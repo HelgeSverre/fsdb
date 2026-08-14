@@ -177,7 +177,7 @@ let private executeStatement (session: Session) (sql: string) : Session * QueryR
         let lastInsertId, result = Executor.execute session.Store (registryFor session) dbName session.LastInsertId stmt
         { session with LastInsertId = lastInsertId }, result
 
-let handle (session: Session) (rawSql: string) : Session * QueryResult =
+let private dispatch (session: Session) (rawSql: string) : Session * QueryResult =
     let sql = rawSql.Trim().TrimEnd(';').Trim()
     let upper = sql.ToUpperInvariant()
 
@@ -191,3 +191,17 @@ let handle (session: Session) (rawSql: string) : Session * QueryResult =
     | _ when upper.StartsWith "SELECT" && upper.Contains "@@" -> session, handleAtVarSelect session sql
     | _ when literalSelect.IsMatch sql -> session, handleLiteralSelect sql
     | _ -> executeStatement session sql
+
+/// No SQL engine failure should ever escape as a raw .NET exception — the
+/// only two paths into `dispatch` (the parser, well guarded, and
+/// `Storage.coerceValue`'s numeric casts, which are not) both funnel into
+/// `Executor`, and `Server`'s connection loop only catches
+/// `PacketTooLargeException`, so anything else here would otherwise unwind
+/// straight to the socket read loop and silently drop the connection with
+/// no ERR packet. Verified reachable: `INSERT INTO t VALUES (1e300)` into a
+/// DECIMAL column throws `OverflowException` from `decimal d`.
+let handle (session: Session) (rawSql: string) : Session * QueryResult =
+    try
+        dispatch session rawSql
+    with ex ->
+        session, Err(1105, sprintf "Internal error: %s" ex.Message) // ER_UNKNOWN_ERROR

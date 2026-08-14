@@ -358,7 +358,19 @@ let queryHandlerTests =
 
               match handle session "GARBAGE NOT SQL" |> snd with
               | Err(1064, msg) -> Expect.stringContains msg "GARBAGE NOT SQL" "message names the query"
-              | other -> failtestf "expected a 1064 error, got %A" other ]
+              | other -> failtestf "expected a 1064 error, got %A" other
+
+          testCase "an exception inside the engine (decimal overflow) is an Err, not an escaping exception"
+          <| fun _ ->
+              // Storage.coerceValue's `decimal d` throws OverflowException for
+              // a DECIMAL column given a value outside decimal's range — this
+              // must never escape `handle` and drop the connection.
+              let session = create 1 (Fsdb.Storage.create ())
+              let session, _ = handle session "CREATE TABLE overflow_t (d DECIMAL(10,2))"
+
+              match handle session "INSERT INTO overflow_t VALUES (1e300)" |> snd with
+              | Err(1105, _) -> ()
+              | other -> failtestf "expected a 1105 internal-error Err, got %A" other ]
 
 /// Reads every packet off a stream until clean EOF.
 let private readAllPackets (stream: IO.Stream) : Async<Packet list> =
