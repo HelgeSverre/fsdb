@@ -108,6 +108,19 @@ let likeToRegex (pattern: string) : string =
 
     @"\A" + sb.ToString() + @"\z"
 
+/// Neither of these recurse into `evalExpr`, so they're plain top-level
+/// `let`s rather than tied into its `rec ... and` group.
+let private boolToValue (b: bool) : Value = VInt(if b then 1L else 0L)
+
+let private likeOp (subject: Value) (pattern: Value) : Value =
+    match subject, pattern with
+    | VNull, _
+    | _, VNull -> VNull
+    | _ ->
+        let text = subject |> toText |> Option.defaultValue ""
+        let pat = pattern |> toText |> Option.defaultValue ""
+        boolToValue (Regex.IsMatch(text, likeToRegex pat, RegexOptions.IgnoreCase ||| RegexOptions.Singleline))
+
 /// Evaluates one expression against one row. Three-valued logic throughout
 /// (comparisons/AND/OR/NOT return `VNull` — SQL's "unknown" — rather than a
 /// boolean whenever an operand is `VNull`, per `Value`'s helpers), function
@@ -127,31 +140,46 @@ let rec private evalExpr (registry: Registry) (columnIndex: Map<string, int>) (r
     | Not e -> eval e |> Result.map (fun v -> truthy v |> Option.map (not >> boolToValue) |> Option.defaultValue VNull)
     | IsNull e -> eval e |> Result.map (function VNull -> VInt 1L | _ -> VInt 0L)
     | IsNotNull e -> eval e |> Result.map (function VNull -> VInt 0L | _ -> VInt 1L)
-    | BinOp(And, a, b) ->
+    | BinOp(op, a, b) ->
+        // And/Or already evaluate both operands (no short-circuit, since
+        // SQL's three-valued logic needs both sides to tell "false" apart
+        // from "unknown"), so every `BinOp` collapses into one total match
+        // on `op` here — all 12 `Ast.Op` cases handled in the one place,
+        // rather than two more `failwith`-guarded helpers each only
+        // partially matching the same type.
         eval a
         |> Result.bind (fun va ->
             eval b
             |> Result.map (fun vb ->
-                match truthy va, truthy vb with
-                | Some false, _
-                | _, Some false -> VInt 0L
-                | Some true, Some true -> VInt 1L
-                | _ -> VNull))
-    | BinOp(Or, a, b) ->
-        eval a
-        |> Result.bind (fun va ->
-            eval b
-            |> Result.map (fun vb ->
-                match truthy va, truthy vb with
-                | Some true, _
-                | _, Some true -> VInt 1L
-                | Some false, Some false -> VInt 0L
-                | _ -> VNull))
-    | BinOp((Eq | Neq | Lt | Lte | Gt | Gte) as op, a, b) ->
-        eval a
-        |> Result.bind (fun va -> eval b |> Result.map (fun vb -> compareOp op va vb))
-    | BinOp((Add | Sub | Mul | Div) as op, a, b) ->
-        eval a |> Result.bind (fun va -> eval b |> Result.map (fun vb -> arithOp op va vb))
+                let compareWith (pred: int -> bool) : Value =
+                    match va, vb with
+                    | VNull, _
+                    | _, VNull -> VNull
+                    | _ -> boolToValue (pred (Value.compare va vb))
+
+                match op with
+                | And ->
+                    match truthy va, truthy vb with
+                    | Some false, _
+                    | _, Some false -> VInt 0L
+                    | Some true, Some true -> VInt 1L
+                    | _ -> VNull
+                | Or ->
+                    match truthy va, truthy vb with
+                    | Some true, _
+                    | _, Some true -> VInt 1L
+                    | Some false, Some false -> VInt 0L
+                    | _ -> VNull
+                | Add -> Value.add va vb
+                | Sub -> Value.sub va vb
+                | Mul -> Value.mul va vb
+                | Div -> Value.div va vb
+                | Eq -> compareWith (fun c -> c = 0)
+                | Neq -> compareWith (fun c -> c <> 0)
+                | Lt -> compareWith (fun c -> c < 0)
+                | Lte -> compareWith (fun c -> c <= 0)
+                | Gt -> compareWith (fun c -> c > 0)
+                | Gte -> compareWith (fun c -> c >= 0)))
     | Like(e, p) ->
         eval e
         |> Result.bind (fun ve -> eval p |> Result.map (fun vp -> likeOp ve vp))
@@ -186,43 +214,6 @@ let rec private evalExpr (registry: Registry) (columnIndex: Map<string, int>) (r
         match Functions.lookup name registry with
         | None -> Error(unknownFunction name)
         | Some fn -> args |> traverseList eval |> Result.map fn
-
-and private boolToValue (b: bool) : Value = VInt(if b then 1L else 0L)
-
-and private compareOp (op: Op) (a: Value) (b: Value) : Value =
-    match a, b with
-    | VNull, _
-    | _, VNull -> VNull
-    | _ ->
-        let c = Value.compare a b
-
-        boolToValue (
-            match op with
-            | Eq -> c = 0
-            | Neq -> c <> 0
-            | Lt -> c < 0
-            | Lte -> c <= 0
-            | Gt -> c > 0
-            | Gte -> c >= 0
-            | _ -> failwith "compareOp: not a comparison operator"
-        )
-
-and private arithOp (op: Op) (a: Value) (b: Value) : Value =
-    match op with
-    | Add -> Value.add a b
-    | Sub -> Value.sub a b
-    | Mul -> Value.mul a b
-    | Div -> Value.div a b
-    | _ -> failwith "arithOp: not an arithmetic operator"
-
-and private likeOp (subject: Value) (pattern: Value) : Value =
-    match subject, pattern with
-    | VNull, _
-    | _, VNull -> VNull
-    | _ ->
-        let text = subject |> toText |> Option.defaultValue ""
-        let pat = pattern |> toText |> Option.defaultValue ""
-        boolToValue (Regex.IsMatch(text, likeToRegex pat, RegexOptions.IgnoreCase ||| RegexOptions.Singleline))
 
 let private applyLimitOffset (limit: int option) (offset: int option) (rows: 'a list) : 'a list =
     let afterOffset =
