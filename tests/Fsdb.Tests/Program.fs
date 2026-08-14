@@ -179,6 +179,24 @@ let queryHandlerTests =
               | Affected _ -> ()
               | other -> failtestf "expected OK, got %A" other
 
+          testCase "SET NAMES updates character_set_client, reflected by SELECT @@character_set_client"
+          <| fun _ ->
+              let session = create 1
+              let session, _ = handle session "SET NAMES latin1"
+
+              match handle session "SELECT @@character_set_client" |> snd with
+              | ResultSet(_, [ [ Some "latin1" ] ]) -> ()
+              | other -> failtestf "expected latin1, got %A" other
+
+          testCase "SET sql_mode = '...' updates the session variable, reflected by SELECT @@sql_mode"
+          <| fun _ ->
+              let session = create 1
+              let session, _ = handle session "SET sql_mode = 'ANSI_QUOTES'"
+
+              match handle session "SELECT @@sql_mode" |> snd with
+              | ResultSet(_, [ [ Some "ANSI_QUOTES" ] ]) -> ()
+              | other -> failtestf "expected ANSI_QUOTES, got %A" other
+
           testCase "SELECT DATABASE() returns NULL before USE"
           <| fun _ ->
               let session = create 1

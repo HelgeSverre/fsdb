@@ -89,12 +89,53 @@ let private handleShowVariables (session: Session) (sql: string) : QueryResult =
 /// like USE and SET change session state, and threading it through the
 /// return value keeps `handle` a pure function of its inputs instead of
 /// mutating the session out from under the caller.
+let private setNames = Regex(@"^SET\s+NAMES\s+'?(\w+)'?", RegexOptions.IgnoreCase)
+
+let private setVar =
+    Regex(@"^SET\s+(?:SESSION\s+|GLOBAL\s+|@@(?:SESSION\.|GLOBAL\.)?)?(\w+)\s*=\s*(.+)$", RegexOptions.IgnoreCase)
+
+let private unquote (v: string) =
+    let v = v.Trim()
+
+    if v.Length >= 2 && (v.StartsWith "'" && v.EndsWith "'" || v.StartsWith "\"" && v.EndsWith "\"") then
+        v.Substring(1, v.Length - 2)
+    else
+        v
+
+/// `SET NAMES x` and `SET [SESSION|@@session.]var = value` update
+/// Session.Variables so a later SELECT @@var / SHOW VARIABLES reflects them.
+/// Anything else (multi-assignment SET, GLOBAL persistence, ...) is accepted
+/// and ignored — ponytail: single-assignment only, add comma-splitting if a
+/// real client needs `SET a = 1, b = 2` in one statement.
+let private handleSet (session: Session) (sql: string) : Session * QueryResult =
+    let namesMatch = setNames.Match sql
+
+    if namesMatch.Success then
+        let charset = namesMatch.Groups.[1].Value
+
+        let vars =
+            session.Variables
+            |> Map.add "character_set_client" charset
+            |> Map.add "character_set_connection" charset
+            |> Map.add "character_set_results" charset
+
+        { session with Variables = vars }, Affected 0UL
+    else
+        let varMatch = setVar.Match sql
+
+        if varMatch.Success then
+            let name = varMatch.Groups.[1].Value.ToLowerInvariant()
+            let value = unquote varMatch.Groups.[2].Value
+            { session with Variables = Map.add name value session.Variables }, Affected 0UL
+        else
+            session, Affected 0UL
+
 let handle (session: Session) (rawSql: string) : Session * QueryResult =
     let sql = rawSql.Trim().TrimEnd(';').Trim()
     let upper = sql.ToUpperInvariant()
 
     match upper with
-    | _ when upper.StartsWith "SET " -> session, Affected 0UL
+    | _ when upper.StartsWith "SET " -> handleSet session sql
     | "SELECT DATABASE()" -> session, ResultSet([ "DATABASE()" ], [ [ session.Database ] ])
     | "SHOW DATABASES" -> session, ResultSet([ "Database" ], [ [ Some "information_schema" ] ])
     | _ when upper.StartsWith "USE " ->
