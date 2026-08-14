@@ -2,8 +2,10 @@
 /// encoding. https://dev.mysql.com/doc/dev/mysql-server/latest/page_protocol_connection_lifecycle.html
 module Fsdb.Protocol
 
+open System
 open System.Text
 open Fsdb.Packet
+open Fsdb.Value
 
 // Capability flags (subset we care about).
 // https://dev.mysql.com/doc/dev/mysql-server/latest/group__group__cs__capabilities__flags.html
@@ -195,3 +197,166 @@ let textRowPayload (values: string option list) : byte[] =
         | Some s -> w.WriteLenEncString s
 
     w.ToArray()
+
+/// Encodes one binary-protocol resultset row
+/// (https://dev.mysql.com/doc/dev/mysql-server/latest/page_protocol_binary_resultset.html#sect_protocol_binary_resultset_row).
+/// Every column this server advertises in a resultset — text or prepared —
+/// is `MYSQL_TYPE_VAR_STRING` (see `columnDefPayload`), whose binary
+/// encoding is the same length-encoded string the text protocol already
+/// uses, so this reuses the exact same `string option list` row shape as
+/// `textRowPayload`; only the packet header and null-bitmap placement
+/// differ. None means SQL NULL.
+let binaryRowPayload (values: string option list) : byte[] =
+    let w = Writer()
+    w.WriteByte 0uy // packet header, always 0x00 for a row
+
+    // Null bitmap: one bit per column, offset by 2 (bits 0 and 1 are
+    // reserved), rounded up to whole bytes.
+    let nullBitmap = Array.zeroCreate<byte> ((values.Length + 7 + 2) / 8)
+
+    values
+    |> List.iteri (fun i v ->
+        if v.IsNone then
+            let bitPos = i + 2
+            nullBitmap.[bitPos / 8] <- nullBitmap.[bitPos / 8] ||| (1uy <<< (bitPos % 8)))
+
+    w.WriteBytes nullBitmap
+
+    for v in values do
+        match v with
+        | Some s -> w.WriteLenEncString s
+        | None -> ()
+
+    w.ToArray()
+
+/// Builds the COM_STMT_PREPARE_OK payload: status byte, statement id,
+/// column count (always 0 — this server never advertises a prepared
+/// statement's result columns ahead of EXECUTE, so no column-definition
+/// packets follow this one; see the ponytail note on `Server`'s
+/// COM_STMT_PREPARE handler), param count, a reserved byte, and warning
+/// count. The `numParams` per-param Column Definition packets (and their
+/// trailing EOF, unless CLIENT_DEPRECATE_EOF) are separate packets the
+/// caller sends after this one.
+let stmtPrepareOkPayload (stmtId: int) (numParams: int) : byte[] =
+    let w = Writer()
+    w.WriteByte 0uy
+    w.WriteInt32LE stmtId
+    w.WriteInt16LE 0 // column count
+    w.WriteInt16LE numParams
+    w.WriteByte 0uy // reserved
+    w.WriteInt16LE 0 // warning count
+    w.ToArray()
+
+// MySQL binary protocol column type ids, as used in COM_STMT_EXECUTE's
+// per-parameter type array.
+// https://dev.mysql.com/doc/dev/mysql-server/latest/page_protocol_basic_dt_types.html
+let TypeTiny = 0x01uy
+let TypeShort = 0x02uy
+let TypeLong = 0x03uy
+let TypeFloat = 0x04uy
+let TypeDouble = 0x05uy
+let TypeNull = 0x06uy
+let TypeTimestamp = 0x07uy
+let TypeLongLong = 0x08uy
+let TypeDate = 0x0auy
+let TypeTime = 0x0buy
+let TypeDateTime = 0x0cuy
+let TypeVarchar = 0x0fuy
+let TypeNewDecimal = 0xf6uy
+let TypeBlob = 0xfcuy
+let TypeVarString = 0xfduy
+let TypeString = 0xfeuy
+
+/// Reads a MySQL binary-protocol DATE/DATETIME/TIMESTAMP value off `r`: a
+/// length byte, then that many bytes of year/month/day[/hour/min/sec[/µs]]
+/// — a shorter length just omits the trailing fields (MySQL only sends as
+/// many bytes as the value needs). Length 0 is the zero date.
+/// https://dev.mysql.com/doc/dev/mysql-server/latest/page_protocol_binary_resultset.html#sect_protocol_binary_resultset_row_value
+let private readBinaryDateTime (r: Reader) : DateTime =
+    let len = int (r.ReadByte())
+
+    if len = 0 then
+        DateTime.MinValue
+    else
+        let year = r.ReadInt16LE()
+        let month = int (r.ReadByte())
+        let day = int (r.ReadByte())
+
+        let hour, minute, second =
+            if len > 4 then int (r.ReadByte()), int (r.ReadByte()), int (r.ReadByte()) else 0, 0, 0
+
+        let micros = if len > 7 then r.ReadInt32LE() else 0
+        DateTime(year, max month 1, max day 1, hour, minute, second).AddTicks(int64 micros * 10L)
+
+/// Reads a MySQL binary-protocol TIME value off `r` and renders it the way
+/// MySQL's TIME text form does (`[-][H]HH:MM:SS[.ffffff]`) — fsdb has no
+/// dedicated Value case for TIME (see `Value.Value`), so this returns
+/// already-formatted text rather than a typed value.
+let private readBinaryTime (r: Reader) : string =
+    let len = int (r.ReadByte())
+
+    if len = 0 then
+        "00:00:00"
+    else
+        let isNegative = r.ReadByte()
+        let days = r.ReadInt32LE()
+        let hour = int (r.ReadByte())
+        let minute = int (r.ReadByte())
+        let second = int (r.ReadByte())
+        let micros = if len > 8 then r.ReadInt32LE() else 0
+        let totalHours = days * 24 + hour
+        let sign = if isNegative <> 0uy then "-" else ""
+        let frac = if micros > 0 then sprintf ".%06d" micros else ""
+        sprintf "%s%02d:%02d:%02d%s" sign totalHours minute second frac
+
+/// Reads one COM_STMT_EXECUTE binary parameter value of MySQL binary type
+/// id `typeId` off `r`, decoded into an fsdb `Value`. `unsigned` only
+/// matters for the fixed-width integer types. NEWDECIMAL/VARCHAR/
+/// VAR_STRING/STRING/BLOB all arrive as a length-encoded byte string —
+/// decoded as UTF-8 text, matching how the rest of fsdb treats them (see
+/// `Storage.coerceValue`).
+let readBinaryValue (r: Reader) (typeId: byte) (unsigned: bool) : Value =
+    let lenEncText () =
+        match r.ReadLenEncInt() with
+        | None -> ""
+        | Some len -> Encoding.UTF8.GetString(r.ReadBytes(int len))
+
+    if typeId = TypeTiny then
+        let b = r.ReadByte()
+        VInt(if unsigned then int64 b else int64 (sbyte b))
+    elif typeId = TypeShort then
+        let v = r.ReadInt16LE()
+        VInt(if unsigned then int64 (uint16 v) else int64 (int16 v))
+    elif typeId = TypeLong then
+        let v = r.ReadInt32LE()
+        VInt(if unsigned then int64 (uint32 v) else int64 v)
+    elif typeId = TypeLongLong then
+        let bytes = r.ReadBytes 8
+
+        if unsigned then
+            VDecimal(decimal (BitConverter.ToUInt64(bytes, 0)))
+        else
+            VInt(BitConverter.ToInt64(bytes, 0))
+    elif typeId = TypeFloat then
+        VDouble(float (BitConverter.ToSingle(r.ReadBytes 4, 0)))
+    elif typeId = TypeDouble then
+        VDouble(BitConverter.ToDouble(r.ReadBytes 8, 0))
+    elif
+        typeId = TypeNewDecimal
+        || typeId = TypeVarchar
+        || typeId = TypeVarString
+        || typeId = TypeString
+        || typeId = TypeBlob
+    then
+        VString(lenEncText ())
+    elif typeId = TypeDate then
+        VDate(DateOnly.FromDateTime(readBinaryDateTime r))
+    elif typeId = TypeDateTime || typeId = TypeTimestamp then
+        VDateTime(readBinaryDateTime r)
+    elif typeId = TypeTime then
+        VString(readBinaryTime r)
+    else
+        // TypeNull and anything unrecognized: NULL params never reach here
+        // (the caller checks the null-bitmap first), so this is only a
+        // fallback for a genuinely unsupported type id.
+        VNull
