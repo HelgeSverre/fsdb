@@ -746,7 +746,132 @@ let tests =
                         "delete"
 
                 testCase "DELETE FROM t without WHERE"
-                <| fun _ -> Expect.equal (parseOk "DELETE FROM t") (Delete("t", None)) "delete without where" ]
+                <| fun _ -> Expect.equal (parseOk "DELETE FROM t") (Delete("t", None)) "delete without where"
+
+                testCase "UPDATE with an alias, ORDER BY, and LIMIT accepts and ignores all three"
+                <| fun _ ->
+                    Expect.equal
+                        (parseOk "UPDATE t AS x SET a = 1 WHERE id = 5 ORDER BY id LIMIT 10")
+                        (Update("t", [ "a", Lit(VInt 1L) ], Some(BinOp(Eq, col "id", Lit(VInt 5L)))))
+                        "alias/order/limit ignored"
+
+                testCase "UPDATE with a bare alias (no AS)"
+                <| fun _ ->
+                    Expect.equal
+                        (parseOk "UPDATE t x SET a = 1")
+                        (Update("t", [ "a", Lit(VInt 1L) ], None))
+                        "bare alias ignored" ]
+
+          testList
+              "ALTER TABLE / RENAME TABLE / CREATE INDEX / DROP INDEX"
+              [ testCase "ADD COLUMN, with and without the COLUMN keyword, and AFTER accepted"
+                <| fun _ ->
+                    match parseOk "ALTER TABLE t ADD COLUMN a INT, ADD b VARCHAR(10) AFTER a" with
+                    | AlterTable("t", [ AddColumn { Name = "a"; Type = TInt false }; AddColumn { Name = "b"; Type = TVarchar 10 } ]) -> ()
+                    | other -> failtestf "expected two AddColumn actions, got %A" other
+
+                testCase "DROP COLUMN, with and without the COLUMN keyword"
+                <| fun _ ->
+                    Expect.equal
+                        (parseOk "ALTER TABLE t DROP COLUMN a, DROP b")
+                        (AlterTable("t", [ DropColumn "a"; DropColumn "b" ]))
+                        "drop column"
+
+                testCase "MODIFY COLUMN changes the column's definition"
+                <| fun _ ->
+                    match parseOk "ALTER TABLE t MODIFY COLUMN a BIGINT UNSIGNED NOT NULL" with
+                    | AlterTable("t", [ ModifyColumn { Name = "a"; Type = TBigInt true; Nullable = false } ]) -> ()
+                    | other -> failtestf "expected a ModifyColumn action, got %A" other
+
+                testCase "CHANGE COLUMN renames and redefines"
+                <| fun _ ->
+                    match parseOk "ALTER TABLE t CHANGE old_name new_name INT" with
+                    | AlterTable("t", [ ChangeColumn("old_name", { Name = "new_name"; Type = TInt false }) ]) -> ()
+                    | other -> failtestf "expected a ChangeColumn action, got %A" other
+
+                testCase "RENAME TO / RENAME AS / bare RENAME"
+                <| fun _ ->
+                    Expect.equal (parseOk "ALTER TABLE t RENAME TO u") (AlterTable("t", [ RenameTo "u" ])) "rename to"
+                    Expect.equal (parseOk "ALTER TABLE t RENAME AS u") (AlterTable("t", [ RenameTo "u" ])) "rename as"
+                    Expect.equal (parseOk "ALTER TABLE t RENAME u") (AlterTable("t", [ RenameTo "u" ])) "bare rename"
+
+                testCase "RENAME COLUMN a TO b"
+                <| fun _ ->
+                    Expect.equal
+                        (parseOk "ALTER TABLE t RENAME COLUMN a TO b")
+                        (AlterTable("t", [ RenameColumnTo("a", "b") ]))
+                        "rename column"
+
+                testCase "ADD [UNIQUE] INDEX|KEY name (cols) and DROP INDEX|KEY name"
+                <| fun _ ->
+                    Expect.equal
+                        (parseOk "ALTER TABLE t ADD UNIQUE INDEX uq (a), ADD KEY idx (b), DROP INDEX uq, DROP KEY idx")
+                        (AlterTable(
+                            "t",
+                            [ AddIndex { Name = "uq"; Columns = [ "a" ]; Unique = true }
+                              AddIndex { Name = "idx"; Columns = [ "b" ]; Unique = false }
+                              DropIndexAction "uq"
+                              DropIndexAction "idx" ]
+                        ))
+                        "add/drop index"
+
+                testCase "ADD CONSTRAINT ... FOREIGN KEY and DROP FOREIGN KEY"
+                <| fun _ ->
+                    match
+                        parseOk
+                            "ALTER TABLE posts ADD CONSTRAINT fk1 FOREIGN KEY (user_id) REFERENCES users (id) ON DELETE CASCADE, DROP FOREIGN KEY fk_old"
+                    with
+                    | AlterTable(
+                        "posts",
+                        [ AddForeignKey { Name = "fk1"; Columns = [ "user_id" ]; RefTable = "users"; RefColumns = [ "id" ] }
+                          DropForeignKey "fk_old" ]) -> ()
+                    | other -> failtestf "expected add/drop foreign key actions, got %A" other
+
+                testCase "ADD PRIMARY KEY (cols)"
+                <| fun _ ->
+                    Expect.equal
+                        (parseOk "ALTER TABLE t ADD PRIMARY KEY (id)")
+                        (AlterTable("t", [ AddPrimaryKey [ "id" ] ]))
+                        "add primary key"
+
+                testCase "RENAME TABLE a TO b, c TO d"
+                <| fun _ ->
+                    Expect.equal
+                        (parseOk "RENAME TABLE a TO b, c TO d")
+                        (RenameTable [ "a", "b"; "c", "d" ])
+                        "rename table"
+
+                testCase "CREATE INDEX / CREATE UNIQUE INDEX"
+                <| fun _ ->
+                    Expect.equal
+                        (parseOk "CREATE INDEX idx_a ON t (a)")
+                        (CreateIndex("idx_a", "t", [ "a" ], false))
+                        "create index"
+
+                    Expect.equal
+                        (parseOk "CREATE UNIQUE INDEX uq_a ON t (a)")
+                        (CreateIndex("uq_a", "t", [ "a" ], true))
+                        "create unique index"
+
+                testCase "DROP INDEX name ON table"
+                <| fun _ ->
+                    Expect.equal (parseOk "DROP INDEX idx_a ON t") (DropIndexStmt("idx_a", "t")) "drop index"
+
+                testCase "CAST(expr AS type), including SIGNED/UNSIGNED"
+                <| fun _ ->
+                    Expect.equal
+                        (parseOk "SELECT CAST(a AS UNSIGNED), CAST('1' AS SIGNED), CAST(a AS CHAR)")
+                        (mkSelect(
+                            [ Cast(col "a", TInt true), None
+                              Cast(Lit(VString "1"), TInt false), None
+                              Cast(col "a", TChar 1), None ],
+                            None,
+                            None,
+                            [],
+                            None,
+                            None
+                        ))
+                        "cast" ]
 
           testList
               "failure cases"
