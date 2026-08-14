@@ -187,16 +187,29 @@ let private parenExpr: Parser<Expr, unit> = between (sym "(") (sym ")") expr
 
 let private starAtom: Parser<Expr, unit> = pstring "*" >>. ws >>% Star
 
+/// A function call built from a *raw* word rather than `identifier` — tried
+/// before the reserved-word check, the same way MySQL disambiguates a
+/// function name from a keyword (`IF(...)`, `LEFT(...)`): a word
+/// immediately followed by `(` is a function call regardless of whether
+/// it's also in `reservedWords`, so `SELECT IF(1,2,3)` reaches the `IF`
+/// scalar instead of dying on "reserved keyword". `attempt`ed so a bare
+/// reserved word with no `(` falls through to `identAtom`'s normal (and
+/// still reserved-word-rejecting) column/qualified-column path.
+let private funcCallAtom: Parser<Expr, unit> =
+    attempt ((many1Satisfy2 isIdentStart isIdentChar .>> ws) .>>. (sym "(" >>. sepBy expr (sym ",") .>> sym ")"))
+    |>> FuncCall
+
 /// A bare word: a column, a qualified `t.col` (or `t.*`, which is `Star` —
 /// `Ast.Expr` doesn't distinguish it from an unqualified `*`), or a function
-/// call if followed by `(args)`.
+/// call if followed by `(args)` (handled by `funcCallAtom` above, tried
+/// first so a reserved-word function name still parses).
 let private identAtom: Parser<Expr, unit> =
-    identifier
-    >>= fun name ->
-        choice
-            [ sym "(" >>. sepBy expr (sym ",") .>> sym ")" |>> fun args -> FuncCall(name, args)
-              sym "." >>. (starAtom <|> (identifier |>> fun col -> QualifiedCol(name, col)))
-              preturn (Col name) ]
+    funcCallAtom
+    <|> (identifier
+         >>= fun name ->
+             choice
+                 [ sym "." >>. (starAtom <|> (identifier |>> fun col -> QualifiedCol(name, col)))
+                   preturn (Col name) ])
 
 let private atom: Parser<Expr, unit> =
     choice

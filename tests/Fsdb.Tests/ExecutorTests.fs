@@ -219,6 +219,14 @@ let tests =
                     | ResultSet(_, [ [ Some "HELLO!" ] ]) -> ()
                     | other -> failtestf "expected HELLO!, got %A" other
 
+                testCase "IF() works even though IF is also a reserved keyword"
+                <| fun _ ->
+                    let store = newStore ()
+
+                    match runDefault store "SELECT IF(1, 'yes', 'no')" with
+                    | ResultSet(_, [ [ Some "yes" ] ]) -> ()
+                    | other -> failtestf "expected yes, got %A" other
+
                 testCase "ABS and ROUND"
                 <| fun _ ->
                     let store = newStore ()

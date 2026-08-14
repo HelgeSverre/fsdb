@@ -119,6 +119,13 @@ let tests =
                         ))
                         "func calls"
 
+                testCase "IF(...) parses as a function call even though IF is a reserved keyword"
+                <| fun _ ->
+                    Expect.equal
+                        (parseOk "SELECT IF(1, 2, 3)")
+                        (mkSelect([ FuncCall("IF", [ Lit(VInt 1L); Lit(VInt 2L); Lit(VInt 3L) ]), None ], None, None, [], None, None))
+                        "if as function call"
+
                 testCase "WHERE clause"
                 <| fun _ ->
                     Expect.equal
