@@ -345,4 +345,211 @@ let tests =
 
                     match runDefault store "INSERT INTO t VALUES ('not a number')" with
                     | Err(1366, _) -> ()
-                    | other -> failtestf "expected a 1366 error, got %A" other ] ]
+                    | other -> failtestf "expected a 1366 error, got %A" other ]
+
+          testList
+              "ALTER TABLE / RENAME TABLE / CREATE INDEX / DROP INDEX end to end"
+              [ testCase "ADD COLUMN then SELECT sees the new column with default values on old rows"
+                <| fun _ ->
+                    let store = newStore ()
+                    runDefault store "CREATE TABLE t (id INT)" |> ignore
+                    runDefault store "INSERT INTO t VALUES (1)" |> ignore
+                    runDefault store "ALTER TABLE t ADD COLUMN active INT DEFAULT 1" |> ignore
+
+                    match runDefault store "SELECT id, active FROM t" with
+                    | ResultSet([ "id"; "active" ], [ [ Some "1"; Some "1" ] ]) -> ()
+                    | other -> failtestf "expected the new column filled with its default, got %A" other
+
+                testCase "DROP COLUMN then SELECT * no longer sees it"
+                <| fun _ ->
+                    let store = newStore ()
+                    runDefault store "CREATE TABLE t (id INT, junk INT)" |> ignore
+                    runDefault store "INSERT INTO t VALUES (1, 2)" |> ignore
+                    runDefault store "ALTER TABLE t DROP COLUMN junk" |> ignore
+
+                    match runDefault store "SELECT * FROM t" with
+                    | ResultSet([ "id" ], [ [ Some "1" ] ]) -> ()
+                    | other -> failtestf "expected only id left, got %A" other
+
+                testCase "CHANGE COLUMN renames and SELECT sees the new name"
+                <| fun _ ->
+                    let store = newStore ()
+                    runDefault store "CREATE TABLE t (old_name VARCHAR(10))" |> ignore
+                    runDefault store "INSERT INTO t VALUES ('x')" |> ignore
+                    runDefault store "ALTER TABLE t CHANGE old_name new_name VARCHAR(20)" |> ignore
+
+                    match runDefault store "SELECT new_name FROM t" with
+                    | ResultSet([ "new_name" ], [ [ Some "x" ] ]) -> ()
+                    | other -> failtestf "expected the renamed column, got %A" other
+
+                testCase "ALTER TABLE ... RENAME TO makes the table reachable under the new name only"
+                <| fun _ ->
+                    let store = newStore ()
+                    runDefault store "CREATE TABLE t (id INT)" |> ignore
+                    runDefault store "ALTER TABLE t RENAME TO u" |> ignore
+
+                    match runDefault store "SELECT * FROM u" with
+                    | ResultSet(_, []) -> ()
+                    | other -> failtestf "expected the renamed table to be queryable, got %A" other
+
+                    match runDefault store "SELECT * FROM t" with
+                    | Err(1146, _) -> ()
+                    | other -> failtestf "expected the old name to be gone, got %A" other
+
+                testCase "RENAME TABLE a TO b"
+                <| fun _ ->
+                    let store = newStore ()
+                    runDefault store "CREATE TABLE a (id INT)" |> ignore
+
+                    match runDefault store "RENAME TABLE a TO b" with
+                    | Affected 0UL -> ()
+                    | other -> failtestf "expected Affected 0, got %A" other
+
+                    match runDefault store "SELECT * FROM b" with
+                    | ResultSet(_, []) -> ()
+                    | other -> failtestf "expected b to exist, got %A" other
+
+                testCase "CREATE INDEX / DROP INDEX round-trip without error"
+                <| fun _ ->
+                    let store = newStore ()
+                    runDefault store "CREATE TABLE t (a INT)" |> ignore
+
+                    match runDefault store "CREATE INDEX idx_a ON t (a)" with
+                    | Affected 0UL -> ()
+                    | other -> failtestf "expected Affected 0, got %A" other
+
+                    match runDefault store "DROP INDEX idx_a ON t" with
+                    | Affected 0UL -> ()
+                    | other -> failtestf "expected Affected 0, got %A" other
+
+                testCase "several ALTER TABLE actions comma-separated in one statement all apply"
+                <| fun _ ->
+                    let store = newStore ()
+                    runDefault store "CREATE TABLE t (id INT, junk INT)" |> ignore
+                    runDefault store "ALTER TABLE t ADD COLUMN extra INT, DROP COLUMN junk" |> ignore
+
+                    match runDefault store "SELECT * FROM t" with
+                    | ResultSet([ "id"; "extra" ], _) -> ()
+                    | other -> failtestf "expected both actions applied, got %A" other ]
+
+          testList
+              "INSERT ... ON DUPLICATE KEY UPDATE / INSERT IGNORE"
+              [ testCase "no collision inserts a fresh row"
+                <| fun _ ->
+                    let store = newStore ()
+                    runDefault store "CREATE TABLE t (id INT PRIMARY KEY, n INT)" |> ignore
+
+                    match runDefault store "INSERT INTO t (id, n) VALUES (1, 10) ON DUPLICATE KEY UPDATE n = n + 1" with
+                    | Affected 1UL -> ()
+                    | other -> failtestf "expected 1 row inserted, got %A" other
+
+                    match runDefault store "SELECT n FROM t WHERE id = 1" with
+                    | ResultSet(_, [ [ Some "10" ] ]) -> ()
+                    | other -> failtestf "expected n = 10, got %A" other
+
+                testCase "a primary key collision runs the UPDATE clause instead of erroring"
+                <| fun _ ->
+                    let store = newStore ()
+                    runDefault store "CREATE TABLE t (id INT PRIMARY KEY, n INT)" |> ignore
+                    runDefault store "INSERT INTO t (id, n) VALUES (1, 10)" |> ignore
+
+                    runDefault store "INSERT INTO t (id, n) VALUES (1, 999) ON DUPLICATE KEY UPDATE n = n + 1"
+                    |> ignore
+
+                    match runDefault store "SELECT n FROM t WHERE id = 1" with
+                    | ResultSet(_, [ [ Some "11" ] ]) -> ()
+                    | other -> failtestf "expected n incremented from the existing row, not overwritten by 999, got %A" other
+
+                testCase "VALUES(col) inside ON DUPLICATE KEY UPDATE resolves to the incoming row's value"
+                <| fun _ ->
+                    let store = newStore ()
+                    runDefault store "CREATE TABLE t (id INT PRIMARY KEY, n INT)" |> ignore
+                    runDefault store "INSERT INTO t (id, n) VALUES (1, 10)" |> ignore
+
+                    runDefault store "INSERT INTO t (id, n) VALUES (1, 999) ON DUPLICATE KEY UPDATE n = VALUES(n)"
+                    |> ignore
+
+                    match runDefault store "SELECT n FROM t WHERE id = 1" with
+                    | ResultSet(_, [ [ Some "999" ] ]) -> ()
+                    | other -> failtestf "expected n replaced with the incoming value 999, got %A" other
+
+                testCase "a unique-index collision (not the primary key) also triggers the UPDATE clause"
+                <| fun _ ->
+                    let store = newStore ()
+                    runDefault store "CREATE TABLE t (id INT PRIMARY KEY, email VARCHAR(255) UNIQUE, hits INT)" |> ignore
+                    runDefault store "INSERT INTO t (id, email, hits) VALUES (1, 'a@x.com', 1)" |> ignore
+
+                    runDefault
+                        store
+                        "INSERT INTO t (id, email, hits) VALUES (2, 'a@x.com', 1) ON DUPLICATE KEY UPDATE hits = hits + 1"
+                    |> ignore
+
+                    match runDefault store "SELECT id, hits FROM t" with
+                    | ResultSet(_, [ [ Some "1"; Some "2" ] ]) -> ()
+                    | other -> failtestf "expected the existing row bumped, not a second row, got %A" other
+
+                testCase "INSERT IGNORE parses and executes like a plain INSERT"
+                <| fun _ ->
+                    let store = newStore ()
+                    runDefault store "CREATE TABLE t (n INT)" |> ignore
+
+                    match runDefault store "INSERT IGNORE INTO t VALUES (1)" with
+                    | Affected 1UL -> ()
+                    | other -> failtestf "expected 1 row affected, got %A" other ]
+
+          testList
+              "CAST and new column types"
+              [ testCase "CAST(x AS UNSIGNED)/CAST(x AS SIGNED) coerce to an integer"
+                <| fun _ ->
+                    let store = newStore ()
+
+                    match runDefault store "SELECT CAST('42' AS UNSIGNED), CAST(3.9 AS SIGNED)" with
+                    | ResultSet(_, [ [ Some "42"; Some "3" ] ]) -> ()
+                    | other -> failtestf "expected 42/3, got %A" other
+
+                testCase "CAST(x AS CHAR) stringifies"
+                <| fun _ ->
+                    let store = newStore ()
+
+                    match runDefault store "SELECT CAST(42 AS CHAR)" with
+                    | ResultSet(_, [ [ Some "42" ] ]) -> ()
+                    | other -> failtestf "expected '42', got %A" other
+
+                testCase "ENUM column accepts a listed value and rejects one outside the set"
+                <| fun _ ->
+                    let store = newStore ()
+                    runDefault store "CREATE TABLE t (status ENUM('open', 'closed'))" |> ignore
+
+                    match runDefault store "INSERT INTO t VALUES ('open')" with
+                    | Affected 1UL -> ()
+                    | other -> failtestf "expected the valid enum value to insert, got %A" other
+
+                    match runDefault store "INSERT INTO t VALUES ('bogus')" with
+                    | Err(1366, _) -> ()
+                    | other -> failtestf "expected a 1366 error for an unlisted enum value, got %A" other
+
+                testCase "SET column accepts any string without validating against the declared set"
+                <| fun _ ->
+                    let store = newStore ()
+                    runDefault store "CREATE TABLE t (flags SET('a', 'b'))" |> ignore
+
+                    match runDefault store "INSERT INTO t VALUES ('a,b')" with
+                    | Affected 1UL -> ()
+                    | other -> failtestf "expected SET to accept any string, got %A" other
+
+                testCase "the full new column-type surface creates and round-trips through INSERT/SELECT"
+                <| fun _ ->
+                    let store = newStore ()
+
+                    runDefault
+                        store
+                        "CREATE TABLE t (a CHAR(3), b TINYTEXT, c BLOB, d SMALLINT, e MEDIUMINT UNSIGNED, f TIME, g YEAR, h FLOAT, i BOOLEAN)"
+                    |> ignore
+
+                    match runDefault store "INSERT INTO t VALUES ('x', 'y', 'z', 1, 2, '10:00:00', 2024, 1.5, 1)" with
+                    | Affected 1UL -> ()
+                    | other -> failtestf "expected the row to insert, got %A" other
+
+                    match runDefault store "SELECT * FROM t" with
+                    | ResultSet(_, [ row ]) -> Expect.equal (List.length row) 9 "every column round-trips"
+                    | other -> failtestf "expected one row back, got %A" other ] ]
