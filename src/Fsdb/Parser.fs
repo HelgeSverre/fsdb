@@ -265,6 +265,12 @@ type private ColMod =
 let private defaultValueLit: Parser<ColumnDefault, unit> =
     (keyword "CURRENT_TIMESTAMP" >>% DCurrentTimestamp) <|> (literalValue |>> DConst)
 
+/// A charset/collation name — Laravel emits `COLLATE 'utf8mb4_unicode_ci'`
+/// (quoted) at the table level but a bare identifier at the column level, so
+/// this accepts either.
+let private identOrString: Parser<string, unit> =
+    identifier <|> (stringLit |>> (function VString s -> s | _ -> ""))
+
 let private colMod: Parser<ColMod, unit> =
     choice
         [ attempt (keyword "NOT" >>. keyword "NULL") >>% MNotNull
@@ -275,8 +281,8 @@ let private colMod: Parser<ColMod, unit> =
           keyword "UNIQUE" >>. optional (keyword "KEY") >>% MUnique
           attempt (keyword "ON" >>. keyword "UPDATE" >>. keyword "CURRENT_TIMESTAMP") >>% MIgnored
           keyword "COMMENT" >>. stringLit >>% MIgnored
-          attempt (keyword "CHARACTER" >>. keyword "SET") >>. identifier >>% MIgnored
-          keyword "COLLATE" >>. identifier >>% MIgnored ]
+          attempt (keyword "CHARACTER" >>. keyword "SET") >>. identOrString >>% MIgnored
+          keyword "COLLATE" >>. identOrString >>% MIgnored ]
 
 let private columnDef: Parser<ColumnDef, unit> =
     (identifier .>>. columnType .>>. many colMod)
@@ -516,13 +522,13 @@ let private createTableItem: Parser<CreateItem, unit> =
 /// accepted and discarded, same treatment as column display widths.
 let private tableOption: Parser<unit, unit> =
     choice
-        [ keyword "ENGINE" >>. opt (sym "=") >>. identifier >>% ()
+        [ keyword "ENGINE" >>. opt (sym "=") >>. identOrString >>% ()
           keyword "DEFAULT" >>. (keyword "CHARSET" <|> (keyword "CHARACTER" >>. keyword "SET"))
           >>. opt (sym "=")
-          >>. identifier
+          >>. identOrString
           >>% ()
-          keyword "CHARSET" >>. opt (sym "=") >>. identifier >>% ()
-          keyword "COLLATE" >>. opt (sym "=") >>. identifier >>% () ]
+          keyword "CHARSET" >>. opt (sym "=") >>. identOrString >>% ()
+          keyword "COLLATE" >>. opt (sym "=") >>. identOrString >>% () ]
 
 let private tableOptions: Parser<unit, unit> = skipMany tableOption
 

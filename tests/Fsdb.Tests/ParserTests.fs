@@ -568,6 +568,12 @@ let tests =
                         ))
                         "table options"
 
+                testCase "COLLATE with a quoted value, as Laravel's MySQL grammar emits it"
+                <| fun _ ->
+                    match parseOk "CREATE TABLE t (id INT) DEFAULT CHARACTER SET utf8mb4 COLLATE 'utf8mb4_unicode_ci'" with
+                    | CreateTable("t", [ { Name = "id" } ], [], [], false) -> ()
+                    | other -> failtestf "expected the quoted collation to parse, got %A" other
+
                 testCase "column-level UNIQUE synthesizes a unique index named after the column"
                 <| fun _ ->
                     match parseOk "CREATE TABLE t (email VARCHAR(255) UNIQUE)" with
