@@ -9,22 +9,26 @@ open Fsdb.Value
 /// A scalar function: its already-evaluated arguments in, one `Value` out.
 /// Aggregates (M5 — SUM/COUNT/AVG accumulating across rows rather than
 /// mapping one row to one value) will get their own `Aggregate` type
-/// registered through a second map on the same `Registry` record once they
-/// land; nothing here needs to change to make room for that.
+/// registered through a second map on `Registry` once they land; nothing
+/// here needs to change to make room for that, since `Registry` is already
+/// a record rather than a bare `Map` alias.
 type Scalar = Value list -> Value
 
 /// Case-insensitive by construction: every key is upper-invariant on the
 /// way in, so `lookup` just normalizes the same way rather than needing a
-/// custom `IComparer`.
-type Registry = Map<string, Scalar>
+/// custom `IComparer`. A record (not a `Map<string, Scalar>` alias) so M5's
+/// aggregate map is a new field here rather than a breaking change to what
+/// `Registry` *is* everywhere it's named (`Executor.evalExpr`,
+/// `QueryHandler.registryFor`, every test).
+type Registry = { Scalars: Map<string, Scalar> }
 
-let empty: Registry = Map.empty
+let empty: Registry = { Scalars = Map.empty }
 
 let registerScalar (name: string) (fn: Scalar) (registry: Registry) : Registry =
-    Map.add (name.ToUpperInvariant()) fn registry
+    { registry with Scalars = Map.add (name.ToUpperInvariant()) fn registry.Scalars }
 
 let lookup (name: string) (registry: Registry) : Scalar option =
-    Map.tryFind (name.ToUpperInvariant()) registry
+    Map.tryFind (name.ToUpperInvariant()) registry.Scalars
 
 // ---------------------------------------------------------------------------
 // Built-ins, registered through the same `registerScalar` API user code
