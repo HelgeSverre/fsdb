@@ -345,8 +345,10 @@ let deleteRows (store: Store) (dbName: string) (tableName: string) (predicate: V
                 Ok(Map.add dbName (Map.add (normalizeTableName tableName) table' db) catalog, List.length removed))
 
 /// Replaces every row matching `predicate` with `updater row`, coercing
-/// the result back to the table's column types. Returns the number of
-/// rows updated.
+/// the result back to the table's column types. Returns the number of rows
+/// actually *changed* — matching but no-op writes (`SET v = v`) don't count,
+/// matching MySQL's "Changed: n" rather than "Rows matched: n" — via `Value[]`'s
+/// structural equality (F# arrays compare structurally, element by element).
 let updateRows
     (store: Store)
     (dbName: string)
@@ -363,7 +365,7 @@ let updateRows
             | Ok table ->
                 let applyToRow row =
                     if predicate row then
-                        updater row |> coerceRow table.Columns |> Result.map (fun r -> r, true)
+                        updater row |> coerceRow table.Columns |> Result.map (fun r -> r, r <> row)
                     else
                         Ok(row, false)
 

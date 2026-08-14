@@ -158,6 +158,16 @@ let tests =
                         Expect.equal rows [ [ Some "alice"; Some "31" ]; [ Some "bob"; Some "25" ] ] "only alice's age changed"
                     | other -> failtestf "expected a resultset, got %A" other
 
+                testCase "UPDATE reports 0 affected for a no-op write to an already-matching row"
+                <| fun _ ->
+                    let store = newStore ()
+                    runDefault store "CREATE TABLE t (id INT, v INT)" |> ignore
+                    runDefault store "INSERT INTO t VALUES (1, 5)" |> ignore
+
+                    match runDefault store "UPDATE t SET v = v WHERE id = 1" with
+                    | Affected 0UL -> ()
+                    | other -> failtestf "expected 0 rows affected (matched but unchanged), got %A" other
+
                 testCase "DELETE removes only matching rows"
                 <| fun _ ->
                     let store = newStore ()
