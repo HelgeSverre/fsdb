@@ -4,6 +4,7 @@ open System
 open Expecto
 open Fsdb.Packet
 open Fsdb.Protocol
+open Fsdb.Value
 open Fsdb.Session
 open Fsdb.Executor
 open Fsdb.QueryHandler
@@ -399,6 +400,153 @@ let queryHandlerTests =
               | Err(1105, _) -> ()
               | other -> failtestf "expected a 1105 internal-error Err, got %A" other ]
 
+let preparedStatementTests =
+    testList
+        "PreparedStatements"
+        [ testCase "placeholderPositions counts only ? outside strings, comments, and backtick identifiers"
+          <| fun _ ->
+              let sql =
+                  "SELECT * FROM t WHERE a = ? AND b = '?' AND c = \"?\" AND d = `?` -- ?\nAND e = ? /* ? */ AND f = ?"
+
+              Expect.equal (placeholderPositions sql |> List.length) 3 "three real placeholders (a, e, f)"
+
+          testCase "placeholderPositions treats a doubled quote as an escaped quote, not the string's end"
+          <| fun _ ->
+              let sql = "SELECT * FROM t WHERE a = 'it''s a ? mystery' AND b = ?"
+              Expect.equal (placeholderPositions sql |> List.length) 1 "one real placeholder"
+
+          testCase "placeholderPositions treats a backslash-escaped quote as not ending the string"
+          <| fun _ ->
+              let sql = @"SELECT * FROM t WHERE a = 'a \' ? b' AND b = ?"
+              Expect.equal (placeholderPositions sql |> List.length) 1 "one real placeholder"
+
+          testCase "substitutePlaceholders replaces placeholders in order and leaves the rest of the SQL untouched"
+          <| fun _ ->
+              let sql = "INSERT INTO t (a, b) VALUES (?, ?)"
+              let result = substitutePlaceholders sql [ "1"; "'x'" ]
+              Expect.equal result "INSERT INTO t (a, b) VALUES (1, 'x')" "substitution"
+
+          testCase "valueToSqlLiteral escapes single quotes and backslashes in strings"
+          <| fun _ ->
+              Expect.equal (valueToSqlLiteral (VString "O'Brien\\")) "'O\\'Brien\\\\'" "escaped literal"
+
+          testCase "valueToSqlLiteral renders NULL for VNull and a plain digit string for VInt"
+          <| fun _ ->
+              Expect.equal (valueToSqlLiteral VNull) "NULL" "null literal"
+              Expect.equal (valueToSqlLiteral (VInt 42L)) "42" "int literal"
+
+          testCase "prepareStatement reports the placeholder count for a valid statement"
+          <| fun _ ->
+              match prepareStatement "INSERT INTO t (a, b) VALUES (?, ?)" with
+              | Result.Ok 2 -> ()
+              | other -> failtestf "expected Ok 2, got %A" other
+
+          testCase "prepareStatement reports a 1064 syntax error for invalid SQL"
+          <| fun _ ->
+              match prepareStatement "GARBAGE NOT SQL" with
+              | Result.Error(1064, _) -> ()
+              | other -> failtestf "expected a 1064 error, got %A" other
+
+          testCase "a prepared INSERT/SELECT round-trips through textual substitution + the normal execution path"
+          <| fun _ ->
+              let session = create 1 (Fsdb.Storage.create ())
+              let session, _ = handle session "CREATE TABLE ps_t (id INT, name VARCHAR(50))"
+              let stmtSql = "INSERT INTO ps_t (id, name) VALUES (?, ?)"
+
+              let finalSql =
+                  substitutePlaceholders
+                      stmtSql
+                      [ valueToSqlLiteral (VInt 1L); valueToSqlLiteral (VString "alice") ]
+
+              let session, insertResult = handle session finalSql
+
+              match insertResult with
+              | Affected 1UL -> ()
+              | other -> failtestf "expected 1 affected row, got %A" other
+
+              match handle session "SELECT name FROM ps_t WHERE id = 1" |> snd with
+              | ResultSet(_, [ [ Some "alice" ] ]) -> ()
+              | other -> failtestf "expected alice, got %A" other ]
+
+let transactionTests =
+    testList
+        "Transactions"
+        [ testCase "a write inside BEGIN...COMMIT is invisible to another connection until commit"
+          <| fun _ ->
+              let store = Fsdb.Storage.create ()
+              let session = create 1 store
+              let session, _ = handle session "CREATE TABLE tx_t (id INT)"
+              let session, _ = handle session "BEGIN"
+              let session, _ = handle session "INSERT INTO tx_t VALUES (1)"
+              let other = create 2 store
+
+              match handle other "SELECT id FROM tx_t" |> snd with
+              | ResultSet(_, []) -> ()
+              | result -> failtestf "expected no rows visible before commit, got %A" result
+
+              let session, _ = handle session "COMMIT"
+              ignore session
+
+              match handle other "SELECT id FROM tx_t" |> snd with
+              | ResultSet(_, [ [ Some "1" ] ]) -> ()
+              | result -> failtestf "expected the committed row, got %A" result
+
+          testCase "ROLLBACK discards writes made inside the transaction"
+          <| fun _ ->
+              let session = create 1 (Fsdb.Storage.create ())
+              let session, _ = handle session "CREATE TABLE tx_r (id INT)"
+              let session, _ = handle session "BEGIN"
+              let session, _ = handle session "INSERT INTO tx_r VALUES (1)"
+              let session, _ = handle session "ROLLBACK"
+
+              match handle session "SELECT id FROM tx_r" |> snd with
+              | ResultSet(_, []) -> ()
+              | result -> failtestf "expected the insert to be rolled back, got %A" result
+
+          testCase "SAVEPOINT / ROLLBACK TO SAVEPOINT undoes only the writes made after it"
+          <| fun _ ->
+              let session = create 1 (Fsdb.Storage.create ())
+              let session, _ = handle session "CREATE TABLE tx_s (id INT)"
+              let session, _ = handle session "BEGIN"
+              let session, _ = handle session "INSERT INTO tx_s VALUES (1)"
+              let session, _ = handle session "SAVEPOINT sp1"
+              let session, _ = handle session "INSERT INTO tx_s VALUES (2)"
+              let session, _ = handle session "ROLLBACK TO SAVEPOINT sp1"
+              let session, _ = handle session "COMMIT"
+
+              match handle session "SELECT id FROM tx_s ORDER BY id" |> snd with
+              | ResultSet(_, [ [ Some "1" ] ]) -> ()
+              | result -> failtestf "expected only the pre-savepoint row, got %A" result
+
+          testCase "SET autocommit = 0 opens an implicit transaction; SET autocommit = 1 commits it"
+          <| fun _ ->
+              let store = Fsdb.Storage.create ()
+              let session = create 1 store
+              let session, _ = handle session "CREATE TABLE tx_ac (id INT)"
+              let session, _ = handle session "SET autocommit = 0"
+              let session, _ = handle session "INSERT INTO tx_ac VALUES (1)"
+              let other = create 2 store
+
+              match handle other "SELECT id FROM tx_ac" |> snd with
+              | ResultSet(_, []) -> ()
+              | result -> failtestf "expected no rows visible before autocommit = 1, got %A" result
+
+              let session, _ = handle session "SET autocommit = 1"
+              ignore session
+
+              match handle other "SELECT id FROM tx_ac" |> snd with
+              | ResultSet(_, [ [ Some "1" ] ]) -> ()
+              | result -> failtestf "expected the row visible once autocommit = 1 commits it, got %A" result
+
+          testCase "RELEASE SAVEPOINT on an unknown savepoint is a 1305 error"
+          <| fun _ ->
+              let session = create 1 (Fsdb.Storage.create ())
+              let session, _ = handle session "BEGIN"
+
+              match handle session "RELEASE SAVEPOINT nope" |> snd with
+              | Err(1305, _) -> ()
+              | result -> failtestf "expected a 1305 error, got %A" result ]
+
 /// Reads every packet off a stream until clean EOF.
 let private readAllPackets (stream: IO.Stream) : Async<Packet list> =
     let rec loop acc =
@@ -554,6 +702,100 @@ let integrationTests =
                   finally
                       listener.Stop()
               }
+              |> Async.RunSynchronously
+
+          // Forces the binary COM_STMT_PREPARE/COM_STMT_EXECUTE path via
+          // MySqlCommand.Prepare() (MySqlConnector otherwise inlines
+          // parameters as literal text over COM_QUERY) — the only way this
+          // suite exercises Goal A's binary parameter decoding from a real
+          // client. `@name`-style parameters are used here (MySqlConnector's
+          // usual style); MySqlConnector itself rewrites them to positional
+          // `?` before it ever hits the wire, so this still exercises the
+          // server's `?`-counting/substitution path the same as a client
+          // that writes `?` directly. php PDO with
+          // `PDO::ATTR_EMULATE_PREPARES => false` exercises the same server
+          // code path from a second, independent client implementation —
+          // covered in the Grind phase, since this suite has no PHP runtime.
+          // Reads back via `GetString`/`IsDBNull` rather than the typed
+          // getters (`GetInt32`, `GetDouble`, ...): every column this server
+          // advertises is MYSQL_TYPE_VAR_STRING (see `columnDefPayload`),
+          // and MySqlConnector's strict typed accessors throw
+          // `InvalidCastException` for a getter that doesn't match the
+          // wire-declared type, regardless of the SQL column's real type.
+          testCase "server-side prepared statements: MySqlCommand.Prepare() with several bound param types, executed twice"
+          <| fun _ ->
+              async {
+                  let listener = Fsdb.Server.startListening System.Net.IPAddress.Loopback 0
+                  let port = Fsdb.Server.port listener
+                  let serverTask = Fsdb.Server.serve listener (Fsdb.Storage.create ()) |> Async.StartAsTask
+
+                  try
+                      let connStr =
+                          sprintf
+                              "Server=127.0.0.1;Port=%d;User ID=root;Password=;AllowPublicKeyRetrieval=True;SslMode=None"
+                              port
+
+                      use conn = new MySqlConnector.MySqlConnection(connStr)
+                      do! conn.OpenAsync() |> Async.AwaitTask
+
+                      use createCmd = conn.CreateCommand()
+
+                      createCmd.CommandText <-
+                          "CREATE TABLE ps_int (id INT, name VARCHAR(50), score DOUBLE, active TINYINT)"
+
+                      do! createCmd.ExecuteNonQueryAsync() |> Async.AwaitTask |> Async.Ignore
+
+                      use insertCmd = conn.CreateCommand()
+
+                      insertCmd.CommandText <-
+                          "INSERT INTO ps_int (id, name, score, active) VALUES (@id, @name, @score, @active)"
+
+                      insertCmd.Parameters.AddWithValue("@id", 1) |> ignore
+                      insertCmd.Parameters.AddWithValue("@name", "alice") |> ignore
+                      insertCmd.Parameters.AddWithValue("@score", 3.5) |> ignore
+                      insertCmd.Parameters.AddWithValue("@active", 1) |> ignore
+                      do! insertCmd.PrepareAsync() |> Async.AwaitTask
+                      let! affected1 = insertCmd.ExecuteNonQueryAsync() |> Async.AwaitTask
+                      Expect.equal affected1 1 "first prepared INSERT"
+
+                      // Re-executes the SAME prepared statement with new
+                      // values (one of them NULL) — exercises
+                      // COM_STMT_EXECUTE's new-params-bound-flag path, since
+                      // MySqlConnector resends bound types on every execute.
+                      insertCmd.Parameters.["@id"].Value <- 2
+                      insertCmd.Parameters.["@name"].Value <- DBNull.Value
+                      insertCmd.Parameters.["@score"].Value <- -1.25
+                      insertCmd.Parameters.["@active"].Value <- 0
+                      let! affected2 = insertCmd.ExecuteNonQueryAsync() |> Async.AwaitTask
+                      Expect.equal affected2 1 "second prepared INSERT with a NULL param"
+
+                      use selectCmd = conn.CreateCommand()
+                      selectCmd.CommandText <- "SELECT id, name, score, active FROM ps_int ORDER BY id"
+                      do! selectCmd.PrepareAsync() |> Async.AwaitTask
+                      use! reader = selectCmd.ExecuteReaderAsync() |> Async.AwaitTask
+
+                      let! hasRow1 = reader.ReadAsync() |> Async.AwaitTask
+                      Expect.isTrue hasRow1 "first row present"
+                      Expect.equal (reader.GetString 0) "1" "row 1 id"
+                      Expect.equal (reader.GetString 1) "alice" "row 1 name"
+                      Expect.equal (reader.GetString 2) "3.5" "row 1 score"
+                      Expect.equal (reader.GetString 3) "1" "row 1 active"
+
+                      let! hasRow2 = reader.ReadAsync() |> Async.AwaitTask
+                      Expect.isTrue hasRow2 "second row present"
+                      Expect.equal (reader.GetString 0) "2" "row 2 id"
+                      Expect.isTrue (reader.IsDBNull 1) "row 2 name is NULL"
+                      Expect.equal (reader.GetString 2) "-1.25" "row 2 score"
+                      Expect.equal (reader.GetString 3) "0" "row 2 active"
+
+                      let! hasRow3 = reader.ReadAsync() |> Async.AwaitTask
+                      Expect.isFalse hasRow3 "only two rows"
+
+                      do! reader.CloseAsync() |> Async.AwaitTask
+                      do! conn.CloseAsync() |> Async.AwaitTask
+                  finally
+                      listener.Stop()
+              }
               |> Async.RunSynchronously ]
 
 [<EntryPoint>]
@@ -566,6 +808,8 @@ let main argv =
             [ packetTests
               protocolTests
               queryHandlerTests
+              preparedStatementTests
+              transactionTests
               serverTests
               ValueTests.tests
               ParserTests.tests
