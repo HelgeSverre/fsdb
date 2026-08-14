@@ -173,7 +173,13 @@ let private tablesColumns =
       intCol "table_rows"
       intCol "auto_increment"
       strCol "table_collation"
-      strCol "table_comment" ]
+      strCol "table_comment"
+      // Fake but present: Laravel's `compileTables` projects `(data_length +
+      // index_length) as size` — this in-memory engine has no real page
+      // storage to report, so both are a constant stand-in rather than
+      // absent columns that would 1054 on that expression.
+      intCol "data_length"
+      intCol "index_length" ]
 
 let private tablesRows (catalog: Catalog) : Value[] list =
     allTables catalog
@@ -185,7 +191,9 @@ let private tablesRows (catalog: Catalog) : Value[] list =
            vi (List.length t.Rows)
            VInt t.NextAutoId
            vs "utf8mb4_unicode_ci"
-           vs "" |])
+           vs ""
+           vi 16384
+           vi 0 |])
 
 let private columnsColumns =
     [ strCol "table_schema"
@@ -201,7 +209,12 @@ let private columnsColumns =
       intCol "numeric_scale"
       strCol "column_key"
       strCol "extra"
-      strCol "collation_name" ]
+      strCol "collation_name"
+      // `Ast.ColumnDef` doesn't track a column comment or a generated-column
+      // expression — both are always empty/NULL, present only so Laravel's
+      // `compileColumns` (which projects them unconditionally) doesn't 1054.
+      strCol "column_comment"
+      strCol "generation_expression" ]
 
 let defaultText (d: ColumnDefault option) : string option =
     match d with
@@ -235,7 +248,9 @@ let private columnsRows (catalog: Catalog) : Value[] list =
                (scale |> Option.map VInt |> Option.defaultValue VNull)
                vs (columnKey t c)
                vs (if c.AutoIncrement then "auto_increment" else "")
-               (if isStringy c.Type then vs "utf8mb4_unicode_ci" else VNull) |]))
+               (if isStringy c.Type then vs "utf8mb4_unicode_ci" else VNull)
+               vs ""
+               vs "" |]))
 
 let private statisticsColumns =
     [ strCol "table_schema"
