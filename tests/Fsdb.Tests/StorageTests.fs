@@ -292,4 +292,98 @@ let tests =
                 <| fun _ ->
                     match resolveColumn usersColumns "missing" with
                     | Error(UnknownColumn "missing") -> ()
-                    | other -> failtestf "expected UnknownColumn, got %A" other ] ]
+                    | other -> failtestf "expected UnknownColumn, got %A" other ]
+
+          testList
+              "updateRows / deleteRows"
+              [ testCase "updateRows rewrites matching rows and coerces the new values"
+                <| fun _ ->
+                    let store = withUsersTable ()
+
+                    insertRows
+                        store
+                        defaultDatabase
+                        "users"
+                        None
+                        [ [ VNull; VString "alice"; VInt 30L ]
+                          [ VNull; VString "bob"; VInt 25L ] ]
+                    |> ignore
+
+                    let predicate (row: Value[]) = row.[1] = VString "alice"
+                    let updater (row: Value[]) = [| row.[0]; row.[1]; VString "31" |]
+
+                    match updateRows store defaultDatabase "users" predicate updater with
+                    | Ok affected ->
+                        Expect.equal affected 1 "one row updated"
+
+                        match scan store defaultDatabase "users" with
+                        | Ok(_, rows) ->
+                            let ages =
+                                rows |> Seq.map (fun r -> r.[1], r.[2]) |> List.ofSeq
+
+                            Expect.contains ages (VString "alice", VInt 31L) "alice's age updated and coerced"
+                            Expect.contains ages (VString "bob", VInt 25L) "bob untouched"
+                        | Error e -> failtestf "expected Ok, got %A" e
+                    | Error e -> failtestf "expected Ok, got %A" e
+
+                testCase "updateRows setting a NOT NULL column to NULL returns NotNullViolation"
+                <| fun _ ->
+                    let store = withUsersTable ()
+
+                    insertRows store defaultDatabase "users" None [ [ VNull; VString "alice"; VInt 30L ] ]
+                    |> ignore
+
+                    let updater (row: Value[]) = [| row.[0]; VNull; row.[2] |]
+
+                    match updateRows store defaultDatabase "users" (fun _ -> true) updater with
+                    | Error(NotNullViolation "name") -> ()
+                    | other -> failtestf "expected NotNullViolation, got %A" other
+
+                testCase "deleteRows removes matching rows and returns the count"
+                <| fun _ ->
+                    let store = withUsersTable ()
+
+                    insertRows
+                        store
+                        defaultDatabase
+                        "users"
+                        None
+                        [ [ VNull; VString "alice"; VInt 30L ]
+                          [ VNull; VString "bob"; VInt 25L ] ]
+                    |> ignore
+
+                    match deleteRows store defaultDatabase "users" (fun row -> row.[1] = VString "alice") with
+                    | Ok affected ->
+                        Expect.equal affected 1 "one row deleted"
+
+                        match scan store defaultDatabase "users" with
+                        | Ok(_, rows) ->
+                            Expect.equal
+                                (rows |> Seq.map (fun r -> r.[1]) |> List.ofSeq)
+                                [ VString "bob" ]
+                                "only bob remains"
+                        | Error e -> failtestf "expected Ok, got %A" e
+                    | Error e -> failtestf "expected Ok, got %A" e ]
+
+          testList
+              "snapshot isolation"
+              [ testCase "a seq obtained before a write still yields the old rows"
+                <| fun _ ->
+                    let store = withUsersTable ()
+
+                    insertRows store defaultDatabase "users" None [ [ VNull; VString "alice"; VInt 30L ] ]
+                    |> ignore
+
+                    let before =
+                        match scan store defaultDatabase "users" with
+                        | Ok(_, rows) -> rows
+                        | Error e -> failtestf "expected Ok, got %A" e
+
+                    insertRows store defaultDatabase "users" None [ [ VNull; VString "bob"; VInt 25L ] ]
+                    |> ignore
+
+                    Expect.equal (List.ofSeq before |> List.length) 1 "the old snapshot still has one row"
+
+                    match scan store defaultDatabase "users" with
+                    | Ok(_, rows) -> Expect.equal (List.ofSeq rows |> List.length) 2 "a fresh scan sees both rows"
+                    | Error e -> failtestf "expected Ok, got %A" e ] ]

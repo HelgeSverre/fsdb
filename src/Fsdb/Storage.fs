@@ -316,6 +316,57 @@ let insertRows
                             (Option.defaultValue 0L firstAssigned, List.length newRowsRev)
                         ))
 
+let private coerceRow (columns: ColumnDef list) (row: Value[]) : Result<Value[], StorageError> =
+    List.zip columns (Array.toList row)
+    |> traverseResult (fun (col, v) -> coerceAndCheck col v)
+    |> Result.map Array.ofList
+
+/// Deletes every row matching `predicate`. Returns the number of rows
+/// removed.
+let deleteRows (store: Store) (dbName: string) (tableName: string) (predicate: Value[] -> bool) : Result<int, StorageError> =
+    withWrite store (fun catalog ->
+        match tryGetDatabase catalog dbName with
+        | Error e -> Error e
+        | Ok db ->
+            match tryGetTable db tableName with
+            | Error e -> Error e
+            | Ok table ->
+                let kept, removed = table.Rows |> List.partition (predicate >> not)
+                let table' = { table with Rows = kept }
+                Ok(Map.add dbName (Map.add (normalizeTableName tableName) table' db) catalog, List.length removed))
+
+/// Replaces every row matching `predicate` with `updater row`, coercing
+/// the result back to the table's column types. Returns the number of
+/// rows updated.
+let updateRows
+    (store: Store)
+    (dbName: string)
+    (tableName: string)
+    (predicate: Value[] -> bool)
+    (updater: Value[] -> Value[])
+    : Result<int, StorageError> =
+    withWrite store (fun catalog ->
+        match tryGetDatabase catalog dbName with
+        | Error e -> Error e
+        | Ok db ->
+            match tryGetTable db tableName with
+            | Error e -> Error e
+            | Ok table ->
+                let applyToRow row =
+                    if predicate row then
+                        updater row |> coerceRow table.Columns |> Result.map (fun r -> r, true)
+                    else
+                        Ok(row, false)
+
+                match table.Rows |> traverseResult applyToRow with
+                | Error e -> Error e
+                | Ok rowsWithFlags ->
+                    let table' =
+                        { table with Rows = rowsWithFlags |> List.map fst }
+
+                    let affected = rowsWithFlags |> List.filter snd |> List.length
+                    Ok(Map.add dbName (Map.add (normalizeTableName tableName) table' db) catalog, affected))
+
 /// A snapshot read: the table's columns and its rows as they were at the
 /// moment of the call. Lock-free — reads a single reference field, and
 /// later writes swap in a new `Catalog` without mutating this snapshot's
