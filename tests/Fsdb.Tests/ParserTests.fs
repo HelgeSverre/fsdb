@@ -154,6 +154,13 @@ let tests =
                         (mkSelect([ Star, None ], Some "t", None, [], Some 10, Some 5))
                         "limit comma form"
 
+                testCase "LIMIT 18446744073709551615 (2^64-1, the 'no limit' idiom) parses instead of a 1064 error"
+                <| fun _ ->
+                    Expect.equal
+                        (parseOk "SELECT id FROM t LIMIT 18446744073709551615 OFFSET 5")
+                        (mkSelect([ col "id", None ], Some "t", None, [], Some System.Int32.MaxValue, Some 5))
+                        "clamped to Int32.MaxValue rather than a syntax error"
+
                 testCase "full clause order: WHERE, ORDER BY, LIMIT together"
                 <| fun _ ->
                     Expect.equal

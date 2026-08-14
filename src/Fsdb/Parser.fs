@@ -402,14 +402,22 @@ let private orderKey: Parser<OrderKey, unit> =
     (expr .>>. opt ((keyword "ASC" >>% Asc) <|> (keyword "DESC" >>% Desc)))
     |>> fun (e, dir) -> (e, dir |> Option.defaultValue Asc)
 
+/// LIMIT/OFFSET accept up to 2^64-1 in MySQL (the "no limit, just an
+/// offset" idiom is `LIMIT 18446744073709551615 OFFSET n`), while
+/// `Ast.SelectStmt.Limit`/`Offset` stay plain `int` — nothing this small an
+/// in-memory engine holds needs a row count past `Int32.MaxValue`, so clamp
+/// rather than widen the AST.
+let private limitTok: Parser<int, unit> =
+    puint64 .>> ws |>> fun n -> if n > uint64 Int32.MaxValue then Int32.MaxValue else int n
+
 /// `LIMIT n`, `LIMIT n OFFSET m`, and the MySQL-specific `LIMIT m, n` (which
 /// means offset `m`, count `n` — the arguments are in the opposite order
 /// from `LIMIT n OFFSET m`).
 let private limitClause: Parser<int option * int option, unit> =
-    keyword "LIMIT" >>. intTok
+    keyword "LIMIT" >>. limitTok
     >>= fun a ->
-        (sym "," >>. intTok |>> fun b -> (Some b, Some a))
-        <|> (keyword "OFFSET" >>. intTok |>> fun b -> (Some a, Some b))
+        (sym "," >>. limitTok |>> fun b -> (Some b, Some a))
+        <|> (keyword "OFFSET" >>. limitTok |>> fun b -> (Some a, Some b))
         <|> preturn (Some a, None)
 
 /// `[db.]table [[AS] alias]` — the alias form omits `AS` too (`FROM t x`),
