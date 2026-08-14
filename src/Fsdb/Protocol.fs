@@ -122,6 +122,20 @@ let okPayload (capabilities: uint32) (affectedRows: uint64) (lastInsertId: uint6
 let okEndOfResultSetPayload (capabilities: uint32) : byte[] =
     okPayloadWithHeader 0xfeuy capabilities 0UL 0UL
 
+/// Minimal MySQL error-code -> SQLSTATE mapping. Drivers/ORMs branch on
+/// SQLSTATE, not the vendor code — PDO/Doctrine map 42000 to a syntax-error
+/// exception, 08S01 to a retryable link failure, etc. — so reporting every
+/// error as the generic HY000 silently degrades error classification and
+/// retry logic. ponytail: grows as new error codes are introduced; anything
+/// unmapped falls back to HY000, matching MySQL's own default.
+let sqlStateForCode (code: int) : string =
+    match code with
+    | 1064 -> "42000" // ER_PARSE_ERROR
+    | 1146 -> "42S02" // ER_NO_SUCH_TABLE
+    | 1054 -> "42S22" // ER_BAD_FIELD_ERROR
+    | 1047 -> "08S01" // ER_UNKNOWN_COM_ERROR
+    | _ -> "HY000"
+
 /// Builds an ERR packet payload (header 0xff).
 let errPayload (capabilities: uint32) (code: int) (message: string) : byte[] =
     let w = Writer()
@@ -130,7 +144,7 @@ let errPayload (capabilities: uint32) (code: int) (message: string) : byte[] =
 
     if capabilities &&& ClientProtocol41 <> 0u then
         w.WriteByte(byte '#')
-        w.WriteBytes(Encoding.ASCII.GetBytes "HY000")
+        w.WriteBytes(Encoding.ASCII.GetBytes(sqlStateForCode code))
 
     w.WriteBytes(Encoding.UTF8.GetBytes message)
     w.ToArray()

@@ -105,6 +105,20 @@ let protocolTests =
               let r = Reader(payload.[1..])
               Expect.equal (r.ReadInt16LE ()) 1064 "error code"
 
+          testCase "ERR payload for 1064 carries SQLSTATE 42000, not the generic HY000"
+          <| fun _ ->
+              // Regression: PDO/Doctrine branch on SQLSTATE (42000 -> syntax
+              // error, not the generic HY000) to classify exceptions.
+              let payload = errPayload ClientProtocol41 1064 "bad syntax"
+              let sqlState = Text.Encoding.ASCII.GetString(payload, 4, 5)
+              Expect.equal sqlState "42000" "sqlstate for 1064"
+
+          testCase "ERR payload for an unmapped code falls back to HY000"
+          <| fun _ ->
+              let payload = errPayload ClientProtocol41 9999 "whatever"
+              let sqlState = Text.Encoding.ASCII.GetString(payload, 4, 5)
+              Expect.equal sqlState "HY000" "sqlstate fallback"
+
           testCase "the resultset-terminating OK uses header 0xfe, not 0x00"
           <| fun _ ->
               // Regression: mysql CLI distinguishes this from a plain OK by the
