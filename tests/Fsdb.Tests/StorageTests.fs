@@ -410,4 +410,218 @@ let tests =
 
                     match scan store defaultDatabase "users" with
                     | Ok(_, rows) -> Expect.equal (List.ofSeq rows |> List.length) 2 "a fresh scan sees both rows"
+                    | Error e -> failtestf "expected Ok, got %A" e ]
+
+          testList
+              "alterTable"
+              [ testCase "AddColumn appends the column and fills existing rows with its default"
+                <| fun _ ->
+                    let store = withUsersTable ()
+                    insertRows store defaultDatabase "users" None [ [ VNull; VString "alice"; VInt 30L ] ] |> ignore
+
+                    let newCol = { (col "active" (TInt false) true) with Default = Some(DConst(VInt 1L)) }
+
+                    match alterTable store defaultDatabase "users" [ AddColumn newCol ] with
+                    | Ok() ->
+                        match scan store defaultDatabase "users" with
+                        | Ok(columns, rows) ->
+                            Expect.equal (List.length columns) 4 "one more column"
+                            Expect.equal (List.ofSeq rows |> List.map (fun r -> r.[3])) [ VInt 1L ] "filled with the new column's default"
+                        | Error e -> failtestf "expected Ok, got %A" e
+                    | Error e -> failtestf "expected Ok, got %A" e
+
+                testCase "DropColumn removes the column from schema and every row"
+                <| fun _ ->
+                    let store = withUsersTable ()
+                    insertRows store defaultDatabase "users" None [ [ VNull; VString "alice"; VInt 30L ] ] |> ignore
+
+                    match alterTable store defaultDatabase "users" [ DropColumn "age" ] with
+                    | Ok() ->
+                        match scan store defaultDatabase "users" with
+                        | Ok(columns, rows) ->
+                            Expect.equal (columns |> List.map (fun c -> c.Name)) [ "id"; "name" ] "age column gone"
+                            Expect.equal (List.ofSeq rows |> List.map Array.length) [ 2 ] "row shrunk too"
+                        | Error e -> failtestf "expected Ok, got %A" e
+                    | Error e -> failtestf "expected Ok, got %A" e
+
+                testCase "DropColumn on an unknown column returns UnknownColumn"
+                <| fun _ ->
+                    let store = withUsersTable ()
+
+                    match alterTable store defaultDatabase "users" [ DropColumn "ghost" ] with
+                    | Error(UnknownColumn "ghost") -> ()
+                    | other -> failtestf "expected UnknownColumn, got %A" other
+
+                testCase "ModifyColumn replaces the column's definition in place"
+                <| fun _ ->
+                    let store = withUsersTable ()
+                    let widened = col "name" (TVarchar 500) false
+
+                    match alterTable store defaultDatabase "users" [ ModifyColumn widened ] with
+                    | Ok() ->
+                        match scan store defaultDatabase "users" with
+                        | Ok(columns, _) ->
+                            match columns |> List.find (fun c -> c.Name = "name") with
+                            | { Type = TVarchar 500 } -> ()
+                            | other -> failtestf "expected the widened type, got %A" other
+                        | Error e -> failtestf "expected Ok, got %A" e
+                    | Error e -> failtestf "expected Ok, got %A" e
+
+                testCase "ChangeColumn renames and redefines a column"
+                <| fun _ ->
+                    let store = withUsersTable ()
+                    let renamed = col "full_name" (TVarchar 255) false
+
+                    match alterTable store defaultDatabase "users" [ ChangeColumn("name", renamed) ] with
+                    | Ok() ->
+                        match scan store defaultDatabase "users" with
+                        | Ok(columns, _) -> Expect.equal (columns |> List.map (fun c -> c.Name)) [ "id"; "full_name"; "age" ] "renamed"
+                        | Error e -> failtestf "expected Ok, got %A" e
+                    | Error e -> failtestf "expected Ok, got %A" e
+
+                testCase "RenameTo re-files the table under its new name"
+                <| fun _ ->
+                    let store = withUsersTable ()
+
+                    match alterTable store defaultDatabase "users" [ RenameTo "people" ] with
+                    | Ok() ->
+                        match scan store defaultDatabase "users" with
+                        | Error(NoSuchTable _) -> ()
+                        | other -> failtestf "expected the old name to be gone, got %A" other
+
+                        match scan store defaultDatabase "people" with
+                        | Ok _ -> ()
+                        | Error e -> failtestf "expected the new name to exist, got %A" e
+                    | Error e -> failtestf "expected Ok, got %A" e
+
+                testCase "renameTable is the same rename as an ALTER TABLE ... RENAME TO"
+                <| fun _ ->
+                    let store = withUsersTable ()
+
+                    match renameTable store defaultDatabase "users" "people" with
+                    | Ok() ->
+                        match scan store defaultDatabase "people" with
+                        | Ok _ -> ()
+                        | Error e -> failtestf "expected Ok, got %A" e
+                    | Error e -> failtestf "expected Ok, got %A" e
+
+                testCase "RenameColumnTo renames just the column"
+                <| fun _ ->
+                    let store = withUsersTable ()
+
+                    match alterTable store defaultDatabase "users" [ RenameColumnTo("age", "years_old") ] with
+                    | Ok() ->
+                        match scan store defaultDatabase "users" with
+                        | Ok(columns, _) -> Expect.equal (columns |> List.map (fun c -> c.Name)) [ "id"; "name"; "years_old" ] "renamed"
+                        | Error e -> failtestf "expected Ok, got %A" e
+                    | Error e -> failtestf "expected Ok, got %A" e
+
+                testCase "AddIndex / DropIndexAction manage the table's index metadata"
+                <| fun _ ->
+                    let store = withUsersTable ()
+                    let ix = { Name = "idx_name"; Columns = [ "name" ]; Unique = false }
+
+                    match alterTable store defaultDatabase "users" [ AddIndex ix ] with
+                    | Ok() ->
+                        match scan store defaultDatabase "users" with
+                        | Ok _ -> ()
+                        | Error e -> failtestf "expected Ok, got %A" e
+                    | Error e -> failtestf "expected Ok, got %A" e
+
+                    match alterTable store defaultDatabase "users" [ DropIndexAction "idx_name" ] with
+                    | Ok() -> ()
+                    | Error e -> failtestf "expected Ok, got %A" e
+
+                testCase "AddForeignKey / DropForeignKey manage the table's FK metadata"
+                <| fun _ ->
+                    let store = withUsersTable ()
+
+                    let fk =
+                        { Name = "fk_x"; Columns = [ "id" ]; RefTable = "other"; RefColumns = [ "id" ]; OnDelete = None; OnUpdate = None }
+
+                    match alterTable store defaultDatabase "users" [ AddForeignKey fk ] with
+                    | Ok() -> ()
+                    | Error e -> failtestf "expected Ok, got %A" e
+
+                    match alterTable store defaultDatabase "users" [ DropForeignKey "fk_x" ] with
+                    | Ok() -> ()
+                    | Error e -> failtestf "expected Ok, got %A" e
+
+                testCase "AddPrimaryKey marks the named columns as primary key"
+                <| fun _ ->
+                    let store = create ()
+                    createTable store defaultDatabase "t" [ col "a" (TInt false) true; col "b" (TInt false) true ] [] [] |> ignore
+
+                    match alterTable store defaultDatabase "t" [ AddPrimaryKey [ "a"; "b" ] ] with
+                    | Ok() ->
+                        match scan store defaultDatabase "t" with
+                        | Ok(columns, _) -> Expect.isTrue (columns |> List.forall (fun c -> c.PrimaryKey)) "both columns are PK"
+                        | Error e -> failtestf "expected Ok, got %A" e
+                    | Error e -> failtestf "expected Ok, got %A" e
+
+                testCase "multiple actions in one call apply in order"
+                <| fun _ ->
+                    let store = withUsersTable ()
+
+                    match alterTable store defaultDatabase "users" [ DropColumn "age"; RenameTo "people" ] with
+                    | Ok() ->
+                        match scan store defaultDatabase "people" with
+                        | Ok(columns, _) -> Expect.equal (columns |> List.map (fun c -> c.Name)) [ "id"; "name" ] "both actions applied"
+                        | Error e -> failtestf "expected Ok, got %A" e
+                    | Error e -> failtestf "expected Ok, got %A" e ]
+
+          testList
+              "upsertRows"
+              [ testCase "no collision: behaves like a plain insert"
+                <| fun _ ->
+                    let store = withUsersTable ()
+                    let applyUpdate (_: Value[]) (candidate: Value[]) = Ok candidate
+
+                    match upsertRows store defaultDatabase "users" None [ [ VNull; VString "alice"; VInt 30L ] ] applyUpdate with
+                    | Ok(lastId, affected) ->
+                        Expect.equal lastId 1L "inserted with a fresh id"
+                        Expect.equal affected 1 "one row"
+                    | Error e -> failtestf "expected Ok, got %A" e
+
+                testCase "a primary-key collision calls applyUpdate instead of inserting a second row"
+                <| fun _ ->
+                    let store = withUsersTable ()
+                    insertRows store defaultDatabase "users" None [ [ VInt 1L; VString "alice"; VInt 30L ] ] |> ignore
+
+                    let applyUpdate (existing: Value[]) (_candidate: Value[]) =
+                        Ok [| existing.[0]; existing.[1]; VInt 31L |]
+
+                    match upsertRows store defaultDatabase "users" None [ [ VInt 1L; VString "alice"; VInt 999L ] ] applyUpdate with
+                    | Ok(_, affected) ->
+                        Expect.equal affected 1 "one row affected (the update, not an insert)"
+
+                        match scan store defaultDatabase "users" with
+                        | Ok(_, rows) -> Expect.equal (List.ofSeq rows |> List.map (fun r -> r.[2])) [ VInt 31L ] "existing row updated, not duplicated"
+                        | Error e -> failtestf "expected Ok, got %A" e
+                    | Error e -> failtestf "expected Ok, got %A" e
+
+                testCase "a unique-index collision (not the primary key) also triggers applyUpdate"
+                <| fun _ ->
+                    let store = create ()
+
+                    createTable
+                        store
+                        defaultDatabase
+                        "emails"
+                        [ col "id" (TInt false) false; col "email" (TVarchar 255) false ]
+                        [ { Name = "uq_email"; Columns = [ "email" ]; Unique = true } ]
+                        []
+                    |> ignore
+
+                    insertRows store defaultDatabase "emails" None [ [ VInt 1L; VString "a@x.com" ] ] |> ignore
+
+                    let applyUpdate (existing: Value[]) (_candidate: Value[]) = Ok existing
+
+                    match upsertRows store defaultDatabase "emails" None [ [ VInt 2L; VString "a@x.com" ] ] applyUpdate with
+                    | Ok(_, affected) ->
+                        Expect.equal affected 1 "matched via the unique index"
+
+                        match scan store defaultDatabase "emails" with
+                        | Ok(_, rows) -> Expect.equal (List.ofSeq rows |> List.length) 1 "no duplicate row inserted"
+                        | Error e -> failtestf "expected Ok, got %A" e
                     | Error e -> failtestf "expected Ok, got %A" e ] ]
