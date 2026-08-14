@@ -167,15 +167,21 @@ let private registryFor (session: Session) : Functions.Registry =
     |> Functions.registerScalar "VERSION" (fun _ -> lookupVar session "version" |> Option.map VString |> Option.defaultValue VNull)
 
 /// Parses and executes anything that isn't one of the text-probe special
-/// cases above. A parse failure is a 1064 syntax error with SQLSTATE 42000
-/// (the mapping `errPayload` already has for that code).
-let private executeStatement (session: Session) (sql: string) : Session * QueryResult =
+/// cases above. A parse failure that also looks like a `SELECT @@...` falls
+/// back to the `@@`-probe path — tried only *after* the real parser, so a
+/// query that merely contains the text `@@` somewhere (inside a string
+/// literal, e.g. `WHERE email = 'a@@b.com'`) parses normally instead of
+/// being hijacked into the probe path and rejected. Anything else is a 1064
+/// syntax error with SQLSTATE 42000 (the mapping `errPayload` already has
+/// for that code).
+let private executeStatement (session: Session) (sql: string) (upper: string) : Session * QueryResult =
     match Parser.parse sql with
-    | Result.Error _ -> session, syntaxError sql
     | Result.Ok stmt ->
         let dbName = session.Database |> Option.defaultValue defaultDatabase
         let lastInsertId, result = Executor.execute session.Store (registryFor session) dbName session.LastInsertId stmt
         { session with LastInsertId = lastInsertId }, result
+    | Result.Error _ when upper.StartsWith "SELECT" && upper.Contains "@@" -> session, handleAtVarSelect session sql
+    | Result.Error _ -> session, syntaxError sql
 
 let private dispatch (session: Session) (rawSql: string) : Session * QueryResult =
     let sql = rawSql.Trim().TrimEnd(';').Trim()
@@ -188,9 +194,8 @@ let private dispatch (session: Session) (rawSql: string) : Session * QueryResult
     | _ when upper.StartsWith "USE " ->
         { session with Database = Some(sql.Substring(4).Trim().Trim('`')) }, Affected 0UL
     | _ when upper.StartsWith "SHOW VARIABLES" -> session, handleShowVariables session sql
-    | _ when upper.StartsWith "SELECT" && upper.Contains "@@" -> session, handleAtVarSelect session sql
     | _ when literalSelect.IsMatch sql -> session, handleLiteralSelect sql
-    | _ -> executeStatement session sql
+    | _ -> executeStatement session sql upper
 
 /// No SQL engine failure should ever escape as a raw .NET exception — the
 /// only two paths into `dispatch` (the parser, well guarded, and

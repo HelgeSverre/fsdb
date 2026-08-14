@@ -360,6 +360,16 @@ let queryHandlerTests =
               | Err(1064, msg) -> Expect.stringContains msg "GARBAGE NOT SQL" "message names the query"
               | other -> failtestf "expected a 1064 error, got %A" other
 
+          testCase "a query containing @@ inside a string literal is not hijacked by the @@-variable probe"
+          <| fun _ ->
+              let session = create 1 (Fsdb.Storage.create ())
+              let session, _ = handle session "CREATE TABLE users (email VARCHAR(50))"
+              let session, _ = handle session "INSERT INTO users VALUES ('a@@b.com')"
+
+              match handle session "SELECT * FROM users WHERE email LIKE '%@@%'" |> snd with
+              | ResultSet(_, [ [ Some "a@@b.com" ] ]) -> ()
+              | other -> failtestf "expected the row to be found via the real parser, got %A" other
+
           testCase "an exception inside the engine (decimal overflow) is an Err, not an escaping exception"
           <| fun _ ->
               // Storage.coerceValue's `decimal d` throws OverflowException for
