@@ -353,6 +353,68 @@ let queryHandlerTests =
               | ResultSet(_, [ [ Some "autocommit"; Some "1" ] ]) -> ()
               | other -> failtestf "expected the autocommit row, got %A" other
 
+          testCase "SHOW TABLES / SHOW FULL TABLES list the current database's tables"
+          <| fun _ ->
+              let session = create 1 (Fsdb.Storage.create ())
+              let session, _ = handle session "USE shop"
+              let session, _ = handle session "CREATE TABLE widgets (id INT PRIMARY KEY)"
+
+              match handle session "SHOW TABLES" |> snd with
+              | ResultSet([ "Tables_in_shop" ], [ [ Some "widgets" ] ]) -> ()
+              | other -> failtestf "expected the one table, got %A" other
+
+              match handle session "SHOW FULL TABLES" |> snd with
+              | ResultSet([ "Tables_in_shop"; "Table_type" ], [ [ Some "widgets"; Some "BASE TABLE" ] ]) -> ()
+              | other -> failtestf "expected the FULL variant's extra column, got %A" other
+
+          testCase "SHOW COLUMNS FROM t / DESCRIBE t report field metadata"
+          <| fun _ ->
+              let session = create 1 (Fsdb.Storage.create ())
+              let session, _ = handle session "USE shop"
+
+              let session, _ =
+                  handle session "CREATE TABLE widgets (id INT AUTO_INCREMENT PRIMARY KEY, name VARCHAR(50) NOT NULL)"
+
+              match handle session "SHOW COLUMNS FROM widgets" |> snd with
+              | ResultSet([ "Field"; "Type"; "Null"; "Key"; "Default"; "Extra" ], rows) ->
+                  Expect.equal
+                      rows
+                      [ [ Some "id"; Some "int"; Some "NO"; Some "PRI"; None; Some "auto_increment" ]
+                        [ Some "name"; Some "varchar(50)"; Some "NO"; Some ""; None; Some "" ] ]
+                      "both columns with their metadata"
+              | other -> failtestf "expected a resultset, got %A" other
+
+              match handle session "DESCRIBE widgets" |> snd with
+              | ResultSet([ "Field"; "Type"; "Null"; "Key"; "Default"; "Extra" ], rows) -> Expect.equal (List.length rows) 2 "DESCRIBE is SHOW COLUMNS under another name"
+              | other -> failtestf "expected a resultset, got %A" other
+
+          testCase "SHOW CREATE TABLE reconstructs plausible DDL"
+          <| fun _ ->
+              let session = create 1 (Fsdb.Storage.create ())
+              let session, _ = handle session "USE shop"
+
+              let session, _ =
+                  handle session "CREATE TABLE widgets (id INT AUTO_INCREMENT PRIMARY KEY, name VARCHAR(50) UNIQUE)"
+
+              match handle session "SHOW CREATE TABLE widgets" |> snd with
+              | ResultSet([ "Table"; "Create Table" ], [ [ Some "widgets"; Some ddl ] ]) ->
+                  Expect.stringContains ddl "CREATE TABLE `widgets`" "names the table"
+                  Expect.stringContains ddl "PRIMARY KEY (`id`)" "includes the primary key"
+                  Expect.stringContains ddl "UNIQUE KEY `name`" "includes the unique index"
+              | other -> failtestf "expected a resultset, got %A" other
+
+          testCase "SHOW INDEX FROM t lists the primary key and other indexes"
+          <| fun _ ->
+              let session = create 1 (Fsdb.Storage.create ())
+              let session, _ = handle session "USE shop"
+              let session, _ = handle session "CREATE TABLE widgets (id INT PRIMARY KEY, sku VARCHAR(20) UNIQUE)"
+
+              match handle session "SHOW INDEX FROM widgets" |> snd with
+              | ResultSet(cols, rows) ->
+                  Expect.equal cols.[0] "Table" "first column is Table"
+                  Expect.equal (List.length rows) 2 "primary key + the unique index"
+              | other -> failtestf "expected a resultset, got %A" other
+
           testCase "an unrecognized statement is a 1064 syntax error naming the query"
           <| fun _ ->
               let session = create 1 (Fsdb.Storage.create ())

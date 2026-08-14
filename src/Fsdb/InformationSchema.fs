@@ -68,7 +68,7 @@ let private dataTypeName (ty: ColumnType) : string =
 /// `information_schema.columns.column_type` — the full declared type text
 /// (`int unsigned`, `varchar(255)`, `enum('a','b')`, ...), the same text
 /// Laravel's `getColumns()`/`SHOW CREATE TABLE` echo back.
-let private columnTypeText (ty: ColumnType) : string =
+let columnTypeText (ty: ColumnType) : string =
     let quotedList vs = vs |> List.map (sprintf "'%s'") |> String.concat ","
     let unsigned u = if u then " unsigned" else ""
 
@@ -133,7 +133,7 @@ let private numericPrecisionScale (ty: ColumnType) : (int64 * int64) option =
     | TDouble -> Some(22L, 0L)
     | _ -> None
 
-let private isStringy (ty: ColumnType) : bool =
+let isStringy (ty: ColumnType) : bool =
     match ty with
     | TChar _
     | TVarchar _
@@ -150,7 +150,7 @@ let private isStringy (ty: ColumnType) : bool =
 /// several indexes over the same leading column "wins" is more involved
 /// than this; good enough for what Laravel's schema introspection actually
 /// reads.
-let private columnKey (table: Table) (c: ColumnDef) : string =
+let columnKey (table: Table) (c: ColumnDef) : string =
     if c.PrimaryKey then
         "PRI"
     else
@@ -203,7 +203,7 @@ let private columnsColumns =
       strCol "extra"
       strCol "collation_name" ]
 
-let private defaultText (d: ColumnDefault option) : string option =
+let defaultText (d: ColumnDefault option) : string option =
     match d with
     | None -> None
     | Some(DConst v) -> v |> toText
