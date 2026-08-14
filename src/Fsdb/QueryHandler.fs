@@ -1,8 +1,10 @@
 /// Query dispatcher: a handful of connection-setup forms mysql CLI/PDO send
-/// (`@@vars`, `SET`, `SHOW`, `USE`, literal `SELECT <n>`) are still matched
-/// on trimmed/uppercased query text, since they're session-variable probes
-/// rather than real SQL the grammar needs to know about. Everything else
-/// goes through `Parser.parse -> Executor.execute`.
+/// (`@@vars`, `SET`, `SHOW`) are still matched on trimmed/uppercased query
+/// text, since they're session-variable probes rather than real SQL the
+/// grammar needs to know about. Everything else — including `SELECT 1` and
+/// `SELECT DATABASE()`, which the grammar and function registry already
+/// handle byte-for-byte the same way — goes through
+/// `Parser.parse -> Executor.execute`.
 module Fsdb.QueryHandler
 
 open System
@@ -75,28 +77,17 @@ let private handleAtVarSelect (session: Session) (sql: string) : QueryResult =
     else
         syntaxError sql
 
-let private literalSelect = Regex(@"^SELECT\s+(-?\d+)$", RegexOptions.IgnoreCase)
-
-/// `SELECT 1`, `SELECT 42`.
-let private handleLiteralSelect (sql: string) : QueryResult =
-    let m = literalSelect.Match sql
-
-    if m.Success then
-        let v = m.Groups.[1].Value
-        ResultSet([ v ], [ [ Some v ] ])
-    else
-        syntaxError sql
-
-let private likeToRegex (pattern: string) =
-    "^" + Regex.Escape(pattern).Replace("%", ".*").Replace("_", ".") + "$"
-
 /// `SHOW VARIABLES` / `SHOW VARIABLES LIKE 'pattern'`.
 let private handleShowVariables (session: Session) (sql: string) : QueryResult =
     let likeMatch = Regex.Match(sql, @"LIKE\s+'([^']*)'", RegexOptions.IgnoreCase)
 
     let matches (name: string) =
         if likeMatch.Success then
-            Regex.IsMatch(name, likeToRegex likeMatch.Groups.[1].Value, RegexOptions.IgnoreCase)
+            Regex.IsMatch(
+                name,
+                Executor.likeToRegex likeMatch.Groups.[1].Value,
+                RegexOptions.IgnoreCase ||| RegexOptions.Singleline
+            )
         else
             true
 
@@ -189,12 +180,10 @@ let private dispatch (session: Session) (rawSql: string) : Session * QueryResult
 
     match upper with
     | _ when upper.StartsWith "SET " -> handleSet session sql
-    | "SELECT DATABASE()" -> session, ResultSet([ "DATABASE()" ], [ [ session.Database ] ])
     | "SHOW DATABASES" -> session, ResultSet([ "Database" ], [ [ Some "information_schema" ] ])
     | _ when upper.StartsWith "USE " ->
         { session with Database = Some(sql.Substring(4).Trim().Trim('`')) }, Affected 0UL
     | _ when upper.StartsWith "SHOW VARIABLES" -> session, handleShowVariables session sql
-    | _ when literalSelect.IsMatch sql -> session, handleLiteralSelect sql
     | _ -> executeStatement session sql upper
 
 /// No SQL engine failure should ever escape as a raw .NET exception — the
