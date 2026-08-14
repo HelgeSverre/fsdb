@@ -385,6 +385,20 @@ let tests =
                         (mkSelect([ Lit(VString "a\\%b\\_c"), None ], None, None, [], None, None))
                         "wildcard escapes preserved"
 
+                testCase "double-quoted string literal, same escaping as single-quoted"
+                <| fun _ ->
+                    Expect.equal
+                        (parseOk "SELECT \"bob\", \"it\"\"s here\" FROM users WHERE name = \"bob\"")
+                        (mkSelect(
+                            [ Lit(VString "bob"), None; Lit(VString "it\"s here"), None ],
+                            Some "users",
+                            Some(BinOp(Eq, col "name", Lit(VString "bob"))),
+                            [],
+                            None,
+                            None
+                        ))
+                        "double-quoted strings"
+
                 testCase "backtick-quoted identifier, including a reserved word and a doubled backtick"
                 <| fun _ ->
                     Expect.equal

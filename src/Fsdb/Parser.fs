@@ -140,15 +140,16 @@ let private numberLit: Parser<Value, unit> =
             | true, d -> VDecimal d
             | false, _ -> VDouble(float nl.String)
 
-/// A single quoted string char, as a (possibly two-character) string rather
-/// than one `char`: `''` escapes to `'`, a backslash escapes the next
+/// One character of a `quote`-delimited string literal, as a (possibly
+/// two-character) string rather than one `char`: a doubled quote (`''` or
+/// `""`) escapes to one literal quote, a backslash escapes the next
 /// character (`\n`, `\t`, `\\`, `\'`, ... or itself for anything without a
 /// special meaning) — except `\%` and `\_`, which MySQL deliberately leaves
 /// as the two literal characters `\%`/`\_` rather than collapsing them, so
 /// `LIKE` (via `Executor.likeToRegex`) can still tell "match the wildcard
 /// literally" apart from "the wildcard". Anything else is literal.
-let private stringChar: Parser<string, unit> =
-    (pstring "''" >>% "'")
+let private quotedStringChar (quote: char) : Parser<string, unit> =
+    (pstring (string quote + string quote) >>% string quote)
     <|> (pchar '\\'
          >>. anyChar
          |>> function
@@ -161,10 +162,17 @@ let private stringChar: Parser<string, unit> =
              | '%' -> "\\%"
              | '_' -> "\\_"
              | other -> string other)
-    <|> (satisfy (fun c -> c <> '\'') |>> string)
+    <|> (satisfy (fun c -> c <> quote) |>> string)
 
-let private stringLit: Parser<Value, unit> =
-    (pchar '\'' >>. manyStrings stringChar .>> pchar '\'' .>> ws) |>> VString
+/// Single- and double-quoted string literals, with identical escaping
+/// rules. Default `sql_mode` (no `ANSI_QUOTES`) treats `"..."` as a string
+/// literal exactly like `'...'` — only backtick-quoting is identifier
+/// quoting — so raw queries/seeders written with double quotes parse
+/// without needing `ANSI_QUOTES` support.
+let private quoted (quote: char) : Parser<Value, unit> =
+    (pchar quote >>. manyStrings (quotedStringChar quote) .>> pchar quote .>> ws) |>> VString
+
+let private stringLit: Parser<Value, unit> = quoted '\'' <|> quoted '"'
 
 let private literalValue: Parser<Value, unit> =
     choice
