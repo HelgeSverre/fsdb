@@ -433,7 +433,7 @@ let integrationTests =
         [ testCase "mysql client can connect, SELECT 1, and read @@version"
           <| fun _ ->
               async {
-                  let listener = Fsdb.Server.startListening 0
+                  let listener = Fsdb.Server.startListening System.Net.IPAddress.Loopback 0
                   let port = Fsdb.Server.port listener
                   let serverTask = Fsdb.Server.serve listener |> Async.StartAsTask
 

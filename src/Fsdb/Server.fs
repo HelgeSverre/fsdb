@@ -187,32 +187,46 @@ let private handleConnection (connectionId: int) (client: TcpClient) : Async<uni
                 |> Async.Ignore
     }
 
-/// Starts listening on 127.0.0.1:port. Pass 0 for an OS-assigned ephemeral
-/// port (used by the integration tests); read it back via `port`.
-let startListening (port: int) : TcpListener =
-    let listener = new TcpListener(IPAddress.Loopback, port)
+/// Starts listening on address:port. Pass port 0 for an OS-assigned
+/// ephemeral port (used by the integration tests); read it back via `port`.
+let startListening (address: IPAddress) (port: int) : TcpListener =
+    let listener = new TcpListener(address, port)
     listener.Start()
     listener
 
 let port (listener: TcpListener) : int =
     (listener.LocalEndpoint :?> IPEndPoint).Port
 
-/// Accepts connections forever, handling each on its own async.
-let serve (listener: TcpListener) : Async<unit> =
+/// None once the listener has been stopped/disposed — the clean way to shut
+/// the server down from the outside.
+let private tryAccept (listener: TcpListener) : Async<TcpClient option> =
     async {
-        let mutable connectionId = 0
-
-        while true do
+        try
             let! client = listener.AcceptTcpClientAsync() |> Async.AwaitTask
-            connectionId <- connectionId + 1
-            let cid = connectionId
-
-            Async.Start(
-                async {
-                    try
-                        do! handleConnection cid client
-                    with _ ->
-                        ()
-                }
-            )
+            return Some client
+        with
+        | :? ObjectDisposedException
+        | :? SocketException -> return None
     }
+
+/// Accepts connections until the listener is stopped, handling each on its
+/// own async. A failing connection is logged, never fatal to the server.
+let serve (listener: TcpListener) : Async<unit> =
+    let rec loop (connectionId: int) : Async<unit> =
+        async {
+            match! tryAccept listener with
+            | None -> ()
+            | Some client ->
+                Async.Start(
+                    async {
+                        try
+                            do! handleConnection connectionId client
+                        with ex ->
+                            eprintfn "fsdb: connection %d: %s" connectionId ex.Message
+                    }
+                )
+
+                return! loop (connectionId + 1)
+        }
+
+    loop 1
