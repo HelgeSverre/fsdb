@@ -35,7 +35,7 @@ let private sendQueryResult
     : Async<unit> =
     async {
         match result with
-        | QueryHandler.Ok affectedRows ->
+        | QueryHandler.Affected affectedRows ->
             do! writePacketAsync stream { SeqId = startSeq; Payload = okPayload capabilities affectedRows 0UL }
         | QueryHandler.Err(code, message) ->
             do! writePacketAsync stream { SeqId = startSeq; Payload = errPayload capabilities code message }

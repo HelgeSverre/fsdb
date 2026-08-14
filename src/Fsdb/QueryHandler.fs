@@ -10,7 +10,7 @@ open Fsdb.Session
 
 type QueryResult =
     | ResultSet of columns: string list * rows: (string option list) list
-    | Ok of affectedRows: uint64
+    | Affected of affectedRows: uint64
     | Err of code: int * message: string
 
 let private syntaxError (sql: string) =
@@ -90,12 +90,12 @@ let handle (session: Session) (rawSql: string) : QueryResult =
     let upper = sql.ToUpperInvariant()
 
     match upper with
-    | _ when upper.StartsWith "SET " -> Ok 0UL
+    | _ when upper.StartsWith "SET " -> Affected 0UL
     | "SELECT DATABASE()" -> ResultSet([ "DATABASE()" ], [ [ session.Database ] ])
     | "SHOW DATABASES" -> ResultSet([ "Database" ], [ [ Some "information_schema" ] ])
     | _ when upper.StartsWith "USE " ->
         session.Database <- Some(sql.Substring(4).Trim().Trim('`'))
-        Ok 0UL
+        Affected 0UL
     | _ when upper.StartsWith "SHOW VARIABLES" -> handleShowVariables session sql
     | _ when upper.StartsWith "SELECT" && upper.Contains "@@" -> handleAtVarSelect session sql
     | _ when upper.StartsWith "SELECT" -> handleLiteralSelect sql

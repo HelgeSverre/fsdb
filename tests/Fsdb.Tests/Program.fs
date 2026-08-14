@@ -176,7 +176,7 @@ let queryHandlerTests =
               let session = create 1
 
               match handle session "SET NAMES utf8mb4" with
-              | Ok _ -> ()
+              | Affected _ -> ()
               | other -> failtestf "expected OK, got %A" other
 
           testCase "SELECT DATABASE() returns NULL before USE"
