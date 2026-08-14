@@ -33,6 +33,16 @@ let private storageErr (e: StorageError) : QueryResult =
     let code, message = toMySqlError e
     Err(code, message)
 
+/// Splits a `Parser.qualifiedTableName`-produced "db.table" (or bare
+/// "table") string back into its two parts, defaulting the database to the
+/// session's current one — the other end of that parser's encoding, so a
+/// qualified name resolves the same way at every statement site instead of
+/// each one growing its own split.
+let private splitQualified (defaultDb: string) (name: string) : string * string =
+    match name.Split('.') with
+    | [| db; tbl |] -> db, tbl
+    | _ -> defaultDb, name
+
 /// `Storage.traverse`, generalized over any error type since this module
 /// threads both `StorageError` and `EvalError` — kept as a local alias
 /// rather than a per-call-site `Storage.traverse` since it reads as a
@@ -419,15 +429,31 @@ let rec private substituteValuesFunc (columnIndex: Map<string, int>) (candidate:
 /// updated) `lastInsertId` alongside the result.
 let execute (store: Store) (registry: Registry) (dbName: string) (lastInsertId: int64) (stmt: Statement) : int64 * QueryResult =
     match stmt with
+    | CreateDatabase(name, ifNotExists) ->
+        match Storage.createDatabase store name with
+        | Ok() -> lastInsertId, Affected 0UL
+        | Error(DatabaseExists _) when ifNotExists -> lastInsertId, Affected 0UL
+        | Error e -> lastInsertId, storageErr e
+
+    | DropDatabase(name, ifExists) ->
+        match Storage.dropDatabase store name with
+        | Ok() -> lastInsertId, Affected 0UL
+        | Error(NoSuchDatabase _) when ifExists -> lastInsertId, Affected 0UL
+        | Error e -> lastInsertId, storageErr e
+
     | CreateTable(name, columns, indexes, foreignKeys, ifNotExists) ->
-        match createTable store dbName name columns indexes foreignKeys with
+        let db, name = splitQualified dbName name
+
+        match createTable store db name columns indexes foreignKeys with
         | Ok() -> lastInsertId, Affected 0UL
         | Error(TableExists _) when ifNotExists -> lastInsertId, Affected 0UL
         | Error e -> lastInsertId, storageErr e
 
     | DropTable(names, ifExists) ->
         let dropOne name =
-            match dropTable store dbName name with
+            let db, name = splitQualified dbName name
+
+            match dropTable store db name with
             | Ok() -> Ok()
             | Error(NoSuchTable _) when ifExists -> Ok()
             | Error e -> Error e
@@ -437,29 +463,44 @@ let execute (store: Store) (registry: Registry) (dbName: string) (lastInsertId: 
         | Error e -> lastInsertId, storageErr e
 
     | AlterTable(table, actions) ->
-        match alterTable store dbName table actions with
+        let db, table = splitQualified dbName table
+
+        match alterTable store db table actions with
         | Ok() -> lastInsertId, Affected 0UL
         | Error e -> lastInsertId, storageErr e
 
     | RenameTable pairs ->
-        let renameOne (oldName, newName) = renameTable store dbName oldName newName
+        // A cross-database `RENAME TABLE a.t TO b.t` only takes the target
+        // name's table part — ponytail: doesn't actually move the table
+        // between catalogs, add that once a migration renames across
+        // databases rather than within one.
+        let renameOne (oldName, newName) =
+            let db, oldTable = splitQualified dbName oldName
+            let _, newTable = splitQualified dbName newName
+            renameTable store db oldTable newTable
 
         match pairs |> traverseList renameOne with
         | Ok _ -> lastInsertId, Affected 0UL
         | Error e -> lastInsertId, storageErr e
 
     | CreateIndex(name, table, columns, unique) ->
-        match alterTable store dbName table [ AddIndex { Name = name; Columns = columns; Unique = unique } ] with
+        let db, table = splitQualified dbName table
+
+        match alterTable store db table [ AddIndex { Name = name; Columns = columns; Unique = unique } ] with
         | Ok() -> lastInsertId, Affected 0UL
         | Error e -> lastInsertId, storageErr e
 
     | DropIndexStmt(name, table) ->
-        match alterTable store dbName table [ DropIndexAction name ] with
+        let db, table = splitQualified dbName table
+
+        match alterTable store db table [ DropIndexAction name ] with
         | Ok() -> lastInsertId, Affected 0UL
         | Error e -> lastInsertId, storageErr e
 
     | Truncate table ->
-        match truncate store dbName table with
+        let db, table = splitQualified dbName table
+
+        match truncate store db table with
         | Ok() -> lastInsertId, Affected 0UL
         | Error e -> lastInsertId, storageErr e
 
@@ -473,6 +514,7 @@ let execute (store: Store) (registry: Registry) (dbName: string) (lastInsertId: 
         // and skips just that row; this engine still fails the whole
         // statement, add per-row suppression once a migration/test actually
         // depends on partial success rather than just the syntax parsing.
+        let db, table = splitQualified dbName table
         let literalCtx = { Registry = registry; ColumnIndex = Map.empty; Row = [||] }
 
         match rowsExprs |> traverseList (traverseList (evalExpr literalCtx)) with
@@ -481,12 +523,12 @@ let execute (store: Store) (registry: Registry) (dbName: string) (lastInsertId: 
             let cols = if columns.IsEmpty then None else Some columns
 
             if onDuplicateUpdate.IsEmpty then
-                match insertRows store dbName table cols rowsValues with
+                match insertRows store db table cols rowsValues with
                 | Ok(newLastId, affected) ->
                     (if newLastId <> 0L then newLastId else lastInsertId), Affected(uint64 affected)
                 | Error e -> lastInsertId, storageErr e
             else
-                match scan store dbName table with
+                match scan store db table with
                 | Error e -> lastInsertId, storageErr e
                 | Ok(tableColumns, _) ->
                     let columnIndex = columnIndexOf tableColumns
@@ -508,7 +550,7 @@ let execute (store: Store) (registry: Registry) (dbName: string) (lastInsertId: 
                                 newRow.[idx] <- v
                             newRow)
 
-                    match upsertRows store dbName table cols rowsValues applyUpdate with
+                    match upsertRows store db table cols rowsValues applyUpdate with
                     | Ok(newLastId, affected) ->
                         (if newLastId <> 0L then newLastId else lastInsertId), Affected(uint64 affected)
                     | Error e -> lastInsertId, storageErr e
@@ -524,7 +566,9 @@ let execute (store: Store) (registry: Registry) (dbName: string) (lastInsertId: 
             | Ok(columns, rows) -> lastInsertId, runSelect registry columns (List.ofSeq rows) select
 
     | Update(table, assignments, whereExpr) ->
-        match scan store dbName table with
+        let db, table = splitQualified dbName table
+
+        match scan store db table with
         | Error e -> lastInsertId, storageErr e
         | Ok(columns, rows) ->
             let columnIndex = columnIndexOf columns
@@ -553,12 +597,14 @@ let execute (store: Store) (registry: Registry) (dbName: string) (lastInsertId: 
                     let predicate row = check row |> Result.mapError ExpressionError
                     let updater row = applyAssignments registry columnIndex indexedAssignments row
 
-                    match updateRows store dbName table predicate updater with
+                    match updateRows store db table predicate updater with
                     | Ok affected -> lastInsertId, Affected(uint64 affected)
                     | Error e -> lastInsertId, storageErr e
 
     | Delete(table, whereExpr) ->
-        match scan store dbName table with
+        let db, table = splitQualified dbName table
+
+        match scan store db table with
         | Error e -> lastInsertId, storageErr e
         | Ok(columns, _) ->
             let columnIndex = columnIndexOf columns
@@ -574,6 +620,6 @@ let execute (store: Store) (registry: Registry) (dbName: string) (lastInsertId: 
             | Ok _ ->
                 let predicate row = check row |> Result.mapError ExpressionError
 
-                match deleteRows store dbName table predicate with
+                match deleteRows store db table predicate with
                 | Ok affected -> lastInsertId, Affected(uint64 affected)
                 | Error e -> lastInsertId, storageErr e

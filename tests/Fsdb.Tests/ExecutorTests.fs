@@ -552,4 +552,53 @@ let tests =
 
                     match runDefault store "SELECT * FROM t" with
                     | ResultSet(_, [ row ]) -> Expect.equal (List.length row) 9 "every column round-trips"
-                    | other -> failtestf "expected one row back, got %A" other ] ]
+                    | other -> failtestf "expected one row back, got %A" other ]
+
+          testList
+              "CREATE/DROP DATABASE and db.table-qualified names"
+              [ testCase "CREATE DATABASE then a qualified CREATE TABLE/INSERT/SELECT round-trip"
+                <| fun _ ->
+                    let store = newStore ()
+
+                    match runDefault store "CREATE DATABASE app" with
+                    | Affected 0UL -> ()
+                    | other -> failtestf "expected CREATE DATABASE to succeed, got %A" other
+
+                    match runDefault store "CREATE DATABASE app" with
+                    | Err(1007, _) -> ()
+                    | other -> failtestf "expected 1007 for a duplicate CREATE DATABASE, got %A" other
+
+                    runDefault store "CREATE TABLE app.widgets (id INT, name VARCHAR(20))" |> ignore
+
+                    match runDefault store "INSERT INTO app.widgets VALUES (1, 'cog')" with
+                    | Affected 1UL -> ()
+                    | other -> failtestf "expected the qualified INSERT to affect one row, got %A" other
+
+                    match runDefault store "SELECT name FROM app.widgets WHERE id = 1" with
+                    | ResultSet(_, [ [ Some "cog" ] ]) -> ()
+                    | other -> failtestf "expected the qualified SELECT to find the row, got %A" other
+
+                    match runDefault store "UPDATE app.widgets SET name = 'gear' WHERE id = 1" with
+                    | Affected 1UL -> ()
+                    | other -> failtestf "expected the qualified UPDATE to affect one row, got %A" other
+
+                    match runDefault store "DELETE FROM app.widgets WHERE id = 1" with
+                    | Affected 1UL -> ()
+                    | other -> failtestf "expected the qualified DELETE to affect one row, got %A" other
+
+                testCase "DROP DATABASE removes it; IF EXISTS/IF NOT EXISTS are no-ops"
+                <| fun _ ->
+                    let store = newStore ()
+                    runDefault store "CREATE DATABASE IF NOT EXISTS app" |> ignore
+
+                    match runDefault store "DROP DATABASE app" with
+                    | Affected 0UL -> ()
+                    | other -> failtestf "expected DROP DATABASE to succeed, got %A" other
+
+                    match runDefault store "DROP DATABASE app" with
+                    | Err(1049, _) -> ()
+                    | other -> failtestf "expected 1049 for a missing DROP DATABASE, got %A" other
+
+                    match runDefault store "DROP DATABASE IF EXISTS app" with
+                    | Affected 0UL -> ()
+                    | other -> failtestf "expected DROP DATABASE IF EXISTS to be a no-op, got %A" other ] ]

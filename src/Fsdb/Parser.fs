@@ -121,6 +121,19 @@ let private backtickIdent: Parser<string, unit> = pchar '`' >>. manyChars backti
 let private identifier: Parser<string, unit> =
     (backtickIdent <|> attempt bareIdent) .>> ws <?> "identifier"
 
+/// `[db.]table` — like `tableRef` below but with no alias, for statements
+/// that target exactly one table rather than projecting columns (DDL,
+/// INSERT/UPDATE/DELETE/TRUNCATE). Encoded as a single "db.table" string
+/// rather than widening every `Ast.Statement` table field to a record —
+/// `Executor.splitQualified` peels it back apart right before resolving
+/// against `Storage`, which already takes database and table name as two
+/// separate arguments everywhere.
+let private qualifiedTableName: Parser<string, unit> =
+    (identifier .>>. opt (sym "." >>. identifier))
+    |>> function
+        | first, Some second -> first + "." + second
+        | first, None -> first
+
 // ---------------------------------------------------------------------------
 // Literals
 // ---------------------------------------------------------------------------
@@ -535,7 +548,7 @@ let private tableOptions: Parser<unit, unit> = skipMany tableOption
 let private createTable: Parser<Statement, unit> =
     (keyword "CREATE" >>. keyword "TABLE"
      >>. (opt (attempt (keyword "IF" >>. keyword "NOT" >>. keyword "EXISTS")) |>> Option.isSome)
-     .>>. identifier
+     .>>. qualifiedTableName
      .>>. between (sym "(") (sym ")") (sepBy1 createTableItem (sym ","))
      .>> tableOptions)
     |>> fun ((ifNotExists, name), items) ->
@@ -564,22 +577,34 @@ let private createIndexStmt: Parser<Statement, unit> =
      .>> keyword "INDEX"
      .>>. identifier
      .>> keyword "ON"
-     .>>. identifier
+     .>>. qualifiedTableName
      .>>. between (sym "(") (sym ")") (sepBy1 indexColumn (sym ",")))
     |>> fun (((unique, name), table), cols) -> CreateIndex(name, table, cols, unique)
 
 let private dropIndexStmt: Parser<Statement, unit> =
-    (keyword "DROP" >>. keyword "INDEX" >>. identifier .>> keyword "ON" .>>. identifier)
+    (keyword "DROP" >>. keyword "INDEX" >>. identifier .>> keyword "ON" .>>. qualifiedTableName)
     |>> fun (name, table) -> DropIndexStmt(name, table)
 
 let private dropTable: Parser<Statement, unit> =
     (keyword "DROP" >>. keyword "TABLE"
      >>. (opt (attempt (keyword "IF" >>. keyword "EXISTS")) |>> Option.isSome)
-     .>>. sepBy1 identifier (sym ","))
+     .>>. sepBy1 qualifiedTableName (sym ","))
     |>> fun (ifExists, names) -> DropTable(names, ifExists)
 
 let private truncateTable: Parser<Statement, unit> =
-    keyword "TRUNCATE" >>. opt (keyword "TABLE") >>. identifier |>> Truncate
+    keyword "TRUNCATE" >>. opt (keyword "TABLE") >>. qualifiedTableName |>> Truncate
+
+let private createDatabaseStmt: Parser<Statement, unit> =
+    (keyword "CREATE" >>. (keyword "DATABASE" <|> keyword "SCHEMA")
+     >>. (opt (attempt (keyword "IF" >>. keyword "NOT" >>. keyword "EXISTS")) |>> Option.isSome)
+     .>>. identifier)
+    |>> fun (ifNotExists, name) -> CreateDatabase(name, ifNotExists)
+
+let private dropDatabaseStmt: Parser<Statement, unit> =
+    (keyword "DROP" >>. (keyword "DATABASE" <|> keyword "SCHEMA")
+     >>. (opt (attempt (keyword "IF" >>. keyword "EXISTS")) |>> Option.isSome)
+     .>>. identifier)
+    |>> fun (ifExists, name) -> DropDatabase(name, ifExists)
 
 // ---------------------------------------------------------------------------
 // ALTER TABLE / RENAME TABLE
@@ -638,11 +663,11 @@ let private alterAction: Parser<AlterAction, unit> =
     <?> "ALTER TABLE action"
 
 let private alterTableStmt: Parser<Statement, unit> =
-    (keyword "ALTER" >>. keyword "TABLE" >>. identifier .>>. sepBy1 alterAction (sym ","))
+    (keyword "ALTER" >>. keyword "TABLE" >>. qualifiedTableName .>>. sepBy1 alterAction (sym ","))
     |>> AlterTable
 
 let private renameTablePair: Parser<string * string, unit> =
-    identifier .>> (keyword "TO" <|> keyword "AS") .>>. identifier
+    qualifiedTableName .>> (keyword "TO" <|> keyword "AS") .>>. qualifiedTableName
 
 let private renameTableStmt: Parser<Statement, unit> =
     (keyword "RENAME" >>. keyword "TABLE" >>. sepBy1 renameTablePair (sym ",")) |>> RenameTable
@@ -658,7 +683,7 @@ let private onDuplicateKeyUpdate: Parser<(string * Expr) list, unit> =
 let private insertStmt: Parser<Statement, unit> =
     (keyword "INSERT" >>. (opt (keyword "IGNORE") |>> Option.isSome)
      .>> keyword "INTO"
-     .>>. identifier
+     .>>. qualifiedTableName
      .>>. opt (between (sym "(") (sym ")") (sepBy1 identifier (sym ",")))
      .>> keyword "VALUES"
      .>>. sepBy1 (between (sym "(") (sym ")") (sepBy1 expr (sym ","))) (sym ",")
@@ -725,7 +750,7 @@ let private selectStmt: Parser<Statement, unit> =
 /// this engine already applies an `UPDATE` to every matching row in one
 /// pass, so an ordering/row-cap on top of that has nothing left to change.
 let private updateStmt: Parser<Statement, unit> =
-    (keyword "UPDATE" >>. identifier
+    (keyword "UPDATE" >>. qualifiedTableName
      .>> opt ((keyword "AS" >>. identifier) <|> identifier)
      .>> keyword "SET"
      .>>. sepBy1 ((identifier .>> sym "=") .>>. expr) (sym ",")
@@ -735,7 +760,7 @@ let private updateStmt: Parser<Statement, unit> =
     |>> fun ((table, assignments), where) -> Update(table, assignments, where)
 
 let private deleteStmt: Parser<Statement, unit> =
-    (keyword "DELETE" >>. keyword "FROM" >>. identifier .>>. opt (keyword "WHERE" >>. expr))
+    (keyword "DELETE" >>. keyword "FROM" >>. qualifiedTableName .>>. opt (keyword "WHERE" >>. expr))
     |>> fun (table, where) -> Delete(table, where)
 
 /// `CREATE TABLE` vs. `CREATE INDEX` and `DROP TABLE` vs. `DROP INDEX` share
@@ -745,8 +770,10 @@ let private deleteStmt: Parser<Statement, unit> =
 /// just that first token without needing to backtrack at all.
 let private statement: Parser<Statement, unit> =
     choice
-        [ attempt createTable
+        [ attempt createDatabaseStmt
+          attempt createTable
           attempt createIndexStmt
+          attempt dropDatabaseStmt
           attempt dropTable
           dropIndexStmt
           truncateTable

@@ -686,7 +686,35 @@ let tests =
                 <| fun _ -> Expect.equal (parseOk "TRUNCATE TABLE t") (Truncate "t") "truncate table"
 
                 testCase "TRUNCATE t without the TABLE keyword"
-                <| fun _ -> Expect.equal (parseOk "TRUNCATE t") (Truncate "t") "truncate" ]
+                <| fun _ -> Expect.equal (parseOk "TRUNCATE t") (Truncate "t") "truncate"
+
+                testCase "DELETE FROM db.t qualified table name"
+                <| fun _ -> Expect.equal (parseOk "DELETE FROM app.t") (Delete("app.t", None)) "qualified delete target" ]
+
+          testList
+              "DATABASE"
+              [ testCase "CREATE DATABASE"
+                <| fun _ -> Expect.equal (parseOk "CREATE DATABASE foo") (CreateDatabase("foo", false)) "create database"
+
+                testCase "CREATE DATABASE IF NOT EXISTS"
+                <| fun _ ->
+                    Expect.equal
+                        (parseOk "CREATE DATABASE IF NOT EXISTS foo")
+                        (CreateDatabase("foo", true))
+                        "create database if not exists"
+
+                testCase "CREATE SCHEMA"
+                <| fun _ -> Expect.equal (parseOk "CREATE SCHEMA foo") (CreateDatabase("foo", false)) "create schema"
+
+                testCase "DROP DATABASE"
+                <| fun _ -> Expect.equal (parseOk "DROP DATABASE foo") (DropDatabase("foo", false)) "drop database"
+
+                testCase "DROP DATABASE IF EXISTS"
+                <| fun _ ->
+                    Expect.equal
+                        (parseOk "DROP DATABASE IF EXISTS foo")
+                        (DropDatabase("foo", true))
+                        "drop database if exists" ]
 
           testList
               "INSERT"

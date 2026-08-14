@@ -164,6 +164,8 @@ type AlterAction =
     | AddPrimaryKey of columns: string list
 
 type Statement =
+    | CreateDatabase of name: string * ifNotExists: bool
+    | DropDatabase of name: string * ifExists: bool
     | CreateTable of
         name: string *
         columns: ColumnDef list *

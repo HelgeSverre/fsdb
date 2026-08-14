@@ -152,6 +152,10 @@ let private handleConnection (connectionId: int) (store: Storage.Store) (client:
                 let resp = parseHandshakeResponse handshakeResp.Payload
                 // Effective capabilities: never claim something the client didn't ask for.
                 capabilities <- resp.Capabilities &&& ServerCapabilities
+                // A client that names a database at connect time (`mysql -D
+                // foo`, PDO's DSN `dbname=foo`) gets it auto-created, same
+                // as `USE` on a fresh in-memory server with no setup step.
+                resp.Database |> Option.iter (Storage.ensureDatabase store)
                 let session = { Session.create connectionId store with Database = resp.Database }
 
                 do!

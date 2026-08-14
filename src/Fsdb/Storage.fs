@@ -17,6 +17,7 @@ open Fsdb.Value
 /// `Result<_, StorageError>` path every other write error does.
 type StorageError =
     | NoSuchDatabase of name: string
+    | DatabaseExists of name: string
     | TableExists of name: string
     | NoSuchTable of name: string
     | UnknownColumn of name: string
@@ -30,6 +31,7 @@ type StorageError =
 let toMySqlError (err: StorageError) : int * string =
     match err with
     | NoSuchDatabase name -> 1049, sprintf "Unknown database '%s'" name
+    | DatabaseExists name -> 1007, sprintf "Can't create database '%s'; database exists" name
     | TableExists name -> 1050, sprintf "Table '%s' already exists" name
     | NoSuchTable name -> 1146, sprintf "Table '%s' doesn't exist" name
     | UnknownColumn name -> 1054, sprintf "Unknown column '%s' in field list" name
@@ -70,6 +72,26 @@ let create () : Store =
       Lock = obj () }
 
 let private normalizeTableName (name: string) = name.ToLowerInvariant()
+
+/// `CREATE DATABASE name` — unlike `ensureDatabase` (silent no-op used by
+/// `USE`/handshake auto-create), this errors 1007 if it already exists;
+/// `Executor` swallows that error for `IF NOT EXISTS`, same pattern as
+/// `createTable`.
+let createDatabase (store: Store) (dbName: string) : Result<unit, StorageError> =
+    lock store.Lock (fun () ->
+        if Map.containsKey dbName store.Catalog then
+            Error(DatabaseExists dbName)
+        else
+            store.Catalog <- Map.add dbName Map.empty store.Catalog
+            Ok())
+
+let dropDatabase (store: Store) (dbName: string) : Result<unit, StorageError> =
+    lock store.Lock (fun () ->
+        if Map.containsKey dbName store.Catalog then
+            store.Catalog <- Map.remove dbName store.Catalog
+            Ok()
+        else
+            Error(NoSuchDatabase dbName))
 
 /// Applies `f` to the current catalog and atomically swaps it in on
 /// success. All writes serialize through this one lock.
