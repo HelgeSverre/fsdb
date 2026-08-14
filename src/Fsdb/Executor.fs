@@ -240,13 +240,29 @@ let private runSelect (registry: Registry) (columns: ColumnDef list) (rows: Valu
 
     let columnIndex = columnIndexOf columns
 
+    // ORDER BY may name a `SELECT ... AS alias` rather than a table column
+    // (`SELECT COUNT(*) AS n FROM t ORDER BY n`) — resolve those first
+    // against the projection list before falling back to `evalExpr`'s
+    // normal column lookup.
+    let aliasExprs =
+        projections
+        |> List.choose (function
+            | expr, Some alias -> Some(alias.ToLowerInvariant(), expr)
+            | _ -> None)
+        |> Map.ofList
+
+    let resolveOrderExpr (expr: Expr) : Expr =
+        match expr with
+        | Col name -> aliasExprs |> Map.tryFind (name.ToLowerInvariant()) |> Option.defaultValue expr
+        | _ -> expr
+
     let matches (row: Value[]) : Result<bool, EvalError> =
         match whereExpr with
         | None -> Ok true
         | Some expr -> evalExpr registry columnIndex row expr |> Result.map (fun v -> truthy v = Some true)
 
     let orderKeys (row: Value[]) : Result<Value list, EvalError> =
-        orderBy |> traverseList (fun (expr, _) -> evalExpr registry columnIndex row expr)
+        orderBy |> traverseList (fun (expr, _) -> evalExpr registry columnIndex row (resolveOrderExpr expr))
 
     let projectRow (row: Value[]) : Result<(string * Value) list, EvalError> =
         projections

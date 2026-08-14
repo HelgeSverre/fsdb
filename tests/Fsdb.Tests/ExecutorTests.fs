@@ -78,6 +78,16 @@ let tests =
                     | ResultSet(_, rows) -> Expect.equal rows [ [ Some "2" ]; [ Some "3" ] ] "page of two starting at offset 1"
                     | other -> failtestf "expected a resultset, got %A" other
 
+                testCase "ORDER BY resolves a SELECT alias, not just a table column"
+                <| fun _ ->
+                    let store = newStore ()
+                    runDefault store "CREATE TABLE t (n INT)" |> ignore
+                    runDefault store "INSERT INTO t VALUES (3), (1), (2)" |> ignore
+
+                    match runDefault store "SELECT n AS x FROM t ORDER BY x" with
+                    | ResultSet([ "x" ], rows) -> Expect.equal rows [ [ Some "1" ]; [ Some "2" ]; [ Some "3" ] ] "sorted by alias"
+                    | other -> failtestf "expected a resultset sorted by alias, got %A" other
+
                 testCase "an unknown column in WHERE is a 1054 error"
                 <| fun _ ->
                     let store = newStore ()
