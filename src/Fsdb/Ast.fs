@@ -57,11 +57,20 @@ type ColumnType =
     | TJson
     | TBool
 
+/// A column's `DEFAULT`: either a fixed value, or `CURRENT_TIMESTAMP`, which
+/// evaluates fresh at insert time rather than once at parse time — kept as
+/// its own case instead of a `VString "CURRENT_TIMESTAMP"` sentinel value so
+/// storage evaluates it explicitly rather than trying (and failing) to
+/// coerce the marker text itself into the column's type.
+type ColumnDefault =
+    | DConst of Value
+    | DCurrentTimestamp
+
 type ColumnDef =
     { Name: string
       Type: ColumnType
       Nullable: bool
-      Default: Value option
+      Default: ColumnDefault option
       AutoIncrement: bool
       PrimaryKey: bool }
 

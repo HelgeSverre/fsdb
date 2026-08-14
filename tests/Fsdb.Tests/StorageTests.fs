@@ -21,7 +21,7 @@ let private idCol =
 let private usersColumns =
     [ idCol
       col "name" (TVarchar 255) false
-      { (col "age" TInt true) with Default = Some(VInt 0L) } ]
+      { (col "age" TInt true) with Default = Some(DConst(VInt 0L)) } ]
 
 /// A store with an empty `users` table, ready to insert into.
 let private withUsersTable () =
@@ -194,6 +194,29 @@ let tests =
                         | Ok(_, rows) ->
                             match List.ofSeq rows with
                             | [ row ] -> Expect.equal row.[2] (VInt 0L) "age falls back to its default"
+                            | other -> failtestf "expected one row, got %A" other
+                        | Error e -> failtestf "expected Ok, got %A" e
+                    | Error e -> failtestf "expected Ok, got %A" e
+
+                testCase "DEFAULT CURRENT_TIMESTAMP evaluates to a real VDateTime, not the marker text"
+                <| fun _ ->
+                    let store = create ()
+
+                    let columns =
+                        [ col "id" TInt false
+                          { (col "created_at" TTimestamp true) with Default = Some DCurrentTimestamp } ]
+
+                    createTable store defaultDatabase "posts" columns |> ignore
+
+                    match insertRows store defaultDatabase "posts" (Some [ "id" ]) [ [ VInt 1L ] ] with
+                    | Ok _ ->
+                        match scan store defaultDatabase "posts" with
+                        | Ok(_, rows) ->
+                            match List.ofSeq rows with
+                            | [ row ] ->
+                                match row.[1] with
+                                | VDateTime _ -> ()
+                                | other -> failtestf "expected a VDateTime default, got %A" other
                             | other -> failtestf "expected one row, got %A" other
                         | Error e -> failtestf "expected Ok, got %A" e
                     | Error e -> failtestf "expected Ok, got %A" e

@@ -293,12 +293,12 @@ let private columnType: Parser<ColumnType, unit> =
 type private ColMod =
     | MNotNull
     | MNull
-    | MDefault of Value
+    | MDefault of ColumnDefault
     | MAutoIncrement
     | MPrimaryKey
 
-let private defaultValueLit: Parser<Value, unit> =
-    (keyword "CURRENT_TIMESTAMP" >>% VString "CURRENT_TIMESTAMP") <|> literalValue
+let private defaultValueLit: Parser<ColumnDefault, unit> =
+    (keyword "CURRENT_TIMESTAMP" >>% DCurrentTimestamp) <|> (literalValue |>> DConst)
 
 let private colMod: Parser<ColMod, unit> =
     choice

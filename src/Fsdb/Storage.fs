@@ -179,6 +179,15 @@ let coerceValue (col: ColumnDef) (v: Value) : Result<Value, StorageError> =
                 | false, _ -> fail ()
             | _ -> fail ()
 
+/// Evaluates a column's `DEFAULT` clause into the value to insert when none
+/// was provided — `CURRENT_TIMESTAMP` evaluates fresh here (insert time),
+/// rather than being carried around as a stored marker value.
+let private evalDefault (d: ColumnDefault option) : Value =
+    match d with
+    | None -> VNull
+    | Some(DConst v) -> v
+    | Some DCurrentTimestamp -> VDateTime DateTime.Now
+
 /// Coerces a value to its column's type and rejects NULL for a non-nullable
 /// column.
 let private coerceAndCheck (col: ColumnDef) (v: Value) : Result<Value, StorageError> =
@@ -242,7 +251,7 @@ let private processRow
         match acc with
         | Error e -> Error e
         | Ok(valuesRev, nextAutoId, assignedId) ->
-            let pending = provided |> Option.defaultValue (col.Default |> Option.defaultValue VNull)
+            let pending = provided |> Option.defaultValue (evalDefault col.Default)
 
             if col.AutoIncrement then
                 match pending with

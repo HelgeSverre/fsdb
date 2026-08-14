@@ -432,7 +432,7 @@ let tests =
                               { Name = "score"
                                 Type = TDecimal(5, 2)
                                 Nullable = true
-                                Default = Some(VInt 0L)
+                                Default = Some(DConst(VInt 0L))
                                 AutoIncrement = false
                                 PrimaryKey = false } ],
                             false
@@ -486,7 +486,7 @@ let tests =
                 testCase "DEFAULT CURRENT_TIMESTAMP"
                 <| fun _ ->
                     match parseOk "CREATE TABLE t (created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP)" with
-                    | CreateTable(_, [ { Type = TTimestamp; Default = Some(VString "CURRENT_TIMESTAMP") } ], _) -> ()
+                    | CreateTable(_, [ { Type = TTimestamp; Default = Some DCurrentTimestamp } ], _) -> ()
                     | other -> failtestf "expected a CURRENT_TIMESTAMP default, got %A" other
 
                 testCase "ENGINE=/CHARSET=/COLLATE= table options are ignored but accepted"
