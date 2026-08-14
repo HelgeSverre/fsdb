@@ -94,8 +94,11 @@ let resolveColumn (columns: ColumnDef list) (name: string) : Result<int, Storage
         | Some i -> Ok i
         | None -> Error(UnknownColumn name)
 
-/// Applies `f` to each element, short-circuiting on the first `Error`.
-let private traverseResult (f: 'a -> Result<'b, StorageError>) (xs: 'a list) : Result<'b list, StorageError> =
+/// Applies `f` to each element, short-circuiting on the first `Error` —
+/// generalized over any error type (not just `StorageError`) and public, so
+/// `Executor` reuses this tail-recursive traversal instead of keeping its
+/// own non-tail-recursive copy.
+let traverse (f: 'a -> Result<'b, 'e>) (xs: 'a list) : Result<'b list, 'e> =
     let rec loop acc =
         function
         | [] -> Ok(List.rev acc)
@@ -105,6 +108,8 @@ let private traverseResult (f: 'a -> Result<'b, StorageError>) (xs: 'a list) : R
             | Error e -> Error e
 
     loop [] xs
+
+let private traverseResult (f: 'a -> Result<'b, StorageError>) (xs: 'a list) : Result<'b list, StorageError> = traverse f xs
 
 let private parseNumeric (s: string) : float option =
     match Double.TryParse(s.Trim(), NumberStyles.Float, CultureInfo.InvariantCulture) with
@@ -195,48 +200,61 @@ let private coerceAndCheck (col: ColumnDef) (v: Value) : Result<Value, StorageEr
     | VNull when not col.Nullable -> Error(NotNullViolation col.Name)
     | _ -> coerceValue col v
 
+/// Runs `f` against `dbName`'s database, swapping the updated database back
+/// into the catalog on success. Every write op boils down to "look up a
+/// database, then a plain update" — this is the one seam `withWrite`'s
+/// callers actually vary on, factored out so each op below is just its own
+/// two lines of logic instead of a hand-rolled hierarchy of hasErrord binds.
+let private withDatabase
+    (store: Store)
+    (dbName: string)
+    (f: Database -> Result<Database * 'a, StorageError>)
+    : Result<'a, StorageError> =
+    withWrite store (fun catalog ->
+        tryGetDatabase catalog dbName
+        |> Result.bind (fun db -> f db |> Result.map (fun (db', result) -> Map.add dbName db' catalog, result)))
+
+/// As `withDatabase`, one level deeper: look up `tableName` within the
+/// database too, and re-key the updated table back under its normalized
+/// name.
+let private withTable
+    (store: Store)
+    (dbName: string)
+    (tableName: string)
+    (f: Table -> Result<Table * 'a, StorageError>)
+    : Result<'a, StorageError> =
+    withDatabase store dbName (fun db ->
+        tryGetTable db tableName
+        |> Result.bind (fun table -> f table |> Result.map (fun (table', result) -> Map.add (normalizeTableName tableName) table' db, result)))
+
 let createTable (store: Store) (dbName: string) (tableName: string) (columns: ColumnDef list) : Result<unit, StorageError> =
     ensureDatabase store dbName
 
-    withWrite store (fun catalog ->
-        match tryGetDatabase catalog dbName with
-        | Error e -> Error e
-        | Ok db ->
-            let key = normalizeTableName tableName
+    withDatabase store dbName (fun db ->
+        let key = normalizeTableName tableName
 
-            if Map.containsKey key db then
-                Error(TableExists tableName)
-            else
-                let table =
-                    { OriginalName = tableName
-                      Columns = columns
-                      Rows = []
-                      NextAutoId = 1L }
+        if Map.containsKey key db then
+            Error(TableExists tableName)
+        else
+            let table =
+                { OriginalName = tableName
+                  Columns = columns
+                  Rows = []
+                  NextAutoId = 1L }
 
-                Ok(Map.add dbName (Map.add key table db) catalog, ()))
+            Ok(Map.add key table db, ()))
 
 let dropTable (store: Store) (dbName: string) (tableName: string) : Result<unit, StorageError> =
-    withWrite store (fun catalog ->
-        match tryGetDatabase catalog dbName with
-        | Error e -> Error e
-        | Ok db ->
-            let key = normalizeTableName tableName
+    withDatabase store dbName (fun db ->
+        let key = normalizeTableName tableName
 
-            if Map.containsKey key db then
-                Ok(Map.add dbName (Map.remove key db) catalog, ())
-            else
-                Error(NoSuchTable tableName))
+        if Map.containsKey key db then
+            Ok(Map.remove key db, ())
+        else
+            Error(NoSuchTable tableName))
 
 let truncate (store: Store) (dbName: string) (tableName: string) : Result<unit, StorageError> =
-    withWrite store (fun catalog ->
-        match tryGetDatabase catalog dbName with
-        | Error e -> Error e
-        | Ok db ->
-            match tryGetTable db tableName with
-            | Error e -> Error e
-            | Ok table ->
-                let table' = { table with Rows = []; NextAutoId = 1L }
-                Ok(Map.add dbName (Map.add (normalizeTableName tableName) table' db) catalog, ()))
+    withTable store dbName tableName (fun table -> Ok({ table with Rows = []; NextAutoId = 1L }, ()))
 
 /// One column's value for one row being inserted, threaded through
 /// `processRow`'s fold: the column's final coerced value, the updated
@@ -282,48 +300,36 @@ let insertRows
     (columns: string list option)
     (rowsIn: Value list list)
     : Result<int64 * int, StorageError> =
-    withWrite store (fun catalog ->
-        match tryGetDatabase catalog dbName with
-        | Error e -> Error e
-        | Ok db ->
-            match tryGetTable db tableName with
-            | Error e -> Error e
-            | Ok table ->
-                let indices =
-                    match columns with
-                    | None -> Ok [ 0 .. table.Columns.Length - 1 ]
-                    | Some names -> names |> traverseResult (resolveColumn table.Columns)
+    withTable store dbName tableName (fun table ->
+        let indices =
+            match columns with
+            | None -> Ok [ 0 .. table.Columns.Length - 1 ]
+            | Some names -> names |> traverseResult (resolveColumn table.Columns)
 
-                match indices with
+        indices
+        |> Result.bind (fun idxs ->
+            let step acc (rowValues: Value list) =
+                match acc with
                 | Error e -> Error e
-                | Ok idxs ->
-                    let step acc (rowValues: Value list) =
-                        match acc with
+                | Ok(rowsRev, nextAutoId, firstAssigned) ->
+                    if List.length rowValues <> List.length idxs then
+                        Error(ColumnCountMismatch(List.length idxs, List.length rowValues))
+                    else
+                        let provided = List.zip idxs rowValues |> Map.ofList
+                        let rawRow = table.Columns |> List.mapi (fun i _ -> Map.tryFind i provided)
+
+                        match processRow nextAutoId rawRow table.Columns with
                         | Error e -> Error e
-                        | Ok(rowsRev, nextAutoId, firstAssigned) ->
-                            if List.length rowValues <> List.length idxs then
-                                Error(ColumnCountMismatch(List.length idxs, List.length rowValues))
-                            else
-                                let provided = List.zip idxs rowValues |> Map.ofList
-                                let rawRow = table.Columns |> List.mapi (fun i _ -> Map.tryFind i provided)
+                        | Ok(finalValues, nextAutoId', assignedId) ->
+                            Ok(Array.ofList finalValues :: rowsRev, nextAutoId', Option.orElse assignedId firstAssigned)
 
-                                match processRow nextAutoId rawRow table.Columns with
-                                | Error e -> Error e
-                                | Ok(finalValues, nextAutoId', assignedId) ->
-                                    Ok(Array.ofList finalValues :: rowsRev, nextAutoId', Option.orElse assignedId firstAssigned)
-
-                    match rowsIn |> List.fold step (Ok([], table.NextAutoId, None)) with
-                    | Error e -> Error e
-                    | Ok(newRowsRev, nextAutoId', firstAssigned) ->
-                        let table' =
-                            { table with
-                                Rows = table.Rows @ List.rev newRowsRev
-                                NextAutoId = nextAutoId' }
-
-                        Ok(
-                            Map.add dbName (Map.add (normalizeTableName tableName) table' db) catalog,
-                            (Option.defaultValue 0L firstAssigned, List.length newRowsRev)
-                        ))
+            rowsIn
+            |> List.fold step (Ok([], table.NextAutoId, None))
+            |> Result.map (fun (newRowsRev, nextAutoId', firstAssigned) ->
+                { table with
+                    Rows = table.Rows @ List.rev newRowsRev
+                    NextAutoId = nextAutoId' },
+                (Option.defaultValue 0L firstAssigned, List.length newRowsRev))))
 
 let private coerceRow (columns: ColumnDef list) (row: Value[]) : Result<Value[], StorageError> =
     List.zip columns (Array.toList row)
@@ -333,16 +339,9 @@ let private coerceRow (columns: ColumnDef list) (row: Value[]) : Result<Value[],
 /// Deletes every row matching `predicate`. Returns the number of rows
 /// removed.
 let deleteRows (store: Store) (dbName: string) (tableName: string) (predicate: Value[] -> bool) : Result<int, StorageError> =
-    withWrite store (fun catalog ->
-        match tryGetDatabase catalog dbName with
-        | Error e -> Error e
-        | Ok db ->
-            match tryGetTable db tableName with
-            | Error e -> Error e
-            | Ok table ->
-                let kept, removed = table.Rows |> List.partition (predicate >> not)
-                let table' = { table with Rows = kept }
-                Ok(Map.add dbName (Map.add (normalizeTableName tableName) table' db) catalog, List.length removed))
+    withTable store dbName tableName (fun table ->
+        let kept, removed = table.Rows |> List.partition (predicate >> not)
+        Ok({ table with Rows = kept }, List.length removed))
 
 /// Replaces every row matching `predicate` with `updater row`, coercing
 /// the result back to the table's column types. Returns the number of rows
@@ -356,27 +355,17 @@ let updateRows
     (predicate: Value[] -> bool)
     (updater: Value[] -> Value[])
     : Result<int, StorageError> =
-    withWrite store (fun catalog ->
-        match tryGetDatabase catalog dbName with
-        | Error e -> Error e
-        | Ok db ->
-            match tryGetTable db tableName with
-            | Error e -> Error e
-            | Ok table ->
-                let applyToRow row =
-                    if predicate row then
-                        updater row |> coerceRow table.Columns |> Result.map (fun r -> r, r <> row)
-                    else
-                        Ok(row, false)
+    withTable store dbName tableName (fun table ->
+        let applyToRow row =
+            if predicate row then
+                updater row |> coerceRow table.Columns |> Result.map (fun r -> r, r <> row)
+            else
+                Ok(row, false)
 
-                match table.Rows |> traverseResult applyToRow with
-                | Error e -> Error e
-                | Ok rowsWithFlags ->
-                    let table' =
-                        { table with Rows = rowsWithFlags |> List.map fst }
-
-                    let affected = rowsWithFlags |> List.filter snd |> List.length
-                    Ok(Map.add dbName (Map.add (normalizeTableName tableName) table' db) catalog, affected))
+        table.Rows
+        |> traverseResult applyToRow
+        |> Result.map (fun rowsWithFlags ->
+            { table with Rows = rowsWithFlags |> List.map fst }, rowsWithFlags |> List.filter snd |> List.length))
 
 /// A snapshot read: the table's columns and its rows as they were at the
 /// moment of the call. Lock-free — reads a single reference field, and

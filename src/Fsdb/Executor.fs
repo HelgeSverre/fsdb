@@ -33,16 +33,11 @@ let private storageErr (e: StorageError) : QueryResult =
     let code, message = toMySqlError e
     Err(code, message)
 
-/// Applies `f` to each element, short-circuiting on the first `Error` —
-/// same shape as `Storage.traverseResult`, generalized over any error type
-/// since this module threads both `StorageError` and `EvalError`.
-let rec private traverseList (f: 'a -> Result<'b, 'e>) (xs: 'a list) : Result<'b list, 'e> =
-    match xs with
-    | [] -> Ok []
-    | x :: rest ->
-        match f x with
-        | Error e -> Error e
-        | Ok y -> traverseList f rest |> Result.map (fun ys -> y :: ys)
+/// `Storage.traverse`, generalized over any error type since this module
+/// threads both `StorageError` and `EvalError` — kept as a local alias
+/// rather than a per-call-site `Storage.traverse` since it reads as a
+/// domain operation here, not a storage one.
+let private traverseList = Storage.traverse
 
 /// Column name (case-insensitive) to its index in a row array.
 let private columnIndexOf (columns: ColumnDef list) : Map<string, int> =
