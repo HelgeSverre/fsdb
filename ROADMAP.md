@@ -16,7 +16,7 @@ Session variables (`SET NAMES`, `sql_mode`), `@@version`, `SELECT DATABASE()`.
 ## M3 — SQL engine core
 FParsec parser, in-memory storage, Value coercion rules.
 CREATE TABLE / INSERT / SELECT with WHERE, ORDER BY, LIMIT via mysql CLI.
-**Gate:** Expecto suite + mysql CLI session exercising CRUD. Status: ☐
+**Gate:** Expecto suite + mysql CLI session exercising CRUD. Status: ✅
 
 ## M4 — Laravel migrations
 ALTER TABLE, indexes, foreign keys, information_schema virtual tables,
