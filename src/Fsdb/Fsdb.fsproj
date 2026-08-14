@@ -6,6 +6,11 @@
   </PropertyGroup>
 
   <ItemGroup>
+    <Compile Include="Packet.fs" />
+    <Compile Include="Protocol.fs" />
+    <Compile Include="Session.fs" />
+    <Compile Include="QueryHandler.fs" />
+    <Compile Include="Server.fs" />
     <Compile Include="Program.fs" />
   </ItemGroup>
 
