@@ -75,6 +75,7 @@ let rec private exprLabel (expr: Expr) : string =
     | Like(e, p) -> sprintf "(%s like %s)" (exprLabel e) (exprLabel p)
     | In(e, xs) -> sprintf "(%s in (%s))" (exprLabel e) (xs |> List.map exprLabel |> String.concat ",")
     | Between(e, lo, hi) -> sprintf "(%s between %s and %s)" (exprLabel e) (exprLabel lo) (exprLabel hi)
+    | Cast(e, _) -> sprintf "cast(%s as ...)" (exprLabel e)
     | Star -> "*"
 
 /// Translates a SQL LIKE pattern to a .NET regex source: `%` -> `.*`, `_` ->
@@ -225,6 +226,23 @@ let rec private evalExpr (ctx: EvalContext) (expr: Expr) : Result<Value, EvalErr
         match Functions.lookup name ctx.Registry with
         | None -> Error(unknownFunction name)
         | Some fn -> args |> traverseList eval |> Result.map fn
+    | Cast(e, ty) ->
+        eval e
+        |> Result.bind (fun v ->
+            // Reuses `Storage.coerceValue` against a throwaway column of the
+            // cast's target type rather than a second coercion table.
+            let castCol: ColumnDef =
+                { Name = "CAST"
+                  Type = ty
+                  Nullable = true
+                  Default = None
+                  AutoIncrement = false
+                  PrimaryKey = false
+                  Unique = false }
+
+            match Storage.coerceValue castCol v with
+            | Ok v' -> Ok v'
+            | Error err -> Error(Storage.toMySqlError err))
 
 let private applyLimitOffset (limit: int option) (offset: int option) (rows: 'a list) : 'a list =
     let afterOffset =
@@ -366,6 +384,34 @@ let private applyAssignments
             newRow.[idx] <- v
         newRow)
 
+/// Rewrites `VALUES(col)` calls (MySQL's way of referring, inside an
+/// `INSERT ... ON DUPLICATE KEY UPDATE` assignment, to the value that row
+/// would have inserted) into the literal `candidate` value for that column —
+/// `funcCallAtom` already parses `VALUES(col)` as an ordinary `FuncCall`
+/// since it just looks like one syntactically, so this is a plain
+/// pre-evaluation rewrite rather than new grammar.
+let rec private substituteValuesFunc (columnIndex: Map<string, int>) (candidate: Value[]) (expr: Expr) : Expr =
+    let sub = substituteValuesFunc columnIndex candidate
+
+    match expr with
+    | FuncCall(name, [ Col c ]) when System.String.Equals(name, "VALUES", System.StringComparison.OrdinalIgnoreCase) ->
+        match Map.tryFind (c.ToLowerInvariant()) columnIndex with
+        | Some i -> Lit candidate.[i]
+        | None -> expr
+    | FuncCall(name, args) -> FuncCall(name, args |> List.map sub)
+    | BinOp(op, a, b) -> BinOp(op, sub a, sub b)
+    | Not e -> Not(sub e)
+    | IsNull e -> IsNull(sub e)
+    | IsNotNull e -> IsNotNull(sub e)
+    | Like(e, p) -> Like(sub e, sub p)
+    | In(e, xs) -> In(sub e, xs |> List.map sub)
+    | Between(e, lo, hi) -> Between(sub e, sub lo, sub hi)
+    | Cast(e, ty) -> Cast(sub e, ty)
+    | Lit _
+    | Col _
+    | QualifiedCol _
+    | Star -> expr
+
 /// Executes one parsed statement against `store`, threading the session's
 /// AUTO_INCREMENT bookkeeping through as a plain value rather than a
 /// `Session` (this module knows nothing about sessions or connections —
@@ -373,8 +419,8 @@ let private applyAssignments
 /// updated) `lastInsertId` alongside the result.
 let execute (store: Store) (registry: Registry) (dbName: string) (lastInsertId: int64) (stmt: Statement) : int64 * QueryResult =
     match stmt with
-    | CreateTable(name, columns, ifNotExists) ->
-        match createTable store dbName name columns with
+    | CreateTable(name, columns, indexes, foreignKeys, ifNotExists) ->
+        match createTable store dbName name columns indexes foreignKeys with
         | Ok() -> lastInsertId, Affected 0UL
         | Error(TableExists _) when ifNotExists -> lastInsertId, Affected 0UL
         | Error e -> lastInsertId, storageErr e
@@ -390,16 +436,43 @@ let execute (store: Store) (registry: Registry) (dbName: string) (lastInsertId: 
         | Ok _ -> lastInsertId, Affected 0UL
         | Error e -> lastInsertId, storageErr e
 
+    | AlterTable(table, actions) ->
+        match alterTable store dbName table actions with
+        | Ok() -> lastInsertId, Affected 0UL
+        | Error e -> lastInsertId, storageErr e
+
+    | RenameTable pairs ->
+        let renameOne (oldName, newName) = renameTable store dbName oldName newName
+
+        match pairs |> traverseList renameOne with
+        | Ok _ -> lastInsertId, Affected 0UL
+        | Error e -> lastInsertId, storageErr e
+
+    | CreateIndex(name, table, columns, unique) ->
+        match alterTable store dbName table [ AddIndex { Name = name; Columns = columns; Unique = unique } ] with
+        | Ok() -> lastInsertId, Affected 0UL
+        | Error e -> lastInsertId, storageErr e
+
+    | DropIndexStmt(name, table) ->
+        match alterTable store dbName table [ DropIndexAction name ] with
+        | Ok() -> lastInsertId, Affected 0UL
+        | Error e -> lastInsertId, storageErr e
+
     | Truncate table ->
         match truncate store dbName table with
         | Ok() -> lastInsertId, Affected 0UL
         | Error e -> lastInsertId, storageErr e
 
-    | Insert(table, columns, rowsExprs) ->
+    | Insert(table, columns, rowsExprs, onDuplicateUpdate, _ignoreDuplicates) ->
         // INSERT ... VALUES expressions aren't evaluated against any row
         // (no table columns are in scope), just literals/functions — an
         // empty column index turns a stray `Col` reference into a clean
-        // 1054 rather than an index-out-of-range.
+        // 1054 rather than an index-out-of-range. `INSERT IGNORE`'s flag is
+        // accepted by the parser but not otherwise acted on here — ponytail:
+        // MySQL's `IGNORE` downgrades a would-be error per row to a warning
+        // and skips just that row; this engine still fails the whole
+        // statement, add per-row suppression once a migration/test actually
+        // depends on partial success rather than just the syntax parsing.
         let literalCtx = { Registry = registry; ColumnIndex = Map.empty; Row = [||] }
 
         match rowsExprs |> traverseList (traverseList (evalExpr literalCtx)) with
@@ -407,10 +480,38 @@ let execute (store: Store) (registry: Registry) (dbName: string) (lastInsertId: 
         | Ok rowsValues ->
             let cols = if columns.IsEmpty then None else Some columns
 
-            match insertRows store dbName table cols rowsValues with
-            | Ok(newLastId, affected) ->
-                (if newLastId <> 0L then newLastId else lastInsertId), Affected(uint64 affected)
-            | Error e -> lastInsertId, storageErr e
+            if onDuplicateUpdate.IsEmpty then
+                match insertRows store dbName table cols rowsValues with
+                | Ok(newLastId, affected) ->
+                    (if newLastId <> 0L then newLastId else lastInsertId), Affected(uint64 affected)
+                | Error e -> lastInsertId, storageErr e
+            else
+                match scan store dbName table with
+                | Error e -> lastInsertId, storageErr e
+                | Ok(tableColumns, _) ->
+                    let columnIndex = columnIndexOf tableColumns
+
+                    let applyUpdate (existing: Value[]) (candidate: Value[]) : Result<Value[], StorageError> =
+                        let ctx = { Registry = registry; ColumnIndex = columnIndex; Row = existing }
+
+                        onDuplicateUpdate
+                        |> traverseList (fun (name, expr) ->
+                            match resolveColumn tableColumns name with
+                            | Error e -> Error e
+                            | Ok idx ->
+                                match evalExpr ctx (substituteValuesFunc columnIndex candidate expr) with
+                                | Ok v -> Ok(idx, v)
+                                | Error err -> Error(ExpressionError err))
+                        |> Result.map (fun idxVals ->
+                            let newRow = Array.copy existing
+                            for idx, v in idxVals do
+                                newRow.[idx] <- v
+                            newRow)
+
+                    match upsertRows store dbName table cols rowsValues applyUpdate with
+                    | Ok(newLastId, affected) ->
+                        (if newLastId <> 0L then newLastId else lastInsertId), Affected(uint64 affected)
+                    | Error e -> lastInsertId, storageErr e
 
     | Select select ->
         match select.From with

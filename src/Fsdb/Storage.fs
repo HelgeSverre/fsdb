@@ -41,12 +41,16 @@ let toMySqlError (err: StorageError) : int * string =
 
 /// A table's rows, newest last. `OriginalName` keeps the as-created casing
 /// for information_schema, even though the catalog keys tables by their
-/// lowercased name.
+/// lowercased name. `Indexes`/`ForeignKeys` are metadata only — see the
+/// ponytail notes on `Ast.IndexDef`/`Ast.ForeignKeyDef` for what's not
+/// enforced yet.
 type Table =
     { OriginalName: string
       Columns: ColumnDef list
       Rows: Value[] list
-      NextAutoId: int64 }
+      NextAutoId: int64
+      Indexes: IndexDef list
+      ForeignKeys: ForeignKeyDef list }
 
 /// Table names are case-insensitive, keyed by their lowercased form.
 type Database = Map<string, Table>
@@ -136,10 +140,12 @@ let coerceValue (col: ColumnDef) (v: Value) : Result<Value, StorageError> =
     | VNull -> Ok VNull
     | _ ->
         match col.Type with
-        | TInt
+        | TInt _
         | TBigInt _
-        | TTinyInt
-        | TBool ->
+        | TSmallInt _
+        | TMediumInt _
+        | TTinyInt _
+        | TYear ->
             match v with
             | VInt i -> Ok(VInt i)
             | VDouble d -> Ok(VInt(int64 d))
@@ -149,7 +155,8 @@ let coerceValue (col: ColumnDef) (v: Value) : Result<Value, StorageError> =
                 | Some d -> Ok(VInt(int64 d))
                 | None -> fail ()
             | _ -> fail ()
-        | TDouble ->
+        | TDouble
+        | TFloat ->
             match v with
             | VDouble d -> Ok(VDouble d)
             | VInt i -> Ok(VDouble(float i))
@@ -169,9 +176,28 @@ let coerceValue (col: ColumnDef) (v: Value) : Result<Value, StorageError> =
                 | Some d -> Ok(VDecimal(decimal d))
                 | None -> fail ()
             | _ -> fail ()
+        | TChar _
         | TVarchar _
+        | TTinyText
         | TText
+        | TMediumText
+        | TLongText
+        | TBinary _
+        | TVarBinary _
+        | TTinyBlob
+        | TBlob
+        | TMediumBlob
+        | TLongBlob
+        | TSet _
+        | TTime
         | TJson -> Ok(VString(v |> toText |> Option.defaultValue ""))
+        | TEnum values ->
+            match v with
+            | VString s when values |> List.exists (fun allowed -> String.Equals(allowed, s, StringComparison.OrdinalIgnoreCase)) ->
+                Ok(VString s)
+            // MySQL also accepts a 1-based index into the declared value list.
+            | VInt i when i >= 1L && i <= int64 (List.length values) -> Ok(VString values.[int i - 1])
+            | _ -> fail ()
         | TDate ->
             match v with
             | VDate d -> Ok(VDate d)
@@ -235,7 +261,14 @@ let private withTable
         tryGetTable db tableName
         |> Result.bind (fun table -> f table |> Result.map (fun (table', result) -> Map.add (normalizeTableName tableName) table' db, result)))
 
-let createTable (store: Store) (dbName: string) (tableName: string) (columns: ColumnDef list) : Result<unit, StorageError> =
+let createTable
+    (store: Store)
+    (dbName: string)
+    (tableName: string)
+    (columns: ColumnDef list)
+    (indexes: IndexDef list)
+    (foreignKeys: ForeignKeyDef list)
+    : Result<unit, StorageError> =
     ensureDatabase store dbName
 
     withDatabase store dbName (fun db ->
@@ -248,7 +281,9 @@ let createTable (store: Store) (dbName: string) (tableName: string) (columns: Co
                 { OriginalName = tableName
                   Columns = columns
                   Rows = []
-                  NextAutoId = 1L }
+                  NextAutoId = 1L
+                  Indexes = indexes
+                  ForeignKeys = foreignKeys }
 
             Ok(Map.add key table db, ()))
 
@@ -263,6 +298,104 @@ let dropTable (store: Store) (dbName: string) (tableName: string) : Result<unit,
 
 let truncate (store: Store) (dbName: string) (tableName: string) : Result<unit, StorageError> =
     withTable store dbName tableName (fun table -> Ok({ table with Rows = []; NextAutoId = 1L }, ()))
+
+/// Removes column index `idx` from every row — used by `DropColumn`, since
+/// `Value[]` has no built-in "remove at" the way a `ResizeArray` would.
+let private removeColumnAt (idx: int) (row: Value[]) : Value[] =
+    row |> Array.indexed |> Array.filter (fun (i, _) -> i <> idx) |> Array.map snd
+
+/// The value an added column gets filled in with for every row that already
+/// exists — its `DEFAULT`, or `NULL` otherwise. ponytail: a `NOT NULL`
+/// column with no `DEFAULT` added to a non-empty table silently gets `NULL`
+/// in every existing row rather than MySQL's strict-mode 1364 error; add the
+/// check once a migration actually exercises that combination against data.
+let private addedColumnFill (col: ColumnDef) : Value = evalDefault col.Default
+
+/// Applies one `Ast.AlterAction` to `table`, returning its replacement and,
+/// for `RenameTo`, the new key it should be re-filed under in the database
+/// map (`None` means "same key").
+let private applyAlterAction (table: Table) (action: AlterAction) : Result<Table * string option, StorageError> =
+    match action with
+    | AddColumn col ->
+        let fill = addedColumnFill col
+        Ok(
+            { table with
+                Columns = table.Columns @ [ col ]
+                Rows = table.Rows |> List.map (fun r -> Array.append r [| fill |]) },
+            None
+        )
+    | DropColumn name ->
+        resolveColumn table.Columns name
+        |> Result.map (fun idx ->
+            { table with
+                Columns = table.Columns |> List.indexed |> List.filter (fun (i, _) -> i <> idx) |> List.map snd
+                Rows = table.Rows |> List.map (removeColumnAt idx) },
+            None)
+    | ModifyColumn newDef ->
+        // ponytail: replaces the column's definition only — existing rows
+        // aren't re-coerced into the new type, so a `MODIFY` that narrows a
+        // type can leave a row holding a value that wouldn't itself pass
+        // `coerceValue` today. Add a re-coercion pass if a migration's
+        // assertions ever depend on it.
+        resolveColumn table.Columns newDef.Name
+        |> Result.map (fun idx ->
+            { table with
+                Columns = table.Columns |> List.mapi (fun i c -> if i = idx then newDef else c) },
+            None)
+    | ChangeColumn(oldName, newDef) ->
+        resolveColumn table.Columns oldName
+        |> Result.map (fun idx ->
+            { table with
+                Columns = table.Columns |> List.mapi (fun i c -> if i = idx then newDef else c) },
+            None)
+    | RenameTo newName -> Ok({ table with OriginalName = newName }, Some(normalizeTableName newName))
+    | RenameColumnTo(oldName, newName) ->
+        resolveColumn table.Columns oldName
+        |> Result.map (fun idx ->
+            { table with
+                Columns = table.Columns |> List.mapi (fun i c -> if i = idx then { c with Name = newName } else c) },
+            None)
+    | AddIndex ix -> Ok({ table with Indexes = table.Indexes @ [ ix ] }, None)
+    | DropIndexAction name ->
+        Ok(
+            { table with
+                Indexes = table.Indexes |> List.filter (fun ix -> not (String.Equals(ix.Name, name, StringComparison.OrdinalIgnoreCase))) },
+            None
+        )
+    | AddForeignKey fk -> Ok({ table with ForeignKeys = table.ForeignKeys @ [ fk ] }, None)
+    | DropForeignKey name ->
+        Ok(
+            { table with
+                ForeignKeys = table.ForeignKeys |> List.filter (fun fk -> not (String.Equals(fk.Name, name, StringComparison.OrdinalIgnoreCase))) },
+            None
+        )
+    | AddPrimaryKey cols ->
+        Ok(
+            { table with
+                Columns = table.Columns |> List.map (fun c -> if List.contains c.Name cols then { c with PrimaryKey = true } else c) },
+            None
+        )
+
+/// Applies `actions` in order against `tableName`, re-filing it under a new
+/// key if any action renamed it (`RENAME TO`/`RENAME [TABLE]`).
+let alterTable (store: Store) (dbName: string) (tableName: string) (actions: AlterAction list) : Result<unit, StorageError> =
+    withDatabase store dbName (fun db ->
+        tryGetTable db tableName
+        |> Result.bind (fun table ->
+            let origKey = normalizeTableName tableName
+
+            let step acc action =
+                acc
+                |> Result.bind (fun (key, tbl) ->
+                    applyAlterAction tbl action
+                    |> Result.map (fun (tbl', newKey) -> (newKey |> Option.defaultValue key), tbl'))
+
+            actions
+            |> List.fold step (Ok(origKey, table))
+            |> Result.map (fun (finalKey, finalTable) -> Map.remove origKey db |> Map.add finalKey finalTable, ())))
+
+let renameTable (store: Store) (dbName: string) (oldName: string) (newName: string) : Result<unit, StorageError> =
+    alterTable store dbName oldName [ RenameTo newName ]
 
 /// One column's value for one row being inserted, threaded through
 /// `processRow`'s fold: the column's final coerced value, the updated
@@ -338,6 +471,78 @@ let insertRows
                     Rows = table.Rows @ List.rev newRowsRev
                     NextAutoId = nextAutoId' },
                 (Option.defaultValue 0L firstAssigned, List.length newRowsRev))))
+
+/// The column-index groups that must be unique: the primary key (if any,
+/// treated as one unique group across however many columns it spans) plus
+/// every `UNIQUE` index. Used by `upsertRows` to find the row (if any) an
+/// incoming `INSERT ... ON DUPLICATE KEY UPDATE` row collides with.
+let private uniqueKeyColumnSets (table: Table) : int list list =
+    let pk =
+        table.Columns |> List.indexed |> List.choose (fun (i, c) -> if c.PrimaryKey then Some i else None)
+
+    let fromIndexes =
+        table.Indexes
+        |> List.filter (fun ix -> ix.Unique)
+        |> List.choose (fun ix -> ix.Columns |> traverseResult (resolveColumn table.Columns) |> Result.toOption)
+
+    (if pk.IsEmpty then [] else [ pk ]) @ fromIndexes
+
+/// `INSERT ... ON DUPLICATE KEY UPDATE`: like `insertRows`, but a candidate
+/// row that collides with an existing row on any unique key or the primary
+/// key is applied to `applyUpdate existingRow candidateRow` instead of being
+/// appended. ponytail: matches on plain `Value[]` equality rather than
+/// MySQL's collation-aware string comparison — good enough for the typical
+/// numeric/exact-string unique keys Laravel migrations declare.
+let upsertRows
+    (store: Store)
+    (dbName: string)
+    (tableName: string)
+    (columns: string list option)
+    (rowsIn: Value list list)
+    (applyUpdate: Value[] -> Value[] -> Result<Value[], StorageError>)
+    : Result<int64 * int, StorageError> =
+    withTable store dbName tableName (fun table ->
+        let indices =
+            match columns with
+            | None -> Ok [ 0 .. table.Columns.Length - 1 ]
+            | Some names -> names |> traverseResult (resolveColumn table.Columns)
+
+        indices
+        |> Result.bind (fun idxs ->
+            let keySets = uniqueKeyColumnSets table
+
+            let findMatch (rows: Value[] list) (candidate: Value[]) =
+                rows
+                |> List.tryFind (fun existing ->
+                    keySets |> List.exists (fun ks -> ks |> List.forall (fun i -> existing.[i] = candidate.[i])))
+
+            let step acc (rowValues: Value list) =
+                acc
+                |> Result.bind (fun (rowsAcc: Value[] list, nextAutoId, firstAssigned, affected) ->
+                    if List.length rowValues <> List.length idxs then
+                        Error(ColumnCountMismatch(List.length idxs, List.length rowValues))
+                    else
+                        let provided = List.zip idxs rowValues |> Map.ofList
+                        let rawRow = table.Columns |> List.mapi (fun i _ -> Map.tryFind i provided)
+
+                        processRow nextAutoId rawRow table.Columns
+                        |> Result.bind (fun (finalValues, nextAutoId', assignedId) ->
+                            let candidate = Array.ofList finalValues
+
+                            match findMatch rowsAcc candidate with
+                            | Some existing ->
+                                applyUpdate existing candidate
+                                |> Result.map (fun updated ->
+                                    (rowsAcc |> List.map (fun r -> if r = existing then updated else r)),
+                                    nextAutoId',
+                                    firstAssigned,
+                                    affected + 1)
+                            | None -> Ok(rowsAcc @ [ candidate ], nextAutoId', Option.orElse assignedId firstAssigned, affected + 1)))
+
+            rowsIn
+            |> List.fold step (Ok(table.Rows, table.NextAutoId, None, 0))
+            |> Result.map (fun (rows', nextAutoId', firstAssigned, affected) ->
+                { table with Rows = rows'; NextAutoId = nextAutoId' }, (Option.defaultValue 0L firstAssigned, affected))))
 
 let private coerceRow (columns: ColumnDef list) (row: Value[]) : Result<Value[], StorageError> =
     List.zip columns (Array.toList row)

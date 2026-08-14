@@ -94,7 +94,14 @@ let private reservedWords =
           "charset"
           "collate"
           "character"
-          "current_timestamp" ],
+          "current_timestamp"
+          "alter"
+          "rename"
+          "index"
+          "constraint"
+          "foreign"
+          "references"
+          "cast" ],
         StringComparer.OrdinalIgnoreCase
     )
 
@@ -183,6 +190,111 @@ let private literalValue: Parser<Value, unit> =
           keyword "FALSE" >>% VInt 0L ]
 
 // ---------------------------------------------------------------------------
+// CREATE TABLE column types and definitions — parsed ahead of expressions
+// since `CAST(expr AS type)` reuses `columnType`.
+// ---------------------------------------------------------------------------
+
+/// A parenthesized width/precision like `(11)` or `(10,2)`, parsed and
+/// discarded — `Ast.ColumnType` doesn't track display width.
+let private ignoredWidth: Parser<unit, unit> =
+    optional (between (sym "(") (sym ")") (sepBy1 intTok (sym ",")))
+
+/// `UNSIGNED` (and MySQL's deprecated `ZEROFILL`, which implies it) after
+/// any numeric type — carried on the int types, accepted-and-discarded on
+/// float/double/decimal since `Ast.ColumnType` doesn't track it there.
+let private unsignedFlag: Parser<bool, unit> = opt (keyword "UNSIGNED") |>> Option.isSome
+
+let private widthLen: Parser<int, unit> = between (sym "(") (sym ")") intTok
+let private optWidthLen: Parser<int option, unit> = opt widthLen
+
+let private stringListParen: Parser<string list, unit> =
+    between (sym "(") (sym ")") (sepBy1 (stringLit |>> (function VString s -> s | _ -> "")) (sym ","))
+
+let private columnType: Parser<ColumnType, unit> =
+    choice
+        [ keyword "TINYINT" >>. ignoredWidth >>. unsignedFlag |>> TTinyInt
+          keyword "SMALLINT" >>. ignoredWidth >>. unsignedFlag |>> TSmallInt
+          keyword "MEDIUMINT" >>. ignoredWidth >>. unsignedFlag |>> TMediumInt
+          keyword "BIGINT" >>. ignoredWidth >>. unsignedFlag |>> TBigInt
+          (keyword "INT" <|> keyword "INTEGER") >>. ignoredWidth >>. unsignedFlag |>> TInt
+          keyword "VARCHAR" >>. widthLen |>> TVarchar
+          keyword "CHAR" >>. optWidthLen |>> (fun n -> TChar(defaultArg n 1))
+          keyword "TINYTEXT" >>% TTinyText
+          keyword "MEDIUMTEXT" >>% TMediumText
+          keyword "LONGTEXT" >>% TLongText
+          keyword "TEXT" >>% TText
+          keyword "VARBINARY" >>. widthLen |>> TVarBinary
+          keyword "BINARY" >>. optWidthLen |>> (fun n -> TBinary(defaultArg n 1))
+          keyword "TINYBLOB" >>% TTinyBlob
+          keyword "MEDIUMBLOB" >>% TMediumBlob
+          keyword "LONGBLOB" >>% TLongBlob
+          keyword "BLOB" >>% TBlob
+          keyword "ENUM" >>. stringListParen |>> TEnum
+          keyword "SET" >>. stringListParen |>> TSet
+          (keyword "DECIMAL" <|> keyword "NUMERIC")
+          >>. opt (between (sym "(") (sym ")") ((intTok .>> sym ",") .>>. intTok))
+          .>> unsignedFlag
+          |>> function
+              | Some(p, s) -> TDecimal(p, s)
+              | None -> TDecimal(10, 0)
+          keyword "DOUBLE" >>. ignoredWidth >>. unsignedFlag >>% TDouble
+          keyword "FLOAT" >>. ignoredWidth >>. unsignedFlag >>% TFloat
+          keyword "DATETIME" >>. ignoredWidth >>% TDateTime
+          keyword "TIMESTAMP" >>. ignoredWidth >>% TTimestamp
+          keyword "DATE" >>% TDate
+          keyword "TIME" >>. ignoredWidth >>% TTime
+          keyword "YEAR" >>. ignoredWidth >>% TYear
+          keyword "JSON" >>% TJson
+          (keyword "BOOLEAN" <|> keyword "BOOL") >>% TTinyInt false ]
+    <?> "column type"
+
+type private ColMod =
+    | MNotNull
+    | MNull
+    | MDefault of ColumnDefault
+    | MAutoIncrement
+    | MPrimaryKey
+    | MUnique
+    /// `COMMENT 'txt'`, `CHARACTER SET x` / `COLLATE y`, and `ON UPDATE
+    /// CURRENT_TIMESTAMP` — accepted so the column definition parses, but
+    /// nothing in `Ast.ColumnDef` tracks them (ponytail: add fields if a
+    /// migration's assertion ever depends on one, e.g. `information_schema`
+    /// exposing a column comment).
+    | MIgnored
+
+let private defaultValueLit: Parser<ColumnDefault, unit> =
+    (keyword "CURRENT_TIMESTAMP" >>% DCurrentTimestamp) <|> (literalValue |>> DConst)
+
+let private colMod: Parser<ColMod, unit> =
+    choice
+        [ attempt (keyword "NOT" >>. keyword "NULL") >>% MNotNull
+          keyword "NULL" >>% MNull
+          keyword "DEFAULT" >>. defaultValueLit .>> optional (keyword "ON" >>. keyword "UPDATE" >>. keyword "CURRENT_TIMESTAMP") |>> MDefault
+          keyword "AUTO_INCREMENT" >>% MAutoIncrement
+          attempt (keyword "PRIMARY" >>. keyword "KEY") >>% MPrimaryKey
+          keyword "UNIQUE" >>. optional (keyword "KEY") >>% MUnique
+          attempt (keyword "ON" >>. keyword "UPDATE" >>. keyword "CURRENT_TIMESTAMP") >>% MIgnored
+          keyword "COMMENT" >>. stringLit >>% MIgnored
+          attempt (keyword "CHARACTER" >>. keyword "SET") >>. identifier >>% MIgnored
+          keyword "COLLATE" >>. identifier >>% MIgnored ]
+
+let private columnDef: Parser<ColumnDef, unit> =
+    (identifier .>>. columnType .>>. many colMod)
+    |>> fun ((name, ty), mods) ->
+        { Name = name
+          Type = ty
+          Nullable = not (List.contains MNotNull mods)
+          Default = mods |> List.tryPick (function MDefault v -> Some v | _ -> None)
+          AutoIncrement = List.contains MAutoIncrement mods
+          PrimaryKey = List.contains MPrimaryKey mods
+          Unique = List.contains MUnique mods }
+
+/// `AFTER col` / `FIRST` after an `ADD`/`MODIFY`/`CHANGE COLUMN` — accepted
+/// and discarded; see the ponytail note on `Ast.AlterAction`.
+let private colPosition: Parser<unit, unit> =
+    optional ((keyword "AFTER" >>. identifier >>% ()) <|> (keyword "FIRST" >>% ()))
+
+// ---------------------------------------------------------------------------
 // Expressions
 // ---------------------------------------------------------------------------
 
@@ -200,12 +312,27 @@ let private starAtom: Parser<Expr, unit> = pstring "*" >>. ws >>% Star
 /// function name from a keyword (`IF(...)`, `LEFT(...)`): a word
 /// immediately followed by `(` is a function call regardless of whether
 /// it's also in `reservedWords`, so `SELECT IF(1,2,3)` reaches the `IF`
-/// scalar instead of dying on "reserved keyword". `attempt`ed so a bare
-/// reserved word with no `(` falls through to `identAtom`'s normal (and
-/// still reserved-word-rejecting) column/qualified-column path.
+/// scalar instead of dying on "reserved keyword", and `VALUES(col)` inside
+/// an `ON DUPLICATE KEY UPDATE` clause parses as an ordinary call too (see
+/// `Executor`'s substitution of it). `attempt`ed so a bare reserved word
+/// with no `(` falls through to `identAtom`'s normal (and still
+/// reserved-word-rejecting) column/qualified-column path.
 let private funcCallAtom: Parser<Expr, unit> =
     attempt ((many1Satisfy2 isIdentStart isIdentChar .>> ws) .>>. (sym "(" >>. sepBy expr (sym ",") .>> sym ")"))
     |>> FuncCall
+
+/// `CAST(expr AS type)` — `SIGNED`/`UNSIGNED [INTEGER]` are only valid as a
+/// cast target, not a column type, so they're handled here rather than in
+/// `columnType`.
+let private castTargetType: Parser<ColumnType, unit> =
+    choice
+        [ attempt (keyword "SIGNED" >>. optional (keyword "INTEGER")) >>% TInt false
+          attempt (keyword "UNSIGNED" >>. optional (keyword "INTEGER")) >>% TInt true
+          columnType ]
+
+let private castExpr: Parser<Expr, unit> =
+    attempt (keyword "CAST" >>. sym "(" >>. expr .>> keyword "AS" .>>. castTargetType .>> sym ")")
+    |>> Cast
 
 /// A bare word: a column, a qualified `t.col` (or `t.*`, which is `Star` —
 /// `Ast.Expr` doesn't distinguish it from an unqualified `*`), or a function
@@ -223,6 +350,7 @@ let private atom: Parser<Expr, unit> =
     choice
         [ parenExpr
           starAtom
+          castExpr
           numberLit |>> Lit
           stringLit |>> Lit
           keyword "NULL" >>% Lit VNull
@@ -296,69 +424,7 @@ let private orExpr: Parser<Expr, unit> =
 do exprRef.Value <- orExpr
 
 // ---------------------------------------------------------------------------
-// CREATE TABLE column definitions
-// ---------------------------------------------------------------------------
-
-/// A parenthesized width/precision like `(11)` or `(10,2)`, parsed and
-/// discarded — `Ast.ColumnType` doesn't track display width.
-let private ignoredWidth: Parser<unit, unit> =
-    optional (between (sym "(") (sym ")") (sepBy1 intTok (sym ",")))
-
-/// `UNSIGNED` is only representable on `TBigInt` in `Ast.ColumnType`; it's
-/// still accepted (and discarded) after any integer type so `INT UNSIGNED`
-/// parses, matching the "ignore-but-accept" treatment used for table options.
-let private unsignedFlag: Parser<bool, unit> = opt (keyword "UNSIGNED") |>> Option.isSome
-
-let private columnType: Parser<ColumnType, unit> =
-    choice
-        [ keyword "TINYINT" >>. ignoredWidth >>. unsignedFlag >>% TTinyInt
-          keyword "BIGINT" >>. ignoredWidth >>. unsignedFlag |>> TBigInt
-          (keyword "INT" <|> keyword "INTEGER") >>. ignoredWidth >>. unsignedFlag >>% TInt
-          keyword "VARCHAR" >>. between (sym "(") (sym ")") intTok |>> TVarchar
-          keyword "TEXT" >>% TText
-          (keyword "DECIMAL" <|> keyword "NUMERIC")
-          >>. opt (between (sym "(") (sym ")") ((intTok .>> sym ",") .>>. intTok))
-          |>> function
-              | Some(p, s) -> TDecimal(p, s)
-              | None -> TDecimal(10, 0)
-          (keyword "DOUBLE" <|> keyword "FLOAT") >>. ignoredWidth >>% TDouble
-          keyword "DATETIME" >>. ignoredWidth >>% TDateTime
-          keyword "TIMESTAMP" >>. ignoredWidth >>% TTimestamp
-          keyword "DATE" >>% TDate
-          keyword "JSON" >>% TJson
-          (keyword "BOOLEAN" <|> keyword "BOOL") >>% TBool ]
-    <?> "column type"
-
-type private ColMod =
-    | MNotNull
-    | MNull
-    | MDefault of ColumnDefault
-    | MAutoIncrement
-    | MPrimaryKey
-
-let private defaultValueLit: Parser<ColumnDefault, unit> =
-    (keyword "CURRENT_TIMESTAMP" >>% DCurrentTimestamp) <|> (literalValue |>> DConst)
-
-let private colMod: Parser<ColMod, unit> =
-    choice
-        [ attempt (keyword "NOT" >>. keyword "NULL") >>% MNotNull
-          keyword "NULL" >>% MNull
-          keyword "DEFAULT" >>. defaultValueLit |>> MDefault
-          keyword "AUTO_INCREMENT" >>% MAutoIncrement
-          attempt (keyword "PRIMARY" >>. keyword "KEY") >>% MPrimaryKey ]
-
-let private columnDef: Parser<ColumnDef, unit> =
-    (identifier .>>. columnType .>>. many colMod)
-    |>> fun ((name, ty), mods) ->
-        { Name = name
-          Type = ty
-          Nullable = not (List.contains MNotNull mods)
-          Default = mods |> List.tryPick (function MDefault v -> Some v | _ -> None)
-          AutoIncrement = List.contains MAutoIncrement mods
-          PrimaryKey = List.contains MPrimaryKey mods }
-
-// ---------------------------------------------------------------------------
-// Statements
+// CREATE TABLE trailing items: PRIMARY KEY / INDEX / FOREIGN KEY
 // ---------------------------------------------------------------------------
 
 /// A trailing `PRIMARY KEY (col, ...)` table constraint. `Ast.CreateTable`
@@ -367,8 +433,80 @@ let private columnDef: Parser<ColumnDef, unit> =
 let private trailingPrimaryKey: Parser<string list, unit> =
     attempt (keyword "PRIMARY" >>. keyword "KEY") >>. between (sym "(") (sym ")") (sepBy1 identifier (sym ","))
 
-let private createTableItem: Parser<Choice<ColumnDef, string list>, unit> =
-    (trailingPrimaryKey |>> Choice2Of2) <|> (columnDef |>> Choice1Of2)
+/// One column inside an index's column list, with its optional MySQL
+/// "key length" (`col(191)`) parsed and discarded — `Ast.IndexDef` doesn't
+/// track prefix lengths.
+let private indexColumn: Parser<string, unit> = identifier .>> optional (between (sym "(") (sym ")") intTok)
+
+/// `[UNIQUE] KEY|INDEX name (cols)` — `UNIQUE` alone (no `KEY`/`INDEX`) is
+/// also legal MySQL, so the `KEY`/`INDEX` keyword itself is optional once
+/// `UNIQUE` has matched; without `UNIQUE`, `KEY`/`INDEX` is required so this
+/// doesn't swallow an ordinary column definition.
+let private indexPrefix: Parser<bool, unit> =
+    (keyword "UNIQUE" >>. optional (keyword "KEY" <|> keyword "INDEX") >>% true)
+    <|> ((keyword "KEY" <|> keyword "INDEX") >>% false)
+
+let private indexItem: Parser<IndexDef, unit> =
+    (indexPrefix .>>. opt identifier .>>. between (sym "(") (sym ")") (sepBy1 indexColumn (sym ",")))
+    |>> fun ((unique, name), cols) ->
+        { Name = name |> Option.defaultValue (List.head cols)
+          Columns = cols
+          Unique = unique }
+
+let private refAction: Parser<string, unit> =
+    choice
+        [ keyword "CASCADE" >>% "CASCADE"
+          attempt (keyword "SET" >>. keyword "NULL") >>% "SET NULL"
+          attempt (keyword "SET" >>. keyword "DEFAULT") >>% "SET DEFAULT"
+          keyword "RESTRICT" >>% "RESTRICT"
+          keyword "NO" >>. keyword "ACTION" >>% "NO ACTION" ]
+
+/// `ON DELETE ...` / `ON UPDATE ...`, order-independent and both optional —
+/// gathered with `many` rather than two fixed `opt`s since MySQL allows
+/// either order (Laravel always emits `ON DELETE` first, but nothing in the
+/// grammar requires it).
+let private foreignKeyRefOptions: Parser<string option * string option, unit> =
+    many (
+        (attempt (keyword "ON" >>. keyword "DELETE") >>. refAction |>> fun a -> Choice1Of2 a)
+        <|> (attempt (keyword "ON" >>. keyword "UPDATE") >>. refAction |>> fun a -> Choice2Of2 a)
+    )
+    |>> fun opts ->
+        (opts |> List.tryPick (function Choice1Of2 a -> Some a | _ -> None),
+         opts |> List.tryPick (function Choice2Of2 a -> Some a | _ -> None))
+
+let private constraintName: Parser<string option, unit> = opt (keyword "CONSTRAINT" >>. identifier)
+
+let private foreignKeyItem: Parser<ForeignKeyDef, unit> =
+    (constraintName .>> keyword "FOREIGN" .>> keyword "KEY"
+     .>>. between (sym "(") (sym ")") (sepBy1 identifier (sym ","))
+     .>> keyword "REFERENCES"
+     .>>. identifier
+     .>>. between (sym "(") (sym ")") (sepBy1 identifier (sym ","))
+     .>>. foreignKeyRefOptions)
+    |>> fun ((((cname, cols), refTable), refCols), (onDelete, onUpdate)) ->
+        { Name = cname |> Option.defaultValue (sprintf "%s_%s_foreign" refTable (List.head cols))
+          Columns = cols
+          RefTable = refTable
+          RefColumns = refCols
+          OnDelete = onDelete
+          OnUpdate = onUpdate }
+
+/// One item inside a `CREATE TABLE (...)` list: an ordinary column, or one
+/// of the trailing table-level constraints. Each alternative is tried with
+/// `attempt` since they can share a leading keyword (`CONSTRAINT ... FOREIGN
+/// KEY` vs. a column literally named `constraint`) before diverging.
+type private CreateItem =
+    | CColumn of ColumnDef
+    | CPrimaryKey of string list
+    | CIndex of IndexDef
+    | CForeignKey of ForeignKeyDef
+
+let private createTableItem: Parser<CreateItem, unit> =
+    choice
+        [ attempt (foreignKeyItem |>> CForeignKey)
+          attempt (trailingPrimaryKey |>> CPrimaryKey)
+          attempt (indexItem |>> CIndex)
+          columnDef |>> CColumn ]
 
 /// `ENGINE=`, `CHARSET=`/`DEFAULT CHARSET=`, `COLLATE=` table options:
 /// accepted and discarded, same treatment as column display widths.
@@ -391,15 +529,38 @@ let private createTable: Parser<Statement, unit> =
      .>>. between (sym "(") (sym ")") (sepBy1 createTableItem (sym ","))
      .>> tableOptions)
     |>> fun ((ifNotExists, name), items) ->
-        let pkNames = items |> List.collect (function Choice2Of2 names -> names | _ -> [])
+        let pkNames = items |> List.collect (function CPrimaryKey names -> names | _ -> [])
+        let explicitIndexes = items |> List.choose (function CIndex ix -> Some ix | _ -> None)
+        let foreignKeys = items |> List.choose (function CForeignKey fk -> Some fk | _ -> None)
 
         let columns =
             items
             |> List.choose (function
-                | Choice1Of2 c -> Some(if List.contains c.Name pkNames then { c with PrimaryKey = true } else c)
-                | Choice2Of2 _ -> None)
+                | CColumn c -> Some(if List.contains c.Name pkNames then { c with PrimaryKey = true } else c)
+                | _ -> None)
 
-        CreateTable(name, columns, ifNotExists)
+        // A column-level `UNIQUE` modifier is just sugar for a single-column
+        // unique index named after the column, so it lands in the same
+        // `Indexes` bucket a trailing `UNIQUE KEY` would.
+        let uniqueColumnIndexes =
+            columns
+            |> List.filter (fun c -> c.Unique)
+            |> List.map (fun c -> { Name = c.Name; Columns = [ c.Name ]; Unique = true })
+
+        CreateTable(name, columns, explicitIndexes @ uniqueColumnIndexes, foreignKeys, ifNotExists)
+
+let private createIndexStmt: Parser<Statement, unit> =
+    (keyword "CREATE" >>. (opt (keyword "UNIQUE") |>> Option.isSome)
+     .>> keyword "INDEX"
+     .>>. identifier
+     .>> keyword "ON"
+     .>>. identifier
+     .>>. between (sym "(") (sym ")") (sepBy1 indexColumn (sym ",")))
+    |>> fun (((unique, name), table), cols) -> CreateIndex(name, table, cols, unique)
+
+let private dropIndexStmt: Parser<Statement, unit> =
+    (keyword "DROP" >>. keyword "INDEX" >>. identifier .>> keyword "ON" .>>. identifier)
+    |>> fun (name, table) -> DropIndexStmt(name, table)
 
 let private dropTable: Parser<Statement, unit> =
     (keyword "DROP" >>. keyword "TABLE"
@@ -410,12 +571,90 @@ let private dropTable: Parser<Statement, unit> =
 let private truncateTable: Parser<Statement, unit> =
     keyword "TRUNCATE" >>. opt (keyword "TABLE") >>. identifier |>> Truncate
 
+// ---------------------------------------------------------------------------
+// ALTER TABLE / RENAME TABLE
+// ---------------------------------------------------------------------------
+
+let private optColumnKw: Parser<unit, unit> = optional (keyword "COLUMN")
+
+let private addColumnAction: Parser<AlterAction, unit> =
+    attempt (keyword "ADD" >>. optColumnKw >>. columnDef .>> colPosition) |>> AddColumn
+
+let private addPrimaryKeyAction: Parser<AlterAction, unit> =
+    attempt (keyword "ADD" >>. trailingPrimaryKey) |>> AddPrimaryKey
+
+let private addIndexAction: Parser<AlterAction, unit> =
+    attempt (keyword "ADD" >>. indexItem) |>> AddIndex
+
+let private addForeignKeyAction: Parser<AlterAction, unit> =
+    attempt (keyword "ADD" >>. foreignKeyItem) |>> AddForeignKey
+
+let private dropForeignKeyAction: Parser<AlterAction, unit> =
+    attempt (keyword "DROP" >>. keyword "FOREIGN" >>. keyword "KEY" >>. identifier) |>> DropForeignKey
+
+let private dropIndexAction: Parser<AlterAction, unit> =
+    attempt (keyword "DROP" >>. (keyword "INDEX" <|> keyword "KEY") >>. identifier) |>> DropIndexAction
+
+let private dropColumnAction: Parser<AlterAction, unit> =
+    attempt (keyword "DROP" >>. optColumnKw >>. identifier) |>> DropColumn
+
+let private modifyColumnAction: Parser<AlterAction, unit> =
+    attempt (keyword "MODIFY" >>. optColumnKw >>. columnDef .>> colPosition) |>> ModifyColumn
+
+let private changeColumnAction: Parser<AlterAction, unit> =
+    attempt (keyword "CHANGE" >>. optColumnKw >>. identifier .>>. columnDef .>> colPosition)
+    |>> ChangeColumn
+
+let private renameColumnAction: Parser<AlterAction, unit> =
+    attempt (keyword "RENAME" >>. keyword "COLUMN" >>. identifier .>> keyword "TO" .>>. identifier)
+    |>> RenameColumnTo
+
+let private renameToAction: Parser<AlterAction, unit> =
+    attempt (keyword "RENAME" >>. opt (keyword "TO" <|> keyword "AS") >>. identifier) |>> RenameTo
+
+let private alterAction: Parser<AlterAction, unit> =
+    choice
+        [ addForeignKeyAction
+          addPrimaryKeyAction
+          addIndexAction
+          addColumnAction
+          dropForeignKeyAction
+          dropIndexAction
+          dropColumnAction
+          modifyColumnAction
+          changeColumnAction
+          renameColumnAction
+          renameToAction ]
+    <?> "ALTER TABLE action"
+
+let private alterTableStmt: Parser<Statement, unit> =
+    (keyword "ALTER" >>. keyword "TABLE" >>. identifier .>>. sepBy1 alterAction (sym ","))
+    |>> AlterTable
+
+let private renameTablePair: Parser<string * string, unit> =
+    identifier .>> (keyword "TO" <|> keyword "AS") .>>. identifier
+
+let private renameTableStmt: Parser<Statement, unit> =
+    (keyword "RENAME" >>. keyword "TABLE" >>. sepBy1 renameTablePair (sym ",")) |>> RenameTable
+
+// ---------------------------------------------------------------------------
+// INSERT / SELECT / UPDATE / DELETE
+// ---------------------------------------------------------------------------
+
+let private onDuplicateKeyUpdate: Parser<(string * Expr) list, unit> =
+    keyword "ON" >>. keyword "DUPLICATE" >>. keyword "KEY" >>. keyword "UPDATE"
+    >>. sepBy1 ((identifier .>> sym "=") .>>. expr) (sym ",")
+
 let private insertStmt: Parser<Statement, unit> =
-    (keyword "INSERT" >>. keyword "INTO" >>. identifier
+    (keyword "INSERT" >>. (opt (keyword "IGNORE") |>> Option.isSome)
+     .>> keyword "INTO"
+     .>>. identifier
      .>>. opt (between (sym "(") (sym ")") (sepBy1 identifier (sym ",")))
      .>> keyword "VALUES"
-     .>>. sepBy1 (between (sym "(") (sym ")") (sepBy1 expr (sym ","))) (sym ","))
-    |>> fun ((table, cols), rows) -> Insert(table, cols |> Option.defaultValue [], rows)
+     .>>. sepBy1 (between (sym "(") (sym ")") (sepBy1 expr (sym ","))) (sym ",")
+     .>>. opt onDuplicateKeyUpdate)
+    |>> fun ((((ignoreDuplicates, table), cols), rows), onDup) ->
+        Insert(table, cols |> Option.defaultValue [], rows, onDup |> Option.defaultValue [], ignoreDuplicates)
 
 let private projection: Parser<Projection, unit> = expr .>>. opt (keyword "AS" >>. identifier)
 
@@ -470,18 +709,43 @@ let private selectStmt: Parser<Statement, unit> =
               Limit = limit
               Offset = offset }
 
+/// `UPDATE t [[AS] alias] SET ... [WHERE ...] [ORDER BY ...] [LIMIT ...]` —
+/// the alias, `ORDER BY`, and `LIMIT` are accepted and discarded:
+/// `Ast.Update` has no join/multi-table shape for an alias to matter to, and
+/// this engine already applies an `UPDATE` to every matching row in one
+/// pass, so an ordering/row-cap on top of that has nothing left to change.
 let private updateStmt: Parser<Statement, unit> =
-    (keyword "UPDATE" >>. identifier .>> keyword "SET"
+    (keyword "UPDATE" >>. identifier
+     .>> opt ((keyword "AS" >>. identifier) <|> identifier)
+     .>> keyword "SET"
      .>>. sepBy1 ((identifier .>> sym "=") .>>. expr) (sym ",")
-     .>>. opt (keyword "WHERE" >>. expr))
+     .>>. opt (keyword "WHERE" >>. expr)
+     .>> opt (keyword "ORDER" >>. keyword "BY" >>. sepBy1 orderKey (sym ","))
+     .>> opt limitClause)
     |>> fun ((table, assignments), where) -> Update(table, assignments, where)
 
 let private deleteStmt: Parser<Statement, unit> =
     (keyword "DELETE" >>. keyword "FROM" >>. identifier .>>. opt (keyword "WHERE" >>. expr))
     |>> fun (table, where) -> Delete(table, where)
 
+/// `CREATE TABLE` vs. `CREATE INDEX` and `DROP TABLE` vs. `DROP INDEX` share
+/// a leading keyword before diverging, so those four need `attempt` to
+/// backtrack cleanly between alternatives; every other statement starts on
+/// a keyword none of the others do, so `choice` picks the right one off
+/// just that first token without needing to backtrack at all.
 let private statement: Parser<Statement, unit> =
-    choice [ createTable; dropTable; truncateTable; insertStmt; selectStmt; updateStmt; deleteStmt ]
+    choice
+        [ attempt createTable
+          attempt createIndexStmt
+          attempt dropTable
+          dropIndexStmt
+          truncateTable
+          insertStmt
+          selectStmt
+          updateStmt
+          deleteStmt
+          alterTableStmt
+          renameTableStmt ]
     <?> "statement"
 
 /// Parses one SQL statement, with an optional trailing `;`. Session-variable

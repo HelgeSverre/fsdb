@@ -465,23 +465,28 @@ let tests =
                         (CreateTable(
                             "t",
                             [ { Name = "id"
-                                Type = TInt
+                                Type = TInt false
                                 Nullable = true
                                 Default = None
                                 AutoIncrement = true
-                                PrimaryKey = true }
+                                PrimaryKey = true
+                                Unique = false }
                               { Name = "name"
                                 Type = TVarchar 255
                                 Nullable = false
                                 Default = None
                                 AutoIncrement = false
-                                PrimaryKey = false }
+                                PrimaryKey = false
+                                Unique = false }
                               { Name = "score"
                                 Type = TDecimal(5, 2)
                                 Nullable = true
                                 Default = Some(DConst(VInt 0L))
                                 AutoIncrement = false
-                                PrimaryKey = false } ],
+                                PrimaryKey = false
+                                Unique = false } ],
+                            [],
+                            [],
                             false
                         ))
                         "create table"
@@ -493,11 +498,14 @@ let tests =
                         (CreateTable(
                             "t",
                             [ { Name = "id"
-                                Type = TInt
+                                Type = TInt false
                                 Nullable = true
                                 Default = None
                                 AutoIncrement = false
-                                PrimaryKey = false } ],
+                                PrimaryKey = false
+                                Unique = false } ],
+                            [],
+                            [],
                             true
                         ))
                         "if not exists"
@@ -509,17 +517,21 @@ let tests =
                         (CreateTable(
                             "t",
                             [ { Name = "id"
-                                Type = TInt
+                                Type = TInt false
                                 Nullable = true
                                 Default = None
                                 AutoIncrement = false
-                                PrimaryKey = true }
+                                PrimaryKey = true
+                                Unique = false }
                               { Name = "name"
                                 Type = TVarchar 10
                                 Nullable = true
                                 Default = None
                                 AutoIncrement = false
-                                PrimaryKey = false } ],
+                                PrimaryKey = false
+                                Unique = false } ],
+                            [],
+                            [],
                             false
                         ))
                         "trailing primary key"
@@ -527,13 +539,13 @@ let tests =
                 testCase "BIGINT UNSIGNED"
                 <| fun _ ->
                     match parseOk "CREATE TABLE t (id BIGINT UNSIGNED)" with
-                    | CreateTable(_, [ { Type = TBigInt true } ], _) -> ()
+                    | CreateTable(_, [ { Type = TBigInt true } ], _, _, _) -> ()
                     | other -> failtestf "expected an unsigned bigint column, got %A" other
 
                 testCase "DEFAULT CURRENT_TIMESTAMP"
                 <| fun _ ->
                     match parseOk "CREATE TABLE t (created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP)" with
-                    | CreateTable(_, [ { Type = TTimestamp; Default = Some DCurrentTimestamp } ], _) -> ()
+                    | CreateTable(_, [ { Type = TTimestamp; Default = Some DCurrentTimestamp } ], _, _, _) -> ()
                     | other -> failtestf "expected a CURRENT_TIMESTAMP default, got %A" other
 
                 testCase "ENGINE=/CHARSET=/COLLATE= table options are ignored but accepted"
@@ -544,14 +556,107 @@ let tests =
                         (CreateTable(
                             "t",
                             [ { Name = "id"
-                                Type = TInt
+                                Type = TInt false
                                 Nullable = true
                                 Default = None
                                 AutoIncrement = false
-                                PrimaryKey = false } ],
+                                PrimaryKey = false
+                                Unique = false } ],
+                            [],
+                            [],
                             false
                         ))
-                        "table options" ]
+                        "table options"
+
+                testCase "column-level UNIQUE synthesizes a unique index named after the column"
+                <| fun _ ->
+                    match parseOk "CREATE TABLE t (email VARCHAR(255) UNIQUE)" with
+                    | CreateTable(_, [ { Unique = true } ], [ { Name = "email"; Columns = [ "email" ]; Unique = true } ], [], false) -> ()
+                    | other -> failtestf "expected a synthesized unique index, got %A" other
+
+                testCase "trailing UNIQUE KEY / KEY / INDEX with an explicit name"
+                <| fun _ ->
+                    match parseOk "CREATE TABLE t (a INT, b INT, UNIQUE KEY uq_a (a), KEY idx_b (b))" with
+                    | CreateTable(
+                        _,
+                        _,
+                        [ { Name = "uq_a"; Columns = [ "a" ]; Unique = true }
+                          { Name = "idx_b"; Columns = [ "b" ]; Unique = false } ],
+                        [],
+                        false) -> ()
+                    | other -> failtestf "expected two indexes, got %A" other
+
+                testCase "trailing CONSTRAINT ... FOREIGN KEY with ON DELETE/ON UPDATE"
+                <| fun _ ->
+                    match
+                        parseOk
+                            "CREATE TABLE posts (user_id BIGINT UNSIGNED, CONSTRAINT posts_user_id_foreign FOREIGN KEY (user_id) REFERENCES users (id) ON DELETE CASCADE ON UPDATE RESTRICT)"
+                    with
+                    | CreateTable(
+                        _,
+                        _,
+                        [],
+                        [ { Name = "posts_user_id_foreign"
+                            Columns = [ "user_id" ]
+                            RefTable = "users"
+                            RefColumns = [ "id" ]
+                            OnDelete = Some "CASCADE"
+                            OnUpdate = Some "RESTRICT" } ],
+                        false) -> ()
+                    | other -> failtestf "expected a foreign key, got %A" other
+
+                testCase "unnamed trailing FOREIGN KEY gets a synthesized name"
+                <| fun _ ->
+                    match parseOk "CREATE TABLE posts (user_id INT, FOREIGN KEY (user_id) REFERENCES users (id))" with
+                    | CreateTable(_, _, [], [ { Name = "users_user_id_foreign" } ], false) -> ()
+                    | other -> failtestf "expected a synthesized FK name, got %A" other
+
+                testCase "ENUM and SET column types carry their declared values"
+                <| fun _ ->
+                    match parseOk "CREATE TABLE t (status ENUM('a', 'b'), flags SET('x', 'y'))" with
+                    | CreateTable(_, [ { Type = TEnum [ "a"; "b" ] }; { Type = TSet [ "x"; "y" ] } ], [], [], false) -> ()
+                    | other -> failtestf "expected enum/set types, got %A" other
+
+                testCase "CHAR/TEXT/BLOB family and TINY/MEDIUM/SMALL int variants all parse"
+                <| fun _ ->
+                    match
+                        parseOk
+                            "CREATE TABLE t (a CHAR(3), b TINYTEXT, c MEDIUMTEXT, d LONGTEXT, e BLOB, f VARBINARY(16), g BINARY(4), h SMALLINT, i MEDIUMINT UNSIGNED, j TIME, k YEAR, l FLOAT, m DOUBLE(8,2))"
+                    with
+                    | CreateTable(
+                        _,
+                        [ { Type = TChar 3 }
+                          { Type = TTinyText }
+                          { Type = TMediumText }
+                          { Type = TLongText }
+                          { Type = TBlob }
+                          { Type = TVarBinary 16 }
+                          { Type = TBinary 4 }
+                          { Type = TSmallInt false }
+                          { Type = TMediumInt true }
+                          { Type = TTime }
+                          { Type = TYear }
+                          { Type = TFloat }
+                          { Type = TDouble } ],
+                        [],
+                        [],
+                        false) -> ()
+                    | other -> failtestf "expected every new column type to parse, got %A" other
+
+                testCase "BOOLEAN/BOOL is an alias for TINYINT"
+                <| fun _ ->
+                    match parseOk "CREATE TABLE t (a BOOLEAN, b BOOL)" with
+                    | CreateTable(_, [ { Type = TTinyInt false }; { Type = TTinyInt false } ], [], [], false) -> ()
+                    | other -> failtestf "expected TTinyInt for BOOLEAN/BOOL, got %A" other
+
+                testCase "COMMENT / CHARACTER SET / COLLATE column modifiers are accepted and ignored"
+                <| fun _ ->
+                    match
+                        parseOk
+                            "CREATE TABLE t (name VARCHAR(255) CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci COMMENT 'a name')"
+                    with
+                    | CreateTable(_, [ { Name = "name" } ], [], [], false) -> ()
+                    | other -> failtestf "expected the comment/charset/collate to be ignored, got %A" other ]
 
           testList
               "DROP TABLE / TRUNCATE"
@@ -580,7 +685,9 @@ let tests =
                         (Insert(
                             "t",
                             [ "a"; "b" ],
-                            [ [ Lit(VInt 1L); Lit(VString "x") ]; [ Lit(VInt 2L); Lit(VString "y") ] ]
+                            [ [ Lit(VInt 1L); Lit(VString "x") ]; [ Lit(VInt 2L); Lit(VString "y") ] ],
+                            [],
+                            false
                         ))
                         "insert with columns"
 
@@ -588,8 +695,28 @@ let tests =
                 <| fun _ ->
                     Expect.equal
                         (parseOk "INSERT INTO t VALUES (1, 2)")
-                        (Insert("t", [], [ [ Lit(VInt 1L); Lit(VInt 2L) ] ]))
-                        "insert without columns" ]
+                        (Insert("t", [], [ [ Lit(VInt 1L); Lit(VInt 2L) ] ], [], false))
+                        "insert without columns"
+
+                testCase "INSERT IGNORE sets the ignore flag"
+                <| fun _ ->
+                    Expect.equal
+                        (parseOk "INSERT IGNORE INTO t VALUES (1)")
+                        (Insert("t", [], [ [ Lit(VInt 1L) ] ], [], true))
+                        "insert ignore"
+
+                testCase "INSERT ... ON DUPLICATE KEY UPDATE carries the assignment list"
+                <| fun _ ->
+                    Expect.equal
+                        (parseOk "INSERT INTO t (a, b) VALUES (1, 2) ON DUPLICATE KEY UPDATE b = VALUES(b) + 1")
+                        (Insert(
+                            "t",
+                            [ "a"; "b" ],
+                            [ [ Lit(VInt 1L); Lit(VInt 2L) ] ],
+                            [ "b", BinOp(Add, FuncCall("VALUES", [ col "b" ]), Lit(VInt 1L)) ],
+                            false
+                        ))
+                        "on duplicate key update" ]
 
           testList
               "UPDATE / DELETE"

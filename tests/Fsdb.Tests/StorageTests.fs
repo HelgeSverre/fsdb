@@ -11,22 +11,23 @@ let private col name ty nullable =
       Nullable = nullable
       Default = None
       AutoIncrement = false
-      PrimaryKey = false }
+      PrimaryKey = false
+      Unique = false }
 
 let private idCol =
-    { (col "id" TInt false) with
+    { (col "id" (TInt false) false) with
         AutoIncrement = true
         PrimaryKey = true }
 
 let private usersColumns =
     [ idCol
       col "name" (TVarchar 255) false
-      { (col "age" TInt true) with Default = Some(DConst(VInt 0L)) } ]
+      { (col "age" (TInt false) true) with Default = Some(DConst(VInt 0L)) } ]
 
 /// A store with an empty `users` table, ready to insert into.
 let private withUsersTable () =
     let store = create ()
-    createTable store defaultDatabase "users" usersColumns |> ignore
+    createTable store defaultDatabase "users" usersColumns [] [] |> ignore
     store
 
 let tests =
@@ -48,7 +49,7 @@ let tests =
                 <| fun _ ->
                     let store = withUsersTable ()
 
-                    match createTable store defaultDatabase "users" usersColumns with
+                    match createTable store defaultDatabase "users" usersColumns [] [] with
                     | Error(TableExists "users") -> ()
                     | other -> failtestf "expected TableExists, got %A" other
 
@@ -56,7 +57,7 @@ let tests =
                 <| fun _ ->
                     let store = withUsersTable ()
 
-                    match createTable store defaultDatabase "USERS" usersColumns with
+                    match createTable store defaultDatabase "USERS" usersColumns [] [] with
                     | Error(TableExists _) -> ()
                     | other -> failtestf "expected TableExists, got %A" other
 
@@ -64,7 +65,7 @@ let tests =
                 <| fun _ ->
                     let store = create ()
 
-                    match createTable store "newdb" "users" usersColumns with
+                    match createTable store "newdb" "users" usersColumns [] [] with
                     | Ok() ->
                         match scan store "newdb" "users" with
                         | Ok _ -> ()
@@ -203,10 +204,10 @@ let tests =
                     let store = create ()
 
                     let columns =
-                        [ col "id" TInt false
+                        [ col "id" (TInt false) false
                           { (col "created_at" TTimestamp true) with Default = Some DCurrentTimestamp } ]
 
-                    createTable store defaultDatabase "posts" columns |> ignore
+                    createTable store defaultDatabase "posts" columns [] [] |> ignore
 
                     match insertRows store defaultDatabase "posts" (Some [ "id" ]) [ [ VInt 1L ] ] with
                     | Ok _ ->
@@ -226,9 +227,9 @@ let tests =
                     let store = create ()
 
                     let columns =
-                        [ col "id" TInt false; col "nickname" (TVarchar 50) true ]
+                        [ col "id" (TInt false) false; col "nickname" (TVarchar 50) true ]
 
-                    createTable store defaultDatabase "t" columns |> ignore
+                    createTable store defaultDatabase "t" columns [] [] |> ignore
 
                     match insertRows store defaultDatabase "t" (Some [ "id" ]) [ [ VInt 1L ] ] with
                     | Ok _ ->
