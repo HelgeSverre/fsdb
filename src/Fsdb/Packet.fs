@@ -149,25 +149,57 @@ let private readExactAsync (stream: Stream) (n: int) : Async<byte[] option> =
             return if eof then None else Some buf
     }
 
-/// Reads one packet from a stream, or None on clean disconnect.
-let readPacketAsync (stream: Stream) : Async<Packet option> =
-    async {
-        match! readExactAsync stream 4 with
-        | None -> return None
-        | Some header ->
-            let r = Reader(header)
-            let len = r.ReadInt24LE()
-            let seqId = r.ReadByte()
-
-            match! readExactAsync stream len with
-            | None -> return None
-            | Some payload -> return Some { SeqId = seqId; Payload = payload }
-    }
-
 /// The largest payload a single packet header can declare (2^24 - 1). A
 /// payload of exactly this many bytes means "more packets follow" on the
 /// wire — see `writePacketAsync` and `readPacketAsync`.
 let maxPacketPayload = 0xffffff
+
+/// Raised by `readPacketAsync` when a multi-packet payload would exceed
+/// `maxAccumulatedPacketSize`, so a malicious or buggy client can't make the
+/// server allocate unbounded memory by streaming 0xffffff-byte chunks
+/// forever.
+exception PacketTooLargeException of size: int
+
+/// Safety ceiling for a reassembled multi-packet payload — matches MySQL's
+/// common `max_allowed_packet` default. ponytail: hardcoded rather than
+/// wired to the `max_allowed_packet` session variable (Packet.fs can't
+/// depend on Session.fs — Session already depends on Protocol which depends
+/// on Packet); revisit if per-connection tuning is ever needed.
+let maxAccumulatedPacketSize = 64 * 1024 * 1024 // 64 MiB
+
+/// Reads one logical packet from a stream, or None on clean disconnect.
+/// Reassembles packets split across the wire per the MySQL protocol: a
+/// chunk of exactly maxPacketPayload bytes means "more packets follow"; the
+/// terminating chunk is the first one shorter than that (possibly empty).
+/// Returns the sequence id of the FIRST fragment, so callers computing the
+/// next response seq id (`packet.SeqId + 1uy`) stay correct.
+let readPacketAsync (stream: Stream) : Async<Packet option> =
+    let rec loop (firstSeqId: byte option) (acc: byte[]) : Async<Packet option> =
+        async {
+            match! readExactAsync stream 4 with
+            | None -> return None
+            | Some header ->
+                let r = Reader(header)
+                let len = r.ReadInt24LE()
+                let seqId = r.ReadByte()
+
+                match! readExactAsync stream len with
+                | None -> return None
+                | Some payload ->
+                    let acc = Array.append acc payload
+
+                    if acc.Length > maxAccumulatedPacketSize then
+                        raise (PacketTooLargeException acc.Length)
+
+                    let firstSeqId = firstSeqId |> Option.defaultValue seqId
+
+                    if len = maxPacketPayload then
+                        return! loop (Some firstSeqId) acc
+                    else
+                        return Some { SeqId = firstSeqId; Payload = acc }
+        }
+
+    loop None [||]
 
 /// Writes one logical packet to a stream, splitting the payload into
 /// maxPacketPayload-byte chunks with incrementing sequence ids if it's too

@@ -104,6 +104,61 @@ let packetTests =
                   let! result = readPacketAsync stream
                   Expect.equal result None "empty stream yields no packet"
               }
+              |> Async.RunSynchronously
+
+          testCase "readPacketAsync reassembles a payload split across multiple wire packets"
+          <| fun _ ->
+              // Regression: a payload of exactly maxPacketPayload bytes means
+              // "more packets follow" per the protocol. Any client sending a
+              // statement >= 16 MiB (MySqlConnector, Connector/J,
+              // libmysqlclient all do) sends it this way; failing to
+              // reassemble ran the first chunk as its own command and then
+              // treated the continuation as a new one. Uses `frame` directly
+              // (not writePacketAsync, which auto-splits/terminates) so the
+              // test controls the exact wire fragmentation.
+              async {
+                  use stream = new IO.MemoryStream()
+                  let firstChunk = Array.create maxPacketPayload 7uy
+                  let secondChunk = [| 1uy; 2uy; 3uy |]
+                  let bytes1 = frame { SeqId = 9uy; Payload = firstChunk }
+                  stream.Write(bytes1, 0, bytes1.Length)
+                  let bytes2 = frame { SeqId = 10uy; Payload = secondChunk }
+                  stream.Write(bytes2, 0, bytes2.Length)
+                  stream.Position <- 0L
+
+                  let! result = readPacketAsync stream
+
+                  match result with
+                  | Some p ->
+                      Expect.equal p.SeqId 9uy "reassembled packet keeps the FIRST fragment's seq id"
+                      Expect.equal p.Payload.Length (maxPacketPayload + 3) "payload is the concatenation of both chunks"
+                      Expect.equal p.Payload.[maxPacketPayload..] secondChunk "tail bytes come from the second chunk"
+                  | None -> failtest "expected a reassembled packet"
+              }
+              |> Async.RunSynchronously
+
+          testCase "readPacketAsync raises PacketTooLargeException instead of allocating unboundedly"
+          <| fun _ ->
+              async {
+                  use stream = new IO.MemoryStream()
+                  // Enough maxPacketPayload-sized fragments (each declaring
+                  // "more data follows") to exceed maxAccumulatedPacketSize.
+                  let chunkCount = maxAccumulatedPacketSize / maxPacketPayload + 2
+                  let chunk = Array.zeroCreate<byte> maxPacketPayload
+
+                  for i in 0 .. chunkCount - 1 do
+                      let bytes = frame { SeqId = byte i; Payload = chunk }
+                      stream.Write(bytes, 0, bytes.Length)
+
+                  stream.Position <- 0L
+
+                  let! outcome = Async.Catch(readPacketAsync stream)
+
+                  match outcome with
+                  | Choice2Of2(:? PacketTooLargeException) -> ()
+                  | Choice1Of2 _ -> failtest "expected PacketTooLargeException, got a result"
+                  | Choice2Of2 ex -> failtestf "expected PacketTooLargeException, got %A" ex
+              }
               |> Async.RunSynchronously ]
 
 let protocolTests =

@@ -103,62 +103,88 @@ let private handleConnection (connectionId: int) (client: TcpClient) : Async<uni
     async {
         use client = client
         use stream = client.GetStream()
-        let authData = randomAuthPluginData ()
-        do! writePacketAsync stream { SeqId = 0uy; Payload = buildHandshakeV10 connectionId authData } |> Async.Ignore
+        // Negotiated once the handshake response arrives; used as a fallback
+        // for the "packet too large" ERR reply if that happens beforehand.
+        let mutable capabilities = ServerCapabilities
 
-        match! readPacketAsync stream with
-        | None -> ()
-        | Some handshakeResp ->
-            let resp = parseHandshakeResponse handshakeResp.Payload
-            // Effective capabilities: never claim something the client didn't ask for.
-            let capabilities = resp.Capabilities &&& ServerCapabilities
-            let session = { Session.create connectionId with Database = resp.Database }
+        try
+            let authData = randomAuthPluginData ()
 
+            do!
+                writePacketAsync stream { SeqId = 0uy; Payload = buildHandshakeV10 connectionId authData }
+                |> Async.Ignore
+
+            match! readPacketAsync stream with
+            | None -> ()
+            | Some handshakeResp ->
+                let resp = parseHandshakeResponse handshakeResp.Payload
+                // Effective capabilities: never claim something the client didn't ask for.
+                capabilities <- resp.Capabilities &&& ServerCapabilities
+                let session = { Session.create connectionId with Database = resp.Database }
+
+                do!
+                    writePacketAsync
+                        stream
+                        { SeqId = handshakeResp.SeqId + 1uy
+                          Payload = okPayload capabilities 0UL 0UL }
+                    |> Async.Ignore
+
+                let rec loop (session: Session) : Async<unit> =
+                    async {
+                        match! readPacketAsync stream with
+                        | None -> ()
+                        | Some cmdPacket ->
+                            let seqId = cmdPacket.SeqId + 1uy
+
+                            match parseCommand cmdPacket.Payload with
+                            | None
+                            | Some Quit -> ()
+                            | Some Ping ->
+                                do!
+                                    writePacketAsync
+                                        stream
+                                        { SeqId = seqId
+                                          Payload = okPayload capabilities 0UL 0UL }
+                                    |> Async.Ignore
+
+                                return! loop session
+                            | Some(InitDb db) ->
+                                do!
+                                    writePacketAsync
+                                        stream
+                                        { SeqId = seqId
+                                          Payload = okPayload capabilities 0UL 0UL }
+                                    |> Async.Ignore
+
+                                return! loop { session with Database = Some db }
+                            | Some(Query sql) ->
+                                let session, result = QueryHandler.handle session sql
+                                do! sendQueryResult stream capabilities seqId result
+                                return! loop session
+                            | Some(Unsupported _) ->
+                                do!
+                                    writePacketAsync
+                                        stream
+                                        { SeqId = seqId
+                                          Payload = errPayload capabilities 1047 "Unknown command" }
+                                    |> Async.Ignore
+
+                                return! loop session
+                    }
+
+                do! loop session
+        with :? PacketTooLargeException ->
+            // Reassembling a multi-packet payload blew past
+            // maxAccumulatedPacketSize. There's no way to resync mid-stream,
+            // but a best-effort ERR beats silently dropping the connection.
             do!
                 writePacketAsync
                     stream
-                    { SeqId = handshakeResp.SeqId + 1uy
-                      Payload = okPayload capabilities 0UL 0UL }
+                    { SeqId = 0uy
+                      Payload = errPayload capabilities 1153 "Got a packet bigger than 'max_allowed_packet' bytes" }
                 |> Async.Ignore
-
-            let rec loop (session: Session) : Async<unit> =
-                async {
-                    match! readPacketAsync stream with
-                    | None -> ()
-                    | Some cmdPacket ->
-                        let seqId = cmdPacket.SeqId + 1uy
-
-                        match parseCommand cmdPacket.Payload with
-                        | None
-                        | Some Quit -> ()
-                        | Some Ping ->
-                            do!
-                                writePacketAsync stream { SeqId = seqId; Payload = okPayload capabilities 0UL 0UL }
-                                |> Async.Ignore
-
-                            return! loop session
-                        | Some(InitDb db) ->
-                            do!
-                                writePacketAsync stream { SeqId = seqId; Payload = okPayload capabilities 0UL 0UL }
-                                |> Async.Ignore
-
-                            return! loop { session with Database = Some db }
-                        | Some(Query sql) ->
-                            let session, result = QueryHandler.handle session sql
-                            do! sendQueryResult stream capabilities seqId result
-                            return! loop session
-                        | Some(Unsupported _) ->
-                            do!
-                                writePacketAsync
-                                    stream
-                                    { SeqId = seqId
-                                      Payload = errPayload capabilities 1047 "Unknown command" }
-                                |> Async.Ignore
-
-                            return! loop session
-                }
-
-            do! loop session
+                |> Async.Catch
+                |> Async.Ignore
     }
 
 /// Starts listening on 127.0.0.1:port. Pass 0 for an OS-assigned ephemeral
