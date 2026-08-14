@@ -858,6 +858,90 @@ let integrationTests =
                   finally
                       listener.Stop()
               }
+              |> Async.RunSynchronously
+
+          testCase "a table with an index and a foreign key is visible through information_schema and SHOW CREATE TABLE"
+          <| fun _ ->
+              async {
+                  let listener = Fsdb.Server.startListening System.Net.IPAddress.Loopback 0
+                  let port = Fsdb.Server.port listener
+                  let serverTask = Fsdb.Server.serve listener (Fsdb.Storage.create ()) |> Async.StartAsTask
+
+                  try
+                      let connStr =
+                          sprintf
+                              "Server=127.0.0.1;Port=%d;User ID=root;Password=;Database=shop;AllowPublicKeyRetrieval=True;SslMode=None"
+                              port
+
+                      use conn = new MySqlConnector.MySqlConnection(connStr)
+                      do! conn.OpenAsync() |> Async.AwaitTask
+
+                      let exec (sql: string) =
+                          async {
+                              use cmd = conn.CreateCommand()
+                              cmd.CommandText <- sql
+                              return! cmd.ExecuteNonQueryAsync() |> Async.AwaitTask
+                          }
+
+                      let scalar (sql: string) =
+                          async {
+                              use cmd = conn.CreateCommand()
+                              cmd.CommandText <- sql
+                              return! cmd.ExecuteScalarAsync() |> Async.AwaitTask
+                          }
+
+                      // `Database=shop` on the connection string exercises the
+                      // handshake's auto-create path (`shop` doesn't exist yet).
+                      let! dbName = scalar "SELECT DATABASE()"
+                      Expect.equal (string dbName) "shop" "connecting with Database=shop auto-created it"
+
+                      do!
+                          exec "CREATE TABLE users (id INT AUTO_INCREMENT PRIMARY KEY, email VARCHAR(255) NOT NULL UNIQUE)"
+                          |> Async.Ignore
+
+                      do!
+                          exec
+                              "CREATE TABLE posts (id INT AUTO_INCREMENT PRIMARY KEY, user_id INT, CONSTRAINT posts_user_id_foreign FOREIGN KEY (user_id) REFERENCES users (id) ON DELETE CASCADE)"
+                          |> Async.Ignore
+
+                      let! tableType =
+                          scalar
+                              "SELECT table_type FROM information_schema.tables WHERE table_schema = 'shop' AND table_name = 'posts'"
+
+                      Expect.equal (string tableType) "BASE TABLE" "posts shows up in information_schema.tables"
+
+                      let! columnType =
+                          scalar
+                              "SELECT column_type FROM information_schema.columns WHERE table_schema = 'shop' AND table_name = 'users' AND column_name = 'email'"
+
+                      Expect.equal (string columnType) "varchar(255)" "information_schema.columns reports the declared type"
+
+                      let! indexColumn =
+                          scalar
+                              "SELECT column_name FROM information_schema.statistics WHERE table_schema = 'shop' AND table_name = 'users' AND index_name = 'email'"
+
+                      Expect.equal (string indexColumn) "email" "the column-level UNIQUE surfaces in information_schema.statistics"
+
+                      let! refTable =
+                          scalar
+                              "SELECT referenced_table_name FROM information_schema.key_column_usage WHERE table_schema = 'shop' AND table_name = 'posts' AND referenced_table_name IS NOT NULL"
+
+                      Expect.equal (string refTable) "users" "the foreign key surfaces in information_schema.key_column_usage"
+
+                      use showCmd = conn.CreateCommand()
+                      showCmd.CommandText <- "SHOW CREATE TABLE users"
+                      use! showReader = showCmd.ExecuteReaderAsync() |> Async.AwaitTask
+                      let! hasRow = showReader.ReadAsync() |> Async.AwaitTask
+                      Expect.isTrue hasRow "SHOW CREATE TABLE returns one row"
+                      let ddl = showReader.GetString 1
+                      Expect.stringContains ddl "PRIMARY KEY (`id`)" "SHOW CREATE TABLE reconstructs the primary key"
+                      Expect.stringContains ddl "UNIQUE KEY `email`" "SHOW CREATE TABLE reconstructs the unique index"
+                      do! showReader.CloseAsync() |> Async.AwaitTask
+
+                      do! conn.CloseAsync() |> Async.AwaitTask
+                  finally
+                      listener.Stop()
+              }
               |> Async.RunSynchronously ]
 
 [<EntryPoint>]
