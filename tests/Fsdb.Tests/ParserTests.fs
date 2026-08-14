@@ -364,6 +364,13 @@ let tests =
                         (mkSelect([ Lit(VString "a\nb\t\\'c"), None ], None, None, [], None, None))
                         "backslash escapes"
 
+                testCase "\\%% and \\_ stay backslash-escaped rather than collapsing to %%/_"
+                <| fun _ ->
+                    Expect.equal
+                        (parseOk "SELECT 'a\\%b\\_c'")
+                        (mkSelect([ Lit(VString "a\\%b\\_c"), None ], None, None, [], None, None))
+                        "wildcard escapes preserved"
+
                 testCase "backtick-quoted identifier, including a reserved word and a doubled backtick"
                 <| fun _ ->
                     Expect.equal

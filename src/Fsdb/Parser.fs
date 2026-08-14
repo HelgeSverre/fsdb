@@ -140,25 +140,31 @@ let private numberLit: Parser<Value, unit> =
             | true, d -> VDecimal d
             | false, _ -> VDouble(float nl.String)
 
-/// A single quoted string char: `''` escapes to `'`, a backslash escapes
-/// the next character (`\n`, `\t`, `\\`, `\'`, ... or itself for anything
-/// without a special meaning), anything else is literal.
-let private stringChar: Parser<char, unit> =
-    (pstring "''" >>% '\'')
+/// A single quoted string char, as a (possibly two-character) string rather
+/// than one `char`: `''` escapes to `'`, a backslash escapes the next
+/// character (`\n`, `\t`, `\\`, `\'`, ... or itself for anything without a
+/// special meaning) — except `\%` and `\_`, which MySQL deliberately leaves
+/// as the two literal characters `\%`/`\_` rather than collapsing them, so
+/// `LIKE` (via `Executor.likeToRegex`) can still tell "match the wildcard
+/// literally" apart from "the wildcard". Anything else is literal.
+let private stringChar: Parser<string, unit> =
+    (pstring "''" >>% "'")
     <|> (pchar '\\'
          >>. anyChar
          |>> function
-             | 'n' -> '\n'
-             | 't' -> '\t'
-             | 'r' -> '\r'
-             | 'b' -> '\b'
-             | '0' -> '\000'
-             | 'Z' -> '\x1A'
-             | other -> other)
-    <|> satisfy (fun c -> c <> '\'')
+             | 'n' -> "\n"
+             | 't' -> "\t"
+             | 'r' -> "\r"
+             | 'b' -> "\b"
+             | '0' -> "\000"
+             | 'Z' -> "\x1A"
+             | '%' -> "\\%"
+             | '_' -> "\\_"
+             | other -> string other)
+    <|> (satisfy (fun c -> c <> '\'') |>> string)
 
 let private stringLit: Parser<Value, unit> =
-    (pchar '\'' >>. manyChars stringChar .>> pchar '\'' .>> ws) |>> VString
+    (pchar '\'' >>. manyStrings stringChar .>> pchar '\'' .>> ws) |>> VString
 
 let private literalValue: Parser<Value, unit> =
     choice

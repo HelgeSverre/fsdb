@@ -83,15 +83,35 @@ let rec private exprLabel (expr: Expr) : string =
     | Star -> "*"
 
 /// Translates a SQL LIKE pattern to a .NET regex source: `%` -> `.*`, `_` ->
-/// `.`. Anchored with `\A`/`\z` rather than `^`/`$` — `$` alone matches
-/// before a trailing newline, which would let `'ab\n' LIKE 'ab'` falsely
-/// match — and callers must pass `RegexOptions.Singleline` so `.` spans
-/// newlines too (`%`/`_` are unqualified wildcards in MySQL, not
-/// "everything but a newline"). Not private: `QueryHandler`'s `SHOW
-/// VARIABLES LIKE` reuses the same LIKE semantics rather than keeping a
-/// second copy.
-let likeToRegex (pattern: string) =
-    @"\A" + Regex.Escape(pattern).Replace("%", ".*").Replace("_", ".") + @"\z"
+/// `.`, and a backslash-escaped `\%`/`\_` (MySQL's own escape for a literal
+/// wildcard character, which `Parser.stringChar` deliberately leaves in the
+/// string unresolved) matches that character literally instead. Anchored
+/// with `\A`/`\z` rather than `^`/`$` — `$` alone matches before a trailing
+/// newline, which would let `'ab\n' LIKE 'ab'` falsely match — and callers
+/// must pass `RegexOptions.Singleline` so `.` spans newlines too (`%`/`_`
+/// are unqualified wildcards in MySQL, not "everything but a newline"). Not
+/// private: `QueryHandler`'s `SHOW VARIABLES LIKE` reuses the same LIKE
+/// semantics rather than keeping a second copy.
+let likeToRegex (pattern: string) : string =
+    let sb = System.Text.StringBuilder()
+    let mutable i = 0
+
+    while i < pattern.Length do
+        match pattern.[i] with
+        | '\\' when i + 1 < pattern.Length && (pattern.[i + 1] = '%' || pattern.[i + 1] = '_') ->
+            sb.Append(Regex.Escape(string pattern.[i + 1])) |> ignore
+            i <- i + 2
+        | '%' ->
+            sb.Append(".*") |> ignore
+            i <- i + 1
+        | '_' ->
+            sb.Append(".") |> ignore
+            i <- i + 1
+        | c ->
+            sb.Append(Regex.Escape(string c)) |> ignore
+            i <- i + 1
+
+    @"\A" + sb.ToString() + @"\z"
 
 /// Evaluates one expression against one row. Three-valued logic throughout
 /// (comparisons/AND/OR/NOT return `VNull` — SQL's "unknown" — rather than a

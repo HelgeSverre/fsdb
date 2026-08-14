@@ -96,6 +96,18 @@ let tests =
                     | ResultSet([ "x" ], rows) -> Expect.equal rows [ [ Some "1" ]; [ Some "2" ]; [ Some "3" ] ] "sorted by alias"
                     | other -> failtestf "expected a resultset sorted by alias, got %A" other
 
+                testCase "LIKE treats a backslash-escaped %/_ as a literal character, not a wildcard"
+                <| fun _ ->
+                    let store = newStore ()
+
+                    match runDefault store "SELECT 'axb' LIKE 'a\\%b'" with
+                    | ResultSet(_, [ [ Some "0" ] ]) -> ()
+                    | other -> failtestf "expected no match (escaped %% is literal), got %A" other
+
+                    match runDefault store "SELECT 'a%b' LIKE 'a\\%b'" with
+                    | ResultSet(_, [ [ Some "1" ] ]) -> ()
+                    | other -> failtestf "expected a literal %% match, got %A" other
+
                 testCase "LIKE matches across embedded newlines"
                 <| fun _ ->
                     let store = newStore ()
