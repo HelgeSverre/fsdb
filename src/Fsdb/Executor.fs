@@ -121,20 +121,31 @@ let private likeOp (subject: Value) (pattern: Value) : Value =
         let pat = pattern |> toText |> Option.defaultValue ""
         boolToValue (Regex.IsMatch(text, likeToRegex pat, RegexOptions.IgnoreCase ||| RegexOptions.Singleline))
 
+/// The three pieces of context `evalExpr` needs to resolve a `Col`/`FuncCall`
+/// against, bundled into one record rather than three loose parameters
+/// threaded through every call site — M5's aggregates add a fourth
+/// (per-group accumulated results the outer expression binds against),
+/// which becomes a field here instead of a fourth parameter at every one of
+/// those call sites.
+type private EvalContext =
+    { Registry: Registry
+      ColumnIndex: Map<string, int>
+      Row: Value[] }
+
 /// Evaluates one expression against one row. Three-valued logic throughout
 /// (comparisons/AND/OR/NOT return `VNull` — SQL's "unknown" — rather than a
 /// boolean whenever an operand is `VNull`, per `Value`'s helpers), function
-/// calls resolve through `registry` (error 1305 if unregistered), and a
-/// bare column resolves through `columnIndex` (error 1054 if unknown).
-let rec private evalExpr (registry: Registry) (columnIndex: Map<string, int>) (row: Value[]) (expr: Expr) : Result<Value, EvalError> =
-    let eval = evalExpr registry columnIndex row
+/// calls resolve through `ctx.Registry` (error 1305 if unregistered), and a
+/// bare column resolves through `ctx.ColumnIndex` (error 1054 if unknown).
+let rec private evalExpr (ctx: EvalContext) (expr: Expr) : Result<Value, EvalError> =
+    let eval = evalExpr ctx
 
     match expr with
     | Lit v -> Ok v
     | Star -> Error(1054, "Invalid use of '*'")
     | Col name ->
-        match Map.tryFind (name.ToLowerInvariant()) columnIndex with
-        | Some i -> Ok row.[i]
+        match Map.tryFind (name.ToLowerInvariant()) ctx.ColumnIndex with
+        | Some i -> Ok ctx.Row.[i]
         | None -> Error(unknownColumn name)
     | QualifiedCol(_, col) -> eval (Col col)
     | Not e -> eval e |> Result.map (fun v -> truthy v |> Option.map (not >> boolToValue) |> Option.defaultValue VNull)
@@ -211,7 +222,7 @@ let rec private evalExpr (registry: Registry) (columnIndex: Map<string, int>) (r
                     | _, _, VNull -> VNull
                     | _ -> boolToValue (Value.compare ve vlo >= 0 && Value.compare ve vhi <= 0))))
     | FuncCall(name, args) ->
-        match Functions.lookup name registry with
+        match Functions.lookup name ctx.Registry with
         | None -> Error(unknownFunction name)
         | Some fn -> args |> traverseList eval |> Result.map fn
 
@@ -227,17 +238,11 @@ let private applyLimitOffset (limit: int option) (offset: int option) (rows: 'a 
 
 /// One projection's `(column name, value)` pairs — a list because `SELECT
 /// *` expands to every column of the row.
-let private evalProjection
-    (registry: Registry)
-    (columnIndex: Map<string, int>)
-    (columns: ColumnDef list)
-    (row: Value[])
-    (proj: Projection)
-    : Result<(string * Value) list, EvalError> =
+let private evalProjection (ctx: EvalContext) (columns: ColumnDef list) (proj: Projection) : Result<(string * Value) list, EvalError> =
     match proj with
-    | Star, _ -> Ok(columns |> List.mapi (fun i c -> c.Name, row.[i]))
+    | Star, _ -> Ok(columns |> List.mapi (fun i c -> c.Name, ctx.Row.[i]))
     | expr, aliasOpt ->
-        evalExpr registry columnIndex row expr
+        evalExpr ctx expr
         |> Result.map (fun v -> [ aliasOpt |> Option.defaultValue (exprLabel expr), v ])
 
 /// An all-`VNull` row shaped like `columns` — used only to type-check a
@@ -261,6 +266,7 @@ let private runSelect (registry: Registry) (columns: ColumnDef list) (rows: Valu
     else
 
     let columnIndex = columnIndexOf columns
+    let ctxFor (row: Value[]) : EvalContext = { Registry = registry; ColumnIndex = columnIndex; Row = row }
 
     // ORDER BY may name a `SELECT ... AS alias` rather than a table column
     // (`SELECT COUNT(*) AS n FROM t ORDER BY n`) — resolve those first
@@ -281,14 +287,14 @@ let private runSelect (registry: Registry) (columns: ColumnDef list) (rows: Valu
     let matches (row: Value[]) : Result<bool, EvalError> =
         match whereExpr with
         | None -> Ok true
-        | Some expr -> evalExpr registry columnIndex row expr |> Result.map (fun v -> truthy v = Some true)
+        | Some expr -> evalExpr (ctxFor row) expr |> Result.map (fun v -> truthy v = Some true)
 
     let orderKeys (row: Value[]) : Result<Value list, EvalError> =
-        orderBy |> traverseList (fun (expr, _) -> evalExpr registry columnIndex row (resolveOrderExpr expr))
+        orderBy |> traverseList (fun (expr, _) -> evalExpr (ctxFor row) (resolveOrderExpr expr))
 
     let projectRow (row: Value[]) : Result<(string * Value) list, EvalError> =
         projections
-        |> traverseList (evalProjection registry columnIndex columns row)
+        |> traverseList (evalProjection (ctxFor row) columns)
         |> Result.map List.concat
 
     // Sorts rows by their pre-evaluated `ORDER BY` keys: a total order per
@@ -349,8 +355,10 @@ let private applyAssignments
     (assignments: (int * Expr) list)
     (row: Value[])
     : Result<Value[], StorageError> =
+    let ctx = { Registry = registry; ColumnIndex = columnIndex; Row = row }
+
     assignments
-    |> traverseList (fun (idx, expr) -> evalExpr registry columnIndex row expr |> Result.map (fun v -> idx, v))
+    |> traverseList (fun (idx, expr) -> evalExpr ctx expr |> Result.map (fun v -> idx, v))
     |> Result.mapError ExpressionError
     |> Result.map (fun idxVals ->
         let newRow = Array.copy row
@@ -392,7 +400,9 @@ let execute (store: Store) (registry: Registry) (dbName: string) (lastInsertId: 
         // (no table columns are in scope), just literals/functions — an
         // empty column index turns a stray `Col` reference into a clean
         // 1054 rather than an index-out-of-range.
-        match rowsExprs |> traverseList (traverseList (evalExpr registry Map.empty [||])) with
+        let literalCtx = { Registry = registry; ColumnIndex = Map.empty; Row = [||] }
+
+        match rowsExprs |> traverseList (traverseList (evalExpr literalCtx)) with
         | Error(code, message) -> lastInsertId, Err(code, message)
         | Ok rowsValues ->
             let cols = if columns.IsEmpty then None else Some columns
@@ -421,13 +431,15 @@ let execute (store: Store) (registry: Registry) (dbName: string) (lastInsertId: 
             match assignments |> traverseList (fun (name, expr) -> resolveColumn columns name |> Result.map (fun i -> i, expr)) with
             | Error e -> lastInsertId, storageErr e
             | Ok indexedAssignments ->
+                let ctxFor row = { Registry = registry; ColumnIndex = columnIndex; Row = row }
+
                 let check row =
                     match whereExpr with
                     | None -> Ok true
-                    | Some expr -> evalExpr registry columnIndex row expr |> Result.map (fun v -> truthy v = Some true)
+                    | Some expr -> evalExpr (ctxFor row) expr |> Result.map (fun v -> truthy v = Some true)
 
                 let checkAssignments row =
-                    indexedAssignments |> traverseList (fun (_, expr) -> evalExpr registry columnIndex row expr)
+                    indexedAssignments |> traverseList (fun (_, expr) -> evalExpr (ctxFor row) expr)
 
                 // Type-check WHERE/SET against a synthetic all-NULL row
                 // first — same reasoning as `runSelect`'s `probeRow`: an
@@ -449,11 +461,12 @@ let execute (store: Store) (registry: Registry) (dbName: string) (lastInsertId: 
         | Error e -> lastInsertId, storageErr e
         | Ok(columns, _) ->
             let columnIndex = columnIndexOf columns
+            let ctxFor row = { Registry = registry; ColumnIndex = columnIndex; Row = row }
 
             let check row =
                 match whereExpr with
                 | None -> Ok true
-                | Some expr -> evalExpr registry columnIndex row expr |> Result.map (fun v -> truthy v = Some true)
+                | Some expr -> evalExpr (ctxFor row) expr |> Result.map (fun v -> truthy v = Some true)
 
             match check (probeRow columns) with
             | Error(code, message) -> lastInsertId, Err(code, message)
