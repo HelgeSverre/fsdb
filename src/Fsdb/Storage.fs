@@ -4,6 +4,7 @@
 module Fsdb.Storage
 
 open System
+open System.Globalization
 open Fsdb.Ast
 open Fsdb.Value
 
@@ -93,6 +94,98 @@ let resolveColumn (columns: ColumnDef list) (name: string) : Result<int, Storage
         | Some i -> Ok i
         | None -> Error(UnknownColumn name)
 
+/// Applies `f` to each element, short-circuiting on the first `Error`.
+let private traverseResult (f: 'a -> Result<'b, StorageError>) (xs: 'a list) : Result<'b list, StorageError> =
+    let rec loop acc =
+        function
+        | [] -> Ok(List.rev acc)
+        | x :: rest ->
+            match f x with
+            | Ok y -> loop (y :: acc) rest
+            | Error e -> Error e
+
+    loop [] xs
+
+let private parseNumeric (s: string) : float option =
+    match Double.TryParse(s.Trim(), NumberStyles.Float, CultureInfo.InvariantCulture) with
+    | true, d -> Some d
+    | false, _ -> None
+
+/// MySQL-style coercion of a value to a column's declared type
+/// (`'12' -> 12` for an INT column); Error 1366 when it's not possible.
+/// NULL always passes through untouched — nullability is checked
+/// separately.
+let coerceValue (col: ColumnDef) (v: Value) : Result<Value, StorageError> =
+    let fail () =
+        Error(InvalidValueForColumn(col.Name, v |> toText |> Option.defaultValue "NULL"))
+
+    match v with
+    | VNull -> Ok VNull
+    | _ ->
+        match col.Type with
+        | TInt
+        | TBigInt _
+        | TTinyInt
+        | TBool ->
+            match v with
+            | VInt i -> Ok(VInt i)
+            | VDouble d -> Ok(VInt(int64 d))
+            | VDecimal d -> Ok(VInt(int64 d))
+            | VString s ->
+                match parseNumeric s with
+                | Some d -> Ok(VInt(int64 d))
+                | None -> fail ()
+            | _ -> fail ()
+        | TDouble ->
+            match v with
+            | VDouble d -> Ok(VDouble d)
+            | VInt i -> Ok(VDouble(float i))
+            | VDecimal d -> Ok(VDouble(float d))
+            | VString s ->
+                match parseNumeric s with
+                | Some d -> Ok(VDouble d)
+                | None -> fail ()
+            | _ -> fail ()
+        | TDecimal _ ->
+            match v with
+            | VDecimal d -> Ok(VDecimal d)
+            | VInt i -> Ok(VDecimal(decimal i))
+            | VDouble d -> Ok(VDecimal(decimal d))
+            | VString s ->
+                match parseNumeric s with
+                | Some d -> Ok(VDecimal(decimal d))
+                | None -> fail ()
+            | _ -> fail ()
+        | TVarchar _
+        | TText
+        | TJson -> Ok(VString(v |> toText |> Option.defaultValue ""))
+        | TDate ->
+            match v with
+            | VDate d -> Ok(VDate d)
+            | VDateTime dt -> Ok(VDate(DateOnly.FromDateTime dt))
+            | VString s ->
+                match DateOnly.TryParse(s.Trim(), CultureInfo.InvariantCulture) with
+                | true, d -> Ok(VDate d)
+                | false, _ -> fail ()
+            | _ -> fail ()
+        | TDateTime
+        | TTimestamp ->
+            match v with
+            | VDateTime dt -> Ok(VDateTime dt)
+            | VDate d -> Ok(VDateTime(d.ToDateTime(TimeOnly.MinValue)))
+            | VString s ->
+                match DateTime.TryParse(s.Trim(), CultureInfo.InvariantCulture, DateTimeStyles.None) with
+                | true, dt -> Ok(VDateTime dt)
+                | false, _ -> fail ()
+            | _ -> fail ()
+
+/// Coerces a value to its column's type and rejects NULL for a non-nullable
+/// column.
+let private coerceAndCheck (col: ColumnDef) (v: Value) : Result<Value, StorageError> =
+    match v with
+    | VNull when not col.Nullable -> Error(NotNullViolation col.Name)
+    | _ -> coerceValue col v
+
 let createTable (store: Store) (dbName: string) (tableName: string) (columns: ColumnDef list) : Result<unit, StorageError> =
     ensureDatabase store dbName
 
@@ -135,6 +228,93 @@ let truncate (store: Store) (dbName: string) (tableName: string) : Result<unit, 
             | Ok table ->
                 let table' = { table with Rows = []; NextAutoId = 1L }
                 Ok(Map.add dbName (Map.add (normalizeTableName tableName) table' db) catalog, ()))
+
+/// One column's value for one row being inserted, threaded through
+/// `processRow`'s fold: the column's final coerced value, the updated
+/// AUTO_INCREMENT counter, and the id assigned to this row's
+/// AUTO_INCREMENT column (if any).
+let private processRow
+    (nextAutoId: int64)
+    (rawRow: Value option list)
+    (columns: ColumnDef list)
+    : Result<Value list * int64 * int64 option, StorageError> =
+    let step acc (col: ColumnDef, provided: Value option) =
+        match acc with
+        | Error e -> Error e
+        | Ok(valuesRev, nextAutoId, assignedId) ->
+            let pending = provided |> Option.defaultValue (col.Default |> Option.defaultValue VNull)
+
+            if col.AutoIncrement then
+                match pending with
+                | VNull -> Ok(VInt nextAutoId :: valuesRev, nextAutoId + 1L, Some nextAutoId)
+                | _ ->
+                    match coerceValue col pending with
+                    | Error e -> Error e
+                    | Ok(VInt i) -> Ok(VInt i :: valuesRev, max nextAutoId (i + 1L), assignedId)
+                    | Ok _ -> Error(InvalidValueForColumn(col.Name, "auto_increment"))
+            else
+                match coerceAndCheck col pending with
+                | Ok v -> Ok(v :: valuesRev, nextAutoId, assignedId)
+                | Error e -> Error e
+
+    List.zip columns rawRow
+    |> List.fold step (Ok([], nextAutoId, None))
+    |> Result.map (fun (valuesRev, nextAutoId, assignedId) -> List.rev valuesRev, nextAutoId, assignedId)
+
+/// Inserts rows built from `columns` (the explicit column list, or `None`
+/// for "all columns in table order") and matching value lists, applying
+/// defaults, AUTO_INCREMENT assignment, and NOT NULL/type-coercion checks.
+/// Returns `(lastInsertId, affected row count)`; `lastInsertId` is the
+/// first AUTO_INCREMENT id assigned by this statement, or 0 if none was.
+let insertRows
+    (store: Store)
+    (dbName: string)
+    (tableName: string)
+    (columns: string list option)
+    (rowsIn: Value list list)
+    : Result<int64 * int, StorageError> =
+    withWrite store (fun catalog ->
+        match tryGetDatabase catalog dbName with
+        | Error e -> Error e
+        | Ok db ->
+            match tryGetTable db tableName with
+            | Error e -> Error e
+            | Ok table ->
+                let indices =
+                    match columns with
+                    | None -> Ok [ 0 .. table.Columns.Length - 1 ]
+                    | Some names -> names |> traverseResult (resolveColumn table.Columns)
+
+                match indices with
+                | Error e -> Error e
+                | Ok idxs ->
+                    let step acc (rowValues: Value list) =
+                        match acc with
+                        | Error e -> Error e
+                        | Ok(rowsRev, nextAutoId, firstAssigned) ->
+                            if List.length rowValues <> List.length idxs then
+                                Error(ColumnCountMismatch(List.length idxs, List.length rowValues))
+                            else
+                                let provided = List.zip idxs rowValues |> Map.ofList
+                                let rawRow = table.Columns |> List.mapi (fun i _ -> Map.tryFind i provided)
+
+                                match processRow nextAutoId rawRow table.Columns with
+                                | Error e -> Error e
+                                | Ok(finalValues, nextAutoId', assignedId) ->
+                                    Ok(Array.ofList finalValues :: rowsRev, nextAutoId', Option.orElse assignedId firstAssigned)
+
+                    match rowsIn |> List.fold step (Ok([], table.NextAutoId, None)) with
+                    | Error e -> Error e
+                    | Ok(newRowsRev, nextAutoId', firstAssigned) ->
+                        let table' =
+                            { table with
+                                Rows = table.Rows @ List.rev newRowsRev
+                                NextAutoId = nextAutoId' }
+
+                        Ok(
+                            Map.add dbName (Map.add (normalizeTableName tableName) table' db) catalog,
+                            (Option.defaultValue 0L firstAssigned, List.length newRowsRev)
+                        ))
 
 /// A snapshot read: the table's columns and its rows as they were at the
 /// moment of the call. Lock-free — reads a single reference field, and
