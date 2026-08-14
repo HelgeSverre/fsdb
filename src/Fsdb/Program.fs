@@ -36,6 +36,7 @@ let main argv =
     | Some address ->
         let port = parsePort argv
         let listener = startListening address port
+        let store = Fsdb.Storage.create ()
         printfn "fsdb listening on %O:%d" address port
-        serve listener |> Async.RunSynchronously
+        serve listener store |> Async.RunSynchronously
         0

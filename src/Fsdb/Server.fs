@@ -9,6 +9,7 @@ open System.Text
 open Fsdb.Packet
 open Fsdb.Protocol
 open Fsdb.Session
+open Fsdb.Executor
 
 // COM_* command byte values we handle.
 // https://dev.mysql.com/doc/dev/mysql-server/latest/page_protocol_command_phase.html
@@ -52,7 +53,7 @@ let sendQueryResult
     (stream: IO.Stream)
     (capabilities: uint32)
     (startSeq: byte)
-    (result: QueryHandler.QueryResult)
+    (result: Executor.QueryResult)
     : Async<unit> =
     // Writes each payload in turn, threading the *actual* next sequence id
     // returned by writePacketAsync rather than assuming one payload == one
@@ -69,10 +70,9 @@ let sendQueryResult
 
     async {
         match result with
-        | QueryHandler.Affected affectedRows ->
-            do! sendAll startSeq [ okPayload capabilities affectedRows 0UL ]
-        | QueryHandler.Err(code, message) -> do! sendAll startSeq [ errPayload capabilities code message ]
-        | QueryHandler.ResultSet(columns, rows) ->
+        | Affected affectedRows -> do! sendAll startSeq [ okPayload capabilities affectedRows 0UL ]
+        | Err(code, message) -> do! sendAll startSeq [ errPayload capabilities code message ]
+        | ResultSet(columns, rows) ->
             let deprecateEof = capabilities &&& ClientDeprecateEof <> 0u
 
             let columnCountPayload =
@@ -99,7 +99,7 @@ let sendQueryResult
             do! sendAll startSeq (List.ofSeq payloads)
     }
 
-let private handleConnection (connectionId: int) (client: TcpClient) : Async<unit> =
+let private handleConnection (connectionId: int) (store: Storage.Store) (client: TcpClient) : Async<unit> =
     async {
         use client = client
         use stream = client.GetStream()
@@ -120,7 +120,7 @@ let private handleConnection (connectionId: int) (client: TcpClient) : Async<uni
                 let resp = parseHandshakeResponse handshakeResp.Payload
                 // Effective capabilities: never claim something the client didn't ask for.
                 capabilities <- resp.Capabilities &&& ServerCapabilities
-                let session = { Session.create connectionId with Database = resp.Database }
+                let session = { Session.create connectionId store with Database = resp.Database }
 
                 do!
                     writePacketAsync
@@ -210,8 +210,9 @@ let private tryAccept (listener: TcpListener) : Async<TcpClient option> =
     }
 
 /// Accepts connections until the listener is stopped, handling each on its
-/// own async. A failing connection is logged, never fatal to the server.
-let serve (listener: TcpListener) : Async<unit> =
+/// own async against the one shared `store` every session reads/writes
+/// through. A failing connection is logged, never fatal to the server.
+let serve (listener: TcpListener) (store: Storage.Store) : Async<unit> =
     let rec loop (connectionId: int) : Async<unit> =
         async {
             match! tryAccept listener with
@@ -220,7 +221,7 @@ let serve (listener: TcpListener) : Async<unit> =
                 Async.Start(
                     async {
                         try
-                            do! handleConnection connectionId client
+                            do! handleConnection connectionId store client
                         with ex ->
                             eprintfn "fsdb: connection %d: %s" connectionId ex.Message
                     }

@@ -1,17 +1,22 @@
-/// Pragmatic query dispatcher for M1/M2: there is no SQL parser yet, so we
-/// pattern-match on trimmed/uppercased query text for the handful of
-/// statements mysql CLI and PDO send on connect. This whole module shrinks
-/// to almost nothing once the real FParsec-based engine lands in M3.
+/// Query dispatcher: a handful of connection-setup forms mysql CLI/PDO send
+/// (`@@vars`, `SET`, `SHOW`, `USE`, literal `SELECT <n>`) are still matched
+/// on trimmed/uppercased query text, since they're session-variable probes
+/// rather than real SQL the grammar needs to know about. Everything else
+/// goes through `Parser.parse -> Executor.execute`.
 module Fsdb.QueryHandler
 
 open System
 open System.Text.RegularExpressions
+open Fsdb.Value
 open Fsdb.Session
+open Fsdb.Storage
 
-type QueryResult =
-    | ResultSet of columns: string list * rows: (string option list) list
-    | Affected of affectedRows: uint64
-    | Err of code: int * message: string
+/// The wire-facing result shape is `Executor.QueryResult` itself — both the
+/// parser-driven path and the text-probe special cases below construct the
+/// same type, so there's exactly one definition of it.
+type QueryResult = Fsdb.Executor.QueryResult
+
+open Fsdb.Executor
 
 let private syntaxError (sql: string) =
     // Truncate: this message gets echoed straight into an ERR packet, and an
@@ -149,6 +154,29 @@ let private handleSet (session: Session) (sql: string) : Session * QueryResult =
         else
             session, Affected 0UL
 
+/// The function registry for one statement: `Functions.builtins` plus the
+/// session-dependent entries that can't be plain `Value list -> Value`
+/// closures until they're given a session to close over (`DATABASE()`
+/// reads `session.Database`, `LAST_INSERT_ID()` reads `session.LastInsertId`,
+/// `VERSION()` just reuses the same `@@version` value `SELECT @@version`
+/// already serves).
+let private registryFor (session: Session) : Functions.Registry =
+    Functions.builtins
+    |> Functions.registerScalar "DATABASE" (fun _ -> session.Database |> Option.map VString |> Option.defaultValue VNull)
+    |> Functions.registerScalar "LAST_INSERT_ID" (fun _ -> VInt session.LastInsertId)
+    |> Functions.registerScalar "VERSION" (fun _ -> lookupVar session "version" |> Option.map VString |> Option.defaultValue VNull)
+
+/// Parses and executes anything that isn't one of the text-probe special
+/// cases above. A parse failure is a 1064 syntax error with SQLSTATE 42000
+/// (the mapping `errPayload` already has for that code).
+let private executeStatement (session: Session) (sql: string) : Session * QueryResult =
+    match Parser.parse sql with
+    | Result.Error _ -> session, syntaxError sql
+    | Result.Ok stmt ->
+        let dbName = session.Database |> Option.defaultValue defaultDatabase
+        let lastInsertId, result = Executor.execute session.Store (registryFor session) dbName session.LastInsertId stmt
+        { session with LastInsertId = lastInsertId }, result
+
 let handle (session: Session) (rawSql: string) : Session * QueryResult =
     let sql = rawSql.Trim().TrimEnd(';').Trim()
     let upper = sql.ToUpperInvariant()
@@ -161,5 +189,5 @@ let handle (session: Session) (rawSql: string) : Session * QueryResult =
         { session with Database = Some(sql.Substring(4).Trim().Trim('`')) }, Affected 0UL
     | _ when upper.StartsWith "SHOW VARIABLES" -> session, handleShowVariables session sql
     | _ when upper.StartsWith "SELECT" && upper.Contains "@@" -> session, handleAtVarSelect session sql
-    | _ when upper.StartsWith "SELECT" -> session, handleLiteralSelect sql
-    | _ -> session, syntaxError sql
+    | _ when literalSelect.IsMatch sql -> session, handleLiteralSelect sql
+    | _ -> executeStatement session sql

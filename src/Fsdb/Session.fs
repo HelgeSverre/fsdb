@@ -2,6 +2,7 @@
 module Fsdb.Session
 
 open Fsdb.Protocol
+open Fsdb.Storage
 
 /// Session variable defaults good enough to satisfy mysql CLI / PDO on
 /// connect. Grows as real clients ask for more `@@vars` / SHOW VARIABLES.
@@ -37,9 +38,18 @@ let defaultVariables: Map<string, string> =
 type Session =
     { ConnectionId: int
       Database: string option
-      Variables: Map<string, string> }
+      Variables: Map<string, string>
+      /// The single shared catalog every connection reads/writes through —
+      /// `Session` itself stays an immutable per-connection value; `Store`
+      /// is the one mutable boundary (see `Storage.Store`).
+      Store: Store
+      /// The AUTO_INCREMENT id assigned by this session's most recent
+      /// INSERT, for `LAST_INSERT_ID()`. 0 until the first such INSERT.
+      LastInsertId: int64 }
 
-let create (connectionId: int) : Session =
+let create (connectionId: int) (store: Store) : Session =
     { ConnectionId = connectionId
       Database = None
-      Variables = defaultVariables }
+      Variables = defaultVariables
+      Store = store
+      LastInsertId = 0L }

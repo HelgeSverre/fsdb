@@ -5,6 +5,7 @@ open Expecto
 open Fsdb.Packet
 open Fsdb.Protocol
 open Fsdb.Session
+open Fsdb.Executor
 open Fsdb.QueryHandler
 
 let packetTests =
@@ -233,7 +234,7 @@ let queryHandlerTests =
         "QueryHandler"
         [ testCase "SELECT 1 returns a single row with column name '1'"
           <| fun _ ->
-              let session = create 1
+              let session = create 1 (Fsdb.Storage.create ())
 
               match handle session "SELECT 1" |> snd with
               | ResultSet(cols, rows) ->
@@ -243,7 +244,7 @@ let queryHandlerTests =
 
           testCase "SELECT @@version returns the server version"
           <| fun _ ->
-              let session = create 1
+              let session = create 1 (Fsdb.Storage.create ())
 
               match handle session "SELECT @@version" |> snd with
               | ResultSet(cols, [ [ Some v ] ]) ->
@@ -253,7 +254,7 @@ let queryHandlerTests =
 
           testCase "SELECT @@version, @@version_comment returns both columns"
           <| fun _ ->
-              let session = create 1
+              let session = create 1 (Fsdb.Storage.create ())
 
               match handle session "SELECT @@version, @@version_comment" |> snd with
               | ResultSet(cols, [ row ]) ->
@@ -263,7 +264,7 @@ let queryHandlerTests =
 
           testCase "SELECT @@unknown_var returns a 1193 unknown-system-variable error"
           <| fun _ ->
-              let session = create 1
+              let session = create 1 (Fsdb.Storage.create ())
 
               match handle session "SELECT @@totally_not_a_var" |> snd with
               | Err(1193, msg) -> Expect.stringContains msg "totally_not_a_var" "message names the variable"
@@ -271,7 +272,7 @@ let queryHandlerTests =
 
           testCase "the Connector/J connection probe (auto_increment_increment, transaction_isolation) resolves"
           <| fun _ ->
-              let session = create 1
+              let session = create 1 (Fsdb.Storage.create ())
 
               match
                   handle
@@ -286,7 +287,7 @@ let queryHandlerTests =
           <| fun _ ->
               // Regression: mysql CLI probes the connection banner with exactly
               // this query at connect time.
-              let session = create 1
+              let session = create 1 (Fsdb.Storage.create ())
 
               match handle session "select @@version_comment limit 1" |> snd with
               | ResultSet([ "@@version_comment" ], [ [ Some _ ] ]) -> ()
@@ -294,7 +295,7 @@ let queryHandlerTests =
 
           testCase "SET NAMES utf8mb4 returns OK"
           <| fun _ ->
-              let session = create 1
+              let session = create 1 (Fsdb.Storage.create ())
 
               match handle session "SET NAMES utf8mb4" |> snd with
               | Affected _ -> ()
@@ -302,7 +303,7 @@ let queryHandlerTests =
 
           testCase "SET NAMES updates character_set_client, reflected by SELECT @@character_set_client"
           <| fun _ ->
-              let session = create 1
+              let session = create 1 (Fsdb.Storage.create ())
               let session, _ = handle session "SET NAMES latin1"
 
               match handle session "SELECT @@character_set_client" |> snd with
@@ -311,7 +312,7 @@ let queryHandlerTests =
 
           testCase "SET sql_mode = '...' updates the session variable, reflected by SELECT @@sql_mode"
           <| fun _ ->
-              let session = create 1
+              let session = create 1 (Fsdb.Storage.create ())
               let session, _ = handle session "SET sql_mode = 'ANSI_QUOTES'"
 
               match handle session "SELECT @@sql_mode" |> snd with
@@ -320,7 +321,7 @@ let queryHandlerTests =
 
           testCase "SELECT DATABASE() returns NULL before USE"
           <| fun _ ->
-              let session = create 1
+              let session = create 1 (Fsdb.Storage.create ())
 
               match handle session "SELECT DATABASE()" |> snd with
               | ResultSet(_, [ [ None ] ]) -> ()
@@ -328,7 +329,7 @@ let queryHandlerTests =
 
           testCase "USE sets the session database, reflected by SELECT DATABASE()"
           <| fun _ ->
-              let session = create 1
+              let session = create 1 (Fsdb.Storage.create ())
               let session, _ = handle session "USE mydb"
 
               match handle session "SELECT DATABASE()" |> snd with
@@ -337,7 +338,7 @@ let queryHandlerTests =
 
           testCase "SHOW DATABASES returns a resultset"
           <| fun _ ->
-              let session = create 1
+              let session = create 1 (Fsdb.Storage.create ())
 
               match handle session "SHOW DATABASES" |> snd with
               | ResultSet([ "Database" ], _ :: _) -> ()
@@ -345,7 +346,7 @@ let queryHandlerTests =
 
           testCase "SHOW VARIABLES LIKE filters by pattern"
           <| fun _ ->
-              let session = create 1
+              let session = create 1 (Fsdb.Storage.create ())
 
               match handle session "SHOW VARIABLES LIKE 'autocommit'" |> snd with
               | ResultSet(_, [ [ Some "autocommit"; Some "1" ] ]) -> ()
@@ -353,10 +354,10 @@ let queryHandlerTests =
 
           testCase "an unrecognized statement is a 1064 syntax error naming the query"
           <| fun _ ->
-              let session = create 1
+              let session = create 1 (Fsdb.Storage.create ())
 
-              match handle session "CREATE TABLE t (id INT)" |> snd with
-              | Err(1064, msg) -> Expect.stringContains msg "CREATE TABLE t" "message names the query"
+              match handle session "GARBAGE NOT SQL" |> snd with
+              | Err(1064, msg) -> Expect.stringContains msg "GARBAGE NOT SQL" "message names the query"
               | other -> failtestf "expected a 1064 error, got %A" other ]
 
 /// Reads every packet off a stream until clean EOF.
@@ -435,7 +436,7 @@ let integrationTests =
               async {
                   let listener = Fsdb.Server.startListening System.Net.IPAddress.Loopback 0
                   let port = Fsdb.Server.port listener
-                  let serverTask = Fsdb.Server.serve listener |> Async.StartAsTask
+                  let serverTask = Fsdb.Server.serve listener (Fsdb.Storage.create ()) |> Async.StartAsTask
 
                   try
                       let connStr =
@@ -455,6 +456,60 @@ let integrationTests =
                       cmd2.CommandText <- "SELECT @@version"
                       let! result2 = cmd2.ExecuteScalarAsync() |> Async.AwaitTask
                       Expect.equal (string result2) ServerVersion "SELECT @@version result"
+
+                      do! conn.CloseAsync() |> Async.AwaitTask
+                  finally
+                      listener.Stop()
+              }
+              |> Async.RunSynchronously
+
+          testCase "a real CRUD round-trip: create table, insert, select, update, delete"
+          <| fun _ ->
+              async {
+                  let listener = Fsdb.Server.startListening System.Net.IPAddress.Loopback 0
+                  let port = Fsdb.Server.port listener
+                  let serverTask = Fsdb.Server.serve listener (Fsdb.Storage.create ()) |> Async.StartAsTask
+
+                  try
+                      let connStr =
+                          sprintf
+                              "Server=127.0.0.1;Port=%d;User ID=root;Password=;AllowPublicKeyRetrieval=True;SslMode=None"
+                              port
+
+                      use conn = new MySqlConnector.MySqlConnection(connStr)
+                      do! conn.OpenAsync() |> Async.AwaitTask
+
+                      let exec (sql: string) =
+                          async {
+                              use cmd = conn.CreateCommand()
+                              cmd.CommandText <- sql
+                              return! cmd.ExecuteNonQueryAsync() |> Async.AwaitTask
+                          }
+
+                      do! exec "CREATE TABLE crud_users (id INT AUTO_INCREMENT PRIMARY KEY, name VARCHAR(50), age INT)" |> Async.Ignore
+                      let! inserted = exec "INSERT INTO crud_users (name, age) VALUES ('alice', 30), ('bob', 25)"
+                      Expect.equal inserted 2 "two rows inserted"
+
+                      use selectCmd = conn.CreateCommand()
+                      selectCmd.CommandText <- "SELECT name, age FROM crud_users WHERE age > 26 ORDER BY name"
+                      use! reader = selectCmd.ExecuteReaderAsync() |> Async.AwaitTask
+                      let! hasRow = reader.ReadAsync() |> Async.AwaitTask
+                      Expect.isTrue hasRow "one row matches age > 26"
+                      Expect.equal (reader.GetString 0) "alice" "matching row is alice"
+                      let! hasMore = reader.ReadAsync() |> Async.AwaitTask
+                      Expect.isFalse hasMore "only one row matches"
+                      do! reader.CloseAsync() |> Async.AwaitTask
+
+                      let! updated = exec "UPDATE crud_users SET age = 31 WHERE name = 'alice'"
+                      Expect.equal updated 1 "one row updated"
+
+                      let! deleted = exec "DELETE FROM crud_users WHERE name = 'bob'"
+                      Expect.equal deleted 1 "one row deleted"
+
+                      use countCmd = conn.CreateCommand()
+                      countCmd.CommandText <- "SELECT UPPER(name), age FROM crud_users"
+                      let! upperName = countCmd.ExecuteScalarAsync() |> Async.AwaitTask
+                      Expect.equal (string upperName) "ALICE" "UPPER() applied through the function registry"
 
                       do! conn.CloseAsync() |> Async.AwaitTask
                   finally
