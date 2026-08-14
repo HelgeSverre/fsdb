@@ -12,6 +12,7 @@ module Fsdb.Parser
 
 open System
 open System.Collections.Generic
+open System.Globalization
 open FParsec
 open Fsdb.Ast
 open Fsdb.Value
@@ -120,13 +121,24 @@ let private identifier: Parser<string, unit> =
 let private numberFormat = NumberLiteralOptions.AllowFraction ||| NumberLiteralOptions.AllowExponent
 
 /// Plain integers become `VInt`, exponent notation becomes `VDouble`, and
-/// everything else with a decimal point stays exact as `VDecimal`.
+/// everything else with a decimal point stays exact as `VDecimal` — an
+/// integer or decimal literal outside its type's range falls back to
+/// `VDouble` (as MySQL's own DECIMAL/BIGINT overflow handling does) instead
+/// of throwing `int64`/`decimal`'s unguarded overflow exception, which would
+/// otherwise escape the parser and drop the client's connection.
 let private numberLit: Parser<Value, unit> =
     (numberLiteral numberFormat "number" .>> ws)
     |>> fun nl ->
-        if nl.IsInteger then VInt(int64 nl.String)
-        elif nl.HasExponent then VDouble(float nl.String)
-        else VDecimal(decimal nl.String)
+        if nl.IsInteger then
+            match Int64.TryParse(nl.String, NumberStyles.Integer, CultureInfo.InvariantCulture) with
+            | true, i -> VInt i
+            | false, _ -> VDouble(float nl.String)
+        elif nl.HasExponent then
+            VDouble(float nl.String)
+        else
+            match Decimal.TryParse(nl.String, NumberStyles.Float, CultureInfo.InvariantCulture) with
+            | true, d -> VDecimal d
+            | false, _ -> VDouble(float nl.String)
 
 /// A single quoted string char: `''` escapes to `'`, a backslash escapes
 /// the next character (`\n`, `\t`, `\\`, `\'`, ... or itself for anything
@@ -445,6 +457,14 @@ let parse (sql: string) : Result<Statement, string> =
 
     // `open FParsec` brings its own `Ok`/`Error` (from `Reply`'s status) into
     // scope, shadowing `Result`'s — qualify to get the ones this signature means.
-    match run full sql with
-    | Success(stmt, _, _) -> Result.Ok stmt
-    | Failure(msg, _, _) -> Result.Error msg
+    //
+    // Belt-and-braces around `numberLit`'s overflow guard above: no parser
+    // exception should ever be able to escape as a raw .NET exception and
+    // drop the caller's connection — a syntax error is always a clean
+    // `Result.Error`, however it originates.
+    try
+        match run full sql with
+        | Success(stmt, _, _) -> Result.Ok stmt
+        | Failure(msg, _, _) -> Result.Error msg
+    with ex ->
+        Result.Error ex.Message

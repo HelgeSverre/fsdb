@@ -338,7 +338,19 @@ let tests =
 
           testList
               "literals and quoting"
-              [ testCase "single-quoted string with doubled-quote escape"
+              [ testCase "an out-of-range integer literal falls back to VDouble instead of throwing"
+                <| fun _ ->
+                    match parseOk "SELECT 99999999999999999999" with
+                    | Select { Projections = [ Lit(VDouble _), None ] } -> ()
+                    | other -> failtestf "expected a VDouble fallback, got %A" other
+
+                testCase "an out-of-range decimal literal falls back to VDouble instead of throwing"
+                <| fun _ ->
+                    match parseOk "SELECT 123456789012345678901234567890123456789.5" with
+                    | Select { Projections = [ Lit(VDouble _), None ] } -> ()
+                    | other -> failtestf "expected a VDouble fallback, got %A" other
+
+                testCase "single-quoted string with doubled-quote escape"
                 <| fun _ ->
                     Expect.equal
                         (parseOk "SELECT 'it''s here'")
