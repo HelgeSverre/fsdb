@@ -44,8 +44,11 @@ let private randomAuthPluginData () : byte[] =
     bytes |> Array.map (fun b -> if b = 0uy then 1uy else b)
 
 /// Writes a text resultset (or OK/ERR) as one or more packets, continuing
-/// the sequence-id numbering from `startSeq`.
-let private sendQueryResult
+/// the sequence-id numbering from `startSeq`. Not private: exercised
+/// directly by the test suite, since it's the only sequence-id-bearing
+/// logic in the server and the legacy (non CLIENT_DEPRECATE_EOF) path isn't
+/// reachable through the MySqlConnector integration test.
+let sendQueryResult
     (stream: IO.Stream)
     (capabilities: uint32)
     (startSeq: byte)
