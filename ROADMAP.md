@@ -7,11 +7,11 @@ gate passes against a real external client.
 `mysql --protocol=tcp -h127.0.0.1 -P3307 -e 'SELECT 1'` returns a resultset.
 Handshake, mysql_native_password auth, packet framing, COM_QUERY, COM_PING,
 COM_QUIT, text resultset encoding.
-**Gate:** mysql CLI gets `1` back. Status: ☐
+**Gate:** mysql CLI gets `1` back. Status: ✅
 
 ## M2 — PDO connects
 Session variables (`SET NAMES`, `sql_mode`), `@@version`, `SELECT DATABASE()`.
-**Gate:** a 5-line PHP PDO script connects and queries. Status: ☐
+**Gate:** a 5-line PHP PDO script connects and queries. Status: ✅
 
 ## M3 — SQL engine core
 FParsec parser, in-memory storage, Value coercion rules.
