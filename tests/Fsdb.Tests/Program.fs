@@ -467,4 +467,11 @@ let main argv =
     Tests.runTestsWithCLIArgs
         []
         argv
-        (testList "fsdb" [ packetTests; protocolTests; queryHandlerTests; serverTests; integrationTests ])
+        (testList
+            "fsdb"
+            [ packetTests
+              protocolTests
+              queryHandlerTests
+              serverTests
+              ValueTests.tests
+              integrationTests ])
