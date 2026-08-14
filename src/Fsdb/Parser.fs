@@ -474,7 +474,11 @@ let private foreignKeyRefOptions: Parser<string option * string option, unit> =
         (opts |> List.tryPick (function Choice1Of2 a -> Some a | _ -> None),
          opts |> List.tryPick (function Choice2Of2 a -> Some a | _ -> None))
 
-let private constraintName: Parser<string option, unit> = opt (keyword "CONSTRAINT" >>. identifier)
+/// `CONSTRAINT [symbol]` — the symbol name is optional even when
+/// `CONSTRAINT` itself is present, so a bare `CONSTRAINT FOREIGN KEY (...)`
+/// (no name at all) parses too.
+let private constraintName: Parser<string option, unit> =
+    opt (keyword "CONSTRAINT" >>. opt identifier) |>> Option.flatten
 
 let private foreignKeyItem: Parser<ForeignKeyDef, unit> =
     (constraintName .>> keyword "FOREIGN" .>> keyword "KEY"

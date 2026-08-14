@@ -611,6 +611,12 @@ let tests =
                     | CreateTable(_, _, [], [ { Name = "users_user_id_foreign" } ], false) -> ()
                     | other -> failtestf "expected a synthesized FK name, got %A" other
 
+                testCase "a bare CONSTRAINT with no symbol name before FOREIGN KEY still parses"
+                <| fun _ ->
+                    match parseOk "CREATE TABLE posts (user_id INT, CONSTRAINT FOREIGN KEY (user_id) REFERENCES users (id))" with
+                    | CreateTable(_, _, [], [ { Name = "users_user_id_foreign" } ], false) -> ()
+                    | other -> failtestf "expected an unnamed CONSTRAINT to still synthesize a name, got %A" other
+
                 testCase "ENUM and SET column types carry their declared values"
                 <| fun _ ->
                     match parseOk "CREATE TABLE t (status ENUM('a', 'b'), flags SET('x', 'y'))" with
