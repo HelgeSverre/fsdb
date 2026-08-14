@@ -474,4 +474,6 @@ let main argv =
               queryHandlerTests
               serverTests
               ValueTests.tests
+              ParserTests.tests
+              StorageTests.tests
               integrationTests ])
