@@ -164,9 +164,37 @@ let readPacketAsync (stream: Stream) : Async<Packet option> =
             | Some payload -> return Some { SeqId = seqId; Payload = payload }
     }
 
-/// Writes one packet to a stream.
-let writePacketAsync (stream: Stream) (p: Packet) : Async<unit> =
+/// The largest payload a single packet header can declare (2^24 - 1). A
+/// payload of exactly this many bytes means "more packets follow" on the
+/// wire — see `writePacketAsync` and `readPacketAsync`.
+let maxPacketPayload = 0xffffff
+
+/// Writes one logical packet to a stream, splitting the payload into
+/// maxPacketPayload-byte chunks with incrementing sequence ids if it's too
+/// big for a single packet (`frame`'s 3-byte length prefix can't represent
+/// more than that; naively calling `frame` on an oversized payload silently
+/// truncated the declared length and desynced the connection forever). A
+/// payload whose length is an exact multiple of maxPacketPayload — including
+/// zero — still gets a final (possibly empty) packet, since a chunk of
+/// exactly maxPacketPayload bytes signals "more data follows".
+/// Returns the next free sequence id, so callers writing several packets in
+/// a row don't have to assume one payload == one seq id.
+let writePacketAsync (stream: Stream) (p: Packet) : Async<byte> =
     async {
-        let bytes = frame p
+        let payload = p.Payload
+        let total = payload.Length
+        let mutable offset = 0
+        let mutable seqId = p.SeqId
+
+        while total - offset >= maxPacketPayload do
+            let chunk = payload.[offset .. offset + maxPacketPayload - 1]
+            let bytes = frame { SeqId = seqId; Payload = chunk }
+            do! stream.WriteAsync(bytes, 0, bytes.Length) |> Async.AwaitTask
+            seqId <- seqId + 1uy
+            offset <- offset + maxPacketPayload
+
+        let lastChunk = payload.[offset..]
+        let bytes = frame { SeqId = seqId; Payload = lastChunk }
         do! stream.WriteAsync(bytes, 0, bytes.Length) |> Async.AwaitTask
+        return seqId + 1uy
     }

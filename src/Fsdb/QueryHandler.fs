@@ -14,11 +14,17 @@ type QueryResult =
     | Err of code: int * message: string
 
 let private syntaxError (sql: string) =
+    // Truncate: this message gets echoed straight into an ERR packet, and an
+    // unbounded echo of the query text is a reachable way to blow past
+    // writePacketAsync's single-packet framing (see the Packet.fs framing
+    // fix for the real root cause of >16 MiB payloads).
+    let truncated = sql.Substring(0, min sql.Length 1024)
+
     Err(
         1064,
         sprintf
             "You have an error in your SQL syntax; check the manual that corresponds to your fsdb version for the right syntax to use near '%s'"
-            sql
+            truncated
     )
 
 let private lookupVar (session: Session) (name: string) : string option =

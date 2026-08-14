@@ -54,7 +54,8 @@ let packetTests =
               async {
                   use stream = new IO.MemoryStream()
                   let original = { SeqId = 3uy; Payload = [| 1uy; 2uy; 3uy; 4uy; 5uy |] }
-                  do! writePacketAsync stream original
+                  let! nextSeqId = writePacketAsync stream original
+                  Expect.equal nextSeqId 4uy "next seq id after a single-chunk write"
                   stream.Position <- 0L
                   let! result = readPacketAsync stream
 
@@ -63,6 +64,36 @@ let packetTests =
                       Expect.equal p.SeqId original.SeqId "seq id"
                       Expect.equal p.Payload original.Payload "payload"
                   | None -> failtest "expected a packet"
+              }
+              |> Async.RunSynchronously
+
+          testCase "writePacketAsync splits a payload >= 16 MiB instead of truncating the length header"
+          <| fun _ ->
+              // Regression: frame's 3-byte length prefix can't represent
+              // more than 0xffffff bytes; naively writing an oversized
+              // payload silently declared `length &&& 0xffffff` and then
+              // wrote the full body, permanently desyncing the connection.
+              async {
+                  use stream = new IO.MemoryStream()
+                  let payload = Array.zeroCreate<byte> maxPacketPayload // exactly the 0xffffff boundary
+                  let! nextSeqId = writePacketAsync stream { SeqId = 5uy; Payload = payload }
+                  // An exact-multiple-of-maxPacketPayload payload needs a
+                  // trailing empty packet so the reader knows where it ends.
+                  Expect.equal nextSeqId 7uy "two wire packets consumed for an exact-boundary payload"
+
+                  stream.Position <- 0L
+                  let header1 = Array.zeroCreate<byte> 4
+                  stream.Read(header1, 0, 4) |> ignore
+                  let r1 = Reader(header1)
+                  Expect.equal (r1.ReadInt24LE()) maxPacketPayload "first chunk declares the max length"
+                  Expect.equal (r1.ReadByte()) 5uy "first chunk seq id"
+
+                  stream.Seek(int64 maxPacketPayload, IO.SeekOrigin.Current) |> ignore
+                  let header2 = Array.zeroCreate<byte> 4
+                  stream.Read(header2, 0, 4) |> ignore
+                  let r2 = Reader(header2)
+                  Expect.equal (r2.ReadInt24LE ()) 0 "trailing packet declares zero length"
+                  Expect.equal (r2.ReadByte ()) 6uy "trailing packet seq id"
               }
               |> Async.RunSynchronously
 

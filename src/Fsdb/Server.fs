@@ -54,12 +54,24 @@ let sendQueryResult
     (startSeq: byte)
     (result: QueryHandler.QueryResult)
     : Async<unit> =
+    // Writes each payload in turn, threading the *actual* next sequence id
+    // returned by writePacketAsync rather than assuming one payload == one
+    // packet == one seq id — a payload that itself splits into multiple
+    // wire packets (>= 16 MiB) would otherwise desync every packet after it.
+    let rec sendAll (seqId: byte) (payloads: byte[] list) : Async<unit> =
+        async {
+            match payloads with
+            | [] -> ()
+            | payload :: rest ->
+                let! nextSeqId = writePacketAsync stream { SeqId = seqId; Payload = payload }
+                return! sendAll nextSeqId rest
+        }
+
     async {
         match result with
         | QueryHandler.Affected affectedRows ->
-            do! writePacketAsync stream { SeqId = startSeq; Payload = okPayload capabilities affectedRows 0UL }
-        | QueryHandler.Err(code, message) ->
-            do! writePacketAsync stream { SeqId = startSeq; Payload = errPayload capabilities code message }
+            do! sendAll startSeq [ okPayload capabilities affectedRows 0UL ]
+        | QueryHandler.Err(code, message) -> do! sendAll startSeq [ errPayload capabilities code message ]
         | QueryHandler.ResultSet(columns, rows) ->
             let deprecateEof = capabilities &&& ClientDeprecateEof <> 0u
 
@@ -84,8 +96,7 @@ let sendQueryResult
                         eofPayload capabilities
                 }
 
-            for i, payload in Seq.indexed payloads do
-                do! writePacketAsync stream { SeqId = startSeq + byte i; Payload = payload }
+            do! sendAll startSeq (List.ofSeq payloads)
     }
 
 let private handleConnection (connectionId: int) (client: TcpClient) : Async<unit> =
@@ -93,7 +104,7 @@ let private handleConnection (connectionId: int) (client: TcpClient) : Async<uni
         use client = client
         use stream = client.GetStream()
         let authData = randomAuthPluginData ()
-        do! writePacketAsync stream { SeqId = 0uy; Payload = buildHandshakeV10 connectionId authData }
+        do! writePacketAsync stream { SeqId = 0uy; Payload = buildHandshakeV10 connectionId authData } |> Async.Ignore
 
         match! readPacketAsync stream with
         | None -> ()
@@ -108,6 +119,7 @@ let private handleConnection (connectionId: int) (client: TcpClient) : Async<uni
                     stream
                     { SeqId = handshakeResp.SeqId + 1uy
                       Payload = okPayload capabilities 0UL 0UL }
+                |> Async.Ignore
 
             let rec loop (session: Session) : Async<unit> =
                 async {
@@ -120,10 +132,16 @@ let private handleConnection (connectionId: int) (client: TcpClient) : Async<uni
                         | None
                         | Some Quit -> ()
                         | Some Ping ->
-                            do! writePacketAsync stream { SeqId = seqId; Payload = okPayload capabilities 0UL 0UL }
+                            do!
+                                writePacketAsync stream { SeqId = seqId; Payload = okPayload capabilities 0UL 0UL }
+                                |> Async.Ignore
+
                             return! loop session
                         | Some(InitDb db) ->
-                            do! writePacketAsync stream { SeqId = seqId; Payload = okPayload capabilities 0UL 0UL }
+                            do!
+                                writePacketAsync stream { SeqId = seqId; Payload = okPayload capabilities 0UL 0UL }
+                                |> Async.Ignore
+
                             return! loop { session with Database = Some db }
                         | Some(Query sql) ->
                             let session, result = QueryHandler.handle session sql
@@ -135,6 +153,7 @@ let private handleConnection (connectionId: int) (client: TcpClient) : Async<uni
                                     stream
                                     { SeqId = seqId
                                       Payload = errPayload capabilities 1047 "Unknown command" }
+                                |> Async.Ignore
 
                             return! loop session
                 }
