@@ -238,6 +238,14 @@ let private runSelect (registry: Registry) (columns: ColumnDef list) (rows: Valu
     let projections, whereExpr, orderBy, limit, offset =
         select.Projections, select.Where, select.OrderBy, select.Limit, select.Offset
 
+    // A `SELECT` with no `FROM` at all has no columns to expand `*`/`t.*`
+    // against — real MySQL rejects it as 1096 rather than emitting a
+    // resultset with zero columns, which isn't a legal text-resultset
+    // packet and aborts the client's whole session.
+    if select.From.IsNone && projections |> List.exists (fst >> (=) Star) then
+        Err(1096, "No tables used")
+    else
+
     let columnIndex = columnIndexOf columns
 
     // ORDER BY may name a `SELECT ... AS alias` rather than a table column

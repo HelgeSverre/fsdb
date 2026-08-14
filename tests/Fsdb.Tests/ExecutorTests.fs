@@ -78,6 +78,14 @@ let tests =
                     | ResultSet(_, rows) -> Expect.equal rows [ [ Some "2" ]; [ Some "3" ] ] "page of two starting at offset 1"
                     | other -> failtestf "expected a resultset, got %A" other
 
+                testCase "SELECT * with no FROM is a 1096 error, not a 0-column resultset"
+                <| fun _ ->
+                    let store = newStore ()
+
+                    match runDefault store "SELECT *" with
+                    | Err(1096, _) -> ()
+                    | other -> failtestf "expected a 1096 error, got %A" other
+
                 testCase "ORDER BY resolves a SELECT alias, not just a table column"
                 <| fun _ ->
                     let store = newStore ()
