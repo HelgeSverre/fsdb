@@ -234,16 +234,10 @@ let private evalProjection
 /// surface a real error.
 let private probeRow (columns: ColumnDef list) : Value[] = Array.create (List.length columns) VNull
 
-let private runSelect
-    (registry: Registry)
-    (columns: ColumnDef list)
-    (rows: Value[] list)
-    (projections: Projection list)
-    (whereExpr: Expr option)
-    (orderBy: OrderKey list)
-    (limit: int option)
-    (offset: int option)
-    : QueryResult =
+let private runSelect (registry: Registry) (columns: ColumnDef list) (rows: Value[] list) (select: SelectStmt) : QueryResult =
+    let projections, whereExpr, orderBy, limit, offset =
+        select.Projections, select.Where, select.OrderBy, select.Limit, select.Offset
+
     let columnIndex = columnIndexOf columns
 
     let matches (row: Value[]) : Result<bool, EvalError> =
@@ -259,10 +253,10 @@ let private runSelect
         |> traverseList (evalProjection registry columnIndex columns row)
         |> Result.map List.concat
 
-    /// Sorts rows by their pre-evaluated `ORDER BY` keys: a total order per
-    /// key via `Value.compare` (NULLs first), folded left-to-right so the
-    /// first key that differs between two rows decides, later keys only
-    /// breaking ties.
+    // Sorts rows by their pre-evaluated `ORDER BY` keys: a total order per
+    // key via `Value.compare` (NULLs first), folded left-to-right so the
+    // first key that differs between two rows decides, later keys only
+    // breaking ties.
     let sortRows (keyed: (Value list * Value[]) list) : (Value list * Value[]) list =
         keyed
         |> List.sortWith (fun (ka, _) (kb, _) ->
@@ -359,13 +353,15 @@ let execute (store: Store) (registry: Registry) (dbName: string) (lastInsertId: 
                 (if newLastId <> 0L then newLastId else lastInsertId), Affected(uint64 affected)
             | Error e -> lastInsertId, storageErr e
 
-    | Select(projections, from, where, orderBy, limit, offset) ->
-        match from with
-        | None -> lastInsertId, runSelect registry [] [ [||] ] projections where orderBy limit offset
-        | Some table ->
-            match scan store dbName table with
+    | Select select ->
+        match select.From with
+        | None -> lastInsertId, runSelect registry [] [ [||] ] select
+        | Some tableRef ->
+            let tableDb = tableRef.Database |> Option.defaultValue dbName
+
+            match scan store tableDb tableRef.Table with
             | Error e -> lastInsertId, storageErr e
-            | Ok(columns, rows) -> lastInsertId, runSelect registry columns (List.ofSeq rows) projections where orderBy limit offset
+            | Ok(columns, rows) -> lastInsertId, runSelect registry columns (List.ofSeq rows) select
 
     | Update(table, assignments, whereExpr) ->
         match scan store dbName table with

@@ -394,15 +394,34 @@ let private limitClause: Parser<int option * int option, unit> =
         <|> (keyword "OFFSET" >>. intTok |>> fun b -> (Some a, Some b))
         <|> preturn (Some a, None)
 
+/// `[db.]table [[AS] alias]` — the alias form omits `AS` too (`FROM t x`),
+/// same as MySQL; `identifier` already backtracks cleanly off a reserved
+/// word (e.g. `WHERE`), so no `attempt` is needed around the bare-alias
+/// alternative.
+let private tableRef: Parser<TableRef, unit> =
+    (identifier .>>. opt (sym "." >>. identifier))
+    .>>. opt ((keyword "AS" >>. identifier) <|> identifier)
+    |>> fun ((first, second), alias) ->
+        match second with
+        | Some table -> { Database = Some first; Table = table; Alias = alias }
+        | None -> { Database = None; Table = first; Alias = alias }
+
 let private selectStmt: Parser<Statement, unit> =
     (keyword "SELECT" >>. sepBy1 projection (sym ",")
-     .>>. opt (keyword "FROM" >>. identifier)
+     .>>. opt (keyword "FROM" >>. tableRef)
      .>>. opt (keyword "WHERE" >>. expr)
      .>>. opt (keyword "ORDER" >>. keyword "BY" >>. sepBy1 orderKey (sym ","))
      .>>. opt limitClause)
     |>> fun ((((projs, from), where), orderBy), limitOffset) ->
         let limit, offset = limitOffset |> Option.defaultValue (None, None)
-        Select(projs, from, where, orderBy |> Option.defaultValue [], limit, offset)
+
+        Select
+            { Projections = projs
+              From = from
+              Where = where
+              OrderBy = orderBy |> Option.defaultValue []
+              Limit = limit
+              Offset = offset }
 
 let private updateStmt: Parser<Statement, unit> =
     (keyword "UPDATE" >>. identifier .>> keyword "SET"

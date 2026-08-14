@@ -68,17 +68,33 @@ type ColumnDef =
 /// A `SELECT` projection: the expression and its optional `AS alias`.
 type Projection = Expr * string option
 
+/// `FROM [db.]table [[AS] alias]`. A record (not a bare string) so a
+/// qualified name (`information_schema.tables`) and an alias have somewhere
+/// to live — needed for M4's schema introspection and, later, joins —
+/// without another breaking edit to every `Select` call site.
+type TableRef =
+    { Database: string option
+      Table: string
+      Alias: string option }
+
+/// A `SELECT` statement's clauses as a record rather than a positional
+/// tuple: every clause after `SELECT ... FROM` is optional and grows
+/// independently (M5 adds `GroupBy`/`Having`), so a record avoids a breaking
+/// edit — and an 8-argument re-spelling at every call site — each time one
+/// does.
+type SelectStmt =
+    { Projections: Projection list
+      From: TableRef option
+      Where: Expr option
+      OrderBy: OrderKey list
+      Limit: int option
+      Offset: int option }
+
 type Statement =
     | CreateTable of name: string * columns: ColumnDef list * ifNotExists: bool
     | DropTable of names: string list * ifExists: bool
     | Insert of table: string * columns: string list * rows: Expr list list
-    | Select of
-        projections: Projection list *
-        from: string option *
-        where: Expr option *
-        orderBy: OrderKey list *
-        limit: int option *
-        offset: int option
+    | Select of SelectStmt
     | Update of table: string * assignments: (string * Expr) list * where: Expr option
     | Delete of table: string * where: Expr option
     | Truncate of table: string

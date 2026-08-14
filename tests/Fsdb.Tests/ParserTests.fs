@@ -14,6 +14,22 @@ let private parseOk (sql: string) : Statement =
 
 let private col name = Col name
 
+/// Builds a `Select` statement from the same positional shape the old
+/// tuple-based `Ast.Select` case had, so every test below reads as a plain
+/// AST comparison instead of a record literal per case; `from` is still a
+/// bare table name string here since none of these tests exercise a
+/// qualified name or alias.
+let private mkSelect
+    (projections: Projection list, from: string option, where: Expr option, orderBy: OrderKey list, limit: int option, offset: int option)
+    : Statement =
+    Select
+        { Projections = projections
+          From = from |> Option.map (fun t -> { Database = None; Table = t; Alias = None })
+          Where = where
+          OrderBy = orderBy
+          Limit = limit
+          Offset = offset }
+
 let tests =
     testList
         "parser"
@@ -23,21 +39,47 @@ let tests =
                 <| fun _ ->
                     Expect.equal
                         (parseOk "SELECT * FROM t")
-                        (Select([ Star, None ], Some "t", None, [], None, None))
+                        (mkSelect([ Star, None ], Some "t", None, [], None, None))
                         "select star"
+
+                testCase "FROM db.table AS alias parses a qualified, aliased TableRef"
+                <| fun _ ->
+                    Expect.equal
+                        (parseOk "SELECT * FROM information_schema.tables AS t")
+                        (Select
+                            { Projections = [ Star, None ]
+                              From = Some { Database = Some "information_schema"; Table = "tables"; Alias = Some "t" }
+                              Where = None
+                              OrderBy = []
+                              Limit = None
+                              Offset = None })
+                        "qualified aliased table ref"
+
+                testCase "FROM t x: alias without AS"
+                <| fun _ ->
+                    Expect.equal
+                        (parseOk "SELECT * FROM t x")
+                        (Select
+                            { Projections = [ Star, None ]
+                              From = Some { Database = None; Table = "t"; Alias = Some "x" }
+                              Where = None
+                              OrderBy = []
+                              Limit = None
+                              Offset = None })
+                        "bare alias"
 
                 testCase "SELECT without FROM"
                 <| fun _ ->
                     Expect.equal
                         (parseOk "SELECT 1+1")
-                        (Select([ BinOp(Add, Lit(VInt 1L), Lit(VInt 1L)), None ], None, None, [], None, None))
+                        (mkSelect([ BinOp(Add, Lit(VInt 1L), Lit(VInt 1L)), None ], None, None, [], None, None))
                         "select without from"
 
                 testCase "SELECT projections with expr AS alias, qualified column, and bare column"
                 <| fun _ ->
                     Expect.equal
                         (parseOk "SELECT a, t.b, a+1 AS c FROM t")
-                        (Select(
+                        (mkSelect(
                             [ col "a", None
                               QualifiedCol("t", "b"), None
                               BinOp(Add, col "a", Lit(VInt 1L)), Some "c" ],
@@ -53,21 +95,21 @@ let tests =
                 <| fun _ ->
                     Expect.equal
                         (parseOk "SELECT t.* FROM t")
-                        (Select([ Star, None ], Some "t", None, [], None, None))
+                        (mkSelect([ Star, None ], Some "t", None, [], None, None))
                         "qualified star"
 
                 testCase "COUNT(*) shape"
                 <| fun _ ->
                     Expect.equal
                         (parseOk "SELECT COUNT(*) FROM t")
-                        (Select([ FuncCall("COUNT", [ Star ]), None ], Some "t", None, [], None, None))
+                        (mkSelect([ FuncCall("COUNT", [ Star ]), None ], Some "t", None, [], None, None))
                         "count star"
 
                 testCase "function call with multiple args and no args"
                 <| fun _ ->
                     Expect.equal
                         (parseOk "SELECT CONCAT(a, b), NOW() FROM t")
-                        (Select(
+                        (mkSelect(
                             [ FuncCall("CONCAT", [ col "a"; col "b" ]), None; FuncCall("NOW", []), None ],
                             Some "t",
                             None,
@@ -81,42 +123,42 @@ let tests =
                 <| fun _ ->
                     Expect.equal
                         (parseOk "SELECT * FROM t WHERE a = 1")
-                        (Select([ Star, None ], Some "t", Some(BinOp(Eq, col "a", Lit(VInt 1L))), [], None, None))
+                        (mkSelect([ Star, None ], Some "t", Some(BinOp(Eq, col "a", Lit(VInt 1L))), [], None, None))
                         "where"
 
                 testCase "ORDER BY with explicit and default direction"
                 <| fun _ ->
                     Expect.equal
                         (parseOk "SELECT * FROM t ORDER BY a DESC, b")
-                        (Select([ Star, None ], Some "t", None, [ col "a", Desc; col "b", Asc ], None, None))
+                        (mkSelect([ Star, None ], Some "t", None, [ col "a", Desc; col "b", Asc ], None, None))
                         "order by"
 
                 testCase "LIMIT n"
                 <| fun _ ->
                     Expect.equal
                         (parseOk "SELECT * FROM t LIMIT 10")
-                        (Select([ Star, None ], Some "t", None, [], Some 10, None))
+                        (mkSelect([ Star, None ], Some "t", None, [], Some 10, None))
                         "limit n"
 
                 testCase "LIMIT n OFFSET m"
                 <| fun _ ->
                     Expect.equal
                         (parseOk "SELECT * FROM t LIMIT 10 OFFSET 5")
-                        (Select([ Star, None ], Some "t", None, [], Some 10, Some 5))
+                        (mkSelect([ Star, None ], Some "t", None, [], Some 10, Some 5))
                         "limit offset"
 
                 testCase "LIMIT m, n means offset m, count n"
                 <| fun _ ->
                     Expect.equal
                         (parseOk "SELECT * FROM t LIMIT 5, 10")
-                        (Select([ Star, None ], Some "t", None, [], Some 10, Some 5))
+                        (mkSelect([ Star, None ], Some "t", None, [], Some 10, Some 5))
                         "limit comma form"
 
                 testCase "full clause order: WHERE, ORDER BY, LIMIT together"
                 <| fun _ ->
                     Expect.equal
                         (parseOk "SELECT a FROM t WHERE a > 1 ORDER BY a LIMIT 2")
-                        (Select(
+                        (mkSelect(
                             [ col "a", None ],
                             Some "t",
                             Some(BinOp(Gt, col "a", Lit(VInt 1L))),
@@ -132,7 +174,7 @@ let tests =
                 <| fun _ ->
                     Expect.equal
                         (parseOk "SELECT a OR b AND c")
-                        (Select(
+                        (mkSelect(
                             [ BinOp(Or, col "a", BinOp(And, col "b", col "c")), None ],
                             None,
                             None,
@@ -146,7 +188,7 @@ let tests =
                 <| fun _ ->
                     Expect.equal
                         (parseOk "SELECT 1+2*3")
-                        (Select(
+                        (mkSelect(
                             [ BinOp(Add, Lit(VInt 1L), BinOp(Mul, Lit(VInt 2L), Lit(VInt 3L))), None ],
                             None,
                             None,
@@ -160,7 +202,7 @@ let tests =
                 <| fun _ ->
                     Expect.equal
                         (parseOk "SELECT (1+2)*3")
-                        (Select(
+                        (mkSelect(
                             [ BinOp(Mul, BinOp(Add, Lit(VInt 1L), Lit(VInt 2L)), Lit(VInt 3L)), None ],
                             None,
                             None,
@@ -174,21 +216,21 @@ let tests =
                 <| fun _ ->
                     Expect.equal
                         (parseOk "SELECT NOT a = b")
-                        (Select([ Not(BinOp(Eq, col "a", col "b")), None ], None, None, [], None, None))
+                        (mkSelect([ Not(BinOp(Eq, col "a", col "b")), None ], None, None, [], None, None))
                         "not precedence"
 
                 testCase "a AND NOT b: NOT binds only to b"
                 <| fun _ ->
                     Expect.equal
                         (parseOk "SELECT a AND NOT b")
-                        (Select([ BinOp(And, col "a", Not(col "b")), None ], None, None, [], None, None))
+                        (mkSelect([ BinOp(And, col "a", Not(col "b")), None ], None, None, [], None, None))
                         "not scoped to right operand"
 
                 testCase "unary minus binds tighter than binary minus"
                 <| fun _ ->
                     Expect.equal
                         (parseOk "SELECT -a - 1")
-                        (Select(
+                        (mkSelect(
                             [ BinOp(Sub, BinOp(Sub, Lit(VInt 0L), col "a"), Lit(VInt 1L)), None ],
                             None,
                             None,
@@ -202,7 +244,7 @@ let tests =
                 <| fun _ ->
                     Expect.equal
                         (parseOk "SELECT a % 2")
-                        (Select([ FuncCall("MOD", [ col "a"; Lit(VInt 2L) ]), None ], None, None, [], None, None))
+                        (mkSelect([ FuncCall("MOD", [ col "a"; Lit(VInt 2L) ]), None ], None, None, [], None, None))
                         "modulo"
 
                 testCase "comparison operators: <=, >=, <>, !=, <, >"
@@ -218,14 +260,14 @@ let tests =
                     for sql, op in cases do
                         Expect.equal
                             (parseOk (sprintf "SELECT %s" sql))
-                            (Select([ BinOp(op, col "a", Lit(VInt 1L)), None ], None, None, [], None, None))
+                            (mkSelect([ BinOp(op, col "a", Lit(VInt 1L)), None ], None, None, [], None, None))
                             sql
 
                 testCase "IS NULL / IS NOT NULL"
                 <| fun _ ->
                     Expect.equal
                         (parseOk "SELECT a IS NULL, a IS NOT NULL")
-                        (Select(
+                        (mkSelect(
                             [ IsNull(col "a"), None; IsNotNull(col "a"), None ],
                             None,
                             None,
@@ -239,7 +281,7 @@ let tests =
                 <| fun _ ->
                     Expect.equal
                         (parseOk "SELECT a LIKE '%x%', a NOT LIKE '%y%'")
-                        (Select(
+                        (mkSelect(
                             [ Like(col "a", Lit(VString "%x%")), None
                               Not(Like(col "a", Lit(VString "%y%"))), None ],
                             None,
@@ -254,7 +296,7 @@ let tests =
                 <| fun _ ->
                     Expect.equal
                         (parseOk "SELECT a IN (1, 2, 3), a NOT IN (4, 5)")
-                        (Select(
+                        (mkSelect(
                             [ In(col "a", [ Lit(VInt 1L); Lit(VInt 2L); Lit(VInt 3L) ]), None
                               Not(In(col "a", [ Lit(VInt 4L); Lit(VInt 5L) ])), None ],
                             None,
@@ -269,7 +311,7 @@ let tests =
                 <| fun _ ->
                     Expect.equal
                         (parseOk "SELECT a BETWEEN 1 AND 10, a NOT BETWEEN 1 AND 10")
-                        (Select(
+                        (mkSelect(
                             [ Between(col "a", Lit(VInt 1L), Lit(VInt 10L)), None
                               Not(Between(col "a", Lit(VInt 1L), Lit(VInt 10L))), None ],
                             None,
@@ -284,7 +326,7 @@ let tests =
                 <| fun _ ->
                     Expect.equal
                         (parseOk "SELECT * FROM t WHERE a BETWEEN 1 AND 10 AND b")
-                        (Select(
+                        (mkSelect(
                             [ Star, None ],
                             Some "t",
                             Some(BinOp(And, Between(col "a", Lit(VInt 1L), Lit(VInt 10L)), col "b")),
@@ -300,28 +342,28 @@ let tests =
                 <| fun _ ->
                     Expect.equal
                         (parseOk "SELECT 'it''s here'")
-                        (Select([ Lit(VString "it's here"), None ], None, None, [], None, None))
+                        (mkSelect([ Lit(VString "it's here"), None ], None, None, [], None, None))
                         "doubled quote"
 
                 testCase "backslash escapes: \\n \\t \\\\ \\'"
                 <| fun _ ->
                     Expect.equal
                         (parseOk "SELECT 'a\\nb\\t\\\\\\'c'")
-                        (Select([ Lit(VString "a\nb\t\\'c"), None ], None, None, [], None, None))
+                        (mkSelect([ Lit(VString "a\nb\t\\'c"), None ], None, None, [], None, None))
                         "backslash escapes"
 
                 testCase "backtick-quoted identifier, including a reserved word and a doubled backtick"
                 <| fun _ ->
                     Expect.equal
                         (parseOk "SELECT `order`, `a``b` FROM `select`")
-                        (Select([ col "order", None; col "a`b", None ], Some "select", None, [], None, None))
+                        (mkSelect([ col "order", None; col "a`b", None ], Some "select", None, [], None, None))
                         "backtick identifiers"
 
                 testCase "integer, decimal, and exponent-notation numeric literals"
                 <| fun _ ->
                     Expect.equal
                         (parseOk "SELECT 42, 3.14, 1.5e3")
-                        (Select(
+                        (mkSelect(
                             [ Lit(VInt 42L), None; Lit(VDecimal 3.14M), None; Lit(VDouble 1500.0), None ],
                             None,
                             None,
@@ -335,7 +377,7 @@ let tests =
                 <| fun _ ->
                     Expect.equal
                         (parseOk "SELECT NULL, TRUE, FALSE")
-                        (Select(
+                        (mkSelect(
                             [ Lit VNull, None; Lit(VInt 1L), None; Lit(VInt 0L), None ],
                             None,
                             None,
@@ -349,21 +391,21 @@ let tests =
                 <| fun _ ->
                     Expect.equal
                         (parseOk "SELECT a -- trailing comment\nFROM /* mid */ t")
-                        (Select([ col "a", None ], Some "t", None, [], None, None))
+                        (mkSelect([ col "a", None ], Some "t", None, [], None, None))
                         "comments"
 
                 testCase "keywords are case-insensitive"
                 <| fun _ ->
                     Expect.equal
                         (parseOk "select A from T where A = 1")
-                        (Select([ col "A", None ], Some "T", Some(BinOp(Eq, col "A", Lit(VInt 1L))), [], None, None))
+                        (mkSelect([ col "A", None ], Some "T", Some(BinOp(Eq, col "A", Lit(VInt 1L))), [], None, None))
                         "case insensitivity"
 
                 testCase "optional trailing semicolon"
                 <| fun _ ->
                     Expect.equal
                         (parseOk "SELECT 1;")
-                        (Select([ Lit(VInt 1L), None ], None, None, [], None, None))
+                        (mkSelect([ Lit(VInt 1L), None ], None, None, [], None, None))
                         "trailing semicolon" ]
 
           testList
