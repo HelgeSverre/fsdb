@@ -360,6 +360,23 @@ let queryHandlerTests =
               | Err(1064, msg) -> Expect.stringContains msg "GARBAGE NOT SQL" "message names the query"
               | other -> failtestf "expected a 1064 error, got %A" other
 
+          testCase "a query whose string data merely starts with SET is not hijacked by the SET-statement probe"
+          <| fun _ ->
+              // handle's `upper.StartsWith "SET "` check is anchored to the
+              // whole trimmed query text, so this can't actually misfire —
+              // this test documents and locks in that guarantee rather than
+              // reproducing a live bug.
+              let session = create 1 (Fsdb.Storage.create ())
+              let session, _ = handle session "CREATE TABLE notes (body VARCHAR(50))"
+
+              match handle session "INSERT INTO notes VALUES ('SET x = 1')" |> snd with
+              | Affected 1UL -> ()
+              | other -> failtestf "expected a normal INSERT, got %A" other
+
+              match handle session "SELECT body FROM notes" |> snd with
+              | ResultSet(_, [ [ Some "SET x = 1" ] ]) -> ()
+              | other -> failtestf "expected the literal string preserved, got %A" other
+
           testCase "a query containing @@ inside a string literal is not hijacked by the @@-variable probe"
           <| fun _ ->
               let session = create 1 (Fsdb.Storage.create ())

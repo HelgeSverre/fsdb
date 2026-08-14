@@ -233,4 +233,116 @@ let tests =
 
                     match runDefault store "SELECT ABS(-5), ROUND(3.7)" with
                     | ResultSet(_, [ [ Some "5"; Some "4" ] ]) -> ()
-                    | other -> failtestf "expected 5/4, got %A" other ] ]
+                    | other -> failtestf "expected 5/4, got %A" other ]
+
+          testList
+              "three-valued logic"
+              [ testCase "WHERE x = NULL matches no rows (NULL never equals anything)"
+                <| fun _ ->
+                    let store = newStore ()
+                    runDefault store "CREATE TABLE t (n INT)" |> ignore
+                    runDefault store "INSERT INTO t VALUES (1), (NULL)" |> ignore
+
+                    match runDefault store "SELECT n FROM t WHERE n = NULL" with
+                    | ResultSet(_, []) -> ()
+                    | other -> failtestf "expected zero rows, got %A" other
+
+                testCase "NULL AND FALSE is FALSE, not NULL (short-circuits to false either way)"
+                <| fun _ ->
+                    let store = newStore ()
+
+                    match runDefault store "SELECT NULL AND FALSE" with
+                    | ResultSet(_, [ [ Some "0" ] ]) -> ()
+                    | other -> failtestf "expected 0, got %A" other
+
+                testCase "NULL AND TRUE is NULL (unknown, neither true nor false)"
+                <| fun _ ->
+                    let store = newStore ()
+
+                    match runDefault store "SELECT NULL AND TRUE" with
+                    | ResultSet(_, [ [ None ] ]) -> ()
+                    | other -> failtestf "expected NULL, got %A" other
+
+                testCase "ORDER BY sorts NULLs first"
+                <| fun _ ->
+                    let store = newStore ()
+                    runDefault store "CREATE TABLE t (n INT)" |> ignore
+                    runDefault store "INSERT INTO t VALUES (2), (NULL), (1)" |> ignore
+
+                    match runDefault store "SELECT n FROM t ORDER BY n" with
+                    | ResultSet(_, rows) -> Expect.equal rows [ [ None ]; [ Some "1" ]; [ Some "2" ] ] "NULL sorts first"
+                    | other -> failtestf "expected a resultset, got %A" other ]
+
+          testList
+              "LIKE / IN / BETWEEN"
+              [ testCase "IN matches any candidate, including a mix of types"
+                <| fun _ ->
+                    let store = newStore ()
+                    runDefault store "CREATE TABLE t (n INT)" |> ignore
+                    runDefault store "INSERT INTO t VALUES (1), (2), (3)" |> ignore
+
+                    match runDefault store "SELECT n FROM t WHERE n IN (1, 3) ORDER BY n" with
+                    | ResultSet(_, rows) -> Expect.equal rows [ [ Some "1" ]; [ Some "3" ] ] "matches 1 and 3 only"
+                    | other -> failtestf "expected a resultset, got %A" other
+
+                testCase "NOT IN excludes the candidates"
+                <| fun _ ->
+                    let store = newStore ()
+                    runDefault store "CREATE TABLE t (n INT)" |> ignore
+                    runDefault store "INSERT INTO t VALUES (1), (2), (3)" |> ignore
+
+                    match runDefault store "SELECT n FROM t WHERE n NOT IN (2) ORDER BY n" with
+                    | ResultSet(_, rows) -> Expect.equal rows [ [ Some "1" ]; [ Some "3" ] ] "excludes 2"
+                    | other -> failtestf "expected a resultset, got %A" other
+
+                testCase "BETWEEN is inclusive on both ends"
+                <| fun _ ->
+                    let store = newStore ()
+                    runDefault store "CREATE TABLE t (n INT)" |> ignore
+                    runDefault store "INSERT INTO t VALUES (1), (2), (3), (4)" |> ignore
+
+                    match runDefault store "SELECT n FROM t WHERE n BETWEEN 2 AND 3 ORDER BY n" with
+                    | ResultSet(_, rows) -> Expect.equal rows [ [ Some "2" ]; [ Some "3" ] ] "includes both endpoints"
+                    | other -> failtestf "expected a resultset, got %A" other
+
+                testCase "LIKE with % and _ wildcards"
+                <| fun _ ->
+                    let store = newStore ()
+                    runDefault store "CREATE TABLE t (name VARCHAR(20))" |> ignore
+                    runDefault store "INSERT INTO t VALUES ('alice'), ('bob'), ('alan')" |> ignore
+
+                    match runDefault store "SELECT name FROM t WHERE name LIKE 'al_ce' ORDER BY name" with
+                    | ResultSet(_, [ [ Some "alice" ] ]) -> ()
+                    | other -> failtestf "expected only alice, got %A" other
+
+                    match runDefault store "SELECT name FROM t WHERE name LIKE 'a%' ORDER BY name" with
+                    | ResultSet(_, rows) -> Expect.equal rows [ [ Some "alan" ]; [ Some "alice" ] ] "both a-names"
+                    | other -> failtestf "expected a resultset, got %A" other ]
+
+          testList
+              "storage errors reaching QueryResult"
+              [ testCase "INSERT into an unknown table is a 1146 error"
+                <| fun _ ->
+                    let store = newStore ()
+
+                    match runDefault store "INSERT INTO ghost VALUES (1)" with
+                    | Err(1146, _) -> ()
+                    | other -> failtestf "expected a 1146 error, got %A" other
+
+                testCase "omitting a NOT NULL column with no default is a 1048 error"
+                <| fun _ ->
+                    let store = newStore ()
+                    runDefault store "CREATE TABLE t (id INT, name VARCHAR(10) NOT NULL)" |> ignore
+
+                    match runDefault store "INSERT INTO t (id) VALUES (1)" with
+                    | Err(1048, _) -> ()
+                    | other -> failtestf "expected a 1048 error, got %A" other
+
+                testCase "an uncoercible value for a column's type is a 1366 error"
+                <| fun _ ->
+                    let store = newStore ()
+                    runDefault store "CREATE TABLE t (n INT)" |> ignore
+
+                    match runDefault store "INSERT INTO t VALUES ('not a number')" with
+                    | Err(1366, _) -> ()
+                    | other -> failtestf "expected a 1366 error, got %A" other ] ]
