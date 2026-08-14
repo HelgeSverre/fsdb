@@ -161,6 +161,27 @@ let queryHandlerTests =
                   Expect.equal (List.length row) 2 "row has two values"
               | other -> failtestf "expected a resultset, got %A" other
 
+          testCase "SELECT @@unknown_var returns a 1193 unknown-system-variable error"
+          <| fun _ ->
+              let session = create 1
+
+              match handle session "SELECT @@totally_not_a_var" |> snd with
+              | Err(1193, msg) -> Expect.stringContains msg "totally_not_a_var" "message names the variable"
+              | other -> failtestf "expected a 1193 error, got %A" other
+
+          testCase "the Connector/J connection probe (auto_increment_increment, transaction_isolation) resolves"
+          <| fun _ ->
+              let session = create 1
+
+              match
+                  handle
+                      session
+                      "SELECT @@session.auto_increment_increment AS auto_increment_increment, @@character_set_client AS character_set_client, @@session.transaction_isolation AS transaction_isolation"
+                  |> snd
+              with
+              | ResultSet(_, [ [ Some "1"; Some _; Some "REPEATABLE-READ" ] ]) -> ()
+              | other -> failtestf "expected all three variables resolved, got %A" other
+
           testCase "SELECT @@version_comment LIMIT 1 tolerates the trailing LIMIT clause"
           <| fun _ ->
               // Regression: mysql CLI probes the connection banner with exactly

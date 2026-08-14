@@ -21,8 +21,8 @@ let private syntaxError (sql: string) =
             sql
     )
 
-let private lookupVar (session: Session) (name: string) : string =
-    session.Variables |> Map.tryFind (name.ToLowerInvariant()) |> Option.defaultValue ""
+let private lookupVar (session: Session) (name: string) : string option =
+    session.Variables |> Map.tryFind (name.ToLowerInvariant())
 
 /// Matches `@@var` or `@@session.var` / `@@global.var`, optionally aliased,
 /// optionally followed by a trailing `LIMIT n` (mysql CLI probes
@@ -30,24 +30,37 @@ let private lookupVar (session: Session) (name: string) : string =
 let private atVarItem =
     Regex(@"^@@(?:SESSION\.|GLOBAL\.)?(\w+)(?:\s+AS\s+(\S+))?(?:\s+LIMIT\s+\d+)?$", RegexOptions.IgnoreCase)
 
-/// `SELECT @@version`, `SELECT @@version AS v, @@sql_mode` etc.
+/// `SELECT @@version`, `SELECT @@version AS v, @@sql_mode` etc. Errors with
+/// 1193 ER_UNKNOWN_SYSTEM_VARIABLE (matching real MySQL) if any referenced
+/// variable isn't known, instead of silently returning an empty string.
 let private handleAtVarSelect (session: Session) (sql: string) : QueryResult =
     let exprs = sql.Substring("SELECT".Length).Trim()
     let items = exprs.Split(',') |> Array.map (fun s -> s.Trim())
     let parsed = items |> Array.map atVarItem.Match
 
     if parsed |> Array.forall (fun m -> m.Success) then
-        let cols =
+        let unknown =
             parsed
-            |> Array.map (fun m -> if m.Groups.[2].Success then m.Groups.[2].Value else "@@" + m.Groups.[1].Value)
-            |> Array.toList
+            |> Array.tryFind (fun m -> lookupVar session m.Groups.[1].Value |> Option.isNone)
 
-        let vals =
-            parsed
-            |> Array.map (fun m -> Some(lookupVar session m.Groups.[1].Value))
-            |> Array.toList
+        match unknown with
+        | Some m -> Err(1193, sprintf "Unknown system variable '%s'" m.Groups.[1].Value)
+        | None ->
+            let cols =
+                parsed
+                |> Array.map (fun m ->
+                    if m.Groups.[2].Success then
+                        m.Groups.[2].Value
+                    else
+                        "@@" + m.Groups.[1].Value)
+                |> Array.toList
 
-        ResultSet(cols, [ vals ])
+            let vals =
+                parsed
+                |> Array.map (fun m -> lookupVar session m.Groups.[1].Value)
+                |> Array.toList
+
+            ResultSet(cols, [ vals ])
     else
         syntaxError sql
 
