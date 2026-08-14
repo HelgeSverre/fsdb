@@ -82,8 +82,16 @@ let rec private exprLabel (expr: Expr) : string =
     | Between(e, lo, hi) -> sprintf "(%s between %s and %s)" (exprLabel e) (exprLabel lo) (exprLabel hi)
     | Star -> "*"
 
-let private likeToRegex (pattern: string) =
-    "^" + Regex.Escape(pattern).Replace("%", ".*").Replace("_", ".") + "$"
+/// Translates a SQL LIKE pattern to a .NET regex source: `%` -> `.*`, `_` ->
+/// `.`. Anchored with `\A`/`\z` rather than `^`/`$` — `$` alone matches
+/// before a trailing newline, which would let `'ab\n' LIKE 'ab'` falsely
+/// match — and callers must pass `RegexOptions.Singleline` so `.` spans
+/// newlines too (`%`/`_` are unqualified wildcards in MySQL, not
+/// "everything but a newline"). Not private: `QueryHandler`'s `SHOW
+/// VARIABLES LIKE` reuses the same LIKE semantics rather than keeping a
+/// second copy.
+let likeToRegex (pattern: string) =
+    @"\A" + Regex.Escape(pattern).Replace("%", ".*").Replace("_", ".") + @"\z"
 
 /// Evaluates one expression against one row. Three-valued logic throughout
 /// (comparisons/AND/OR/NOT return `VNull` — SQL's "unknown" — rather than a
@@ -199,7 +207,7 @@ and private likeOp (subject: Value) (pattern: Value) : Value =
     | _ ->
         let text = subject |> toText |> Option.defaultValue ""
         let pat = pattern |> toText |> Option.defaultValue ""
-        boolToValue (Regex.IsMatch(text, likeToRegex pat, RegexOptions.IgnoreCase))
+        boolToValue (Regex.IsMatch(text, likeToRegex pat, RegexOptions.IgnoreCase ||| RegexOptions.Singleline))
 
 let private applyLimitOffset (limit: int option) (offset: int option) (rows: 'a list) : 'a list =
     let afterOffset =

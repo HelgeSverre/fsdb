@@ -96,6 +96,22 @@ let tests =
                     | ResultSet([ "x" ], rows) -> Expect.equal rows [ [ Some "1" ]; [ Some "2" ]; [ Some "3" ] ] "sorted by alias"
                     | other -> failtestf "expected a resultset sorted by alias, got %A" other
 
+                testCase "LIKE matches across embedded newlines"
+                <| fun _ ->
+                    let store = newStore ()
+
+                    match runDefault store "SELECT 'line1\nline2' LIKE '%line2%'" with
+                    | ResultSet(_, [ [ Some "1" ] ]) -> ()
+                    | other -> failtestf "expected a match across the newline, got %A" other
+
+                testCase "LIKE does not match past a trailing newline for an unqualified pattern"
+                <| fun _ ->
+                    let store = newStore ()
+
+                    match runDefault store "SELECT 'ab\n' LIKE 'ab'" with
+                    | ResultSet(_, [ [ Some "0" ] ]) -> ()
+                    | other -> failtestf "expected no match, got %A" other
+
                 testCase "an unknown column in WHERE is a 1054 error"
                 <| fun _ ->
                     let store = newStore ()
