@@ -85,18 +85,21 @@ let private handleShowVariables (session: Session) (sql: string) : QueryResult =
 
     ResultSet([ "Variable_name"; "Value" ], rows)
 
-let handle (session: Session) (rawSql: string) : QueryResult =
+/// Returns the (possibly updated) session alongside the result: statements
+/// like USE and SET change session state, and threading it through the
+/// return value keeps `handle` a pure function of its inputs instead of
+/// mutating the session out from under the caller.
+let handle (session: Session) (rawSql: string) : Session * QueryResult =
     let sql = rawSql.Trim().TrimEnd(';').Trim()
     let upper = sql.ToUpperInvariant()
 
     match upper with
-    | _ when upper.StartsWith "SET " -> Affected 0UL
-    | "SELECT DATABASE()" -> ResultSet([ "DATABASE()" ], [ [ session.Database ] ])
-    | "SHOW DATABASES" -> ResultSet([ "Database" ], [ [ Some "information_schema" ] ])
+    | _ when upper.StartsWith "SET " -> session, Affected 0UL
+    | "SELECT DATABASE()" -> session, ResultSet([ "DATABASE()" ], [ [ session.Database ] ])
+    | "SHOW DATABASES" -> session, ResultSet([ "Database" ], [ [ Some "information_schema" ] ])
     | _ when upper.StartsWith "USE " ->
-        session.Database <- Some(sql.Substring(4).Trim().Trim('`'))
-        Affected 0UL
-    | _ when upper.StartsWith "SHOW VARIABLES" -> handleShowVariables session sql
-    | _ when upper.StartsWith "SELECT" && upper.Contains "@@" -> handleAtVarSelect session sql
-    | _ when upper.StartsWith "SELECT" -> handleLiteralSelect sql
-    | _ -> syntaxError sql
+        { session with Database = Some(sql.Substring(4).Trim().Trim('`')) }, Affected 0UL
+    | _ when upper.StartsWith "SHOW VARIABLES" -> session, handleShowVariables session sql
+    | _ when upper.StartsWith "SELECT" && upper.Contains "@@" -> session, handleAtVarSelect session sql
+    | _ when upper.StartsWith "SELECT" -> session, handleLiteralSelect sql
+    | _ -> session, syntaxError sql

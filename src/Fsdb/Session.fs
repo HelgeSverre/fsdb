@@ -24,8 +24,8 @@ let defaultVariables: Map<string, string> =
 
 type Session =
     { ConnectionId: int
-      mutable Database: string option
-      mutable Variables: Map<string, string> }
+      Database: string option
+      Variables: Map<string, string> }
 
 let create (connectionId: int) : Session =
     { ConnectionId = connectionId

@@ -135,7 +135,7 @@ let queryHandlerTests =
           <| fun _ ->
               let session = create 1
 
-              match handle session "SELECT 1" with
+              match handle session "SELECT 1" |> snd with
               | ResultSet(cols, rows) ->
                   Expect.equal cols [ "1" ] "column name"
                   Expect.equal rows [ [ Some "1" ] ] "row value"
@@ -145,7 +145,7 @@ let queryHandlerTests =
           <| fun _ ->
               let session = create 1
 
-              match handle session "SELECT @@version" with
+              match handle session "SELECT @@version" |> snd with
               | ResultSet(cols, [ [ Some v ] ]) ->
                   Expect.equal cols [ "@@version" ] "column name"
                   Expect.equal v ServerVersion "version value"
@@ -155,7 +155,7 @@ let queryHandlerTests =
           <| fun _ ->
               let session = create 1
 
-              match handle session "SELECT @@version, @@version_comment" with
+              match handle session "SELECT @@version, @@version_comment" |> snd with
               | ResultSet(cols, [ row ]) ->
                   Expect.equal cols [ "@@version"; "@@version_comment" ] "columns"
                   Expect.equal (List.length row) 2 "row has two values"
@@ -167,7 +167,7 @@ let queryHandlerTests =
               // this query at connect time.
               let session = create 1
 
-              match handle session "select @@version_comment limit 1" with
+              match handle session "select @@version_comment limit 1" |> snd with
               | ResultSet([ "@@version_comment" ], [ [ Some _ ] ]) -> ()
               | other -> failtestf "expected a resultset, got %A" other
 
@@ -175,7 +175,7 @@ let queryHandlerTests =
           <| fun _ ->
               let session = create 1
 
-              match handle session "SET NAMES utf8mb4" with
+              match handle session "SET NAMES utf8mb4" |> snd with
               | Affected _ -> ()
               | other -> failtestf "expected OK, got %A" other
 
@@ -183,16 +183,16 @@ let queryHandlerTests =
           <| fun _ ->
               let session = create 1
 
-              match handle session "SELECT DATABASE()" with
+              match handle session "SELECT DATABASE()" |> snd with
               | ResultSet(_, [ [ None ] ]) -> ()
               | other -> failtestf "expected a single NULL row, got %A" other
 
           testCase "USE sets the session database, reflected by SELECT DATABASE()"
           <| fun _ ->
               let session = create 1
-              handle session "USE mydb" |> ignore
+              let session, _ = handle session "USE mydb"
 
-              match handle session "SELECT DATABASE()" with
+              match handle session "SELECT DATABASE()" |> snd with
               | ResultSet(_, [ [ Some "mydb" ] ]) -> ()
               | other -> failtestf "expected mydb, got %A" other
 
@@ -200,7 +200,7 @@ let queryHandlerTests =
           <| fun _ ->
               let session = create 1
 
-              match handle session "SHOW DATABASES" with
+              match handle session "SHOW DATABASES" |> snd with
               | ResultSet([ "Database" ], _ :: _) -> ()
               | other -> failtestf "expected a non-empty resultset, got %A" other
 
@@ -208,7 +208,7 @@ let queryHandlerTests =
           <| fun _ ->
               let session = create 1
 
-              match handle session "SHOW VARIABLES LIKE 'autocommit'" with
+              match handle session "SHOW VARIABLES LIKE 'autocommit'" |> snd with
               | ResultSet(_, [ [ Some "autocommit"; Some "1" ] ]) -> ()
               | other -> failtestf "expected the autocommit row, got %A" other
 
@@ -216,7 +216,7 @@ let queryHandlerTests =
           <| fun _ ->
               let session = create 1
 
-              match handle session "CREATE TABLE t (id INT)" with
+              match handle session "CREATE TABLE t (id INT)" |> snd with
               | Err(1064, msg) -> Expect.stringContains msg "CREATE TABLE t" "message names the query"
               | other -> failtestf "expected a 1064 error, got %A" other ]
 

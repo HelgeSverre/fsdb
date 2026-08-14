@@ -99,8 +99,7 @@ let private handleConnection (connectionId: int) (client: TcpClient) : Async<uni
             let resp = parseHandshakeResponse handshakeResp.Payload
             // Effective capabilities: never claim something the client didn't ask for.
             let capabilities = resp.Capabilities &&& ServerCapabilities
-            let session = Session.create connectionId
-            session.Database <- resp.Database
+            let session = { Session.create connectionId with Database = resp.Database }
 
             do!
                 writePacketAsync
@@ -108,29 +107,37 @@ let private handleConnection (connectionId: int) (client: TcpClient) : Async<uni
                     { SeqId = handshakeResp.SeqId + 1uy
                       Payload = okPayload capabilities 0UL 0UL }
 
-            let mutable running = true
+            let rec loop (session: Session) : Async<unit> =
+                async {
+                    match! readPacketAsync stream with
+                    | None -> ()
+                    | Some cmdPacket ->
+                        let seqId = cmdPacket.SeqId + 1uy
 
-            while running do
-                match! readPacketAsync stream with
-                | None -> running <- false
-                | Some cmdPacket ->
-                    let seqId = cmdPacket.SeqId + 1uy
+                        match parseCommand cmdPacket.Payload with
+                        | None
+                        | Some Quit -> ()
+                        | Some Ping ->
+                            do! writePacketAsync stream { SeqId = seqId; Payload = okPayload capabilities 0UL 0UL }
+                            return! loop session
+                        | Some(InitDb db) ->
+                            do! writePacketAsync stream { SeqId = seqId; Payload = okPayload capabilities 0UL 0UL }
+                            return! loop { session with Database = Some db }
+                        | Some(Query sql) ->
+                            let session, result = QueryHandler.handle session sql
+                            do! sendQueryResult stream capabilities seqId result
+                            return! loop session
+                        | Some(Unsupported _) ->
+                            do!
+                                writePacketAsync
+                                    stream
+                                    { SeqId = seqId
+                                      Payload = errPayload capabilities 1047 "Unknown command" }
 
-                    match parseCommand cmdPacket.Payload with
-                    | None
-                    | Some Quit -> running <- false
-                    | Some Ping ->
-                        do! writePacketAsync stream { SeqId = seqId; Payload = okPayload capabilities 0UL 0UL }
-                    | Some(InitDb db) ->
-                        session.Database <- Some db
-                        do! writePacketAsync stream { SeqId = seqId; Payload = okPayload capabilities 0UL 0UL }
-                    | Some(Query sql) -> do! sendQueryResult stream capabilities seqId (QueryHandler.handle session sql)
-                    | Some(Unsupported _) ->
-                        do!
-                            writePacketAsync
-                                stream
-                                { SeqId = seqId
-                                  Payload = errPayload capabilities 1047 "Unknown command" }
+                            return! loop session
+                }
+
+            do! loop session
     }
 
 /// Starts listening on 127.0.0.1:port. Pass 0 for an OS-assigned ephemeral
