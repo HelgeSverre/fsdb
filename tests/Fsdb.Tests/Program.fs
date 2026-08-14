@@ -815,4 +815,5 @@ let main argv =
               ParserTests.tests
               StorageTests.tests
               ExecutorTests.tests
+              InformationSchemaTests.tests
               integrationTests ])

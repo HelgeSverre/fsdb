@@ -561,6 +561,15 @@ let execute (store: Store) (registry: Registry) (dbName: string) (lastInsertId: 
         | Some tableRef ->
             let tableDb = tableRef.Database |> Option.defaultValue dbName
 
+            // `information_schema` is virtual — projected fresh from the
+            // catalog by `InformationSchema.scan` rather than looked up as
+            // a real stored table (see its module doc for why).
+            if System.String.Equals(tableDb, "information_schema", System.StringComparison.OrdinalIgnoreCase) then
+                match InformationSchema.scan store.Catalog tableRef.Table with
+                | Some(columns, rows) -> lastInsertId, runSelect registry columns rows select
+                | None -> lastInsertId, storageErr (NoSuchTable tableRef.Table)
+            else
+
             match scan store tableDb tableRef.Table with
             | Error e -> lastInsertId, storageErr e
             | Ok(columns, rows) -> lastInsertId, runSelect registry columns (List.ofSeq rows) select
