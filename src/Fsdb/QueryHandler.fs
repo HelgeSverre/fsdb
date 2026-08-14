@@ -713,6 +713,11 @@ let private dispatch (session: Session) (rawSql: string) : Session * QueryResult
 /// DECIMAL column throws `OverflowException` from `decimal d`.
 let handle (session: Session) (rawSql: string) : Session * QueryResult =
     try
-        dispatch session rawSql
+        match dispatch session rawSql with
+        | _, Err(code, msg) as result ->
+            eprintfn "fsdb: ERR %d %s -- query: %s" code msg rawSql
+            result
+        | result -> result
     with ex ->
+        eprintfn "fsdb: EXN %s -- query: %s" ex.Message rawSql
         session, Err(1105, sprintf "Internal error: %s" ex.Message) // ER_UNKNOWN_ERROR
