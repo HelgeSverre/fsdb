@@ -12,10 +12,28 @@ open Fsdb.Session
 
 // COM_* command byte values we handle.
 // https://dev.mysql.com/doc/dev/mysql-server/latest/page_protocol_command_phase.html
-let private ComQuit = 0x01uy
-let private ComInitDb = 0x02uy
-let private ComQuery = 0x03uy
-let private ComPing = 0x0euy
+type private Command =
+    | Quit
+    | InitDb of database: string
+    | Query of sql: string
+    | Ping
+    | Unsupported of code: byte
+
+/// None means a malformed (empty) command packet — treat as disconnect.
+let private parseCommand (payload: byte[]) : Command option =
+    if payload.Length = 0 then
+        None
+    else
+        let rest () = Encoding.UTF8.GetString(payload, 1, payload.Length - 1)
+
+        Some(
+            match payload.[0] with
+            | 0x01uy -> Quit
+            | 0x02uy -> InitDb(rest ())
+            | 0x03uy -> Query(rest ())
+            | 0x0euy -> Ping
+            | b -> Unsupported b
+        )
 
 let private randomAuthPluginData () : byte[] =
     let bytes = Array.zeroCreate<byte> 20
@@ -95,23 +113,19 @@ let private handleConnection (connectionId: int) (client: TcpClient) : Async<uni
             while running do
                 match! readPacketAsync stream with
                 | None -> running <- false
-                | Some cmdPacket when cmdPacket.Payload.Length = 0 -> running <- false
                 | Some cmdPacket ->
-                    let cmd = cmdPacket.Payload.[0]
                     let seqId = cmdPacket.SeqId + 1uy
 
-                    match cmd with
-                    | b when b = ComQuit -> running <- false
-                    | b when b = ComPing ->
+                    match parseCommand cmdPacket.Payload with
+                    | None
+                    | Some Quit -> running <- false
+                    | Some Ping ->
                         do! writePacketAsync stream { SeqId = seqId; Payload = okPayload capabilities 0UL 0UL }
-                    | b when b = ComInitDb ->
-                        let db = Encoding.UTF8.GetString(cmdPacket.Payload, 1, cmdPacket.Payload.Length - 1)
+                    | Some(InitDb db) ->
                         session.Database <- Some db
                         do! writePacketAsync stream { SeqId = seqId; Payload = okPayload capabilities 0UL 0UL }
-                    | b when b = ComQuery ->
-                        let sql = Encoding.UTF8.GetString(cmdPacket.Payload, 1, cmdPacket.Payload.Length - 1)
-                        do! sendQueryResult stream capabilities seqId (QueryHandler.handle session sql)
-                    | _ ->
+                    | Some(Query sql) -> do! sendQueryResult stream capabilities seqId (QueryHandler.handle session sql)
+                    | Some(Unsupported _) ->
                         do!
                             writePacketAsync
                                 stream
