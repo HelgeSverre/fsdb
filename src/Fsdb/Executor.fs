@@ -87,6 +87,7 @@ let rec private exprLabel (expr: Expr) : string =
     | Between(e, lo, hi) -> sprintf "(%s between %s and %s)" (exprLabel e) (exprLabel lo) (exprLabel hi)
     | Cast(e, _) -> sprintf "cast(%s as ...)" (exprLabel e)
     | Star -> "*"
+    | Exists _ -> "exists"
 
 /// Translates a SQL LIKE pattern to a .NET regex source: `%` -> `.*`, `_` ->
 /// `.`, and a backslash-escaped `\%`/`\_` (MySQL's own escape for a literal
@@ -138,10 +139,18 @@ let private likeOp (subject: Value) (pattern: Value) : Value =
 /// (per-group accumulated results the outer expression binds against),
 /// which becomes a field here instead of a fourth parameter at every one of
 /// those call sites.
+/// `Store`/`DbName` are only read by the `Exists` case (a nested `SELECT`
+/// needs a whole store/database to run against, not just the current row),
+/// but every `EvalContext` carries them rather than splitting into a second
+/// "context with subquery support" type — `Exists` can appear inside any
+/// expression (a `WHERE`, a projection, ...), so every call site would need
+/// to know which one to build.
 type private EvalContext =
     { Registry: Registry
       ColumnIndex: Map<string, int>
-      Row: Value[] }
+      Row: Value[]
+      Store: Store
+      DbName: string }
 
 /// Evaluates one expression against one row. Three-valued logic throughout
 /// (comparisons/AND/OR/NOT return `VNull` — SQL's "unknown" — rather than a
@@ -253,8 +262,36 @@ let rec private evalExpr (ctx: EvalContext) (expr: Expr) : Result<Value, EvalErr
             match Storage.coerceValue castCol v with
             | Ok v' -> Ok v'
             | Error err -> Error(Storage.toMySqlError err))
+    | Exists select ->
+        match runSelectStmt ctx.Store ctx.Registry ctx.DbName select with
+        | ResultSet(_, rows) -> Ok(boolToValue (not (List.isEmpty rows)))
+        | Err(code, message) -> Error(code, message)
+        // A `SELECT` under `EXISTS (...)` is never an `INSERT`/`UPDATE`/
+        // `DELETE` (the parser's `selectStmtRecord` only builds `SelectStmt`
+        // records, nothing else reaches here), so `Affected` can't occur.
+        | Affected _ -> Ok VNull
 
-let private applyLimitOffset (limit: int option) (offset: int option) (rows: 'a list) : 'a list =
+/// Resolves a `SELECT`'s `FROM` (a real table, `information_schema`'s
+/// virtual one, or none) and runs `select` against it — the `Statement`
+/// case's `Select` branch and `Exists`' nested subquery both fund into this
+/// one place rather than each re-implementing the `information_schema`
+/// special case.
+and private runSelectStmt (store: Store) (registry: Registry) (dbName: string) (select: SelectStmt) : QueryResult =
+    match select.From with
+    | None -> runSelect store registry dbName [] [ [||] ] select
+    | Some tableRef ->
+        let tableDb = tableRef.Database |> Option.defaultValue dbName
+
+        if System.String.Equals(tableDb, "information_schema", System.StringComparison.OrdinalIgnoreCase) then
+            match InformationSchema.scan store.Catalog tableRef.Table with
+            | Some(columns, rows) -> runSelect store registry dbName columns rows select
+            | None -> storageErr (NoSuchTable tableRef.Table)
+        else
+            match scan store tableDb tableRef.Table with
+            | Error e -> storageErr e
+            | Ok(columns, rows) -> runSelect store registry dbName columns (List.ofSeq rows) select
+
+and private applyLimitOffset (limit: int option) (offset: int option) (rows: 'a list) : 'a list =
     let afterOffset =
         match offset with
         | Some o -> rows |> List.skip (min o (List.length rows))
@@ -266,7 +303,7 @@ let private applyLimitOffset (limit: int option) (offset: int option) (rows: 'a 
 
 /// One projection's `(column name, value)` pairs — a list because `SELECT
 /// *` expands to every column of the row.
-let private evalProjection (ctx: EvalContext) (columns: ColumnDef list) (proj: Projection) : Result<(string * Value) list, EvalError> =
+and private evalProjection (ctx: EvalContext) (columns: ColumnDef list) (proj: Projection) : Result<(string * Value) list, EvalError> =
     match proj with
     | Star, _ -> Ok(columns |> List.mapi (fun i c -> c.Name, ctx.Row.[i]))
     | expr, aliasOpt ->
@@ -279,9 +316,16 @@ let private evalProjection (ctx: EvalContext) (columns: ColumnDef list) (proj: P
 /// Without this, a table with zero matching (or zero total) rows would
 /// silently skip evaluating its WHERE/ORDER BY/projection at all and never
 /// surface a real error.
-let private probeRow (columns: ColumnDef list) : Value[] = Array.create (List.length columns) VNull
+and private probeRow (columns: ColumnDef list) : Value[] = Array.create (List.length columns) VNull
 
-let private runSelect (registry: Registry) (columns: ColumnDef list) (rows: Value[] list) (select: SelectStmt) : QueryResult =
+and private runSelect
+    (store: Store)
+    (registry: Registry)
+    (dbName: string)
+    (columns: ColumnDef list)
+    (rows: Value[] list)
+    (select: SelectStmt)
+    : QueryResult =
     let projections, whereExpr, orderBy, limit, offset =
         select.Projections, select.Where, select.OrderBy, select.Limit, select.Offset
 
@@ -294,7 +338,13 @@ let private runSelect (registry: Registry) (columns: ColumnDef list) (rows: Valu
     else
 
     let columnIndex = columnIndexOf columns
-    let ctxFor (row: Value[]) : EvalContext = { Registry = registry; ColumnIndex = columnIndex; Row = row }
+
+    let ctxFor (row: Value[]) : EvalContext =
+        { Registry = registry
+          ColumnIndex = columnIndex
+          Row = row
+          Store = store
+          DbName = dbName }
 
     // ORDER BY may name a `SELECT ... AS alias` rather than a table column
     // (`SELECT COUNT(*) AS n FROM t ORDER BY n`) — resolve those first
@@ -378,12 +428,19 @@ let private runSelect (registry: Registry) (columns: ColumnDef list) (rows: Valu
 /// the difference between "UPDATE failed" and quiet data corruption once a
 /// SET expression can fail per row.
 let private applyAssignments
+    (store: Store)
     (registry: Registry)
+    (dbName: string)
     (columnIndex: Map<string, int>)
     (assignments: (int * Expr) list)
     (row: Value[])
     : Result<Value[], StorageError> =
-    let ctx = { Registry = registry; ColumnIndex = columnIndex; Row = row }
+    let ctx =
+        { Registry = registry
+          ColumnIndex = columnIndex
+          Row = row
+          Store = store
+          DbName = dbName }
 
     assignments
     |> traverseList (fun (idx, expr) -> evalExpr ctx expr |> Result.map (fun v -> idx, v))
@@ -420,7 +477,8 @@ let rec private substituteValuesFunc (columnIndex: Map<string, int>) (candidate:
     | Lit _
     | Col _
     | QualifiedCol _
-    | Star -> expr
+    | Star
+    | Exists _ -> expr
 
 /// Executes one parsed statement against `store`, threading the session's
 /// AUTO_INCREMENT bookkeeping through as a plain value rather than a
@@ -515,7 +573,13 @@ let execute (store: Store) (registry: Registry) (dbName: string) (lastInsertId: 
         // statement, add per-row suppression once a migration/test actually
         // depends on partial success rather than just the syntax parsing.
         let db, table = splitQualified dbName table
-        let literalCtx = { Registry = registry; ColumnIndex = Map.empty; Row = [||] }
+
+        let literalCtx =
+            { Registry = registry
+              ColumnIndex = Map.empty
+              Row = [||]
+              Store = store
+              DbName = dbName }
 
         match rowsExprs |> traverseList (traverseList (evalExpr literalCtx)) with
         | Error(code, message) -> lastInsertId, Err(code, message)
@@ -534,7 +598,12 @@ let execute (store: Store) (registry: Registry) (dbName: string) (lastInsertId: 
                     let columnIndex = columnIndexOf tableColumns
 
                     let applyUpdate (existing: Value[]) (candidate: Value[]) : Result<Value[], StorageError> =
-                        let ctx = { Registry = registry; ColumnIndex = columnIndex; Row = existing }
+                        let ctx =
+                            { Registry = registry
+                              ColumnIndex = columnIndex
+                              Row = existing
+                              Store = store
+                              DbName = dbName }
 
                         onDuplicateUpdate
                         |> traverseList (fun (name, expr) ->
@@ -555,24 +624,7 @@ let execute (store: Store) (registry: Registry) (dbName: string) (lastInsertId: 
                         (if newLastId <> 0L then newLastId else lastInsertId), Affected(uint64 affected)
                     | Error e -> lastInsertId, storageErr e
 
-    | Select select ->
-        match select.From with
-        | None -> lastInsertId, runSelect registry [] [ [||] ] select
-        | Some tableRef ->
-            let tableDb = tableRef.Database |> Option.defaultValue dbName
-
-            // `information_schema` is virtual — projected fresh from the
-            // catalog by `InformationSchema.scan` rather than looked up as
-            // a real stored table (see its module doc for why).
-            if System.String.Equals(tableDb, "information_schema", System.StringComparison.OrdinalIgnoreCase) then
-                match InformationSchema.scan store.Catalog tableRef.Table with
-                | Some(columns, rows) -> lastInsertId, runSelect registry columns rows select
-                | None -> lastInsertId, storageErr (NoSuchTable tableRef.Table)
-            else
-
-            match scan store tableDb tableRef.Table with
-            | Error e -> lastInsertId, storageErr e
-            | Ok(columns, rows) -> lastInsertId, runSelect registry columns (List.ofSeq rows) select
+    | Select select -> lastInsertId, runSelectStmt store registry dbName select
 
     | Update(table, assignments, whereExpr) ->
         let db, table = splitQualified dbName table
@@ -585,7 +637,12 @@ let execute (store: Store) (registry: Registry) (dbName: string) (lastInsertId: 
             match assignments |> traverseList (fun (name, expr) -> resolveColumn columns name |> Result.map (fun i -> i, expr)) with
             | Error e -> lastInsertId, storageErr e
             | Ok indexedAssignments ->
-                let ctxFor row = { Registry = registry; ColumnIndex = columnIndex; Row = row }
+                let ctxFor row =
+                    { Registry = registry
+                      ColumnIndex = columnIndex
+                      Row = row
+                      Store = store
+                      DbName = dbName }
 
                 let check row =
                     match whereExpr with
@@ -604,7 +661,7 @@ let execute (store: Store) (registry: Registry) (dbName: string) (lastInsertId: 
                 | Error(code, message) -> lastInsertId, Err(code, message)
                 | Ok _ ->
                     let predicate row = check row |> Result.mapError ExpressionError
-                    let updater row = applyAssignments registry columnIndex indexedAssignments row
+                    let updater row = applyAssignments store registry dbName columnIndex indexedAssignments row
 
                     match updateRows store db table predicate updater with
                     | Ok affected -> lastInsertId, Affected(uint64 affected)
@@ -617,7 +674,13 @@ let execute (store: Store) (registry: Registry) (dbName: string) (lastInsertId: 
         | Error e -> lastInsertId, storageErr e
         | Ok(columns, _) ->
             let columnIndex = columnIndexOf columns
-            let ctxFor row = { Registry = registry; ColumnIndex = columnIndex; Row = row }
+
+            let ctxFor row =
+                { Registry = registry
+                  ColumnIndex = columnIndex
+                  Row = row
+                  Store = store
+                  DbName = dbName }
 
             let check row =
                 match whereExpr with

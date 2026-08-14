@@ -601,4 +601,33 @@ let tests =
 
                     match runDefault store "DROP DATABASE IF EXISTS app" with
                     | Affected 0UL -> ()
-                    | other -> failtestf "expected DROP DATABASE IF EXISTS to be a no-op, got %A" other ] ]
+                    | other -> failtestf "expected DROP DATABASE IF EXISTS to be a no-op, got %A" other ]
+
+          testList
+              "EXISTS (subquery)"
+              [ testCase "EXISTS is true when the subquery has rows, false when it doesn't"
+                <| fun _ ->
+                    let store = newStore ()
+                    runDefault store "CREATE TABLE t (id INT)" |> ignore
+                    runDefault store "INSERT INTO t VALUES (1)" |> ignore
+
+                    match runDefault store "SELECT EXISTS (SELECT 1 FROM t WHERE id = 1) AS `exists`" with
+                    | ResultSet([ "exists" ], [ [ Some "1" ] ]) -> ()
+                    | other -> failtestf "expected exists=1, got %A" other
+
+                    match runDefault store "SELECT EXISTS (SELECT 1 FROM t WHERE id = 2) AS `exists`" with
+                    | ResultSet([ "exists" ], [ [ Some "0" ] ]) -> ()
+                    | other -> failtestf "expected exists=0, got %A" other
+
+                testCase "EXISTS reaches information_schema, the shape Laravel's hasTable() uses"
+                <| fun _ ->
+                    let store = newStore ()
+                    runDefault store "CREATE TABLE widgets (id INT)" |> ignore
+
+                    let sql =
+                        "select exists (select 1 from information_schema.tables where table_schema = 'fsdb' "
+                        + "and table_name = 'widgets' and table_type in ('BASE TABLE', 'SYSTEM VERSIONED')) as `exists`"
+
+                    match runDefault store sql with
+                    | ResultSet([ "exists" ], [ [ Some "1" ] ]) -> ()
+                    | other -> failtestf "expected exists=1, got %A" other ] ]

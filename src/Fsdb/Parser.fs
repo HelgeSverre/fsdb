@@ -326,6 +326,12 @@ let private colPosition: Parser<unit, unit> =
 // tie the knot with a forward reference.
 let private expr, exprRef = createParserForwardedToRef<Expr, unit> ()
 
+/// `SELECT`'s own clauses recurse into `expr` (projections, `WHERE`, ...),
+/// and `expr`'s `Exists` case recurses back into a `SELECT` — tie that knot
+/// the same way `expr` ties its own, with the real definition assigned down
+/// by `selectStmt` once `tableRef`/`projection`/etc. exist.
+let private selectStmtRecord, selectStmtRecordRef = createParserForwardedToRef<SelectStmt, unit> ()
+
 let private parenExpr: Parser<Expr, unit> = between (sym "(") (sym ")") expr
 
 let private starAtom: Parser<Expr, unit> = pstring "*" >>. ws >>% Star
@@ -357,6 +363,9 @@ let private castExpr: Parser<Expr, unit> =
     attempt (keyword "CAST" >>. sym "(" >>. expr .>> keyword "AS" .>>. castTargetType .>> sym ")")
     |>> Cast
 
+let private existsExpr: Parser<Expr, unit> =
+    attempt (keyword "EXISTS" >>. sym "(" >>. selectStmtRecord .>> sym ")") |>> Exists
+
 /// A bare word: a column, a qualified `t.col` (or `t.*`, which is `Star` —
 /// `Ast.Expr` doesn't distinguish it from an unqualified `*`), or a function
 /// call if followed by `(args)` (handled by `funcCallAtom` above, tried
@@ -374,6 +383,7 @@ let private atom: Parser<Expr, unit> =
         [ parenExpr
           starAtom
           castExpr
+          existsExpr
           numberLit |>> Lit
           stringLit |>> Lit
           keyword "NULL" >>% Lit VNull
@@ -731,7 +741,7 @@ let private tableRef: Parser<TableRef, unit> =
         | Some table -> { Database = Some first; Table = table; Alias = alias }
         | None -> { Database = None; Table = first; Alias = alias }
 
-let private selectStmt: Parser<Statement, unit> =
+selectStmtRecordRef.Value <-
     (keyword "SELECT" >>. sepBy1 projection (sym ",")
      .>>. opt (keyword "FROM" >>. tableRef)
      .>>. opt (keyword "WHERE" >>. expr)
@@ -740,13 +750,14 @@ let private selectStmt: Parser<Statement, unit> =
     |>> fun ((((projs, from), where), orderBy), limitOffset) ->
         let limit, offset = limitOffset |> Option.defaultValue (None, None)
 
-        Select
-            { Projections = projs
-              From = from
-              Where = where
-              OrderBy = orderBy |> Option.defaultValue []
-              Limit = limit
-              Offset = offset }
+        { Projections = projs
+          From = from
+          Where = where
+          OrderBy = orderBy |> Option.defaultValue []
+          Limit = limit
+          Offset = offset }
+
+let private selectStmt: Parser<Statement, unit> = selectStmtRecord |>> Select
 
 /// `UPDATE t [[AS] alias] SET ... [WHERE ...] [ORDER BY ...] [LIMIT ...]` —
 /// the alias, `ORDER BY`, and `LIMIT` are accepted and discarded:

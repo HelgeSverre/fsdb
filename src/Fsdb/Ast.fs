@@ -56,6 +56,10 @@ type ColumnType =
     | TYear
     | TJson
 
+// `Expr` and `SelectStmt` are mutually recursive: `Exists`/a scalar subquery
+// carries a nested `SelectStmt`, whose projections/`WHERE` are themselves
+// built from `Expr`. Every type in between (`Projection`, `TableRef`, ...)
+// rides along in the same `and` chain since `SelectStmt` needs them.
 type Expr =
     | Lit of Value
     | Col of name: string
@@ -74,24 +78,29 @@ type Expr =
     | Cast of Expr * ColumnType
     /// `SELECT *` / `SELECT t.*`.
     | Star
+    /// `EXISTS (SELECT ...)` — true iff the subquery returns at least one
+    /// row. Only the boolean form is needed so far (Laravel's schema-probe
+    /// queries: `hasTable`/`hasColumn`/...); add a general scalar-subquery
+    /// case (`(SELECT ...)` used as a value) when a migration needs one.
+    | Exists of SelectStmt
 
-type Direction =
+and Direction =
     | Asc
     | Desc
 
 /// One `ORDER BY` key: the expression to sort by and its direction.
-type OrderKey = Expr * Direction
+and OrderKey = Expr * Direction
 
 /// A column's `DEFAULT`: either a fixed value, or `CURRENT_TIMESTAMP`, which
 /// evaluates fresh at insert time rather than once at parse time — kept as
 /// its own case instead of a `VString "CURRENT_TIMESTAMP"` sentinel value so
 /// storage evaluates it explicitly rather than trying (and failing) to
 /// coerce the marker text itself into the column's type.
-type ColumnDefault =
+and ColumnDefault =
     | DConst of Value
     | DCurrentTimestamp
 
-type ColumnDef =
+and ColumnDef =
     { Name: string
       Type: ColumnType
       Nullable: bool
@@ -103,7 +112,7 @@ type ColumnDef =
 /// A named `[UNIQUE] KEY|INDEX (cols)` — from a `CREATE TABLE` trailing item,
 /// `ALTER TABLE ADD INDEX`, `CREATE INDEX`, or a column-level `UNIQUE`
 /// modifier (which synthesizes one of these named after the column).
-type IndexDef = { Name: string; Columns: string list; Unique: bool }
+and IndexDef = { Name: string; Columns: string list; Unique: bool }
 
 /// A `CONSTRAINT name FOREIGN KEY (cols) REFERENCES tbl (cols) [ON DELETE
 /// ...] [ON UPDATE ...]` — metadata only, stored so `information_schema` can
@@ -111,7 +120,7 @@ type IndexDef = { Name: string; Columns: string list; Unique: bool }
 /// delete/update, no insert-time reference check), add it once a migration's
 /// test suite actually depends on the enforcement rather than just the
 /// metadata existing.
-type ForeignKeyDef =
+and ForeignKeyDef =
     { Name: string
       Columns: string list
       RefTable: string
@@ -120,13 +129,13 @@ type ForeignKeyDef =
       OnUpdate: string option }
 
 /// A `SELECT` projection: the expression and its optional `AS alias`.
-type Projection = Expr * string option
+and Projection = Expr * string option
 
 /// `FROM [db.]table [[AS] alias]`. A record (not a bare string) so a
 /// qualified name (`information_schema.tables`) and an alias have somewhere
 /// to live — needed for M4's schema introspection and, later, joins —
 /// without another breaking edit to every `Select` call site.
-type TableRef =
+and TableRef =
     { Database: string option
       Table: string
       Alias: string option }
@@ -136,7 +145,7 @@ type TableRef =
 /// independently (M5 adds `GroupBy`/`Having`), so a record avoids a breaking
 /// edit — and an 8-argument re-spelling at every call site — each time one
 /// does.
-type SelectStmt =
+and SelectStmt =
     { Projections: Projection list
       From: TableRef option
       Where: Expr option
