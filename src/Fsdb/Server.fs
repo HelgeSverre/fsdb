@@ -59,31 +59,30 @@ let private sendQueryResult
             do! writePacketAsync stream { SeqId = startSeq; Payload = errPayload capabilities code message }
         | QueryHandler.ResultSet(columns, rows) ->
             let deprecateEof = capabilities &&& ClientDeprecateEof <> 0u
-            let mutable seq = startSeq
 
-            let send payload =
-                async {
-                    do! writePacketAsync stream { SeqId = seq; Payload = payload }
-                    seq <- seq + 1uy
+            let columnCountPayload =
+                let w = Writer()
+                w.WriteLenEncInt(uint64 columns.Length)
+                w.ToArray()
+
+            // The packet order here reads top-to-bottom as the protocol spec
+            // describes a text resultset: column count, column defs, an EOF
+            // (unless CLIENT_DEPRECATE_EOF), rows, then the terminator.
+            let payloads =
+                seq {
+                    columnCountPayload
+                    yield! columns |> Seq.map (fun col -> columnDefPayload { Name = col })
+                    if not deprecateEof then
+                        eofPayload capabilities
+                    yield! rows |> Seq.map textRowPayload
+                    if deprecateEof then
+                        okEndOfResultSetPayload capabilities
+                    else
+                        eofPayload capabilities
                 }
 
-            let colCountPayload = Writer()
-            colCountPayload.WriteLenEncInt(uint64 columns.Length)
-            do! send (colCountPayload.ToArray())
-
-            for col in columns do
-                do! send (columnDefPayload { Name = col })
-
-            if not deprecateEof then
-                do! send (eofPayload capabilities)
-
-            for row in rows do
-                do! send (textRowPayload row)
-
-            if deprecateEof then
-                do! send (okEndOfResultSetPayload capabilities)
-            else
-                do! send (eofPayload capabilities)
+            for i, payload in Seq.indexed payloads do
+                do! writePacketAsync stream { SeqId = startSeq + byte i; Payload = payload }
     }
 
 let private handleConnection (connectionId: int) (client: TcpClient) : Async<unit> =
