@@ -71,7 +71,13 @@ let tests =
                     Expect.isLessThan
                         (compare (VDate(DateOnly(2024, 1, 1))) (VDate(DateOnly(2024, 6, 1))))
                         0
-                        "jan < jun" ]
+                        "jan < jun"
+
+                testCase "string comparison is case-insensitive, matching utf8mb4_0900_ai_ci"
+                <| fun _ -> Expect.equal (compare (VString "a") (VString "A")) 0 "'a' = 'A'"
+
+                testCase "string comparison ignores trailing spaces, matching PAD SPACE"
+                <| fun _ -> Expect.equal (compare (VString "a") (VString "a ")) 0 "'a' = 'a '" ]
 
           testList
               "equals"

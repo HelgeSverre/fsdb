@@ -68,11 +68,20 @@ let toDouble (v: Value) : float =
     | VDateTime _
     | VJson _ -> v |> toText |> Option.map parseLeadingNumeric |> Option.defaultValue 0.0
 
+/// String comparison matching MySQL 8's default collation,
+/// utf8mb4_0900_ai_ci: case-insensitive ("ai" is accent-insensitive, which
+/// .NET's OrdinalIgnoreCase doesn't model — ponytail: ASCII/Latin case
+/// folding only, add real accent folding if a _ai collation edge case
+/// actually matters) and PAD SPACE-insensitive, so `'a' = 'a '` is true the
+/// same way a CHAR/VARCHAR compare trims trailing spaces before comparing.
+let private compareStrings (x: string) (y: string) : int =
+    String.Compare(x.TrimEnd(' '), y.TrimEnd(' '), StringComparison.OrdinalIgnoreCase) |> sign
+
 /// Total order over values for ORDER BY: NULL sorts first, numbers compare
 /// numerically (a number vs. a string coerces the string to a double, so
 /// `'10' < '9'` numerically even though it's false as a string compare),
-/// same-typed values compare natively, and anything else falls back to a
-/// text compare.
+/// same-typed values compare natively (strings per `compareStrings`'s
+/// collation), and anything else falls back to a text compare.
 let compare (a: Value) (b: Value) : int =
     match a, b with
     | VNull, VNull -> 0
@@ -80,7 +89,7 @@ let compare (a: Value) (b: Value) : int =
     | _, VNull -> 1
     | VDecimal x, VDecimal y -> Decimal.Compare(x, y)
     | VInt x, VInt y -> Operators.compare x y
-    | VString x, VString y -> String.CompareOrdinal(x, y) |> sign
+    | VString x, VString y -> compareStrings x y
     | VBytes x, VBytes y -> Operators.compare x y
     | VDate x, VDate y -> Operators.compare x y
     | VDateTime x, VDateTime y -> Operators.compare x y
@@ -88,7 +97,7 @@ let compare (a: Value) (b: Value) : int =
     | VDateTime x, VDate y -> Operators.compare x (y.ToDateTime(TimeOnly.MinValue))
     | (VInt _ | VDouble _ | VDecimal _), _
     | _, (VInt _ | VDouble _ | VDecimal _) -> Operators.compare (toDouble a) (toDouble b)
-    | _ -> String.CompareOrdinal(toText a |> Option.defaultValue "", toText b |> Option.defaultValue "") |> sign
+    | _ -> compareStrings (toText a |> Option.defaultValue "") (toText b |> Option.defaultValue "")
 
 /// WHERE-style equality with MySQL's implicit coercion (`1 = '1'` is true).
 /// Three-valued logic: NULL never equals anything, including another NULL.
