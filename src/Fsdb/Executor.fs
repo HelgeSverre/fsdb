@@ -326,35 +326,46 @@ let private runSelect (registry: Registry) (columns: ColumnDef list) (rows: Valu
     | Ok probeProjection ->
         let colNames = probeProjection |> List.map fst
 
-        let keyed =
-            rows
-            |> List.filter (matches >> Result.defaultValue false)
-            |> List.map (fun row -> (orderKeys row |> Result.defaultValue []), row)
+        // A row-level WHERE/ORDER BY failure (not reachable today, but a
+        // real possibility once a function can fail per row rather than
+        // just at the schema level the probe above already checks) must
+        // surface as an `Err`, not be silently treated as "row excluded"
+        // or "sorts as if no keys" — thread the `Result` through instead of
+        // defaulting it away.
+        let keepWithOrderKeys (row: Value[]) : Result<(Value list * Value[]) option, EvalError> =
+            matches row
+            |> Result.bind (fun keep -> if keep then orderKeys row |> Result.map (fun keys -> Some(keys, row)) else Ok None)
 
-        let textRows =
-            keyed
-            |> sortRows
-            |> List.map snd
-            |> applyLimitOffset limit offset
-            |> List.map (fun row -> projectRow row |> Result.defaultValue [] |> List.map (snd >> toText))
+        match rows |> traverseList keepWithOrderKeys with
+        | Error(code, message) -> Err(code, message)
+        | Ok maybeKeyed ->
+            let keyed = maybeKeyed |> List.choose id
 
-        ResultSet(colNames, textRows)
+            match keyed |> sortRows |> List.map snd |> applyLimitOffset limit offset |> traverseList projectRow with
+            | Error(code, message) -> Err(code, message)
+            | Ok projectedRows -> ResultSet(colNames, projectedRows |> List.map (List.map (snd >> toText)))
 
 /// Assigns `assignments` (already resolved to column indices) to a copy of
 /// `row`, evaluating each right-hand side against the row's original
-/// (pre-assignment) values.
+/// (pre-assignment) values. A failing right-hand side propagates as an
+/// `Error` (as a `StorageError` so it can travel through
+/// `Storage.updateRows`'s `updater`) instead of silently writing `VNull` —
+/// the difference between "UPDATE failed" and quiet data corruption once a
+/// SET expression can fail per row.
 let private applyAssignments
     (registry: Registry)
     (columnIndex: Map<string, int>)
     (assignments: (int * Expr) list)
     (row: Value[])
-    : Value[] =
-    let newRow = Array.copy row
-
-    for idx, expr in assignments do
-        newRow.[idx] <- (evalExpr registry columnIndex row expr |> Result.defaultValue VNull)
-
-    newRow
+    : Result<Value[], StorageError> =
+    assignments
+    |> traverseList (fun (idx, expr) -> evalExpr registry columnIndex row expr |> Result.map (fun v -> idx, v))
+    |> Result.mapError ExpressionError
+    |> Result.map (fun idxVals ->
+        let newRow = Array.copy row
+        for idx, v in idxVals do
+            newRow.[idx] <- v
+        newRow)
 
 /// Executes one parsed statement against `store`, threading the session's
 /// AUTO_INCREMENT bookkeeping through as a plain value rather than a
@@ -435,7 +446,7 @@ let execute (store: Store) (registry: Registry) (dbName: string) (lastInsertId: 
                 match check (probeRow columns) |> Result.bind (fun _ -> checkAssignments (probeRow columns)) with
                 | Error(code, message) -> lastInsertId, Err(code, message)
                 | Ok _ ->
-                    let predicate row = check row |> Result.defaultValue false
+                    let predicate row = check row |> Result.mapError ExpressionError
                     let updater row = applyAssignments registry columnIndex indexedAssignments row
 
                     match updateRows store dbName table predicate updater with
@@ -456,7 +467,7 @@ let execute (store: Store) (registry: Registry) (dbName: string) (lastInsertId: 
             match check (probeRow columns) with
             | Error(code, message) -> lastInsertId, Err(code, message)
             | Ok _ ->
-                let predicate row = check row |> Result.defaultValue false
+                let predicate row = check row |> Result.mapError ExpressionError
 
                 match deleteRows store dbName table predicate with
                 | Ok affected -> lastInsertId, Affected(uint64 affected)

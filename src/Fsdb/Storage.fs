@@ -9,6 +9,12 @@ open Fsdb.Ast
 open Fsdb.Value
 
 /// Storage-layer failures, mapped to MySQL error codes by `toMySqlError`.
+/// `ExpressionError` carries an already-formed MySQL (code, message) pair
+/// through from `Executor`'s row-level expression evaluation (e.g. an
+/// `UPDATE ... SET` right-hand side) — `Storage` doesn't know that
+/// vocabulary, but `updateRows`'s `updater` can now fail per row instead of
+/// silently writing a `VNull`, and its failure needs to travel the same
+/// `Result<_, StorageError>` path every other write error does.
 type StorageError =
     | NoSuchDatabase of name: string
     | TableExists of name: string
@@ -17,6 +23,7 @@ type StorageError =
     | ColumnCountMismatch of expected: int * actual: int
     | NotNullViolation of column: string
     | InvalidValueForColumn of column: string * value: string
+    | ExpressionError of code: int * message: string
 
 /// MySQL error code + message for a `StorageError`, ready for the wire
 /// protocol's ERR packet.
@@ -30,6 +37,7 @@ let toMySqlError (err: StorageError) : int * string =
         1136, sprintf "Column count doesn't match value count at row 1 (expected %d, got %d)" expected actual
     | NotNullViolation column -> 1048, sprintf "Column '%s' cannot be null" column
     | InvalidValueForColumn(column, value) -> 1366, sprintf "Incorrect value: '%s' for column '%s'" value column
+    | ExpressionError(code, message) -> code, message
 
 /// A table's rows, newest last. `OriginalName` keeps the as-created casing
 /// for information_schema, even though the catalog keys tables by their
@@ -337,30 +345,48 @@ let private coerceRow (columns: ColumnDef list) (row: Value[]) : Result<Value[],
     |> Result.map Array.ofList
 
 /// Deletes every row matching `predicate`. Returns the number of rows
-/// removed.
-let deleteRows (store: Store) (dbName: string) (tableName: string) (predicate: Value[] -> bool) : Result<int, StorageError> =
+/// removed. `predicate` returns a `Result` rather than a plain `bool` so a
+/// per-row WHERE-evaluation failure (not reachable today — every `Value`
+/// operation is total — but a real possibility once functions that can
+/// fail per row land) surfaces as an `Error` instead of silently being
+/// treated as "didn't match".
+let deleteRows
+    (store: Store)
+    (dbName: string)
+    (tableName: string)
+    (predicate: Value[] -> Result<bool, StorageError>)
+    : Result<int, StorageError> =
     withTable store dbName tableName (fun table ->
-        let kept, removed = table.Rows |> List.partition (predicate >> not)
-        Ok({ table with Rows = kept }, List.length removed))
+        table.Rows
+        |> traverseResult (fun row -> predicate row |> Result.map (fun keep -> keep, row))
+        |> Result.map (fun flagged ->
+            let kept = flagged |> List.filter (fst >> not) |> List.map snd
+            { table with Rows = kept }, flagged |> List.filter fst |> List.length))
 
 /// Replaces every row matching `predicate` with `updater row`, coercing
 /// the result back to the table's column types. Returns the number of rows
 /// actually *changed* — matching but no-op writes (`SET v = v`) don't count,
 /// matching MySQL's "Changed: n" rather than "Rows matched: n" — via `Value[]`'s
 /// structural equality (F# arrays compare structurally, element by element).
+/// As with `deleteRows`, `predicate` and `updater` both return `Result`
+/// rather than defaulting a failure away.
 let updateRows
     (store: Store)
     (dbName: string)
     (tableName: string)
-    (predicate: Value[] -> bool)
-    (updater: Value[] -> Value[])
+    (predicate: Value[] -> Result<bool, StorageError>)
+    (updater: Value[] -> Result<Value[], StorageError>)
     : Result<int, StorageError> =
     withTable store dbName tableName (fun table ->
         let applyToRow row =
-            if predicate row then
-                updater row |> coerceRow table.Columns |> Result.map (fun r -> r, r <> row)
-            else
-                Ok(row, false)
+            predicate row
+            |> Result.bind (fun keep ->
+                if keep then
+                    updater row
+                    |> Result.bind (coerceRow table.Columns)
+                    |> Result.map (fun r -> r, r <> row)
+                else
+                    Ok(row, false))
 
         table.Rows
         |> traverseResult applyToRow

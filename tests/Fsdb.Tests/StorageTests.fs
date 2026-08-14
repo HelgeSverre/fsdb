@@ -332,8 +332,8 @@ let tests =
                           [ VNull; VString "bob"; VInt 25L ] ]
                     |> ignore
 
-                    let predicate (row: Value[]) = row.[1] = VString "alice"
-                    let updater (row: Value[]) = [| row.[0]; row.[1]; VString "31" |]
+                    let predicate (row: Value[]) = Ok(row.[1] = VString "alice")
+                    let updater (row: Value[]) = Ok [| row.[0]; row.[1]; VString "31" |]
 
                     match updateRows store defaultDatabase "users" predicate updater with
                     | Ok affected ->
@@ -356,9 +356,9 @@ let tests =
                     insertRows store defaultDatabase "users" None [ [ VNull; VString "alice"; VInt 30L ] ]
                     |> ignore
 
-                    let updater (row: Value[]) = [| row.[0]; VNull; row.[2] |]
+                    let updater (row: Value[]) = Ok [| row.[0]; VNull; row.[2] |]
 
-                    match updateRows store defaultDatabase "users" (fun _ -> true) updater with
+                    match updateRows store defaultDatabase "users" (fun _ -> Ok true) updater with
                     | Error(NotNullViolation "name") -> ()
                     | other -> failtestf "expected NotNullViolation, got %A" other
 
@@ -375,7 +375,7 @@ let tests =
                           [ VNull; VString "bob"; VInt 25L ] ]
                     |> ignore
 
-                    match deleteRows store defaultDatabase "users" (fun row -> row.[1] = VString "alice") with
+                    match deleteRows store defaultDatabase "users" (fun row -> Ok(row.[1] = VString "alice")) with
                     | Ok affected ->
                         Expect.equal affected 1 "one row deleted"
 
