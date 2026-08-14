@@ -201,18 +201,6 @@ and private likeOp (subject: Value) (pattern: Value) : Value =
         let pat = pattern |> toText |> Option.defaultValue ""
         boolToValue (Regex.IsMatch(text, likeToRegex pat, RegexOptions.IgnoreCase))
 
-/// Evaluates `f` for every row, stopping at (and returning) the first error
-/// without materializing past it.
-let private validateRows (rows: Value[] list) (f: Value[] -> Result<'a, EvalError>) : Result<unit, EvalError> =
-    rows
-    |> List.tryPick (fun row ->
-        match f row with
-        | Error e -> Some e
-        | Ok _ -> None)
-    |> function
-        | Some e -> Error e
-        | None -> Ok()
-
 let private applyLimitOffset (limit: int option) (offset: int option) (rows: 'a list) : 'a list =
     let afterOffset =
         match offset with
@@ -238,6 +226,14 @@ let private evalProjection
         evalExpr registry columnIndex row expr
         |> Result.map (fun v -> [ aliasOpt |> Option.defaultValue (exprLabel expr), v ])
 
+/// An all-`VNull` row shaped like `columns` — used only to type-check a
+/// statement's expressions (unknown column/function) independent of the
+/// actual data, since those errors are about the schema, not row values.
+/// Without this, a table with zero matching (or zero total) rows would
+/// silently skip evaluating its WHERE/ORDER BY/projection at all and never
+/// surface a real error.
+let private probeRow (columns: ColumnDef list) : Value[] = Array.create (List.length columns) VNull
+
 let private runSelect
     (registry: Registry)
     (columns: ColumnDef list)
@@ -258,6 +254,11 @@ let private runSelect
     let orderKeys (row: Value[]) : Result<Value list, EvalError> =
         orderBy |> traverseList (fun (expr, _) -> evalExpr registry columnIndex row expr)
 
+    let projectRow (row: Value[]) : Result<(string * Value) list, EvalError> =
+        projections
+        |> traverseList (evalProjection registry columnIndex columns row)
+        |> Result.map List.concat
+
     /// Sorts rows by their pre-evaluated `ORDER BY` keys: a total order per
     /// key via `Value.compare` (NULLs first), folded left-to-right so the
     /// first key that differs between two rows decides, later keys only
@@ -277,42 +278,26 @@ let private runSelect
                         | Desc -> -c)
                 0)
 
-    match validateRows rows matches with
-    | Error e -> Err(fst e, snd e)
-    | Ok() ->
-        let filtered = rows |> List.filter (matches >> Result.defaultValue false)
+    let probe = probeRow columns
 
-        match filtered |> traverseList (fun row -> orderKeys row |> Result.map (fun keys -> keys, row)) with
-        | Error e -> Err(fst e, snd e)
-        | Ok keyed ->
-            let projected =
-                keyed
-                |> sortRows
-                |> List.map snd
-                |> applyLimitOffset limit offset
-                |> traverseList (fun row ->
-                    projections
-                    |> traverseList (evalProjection registry columnIndex columns row)
-                    |> Result.map List.concat)
+    match matches probe |> Result.bind (fun _ -> orderKeys probe) |> Result.bind (fun _ -> projectRow probe) with
+    | Error(code, message) -> Err(code, message)
+    | Ok probeProjection ->
+        let colNames = probeProjection |> List.map fst
 
-            match projected with
-            | Error e -> Err(fst e, snd e)
-            | Ok rowsOfPairs ->
-                let colNames =
-                    match rowsOfPairs with
-                    | first :: _ -> first |> List.map fst
-                    | [] ->
-                        // No rows to read column names off of — evaluate the
-                        // projection shape against an all-NULL row instead,
-                        // purely to discover names (`Star` still needs real
-                        // columns, everything else doesn't touch the row).
-                        projections
-                        |> List.collect (function
-                            | Star, _ -> columns |> List.map (fun c -> c.Name)
-                            | expr, aliasOpt -> [ aliasOpt |> Option.defaultValue (exprLabel expr) ])
+        let keyed =
+            rows
+            |> List.filter (matches >> Result.defaultValue false)
+            |> List.map (fun row -> (orderKeys row |> Result.defaultValue []), row)
 
-                let textRows = rowsOfPairs |> List.map (List.map (snd >> toText))
-                ResultSet(colNames, textRows)
+        let textRows =
+            keyed
+            |> sortRows
+            |> List.map snd
+            |> applyLimitOffset limit offset
+            |> List.map (fun row -> projectRow row |> Result.defaultValue [] |> List.map (snd >> toText))
+
+        ResultSet(colNames, textRows)
 
 /// Assigns `assignments` (already resolved to column indices) to a copy of
 /// `row`, evaluating each right-hand side against the row's original
@@ -391,8 +376,6 @@ let execute (store: Store) (registry: Registry) (dbName: string) (lastInsertId: 
             match assignments |> traverseList (fun (name, expr) -> resolveColumn columns name |> Result.map (fun i -> i, expr)) with
             | Error e -> lastInsertId, storageErr e
             | Ok indexedAssignments ->
-                let rowList = List.ofSeq rows
-
                 let check row =
                     match whereExpr with
                     | None -> Ok true
@@ -401,34 +384,35 @@ let execute (store: Store) (registry: Registry) (dbName: string) (lastInsertId: 
                 let checkAssignments row =
                     indexedAssignments |> traverseList (fun (_, expr) -> evalExpr registry columnIndex row expr)
 
-                match validateRows rowList check with
+                // Type-check WHERE/SET against a synthetic all-NULL row
+                // first — same reasoning as `runSelect`'s `probeRow`: an
+                // unknown column/function is a schema error, not a data
+                // one, and shouldn't depend on whether any row happens to
+                // match (or exist at all).
+                match check (probeRow columns) |> Result.bind (fun _ -> checkAssignments (probeRow columns)) with
                 | Error(code, message) -> lastInsertId, Err(code, message)
-                | Ok() ->
-                    match validateRows rowList checkAssignments with
-                    | Error(code, message) -> lastInsertId, Err(code, message)
-                    | Ok() ->
-                        let predicate row = check row |> Result.defaultValue false
-                        let updater row = applyAssignments registry columnIndex indexedAssignments row
+                | Ok _ ->
+                    let predicate row = check row |> Result.defaultValue false
+                    let updater row = applyAssignments registry columnIndex indexedAssignments row
 
-                        match updateRows store dbName table predicate updater with
-                        | Ok affected -> lastInsertId, Affected(uint64 affected)
-                        | Error e -> lastInsertId, storageErr e
+                    match updateRows store dbName table predicate updater with
+                    | Ok affected -> lastInsertId, Affected(uint64 affected)
+                    | Error e -> lastInsertId, storageErr e
 
     | Delete(table, whereExpr) ->
         match scan store dbName table with
         | Error e -> lastInsertId, storageErr e
-        | Ok(columns, rows) ->
+        | Ok(columns, _) ->
             let columnIndex = columnIndexOf columns
-            let rowList = List.ofSeq rows
 
             let check row =
                 match whereExpr with
                 | None -> Ok true
                 | Some expr -> evalExpr registry columnIndex row expr |> Result.map (fun v -> truthy v = Some true)
 
-            match validateRows rowList check with
+            match check (probeRow columns) with
             | Error(code, message) -> lastInsertId, Err(code, message)
-            | Ok() ->
+            | Ok _ ->
                 let predicate row = check row |> Result.defaultValue false
 
                 match deleteRows store dbName table predicate with
