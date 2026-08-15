@@ -631,7 +631,14 @@ let private insertCore
                         | Some e -> Error e
                         | None ->
                             if checkFks then
-                                checkFkParents db table.Columns table.ForeignKeys candidate
+                                // A self-referencing (or otherwise
+                                // same-table) FK's parent needs to see this
+                                // same multi-row INSERT's earlier rows too,
+                                // not just what was already committed before
+                                // the statement started — same reasoning as
+                                // `findUniqueCollision` just above.
+                                let dbView = Map.add tableKey { table with Rows = table.Rows @ accepted } db
+                                checkFkParents dbView table.Columns table.ForeignKeys candidate
                                 |> Result.map (fun () -> candidate, nextAutoId', assignedId)
                             else
                                 Ok(candidate, nextAutoId', assignedId))

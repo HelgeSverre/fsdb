@@ -1205,4 +1205,33 @@ let tests =
                 testCase "setForeignKeyChecks true (the default) is the store's starting state"
                 <| fun _ ->
                     let store = create ()
-                    Expect.isTrue store.ForeignKeyChecks "FK checks are on by default" ] ]
+                    Expect.isTrue store.ForeignKeyChecks "FK checks are on by default"
+
+                testCase "a multi-row INSERT into a self-referencing table sees its own earlier rows as valid parents"
+                <| fun _ ->
+                    let store = create ()
+
+                    let selfFk =
+                        { Name = "fk_node"
+                          Columns = [ "parent_id" ]
+                          RefTable = "node"
+                          RefColumns = [ "id" ]
+                          OnDelete = None
+                          OnUpdate = None }
+
+                    createTable store defaultDatabase "node" [ idCol; col "parent_id" (TInt false) true ] [] [ selfFk ]
+                    |> ignore
+
+                    match
+                        insertRows
+                            store
+                            defaultDatabase
+                            "node"
+                            None
+                            [ [ VInt 1L; VNull ]
+                              [ VInt 2L; VInt 1L ]
+                              [ VInt 3L; VInt 2L ]
+                              [ VInt 4L; VInt 3L ] ]
+                    with
+                    | Ok(_, affected) -> Expect.equal affected 4 "every row's parent was already inserted earlier in the same statement"
+                    | Error e -> failtestf "expected Ok, got %A" e ] ]
