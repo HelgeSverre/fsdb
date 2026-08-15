@@ -598,7 +598,41 @@ let tests =
 
                     match runDefault store "EXPLAIN SELECT * FROM t" with
                     | ResultSet(_, [ [ _; _; _; _; Some "system"; _; _; _; _; Some "1"; _; _ ] ]) -> ()
-                    | other -> failtestf "expected type=system for a 1-row table, got %A" other ]
+                    | other -> failtestf "expected type=system for a 1-row table, got %A" other
+
+                testCase "EXPLAIN validates the statement it describes: a missing table is 1146, not a fake plan"
+                <| fun _ ->
+                    let store = newStore ()
+
+                    for sql in
+                        [ "EXPLAIN SELECT * FROM nosuchtable"
+                          "EXPLAIN UPDATE nosuchtable SET x = 1"
+                          "EXPLAIN INSERT INTO nosuchtable VALUES (1)" ] do
+                        match runDefault store sql with
+                        | Err(1146, _) -> ()
+                        | other -> failtestf "expected 1146 for %s, got %A" sql other
+
+                testCase "EXPLAIN on a JOIN against a missing table is 1146"
+                <| fun _ ->
+                    let store = newStore ()
+                    runDefault store "CREATE TABLE t1 (id INT)" |> ignore
+
+                    match runDefault store "EXPLAIN SELECT * FROM t1 JOIN nosuch2 ON t1.id = nosuch2.id" with
+                    | Err(1146, _) -> ()
+                    | other -> failtestf "expected 1146, got %A" other
+
+                testCase "EXPLAIN validates unknown columns: 1054, not a fake plan"
+                <| fun _ ->
+                    let store = newStore ()
+                    runDefault store "CREATE TABLE t1 (id INT)" |> ignore
+
+                    match runDefault store "EXPLAIN SELECT nosuchcol FROM t1" with
+                    | Err(1054, _) -> ()
+                    | other -> failtestf "expected 1054, got %A" other
+
+                    match runDefault store "EXPLAIN DELETE FROM t1 WHERE nosuchcol = 1" with
+                    | Err(1054, _) -> ()
+                    | other -> failtestf "expected 1054, got %A" other ]
 
           testList
               "functions"

@@ -1884,17 +1884,22 @@ let private isCorrelated (sub: SelectStmt) : bool =
 /// virtual) table: `system` for a table with at most one row, `ALL`
 /// otherwise (this executor never does anything but a full scan), and the
 /// table's actual current row count — honest, not an estimate, since a
-/// `scan` is cheap at this engine's in-memory scale.
-let private explainTableStats (store: Store) (dbName: string) (tableRef: TableRef) : uint64 option * string =
+/// `scan` is cheap at this engine's in-memory scale. `EXPLAIN` still
+/// describes a real statement, so a table that doesn't exist is 1146 here
+/// too, same as it would be if the statement actually ran — not a fake
+/// plan with `rows = NULL`.
+let private explainTableStats (store: Store) (dbName: string) (tableRef: TableRef) : Result<uint64 option * string, QueryResult> =
     let tableDb = tableRef.Database |> Option.defaultValue dbName
 
-    let rowCount =
+    let rowCountResult =
         if System.String.Equals(tableDb, "information_schema", System.StringComparison.OrdinalIgnoreCase) then
-            InformationSchema.scan store.Catalog tableRef.Table |> Option.map (snd >> List.length >> uint64)
+            match InformationSchema.scan store.Catalog tableRef.Table with
+            | Some(_, rows) -> Ok(uint64 (List.length rows))
+            | None -> Error(storageErr (NoSuchTable tableRef.Table))
         else
-            scan store tableDb tableRef.Table |> Result.toOption |> Option.map (snd >> Seq.length >> uint64)
+            scan store tableDb tableRef.Table |> Result.mapError storageErr |> Result.map (snd >> Seq.length >> uint64)
 
-    rowCount, (match rowCount with Some n when n <= 1UL -> "system" | _ -> "ALL")
+    rowCountResult |> Result.map (fun n -> Some n, (if n <= 1UL then "system" else "ALL"))
 
 /// One `EXPLAIN` block's table rows (`from` plus every `join`, in order),
 /// recursing into a `FROM (SELECT ...) AS alias`'s own block (`DERIVED`)
@@ -1914,7 +1919,7 @@ let rec private explainJoinBlock
     (joins: Join list)
     (extra: string list)
     (subqueryExprs: Expr list)
-    : unit =
+    : Result<unit, QueryResult> =
     let tableCount = (from |> Option.toList |> List.length) + joins.Length
 
     let emitTableRow (idx: int) (label: string) (rowCount: uint64 option) (typeLabel: string) =
@@ -1926,36 +1931,41 @@ let rec private explainJoinBlock
               Rows = rowCount
               Extra = (if idx = tableCount - 1 then extra else []) }
 
-    match from with
-    | None -> ()
-    | Some(FromTable tref) ->
-        let n, ty = explainTableStats store dbName tref
-        emitTableRow 0 (tref.Alias |> Option.defaultValue tref.Table) n ty
-    | Some(FromSubquery(sub, _alias)) ->
-        let derivedId = nextId ()
-        emitTableRow 0 (sprintf "<derived%d>" derivedId) None "ALL"
-        explainSelectBlock store dbName nextId acc derivedId "DERIVED" sub
+    let fromResult =
+        match from with
+        | None -> Ok()
+        | Some(FromTable tref) ->
+            explainTableStats store dbName tref
+            |> Result.map (fun (n, ty) -> emitTableRow 0 (tref.Alias |> Option.defaultValue tref.Table) n ty)
+        | Some(FromSubquery(sub, _alias)) ->
+            let derivedId = nextId ()
+            emitTableRow 0 (sprintf "<derived%d>" derivedId) None "ALL"
+            explainSelectBlock store dbName nextId acc derivedId "DERIVED" sub
 
-    joins
-    |> List.iteri (fun i j ->
-        let n, ty = explainTableStats store dbName j.Table
-        emitTableRow (i + 1) (j.Table.Alias |> Option.defaultValue j.Table.Table) n ty)
-
-    if tableCount = 0 then
-        acc.Add
-            { Id = Some id
-              SelectType = selectType
-              Table = None
-              Type = None
-              Rows = None
-              Extra = [ "No tables used" ] }
-
-    subqueryExprs
-    |> List.collect collectSubqueries
-    |> List.iter (fun sub ->
-        let sid = nextId ()
-        let stype = if isCorrelated sub then "DEPENDENT SUBQUERY" else "SUBQUERY"
-        explainSelectBlock store dbName nextId acc sid stype sub)
+    fromResult
+    |> Result.bind (fun () ->
+        joins
+        |> List.indexed
+        |> traverse (fun (i, j) ->
+            explainTableStats store dbName j.Table
+            |> Result.map (fun (n, ty) -> emitTableRow (i + 1) (j.Table.Alias |> Option.defaultValue j.Table.Table) n ty)))
+    |> Result.map (fun _ ->
+        if tableCount = 0 then
+            acc.Add
+                { Id = Some id
+                  SelectType = selectType
+                  Table = None
+                  Type = None
+                  Rows = None
+                  Extra = [ "No tables used" ] })
+    |> Result.bind (fun () ->
+        subqueryExprs
+        |> List.collect collectSubqueries
+        |> traverse (fun sub ->
+            let sid = nextId ()
+            let stype = if isCorrelated sub then "DEPENDENT SUBQUERY" else "SUBQUERY"
+            explainSelectBlock store dbName nextId acc sid stype sub)
+        |> Result.map ignore)
 
 /// One `SELECT`'s (or `FROM (SELECT ...)` derived table's) `EXPLAIN`
 /// block — `Extra`'s three flags read straight off the clauses that make
@@ -1971,7 +1981,7 @@ and private explainSelectBlock
     (id: int)
     (selectType: string)
     (select: SelectStmt)
-    : unit =
+    : Result<unit, QueryResult> =
     let extra =
         [ if select.Where.IsSome then "Using where"
           if not select.OrderBy.IsEmpty then "Using filesort"
@@ -2015,12 +2025,19 @@ let private renderExplainRows (rows: ExplainRow list) : QueryResult =
     ResultSet(columns, rows |> List.sortBy (fun r -> r.Id |> Option.defaultValue System.Int32.MaxValue) |> List.map renderRow)
 
 /// `EXPLAIN [FORMAT=TRADITIONAL] stmt` — a pure description of what
-/// `execute` would do with `stmt`, never actually running it. Covers every
-/// statement shape real MySQL allows `EXPLAIN` on that this engine has a
-/// join/subquery structure to describe (`SELECT`, `UNION`, `UPDATE`,
-/// `DELETE`, `INSERT` — plain or `... SELECT`); anything else (DDL, session
-/// statements, ...) is the same 1064 real MySQL gives.
-let rec private explainStatement (store: Store) (dbName: string) (stmt: Statement) : QueryResult =
+/// `execute` would do with `stmt`, never actually running it. Still
+/// validates `stmt` the way actually running it would, though — real MySQL
+/// gives 1146 for a table `EXPLAIN` describes that doesn't exist and 1054
+/// for a column it doesn't recognize, not a fake plan; `explainJoinBlock`/
+/// `explainTableStats` carry that check for every table an `UPDATE`/
+/// `DELETE`/`SELECT`/subquery touches, `runSelectStmt` (read-only, so safe
+/// to call purely to typecheck and discard) covers a `SELECT`'s columns the
+/// same way `QueryHandler`'s real execution path would.
+/// Covers every statement shape real MySQL allows `EXPLAIN` on that this
+/// engine has a join/subquery structure to describe (`SELECT`, `UNION`,
+/// `UPDATE`, `DELETE`, `INSERT` — plain or `... SELECT`); anything else
+/// (DDL, session statements, ...) is the same 1064 real MySQL gives.
+let rec private explainStatement (store: Store) (registry: Registry) (dbName: string) (stmt: Statement) : QueryResult =
     let counter = ref 0
 
     let nextId () =
@@ -2029,67 +2046,106 @@ let rec private explainStatement (store: Store) (dbName: string) (stmt: Statemen
 
     let acc = ResizeArray<ExplainRow>()
 
+    let finish (result: Result<unit, QueryResult>) =
+        match result with
+        | Ok() -> renderExplainRows (List.ofSeq acc)
+        | Error e -> e
+
+    /// `INSERT`'s target table never goes through `explainJoinBlock` (an
+    /// `INSERT` has no `FROM`), so it needs its own existence check.
+    let checkTableExists (table: string) : Result<unit, QueryResult> =
+        let db, tname = splitQualified dbName table
+        resolveTableRef store dbName { Database = Some db; Table = tname; Alias = None } |> Result.map ignore
+
+    let checkSelect (select: SelectStmt) : Result<unit, QueryResult> =
+        match runSelectStmt store registry dbName select None with
+        | Err(code, message), _, _ -> Error(Err(code, message))
+        | _ -> Ok()
+
+    /// `UPDATE`/`DELETE` have no `SelectStmt` to hand `checkSelect`, so
+    /// `exprs` (their `WHERE`, and an `UPDATE`'s `SET` right-hand sides) get
+    /// the same "evaluate against a synthetic all-NULL probe row" check the
+    /// real single-table `UPDATE`/`DELETE` paths already run before writing
+    /// anything — an unknown column is 1054 here too, not a fake plan.
+    let checkMutationWhere (fromRef: TableRef) (joins: Join list) (exprs: Expr list) : Result<unit, QueryResult> =
+        resolveTableRef store dbName fromRef
+        |> Result.bind (fun (fromCols, _) ->
+            joins
+            |> traverse (fun j -> resolveTableRef store dbName j.Table |> Result.map (fun (cols, _) -> (j.Table.Alias |> Option.defaultValue j.Table.Table), cols))
+            |> Result.map (fun joinSources -> ((fromRef.Alias |> Option.defaultValue fromRef.Table), fromCols) :: joinSources))
+        |> Result.bind (fun sources ->
+            let allCols = sources |> List.collect snd
+            let ctx = contextFactory store registry dbName (columnIndexOf allCols) (qualifierRanges sources) None (probeRow allCols)
+            exprs |> traverse (fun e -> evalExpr ctx e |> Result.map ignore) |> Result.map ignore |> Result.mapError Err)
+
     match stmt with
     | Select select ->
         let id = nextId ()
         let selectType = if containsSubqueryExpr (select.Where |> Option.defaultValue (Lit(VInt 1L))) || (select.Projections |> List.map fst |> List.exists containsSubqueryExpr) || (select.Having |> Option.map containsSubqueryExpr |> Option.defaultValue false) || (select.From |> Option.map (function FromSubquery _ -> true | _ -> false) |> Option.defaultValue false) then "PRIMARY" else "SIMPLE"
-        explainSelectBlock store dbName nextId acc id selectType select
-        renderExplainRows (List.ofSeq acc)
+        finish (checkSelect select |> Result.bind (fun () -> explainSelectBlock store dbName nextId acc id selectType select))
     | Union(first, rest, _, _, _) ->
         let id1 = nextId ()
-        explainSelectBlock store dbName nextId acc id1 "PRIMARY" first
 
-        let restIds =
-            rest
-            |> List.map (fun (_, s) ->
-                let sid = nextId ()
-                explainSelectBlock store dbName nextId acc sid "UNION" s
-                sid)
-
-        if not restIds.IsEmpty then
-            let label = sprintf "<union%s>" (id1 :: restIds |> List.map string |> String.concat ",")
-
-            acc.Add
-                { Id = None
-                  SelectType = "UNION RESULT"
-                  Table = Some label
-                  Type = None
-                  Rows = None
-                  Extra = [] }
-
-        renderExplainRows (List.ofSeq acc)
+        finish (
+            checkSelect first
+            |> Result.bind (fun () -> rest |> traverse (fun (_, s) -> checkSelect s) |> Result.map ignore)
+            |> Result.bind (fun () -> explainSelectBlock store dbName nextId acc id1 "PRIMARY" first)
+            |> Result.bind (fun () ->
+                rest
+                |> traverse (fun (_, s) ->
+                    let sid = nextId ()
+                    explainSelectBlock store dbName nextId acc sid "UNION" s |> Result.map (fun () -> sid)))
+            |> Result.map (fun restIds ->
+                if not restIds.IsEmpty then
+                    let label = sprintf "<union%s>" (id1 :: restIds |> List.map string |> String.concat ",")
+                    acc.Add { Id = None; SelectType = "UNION RESULT"; Table = Some label; Type = None; Rows = None; Extra = [] })
+        )
     | Update u ->
         let id = nextId ()
         let extra = [ if u.Where.IsSome then "Using where"
                       if not u.OrderBy.IsEmpty then "Using filesort" ]
         let subqueryExprs = (u.Where |> Option.toList) @ (u.Assignments |> List.map (fun a -> a.Value)) @ (u.OrderBy |> List.map fst)
-        explainJoinBlock store dbName nextId acc id "UPDATE" (Some(FromTable u.From)) u.Joins extra subqueryExprs
-        renderExplainRows (List.ofSeq acc)
+
+        finish (
+            checkMutationWhere u.From u.Joins ((u.Where |> Option.toList) @ (u.Assignments |> List.map (fun a -> a.Value)))
+            |> Result.bind (fun () -> explainJoinBlock store dbName nextId acc id "UPDATE" (Some(FromTable u.From)) u.Joins extra subqueryExprs)
+        )
     | Delete d ->
         let id = nextId ()
         let extra = [ if d.Where.IsSome then "Using where"
                       if not d.OrderBy.IsEmpty then "Using filesort" ]
         let subqueryExprs = d.Where |> Option.toList
-        explainJoinBlock store dbName nextId acc id "DELETE" (Some(FromTable d.From)) d.Joins extra subqueryExprs
-        renderExplainRows (List.ofSeq acc)
+
+        finish (
+            checkMutationWhere d.From d.Joins (d.Where |> Option.toList)
+            |> Result.bind (fun () -> explainJoinBlock store dbName nextId acc id "DELETE" (Some(FromTable d.From)) d.Joins extra subqueryExprs)
+        )
     | Insert(table, _, rowsExprs, _, _) ->
         let id = nextId ()
-        acc.Add { Id = Some id; SelectType = "INSERT"; Table = Some table; Type = None; Rows = None; Extra = [] }
 
-        List.concat rowsExprs
-        |> List.collect collectSubqueries
-        |> List.iter (fun sub ->
-            let sid = nextId ()
-            explainSelectBlock store dbName nextId acc sid (if isCorrelated sub then "DEPENDENT SUBQUERY" else "SUBQUERY") sub)
-
-        renderExplainRows (List.ofSeq acc)
+        finish (
+            checkTableExists table
+            |> Result.map (fun () -> acc.Add { Id = Some id; SelectType = "INSERT"; Table = Some table; Type = None; Rows = None; Extra = [] })
+            |> Result.bind (fun () ->
+                List.concat rowsExprs
+                |> List.collect collectSubqueries
+                |> traverse (fun sub ->
+                    let sid = nextId ()
+                    explainSelectBlock store dbName nextId acc sid (if isCorrelated sub then "DEPENDENT SUBQUERY" else "SUBQUERY") sub)
+                |> Result.map ignore)
+        )
     | InsertSelect(table, _, select, _) ->
         let id = nextId ()
-        acc.Add { Id = Some id; SelectType = "INSERT"; Table = Some table; Type = None; Rows = None; Extra = [] }
-        let sid = nextId ()
-        explainSelectBlock store dbName nextId acc sid "SUBQUERY" select
-        renderExplainRows (List.ofSeq acc)
-    | Explain inner -> explainStatement store dbName inner
+
+        finish (
+            checkTableExists table
+            |> Result.bind (fun () -> checkSelect select)
+            |> Result.map (fun () -> acc.Add { Id = Some id; SelectType = "INSERT"; Table = Some table; Type = None; Rows = None; Extra = [] })
+            |> Result.bind (fun () ->
+                let sid = nextId ()
+                explainSelectBlock store dbName nextId acc sid "SUBQUERY" select)
+        )
+    | Explain inner -> explainStatement store registry dbName inner
     | _ -> Err(1064, "EXPLAIN is not supported for this statement")
 
 /// A top-level `SELECT`'s resultset plus its per-column MySQL wire types —
@@ -2571,4 +2627,4 @@ let execute (store: Store) (registry: Registry) (dbName: string) (lastInsertId: 
                     | Error e -> lastInsertId, storageErr e
 
     | Explain inner ->
-        lastInsertId, explainStatement store dbName inner
+        lastInsertId, explainStatement store registry dbName inner
