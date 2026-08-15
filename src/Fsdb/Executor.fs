@@ -684,6 +684,24 @@ and private applyLimitOffset (limit: int option) (offset: int option) (rows: 'a 
     | Some l -> afterOffset |> List.truncate (max 0 l)
     | None -> afterOffset
 
+/// Compares two rows by their pre-evaluated `ORDER BY` keys: a total order
+/// per key via `Value.compare` (NULLs first), folded left-to-right so the
+/// first key that differs between two rows decides, later keys only
+/// breaking ties. The one comparator every `ORDER BY` sort site (plain
+/// `SELECT`, grouped, windowed, `UNION`) shares, instead of each carrying
+/// its own copy of the same fold.
+and private compareByOrderKeys (dirs: Direction list) (ka: Value list) (kb: Value list) : int =
+    List.zip3 dirs ka kb
+    |> List.fold
+        (fun acc (dir, va, vb) ->
+            if acc <> 0 then
+                acc
+            else
+                match dir with
+                | Asc -> Value.compare va vb
+                | Desc -> -(Value.compare va vb))
+        0
+
 /// A `UNION` statement's combined resultset, plus its column types —
 /// pulled out of `execute`'s `Union` arm (which just calls this and
 /// discards the second half) so `QueryHandler.executeStatement` can call
@@ -762,17 +780,10 @@ and runUnionStmt
                 else
                     allPaired
                     |> List.sortWith (fun (_, ta) (_, tb) ->
-                        orderBy
-                        |> List.fold
-                            (fun acc (expr, dir) ->
-                                if acc <> 0 then
-                                    acc
-                                else
-                                    let c = Value.compare (orderKeyOf ta expr) (orderKeyOf tb expr)
-                                    match dir with
-                                    | Asc -> c
-                                    | Desc -> -c)
-                            0)
+                        compareByOrderKeys
+                            (orderBy |> List.map snd)
+                            (orderBy |> List.map (fst >> orderKeyOf ta))
+                            (orderBy |> List.map (fst >> orderKeyOf tb)))
 
             ResultSet(cols, sortedPaired |> List.map fst |> applyLimitOffset limit offset), firstTypes
 
@@ -1114,19 +1125,7 @@ and private runGroupedSelect
                     let kept = maybeRows |> List.choose id
 
                     let sorted =
-                        kept
-                        |> List.sortWith (fun (_, ka) (_, kb) ->
-                            List.zip3 (List.map snd select.OrderBy) ka kb
-                            |> List.fold
-                                (fun acc (dir, va, vb) ->
-                                    if acc <> 0 then
-                                        acc
-                                    else
-                                        let c = Value.compare va vb
-                                        match dir with
-                                        | Asc -> c
-                                        | Desc -> -c)
-                                0)
+                        kept |> List.sortWith (fun (_, ka) (_, kb) -> compareByOrderKeys (List.map snd select.OrderBy) ka kb)
 
                     let paired =
                         sorted
@@ -1198,18 +1197,7 @@ and private runWindowedSelect
                     |> List.groupBy (fun (_, (partKey, _, _)) -> partKey)
                     |> List.collect (fun (_, group) ->
                         group
-                        |> List.sortWith (fun (_, (_, ka, _)) (_, (_, kb, _)) ->
-                            List.zip3 (windowOrderBy |> List.map snd) ka kb
-                            |> List.fold
-                                (fun acc (dir, va, vb) ->
-                                    if acc <> 0 then
-                                        acc
-                                    else
-                                        let c = Value.compare va vb
-                                        match dir with
-                                        | Asc -> c
-                                        | Desc -> -c)
-                                0)
+                        |> List.sortWith (fun (_, (_, ka, _)) (_, (_, kb, _)) -> compareByOrderKeys (windowOrderBy |> List.map snd) ka kb)
                         |> List.mapi (fun rank (origIdx, _) -> origIdx, int64 (rank + 1)))
                     |> Map.ofList
 
@@ -1299,24 +1287,8 @@ and private runSelect
         |> traverse (evalProjection (ctxFor row) columns)
         |> Result.map List.concat
 
-    // Sorts rows by their pre-evaluated `ORDER BY` keys: a total order per
-    // key via `Value.compare` (NULLs first), folded left-to-right so the
-    // first key that differs between two rows decides, later keys only
-    // breaking ties.
     let sortRows (keyed: (Value list * Value[]) list) : (Value list * Value[]) list =
-        keyed
-        |> List.sortWith (fun (ka, _) (kb, _) ->
-            List.zip3 (List.map snd orderBy) ka kb
-            |> List.fold
-                (fun acc (dir, va, vb) ->
-                    if acc <> 0 then
-                        acc
-                    else
-                        let c = Value.compare va vb
-                        match dir with
-                        | Asc -> c
-                        | Desc -> -c)
-                0)
+        keyed |> List.sortWith (fun (ka, _) (kb, _) -> compareByOrderKeys (List.map snd orderBy) ka kb)
 
     let probe = probeRow columns
 
