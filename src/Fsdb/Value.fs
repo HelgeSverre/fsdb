@@ -20,6 +20,31 @@ type Value =
     /// (JVal DU or similar) when JSON_EXTRACT-style path queries land.
     | VJson of string
 
+// MySQL wire protocol column type ids — shared by `Protocol`'s column
+// definition packets (a resultset's declared type) and its binary-protocol
+// parameter decoding (COM_STMT_EXECUTE's per-param type array). Kept here,
+// ahead of both `Executor` and `Protocol` in build order, so `mysqlTypeOf`
+// below (used by `Executor` to type a resultset's columns) and `Protocol`
+// (used to read/write them on the wire) share one definition instead of
+// two copies of the same numeric constants drifting apart.
+// https://dev.mysql.com/doc/dev/mysql-server/latest/page_protocol_basic_dt_types.html
+let TypeTiny = 0x01uy
+let TypeShort = 0x02uy
+let TypeLong = 0x03uy
+let TypeFloat = 0x04uy
+let TypeDouble = 0x05uy
+let TypeNull = 0x06uy
+let TypeTimestamp = 0x07uy
+let TypeLongLong = 0x08uy
+let TypeDate = 0x0auy
+let TypeTime = 0x0buy
+let TypeDateTime = 0x0cuy
+let TypeVarchar = 0x0fuy
+let TypeNewDecimal = 0xf6uy
+let TypeBlob = 0xfcuy
+let TypeVarString = 0xfduy
+let TypeString = 0xfeuy
+
 /// Renders a value the way the text resultset protocol does: NULL becomes
 /// the lenenc-null marker (`None`), everything else its textual form.
 let toText (v: Value) : string option =
@@ -35,6 +60,31 @@ let toText (v: Value) : string option =
     | VDate d -> Some(d.ToString("yyyy-MM-dd", CultureInfo.InvariantCulture))
     | VDateTime dt -> Some(dt.ToString("yyyy-MM-dd HH:mm:ss", CultureInfo.InvariantCulture))
     | VJson j -> Some j
+
+/// The MySQL wire type this value's runtime shape reports as, so a
+/// resultset's column definition can match the value instead of a blanket
+/// VAR_STRING (see the `ponytail` history on `Protocol.columnDefPayload`).
+/// This matters for real client drivers: PHP's mysqlnd, in particular,
+/// auto-converts a LONGLONG/DOUBLE/DATE/DATETIME-typed column to a native
+/// int/float/string even over the text protocol, based on this byte —
+/// app code that does `$model->foo_id === $other->id` only gets the
+/// native-int conversion real MySQL gives it if fsdb reports the same
+/// type real MySQL would, instead of leaving every column a string for
+/// the client to coerce.
+let mysqlTypeOf (v: Value) : byte =
+    match v with
+    // No data to type; NULL round-trips the same regardless of the
+    // declared column type, so the caller's fallback (typically
+    // VAR_STRING) is as good as anything else here.
+    | VNull -> TypeVarString
+    | VInt _ -> TypeLongLong
+    | VDouble _ -> TypeDouble
+    | VDecimal _ -> TypeNewDecimal
+    | VString _
+    | VBytes _
+    | VJson _ -> TypeVarString
+    | VDate _ -> TypeDate
+    | VDateTime _ -> TypeDateTime
 
 /// Matches the leading numeric prefix of a string the way MySQL's
 /// string-to-number cast does (`'12abc' + 0` = 12, `'abc' + 0` = 0),

@@ -484,14 +484,36 @@ let private registryFor (session: Session) : Functions.Registry =
 let private executeStatement (session: Session) (sql: string) (upper: string) : Session * QueryResult =
     match Parser.parse sql with
     | Result.Ok stmt ->
+        let store = Session.currentStore session
+        let registry = registryFor session
         let dbName = session.Database |> Option.defaultValue defaultDatabase
 
-        let lastInsertId, result =
-            Executor.execute (Session.currentStore session) (registryFor session) dbName session.LastInsertId stmt
+        // `SELECT`/`UNION` go through `Executor`'s type-preserving entry
+        // points instead of the plain `execute` every other statement uses
+        // — those are the only two statement kinds that reach the wire as
+        // a `ResultSet`, and only they still have the typed `Value`s
+        // (rather than already-rendered text) `columnTypes` needs. See
+        // `Session.LastResultColumnTypes`'s doc for why this rides along
+        // on `session` instead of widening this function's own return type.
+        let lastInsertId, result, columnTypes =
+            match stmt with
+            | Select select ->
+                let result, types = Executor.runTopLevelSelect store registry dbName select
+                session.LastInsertId, result, types
+            | Union(first, rest, orderBy, limit, offset) ->
+                let result, types = Executor.runUnionStmt store registry dbName first rest orderBy limit offset
+                session.LastInsertId, result, types
+            | _ ->
+                let lastInsertId, result = Executor.execute store registry dbName session.LastInsertId stmt
+                lastInsertId, result, []
 
-        { session with LastInsertId = lastInsertId }, result
-    | Result.Error _ when upper.StartsWith "SELECT" && upper.Contains "@@" -> session, handleAtVarSelect session sql
-    | Result.Error _ -> session, syntaxError sql
+        { session with
+            LastInsertId = lastInsertId
+            LastResultColumnTypes = columnTypes },
+        result
+    | Result.Error _ when upper.StartsWith "SELECT" && upper.Contains "@@" ->
+        { session with LastResultColumnTypes = [] }, handleAtVarSelect session sql
+    | Result.Error _ -> { session with LastResultColumnTypes = [] }, syntaxError sql
 
 /// Every statement form `dispatch` recognizes purely by text probe
 /// (SET/USE/SHOW/transaction control) rather than `Parser.parse` — one DU
@@ -648,7 +670,16 @@ let private dispatch (session: Session) (rawSql: string) : Session * QueryResult
     let upper = sql.ToUpperInvariant()
 
     match tryProbe sql upper with
-    | Some probe -> runProbe session sql probe
+    | Some probe ->
+        // Every probe-handled form (SHOW/SET/session-variable SELECT/...)
+        // is its own small synthetic `ResultSet` of plain strings — none of
+        // them go through `executeStatement`'s typed path, so clear
+        // whatever `LastResultColumnTypes` a previous statement on this
+        // session left behind rather than risk it surviving (via `Server`'s
+        // VAR_STRING-length-mismatch fallback, a same-column-count
+        // coincidence is all it'd take) onto an unrelated resultset.
+        let session, result = runProbe session sql probe
+        { session with LastResultColumnTypes = [] }, result
     | None -> executeStatement session sql upper
 
 /// No SQL engine failure should ever escape as a raw .NET exception — the

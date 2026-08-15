@@ -23,6 +23,38 @@ let tests =
                   Expect.equal rows [ [ Some "1" ] ] "row value"
               | other -> failtestf "expected a resultset, got %A" other
 
+          testCase "a SELECT's int/string columns report their real MySQL wire types, not a blanket VAR_STRING"
+          <| fun _ ->
+              // Regression: real MySQL clients (PHP's mysqlnd in particular)
+              // auto-convert a LONGLONG-typed column to a native int even
+              // over the text protocol — Eloquent code doing `$model->foo_id
+              // === $other->id` only gets that conversion if the column
+              // definition packet reports the same type real MySQL would.
+              let session = create 1 (Fsdb.Storage.create ())
+              let session, _ = handle session "CREATE TABLE t (id INT, name VARCHAR(10))"
+              let session, _ = handle session "INSERT INTO t VALUES (1, 'a')"
+
+              match handle session "SELECT id, name FROM t" with
+              | session, ResultSet([ "id"; "name" ], [ [ Some "1"; Some "a" ] ]) ->
+                  Expect.equal session.LastResultColumnTypes [ TypeLongLong; TypeVarString ] "id is int, name is a string"
+              | _, other -> failtestf "expected a resultset, got %A" other
+
+          testCase "LastResultColumnTypes doesn't leak from a real SELECT onto a later same-arity probe result"
+          <| fun _ ->
+              let session = create 1 (Fsdb.Storage.create ())
+              let session, _ = handle session "CREATE TABLE t (id INT)"
+              let session, _ = handle session "INSERT INTO t VALUES (1)"
+              let session, _ = handle session "SELECT id FROM t"
+              Expect.equal session.LastResultColumnTypes [ TypeLongLong ] "SELECT set a real type"
+
+              // `SELECT @@version` is also a single-column resultset (the
+              // `handleAtVarSelect` probe path, not `executeStatement`'s
+              // typed one) — without an explicit reset this would silently
+              // inherit the previous statement's LONGLONG type instead of
+              // falling back to VAR_STRING for its actual string value.
+              let session, _ = handle session "SELECT @@version"
+              Expect.equal session.LastResultColumnTypes [] "an unrelated probe result clears it"
+
           testCase "SELECT @@version returns the server version"
           <| fun _ ->
               let session = create 1 (Fsdb.Storage.create ())

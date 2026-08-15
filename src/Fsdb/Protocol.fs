@@ -177,12 +177,11 @@ let eofPayload (capabilities: uint32) (statusFlags: int) : byte[] =
 
     w.ToArray()
 
-/// A resultset column. Every column is reported as MYSQL_TYPE_VAR_STRING —
-/// the text protocol sends all values as strings anyway, and clients coerce.
-type ColumnDef = { Name: string }
-
-/// MYSQL_TYPE_VAR_STRING
-let private ColumnTypeVarString = 0xfduy
+/// A resultset column: its name and its MySQL wire type — see
+/// `Value.mysqlTypeOf` (the data-driven source for most resultsets) and
+/// `wireTypeOfColumnType` below (the declared-schema source for the
+/// COM_FIELD_LIST path, which has no row data to read a type off of).
+type ColumnDef = { Name: string; Type: byte }
 
 let columnDefPayload (col: ColumnDef) : byte[] =
     let w = Writer()
@@ -195,11 +194,31 @@ let columnDefPayload (col: ColumnDef) : byte[] =
     w.WriteLenEncInt 0x0cUL // length of fixed-length fields
     w.WriteInt16LE Utf8Mb4GeneralCi
     w.WriteInt32LE 0 // column length
-    w.WriteByte ColumnTypeVarString
+    w.WriteByte col.Type
     w.WriteInt16LE 0 // flags
     w.WriteByte 0uy // decimals
     w.WriteInt16LE 0 // filler
     w.ToArray()
+
+/// Maps a column's *declared* SQL type to its MySQL wire type id — used
+/// only by the deprecated COM_FIELD_LIST path (`Server`'s `FieldList`
+/// handler), which reads straight off `Storage`'s schema instead of a
+/// query result's rows, so there's no `Value` for `Value.mysqlTypeOf` to
+/// read a type off of.
+let wireTypeOfColumnType (ty: Ast.ColumnType) : byte =
+    match ty with
+    | Ast.TTinyInt _ -> TypeTiny
+    | Ast.TSmallInt _ -> TypeShort
+    | Ast.TMediumInt _
+    | Ast.TInt _ -> TypeLong
+    | Ast.TBigInt _ -> TypeLongLong
+    | Ast.TDecimal _ -> TypeNewDecimal
+    | Ast.TDouble -> TypeDouble
+    | Ast.TFloat -> TypeFloat
+    | Ast.TDate -> TypeDate
+    | Ast.TDateTime
+    | Ast.TTimestamp -> TypeDateTime
+    | _ -> TypeVarString
 
 /// Encodes one text-protocol row. None means SQL NULL.
 let textRowPayload (values: string option list) : byte[] =
@@ -214,12 +233,21 @@ let textRowPayload (values: string option list) : byte[] =
 
 /// Encodes one binary-protocol resultset row
 /// (https://dev.mysql.com/doc/dev/mysql-server/latest/page_protocol_binary_resultset.html#sect_protocol_binary_resultset_row).
-/// Every column this server advertises in a resultset — text or prepared —
-/// is `MYSQL_TYPE_VAR_STRING` (see `columnDefPayload`), whose binary
-/// encoding is the same length-encoded string the text protocol already
-/// uses, so this reuses the exact same `string option list` row shape as
-/// `textRowPayload`; only the packet header and null-bitmap placement
-/// differ. None means SQL NULL.
+/// Every value here is still encoded as a length-encoded string regardless
+/// of its logical type, so `Server`'s COM_STMT_EXECUTE reply always
+/// advertises its columns as `MYSQL_TYPE_VAR_STRING` in `columnDefPayload`
+/// too (passing `[]` for `resultPayloads`' `columnTypes`, whatever
+/// `Value.mysqlTypeOf` would've reported for the text-protocol reply) —
+/// advertising e.g. LONGLONG here without also switching this row encoding
+/// to raw fixed-width ints would desync every column after it for a real
+/// binary-protocol client. ponytail: type this properly (raw int/double
+/// bytes, MySQL's binary date encoding, ...) if a prepared-statement
+/// client ever needs native-typed binary results the way `textRowPayload`
+/// callers now get; every exercised client so far (chatflow's PDO,
+/// emulated prepares by default, and `Fsdb.Tests`' MySqlConnector cases)
+/// tolerates VAR_STRING binary rows fine. This reuses the exact same
+/// `string option list` row shape as `textRowPayload`; only the packet
+/// header and null-bitmap placement differ. None means SQL NULL.
 let binaryRowPayload (values: string option list) : byte[] =
     let w = Writer()
     w.WriteByte 0uy // packet header, always 0x00 for a row

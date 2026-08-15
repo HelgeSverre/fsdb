@@ -91,6 +91,7 @@ let private resultPayloads
     (capabilities: uint32)
     (statusFlags: int)
     (lastInsertId: uint64)
+    (columnTypes: byte list)
     (result: Executor.QueryResult)
     : byte[] list =
     match result with
@@ -99,13 +100,24 @@ let private resultPayloads
     | ResultSet(columns, rows) ->
         let deprecateEof = capabilities &&& ClientDeprecateEof <> 0u
 
+        // `columnTypes` only means anything if the caller actually had one
+        // entry per column (a mismatch means "no real info" — the
+        // COM_STMT_EXECUTE binary-row path always passes `[]` here, see
+        // `binaryRowPayload`'s doc) — fall back to VAR_STRING per column
+        // rather than zipping a too-short/too-long list.
+        let types =
+            if List.length columnTypes = columns.Length then
+                columnTypes
+            else
+                List.replicate columns.Length TypeVarString
+
         let columnCountPayload =
             let w = Writer()
             w.WriteLenEncInt(uint64 columns.Length)
             w.ToArray()
 
         [ columnCountPayload ]
-        @ (columns |> List.map (fun col -> columnDefPayload { Name = col }))
+        @ (List.zip columns types |> List.map (fun (name, ty) -> columnDefPayload { Name = name; Type = ty }))
         @ (if deprecateEof then [] else [ eofPayload capabilities statusFlags ])
         @ (rows |> List.map rowEncoder)
         @ [ (if deprecateEof then
@@ -124,13 +136,17 @@ let sendQueryResult
     (startSeq: byte)
     (statusFlags: int)
     (lastInsertId: uint64)
+    (columnTypes: byte list)
     (result: Executor.QueryResult)
     : Async<unit> =
-    sendPayloads stream startSeq (resultPayloads textRowPayload capabilities statusFlags lastInsertId result)
+    sendPayloads stream startSeq (resultPayloads textRowPayload capabilities statusFlags lastInsertId columnTypes result)
     |> Async.Ignore
 
 /// As `sendQueryResult`, but encodes resultset rows in the binary protocol
-/// row format COM_STMT_EXECUTE requires.
+/// row format COM_STMT_EXECUTE requires — always passes `columnTypes = []`
+/// (VAR_STRING for every column) to `resultPayloads`; see
+/// `binaryRowPayload`'s doc for why real per-column types can't go out
+/// over this path yet.
 let sendBinaryQueryResult
     (stream: IO.Stream)
     (capabilities: uint32)
@@ -139,7 +155,7 @@ let sendBinaryQueryResult
     (lastInsertId: uint64)
     (result: Executor.QueryResult)
     : Async<unit> =
-    sendPayloads stream startSeq (resultPayloads binaryRowPayload capabilities statusFlags lastInsertId result)
+    sendPayloads stream startSeq (resultPayloads binaryRowPayload capabilities statusFlags lastInsertId [] result)
     |> Async.Ignore
 
 /// `SERVER_STATUS_AUTOCOMMIT` always, plus `SERVER_STATUS_IN_TRANS` while
@@ -222,6 +238,7 @@ let private handleConnection (connectionId: int) (store: Storage.Store) (client:
                                         seqId
                                         (statusFlagsFor session)
                                         (uint64 session.LastInsertId)
+                                        session.LastResultColumnTypes
                                         result
 
                                 return! loop session
@@ -243,7 +260,8 @@ let private handleConnection (connectionId: int) (store: Storage.Store) (client:
                                     return! loop session
                                 | Result.Ok(columns, _rows) ->
                                     let payloads =
-                                        (columns |> List.map (fun c -> columnDefPayload { Name = c.Name }))
+                                        (columns
+                                         |> List.map (fun c -> columnDefPayload { Name = c.Name; Type = wireTypeOfColumnType c.Type }))
                                         @ [ eofPayload capabilities (statusFlagsFor session) ]
 
                                     do! sendPayloads stream seqId payloads |> Async.Ignore
@@ -279,7 +297,7 @@ let private handleConnection (connectionId: int) (store: Storage.Store) (client:
 
                                     let payloads =
                                         stmtPrepareOkPayload stmtId paramCount
-                                        :: List.replicate paramCount (columnDefPayload { Name = "?" })
+                                        :: List.replicate paramCount (columnDefPayload { Name = "?"; Type = TypeVarString })
                                         @ paramDefEof
 
                                     do! sendPayloads stream seqId payloads |> Async.Ignore

@@ -48,6 +48,30 @@ let tests =
                 <| fun _ -> Expect.equal (toText (VJson "{\"a\":1}")) (Some "{\"a\":1}") "json" ]
 
           testList
+              "mysqlTypeOf"
+              [ testCase "VInt reports LONGLONG, so mysqlnd converts it to a native PHP int"
+                <| fun _ -> Expect.equal (mysqlTypeOf (VInt 1L)) TypeLongLong "int"
+
+                testCase "VDouble reports DOUBLE"
+                <| fun _ -> Expect.equal (mysqlTypeOf (VDouble 1.5)) TypeDouble "double"
+
+                testCase "VDecimal reports NEWDECIMAL"
+                <| fun _ -> Expect.equal (mysqlTypeOf (VDecimal 12.5M)) TypeNewDecimal "decimal"
+
+                testCase "VString reports VAR_STRING"
+                <| fun _ -> Expect.equal (mysqlTypeOf (VString "hi")) TypeVarString "string"
+
+                testCase "VDate reports DATE"
+                <| fun _ -> Expect.equal (mysqlTypeOf (VDate(DateOnly(2024, 3, 5)))) TypeDate "date"
+
+                testCase "VDateTime reports DATETIME"
+                <| fun _ ->
+                    Expect.equal (mysqlTypeOf (VDateTime(DateTime(2024, 3, 5, 13, 45, 9)))) TypeDateTime "datetime"
+
+                testCase "VNull falls back to VAR_STRING — NULL round-trips regardless of declared type"
+                <| fun _ -> Expect.equal (mysqlTypeOf VNull) TypeVarString "null" ]
+
+          testList
               "compare"
               [ testCase "NULL sorts before every other value"
                 <| fun _ ->

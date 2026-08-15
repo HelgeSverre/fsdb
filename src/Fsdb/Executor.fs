@@ -324,7 +324,7 @@ let rec private evalExpr (ctx: EvalContext) (expr: Expr) : Result<Value, EvalErr
             match ve with
             | VNull -> Ok VNull
             | _ ->
-                match runSelectStmt ctx.Store ctx.Registry ctx.DbName select (Some ctx) with
+                match runSelectStmt ctx.Store ctx.Registry ctx.DbName select (Some ctx) |> fst with
                 | Err(code, message) -> Error(code, message)
                 | Affected _ -> Ok VNull
                 | ResultSet(_, rows) ->
@@ -407,7 +407,7 @@ let rec private evalExpr (ctx: EvalContext) (expr: Expr) : Result<Value, EvalErr
             | Ok v' -> Ok v'
             | Error err -> Error(Storage.toMySqlError err))
     | Exists select ->
-        match runSelectStmt ctx.Store ctx.Registry ctx.DbName select (Some ctx) with
+        match runSelectStmt ctx.Store ctx.Registry ctx.DbName select (Some ctx) |> fst with
         | ResultSet(_, rows) -> Ok(boolToValue (not (List.isEmpty rows)))
         | Err(code, message) -> Error(code, message)
         // A `SELECT` under `EXISTS (...)` is never an `INSERT`/`UPDATE`/
@@ -415,7 +415,7 @@ let rec private evalExpr (ctx: EvalContext) (expr: Expr) : Result<Value, EvalErr
         // records, nothing else reaches here), so `Affected` can't occur.
         | Affected _ -> Ok VNull
     | Subquery select ->
-        match runSelectStmt ctx.Store ctx.Registry ctx.DbName select (Some ctx) with
+        match runSelectStmt ctx.Store ctx.Registry ctx.DbName select (Some ctx) |> fst with
         | Err(code, message) -> Error(code, message)
         | Affected _ -> Ok VNull
         | ResultSet(cols, _) when List.length cols <> 1 -> Error(1241, "Operand should contain 1 column(s)")
@@ -479,7 +479,7 @@ and private resolveFromItem (store: Store) (registry: Registry) (dbName: string)
     match item with
     | FromTable tableRef -> resolveTableRef store dbName tableRef
     | FromSubquery(select, _alias) ->
-        match runSelectStmt store registry dbName select None with
+        match runSelectStmt store registry dbName select None |> fst with
         | ResultSet(cols, rows) -> Ok(deriveColumns cols, deriveRows rows)
         | Err(code, message) -> Error(Err(code, message))
         | Affected _ -> Error(Err(1064, "derived table did not return a resultset"))
@@ -576,13 +576,20 @@ and private applyJoin
 /// `InSubquery`/a derived table's own `FROM`) all fund into this one place
 /// rather than each re-implementing the join-materialization logic.
 /// `outer` is `None` for a top-level statement and `Some` when this is
-/// itself a subquery — see `EvalContext.Outer`.
-and private runSelectStmt (store: Store) (registry: Registry) (dbName: string) (select: SelectStmt) (outer: EvalContext option) : QueryResult =
+/// itself a subquery — see `EvalContext.Outer`. Its per-column MySQL wire
+/// types (the `byte list`; see `columnTypesOf`) are only available here —
+/// by the time a `SELECT`'s rows reach `execute`'s return value they're
+/// already the wire's flat `string option list` text, with no `Value`
+/// left to read a type off of — but this can't be `public` itself (`outer:
+/// EvalContext option` would leak the `private` `EvalContext` type through
+/// a public signature); `runTopLevelSelect` near `execute` below is the
+/// type-preserving public entry point `QueryHandler` calls instead.
+and private runSelectStmt (store: Store) (registry: Registry) (dbName: string) (select: SelectStmt) (outer: EvalContext option) : QueryResult * byte list =
     match select.From with
     | None -> runSelect store registry dbName [] Map.empty [ [||] ] select outer
     | Some fromItem ->
         match resolveFromItem store registry dbName fromItem with
-        | Error e -> e
+        | Error e -> e, []
         | Ok(baseColumns, baseRows) ->
             let baseQualifier =
                 match fromItem with
@@ -592,8 +599,26 @@ and private runSelectStmt (store: Store) (registry: Registry) (dbName: string) (
             let initial : Result<(string * ColumnDef list) list * Value[] list, QueryResult> = Ok([ baseQualifier, baseColumns ], baseRows)
 
             match select.Joins |> List.fold (fun acc join -> acc |> Result.bind (fun combined -> applyJoin store registry dbName outer combined join)) initial with
-            | Error e -> e
+            | Error e -> e, []
             | Ok(sources, rows) -> runSelect store registry dbName (sources |> List.collect snd) (qualifierRanges sources) rows select outer
+
+/// Per-column MySQL wire type for a freshly-projected resultset, read off
+/// the first non-NULL `Value` in each column across `rows` — a plain
+/// data-driven read of the same typed values the row already carries
+/// (see `Value.mysqlTypeOf`), not a separate static type-inference pass,
+/// so it's correct for a literal, a cast, or an aggregate the same way it
+/// is for a bare column reference. Falls back to VAR_STRING for a column
+/// that's NULL in every row (or there are no rows at all) — NULL
+/// round-trips the same regardless of the declared type, so there's
+/// nothing to lose by guessing wrong there.
+and private columnTypesOf (colCount: int) (rows: (string * Value) list list) : byte list =
+    [ for i in 0 .. colCount - 1 ->
+          rows
+          |> List.tryPick (fun row ->
+              match snd row.[i] with
+              | VNull -> None
+              | v -> Some(Value.mysqlTypeOf v))
+          |> Option.defaultValue Value.TypeVarString ]
 
 and private applyLimitOffset (limit: int option) (offset: int option) (rows: 'a list) : 'a list =
     let afterOffset =
@@ -604,6 +629,90 @@ and private applyLimitOffset (limit: int option) (offset: int option) (rows: 'a 
     match limit with
     | Some l -> afterOffset |> List.truncate (max 0 l)
     | None -> afterOffset
+
+/// A `UNION` statement's combined resultset, plus its column types —
+/// pulled out of `execute`'s `Union` arm (which just calls this and
+/// discards the second half) so `QueryHandler.executeStatement` can call
+/// it directly too for the wire-level types. Public (unlike
+/// `runSelectStmt`): it has no `EvalContext` in its own signature, so
+/// nothing stops `QueryHandler` from calling it straight instead of
+/// through a `runTopLevelSelect`-style wrapper.
+///
+/// Each branch runs as an independent, uncorrelated `SELECT` (`outer =
+/// None`) — `Union` only ever occurs as a top-level statement (see
+/// `Ast.Union`'s doc), never nested inside another query's expression, so
+/// there's no outer row to thread through. The combined resultset's
+/// column types are just the first branch's — ponytail: real MySQL
+/// reconciles each column's type across every branch (e.g. an INT column
+/// unioned with a DECIMAL one comes back DECIMAL), this only ever reports
+/// the first branch's types; add real reconciliation if a mixed-type
+/// UNION ever needs it.
+and runUnionStmt
+    (store: Store)
+    (registry: Registry)
+    (dbName: string)
+    (first: SelectStmt)
+    (rest: (bool * SelectStmt) list)
+    (orderBy: OrderKey list)
+    (limit: int option)
+    (offset: int option)
+    : QueryResult * byte list =
+    let runBranch (select: SelectStmt) = runSelectStmt store registry dbName select None |> fst
+
+    let combine (acc: Result<string list * (string option list) list, QueryResult>) (isAll: bool, select: SelectStmt) =
+        acc
+        |> Result.bind (fun (cols, rowsSoFar) ->
+            match runBranch select with
+            | Err(code, message) -> Error(Err(code, message))
+            | Affected _ -> Error(Err(1064, "UNION branch did not return a resultset"))
+            | ResultSet(branchCols, branchRows) when List.length branchCols <> List.length cols ->
+                Error(Err(1222, "The used SELECT statements have a different number of columns"))
+            | ResultSet(_, branchRows) ->
+                let combined = if isAll then rowsSoFar @ branchRows else (rowsSoFar @ branchRows) |> List.distinct
+                Ok(cols, combined))
+
+    match runSelectStmt store registry dbName first None with
+    | Err(code, message), _ -> Err(code, message), []
+    | Affected _, _ -> Err(1064, "UNION branch did not return a resultset"), []
+    | ResultSet(firstCols, firstRows), firstTypes ->
+        match rest |> List.fold combine (Ok(firstCols, firstRows)) with
+        | Error e -> e, []
+        | Ok(cols, allRows) ->
+            // `ORDER BY`/`LIMIT` on the combined result — same
+            // alias/positional resolution and `Value.compare` sort as
+            // an ordinary `SELECT`, just over the already-projected
+            // text rows (there's no underlying typed row left once
+            // every branch has run) rather than through `evalExpr`.
+            let projections = cols |> List.map (fun c -> Col c, None)
+            let resolveOrder = resolvePositionalOrAlias projections
+
+            let orderKeyOf (row: string option list) (expr: Expr) : Value =
+                match resolveOrder expr with
+                | Col name ->
+                    match cols |> List.tryFindIndex (fun c -> System.String.Equals(c, name, System.StringComparison.OrdinalIgnoreCase)) with
+                    | Some i -> row.[i] |> function Some s -> VString s | None -> VNull
+                    | None -> VNull
+                | _ -> VNull
+
+            let sorted =
+                if orderBy.IsEmpty then
+                    allRows
+                else
+                    allRows
+                    |> List.sortWith (fun a b ->
+                        orderBy
+                        |> List.fold
+                            (fun acc (expr, dir) ->
+                                if acc <> 0 then
+                                    acc
+                                else
+                                    let c = Value.compare (orderKeyOf a expr) (orderKeyOf b expr)
+                                    match dir with
+                                    | Asc -> c
+                                    | Desc -> -c)
+                            0)
+
+            ResultSet(cols, sorted |> applyLimitOffset limit offset), firstTypes
 
 /// One projection's `(column name, value)` pairs — a list because `SELECT
 /// *` expands to every column of the row.
@@ -777,7 +886,7 @@ and private runGroupedSelect
     (rows: Value[] list)
     (select: SelectStmt)
     (outer: EvalContext option)
-    : QueryResult =
+    : QueryResult * byte list =
     let columnIndex = columnIndexOf columns
 
     let ctxFor (row: Value[]) : EvalContext =
@@ -838,12 +947,12 @@ and private runGroupedSelect
           |> Result.bind (fun _ -> havingOk [])
           |> Result.bind (fun _ -> orderKeysOf [])
           |> Result.bind (fun _ -> projectGroup []) with
-    | Error(code, message) -> Err(code, message)
+    | Error(code, message) -> Err(code, message), []
     | Ok probeProjected ->
         let colNames = probeProjected |> List.map fst
 
         match rows |> traverse (fun row -> matches row |> Result.map (fun keep -> if keep then Some row else None)) with
-        | Error(code, message) -> Err(code, message)
+        | Error(code, message) -> Err(code, message), []
         | Ok maybeMatched ->
             let matched = maybeMatched |> List.choose id
 
@@ -856,7 +965,7 @@ and private runGroupedSelect
                     |> Result.map (fun keyed -> keyed |> List.groupBy fst |> List.map (snd >> List.map snd))
 
             match buildGroups () with
-            | Error(code, message) -> Err(code, message)
+            | Error(code, message) -> Err(code, message), []
             | Ok groups ->
                 let processGroup (groupRows: Value[] list) : Result<((string * Value) list * Value list) option, EvalError> =
                     havingOk groupRows
@@ -868,7 +977,7 @@ and private runGroupedSelect
                             |> Result.bind (fun proj -> orderKeysOf groupRows |> Result.map (fun keys -> Some(proj, keys))))
 
                 match groups |> traverse processGroup with
-                | Error(code, message) -> Err(code, message)
+                | Error(code, message) -> Err(code, message), []
                 | Ok maybeRows ->
                     let kept = maybeRows |> List.choose id
 
@@ -889,7 +998,8 @@ and private runGroupedSelect
 
                     let textRows = sorted |> List.map (fst >> List.map (snd >> toText))
                     let deduped = if select.Distinct then List.distinct textRows else textRows
-                    ResultSet(colNames, deduped |> applyLimitOffset select.Limit select.Offset)
+                    let types = columnTypesOf (List.length colNames) (sorted |> List.map fst)
+                    ResultSet(colNames, deduped |> applyLimitOffset select.Limit select.Offset), types
 
 and private runSelect
     (store: Store)
@@ -900,7 +1010,7 @@ and private runSelect
     (rows: Value[] list)
     (select: SelectStmt)
     (outer: EvalContext option)
-    : QueryResult =
+    : QueryResult * byte list =
     let projections, whereExpr, orderBy, limit, offset =
         select.Projections, select.Where, select.OrderBy, select.Limit, select.Offset
 
@@ -909,7 +1019,7 @@ and private runSelect
     // resultset with zero columns, which isn't a legal text-resultset
     // packet and aborts the client's whole session.
     if select.From.IsNone && projections |> List.exists (fst >> (=) Star) then
-        Err(1096, "No tables used")
+        Err(1096, "No tables used"), []
     elif
         not select.GroupBy.IsEmpty
         || select.Having.IsSome
@@ -971,7 +1081,7 @@ and private runSelect
     let probe = probeRow columns
 
     match matches probe |> Result.bind (fun _ -> orderKeys probe) |> Result.bind (fun _ -> projectRow probe) with
-    | Error(code, message) -> Err(code, message)
+    | Error(code, message) -> Err(code, message), []
     | Ok probeProjection ->
         let colNames = probeProjection |> List.map fst
 
@@ -986,7 +1096,7 @@ and private runSelect
             |> Result.bind (fun keep -> if keep then orderKeys row |> Result.map (fun keys -> Some(keys, row)) else Ok None)
 
         match rows |> traverse keepWithOrderKeys with
-        | Error(code, message) -> Err(code, message)
+        | Error(code, message) -> Err(code, message), []
         | Ok maybeKeyed ->
             let keyed = maybeKeyed |> List.choose id
 
@@ -998,11 +1108,12 @@ and private runSelect
             // would miss two source rows that only agree on the columns
             // actually selected.
             match keyed |> sortRows |> List.map snd |> traverse projectRow with
-            | Error(code, message) -> Err(code, message)
+            | Error(code, message) -> Err(code, message), []
             | Ok projectedRows ->
                 let textRows = projectedRows |> List.map (List.map (snd >> toText))
                 let deduped = if select.Distinct then List.distinct textRows else textRows
-                ResultSet(colNames, deduped |> applyLimitOffset limit offset)
+                let types = columnTypesOf (List.length colNames) projectedRows
+                ResultSet(colNames, deduped |> applyLimitOffset limit offset), types
 
 /// Assigns `assignments` (already resolved to column indices) to a copy of
 /// `row`, evaluating each right-hand side against the row's original
@@ -1154,6 +1265,14 @@ let rec private substituteValuesFunc (columnIndex: Map<string, int>) (candidate:
     | Subquery _
     | InSubquery _ -> expr
 
+/// A top-level `SELECT`'s resultset plus its per-column MySQL wire types —
+/// `QueryHandler.executeStatement`'s type-preserving entry point into
+/// `runSelectStmt`, which can't be `public` itself (see the doc there).
+/// `outer` is always `None` for a top-level statement, so this needs no
+/// `EvalContext` in its own signature.
+let runTopLevelSelect (store: Store) (registry: Registry) (dbName: string) (select: SelectStmt) : QueryResult * byte list =
+    runSelectStmt store registry dbName select None
+
 /// Executes one parsed statement against `store`, threading the session's
 /// AUTO_INCREMENT bookkeeping through as a plain value rather than a
 /// `Session` (this module knows nothing about sessions or connections —
@@ -1299,69 +1418,10 @@ let execute (store: Store) (registry: Registry) (dbName: string) (lastInsertId: 
                         (if newLastId <> 0L then newLastId else lastInsertId), Affected(uint64 affected)
                     | Error e -> lastInsertId, storageErr e
 
-    | Select select -> lastInsertId, runSelectStmt store registry dbName select None
+    | Select select -> lastInsertId, (runSelectStmt store registry dbName select None |> fst)
 
     | Union(first, rest, orderBy, limit, offset) ->
-        // Each branch runs as an independent, uncorrelated `SELECT`
-        // (`outer = None`) — `Union` only ever occurs as a top-level
-        // statement (see `Ast.Union`'s doc), never nested inside another
-        // query's expression, so there's no outer row to thread through.
-        let runBranch (select: SelectStmt) = runSelectStmt store registry dbName select None
-
-        let combine (acc: Result<string list * (string option list) list, QueryResult>) (isAll: bool, select: SelectStmt) =
-            acc
-            |> Result.bind (fun (cols, rowsSoFar) ->
-                match runBranch select with
-                | Err(code, message) -> Error(Err(code, message))
-                | Affected _ -> Error(Err(1064, "UNION branch did not return a resultset"))
-                | ResultSet(branchCols, branchRows) when List.length branchCols <> List.length cols ->
-                    Error(Err(1222, "The used SELECT statements have a different number of columns"))
-                | ResultSet(_, branchRows) ->
-                    let combined = if isAll then rowsSoFar @ branchRows else (rowsSoFar @ branchRows) |> List.distinct
-                    Ok(cols, combined))
-
-        match runBranch first with
-        | Err(code, message) -> lastInsertId, Err(code, message)
-        | Affected _ -> lastInsertId, Err(1064, "UNION branch did not return a resultset")
-        | ResultSet(firstCols, firstRows) ->
-            match rest |> List.fold combine (Ok(firstCols, firstRows)) with
-            | Error e -> lastInsertId, e
-            | Ok(cols, allRows) ->
-                // `ORDER BY`/`LIMIT` on the combined result — same
-                // alias/positional resolution and `Value.compare` sort as
-                // an ordinary `SELECT`, just over the already-projected
-                // text rows (there's no underlying typed row left once
-                // every branch has run) rather than through `evalExpr`.
-                let projections = cols |> List.map (fun c -> Col c, None)
-                let resolveOrder = resolvePositionalOrAlias projections
-
-                let orderKeyOf (row: string option list) (expr: Expr) : Value =
-                    match resolveOrder expr with
-                    | Col name ->
-                        match cols |> List.tryFindIndex (fun c -> System.String.Equals(c, name, System.StringComparison.OrdinalIgnoreCase)) with
-                        | Some i -> row.[i] |> function Some s -> VString s | None -> VNull
-                        | None -> VNull
-                    | _ -> VNull
-
-                let sorted =
-                    if orderBy.IsEmpty then
-                        allRows
-                    else
-                        allRows
-                        |> List.sortWith (fun a b ->
-                            orderBy
-                            |> List.fold
-                                (fun acc (expr, dir) ->
-                                    if acc <> 0 then
-                                        acc
-                                    else
-                                        let c = Value.compare (orderKeyOf a expr) (orderKeyOf b expr)
-                                        match dir with
-                                        | Asc -> c
-                                        | Desc -> -c)
-                                0)
-
-                lastInsertId, ResultSet(cols, sorted |> applyLimitOffset limit offset)
+        lastInsertId, (runUnionStmt store registry dbName first rest orderBy limit offset |> fst)
 
     | Update(table, assignments, whereExpr) ->
         let db, table = splitQualified dbName table

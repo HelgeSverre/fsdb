@@ -46,6 +46,7 @@ let tests =
                               1uy
                               StatusAutocommit
                               0UL
+                              []
                               (ResultSet([ "a"; "b" ], [ [ Some "1"; None ] ]))
 
                       stream.Position <- 0L
@@ -70,7 +71,7 @@ let tests =
                   let run caps =
                       async {
                           use stream = new IO.MemoryStream()
-                          do! Fsdb.Server.sendQueryResult stream caps 1uy StatusAutocommit 0UL (ResultSet([ "a" ], [ [ Some "1" ] ]))
+                          do! Fsdb.Server.sendQueryResult stream caps 1uy StatusAutocommit 0UL [] (ResultSet([ "a" ], [ [ Some "1" ] ]))
                           stream.Position <- 0L
                           return! readAllPackets stream
                       }

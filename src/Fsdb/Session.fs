@@ -89,6 +89,16 @@ type Session =
       /// The AUTO_INCREMENT id assigned by this session's most recent
       /// INSERT, for `LAST_INSERT_ID()`. 0 until the first such INSERT.
       LastInsertId: int64
+      /// Per-column MySQL wire types for the most recent statement's
+      /// `ResultSet`, if any — `[]` for anything else (an `Affected`/`Err`
+      /// result, or a `ResultSet` this session's dispatch path didn't
+      /// bother typing, e.g. `SHOW ...`/session-variable probes). `Server`
+      /// reads this right after `QueryHandler.handle` to build the
+      /// resultset's column-definition packets; threaded through `Session`
+      /// like `LastInsertId` instead of widening `handle`'s own return
+      /// type, since dozens of tests destructure `QueryHandler.handle`'s
+      /// plain `Session * QueryResult` pair directly.
+      LastResultColumnTypes: byte list
       /// `Some` between BEGIN/START TRANSACTION and COMMIT/ROLLBACK.
       Tx: Transaction option
       /// Prepared statements registered by this connection's COM_STMT_PREPARE
@@ -112,6 +122,7 @@ let create (connectionId: int) (store: Store) : Session =
       Variables = defaultVariables
       Store = store
       LastInsertId = 0L
+      LastResultColumnTypes = []
       Tx = None
       Statements = Map.empty
       NextStmtId = 1
