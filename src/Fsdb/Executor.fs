@@ -48,6 +48,26 @@ let private columnIndexOf (columns: ColumnDef list) : Map<string, int list> =
     |> List.map (fun (name, xs) -> name, xs |> List.map snd)
     |> Map.ofList
 
+/// Which clause a bare `Col` is being resolved from — the only thing that
+/// varies between an ambiguous-column 1052 in a field list, a `WHERE`, a
+/// JOIN `ON`, an `ORDER BY`, or a `GROUP BY`/`HAVING` is the four words
+/// MySQL puts in the error message, so `resolveCol` takes one of these
+/// instead of five near-identical copies of itself.
+type private Clause =
+    | FieldList
+    | WhereClause
+    | OnClause
+    | OrderClause
+    | GroupStatement
+
+let private clauseLabel =
+    function
+    | FieldList -> "field list"
+    | WhereClause -> "where clause"
+    | OnClause -> "on clause"
+    | OrderClause -> "order clause"
+    | GroupStatement -> "group statement"
+
 /// Aggregate-call recognition: a `FuncCall` whose name is registered as an
 /// aggregate on `registry` (see `Functions.Registry.Aggregates`) rather than
 /// a hardcoded name set here — M6's `registerAggregate` extension point is
@@ -213,7 +233,15 @@ type private EvalContext =
       /// takes an `EvalContext option` for exactly this and passes it down
       /// to every context it builds while running that subquery, so the
       /// chain composes to any nesting depth.
-      Outer: EvalContext option }
+      Outer: EvalContext option
+      /// Which clause a bare `Col` lookup through this context is on behalf
+      /// of — only wired up for the ambiguous-column 1052's message
+      /// (`resolveCol`); `contextFactory` defaults every context to
+      /// `FieldList`, and call sites override it with a record update
+      /// (`{ ctx with Clause = WhereClause }`) for the handful of spots
+      /// that resolve a `WHERE`/`ON`/`ORDER BY`/`GROUP BY` expression
+      /// instead of a projection.
+      Clause: Clause }
 
 /// `EvalContext.Qualifiers` for a single unaliased/aliased table in scope —
 /// every non-JOIN statement (`UPDATE`, `DELETE`, `INSERT ... ON DUPLICATE
@@ -239,7 +267,8 @@ let private contextFactory
           Row = row
           Store = store
           DbName = dbName
-          Outer = outer }
+          Outer = outer
+          Clause = FieldList }
 
 /// Resolves a bare column against `ctx`, falling back to
 /// `ctx.Outer`/its own outer/... on a miss — see `EvalContext.Outer`. Two or
@@ -248,10 +277,10 @@ let private contextFactory
 let rec private resolveCol (ctx: EvalContext) (name: string) : Result<Value, EvalError> =
     match Map.tryFind (name.ToLowerInvariant()) ctx.ColumnIndex with
     | Some [ i ] -> Ok ctx.Row.[i]
-    | Some(_ :: _ :: _) -> Error(1052, sprintf "Column '%s' in field list is ambiguous" name)
+    | Some(_ :: _ :: _) -> Error(1052, sprintf "Column '%s' in %s is ambiguous" name (clauseLabel ctx.Clause))
     | Some [] | None ->
         match ctx.Outer with
-        | Some parent -> resolveCol parent name
+        | Some parent -> resolveCol { parent with Clause = ctx.Clause } name
         | None -> Error(unknownColumn name)
 
 /// The `QualifiedCol` counterpart of `resolveCol` — same outer-context
@@ -590,7 +619,7 @@ and private applyJoin
         pairs
         |> traverse (fun (li, ri, l, r) ->
             let combined = Array.append l r
-            evalExpr (ctxFor combined) join.On |> Result.map (fun v -> li, ri, (truthy v = Some true), combined))
+            evalExpr { ctxFor combined with Clause = OnClause } join.On |> Result.map (fun v -> li, ri, (truthy v = Some true), combined))
         |> Result.mapError Err
         |> Result.map (fun flagged ->
             let matched = flagged |> List.filter (fun (_, _, ok, _) -> ok)
@@ -972,29 +1001,66 @@ and private resolvePositionalOrAlias (projections: Projection list) (expr: Expr)
 /// alias nested somewhere inside it (`HAVING c > 1`, not just `HAVING c`),
 /// so a shallow top-level check misses it entirely: `Col "c"` there isn't a
 /// real column at all, only the `SELECT` list's own alias, and evaluating
-/// it unresolved fails with 1054. Walks every subexpression substituting a
-/// `Col` that names a projection alias with that projection's own
-/// expression; same shape as `substituteValuesFunc`'s rewrite.
-and private resolveAliasesDeep (projections: Projection list) (expr: Expr) : Expr =
-    let sub = resolveAliasesDeep projections
+/// it unresolved fails with 1054.
+///
+/// GROUP BY / HAVING's own column-name priority — the mirror image of
+/// ORDER BY's (see `resolveOrderKey`'s doc): a bare name is checked against
+/// the FROM-table columns first, and only falls back to the SELECT list's
+/// own alias/position when it isn't a FROM-table column at all (real MySQL
+/// documents this FROM-first order for GROUP BY/HAVING). A FROM-table match
+/// present in more than one joined table is error 1052 "group statement",
+/// same wording for both clauses.
+and private resolveGroupOrHavingCol (columnIndex: Map<string, int list>) (projections: Projection list) (name: string) : Result<Expr, EvalError> =
+    match Map.tryFind (name.ToLowerInvariant()) columnIndex with
+    | Some [ _ ] -> Ok(Col name)
+    | Some(_ :: _ :: _) -> Error(1052, sprintf "Column '%s' in group statement is ambiguous" name)
+    | Some [] | None -> Ok(resolvePositionalOrAlias projections (Col name))
+
+/// `GROUP BY`'s key list: each key is a bare top-level expression, never
+/// searched inside a larger tree (unlike `HAVING`'s condition — see
+/// `resolveHavingRef`), so a `Col` only ever needs the shallow check above;
+/// anything else (a position number, or an expression that's neither) goes
+/// through `resolvePositionalOrAlias` unchanged.
+and private resolveGroupByRef (columnIndex: Map<string, int list>) (projections: Projection list) (expr: Expr) : Result<Expr, EvalError> =
+    match expr with
+    | Col name -> resolveGroupOrHavingCol columnIndex projections name
+    | _ -> Ok(resolvePositionalOrAlias projections expr)
+
+/// `resolveGroupByRef`'s recursive counterpart for `HAVING` — same reason
+/// the old `resolveAliasesDeep` walked the whole tree instead of just the
+/// top level: `HAVING c > 1`'s alias `c` is nested inside a `BinOp`, not
+/// bare. Same shape as `substituteValuesFunc`'s rewrite, but `Result`-
+/// threaded since a `Col` can now fail with the ambiguous-FROM-table 1052.
+and private resolveHavingRef (columnIndex: Map<string, int list>) (projections: Projection list) (expr: Expr) : Result<Expr, EvalError> =
+    let sub = resolveHavingRef columnIndex projections
 
     match expr with
-    | Col _ -> resolvePositionalOrAlias projections expr
-    | FuncCall(name, args) -> FuncCall(name, args |> List.map sub)
-    | BinOp(op, a, b) -> BinOp(op, sub a, sub b)
-    | Not e -> Not(sub e)
-    | IsNull e -> IsNull(sub e)
-    | IsNotNull e -> IsNotNull(sub e)
-    | IsTrue e -> IsTrue(sub e)
-    | IsFalse e -> IsFalse(sub e)
-    | Distinct e -> Distinct(sub e)
-    | Like(e, p, cs) -> Like(sub e, sub p, cs)
-    | Regexp(e, p) -> Regexp(sub e, sub p)
-    | In(e, xs) -> In(sub e, xs |> List.map sub)
-    | Between(e, lo, hi) -> Between(sub e, sub lo, sub hi)
-    | Cast(e, ty) -> Cast(sub e, ty)
+    | Col name -> resolveGroupOrHavingCol columnIndex projections name
+    | FuncCall(name, args) -> args |> traverse sub |> Result.map (fun args' -> FuncCall(name, args'))
+    | BinOp(op, a, b) -> sub a |> Result.bind (fun a' -> sub b |> Result.map (fun b' -> BinOp(op, a', b')))
+    | Not e -> sub e |> Result.map Not
+    | IsNull e -> sub e |> Result.map IsNull
+    | IsNotNull e -> sub e |> Result.map IsNotNull
+    | IsTrue e -> sub e |> Result.map IsTrue
+    | IsFalse e -> sub e |> Result.map IsFalse
+    | Distinct e -> sub e |> Result.map Distinct
+    | Like(e, p, cs) -> sub e |> Result.bind (fun e' -> sub p |> Result.map (fun p' -> Like(e', p', cs)))
+    | Regexp(e, p) -> sub e |> Result.bind (fun e' -> sub p |> Result.map (fun p' -> Regexp(e', p')))
+    | In(e, xs) -> sub e |> Result.bind (fun e' -> xs |> traverse sub |> Result.map (fun xs' -> In(e', xs')))
+    | Between(e, lo, hi) ->
+        sub e |> Result.bind (fun e' -> sub lo |> Result.bind (fun lo' -> sub hi |> Result.map (fun hi' -> Between(e', lo', hi'))))
+    | Cast(e, ty) -> sub e |> Result.map (fun e' -> Cast(e', ty))
     | Case(subject, whens, elseBranch) ->
-        Case(subject |> Option.map sub, whens |> List.map (fun (c, r) -> sub c, sub r), elseBranch |> Option.map sub)
+        let subOpt =
+            function
+            | Some e -> sub e |> Result.map Some
+            | None -> Ok None
+
+        subOpt subject
+        |> Result.bind (fun subject' ->
+            whens
+            |> traverse (fun (c, r) -> sub c |> Result.bind (fun c' -> sub r |> Result.map (fun r' -> c', r')))
+            |> Result.bind (fun whens' -> subOpt elseBranch |> Result.map (fun else' -> Case(subject', whens', else'))))
     | Lit _
     | QualifiedCol _
     | Star _
@@ -1003,7 +1069,34 @@ and private resolveAliasesDeep (projections: Projection list) (expr: Expr) : Exp
     // query's projection alias.
     | Exists _
     | Subquery _
-    | InSubquery _ -> expr
+    | InSubquery _ -> Ok expr
+
+/// `ORDER BY`'s 1-based projection position (`ORDER BY 2`) — split out from
+/// `resolvePositionalOrAlias` because ORDER BY's alias case now goes
+/// through `resolveOrderKey`'s output-column matching instead (which needs
+/// to see the ambiguous-alias case `resolvePositionalOrAlias`'s
+/// first-match `tryPick` would otherwise hide).
+and private resolveOrderPosition (projections: Projection list) (expr: Expr) : Expr =
+    match expr with
+    | Lit(VInt n) when n >= 1L && n <= int64 (List.length projections) -> fst projections.[int n - 1]
+    | _ -> expr
+
+/// `ORDER BY`'s alias-then-FROM-table priority (see `resolveGroupOrHavingCol`'s
+/// doc for the opposite order GROUP BY/HAVING use): tries the bare name
+/// against `outputCols` — the SELECT list's own output columns, explicit
+/// aliases and every name `*`/`t.*` expanded into, in row order — first;
+/// exactly one match binds directly to that column's already-computed
+/// value, more than one is error 1052 "order clause", and zero falls
+/// through to `resolveCol` against the FROM-table columns instead (also
+/// tagged `OrderClause`, not `FieldList`).
+and private resolveOrderKey (ctx: EvalContext) (outputCols: (string * Value) list) (expr: Expr) : Result<Value, EvalError> =
+    match expr with
+    | Col name ->
+        match outputCols |> List.filter (fun (n, _) -> System.String.Equals(n, name, System.StringComparison.OrdinalIgnoreCase)) with
+        | [ (_, v) ] -> Ok v
+        | _ :: _ :: _ -> Error(1052, sprintf "Column '%s' in order clause is ambiguous" name)
+        | [] -> resolveCol { ctx with Clause = OrderClause } name
+    | e -> evalExpr { ctx with Clause = OrderClause } e
 
 /// The `GROUP BY`/aggregate path: `select.GroupBy` (resolved through
 /// `resolvePositionalOrAlias` for positional/alias references first)
@@ -1032,13 +1125,10 @@ and private runGroupedSelect
 
     let ctxFor = contextFactory store registry dbName columnIndex qualifiers outer
 
-    let resolveRef = resolvePositionalOrAlias select.Projections
-    let groupExprs = select.GroupBy |> List.map resolveRef
-
     let matches (row: Value[]) : Result<bool, EvalError> =
         match select.Where with
         | None -> Ok true
-        | Some expr -> evalExpr (ctxFor row) expr |> Result.map (fun v -> truthy v = Some true)
+        | Some expr -> evalExpr { ctxFor row with Clause = WhereClause } expr |> Result.map (fun v -> truthy v = Some true)
 
     let representativeOf (groupRows: Value[] list) : Value[] = groupRows |> List.tryHead |> Option.defaultValue (probeRow columns)
 
@@ -1060,36 +1150,49 @@ and private runGroupedSelect
         match select.Having with
         | None -> Ok true
         | Some h ->
-            // `resolveAliasesDeep` resolves a `SELECT ... AS alias`
-            // anywhere inside the condition — `GROUP BY`/`ORDER BY` only
-            // need `resolveRef`'s shallow, top-level check since a key
-            // there is almost always a bare alias/column, but `HAVING`'s
-            // condition is a full boolean expression (`HAVING c > 1`, not
-            // just `HAVING c`), and MySQL allows a projection alias nested
-            // anywhere inside it (e.g. Eloquent's `having('aggregate_alias',
-            // ...)`).
-            rewriteAggregates registry ctxFor groupRows (resolveAliasesDeep select.Projections h)
-            |> Result.bind (evalExpr (ctxFor (representativeOf groupRows)))
+            // `resolveHavingRef` resolves a `SELECT ... AS alias` anywhere
+            // inside the condition (`HAVING`'s condition is a full boolean
+            // expression, not just a bare alias — MySQL allows a projection
+            // alias nested anywhere inside it, e.g. Eloquent's
+            // `having('aggregate_alias', ...)`), FROM-table columns first.
+            resolveHavingRef columnIndex select.Projections h
+            |> Result.bind (rewriteAggregates registry ctxFor groupRows)
+            |> Result.bind (evalExpr { ctxFor (representativeOf groupRows) with Clause = GroupStatement })
             |> Result.map (fun v -> truthy v = Some true)
 
-    let orderKeysOf (groupRows: Value[] list) : Result<Value list, EvalError> =
+    // ORDER BY's alias-first priority (the opposite of GROUP BY/HAVING's
+    // FROM-first one — see `resolveOrderKey`'s doc) resolves against this
+    // group's own already-projected output columns (`outputCols`, from
+    // `projectGroup`) rather than the group's raw rows.
+    let orderKeysOf (outputCols: (string * Value) list) (groupRows: Value[] list) : Result<Value list, EvalError> =
         let representative = representativeOf groupRows
 
         select.OrderBy
         |> traverse (fun (expr, _) ->
-            rewriteAggregates registry ctxFor groupRows (resolveRef expr)
-            |> Result.bind (evalExpr (ctxFor representative)))
+            match resolveOrderPosition select.Projections expr with
+            | Col name ->
+                match outputCols |> List.filter (fun (n, _) -> System.String.Equals(n, name, System.StringComparison.OrdinalIgnoreCase)) with
+                | [ (_, v) ] -> Ok v
+                | _ :: _ :: _ -> Error(1052, sprintf "Column '%s' in order clause is ambiguous" name)
+                | [] ->
+                    rewriteAggregates registry ctxFor groupRows (Col name)
+                    |> Result.bind (evalExpr { ctxFor representative with Clause = OrderClause })
+            | e -> rewriteAggregates registry ctxFor groupRows e |> Result.bind (evalExpr { ctxFor representative with Clause = OrderClause }))
 
     // Schema probe: type-checks WHERE/GROUP BY/HAVING/ORDER BY/projections
     // against an all-NULL row first, the same reasoning as `probeRow`'s
     // other use — an unknown column/function is a schema error independent
     // of whether any row happens to match, or a real `GROUP BY` happens to
     // produce zero groups.
+    match select.GroupBy |> traverse (resolveGroupByRef columnIndex select.Projections) with
+    | Error(code, message) -> Err(code, message), [], []
+    | Ok groupExprs ->
+
     match matches (probeRow columns)
           |> Result.bind (fun _ -> groupExprs |> traverse (evalExpr (ctxFor (probeRow columns))) |> Result.map ignore)
           |> Result.bind (fun _ -> havingOk [])
-          |> Result.bind (fun _ -> orderKeysOf [])
-          |> Result.bind (fun _ -> projectGroup []) with
+          |> Result.bind (fun _ -> projectGroup [])
+          |> Result.bind (fun probeProjected -> orderKeysOf probeProjected [] |> Result.map (fun _ -> probeProjected)) with
     | Error(code, message) -> Err(code, message), [], []
     | Ok probeProjected ->
         let colNames = probeProjected |> List.map fst
@@ -1117,7 +1220,7 @@ and private runGroupedSelect
                             Ok None
                         else
                             projectGroup groupRows
-                            |> Result.bind (fun proj -> orderKeysOf groupRows |> Result.map (fun keys -> Some(proj, keys))))
+                            |> Result.bind (fun proj -> orderKeysOf proj groupRows |> Result.map (fun keys -> Some(proj, keys))))
 
                 match groups |> traverse processGroup with
                 | Error(code, message) -> Err(code, message), [], []
@@ -1167,7 +1270,7 @@ and private runWindowedSelect
         let matches (row: Value[]) : Result<bool, EvalError> =
             match select.Where with
             | None -> Ok true
-            | Some expr -> evalExpr (ctxFor row) expr |> Result.map (fun v -> truthy v = Some true)
+            | Some expr -> evalExpr { ctxFor row with Clause = WhereClause } expr |> Result.map (fun v -> truthy v = Some true)
 
         let keyOf (exprs: Expr list) (row: Value[]) : Result<Value list, EvalError> =
             exprs |> traverse (evalExpr (ctxFor row))
@@ -1268,24 +1371,26 @@ and private runSelect
 
     let ctxFor = contextFactory store registry dbName columnIndex qualifiers outer
 
-    // ORDER BY may name a `SELECT ... AS alias` or a 1-based projection
-    // position (`SELECT COUNT(*) AS n FROM t ORDER BY n` / `ORDER BY 1`) —
-    // resolve those first against the projection list before falling back
-    // to `evalExpr`'s normal column lookup.
-    let resolveOrderExpr = resolvePositionalOrAlias projections
+    // ORDER BY may name a 1-based projection position (`ORDER BY 1`) —
+    // resolve that first against the projection list; `resolveOrderKey`
+    // below handles the alias/output-column case (and its `*`/`t.*`
+    // expansion) itself.
+    let resolveOrderExpr = resolveOrderPosition projections
 
     let matches (row: Value[]) : Result<bool, EvalError> =
         match whereExpr with
         | None -> Ok true
-        | Some expr -> evalExpr (ctxFor row) expr |> Result.map (fun v -> truthy v = Some true)
-
-    let orderKeys (row: Value[]) : Result<Value list, EvalError> =
-        orderBy |> traverse (fun (expr, _) -> evalExpr (ctxFor row) (resolveOrderExpr expr))
+        | Some expr -> evalExpr { ctxFor row with Clause = WhereClause } expr |> Result.map (fun v -> truthy v = Some true)
 
     let projectRow (row: Value[]) : Result<(string * Value) list, EvalError> =
         projections
         |> traverse (evalProjection (ctxFor row) columns)
         |> Result.map List.concat
+
+    let orderKeys (row: Value[]) : Result<Value list, EvalError> =
+        orderBy
+        |> traverse (fun (expr, _) ->
+            projectRow row |> Result.bind (fun outputCols -> resolveOrderKey (ctxFor row) outputCols (resolveOrderExpr expr)))
 
     let sortRows (keyed: (Value list * Value[]) list) : (Value list * Value[]) list =
         keyed |> List.sortWith (fun (ka, _) (kb, _) -> compareByOrderKeys (List.map snd orderBy) ka kb)
@@ -1681,7 +1786,7 @@ let execute (store: Store) (registry: Registry) (dbName: string) (lastInsertId: 
                 let check row =
                     match whereExpr with
                     | None -> Ok true
-                    | Some expr -> evalExpr (ctxFor row) expr |> Result.map (fun v -> truthy v = Some true)
+                    | Some expr -> evalExpr { ctxFor row with Clause = WhereClause } expr |> Result.map (fun v -> truthy v = Some true)
 
                 let checkAssignments row =
                     indexedAssignments |> traverse (fun (_, expr) -> evalExpr (ctxFor row) expr)
@@ -1714,7 +1819,7 @@ let execute (store: Store) (registry: Registry) (dbName: string) (lastInsertId: 
             let check row =
                 match whereExpr with
                 | None -> Ok true
-                | Some expr -> evalExpr (ctxFor row) expr |> Result.map (fun v -> truthy v = Some true)
+                | Some expr -> evalExpr { ctxFor row with Clause = WhereClause } expr |> Result.map (fun v -> truthy v = Some true)
 
             match check (probeRow columns) with
             | Error(code, message) -> lastInsertId, Err(code, message)
