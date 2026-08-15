@@ -693,34 +693,128 @@ let private executeStatement (session: Session) (sql: string) (upper: string) : 
     | Result.Error _ when upper.StartsWith "SELECT" && upper.Contains "@@" -> session, handleAtVarSelect session sql
     | Result.Error _ -> session, syntaxError sql
 
-/// Every statement form `dispatch` below recognizes purely by text probe
-/// (SET/USE/SHOW/transaction control) rather than `Parser.parse` — mirrors
-/// `dispatch`'s own leading guards (not the fallback `executeStatement`
-/// case), kept as one predicate reusable from `prepareStatement`, since
-/// PDO's default `ATTR_EMULATE_PREPARES = false` means even a plain `SET
+/// Every statement form `dispatch` recognizes purely by text probe
+/// (SET/USE/SHOW/transaction control) rather than `Parser.parse` — one DU
+/// case per form, so `tryProbe` (the recognizer) and `runProbe` (what to do
+/// once recognized) are two separate functions over the same closed set
+/// instead of the same ordered if/elif chain written out twice by hand.
+/// `prepareStatement` only needs `tryProbe`'s `.IsSome`, since PDO's default
+/// `ATTR_EMULATE_PREPARES = false` means even a plain `SET
 /// FOREIGN_KEY_CHECKS=0` (Laravel's `Schema::disableForeignKeyConstraints`)
 /// goes through COM_STMT_PREPARE, and the grammar itself has no `SET`/`SHOW`
 /// production to validate it against.
-let private isNonGrammarStatement (sql: string) (upper: string) : bool =
-    setAutocommit.IsMatch sql
-    || upper.StartsWith "SET "
-    || rollbackToSavepointStmt.IsMatch sql
-    || beginTx.IsMatch upper
-    || commitTx.IsMatch upper
-    || rollbackTx.IsMatch upper
-    || savepointStmt.IsMatch sql
-    || releaseSavepointStmt.IsMatch sql
-    || upper.StartsWith "USE "
-    || upper.StartsWith "SHOW VARIABLES"
-    || upper = "SHOW WARNINGS"
-    || upper.StartsWith "SHOW DATABASES"
-    || upper.StartsWith "SHOW TABLE STATUS"
-    || upper.StartsWith "SHOW TABLES"
-    || upper.StartsWith "SHOW FULL TABLES"
-    || showCreateTableRe.IsMatch sql
-    || showColumnsRe.IsMatch sql
-    || describeRe.IsMatch sql
-    || showIndexRe.IsMatch sql
+type private Probe =
+    | SetAutocommit of value: string
+    | SetVar
+    | RollbackTo of savepoint: string
+    | Begin
+    | Commit
+    | Rollback
+    | Savepoint of name: string
+    | Release of name: string
+    | Use of dbName: string
+    | ShowVariables
+    | ShowWarnings
+    | ShowDatabases
+    | ShowTableStatus
+    | ShowTables
+    | ShowCreate of name: string
+    | ShowColumns of full: bool * name: string * dbOverride: string option
+    | Describe of name: string
+    | ShowIndex of name: string * dbOverride: string option
+
+/// The one ordered list of text-probed forms — matching `Probe`'s cases
+/// exactly (the compiler enforces `runProbe` covers every one of them), so
+/// COM_QUERY (`dispatch`) and COM_STMT_PREPARE (`prepareStatement`) can
+/// never disagree about which statements are text-probed vs. parsed the way
+/// two independently-written predicates could drift.
+let private tryProbe (sql: string) (upper: string) : Probe option =
+    if setAutocommit.IsMatch sql then
+        Some(SetAutocommit((setAutocommit.Match sql).Groups.[1].Value))
+    elif upper.StartsWith "SET " then
+        Some SetVar
+    elif rollbackToSavepointStmt.IsMatch sql then
+        Some(RollbackTo((rollbackToSavepointStmt.Match sql).Groups.[2].Value))
+    elif beginTx.IsMatch upper then
+        Some Begin
+    elif commitTx.IsMatch upper then
+        Some Commit
+    elif rollbackTx.IsMatch upper then
+        Some Rollback
+    elif savepointStmt.IsMatch sql then
+        Some(Savepoint((savepointStmt.Match sql).Groups.[1].Value))
+    elif releaseSavepointStmt.IsMatch sql then
+        Some(Release((releaseSavepointStmt.Match sql).Groups.[1].Value))
+    elif upper.StartsWith "USE " then
+        Some(Use(sql.Substring(4).Trim().Trim('`')))
+    elif upper.StartsWith "SHOW VARIABLES" then
+        Some ShowVariables
+    elif upper = "SHOW WARNINGS" then
+        Some ShowWarnings
+    elif upper.StartsWith "SHOW DATABASES" then
+        Some ShowDatabases
+    elif upper.StartsWith "SHOW TABLE STATUS" then
+        Some ShowTableStatus
+    elif upper.StartsWith "SHOW TABLES" || upper.StartsWith "SHOW FULL TABLES" then
+        Some ShowTables
+    elif showCreateTableRe.IsMatch sql then
+        Some(ShowCreate((showCreateTableRe.Match sql).Groups.[1].Value))
+    elif showColumnsRe.IsMatch sql then
+        let m = showColumnsRe.Match sql
+        let dbOverride = if m.Groups.[4].Success then Some m.Groups.[4].Value else None
+        Some(ShowColumns(m.Groups.[1].Success, m.Groups.[2].Value, dbOverride))
+    elif describeRe.IsMatch sql then
+        Some(Describe((describeRe.Match sql).Groups.[1].Value))
+    elif showIndexRe.IsMatch sql then
+        let m = showIndexRe.Match sql
+        let dbOverride = if m.Groups.[3].Success then Some m.Groups.[3].Value else None
+        Some(ShowIndex(m.Groups.[1].Value, dbOverride))
+    else
+        None
+
+/// What each `Probe` case actually does, given the session and the
+/// (trimmed) SQL text `tryProbe` matched against — a couple of cases
+/// (`SetVar`'s comma/quoting, the `SHOW ...`s' own `LIKE` suffix) still
+/// re-derive a little from `sql` themselves rather than `Probe` carrying
+/// every last capture group, since that parsing already lives in
+/// `handleSet`/`handleShowVariables`/etc. and shouldn't move twice.
+let private runProbe (session: Session) (sql: string) (probe: Probe) : Session * QueryResult =
+    match probe with
+    | SetAutocommit value -> handleSetAutocommit value session
+    | SetVar -> handleSet session sql
+    | RollbackTo name -> rollbackToSavepoint name session
+    | Begin -> beginTransaction session, Affected 0UL
+    | Commit -> commitSession session, Affected 0UL
+    | Rollback -> rollbackSession session, Affected 0UL
+    | Savepoint name -> savepoint name session
+    | Release name -> releaseSavepoint name session
+    | Use dbName -> { session with Database = Some dbName }, Affected 0UL
+    | ShowVariables -> session, handleShowVariables session sql
+    | ShowWarnings -> session, ResultSet([ "Level"; "Code"; "Message" ], [])
+    | ShowDatabases -> session, handleShowDatabases session sql
+    | ShowTableStatus -> session, handleShowTableStatus session sql
+    | ShowTables -> session, handleShowTables session sql
+    | ShowCreate name ->
+        let sessionDb = session.Database |> Option.defaultValue defaultDatabase
+        let dbName, table = splitQualified sessionDb name
+
+        match findTable session dbName table with
+        | Error(code, msg) -> session, Err(code, msg)
+        | Ok t -> session, ResultSet([ "Table"; "Create Table" ], [ [ Some t.OriginalName; Some(showCreateTableDDL t) ] ])
+    | ShowColumns(full, name, dbOverride) ->
+        let sessionDb = session.Database |> Option.defaultValue defaultDatabase
+        let dbName, table = splitQualified sessionDb name
+        let dbName = dbOverride |> Option.map stripBackticks |> Option.defaultValue dbName
+        session, handleShowColumns session full dbName table (likeSuffix sql)
+    | Describe name ->
+        let sessionDb = session.Database |> Option.defaultValue defaultDatabase
+        let dbName, table = splitQualified sessionDb name
+        session, handleShowColumns session false dbName table None
+    | ShowIndex(name, dbOverride) ->
+        let sessionDb = session.Database |> Option.defaultValue defaultDatabase
+        let dbName, table = splitQualified sessionDb name
+        let dbName = dbOverride |> Option.map stripBackticks |> Option.defaultValue dbName
+        session, handleShowIndex session dbName table
 
 /// Parses and validates SQL for COM_STMT_PREPARE without executing it: a
 /// parse failure is the same 1064 (code, message) pair a COM_QUERY syntax
@@ -742,7 +836,7 @@ let prepareStatement (sql: string) : Result<int, int * string> =
     let trimmed = probeSql.Trim().TrimEnd(';').Trim()
     let upper = trimmed.ToUpperInvariant()
 
-    if isNonGrammarStatement trimmed upper then
+    if (tryProbe trimmed upper).IsSome then
         Result.Ok placeholderCount
     else
         match Parser.parse probeSql with
@@ -756,46 +850,9 @@ let private dispatch (session: Session) (rawSql: string) : Session * QueryResult
     let sql = rawSql.Trim().TrimEnd(';').Trim()
     let upper = sql.ToUpperInvariant()
 
-    match upper with
-    | _ when setAutocommit.IsMatch sql -> handleSetAutocommit (setAutocommit.Match sql).Groups.[1].Value session
-    | _ when upper.StartsWith "SET " -> handleSet session sql
-    | _ when rollbackToSavepointStmt.IsMatch sql -> rollbackToSavepoint (rollbackToSavepointStmt.Match sql).Groups.[2].Value session
-    | _ when beginTx.IsMatch upper -> beginTransaction session, Affected 0UL
-    | _ when commitTx.IsMatch upper -> commitSession session, Affected 0UL
-    | _ when rollbackTx.IsMatch upper -> rollbackSession session, Affected 0UL
-    | _ when savepointStmt.IsMatch sql -> savepoint (savepointStmt.Match sql).Groups.[1].Value session
-    | _ when releaseSavepointStmt.IsMatch sql -> releaseSavepoint (releaseSavepointStmt.Match sql).Groups.[1].Value session
-    | _ when upper.StartsWith "USE " ->
-        { session with Database = Some(sql.Substring(4).Trim().Trim('`')) }, Affected 0UL
-    | _ when upper.StartsWith "SHOW VARIABLES" -> session, handleShowVariables session sql
-    | "SHOW WARNINGS" -> session, ResultSet([ "Level"; "Code"; "Message" ], [])
-    | _ when upper.StartsWith "SHOW DATABASES" -> session, handleShowDatabases session sql
-    | _ when upper.StartsWith "SHOW TABLE STATUS" -> session, handleShowTableStatus session sql
-    | _ when upper.StartsWith "SHOW TABLES" || upper.StartsWith "SHOW FULL TABLES" -> session, handleShowTables session sql
-    | _ when showCreateTableRe.IsMatch sql ->
-        let sessionDb = session.Database |> Option.defaultValue defaultDatabase
-        let dbName, table = splitQualified sessionDb (showCreateTableRe.Match sql).Groups.[1].Value
-
-        match findTable session dbName table with
-        | Error(code, msg) -> session, Err(code, msg)
-        | Ok t -> session, ResultSet([ "Table"; "Create Table" ], [ [ Some t.OriginalName; Some(showCreateTableDDL t) ] ])
-    | _ when showColumnsRe.IsMatch sql ->
-        let m = showColumnsRe.Match sql
-        let sessionDb = session.Database |> Option.defaultValue defaultDatabase
-        let dbName, table = splitQualified sessionDb m.Groups.[2].Value
-        let dbName = if m.Groups.[4].Success then stripBackticks m.Groups.[4].Value else dbName
-        session, handleShowColumns session m.Groups.[1].Success dbName table (likeSuffix sql)
-    | _ when describeRe.IsMatch sql ->
-        let sessionDb = session.Database |> Option.defaultValue defaultDatabase
-        let dbName, table = splitQualified sessionDb (describeRe.Match sql).Groups.[1].Value
-        session, handleShowColumns session false dbName table None
-    | _ when showIndexRe.IsMatch sql ->
-        let m = showIndexRe.Match sql
-        let sessionDb = session.Database |> Option.defaultValue defaultDatabase
-        let dbName, table = splitQualified sessionDb m.Groups.[1].Value
-        let dbName = if m.Groups.[3].Success then stripBackticks m.Groups.[3].Value else dbName
-        session, handleShowIndex session dbName table
-    | _ -> executeStatement session sql upper
+    match tryProbe sql upper with
+    | Some probe -> runProbe session sql probe
+    | None -> executeStatement session sql upper
 
 /// No SQL engine failure should ever escape as a raw .NET exception — the
 /// only two paths into `dispatch` (the parser, well guarded, and
