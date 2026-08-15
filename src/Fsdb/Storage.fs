@@ -78,6 +78,23 @@ type Database = Map<string, Table>
 /// Database names, as given, to a `Database`.
 type Catalog = Map<string, Database>
 
+/// One committed change to the catalog, for a physical WAL. Data changes
+/// (`RowsInserted`/`RowsUpdated`/`RowsDeleted`) carry the actual `Value`s
+/// written, never SQL text — `INSERT ... VALUES (NOW(), UUID())` replayed as
+/// SQL would produce different values the second time, so replay must be
+/// "write exactly this row" rather than "re-run this expression". DDL
+/// (`SchemaChanged`) is deterministic by nature (CREATE/ALTER/DROP/TRUNCATE/
+/// RENAME never depend on when they run), so it's logged logically as the
+/// parsed `Statement` instead. `TransactionCommitted` wraps every event a
+/// multi-statement transaction buffered, emitted once at COMMIT — see
+/// `beginTransactionSnapshot`/`commitTransactionEvents`.
+type CommitEvent =
+    | RowsInserted of db: string * table: string * rows: Value[] list
+    | RowsUpdated of db: string * table: string * changes: (Value[] * Value[]) list
+    | RowsDeleted of db: string * table: string * rows: Value[] list
+    | SchemaChanged of db: string * Statement
+    | TransactionCommitted of CommitEvent list
+
 let defaultDatabase = "fsdb"
 
 let private stripBackticks (s: string) = s.Trim().Trim('`')
@@ -111,12 +128,70 @@ let splitQualified (defaultDb: string) (name: string) : string * string =
 type Store =
     { mutable Catalog: Catalog
       mutable ForeignKeyChecks: bool
+      /// Fires once per committed write, under `Lock`, right after the
+      /// catalog swap that made it visible — `None` (the default) means no
+      /// subscriber, so every write path's event-construction work still
+      /// happens (it's cheap: the row values were already computed for the
+      /// write itself) but delivery is a no-op. Set directly (e.g.
+      /// `store.OnCommit <- Some handler`) before serving traffic; nothing
+      /// here mutates it mid-flight.
+      mutable OnCommit: (CommitEvent -> unit) option
+      /// `Some` only for a transaction's private snapshot `Store` (see
+      /// `beginTransactionSnapshot`): while set, every write path appends its
+      /// event here instead of calling `OnCommit`, so nothing is visible
+      /// outside the transaction until `commitTransactionEvents` flushes the
+      /// buffer as one `TransactionCommitted` on the real store — a ROLLBACK
+      /// just discards the snapshot, buffer and all.
+      mutable PendingEvents: ResizeArray<CommitEvent> option
       Lock: obj }
 
 let create () : Store =
     { Catalog = Map.ofList [ defaultDatabase, Map.empty ]
       ForeignKeyChecks = true
+      OnCommit = None
+      PendingEvents = None
       Lock = obj () }
+
+/// Delivers `event` (if any): buffers it if `store` is a transaction
+/// snapshot (`PendingEvents`), otherwise hands it straight to `OnCommit` if
+/// someone's listening. Callers hold `store.Lock` for the whole operation
+/// this event describes (every public write function below wraps its body
+/// in `lock store.Lock`, and F#'s `lock` — `Monitor` — is reentrant on the
+/// same thread), so this always runs "under the write lock after a
+/// successful catalog swap".
+let private emit (store: Store) (event: CommitEvent option) : unit =
+    match event with
+    | None -> ()
+    | Some e ->
+        match store.PendingEvents with
+        | Some buffer -> buffer.Add e
+        | None -> store.OnCommit |> Option.iter (fun f -> f e)
+
+/// A private per-transaction catalog snapshot seeded from `store`'s current
+/// catalog (see `Session.Transaction`) — writes against it stay invisible
+/// to `store` until `commitTransactionEvents` flushes its buffered events
+/// and the caller merges its catalog back in; a ROLLBACK just drops it.
+/// Only buffers events at all when `store` actually has a subscriber —
+/// otherwise every write during the transaction skips straight past
+/// `emit`'s buffer check, same zero-overhead-when-nobody's-listening
+/// property as the non-transactional path.
+let beginTransactionSnapshot (store: Store) : Store =
+    { Catalog = store.Catalog
+      ForeignKeyChecks = store.ForeignKeyChecks
+      OnCommit = None
+      PendingEvents = if store.OnCommit.IsSome then Some(ResizeArray()) else None
+      Lock = obj () }
+
+/// Flushes a committed transaction's buffered events onto the real `store`
+/// as one `TransactionCommitted`, if it buffered any — a no-op for an empty
+/// or subscriber-less snapshot. Call under `store.Lock`, after merging
+/// `snapshot`'s catalog back in (see `QueryHandler.commitSession`); there's
+/// no rollback counterpart, since discarding `snapshot` discards its buffer
+/// too.
+let commitTransactionEvents (store: Store) (snapshot: Store) : unit =
+    match snapshot.PendingEvents with
+    | Some buffer when buffer.Count > 0 -> emit store (Some(TransactionCommitted(List.ofSeq buffer)))
+    | _ -> ()
 
 /// `SET FOREIGN_KEY_CHECKS = 0|1` — Integrate wires this from
 /// `QueryHandler`'s `SET` probe (see the note on `Store.ForeignKeyChecks`).
@@ -135,12 +210,14 @@ let createDatabase (store: Store) (dbName: string) : Result<unit, StorageError> 
             Error(DatabaseExists dbName)
         else
             store.Catalog <- Map.add dbName Map.empty store.Catalog
+            emit store (Some(SchemaChanged(dbName, CreateDatabase(dbName, false))))
             Ok())
 
 let dropDatabase (store: Store) (dbName: string) : Result<unit, StorageError> =
     lock store.Lock (fun () ->
         if Map.containsKey dbName store.Catalog then
             store.Catalog <- Map.remove dbName store.Catalog
+            emit store (Some(SchemaChanged(dbName, DropDatabase(dbName, false))))
             Ok()
         else
             Error(NoSuchDatabase dbName))
@@ -350,35 +427,55 @@ let createTable
     (indexes: IndexDef list)
     (foreignKeys: ForeignKeyDef list)
     : Result<unit, StorageError> =
-    ensureDatabase store dbName
+    lock store.Lock (fun () ->
+        ensureDatabase store dbName
 
-    withDatabase store dbName (fun db ->
-        let key = normalizeTableName tableName
+        let result =
+            withDatabase store dbName (fun db ->
+                let key = normalizeTableName tableName
 
-        if Map.containsKey key db then
-            Error(TableExists tableName)
-        else
-            let table =
-                { OriginalName = tableName
-                  Columns = columns
-                  Rows = []
-                  NextAutoId = 1L
-                  Indexes = indexes
-                  ForeignKeys = foreignKeys }
+                if Map.containsKey key db then
+                    Error(TableExists tableName)
+                else
+                    let table =
+                        { OriginalName = tableName
+                          Columns = columns
+                          Rows = []
+                          NextAutoId = 1L
+                          Indexes = indexes
+                          ForeignKeys = foreignKeys }
 
-            Ok(Map.add key table db, ()))
+                    Ok(Map.add key table db, ()))
+
+        if result.IsOk then
+            emit store (Some(SchemaChanged(dbName, CreateTable(tableName, columns, indexes, foreignKeys, false))))
+
+        result)
 
 let dropTable (store: Store) (dbName: string) (tableName: string) : Result<unit, StorageError> =
-    withDatabase store dbName (fun db ->
-        let key = normalizeTableName tableName
+    lock store.Lock (fun () ->
+        let result =
+            withDatabase store dbName (fun db ->
+                let key = normalizeTableName tableName
 
-        if Map.containsKey key db then
-            Ok(Map.remove key db, ())
-        else
-            Error(NoSuchTable tableName))
+                if Map.containsKey key db then
+                    Ok(Map.remove key db, ())
+                else
+                    Error(NoSuchTable tableName))
+
+        if result.IsOk then
+            emit store (Some(SchemaChanged(dbName, DropTable([ tableName ], false))))
+
+        result)
 
 let truncate (store: Store) (dbName: string) (tableName: string) : Result<unit, StorageError> =
-    withTable store dbName tableName (fun table -> Ok({ table with Rows = []; NextAutoId = 1L }, ()))
+    lock store.Lock (fun () ->
+        let result = withTable store dbName tableName (fun table -> Ok({ table with Rows = []; NextAutoId = 1L }, ()))
+
+        if result.IsOk then
+            emit store (Some(SchemaChanged(dbName, Truncate tableName)))
+
+        result)
 
 /// Removes column index `idx` from every row — used by `DropColumn`, since
 /// `Value[]` has no built-in "remove at" the way a `ResizeArray` would.
@@ -460,20 +557,27 @@ let private applyAlterAction (table: Table) (action: AlterAction) : Result<Table
 /// Applies `actions` in order against `tableName`, re-filing it under a new
 /// key if any action renamed it (`RENAME TO`/`RENAME [TABLE]`).
 let alterTable (store: Store) (dbName: string) (tableName: string) (actions: AlterAction list) : Result<unit, StorageError> =
-    withDatabase store dbName (fun db ->
-        tryGetTable db tableName
-        |> Result.bind (fun table ->
-            let origKey = normalizeTableName tableName
+    lock store.Lock (fun () ->
+        let result =
+            withDatabase store dbName (fun db ->
+                tryGetTable db tableName
+                |> Result.bind (fun table ->
+                    let origKey = normalizeTableName tableName
 
-            let step acc action =
-                acc
-                |> Result.bind (fun (key, tbl) ->
-                    applyAlterAction tbl action
-                    |> Result.map (fun (tbl', newKey) -> (newKey |> Option.defaultValue key), tbl'))
+                    let step acc action =
+                        acc
+                        |> Result.bind (fun (key, tbl) ->
+                            applyAlterAction tbl action
+                            |> Result.map (fun (tbl', newKey) -> (newKey |> Option.defaultValue key), tbl'))
 
-            actions
-            |> List.fold step (Ok(origKey, table))
-            |> Result.map (fun (finalKey, finalTable) -> Map.remove origKey db |> Map.add finalKey finalTable, ())))
+                    actions
+                    |> List.fold step (Ok(origKey, table))
+                    |> Result.map (fun (finalKey, finalTable) -> Map.remove origKey db |> Map.add finalKey finalTable, ())))
+
+        if result.IsOk then
+            emit store (Some(SchemaChanged(dbName, AlterTable(tableName, actions))))
+
+        result)
 
 let renameTable (store: Store) (dbName: string) (oldName: string) (newName: string) : Result<unit, StorageError> =
     alterTable store dbName oldName [ RenameTo newName ]
@@ -609,7 +713,7 @@ let private insertCore
     (tableKey: string)
     (rowsIn: Value list list)
     (idxs: int list)
-    : Result<Database * (int64 * int), StorageError> =
+    : Result<Database * (int64 * int * Value[] list), StorageError> =
     let table = Map.find tableKey db
     let uniqueGroups = uniqueKeyGroups table
 
@@ -652,7 +756,7 @@ let private insertCore
     |> List.fold step (Ok([], table.NextAutoId, None))
     |> Result.map (fun (accepted, nextAutoId', firstAssigned) ->
         let table' = { table with Rows = table.Rows @ accepted; NextAutoId = nextAutoId' }
-        Map.add tableKey table' db, (Option.defaultValue 0L firstAssigned, List.length accepted))
+        Map.add tableKey table' db, (Option.defaultValue 0L firstAssigned, List.length accepted, accepted))
 
 /// Inserts rows built from `columns` and matching value lists, applying
 /// defaults, AUTO_INCREMENT assignment, NOT NULL/type-coercion checks, and
@@ -669,13 +773,23 @@ let insertRows
     (columns: string list option)
     (rowsIn: Value list list)
     : Result<int64 * int, StorageError> =
-    withDatabase store dbName (fun db ->
+    lock store.Lock (fun () ->
         let key = normalizeTableName tableName
 
-        tryGetTable db tableName
-        |> Result.bind (fun table ->
-            resolveInsertColumns table columns
-            |> Result.bind (insertCore store.ForeignKeyChecks false db key rowsIn)))
+        let result =
+            withDatabase store dbName (fun db ->
+                tryGetTable db tableName
+                |> Result.bind (fun table ->
+                    resolveInsertColumns table columns
+                    |> Result.bind (insertCore store.ForeignKeyChecks false db key rowsIn)))
+
+        match result with
+        | Ok(lastId, affected, rows) ->
+            if not rows.IsEmpty then
+                emit store (Some(RowsInserted(dbName, tableName, rows)))
+
+            Ok(lastId, affected)
+        | Error e -> Error e)
 
 /// `INSERT IGNORE`: as `insertRows`, but a row that would violate NOT
 /// NULL/unique/foreign-key constraints is skipped instead of failing the
@@ -690,13 +804,23 @@ let insertRowsIgnore
     (columns: string list option)
     (rowsIn: Value list list)
     : Result<int64 * int, StorageError> =
-    withDatabase store dbName (fun db ->
+    lock store.Lock (fun () ->
         let key = normalizeTableName tableName
 
-        tryGetTable db tableName
-        |> Result.bind (fun table ->
-            resolveInsertColumns table columns
-            |> Result.bind (insertCore store.ForeignKeyChecks true db key rowsIn)))
+        let result =
+            withDatabase store dbName (fun db ->
+                tryGetTable db tableName
+                |> Result.bind (fun table ->
+                    resolveInsertColumns table columns
+                    |> Result.bind (insertCore store.ForeignKeyChecks true db key rowsIn)))
+
+        match result with
+        | Ok(lastId, affected, rows) ->
+            if not rows.IsEmpty then
+                emit store (Some(RowsInserted(dbName, tableName, rows)))
+
+            Ok(lastId, affected)
+        | Error e -> Error e)
 
 /// `INSERT ... ON DUPLICATE KEY UPDATE`: like `insertRows`, but a candidate
 /// row that collides with an existing row on any unique key or the primary
@@ -712,58 +836,82 @@ let upsertRows
     (computeGenerated: Value[] -> Result<Value[], StorageError>)
     (applyUpdate: Value[] -> Value[] -> Result<Value[], StorageError>)
     : Result<int64 * int, StorageError> =
-    withTable store dbName tableName (fun table ->
-        let indices =
-            match columns with
-            | None -> Ok [ 0 .. table.Columns.Length - 1 ]
-            | Some names -> names |> traverse (resolveColumn table.Columns)
+    lock store.Lock (fun () ->
+        let result =
+            withTable store dbName tableName (fun table ->
+                let indices =
+                    match columns with
+                    | None -> Ok [ 0 .. table.Columns.Length - 1 ]
+                    | Some names -> names |> traverse (resolveColumn table.Columns)
 
-        indices
-        |> Result.bind (fun idxs ->
-            let keySets = uniqueKeyGroups table |> List.map snd
+                indices
+                |> Result.bind (fun idxs ->
+                    let keySets = uniqueKeyGroups table |> List.map snd
 
-            let findMatch (rows: Value[] list) (candidate: Value[]) =
-                rows |> List.tryFind (fun existing -> keySets |> List.exists (fun ks -> rowsCollideOn ks existing candidate))
+                    let findMatch (rows: Value[] list) (candidate: Value[]) =
+                        rows |> List.tryFind (fun existing -> keySets |> List.exists (fun ks -> rowsCollideOn ks existing candidate))
 
-            let step acc (rowValues: Value list) =
-                acc
-                |> Result.bind (fun (rowsAcc: Value[] list, nextAutoId, firstAssigned, affected) ->
-                    if List.length rowValues <> List.length idxs then
-                        Error(ColumnCountMismatch(List.length idxs, List.length rowValues))
-                    else
-                        let provided = List.zip idxs rowValues |> Map.ofList
-                        let rawRow = table.Columns |> List.mapi (fun i _ -> Map.tryFind i provided)
+                    let step acc (rowValues: Value list) =
+                        acc
+                        |> Result.bind
+                            (fun (rowsAcc: Value[] list, nextAutoId, firstAssigned, affected, inserted: Value[] list, updated: (Value[] * Value[]) list) ->
+                                if List.length rowValues <> List.length idxs then
+                                    Error(ColumnCountMismatch(List.length idxs, List.length rowValues))
+                                else
+                                    let provided = List.zip idxs rowValues |> Map.ofList
+                                    let rawRow = table.Columns |> List.mapi (fun i _ -> Map.tryFind i provided)
 
-                        processRow nextAutoId rawRow table.Columns
-                        |> Result.bind (fun (finalValues, nextAutoId', assignedId) ->
-                            // A unique index over a *generated* column (e.g.
-                            // Laravel Pulse's `key_hash BINARY(16) AS
-                            // (unhex(md5(key)))`) is still NULL in the raw
-                            // candidate at this point — `computeGenerated`
-                            // fills it in before `findMatch`/`rowsCollideOn`
-                            // run, so ON DUPLICATE KEY UPDATE actually finds
-                            // the collision instead of degrading into a
-                            // plain INSERT that then trips the unique check.
-                            computeGenerated (Array.ofList finalValues)
-                            |> Result.map (fun candidate ->
-                                match findMatch rowsAcc candidate with
-                                | Some existing -> Choice1Of2(existing, candidate)
-                                | None -> Choice2Of2 candidate)
-                            |> Result.bind (function
-                                | Choice1Of2(existing, candidate) ->
-                                    applyUpdate existing candidate
-                                    |> Result.map (fun updated ->
-                                        (rowsAcc |> List.map (fun r -> if r = existing then updated else r)),
-                                        nextAutoId',
-                                        firstAssigned,
-                                        affected + 1)
-                                | Choice2Of2 candidate ->
-                                    Ok(rowsAcc @ [ candidate ], nextAutoId', Option.orElse assignedId firstAssigned, affected + 1))))
+                                    processRow nextAutoId rawRow table.Columns
+                                    |> Result.bind (fun (finalValues, nextAutoId', assignedId) ->
+                                        // A unique index over a *generated* column (e.g.
+                                        // Laravel Pulse's `key_hash BINARY(16) AS
+                                        // (unhex(md5(key)))`) is still NULL in the raw
+                                        // candidate at this point — `computeGenerated`
+                                        // fills it in before `findMatch`/`rowsCollideOn`
+                                        // run, so ON DUPLICATE KEY UPDATE actually finds
+                                        // the collision instead of degrading into a
+                                        // plain INSERT that then trips the unique check.
+                                        computeGenerated (Array.ofList finalValues)
+                                        |> Result.map (fun candidate ->
+                                            match findMatch rowsAcc candidate with
+                                            | Some existing -> Choice1Of2(existing, candidate)
+                                            | None -> Choice2Of2 candidate)
+                                        |> Result.bind (function
+                                            | Choice1Of2(existing, candidate) ->
+                                                applyUpdate existing candidate
+                                                |> Result.map (fun applied ->
+                                                    (rowsAcc |> List.map (fun r -> if r = existing then applied else r)),
+                                                    nextAutoId',
+                                                    firstAssigned,
+                                                    affected + 1,
+                                                    inserted,
+                                                    (existing, applied) :: updated)
+                                            | Choice2Of2 candidate ->
+                                                Ok(
+                                                    rowsAcc @ [ candidate ],
+                                                    nextAutoId',
+                                                    Option.orElse assignedId firstAssigned,
+                                                    affected + 1,
+                                                    candidate :: inserted,
+                                                    updated
+                                                ))))
 
-            rowsIn
-            |> List.fold step (Ok(table.Rows, table.NextAutoId, None, 0))
-            |> Result.map (fun (rows', nextAutoId', firstAssigned, affected) ->
-                { table with Rows = rows'; NextAutoId = nextAutoId' }, (Option.defaultValue 0L firstAssigned, affected))))
+                    rowsIn
+                    |> List.fold step (Ok(table.Rows, table.NextAutoId, None, 0, [], []))
+                    |> Result.map (fun (rows', nextAutoId', firstAssigned, affected, inserted, updated) ->
+                        { table with Rows = rows'; NextAutoId = nextAutoId' },
+                        (Option.defaultValue 0L firstAssigned, affected, List.rev inserted, List.rev updated))))
+
+        match result with
+        | Ok(lastId, affected, inserted, updated) ->
+            if not inserted.IsEmpty then
+                emit store (Some(RowsInserted(dbName, tableName, inserted)))
+
+            if not updated.IsEmpty then
+                emit store (Some(RowsUpdated(dbName, tableName, updated)))
+
+            Ok(lastId, affected)
+        | Error e -> Error e)
 
 let private coerceRow (columns: ColumnDef list) (row: Value[]) : Result<Value[], StorageError> =
     List.zip columns (Array.toList row)
@@ -932,8 +1080,16 @@ let rec private cascadeDeleteVisited
             |> List.fold applyChild (Ok(db, visited))
             |> Result.map (fun (d, visited) -> removeFrom d, visited)
 
-let private cascadeDelete (checkFks: bool) (db: Database) (tableKey: string) (toDelete: Value[] list) : Result<Database, StorageError> =
-    cascadeDeleteVisited checkFks db Map.empty tableKey toDelete |> Result.map fst
+/// As `cascadeDeleteVisited`, seeded with an empty `visited` — its second
+/// return value is every row actually removed, by table key, including
+/// `tableKey` itself and every table a `CASCADE` reached, for `deleteRows`
+/// to report as `RowsDeleted` events. ponytail: `ON DELETE SET NULL`
+/// blanks child rows in place rather than deleting them, so those changes
+/// aren't in `visited` and don't get their own `RowsUpdated` event yet —
+/// add that (thread a similar accumulator through the `"SET NULL"` branch
+/// above) once a migration's FK actually uses it.
+let private cascadeDelete (checkFks: bool) (db: Database) (tableKey: string) (toDelete: Value[] list) : Result<Database * Map<string, Value[] list>, StorageError> =
+    cascadeDeleteVisited checkFks db Map.empty tableKey toDelete
 
 /// Deletes every row matching `predicate`. Returns the number of rows
 /// removed. `predicate` returns a `Result` rather than a plain `bool` so a
@@ -949,16 +1105,31 @@ let deleteRows
     (tableName: string)
     (predicate: Value[] -> Result<bool, StorageError>)
     : Result<int, StorageError> =
-    withDatabase store dbName (fun db ->
-        let key = normalizeTableName tableName
+    lock store.Lock (fun () ->
+        let result =
+            withDatabase store dbName (fun db ->
+                let key = normalizeTableName tableName
 
-        tryGetTable db tableName
-        |> Result.bind (fun table ->
-            table.Rows
-            |> traverse (fun row -> predicate row |> Result.map (fun keep -> keep, row))
-            |> Result.bind (fun flagged ->
-                let toDelete = flagged |> List.filter fst |> List.map snd
-                cascadeDelete store.ForeignKeyChecks db key toDelete |> Result.map (fun db' -> db', toDelete.Length))))
+                tryGetTable db tableName
+                |> Result.bind (fun table ->
+                    table.Rows
+                    |> traverse (fun row -> predicate row |> Result.map (fun keep -> keep, row))
+                    |> Result.bind (fun flagged ->
+                        let toDelete = flagged |> List.filter fst |> List.map snd
+
+                        cascadeDelete store.ForeignKeyChecks db key toDelete
+                        |> Result.map (fun (db', removed) -> db', (toDelete.Length, db, removed)))))
+
+        match result with
+        | Ok(affected, db, removed) ->
+            removed
+            |> Map.iter (fun tableKey rows ->
+                if not rows.IsEmpty then
+                    let originalName = db |> Map.tryFind tableKey |> Option.map (fun t -> t.OriginalName) |> Option.defaultValue tableKey
+                    emit store (Some(RowsDeleted(dbName, originalName, rows))))
+
+            Ok affected
+        | Error e -> Error e)
 
 /// Replaces every row matching `predicate` with `updater row`, coercing the
 /// result back to the table's column types, then checking it against the
@@ -978,55 +1149,69 @@ let updateRows
     (predicate: Value[] -> Result<bool, StorageError>)
     (updater: Value[] -> Result<Value[], StorageError>)
     : Result<int, StorageError> =
-    withDatabase store dbName (fun db ->
-        let key = normalizeTableName tableName
+    lock store.Lock (fun () ->
+        let result =
+            withDatabase store dbName (fun db ->
+                let key = normalizeTableName tableName
 
-        tryGetTable db tableName
-        |> Result.bind (fun table ->
-            let uniqueGroups = uniqueKeyGroups table
-            let checkFks = store.ForeignKeyChecks
-            let original = Array.ofList table.Rows
+                tryGetTable db tableName
+                |> Result.bind (fun table ->
+                    let uniqueGroups = uniqueKeyGroups table
+                    let checkFks = store.ForeignKeyChecks
+                    let original = Array.ofList table.Rows
 
-            // Folds left-to-right, threading the rows already written this
-            // statement (`doneRows`, holding their *new* values) alongside
-            // the rows not yet reached (their still-*original* values) —
-            // mirrors `insertCore`'s `table.Rows @ accepted` pattern, so a
-            // multi-row `UPDATE` that moves several rows onto the same
-            // unique value collides with a sibling row this same statement
-            // already rewrote, not just against the frozen pre-statement
-            // snapshot.
-            let step acc (i, row) =
-                acc
-                |> Result.bind (fun (doneRows: Value[] list, changedCount) ->
-                    predicate row
-                    |> Result.bind (fun keep ->
-                        if not keep then
-                            Ok(doneRows @ [ row ], changedCount)
-                        else
-                            updater row
-                            |> Result.bind (coerceRow table.Columns)
-                            |> Result.bind (fun newRow ->
-                                let notYetProcessed =
-                                    original |> Array.indexed |> Array.filter (fun (j, _) -> j > i) |> Array.map snd |> List.ofArray
+                    // Folds left-to-right, threading the rows already written this
+                    // statement (`doneRows`, holding their *new* values) alongside
+                    // the rows not yet reached (their still-*original* values) —
+                    // mirrors `insertCore`'s `table.Rows @ accepted` pattern, so a
+                    // multi-row `UPDATE` that moves several rows onto the same
+                    // unique value collides with a sibling row this same statement
+                    // already rewrote, not just against the frozen pre-statement
+                    // snapshot. `changes` collects only the rows actually rewritten
+                    // (before, after) — for `RowsUpdated`, and for `changedCount`
+                    // (its length), matching MySQL's "Changed: n" rather than "Rows
+                    // matched: n".
+                    let step acc (i, row) =
+                        acc
+                        |> Result.bind (fun (doneRows: Value[] list, changes: (Value[] * Value[]) list) ->
+                            predicate row
+                            |> Result.bind (fun keep ->
+                                if not keep then
+                                    Ok(doneRows @ [ row ], changes)
+                                else
+                                    updater row
+                                    |> Result.bind (coerceRow table.Columns)
+                                    |> Result.bind (fun newRow ->
+                                        let notYetProcessed =
+                                            original |> Array.indexed |> Array.filter (fun (j, _) -> j > i) |> Array.map snd |> List.ofArray
 
-                                let others = doneRows @ notYetProcessed
+                                        let others = doneRows @ notYetProcessed
 
-                                match findUniqueCollision uniqueGroups others newRow with
-                                | Some e -> Error e
-                                | None ->
-                                    if checkFks then
-                                        checkFkParents db table.Columns table.ForeignKeys newRow
-                                        |> Result.bind (fun () -> checkNotOrphaning db key table.Columns row newRow)
-                                        |> Result.map (fun () -> newRow)
-                                    else
-                                        Ok newRow)
-                            |> Result.map (fun newRow -> doneRows @ [ newRow ], changedCount + (if newRow <> row then 1 else 0))))
+                                        match findUniqueCollision uniqueGroups others newRow with
+                                        | Some e -> Error e
+                                        | None ->
+                                            if checkFks then
+                                                checkFkParents db table.Columns table.ForeignKeys newRow
+                                                |> Result.bind (fun () -> checkNotOrphaning db key table.Columns row newRow)
+                                                |> Result.map (fun () -> newRow)
+                                            else
+                                                Ok newRow)
+                                    |> Result.map (fun newRow ->
+                                        doneRows @ [ newRow ], (if newRow <> row then changes @ [ row, newRow ] else changes))))
 
-            original
-            |> List.ofArray
-            |> List.indexed
-            |> List.fold step (Ok([], 0))
-            |> Result.map (fun (rows', changedCount) -> Map.add key { table with Rows = rows' } db, changedCount)))
+                    original
+                    |> List.ofArray
+                    |> List.indexed
+                    |> List.fold step (Ok([], []))
+                    |> Result.map (fun (rows', changes) -> Map.add key { table with Rows = rows' } db, changes)))
+
+        match result with
+        | Ok changes ->
+            if not changes.IsEmpty then
+                emit store (Some(RowsUpdated(dbName, tableName, changes)))
+
+            Ok changes.Length
+        | Error e -> Error e)
 
 /// A snapshot read: the table's columns and its rows as they were at the
 /// moment of the call. Lock-free — reads a single reference field, and

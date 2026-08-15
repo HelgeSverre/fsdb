@@ -74,7 +74,11 @@ type PreparedStmt =
 type Transaction =
     { Snapshot: Store
       BaseCatalog: Catalog
-      Savepoints: Map<string, Catalog> }
+      /// Each savepoint's catalog plus how many events `Snapshot.PendingEvents`
+      /// had buffered at that point — `ROLLBACK TO SAVEPOINT` truncates the
+      /// buffer back to that length too, so a physical WAL never sees events
+      /// for writes the savepoint rollback just undid.
+      Savepoints: Map<string, Catalog * int> }
 
 type Session =
     { ConnectionId: int

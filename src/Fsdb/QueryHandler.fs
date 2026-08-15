@@ -395,7 +395,8 @@ let private commitSession (session: Session) : Session =
     match session.Tx with
     | Some tx ->
         lock session.Store.Lock (fun () ->
-            session.Store.Catalog <- mergeCatalogs tx.BaseCatalog tx.Snapshot.Catalog session.Store.Catalog)
+            session.Store.Catalog <- mergeCatalogs tx.BaseCatalog tx.Snapshot.Catalog session.Store.Catalog
+            Storage.commitTransactionEvents session.Store tx.Snapshot)
 
         { session with Tx = None }
     | None -> session
@@ -411,10 +412,7 @@ let private rollbackSession (session: Session) : Session = { session with Tx = N
 let private beginTransaction (session: Session) : Session =
     let session = commitSession session
     let baseCatalog = session.Store.Catalog
-    let snapshot: Store =
-        { Catalog = baseCatalog
-          Lock = obj ()
-          ForeignKeyChecks = session.Store.ForeignKeyChecks }
+    let snapshot = Storage.beginTransactionSnapshot session.Store
 
     { session with
         Tx = Some { Snapshot = snapshot; BaseCatalog = baseCatalog; Savepoints = Map.empty } }
@@ -428,13 +426,21 @@ let private savepoint (name: string) (session: Session) : Session * QueryResult 
     let session = if session.Tx.IsNone then beginTransaction session else session
 
     match session.Tx with
-    | Some tx -> { session with Tx = Some { tx with Savepoints = Map.add name tx.Snapshot.Catalog tx.Savepoints } }, Affected 0UL
+    | Some tx ->
+        let eventCount = tx.Snapshot.PendingEvents |> Option.map (fun b -> b.Count) |> Option.defaultValue 0
+        { session with Tx = Some { tx with Savepoints = Map.add name (tx.Snapshot.Catalog, eventCount) tx.Savepoints } }, Affected 0UL
     | None -> session, Affected 0UL // unreachable: beginTransaction always sets Tx
 
 let private rollbackToSavepoint (name: string) (session: Session) : Session * QueryResult =
-    match session.Tx |> Option.bind (fun tx -> Map.tryFind name tx.Savepoints |> Option.map (fun cat -> tx, cat)) with
-    | Some(tx, catalog) ->
+    match session.Tx |> Option.bind (fun tx -> Map.tryFind name tx.Savepoints |> Option.map (fun seed -> tx, seed)) with
+    | Some(tx, (catalog, eventCount)) ->
         tx.Snapshot.Catalog <- catalog
+        // Drop every event this transaction buffered after the savepoint —
+        // otherwise a WAL replay would apply writes the savepoint rollback
+        // just undid.
+        tx.Snapshot.PendingEvents
+        |> Option.iter (fun buffer -> if buffer.Count > eventCount then buffer.RemoveRange(eventCount, buffer.Count - eventCount))
+
         session, Affected 0UL
     | None -> session, savepointNotFound name
 

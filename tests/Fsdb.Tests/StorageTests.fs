@@ -1218,4 +1218,195 @@ let tests =
                         match scan store defaultDatabase "departments" with
                         | Ok(_, rows) -> Expect.equal (rows |> Seq.map (fun r -> r.[0]) |> List.ofSeq) [ VInt 1L ] "the parent row is untouched"
                         | Error e -> failtestf "expected Ok, got %A" e
-                    | other -> failtestf "expected ForeignKeyRestrict, got %A" other ] ]
+                    | other -> failtestf "expected ForeignKeyRestrict, got %A" other ]
+
+          testList
+              "OnCommit notification hook"
+              [ testCase "insertRows fires RowsInserted with the physically-coerced row (defaults/autoincrement resolved)"
+                <| fun _ ->
+                    let store = withUsersTable ()
+                    let events = ResizeArray<CommitEvent>()
+                    store.OnCommit <- Some events.Add
+
+                    insertRows store defaultDatabase "users" None [ [ VNull; VString "alice"; VNull ] ] |> ignore
+
+                    Expect.equal
+                        (List.ofSeq events)
+                        [ RowsInserted(defaultDatabase, "users", [ [| VInt 1L; VString "alice"; VNull |] ]) ]
+                        "one RowsInserted with the assigned auto-increment id"
+
+                testCase "insertRows with no subscriber fires nothing (no OnCommit set)"
+                <| fun _ ->
+                    let store = withUsersTable ()
+                    Expect.isNone store.OnCommit "no subscriber by default"
+                    // Just proving this doesn't throw with OnCommit = None.
+                    insertRows store defaultDatabase "users" None [ [ VNull; VString "alice"; VNull ] ] |> ignore
+
+                testCase "an INSERT that inserts zero rows (INSERT IGNORE, every row skipped) fires nothing"
+                <| fun _ ->
+                    let store = withUsersTable ()
+                    insertRows store defaultDatabase "users" None [ [ VInt 1L; VString "alice"; VNull ] ] |> ignore
+                    let events = ResizeArray<CommitEvent>()
+                    store.OnCommit <- Some events.Add
+
+                    insertRowsIgnore store defaultDatabase "users" None [ [ VInt 1L; VString "bob"; VNull ] ] |> ignore
+
+                    Expect.isEmpty events "duplicate PK row was skipped, not inserted"
+
+                testCase "updateRows fires RowsUpdated with (before, after) pairs for changed rows only"
+                <| fun _ ->
+                    let store = withUsersTable ()
+
+                    insertRows
+                        store
+                        defaultDatabase
+                        "users"
+                        None
+                        [ [ VInt 1L; VString "alice"; VInt 30L ]; [ VInt 2L; VString "bob"; VInt 40L ] ]
+                    |> ignore
+
+                    let events = ResizeArray<CommitEvent>()
+                    store.OnCommit <- Some events.Add
+
+                    // A no-op SET (age stays 40) on bob's row must not appear
+                    // in the event's changes, matching "Changed: n" semantics.
+                    updateRows
+                        store
+                        defaultDatabase
+                        "users"
+                        (fun _ -> Ok true)
+                        (fun row -> if row.[0] = VInt 1L then Ok [| row.[0]; row.[1]; VInt 31L |] else Ok row)
+                    |> ignore
+
+                    Expect.equal
+                        (List.ofSeq events)
+                        [ RowsUpdated(defaultDatabase, "users", [ [| VInt 1L; VString "alice"; VInt 30L |], [| VInt 1L; VString "alice"; VInt 31L |] ]) ]
+                        "only alice's row actually changed"
+
+                testCase "deleteRows fires RowsDeleted with the removed rows"
+                <| fun _ ->
+                    let store = withUsersTable ()
+                    insertRows store defaultDatabase "users" None [ [ VInt 1L; VString "alice"; VInt 30L ] ] |> ignore
+
+                    let events = ResizeArray<CommitEvent>()
+                    store.OnCommit <- Some events.Add
+
+                    deleteRows store defaultDatabase "users" (fun _ -> Ok true) |> ignore
+
+                    Expect.equal
+                        (List.ofSeq events)
+                        [ RowsDeleted(defaultDatabase, "users", [ [| VInt 1L; VString "alice"; VInt 30L |] ]) ]
+                        "the deleted row"
+
+                testCase "upsertRows fires RowsInserted for appended rows and RowsUpdated for collided rows in one call"
+                <| fun _ ->
+                    let store = withUsersTable ()
+                    insertRows store defaultDatabase "users" None [ [ VInt 1L; VString "alice"; VInt 30L ] ] |> ignore
+
+                    let events = ResizeArray<CommitEvent>()
+                    store.OnCommit <- Some events.Add
+
+                    let applyUpdate (existing: Value[]) (_candidate: Value[]) = Ok [| existing.[0]; existing.[1]; VInt 99L |]
+
+                    upsertRows
+                        store
+                        defaultDatabase
+                        "users"
+                        None
+                        [ [ VInt 1L; VString "alice"; VInt 1L ]; [ VInt 2L; VString "carol"; VInt 20L ] ]
+                        Ok
+                        applyUpdate
+                    |> ignore
+
+                    Expect.contains
+                        (List.ofSeq events)
+                        (RowsInserted(defaultDatabase, "users", [ [| VInt 2L; VString "carol"; VInt 20L |] ]))
+                        "carol was a fresh insert"
+
+                    Expect.contains
+                        (List.ofSeq events)
+                        (RowsUpdated(defaultDatabase, "users", [ [| VInt 1L; VString "alice"; VInt 30L |], [| VInt 1L; VString "alice"; VInt 99L |] ]))
+                        "alice's row collided and was updated"
+
+                testCase "createTable/dropTable/alterTable/truncate/createDatabase/dropDatabase all fire SchemaChanged, logically (the DDL statement, not row data)"
+                <| fun _ ->
+                    let store = create ()
+                    let events = ResizeArray<CommitEvent>()
+                    store.OnCommit <- Some events.Add
+
+                    createDatabase store "shop" |> ignore
+                    createTable store "shop" "widgets" usersColumns [] [] |> ignore
+                    alterTable store "shop" "widgets" [ AddColumn(col "sku" (TVarchar 64) true) ] |> ignore
+                    truncate store "shop" "widgets" |> ignore
+                    dropTable store "shop" "widgets" |> ignore
+                    dropDatabase store "shop" |> ignore
+
+                    Expect.equal (List.ofSeq events |> List.length) 6 "one SchemaChanged per DDL statement"
+
+                    events
+                    |> Seq.iter (function
+                        | SchemaChanged("shop", _) -> ()
+                        | other -> failtestf "expected a SchemaChanged in db 'shop', got %A" other)
+
+                testCase "a failed write (e.g. duplicate key) fires nothing"
+                <| fun _ ->
+                    let store = withUsersTable ()
+                    insertRows store defaultDatabase "users" None [ [ VInt 1L; VString "alice"; VInt 30L ] ] |> ignore
+
+                    let events = ResizeArray<CommitEvent>()
+                    store.OnCommit <- Some events.Add
+
+                    match insertRows store defaultDatabase "users" None [ [ VInt 1L; VString "bob"; VInt 40L ] ] with
+                    | Error(DuplicateKey _) -> ()
+                    | other -> failtestf "expected DuplicateKey, got %A" other
+
+                    Expect.isEmpty events "the failed insert wrote nothing, so nothing fired"
+
+                testCase "a transaction snapshot buffers its writes and only emits a single TransactionCommitted, on commit"
+                <| fun _ ->
+                    let store = withUsersTable ()
+                    let events = ResizeArray<CommitEvent>()
+                    store.OnCommit <- Some events.Add
+
+                    let snapshot = beginTransactionSnapshot store
+                    insertRows snapshot defaultDatabase "users" None [ [ VInt 1L; VString "alice"; VInt 30L ] ] |> ignore
+                    insertRows snapshot defaultDatabase "users" None [ [ VInt 2L; VString "bob"; VInt 40L ] ] |> ignore
+
+                    Expect.isEmpty events "nothing visible on the real store until commit"
+
+                    // Merge the snapshot's catalog back in (what
+                    // QueryHandler.commitSession does) and flush its buffer.
+                    store.Catalog <- snapshot.Catalog
+                    commitTransactionEvents store snapshot
+
+                    match List.ofSeq events with
+                    | [ TransactionCommitted evs ] ->
+                        Expect.equal
+                            evs
+                            [ RowsInserted(defaultDatabase, "users", [ [| VInt 1L; VString "alice"; VInt 30L |] ])
+                              RowsInserted(defaultDatabase, "users", [ [| VInt 2L; VString "bob"; VInt 40L |] ]) ]
+                            "both buffered inserts, in order"
+                    | other -> failtestf "expected exactly one TransactionCommitted, got %A" other
+
+                testCase "a rolled-back transaction snapshot's buffered events are simply discarded"
+                <| fun _ ->
+                    let store = withUsersTable ()
+                    let events = ResizeArray<CommitEvent>()
+                    store.OnCommit <- Some events.Add
+
+                    let snapshot = beginTransactionSnapshot store
+                    insertRows snapshot defaultDatabase "users" None [ [ VInt 1L; VString "alice"; VInt 30L ] ] |> ignore
+
+                    // ROLLBACK: just drop the snapshot — never call
+                    // commitTransactionEvents, never merge its catalog.
+                    Expect.isEmpty events "rollback never touched the real store"
+
+                    match scan store defaultDatabase "users" with
+                    | Ok(_, rows) -> Expect.isEmpty (List.ofSeq rows) "the real store's data is untouched too"
+                    | Error e -> failtestf "expected Ok, got %A" e
+
+                testCase "a transaction snapshot doesn't buffer at all when the real store has no subscriber"
+                <| fun _ ->
+                    let store = withUsersTable ()
+                    let snapshot = beginTransactionSnapshot store
+                    Expect.isNone snapshot.PendingEvents "no subscriber on the real store means nothing to buffer" ] ]
