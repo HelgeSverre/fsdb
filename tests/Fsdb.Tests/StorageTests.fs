@@ -1092,6 +1092,33 @@ let tests =
                         | Error e -> failtestf "expected Ok, got %A" e
                     | Error e -> failtestf "expected Ok, got %A" e
 
+                testCase "ON DELETE SET NULL against a NOT NULL foreign key column fails the delete instead of blanking it"
+                <| fun _ ->
+                    let store = create ()
+
+                    createTable store defaultDatabase "pa" [ idCol ] [] [] |> ignore
+
+                    let fk =
+                        { Name = "fk_ch"
+                          Columns = [ "pid" ]
+                          RefTable = "pa"
+                          RefColumns = [ "id" ]
+                          OnDelete = Some "SET NULL"
+                          OnUpdate = None }
+
+                    createTable store defaultDatabase "ch" [ idCol; col "pid" (TInt false) false ] [] [ fk ]
+                    |> ignore
+
+                    insertRows store defaultDatabase "pa" None [ [ VInt 1L ] ] |> ignore
+                    insertRows store defaultDatabase "ch" None [ [ VInt 5L; VInt 1L ] ] |> ignore
+
+                    match deleteRows store defaultDatabase "pa" (fun _ -> Ok true) with
+                    | Error(NotNullViolation "pid") ->
+                        match scan store defaultDatabase "ch" with
+                        | Ok(_, rows) -> Expect.equal (List.ofSeq rows) [ [| VInt 5L; VInt 1L |] ] "the child row is untouched"
+                        | Error e -> failtestf "expected Ok, got %A" e
+                    | other -> failtestf "expected NotNullViolation, got %A" other
+
                 testCase "ON DELETE CASCADE recurses through a grandchild table"
                 <| fun _ ->
                     let store = withDeptEmployees (Some "CASCADE")

@@ -850,15 +850,26 @@ let rec private cascadeDeleteVisited
                             match fk.OnDelete |> Option.map (fun s -> s.Trim().ToUpperInvariant()) with
                             | Some "CASCADE" -> cascadeDeleteVisited checkFks d visited childKey matching
                             | Some "SET NULL" ->
-                                let blanked row =
-                                    if isChild row then
-                                        let row' = Array.copy row
-                                        childIdxs |> List.iter (fun i -> row'.[i] <- VNull)
-                                        row'
-                                    else
-                                        row
+                                // A `NOT NULL` FK column can't actually be
+                                // blanked — real MySQL refuses to create
+                                // such a constraint at all (error 1215);
+                                // this engine doesn't validate DDL that
+                                // strictly, so the equivalent check happens
+                                // here instead, failing the delete (1048)
+                                // rather than silently writing a `NULL` no
+                                // INSERT/UPDATE could ever produce.
+                                match childIdxs |> List.tryFind (fun i -> not childTbl.Columns.[i].Nullable) with
+                                | Some i -> Error(NotNullViolation childTbl.Columns.[i].Name)
+                                | None ->
+                                    let blanked row =
+                                        if isChild row then
+                                            let row' = Array.copy row
+                                            childIdxs |> List.iter (fun i -> row'.[i] <- VNull)
+                                            row'
+                                        else
+                                            row
 
-                                Ok(Map.add childKey { childTbl with Rows = childTbl.Rows |> List.map blanked } d, visited)
+                                    Ok(Map.add childKey { childTbl with Rows = childTbl.Rows |> List.map blanked } d, visited)
                             | _ -> Error(ForeignKeyRestrict fk.Name))
 
             referencingForeignKeys db tableKey
