@@ -150,6 +150,11 @@ let sqlStateForCode (code: int) : string =
     | 1146 -> "42S02" // ER_NO_SUCH_TABLE
     | 1054 -> "42S22" // ER_BAD_FIELD_ERROR
     | 1047 -> "08S01" // ER_UNKNOWN_COM_ERROR
+    | 1048 -> "23000" // ER_BAD_NULL_ERROR
+    | 1052 -> "23000" // ER_NON_UNIQ_ERROR
+    | 1062 -> "23000" // ER_DUP_ENTRY
+    | 1451 -> "23000" // ER_ROW_IS_REFERENCED_2
+    | 1452 -> "23000" // ER_NO_REFERENCED_ROW_2
     | _ -> "HY000"
 
 /// Builds an ERR packet payload (header 0xff).
