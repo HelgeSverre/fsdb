@@ -571,6 +571,14 @@ and private resolveFromItem (store: Store) (registry: Registry) (dbName: string)
         | Err(code, message), _, _ -> Error(Err(code, message))
         | Affected _, _, _ -> Error(Err(1064, "derived table did not return a resultset"))
 
+/// The qualifier a `FROM`/`JOIN` source's columns resolve `qualifier.col`
+/// against: a real table's alias (or its own name), or a derived table's
+/// mandatory alias.
+and private fromItemQualifier (item: FromItem) : string =
+    match item with
+    | FromTable t -> t.Alias |> Option.defaultValue t.Table
+    | FromSubquery(_, alias) -> alias
+
 /// `EvalContext.Qualifiers` for every source (the `FROM` table, and each
 /// `JOIN` after it) already resolved into `sources`, ordered the same
 /// left-to-right way their columns are laid out in a combined row —
@@ -611,10 +619,10 @@ and private applyJoin
     ((sourcesSoFar, rowsSoFar): (string * ColumnDef list) list * Value[] list)
     (join: Join)
     : Result<(string * ColumnDef list) list * Value[] list, QueryResult> =
-    match resolveTableRef store dbName join.Table with
+    match resolveFromItem store registry dbName join.Table with
     | Error e -> Error e
     | Ok(joinColumns, joinRows) ->
-        let joinQualifier = join.Table.Alias |> Option.defaultValue join.Table.Table
+        let joinQualifier = fromItemQualifier join.Table
         let newSources = sourcesSoFar @ [ joinQualifier, joinColumns ]
         let qualifiers = qualifierRanges newSources
         let combinedColumnsSoFar = sourcesSoFar |> List.collect snd
@@ -667,9 +675,10 @@ and private applyJoin
 /// path — that path is the hot, heavily-tested read path; duplicating the
 /// (much smaller) join loop here keeps it untouched. ponytail: real tables
 /// only (no derived-table join source) — MySQL itself doesn't allow a
-/// derived table as a multi-table `UPDATE`/`DELETE` target anyway, and no
-/// join source needs one until a migration's `UPDATE`/`DELETE` actually
-/// joins against a subquery.
+/// derived table as a multi-table `UPDATE`/`DELETE` target anyway; a
+/// derived-table join *source* (`UPDATE t1 JOIN (SELECT ...) dt ON ...`)
+/// is real MySQL syntax this rejects with 1064 rather than silently
+/// mishandling, add it if a migration's `UPDATE`/`DELETE` actually needs one.
 and private applyMutationJoin
     (store: Store)
     (registry: Registry)
@@ -677,54 +686,58 @@ and private applyMutationJoin
     ((sourcesSoFar, rowsSoFar): (string * TableRef * ColumnDef list) list * (Value[] option list * Value[]) list)
     (join: Join)
     : Result<(string * TableRef * ColumnDef list) list * (Value[] option list * Value[]) list, QueryResult> =
-    match resolveTableRef store dbName join.Table with
-    | Error e -> Error e
-    | Ok(joinColumns, joinRows) ->
-        let joinQualifier = join.Table.Alias |> Option.defaultValue join.Table.Table
-        let newSources = sourcesSoFar @ [ joinQualifier, join.Table, joinColumns ]
-        let qualifiers = qualifierRanges (newSources |> List.map (fun (q, _, c) -> q, c))
-        let combinedColumnsSoFar = sourcesSoFar |> List.map (fun (_, _, c) -> c) |> List.collect id
-        let leftFlatPadding = combinedColumnsSoFar |> List.map (fun _ -> VNull) |> Array.ofList
-        let rightFlatPadding = joinColumns |> List.map (fun _ -> VNull) |> Array.ofList
-        let leftIdentityPadding = sourcesSoFar |> List.map (fun _ -> None)
+    match join.Table with
+    | FromSubquery _ ->
+        Error(Err(1064, "a derived table (subquery) isn't supported as a multi-table UPDATE/DELETE JOIN source"))
+    | FromTable tableRef ->
+        match resolveTableRef store dbName tableRef with
+        | Error e -> Error e
+        | Ok(joinColumns, joinRows) ->
+            let joinQualifier = tableRef.Alias |> Option.defaultValue tableRef.Table
+            let newSources = sourcesSoFar @ [ joinQualifier, tableRef, joinColumns ]
+            let qualifiers = qualifierRanges (newSources |> List.map (fun (q, _, c) -> q, c))
+            let combinedColumnsSoFar = sourcesSoFar |> List.map (fun (_, _, c) -> c) |> List.collect id
+            let leftFlatPadding = combinedColumnsSoFar |> List.map (fun _ -> VNull) |> Array.ofList
+            let rightFlatPadding = joinColumns |> List.map (fun _ -> VNull) |> Array.ofList
+            let leftIdentityPadding = sourcesSoFar |> List.map (fun _ -> None)
 
-        let ctxFor = contextFactory store registry dbName (columnIndexOf (combinedColumnsSoFar @ joinColumns)) qualifiers None
+            let ctxFor = contextFactory store registry dbName (columnIndexOf (combinedColumnsSoFar @ joinColumns)) qualifiers None
 
-        let leftIndexed = rowsSoFar |> List.indexed
-        let rightIndexed = joinRows |> List.indexed
+            let leftIndexed = rowsSoFar |> List.indexed
+            let rightIndexed = joinRows |> List.indexed
 
-        let pairs = [ for li, l in leftIndexed do for ri, r in rightIndexed -> li, ri, l, r ]
+            let pairs = [ for li, l in leftIndexed do for ri, r in rightIndexed -> li, ri, l, r ]
 
-        pairs
-        |> traverse (fun (li, ri, (lIdent, lFlat), r) ->
-            let combinedFlat = Array.append lFlat r
-            evalExpr { ctxFor combinedFlat with Clause = OnClause } join.On
-            |> Result.map (fun v -> li, ri, (truthy v = Some true), (lIdent @ [ Some r ], combinedFlat)))
-        |> Result.mapError Err
-        |> Result.map (fun flagged ->
-            let matched = flagged |> List.filter (fun (_, _, ok, _) -> ok)
-            let matchedRows = matched |> List.map (fun (_, _, _, row) -> row)
-            let matchedLeft = matched |> List.map (fun (li, _, _, _) -> li) |> Set.ofList
-            let matchedRight = matched |> List.map (fun (_, ri, _, _) -> ri) |> Set.ofList
+            pairs
+            |> traverse (fun (li, ri, (lIdent, lFlat), r) ->
+                let combinedFlat = Array.append lFlat r
+                evalExpr { ctxFor combinedFlat with Clause = OnClause } join.On
+                |> Result.map (fun v -> li, ri, (truthy v = Some true), (lIdent @ [ Some r ], combinedFlat)))
+            |> Result.mapError Err
+            |> Result.map (fun flagged ->
+                let matched = flagged |> List.filter (fun (_, _, ok, _) -> ok)
+                let matchedRows = matched |> List.map (fun (_, _, _, row) -> row)
+                let matchedLeft = matched |> List.map (fun (li, _, _, _) -> li) |> Set.ofList
+                let matchedRight = matched |> List.map (fun (_, ri, _, _) -> ri) |> Set.ofList
 
-            let leftOnly =
-                leftIndexed
-                |> List.filter (fst >> matchedLeft.Contains >> not)
-                |> List.map (fun (_, (lIdent, lFlat)) -> lIdent @ [ None ], Array.append lFlat rightFlatPadding)
+                let leftOnly =
+                    leftIndexed
+                    |> List.filter (fst >> matchedLeft.Contains >> not)
+                    |> List.map (fun (_, (lIdent, lFlat)) -> lIdent @ [ None ], Array.append lFlat rightFlatPadding)
 
-            let rightOnly =
-                rightIndexed
-                |> List.filter (fst >> matchedRight.Contains >> not)
-                |> List.map (fun (_, r) -> leftIdentityPadding @ [ Some r ], Array.append leftFlatPadding r)
+                let rightOnly =
+                    rightIndexed
+                    |> List.filter (fst >> matchedRight.Contains >> not)
+                    |> List.map (fun (_, r) -> leftIdentityPadding @ [ Some r ], Array.append leftFlatPadding r)
 
-            let rows =
-                match join.Kind with
-                | InnerJoin
-                | CrossJoin -> matchedRows
-                | LeftJoin -> matchedRows @ leftOnly
-                | RightJoin -> matchedRows @ rightOnly
+                let rows =
+                    match join.Kind with
+                    | InnerJoin
+                    | CrossJoin -> matchedRows
+                    | LeftJoin -> matchedRows @ leftOnly
+                    | RightJoin -> matchedRows @ rightOnly
 
-            newSources, rows)
+                newSources, rows)
 
 /// Resolves `from :: joins` into the same `(sources, rows)` shape
 /// `applyMutationJoin` builds up — the multi-table `UPDATE`/`DELETE`
@@ -771,10 +784,7 @@ and private runSelectStmt
         match resolveFromItem store registry dbName fromItem with
         | Error e -> e, [], []
         | Ok(baseColumns, baseRows) ->
-            let baseQualifier =
-                match fromItem with
-                | FromTable t -> t.Alias |> Option.defaultValue t.Table
-                | FromSubquery(_, alias) -> alias
+            let baseQualifier = fromItemQualifier fromItem
 
             let initial : Result<(string * ColumnDef list) list * Value[] list, QueryResult> = Ok([ baseQualifier, baseColumns ], baseRows)
 
@@ -1821,12 +1831,7 @@ let private selectSubqueryExprs (select: SelectStmt) : Expr list =
 /// writes, which always qualifies the outer reference.
 let private isCorrelated (sub: SelectStmt) : bool =
     let ownAliases =
-        ((sub.From
-          |> Option.map (function
-              | FromTable t -> [ t.Alias |> Option.defaultValue t.Table ]
-              | FromSubquery(_, alias) -> [ alias ])
-          |> Option.defaultValue [])
-         @ (sub.Joins |> List.map (fun j -> j.Table.Alias |> Option.defaultValue j.Table.Table)))
+        ((sub.From |> Option.map fromItemQualifier |> Option.toList) @ (sub.Joins |> List.map (fun j -> fromItemQualifier j.Table)))
         |> List.map (fun s -> s.ToLowerInvariant())
         |> Set.ofList
 
@@ -1918,24 +1923,22 @@ let rec private explainJoinBlock
               Rows = rowCount
               Extra = (if idx = tableCount - 1 then extra else []) }
 
-    let fromResult =
-        match from with
-        | None -> Ok()
-        | Some(FromTable tref) ->
+    /// One `FromItem`'s row(s): a real table's stats, or a derived table's
+    /// `<derivedN>` placeholder plus its own recursive `DERIVED` block.
+    let explainFromItem (idx: int) (item: FromItem) : Result<unit, QueryResult> =
+        match item with
+        | FromTable tref ->
             explainTableStats store dbName tref
-            |> Result.map (fun (n, ty) -> emitTableRow 0 (tref.Alias |> Option.defaultValue tref.Table) n ty)
-        | Some(FromSubquery(sub, _alias)) ->
+            |> Result.map (fun (n, ty) -> emitTableRow idx (tref.Alias |> Option.defaultValue tref.Table) n ty)
+        | FromSubquery(sub, _alias) ->
             let derivedId = nextId ()
-            emitTableRow 0 (sprintf "<derived%d>" derivedId) None "ALL"
+            emitTableRow idx (sprintf "<derived%d>" derivedId) None "ALL"
             explainSelectBlock store dbName nextId acc derivedId "DERIVED" sub
 
+    let fromResult = from |> Option.map (explainFromItem 0) |> Option.defaultValue (Ok())
+
     fromResult
-    |> Result.bind (fun () ->
-        joins
-        |> List.indexed
-        |> traverse (fun (i, j) ->
-            explainTableStats store dbName j.Table
-            |> Result.map (fun (n, ty) -> emitTableRow (i + 1) (j.Table.Alias |> Option.defaultValue j.Table.Table) n ty)))
+    |> Result.bind (fun () -> joins |> List.indexed |> traverse (fun (i, j) -> explainFromItem (i + 1) j.Table))
     |> Result.map (fun _ ->
         if tableCount = 0 then
             acc.Add
@@ -2048,10 +2051,16 @@ let rec private explainStatement (store: Store) (registry: Registry) (dbName: st
     /// real single-table `UPDATE`/`DELETE` paths already run before writing
     /// anything — an unknown column is 1054 here too, not a fake plan.
     let checkMutationWhere (fromRef: TableRef) (joins: Join list) (exprs: Expr list) : Result<unit, QueryResult> =
+        let resolveJoinSource (j: Join) =
+            match j.Table with
+            | FromSubquery _ ->
+                Error(Err(1064, "a derived table (subquery) isn't supported as a multi-table UPDATE/DELETE JOIN source"))
+            | FromTable tref -> resolveTableRef store dbName tref |> Result.map (fun (cols, _) -> fromItemQualifier j.Table, cols)
+
         resolveTableRef store dbName fromRef
         |> Result.bind (fun (fromCols, _) ->
             joins
-            |> traverse (fun j -> resolveTableRef store dbName j.Table |> Result.map (fun (cols, _) -> (j.Table.Alias |> Option.defaultValue j.Table.Table), cols))
+            |> traverse resolveJoinSource
             |> Result.map (fun joinSources -> ((fromRef.Alias |> Option.defaultValue fromRef.Table), fromCols) :: joinSources))
         |> Result.bind (fun sources ->
             let allCols = sources |> List.collect snd

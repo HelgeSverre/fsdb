@@ -214,10 +214,14 @@ and JoinKind =
 /// One `[INNER | LEFT [OUTER]] JOIN table ON expr` clause, applied against
 /// whatever's already in scope to its left (the `FROM` table, or the result
 /// of an earlier `Join` in the same list — this engine only ever nests
-/// joins left-to-right, matching how they're written).
+/// joins left-to-right, matching how they're written). `Table` is a
+/// `FromItem`, not a bare `TableRef`, so `JOIN (SELECT ...) AS alias ON
+/// ...` (Eloquent's `joinSub`/`leftJoinSub`) parses the same derived-table
+/// shape the leading `FROM` already does; a multi-table `UPDATE`/`DELETE ...
+/// JOIN` still only accepts `FromTable` (see `Executor.applyMutationJoin`).
 and Join =
     { Kind: JoinKind
-      Table: TableRef
+      Table: FromItem
       On: Expr }
 
 /// A `SELECT` statement's clauses as a record rather than a positional

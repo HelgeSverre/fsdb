@@ -1762,6 +1762,35 @@ let tests =
                         Expect.equal rows [ [ Some "2" ]; [ Some "9" ]; [ Some "10" ] ] "ORDER BY sorts numerically, not lexicographically"
                     | other -> failtestf "expected a numerically-sorted resultset, got %A" other
 
+                testCase "LEFT JOIN (SELECT ...) AS t ON ... — a derived table as a JOIN target, not just the leading FROM"
+                <| fun _ ->
+                    // Eloquent's leftJoinSub/joinSub send exactly this shape.
+                    let store = newStore ()
+                    runDefault store "CREATE TABLE users (id INT, name VARCHAR(20))" |> ignore
+                    runDefault store "CREATE TABLE orders (user_id INT, total INT)" |> ignore
+                    runDefault store "INSERT INTO users VALUES (1, 'alice'), (2, 'bob')" |> ignore
+                    runDefault store "INSERT INTO orders VALUES (1, 10), (1, 5)" |> ignore
+
+                    match
+                        runDefault
+                            store
+                            "SELECT users.name, o.total_spent FROM users LEFT JOIN (SELECT user_id, SUM(total) AS total_spent FROM orders GROUP BY user_id) AS o ON users.id = o.user_id ORDER BY users.id"
+                    with
+                    | ResultSet([ "name"; "total_spent" ], rows) ->
+                        Expect.equal rows [ [ Some "alice"; Some "15" ]; [ Some "bob"; None ] ] "bob has no orders, padded with NULL"
+                    | other -> failtestf "expected a joined-against-subquery resultset, got %A" other
+
+                testCase "UPDATE t1 JOIN (SELECT ...) dt ON ... is a 1064 error, not a crash"
+                <| fun _ ->
+                    // `Executor.applyMutationJoin`'s documented real-tables-only
+                    // simplification — a clean error, not a wrong result.
+                    let store = newStore ()
+                    runDefault store "CREATE TABLE t1 (id INT, n INT)" |> ignore
+
+                    match runDefault store "UPDATE t1 JOIN (SELECT 1 AS id) dt ON t1.id = dt.id SET t1.n = 1" with
+                    | Err(1064, _) -> ()
+                    | other -> failtestf "expected a 1064 error, got %A" other
+
                 testCase "a scalar subquery's comparison is numeric, not lexicographic text"
                 <| fun _ ->
                     let store = newStore ()

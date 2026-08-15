@@ -1011,7 +1011,7 @@ let tests =
                 testCase "UPDATE t1 JOIN t2 ON ... SET t1.x = ..., t2.y = ..."
                 <| fun _ ->
                     match parseOk "UPDATE t1 JOIN t2 ON t1.id = t2.t1_id SET t1.x = 1, t2.y = 2 WHERE t1.id = 5" with
-                    | Update { Joins = [ { Kind = InnerJoin; Table = { Table = "t2" } } ]
+                    | Update { Joins = [ { Kind = InnerJoin; Table = FromTable { Table = "t2" } } ]
                                Assignments = [ { Table = Some "t1"; Column = "x" }; { Table = Some "t2"; Column = "y" } ]
                                OrderBy = []
                                Limit = None } -> ()
@@ -1025,7 +1025,7 @@ let tests =
                     match parseOk "DELETE t1 FROM t1 JOIN t2 ON t1.id = t2.t1_id WHERE t2.flag = 1" with
                     | Delete { Targets = [ "t1" ]
                                From = { Table = "t1" }
-                               Joins = [ { Kind = InnerJoin; Table = { Table = "t2" } } ] } -> ()
+                               Joins = [ { Kind = InnerJoin; Table = FromTable { Table = "t2" } } ] } -> ()
                     | other -> failtestf "expected a named-target multi-table DELETE, got %A" other
 
                 testCase "DELETE FROM t1 USING t1 JOIN t2 ON ..."
@@ -1033,7 +1033,7 @@ let tests =
                     match parseOk "DELETE FROM t1 USING t1 JOIN t2 ON t1.id = t2.t1_id WHERE t2.flag = 1" with
                     | Delete { Targets = [ "t1" ]
                                From = { Table = "t1" }
-                               Joins = [ { Kind = InnerJoin; Table = { Table = "t2" } } ] } -> ()
+                               Joins = [ { Kind = InnerJoin; Table = FromTable { Table = "t2" } } ] } -> ()
                     | other -> failtestf "expected a USING-form multi-table DELETE, got %A" other ]
 
           testList
@@ -1349,7 +1349,7 @@ let tests =
                 testCase "multiple chained joins with aliases"
                 <| fun _ ->
                     match parseOk "SELECT * FROM a AS x JOIN b AS y ON x.id = y.a_id LEFT JOIN c AS z ON y.id = z.b_id" with
-                    | Select { Joins = [ { Kind = InnerJoin; Table = { Alias = Some "y" } }; { Kind = LeftJoin; Table = { Alias = Some "z" } } ] } ->
+                    | Select { Joins = [ { Kind = InnerJoin; Table = FromTable { Alias = Some "y" } }; { Kind = LeftJoin; Table = FromTable { Alias = Some "z" } } ] } ->
                         ()
                     | other -> failtestf "expected two chained joins, got %A" other ]
 
@@ -1360,6 +1360,14 @@ let tests =
                     match parseOk "SELECT * FROM (SELECT id FROM t) AS derived" with
                     | Select { From = Some(FromSubquery({ From = Some(FromTable { Table = "t" }) }, "derived")) } -> ()
                     | other -> failtestf "expected a FromSubquery, got %A" other
+
+                testCase "LEFT JOIN (SELECT ...) AS t ON ... is a derived table join source"
+                <| fun _ ->
+                    // Eloquent's leftJoinSub/joinSub — a real table's JOIN
+                    // target can be a subquery too, not just the leading FROM.
+                    match parseOk "SELECT * FROM a LEFT JOIN (SELECT id FROM t) AS derived ON a.id = derived.id" with
+                    | Select { Joins = [ { Kind = LeftJoin; Table = FromSubquery({ From = Some(FromTable { Table = "t" }) }, "derived") } ] } -> ()
+                    | other -> failtestf "expected a FromSubquery join target, got %A" other
 
                 testCase "UNION ALL keeps duplicates, plain UNION dedupes"
                 <| fun _ ->

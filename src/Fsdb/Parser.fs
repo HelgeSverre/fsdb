@@ -977,7 +977,7 @@ let private joinKind: Parser<JoinKind, unit> =
 /// of a separate Cartesian-product code path.
 let private crossJoinClause: Parser<Join, unit> =
     attempt (keyword "CROSS" >>. keyword "JOIN" >>. tableRef)
-    |>> fun table -> { Kind = CrossJoin; Table = table; On = Lit(VInt 1L) }
+    |>> fun table -> { Kind = CrossJoin; Table = FromTable table; On = Lit(VInt 1L) }
 
 /// `FROM t1, t2` — MySQL's legacy comma (implicit-join) syntax, still the
 /// form plenty of handwritten SQL uses for what an explicit `CROSS JOIN`
@@ -988,12 +988,20 @@ let private crossJoinClause: Parser<Join, unit> =
 /// other `Join`, only a real table can follow the comma, not a derived
 /// `(SELECT ...)`.
 let private commaJoinClause: Parser<Join, unit> =
-    attempt (sym "," >>. tableRef) |>> fun table -> { Kind = CrossJoin; Table = table; On = Lit(VInt 1L) }
+    attempt (sym "," >>. tableRef)
+    |>> fun table -> { Kind = CrossJoin; Table = FromTable table; On = Lit(VInt 1L) }
 
+/// `[INNER | LEFT [OUTER] | RIGHT [OUTER]] JOIN (table | (SELECT ...) AS
+/// alias) ON expr` — `fromItem` (not `tableRef`) so `JOIN (SELECT ...) AS
+/// alias ON ...` (Eloquent's `joinSub`/`leftJoinSub`/`rightJoinSub`) parses;
+/// a multi-table `UPDATE`/`DELETE ... JOIN` shares this same grammar but
+/// rejects a derived-table target at execution time (see
+/// `Executor.applyMutationJoin`), not here — the grammar itself doesn't know
+/// which statement kind it's parsing.
 let private joinClause: Parser<Join, unit> =
     crossJoinClause
     <|> commaJoinClause
-    <|> ((joinKind .>>. tableRef .>> keyword "ON" .>>. expr)
+    <|> ((joinKind .>>. fromItem .>> keyword "ON" .>>. expr)
          |>> fun ((kind, table), onExpr) -> { Kind = kind; Table = table; On = onExpr })
 
 let private groupByClause: Parser<Expr list, unit> = keyword "GROUP" >>. keyword "BY" >>. sepBy1 expr (sym ",")
