@@ -119,12 +119,10 @@ let splitQualified (defaultDb: string) (name: string) : string * string =
 /// `ForeignKeyChecks` gates every FK enforcement in this module (cascading
 /// deletes, `RESTRICT`, parent-existence checks on insert/update) — the
 /// storage-level mirror of MySQL's session `FOREIGN_KEY_CHECKS` variable.
-/// It's a single store-wide flag rather than per-session because `Store`
-/// has no session concept; Integrate: `QueryHandler`'s `SET
-/// FOREIGN_KEY_CHECKS = 0|1` (and Laravel's
-/// `Schema::disableForeignKeyConstraints`, which sends exactly that) should
-/// call `setForeignKeyChecks` — see the comment above `tryProbe`'s `SetVar`
-/// case in QueryHandler.fs, which already anticipates this.
+/// A single store-wide flag rather than per-session, since `Store` has no
+/// session concept; `QueryHandler`'s `SET FOREIGN_KEY_CHECKS = 0|1` probe
+/// (and Laravel's `Schema::disableForeignKeyConstraints`, which sends
+/// exactly that) calls `setForeignKeyChecks`.
 type Store =
     { mutable Catalog: Catalog
       mutable ForeignKeyChecks: bool
@@ -193,8 +191,8 @@ let commitTransactionEvents (store: Store) (snapshot: Store) : unit =
     | Some buffer when buffer.Count > 0 -> emit store (Some(TransactionCommitted(List.ofSeq buffer)))
     | _ -> ()
 
-/// `SET FOREIGN_KEY_CHECKS = 0|1` — Integrate wires this from
-/// `QueryHandler`'s `SET` probe (see the note on `Store.ForeignKeyChecks`).
+/// `SET FOREIGN_KEY_CHECKS = 0|1` — wired from `QueryHandler`'s `SET` probe
+/// (see the note on `Store.ForeignKeyChecks`).
 let setForeignKeyChecks (store: Store) (enabled: bool) : unit =
     lock store.Lock (fun () -> store.ForeignKeyChecks <- enabled)
 
