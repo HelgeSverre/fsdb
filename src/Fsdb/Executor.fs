@@ -221,6 +221,26 @@ type private EvalContext =
 let private singleQualifier (name: string) (columns: ColumnDef list) : Map<string, ColumnDef list * int> =
     Map.ofList [ name.ToLowerInvariant(), (columns, 0) ]
 
+/// Everything constant for one statement, curried ahead of the row — every
+/// `ctxFor`/`ctx` below collapses to one line instead of an eight-line
+/// `EvalContext` record literal repeated at each call site.
+let private contextFactory
+    (store: Store)
+    (registry: Registry)
+    (dbName: string)
+    (columnIndex: Map<string, int list>)
+    (qualifiers: Map<string, ColumnDef list * int>)
+    (outer: EvalContext option)
+    : Value[] -> EvalContext =
+    fun row ->
+        { Registry = registry
+          ColumnIndex = columnIndex
+          Qualifiers = qualifiers
+          Row = row
+          Store = store
+          DbName = dbName
+          Outer = outer }
+
 /// Resolves a bare column against `ctx`, falling back to
 /// `ctx.Outer`/its own outer/... on a miss — see `EvalContext.Outer`. Two or
 /// more matches (a `JOIN` of tables that share a column name) is error 1052,
@@ -560,14 +580,7 @@ and private applyJoin
         let leftNullPadding = combinedColumnsSoFar |> List.map (fun _ -> VNull) |> Array.ofList
         let rightNullPadding = joinColumns |> List.map (fun _ -> VNull) |> Array.ofList
 
-        let ctxFor (row: Value[]) : EvalContext =
-            { Registry = registry
-              ColumnIndex = columnIndexOf (combinedColumnsSoFar @ joinColumns)
-              Qualifiers = qualifiers
-              Row = row
-              Store = store
-              DbName = dbName
-              Outer = outer }
+        let ctxFor = contextFactory store registry dbName (columnIndexOf (combinedColumnsSoFar @ joinColumns)) qualifiers outer
 
         let leftIndexed = rowsSoFar |> List.indexed
         let rightIndexed = joinRows |> List.indexed
@@ -1006,14 +1019,7 @@ and private runGroupedSelect
     : QueryResult * byte list * Value[] list =
     let columnIndex = columnIndexOf columns
 
-    let ctxFor (row: Value[]) : EvalContext =
-        { Registry = registry
-          ColumnIndex = columnIndex
-          Qualifiers = qualifiers
-          Row = row
-          Store = store
-          DbName = dbName
-          Outer = outer }
+    let ctxFor = contextFactory store registry dbName columnIndex qualifiers outer
 
     let resolveRef = resolvePositionalOrAlias select.Projections
     let groupExprs = select.GroupBy |> List.map resolveRef
@@ -1157,14 +1163,7 @@ and private runWindowedSelect
     | Some(partitionBy, windowOrderBy) ->
         let columnIndex = columnIndexOf columns
 
-        let ctxFor (row: Value[]) : EvalContext =
-            { Registry = registry
-              ColumnIndex = columnIndex
-              Qualifiers = qualifiers
-              Row = row
-              Store = store
-              DbName = dbName
-              Outer = outer }
+        let ctxFor = contextFactory store registry dbName columnIndex qualifiers outer
 
         let matches (row: Value[]) : Result<bool, EvalError> =
             match select.Where with
@@ -1279,14 +1278,7 @@ and private runSelect
 
     let columnIndex = columnIndexOf columns
 
-    let ctxFor (row: Value[]) : EvalContext =
-        { Registry = registry
-          ColumnIndex = columnIndex
-          Qualifiers = qualifiers
-          Row = row
-          Store = store
-          DbName = dbName
-          Outer = outer }
+    let ctxFor = contextFactory store registry dbName columnIndex qualifiers outer
 
     // ORDER BY may name a `SELECT ... AS alias` or a 1-based projection
     // position (`SELECT COUNT(*) AS n FROM t ORDER BY n` / `ORDER BY 1`) —
@@ -1386,14 +1378,7 @@ let private applyAssignments
     (assignments: (int * Expr) list)
     (row: Value[])
     : Result<Value[], StorageError> =
-    let ctx =
-        { Registry = registry
-          ColumnIndex = columnIndex
-          Qualifiers = qualifiers
-          Row = row
-          Store = store
-          DbName = dbName
-          Outer = None }
+    let ctx = contextFactory store registry dbName columnIndex qualifiers None row
 
     assignments
     |> traverse (fun (idx, expr) -> evalExpr ctx expr |> Result.map (fun v -> idx, v))
@@ -1430,14 +1415,7 @@ let private computeGeneratedRow
     else
         let row' = Array.copy row
 
-        let ctx =
-            { Registry = registry
-              ColumnIndex = columnIndexOf columns
-              Qualifiers = singleQualifier table columns
-              Row = row'
-              Store = store
-              DbName = dbName
-              Outer = None }
+        let ctx = contextFactory store registry dbName (columnIndexOf columns) (singleQualifier table columns) None row'
 
         // `ctx.Row` holds `row'` by reference, so mutating it in place
         // right after each column's evaluated (rather than collecting then
@@ -1639,14 +1617,7 @@ let execute (store: Store) (registry: Registry) (dbName: string) (lastInsertId: 
         // 1054 rather than an index-out-of-range.
         let db, table = splitQualified dbName table
 
-        let literalCtx =
-            { Registry = registry
-              ColumnIndex = Map.empty
-              Qualifiers = Map.empty
-              Row = [||]
-              Store = store
-              DbName = dbName
-              Outer = None }
+        let literalCtx = contextFactory store registry dbName Map.empty Map.empty None [||]
 
         match rowsExprs |> traverse (traverse (evalExpr literalCtx)) with
         | Error(code, message) -> lastInsertId, Err(code, message)
@@ -1667,14 +1638,7 @@ let execute (store: Store) (registry: Registry) (dbName: string) (lastInsertId: 
                     let columnIndex = columnIndexOf tableColumns
 
                     let applyUpdate (existing: Value[]) (candidate: Value[]) : Result<Value[], StorageError> =
-                        let ctx =
-                            { Registry = registry
-                              ColumnIndex = columnIndex
-                              Qualifiers = singleQualifier table tableColumns
-                              Row = existing
-                              Store = store
-                              DbName = dbName
-                              Outer = None }
+                        let ctx = contextFactory store registry dbName columnIndex (singleQualifier table tableColumns) None existing
 
                         onDuplicateUpdate
                         |> traverse (fun (name, expr) ->
@@ -1740,14 +1704,7 @@ let execute (store: Store) (registry: Registry) (dbName: string) (lastInsertId: 
             | Ok indexedAssignments ->
                 let qualifiers = singleQualifier table columns
 
-                let ctxFor row =
-                    { Registry = registry
-                      ColumnIndex = columnIndex
-                      Qualifiers = qualifiers
-                      Row = row
-                      Store = store
-                      DbName = dbName
-                      Outer = None }
+                let ctxFor = contextFactory store registry dbName columnIndex qualifiers None
 
                 let check row =
                     match whereExpr with
@@ -1780,14 +1737,7 @@ let execute (store: Store) (registry: Registry) (dbName: string) (lastInsertId: 
         | Ok(columns, _) ->
             let columnIndex = columnIndexOf columns
 
-            let ctxFor row =
-                { Registry = registry
-                  ColumnIndex = columnIndex
-                  Qualifiers = singleQualifier table columns
-                  Row = row
-                  Store = store
-                  DbName = dbName
-                  Outer = None }
+            let ctxFor = contextFactory store registry dbName columnIndex (singleQualifier table columns) None
 
             let check row =
                 match whereExpr with
