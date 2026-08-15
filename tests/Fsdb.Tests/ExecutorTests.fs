@@ -289,6 +289,67 @@ let tests =
                     | ResultSet(_, [ [ Some "1" ] ]) -> ()
                     | other -> failtestf "expected hits incremented exactly once, got %A" other
 
+                testCase "UPDATE self-join through two aliases writes both sides of every matched row"
+                <| fun _ ->
+                    // Regression: `claims`/`pending` used to be keyed by
+                    // source *index*, so a self-join's two aliases wrote
+                    // through two sequential `Storage.updateRows` passes —
+                    // the first pass's row-array replacement broke the
+                    // second pass's by-reference match, silently dropping
+                    // its half of the write.
+                    let store = newStore ()
+                    runDefault store "CREATE TABLE sj2 (id INT, v INT, w INT, nxt INT)" |> ignore
+                    runDefault store "INSERT INTO sj2 VALUES (1, 0, 0, 2), (2, 0, 0, 3), (3, 0, 0, NULL)" |> ignore
+
+                    match runDefault store "UPDATE sj2 a JOIN sj2 b ON a.nxt = b.id SET a.v = 111, b.w = 222" with
+                    | Affected _ -> ()
+                    | other -> failtestf "expected the statement to succeed, got %A" other
+
+                    match runDefault store "SELECT id, v, w FROM sj2 ORDER BY id" with
+                    | ResultSet(_, rows) ->
+                        // Two join matches: (a=1,b=2) and (a=2,b=3). Row 2
+                        // is reached both as a 'b' (match 1, w=222) and as
+                        // an 'a' (match 2, v=111) — both must land, since
+                        // `a` and `b` are independent roles even though
+                        // they're the same table.
+                        Expect.equal
+                            rows
+                            [ [ Some "1"; Some "111"; Some "0" ]; [ Some "2"; Some "111"; Some "222" ]; [ Some "3"; Some "0"; Some "222" ] ]
+                            "row 1: a's v=111 only. row 2: both a's v=111 and b's w=222. row 3: b's w=222 only"
+                    | other -> failtestf "expected a resultset, got %A" other
+
+                testCase "UPDATE JOIN across tables is statement-atomic: a later table's constraint violation leaves the earlier table untouched"
+                <| fun _ ->
+                    let store = newStore ()
+                    runDefault store "CREATE TABLE p (id INT PRIMARY KEY, x INT)" |> ignore
+                    runDefault store "CREATE TABLE q (id INT PRIMARY KEY, pid INT, u INT UNIQUE)" |> ignore
+                    runDefault store "INSERT INTO p VALUES (1, 10), (2, 20)" |> ignore
+                    runDefault store "INSERT INTO q VALUES (100, 1, 1), (101, 2, 2)" |> ignore
+
+                    match runDefault store "UPDATE p JOIN q ON p.id = q.pid SET p.x = 999, q.u = 7" with
+                    | Err(1062, _) -> ()
+                    | other -> failtestf "expected a 1062 duplicate-key error (q.u = 7 collides for both matched rows), got %A" other
+
+                    match runDefault store "SELECT x FROM p ORDER BY id" with
+                    | ResultSet(_, rows) -> Expect.equal rows [ [ Some "10" ]; [ Some "20" ] ] "p's rows must be untouched — the whole statement rolled back"
+                    | other -> failtestf "expected a resultset, got %A" other
+
+                testCase "UPDATE JOIN SET assignments evaluate left-to-right across tables too"
+                <| fun _ ->
+                    let store = newStore ()
+                    runDefault store "CREATE TABLE u1 (id INT, a INT)" |> ignore
+                    runDefault store "CREATE TABLE u2 (id INT, b INT)" |> ignore
+                    runDefault store "INSERT INTO u1 VALUES (1, 1)" |> ignore
+                    runDefault store "INSERT INTO u2 VALUES (1, 0)" |> ignore
+
+                    match runDefault store "UPDATE u1 JOIN u2 ON u1.id = u2.id SET u1.a = 42, u2.b = u1.a" with
+                    | Affected 2UL -> ()
+                    | other -> failtestf "expected 2 rows affected, got %A" other
+
+                    match runDefault store "SELECT b FROM u2" with
+                    | ResultSet(_, [ [ Some "42" ] ]) -> ()
+                    | other -> failtestf "expected u2.b to see u1.a's new value (42), got %A" other
+
                 testCase "DELETE t1 FROM t1 JOIN t2 ON ... removes only t1's matched rows"
                 <| fun _ ->
                     let store = newStore ()

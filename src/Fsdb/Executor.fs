@@ -2313,100 +2313,177 @@ let execute (store: Store) (registry: Registry) (dbName: string) (lastInsertId: 
         // whichever source table each `SET` target names, claiming a
         // physical row (by reference) the first time a matched row touches
         // it so a row reached through more than one join match is still
-        // updated at most once (see `Ast.UpdateStmt`'s doc). Each target
-        // table's claimed writes then go through `Storage.updateRows` same
-        // as a single-table `UPDATE` would, one call per table.
-        match runMutationJoin store registry dbName updateStmt.From updateStmt.Joins with
-        | Error e -> lastInsertId, e
-        | Ok(sources, joinedRows) ->
-            let sourceIndex = sources |> List.mapi (fun i (q, _, _) -> q.ToLowerInvariant(), i) |> Map.ofList
-            let combinedColumns = sources |> List.map (fun (q, _, c) -> q, c)
-            let ctxFor = contextFactory store registry dbName (columnIndexOf (combinedColumns |> List.collect snd)) (qualifierRanges combinedColumns) None
+        // updated at most once (see `Ast.UpdateStmt`'s doc). Held under one
+        // `store.Lock` for the whole statement (read *and* write) so no
+        // other write can interleave between the join scan and the apply
+        // below — same coarseness `Storage.updateRows` already uses for a
+        // single-table `UPDATE`.
+        lock store.Lock (fun () ->
+            match runMutationJoin store registry dbName updateStmt.From updateStmt.Joins with
+            | Error e -> lastInsertId, e
+            | Ok(sources, joinedRows) ->
+                let sourceIndex = sources |> List.mapi (fun i (q, _, _) -> q.ToLowerInvariant(), i) |> Map.ofList
+                let combinedColumns = sources |> List.map (fun (q, _, c) -> q, c)
+                let ctxFor = contextFactory store registry dbName (columnIndexOf (combinedColumns |> List.collect snd)) (qualifierRanges combinedColumns) None
 
-            let resolveAssignment (a: Assignment) : Result<(int * int * Expr), EvalError> =
-                match a.Table with
-                | Some q ->
-                    match Map.tryFind (q.ToLowerInvariant()) sourceIndex with
-                    | None -> Error(unknownColumn (sprintf "%s.%s" q a.Column))
-                    | Some srcIdx ->
-                        let _, _, cols = sources.[srcIdx]
+                // Byte offset of each source's columns within the flat
+                // combined row `ctxFor` expects — lets the left-to-right
+                // fold below patch an assignment's new value straight into
+                // a working copy of that row for the next assignment to see.
+                let sourceOffsets =
+                    combinedColumns |> List.fold (fun (offset, acc) (_, cols) -> offset + List.length cols, acc @ [ offset ]) (0, []) |> snd |> Array.ofList
 
-                        resolveColumn cols a.Column
-                        |> Result.mapError (fun _ -> unknownColumn (sprintf "%s.%s" q a.Column))
-                        |> Result.map (fun colIdx -> srcIdx, colIdx, a.Value)
-                | None ->
-                    match
-                        sources
-                        |> List.indexed
-                        |> List.choose (fun (i, (_, _, cols)) -> resolveColumn cols a.Column |> function Ok idx -> Some(i, idx) | Error _ -> None)
-                    with
-                    | [ (srcIdx, colIdx) ] -> Ok(srcIdx, colIdx, a.Value)
-                    | [] -> Error(unknownColumn a.Column)
-                    | _ -> Error(1052, sprintf "Column '%s' in field list is ambiguous" a.Column)
+                let resolveAssignment (a: Assignment) : Result<(int * int * Expr), EvalError> =
+                    match a.Table with
+                    | Some q ->
+                        match Map.tryFind (q.ToLowerInvariant()) sourceIndex with
+                        | None -> Error(unknownColumn (sprintf "%s.%s" q a.Column))
+                        | Some srcIdx ->
+                            let _, _, cols = sources.[srcIdx]
 
-            match updateStmt.Assignments |> traverse resolveAssignment with
-            | Error(code, message) -> lastInsertId, Err(code, message)
-            | Ok resolvedAssignments ->
-                let assignmentsBySource = resolvedAssignments |> List.groupBy (fun (i, _, _) -> i)
+                            resolveColumn cols a.Column
+                            |> Result.mapError (fun _ -> unknownColumn (sprintf "%s.%s" q a.Column))
+                            |> Result.map (fun colIdx -> srcIdx, colIdx, a.Value)
+                    | None ->
+                        match
+                            sources
+                            |> List.indexed
+                            |> List.choose (fun (i, (_, _, cols)) -> resolveColumn cols a.Column |> function Ok idx -> Some(i, idx) | Error _ -> None)
+                        with
+                        | [ (srcIdx, colIdx) ] -> Ok(srcIdx, colIdx, a.Value)
+                        | [] -> Error(unknownColumn a.Column)
+                        | _ -> Error(1052, sprintf "Column '%s' in field list is ambiguous" a.Column)
 
-                let check flat =
-                    match updateStmt.Where with
-                    | None -> Ok true
-                    | Some expr -> evalExpr { ctxFor flat with Clause = WhereClause } expr |> Result.map (fun v -> truthy v = Some true)
-
-                let claims = sources |> List.map (fun _ -> System.Collections.Generic.HashSet<Value[]>(HashIdentity.Reference))
-                let pending = sources |> List.map (fun _ -> System.Collections.Generic.Dictionary<Value[], (int * Value) list>(HashIdentity.Reference))
-
-                let processRow ((identities, flat): Value[] option list * Value[]) : Result<unit, EvalError> =
-                    check flat
-                    |> Result.bind (fun isMatch ->
-                        if not isMatch then
-                            Ok()
-                        else
-                            let ctx = ctxFor flat
-
-                            assignmentsBySource
-                            |> traverse (fun (srcIdx, assigns) ->
-                                match List.item srcIdx identities with
-                                | None -> Ok()
-                                | Some physRow when claims.[srcIdx].Contains physRow -> Ok()
-                                | Some physRow ->
-                                    assigns
-                                    |> traverse (fun (_, colIdx, expr) -> evalExpr ctx expr |> Result.map (fun v -> colIdx, v))
-                                    |> Result.map (fun vals ->
-                                        claims.[srcIdx].Add physRow |> ignore
-                                        pending.[srcIdx].[physRow] <- vals))
-                            |> Result.map ignore)
-
-                match joinedRows |> traverse processRow with
+                match updateStmt.Assignments |> traverse resolveAssignment with
                 | Error(code, message) -> lastInsertId, Err(code, message)
-                | Ok _ ->
-                    let apply =
+                | Ok resolvedAssignments ->
+                    let check flat =
+                        match updateStmt.Where with
+                        | None -> Ok true
+                        | Some expr -> evalExpr { ctxFor flat with Clause = WhereClause } expr |> Result.map (fun v -> truthy v = Some true)
+
+                    // Two aliases resolving to the same physical table (a
+                    // self-join) must share one claim/pending bucket, keyed
+                    // by the physical table rather than by source index —
+                    // otherwise the same row reached through both aliases
+                    // gets written by two separate `Storage.updateRows`
+                    // passes below, and the first pass's row-array
+                    // replacement (`updateRows` returns *new* `Value[]`s for
+                    // every row it changes) breaks the second pass's
+                    // by-reference match, silently dropping its write.
+                    let physicalKey (tableRef: TableRef) : string * string =
+                        (tableRef.Database |> Option.defaultValue dbName), Storage.normalizeTableName tableRef.Table
+
+                    let physicalGroups =
                         sources
-                        |> List.mapi (fun i (_, tableRef, _) ->
-                            if pending.[i].Count = 0 then
-                                Ok 0
+                        |> List.map (fun (_, tableRef, _) -> tableRef)
+                        |> List.fold (fun acc t -> if acc |> List.exists (fun t' -> physicalKey t' = physicalKey t) then acc else acc @ [ t ]) []
+                        |> Array.ofList
+
+                    let sourcePhys =
+                        sources
+                        |> List.map (fun (_, tableRef, _) -> physicalGroups |> Array.findIndex (fun t -> physicalKey t = physicalKey tableRef))
+                        |> Array.ofList
+
+                    // `claims` stays keyed by *source* (one set per alias,
+                    // as before `Ast.UpdateStmt`'s "at most once" doc
+                    // describes) — a physical row matched twice through the
+                    // *same* alias (`t1 JOIN t2` where two `t2` rows both
+                    // join the same `t1` row) is only written once by that
+                    // alias, but a self-join's two *different* aliases each
+                    // get their own claim on the same physical row, so both
+                    // land — matching MySQL, where `a` and `b` are
+                    // independent roles even when they're the same table.
+                    // `pending` is what's keyed by physical table: every
+                    // alias's surviving write for a given physical row
+                    // accumulates into the *same* entry, so one
+                    // `updateRows` pass per physical table applies every
+                    // alias's columns for that row together instead of two
+                    // passes racing each other's row-array replacement.
+                    let claims = sources |> List.map (fun _ -> System.Collections.Generic.HashSet<Value[]>(HashIdentity.Reference)) |> Array.ofList
+                    let pending = physicalGroups |> Array.map (fun _ -> System.Collections.Generic.Dictionary<Value[], (int * Value) list>(HashIdentity.Reference))
+
+                    let processRow ((identities, flat): Value[] option list * Value[]) : Result<unit, EvalError> =
+                        check flat
+                        |> Result.bind (fun isMatch ->
+                            if not isMatch then
+                                Ok()
                             else
-                                let tdb, tname = (tableRef.Database |> Option.defaultValue dbName), tableRef.Table
-                                let predicate row = Ok(pending.[i].ContainsKey row)
+                                // Left-to-right: each assignment's RHS is
+                                // evaluated against `working`, patched with
+                                // every earlier assignment in this same
+                                // statement — matching MySQL's documented
+                                // `SET a = x, b = a` evaluation order, now
+                                // across tables too.
+                                let working = Array.copy flat
 
-                                let updater row =
-                                    match pending.[i].TryGetValue row with
-                                    | true, vals ->
-                                        let newRow = Array.copy row
+                                let rec go assignments =
+                                    match assignments with
+                                    | [] -> Ok()
+                                    | (srcIdx, colIdx, expr) :: rest ->
+                                        evalExpr (ctxFor working) expr
+                                        |> Result.bind (fun v ->
+                                            working.[sourceOffsets.[srcIdx] + colIdx] <- v
 
-                                        for colIdx, v in vals do
-                                            newRow.[colIdx] <- v
+                                            match List.item srcIdx identities with
+                                            | None -> ()
+                                            | Some physRow ->
+                                                let physIdx = sourcePhys.[srcIdx]
 
-                                        Ok newRow
-                                    | false, _ -> Ok row
+                                                if not (claims.[srcIdx].Contains physRow) then
+                                                    claims.[srcIdx].Add physRow |> ignore
+                                                    let existing = match pending.[physIdx].TryGetValue physRow with true, vs -> vs | false, _ -> []
+                                                    pending.[physIdx].[physRow] <- existing @ [ colIdx, v ]
 
-                                updateRows store tdb tname predicate updater |> withGeneratedRecomputed store registry dbName tdb tname)
-                        |> traverse id
+                                            go rest)
 
-                    match apply with
-                    | Ok counts -> lastInsertId, Affected(uint64 (List.sum counts))
-                    | Error e -> lastInsertId, storageErr e
+                                go resolvedAssignments)
+
+                    match joinedRows |> traverse processRow with
+                    | Error(code, message) -> lastInsertId, Err(code, message)
+                    | Ok _ ->
+                        // All per-table writes must succeed together or not
+                        // at all — MySQL rolls back the whole statement when
+                        // a later table's write violates a constraint,
+                        // rather than leaving an earlier table's rows
+                        // mutated. `beginTransactionSnapshot` gives an
+                        // isolated scratch catalog to write every physical
+                        // table's batch into; only merged back into `store`
+                        // (as one `TransactionCommitted` WAL entry, not N
+                        // separate ones) once every batch has actually
+                        // succeeded.
+                        let snapshot = Storage.beginTransactionSnapshot store
+
+                        let apply =
+                            physicalGroups
+                            |> Array.mapi (fun i tableRef ->
+                                if pending.[i].Count = 0 then
+                                    Ok 0
+                                else
+                                    let tdb, tname = (tableRef.Database |> Option.defaultValue dbName), tableRef.Table
+                                    let predicate row = Ok(pending.[i].ContainsKey row)
+
+                                    let updater row =
+                                        match pending.[i].TryGetValue row with
+                                        | true, vals ->
+                                            let newRow = Array.copy row
+
+                                            for colIdx, v in vals do
+                                                newRow.[colIdx] <- v
+
+                                            Ok newRow
+                                        | false, _ -> Ok row
+
+                                    updateRows snapshot tdb tname predicate updater |> withGeneratedRecomputed snapshot registry dbName tdb tname)
+                            |> Array.toList
+                            |> traverse id
+
+                        match apply with
+                        | Ok counts ->
+                            store.Catalog <- snapshot.Catalog
+                            Storage.commitTransactionEvents store snapshot
+                            lastInsertId, Affected(uint64 (List.sum counts))
+                        | Error e -> lastInsertId, storageErr e)
 
     | Delete deleteStmt when deleteStmt.Joins.IsEmpty ->
         let db, table = (deleteStmt.From.Database |> Option.defaultValue dbName), deleteStmt.From.Table
