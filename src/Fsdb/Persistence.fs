@@ -215,6 +215,13 @@ let rec private encodeExpr (expr: Expr) : JsonNode =
             "RowNumberOver"
             [ "partitionBy", arr (partitionBy |> List.map encodeExpr)
               "orderBy", arr (orderBy |> List.map (fun (e, d) -> arr [ encodeExpr e; encodeDirection d ])) ]
+    | LagOver(e, offset, partitionBy, orderBy) ->
+        caseObj
+            "LagOver"
+            [ "e", encodeExpr e
+              "offset", i64Node offset
+              "partitionBy", arr (partitionBy |> List.map encodeExpr)
+              "orderBy", arr (orderBy |> List.map (fun (e, d) -> arr [ encodeExpr e; encodeDirection d ])) ]
     | Distinct e -> caseObj "Distinct" [ "e", encodeExpr e ]
     | Cast(e, t) -> caseObj "Cast" [ "e", encodeExpr e; "t", encodeColumnType t ]
     | Star q -> caseObj "Star" [ "q", strOptNode q ]
@@ -249,6 +256,17 @@ let rec private decodeExpr (node: JsonNode) : Expr =
     | "FuncCall" -> FuncCall(f("name").GetValue<string>(), f("args").AsArray() |> Seq.map decodeExpr |> List.ofSeq)
     | "RowNumberOver" ->
         RowNumberOver(
+            f("partitionBy").AsArray() |> Seq.map decodeExpr |> List.ofSeq,
+            f("orderBy").AsArray()
+            |> Seq.map (fun p ->
+                let pair = p.AsArray()
+                decodeExpr pair.[0], decodeDirection pair.[1])
+            |> List.ofSeq
+        )
+    | "LagOver" ->
+        LagOver(
+            decodeExpr (f "e"),
+            f("offset").GetValue<int64>(),
             f("partitionBy").AsArray() |> Seq.map decodeExpr |> List.ofSeq,
             f("orderBy").AsArray()
             |> Seq.map (fun p ->

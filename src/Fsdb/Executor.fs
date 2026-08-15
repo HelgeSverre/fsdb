@@ -112,6 +112,7 @@ let rec private containsAggregate (registry: Registry) (expr: Expr) : bool =
     | QualifiedCol _
     | Star _
     | RowNumberOver _
+    | LagOver _
     // A subquery's own aggregates belong to *its* grouping, not the query
     // this expression sits in — `containsAggregate` only asks whether
     // `runSelect` needs to switch itself onto the grouped path, so these
@@ -120,6 +121,85 @@ let rec private containsAggregate (registry: Registry) (expr: Expr) : bool =
     | Exists _
     | Subquery _
     | InSubquery _ -> false
+
+/// Every `RowNumberOver`/`LagOver` node inside `expr`, in encounter order —
+/// pre-order, same walk shape as the later `collectSubqueries` for the
+/// corresponding job. A window function can sit anywhere in a projection's
+/// expression tree (`value - LAG(value) OVER (...)`), not just bare at the
+/// top level, so both `runSelect`'s dispatch and `runWindowedSelect`'s
+/// rewrite need every occurrence rather than only a top-level one.
+let rec private collectWindowFuncs (expr: Expr) : Expr list =
+    match expr with
+    | RowNumberOver _
+    | LagOver _ -> [ expr ]
+    | FuncCall(_, args) -> args |> List.collect collectWindowFuncs
+    | BinOp(_, a, b) -> collectWindowFuncs a @ collectWindowFuncs b
+    | Not e
+    | IsNull e
+    | IsNotNull e
+    | IsTrue e
+    | IsFalse e
+    | Distinct e
+    | Cast(e, _) -> collectWindowFuncs e
+    | Like(e, p, _) -> collectWindowFuncs e @ collectWindowFuncs p
+    | Regexp(e, p) -> collectWindowFuncs e @ collectWindowFuncs p
+    | In(e, xs) -> collectWindowFuncs e @ (xs |> List.collect collectWindowFuncs)
+    | Between(e, lo, hi) -> collectWindowFuncs e @ collectWindowFuncs lo @ collectWindowFuncs hi
+    | Case(subject, whens, elseBranch) ->
+        (subject |> Option.map collectWindowFuncs |> Option.defaultValue [])
+        @ (whens |> List.collect (fun (c, r) -> collectWindowFuncs c @ collectWindowFuncs r))
+        @ (elseBranch |> Option.map collectWindowFuncs |> Option.defaultValue [])
+    | Lit _
+    | Col _
+    | QualifiedCol _
+    | Star _
+    | Exists _
+    | Subquery _
+    | InSubquery _ -> []
+
+/// Replaces every window-function node `collectWindowFuncs` would find with
+/// the plain `Col` reference `synthetic` maps it to (structural lookup — a
+/// small association list rather than a `Map`, since `Expr` carries no
+/// `Comparison` instance for a `Map` key to lean on). `runWindowedSelect`'s
+/// rewrite step, generalized to substitute a window function nested inside
+/// arithmetic/`CASE`/... in place, not just a bare top-level projection.
+let rec private substituteWindowFuncs (synthetic: (Expr * string) list) (expr: Expr) : Expr =
+    match synthetic |> List.tryFind (fun (e, _) -> e = expr) with
+    | Some(_, name) -> Col name
+    | None ->
+        let sub = substituteWindowFuncs synthetic
+
+        match expr with
+        | FuncCall(name, args) -> FuncCall(name, args |> List.map sub)
+        | BinOp(op, a, b) -> BinOp(op, sub a, sub b)
+        | Not e -> Not(sub e)
+        | IsNull e -> IsNull(sub e)
+        | IsNotNull e -> IsNotNull(sub e)
+        | IsTrue e -> IsTrue(sub e)
+        | IsFalse e -> IsFalse(sub e)
+        | Distinct e -> Distinct(sub e)
+        | Cast(e, ty) -> Cast(sub e, ty)
+        | Like(e, p, cs) -> Like(sub e, sub p, cs)
+        | Regexp(e, p) -> Regexp(sub e, sub p)
+        | In(e, xs) -> In(sub e, xs |> List.map sub)
+        | Between(e, lo, hi) -> Between(sub e, sub lo, sub hi)
+        | Case(subject, whens, elseBranch) ->
+            Case(subject |> Option.map sub, whens |> List.map (fun (c, r) -> sub c, sub r), elseBranch |> Option.map sub)
+        // Every occurrence of a `RowNumberOver`/`LagOver` structurally equal
+        // to one `collectWindowFuncs` found is already handled by the
+        // lookup above; the only way one reaches here is if it isn't one of
+        // them, which can't happen given `runWindowedSelect` always builds
+        // `synthetic` from `collectWindowFuncs`'s own result — a leaf
+        // passthrough is the safe default regardless.
+        | Lit _
+        | Col _
+        | QualifiedCol _
+        | Star _
+        | RowNumberOver _
+        | LagOver _
+        | Exists _
+        | Subquery _
+        | InSubquery _ -> expr
 
 let private opSymbol =
     function
@@ -164,6 +244,7 @@ let rec private exprLabel (expr: Expr) : string =
     | Star None -> "*"
     | Star(Some q) -> sprintf "%s.*" q
     | RowNumberOver _ -> "row_number() over ()"
+    | LagOver(e, _, _, _) -> sprintf "lag(%s) over ()" (exprLabel e)
     | Exists _ -> "exists"
     | Subquery _ -> "(...)"
 
@@ -321,11 +402,13 @@ let rec private evalExpr (ctx: EvalContext) (expr: Expr) : Result<Value, EvalErr
     match expr with
     | Lit v -> Ok v
     | Star _ -> Error(1054, "Invalid use of '*'")
-    // Only reachable if a `RowNumberOver` ever escapes `runWindowedSelect`'s
-    // rewrite (which replaces every top-level one with a plain `Col`
-    // reference before any of this runs) — e.g. nested inside another
-    // expression, which real MySQL itself rejects for a window function.
-    | RowNumberOver _ -> Error(1054, "Invalid use of a group function")
+    // Only reachable if a `RowNumberOver`/`LagOver` ever escapes
+    // `runWindowedSelect`'s rewrite (which substitutes every occurrence,
+    // wherever it's nested, for a plain `Col` reference before any of this
+    // runs) — real MySQL itself rejects a window function outside a
+    // `SELECT`'s own projection/`ORDER BY` list the same way.
+    | RowNumberOver _
+    | LagOver _ -> Error(1054, "Invalid use of a group function")
     | Col name -> resolveCol ctx name
     | QualifiedCol(table, col) -> resolveQualifiedCol ctx table col
     | Not e -> eval e |> Result.map (fun v -> truthy v |> Option.map (not >> boolToValue) |> Option.defaultValue VNull)
@@ -1072,13 +1155,14 @@ and private rewriteAggregates
     | Col _
     | QualifiedCol _
     | Star _
-    // `RowNumberOver` never reaches a grouped SELECT — `runSelect` sends
-    // any `RowNumberOver` projection to `runWindowedSelect` before the
-    // GROUP BY/aggregate check that would otherwise land here even gets
+    // A `RowNumberOver`/`LagOver` never reaches a grouped SELECT —
+    // `runSelect` sends any select with one to `runWindowedSelect` before
+    // the GROUP BY/aggregate check that would otherwise land here even gets
     // evaluated (see `runSelect`'s dispatch) — but a leaf passthrough here
     // is the same "nothing to pre-evaluate" answer `Star`'s already is if
     // that ever changes.
     | RowNumberOver _
+    | LagOver _
     // A subquery is its own scope with its own grouping — nothing inside it
     // is one of *this* query's aggregate calls to pre-evaluate, even though
     // (via `EvalContext.Outer`) it can still read this query's columns.
@@ -1172,6 +1256,7 @@ and private resolveHavingRef (columnIndex: Map<string, int list>) (projections: 
     | QualifiedCol _
     | Star _
     | RowNumberOver _
+    | LagOver _
     // A subquery is its own scope — nothing inside it can be *this*
     // query's projection alias.
     | Exists _
@@ -1343,17 +1428,21 @@ and private runGroupedSelect
                     let limited = dedupedPaired |> applyLimitOffset select.Limit select.Offset
                     ResultSet(colNames, limited |> List.map fst), types, limited |> List.map snd
 
-/// `SELECT ..., ROW_NUMBER() OVER (PARTITION BY p ORDER BY o) [AS alias]
-/// FROM ...` (see `Ast.Expr.RowNumberOver`'s doc) — computed once here,
-/// against the WHERE-filtered rows (real MySQL computes a window function
-/// after `WHERE`, before `SELECT`/`ORDER BY`/`LIMIT`), then handed back to
-/// the ordinary (non-windowed) `runSelect` path as one more real column: a
-/// synthetic trailing `ColumnDef` appended to `columns`/each row, with
-/// every projection's `Star`/`RowNumberOver` rewritten into plain `Col`
-/// references first — expanding `Star` explicitly here (rather than
-/// leaving it for `runSelect`'s own `Star` handling) keeps the synthetic
-/// column out of a bare `SELECT *`'s expansion, so it shows up only where
-/// `RowNumberOver` itself was written.
+/// `SELECT ..., ROW_NUMBER() OVER (...) | LAG(expr) OVER (...) [AS alias],
+/// ... FROM ...` (see `Ast.Expr.RowNumberOver`/`LagOver`'s docs) — every
+/// distinct window function `collectWindowFuncs` finds anywhere among the
+/// projections is computed once here, against the WHERE-filtered rows (real
+/// MySQL computes a window function after `WHERE`, before
+/// `SELECT`/`ORDER BY`/`LIMIT`), then handed back to the ordinary
+/// (non-windowed) `runSelect` path as one more real column each: a
+/// synthetic trailing `ColumnDef` per window function, appended to
+/// `columns`/each row, with every projection's `Star` expanded and every
+/// window-function occurrence (bare, or nested inside arithmetic/`CASE`/...)
+/// substituted for the matching synthetic `Col` reference — expanding `Star`
+/// explicitly here (rather than leaving it for `runSelect`'s own `Star`
+/// handling) keeps the synthetic columns out of a bare `SELECT *`'s
+/// expansion, so they show up only where a window function itself was
+/// written.
 and private runWindowedSelect
     (store: Store)
     (registry: Registry)
@@ -1364,79 +1453,133 @@ and private runWindowedSelect
     (select: SelectStmt)
     (outer: EvalContext option)
     : QueryResult * byte list * Value[] list =
-    match select.Projections |> List.tryPick (fst >> function RowNumberOver(p, o) -> Some(p, o) | _ -> None) with
-    | None -> Err(1064, "runWindowedSelect called without a RowNumberOver projection"), [], []
-    | Some(partitionBy, windowOrderBy) ->
-        let columnIndex = columnIndexOf columns
+    let windowFuncs = select.Projections |> List.collect (fst >> collectWindowFuncs) |> List.distinct
 
-        let ctxFor = contextFactory store registry dbName columnIndex qualifiers outer
+    if windowFuncs.IsEmpty then
+        Err(1064, "runWindowedSelect called without a window-function projection"), [], []
+    else
 
-        let matches = whereMatches ctxFor select.Where
+    let columnIndex = columnIndexOf columns
+    let ctxFor = contextFactory store registry dbName columnIndex qualifiers outer
+    let matches = whereMatches ctxFor select.Where
 
-        let keyOf (exprs: Expr list) (row: Value[]) : Result<Value list, EvalError> =
-            exprs |> traverse (evalExpr (ctxFor row))
+    match rows |> traverse (fun row -> matches row |> Result.map (fun keep -> if keep then Some row else None)) with
+    | Error(code, message) -> Err(code, message), [], []
+    | Ok maybeMatched ->
+        let matched = maybeMatched |> List.choose id
 
-        match rows |> traverse (fun row -> matches row |> Result.map (fun keep -> if keep then Some row else None)) with
-        | Error(code, message) -> Err(code, message), [], []
-        | Ok maybeMatched ->
-            let matched = maybeMatched |> List.choose id
+        // One partitioned-and-ordered pass per distinct window function —
+        // grouping by partition key preserves each group's original
+        // relative order (`List.groupBy` is stable), which only matters as
+        // a tiebreak among rows the window's own ORDER BY doesn't otherwise
+        // distinguish.
+        let computeColumn (windowFunc: Expr) : Result<Value[], EvalError> =
+            let partitionBy, windowOrderBy =
+                match windowFunc with
+                | RowNumberOver(p, o) -> p, o
+                | LagOver(_, _, p, o) -> p, o
+                | _ -> [], []
 
-            let keyed =
-                matched
-                |> traverse (fun row ->
-                    keyOf partitionBy row
-                    |> Result.bind (fun partKey -> keyOf (windowOrderBy |> List.map fst) row |> Result.map (fun ordKey -> partKey, ordKey, row)))
+            let keyOf (exprs: Expr list) (row: Value[]) : Result<Value list, EvalError> =
+                exprs |> traverse (evalExpr (ctxFor row))
 
-            match keyed with
-            | Error(code, message) -> Err(code, message), [], []
-            | Ok keyed ->
-                // One row number per partition, 1-based, assigned in the
-                // window's own ORDER BY order — grouping by partition key
-                // preserves each group's original relative order (`List.groupBy`
-                // is stable), which only matters as a tiebreak among rows the
-                // window ORDER BY doesn't otherwise distinguish.
-                let rowNumberByIndex =
+            matched
+            |> traverse (fun row ->
+                keyOf partitionBy row
+                |> Result.bind (fun partKey -> keyOf (windowOrderBy |> List.map fst) row |> Result.map (fun ordKey -> partKey, ordKey, row)))
+            |> Result.bind (fun keyed ->
+                let partitions =
                     keyed
                     |> List.indexed
                     |> List.groupBy (fun (_, (partKey, _, _)) -> partKey)
-                    |> List.collect (fun (_, group) ->
+                    |> List.map (fun (_, group) ->
                         group
                         |> List.sortWith (fun (_, (_, ka, _)) (_, (_, kb, _)) -> compareByOrderKeys (windowOrderBy |> List.map snd) ka kb)
-                        |> List.mapi (fun rank (origIdx, _) -> origIdx, int64 (rank + 1)))
-                    |> Map.ofList
+                        |> Array.ofList)
 
-                let syntheticName = "__fsdb_row_number__"
+                match windowFunc with
+                | RowNumberOver _ ->
+                    partitions
+                    |> Array.ofList
+                    |> Array.collect (Array.mapi (fun rank (origIdx, _) -> origIdx, VInt(int64 (rank + 1))))
+                    |> Ok
+                | LagOver(lagExpr, offset, _, _) ->
+                    // `pos - offset` indexes back within the same
+                    // partition's ORDER BY-sorted rows; before the
+                    // partition's start (no such predecessor) is NULL, same
+                    // as real MySQL's `LAG`.
+                    partitions
+                    |> traverse (fun group ->
+                        group
+                        |> Array.mapi (fun pos (origIdx, _) ->
+                            let srcPos = pos - int offset
 
-                let syntheticColumn: ColumnDef =
-                    { Name = syntheticName
+                            if srcPos < 0 then
+                                Ok(origIdx, VNull)
+                            else
+                                let (_, (_, _, srcRow)) = group.[srcPos]
+                                evalExpr (ctxFor srcRow) lagExpr |> Result.map (fun v -> origIdx, v))
+                        |> Array.toList
+                        |> traverse id)
+                    |> Result.map (List.collect id >> Array.ofList)
+                | _ -> Ok [||])
+            |> Result.map (fun pairs ->
+                let byIndex = pairs |> Array.toList |> Map.ofList
+                matched |> List.mapi (fun i _ -> Map.find i byIndex) |> Array.ofList)
+
+        match windowFuncs |> traverse computeColumn with
+        | Error(code, message) -> Err(code, message), [], []
+        | Ok computedColumns ->
+            let synthetic =
+                windowFuncs |> List.mapi (fun i wf -> wf, sprintf "__fsdb_window_%d__" i)
+
+            let syntheticColumns =
+                synthetic
+                |> List.map (fun (wf, name) ->
+                    { Name = name
+                      // The row's actual `Value` (a real int for
+                      // `RowNumberOver`, `lagExpr`'s own runtime type for
+                      // `LagOver`) drives the wire type downstream (see
+                      // `columnTypesOf`), so this declared type is never
+                      // read for anything but `Nullable`.
                       Type = TBigInt false
-                      Nullable = false
+                      Nullable = (match wf with LagOver _ -> true | _ -> false)
                       Default = None
                       AutoIncrement = false
                       PrimaryKey = false
                       Unique = false
-                      Generated = None }
+                      Generated = None })
 
-                let extendedColumns = columns @ [ syntheticColumn ]
+            let extendedColumns = columns @ syntheticColumns
 
-                let extendedRows =
-                    matched
-                    |> List.mapi (fun idx row -> Array.append row [| VInt(Map.find idx rowNumberByIndex) |])
+            let extendedRows =
+                matched
+                |> List.mapi (fun idx row -> Array.append row (computedColumns |> List.map (fun col -> col.[idx]) |> Array.ofList))
 
-                let rewriteProjection (expr: Expr, aliasOpt: string option) : (Expr * string option) list =
-                    match expr with
-                    | RowNumberOver _ -> [ Col syntheticName, (aliasOpt |> Option.orElse (Some syntheticName)) ]
-                    | Star None -> columns |> List.map (fun c -> Col c.Name, None)
-                    | Star(Some qualifier) ->
-                        match Map.tryFind (qualifier.ToLowerInvariant()) qualifiers with
-                        | Some(cols, _) -> cols |> List.map (fun c -> Col c.Name, None)
-                        | None -> [ expr, aliasOpt ]
-                    | _ -> [ expr, aliasOpt ]
+            let rewriteProjection (expr: Expr, aliasOpt: string option) : (Expr * string option) list =
+                match expr with
+                | Star None -> columns |> List.map (fun c -> Col c.Name, None)
+                | Star(Some qualifier) ->
+                    match Map.tryFind (qualifier.ToLowerInvariant()) qualifiers with
+                    | Some(cols, _) -> cols |> List.map (fun c -> Col c.Name, None)
+                    | None -> [ expr, aliasOpt ]
+                | _ ->
+                    // A bare (unwrapped) window-function projection with no
+                    // explicit alias defaults its label to the synthetic
+                    // column's own name, same as before generalizing this
+                    // to arbitrary nesting — anything wrapping one falls
+                    // through to `runSelect`'s ordinary unaliased-label
+                    // handling instead.
+                    let alias =
+                        aliasOpt
+                        |> Option.orElse (synthetic |> List.tryFind (fun (wf, _) -> wf = expr) |> Option.map snd)
 
-                let select' =
-                    { select with Projections = select.Projections |> List.collect rewriteProjection }
+                    [ substituteWindowFuncs synthetic expr, alias ]
 
-                runSelect store registry dbName extendedColumns qualifiers extendedRows select' outer
+            let select' =
+                { select with Projections = select.Projections |> List.collect rewriteProjection }
+
+            runSelect store registry dbName extendedColumns qualifiers extendedRows select' outer
 
 and private runSelect
     (store: Store)
@@ -1457,7 +1600,7 @@ and private runSelect
     // packet and aborts the client's whole session.
     if select.From.IsNone && projections |> List.exists (fst >> function Star _ -> true | _ -> false) then
         Err(1096, "No tables used"), [], []
-    elif projections |> List.exists (fst >> function RowNumberOver _ -> true | _ -> false) then
+    elif projections |> List.exists (fst >> collectWindowFuncs >> List.isEmpty >> not) then
         runWindowedSelect store registry dbName columns qualifiers rows select outer
     elif
         not select.GroupBy.IsEmpty
@@ -1740,6 +1883,7 @@ let rec private substituteValuesFunc (columnIndex: Map<string, int list>) (candi
     | QualifiedCol _
     | Star _
     | RowNumberOver _
+    | LagOver _
     // `VALUES(col)` only ever occurs directly in an `ON DUPLICATE KEY
     // UPDATE` assignment, never inside a subquery's own text — nothing to
     // substitute inside one, so it's left as-is like `Exists` always was.
@@ -1801,7 +1945,8 @@ let rec private collectSubqueries (expr: Expr) : SelectStmt list =
     | Col _
     | QualifiedCol _
     | Star _
-    | RowNumberOver _ -> []
+    | RowNumberOver _
+    | LagOver _ -> []
 
 /// Whether `expr` contains a subquery form (`Exists`/`Subquery`/
 /// `InSubquery`) anywhere inside it — the same walk `collectSubqueries`
@@ -1861,7 +2006,8 @@ let private isCorrelated (sub: SelectStmt) : bool =
         | Lit _
         | Col _
         | Star _
-        | RowNumberOver _ -> false
+        | RowNumberOver _
+        | LagOver _ -> false
 
     let exprs =
         (sub.Projections |> List.map fst)

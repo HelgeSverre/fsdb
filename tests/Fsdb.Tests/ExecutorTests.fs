@@ -1997,4 +1997,57 @@ let tests =
                             rows
                             [ [ Some "1"; Some "2"; Some "newest"; Some "1" ]; [ Some "2"; Some "1"; Some "only"; Some "1" ] ]
                             "only the latest message per session survives"
-                    | other -> failtestf "expected one row per session, got %A" other ] ]
+                    | other -> failtestf "expected one row per session, got %A" other ]
+
+          testList
+              "LAG(expr) OVER (PARTITION BY ... ORDER BY ...)"
+              [ testCase "yields the previous row's value per partition, NULL for the first"
+                <| fun _ ->
+                    let store = newStore ()
+                    runDefault store "CREATE TABLE readings (sensor VARCHAR(10), created_at INT, value INT)" |> ignore
+
+                    runDefault
+                        store
+                        "INSERT INTO readings VALUES ('a', 1, 10), ('a', 2, 14), ('a', 3, 9), ('b', 1, 100)"
+                    |> ignore
+
+                    match
+                        runDefault
+                            store
+                            "SELECT sensor, value, LAG(value) OVER (PARTITION BY sensor ORDER BY created_at) AS prev FROM readings ORDER BY sensor, created_at"
+                    with
+                    | ResultSet([ "sensor"; "value"; "prev" ], rows) ->
+                        Expect.equal
+                            rows
+                            [ [ Some "a"; Some "10"; None ]
+                              [ Some "a"; Some "14"; Some "10" ]
+                              [ Some "a"; Some "9"; Some "14" ]
+                              [ Some "b"; Some "100"; None ] ]
+                            "each partition's first row has no predecessor, later rows see the prior one"
+                    | other -> failtestf "expected lagged values, got %A" other
+
+                testCase "usable nested inside arithmetic, not just as a bare projection"
+                <| fun _ ->
+                    let store = newStore ()
+                    runDefault store "CREATE TABLE readings (sensor VARCHAR(10), created_at INT, value INT)" |> ignore
+                    runDefault store "INSERT INTO readings VALUES ('a', 1, 10), ('a', 2, 14)" |> ignore
+
+                    match
+                        runDefault
+                            store
+                            "SELECT value, value - LAG(value) OVER (PARTITION BY sensor ORDER BY created_at) AS diff FROM readings ORDER BY created_at"
+                    with
+                    | ResultSet([ "value"; "diff" ], [ [ Some "10"; None ]; [ Some "14"; Some "4" ] ]) -> ()
+                    | other -> failtestf "expected value - LAG(value) computed per row, got %A" other
+
+                testCase "an explicit offset skips back that many rows within the partition"
+                <| fun _ ->
+                    let store = newStore ()
+                    runDefault store "CREATE TABLE readings (created_at INT, value INT)" |> ignore
+                    runDefault store "INSERT INTO readings VALUES (1, 10), (2, 20), (3, 30)" |> ignore
+
+                    match
+                        runDefault store "SELECT value, LAG(value, 2) OVER (ORDER BY created_at) AS prev2 FROM readings ORDER BY created_at"
+                    with
+                    | ResultSet([ "value"; "prev2" ], [ [ Some "10"; None ]; [ Some "20"; None ]; [ Some "30"; Some "10" ] ]) -> ()
+                    | other -> failtestf "expected offset-2 lag, got %A" other ] ]

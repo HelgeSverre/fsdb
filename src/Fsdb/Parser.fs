@@ -343,27 +343,44 @@ let private groupConcatAtom: Parser<Expr, unit> =
         let argExpr = if distinctOpt.IsSome then Distinct arg else arg
         FuncCall("GROUP_CONCAT", argExpr :: (sepOpt |> Option.toList))
 
-/// `ROW_NUMBER() OVER (PARTITION BY expr, ... ORDER BY expr [ASC|DESC], ...)`
-/// — see `Ast.Expr.RowNumberOver`'s doc. Written out here rather than
-/// reusing the later `orderKey` parser (which needs `Asc`/`Desc`'s default
-/// already applied) since `orderKey` isn't defined until after `atom`;
-/// duplicating its two-line direction-defaulting logic is cheaper than
-/// reordering the file to hoist it.
-let private rowNumberOverAtom: Parser<Expr, unit> =
-    attempt (keyword "ROW_NUMBER" >>. sym "(" >>. sym ")" >>. keyword "OVER" >>. sym "(")
-    >>. opt (keyword "PARTITION" >>. keyword "BY" >>. sepBy1 expr (sym ","))
+/// The `PARTITION BY expr, ... ORDER BY expr [ASC|DESC], ...` body shared by
+/// every `OVER (...)` clause below. Written out here rather than reusing the
+/// later `orderKey` parser (which needs `Asc`/`Desc`'s default already
+/// applied) since `orderKey` isn't defined until after `atom`; duplicating
+/// its two-line direction-defaulting logic is cheaper than reordering the
+/// file to hoist it.
+let private windowClause: Parser<Expr list * OrderKey list, unit> =
+    opt (keyword "PARTITION" >>. keyword "BY" >>. sepBy1 expr (sym ","))
     .>>. opt (
         keyword "ORDER" >>. keyword "BY"
         >>. sepBy1 (expr .>>. opt ((keyword "ASC" >>% Asc) <|> (keyword "DESC" >>% Desc))) (sym ",")
     )
-    .>> sym ")"
     |>> fun (partitionBy, orderBy) ->
         let orderBy =
             orderBy
             |> Option.defaultValue []
             |> List.map (fun (e, dir) -> e, dir |> Option.defaultValue Asc)
 
-        RowNumberOver(partitionBy |> Option.defaultValue [], orderBy)
+        partitionBy |> Option.defaultValue [], orderBy
+
+/// `ROW_NUMBER() OVER (...)` — see `Ast.Expr.RowNumberOver`'s doc.
+let private rowNumberOverAtom: Parser<Expr, unit> =
+    attempt (keyword "ROW_NUMBER" >>. sym "(" >>. sym ")" >>. keyword "OVER" >>. sym "(")
+    >>. windowClause
+    .>> sym ")"
+    |>> RowNumberOver
+
+/// `LAG(expr[, offset]) OVER (...)` — see `Ast.Expr.LagOver`'s doc.
+let private lagOverAtom: Parser<Expr, unit> =
+    attempt (keyword "LAG" >>. sym "(") >>. expr
+    .>>. opt (sym "," >>. intTok)
+    .>> sym ")"
+    .>> keyword "OVER"
+    .>> sym "("
+    .>>. windowClause
+    .>> sym ")"
+    |>> fun ((lagExpr, offsetOpt), (partitionBy, orderBy)) ->
+        LagOver(lagExpr, offsetOpt |> Option.map int64 |> Option.defaultValue 1L, partitionBy, orderBy)
 
 /// `CAST(expr AS type)` — `SIGNED`/`UNSIGNED [INTEGER]` are only valid as a
 /// cast target, not a column type, so they're handled here rather than in
@@ -460,6 +477,7 @@ let private atom: Parser<Expr, unit> =
           timestampFuncAtom
           groupConcatAtom
           rowNumberOverAtom
+          lagOverAtom
           numberLit |>> Lit
           stringLit |>> Lit
           keyword "NULL" >>% Lit VNull

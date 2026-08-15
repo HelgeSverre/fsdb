@@ -93,9 +93,17 @@ type Expr =
     /// the one window-function shape Laravel's constrained eager loading
     /// compiles a relation query's `->limit()` into (e.g. `->with(['messages'
     /// => fn ($q) => $q->orderBy('created_at', 'desc')->limit(1)])`).
-    /// ponytail: only `ROW_NUMBER`, no `RANK`/`LAG`/`LEAD`/frame clauses, no
-    /// other window functions — add them if a migration's query needs one.
     | RowNumberOver of partitionBy: Expr list * orderBy: OrderKey list
+    /// `LAG(expr[, offset]) OVER (PARTITION BY expr, ... ORDER BY expr, ...)`
+    /// — the value of `expr` `offset` rows back (default 1) within the same
+    /// partition, ordered by the window's own `ORDER BY`; `NULL` for a row
+    /// with no such predecessor. Unlike `RowNumberOver`, this can sit
+    /// anywhere inside a larger expression (`value - LAG(value) OVER (...)`
+    /// is a real report query), so `Executor` finds and substitutes every
+    /// occurrence rather than only a bare top-level projection.
+    /// ponytail: only `LAG`, no `LEAD`/`RANK`/frame clauses — add them if a
+    /// migration's query needs one.
+    | LagOver of expr: Expr * offset: int64 * partitionBy: Expr list * orderBy: OrderKey list
     /// Marks `DISTINCT expr` as an aggregate call's argument (`COUNT(DISTINCT
     /// x)`, `SUM(DISTINCT x)`, ...) — only meaningful as the (unwrapped) sole
     /// argument of a `FuncCall` the executor recognizes as an aggregate;

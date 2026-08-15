@@ -899,6 +899,26 @@ let tests =
                     | other -> failtestf "expected an empty partition/order spec, got %A" other ]
 
           testList
+              "LAG(expr[, offset]) OVER (...)"
+              [ testCase "no explicit offset defaults to 1"
+                <| fun _ ->
+                    match parseOk "SELECT LAG(value) OVER (PARTITION BY a ORDER BY b) AS prev FROM t" with
+                    | Select { Projections = [ LagOver(Col "value", 1L, [ Col "a" ], [ Col "b", Asc ]), Some "prev" ] } -> ()
+                    | other -> failtestf "expected a LagOver projection with offset 1, got %A" other
+
+                testCase "an explicit offset is parsed through"
+                <| fun _ ->
+                    match parseOk "SELECT LAG(value, 2) OVER (ORDER BY b) FROM t" with
+                    | Select { Projections = [ LagOver(Col "value", 2L, [], [ Col "b", Asc ]), None ] } -> ()
+                    | other -> failtestf "expected offset 2, got %A" other
+
+                testCase "usable nested inside arithmetic"
+                <| fun _ ->
+                    match parseOk "SELECT value - LAG(value) OVER (ORDER BY b) AS diff FROM t" with
+                    | Select { Projections = [ BinOp(Sub, Col "value", LagOver(Col "value", 1L, [], [ Col "b", Asc ])), Some "diff" ] } -> ()
+                    | other -> failtestf "expected LagOver nested in a BinOp, got %A" other ]
+
+          testList
               "UPDATE / DELETE"
               [ testCase "UPDATE t SET a=expr, b=expr WHERE ..."
                 <| fun _ ->
