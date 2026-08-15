@@ -292,6 +292,21 @@ let tests =
                       testCase "DATE_ADD/DATE_SUB propagate NULL"
                       <| fun _ -> Expect.equal (call "DATE_ADD" [ VNull; VString "1 DAY" ]) VNull "null date"
 
+                      testCase "DATE_ADD on a date-only VString stays a date, not a midnight datetime"
+                      <| fun _ ->
+                          // The parser never types a SQL string literal as
+                          // `VDate` — `DATE_ADD('2024-01-15', INTERVAL 10
+                          // DAY)` still has to answer with a plain date.
+                          Expect.equal
+                              (call "DATE_ADD" [ VString "2024-01-15"; call "INTERVAL" [ VInt 10L; VString "DAY" ] ])
+                              (VDate(DateOnly(2024, 1, 25)))
+                              "date-only string stays a date"
+
+                          Expect.equal
+                              (call "DATE_ADD" [ VString "2024-01-15 10:00:00"; call "INTERVAL" [ VInt 1L; VString "HOUR" ] ])
+                              (VDateTime(DateTime(2024, 1, 15, 11, 0, 0)))
+                              "a time-bearing string still becomes a datetime"
+
                       testCase "DATEDIFF counts whole days, ignoring time"
                       <| fun _ ->
                           Expect.equal

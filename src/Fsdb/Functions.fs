@@ -654,14 +654,20 @@ let private tryParseIntervalArg (v: Value) : (float * string) option =
             None
     | _ -> None
 
-let private isVDate =
-    function
+/// Whether `v` names a date with no time-of-day component — a real `VDate`,
+/// or (MySQL doesn't type its string literals, so `DATE_ADD('2024-01-15',
+/// INTERVAL 1 DAY)` is still expected to answer with a plain date, not a
+/// midnight datetime) a `VString` that doesn't itself look like it carries
+/// a time part.
+let private looksDateOnly (v: Value) : bool =
+    match v with
     | VDate _ -> true
+    | VString s -> not (s.Contains ':')
     | _ -> false
 
 let private applyDateInterval (sign: float) (dateV: Value) (dt: DateTime) (amount: float) (unit: string) : Value =
     let result = addInterval dt (sign * amount) unit
-    if isVDate dateV && dateOnlyUnits.Contains(unit.ToUpperInvariant()) then
+    if looksDateOnly dateV && dateOnlyUnits.Contains(unit.ToUpperInvariant()) then
         VDate(DateOnly.FromDateTime result)
     else
         VDateTime result
