@@ -15,6 +15,11 @@ let private parsePort (argv: string[]) : int =
         | false, _ -> None)
     |> Option.defaultValue 3307
 
+/// `--data-dir PATH` opts into durability (M7) — `Db.withDataDir` loads
+/// whatever's already there and keeps writing to it. No flag = today's pure
+/// in-memory behavior, unchanged.
+let private parseDataDir (argv: string[]) : string option = argValue "--data-dir" argv
+
 /// --listen takes an IP address ("0.0.0.0", "::"), with "localhost" as the
 /// one spelled-out convenience. Defaults to loopback.
 let private parseListenAddress (argv: string[]) : IPAddress option =
@@ -34,6 +39,14 @@ let main argv =
         1
     | Some address ->
         let port = parsePort argv
+
+        let db =
+            match parseDataDir argv with
+            | Some dataDir ->
+                printfn "fsdb: durability on, data-dir %s" dataDir
+                Db.create () |> Db.withDataDir dataDir
+            | None -> Db.create ()
+
         printfn "fsdb listening on %O:%d" address port
-        Db.create () |> Db.listen address port |> Async.RunSynchronously
+        db |> Db.listen address port |> Async.RunSynchronously
         0
