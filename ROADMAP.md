@@ -49,7 +49,17 @@ Opt-in durability via `--data-dir`: WAL + snapshot, replay on startup.
 Default stays pure in-memory (tests unchanged).
 **Gate:** with --data-dir: `artisan migrate`, restart fsdb, `migrate` says
 "Nothing to migrate"; plus kill -9 mid-write leaves committed data intact
-and replayable. Status: ☐
+and replayable. Status: ✅ (fresh `--data-dir` on 3424: create+insert incl.
+`NOW()`/`UUID()`, `kill -9`, restart — identical `SELECT`; graceful
+SIGTERM, restart — intact. Fresh `--data-dir` on 3307: chatflow's full 94
+migrations via `artisan migrate --force`, graceful restart, `migrate`
+again — "Nothing to migrate". WAL replay hardened along the way: a torn
+final line no longer poisons future appends, `RowsUpdated`/`RowsDeleted`
+replay no longer cascades or over-applies on duplicate-valued rows, replay
+no longer re-validates FK checks a `SET FOREIGN_KEY_CHECKS=0` write
+deliberately skipped, `snapshotNow` is crash-safe and fsynced, a failed WAL
+append is fatal instead of silently diverging, `GENERATED` column
+expressions survive a restart)
 
 ## M8 — EXPLAIN + semantics cleanups
 EXPLAIN (tabular; reports the executor's actual full-scan behavior, no fake
@@ -57,4 +67,20 @@ index usage), multi-table UPDATE/DELETE with JOINs, UPDATE/DELETE ORDER
 BY+LIMIT (currently parsed but ignored), AFTER/FIRST column positioning.
 **Gate:** EXPLAIN on join/subquery queries via mysql CLI; UPDATE/DELETE JOIN
 semantics differential-verified against real MySQL 8 (Docker oracle);
-chatflow suite still at exact parity. Status: ☐
+chatflow suite still at exact parity. Status: ✅ (EXPLAIN on a join+correlated-subquery
+query renders correctly via the mysql CLI and now validates the statement
+it describes — 1146/1054 for a missing table/column instead of a fake
+plan; UPDATE JOIN / DELETE JOIN / `UPDATE ... ORDER BY ... LIMIT` /
+`DELETE ... ORDER BY ... LIMIT` smoke-verified over the wire, including a
+self-join `UPDATE` that used to silently drop one alias's writes and a
+cross-table constraint violation that used to leave the earlier table's
+rows mutated — both fixed and statement-atomic now; `SET a = x, b = a`
+evaluates left-to-right, matching MySQL; comma (implicit-join) `FROM`
+lists now parse for `SELECT`/`UPDATE`/`DELETE` alike. Differential
+comparisons against real MySQL 8.4 for the fixes above came from the
+review that found them, not a Docker oracle run in this pass. Chatflow's
+full `vendor/bin/pest tests --no-coverage --compact` (in-memory, no
+data-dir): 288 passed/15 skipped/2 todos/0 failed, 792 assertions — 0
+failures either way, one more test (and 5 more assertions) than the M5
+baseline's 287/787, which tracks chatflow's own migrations/tests having
+grown since that baseline was recorded, not a regression here)
