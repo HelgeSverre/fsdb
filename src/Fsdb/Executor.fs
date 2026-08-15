@@ -79,7 +79,7 @@ let rec private containsAggregate (registry: Registry) (expr: Expr) : bool =
     | Lit _
     | Col _
     | QualifiedCol _
-    | Star
+    | Star _
     // A subquery's own aggregates belong to *its* grouping, not the query
     // this expression sits in — `containsAggregate` only asks whether
     // `runSelect` needs to switch itself onto the grouped path, so these
@@ -129,7 +129,8 @@ let rec private exprLabel (expr: Expr) : string =
     | Cast(e, _) -> sprintf "cast(%s as ...)" (exprLabel e)
     | Distinct e -> sprintf "distinct %s" (exprLabel e)
     | Case _ -> "case"
-    | Star -> "*"
+    | Star None -> "*"
+    | Star(Some q) -> sprintf "%s.*" q
     | Exists _ -> "exists"
     | Subquery _ -> "(...)"
 
@@ -230,6 +231,20 @@ let rec private resolveQualifiedCol (ctx: EvalContext) (table: string) (col: str
         | Some parent -> resolveQualifiedCol parent table col
         | None -> Error(unknownColumn (sprintf "%s.%s" table col))
 
+/// `Star(Some qualifier)` (`t.*`) resolution — same shape as
+/// `resolveQualifiedCol`, but hands back every one of that qualifier's own
+/// `(name, value)` pairs instead of a single column, so a `JOIN`'s `t.*`
+/// expands to just `t`'s own columns rather than every joined table's
+/// columns concatenated (which is what `evalProjection`'s unqualified
+/// `Star None` case still means).
+let rec private resolveStarQualifier (ctx: EvalContext) (qualifier: string) : Result<(string * Value) list, EvalError> =
+    match Map.tryFind (qualifier.ToLowerInvariant()) ctx.Qualifiers with
+    | Some(cols, offset) -> Ok(cols |> List.mapi (fun i c -> c.Name, ctx.Row.[offset + i]))
+    | None ->
+        match ctx.Outer with
+        | Some parent -> resolveStarQualifier parent qualifier
+        | None -> Error(unknownColumn (sprintf "%s.*" qualifier))
+
 /// Evaluates one expression against one row. Three-valued logic throughout
 /// (comparisons/AND/OR/NOT return `VNull` — SQL's "unknown" — rather than a
 /// boolean whenever an operand is `VNull`, per `Value`'s helpers), function
@@ -240,7 +255,7 @@ let rec private evalExpr (ctx: EvalContext) (expr: Expr) : Result<Value, EvalErr
 
     match expr with
     | Lit v -> Ok v
-    | Star -> Error(1054, "Invalid use of '*'")
+    | Star _ -> Error(1054, "Invalid use of '*'")
     | Col name -> resolveCol ctx name
     | QualifiedCol(table, col) -> resolveQualifiedCol ctx table col
     | Not e -> eval e |> Result.map (fun v -> truthy v |> Option.map (not >> boolToValue) |> Option.defaultValue VNull)
@@ -718,7 +733,8 @@ and runUnionStmt
 /// *` expands to every column of the row.
 and private evalProjection (ctx: EvalContext) (columns: ColumnDef list) (proj: Projection) : Result<(string * Value) list, EvalError> =
     match proj with
-    | Star, _ -> Ok(columns |> List.mapi (fun i c -> c.Name, ctx.Row.[i]))
+    | Star None, _ -> Ok(columns |> List.mapi (fun i c -> c.Name, ctx.Row.[i]))
+    | Star(Some qualifier), _ -> resolveStarQualifier ctx qualifier
     | expr, aliasOpt ->
         evalExpr ctx expr
         |> Result.map (fun v -> [ aliasOpt |> Option.defaultValue (exprLabel expr), v ])
@@ -761,7 +777,7 @@ and private evalAggregate
         rows |> traverse (fun row -> evalExpr (ctxFor row) expr) |> Result.map (List.filter (function VNull -> false | _ -> true))
 
     match args with
-    | [ Star ] when isCount -> Ok(VInt(int64 (List.length rows)))
+    | [ Star _ ] when isCount -> Ok(VInt(int64 (List.length rows)))
     | arg :: rest when isGroupConcat ->
         // `GROUP_CONCAT` folds entirely here rather than through
         // `registry.Aggregates` — see `isAggregateCall`'s doc.
@@ -840,7 +856,7 @@ and private rewriteAggregates
     | Lit _
     | Col _
     | QualifiedCol _
-    | Star
+    | Star _
     // A subquery is its own scope with its own grouping — nothing inside it
     // is one of *this* query's aggregate calls to pre-evaluate, even though
     // (via `EvalContext.Outer`) it can still read this query's columns.
@@ -914,7 +930,8 @@ and private runGroupedSelect
         select.Projections
         |> traverse (fun (expr, aliasOpt) ->
             match expr with
-            | Star -> Ok(columns |> List.mapi (fun i c -> c.Name, representative.[i]))
+            | Star None -> Ok(columns |> List.mapi (fun i c -> c.Name, representative.[i]))
+            | Star(Some qualifier) -> resolveStarQualifier (ctxFor representative) qualifier
             | _ ->
                 rewriteAggregates registry ctxFor groupRows expr
                 |> Result.bind (evalExpr (ctxFor representative))
@@ -1018,7 +1035,7 @@ and private runSelect
     // against — real MySQL rejects it as 1096 rather than emitting a
     // resultset with zero columns, which isn't a legal text-resultset
     // packet and aborts the client's whole session.
-    if select.From.IsNone && projections |> List.exists (fst >> (=) Star) then
+    if select.From.IsNone && projections |> List.exists (fst >> function Star _ -> true | _ -> false) then
         Err(1096, "No tables used"), []
     elif
         not select.GroupBy.IsEmpty
@@ -1257,7 +1274,7 @@ let rec private substituteValuesFunc (columnIndex: Map<string, int>) (candidate:
     | Lit _
     | Col _
     | QualifiedCol _
-    | Star
+    | Star _
     // `VALUES(col)` only ever occurs directly in an `ON DUPLICATE KEY
     // UPDATE` assignment, never inside a subquery's own text — nothing to
     // substitute inside one, so it's left as-is like `Exists` always was.

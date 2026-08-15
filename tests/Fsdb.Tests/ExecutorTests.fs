@@ -811,7 +811,35 @@ let tests =
                             rows
                             [ [ Some "1"; Some "10" ]; [ Some "1"; Some "20" ]; [ Some "2"; Some "10" ]; [ Some "2"; Some "20" ] ]
                             "every combination"
-                    | other -> failtestf "expected a 2x2 Cartesian product, got %A" other ]
+                    | other -> failtestf "expected a 2x2 Cartesian product, got %A" other
+
+                testCase "qualified t.* in a JOIN expands only that table's own columns, not every joined column"
+                <| fun _ ->
+                    // Regression: `Ast.Expr.Star` used to drop the
+                    // qualifier entirely, so `teams.*` in a JOIN expanded to
+                    // *every* joined table's columns concatenated — with
+                    // `teams`/`team_user` both having their own `id` column,
+                    // `team_user.id` (whatever the join happened to append
+                    // last) silently won over `teams.id` once the row was
+                    // read back by name (this is exactly the shape of a
+                    // Laravel `belongsToMany` pivot query: `SELECT teams.*,
+                    // team_user.role AS pivot_role FROM teams JOIN
+                    // team_user ...`).
+                    let store = newStore ()
+                    runDefault store "CREATE TABLE teams (id INT, name VARCHAR(10))" |> ignore
+                    runDefault store "CREATE TABLE team_user (id INT, team_id INT, role VARCHAR(10))" |> ignore
+                    runDefault store "INSERT INTO teams VALUES (1, 'acme')" |> ignore
+                    // team_user's own id (99) collides with no team id, but
+                    // would still shadow teams.id under the old bug.
+                    runDefault store "INSERT INTO team_user VALUES (99, 1, 'admin')" |> ignore
+
+                    match
+                        runDefault
+                            store
+                            "SELECT teams.*, team_user.role AS pivot_role FROM teams JOIN team_user ON teams.id = team_user.team_id"
+                    with
+                    | ResultSet([ "id"; "name"; "pivot_role" ], [ [ Some "1"; Some "acme"; Some "admin" ] ]) -> ()
+                    | other -> failtestf "expected teams' own id (1), not team_user's (99), got %A" other ]
 
           testList
               "real GROUP BY / HAVING / grouped aggregates"

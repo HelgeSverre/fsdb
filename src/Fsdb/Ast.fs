@@ -99,8 +99,12 @@ type Expr =
     /// separate cast-target vocabulary, coerced the same way a column of
     /// that type would be (see `Storage.coerceValue`).
     | Cast of Expr * ColumnType
-    /// `SELECT *` / `SELECT t.*`.
-    | Star
+    /// `SELECT *` (`None`) / `SELECT t.*` (`Some "t"`) — the qualifier
+    /// matters once there's a `JOIN` in scope: `Executor.evalProjection`
+    /// expands `t.*` to just `t`'s own columns via `EvalContext.Qualifiers`,
+    /// not every joined table's columns concatenated (which is what an
+    /// unqualified `*` still means, `FROM`-order, joins included).
+    | Star of string option
     /// `EXISTS (SELECT ...)` — true iff the subquery returns at least one
     /// row.
     | Exists of SelectStmt

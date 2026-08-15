@@ -296,7 +296,7 @@ let private selectStmtRecord, selectStmtRecordRef = createParserForwardedToRef<S
 
 let private parenExpr: Parser<Expr, unit> = between (sym "(") (sym ")") expr
 
-let private starAtom: Parser<Expr, unit> = pstring "*" >>. ws >>% Star
+let private starAtom: Parser<Expr, unit> = pstring "*" >>. ws >>% Star None
 
 /// `DISTINCT expr` inside a function call's argument list (`COUNT(DISTINCT
 /// x)`, `SUM(DISTINCT x)`, ...) — only meaningful for an aggregate, but
@@ -386,16 +386,17 @@ let private caseExpr: Parser<Expr, unit> =
     )
     |>> fun ((subject, whens), elseBranch) -> Case(subject, whens, elseBranch)
 
-/// A bare word: a column, a qualified `t.col` (or `t.*`, which is `Star` —
-/// `Ast.Expr` doesn't distinguish it from an unqualified `*`), or a function
-/// call if followed by `(args)` (handled by `funcCallAtom` above, tried
-/// first so a reserved-word function name still parses).
+/// A bare word: a column, a qualified `t.col` (or `t.*`, `Star(Some "t")`),
+/// or a function call if followed by `(args)` (handled by `funcCallAtom`
+/// above, tried first so a reserved-word function name still parses).
 let private identAtom: Parser<Expr, unit> =
     funcCallAtom
     <|> (identifier
          >>= fun name ->
              choice
-                 [ sym "." >>. (starAtom <|> (identifier |>> fun col -> QualifiedCol(name, col)))
+                 [ sym "."
+                   >>. ((pstring "*" >>. ws >>% Star(Some name))
+                        <|> (identifier |>> fun col -> QualifiedCol(name, col)))
                    preturn (Col name) ])
 
 let private atom: Parser<Expr, unit> =

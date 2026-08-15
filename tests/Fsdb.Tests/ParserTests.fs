@@ -44,7 +44,7 @@ let tests =
                 <| fun _ ->
                     Expect.equal
                         (parseOk "SELECT * FROM t")
-                        (mkSelect([ Star, None ], Some "t", None, [], None, None))
+                        (mkSelect([ Star None, None ], Some "t", None, [], None, None))
                         "select star"
 
                 testCase "SELECT DISTINCT col FROM t sets Distinct"
@@ -58,7 +58,7 @@ let tests =
                     Expect.equal
                         (parseOk "SELECT * FROM information_schema.tables AS t")
                         (Select
-                            { Projections = [ Star, None ]
+                            { Projections = [ Star None, None ]
                               Distinct = false
                               From = Some(FromTable { Database = Some "information_schema"; Table = "tables"; Alias = Some "t" })
                               Joins = []
@@ -76,7 +76,7 @@ let tests =
                     Expect.equal
                         (parseOk "SELECT * FROM t x")
                         (Select
-                            { Projections = [ Star, None ]
+                            { Projections = [ Star None, None ]
                               Distinct = false
                               From = Some(FromTable { Database = None; Table = "t"; Alias = Some "x" })
                               Joins = []
@@ -112,18 +112,18 @@ let tests =
                         ))
                         "projections"
 
-                testCase "SELECT t.* is Star"
+                testCase "SELECT t.* is Star(Some \"t\")"
                 <| fun _ ->
                     Expect.equal
                         (parseOk "SELECT t.* FROM t")
-                        (mkSelect([ Star, None ], Some "t", None, [], None, None))
+                        (mkSelect([ Star(Some "t"), None ], Some "t", None, [], None, None))
                         "qualified star"
 
                 testCase "COUNT(*) shape"
                 <| fun _ ->
                     Expect.equal
                         (parseOk "SELECT COUNT(*) FROM t")
-                        (mkSelect([ FuncCall("COUNT", [ Star ]), None ], Some "t", None, [], None, None))
+                        (mkSelect([ FuncCall("COUNT", [ Star None ]), None ], Some "t", None, [], None, None))
                         "count star"
 
                 testCase "function call with multiple args and no args"
@@ -151,35 +151,35 @@ let tests =
                 <| fun _ ->
                     Expect.equal
                         (parseOk "SELECT * FROM t WHERE a = 1")
-                        (mkSelect([ Star, None ], Some "t", Some(BinOp(Eq, col "a", Lit(VInt 1L))), [], None, None))
+                        (mkSelect([ Star None, None ], Some "t", Some(BinOp(Eq, col "a", Lit(VInt 1L))), [], None, None))
                         "where"
 
                 testCase "ORDER BY with explicit and default direction"
                 <| fun _ ->
                     Expect.equal
                         (parseOk "SELECT * FROM t ORDER BY a DESC, b")
-                        (mkSelect([ Star, None ], Some "t", None, [ col "a", Desc; col "b", Asc ], None, None))
+                        (mkSelect([ Star None, None ], Some "t", None, [ col "a", Desc; col "b", Asc ], None, None))
                         "order by"
 
                 testCase "LIMIT n"
                 <| fun _ ->
                     Expect.equal
                         (parseOk "SELECT * FROM t LIMIT 10")
-                        (mkSelect([ Star, None ], Some "t", None, [], Some 10, None))
+                        (mkSelect([ Star None, None ], Some "t", None, [], Some 10, None))
                         "limit n"
 
                 testCase "LIMIT n OFFSET m"
                 <| fun _ ->
                     Expect.equal
                         (parseOk "SELECT * FROM t LIMIT 10 OFFSET 5")
-                        (mkSelect([ Star, None ], Some "t", None, [], Some 10, Some 5))
+                        (mkSelect([ Star None, None ], Some "t", None, [], Some 10, Some 5))
                         "limit offset"
 
                 testCase "LIMIT m, n means offset m, count n"
                 <| fun _ ->
                     Expect.equal
                         (parseOk "SELECT * FROM t LIMIT 5, 10")
-                        (mkSelect([ Star, None ], Some "t", None, [], Some 10, Some 5))
+                        (mkSelect([ Star None, None ], Some "t", None, [], Some 10, Some 5))
                         "limit comma form"
 
                 testCase "LIMIT 18446744073709551615 (2^64-1, the 'no limit' idiom) parses instead of a 1064 error"
@@ -362,7 +362,7 @@ let tests =
                     Expect.equal
                         (parseOk "SELECT * FROM t WHERE a BETWEEN 1 AND 10 AND b")
                         (mkSelect(
-                            [ Star, None ],
+                            [ Star None, None ],
                             Some "t",
                             Some(BinOp(And, Between(col "a", Lit(VInt 1L), Lit(VInt 10L)), col "b")),
                             [],
@@ -1112,7 +1112,7 @@ let tests =
               [ testCase "GROUP BY col, HAVING with an aggregate"
                 <| fun _ ->
                     match parseOk "SELECT dept, COUNT(*) AS c FROM t GROUP BY dept HAVING COUNT(*) > 1" with
-                    | Select { GroupBy = [ Col "dept" ]; Having = Some(BinOp(Gt, FuncCall("COUNT", [ Star ]), Lit(VInt 1L))) } -> ()
+                    | Select { GroupBy = [ Col "dept" ]; Having = Some(BinOp(Gt, FuncCall("COUNT", [ Star None ]), Lit(VInt 1L))) } -> ()
                     | other -> failtestf "expected GroupBy/Having to parse, got %A" other
 
                 testCase "GROUP BY accepts multiple comma-separated expressions"
