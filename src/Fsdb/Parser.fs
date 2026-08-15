@@ -129,7 +129,7 @@ let private identifier: Parser<string, unit> =
 /// that target exactly one table rather than projecting columns (DDL,
 /// INSERT/UPDATE/DELETE/TRUNCATE). Encoded as a single "db.table" string
 /// rather than widening every `Ast.Statement` table field to a record —
-/// `Executor.splitQualified` peels it back apart right before resolving
+/// `Storage.splitQualified` peels it back apart right before resolving
 /// against `Storage`, which already takes database and table name as two
 /// separate arguments everywhere.
 let private qualifiedTableName: Parser<string, unit> =

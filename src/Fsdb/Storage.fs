@@ -62,6 +62,21 @@ type Catalog = Map<string, Database>
 
 let defaultDatabase = "fsdb"
 
+let private stripBackticks (s: string) = s.Trim().Trim('`')
+
+/// Splits a `` `db`.`table` `` (or bare `table`) name into its two parts,
+/// defaulting the database to `defaultDb` — the one place every qualified
+/// name resolves through, whether it came from the real parser
+/// (`Parser.qualifiedTableName`, via `Executor.execute`) or a text-probed
+/// `SHOW ...`/`DESCRIBE` statement (`QueryHandler.dispatch`). Strips
+/// backticks per component, *after* splitting on `.`, not before —
+/// `` `shop`.`users` ``.Trim('`') first leaves `` shop`.`users `` (the
+/// backticks straddling the dot survive), which then splits wrong.
+let splitQualified (defaultDb: string) (name: string) : string * string =
+    match name.Trim().Split('.') with
+    | [| db; tbl |] -> stripBackticks db, stripBackticks tbl
+    | _ -> defaultDb, stripBackticks name
+
 /// ponytail: one global write lock for the whole catalog rather than
 /// per-table locks — fine until write throughput across unrelated tables
 /// actually matters, at which point shard the lock per table.
@@ -142,8 +157,6 @@ let traverse (f: 'a -> Result<'b, 'e>) (xs: 'a list) : Result<'b list, 'e> =
             | Error e -> Error e
 
     loop [] xs
-
-let private traverseResult (f: 'a -> Result<'b, StorageError>) (xs: 'a list) : Result<'b list, StorageError> = traverse f xs
 
 let private parseNumeric (s: string) : float option =
     match Double.TryParse(s.Trim(), NumberStyles.Float, CultureInfo.InvariantCulture) with
@@ -467,7 +480,7 @@ let insertRows
         let indices =
             match columns with
             | None -> Ok [ 0 .. table.Columns.Length - 1 ]
-            | Some names -> names |> traverseResult (resolveColumn table.Columns)
+            | Some names -> names |> traverse (resolveColumn table.Columns)
 
         indices
         |> Result.bind (fun idxs ->
@@ -505,7 +518,7 @@ let private uniqueKeyColumnSets (table: Table) : int list list =
     let fromIndexes =
         table.Indexes
         |> List.filter (fun ix -> ix.Unique)
-        |> List.choose (fun ix -> ix.Columns |> traverseResult (resolveColumn table.Columns) |> Result.toOption)
+        |> List.choose (fun ix -> ix.Columns |> traverse (resolveColumn table.Columns) |> Result.toOption)
 
     (if pk.IsEmpty then [] else [ pk ]) @ fromIndexes
 
@@ -527,7 +540,7 @@ let upsertRows
         let indices =
             match columns with
             | None -> Ok [ 0 .. table.Columns.Length - 1 ]
-            | Some names -> names |> traverseResult (resolveColumn table.Columns)
+            | Some names -> names |> traverse (resolveColumn table.Columns)
 
         indices
         |> Result.bind (fun idxs ->
@@ -568,7 +581,7 @@ let upsertRows
 
 let private coerceRow (columns: ColumnDef list) (row: Value[]) : Result<Value[], StorageError> =
     List.zip columns (Array.toList row)
-    |> traverseResult (fun (col, v) -> coerceAndCheck col v)
+    |> traverse (fun (col, v) -> coerceAndCheck col v)
     |> Result.map Array.ofList
 
 /// Deletes every row matching `predicate`. Returns the number of rows
@@ -585,7 +598,7 @@ let deleteRows
     : Result<int, StorageError> =
     withTable store dbName tableName (fun table ->
         table.Rows
-        |> traverseResult (fun row -> predicate row |> Result.map (fun keep -> keep, row))
+        |> traverse (fun row -> predicate row |> Result.map (fun keep -> keep, row))
         |> Result.map (fun flagged ->
             let kept = flagged |> List.filter (fst >> not) |> List.map snd
             { table with Rows = kept }, flagged |> List.filter fst |> List.length))
@@ -616,7 +629,7 @@ let updateRows
                     Ok(row, false))
 
         table.Rows
-        |> traverseResult applyToRow
+        |> traverse applyToRow
         |> Result.map (fun rowsWithFlags ->
             { table with Rows = rowsWithFlags |> List.map fst }, rowsWithFlags |> List.filter snd |> List.length))
 

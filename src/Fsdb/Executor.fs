@@ -33,22 +33,6 @@ let private storageErr (e: StorageError) : QueryResult =
     let code, message = toMySqlError e
     Err(code, message)
 
-/// Splits a `Parser.qualifiedTableName`-produced "db.table" (or bare
-/// "table") string back into its two parts, defaulting the database to the
-/// session's current one — the other end of that parser's encoding, so a
-/// qualified name resolves the same way at every statement site instead of
-/// each one growing its own split.
-let private splitQualified (defaultDb: string) (name: string) : string * string =
-    match name.Split('.') with
-    | [| db; tbl |] -> db, tbl
-    | _ -> defaultDb, name
-
-/// `Storage.traverse`, generalized over any error type since this module
-/// threads both `StorageError` and `EvalError` — kept as a local alias
-/// rather than a per-call-site `Storage.traverse` since it reads as a
-/// domain operation here, not a storage one.
-let private traverseList = Storage.traverse
-
 /// Column name (case-insensitive) to its index in a row array.
 let private columnIndexOf (columns: ColumnDef list) : Map<string, int> =
     columns |> List.mapi (fun i c -> c.Name.ToLowerInvariant(), i) |> Map.ofList
@@ -262,7 +246,7 @@ let rec private evalExpr (ctx: EvalContext) (expr: Expr) : Result<Value, EvalErr
             | VNull -> Ok VNull
             | _ ->
                 xs
-                |> traverseList eval
+                |> traverse eval
                 |> Result.map (fun vs ->
                     if vs |> List.exists (fun v -> Value.equals ve v = Some true) then
                         VInt 1L
@@ -285,7 +269,7 @@ let rec private evalExpr (ctx: EvalContext) (expr: Expr) : Result<Value, EvalErr
     | FuncCall(name, args) ->
         match Functions.lookup name ctx.Registry with
         | None -> Error(unknownFunction name)
-        | Some fn -> args |> traverseList eval |> Result.map fn
+        | Some fn -> args |> traverse eval |> Result.map fn
     | Cast(e, ty) ->
         eval e
         |> Result.bind (fun v ->
@@ -389,7 +373,7 @@ and private evalAggregate
         | None -> Error(unknownFunction name)
         | Some fold ->
             rows
-            |> traverseList (fun row -> evalExpr (ctxFor row) arg)
+            |> traverse (fun row -> evalExpr (ctxFor row) arg)
             |> Result.map (fun vs ->
                 let nonNull = vs |> List.filter (function VNull -> false | _ -> true)
                 if isCount || not nonNull.IsEmpty then fold nonNull else VNull)
@@ -415,13 +399,13 @@ and private rewriteAggregates
 
     match expr with
     | FuncCall(name, args) when isAggregateCall registry expr -> evalAggregate registry ctxFor rows name args |> Result.map Lit
-    | FuncCall(name, args) -> args |> traverseList sub |> Result.map (fun args' -> FuncCall(name, args'))
+    | FuncCall(name, args) -> args |> traverse sub |> Result.map (fun args' -> FuncCall(name, args'))
     | BinOp(op, a, b) -> sub a |> Result.bind (fun a' -> sub b |> Result.map (fun b' -> BinOp(op, a', b')))
     | Not e -> sub e |> Result.map Not
     | IsNull e -> sub e |> Result.map IsNull
     | IsNotNull e -> sub e |> Result.map IsNotNull
     | Like(e, p) -> sub e |> Result.bind (fun e' -> sub p |> Result.map (fun p' -> Like(e', p')))
-    | In(e, xs) -> sub e |> Result.bind (fun e' -> xs |> traverseList sub |> Result.map (fun xs' -> In(e', xs')))
+    | In(e, xs) -> sub e |> Result.bind (fun e' -> xs |> traverse sub |> Result.map (fun xs' -> In(e', xs')))
     | Between(e, lo, hi) ->
         sub e |> Result.bind (fun e' -> sub lo |> Result.bind (fun lo' -> sub hi |> Result.map (fun hi' -> Between(e', lo', hi'))))
     | Cast(e, ty) -> sub e |> Result.map (fun e' -> Cast(e', ty))
@@ -459,7 +443,7 @@ and private runAggregateSelect
         | None -> Ok true
         | Some expr -> evalExpr (ctxFor row) expr |> Result.map (fun v -> truthy v = Some true)
 
-    match rows |> traverseList (fun row -> matches row |> Result.map (fun keep -> if keep then Some row else None)) with
+    match rows |> traverse (fun row -> matches row |> Result.map (fun keep -> if keep then Some row else None)) with
     | Error(code, message) -> Err(code, message)
     | Ok maybeMatched ->
         let matched = maybeMatched |> List.choose id
@@ -482,7 +466,7 @@ and private runAggregateSelect
                 |> Result.bind (evalExpr (ctxFor representativeRow))
                 |> Result.map (fun v -> label, v)
 
-        match select.Projections |> traverseList projectOne with
+        match select.Projections |> traverse projectOne with
         | Error(code, message) -> Err(code, message)
         | Ok pairs -> ResultSet(pairs |> List.map fst, [ pairs |> List.map (snd >> toText) ])
 
@@ -540,11 +524,11 @@ and private runSelect
         | Some expr -> evalExpr (ctxFor row) expr |> Result.map (fun v -> truthy v = Some true)
 
     let orderKeys (row: Value[]) : Result<Value list, EvalError> =
-        orderBy |> traverseList (fun (expr, _) -> evalExpr (ctxFor row) (resolveOrderExpr expr))
+        orderBy |> traverse (fun (expr, _) -> evalExpr (ctxFor row) (resolveOrderExpr expr))
 
     let projectRow (row: Value[]) : Result<(string * Value) list, EvalError> =
         projections
-        |> traverseList (evalProjection (ctxFor row) columns)
+        |> traverse (evalProjection (ctxFor row) columns)
         |> Result.map List.concat
 
     // Sorts rows by their pre-evaluated `ORDER BY` keys: a total order per
@@ -583,12 +567,12 @@ and private runSelect
             matches row
             |> Result.bind (fun keep -> if keep then orderKeys row |> Result.map (fun keys -> Some(keys, row)) else Ok None)
 
-        match rows |> traverseList keepWithOrderKeys with
+        match rows |> traverse keepWithOrderKeys with
         | Error(code, message) -> Err(code, message)
         | Ok maybeKeyed ->
             let keyed = maybeKeyed |> List.choose id
 
-            match keyed |> sortRows |> List.map snd |> applyLimitOffset limit offset |> traverseList projectRow with
+            match keyed |> sortRows |> List.map snd |> applyLimitOffset limit offset |> traverse projectRow with
             | Error(code, message) -> Err(code, message)
             | Ok projectedRows -> ResultSet(colNames, projectedRows |> List.map (List.map (snd >> toText)))
 
@@ -617,7 +601,7 @@ let private applyAssignments
           DbName = dbName }
 
     assignments
-    |> traverseList (fun (idx, expr) -> evalExpr ctx expr |> Result.map (fun v -> idx, v))
+    |> traverse (fun (idx, expr) -> evalExpr ctx expr |> Result.map (fun v -> idx, v))
     |> Result.mapError ExpressionError
     |> Result.map (fun idxVals ->
         let newRow = Array.copy row
@@ -690,7 +674,7 @@ let execute (store: Store) (registry: Registry) (dbName: string) (lastInsertId: 
             | Error(NoSuchTable _) when ifExists -> Ok()
             | Error e -> Error e
 
-        match names |> traverseList dropOne with
+        match names |> traverse dropOne with
         | Ok _ -> lastInsertId, Affected 0UL
         | Error e -> lastInsertId, storageErr e
 
@@ -711,7 +695,7 @@ let execute (store: Store) (registry: Registry) (dbName: string) (lastInsertId: 
             let _, newTable = splitQualified dbName newName
             renameTable store db oldTable newTable
 
-        match pairs |> traverseList renameOne with
+        match pairs |> traverse renameOne with
         | Ok _ -> lastInsertId, Affected 0UL
         | Error e -> lastInsertId, storageErr e
 
@@ -756,7 +740,7 @@ let execute (store: Store) (registry: Registry) (dbName: string) (lastInsertId: 
               Store = store
               DbName = dbName }
 
-        match rowsExprs |> traverseList (traverseList (evalExpr literalCtx)) with
+        match rowsExprs |> traverse (traverse (evalExpr literalCtx)) with
         | Error(code, message) -> lastInsertId, Err(code, message)
         | Ok rowsValues ->
             let cols = if columns.IsEmpty then None else Some columns
@@ -782,7 +766,7 @@ let execute (store: Store) (registry: Registry) (dbName: string) (lastInsertId: 
                               DbName = dbName }
 
                         onDuplicateUpdate
-                        |> traverseList (fun (name, expr) ->
+                        |> traverse (fun (name, expr) ->
                             match resolveColumn tableColumns name with
                             | Error e -> Error e
                             | Ok idx ->
@@ -810,7 +794,7 @@ let execute (store: Store) (registry: Registry) (dbName: string) (lastInsertId: 
         | Ok(columns, rows) ->
             let columnIndex = columnIndexOf columns
 
-            match assignments |> traverseList (fun (name, expr) -> resolveColumn columns name |> Result.map (fun i -> i, expr)) with
+            match assignments |> traverse (fun (name, expr) -> resolveColumn columns name |> Result.map (fun i -> i, expr)) with
             | Error e -> lastInsertId, storageErr e
             | Ok indexedAssignments ->
                 let qualifier = Some(table.ToLowerInvariant())
@@ -829,7 +813,7 @@ let execute (store: Store) (registry: Registry) (dbName: string) (lastInsertId: 
                     | Some expr -> evalExpr (ctxFor row) expr |> Result.map (fun v -> truthy v = Some true)
 
                 let checkAssignments row =
-                    indexedAssignments |> traverseList (fun (_, expr) -> evalExpr (ctxFor row) expr)
+                    indexedAssignments |> traverse (fun (_, expr) -> evalExpr (ctxFor row) expr)
 
                 // Type-check WHERE/SET against a synthetic all-NULL row
                 // first — same reasoning as `runSelect`'s `probeRow`: an
