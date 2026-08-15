@@ -27,7 +27,13 @@ and a second consecutive `migrate` (Nothing to migrate). Status: ✅
 
 ## M5 — Chatflow test suite
 Joins, aggregates, subqueries, savepoints, JSON functions, expression breadth.
-**Gate:** chatflow phpunit suite green against fsdb. Status: ✅
+**Gate:** `vendor/bin/pest tests --no-coverage --compact` (not `php artisan
+test` — that only resolves phpunit.xml's `Unit`/`Feature` testsuites, 269
+tests, and silently skips `tests/Arch`/`tests/Integration`, which the sqlite
+REFERENCE baseline's `vendor/bin/pest tests` does sweep in, 304 tests) run
+against fsdb on port 3307, same scope/command both sides, dot-pattern
+compared against the sqlite baseline. Status: ✅ (287 passed, 15 skipped, 2
+todos, 787 assertions — parity with the sqlite baseline)
 
 ## M6 — Extensibility polish
 Public `registerScalar` / `registerAggregate` API, docs, examples.
