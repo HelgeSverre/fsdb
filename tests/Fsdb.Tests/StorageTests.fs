@@ -582,38 +582,6 @@ let tests =
                     | Error e -> failtestf "expected Ok, got %A" e ]
 
           testList
-              "applyGeneratedColumns"
-              [ testCase "recomputes only the named columns, leaving the rest of the row untouched"
-                <| fun _ ->
-                    let columns =
-                        [ col "first" (TVarchar 50) false; col "last" (TVarchar 50) false; col "full_name" (TVarchar 100) true ]
-
-                    let row = [| VString "Ada"; VString "Lovelace"; VNull |]
-
-                    // Stand-in for `Executor`'s evaluator: concatenates
-                    // `first`/`last` for `full_name`, ignores everything else.
-                    let compute (r: Value[]) (c: ColumnDef) =
-                        if c.Name = "full_name" then
-                            VString(sprintf "%s %s" (r.[0] |> toText |> Option.get) (r.[1] |> toText |> Option.get))
-                        else
-                            VNull
-
-                    let result = applyGeneratedColumns compute [ "full_name" ] columns row
-
-                    Expect.equal result.[0] (VString "Ada") "untouched column 0"
-                    Expect.equal result.[1] (VString "Lovelace") "untouched column 1"
-                    Expect.equal result.[2] (VString "Ada Lovelace") "computed column"
-
-                testCase "an unknown generated column name is ignored rather than throwing"
-                <| fun _ ->
-                    let columns = [ col "a" (TInt false) false ]
-                    let row = [| VInt 1L |]
-
-                    let result = applyGeneratedColumns (fun _ _ -> VInt 999L) [ "ghost" ] columns row
-
-                    Expect.equal result [| VInt 1L |] "row unchanged" ]
-
-          testList
               "resolveColumn"
               [ testCase "resolveColumn finds a column case-insensitively"
                 <| fun _ ->

@@ -1050,24 +1050,3 @@ let scan (store: Store) (dbName: string) (tableName: string) : Result<ColumnDef 
 /// `INSERT`/`UPDATE`. `VIRTUAL` isn't distinguished from `STORED` — both
 /// are persisted in `Rows` the same way, since this engine has no separate
 /// "recompute on every read" path.
-///
-/// `applyGeneratedColumns` below is the pure, storage-only piece: given a
-/// `compute` callback (`Executor`'s evaluator, closed over each column's
-/// `Expr` however it ends up looked up) and the names of the generated
-/// columns, it rewrites just those columns of `row`, leaving every other
-/// value untouched. `compute row col` sees `row` with every column's
-/// *current* value (so a generated column can read a plain column's newly
-/// inserted/updated value) and returns `col`'s recomputed value. Kept
-/// separate from `Executor`'s actual `updater` (which additionally needs to
-/// propagate an evaluation/coercion `Result`, not just a bare `Value`) as a
-/// directly-testable building block.
-let applyGeneratedColumns (compute: Value[] -> ColumnDef -> Value) (generatedColumnNames: string list) (columns: ColumnDef list) (row: Value[]) : Value[] =
-    let row' = Array.copy row
-
-    generatedColumnNames
-    |> List.iter (fun name ->
-        match resolveColumn columns name with
-        | Ok idx -> row'.[idx] <- compute row' columns.[idx]
-        | Error _ -> ())
-
-    row'
