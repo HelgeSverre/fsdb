@@ -112,6 +112,47 @@ let tests =
                         ))
                         "projections"
 
+                testCase "SELECT projections with an implicit alias (no AS)"
+                <| fun _ ->
+                    Expect.equal
+                        (parseOk "SELECT 1 x, a+1 total FROM t")
+                        (mkSelect(
+                            [ Lit(VInt 1L), Some "x"
+                              BinOp(Add, col "a", Lit(VInt 1L)), Some "total" ],
+                            Some "t",
+                            None,
+                            [],
+                            None,
+                            None
+                        ))
+                        "bare aliases, no AS"
+
+                testCase "TIMESTAMPDIFF/TIMESTAMPADD take an unquoted unit keyword"
+                <| fun _ ->
+                    Expect.equal
+                        (parseOk "SELECT TIMESTAMPDIFF(MONTH, a, b) FROM t")
+                        (mkSelect(
+                            [ FuncCall("TIMESTAMPDIFF", [ Lit(VString "MONTH"); col "a"; col "b" ]), None ],
+                            Some "t",
+                            None,
+                            [],
+                            None,
+                            None
+                        ))
+                        "unquoted MONTH parses as the unit, not a column reference"
+
+                    Expect.equal
+                        (parseOk "SELECT TIMESTAMPADD(DAY, 1, a) FROM t")
+                        (mkSelect(
+                            [ FuncCall("TIMESTAMPADD", [ Lit(VString "DAY"); Lit(VInt 1L); col "a" ]), None ],
+                            Some "t",
+                            None,
+                            [],
+                            None,
+                            None
+                        ))
+                        "TIMESTAMPADD too"
+
                 testCase "SELECT t.* is Star(Some \"t\")"
                 <| fun _ ->
                     Expect.equal
@@ -1275,7 +1316,12 @@ let tests =
 
                 testCase "trailing garbage after a valid statement is an Error"
                 <| fun _ ->
-                    match parse "SELECT 1 EXTRA" with
+                    // `SELECT 1 EXTRA` used to land here too, but it's
+                    // actually valid MySQL — `EXTRA` is a bare column alias
+                    // (no `AS` required) — so it's covered by the "implicit
+                    // alias" test below instead; a trailing number can't be
+                    // an alias, so it's still unambiguous garbage.
+                    match parse "SELECT 1 42" with
                     | Error _ -> ()
                     | Ok stmt -> failtestf "expected an error, got %A" stmt
 

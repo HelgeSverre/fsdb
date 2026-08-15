@@ -393,6 +393,26 @@ let private intervalAtom: Parser<Expr, unit> =
     attempt (keyword "INTERVAL" >>. expr .>>. (many1Satisfy2 isIdentStart isIdentChar .>> ws))
     |>> fun (n, unit) -> FuncCall("INTERVAL", [ n; Lit(VString(unit.ToUpperInvariant())) ])
 
+/// `TIMESTAMPDIFF(unit, expr1, expr2)` / `TIMESTAMPADD(unit, n, expr)` —
+/// the first argument is an *unquoted* unit keyword in real MySQL (`MONTH`,
+/// not `'MONTH'`), which `funcCallAtom`'s general call-argument grammar
+/// can't parse (every argument goes through `expr`, so a bare `MONTH` there
+/// resolves as an ordinary column reference and fails with 1054). Same
+/// trick `intervalAtom` already uses for `INTERVAL n UNIT` — parse the unit
+/// word directly into a `Lit(VString ...)` and splice it in as the
+/// function's first argument, ahead of `funcCallAtom` in `atom`'s `choice`
+/// so it wins for these two names specifically.
+let private timestampFuncAtom: Parser<Expr, unit> =
+    attempt (
+        ((keyword "TIMESTAMPDIFF" >>% "TIMESTAMPDIFF") <|> (keyword "TIMESTAMPADD" >>% "TIMESTAMPADD"))
+        .>> sym "("
+        .>>. (many1Satisfy2 isIdentStart isIdentChar .>> ws)
+        .>> sym ","
+        .>>. sepBy1 expr (sym ",")
+        .>> sym ")"
+    )
+    |>> fun ((name, unit), args) -> FuncCall(name, Lit(VString(unit.ToUpperInvariant())) :: args)
+
 let private caseWhenThen: Parser<Expr * Expr, unit> = (keyword "WHEN" >>. expr .>> keyword "THEN") .>>. expr
 
 /// `CASE WHEN cond THEN result ... [ELSE result] END` (searched form) and
@@ -430,6 +450,7 @@ let private atom: Parser<Expr, unit> =
           existsExpr
           caseExpr
           intervalAtom
+          timestampFuncAtom
           groupConcatAtom
           rowNumberOverAtom
           numberLit |>> Lit
@@ -873,7 +894,18 @@ let private insertStmt: Parser<Statement, unit> =
         | Choice1Of2(rows, onDup) -> Insert(table, cols, rows, onDup |> Option.defaultValue [], ignoreDuplicates)
         | Choice2Of2 select -> InsertSelect(table, cols, select, ignoreDuplicates)
 
-let private projection: Parser<Projection, unit> = expr .>>. opt (keyword "AS" >>. identifier)
+/// A projection's alias — `AS name`, or real MySQL's implicit form with no
+/// `AS` at all (`SELECT 1 x FROM t`, `SELECT price * qty total FROM
+/// orders`): a bare word right after the expression that isn't the next
+/// clause's keyword. `identifier` already rejects every word in
+/// `reservedWords` (`FROM`/`WHERE`/`GROUP`/`ORDER`/`HAVING`/`LIMIT`/...), so
+/// this only fires on an actual alias, not the start of the next clause;
+/// `attempt`ed so a comma or clause keyword right after the expression
+/// cleanly falls through to `None` instead of failing the whole projection.
+let private projectionAlias: Parser<string option, unit> =
+    (attempt (keyword "AS" >>. identifier) |>> Some) <|> (attempt identifier |>> Some) <|> preturn None
+
+let private projection: Parser<Projection, unit> = expr .>>. projectionAlias
 
 let private orderKey: Parser<OrderKey, unit> =
     (expr .>>. opt ((keyword "ASC" >>% Asc) <|> (keyword "DESC" >>% Desc)))
