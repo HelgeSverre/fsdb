@@ -491,21 +491,24 @@ let tests =
                                 Default = None
                                 AutoIncrement = true
                                 PrimaryKey = true
-                                Unique = false }
+                                Unique = false
+                                Generated = None }
                               { Name = "name"
                                 Type = TVarchar 255
                                 Nullable = false
                                 Default = None
                                 AutoIncrement = false
                                 PrimaryKey = false
-                                Unique = false }
+                                Unique = false
+                                Generated = None }
                               { Name = "score"
                                 Type = TDecimal(5, 2)
                                 Nullable = true
                                 Default = Some(DConst(VInt 0L))
                                 AutoIncrement = false
                                 PrimaryKey = false
-                                Unique = false } ],
+                                Unique = false
+                                Generated = None } ],
                             [],
                             [],
                             false
@@ -524,7 +527,8 @@ let tests =
                                 Default = None
                                 AutoIncrement = false
                                 PrimaryKey = false
-                                Unique = false } ],
+                                Unique = false
+                                Generated = None } ],
                             [],
                             [],
                             true
@@ -543,14 +547,16 @@ let tests =
                                 Default = None
                                 AutoIncrement = false
                                 PrimaryKey = true
-                                Unique = false }
+                                Unique = false
+                                Generated = None }
                               { Name = "name"
                                 Type = TVarchar 10
                                 Nullable = true
                                 Default = None
                                 AutoIncrement = false
                                 PrimaryKey = false
-                                Unique = false } ],
+                                Unique = false
+                                Generated = None } ],
                             [],
                             [],
                             false
@@ -582,7 +588,8 @@ let tests =
                                 Default = None
                                 AutoIncrement = false
                                 PrimaryKey = false
-                                Unique = false } ],
+                                Unique = false
+                                Generated = None } ],
                             [],
                             [],
                             false
@@ -691,14 +698,19 @@ let tests =
                     | CreateTable(_, [ { Name = "name" } ], [], [], false) -> ()
                     | other -> failtestf "expected the comment/charset/collate to be ignored, got %A" other
 
-                testCase "a generated column's AS (expr) [VIRTUAL|STORED] is accepted and ignored (Laravel Pulse's key_hash)"
+                testCase "a generated column's AS (expr) [VIRTUAL|STORED] is captured on ColumnDef.Generated (Laravel Pulse's key_hash)"
                 <| fun _ ->
                     match
                         parseOk
                             "CREATE TABLE pulse_values (`key` MEDIUMTEXT NOT NULL, key_hash CHAR(16) CHARACTER SET binary AS (UNHEX(MD5(`key`))))"
                     with
-                    | CreateTable(_, [ { Name = "key" }; { Name = "key_hash"; Type = TChar 16 } ], [], [], false) -> ()
-                    | other -> failtestf "expected the generated column to parse and its AS (...) to be ignored, got %A" other ]
+                    | CreateTable(_,
+                                  [ { Name = "key"; Generated = None }
+                                    { Name = "key_hash"; Type = TChar 16; Generated = Some(FuncCall("UNHEX", _)) } ],
+                                  [],
+                                  [],
+                                  false) -> ()
+                    | other -> failtestf "expected the generated column's AS (...) to be captured, got %A" other ]
 
           testList
               "DROP TABLE / TRUNCATE"

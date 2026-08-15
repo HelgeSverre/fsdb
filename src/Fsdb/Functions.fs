@@ -627,16 +627,13 @@ let private addInterval (dt: DateTime) (amount: float) (unit: string) : DateTime
     | "YEAR" -> dt.AddYears(int amount)
     | _ -> dt
 
-/// The parser doesn't yet have `INTERVAL n UNIT` grammar (no `Interval` AST
-/// node exists) — until it does, `DATE_ADD`/`DATE_SUB` can't actually be
-/// reached via `INTERVAL` syntax from SQL. Registering an `INTERVAL` scalar
-/// here is the tolerant, forward-compatible shape: *if* the parser starts
-/// desugaring `INTERVAL n UNIT` to `FuncCall("INTERVAL", [n; UNIT])` (the
-/// natural minimal-grammar choice, since a UNIT keyword can be captured as
-/// a string literal same as any other identifier-ish token), this already
-/// round-trips through `DATE_ADD`/`DATE_SUB`'s 2-arg form. It's also
-/// directly testable today by evaluating the registered functions with
-/// `Value` args, independent of what the parser ends up emitting.
+/// `Parser.fs`'s `INTERVAL n UNIT` grammar desugars to
+/// `FuncCall("INTERVAL", [n; Lit(VString UNIT)])` (no separate `Interval`
+/// AST node), which `evalExpr` evaluates like any other function call
+/// before `DATE_ADD`/`DATE_SUB` see it — so the marker string this scalar
+/// returns is exactly `dateAddCore`'s 2-arg-form input. Still independently
+/// testable by evaluating the registered functions with `Value` args
+/// directly.
 let private intervalMarker = " INTERVAL "
 
 let private intervalFn: Scalar =

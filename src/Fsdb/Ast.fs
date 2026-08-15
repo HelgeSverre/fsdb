@@ -140,7 +140,12 @@ and ColumnDef =
       Default: ColumnDefault option
       AutoIncrement: bool
       PrimaryKey: bool
-      Unique: bool }
+      Unique: bool
+      /// `[GENERATED ALWAYS] AS (expr) [VIRTUAL | STORED]` — `None` for a
+      /// plain column. Both VIRTUAL and STORED are persisted the same way
+      /// here (this engine has no separate "recompute on every read" path),
+      /// so only the expression itself is kept.
+      Generated: Expr option }
 
 /// A named `[UNIQUE] KEY|INDEX (cols)` — from a `CREATE TABLE` trailing item,
 /// `ALTER TABLE ADD INDEX`, `CREATE INDEX`, or a column-level `UNIQUE`

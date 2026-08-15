@@ -12,7 +12,8 @@ let private col name ty nullable =
       Default = None
       AutoIncrement = false
       PrimaryKey = false
-      Unique = false }
+      Unique = false
+      Generated = None }
 
 let private idCol =
     { (col "id" (TInt false) false) with

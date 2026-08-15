@@ -519,6 +519,10 @@ let private handleSet (session: Session) (sql: string) : Session * QueryResult =
         if varMatch.Success then
             let name = varMatch.Groups.[1].Value.ToLowerInvariant()
             let value = unquote varMatch.Groups.[2].Value
+
+            if name = "foreign_key_checks" then
+                setForeignKeyChecks session.Store (value.Trim() <> "0")
+
             { session with Variables = Map.add name value session.Variables }, Affected 0UL
         else
             match setVarNameForError.Match sql with
@@ -675,6 +679,9 @@ let private registryFor (session: Session) : Functions.Registry =
     |> Functions.registerScalar "DATABASE" (fun _ -> session.Database |> Option.map VString |> Option.defaultValue VNull)
     |> Functions.registerScalar "LAST_INSERT_ID" (fun _ -> VInt session.LastInsertId)
     |> Functions.registerScalar "VERSION" (fun _ -> lookupVar session "version" |> Option.map VString |> Option.defaultValue VNull)
+    |> Functions.registerScalar "CONNECTION_ID" (fun _ -> VInt(int64 session.ConnectionId))
+    |> Functions.registerScalar "CURRENT_USER" (fun _ -> VString "fsdb@localhost")
+    |> Functions.registerScalar "USER" (fun _ -> VString "fsdb@localhost")
 
 /// Parses and executes anything that isn't one of the text-probe special
 /// cases above. A parse failure that also looks like a `SELECT @@...` falls

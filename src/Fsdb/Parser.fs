@@ -527,14 +527,11 @@ type private ColMod =
     | MAutoIncrement
     | MPrimaryKey
     | MUnique
+    | MGenerated of Expr
     /// `COMMENT 'txt'`, `CHARACTER SET x` / `COLLATE y`, `ON UPDATE
-    /// CURRENT_TIMESTAMP`, and a generated column's `AS (expr)` — accepted
-    /// so the column definition parses, but nothing in `Ast.ColumnDef`
-    /// tracks them (ponytail: add fields if a migration's assertion ever
-    /// depends on one, e.g. `information_schema` exposing the real
-    /// generation expression text, or the engine actually computing a
-    /// generated column's value rather than just accepting a NULL/absent
-    /// one).
+    /// CURRENT_TIMESTAMP` — accepted so the column definition parses, but
+    /// nothing in `Ast.ColumnDef` tracks them (ponytail: add fields if a
+    /// migration's assertion ever depends on one).
     | MIgnored
 
 let private defaultValueLit: Parser<ColumnDefault, unit> =
@@ -548,17 +545,17 @@ let private identOrString: Parser<string, unit> =
 
 /// `[GENERATED ALWAYS] AS (expr) [VIRTUAL | STORED]` — a computed column
 /// (`char(16) ... AS (UNHEX(MD5(\`key\`)))`, Laravel Pulse's dedup key hash).
-/// The expression itself just needs to *parse* (reusing the full `expr`
-/// grammar, which already handles arbitrary nested function calls), not be
-/// evaluated — see the `MIgnored` doc above.
-let private generatedColumn: Parser<unit, unit> =
+/// Reuses the full `expr` grammar (arbitrary nested function calls), and the
+/// parsed `Expr` is kept on `ColumnDef.Generated` for `Executor`/`Storage`
+/// to evaluate on insert/update — VIRTUAL vs STORED isn't distinguished
+/// (see the doc on `Ast.ColumnDef.Generated`).
+let private generatedColumn: Parser<Expr, unit> =
     optional (keyword "GENERATED" >>. keyword "ALWAYS")
     >>. keyword "AS"
     >>. sym "("
     >>. expr
-    >>. sym ")"
-    >>. optional (keyword "VIRTUAL" <|> keyword "STORED")
-    >>% ()
+    .>> sym ")"
+    .>> optional (keyword "VIRTUAL" <|> keyword "STORED")
 
 let private colMod: Parser<ColMod, unit> =
     choice
@@ -572,7 +569,7 @@ let private colMod: Parser<ColMod, unit> =
           keyword "COMMENT" >>. stringLit >>% MIgnored
           attempt (keyword "CHARACTER" >>. keyword "SET") >>. identOrString >>% MIgnored
           keyword "COLLATE" >>. identOrString >>% MIgnored
-          attempt generatedColumn >>% MIgnored ]
+          attempt generatedColumn |>> MGenerated ]
 
 let private columnDef: Parser<ColumnDef, unit> =
     (identifier .>>. columnType .>>. many colMod)
@@ -583,7 +580,8 @@ let private columnDef: Parser<ColumnDef, unit> =
           Default = mods |> List.tryPick (function MDefault v -> Some v | _ -> None)
           AutoIncrement = List.contains MAutoIncrement mods
           PrimaryKey = List.contains MPrimaryKey mods
-          Unique = List.contains MUnique mods }
+          Unique = List.contains MUnique mods
+          Generated = mods |> List.tryPick (function MGenerated e -> Some e | _ -> None) }
 
 /// `AFTER col` / `FIRST` after an `ADD`/`MODIFY`/`CHANGE COLUMN` — accepted
 /// and discarded; see the ponytail note on `Ast.AlterAction`.

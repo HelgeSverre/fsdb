@@ -431,7 +431,8 @@ let rec private evalExpr (ctx: EvalContext) (expr: Expr) : Result<Value, EvalErr
                   Default = None
                   AutoIncrement = false
                   PrimaryKey = false
-                  Unique = false }
+                  Unique = false
+                  Generated = None }
 
             match Storage.coerceValue castCol v with
             | Ok v' -> Ok v'
@@ -485,7 +486,8 @@ and private deriveColumns (names: string list) : ColumnDef list =
           Default = None
           AutoIncrement = false
           PrimaryKey = false
-          Unique = false })
+          Unique = false
+          Generated = None })
 
 /// A derived table's rows, converted back from `runSelectStmt`'s text
 /// resultset shape into `Value[]` — ponytail: round-trips through text
@@ -1189,16 +1191,11 @@ let execute (store: Store) (registry: Registry) (dbName: string) (lastInsertId: 
         | Ok() -> lastInsertId, Affected 0UL
         | Error e -> lastInsertId, storageErr e
 
-    | Insert(table, columns, rowsExprs, onDuplicateUpdate, _ignoreDuplicates) ->
+    | Insert(table, columns, rowsExprs, onDuplicateUpdate, ignoreDuplicates) ->
         // INSERT ... VALUES expressions aren't evaluated against any row
         // (no table columns are in scope), just literals/functions — an
         // empty column index turns a stray `Col` reference into a clean
-        // 1054 rather than an index-out-of-range. `INSERT IGNORE`'s flag is
-        // accepted by the parser but not otherwise acted on here — ponytail:
-        // MySQL's `IGNORE` downgrades a would-be error per row to a warning
-        // and skips just that row; this engine still fails the whole
-        // statement, add per-row suppression once a migration/test actually
-        // depends on partial success rather than just the syntax parsing.
+        // 1054 rather than an index-out-of-range.
         let db, table = splitQualified dbName table
 
         let literalCtx =
@@ -1216,7 +1213,9 @@ let execute (store: Store) (registry: Registry) (dbName: string) (lastInsertId: 
             let cols = if columns.IsEmpty then None else Some columns
 
             if onDuplicateUpdate.IsEmpty then
-                match insertRows store db table cols rowsValues with
+                let insert = if ignoreDuplicates then insertRowsIgnore else insertRows
+
+                match insert store db table cols rowsValues with
                 | Ok(newLastId, affected) ->
                     (if newLastId <> 0L then newLastId else lastInsertId), Affected(uint64 affected)
                 | Error e -> lastInsertId, storageErr e
