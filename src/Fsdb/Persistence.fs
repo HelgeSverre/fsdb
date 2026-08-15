@@ -144,6 +144,138 @@ let private decodeColumnType (node: JsonNode) : ColumnType =
     | tag -> failwithf "Persistence: unknown ColumnType case '%s' in WAL/snapshot" tag
 
 // ---------------------------------------------------------------------
+// `Ast.Expr` — the only place one needs to survive the WAL/snapshot at all
+// is `ColumnDef.Generated` (`GENERATED ALWAYS AS (expr)`), and MySQL itself
+// rejects a subquery there, so `InSubquery`/`Exists`/`Subquery` fail loudly
+// rather than needing a `SelectStmt` encoder too — a real migration can't
+// produce one here to lose in the first place.
+// ---------------------------------------------------------------------
+
+let private encodeOp (op: Op) : JsonNode =
+    str (
+        match op with
+        | And -> "And"
+        | Or -> "Or"
+        | Eq -> "Eq"
+        | Neq -> "Neq"
+        | Lt -> "Lt"
+        | Lte -> "Lte"
+        | Gt -> "Gt"
+        | Gte -> "Gte"
+        | Add -> "Add"
+        | Sub -> "Sub"
+        | Mul -> "Mul"
+        | Div -> "Div"
+        | NullSafeEq -> "NullSafeEq"
+    )
+
+let private decodeOp (node: JsonNode) : Op =
+    match node.GetValue<string>() with
+    | "And" -> And
+    | "Or" -> Or
+    | "Eq" -> Eq
+    | "Neq" -> Neq
+    | "Lt" -> Lt
+    | "Lte" -> Lte
+    | "Gt" -> Gt
+    | "Gte" -> Gte
+    | "Add" -> Add
+    | "Sub" -> Sub
+    | "Mul" -> Mul
+    | "Div" -> Div
+    | "NullSafeEq" -> NullSafeEq
+    | tag -> failwithf "Persistence: unknown Op case '%s' in WAL/snapshot" tag
+
+let private encodeDirection (d: Direction) : JsonNode = str (match d with Asc -> "Asc" | Desc -> "Desc")
+
+let private decodeDirection (node: JsonNode) : Direction =
+    match node.GetValue<string>() with
+    | "Asc" -> Asc
+    | "Desc" -> Desc
+    | tag -> failwithf "Persistence: unknown Direction case '%s' in WAL/snapshot" tag
+
+let rec private encodeExpr (expr: Expr) : JsonNode =
+    match expr with
+    | Lit v -> caseObj "Lit" [ "v", str (toWire v) ]
+    | Col name -> caseObj "Col" [ "name", str name ]
+    | QualifiedCol(t, c) -> caseObj "QualifiedCol" [ "table", str t; "column", str c ]
+    | BinOp(op, a, b) -> caseObj "BinOp" [ "op", encodeOp op; "a", encodeExpr a; "b", encodeExpr b ]
+    | Not e -> caseObj "Not" [ "e", encodeExpr e ]
+    | IsNull e -> caseObj "IsNull" [ "e", encodeExpr e ]
+    | IsNotNull e -> caseObj "IsNotNull" [ "e", encodeExpr e ]
+    | IsTrue e -> caseObj "IsTrue" [ "e", encodeExpr e ]
+    | IsFalse e -> caseObj "IsFalse" [ "e", encodeExpr e ]
+    | Like(e, p, cs) -> caseObj "Like" [ "e", encodeExpr e; "p", encodeExpr p; "cs", boolNode cs ]
+    | Regexp(e, p) -> caseObj "Regexp" [ "e", encodeExpr e; "p", encodeExpr p ]
+    | In(e, xs) -> caseObj "In" [ "e", encodeExpr e; "xs", arr (xs |> List.map encodeExpr) ]
+    | Between(e, lo, hi) -> caseObj "Between" [ "e", encodeExpr e; "lo", encodeExpr lo; "hi", encodeExpr hi ]
+    | FuncCall(name, args) -> caseObj "FuncCall" [ "name", str name; "args", arr (args |> List.map encodeExpr) ]
+    | RowNumberOver(partitionBy, orderBy) ->
+        caseObj
+            "RowNumberOver"
+            [ "partitionBy", arr (partitionBy |> List.map encodeExpr)
+              "orderBy", arr (orderBy |> List.map (fun (e, d) -> arr [ encodeExpr e; encodeDirection d ])) ]
+    | Distinct e -> caseObj "Distinct" [ "e", encodeExpr e ]
+    | Cast(e, t) -> caseObj "Cast" [ "e", encodeExpr e; "t", encodeColumnType t ]
+    | Star q -> caseObj "Star" [ "q", strOptNode q ]
+    | Case(subject, whens, elseBranch) ->
+        caseObj
+            "Case"
+            [ "subject", (subject |> Option.map encodeExpr |> Option.defaultValue null)
+              "whens", arr (whens |> List.map (fun (c, r) -> arr [ encodeExpr c; encodeExpr r ]))
+              "else", (elseBranch |> Option.map encodeExpr |> Option.defaultValue null) ]
+    | InSubquery _
+    | Exists _
+    | Subquery _ -> failwithf "Persistence: a GENERATED column can't hold a subquery (MySQL itself rejects one there)"
+
+let rec private decodeExpr (node: JsonNode) : Expr =
+    let case, o = caseName node
+    let f (k: string) = o.[k]
+
+    match case with
+    | "Lit" -> Lit(ofWire (f("v").GetValue<string>()))
+    | "Col" -> Col(f("name").GetValue<string>())
+    | "QualifiedCol" -> QualifiedCol(f("table").GetValue<string>(), f("column").GetValue<string>())
+    | "BinOp" -> BinOp(decodeOp (f "op"), decodeExpr (f "a"), decodeExpr (f "b"))
+    | "Not" -> Not(decodeExpr (f "e"))
+    | "IsNull" -> IsNull(decodeExpr (f "e"))
+    | "IsNotNull" -> IsNotNull(decodeExpr (f "e"))
+    | "IsTrue" -> IsTrue(decodeExpr (f "e"))
+    | "IsFalse" -> IsFalse(decodeExpr (f "e"))
+    | "Like" -> Like(decodeExpr (f "e"), decodeExpr (f "p"), f("cs").GetValue<bool>())
+    | "Regexp" -> Regexp(decodeExpr (f "e"), decodeExpr (f "p"))
+    | "In" -> In(decodeExpr (f "e"), f("xs").AsArray() |> Seq.map decodeExpr |> List.ofSeq)
+    | "Between" -> Between(decodeExpr (f "e"), decodeExpr (f "lo"), decodeExpr (f "hi"))
+    | "FuncCall" -> FuncCall(f("name").GetValue<string>(), f("args").AsArray() |> Seq.map decodeExpr |> List.ofSeq)
+    | "RowNumberOver" ->
+        RowNumberOver(
+            f("partitionBy").AsArray() |> Seq.map decodeExpr |> List.ofSeq,
+            f("orderBy").AsArray()
+            |> Seq.map (fun p ->
+                let pair = p.AsArray()
+                decodeExpr pair.[0], decodeDirection pair.[1])
+            |> List.ofSeq
+        )
+    | "Distinct" -> Distinct(decodeExpr (f "e"))
+    | "Cast" -> Cast(decodeExpr (f "e"), decodeColumnType (f "t"))
+    | "Star" -> Star(optStr (f "q"))
+    | "Case" ->
+        Case(
+            (match f "subject" with
+             | null -> None
+             | s -> Some(decodeExpr s)),
+            f("whens").AsArray()
+            |> Seq.map (fun p ->
+                let pair = p.AsArray()
+                decodeExpr pair.[0], decodeExpr pair.[1])
+            |> List.ofSeq,
+            (match f "else" with
+             | null -> None
+             | e -> Some(decodeExpr e))
+        )
+    | tag -> failwithf "Persistence: unknown Expr case '%s' in WAL/snapshot" tag
+
+// ---------------------------------------------------------------------
 // `Ast.ColumnDefault` / `ColumnDef` / `IndexDef` / `ForeignKeyDef`
 // ---------------------------------------------------------------------
 
@@ -160,21 +292,13 @@ let private decodeColumnDefault (node: JsonNode) : ColumnDefault =
     | "DCurrentTimestamp" -> DCurrentTimestamp
     | tag -> failwithf "Persistence: unknown ColumnDefault case '%s' in WAL/snapshot" tag
 
-/// `ColumnDef.Generated` (`GENERATED ALWAYS AS (expr)`) has no WAL/snapshot
-/// encoding — there's no `Expr` encoder here (it's only reachable through
-/// this one field among the DDL shapes `SchemaChanged` carries) — so rather
-/// than silently degrade a generated column into a plain one after a
-/// restart (every write after the first restart would then compute the
-/// wrong value, or `NULL`, for it — not the cosmetic `SHOW CREATE TABLE`
-/// gap `InformationSchema.showCreateTableDDL` has), fail loudly at the
-/// point a persisted table would lose it: the `CREATE`/`ALTER TABLE`
-/// statement that defines the column, or the periodic full-catalog
-/// snapshot, whichever tries to encode it first. Add an `Expr` encoder if a
-/// migration ever needs `GENERATED` to survive `--data-dir`.
+/// `ColumnDef.Generated` (`GENERATED ALWAYS AS (expr)`) round-trips through
+/// the `Expr` encoder above — without it, a generated column silently
+/// stopped being computed after a restart (new rows got `NULL` where MySQL
+/// computes a value; Laravel Pulse's `key_hash ... AS (unhex(md5(key)))` is
+/// exactly this shape), not just the cosmetic `SHOW CREATE TABLE` gap
+/// `InformationSchema.showCreateTableDDL` has.
 let private encodeColumnDef (c: ColumnDef) : JsonNode =
-    if c.Generated.IsSome then
-        failwithf "fsdb: GENERATED column '%s' can't be persisted under --data-dir yet (no WAL/snapshot encoding for its expression)" c.Name
-
     let o = JsonObject()
     o.["name"] <- str c.Name
     o.["type"] <- encodeColumnType c.Type
@@ -183,6 +307,7 @@ let private encodeColumnDef (c: ColumnDef) : JsonNode =
     o.["autoIncrement"] <- boolNode c.AutoIncrement
     o.["primaryKey"] <- boolNode c.PrimaryKey
     o.["unique"] <- boolNode c.Unique
+    o.["generated"] <- (c.Generated |> Option.map encodeExpr |> Option.defaultValue null)
     o
 
 let private decodeColumnDef (node: JsonNode) : ColumnDef =
@@ -195,7 +320,7 @@ let private decodeColumnDef (node: JsonNode) : ColumnDef =
       AutoIncrement = o.["autoIncrement"].GetValue<bool>()
       PrimaryKey = o.["primaryKey"].GetValue<bool>()
       Unique = o.["unique"].GetValue<bool>()
-      Generated = None }
+      Generated = (match o.["generated"] with null -> None | g -> Some(decodeExpr g)) }
 
 let private encodeIndexDef (ix: IndexDef) : JsonNode =
     let o = JsonObject()

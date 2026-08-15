@@ -349,12 +349,15 @@ let tests =
               let ids = rowsOf reloaded defaultDatabase "c" |> List.map (fun r -> r.[0])
               Expect.containsAll ids [ VInt 1L; VInt 2L ] "the FK-checks-disabled orphan row survives replay"
 
-          testCase "a GENERATED column fails loudly at CREATE TABLE time under --data-dir instead of silently degrading"
+          testCase "a GENERATED column's expression survives a restart, so writes after it still compute the right value"
           <| fun _ ->
               let dir = tempDataDir ()
               let store = load dir
               attach dir store
 
+              // `b AS (a * 2)` — a stand-in for Laravel Pulse's `key_hash
+              // ... AS (unhex(md5(key)))`, the real-world shape that
+              // motivated this.
               let genCol =
                   { Name = "b"
                     Type = TInt false
@@ -365,25 +368,31 @@ let tests =
                     Unique = false
                     Generated = Some(BinOp(Mul, Col "a", Lit(VInt 2L))) }
 
-              let createFails () =
-                  createTable
-                      store
-                      defaultDatabase
-                      "g"
-                      [ { Name = "a"
-                          Type = TInt false
-                          Nullable = true
-                          Default = None
-                          AutoIncrement = false
-                          PrimaryKey = false
-                          Unique = false
-                          Generated = None }
-                        genCol ]
-                      []
-                      []
-                  |> ignore
+              createTable
+                  store
+                  defaultDatabase
+                  "g"
+                  [ { Name = "a"
+                      Type = TInt false
+                      Nullable = true
+                      Default = None
+                      AutoIncrement = false
+                      PrimaryKey = false
+                      Unique = false
+                      Generated = None }
+                    genCol ]
+                  []
+                  []
+              |> ignore
 
-              Expect.throws createFails "encoding a GENERATED column's DDL into the WAL raises instead of quietly dropping the expression"
+              let reloaded = load dir
+
+              match scan reloaded defaultDatabase "g" with
+              | Ok(columns, _) ->
+                  match columns |> List.tryFind (fun c -> c.Name = "b") |> Option.bind (fun c -> c.Generated) with
+                  | Some(BinOp(Mul, Col "a", Lit(VInt 2L))) -> ()
+                  | other -> failtestf "expected the generated expression to survive the restart intact, got %A" other
+              | Error e -> failtestf "expected table 'g' to reload, got %A" e
 
           testCase "a crash between the fsynced .new snapshot and the WAL truncation still recovers the full catalog, no duplicates"
           <| fun _ ->
