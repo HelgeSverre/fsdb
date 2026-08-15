@@ -8,6 +8,7 @@
 module Fsdb.InformationSchema
 
 open System
+open System.Text.RegularExpressions
 open Fsdb.Ast
 open Fsdb.Value
 open Fsdb.Storage
@@ -379,3 +380,258 @@ let scan (catalog: Catalog) (name: string) : (ColumnDef list * Value[] list) opt
     | "REFERENTIAL_CONSTRAINTS" -> Some(referentialConstraintsColumns, referentialConstraintsRows catalog)
     | "SCHEMATA" -> Some(schemataColumns, schemataRows catalog)
     | _ -> None
+
+// ---------------------------------------------------------------------------
+// `SHOW TABLES / DATABASES / COLUMNS / CREATE TABLE / INDEX / TABLE STATUS`,
+// and `DESCRIBE` — MySQL's older, differently-shaped sibling of the
+// `information_schema` views above. `QueryHandler` still owns recognizing
+// these forms by text probe (regex over the raw SQL) and extracting their
+// arguments (db/table/LIKE pattern); once it has those, everything here is
+// "given a `Catalog` and already-parsed arguments, render the
+// `(columns, text rows)` `Executor.QueryResult.ResultSet` wants, or the
+// `(code, message)` an unknown database/table fails with" — colocated with
+// `information_schema`'s own row-builders (`tablesRows`/`columnsRows`/
+// `statisticsRows` above) since it's the same catalog-introspection job
+// under MySQL's other output shape, reusing the same per-column formatting
+// helpers (`columnTypeText`/`columnKey`/`defaultText`/`isStringy`) rather
+// than a second copy of them.
+// ---------------------------------------------------------------------------
+
+/// A `SHOW ...`/`DESCRIBE` result, ready for `QueryHandler` to lift straight
+/// into `ResultSet`/`Err`.
+type ShowResult = Result<string list * (string option list) list, int * string>
+
+/// Optional case-insensitive `LIKE 'pattern'` filter shared by every `SHOW
+/// ...` rendering function below — `None` (no `LIKE` clause given) always
+/// matches.
+let private likeFilter (likeOpt: string option) (name: string) : bool =
+    match likeOpt with
+    | None -> true
+    | Some pattern -> Regex.IsMatch(name, likeToRegex pattern, RegexOptions.IgnoreCase ||| RegexOptions.Singleline)
+
+/// Looks a table up straight off the catalog (rather than through
+/// `Storage.scan`, which only hands back columns/rows) since `SHOW
+/// COLUMNS`/`SHOW CREATE TABLE`/`SHOW INDEX` all need the whole
+/// `Storage.Table` — indexes and foreign keys included, not just its column
+/// list.
+let findTable (catalog: Catalog) (dbName: string) (tableName: string) : Result<Table, int * string> =
+    match Map.tryFind dbName catalog with
+    | None -> Error(1049, sprintf "Unknown database '%s'" dbName)
+    | Some db ->
+        match Map.tryFind (tableName.ToLowerInvariant()) db with
+        | Some t -> Ok t
+        | None -> Error(1146, sprintf "Table '%s' doesn't exist" tableName)
+
+/// `SHOW [FULL] TABLES [FROM db] [LIKE 'pattern']`.
+let showTables (catalog: Catalog) (dbName: string) (full: bool) (likeOpt: string option) : ShowResult =
+    match Map.tryFind dbName catalog with
+    | None -> Error(1049, sprintf "Unknown database '%s'" dbName)
+    | Some db ->
+        let names =
+            db |> Map.toList |> List.map (fun (_, t) -> t.OriginalName) |> List.filter (likeFilter likeOpt) |> List.sort
+
+        let col = sprintf "Tables_in_%s" dbName
+
+        if full then
+            Ok([ col; "Table_type" ], names |> List.map (fun n -> [ Some n; Some "BASE TABLE" ]))
+        else
+            Ok([ col ], names |> List.map (fun n -> [ Some n ]))
+
+/// `SHOW DATABASES [LIKE 'pattern']`.
+let showDatabases (catalog: Catalog) (likeOpt: string option) : string list * (string option list) list =
+    let names =
+        "information_schema" :: (catalog |> Map.toList |> List.map fst)
+        |> List.distinct
+        |> List.filter (likeFilter likeOpt)
+        |> List.sort
+
+    [ "Database" ], names |> List.map (fun n -> [ Some n ])
+
+/// `SHOW [FULL] COLUMNS FROM t [FROM db] [LIKE 'pattern']` and
+/// `DESCRIBE`/`DESC t` (which are just `SHOW COLUMNS`'s narrower 5-column
+/// form under a different name).
+let showColumns (catalog: Catalog) (full: bool) (dbName: string) (tableName: string) (likeOpt: string option) : ShowResult =
+    findTable catalog dbName tableName
+    |> Result.map (fun t ->
+        let isNullable (c: ColumnDef) = if c.PrimaryKey || not c.Nullable then "NO" else "YES"
+        let defaultCol (c: ColumnDef) = defaultText c.Default
+        let extra (c: ColumnDef) = if c.AutoIncrement then "auto_increment" else ""
+
+        let cols = t.Columns |> List.filter (fun c -> likeFilter likeOpt c.Name)
+
+        if full then
+            let rows =
+                cols
+                |> List.map (fun c ->
+                    [ Some c.Name
+                      Some(columnTypeText c.Type)
+                      (if isStringy c.Type then Some "utf8mb4_unicode_ci" else None)
+                      Some(isNullable c)
+                      Some(columnKey t c)
+                      defaultCol c
+                      Some(extra c)
+                      Some "select,insert,update,references"
+                      Some "" ])
+
+            [ "Field"; "Type"; "Collation"; "Null"; "Key"; "Default"; "Extra"; "Privileges"; "Comment" ], rows
+        else
+            let rows =
+                cols
+                |> List.map (fun c ->
+                    [ Some c.Name; Some(columnTypeText c.Type); Some(isNullable c); Some(columnKey t c); defaultCol c; Some(extra c) ])
+
+            [ "Field"; "Type"; "Null"; "Key"; "Default"; "Extra" ], rows)
+
+let private backtick (s: string) = "`" + s + "`"
+let private backtickCols = List.map backtick >> String.concat ", "
+
+/// Reconstructs plausible `CREATE TABLE` DDL from a table's stored metadata
+/// for `SHOW CREATE TABLE` — not the original DDL text (nothing keeps that
+/// around), a fresh rendering of the same columns/indexes/foreign keys, the
+/// same way real MySQL's `SHOW CREATE TABLE` itself re-derives its output
+/// from the catalog rather than echoing verbatim source.
+let private showCreateTableDDL (t: Table) : string =
+    let columnLine (c: ColumnDef) =
+        let notNull = if c.PrimaryKey || not c.Nullable then "NOT NULL" else ""
+
+        let defaultPart =
+            match defaultText c.Default with
+            | Some d when c.Default = Some DCurrentTimestamp -> sprintf "DEFAULT %s" d
+            | Some d -> sprintf "DEFAULT '%s'" d
+            | None -> if c.PrimaryKey || not c.Nullable then "" else "DEFAULT NULL"
+
+        let extra = if c.AutoIncrement then "AUTO_INCREMENT" else ""
+
+        [ backtick c.Name; columnTypeText c.Type; notNull; defaultPart; extra ]
+        |> List.filter ((<>) "")
+        |> String.concat " "
+
+    let pkCols = t.Columns |> List.filter (fun c -> c.PrimaryKey) |> List.map (fun c -> c.Name)
+    let pkLine = if pkCols.IsEmpty then [] else [ sprintf "PRIMARY KEY (%s)" (backtickCols pkCols) ]
+
+    let indexLines =
+        t.Indexes
+        |> List.map (fun ix -> sprintf "%sKEY %s (%s)" (if ix.Unique then "UNIQUE " else "") (backtick ix.Name) (backtickCols ix.Columns))
+
+    let fkLines =
+        t.ForeignKeys
+        |> List.map (fun fk ->
+            let onDelete = fk.OnDelete |> Option.map (sprintf " ON DELETE %s") |> Option.defaultValue ""
+            let onUpdate = fk.OnUpdate |> Option.map (sprintf " ON UPDATE %s") |> Option.defaultValue ""
+
+            sprintf
+                "CONSTRAINT %s FOREIGN KEY (%s) REFERENCES %s (%s)%s%s"
+                (backtick fk.Name)
+                (backtickCols fk.Columns)
+                (backtick fk.RefTable)
+                (backtickCols fk.RefColumns)
+                onDelete
+                onUpdate)
+
+    let lines = (t.Columns |> List.map columnLine) @ pkLine @ indexLines @ fkLines
+
+    sprintf
+        "CREATE TABLE %s (\n  %s\n) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci"
+        (backtick t.OriginalName)
+        (String.concat ",\n  " lines)
+
+/// `SHOW CREATE TABLE t`.
+let showCreateTable (catalog: Catalog) (dbName: string) (tableName: string) : ShowResult =
+    findTable catalog dbName tableName
+    |> Result.map (fun t -> [ "Table"; "Create Table" ], [ [ Some t.OriginalName; Some(showCreateTableDDL t) ] ])
+
+/// `SHOW INDEX|INDEXES|KEYS FROM t [FROM db]` — one row per index column,
+/// same shape `STATISTICS` (above) projects, just scoped to one table and
+/// under `SHOW`'s own (differently-cased) column names.
+let showIndex (catalog: Catalog) (dbName: string) (tableName: string) : ShowResult =
+    findTable catalog dbName tableName
+    |> Result.map (fun t ->
+        let pkCols = t.Columns |> List.filter (fun c -> c.PrimaryKey) |> List.map (fun c -> c.Name)
+        let primaryIndex = if pkCols.IsEmpty then [] else [ { Name = "PRIMARY"; Columns = pkCols; Unique = true } ]
+
+        let rows =
+            primaryIndex @ t.Indexes
+            |> List.collect (fun ix ->
+                ix.Columns
+                |> List.mapi (fun i colName ->
+                    [ Some t.OriginalName
+                      Some(if ix.Unique then "0" else "1")
+                      Some ix.Name
+                      Some(string (i + 1))
+                      Some colName
+                      Some "A"
+                      Some "0"
+                      None
+                      None
+                      Some "YES"
+                      Some "BTREE"
+                      Some ""
+                      Some "" ]))
+
+        [ "Table"
+          "Non_unique"
+          "Key_name"
+          "Seq_in_index"
+          "Column_name"
+          "Collation"
+          "Cardinality"
+          "Sub_part"
+          "Packed"
+          "Null"
+          "Index_type"
+          "Comment"
+          "Index_comment" ],
+        rows)
+
+/// `SHOW TABLE STATUS [FROM db] [LIKE 'pattern']`.
+let showTableStatus (catalog: Catalog) (dbName: string) (likeOpt: string option) : ShowResult =
+    match Map.tryFind dbName catalog with
+    | None -> Error(1049, sprintf "Unknown database '%s'" dbName)
+    | Some db ->
+        let rows =
+            db
+            |> Map.toList
+            |> List.map snd
+            |> List.filter (fun t -> likeFilter likeOpt t.OriginalName)
+            |> List.sortBy (fun t -> t.OriginalName)
+            |> List.map (fun t ->
+                [ Some t.OriginalName
+                  Some "InnoDB"
+                  Some "10"
+                  Some "Dynamic"
+                  Some(string (List.length t.Rows))
+                  Some "0"
+                  Some "16384"
+                  Some "0"
+                  Some "0"
+                  Some "0"
+                  Some(string t.NextAutoId)
+                  None
+                  None
+                  None
+                  Some "utf8mb4_unicode_ci"
+                  None
+                  Some ""
+                  Some "" ])
+
+        Ok(
+            [ "Name"
+              "Engine"
+              "Version"
+              "Row_format"
+              "Rows"
+              "Avg_row_length"
+              "Data_length"
+              "Max_data_length"
+              "Index_length"
+              "Data_free"
+              "Auto_increment"
+              "Create_time"
+              "Update_time"
+              "Check_time"
+              "Collation"
+              "Checksum"
+              "Create_options"
+              "Comment" ],
+            rows
+        )

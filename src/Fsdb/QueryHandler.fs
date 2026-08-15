@@ -206,22 +206,26 @@ let private handleShowVariables (session: Session) (sql: string) : QueryResult =
 // SHOW TABLES / DATABASES / COLUMNS / CREATE TABLE / INDEX / TABLE STATUS,
 // and DESCRIBE — matched by text probe like SHOW VARIABLES above, since
 // they're catalog-introspection statements read straight off `Storage`
-// rather than something `Executor` evaluates rows through. Column shapes
-// mirror real MySQL's `SHOW ...` output closely enough for mysql CLI and
-// Laravel's non-`information_schema` probes (`Schema::hasTable`, etc.) to
-// read what they expect.
+// rather than something `Executor` evaluates rows through. Just the probe
+// regexes and raw-SQL argument extraction live here; the actual
+// `(columns, rows)`/`(code, message)` rendering is `InformationSchema`'s
+// (colocated with its `information_schema`-view row-builders), reached via
+// `showResult` below.
 // ---------------------------------------------------------------------------
 
 let private likeSuffix (sql: string) : string option =
     let m = Regex.Match(sql, @"LIKE\s+'([^']*)'\s*$", RegexOptions.IgnoreCase)
     if m.Success then Some m.Groups.[1].Value else None
 
-let private likeFilter (likeOpt: string option) (name: string) : bool =
-    match likeOpt with
-    | None -> true
-    | Some pattern -> Regex.IsMatch(name, likeToRegex pattern, RegexOptions.IgnoreCase ||| RegexOptions.Singleline)
-
 let private stripBackticks (s: string) = s.Trim().Trim('`')
+
+/// Lifts an `InformationSchema.ShowResult` into `QueryResult` — the one spot
+/// `Ok`/`Error` become `ResultSet`/`Err`, so every `SHOW ...` case in
+/// `runProbe` below reads as plain data flow instead of repeating the match.
+let private showResult: InformationSchema.ShowResult -> QueryResult =
+    function
+    | Ok(cols, rows) -> ResultSet(cols, rows)
+    | Error(code, msg) -> Err(code, msg)
 
 let private showTablesRe =
     Regex(@"^SHOW\s+(FULL\s+)?TABLES(\s+FROM\s+(\S+))?", RegexOptions.IgnoreCase)
@@ -231,185 +235,20 @@ let private handleShowTables (session: Session) (sql: string) : QueryResult =
     let full = m.Groups.[1].Success
     let dbName = if m.Groups.[3].Success then stripBackticks m.Groups.[3].Value else session.Database |> Option.defaultValue defaultDatabase
 
-    match Map.tryFind dbName (Session.currentStore session).Catalog with
-    | None -> Err(1049, sprintf "Unknown database '%s'" dbName)
-    | Some db ->
-        let names =
-            db |> Map.toList |> List.map (fun (_, t) -> t.OriginalName) |> List.filter (likeFilter (likeSuffix sql)) |> List.sort
-
-        let col = sprintf "Tables_in_%s" dbName
-
-        if full then
-            ResultSet([ col; "Table_type" ], names |> List.map (fun n -> [ Some n; Some "BASE TABLE" ]))
-        else
-            ResultSet([ col ], names |> List.map (fun n -> [ Some n ]))
+    InformationSchema.showTables (Session.currentStore session).Catalog dbName full (likeSuffix sql) |> showResult
 
 let private handleShowDatabases (session: Session) (sql: string) : QueryResult =
-    let catalog = (Session.currentStore session).Catalog
-
-    let names =
-        "information_schema" :: (catalog |> Map.toList |> List.map fst)
-        |> List.distinct
-        |> List.filter (likeFilter (likeSuffix sql))
-        |> List.sort
-
-    ResultSet([ "Database" ], names |> List.map (fun n -> [ Some n ]))
-
-/// Looks a table up straight off the catalog snapshot (rather than through
-/// `Storage.scan`, which only hands back columns/rows) since `SHOW COLUMNS`/
-/// `SHOW CREATE TABLE`/`SHOW INDEX` all need the whole `Storage.Table` —
-/// indexes and foreign keys included, not just its column list.
-let private findTable (session: Session) (dbName: string) (tableName: string) : Result<Table, int * string> =
-    match Map.tryFind dbName (Session.currentStore session).Catalog with
-    | None -> Error(1049, sprintf "Unknown database '%s'" dbName)
-    | Some db ->
-        match Map.tryFind (tableName.ToLowerInvariant()) db with
-        | Some t -> Ok t
-        | None -> Error(1146, sprintf "Table '%s' doesn't exist" tableName)
+    InformationSchema.showDatabases (Session.currentStore session).Catalog (likeSuffix sql) |> ResultSet
 
 let private showColumnsRe =
     Regex(@"^SHOW\s+(FULL\s+)?COLUMNS\s+FROM\s+(\S+)(\s+FROM\s+(\S+))?", RegexOptions.IgnoreCase)
 
 let private describeRe = Regex(@"^(?:DESCRIBE|DESC)\s+(\S+)\s*$", RegexOptions.IgnoreCase)
 
-/// `SHOW [FULL] COLUMNS FROM t [FROM db]` and `DESCRIBE`/`DESC t` (which are
-/// just `SHOW COLUMNS`'s narrower 5-column form under a different name).
-let private handleShowColumns (session: Session) (full: bool) (dbName: string) (tableName: string) (likeOpt: string option) : QueryResult =
-    match findTable session dbName tableName with
-    | Error(code, msg) -> Err(code, msg)
-    | Ok t ->
-        let isNullable (c: Ast.ColumnDef) = if c.PrimaryKey || not c.Nullable then "NO" else "YES"
-        let defaultCol (c: Ast.ColumnDef) = InformationSchema.defaultText c.Default
-        let extra (c: Ast.ColumnDef) = if c.AutoIncrement then "auto_increment" else ""
-
-        let cols = t.Columns |> List.filter (fun c -> likeFilter likeOpt c.Name)
-
-        if full then
-            let rows =
-                cols
-                |> List.map (fun c ->
-                    [ Some c.Name
-                      Some(InformationSchema.columnTypeText c.Type)
-                      (if InformationSchema.isStringy c.Type then Some "utf8mb4_unicode_ci" else None)
-                      Some(isNullable c)
-                      Some(InformationSchema.columnKey t c)
-                      defaultCol c
-                      Some(extra c)
-                      Some "select,insert,update,references"
-                      Some "" ])
-
-            ResultSet([ "Field"; "Type"; "Collation"; "Null"; "Key"; "Default"; "Extra"; "Privileges"; "Comment" ], rows)
-        else
-            let rows =
-                cols
-                |> List.map (fun c ->
-                    [ Some c.Name; Some(InformationSchema.columnTypeText c.Type); Some(isNullable c); Some(InformationSchema.columnKey t c); defaultCol c; Some(extra c) ])
-
-            ResultSet([ "Field"; "Type"; "Null"; "Key"; "Default"; "Extra" ], rows)
-
-let private backtick (s: string) = "`" + s + "`"
-let private backtickCols = List.map backtick >> String.concat ", "
-
-/// Reconstructs plausible `CREATE TABLE` DDL from a table's stored metadata
-/// for `SHOW CREATE TABLE` — not the original DDL text (nothing keeps that
-/// around), a fresh rendering of the same columns/indexes/foreign keys, the
-/// same way real MySQL's `SHOW CREATE TABLE` itself re-derives its output
-/// from the catalog rather than echoing verbatim source.
-let private showCreateTableDDL (t: Table) : string =
-    let columnLine (c: Ast.ColumnDef) =
-        let notNull = if c.PrimaryKey || not c.Nullable then "NOT NULL" else ""
-
-        let defaultPart =
-            match InformationSchema.defaultText c.Default with
-            | Some d when c.Default = Some Ast.DCurrentTimestamp -> sprintf "DEFAULT %s" d
-            | Some d -> sprintf "DEFAULT '%s'" d
-            | None -> if c.PrimaryKey || not c.Nullable then "" else "DEFAULT NULL"
-
-        let extra = if c.AutoIncrement then "AUTO_INCREMENT" else ""
-
-        [ backtick c.Name; InformationSchema.columnTypeText c.Type; notNull; defaultPart; extra ]
-        |> List.filter ((<>) "")
-        |> String.concat " "
-
-    let pkCols = t.Columns |> List.filter (fun c -> c.PrimaryKey) |> List.map (fun c -> c.Name)
-    let pkLine = if pkCols.IsEmpty then [] else [ sprintf "PRIMARY KEY (%s)" (backtickCols pkCols) ]
-
-    let indexLines =
-        t.Indexes
-        |> List.map (fun ix -> sprintf "%sKEY %s (%s)" (if ix.Unique then "UNIQUE " else "") (backtick ix.Name) (backtickCols ix.Columns))
-
-    let fkLines =
-        t.ForeignKeys
-        |> List.map (fun fk ->
-            let onDelete = fk.OnDelete |> Option.map (sprintf " ON DELETE %s") |> Option.defaultValue ""
-            let onUpdate = fk.OnUpdate |> Option.map (sprintf " ON UPDATE %s") |> Option.defaultValue ""
-
-            sprintf
-                "CONSTRAINT %s FOREIGN KEY (%s) REFERENCES %s (%s)%s%s"
-                (backtick fk.Name)
-                (backtickCols fk.Columns)
-                (backtick fk.RefTable)
-                (backtickCols fk.RefColumns)
-                onDelete
-                onUpdate)
-
-    let lines = (t.Columns |> List.map columnLine) @ pkLine @ indexLines @ fkLines
-
-    sprintf
-        "CREATE TABLE %s (\n  %s\n) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci"
-        (backtick t.OriginalName)
-        (String.concat ",\n  " lines)
-
 let private showCreateTableRe = Regex(@"^SHOW\s+CREATE\s+TABLE\s+(\S+)\s*$", RegexOptions.IgnoreCase)
 
-/// `SHOW INDEX|INDEXES|KEYS FROM t [FROM db]` — one row per index column,
-/// same shape `InformationSchema`'s `STATISTICS` table projects, just scoped
-/// to one table and under `SHOW`'s own (differently-cased) column names.
 let private showIndexRe =
     Regex(@"^SHOW\s+(?:INDEX|INDEXES|KEYS)\s+FROM\s+(\S+)(\s+FROM\s+(\S+))?", RegexOptions.IgnoreCase)
-
-let private handleShowIndex (session: Session) (dbName: string) (tableName: string) : QueryResult =
-    match findTable session dbName tableName with
-    | Error(code, msg) -> Err(code, msg)
-    | Ok t ->
-        let pkCols = t.Columns |> List.filter (fun c -> c.PrimaryKey) |> List.map (fun c -> c.Name)
-        let primaryIndex = if pkCols.IsEmpty then [] else [ { Name = "PRIMARY"; Columns = pkCols; Unique = true } ]
-
-        let rows =
-            primaryIndex @ t.Indexes
-            |> List.collect (fun ix ->
-                ix.Columns
-                |> List.mapi (fun i colName ->
-                    [ Some t.OriginalName
-                      Some(if ix.Unique then "0" else "1")
-                      Some ix.Name
-                      Some(string (i + 1))
-                      Some colName
-                      Some "A"
-                      Some "0"
-                      None
-                      None
-                      Some "YES"
-                      Some "BTREE"
-                      Some ""
-                      Some "" ]))
-
-        ResultSet(
-            [ "Table"
-              "Non_unique"
-              "Key_name"
-              "Seq_in_index"
-              "Column_name"
-              "Collation"
-              "Cardinality"
-              "Sub_part"
-              "Packed"
-              "Null"
-              "Index_type"
-              "Comment"
-              "Index_comment" ],
-            rows
-        )
 
 let private showTableStatusRe = Regex(@"^SHOW\s+TABLE\s+STATUS(\s+FROM\s+(\S+))?", RegexOptions.IgnoreCase)
 
@@ -417,56 +256,7 @@ let private handleShowTableStatus (session: Session) (sql: string) : QueryResult
     let m = showTableStatusRe.Match sql
     let dbName = if m.Groups.[2].Success then stripBackticks m.Groups.[2].Value else session.Database |> Option.defaultValue defaultDatabase
 
-    match Map.tryFind dbName (Session.currentStore session).Catalog with
-    | None -> Err(1049, sprintf "Unknown database '%s'" dbName)
-    | Some db ->
-        let rows =
-            db
-            |> Map.toList
-            |> List.map snd
-            |> List.filter (fun t -> likeFilter (likeSuffix sql) t.OriginalName)
-            |> List.sortBy (fun t -> t.OriginalName)
-            |> List.map (fun t ->
-                [ Some t.OriginalName
-                  Some "InnoDB"
-                  Some "10"
-                  Some "Dynamic"
-                  Some(string (List.length t.Rows))
-                  Some "0"
-                  Some "16384"
-                  Some "0"
-                  Some "0"
-                  Some "0"
-                  Some(string t.NextAutoId)
-                  None
-                  None
-                  None
-                  Some "utf8mb4_unicode_ci"
-                  None
-                  Some ""
-                  Some "" ])
-
-        ResultSet(
-            [ "Name"
-              "Engine"
-              "Version"
-              "Row_format"
-              "Rows"
-              "Avg_row_length"
-              "Data_length"
-              "Max_data_length"
-              "Index_length"
-              "Data_free"
-              "Auto_increment"
-              "Create_time"
-              "Update_time"
-              "Check_time"
-              "Collation"
-              "Checksum"
-              "Create_options"
-              "Comment" ],
-            rows
-        )
+    InformationSchema.showTableStatus (Session.currentStore session).Catalog dbName (likeSuffix sql) |> showResult
 
 /// Returns the (possibly updated) session alongside the result: statements
 /// like USE and SET change session state, and threading it through the
@@ -807,24 +597,21 @@ let private runProbe (session: Session) (sql: string) (probe: Probe) : Session *
     | ShowCreate name ->
         let sessionDb = session.Database |> Option.defaultValue defaultDatabase
         let dbName, table = splitQualified sessionDb name
-
-        match findTable session dbName table with
-        | Error(code, msg) -> session, Err(code, msg)
-        | Ok t -> session, ResultSet([ "Table"; "Create Table" ], [ [ Some t.OriginalName; Some(showCreateTableDDL t) ] ])
+        session, InformationSchema.showCreateTable (Session.currentStore session).Catalog dbName table |> showResult
     | ShowColumns(full, name, dbOverride) ->
         let sessionDb = session.Database |> Option.defaultValue defaultDatabase
         let dbName, table = splitQualified sessionDb name
         let dbName = dbOverride |> Option.map stripBackticks |> Option.defaultValue dbName
-        session, handleShowColumns session full dbName table (likeSuffix sql)
+        session, InformationSchema.showColumns (Session.currentStore session).Catalog full dbName table (likeSuffix sql) |> showResult
     | Describe name ->
         let sessionDb = session.Database |> Option.defaultValue defaultDatabase
         let dbName, table = splitQualified sessionDb name
-        session, handleShowColumns session false dbName table None
+        session, InformationSchema.showColumns (Session.currentStore session).Catalog false dbName table None |> showResult
     | ShowIndex(name, dbOverride) ->
         let sessionDb = session.Database |> Option.defaultValue defaultDatabase
         let dbName, table = splitQualified sessionDb name
         let dbName = dbOverride |> Option.map stripBackticks |> Option.defaultValue dbName
-        session, handleShowIndex session dbName table
+        session, InformationSchema.showIndex (Session.currentStore session).Catalog dbName table |> showResult
 
 /// Parses and validates SQL for COM_STMT_PREPARE without executing it: a
 /// parse failure is the same 1064 (code, message) pair a COM_QUERY syntax
