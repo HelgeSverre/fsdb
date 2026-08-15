@@ -760,15 +760,16 @@ let private tableRef: Parser<TableRef, unit> =
         | None -> { Database = None; Table = first; Alias = alias }
 
 selectStmtRecordRef.Value <-
-    (keyword "SELECT" >>. sepBy1 projection (sym ",")
+    (keyword "SELECT" >>. opt (keyword "DISTINCT") .>>. sepBy1 projection (sym ",")
      .>>. opt (keyword "FROM" >>. tableRef)
      .>>. opt (keyword "WHERE" >>. expr)
      .>>. opt (keyword "ORDER" >>. keyword "BY" >>. sepBy1 orderKey (sym ","))
      .>>. opt limitClause)
-    |>> fun ((((projs, from), where), orderBy), limitOffset) ->
+    |>> fun (((((distinct, projs), from), where), orderBy), limitOffset) ->
         let limit, offset = limitOffset |> Option.defaultValue (None, None)
 
         { Projections = projs
+          Distinct = distinct.IsSome
           From = from
           Where = where
           OrderBy = orderBy |> Option.defaultValue []

@@ -572,9 +572,19 @@ and private runSelect
         | Ok maybeKeyed ->
             let keyed = maybeKeyed |> List.choose id
 
-            match keyed |> sortRows |> List.map snd |> applyLimitOffset limit offset |> traverse projectRow with
+            // Projects every sorted row *before* LIMIT/OFFSET (rather than
+            // after, as a non-DISTINCT `SELECT` could) so `DISTINCT` can
+            // dedupe on the projected columns while still honoring ORDER
+            // BY's row order (first occurrence wins) — deduping post-LIMIT
+            // would undercount, and deduping on the raw pre-projection row
+            // would miss two source rows that only agree on the columns
+            // actually selected.
+            match keyed |> sortRows |> List.map snd |> traverse projectRow with
             | Error(code, message) -> Err(code, message)
-            | Ok projectedRows -> ResultSet(colNames, projectedRows |> List.map (List.map (snd >> toText)))
+            | Ok projectedRows ->
+                let textRows = projectedRows |> List.map (List.map (snd >> toText))
+                let deduped = if select.Distinct then List.distinct textRows else textRows
+                ResultSet(colNames, deduped |> applyLimitOffset limit offset)
 
 /// Assigns `assignments` (already resolved to column indices) to a copy of
 /// `row`, evaluating each right-hand side against the row's original

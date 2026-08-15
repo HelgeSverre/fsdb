@@ -24,6 +24,7 @@ let private mkSelect
     : Statement =
     Select
         { Projections = projections
+          Distinct = false
           From = from |> Option.map (fun t -> { Database = None; Table = t; Alias = None })
           Where = where
           OrderBy = orderBy
@@ -42,12 +43,19 @@ let tests =
                         (mkSelect([ Star, None ], Some "t", None, [], None, None))
                         "select star"
 
+                testCase "SELECT DISTINCT col FROM t sets Distinct"
+                <| fun _ ->
+                    match parseOk "SELECT DISTINCT name FROM t" with
+                    | Select { Distinct = true; Projections = [ Col "name", None ] } -> ()
+                    | other -> failtestf "expected Distinct = true, got %A" other
+
                 testCase "FROM db.table AS alias parses a qualified, aliased TableRef"
                 <| fun _ ->
                     Expect.equal
                         (parseOk "SELECT * FROM information_schema.tables AS t")
                         (Select
                             { Projections = [ Star, None ]
+                              Distinct = false
                               From = Some { Database = Some "information_schema"; Table = "tables"; Alias = Some "t" }
                               Where = None
                               OrderBy = []
@@ -61,6 +69,7 @@ let tests =
                         (parseOk "SELECT * FROM t x")
                         (Select
                             { Projections = [ Star, None ]
+                              Distinct = false
                               From = Some { Database = None; Table = "t"; Alias = Some "x" }
                               Where = None
                               OrderBy = []

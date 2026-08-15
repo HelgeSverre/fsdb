@@ -147,6 +147,7 @@ and TableRef =
 /// does.
 and SelectStmt =
     { Projections: Projection list
+      Distinct: bool
       From: TableRef option
       Where: Expr option
       OrderBy: OrderKey list

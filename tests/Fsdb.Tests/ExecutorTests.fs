@@ -715,4 +715,27 @@ let tests =
 
                     match runDefault store "SELECT u.id FROM u AS x" with
                     | Err(1054, _) -> ()
-                    | other -> failtestf "expected the pre-alias table name to no longer resolve, got %A" other ] ]
+                    | other -> failtestf "expected the pre-alias table name to no longer resolve, got %A" other ]
+
+          testList
+              "SELECT DISTINCT"
+              [ testCase "SELECT DISTINCT dedupes on the projected columns, preserving first-occurrence order"
+                <| fun _ ->
+                    let store = newStore ()
+                    runDefault store "CREATE TABLE u (name VARCHAR(10))" |> ignore
+                    runDefault store "INSERT INTO u VALUES ('bob'), ('alice'), ('bob'), ('alice'), ('carol')" |> ignore
+
+                    match runDefault store "SELECT DISTINCT name FROM u ORDER BY name" with
+                    | ResultSet([ "name" ], rows) ->
+                        Expect.equal rows [ [ Some "alice" ]; [ Some "bob" ]; [ Some "carol" ] ] "three distinct names, sorted"
+                    | other -> failtestf "expected a deduped resultset, got %A" other
+
+                testCase "SELECT DISTINCT applies LIMIT to the deduped set, not the raw row count"
+                <| fun _ ->
+                    let store = newStore ()
+                    runDefault store "CREATE TABLE u (name VARCHAR(10))" |> ignore
+                    runDefault store "INSERT INTO u VALUES ('a'), ('a'), ('a'), ('b')" |> ignore
+
+                    match runDefault store "SELECT DISTINCT name FROM u ORDER BY name LIMIT 1" with
+                    | ResultSet([ "name" ], [ [ Some "a" ] ]) -> ()
+                    | other -> failtestf "expected LIMIT 1 to keep only the first distinct row, got %A" other ] ]
