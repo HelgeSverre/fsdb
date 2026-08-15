@@ -26,6 +26,7 @@ let private mkSelect
         { Projections = projections
           Distinct = false
           From = from |> Option.map (fun t -> { Database = None; Table = t; Alias = None })
+          Joins = []
           Where = where
           OrderBy = orderBy
           Limit = limit
@@ -57,6 +58,7 @@ let tests =
                             { Projections = [ Star, None ]
                               Distinct = false
                               From = Some { Database = Some "information_schema"; Table = "tables"; Alias = Some "t" }
+                              Joins = []
                               Where = None
                               OrderBy = []
                               Limit = None
@@ -71,6 +73,7 @@ let tests =
                             { Projections = [ Star, None ]
                               Distinct = false
                               From = Some { Database = None; Table = "t"; Alias = Some "x" }
+                              Joins = []
                               Where = None
                               OrderBy = []
                               Limit = None

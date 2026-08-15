@@ -164,15 +164,24 @@ let private likeOp (subject: Value) (pattern: Value) : Value =
 type private EvalContext =
     { Registry: Registry
       ColumnIndex: Map<string, int>
-      /// The lowercased alias-or-table-name a `QualifiedCol` must match to
-      /// resolve — `None` when there's no table in scope at all (e.g. a
-      /// literal `INSERT ... VALUES` row). Single-table only for now (see
-      /// `QualifiedCol`'s match in `evalExpr`); grows into a set once JOINs
-      /// bring more than one source into scope.
-      Qualifier: string option
+      /// Per-source-table resolution for `QualifiedCol`: lowercased alias-
+      /// or-table-name -> that source's own column list plus the offset its
+      /// columns start at within `Row` (`Row` is one table's columns for a
+      /// plain `FROM`, or every joined table's columns concatenated
+      /// left-to-right for a JOIN — see `Executor.applyJoin`). Empty when
+      /// there's no table in scope at all (e.g. a literal `INSERT ...
+      /// VALUES` row), so any `QualifiedCol` there is a clean unknown-column
+      /// error instead of an index-out-of-range.
+      Qualifiers: Map<string, ColumnDef list * int>
       Row: Value[]
       Store: Store
       DbName: string }
+
+/// `EvalContext.Qualifiers` for a single unaliased/aliased table in scope —
+/// every non-JOIN statement (`UPDATE`, `DELETE`, `INSERT ... ON DUPLICATE
+/// KEY UPDATE`) builds it this way, one entry at offset 0.
+let private singleQualifier (name: string) (columns: ColumnDef list) : Map<string, ColumnDef list * int> =
+    Map.ofList [ name.ToLowerInvariant(), (columns, 0) ]
 
 /// Evaluates one expression against one row. Three-valued logic throughout
 /// (comparisons/AND/OR/NOT return `VNull` — SQL's "unknown" — rather than a
@@ -190,9 +199,12 @@ let rec private evalExpr (ctx: EvalContext) (expr: Expr) : Result<Value, EvalErr
         | Some i -> Ok ctx.Row.[i]
         | None -> Error(unknownColumn name)
     | QualifiedCol(table, col) ->
-        match ctx.Qualifier with
-        | Some q when System.String.Equals(q, table, System.StringComparison.OrdinalIgnoreCase) -> eval (Col col)
-        | _ -> Error(unknownColumn (sprintf "%s.%s" table col))
+        match Map.tryFind (table.ToLowerInvariant()) ctx.Qualifiers with
+        | None -> Error(unknownColumn (sprintf "%s.%s" table col))
+        | Some(cols, offset) ->
+            match cols |> List.tryFindIndex (fun c -> System.String.Equals(c.Name, col, System.StringComparison.OrdinalIgnoreCase)) with
+            | Some idx -> Ok ctx.Row.[offset + idx]
+            | None -> Error(unknownColumn (sprintf "%s.%s" table col))
     | Not e -> eval e |> Result.map (fun v -> truthy v |> Option.map (not >> boolToValue) |> Option.defaultValue VNull)
     | IsNull e -> eval e |> Result.map (function VNull -> VInt 1L | _ -> VInt 0L)
     | IsNotNull e -> eval e |> Result.map (function VNull -> VInt 0L | _ -> VInt 1L)
@@ -296,31 +308,98 @@ let rec private evalExpr (ctx: EvalContext) (expr: Expr) : Result<Value, EvalErr
         // records, nothing else reaches here), so `Affected` can't occur.
         | Affected _ -> Ok VNull
 
+/// Resolves one `TableRef` (a real table, or `information_schema`'s virtual
+/// one) to its columns and rows — the one place both the base `FROM` and
+/// every `JOIN` target resolve through, so there's exactly one
+/// `information_schema` special case rather than one per call site.
+and private resolveTableRef (store: Store) (dbName: string) (tableRef: TableRef) : Result<ColumnDef list * Value[] list, QueryResult> =
+    let tableDb = tableRef.Database |> Option.defaultValue dbName
+
+    if System.String.Equals(tableDb, "information_schema", System.StringComparison.OrdinalIgnoreCase) then
+        match InformationSchema.scan store.Catalog tableRef.Table with
+        | Some(columns, rows) -> Ok(columns, rows)
+        | None -> Error(storageErr (NoSuchTable tableRef.Table))
+    else
+        match scan store tableDb tableRef.Table with
+        | Error e -> Error(storageErr e)
+        | Ok(columns, rows) -> Ok(columns, List.ofSeq rows)
+
+/// `EvalContext.Qualifiers` for every source (the `FROM` table, and each
+/// `JOIN` after it) already resolved into `sources`, ordered the same
+/// left-to-right way their columns are laid out in a combined row —
+/// offsets accumulate across the fold, so source *n*'s columns start right
+/// where source *n-1*'s end.
+and private qualifierRanges (sources: (string * ColumnDef list) list) : Map<string, ColumnDef list * int> =
+    sources
+    |> List.fold (fun (offset, quals) (qualifier, cols) -> offset + List.length cols, Map.add (qualifier.ToLowerInvariant()) (cols, offset) quals) (0, Map.empty)
+    |> snd
+
+/// Applies one `JOIN` clause against whatever's already in scope
+/// (`sourcesSoFar`/`rowsSoFar`, built by the `FROM` table and any earlier
+/// `JOIN`s in the same list): resolves the joined table, then for every row
+/// already in scope, evaluates `join.On` against it paired with each of the
+/// joined table's rows. `INNER JOIN` keeps only the pairs where `On` is
+/// true; `LEFT JOIN` also keeps a left-hand row that matched nothing, with
+/// the joined table's columns padded `NULL` (standard outer-join
+/// semantics). A nested loop, not a hash join — fine at the row counts a
+/// migration/test table holds; ponytail: revisit if a JOIN over a
+/// realistically large table ever shows up in a profile.
+and private applyJoin
+    (store: Store)
+    (registry: Registry)
+    (dbName: string)
+    ((sourcesSoFar, rowsSoFar): (string * ColumnDef list) list * Value[] list)
+    (join: Join)
+    : Result<(string * ColumnDef list) list * Value[] list, QueryResult> =
+    match resolveTableRef store dbName join.Table with
+    | Error e -> Error e
+    | Ok(joinColumns, joinRows) ->
+        let joinQualifier = join.Table.Alias |> Option.defaultValue join.Table.Table
+        let newSources = sourcesSoFar @ [ joinQualifier, joinColumns ]
+        let qualifiers = qualifierRanges newSources
+        let combinedColumnsSoFar = sourcesSoFar |> List.collect snd
+        let nullPadding = joinColumns |> List.map (fun _ -> VNull) |> Array.ofList
+
+        let ctxFor (row: Value[]) : EvalContext =
+            { Registry = registry
+              ColumnIndex = columnIndexOf (combinedColumnsSoFar @ joinColumns)
+              Qualifiers = qualifiers
+              Row = row
+              Store = store
+              DbName = dbName }
+
+        let matchOne (leftRow: Value[]) : Result<Value[] list, EvalError> =
+            joinRows
+            |> traverse (fun rightRow ->
+                let combined = Array.append leftRow rightRow
+                evalExpr (ctxFor combined) join.On |> Result.map (fun v -> truthy v = Some true, combined))
+            |> Result.map (fun flagged ->
+                match join.Kind, flagged |> List.filter fst |> List.map snd with
+                | LeftJoin, [] -> [ Array.append leftRow nullPadding ]
+                | _, matched -> matched)
+
+        match rowsSoFar |> traverse matchOne with
+        | Error(code, message) -> Error(Err(code, message))
+        | Ok rowGroups -> Ok(newSources, List.concat rowGroups)
+
 /// Resolves a `SELECT`'s `FROM` (a real table, `information_schema`'s
-/// virtual one, or none) and runs `select` against it — the `Statement`
-/// case's `Select` branch and `Exists`' nested subquery both fund into this
-/// one place rather than each re-implementing the `information_schema`
-/// special case.
+/// virtual one, or none) plus every `JOIN` after it, and runs `select`
+/// against the combined result — the `Statement` case's `Select` branch and
+/// `Exists`' nested subquery both fund into this one place rather than each
+/// re-implementing the `information_schema`/join-materialization logic.
 and private runSelectStmt (store: Store) (registry: Registry) (dbName: string) (select: SelectStmt) : QueryResult =
     match select.From with
-    | None -> runSelect store registry dbName [] [ [||] ] select
+    | None -> runSelect store registry dbName [] Map.empty [ [||] ] select
     | Some tableRef ->
-        let tableDb = tableRef.Database |> Option.defaultValue dbName
+        match resolveTableRef store dbName tableRef with
+        | Error e -> e
+        | Ok(baseColumns, baseRows) ->
+            let baseQualifier = tableRef.Alias |> Option.defaultValue tableRef.Table
+            let initial : Result<(string * ColumnDef list) list * Value[] list, QueryResult> = Ok([ baseQualifier, baseColumns ], baseRows)
 
-        if System.String.Equals(tableDb, "information_schema", System.StringComparison.OrdinalIgnoreCase) then
-            match InformationSchema.scan store.Catalog tableRef.Table with
-            | Some(columns, rows) -> runSelect store registry dbName columns rows select
-            | None -> storageErr (NoSuchTable tableRef.Table)
-        else
-            match scan store tableDb tableRef.Table with
-            | Error e -> storageErr e
-            | Ok(columns, rows) -> runSelect store registry dbName columns (List.ofSeq rows) select
-
-/// The lowercased alias-or-table-name a `QualifiedCol` in this `select`'s
-/// scope must match — `None` for a `FROM`-less `SELECT`. Single-table only,
-/// same limit as `EvalContext.Qualifier`.
-and private qualifierOf (select: SelectStmt) : string option =
-    select.From |> Option.map (fun t -> (t.Alias |> Option.defaultValue t.Table).ToLowerInvariant())
+            match select.Joins |> List.fold (fun acc join -> acc |> Result.bind (fun combined -> applyJoin store registry dbName combined join)) initial with
+            | Error e -> e
+            | Ok(sources, rows) -> runSelect store registry dbName (sources |> List.collect snd) (qualifierRanges sources) rows select
 
 and private applyLimitOffset (limit: int option) (offset: int option) (rows: 'a list) : 'a list =
     let afterOffset =
@@ -424,16 +503,16 @@ and private runAggregateSelect
     (registry: Registry)
     (dbName: string)
     (columns: ColumnDef list)
+    (qualifiers: Map<string, ColumnDef list * int>)
     (rows: Value[] list)
     (select: SelectStmt)
     : QueryResult =
     let columnIndex = columnIndexOf columns
-    let qualifier = qualifierOf select
 
     let ctxFor (row: Value[]) : EvalContext =
         { Registry = registry
           ColumnIndex = columnIndex
-          Qualifier = qualifier
+          Qualifiers = qualifiers
           Row = row
           Store = store
           DbName = dbName }
@@ -475,6 +554,7 @@ and private runSelect
     (registry: Registry)
     (dbName: string)
     (columns: ColumnDef list)
+    (qualifiers: Map<string, ColumnDef list * int>)
     (rows: Value[] list)
     (select: SelectStmt)
     : QueryResult =
@@ -488,16 +568,15 @@ and private runSelect
     if select.From.IsNone && projections |> List.exists (fst >> (=) Star) then
         Err(1096, "No tables used")
     elif projections |> List.exists (fst >> containsAggregate registry) then
-        runAggregateSelect store registry dbName columns rows select
+        runAggregateSelect store registry dbName columns qualifiers rows select
     else
 
     let columnIndex = columnIndexOf columns
-    let qualifier = qualifierOf select
 
     let ctxFor (row: Value[]) : EvalContext =
         { Registry = registry
           ColumnIndex = columnIndex
-          Qualifier = qualifier
+          Qualifiers = qualifiers
           Row = row
           Store = store
           DbName = dbName }
@@ -598,14 +677,14 @@ let private applyAssignments
     (registry: Registry)
     (dbName: string)
     (columnIndex: Map<string, int>)
-    (qualifier: string option)
+    (qualifiers: Map<string, ColumnDef list * int>)
     (assignments: (int * Expr) list)
     (row: Value[])
     : Result<Value[], StorageError> =
     let ctx =
         { Registry = registry
           ColumnIndex = columnIndex
-          Qualifier = qualifier
+          Qualifiers = qualifiers
           Row = row
           Store = store
           DbName = dbName }
@@ -745,7 +824,7 @@ let execute (store: Store) (registry: Registry) (dbName: string) (lastInsertId: 
         let literalCtx =
             { Registry = registry
               ColumnIndex = Map.empty
-              Qualifier = None
+              Qualifiers = Map.empty
               Row = [||]
               Store = store
               DbName = dbName }
@@ -770,7 +849,7 @@ let execute (store: Store) (registry: Registry) (dbName: string) (lastInsertId: 
                         let ctx =
                             { Registry = registry
                               ColumnIndex = columnIndex
-                              Qualifier = Some(table.ToLowerInvariant())
+                              Qualifiers = singleQualifier table tableColumns
                               Row = existing
                               Store = store
                               DbName = dbName }
@@ -807,12 +886,12 @@ let execute (store: Store) (registry: Registry) (dbName: string) (lastInsertId: 
             match assignments |> traverse (fun (name, expr) -> resolveColumn columns name |> Result.map (fun i -> i, expr)) with
             | Error e -> lastInsertId, storageErr e
             | Ok indexedAssignments ->
-                let qualifier = Some(table.ToLowerInvariant())
+                let qualifiers = singleQualifier table columns
 
                 let ctxFor row =
                     { Registry = registry
                       ColumnIndex = columnIndex
-                      Qualifier = qualifier
+                      Qualifiers = qualifiers
                       Row = row
                       Store = store
                       DbName = dbName }
@@ -834,7 +913,7 @@ let execute (store: Store) (registry: Registry) (dbName: string) (lastInsertId: 
                 | Error(code, message) -> lastInsertId, Err(code, message)
                 | Ok _ ->
                     let predicate row = check row |> Result.mapError ExpressionError
-                    let updater row = applyAssignments store registry dbName columnIndex qualifier indexedAssignments row
+                    let updater row = applyAssignments store registry dbName columnIndex qualifiers indexedAssignments row
 
                     match updateRows store db table predicate updater with
                     | Ok affected -> lastInsertId, Affected(uint64 affected)
@@ -851,7 +930,7 @@ let execute (store: Store) (registry: Registry) (dbName: string) (lastInsertId: 
             let ctxFor row =
                 { Registry = registry
                   ColumnIndex = columnIndex
-                  Qualifier = Some(table.ToLowerInvariant())
+                  Qualifiers = singleQualifier table columns
                   Row = row
                   Store = store
                   DbName = dbName }

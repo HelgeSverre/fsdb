@@ -140,6 +140,22 @@ and TableRef =
       Table: string
       Alias: string option }
 
+/// `INNER JOIN` requires a matching row on `On`; `LEFT JOIN` keeps every
+/// left-hand row even without one, padding the right-hand columns with
+/// `NULL` (SQL's standard outer-join semantics).
+and JoinKind =
+    | InnerJoin
+    | LeftJoin
+
+/// One `[INNER | LEFT [OUTER]] JOIN table ON expr` clause, applied against
+/// whatever's already in scope to its left (the `FROM` table, or the result
+/// of an earlier `Join` in the same list — this engine only ever nests
+/// joins left-to-right, matching how they're written).
+and Join =
+    { Kind: JoinKind
+      Table: TableRef
+      On: Expr }
+
 /// A `SELECT` statement's clauses as a record rather than a positional
 /// tuple: every clause after `SELECT ... FROM` is optional and grows
 /// independently (M5 adds `GroupBy`/`Having`), so a record avoids a breaking
@@ -149,6 +165,7 @@ and SelectStmt =
     { Projections: Projection list
       Distinct: bool
       From: TableRef option
+      Joins: Join list
       Where: Expr option
       OrderBy: OrderKey list
       Limit: int option

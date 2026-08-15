@@ -105,7 +105,12 @@ let private reservedWords =
           "constraint"
           "foreign"
           "references"
-          "cast" ],
+          "cast"
+          "join"
+          "inner"
+          "left"
+          "outer"
+          "on" ],
         StringComparer.OrdinalIgnoreCase
     )
 
@@ -759,18 +764,33 @@ let private tableRef: Parser<TableRef, unit> =
         | Some table -> { Database = Some first; Table = table; Alias = alias }
         | None -> { Database = None; Table = first; Alias = alias }
 
+/// `[INNER] JOIN` and `LEFT [OUTER] JOIN` — the only two kinds `Ast.JoinKind`
+/// has; a bare `JOIN` (no `INNER`) means the same as `INNER JOIN`, matching
+/// MySQL.
+let private joinKind: Parser<JoinKind, unit> =
+    (keyword "INNER" >>. keyword "JOIN" >>% InnerJoin)
+    <|> (keyword "LEFT" >>. optional (keyword "OUTER") >>. keyword "JOIN" >>% LeftJoin)
+    <|> (keyword "JOIN" >>% InnerJoin)
+
+let private joinClause: Parser<Join, unit> =
+    (joinKind .>>. tableRef .>> keyword "ON" .>>. expr)
+    |>> fun ((kind, table), onExpr) -> { Kind = kind; Table = table; On = onExpr }
+
 selectStmtRecordRef.Value <-
     (keyword "SELECT" >>. opt (keyword "DISTINCT") .>>. sepBy1 projection (sym ",")
-     .>>. opt (keyword "FROM" >>. tableRef)
+     .>>. opt (keyword "FROM" >>. tableRef .>>. many joinClause)
      .>>. opt (keyword "WHERE" >>. expr)
      .>>. opt (keyword "ORDER" >>. keyword "BY" >>. sepBy1 orderKey (sym ","))
      .>>. opt limitClause)
-    |>> fun (((((distinct, projs), from), where), orderBy), limitOffset) ->
+    |>> fun (((((distinct, projs), fromAndJoins), where), orderBy), limitOffset) ->
         let limit, offset = limitOffset |> Option.defaultValue (None, None)
+        let from = fromAndJoins |> Option.map fst
+        let joins = fromAndJoins |> Option.map snd |> Option.defaultValue []
 
         { Projections = projs
           Distinct = distinct.IsSome
           From = from
+          Joins = joins
           Where = where
           OrderBy = orderBy |> Option.defaultValue []
           Limit = limit

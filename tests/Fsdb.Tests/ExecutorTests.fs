@@ -738,4 +738,47 @@ let tests =
 
                     match runDefault store "SELECT DISTINCT name FROM u ORDER BY name LIMIT 1" with
                     | ResultSet([ "name" ], [ [ Some "a" ] ]) -> ()
-                    | other -> failtestf "expected LIMIT 1 to keep only the first distinct row, got %A" other ] ]
+                    | other -> failtestf "expected LIMIT 1 to keep only the first distinct row, got %A" other ]
+
+          testList
+              "JOIN"
+              [ testCase "INNER JOIN matches rows across two aliased instances of the same table"
+                <| fun _ ->
+                    // Verbatim repro from the review finding: JOIN was
+                    // entirely unimplemented (1064 syntax error) even though
+                    // table aliases themselves already parsed fine.
+                    let store = newStore ()
+                    runDefault store "CREATE TABLE crud (id INT, name VARCHAR(10), qty INT)" |> ignore
+                    runDefault store "INSERT INTO crud VALUES (1, 'widget', 5), (2, 'gadget', 9)" |> ignore
+
+                    match runDefault store "SELECT c.name, d.qty FROM crud AS c INNER JOIN crud AS d ON c.id = d.id ORDER BY c.id" with
+                    | ResultSet([ "name"; "qty" ], rows) ->
+                        Expect.equal rows [ [ Some "widget"; Some "5" ]; [ Some "gadget"; Some "9" ] ] "each row joined to itself"
+                    | other -> failtestf "expected a joined resultset, got %A" other
+
+                testCase "INNER JOIN between two different tables, and it drops unmatched rows"
+                <| fun _ ->
+                    let store = newStore ()
+                    runDefault store "CREATE TABLE users (id INT, name VARCHAR(10))" |> ignore
+                    runDefault store "CREATE TABLE posts (id INT, user_id INT, title VARCHAR(20))" |> ignore
+                    runDefault store "INSERT INTO users VALUES (1, 'alice'), (2, 'bob')" |> ignore
+                    // bob (user_id 2) has no post; alice has two.
+                    runDefault store "INSERT INTO posts VALUES (1, 1, 'first'), (2, 1, 'second')" |> ignore
+
+                    match runDefault store "SELECT users.name, posts.title FROM users JOIN posts ON users.id = posts.user_id ORDER BY posts.id" with
+                    | ResultSet([ "name"; "title" ], rows) ->
+                        Expect.equal rows [ [ Some "alice"; Some "first" ]; [ Some "alice"; Some "second" ] ] "only alice's matching posts"
+                    | other -> failtestf "expected a joined resultset, got %A" other
+
+                testCase "LEFT JOIN keeps an unmatched left row, padding the right side with NULL"
+                <| fun _ ->
+                    let store = newStore ()
+                    runDefault store "CREATE TABLE users (id INT, name VARCHAR(10))" |> ignore
+                    runDefault store "CREATE TABLE posts (id INT, user_id INT, title VARCHAR(20))" |> ignore
+                    runDefault store "INSERT INTO users VALUES (1, 'alice'), (2, 'bob')" |> ignore
+                    runDefault store "INSERT INTO posts VALUES (1, 1, 'first')" |> ignore
+
+                    match runDefault store "SELECT users.name, posts.title FROM users LEFT JOIN posts ON users.id = posts.user_id ORDER BY users.id" with
+                    | ResultSet([ "name"; "title" ], rows) ->
+                        Expect.equal rows [ [ Some "alice"; Some "first" ]; [ Some "bob"; None ] ] "bob survives with a NULL title"
+                    | other -> failtestf "expected a joined resultset, got %A" other ] ]
