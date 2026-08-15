@@ -43,3 +43,18 @@ README's compilable example builds against `Fsdb.dll` as written, and
 `tests/Fsdb.Tests/IntegrationTests.fs`'s "Db.registerScalar/registerAggregate
 are queryable over the wire" test proves SLUGIFY/MEDIAN work over a real
 MySqlConnector connection)
+
+## M7 — Persistence
+Opt-in durability via `--data-dir`: WAL + snapshot, replay on startup.
+Default stays pure in-memory (tests unchanged).
+**Gate:** with --data-dir: `artisan migrate`, restart fsdb, `migrate` says
+"Nothing to migrate"; plus kill -9 mid-write leaves committed data intact
+and replayable. Status: ☐
+
+## M8 — EXPLAIN + honest semantics cleanups
+EXPLAIN (tabular, truthful about our all-scans executor), multi-table
+UPDATE/DELETE with JOINs, real UPDATE/DELETE ORDER BY+LIMIT (currently
+accepted-and-ignored — silent wrongness), AFTER/FIRST column positioning.
+**Gate:** EXPLAIN on join/subquery queries via mysql CLI; UPDATE/DELETE JOIN
+semantics differential-verified against real MySQL 8 (Docker oracle);
+chatflow suite still at exact parity. Status: ☐
