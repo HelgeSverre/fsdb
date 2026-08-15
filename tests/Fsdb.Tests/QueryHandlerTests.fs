@@ -132,6 +132,55 @@ let tests =
               | ResultSet(_, [ [ Some "ANSI_QUOTES" ] ]) -> ()
               | other -> failtestf "expected ANSI_QUOTES, got %A" other
 
+          testCase "SET NAMES 'x' COLLATE 'y', SESSION sql_mode='...' applies both assignments"
+          <| fun _ ->
+              // Laravel's MySqlConnector::configureConnection sends exactly
+              // this shape — NAMES-with-COLLATE and sql_mode as one
+              // comma-joined SET, not two separate statements.
+              let session = create 1 (Fsdb.Storage.create ())
+
+              let session, result =
+                  handle session "SET NAMES 'utf8mb4' COLLATE 'utf8mb4_unicode_ci', SESSION sql_mode='NO_ENGINE_SUBSTITUTION'"
+
+              match result with
+              | Affected _ -> ()
+              | other -> failtestf "expected OK, got %A" other
+
+              match handle session "SELECT @@character_set_client, @@sql_mode" |> snd with
+              | ResultSet(_, [ [ Some "utf8mb4"; Some "NO_ENGINE_SUBSTITUTION" ] ]) -> ()
+              | other -> failtestf "expected both variables updated, got %A" other
+
+          testCase "sql_mode inside a comma-joined SET still splits on its own internal commas correctly"
+          <| fun _ ->
+              // The mode list itself is comma-separated *inside its quotes*
+              // — `splitSetAssignments` must not split there, only on the
+              // comma between this assignment and the next.
+              let session = create 1 (Fsdb.Storage.create ())
+
+              let session, _ =
+                  handle session "SET SESSION sql_mode='ONLY_FULL_GROUP_BY,STRICT_TRANS_TABLES', NAMES 'latin1'"
+
+              match handle session "SELECT @@sql_mode, @@character_set_client" |> snd with
+              | ResultSet(_, [ [ Some "ONLY_FULL_GROUP_BY,STRICT_TRANS_TABLES"; Some "latin1" ] ]) -> ()
+              | other -> failtestf "expected both variables updated, got %A" other
+
+          testCase "sql_mode inside Laravel's real comma-joined connect-time SET turns off strict coercion"
+          <| fun _ ->
+              // The exact statement `strict => false` sends
+              // (`MySqlConnector::configureConnection`) — reproduces the
+              // real-world bug where the compound form's `sql_mode` half
+              // was silently dropped and every insert stayed strict.
+              let session = create 1 (Fsdb.Storage.create ())
+
+              let session, _ =
+                  handle session "SET NAMES 'utf8mb4' COLLATE 'utf8mb4_unicode_ci', SESSION sql_mode='NO_ENGINE_SUBSTITUTION'"
+
+              let session, _ = handle session "CREATE TABLE t (n INT)"
+
+              match handle session "INSERT INTO t VALUES ('not a number')" |> snd with
+              | Affected 1UL -> ()
+              | other -> failtestf "expected the non-strict insert to succeed, got %A" other
+
           testCase "SET @user_var = 1 is a loud 1193 error, not a silent fake OK"
           <| fun _ ->
               // `setVar`'s (\w+) can't match `@foo` — a silent

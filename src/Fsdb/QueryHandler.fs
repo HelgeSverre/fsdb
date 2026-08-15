@@ -262,16 +262,20 @@ let private handleShowTableStatus (session: Session) (sql: string) : QueryResult
 /// like USE and SET change session state, and threading it through the
 /// return value keeps `handle` a pure function of its inputs instead of
 /// mutating the session out from under the caller.
-let private setNames = Regex(@"^SET\s+NAMES\s+'?(\w+)'?", RegexOptions.IgnoreCase)
+///
+/// These match one already-comma-split assignment (`splitSetAssignments`
+/// strips the leading `SET` keyword before splitting), not a whole `SET`
+/// statement.
+let private setNames = Regex(@"^NAMES\s+'?(\w+)'?", RegexOptions.IgnoreCase)
 
 let private setVar =
-    Regex(@"^SET\s+(?:SESSION\s+|GLOBAL\s+|@@(?:SESSION\.|GLOBAL\.)?)?(\w+)\s*=\s*(.+)$", RegexOptions.IgnoreCase)
+    Regex(@"^(?:SESSION\s+|GLOBAL\s+|@@(?:SESSION\.|GLOBAL\.)?)?(\w+)\s*=\s*(.+)$", RegexOptions.IgnoreCase)
 
 /// Best-effort name extraction for the "this looks like an assignment but
 /// `setVar` didn't match it" error below — `\S+` rather than `\w+` so it
 /// also captures the `@name` a user-defined variable assignment
 /// (`SET @foo = 1`) uses, which `setVar` deliberately doesn't match.
-let private setVarNameForError = Regex(@"^SET\s+(?:SESSION\s+|GLOBAL\s+)?(\S+?)\s*=", RegexOptions.IgnoreCase)
+let private setVarNameForError = Regex(@"^(?:SESSION\s+|GLOBAL\s+)?(\S+?)\s*=", RegexOptions.IgnoreCase)
 
 let private unquote (v: string) =
     let v = v.Trim()
@@ -281,53 +285,90 @@ let private unquote (v: string) =
     else
         v
 
+/// `SET a = 1, b = 2` is one statement assigning several variables — real
+/// clients use it (Laravel's `MySqlConnector::configureConnection` sends
+/// `SET NAMES 'utf8mb4', SESSION sql_mode='...'` as one call). Splits on
+/// commas outside quotes, after stripping the leading `SET` keyword, so a
+/// quoted value with its own commas (`sql_mode`'s comma-separated mode
+/// list) doesn't get split apart.
+let private splitSetAssignments (sql: string) : string list =
+    let body = Regex.Replace(sql, @"^SET\s+", "", RegexOptions.IgnoreCase)
+    let parts = ResizeArray()
+    let current = StringBuilder()
+    let mutable quoteChar = None
+
+    for c in body do
+        match quoteChar with
+        | Some q when c = q ->
+            quoteChar <- None
+            current.Append c |> ignore
+        | Some _ -> current.Append c |> ignore
+        | None ->
+            match c with
+            | '\'' | '"' ->
+                quoteChar <- Some c
+                current.Append c |> ignore
+            | ',' ->
+                parts.Add(current.ToString())
+                current.Clear() |> ignore
+            | _ -> current.Append c |> ignore
+
+    parts.Add(current.ToString())
+    parts |> Seq.map (fun s -> s.Trim()) |> Seq.filter (fun s -> s <> "") |> List.ofSeq
+
 /// `SET NAMES x` and `SET [SESSION|@@session.]var = value` update
-/// Session.Variables so a later SELECT @@var / SHOW VARIABLES reflects them.
-/// Anything else recognizably shaped like an assignment but not matched by
-/// `setVar` (`SET @user_var = 1` — user-defined variables aren't a session
-/// variable this server tracks; `Session.Variables`/`setVar` are both
-/// system-variable-shaped) is a loud 1193 rather than a silent fake OK —
-/// ponytail: single-assignment only for the forms that *are* handled, add
-/// comma-splitting if a real client needs `SET a = 1, b = 2` in one
-/// statement.
+/// Session.Variables so a later SELECT @@var / SHOW VARIABLES reflects them,
+/// one comma-split assignment at a time (`splitSetAssignments`) — the first
+/// assignment recognizably shaped like one but not matched by `setVar`
+/// (`SET @user_var = 1` — user-defined variables aren't a session variable
+/// this server tracks; `Session.Variables`/`setVar` are both
+/// system-variable-shaped) aborts the whole statement with a loud 1193
+/// rather than a silent fake OK, same as real MySQL abandoning the rest of
+/// a multi-assignment `SET` on its first bad name.
 let private handleSet (session: Session) (sql: string) : Session * QueryResult =
-    let namesMatch = setNames.Match sql
+    let rec loop (session: Session) (fragments: string list) : Session * QueryResult =
+        match fragments with
+        | [] -> session, Affected 0UL
+        | fragment :: rest ->
+            let namesMatch = setNames.Match fragment
 
-    if namesMatch.Success then
-        let charset = namesMatch.Groups.[1].Value
+            if namesMatch.Success then
+                let charset = namesMatch.Groups.[1].Value
 
-        let vars =
-            session.Variables
-            |> Map.add "character_set_client" charset
-            |> Map.add "character_set_connection" charset
-            |> Map.add "character_set_results" charset
+                let vars =
+                    session.Variables
+                    |> Map.add "character_set_client" charset
+                    |> Map.add "character_set_connection" charset
+                    |> Map.add "character_set_results" charset
 
-        { session with Variables = vars }, Affected 0UL
-    else
-        let varMatch = setVar.Match sql
+                loop { session with Variables = vars } rest
+            else
+                let varMatch = setVar.Match fragment
 
-        if varMatch.Success then
-            let name = varMatch.Groups.[1].Value.ToLowerInvariant()
-            let value = unquote varMatch.Groups.[2].Value
+                if varMatch.Success then
+                    let name = varMatch.Groups.[1].Value.ToLowerInvariant()
+                    let value = unquote varMatch.Groups.[2].Value
 
-            if name = "foreign_key_checks" then
-                setForeignKeyChecks session.Store (value.Trim() <> "0")
+                    if name = "foreign_key_checks" then
+                        setForeignKeyChecks session.Store (value.Trim() <> "0")
 
-            if name = "sql_mode" then
-                let isStrict =
-                    value.Split(',')
-                    |> Array.exists (fun m ->
-                        let m = m.Trim()
-                        String.Equals(m, "STRICT_TRANS_TABLES", StringComparison.OrdinalIgnoreCase)
-                        || String.Equals(m, "STRICT_ALL_TABLES", StringComparison.OrdinalIgnoreCase))
+                    if name = "sql_mode" then
+                        let isStrict =
+                            value.Split(',')
+                            |> Array.exists (fun m ->
+                                let m = m.Trim()
+                                String.Equals(m, "STRICT_TRANS_TABLES", StringComparison.OrdinalIgnoreCase)
+                                || String.Equals(m, "STRICT_ALL_TABLES", StringComparison.OrdinalIgnoreCase))
 
-                setStrictMode session.Store isStrict
+                        setStrictMode session.Store isStrict
 
-            { session with Variables = Map.add name value session.Variables }, Affected 0UL
-        else
-            match setVarNameForError.Match sql with
-            | m when m.Success -> session, Err(1193, sprintf "Unknown system variable '%s'" m.Groups.[1].Value)
-            | _ -> session, syntaxError sql
+                    loop { session with Variables = Map.add name value session.Variables } rest
+                else
+                    match setVarNameForError.Match fragment with
+                    | m when m.Success -> session, Err(1193, sprintf "Unknown system variable '%s'" m.Groups.[1].Value)
+                    | _ -> session, syntaxError sql
+
+    loop session (splitSetAssignments sql)
 
 // ---------------------------------------------------------------------------
 // Transactions: BEGIN/COMMIT/ROLLBACK, SET autocommit, SAVEPOINT. Matched by
