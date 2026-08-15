@@ -168,6 +168,20 @@ let tests =
                     | Affected 0UL -> ()
                     | other -> failtestf "expected 0 rows affected (matched but unchanged), got %A" other
 
+                testCase "UPDATE SET assignments evaluate left-to-right: a later one sees an earlier one's new value"
+                <| fun _ ->
+                    let store = newStore ()
+                    runDefault store "CREATE TABLE s1 (id INT, a INT, b INT)" |> ignore
+                    runDefault store "INSERT INTO s1 VALUES (1, 1, 2)" |> ignore
+
+                    match runDefault store "UPDATE s1 SET a = 10, b = a" with
+                    | Affected 1UL -> ()
+                    | other -> failtestf "expected 1 row affected, got %A" other
+
+                    match runDefault store "SELECT a, b FROM s1" with
+                    | ResultSet(_, [ [ Some "10"; Some "10" ] ]) -> ()
+                    | other -> failtestf "expected b to see a's new value (10), matching MySQL's left-to-right evaluation, got %A" other
+
                 testCase "DELETE removes only matching rows"
                 <| fun _ ->
                     let store = newStore ()

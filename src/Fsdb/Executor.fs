@@ -1574,12 +1574,14 @@ let private selectMutationTargets
         | None -> ordered)
 
 /// Assigns `assignments` (already resolved to column indices) to a copy of
-/// `row`, evaluating each right-hand side against the row's original
-/// (pre-assignment) values. A failing right-hand side propagates as an
-/// `Error` (as a `StorageError` so it can travel through
-/// `Storage.updateRows`'s `updater`) instead of silently writing `VNull` —
-/// the difference between "UPDATE failed" and quiet data corruption once a
-/// SET expression can fail per row.
+/// `row`, left-to-right — each right-hand side is evaluated against the row
+/// *as mutated by every earlier assignment in the same statement*, matching
+/// MySQL's documented `UPDATE` evaluation order (`SET a = 10, b = a` sets
+/// `b` to the *new* `a`, not the pre-statement one). A failing right-hand
+/// side propagates as an `Error` (as a `StorageError` so it can travel
+/// through `Storage.updateRows`'s `updater`) instead of silently writing
+/// `VNull` — the difference between "UPDATE failed" and quiet data
+/// corruption once a SET expression can fail per row.
 let private applyAssignments
     (store: Store)
     (registry: Registry)
@@ -1589,16 +1591,18 @@ let private applyAssignments
     (assignments: (int * Expr) list)
     (row: Value[])
     : Result<Value[], StorageError> =
-    let ctx = contextFactory store registry dbName columnIndex qualifiers None row
-
     assignments
-    |> traverse (fun (idx, expr) -> evalExpr ctx expr |> Result.map (fun v -> idx, v))
-    |> Result.mapError ExpressionError
-    |> Result.map (fun idxVals ->
-        let newRow = Array.copy row
-        for idx, v in idxVals do
-            newRow.[idx] <- v
-        newRow)
+    |> List.fold
+        (fun acc (idx, expr) ->
+            acc
+            |> Result.bind (fun current ->
+                evalExpr (contextFactory store registry dbName columnIndex qualifiers None current) expr
+                |> Result.mapError ExpressionError
+                |> Result.map (fun v ->
+                    let newRow = Array.copy current
+                    newRow.[idx] <- v
+                    newRow)))
+        (Ok(Array.copy row))
 
 /// Computes every `Generated` column of `row` (`CREATE TABLE ... col AS
 /// (expr)`) fresh from its other columns' current values, leaving every
