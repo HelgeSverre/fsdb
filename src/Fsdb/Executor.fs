@@ -827,10 +827,31 @@ and private evalAggregate
             |> Result.map (fun nonNull ->
                 let deduped = if distinct then List.distinct nonNull else nonNull
                 if isCount || not deduped.IsEmpty then fold deduped else VNull)
+    | Distinct firstExpr :: rest when isCount ->
+        // `COUNT(DISTINCT a, b)` — `distinctArg` (the call-argument parser)
+        // attaches `Distinct` only to the first comma-separated argument,
+        // but MySQL's `DISTINCT` here scopes over the whole tuple `(a, b)`,
+        // not just `a`. Evaluate every argument per row, drop a row if
+        // *any* column of it is NULL (SQL's usual "NULL drops the row from
+        // an aggregate" rule, applied to the whole tuple), dedupe the
+        // tuples, and count what's left.
+        let allArgs = firstExpr :: rest
+
+        rows
+        |> traverse (fun row -> allArgs |> traverse (evalExpr (ctxFor row)))
+        |> Result.map (fun tuples ->
+            tuples
+            |> List.filter (List.exists (function VNull -> true | _ -> false) >> not)
+            |> List.distinct
+            |> List.length
+            |> int64
+            |> VInt)
     // `isAggregateCall` (the only caller that routes here) already narrowed
     // to single-argument aggregate calls (`GROUP_CONCAT`'s optional
-    // `SEPARATOR` aside).
-    | _ -> Ok VNull
+    // `SEPARATOR`, and now `COUNT(DISTINCT a, b)`, aside) — anything else
+    // multi-argument (e.g. `SUM(DISTINCT a, b)`, which MySQL itself
+    // rejects) is a syntax error, not a silent NULL.
+    | _ -> Error(1064, sprintf "Incorrect parameter count in the call to native function '%s'" name)
 
 /// Pre-evaluates every aggregate subtree of `expr` (anywhere it appears —
 /// nested in arithmetic, a function argument, ...) against `rows` into a

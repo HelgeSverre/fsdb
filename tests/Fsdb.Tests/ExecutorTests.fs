@@ -1034,6 +1034,20 @@ let tests =
                     | ResultSet([ "c" ], [ [ Some "2" ] ]) -> ()
                     | other -> failtestf "expected COUNT(DISTINCT n) = 2, got %A" other
 
+                testCase "COUNT(DISTINCT a, b) counts distinct tuples, dropping any tuple with a NULL"
+                <| fun _ ->
+                    let store = newStore ()
+                    runDefault store "CREATE TABLE t (g VARCHAR(10), n INT)" |> ignore
+
+                    runDefault
+                        store
+                        "INSERT INTO t VALUES ('a', 1), ('a', NULL), ('b', 3), ('b', 3), (NULL, 5)"
+                    |> ignore
+
+                    match runDefault store "SELECT COUNT(DISTINCT g, n) AS c FROM t" with
+                    | ResultSet([ "c" ], [ [ Some "2" ] ]) -> ()
+                    | other -> failtestf "expected 2 distinct (g, n) tuples ('a',1) and ('b',3), got %A" other
+
                 testCase "GROUP_CONCAT joins group members with the default comma separator, and a custom SEPARATOR"
                 <| fun _ ->
                     let store = newStore ()
