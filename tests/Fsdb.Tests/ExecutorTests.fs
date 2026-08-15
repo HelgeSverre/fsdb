@@ -929,7 +929,115 @@ let tests =
 
                     match runDefault store "SELECT id FROM u JOIN p ON p.uid = u.id" with
                     | Err(1052, _) -> ()
-                    | other -> failtestf "expected error 1052 (ambiguous column), got %A" other ]
+                    | other -> failtestf "expected error 1052 (ambiguous column), got %A" other
+
+                testCase "ORDER BY resolves a bare name against SELECT's output columns before FROM-tables (Laravel's belongsToMany-through shape)"
+                <| fun _ ->
+                    // Both `chat_sessions` and `chatbots` have `created_at`,
+                    // but the projection only outputs one of them (via
+                    // `chat_sessions.*`) — real MySQL resolves the bare
+                    // `ORDER BY created_at` against that single output
+                    // column, not against the two ambiguous FROM-table ones
+                    // (verified against a live MySQL 8 instance).
+                    let store = newStore ()
+                    runDefault store "CREATE TABLE chat_sessions (id INT, chatbot_id INT, created_at VARCHAR(20))" |> ignore
+                    runDefault store "CREATE TABLE chatbots (id INT, team_id INT, created_at VARCHAR(20))" |> ignore
+                    runDefault store "INSERT INTO chatbots VALUES (1, 1, '2020-01-01')" |> ignore
+                    runDefault store "INSERT INTO chat_sessions VALUES (1, 1, '2021-01-01')" |> ignore
+                    runDefault store "INSERT INTO chat_sessions VALUES (2, 1, '2019-01-01')" |> ignore
+
+                    match
+                        runDefault
+                            store
+                            "select chat_sessions.*, chatbots.team_id as laravel_through_key from chat_sessions inner join chatbots on chatbots.id = chat_sessions.chatbot_id where chatbots.team_id = 1 order by created_at desc limit 5"
+                    with
+                    | ResultSet([ "id"; "chatbot_id"; "created_at"; "laravel_through_key" ], rows) ->
+                        Expect.equal
+                            (rows |> List.map (fun r -> r.[0]))
+                            [ Some "1"; Some "2" ]
+                            "expected chat_sessions sorted by its own created_at, descending"
+                    | other -> failtestf "expected a resultset, got %A" other
+
+                testCase "SELECT * FROM two joined tables, ORDER BY a column both have, is error 1052 in the order clause"
+                <| fun _ ->
+                    let store = newStore ()
+                    runDefault store "CREATE TABLE chat_sessions (id INT, chatbot_id INT, created_at VARCHAR(20))" |> ignore
+                    runDefault store "CREATE TABLE chatbots (id INT, team_id INT, created_at VARCHAR(20))" |> ignore
+                    runDefault store "INSERT INTO chatbots VALUES (1, 1, '2020-01-01')" |> ignore
+                    runDefault store "INSERT INTO chat_sessions VALUES (1, 1, '2021-01-01')" |> ignore
+
+                    match
+                        runDefault
+                            store
+                            "SELECT * FROM chat_sessions INNER JOIN chatbots ON chatbots.id = chat_sessions.chatbot_id ORDER BY created_at"
+                    with
+                    | Err(1052, msg) -> Expect.stringContains msg "order clause" "expected the order-clause wording"
+                    | other -> failtestf "expected error 1052 (ambiguous ORDER BY), got %A" other
+
+                testCase "ORDER BY a name that's a duplicate SELECT alias is error 1052 in the order clause"
+                <| fun _ ->
+                    let store = newStore ()
+                    runDefault store "CREATE TABLE chat_sessions (id INT, chatbot_id INT, created_at VARCHAR(20))" |> ignore
+                    runDefault store "CREATE TABLE chatbots (id INT, team_id INT, created_at VARCHAR(20))" |> ignore
+                    runDefault store "INSERT INTO chatbots VALUES (1, 1, '2020-01-01')" |> ignore
+                    runDefault store "INSERT INTO chat_sessions VALUES (1, 1, '2021-01-01')" |> ignore
+
+                    match
+                        runDefault
+                            store
+                            "SELECT chat_sessions.created_at AS x, chatbots.created_at AS x FROM chat_sessions JOIN chatbots ON chatbots.id = chat_sessions.chatbot_id ORDER BY x"
+                    with
+                    | Err(1052, msg) -> Expect.stringContains msg "order clause" "expected the order-clause wording"
+                    | other -> failtestf "expected error 1052 (ambiguous duplicate alias), got %A" other
+
+                testCase "WHERE a bare ambiguous column is error 1052 in the where clause"
+                <| fun _ ->
+                    let store = newStore ()
+                    runDefault store "CREATE TABLE chat_sessions (id INT, chatbot_id INT, created_at VARCHAR(20))" |> ignore
+                    runDefault store "CREATE TABLE chatbots (id INT, team_id INT, created_at VARCHAR(20))" |> ignore
+                    runDefault store "INSERT INTO chatbots VALUES (1, 1, '2020-01-01')" |> ignore
+                    runDefault store "INSERT INTO chat_sessions VALUES (1, 1, '2021-01-01')" |> ignore
+
+                    match
+                        runDefault
+                            store
+                            "SELECT chat_sessions.* FROM chat_sessions INNER JOIN chatbots ON chatbots.id = chat_sessions.chatbot_id WHERE created_at > '2020-01-01'"
+                    with
+                    | Err(1052, msg) -> Expect.stringContains msg "where clause" "expected the where-clause wording"
+                    | other -> failtestf "expected error 1052 (ambiguous WHERE), got %A" other
+
+                testCase "ORDER BY a name absent from the output but unique across FROM-tables still resolves"
+                <| fun _ ->
+                    let store = newStore ()
+                    runDefault store "CREATE TABLE chat_sessions (id INT, chatbot_id INT, created_at VARCHAR(20))" |> ignore
+                    runDefault store "CREATE TABLE chatbots (id INT, team_id INT)" |> ignore
+                    runDefault store "INSERT INTO chatbots VALUES (1, 1)" |> ignore
+                    runDefault store "INSERT INTO chat_sessions VALUES (2, 1, 'b')" |> ignore
+                    runDefault store "INSERT INTO chat_sessions VALUES (1, 1, 'a')" |> ignore
+
+                    match
+                        runDefault
+                            store
+                            "SELECT chat_sessions.id FROM chat_sessions JOIN chatbots ON chatbots.id = chat_sessions.chatbot_id ORDER BY chatbot_id"
+                    with
+                    | ResultSet([ "id" ], rows) -> Expect.equal rows [ [ Some "2" ]; [ Some "1" ] ] "expected both rows, chatbot_id ties broken by (stable) scan/insertion order"
+                    | other -> failtestf "expected a resultset, got %A" other
+
+                testCase "ORDER BY a name absent from the output and ambiguous across FROM-tables is error 1052"
+                <| fun _ ->
+                    let store = newStore ()
+                    runDefault store "CREATE TABLE chat_sessions (id INT, chatbot_id INT, created_at VARCHAR(20))" |> ignore
+                    runDefault store "CREATE TABLE chatbots (id INT, team_id INT, created_at VARCHAR(20))" |> ignore
+                    runDefault store "INSERT INTO chatbots VALUES (1, 1, '2020-01-01')" |> ignore
+                    runDefault store "INSERT INTO chat_sessions VALUES (1, 1, '2021-01-01')" |> ignore
+
+                    match
+                        runDefault
+                            store
+                            "SELECT chat_sessions.id FROM chat_sessions JOIN chatbots ON chatbots.id = chat_sessions.chatbot_id ORDER BY created_at"
+                    with
+                    | Err(1052, msg) -> Expect.stringContains msg "order clause" "expected the order-clause wording"
+                    | other -> failtestf "expected error 1052 (ambiguous ORDER BY fallback), got %A" other ]
 
           testList
               "real GROUP BY / HAVING / grouped aggregates"
