@@ -25,7 +25,7 @@ let tests =
 
           testCase "a SELECT's int/string columns report their real MySQL wire types, not a blanket VAR_STRING"
           <| fun _ ->
-              // Regression: real MySQL clients (PHP's mysqlnd in particular)
+              // Real MySQL clients (PHP's mysqlnd in particular)
               // auto-convert a LONGLONG-typed column to a native int even
               // over the text protocol — Eloquent code doing `$model->foo_id
               // === $other->id` only gets that conversion if the column
@@ -98,8 +98,8 @@ let tests =
 
           testCase "SELECT @@version_comment LIMIT 1 tolerates the trailing LIMIT clause"
           <| fun _ ->
-              // Regression: mysql CLI probes the connection banner with exactly
-              // this query at connect time.
+              // mysql CLI probes the connection banner with exactly this
+              // query at connect time.
               let session = create 1 (Fsdb.Storage.create ())
 
               match handle session "select @@version_comment limit 1" |> snd with
@@ -134,10 +134,10 @@ let tests =
 
           testCase "SET @user_var = 1 is a loud 1193 error, not a silent fake OK"
           <| fun _ ->
-              // Regression: `setVar`'s (\w+) can't match `@foo`, so this
-              // used to fall through to handleSet's catch-all and report
-              // `Affected 0UL` — the client believes the write landed, then
-              // `SELECT @foo` is a 1064 syntax error right after.
+              // `setVar`'s (\w+) can't match `@foo` — a silent
+              // `Affected 0UL` here would make the client believe the write
+              // landed, only for `SELECT @foo` to hit a 1064 syntax error
+              // right after.
               let session = create 1 (Fsdb.Storage.create ())
 
               match handle session "SET @user_var = 1" |> snd with
@@ -229,11 +229,6 @@ let tests =
 
           testCase "SHOW CREATE TABLE with a backtick-quoted, db-qualified name matches the unqualified result"
           <| fun _ ->
-              // Regression: stripBackticks used to run on the whole
-              // "`db`.`table`" string *before* splitting on '.', so
-              // "`shop`.`users`".Trim('`') -> "shop`.`users" -> split on
-              // '.' -> ("shop`", "`users") — an unknown-database error for
-              // any SHOW target that's both qualified and backtick-quoted.
               let session = create 1 (Fsdb.Storage.create ())
               let session, _ = handle session "USE shop"
               let session, _ = handle session "CREATE TABLE users (id INT PRIMARY KEY)"
@@ -273,9 +268,7 @@ let tests =
           testCase "a query whose string data merely starts with SET is not hijacked by the SET-statement probe"
           <| fun _ ->
               // handle's `upper.StartsWith "SET "` check is anchored to the
-              // whole trimmed query text, so this can't actually misfire —
-              // this test documents and locks in that guarantee rather than
-              // reproducing a live bug.
+              // whole trimmed query text, so this can't actually misfire.
               let session = create 1 (Fsdb.Storage.create ())
               let session, _ = handle session "CREATE TABLE notes (body VARCHAR(50))"
 

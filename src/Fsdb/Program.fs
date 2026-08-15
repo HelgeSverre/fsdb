@@ -15,9 +15,8 @@ let private parsePort (argv: string[]) : int =
         | false, _ -> None)
     |> Option.defaultValue 3307
 
-/// `--data-dir PATH` opts into durability (M7) — `Db.withDataDir` loads
-/// whatever's already there and keeps writing to it. No flag = today's pure
-/// in-memory behavior, unchanged.
+/// `--data-dir PATH` opts into durability — `Db.withDataDir` loads whatever's
+/// already there and keeps writing to it. No flag means pure in-memory.
 let private parseDataDir (argv: string[]) : string option = argValue "--data-dir" argv
 
 /// --listen takes an IP address ("0.0.0.0", "::"), with "localhost" as the

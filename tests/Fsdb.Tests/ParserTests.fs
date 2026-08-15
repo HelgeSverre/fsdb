@@ -14,11 +14,10 @@ let private parseOk (sql: string) : Statement =
 
 let private col name = Col name
 
-/// Builds a `Select` statement from the same positional shape the old
-/// tuple-based `Ast.Select` case had, so every test below reads as a plain
-/// AST comparison instead of a record literal per case; `from` is still a
-/// bare table name string here since none of these tests exercise a
-/// qualified name or alias.
+/// Builds a `Select` statement from a flat positional tuple, so every test
+/// below reads as a plain AST comparison instead of a record literal per
+/// case; `from` is still a bare table name string here since none of these
+/// tests exercise a qualified name or alias.
 let private mkSelect
     (projections: Projection list, from: string option, where: Expr option, orderBy: OrderKey list, limit: int option, offset: int option)
     : Statement =
@@ -1416,11 +1415,10 @@ let tests =
 
                 testCase "trailing garbage after a valid statement is an Error"
                 <| fun _ ->
-                    // `SELECT 1 EXTRA` used to land here too, but it's
-                    // actually valid MySQL — `EXTRA` is a bare column alias
-                    // (no `AS` required) — so it's covered by the "implicit
-                    // alias" test below instead; a trailing number can't be
-                    // an alias, so it's still unambiguous garbage.
+                    // `SELECT 1 EXTRA` is valid MySQL — `EXTRA` is a bare
+                    // column alias, no `AS` required, covered by the
+                    // "implicit alias" test below. A trailing number can't
+                    // be an alias, so it's still unambiguous garbage.
                     match parse "SELECT 1 42" with
                     | Error _ -> ()
                     | Ok stmt -> failtestf "expected an error, got %A" stmt

@@ -91,11 +91,6 @@ let tests =
 
           testCase "COMMIT doesn't discard a concurrent write another connection made to a different table"
           <| fun _ ->
-              // Regression: commitSession used to copy the whole transaction
-              // snapshot's catalog back over the shared store's, so any
-              // write another connection made to *any* table (not just the
-              // one row this transaction touched) during the transaction's
-              // lifetime was silently lost.
               let store = Fsdb.Storage.create ()
               let session = create 1 store
               let session, _ = handle session "CREATE TABLE tx_m (id INT)"

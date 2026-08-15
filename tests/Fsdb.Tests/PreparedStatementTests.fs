@@ -42,8 +42,8 @@ let tests =
 
           testCase "valueToSqlLiteral escapes CR/LF so a bound param round-trips through re-parsing"
           <| fun _ ->
-              // Regression: a raw CR spliced into the SQL text gets silently
-              // normalized to LF by FParsec's CharStream on re-parse (it
+              // A raw CR spliced into the SQL text gets silently normalized
+              // to LF by FParsec's CharStream on re-parse (it
               // treats bare \r/\r\n as line endings) unless the literal
               // escapes it, corrupting any CRLF value a prepared statement
               // substitutes in — e.g. an HTML textarea's body.

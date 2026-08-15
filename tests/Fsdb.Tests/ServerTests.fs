@@ -24,10 +24,10 @@ let private readAllPackets (stream: IO.Stream) : Async<Packet list> =
 let tests =
     testList
         "Server"
-        [ // Regression: sendQueryResult is the only sequence-id-bearing logic
-          // in the server, and getting a resultset terminator wrong hangs
-          // mysql CLI / mysqlnd forever waiting for a terminator that never
-          // arrives (see the okEndOfResultSetPayload regression test above).
+        [ // sendQueryResult is the only sequence-id-bearing logic in the
+          // server, and getting a resultset terminator wrong hangs mysql
+          // CLI / mysqlnd forever waiting for a terminator that never
+          // arrives (see the okEndOfResultSetPayload test above).
           // MySqlConnector always negotiates CLIENT_DEPRECATE_EOF, so the
           // integration test alone never exercises the legacy EOF path that
           // PDO/mysqlnd may still use — cover both here directly.

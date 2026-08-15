@@ -59,8 +59,8 @@ let private randomAuthPluginData () : byte[] =
     let bytes = Array.zeroCreate<byte> 20
     Random.Shared.NextBytes bytes
     // Auth-plugin-data fields are null-terminated on the wire; a stray 0x00
-    // would truncate them. Harmless either way since we never check the
-    // scramble, but keep the bytes well-formed.
+    // would truncate them. Harmless either way since the scramble is never
+    // checked, but keep the bytes well-formed.
     bytes |> Array.map (fun b -> if b = 0uy then 1uy else b)
 
 /// Writes each payload in turn, threading the *actual* next sequence id

@@ -238,8 +238,7 @@ let tests =
               insertRows restarted defaultDatabase "t" None [ [ VNull; VString "second"; VNull ] ] |> ignore
               insertRows restarted defaultDatabase "t" None [ [ VNull; VString "third"; VNull ] ] |> ignore
 
-              // Restart #2: both post-restart writes must be intact — before
-              // the fix, they'd glue onto the torn bytes and be lost here.
+              // Restart #2: both post-restart writes must be intact.
               let restarted2 = load dir
               let names = rowsOf restarted2 defaultDatabase "t" |> List.map (fun r -> r.[1])
               Expect.containsAll names [ VString "good"; VString "second"; VString "third" ] "every row acked after the torn-line restart survives a second restart"
@@ -356,8 +355,7 @@ let tests =
               attach dir store
 
               // `b AS (a * 2)` — a stand-in for Laravel Pulse's `key_hash
-              // ... AS (unhex(md5(key)))`, the real-world shape that
-              // motivated this.
+              // ... AS (unhex(md5(key)))` generated-column shape.
               let genCol =
                   { Name = "b"
                     Type = TInt false

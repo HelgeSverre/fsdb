@@ -75,10 +75,8 @@ let tests =
                       let! inserted = insertCmd.ExecuteNonQueryAsync() |> Async.AwaitTask
                       Expect.equal inserted 2 "two rows inserted"
 
-                      // Regression: the OK packet's last_insert_id used to be
-                      // hardcoded to 0 regardless of what the session tracked,
-                      // so PDO::lastInsertId()/MySqlCommand.LastInsertedId
-                      // always read back "0".
+                      // PDO::lastInsertId()/MySqlCommand.LastInsertedId both
+                      // read this straight off the OK packet.
                       Expect.equal insertCmd.LastInsertedId 1L "OK packet reports the real last_insert_id"
 
                       use selectCmd = conn.CreateCommand()
@@ -111,15 +109,14 @@ let tests =
           // Forces the binary COM_STMT_PREPARE/COM_STMT_EXECUTE path via
           // MySqlCommand.Prepare() (MySqlConnector otherwise inlines
           // parameters as literal text over COM_QUERY) — the only way this
-          // suite exercises Goal A's binary parameter decoding from a real
-          // client. `@name`-style parameters are used here (MySqlConnector's
-          // usual style); MySqlConnector itself rewrites them to positional
-          // `?` before it ever hits the wire, so this still exercises the
+          // suite exercises binary parameter decoding from a real client.
+          // `@name`-style parameters are used here (MySqlConnector's usual
+          // style); MySqlConnector itself rewrites them to positional `?`
+          // before it ever hits the wire, so this still exercises the
           // server's `?`-counting/substitution path the same as a client
           // that writes `?` directly. php PDO with
           // `PDO::ATTR_EMULATE_PREPARES => false` exercises the same server
-          // code path from a second, independent client implementation —
-          // covered in the Grind phase, since this suite has no PHP runtime.
+          // code path from a second, independent client implementation.
           // Reads back via `GetString`/`IsDBNull` rather than the typed
           // getters (`GetInt32`, `GetDouble`, ...): every column this server
           // advertises is MYSQL_TYPE_VAR_STRING (see `columnDefPayload`),
@@ -292,16 +289,15 @@ let tests =
               }
               |> Async.RunSynchronously
 
-          // Regression: a COM_STMT_EXECUTE payload whose declared param type
-          // doesn't match the bytes actually on the wire used to throw
-          // straight out of the connection loop (readBinaryValue's
-          // `Reader.ReadBytes` runs outside `QueryHandler.handle`'s
-          // try/with) and drop the socket with no ERR packet. A well-behaved
-          // driver never sends this, but a malformed/adversarial one
-          // shouldn't be able to silently kill the connection either — hand
-          // this one over the wire directly since no real client library
-          // will construct it. Declares MYSQL_TYPE_LONGLONG (needs 8 bytes)
-          // but supplies only 2.
+          // readBinaryValue's `Reader.ReadBytes` runs outside
+          // `QueryHandler.handle`'s try/with, so a COM_STMT_EXECUTE payload
+          // whose declared param type doesn't match the bytes actually on
+          // the wire must not throw straight out of the connection loop and
+          // drop the socket with no ERR packet. A well-behaved driver never
+          // sends this, but a malformed/adversarial one shouldn't be able to
+          // silently kill the connection either — hand this one over the
+          // wire directly since no real client library will construct it.
+          // Declares MYSQL_TYPE_LONGLONG (needs 8 bytes) but supplies only 2.
           testCase "a malformed COM_STMT_EXECUTE param payload gets an ERR, not a dropped connection"
           <| fun _ ->
               async {
@@ -372,10 +368,10 @@ let tests =
               }
               |> Async.RunSynchronously
 
-          // The M6 gate: the README's embedding example, exercised over the
-          // real wire with a real MySqlConnector client — a custom scalar
-          // (SLUGIFY) and a custom aggregate (MEDIAN) registered on a `Db`
-          // via `Db.registerScalar`/`registerAggregate`, then queried.
+          // The README's embedding example, exercised over the real wire
+          // with a real MySqlConnector client — a custom scalar (SLUGIFY)
+          // and a custom aggregate (MEDIAN) registered on a `Db` via
+          // `Db.registerScalar`/`registerAggregate`, then queried.
           testCase "Db.registerScalar/registerAggregate are queryable over the wire"
           <| fun _ ->
               async {

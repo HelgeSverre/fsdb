@@ -198,9 +198,8 @@ let tests =
 
                 testCase "DELETE ... LIMIT n caps how many matching rows are removed"
                 <| fun _ ->
-                    // Regression: a bare `DELETE FROM t WHERE ... LIMIT n`
-                    // (a batch-cleanup-job staple, capping how many stale
-                    // rows one run removes) was a clean 1064 syntax error.
+                    // `DELETE FROM t WHERE ... LIMIT n` is a batch-cleanup-job
+                    // staple, capping how many stale rows one run removes.
                     let store = newStore ()
                     runDefault store "CREATE TABLE t (n INT)" |> ignore
                     runDefault store "INSERT INTO t VALUES (1), (2), (3), (4)" |> ignore
@@ -291,12 +290,6 @@ let tests =
 
                 testCase "UPDATE self-join through two aliases writes both sides of every matched row"
                 <| fun _ ->
-                    // Regression: `claims`/`pending` used to be keyed by
-                    // source *index*, so a self-join's two aliases wrote
-                    // through two sequential `Storage.updateRows` passes —
-                    // the first pass's row-array replacement broke the
-                    // second pass's by-reference match, silently dropping
-                    // its half of the write.
                     let store = newStore ()
                     runDefault store "CREATE TABLE sj2 (id INT, v INT, w INT, nxt INT)" |> ignore
                     runDefault store "INSERT INTO sj2 VALUES (1, 0, 0, 2), (2, 0, 0, 3), (3, 0, 0, NULL)" |> ignore
@@ -971,11 +964,9 @@ let tests =
               "INSERT ... SELECT"
               [ testCase "inserts every row a SELECT (with WHERE/GROUP BY/aggregates) produces"
                 <| fun _ ->
-                    // Regression: `Ast.Statement.Insert`'s only row source
-                    // was a literal `VALUES` list — `INSERT INTO t (cols)
-                    // SELECT ...` (a Laravel reporting-job staple: roll a
-                    // detail table up into a daily summary table) was a
-                    // clean 1064 syntax error.
+                    // `INSERT INTO t (cols) SELECT ...` is a Laravel
+                    // reporting-job staple: roll a detail table up into a
+                    // daily summary table.
                     let store = newStore ()
                     runDefault store "CREATE TABLE sales (region VARCHAR(10), amount INT)" |> ignore
                     runDefault store "CREATE TABLE region_totals (region VARCHAR(10), total INT)" |> ignore
@@ -1174,11 +1165,6 @@ let tests =
 
                 testCase "an aggregate nested inside an expression is detected and evaluated, not just a bare top-level call"
                 <| fun _ ->
-                    // Regression: aggregate detection used to be top-level
-                    // only (`FuncCall` matched directly against the
-                    // projection expr), so `COUNT(*) + 1` fell through to
-                    // the per-row path and died looking `COUNT` up as a
-                    // scalar function (`FUNCTION COUNT does not exist`).
                     let store = newStore ()
                     runDefault store "CREATE TABLE t (n INT)" |> ignore
                     runDefault store "INSERT INTO t VALUES (10), (20)" |> ignore
@@ -1195,10 +1181,6 @@ let tests =
               "table-qualified columns are checked against the FROM's alias-or-table, not silently accepted from anywhere"
               [ testCase "a qualifier that doesn't match the table in scope is a 1054 unknown-column error, not a resultset"
                 <| fun _ ->
-                    // Regression: QualifiedCol used to throw its qualifier
-                    // away entirely (`QualifiedCol(_, col) -> eval (Col
-                    // col)`), so `SELECT p.id FROM u` silently resolved `id`
-                    // against `u` instead of erroring on the unknown `p`.
                     let store = newStore ()
                     runDefault store "CREATE TABLE u (id INT)" |> ignore
                     runDefault store "INSERT INTO u VALUES (1)" |> ignore
@@ -1257,9 +1239,6 @@ let tests =
               "JOIN"
               [ testCase "INNER JOIN matches rows across two aliased instances of the same table"
                 <| fun _ ->
-                    // Verbatim repro from the review finding: JOIN was
-                    // entirely unimplemented (1064 syntax error) even though
-                    // table aliases themselves already parsed fine.
                     let store = newStore ()
                     runDefault store "CREATE TABLE crud (id INT, name VARCHAR(10), qty INT)" |> ignore
                     runDefault store "INSERT INTO crud VALUES (1, 'widget', 5), (2, 'gadget', 9)" |> ignore
@@ -1376,22 +1355,13 @@ let tests =
 
                 testCase "qualified t.* in a JOIN expands only that table's own columns, not every joined column"
                 <| fun _ ->
-                    // Regression: `Ast.Expr.Star` used to drop the
-                    // qualifier entirely, so `teams.*` in a JOIN expanded to
-                    // *every* joined table's columns concatenated — with
-                    // `teams`/`team_user` both having their own `id` column,
-                    // `team_user.id` (whatever the join happened to append
-                    // last) silently won over `teams.id` once the row was
-                    // read back by name (this is exactly the shape of a
-                    // Laravel `belongsToMany` pivot query: `SELECT teams.*,
-                    // team_user.role AS pivot_role FROM teams JOIN
-                    // team_user ...`).
+                    // This is the shape of a Laravel `belongsToMany` pivot
+                    // query: `SELECT teams.*, team_user.role AS pivot_role
+                    // FROM teams JOIN team_user ...`.
                     let store = newStore ()
                     runDefault store "CREATE TABLE teams (id INT, name VARCHAR(10))" |> ignore
                     runDefault store "CREATE TABLE team_user (id INT, team_id INT, role VARCHAR(10))" |> ignore
                     runDefault store "INSERT INTO teams VALUES (1, 'acme')" |> ignore
-                    // team_user's own id (99) collides with no team id, but
-                    // would still shadow teams.id under the old bug.
                     runDefault store "INSERT INTO team_user VALUES (99, 1, 'admin')" |> ignore
 
                     match
@@ -1777,10 +1747,6 @@ let tests =
 
                 testCase "a derived table's columns compare numerically, not as re-wrapped text"
                 <| fun _ ->
-                    // A derived table's rows used to round-trip through the
-                    // wire's text resultset shape and come back as VString,
-                    // so any comparison on them (MAX/ORDER BY/...) sorted
-                    // lexicographically ("10" < "2") instead of numerically.
                     let store = newStore ()
                     runDefault store "CREATE TABLE nums (n INT)" |> ignore
                     runDefault store "INSERT INTO nums VALUES (2), (10), (9)" |> ignore
@@ -1925,12 +1891,10 @@ let tests =
               "DATE column coercion"
               [ testCase "a full datetime string into a DATE column keeps just the date part, like real MySQL"
                 <| fun _ ->
-                    // Regression: a bare `INSERT ... VALUES ('2024-03-05
-                    // 13:45:09')` into a DATE column used to fail to parse
-                    // (DateOnly.TryParse rejects a time component) even
-                    // though real MySQL silently truncates it — this is
-                    // exactly what Eloquent's `date` cast sends (Carbon's
-                    // full `'Y-m-d H:i:s'` string form).
+                    // Real MySQL silently truncates a full datetime string
+                    // into just its date part on insert into a DATE column
+                    // — this is exactly what Eloquent's `date` cast sends
+                    // (Carbon's full `'Y-m-d H:i:s'` string form).
                     let store = newStore ()
                     runDefault store "CREATE TABLE t (d DATE)" |> ignore
 

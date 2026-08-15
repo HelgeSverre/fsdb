@@ -66,8 +66,8 @@ let tests =
 
           testCase "writePacketAsync splits a payload >= 16 MiB instead of truncating the length header"
           <| fun _ ->
-              // Regression: frame's 3-byte length prefix can't represent
-              // more than 0xffffff bytes; naively writing an oversized
+              // frame's 3-byte length prefix can't represent more than
+              // 0xffffff bytes; naively writing an oversized
               // payload silently declared `length &&& 0xffffff` and then
               // wrote the full body, permanently desyncing the connection.
               async {
@@ -105,8 +105,8 @@ let tests =
 
           testCase "readPacketAsync reassembles a payload split across multiple wire packets"
           <| fun _ ->
-              // Regression: a payload of exactly maxPacketPayload bytes means
-              // "more packets follow" per the protocol. Any client sending a
+              // A payload of exactly maxPacketPayload bytes means "more
+              // packets follow" per the protocol. Any client sending a
               // statement >= 16 MiB (MySqlConnector, Connector/J,
               // libmysqlclient all do) sends it this way; failing to
               // reassemble ran the first chunk as its own command and then

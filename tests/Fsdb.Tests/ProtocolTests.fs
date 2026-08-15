@@ -30,9 +30,8 @@ let tests =
 
           testCase "OK payload status flags carry SERVER_STATUS_IN_TRANS while a transaction is open"
           <| fun _ ->
-              // Regression: the status flags used to be hardcoded to
-              // StatusAutocommit alone, so PDO's inTransaction() (which reads
-              // this bit off the wire) always reported false.
+              // PDO's inTransaction() reads SERVER_STATUS_IN_TRANS directly
+              // off this bit.
               let payload = okPayload ClientProtocol41 (StatusAutocommit ||| StatusInTrans) 0UL 0UL
               let r = Reader(payload.[1..])
               r.ReadLenEncInt() |> ignore // affected rows
@@ -49,8 +48,8 @@ let tests =
 
           testCase "ERR payload for 1064 carries SQLSTATE 42000, not the generic HY000"
           <| fun _ ->
-              // Regression: PDO/Doctrine branch on SQLSTATE (42000 -> syntax
-              // error, not the generic HY000) to classify exceptions.
+              // PDO/Doctrine branch on SQLSTATE (42000 -> syntax error, not
+              // the generic HY000) to classify exceptions.
               let payload = errPayload ClientProtocol41 1064 "bad syntax"
               let sqlState = Text.Encoding.ASCII.GetString(payload, 4, 5)
               Expect.equal sqlState "42000" "sqlstate for 1064"
@@ -63,8 +62,8 @@ let tests =
 
           testCase "the resultset-terminating OK uses header 0xfe, not 0x00"
           <| fun _ ->
-              // Regression: mysql CLI distinguishes this from a plain OK by the
-              // 0xfe header (it reuses the legacy EOF marker byte). Sending 0x00
+              // mysql CLI distinguishes this from a plain OK by the 0xfe
+              // header (it reuses the legacy EOF marker byte). Sending 0x00
               // here makes mysql_use_result callers (e.g. the CLI's startup
               // banner query) hang forever waiting for a terminator that never
               // looks like one.

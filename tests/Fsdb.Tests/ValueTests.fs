@@ -110,8 +110,7 @@ let tests =
 
                 testCase "numeric-string coercion beats lexical string ordering"
                 <| fun _ ->
-                    // '9' < '10' lexically but 9 > 10 is false numerically —
-                    // this is the case the task explicitly calls out.
+                    // '9' < '10' lexically but 9 > 10 is false numerically.
                     Expect.isLessThan (compare (VString "9") (VInt 10L)) 0 "'9' < 10 numerically"
 
                 testCase "two strings compare lexically, not numerically"
