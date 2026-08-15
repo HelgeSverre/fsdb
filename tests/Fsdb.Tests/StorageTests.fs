@@ -1107,6 +1107,38 @@ let tests =
                         | Error e -> failtestf "expected Ok, got %A" e
                     | Error e -> failtestf "expected Ok, got %A" e
 
+                testCase "ON DELETE CASCADE on a mutually-referencing cycle terminates instead of stack-overflowing"
+                <| fun _ ->
+                    let store = create ()
+
+                    let selfFk =
+                        { Name = "fk_node"
+                          Columns = [ "parent_id" ]
+                          RefTable = "node"
+                          RefColumns = [ "id" ]
+                          OnDelete = Some "CASCADE"
+                          OnUpdate = None }
+
+                    createTable store defaultDatabase "node" [ idCol; col "parent_id" (TInt false) true ] [] [ selfFk ]
+                    |> ignore
+
+                    // Two rows that reference each other — needs the checks
+                    // disabled to insert at all, same as a real client's
+                    // `SET FOREIGN_KEY_CHECKS=0` around a cyclic seed.
+                    setForeignKeyChecks store false
+
+                    insertRows store defaultDatabase "node" None [ [ VInt 6L; VInt 7L ]; [ VInt 7L; VInt 6L ] ]
+                    |> ignore
+
+                    setForeignKeyChecks store true
+
+                    match deleteRows store defaultDatabase "node" (fun row -> Ok(row.[0] = VInt 6L)) with
+                    | Ok _ ->
+                        match scan store defaultDatabase "node" with
+                        | Ok(_, rows) -> Expect.isEmpty (List.ofSeq rows) "the mutually-referencing pair is fully deleted, not stuck in infinite recursion"
+                        | Error e -> failtestf "expected Ok, got %A" e
+                    | Error e -> failtestf "expected Ok, got %A" e
+
                 testCase "setForeignKeyChecks false allows a blocked delete and a dangling child insert through"
                 <| fun _ ->
                     let store = withDeptEmployees None

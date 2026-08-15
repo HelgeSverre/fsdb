@@ -779,7 +779,25 @@ let private referencingForeignKeys (db: Database) (parentKey: string) : (string 
 /// everything already computed — `deleteRows`/`withDatabase` only ever
 /// commits an `Ok` result, so this is all-or-nothing per statement without
 /// needing its own rollback logic.
-let rec private cascadeDelete (checkFks: bool) (db: Database) (tableKey: string) (toDelete: Value[] list) : Result<Database, StorageError> =
+/// `cascadeDelete`'s real recursion, threading `visited` — every row already
+/// scheduled for deletion in this call tree, per table — so a cyclic
+/// `CASCADE` (two tables' foreign keys pointing at each other, or a
+/// self-referencing one) can't re-discover a row it already scheduled and
+/// recurse forever: once a row is in `visited` for its table, a later
+/// `matching` set that rediscovers it drops it before recursing, so the
+/// cascade's frontier shrinks every call instead of oscillating between the
+/// same two rows and StackOverflow-crashing the whole (uncatchable in .NET)
+/// process.
+let rec private cascadeDeleteVisited
+    (checkFks: bool)
+    (db: Database)
+    (visited: Map<string, Value[] list>)
+    (tableKey: string)
+    (toDelete: Value[] list)
+    : Result<Database * Map<string, Value[] list>, StorageError> =
+    let alreadyVisited = visited |> Map.tryFind tableKey |> Option.defaultValue []
+    let toDelete = toDelete |> List.filter (fun row -> not (alreadyVisited |> List.exists ((=) row)))
+
     // Removes one row per entry in `toDelete`, not every structurally-equal
     // row: two identical rows are distinct rows, and a `DELETE ... LIMIT n`
     // (or a cascaded child match) may legitimately match only one of them.
@@ -798,51 +816,57 @@ let rec private cascadeDelete (checkFks: bool) (db: Database) (tableKey: string)
         Map.add tableKey { t with Rows = List.rev kept } d
 
     if toDelete.IsEmpty then
-        Ok db
-    elif not checkFks then
-        Ok(removeFrom db)
+        Ok(db, visited)
     else
-        let table = Map.find tableKey db
+        let visited = visited |> Map.add tableKey (alreadyVisited @ toDelete)
 
-        let applyChild dbAcc (childKey: string, fk: ForeignKeyDef) =
-            dbAcc
-            |> Result.bind (fun d ->
-                let childTbl = Map.find childKey d
+        if not checkFks then
+            Ok(removeFrom db, visited)
+        else
+            let table = Map.find tableKey db
 
-                match fk.Columns |> traverse (resolveColumn childTbl.Columns), fk.RefColumns |> traverse (resolveColumn table.Columns) with
-                | Error _, _
-                | _, Error _ -> Ok d // stale FK metadata — see `checkFkParents`'s note.
-                | Ok childIdxs, Ok refIdxs ->
-                    let parentKeys = toDelete |> List.map (fun row -> refIdxs |> List.map (fun i -> row.[i]))
+            let applyChild acc (childKey: string, fk: ForeignKeyDef) =
+                acc
+                |> Result.bind (fun (d, visited) ->
+                    let childTbl = Map.find childKey d
 
-                    let isChild (row: Value[]) =
-                        let key = childIdxs |> List.map (fun i -> row.[i])
+                    match fk.Columns |> traverse (resolveColumn childTbl.Columns), fk.RefColumns |> traverse (resolveColumn table.Columns) with
+                    | Error _, _
+                    | _, Error _ -> Ok(d, visited) // stale FK metadata — see `checkFkParents`'s note.
+                    | Ok childIdxs, Ok refIdxs ->
+                        let parentKeys = toDelete |> List.map (fun row -> refIdxs |> List.map (fun i -> row.[i]))
 
-                        key |> List.forall ((<>) VNull)
-                        && parentKeys |> List.exists (List.forall2 (fun a b -> compare a b = 0) key)
+                        let isChild (row: Value[]) =
+                            let key = childIdxs |> List.map (fun i -> row.[i])
 
-                    let matching = childTbl.Rows |> List.filter isChild
+                            key |> List.forall ((<>) VNull)
+                            && parentKeys |> List.exists (List.forall2 (fun a b -> compare a b = 0) key)
 
-                    if matching.IsEmpty then
-                        Ok d
-                    else
-                        match fk.OnDelete |> Option.map (fun s -> s.Trim().ToUpperInvariant()) with
-                        | Some "CASCADE" -> cascadeDelete checkFks d childKey matching
-                        | Some "SET NULL" ->
-                            let blanked row =
-                                if isChild row then
-                                    let row' = Array.copy row
-                                    childIdxs |> List.iter (fun i -> row'.[i] <- VNull)
-                                    row'
-                                else
-                                    row
+                        let matching = childTbl.Rows |> List.filter isChild
 
-                            Ok(Map.add childKey { childTbl with Rows = childTbl.Rows |> List.map blanked } d)
-                        | _ -> Error(ForeignKeyRestrict fk.Name))
+                        if matching.IsEmpty then
+                            Ok(d, visited)
+                        else
+                            match fk.OnDelete |> Option.map (fun s -> s.Trim().ToUpperInvariant()) with
+                            | Some "CASCADE" -> cascadeDeleteVisited checkFks d visited childKey matching
+                            | Some "SET NULL" ->
+                                let blanked row =
+                                    if isChild row then
+                                        let row' = Array.copy row
+                                        childIdxs |> List.iter (fun i -> row'.[i] <- VNull)
+                                        row'
+                                    else
+                                        row
 
-        referencingForeignKeys db tableKey
-        |> List.fold applyChild (Ok db)
-        |> Result.map removeFrom
+                                Ok(Map.add childKey { childTbl with Rows = childTbl.Rows |> List.map blanked } d, visited)
+                            | _ -> Error(ForeignKeyRestrict fk.Name))
+
+            referencingForeignKeys db tableKey
+            |> List.fold applyChild (Ok(db, visited))
+            |> Result.map (fun (d, visited) -> removeFrom d, visited)
+
+let private cascadeDelete (checkFks: bool) (db: Database) (tableKey: string) (toDelete: Value[] list) : Result<Database, StorageError> =
+    cascadeDeleteVisited checkFks db Map.empty tableKey toDelete |> Result.map fst
 
 /// Deletes every row matching `predicate`. Returns the number of rows
 /// removed. `predicate` returns a `Result` rather than a plain `bool` so a
