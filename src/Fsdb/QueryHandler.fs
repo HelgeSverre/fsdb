@@ -227,11 +227,15 @@ let private stripBackticks (s: string) = s.Trim().Trim('`')
 /// TABLE` accept it directly, alongside their own `FROM db` clause — the
 /// same split `Executor.splitQualified` does for statements the real parser
 /// handles, duplicated here in miniature since these are still text-probed
-/// rather than parsed.
+/// rather than parsed. Strips backticks per component *after* splitting on
+/// `.`, not before — `` `shop`.`users` `` trimmed as one string first
+/// becomes `` shop`.`users `` (the outer backticks are gone, the inner ones
+/// around the dot aren't), which then splits into `` shop` `` / `` `users ``
+/// instead of `shop` / `users`.
 let private splitDbTable (defaultDb: string) (name: string) : string * string =
-    match name.Split('.') with
-    | [| db; tbl |] -> db, tbl
-    | _ -> defaultDb, name
+    match name.Trim().Split('.') with
+    | [| db; tbl |] -> stripBackticks db, stripBackticks tbl
+    | _ -> defaultDb, stripBackticks name
 
 let private showTablesRe =
     Regex(@"^SHOW\s+(FULL\s+)?TABLES(\s+FROM\s+(\S+))?", RegexOptions.IgnoreCase)
@@ -772,7 +776,7 @@ let private dispatch (session: Session) (rawSql: string) : Session * QueryResult
     | _ when upper.StartsWith "SHOW TABLES" || upper.StartsWith "SHOW FULL TABLES" -> session, handleShowTables session sql
     | _ when showCreateTableRe.IsMatch sql ->
         let sessionDb = session.Database |> Option.defaultValue defaultDatabase
-        let dbName, table = splitDbTable sessionDb (stripBackticks (showCreateTableRe.Match sql).Groups.[1].Value)
+        let dbName, table = splitDbTable sessionDb (showCreateTableRe.Match sql).Groups.[1].Value
 
         match findTable session dbName table with
         | Error(code, msg) -> session, Err(code, msg)
@@ -780,17 +784,17 @@ let private dispatch (session: Session) (rawSql: string) : Session * QueryResult
     | _ when showColumnsRe.IsMatch sql ->
         let m = showColumnsRe.Match sql
         let sessionDb = session.Database |> Option.defaultValue defaultDatabase
-        let dbName, table = splitDbTable sessionDb (stripBackticks m.Groups.[2].Value)
+        let dbName, table = splitDbTable sessionDb m.Groups.[2].Value
         let dbName = if m.Groups.[4].Success then stripBackticks m.Groups.[4].Value else dbName
         session, handleShowColumns session m.Groups.[1].Success dbName table (likeSuffix sql)
     | _ when describeRe.IsMatch sql ->
         let sessionDb = session.Database |> Option.defaultValue defaultDatabase
-        let dbName, table = splitDbTable sessionDb (stripBackticks (describeRe.Match sql).Groups.[1].Value)
+        let dbName, table = splitDbTable sessionDb (describeRe.Match sql).Groups.[1].Value
         session, handleShowColumns session false dbName table None
     | _ when showIndexRe.IsMatch sql ->
         let m = showIndexRe.Match sql
         let sessionDb = session.Database |> Option.defaultValue defaultDatabase
-        let dbName, table = splitDbTable sessionDb (stripBackticks m.Groups.[1].Value)
+        let dbName, table = splitDbTable sessionDb m.Groups.[1].Value
         let dbName = if m.Groups.[3].Success then stripBackticks m.Groups.[3].Value else dbName
         session, handleShowIndex session dbName table
     | _ -> executeStatement session sql upper

@@ -416,6 +416,29 @@ let queryHandlerTests =
                   Expect.stringContains ddl "UNIQUE KEY `name`" "includes the unique index"
               | other -> failtestf "expected a resultset, got %A" other
 
+          testCase "SHOW CREATE TABLE with a backtick-quoted, db-qualified name matches the unqualified result"
+          <| fun _ ->
+              // Regression: stripBackticks used to run on the whole
+              // "`db`.`table`" string *before* splitting on '.', so
+              // "`shop`.`users`".Trim('`') -> "shop`.`users" -> split on
+              // '.' -> ("shop`", "`users") — an unknown-database error for
+              // any SHOW target that's both qualified and backtick-quoted.
+              let session = create 1 (Fsdb.Storage.create ())
+              let session, _ = handle session "USE shop"
+              let session, _ = handle session "CREATE TABLE users (id INT PRIMARY KEY)"
+
+              let unqualified = handle session "SHOW CREATE TABLE users" |> snd
+              let qualified = handle session "SHOW CREATE TABLE `shop`.`users`" |> snd
+              Expect.equal qualified unqualified "backtick-quoted db.table matches the unqualified form"
+
+              match handle session "SHOW COLUMNS FROM `shop`.`users`" |> snd with
+              | ResultSet(_, [ _ ]) -> ()
+              | other -> failtestf "expected SHOW COLUMNS to resolve the backtick-quoted db.table, got %A" other
+
+              match handle session "SHOW INDEX FROM `shop`.`users`" |> snd with
+              | ResultSet(_, [ _ ]) -> ()
+              | other -> failtestf "expected SHOW INDEX to resolve the backtick-quoted db.table, got %A" other
+
           testCase "SHOW INDEX FROM t lists the primary key and other indexes"
           <| fun _ ->
               let session = create 1 (Fsdb.Storage.create ())
