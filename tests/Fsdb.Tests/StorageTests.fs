@@ -920,7 +920,7 @@ let tests =
                     let store = withUsersTable ()
                     let applyUpdate (_: Value[]) (candidate: Value[]) = Ok candidate
 
-                    match upsertRows store defaultDatabase "users" None [ [ VNull; VString "alice"; VInt 30L ] ] applyUpdate with
+                    match upsertRows store defaultDatabase "users" None [ [ VNull; VString "alice"; VInt 30L ] ] Ok applyUpdate with
                     | Ok(lastId, affected) ->
                         Expect.equal lastId 1L "inserted with a fresh id"
                         Expect.equal affected 1 "one row"
@@ -934,7 +934,7 @@ let tests =
                     let applyUpdate (existing: Value[]) (_candidate: Value[]) =
                         Ok [| existing.[0]; existing.[1]; VInt 31L |]
 
-                    match upsertRows store defaultDatabase "users" None [ [ VInt 1L; VString "alice"; VInt 999L ] ] applyUpdate with
+                    match upsertRows store defaultDatabase "users" None [ [ VInt 1L; VString "alice"; VInt 999L ] ] Ok applyUpdate with
                     | Ok(_, affected) ->
                         Expect.equal affected 1 "one row affected (the update, not an insert)"
 
@@ -960,7 +960,7 @@ let tests =
 
                     let applyUpdate (existing: Value[]) (_candidate: Value[]) = Ok existing
 
-                    match upsertRows store defaultDatabase "emails" None [ [ VInt 2L; VString "a@x.com" ] ] applyUpdate with
+                    match upsertRows store defaultDatabase "emails" None [ [ VInt 2L; VString "a@x.com" ] ] Ok applyUpdate with
                     | Ok(_, affected) ->
                         Expect.equal affected 1 "matched via the unique index"
 

@@ -709,6 +709,7 @@ let upsertRows
     (tableName: string)
     (columns: string list option)
     (rowsIn: Value list list)
+    (computeGenerated: Value[] -> Result<Value[], StorageError>)
     (applyUpdate: Value[] -> Value[] -> Result<Value[], StorageError>)
     : Result<int64 * int, StorageError> =
     withTable store dbName tableName (fun table ->
@@ -735,17 +736,29 @@ let upsertRows
 
                         processRow nextAutoId rawRow table.Columns
                         |> Result.bind (fun (finalValues, nextAutoId', assignedId) ->
-                            let candidate = Array.ofList finalValues
-
-                            match findMatch rowsAcc candidate with
-                            | Some existing ->
-                                applyUpdate existing candidate
-                                |> Result.map (fun updated ->
-                                    (rowsAcc |> List.map (fun r -> if r = existing then updated else r)),
-                                    nextAutoId',
-                                    firstAssigned,
-                                    affected + 1)
-                            | None -> Ok(rowsAcc @ [ candidate ], nextAutoId', Option.orElse assignedId firstAssigned, affected + 1)))
+                            // A unique index over a *generated* column (e.g.
+                            // Laravel Pulse's `key_hash BINARY(16) AS
+                            // (unhex(md5(key)))`) is still NULL in the raw
+                            // candidate at this point — `computeGenerated`
+                            // fills it in before `findMatch`/`rowsCollideOn`
+                            // run, so ON DUPLICATE KEY UPDATE actually finds
+                            // the collision instead of degrading into a
+                            // plain INSERT that then trips the unique check.
+                            computeGenerated (Array.ofList finalValues)
+                            |> Result.map (fun candidate ->
+                                match findMatch rowsAcc candidate with
+                                | Some existing -> Choice1Of2(existing, candidate)
+                                | None -> Choice2Of2 candidate)
+                            |> Result.bind (function
+                                | Choice1Of2(existing, candidate) ->
+                                    applyUpdate existing candidate
+                                    |> Result.map (fun updated ->
+                                        (rowsAcc |> List.map (fun r -> if r = existing then updated else r)),
+                                        nextAutoId',
+                                        firstAssigned,
+                                        affected + 1)
+                                | Choice2Of2 candidate ->
+                                    Ok(rowsAcc @ [ candidate ], nextAutoId', Option.orElse assignedId firstAssigned, affected + 1))))
 
             rowsIn
             |> List.fold step (Ok(table.Rows, table.NextAutoId, None, 0))

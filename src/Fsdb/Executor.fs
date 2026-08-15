@@ -1298,20 +1298,68 @@ let private applyAssignments
             newRow.[idx] <- v
         newRow)
 
-/// Recomputes every `Generated` column of `table` (`CREATE TABLE ... col AS
-/// (expr)`) after a successful `INSERT`/`UPDATE` — called unconditionally
-/// from those two cases below, a no-op (skips the `updateRows` pass
-/// entirely) when the table has none. A generated expression is a pure
-/// function of the row's other columns, so recomputing it for rows that
-/// already have the right value is harmless; that's what buys the "just
-/// rerun it over the whole table" simplicity instead of tracking exactly
-/// which rows an `INSERT`/`UPDATE` touched.
+/// Computes every `Generated` column of `row` (`CREATE TABLE ... col AS
+/// (expr)`) fresh from its other columns' current values, leaving every
+/// other column untouched — a no-op when `table` has no generated columns.
+/// The one place this recomputation actually happens: `recomputeGeneratedColumns`
+/// folds it over a whole table's rows after a successful `INSERT`/`UPDATE`,
+/// and `upsertRows`'s `computeGenerated` parameter needs it applied to a
+/// bare candidate row *before* that row lands, so a unique index spanning a
+/// generated column (e.g. Laravel Pulse's `key_hash BINARY(16) AS
+/// (unhex(md5(key)))`) sees its real value at collision-detection time
+/// instead of a not-yet-computed NULL. Left-to-right column order lets one
+/// generated column reference an earlier one in the same row.
+let private computeGeneratedRow
+    (store: Store)
+    (registry: Registry)
+    (dbName: string)
+    (table: string)
+    (columns: ColumnDef list)
+    (row: Value[])
+    : Result<Value[], StorageError> =
+    let generated = columns |> List.choose (fun c -> c.Generated |> Option.map (fun e -> c, e))
+
+    if generated.IsEmpty then
+        Ok row
+    else
+        let row' = Array.copy row
+
+        let ctx =
+            { Registry = registry
+              ColumnIndex = columnIndexOf columns
+              Qualifiers = singleQualifier table columns
+              Row = row'
+              Store = store
+              DbName = dbName
+              Outer = None }
+
+        // `ctx.Row` holds `row'` by reference, so mutating it in place
+        // right after each column's evaluated (rather than collecting then
+        // applying afterwards) lets a later generated column's expression
+        // see an earlier one's freshly computed value.
+        generated
+        |> traverse (fun (col, expr) ->
+            evalExpr ctx expr
+            |> Result.mapError ExpressionError
+            |> Result.bind (fun v -> coerceValue col v)
+            |> Result.map (fun v' ->
+                match resolveColumn columns col.Name with
+                | Ok idx -> row'.[idx] <- v'
+                | Error _ -> ()))
+        |> Result.map (fun _ -> row')
+
+/// Recomputes every `Generated` column of `table` after a successful
+/// `INSERT`/`UPDATE` — called unconditionally from those cases below, a
+/// no-op (skips the `updateRows` pass entirely, via `computeGeneratedRow`'s
+/// own no-op check) when the table has none. A generated expression is a
+/// pure function of the row's other columns, so recomputing it for rows
+/// that already have the right value is harmless; that's what buys the
+/// "just rerun it over the whole table" simplicity instead of tracking
+/// exactly which rows an `INSERT`/`UPDATE` touched.
 /// ponytail: O(table size) per write when a table has generated columns
 /// (fine for this engine's in-memory scale) — upgrade to recomputing only
 /// the affected rows if a migration's table ever gets large enough to make
 /// that the bottleneck.
-/// Left-to-right column order lets one generated column reference an
-/// earlier one in the same row, per `Storage.applyGeneratedColumns`'s doc.
 let private recomputeGeneratedColumns
     (store: Store)
     (registry: Registry)
@@ -1320,42 +1368,11 @@ let private recomputeGeneratedColumns
     (table: string)
     (columns: ColumnDef list)
     : Result<unit, StorageError> =
-    let generated = columns |> List.choose (fun c -> c.Generated |> Option.map (fun e -> c, e))
-
-    if generated.IsEmpty then
+    if columns |> List.exists (fun c -> c.Generated.IsSome) |> not then
         Ok()
     else
-        let columnIndex = columnIndexOf columns
-        let qualifiers = singleQualifier table columns
-
-        let updater (row: Value[]) : Result<Value[], StorageError> =
-            let row' = Array.copy row
-
-            let ctx =
-                { Registry = registry
-                  ColumnIndex = columnIndex
-                  Qualifiers = qualifiers
-                  Row = row'
-                  Store = store
-                  DbName = dbName
-                  Outer = None }
-
-            // `ctx.Row` holds `row'` by reference, so mutating it in place
-            // right after each column's evaluated (rather than collecting
-            // then applying afterwards) lets a later generated column's
-            // expression see an earlier one's freshly computed value.
-            generated
-            |> traverse (fun (col, expr) ->
-                evalExpr ctx expr
-                |> Result.mapError ExpressionError
-                |> Result.bind (fun v -> coerceValue col v)
-                |> Result.map (fun v' ->
-                    match resolveColumn columns col.Name with
-                    | Ok idx -> row'.[idx] <- v'
-                    | Error _ -> ()))
-            |> Result.map (fun _ -> row')
-
-        updateRows store db table (fun _ -> Ok true) updater |> Result.map ignore
+        updateRows store db table (fun _ -> Ok true) (computeGeneratedRow store registry dbName table columns)
+        |> Result.map ignore
 
 /// Threads `recomputeGeneratedColumns` onto the tail of an `INSERT`/`UPDATE`
 /// result — re-scans `table` for its current columns (cheap: an in-memory
@@ -1563,7 +1580,9 @@ let execute (store: Store) (registry: Registry) (dbName: string) (lastInsertId: 
                                 newRow.[idx] <- v
                             newRow)
 
-                    match upsertRows store db table cols rowsValues applyUpdate |> withGeneratedRecomputed store registry dbName db table with
+                    let computeGenerated = computeGeneratedRow store registry dbName table tableColumns
+
+                    match upsertRows store db table cols rowsValues computeGenerated applyUpdate |> withGeneratedRecomputed store registry dbName db table with
                     | Ok(newLastId, affected) ->
                         (if newLastId <> 0L then newLastId else lastInsertId), Affected(uint64 affected)
                     | Error e -> lastInsertId, storageErr e

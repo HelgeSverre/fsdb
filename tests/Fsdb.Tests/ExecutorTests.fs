@@ -505,6 +505,24 @@ let tests =
                     | ResultSet(_, [ [ Some "1"; Some "2" ] ]) -> ()
                     | other -> failtestf "expected the existing row bumped, not a second row, got %A" other
 
+                testCase "a collision on a unique index over a VIRTUAL generated column runs the UPDATE clause, not error 1062"
+                <| fun _ ->
+                    let store = newStore ()
+
+                    runDefault store "CREATE TABLE t (id INT PRIMARY KEY, k VARCHAR(50), k_hash VARCHAR(64) AS (MD5(k)), UNIQUE KEY uq_hash (k_hash))"
+                    |> ignore
+
+                    runDefault store "INSERT INTO t (id, k) VALUES (1, 'x') ON DUPLICATE KEY UPDATE id = id"
+                    |> ignore
+
+                    match runDefault store "INSERT INTO t (id, k) VALUES (2, 'x') ON DUPLICATE KEY UPDATE id = id" with
+                    | Affected _ -> ()
+                    | other -> failtestf "expected the ODKU clause to run instead of a 1062 error, got %A" other
+
+                    match runDefault store "SELECT COUNT(*) FROM t" with
+                    | ResultSet(_, [ [ Some "1" ] ]) -> ()
+                    | other -> failtestf "expected one row (updated, not duplicated), got %A" other
+
                 testCase "INSERT IGNORE parses and executes like a plain INSERT"
                 <| fun _ ->
                     let store = newStore ()
