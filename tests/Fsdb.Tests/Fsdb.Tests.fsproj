@@ -6,11 +6,18 @@
   </PropertyGroup>
 
   <ItemGroup>
+    <Compile Include="PacketTests.fs" />
+    <Compile Include="ProtocolTests.fs" />
     <Compile Include="ValueTests.fs" />
     <Compile Include="ParserTests.fs" />
     <Compile Include="StorageTests.fs" />
     <Compile Include="ExecutorTests.fs" />
     <Compile Include="InformationSchemaTests.fs" />
+    <Compile Include="QueryHandlerTests.fs" />
+    <Compile Include="PreparedStatementTests.fs" />
+    <Compile Include="TransactionTests.fs" />
+    <Compile Include="ServerTests.fs" />
+    <Compile Include="IntegrationTests.fs" />
     <Compile Include="Program.fs" />
   </ItemGroup>
 
