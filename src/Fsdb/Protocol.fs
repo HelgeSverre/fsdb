@@ -300,7 +300,13 @@ let private readBinaryDateTime (r: Reader) : DateTime =
             if len > 4 then int (r.ReadByte()), int (r.ReadByte()), int (r.ReadByte()) else 0, 0, 0
 
         let micros = if len > 7 then r.ReadInt32LE() else 0
-        DateTime(year, max month 1, max day 1, hour, minute, second).AddTicks(int64 micros * 10L)
+        // MySqlConnector (and other clients) send year 0 for MySQL's
+        // '0000-00-00' zero-date — `DateTime` has no such value, so clamp
+        // the same way month/day already are rather than letting the
+        // constructor throw and drop the connection (see the try/with
+        // around this call site in `Server`).
+        DateTime(max year 1, max month 1, max day 1, hour, minute, second)
+            .AddTicks(int64 micros * 10L)
 
 /// Reads a MySQL binary-protocol TIME value off `r` and renders it the way
 /// MySQL's TIME text form does (`[-][H]HH:MM:SS[.ffffff]`) — fsdb has no

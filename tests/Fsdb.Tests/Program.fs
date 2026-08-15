@@ -999,6 +999,86 @@ let integrationTests =
                   finally
                       listener.Stop()
               }
+              |> Async.RunSynchronously
+
+          // Regression: a COM_STMT_EXECUTE payload whose declared param type
+          // doesn't match the bytes actually on the wire used to throw
+          // straight out of the connection loop (readBinaryValue's
+          // `Reader.ReadBytes` runs outside `QueryHandler.handle`'s
+          // try/with) and drop the socket with no ERR packet. A well-behaved
+          // driver never sends this, but a malformed/adversarial one
+          // shouldn't be able to silently kill the connection either — hand
+          // this one over the wire directly since no real client library
+          // will construct it. Declares MYSQL_TYPE_LONGLONG (needs 8 bytes)
+          // but supplies only 2.
+          testCase "a malformed COM_STMT_EXECUTE param payload gets an ERR, not a dropped connection"
+          <| fun _ ->
+              async {
+                  let listener = Fsdb.Server.startListening System.Net.IPAddress.Loopback 0
+                  let port = Fsdb.Server.port listener
+                  let serverTask = Fsdb.Server.serve listener (Fsdb.Storage.create ()) |> Async.StartAsTask
+
+                  try
+                      use client = new Net.Sockets.TcpClient()
+                      do! client.ConnectAsync(Net.IPAddress.Loopback, port) |> Async.AwaitTask
+                      use stream = client.GetStream()
+
+                      // Handshake: read the server's HandshakeV10, reply with a
+                      // minimal HandshakeResponse41 (no auth, no database).
+                      let! handshake = readPacketAsync stream
+                      let handshakeSeq = handshake.Value.SeqId
+
+                      let helloResponse =
+                          let w = Writer()
+                          w.WriteInt32LE(int ClientProtocol41)
+                          w.WriteInt32LE 16777216
+                          w.WriteByte 45uy
+                          w.WriteBytes(Array.zeroCreate<byte> 23)
+                          w.WriteNullTerminatedString "root"
+                          w.WriteByte 0uy // zero-length auth response
+                          w.ToArray()
+
+                      let! _ = writePacketAsync stream { SeqId = handshakeSeq + 1uy; Payload = helloResponse }
+                      let! _ = readPacketAsync stream // connection OK
+
+                      // COM_STMT_PREPARE "SELECT ?"
+                      let prepPayload = Array.append [| 0x16uy |] (Text.Encoding.UTF8.GetBytes "SELECT ?")
+                      let! _ = writePacketAsync stream { SeqId = 0uy; Payload = prepPayload }
+                      let! prepareOk = readPacketAsync stream
+                      let stmtId = Reader(prepareOk.Value.Payload.[1..]).ReadInt32LE()
+                      let! _ = readPacketAsync stream // the one param's column-def packet
+                      let! _ = readPacketAsync stream // its trailing EOF
+
+                      // COM_STMT_EXECUTE: stmtId, cursor flags, iteration
+                      // count, null bitmap (1 byte, param count 1), new-
+                      // params-bound=1, type=LONGLONG/signed, then only 2
+                      // payload bytes where 8 are required.
+                      let execPayload =
+                          let w = Writer()
+                          w.WriteByte 0x17uy
+                          w.WriteInt32LE stmtId
+                          w.WriteByte 0uy
+                          w.WriteInt32LE 1
+                          w.WriteByte 0uy // null bitmap
+                          w.WriteByte 1uy // new-params-bound
+                          w.WriteByte TypeLongLong
+                          w.WriteByte 0uy // signed
+                          w.WriteBytes [| 1uy; 2uy |] // only 2 of the 8 bytes LONGLONG needs
+                          w.ToArray()
+
+                      let! _ = writePacketAsync stream { SeqId = 0uy; Payload = execPayload }
+                      let! errReply = readPacketAsync stream
+                      Expect.isTrue errReply.IsSome "the connection is still alive after the malformed EXECUTE"
+                      Expect.equal errReply.Value.Payload.[0] 0xffuy "server replies ERR, not silence/close"
+
+                      // The connection itself must still be usable afterwards.
+                      let queryPayload = Array.append [| 0x03uy |] (Text.Encoding.UTF8.GetBytes "SELECT 1")
+                      let! _ = writePacketAsync stream { SeqId = 0uy; Payload = queryPayload }
+                      let! afterReply = readPacketAsync stream
+                      Expect.isTrue afterReply.IsSome "a later query on the same connection still gets a reply"
+                  finally
+                      listener.Stop()
+              }
               |> Async.RunSynchronously ]
 
 [<EntryPoint>]

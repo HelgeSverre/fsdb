@@ -301,26 +301,58 @@ let private handleConnection (connectionId: int) (store: Storage.Store) (client:
 
                                     return! loop session
                                 | Some stmt ->
-                                    let nullBitmap =
-                                        if stmt.ParamCount > 0 then r.ReadBytes((stmt.ParamCount + 7) / 8) else [||]
+                                    // A malformed COM_STMT_EXECUTE payload (a declared type not
+                                    // matching what's actually on the wire, a truncated param,
+                                    // ...) makes `Reader`'s reads throw straight out of this
+                                    // decode step — caught here rather than escaping the
+                                    // connection loop (see the ponytail note on `readBinaryValue`
+                                    // in Protocol.fs for the other half of this: a well-formed but
+                                    // un-representable value like a zero DATETIME, clamped instead
+                                    // of thrown).
+                                    let decoded =
+                                        try
+                                            let nullBitmap =
+                                                if stmt.ParamCount > 0 then r.ReadBytes((stmt.ParamCount + 7) / 8) else [||]
 
-                                    let newParamsBound = if stmt.ParamCount > 0 then r.ReadByte() else 0uy
+                                            let newParamsBound = if stmt.ParamCount > 0 then r.ReadByte() else 0uy
 
-                                    let typesResult =
-                                        if stmt.ParamCount = 0 then
-                                            Result.Ok []
-                                        elif newParamsBound = 1uy then
-                                            // Explicit sequential reads (not a bare tuple of two
-                                            // `ReadByte()` calls) so the type byte is always read
-                                            // before the unsigned-flag byte, regardless of F#'s
-                                            // tuple-construction evaluation order.
-                                            Result.Ok [ for _ in 1 .. stmt.ParamCount -> let t = r.ReadByte() in let u = r.ReadByte() in t, u <> 0uy ]
-                                        else
-                                            match stmt.LastParamTypes with
-                                            | Some types -> Result.Ok types
-                                            | None -> Result.Error "COM_STMT_EXECUTE sent no parameter types to bind"
+                                            let typesResult =
+                                                if stmt.ParamCount = 0 then
+                                                    Result.Ok []
+                                                elif newParamsBound = 1uy then
+                                                    // Explicit sequential reads (not a bare tuple of two
+                                                    // `ReadByte()` calls) so the type byte is always read
+                                                    // before the unsigned-flag byte, regardless of F#'s
+                                                    // tuple-construction evaluation order.
+                                                    Result.Ok [ for _ in 1 .. stmt.ParamCount -> let t = r.ReadByte() in let u = r.ReadByte() in t, u <> 0uy ]
+                                                else
+                                                    match stmt.LastParamTypes with
+                                                    | Some types -> Result.Ok types
+                                                    | None -> Result.Error "COM_STMT_EXECUTE sent no parameter types to bind"
 
-                                    match typesResult with
+                                            match typesResult with
+                                            | Result.Error message -> Result.Error message
+                                            | Result.Ok types ->
+                                                let isNull i =
+                                                    (int nullBitmap.[i / 8] >>> (i % 8)) &&& 1 = 1
+
+                                                let values =
+                                                    types
+                                                    |> List.mapi (fun i (typeId, unsigned) ->
+                                                        match Map.tryFind (stmtId, i) session.LongData with
+                                                        | Some bytes -> VString(Encoding.UTF8.GetString bytes)
+                                                        | None -> if isNull i then VNull else readBinaryValue r typeId unsigned)
+
+                                                let finalSql =
+                                                    QueryHandler.substitutePlaceholders
+                                                        stmt.Sql
+                                                        (values |> List.map QueryHandler.valueToSqlLiteral)
+
+                                                Result.Ok(types, finalSql)
+                                        with ex ->
+                                            Result.Error ex.Message
+
+                                    match decoded with
                                     | Result.Error message ->
                                         do!
                                             writePacketAsync
@@ -329,22 +361,7 @@ let private handleConnection (connectionId: int) (store: Storage.Store) (client:
                                             |> Async.Ignore
 
                                         return! loop session
-                                    | Result.Ok types ->
-                                        let isNull i =
-                                            (int nullBitmap.[i / 8] >>> (i % 8)) &&& 1 = 1
-
-                                        let values =
-                                            types
-                                            |> List.mapi (fun i (typeId, unsigned) ->
-                                                match Map.tryFind (stmtId, i) session.LongData with
-                                                | Some bytes -> VString(Encoding.UTF8.GetString bytes)
-                                                | None -> if isNull i then VNull else readBinaryValue r typeId unsigned)
-
-                                        let finalSql =
-                                            QueryHandler.substitutePlaceholders
-                                                stmt.Sql
-                                                (values |> List.map QueryHandler.valueToSqlLiteral)
-
+                                    | Result.Ok(types, finalSql) ->
                                         let session =
                                             { session with
                                                 Statements = Map.add stmtId { stmt with LastParamTypes = Some types } session.Statements
