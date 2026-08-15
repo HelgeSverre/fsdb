@@ -305,6 +305,264 @@ let tests =
                     | other -> failtestf "expected InvalidValueForColumn, got %A" other ]
 
           testList
+              "unique constraints"
+              [ let emailsTable store =
+                    createTable
+                        store
+                        defaultDatabase
+                        "emails"
+                        [ col "id" (TInt false) false; col "email" (TVarchar 255) false ]
+                        [ { Name = "uq_email"; Columns = [ "email" ]; Unique = true } ]
+                        []
+                    |> ignore
+
+                testCase "a plain INSERT violating a UNIQUE index returns error 1062"
+                <| fun _ ->
+                    let store = create ()
+                    emailsTable store
+                    insertRows store defaultDatabase "emails" None [ [ VInt 1L; VString "a@x.com" ] ] |> ignore
+
+                    match insertRows store defaultDatabase "emails" None [ [ VInt 2L; VString "a@x.com" ] ] with
+                    | Error(DuplicateKey("uq_email", "a@x.com")) ->
+                        let code, _ = toMySqlError (DuplicateKey("uq_email", "a@x.com"))
+                        Expect.equal code 1062 "MySQL error code"
+                    | other -> failtestf "expected DuplicateKey, got %A" other
+
+                testCase "a plain INSERT violating the primary key returns error 1062 for key PRIMARY"
+                <| fun _ ->
+                    let store = withUsersTable ()
+                    insertRows store defaultDatabase "users" None [ [ VInt 1L; VString "alice"; VInt 30L ] ]
+                    |> ignore
+
+                    match insertRows store defaultDatabase "users" None [ [ VInt 1L; VString "bob"; VInt 25L ] ] with
+                    | Error(DuplicateKey("PRIMARY", "1")) -> ()
+                    | other -> failtestf "expected DuplicateKey on PRIMARY, got %A" other
+
+                testCase "the unique check is collation-aware: case and trailing spaces don't dodge it"
+                <| fun _ ->
+                    let store = create ()
+                    emailsTable store
+                    insertRows store defaultDatabase "emails" None [ [ VInt 1L; VString "a@x.com" ] ] |> ignore
+
+                    match insertRows store defaultDatabase "emails" None [ [ VInt 2L; VString "A@X.COM " ] ] with
+                    | Error(DuplicateKey("uq_email", _)) -> ()
+                    | other -> failtestf "expected DuplicateKey, got %A" other
+
+                testCase "two colliding rows within the same multi-row INSERT also return error 1062"
+                <| fun _ ->
+                    let store = create ()
+                    emailsTable store
+
+                    match
+                        insertRows
+                            store
+                            defaultDatabase
+                            "emails"
+                            None
+                            [ [ VInt 1L; VString "a@x.com" ]
+                              [ VInt 2L; VString "a@x.com" ] ]
+                    with
+                    | Error(DuplicateKey("uq_email", "a@x.com")) -> ()
+                    | other -> failtestf "expected DuplicateKey, got %A" other
+
+                testCase "UPDATE colliding with another row's unique value returns error 1062"
+                <| fun _ ->
+                    let store = create ()
+                    emailsTable store
+
+                    insertRows
+                        store
+                        defaultDatabase
+                        "emails"
+                        None
+                        [ [ VInt 1L; VString "a@x.com" ]
+                          [ VInt 2L; VString "b@x.com" ] ]
+                    |> ignore
+
+                    let updater (row: Value[]) = Ok [| row.[0]; VString "a@x.com" |]
+
+                    match updateRows store defaultDatabase "emails" (fun row -> Ok(row.[0] = VInt 2L)) updater with
+                    | Error(DuplicateKey("uq_email", "a@x.com")) -> ()
+                    | other -> failtestf "expected DuplicateKey, got %A" other
+
+                testCase "UPDATE that leaves a row's own unique value unchanged doesn't collide with itself"
+                <| fun _ ->
+                    let store = create ()
+                    emailsTable store
+                    insertRows store defaultDatabase "emails" None [ [ VInt 1L; VString "a@x.com" ] ] |> ignore
+
+                    let updater (row: Value[]) = Ok row
+
+                    match updateRows store defaultDatabase "emails" (fun _ -> Ok true) updater with
+                    | Ok _ -> ()
+                    | Error e -> failtestf "expected Ok (no self-collision), got %A" e
+
+                testCase "a composite primary key rejects a second row with the same column combination"
+                <| fun _ ->
+                    let store = create ()
+
+                    createTable
+                        store
+                        defaultDatabase
+                        "role_user"
+                        [ { (col "role_id" (TInt false) false) with PrimaryKey = true }
+                          { (col "user_id" (TInt false) false) with PrimaryKey = true } ]
+                        []
+                        []
+                    |> ignore
+
+                    insertRows store defaultDatabase "role_user" None [ [ VInt 1L; VInt 2L ] ] |> ignore
+
+                    match insertRows store defaultDatabase "role_user" None [ [ VInt 1L; VInt 2L ] ] with
+                    | Error(DuplicateKey("PRIMARY", _)) -> ()
+                    | other -> failtestf "expected DuplicateKey on the composite PRIMARY, got %A" other
+
+                testCase "a composite primary key allows rows that differ in either column"
+                <| fun _ ->
+                    let store = create ()
+
+                    createTable
+                        store
+                        defaultDatabase
+                        "role_user"
+                        [ { (col "role_id" (TInt false) false) with PrimaryKey = true }
+                          { (col "user_id" (TInt false) false) with PrimaryKey = true } ]
+                        []
+                        []
+                    |> ignore
+
+                    insertRows store defaultDatabase "role_user" None [ [ VInt 1L; VInt 2L ] ] |> ignore
+
+                    match insertRows store defaultDatabase "role_user" None [ [ VInt 1L; VInt 3L ] ] with
+                    | Ok _ -> ()
+                    | Error e -> failtestf "expected Ok, got %A" e ]
+
+          testList
+              "INSERT IGNORE"
+              [ testCase "insertRowsIgnore skips a NOT NULL violation and inserts the rest"
+                <| fun _ ->
+                    let store = withUsersTable ()
+
+                    match
+                        insertRowsIgnore
+                            store
+                            defaultDatabase
+                            "users"
+                            None
+                            [ [ VNull; VNull; VInt 30L ] // violates NOT NULL on name
+                              [ VNull; VString "bob"; VInt 25L ] ]
+                    with
+                    | Ok(_, affected) ->
+                        Expect.equal affected 1 "only the good row counted"
+
+                        match scan store defaultDatabase "users" with
+                        | Ok(_, rows) -> Expect.equal (List.ofSeq rows |> List.map (fun r -> r.[1])) [ VString "bob" ] "only bob got in"
+                        | Error e -> failtestf "expected Ok, got %A" e
+                    | Error e -> failtestf "expected Ok, got %A" e
+
+                testCase "insertRowsIgnore skips a unique-key violation and inserts the rest"
+                <| fun _ ->
+                    let store = create ()
+
+                    createTable
+                        store
+                        defaultDatabase
+                        "emails"
+                        [ col "id" (TInt false) false; col "email" (TVarchar 255) false ]
+                        [ { Name = "uq_email"; Columns = [ "email" ]; Unique = true } ]
+                        []
+                    |> ignore
+
+                    insertRows store defaultDatabase "emails" None [ [ VInt 1L; VString "a@x.com" ] ] |> ignore
+
+                    match
+                        insertRowsIgnore
+                            store
+                            defaultDatabase
+                            "emails"
+                            None
+                            [ [ VInt 2L; VString "a@x.com" ] // dup, skipped
+                              [ VInt 3L; VString "b@x.com" ] ]
+                    with
+                    | Ok(_, affected) ->
+                        Expect.equal affected 1 "only the non-colliding row counted"
+
+                        match scan store defaultDatabase "emails" with
+                        | Ok(_, rows) -> Expect.equal (List.ofSeq rows |> List.length) 2 "the original row plus the one good new row"
+                        | Error e -> failtestf "expected Ok, got %A" e
+                    | Error e -> failtestf "expected Ok, got %A" e
+
+                testCase "insertRowsIgnore skips a row whose foreign key parent is missing"
+                <| fun _ ->
+                    let store = create ()
+
+                    createTable store defaultDatabase "departments" [ col "id" (TInt false) false ] [] []
+                    |> ignore
+
+                    let fk =
+                        { Name = "fk_dept"
+                          Columns = [ "dept_id" ]
+                          RefTable = "departments"
+                          RefColumns = [ "id" ]
+                          OnDelete = None
+                          OnUpdate = None }
+
+                    createTable
+                        store
+                        defaultDatabase
+                        "employees"
+                        [ col "id" (TInt false) false; col "dept_id" (TInt false) true ]
+                        []
+                        [ fk ]
+                    |> ignore
+
+                    match
+                        insertRowsIgnore
+                            store
+                            defaultDatabase
+                            "employees"
+                            None
+                            [ [ VInt 1L; VInt 999L ] // no such department, skipped
+                              [ VInt 2L; VNull ] ]
+                    with
+                    | Ok(_, affected) ->
+                        Expect.equal affected 1 "only the row with no dangling FK counted"
+                    | Error e -> failtestf "expected Ok, got %A" e
+
+                testCase "insertRowsIgnore returns lastInsertId 0 when every row is skipped"
+                <| fun _ ->
+                    let store = withUsersTable ()
+
+                    match insertRowsIgnore store defaultDatabase "users" (Some [ "id"; "age" ]) [ [ VInt 1L; VInt 30L ] ] with
+                    | Ok(lastId, affected) ->
+                        Expect.equal lastId 0L "nothing was assigned"
+                        Expect.equal affected 0 "nothing was inserted"
+                    | Error e -> failtestf "expected Ok, got %A" e
+
+                testCase "insertRowsIgnore still errors on a genuine column-count mismatch"
+                <| fun _ ->
+                    let store = withUsersTable ()
+
+                    match insertRowsIgnore store defaultDatabase "users" None [ [ VNull; VString "alice" ] ] with
+                    | Error(ColumnCountMismatch(3, 2)) -> ()
+                    | other -> failtestf "expected ColumnCountMismatch, got %A" other ]
+
+          testList
+              "AUTO_INCREMENT vs. DELETE"
+              [ testCase "DELETE does not reset the AUTO_INCREMENT counter (unlike TRUNCATE)"
+                <| fun _ ->
+                    let store = withUsersTable ()
+
+                    insertRows store defaultDatabase "users" None [ [ VNull; VString "alice"; VInt 30L ] ]
+                    |> ignore
+
+                    deleteRows store defaultDatabase "users" (fun _ -> Ok true) |> ignore
+
+                    match insertRows store defaultDatabase "users" None [ [ VNull; VString "bob"; VInt 25L ] ] with
+                    | Ok(lastId, _) -> Expect.equal lastId 2L "the counter kept climbing across the delete"
+                    | Error e -> failtestf "expected Ok, got %A" e ]
+
+          testList
               "resolveColumn"
               [ testCase "resolveColumn finds a column case-insensitively"
                 <| fun _ ->
@@ -624,4 +882,183 @@ let tests =
                         match scan store defaultDatabase "emails" with
                         | Ok(_, rows) -> Expect.equal (List.ofSeq rows |> List.length) 1 "no duplicate row inserted"
                         | Error e -> failtestf "expected Ok, got %A" e
-                    | Error e -> failtestf "expected Ok, got %A" e ] ]
+                    | Error e -> failtestf "expected Ok, got %A" e ]
+
+          testList
+              "foreign keys"
+              [ let idCol =
+                    { (col "id" (TInt false) false) with
+                        PrimaryKey = true }
+
+                /// A `departments`/`employees` pair: `employees.dept_id`
+                /// references `departments(id)` under the given `onDelete`
+                /// action (`None` = no `ON DELETE` clause, MySQL's default —
+                /// behaves like `RESTRICT`).
+                let withDeptEmployees (onDelete: string option) =
+                    let store = create ()
+
+                    createTable store defaultDatabase "departments" [ idCol; col "name" (TVarchar 255) false ] [] []
+                    |> ignore
+
+                    let fk =
+                        { Name = "fk_dept"
+                          Columns = [ "dept_id" ]
+                          RefTable = "departments"
+                          RefColumns = [ "id" ]
+                          OnDelete = onDelete
+                          OnUpdate = None }
+
+                    createTable
+                        store
+                        defaultDatabase
+                        "employees"
+                        [ idCol; col "dept_id" (TInt false) true; col "name" (TVarchar 255) false ]
+                        []
+                        [ fk ]
+                    |> ignore
+
+                    insertRows store defaultDatabase "departments" None [ [ VInt 1L; VString "eng" ] ]
+                    |> ignore
+
+                    store
+
+                testCase "INSERT of a child row with no matching parent returns error 1452"
+                <| fun _ ->
+                    let store = withDeptEmployees None
+
+                    match insertRows store defaultDatabase "employees" None [ [ VInt 1L; VInt 999L; VString "alice" ] ] with
+                    | Error(ForeignKeyParentMissing "fk_dept") ->
+                        let code, _ = toMySqlError (ForeignKeyParentMissing "fk_dept")
+                        Expect.equal code 1452 "MySQL error code"
+                    | other -> failtestf "expected ForeignKeyParentMissing, got %A" other
+
+                testCase "INSERT of a child row with a NULL foreign key column is allowed"
+                <| fun _ ->
+                    let store = withDeptEmployees None
+
+                    match insertRows store defaultDatabase "employees" None [ [ VInt 1L; VNull; VString "alice" ] ] with
+                    | Ok _ -> ()
+                    | Error e -> failtestf "expected Ok, got %A" e
+
+                testCase "INSERT of a child row with a matching parent succeeds"
+                <| fun _ ->
+                    let store = withDeptEmployees None
+
+                    match insertRows store defaultDatabase "employees" None [ [ VInt 1L; VInt 1L; VString "alice" ] ] with
+                    | Ok _ -> ()
+                    | Error e -> failtestf "expected Ok, got %A" e
+
+                testCase "UPDATE of a child row's foreign key to a non-existent parent returns error 1452"
+                <| fun _ ->
+                    let store = withDeptEmployees None
+                    insertRows store defaultDatabase "employees" None [ [ VInt 1L; VInt 1L; VString "alice" ] ]
+                    |> ignore
+
+                    let updater (row: Value[]) = Ok [| row.[0]; VInt 999L; row.[2] |]
+
+                    match updateRows store defaultDatabase "employees" (fun _ -> Ok true) updater with
+                    | Error(ForeignKeyParentMissing "fk_dept") -> ()
+                    | other -> failtestf "expected ForeignKeyParentMissing, got %A" other
+
+                testCase "DELETE of a parent row with children and no ON DELETE clause returns error 1451 (RESTRICT default)"
+                <| fun _ ->
+                    let store = withDeptEmployees None
+                    insertRows store defaultDatabase "employees" None [ [ VInt 1L; VInt 1L; VString "alice" ] ]
+                    |> ignore
+
+                    match deleteRows store defaultDatabase "departments" (fun _ -> Ok true) with
+                    | Error(ForeignKeyRestrict "fk_dept") ->
+                        let code, _ = toMySqlError (ForeignKeyRestrict "fk_dept")
+                        Expect.equal code 1451 "MySQL error code"
+                    | other -> failtestf "expected ForeignKeyRestrict, got %A" other
+
+                    match scan store defaultDatabase "departments" with
+                    | Ok(_, rows) -> Expect.equal (List.ofSeq rows |> List.length) 1 "the parent row survives the failed delete"
+                    | Error e -> failtestf "expected Ok, got %A" e
+
+                testCase "DELETE of a parent row with ON DELETE CASCADE deletes its children too"
+                <| fun _ ->
+                    let store = withDeptEmployees (Some "CASCADE")
+                    insertRows store defaultDatabase "employees" None [ [ VInt 1L; VInt 1L; VString "alice" ] ]
+                    |> ignore
+
+                    match deleteRows store defaultDatabase "departments" (fun _ -> Ok true) with
+                    | Ok affected ->
+                        Expect.equal affected 1 "one department deleted"
+
+                        match scan store defaultDatabase "employees" with
+                        | Ok(_, rows) -> Expect.isEmpty (List.ofSeq rows) "the cascaded child row is gone too"
+                        | Error e -> failtestf "expected Ok, got %A" e
+                    | Error e -> failtestf "expected Ok, got %A" e
+
+                testCase "DELETE of a parent row with ON DELETE SET NULL blanks the children's foreign key"
+                <| fun _ ->
+                    let store = withDeptEmployees (Some "SET NULL")
+                    insertRows store defaultDatabase "employees" None [ [ VInt 1L; VInt 1L; VString "alice" ] ]
+                    |> ignore
+
+                    match deleteRows store defaultDatabase "departments" (fun _ -> Ok true) with
+                    | Ok _ ->
+                        match scan store defaultDatabase "employees" with
+                        | Ok(_, rows) ->
+                            match List.ofSeq rows with
+                            | [ row ] -> Expect.equal row.[1] VNull "dept_id blanked, row otherwise survives"
+                            | other -> failtestf "expected the child row to survive, got %A" other
+                        | Error e -> failtestf "expected Ok, got %A" e
+                    | Error e -> failtestf "expected Ok, got %A" e
+
+                testCase "ON DELETE CASCADE recurses through a grandchild table"
+                <| fun _ ->
+                    let store = withDeptEmployees (Some "CASCADE")
+                    insertRows store defaultDatabase "employees" None [ [ VInt 1L; VInt 1L; VString "alice" ] ]
+                    |> ignore
+
+                    let projFk =
+                        { Name = "fk_owner"
+                          Columns = [ "owner_id" ]
+                          RefTable = "employees"
+                          RefColumns = [ "id" ]
+                          OnDelete = Some "CASCADE"
+                          OnUpdate = None }
+
+                    createTable
+                        store
+                        defaultDatabase
+                        "projects"
+                        [ idCol; col "owner_id" (TInt false) true; col "title" (TVarchar 255) false ]
+                        []
+                        [ projFk ]
+                    |> ignore
+
+                    insertRows store defaultDatabase "projects" None [ [ VInt 1L; VInt 1L; VString "roadmap" ] ]
+                    |> ignore
+
+                    match deleteRows store defaultDatabase "departments" (fun _ -> Ok true) with
+                    | Ok _ ->
+                        match scan store defaultDatabase "projects" with
+                        | Ok(_, rows) -> Expect.isEmpty (List.ofSeq rows) "the grandchild row cascaded away too"
+                        | Error e -> failtestf "expected Ok, got %A" e
+                    | Error e -> failtestf "expected Ok, got %A" e
+
+                testCase "setForeignKeyChecks false allows a blocked delete and a dangling child insert through"
+                <| fun _ ->
+                    let store = withDeptEmployees None
+                    insertRows store defaultDatabase "employees" None [ [ VInt 1L; VInt 1L; VString "alice" ] ]
+                    |> ignore
+
+                    setForeignKeyChecks store false
+
+                    match deleteRows store defaultDatabase "departments" (fun _ -> Ok true) with
+                    | Ok affected -> Expect.equal affected 1 "delete goes through with checks disabled"
+                    | Error e -> failtestf "expected Ok, got %A" e
+
+                    // employees.dept_id = 1 is now dangling; also verify a
+                    // fresh insert to a non-existent parent is allowed too.
+                    match insertRows store defaultDatabase "employees" None [ [ VInt 2L; VInt 12345L; VString "bob" ] ] with
+                    | Ok _ -> ()
+                    | Error e -> failtestf "expected Ok with checks disabled, got %A" e
+
+                testCase "setForeignKeyChecks true (the default) is the store's starting state"
+                <| fun _ ->
+                    let store = create ()
+                    Expect.isTrue store.ForeignKeyChecks "FK checks are on by default" ] ]

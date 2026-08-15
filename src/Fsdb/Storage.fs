@@ -25,6 +25,15 @@ type StorageError =
     | NotNullViolation of column: string
     | InvalidValueForColumn of column: string * value: string
     | ExpressionError of code: int * message: string
+    /// A unique index (or the primary key, reported as `"PRIMARY"`) already
+    /// has a row with this value.
+    | DuplicateKey of keyName: string * value: string
+    /// `DELETE`/parent-row `UPDATE` blocked by a child row through a
+    /// `RESTRICT`/`NO ACTION` (or unspecified) `ON DELETE` foreign key.
+    | ForeignKeyRestrict of fkName: string
+    /// `INSERT`/`UPDATE` of a child row whose foreign key columns don't
+    /// match any row in the referenced table.
+    | ForeignKeyParentMissing of fkName: string
 
 /// MySQL error code + message for a `StorageError`, ready for the wire
 /// protocol's ERR packet.
@@ -40,12 +49,21 @@ let toMySqlError (err: StorageError) : int * string =
     | NotNullViolation column -> 1048, sprintf "Column '%s' cannot be null" column
     | InvalidValueForColumn(column, value) -> 1366, sprintf "Incorrect value: '%s' for column '%s'" value column
     | ExpressionError(code, message) -> code, message
+    | DuplicateKey(keyName, value) -> 1062, sprintf "Duplicate entry '%s' for key '%s'" value keyName
+    | ForeignKeyRestrict fkName ->
+        1451, sprintf "Cannot delete or update a parent row: a foreign key constraint fails (`%s`)" fkName
+    | ForeignKeyParentMissing fkName ->
+        1452, sprintf "Cannot add or update a child row: a foreign key constraint fails (`%s`)" fkName
 
 /// A table's rows, newest last. `OriginalName` keeps the as-created casing
 /// for information_schema, even though the catalog keys tables by their
-/// lowercased name. `Indexes`/`ForeignKeys` are metadata only — see the
-/// ponytail notes on `Ast.IndexDef`/`Ast.ForeignKeyDef` for what's not
-/// enforced yet.
+/// lowercased name. `Indexes`' `UNIQUE` entries (plus the primary key) are
+/// enforced on every `INSERT`/`UPDATE`/`upsertRows` (see
+/// `findUniqueCollision`); `ForeignKeys` are enforced on
+/// `INSERT`/`UPDATE`/`DELETE` (see `checkFkParents`/`cascadeDelete`), gated
+/// by `Store.ForeignKeyChecks`. Non-`UNIQUE` plain indexes remain metadata
+/// only — nothing in this engine does index-accelerated lookup yet, every
+/// scan is a full table scan.
 type Table =
     { OriginalName: string
       Columns: ColumnDef list
@@ -80,11 +98,30 @@ let splitQualified (defaultDb: string) (name: string) : string * string =
 /// ponytail: one global write lock for the whole catalog rather than
 /// per-table locks — fine until write throughput across unrelated tables
 /// actually matters, at which point shard the lock per table.
-type Store = { mutable Catalog: Catalog; Lock: obj }
+///
+/// `ForeignKeyChecks` gates every FK enforcement in this module (cascading
+/// deletes, `RESTRICT`, parent-existence checks on insert/update) — the
+/// storage-level mirror of MySQL's session `FOREIGN_KEY_CHECKS` variable.
+/// It's a single store-wide flag rather than per-session because `Store`
+/// has no session concept; Integrate: `QueryHandler`'s `SET
+/// FOREIGN_KEY_CHECKS = 0|1` (and Laravel's
+/// `Schema::disableForeignKeyConstraints`, which sends exactly that) should
+/// call `setForeignKeyChecks` — see the comment above `tryProbe`'s `SetVar`
+/// case in QueryHandler.fs, which already anticipates this.
+type Store =
+    { mutable Catalog: Catalog
+      mutable ForeignKeyChecks: bool
+      Lock: obj }
 
 let create () : Store =
     { Catalog = Map.ofList [ defaultDatabase, Map.empty ]
+      ForeignKeyChecks = true
       Lock = obj () }
+
+/// `SET FOREIGN_KEY_CHECKS = 0|1` — Integrate wires this from
+/// `QueryHandler`'s `SET` probe (see the note on `Store.ForeignKeyChecks`).
+let setForeignKeyChecks (store: Store) (enabled: bool) : unit =
+    lock store.Lock (fun () -> store.ForeignKeyChecks <- enabled)
 
 let private normalizeTableName (name: string) = name.ToLowerInvariant()
 
@@ -464,11 +501,151 @@ let private processRow
     |> List.fold step (Ok([], nextAutoId, None))
     |> Result.map (fun (valuesRev, nextAutoId, assignedId) -> List.rev valuesRev, nextAutoId, assignedId)
 
-/// Inserts rows built from `columns` (the explicit column list, or `None`
-/// for "all columns in table order") and matching value lists, applying
-/// defaults, AUTO_INCREMENT assignment, and NOT NULL/type-coercion checks.
-/// Returns `(lastInsertId, affected row count)`; `lastInsertId` is the
-/// first AUTO_INCREMENT id assigned by this statement, or 0 if none was.
+/// The `(keyName, column indices)` groups that must be unique: the primary
+/// key (if any, named `"PRIMARY"` the way MySQL reports it in error 1062,
+/// and treated as one group across however many columns it spans) plus
+/// every `UNIQUE` index, named after itself. Used by `upsertRows` to find
+/// the row (if any) an incoming `INSERT ... ON DUPLICATE KEY UPDATE` row
+/// collides with, and by `findUniqueCollision` for plain `INSERT`/`UPDATE`.
+let private uniqueKeyGroups (table: Table) : (string * int list) list =
+    let pk =
+        table.Columns |> List.indexed |> List.choose (fun (i, c) -> if c.PrimaryKey then Some i else None)
+
+    let fromIndexes =
+        table.Indexes
+        |> List.filter (fun ix -> ix.Unique)
+        |> List.choose (fun ix -> ix.Columns |> traverse (resolveColumn table.Columns) |> Result.toOption |> Option.map (fun idxs -> ix.Name, idxs))
+
+    (if pk.IsEmpty then [] else [ "PRIMARY", pk ]) @ fromIndexes
+
+/// Whether `a` and `b` collide on unique-key group `idxs`: every column
+/// compares equal under `Value.compare`'s collation-aware rules (so
+/// `'Alice' = 'alice'` and `'a' = 'a '` collide, matching MySQL's default
+/// collation), *unless* any column in the group is `NULL` on either side —
+/// MySQL's unique indexes treat `NULL` as distinct from every other `NULL`,
+/// so a `NULL` anywhere in the group means "no collision" rather than "not
+/// equal, so no collision" (the difference matters for `IS NULL` groups: two
+/// all-NULL rows still don't collide).
+let private rowsCollideOn (idxs: int list) (a: Value[]) (b: Value[]) : bool =
+    idxs |> List.forall (fun i -> a.[i] <> VNull && b.[i] <> VNull && compare a.[i] b.[i] = 0)
+
+/// The first unique-key violation `candidate` has against `existingRows`, if
+/// any, as the `DuplicateKey` error 1062 wraps (the colliding key's name and
+/// a MySQL-style `-`-joined value for composite keys).
+let private findUniqueCollision (groups: (string * int list) list) (existingRows: Value[] list) (candidate: Value[]) : StorageError option =
+    existingRows
+    |> List.tryPick (fun existing ->
+        groups
+        |> List.tryPick (fun (name, idxs) ->
+            if rowsCollideOn idxs existing candidate then
+                let value =
+                    idxs |> List.map (fun i -> candidate.[i] |> toText |> Option.defaultValue "NULL") |> String.concat "-"
+
+                Some(DuplicateKey(name, value))
+            else
+                None))
+
+/// Verifies every foreign key `fks` (a child table's own `ForeignKeys`) has
+/// a matching parent row for `row`'s values, per MySQL's MATCH SIMPLE
+/// semantics: a foreign key with any `NULL` column doesn't need a parent at
+/// all. Malformed FK metadata (a column name that no longer resolves, e.g.
+/// after a `DROP COLUMN` that didn't also drop the FK) or a since-dropped
+/// referenced table/column is treated as "not enforceable" rather than
+/// blocking every write — `information_schema` can still show the stale FK,
+/// same as MySQL leaves a dangling constraint visible after `DROP TABLE ...
+/// FOREIGN_KEY_CHECKS=0`.
+let private checkFkParents (db: Database) (childColumns: ColumnDef list) (fks: ForeignKeyDef list) (row: Value[]) : Result<unit, StorageError> =
+    let checkOne (fk: ForeignKeyDef) =
+        match fk.Columns |> traverse (resolveColumn childColumns) with
+        | Error _ -> Ok()
+        | Ok idxs ->
+            let values = idxs |> List.map (fun i -> row.[i])
+
+            if values |> List.exists ((=) VNull) then
+                Ok()
+            else
+                match Map.tryFind (normalizeTableName fk.RefTable) db with
+                | None -> Ok()
+                | Some parent ->
+                    match fk.RefColumns |> traverse (resolveColumn parent.Columns) with
+                    | Error _ -> Ok()
+                    | Ok refIdxs ->
+                        let found =
+                            parent.Rows
+                            |> List.exists (fun prow -> List.forall2 (fun i v -> compare prow.[i] v = 0) refIdxs values)
+
+                        if found then Ok() else Error(ForeignKeyParentMissing fk.Name)
+
+    fks |> traverse checkOne |> Result.map ignore
+
+/// Resolves `columns` (the explicit column list, or `None` for "all columns
+/// in table order") to indices against `table`.
+let private resolveInsertColumns (table: Table) (columns: string list option) : Result<int list, StorageError> =
+    match columns with
+    | None -> Ok [ 0 .. table.Columns.Length - 1 ]
+    | Some names -> names |> traverse (resolveColumn table.Columns)
+
+/// Shared core of `insertRows` and `insertRowsIgnore`: builds each row via
+/// `processRow`, then checks it against the table's unique keys (including
+/// rows already accepted earlier in this same statement, since two rows in
+/// one multi-row `INSERT` can collide with each other) and, when `checkFks`
+/// is set, its foreign keys' parents. A row's own shape (wrong column count)
+/// is always a hard error — `INSERT IGNORE` downgrades constraint
+/// violations per MySQL, not malformed statements — everything else is
+/// skipped rather than failing the batch when `ignoreErrors` is set.
+let private insertCore
+    (checkFks: bool)
+    (ignoreErrors: bool)
+    (db: Database)
+    (tableKey: string)
+    (rowsIn: Value list list)
+    (idxs: int list)
+    : Result<Database * (int64 * int), StorageError> =
+    let table = Map.find tableKey db
+    let uniqueGroups = uniqueKeyGroups table
+
+    let step acc (rowValues: Value list) =
+        acc
+        |> Result.bind (fun (accepted: Value[] list, nextAutoId, firstAssigned) ->
+            if List.length rowValues <> List.length idxs then
+                Error(ColumnCountMismatch(List.length idxs, List.length rowValues))
+            else
+                let provided = List.zip idxs rowValues |> Map.ofList
+                let rawRow = table.Columns |> List.mapi (fun i _ -> Map.tryFind i provided)
+
+                let rowResult =
+                    processRow nextAutoId rawRow table.Columns
+                    |> Result.bind (fun (finalValues, nextAutoId', assignedId) ->
+                        let candidate = Array.ofList finalValues
+
+                        match findUniqueCollision uniqueGroups (table.Rows @ accepted) candidate with
+                        | Some e -> Error e
+                        | None ->
+                            if checkFks then
+                                checkFkParents db table.Columns table.ForeignKeys candidate
+                                |> Result.map (fun () -> candidate, nextAutoId', assignedId)
+                            else
+                                Ok(candidate, nextAutoId', assignedId))
+
+                match rowResult with
+                | Ok(candidate, nextAutoId', assignedId) -> Ok(accepted @ [ candidate ], nextAutoId', Option.orElse assignedId firstAssigned)
+                | Error _ when ignoreErrors -> Ok(accepted, nextAutoId, firstAssigned)
+                | Error e -> Error e)
+
+    rowsIn
+    |> List.fold step (Ok([], table.NextAutoId, None))
+    |> Result.map (fun (accepted, nextAutoId', firstAssigned) ->
+        let table' = { table with Rows = table.Rows @ accepted; NextAutoId = nextAutoId' }
+        Map.add tableKey table' db, (Option.defaultValue 0L firstAssigned, List.length accepted))
+
+/// Inserts rows built from `columns` and matching value lists, applying
+/// defaults, AUTO_INCREMENT assignment, NOT NULL/type-coercion checks, and
+/// — new here — unique-key (error 1062) and, when `store.ForeignKeyChecks`
+/// is set, foreign-key parent-existence (error 1452) checks. Returns
+/// `(lastInsertId, affected row count)`; `lastInsertId` is the first
+/// AUTO_INCREMENT id assigned by this statement, or 0 if none was. Fails the
+/// whole statement on the first bad row — see `insertRowsIgnore` for `INSERT
+/// IGNORE`'s per-row skip semantics.
 let insertRows
     (store: Store)
     (dbName: string)
@@ -476,58 +653,40 @@ let insertRows
     (columns: string list option)
     (rowsIn: Value list list)
     : Result<int64 * int, StorageError> =
-    withTable store dbName tableName (fun table ->
-        let indices =
-            match columns with
-            | None -> Ok [ 0 .. table.Columns.Length - 1 ]
-            | Some names -> names |> traverse (resolveColumn table.Columns)
+    withDatabase store dbName (fun db ->
+        let key = normalizeTableName tableName
 
-        indices
-        |> Result.bind (fun idxs ->
-            let step acc (rowValues: Value list) =
-                match acc with
-                | Error e -> Error e
-                | Ok(rowsRev, nextAutoId, firstAssigned) ->
-                    if List.length rowValues <> List.length idxs then
-                        Error(ColumnCountMismatch(List.length idxs, List.length rowValues))
-                    else
-                        let provided = List.zip idxs rowValues |> Map.ofList
-                        let rawRow = table.Columns |> List.mapi (fun i _ -> Map.tryFind i provided)
+        tryGetTable db tableName
+        |> Result.bind (fun table ->
+            resolveInsertColumns table columns
+            |> Result.bind (insertCore store.ForeignKeyChecks false db key rowsIn)))
 
-                        match processRow nextAutoId rawRow table.Columns with
-                        | Error e -> Error e
-                        | Ok(finalValues, nextAutoId', assignedId) ->
-                            Ok(Array.ofList finalValues :: rowsRev, nextAutoId', Option.orElse assignedId firstAssigned)
+/// `INSERT IGNORE`: as `insertRows`, but a row that would violate NOT
+/// NULL/unique/foreign-key constraints is skipped instead of failing the
+/// statement — MySQL downgrades the error to a warning per row. The
+/// returned affected count is only the rows actually inserted;
+/// `lastInsertId` is the first one assigned, same as `insertRows` (0 if
+/// every row was skipped).
+let insertRowsIgnore
+    (store: Store)
+    (dbName: string)
+    (tableName: string)
+    (columns: string list option)
+    (rowsIn: Value list list)
+    : Result<int64 * int, StorageError> =
+    withDatabase store dbName (fun db ->
+        let key = normalizeTableName tableName
 
-            rowsIn
-            |> List.fold step (Ok([], table.NextAutoId, None))
-            |> Result.map (fun (newRowsRev, nextAutoId', firstAssigned) ->
-                { table with
-                    Rows = table.Rows @ List.rev newRowsRev
-                    NextAutoId = nextAutoId' },
-                (Option.defaultValue 0L firstAssigned, List.length newRowsRev))))
-
-/// The column-index groups that must be unique: the primary key (if any,
-/// treated as one unique group across however many columns it spans) plus
-/// every `UNIQUE` index. Used by `upsertRows` to find the row (if any) an
-/// incoming `INSERT ... ON DUPLICATE KEY UPDATE` row collides with.
-let private uniqueKeyColumnSets (table: Table) : int list list =
-    let pk =
-        table.Columns |> List.indexed |> List.choose (fun (i, c) -> if c.PrimaryKey then Some i else None)
-
-    let fromIndexes =
-        table.Indexes
-        |> List.filter (fun ix -> ix.Unique)
-        |> List.choose (fun ix -> ix.Columns |> traverse (resolveColumn table.Columns) |> Result.toOption)
-
-    (if pk.IsEmpty then [] else [ pk ]) @ fromIndexes
+        tryGetTable db tableName
+        |> Result.bind (fun table ->
+            resolveInsertColumns table columns
+            |> Result.bind (insertCore store.ForeignKeyChecks true db key rowsIn)))
 
 /// `INSERT ... ON DUPLICATE KEY UPDATE`: like `insertRows`, but a candidate
 /// row that collides with an existing row on any unique key or the primary
 /// key is applied to `applyUpdate existingRow candidateRow` instead of being
-/// appended. ponytail: matches on plain `Value[]` equality rather than
-/// MySQL's collation-aware string comparison — good enough for the typical
-/// numeric/exact-string unique keys Laravel migrations declare.
+/// appended. Collision detection is collation-aware (`rowsCollideOn`), same
+/// as plain `INSERT`'s unique check.
 let upsertRows
     (store: Store)
     (dbName: string)
@@ -544,12 +703,10 @@ let upsertRows
 
         indices
         |> Result.bind (fun idxs ->
-            let keySets = uniqueKeyColumnSets table
+            let keySets = uniqueKeyGroups table |> List.map snd
 
             let findMatch (rows: Value[] list) (candidate: Value[]) =
-                rows
-                |> List.tryFind (fun existing ->
-                    keySets |> List.exists (fun ks -> ks |> List.forall (fun i -> existing.[i] = candidate.[i])))
+                rows |> List.tryFind (fun existing -> keySets |> List.exists (fun ks -> rowsCollideOn ks existing candidate))
 
             let step acc (rowValues: Value list) =
                 acc
@@ -584,32 +741,124 @@ let private coerceRow (columns: ColumnDef list) (row: Value[]) : Result<Value[],
     |> traverse (fun (col, v) -> coerceAndCheck col v)
     |> Result.map Array.ofList
 
+/// Every `(childTableKey, fk)` in `db` whose `fk.RefTable` is `parentKey` —
+/// every foreign key elsewhere in the database that a delete from
+/// `parentKey` needs to check. Same-database only: `Ast.ForeignKeyDef`
+/// carries no database qualifier, so a cross-database FK (rare even in
+/// MySQL, and not something Laravel migrations emit) isn't found here.
+let private referencingForeignKeys (db: Database) (parentKey: string) : (string * ForeignKeyDef) list =
+    db
+    |> Map.toList
+    |> List.collect (fun (childKey, childTbl) ->
+        childTbl.ForeignKeys
+        |> List.filter (fun fk -> normalizeTableName fk.RefTable = parentKey)
+        |> List.map (fun fk -> childKey, fk))
+
+/// Deletes `toDelete` (rows already known to belong to `tableKey`, e.g. from
+/// `deleteRows`'s WHERE match) from `db`, applying every other table's
+/// referencing foreign keys' `OnDelete` action first: `CASCADE` recurses
+/// (deleting a parent whose children are themselves parents cascades all
+/// the way down), `SET NULL` blanks the child's FK columns, and anything
+/// else — `RESTRICT`, `NO ACTION`, or no `ON DELETE` clause at all, all
+/// three of which MySQL treats the same way, an immediate check rather than
+/// a deferred one — fails the whole delete with error 1451 the moment any
+/// matching child row exists. `checkFks = false` (`SET FOREIGN_KEY_CHECKS =
+/// 0`) skips all of this and just removes the rows, leaving any children
+/// dangling, same as MySQL. Because every step here returns a *new*
+/// `Database` rather than mutating one in place, an `Error` partway through
+/// (a `RESTRICT` hit on the third referencing table, say) discards
+/// everything already computed — `deleteRows`/`withDatabase` only ever
+/// commits an `Ok` result, so this is all-or-nothing per statement without
+/// needing its own rollback logic.
+let rec private cascadeDelete (checkFks: bool) (db: Database) (tableKey: string) (toDelete: Value[] list) : Result<Database, StorageError> =
+    let removeFrom (d: Database) =
+        let t = Map.find tableKey d
+        let isDeleted row = toDelete |> List.exists ((=) row)
+        Map.add tableKey { t with Rows = t.Rows |> List.filter (isDeleted >> not) } d
+
+    if toDelete.IsEmpty then
+        Ok db
+    elif not checkFks then
+        Ok(removeFrom db)
+    else
+        let table = Map.find tableKey db
+
+        let applyChild dbAcc (childKey: string, fk: ForeignKeyDef) =
+            dbAcc
+            |> Result.bind (fun d ->
+                let childTbl = Map.find childKey d
+
+                match fk.Columns |> traverse (resolveColumn childTbl.Columns), fk.RefColumns |> traverse (resolveColumn table.Columns) with
+                | Error _, _
+                | _, Error _ -> Ok d // stale FK metadata — see `checkFkParents`'s note.
+                | Ok childIdxs, Ok refIdxs ->
+                    let parentKeys = toDelete |> List.map (fun row -> refIdxs |> List.map (fun i -> row.[i]))
+
+                    let isChild (row: Value[]) =
+                        let key = childIdxs |> List.map (fun i -> row.[i])
+
+                        key |> List.forall ((<>) VNull)
+                        && parentKeys |> List.exists (List.forall2 (fun a b -> compare a b = 0) key)
+
+                    let matching = childTbl.Rows |> List.filter isChild
+
+                    if matching.IsEmpty then
+                        Ok d
+                    else
+                        match fk.OnDelete |> Option.map (fun s -> s.Trim().ToUpperInvariant()) with
+                        | Some "CASCADE" -> cascadeDelete checkFks d childKey matching
+                        | Some "SET NULL" ->
+                            let blanked row =
+                                if isChild row then
+                                    let row' = Array.copy row
+                                    childIdxs |> List.iter (fun i -> row'.[i] <- VNull)
+                                    row'
+                                else
+                                    row
+
+                            Ok(Map.add childKey { childTbl with Rows = childTbl.Rows |> List.map blanked } d)
+                        | _ -> Error(ForeignKeyRestrict fk.Name))
+
+        referencingForeignKeys db tableKey
+        |> List.fold applyChild (Ok db)
+        |> Result.map removeFrom
+
 /// Deletes every row matching `predicate`. Returns the number of rows
 /// removed. `predicate` returns a `Result` rather than a plain `bool` so a
 /// per-row WHERE-evaluation failure (not reachable today — every `Value`
 /// operation is total — but a real possibility once functions that can
 /// fail per row land) surfaces as an `Error` instead of silently being
-/// treated as "didn't match".
+/// treated as "didn't match". When `store.ForeignKeyChecks` is set (the
+/// default), applies every referencing foreign key's `ON DELETE` action —
+/// see `cascadeDelete`.
 let deleteRows
     (store: Store)
     (dbName: string)
     (tableName: string)
     (predicate: Value[] -> Result<bool, StorageError>)
     : Result<int, StorageError> =
-    withTable store dbName tableName (fun table ->
-        table.Rows
-        |> traverse (fun row -> predicate row |> Result.map (fun keep -> keep, row))
-        |> Result.map (fun flagged ->
-            let kept = flagged |> List.filter (fst >> not) |> List.map snd
-            { table with Rows = kept }, flagged |> List.filter fst |> List.length))
+    withDatabase store dbName (fun db ->
+        let key = normalizeTableName tableName
 
-/// Replaces every row matching `predicate` with `updater row`, coercing
-/// the result back to the table's column types. Returns the number of rows
-/// actually *changed* — matching but no-op writes (`SET v = v`) don't count,
-/// matching MySQL's "Changed: n" rather than "Rows matched: n" — via `Value[]`'s
-/// structural equality (F# arrays compare structurally, element by element).
-/// As with `deleteRows`, `predicate` and `updater` both return `Result`
-/// rather than defaulting a failure away.
+        tryGetTable db tableName
+        |> Result.bind (fun table ->
+            table.Rows
+            |> traverse (fun row -> predicate row |> Result.map (fun keep -> keep, row))
+            |> Result.bind (fun flagged ->
+                let toDelete = flagged |> List.filter fst |> List.map snd
+                cascadeDelete store.ForeignKeyChecks db key toDelete |> Result.map (fun db' -> db', toDelete.Length))))
+
+/// Replaces every row matching `predicate` with `updater row`, coercing the
+/// result back to the table's column types, then checking it against the
+/// table's unique keys (error 1062, against every *other* row — a no-op
+/// `UPDATE` that leaves a row's own unique value unchanged doesn't collide
+/// with itself) and, when `store.ForeignKeyChecks` is set, its foreign
+/// keys' parents (error 1452). Returns the number of rows actually
+/// *changed* — matching but no-op writes (`SET v = v`) don't count, matching
+/// MySQL's "Changed: n" rather than "Rows matched: n" — via `Value[]`'s
+/// structural equality (F# arrays compare structurally, element by
+/// element). As with `deleteRows`, `predicate` and `updater` both return
+/// `Result` rather than defaulting a failure away.
 let updateRows
     (store: Store)
     (dbName: string)
@@ -617,21 +866,44 @@ let updateRows
     (predicate: Value[] -> Result<bool, StorageError>)
     (updater: Value[] -> Result<Value[], StorageError>)
     : Result<int, StorageError> =
-    withTable store dbName tableName (fun table ->
-        let applyToRow row =
-            predicate row
-            |> Result.bind (fun keep ->
-                if keep then
-                    updater row
-                    |> Result.bind (coerceRow table.Columns)
-                    |> Result.map (fun r -> r, r <> row)
-                else
-                    Ok(row, false))
+    withDatabase store dbName (fun db ->
+        let key = normalizeTableName tableName
 
-        table.Rows
-        |> traverse applyToRow
-        |> Result.map (fun rowsWithFlags ->
-            { table with Rows = rowsWithFlags |> List.map fst }, rowsWithFlags |> List.filter snd |> List.length))
+        tryGetTable db tableName
+        |> Result.bind (fun table ->
+            let uniqueGroups = uniqueKeyGroups table
+            let checkFks = store.ForeignKeyChecks
+            let original = Array.ofList table.Rows
+
+            let applyToRow i row =
+                predicate row
+                |> Result.bind (fun keep ->
+                    if not keep then
+                        Ok(row, false)
+                    else
+                        updater row
+                        |> Result.bind (coerceRow table.Columns)
+                        |> Result.bind (fun newRow ->
+                            let others =
+                                original |> Array.indexed |> Array.filter (fun (j, _) -> j <> i) |> Array.map snd |> List.ofArray
+
+                            match findUniqueCollision uniqueGroups others newRow with
+                            | Some e -> Error e
+                            | None ->
+                                if checkFks then
+                                    checkFkParents db table.Columns table.ForeignKeys newRow
+                                    |> Result.map (fun () -> newRow)
+                                else
+                                    Ok newRow)
+                        |> Result.map (fun newRow -> newRow, newRow <> row))
+
+            original
+            |> List.ofArray
+            |> List.indexed
+            |> traverse (fun (i, row) -> applyToRow i row)
+            |> Result.map (fun rowsWithFlags ->
+                let table' = { table with Rows = rowsWithFlags |> List.map fst }
+                Map.add key table' db, rowsWithFlags |> List.filter snd |> List.length)))
 
 /// A snapshot read: the table's columns and its rows as they were at the
 /// moment of the call. Lock-free — reads a single reference field, and
