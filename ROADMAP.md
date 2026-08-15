@@ -51,10 +51,10 @@ Default stays pure in-memory (tests unchanged).
 "Nothing to migrate"; plus kill -9 mid-write leaves committed data intact
 and replayable. Status: ☐
 
-## M8 — EXPLAIN + honest semantics cleanups
-EXPLAIN (tabular, truthful about our all-scans executor), multi-table
-UPDATE/DELETE with JOINs, real UPDATE/DELETE ORDER BY+LIMIT (currently
-accepted-and-ignored — silent wrongness), AFTER/FIRST column positioning.
+## M8 — EXPLAIN + semantics cleanups
+EXPLAIN (tabular; reports the executor's actual full-scan behavior, no fake
+index usage), multi-table UPDATE/DELETE with JOINs, UPDATE/DELETE ORDER
+BY+LIMIT (currently parsed but ignored), AFTER/FIRST column positioning.
 **Gate:** EXPLAIN on join/subquery queries via mysql CLI; UPDATE/DELETE JOIN
 semantics differential-verified against real MySQL 8 (Docker oracle);
 chatflow suite still at exact parity. Status: ☐
