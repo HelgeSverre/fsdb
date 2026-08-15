@@ -275,9 +275,18 @@ let coerceValue (col: ColumnDef) (v: Value) : Result<Value, StorageError> =
             | VDate d -> Ok(VDate d)
             | VDateTime dt -> Ok(VDate(DateOnly.FromDateTime dt))
             | VString s ->
+                // A plain date parses directly; a full datetime string
+                // (real MySQL accepts one into a DATE column too, keeping
+                // just the date part and silently dropping the time — e.g.
+                // Eloquent's `date` cast round-tripping a `Carbon` instance
+                // through its full `'Y-m-d H:i:s'` string form) falls back
+                // to `DateTime.TryParse` and truncates.
                 match DateOnly.TryParse(s.Trim(), CultureInfo.InvariantCulture) with
                 | true, d -> Ok(VDate d)
-                | false, _ -> fail ()
+                | false, _ ->
+                    match DateTime.TryParse(s.Trim(), CultureInfo.InvariantCulture, DateTimeStyles.None) with
+                    | true, dt -> Ok(VDate(DateOnly.FromDateTime dt))
+                    | false, _ -> fail ()
             | _ -> fail ()
         | TDateTime
         | TTimestamp ->

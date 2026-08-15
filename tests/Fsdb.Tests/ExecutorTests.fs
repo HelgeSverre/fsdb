@@ -1170,4 +1170,25 @@ let tests =
 
                     match runDefault store "SELECT doubled FROM t" with
                     | ResultSet([ "doubled" ], [ [ Some "20" ] ]) -> ()
-                    | other -> failtestf "expected doubled to recompute to 20, got %A" other ] ]
+                    | other -> failtestf "expected doubled to recompute to 20, got %A" other ]
+
+          testList
+              "DATE column coercion"
+              [ testCase "a full datetime string into a DATE column keeps just the date part, like real MySQL"
+                <| fun _ ->
+                    // Regression: a bare `INSERT ... VALUES ('2024-03-05
+                    // 13:45:09')` into a DATE column used to fail to parse
+                    // (DateOnly.TryParse rejects a time component) even
+                    // though real MySQL silently truncates it — this is
+                    // exactly what Eloquent's `date` cast sends (Carbon's
+                    // full `'Y-m-d H:i:s'` string form).
+                    let store = newStore ()
+                    runDefault store "CREATE TABLE t (d DATE)" |> ignore
+
+                    match runDefault store "INSERT INTO t VALUES ('2024-03-05 13:45:09')" with
+                    | Affected 1UL -> ()
+                    | other -> failtestf "expected the datetime string to coerce into DATE, got %A" other
+
+                    match runDefault store "SELECT d FROM t" with
+                    | ResultSet([ "d" ], [ [ Some "2024-03-05" ] ]) -> ()
+                    | other -> failtestf "expected the date part only, got %A" other ] ]
