@@ -28,6 +28,16 @@ type Writer() =
         for i in 0..3 do
             this.WriteByte(byte ((v >>> (i * 8)) &&& 0xff))
 
+    member this.WriteInt64LE(v: int64) =
+        for i in 0..7 do
+            this.WriteByte(byte ((v >>> (i * 8)) &&& 0xffL))
+
+    /// IEEE 754 double, raw 8 bytes little-endian — `DoubleToInt64Bits`
+    /// gets the raw bits platform-independently, then `WriteInt64LE`
+    /// writes them out explicitly rather than trusting `BitConverter`'s
+    /// own (platform-dependent) endianness.
+    member this.WriteDoubleLE(v: float) = this.WriteInt64LE(BitConverter.DoubleToInt64Bits v)
+
     member this.WriteNullTerminatedString(s: string) =
         this.WriteBytes(Encoding.UTF8.GetBytes s)
         this.WriteByte 0uy

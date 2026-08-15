@@ -231,24 +231,50 @@ let textRowPayload (values: string option list) : byte[] =
 
     w.ToArray()
 
+/// Writes one non-NULL binary-protocol row value already rendered as
+/// `Value.toText`-style text (`Executor.QueryResult` never keeps the
+/// original typed `Value` around — see `Value.mysqlTypeOf`'s doc), parsed
+/// back and re-encoded per `typeId`'s fixed-width wire shape
+/// (https://dev.mysql.com/doc/dev/mysql-server/latest/page_protocol_binary_resultset.html#sect_protocol_binary_resultset_row_value)
+/// — the inverse of `readBinaryValue`'s numeric/date cases. Reporting a
+/// non-VAR_STRING type in the column definition but still encoding the row
+/// as a length-encoded string (or vice versa) desyncs every column after
+/// it for a real binary-protocol client, so this must stay in lockstep
+/// with `Value.mysqlTypeOf`/`wireTypeOfColumnType`'s type choices.
+/// NEWDECIMAL and anything this doesn't special-case fall back to the
+/// same length-encoded string DECIMAL/VARCHAR/VARSTRING/STRING already use
+/// on the wire (see `readBinaryValue`) — decimal precision has to survive
+/// as text either way, so there's no fixed-width form to prefer.
+let private writeBinaryValue (w: Writer) (typeId: byte) (s: string) : unit =
+    if typeId = TypeLongLong then
+        w.WriteInt64LE(Int64.Parse(s, Globalization.CultureInfo.InvariantCulture))
+    elif typeId = TypeDouble then
+        w.WriteDoubleLE(Double.Parse(s, Globalization.CultureInfo.InvariantCulture))
+    elif typeId = TypeDate then
+        let d = DateOnly.Parse(s, Globalization.CultureInfo.InvariantCulture)
+        w.WriteByte 4uy
+        w.WriteInt16LE d.Year
+        w.WriteByte(byte d.Month)
+        w.WriteByte(byte d.Day)
+    elif typeId = TypeDateTime || typeId = TypeTimestamp then
+        let dt = DateTime.Parse(s, Globalization.CultureInfo.InvariantCulture)
+        w.WriteByte 7uy
+        w.WriteInt16LE dt.Year
+        w.WriteByte(byte dt.Month)
+        w.WriteByte(byte dt.Day)
+        w.WriteByte(byte dt.Hour)
+        w.WriteByte(byte dt.Minute)
+        w.WriteByte(byte dt.Second)
+    else
+        w.WriteLenEncString s
+
 /// Encodes one binary-protocol resultset row
 /// (https://dev.mysql.com/doc/dev/mysql-server/latest/page_protocol_binary_resultset.html#sect_protocol_binary_resultset_row).
-/// Every value here is still encoded as a length-encoded string regardless
-/// of its logical type, so `Server`'s COM_STMT_EXECUTE reply always
-/// advertises its columns as `MYSQL_TYPE_VAR_STRING` in `columnDefPayload`
-/// too (passing `[]` for `resultPayloads`' `columnTypes`, whatever
-/// `Value.mysqlTypeOf` would've reported for the text-protocol reply) —
-/// advertising e.g. LONGLONG here without also switching this row encoding
-/// to raw fixed-width ints would desync every column after it for a real
-/// binary-protocol client. ponytail: type this properly (raw int/double
-/// bytes, MySQL's binary date encoding, ...) if a prepared-statement
-/// client ever needs native-typed binary results the way `textRowPayload`
-/// callers now get; every exercised client so far (chatflow's PDO,
-/// emulated prepares by default, and `Fsdb.Tests`' MySqlConnector cases)
-/// tolerates VAR_STRING binary rows fine. This reuses the exact same
-/// `string option list` row shape as `textRowPayload`; only the packet
-/// header and null-bitmap placement differ. None means SQL NULL.
-let binaryRowPayload (values: string option list) : byte[] =
+/// `columnTypes` must be the same list `columnDefPayload` advertised each
+/// column as (see `writeBinaryValue`'s doc on why); a shorter/longer list
+/// than `values` is a caller bug, not a value this falls back for. None
+/// means SQL NULL.
+let binaryRowPayload (columnTypes: byte list) (values: string option list) : byte[] =
     let w = Writer()
     w.WriteByte 0uy // packet header, always 0x00 for a row
 
@@ -264,10 +290,11 @@ let binaryRowPayload (values: string option list) : byte[] =
 
     w.WriteBytes nullBitmap
 
-    for v in values do
+    List.zip columnTypes values
+    |> List.iter (fun (typeId, v) ->
         match v with
-        | Some s -> w.WriteLenEncString s
-        | None -> ()
+        | Some s -> writeBinaryValue w typeId s
+        | None -> ())
 
     w.ToArray()
 

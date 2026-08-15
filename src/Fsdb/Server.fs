@@ -87,7 +87,7 @@ let sendPayloads (stream: IO.Stream) (startSeq: byte) (payloads: byte[] list) : 
 /// protocol spec describes a resultset: column count, column defs, an EOF
 /// (unless CLIENT_DEPRECATE_EOF), rows, then the terminator.
 let private resultPayloads
-    (rowEncoder: string option list -> byte[])
+    (rowEncoder: byte list -> string option list -> byte[])
     (capabilities: uint32)
     (statusFlags: int)
     (lastInsertId: uint64)
@@ -101,10 +101,13 @@ let private resultPayloads
         let deprecateEof = capabilities &&& ClientDeprecateEof <> 0u
 
         // `columnTypes` only means anything if the caller actually had one
-        // entry per column (a mismatch means "no real info" — the
-        // COM_STMT_EXECUTE binary-row path always passes `[]` here, see
-        // `binaryRowPayload`'s doc) — fall back to VAR_STRING per column
-        // rather than zipping a too-short/too-long list.
+        // entry per column (a mismatch means "no real info", e.g. a probe
+        // result — see `Session.LastResultColumnTypes`'s doc) — fall back
+        // to VAR_STRING per column rather than zipping a too-short/too-long
+        // list. Both the column-definition packets and `rowEncoder` below
+        // use this same reconciled `types`, so the two can never disagree
+        // about a column's type the way passing `columnTypes` to each
+        // independently could.
         let types =
             if List.length columnTypes = columns.Length then
                 columnTypes
@@ -119,7 +122,7 @@ let private resultPayloads
         [ columnCountPayload ]
         @ (List.zip columns types |> List.map (fun (name, ty) -> columnDefPayload { Name = name; Type = ty }))
         @ (if deprecateEof then [] else [ eofPayload capabilities statusFlags ])
-        @ (rows |> List.map rowEncoder)
+        @ (rows |> List.map (rowEncoder types))
         @ [ (if deprecateEof then
                  okEndOfResultSetPayload capabilities statusFlags
              else
@@ -139,23 +142,29 @@ let sendQueryResult
     (columnTypes: byte list)
     (result: Executor.QueryResult)
     : Async<unit> =
-    sendPayloads stream startSeq (resultPayloads textRowPayload capabilities statusFlags lastInsertId columnTypes result)
+    sendPayloads
+        stream
+        startSeq
+        (resultPayloads (fun _ -> textRowPayload) capabilities statusFlags lastInsertId columnTypes result)
     |> Async.Ignore
 
 /// As `sendQueryResult`, but encodes resultset rows in the binary protocol
-/// row format COM_STMT_EXECUTE requires — always passes `columnTypes = []`
-/// (VAR_STRING for every column) to `resultPayloads`; see
-/// `binaryRowPayload`'s doc for why real per-column types can't go out
-/// over this path yet.
+/// row format COM_STMT_EXECUTE requires (`binaryRowPayload`, which — unlike
+/// `textRowPayload` — actually reads `columnTypes` to pick each value's
+/// wire encoding, not just what `columnDefPayload` advertises).
 let sendBinaryQueryResult
     (stream: IO.Stream)
     (capabilities: uint32)
     (startSeq: byte)
     (statusFlags: int)
     (lastInsertId: uint64)
+    (columnTypes: byte list)
     (result: Executor.QueryResult)
     : Async<unit> =
-    sendPayloads stream startSeq (resultPayloads binaryRowPayload capabilities statusFlags lastInsertId [] result)
+    sendPayloads
+        stream
+        startSeq
+        (resultPayloads binaryRowPayload capabilities statusFlags lastInsertId columnTypes result)
     |> Async.Ignore
 
 /// `SERVER_STATUS_AUTOCOMMIT` always, plus `SERVER_STATUS_IN_TRANS` while
@@ -394,6 +403,7 @@ let private handleConnection (connectionId: int) (store: Storage.Store) (client:
                                                 seqId
                                                 (statusFlagsFor session)
                                                 (uint64 session.LastInsertId)
+                                                session.LastResultColumnTypes
                                                 result
 
                                         return! loop session

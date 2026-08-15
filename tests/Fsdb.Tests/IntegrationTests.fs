@@ -178,19 +178,25 @@ let tests =
                       do! selectCmd.PrepareAsync() |> Async.AwaitTask
                       use! reader = selectCmd.ExecuteReaderAsync() |> Async.AwaitTask
 
+                      // `id`/`score`/`active` now come back column-typed
+                      // (LONGLONG/DOUBLE) rather than a blanket VAR_STRING
+                      // — see `Value.mysqlTypeOf` — so a real ADO.NET
+                      // reader hands back native `Int64`/`Double` for them,
+                      // the same as it would against real MySQL; only
+                      // `name` (VARCHAR) is still a string.
                       let! hasRow1 = reader.ReadAsync() |> Async.AwaitTask
                       Expect.isTrue hasRow1 "first row present"
-                      Expect.equal (reader.GetString 0) "1" "row 1 id"
+                      Expect.equal (reader.GetInt64 0) 1L "row 1 id"
                       Expect.equal (reader.GetString 1) "alice" "row 1 name"
-                      Expect.equal (reader.GetString 2) "3.5" "row 1 score"
-                      Expect.equal (reader.GetString 3) "1" "row 1 active"
+                      Expect.equal (reader.GetDouble 2) 3.5 "row 1 score"
+                      Expect.equal (reader.GetInt64 3) 1L "row 1 active"
 
                       let! hasRow2 = reader.ReadAsync() |> Async.AwaitTask
                       Expect.isTrue hasRow2 "second row present"
-                      Expect.equal (reader.GetString 0) "2" "row 2 id"
+                      Expect.equal (reader.GetInt64 0) 2L "row 2 id"
                       Expect.isTrue (reader.IsDBNull 1) "row 2 name is NULL"
-                      Expect.equal (reader.GetString 2) "-1.25" "row 2 score"
-                      Expect.equal (reader.GetString 3) "0" "row 2 active"
+                      Expect.equal (reader.GetDouble 2) -1.25 "row 2 score"
+                      Expect.equal (reader.GetInt64 3) 0L "row 2 active"
 
                       let! hasRow3 = reader.ReadAsync() |> Async.AwaitTask
                       Expect.isFalse hasRow3 "only two rows"
