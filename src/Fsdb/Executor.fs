@@ -33,9 +33,20 @@ let private storageErr (e: StorageError) : QueryResult =
     let code, message = toMySqlError e
     Err(code, message)
 
-/// Column name (case-insensitive) to its index in a row array.
-let private columnIndexOf (columns: ColumnDef list) : Map<string, int> =
-    columns |> List.mapi (fun i c -> c.Name.ToLowerInvariant(), i) |> Map.ofList
+/// Column name (case-insensitive) to *every* index it resolves to in a row
+/// array — usually exactly one, but a `JOIN` can combine two tables that
+/// both have a column of the same name (`SELECT id FROM u JOIN p ON
+/// p.uid = u.id`). Keeping every match (rather than `Map.ofList`'s silent
+/// "last one wins") is what lets `resolveCol` tell an ambiguous bare
+/// reference apart from an unambiguous one and raise error 1052, the same
+/// way real MySQL does, instead of silently binding to whichever table
+/// happened to be listed last in the `JOIN`.
+let private columnIndexOf (columns: ColumnDef list) : Map<string, int list> =
+    columns
+    |> List.mapi (fun i c -> c.Name.ToLowerInvariant(), i)
+    |> List.groupBy fst
+    |> List.map (fun (name, xs) -> name, xs |> List.map snd)
+    |> Map.ofList
 
 /// Aggregate-call recognition: a `FuncCall` whose name is registered as an
 /// aggregate on `registry` (see `Functions.Registry.Aggregates`) rather than
@@ -178,7 +189,7 @@ let private regexpOp (subject: Value) (pattern: Value) : Value =
 /// to know which one to build.
 type private EvalContext =
     { Registry: Registry
-      ColumnIndex: Map<string, int>
+      ColumnIndex: Map<string, int list>
       /// Per-source-table resolution for `QualifiedCol`: lowercased alias-
       /// or-table-name -> that source's own column list plus the offset its
       /// columns start at within `Row` (`Row` is one table's columns for a
@@ -211,11 +222,14 @@ let private singleQualifier (name: string) (columns: ColumnDef list) : Map<strin
     Map.ofList [ name.ToLowerInvariant(), (columns, 0) ]
 
 /// Resolves a bare column against `ctx`, falling back to
-/// `ctx.Outer`/its own outer/... on a miss — see `EvalContext.Outer`.
+/// `ctx.Outer`/its own outer/... on a miss — see `EvalContext.Outer`. Two or
+/// more matches (a `JOIN` of tables that share a column name) is error 1052,
+/// not a silent pick of whichever one `columnIndexOf` happened to see last.
 let rec private resolveCol (ctx: EvalContext) (name: string) : Result<Value, EvalError> =
     match Map.tryFind (name.ToLowerInvariant()) ctx.ColumnIndex with
-    | Some i -> Ok ctx.Row.[i]
-    | None ->
+    | Some [ i ] -> Ok ctx.Row.[i]
+    | Some(_ :: _ :: _) -> Error(1052, sprintf "Column '%s' in field list is ambiguous" name)
+    | Some [] | None ->
         match ctx.Outer with
         | Some parent -> resolveCol parent name
         | None -> Error(unknownColumn name)
@@ -1275,7 +1289,7 @@ let private applyAssignments
     (store: Store)
     (registry: Registry)
     (dbName: string)
-    (columnIndex: Map<string, int>)
+    (columnIndex: Map<string, int list>)
     (qualifiers: Map<string, ColumnDef list * int>)
     (assignments: (int * Expr) list)
     (row: Value[])
@@ -1397,14 +1411,17 @@ let private withGeneratedRecomputed
 /// `funcCallAtom` already parses `VALUES(col)` as an ordinary `FuncCall`
 /// since it just looks like one syntactically, so this is a plain
 /// pre-evaluation rewrite rather than new grammar.
-let rec private substituteValuesFunc (columnIndex: Map<string, int>) (candidate: Value[]) (expr: Expr) : Expr =
+let rec private substituteValuesFunc (columnIndex: Map<string, int list>) (candidate: Value[]) (expr: Expr) : Expr =
     let sub = substituteValuesFunc columnIndex candidate
 
     match expr with
     | FuncCall(name, [ Col c ]) when System.String.Equals(name, "VALUES", System.StringComparison.OrdinalIgnoreCase) ->
+        // `candidate` is always the row for the one table this INSERT
+        // targets, so there's no cross-table ambiguity to consider here
+        // the way `resolveCol` has to for a JOIN — just take the column.
         match Map.tryFind (c.ToLowerInvariant()) columnIndex with
-        | Some i -> Lit candidate.[i]
-        | None -> expr
+        | Some(i :: _) -> Lit candidate.[i]
+        | _ -> expr
     | FuncCall(name, args) -> FuncCall(name, args |> List.map sub)
     | BinOp(op, a, b) -> BinOp(op, sub a, sub b)
     | Not e -> Not(sub e)

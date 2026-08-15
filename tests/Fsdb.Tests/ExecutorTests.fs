@@ -917,7 +917,19 @@ let tests =
                             "SELECT teams.*, team_user.role AS pivot_role FROM teams JOIN team_user ON teams.id = team_user.team_id"
                     with
                     | ResultSet([ "id"; "name"; "pivot_role" ], [ [ Some "1"; Some "acme"; Some "admin" ] ]) -> ()
-                    | other -> failtestf "expected teams' own id (1), not team_user's (99), got %A" other ]
+                    | other -> failtestf "expected teams' own id (1), not team_user's (99), got %A" other
+
+                testCase "an unqualified column present in two joined tables is error 1052, not a silent pick"
+                <| fun _ ->
+                    let store = newStore ()
+                    runDefault store "CREATE TABLE u (id INT, name VARCHAR(10))" |> ignore
+                    runDefault store "CREATE TABLE p (id INT, uid INT, title VARCHAR(10))" |> ignore
+                    runDefault store "INSERT INTO u VALUES (1, 'alice')" |> ignore
+                    runDefault store "INSERT INTO p VALUES (10, 1, 'first')" |> ignore
+
+                    match runDefault store "SELECT id FROM u JOIN p ON p.uid = u.id" with
+                    | Err(1052, _) -> ()
+                    | other -> failtestf "expected error 1052 (ambiguous column), got %A" other ]
 
           testList
               "real GROUP BY / HAVING / grouped aggregates"
