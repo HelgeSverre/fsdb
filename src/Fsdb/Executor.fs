@@ -53,6 +53,17 @@ let private traverseList = Storage.traverse
 let private columnIndexOf (columns: ColumnDef list) : Map<string, int> =
     columns |> List.mapi (fun i c -> c.Name.ToLowerInvariant(), i) |> Map.ofList
 
+/// Whole-table (no `GROUP BY` yet — that's M5) aggregate function names:
+/// recognizing one anywhere in a `SELECT`'s projection list switches
+/// `runSelect` from its normal per-row path to `runAggregateSelect`'s
+/// collapse-to-one-row path.
+let private aggregateNames = set [ "count"; "sum"; "avg"; "min"; "max" ]
+
+let private isAggregateCall (expr: Expr) : bool =
+    match expr with
+    | FuncCall(name, _) -> aggregateNames.Contains(name.ToLowerInvariant())
+    | _ -> false
+
 let private opSymbol =
     function
     | And -> "AND"
@@ -318,6 +329,87 @@ and private evalProjection (ctx: EvalContext) (columns: ColumnDef list) (proj: P
 /// surface a real error.
 and private probeRow (columns: ColumnDef list) : Value[] = Array.create (List.length columns) VNull
 
+/// One aggregate call's value over the rows a `WHERE` already filtered to.
+/// `COUNT(*)` counts rows; every other form (including `COUNT(expr)`)
+/// evaluates its one argument per row first, then folds — `NULL`s drop out
+/// before folding (SQL's aggregate rule) and folding an empty set yields
+/// `NULL` for `SUM`/`AVG`/`MIN`/`MAX` (`COUNT` yields `0`, handled by
+/// `List.length` naturally producing `0`).
+and private evalAggregate (ctxFor: Value[] -> EvalContext) (rows: Value[] list) (name: string) (args: Expr list) : Result<Value, EvalError> =
+    match name.ToLowerInvariant(), args with
+    | "count", [ Star ] -> Ok(VInt(int64 (List.length rows)))
+    | "count", [ arg ] ->
+        rows
+        |> traverseList (fun row -> evalExpr (ctxFor row) arg)
+        |> Result.map (fun vs -> VInt(int64 (vs |> List.filter (function VNull -> false | _ -> true) |> List.length)))
+    | (("sum" | "avg" | "min" | "max") as fn), [ arg ] ->
+        rows
+        |> traverseList (fun row -> evalExpr (ctxFor row) arg)
+        |> Result.map (fun vs ->
+            match vs |> List.filter (function VNull -> false | _ -> true) with
+            | [] -> VNull
+            | nonNull ->
+                match fn with
+                | "sum" -> nonNull |> List.reduce Value.add
+                | "avg" -> Value.div (nonNull |> List.reduce Value.add) (VInt(int64 (List.length nonNull)))
+                | "min" -> nonNull |> List.reduce (fun a b -> if Value.compare a b <= 0 then a else b)
+                | _ -> nonNull |> List.reduce (fun a b -> if Value.compare a b >= 0 then a else b))
+    // `isAggregateCall` (the only caller that routes here) already narrowed
+    // to the names/arities matched above.
+    | _ -> Ok VNull
+
+/// The ungrouped-aggregate path (`SELECT MAX(x) FROM t`, no `GROUP BY`):
+/// the whole `WHERE`-filtered row set collapses to one output row. `ORDER
+/// BY`/`LIMIT` are moot on a single row, so unlike `runSelect` this doesn't
+/// apply them.
+and private runAggregateSelect
+    (store: Store)
+    (registry: Registry)
+    (dbName: string)
+    (columns: ColumnDef list)
+    (rows: Value[] list)
+    (select: SelectStmt)
+    : QueryResult =
+    let columnIndex = columnIndexOf columns
+
+    let ctxFor (row: Value[]) : EvalContext =
+        { Registry = registry
+          ColumnIndex = columnIndex
+          Row = row
+          Store = store
+          DbName = dbName }
+
+    let matches (row: Value[]) : Result<bool, EvalError> =
+        match select.Where with
+        | None -> Ok true
+        | Some expr -> evalExpr (ctxFor row) expr |> Result.map (fun v -> truthy v = Some true)
+
+    match rows |> traverseList (fun row -> matches row |> Result.map (fun keep -> if keep then Some row else None)) with
+    | Error(code, message) -> Err(code, message)
+    | Ok maybeMatched ->
+        let matched = maybeMatched |> List.choose id
+
+        // A non-aggregate projection alongside an aggregate one (legal
+        // under non-strict `sql_mode`, which is what this engine accepts)
+        // has no well-defined row to read from once many rows collapse
+        // into one — ponytail: picks the first matched row (or an all-NULL
+        // probe row if none matched) rather than real `GROUP BY` per-group
+        // semantics; add that (M5) once a query needs more than one group.
+        let representativeRow = matched |> List.tryHead |> Option.defaultValue (probeRow columns)
+
+        let projectOne ((expr, aliasOpt): Projection) : Result<string * Value, EvalError> =
+            let label = aliasOpt |> Option.defaultValue (exprLabel expr)
+
+            match expr with
+            | FuncCall(name, args) when isAggregateCall expr ->
+                evalAggregate ctxFor matched name args |> Result.map (fun v -> label, v)
+            | Star -> Error(1054, "Invalid use of '*'")
+            | _ -> evalExpr (ctxFor representativeRow) expr |> Result.map (fun v -> label, v)
+
+        match select.Projections |> traverseList projectOne with
+        | Error(code, message) -> Err(code, message)
+        | Ok pairs -> ResultSet(pairs |> List.map fst, [ pairs |> List.map (snd >> toText) ])
+
 and private runSelect
     (store: Store)
     (registry: Registry)
@@ -335,6 +427,8 @@ and private runSelect
     // packet and aborts the client's whole session.
     if select.From.IsNone && projections |> List.exists (fst >> (=) Star) then
         Err(1096, "No tables used")
+    elif projections |> List.exists (fst >> isAggregateCall) then
+        runAggregateSelect store registry dbName columns rows select
     else
 
     let columnIndex = columnIndexOf columns

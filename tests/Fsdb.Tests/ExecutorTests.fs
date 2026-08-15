@@ -630,4 +630,31 @@ let tests =
 
                     match runDefault store sql with
                     | ResultSet([ "exists" ], [ [ Some "1" ] ]) -> ()
-                    | other -> failtestf "expected exists=1, got %A" other ] ]
+                    | other -> failtestf "expected exists=1, got %A" other ]
+
+          testList
+              "ungrouped aggregates (COUNT/SUM/AVG/MIN/MAX, no GROUP BY)"
+              [ testCase "MAX(batch) is what Laravel's migration repository runs to pick the next batch number"
+                <| fun _ ->
+                    let store = newStore ()
+                    runDefault store "CREATE TABLE migrations (id INT, batch INT)" |> ignore
+                    runDefault store "INSERT INTO migrations VALUES (1, 1), (2, 1), (3, 2)" |> ignore
+
+                    match runDefault store "SELECT MAX(batch) AS aggregate FROM migrations" with
+                    | ResultSet([ "aggregate" ], [ [ Some "2" ] ]) -> ()
+                    | other -> failtestf "expected aggregate=2, got %A" other
+
+                testCase "COUNT(*)/SUM/AVG/MIN over an empty table and a NULL-containing one"
+                <| fun _ ->
+                    let store = newStore ()
+                    runDefault store "CREATE TABLE t (n INT)" |> ignore
+
+                    match runDefault store "SELECT COUNT(*) AS c, SUM(n) AS s, MIN(n) AS mn FROM t" with
+                    | ResultSet([ "c"; "s"; "mn" ], [ [ Some "0"; None; None ] ]) -> ()
+                    | other -> failtestf "expected count=0 and sum/min NULL on an empty table, got %A" other
+
+                    runDefault store "INSERT INTO t VALUES (10), (NULL), (20)" |> ignore
+
+                    match runDefault store "SELECT COUNT(*) AS c, COUNT(n) AS cn, SUM(n) AS s, AVG(n) AS a FROM t" with
+                    | ResultSet([ "c"; "cn"; "s"; "a" ], [ [ Some "3"; Some "2"; Some "30"; Some "15" ] ]) -> ()
+                    | other -> failtestf "expected NULLs to drop out of COUNT(n)/SUM/AVG, got %A" other ] ]
