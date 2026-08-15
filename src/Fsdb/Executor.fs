@@ -1120,11 +1120,11 @@ and private resolveGroupByRef (columnIndex: Map<string, int list>) (projections:
     | Col name -> resolveGroupOrHavingCol columnIndex projections name
     | _ -> Ok(resolvePositionalOrAlias projections expr)
 
-/// `resolveGroupByRef`'s recursive counterpart for `HAVING` — same reason
-/// the old `resolveAliasesDeep` walked the whole tree instead of just the
-/// top level: `HAVING c > 1`'s alias `c` is nested inside a `BinOp`, not
-/// bare. Same shape as `substituteValuesFunc`'s rewrite, but `Result`-
-/// threaded since a `Col` can now fail with the ambiguous-FROM-table 1052.
+/// `resolveGroupByRef`'s recursive counterpart for `HAVING`: `HAVING c > 1`'s
+/// alias `c` is nested inside a `BinOp`, not bare, so a shallow top-level
+/// check misses it. Same shape as `substituteValuesFunc`'s rewrite, but
+/// `Result`-threaded since a `Col` can now fail with the ambiguous-FROM-table
+/// 1052.
 and private resolveHavingRef (columnIndex: Map<string, int list>) (projections: Projection list) (expr: Expr) : Result<Expr, EvalError> =
     let sub = resolveHavingRef columnIndex projections
 
