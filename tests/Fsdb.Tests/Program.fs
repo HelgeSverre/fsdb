@@ -183,8 +183,20 @@ let protocolTests =
 
           testCase "OK payload starts with 0x00 header"
           <| fun _ ->
-              let payload = okPayload ClientProtocol41 0UL 0UL
+              let payload = okPayload ClientProtocol41 StatusAutocommit 0UL 0UL
               Expect.equal payload.[0] 0uy "OK header byte"
+
+          testCase "OK payload status flags carry SERVER_STATUS_IN_TRANS while a transaction is open"
+          <| fun _ ->
+              // Regression: the status flags used to be hardcoded to
+              // StatusAutocommit alone, so PDO's inTransaction() (which reads
+              // this bit off the wire) always reported false.
+              let payload = okPayload ClientProtocol41 (StatusAutocommit ||| StatusInTrans) 0UL 0UL
+              let r = Reader(payload.[1..])
+              r.ReadLenEncInt() |> ignore // affected rows
+              r.ReadLenEncInt() |> ignore // last insert id
+              let statusFlags = r.ReadInt16LE()
+              Expect.isTrue (statusFlags &&& StatusInTrans <> 0) "SERVER_STATUS_IN_TRANS set"
 
           testCase "ERR payload carries the error code and message"
           <| fun _ ->
@@ -214,7 +226,7 @@ let protocolTests =
               // here makes mysql_use_result callers (e.g. the CLI's startup
               // banner query) hang forever waiting for a terminator that never
               // looks like one.
-              let payload = okEndOfResultSetPayload ClientProtocol41
+              let payload = okEndOfResultSetPayload ClientProtocol41 StatusAutocommit
               Expect.equal payload.[0] 0xfeuy "end-of-resultset OK header byte"
 
           testCase "parseHandshakeResponse reads username and capabilities"
@@ -660,6 +672,7 @@ let serverTests =
                               stream
                               caps
                               1uy
+                              StatusAutocommit
                               0UL
                               (ResultSet([ "a"; "b" ], [ [ Some "1"; None ] ]))
 
@@ -685,7 +698,7 @@ let serverTests =
                   let run caps =
                       async {
                           use stream = new IO.MemoryStream()
-                          do! Fsdb.Server.sendQueryResult stream caps 1uy 0UL (ResultSet([ "a" ], [ [ Some "1" ] ]))
+                          do! Fsdb.Server.sendQueryResult stream caps 1uy StatusAutocommit 0UL (ResultSet([ "a" ], [ [ Some "1" ] ]))
                           stream.Position <- 0L
                           return! readAllPackets stream
                       }

@@ -89,11 +89,12 @@ let sendPayloads (stream: IO.Stream) (startSeq: byte) (payloads: byte[] list) : 
 let private resultPayloads
     (rowEncoder: string option list -> byte[])
     (capabilities: uint32)
+    (statusFlags: int)
     (lastInsertId: uint64)
     (result: Executor.QueryResult)
     : byte[] list =
     match result with
-    | Affected affectedRows -> [ okPayload capabilities affectedRows lastInsertId ]
+    | Affected affectedRows -> [ okPayload capabilities statusFlags affectedRows lastInsertId ]
     | Err(code, message) -> [ errPayload capabilities code message ]
     | ResultSet(columns, rows) ->
         let deprecateEof = capabilities &&& ClientDeprecateEof <> 0u
@@ -105,9 +106,12 @@ let private resultPayloads
 
         [ columnCountPayload ]
         @ (columns |> List.map (fun col -> columnDefPayload { Name = col }))
-        @ (if deprecateEof then [] else [ eofPayload capabilities ])
+        @ (if deprecateEof then [] else [ eofPayload capabilities statusFlags ])
         @ (rows |> List.map rowEncoder)
-        @ [ (if deprecateEof then okEndOfResultSetPayload capabilities else eofPayload capabilities) ]
+        @ [ (if deprecateEof then
+                 okEndOfResultSetPayload capabilities statusFlags
+             else
+                 eofPayload capabilities statusFlags) ]
 
 /// Writes a text resultset (or OK/ERR) as one or more packets, continuing
 /// the sequence-id numbering from `startSeq`. Not private: exercised
@@ -118,10 +122,12 @@ let sendQueryResult
     (stream: IO.Stream)
     (capabilities: uint32)
     (startSeq: byte)
+    (statusFlags: int)
     (lastInsertId: uint64)
     (result: Executor.QueryResult)
     : Async<unit> =
-    sendPayloads stream startSeq (resultPayloads textRowPayload capabilities lastInsertId result) |> Async.Ignore
+    sendPayloads stream startSeq (resultPayloads textRowPayload capabilities statusFlags lastInsertId result)
+    |> Async.Ignore
 
 /// As `sendQueryResult`, but encodes resultset rows in the binary protocol
 /// row format COM_STMT_EXECUTE requires.
@@ -129,10 +135,20 @@ let sendBinaryQueryResult
     (stream: IO.Stream)
     (capabilities: uint32)
     (startSeq: byte)
+    (statusFlags: int)
     (lastInsertId: uint64)
     (result: Executor.QueryResult)
     : Async<unit> =
-    sendPayloads stream startSeq (resultPayloads binaryRowPayload capabilities lastInsertId result) |> Async.Ignore
+    sendPayloads stream startSeq (resultPayloads binaryRowPayload capabilities statusFlags lastInsertId result)
+    |> Async.Ignore
+
+/// `SERVER_STATUS_AUTOCOMMIT` always, plus `SERVER_STATUS_IN_TRANS` while
+/// `session.Tx` is open — every OK/EOF packet reports this so PDO's
+/// `inTransaction()`/`beginTransaction()`/`commit()` (which read the status
+/// bit off the wire, not just whatever `COMMIT`/`ROLLBACK` themselves reply)
+/// see the real transaction state.
+let private statusFlagsFor (session: Session) : int =
+    StatusAutocommit ||| (if session.Tx.IsSome then StatusInTrans else 0)
 
 let private handleConnection (connectionId: int) (store: Storage.Store) (client: TcpClient) : Async<unit> =
     async {
@@ -165,7 +181,7 @@ let private handleConnection (connectionId: int) (store: Storage.Store) (client:
                     writePacketAsync
                         stream
                         { SeqId = handshakeResp.SeqId + 1uy
-                          Payload = okPayload capabilities 0UL 0UL }
+                          Payload = okPayload capabilities (statusFlagsFor session) 0UL 0UL }
                     |> Async.Ignore
 
                 let rec loop (session: Session) : Async<unit> =
@@ -183,7 +199,7 @@ let private handleConnection (connectionId: int) (store: Storage.Store) (client:
                                     writePacketAsync
                                         stream
                                         { SeqId = seqId
-                                          Payload = okPayload capabilities 0UL 0UL }
+                                          Payload = okPayload capabilities (statusFlagsFor session) 0UL 0UL }
                                     |> Async.Ignore
 
                                 return! loop session
@@ -192,13 +208,22 @@ let private handleConnection (connectionId: int) (store: Storage.Store) (client:
                                     writePacketAsync
                                         stream
                                         { SeqId = seqId
-                                          Payload = okPayload capabilities 0UL 0UL }
+                                          Payload = okPayload capabilities (statusFlagsFor session) 0UL 0UL }
                                     |> Async.Ignore
 
                                 return! loop { session with Database = Some db }
                             | Some(Query sql) ->
                                 let session, result = QueryHandler.handle session sql
-                                do! sendQueryResult stream capabilities seqId (uint64 session.LastInsertId) result
+
+                                do!
+                                    sendQueryResult
+                                        stream
+                                        capabilities
+                                        seqId
+                                        (statusFlagsFor session)
+                                        (uint64 session.LastInsertId)
+                                        result
+
                                 return! loop session
                             | Some(FieldList table) ->
                                 // Deprecated in MySQL 8.0, but PDO/mysqlnd's
@@ -219,7 +244,7 @@ let private handleConnection (connectionId: int) (store: Storage.Store) (client:
                                 | Result.Ok(columns, _rows) ->
                                     let payloads =
                                         (columns |> List.map (fun c -> columnDefPayload { Name = c.Name }))
-                                        @ [ eofPayload capabilities ]
+                                        @ [ eofPayload capabilities (statusFlagsFor session) ]
 
                                     do! sendPayloads stream seqId payloads |> Async.Ignore
                                     return! loop session
@@ -247,7 +272,10 @@ let private handleConnection (connectionId: int) (store: Storage.Store) (client:
                                     let deprecateEof = capabilities &&& ClientDeprecateEof <> 0u
 
                                     let paramDefEof =
-                                        if paramCount > 0 && not deprecateEof then [ eofPayload capabilities ] else []
+                                        if paramCount > 0 && not deprecateEof then
+                                            [ eofPayload capabilities (statusFlagsFor session) ]
+                                        else
+                                            []
 
                                     let payloads =
                                         stmtPrepareOkPayload stmtId paramCount
@@ -323,7 +351,16 @@ let private handleConnection (connectionId: int) (store: Storage.Store) (client:
                                                 LongData = session.LongData |> Map.filter (fun (sid, _) _ -> sid <> stmtId) }
 
                                         let session, result = QueryHandler.handle session finalSql
-                                        do! sendBinaryQueryResult stream capabilities seqId (uint64 session.LastInsertId) result
+
+                                        do!
+                                            sendBinaryQueryResult
+                                                stream
+                                                capabilities
+                                                seqId
+                                                (statusFlagsFor session)
+                                                (uint64 session.LastInsertId)
+                                                result
+
                                         return! loop session
                             | Some(StmtSendLongData payload) ->
                                 // No response is ever sent for this command,
@@ -359,7 +396,10 @@ let private handleConnection (connectionId: int) (store: Storage.Store) (client:
                                         { session with LongData = session.LongData |> Map.filter (fun (sid, _) _ -> sid <> stmtId) }
 
                                     do!
-                                        writePacketAsync stream { SeqId = seqId; Payload = okPayload capabilities 0UL 0UL }
+                                        writePacketAsync
+                                            stream
+                                            { SeqId = seqId
+                                              Payload = okPayload capabilities (statusFlagsFor session) 0UL 0UL }
                                         |> Async.Ignore
 
                                     return! loop session
