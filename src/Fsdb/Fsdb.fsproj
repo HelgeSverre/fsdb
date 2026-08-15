@@ -18,6 +18,7 @@
     <Compile Include="Session.fs" />
     <Compile Include="QueryHandler.fs" />
     <Compile Include="Server.fs" />
+    <Compile Include="Db.fs" />
     <Compile Include="Program.fs" />
   </ItemGroup>
 

@@ -6,6 +6,7 @@ open System
 open System.Net
 open System.Net.Sockets
 open System.Text
+open Fsdb.Functions
 open Fsdb.Packet
 open Fsdb.Protocol
 open Fsdb.Session
@@ -175,7 +176,12 @@ let sendBinaryQueryResult
 let private statusFlagsFor (session: Session) : int =
     StatusAutocommit ||| (if session.Tx.IsSome then StatusInTrans else 0)
 
-let private handleConnection (connectionId: int) (store: Storage.Store) (client: TcpClient) : Async<unit> =
+let private handleConnection
+    (connectionId: int)
+    (store: Storage.Store)
+    (customFunctions: Functions.Registry)
+    (client: TcpClient)
+    : Async<unit> =
     async {
         use client = client
         use stream = client.GetStream()
@@ -200,7 +206,10 @@ let private handleConnection (connectionId: int) (store: Storage.Store) (client:
                 // foo`, PDO's DSN `dbname=foo`) gets it auto-created, same
                 // as `USE` on a fresh in-memory server with no setup step.
                 resp.Database |> Option.iter (Storage.ensureDatabase store)
-                let session = { Session.create connectionId store with Database = resp.Database }
+                let session =
+                    { Session.create connectionId store with
+                        Database = resp.Database
+                        CustomFunctions = customFunctions }
 
                 do!
                     writePacketAsync
@@ -507,8 +516,11 @@ let private tryAccept (listener: TcpListener) : Async<TcpClient option> =
 
 /// Accepts connections until the listener is stopped, handling each on its
 /// own async against the one shared `store` every session reads/writes
-/// through. A failing connection is logged, never fatal to the server.
-let serve (listener: TcpListener) (store: Storage.Store) : Async<unit> =
+/// through, with `customFunctions` (an embedding `Db`'s registered scalars/
+/// aggregates — `Functions.empty` if none) available to every statement any
+/// connection runs. A failing connection is logged, never fatal to the
+/// server.
+let serve (listener: TcpListener) (store: Storage.Store) (customFunctions: Functions.Registry) : Async<unit> =
     let rec loop (connectionId: int) : Async<unit> =
         async {
             match! tryAccept listener with
@@ -517,7 +529,7 @@ let serve (listener: TcpListener) (store: Storage.Store) : Async<unit> =
                 Async.Start(
                     async {
                         try
-                            do! handleConnection connectionId store client
+                            do! handleConnection connectionId store customFunctions client
                         with ex ->
                             eprintfn "fsdb: connection %d: %s" connectionId ex.Message
                     }

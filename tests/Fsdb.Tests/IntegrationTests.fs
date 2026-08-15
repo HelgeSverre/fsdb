@@ -18,7 +18,7 @@ let tests =
               async {
                   let listener = Fsdb.Server.startListening System.Net.IPAddress.Loopback 0
                   let port = Fsdb.Server.port listener
-                  Fsdb.Server.serve listener (Fsdb.Storage.create ()) |> Async.StartAsTask |> ignore
+                  Fsdb.Server.serve listener (Fsdb.Storage.create ()) Fsdb.Functions.empty |> Async.StartAsTask |> ignore
 
                   try
                       let connStr =
@@ -50,7 +50,7 @@ let tests =
               async {
                   let listener = Fsdb.Server.startListening System.Net.IPAddress.Loopback 0
                   let port = Fsdb.Server.port listener
-                  Fsdb.Server.serve listener (Fsdb.Storage.create ()) |> Async.StartAsTask |> ignore
+                  Fsdb.Server.serve listener (Fsdb.Storage.create ()) Fsdb.Functions.empty |> Async.StartAsTask |> ignore
 
                   try
                       let connStr =
@@ -131,7 +131,7 @@ let tests =
               async {
                   let listener = Fsdb.Server.startListening System.Net.IPAddress.Loopback 0
                   let port = Fsdb.Server.port listener
-                  Fsdb.Server.serve listener (Fsdb.Storage.create ()) |> Async.StartAsTask |> ignore
+                  Fsdb.Server.serve listener (Fsdb.Storage.create ()) Fsdb.Functions.empty |> Async.StartAsTask |> ignore
 
                   try
                       let connStr =
@@ -213,7 +213,7 @@ let tests =
               async {
                   let listener = Fsdb.Server.startListening System.Net.IPAddress.Loopback 0
                   let port = Fsdb.Server.port listener
-                  Fsdb.Server.serve listener (Fsdb.Storage.create ()) |> Async.StartAsTask |> ignore
+                  Fsdb.Server.serve listener (Fsdb.Storage.create ()) Fsdb.Functions.empty |> Async.StartAsTask |> ignore
 
                   try
                       let connStr =
@@ -307,7 +307,7 @@ let tests =
               async {
                   let listener = Fsdb.Server.startListening System.Net.IPAddress.Loopback 0
                   let port = Fsdb.Server.port listener
-                  Fsdb.Server.serve listener (Fsdb.Storage.create ()) |> Async.StartAsTask |> ignore
+                  Fsdb.Server.serve listener (Fsdb.Storage.create ()) Fsdb.Functions.empty |> Async.StartAsTask |> ignore
 
                   try
                       use client = new Net.Sockets.TcpClient()
@@ -367,6 +367,90 @@ let tests =
                       let! _ = writePacketAsync stream { SeqId = 0uy; Payload = queryPayload }
                       let! afterReply = readPacketAsync stream
                       Expect.isTrue afterReply.IsSome "a later query on the same connection still gets a reply"
+                  finally
+                      listener.Stop()
+              }
+              |> Async.RunSynchronously
+
+          // The M6 gate: the README's embedding example, exercised over the
+          // real wire with a real MySqlConnector client — a custom scalar
+          // (SLUGIFY) and a custom aggregate (MEDIAN) registered on a `Db`
+          // via `Db.registerScalar`/`registerAggregate`, then queried.
+          testCase "Db.registerScalar/registerAggregate are queryable over the wire"
+          <| fun _ ->
+              async {
+                  let slugify =
+                      function
+                      | [ VString s ] ->
+                          let lowered = s.ToLowerInvariant()
+
+                          let slug =
+                              Text.RegularExpressions.Regex.Replace(lowered, "[^a-z0-9]+", "-")
+                              |> fun s -> s.Trim '-'
+
+                          VString slug
+                      | _ -> VNull
+
+                  let median: Fsdb.Value.Value list -> Fsdb.Value.Value =
+                      fun values ->
+                          let sorted =
+                              values
+                              |> List.choose (function
+                                  | VInt i -> Some(float i)
+                                  | VDouble f -> Some f
+                                  | _ -> None)
+                              |> List.sort
+
+                          match sorted with
+                          | [] -> VNull
+                          | _ ->
+                              let n = List.length sorted
+                              let mid = n / 2
+
+                              if n % 2 = 0 then
+                                  VDouble((sorted.[mid - 1] + sorted.[mid]) / 2.0)
+                              else
+                                  VDouble sorted.[mid]
+
+                  let db =
+                      Fsdb.Db.create ()
+                      |> Fsdb.Db.registerScalar "SLUGIFY" slugify
+                      |> Fsdb.Db.registerAggregate "MEDIAN" median
+
+                  let listener = Fsdb.Server.startListening System.Net.IPAddress.Loopback 0
+                  let port = Fsdb.Server.port listener
+                  Fsdb.Server.serve listener db.Store db.Functions |> Async.StartAsTask |> ignore
+
+                  try
+                      let connStr =
+                          sprintf
+                              "Server=127.0.0.1;Port=%d;User ID=root;Password=;AllowPublicKeyRetrieval=True;SslMode=None"
+                              port
+
+                      use conn = new MySqlConnector.MySqlConnection(connStr)
+                      do! conn.OpenAsync() |> Async.AwaitTask
+
+                      use slugCmd = conn.CreateCommand()
+                      slugCmd.CommandText <- "SELECT SLUGIFY('Hello, World!')"
+                      let! slugResult = slugCmd.ExecuteScalarAsync() |> Async.AwaitTask
+                      Expect.equal (string slugResult) "hello-world" "SLUGIFY produces a slug over the wire"
+
+                      let exec (sql: string) =
+                          async {
+                              use cmd = conn.CreateCommand()
+                              cmd.CommandText <- sql
+                              return! cmd.ExecuteNonQueryAsync() |> Async.AwaitTask
+                          }
+
+                      do! exec "CREATE TABLE scores (id INT AUTO_INCREMENT PRIMARY KEY, score INT)" |> Async.Ignore
+                      do! exec "INSERT INTO scores (score) VALUES (1), (3), (2), (9), (4)" |> Async.Ignore
+
+                      use medianCmd = conn.CreateCommand()
+                      medianCmd.CommandText <- "SELECT MEDIAN(score) FROM scores"
+                      let! medianResult = medianCmd.ExecuteScalarAsync() |> Async.AwaitTask
+                      Expect.equal (string medianResult) "3" "MEDIAN aggregates over the wire"
+
+                      do! conn.CloseAsync() |> Async.AwaitTask
                   finally
                       listener.Stop()
               }

@@ -1,7 +1,6 @@
 module Fsdb.Program
 
 open System.Net
-open Fsdb.Server
 
 let private argValue (name: string) (argv: string[]) : string option =
     argv
@@ -35,8 +34,6 @@ let main argv =
         1
     | Some address ->
         let port = parsePort argv
-        let listener = startListening address port
-        let store = Fsdb.Storage.create ()
         printfn "fsdb listening on %O:%d" address port
-        serve listener store |> Async.RunSynchronously
+        Db.create () |> Db.listen address port |> Async.RunSynchronously
         0

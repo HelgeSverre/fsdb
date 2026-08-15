@@ -458,14 +458,21 @@ let private handleSetAutocommit (value: string) (session: Session) : Session * Q
 
     session, Affected 0UL
 
-/// The function registry for one statement: `Functions.builtins` plus the
+/// The function registry for one statement: `Functions.builtins`, then
+/// `session.CustomFunctions` (an embedding `Db`'s `registerScalar`/
+/// `registerAggregate` calls — free to override a built-in), then the
 /// session-dependent entries that can't be plain `Value list -> Value`
 /// closures until they're given a session to close over (`DATABASE()`
 /// reads `session.Database`, `LAST_INSERT_ID()` reads `session.LastInsertId`,
 /// `VERSION()` just reuses the same `@@version` value `SELECT @@version`
-/// already serves).
+/// already serves) — those go last so they always win.
 let private registryFor (session: Session) : Functions.Registry =
-    Functions.builtins
+    let withCustom =
+        session.CustomFunctions.Scalars
+        |> Map.fold (fun r name fn -> Functions.registerScalar name fn r) Functions.builtins
+        |> fun r -> session.CustomFunctions.Aggregates |> Map.fold (fun r name fn -> Functions.registerAggregate name fn r) r
+
+    withCustom
     |> Functions.registerScalar "DATABASE" (fun _ -> session.Database |> Option.map VString |> Option.defaultValue VNull)
     |> Functions.registerScalar "LAST_INSERT_ID" (fun _ -> VInt session.LastInsertId)
     |> Functions.registerScalar "VERSION" (fun _ -> lookupVar session "version" |> Option.map VString |> Option.defaultValue VNull)

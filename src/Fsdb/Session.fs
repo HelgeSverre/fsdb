@@ -114,7 +114,13 @@ type Session =
       /// Bytes buffered by COM_STMT_SEND_LONG_DATA, keyed by (statement id,
       /// param index), appended to on each call and consumed (then cleared)
       /// by the next COM_STMT_EXECUTE or COM_STMT_RESET for that statement.
-      LongData: Map<int * int, byte[]> }
+      LongData: Map<int * int, byte[]>
+      /// Custom functions registered on the embedding `Db` this session's
+      /// connection was accepted on (see `Fsdb.Db.registerScalar`/
+      /// `registerAggregate`) — empty for a session built directly (every
+      /// test). `QueryHandler.registryFor` layers these over the built-ins,
+      /// under session-bound overrides like `DATABASE()`.
+      CustomFunctions: Fsdb.Functions.Registry }
 
 let create (connectionId: int) (store: Store) : Session =
     { ConnectionId = connectionId
@@ -126,7 +132,8 @@ let create (connectionId: int) (store: Store) : Session =
       Tx = None
       Statements = Map.empty
       NextStmtId = 1
-      LongData = Map.empty }
+      LongData = Map.empty
+      CustomFunctions = Fsdb.Functions.empty }
 
 /// The catalog store all statements on this session currently execute
 /// against: the shared store outside a transaction, or the transaction's
