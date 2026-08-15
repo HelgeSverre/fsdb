@@ -617,7 +617,10 @@ let private rollbackSession (session: Session) : Session = { session with Tx = N
 let private beginTransaction (session: Session) : Session =
     let session = commitSession session
     let baseCatalog = session.Store.Catalog
-    let snapshot: Store = { Catalog = baseCatalog; Lock = obj () }
+    let snapshot: Store =
+        { Catalog = baseCatalog
+          Lock = obj ()
+          ForeignKeyChecks = session.Store.ForeignKeyChecks }
 
     { session with
         Tx = Some { Snapshot = snapshot; BaseCatalog = baseCatalog; Savepoints = Map.empty } }
