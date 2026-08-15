@@ -491,6 +491,12 @@ let private setNames = Regex(@"^SET\s+NAMES\s+'?(\w+)'?", RegexOptions.IgnoreCas
 let private setVar =
     Regex(@"^SET\s+(?:SESSION\s+|GLOBAL\s+|@@(?:SESSION\.|GLOBAL\.)?)?(\w+)\s*=\s*(.+)$", RegexOptions.IgnoreCase)
 
+/// Best-effort name extraction for the "this looks like an assignment but
+/// `setVar` didn't match it" error below — `\S+` rather than `\w+` so it
+/// also captures the `@name` a user-defined variable assignment
+/// (`SET @foo = 1`) uses, which `setVar` deliberately doesn't match.
+let private setVarNameForError = Regex(@"^SET\s+(?:SESSION\s+|GLOBAL\s+)?(\S+?)\s*=", RegexOptions.IgnoreCase)
+
 let private unquote (v: string) =
     let v = v.Trim()
 
@@ -501,9 +507,13 @@ let private unquote (v: string) =
 
 /// `SET NAMES x` and `SET [SESSION|@@session.]var = value` update
 /// Session.Variables so a later SELECT @@var / SHOW VARIABLES reflects them.
-/// Anything else (multi-assignment SET, GLOBAL persistence, ...) is accepted
-/// and ignored — ponytail: single-assignment only, add comma-splitting if a
-/// real client needs `SET a = 1, b = 2` in one statement.
+/// Anything else recognizably shaped like an assignment but not matched by
+/// `setVar` (`SET @user_var = 1` — user-defined variables aren't a session
+/// variable this server tracks; `Session.Variables`/`setVar` are both
+/// system-variable-shaped) is a loud 1193 rather than a silent fake OK —
+/// ponytail: single-assignment only for the forms that *are* handled, add
+/// comma-splitting if a real client needs `SET a = 1, b = 2` in one
+/// statement.
 let private handleSet (session: Session) (sql: string) : Session * QueryResult =
     let namesMatch = setNames.Match sql
 
@@ -525,7 +535,9 @@ let private handleSet (session: Session) (sql: string) : Session * QueryResult =
             let value = unquote varMatch.Groups.[2].Value
             { session with Variables = Map.add name value session.Variables }, Affected 0UL
         else
-            session, Affected 0UL
+            match setVarNameForError.Match sql with
+            | m when m.Success -> session, Err(1193, sprintf "Unknown system variable '%s'" m.Groups.[1].Value)
+            | _ -> session, syntaxError sql
 
 // ---------------------------------------------------------------------------
 // Transactions: BEGIN/COMMIT/ROLLBACK, SET autocommit, SAVEPOINT. Matched by

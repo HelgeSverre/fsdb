@@ -333,6 +333,18 @@ let queryHandlerTests =
               | ResultSet(_, [ [ Some "ANSI_QUOTES" ] ]) -> ()
               | other -> failtestf "expected ANSI_QUOTES, got %A" other
 
+          testCase "SET @user_var = 1 is a loud 1193 error, not a silent fake OK"
+          <| fun _ ->
+              // Regression: `setVar`'s (\w+) can't match `@foo`, so this
+              // used to fall through to handleSet's catch-all and report
+              // `Affected 0UL` — the client believes the write landed, then
+              // `SELECT @foo` is a 1064 syntax error right after.
+              let session = create 1 (Fsdb.Storage.create ())
+
+              match handle session "SET @user_var = 1" |> snd with
+              | Err(1193, msg) -> Expect.stringContains msg "@user_var" "the error names the unhandled variable"
+              | other -> failtestf "expected a 1193 error, got %A" other
+
           testCase "SELECT DATABASE() returns NULL before USE"
           <| fun _ ->
               let session = create 1 (Fsdb.Storage.create ())
