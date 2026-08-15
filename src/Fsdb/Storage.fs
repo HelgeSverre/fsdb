@@ -198,7 +198,11 @@ let commitTransactionEvents (store: Store) (snapshot: Store) : unit =
 let setForeignKeyChecks (store: Store) (enabled: bool) : unit =
     lock store.Lock (fun () -> store.ForeignKeyChecks <- enabled)
 
-let private normalizeTableName (name: string) = name.ToLowerInvariant()
+/// Table names are keyed case-insensitively by their lowercased form —
+/// public because `Persistence`'s WAL replay looks tables up in `Catalog`
+/// directly (bypassing this module's checked write paths on purpose; see
+/// the note on `Persistence.applyEvent`), so it needs the same key.
+let normalizeTableName (name: string) = name.ToLowerInvariant()
 
 /// `CREATE DATABASE name` — unlike `ensureDatabase` (silent no-op used by
 /// `USE`/handshake auto-create), this errors 1007 if it already exists;

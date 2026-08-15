@@ -217,4 +217,194 @@ let tests =
               Expect.equal afterRollback beforeRollback "rollback wrote nothing to the WAL"
 
               let reloaded = load dir
-              Expect.isEmpty (rowsOf reloaded defaultDatabase "t") "the rolled-back row never made it in" ]
+              Expect.isEmpty (rowsOf reloaded defaultDatabase "t") "the rolled-back row never made it in"
+
+          testCase "a torn WAL line doesn't poison future appends: writes after a kill -9 restart still survive a second restart"
+          <| fun _ ->
+              let dir = tempDataDir ()
+              let store = load dir
+              attach dir store
+              createTable store defaultDatabase "t" usersColumns [] [] |> ignore
+              insertRows store defaultDatabase "t" None [ [ VNull; VString "good"; VNull ] ] |> ignore
+              // Simulate a `kill -9` mid-`Write`: a half-written trailing line.
+              File.AppendAllText(walPath dir, "{\"case\":\"RowsInserted\",\"db\":\"fsdb\",\"table\":\"t\",\"rows\":[[\"I2\"")
+
+              // Restart #1: replay stops at the torn line, but must also
+              // truncate it away so the next append starts clean.
+              let restarted = load dir
+              attach dir restarted
+              Expect.equal (rowsOf restarted defaultDatabase "t") [ [| VInt 1L; VString "good"; VNull |] ] "torn line dropped, good row survives"
+
+              insertRows restarted defaultDatabase "t" None [ [ VNull; VString "second"; VNull ] ] |> ignore
+              insertRows restarted defaultDatabase "t" None [ [ VNull; VString "third"; VNull ] ] |> ignore
+
+              // Restart #2: both post-restart writes must be intact — before
+              // the fix, they'd glue onto the torn bytes and be lost here.
+              let restarted2 = load dir
+              let names = rowsOf restarted2 defaultDatabase "t" |> List.map (fun r -> r.[1])
+              Expect.containsAll names [ VString "good"; VString "second"; VString "third" ] "every row acked after the torn-line restart survives a second restart"
+
+          testCase "WAL replay of a sequential UPDATE (n = n + 1) doesn't cascade through its own earlier changes"
+          <| fun _ ->
+              let dir = tempDataDir ()
+              let store = load dir
+              attach dir store
+
+              createTable
+                  store
+                  defaultDatabase
+                  "seq"
+                  [ { Name = "n"
+                      Type = TInt false
+                      Nullable = false
+                      Default = None
+                      AutoIncrement = false
+                      PrimaryKey = false
+                      Unique = false
+                      Generated = None } ]
+                  []
+                  []
+              |> ignore
+
+              insertRows store defaultDatabase "seq" None [ [ VInt 1L ]; [ VInt 2L ]; [ VInt 3L ] ] |> ignore
+              updateRows store defaultDatabase "seq" (fun _ -> Ok true) (fun row -> Ok [| VInt((row.[0] |> function VInt i -> i | _ -> 0L) + 1L) |])
+              |> ignore
+
+              let reloaded = load dir
+              let values = rowsOf reloaded defaultDatabase "seq" |> List.map (fun r -> r.[0]) |> List.sortBy (function VInt i -> i | _ -> 0L)
+              Expect.equal values [ VInt 2L; VInt 3L; VInt 4L ] "each row incremented exactly once on replay, not cascaded"
+
+          testCase "WAL replay of a duplicate-row DELETE LIMIT 1 removes exactly one physical row, not every value-equal twin"
+          <| fun _ ->
+              let dir = tempDataDir ()
+              let store = load dir
+              attach dir store
+
+              createTable
+                  store
+                  defaultDatabase
+                  "dups"
+                  [ { Name = "n"
+                      Type = TInt false
+                      Nullable = false
+                      Default = None
+                      AutoIncrement = false
+                      PrimaryKey = false
+                      Unique = false
+                      Generated = None } ]
+                  []
+                  []
+              |> ignore
+
+              insertRows store defaultDatabase "dups" None [ [ VInt 7L ]; [ VInt 7L ]; [ VInt 7L ] ] |> ignore
+              // Delete exactly one row (as `DELETE ... WHERE n = 7 LIMIT 1` would).
+              let mutable deleted = false
+
+              deleteRows store defaultDatabase "dups" (fun row ->
+                  if not deleted && row = [| VInt 7L |] then
+                      deleted <- true
+                      Ok true
+                  else
+                      Ok false)
+              |> ignore
+
+              let reloaded = load dir
+              Expect.equal (rowsOf reloaded defaultDatabase "dups" |> List.length) 2 "only the one deleted row is gone after replay"
+
+          testCase "WAL replay doesn't re-validate foreign keys — a row written under SET FOREIGN_KEY_CHECKS=0 survives"
+          <| fun _ ->
+              let dir = tempDataDir ()
+              let store = load dir
+              attach dir store
+
+              let idCol name =
+                  { Name = name
+                    Type = TInt false
+                    Nullable = false
+                    Default = None
+                    AutoIncrement = false
+                    PrimaryKey = true
+                    Unique = false
+                    Generated = None }
+
+              createTable store defaultDatabase "p" [ idCol "id" ] [] [] |> ignore
+
+              createTable
+                  store
+                  defaultDatabase
+                  "c"
+                  [ idCol "id"; { (idCol "pid") with PrimaryKey = false } ]
+                  []
+                  [ { Name = "fkc"; Columns = [ "pid" ]; RefTable = "p"; RefColumns = [ "id" ]; OnDelete = None; OnUpdate = None } ]
+              |> ignore
+
+              insertRows store defaultDatabase "p" None [ [ VInt 1L ] ] |> ignore
+              insertRows store defaultDatabase "c" None [ [ VInt 1L; VInt 1L ] ] |> ignore
+
+              setForeignKeyChecks store false
+              insertRows store defaultDatabase "c" None [ [ VInt 2L; VInt 999L ] ] |> ignore
+              setForeignKeyChecks store true
+
+              let reloaded = load dir
+              let ids = rowsOf reloaded defaultDatabase "c" |> List.map (fun r -> r.[0])
+              Expect.containsAll ids [ VInt 1L; VInt 2L ] "the FK-checks-disabled orphan row survives replay"
+
+          testCase "a GENERATED column fails loudly at CREATE TABLE time under --data-dir instead of silently degrading"
+          <| fun _ ->
+              let dir = tempDataDir ()
+              let store = load dir
+              attach dir store
+
+              let genCol =
+                  { Name = "b"
+                    Type = TInt false
+                    Nullable = true
+                    Default = None
+                    AutoIncrement = false
+                    PrimaryKey = false
+                    Unique = false
+                    Generated = Some(BinOp(Mul, Col "a", Lit(VInt 2L))) }
+
+              let createFails () =
+                  createTable
+                      store
+                      defaultDatabase
+                      "g"
+                      [ { Name = "a"
+                          Type = TInt false
+                          Nullable = true
+                          Default = None
+                          AutoIncrement = false
+                          PrimaryKey = false
+                          Unique = false
+                          Generated = None }
+                        genCol ]
+                      []
+                      []
+                  |> ignore
+
+              Expect.throws createFails "encoding a GENERATED column's DDL into the WAL raises instead of quietly dropping the expression"
+
+          testCase "a crash between the fsynced .new snapshot and the WAL truncation still recovers the full catalog, no duplicates"
+          <| fun _ ->
+              let dir = tempDataDir ()
+              let store = load dir
+              attach dir store
+              createTable store defaultDatabase "t" usersColumns [] [] |> ignore
+              insertRows store defaultDatabase "t" None [ [ VNull; VString "a"; VNull ]; [ VNull; VString "b"; VNull ] ] |> ignore
+
+              // Manually reproduce the on-disk state right after `snapshotNow`
+              // fsyncs `.new` but before it renames it into place — the WAL is
+              // *not* yet truncated in this window (truncation happens before
+              // the rename), so both the fsynced `.new` and a full WAL are on
+              // disk at once.
+              snapshotNow dir store
+              let snap = File.ReadAllText(snapshotPath dir)
+              File.WriteAllText(snapshotPath dir + ".new", snap)
+              File.Delete(snapshotPath dir)
+
+              let reloaded = load dir
+              let names = rowsOf reloaded defaultDatabase "t" |> List.map (fun r -> r.[1])
+              Expect.equal (List.length names) 2 "the .new snapshot is trusted as-is, not merged with an (already-truncated, in the real path) WAL"
+              Expect.containsAll names [ VString "a"; VString "b" ] "no data lost"
+              Expect.isFalse (File.Exists(snapshotPath dir + ".new")) ".new is renamed into place after a successful load" ]

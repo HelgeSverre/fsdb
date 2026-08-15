@@ -28,6 +28,12 @@ open Fsdb.Storage
 let private walFileName = "wal.jsonl"
 let private snapshotFileName = "snapshot.fsdb"
 
+/// `PosixSignalRegistration.Create` returns a disposable that unregisters
+/// its handler when finalized — `attach`'s SIGTERM/SIGINT registrations
+/// have to stay reachable for the process's whole lifetime, or the first GC
+/// silently stops the shutdown snapshot from firing. See `attach`.
+let private shutdownRegistrations = ResizeArray<IDisposable>()
+
 /// Once the WAL crosses this many bytes, or this many appended entries,
 /// whichever comes first, `attach`'s subscriber snapshots the whole catalog
 /// and truncates it — keeps startup replay bounded instead of an
@@ -154,14 +160,21 @@ let private decodeColumnDefault (node: JsonNode) : ColumnDefault =
     | "DCurrentTimestamp" -> DCurrentTimestamp
     | tag -> failwithf "Persistence: unknown ColumnDefault case '%s' in WAL/snapshot" tag
 
-/// `ColumnDef.Generated` (`GENERATED ALWAYS AS (expr)`) isn't replayed —
-/// ponytail: no WAL encoding for `Expr` here (it's only reachable through
-/// this one field among the DDL shapes `SchemaChanged` carries), so a
-/// generated column comes back as a plain one after a restart, the same gap
-/// `InformationSchema.showCreateTableDDL` already has for `SHOW CREATE
-/// TABLE`. Add an `Expr` encoder if a migration ever depends on `GENERATED`
-/// surviving one.
+/// `ColumnDef.Generated` (`GENERATED ALWAYS AS (expr)`) has no WAL/snapshot
+/// encoding — there's no `Expr` encoder here (it's only reachable through
+/// this one field among the DDL shapes `SchemaChanged` carries) — so rather
+/// than silently degrade a generated column into a plain one after a
+/// restart (every write after the first restart would then compute the
+/// wrong value, or `NULL`, for it — not the cosmetic `SHOW CREATE TABLE`
+/// gap `InformationSchema.showCreateTableDDL` has), fail loudly at the
+/// point a persisted table would lose it: the `CREATE`/`ALTER TABLE`
+/// statement that defines the column, or the periodic full-catalog
+/// snapshot, whichever tries to encode it first. Add an `Expr` encoder if a
+/// migration ever needs `GENERATED` to survive `--data-dir`.
 let private encodeColumnDef (c: ColumnDef) : JsonNode =
+    if c.Generated.IsSome then
+        failwithf "fsdb: GENERATED column '%s' can't be persisted under --data-dir yet (no WAL/snapshot encoding for its expression)" c.Name
+
     let o = JsonObject()
     o.["name"] <- str c.Name
     o.["type"] <- encodeColumnType c.Type
@@ -382,42 +395,93 @@ let private applyDdl (store: Store) (db: string) (stmt: Statement) : unit =
     | Truncate table -> warn "Truncate" (truncate store db table)
     | other -> eprintfn "fsdb: WAL replay warning (SchemaChanged): unexpected statement %A" other
 
-/// Rows matching `target` by structural equality — a duplicate-valued table
-/// (no unique key on every column) makes "which physical row" ambiguous by
-/// value alone; ponytail: replay dedupes by value, not row identity (there
-/// is none in this `Value[] list` storage model), which is a no-op the
-/// moment a matching row's already been rewritten by an earlier entry in
-/// the same event list, so the end state still comes out right — see the
-/// module's replay tests.
+/// Applies `changes` — `(before, after)` pairs in the same ascending
+/// original-row order `Storage.updateRows` emitted them, one entry per
+/// physically distinct row it touched — to `rows` in a single forward pass:
+/// walk both lists together, consuming the next change only once it's due
+/// (its `before` matches the row in hand). Never re-scans from the top of
+/// `rows` per change, so a change's `after` value can't be picked back up
+/// as a later change's `before` — the cascade a naive "find any row equal
+/// to `before`, replace it" replay hits on `UPDATE t SET n = n + 1` (every
+/// row's `after` equals the next row's `before`). Any two rows the pass
+/// can't tell apart are byte-identical, so it never matters which one
+/// consumes which change.
+let rec private applyRowChanges (changes: (Value[] * Value[]) list) (rows: Value[] list) : Value[] list =
+    match rows, changes with
+    | [], _ -> []
+    | row :: restRows, (before, after) :: restChanges when row = before -> after :: applyRowChanges restChanges restRows
+    | row :: restRows, _ -> row :: applyRowChanges changes restRows
+
+/// As `applyRowChanges`, for `RowsDeleted`'s logged rows: drops the next
+/// not-yet-consumed match for each logged row, in order — fixes replaying a
+/// partial delete over duplicate-valued rows (`DELETE ... LIMIT 1` over two
+/// identical rows) wiping every row equal to the target instead of just the
+/// one that was actually removed.
+let rec private applyRowDeletes (targets: Value[] list) (rows: Value[] list) : Value[] list =
+    match rows, targets with
+    | [], _ -> []
+    | row :: restRows, target :: restTargets when row = target -> applyRowDeletes restTargets restRows
+    | row :: restRows, _ -> row :: applyRowDeletes targets restRows
+
+/// Rewrites `dbName.tableName`'s `Rows` in `store.Catalog` directly with
+/// `f`, bypassing `Storage.updateRows`/`deleteRows` entirely. Replay is a
+/// physical log of rows that already passed every check once, at commit
+/// time — routing it back through those checked write paths is what causes
+/// the cascade/over-delete bugs `applyRowChanges`/`applyRowDeletes` fix (a
+/// value-equality predicate scanning the *whole* table can't express "this
+/// one physical row"), and would also re-run FK/unique validation that a
+/// `SET FOREIGN_KEY_CHECKS = 0` write may have deliberately skipped.
+let private mapTableRows (store: Store) (dbName: string) (tableName: string) (f: Value[] list -> Value[] list) : unit =
+    let key = normalizeTableName tableName
+
+    match store.Catalog |> Map.tryFind dbName with
+    | None -> eprintfn "fsdb: WAL replay warning: unknown database '%s'" dbName
+    | Some db ->
+        match db |> Map.tryFind key with
+        | None -> eprintfn "fsdb: WAL replay warning: unknown table '%s.%s'" dbName tableName
+        | Some table -> store.Catalog <- store.Catalog |> Map.add dbName (db |> Map.add key { table with Rows = f table.Rows })
+
 let rec private applyEvent (store: Store) (event: CommitEvent) : unit =
     match event with
     | RowsInserted(db, table, rows) ->
         if not rows.IsEmpty then
             warn "RowsInserted" (insertRows store db table None (rows |> List.map List.ofArray) |> Result.map ignore)
-    | RowsUpdated(db, table, changes) ->
-        changes
-        |> List.iter (fun (before, after) ->
-            warn "RowsUpdated" (updateRows store db table (fun row -> Ok(row = before)) (fun _ -> Ok after) |> Result.map ignore))
-    | RowsDeleted(db, table, rows) ->
-        rows |> List.iter (fun target -> warn "RowsDeleted" (deleteRows store db table (fun row -> Ok(row = target)) |> Result.map ignore))
+    | RowsUpdated(db, table, changes) -> mapTableRows store db table (applyRowChanges changes)
+    | RowsDeleted(db, table, rows) -> mapTableRows store db table (applyRowDeletes rows)
     | SchemaChanged(db, stmt) -> applyDdl store db stmt
     | TransactionCommitted events -> events |> List.iter (applyEvent store)
 
-let private replayWal (store: Store) (walPath: string) : unit =
-    if File.Exists walPath then
+/// Replays every complete line in `walPath` into `store`, returning the
+/// byte offset just past the last successfully applied line. A torn final
+/// line (a `kill -9` mid-write) is expected, not corruption to panic over —
+/// everything before it already committed durably — so replay stops there
+/// rather than guessing at what the rest of the line might have meant;
+/// `load` truncates the WAL back to the returned offset so the *next*
+/// append glues onto a clean record boundary instead of the torn bytes
+/// (otherwise every write from then on decodes into one ever-growing
+/// corrupt line and is lost again at the next restart).
+let private replayWal (store: Store) (walPath: string) : int64 =
+    if not (File.Exists walPath) then
+        0L
+    else
+        let mutable offset = 0L
         let mutable stopped = false
 
         for line in File.ReadAllLines walPath do
-            if not stopped && not (String.IsNullOrWhiteSpace line) then
-                try
-                    applyEvent store (decodeEvent (JsonNode.Parse line))
-                with ex ->
-                    // A torn final line (a `kill -9` mid-write) is expected,
-                    // not corruption to panic over — everything before it
-                    // already committed durably; stop, don't guess at what
-                    // the rest of the line might have meant.
-                    eprintfn "fsdb: WAL replay stopped at a truncated/corrupt line (%s): %s" walPath ex.Message
-                    stopped <- true
+            if not stopped then
+                let lineBytes = int64 (Text.Encoding.UTF8.GetByteCount line) + 1L
+
+                if String.IsNullOrWhiteSpace line then
+                    offset <- offset + lineBytes
+                else
+                    try
+                        applyEvent store (decodeEvent (JsonNode.Parse line))
+                        offset <- offset + lineBytes
+                    with ex ->
+                        eprintfn "fsdb: WAL replay stopped at a truncated/corrupt line (%s): %s" walPath ex.Message
+                        stopped <- true
+
+        offset
 
 // ---------------------------------------------------------------------
 // Snapshot: the whole catalog, JSON, written atomically (tmp + rename).
@@ -463,17 +527,35 @@ let private decodeCatalog (node: JsonNode) : Catalog =
         dbEntry.Key, db)
     |> Map.ofSeq
 
-/// Snapshots `store`'s whole catalog to `dataDir/snapshot.fsdb` (tmp file +
-/// atomic rename) and truncates the WAL back to empty. Safe to call any
-/// time — holds `store.Lock` for the duration, same as every other write.
+/// Snapshots `store`'s whole catalog to `dataDir/snapshot.fsdb` and
+/// truncates the WAL back to empty. Safe to call any time — holds
+/// `store.Lock` for the duration, same as every other write.
+///
+/// Ordered (and fsynced) so a crash at any point still leaves `load` a
+/// consistent state to recover from: write the *whole* catalog to
+/// `snapshot.fsdb.new` through a `FileStream` and `Flush true` (an fsync,
+/// matching `attach`'s WAL writes — `File.WriteAllText` never syncs, so the
+/// old tmp-file dance could lose the snapshot to a power loss right after
+/// the WAL truncation it's supposed to be a backup for), *then* truncate
+/// the WAL, *then* rename `.new` into place. A crash between the fsync and
+/// the rename leaves both `.new` (complete) and the old `snapshot.fsdb`
+/// (stale but harmless) plus a truncated WAL on disk; `load` prefers `.new`
+/// when it's there and parses cleanly. A crash *before* the fsync leaves an
+/// incomplete/absent `.new` and the WAL untouched, so `load` falls back to
+/// the old snapshot + full WAL replay — nothing lost either way.
 let snapshotNow (dataDir: string) (store: Store) : unit =
     lock store.Lock (fun () ->
         Directory.CreateDirectory dataDir |> ignore
         let finalPath = Path.Combine(dataDir, snapshotFileName)
-        let tmpPath = finalPath + ".tmp"
-        File.WriteAllText(tmpPath, (encodeCatalog store.Catalog).ToJsonString())
-        File.Move(tmpPath, finalPath, true)
-        File.WriteAllText(Path.Combine(dataDir, walFileName), ""))
+        let newPath = finalPath + ".new"
+
+        (use s = new FileStream(newPath, FileMode.Create, FileAccess.Write)
+         let bytes = Text.Encoding.UTF8.GetBytes((encodeCatalog store.Catalog).ToJsonString())
+         s.Write(bytes, 0, bytes.Length)
+         s.Flush true)
+
+        File.WriteAllText(Path.Combine(dataDir, walFileName), "")
+        File.Move(newPath, finalPath, true))
 
 /// Loads durable state from `dataDir` into a fresh `Store`: the snapshot if
 /// one exists, then any WAL entries written after it. Call once at startup,
@@ -484,11 +566,45 @@ let load (dataDir: string) : Store =
     let store = Storage.create ()
     Directory.CreateDirectory dataDir |> ignore
     let snapshotPath = Path.Combine(dataDir, snapshotFileName)
+    let newPath = snapshotPath + ".new"
+    let walPath = Path.Combine(dataDir, walFileName)
 
-    if File.Exists snapshotPath then
-        store.Catalog <- decodeCatalog (JsonNode.Parse(File.ReadAllText snapshotPath))
+    // See `snapshotNow`: a fully-written `.new` is a superset of whatever's
+    // in the WAL (it's fsynced *before* the WAL is truncated), so prefer it
+    // and skip the WAL entirely rather than double-applying what it already
+    // has. A `.new` that fails to parse means the crash landed mid-write,
+    // before the fsync — it's garbage, not authoritative; fall through to
+    // the untouched old snapshot + full WAL instead.
+    let loadedFromNew =
+        File.Exists newPath
+        && (try
+                store.Catalog <- decodeCatalog (JsonNode.Parse(File.ReadAllText newPath))
+                true
+            with _ ->
+                false)
 
-    replayWal store (Path.Combine(dataDir, walFileName))
+    if loadedFromNew then
+        File.Move(newPath, snapshotPath, true)
+        File.WriteAllText(walPath, "")
+    else
+        if File.Exists snapshotPath then
+            store.Catalog <- decodeCatalog (JsonNode.Parse(File.ReadAllText snapshotPath))
+
+        // The WAL holds rows that already passed every check once, at
+        // commit time — re-validating foreign keys on replay only risks
+        // dropping one written under `SET FOREIGN_KEY_CHECKS = 0` (wired up
+        // at `QueryHandler.fs`, used by Laravel migrations/seeders), since
+        // event order already preserves whatever check *was* enforced.
+        store.ForeignKeyChecks <- false
+        let goodOffset = replayWal store walPath
+        store.ForeignKeyChecks <- true
+
+        // A torn final line (`kill -9` mid-append) must not poison the WAL
+        // forever — see `replayWal`'s doc comment.
+        if File.Exists walPath && FileInfo(walPath).Length <> goodOffset then
+            use fs = new FileStream(walPath, FileMode.Open, FileAccess.Write)
+            fs.SetLength goodOffset
+
     store
 
 /// Subscribes `store` to `Storage.Store.OnCommit`, appending every commit as
@@ -515,11 +631,24 @@ let attach (dataDir: string) (store: Store) : unit =
 
     let appendLine (line: string) =
         let walSize =
-            use s = new FileStream(walPath, FileMode.Append, FileAccess.Write, FileShare.Read)
-            let bytes = Text.Encoding.UTF8.GetBytes(line + "\n")
-            s.Write(bytes, 0, bytes.Length)
-            s.Flush true
-            s.Length
+            try
+                use s = new FileStream(walPath, FileMode.Append, FileAccess.Write, FileShare.Read)
+                let bytes = Text.Encoding.UTF8.GetBytes(line + "\n")
+                s.Write(bytes, 0, bytes.Length)
+                s.Flush true
+                s.Length
+            with ex ->
+                // By the time `OnCommit` fires, `Storage` has already
+                // applied the mutation to `store.Catalog` (see
+                // `Storage.emit`) — a WAL append failing here (ENOSPC,
+                // permissions, …) can't be turned into a client-visible
+                // error without silently serving a row that exists only in
+                // memory, invisible to the very durability mechanism whose
+                // job is to keep it. Crash rather than keep serving reads
+                // and writes against a catalog the WAL can no longer prove.
+                eprintfn "fsdb: WAL append failed, catalog and disk have diverged: %s" ex.Message
+                Environment.FailFast(sprintf "fsdb: fatal WAL append failure: %s" ex.Message, ex)
+                reraise ()
 
         entryCount := !entryCount + 1
 
@@ -531,5 +660,10 @@ let attach (dataDir: string) (store: Store) : unit =
 
     let onShutdown (_: PosixSignalContext) = snapshotNow dataDir store
 
-    PosixSignalRegistration.Create(PosixSignal.SIGTERM, onShutdown) |> ignore
-    PosixSignalRegistration.Create(PosixSignal.SIGINT, onShutdown) |> ignore
+    // `PosixSignalRegistration` unregisters its handler when finalized —
+    // `attach` returning right after this would leave nothing holding a
+    // reference, so the first GC silently stops the SIGTERM/SIGINT
+    // shutdown snapshot from ever firing again. Root them for the process's
+    // lifetime instead of `|> ignore`-ing the disposable away.
+    shutdownRegistrations.Add(PosixSignalRegistration.Create(PosixSignal.SIGTERM, onShutdown))
+    shutdownRegistrations.Add(PosixSignalRegistration.Create(PosixSignal.SIGINT, onShutdown))
