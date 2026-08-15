@@ -965,6 +965,20 @@ let tests =
                     | ResultSet([ "region" ], rows) -> Expect.equal rows [ [ Some "east" ] ] "only east has more than one row"
                     | other -> failtestf "expected only 'east' to survive HAVING, got %A" other
 
+                testCase "HAVING can reference a SELECT list alias, not just a bare aggregate call"
+                <| fun _ ->
+                    let store = newStore ()
+                    runDefault store "CREATE TABLE sales (region VARCHAR(10), amount INT)" |> ignore
+
+                    runDefault
+                        store
+                        "INSERT INTO sales VALUES ('east', 10), ('east', 20), ('west', 5), ('south', 100)"
+                    |> ignore
+
+                    match runDefault store "SELECT region, COUNT(*) AS c FROM sales GROUP BY region HAVING c > 1 ORDER BY region" with
+                    | ResultSet([ "region"; "c" ], rows) -> Expect.equal rows [ [ Some "east"; Some "2" ] ] "only east has c > 1"
+                    | other -> failtestf "expected the alias 'c' to resolve inside HAVING, got %A" other
+
                 testCase "GROUP BY with a NULL-valued key groups every NULL together, same as MySQL"
                 <| fun _ ->
                     let store = newStore ()

@@ -929,6 +929,45 @@ and private resolvePositionalOrAlias (projections: Projection list) (expr: Expr)
         |> Option.defaultValue expr
     | _ -> expr
 
+/// `resolvePositionalOrAlias`'s recursive counterpart — `GROUP BY`/`ORDER
+/// BY` keys are almost always a bare alias/column/position at the top
+/// level, but `HAVING`'s condition is a full boolean expression with the
+/// alias nested somewhere inside it (`HAVING c > 1`, not just `HAVING c`),
+/// so a shallow top-level check misses it entirely: `Col "c"` there isn't a
+/// real column at all, only the `SELECT` list's own alias, and evaluating
+/// it unresolved fails with 1054. Walks every subexpression substituting a
+/// `Col` that names a projection alias with that projection's own
+/// expression; same shape as `substituteValuesFunc`'s rewrite.
+and private resolveAliasesDeep (projections: Projection list) (expr: Expr) : Expr =
+    let sub = resolveAliasesDeep projections
+
+    match expr with
+    | Col _ -> resolvePositionalOrAlias projections expr
+    | FuncCall(name, args) -> FuncCall(name, args |> List.map sub)
+    | BinOp(op, a, b) -> BinOp(op, sub a, sub b)
+    | Not e -> Not(sub e)
+    | IsNull e -> IsNull(sub e)
+    | IsNotNull e -> IsNotNull(sub e)
+    | IsTrue e -> IsTrue(sub e)
+    | IsFalse e -> IsFalse(sub e)
+    | Distinct e -> Distinct(sub e)
+    | Like(e, p, cs) -> Like(sub e, sub p, cs)
+    | Regexp(e, p) -> Regexp(sub e, sub p)
+    | In(e, xs) -> In(sub e, xs |> List.map sub)
+    | Between(e, lo, hi) -> Between(sub e, sub lo, sub hi)
+    | Cast(e, ty) -> Cast(sub e, ty)
+    | Case(subject, whens, elseBranch) ->
+        Case(subject |> Option.map sub, whens |> List.map (fun (c, r) -> sub c, sub r), elseBranch |> Option.map sub)
+    | Lit _
+    | QualifiedCol _
+    | Star _
+    | RowNumberOver _
+    // A subquery is its own scope — nothing inside it can be *this*
+    // query's projection alias.
+    | Exists _
+    | Subquery _
+    | InSubquery _ -> expr
+
 /// The `GROUP BY`/aggregate path: `select.GroupBy` (resolved through
 /// `resolvePositionalOrAlias` for positional/alias references first)
 /// partitions the `WHERE`-filtered rows into groups — structural equality on
@@ -991,7 +1030,15 @@ and private runGroupedSelect
         match select.Having with
         | None -> Ok true
         | Some h ->
-            rewriteAggregates registry ctxFor groupRows h
+            // `resolveAliasesDeep` resolves a `SELECT ... AS alias`
+            // anywhere inside the condition — `GROUP BY`/`ORDER BY` only
+            // need `resolveRef`'s shallow, top-level check since a key
+            // there is almost always a bare alias/column, but `HAVING`'s
+            // condition is a full boolean expression (`HAVING c > 1`, not
+            // just `HAVING c`), and MySQL allows a projection alias nested
+            // anywhere inside it (e.g. Eloquent's `having('aggregate_alias',
+            // ...)`).
+            rewriteAggregates registry ctxFor groupRows (resolveAliasesDeep select.Projections h)
             |> Result.bind (evalExpr (ctxFor (representativeOf groupRows)))
             |> Result.map (fun v -> truthy v = Some true)
 
