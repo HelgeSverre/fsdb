@@ -578,6 +578,15 @@ and private qualifierRanges (sources: (string * ColumnDef list) list) : Map<stri
     |> List.fold (fun (offset, quals) (qualifier, cols) -> offset + List.length cols, Map.add (qualifier.ToLowerInvariant()) (cols, offset) quals) (0, Map.empty)
     |> snd
 
+/// The one `WHERE` predicate every scan and mutation path shares — no
+/// clause matches everything, otherwise SQL's three-valued truthiness
+/// (`evalExpr` against the row under `WhereClause`, `NULL`/`false` both
+/// meaning "no match", only an explicit `true` keeping the row).
+and private whereMatches (ctxFor: Value[] -> EvalContext) (where: Expr option) (row: Value[]) : Result<bool, EvalError> =
+    match where with
+    | None -> Ok true
+    | Some expr -> evalExpr { ctxFor row with Clause = WhereClause } expr |> Result.map (fun v -> truthy v = Some true)
+
 /// Applies one `JOIN` clause against whatever's already in scope
 /// (`sourcesSoFar`/`rowsSoFar`, built by the `FROM` table and any earlier
 /// `JOIN`s in the same list): resolves the joined table, evaluates `join.On`
@@ -1210,10 +1219,7 @@ and private runGroupedSelect
 
     let ctxFor = contextFactory store registry dbName columnIndex qualifiers outer
 
-    let matches (row: Value[]) : Result<bool, EvalError> =
-        match select.Where with
-        | None -> Ok true
-        | Some expr -> evalExpr { ctxFor row with Clause = WhereClause } expr |> Result.map (fun v -> truthy v = Some true)
+    let matches = whereMatches ctxFor select.Where
 
     let representativeOf (groupRows: Value[] list) : Value[] = groupRows |> List.tryHead |> Option.defaultValue (probeRow columns)
 
@@ -1352,10 +1358,7 @@ and private runWindowedSelect
 
         let ctxFor = contextFactory store registry dbName columnIndex qualifiers outer
 
-        let matches (row: Value[]) : Result<bool, EvalError> =
-            match select.Where with
-            | None -> Ok true
-            | Some expr -> evalExpr { ctxFor row with Clause = WhereClause } expr |> Result.map (fun v -> truthy v = Some true)
+        let matches = whereMatches ctxFor select.Where
 
         let keyOf (exprs: Expr list) (row: Value[]) : Result<Value list, EvalError> =
             exprs |> traverse (evalExpr (ctxFor row))
@@ -1462,10 +1465,7 @@ and private runSelect
     // expansion) itself.
     let resolveOrderExpr = resolveOrderPosition projections
 
-    let matches (row: Value[]) : Result<bool, EvalError> =
-        match whereExpr with
-        | None -> Ok true
-        | Some expr -> evalExpr { ctxFor row with Clause = WhereClause } expr |> Result.map (fun v -> truthy v = Some true)
+    let matches = whereMatches ctxFor whereExpr
 
     let projectRow (row: Value[]) : Result<(string * Value) list, EvalError> =
         projections
@@ -1759,39 +1759,6 @@ type private ExplainRow =
       Rows: uint64 option
       Extra: string list }
 
-/// Whether `expr` contains a subquery form (`Exists`/`Subquery`/
-/// `InSubquery`) anywhere inside it — walks every `Expr` case the same way
-/// `containsAggregate` does, but for a different vocabulary (subquery forms,
-/// not aggregate calls) and a different purpose (`EXPLAIN`'s `SIMPLE` vs.
-/// `PRIMARY`, not `runSelect`'s grouped-vs-ungrouped path).
-let rec private containsSubqueryExpr (expr: Expr) : bool =
-    match expr with
-    | Exists _
-    | Subquery _
-    | InSubquery _ -> true
-    | BinOp(_, a, b) -> containsSubqueryExpr a || containsSubqueryExpr b
-    | Not e
-    | IsNull e
-    | IsNotNull e
-    | IsTrue e
-    | IsFalse e
-    | Distinct e -> containsSubqueryExpr e
-    | Like(e, p, _) -> containsSubqueryExpr e || containsSubqueryExpr p
-    | Regexp(e, p) -> containsSubqueryExpr e || containsSubqueryExpr p
-    | In(e, xs) -> containsSubqueryExpr e || xs |> List.exists containsSubqueryExpr
-    | Between(e, lo, hi) -> containsSubqueryExpr e || containsSubqueryExpr lo || containsSubqueryExpr hi
-    | Cast(e, _) -> containsSubqueryExpr e
-    | Case(subject, whens, elseBranch) ->
-        (subject |> Option.map containsSubqueryExpr |> Option.defaultValue false)
-        || whens |> List.exists (fun (c, r) -> containsSubqueryExpr c || containsSubqueryExpr r)
-        || (elseBranch |> Option.map containsSubqueryExpr |> Option.defaultValue false)
-    | FuncCall(_, args) -> args |> List.exists containsSubqueryExpr
-    | Lit _
-    | Col _
-    | QualifiedCol _
-    | Star _
-    | RowNumberOver _ -> false
-
 /// Every subquery `expr` embeds, in encounter order — `EXPLAIN`'s source of
 /// `SUBQUERY`/`DEPENDENT SUBQUERY` rows, one nested block per subquery form
 /// found this way.
@@ -1822,6 +1789,23 @@ let rec private collectSubqueries (expr: Expr) : SelectStmt list =
     | QualifiedCol _
     | Star _
     | RowNumberOver _ -> []
+
+/// Whether `expr` contains a subquery form (`Exists`/`Subquery`/
+/// `InSubquery`) anywhere inside it — the same walk `collectSubqueries`
+/// already does, asked as a yes/no, for `EXPLAIN`'s `SIMPLE` vs. `PRIMARY`.
+let private containsSubqueryExpr (expr: Expr) : bool = not (collectSubqueries expr).IsEmpty
+
+/// Every expression position a `SELECT` can hide a subquery in — one list,
+/// read both by `explainSelectBlock` (which blocks to emit for each
+/// embedded subquery) and by the `SIMPLE`-vs-`PRIMARY` check in
+/// `explainStatement`, so the two can't drift out of sync the way a second
+/// hand-written copy of this list did (missing `GroupBy`/`OrderBy`).
+let private selectSubqueryExprs (select: SelectStmt) : Expr list =
+    (select.Projections |> List.map fst)
+    @ (select.Where |> Option.toList)
+    @ (select.Having |> Option.toList)
+    @ select.GroupBy
+    @ (select.OrderBy |> List.map fst)
 
 /// Whether any expression in `sub` (its projections/`WHERE`/`HAVING`/
 /// `GROUP BY`/`ORDER BY`) references a table qualifier that isn't one of
@@ -1987,14 +1971,7 @@ and private explainSelectBlock
           if not select.OrderBy.IsEmpty then "Using filesort"
           if not select.GroupBy.IsEmpty || select.Distinct then "Using temporary" ]
 
-    let subqueryExprs =
-        (select.Projections |> List.map fst)
-        @ (select.Where |> Option.toList)
-        @ (select.Having |> Option.toList)
-        @ select.GroupBy
-        @ (select.OrderBy |> List.map fst)
-
-    explainJoinBlock store dbName nextId acc id selectType select.From select.Joins extra subqueryExprs
+    explainJoinBlock store dbName nextId acc id selectType select.From select.Joins extra (selectSubqueryExprs select)
 
 /// Renders every collected `ExplainRow` into `EXPLAIN`'s classic 12-column
 /// resultset — `id` ascending, `None -> NULL` in every `option` cell the
@@ -2081,7 +2058,11 @@ let rec private explainStatement (store: Store) (registry: Registry) (dbName: st
     match stmt with
     | Select select ->
         let id = nextId ()
-        let selectType = if containsSubqueryExpr (select.Where |> Option.defaultValue (Lit(VInt 1L))) || (select.Projections |> List.map fst |> List.exists containsSubqueryExpr) || (select.Having |> Option.map containsSubqueryExpr |> Option.defaultValue false) || (select.From |> Option.map (function FromSubquery _ -> true | _ -> false) |> Option.defaultValue false) then "PRIMARY" else "SIMPLE"
+
+        let selectType =
+            let isDerived = match select.From with Some(FromSubquery _) -> true | _ -> false
+            if (selectSubqueryExprs select |> List.exists containsSubqueryExpr) || isDerived then "PRIMARY" else "SIMPLE"
+
         finish (checkSelect select |> Result.bind (fun () -> explainSelectBlock store dbName nextId acc id selectType select))
     | Union(first, rest, _, _, _) ->
         let id1 = nextId ()
@@ -2336,10 +2317,7 @@ let execute (store: Store) (registry: Registry) (dbName: string) (lastInsertId: 
 
                 let ctxFor = contextFactory store registry dbName columnIndex qualifiers None
 
-                let check row =
-                    match updateStmt.Where with
-                    | None -> Ok true
-                    | Some expr -> evalExpr { ctxFor row with Clause = WhereClause } expr |> Result.map (fun v -> truthy v = Some true)
+                let check = whereMatches ctxFor updateStmt.Where
 
                 let checkAssignments row =
                     indexedAssignments |> traverse (fun (_, expr) -> evalExpr (ctxFor row) expr)
@@ -2413,10 +2391,7 @@ let execute (store: Store) (registry: Registry) (dbName: string) (lastInsertId: 
                 match updateStmt.Assignments |> traverse resolveAssignment with
                 | Error(code, message) -> lastInsertId, Err(code, message)
                 | Ok resolvedAssignments ->
-                    let check flat =
-                        match updateStmt.Where with
-                        | None -> Ok true
-                        | Some expr -> evalExpr { ctxFor flat with Clause = WhereClause } expr |> Result.map (fun v -> truthy v = Some true)
+                    let check = whereMatches ctxFor updateStmt.Where
 
                     // Two aliases resolving to the same physical table (a
                     // self-join) must share one claim/pending bucket, keyed
@@ -2552,10 +2527,7 @@ let execute (store: Store) (registry: Registry) (dbName: string) (lastInsertId: 
 
             let ctxFor = contextFactory store registry dbName columnIndex (singleQualifier tableAlias columns) None
 
-            let check row =
-                match deleteStmt.Where with
-                | None -> Ok true
-                | Some expr -> evalExpr { ctxFor row with Clause = WhereClause } expr |> Result.map (fun v -> truthy v = Some true)
+            let check = whereMatches ctxFor deleteStmt.Where
 
             match check (probeRow columns) with
             | Error(code, message) -> lastInsertId, Err(code, message)
@@ -2594,10 +2566,7 @@ let execute (store: Store) (registry: Registry) (dbName: string) (lastInsertId: 
             with
             | Error(code, message) -> lastInsertId, Err(code, message)
             | Ok targetIndices ->
-                let check flat =
-                    match deleteStmt.Where with
-                    | None -> Ok true
-                    | Some expr -> evalExpr { ctxFor flat with Clause = WhereClause } expr |> Result.map (fun v -> truthy v = Some true)
+                let check = whereMatches ctxFor deleteStmt.Where
 
                 let claimedByTarget = targetIndices |> List.map (fun i -> i, System.Collections.Generic.HashSet<Value[]>(HashIdentity.Reference)) |> Map.ofList
 
