@@ -308,5 +308,5 @@ type Statement =
     /// branch's own (unused) `SelectStmt.OrderBy`/`Limit`.
     | Union of first: SelectStmt * rest: (bool * SelectStmt) list * orderBy: OrderKey list * limit: int option * offset: int option
     | Update of table: string * assignments: (string * Expr) list * where: Expr option
-    | Delete of table: string * where: Expr option
+    | Delete of table: string * where: Expr option * limit: int option
     | Truncate of table: string

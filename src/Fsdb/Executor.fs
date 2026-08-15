@@ -1639,7 +1639,7 @@ let execute (store: Store) (registry: Registry) (dbName: string) (lastInsertId: 
                     | Ok affected -> lastInsertId, Affected(uint64 affected)
                     | Error e -> lastInsertId, storageErr e
 
-    | Delete(table, whereExpr) ->
+    | Delete(table, whereExpr, limit) ->
         let db, table = splitQualified dbName table
 
         match scan store db table with
@@ -1664,7 +1664,22 @@ let execute (store: Store) (registry: Registry) (dbName: string) (lastInsertId: 
             match check (probeRow columns) with
             | Error(code, message) -> lastInsertId, Err(code, message)
             | Ok _ ->
-                let predicate row = check row |> Result.mapError ExpressionError
+                // `LIMIT n` caps how many *matching* rows get deleted —
+                // MySQL's own `DELETE ... LIMIT` (with no `ORDER BY`, which
+                // this grammar doesn't accept here anyway) picks an
+                // unspecified subset, so stopping at the first `n` matches
+                // in scan order is a legal choice of "unspecified" too.
+                let remaining = ref (limit |> Option.defaultValue System.Int32.MaxValue)
+
+                let predicate row =
+                    check row
+                    |> Result.mapError ExpressionError
+                    |> Result.map (fun isMatch ->
+                        if isMatch && remaining.Value > 0 then
+                            remaining.Value <- remaining.Value - 1
+                            true
+                        else
+                            false)
 
                 match deleteRows store db table predicate with
                 | Ok affected -> lastInsertId, Affected(uint64 affected)

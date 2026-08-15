@@ -1026,9 +1026,15 @@ let private updateStmt: Parser<Statement, unit> =
      .>> opt limitClause)
     |>> fun ((table, assignments), where) -> Update(table, assignments, where)
 
+/// `DELETE FROM t [WHERE ...] [LIMIT n]` — the `LIMIT` (no `OFFSET`, unlike
+/// a `SELECT`'s — MySQL's `DELETE ... LIMIT` doesn't accept one) is a
+/// batch-deletion staple (a reporting/cleanup job capping how many stale
+/// rows one run removes).
 let private deleteStmt: Parser<Statement, unit> =
-    (keyword "DELETE" >>. keyword "FROM" >>. qualifiedTableName .>>. opt (keyword "WHERE" >>. expr))
-    |>> fun (table, where) -> Delete(table, where)
+    (keyword "DELETE" >>. keyword "FROM" >>. qualifiedTableName
+     .>>. opt (keyword "WHERE" >>. expr)
+     .>>. opt (keyword "LIMIT" >>. limitTok))
+    |>> fun ((table, where), limit) -> Delete(table, where, limit)
 
 /// `CREATE TABLE` vs. `CREATE INDEX` and `DROP TABLE` vs. `DROP INDEX` share
 /// a leading keyword before diverging, so those four need `attempt` to

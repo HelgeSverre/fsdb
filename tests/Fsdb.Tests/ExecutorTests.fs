@@ -180,7 +180,24 @@ let tests =
 
                     match runDefault store "SELECT name FROM users" with
                     | ResultSet(_, [ [ Some "alice" ] ]) -> ()
-                    | other -> failtestf "expected only alice left, got %A" other ]
+                    | other -> failtestf "expected only alice left, got %A" other
+
+                testCase "DELETE ... LIMIT n caps how many matching rows are removed"
+                <| fun _ ->
+                    // Regression: a bare `DELETE FROM t WHERE ... LIMIT n`
+                    // (a batch-cleanup-job staple, capping how many stale
+                    // rows one run removes) was a clean 1064 syntax error.
+                    let store = newStore ()
+                    runDefault store "CREATE TABLE t (n INT)" |> ignore
+                    runDefault store "INSERT INTO t VALUES (1), (2), (3), (4)" |> ignore
+
+                    match runDefault store "DELETE FROM t WHERE n >= 2 LIMIT 2" with
+                    | Affected 2UL -> ()
+                    | other -> failtestf "expected exactly 2 rows deleted, got %A" other
+
+                    match runDefault store "SELECT COUNT(*) AS c FROM t" with
+                    | ResultSet([ "c" ], [ [ Some "2" ] ]) -> ()
+                    | other -> failtestf "expected 2 rows left (4 - 2 deleted), got %A" other ]
 
           testList
               "functions"

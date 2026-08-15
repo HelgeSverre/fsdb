@@ -731,7 +731,7 @@ let tests =
                 <| fun _ -> Expect.equal (parseOk "TRUNCATE t") (Truncate "t") "truncate"
 
                 testCase "DELETE FROM db.t qualified table name"
-                <| fun _ -> Expect.equal (parseOk "DELETE FROM app.t") (Delete("app.t", None)) "qualified delete target" ]
+                <| fun _ -> Expect.equal (parseOk "DELETE FROM app.t") (Delete("app.t", None, None)) "qualified delete target" ]
 
           testList
               "DATABASE"
@@ -872,11 +872,18 @@ let tests =
                 <| fun _ ->
                     Expect.equal
                         (parseOk "DELETE FROM t WHERE id = 5")
-                        (Delete("t", Some(BinOp(Eq, col "id", Lit(VInt 5L)))))
+                        (Delete("t", Some(BinOp(Eq, col "id", Lit(VInt 5L))), None))
                         "delete"
 
                 testCase "DELETE FROM t without WHERE"
-                <| fun _ -> Expect.equal (parseOk "DELETE FROM t") (Delete("t", None)) "delete without where"
+                <| fun _ -> Expect.equal (parseOk "DELETE FROM t") (Delete("t", None, None)) "delete without where"
+
+                testCase "DELETE FROM t WHERE ... LIMIT n"
+                <| fun _ ->
+                    Expect.equal
+                        (parseOk "DELETE FROM t WHERE id = 5 LIMIT 100")
+                        (Delete("t", Some(BinOp(Eq, col "id", Lit(VInt 5L))), Some 100))
+                        "delete with limit"
 
                 testCase "UPDATE with an alias, ORDER BY, and LIMIT accepts and ignores all three"
                 <| fun _ ->
