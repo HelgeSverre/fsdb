@@ -37,4 +37,9 @@ todos, 787 assertions — parity with the sqlite baseline)
 
 ## M6 — Extensibility polish
 Public `registerScalar` / `registerAggregate` API, docs, examples.
-**Gate:** README example runs as written. Status: ☐
+**Gate:** README example runs as written. Status: ✅ (`Fsdb.Db` embedding
+facade — `Db.create`/`registerScalar`/`registerAggregate`/`listen`; the
+README's compilable example builds against `Fsdb.dll` as written, and
+`tests/Fsdb.Tests/IntegrationTests.fs`'s "Db.registerScalar/registerAggregate
+are queryable over the wire" test proves SLUGIFY/MEDIAN work over a real
+MySqlConnector connection)
