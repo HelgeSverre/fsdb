@@ -70,6 +70,21 @@ against fsdb at exact parity with its sqlite baseline (287 passed, 15
 skipped, 2 todos, 787 assertions on both sides). See [ROADMAP.md](ROADMAP.md)
 for the milestone-by-milestone plan and acceptance gates.
 
+## Benchmarking
+
+`benchmarks/Fsdb.Benchmarks` runs fsdb head-to-head against a native MySQL
+8.4, same schema, same seeded data, same queries, via BenchmarkDotNet.
+
+```sh
+just bench        # full suite, ~10 min, results -> benchmarks/results/<git-sha>.md
+just bench-quick  # ShortRun job for fast local iteration, no results file
+```
+
+Both servers run ad hoc (no brew services) and are torn down afterwards.
+fsdb optimizes for readable, idiomatic F# over raw speed, so expect MySQL to
+win most of these — the numbers are here to find and track the hotspots,
+not to chase parity.
+
 ## License
 
 MIT
