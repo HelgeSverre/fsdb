@@ -5,6 +5,7 @@ open Expecto
 open Fsdb.Packet
 open Fsdb.Protocol
 open Fsdb.Value
+open Fsdb.Ast
 open Fsdb.Session
 open Fsdb.Executor
 open Fsdb.QueryHandler
@@ -503,6 +504,22 @@ let preparedStatementTests =
           testCase "valueToSqlLiteral escapes single quotes and backslashes in strings"
           <| fun _ ->
               Expect.equal (valueToSqlLiteral (VString "O'Brien\\")) "'O\\'Brien\\\\'" "escaped literal"
+
+          testCase "valueToSqlLiteral escapes CR/LF so a bound param round-trips through re-parsing"
+          <| fun _ ->
+              // Regression: a raw CR spliced into the SQL text gets silently
+              // normalized to LF by FParsec's CharStream on re-parse (it
+              // treats bare \r/\r\n as line endings) unless the literal
+              // escapes it, corrupting any CRLF value a prepared statement
+              // substitutes in — e.g. an HTML textarea's body.
+              let original = "a\r\nb\rc"
+              let literal = valueToSqlLiteral (VString original)
+              Expect.stringContains literal "\\r" "CR is escaped in the literal"
+
+              match Fsdb.Parser.parse (sprintf "SELECT %s AS x" literal) with
+              | Result.Ok(Select { Projections = [ Lit(VString roundtripped), _ ] }) ->
+                  Expect.equal roundtripped original "CR/LF survive the literal round-trip"
+              | other -> failtestf "expected a parsed SELECT literal, got %A" other
 
           testCase "valueToSqlLiteral renders NULL for VNull and a plain digit string for VInt"
           <| fun _ ->

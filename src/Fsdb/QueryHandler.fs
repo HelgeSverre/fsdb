@@ -117,9 +117,15 @@ let substitutePlaceholders (sql: string) (literals: string list) : string =
 /// Renders a bound parameter value as a SQL literal safe to splice into the
 /// stored statement text — the string-escaping mirrors MySQL's default
 /// (`NO_BACKSLASH_ESCAPES` off) rules: backslash and single quote both
-/// escape with a leading backslash.
+/// escape with a leading backslash. CR/LF are escaped too (`\r`/`\n`), not
+/// left as raw bytes — `Parser.quotedStringChar` already round-trips those
+/// two escapes back to CR/LF, but a raw CR spliced into the SQL text gets
+/// silently normalized away by FParsec's CharStream on re-parse (it treats
+/// bare `\r`/`\r\n` as line endings), corrupting any multi-line value
+/// (e.g. an HTML textarea's CRLF body) on the way through a prepared
+/// statement.
 let private escapeSqlString (s: string) : string =
-    s.Replace("\\", "\\\\").Replace("'", "\\'")
+    s.Replace("\\", "\\\\").Replace("'", "\\'").Replace("\r", "\\r").Replace("\n", "\\n")
 
 let valueToSqlLiteral (v: Value) : string =
     match v with
