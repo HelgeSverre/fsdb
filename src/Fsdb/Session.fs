@@ -58,17 +58,22 @@ type PreparedStmt =
 /// `Catalog`, its own lock — seeded from the shared store's catalog at
 /// BEGIN time; every statement inside the transaction reads/writes this
 /// snapshot instead of the shared store, so concurrent connections see
-/// nothing from it until COMMIT copies `Snapshot.Catalog` back over the
-/// shared store's. That's real repeatable-read isolation for the reading
-/// side. ponytail: COMMIT is last-writer-wins on the *whole* catalog, not a
-/// per-table/per-row merge — a concurrent write against a different table
-/// by another connection during the transaction's lifetime is silently
-/// lost when this transaction commits. Cheap because `Store`'s fields are
-/// already public and mutable (no hook needed in Storage.fs); a real MVCC
-/// engine with write-write conflict detection is the upgrade path if
-/// concurrent-transaction data loss ever bites.
+/// nothing from it until COMMIT merges `Snapshot.Catalog` back into the
+/// shared store's (see `QueryHandler.commitSession`). That's real
+/// repeatable-read isolation for the reading side. `BaseCatalog` is that
+/// same seed, kept alongside `Snapshot` untouched by any write this
+/// transaction makes — COMMIT diffs `Snapshot.Catalog` against it,
+/// table-by-table, to tell "this transaction wrote table X" apart from
+/// "table X just happened to be in the snapshot", so a concurrent write to
+/// an *untouched* table by another connection survives the commit instead
+/// of being silently overwritten by a stale copy of it. ponytail: last-
+/// writer-wins per table, not per row — a concurrent write to the *same*
+/// table this transaction also wrote is still overwritten by whichever
+/// commits second; real MVCC write-write conflict detection is the upgrade
+/// path if that ever bites.
 type Transaction =
     { Snapshot: Store
+      BaseCatalog: Catalog
       Savepoints: Map<string, Catalog> }
 
 type Session =

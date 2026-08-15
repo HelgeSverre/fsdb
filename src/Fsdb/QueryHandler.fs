@@ -545,13 +545,62 @@ let private setAutocommit =
         RegexOptions.IgnoreCase
     )
 
-/// Commits the open transaction (if any) by copying its snapshot catalog
-/// back over the shared store's — a no-op, matching real MySQL, if there
-/// isn't one open.
+/// Three-way merges a transaction's snapshot back into a catalog: for every
+/// (database, table) that appears in any of the three, a table this
+/// transaction actually wrote — its snapshot copy differs from
+/// `baseCatalog`'s, the seed taken at BEGIN time — wins; a table it dropped
+/// (present at BEGIN, gone from the snapshot) is removed; a table it never
+/// touched is left exactly as `liveCatalog` (the shared store's catalog
+/// *right now*, not as of BEGIN) already has it, so a concurrent write to
+/// that table by another connection during the transaction's lifetime
+/// survives instead of being silently discarded by a stale copy of it. Same
+/// three-way logic one level up for whole databases the transaction
+/// created/dropped.
+let private mergeCatalogs (baseCatalog: Catalog) (txCatalog: Catalog) (liveCatalog: Catalog) : Catalog =
+    let keysOf (m: Map<string, 'a>) = m |> Map.toList |> List.map fst |> Set.ofList
+
+    let dbKeys = Set.unionMany [ keysOf baseCatalog; keysOf txCatalog; keysOf liveCatalog ]
+
+    dbKeys
+    |> Set.fold
+        (fun acc dbName ->
+            match Map.tryFind dbName baseCatalog, Map.tryFind dbName txCatalog with
+            | Some _, None -> Map.remove dbName acc // the tx dropped this database
+            | None, Some txDb -> Map.add dbName txDb acc // the tx created this database
+            | None, None -> acc // the tx never saw this database; leave the live entry alone
+            | Some baseDb, Some txDb ->
+                // Existed both before and after the tx (whether or not the
+                // tx touched any table in it) — merge table-by-table
+                // against the *live* catalog's current version of the
+                // database, not the tx's, so a concurrent write to an
+                // untouched table survives.
+                let liveDb = Map.tryFind dbName liveCatalog |> Option.defaultValue Map.empty
+                let tableKeys = Set.unionMany [ keysOf baseDb; keysOf txDb; keysOf liveDb ]
+
+                let mergedDb =
+                    tableKeys
+                    |> Set.fold
+                        (fun tacc tableName ->
+                            match Map.tryFind tableName baseDb, Map.tryFind tableName txDb with
+                            | Some _, None -> Map.remove tableName tacc // dropped by the tx
+                            | None, Some t -> Map.add tableName t tacc // created by the tx
+                            | Some baseT, Some txT when baseT <> txT -> Map.add tableName txT tacc // modified by the tx
+                            | _ -> tacc // untouched by the tx — keep whatever's live
+                        )
+                        liveDb
+
+                Map.add dbName mergedDb acc)
+        liveCatalog
+
+/// Commits the open transaction (if any) by merging its snapshot catalog
+/// back into the shared store's (see `mergeCatalogs`) — a no-op, matching
+/// real MySQL, if there isn't one open.
 let private commitSession (session: Session) : Session =
     match session.Tx with
     | Some tx ->
-        lock session.Store.Lock (fun () -> session.Store.Catalog <- tx.Snapshot.Catalog)
+        lock session.Store.Lock (fun () ->
+            session.Store.Catalog <- mergeCatalogs tx.BaseCatalog tx.Snapshot.Catalog session.Store.Catalog)
+
         { session with Tx = None }
     | None -> session
 
@@ -565,8 +614,11 @@ let private rollbackSession (session: Session) : Session = { session with Tx = N
 /// whatever the first transaction had done.
 let private beginTransaction (session: Session) : Session =
     let session = commitSession session
-    let snapshot: Store = { Catalog = session.Store.Catalog; Lock = obj () }
-    { session with Tx = Some { Snapshot = snapshot; Savepoints = Map.empty } }
+    let baseCatalog = session.Store.Catalog
+    let snapshot: Store = { Catalog = baseCatalog; Lock = obj () }
+
+    { session with
+        Tx = Some { Snapshot = snapshot; BaseCatalog = baseCatalog; Savepoints = Map.empty } }
 
 let private savepointNotFound (name: string) : QueryResult =
     Err(1305, sprintf "SAVEPOINT %s does not exist" name)

@@ -653,7 +653,39 @@ let transactionTests =
 
               match handle session "RELEASE SAVEPOINT nope" |> snd with
               | Err(1305, _) -> ()
-              | result -> failtestf "expected a 1305 error, got %A" result ]
+              | result -> failtestf "expected a 1305 error, got %A" result
+
+          testCase "COMMIT doesn't discard a concurrent write another connection made to a different table"
+          <| fun _ ->
+              // Regression: commitSession used to copy the whole transaction
+              // snapshot's catalog back over the shared store's, so any
+              // write another connection made to *any* table (not just the
+              // one row this transaction touched) during the transaction's
+              // lifetime was silently lost.
+              let store = Fsdb.Storage.create ()
+              let session = create 1 store
+              let session, _ = handle session "CREATE TABLE tx_m (id INT)"
+              let session, _ = handle session "CREATE TABLE tx_other (id INT)"
+              let session, _ = handle session "BEGIN"
+              let session, _ = handle session "INSERT INTO tx_m VALUES (1)"
+
+              let other = create 2 store
+              let other, otherResult = handle other "INSERT INTO tx_other VALUES (99)"
+
+              match otherResult with
+              | Affected 1UL -> ()
+              | result -> failtestf "expected the concurrent insert into a different table to succeed, got %A" result
+
+              let session, _ = handle session "COMMIT"
+              ignore session
+
+              match handle other "SELECT id FROM tx_other" |> snd with
+              | ResultSet(_, [ [ Some "99" ] ]) -> ()
+              | result -> failtestf "expected the concurrent write to survive the commit, got %A" result
+
+              match handle other "SELECT id FROM tx_m" |> snd with
+              | ResultSet(_, [ [ Some "1" ] ]) -> ()
+              | result -> failtestf "expected the transaction's own write to also be there, got %A" result ]
 
 /// Reads every packet off a stream until clean EOF.
 let private readAllPackets (stream: IO.Stream) : Async<Packet list> =
