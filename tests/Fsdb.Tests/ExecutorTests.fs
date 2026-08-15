@@ -657,4 +657,43 @@ let tests =
 
                     match runDefault store "SELECT COUNT(*) AS c, COUNT(n) AS cn, SUM(n) AS s, AVG(n) AS a FROM t" with
                     | ResultSet([ "c"; "cn"; "s"; "a" ], [ [ Some "3"; Some "2"; Some "30"; Some "15" ] ]) -> ()
-                    | other -> failtestf "expected NULLs to drop out of COUNT(n)/SUM/AVG, got %A" other ] ]
+                    | other -> failtestf "expected NULLs to drop out of COUNT(n)/SUM/AVG, got %A" other ]
+
+          testList
+              "table-qualified columns are checked against the FROM's alias-or-table, not silently accepted from anywhere"
+              [ testCase "a qualifier that doesn't match the table in scope is a 1054 unknown-column error, not a resultset"
+                <| fun _ ->
+                    // Regression: QualifiedCol used to throw its qualifier
+                    // away entirely (`QualifiedCol(_, col) -> eval (Col
+                    // col)`), so `SELECT p.id FROM u` silently resolved `id`
+                    // against `u` instead of erroring on the unknown `p`.
+                    let store = newStore ()
+                    runDefault store "CREATE TABLE u (id INT)" |> ignore
+                    runDefault store "INSERT INTO u VALUES (1)" |> ignore
+
+                    match runDefault store "SELECT p.id FROM u" with
+                    | Err(1054, _) -> ()
+                    | other -> failtestf "expected a 1054 unknown-column error, got %A" other
+
+                testCase "a qualifier matching the table's alias resolves correctly"
+                <| fun _ ->
+                    let store = newStore ()
+                    runDefault store "CREATE TABLE u (id INT)" |> ignore
+                    runDefault store "INSERT INTO u VALUES (1)" |> ignore
+
+                    match runDefault store "SELECT x.id FROM u AS x" with
+                    | ResultSet([ "id" ], [ [ Some "1" ] ]) -> ()
+                    | other -> failtestf "expected the alias-qualified column to resolve, got %A" other
+
+                testCase "a qualifier matching the bare table name still resolves once it's aliased away"
+                <| fun _ ->
+                    // Once a table has an alias, real MySQL only accepts the
+                    // alias as the qualifier, not the original table name —
+                    // `u.id` must be unknown the same way `p.id` is.
+                    let store = newStore ()
+                    runDefault store "CREATE TABLE u (id INT)" |> ignore
+                    runDefault store "INSERT INTO u VALUES (1)" |> ignore
+
+                    match runDefault store "SELECT u.id FROM u AS x" with
+                    | Err(1054, _) -> ()
+                    | other -> failtestf "expected the pre-alias table name to no longer resolve, got %A" other ] ]

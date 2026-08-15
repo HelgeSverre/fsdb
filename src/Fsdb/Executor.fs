@@ -159,6 +159,12 @@ let private likeOp (subject: Value) (pattern: Value) : Value =
 type private EvalContext =
     { Registry: Registry
       ColumnIndex: Map<string, int>
+      /// The lowercased alias-or-table-name a `QualifiedCol` must match to
+      /// resolve — `None` when there's no table in scope at all (e.g. a
+      /// literal `INSERT ... VALUES` row). Single-table only for now (see
+      /// `QualifiedCol`'s match in `evalExpr`); grows into a set once JOINs
+      /// bring more than one source into scope.
+      Qualifier: string option
       Row: Value[]
       Store: Store
       DbName: string }
@@ -178,7 +184,10 @@ let rec private evalExpr (ctx: EvalContext) (expr: Expr) : Result<Value, EvalErr
         match Map.tryFind (name.ToLowerInvariant()) ctx.ColumnIndex with
         | Some i -> Ok ctx.Row.[i]
         | None -> Error(unknownColumn name)
-    | QualifiedCol(_, col) -> eval (Col col)
+    | QualifiedCol(table, col) ->
+        match ctx.Qualifier with
+        | Some q when System.String.Equals(q, table, System.StringComparison.OrdinalIgnoreCase) -> eval (Col col)
+        | _ -> Error(unknownColumn (sprintf "%s.%s" table col))
     | Not e -> eval e |> Result.map (fun v -> truthy v |> Option.map (not >> boolToValue) |> Option.defaultValue VNull)
     | IsNull e -> eval e |> Result.map (function VNull -> VInt 1L | _ -> VInt 0L)
     | IsNotNull e -> eval e |> Result.map (function VNull -> VInt 0L | _ -> VInt 1L)
@@ -302,6 +311,12 @@ and private runSelectStmt (store: Store) (registry: Registry) (dbName: string) (
             | Error e -> storageErr e
             | Ok(columns, rows) -> runSelect store registry dbName columns (List.ofSeq rows) select
 
+/// The lowercased alias-or-table-name a `QualifiedCol` in this `select`'s
+/// scope must match — `None` for a `FROM`-less `SELECT`. Single-table only,
+/// same limit as `EvalContext.Qualifier`.
+and private qualifierOf (select: SelectStmt) : string option =
+    select.From |> Option.map (fun t -> (t.Alias |> Option.defaultValue t.Table).ToLowerInvariant())
+
 and private applyLimitOffset (limit: int option) (offset: int option) (rows: 'a list) : 'a list =
     let afterOffset =
         match offset with
@@ -371,10 +386,12 @@ and private runAggregateSelect
     (select: SelectStmt)
     : QueryResult =
     let columnIndex = columnIndexOf columns
+    let qualifier = qualifierOf select
 
     let ctxFor (row: Value[]) : EvalContext =
         { Registry = registry
           ColumnIndex = columnIndex
+          Qualifier = qualifier
           Row = row
           Store = store
           DbName = dbName }
@@ -432,10 +449,12 @@ and private runSelect
     else
 
     let columnIndex = columnIndexOf columns
+    let qualifier = qualifierOf select
 
     let ctxFor (row: Value[]) : EvalContext =
         { Registry = registry
           ColumnIndex = columnIndex
+          Qualifier = qualifier
           Row = row
           Store = store
           DbName = dbName }
@@ -526,12 +545,14 @@ let private applyAssignments
     (registry: Registry)
     (dbName: string)
     (columnIndex: Map<string, int>)
+    (qualifier: string option)
     (assignments: (int * Expr) list)
     (row: Value[])
     : Result<Value[], StorageError> =
     let ctx =
         { Registry = registry
           ColumnIndex = columnIndex
+          Qualifier = qualifier
           Row = row
           Store = store
           DbName = dbName }
@@ -671,6 +692,7 @@ let execute (store: Store) (registry: Registry) (dbName: string) (lastInsertId: 
         let literalCtx =
             { Registry = registry
               ColumnIndex = Map.empty
+              Qualifier = None
               Row = [||]
               Store = store
               DbName = dbName }
@@ -695,6 +717,7 @@ let execute (store: Store) (registry: Registry) (dbName: string) (lastInsertId: 
                         let ctx =
                             { Registry = registry
                               ColumnIndex = columnIndex
+                              Qualifier = Some(table.ToLowerInvariant())
                               Row = existing
                               Store = store
                               DbName = dbName }
@@ -731,9 +754,12 @@ let execute (store: Store) (registry: Registry) (dbName: string) (lastInsertId: 
             match assignments |> traverseList (fun (name, expr) -> resolveColumn columns name |> Result.map (fun i -> i, expr)) with
             | Error e -> lastInsertId, storageErr e
             | Ok indexedAssignments ->
+                let qualifier = Some(table.ToLowerInvariant())
+
                 let ctxFor row =
                     { Registry = registry
                       ColumnIndex = columnIndex
+                      Qualifier = qualifier
                       Row = row
                       Store = store
                       DbName = dbName }
@@ -755,7 +781,7 @@ let execute (store: Store) (registry: Registry) (dbName: string) (lastInsertId: 
                 | Error(code, message) -> lastInsertId, Err(code, message)
                 | Ok _ ->
                     let predicate row = check row |> Result.mapError ExpressionError
-                    let updater row = applyAssignments store registry dbName columnIndex indexedAssignments row
+                    let updater row = applyAssignments store registry dbName columnIndex qualifier indexedAssignments row
 
                     match updateRows store db table predicate updater with
                     | Ok affected -> lastInsertId, Affected(uint64 affected)
@@ -772,6 +798,7 @@ let execute (store: Store) (registry: Registry) (dbName: string) (lastInsertId: 
             let ctxFor row =
                 { Registry = registry
                   ColumnIndex = columnIndex
+                  Qualifier = Some(table.ToLowerInvariant())
                   Row = row
                   Store = store
                   DbName = dbName }
