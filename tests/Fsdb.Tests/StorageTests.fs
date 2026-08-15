@@ -1234,4 +1234,20 @@ let tests =
                               [ VInt 4L; VInt 3L ] ]
                     with
                     | Ok(_, affected) -> Expect.equal affected 4 "every row's parent was already inserted earlier in the same statement"
-                    | Error e -> failtestf "expected Ok, got %A" e ] ]
+                    | Error e -> failtestf "expected Ok, got %A" e
+
+                testCase "UPDATE of a referenced parent key with an existing child row returns error 1451"
+                <| fun _ ->
+                    let store = withDeptEmployees None
+
+                    insertRows store defaultDatabase "employees" None [ [ VInt 1L; VInt 1L; VString "alice" ] ]
+                    |> ignore
+
+                    let updater (row: Value[]) = Ok [| VInt 99L; row.[1] |]
+
+                    match updateRows store defaultDatabase "departments" (fun _ -> Ok true) updater with
+                    | Error(ForeignKeyRestrict "fk_dept") ->
+                        match scan store defaultDatabase "departments" with
+                        | Ok(_, rows) -> Expect.equal (rows |> Seq.map (fun r -> r.[0]) |> List.ofSeq) [ VInt 1L ] "the parent row is untouched"
+                        | Error e -> failtestf "expected Ok, got %A" e
+                    | other -> failtestf "expected ForeignKeyRestrict, got %A" other ] ]

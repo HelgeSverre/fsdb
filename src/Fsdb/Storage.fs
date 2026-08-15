@@ -770,6 +770,42 @@ let private referencingForeignKeys (db: Database) (parentKey: string) : (string 
         |> List.filter (fun fk -> normalizeTableName fk.RefTable = parentKey)
         |> List.map (fun fk -> childKey, fk))
 
+/// Whether rewriting `tableKey`'s `oldRow` into `newRow` would orphan a
+/// child row elsewhere in `db` — `updateRows`'s parent-side counterpart to
+/// `checkFkParents`'s child-side check, using the same `referencingForeignKeys`
+/// `cascadeDelete` uses for `DELETE`. Only relevant when the update actually
+/// changes a column some other table's FK references at all: most `UPDATE`s
+/// never touch the referenced key, so this is a no-op the moment `oldKey =
+/// newKey`. Always RESTRICT (error 1451) rather than dispatching on the FK's
+/// `OnUpdate` clause — this engine doesn't move/blank child rows on UPDATE
+/// (unlike `cascadeDelete`'s DELETE-side CASCADE/SET NULL), so refusing the
+/// update is the safe default even for a `ON UPDATE CASCADE` FK; upgrade to
+/// real cascading UPDATE if a migration ever depends on it.
+let private checkNotOrphaning (db: Database) (tableKey: string) (parentColumns: ColumnDef list) (oldRow: Value[]) (newRow: Value[]) : Result<unit, StorageError> =
+    let checkOne (childKey: string, fk: ForeignKeyDef) =
+        match fk.RefColumns |> traverse (resolveColumn parentColumns) with
+        | Error _ -> Ok() // stale FK metadata — see `checkFkParents`'s note.
+        | Ok refIdxs ->
+            let oldKey = refIdxs |> List.map (fun i -> oldRow.[i])
+            let newKey = refIdxs |> List.map (fun i -> newRow.[i])
+
+            if oldKey = newKey || oldKey |> List.exists ((=) VNull) then
+                Ok()
+            else
+                match Map.tryFind childKey db with
+                | None -> Ok()
+                | Some childTbl ->
+                    match fk.Columns |> traverse (resolveColumn childTbl.Columns) with
+                    | Error _ -> Ok()
+                    | Ok childIdxs ->
+                        let stillReferenced =
+                            childTbl.Rows
+                            |> List.exists (fun row -> List.forall2 (fun i v -> compare row.[i] v = 0) childIdxs oldKey)
+
+                        if stillReferenced then Error(ForeignKeyRestrict fk.Name) else Ok()
+
+    referencingForeignKeys db tableKey |> traverse checkOne |> Result.map ignore
+
 /// Deletes `toDelete` (rows already known to belong to `tableKey`, e.g. from
 /// `deleteRows`'s WHERE match) from `db`, applying every other table's
 /// referencing foreign keys' `OnDelete` action first: `CASCADE` recurses
@@ -967,6 +1003,7 @@ let updateRows
                                 | None ->
                                     if checkFks then
                                         checkFkParents db table.Columns table.ForeignKeys newRow
+                                        |> Result.bind (fun () -> checkNotOrphaning db key table.Columns row newRow)
                                         |> Result.map (fun () -> newRow)
                                     else
                                         Ok newRow)
