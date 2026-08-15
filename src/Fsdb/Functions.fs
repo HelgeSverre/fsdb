@@ -208,6 +208,12 @@ let private parseJsonPath (path: string) : JPath list option =
 
         if ok then Some(List.ofSeq segs) else None
 
+/// MySQL's negative-counts-from-the-end array index (`$[-1]` is the last
+/// element), bounds-checked against `a`'s actual length.
+let private normIndex (a: JsonArray) (idx: int) : int option =
+    let i = if idx < 0 then a.Count + idx else idx
+    if i >= 0 && i < a.Count then Some i else None
+
 /// Walks `node` along `segs`, returning every match (more than one only
 /// when a `JWildcard` segment fans out). A found JSON `null` is a valid
 /// match — represented by a `null` `JsonNode` reference in the list — so
@@ -227,8 +233,9 @@ let rec private navigateJson (node: JsonNode) (segs: JPath list) : JsonNode list
     | JIndex idx :: rest ->
         match node with
         | :? JsonArray as a ->
-            let i = if idx < 0 then a.Count + idx else idx
-            if i >= 0 && i < a.Count then navigateJson a.[i] rest else []
+            match normIndex a idx with
+            | Some i -> navigateJson a.[i] rest
+            | None -> []
         | _ -> []
 
 /// Renders a `JsonNode` the way MySQL's JSON printer does: a space after
@@ -416,47 +423,49 @@ type private JsonWriteMode =
     | JInsert
     | JReplace
 
-let rec private setJsonPath (root: JsonNode) (segs: JPath list) (value: JsonNode) (mode: JsonWriteMode) : unit =
+/// Walks to the container holding `segs`' final path segment and applies
+/// `act` to it — the shared spine of `setJsonPath`/`removeJsonPath`, so a
+/// fix to how either one traverses a *nested* path (as opposed to what it
+/// does once it gets there) automatically applies to both.
+let rec private atLeaf (root: JsonNode) (segs: JPath list) (act: JsonNode -> JPath -> unit) : unit =
     match segs with
-    | [ JKey k ] ->
-        match root with
-        | :? JsonObject as o ->
-            match mode, o.ContainsKey k with
-            | JInsert, true
-            | JReplace, false -> ()
-            | _ -> o.[k] <- value
-        | _ -> ()
-    | [ JIndex idx ] ->
-        match root with
-        | :? JsonArray as a ->
-            let i = if idx < 0 then a.Count + idx else idx
-
-            if i >= 0 && i < a.Count then
-                match mode with
-                | JInsert -> ()
-                | _ -> a.[i] <- value
-            elif i = a.Count then
-                match mode with
-                | JReplace -> ()
-                | _ -> a.Add value
-        | _ -> ()
+    | [ leaf ] -> act root leaf
     | JKey k :: rest ->
         match root with
-        | :? JsonObject as o ->
-            if o.ContainsKey k && not (isNull o.[k]) then
-                setJsonPath o.[k] rest value mode
+        | :? JsonObject as o when o.ContainsKey k && not (isNull o.[k]) -> atLeaf o.[k] rest act
         | _ -> ()
     | JIndex idx :: rest ->
         match root with
         | :? JsonArray as a ->
-            let i = if idx < 0 then a.Count + idx else idx
-
-            if i >= 0 && i < a.Count then
-                let child = a.[i]
-                if not (isNull child) then setJsonPath child rest value mode
+            match normIndex a idx with
+            | Some i when not (isNull a.[i]) -> atLeaf a.[i] rest act
+            | _ -> ()
         | _ -> ()
     | JWildcard :: _
     | [] -> ()
+
+let private setJsonPath (root: JsonNode) (segs: JPath list) (value: JsonNode) (mode: JsonWriteMode) : unit =
+    atLeaf root segs (fun parent leaf ->
+        match parent, leaf with
+        | (:? JsonObject as o), JKey k ->
+            match mode, o.ContainsKey k with
+            | JInsert, true
+            | JReplace, false -> ()
+            | _ -> o.[k] <- value
+        | (:? JsonArray as a), JIndex idx ->
+            match normIndex a idx with
+            | Some i ->
+                match mode with
+                | JInsert -> ()
+                | _ -> a.[i] <- value
+            | None ->
+                let i = if idx < 0 then a.Count + idx else idx
+
+                if i = a.Count then
+                    match mode with
+                    | JReplace -> ()
+                    | _ -> a.Add value
+        | _ -> ())
 
 /// Splits a flat `[path; value; path; value; ...]` arg list into pairs —
 /// `List.chunkBySize 2` would work too but leaves an unavoidable
@@ -486,35 +495,15 @@ let private jsonWriteFn (mode: JsonWriteMode) : Scalar =
             VJson(formatJsonNode root)
     | _ -> VNull
 
-let rec private removeJsonPath (root: JsonNode) (segs: JPath list) : unit =
-    match segs with
-    | [ JKey k ] ->
-        match root with
-        | :? JsonObject as o -> o.Remove k |> ignore
-        | _ -> ()
-    | [ JIndex idx ] ->
-        match root with
-        | :? JsonArray as a ->
-            let i = if idx < 0 then a.Count + idx else idx
-            if i >= 0 && i < a.Count then a.RemoveAt i
-        | _ -> ()
-    | JKey k :: rest ->
-        match root with
-        | :? JsonObject as o ->
-            if o.ContainsKey k && not (isNull o.[k]) then
-                removeJsonPath o.[k] rest
-        | _ -> ()
-    | JIndex idx :: rest ->
-        match root with
-        | :? JsonArray as a ->
-            let i = if idx < 0 then a.Count + idx else idx
-
-            if i >= 0 && i < a.Count then
-                let child = a.[i]
-                if not (isNull child) then removeJsonPath child rest
-        | _ -> ()
-    | JWildcard :: _
-    | [] -> ()
+let private removeJsonPath (root: JsonNode) (segs: JPath list) : unit =
+    atLeaf root segs (fun parent leaf ->
+        match parent, leaf with
+        | (:? JsonObject as o), JKey k -> o.Remove k |> ignore
+        | (:? JsonArray as a), JIndex idx ->
+            match normIndex a idx with
+            | Some i -> a.RemoveAt i
+            | None -> ()
+        | _ -> ())
 
 let private jsonRemoveFn: Scalar =
     function
