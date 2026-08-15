@@ -1,4 +1,7 @@
 <Solution>
+  <Folder Name="/benchmarks/">
+    <Project Path="benchmarks/Fsdb.Benchmarks/Fsdb.Benchmarks.fsproj" />
+  </Folder>
   <Folder Name="/src/">
     <Project Path="src/Fsdb/Fsdb.fsproj" />
   </Folder>
