@@ -358,5 +358,93 @@ let tests =
                       <| fun _ ->
                           Expect.equal (call "STR_TO_DATE" [ VString "2024-03-05"; VString "%Y-%m-%d" ]) (VDate(DateOnly(2024, 3, 5))) "str_to_date" ]
 
+                testList
+                    "Strings"
+                    [ testCase "SUBSTRING is 1-indexed and supports negative positions"
+                      <| fun _ ->
+                          Expect.equal (call "SUBSTRING" [ VString "Hello world"; VInt 7L ]) (VString "world") "positive pos"
+                          Expect.equal (call "SUBSTRING" [ VString "Hello world"; VInt 1L; VInt 5L ]) (VString "Hello") "with length"
+                          Expect.equal (call "SUBSTRING" [ VString "Hello"; VInt(-3L) ]) (VString "llo") "negative pos"
+
+                      testCase "LOCATE/INSTR/POSITION find a 1-indexed offset, or 0"
+                      <| fun _ ->
+                          Expect.equal (call "LOCATE" [ VString "lo"; VString "Hello" ]) (VInt 4L) "locate"
+                          Expect.equal (call "INSTR" [ VString "Hello"; VString "lo" ]) (VInt 4L) "instr"
+                          Expect.equal (call "POSITION" [ VString "z"; VString "Hello" ]) (VInt 0L) "not found"
+
+                      testCase "REPLACE substitutes every occurrence"
+                      <| fun _ -> Expect.equal (call "REPLACE" [ VString "a-b-c"; VString "-"; VString "+" ]) (VString "a+b+c") "replace"
+
+                      testCase "TRIM/LTRIM/RTRIM strip whitespace"
+                      <| fun _ ->
+                          Expect.equal (call "TRIM" [ VString "  hi  " ]) (VString "hi") "trim"
+                          Expect.equal (call "LTRIM" [ VString "  hi  " ]) (VString "hi  ") "ltrim"
+                          Expect.equal (call "RTRIM" [ VString "  hi  " ]) (VString "  hi") "rtrim"
+
+                      testCase "LPAD/RPAD pad to length with a repeating pad string"
+                      <| fun _ ->
+                          Expect.equal (call "LPAD" [ VString "5"; VInt 3L; VString "0" ]) (VString "005") "lpad"
+                          Expect.equal (call "RPAD" [ VString "5"; VInt 3L; VString "0" ]) (VString "500") "rpad"
+                          Expect.equal (call "LPAD" [ VString "12345"; VInt 3L; VString "0" ]) (VString "123") "lpad truncates"
+
+                      testCase "LEFT/RIGHT take from either end"
+                      <| fun _ ->
+                          Expect.equal (call "LEFT" [ VString "Hello"; VInt 3L ]) (VString "Hel") "left"
+                          Expect.equal (call "RIGHT" [ VString "Hello"; VInt 3L ]) (VString "llo") "right"
+
+                      testCase "REVERSE/REPEAT/SPACE build strings"
+                      <| fun _ ->
+                          Expect.equal (call "REVERSE" [ VString "abc" ]) (VString "cba") "reverse"
+                          Expect.equal (call "REPEAT" [ VString "ab"; VInt 3L ]) (VString "ababab") "repeat"
+                          Expect.equal (call "SPACE" [ VInt 3L ]) (VString "   ") "space"
+
+                      testCase "ASCII returns the first character's code, 0 for empty"
+                      <| fun _ ->
+                          Expect.equal (call "ASCII" [ VString "A" ]) (VInt 65L) "ascii"
+                          Expect.equal (call "ASCII" [ VString "" ]) (VInt 0L) "empty"
+
+                      testCase "HEX/UNHEX round-trip a string"
+                      <| fun _ ->
+                          Expect.equal (call "HEX" [ VString "AB" ]) (VString "4142") "hex"
+                          Expect.equal (call "UNHEX" [ VString "4142" ]) (VString "AB") "unhex"
+
+                      testCase "MD5/SHA1 produce lowercase hex digests of the known length"
+                      <| fun _ ->
+                          match call "MD5" [ VString "hello" ] with
+                          | VString s -> Expect.equal s.Length 32 "md5 length"
+                          | v -> failwithf "expected VString, got %A" v
+
+                          match call "SHA1" [ VString "hello" ] with
+                          | VString s -> Expect.equal s.Length 40 "sha1 length"
+                          | v -> failwithf "expected VString, got %A" v
+
+                      testCase "FORMAT adds thousands separators and fixes decimal places"
+                      <| fun _ -> Expect.equal (call "FORMAT" [ VDouble 1234.5; VInt 2L ]) (VString "1,234.50") "format"
+
+                      testCase "SUBSTRING_INDEX slices before/after the Nth delimiter"
+                      <| fun _ ->
+                          Expect.equal (call "SUBSTRING_INDEX" [ VString "a.b.c"; VString "."; VInt 2L ]) (VString "a.b") "positive count"
+                          Expect.equal (call "SUBSTRING_INDEX" [ VString "a.b.c"; VString "."; VInt(-2L) ]) (VString "b.c") "negative count"
+
+                      testCase "CONCAT_WS skips NULL arguments but a NULL separator nulls the result"
+                      <| fun _ ->
+                          Expect.equal (call "CONCAT_WS" [ VString ","; VString "a"; VNull; VString "b" ]) (VString "a,b") "skips null"
+                          Expect.equal (call "CONCAT_WS" [ VNull; VString "a"; VString "b" ]) VNull "null separator"
+
+                      testCase "ELT/FIELD/FIND_IN_SET are all 1-indexed, 0/NULL when not found"
+                      <| fun _ ->
+                          Expect.equal (call "ELT" [ VInt 2L; VString "a"; VString "b"; VString "c" ]) (VString "b") "elt"
+                          Expect.equal (call "FIELD" [ VString "b"; VString "a"; VString "b"; VString "c" ]) (VInt 2L) "field"
+                          Expect.equal (call "FIELD" [ VNull; VString "a"; VString "b" ]) (VInt 0L) "field(NULL, ...) is 0, not NULL"
+                          Expect.equal (call "FIND_IN_SET" [ VString "b"; VString "a,b,c" ]) (VInt 2L) "find_in_set"
+
+                      testCase "QUOTE wraps and escapes for a SQL literal"
+                      <| fun _ -> Expect.equal (call "QUOTE" [ VString "it's" ]) (VString "'it\\'s'") "quote"
+
+                      testCase "STRCMP returns -1/0/1"
+                      <| fun _ ->
+                          Expect.equal (call "STRCMP" [ VString "a"; VString "b" ]) (VInt(-1L)) "a < b"
+                          Expect.equal (call "STRCMP" [ VString "a"; VString "a" ]) (VInt 0L) "a = a" ]
+
               ]
         ]

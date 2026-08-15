@@ -903,6 +903,250 @@ let private strToDateFn: Scalar =
     | _ -> VNull
 
 // ---------------------------------------------------------------------------
+// Strings.
+// ---------------------------------------------------------------------------
+
+/// Shared by `SUBSTRING`/`SUBSTRING_INDEX`-adjacent helpers: MySQL's 1-based,
+/// negative-counts-from-the-end position rule, clamped into a valid 0-based
+/// start offset.
+let private resolveStart (len: int) (pos: int) : int option =
+    if pos > 0 then Some(min (pos - 1) len)
+    elif pos < 0 then Some(max 0 (len + pos))
+    else None
+
+let private substringFn: Scalar =
+    function
+    | [ s; posV ] when not (anyNull [ s; posV ]) ->
+        let str = req s
+
+        match resolveStart str.Length (int (toDouble posV)) with
+        | None -> VString ""
+        | Some start -> VString(str.Substring start)
+    | [ s; posV; lenV ] when not (anyNull [ s; posV; lenV ]) ->
+        let str = req s
+        let takeLen = int (toDouble lenV)
+
+        match resolveStart str.Length (int (toDouble posV)) with
+        | None -> VString ""
+        | Some start when takeLen <= 0 -> VString ""
+        | Some start -> VString(str.Substring(start, min takeLen (str.Length - start)))
+    | _ -> VNull
+
+let private locateAt (str: string) (sub: string) (startIdx: int) : Value =
+    if startIdx > str.Length || startIdx < 0 then
+        VInt 0L
+    else
+        VInt(int64 (str.IndexOf(sub, startIdx, StringComparison.OrdinalIgnoreCase) + 1))
+
+let private locateFn: Scalar =
+    function
+    | [ sub; str ] when not (anyNull [ sub; str ]) -> locateAt (req str) (req sub) 0
+    | [ sub; str; posV ] when not (anyNull [ sub; str; posV ]) -> locateAt (req str) (req sub) (max 0 (int (toDouble posV) - 1))
+    | _ -> VNull
+
+let private instrFn: Scalar =
+    function
+    | [ str; sub ] when not (anyNull [ str; sub ]) -> locateAt (req str) (req sub) 0
+    | _ -> VNull
+
+let private replaceFn: Scalar =
+    function
+    | [ s; f; t ] when not (anyNull [ s; f; t ]) ->
+        let str, frm = req s, req f
+        if frm = "" then VString str else VString(str.Replace(frm, req t))
+    | _ -> VNull
+
+let private padFn (left: bool) : Scalar =
+    function
+    | [ s; lenV; p ] when not (anyNull [ s; lenV; p ]) ->
+        let str, pad = req s, req p
+        let targetLen = int (toDouble lenV)
+
+        if targetLen <= 0 then
+            VString ""
+        elif targetLen <= str.Length then
+            VString(str.Substring(0, targetLen))
+        elif pad = "" then
+            VNull
+        else
+            let needed = targetLen - str.Length
+            let padding = (String.replicate (needed / pad.Length + 1) pad).Substring(0, needed)
+            VString(if left then padding + str else str + padding)
+    | _ -> VNull
+
+let private leftFn: Scalar =
+    function
+    | [ s; n ] when not (anyNull [ s; n ]) ->
+        let str = req s
+        VString(str.Substring(0, max 0 (min str.Length (int (toDouble n)))))
+    | _ -> VNull
+
+let private rightFn: Scalar =
+    function
+    | [ s; n ] when not (anyNull [ s; n ]) ->
+        let str = req s
+        let k = max 0 (min str.Length (int (toDouble n)))
+        VString(str.Substring(str.Length - k))
+    | _ -> VNull
+
+let private repeatFn: Scalar =
+    function
+    | [ s; n ] when not (anyNull [ s; n ]) ->
+        let k = int (toDouble n)
+        VString(if k <= 0 then "" else String.replicate k (req s))
+    | _ -> VNull
+
+let private spaceFn: Scalar =
+    function
+    | [ n ] when not (anyNull [ n ]) -> VString(String(' ', max 0 (int (toDouble n))))
+    | _ -> VNull
+
+let private asciiFn: Scalar =
+    function
+    | [ s ] when not (anyNull [ s ]) ->
+        let str = req s
+        VInt(if str = "" then 0L else int64 (byte str.[0]))
+    | _ -> VNull
+
+/// Minimal `CHAR(n1, n2, ...)`: builds a string from Unicode code points
+/// rather than MySQL's charset-aware byte assembly. Per MySQL, NULL
+/// arguments are skipped rather than nulling the whole result.
+let private charFn: Scalar =
+    fun args ->
+        args
+        |> List.choose (function
+            | VNull -> None
+            | v -> Some(char (int (toDouble v))))
+        |> Array.ofList
+        |> String
+        |> VString
+
+let private hexFn: Scalar =
+    function
+    | [ VInt i ] -> VString(i.ToString "X")
+    | [ VString s ] -> VString(s |> Seq.map (fun c -> (int c).ToString "X2") |> String.concat "")
+    | [ VBytes b ] -> VString(b |> Array.map (fun x -> x.ToString "X2") |> String.concat "")
+    | [ v ] when not (anyNull [ v ]) -> VString((int64 (toDouble v)).ToString "X")
+    | _ -> VNull
+
+let private unhexFn: Scalar =
+    function
+    | [ v ] when not (anyNull [ v ]) ->
+        let s = req v
+
+        if s.Length % 2 <> 0 || not (s |> Seq.forall Uri.IsHexDigit) then
+            VNull
+        else
+            [| for i in 0 .. 2 .. s.Length - 1 -> Convert.ToByte(s.Substring(i, 2), 16) |]
+            |> Text.Encoding.Latin1.GetString
+            |> VString
+    | _ -> VNull
+
+let private md5Fn: Scalar = textMap (fun s -> Convert.ToHexString(MD5.HashData(Text.Encoding.UTF8.GetBytes s)).ToLowerInvariant())
+let private sha1Fn: Scalar = textMap (fun s -> Convert.ToHexString(SHA1.HashData(Text.Encoding.UTF8.GetBytes s)).ToLowerInvariant())
+
+/// ponytail: SHA-224 isn't in the BCL (no `SHA224` type) — returns NULL for
+/// that length rather than hand-rolling it, add a real implementation if a
+/// migration actually calls `SHA2(x, 224)`.
+let private sha2Fn: Scalar =
+    function
+    | [ s; lenV ] when not (anyNull [ s; lenV ]) ->
+        let bytes = Text.Encoding.UTF8.GetBytes(req s)
+
+        let hash =
+            match int (toDouble lenV) with
+            | 0
+            | 256 -> Some(SHA256.HashData bytes)
+            | 384 -> Some(SHA384.HashData bytes)
+            | 512 -> Some(SHA512.HashData bytes)
+            | _ -> None
+
+        hash |> Option.map (fun h -> VString(Convert.ToHexString(h).ToLowerInvariant())) |> Option.defaultValue VNull
+    | _ -> VNull
+
+let private formatFn: Scalar =
+    function
+    | [ n; d ] when not (anyNull [ n; d ]) -> VString((toDouble n).ToString("N" + string (max 0 (int (toDouble d))), CultureInfo.InvariantCulture))
+    | _ -> VNull
+
+let private substringIndexFn: Scalar =
+    function
+    | [ s; d; c ] when not (anyNull [ s; d; c ]) ->
+        let str, delim = req s, req d
+        let count = int (toDouble c)
+
+        if delim = "" || count = 0 then
+            VString ""
+        else
+            let parts = str.Split([| delim |], StringSplitOptions.None)
+
+            if count > 0 then
+                VString(String.Join(delim, parts |> Array.truncate count))
+            else
+                let take = min (-count) parts.Length
+                VString(String.Join(delim, parts |> Array.skip (parts.Length - take)))
+    | _ -> VNull
+
+let private concatWsFn: Scalar =
+    function
+    | sep :: rest when not (anyNull [ sep ]) ->
+        rest |> List.choose (function VNull -> None | v -> toText v) |> String.concat (req sep) |> VString
+    | _ -> VNull
+
+let private eltFn: Scalar =
+    function
+    | n :: rest when not (anyNull [ n ]) ->
+        let idx = int (toDouble n)
+        if idx >= 1 && idx <= rest.Length then rest.[idx - 1] else VNull
+    | _ -> VNull
+
+/// `FIELD(NULL, ...)` is one of MySQL's documented NULL exceptions: it
+/// returns `0`, not `NULL`, since NULL never equals anything (including
+/// another NULL) so it simply never matches.
+let private fieldFn: Scalar =
+    function
+    | target :: rest ->
+        match rest |> List.tryFindIndex (fun v -> Value.equals target v = Some true) with
+        | Some i -> VInt(int64 (i + 1))
+        | None -> VInt 0L
+    | _ -> VNull
+
+let private findInSetFn: Scalar =
+    function
+    | [ s; list ] when not (anyNull [ s; list ]) ->
+        let target = req s
+
+        match (req list).Split(',') |> Array.tryFindIndex (fun x -> String.Equals(x, target, StringComparison.OrdinalIgnoreCase)) with
+        | Some i -> VInt(int64 (i + 1))
+        | None -> VInt 0L
+    | _ -> VNull
+
+let private quoteFn: Scalar =
+    function
+    | [ VNull ] -> VString "NULL"
+    | [ v ] ->
+        let sb = StringBuilder()
+        sb.Append '\'' |> ignore
+
+        for c in req v do
+            match c with
+            | '\'' -> sb.Append "\\'" |> ignore
+            | '\\' -> sb.Append "\\\\" |> ignore
+            | '\000' -> sb.Append "\\0" |> ignore
+            | '\n' -> sb.Append "\\n" |> ignore
+            | '\r' -> sb.Append "\\r" |> ignore
+            | c -> sb.Append c |> ignore
+
+        sb.Append '\'' |> ignore
+        VString(sb.ToString())
+    | _ -> VNull
+
+let private strcmpFn: Scalar =
+    function
+    | [ a; b ] when not (anyNull [ a; b ]) -> VInt(int64 (sign (Value.compare a b)))
+    | _ -> VNull
+
+// ---------------------------------------------------------------------------
 // Aggregates: COUNT/SUM/AVG/MIN/MAX. Each `Aggregate` here only ever sees a
 // nonempty, already NULL-filtered `Value list` — `Executor.evalAggregate`
 // handles the empty-list-is-NULL case (and COUNT(*)'s row-counting, which
@@ -974,6 +1218,38 @@ let builtins: Registry =
     |> registerScalar "TIMESTAMPDIFF" timestampDiffFn
     |> registerScalar "LAST_DAY" lastDayFn
     |> registerScalar "STR_TO_DATE" strToDateFn
+    // Strings
+    |> registerScalar "SUBSTRING" substringFn
+    |> registerScalar "SUBSTR" substringFn
+    |> registerScalar "LOCATE" locateFn
+    |> registerScalar "INSTR" instrFn
+    |> registerScalar "POSITION" locateFn
+    |> registerScalar "REPLACE" replaceFn
+    |> registerScalar "TRIM" (textMap (fun s -> s.Trim()))
+    |> registerScalar "LTRIM" (textMap (fun s -> s.TrimStart()))
+    |> registerScalar "RTRIM" (textMap (fun s -> s.TrimEnd()))
+    |> registerScalar "LPAD" (padFn true)
+    |> registerScalar "RPAD" (padFn false)
+    |> registerScalar "LEFT" leftFn
+    |> registerScalar "RIGHT" rightFn
+    |> registerScalar "REVERSE" (textMap (fun s -> String(Array.rev (s.ToCharArray()))))
+    |> registerScalar "REPEAT" repeatFn
+    |> registerScalar "SPACE" spaceFn
+    |> registerScalar "ASCII" asciiFn
+    |> registerScalar "CHAR" charFn
+    |> registerScalar "HEX" hexFn
+    |> registerScalar "UNHEX" unhexFn
+    |> registerScalar "MD5" md5Fn
+    |> registerScalar "SHA1" sha1Fn
+    |> registerScalar "SHA2" sha2Fn
+    |> registerScalar "FORMAT" formatFn
+    |> registerScalar "SUBSTRING_INDEX" substringIndexFn
+    |> registerScalar "CONCAT_WS" concatWsFn
+    |> registerScalar "ELT" eltFn
+    |> registerScalar "FIELD" fieldFn
+    |> registerScalar "FIND_IN_SET" findInSetFn
+    |> registerScalar "QUOTE" quoteFn
+    |> registerScalar "STRCMP" strcmpFn
     |> registerAggregate "COUNT" countAgg
     |> registerAggregate "SUM" sumAgg
     |> registerAggregate "AVG" avgAgg
