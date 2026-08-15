@@ -678,6 +678,40 @@ let tests =
                                 [ VString "bob" ]
                                 "only bob remains"
                         | Error e -> failtestf "expected Ok, got %A" e
+                    | Error e -> failtestf "expected Ok, got %A" e
+
+                testCase "deleteRows removes only the rows the predicate matched, not every byte-identical row (DELETE ... LIMIT semantics)"
+                <| fun _ ->
+                    let store = create ()
+                    createTable store defaultDatabase "dup" [ col "v" (TInt false) true ] [] [] |> ignore
+
+                    insertRows store defaultDatabase "dup" None [ [ VInt 1L ]; [ VInt 1L ]; [ VInt 2L ] ]
+                    |> ignore
+
+                    // Mimics `DELETE ... LIMIT 1`: the predicate only accepts
+                    // the first row it sees, even though two rows are
+                    // structurally identical.
+                    let remaining = ref 1
+
+                    let predicate (row: Value[]) =
+                        Ok(
+                            row.[0] = VInt 1L
+                            && remaining.Value > 0
+                            && (remaining.Value <- remaining.Value - 1
+                                true)
+                        )
+
+                    match deleteRows store defaultDatabase "dup" predicate with
+                    | Ok affected ->
+                        Expect.equal affected 1 "only one row reported deleted"
+
+                        match scan store defaultDatabase "dup" with
+                        | Ok(_, rows) ->
+                            Expect.equal
+                                (rows |> Seq.map (fun r -> r.[0]) |> List.ofSeq |> List.sortBy (function VInt i -> i | _ -> 0L))
+                                [ VInt 1L; VInt 2L ]
+                                "one of the two duplicate 1-rows survives"
+                        | Error e -> failtestf "expected Ok, got %A" e
                     | Error e -> failtestf "expected Ok, got %A" e ]
 
           testList

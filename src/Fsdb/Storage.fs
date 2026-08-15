@@ -780,10 +780,22 @@ let private referencingForeignKeys (db: Database) (parentKey: string) : (string 
 /// commits an `Ok` result, so this is all-or-nothing per statement without
 /// needing its own rollback logic.
 let rec private cascadeDelete (checkFks: bool) (db: Database) (tableKey: string) (toDelete: Value[] list) : Result<Database, StorageError> =
+    // Removes one row per entry in `toDelete`, not every structurally-equal
+    // row: two identical rows are distinct rows, and a `DELETE ... LIMIT n`
+    // (or a cascaded child match) may legitimately match only one of them.
     let removeFrom (d: Database) =
         let t = Map.find tableKey d
-        let isDeleted row = toDelete |> List.exists ((=) row)
-        Map.add tableKey { t with Rows = t.Rows |> List.filter (isDeleted >> not) } d
+
+        let kept, _ =
+            t.Rows
+            |> List.fold
+                (fun (kept, pending) row ->
+                    match pending |> List.tryFindIndex ((=) row) with
+                    | Some i -> kept, List.removeAt i pending
+                    | None -> row :: kept, pending)
+                ([], toDelete)
+
+        Map.add tableKey { t with Rows = List.rev kept } d
 
     if toDelete.IsEmpty then
         Ok db
