@@ -27,7 +27,7 @@ and a second consecutive `migrate` (Nothing to migrate). Status: ✅
 
 ## M5 — Chatflow test suite
 Joins, aggregates, subqueries, savepoints, JSON functions, expression breadth.
-**Gate:** chatflow phpunit suite green against fsdb. Status: ☐
+**Gate:** chatflow phpunit suite green against fsdb. Status: ✅
 
 ## M6 — Extensibility polish
 Public `registerScalar` / `registerAggregate` API, docs, examples.
