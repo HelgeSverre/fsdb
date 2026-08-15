@@ -920,35 +920,45 @@ let updateRows
             let checkFks = store.ForeignKeyChecks
             let original = Array.ofList table.Rows
 
-            let applyToRow i row =
-                predicate row
-                |> Result.bind (fun keep ->
-                    if not keep then
-                        Ok(row, false)
-                    else
-                        updater row
-                        |> Result.bind (coerceRow table.Columns)
-                        |> Result.bind (fun newRow ->
-                            let others =
-                                original |> Array.indexed |> Array.filter (fun (j, _) -> j <> i) |> Array.map snd |> List.ofArray
+            // Folds left-to-right, threading the rows already written this
+            // statement (`doneRows`, holding their *new* values) alongside
+            // the rows not yet reached (their still-*original* values) —
+            // mirrors `insertCore`'s `table.Rows @ accepted` pattern, so a
+            // multi-row `UPDATE` that moves several rows onto the same
+            // unique value collides with a sibling row this same statement
+            // already rewrote, not just against the frozen pre-statement
+            // snapshot.
+            let step acc (i, row) =
+                acc
+                |> Result.bind (fun (doneRows: Value[] list, changedCount) ->
+                    predicate row
+                    |> Result.bind (fun keep ->
+                        if not keep then
+                            Ok(doneRows @ [ row ], changedCount)
+                        else
+                            updater row
+                            |> Result.bind (coerceRow table.Columns)
+                            |> Result.bind (fun newRow ->
+                                let notYetProcessed =
+                                    original |> Array.indexed |> Array.filter (fun (j, _) -> j > i) |> Array.map snd |> List.ofArray
 
-                            match findUniqueCollision uniqueGroups others newRow with
-                            | Some e -> Error e
-                            | None ->
-                                if checkFks then
-                                    checkFkParents db table.Columns table.ForeignKeys newRow
-                                    |> Result.map (fun () -> newRow)
-                                else
-                                    Ok newRow)
-                        |> Result.map (fun newRow -> newRow, newRow <> row))
+                                let others = doneRows @ notYetProcessed
+
+                                match findUniqueCollision uniqueGroups others newRow with
+                                | Some e -> Error e
+                                | None ->
+                                    if checkFks then
+                                        checkFkParents db table.Columns table.ForeignKeys newRow
+                                        |> Result.map (fun () -> newRow)
+                                    else
+                                        Ok newRow)
+                            |> Result.map (fun newRow -> doneRows @ [ newRow ], changedCount + (if newRow <> row then 1 else 0))))
 
             original
             |> List.ofArray
             |> List.indexed
-            |> traverse (fun (i, row) -> applyToRow i row)
-            |> Result.map (fun rowsWithFlags ->
-                let table' = { table with Rows = rowsWithFlags |> List.map fst }
-                Map.add key table' db, rowsWithFlags |> List.filter snd |> List.length)))
+            |> List.fold step (Ok([], 0))
+            |> Result.map (fun (rows', changedCount) -> Map.add key { table with Rows = rows' } db, changedCount)))
 
 /// A snapshot read: the table's columns and its rows as they were at the
 /// moment of the call. Lock-free — reads a single reference field, and

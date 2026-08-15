@@ -436,7 +436,25 @@ let tests =
 
                     match insertRows store defaultDatabase "role_user" None [ [ VInt 1L; VInt 3L ] ] with
                     | Ok _ -> ()
-                    | Error e -> failtestf "expected Ok, got %A" e ]
+                    | Error e -> failtestf "expected Ok, got %A" e
+
+                testCase "a multi-row UPDATE that moves two rows onto the same UNIQUE value returns error 1062"
+                <| fun _ ->
+                    let store = create ()
+                    emailsTable store
+
+                    insertRows
+                        store
+                        defaultDatabase
+                        "emails"
+                        None
+                        [ [ VInt 1L; VString "a@x.com" ]
+                          [ VInt 2L; VString "b@x.com" ] ]
+                    |> ignore
+
+                    match updateRows store defaultDatabase "emails" (fun _ -> Ok true) (fun row -> Ok [| row.[0]; VString "same@x.com" |]) with
+                    | Error(DuplicateKey("uq_email", "same@x.com")) -> ()
+                    | other -> failtestf "expected DuplicateKey, got %A" other ]
 
           testList
               "INSERT IGNORE"
