@@ -1147,6 +1147,168 @@ let private strcmpFn: Scalar =
     | _ -> VNull
 
 // ---------------------------------------------------------------------------
+// Math/misc.
+// ---------------------------------------------------------------------------
+
+let private ceilFn: Scalar =
+    function
+    | [ VInt i ] -> VInt i
+    | [ v ] when not (anyNull [ v ]) -> VInt(int64 (Math.Ceiling(toDouble v)))
+    | _ -> VNull
+
+let private floorFn: Scalar =
+    function
+    | [ VInt i ] -> VInt i
+    | [ v ] when not (anyNull [ v ]) -> VInt(int64 (Math.Floor(toDouble v)))
+    | _ -> VNull
+
+let private powFn: Scalar =
+    function
+    | [ a; b ] when not (anyNull [ a; b ]) -> VDouble(Math.Pow(toDouble a, toDouble b))
+    | _ -> VNull
+
+let private sqrtFn: Scalar =
+    function
+    | [ v ] when not (anyNull [ v ]) ->
+        let d = toDouble v
+        if d < 0.0 then VNull else VDouble(Math.Sqrt d)
+    | _ -> VNull
+
+let private signFn: Scalar =
+    function
+    | [ v ] when not (anyNull [ v ]) -> VInt(int64 (sign (toDouble v)))
+    | _ -> VNull
+
+let private truncateFn: Scalar =
+    function
+    | [ VDecimal dec; d ] when not (anyNull [ d ]) ->
+        let factor = decimal (Math.Pow(10.0, float (int (toDouble d))))
+        VDecimal(Math.Truncate(dec * factor) / factor)
+    | [ v; d ] when not (anyNull [ v; d ]) ->
+        let factor = Math.Pow(10.0, float (int (toDouble d)))
+        VDouble(Math.Truncate(toDouble v * factor) / factor)
+    | _ -> VNull
+
+let private random = Random()
+let private randFn: Scalar = fun _ -> VDouble(random.NextDouble())
+
+let private greatestFn: Scalar =
+    function
+    | args when anyNull args || List.isEmpty args -> VNull
+    | args -> args |> List.reduce (fun a b -> if Value.compare a b >= 0 then a else b)
+
+let private leastFn: Scalar =
+    function
+    | args when anyNull args || List.isEmpty args -> VNull
+    | args -> args |> List.reduce (fun a b -> if Value.compare a b <= 0 then a else b)
+
+/// `NULLIF(a, b)`: NULL when `a = b`; otherwise `a` — including when the
+/// comparison itself is unknown (either side NULL), since MySQL's `<>`
+/// there is unknown, not true.
+let private nullIfFn: Scalar =
+    function
+    | [ a; b ] -> if Value.equals a b = Some true then VNull else a
+    | _ -> VNull
+
+let private isNullFn: Scalar =
+    function
+    | [ VNull ] -> VInt 1L
+    | [ _ ] -> VInt 0L
+    | _ -> VNull
+
+let private baseDigits = "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ"
+
+let private parseInBase (s: string) (b: int) : int64 option =
+    let s = s.Trim().ToUpperInvariant()
+    let neg, s = if s.StartsWith "-" then true, s.Substring 1 else false, s
+
+    if s = "" then
+        None
+    else
+        let mutable ok = true
+        let mutable acc = 0L
+
+        for c in s do
+            let d = baseDigits.IndexOf c
+            if d < 0 || d >= b then ok <- false else acc <- acc * int64 b + int64 d
+
+        if ok then Some(if neg then -acc else acc) else None
+
+let private toBase (n: int64) (b: int) : string =
+    if n = 0L then
+        "0"
+    else
+        let neg = n < 0L
+        let mutable v = abs n
+        let sb = StringBuilder()
+
+        while v > 0L do
+            sb.Insert(0, baseDigits.[int (v % int64 b)]) |> ignore
+            v <- v / int64 b
+
+        (if neg then "-" else "") + sb.ToString()
+
+let private convFn: Scalar =
+    function
+    | [ n; f; t ] when not (anyNull [ n; f; t ]) ->
+        match parseInBase (req n) (int (toDouble f)) with
+        | Some v -> VString(toBase v (int (toDouble t)))
+        | None -> VNull
+    | _ -> VNull
+
+let private binFn: Scalar =
+    function
+    | [ v ] when not (anyNull [ v ]) -> VString(toBase (int64 (toDouble v)) 2)
+    | _ -> VNull
+
+let private octFn: Scalar =
+    function
+    | [ v ] when not (anyNull [ v ]) -> VString(toBase (int64 (toDouble v)) 8)
+    | _ -> VNull
+
+/// The zlib/IEEE-802.3 CRC-32 MySQL's `CRC32()` implements — the standard
+/// bit-reflected table-driven form, not a shortcut worth swapping for a
+/// library dependency.
+let private crc32Table =
+    Array.init 256 (fun i ->
+        let mutable c = uint32 i
+
+        for _ in 0..7 do
+            c <- if c &&& 1u <> 0u then 0xEDB88320u ^^^ (c >>> 1) else c >>> 1
+
+        c)
+
+let private crc32 (bytes: byte[]) : uint32 =
+    let mutable crc = 0xFFFFFFFFu
+    for b in bytes do
+        crc <- crc32Table.[int ((crc ^^^ uint32 b) &&& 0xFFu)] ^^^ (crc >>> 8)
+    crc ^^^ 0xFFFFFFFFu
+
+let private crc32Fn: Scalar =
+    function
+    | [ v ] when not (anyNull [ v ]) -> VInt(int64 (crc32 (Text.Encoding.UTF8.GetBytes(req v))))
+    | _ -> VNull
+
+let private uuidFn: Scalar = fun _ -> VString(Guid.NewGuid().ToString())
+
+let private inetAtonFn: Scalar =
+    function
+    | [ v ] when not (anyNull [ v ]) ->
+        match IPAddress.TryParse(req v) with
+        | true, ip when ip.AddressFamily = AddressFamily.InterNetwork ->
+            let b = ip.GetAddressBytes()
+            VInt(int64 ((uint32 b.[0] <<< 24) ||| (uint32 b.[1] <<< 16) ||| (uint32 b.[2] <<< 8) ||| uint32 b.[3]))
+        | _ -> VNull
+    | _ -> VNull
+
+let private inetNtoaFn: Scalar =
+    function
+    | [ v ] when not (anyNull [ v ]) ->
+        let n = uint32 (toDouble v)
+        VString(sprintf "%d.%d.%d.%d" ((n >>> 24) &&& 0xFFu) ((n >>> 16) &&& 0xFFu) ((n >>> 8) &&& 0xFFu) (n &&& 0xFFu))
+    | _ -> VNull
+
+// ---------------------------------------------------------------------------
 // Aggregates: COUNT/SUM/AVG/MIN/MAX. Each `Aggregate` here only ever sees a
 // nonempty, already NULL-filtered `Value list` — `Executor.evalAggregate`
 // handles the empty-list-is-NULL case (and COUNT(*)'s row-counting, which
@@ -1250,6 +1412,27 @@ let builtins: Registry =
     |> registerScalar "FIND_IN_SET" findInSetFn
     |> registerScalar "QUOTE" quoteFn
     |> registerScalar "STRCMP" strcmpFn
+    // Math/misc
+    |> registerScalar "CEIL" ceilFn
+    |> registerScalar "CEILING" ceilFn
+    |> registerScalar "FLOOR" floorFn
+    |> registerScalar "POW" powFn
+    |> registerScalar "POWER" powFn
+    |> registerScalar "SQRT" sqrtFn
+    |> registerScalar "SIGN" signFn
+    |> registerScalar "TRUNCATE" truncateFn
+    |> registerScalar "RAND" randFn
+    |> registerScalar "GREATEST" greatestFn
+    |> registerScalar "LEAST" leastFn
+    |> registerScalar "NULLIF" nullIfFn
+    |> registerScalar "ISNULL" isNullFn
+    |> registerScalar "CONV" convFn
+    |> registerScalar "BIN" binFn
+    |> registerScalar "OCT" octFn
+    |> registerScalar "CRC32" crc32Fn
+    |> registerScalar "UUID" uuidFn
+    |> registerScalar "INET_ATON" inetAtonFn
+    |> registerScalar "INET_NTOA" inetNtoaFn
     |> registerAggregate "COUNT" countAgg
     |> registerAggregate "SUM" sumAgg
     |> registerAggregate "AVG" avgAgg

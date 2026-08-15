@@ -446,5 +446,63 @@ let tests =
                           Expect.equal (call "STRCMP" [ VString "a"; VString "b" ]) (VInt(-1L)) "a < b"
                           Expect.equal (call "STRCMP" [ VString "a"; VString "a" ]) (VInt 0L) "a = a" ]
 
-              ]
-        ]
+                testList
+                    "Math and misc"
+                    [ testCase "CEIL/FLOOR round toward +/- infinity"
+                      <| fun _ ->
+                          Expect.equal (call "CEIL" [ VDouble 1.1 ]) (VInt 2L) "ceil"
+                          Expect.equal (call "FLOOR" [ VDouble 1.9 ]) (VInt 1L) "floor"
+
+                      testCase "POW/SQRT compute doubles, SQRT of a negative is NULL"
+                      <| fun _ ->
+                          Expect.equal (call "POW" [ VInt 2L; VInt 10L ]) (VDouble 1024.0) "pow"
+                          Expect.equal (call "SQRT" [ VInt 9L ]) (VDouble 3.0) "sqrt"
+                          Expect.equal (call "SQRT" [ VInt(-1L) ]) VNull "sqrt of negative"
+
+                      testCase "SIGN returns -1/0/1"
+                      <| fun _ ->
+                          Expect.equal (call "SIGN" [ VInt(-5L) ]) (VInt(-1L)) "negative"
+                          Expect.equal (call "SIGN" [ VInt 0L ]) (VInt 0L) "zero"
+                          Expect.equal (call "SIGN" [ VInt 5L ]) (VInt 1L) "positive"
+
+                      testCase "TRUNCATE cuts toward zero without rounding"
+                      <| fun _ -> Expect.equal (call "TRUNCATE" [ VDouble 1.999; VInt 2L ]) (VDouble 1.99) "truncate"
+
+                      testCase "GREATEST/LEAST propagate NULL and otherwise compare like ORDER BY"
+                      <| fun _ ->
+                          Expect.equal (call "GREATEST" [ VInt 1L; VInt 5L; VInt 3L ]) (VInt 5L) "greatest"
+                          Expect.equal (call "LEAST" [ VInt 1L; VInt 5L; VInt 3L ]) (VInt 1L) "least"
+                          Expect.equal (call "GREATEST" [ VInt 1L; VNull ]) VNull "null propagates"
+
+                      testCase "NULLIF nulls out equal arguments, passes through unequal ones"
+                      <| fun _ ->
+                          Expect.equal (call "NULLIF" [ VInt 1L; VInt 1L ]) VNull "equal"
+                          Expect.equal (call "NULLIF" [ VInt 1L; VInt 2L ]) (VInt 1L) "unequal"
+                          Expect.equal (call "NULLIF" [ VInt 1L; VNull ]) (VInt 1L) "vs null is not equal"
+
+                      testCase "ISNULL is 1 for NULL, 0 otherwise"
+                      <| fun _ ->
+                          Expect.equal (call "ISNULL" [ VNull ]) (VInt 1L) "null"
+                          Expect.equal (call "ISNULL" [ VInt 0L ]) (VInt 0L) "zero is not null"
+
+                      testCase "CONV converts a number between bases"
+                      <| fun _ -> Expect.equal (call "CONV" [ VString "ff"; VInt 16L; VInt 10L ]) (VString "255") "hex to decimal"
+
+                      testCase "BIN/OCT render base 2/8"
+                      <| fun _ ->
+                          Expect.equal (call "BIN" [ VInt 5L ]) (VString "101") "bin"
+                          Expect.equal (call "OCT" [ VInt 8L ]) (VString "10") "oct"
+
+                      testCase "CRC32 matches the standard zlib checksum"
+                      <| fun _ -> Expect.equal (call "CRC32" [ VString "123456789" ]) (VInt 0x0CBF43926L) "crc32 check value"
+
+                      testCase "UUID produces a well-formed v4-shaped string"
+                      <| fun _ ->
+                          match call "UUID" [] with
+                          | VString s -> Expect.isTrue (Guid.TryParse(s) |> fst) "parses as a guid"
+                          | v -> failwithf "expected VString, got %A" v
+
+                      testCase "INET_ATON/INET_NTOA round-trip an IPv4 address"
+                      <| fun _ ->
+                          Expect.equal (call "INET_ATON" [ VString "192.168.1.1" ]) (VInt 3232235777L) "aton"
+                          Expect.equal (call "INET_NTOA" [ VInt 3232235777L ]) (VString "192.168.1.1") "ntoa" ] ] ]
