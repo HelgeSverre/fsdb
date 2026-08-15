@@ -668,7 +668,16 @@ let tests =
                             "CREATE TABLE t (name VARCHAR(255) CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci COMMENT 'a name')"
                     with
                     | CreateTable(_, [ { Name = "name" } ], [], [], false) -> ()
-                    | other -> failtestf "expected the comment/charset/collate to be ignored, got %A" other ]
+                    | other -> failtestf "expected the comment/charset/collate to be ignored, got %A" other
+
+                testCase "a generated column's AS (expr) [VIRTUAL|STORED] is accepted and ignored (Laravel Pulse's key_hash)"
+                <| fun _ ->
+                    match
+                        parseOk
+                            "CREATE TABLE pulse_values (`key` MEDIUMTEXT NOT NULL, key_hash CHAR(16) CHARACTER SET binary AS (UNHEX(MD5(`key`))))"
+                    with
+                    | CreateTable(_, [ { Name = "key" }; { Name = "key_hash"; Type = TChar 16 } ], [], [], false) -> ()
+                    | other -> failtestf "expected the generated column to parse and its AS (...) to be ignored, got %A" other ]
 
           testList
               "DROP TABLE / TRUNCATE"

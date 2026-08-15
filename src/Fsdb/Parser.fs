@@ -265,58 +265,6 @@ let private columnType: Parser<ColumnType, unit> =
           (keyword "BOOLEAN" <|> keyword "BOOL") >>% TTinyInt false ]
     <?> "column type"
 
-type private ColMod =
-    | MNotNull
-    | MNull
-    | MDefault of ColumnDefault
-    | MAutoIncrement
-    | MPrimaryKey
-    | MUnique
-    /// `COMMENT 'txt'`, `CHARACTER SET x` / `COLLATE y`, and `ON UPDATE
-    /// CURRENT_TIMESTAMP` — accepted so the column definition parses, but
-    /// nothing in `Ast.ColumnDef` tracks them (ponytail: add fields if a
-    /// migration's assertion ever depends on one, e.g. `information_schema`
-    /// exposing a column comment).
-    | MIgnored
-
-let private defaultValueLit: Parser<ColumnDefault, unit> =
-    (keyword "CURRENT_TIMESTAMP" >>% DCurrentTimestamp) <|> (literalValue |>> DConst)
-
-/// A charset/collation name — Laravel emits `COLLATE 'utf8mb4_unicode_ci'`
-/// (quoted) at the table level but a bare identifier at the column level, so
-/// this accepts either.
-let private identOrString: Parser<string, unit> =
-    identifier <|> (stringLit |>> (function VString s -> s | _ -> ""))
-
-let private colMod: Parser<ColMod, unit> =
-    choice
-        [ attempt (keyword "NOT" >>. keyword "NULL") >>% MNotNull
-          keyword "NULL" >>% MNull
-          keyword "DEFAULT" >>. defaultValueLit .>> optional (keyword "ON" >>. keyword "UPDATE" >>. keyword "CURRENT_TIMESTAMP") |>> MDefault
-          keyword "AUTO_INCREMENT" >>% MAutoIncrement
-          attempt (keyword "PRIMARY" >>. keyword "KEY") >>% MPrimaryKey
-          keyword "UNIQUE" >>. optional (keyword "KEY") >>% MUnique
-          attempt (keyword "ON" >>. keyword "UPDATE" >>. keyword "CURRENT_TIMESTAMP") >>% MIgnored
-          keyword "COMMENT" >>. stringLit >>% MIgnored
-          attempt (keyword "CHARACTER" >>. keyword "SET") >>. identOrString >>% MIgnored
-          keyword "COLLATE" >>. identOrString >>% MIgnored ]
-
-let private columnDef: Parser<ColumnDef, unit> =
-    (identifier .>>. columnType .>>. many colMod)
-    |>> fun ((name, ty), mods) ->
-        { Name = name
-          Type = ty
-          Nullable = not (List.contains MNotNull mods)
-          Default = mods |> List.tryPick (function MDefault v -> Some v | _ -> None)
-          AutoIncrement = List.contains MAutoIncrement mods
-          PrimaryKey = List.contains MPrimaryKey mods
-          Unique = List.contains MUnique mods }
-
-/// `AFTER col` / `FIRST` after an `ADD`/`MODIFY`/`CHANGE COLUMN` — accepted
-/// and discarded; see the ponytail note on `Ast.AlterAction`.
-let private colPosition: Parser<unit, unit> =
-    optional ((keyword "AFTER" >>. identifier >>% ()) <|> (keyword "FIRST" >>% ()))
-
 // ---------------------------------------------------------------------------
 // Expressions
 // ---------------------------------------------------------------------------
@@ -455,6 +403,76 @@ let private orExpr: Parser<Expr, unit> =
     chainl1 andExpr (keyword "OR" >>% fun a b -> BinOp(Or, a, b))
 
 do exprRef.Value <- orExpr
+
+type private ColMod =
+    | MNotNull
+    | MNull
+    | MDefault of ColumnDefault
+    | MAutoIncrement
+    | MPrimaryKey
+    | MUnique
+    /// `COMMENT 'txt'`, `CHARACTER SET x` / `COLLATE y`, `ON UPDATE
+    /// CURRENT_TIMESTAMP`, and a generated column's `AS (expr)` — accepted
+    /// so the column definition parses, but nothing in `Ast.ColumnDef`
+    /// tracks them (ponytail: add fields if a migration's assertion ever
+    /// depends on one, e.g. `information_schema` exposing the real
+    /// generation expression text, or the engine actually computing a
+    /// generated column's value rather than just accepting a NULL/absent
+    /// one).
+    | MIgnored
+
+let private defaultValueLit: Parser<ColumnDefault, unit> =
+    (keyword "CURRENT_TIMESTAMP" >>% DCurrentTimestamp) <|> (literalValue |>> DConst)
+
+/// A charset/collation name — Laravel emits `COLLATE 'utf8mb4_unicode_ci'`
+/// (quoted) at the table level but a bare identifier at the column level, so
+/// this accepts either.
+let private identOrString: Parser<string, unit> =
+    identifier <|> (stringLit |>> (function VString s -> s | _ -> ""))
+
+/// `[GENERATED ALWAYS] AS (expr) [VIRTUAL | STORED]` — a computed column
+/// (`char(16) ... AS (UNHEX(MD5(\`key\`)))`, Laravel Pulse's dedup key hash).
+/// The expression itself just needs to *parse* (reusing the full `expr`
+/// grammar, which already handles arbitrary nested function calls), not be
+/// evaluated — see the `MIgnored` doc above.
+let private generatedColumn: Parser<unit, unit> =
+    optional (keyword "GENERATED" >>. keyword "ALWAYS")
+    >>. keyword "AS"
+    >>. sym "("
+    >>. expr
+    >>. sym ")"
+    >>. optional (keyword "VIRTUAL" <|> keyword "STORED")
+    >>% ()
+
+let private colMod: Parser<ColMod, unit> =
+    choice
+        [ attempt (keyword "NOT" >>. keyword "NULL") >>% MNotNull
+          keyword "NULL" >>% MNull
+          keyword "DEFAULT" >>. defaultValueLit .>> optional (keyword "ON" >>. keyword "UPDATE" >>. keyword "CURRENT_TIMESTAMP") |>> MDefault
+          keyword "AUTO_INCREMENT" >>% MAutoIncrement
+          attempt (keyword "PRIMARY" >>. keyword "KEY") >>% MPrimaryKey
+          keyword "UNIQUE" >>. optional (keyword "KEY") >>% MUnique
+          attempt (keyword "ON" >>. keyword "UPDATE" >>. keyword "CURRENT_TIMESTAMP") >>% MIgnored
+          keyword "COMMENT" >>. stringLit >>% MIgnored
+          attempt (keyword "CHARACTER" >>. keyword "SET") >>. identOrString >>% MIgnored
+          keyword "COLLATE" >>. identOrString >>% MIgnored
+          attempt generatedColumn >>% MIgnored ]
+
+let private columnDef: Parser<ColumnDef, unit> =
+    (identifier .>>. columnType .>>. many colMod)
+    |>> fun ((name, ty), mods) ->
+        { Name = name
+          Type = ty
+          Nullable = not (List.contains MNotNull mods)
+          Default = mods |> List.tryPick (function MDefault v -> Some v | _ -> None)
+          AutoIncrement = List.contains MAutoIncrement mods
+          PrimaryKey = List.contains MPrimaryKey mods
+          Unique = List.contains MUnique mods }
+
+/// `AFTER col` / `FIRST` after an `ADD`/`MODIFY`/`CHANGE COLUMN` — accepted
+/// and discarded; see the ponytail note on `Ast.AlterAction`.
+let private colPosition: Parser<unit, unit> =
+    optional ((keyword "AFTER" >>. identifier >>% ()) <|> (keyword "FIRST" >>% ()))
 
 // ---------------------------------------------------------------------------
 // CREATE TABLE trailing items: PRIMARY KEY / INDEX / FOREIGN KEY
