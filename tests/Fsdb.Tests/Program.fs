@@ -509,6 +509,23 @@ let preparedStatementTests =
               | Result.Error(1064, _) -> ()
               | other -> failtestf "expected a 1064 error, got %A" other
 
+          testCase "prepareStatement accepts SET/SHOW/transaction-control forms the grammar itself doesn't parse"
+          <| fun _ ->
+              // Laravel's Schema::disableForeignKeyConstraints() runs
+              // Connection::statement(), which always calls PDO::prepare()
+              // regardless of emulation — real MySQL PDO's default is
+              // ATTR_EMULATE_PREPARES = false, so even a bare `SET
+              // FOREIGN_KEY_CHECKS=0` goes through COM_STMT_PREPARE.
+              for sql in
+                  [ "SET FOREIGN_KEY_CHECKS=0"
+                    "SET NAMES utf8mb4"
+                    "START TRANSACTION"
+                    "COMMIT"
+                    "SHOW TABLES" ] do
+                  match prepareStatement sql with
+                  | Result.Ok 0 -> ()
+                  | other -> failtestf "expected %s to prepare with 0 placeholders, got %A" sql other
+
           testCase "a prepared INSERT/SELECT round-trips through textual substitution + the normal execution path"
           <| fun _ ->
               let session = create 1 (Fsdb.Storage.create ())

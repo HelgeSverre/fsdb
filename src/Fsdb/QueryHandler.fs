@@ -133,31 +133,6 @@ let valueToSqlLiteral (v: Value) : string =
     | VBytes _
     | VJson _ -> "'" + escapeSqlString (v |> toText |> Option.defaultValue "") + "'"
 
-/// Parses and validates SQL for COM_STMT_PREPARE without executing it: a
-/// parse failure is the same 1064 (code, message) pair a COM_QUERY syntax
-/// error gets, so `Server` doesn't need its own copy of that formatting.
-/// `Ok` carries the placeholder count `Server` needs for the
-/// COM_STMT_PREPARE_OK reply.
-///
-/// The grammar has no notion of a `?` placeholder token (bound parameters
-/// are this module's own textual-substitution concern, not the parser's —
-/// see the `PreparedStmt` ponytail note in Session.fs), so validating the
-/// statement as given would reject every parameterized query. Standing in
-/// `NULL` for each placeholder validates the surrounding SQL is
-/// syntactically real without needing the grammar to know placeholders
-/// exist; the *stored* statement (what `Server` puts in `PreparedStmt.Sql`)
-/// is still the original text with the real `?`s, untouched by this probe.
-let prepareStatement (sql: string) : Result<int, int * string> =
-    let placeholderCount = placeholderPositions sql |> List.length
-    let probeSql = substitutePlaceholders sql (List.replicate placeholderCount "NULL")
-
-    match Parser.parse probeSql with
-    | Result.Ok _ -> Result.Ok placeholderCount
-    | Result.Error _ ->
-        match syntaxError sql with
-        | Err(code, msg) -> Result.Error(code, msg)
-        | _ -> Result.Error(1064, "syntax error")
-
 /// Matches `@@var` or `@@session.var` / `@@global.var`, optionally aliased,
 /// optionally followed by a trailing `LIMIT n` (mysql CLI probes
 /// `@@version_comment` this way at connect time).
@@ -657,6 +632,65 @@ let private executeStatement (session: Session) (sql: string) (upper: string) : 
         { session with LastInsertId = lastInsertId }, result
     | Result.Error _ when upper.StartsWith "SELECT" && upper.Contains "@@" -> session, handleAtVarSelect session sql
     | Result.Error _ -> session, syntaxError sql
+
+/// Every statement form `dispatch` below recognizes purely by text probe
+/// (SET/USE/SHOW/transaction control) rather than `Parser.parse` — mirrors
+/// `dispatch`'s own leading guards (not the fallback `executeStatement`
+/// case), kept as one predicate reusable from `prepareStatement`, since
+/// PDO's default `ATTR_EMULATE_PREPARES = false` means even a plain `SET
+/// FOREIGN_KEY_CHECKS=0` (Laravel's `Schema::disableForeignKeyConstraints`)
+/// goes through COM_STMT_PREPARE, and the grammar itself has no `SET`/`SHOW`
+/// production to validate it against.
+let private isNonGrammarStatement (sql: string) (upper: string) : bool =
+    setAutocommit.IsMatch sql
+    || upper.StartsWith "SET "
+    || rollbackToSavepointStmt.IsMatch sql
+    || beginTx.IsMatch upper
+    || commitTx.IsMatch upper
+    || rollbackTx.IsMatch upper
+    || savepointStmt.IsMatch sql
+    || releaseSavepointStmt.IsMatch sql
+    || upper.StartsWith "USE "
+    || upper.StartsWith "SHOW VARIABLES"
+    || upper = "SHOW WARNINGS"
+    || upper.StartsWith "SHOW DATABASES"
+    || upper.StartsWith "SHOW TABLE STATUS"
+    || upper.StartsWith "SHOW TABLES"
+    || upper.StartsWith "SHOW FULL TABLES"
+    || showCreateTableRe.IsMatch sql
+    || showColumnsRe.IsMatch sql
+    || describeRe.IsMatch sql
+    || showIndexRe.IsMatch sql
+
+/// Parses and validates SQL for COM_STMT_PREPARE without executing it: a
+/// parse failure is the same 1064 (code, message) pair a COM_QUERY syntax
+/// error gets, so `Server` doesn't need its own copy of that formatting.
+/// `Ok` carries the placeholder count `Server` needs for the
+/// COM_STMT_PREPARE_OK reply.
+///
+/// The grammar has no notion of a `?` placeholder token (bound parameters
+/// are this module's own textual-substitution concern, not the parser's —
+/// see the `PreparedStmt` ponytail note in Session.fs), so validating the
+/// statement as given would reject every parameterized query. Standing in
+/// `NULL` for each placeholder validates the surrounding SQL is
+/// syntactically real without needing the grammar to know placeholders
+/// exist; the *stored* statement (what `Server` puts in `PreparedStmt.Sql`)
+/// is still the original text with the real `?`s, untouched by this probe.
+let prepareStatement (sql: string) : Result<int, int * string> =
+    let placeholderCount = placeholderPositions sql |> List.length
+    let probeSql = substitutePlaceholders sql (List.replicate placeholderCount "NULL")
+    let trimmed = probeSql.Trim().TrimEnd(';').Trim()
+    let upper = trimmed.ToUpperInvariant()
+
+    if isNonGrammarStatement trimmed upper then
+        Result.Ok placeholderCount
+    else
+        match Parser.parse probeSql with
+        | Result.Ok _ -> Result.Ok placeholderCount
+        | Result.Error _ ->
+            match syntaxError sql with
+            | Err(code, msg) -> Result.Error(code, msg)
+            | _ -> Result.Error(1064, "syntax error")
 
 let private dispatch (session: Session) (rawSql: string) : Session * QueryResult =
     let sql = rawSql.Trim().TrimEnd(';').Trim()
