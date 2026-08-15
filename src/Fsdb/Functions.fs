@@ -803,9 +803,15 @@ let private curTimeFn: Scalar = fun _ -> VString(DateTime.Now.ToString "HH:mm:ss
 
 let private unixEpoch = DateTime(1970, 1, 1, 0, 0, 0, DateTimeKind.Unspecified)
 
+// The 0-arg form has to agree with `nowFn`/`curDateFn`/`curTimeFn`'s clock
+// (`DateTime.Now`, local time) rather than UTC — this engine doesn't model
+// timezones at all, so `UNIX_TIMESTAMP()` and `UNIX_TIMESTAMP(NOW())`
+// (and `FROM_UNIXTIME(UNIX_TIMESTAMP())` vs. `NOW()`) would otherwise
+// disagree by the host's UTC offset, and the disagreement would change
+// with the host's timezone.
 let private unixTimestampFn: Scalar =
     function
-    | [] -> VInt(DateTimeOffset.UtcNow.ToUnixTimeSeconds())
+    | [] -> VInt(int64 (DateTime.Now - unixEpoch).TotalSeconds)
     | [ v ] when not (anyNull [ v ]) -> asDateTime v |> Option.map (fun dt -> VInt(int64 (dt - unixEpoch).TotalSeconds)) |> Option.defaultValue VNull
     | _ -> VNull
 

@@ -381,6 +381,15 @@ let tests =
                           let ts = call "UNIX_TIMESTAMP" [ dt ]
                           Expect.equal (call "FROM_UNIXTIME" [ ts ]) dt "round trip"
 
+                      testCase "UNIX_TIMESTAMP() agrees with NOW() (both read the same clock)"
+                      <| fun _ ->
+                          let nowTs = call "UNIX_TIMESTAMP" [ call "NOW" [] ]
+                          let bareTs = call "UNIX_TIMESTAMP" []
+
+                          match nowTs, bareTs with
+                          | VInt a, VInt b -> Expect.isTrue (abs (a - b) <= 1L) "UNIX_TIMESTAMP() and UNIX_TIMESTAMP(NOW()) read the same clock, not one UTC and one local"
+                          | other -> failtestf "expected two VInt timestamps, got %A" other
+
                       testCase "TIMESTAMPDIFF computes whole units between two datetimes"
                       <| fun _ ->
                           Expect.equal
