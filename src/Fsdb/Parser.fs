@@ -827,16 +827,28 @@ let private onDuplicateKeyUpdate: Parser<(string * Expr) list, unit> =
     keyword "ON" >>. keyword "DUPLICATE" >>. keyword "KEY" >>. keyword "UPDATE"
     >>. sepBy1 ((identifier .>> sym "=") .>>. expr) (sym ",")
 
+/// `INSERT INTO t (cols) VALUES (...), (...) [ON DUPLICATE KEY UPDATE ...]`
+/// or `INSERT INTO t (cols) SELECT ...` — both share the same `INSERT
+/// [IGNORE] INTO table (cols)?` prefix, diverging only on the `VALUES`/
+/// `SELECT` keyword right after it, so parsing that prefix once and
+/// `choice`-ing between the two row sources needs no `attempt` backtracking
+/// (see the `statement` parser's doc on why that matters).
 let private insertStmt: Parser<Statement, unit> =
     (keyword "INSERT" >>. (opt (keyword "IGNORE") |>> Option.isSome)
      .>> keyword "INTO"
      .>>. qualifiedTableName
      .>>. opt (between (sym "(") (sym ")") (sepBy1 identifier (sym ",")))
-     .>> keyword "VALUES"
-     .>>. sepBy1 (between (sym "(") (sym ")") (sepBy1 expr (sym ","))) (sym ",")
-     .>>. opt onDuplicateKeyUpdate)
-    |>> fun ((((ignoreDuplicates, table), cols), rows), onDup) ->
-        Insert(table, cols |> Option.defaultValue [], rows, onDup |> Option.defaultValue [], ignoreDuplicates)
+     .>>. choice
+              [ (keyword "VALUES" >>. sepBy1 (between (sym "(") (sym ")") (sepBy1 expr (sym ","))) (sym ",")
+                 .>>. opt onDuplicateKeyUpdate)
+                |>> Choice1Of2
+                selectStmtRecord |>> Choice2Of2 ])
+    |>> fun (((ignoreDuplicates, table), cols), branch) ->
+        let cols = cols |> Option.defaultValue []
+
+        match branch with
+        | Choice1Of2(rows, onDup) -> Insert(table, cols, rows, onDup |> Option.defaultValue [], ignoreDuplicates)
+        | Choice2Of2 select -> InsertSelect(table, cols, select, ignoreDuplicates)
 
 let private projection: Parser<Projection, unit> = expr .>>. opt (keyword "AS" >>. identifier)
 

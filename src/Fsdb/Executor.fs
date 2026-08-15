@@ -1435,6 +1435,27 @@ let execute (store: Store) (registry: Registry) (dbName: string) (lastInsertId: 
                         (if newLastId <> 0L then newLastId else lastInsertId), Affected(uint64 affected)
                     | Error e -> lastInsertId, storageErr e
 
+    | InsertSelect(table, columns, select, ignoreDuplicates) ->
+        let db, table = splitQualified dbName table
+
+        match runSelectStmt store registry dbName select None |> fst with
+        | Err(code, message) -> lastInsertId, Err(code, message)
+        | Affected _ -> lastInsertId, Err(1064, "INSERT ... SELECT source did not return a resultset")
+        | ResultSet(_, rows) ->
+            // The source rows are already the wire's flat `string option`
+            // text (see `Value.mysqlTypeOf`'s callers) rather than the
+            // original typed `Value`s — fine here, since `insertRows`/
+            // `insertRowsIgnore` coerce every value through the target
+            // column's type anyway, the same as a literal `VALUES` row's
+            // `Lit(VString ...)` would.
+            let rowsValues = rows |> List.map (List.map (function Some s -> VString s | None -> VNull))
+            let cols = if columns.IsEmpty then None else Some columns
+            let insert = if ignoreDuplicates then insertRowsIgnore else insertRows
+
+            match insert store db table cols rowsValues |> withGeneratedRecomputed store registry dbName db table with
+            | Ok(newLastId, affected) -> (if newLastId <> 0L then newLastId else lastInsertId), Affected(uint64 affected)
+            | Error e -> lastInsertId, storageErr e
+
     | Select select -> lastInsertId, (runSelectStmt store registry dbName select None |> fst)
 
     | Union(first, rest, orderBy, limit, offset) ->

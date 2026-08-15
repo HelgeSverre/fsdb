@@ -498,6 +498,49 @@ let tests =
                     | other -> failtestf "expected 1 row affected, got %A" other ]
 
           testList
+              "INSERT ... SELECT"
+              [ testCase "inserts every row a SELECT (with WHERE/GROUP BY/aggregates) produces"
+                <| fun _ ->
+                    // Regression: `Ast.Statement.Insert`'s only row source
+                    // was a literal `VALUES` list — `INSERT INTO t (cols)
+                    // SELECT ...` (a Laravel reporting-job staple: roll a
+                    // detail table up into a daily summary table) was a
+                    // clean 1064 syntax error.
+                    let store = newStore ()
+                    runDefault store "CREATE TABLE sales (region VARCHAR(10), amount INT)" |> ignore
+                    runDefault store "CREATE TABLE region_totals (region VARCHAR(10), total INT)" |> ignore
+
+                    runDefault
+                        store
+                        "INSERT INTO sales VALUES ('east', 10), ('east', 20), ('west', 5)"
+                    |> ignore
+
+                    match
+                        runDefault
+                            store
+                            "INSERT INTO region_totals (region, total) SELECT region, SUM(amount) FROM sales GROUP BY region ORDER BY region"
+                    with
+                    | Affected 2UL -> ()
+                    | other -> failtestf "expected 2 rows inserted, got %A" other
+
+                    match runDefault store "SELECT region, total FROM region_totals ORDER BY region" with
+                    | ResultSet([ "region"; "total" ], rows) ->
+                        Expect.equal rows [ [ Some "east"; Some "30" ]; [ Some "west"; Some "5" ] ] "one summary row per region"
+                    | other -> failtestf "expected the grouped totals, got %A" other
+
+                testCase "INSERT IGNORE ... SELECT skips rows that violate a unique constraint instead of failing"
+                <| fun _ ->
+                    let store = newStore ()
+                    runDefault store "CREATE TABLE src (id INT)" |> ignore
+                    runDefault store "CREATE TABLE dst (id INT UNIQUE)" |> ignore
+                    runDefault store "INSERT INTO src VALUES (1), (2)" |> ignore
+                    runDefault store "INSERT INTO dst VALUES (1)" |> ignore
+
+                    match runDefault store "INSERT IGNORE INTO dst (id) SELECT id FROM src ORDER BY id" with
+                    | Affected 1UL -> ()
+                    | other -> failtestf "expected only id=2 inserted (id=1 collides), got %A" other ]
+
+          testList
               "CAST and new column types"
               [ testCase "CAST(x AS UNSIGNED)/CAST(x AS SIGNED) coerce to an integer"
                 <| fun _ ->

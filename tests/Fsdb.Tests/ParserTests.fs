@@ -798,7 +798,35 @@ let tests =
                             [ "b", BinOp(Add, FuncCall("VALUES", [ col "b" ]), Lit(VInt 1L)) ],
                             false
                         ))
-                        "on duplicate key update" ]
+                        "on duplicate key update"
+
+                testCase "INSERT INTO t (cols) SELECT ... is InsertSelect, not a VALUES Insert"
+                <| fun _ ->
+                    Expect.equal
+                        (parseOk "INSERT INTO t (a, b) SELECT x, y FROM u WHERE x > 1")
+                        (InsertSelect(
+                            "t",
+                            [ "a"; "b" ],
+                            { Projections = [ col "x", None; col "y", None ]
+                              Distinct = false
+                              From = Some(FromTable { Database = None; Table = "u"; Alias = None })
+                              Joins = []
+                              Where = Some(BinOp(Gt, col "x", Lit(VInt 1L)))
+                              GroupBy = []
+                              Having = None
+                              OrderBy = []
+                              Limit = None
+                              Offset = None
+                              Locking = false },
+                            false
+                        ))
+                        "insert select"
+
+                testCase "INSERT IGNORE INTO t SELECT ... sets the ignore flag"
+                <| fun _ ->
+                    match parseOk "INSERT IGNORE INTO t SELECT * FROM u" with
+                    | InsertSelect("t", [], _, true) -> ()
+                    | other -> failtestf "expected an ignore-flagged InsertSelect, got %A" other ]
 
           testList
               "UPDATE / DELETE"
