@@ -1326,6 +1326,54 @@ let tests =
                             "every combination"
                     | other -> failtestf "expected a 2x2 Cartesian product, got %A" other
 
+                testCase "FROM t1, t2 (comma/implicit join) works the same as an explicit CROSS JOIN"
+                <| fun _ ->
+                    let store = newStore ()
+                    runDefault store "CREATE TABLE a (x INT)" |> ignore
+                    runDefault store "CREATE TABLE b (y INT)" |> ignore
+                    runDefault store "INSERT INTO a VALUES (1), (2)" |> ignore
+                    runDefault store "INSERT INTO b VALUES (10), (20)" |> ignore
+
+                    match runDefault store "SELECT x, y FROM a, b ORDER BY x, y" with
+                    | ResultSet([ "x"; "y" ], rows) ->
+                        Expect.equal
+                            rows
+                            [ [ Some "1"; Some "10" ]; [ Some "1"; Some "20" ]; [ Some "2"; Some "10" ]; [ Some "2"; Some "20" ] ]
+                            "every combination, same as CROSS JOIN"
+                    | other -> failtestf "expected a 2x2 Cartesian product, got %A" other
+
+                testCase "UPDATE t1, t2 SET ... WHERE ... (comma join) updates matched rows"
+                <| fun _ ->
+                    let store = newStore ()
+                    runDefault store "CREATE TABLE t1 (id INT, x INT)" |> ignore
+                    runDefault store "CREATE TABLE t2 (t1id INT, y INT)" |> ignore
+                    runDefault store "INSERT INTO t1 VALUES (1, 0)" |> ignore
+                    runDefault store "INSERT INTO t2 VALUES (1, 5)" |> ignore
+
+                    match runDefault store "UPDATE t1, t2 SET t1.x = t2.y WHERE t1.id = t2.t1id" with
+                    | Affected 1UL -> ()
+                    | other -> failtestf "expected 1 row affected, got %A" other
+
+                    match runDefault store "SELECT x FROM t1" with
+                    | ResultSet(_, [ [ Some "5" ] ]) -> ()
+                    | other -> failtestf "expected t1.x set from t2.y, got %A" other
+
+                testCase "DELETE t1 FROM t1, t2 WHERE ... (comma join) deletes matched rows"
+                <| fun _ ->
+                    let store = newStore ()
+                    runDefault store "CREATE TABLE t1 (id INT)" |> ignore
+                    runDefault store "CREATE TABLE t2 (t1id INT, y INT)" |> ignore
+                    runDefault store "INSERT INTO t1 VALUES (1), (2)" |> ignore
+                    runDefault store "INSERT INTO t2 VALUES (1, 7)" |> ignore
+
+                    match runDefault store "DELETE t1 FROM t1, t2 WHERE t1.id = t2.t1id AND t2.y > 6" with
+                    | Affected 1UL -> ()
+                    | other -> failtestf "expected 1 row deleted, got %A" other
+
+                    match runDefault store "SELECT id FROM t1 ORDER BY id" with
+                    | ResultSet(_, [ [ Some "2" ] ]) -> ()
+                    | other -> failtestf "expected only id=2 left, got %A" other
+
                 testCase "qualified t.* in a JOIN expands only that table's own columns, not every joined column"
                 <| fun _ ->
                     // Regression: `Ast.Expr.Star` used to drop the

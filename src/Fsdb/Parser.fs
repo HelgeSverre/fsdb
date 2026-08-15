@@ -979,8 +979,20 @@ let private crossJoinClause: Parser<Join, unit> =
     attempt (keyword "CROSS" >>. keyword "JOIN" >>. tableRef)
     |>> fun table -> { Kind = CrossJoin; Table = table; On = Lit(VInt 1L) }
 
+/// `FROM t1, t2` — MySQL's legacy comma (implicit-join) syntax, still the
+/// form plenty of handwritten SQL uses for what an explicit `CROSS JOIN`
+/// says today. Desugars into the exact same `CrossJoin` shape
+/// `crossJoinClause` already produces, so every consumer that already walks
+/// an N-source join list (`Executor.applyJoin`/`runMutationJoin`) lights up
+/// for `SELECT`/`UPDATE`/`DELETE` alike with no executor change; like every
+/// other `Join`, only a real table can follow the comma, not a derived
+/// `(SELECT ...)`.
+let private commaJoinClause: Parser<Join, unit> =
+    attempt (sym "," >>. tableRef) |>> fun table -> { Kind = CrossJoin; Table = table; On = Lit(VInt 1L) }
+
 let private joinClause: Parser<Join, unit> =
     crossJoinClause
+    <|> commaJoinClause
     <|> ((joinKind .>>. tableRef .>> keyword "ON" .>>. expr)
          |>> fun ((kind, table), onExpr) -> { Kind = kind; Table = table; On = onExpr })
 
