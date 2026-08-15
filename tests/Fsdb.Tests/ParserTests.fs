@@ -25,12 +25,15 @@ let private mkSelect
     Select
         { Projections = projections
           Distinct = false
-          From = from |> Option.map (fun t -> { Database = None; Table = t; Alias = None })
+          From = from |> Option.map (fun t -> FromTable { Database = None; Table = t; Alias = None })
           Joins = []
           Where = where
+          GroupBy = []
+          Having = None
           OrderBy = orderBy
           Limit = limit
-          Offset = offset }
+          Offset = offset
+          Locking = false }
 
 let tests =
     testList
@@ -57,12 +60,15 @@ let tests =
                         (Select
                             { Projections = [ Star, None ]
                               Distinct = false
-                              From = Some { Database = Some "information_schema"; Table = "tables"; Alias = Some "t" }
+                              From = Some(FromTable { Database = Some "information_schema"; Table = "tables"; Alias = Some "t" })
                               Joins = []
                               Where = None
+                              GroupBy = []
+                              Having = None
                               OrderBy = []
                               Limit = None
-                              Offset = None })
+                              Offset = None
+                              Locking = false })
                         "qualified aliased table ref"
 
                 testCase "FROM t x: alias without AS"
@@ -72,12 +78,15 @@ let tests =
                         (Select
                             { Projections = [ Star, None ]
                               Distinct = false
-                              From = Some { Database = None; Table = "t"; Alias = Some "x" }
+                              From = Some(FromTable { Database = None; Table = "t"; Alias = Some "x" })
                               Joins = []
                               Where = None
+                              GroupBy = []
+                              Having = None
                               OrderBy = []
                               Limit = None
-                              Offset = None })
+                              Offset = None
+                              Locking = false })
                         "bare alias"
 
                 testCase "SELECT without FROM"
@@ -308,8 +317,8 @@ let tests =
                     Expect.equal
                         (parseOk "SELECT a LIKE '%x%', a NOT LIKE '%y%'")
                         (mkSelect(
-                            [ Like(col "a", Lit(VString "%x%")), None
-                              Not(Like(col "a", Lit(VString "%y%"))), None ],
+                            [ Like(col "a", Lit(VString "%x%"), false), None
+                              Not(Like(col "a", Lit(VString "%y%"), false)), None ],
                             None,
                             None,
                             [],
@@ -943,7 +952,245 @@ let tests =
                             None,
                             None
                         ))
-                        "cast" ]
+                        "cast"
+
+                testCase "CASE WHEN ... THEN ... ELSE ... END (searched form)"
+                <| fun _ ->
+                    Expect.equal
+                        (parseOk "SELECT CASE WHEN a > 0 THEN 'pos' WHEN a < 0 THEN 'neg' ELSE 'zero' END")
+                        (mkSelect(
+                            [ Case(
+                                  None,
+                                  [ BinOp(Gt, col "a", Lit(VInt 0L)), Lit(VString "pos")
+                                    BinOp(Lt, col "a", Lit(VInt 0L)), Lit(VString "neg") ],
+                                  Some(Lit(VString "zero"))
+                              ),
+                              None ],
+                            None,
+                            None,
+                            [],
+                            None,
+                            None
+                        ))
+                        "searched CASE"
+
+                testCase "CASE subject WHEN ... THEN ... END, no ELSE (simple form)"
+                <| fun _ ->
+                    Expect.equal
+                        (parseOk "SELECT CASE status WHEN 1 THEN 'a' WHEN 2 THEN 'b' END")
+                        (mkSelect(
+                            [ Case(Some(col "status"), [ Lit(VInt 1L), Lit(VString "a"); Lit(VInt 2L), Lit(VString "b") ], None), None ],
+                            None,
+                            None,
+                            [],
+                            None,
+                            None
+                        ))
+                        "simple CASE, no ELSE"
+
+                testCase "<=> is the null-safe equals operator"
+                <| fun _ ->
+                    Expect.equal
+                        (parseOk "SELECT a <=> b")
+                        (mkSelect([ BinOp(NullSafeEq, col "a", col "b"), None ], None, None, [], None, None))
+                        "<=>"
+
+                testCase "IS TRUE / IS FALSE / IS NOT TRUE / IS NOT FALSE"
+                <| fun _ ->
+                    Expect.equal
+                        (parseOk "SELECT a IS TRUE, a IS FALSE, a IS NOT TRUE, a IS NOT FALSE")
+                        (mkSelect(
+                            [ IsTrue(col "a"), None
+                              IsFalse(col "a"), None
+                              Not(IsTrue(col "a")), None
+                              Not(IsFalse(col "a")), None ],
+                            None,
+                            None,
+                            [],
+                            None,
+                            None
+                        ))
+                        "IS TRUE/FALSE"
+
+                testCase "LIKE BINARY sets Like's case-sensitive flag"
+                <| fun _ ->
+                    Expect.equal
+                        (parseOk "SELECT a LIKE BINARY 'x', a NOT LIKE BINARY 'y'")
+                        (mkSelect(
+                            [ Like(col "a", Lit(VString "x"), true), None; Not(Like(col "a", Lit(VString "y"), true)), None ],
+                            None,
+                            None,
+                            [],
+                            None,
+                            None
+                        ))
+                        "LIKE BINARY"
+
+                testCase "REGEXP / RLIKE"
+                <| fun _ ->
+                    Expect.equal
+                        (parseOk "SELECT a REGEXP '^x', a RLIKE '^y', a NOT REGEXP '^z'")
+                        (mkSelect(
+                            [ Regexp(col "a", Lit(VString "^x")), None
+                              Regexp(col "a", Lit(VString "^y")), None
+                              Not(Regexp(col "a", Lit(VString "^z"))), None ],
+                            None,
+                            None,
+                            [],
+                            None,
+                            None
+                        ))
+                        "REGEXP/RLIKE"
+
+                testCase "col->'$.path' and col->>'$.path' desugar to JSON_EXTRACT/JSON_UNQUOTE"
+                <| fun _ ->
+                    Expect.equal
+                        (parseOk "SELECT data->'$.a', data->>'$.b'")
+                        (mkSelect(
+                            [ FuncCall("JSON_EXTRACT", [ col "data"; Lit(VString "$.a") ]), None
+                              FuncCall("JSON_UNQUOTE", [ FuncCall("JSON_EXTRACT", [ col "data"; Lit(VString "$.b") ]) ]), None ],
+                            None,
+                            None,
+                            [],
+                            None,
+                            None
+                        ))
+                        "JSON arrow operators"
+
+                testCase "INTERVAL n UNIT parses as a FuncCall shape"
+                <| fun _ ->
+                    Expect.equal
+                        (parseOk "SELECT DATE_ADD(created_at, INTERVAL 1 DAY)")
+                        (mkSelect(
+                            [ FuncCall("DATE_ADD", [ col "created_at"; FuncCall("INTERVAL", [ Lit(VInt 1L); Lit(VString "DAY") ]) ]), None ],
+                            None,
+                            None,
+                            [],
+                            None,
+                            None
+                        ))
+                        "INTERVAL encoding"
+
+                testCase "scalar subquery: (SELECT ...) used as a value"
+                <| fun _ ->
+                    match parseOk "SELECT (SELECT COUNT(*) FROM t) AS c" with
+                    | Select { Projections = [ Subquery { From = Some(FromTable { Table = "t" }) }, Some "c" ] } -> ()
+                    | other -> failtestf "expected a Subquery projection, got %A" other
+
+                testCase "IN (SELECT ...) parses as InSubquery"
+                <| fun _ ->
+                    match parseOk "SELECT a FROM t WHERE a IN (SELECT b FROM u)" with
+                    | Select { Where = Some(InSubquery(Col "a", { From = Some(FromTable { Table = "u" }) })) } -> ()
+                    | other -> failtestf "expected InSubquery, got %A" other
+
+                testCase "NOT IN (SELECT ...) desugars to Not(InSubquery(...))"
+                <| fun _ ->
+                    match parseOk "SELECT a FROM t WHERE a NOT IN (SELECT b FROM u)" with
+                    | Select { Where = Some(Not(InSubquery(Col "a", _))) } -> ()
+                    | other -> failtestf "expected Not(InSubquery(...)), got %A" other
+
+                testCase "NOT EXISTS desugars through the ordinary NOT/EXISTS parsers"
+                <| fun _ ->
+                    match parseOk "SELECT a FROM t WHERE NOT EXISTS (SELECT 1 FROM u)" with
+                    | Select { Where = Some(Not(Exists _)) } -> ()
+                    | other -> failtestf "expected Not(Exists ...), got %A" other ]
+
+          testList
+              "GROUP BY / HAVING"
+              [ testCase "GROUP BY col, HAVING with an aggregate"
+                <| fun _ ->
+                    match parseOk "SELECT dept, COUNT(*) AS c FROM t GROUP BY dept HAVING COUNT(*) > 1" with
+                    | Select { GroupBy = [ Col "dept" ]; Having = Some(BinOp(Gt, FuncCall("COUNT", [ Star ]), Lit(VInt 1L))) } -> ()
+                    | other -> failtestf "expected GroupBy/Having to parse, got %A" other
+
+                testCase "GROUP BY accepts multiple comma-separated expressions"
+                <| fun _ ->
+                    match parseOk "SELECT a, b, COUNT(*) FROM t GROUP BY a, b" with
+                    | Select { GroupBy = [ Col "a"; Col "b" ] } -> ()
+                    | other -> failtestf "expected two GROUP BY keys, got %A" other
+
+                testCase "COUNT(DISTINCT x) parses to FuncCall with a Distinct-wrapped argument"
+                <| fun _ ->
+                    match parseOk "SELECT COUNT(DISTINCT x) FROM t" with
+                    | Select { Projections = [ FuncCall("COUNT", [ Distinct(Col "x") ]), None ] } -> ()
+                    | other -> failtestf "expected COUNT(DISTINCT x), got %A" other
+
+                testCase "GROUP_CONCAT(x SEPARATOR '-') and GROUP_CONCAT(DISTINCT x)"
+                <| fun _ ->
+                    let expectedProjections =
+                        [ FuncCall("GROUP_CONCAT", [ Col "x"; Lit(VString "-") ]), None
+                          FuncCall("GROUP_CONCAT", [ Distinct(Col "y") ]), None ]
+
+                    match parseOk "SELECT GROUP_CONCAT(x SEPARATOR '-'), GROUP_CONCAT(DISTINCT y) FROM t" with
+                    | Select { Projections = projs } -> Expect.equal projs expectedProjections "two GROUP_CONCAT shapes"
+                    | other -> failtestf "expected a Select, got %A" other ]
+
+          testList
+              "JOIN kinds"
+              [ testCase "RIGHT JOIN"
+                <| fun _ ->
+                    match parseOk "SELECT * FROM a RIGHT JOIN b ON a.id = b.a_id" with
+                    | Select { Joins = [ { Kind = RightJoin } ] } -> ()
+                    | other -> failtestf "expected a RightJoin, got %A" other
+
+                testCase "CROSS JOIN has no ON clause and parses to the always-true condition"
+                <| fun _ ->
+                    match parseOk "SELECT * FROM a CROSS JOIN b" with
+                    | Select { Joins = [ { Kind = CrossJoin; On = Lit(VInt 1L) } ] } -> ()
+                    | other -> failtestf "expected a CrossJoin, got %A" other
+
+                testCase "multiple chained joins with aliases"
+                <| fun _ ->
+                    match parseOk "SELECT * FROM a AS x JOIN b AS y ON x.id = y.a_id LEFT JOIN c AS z ON y.id = z.b_id" with
+                    | Select { Joins = [ { Kind = InnerJoin; Table = { Alias = Some "y" } }; { Kind = LeftJoin; Table = { Alias = Some "z" } } ] } ->
+                        ()
+                    | other -> failtestf "expected two chained joins, got %A" other ]
+
+          testList
+              "derived tables and UNION"
+              [ testCase "FROM (SELECT ...) AS t is a derived table"
+                <| fun _ ->
+                    match parseOk "SELECT * FROM (SELECT id FROM t) AS derived" with
+                    | Select { From = Some(FromSubquery({ From = Some(FromTable { Table = "t" }) }, "derived")) } -> ()
+                    | other -> failtestf "expected a FromSubquery, got %A" other
+
+                testCase "UNION ALL keeps duplicates, plain UNION dedupes"
+                <| fun _ ->
+                    match parseOk "SELECT a FROM t UNION ALL SELECT b FROM u UNION SELECT c FROM v" with
+                    | Union(_, [ (true, _); (false, _) ], _, _, _) -> ()
+                    | other -> failtestf "expected a two-branch Union with ALL then DISTINCT flags, got %A" other
+
+                testCase "a single SELECT (no UNION) still parses to the plain Select case"
+                <| fun _ ->
+                    match parseOk "SELECT a FROM t" with
+                    | Select _ -> ()
+                    | other -> failtestf "expected a plain Select, got %A" other
+
+                testCase "trailing ORDER BY/LIMIT after a UNION apply to the combined result"
+                <| fun _ ->
+                    match parseOk "SELECT a FROM t UNION SELECT a FROM u ORDER BY a LIMIT 5" with
+                    | Union(_, _, [ (Col "a", Asc) ], Some 5, None) -> ()
+                    | other -> failtestf "expected the trailing ORDER BY/LIMIT to land on the Union, got %A" other ]
+
+          testList
+              "FOR UPDATE / LOCK IN SHARE MODE"
+              [ testCase "FOR UPDATE sets Locking"
+                <| fun _ ->
+                    match parseOk "SELECT * FROM t FOR UPDATE" with
+                    | Select { Locking = true } -> ()
+                    | other -> failtestf "expected Locking = true, got %A" other
+
+                testCase "LOCK IN SHARE MODE sets Locking"
+                <| fun _ ->
+                    match parseOk "SELECT * FROM t LOCK IN SHARE MODE" with
+                    | Select { Locking = true } -> ()
+                    | other -> failtestf "expected Locking = true, got %A" other
+
+                testCase "no locking clause leaves Locking false"
+                <| fun _ ->
+                    match parseOk "SELECT * FROM t" with
+                    | Select { Locking = false } -> ()
+                    | other -> failtestf "expected Locking = false, got %A" other ]
 
           testList
               "failure cases"

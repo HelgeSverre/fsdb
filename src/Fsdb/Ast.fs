@@ -20,6 +20,10 @@ type Op =
     | Sub
     | Mul
     | Div
+    /// `<=>` — the null-safe equals operator: like `Eq` except `NULL <=> NULL`
+    /// is true (rather than `NULL`) and `NULL <=> anything-else` is false
+    /// (rather than `NULL`) — it never returns SQL's three-valued unknown.
+    | NullSafeEq
 
 type ColumnType =
     | TTinyInt of unsigned: bool
@@ -68,10 +72,29 @@ type Expr =
     | Not of Expr
     | IsNull of Expr
     | IsNotNull of Expr
-    | Like of Expr * pattern: Expr
+    /// `IS TRUE` / `IS FALSE` — three-valued like the `IsNull` pair: `NULL IS
+    /// TRUE` and `NULL IS FALSE` both evaluate to false (not NULL), since a
+    /// truth test is always a plain boolean answer, never itself unknown.
+    | IsTrue of Expr
+    | IsFalse of Expr
+    /// `caseSensitive` is set by `LIKE BINARY`, MySQL's shorthand for a
+    /// byte-for-byte (rather than the engine's default case-insensitive)
+    /// pattern match — plain `LIKE` always sets it false.
+    | Like of Expr * pattern: Expr * caseSensitive: bool
+    | Regexp of Expr * pattern: Expr
     | In of Expr * candidates: Expr list
+    /// `expr IN (SELECT ...)` — the candidate set is a subquery's first
+    /// column rather than a literal list; `Not(InSubquery(...))` is `NOT IN
+    /// (SELECT ...)`, the same desugaring `In`'s own `NOT IN` already uses.
+    | InSubquery of Expr * SelectStmt
     | Between of Expr * lo: Expr * hi: Expr
     | FuncCall of name: string * args: Expr list
+    /// Marks `DISTINCT expr` as an aggregate call's argument (`COUNT(DISTINCT
+    /// x)`, `SUM(DISTINCT x)`, ...) — only meaningful as the (unwrapped) sole
+    /// argument of a `FuncCall` the executor recognizes as an aggregate;
+    /// anywhere else it's a parse shape that can't occur, since the parser
+    /// only ever produces it inside a function call's argument list.
+    | Distinct of Expr
     /// Minimal `CAST(expr AS type)` — reuses `ColumnType` rather than a
     /// separate cast-target vocabulary, coerced the same way a column of
     /// that type would be (see `Storage.coerceValue`).
@@ -79,10 +102,20 @@ type Expr =
     /// `SELECT *` / `SELECT t.*`.
     | Star
     /// `EXISTS (SELECT ...)` — true iff the subquery returns at least one
-    /// row. Only the boolean form is needed so far (Laravel's schema-probe
-    /// queries: `hasTable`/`hasColumn`/...); add a general scalar-subquery
-    /// case (`(SELECT ...)` used as a value) when a migration needs one.
+    /// row.
     | Exists of SelectStmt
+    /// `(SELECT ...)` used as a value — the subquery must yield exactly one
+    /// column; zero rows evaluates to `NULL`, more than one row is MySQL
+    /// error 1242, exactly one row yields that row's single column value.
+    | Subquery of SelectStmt
+    /// `CASE WHEN cond THEN result ... [ELSE result] END` (the "searched"
+    /// form, `subject = None`, each `whens` key is a boolean condition) or
+    /// `CASE subject WHEN value THEN result ... [ELSE result] END` (the
+    /// "simple" form, `subject = Some ...`, each `whens` key compares equal
+    /// to `subject` instead) — one case instead of two so the executor's
+    /// every other `Expr`-walking function (`containsAggregate`,
+    /// `rewriteAggregates`, ...) only needs one branch to recurse through.
+    | Case of subject: Expr option * whens: (Expr * Expr) list * elseBranch: Expr option
 
 and Direction =
     | Asc
@@ -140,12 +173,27 @@ and TableRef =
       Table: string
       Alias: string option }
 
-/// `INNER JOIN` requires a matching row on `On`; `LEFT JOIN` keeps every
-/// left-hand row even without one, padding the right-hand columns with
-/// `NULL` (SQL's standard outer-join semantics).
+/// A `SELECT`'s `FROM` target: a real (or `information_schema` virtual)
+/// table, or a derived table — `FROM (SELECT ...) AS alias` — whose alias is
+/// mandatory (MySQL requires one) and doubles as the qualifier later
+/// `t.col` references resolve against, the same way a real table's alias
+/// does.
+and FromItem =
+    | FromTable of TableRef
+    | FromSubquery of SelectStmt * alias: string
+
+/// `INNER`/`CROSS JOIN` require a matching row on `On` (`CROSS JOIN` has no
+/// `ON` at all — the parser gives it the always-true `Lit (VInt 1L)` so it
+/// shares `INNER JOIN`'s matching logic and produces every combination, the
+/// Cartesian product); `LEFT JOIN` keeps every left-hand row even without a
+/// match, padding the right-hand columns with `NULL`; `RIGHT JOIN` is the
+/// mirror, keeping every right-hand row and padding the left-hand columns
+/// (SQL's standard outer-join semantics either way).
 and JoinKind =
     | InnerJoin
     | LeftJoin
+    | RightJoin
+    | CrossJoin
 
 /// One `[INNER | LEFT [OUTER]] JOIN table ON expr` clause, applied against
 /// whatever's already in scope to its left (the `FROM` table, or the result
@@ -164,12 +212,30 @@ and Join =
 and SelectStmt =
     { Projections: Projection list
       Distinct: bool
-      From: TableRef option
+      From: FromItem option
       Joins: Join list
       Where: Expr option
+      /// `GROUP BY` key expressions — a positional integer (`GROUP BY 2`) or
+      /// a bare column that names a `SELECT ... AS alias` resolve against
+      /// `Projections` the same way `OrderBy` already does, both at
+      /// execution time (`Executor.resolveGroupOrOrderExpr`) rather than
+      /// here, since resolving an alias needs the sibling projection list in
+      /// scope.
+      GroupBy: Expr list
+      /// `HAVING` filters *grouped* rows (after `GroupBy` collapses the
+      /// `WHERE`-filtered set, or the whole result as one group when
+      /// `GroupBy` is empty) — unlike `Where`, its expression may contain
+      /// aggregate calls that aren't in `Projections` at all (`HAVING
+      /// COUNT(*) > 1`).
+      Having: Expr option
       OrderBy: OrderKey list
       Limit: int option
-      Offset: int option }
+      Offset: int option
+      /// `FOR UPDATE` / `LOCK IN SHARE MODE` — accepted and ignored: this
+      /// engine has no row-level locking to apply it to (no concurrent
+      /// writers within one in-memory `Store`), so the clause only needs to
+      /// parse rather than change execution.
+      Locking: bool }
 
 /// One `ALTER TABLE` action; a statement carries a list of these since
 /// MySQL (and Laravel) commonly comma-separates several in one `ALTER
@@ -211,6 +277,14 @@ type Statement =
         onDuplicateUpdate: (string * Expr) list *
         ignoreDuplicates: bool
     | Select of SelectStmt
+    /// `select1 UNION [ALL|DISTINCT] select2 [UNION [ALL|DISTINCT] select3 ...]
+    /// [ORDER BY ...] [LIMIT ...]` — `First`/`Rest` are the branches with
+    /// each `Rest` member's own `bool` recording whether *that* `UNION` was
+    /// `ALL` (duplicates kept) or plain/`DISTINCT` (deduped against
+    /// everything combined so far); the trailing `ORDER BY`/`LIMIT` apply to
+    /// the whole combined result, so they live here rather than on any one
+    /// branch's own (unused) `SelectStmt.OrderBy`/`Limit`.
+    | Union of first: SelectStmt * rest: (bool * SelectStmt) list * orderBy: OrderKey list * limit: int option * offset: int option
     | Update of table: string * assignments: (string * Expr) list * where: Expr option
     | Delete of table: string * where: Expr option
     | Truncate of table: string

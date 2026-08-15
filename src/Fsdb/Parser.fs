@@ -109,8 +109,17 @@ let private reservedWords =
           "join"
           "inner"
           "left"
+          "right"
+          "cross"
           "outer"
-          "on" ],
+          "on"
+          "group"
+          "having"
+          "union"
+          "all"
+          "when"
+          "for"
+          "lock" ],
         StringComparer.OrdinalIgnoreCase
     )
 
@@ -289,6 +298,14 @@ let private parenExpr: Parser<Expr, unit> = between (sym "(") (sym ")") expr
 
 let private starAtom: Parser<Expr, unit> = pstring "*" >>. ws >>% Star
 
+/// `DISTINCT expr` inside a function call's argument list (`COUNT(DISTINCT
+/// x)`, `SUM(DISTINCT x)`, ...) — only meaningful for an aggregate, but
+/// accepted for any call syntactically, same as the codebase's other
+/// accept-and-let-the-executor-care choices (e.g. `MIgnored` column
+/// modifiers).
+let private distinctArg: Parser<Expr, unit> =
+    (attempt (keyword "DISTINCT" >>. expr) |>> Distinct) <|> expr
+
 /// A function call built from a *raw* word rather than `identifier` — tried
 /// before the reserved-word check, the same way MySQL disambiguates a
 /// function name from a keyword (`IF(...)`, `LEFT(...)`): a word
@@ -300,8 +317,24 @@ let private starAtom: Parser<Expr, unit> = pstring "*" >>. ws >>% Star
 /// with no `(` falls through to `identAtom`'s normal (and still
 /// reserved-word-rejecting) column/qualified-column path.
 let private funcCallAtom: Parser<Expr, unit> =
-    attempt ((many1Satisfy2 isIdentStart isIdentChar .>> ws) .>>. (sym "(" >>. sepBy expr (sym ",") .>> sym ")"))
+    attempt ((many1Satisfy2 isIdentStart isIdentChar .>> ws) .>>. (sym "(" >>. sepBy distinctArg (sym ",") .>> sym ")"))
     |>> FuncCall
+
+/// `GROUP_CONCAT([DISTINCT] expr [SEPARATOR 'str'])` — parsed separately
+/// from `funcCallAtom` rather than folding `SEPARATOR` into the general
+/// call-argument grammar, since it's the one built-in whose argument list
+/// isn't just a comma-separated expression list. `ORDER BY` inside the call
+/// (`GROUP_CONCAT(x ORDER BY y)`) is real MySQL syntax too — ponytail: not
+/// accepted here, add it if a migration's assertion ever depends on the
+/// concatenation order rather than just the member set/count.
+let private groupConcatAtom: Parser<Expr, unit> =
+    attempt (keyword "GROUP_CONCAT" >>. sym "(")
+    >>. (opt (keyword "DISTINCT") .>>. expr)
+    .>>. opt (keyword "SEPARATOR" >>. (stringLit |>> Lit))
+    .>> sym ")"
+    |>> fun ((distinctOpt, arg), sepOpt) ->
+        let argExpr = if distinctOpt.IsSome then Distinct arg else arg
+        FuncCall("GROUP_CONCAT", argExpr :: (sepOpt |> Option.toList))
 
 /// `CAST(expr AS type)` — `SIGNED`/`UNSIGNED [INTEGER]` are only valid as a
 /// cast target, not a column type, so they're handled here rather than in
@@ -319,6 +352,40 @@ let private castExpr: Parser<Expr, unit> =
 let private existsExpr: Parser<Expr, unit> =
     attempt (keyword "EXISTS" >>. sym "(" >>. selectStmtRecord .>> sym ")") |>> Exists
 
+/// `(SELECT ...)` used as a value — tried with `attempt` ahead of `parenExpr`
+/// since both start with `(`; a plain parenthesized expression never starts
+/// with the `SELECT` keyword, so the two never actually compete once
+/// `selectStmtRecord` commits.
+let private subqueryExpr: Parser<Expr, unit> =
+    attempt (sym "(" >>. selectStmtRecord .>> sym ")") |>> Subquery
+
+/// `INTERVAL n UNIT` — only ever valid as a date-arithmetic function's
+/// argument (`DATE_ADD(x, INTERVAL 1 DAY)`), but parsed here as a general
+/// expression atom (rather than special-cased only inside a call's argument
+/// list) since that's the one place it can occur and this is simpler than
+/// threading a separate "date-function argument" grammar through just for
+/// it. Encodes as `FuncCall("INTERVAL", [n; Lit(VString "DAY")])` — the unit
+/// word is accepted as-is (uppercased) and not validated against MySQL's
+/// real unit list, left for whatever date function reads it.
+let private intervalAtom: Parser<Expr, unit> =
+    attempt (keyword "INTERVAL" >>. expr .>>. (many1Satisfy2 isIdentStart isIdentChar .>> ws))
+    |>> fun (n, unit) -> FuncCall("INTERVAL", [ n; Lit(VString(unit.ToUpperInvariant())) ])
+
+let private caseWhenThen: Parser<Expr * Expr, unit> = (keyword "WHEN" >>. expr .>> keyword "THEN") .>>. expr
+
+/// `CASE WHEN cond THEN result ... [ELSE result] END` (searched form) and
+/// `CASE subject WHEN value THEN result ... [ELSE result] END` (simple
+/// form) share one production: `opt expr` right after `CASE` either matches
+/// the simple form's subject or (since `WHEN` is a reserved word and can't
+/// start an expression) consumes nothing and leaves the searched form's
+/// `WHEN` for `caseWhenThen`.
+let private caseExpr: Parser<Expr, unit> =
+    attempt (
+        keyword "CASE" >>. opt expr .>>. many1 caseWhenThen .>>. opt (keyword "ELSE" >>. expr)
+        .>> keyword "END"
+    )
+    |>> fun ((subject, whens), elseBranch) -> Case(subject, whens, elseBranch)
+
 /// A bare word: a column, a qualified `t.col` (or `t.*`, which is `Star` —
 /// `Ast.Expr` doesn't distinguish it from an unqualified `*`), or a function
 /// call if followed by `(args)` (handled by `funcCallAtom` above, tried
@@ -333,10 +400,14 @@ let private identAtom: Parser<Expr, unit> =
 
 let private atom: Parser<Expr, unit> =
     choice
-        [ parenExpr
+        [ subqueryExpr
+          parenExpr
           starAtom
           castExpr
           existsExpr
+          caseExpr
+          intervalAtom
+          groupConcatAtom
           numberLit |>> Lit
           stringLit |>> Lit
           keyword "NULL" >>% Lit VNull
@@ -345,13 +416,32 @@ let private atom: Parser<Expr, unit> =
           identAtom ]
     <?> "expression"
 
+/// `col->'$.path'` / `col->>'$.path'` — MySQL's JSON path-extraction
+/// operators, desugared at parse time into ordinary function calls
+/// (`JSON_EXTRACT`, and `->>` additionally unquotes the result) rather than
+/// adding an `Expr` case: they're pure sugar over a function pair the
+/// registry already needs to provide, so the executor only ever sees a
+/// `FuncCall` either way. Postfix and left-associative (chains `many`), tried
+/// at the atom level (rather than as an `opp` infix operator) since the
+/// right-hand side is always a string literal path, never a general
+/// expression.
+let private jsonArrowAtom: Parser<Expr, unit> =
+    atom
+    >>= fun a ->
+        many (
+            choice
+                [ sym "->>" >>. stringLit |>> fun p e -> FuncCall("JSON_UNQUOTE", [ FuncCall("JSON_EXTRACT", [ e; Lit p ]) ])
+                  sym "->" >>. stringLit |>> fun p e -> FuncCall("JSON_EXTRACT", [ e; Lit p ]) ]
+        )
+        |>> List.fold (fun acc f -> f acc) a
+
 /// Arithmetic: `+ -` bind loosest, `* / %` tighter, unary `-` tightest.
 /// `Ast.Op` has no modulo or unary-negation case, so both desugar: `%`
 /// becomes a call to `MOD` (which is what MySQL's `%` already means) and
 /// unary `-x` becomes `0 - x`.
 let private opp = OperatorPrecedenceParser<Expr, unit, unit>()
 let private arithExpr = opp.ExpressionParser
-opp.TermParser <- atom
+opp.TermParser <- jsonArrowAtom
 opp.AddOperator(InfixOperator("+", ws, 1, Associativity.Left, (fun a b -> BinOp(Add, a, b))))
 opp.AddOperator(InfixOperator("-", ws, 1, Associativity.Left, (fun a b -> BinOp(Sub, a, b))))
 opp.AddOperator(InfixOperator("*", ws, 2, Associativity.Left, (fun a b -> BinOp(Mul, a, b))))
@@ -359,7 +449,12 @@ opp.AddOperator(InfixOperator("/", ws, 2, Associativity.Left, (fun a b -> BinOp(
 opp.AddOperator(InfixOperator("%", ws, 2, Associativity.Left, (fun a b -> FuncCall("MOD", [ a; b ]))))
 opp.AddOperator(PrefixOperator("-", ws, 3, true, (fun e -> BinOp(Sub, Lit(VInt 0L), e))))
 
-let private inList: Parser<Expr list, unit> = between (sym "(") (sym ")") (sepBy1 expr (sym ","))
+/// `IN (SELECT ...)` vs. `IN (expr, expr, ...)` — both start with `(`, so
+/// the subquery form is tried first (`attempt`ed since `selectStmtRecord`
+/// commits on its leading `SELECT` keyword the same way `subqueryExpr`
+/// does) before falling back to the literal candidate list.
+let private inCandidates: Parser<Choice<SelectStmt, Expr list>, unit> =
+    sym "(" >>. (attempt (selectStmtRecord |>> Choice1Of2) <|> (sepBy1 expr (sym ",") |>> Choice2Of2)) .>> sym ")"
 
 let private betweenTail: Parser<Expr * Expr, unit> = (arithExpr .>> keyword "AND") .>>. arithExpr
 
@@ -369,7 +464,8 @@ let private betweenTail: Parser<Expr * Expr, unit> = (arithExpr .>> keyword "AND
 /// since `Ast.Expr` doesn't carry negated variants of its own.
 let private compareOp: Parser<Op, unit> =
     choice
-        [ pstring "<=" >>% Lte
+        [ pstring "<=>" >>% NullSafeEq
+          pstring "<=" >>% Lte
           pstring ">=" >>% Gte
           pstring "<>" >>% Neq
           pstring "!=" >>% Neq
@@ -381,13 +477,28 @@ let private compareOp: Parser<Op, unit> =
 let private comparisonExpr: Parser<Expr, unit> =
     arithExpr
     >>= fun left ->
+        let inExpr xs =
+            match xs with
+            | Choice1Of2 sel -> InSubquery(left, sel)
+            | Choice2Of2 candidates -> In(left, candidates)
+
         choice
             [ attempt (keyword "IS" >>. keyword "NOT" >>. keyword "NULL") >>% IsNotNull left
               attempt (keyword "IS" >>. keyword "NULL") >>% IsNull left
-              attempt (keyword "NOT" >>. keyword "LIKE") >>. arithExpr |>> fun p -> Not(Like(left, p))
-              keyword "LIKE" >>. arithExpr |>> fun p -> Like(left, p)
-              attempt (keyword "NOT" >>. keyword "IN") >>. inList |>> fun xs -> Not(In(left, xs))
-              keyword "IN" >>. inList |>> fun xs -> In(left, xs)
+              attempt (keyword "IS" >>. keyword "NOT" >>. keyword "TRUE") >>% Not(IsTrue left)
+              attempt (keyword "IS" >>. keyword "NOT" >>. keyword "FALSE") >>% Not(IsFalse left)
+              attempt (keyword "IS" >>. keyword "TRUE") >>% IsTrue left
+              attempt (keyword "IS" >>. keyword "FALSE") >>% IsFalse left
+              attempt (keyword "NOT" >>. keyword "LIKE" >>. keyword "BINARY") >>. arithExpr
+              |>> fun p -> Not(Like(left, p, true))
+              attempt (keyword "LIKE" >>. keyword "BINARY") >>. arithExpr |>> fun p -> Like(left, p, true)
+              attempt (keyword "NOT" >>. keyword "LIKE") >>. arithExpr |>> fun p -> Not(Like(left, p, false))
+              keyword "LIKE" >>. arithExpr |>> fun p -> Like(left, p, false)
+              attempt (keyword "NOT" >>. (keyword "REGEXP" <|> keyword "RLIKE")) >>. arithExpr
+              |>> fun p -> Not(Regexp(left, p))
+              (keyword "REGEXP" <|> keyword "RLIKE") >>. arithExpr |>> fun p -> Regexp(left, p)
+              attempt (keyword "NOT" >>. keyword "IN") >>. inCandidates |>> (inExpr >> Not)
+              keyword "IN" >>. inCandidates |>> inExpr
               attempt (keyword "NOT" >>. keyword "BETWEEN") >>. betweenTail
               |>> fun (lo, hi) -> Not(Between(left, lo, hi))
               keyword "BETWEEN" >>. betweenTail |>> fun (lo, hi) -> Between(left, lo, hi)
@@ -764,25 +875,62 @@ let private tableRef: Parser<TableRef, unit> =
         | Some table -> { Database = Some first; Table = table; Alias = alias }
         | None -> { Database = None; Table = first; Alias = alias }
 
-/// `[INNER] JOIN` and `LEFT [OUTER] JOIN` — the only two kinds `Ast.JoinKind`
-/// has; a bare `JOIN` (no `INNER`) means the same as `INNER JOIN`, matching
-/// MySQL.
+/// `FROM (SELECT ...) AS alias` — a derived table; the alias is required
+/// (MySQL rejects an unaliased one), so unlike `tableRef`'s optional alias
+/// this one is a plain `identifier`, not an `opt`. Tried with `attempt`
+/// ahead of `tableRef |>> FromTable` since both start by looking for `(` vs.
+/// a bare identifier — no ambiguity in practice (a real table name is never
+/// `(`), but `attempt` keeps the two alternatives cleanly independent.
+let private derivedTable: Parser<FromItem, unit> =
+    attempt (sym "(" >>. selectStmtRecord .>> sym ")" .>>. ((keyword "AS" >>. identifier) <|> identifier))
+    |>> FromSubquery
+
+let private fromItem: Parser<FromItem, unit> = derivedTable <|> (tableRef |>> FromTable)
+
+/// `[INNER] JOIN`, `LEFT [OUTER] JOIN`, and `RIGHT [OUTER] JOIN` all require
+/// an `ON`; `CROSS JOIN` (parsed separately by `crossJoinClause` below) never
+/// takes one. A bare `JOIN` (no `INNER`) means the same as `INNER JOIN`,
+/// matching MySQL.
 let private joinKind: Parser<JoinKind, unit> =
     (keyword "INNER" >>. keyword "JOIN" >>% InnerJoin)
     <|> (keyword "LEFT" >>. optional (keyword "OUTER") >>. keyword "JOIN" >>% LeftJoin)
+    <|> (keyword "RIGHT" >>. optional (keyword "OUTER") >>. keyword "JOIN" >>% RightJoin)
     <|> (keyword "JOIN" >>% InnerJoin)
 
+/// `CROSS JOIN table` — no `ON` at all; encoded with the always-true
+/// `Lit (VInt 1L)` condition so `Executor.applyJoin` can run it through the
+/// exact same matching logic as `INNER JOIN` (every pair "matches") instead
+/// of a separate Cartesian-product code path.
+let private crossJoinClause: Parser<Join, unit> =
+    attempt (keyword "CROSS" >>. keyword "JOIN" >>. tableRef)
+    |>> fun table -> { Kind = CrossJoin; Table = table; On = Lit(VInt 1L) }
+
 let private joinClause: Parser<Join, unit> =
-    (joinKind .>>. tableRef .>> keyword "ON" .>>. expr)
-    |>> fun ((kind, table), onExpr) -> { Kind = kind; Table = table; On = onExpr }
+    crossJoinClause
+    <|> ((joinKind .>>. tableRef .>> keyword "ON" .>>. expr)
+         |>> fun ((kind, table), onExpr) -> { Kind = kind; Table = table; On = onExpr })
+
+let private groupByClause: Parser<Expr list, unit> = keyword "GROUP" >>. keyword "BY" >>. sepBy1 expr (sym ",")
+
+let private havingClause: Parser<Expr, unit> = keyword "HAVING" >>. expr
+
+/// `FOR UPDATE` / `FOR SHARE` / `LOCK IN SHARE MODE` — parsed and discarded;
+/// see the `Ast.SelectStmt.Locking` doc for why there's nothing else to do
+/// with it.
+let private lockClause: Parser<unit, unit> =
+    (keyword "FOR" >>. (keyword "UPDATE" <|> (keyword "SHARE" >>% ())) >>% ())
+    <|> (keyword "LOCK" >>. keyword "IN" >>. keyword "SHARE" >>. keyword "MODE" >>% ())
 
 selectStmtRecordRef.Value <-
     (keyword "SELECT" >>. opt (keyword "DISTINCT") .>>. sepBy1 projection (sym ",")
-     .>>. opt (keyword "FROM" >>. tableRef .>>. many joinClause)
+     .>>. opt (keyword "FROM" >>. fromItem .>>. many joinClause)
      .>>. opt (keyword "WHERE" >>. expr)
+     .>>. opt groupByClause
+     .>>. opt havingClause
      .>>. opt (keyword "ORDER" >>. keyword "BY" >>. sepBy1 orderKey (sym ","))
-     .>>. opt limitClause)
-    |>> fun (((((distinct, projs), fromAndJoins), where), orderBy), limitOffset) ->
+     .>>. opt limitClause
+     .>>. opt lockClause)
+    |>> fun ((((((((distinct, projs), fromAndJoins), where), groupBy), having), orderBy), limitOffset), locking) ->
         let limit, offset = limitOffset |> Option.defaultValue (None, None)
         let from = fromAndJoins |> Option.map fst
         let joins = fromAndJoins |> Option.map snd |> Option.defaultValue []
@@ -792,11 +940,32 @@ selectStmtRecordRef.Value <-
           From = from
           Joins = joins
           Where = where
+          GroupBy = groupBy |> Option.defaultValue []
+          Having = having
           OrderBy = orderBy |> Option.defaultValue []
           Limit = limit
-          Offset = offset }
+          Offset = offset
+          Locking = locking.IsSome }
 
-let private selectStmt: Parser<Statement, unit> = selectStmtRecord |>> Select
+/// `UNION [ALL|DISTINCT]` between two `SELECT`s — `ALL` keeps duplicates,
+/// plain `UNION` (or explicit `DISTINCT`) dedupes, matching MySQL's default.
+let private unionOp: Parser<bool, unit> =
+    keyword "UNION" >>. ((keyword "ALL" >>% true) <|> (optional (keyword "DISTINCT") >>% false))
+
+/// A single `SELECT`, or a `UNION`-chained sequence of them. Each branch is
+/// a full `selectStmtRecord` (so it can itself carry a trailing `ORDER
+/// BY`/`LIMIT`/lock clause), but only the *last* branch's ever ends up
+/// meaning anything: real MySQL requires parenthesizing an individual
+/// branch's own `ORDER BY`, so a bare trailing one only ever belongs to the
+/// combined result — reading it off whichever branch parsed last gets that
+/// for free without a separate "top-level" clause in the grammar.
+let private selectOrUnionStmt: Parser<Statement, unit> =
+    selectStmtRecord .>>. many (unionOp .>>. selectStmtRecord)
+    |>> function
+        | first, [] -> Select first
+        | first, rest ->
+            let last = rest |> List.last |> snd
+            Union(first, rest, last.OrderBy, last.Limit, last.Offset)
 
 /// `UPDATE t [[AS] alias] SET ... [WHERE ...] [ORDER BY ...] [LIMIT ...]` —
 /// the alias, `ORDER BY`, and `LIMIT` are accepted and discarded:
@@ -842,7 +1011,7 @@ let private statement: Parser<Statement, unit> =
           dropIndexStmt
           truncateTable
           insertStmt
-          selectStmt
+          selectOrUnionStmt
           updateStmt
           deleteStmt
           alterTableStmt

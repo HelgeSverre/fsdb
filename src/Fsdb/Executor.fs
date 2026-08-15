@@ -37,20 +37,25 @@ let private storageErr (e: StorageError) : QueryResult =
 let private columnIndexOf (columns: ColumnDef list) : Map<string, int> =
     columns |> List.mapi (fun i c -> c.Name.ToLowerInvariant(), i) |> Map.ofList
 
-/// Whole-table (no `GROUP BY` yet — that's M5) aggregate recognition: a
-/// `FuncCall` whose name is registered as an aggregate on `registry` (see
-/// `Functions.Registry.Aggregates`) rather than a hardcoded name set here —
-/// M6's `registerAggregate` extension point is the same one `Functions`
-/// itself uses for COUNT/SUM/AVG/MIN/MAX.
+/// Aggregate-call recognition: a `FuncCall` whose name is registered as an
+/// aggregate on `registry` (see `Functions.Registry.Aggregates`) rather than
+/// a hardcoded name set here — M6's `registerAggregate` extension point is
+/// the same one `Functions` itself uses for COUNT/SUM/AVG/MIN/MAX — plus
+/// `GROUP_CONCAT`, which is always recognized directly since its
+/// `SEPARATOR`/multi-arg evaluation lives entirely in `evalAggregate` below
+/// rather than the registry (see `Parser.groupConcatAtom`'s doc for why it's
+/// not just another `registerAggregate` entry).
 let private isAggregateCall (registry: Registry) (expr: Expr) : bool =
     match expr with
-    | FuncCall(name, _) -> Functions.lookupAggregate name registry |> Option.isSome
+    | FuncCall(name, _) ->
+        System.String.Equals(name, "GROUP_CONCAT", System.StringComparison.OrdinalIgnoreCase)
+        || Functions.lookupAggregate name registry |> Option.isSome
     | _ -> false
 
 /// Whether `expr` contains an aggregate call *anywhere*, not just at the
 /// top level — `SELECT COUNT(*) + 1 FROM t` or a `WHERE`-style predicate
 /// nesting one inside a `HAVING`-shaped expression both need this to switch
-/// `runSelect` onto `runAggregateSelect`'s path, the same walk
+/// `runSelect` onto `runGroupedSelect`'s path, the same walk
 /// `substituteValuesFunc` already does for `VALUES(col)` rewriting.
 let rec private containsAggregate (registry: Registry) (expr: Expr) : bool =
     match expr with
@@ -58,16 +63,31 @@ let rec private containsAggregate (registry: Registry) (expr: Expr) : bool =
     | BinOp(_, a, b) -> containsAggregate registry a || containsAggregate registry b
     | Not e
     | IsNull e
-    | IsNotNull e -> containsAggregate registry e
-    | Like(e, p) -> containsAggregate registry e || containsAggregate registry p
+    | IsNotNull e
+    | IsTrue e
+    | IsFalse e
+    | Distinct e -> containsAggregate registry e
+    | Like(e, p, _) -> containsAggregate registry e || containsAggregate registry p
+    | Regexp(e, p) -> containsAggregate registry e || containsAggregate registry p
     | In(e, xs) -> containsAggregate registry e || xs |> List.exists (containsAggregate registry)
     | Between(e, lo, hi) -> containsAggregate registry e || containsAggregate registry lo || containsAggregate registry hi
     | Cast(e, _) -> containsAggregate registry e
+    | Case(subject, whens, elseBranch) ->
+        (subject |> Option.map (containsAggregate registry) |> Option.defaultValue false)
+        || whens |> List.exists (fun (c, r) -> containsAggregate registry c || containsAggregate registry r)
+        || (elseBranch |> Option.map (containsAggregate registry) |> Option.defaultValue false)
     | Lit _
     | Col _
     | QualifiedCol _
     | Star
-    | Exists _ -> false
+    // A subquery's own aggregates belong to *its* grouping, not the query
+    // this expression sits in — `containsAggregate` only asks whether
+    // `runSelect` needs to switch itself onto the grouped path, so these
+    // three never contribute regardless of what their nested `SelectStmt`
+    // contains.
+    | Exists _
+    | Subquery _
+    | InSubquery _ -> false
 
 let private opSymbol =
     function
@@ -83,6 +103,7 @@ let private opSymbol =
     | Sub -> "-"
     | Mul -> "*"
     | Div -> "/"
+    | NullSafeEq -> "<=>"
 
 /// The column name MySQL gives an unaliased projection — exact for columns
 /// and literals, a best-effort reconstruction of the source text for
@@ -98,12 +119,19 @@ let rec private exprLabel (expr: Expr) : string =
     | Not e -> sprintf "not(%s)" (exprLabel e)
     | IsNull e -> sprintf "(%s is null)" (exprLabel e)
     | IsNotNull e -> sprintf "(%s is not null)" (exprLabel e)
-    | Like(e, p) -> sprintf "(%s like %s)" (exprLabel e) (exprLabel p)
+    | IsTrue e -> sprintf "(%s is true)" (exprLabel e)
+    | IsFalse e -> sprintf "(%s is false)" (exprLabel e)
+    | Like(e, p, _) -> sprintf "(%s like %s)" (exprLabel e) (exprLabel p)
+    | Regexp(e, p) -> sprintf "(%s regexp %s)" (exprLabel e) (exprLabel p)
     | In(e, xs) -> sprintf "(%s in (%s))" (exprLabel e) (xs |> List.map exprLabel |> String.concat ",")
+    | InSubquery(e, _) -> sprintf "(%s in (...))" (exprLabel e)
     | Between(e, lo, hi) -> sprintf "(%s between %s and %s)" (exprLabel e) (exprLabel lo) (exprLabel hi)
     | Cast(e, _) -> sprintf "cast(%s as ...)" (exprLabel e)
+    | Distinct e -> sprintf "distinct %s" (exprLabel e)
+    | Case _ -> "case"
     | Star -> "*"
     | Exists _ -> "exists"
+    | Subquery _ -> "(...)"
 
 /// Translates a SQL LIKE pattern to a .NET regex source: `%` -> `.*`, `_` ->
 /// `.`, and a backslash-escaped `\%`/`\_` (MySQL's own escape for a literal
@@ -140,14 +168,29 @@ let likeToRegex (pattern: string) : string =
 /// `let`s rather than tied into its `rec ... and` group.
 let private boolToValue (b: bool) : Value = VInt(if b then 1L else 0L)
 
-let private likeOp (subject: Value) (pattern: Value) : Value =
+let private likeOp (caseSensitive: bool) (subject: Value) (pattern: Value) : Value =
     match subject, pattern with
     | VNull, _
     | _, VNull -> VNull
     | _ ->
         let text = subject |> toText |> Option.defaultValue ""
         let pat = pattern |> toText |> Option.defaultValue ""
-        boolToValue (Regex.IsMatch(text, likeToRegex pat, RegexOptions.IgnoreCase ||| RegexOptions.Singleline))
+        let opts = if caseSensitive then RegexOptions.Singleline else RegexOptions.IgnoreCase ||| RegexOptions.Singleline
+        boolToValue (Regex.IsMatch(text, likeToRegex pat, opts))
+
+/// `REGEXP`/`RLIKE` — MySQL's default collation makes these case-insensitive
+/// too, same as `LIKE`; unlike `LIKE`'s translated wildcard syntax, the
+/// pattern is already a real (POSIX-flavored, close enough to .NET's for the
+/// common cases Eloquent generates) regex, so it's handed to `Regex`
+/// directly rather than through `likeToRegex`.
+let private regexpOp (subject: Value) (pattern: Value) : Value =
+    match subject, pattern with
+    | VNull, _
+    | _, VNull -> VNull
+    | _ ->
+        let text = subject |> toText |> Option.defaultValue ""
+        let pat = pattern |> toText |> Option.defaultValue ""
+        boolToValue (Regex.IsMatch(text, pat, RegexOptions.IgnoreCase))
 
 /// The three pieces of context `evalExpr` needs to resolve a `Col`/`FuncCall`
 /// against, bundled into one record rather than three loose parameters
@@ -175,13 +218,48 @@ type private EvalContext =
       Qualifiers: Map<string, ColumnDef list * int>
       Row: Value[]
       Store: Store
-      DbName: string }
+      DbName: string
+      /// The enclosing query's own context, if this one belongs to a
+      /// subquery (`Exists`/`Subquery`/`InSubquery`) — `None` for every
+      /// top-level statement. `Col`/`QualifiedCol` fall back to it when a
+      /// name isn't in this context's own `ColumnIndex`/`Qualifiers`, which
+      /// is what makes a *correlated* subquery (`WHERE EXISTS (SELECT 1
+      /// FROM t2 WHERE t2.parent_id = t1.id)`) resolve `t1.id` at all: it
+      /// isn't a column of `t2`, so it falls through to the outer row that
+      /// was in scope when the subquery started running. `runSelectStmt`
+      /// takes an `EvalContext option` for exactly this and passes it down
+      /// to every context it builds while running that subquery, so the
+      /// chain composes to any nesting depth.
+      Outer: EvalContext option }
 
 /// `EvalContext.Qualifiers` for a single unaliased/aliased table in scope —
 /// every non-JOIN statement (`UPDATE`, `DELETE`, `INSERT ... ON DUPLICATE
 /// KEY UPDATE`) builds it this way, one entry at offset 0.
 let private singleQualifier (name: string) (columns: ColumnDef list) : Map<string, ColumnDef list * int> =
     Map.ofList [ name.ToLowerInvariant(), (columns, 0) ]
+
+/// Resolves a bare column against `ctx`, falling back to
+/// `ctx.Outer`/its own outer/... on a miss — see `EvalContext.Outer`.
+let rec private resolveCol (ctx: EvalContext) (name: string) : Result<Value, EvalError> =
+    match Map.tryFind (name.ToLowerInvariant()) ctx.ColumnIndex with
+    | Some i -> Ok ctx.Row.[i]
+    | None ->
+        match ctx.Outer with
+        | Some parent -> resolveCol parent name
+        | None -> Error(unknownColumn name)
+
+/// The `QualifiedCol` counterpart of `resolveCol` — same outer-context
+/// fallback, checked against `ctx.Qualifiers` instead of `ctx.ColumnIndex`.
+let rec private resolveQualifiedCol (ctx: EvalContext) (table: string) (col: string) : Result<Value, EvalError> =
+    match Map.tryFind (table.ToLowerInvariant()) ctx.Qualifiers with
+    | Some(cols, offset) ->
+        match cols |> List.tryFindIndex (fun c -> System.String.Equals(c.Name, col, System.StringComparison.OrdinalIgnoreCase)) with
+        | Some idx -> Ok ctx.Row.[offset + idx]
+        | None -> Error(unknownColumn (sprintf "%s.%s" table col))
+    | None ->
+        match ctx.Outer with
+        | Some parent -> resolveQualifiedCol parent table col
+        | None -> Error(unknownColumn (sprintf "%s.%s" table col))
 
 /// Evaluates one expression against one row. Three-valued logic throughout
 /// (comparisons/AND/OR/NOT return `VNull` — SQL's "unknown" — rather than a
@@ -194,20 +272,13 @@ let rec private evalExpr (ctx: EvalContext) (expr: Expr) : Result<Value, EvalErr
     match expr with
     | Lit v -> Ok v
     | Star -> Error(1054, "Invalid use of '*'")
-    | Col name ->
-        match Map.tryFind (name.ToLowerInvariant()) ctx.ColumnIndex with
-        | Some i -> Ok ctx.Row.[i]
-        | None -> Error(unknownColumn name)
-    | QualifiedCol(table, col) ->
-        match Map.tryFind (table.ToLowerInvariant()) ctx.Qualifiers with
-        | None -> Error(unknownColumn (sprintf "%s.%s" table col))
-        | Some(cols, offset) ->
-            match cols |> List.tryFindIndex (fun c -> System.String.Equals(c.Name, col, System.StringComparison.OrdinalIgnoreCase)) with
-            | Some idx -> Ok ctx.Row.[offset + idx]
-            | None -> Error(unknownColumn (sprintf "%s.%s" table col))
+    | Col name -> resolveCol ctx name
+    | QualifiedCol(table, col) -> resolveQualifiedCol ctx table col
     | Not e -> eval e |> Result.map (fun v -> truthy v |> Option.map (not >> boolToValue) |> Option.defaultValue VNull)
     | IsNull e -> eval e |> Result.map (function VNull -> VInt 1L | _ -> VInt 0L)
     | IsNotNull e -> eval e |> Result.map (function VNull -> VInt 0L | _ -> VInt 1L)
+    | IsTrue e -> eval e |> Result.map (fun v -> boolToValue (truthy v = Some true))
+    | IsFalse e -> eval e |> Result.map (fun v -> boolToValue (truthy v = Some false))
     | BinOp(op, a, b) ->
         // And/Or already evaluate both operands (no short-circuit, since
         // SQL's three-valued logic needs both sides to tell "false" apart
@@ -247,10 +318,22 @@ let rec private evalExpr (ctx: EvalContext) (expr: Expr) : Result<Value, EvalErr
                 | Lt -> compareWith (fun c -> c < 0)
                 | Lte -> compareWith (fun c -> c <= 0)
                 | Gt -> compareWith (fun c -> c > 0)
-                | Gte -> compareWith (fun c -> c >= 0)))
-    | Like(e, p) ->
+                | Gte -> compareWith (fun c -> c >= 0)
+                // Never unknown, unlike every other comparison here: both
+                // sides `NULL` is true, either side (but not both) `NULL` is
+                // false, otherwise it's a plain `Eq`.
+                | NullSafeEq ->
+                    match va, vb with
+                    | VNull, VNull -> VInt 1L
+                    | VNull, _
+                    | _, VNull -> VInt 0L
+                    | _ -> boolToValue (Value.compare va vb = 0)))
+    | Like(e, p, caseSensitive) ->
         eval e
-        |> Result.bind (fun ve -> eval p |> Result.map (fun vp -> likeOp ve vp))
+        |> Result.bind (fun ve -> eval p |> Result.map (fun vp -> likeOp caseSensitive ve vp))
+    | Regexp(e, p) ->
+        eval e
+        |> Result.bind (fun ve -> eval p |> Result.map (fun vp -> regexpOp ve vp))
     | In(e, xs) ->
         eval e
         |> Result.bind (fun ve ->
@@ -266,6 +349,60 @@ let rec private evalExpr (ctx: EvalContext) (expr: Expr) : Result<Value, EvalErr
                         VNull
                     else
                         VInt 0L))
+    | InSubquery(e, select) ->
+        eval e
+        |> Result.bind (fun ve ->
+            match ve with
+            | VNull -> Ok VNull
+            | _ ->
+                match runSelectStmt ctx.Store ctx.Registry ctx.DbName select (Some ctx) with
+                | Err(code, message) -> Error(code, message)
+                | Affected _ -> Ok VNull
+                | ResultSet(_, rows) ->
+                    // The candidate set is the subquery's first column —
+                    // real MySQL requires exactly one, but ponytail: not
+                    // enforced here (extra columns are just ignored) rather
+                    // than adding an 1241-style check that `Subquery`
+                    // already has to have for its own single-value case;
+                    // add it here too if a migration's `IN (SELECT a, b
+                    // ...)` ever needs the real error instead of silently
+                    // matching on `a`.
+                    let candidates = rows |> List.map (List.tryHead >> Option.flatten >> function Some s -> VString s | None -> VNull)
+
+                    if candidates |> List.exists (fun v -> Value.equals ve v = Some true) then
+                        Ok(VInt 1L)
+                    elif candidates |> List.exists (function VNull -> true | _ -> false) then
+                        Ok VNull
+                    else
+                        Ok(VInt 0L))
+    | Distinct e -> eval e
+    | Case(subject, whens, elseBranch) ->
+        let fallback () =
+            match elseBranch with
+            | Some e -> eval e
+            | None -> Ok VNull
+
+        match subject with
+        | Some se ->
+            eval se
+            |> Result.bind (fun sv ->
+                let rec tryWhens =
+                    function
+                    | [] -> fallback ()
+                    | (whenExpr, resExpr) :: rest ->
+                        eval whenExpr
+                        |> Result.bind (fun wv -> if Value.equals sv wv = Some true then eval resExpr else tryWhens rest)
+
+                tryWhens whens)
+        | None ->
+            let rec tryWhens =
+                function
+                | [] -> fallback ()
+                | (condExpr, resExpr) :: rest ->
+                    eval condExpr
+                    |> Result.bind (fun cv -> if truthy cv = Some true then eval resExpr else tryWhens rest)
+
+            tryWhens whens
     | Between(e, lo, hi) ->
         eval e
         |> Result.bind (fun ve ->
@@ -300,13 +437,22 @@ let rec private evalExpr (ctx: EvalContext) (expr: Expr) : Result<Value, EvalErr
             | Ok v' -> Ok v'
             | Error err -> Error(Storage.toMySqlError err))
     | Exists select ->
-        match runSelectStmt ctx.Store ctx.Registry ctx.DbName select with
+        match runSelectStmt ctx.Store ctx.Registry ctx.DbName select (Some ctx) with
         | ResultSet(_, rows) -> Ok(boolToValue (not (List.isEmpty rows)))
         | Err(code, message) -> Error(code, message)
         // A `SELECT` under `EXISTS (...)` is never an `INSERT`/`UPDATE`/
         // `DELETE` (the parser's `selectStmtRecord` only builds `SelectStmt`
         // records, nothing else reaches here), so `Affected` can't occur.
         | Affected _ -> Ok VNull
+    | Subquery select ->
+        match runSelectStmt ctx.Store ctx.Registry ctx.DbName select (Some ctx) with
+        | Err(code, message) -> Error(code, message)
+        | Affected _ -> Ok VNull
+        | ResultSet(cols, _) when List.length cols <> 1 -> Error(1241, "Operand should contain 1 column(s)")
+        | ResultSet(_, []) -> Ok VNull
+        | ResultSet(_, [ [ Some s ] ]) -> Ok(VString s)
+        | ResultSet(_, [ [ None ] ]) -> Ok VNull
+        | ResultSet(_, _) -> Error(1242, "Subquery returns more than 1 row")
 
 /// Resolves one `TableRef` (a real table, or `information_schema`'s virtual
 /// one) to its columns and rows — the one place both the base `FROM` and
@@ -324,6 +470,49 @@ and private resolveTableRef (store: Store) (dbName: string) (tableRef: TableRef)
         | Error e -> Error(storageErr e)
         | Ok(columns, rows) -> Ok(columns, List.ofSeq rows)
 
+/// Synthetic, all-nullable-text `ColumnDef`s for a derived table's columns —
+/// `runSelectStmt` only hands back the *text* resultset shape (see
+/// `deriveRows` below), so there's no real `ColumnType` to recover; `TText`
+/// is close enough since every consumer (comparisons, `Value.compare`, ...)
+/// already coerces through `toText`/`toDouble` rather than trusting the
+/// declared type.
+and private deriveColumns (names: string list) : ColumnDef list =
+    names
+    |> List.map (fun n ->
+        { Name = n
+          Type = TText
+          Nullable = true
+          Default = None
+          AutoIncrement = false
+          PrimaryKey = false
+          Unique = false })
+
+/// A derived table's rows, converted back from `runSelectStmt`'s text
+/// resultset shape into `Value[]` — ponytail: round-trips through text
+/// (`VString`/`VNull` only, so e.g. a derived `DATE` column compares as a
+/// string rather than a `VDate`) rather than threading a typed-row API back
+/// out of `runSelectStmt`; `Value.compare`/`toDouble` already coerce a
+/// string against a number, so ordinary equality/ordering on a derived
+/// column still works, just without the original type's own comparison
+/// rules. Upgrade to a typed path if a migration's derived-table query ever
+/// needs one.
+and private deriveRows (rows: (string option list) list) : Value[] list =
+    rows |> List.map (List.map (function Some s -> VString s | None -> VNull) >> Array.ofList)
+
+/// Resolves one `FromItem` — a real/virtual table via `resolveTableRef`, or
+/// a derived table by running its subquery (uncorrelated: a plain derived
+/// table can't see the outer query's columns, only `LATERAL` ones could,
+/// which this engine doesn't support) and converting its resultset back into
+/// rows via `deriveColumns`/`deriveRows`.
+and private resolveFromItem (store: Store) (registry: Registry) (dbName: string) (item: FromItem) : Result<ColumnDef list * Value[] list, QueryResult> =
+    match item with
+    | FromTable tableRef -> resolveTableRef store dbName tableRef
+    | FromSubquery(select, _alias) ->
+        match runSelectStmt store registry dbName select None with
+        | ResultSet(cols, rows) -> Ok(deriveColumns cols, deriveRows rows)
+        | Err(code, message) -> Error(Err(code, message))
+        | Affected _ -> Error(Err(1064, "derived table did not return a resultset"))
+
 /// `EvalContext.Qualifiers` for every source (the `FROM` table, and each
 /// `JOIN` after it) already resolved into `sources`, ordered the same
 /// left-to-right way their columns are laid out in a combined row —
@@ -336,18 +525,22 @@ and private qualifierRanges (sources: (string * ColumnDef list) list) : Map<stri
 
 /// Applies one `JOIN` clause against whatever's already in scope
 /// (`sourcesSoFar`/`rowsSoFar`, built by the `FROM` table and any earlier
-/// `JOIN`s in the same list): resolves the joined table, then for every row
-/// already in scope, evaluates `join.On` against it paired with each of the
-/// joined table's rows. `INNER JOIN` keeps only the pairs where `On` is
-/// true; `LEFT JOIN` also keeps a left-hand row that matched nothing, with
-/// the joined table's columns padded `NULL` (standard outer-join
-/// semantics). A nested loop, not a hash join — fine at the row counts a
-/// migration/test table holds; ponytail: revisit if a JOIN over a
-/// realistically large table ever shows up in a profile.
+/// `JOIN`s in the same list): resolves the joined table, evaluates `join.On`
+/// against every (left row, right row) pair, then combines the matched pairs
+/// with whatever `join.Kind` needs added on top — `LEFT`/`RIGHT` also keep
+/// the side that matched nothing, `NULL`-padded on the other side; `INNER`
+/// and `CROSS` (the latter's `On` is always the literal-true `join.On` the
+/// parser gives it) keep only the matches. Indices (not row references)
+/// track which left/right rows matched anything, so outer-join padding is
+/// correct even if two rows happen to be structurally equal. A nested loop,
+/// not a hash join — fine at the row counts a migration/test table holds;
+/// ponytail: revisit if a JOIN over a realistically large table ever shows
+/// up in a profile.
 and private applyJoin
     (store: Store)
     (registry: Registry)
     (dbName: string)
+    (outer: EvalContext option)
     ((sourcesSoFar, rowsSoFar): (string * ColumnDef list) list * Value[] list)
     (join: Join)
     : Result<(string * ColumnDef list) list * Value[] list, QueryResult> =
@@ -358,7 +551,8 @@ and private applyJoin
         let newSources = sourcesSoFar @ [ joinQualifier, joinColumns ]
         let qualifiers = qualifierRanges newSources
         let combinedColumnsSoFar = sourcesSoFar |> List.collect snd
-        let nullPadding = joinColumns |> List.map (fun _ -> VNull) |> Array.ofList
+        let leftNullPadding = combinedColumnsSoFar |> List.map (fun _ -> VNull) |> Array.ofList
+        let rightNullPadding = joinColumns |> List.map (fun _ -> VNull) |> Array.ofList
 
         let ctxFor (row: Value[]) : EvalContext =
             { Registry = registry
@@ -366,40 +560,69 @@ and private applyJoin
               Qualifiers = qualifiers
               Row = row
               Store = store
-              DbName = dbName }
+              DbName = dbName
+              Outer = outer }
 
-        let matchOne (leftRow: Value[]) : Result<Value[] list, EvalError> =
-            joinRows
-            |> traverse (fun rightRow ->
-                let combined = Array.append leftRow rightRow
-                evalExpr (ctxFor combined) join.On |> Result.map (fun v -> truthy v = Some true, combined))
-            |> Result.map (fun flagged ->
-                match join.Kind, flagged |> List.filter fst |> List.map snd with
-                | LeftJoin, [] -> [ Array.append leftRow nullPadding ]
-                | _, matched -> matched)
+        let leftIndexed = rowsSoFar |> List.indexed
+        let rightIndexed = joinRows |> List.indexed
 
-        match rowsSoFar |> traverse matchOne with
-        | Error(code, message) -> Error(Err(code, message))
-        | Ok rowGroups -> Ok(newSources, List.concat rowGroups)
+        let pairs = [ for li, l in leftIndexed do for ri, r in rightIndexed -> li, ri, l, r ]
+
+        pairs
+        |> traverse (fun (li, ri, l, r) ->
+            let combined = Array.append l r
+            evalExpr (ctxFor combined) join.On |> Result.map (fun v -> li, ri, (truthy v = Some true), combined))
+        |> Result.mapError Err
+        |> Result.map (fun flagged ->
+            let matched = flagged |> List.filter (fun (_, _, ok, _) -> ok)
+            let matchedCombined = matched |> List.map (fun (_, _, _, c) -> c)
+            let matchedLeft = matched |> List.map (fun (li, _, _, _) -> li) |> Set.ofList
+            let matchedRight = matched |> List.map (fun (_, ri, _, _) -> ri) |> Set.ofList
+
+            let leftOnly =
+                leftIndexed
+                |> List.filter (fst >> matchedLeft.Contains >> not)
+                |> List.map (fun (_, l) -> Array.append l rightNullPadding)
+
+            let rightOnly =
+                rightIndexed
+                |> List.filter (fst >> matchedRight.Contains >> not)
+                |> List.map (fun (_, r) -> Array.append leftNullPadding r)
+
+            let combinedRows =
+                match join.Kind with
+                | InnerJoin
+                | CrossJoin -> matchedCombined
+                | LeftJoin -> matchedCombined @ leftOnly
+                | RightJoin -> matchedCombined @ rightOnly
+
+            newSources, combinedRows)
 
 /// Resolves a `SELECT`'s `FROM` (a real table, `information_schema`'s
-/// virtual one, or none) plus every `JOIN` after it, and runs `select`
-/// against the combined result — the `Statement` case's `Select` branch and
-/// `Exists`' nested subquery both fund into this one place rather than each
-/// re-implementing the `information_schema`/join-materialization logic.
-and private runSelectStmt (store: Store) (registry: Registry) (dbName: string) (select: SelectStmt) : QueryResult =
+/// virtual one, a derived table, or none) plus every `JOIN` after it, and
+/// runs `select` against the combined result — the `Statement` case's
+/// `Select` branch and every subquery form (`Exists`/`Subquery`/
+/// `InSubquery`/a derived table's own `FROM`) all fund into this one place
+/// rather than each re-implementing the join-materialization logic.
+/// `outer` is `None` for a top-level statement and `Some` when this is
+/// itself a subquery — see `EvalContext.Outer`.
+and private runSelectStmt (store: Store) (registry: Registry) (dbName: string) (select: SelectStmt) (outer: EvalContext option) : QueryResult =
     match select.From with
-    | None -> runSelect store registry dbName [] Map.empty [ [||] ] select
-    | Some tableRef ->
-        match resolveTableRef store dbName tableRef with
+    | None -> runSelect store registry dbName [] Map.empty [ [||] ] select outer
+    | Some fromItem ->
+        match resolveFromItem store registry dbName fromItem with
         | Error e -> e
         | Ok(baseColumns, baseRows) ->
-            let baseQualifier = tableRef.Alias |> Option.defaultValue tableRef.Table
+            let baseQualifier =
+                match fromItem with
+                | FromTable t -> t.Alias |> Option.defaultValue t.Table
+                | FromSubquery(_, alias) -> alias
+
             let initial : Result<(string * ColumnDef list) list * Value[] list, QueryResult> = Ok([ baseQualifier, baseColumns ], baseRows)
 
-            match select.Joins |> List.fold (fun acc join -> acc |> Result.bind (fun combined -> applyJoin store registry dbName combined join)) initial with
+            match select.Joins |> List.fold (fun acc join -> acc |> Result.bind (fun combined -> applyJoin store registry dbName outer combined join)) initial with
             | Error e -> e
-            | Ok(sources, rows) -> runSelect store registry dbName (sources |> List.collect snd) (qualifierRanges sources) rows select
+            | Ok(sources, rows) -> runSelect store registry dbName (sources |> List.collect snd) (qualifierRanges sources) rows select outer
 
 and private applyLimitOffset (limit: int option) (offset: int option) (rows: 'a list) : 'a list =
     let afterOffset =
@@ -444,20 +667,52 @@ and private evalAggregate
     (args: Expr list)
     : Result<Value, EvalError> =
     let isCount = System.String.Equals(name, "COUNT", System.StringComparison.OrdinalIgnoreCase)
+    let isGroupConcat = System.String.Equals(name, "GROUP_CONCAT", System.StringComparison.OrdinalIgnoreCase)
+
+    // `COUNT(DISTINCT x)`/`SUM(DISTINCT x)`/... all unwrap the same way:
+    // dedupe the per-row values (after dropping `NULL`s) before folding,
+    // regardless of which aggregate wraps the `DISTINCT`.
+    let unwrapDistinct =
+        function
+        | Distinct e -> true, e
+        | e -> false, e
+
+    let evalNonNull (expr: Expr) : Result<Value list, EvalError> =
+        rows |> traverse (fun row -> evalExpr (ctxFor row) expr) |> Result.map (List.filter (function VNull -> false | _ -> true))
 
     match args with
     | [ Star ] when isCount -> Ok(VInt(int64 (List.length rows)))
+    | arg :: rest when isGroupConcat ->
+        // `GROUP_CONCAT` folds entirely here rather than through
+        // `registry.Aggregates` — see `isAggregateCall`'s doc.
+        let distinct, innerExpr = unwrapDistinct arg
+
+        let separator =
+            match rest with
+            | [ Lit(VString s) ] -> s
+            | _ -> ","
+
+        evalNonNull innerExpr
+        |> Result.map (fun nonNull ->
+            let deduped = if distinct then List.distinct nonNull else nonNull
+
+            if deduped.IsEmpty then
+                VNull
+            else
+                deduped |> List.map (toText >> Option.defaultValue "") |> String.concat separator |> VString)
     | [ arg ] ->
+        let distinct, innerExpr = unwrapDistinct arg
+
         match Functions.lookupAggregate name registry with
         | None -> Error(unknownFunction name)
         | Some fold ->
-            rows
-            |> traverse (fun row -> evalExpr (ctxFor row) arg)
-            |> Result.map (fun vs ->
-                let nonNull = vs |> List.filter (function VNull -> false | _ -> true)
-                if isCount || not nonNull.IsEmpty then fold nonNull else VNull)
+            evalNonNull innerExpr
+            |> Result.map (fun nonNull ->
+                let deduped = if distinct then List.distinct nonNull else nonNull
+                if isCount || not deduped.IsEmpty then fold deduped else VNull)
     // `isAggregateCall` (the only caller that routes here) already narrowed
-    // to single-argument aggregate calls.
+    // to single-argument aggregate calls (`GROUP_CONCAT`'s optional
+    // `SEPARATOR` aside).
     | _ -> Ok VNull
 
 /// Pre-evaluates every aggregate subtree of `expr` (anywhere it appears —
@@ -483,22 +738,66 @@ and private rewriteAggregates
     | Not e -> sub e |> Result.map Not
     | IsNull e -> sub e |> Result.map IsNull
     | IsNotNull e -> sub e |> Result.map IsNotNull
-    | Like(e, p) -> sub e |> Result.bind (fun e' -> sub p |> Result.map (fun p' -> Like(e', p')))
+    | IsTrue e -> sub e |> Result.map IsTrue
+    | IsFalse e -> sub e |> Result.map IsFalse
+    | Distinct e -> sub e |> Result.map Distinct
+    | Like(e, p, cs) -> sub e |> Result.bind (fun e' -> sub p |> Result.map (fun p' -> Like(e', p', cs)))
+    | Regexp(e, p) -> sub e |> Result.bind (fun e' -> sub p |> Result.map (fun p' -> Regexp(e', p')))
     | In(e, xs) -> sub e |> Result.bind (fun e' -> xs |> traverse sub |> Result.map (fun xs' -> In(e', xs')))
     | Between(e, lo, hi) ->
         sub e |> Result.bind (fun e' -> sub lo |> Result.bind (fun lo' -> sub hi |> Result.map (fun hi' -> Between(e', lo', hi'))))
     | Cast(e, ty) -> sub e |> Result.map (fun e' -> Cast(e', ty))
+    | Case(subject, whens, elseBranch) ->
+        let subOpt = function
+            | Some e -> sub e |> Result.map Some
+            | None -> Ok None
+
+        subOpt subject
+        |> Result.bind (fun subject' ->
+            whens
+            |> traverse (fun (c, r) -> sub c |> Result.bind (fun c' -> sub r |> Result.map (fun r' -> c', r')))
+            |> Result.bind (fun whens' -> subOpt elseBranch |> Result.map (fun else' -> Case(subject', whens', else'))))
     | Lit _
     | Col _
     | QualifiedCol _
     | Star
-    | Exists _ -> Ok expr
+    // A subquery is its own scope with its own grouping — nothing inside it
+    // is one of *this* query's aggregate calls to pre-evaluate, even though
+    // (via `EvalContext.Outer`) it can still read this query's columns.
+    | Exists _
+    | Subquery _
+    | InSubquery _ -> Ok expr
 
-/// The ungrouped-aggregate path (`SELECT MAX(x) FROM t`, no `GROUP BY`):
-/// the whole `WHERE`-filtered row set collapses to one output row. `ORDER
-/// BY`/`LIMIT` are moot on a single row, so unlike `runSelect` this doesn't
-/// apply them.
-and private runAggregateSelect
+/// Resolves an `ORDER BY`/`GROUP BY` key that names a `SELECT ... AS alias`
+/// (`... ORDER BY n`) or a 1-based projection position (`... ORDER BY 2`,
+/// `GROUP BY 1`) against `projections`, falling back to the expression
+/// as-is for anything else (an ordinary column, or an expression that just
+/// happens not to match any alias).
+and private resolvePositionalOrAlias (projections: Projection list) (expr: Expr) : Expr =
+    match expr with
+    | Lit(VInt n) when n >= 1L && n <= int64 (List.length projections) -> fst projections.[int n - 1]
+    | Col name ->
+        projections
+        |> List.tryPick (function
+            | e, Some alias when System.String.Equals(alias, name, System.StringComparison.OrdinalIgnoreCase) -> Some e
+            | _ -> None)
+        |> Option.defaultValue expr
+    | _ -> expr
+
+/// The `GROUP BY`/aggregate path: `select.GroupBy` (resolved through
+/// `resolvePositionalOrAlias` for positional/alias references first)
+/// partitions the `WHERE`-filtered rows into groups — structural equality on
+/// each row's evaluated `Value list` key is already exactly SQL's "NULLs
+/// group together" rule, so no custom comparer is needed — and an empty
+/// `GroupBy` collapses everything into one synthetic group (even an empty
+/// one, so `SELECT COUNT(*) FROM t` on an empty `t` still returns one row
+/// with `0` rather than no rows, matching a real whole-table aggregate; a
+/// real `GROUP BY` with nothing to group correctly produces zero rows
+/// instead). Every projection/`HAVING`/`ORDER BY` expression runs through
+/// `rewriteAggregates` per group before evaluating what's left against that
+/// group's first row — MySQL's `ONLY_FULL_GROUP_BY`-off behavior for a bare
+/// non-aggregated column, equivalent to wrapping it in `ANY_VALUE`.
+and private runGroupedSelect
     (store: Store)
     (registry: Registry)
     (dbName: string)
@@ -506,6 +805,7 @@ and private runAggregateSelect
     (qualifiers: Map<string, ColumnDef list * int>)
     (rows: Value[] list)
     (select: SelectStmt)
+    (outer: EvalContext option)
     : QueryResult =
     let columnIndex = columnIndexOf columns
 
@@ -515,39 +815,110 @@ and private runAggregateSelect
           Qualifiers = qualifiers
           Row = row
           Store = store
-          DbName = dbName }
+          DbName = dbName
+          Outer = outer }
+
+    let resolveRef = resolvePositionalOrAlias select.Projections
+    let groupExprs = select.GroupBy |> List.map resolveRef
 
     let matches (row: Value[]) : Result<bool, EvalError> =
         match select.Where with
         | None -> Ok true
         | Some expr -> evalExpr (ctxFor row) expr |> Result.map (fun v -> truthy v = Some true)
 
-    match rows |> traverse (fun row -> matches row |> Result.map (fun keep -> if keep then Some row else None)) with
-    | Error(code, message) -> Err(code, message)
-    | Ok maybeMatched ->
-        let matched = maybeMatched |> List.choose id
+    let representativeOf (groupRows: Value[] list) : Value[] = groupRows |> List.tryHead |> Option.defaultValue (probeRow columns)
 
-        // A non-aggregate projection alongside an aggregate one (legal
-        // under non-strict `sql_mode`, which is what this engine accepts)
-        // has no well-defined row to read from once many rows collapse
-        // into one — ponytail: picks the first matched row (or an all-NULL
-        // probe row if none matched) rather than real `GROUP BY` per-group
-        // semantics; add that (M5) once a query needs more than one group.
-        let representativeRow = matched |> List.tryHead |> Option.defaultValue (probeRow columns)
+    let projectGroup (groupRows: Value[] list) : Result<(string * Value) list, EvalError> =
+        let representative = representativeOf groupRows
 
-        let projectOne ((expr, aliasOpt): Projection) : Result<string * Value, EvalError> =
-            let label = aliasOpt |> Option.defaultValue (exprLabel expr)
-
+        select.Projections
+        |> traverse (fun (expr, aliasOpt) ->
             match expr with
-            | Star -> Error(1054, "Invalid use of '*'")
+            | Star -> Ok(columns |> List.mapi (fun i c -> c.Name, representative.[i]))
             | _ ->
-                rewriteAggregates registry ctxFor matched expr
-                |> Result.bind (evalExpr (ctxFor representativeRow))
-                |> Result.map (fun v -> label, v)
+                rewriteAggregates registry ctxFor groupRows expr
+                |> Result.bind (evalExpr (ctxFor representative))
+                |> Result.map (fun v -> [ aliasOpt |> Option.defaultValue (exprLabel expr), v ]))
+        |> Result.map List.concat
 
-        match select.Projections |> traverse projectOne with
+    let havingOk (groupRows: Value[] list) : Result<bool, EvalError> =
+        match select.Having with
+        | None -> Ok true
+        | Some h ->
+            rewriteAggregates registry ctxFor groupRows h
+            |> Result.bind (evalExpr (ctxFor (representativeOf groupRows)))
+            |> Result.map (fun v -> truthy v = Some true)
+
+    let orderKeysOf (groupRows: Value[] list) : Result<Value list, EvalError> =
+        let representative = representativeOf groupRows
+
+        select.OrderBy
+        |> traverse (fun (expr, _) ->
+            rewriteAggregates registry ctxFor groupRows (resolveRef expr)
+            |> Result.bind (evalExpr (ctxFor representative)))
+
+    // Schema probe: type-checks WHERE/GROUP BY/HAVING/ORDER BY/projections
+    // against an all-NULL row first, the same reasoning as `probeRow`'s
+    // other use — an unknown column/function is a schema error independent
+    // of whether any row happens to match, or a real `GROUP BY` happens to
+    // produce zero groups.
+    match matches (probeRow columns)
+          |> Result.bind (fun _ -> groupExprs |> traverse (evalExpr (ctxFor (probeRow columns))) |> Result.map ignore)
+          |> Result.bind (fun _ -> havingOk [])
+          |> Result.bind (fun _ -> orderKeysOf [])
+          |> Result.bind (fun _ -> projectGroup []) with
+    | Error(code, message) -> Err(code, message)
+    | Ok probeProjected ->
+        let colNames = probeProjected |> List.map fst
+
+        match rows |> traverse (fun row -> matches row |> Result.map (fun keep -> if keep then Some row else None)) with
         | Error(code, message) -> Err(code, message)
-        | Ok pairs -> ResultSet(pairs |> List.map fst, [ pairs |> List.map (snd >> toText) ])
+        | Ok maybeMatched ->
+            let matched = maybeMatched |> List.choose id
+
+            let buildGroups () : Result<Value[] list list, EvalError> =
+                if groupExprs.IsEmpty then
+                    Ok [ matched ]
+                else
+                    matched
+                    |> traverse (fun row -> groupExprs |> traverse (evalExpr (ctxFor row)) |> Result.map (fun key -> key, row))
+                    |> Result.map (fun keyed -> keyed |> List.groupBy fst |> List.map (snd >> List.map snd))
+
+            match buildGroups () with
+            | Error(code, message) -> Err(code, message)
+            | Ok groups ->
+                let processGroup (groupRows: Value[] list) : Result<((string * Value) list * Value list) option, EvalError> =
+                    havingOk groupRows
+                    |> Result.bind (fun keep ->
+                        if not keep then
+                            Ok None
+                        else
+                            projectGroup groupRows
+                            |> Result.bind (fun proj -> orderKeysOf groupRows |> Result.map (fun keys -> Some(proj, keys))))
+
+                match groups |> traverse processGroup with
+                | Error(code, message) -> Err(code, message)
+                | Ok maybeRows ->
+                    let kept = maybeRows |> List.choose id
+
+                    let sorted =
+                        kept
+                        |> List.sortWith (fun (_, ka) (_, kb) ->
+                            List.zip3 (List.map snd select.OrderBy) ka kb
+                            |> List.fold
+                                (fun acc (dir, va, vb) ->
+                                    if acc <> 0 then
+                                        acc
+                                    else
+                                        let c = Value.compare va vb
+                                        match dir with
+                                        | Asc -> c
+                                        | Desc -> -c)
+                                0)
+
+                    let textRows = sorted |> List.map (fst >> List.map (snd >> toText))
+                    let deduped = if select.Distinct then List.distinct textRows else textRows
+                    ResultSet(colNames, deduped |> applyLimitOffset select.Limit select.Offset)
 
 and private runSelect
     (store: Store)
@@ -557,6 +928,7 @@ and private runSelect
     (qualifiers: Map<string, ColumnDef list * int>)
     (rows: Value[] list)
     (select: SelectStmt)
+    (outer: EvalContext option)
     : QueryResult =
     let projections, whereExpr, orderBy, limit, offset =
         select.Projections, select.Where, select.OrderBy, select.Limit, select.Offset
@@ -567,8 +939,13 @@ and private runSelect
     // packet and aborts the client's whole session.
     if select.From.IsNone && projections |> List.exists (fst >> (=) Star) then
         Err(1096, "No tables used")
-    elif projections |> List.exists (fst >> containsAggregate registry) then
-        runAggregateSelect store registry dbName columns qualifiers rows select
+    elif
+        not select.GroupBy.IsEmpty
+        || select.Having.IsSome
+        || projections |> List.exists (fst >> containsAggregate registry)
+        || orderBy |> List.exists (fst >> containsAggregate registry)
+    then
+        runGroupedSelect store registry dbName columns qualifiers rows select outer
     else
 
     let columnIndex = columnIndexOf columns
@@ -579,23 +956,14 @@ and private runSelect
           Qualifiers = qualifiers
           Row = row
           Store = store
-          DbName = dbName }
+          DbName = dbName
+          Outer = outer }
 
-    // ORDER BY may name a `SELECT ... AS alias` rather than a table column
-    // (`SELECT COUNT(*) AS n FROM t ORDER BY n`) — resolve those first
-    // against the projection list before falling back to `evalExpr`'s
-    // normal column lookup.
-    let aliasExprs =
-        projections
-        |> List.choose (function
-            | expr, Some alias -> Some(alias.ToLowerInvariant(), expr)
-            | _ -> None)
-        |> Map.ofList
-
-    let resolveOrderExpr (expr: Expr) : Expr =
-        match expr with
-        | Col name -> aliasExprs |> Map.tryFind (name.ToLowerInvariant()) |> Option.defaultValue expr
-        | _ -> expr
+    // ORDER BY may name a `SELECT ... AS alias` or a 1-based projection
+    // position (`SELECT COUNT(*) AS n FROM t ORDER BY n` / `ORDER BY 1`) —
+    // resolve those first against the projection list before falling back
+    // to `evalExpr`'s normal column lookup.
+    let resolveOrderExpr = resolvePositionalOrAlias projections
 
     let matches (row: Value[]) : Result<bool, EvalError> =
         match whereExpr with
@@ -687,7 +1055,8 @@ let private applyAssignments
           Qualifiers = qualifiers
           Row = row
           Store = store
-          DbName = dbName }
+          DbName = dbName
+          Outer = None }
 
     assignments
     |> traverse (fun (idx, expr) -> evalExpr ctx expr |> Result.map (fun v -> idx, v))
@@ -717,15 +1086,26 @@ let rec private substituteValuesFunc (columnIndex: Map<string, int>) (candidate:
     | Not e -> Not(sub e)
     | IsNull e -> IsNull(sub e)
     | IsNotNull e -> IsNotNull(sub e)
-    | Like(e, p) -> Like(sub e, sub p)
+    | IsTrue e -> IsTrue(sub e)
+    | IsFalse e -> IsFalse(sub e)
+    | Distinct e -> Distinct(sub e)
+    | Like(e, p, cs) -> Like(sub e, sub p, cs)
+    | Regexp(e, p) -> Regexp(sub e, sub p)
     | In(e, xs) -> In(sub e, xs |> List.map sub)
     | Between(e, lo, hi) -> Between(sub e, sub lo, sub hi)
     | Cast(e, ty) -> Cast(sub e, ty)
+    | Case(subject, whens, elseBranch) ->
+        Case(subject |> Option.map sub, whens |> List.map (fun (c, r) -> sub c, sub r), elseBranch |> Option.map sub)
     | Lit _
     | Col _
     | QualifiedCol _
     | Star
-    | Exists _ -> expr
+    // `VALUES(col)` only ever occurs directly in an `ON DUPLICATE KEY
+    // UPDATE` assignment, never inside a subquery's own text — nothing to
+    // substitute inside one, so it's left as-is like `Exists` always was.
+    | Exists _
+    | Subquery _
+    | InSubquery _ -> expr
 
 /// Executes one parsed statement against `store`, threading the session's
 /// AUTO_INCREMENT bookkeeping through as a plain value rather than a
@@ -827,7 +1207,8 @@ let execute (store: Store) (registry: Registry) (dbName: string) (lastInsertId: 
               Qualifiers = Map.empty
               Row = [||]
               Store = store
-              DbName = dbName }
+              DbName = dbName
+              Outer = None }
 
         match rowsExprs |> traverse (traverse (evalExpr literalCtx)) with
         | Error(code, message) -> lastInsertId, Err(code, message)
@@ -852,7 +1233,8 @@ let execute (store: Store) (registry: Registry) (dbName: string) (lastInsertId: 
                               Qualifiers = singleQualifier table tableColumns
                               Row = existing
                               Store = store
-                              DbName = dbName }
+                              DbName = dbName
+                              Outer = None }
 
                         onDuplicateUpdate
                         |> traverse (fun (name, expr) ->
@@ -873,7 +1255,69 @@ let execute (store: Store) (registry: Registry) (dbName: string) (lastInsertId: 
                         (if newLastId <> 0L then newLastId else lastInsertId), Affected(uint64 affected)
                     | Error e -> lastInsertId, storageErr e
 
-    | Select select -> lastInsertId, runSelectStmt store registry dbName select
+    | Select select -> lastInsertId, runSelectStmt store registry dbName select None
+
+    | Union(first, rest, orderBy, limit, offset) ->
+        // Each branch runs as an independent, uncorrelated `SELECT`
+        // (`outer = None`) — `Union` only ever occurs as a top-level
+        // statement (see `Ast.Union`'s doc), never nested inside another
+        // query's expression, so there's no outer row to thread through.
+        let runBranch (select: SelectStmt) = runSelectStmt store registry dbName select None
+
+        let combine (acc: Result<string list * (string option list) list, QueryResult>) (isAll: bool, select: SelectStmt) =
+            acc
+            |> Result.bind (fun (cols, rowsSoFar) ->
+                match runBranch select with
+                | Err(code, message) -> Error(Err(code, message))
+                | Affected _ -> Error(Err(1064, "UNION branch did not return a resultset"))
+                | ResultSet(branchCols, branchRows) when List.length branchCols <> List.length cols ->
+                    Error(Err(1222, "The used SELECT statements have a different number of columns"))
+                | ResultSet(_, branchRows) ->
+                    let combined = if isAll then rowsSoFar @ branchRows else (rowsSoFar @ branchRows) |> List.distinct
+                    Ok(cols, combined))
+
+        match runBranch first with
+        | Err(code, message) -> lastInsertId, Err(code, message)
+        | Affected _ -> lastInsertId, Err(1064, "UNION branch did not return a resultset")
+        | ResultSet(firstCols, firstRows) ->
+            match rest |> List.fold combine (Ok(firstCols, firstRows)) with
+            | Error e -> lastInsertId, e
+            | Ok(cols, allRows) ->
+                // `ORDER BY`/`LIMIT` on the combined result — same
+                // alias/positional resolution and `Value.compare` sort as
+                // an ordinary `SELECT`, just over the already-projected
+                // text rows (there's no underlying typed row left once
+                // every branch has run) rather than through `evalExpr`.
+                let projections = cols |> List.map (fun c -> Col c, None)
+                let resolveOrder = resolvePositionalOrAlias projections
+
+                let orderKeyOf (row: string option list) (expr: Expr) : Value =
+                    match resolveOrder expr with
+                    | Col name ->
+                        match cols |> List.tryFindIndex (fun c -> System.String.Equals(c, name, System.StringComparison.OrdinalIgnoreCase)) with
+                        | Some i -> row.[i] |> function Some s -> VString s | None -> VNull
+                        | None -> VNull
+                    | _ -> VNull
+
+                let sorted =
+                    if orderBy.IsEmpty then
+                        allRows
+                    else
+                        allRows
+                        |> List.sortWith (fun a b ->
+                            orderBy
+                            |> List.fold
+                                (fun acc (expr, dir) ->
+                                    if acc <> 0 then
+                                        acc
+                                    else
+                                        let c = Value.compare (orderKeyOf a expr) (orderKeyOf b expr)
+                                        match dir with
+                                        | Asc -> c
+                                        | Desc -> -c)
+                                0)
+
+                lastInsertId, ResultSet(cols, sorted |> applyLimitOffset limit offset)
 
     | Update(table, assignments, whereExpr) ->
         let db, table = splitQualified dbName table
@@ -894,7 +1338,8 @@ let execute (store: Store) (registry: Registry) (dbName: string) (lastInsertId: 
                       Qualifiers = qualifiers
                       Row = row
                       Store = store
-                      DbName = dbName }
+                      DbName = dbName
+                      Outer = None }
 
                 let check row =
                     match whereExpr with
@@ -933,7 +1378,8 @@ let execute (store: Store) (registry: Registry) (dbName: string) (lastInsertId: 
                   Qualifiers = singleQualifier table columns
                   Row = row
                   Store = store
-                  DbName = dbName }
+                  DbName = dbName
+                  Outer = None }
 
             let check row =
                 match whereExpr with

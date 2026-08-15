@@ -781,4 +781,341 @@ let tests =
                     match runDefault store "SELECT users.name, posts.title FROM users LEFT JOIN posts ON users.id = posts.user_id ORDER BY users.id" with
                     | ResultSet([ "name"; "title" ], rows) ->
                         Expect.equal rows [ [ Some "alice"; Some "first" ]; [ Some "bob"; None ] ] "bob survives with a NULL title"
-                    | other -> failtestf "expected a joined resultset, got %A" other ] ]
+                    | other -> failtestf "expected a joined resultset, got %A" other
+
+                testCase "RIGHT JOIN keeps an unmatched right row, padding the left side with NULL"
+                <| fun _ ->
+                    let store = newStore ()
+                    runDefault store "CREATE TABLE users (id INT, name VARCHAR(10))" |> ignore
+                    runDefault store "CREATE TABLE posts (id INT, user_id INT, title VARCHAR(20))" |> ignore
+                    runDefault store "INSERT INTO users VALUES (1, 'alice')" |> ignore
+                    // post 2's user_id (99) matches no user.
+                    runDefault store "INSERT INTO posts VALUES (1, 1, 'first'), (2, 99, 'orphan')" |> ignore
+
+                    match runDefault store "SELECT users.name, posts.title FROM users RIGHT JOIN posts ON users.id = posts.user_id ORDER BY posts.id" with
+                    | ResultSet([ "name"; "title" ], rows) ->
+                        Expect.equal rows [ [ Some "alice"; Some "first" ]; [ None; Some "orphan" ] ] "the orphaned post survives with a NULL name"
+                    | other -> failtestf "expected a joined resultset, got %A" other
+
+                testCase "CROSS JOIN produces the full Cartesian product"
+                <| fun _ ->
+                    let store = newStore ()
+                    runDefault store "CREATE TABLE a (x INT)" |> ignore
+                    runDefault store "CREATE TABLE b (y INT)" |> ignore
+                    runDefault store "INSERT INTO a VALUES (1), (2)" |> ignore
+                    runDefault store "INSERT INTO b VALUES (10), (20)" |> ignore
+
+                    match runDefault store "SELECT x, y FROM a CROSS JOIN b ORDER BY x, y" with
+                    | ResultSet([ "x"; "y" ], rows) ->
+                        Expect.equal
+                            rows
+                            [ [ Some "1"; Some "10" ]; [ Some "1"; Some "20" ]; [ Some "2"; Some "10" ]; [ Some "2"; Some "20" ] ]
+                            "every combination"
+                    | other -> failtestf "expected a 2x2 Cartesian product, got %A" other ]
+
+          testList
+              "real GROUP BY / HAVING / grouped aggregates"
+              [ testCase "GROUP BY groups rows and aggregates per group"
+                <| fun _ ->
+                    let store = newStore ()
+                    runDefault store "CREATE TABLE sales (region VARCHAR(10), amount INT)" |> ignore
+
+                    runDefault
+                        store
+                        "INSERT INTO sales VALUES ('east', 10), ('east', 20), ('west', 5), ('west', 15), ('west', 25)"
+                    |> ignore
+
+                    match runDefault store "SELECT region, SUM(amount) AS total, COUNT(*) AS n FROM sales GROUP BY region ORDER BY region" with
+                    | ResultSet([ "region"; "total"; "n" ], rows) ->
+                        Expect.equal
+                            rows
+                            [ [ Some "east"; Some "30"; Some "2" ]; [ Some "west"; Some "45"; Some "3" ] ]
+                            "one row per region, aggregated over just that region's rows"
+                    | other -> failtestf "expected two grouped rows, got %A" other
+
+                testCase "HAVING filters grouped rows, including referencing an aggregate not in the SELECT list"
+                <| fun _ ->
+                    let store = newStore ()
+                    runDefault store "CREATE TABLE sales (region VARCHAR(10), amount INT)" |> ignore
+
+                    runDefault
+                        store
+                        "INSERT INTO sales VALUES ('east', 10), ('east', 20), ('west', 5), ('south', 100)"
+                    |> ignore
+
+                    match runDefault store "SELECT region FROM sales GROUP BY region HAVING COUNT(*) > 1 ORDER BY region" with
+                    | ResultSet([ "region" ], rows) -> Expect.equal rows [ [ Some "east" ] ] "only east has more than one row"
+                    | other -> failtestf "expected only 'east' to survive HAVING, got %A" other
+
+                testCase "GROUP BY with a NULL-valued key groups every NULL together, same as MySQL"
+                <| fun _ ->
+                    let store = newStore ()
+                    runDefault store "CREATE TABLE t (grp VARCHAR(10), n INT)" |> ignore
+                    runDefault store "INSERT INTO t VALUES (NULL, 1), (NULL, 2), ('a', 3)" |> ignore
+
+                    match runDefault store "SELECT grp, COUNT(*) AS c FROM t GROUP BY grp ORDER BY grp" with
+                    | ResultSet([ "grp"; "c" ], rows) ->
+                        Expect.equal rows [ [ None; Some "2" ]; [ Some "a"; Some "1" ] ] "both NULL rows land in one group"
+                    | other -> failtestf "expected NULLs to group together, got %A" other
+
+                testCase "COUNT ignores NULL, SUM of an all-NULL group is NULL, AVG propagates NULL the same way"
+                <| fun _ ->
+                    let store = newStore ()
+                    runDefault store "CREATE TABLE t (grp VARCHAR(10), n INT)" |> ignore
+                    runDefault store "INSERT INTO t VALUES ('a', NULL), ('a', NULL), ('b', 10), ('b', NULL)" |> ignore
+
+                    match runDefault store "SELECT grp, COUNT(n) AS cn, SUM(n) AS s, AVG(n) AS a FROM t GROUP BY grp ORDER BY grp" with
+                    | ResultSet([ "grp"; "cn"; "s"; "a" ], rows) ->
+                        Expect.equal
+                            rows
+                            [ [ Some "a"; Some "0"; None; None ]; [ Some "b"; Some "1"; Some "10"; Some "10" ] ]
+                            "group 'a' is all-NULL (COUNT 0, SUM/AVG NULL), group 'b' has one real value"
+                    | other -> failtestf "expected NULL-aware aggregates per group, got %A" other
+
+                testCase "a bare non-aggregated column picks the first row of its group (ANY_VALUE-style, ONLY_FULL_GROUP_BY off)"
+                <| fun _ ->
+                    let store = newStore ()
+                    runDefault store "CREATE TABLE t (grp VARCHAR(10), tag VARCHAR(10))" |> ignore
+                    runDefault store "INSERT INTO t VALUES ('a', 'first'), ('a', 'second')" |> ignore
+
+                    match runDefault store "SELECT grp, tag FROM t GROUP BY grp" with
+                    | ResultSet([ "grp"; "tag" ], [ [ Some "a"; Some "first" ] ]) -> ()
+                    | other -> failtestf "expected the first row's tag, got %A" other
+
+                testCase "GROUP BY a positional projection reference and an alias"
+                <| fun _ ->
+                    let store = newStore ()
+                    runDefault store "CREATE TABLE t (grp VARCHAR(10), n INT)" |> ignore
+                    runDefault store "INSERT INTO t VALUES ('a', 1), ('a', 2), ('b', 3)" |> ignore
+
+                    match runDefault store "SELECT grp AS g, COUNT(*) AS c FROM t GROUP BY 1 ORDER BY g" with
+                    | ResultSet([ "g"; "c" ], rows) -> Expect.equal rows [ [ Some "a"; Some "2" ]; [ Some "b"; Some "1" ] ] "GROUP BY 1"
+                    | other -> failtestf "expected GROUP BY 1 to group by the first projection, got %A" other
+
+                    match runDefault store "SELECT grp AS g, COUNT(*) AS c FROM t GROUP BY g ORDER BY g" with
+                    | ResultSet([ "g"; "c" ], rows) -> Expect.equal rows [ [ Some "a"; Some "2" ]; [ Some "b"; Some "1" ] ] "GROUP BY alias"
+                    | other -> failtestf "expected GROUP BY alias to group by the aliased projection, got %A" other
+
+                testCase "ORDER BY an aggregate not in the SELECT list, over a grouped query"
+                <| fun _ ->
+                    let store = newStore ()
+                    runDefault store "CREATE TABLE t (grp VARCHAR(10), n INT)" |> ignore
+                    runDefault store "INSERT INTO t VALUES ('a', 1), ('b', 1), ('b', 2), ('b', 3)" |> ignore
+
+                    match runDefault store "SELECT grp FROM t GROUP BY grp ORDER BY COUNT(*) DESC" with
+                    | ResultSet([ "grp" ], rows) -> Expect.equal rows [ [ Some "b" ]; [ Some "a" ] ] "'b' has more rows, sorts first descending"
+                    | other -> failtestf "expected ORDER BY COUNT(*) DESC to work, got %A" other
+
+                testCase "COUNT(DISTINCT x) counts only distinct non-NULL values"
+                <| fun _ ->
+                    let store = newStore ()
+                    runDefault store "CREATE TABLE t (grp VARCHAR(10), n INT)" |> ignore
+                    runDefault store "INSERT INTO t VALUES ('a', 1), ('a', 1), ('a', 2), ('a', NULL)" |> ignore
+
+                    match runDefault store "SELECT COUNT(DISTINCT n) AS c FROM t GROUP BY grp" with
+                    | ResultSet([ "c" ], [ [ Some "2" ] ]) -> ()
+                    | other -> failtestf "expected COUNT(DISTINCT n) = 2, got %A" other
+
+                testCase "GROUP_CONCAT joins group members with the default comma separator, and a custom SEPARATOR"
+                <| fun _ ->
+                    let store = newStore ()
+                    runDefault store "CREATE TABLE t (grp VARCHAR(10), tag VARCHAR(10))" |> ignore
+                    runDefault store "INSERT INTO t VALUES ('a', 'x'), ('a', 'y'), ('a', 'x')" |> ignore
+
+                    match runDefault store "SELECT GROUP_CONCAT(tag) AS c FROM t GROUP BY grp" with
+                    | ResultSet([ "c" ], [ [ Some "x,y,x" ] ]) -> ()
+                    | other -> failtestf "expected the default comma separator, got %A" other
+
+                    match runDefault store "SELECT GROUP_CONCAT(DISTINCT tag SEPARATOR '|') AS c FROM t GROUP BY grp" with
+                    | ResultSet([ "c" ], [ [ Some "x|y" ] ]) -> ()
+                    | other -> failtestf "expected DISTINCT deduping and a custom separator, got %A" other
+
+                testCase "SELECT COUNT(*) FROM an empty table still returns one row with 0, not zero rows"
+                <| fun _ ->
+                    let store = newStore ()
+                    runDefault store "CREATE TABLE t (n INT)" |> ignore
+
+                    match runDefault store "SELECT COUNT(*) AS c FROM t" with
+                    | ResultSet([ "c" ], [ [ Some "0" ] ]) -> ()
+                    | other -> failtestf "expected one row with COUNT(*) = 0 on an empty table, got %A" other
+
+                testCase "a real GROUP BY over an empty table produces zero rows, unlike the whole-table aggregate case above"
+                <| fun _ ->
+                    let store = newStore ()
+                    runDefault store "CREATE TABLE t (grp VARCHAR(10), n INT)" |> ignore
+
+                    match runDefault store "SELECT grp, COUNT(*) AS c FROM t GROUP BY grp" with
+                    | ResultSet(_, []) -> ()
+                    | other -> failtestf "expected zero grouped rows on an empty table, got %A" other ]
+
+          testList
+              "correlated subqueries"
+              [ testCase "correlated EXISTS: WHERE EXISTS (... referencing the outer row) — the Eloquent whereHas() shape"
+                <| fun _ ->
+                    let store = newStore ()
+                    runDefault store "CREATE TABLE users (id INT, name VARCHAR(10))" |> ignore
+                    runDefault store "CREATE TABLE posts (id INT, user_id INT)" |> ignore
+                    runDefault store "INSERT INTO users VALUES (1, 'alice'), (2, 'bob')" |> ignore
+                    // only alice has a post.
+                    runDefault store "INSERT INTO posts VALUES (1, 1)" |> ignore
+
+                    let sql = "SELECT name FROM users WHERE EXISTS (SELECT 1 FROM posts WHERE posts.user_id = users.id)"
+
+                    match runDefault store sql with
+                    | ResultSet([ "name" ], [ [ Some "alice" ] ]) -> ()
+                    | other -> failtestf "expected only alice (who has a post), got %A" other
+
+                testCase "correlated NOT EXISTS"
+                <| fun _ ->
+                    let store = newStore ()
+                    runDefault store "CREATE TABLE users (id INT, name VARCHAR(10))" |> ignore
+                    runDefault store "CREATE TABLE posts (id INT, user_id INT)" |> ignore
+                    runDefault store "INSERT INTO users VALUES (1, 'alice'), (2, 'bob')" |> ignore
+                    runDefault store "INSERT INTO posts VALUES (1, 1)" |> ignore
+
+                    let sql = "SELECT name FROM users WHERE NOT EXISTS (SELECT 1 FROM posts WHERE posts.user_id = users.id)"
+
+                    match runDefault store sql with
+                    | ResultSet([ "name" ], [ [ Some "bob" ] ]) -> ()
+                    | other -> failtestf "expected only bob (who has no post), got %A" other
+
+                testCase "IN (SELECT ...): a non-correlated subquery's first column is the candidate set"
+                <| fun _ ->
+                    let store = newStore ()
+                    runDefault store "CREATE TABLE users (id INT, name VARCHAR(10))" |> ignore
+                    runDefault store "CREATE TABLE posts (user_id INT)" |> ignore
+                    runDefault store "INSERT INTO users VALUES (1, 'alice'), (2, 'bob')" |> ignore
+                    runDefault store "INSERT INTO posts VALUES (1)" |> ignore
+
+                    match runDefault store "SELECT name FROM users WHERE id IN (SELECT user_id FROM posts)" with
+                    | ResultSet([ "name" ], [ [ Some "alice" ] ]) -> ()
+                    | other -> failtestf "expected only alice, got %A" other
+
+                testCase "NOT IN (SELECT ...)"
+                <| fun _ ->
+                    let store = newStore ()
+                    runDefault store "CREATE TABLE users (id INT, name VARCHAR(10))" |> ignore
+                    runDefault store "CREATE TABLE posts (user_id INT)" |> ignore
+                    runDefault store "INSERT INTO users VALUES (1, 'alice'), (2, 'bob')" |> ignore
+                    runDefault store "INSERT INTO posts VALUES (1)" |> ignore
+
+                    match runDefault store "SELECT name FROM users WHERE id NOT IN (SELECT user_id FROM posts)" with
+                    | ResultSet([ "name" ], [ [ Some "bob" ] ]) -> ()
+                    | other -> failtestf "expected only bob, got %A" other
+
+                testCase "scalar subquery: (SELECT ...) used as a value, zero rows is NULL, one row is that value"
+                <| fun _ ->
+                    let store = newStore ()
+                    runDefault store "CREATE TABLE users (id INT, name VARCHAR(10))" |> ignore
+                    runDefault store "CREATE TABLE posts (id INT, user_id INT)" |> ignore
+                    runDefault store "INSERT INTO users VALUES (1, 'alice'), (2, 'bob')" |> ignore
+                    runDefault store "INSERT INTO posts VALUES (1, 1), (2, 1)" |> ignore
+
+                    let sql = "SELECT name, (SELECT COUNT(*) FROM posts WHERE posts.user_id = users.id) AS n FROM users ORDER BY name"
+
+                    match runDefault store sql with
+                    | ResultSet([ "name"; "n" ], rows) ->
+                        Expect.equal rows [ [ Some "alice"; Some "2" ]; [ Some "bob"; Some "0" ] ] "correlated scalar subquery per row"
+                    | other -> failtestf "expected a per-row correlated count, got %A" other
+
+                testCase "scalar subquery returning more than one row is MySQL error 1242"
+                <| fun _ ->
+                    let store = newStore ()
+                    runDefault store "CREATE TABLE t (n INT)" |> ignore
+                    runDefault store "INSERT INTO t VALUES (1), (2)" |> ignore
+
+                    match runDefault store "SELECT (SELECT n FROM t) AS x" with
+                    | Err(1242, _) -> ()
+                    | other -> failtestf "expected error 1242, got %A" other
+
+                testCase "derived table: FROM (SELECT ...) AS t"
+                <| fun _ ->
+                    let store = newStore ()
+                    runDefault store "CREATE TABLE t (n INT)" |> ignore
+                    runDefault store "INSERT INTO t VALUES (1), (2), (3)" |> ignore
+
+                    match runDefault store "SELECT doubled FROM (SELECT n * 2 AS doubled FROM t) AS d WHERE doubled > 2 ORDER BY doubled" with
+                    | ResultSet([ "doubled" ], rows) -> Expect.equal rows [ [ Some "4" ]; [ Some "6" ] ] "derived table filtered and projected"
+                    | other -> failtestf "expected a derived-table resultset, got %A" other ]
+
+          testList
+              "CASE / UNION / <=> / IS TRUE-FALSE / REGEXP / LIKE BINARY"
+              [ testCase "searched CASE WHEN ... THEN ... ELSE ... END"
+                <| fun _ ->
+                    let store = newStore ()
+                    runDefault store "CREATE TABLE t (n INT)" |> ignore
+                    runDefault store "INSERT INTO t VALUES (1), (-1), (0)" |> ignore
+
+                    let sql = "SELECT CASE WHEN n > 0 THEN 'pos' WHEN n < 0 THEN 'neg' ELSE 'zero' END AS sign FROM t ORDER BY n"
+
+                    match runDefault store sql with
+                    | ResultSet([ "sign" ], rows) ->
+                        Expect.equal rows [ [ Some "neg" ]; [ Some "zero" ]; [ Some "pos" ] ] "one branch per row"
+                    | other -> failtestf "expected a CASE per row, got %A" other
+
+                testCase "simple CASE subject WHEN value THEN ... END, falling through to NULL with no ELSE"
+                <| fun _ ->
+                    let store = newStore ()
+                    runDefault store "CREATE TABLE t (n INT)" |> ignore
+                    runDefault store "INSERT INTO t VALUES (1), (2), (3)" |> ignore
+
+                    match runDefault store "SELECT CASE n WHEN 1 THEN 'one' WHEN 2 THEN 'two' END AS label FROM t ORDER BY n" with
+                    | ResultSet([ "label" ], rows) -> Expect.equal rows [ [ Some "one" ]; [ Some "two" ]; [ None ] ] "3 falls through to NULL"
+                    | other -> failtestf "expected a simple CASE with an implicit NULL else, got %A" other
+
+                testCase "UNION dedupes, UNION ALL keeps duplicates"
+                <| fun _ ->
+                    let store = newStore ()
+                    runDefault store "CREATE TABLE a (n INT)" |> ignore
+                    runDefault store "CREATE TABLE b (n INT)" |> ignore
+                    runDefault store "INSERT INTO a VALUES (1), (2)" |> ignore
+                    runDefault store "INSERT INTO b VALUES (2), (3)" |> ignore
+
+                    match runDefault store "SELECT n FROM a UNION SELECT n FROM b ORDER BY n" with
+                    | ResultSet([ "n" ], rows) -> Expect.equal rows [ [ Some "1" ]; [ Some "2" ]; [ Some "3" ] ] "deduped"
+                    | other -> failtestf "expected UNION to dedupe, got %A" other
+
+                    match runDefault store "SELECT n FROM a UNION ALL SELECT n FROM b ORDER BY n" with
+                    | ResultSet([ "n" ], rows) ->
+                        Expect.equal rows [ [ Some "1" ]; [ Some "2" ]; [ Some "2" ]; [ Some "3" ] ] "duplicates kept"
+                    | other -> failtestf "expected UNION ALL to keep duplicates, got %A" other
+
+                testCase "<=> is a null-safe equals: NULL <=> NULL is true, unlike ="
+                <| fun _ ->
+                    let store = newStore ()
+
+                    match runDefault store "SELECT NULL <=> NULL AS a, NULL = NULL AS b, 1 <=> 1 AS c, 1 <=> 2 AS d" with
+                    | ResultSet([ "a"; "b"; "c"; "d" ], [ [ Some "1"; None; Some "1"; Some "0" ] ]) -> ()
+                    | other -> failtestf "expected <=> to never be NULL, got %A" other
+
+                testCase "IS TRUE / IS FALSE are never NULL, even for a NULL operand"
+                <| fun _ ->
+                    let store = newStore ()
+
+                    match runDefault store "SELECT (1 IS TRUE) AS a, (0 IS FALSE) AS b, (NULL IS TRUE) AS c, (NULL IS FALSE) AS d" with
+                    | ResultSet([ "a"; "b"; "c"; "d" ], [ [ Some "1"; Some "1"; Some "0"; Some "0" ] ]) -> ()
+                    | other -> failtestf "expected IS TRUE/FALSE to be plain booleans, got %A" other
+
+                testCase "REGEXP matches a real regex pattern, case-insensitively"
+                <| fun _ ->
+                    let store = newStore ()
+                    runDefault store "CREATE TABLE t (s VARCHAR(10))" |> ignore
+                    runDefault store "INSERT INTO t VALUES ('Hello'), ('world')" |> ignore
+
+                    match runDefault store "SELECT s FROM t WHERE s REGEXP '^h' ORDER BY s" with
+                    | ResultSet([ "s" ], [ [ Some "Hello" ] ]) -> ()
+                    | other -> failtestf "expected REGEXP to case-insensitively match 'Hello', got %A" other
+
+                testCase "LIKE BINARY is case-sensitive, unlike plain LIKE"
+                <| fun _ ->
+                    let store = newStore ()
+                    runDefault store "CREATE TABLE t (s VARCHAR(10))" |> ignore
+                    runDefault store "INSERT INTO t VALUES ('Hello')" |> ignore
+
+                    match runDefault store "SELECT s FROM t WHERE s LIKE BINARY 'hello'" with
+                    | ResultSet(_, []) -> ()
+                    | other -> failtestf "expected LIKE BINARY 'hello' not to match 'Hello', got %A" other
+
+                    match runDefault store "SELECT s FROM t WHERE s LIKE 'hello'" with
+                    | ResultSet([ "s" ], [ [ Some "Hello" ] ]) -> ()
+                    | other -> failtestf "expected plain LIKE to still match case-insensitively, got %A" other ] ]
