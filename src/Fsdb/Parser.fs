@@ -294,6 +294,13 @@ let private expr, exprRef = createParserForwardedToRef<Expr, unit> ()
 /// by `selectStmt` once `tableRef`/`projection`/etc. exist.
 let private selectStmtRecord, selectStmtRecordRef = createParserForwardedToRef<SelectStmt, unit> ()
 
+/// `EXPLAIN stmt` wraps any other statement, including (in principle)
+/// another `EXPLAIN` — tie the same forward-reference knot so `explainStmt`
+/// (defined well before the full `statement` choice exists) can recurse into
+/// it; the real definition is assigned at the bottom of the file, same as
+/// `expr`/`selectStmtRecord` above.
+let private statement, statementRef = createParserForwardedToRef<Statement, unit> ()
+
 let private parenExpr: Parser<Expr, unit> = between (sym "(") (sym ")") expr
 
 let private starAtom: Parser<Expr, unit> = pstring "*" >>. ws >>% Star None
@@ -628,10 +635,11 @@ let private columnDef: Parser<ColumnDef, unit> =
           Unique = List.contains MUnique mods
           Generated = mods |> List.tryPick (function MGenerated e -> Some e | _ -> None) }
 
-/// `AFTER col` / `FIRST` after an `ADD`/`MODIFY`/`CHANGE COLUMN` — accepted
-/// and discarded; see the ponytail note on `Ast.AlterAction`.
-let private colPosition: Parser<unit, unit> =
-    optional ((keyword "AFTER" >>. identifier >>% ()) <|> (keyword "FIRST" >>% ()))
+/// `AFTER col` / `FIRST` after an `ADD`/`MODIFY`/`CHANGE COLUMN` —
+/// `PositionDefault` when neither is written.
+let private colPosition: Parser<ColumnPosition, unit> =
+    opt ((keyword "AFTER" >>. identifier |>> PositionAfter) <|> (keyword "FIRST" >>% PositionFirst))
+    |>> Option.defaultValue PositionDefault
 
 // ---------------------------------------------------------------------------
 // CREATE TABLE trailing items: PRIMARY KEY / INDEX / FOREIGN KEY
@@ -804,7 +812,7 @@ let private dropDatabaseStmt: Parser<Statement, unit> =
 let private optColumnKw: Parser<unit, unit> = optional (keyword "COLUMN")
 
 let private addColumnAction: Parser<AlterAction, unit> =
-    attempt (keyword "ADD" >>. optColumnKw >>. columnDef .>> colPosition) |>> AddColumn
+    attempt (keyword "ADD" >>. optColumnKw >>. columnDef .>>. colPosition) |>> AddColumn
 
 let private addPrimaryKeyAction: Parser<AlterAction, unit> =
     attempt (keyword "ADD" >>. trailingPrimaryKey) |>> AddPrimaryKey
@@ -825,11 +833,11 @@ let private dropColumnAction: Parser<AlterAction, unit> =
     attempt (keyword "DROP" >>. optColumnKw >>. identifier) |>> DropColumn
 
 let private modifyColumnAction: Parser<AlterAction, unit> =
-    attempt (keyword "MODIFY" >>. optColumnKw >>. columnDef .>> colPosition) |>> ModifyColumn
+    attempt (keyword "MODIFY" >>. optColumnKw >>. columnDef .>>. colPosition) |>> ModifyColumn
 
 let private changeColumnAction: Parser<AlterAction, unit> =
-    attempt (keyword "CHANGE" >>. optColumnKw >>. identifier .>>. columnDef .>> colPosition)
-    |>> ChangeColumn
+    attempt (keyword "CHANGE" >>. optColumnKw >>. identifier .>>. columnDef .>>. colPosition)
+    |>> fun ((oldName, newDef), position) -> ChangeColumn(oldName, newDef, position)
 
 let private renameColumnAction: Parser<AlterAction, unit> =
     attempt (keyword "RENAME" >>. keyword "COLUMN" >>. identifier .>> keyword "TO" .>>. identifier)
@@ -1033,47 +1041,92 @@ let private selectOrUnionStmt: Parser<Statement, unit> =
             let last = rest |> List.last |> snd
             Union(first, rest, last.OrderBy, last.Limit, last.Offset)
 
-/// `UPDATE t [[AS] alias] SET ... [WHERE ...] [ORDER BY ...] [LIMIT ...]` —
-/// the alias, `ORDER BY`, and `LIMIT` are accepted and discarded:
-/// `Ast.Update` has no join/multi-table shape for an alias to matter to, and
-/// this engine already applies an `UPDATE` to every matching row in one
-/// pass, so an ordering/row-cap on top of that has nothing left to change.
 /// An assignment target, `col` or `table.col` (Laravel's `touch()` qualifies
 /// `updated_at` with the table name even in a single-table `UPDATE`) — the
-/// table part is discarded, same as everywhere else this engine sees a
-/// qualified name against a statement with only one table in scope.
-let private assignTarget: Parser<string, unit> =
-    (identifier .>>. opt (sym "." >>. identifier))
+/// table part only matters once there's more than one table in scope (a
+/// multi-table `UPDATE ... JOIN`); a single-table `UPDATE` still parses one
+/// the same way it always could, `Executor` just never needs it there.
+let private assignment: Parser<Assignment, unit> =
+    ((identifier .>>. opt (sym "." >>. identifier)) .>> sym "=") .>>. expr
     |>> function
-        | first, None -> first
-        | _, Some col -> col
+        | (first, None), value -> { Table = None; Column = first; Value = value }
+        | (first, Some col), value -> { Table = Some first; Column = col; Value = value }
 
+/// `[ORDER BY ...] [LIMIT n]`, legal only on a single-table `UPDATE`/`DELETE`
+/// (`joins` empty) — matching MySQL's own grammar restriction, a
+/// multi-table form simply never attempts to parse this trailing clause, so
+/// leftover `ORDER BY`/`LIMIT` tokens after a JOIN'd `UPDATE`/`DELETE` fall
+/// through to `Parser.parse`'s top-level `eof` and surface as an ordinary
+/// syntax error — the same 1064 real MySQL gives that combination.
+let private singleTableOrderLimit (joins: Join list) : Parser<OrderKey list * int option, unit> =
+    if joins.IsEmpty then
+        (opt (keyword "ORDER" >>. keyword "BY" >>. sepBy1 orderKey (sym ",")) |>> Option.defaultValue [])
+        .>>. opt (keyword "LIMIT" >>. limitTok)
+    else
+        preturn ([], None)
+
+/// `UPDATE t1 [[AS] a] [JOIN ...] SET assignments [WHERE ...] [ORDER BY ...]
+/// [LIMIT ...]`.
 let private updateStmt: Parser<Statement, unit> =
-    (keyword "UPDATE" >>. qualifiedTableName
-     .>> opt ((keyword "AS" >>. identifier) <|> identifier)
-     .>> keyword "SET"
-     .>>. sepBy1 ((assignTarget .>> sym "=") .>>. expr) (sym ",")
-     .>>. opt (keyword "WHERE" >>. expr)
-     .>> opt (keyword "ORDER" >>. keyword "BY" >>. sepBy1 orderKey (sym ","))
-     .>> opt limitClause)
-    |>> fun ((table, assignments), where) -> Update(table, assignments, where)
+    (keyword "UPDATE" >>. tableRef .>>. many joinClause .>> keyword "SET" .>>. sepBy1 assignment (sym ","))
+    >>= fun ((from, joins), assignments) ->
+        opt (keyword "WHERE" >>. expr) .>>. singleTableOrderLimit joins
+        |>> fun (where, (orderBy, limit)) ->
+            Update
+                { From = from
+                  Joins = joins
+                  Assignments = assignments
+                  Where = where
+                  OrderBy = orderBy
+                  Limit = limit }
 
-/// `DELETE FROM t [WHERE ...] [LIMIT n]` — the `LIMIT` (no `OFFSET`, unlike
-/// a `SELECT`'s — MySQL's `DELETE ... LIMIT` doesn't accept one) is a
-/// batch-deletion staple (a reporting/cleanup job capping how many stale
-/// rows one run removes).
+/// `DELETE t1[, t2, ...] FROM t1 JOIN t2 ON ... [WHERE ...]` — the
+/// multi-table form naming its delete targets before `FROM`.
+let private namedTargetsDelete: Parser<string list * TableRef * Join list, unit> =
+    attempt (sepBy1 identifier (sym ",") .>> keyword "FROM" .>>. tableRef .>>. many joinClause)
+    |>> fun ((targets, from), joins) -> targets, from, joins
+
+/// `DELETE FROM t1[, t2, ...] USING t1 JOIN t2 ON ... [WHERE ...]` — the
+/// `USING` multi-table form; the target list (before `USING`) names which
+/// of the `USING` join's tables actually lose rows.
+let private usingDelete: Parser<string list * TableRef * Join list, unit> =
+    attempt (keyword "FROM" >>. sepBy1 identifier (sym ",") .>> keyword "USING" .>>. tableRef .>>. many joinClause)
+    |>> fun ((targets, from), joins) -> targets, from, joins
+
+/// `DELETE FROM t1 [WHERE ...] [ORDER BY ...] [LIMIT n]` — single-table;
+/// `Targets` is just `t1` itself (by its alias, if it has one).
+let private singleTableDeleteHead: Parser<string list * TableRef * Join list, unit> =
+    keyword "FROM" >>. tableRef
+    |>> fun from -> [ from.Alias |> Option.defaultValue from.Table ], from, []
+
 let private deleteStmt: Parser<Statement, unit> =
-    (keyword "DELETE" >>. keyword "FROM" >>. qualifiedTableName
-     .>>. opt (keyword "WHERE" >>. expr)
-     .>>. opt (keyword "LIMIT" >>. limitTok))
-    |>> fun ((table, where), limit) -> Delete(table, where, limit)
+    keyword "DELETE" >>. (namedTargetsDelete <|> usingDelete <|> singleTableDeleteHead)
+    >>= fun (targets, from, joins) ->
+        opt (keyword "WHERE" >>. expr) .>>. singleTableOrderLimit joins
+        |>> fun (where, (orderBy, limit)) ->
+            Delete
+                { Targets = targets
+                  From = from
+                  Joins = joins
+                  Where = where
+                  OrderBy = orderBy
+                  Limit = limit }
+
+/// `EXPLAIN [FORMAT=TRADITIONAL] stmt` — MySQL also accepts `DESCRIBE`/
+/// `DESC` as synonyms when just describing a table's columns (not a
+/// statement), out of scope here; this only covers the `EXPLAIN stmt` form.
+let private explainStmt: Parser<Statement, unit> =
+    keyword "EXPLAIN"
+    >>. optional (attempt (keyword "FORMAT" >>. sym "=" >>. keyword "TRADITIONAL"))
+    >>. statement
+    |>> Explain
 
 /// `CREATE TABLE` vs. `CREATE INDEX` and `DROP TABLE` vs. `DROP INDEX` share
 /// a leading keyword before diverging, so those four need `attempt` to
 /// backtrack cleanly between alternatives; every other statement starts on
 /// a keyword none of the others do, so `choice` picks the right one off
 /// just that first token without needing to backtrack at all.
-let private statement: Parser<Statement, unit> =
+statementRef.Value <-
     choice
         [ attempt createDatabaseStmt
           attempt createTable
@@ -1087,7 +1140,8 @@ let private statement: Parser<Statement, unit> =
           updateStmt
           deleteStmt
           alterTableStmt
-          renameTableStmt ]
+          renameTableStmt
+          explainStmt ]
     <?> "statement"
 
 /// Parses one SQL statement, with an optional trailing `;`. Session-variable

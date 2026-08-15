@@ -197,7 +197,333 @@ let tests =
 
                     match runDefault store "SELECT COUNT(*) AS c FROM t" with
                     | ResultSet([ "c" ], [ [ Some "2" ] ]) -> ()
-                    | other -> failtestf "expected 2 rows left (4 - 2 deleted), got %A" other ]
+                    | other -> failtestf "expected 2 rows left (4 - 2 deleted), got %A" other
+
+                testCase "UPDATE ... ORDER BY ... LIMIT mutates only the first n rows in that order"
+                <| fun _ ->
+                    let store = newStore ()
+                    runDefault store "CREATE TABLE t (n INT)" |> ignore
+                    runDefault store "INSERT INTO t VALUES (3), (1), (4), (2)" |> ignore
+
+                    match runDefault store "UPDATE t SET n = n + 100 ORDER BY n LIMIT 2" with
+                    | Affected 2UL -> ()
+                    | other -> failtestf "expected 2 rows affected, got %A" other
+
+                    match runDefault store "SELECT n FROM t ORDER BY n" with
+                    | ResultSet(_, rows) ->
+                        // 1 and 2 were the two lowest, so they're the ones
+                        // that got +100'd; 3 and 4 are untouched.
+                        Expect.equal rows [ [ Some "3" ]; [ Some "4" ]; [ Some "101" ]; [ Some "102" ] ] "only the two smallest rows changed"
+                    | other -> failtestf "expected a resultset, got %A" other
+
+                testCase "DELETE ... ORDER BY ... LIMIT removes the first n rows in that order"
+                <| fun _ ->
+                    let store = newStore ()
+                    runDefault store "CREATE TABLE t (n INT)" |> ignore
+                    runDefault store "INSERT INTO t VALUES (3), (1), (4), (2)" |> ignore
+
+                    match runDefault store "DELETE FROM t ORDER BY n DESC LIMIT 2" with
+                    | Affected 2UL -> ()
+                    | other -> failtestf "expected 2 rows affected, got %A" other
+
+                    match runDefault store "SELECT n FROM t ORDER BY n" with
+                    | ResultSet(_, rows) -> Expect.equal rows [ [ Some "1" ]; [ Some "2" ] ] "the two largest were removed"
+                    | other -> failtestf "expected a resultset, got %A" other
+
+                testCase "UPDATE t1 JOIN t2 ON ... SET updates matched rows in both tables"
+                <| fun _ ->
+                    let store = newStore ()
+                    runDefault store "CREATE TABLE accounts (id INT, name VARCHAR(20))" |> ignore
+                    runDefault store "CREATE TABLE balances (account_id INT, cents INT)" |> ignore
+                    runDefault store "INSERT INTO accounts VALUES (1, 'old'), (2, 'other')" |> ignore
+                    runDefault store "INSERT INTO balances VALUES (1, 100)" |> ignore
+
+                    match
+                        runDefault
+                            store
+                            "UPDATE accounts a JOIN balances b ON a.id = b.account_id SET a.name = 'renamed', b.cents = b.cents + 1 WHERE a.id = 1"
+                    with
+                    | Affected 2UL -> ()
+                    | other -> failtestf "expected 2 rows affected (one per table), got %A" other
+
+                    match runDefault store "SELECT name FROM accounts WHERE id = 1" with
+                    | ResultSet(_, [ [ Some "renamed" ] ]) -> ()
+                    | other -> failtestf "expected the account renamed, got %A" other
+
+                    match runDefault store "SELECT cents FROM balances WHERE account_id = 1" with
+                    | ResultSet(_, [ [ Some "101" ] ]) -> ()
+                    | other -> failtestf "expected the balance incremented, got %A" other
+
+                    match runDefault store "SELECT name FROM accounts WHERE id = 2" with
+                    | ResultSet(_, [ [ Some "other" ] ]) -> ()
+                    | other -> failtestf "expected the unmatched account untouched, got %A" other
+
+                testCase "UPDATE JOIN updates a physical row at most once even when the join matches it multiple times"
+                <| fun _ ->
+                    let store = newStore ()
+                    runDefault store "CREATE TABLE t1 (id INT, hits INT)" |> ignore
+                    runDefault store "CREATE TABLE t2 (t1_id INT)" |> ignore
+                    runDefault store "INSERT INTO t1 VALUES (1, 0)" |> ignore
+                    // Two t2 rows both join to the same t1 row.
+                    runDefault store "INSERT INTO t2 VALUES (1), (1)" |> ignore
+
+                    match runDefault store "UPDATE t1 JOIN t2 ON t1.id = t2.t1_id SET t1.hits = t1.hits + 1" with
+                    | Affected 1UL -> ()
+                    | other -> failtestf "expected exactly 1 row affected despite two join matches, got %A" other
+
+                    match runDefault store "SELECT hits FROM t1" with
+                    | ResultSet(_, [ [ Some "1" ] ]) -> ()
+                    | other -> failtestf "expected hits incremented exactly once, got %A" other
+
+                testCase "DELETE t1 FROM t1 JOIN t2 ON ... removes only t1's matched rows"
+                <| fun _ ->
+                    let store = newStore ()
+                    runDefault store "CREATE TABLE t1 (id INT)" |> ignore
+                    runDefault store "CREATE TABLE t2 (t1_id INT, flag INT)" |> ignore
+                    runDefault store "INSERT INTO t1 VALUES (1), (2)" |> ignore
+                    runDefault store "INSERT INTO t2 VALUES (1, 1), (2, 0)" |> ignore
+
+                    match runDefault store "DELETE t1 FROM t1 JOIN t2 ON t1.id = t2.t1_id WHERE t2.flag = 1" with
+                    | Affected 1UL -> ()
+                    | other -> failtestf "expected 1 row deleted, got %A" other
+
+                    match runDefault store "SELECT id FROM t1 ORDER BY id" with
+                    | ResultSet(_, [ [ Some "2" ] ]) -> ()
+                    | other -> failtestf "expected only id=2 left, got %A" other
+
+                    match runDefault store "SELECT COUNT(*) AS c FROM t2" with
+                    | ResultSet(_, [ [ Some "2" ] ]) -> ()
+                    | other -> failtestf "expected t2 untouched (not a delete target), got %A" other
+
+                testCase "DELETE FROM t1 USING t1 JOIN t2 ON ... deletes the same way as the named-target form"
+                <| fun _ ->
+                    let store = newStore ()
+                    runDefault store "CREATE TABLE t1 (id INT)" |> ignore
+                    runDefault store "CREATE TABLE t2 (t1_id INT, flag INT)" |> ignore
+                    runDefault store "INSERT INTO t1 VALUES (1), (2)" |> ignore
+                    runDefault store "INSERT INTO t2 VALUES (1, 1), (2, 0)" |> ignore
+
+                    match runDefault store "DELETE FROM t1 USING t1 JOIN t2 ON t1.id = t2.t1_id WHERE t2.flag = 1" with
+                    | Affected 1UL -> ()
+                    | other -> failtestf "expected 1 row deleted, got %A" other
+
+                    match runDefault store "SELECT id FROM t1 ORDER BY id" with
+                    | ResultSet(_, [ [ Some "2" ] ]) -> ()
+                    | other -> failtestf "expected only id=2 left, got %A" other
+
+                testCase "DELETE t1, t2 FROM t1 JOIN t2 ON ... deletes matched rows from both target tables"
+                <| fun _ ->
+                    let store = newStore ()
+                    runDefault store "CREATE TABLE t1 (id INT)" |> ignore
+                    runDefault store "CREATE TABLE t2 (t1_id INT)" |> ignore
+                    runDefault store "INSERT INTO t1 VALUES (1), (2)" |> ignore
+                    runDefault store "INSERT INTO t2 VALUES (1)" |> ignore
+
+                    match runDefault store "DELETE t1, t2 FROM t1 JOIN t2 ON t1.id = t2.t1_id" with
+                    | Affected 2UL -> ()
+                    | other -> failtestf "expected 2 rows deleted total (one per table), got %A" other
+
+                    match runDefault store "SELECT id FROM t1 ORDER BY id" with
+                    | ResultSet(_, [ [ Some "2" ] ]) -> ()
+                    | other -> failtestf "expected t1's matched row gone, got %A" other
+
+                    match runDefault store "SELECT COUNT(*) AS c FROM t2" with
+                    | ResultSet(_, [ [ Some "0" ] ]) -> ()
+                    | other -> failtestf "expected t2 emptied, got %A" other ]
+
+          testList
+              "ALTER TABLE ... AFTER / FIRST"
+              [ testCase "ADD COLUMN ... FIRST repositions in SELECT * order and ordinal_position"
+                <| fun _ ->
+                    let store = newStore ()
+                    runDefault store "CREATE TABLE t (id INT, name VARCHAR(20))" |> ignore
+                    runDefault store "INSERT INTO t VALUES (1, 'x')" |> ignore
+                    runDefault store "ALTER TABLE t ADD COLUMN flag INT FIRST" |> ignore
+
+                    match runDefault store "SELECT * FROM t" with
+                    | ResultSet([ "flag"; "id"; "name" ], [ [ None; Some "1"; Some "x" ] ]) -> ()
+                    | other -> failtestf "expected flag first, got %A" other
+
+                testCase "ADD COLUMN ... AFTER col repositions in SELECT * order"
+                <| fun _ ->
+                    let store = newStore ()
+                    runDefault store "CREATE TABLE t (id INT, name VARCHAR(20))" |> ignore
+                    runDefault store "INSERT INTO t VALUES (1, 'x')" |> ignore
+                    runDefault store "ALTER TABLE t ADD COLUMN flag INT AFTER id" |> ignore
+
+                    match runDefault store "SELECT * FROM t" with
+                    | ResultSet([ "id"; "flag"; "name" ], [ [ Some "1"; None; Some "x" ] ]) -> ()
+                    | other -> failtestf "expected flag right after id, got %A" other
+
+                testCase "CHANGE COLUMN ... FIRST renames, redefines, and repositions in one statement"
+                <| fun _ ->
+                    let store = newStore ()
+                    runDefault store "CREATE TABLE t (id INT, name VARCHAR(20), age INT)" |> ignore
+                    runDefault store "INSERT INTO t VALUES (1, 'x', 30)" |> ignore
+                    runDefault store "ALTER TABLE t CHANGE age years INT FIRST" |> ignore
+
+                    match runDefault store "SELECT * FROM t" with
+                    | ResultSet([ "years"; "id"; "name" ], [ [ Some "30"; Some "1"; Some "x" ] ]) -> ()
+                    | other -> failtestf "expected years first with its value moved along, got %A" other
+
+                testCase "ADD COLUMN ... FIRST updates information_schema.columns ordinal_position"
+                <| fun _ ->
+                    let store = newStore ()
+                    runDefault store "CREATE TABLE t (id INT, name VARCHAR(20))" |> ignore
+                    runDefault store "ALTER TABLE t ADD COLUMN flag INT FIRST" |> ignore
+
+                    match
+                        runDefault
+                            store
+                            "SELECT column_name FROM information_schema.columns WHERE table_name = 't' ORDER BY ordinal_position"
+                    with
+                    | ResultSet(_, [ [ Some "flag" ]; [ Some "id" ]; [ Some "name" ] ]) -> ()
+                    | other -> failtestf "expected flag/id/name ordinal order, got %A" other ]
+
+          testList
+              "EXPLAIN"
+              [ testCase "EXPLAIN SELECT with a WHERE and JOIN describes both tables in FROM order"
+                <| fun _ ->
+                    let store = newStore ()
+                    runDefault store "CREATE TABLE t1 (id INT)" |> ignore
+                    runDefault store "CREATE TABLE t2 (t1_id INT)" |> ignore
+                    runDefault store "INSERT INTO t1 VALUES (1), (2)" |> ignore
+                    runDefault store "INSERT INTO t2 VALUES (1)" |> ignore
+
+                    match runDefault store "EXPLAIN SELECT * FROM t1 JOIN t2 ON t1.id = t2.t1_id WHERE t1.id = 1" with
+                    | ResultSet(cols,
+                                [ [ Some "1"; Some "SIMPLE"; Some "t1"; _; Some "ALL"; _; _; _; _; Some "2"; Some "100.00"; None ]
+                                  [ Some "1"; Some "SIMPLE"; Some "t2"; _; Some "system"; _; _; _; _; Some "1"; Some "100.00"; Some extra ] ]) ->
+                        Expect.equal
+                            cols
+                            [ "id"; "select_type"; "table"; "partitions"; "type"; "possible_keys"; "key"; "key_len"; "ref"; "rows"; "filtered"; "Extra" ]
+                            "the classic 12 columns"
+
+                        Expect.stringContains extra "Using where" "WHERE noted on the last table"
+                    | other -> failtestf "expected a two-row join plan, got %A" other
+
+                testCase "EXPLAIN SELECT with a correlated EXISTS subquery is DEPENDENT SUBQUERY"
+                <| fun _ ->
+                    let store = newStore ()
+                    runDefault store "CREATE TABLE t1 (id INT)" |> ignore
+                    runDefault store "CREATE TABLE t2 (t1_id INT)" |> ignore
+
+                    match
+                        runDefault
+                            store
+                            "EXPLAIN SELECT * FROM t1 WHERE EXISTS (SELECT 1 FROM t2 WHERE t2.t1_id = t1.id)"
+                    with
+                    | ResultSet(_, rows) ->
+                        let selectTypes = rows |> List.map (fun r -> r.[1])
+                        Expect.contains selectTypes (Some "DEPENDENT SUBQUERY") "the correlated subquery is flagged dependent"
+                        let ids = rows |> List.map (fun r -> r.[0])
+                        Expect.equal (ids |> List.distinct |> List.length) 2 "outer and subquery are different id blocks"
+                    | other -> failtestf "expected a resultset, got %A" other
+
+                testCase "EXPLAIN SELECT with an uncorrelated subquery is plain SUBQUERY"
+                <| fun _ ->
+                    let store = newStore ()
+                    runDefault store "CREATE TABLE t1 (id INT)" |> ignore
+                    runDefault store "CREATE TABLE t2 (id INT)" |> ignore
+
+                    match runDefault store "EXPLAIN SELECT * FROM t1 WHERE id IN (SELECT id FROM t2)" with
+                    | ResultSet(_, rows) ->
+                        let selectTypes = rows |> List.map (fun r -> r.[1])
+                        Expect.contains selectTypes (Some "SUBQUERY") "the uncorrelated subquery is plain SUBQUERY"
+                    | other -> failtestf "expected a resultset, got %A" other
+
+                testCase "EXPLAIN SELECT with a derived table is DERIVED"
+                <| fun _ ->
+                    let store = newStore ()
+                    runDefault store "CREATE TABLE t (n INT)" |> ignore
+                    runDefault store "INSERT INTO t VALUES (1), (2)" |> ignore
+
+                    match runDefault store "EXPLAIN SELECT * FROM (SELECT n FROM t) AS d" with
+                    | ResultSet(_, rows) ->
+                        let selectTypes = rows |> List.map (fun r -> r.[1])
+                        Expect.contains selectTypes (Some "DERIVED") "the derived table gets its own DERIVED block"
+                        let tables = rows |> List.map (fun r -> r.[2])
+                        Expect.contains tables (Some "<derived2>") "the outer row references it by its derived id"
+                    | other -> failtestf "expected a resultset, got %A" other
+
+                testCase "EXPLAIN SELECT with GROUP BY notes Using temporary"
+                <| fun _ ->
+                    let store = newStore ()
+                    runDefault store "CREATE TABLE t (g INT)" |> ignore
+
+                    match runDefault store "EXPLAIN SELECT g, COUNT(*) FROM t GROUP BY g" with
+                    | ResultSet(_, [ row ]) -> Expect.stringContains (row.[11] |> Option.defaultValue "") "Using temporary" "GROUP BY notes Using temporary"
+                    | other -> failtestf "expected one row, got %A" other
+
+                testCase "EXPLAIN SELECT with ORDER BY notes Using filesort"
+                <| fun _ ->
+                    let store = newStore ()
+                    runDefault store "CREATE TABLE t (n INT)" |> ignore
+
+                    match runDefault store "EXPLAIN SELECT n FROM t ORDER BY n" with
+                    | ResultSet(_, [ row ]) -> Expect.stringContains (row.[11] |> Option.defaultValue "") "Using filesort" "ORDER BY notes Using filesort"
+                    | other -> failtestf "expected one row, got %A" other
+
+                testCase "EXPLAIN on a UNION includes PRIMARY, UNION, and a UNION RESULT row"
+                <| fun _ ->
+                    let store = newStore ()
+                    runDefault store "CREATE TABLE t (n INT)" |> ignore
+
+                    match runDefault store "EXPLAIN SELECT n FROM t UNION SELECT n FROM t" with
+                    | ResultSet(_, rows) ->
+                        let selectTypes = rows |> List.choose (fun r -> r.[1])
+                        Expect.contains selectTypes "PRIMARY" "first branch is PRIMARY"
+                        Expect.contains selectTypes "UNION" "second branch is UNION"
+                        Expect.contains selectTypes "UNION RESULT" "a UNION RESULT row combines them"
+                    | other -> failtestf "expected a resultset, got %A" other
+
+                testCase "EXPLAIN UPDATE describes the target table with select_type UPDATE"
+                <| fun _ ->
+                    let store = newStore ()
+                    runDefault store "CREATE TABLE t (id INT, n INT)" |> ignore
+                    runDefault store "INSERT INTO t VALUES (1, 1), (2, 2)" |> ignore
+
+                    match runDefault store "EXPLAIN UPDATE t SET n = 1 WHERE id = 1" with
+                    | ResultSet(_, [ [ Some "1"; Some "UPDATE"; Some "t"; _; Some "ALL"; _; _; _; _; Some "2"; Some "100.00"; Some extra ] ]) ->
+                        Expect.stringContains extra "Using where" "WHERE noted"
+                    | other -> failtestf "expected one UPDATE-typed row, got %A" other
+
+                testCase "EXPLAIN DELETE describes the target table with select_type DELETE"
+                <| fun _ ->
+                    let store = newStore ()
+                    runDefault store "CREATE TABLE t (id INT)" |> ignore
+
+                    match runDefault store "EXPLAIN DELETE FROM t WHERE id = 1" with
+                    | ResultSet(_, [ [ Some "1"; Some "DELETE"; Some "t"; _; _; _; _; _; _; _; _; _ ] ]) -> ()
+                    | other -> failtestf "expected one DELETE-typed row, got %A" other
+
+                testCase "EXPLAIN INSERT works without error"
+                <| fun _ ->
+                    let store = newStore ()
+                    runDefault store "CREATE TABLE t (id INT)" |> ignore
+
+                    match runDefault store "EXPLAIN INSERT INTO t VALUES (1)" with
+                    | ResultSet(_, [ [ Some "1"; Some "INSERT"; Some "t"; _; _; _; _; _; _; _; _; _ ] ]) -> ()
+                    | other -> failtestf "expected one INSERT-typed row, got %A" other
+
+                testCase "EXPLAIN FORMAT=TRADITIONAL parses the same as bare EXPLAIN"
+                <| fun _ ->
+                    let store = newStore ()
+                    runDefault store "CREATE TABLE t (id INT)" |> ignore
+
+                    match runDefault store "EXPLAIN FORMAT=TRADITIONAL SELECT * FROM t" with
+                    | ResultSet(_, [ [ Some "1"; Some "SIMPLE"; Some "t"; _; _; _; _; _; _; _; _; _ ] ]) -> ()
+                    | other -> failtestf "expected the same shape as bare EXPLAIN, got %A" other
+
+                testCase "EXPLAIN on a 1-row table reports type system"
+                <| fun _ ->
+                    let store = newStore ()
+                    runDefault store "CREATE TABLE t (id INT)" |> ignore
+                    runDefault store "INSERT INTO t VALUES (1)" |> ignore
+
+                    match runDefault store "EXPLAIN SELECT * FROM t" with
+                    | ResultSet(_, [ [ _; _; _; _; Some "system"; _; _; _; _; Some "1"; _; _ ] ]) -> ()
+                    | other -> failtestf "expected type=system for a 1-row table, got %A" other ]
 
           testList
               "functions"

@@ -489,19 +489,43 @@ let private removeColumnAt (idx: int) (row: Value[]) : Value[] =
 /// check once a migration actually exercises that combination against data.
 let private addedColumnFill (col: ColumnDef) : Value = evalDefault col.Default
 
+/// Inserts `x` at `idx` (clamped to `xs`'s length, so `idx = List.length xs`
+/// appends) — used by `AFTER`/`FIRST` column positioning, since `Columns`
+/// and each row's `Value[]` are both plain lists/arrays with no built-in
+/// "insert at" the way a `ResizeArray` would have.
+let private insertAt (idx: int) (x: 'a) (xs: 'a list) : 'a list =
+    let before, after = xs |> List.splitAt (min idx (List.length xs))
+    before @ [ x ] @ after
+
+/// Resolves `FIRST`/`AFTER col`/no-clause-given to a concrete 0-based index
+/// into `columnsExcludingSelf` (the table's columns with the column being
+/// added/moved already removed, so an `AFTER`/`FIRST` offset means the same
+/// thing whether this is a brand new column or one already elsewhere in the
+/// list) — `fallback` is what `PositionDefault` (no `AFTER`/`FIRST` written)
+/// resolves to, which differs by caller: `AddColumn` wants the end of the
+/// table (a plain `ADD COLUMN` with no position appends), `ModifyColumn`/
+/// `ChangeColumn` want the column's own current index (a plain `MODIFY`/
+/// `CHANGE COLUMN` with no position leaves it exactly where it was).
+let private resolvePosition (columnsExcludingSelf: ColumnDef list) (fallback: int) (position: ColumnPosition) : Result<int, StorageError> =
+    match position with
+    | PositionDefault -> Ok fallback
+    | PositionFirst -> Ok 0
+    | PositionAfter col -> resolveColumn columnsExcludingSelf col |> Result.map (fun idx -> idx + 1)
+
 /// Applies one `Ast.AlterAction` to `table`, returning its replacement and,
 /// for `RenameTo`, the new key it should be re-filed under in the database
 /// map (`None` means "same key").
 let private applyAlterAction (table: Table) (action: AlterAction) : Result<Table * string option, StorageError> =
     match action with
-    | AddColumn col ->
+    | AddColumn(col, position) ->
         let fill = addedColumnFill col
-        Ok(
+
+        resolvePosition table.Columns (List.length table.Columns) position
+        |> Result.map (fun idx ->
             { table with
-                Columns = table.Columns @ [ col ]
-                Rows = table.Rows |> List.map (fun r -> Array.append r [| fill |]) },
-            None
-        )
+                Columns = table.Columns |> insertAt idx col
+                Rows = table.Rows |> List.map (fun r -> r |> Array.toList |> insertAt idx fill |> Array.ofList) },
+            None)
     | DropColumn name ->
         resolveColumn table.Columns name
         |> Result.map (fun idx ->
@@ -509,23 +533,41 @@ let private applyAlterAction (table: Table) (action: AlterAction) : Result<Table
                 Columns = table.Columns |> List.indexed |> List.filter (fun (i, _) -> i <> idx) |> List.map snd
                 Rows = table.Rows |> List.map (removeColumnAt idx) },
             None)
-    | ModifyColumn newDef ->
+    | ModifyColumn(newDef, position) ->
         // ponytail: replaces the column's definition only — existing rows
         // aren't re-coerced into the new type, so a `MODIFY` that narrows a
         // type can leave a row holding a value that wouldn't itself pass
         // `coerceValue` today. Add a re-coercion pass if a migration's
         // assertions ever depend on it.
         resolveColumn table.Columns newDef.Name
-        |> Result.map (fun idx ->
-            { table with
-                Columns = table.Columns |> List.mapi (fun i c -> if i = idx then newDef else c) },
-            None)
-    | ChangeColumn(oldName, newDef) ->
+        |> Result.bind (fun oldIdx ->
+            let columnsExcludingSelf = table.Columns |> List.indexed |> List.filter (fun (i, _) -> i <> oldIdx) |> List.map snd
+
+            resolvePosition columnsExcludingSelf oldIdx position
+            |> Result.map (fun newIdx ->
+                { table with
+                    Columns = columnsExcludingSelf |> insertAt newIdx newDef
+                    Rows =
+                        table.Rows
+                        |> List.map (fun r ->
+                            let v = r.[oldIdx]
+                            r |> removeColumnAt oldIdx |> Array.toList |> insertAt newIdx v |> Array.ofList) },
+                None))
+    | ChangeColumn(oldName, newDef, position) ->
         resolveColumn table.Columns oldName
-        |> Result.map (fun idx ->
-            { table with
-                Columns = table.Columns |> List.mapi (fun i c -> if i = idx then newDef else c) },
-            None)
+        |> Result.bind (fun oldIdx ->
+            let columnsExcludingSelf = table.Columns |> List.indexed |> List.filter (fun (i, _) -> i <> oldIdx) |> List.map snd
+
+            resolvePosition columnsExcludingSelf oldIdx position
+            |> Result.map (fun newIdx ->
+                { table with
+                    Columns = columnsExcludingSelf |> insertAt newIdx newDef
+                    Rows =
+                        table.Rows
+                        |> List.map (fun r ->
+                            let v = r.[oldIdx]
+                            r |> removeColumnAt oldIdx |> Array.toList |> insertAt newIdx v |> Array.ofList) },
+                None))
     | RenameTo newName -> Ok({ table with OriginalName = newName }, Some(normalizeTableName newName))
     | RenameColumnTo(oldName, newName) ->
         resolveColumn table.Columns oldName

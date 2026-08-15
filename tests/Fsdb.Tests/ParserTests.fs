@@ -772,7 +772,17 @@ let tests =
                 <| fun _ -> Expect.equal (parseOk "TRUNCATE t") (Truncate "t") "truncate"
 
                 testCase "DELETE FROM db.t qualified table name"
-                <| fun _ -> Expect.equal (parseOk "DELETE FROM app.t") (Delete("app.t", None, None)) "qualified delete target" ]
+                <| fun _ ->
+                    Expect.equal
+                        (parseOk "DELETE FROM app.t")
+                        (Delete
+                            { Targets = [ "t" ]
+                              From = { Database = Some "app"; Table = "t"; Alias = None }
+                              Joins = []
+                              Where = None
+                              OrderBy = []
+                              Limit = None })
+                        "qualified delete target" ]
 
           testList
               "DATABASE"
@@ -895,69 +905,153 @@ let tests =
                 <| fun _ ->
                     Expect.equal
                         (parseOk "UPDATE t SET a = 1, b = a + 1 WHERE id = 5")
-                        (Update(
-                            "t",
-                            [ "a", Lit(VInt 1L); "b", BinOp(Add, col "a", Lit(VInt 1L)) ],
-                            Some(BinOp(Eq, col "id", Lit(VInt 5L)))
-                        ))
+                        (Update
+                            { From = { Database = None; Table = "t"; Alias = None }
+                              Joins = []
+                              Assignments =
+                                [ { Table = None; Column = "a"; Value = Lit(VInt 1L) }
+                                  { Table = None; Column = "b"; Value = BinOp(Add, col "a", Lit(VInt 1L)) } ]
+                              Where = Some(BinOp(Eq, col "id", Lit(VInt 5L)))
+                              OrderBy = []
+                              Limit = None })
                         "update"
 
                 testCase "UPDATE without WHERE"
                 <| fun _ ->
                     Expect.equal
                         (parseOk "UPDATE t SET a = 1")
-                        (Update("t", [ "a", Lit(VInt 1L) ], None))
+                        (Update
+                            { From = { Database = None; Table = "t"; Alias = None }
+                              Joins = []
+                              Assignments = [ { Table = None; Column = "a"; Value = Lit(VInt 1L) } ]
+                              Where = None
+                              OrderBy = []
+                              Limit = None })
                         "update without where"
 
                 testCase "DELETE FROM t WHERE ..."
                 <| fun _ ->
                     Expect.equal
                         (parseOk "DELETE FROM t WHERE id = 5")
-                        (Delete("t", Some(BinOp(Eq, col "id", Lit(VInt 5L))), None))
+                        (Delete
+                            { Targets = [ "t" ]
+                              From = { Database = None; Table = "t"; Alias = None }
+                              Joins = []
+                              Where = Some(BinOp(Eq, col "id", Lit(VInt 5L)))
+                              OrderBy = []
+                              Limit = None })
                         "delete"
 
                 testCase "DELETE FROM t without WHERE"
-                <| fun _ -> Expect.equal (parseOk "DELETE FROM t") (Delete("t", None, None)) "delete without where"
+                <| fun _ ->
+                    Expect.equal
+                        (parseOk "DELETE FROM t")
+                        (Delete
+                            { Targets = [ "t" ]
+                              From = { Database = None; Table = "t"; Alias = None }
+                              Joins = []
+                              Where = None
+                              OrderBy = []
+                              Limit = None })
+                        "delete without where"
 
                 testCase "DELETE FROM t WHERE ... LIMIT n"
                 <| fun _ ->
                     Expect.equal
                         (parseOk "DELETE FROM t WHERE id = 5 LIMIT 100")
-                        (Delete("t", Some(BinOp(Eq, col "id", Lit(VInt 5L))), Some 100))
+                        (Delete
+                            { Targets = [ "t" ]
+                              From = { Database = None; Table = "t"; Alias = None }
+                              Joins = []
+                              Where = Some(BinOp(Eq, col "id", Lit(VInt 5L)))
+                              OrderBy = []
+                              Limit = Some 100 })
                         "delete with limit"
 
-                testCase "UPDATE with an alias, ORDER BY, and LIMIT accepts and ignores all three"
+                testCase "UPDATE with an alias, ORDER BY, and LIMIT"
                 <| fun _ ->
                     Expect.equal
                         (parseOk "UPDATE t AS x SET a = 1 WHERE id = 5 ORDER BY id LIMIT 10")
-                        (Update("t", [ "a", Lit(VInt 1L) ], Some(BinOp(Eq, col "id", Lit(VInt 5L)))))
-                        "alias/order/limit ignored"
+                        (Update
+                            { From = { Database = None; Table = "t"; Alias = Some "x" }
+                              Joins = []
+                              Assignments = [ { Table = None; Column = "a"; Value = Lit(VInt 1L) } ]
+                              Where = Some(BinOp(Eq, col "id", Lit(VInt 5L)))
+                              OrderBy = [ col "id", Asc ]
+                              Limit = Some 10 })
+                        "alias parsed, order/limit real"
 
                 testCase "UPDATE with a bare alias (no AS)"
                 <| fun _ ->
                     Expect.equal
                         (parseOk "UPDATE t x SET a = 1")
-                        (Update("t", [ "a", Lit(VInt 1L) ], None))
-                        "bare alias ignored"
+                        (Update
+                            { From = { Database = None; Table = "t"; Alias = Some "x" }
+                              Joins = []
+                              Assignments = [ { Table = None; Column = "a"; Value = Lit(VInt 1L) } ]
+                              Where = None
+                              OrderBy = []
+                              Limit = None })
+                        "bare alias parsed"
 
                 testCase "UPDATE SET with a table-qualified column (Laravel's touch())"
                 <| fun _ ->
                     Expect.equal
                         (parseOk "UPDATE chatbots SET restrict_allowed_origins = 1, `chatbots`.`updated_at` = '2024-01-01'")
-                        (Update(
-                            "chatbots",
-                            [ "restrict_allowed_origins", Lit(VInt 1L); "updated_at", Lit(VString "2024-01-01") ],
-                            None
-                        ))
-                        "table.column assignment target strips the table qualifier" ]
+                        (Update
+                            { From = { Database = None; Table = "chatbots"; Alias = None }
+                              Joins = []
+                              Assignments =
+                                [ { Table = None; Column = "restrict_allowed_origins"; Value = Lit(VInt 1L) }
+                                  { Table = Some "chatbots"; Column = "updated_at"; Value = Lit(VString "2024-01-01") } ]
+                              Where = None
+                              OrderBy = []
+                              Limit = None })
+                        "table.column assignment target keeps the table qualifier"
+
+                testCase "UPDATE t1 JOIN t2 ON ... SET t1.x = ..., t2.y = ..."
+                <| fun _ ->
+                    match parseOk "UPDATE t1 JOIN t2 ON t1.id = t2.t1_id SET t1.x = 1, t2.y = 2 WHERE t1.id = 5" with
+                    | Update { Joins = [ { Kind = InnerJoin; Table = { Table = "t2" } } ]
+                               Assignments = [ { Table = Some "t1"; Column = "x" }; { Table = Some "t2"; Column = "y" } ]
+                               OrderBy = []
+                               Limit = None } -> ()
+                    | other -> failtestf "expected a two-table UPDATE JOIN, got %A" other
+
+                testCase "UPDATE t1 JOIN t2 ON ... ORDER BY is a syntax error (MySQL rejects it too)"
+                <| fun _ -> Expect.isError (parse "UPDATE t1 JOIN t2 ON t1.id = t2.id SET t1.x = 1 ORDER BY t1.id") "multi-table UPDATE ORDER BY rejected"
+
+                testCase "DELETE t1 FROM t1 JOIN t2 ON ... — named targets before FROM"
+                <| fun _ ->
+                    match parseOk "DELETE t1 FROM t1 JOIN t2 ON t1.id = t2.t1_id WHERE t2.flag = 1" with
+                    | Delete { Targets = [ "t1" ]
+                               From = { Table = "t1" }
+                               Joins = [ { Kind = InnerJoin; Table = { Table = "t2" } } ] } -> ()
+                    | other -> failtestf "expected a named-target multi-table DELETE, got %A" other
+
+                testCase "DELETE FROM t1 USING t1 JOIN t2 ON ..."
+                <| fun _ ->
+                    match parseOk "DELETE FROM t1 USING t1 JOIN t2 ON t1.id = t2.t1_id WHERE t2.flag = 1" with
+                    | Delete { Targets = [ "t1" ]
+                               From = { Table = "t1" }
+                               Joins = [ { Kind = InnerJoin; Table = { Table = "t2" } } ] } -> ()
+                    | other -> failtestf "expected a USING-form multi-table DELETE, got %A" other ]
 
           testList
               "ALTER TABLE / RENAME TABLE / CREATE INDEX / DROP INDEX"
               [ testCase "ADD COLUMN, with and without the COLUMN keyword, and AFTER accepted"
                 <| fun _ ->
                     match parseOk "ALTER TABLE t ADD COLUMN a INT, ADD b VARCHAR(10) AFTER a" with
-                    | AlterTable("t", [ AddColumn { Name = "a"; Type = TInt false }; AddColumn { Name = "b"; Type = TVarchar 10 } ]) -> ()
+                    | AlterTable("t",
+                                 [ AddColumn({ Name = "a"; Type = TInt false }, PositionDefault)
+                                   AddColumn({ Name = "b"; Type = TVarchar 10 }, PositionAfter "a") ]) -> ()
                     | other -> failtestf "expected two AddColumn actions, got %A" other
+
+                testCase "ADD COLUMN ... FIRST"
+                <| fun _ ->
+                    match parseOk "ALTER TABLE t ADD COLUMN a INT FIRST" with
+                    | AlterTable("t", [ AddColumn({ Name = "a" }, PositionFirst) ]) -> ()
+                    | other -> failtestf "expected a FIRST-positioned AddColumn, got %A" other
 
                 testCase "DROP COLUMN, with and without the COLUMN keyword"
                 <| fun _ ->
@@ -969,13 +1063,19 @@ let tests =
                 testCase "MODIFY COLUMN changes the column's definition"
                 <| fun _ ->
                     match parseOk "ALTER TABLE t MODIFY COLUMN a BIGINT UNSIGNED NOT NULL" with
-                    | AlterTable("t", [ ModifyColumn { Name = "a"; Type = TBigInt true; Nullable = false } ]) -> ()
+                    | AlterTable("t", [ ModifyColumn({ Name = "a"; Type = TBigInt true; Nullable = false }, PositionDefault) ]) -> ()
                     | other -> failtestf "expected a ModifyColumn action, got %A" other
+
+                testCase "MODIFY COLUMN ... AFTER col"
+                <| fun _ ->
+                    match parseOk "ALTER TABLE t MODIFY a INT AFTER b" with
+                    | AlterTable("t", [ ModifyColumn({ Name = "a" }, PositionAfter "b") ]) -> ()
+                    | other -> failtestf "expected an AFTER-positioned ModifyColumn, got %A" other
 
                 testCase "CHANGE COLUMN renames and redefines"
                 <| fun _ ->
                     match parseOk "ALTER TABLE t CHANGE old_name new_name INT" with
-                    | AlterTable("t", [ ChangeColumn("old_name", { Name = "new_name"; Type = TInt false }) ]) -> ()
+                    | AlterTable("t", [ ChangeColumn("old_name", { Name = "new_name"; Type = TInt false }, PositionDefault) ]) -> ()
                     | other -> failtestf "expected a ChangeColumn action, got %A" other
 
                 testCase "RENAME TO / RENAME AS / bare RENAME"

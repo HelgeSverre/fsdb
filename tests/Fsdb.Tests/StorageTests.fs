@@ -732,7 +732,7 @@ let tests =
 
                     let newCol = { (col "active" (TInt false) true) with Default = Some(DConst(VInt 1L)) }
 
-                    match alterTable store defaultDatabase "users" [ AddColumn newCol ] with
+                    match alterTable store defaultDatabase "users" [ AddColumn(newCol, PositionDefault) ] with
                     | Ok() ->
                         match scan store defaultDatabase "users" with
                         | Ok(columns, rows) ->
@@ -768,7 +768,7 @@ let tests =
                     let store = withUsersTable ()
                     let widened = col "name" (TVarchar 500) false
 
-                    match alterTable store defaultDatabase "users" [ ModifyColumn widened ] with
+                    match alterTable store defaultDatabase "users" [ ModifyColumn(widened, PositionDefault) ] with
                     | Ok() ->
                         match scan store defaultDatabase "users" with
                         | Ok(columns, _) ->
@@ -783,10 +783,77 @@ let tests =
                     let store = withUsersTable ()
                     let renamed = col "full_name" (TVarchar 255) false
 
-                    match alterTable store defaultDatabase "users" [ ChangeColumn("name", renamed) ] with
+                    match alterTable store defaultDatabase "users" [ ChangeColumn("name", renamed, PositionDefault) ] with
                     | Ok() ->
                         match scan store defaultDatabase "users" with
                         | Ok(columns, _) -> Expect.equal (columns |> List.map (fun c -> c.Name)) [ "id"; "full_name"; "age" ] "renamed"
+                        | Error e -> failtestf "expected Ok, got %A" e
+                    | Error e -> failtestf "expected Ok, got %A" e
+
+                testCase "AddColumn ... FIRST inserts at the front, in schema and every row"
+                <| fun _ ->
+                    let store = withUsersTable ()
+                    insertRows store defaultDatabase "users" None [ [ VNull; VString "alice"; VInt 30L ] ] |> ignore
+
+                    match alterTable store defaultDatabase "users" [ AddColumn(col "flag" (TInt false) true, PositionFirst) ] with
+                    | Ok() ->
+                        match scan store defaultDatabase "users" with
+                        | Ok(columns, rows) ->
+                            Expect.equal (columns |> List.map (fun c -> c.Name)) [ "flag"; "id"; "name"; "age" ] "flag is now first"
+                            Expect.equal (List.ofSeq rows |> List.map (fun r -> r.[0])) [ VNull ] "row's first value is the new column's"
+                        | Error e -> failtestf "expected Ok, got %A" e
+                    | Error e -> failtestf "expected Ok, got %A" e
+
+                testCase "AddColumn ... AFTER col inserts right after that column, in schema and every row"
+                <| fun _ ->
+                    let store = withUsersTable ()
+                    insertRows store defaultDatabase "users" None [ [ VNull; VString "alice"; VInt 30L ] ] |> ignore
+
+                    match alterTable store defaultDatabase "users" [ AddColumn(col "flag" (TInt false) true, PositionAfter "id") ] with
+                    | Ok() ->
+                        match scan store defaultDatabase "users" with
+                        | Ok(columns, rows) ->
+                            Expect.equal (columns |> List.map (fun c -> c.Name)) [ "id"; "flag"; "name"; "age" ] "flag right after id"
+                            Expect.equal (List.ofSeq rows |> List.map (fun r -> r.[1])) [ VNull ] "row's second value is the new column's"
+                        | Error e -> failtestf "expected Ok, got %A" e
+                    | Error e -> failtestf "expected Ok, got %A" e
+
+                testCase "ModifyColumn with no position leaves the column exactly where it was"
+                <| fun _ ->
+                    let store = withUsersTable ()
+
+                    match alterTable store defaultDatabase "users" [ ModifyColumn(col "name" (TVarchar 500) false, PositionDefault) ] with
+                    | Ok() ->
+                        match scan store defaultDatabase "users" with
+                        | Ok(columns, _) -> Expect.equal (columns |> List.map (fun c -> c.Name)) [ "id"; "name"; "age" ] "order unchanged"
+                        | Error e -> failtestf "expected Ok, got %A" e
+                    | Error e -> failtestf "expected Ok, got %A" e
+
+                testCase "ModifyColumn ... FIRST moves the column and its row values to the front"
+                <| fun _ ->
+                    let store = withUsersTable ()
+                    insertRows store defaultDatabase "users" None [ [ VNull; VString "alice"; VInt 30L ] ] |> ignore
+
+                    match alterTable store defaultDatabase "users" [ ModifyColumn(col "age" (TInt false) true, PositionFirst) ] with
+                    | Ok() ->
+                        match scan store defaultDatabase "users" with
+                        | Ok(columns, rows) ->
+                            Expect.equal (columns |> List.map (fun c -> c.Name)) [ "age"; "id"; "name" ] "age moved to the front"
+                            Expect.equal (List.ofSeq rows |> List.map (fun r -> r.[0])) [ VInt 30L ] "age's own value moved with it"
+                        | Error e -> failtestf "expected Ok, got %A" e
+                    | Error e -> failtestf "expected Ok, got %A" e
+
+                testCase "ChangeColumn ... AFTER col renames, redefines, and repositions in one action"
+                <| fun _ ->
+                    let store = withUsersTable ()
+                    insertRows store defaultDatabase "users" None [ [ VNull; VString "alice"; VInt 30L ] ] |> ignore
+
+                    match alterTable store defaultDatabase "users" [ ChangeColumn("age", col "years" (TInt false) true, PositionFirst) ] with
+                    | Ok() ->
+                        match scan store defaultDatabase "users" with
+                        | Ok(columns, rows) ->
+                            Expect.equal (columns |> List.map (fun c -> c.Name)) [ "years"; "id"; "name" ] "renamed and moved to the front"
+                            Expect.equal (List.ofSeq rows |> List.map (fun r -> r.[0])) [ VInt 30L ] "row value moved with it"
                         | Error e -> failtestf "expected Ok, got %A" e
                     | Error e -> failtestf "expected Ok, got %A" e
 
@@ -1336,7 +1403,7 @@ let tests =
 
                     createDatabase store "shop" |> ignore
                     createTable store "shop" "widgets" usersColumns [] [] |> ignore
-                    alterTable store "shop" "widgets" [ AddColumn(col "sku" (TVarchar 64) true) ] |> ignore
+                    alterTable store "shop" "widgets" [ AddColumn(col "sku" (TVarchar 64) true, PositionDefault) ] |> ignore
                     truncate store "shop" "widgets" |> ignore
                     dropTable store "shop" "widgets" |> ignore
                     dropDatabase store "shop" |> ignore

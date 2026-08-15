@@ -253,17 +253,25 @@ and SelectStmt =
       /// parse rather than change execution.
       Locking: bool }
 
+/// Where `ADD`/`MODIFY`/`CHANGE COLUMN` places a column: `PositionDefault`
+/// means no `AFTER`/`FIRST` was written (a plain `ADD` appends at the end;
+/// a plain `MODIFY`/`CHANGE` leaves the column where it already was —
+/// `Storage.applyAlterAction` picks the right fallback index per action
+/// since the two mean different things), `PositionFirst` is `FIRST`,
+/// `PositionAfter col` is `AFTER col`.
+type ColumnPosition =
+    | PositionDefault
+    | PositionFirst
+    | PositionAfter of column: string
+
 /// One `ALTER TABLE` action; a statement carries a list of these since
 /// MySQL (and Laravel) commonly comma-separates several in one `ALTER
-/// TABLE`. `AFTER col` / `FIRST` are accepted by the parser but not carried
-/// here — ponytail: column ordering isn't tracked yet, add a position field
-/// if a migration's assertion ever depends on physical column order rather
-/// than just the column existing.
+/// TABLE`.
 type AlterAction =
-    | AddColumn of ColumnDef
+    | AddColumn of ColumnDef * position: ColumnPosition
     | DropColumn of column: string
-    | ModifyColumn of ColumnDef
-    | ChangeColumn of oldName: string * ColumnDef
+    | ModifyColumn of ColumnDef * position: ColumnPosition
+    | ChangeColumn of oldName: string * ColumnDef * position: ColumnPosition
     | RenameTo of newName: string
     | RenameColumnTo of oldName: string * newName: string
     | AddIndex of IndexDef
@@ -307,6 +315,46 @@ type Statement =
     /// the whole combined result, so they live here rather than on any one
     /// branch's own (unused) `SelectStmt.OrderBy`/`Limit`.
     | Union of first: SelectStmt * rest: (bool * SelectStmt) list * orderBy: OrderKey list * limit: int option * offset: int option
-    | Update of table: string * assignments: (string * Expr) list * where: Expr option
-    | Delete of table: string * where: Expr option * limit: int option
+    | Update of UpdateStmt
+    | Delete of DeleteStmt
     | Truncate of table: string
+    /// `EXPLAIN [FORMAT=TRADITIONAL] stmt` — MySQL's classic tabular
+    /// `EXPLAIN` accepts `SELECT`/`UPDATE`/`DELETE`/`INSERT`, all handled by
+    /// describing what `Executor` would actually do rather than running it.
+    | Explain of Statement
+
+/// A `SET` target: `col` or `table.col` — the table qualifier only matters
+/// once there's more than one table in scope (a multi-table `UPDATE ...
+/// JOIN`); a single-table `UPDATE` still parses (and discards, same as
+/// always) a `table.` qualifier even so (Laravel's `touch()` writes
+/// `updated_at = ...` qualified even in a single-table `UPDATE`).
+and Assignment = { Table: string option; Column: string; Value: Expr }
+
+/// `UPDATE t1 [[AS] a] [JOIN ...] SET assignments [WHERE ...] [ORDER BY ...]
+/// [LIMIT ...]` — `OrderBy`/`Limit` are only legal (and only ever parsed) when
+/// `Joins` is empty, matching MySQL's own grammar restriction against a
+/// multi-table `UPDATE`. Multi-table semantics: a physical row reached
+/// through more than one join match is still updated at most once (see
+/// `Executor`'s multi-table `UPDATE` handling).
+and UpdateStmt =
+    { From: TableRef
+      Joins: Join list
+      Assignments: Assignment list
+      Where: Expr option
+      OrderBy: OrderKey list
+      Limit: int option }
+
+/// `DELETE FROM t1 [WHERE ...] [ORDER BY ...] [LIMIT n]` (single-table —
+/// `Targets = [t1's alias-or-name]`), `DELETE t1[, t2] FROM t1 JOIN t2 ON
+/// ... [WHERE ...]`, or `DELETE FROM t1 USING t1 JOIN t2 ON ... [WHERE ...]`
+/// (multi-table forms) — `Targets` holds the alias (or bare table name,
+/// unaliased) exactly as written before `FROM`/`USING`, resolved against
+/// `From`/`Joins` at execution time; `OrderBy`/`Limit` are only legal
+/// (single-table) the same way `UpdateStmt`'s are.
+and DeleteStmt =
+    { Targets: string list
+      From: TableRef
+      Joins: Join list
+      Where: Expr option
+      OrderBy: OrderKey list
+      Limit: int option }

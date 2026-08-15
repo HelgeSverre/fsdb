@@ -646,6 +646,91 @@ and private applyJoin
 
             newSources, combinedRows)
 
+/// Like `applyJoin`, but for a multi-table `UPDATE`/`DELETE ... JOIN`
+/// rather than a `SELECT`: alongside the flattened row `evalExpr` needs,
+/// each combined row also keeps every source's own physical `Value[]`
+/// (`None` on an outer-join side that matched nothing — there's no real row
+/// there to update/delete). A separate, smaller nested-loop join from
+/// `applyJoin` rather than threading identity through the shared `SELECT`
+/// path — that path is the hot, heavily-tested read path; duplicating the
+/// (much smaller) join loop here keeps it untouched. ponytail: real tables
+/// only (no derived-table join source) — MySQL itself doesn't allow a
+/// derived table as a multi-table `UPDATE`/`DELETE` target anyway, and no
+/// join source needs one until a migration's `UPDATE`/`DELETE` actually
+/// joins against a subquery.
+and private applyMutationJoin
+    (store: Store)
+    (registry: Registry)
+    (dbName: string)
+    ((sourcesSoFar, rowsSoFar): (string * TableRef * ColumnDef list) list * (Value[] option list * Value[]) list)
+    (join: Join)
+    : Result<(string * TableRef * ColumnDef list) list * (Value[] option list * Value[]) list, QueryResult> =
+    match resolveTableRef store dbName join.Table with
+    | Error e -> Error e
+    | Ok(joinColumns, joinRows) ->
+        let joinQualifier = join.Table.Alias |> Option.defaultValue join.Table.Table
+        let newSources = sourcesSoFar @ [ joinQualifier, join.Table, joinColumns ]
+        let qualifiers = qualifierRanges (newSources |> List.map (fun (q, _, c) -> q, c))
+        let combinedColumnsSoFar = sourcesSoFar |> List.map (fun (_, _, c) -> c) |> List.collect id
+        let leftFlatPadding = combinedColumnsSoFar |> List.map (fun _ -> VNull) |> Array.ofList
+        let rightFlatPadding = joinColumns |> List.map (fun _ -> VNull) |> Array.ofList
+        let leftIdentityPadding = sourcesSoFar |> List.map (fun _ -> None)
+
+        let ctxFor = contextFactory store registry dbName (columnIndexOf (combinedColumnsSoFar @ joinColumns)) qualifiers None
+
+        let leftIndexed = rowsSoFar |> List.indexed
+        let rightIndexed = joinRows |> List.indexed
+
+        let pairs = [ for li, l in leftIndexed do for ri, r in rightIndexed -> li, ri, l, r ]
+
+        pairs
+        |> traverse (fun (li, ri, (lIdent, lFlat), r) ->
+            let combinedFlat = Array.append lFlat r
+            evalExpr { ctxFor combinedFlat with Clause = OnClause } join.On
+            |> Result.map (fun v -> li, ri, (truthy v = Some true), (lIdent @ [ Some r ], combinedFlat)))
+        |> Result.mapError Err
+        |> Result.map (fun flagged ->
+            let matched = flagged |> List.filter (fun (_, _, ok, _) -> ok)
+            let matchedRows = matched |> List.map (fun (_, _, _, row) -> row)
+            let matchedLeft = matched |> List.map (fun (li, _, _, _) -> li) |> Set.ofList
+            let matchedRight = matched |> List.map (fun (_, ri, _, _) -> ri) |> Set.ofList
+
+            let leftOnly =
+                leftIndexed
+                |> List.filter (fst >> matchedLeft.Contains >> not)
+                |> List.map (fun (_, (lIdent, lFlat)) -> lIdent @ [ None ], Array.append lFlat rightFlatPadding)
+
+            let rightOnly =
+                rightIndexed
+                |> List.filter (fst >> matchedRight.Contains >> not)
+                |> List.map (fun (_, r) -> leftIdentityPadding @ [ Some r ], Array.append leftFlatPadding r)
+
+            let rows =
+                match join.Kind with
+                | InnerJoin
+                | CrossJoin -> matchedRows
+                | LeftJoin -> matchedRows @ leftOnly
+                | RightJoin -> matchedRows @ rightOnly
+
+            newSources, rows)
+
+/// Resolves `from :: joins` into the same `(sources, rows)` shape
+/// `applyMutationJoin` builds up — the multi-table `UPDATE`/`DELETE`
+/// counterpart to `runSelectStmt`'s `FROM`/`JOIN` resolution.
+and private runMutationJoin
+    (store: Store)
+    (registry: Registry)
+    (dbName: string)
+    (from: TableRef)
+    (joins: Join list)
+    : Result<(string * TableRef * ColumnDef list) list * (Value[] option list * Value[]) list, QueryResult> =
+    match resolveTableRef store dbName from with
+    | Error e -> Error e
+    | Ok(cols, rows) ->
+        let baseQualifier = from.Alias |> Option.defaultValue from.Table
+        let initial = [ baseQualifier, from, cols ], (rows |> List.map (fun r -> [ Some r ], r))
+        joins |> List.fold (fun acc j -> acc |> Result.bind (fun st -> applyMutationJoin store registry dbName st j)) (Ok initial)
+
 /// Resolves a `SELECT`'s `FROM` (a real table, `information_schema`'s
 /// virtual one, a derived table, or none) plus every `JOIN` after it, and
 /// runs `select` against the combined result — the `Statement` case's
@@ -1439,6 +1524,55 @@ and private runSelect
                 let limited = dedupedPaired |> applyLimitOffset limit offset
                 ResultSet(colNames, limited |> List.map fst), types, limited |> List.map snd
 
+/// A reference-identity set of physical rows — `HashIdentity.Reference`
+/// rather than `Value[]`'s own structural equality, so two rows that happen
+/// to hold identical values are still distinguished, and so the set can be
+/// built from a `scan` snapshot taken *before* `Storage.updateRows`/
+/// `deleteRows` re-reads the table under its own lock and still match the
+/// exact same array instances (true as long as nothing else writes to the
+/// table in between — the same single-statement, single-connection
+/// assumption every other `scan`-then-mutate call site here already makes).
+let private referenceSet (rows: Value[] list) : System.Collections.Generic.HashSet<Value[]> =
+    System.Collections.Generic.HashSet<Value[]>(rows, HashIdentity.Reference)
+
+/// The physical rows a single-table `UPDATE`/`DELETE` actually mutates:
+/// every row `matches` (the `WHERE`, or everything when there's none),
+/// ordered by `orderBy` and capped at `limit` — computed up front, against
+/// each row's original values, so `ORDER BY`/`LIMIT` see a stable snapshot
+/// rather than a moving target as rows get rewritten. Empty `orderBy` with
+/// no `limit` is every matching row in scan order (an ordinary `UPDATE`/
+/// `DELETE`'s existing behavior); `limit` alone (no `ORDER BY`) still caps
+/// the count, in whatever order `rows` was already in — MySQL calls that
+/// order "unspecified" for a `LIMIT` with no `ORDER BY`, so scan order is as
+/// legitimate a choice as any.
+let private selectMutationTargets
+    (ctxFor: Value[] -> EvalContext)
+    (rows: Value[] list)
+    (matches: Value[] -> Result<bool, EvalError>)
+    (orderBy: OrderKey list)
+    (limit: int option)
+    : Result<Value[] list, EvalError> =
+    rows
+    |> traverse (fun row -> matches row |> Result.map (fun m -> m, row))
+    |> Result.bind (fun flagged ->
+        let matched = flagged |> List.filter fst |> List.map snd
+
+        if orderBy.IsEmpty then
+            Ok matched
+        else
+            let dirs = orderBy |> List.map snd
+
+            matched
+            |> traverse (fun row ->
+                orderBy
+                |> traverse (fun (e, _) -> evalExpr { ctxFor row with Clause = OrderClause } e)
+                |> Result.map (fun keys -> keys, row))
+            |> Result.map (fun keyed -> keyed |> List.sortWith (fun (ka, _) (kb, _) -> compareByOrderKeys dirs ka kb) |> List.map snd))
+    |> Result.map (fun ordered ->
+        match limit with
+        | Some l -> ordered |> List.truncate (max 0 l)
+        | None -> ordered)
+
 /// Assigns `assignments` (already resolved to column indices) to a copy of
 /// `row`, evaluating each right-hand side against the row's original
 /// (pre-assignment) values. A failing right-hand side propagates as an
@@ -1595,6 +1729,364 @@ let rec private substituteValuesFunc (columnIndex: Map<string, int list>) (candi
     | Exists _
     | Subquery _
     | InSubquery _ -> expr
+
+// ---------------------------------------------------------------------------
+// EXPLAIN — a pure *description* of what this executor would actually do
+// (join order, subquery/derived-table/union structure, current row counts),
+// never a real index-planner: this engine has no indexes at execution time,
+// so `type` is always `ALL` (a full scan) or `system` for a 0/1-row table,
+// and `possible_keys`/`key`/`key_len`/`ref` are always NULL — faking index
+// usage here would just be a second, disconnected lie about what `execute`
+// does. `rows` is the table's *actual* current row count (an in-memory
+// `scan`, not an estimate) since this engine can afford that where real
+// MySQL's cost-based planner can't.
+// ---------------------------------------------------------------------------
+
+/// One row of `EXPLAIN`'s classic 12-column tabular output. `Id`/`Table` are
+/// `option` since a few rows render `NULL` there (`UNION RESULT`'s `Id`
+/// doesn't belong to any one branch; a from-less `SELECT 1`'s `Table`
+/// doesn't name one) — `None` renders `NULL` the same way every other
+/// resultset cell already does.
+type private ExplainRow =
+    { Id: int option
+      SelectType: string
+      Table: string option
+      Type: string option
+      Rows: uint64 option
+      Extra: string list }
+
+/// Whether `expr` contains a subquery form (`Exists`/`Subquery`/
+/// `InSubquery`) anywhere inside it — walks every `Expr` case the same way
+/// `containsAggregate` does, but for a different vocabulary (subquery forms,
+/// not aggregate calls) and a different purpose (`EXPLAIN`'s `SIMPLE` vs.
+/// `PRIMARY`, not `runSelect`'s grouped-vs-ungrouped path).
+let rec private containsSubqueryExpr (expr: Expr) : bool =
+    match expr with
+    | Exists _
+    | Subquery _
+    | InSubquery _ -> true
+    | BinOp(_, a, b) -> containsSubqueryExpr a || containsSubqueryExpr b
+    | Not e
+    | IsNull e
+    | IsNotNull e
+    | IsTrue e
+    | IsFalse e
+    | Distinct e -> containsSubqueryExpr e
+    | Like(e, p, _) -> containsSubqueryExpr e || containsSubqueryExpr p
+    | Regexp(e, p) -> containsSubqueryExpr e || containsSubqueryExpr p
+    | In(e, xs) -> containsSubqueryExpr e || xs |> List.exists containsSubqueryExpr
+    | Between(e, lo, hi) -> containsSubqueryExpr e || containsSubqueryExpr lo || containsSubqueryExpr hi
+    | Cast(e, _) -> containsSubqueryExpr e
+    | Case(subject, whens, elseBranch) ->
+        (subject |> Option.map containsSubqueryExpr |> Option.defaultValue false)
+        || whens |> List.exists (fun (c, r) -> containsSubqueryExpr c || containsSubqueryExpr r)
+        || (elseBranch |> Option.map containsSubqueryExpr |> Option.defaultValue false)
+    | FuncCall(_, args) -> args |> List.exists containsSubqueryExpr
+    | Lit _
+    | Col _
+    | QualifiedCol _
+    | Star _
+    | RowNumberOver _ -> false
+
+/// Every subquery `expr` embeds, in encounter order — `EXPLAIN`'s source of
+/// `SUBQUERY`/`DEPENDENT SUBQUERY` rows, one nested block per subquery form
+/// found this way.
+let rec private collectSubqueries (expr: Expr) : SelectStmt list =
+    match expr with
+    | Exists s
+    | Subquery s -> [ s ]
+    | InSubquery(e, s) -> collectSubqueries e @ [ s ]
+    | BinOp(_, a, b) -> collectSubqueries a @ collectSubqueries b
+    | Not e
+    | IsNull e
+    | IsNotNull e
+    | IsTrue e
+    | IsFalse e
+    | Distinct e -> collectSubqueries e
+    | Like(e, p, _) -> collectSubqueries e @ collectSubqueries p
+    | Regexp(e, p) -> collectSubqueries e @ collectSubqueries p
+    | In(e, xs) -> collectSubqueries e @ (xs |> List.collect collectSubqueries)
+    | Between(e, lo, hi) -> collectSubqueries e @ collectSubqueries lo @ collectSubqueries hi
+    | Cast(e, _) -> collectSubqueries e
+    | Case(subject, whens, elseBranch) ->
+        (subject |> Option.map collectSubqueries |> Option.defaultValue [])
+        @ (whens |> List.collect (fun (c, r) -> collectSubqueries c @ collectSubqueries r))
+        @ (elseBranch |> Option.map collectSubqueries |> Option.defaultValue [])
+    | FuncCall(_, args) -> args |> List.collect collectSubqueries
+    | Lit _
+    | Col _
+    | QualifiedCol _
+    | Star _
+    | RowNumberOver _ -> []
+
+/// Whether any expression in `sub` (its projections/`WHERE`/`HAVING`/
+/// `GROUP BY`/`ORDER BY`) references a table qualifier that isn't one of
+/// `sub`'s own `FROM`/`JOIN` aliases — `EXPLAIN`'s `DEPENDENT SUBQUERY` vs.
+/// plain `SUBQUERY` (a correlated `WHERE EXISTS (SELECT 1 FROM t2 WHERE
+/// t2.parent_id = t1.id)` references `t1`, which isn't one of `t2`'s own
+/// aliases). ponytail: only catches *qualified* correlation (`t1.id`, not a
+/// bare `id` that happens to resolve to the outer row) — good enough for
+/// every correlated subquery this codebase's own Laravel-shaped test suite
+/// writes, which always qualifies the outer reference.
+let private isCorrelated (sub: SelectStmt) : bool =
+    let ownAliases =
+        ((sub.From
+          |> Option.map (function
+              | FromTable t -> [ t.Alias |> Option.defaultValue t.Table ]
+              | FromSubquery(_, alias) -> [ alias ])
+          |> Option.defaultValue [])
+         @ (sub.Joins |> List.map (fun j -> j.Table.Alias |> Option.defaultValue j.Table.Table)))
+        |> List.map (fun s -> s.ToLowerInvariant())
+        |> Set.ofList
+
+    let rec references (expr: Expr) : bool =
+        match expr with
+        | QualifiedCol(t, _) -> not (ownAliases.Contains(t.ToLowerInvariant()))
+        | Exists _
+        | Subquery _ -> false
+        | InSubquery(e, _) -> references e
+        | BinOp(_, a, b) -> references a || references b
+        | Not e
+        | IsNull e
+        | IsNotNull e
+        | IsTrue e
+        | IsFalse e
+        | Distinct e -> references e
+        | Like(e, p, _) -> references e || references p
+        | Regexp(e, p) -> references e || references p
+        | In(e, xs) -> references e || xs |> List.exists references
+        | Between(e, lo, hi) -> references e || references lo || references hi
+        | Cast(e, _) -> references e
+        | Case(subject, whens, elseBranch) ->
+            (subject |> Option.map references |> Option.defaultValue false)
+            || whens |> List.exists (fun (c, r) -> references c || references r)
+            || (elseBranch |> Option.map references |> Option.defaultValue false)
+        | FuncCall(_, args) -> args |> List.exists references
+        | Lit _
+        | Col _
+        | Star _
+        | RowNumberOver _ -> false
+
+    let exprs =
+        (sub.Projections |> List.map fst)
+        @ (sub.Where |> Option.toList)
+        @ (sub.Having |> Option.toList)
+        @ sub.GroupBy
+        @ (sub.OrderBy |> List.map fst)
+
+    exprs |> List.exists references
+
+/// `EXPLAIN`'s `type`/`rows` pair for one real (or `information_schema`
+/// virtual) table: `system` for a table with at most one row, `ALL`
+/// otherwise (this executor never does anything but a full scan), and the
+/// table's actual current row count — honest, not an estimate, since a
+/// `scan` is cheap at this engine's in-memory scale.
+let private explainTableStats (store: Store) (dbName: string) (tableRef: TableRef) : uint64 option * string =
+    let tableDb = tableRef.Database |> Option.defaultValue dbName
+
+    let rowCount =
+        if System.String.Equals(tableDb, "information_schema", System.StringComparison.OrdinalIgnoreCase) then
+            InformationSchema.scan store.Catalog tableRef.Table |> Option.map (snd >> List.length >> uint64)
+        else
+            scan store tableDb tableRef.Table |> Result.toOption |> Option.map (snd >> Seq.length >> uint64)
+
+    rowCount, (match rowCount with Some n when n <= 1UL -> "system" | _ -> "ALL")
+
+/// One `EXPLAIN` block's table rows (`from` plus every `join`, in order),
+/// recursing into a `FROM (SELECT ...) AS alias`'s own block (`DERIVED`)
+/// and every subquery `subqueryExprs` embeds (`SUBQUERY`/`DEPENDENT
+/// SUBQUERY`) — the shared plumbing `explainSelectBlock` (a real `SELECT`)
+/// and `execute`'s `UPDATE`/`DELETE ... JOIN` explain handling both drive,
+/// since neither `Ast.UpdateStmt` nor `Ast.DeleteStmt` has a `SelectStmt` to
+/// hand this the way a `SELECT`/derived table does.
+let rec private explainJoinBlock
+    (store: Store)
+    (dbName: string)
+    (nextId: unit -> int)
+    (acc: ResizeArray<ExplainRow>)
+    (id: int)
+    (selectType: string)
+    (from: FromItem option)
+    (joins: Join list)
+    (extra: string list)
+    (subqueryExprs: Expr list)
+    : unit =
+    let tableCount = (from |> Option.toList |> List.length) + joins.Length
+
+    let emitTableRow (idx: int) (label: string) (rowCount: uint64 option) (typeLabel: string) =
+        acc.Add
+            { Id = Some id
+              SelectType = selectType
+              Table = Some label
+              Type = Some typeLabel
+              Rows = rowCount
+              Extra = (if idx = tableCount - 1 then extra else []) }
+
+    match from with
+    | None -> ()
+    | Some(FromTable tref) ->
+        let n, ty = explainTableStats store dbName tref
+        emitTableRow 0 (tref.Alias |> Option.defaultValue tref.Table) n ty
+    | Some(FromSubquery(sub, _alias)) ->
+        let derivedId = nextId ()
+        emitTableRow 0 (sprintf "<derived%d>" derivedId) None "ALL"
+        explainSelectBlock store dbName nextId acc derivedId "DERIVED" sub
+
+    joins
+    |> List.iteri (fun i j ->
+        let n, ty = explainTableStats store dbName j.Table
+        emitTableRow (i + 1) (j.Table.Alias |> Option.defaultValue j.Table.Table) n ty)
+
+    if tableCount = 0 then
+        acc.Add
+            { Id = Some id
+              SelectType = selectType
+              Table = None
+              Type = None
+              Rows = None
+              Extra = [ "No tables used" ] }
+
+    subqueryExprs
+    |> List.collect collectSubqueries
+    |> List.iter (fun sub ->
+        let sid = nextId ()
+        let stype = if isCorrelated sub then "DEPENDENT SUBQUERY" else "SUBQUERY"
+        explainSelectBlock store dbName nextId acc sid stype sub)
+
+/// One `SELECT`'s (or `FROM (SELECT ...)` derived table's) `EXPLAIN`
+/// block — `Extra`'s three flags read straight off the clauses that make
+/// them true (`WHERE` -> `Using where`, `ORDER BY` -> `Using filesort`
+/// since there's no index to satisfy it without one, `GROUP BY`/`DISTINCT`
+/// -> `Using temporary`), then hands the table/subquery walk itself to
+/// `explainJoinBlock`.
+and private explainSelectBlock
+    (store: Store)
+    (dbName: string)
+    (nextId: unit -> int)
+    (acc: ResizeArray<ExplainRow>)
+    (id: int)
+    (selectType: string)
+    (select: SelectStmt)
+    : unit =
+    let extra =
+        [ if select.Where.IsSome then "Using where"
+          if not select.OrderBy.IsEmpty then "Using filesort"
+          if not select.GroupBy.IsEmpty || select.Distinct then "Using temporary" ]
+
+    let subqueryExprs =
+        (select.Projections |> List.map fst)
+        @ (select.Where |> Option.toList)
+        @ (select.Having |> Option.toList)
+        @ select.GroupBy
+        @ (select.OrderBy |> List.map fst)
+
+    explainJoinBlock store dbName nextId acc id selectType select.From select.Joins extra subqueryExprs
+
+/// Renders every collected `ExplainRow` into `EXPLAIN`'s classic 12-column
+/// resultset — `id` ascending, `None -> NULL` in every `option` cell the
+/// same way every other resultset already does (see `ExplainRow`'s doc for
+/// why `Id`/`Table` are `option` at all). `filtered` is always the honest
+/// `100.00` a planner with no statistics can report (this engine has
+/// nothing else to estimate it from), present on every real table row and
+/// `NULL` only where `type` itself is `NULL` too (a from-less `SELECT 1`, a
+/// `UNION RESULT` row).
+let private renderExplainRows (rows: ExplainRow list) : QueryResult =
+    let columns =
+        [ "id"; "select_type"; "table"; "partitions"; "type"; "possible_keys"; "key"; "key_len"; "ref"; "rows"; "filtered"; "Extra" ]
+
+    let renderRow (r: ExplainRow) : string option list =
+        [ r.Id |> Option.map string
+          Some r.SelectType
+          r.Table
+          None
+          r.Type
+          None
+          None
+          None
+          None
+          r.Rows |> Option.map string
+          (r.Type |> Option.map (fun _ -> "100.00"))
+          (if r.Extra.IsEmpty then None else Some(String.concat "; " r.Extra)) ]
+
+    ResultSet(columns, rows |> List.sortBy (fun r -> r.Id |> Option.defaultValue System.Int32.MaxValue) |> List.map renderRow)
+
+/// `EXPLAIN [FORMAT=TRADITIONAL] stmt` — a pure description of what
+/// `execute` would do with `stmt`, never actually running it. Covers every
+/// statement shape real MySQL allows `EXPLAIN` on that this engine has a
+/// join/subquery structure to describe (`SELECT`, `UNION`, `UPDATE`,
+/// `DELETE`, `INSERT` — plain or `... SELECT`); anything else (DDL, session
+/// statements, ...) is the same 1064 real MySQL gives.
+let rec private explainStatement (store: Store) (dbName: string) (stmt: Statement) : QueryResult =
+    let counter = ref 0
+
+    let nextId () =
+        counter.Value <- counter.Value + 1
+        counter.Value
+
+    let acc = ResizeArray<ExplainRow>()
+
+    match stmt with
+    | Select select ->
+        let id = nextId ()
+        let selectType = if containsSubqueryExpr (select.Where |> Option.defaultValue (Lit(VInt 1L))) || (select.Projections |> List.map fst |> List.exists containsSubqueryExpr) || (select.Having |> Option.map containsSubqueryExpr |> Option.defaultValue false) || (select.From |> Option.map (function FromSubquery _ -> true | _ -> false) |> Option.defaultValue false) then "PRIMARY" else "SIMPLE"
+        explainSelectBlock store dbName nextId acc id selectType select
+        renderExplainRows (List.ofSeq acc)
+    | Union(first, rest, _, _, _) ->
+        let id1 = nextId ()
+        explainSelectBlock store dbName nextId acc id1 "PRIMARY" first
+
+        let restIds =
+            rest
+            |> List.map (fun (_, s) ->
+                let sid = nextId ()
+                explainSelectBlock store dbName nextId acc sid "UNION" s
+                sid)
+
+        if not restIds.IsEmpty then
+            let label = sprintf "<union%s>" (id1 :: restIds |> List.map string |> String.concat ",")
+
+            acc.Add
+                { Id = None
+                  SelectType = "UNION RESULT"
+                  Table = Some label
+                  Type = None
+                  Rows = None
+                  Extra = [] }
+
+        renderExplainRows (List.ofSeq acc)
+    | Update u ->
+        let id = nextId ()
+        let extra = [ if u.Where.IsSome then "Using where"
+                      if not u.OrderBy.IsEmpty then "Using filesort" ]
+        let subqueryExprs = (u.Where |> Option.toList) @ (u.Assignments |> List.map (fun a -> a.Value)) @ (u.OrderBy |> List.map fst)
+        explainJoinBlock store dbName nextId acc id "UPDATE" (Some(FromTable u.From)) u.Joins extra subqueryExprs
+        renderExplainRows (List.ofSeq acc)
+    | Delete d ->
+        let id = nextId ()
+        let extra = [ if d.Where.IsSome then "Using where"
+                      if not d.OrderBy.IsEmpty then "Using filesort" ]
+        let subqueryExprs = d.Where |> Option.toList
+        explainJoinBlock store dbName nextId acc id "DELETE" (Some(FromTable d.From)) d.Joins extra subqueryExprs
+        renderExplainRows (List.ofSeq acc)
+    | Insert(table, _, rowsExprs, _, _) ->
+        let id = nextId ()
+        acc.Add { Id = Some id; SelectType = "INSERT"; Table = Some table; Type = None; Rows = None; Extra = [] }
+
+        List.concat rowsExprs
+        |> List.collect collectSubqueries
+        |> List.iter (fun sub ->
+            let sid = nextId ()
+            explainSelectBlock store dbName nextId acc sid (if isCorrelated sub then "DEPENDENT SUBQUERY" else "SUBQUERY") sub)
+
+        renderExplainRows (List.ofSeq acc)
+    | InsertSelect(table, _, select, _) ->
+        let id = nextId ()
+        acc.Add { Id = Some id; SelectType = "INSERT"; Table = Some table; Type = None; Rows = None; Extra = [] }
+        let sid = nextId ()
+        explainSelectBlock store dbName nextId acc sid "SUBQUERY" select
+        renderExplainRows (List.ofSeq acc)
+    | Explain inner -> explainStatement store dbName inner
+    | _ -> Err(1064, "EXPLAIN is not supported for this statement")
 
 /// A top-level `SELECT`'s resultset plus its per-column MySQL wire types —
 /// `QueryHandler.executeStatement`'s type-preserving entry point into
@@ -1768,23 +2260,24 @@ let execute (store: Store) (registry: Registry) (dbName: string) (lastInsertId: 
     | Union(first, rest, orderBy, limit, offset) ->
         lastInsertId, (runUnionStmt store registry dbName first rest orderBy limit offset |> fst)
 
-    | Update(table, assignments, whereExpr) ->
-        let db, table = splitQualified dbName table
+    | Update updateStmt when updateStmt.Joins.IsEmpty ->
+        let db, table = (updateStmt.From.Database |> Option.defaultValue dbName), updateStmt.From.Table
+        let tableAlias = updateStmt.From.Alias |> Option.defaultValue updateStmt.From.Table
 
         match scan store db table with
         | Error e -> lastInsertId, storageErr e
         | Ok(columns, rows) ->
             let columnIndex = columnIndexOf columns
 
-            match assignments |> traverse (fun (name, expr) -> resolveColumn columns name |> Result.map (fun i -> i, expr)) with
+            match updateStmt.Assignments |> traverse (fun a -> resolveColumn columns a.Column |> Result.map (fun i -> i, a.Value)) with
             | Error e -> lastInsertId, storageErr e
             | Ok indexedAssignments ->
-                let qualifiers = singleQualifier table columns
+                let qualifiers = singleQualifier tableAlias columns
 
                 let ctxFor = contextFactory store registry dbName columnIndex qualifiers None
 
                 let check row =
-                    match whereExpr with
+                    match updateStmt.Where with
                     | None -> Ok true
                     | Some expr -> evalExpr { ctxFor row with Clause = WhereClause } expr |> Result.map (fun v -> truthy v = Some true)
 
@@ -1799,48 +2292,202 @@ let execute (store: Store) (registry: Registry) (dbName: string) (lastInsertId: 
                 match check (probeRow columns) |> Result.bind (fun _ -> checkAssignments (probeRow columns)) with
                 | Error(code, message) -> lastInsertId, Err(code, message)
                 | Ok _ ->
-                    let predicate row = check row |> Result.mapError ExpressionError
-                    let updater row = applyAssignments store registry dbName columnIndex qualifiers indexedAssignments row
+                    match selectMutationTargets ctxFor (List.ofSeq rows) check updateStmt.OrderBy updateStmt.Limit with
+                    | Error(code, message) -> lastInsertId, Err(code, message)
+                    | Ok targetRows ->
+                        let targetSet = referenceSet targetRows
+                        let predicate row = Ok(targetSet.Contains row)
+                        let updater row = applyAssignments store registry dbName columnIndex qualifiers indexedAssignments row
 
-                    match updateRows store db table predicate updater |> withGeneratedRecomputed store registry dbName db table with
-                    | Ok affected -> lastInsertId, Affected(uint64 affected)
+                        match updateRows store db table predicate updater |> withGeneratedRecomputed store registry dbName db table with
+                        | Ok affected -> lastInsertId, Affected(uint64 affected)
+                        | Error e -> lastInsertId, storageErr e
+
+    | Update updateStmt ->
+        // Multi-table `UPDATE t1 JOIN t2 ON ... SET ...` — resolves the
+        // whole join, then for each matched combined row, assigns to
+        // whichever source table each `SET` target names, claiming a
+        // physical row (by reference) the first time a matched row touches
+        // it so a row reached through more than one join match is still
+        // updated at most once (see `Ast.UpdateStmt`'s doc). Each target
+        // table's claimed writes then go through `Storage.updateRows` same
+        // as a single-table `UPDATE` would, one call per table.
+        match runMutationJoin store registry dbName updateStmt.From updateStmt.Joins with
+        | Error e -> lastInsertId, e
+        | Ok(sources, joinedRows) ->
+            let sourceIndex = sources |> List.mapi (fun i (q, _, _) -> q.ToLowerInvariant(), i) |> Map.ofList
+            let combinedColumns = sources |> List.map (fun (q, _, c) -> q, c)
+            let ctxFor = contextFactory store registry dbName (columnIndexOf (combinedColumns |> List.collect snd)) (qualifierRanges combinedColumns) None
+
+            let resolveAssignment (a: Assignment) : Result<(int * int * Expr), EvalError> =
+                match a.Table with
+                | Some q ->
+                    match Map.tryFind (q.ToLowerInvariant()) sourceIndex with
+                    | None -> Error(unknownColumn (sprintf "%s.%s" q a.Column))
+                    | Some srcIdx ->
+                        let _, _, cols = sources.[srcIdx]
+
+                        resolveColumn cols a.Column
+                        |> Result.mapError (fun _ -> unknownColumn (sprintf "%s.%s" q a.Column))
+                        |> Result.map (fun colIdx -> srcIdx, colIdx, a.Value)
+                | None ->
+                    match
+                        sources
+                        |> List.indexed
+                        |> List.choose (fun (i, (_, _, cols)) -> resolveColumn cols a.Column |> function Ok idx -> Some(i, idx) | Error _ -> None)
+                    with
+                    | [ (srcIdx, colIdx) ] -> Ok(srcIdx, colIdx, a.Value)
+                    | [] -> Error(unknownColumn a.Column)
+                    | _ -> Error(1052, sprintf "Column '%s' in field list is ambiguous" a.Column)
+
+            match updateStmt.Assignments |> traverse resolveAssignment with
+            | Error(code, message) -> lastInsertId, Err(code, message)
+            | Ok resolvedAssignments ->
+                let assignmentsBySource = resolvedAssignments |> List.groupBy (fun (i, _, _) -> i)
+
+                let check flat =
+                    match updateStmt.Where with
+                    | None -> Ok true
+                    | Some expr -> evalExpr { ctxFor flat with Clause = WhereClause } expr |> Result.map (fun v -> truthy v = Some true)
+
+                let claims = sources |> List.map (fun _ -> System.Collections.Generic.HashSet<Value[]>(HashIdentity.Reference))
+                let pending = sources |> List.map (fun _ -> System.Collections.Generic.Dictionary<Value[], (int * Value) list>(HashIdentity.Reference))
+
+                let processRow ((identities, flat): Value[] option list * Value[]) : Result<unit, EvalError> =
+                    check flat
+                    |> Result.bind (fun isMatch ->
+                        if not isMatch then
+                            Ok()
+                        else
+                            let ctx = ctxFor flat
+
+                            assignmentsBySource
+                            |> traverse (fun (srcIdx, assigns) ->
+                                match List.item srcIdx identities with
+                                | None -> Ok()
+                                | Some physRow when claims.[srcIdx].Contains physRow -> Ok()
+                                | Some physRow ->
+                                    assigns
+                                    |> traverse (fun (_, colIdx, expr) -> evalExpr ctx expr |> Result.map (fun v -> colIdx, v))
+                                    |> Result.map (fun vals ->
+                                        claims.[srcIdx].Add physRow |> ignore
+                                        pending.[srcIdx].[physRow] <- vals))
+                            |> Result.map ignore)
+
+                match joinedRows |> traverse processRow with
+                | Error(code, message) -> lastInsertId, Err(code, message)
+                | Ok _ ->
+                    let apply =
+                        sources
+                        |> List.mapi (fun i (_, tableRef, _) ->
+                            if pending.[i].Count = 0 then
+                                Ok 0
+                            else
+                                let tdb, tname = (tableRef.Database |> Option.defaultValue dbName), tableRef.Table
+                                let predicate row = Ok(pending.[i].ContainsKey row)
+
+                                let updater row =
+                                    match pending.[i].TryGetValue row with
+                                    | true, vals ->
+                                        let newRow = Array.copy row
+
+                                        for colIdx, v in vals do
+                                            newRow.[colIdx] <- v
+
+                                        Ok newRow
+                                    | false, _ -> Ok row
+
+                                updateRows store tdb tname predicate updater |> withGeneratedRecomputed store registry dbName tdb tname)
+                        |> traverse id
+
+                    match apply with
+                    | Ok counts -> lastInsertId, Affected(uint64 (List.sum counts))
                     | Error e -> lastInsertId, storageErr e
 
-    | Delete(table, whereExpr, limit) ->
-        let db, table = splitQualified dbName table
+    | Delete deleteStmt when deleteStmt.Joins.IsEmpty ->
+        let db, table = (deleteStmt.From.Database |> Option.defaultValue dbName), deleteStmt.From.Table
+        let tableAlias = deleteStmt.From.Alias |> Option.defaultValue deleteStmt.From.Table
 
         match scan store db table with
         | Error e -> lastInsertId, storageErr e
-        | Ok(columns, _) ->
+        | Ok(columns, rows) ->
             let columnIndex = columnIndexOf columns
 
-            let ctxFor = contextFactory store registry dbName columnIndex (singleQualifier table columns) None
+            let ctxFor = contextFactory store registry dbName columnIndex (singleQualifier tableAlias columns) None
 
             let check row =
-                match whereExpr with
+                match deleteStmt.Where with
                 | None -> Ok true
                 | Some expr -> evalExpr { ctxFor row with Clause = WhereClause } expr |> Result.map (fun v -> truthy v = Some true)
 
             match check (probeRow columns) with
             | Error(code, message) -> lastInsertId, Err(code, message)
             | Ok _ ->
-                // `LIMIT n` caps how many *matching* rows get deleted —
-                // MySQL's own `DELETE ... LIMIT` (with no `ORDER BY`, which
-                // this grammar doesn't accept here anyway) picks an
-                // unspecified subset, so stopping at the first `n` matches
-                // in scan order is a legal choice of "unspecified" too.
-                let remaining = ref (limit |> Option.defaultValue System.Int32.MaxValue)
+                match selectMutationTargets ctxFor (List.ofSeq rows) check deleteStmt.OrderBy deleteStmt.Limit with
+                | Error(code, message) -> lastInsertId, Err(code, message)
+                | Ok targetRows ->
+                    let targetSet = referenceSet targetRows
+                    let predicate row = Ok(targetSet.Contains row)
 
-                let predicate row =
-                    check row
-                    |> Result.mapError ExpressionError
+                    match deleteRows store db table predicate with
+                    | Ok affected -> lastInsertId, Affected(uint64 affected)
+                    | Error e -> lastInsertId, storageErr e
+
+    | Delete deleteStmt ->
+        // Multi-table `DELETE t1[, t2] FROM t1 JOIN t2 ON ...` / `DELETE
+        // FROM t1 USING t1 JOIN t2 ON ...` — resolves the whole join, marks
+        // (by reference) every physical row of every named `Targets` table
+        // that any matched combined row touches, then removes each target
+        // table's marked rows via `Storage.deleteRows`, one call per table.
+        // A physical row reached through more than one join match is still
+        // only in the set once (a `HashSet`), so it's deleted at most once.
+        match runMutationJoin store registry dbName deleteStmt.From deleteStmt.Joins with
+        | Error e -> lastInsertId, e
+        | Ok(sources, joinedRows) ->
+            let sourceIndex = sources |> List.mapi (fun i (q, _, _) -> q.ToLowerInvariant(), i) |> Map.ofList
+            let combinedColumns = sources |> List.map (fun (q, _, c) -> q, c)
+            let ctxFor = contextFactory store registry dbName (columnIndexOf (combinedColumns |> List.collect snd)) (qualifierRanges combinedColumns) None
+
+            match
+                deleteStmt.Targets
+                |> traverse (fun t ->
+                    match Map.tryFind (t.ToLowerInvariant()) sourceIndex with
+                    | Some i -> Ok i
+                    | None -> Error(1109, sprintf "Unknown table '%s' in MULTI DELETE" t))
+            with
+            | Error(code, message) -> lastInsertId, Err(code, message)
+            | Ok targetIndices ->
+                let check flat =
+                    match deleteStmt.Where with
+                    | None -> Ok true
+                    | Some expr -> evalExpr { ctxFor flat with Clause = WhereClause } expr |> Result.map (fun v -> truthy v = Some true)
+
+                let claimedByTarget = targetIndices |> List.map (fun i -> i, System.Collections.Generic.HashSet<Value[]>(HashIdentity.Reference)) |> Map.ofList
+
+                let processRow ((identities, flat): Value[] option list * Value[]) : Result<unit, EvalError> =
+                    check flat
                     |> Result.map (fun isMatch ->
-                        if isMatch && remaining.Value > 0 then
-                            remaining.Value <- remaining.Value - 1
-                            true
-                        else
-                            false)
+                        if isMatch then
+                            for i in targetIndices do
+                                match List.item i identities with
+                                | Some physRow -> claimedByTarget.[i].Add physRow |> ignore
+                                | None -> ())
 
-                match deleteRows store db table predicate with
-                | Ok affected -> lastInsertId, Affected(uint64 affected)
-                | Error e -> lastInsertId, storageErr e
+                match joinedRows |> traverse processRow with
+                | Error(code, message) -> lastInsertId, Err(code, message)
+                | Ok _ ->
+                    let apply =
+                        targetIndices
+                        |> List.distinct
+                        |> traverse (fun i ->
+                            let _, tableRef, _ = sources.[i]
+                            let tdb, tname = (tableRef.Database |> Option.defaultValue dbName), tableRef.Table
+                            let set = claimedByTarget.[i]
+                            deleteRows store tdb tname (fun row -> Ok(set.Contains row)))
+
+                    match apply with
+                    | Ok counts -> lastInsertId, Affected(uint64 (List.sum counts))
+                    | Error e -> lastInsertId, storageErr e
+
+    | Explain inner ->
+        lastInsertId, explainStatement store dbName inner
