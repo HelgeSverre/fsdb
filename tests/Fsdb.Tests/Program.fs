@@ -660,6 +660,7 @@ let serverTests =
                               stream
                               caps
                               1uy
+                              0UL
                               (ResultSet([ "a"; "b" ], [ [ Some "1"; None ] ]))
 
                       stream.Position <- 0L
@@ -684,7 +685,7 @@ let serverTests =
                   let run caps =
                       async {
                           use stream = new IO.MemoryStream()
-                          do! Fsdb.Server.sendQueryResult stream caps 1uy (ResultSet([ "a" ], [ [ Some "1" ] ]))
+                          do! Fsdb.Server.sendQueryResult stream caps 1uy 0UL (ResultSet([ "a" ], [ [ Some "1" ] ]))
                           stream.Position <- 0L
                           return! readAllPackets stream
                       }
@@ -753,8 +754,17 @@ let integrationTests =
                           }
 
                       do! exec "CREATE TABLE crud_users (id INT AUTO_INCREMENT PRIMARY KEY, name VARCHAR(50), age INT)" |> Async.Ignore
-                      let! inserted = exec "INSERT INTO crud_users (name, age) VALUES ('alice', 30), ('bob', 25)"
+
+                      use insertCmd = conn.CreateCommand()
+                      insertCmd.CommandText <- "INSERT INTO crud_users (name, age) VALUES ('alice', 30), ('bob', 25)"
+                      let! inserted = insertCmd.ExecuteNonQueryAsync() |> Async.AwaitTask
                       Expect.equal inserted 2 "two rows inserted"
+
+                      // Regression: the OK packet's last_insert_id used to be
+                      // hardcoded to 0 regardless of what the session tracked,
+                      // so PDO::lastInsertId()/MySqlCommand.LastInsertedId
+                      // always read back "0".
+                      Expect.equal insertCmd.LastInsertedId 1L "OK packet reports the real last_insert_id"
 
                       use selectCmd = conn.CreateCommand()
                       selectCmd.CommandText <- "SELECT name, age FROM crud_users WHERE age > 26 ORDER BY name"

@@ -89,10 +89,11 @@ let sendPayloads (stream: IO.Stream) (startSeq: byte) (payloads: byte[] list) : 
 let private resultPayloads
     (rowEncoder: string option list -> byte[])
     (capabilities: uint32)
+    (lastInsertId: uint64)
     (result: Executor.QueryResult)
     : byte[] list =
     match result with
-    | Affected affectedRows -> [ okPayload capabilities affectedRows 0UL ]
+    | Affected affectedRows -> [ okPayload capabilities affectedRows lastInsertId ]
     | Err(code, message) -> [ errPayload capabilities code message ]
     | ResultSet(columns, rows) ->
         let deprecateEof = capabilities &&& ClientDeprecateEof <> 0u
@@ -117,9 +118,10 @@ let sendQueryResult
     (stream: IO.Stream)
     (capabilities: uint32)
     (startSeq: byte)
+    (lastInsertId: uint64)
     (result: Executor.QueryResult)
     : Async<unit> =
-    sendPayloads stream startSeq (resultPayloads textRowPayload capabilities result) |> Async.Ignore
+    sendPayloads stream startSeq (resultPayloads textRowPayload capabilities lastInsertId result) |> Async.Ignore
 
 /// As `sendQueryResult`, but encodes resultset rows in the binary protocol
 /// row format COM_STMT_EXECUTE requires.
@@ -127,9 +129,10 @@ let sendBinaryQueryResult
     (stream: IO.Stream)
     (capabilities: uint32)
     (startSeq: byte)
+    (lastInsertId: uint64)
     (result: Executor.QueryResult)
     : Async<unit> =
-    sendPayloads stream startSeq (resultPayloads binaryRowPayload capabilities result) |> Async.Ignore
+    sendPayloads stream startSeq (resultPayloads binaryRowPayload capabilities lastInsertId result) |> Async.Ignore
 
 let private handleConnection (connectionId: int) (store: Storage.Store) (client: TcpClient) : Async<unit> =
     async {
@@ -195,7 +198,7 @@ let private handleConnection (connectionId: int) (store: Storage.Store) (client:
                                 return! loop { session with Database = Some db }
                             | Some(Query sql) ->
                                 let session, result = QueryHandler.handle session sql
-                                do! sendQueryResult stream capabilities seqId result
+                                do! sendQueryResult stream capabilities seqId (uint64 session.LastInsertId) result
                                 return! loop session
                             | Some(FieldList table) ->
                                 // Deprecated in MySQL 8.0, but PDO/mysqlnd's
@@ -320,7 +323,7 @@ let private handleConnection (connectionId: int) (store: Storage.Store) (client:
                                                 LongData = session.LongData |> Map.filter (fun (sid, _) _ -> sid <> stmtId) }
 
                                         let session, result = QueryHandler.handle session finalSql
-                                        do! sendBinaryQueryResult stream capabilities seqId result
+                                        do! sendBinaryQueryResult stream capabilities seqId (uint64 session.LastInsertId) result
                                         return! loop session
                             | Some(StmtSendLongData payload) ->
                                 // No response is ever sent for this command,
