@@ -21,7 +21,9 @@ CREATE TABLE / INSERT / SELECT with WHERE, ORDER BY, LIMIT via mysql CLI.
 ## M4 — Laravel migrations
 ALTER TABLE, indexes, foreign keys, information_schema virtual tables,
 prepared statements (COM_STMT_*), transactions.
-**Gate:** `php artisan migrate` on chatflow (91 migrations) succeeds. Status: ☐
+**Gate:** `php artisan migrate` on chatflow (94 migrations) succeeds, plus
+`migrate:status` (all Ran), `migrate:fresh` (DROP via SHOW/information_schema),
+and a second consecutive `migrate` (Nothing to migrate). Status: ✅
 
 ## M5 — Chatflow test suite
 Joins, aggregates, subqueries, savepoints, JSON functions, expression breadth.
