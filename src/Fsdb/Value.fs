@@ -61,6 +61,53 @@ let toText (v: Value) : string option =
     | VDateTime dt -> Some(dt.ToString("yyyy-MM-dd HH:mm:ss", CultureInfo.InvariantCulture))
     | VJson j -> Some j
 
+/// A round-trippable encoding of a `Value` as one tagged, newline-free
+/// string — `ofWire (toWire v) = v` for every case. Exists for
+/// `Persistence`'s physical WAL/snapshot, which needs its own serialization
+/// distinct from `toText`'s display-only rendering: `toText` collapses
+/// `VNull` to `None` (indistinguishable from "no column" once flattened into
+/// a delimited line) and truncates `VDateTime` to whole seconds (real MySQL
+/// datetimes carry microseconds; round-tripping through `"yyyy-MM-dd
+/// HH:mm:ss"` would silently drop them on every replay). Strings/bytes/JSON
+/// are base64-encoded so the encoded line is safe to store one-per-line (or
+/// comma/pipe-joined) regardless of what the value itself contains.
+let toWire (v: Value) : string =
+    let b64 (s: string) = Convert.ToBase64String(Text.Encoding.UTF8.GetBytes s)
+
+    match v with
+    | VNull -> "N"
+    | VInt i -> "I" + string i
+    | VDouble d -> "D" + d.ToString("R", CultureInfo.InvariantCulture)
+    | VDecimal d -> "M" + d.ToString(CultureInfo.InvariantCulture)
+    | VString s -> "S" + b64 s
+    | VBytes b -> "B" + Convert.ToBase64String b
+    | VDate d -> "T" + d.ToString("yyyy-MM-dd", CultureInfo.InvariantCulture)
+    // "O" (round-trip) format, not `toText`'s display format — keeps
+    // sub-second precision.
+    | VDateTime dt -> "V" + dt.ToString("O", CultureInfo.InvariantCulture)
+    | VJson j -> "J" + b64 j
+
+/// Inverse of `toWire`. Throws on malformed input — a corrupt WAL line is a
+/// startup-time failure to surface loudly, not a value to silently coerce.
+let ofWire (s: string) : Value =
+    let unb64 (payload: string) = Text.Encoding.UTF8.GetString(Convert.FromBase64String payload)
+
+    if s = "N" then
+        VNull
+    else
+        let payload = s.Substring(1)
+
+        match s.[0] with
+        | 'I' -> VInt(Int64.Parse(payload, CultureInfo.InvariantCulture))
+        | 'D' -> VDouble(Double.Parse(payload, NumberStyles.Float, CultureInfo.InvariantCulture))
+        | 'M' -> VDecimal(Decimal.Parse(payload, CultureInfo.InvariantCulture))
+        | 'S' -> VString(unb64 payload)
+        | 'B' -> VBytes(Convert.FromBase64String payload)
+        | 'T' -> VDate(DateOnly.Parse(payload, CultureInfo.InvariantCulture))
+        | 'V' -> VDateTime(DateTime.Parse(payload, CultureInfo.InvariantCulture, DateTimeStyles.RoundtripKind))
+        | 'J' -> VJson(unb64 payload)
+        | tag -> failwithf "Value.ofWire: unknown tag '%c' in %s" tag s
+
 /// The MySQL wire type this value's runtime shape reports as, so a
 /// resultset's column definition can match the value instead of a blanket
 /// VAR_STRING (see the `ponytail` history on `Protocol.columnDefPayload`).

@@ -48,6 +48,27 @@ let tests =
                 <| fun _ -> Expect.equal (toText (VJson "{\"a\":1}")) (Some "{\"a\":1}") "json" ]
 
           testList
+              "toWire/ofWire round-trip"
+              [ testCase "every case round-trips, including sub-second precision toText would drop"
+                <| fun _ ->
+                    let values =
+                        [ VNull
+                          VInt -42L
+                          VDouble 1.5
+                          VDecimal 12.50M
+                          VString "hi | there\nwith \"quotes\""
+                          VBytes [| 0uy; 255uy; 1uy |]
+                          VDate(DateOnly(2024, 3, 5))
+                          VDateTime(DateTime(2024, 3, 5, 13, 45, 9, 123))
+                          VJson "{\"a\":1}" ]
+
+                    for v in values do
+                        Expect.equal (ofWire (toWire v)) v (sprintf "round-trip of %A" v)
+
+                testCase "ofWire throws on an unrecognized tag"
+                <| fun _ -> Expect.throws (fun () -> ofWire "?garbage" |> ignore) "bad tag" ]
+
+          testList
               "mysqlTypeOf"
               [ testCase "VInt reports LONGLONG, so mysqlnd converts it to a native PHP int"
                 <| fun _ -> Expect.equal (mysqlTypeOf (VInt 1L)) TypeLongLong "int"
