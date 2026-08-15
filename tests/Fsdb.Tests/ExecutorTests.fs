@@ -1362,6 +1362,8 @@ let tests =
                     runDefault store "CREATE TABLE teams (id INT, name VARCHAR(10))" |> ignore
                     runDefault store "CREATE TABLE team_user (id INT, team_id INT, role VARCHAR(10))" |> ignore
                     runDefault store "INSERT INTO teams VALUES (1, 'acme')" |> ignore
+                    // team_user.id (99) differs from teams.id (1), so a
+                    // qualifier-dropping expansion is visible in the result.
                     runDefault store "INSERT INTO team_user VALUES (99, 1, 'admin')" |> ignore
 
                     match

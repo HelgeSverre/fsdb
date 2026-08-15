@@ -66,10 +66,10 @@ let tests =
 
           testCase "writePacketAsync splits a payload >= 16 MiB instead of truncating the length header"
           <| fun _ ->
-              // frame's 3-byte length prefix can't represent more than
-              // 0xffffff bytes; naively writing an oversized
-              // payload silently declared `length &&& 0xffffff` and then
-              // wrote the full body, permanently desyncing the connection.
+              // A frame's 3-byte length prefix can't represent more than
+              // 0xffffff bytes; naively writing an oversized payload declares
+              // `length &&& 0xffffff` and then writes the full body,
+              // permanently desyncing the connection.
               async {
                   use stream = new IO.MemoryStream()
                   let payload = Array.zeroCreate<byte> maxPacketPayload // exactly the 0xffffff boundary

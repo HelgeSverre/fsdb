@@ -116,7 +116,8 @@ let tests =
           // server's `?`-counting/substitution path the same as a client
           // that writes `?` directly. php PDO with
           // `PDO::ATTR_EMULATE_PREPARES => false` exercises the same server
-          // code path from a second, independent client implementation.
+          // code path from a second, independent client implementation, but
+          // not from this suite — there is no PHP runtime here.
           // Reads back via `GetString`/`IsDBNull` rather than the typed
           // getters (`GetInt32`, `GetDouble`, ...): every column this server
           // advertises is MYSQL_TYPE_VAR_STRING (see `columnDefPayload`),

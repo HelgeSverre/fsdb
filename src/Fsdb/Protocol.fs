@@ -7,7 +7,7 @@ open System.Text
 open Fsdb.Packet
 open Fsdb.Value
 
-// Capability flags (subset we care about).
+// Capability flags (the subset this server negotiates).
 // https://dev.mysql.com/doc/dev/mysql-server/latest/group__group__cs__capabilities__flags.html
 let ClientLongPassword = 0x00000001u
 let ClientFoundRows = 0x00000002u
@@ -47,7 +47,7 @@ let StatusInTrans = 0x0001
 let StatusAutocommit = 2
 
 /// Builds the initial HandshakeV10 payload. `authPluginData` must be 20 bytes;
-/// its contents are irrelevant because we accept any password (see
+/// its contents are irrelevant because any password is accepted (see
 /// `parseHandshakeResponse` — ponytail: no auth verification, this is a dev
 /// server; add real mysql_native_password checking if this ever needs to be
 /// exposed beyond localhost).
@@ -74,9 +74,9 @@ type HandshakeResponse =
       Username: string
       Database: string option }
 
-/// Parses a HandshakeResponse41 payload. We only need the capability flags,
-/// username, and optional database — the auth response bytes are read (to
-/// advance past them correctly) but never checked.
+/// Parses a HandshakeResponse41 payload. Only the capability flags, username,
+/// and optional database matter — the auth response bytes are read (to advance
+/// past them correctly) but never checked.
 let parseHandshakeResponse (payload: byte[]) : HandshakeResponse =
     let r = Reader(payload)
     let capabilities = uint32 (r.ReadInt32LE())
