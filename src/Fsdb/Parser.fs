@@ -782,11 +782,21 @@ let private selectStmt: Parser<Statement, unit> = selectStmtRecord |>> Select
 /// `Ast.Update` has no join/multi-table shape for an alias to matter to, and
 /// this engine already applies an `UPDATE` to every matching row in one
 /// pass, so an ordering/row-cap on top of that has nothing left to change.
+/// An assignment target, `col` or `table.col` (Laravel's `touch()` qualifies
+/// `updated_at` with the table name even in a single-table `UPDATE`) — the
+/// table part is discarded, same as everywhere else this engine sees a
+/// qualified name against a statement with only one table in scope.
+let private assignTarget: Parser<string, unit> =
+    (identifier .>>. opt (sym "." >>. identifier))
+    |>> function
+        | first, None -> first
+        | _, Some col -> col
+
 let private updateStmt: Parser<Statement, unit> =
     (keyword "UPDATE" >>. qualifiedTableName
      .>> opt ((keyword "AS" >>. identifier) <|> identifier)
      .>> keyword "SET"
-     .>>. sepBy1 ((identifier .>> sym "=") .>>. expr) (sym ",")
+     .>>. sepBy1 ((assignTarget .>> sym "=") .>>. expr) (sym ",")
      .>>. opt (keyword "WHERE" >>. expr)
      .>> opt (keyword "ORDER" >>. keyword "BY" >>. sepBy1 orderKey (sym ","))
      .>> opt limitClause)

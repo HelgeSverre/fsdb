@@ -809,7 +809,18 @@ let tests =
                     Expect.equal
                         (parseOk "UPDATE t x SET a = 1")
                         (Update("t", [ "a", Lit(VInt 1L) ], None))
-                        "bare alias ignored" ]
+                        "bare alias ignored"
+
+                testCase "UPDATE SET with a table-qualified column (Laravel's touch())"
+                <| fun _ ->
+                    Expect.equal
+                        (parseOk "UPDATE chatbots SET restrict_allowed_origins = 1, `chatbots`.`updated_at` = '2024-01-01'")
+                        (Update(
+                            "chatbots",
+                            [ "restrict_allowed_origins", Lit(VInt 1L); "updated_at", Lit(VString "2024-01-01") ],
+                            None
+                        ))
+                        "table.column assignment target strips the table qualifier" ]
 
           testList
               "ALTER TABLE / RENAME TABLE / CREATE INDEX / DROP INDEX"
