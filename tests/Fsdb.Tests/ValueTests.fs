@@ -130,7 +130,25 @@ let tests =
                 <| fun _ -> Expect.equal (compare (VString "a") (VString "A")) 0 "'a' = 'A'"
 
                 testCase "string comparison ignores trailing spaces, matching PAD SPACE"
-                <| fun _ -> Expect.equal (compare (VString "a") (VString "a ")) 0 "'a' = 'a '" ]
+                <| fun _ -> Expect.equal (compare (VString "a") (VString "a ")) 0 "'a' = 'a '"
+
+                testCase "a DATE column value against a DATETIME-shaped string bound compares as a real instant, not text"
+                <| fun _ ->
+                    // Regression: `VDate 2024-01-01`.toText ("2024-01-01", no
+                    // time part) sorted lexically *before* "2024-01-01
+                    // 00:00:00" as plain text, so `date BETWEEN '2024-01-01
+                    // 00:00:00' AND ...` wrongly excluded same-day rows at
+                    // the lower bound.
+                    Expect.equal (compare (VDate(DateOnly(2024, 1, 1))) (VString "2024-01-01 00:00:00")) 0 "midnight on the same day"
+                    Expect.isGreaterThan (compare (VDate(DateOnly(2024, 1, 1))) (VString "2023-12-31 23:59:59")) 0 "a day after the bound"
+                    Expect.isLessThan (compare (VString "2024-01-01 00:00:00") (VDate(DateOnly(2024, 1, 2)))) 0 "symmetric: string on the left"
+
+                testCase "a DATETIME value against an unparseable string bound falls back to a text compare"
+                <| fun _ ->
+                    Expect.equal
+                        (compare (VDateTime(DateTime(2024, 1, 1))) (VString "not a date"))
+                        (compare (VString "2024-01-01 00:00:00") (VString "not a date"))
+                        "text fallback" ]
 
           testList
               "equals"

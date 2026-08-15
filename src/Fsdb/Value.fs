@@ -174,12 +174,21 @@ let toDouble (v: Value) : float =
 let private compareStrings (x: string) (y: string) : int =
     String.Compare(x.TrimEnd(' '), y.TrimEnd(' '), StringComparison.OrdinalIgnoreCase) |> sign
 
+/// `VDate`/`VDateTime` as one .NET `DateTime`, midnight for the date-only
+/// case — the shared instant `compare`'s VDate/VDateTime-vs-VString branch
+/// parses a string bound against.
+let private asDateTime (v: Value) : DateTime =
+    match v with
+    | VDate d -> d.ToDateTime(TimeOnly.MinValue)
+    | VDateTime dt -> dt
+    | _ -> invalidArg "v" "asDateTime expects VDate or VDateTime"
+
 /// Total order over values for ORDER BY: NULL sorts first, numbers compare
 /// numerically (a number vs. a string coerces the string to a double, so
 /// `'10' < '9'` numerically even though it's false as a string compare),
 /// same-typed values compare natively (strings per `compareStrings`'s
 /// collation), and anything else falls back to a text compare.
-let compare (a: Value) (b: Value) : int =
+let rec compare (a: Value) (b: Value) : int =
     match a, b with
     | VNull, VNull -> 0
     | VNull, _ -> -1
@@ -192,6 +201,20 @@ let compare (a: Value) (b: Value) : int =
     | VDateTime x, VDateTime y -> Operators.compare x y
     | VDate x, VDateTime y -> Operators.compare (x.ToDateTime(TimeOnly.MinValue)) y
     | VDateTime x, VDate y -> Operators.compare x (y.ToDateTime(TimeOnly.MinValue))
+    | (VDate _ | VDateTime _), VString s ->
+        // A literal like a `WHERE date BETWEEN '2024-01-01 00:00:00' AND
+        // ...` bound is still a bare VString here (nothing coerces it to the
+        // column's type ahead of the comparison) — parsed as a real instant
+        // and compared temporally when it looks like one, the same as real
+        // MySQL's DATE/DATETIME-vs-string coercion. Unparseable text falls
+        // back to a text compare rather than erroring, matching every other
+        // case here. Without this, `VDate "2024-01-01"`.`toText` ("2024-01-01",
+        // no time part) sorted *before* "2024-01-01 00:00:00" as plain text —
+        // a same-day BETWEEN lower bound excluded rows it should include.
+        match DateTime.TryParse(s.Trim(), CultureInfo.InvariantCulture, DateTimeStyles.None) with
+        | true, dt -> Operators.compare (asDateTime a) dt
+        | false, _ -> compareStrings (toText a |> Option.defaultValue "") s
+    | VString _, (VDate _ | VDateTime _) -> -(compare b a)
     | (VInt _ | VDouble _ | VDecimal _), _
     | _, (VInt _ | VDouble _ | VDecimal _) -> Operators.compare (toDouble a) (toDouble b)
     | _ -> compareStrings (toText a |> Option.defaultValue "") (toText b |> Option.defaultValue "")
