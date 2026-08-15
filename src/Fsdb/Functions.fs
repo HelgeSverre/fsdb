@@ -579,6 +579,330 @@ let private jsonSearchFn: Scalar =
     | _ -> VNull
 
 // ---------------------------------------------------------------------------
+// Dates. `NOW()`/`CURRENT_TIMESTAMP` already exist above; everything else
+// MySQL's date/time surface needs for a Laravel app (timestamps, `Carbon`
+// comparisons, `whereDate`, etc.) lives here.
+// ---------------------------------------------------------------------------
+
+let private dateTimeFormats =
+    [| "yyyy-MM-dd HH:mm:ss"
+       "yyyy-MM-dd"
+       "yyyy-MM-ddTHH:mm:ss"
+       "yyyy/MM/dd" |]
+
+/// Parses any `Value` as a `DateTime` the way MySQL's implicit date cast
+/// does: real date/datetime values pass through, everything else parses its
+/// text (first against MySQL's own common formats, then .NET's general
+/// parser as a fallback) — `None` rather than an error for anything that
+/// doesn't look like a date.
+let private asDateTime (v: Value) : DateTime option =
+    match v with
+    | VDateTime dt -> Some dt
+    | VDate d -> Some(d.ToDateTime TimeOnly.MinValue)
+    | VNull -> None
+    | _ ->
+        match toText v with
+        | None -> None
+        | Some s ->
+            match DateTime.TryParseExact(s.Trim(), dateTimeFormats, CultureInfo.InvariantCulture, DateTimeStyles.None) with
+            | true, dt -> Some dt
+            | false, _ ->
+                match DateTime.TryParse(s.Trim(), CultureInfo.InvariantCulture, DateTimeStyles.None) with
+                | true, dt -> Some dt
+                | false, _ -> None
+
+let private asDateOnly (v: Value) : DateOnly option = asDateTime v |> Option.map DateOnly.FromDateTime
+
+let private dateOnlyUnits = set [ "DAY"; "WEEK"; "MONTH"; "QUARTER"; "YEAR" ]
+
+let private addInterval (dt: DateTime) (amount: float) (unit: string) : DateTime =
+    match unit.ToUpperInvariant() with
+    | "SECOND" -> dt.AddSeconds amount
+    | "MINUTE" -> dt.AddMinutes amount
+    | "HOUR" -> dt.AddHours amount
+    | "DAY" -> dt.AddDays amount
+    | "WEEK" -> dt.AddDays(amount * 7.0)
+    | "MONTH" -> dt.AddMonths(int amount)
+    | "QUARTER" -> dt.AddMonths(int amount * 3)
+    | "YEAR" -> dt.AddYears(int amount)
+    | _ -> dt
+
+/// The parser doesn't yet have `INTERVAL n UNIT` grammar (no `Interval` AST
+/// node exists) — until it does, `DATE_ADD`/`DATE_SUB` can't actually be
+/// reached via `INTERVAL` syntax from SQL. Registering an `INTERVAL` scalar
+/// here is the tolerant, forward-compatible shape: *if* the parser starts
+/// desugaring `INTERVAL n UNIT` to `FuncCall("INTERVAL", [n; UNIT])` (the
+/// natural minimal-grammar choice, since a UNIT keyword can be captured as
+/// a string literal same as any other identifier-ish token), this already
+/// round-trips through `DATE_ADD`/`DATE_SUB`'s 2-arg form. It's also
+/// directly testable today by evaluating the registered functions with
+/// `Value` args, independent of what the parser ends up emitting.
+let private intervalMarker = " INTERVAL "
+
+let private intervalFn: Scalar =
+    function
+    | [ amt; unit ] -> VString(intervalMarker + req amt + " " + req unit)
+    | _ -> VNull
+
+/// Reads the `INTERVAL` encoding above, or tolerates a plain `"N UNIT"`
+/// string (e.g. `DATE_ADD(d, '1 DAY')`) as a fallback shape.
+let private tryParseIntervalArg (v: Value) : (float * string) option =
+    match v with
+    | VString s when s.StartsWith intervalMarker ->
+        match s.Substring(intervalMarker.Length).Split(' ') with
+        | [| n; u |] ->
+            match Double.TryParse(n, NumberStyles.Float, CultureInfo.InvariantCulture) with
+            | true, d -> Some(d, u)
+            | false, _ -> None
+        | _ -> None
+    | VString s ->
+        let m = Regex.Match(s.Trim(), @"^(-?\d+(?:\.\d+)?)\s+([A-Za-z]+)$")
+        if m.Success then
+            Some(Double.Parse(m.Groups.[1].Value, CultureInfo.InvariantCulture), m.Groups.[2].Value.ToUpperInvariant())
+        else
+            None
+    | _ -> None
+
+let private isVDate =
+    function
+    | VDate _ -> true
+    | _ -> false
+
+let private applyDateInterval (sign: float) (dateV: Value) (dt: DateTime) (amount: float) (unit: string) : Value =
+    let result = addInterval dt (sign * amount) unit
+    if isVDate dateV && dateOnlyUnits.Contains(unit.ToUpperInvariant()) then
+        VDate(DateOnly.FromDateTime result)
+    else
+        VDateTime result
+
+let private dateAddCore (sign: float) : Scalar =
+    function
+    | [ dateV; intervalV ] when not (anyNull [ dateV; intervalV ]) ->
+        match asDateTime dateV, tryParseIntervalArg intervalV with
+        | Some dt, Some(n, unit) -> applyDateInterval sign dateV dt n unit
+        | _ -> VNull
+    | [ dateV; amtV; VString unit ] when not (anyNull [ dateV; amtV ]) ->
+        match asDateTime dateV with
+        | Some dt -> applyDateInterval sign dateV dt (toDouble amtV) unit
+        | None -> VNull
+    | _ -> VNull
+
+let private dateDiffFn: Scalar =
+    function
+    | [ a; b ] when not (anyNull [ a; b ]) ->
+        match asDateOnly a, asDateOnly b with
+        | Some da, Some db -> VInt(int64 (da.DayNumber - db.DayNumber))
+        | _ -> VNull
+    | _ -> VNull
+
+/// The common `DATE_FORMAT`/`FROM_UNIXTIME` specifiers — MySQL's `%x` table
+/// has far more (week-numbering variants, locale names, ...); this is the
+/// subset a Laravel app's `Carbon::format`-equivalent queries actually hit.
+let private formatDate (dt: DateTime) (fmt: string) : string =
+    let sb = StringBuilder()
+    let mutable i = 0
+
+    while i < fmt.Length do
+        if fmt.[i] = '%' && i + 1 < fmt.Length then
+            let piece =
+                match fmt.[i + 1] with
+                | 'Y' -> dt.Year.ToString("D4")
+                | 'y' -> (dt.Year % 100).ToString("D2")
+                | 'm' -> dt.Month.ToString("D2")
+                | 'c' -> string dt.Month
+                | 'd' -> dt.Day.ToString("D2")
+                | 'e' -> string dt.Day
+                | 'H' -> dt.Hour.ToString("D2")
+                | 'h'
+                | 'I' -> (let h = dt.Hour % 12 in (if h = 0 then 12 else h)).ToString("D2")
+                | 'i' -> dt.Minute.ToString("D2")
+                | 's'
+                | 'S' -> dt.Second.ToString("D2")
+                | 'p' -> if dt.Hour < 12 then "AM" else "PM"
+                | 'W' -> dt.DayOfWeek.ToString()
+                | 'a' -> (dt.DayOfWeek.ToString()).Substring(0, 3)
+                | 'M' -> CultureInfo.InvariantCulture.DateTimeFormat.GetMonthName dt.Month
+                | 'b' -> CultureInfo.InvariantCulture.DateTimeFormat.GetAbbreviatedMonthName dt.Month
+                | 'j' -> dt.DayOfYear.ToString("D3")
+                | 'D' ->
+                    let suffix =
+                        match dt.Day with
+                        | 1
+                        | 21
+                        | 31 -> "st"
+                        | 2
+                        | 22 -> "nd"
+                        | 3
+                        | 23 -> "rd"
+                        | _ -> "th"
+
+                    string dt.Day + suffix
+                | 'w' -> string (int dt.DayOfWeek)
+                | '%' -> "%"
+                | other -> "%" + string other
+
+            sb.Append(piece: string) |> ignore
+            i <- i + 2
+        else
+            sb.Append fmt.[i] |> ignore
+            i <- i + 1
+
+    sb.ToString()
+
+let private dateFormatFn: Scalar =
+    function
+    | [ d; f ] when not (anyNull [ d; f ]) ->
+        match asDateTime d, toText f with
+        | Some dt, Some fmt -> VString(formatDate dt fmt)
+        | _ -> VNull
+    | _ -> VNull
+
+let private dateFn: Scalar =
+    function
+    | [ v ] when not (anyNull [ v ]) -> asDateOnly v |> Option.map VDate |> Option.defaultValue VNull
+    | _ -> VNull
+
+/// No `TIME` case in `Value` (see the `VJson` comment on the same theme) —
+/// ponytail: rendered as a plain `"HH:mm:ss"` string, add a `VTime` case if
+/// a migration needs it to compare/sort as a real time value.
+let private timeFn: Scalar =
+    function
+    | [ v ] when not (anyNull [ v ]) ->
+        asDateTime v |> Option.map (fun dt -> VString(dt.ToString("HH:mm:ss"))) |> Option.defaultValue VNull
+    | _ -> VNull
+
+let private datePartFn (f: DateTime -> int) : Scalar =
+    function
+    | [ v ] when not (anyNull [ v ]) -> asDateTime v |> Option.map (f >> int64 >> VInt) |> Option.defaultValue VNull
+    | _ -> VNull
+
+let private dayNameFn: Scalar =
+    function
+    | [ v ] when not (anyNull [ v ]) -> asDateTime v |> Option.map (fun d -> VString(d.DayOfWeek.ToString())) |> Option.defaultValue VNull
+    | _ -> VNull
+
+let private monthNameFn: Scalar =
+    function
+    | [ v ] when not (anyNull [ v ]) ->
+        asDateTime v
+        |> Option.map (fun d -> VString(CultureInfo.InvariantCulture.DateTimeFormat.GetMonthName d.Month))
+        |> Option.defaultValue VNull
+    | _ -> VNull
+
+/// `WEEK(date[, mode])` — ponytail: only the mode-0-ish default (Sunday
+/// first day of the week) is modeled; a `mode` argument, if given, is
+/// accepted but ignored rather than implementing all 8 MySQL week modes.
+let private weekFn: Scalar =
+    function
+    | (v :: _) when not (anyNull [ v ]) ->
+        asDateTime v
+        |> Option.map (fun dt ->
+            VInt(int64 (CultureInfo.InvariantCulture.Calendar.GetWeekOfYear(dt, CalendarWeekRule.FirstDay, DayOfWeek.Sunday))))
+        |> Option.defaultValue VNull
+    | _ -> VNull
+
+let private curDateFn: Scalar = fun _ -> VDate(DateOnly.FromDateTime DateTime.Now)
+let private curTimeFn: Scalar = fun _ -> VString(DateTime.Now.ToString "HH:mm:ss")
+
+let private unixEpoch = DateTime(1970, 1, 1, 0, 0, 0, DateTimeKind.Unspecified)
+
+let private unixTimestampFn: Scalar =
+    function
+    | [] -> VInt(DateTimeOffset.UtcNow.ToUnixTimeSeconds())
+    | [ v ] when not (anyNull [ v ]) -> asDateTime v |> Option.map (fun dt -> VInt(int64 (dt - unixEpoch).TotalSeconds)) |> Option.defaultValue VNull
+    | _ -> VNull
+
+let private fromUnixTimeFn: Scalar =
+    function
+    | [ ts ] when not (anyNull [ ts ]) -> VDateTime(unixEpoch.AddSeconds(toDouble ts))
+    | [ ts; f ] when not (anyNull [ ts; f ]) ->
+        match toText f with
+        | Some fmt -> VString(formatDate (unixEpoch.AddSeconds(toDouble ts)) fmt)
+        | None -> VNull
+    | _ -> VNull
+
+let private timestampDiffFn: Scalar =
+    function
+    | [ u; a; b ] when not (anyNull [ u; a; b ]) ->
+        match toText u, asDateTime a, asDateTime b with
+        | Some unit, Some da, Some db ->
+            let span = db - da
+
+            let result =
+                match unit.ToUpperInvariant() with
+                | "SECOND" -> span.TotalSeconds
+                | "MINUTE" -> span.TotalMinutes
+                | "HOUR" -> span.TotalHours
+                | "DAY" -> span.TotalDays
+                | "WEEK" -> span.TotalDays / 7.0
+                | "MONTH" -> float ((db.Year - da.Year) * 12 + db.Month - da.Month) - (if db.Day < da.Day then 1.0 else 0.0)
+                | "QUARTER" -> float ((db.Year - da.Year) * 12 + db.Month - da.Month) / 3.0
+                | "YEAR" ->
+                    float (db.Year - da.Year)
+                    - (if (db.Month, db.Day) < (da.Month, da.Day) then 1.0 else 0.0)
+                | _ -> span.TotalSeconds
+
+            VInt(int64 (Math.Truncate result))
+        | _ -> VNull
+    | _ -> VNull
+
+let private lastDayFn: Scalar =
+    function
+    | [ v ] when not (anyNull [ v ]) ->
+        asDateTime v
+        |> Option.map (fun dt -> VDate(DateOnly(dt.Year, dt.Month, DateTime.DaysInMonth(dt.Year, dt.Month))))
+        |> Option.defaultValue VNull
+    | _ -> VNull
+
+/// The `STR_TO_DATE` mirror of `formatDate`'s specifier table, translated
+/// to a .NET custom format string for `DateTime.TryParseExact`.
+let private mysqlToNetFormat (fmt: string) : string =
+    let sb = StringBuilder()
+    let mutable i = 0
+
+    while i < fmt.Length do
+        if fmt.[i] = '%' && i + 1 < fmt.Length then
+            let piece =
+                match fmt.[i + 1] with
+                | 'Y' -> "yyyy"
+                | 'y' -> "yy"
+                | 'm' -> "MM"
+                | 'c' -> "M"
+                | 'd' -> "dd"
+                | 'e' -> "d"
+                | 'H' -> "HH"
+                | 'h' -> "hh"
+                | 'i' -> "mm"
+                | 's' -> "ss"
+                | 'p' -> "tt"
+                | 'M' -> "MMMM"
+                | 'b' -> "MMM"
+                | '%' -> "%"
+                | other -> string other
+
+            sb.Append(piece: string) |> ignore
+            i <- i + 2
+        else
+            sb.Append fmt.[i] |> ignore
+            i <- i + 1
+
+    sb.ToString()
+
+let private strToDateFn: Scalar =
+    function
+    | [ s; f ] when not (anyNull [ s; f ]) ->
+        match toText s, toText f with
+        | Some str, Some fmt ->
+            let netFmt = mysqlToNetFormat fmt
+
+            match DateTime.TryParseExact(str.Trim(), netFmt, CultureInfo.InvariantCulture, DateTimeStyles.None) with
+            | true, dt when netFmt.Contains "H" || netFmt.Contains "h" -> VDateTime dt
+            | true, dt -> VDate(DateOnly.FromDateTime dt)
+            | false, _ -> VNull
+        | _ -> VNull
+    | _ -> VNull
+
+// ---------------------------------------------------------------------------
 // Aggregates: COUNT/SUM/AVG/MIN/MAX. Each `Aggregate` here only ever sees a
 // nonempty, already NULL-filtered `Value list` — `Executor.evalAggregate`
 // handles the empty-list-is-NULL case (and COUNT(*)'s row-counting, which
@@ -620,6 +944,36 @@ let builtins: Registry =
     |> registerScalar "JSON_VALID" jsonValidFn
     |> registerScalar "JSON_KEYS" jsonKeysFn
     |> registerScalar "JSON_SEARCH" jsonSearchFn
+    // Dates
+    |> registerScalar "DATE_ADD" (dateAddCore 1.0)
+    |> registerScalar "ADDDATE" (dateAddCore 1.0)
+    |> registerScalar "DATE_SUB" (dateAddCore -1.0)
+    |> registerScalar "SUBDATE" (dateAddCore -1.0)
+    |> registerScalar "INTERVAL" intervalFn
+    |> registerScalar "DATEDIFF" dateDiffFn
+    |> registerScalar "DATE_FORMAT" dateFormatFn
+    |> registerScalar "DATE" dateFn
+    |> registerScalar "TIME" timeFn
+    |> registerScalar "YEAR" (datePartFn (fun d -> d.Year))
+    |> registerScalar "MONTH" (datePartFn (fun d -> d.Month))
+    |> registerScalar "DAY" (datePartFn (fun d -> d.Day))
+    |> registerScalar "DAYOFMONTH" (datePartFn (fun d -> d.Day))
+    |> registerScalar "HOUR" (datePartFn (fun d -> d.Hour))
+    |> registerScalar "MINUTE" (datePartFn (fun d -> d.Minute))
+    |> registerScalar "SECOND" (datePartFn (fun d -> d.Second))
+    |> registerScalar "DAYOFWEEK" (datePartFn (fun d -> int d.DayOfWeek + 1))
+    |> registerScalar "DAYNAME" dayNameFn
+    |> registerScalar "MONTHNAME" monthNameFn
+    |> registerScalar "WEEK" weekFn
+    |> registerScalar "QUARTER" (datePartFn (fun d -> (d.Month - 1) / 3 + 1))
+    |> registerScalar "CURDATE" curDateFn
+    |> registerScalar "CURRENT_DATE" curDateFn
+    |> registerScalar "CURTIME" curTimeFn
+    |> registerScalar "UNIX_TIMESTAMP" unixTimestampFn
+    |> registerScalar "FROM_UNIXTIME" fromUnixTimeFn
+    |> registerScalar "TIMESTAMPDIFF" timestampDiffFn
+    |> registerScalar "LAST_DAY" lastDayFn
+    |> registerScalar "STR_TO_DATE" strToDateFn
     |> registerAggregate "COUNT" countAgg
     |> registerAggregate "SUM" sumAgg
     |> registerAggregate "AVG" avgAgg

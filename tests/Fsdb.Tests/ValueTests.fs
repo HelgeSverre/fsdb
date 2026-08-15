@@ -259,5 +259,104 @@ let tests =
                       testCase "JSON_KEYS lists an object's top-level keys"
                       <| fun _ -> Expect.equal (call "JSON_KEYS" [ VJson """{"a": 1, "b": 2}""" ]) (VJson """["a", "b"]""") "keys" ]
 
+                testList
+                    "Dates"
+                    [ testCase "DATE_ADD/DATE_SUB apply an INTERVAL-encoded argument"
+                      <| fun _ ->
+                          let interval = call "INTERVAL" [ VInt 3L; VString "DAY" ]
+
+                          Expect.equal
+                              (call "DATE_ADD" [ VDate(DateOnly(2024, 1, 1)); interval ])
+                              (VDate(DateOnly(2024, 1, 4)))
+                              "date_add 3 days"
+
+                          Expect.equal
+                              (call "DATE_SUB" [ VDate(DateOnly(2024, 1, 4)); interval ])
+                              (VDate(DateOnly(2024, 1, 1)))
+                              "date_sub 3 days"
+
+                      testCase "DATE_ADD on a datetime with a time-bearing unit stays a datetime"
+                      <| fun _ ->
+                          Expect.equal
+                              (call "DATE_ADD" [ VDateTime(DateTime(2024, 1, 1, 10, 0, 0)); call "INTERVAL" [ VInt 90L; VString "MINUTE" ] ])
+                              (VDateTime(DateTime(2024, 1, 1, 11, 30, 0)))
+                              "date_add 90 minutes"
+
+                      testCase "DATE_ADD tolerates a plain 'N UNIT' string interval"
+                      <| fun _ ->
+                          Expect.equal
+                              (call "DATE_ADD" [ VDate(DateOnly(2024, 1, 1)); VString "1 MONTH" ])
+                              (VDate(DateOnly(2024, 2, 1)))
+                              "date_add '1 MONTH'"
+
+                      testCase "DATE_ADD/DATE_SUB propagate NULL"
+                      <| fun _ -> Expect.equal (call "DATE_ADD" [ VNull; VString "1 DAY" ]) VNull "null date"
+
+                      testCase "DATEDIFF counts whole days, ignoring time"
+                      <| fun _ ->
+                          Expect.equal
+                              (call "DATEDIFF" [ VDateTime(DateTime(2024, 1, 10, 23, 0, 0)); VDateTime(DateTime(2024, 1, 1, 1, 0, 0)) ])
+                              (VInt 9L)
+                              "datediff"
+
+                      testCase "DATE_FORMAT renders the common specifiers"
+                      <| fun _ ->
+                          Expect.equal
+                              (call "DATE_FORMAT" [ VDateTime(DateTime(2024, 3, 5, 13, 45, 9)); VString "%Y-%m-%d %H:%i:%s" ])
+                              (VString "2024-03-05 13:45:09")
+                              "date_format"
+
+                      testCase "DATE_FORMAT works on a VString datetime, not just VDateTime"
+                      <| fun _ ->
+                          Expect.equal
+                              (call "DATE_FORMAT" [ VString "2024-03-05 13:45:09"; VString "%Y-%m-%d" ])
+                              (VString "2024-03-05")
+                              "date_format on string"
+
+                      testCase "DATE truncates to the date part"
+                      <| fun _ -> Expect.equal (call "DATE" [ VDateTime(DateTime(2024, 3, 5, 13, 45, 9)) ]) (VDate(DateOnly(2024, 3, 5))) "date"
+
+                      testCase "YEAR/MONTH/DAY/HOUR/MINUTE/SECOND extract their date part"
+                      <| fun _ ->
+                          let dt = VDateTime(DateTime(2024, 3, 5, 13, 45, 9))
+                          Expect.equal (call "YEAR" [ dt ]) (VInt 2024L) "year"
+                          Expect.equal (call "MONTH" [ dt ]) (VInt 3L) "month"
+                          Expect.equal (call "DAY" [ dt ]) (VInt 5L) "day"
+                          Expect.equal (call "HOUR" [ dt ]) (VInt 13L) "hour"
+                          Expect.equal (call "MINUTE" [ dt ]) (VInt 45L) "minute"
+                          Expect.equal (call "SECOND" [ dt ]) (VInt 9L) "second"
+
+                      testCase "DAYOFWEEK/DAYNAME/MONTHNAME match MySQL (1 = Sunday)"
+                      <| fun _ ->
+                          let sunday = VDate(DateOnly(2024, 3, 3))
+                          Expect.equal (call "DAYOFWEEK" [ sunday ]) (VInt 1L) "sunday is 1"
+                          Expect.equal (call "DAYNAME" [ sunday ]) (VString "Sunday") "dayname"
+                          Expect.equal (call "MONTHNAME" [ sunday ]) (VString "March") "monthname"
+
+                      testCase "QUARTER buckets the month into 1-4"
+                      <| fun _ -> Expect.equal (call "QUARTER" [ VDate(DateOnly(2024, 8, 1)) ]) (VInt 3L) "august is q3"
+
+                      testCase "UNIX_TIMESTAMP/FROM_UNIXTIME round-trip"
+                      <| fun _ ->
+                          let dt = VDateTime(DateTime(2024, 1, 1, 0, 0, 0))
+                          let ts = call "UNIX_TIMESTAMP" [ dt ]
+                          Expect.equal (call "FROM_UNIXTIME" [ ts ]) dt "round trip"
+
+                      testCase "TIMESTAMPDIFF computes whole units between two datetimes"
+                      <| fun _ ->
+                          Expect.equal
+                              (call
+                                  "TIMESTAMPDIFF"
+                                  [ VString "DAY"; VDate(DateOnly(2024, 1, 1)); VDate(DateOnly(2024, 1, 11)) ])
+                              (VInt 10L)
+                              "timestampdiff days"
+
+                      testCase "LAST_DAY finds the month's final day"
+                      <| fun _ -> Expect.equal (call "LAST_DAY" [ VDate(DateOnly(2024, 2, 15)) ]) (VDate(DateOnly(2024, 2, 29))) "leap february"
+
+                      testCase "STR_TO_DATE parses a common format"
+                      <| fun _ ->
+                          Expect.equal (call "STR_TO_DATE" [ VString "2024-03-05"; VString "%Y-%m-%d" ]) (VDate(DateOnly(2024, 3, 5))) "str_to_date" ]
+
               ]
         ]
