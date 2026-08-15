@@ -838,11 +838,20 @@ let private timestampDiffFn: Scalar =
                 | "HOUR" -> span.TotalHours
                 | "DAY" -> span.TotalDays
                 | "WEEK" -> span.TotalDays / 7.0
-                | "MONTH" -> float ((db.Year - da.Year) * 12 + db.Month - da.Month) - (if db.Day < da.Day then 1.0 else 0.0)
+                // MONTH/YEAR's "whole units" rule (a day short of a full
+                // month/year doesn't count) only makes sense computed on the
+                // chronologically-ordered pair — computed directly on
+                // `(da, db)` it always subtracted 1 regardless of which
+                // side was earlier, overshooting by one whenever `db < da`
+                // (a negative diff). Order the pair first, then reapply the
+                // sign to the magnitude.
+                | "MONTH" ->
+                    let earlier, later, sign = if db < da then db, da, -1.0 else da, db, 1.0
+                    sign * (float ((later.Year - earlier.Year) * 12 + later.Month - earlier.Month) - (if later.Day < earlier.Day then 1.0 else 0.0))
                 | "QUARTER" -> float ((db.Year - da.Year) * 12 + db.Month - da.Month) / 3.0
                 | "YEAR" ->
-                    float (db.Year - da.Year)
-                    - (if (db.Month, db.Day) < (da.Month, da.Day) then 1.0 else 0.0)
+                    let earlier, later, sign = if db < da then db, da, -1.0 else da, db, 1.0
+                    sign * (float (later.Year - earlier.Year) - (if (later.Month, later.Day) < (earlier.Month, earlier.Day) then 1.0 else 0.0))
                 | _ -> span.TotalSeconds
 
             VInt(int64 (Math.Truncate result))

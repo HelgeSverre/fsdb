@@ -399,6 +399,22 @@ let tests =
                               (VInt 10L)
                               "timestampdiff days"
 
+                      testCase "TIMESTAMPDIFF MONTH/YEAR overshoot by one when the diff is negative"
+                      <| fun _ ->
+                          Expect.equal
+                              (call
+                                  "TIMESTAMPDIFF"
+                                  [ VString "MONTH"; VDate(DateOnly(2024, 3, 31)); VDate(DateOnly(2024, 1, 1)) ])
+                              (VInt -2L)
+                              "backwards month diff"
+
+                          Expect.equal
+                              (call
+                                  "TIMESTAMPDIFF"
+                                  [ VString "YEAR"; VDate(DateOnly(2024, 6, 1)); VDate(DateOnly(2023, 1, 1)) ])
+                              (VInt -1L)
+                              "backwards year diff"
+
                       testCase "LAST_DAY finds the month's final day"
                       <| fun _ -> Expect.equal (call "LAST_DAY" [ VDate(DateOnly(2024, 2, 15)) ]) (VDate(DateOnly(2024, 2, 29))) "leap february"
 
