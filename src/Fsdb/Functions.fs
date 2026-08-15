@@ -554,12 +554,6 @@ let rec private collectJsonStrings (node: JsonNode) (path: string) : (string * s
         a |> Seq.indexed |> Seq.collect (fun (i, v) -> collectJsonStrings v (sprintf "%s[%d]" path i)) |> List.ofSeq
     | _ -> if node.GetValueKind() = JsonValueKind.String then [ path, node.GetValue<string>() ] else []
 
-/// SQL `LIKE` wildcards (`%`/`_`) translated to a regex, the minimal
-/// matcher `JSON_SEARCH`'s `search_str` needs.
-let private likeToRegex (pattern: string) : Regex =
-    let escaped = (Regex.Escape pattern).Replace(@"\%", ".*").Replace(@"\_", ".")
-    Regex("^" + escaped + "$", RegexOptions.IgnoreCase ||| RegexOptions.Singleline)
-
 /// Minimal `JSON_SEARCH(doc, 'one'|'all', search_str)` — ponytail: no
 /// `escape_char`/restricting `path` argument support, add them if a
 /// migration's search actually needs escaped wildcards or a narrowed scope.
@@ -568,7 +562,7 @@ let private jsonSearchFn: Scalar =
     | doc :: modeV :: searchV :: _ when not (anyNull [ doc; modeV; searchV ]) ->
         match tryParseJsonValue doc, toText searchV with
         | Some root, Some search ->
-            let rx = likeToRegex search
+            let rx = Regex(likeToRegex search, RegexOptions.IgnoreCase ||| RegexOptions.Singleline)
             let matches = collectJsonStrings root "$" |> List.filter (snd >> rx.IsMatch) |> List.map fst
 
             match matches, (toText modeV |> Option.defaultValue "one").ToUpperInvariant() with

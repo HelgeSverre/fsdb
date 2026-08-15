@@ -920,41 +920,24 @@ let scan (store: Store) (dbName: string) (tableName: string) : Result<ColumnDef 
         | Ok table -> Ok(table.Columns, Seq.ofList table.Rows)
 
 /// Generated/virtual columns (`CREATE TABLE ... col AS (expr) [STORED |
-/// VIRTUAL]`) — **not enforced by this module**. `Ast.ColumnDef` has no
-/// field carrying the `AS (expr)` generation expression (only `Default`,
-/// which is a fixed value or `CURRENT_TIMESTAMP`, evaluated once at insert
-/// time — a generated column instead recomputes from *other columns in the
-/// same row*, every insert/update, which needs a real expression
-/// evaluator), so `Storage` has no way to know which columns are generated
-/// or what to compute — that's `Executor`'s `evalExpr`, not this module's.
-/// Read-back today falls through `evalDefault`, i.e. `NULL`.
+/// VIRTUAL]`) — `Ast.ColumnDef.Generated` carries the parsed `Expr`, but
+/// evaluating it needs `Executor.evalExpr` (a whole registry/row-context
+/// this module doesn't have), so the actual recompute-on-write lives in
+/// `Executor.recomputeGeneratedColumns`, called after every successful
+/// `INSERT`/`UPDATE`. `VIRTUAL` isn't distinguished from `STORED` — both
+/// are persisted in `Rows` the same way, since this engine has no separate
+/// "recompute on every read" path.
 ///
-/// This is as far as `Storage` can go without an `Ast.fs`/`Executor.fs`
-/// change (out of scope here — those are owned by the Parser/Executor/Ast
-/// agent). Integrate, once `ColumnDef` carries e.g. `Generated: (Expr *
-/// stored: bool) option`:
-///   1. Add the field to `Ast.ColumnDef` (and thread it through the parser's
-///      `CREATE TABLE`/column-definition grammar).
-///   2. After `insertRows`/`updateRows` succeeds, for each column with
-///      `Generated = Some(expr, _)`, re-run `updateRows` on the affected
-///      row(s) with an `updater` built from `applyGeneratedColumns below,
-///      passing a `compute` closure that evaluates `expr` via `evalExpr`
-///      against the row (generated columns may reference other generated
-///      columns, so evaluate in a dependency-safe order — a single
-///      left-to-right pass over `columns` is enough unless a migration
-///      actually chains them).
-///   3. A `VIRTUAL` (not `STORED`) generated column additionally needs to
-///      recompute on every `scan`/read rather than be persisted — this
-///      table stores every column's value in `Rows` either way, so that's
-///      an `Executor`-side read-path concern, not a `Storage` one.
-///
-/// `applyGeneratedColumns` is the reusable piece in the meantime: given a
+/// `applyGeneratedColumns` below is the pure, storage-only piece: given a
 /// `compute` callback (`Executor`'s evaluator, closed over each column's
 /// `Expr` however it ends up looked up) and the names of the generated
 /// columns, it rewrites just those columns of `row`, leaving every other
 /// value untouched. `compute row col` sees `row` with every column's
 /// *current* value (so a generated column can read a plain column's newly
-/// inserted/updated value) and returns `col`'s recomputed value.
+/// inserted/updated value) and returns `col`'s recomputed value. Kept
+/// separate from `Executor`'s actual `updater` (which additionally needs to
+/// propagate an evaluation/coercion `Result`, not just a bare `Value`) as a
+/// directly-testable building block.
 let applyGeneratedColumns (compute: Value[] -> ColumnDef -> Value) (generatedColumnNames: string list) (columns: ColumnDef list) (row: Value[]) : Value[] =
     let row' = Array.copy row
 

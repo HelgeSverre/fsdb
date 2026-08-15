@@ -187,7 +187,7 @@ let private handleShowVariables (session: Session) (sql: string) : QueryResult =
         if likeMatch.Success then
             Regex.IsMatch(
                 name,
-                Executor.likeToRegex likeMatch.Groups.[1].Value,
+                likeToRegex likeMatch.Groups.[1].Value,
                 RegexOptions.IgnoreCase ||| RegexOptions.Singleline
             )
         else
@@ -219,7 +219,7 @@ let private likeSuffix (sql: string) : string option =
 let private likeFilter (likeOpt: string option) (name: string) : bool =
     match likeOpt with
     | None -> true
-    | Some pattern -> Regex.IsMatch(name, Executor.likeToRegex pattern, RegexOptions.IgnoreCase ||| RegexOptions.Singleline)
+    | Some pattern -> Regex.IsMatch(name, likeToRegex pattern, RegexOptions.IgnoreCase ||| RegexOptions.Singleline)
 
 let private stripBackticks (s: string) = s.Trim().Trim('`')
 
