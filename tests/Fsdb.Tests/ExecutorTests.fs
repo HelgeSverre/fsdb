@@ -1182,7 +1182,36 @@ let tests =
 
                     match runDefault store "SELECT doubled FROM (SELECT n * 2 AS doubled FROM t) AS d WHERE doubled > 2 ORDER BY doubled" with
                     | ResultSet([ "doubled" ], rows) -> Expect.equal rows [ [ Some "4" ]; [ Some "6" ] ] "derived table filtered and projected"
-                    | other -> failtestf "expected a derived-table resultset, got %A" other ]
+                    | other -> failtestf "expected a derived-table resultset, got %A" other
+
+                testCase "a derived table's columns compare numerically, not as re-wrapped text"
+                <| fun _ ->
+                    // A derived table's rows used to round-trip through the
+                    // wire's text resultset shape and come back as VString,
+                    // so any comparison on them (MAX/ORDER BY/...) sorted
+                    // lexicographically ("10" < "2") instead of numerically.
+                    let store = newStore ()
+                    runDefault store "CREATE TABLE nums (n INT)" |> ignore
+                    runDefault store "INSERT INTO nums VALUES (2), (10), (9)" |> ignore
+
+                    match runDefault store "SELECT MAX(y.n) AS m FROM (SELECT n FROM nums) y" with
+                    | ResultSet([ "m" ], [ [ Some "10" ] ]) -> ()
+                    | other -> failtestf "expected MAX to compare numerically (10), got %A" other
+
+                    match runDefault store "SELECT y.n FROM (SELECT n FROM nums) y ORDER BY y.n" with
+                    | ResultSet([ "n" ], rows) ->
+                        Expect.equal rows [ [ Some "2" ]; [ Some "9" ]; [ Some "10" ] ] "ORDER BY sorts numerically, not lexicographically"
+                    | other -> failtestf "expected a numerically-sorted resultset, got %A" other
+
+                testCase "a scalar subquery's comparison is numeric, not lexicographic text"
+                <| fun _ ->
+                    let store = newStore ()
+                    runDefault store "CREATE TABLE nums (n INT)" |> ignore
+                    runDefault store "INSERT INTO nums VALUES (2), (10), (9)" |> ignore
+
+                    match runDefault store "SELECT (SELECT MAX(n) FROM nums) > (SELECT MIN(n) FROM nums) AS r" with
+                    | ResultSet([ "r" ], [ [ Some "1" ] ]) -> ()
+                    | other -> failtestf "expected 10 > 2 to be true, got %A" other ]
 
           testList
               "CASE / UNION / <=> / IS TRUE-FALSE / REGEXP / LIKE BINARY"
@@ -1225,6 +1254,17 @@ let tests =
                     | ResultSet([ "n" ], rows) ->
                         Expect.equal rows [ [ Some "1" ]; [ Some "2" ]; [ Some "2" ]; [ Some "3" ] ] "duplicates kept"
                     | other -> failtestf "expected UNION ALL to keep duplicates, got %A" other
+
+                testCase "UNION's ORDER BY sorts numerically, not as re-wrapped text"
+                <| fun _ ->
+                    let store = newStore ()
+                    runDefault store "CREATE TABLE nums (n INT)" |> ignore
+                    runDefault store "INSERT INTO nums VALUES (2), (10), (9)" |> ignore
+
+                    match runDefault store "SELECT n FROM nums UNION SELECT n FROM nums ORDER BY n" with
+                    | ResultSet([ "n" ], rows) ->
+                        Expect.equal rows [ [ Some "2" ]; [ Some "9" ]; [ Some "10" ] ] "sorted numerically, not lexicographically"
+                    | other -> failtestf "expected a numerically-sorted UNION resultset, got %A" other
 
                 testCase "<=> is a null-safe equals: NULL <=> NULL is true, unlike ="
                 <| fun _ ->
