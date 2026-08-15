@@ -80,6 +80,7 @@ let rec private containsAggregate (registry: Registry) (expr: Expr) : bool =
     | Col _
     | QualifiedCol _
     | Star _
+    | RowNumberOver _
     // A subquery's own aggregates belong to *its* grouping, not the query
     // this expression sits in — `containsAggregate` only asks whether
     // `runSelect` needs to switch itself onto the grouped path, so these
@@ -131,6 +132,7 @@ let rec private exprLabel (expr: Expr) : string =
     | Case _ -> "case"
     | Star None -> "*"
     | Star(Some q) -> sprintf "%s.*" q
+    | RowNumberOver _ -> "row_number() over ()"
     | Exists _ -> "exists"
     | Subquery _ -> "(...)"
 
@@ -256,6 +258,11 @@ let rec private evalExpr (ctx: EvalContext) (expr: Expr) : Result<Value, EvalErr
     match expr with
     | Lit v -> Ok v
     | Star _ -> Error(1054, "Invalid use of '*'")
+    // Only reachable if a `RowNumberOver` ever escapes `runWindowedSelect`'s
+    // rewrite (which replaces every top-level one with a plain `Col`
+    // reference before any of this runs) — e.g. nested inside another
+    // expression, which real MySQL itself rejects for a window function.
+    | RowNumberOver _ -> Error(1054, "Invalid use of a group function")
     | Col name -> resolveCol ctx name
     | QualifiedCol(table, col) -> resolveQualifiedCol ctx table col
     | Not e -> eval e |> Result.map (fun v -> truthy v |> Option.map (not >> boolToValue) |> Option.defaultValue VNull)
@@ -857,6 +864,13 @@ and private rewriteAggregates
     | Col _
     | QualifiedCol _
     | Star _
+    // `RowNumberOver` never reaches a grouped SELECT — `runSelect` sends
+    // any `RowNumberOver` projection to `runWindowedSelect` before the
+    // GROUP BY/aggregate check that would otherwise land here even gets
+    // evaluated (see `runSelect`'s dispatch) — but a leaf passthrough here
+    // is the same "nothing to pre-evaluate" answer `Star`'s already is if
+    // that ever changes.
+    | RowNumberOver _
     // A subquery is its own scope with its own grouping — nothing inside it
     // is one of *this* query's aggregate calls to pre-evaluate, even though
     // (via `EvalContext.Outer`) it can still read this query's columns.
@@ -1018,6 +1032,122 @@ and private runGroupedSelect
                     let types = columnTypesOf (List.length colNames) (sorted |> List.map fst)
                     ResultSet(colNames, deduped |> applyLimitOffset select.Limit select.Offset), types
 
+/// `SELECT ..., ROW_NUMBER() OVER (PARTITION BY p ORDER BY o) [AS alias]
+/// FROM ...` (see `Ast.Expr.RowNumberOver`'s doc) — computed once here,
+/// against the WHERE-filtered rows (real MySQL computes a window function
+/// after `WHERE`, before `SELECT`/`ORDER BY`/`LIMIT`), then handed back to
+/// the ordinary (non-windowed) `runSelect` path as one more real column: a
+/// synthetic trailing `ColumnDef` appended to `columns`/each row, with
+/// every projection's `Star`/`RowNumberOver` rewritten into plain `Col`
+/// references first — expanding `Star` explicitly here (rather than
+/// leaving it for `runSelect`'s own `Star` handling) keeps the synthetic
+/// column out of a bare `SELECT *`'s expansion, so it shows up only where
+/// `RowNumberOver` itself was written.
+and private runWindowedSelect
+    (store: Store)
+    (registry: Registry)
+    (dbName: string)
+    (columns: ColumnDef list)
+    (qualifiers: Map<string, ColumnDef list * int>)
+    (rows: Value[] list)
+    (select: SelectStmt)
+    (outer: EvalContext option)
+    : QueryResult * byte list =
+    match select.Projections |> List.tryPick (fst >> function RowNumberOver(p, o) -> Some(p, o) | _ -> None) with
+    | None -> Err(1064, "runWindowedSelect called without a RowNumberOver projection"), []
+    | Some(partitionBy, windowOrderBy) ->
+        let columnIndex = columnIndexOf columns
+
+        let ctxFor (row: Value[]) : EvalContext =
+            { Registry = registry
+              ColumnIndex = columnIndex
+              Qualifiers = qualifiers
+              Row = row
+              Store = store
+              DbName = dbName
+              Outer = outer }
+
+        let matches (row: Value[]) : Result<bool, EvalError> =
+            match select.Where with
+            | None -> Ok true
+            | Some expr -> evalExpr (ctxFor row) expr |> Result.map (fun v -> truthy v = Some true)
+
+        let keyOf (exprs: Expr list) (row: Value[]) : Result<Value list, EvalError> =
+            exprs |> traverse (evalExpr (ctxFor row))
+
+        match rows |> traverse (fun row -> matches row |> Result.map (fun keep -> if keep then Some row else None)) with
+        | Error(code, message) -> Err(code, message), []
+        | Ok maybeMatched ->
+            let matched = maybeMatched |> List.choose id
+
+            let keyed =
+                matched
+                |> traverse (fun row ->
+                    keyOf partitionBy row
+                    |> Result.bind (fun partKey -> keyOf (windowOrderBy |> List.map fst) row |> Result.map (fun ordKey -> partKey, ordKey, row)))
+
+            match keyed with
+            | Error(code, message) -> Err(code, message), []
+            | Ok keyed ->
+                // One row number per partition, 1-based, assigned in the
+                // window's own ORDER BY order — grouping by partition key
+                // preserves each group's original relative order (`List.groupBy`
+                // is stable), which only matters as a tiebreak among rows the
+                // window ORDER BY doesn't otherwise distinguish.
+                let rowNumberByIndex =
+                    keyed
+                    |> List.indexed
+                    |> List.groupBy (fun (_, (partKey, _, _)) -> partKey)
+                    |> List.collect (fun (_, group) ->
+                        group
+                        |> List.sortWith (fun (_, (_, ka, _)) (_, (_, kb, _)) ->
+                            List.zip3 (windowOrderBy |> List.map snd) ka kb
+                            |> List.fold
+                                (fun acc (dir, va, vb) ->
+                                    if acc <> 0 then
+                                        acc
+                                    else
+                                        let c = Value.compare va vb
+                                        match dir with
+                                        | Asc -> c
+                                        | Desc -> -c)
+                                0)
+                        |> List.mapi (fun rank (origIdx, _) -> origIdx, int64 (rank + 1)))
+                    |> Map.ofList
+
+                let syntheticName = "__fsdb_row_number__"
+
+                let syntheticColumn: ColumnDef =
+                    { Name = syntheticName
+                      Type = TBigInt false
+                      Nullable = false
+                      Default = None
+                      AutoIncrement = false
+                      PrimaryKey = false
+                      Unique = false
+                      Generated = None }
+
+                let extendedColumns = columns @ [ syntheticColumn ]
+
+                let extendedRows =
+                    matched
+                    |> List.mapi (fun idx row -> Array.append row [| VInt(Map.find idx rowNumberByIndex) |])
+
+                let rewriteProjection (expr: Expr, aliasOpt: string option) : (Expr * string option) list =
+                    match expr with
+                    | RowNumberOver _ -> [ Col syntheticName, (aliasOpt |> Option.orElse (Some syntheticName)) ]
+                    | Star None -> columns |> List.map (fun c -> Col c.Name, None)
+                    | Star(Some qualifier) ->
+                        match Map.tryFind (qualifier.ToLowerInvariant()) qualifiers with
+                        | Some(cols, _) -> cols |> List.map (fun c -> Col c.Name, None)
+                        | None -> [ expr, aliasOpt ]
+                    | _ -> [ expr, aliasOpt ]
+
+                let select' =
+                    { select with Projections = select.Projections |> List.collect rewriteProjection }
+
+                runSelect store registry dbName extendedColumns qualifiers extendedRows select' outer
+
 and private runSelect
     (store: Store)
     (registry: Registry)
@@ -1037,6 +1167,8 @@ and private runSelect
     // packet and aborts the client's whole session.
     if select.From.IsNone && projections |> List.exists (fst >> function Star _ -> true | _ -> false) then
         Err(1096, "No tables used"), []
+    elif projections |> List.exists (fst >> function RowNumberOver _ -> true | _ -> false) then
+        runWindowedSelect store registry dbName columns qualifiers rows select outer
     elif
         not select.GroupBy.IsEmpty
         || select.Having.IsSome
@@ -1275,6 +1407,7 @@ let rec private substituteValuesFunc (columnIndex: Map<string, int>) (candidate:
     | Col _
     | QualifiedCol _
     | Star _
+    | RowNumberOver _
     // `VALUES(col)` only ever occurs directly in an `ON DUPLICATE KEY
     // UPDATE` assignment, never inside a subquery's own text — nothing to
     // substitute inside one, so it's left as-is like `Exists` always was.

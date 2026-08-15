@@ -89,6 +89,13 @@ type Expr =
     | InSubquery of Expr * SelectStmt
     | Between of Expr * lo: Expr * hi: Expr
     | FuncCall of name: string * args: Expr list
+    /// `ROW_NUMBER() OVER (PARTITION BY expr, ... ORDER BY expr, ...)` —
+    /// the one window-function shape Laravel's constrained eager loading
+    /// compiles a relation query's `->limit()` into (e.g. `->with(['messages'
+    /// => fn ($q) => $q->orderBy('created_at', 'desc')->limit(1)])`).
+    /// ponytail: only `ROW_NUMBER`, no `RANK`/`LAG`/`LEAD`/frame clauses, no
+    /// other window functions — add them if a migration's query needs one.
+    | RowNumberOver of partitionBy: Expr list * orderBy: OrderKey list
     /// Marks `DISTINCT expr` as an aggregate call's argument (`COUNT(DISTINCT
     /// x)`, `SUM(DISTINCT x)`, ...) — only meaningful as the (unwrapped) sole
     /// argument of a `FuncCall` the executor recognizes as an aggregate;

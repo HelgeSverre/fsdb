@@ -1234,4 +1234,66 @@ let tests =
 
                     match runDefault store "SELECT d FROM t" with
                     | ResultSet([ "d" ], [ [ Some "2024-03-05" ] ]) -> ()
-                    | other -> failtestf "expected the date part only, got %A" other ] ]
+                    | other -> failtestf "expected the date part only, got %A" other ]
+
+          testList
+              "ROW_NUMBER() OVER (PARTITION BY ... ORDER BY ...)"
+              [ testCase "numbers rows 1.. per partition, in the window's own ORDER BY order"
+                <| fun _ ->
+                    let store = newStore ()
+                    runDefault store "CREATE TABLE msgs (session_id INT, created_at INT, body VARCHAR(20))" |> ignore
+
+                    runDefault
+                        store
+                        "INSERT INTO msgs VALUES (1, 1, 'a'), (1, 2, 'b'), (1, 3, 'c'), (2, 1, 'x')"
+                    |> ignore
+
+                    match
+                        runDefault
+                            store
+                            "SELECT body, ROW_NUMBER() OVER (PARTITION BY session_id ORDER BY created_at DESC) AS rn FROM msgs ORDER BY session_id, rn"
+                    with
+                    | ResultSet([ "body"; "rn" ], rows) ->
+                        Expect.equal
+                            rows
+                            [ [ Some "c"; Some "1" ]; [ Some "b"; Some "2" ]; [ Some "a"; Some "3" ]; [ Some "x"; Some "1" ] ]
+                            "each session's messages numbered newest-first, restarting per session"
+                    | other -> failtestf "expected numbered rows, got %A" other
+
+                testCase "SELECT * alongside ROW_NUMBER() OVER (...) doesn't leak the synthetic column into *"
+                <| fun _ ->
+                    let store = newStore ()
+                    runDefault store "CREATE TABLE msgs (session_id INT, body VARCHAR(20))" |> ignore
+                    runDefault store "INSERT INTO msgs VALUES (1, 'a')" |> ignore
+
+                    match
+                        runDefault store "SELECT *, ROW_NUMBER() OVER (PARTITION BY session_id ORDER BY body) AS rn FROM msgs"
+                    with
+                    | ResultSet([ "session_id"; "body"; "rn" ], [ [ Some "1"; Some "a"; Some "1" ] ]) -> ()
+                    | other -> failtestf "expected exactly session_id, body, rn (no duplicate/leaked column), got %A" other
+
+                testCase "the Laravel 'limit per group' shape: a derived table filtered on the window alias"
+                <| fun _ ->
+                    // Verbatim repro of the pattern Eloquent's constrained
+                    // eager loading (`->with(['msgs' => fn ($q) =>
+                    // $q->orderBy('created_at', 'desc')->limit(1)])`)
+                    // compiles a relation query's `->limit()` into.
+                    let store = newStore ()
+                    runDefault store "CREATE TABLE msgs (session_id INT, created_at INT, body VARCHAR(20))" |> ignore
+
+                    runDefault
+                        store
+                        "INSERT INTO msgs VALUES (1, 1, 'old'), (1, 2, 'newest'), (2, 1, 'only')"
+                    |> ignore
+
+                    match
+                        runDefault
+                            store
+                            "SELECT * FROM (SELECT *, ROW_NUMBER() OVER (PARTITION BY session_id ORDER BY created_at DESC) AS laravel_row FROM msgs) AS t WHERE laravel_row <= 1 ORDER BY session_id"
+                    with
+                    | ResultSet([ "session_id"; "created_at"; "body"; "laravel_row" ], rows) ->
+                        Expect.equal
+                            rows
+                            [ [ Some "1"; Some "2"; Some "newest"; Some "1" ]; [ Some "2"; Some "1"; Some "only"; Some "1" ] ]
+                            "only the latest message per session survives"
+                    | other -> failtestf "expected one row per session, got %A" other ] ]

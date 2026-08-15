@@ -829,6 +829,26 @@ let tests =
                     | other -> failtestf "expected an ignore-flagged InsertSelect, got %A" other ]
 
           testList
+              "ROW_NUMBER() OVER (...)"
+              [ testCase "PARTITION BY and ORDER BY both present"
+                <| fun _ ->
+                    match parseOk "SELECT ROW_NUMBER() OVER (PARTITION BY a ORDER BY b DESC) AS rn FROM t" with
+                    | Select { Projections = [ RowNumberOver([ Col "a" ], [ Col "b", Desc ]), Some "rn" ] } -> ()
+                    | other -> failtestf "expected a RowNumberOver projection, got %A" other
+
+                testCase "PARTITION BY with multiple columns, ORDER BY defaulting to ASC"
+                <| fun _ ->
+                    match parseOk "SELECT ROW_NUMBER() OVER (PARTITION BY a, b ORDER BY c) FROM t" with
+                    | Select { Projections = [ RowNumberOver([ Col "a"; Col "b" ], [ Col "c", Asc ]), None ] } -> ()
+                    | other -> failtestf "expected a two-column partition key, got %A" other
+
+                testCase "OVER () with neither PARTITION BY nor ORDER BY"
+                <| fun _ ->
+                    match parseOk "SELECT ROW_NUMBER() OVER () FROM t" with
+                    | Select { Projections = [ RowNumberOver([], []), None ] } -> ()
+                    | other -> failtestf "expected an empty partition/order spec, got %A" other ]
+
+          testList
               "UPDATE / DELETE"
               [ testCase "UPDATE t SET a=expr, b=expr WHERE ..."
                 <| fun _ ->
