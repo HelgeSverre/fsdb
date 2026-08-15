@@ -491,7 +491,10 @@ let rec private evalExpr (ctx: EvalContext) (expr: Expr) : Result<Value, EvalErr
                   Unique = false
                   Generated = None }
 
-            match Storage.coerceValue castCol v with
+            // CAST stays strict regardless of session sql_mode — MySQL raises
+            // a truncation error for CAST's own out-of-range/unparseable
+            // conversions independent of STRICT_TRANS_TABLES.
+            match Storage.coerceValue true castCol v with
             | Ok v' -> Ok v'
             | Error err -> Error(Storage.toMySqlError err))
     | Exists select ->
@@ -1640,7 +1643,7 @@ let private computeGeneratedRow
         |> traverse (fun (col, expr) ->
             evalExpr ctx expr
             |> Result.mapError ExpressionError
-            |> Result.bind (fun v -> coerceValue col v)
+            |> Result.bind (fun v -> coerceValue store.StrictMode col v)
             |> Result.map (fun v' ->
                 match resolveColumn columns col.Name with
                 | Ok idx -> row'.[idx] <- v'

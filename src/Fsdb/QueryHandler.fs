@@ -313,6 +313,16 @@ let private handleSet (session: Session) (sql: string) : Session * QueryResult =
             if name = "foreign_key_checks" then
                 setForeignKeyChecks session.Store (value.Trim() <> "0")
 
+            if name = "sql_mode" then
+                let isStrict =
+                    value.Split(',')
+                    |> Array.exists (fun m ->
+                        let m = m.Trim()
+                        String.Equals(m, "STRICT_TRANS_TABLES", StringComparison.OrdinalIgnoreCase)
+                        || String.Equals(m, "STRICT_ALL_TABLES", StringComparison.OrdinalIgnoreCase))
+
+                setStrictMode session.Store isStrict
+
             { session with Variables = Map.add name value session.Variables }, Affected 0UL
         else
             match setVarNameForError.Match sql with

@@ -303,6 +303,41 @@ let tests =
                     | Error(InvalidValueForColumn("age", "not-a-number")) ->
                         let code, _ = toMySqlError (InvalidValueForColumn("age", "not-a-number"))
                         Expect.equal code 1366 "MySQL error code"
+                    | other -> failtestf "expected InvalidValueForColumn, got %A" other
+
+                testCase "outside STRICT_TRANS_TABLES, a non-numeric string into an INT column coerces to 0"
+                <| fun _ ->
+                    let store = withUsersTable ()
+                    setStrictMode store false
+
+                    match insertRows store defaultDatabase "users" None [ [ VNull; VString "alice"; VString "not-a-number" ] ] with
+                    | Ok _ ->
+                        match scan store defaultDatabase "users" with
+                        | Ok(_, rows) ->
+                            match List.ofSeq rows with
+                            | [ row ] -> Expect.equal row.[2] (VInt 0L) "age coerced to 0"
+                            | other -> failtestf "expected one row, got %A" other
+                        | Error e -> failtestf "expected Ok, got %A" e
+                    | Error e -> failtestf "expected Ok, got %A" e ]
+
+          testList
+              "coerceValue non-strict fallback"
+              [ testCase "strict mode rejects an unparseable datetime string"
+                <| fun _ ->
+                    match coerceValue true (col "established" TDateTime true) (VString "") with
+                    | Error(InvalidValueForColumn("established", "")) -> ()
+                    | other -> failtestf "expected InvalidValueForColumn, got %A" other
+
+                testCase "non-strict mode coerces an unparseable datetime string on a nullable column to NULL"
+                <| fun _ ->
+                    match coerceValue false (col "established" TDateTime true) (VString "") with
+                    | Ok VNull -> ()
+                    | other -> failtestf "expected Ok VNull, got %A" other
+
+                testCase "non-strict mode still rejects an unparseable datetime string on a NOT NULL column"
+                <| fun _ ->
+                    match coerceValue false (col "established" TDateTime false) (VString "") with
+                    | Error(InvalidValueForColumn("established", "")) -> ()
                     | other -> failtestf "expected InvalidValueForColumn, got %A" other ]
 
           testList

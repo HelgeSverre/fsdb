@@ -123,9 +123,19 @@ let splitQualified (defaultDb: string) (name: string) : string * string =
 /// session concept; `QueryHandler`'s `SET FOREIGN_KEY_CHECKS = 0|1` probe
 /// (and Laravel's `Schema::disableForeignKeyConstraints`, which sends
 /// exactly that) calls `setForeignKeyChecks`.
+/// The storage-level mirror of MySQL's session `sql_mode`
+/// STRICT_TRANS_TABLES/STRICT_ALL_TABLES: `true` rejects a value that
+/// doesn't fit its column's type with error 1366 (`coerceValue`'s default);
+/// `false` coerces to MySQL's non-strict fallback instead — 0 for a numeric
+/// column, the zero date/datetime for a temporal one. Store-wide rather than
+/// per-session, same simplification as `ForeignKeyChecks` above.
+/// `QueryHandler`'s `SET SESSION sql_mode = ...` probe (and Laravel's
+/// `'strict' => false` connection config, which sends
+/// `SET SESSION sql_mode='NO_ENGINE_SUBSTITUTION'`) calls `setStrictMode`.
 type Store =
     { mutable Catalog: Catalog
       mutable ForeignKeyChecks: bool
+      mutable StrictMode: bool
       /// Fires once per committed write, under `Lock`, right after the
       /// catalog swap that made it visible — `None` (the default) means no
       /// subscriber, so every write path's event-construction work still
@@ -146,6 +156,7 @@ type Store =
 let create () : Store =
     { Catalog = Map.ofList [ defaultDatabase, Map.empty ]
       ForeignKeyChecks = true
+      StrictMode = true
       OnCommit = None
       PendingEvents = None
       Lock = obj () }
@@ -176,6 +187,7 @@ let private emit (store: Store) (event: CommitEvent option) : unit =
 let beginTransactionSnapshot (store: Store) : Store =
     { Catalog = store.Catalog
       ForeignKeyChecks = store.ForeignKeyChecks
+      StrictMode = store.StrictMode
       OnCommit = None
       PendingEvents = if store.OnCommit.IsSome then Some(ResizeArray()) else None
       Lock = obj () }
@@ -195,6 +207,12 @@ let commitTransactionEvents (store: Store) (snapshot: Store) : unit =
 /// (see the note on `Store.ForeignKeyChecks`).
 let setForeignKeyChecks (store: Store) (enabled: bool) : unit =
     lock store.Lock (fun () -> store.ForeignKeyChecks <- enabled)
+
+/// `SET SESSION sql_mode = ...` — wired from `QueryHandler`'s `SET` probe
+/// (see the note on `Store.StrictMode`). `strict` is whether the new mode
+/// still contains STRICT_TRANS_TABLES/STRICT_ALL_TABLES.
+let setStrictMode (store: Store) (strict: bool) : unit =
+    lock store.Lock (fun () -> store.StrictMode <- strict)
 
 /// Table names are keyed case-insensitively by their lowercased form —
 /// public because `Persistence`'s WAL replay looks tables up in `Catalog`
@@ -280,12 +298,31 @@ let private parseNumeric (s: string) : float option =
     | false, _ -> None
 
 /// MySQL-style coercion of a value to a column's declared type
-/// (`'12' -> 12` for an INT column); Error 1366 when it's not possible.
+/// (`'12' -> 12` for an INT column); error 1366 when it's not possible and
+/// `strict` (the session's STRICT_TRANS_TABLES/STRICT_ALL_TABLES, see
+/// `Store.StrictMode`) is set — MySQL's actual default. Off (Laravel's
+/// `'strict' => false` connection config, which sends
+/// `SET SESSION sql_mode='NO_ENGINE_SUBSTITUTION'`), an otherwise-rejected
+/// value coerces to MySQL's non-strict fallback instead: 0 for a numeric
+/// column, NULL for a nullable temporal one. ponytail: a NOT NULL temporal
+/// column still hard-fails non-strict too — real MySQL's fallback there is
+/// the zero date `'0000-00-00'`, which `VDate`/`VDateTime` (backed by
+/// `DateOnly`/`DateTime`, no year zero) can't represent; add a zero-date
+/// sentinel if a NOT NULL date/datetime column ever needs this path.
 /// NULL always passes through untouched — nullability is checked
 /// separately.
-let coerceValue (col: ColumnDef) (v: Value) : Result<Value, StorageError> =
+let coerceValue (strict: bool) (col: ColumnDef) (v: Value) : Result<Value, StorageError> =
     let fail () =
         Error(InvalidValueForColumn(col.Name, v |> toText |> Option.defaultValue "NULL"))
+
+    /// Non-strict's numeric fallback: 0, always representable.
+    let numericFallback (zero: unit -> Value) = if strict then fail () else Ok(zero ())
+
+    /// Non-strict's temporal fallback: MySQL's zero date, which
+    /// `VDate`/`VDateTime` can't represent (see the type's doc comment) — NULL
+    /// stands in for it on a nullable column, otherwise this still hard-fails.
+    let temporalFallback () =
+        if strict || not col.Nullable then fail () else Ok VNull
 
     match v with
     | VNull -> Ok VNull
@@ -304,8 +341,8 @@ let coerceValue (col: ColumnDef) (v: Value) : Result<Value, StorageError> =
             | VString s ->
                 match parseNumeric s with
                 | Some d -> Ok(VInt(int64 d))
-                | None -> fail ()
-            | _ -> fail ()
+                | None -> numericFallback (fun () -> VInt 0L)
+            | _ -> numericFallback (fun () -> VInt 0L)
         | TDouble
         | TFloat ->
             match v with
@@ -315,8 +352,8 @@ let coerceValue (col: ColumnDef) (v: Value) : Result<Value, StorageError> =
             | VString s ->
                 match parseNumeric s with
                 | Some d -> Ok(VDouble d)
-                | None -> fail ()
-            | _ -> fail ()
+                | None -> numericFallback (fun () -> VDouble 0.0)
+            | _ -> numericFallback (fun () -> VDouble 0.0)
         | TDecimal _ ->
             match v with
             | VDecimal d -> Ok(VDecimal d)
@@ -325,8 +362,8 @@ let coerceValue (col: ColumnDef) (v: Value) : Result<Value, StorageError> =
             | VString s ->
                 match parseNumeric s with
                 | Some d -> Ok(VDecimal(decimal d))
-                | None -> fail ()
-            | _ -> fail ()
+                | None -> numericFallback (fun () -> VDecimal 0M)
+            | _ -> numericFallback (fun () -> VDecimal 0M)
         | TChar _
         | TVarchar _
         | TTinyText
@@ -365,8 +402,8 @@ let coerceValue (col: ColumnDef) (v: Value) : Result<Value, StorageError> =
                 | false, _ ->
                     match DateTime.TryParse(s.Trim(), CultureInfo.InvariantCulture, DateTimeStyles.None) with
                     | true, dt -> Ok(VDate(DateOnly.FromDateTime dt))
-                    | false, _ -> fail ()
-            | _ -> fail ()
+                    | false, _ -> temporalFallback ()
+            | _ -> temporalFallback ()
         | TDateTime
         | TTimestamp ->
             match v with
@@ -375,8 +412,8 @@ let coerceValue (col: ColumnDef) (v: Value) : Result<Value, StorageError> =
             | VString s ->
                 match DateTime.TryParse(s.Trim(), CultureInfo.InvariantCulture, DateTimeStyles.None) with
                 | true, dt -> Ok(VDateTime dt)
-                | false, _ -> fail ()
-            | _ -> fail ()
+                | false, _ -> temporalFallback ()
+            | _ -> temporalFallback ()
 
 /// Evaluates a column's `DEFAULT` clause into the value to insert when none
 /// was provided — `CURRENT_TIMESTAMP` evaluates fresh here (insert time),
@@ -389,10 +426,10 @@ let private evalDefault (d: ColumnDefault option) : Value =
 
 /// Coerces a value to its column's type and rejects NULL for a non-nullable
 /// column.
-let private coerceAndCheck (col: ColumnDef) (v: Value) : Result<Value, StorageError> =
+let private coerceAndCheck (strict: bool) (col: ColumnDef) (v: Value) : Result<Value, StorageError> =
     match v with
     | VNull when not col.Nullable -> Error(NotNullViolation col.Name)
-    | _ -> coerceValue col v
+    | _ -> coerceValue strict col v
 
 /// Runs `f` against `dbName`'s database, swapping the updated database back
 /// into the catalog on success. Every write op boils down to "look up a
@@ -631,6 +668,7 @@ let renameTable (store: Store) (dbName: string) (oldName: string) (newName: stri
 /// AUTO_INCREMENT counter, and the id assigned to this row's
 /// AUTO_INCREMENT column (if any).
 let private processRow
+    (strict: bool)
     (nextAutoId: int64)
     (rawRow: Value option list)
     (columns: ColumnDef list)
@@ -645,12 +683,12 @@ let private processRow
                 match pending with
                 | VNull -> Ok(VInt nextAutoId :: valuesRev, nextAutoId + 1L, Some nextAutoId)
                 | _ ->
-                    match coerceValue col pending with
+                    match coerceValue strict col pending with
                     | Error e -> Error e
                     | Ok(VInt i) -> Ok(VInt i :: valuesRev, max nextAutoId (i + 1L), assignedId)
                     | Ok _ -> Error(InvalidValueForColumn(col.Name, "auto_increment"))
             else
-                match coerceAndCheck col pending with
+                match coerceAndCheck strict col pending with
                 | Ok v -> Ok(v :: valuesRev, nextAutoId, assignedId)
                 | Error e -> Error e
 
@@ -752,6 +790,7 @@ let private resolveInsertColumns (table: Table) (columns: string list option) : 
 /// skipped rather than failing the batch when `ignoreErrors` is set.
 let private insertCore
     (checkFks: bool)
+    (strict: bool)
     (ignoreErrors: bool)
     (db: Database)
     (tableKey: string)
@@ -771,7 +810,7 @@ let private insertCore
                 let rawRow = table.Columns |> List.mapi (fun i _ -> Map.tryFind i provided)
 
                 let rowResult =
-                    processRow nextAutoId rawRow table.Columns
+                    processRow strict nextAutoId rawRow table.Columns
                     |> Result.bind (fun (finalValues, nextAutoId', assignedId) ->
                         let candidate = Array.ofList finalValues
 
@@ -825,7 +864,7 @@ let insertRows
                 tryGetTable db tableName
                 |> Result.bind (fun table ->
                     resolveInsertColumns table columns
-                    |> Result.bind (insertCore store.ForeignKeyChecks false db key rowsIn)))
+                    |> Result.bind (insertCore store.ForeignKeyChecks store.StrictMode false db key rowsIn)))
 
         match result with
         | Ok(lastId, affected, rows) ->
@@ -856,7 +895,7 @@ let insertRowsIgnore
                 tryGetTable db tableName
                 |> Result.bind (fun table ->
                     resolveInsertColumns table columns
-                    |> Result.bind (insertCore store.ForeignKeyChecks true db key rowsIn)))
+                    |> Result.bind (insertCore store.ForeignKeyChecks store.StrictMode true db key rowsIn)))
 
         match result with
         | Ok(lastId, affected, rows) ->
@@ -905,7 +944,7 @@ let upsertRows
                                     let provided = List.zip idxs rowValues |> Map.ofList
                                     let rawRow = table.Columns |> List.mapi (fun i _ -> Map.tryFind i provided)
 
-                                    processRow nextAutoId rawRow table.Columns
+                                    processRow store.StrictMode nextAutoId rawRow table.Columns
                                     |> Result.bind (fun (finalValues, nextAutoId', assignedId) ->
                                         // A unique index over a *generated* column (e.g.
                                         // Laravel Pulse's `key_hash BINARY(16) AS
@@ -957,9 +996,9 @@ let upsertRows
             Ok(lastId, affected)
         | Error e -> Error e)
 
-let private coerceRow (columns: ColumnDef list) (row: Value[]) : Result<Value[], StorageError> =
+let private coerceRow (strict: bool) (columns: ColumnDef list) (row: Value[]) : Result<Value[], StorageError> =
     List.zip columns (Array.toList row)
-    |> traverse (fun (col, v) -> coerceAndCheck col v)
+    |> traverse (fun (col, v) -> coerceAndCheck strict col v)
     |> Result.map Array.ofList
 
 /// Every `(childTableKey, fk)` in `db` whose `fk.RefTable` is `parentKey` —
@@ -1224,7 +1263,7 @@ let updateRows
                                     Ok(doneRows @ [ row ], changes)
                                 else
                                     updater row
-                                    |> Result.bind (coerceRow table.Columns)
+                                    |> Result.bind (coerceRow store.StrictMode table.Columns)
                                     |> Result.bind (fun newRow ->
                                         let notYetProcessed =
                                             original |> Array.indexed |> Array.filter (fun (j, _) -> j > i) |> Array.map snd |> List.ofArray
