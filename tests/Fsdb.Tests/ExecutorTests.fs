@@ -1118,4 +1118,28 @@ let tests =
 
                     match runDefault store "SELECT s FROM t WHERE s LIKE 'hello'" with
                     | ResultSet([ "s" ], [ [ Some "Hello" ] ]) -> ()
-                    | other -> failtestf "expected plain LIKE to still match case-insensitively, got %A" other ] ]
+                    | other -> failtestf "expected plain LIKE to still match case-insensitively, got %A" other ]
+
+          testList
+              "generated columns"
+              [ testCase "a STORED generated column computes on INSERT"
+                <| fun _ ->
+                    let store = newStore ()
+                    runDefault store "CREATE TABLE t (n INT, doubled INT AS (n * 2) STORED)" |> ignore
+                    runDefault store "INSERT INTO t (n) VALUES (3), (5)" |> ignore
+
+                    match runDefault store "SELECT n, doubled FROM t ORDER BY n" with
+                    | ResultSet([ "n"; "doubled" ], rows) ->
+                        Expect.equal rows [ [ Some "3"; Some "6" ]; [ Some "5"; Some "10" ] ] "computed from n"
+                    | other -> failtestf "expected doubled to be computed, got %A" other
+
+                testCase "a generated column recomputes after UPDATE of a column it depends on"
+                <| fun _ ->
+                    let store = newStore ()
+                    runDefault store "CREATE TABLE t (n INT, doubled INT AS (n * 2))" |> ignore
+                    runDefault store "INSERT INTO t (n) VALUES (3)" |> ignore
+                    runDefault store "UPDATE t SET n = 10" |> ignore
+
+                    match runDefault store "SELECT doubled FROM t" with
+                    | ResultSet([ "doubled" ], [ [ Some "20" ] ]) -> ()
+                    | other -> failtestf "expected doubled to recompute to 20, got %A" other ] ]
