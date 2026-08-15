@@ -53,16 +53,37 @@ let private traverseList = Storage.traverse
 let private columnIndexOf (columns: ColumnDef list) : Map<string, int> =
     columns |> List.mapi (fun i c -> c.Name.ToLowerInvariant(), i) |> Map.ofList
 
-/// Whole-table (no `GROUP BY` yet — that's M5) aggregate function names:
-/// recognizing one anywhere in a `SELECT`'s projection list switches
-/// `runSelect` from its normal per-row path to `runAggregateSelect`'s
-/// collapse-to-one-row path.
-let private aggregateNames = set [ "count"; "sum"; "avg"; "min"; "max" ]
-
-let private isAggregateCall (expr: Expr) : bool =
+/// Whole-table (no `GROUP BY` yet — that's M5) aggregate recognition: a
+/// `FuncCall` whose name is registered as an aggregate on `registry` (see
+/// `Functions.Registry.Aggregates`) rather than a hardcoded name set here —
+/// M6's `registerAggregate` extension point is the same one `Functions`
+/// itself uses for COUNT/SUM/AVG/MIN/MAX.
+let private isAggregateCall (registry: Registry) (expr: Expr) : bool =
     match expr with
-    | FuncCall(name, _) -> aggregateNames.Contains(name.ToLowerInvariant())
+    | FuncCall(name, _) -> Functions.lookupAggregate name registry |> Option.isSome
     | _ -> false
+
+/// Whether `expr` contains an aggregate call *anywhere*, not just at the
+/// top level — `SELECT COUNT(*) + 1 FROM t` or a `WHERE`-style predicate
+/// nesting one inside a `HAVING`-shaped expression both need this to switch
+/// `runSelect` onto `runAggregateSelect`'s path, the same walk
+/// `substituteValuesFunc` already does for `VALUES(col)` rewriting.
+let rec private containsAggregate (registry: Registry) (expr: Expr) : bool =
+    match expr with
+    | FuncCall(_, args) -> isAggregateCall registry expr || args |> List.exists (containsAggregate registry)
+    | BinOp(_, a, b) -> containsAggregate registry a || containsAggregate registry b
+    | Not e
+    | IsNull e
+    | IsNotNull e -> containsAggregate registry e
+    | Like(e, p) -> containsAggregate registry e || containsAggregate registry p
+    | In(e, xs) -> containsAggregate registry e || xs |> List.exists (containsAggregate registry)
+    | Between(e, lo, hi) -> containsAggregate registry e || containsAggregate registry lo || containsAggregate registry hi
+    | Cast(e, _) -> containsAggregate registry e
+    | Lit _
+    | Col _
+    | QualifiedCol _
+    | Star
+    | Exists _ -> false
 
 let private opSymbol =
     function
@@ -345,33 +366,70 @@ and private evalProjection (ctx: EvalContext) (columns: ColumnDef list) (proj: P
 and private probeRow (columns: ColumnDef list) : Value[] = Array.create (List.length columns) VNull
 
 /// One aggregate call's value over the rows a `WHERE` already filtered to.
-/// `COUNT(*)` counts rows; every other form (including `COUNT(expr)`)
-/// evaluates its one argument per row first, then folds — `NULL`s drop out
-/// before folding (SQL's aggregate rule) and folding an empty set yields
-/// `NULL` for `SUM`/`AVG`/`MIN`/`MAX` (`COUNT` yields `0`, handled by
-/// `List.length` naturally producing `0`).
-and private evalAggregate (ctxFor: Value[] -> EvalContext) (rows: Value[] list) (name: string) (args: Expr list) : Result<Value, EvalError> =
-    match name.ToLowerInvariant(), args with
-    | "count", [ Star ] -> Ok(VInt(int64 (List.length rows)))
-    | "count", [ arg ] ->
-        rows
-        |> traverseList (fun row -> evalExpr (ctxFor row) arg)
-        |> Result.map (fun vs -> VInt(int64 (vs |> List.filter (function VNull -> false | _ -> true) |> List.length)))
-    | (("sum" | "avg" | "min" | "max") as fn), [ arg ] ->
-        rows
-        |> traverseList (fun row -> evalExpr (ctxFor row) arg)
-        |> Result.map (fun vs ->
-            match vs |> List.filter (function VNull -> false | _ -> true) with
-            | [] -> VNull
-            | nonNull ->
-                match fn with
-                | "sum" -> nonNull |> List.reduce Value.add
-                | "avg" -> Value.div (nonNull |> List.reduce Value.add) (VInt(int64 (List.length nonNull)))
-                | "min" -> nonNull |> List.reduce (fun a b -> if Value.compare a b <= 0 then a else b)
-                | _ -> nonNull |> List.reduce (fun a b -> if Value.compare a b >= 0 then a else b))
+/// `COUNT(*)` counts rows directly (`*` isn't a valid `Expr`, so there's
+/// nothing to evaluate per row); every other form evaluates its one
+/// argument per row first, drops the `NULL`s (SQL's aggregate rule), then
+/// folds via whatever `registry` has registered for `name` (see
+/// `Functions.Registry.Aggregates`) — except `COUNT(expr)`, which (unlike
+/// `SUM`/`AVG`/`MIN`/`MAX`) yields `0` rather than `NULL` on an empty
+/// non-NULL set, so it still folds even when there's nothing left to fold.
+and private evalAggregate
+    (registry: Registry)
+    (ctxFor: Value[] -> EvalContext)
+    (rows: Value[] list)
+    (name: string)
+    (args: Expr list)
+    : Result<Value, EvalError> =
+    let isCount = System.String.Equals(name, "COUNT", System.StringComparison.OrdinalIgnoreCase)
+
+    match args with
+    | [ Star ] when isCount -> Ok(VInt(int64 (List.length rows)))
+    | [ arg ] ->
+        match Functions.lookupAggregate name registry with
+        | None -> Error(unknownFunction name)
+        | Some fold ->
+            rows
+            |> traverseList (fun row -> evalExpr (ctxFor row) arg)
+            |> Result.map (fun vs ->
+                let nonNull = vs |> List.filter (function VNull -> false | _ -> true)
+                if isCount || not nonNull.IsEmpty then fold nonNull else VNull)
     // `isAggregateCall` (the only caller that routes here) already narrowed
-    // to the names/arities matched above.
+    // to single-argument aggregate calls.
     | _ -> Ok VNull
+
+/// Pre-evaluates every aggregate subtree of `expr` (anywhere it appears —
+/// nested in arithmetic, a function argument, ...) against `rows` into a
+/// `Lit`, so the caller can evaluate what's left as an ordinary per-row
+/// expression against one representative row. Same shape as
+/// `substituteValuesFunc`'s rewrite walk. Without this, `SELECT COUNT(*) +
+/// 1 FROM t` fails: the top-level node is `BinOp(Add, FuncCall("COUNT",
+/// [Star]), Lit 1)`, not a bare `FuncCall`, so plain per-row evaluation
+/// would try (and fail) to look `COUNT` up as a scalar function.
+and private rewriteAggregates
+    (registry: Registry)
+    (ctxFor: Value[] -> EvalContext)
+    (rows: Value[] list)
+    (expr: Expr)
+    : Result<Expr, EvalError> =
+    let sub = rewriteAggregates registry ctxFor rows
+
+    match expr with
+    | FuncCall(name, args) when isAggregateCall registry expr -> evalAggregate registry ctxFor rows name args |> Result.map Lit
+    | FuncCall(name, args) -> args |> traverseList sub |> Result.map (fun args' -> FuncCall(name, args'))
+    | BinOp(op, a, b) -> sub a |> Result.bind (fun a' -> sub b |> Result.map (fun b' -> BinOp(op, a', b')))
+    | Not e -> sub e |> Result.map Not
+    | IsNull e -> sub e |> Result.map IsNull
+    | IsNotNull e -> sub e |> Result.map IsNotNull
+    | Like(e, p) -> sub e |> Result.bind (fun e' -> sub p |> Result.map (fun p' -> Like(e', p')))
+    | In(e, xs) -> sub e |> Result.bind (fun e' -> xs |> traverseList sub |> Result.map (fun xs' -> In(e', xs')))
+    | Between(e, lo, hi) ->
+        sub e |> Result.bind (fun e' -> sub lo |> Result.bind (fun lo' -> sub hi |> Result.map (fun hi' -> Between(e', lo', hi'))))
+    | Cast(e, ty) -> sub e |> Result.map (fun e' -> Cast(e', ty))
+    | Lit _
+    | Col _
+    | QualifiedCol _
+    | Star
+    | Exists _ -> Ok expr
 
 /// The ungrouped-aggregate path (`SELECT MAX(x) FROM t`, no `GROUP BY`):
 /// the whole `WHERE`-filtered row set collapses to one output row. `ORDER
@@ -418,10 +476,11 @@ and private runAggregateSelect
             let label = aliasOpt |> Option.defaultValue (exprLabel expr)
 
             match expr with
-            | FuncCall(name, args) when isAggregateCall expr ->
-                evalAggregate ctxFor matched name args |> Result.map (fun v -> label, v)
             | Star -> Error(1054, "Invalid use of '*'")
-            | _ -> evalExpr (ctxFor representativeRow) expr |> Result.map (fun v -> label, v)
+            | _ ->
+                rewriteAggregates registry ctxFor matched expr
+                |> Result.bind (evalExpr (ctxFor representativeRow))
+                |> Result.map (fun v -> label, v)
 
         match select.Projections |> traverseList projectOne with
         | Error(code, message) -> Err(code, message)
@@ -444,7 +503,7 @@ and private runSelect
     // packet and aborts the client's whole session.
     if select.From.IsNone && projections |> List.exists (fst >> (=) Star) then
         Err(1096, "No tables used")
-    elif projections |> List.exists (fst >> isAggregateCall) then
+    elif projections |> List.exists (fst >> containsAggregate registry) then
         runAggregateSelect store registry dbName columns rows select
     else
 

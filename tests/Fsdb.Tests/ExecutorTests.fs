@@ -657,7 +657,26 @@ let tests =
 
                     match runDefault store "SELECT COUNT(*) AS c, COUNT(n) AS cn, SUM(n) AS s, AVG(n) AS a FROM t" with
                     | ResultSet([ "c"; "cn"; "s"; "a" ], [ [ Some "3"; Some "2"; Some "30"; Some "15" ] ]) -> ()
-                    | other -> failtestf "expected NULLs to drop out of COUNT(n)/SUM/AVG, got %A" other ]
+                    | other -> failtestf "expected NULLs to drop out of COUNT(n)/SUM/AVG, got %A" other
+
+                testCase "an aggregate nested inside an expression is detected and evaluated, not just a bare top-level call"
+                <| fun _ ->
+                    // Regression: aggregate detection used to be top-level
+                    // only (`FuncCall` matched directly against the
+                    // projection expr), so `COUNT(*) + 1` fell through to
+                    // the per-row path and died looking `COUNT` up as a
+                    // scalar function (`FUNCTION COUNT does not exist`).
+                    let store = newStore ()
+                    runDefault store "CREATE TABLE t (n INT)" |> ignore
+                    runDefault store "INSERT INTO t VALUES (10), (20)" |> ignore
+
+                    match runDefault store "SELECT COUNT(*) + 1 AS c FROM t" with
+                    | ResultSet([ "c" ], [ [ Some "3" ] ]) -> ()
+                    | other -> failtestf "expected COUNT(*) + 1 = 3, got %A" other
+
+                    match runDefault store "SELECT ROUND(AVG(n), 1) AS a FROM t" with
+                    | ResultSet([ "a" ], [ [ Some "15" ] ]) -> ()
+                    | other -> failtestf "expected a scalar function wrapping an aggregate to work, got %A" other ]
 
           testList
               "table-qualified columns are checked against the FROM's alias-or-table, not silently accepted from anywhere"
