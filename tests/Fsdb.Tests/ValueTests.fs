@@ -301,7 +301,18 @@ let tests =
                           Expect.equal (call "JSON_VALID" [ VString "{not json" ]) (VInt 0L) "invalid"
 
                       testCase "JSON_KEYS lists an object's top-level keys"
-                      <| fun _ -> Expect.equal (call "JSON_KEYS" [ VJson """{"a": 1, "b": 2}""" ]) (VJson """["a", "b"]""") "keys" ]
+                      <| fun _ -> Expect.equal (call "JSON_KEYS" [ VJson """{"a": 1, "b": 2}""" ]) (VJson """["a", "b"]""") "keys"
+
+                      testCase "JSON_TYPE names each JSON value's kind"
+                      <| fun _ ->
+                          Expect.equal (call "JSON_TYPE" [ VJson """{"a": 1}""" ]) (VString "OBJECT") "object"
+                          Expect.equal (call "JSON_TYPE" [ VJson "[1, 2]" ]) (VString "ARRAY") "array"
+                          Expect.equal (call "JSON_TYPE" [ VJson "\"hi\"" ]) (VString "STRING") "string"
+                          Expect.equal (call "JSON_TYPE" [ VJson "1" ]) (VString "INTEGER") "integer"
+                          Expect.equal (call "JSON_TYPE" [ VJson "1.5" ]) (VString "DOUBLE") "double"
+                          Expect.equal (call "JSON_TYPE" [ VJson "true" ]) (VString "BOOLEAN") "boolean"
+                          Expect.equal (call "JSON_TYPE" [ VJson "null" ]) (VString "NULL") "json null"
+                          Expect.equal (call "JSON_TYPE" [ VNull ]) VNull "sql null" ]
 
                 testList
                     "Dates"

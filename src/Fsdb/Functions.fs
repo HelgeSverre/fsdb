@@ -395,6 +395,33 @@ let private jsonValidFn: Scalar =
                 VInt 0L
     | _ -> VNull
 
+/// MySQL's JSON_TYPE names, collapsed to what a `JsonNode` can actually tell
+/// apart: numbers only split INTEGER/DOUBLE by whether the source text has a
+/// fraction or exponent, not MySQL's full INTEGER/UNSIGNED INTEGER/DECIMAL
+/// split (this engine doesn't retain that provenance).
+let private jsonTypeOf (node: JsonNode) : string =
+    match node with
+    | null -> "NULL"
+    | :? JsonObject -> "OBJECT"
+    | :? JsonArray -> "ARRAY"
+    | _ ->
+        match node.GetValueKind() with
+        | JsonValueKind.String -> "STRING"
+        | JsonValueKind.True
+        | JsonValueKind.False -> "BOOLEAN"
+        | JsonValueKind.Number ->
+            let raw = node.ToJsonString()
+            if raw.IndexOfAny [| '.'; 'e'; 'E' |] >= 0 then "DOUBLE" else "INTEGER"
+        | _ -> "OPAQUE"
+
+let private jsonTypeFn: Scalar =
+    function
+    | [ doc ] when not (anyNull [ doc ]) ->
+        match tryParseJsonValue doc with
+        | Some node -> VString(jsonTypeOf node)
+        | None -> VNull
+    | _ -> VNull
+
 let private jsonKeysOf (node: JsonNode option) : Value =
     match node with
     | Some(:? JsonObject as o) -> VJson("[" + (o |> Seq.map (fun kv -> JsonSerializer.Serialize kv.Key) |> String.concat ", ") + "]")
@@ -1349,6 +1376,7 @@ let builtins: Registry =
     |> registerScalar "JSON_OBJECT" jsonObjectFn
     |> registerScalar "JSON_LENGTH" jsonLengthFn
     |> registerScalar "JSON_VALID" jsonValidFn
+    |> registerScalar "JSON_TYPE" jsonTypeFn
     |> registerScalar "JSON_KEYS" jsonKeysFn
     |> registerScalar "JSON_SEARCH" jsonSearchFn
     // Dates
