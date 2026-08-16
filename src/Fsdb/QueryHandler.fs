@@ -312,8 +312,10 @@ let private unquote (v: string) =
 /// `SET x = @@y` / `SET x = @y` — the mysqldump preamble/postamble idiom of
 /// saving a setting into a user variable and restoring it later
 /// (`SET @OLD_SQL_MODE=@@SQL_MODE` ... `SET SQL_MODE=@OLD_SQL_MODE`) needs
-/// exactly this, not full expression evaluation. Anything else is a
-/// literal, unquoted as before.
+/// exactly this, not full expression evaluation. A literal `NULL` resolves
+/// to `None` too, same as an unset variable reference — `SET @x = NULL`
+/// must leave `@x` a real SQL NULL, not the four-character string `"NULL"`.
+/// Anything else is a literal, unquoted as before.
 let private resolveSetRhs (session: Session) (rhs: string) : string option =
     let rhs = rhs.Trim()
     let m = atVarItem.Match rhs
@@ -321,7 +323,11 @@ let private resolveSetRhs (session: Session) (rhs: string) : string option =
     if m.Success then
         resolveAtRef session m.Groups.[1].Value m.Groups.[2].Value
     else
-        Some(unquote rhs)
+        let unquoted = unquote rhs
+        if String.Equals(unquoted, "NULL", StringComparison.OrdinalIgnoreCase) then
+            None
+        else
+            Some unquoted
 
 /// Whether a `sql_mode` value (comma-separated, as stored in
 /// `Session.Variables`) still contains STRICT_TRANS_TABLES/STRICT_ALL_TABLES
@@ -411,8 +417,11 @@ let private parseSetFragment (sql: string) (session: Session) (fragment: string)
             let varMatch = setVar.Match fragment
 
             if varMatch.Success then
-                let value = resolveSetRhs session varMatch.Groups.[2].Value |> Option.defaultValue ""
-                Ok(SetVarAction(varMatch.Groups.[1].Value.ToLowerInvariant(), value))
+                let name = varMatch.Groups.[1].Value.ToLowerInvariant()
+
+                match resolveSetRhs session varMatch.Groups.[2].Value with
+                | Some value -> Ok(SetVarAction(name, value))
+                | None -> Error(Err(1231, sprintf "Variable '%s' can't be set to the value of 'NULL'" name))
             else
                 match setVarNameForError.Match fragment with
                 | m when m.Success -> Error(Err(1193, sprintf "Unknown system variable '%s'" m.Groups.[1].Value))

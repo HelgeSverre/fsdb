@@ -285,6 +285,23 @@ let tests =
               | ResultSet([ "@never_set" ], [ [ None ] ]) -> ()
               | other -> failtestf "expected a NULL row, got %A" other
 
+          testCase "SET @x = NULL defines a user variable holding NULL, not the string 'NULL'"
+          <| fun _ ->
+              let session = create 1 (Fsdb.Storage.create ())
+              let session, _ = handle session "SET @x = NULL"
+
+              match handle session "SELECT @x" |> snd with
+              | ResultSet([ "@x" ], [ [ None ] ]) -> ()
+              | other -> failtestf "expected a real NULL, not the string 'NULL', got %A" other
+
+          testCase "SET foreign_key_checks = @never_set is a 1231, not a silent empty string"
+          <| fun _ ->
+              let session = create 1 (Fsdb.Storage.create ())
+
+              match handle session "SET foreign_key_checks = @never_set" |> snd with
+              | Err(1231, _) -> ()
+              | other -> failtestf "expected a 1231 error, got %A" other
+
           testCase "SET x = @old_var restores a saved system variable, mysqldump's preamble/postamble idiom"
           <| fun _ ->
               let session = create 1 (Fsdb.Storage.create ())
