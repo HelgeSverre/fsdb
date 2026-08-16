@@ -524,6 +524,18 @@ let tests =
                 <| fun _ ->
                     Expect.equal (stripVersionComments "SELECT /*!99999 SQL_NO_CACHE */ 1") "SELECT  1" "above server version is inert"
 
+                testCase "version-gated /*!NNNNN ... */ comment reads only the first 5 digits of a longer run"
+                <| fun _ ->
+                    // A 6-digit run isn't "no version" -- MySQL gates on its
+                    // first 5 (99999, always above the server's version), so
+                    // this is inert, not a 1064 with the digits spliced in as
+                    // garbage tokens.
+                    Expect.equal (stripVersionComments "SELECT /*!999999 BOGUSTOKEN */ 2") "SELECT  2" "first 5 digits gate the comment"
+
+                testCase "version-gated /*!NNNNN ... */ comment reads a run shorter than 5 digits as a version too"
+                <| fun _ ->
+                    Expect.equal (stripVersionComments "SELECT /*!9999 body */ 1") "SELECT  body  1" "a short digit run still counts as a version"
+
                 testCase "stripVersionComments leaves a /*! -lookalike inside a string literal alone"
                 <| fun _ ->
                     Expect.equal

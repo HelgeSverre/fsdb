@@ -79,10 +79,17 @@ let stripVersionComments (sql: string) : string =
                 | idx -> idx
 
             let inner = sql.Substring(i + 3, closeAt - (i + 3))
-            let digits = String(inner |> Seq.takeWhile Char.IsDigit |> Seq.toArray)
+            // MySQL reads the *first 5 digits* of the leading digit run as
+            // the version, not "exactly 5 digits or none" -- a run longer
+            // than 5 (mysqldump's own `/*!999999\- enable the sandbox mode
+            // */` preamble) still gates on its first 5, with the rest
+            // spliced back into the body; a run shorter than 5 still counts
+            // as a version (`/*!9999 body */` runs `body`). Only an empty
+            // run means "any version".
+            let digits = String(inner |> Seq.truncate 5 |> Seq.takeWhile Char.IsDigit |> Seq.toArray)
 
             let version, body =
-                if digits.Length = 5 then int digits, inner.Substring(digits.Length)
+                if digits.Length > 0 then int digits, inner.Substring(digits.Length)
                 else 0, inner
 
             if version <= serverVersionNumber then
