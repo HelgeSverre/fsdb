@@ -45,6 +45,34 @@ let tests =
                       "both tables, correctly typed and counted"
               | other -> failtestf "expected a resultset, got %A" other
 
+          testCase "TABLES' t.AUTO_INCREMENT and t.CREATE_OPTIONS both project without a 1054/1064, Doctrine DBAL's own introspection query"
+          <| fun _ ->
+              // Laravel's `Blueprint::change()` (e.g. `$table->decimal(...)
+              // ->change()`) goes through Doctrine DBAL, which probes
+              // `getListTableMetadataSQL` — `t.AUTO_INCREMENT` used to be a
+              // 1064 (AUTO_INCREMENT was a reserved word) and
+              // `t.CREATE_OPTIONS` a 1054 (column didn't exist at all).
+              let store = setup ()
+
+              match
+                  run
+                      store
+                      "SELECT t.AUTO_INCREMENT, t.CREATE_OPTIONS FROM information_schema.TABLES t WHERE t.TABLE_SCHEMA = 'fsdb' AND t.TABLE_NAME = 'users'"
+              with
+              | ResultSet(_, [ [ _; Some "" ] ]) -> ()
+              | other -> failtestf "expected a one-row resultset, got %A" other
+
+          testCase "COLLATION_CHARACTER_SET_APPLICABILITY maps a table's collation to its character set"
+          <| fun _ ->
+              // The other half of that same Doctrine DBAL query: `INNER
+              // JOIN information_schema.COLLATION_CHARACTER_SET_APPLICABILITY
+              // ccsa ON ccsa.COLLATION_NAME = t.TABLE_COLLATION`.
+              let store = setup ()
+
+              match run store "SELECT character_set_name FROM information_schema.COLLATION_CHARACTER_SET_APPLICABILITY WHERE collation_name = 'utf8mb4_unicode_ci'" with
+              | ResultSet(_, [ [ Some "utf8mb4" ] ]) -> ()
+              | other -> failtestf "expected a single utf8mb4 row, got %A" other
+
           testCase "COLUMNS projects declared columns with type/nullability/key metadata"
           <| fun _ ->
               let store = setup ()

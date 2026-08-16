@@ -104,12 +104,16 @@ let private intTok: Parser<int, unit> = pint32 .>> ws
 /// entirely, same as real MySQL. Deliberately *not* real MySQL's full
 /// reserved-word list: only words this grammar's `expr`/statement dispatch
 /// would otherwise misparse land here — `ENGINE`/`CHARSET`/`COLLATE`/
-/// `CHARACTER` are deliberately excluded: they're matched via `keyword`
-/// (literal text, independent of this set) only inside `CREATE TABLE`'s own
-/// table-options/column-modifier grammar, never as a general expression
-/// atom, since reserving them would break `information_schema.tables.engine`
-/// (and any other query naming an ordinary column `engine`/`charset`/
-/// `collate`) from parsing as a plain column reference.
+/// `CHARACTER`/`AUTO_INCREMENT` are deliberately excluded: they're matched
+/// via `keyword` (literal text, independent of this set) only inside
+/// `CREATE TABLE`'s own table-options/column-modifier grammar, never as a
+/// general expression atom, since reserving them would break
+/// `information_schema.tables.engine`/`.auto_increment` (and any other
+/// query naming an ordinary column `engine`/`charset`/`collate`/
+/// `auto_increment` — Doctrine DBAL's own schema introspection, behind
+/// Laravel's `Blueprint::change()`, is one such query) from parsing as a
+/// plain column reference. Real MySQL agrees: `AUTO_INCREMENT` is a
+/// non-reserved keyword there too.
 let private reservedWords =
     HashSet<string>(
         [ "select"
@@ -138,7 +142,6 @@ let private reservedWords =
           "primary"
           "key"
           "default"
-          "auto_increment"
           "unsigned"
           "null"
           "true"

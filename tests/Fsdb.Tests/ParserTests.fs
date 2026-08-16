@@ -502,6 +502,17 @@ let tests =
                         (mkSelect([ col "a", None ], Some "t", None, [], None, None))
                         "comments"
 
+                testCase "AUTO_INCREMENT is a non-reserved word, usable as a plain column reference"
+                <| fun _ ->
+                    // Real MySQL agrees (`AUTO_INCREMENT` is non-reserved
+                    // there too) — `information_schema.tables.auto_increment`
+                    // and Doctrine DBAL's schema-introspection query
+                    // (`t.AUTO_INCREMENT`) both depend on this parsing.
+                    Expect.equal
+                        (parseOk "SELECT t.AUTO_INCREMENT FROM t")
+                        (mkSelect([ QualifiedCol("t", "AUTO_INCREMENT"), None ], Some "t", None, [], None, None))
+                        "AUTO_INCREMENT as a qualified column reference"
+
                 testCase "version-gated /*!NNNNN ... */ comment splices its SQL back in, below server version"
                 <| fun _ ->
                     Expect.equal

@@ -181,7 +181,12 @@ let private tablesColumns =
       // storage to report, so both are a constant stand-in rather than
       // absent columns that would 1054 on that expression.
       intCol "data_length"
-      intCol "index_length" ]
+      intCol "index_length"
+      // Always empty: `Ast`'s `CREATE TABLE` has no notion of extra table
+      // options (`ROW_FORMAT=...` etc.) to echo back. Present only so
+      // Doctrine DBAL's `getListTableMetadataSQL` (behind Laravel's
+      // `Blueprint::change()`) doesn't 1054 projecting it.
+      strCol "create_options" ]
 
 let private tablesRows (catalog: Catalog) : Value[] list =
     allTables catalog
@@ -195,7 +200,8 @@ let private tablesRows (catalog: Catalog) : Value[] list =
            vs "utf8mb4_unicode_ci"
            vs ""
            vi 16384
-           vi 0 |])
+           vi 0
+           vs "" |])
 
 let private columnsColumns =
     [ strCol "table_schema"
@@ -367,6 +373,25 @@ let private schemataRows (catalog: Catalog) : Value[] list =
     |> List.distinct
     |> List.map (fun dbName -> [| vs "def"; vs dbName; vs "utf8mb4"; vs "utf8mb4_unicode_ci" |])
 
+let private collationCharacterSetApplicabilityColumns =
+    [ strCol "collation_name"; strCol "character_set_name" ]
+
+/// Real MySQL's version lists all ~280 collations the server ships with,
+/// regardless of whether anything actually uses them. This only needs to
+/// cover collations fsdb itself can ever hand back (`tablesRows`'s/
+/// `columnsRows`'s hardcoded `utf8mb4_unicode_ci`, the session defaults in
+/// `Session.defaultVariables`, and MySQL 8's own server default) — enough
+/// for Doctrine DBAL's `getListTableMetadataSQL`
+/// (`... JOIN information_schema.COLLATION_CHARACTER_SET_APPLICABILITY
+/// ccsa ON ccsa.COLLATION_NAME = t.TABLE_COLLATION`, behind Laravel's
+/// `Blueprint::change()`) to find a match, not a full reference table.
+let private collationCharacterSetApplicabilityRows: Value[] list =
+    [ "utf8mb4_unicode_ci", "utf8mb4"
+      "utf8mb4_general_ci", "utf8mb4"
+      "utf8mb4_bin", "utf8mb4"
+      "utf8mb4_0900_ai_ci", "utf8mb4" ]
+    |> List.map (fun (collation, charset) -> [| vs collation; vs charset |])
+
 /// Resolves one `information_schema` table name (case-insensitive) to its
 /// columns and freshly-projected rows, or `None` if `name` isn't one of the
 /// virtual tables this module knows about (a real 1146 from `Executor`, same
@@ -378,6 +403,8 @@ let scan (catalog: Catalog) (name: string) : (ColumnDef list * Value[] list) opt
     | "STATISTICS" -> Some(statisticsColumns, statisticsRows catalog)
     | "KEY_COLUMN_USAGE" -> Some(keyColumnUsageColumns, keyColumnUsageRows catalog)
     | "REFERENTIAL_CONSTRAINTS" -> Some(referentialConstraintsColumns, referentialConstraintsRows catalog)
+    | "COLLATION_CHARACTER_SET_APPLICABILITY" ->
+        Some(collationCharacterSetApplicabilityColumns, collationCharacterSetApplicabilityRows)
     | "SCHEMATA" -> Some(schemataColumns, schemataRows catalog)
     | _ -> None
 
