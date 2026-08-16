@@ -511,6 +511,13 @@ let rec private evalExpr (ctx: EvalContext) (expr: Expr) : Result<Value, EvalErr
                     | _, Some true -> VInt 1L
                     | Some false, Some false -> VInt 0L
                     | _ -> VNull
+                // `datetime_expr +/- INTERVAL n unit` parses to a plain
+                // `BinOp`, same as `1 + 2` — `vb` here is `INTERVAL`'s own
+                // encoded marker value (see `Functions.intervalFn`), so it
+                // needs the same real date arithmetic `DATE_ADD`/`DATE_SUB`
+                // give it rather than falling into generic numeric add/sub.
+                | Add when isIntervalValue vb -> tryDateIntervalBinOp 1.0 va vb |> Option.defaultValue (Value.add va vb)
+                | Sub when isIntervalValue vb -> tryDateIntervalBinOp -1.0 va vb |> Option.defaultValue (Value.sub va vb)
                 | Add -> Value.add va vb
                 | Sub -> Value.sub va vb
                 | Mul -> Value.mul va vb

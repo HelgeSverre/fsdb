@@ -700,6 +700,26 @@ let private dateAddCore (sign: float) : Scalar =
         | None -> VNull
     | _ -> VNull
 
+/// Whether `v` is the encoded result of an `INTERVAL n unit` expression
+/// (see `intervalFn` above) — the marker `Executor.evalExpr`'s `BinOp(Add,
+/// ...)`/`BinOp(Sub, ...)` cases check before falling back to plain numeric
+/// `Value.add`/`Value.sub`, since `datetime_expr +/- INTERVAL n unit` reaches
+/// them as an ordinary binary operator, not a call to `DATE_ADD`/`DATE_SUB`.
+let isIntervalValue (v: Value) : bool =
+    match v with
+    | VString s -> s.StartsWith intervalMarker
+    | _ -> false
+
+/// Real date/time arithmetic for that binary-operator form — same encoding
+/// and unit handling as `dateAddCore`, just entered through `+`/`-` on an
+/// `INTERVAL n unit` operand instead of a `DATE_ADD`/`DATE_SUB` call. `None`
+/// when `dateV` isn't a recognizable date/time, so the caller can fall back
+/// to `Value.add`/`Value.sub` and get MySQL's usual type-error/NULL there.
+let tryDateIntervalBinOp (sign: float) (dateV: Value) (intervalV: Value) : Value option =
+    match tryParseIntervalArg intervalV, asDateTime dateV with
+    | Some(n, unit), Some dt -> Some(applyDateInterval sign dateV dt n unit)
+    | _ -> None
+
 let private dateDiffFn: Scalar =
     function
     | [ a; b ] when not (anyNull [ a; b ]) ->

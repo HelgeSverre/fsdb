@@ -174,7 +174,17 @@ let tests =
 
                     match runDefault store "SELECT NOPE(1)" with
                     | Err(1305, msg) -> Expect.stringContains msg "NOPE" "message names the function"
-                    | other -> failtestf "expected a 1305 error, got %A" other ]
+                    | other -> failtestf "expected a 1305 error, got %A" other
+
+                testCase "the binary-operator form of INTERVAL arithmetic (expr - INTERVAL n unit) does real date math, like DATE_SUB"
+                <| fun _ ->
+                    let store = newStore ()
+
+                    match runDefault store "SELECT DATE('2024-03-15') - INTERVAL 10 DAY, DATE('2024-03-15') + INTERVAL 1 MONTH" with
+                    | ResultSet(_, [ [ minus; plus ] ]) ->
+                        Expect.equal minus (Some "2024-03-05") "subtracting 10 days"
+                        Expect.equal plus (Some "2024-04-15") "adding 1 month"
+                    | other -> failtestf "expected a resultset, got %A" other ]
 
           testList
               "UPDATE / DELETE"
