@@ -29,6 +29,57 @@ let private blockComment: Parser<unit, unit> = pstring "/*" >>. skipManyTill any
 /// to think about trailing space.
 let private ws: Parser<unit, unit> = skipMany (choice [ spaces1; lineComment; blockComment ])
 
+/// The numeric form of `Protocol.ServerVersion` ("8.0.36-fsdb"), for
+/// `stripVersionComments` below. Duplicated rather than shared because
+/// `Protocol.fs` compiles after this file — keep the two in sync by hand if
+/// `ServerVersion` ever changes.
+let private serverVersionNumber = 80036
+
+/// mysqldump wraps version-specific SQL in `/*!NNNNN ... */` (or a bare
+/// `/*! ... */` for "any version") so one dump can target several server
+/// versions at once: MySQL's grammar runs the wrapped SQL as ordinary
+/// executable SQL when the server's version is >= NNNNN, and treats it as
+/// an inert comment otherwise. `blockComment` above only ever does the
+/// second half (skip it); this rewrites the SQL text ahead of parsing so
+/// the first half (splice it back in) doesn't need its own grammar rule.
+/// Not recursive — mysqldump never nests these.
+let stripVersionComments (sql: string) : string =
+    let sb = Text.StringBuilder(sql.Length)
+    let mutable i = 0
+
+    while i < sql.Length do
+        if i + 2 < sql.Length && sql.[i] = '/' && sql.[i + 1] = '*' && sql.[i + 2] = '!' then
+            let closeAt =
+                match sql.IndexOf("*/", i + 3) with
+                | -1 -> sql.Length
+                | idx -> idx
+
+            let inner = sql.Substring(i + 3, closeAt - (i + 3))
+            let digits = String(inner |> Seq.takeWhile Char.IsDigit |> Seq.toArray)
+
+            let version, body =
+                if digits.Length = 5 then int digits, inner.Substring(digits.Length)
+                else 0, inner
+
+            if version <= serverVersionNumber then
+                sb.Append(body: string) |> ignore
+
+            i <- (if closeAt = sql.Length then closeAt else closeAt + 2)
+        else
+            sb.Append(sql.[i]) |> ignore
+            i <- i + 1
+
+    sb.ToString()
+
+/// True when `sql` is nothing but whitespace/comments — real MySQL treats
+/// that as a harmless no-op (`Query OK, 0 rows affected`), not a syntax
+/// error, which matters once a version-gated comment above strips down to
+/// nothing on its own line (a routine shape in mysqldump preambles).
+let isBlank (sql: string) : bool =
+    match run (ws .>> eof) sql with
+    | Success _ -> true
+    | Failure _ -> false
+
 /// A punctuation token (`(`, `,`, `=`, ...) followed by whitespace.
 let private sym (s: string) : Parser<unit, unit> = pstring s >>. ws
 

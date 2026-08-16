@@ -502,6 +502,23 @@ let tests =
                         (mkSelect([ col "a", None ], Some "t", None, [], None, None))
                         "comments"
 
+                testCase "version-gated /*!NNNNN ... */ comment splices its SQL back in, below server version"
+                <| fun _ ->
+                    Expect.equal
+                        (stripVersionComments "/*!40103 SET TIME_ZONE='+00:00' */")
+                        " SET TIME_ZONE='+00:00' "
+                        "below server version executes"
+
+                testCase "version-gated /*!NNNNN ... */ comment is dropped, above server version"
+                <| fun _ ->
+                    Expect.equal (stripVersionComments "SELECT /*!99999 SQL_NO_CACHE */ 1") "SELECT  1" "above server version is inert"
+
+                testCase "isBlank is true only for a comment/whitespace-only statement"
+                <| fun _ ->
+                    Expect.isTrue (isBlank "  /* trailing comment */ ") "comment-only"
+                    Expect.isTrue (isBlank "-- just a line comment") "line-comment-only"
+                    Expect.isFalse (isBlank "SELECT 1") "real statement"
+
                 testCase "keywords are case-insensitive"
                 <| fun _ ->
                     Expect.equal

@@ -23,6 +23,22 @@ let tests =
                   Expect.equal rows [ [ Some "1" ] ] "row value"
               | other -> failtestf "expected a resultset, got %A" other
 
+          testCase "a version-gated /*!NNNNN ... */ comment executes its wrapped SET, matching a mysqldump preamble"
+          <| fun _ ->
+              let session = create 1 (Fsdb.Storage.create ())
+
+              match handle session "/*!40103 SET @OLD_TIME_ZONE=@@TIME_ZONE */" |> snd with
+              | Affected 0UL -> ()
+              | other -> failtestf "expected an OK/0-rows ack, got %A" other
+
+          testCase "a comment-only statement is a harmless no-op, not a syntax error"
+          <| fun _ ->
+              let session = create 1 (Fsdb.Storage.create ())
+
+              match handle session "/* trailing comment */" |> snd with
+              | Affected 0UL -> ()
+              | other -> failtestf "expected an OK/0-rows ack, got %A" other
+
           testCase "a SELECT's int/string columns report their real MySQL wire types, not a blanket VAR_STRING"
           <| fun _ ->
               // Real MySQL clients (PHP's mysqlnd in particular)
@@ -219,10 +235,13 @@ let tests =
               // Two-phase: every fragment parses before any of them apply,
               // so a `SET` that fails partway through — the same as real
               // MySQL — can't leave `sql_mode` (or any other variable it
-              // named first) half-updated.
+              // named first) half-updated. `bad-name` (a hyphen isn't a
+              // valid identifier char) matches neither `setVar` nor
+              // `setUserVar` — `@user_var=1` used to be this fixture's bad
+              // fragment, before `SET @foo = ...` became a real feature.
               let session = create 1 (Fsdb.Storage.create ())
 
-              let session, result = handle session "SET SESSION sql_mode='ANSI_QUOTES', @user_var=1"
+              let session, result = handle session "SET SESSION sql_mode='ANSI_QUOTES', bad-name=1"
 
               match result with
               | Err(1193, _) -> ()
@@ -232,17 +251,42 @@ let tests =
               | ResultSet(_, [ [ Some mode ] ]) -> Expect.stringContains mode "STRICT_TRANS_TABLES" "sql_mode is unchanged from its default"
               | other -> failtestf "expected a resultset, got %A" other
 
-          testCase "SET @user_var = 1 is a loud 1193 error, not a silent fake OK"
+          testCase "SET @user_var = 1 defines a user variable, readable back via SELECT @user_var"
           <| fun _ ->
-              // `setVar`'s (\w+) can't match `@foo` — a silent
-              // `Affected 0UL` here would make the client believe the write
-              // landed, only for `SELECT @foo` to hit a 1064 syntax error
-              // right after.
+              // Real MySQL never validates a user-defined variable's name —
+              // `SET @foo = ...` is always legal, unlike `SET SESSION x =
+              // y`. mysqldump leans on this to save/restore settings around
+              // a dump (`SET @OLD_SQL_MODE=@@SQL_MODE` ... later `SET
+              // SQL_MODE=@OLD_SQL_MODE`).
+              let session = create 1 (Fsdb.Storage.create ())
+              let session, setResult = handle session "SET @user_var = 1"
+
+              match setResult with
+              | Affected 0UL -> ()
+              | other -> failtestf "expected OK, got %A" other
+
+              match handle session "SELECT @user_var" |> snd with
+              | ResultSet([ "@user_var" ], [ [ Some "1" ] ]) -> ()
+              | other -> failtestf "expected user_var to read back as 1, got %A" other
+
+          testCase "SELECT @never_set is NULL, not an error — unlike an unknown @@system_var"
+          <| fun _ ->
               let session = create 1 (Fsdb.Storage.create ())
 
-              match handle session "SET @user_var = 1" |> snd with
-              | Err(1193, msg) -> Expect.stringContains msg "@user_var" "the error names the unhandled variable"
-              | other -> failtestf "expected a 1193 error, got %A" other
+              match handle session "SELECT @never_set" |> snd with
+              | ResultSet([ "@never_set" ], [ [ None ] ]) -> ()
+              | other -> failtestf "expected a NULL row, got %A" other
+
+          testCase "SET x = @old_var restores a saved system variable, mysqldump's preamble/postamble idiom"
+          <| fun _ ->
+              let session = create 1 (Fsdb.Storage.create ())
+              let session, _ = handle session "SET @OLD_SQL_MODE=@@SQL_MODE"
+              let session, _ = handle session "SET SESSION sql_mode='ANSI_QUOTES'"
+              let session, _ = handle session "SET SQL_MODE=@OLD_SQL_MODE"
+
+              match handle session "SELECT @@sql_mode" |> snd with
+              | ResultSet(_, [ [ Some mode ] ]) -> Expect.stringContains mode "STRICT_TRANS_TABLES" "sql_mode restored to its original value"
+              | other -> failtestf "expected a resultset, got %A" other
 
           testCase "SELECT DATABASE() returns NULL before USE"
           <| fun _ ->

@@ -139,40 +139,57 @@ let valueToSqlLiteral (v: Value) : string =
     | VBytes _
     | VJson _ -> "'" + escapeSqlString (v |> toText |> Option.defaultValue "") + "'"
 
-/// Matches `@@var` or `@@session.var` / `@@global.var`, optionally aliased,
-/// optionally followed by a trailing `LIMIT n` (mysql CLI probes
-/// `@@version_comment` this way at connect time).
+/// Matches `@@var` (system, optionally `session.`/`global.`-qualified) or
+/// `@var` (user-defined), optionally aliased, optionally followed by a
+/// trailing `LIMIT n` (mysql CLI probes `@@version_comment` this way at
+/// connect time). Group 1 is the sigil (`"@"` or `"@@"`), so a single regex
+/// covers both — `resolveAtRef` below is the only place that branches on
+/// which.
 let private atVarItem =
-    Regex(@"^@@(?:SESSION\.|GLOBAL\.)?(\w+)(?:\s+AS\s+(\S+))?(?:\s+LIMIT\s+\d+)?$", RegexOptions.IgnoreCase)
+    Regex(@"^(@@?)(?:SESSION\.|GLOBAL\.)?(\w+)(?:\s+AS\s+(\S+))?(?:\s+LIMIT\s+\d+)?$", RegexOptions.IgnoreCase)
 
-/// `SELECT @@version`, `SELECT @@version AS v, @@sql_mode` etc. Errors with
-/// 1193 ER_UNKNOWN_SYSTEM_VARIABLE (matching real MySQL) if any referenced
-/// variable isn't known, instead of silently returning an empty string.
+/// Resolves one `@@name`/`@name` reference to its current value. A system
+/// variable (`@@`) is looked up in `Session.Variables`; a user variable
+/// (`@`) in `Session.UserVariables`, where "never `SET`" and "`SET` to
+/// NULL" both collapse to `None` via `Option.flatten` — real MySQL reads
+/// both back as NULL, and callers here don't need to tell them apart.
+let private resolveAtRef (session: Session) (sigil: string) (name: string) : string option =
+    if sigil = "@@" then
+        lookupVar session name
+    else
+        session.UserVariables |> Map.tryFind (name.ToLowerInvariant()) |> Option.flatten
+
+/// `SELECT @@version`, `SELECT @foo`, `SELECT @@version AS v, @foo` etc.
+/// A referenced *system* variable that isn't known is a loud 1193
+/// ER_UNKNOWN_SYSTEM_VARIABLE, matching real MySQL — but a *user* variable
+/// is never "unknown" in real MySQL (any `@name` is legal); one that was
+/// never `SET` just reads back as NULL, same as `resolveAtRef` above
+/// already gives an unset one.
 let private handleAtVarSelect (session: Session) (sql: string) : QueryResult =
     let exprs = sql.Substring("SELECT".Length).Trim()
     let items = exprs.Split(',') |> Array.map (fun s -> s.Trim())
     let parsed = items |> Array.map atVarItem.Match
 
     if parsed |> Array.forall (fun m -> m.Success) then
-        let unknown =
+        let unknownSysVar =
             parsed
-            |> Array.tryFind (fun m -> lookupVar session m.Groups.[1].Value |> Option.isNone)
+            |> Array.tryFind (fun m -> m.Groups.[1].Value = "@@" && lookupVar session m.Groups.[2].Value |> Option.isNone)
 
-        match unknown with
-        | Some m -> Err(1193, sprintf "Unknown system variable '%s'" m.Groups.[1].Value)
+        match unknownSysVar with
+        | Some m -> Err(1193, sprintf "Unknown system variable '%s'" m.Groups.[2].Value)
         | None ->
             let cols =
                 parsed
                 |> Array.map (fun m ->
-                    if m.Groups.[2].Success then
-                        m.Groups.[2].Value
+                    if m.Groups.[3].Success then
+                        m.Groups.[3].Value
                     else
-                        "@@" + m.Groups.[1].Value)
+                        m.Groups.[1].Value + m.Groups.[2].Value)
                 |> Array.toList
 
             let vals =
                 parsed
-                |> Array.map (fun m -> lookupVar session m.Groups.[1].Value)
+                |> Array.map (fun m -> resolveAtRef session m.Groups.[1].Value m.Groups.[2].Value)
                 |> Array.toList
 
             ResultSet(cols, [ vals ])
@@ -271,10 +288,14 @@ let private setNames = Regex(@"^NAMES\s+'?(\w+)'?", RegexOptions.IgnoreCase)
 let private setVar =
     Regex(@"^(?:SESSION\s+|GLOBAL\s+|@@(?:SESSION\.|GLOBAL\.)?)?(\w+)\s*=\s*(.+)$", RegexOptions.IgnoreCase)
 
+/// `SET @name = ...` — a user-defined variable assignment, distinct from
+/// `setVar`'s system-variable form (bare `\w+`, or `@@`-prefixed): real
+/// MySQL never validates a user variable's name, so this always succeeds
+/// where `setVar` would otherwise report it "unknown".
+let private setUserVar = Regex(@"^@(\w+)\s*=\s*(.+)$", RegexOptions.IgnoreCase)
+
 /// Best-effort name extraction for the "this looks like an assignment but
-/// `setVar` didn't match it" error below — `\S+` rather than `\w+` so it
-/// also captures the `@name` a user-defined variable assignment
-/// (`SET @foo = 1`) uses, which `setVar` deliberately doesn't match.
+/// neither `setVar` nor `setUserVar` matched it" error below.
 let private setVarNameForError = Regex(@"^(?:SESSION\s+|GLOBAL\s+)?(\S+?)\s*=", RegexOptions.IgnoreCase)
 
 let private unquote (v: string) =
@@ -284,6 +305,23 @@ let private unquote (v: string) =
         v.Substring(1, v.Length - 2)
     else
         v
+
+/// Resolves a `SET` fragment's right-hand side: a bare `@@sysvar`/`@uservar`
+/// reference reads that variable's current value (via `resolveAtRef`,
+/// shared with `SELECT @@x`/`SELECT @x`), matching real MySQL's
+/// `SET x = @@y` / `SET x = @y` — the mysqldump preamble/postamble idiom of
+/// saving a setting into a user variable and restoring it later
+/// (`SET @OLD_SQL_MODE=@@SQL_MODE` ... `SET SQL_MODE=@OLD_SQL_MODE`) needs
+/// exactly this, not full expression evaluation. Anything else is a
+/// literal, unquoted as before.
+let private resolveSetRhs (session: Session) (rhs: string) : string option =
+    let rhs = rhs.Trim()
+    let m = atVarItem.Match rhs
+
+    if m.Success then
+        resolveAtRef session m.Groups.[1].Value m.Groups.[2].Value
+    else
+        Some(unquote rhs)
 
 /// Whether a `sql_mode` value (comma-separated, as stored in
 /// `Session.Variables`) still contains STRICT_TRANS_TABLES/STRICT_ALL_TABLES
@@ -345,24 +383,40 @@ let private splitSetAssignments (sql: string) : string list =
 type private SetAction =
     | SetNamesAction of charset: string
     | SetVarAction of name: string * value: string
+    | SetUserVarAction of name: string * value: string option
 
 /// Parses one comma-split fragment into the variable(s) it would assign,
 /// without touching `session`/`Store` — `handleSet` only applies any of
-/// these once every fragment in the statement has parsed.
-let private parseSetFragment (sql: string) (fragment: string) : Result<SetAction, QueryResult> =
+/// these once every fragment in the statement has parsed. Reads `session`
+/// only to resolve a `@@x`/`@y` right-hand side (`resolveSetRhs`) against
+/// its state *before* this `SET` statement — a later fragment in the same
+/// multi-assignment doesn't see an earlier fragment's not-yet-applied
+/// write, consistent with the whole statement being all-or-nothing below.
+let private parseSetFragment (sql: string) (session: Session) (fragment: string) : Result<SetAction, QueryResult> =
     let namesMatch = setNames.Match fragment
 
     if namesMatch.Success then
         Ok(SetNamesAction namesMatch.Groups.[1].Value)
     else
-        let varMatch = setVar.Match fragment
+        let userVarMatch = setUserVar.Match fragment
 
-        if varMatch.Success then
-            Ok(SetVarAction(varMatch.Groups.[1].Value.ToLowerInvariant(), unquote varMatch.Groups.[2].Value))
+        if userVarMatch.Success then
+            Ok(
+                SetUserVarAction(
+                    userVarMatch.Groups.[1].Value.ToLowerInvariant(),
+                    resolveSetRhs session userVarMatch.Groups.[2].Value
+                )
+            )
         else
-            match setVarNameForError.Match fragment with
-            | m when m.Success -> Error(Err(1193, sprintf "Unknown system variable '%s'" m.Groups.[1].Value))
-            | _ -> Error(syntaxError sql)
+            let varMatch = setVar.Match fragment
+
+            if varMatch.Success then
+                let value = resolveSetRhs session varMatch.Groups.[2].Value |> Option.defaultValue ""
+                Ok(SetVarAction(varMatch.Groups.[1].Value.ToLowerInvariant(), value))
+            else
+                match setVarNameForError.Match fragment with
+                | m when m.Success -> Error(Err(1193, sprintf "Unknown system variable '%s'" m.Groups.[1].Value))
+                | _ -> Error(syntaxError sql)
 
 /// Applies one already-parsed `SetAction` to `session`, including the
 /// `Store`-level side effects (`setForeignKeyChecks`/`setStrictMode`)
@@ -384,20 +438,20 @@ let private applySetAction (session: Session) (action: SetAction) : Session =
             setStrictMode session.Store (isStrictSqlMode value)
 
         { session with Variables = Map.add name value session.Variables }
+    | SetUserVarAction(name, value) -> { session with UserVariables = Map.add name value session.UserVariables }
 
-/// `SET NAMES x` and `SET [SESSION|@@session.]var = value` update
-/// Session.Variables so a later SELECT @@var / SHOW VARIABLES reflects them,
-/// one comma-split assignment at a time (`splitSetAssignments`). Two-phase:
-/// every fragment is parsed first (`parseSetFragment`), and only if *all* of
-/// them parse does any of them apply (`applySetAction`) — the first
-/// assignment recognizably shaped like one but not matched by `setVar`
-/// (`SET @user_var = 1` — user-defined variables aren't a session variable
-/// this server tracks; `Session.Variables`/`setVar` are both
-/// system-variable-shaped) aborts the whole statement with a loud 1193 and
-/// no partial effect, same as real MySQL abandoning a multi-assignment `SET`
-/// on its first bad name without acting on the assignments before it.
+/// `SET NAMES x`, `SET [SESSION|@@session.]var = value`, and `SET @var =
+/// value` update `Session.Variables`/`Session.UserVariables` so a later
+/// `SELECT @@var`/`SELECT @var`/`SHOW VARIABLES` reflects them, one
+/// comma-split assignment at a time (`splitSetAssignments`). Two-phase:
+/// every fragment is parsed first (`parseSetFragment`), and only if *all*
+/// of them parse does any of them apply (`applySetAction`) — an assignment
+/// recognizably shaped like one but matched by neither `setVar` nor
+/// `setUserVar` aborts the whole statement with a loud 1193 and no partial
+/// effect, same as real MySQL abandoning a multi-assignment `SET` on its
+/// first bad name without acting on the assignments before it.
 let private handleSet (session: Session) (sql: string) : Session * QueryResult =
-    match splitSetAssignments sql |> traverse (parseSetFragment sql) with
+    match splitSetAssignments sql |> traverse (parseSetFragment sql session) with
     | Error result -> session, result
     | Ok actions -> (actions |> List.fold applySetAction session), Affected 0UL
 
@@ -569,13 +623,13 @@ let private registryFor (session: Session) : Functions.Registry =
     |> Functions.registerScalar "USER" (fun _ -> VString "fsdb@localhost")
 
 /// Parses and executes anything that isn't one of the text-probe special
-/// cases above. A parse failure that also looks like a `SELECT @@...` falls
-/// back to the `@@`-probe path — tried only *after* the real parser, so a
-/// query that merely contains the text `@@` somewhere (inside a string
-/// literal, e.g. `WHERE email = 'a@@b.com'`) parses normally instead of
-/// being hijacked into the probe path and rejected. Anything else is a 1064
-/// syntax error with SQLSTATE 42000 (the mapping `errPayload` already has
-/// for that code).
+/// cases above. A parse failure that also looks like a `SELECT @@...`/
+/// `SELECT @...` falls back to the `@`-probe path — tried only *after* the
+/// real parser, so a query that merely contains the text `@` somewhere
+/// (inside a string literal, e.g. `WHERE email = 'a@b.com'`) parses
+/// normally instead of being hijacked into the probe path and rejected.
+/// Anything else is a 1064 syntax error with SQLSTATE 42000 (the mapping
+/// `errPayload` already has for that code).
 let private executeStatement (session: Session) (sql: string) (upper: string) : Session * QueryResult =
     match Parser.parse sql with
     | Result.Ok stmt ->
@@ -614,7 +668,7 @@ let private executeStatement (session: Session) (sql: string) (upper: string) : 
             LastInsertId = lastInsertId
             LastResultColumnTypes = columnTypes },
         result
-    | Result.Error _ when upper.StartsWith "SELECT" && upper.Contains "@@" ->
+    | Result.Error _ when upper.StartsWith "SELECT" && upper.Contains "@" ->
         { session with LastResultColumnTypes = [] }, handleAtVarSelect session sql
     | Result.Error _ -> { session with LastResultColumnTypes = [] }, syntaxError sql
 
@@ -769,21 +823,30 @@ let prepareStatement (sql: string) : Result<int, int * string> =
             | _ -> Result.Error(1064, "syntax error")
 
 let private dispatch (session: Session) (rawSql: string) : Session * QueryResult =
-    let sql = rawSql.Trim().TrimEnd(';').Trim()
-    let upper = sql.ToUpperInvariant()
+    let sql = (Parser.stripVersionComments rawSql).Trim().TrimEnd(';').Trim()
 
-    match tryProbe sql upper with
-    | Some probe ->
-        // Every probe-handled form (SHOW/SET/session-variable SELECT/...)
-        // is its own small synthetic `ResultSet` of plain strings — none of
-        // them go through `executeStatement`'s typed path, so clear
-        // whatever `LastResultColumnTypes` a previous statement on this
-        // session left behind rather than risk it surviving (via `Server`'s
-        // VAR_STRING-length-mismatch fallback, a same-column-count
-        // coincidence is all it'd take) onto an unrelated resultset.
-        let session, result = runProbe session sql probe
-        { session with LastResultColumnTypes = [] }, result
-    | None -> executeStatement session sql upper
+    // A mysqldump preamble/postamble is a run of `/*!NNNNN ... */;` lines;
+    // once the version comment above strips down to nothing (or this was a
+    // plain `/* ... */`/`-- ...` comment to begin with), what's left is a
+    // no-op, same as real MySQL's `Query OK, 0 rows affected` for it —
+    // not a syntax error.
+    if Parser.isBlank sql then
+        session, Affected 0UL
+    else
+        let upper = sql.ToUpperInvariant()
+
+        match tryProbe sql upper with
+        | Some probe ->
+            // Every probe-handled form (SHOW/SET/session-variable SELECT/...)
+            // is its own small synthetic `ResultSet` of plain strings — none of
+            // them go through `executeStatement`'s typed path, so clear
+            // whatever `LastResultColumnTypes` a previous statement on this
+            // session left behind rather than risk it surviving (via `Server`'s
+            // VAR_STRING-length-mismatch fallback, a same-column-count
+            // coincidence is all it'd take) onto an unrelated resultset.
+            let session, result = runProbe session sql probe
+            { session with LastResultColumnTypes = [] }, result
+        | None -> executeStatement session sql upper
 
 /// No SQL engine failure should ever escape as a raw .NET exception — the
 /// only two paths into `dispatch` (the parser, well guarded, and

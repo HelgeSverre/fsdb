@@ -23,6 +23,14 @@ let defaultVariables: Map<string, string> =
           "system_time_zone", "UTC"
           "time_zone", "SYSTEM"
           "auto_increment_increment", "1"
+          // mysqldump's preamble reads these three before ever `SET`-ing
+          // anything (`SET @OLD_FOREIGN_KEY_CHECKS=@@FOREIGN_KEY_CHECKS`,
+          // same for unique_checks/sql_notes) — real defaults, so a fresh
+          // session already knows them instead of only picking them up
+          // once something sets them.
+          "foreign_key_checks", "1"
+          "unique_checks", "1"
+          "sql_notes", "1"
           "transaction_isolation", "REPEATABLE-READ"
           "lower_case_table_names", "0"
           "have_ssl", "DISABLED"
@@ -84,6 +92,15 @@ type Session =
     { ConnectionId: int
       Database: string option
       Variables: Map<string, string>
+      /// `SET @name = ...` user-defined variables — unlike `Variables`
+      /// (real, known system variables), any `@name` is legal in real
+      /// MySQL, so there's no default set and no "unknown variable" error
+      /// path for these. `string option` per value (not just `string`)
+      /// distinguishes "SET to NULL" from the map lookup itself already
+      /// telling `None` apart from `Some` — both mean "reads back as
+      /// NULL", so callers reading a value back collapse the two with
+      /// `Option.flatten` rather than needing to branch on which.
+      UserVariables: Map<string, string option>
       /// The single shared catalog every connection reads/writes through —
       /// `Session` itself stays an immutable per-connection value; `Store`
       /// is the one mutable boundary (see `Storage.Store`). Always the
@@ -130,6 +147,7 @@ let create (connectionId: int) (store: Store) : Session =
     { ConnectionId = connectionId
       Database = None
       Variables = defaultVariables
+      UserVariables = Map.empty
       Store = store
       LastInsertId = 0L
       LastResultColumnTypes = []
