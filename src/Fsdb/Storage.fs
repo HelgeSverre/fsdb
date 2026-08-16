@@ -394,16 +394,26 @@ let coerceValue (strict: bool) (col: ColumnDef) (v: Value) : Result<Value, Stora
                 | Some d -> Ok(VDouble d)
                 | None -> numericFallback (fun () -> VDouble 0.0)
             | _ -> numericFallback (fun () -> VDouble 0.0)
-        | TDecimal _ ->
+        | TDecimal(_, scale) ->
+            // MySQL pads/rounds every stored value to the column's declared
+            // scale (`DECIMAL(10,2)` stores `100` as `100.00`), and later
+            // reads it back at that same scale — `.NET`'s `decimal` carries
+            // its own scale, but round-tripping through `Math.Round` alone
+            // doesn't widen it (`Math.Round(100m, 2)` is still `100`, not
+            // `100.00`), so go through a fixed-point string format instead,
+            // which both rounds and pads in one step.
+            let rescale (d: decimal) =
+                Decimal.Parse(d.ToString("F" + string scale, CultureInfo.InvariantCulture), CultureInfo.InvariantCulture)
+
             match v with
-            | VDecimal d -> Ok(VDecimal d)
-            | VInt i -> Ok(VDecimal(decimal i))
-            | VDouble d -> Ok(VDecimal(decimal d))
+            | VDecimal d -> Ok(VDecimal(rescale d))
+            | VInt i -> Ok(VDecimal(rescale (decimal i)))
+            | VDouble d -> Ok(VDecimal(rescale (decimal d)))
             | VString s ->
                 match parseNumeric s with
-                | Some d -> Ok(VDecimal(decimal d))
-                | None -> numericFallback (fun () -> VDecimal 0M)
-            | _ -> numericFallback (fun () -> VDecimal 0M)
+                | Some d -> Ok(VDecimal(rescale (decimal d)))
+                | None -> numericFallback (fun () -> VDecimal(rescale 0M))
+            | _ -> numericFallback (fun () -> VDecimal(rescale 0M))
         | TChar _
         | TVarchar _
         | TTinyText

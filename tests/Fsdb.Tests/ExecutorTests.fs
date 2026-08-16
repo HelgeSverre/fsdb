@@ -113,6 +113,16 @@ let tests =
                     | ResultSet(_, rows) -> Expect.equal rows [ [ Some "2" ]; [ Some "3" ] ] "page of two starting at offset 1"
                     | other -> failtestf "expected a resultset, got %A" other
 
+                testCase "a whole-number INSERT into a DECIMAL column is padded to its declared scale on read"
+                <| fun _ ->
+                    let store = newStore ()
+                    runDefault store "CREATE TABLE t (price DECIMAL(10,2))" |> ignore
+                    runDefault store "INSERT INTO t VALUES (100), (49.999)" |> ignore
+
+                    match runDefault store "SELECT price FROM t ORDER BY price" with
+                    | ResultSet(_, rows) -> Expect.equal rows [ [ Some "50.00" ]; [ Some "100.00" ] ] "both rows carry the column's 2-digit scale"
+                    | other -> failtestf "expected a resultset, got %A" other
+
                 testCase "SELECT * with no FROM is a 1096 error, not a 0-column resultset"
                 <| fun _ ->
                     let store = newStore ()
@@ -1099,12 +1109,13 @@ let tests =
                 <| fun _ ->
                     // Oracle: CAST('1e3' AS SIGNED) = 1 (string-to-integer
                     // conversion stops at the first non-digit); CAST('1e3' AS
-                    // DECIMAL(10,2)) = 1000 (the float grammar applies).
+                    // DECIMAL(10,2)) = 1000.00 (the float grammar applies,
+                    // then the result is padded to the target's declared scale).
                     let store = newStore ()
 
                     match runDefault store "SELECT CAST('1e3' AS SIGNED), CAST('1e3' AS DECIMAL(10,2))" with
-                    | ResultSet(_, [ [ Some "1"; Some "1000" ] ]) -> ()
-                    | other -> failtestf "expected 1, 1000, got %A" other
+                    | ResultSet(_, [ [ Some "1"; Some "1000.00" ] ]) -> ()
+                    | other -> failtestf "expected 1, 1000.00, got %A" other
 
                 testCase "ENUM column accepts a listed value and rejects one outside the set"
                 <| fun _ ->
