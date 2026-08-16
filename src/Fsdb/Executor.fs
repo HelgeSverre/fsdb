@@ -33,15 +33,20 @@ let private storageErr (e: StorageError) : QueryResult =
     let code, message = toMySqlError e
     Err(code, message)
 
-/// The leading numeric run of `s` (optional sign, digits, optional
-/// fraction/exponent), the way MySQL's numeric `CAST`/implicit string-to-
-/// number conversion reads a string — `"12abc"` yields `Some "12"`, `"abc"`
-/// yields `None`. Unlike `Storage.coerceValue`'s `parseNumeric`, which
-/// requires the *whole* trimmed string to parse.
-let private leadingNumericPrefixRegex = Regex(@"^\s*[+-]?(\d+\.?\d*|\.\d+)([eE][+-]?\d+)?")
+/// The leading numeric run of `s`, the way MySQL's numeric `CAST`/implicit
+/// string-to-number conversion reads a string — `"12abc"` yields
+/// `Some "12"`, `"abc"` yields `None`. Unlike `Storage.coerceValue`'s
+/// `parseNumeric`, which requires the *whole* trimmed string to parse. An
+/// integer target reads only an optional sign and digits and stops there —
+/// `CAST('1e3' AS SIGNED)` is `1` in MySQL, not `1000` — while a
+/// DECIMAL/float target also honors a fraction and exponent
+/// (`CAST('1e3' AS DECIMAL(10,2))` is `1000`), so the two targets need
+/// different grammars rather than one regex serving both.
+let private leadingIntegerPrefixRegex = Regex(@"^\s*[+-]?\d+")
+let private leadingFloatPrefixRegex = Regex(@"^\s*[+-]?(\d+\.?\d*|\.\d+)([eE][+-]?\d+)?")
 
-let private leadingNumericPrefix (s: string) : string option =
-    let m = leadingNumericPrefixRegex.Match s
+let private leadingNumericPrefix (regex: Regex) (s: string) : string option =
+    let m = regex.Match s
     if m.Success && m.Value.Trim() <> "" then Some(m.Value.Trim()) else None
 
 /// Column name (case-insensitive) to *every* index it resolves to in a row
@@ -597,8 +602,10 @@ let rec private evalExpr (ctx: EvalContext) (expr: Expr) : Result<Value, EvalErr
 
             let v =
                 match v, ty with
-                | VString s, (TTinyInt _ | TSmallInt _ | TMediumInt _ | TInt _ | TBigInt _ | TYear | TDouble | TFloat | TDecimal _) ->
-                    VString(leadingNumericPrefix s |> Option.defaultValue "")
+                | VString s, (TTinyInt _ | TSmallInt _ | TMediumInt _ | TInt _ | TBigInt _ | TYear) ->
+                    VString(leadingNumericPrefix leadingIntegerPrefixRegex s |> Option.defaultValue "")
+                | VString s, (TDouble | TFloat | TDecimal _) ->
+                    VString(leadingNumericPrefix leadingFloatPrefixRegex s |> Option.defaultValue "")
                 | _ -> v
 
             match Storage.coerceValue false castCol v with

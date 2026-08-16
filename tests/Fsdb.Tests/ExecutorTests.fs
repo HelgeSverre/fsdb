@@ -1032,6 +1032,17 @@ let tests =
                     | ResultSet(_, [ [ Some "0"; Some "12"; None ] ]) -> ()
                     | other -> failtestf "expected 0, 12, NULL, got %A" other
 
+                testCase "CAST(x AS SIGNED) stops at the exponent, unlike a DECIMAL/float target"
+                <| fun _ ->
+                    // Oracle: CAST('1e3' AS SIGNED) = 1 (string-to-integer
+                    // conversion stops at the first non-digit); CAST('1e3' AS
+                    // DECIMAL(10,2)) = 1000 (the float grammar applies).
+                    let store = newStore ()
+
+                    match runDefault store "SELECT CAST('1e3' AS SIGNED), CAST('1e3' AS DECIMAL(10,2))" with
+                    | ResultSet(_, [ [ Some "1"; Some "1000" ] ]) -> ()
+                    | other -> failtestf "expected 1, 1000, got %A" other
+
                 testCase "ENUM column accepts a listed value and rejects one outside the set"
                 <| fun _ ->
                     let store = newStore ()
