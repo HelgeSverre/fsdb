@@ -21,9 +21,26 @@ dotnet run --project src/Fsdb        # listens on 127.0.0.1:3307
 mysql --protocol=tcp -h127.0.0.1 -P3307 -e 'SELECT 1'
 ```
 
-Flags: `--port N`, `--listen <ip|localhost>`, and `--data-dir PATH` for opt-in
-durability (WAL + snapshots, replayed on startup; without it fsdb is pure
-in-memory).
+```
+USAGE: fsdb [--help] [--port <port>] [--listen <address>] [--data-dir <path>]
+
+OPTIONS:
+
+    --port, -p <port>     port to listen on (default 3307)
+    --listen <address>    IP address to bind, or 'localhost' (default loopback)
+    --data-dir <path>     enable durability: WAL + snapshots stored here,
+                          replayed on startup
+    --help                display this list of options.
+```
+
+Without `--data-dir`, fsdb is pure in-memory.
+
+Install globally (publishes a single binary to `~/.local/bin/fsdb`):
+
+```sh
+just install      # then: fsdb --help
+just uninstall
+```
 
 Or via the [justfile](justfile):
 

@@ -1,28 +1,27 @@
 module Fsdb.Program
 
 open System.Net
+open Argu
 
-let private argValue (name: string) (argv: string[]) : string option =
-    argv
-    |> Array.tryFindIndex ((=) name)
-    |> Option.bind (fun i -> Array.tryItem (i + 1) argv)
+type Arguments =
+    | [<AltCommandLine("-p")>] Port of port: int
+    | Listen of address: string
+    | Data_Dir of path: string
 
-let private parsePort (argv: string[]) : int =
-    argValue "--port" argv
-    |> Option.bind (fun s ->
-        match System.Int32.TryParse s with
-        | true, v -> Some v
-        | false, _ -> None)
-    |> Option.defaultValue 3307
+    interface IArgParserTemplate with
+        member this.Usage =
+            match this with
+            | Port _ -> "port to listen on (default 3307)"
+            | Listen _ -> "IP address to bind, or 'localhost' (default loopback)"
+            | Data_Dir _ -> "enable durability: WAL + snapshots stored here, replayed on startup"
 
-/// `--data-dir PATH` opts into durability — `Db.withDataDir` loads whatever's
-/// already there and keeps writing to it. No flag means pure in-memory.
-let private parseDataDir (argv: string[]) : string option = argValue "--data-dir" argv
+let private parser =
+    ArgumentParser.Create<Arguments>(programName = "fsdb", errorHandler = ProcessExiter())
 
-/// --listen takes an IP address ("0.0.0.0", "::"), with "localhost" as the
-/// one spelled-out convenience. Defaults to loopback.
-let private parseListenAddress (argv: string[]) : IPAddress option =
-    match argValue "--listen" argv with
+/// `--listen` takes an IP address ("0.0.0.0", "::"), with "localhost" as the
+/// one spelled-out convenience.
+let private resolveListenAddress (results: ParseResults<Arguments>) : IPAddress option =
+    match results.TryGetResult Listen with
     | None
     | Some "localhost" -> Some IPAddress.Loopback
     | Some s ->
@@ -32,15 +31,17 @@ let private parseListenAddress (argv: string[]) : IPAddress option =
 
 [<EntryPoint>]
 let main argv =
-    match parseListenAddress argv with
+    let results = parser.Parse argv
+
+    match resolveListenAddress results with
     | None ->
         eprintfn "fsdb: --listen expects an IP address or 'localhost'"
         1
     | Some address ->
-        let port = parsePort argv
+        let port = results.GetResult(Port, defaultValue = 3307)
 
         let db =
-            match parseDataDir argv with
+            match results.TryGetResult Data_Dir with
             | Some dataDir ->
                 printfn "fsdb: durability on, data-dir %s" dataDir
                 Db.create () |> Db.withDataDir dataDir

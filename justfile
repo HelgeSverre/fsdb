@@ -48,6 +48,22 @@ clean:
     dotnet clean -v q
     rm -rf src/Fsdb/bin src/Fsdb/obj tests/Fsdb.Tests/bin tests/Fsdb.Tests/obj
 
+# === Install ===
+
+# Install fsdb globally as a single binary (framework-dependent)
+[group('install')]
+install dest="~/.local/bin":
+    dotnet publish src/Fsdb -c Release -o src/Fsdb/bin/dist -p:PublishSingleFile=true --self-contained false -v q
+    mkdir -p {{ dest }}
+    install -m 0755 src/Fsdb/bin/dist/Fsdb {{ dest }}/fsdb
+    @echo "Installed {{ dest }}/fsdb — try: fsdb --help"
+
+# Remove the globally installed fsdb
+[group('install')]
+uninstall dest="~/.local/bin":
+    rm -f {{ dest }}/fsdb
+    @echo "Removed {{ dest }}/fsdb"
+
 # === Bench ===
 # fsdb vs a native MySQL 8.4, run ad hoc (no brew services / launchd).
 
