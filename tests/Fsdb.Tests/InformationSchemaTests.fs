@@ -156,6 +156,30 @@ let tests =
               | ResultSet(_, [ [ Some "CASCADE"; Some "posts"; Some "users" ] ]) -> ()
               | other -> failtestf "expected the referential constraint row, got %A" other
 
+          testCase "TABLE_CONSTRAINTS has one row per PRIMARY KEY/UNIQUE/FOREIGN KEY, and none for a plain index"
+          <| fun _ ->
+              let store = setup ()
+
+              match
+                  run
+                      store
+                      "SELECT constraint_name, constraint_type FROM information_schema.table_constraints WHERE constraint_schema = 'fsdb' AND table_name = 'posts' ORDER BY constraint_type"
+              with
+              | ResultSet(_, rows) ->
+                  Expect.equal
+                      rows
+                      [ [ Some "posts_user_id_foreign"; Some "FOREIGN KEY" ]; [ Some "PRIMARY"; Some "PRIMARY KEY" ] ]
+                      "posts' PK and FK, nothing else"
+              | other -> failtestf "expected a resultset, got %A" other
+
+              match
+                  run
+                      store
+                      "SELECT EXISTS(SELECT * FROM information_schema.table_constraints WHERE constraint_schema = 'fsdb' AND table_name = 'posts' AND constraint_name = 'posts_user_id_foreign' AND constraint_type = 'FOREIGN KEY') AS `exists`"
+              with
+              | ResultSet(_, [ [ Some "1" ] ]) -> ()
+              | other -> failtestf "expected the exists() probe to find the named foreign key, got %A" other
+
           testCase "SCHEMATA lists every real database plus information_schema itself"
           <| fun _ ->
               let store = setup ()
