@@ -126,6 +126,16 @@ let tests =
                       "primary key and the column-level unique index both show up"
               | other -> failtestf "expected a resultset, got %A" other
 
+          testCase "STATISTICS.sub_part is always NULL — no prefix-length indexes to report"
+          <| fun _ ->
+              // Doctrine DBAL's `selectIndexColumns` (behind Laravel's
+              // `Blueprint::change()`) projects `SUB_PART`.
+              let store = setup ()
+
+              match run store "SELECT sub_part FROM information_schema.statistics WHERE table_schema = 'fsdb' AND table_name = 'users' AND index_name = 'PRIMARY'" with
+              | ResultSet(_, [ [ None ] ]) -> ()
+              | other -> failtestf "expected a single NULL row, got %A" other
+
           testCase "KEY_COLUMN_USAGE and REFERENTIAL_CONSTRAINTS surface the foreign key"
           <| fun _ ->
               let store = setup ()

@@ -273,7 +273,12 @@ let private statisticsColumns =
       strCol "column_name"
       strCol "collation"
       intCol "cardinality"
-      strCol "index_type" ]
+      strCol "index_type"
+      // A prefix index's `(N)` length (`INDEX(col(10))`) — always NULL
+      // (whole-column) since `Ast.IndexDef` doesn't track a prefix length
+      // to begin with. Doctrine DBAL's `selectIndexColumns` (behind
+      // Laravel's `Blueprint::change()`) projects it unconditionally.
+      intCol "sub_part" ]
 
 /// One row per `(index, column)` pair — the primary key surfaces as a
 /// synthesized index literally named `PRIMARY`, same as real MySQL, since
@@ -299,7 +304,8 @@ let private statisticsRows (catalog: Catalog) : Value[] list =
                    vs colName
                    vs "A"
                    vi 0
-                   vs "BTREE" |])))
+                   vs "BTREE"
+                   VNull |])))
 
 let private keyColumnUsageColumns =
     [ strCol "constraint_schema"
