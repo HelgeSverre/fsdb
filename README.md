@@ -21,6 +21,10 @@ dotnet run --project src/Fsdb        # listens on 127.0.0.1:3307
 mysql --protocol=tcp -h127.0.0.1 -P3307 -e 'SELECT 1'
 ```
 
+Flags: `--port N`, `--listen <ip|localhost>`, and `--data-dir PATH` for opt-in
+durability (WAL + snapshots, replayed on startup; without it fsdb is pure
+in-memory).
+
 Or via the [justfile](justfile):
 
 ```sh
@@ -64,11 +68,26 @@ round-trip test (`SLUGIFY`/`MEDIAN`) against a real client over the wire.
 
 ## Status
 
-M1 through M5 are done: wire protocol, PDO/mysql-CLI compatibility, the SQL
-engine core, Laravel migrations, and a 304-test Laravel (Pest) suite running
-against fsdb at exact parity with its sqlite baseline (287 passed, 15
-skipped, 2 todos, 787 assertions on both sides). See [ROADMAP.md](ROADMAP.md)
-for the milestone-by-milestone plan and acceptance gates.
+All eight roadmap milestones are done: wire protocol, PDO/mysql-CLI
+compatibility, the SQL engine core, Laravel migrations, test-suite parity,
+the embedding API, opt-in persistence (`--data-dir`), and EXPLAIN +
+multi-table DML. See [ROADMAP.md](ROADMAP.md) for the milestone plan,
+acceptance gates, and per-milestone evidence.
+
+### Compatibility gauntlet
+
+fsdb is validated by migrating and running the test suites of real Laravel
+applications against it, unmodified. Where a suite diverges from its sqlite
+baseline, the dispute is settled by running the same tests against a real
+MySQL 8.4 — fsdb must match MySQL, not sqlite.
+
+| Application | Laravel | Migrations | Result |
+|---|---|---|---|
+| chatflow | 11 | 94 | full parity, 0 failures |
+| reflow | 11 | 205 | parity; 5 residual failures reproduce identically on real MySQL (app-side factory/collation bugs) |
+| boatflow | 10 | 160 | behavioral equivalence with real MySQL (identical failure set from an app-side factory bug) |
+| crescat-website | 13 | 43 | in progress |
+| crescat | 13 | 487 | pending |
 
 ## Benchmarking
 
