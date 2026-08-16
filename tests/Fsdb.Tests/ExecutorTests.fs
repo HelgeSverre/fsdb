@@ -68,6 +68,41 @@ let tests =
                     | ResultSet(_, rows) -> Expect.equal rows [ [ Some "3" ]; [ Some "2" ]; [ Some "1" ] ] "descending order"
                     | other -> failtestf "expected a resultset, got %A" other
 
+                testCase "ORDER BY an ENUM uses declaration order, including aliases and grouped results"
+                <| fun _ ->
+                    let store = newStore ()
+                    runDefault store "CREATE TABLE memberships (role ENUM('owner','admin','member','viewer'))" |> ignore
+
+                    runDefault store "INSERT INTO memberships VALUES ('viewer'), ('member'), ('admin'), ('owner'), ('member')"
+                    |> ignore
+
+                    match runDefault store "SELECT role AS r FROM memberships ORDER BY r" with
+                    | ResultSet(_, rows) ->
+                        Expect.equal
+                            rows
+                            [ [ Some "owner" ]; [ Some "admin" ]; [ Some "member" ]; [ Some "member" ]; [ Some "viewer" ] ]
+                            "a projection alias retains the ENUM's ordinal sort"
+                    | other -> failtestf "expected an enum resultset, got %A" other
+
+                    match runDefault store "SELECT role, COUNT(*) FROM memberships GROUP BY role ORDER BY role" with
+                    | ResultSet(_, rows) ->
+                        Expect.equal
+                            rows
+                            [ [ Some "owner"; Some "1" ]
+                              [ Some "admin"; Some "1" ]
+                              [ Some "member"; Some "2" ]
+                              [ Some "viewer"; Some "1" ] ]
+                            "grouped ENUM results use declaration order"
+                    | other -> failtestf "expected a grouped enum resultset, got %A" other
+
+                    match runDefault store "SELECT role FROM memberships ORDER BY CAST(role AS CHAR)" with
+                    | ResultSet(_, rows) ->
+                        Expect.equal
+                            rows
+                            [ [ Some "admin" ]; [ Some "member" ]; [ Some "member" ]; [ Some "owner" ]; [ Some "viewer" ] ]
+                            "an explicit character cast remains lexical"
+                    | other -> failtestf "expected a cast-sorted resultset, got %A" other
+
                 testCase "LIMIT with OFFSET pages through rows"
                 <| fun _ ->
                     let store = newStore ()
@@ -1055,6 +1090,28 @@ let tests =
                     match runDefault store "INSERT INTO t VALUES ('bogus')" with
                     | Err(1366, _) -> ()
                     | other -> failtestf "expected a 1366 error for an unlisted enum value, got %A" other
+
+                testCase "hexadecimal literals preserve arbitrary bytes in VARBINARY and BLOB columns"
+                <| fun _ ->
+                    let store = newStore ()
+                    runDefault store "CREATE TABLE t (binary_value VARBINARY(8), blob_value BLOB)" |> ignore
+
+                    match runDefault store "INSERT INTO t VALUES (X'00ff80', x'deadbeef')" with
+                    | Affected 1UL -> ()
+                    | other -> failtestf "expected the binary row to insert, got %A" other
+
+                    match runDefault store "SELECT HEX(binary_value), HEX(blob_value) FROM t" with
+                    | ResultSet(_, [ [ Some "00FF80"; Some "DEADBEEF" ] ]) -> ()
+                    | other -> failtestf "expected exact binary values, got %A" other
+
+                    match scan store defaultDatabase "t" with
+                    | Ok(_, rows) ->
+                        match List.ofSeq rows with
+                        | [ [| VBytes binary; VBytes blob |] ] ->
+                            Expect.equal binary [| 0x00uy; 0xffuy; 0x80uy |] "VARBINARY stored raw bytes"
+                            Expect.equal blob [| 0xdeuy; 0xaduy; 0xbeuy; 0xefuy |] "BLOB stored raw bytes"
+                        | other -> failtestf "expected stored VBytes values, got %A" other
+                    | Error error -> failtestf "expected the binary table to scan, got %A" error
 
                 testCase "SET column accepts any string without validating against the declared set"
                 <| fun _ ->

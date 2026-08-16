@@ -460,6 +460,27 @@ let tests =
                         ))
                         "double-quoted strings"
 
+                testCase "quoted hexadecimal literals parse as raw bytes, case-insensitively"
+                <| fun _ ->
+                    Expect.equal
+                        (parseOk "SELECT X'00ffA5', x''")
+                        (mkSelect(
+                            [ Lit(VBytes [| 0x00uy; 0xffuy; 0xa5uy |]), None
+                              Lit(VBytes [||]), None ],
+                            None,
+                            None,
+                            [],
+                            None,
+                            None
+                        ))
+                        "hex bytes"
+
+                testCase "quoted hexadecimal literals require byte-aligned digits"
+                <| fun _ ->
+                    match Fsdb.Parser.parse "SELECT X'abc'" with
+                    | Ok statement -> failtestf "expected an error, got %A" statement
+                    | Error error -> Expect.stringContains error "even number" "actionable malformed-literal error"
+
                 testCase "backtick-quoted identifier, including a reserved word and a doubled backtick"
                 <| fun _ ->
                     Expect.equal

@@ -106,6 +106,44 @@ let tests =
               }
               |> Async.RunSynchronously
 
+          testCase "BLOB and VARBINARY bytes survive a real MySqlConnector round-trip"
+          <| fun _ ->
+              async {
+                  let listener = Fsdb.Server.startListening System.Net.IPAddress.Loopback 0
+                  let port = Fsdb.Server.port listener
+                  Fsdb.Server.serve listener (Fsdb.Storage.create ()) Fsdb.Functions.empty |> Async.StartAsTask |> ignore
+
+                  try
+                      let connStr =
+                          sprintf
+                              "Server=127.0.0.1;Port=%d;User ID=root;Password=;AllowPublicKeyRetrieval=True;SslMode=None"
+                              port
+
+                      use conn = new MySqlConnector.MySqlConnection(connStr)
+                      do! conn.OpenAsync() |> Async.AwaitTask
+
+                      use create = conn.CreateCommand()
+                      create.CommandText <- "CREATE TABLE binary_values (fixed VARBINARY(8), payload BLOB)"
+                      do! create.ExecuteNonQueryAsync() |> Async.AwaitTask |> Async.Ignore
+
+                      use insert = conn.CreateCommand()
+                      insert.CommandText <- "INSERT INTO binary_values VALUES (X'00ff80', X'deadbeef')"
+                      do! insert.ExecuteNonQueryAsync() |> Async.AwaitTask |> Async.Ignore
+
+                      use select = conn.CreateCommand()
+                      select.CommandText <- "SELECT fixed, payload FROM binary_values"
+                      use! reader = select.ExecuteReaderAsync() |> Async.AwaitTask
+                      let! hasRow = reader.ReadAsync() |> Async.AwaitTask
+                      Expect.isTrue hasRow "binary row present"
+                      Expect.equal (reader.GetFieldValue<byte[]>(0)) [| 0x00uy; 0xffuy; 0x80uy |] "VARBINARY bytes"
+                      Expect.equal (reader.GetFieldValue<byte[]>(1)) [| 0xdeuy; 0xaduy; 0xbeuy; 0xefuy |] "BLOB bytes"
+                      do! reader.CloseAsync() |> Async.AwaitTask
+                      do! conn.CloseAsync() |> Async.AwaitTask
+                  finally
+                      listener.Stop()
+              }
+              |> Async.RunSynchronously
+
           // Forces the binary COM_STMT_PREPARE/COM_STMT_EXECUTE path via
           // MySqlCommand.Prepare() (MySqlConnector otherwise inlines
           // parameters as literal text over COM_QUERY) — the only way this

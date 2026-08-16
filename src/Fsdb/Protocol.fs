@@ -40,6 +40,14 @@ let ServerVersion = "8.0.36-fsdb"
 /// utf8mb4_general_ci, used both as the handshake charset id and column charset.
 let Utf8Mb4GeneralCi = 45
 
+/// MySQL's `binary` pseudo-collation id. BLOB/VARBINARY result columns must
+/// advertise this rather than a UTF-8 collation or clients are entitled to
+/// decode arbitrary bytes as text (and replace invalid sequences).
+let BinaryCollation = 63
+
+let private BlobFlag = 0x0010
+let private BinaryFlag = 0x0080
+
 /// SERVER_STATUS_IN_TRANS
 let StatusInTrans = 0x0001
 
@@ -197,10 +205,11 @@ let columnDefPayload (col: ColumnDef) : byte[] =
     w.WriteLenEncString col.Name
     w.WriteLenEncString col.Name // org_name
     w.WriteLenEncInt 0x0cUL // length of fixed-length fields
-    w.WriteInt16LE Utf8Mb4GeneralCi
+    let isBinary = col.Type = TypeBlob
+    w.WriteInt16LE(if isBinary then BinaryCollation else Utf8Mb4GeneralCi)
     w.WriteInt32LE 0 // column length
     w.WriteByte col.Type
-    w.WriteInt16LE 0 // flags
+    w.WriteInt16LE(if isBinary then BlobFlag ||| BinaryFlag else 0)
     w.WriteByte 0uy // decimals
     w.WriteInt16LE 0 // filler
     w.ToArray()
@@ -223,6 +232,12 @@ let wireTypeOfColumnType (ty: Ast.ColumnType) : byte =
     | Ast.TDate -> TypeDate
     | Ast.TDateTime
     | Ast.TTimestamp -> TypeDateTime
+    | Ast.TBinary _
+    | Ast.TVarBinary _
+    | Ast.TTinyBlob
+    | Ast.TBlob
+    | Ast.TMediumBlob
+    | Ast.TLongBlob -> TypeBlob
     | _ -> TypeVarString
 
 /// Encodes one text-protocol row. None means SQL NULL.
@@ -233,6 +248,22 @@ let textRowPayload (values: string option list) : byte[] =
         match v with
         | None -> w.WriteLenEncNull()
         | Some s -> w.WriteLenEncString s
+
+    w.ToArray()
+
+/// Text-protocol row encoding with the advertised column types available.
+/// `Executor.QueryResult` represents VBytes losslessly as a Latin-1 string;
+/// turn that carrier back into its original bytes for binary columns rather
+/// than UTF-8-encoding it and changing every byte above 0x7f.
+let textRowPayloadTyped (columnTypes: byte list) (values: string option list) : byte[] =
+    let w = Writer()
+
+    List.zip columnTypes values
+    |> List.iter (fun (typeId, value) ->
+        match value with
+        | None -> w.WriteLenEncNull()
+        | Some s when typeId = TypeBlob -> w.WriteLenEncBytes(Encoding.Latin1.GetBytes s)
+        | Some s -> w.WriteLenEncString s)
 
     w.ToArray()
 
@@ -270,6 +301,8 @@ let private writeBinaryValue (w: Writer) (typeId: byte) (s: string) : unit =
         w.WriteByte(byte dt.Hour)
         w.WriteByte(byte dt.Minute)
         w.WriteByte(byte dt.Second)
+    elif typeId = TypeBlob then
+        w.WriteLenEncBytes(Encoding.Latin1.GetBytes s)
     else
         w.WriteLenEncString s
 
@@ -401,6 +434,11 @@ let readBinaryValue (r: Reader) (typeId: byte) (unsigned: bool) : Value =
         | None -> ""
         | Some len -> Encoding.UTF8.GetString(r.ReadBytes(int len))
 
+    let lenEncBytes () =
+        match r.ReadLenEncInt() with
+        | None -> [||]
+        | Some len -> r.ReadBytes(int len)
+
     if typeId = TypeTiny then
         let b = r.ReadByte()
         VInt(if unsigned then int64 b else int64 (sbyte b))
@@ -426,9 +464,10 @@ let readBinaryValue (r: Reader) (typeId: byte) (unsigned: bool) : Value =
         || typeId = TypeVarchar
         || typeId = TypeVarString
         || typeId = TypeString
-        || typeId = TypeBlob
     then
         VString(lenEncText ())
+    elif typeId = TypeBlob then
+        VBytes(lenEncBytes ())
     elif typeId = TypeDate then
         VDate(DateOnly.FromDateTime(readBinaryDateTime r))
     elif typeId = TypeDateTime || typeId = TypeTimestamp then

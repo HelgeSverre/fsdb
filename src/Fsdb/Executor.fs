@@ -397,6 +397,50 @@ let rec private resolveQualifiedCol (ctx: EvalContext) (table: string) (col: str
         | Some parent -> resolveQualifiedCol parent table col
         | None -> Error(unknownColumn (sprintf "%s.%s" table col))
 
+/// Finds the declared column occupying one flattened row position. A JOIN
+/// can expose the same physical range under more than one qualifier, but
+/// every matching range carries the same ColumnDef, so the first is enough.
+let private tryColumnDefAt (ctx: EvalContext) (index: int) : ColumnDef option =
+    ctx.Qualifiers
+    |> Map.toSeq
+    |> Seq.tryPick (fun (_, (columns, offset)) ->
+        let relative = index - offset
+        if relative >= 0 && relative < columns.Length then Some columns.[relative] else None)
+
+/// Recovers the declared column behind a bare/qualified expression without
+/// changing expression evaluation itself. This type context is needed only
+/// by ORDER BY: ENUM values are stored as their labels for display and
+/// equality, but MySQL sorts them by declaration ordinal.
+let rec private tryColumnDefForExpr (ctx: EvalContext) (expr: Expr) : ColumnDef option =
+    match expr with
+    | Col name ->
+        match Map.tryFind (name.ToLowerInvariant()) ctx.ColumnIndex with
+        | Some [ index ] -> tryColumnDefAt ctx index
+        | Some(_ :: _ :: _)
+        | Some [] -> None
+        | None -> ctx.Outer |> Option.bind (fun outer -> tryColumnDefForExpr outer expr)
+    | QualifiedCol(table, col) ->
+        match Map.tryFind (table.ToLowerInvariant()) ctx.Qualifiers with
+        | Some(columns, _) ->
+            columns
+            |> List.tryFind (fun column ->
+                System.String.Equals(column.Name, col, System.StringComparison.OrdinalIgnoreCase))
+        | None -> ctx.Outer |> Option.bind (fun outer -> tryColumnDefForExpr outer expr)
+    | _ -> None
+
+/// Converts a displayed ENUM label into its 1-based declaration ordinal
+/// for one ORDER BY key. The original row/projection value remains a string;
+/// only the private sort key changes. Invalid labels cannot normally reach
+/// storage, but ordinal 0 mirrors MySQL's sentinel ordering if one does.
+let private orderValueForExpr (ctx: EvalContext) (expr: Expr) (value: Value) : Value =
+    match tryColumnDefForExpr ctx expr, value with
+    | Some { Type = TEnum declared }, VString label ->
+        declared
+        |> List.tryFindIndex (fun item -> System.String.Equals(item, label, System.StringComparison.OrdinalIgnoreCase))
+        |> Option.map (fun index -> VInt(int64 (index + 1)))
+        |> Option.defaultValue (VInt 0L)
+    | _ -> value
+
 /// `Star(Some qualifier)` (`t.*`) resolution — same shape as
 /// `resolveQualifiedCol`, but hands back every one of that qualifier's own
 /// `(name, value)` pairs instead of a single column, so a `JOIN`'s `t.*`
@@ -636,6 +680,14 @@ let rec private evalExpr (ctx: EvalContext) (expr: Expr) : Result<Value, EvalErr
         | ResultSet(_, []), _, _ -> Ok VNull
         | ResultSet(_, [ _ ]), _, [ row ] -> Ok row.[0]
         | ResultSet(_, _), _, _ -> Error(1242, "Subquery returns more than 1 row")
+
+/// Evaluates an ORDER BY expression and applies the column-type-specific
+/// sort representation. Expressions such as CAST(enum_col AS CHAR) remain
+/// ordinary lexical strings; only a direct ENUM column reference uses its
+/// declaration ordinal, matching MySQL.
+and private evalOrderKey (ctx: EvalContext) (expr: Expr) : Result<Value, EvalError> =
+    let orderCtx = { ctx with Clause = OrderClause }
+    evalExpr orderCtx expr |> Result.map (orderValueForExpr orderCtx expr)
 
 /// Resolves one `TableRef` (a real table, or `information_schema`'s virtual
 /// one) to its columns and rows — the one place both the base `FROM` and
@@ -1110,7 +1162,7 @@ and private evalAggregate
             evalExpr ctx innerExpr
             |> Result.bind (function
                 | VNull -> Ok None
-                | v -> orderKeys |> traverse (fst >> evalExpr ctx) |> Result.map (fun keys -> Some(v, keys)))
+                | v -> orderKeys |> traverse (fst >> evalOrderKey ctx) |> Result.map (fun keys -> Some(v, keys)))
 
         rows
         |> traverse evalRow
@@ -1337,14 +1389,34 @@ and private resolveOrderPosition (projections: Projection list) (expr: Expr) : E
 /// value, more than one is error 1052 "order clause", and zero falls
 /// through to `resolveCol` against the FROM-table columns instead (also
 /// tagged `OrderClause`, not `FieldList`).
-and private resolveOrderKey (ctx: EvalContext) (outputCols: (string * Value) list) (expr: Expr) : Result<Value, EvalError> =
+and private resolveOrderKey
+    (ctx: EvalContext)
+    (projections: Projection list)
+    (outputCols: (string * Value) list)
+    (expr: Expr)
+    : Result<Value, EvalError> =
     match expr with
     | Col name ->
         match outputCols |> List.filter (fun (n, _) -> System.String.Equals(n, name, System.StringComparison.OrdinalIgnoreCase)) with
-        | [ (_, v) ] -> Ok v
+        | [ (_, v) ] ->
+            // An output alias retains its source expression's declared
+            // type for sorting (`SELECT role AS r ... ORDER BY r`). A
+            // computed alias has no direct ENUM column and stays lexical.
+            let sourceExpr =
+                projections
+                |> List.choose (fun (projectionExpr, alias) ->
+                    alias
+                    |> Option.filter (fun aliasName ->
+                        System.String.Equals(aliasName, name, System.StringComparison.OrdinalIgnoreCase))
+                    |> Option.map (fun _ -> projectionExpr))
+                |> function
+                    | [ projectionExpr ] -> projectionExpr
+                    | _ -> expr
+
+            Ok(orderValueForExpr { ctx with Clause = OrderClause } sourceExpr v)
         | _ :: _ :: _ -> Error(1052, sprintf "Column '%s' in order clause is ambiguous" name)
-        | [] -> resolveCol { ctx with Clause = OrderClause } name
-    | e -> evalExpr { ctx with Clause = OrderClause } e
+        | [] -> evalOrderKey ctx (Col name)
+    | e -> evalOrderKey ctx e
 
 /// The `GROUP BY`/aggregate path: `select.GroupBy` (resolved through
 /// `resolvePositionalOrAlias` for positional/alias references first)
@@ -1491,18 +1563,31 @@ and private runGroupedSelect
     // `projectGroup`) rather than the group's raw rows.
     let orderKeysOf (outputCols: (string * Value) list) (groupRows: Value[] list) : Result<Value list, EvalError> =
         let representative = representativeOf groupRows
+        let ctx = ctxFor representative
 
         select.OrderBy
         |> traverse (fun (expr, _) ->
             match resolveOrderPosition select.Projections expr with
             | Col name ->
                 match outputCols |> List.filter (fun (n, _) -> System.String.Equals(n, name, System.StringComparison.OrdinalIgnoreCase)) with
-                | [ (_, v) ] -> Ok v
+                | [ (_, v) ] ->
+                    let sourceExpr =
+                        select.Projections
+                        |> List.choose (fun (projectionExpr, alias) ->
+                            alias
+                            |> Option.filter (fun aliasName ->
+                                System.String.Equals(aliasName, name, System.StringComparison.OrdinalIgnoreCase))
+                            |> Option.map (fun _ -> projectionExpr))
+                        |> function
+                            | [ projectionExpr ] -> projectionExpr
+                            | _ -> Col name
+
+                    Ok(orderValueForExpr { ctx with Clause = OrderClause } sourceExpr v)
                 | _ :: _ :: _ -> Error(1052, sprintf "Column '%s' in order clause is ambiguous" name)
                 | [] ->
                     rewriteAggregates registry ctxFor groupRows (Col name)
-                    |> Result.bind (evalExpr { ctxFor representative with Clause = OrderClause })
-            | e -> rewriteAggregates registry ctxFor groupRows e |> Result.bind (evalExpr { ctxFor representative with Clause = OrderClause }))
+                    |> Result.bind (evalOrderKey ctx)
+            | e -> rewriteAggregates registry ctxFor groupRows e |> Result.bind (evalOrderKey ctx))
 
     // Schema probe: type-checks WHERE/GROUP BY/HAVING/ORDER BY/projections
     // against an all-NULL row first, the same reasoning as `probeRow`'s
@@ -1572,7 +1657,9 @@ and private runGroupedSelect
                         if indexOrdered then
                             kept
                             |> List.sortWith (fun (_, _, ka) (_, _, kb) ->
-                                compareByOrderKeys (groupExprs |> List.map (fun _ -> Asc)) ka kb)
+                                let probeCtx = ctxFor (probeRow columns)
+                                let enumAware keys = List.map2 (orderValueForExpr probeCtx) groupExprs keys
+                                compareByOrderKeys (groupExprs |> List.map (fun _ -> Asc)) (enumAware ka) (enumAware kb))
                         else
                             kept |> List.sortWith (fun (_, ka, _) (_, kb, _) -> compareByOrderKeys (List.map snd select.OrderBy) ka kb)
 
@@ -1640,10 +1727,14 @@ and private runWindowedSelect
             let keyOf (exprs: Expr list) (row: Value[]) : Result<Value list, EvalError> =
                 exprs |> traverse (evalExpr (ctxFor row))
 
+            let orderKeyOf (exprs: Expr list) (row: Value[]) : Result<Value list, EvalError> =
+                exprs |> traverse (evalOrderKey (ctxFor row))
+
             matched
             |> traverse (fun row ->
                 keyOf partitionBy row
-                |> Result.bind (fun partKey -> keyOf (windowOrderBy |> List.map fst) row |> Result.map (fun ordKey -> partKey, ordKey, row)))
+                |> Result.bind (fun partKey ->
+                    orderKeyOf (windowOrderBy |> List.map fst) row |> Result.map (fun ordKey -> partKey, ordKey, row)))
             |> Result.bind (fun keyed ->
                 let partitions =
                     keyed
@@ -1788,7 +1879,8 @@ and private runSelect
     let orderKeys (row: Value[]) : Result<Value list, EvalError> =
         orderBy
         |> traverse (fun (expr, _) ->
-            projectRow row |> Result.bind (fun outputCols -> resolveOrderKey (ctxFor row) outputCols (resolveOrderExpr expr)))
+            projectRow row
+            |> Result.bind (fun outputCols -> resolveOrderKey (ctxFor row) projections outputCols (resolveOrderExpr expr)))
 
     let sortRows (keyed: (Value list * Value[]) list) : (Value list * Value[]) list =
         keyed |> List.sortWith (fun (ka, _) (kb, _) -> compareByOrderKeys (List.map snd orderBy) ka kb)
@@ -1878,7 +1970,7 @@ let private selectMutationTargets
             matched
             |> traverse (fun row ->
                 orderBy
-                |> traverse (fun (e, _) -> evalExpr { ctxFor row with Clause = OrderClause } e)
+                |> traverse (fun (e, _) -> evalOrderKey (ctxFor row) e)
                 |> Result.map (fun keys -> keys, row))
             |> Result.map (fun keyed -> keyed |> List.sortWith (fun (ka, _) (kb, _) -> compareByOrderKeys dirs ka kb) |> List.map snd))
     |> Result.map (fun ordered ->

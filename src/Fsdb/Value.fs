@@ -128,8 +128,8 @@ let mysqlTypeOf (v: Value) : byte =
     | VDouble _ -> TypeDouble
     | VDecimal _ -> TypeNewDecimal
     | VString _
-    | VBytes _
     | VJson _ -> TypeVarString
+    | VBytes _ -> TypeBlob
     | VDate _ -> TypeDate
     | VDateTime _ -> TypeDateTime
 

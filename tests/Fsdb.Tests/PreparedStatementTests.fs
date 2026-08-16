@@ -61,6 +61,16 @@ let tests =
               Expect.equal (valueToSqlLiteral VNull) "NULL" "null literal"
               Expect.equal (valueToSqlLiteral (VInt 42L)) "42" "int literal"
 
+          testCase "valueToSqlLiteral renders raw bytes as a hexadecimal literal"
+          <| fun _ ->
+              let literal = valueToSqlLiteral (VBytes [| 0x00uy; 0xffuy; 0x80uy |])
+              Expect.equal literal "X'00FF80'" "lossless binary literal"
+
+              match Fsdb.Parser.parse ("SELECT " + literal) with
+              | Result.Ok(Select { Projections = [ Lit(VBytes bytes), _ ] }) ->
+                  Expect.equal bytes [| 0x00uy; 0xffuy; 0x80uy |] "prepared substitution round-trip"
+              | other -> failtestf "expected a parsed binary literal, got %A" other
+
           testCase "prepareStatement reports the placeholder count for a valid statement"
           <| fun _ ->
               match prepareStatement "INSERT INTO t (a, b) VALUES (?, ?)" with

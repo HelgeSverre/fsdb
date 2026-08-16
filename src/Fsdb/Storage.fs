@@ -381,15 +381,23 @@ let coerceValue (strict: bool) (col: ColumnDef) (v: Value) : Result<Value, Stora
         | TText
         | TMediumText
         | TLongText
+        | TSet _
+        | TTime
+        | TJson -> Ok(VString(v |> toText |> Option.defaultValue ""))
         | TBinary _
         | TVarBinary _
         | TTinyBlob
         | TBlob
         | TMediumBlob
-        | TLongBlob
-        | TSet _
-        | TTime
-        | TJson -> Ok(VString(v |> toText |> Option.defaultValue ""))
+        | TLongBlob ->
+            match v with
+            | VBytes bytes -> Ok(VBytes bytes)
+            // A character literal assigned to a binary column is encoded
+            // using the connection's effective utf8mb4 character set. Raw
+            // `X'...'` literals already arrive as VBytes and bypass this
+            // conversion, preserving every byte including invalid UTF-8.
+            | VString text -> Ok(VBytes(Text.Encoding.UTF8.GetBytes text))
+            | _ -> Ok(VBytes(v |> toText |> Option.defaultValue "" |> Text.Encoding.UTF8.GetBytes))
         | TEnum values ->
             match v with
             | VString s when values |> List.exists (fun allowed -> String.Equals(allowed, s, StringComparison.OrdinalIgnoreCase)) ->

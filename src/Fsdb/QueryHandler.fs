@@ -139,10 +139,10 @@ let valueToSqlLiteral (v: Value) : string =
     | VInt i -> string i
     | VDouble d -> d.ToString(Globalization.CultureInfo.InvariantCulture)
     | VDecimal d -> d.ToString(Globalization.CultureInfo.InvariantCulture)
+    | VBytes bytes -> "X'" + Convert.ToHexString(bytes) + "'"
     | VDate _
     | VDateTime _
     | VString _
-    | VBytes _
     | VJson _ -> "'" + escapeSqlString (v |> toText |> Option.defaultValue "") + "'"
 
 /// Matches `@@var` (system, optionally `session.`/`global.`-qualified) or

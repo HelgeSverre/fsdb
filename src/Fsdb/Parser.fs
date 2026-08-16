@@ -297,9 +297,26 @@ let private quoted (quote: char) : Parser<Value, unit> =
 
 let private stringLit: Parser<Value, unit> = quoted '\'' <|> quoted '"'
 
+/// MySQL's quoted hexadecimal binary literal (`X'00ff'`, case-insensitive
+/// on the introducer). The introducer and opening quote are attempted as a
+/// unit so an ordinary identifier beginning with `x` can still fall through
+/// to `identAtom`; once the quote is present, malformed/odd-length hex is a
+/// committed syntax error instead of being reinterpreted as an identifier.
+let private hexBytesLit: Parser<Value, unit> =
+    attempt (pstringCI "X" .>> pchar '\'')
+    >>. manyChars (satisfy Uri.IsHexDigit)
+    .>> pchar '\''
+    .>> ws
+    >>= fun digits ->
+        if digits.Length % 2 <> 0 then
+            fail "a hexadecimal binary literal must contain an even number of digits"
+        else
+            preturn (VBytes(Convert.FromHexString digits))
+
 let private literalValue: Parser<Value, unit> =
     choice
         [ numberLit
+          hexBytesLit
           stringLit
           keyword "NULL" >>% VNull
           keyword "TRUE" >>% VInt 1L
@@ -573,6 +590,7 @@ let private atom: Parser<Expr, unit> =
           rowNumberOverAtom
           lagOverAtom
           numberLit |>> Lit
+          hexBytesLit |>> Lit
           stringLit |>> Lit
           keyword "NULL" >>% Lit VNull
           keyword "TRUE" >>% Lit(VInt 1L)

@@ -146,7 +146,7 @@ let sendQueryResult
     sendPayloads
         stream
         startSeq
-        (resultPayloads (fun _ -> textRowPayload) capabilities statusFlags lastInsertId columnTypes result)
+        (resultPayloads textRowPayloadTyped capabilities statusFlags lastInsertId columnTypes result)
     |> Async.Ignore
 
 /// As `sendQueryResult`, but encodes resultset rows in the binary protocol

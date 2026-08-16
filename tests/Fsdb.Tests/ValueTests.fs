@@ -82,6 +82,9 @@ let tests =
                 testCase "VString reports VAR_STRING"
                 <| fun _ -> Expect.equal (mysqlTypeOf (VString "hi")) TypeVarString "string"
 
+                testCase "VBytes reports BLOB so clients preserve raw bytes"
+                <| fun _ -> Expect.equal (mysqlTypeOf (VBytes [| 0uy; 255uy |])) TypeBlob "bytes"
+
                 testCase "VDate reports DATE"
                 <| fun _ -> Expect.equal (mysqlTypeOf (VDate(DateOnly(2024, 3, 5)))) TypeDate "date"
 

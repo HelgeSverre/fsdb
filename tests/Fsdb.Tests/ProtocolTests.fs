@@ -4,6 +4,7 @@ open System
 open Expecto
 open Fsdb.Packet
 open Fsdb.Protocol
+open Fsdb.Value
 
 let tests =
     testList
@@ -81,4 +82,32 @@ let tests =
               w.WriteByte 0uy // zero-length auth response
               let resp = parseHandshakeResponse (w.ToArray())
               Expect.equal resp.Username "root" "username"
-              Expect.equal resp.Database None "no database requested" ]
+              Expect.equal resp.Database None "no database requested"
+
+          testCase "typed text rows encode BLOB values as raw bytes"
+          <| fun _ ->
+              let bytes = [| 0x00uy; 0xffuy; 0x80uy |]
+              let carrier = Text.Encoding.Latin1.GetString bytes
+              let reader = Reader(textRowPayloadTyped [ TypeBlob ] [ Some carrier ])
+              Expect.equal (reader.ReadLenEncInt ()) (Some(uint64 bytes.Length)) "raw byte length"
+              Expect.equal (reader.ReadBytes bytes.Length) bytes "no UTF-8 expansion"
+
+          testCase "BLOB column definitions advertise binary collation and flags"
+          <| fun _ ->
+              let reader = Reader(columnDefPayload { Name = "payload"; Type = TypeBlob })
+              for _ in 1..6 do
+                  reader.ReadLenEncString() |> ignore
+              reader.ReadLenEncInt() |> ignore
+              Expect.equal (reader.ReadInt16LE ()) BinaryCollation "binary collation"
+              reader.ReadInt32LE() |> ignore
+              Expect.equal (reader.ReadByte ()) TypeBlob "BLOB type"
+              let flags = reader.ReadInt16LE()
+              Expect.isTrue (flags &&& 0x0010 <> 0) "BLOB flag"
+              Expect.isTrue (flags &&& 0x0080 <> 0) "BINARY flag"
+
+          testCase "binary protocol BLOB parameters decode as raw bytes"
+          <| fun _ ->
+              let bytes = [| 0x00uy; 0xffuy; 0x80uy |]
+              let writer = Writer()
+              writer.WriteLenEncBytes bytes
+              Expect.equal (readBinaryValue (Reader(writer.ToArray())) TypeBlob false) (VBytes bytes) "raw BLOB parameter" ]

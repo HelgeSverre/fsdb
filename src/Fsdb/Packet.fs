@@ -64,6 +64,12 @@ type Writer() =
         this.WriteLenEncInt(uint64 bytes.Length)
         this.WriteBytes bytes
 
+    /// Length-encoded raw bytes. Unlike `WriteLenEncString`, this performs
+    /// no character encoding and is therefore safe for BLOB/VARBINARY data.
+    member this.WriteLenEncBytes(bytes: byte[]) =
+        this.WriteLenEncInt(uint64 bytes.Length)
+        this.WriteBytes bytes
+
     /// The NULL sentinel for a length-encoded value (0xfb).
     member this.WriteLenEncNull() = this.WriteByte 0xfbuy
 
