@@ -6,7 +6,7 @@ open Fsdb.Storage
 
 /// Session variable defaults good enough to satisfy mysql CLI / PDO on
 /// connect. Grows as real clients ask for more `@@vars` / SHOW VARIABLES.
-let defaultVariables: Map<string, string> =
+let defaultVariables: Map<string, string option> =
     Map.ofList
         [ "version", ServerVersion
           "version_comment", "fsdb"
@@ -42,6 +42,7 @@ let defaultVariables: Map<string, string> =
           "performance_schema", "0"
           "query_cache_size", "0"
           "query_cache_type", "OFF" ]
+        |> Map.map (fun _ v -> Some v)
 
 /// A server-side prepared statement (COM_STMT_PREPARE / COM_STMT_EXECUTE):
 /// the SQL text as given, `?` placeholders and all. Execution substitutes
@@ -91,7 +92,14 @@ type Transaction =
 type Session =
     { ConnectionId: int
       Database: string option
-      Variables: Map<string, string>
+      /// Real, known system variables. `string option` per value (not just
+      /// `string`) distinguishes a variable MySQL accepts NULL for (e.g.
+      /// `SET character_set_results = NULL`) from one holding an ordinary
+      /// string — the map lookup's own `None` for a key that isn't in the
+      /// map at all still means "unknown variable" (1193), same as before;
+      /// only a *present* key can hold `None`. See `UserVariables` below
+      /// for the analogous convention on user-defined variables.
+      Variables: Map<string, string option>
       /// `SET @name = ...` user-defined variables — unlike `Variables`
       /// (real, known system variables), any `@name` is legal in real
       /// MySQL, so there's no default set and no "unknown variable" error

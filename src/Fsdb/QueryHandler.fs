@@ -37,7 +37,13 @@ let private syntaxError (sql: string) =
             truncated
     )
 
-let private lookupVar (session: Session) (name: string) : string option =
+/// Raw map lookup: the outer `option` is "is `name` even a known variable"
+/// (unchanged since `Session.Variables` grew NULL-capable values) — `None`
+/// there is the true "unknown variable" case (1193 below), while `Some
+/// None` is a known variable currently holding SQL NULL. Callers that only
+/// want the value (collapsing "unknown" and "known but NULL" the way
+/// `SELECT @@x` does for both sigils) flatten it themselves.
+let private lookupVar (session: Session) (name: string) : string option option =
     session.Variables |> Map.tryFind (name.ToLowerInvariant())
 
 /// Finds every top-level `?` placeholder in `sql` — one that isn't inside a
@@ -155,7 +161,7 @@ let private atVarItem =
 /// both back as NULL, and callers here don't need to tell them apart.
 let private resolveAtRef (session: Session) (sigil: string) (name: string) : string option =
     if sigil = "@@" then
-        lookupVar session name
+        lookupVar session name |> Option.flatten
     else
         session.UserVariables |> Map.tryFind (name.ToLowerInvariant()) |> Option.flatten
 
@@ -215,7 +221,7 @@ let private handleShowVariables (session: Session) (sql: string) : QueryResult =
         |> Map.toList
         |> List.filter (fst >> matches)
         |> List.sortBy fst
-        |> List.map (fun (k, v) -> [ Some k; Some v ])
+        |> List.map (fun (k, v) -> [ Some k; v ])
 
     ResultSet([ "Variable_name"; "Value" ], rows)
 
@@ -389,8 +395,14 @@ let private splitSetAssignments (sql: string) : string list =
 /// left-to-right with partial effect.
 type private SetAction =
     | SetNamesAction of charset: string
-    | SetVarAction of name: string * value: string
+    | SetVarAction of name: string * value: string option
     | SetUserVarAction of name: string * value: string option
+
+/// System variables real MySQL accepts an explicit `NULL` for (rather than
+/// the 1231 "can't be set to the value of NULL" every other variable
+/// raises) — connector handshakes reset the results charset exactly this
+/// way. Grows as real clients ask for more.
+let private nullableSystemVars = Set.ofList [ "character_set_results" ]
 
 /// Parses one comma-split fragment into the variable(s) it would assign,
 /// without touching `session`/`Store` — `handleSet` only applies any of
@@ -421,7 +433,8 @@ let private parseSetFragment (sql: string) (session: Session) (fragment: string)
                 let name = varMatch.Groups.[1].Value.ToLowerInvariant()
 
                 match resolveSetRhs session varMatch.Groups.[2].Value with
-                | Some value -> Ok(SetVarAction(name, value))
+                | Some value -> Ok(SetVarAction(name, Some value))
+                | None when nullableSystemVars.Contains name -> Ok(SetVarAction(name, None))
                 | None -> Error(Err(1231, sprintf "Variable '%s' can't be set to the value of 'NULL'" name))
             else
                 match setVarNameForError.Match fragment with
@@ -437,15 +450,19 @@ let private applySetAction (session: Session) (action: SetAction) : Session =
         { session with
             Variables =
                 session.Variables
-                |> Map.add "character_set_client" charset
-                |> Map.add "character_set_connection" charset
-                |> Map.add "character_set_results" charset }
+                |> Map.add "character_set_client" (Some charset)
+                |> Map.add "character_set_connection" (Some charset)
+                |> Map.add "character_set_results" (Some charset) }
     | SetVarAction(name, value) ->
+        // Neither `foreign_key_checks` nor `sql_mode` is in
+        // `nullableSystemVars`, so `value` is always `Some` here — but the
+        // type is shared with every other system variable, so this still
+        // has to handle `None`.
         if name = "foreign_key_checks" then
-            setForeignKeyChecks session.Store (value.Trim() <> "0")
+            value |> Option.iter (fun v -> setForeignKeyChecks session.Store (v.Trim() <> "0"))
 
         if name = "sql_mode" then
-            setStrictMode session.Store (isStrictSqlMode value)
+            value |> Option.iter (fun v -> setStrictMode session.Store (isStrictSqlMode v))
 
         { session with Variables = Map.add name value session.Variables }
     | SetUserVarAction(name, value) -> { session with UserVariables = Map.add name value session.UserVariables }
@@ -628,7 +645,7 @@ let private releaseSavepoint (name: string) (session: Session) : Session * Query
     | _ -> session, savepointNotFound name
 
 let private handleSetAutocommit (value: string) (session: Session) : Session * QueryResult =
-    let session = { session with Variables = Map.add "autocommit" value session.Variables }
+    let session = { session with Variables = Map.add "autocommit" (Some value) session.Variables }
 
     let session =
         if value = "0" then
@@ -658,7 +675,9 @@ let private registryFor (session: Session) : Functions.Registry =
     |> Functions.registerScalar "DATABASE" databaseFn
     |> Functions.registerScalar "SCHEMA" databaseFn
     |> Functions.registerScalar "LAST_INSERT_ID" (fun _ -> VInt session.LastInsertId)
-    |> Functions.registerScalar "VERSION" (fun _ -> lookupVar session "version" |> Option.map VString |> Option.defaultValue VNull)
+    |> Functions.registerScalar
+        "VERSION"
+        (fun _ -> lookupVar session "version" |> Option.flatten |> Option.map VString |> Option.defaultValue VNull)
     |> Functions.registerScalar "CONNECTION_ID" (fun _ -> VInt(int64 session.ConnectionId))
     |> Functions.registerScalar "CURRENT_USER" (fun _ -> VString "fsdb@localhost")
     |> Functions.registerScalar "USER" (fun _ -> VString "fsdb@localhost")
@@ -682,7 +701,9 @@ let private executeStatement (session: Session) (sql: string) (upper: string) : 
         // `Session.Variables`) can't leak into this one's coercion
         // behavior, and a transaction never runs on the stale StrictMode
         // its snapshot happened to be seeded with at BEGIN time.
-        setStrictMode store (lookupVar session "sql_mode" |> Option.map isStrictSqlMode |> Option.defaultValue true)
+        setStrictMode
+            store
+            (lookupVar session "sql_mode" |> Option.flatten |> Option.map isStrictSqlMode |> Option.defaultValue true)
         let registry = registryFor session
         let dbName = session.Database |> Option.defaultValue defaultDatabase
 

@@ -311,6 +311,19 @@ let tests =
               | ResultSet([ "@x" ], [ [ Some "NULL" ] ]) -> ()
               | other -> failtestf "expected the string 'NULL', not a real NULL, got %A" other
 
+          testCase "SET character_set_results = NULL is accepted, unlike other system variables"
+          <| fun _ ->
+              let session = create 1 (Fsdb.Storage.create ())
+              let session, setResult = handle session "SET character_set_results = NULL"
+
+              match setResult with
+              | Affected 0UL -> ()
+              | other -> failtestf "expected OK, got %A" other
+
+              match handle session "SELECT @@character_set_results" |> snd with
+              | ResultSet([ "@@character_set_results" ], [ [ None ] ]) -> ()
+              | other -> failtestf "expected @@character_set_results to read back as NULL, got %A" other
+
           testCase "SET x = @old_var restores a saved system variable, mysqldump's preamble/postamble idiom"
           <| fun _ ->
               let session = create 1 (Fsdb.Storage.create ())
