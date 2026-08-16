@@ -79,8 +79,10 @@ type Expr =
     | IsFalse of Expr
     /// `caseSensitive` is set by `LIKE BINARY`, MySQL's shorthand for a
     /// byte-for-byte (rather than the engine's default case-insensitive)
-    /// pattern match — plain `LIKE` always sets it false.
-    | Like of Expr * pattern: Expr * caseSensitive: bool
+    /// pattern match — plain `LIKE` always sets it false. `escape` is the
+    /// character an `ESCAPE '<c>'` clause names for un-wildcarding `%`/`_`
+    /// in the pattern; `None` means MySQL's default, backslash.
+    | Like of Expr * pattern: Expr * caseSensitive: bool * escape: char option
     | Regexp of Expr * pattern: Expr
     | In of Expr * candidates: Expr list
     /// `expr IN (SELECT ...)` — the candidate set is a subquery's first

@@ -205,7 +205,13 @@ let rec private encodeExpr (expr: Expr) : JsonNode =
     | IsNotNull e -> caseObj "IsNotNull" [ "e", encodeExpr e ]
     | IsTrue e -> caseObj "IsTrue" [ "e", encodeExpr e ]
     | IsFalse e -> caseObj "IsFalse" [ "e", encodeExpr e ]
-    | Like(e, p, cs) -> caseObj "Like" [ "e", encodeExpr e; "p", encodeExpr p; "cs", boolNode cs ]
+    | Like(e, p, cs, esc) ->
+        caseObj
+            "Like"
+            [ "e", encodeExpr e
+              "p", encodeExpr p
+              "cs", boolNode cs
+              "esc", strOptNode (esc |> Option.map string) ]
     | Regexp(e, p) -> caseObj "Regexp" [ "e", encodeExpr e; "p", encodeExpr p ]
     | In(e, xs) -> caseObj "In" [ "e", encodeExpr e; "xs", arr (xs |> List.map encodeExpr) ]
     | Between(e, lo, hi) -> caseObj "Between" [ "e", encodeExpr e; "lo", encodeExpr lo; "hi", encodeExpr hi ]
@@ -250,7 +256,7 @@ let rec private decodeExpr (node: JsonNode) : Expr =
     | "IsNotNull" -> IsNotNull(decodeExpr (f "e"))
     | "IsTrue" -> IsTrue(decodeExpr (f "e"))
     | "IsFalse" -> IsFalse(decodeExpr (f "e"))
-    | "Like" -> Like(decodeExpr (f "e"), decodeExpr (f "p"), f("cs").GetValue<bool>())
+    | "Like" -> Like(decodeExpr (f "e"), decodeExpr (f "p"), f("cs").GetValue<bool>(), optStr (f "esc") |> Option.map (fun s -> s.[0]))
     | "Regexp" -> Regexp(decodeExpr (f "e"), decodeExpr (f "p"))
     | "In" -> In(decodeExpr (f "e"), f("xs").AsArray() |> Seq.map decodeExpr |> List.ofSeq)
     | "Between" -> Between(decodeExpr (f "e"), decodeExpr (f "lo"), decodeExpr (f "hi"))

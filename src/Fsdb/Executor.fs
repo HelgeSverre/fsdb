@@ -116,7 +116,7 @@ let rec private containsAggregate (registry: Registry) (expr: Expr) : bool =
     | IsFalse e
     | Distinct e
     | OrderBy(e, _) -> containsAggregate registry e
-    | Like(e, p, _) -> containsAggregate registry e || containsAggregate registry p
+    | Like(e, p, _, _) -> containsAggregate registry e || containsAggregate registry p
     | Regexp(e, p) -> containsAggregate registry e || containsAggregate registry p
     | In(e, xs) -> containsAggregate registry e || xs |> List.exists (containsAggregate registry)
     | Between(e, lo, hi) -> containsAggregate registry e || containsAggregate registry lo || containsAggregate registry hi
@@ -160,7 +160,7 @@ let rec private collectWindowFuncs (expr: Expr) : Expr list =
     | Distinct e
     | OrderBy(e, _)
     | Cast(e, _) -> collectWindowFuncs e
-    | Like(e, p, _) -> collectWindowFuncs e @ collectWindowFuncs p
+    | Like(e, p, _, _) -> collectWindowFuncs e @ collectWindowFuncs p
     | Regexp(e, p) -> collectWindowFuncs e @ collectWindowFuncs p
     | In(e, xs) -> collectWindowFuncs e @ (xs |> List.collect collectWindowFuncs)
     | Between(e, lo, hi) -> collectWindowFuncs e @ collectWindowFuncs lo @ collectWindowFuncs hi
@@ -199,7 +199,7 @@ let rec private substituteWindowFuncs (synthetic: (Expr * string) list) (expr: E
         | Distinct e -> Distinct(sub e)
         | OrderBy(e, dir) -> OrderBy(sub e, dir)
         | Cast(e, ty) -> Cast(sub e, ty)
-        | Like(e, p, cs) -> Like(sub e, sub p, cs)
+        | Like(e, p, cs, esc) -> Like(sub e, sub p, cs, esc)
         | Regexp(e, p) -> Regexp(sub e, sub p)
         | In(e, xs) -> In(sub e, xs |> List.map sub)
         | Between(e, lo, hi) -> Between(sub e, sub lo, sub hi)
@@ -253,7 +253,7 @@ let rec private exprLabel (expr: Expr) : string =
     | IsNotNull e -> sprintf "(%s is not null)" (exprLabel e)
     | IsTrue e -> sprintf "(%s is true)" (exprLabel e)
     | IsFalse e -> sprintf "(%s is false)" (exprLabel e)
-    | Like(e, p, _) -> sprintf "(%s like %s)" (exprLabel e) (exprLabel p)
+    | Like(e, p, _, _) -> sprintf "(%s like %s)" (exprLabel e) (exprLabel p)
     | Regexp(e, p) -> sprintf "(%s regexp %s)" (exprLabel e) (exprLabel p)
     | In(e, xs) -> sprintf "(%s in (%s))" (exprLabel e) (xs |> List.map exprLabel |> String.concat ",")
     | InSubquery(e, _) -> sprintf "(%s in (...))" (exprLabel e)
@@ -273,7 +273,7 @@ let rec private exprLabel (expr: Expr) : string =
 /// `let`s rather than tied into its `rec ... and` group.
 let private boolToValue (b: bool) : Value = VInt(if b then 1L else 0L)
 
-let private likeOp (caseSensitive: bool) (subject: Value) (pattern: Value) : Value =
+let private likeOp (caseSensitive: bool) (escape: char option) (subject: Value) (pattern: Value) : Value =
     match subject, pattern with
     | VNull, _
     | _, VNull -> VNull
@@ -281,7 +281,8 @@ let private likeOp (caseSensitive: bool) (subject: Value) (pattern: Value) : Val
         let text = subject |> toText |> Option.defaultValue ""
         let pat = pattern |> toText |> Option.defaultValue ""
         let opts = if caseSensitive then RegexOptions.Singleline else RegexOptions.IgnoreCase ||| RegexOptions.Singleline
-        boolToValue (Regex.IsMatch(text, likeToRegex pat, opts))
+        let regex = likeToRegexWith (escape |> Option.defaultValue '\\') pat
+        boolToValue (Regex.IsMatch(text, regex, opts))
 
 /// `REGEXP`/`RLIKE` — MySQL's default collation makes these case-insensitive
 /// too, same as `LIKE`; unlike `LIKE`'s translated wildcard syntax, the
@@ -537,9 +538,9 @@ let rec private evalExpr (ctx: EvalContext) (expr: Expr) : Result<Value, EvalErr
                     | VNull, _
                     | _, VNull -> VInt 0L
                     | _ -> boolToValue (Value.compare va vb = 0)))
-    | Like(e, p, caseSensitive) ->
+    | Like(e, p, caseSensitive, escape) ->
         eval e
-        |> Result.bind (fun ve -> eval p |> Result.map (fun vp -> likeOp caseSensitive ve vp))
+        |> Result.bind (fun ve -> eval p |> Result.map (fun vp -> likeOp caseSensitive escape ve vp))
     | Regexp(e, p) ->
         eval e
         |> Result.bind (fun ve -> eval p |> Result.map (fun vp -> regexpOp ve vp))
@@ -1332,7 +1333,7 @@ and private rewriteAggregates
     | IsFalse e -> sub e |> Result.map IsFalse
     | Distinct e -> sub e |> Result.map Distinct
     | OrderBy(e, dir) -> sub e |> Result.map (fun e' -> OrderBy(e', dir))
-    | Like(e, p, cs) -> sub e |> Result.bind (fun e' -> sub p |> Result.map (fun p' -> Like(e', p', cs)))
+    | Like(e, p, cs, esc) -> sub e |> Result.bind (fun e' -> sub p |> Result.map (fun p' -> Like(e', p', cs, esc)))
     | Regexp(e, p) -> sub e |> Result.bind (fun e' -> sub p |> Result.map (fun p' -> Regexp(e', p')))
     | In(e, xs) -> sub e |> Result.bind (fun e' -> xs |> traverse sub |> Result.map (fun xs' -> In(e', xs')))
     | Between(e, lo, hi) ->
@@ -1433,7 +1434,7 @@ and private resolveHavingRef (columnIndex: Map<string, int list>) (projections: 
     | IsFalse e -> sub e |> Result.map IsFalse
     | Distinct e -> sub e |> Result.map Distinct
     | OrderBy(e, dir) -> sub e |> Result.map (fun e' -> OrderBy(e', dir))
-    | Like(e, p, cs) -> sub e |> Result.bind (fun e' -> sub p |> Result.map (fun p' -> Like(e', p', cs)))
+    | Like(e, p, cs, esc) -> sub e |> Result.bind (fun e' -> sub p |> Result.map (fun p' -> Like(e', p', cs, esc)))
     | Regexp(e, p) -> sub e |> Result.bind (fun e' -> sub p |> Result.map (fun p' -> Regexp(e', p')))
     | In(e, xs) -> sub e |> Result.bind (fun e' -> xs |> traverse sub |> Result.map (fun xs' -> In(e', xs')))
     | Between(e, lo, hi) ->
@@ -2211,7 +2212,7 @@ let rec private substituteValuesFunc (columnIndex: Map<string, int list>) (candi
     | IsFalse e -> IsFalse(sub e)
     | Distinct e -> Distinct(sub e)
     | OrderBy(e, dir) -> OrderBy(sub e, dir)
-    | Like(e, p, cs) -> Like(sub e, sub p, cs)
+    | Like(e, p, cs, esc) -> Like(sub e, sub p, cs, esc)
     | Regexp(e, p) -> Regexp(sub e, sub p)
     | In(e, xs) -> In(sub e, xs |> List.map sub)
     | Between(e, lo, hi) -> Between(sub e, sub lo, sub hi)
@@ -2272,7 +2273,7 @@ let rec private collectSubqueries (expr: Expr) : SelectStmt list =
     | IsFalse e
     | Distinct e
     | OrderBy(e, _) -> collectSubqueries e
-    | Like(e, p, _) -> collectSubqueries e @ collectSubqueries p
+    | Like(e, p, _, _) -> collectSubqueries e @ collectSubqueries p
     | Regexp(e, p) -> collectSubqueries e @ collectSubqueries p
     | In(e, xs) -> collectSubqueries e @ (xs |> List.collect collectSubqueries)
     | Between(e, lo, hi) -> collectSubqueries e @ collectSubqueries lo @ collectSubqueries hi
@@ -2335,7 +2336,7 @@ let private isCorrelated (sub: SelectStmt) : bool =
         | IsFalse e
         | Distinct e
         | OrderBy(e, _) -> references e
-        | Like(e, p, _) -> references e || references p
+        | Like(e, p, _, _) -> references e || references p
         | Regexp(e, p) -> references e || references p
         | In(e, xs) -> references e || xs |> List.exists references
         | Between(e, lo, hi) -> references e || references lo || references hi

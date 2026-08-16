@@ -220,23 +220,22 @@ let rec compare (a: Value) (b: Value) : int =
     | _ -> compareStrings (toText a |> Option.defaultValue "") (toText b |> Option.defaultValue "")
 
 /// Translates a SQL LIKE pattern to a .NET regex source: `%` -> `.*`, `_` ->
-/// `.`, and a backslash-escaped `\%`/`\_` (MySQL's own escape for a literal
-/// wildcard character, which `Parser.stringChar` deliberately leaves in the
-/// string unresolved) matches that character literally instead. Anchored
-/// with `\A`/`\z` rather than `^`/`$` — `$` alone matches before a trailing
-/// newline, which would let `'ab\n' LIKE 'ab'` falsely match — and callers
-/// must pass `RegexOptions.Singleline` so `.` spans newlines too (`%`/`_`
-/// are unqualified wildcards in MySQL, not "everything but a newline"). One
-/// definition shared by `Executor`'s `LIKE` operator, `QueryHandler`'s `SHOW
-/// ... LIKE`, and `Functions`'s `JSON_SEARCH`, instead of three copies of
-/// the same escaping rules.
-let likeToRegex (pattern: string) : string =
+/// `.`, and an escape-prefixed `%`/`_` (backslash by default, or whatever an
+/// `ESCAPE '<c>'` clause names — see `escapeChar`) matches that character
+/// literally instead. Anchored with `\A`/`\z` rather than `^`/`$` — `$`
+/// alone matches before a trailing newline, which would let `'ab\n' LIKE
+/// 'ab'` falsely match — and callers must pass `RegexOptions.Singleline` so
+/// `.` spans newlines too (`%`/`_` are unqualified wildcards in MySQL, not
+/// "everything but a newline"). One definition shared by `Executor`'s `LIKE`
+/// operator, `QueryHandler`'s `SHOW ... LIKE`, and `Functions`'s
+/// `JSON_SEARCH`, instead of three copies of the same escaping rules.
+let likeToRegexWith (escapeChar: char) (pattern: string) : string =
     let sb = Text.StringBuilder()
     let mutable i = 0
 
     while i < pattern.Length do
         match pattern.[i] with
-        | '\\' when i + 1 < pattern.Length && (pattern.[i + 1] = '%' || pattern.[i + 1] = '_') ->
+        | c when c = escapeChar && i + 1 < pattern.Length && (pattern.[i + 1] = '%' || pattern.[i + 1] = '_') ->
             sb.Append(Regex.Escape(string pattern.[i + 1])) |> ignore
             i <- i + 2
         | '%' ->
@@ -250,6 +249,11 @@ let likeToRegex (pattern: string) : string =
             i <- i + 1
 
     @"\A" + sb.ToString() + @"\z"
+
+/// `LIKE` without an `ESCAPE` clause: MySQL's default escape is backslash,
+/// which is also what `Parser.stringChar` leaves unresolved in the pattern
+/// string for this purpose.
+let likeToRegex (pattern: string) : string = likeToRegexWith '\\' pattern
 
 /// WHERE-style equality with MySQL's implicit coercion (`1 = '1'` is true).
 /// Three-valued logic: NULL never equals anything, including another NULL.

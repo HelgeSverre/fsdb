@@ -143,6 +143,24 @@ let tests =
                     | ResultSet(_, [ [ Some "1" ] ]) -> ()
                     | other -> failtestf "expected a literal %% match, got %A" other
 
+                testCase "LIKE ESCAPE names a custom escape character instead of backslash"
+                <| fun _ ->
+                    let store = newStore ()
+
+                    match runDefault store "SELECT 'a%b' LIKE 'a!%b' ESCAPE '!'" with
+                    | ResultSet(_, [ [ Some "1" ] ]) -> ()
+                    | other -> failtestf "expected a literal %% match via the '!' escape, got %A" other
+
+                    match runDefault store "SELECT 'axb' LIKE 'a!%b' ESCAPE '!'" with
+                    | ResultSet(_, [ [ Some "0" ] ]) -> ()
+                    | other -> failtestf "expected no match (escaped %% is literal), got %A" other
+
+                    // With a custom escape char in play, a bare backslash goes back to
+                    // being a plain, unescaped character rather than an escape.
+                    match runDefault store "SELECT 'a\\\\b' LIKE 'a\\\\b' ESCAPE '!'" with
+                    | ResultSet(_, [ [ Some "1" ] ]) -> ()
+                    | other -> failtestf "expected backslash to be literal when ESCAPE picks another character, got %A" other
+
                 testCase "LIKE matches across embedded newlines"
                 <| fun _ ->
                     let store = newStore ()

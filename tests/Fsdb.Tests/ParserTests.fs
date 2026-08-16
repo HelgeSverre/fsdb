@@ -357,8 +357,8 @@ let tests =
                     Expect.equal
                         (parseOk "SELECT a LIKE '%x%', a NOT LIKE '%y%'")
                         (mkSelect(
-                            [ Like(col "a", Lit(VString "%x%"), false), None
-                              Not(Like(col "a", Lit(VString "%y%"), false)), None ],
+                            [ Like(col "a", Lit(VString "%x%"), false, None), None
+                              Not(Like(col "a", Lit(VString "%y%"), false, None)), None ],
                             None,
                             None,
                             [],
@@ -1316,7 +1316,7 @@ let tests =
                     Expect.equal
                         (parseOk "SELECT a LIKE BINARY 'x', a NOT LIKE BINARY 'y'")
                         (mkSelect(
-                            [ Like(col "a", Lit(VString "x"), true), None; Not(Like(col "a", Lit(VString "y"), true)), None ],
+                            [ Like(col "a", Lit(VString "x"), true, None), None; Not(Like(col "a", Lit(VString "y"), true, None)), None ],
                             None,
                             None,
                             [],

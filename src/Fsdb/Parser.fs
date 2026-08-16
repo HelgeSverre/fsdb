@@ -640,6 +640,18 @@ let private inCandidates: Parser<Choice<SelectStmt, Expr list>, unit> =
 
 let private betweenTail: Parser<Expr * Expr, unit> = (arithExpr .>> keyword "AND") .>>. arithExpr
 
+/// The optional `ESCAPE '<c>'` tail on a `LIKE` predicate, naming the
+/// character that un-wildcards a literal `%`/`_` in the pattern (MySQL
+/// default: backslash). `None` means "use the default" — covers both a
+/// missing clause and the rare `ESCAPE ''` (MySQL then disables escaping
+/// entirely, which `likeToRegex`'s no-escape-char behavior can't express
+/// separately from "default", but nobody writes that in practice).
+let private escapeClause: Parser<char option, unit> =
+    opt (keyword "ESCAPE" >>. stringLit)
+    |>> Option.bind (function
+        | VString s when s.Length > 0 -> Some s.[0]
+        | _ -> None)
+
 /// Comparisons and the `IS NULL` / `LIKE` / `IN` / `BETWEEN` predicates,
 /// all sitting at the same precedence just above arithmetic. The `NOT
 /// LIKE`/`NOT IN`/`NOT BETWEEN` forms desugar to `Not (Like ...)` etc.
@@ -671,11 +683,13 @@ let private comparisonExpr: Parser<Expr, unit> =
               attempt (keyword "IS" >>. keyword "NOT" >>. keyword "FALSE") >>% Not(IsFalse left)
               attempt (keyword "IS" >>. keyword "TRUE") >>% IsTrue left
               attempt (keyword "IS" >>. keyword "FALSE") >>% IsFalse left
-              attempt (keyword "NOT" >>. keyword "LIKE" >>. keyword "BINARY") >>. arithExpr
-              |>> fun p -> Not(Like(left, p, true))
-              attempt (keyword "LIKE" >>. keyword "BINARY") >>. arithExpr |>> fun p -> Like(left, p, true)
-              attempt (keyword "NOT" >>. keyword "LIKE") >>. arithExpr |>> fun p -> Not(Like(left, p, false))
-              keyword "LIKE" >>. arithExpr |>> fun p -> Like(left, p, false)
+              attempt (keyword "NOT" >>. keyword "LIKE" >>. keyword "BINARY") >>. arithExpr .>>. escapeClause
+              |>> fun (p, esc) -> Not(Like(left, p, true, esc))
+              attempt (keyword "LIKE" >>. keyword "BINARY") >>. arithExpr .>>. escapeClause
+              |>> fun (p, esc) -> Like(left, p, true, esc)
+              attempt (keyword "NOT" >>. keyword "LIKE") >>. arithExpr .>>. escapeClause
+              |>> fun (p, esc) -> Not(Like(left, p, false, esc))
+              keyword "LIKE" >>. arithExpr .>>. escapeClause |>> fun (p, esc) -> Like(left, p, false, esc)
               attempt (keyword "NOT" >>. (keyword "REGEXP" <|> keyword "RLIKE")) >>. arithExpr
               |>> fun p -> Not(Regexp(left, p))
               (keyword "REGEXP" <|> keyword "RLIKE") >>. arithExpr |>> fun p -> Regexp(left, p)
