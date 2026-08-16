@@ -524,6 +524,17 @@ let tests =
                 <| fun _ ->
                     Expect.equal (stripVersionComments "SELECT /*!99999 SQL_NO_CACHE */ 1") "SELECT  1" "above server version is inert"
 
+                testCase "stripVersionComments leaves a /*! -lookalike inside a string literal alone"
+                <| fun _ ->
+                    Expect.equal
+                        (stripVersionComments "INSERT INTO t VALUES (1,'price /*!40101 x*/ note')")
+                        "INSERT INTO t VALUES (1,'price /*!40101 x*/ note')"
+                        "a quoted /*! is data, not a version comment"
+
+                testCase "stripVersionComments doesn't run off the end of an unterminated /*! lookalike in a literal"
+                <| fun _ ->
+                    Expect.equal (stripVersionComments "SELECT 'a/*!b'") "SELECT 'a/*!b'" "the literal's closing quote still ends the string"
+
                 testCase "isBlank is true only for a comment/whitespace-only statement"
                 <| fun _ ->
                     Expect.isTrue (isBlank "  /* trailing comment */ ") "comment-only"

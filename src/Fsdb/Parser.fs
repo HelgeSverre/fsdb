@@ -46,9 +46,33 @@ let private serverVersionNumber = 80036
 let stripVersionComments (sql: string) : string =
     let sb = Text.StringBuilder(sql.Length)
     let mutable i = 0
+    // `'`/`"`/`` ` `` while inside a string/identifier literal — a `/*!`
+    // that appears there is data, not a version comment (see the copy loop
+    // below for how it's tracked in and out of literals).
+    let mutable quoteChar: char option = None
 
     while i < sql.Length do
-        if i + 2 < sql.Length && sql.[i] = '/' && sql.[i + 1] = '*' && sql.[i + 2] = '!' then
+        match quoteChar with
+        | Some q when sql.[i] = '\\' && q <> '`' && i + 1 < sql.Length ->
+            // backslash-escapes only apply inside '...'/"...", not `...`
+            sb.Append(sql.[i]).Append(sql.[i + 1]) |> ignore
+            i <- i + 2
+        | Some q when sql.[i] = q && i + 1 < sql.Length && sql.[i + 1] = q ->
+            // a doubled quote char is an escaped literal quote, not the close
+            sb.Append(sql.[i]).Append(sql.[i + 1]) |> ignore
+            i <- i + 2
+        | Some q when sql.[i] = q ->
+            quoteChar <- None
+            sb.Append(sql.[i]) |> ignore
+            i <- i + 1
+        | Some _ ->
+            sb.Append(sql.[i]) |> ignore
+            i <- i + 1
+        | None when sql.[i] = '\'' || sql.[i] = '"' || sql.[i] = '`' ->
+            quoteChar <- Some sql.[i]
+            sb.Append(sql.[i]) |> ignore
+            i <- i + 1
+        | None when i + 2 < sql.Length && sql.[i] = '/' && sql.[i + 1] = '*' && sql.[i + 2] = '!' ->
             let closeAt =
                 match sql.IndexOf("*/", i + 3) with
                 | -1 -> sql.Length
@@ -65,7 +89,7 @@ let stripVersionComments (sql: string) : string =
                 sb.Append(body: string) |> ignore
 
             i <- (if closeAt = sql.Length then closeAt else closeAt + 2)
-        else
+        | None ->
             sb.Append(sql.[i]) |> ignore
             i <- i + 1
 

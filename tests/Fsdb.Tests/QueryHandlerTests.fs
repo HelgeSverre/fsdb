@@ -39,6 +39,14 @@ let tests =
               | Affected 0UL -> ()
               | other -> failtestf "expected an OK/0-rows ack, got %A" other
 
+          testCase "a /*!NNNNN lookalike inside a string literal round-trips unchanged"
+          <| fun _ ->
+              let session = create 1 (Fsdb.Storage.create ())
+
+              match handle session "SELECT 'a /*!40101 x*/ b'" |> snd with
+              | ResultSet(_, [ [ Some "a /*!40101 x*/ b" ] ]) -> ()
+              | other -> failtestf "expected the literal intact, got %A" other
+
           testCase "a SELECT's int/string columns report their real MySQL wire types, not a blanket VAR_STRING"
           <| fun _ ->
               // Real MySQL clients (PHP's mysqlnd in particular)
