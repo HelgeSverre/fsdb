@@ -651,8 +651,11 @@ let private registryFor (session: Session) : Functions.Registry =
         |> Map.fold (fun r name fn -> Functions.registerScalar name fn r) Functions.builtins
         |> fun r -> session.CustomFunctions.Aggregates |> Map.fold (fun r name fn -> Functions.registerAggregate name fn r) r
 
+    let databaseFn _ = session.Database |> Option.map VString |> Option.defaultValue VNull
+
     withCustom
-    |> Functions.registerScalar "DATABASE" (fun _ -> session.Database |> Option.map VString |> Option.defaultValue VNull)
+    |> Functions.registerScalar "DATABASE" databaseFn
+    |> Functions.registerScalar "SCHEMA" databaseFn
     |> Functions.registerScalar "LAST_INSERT_ID" (fun _ -> VInt session.LastInsertId)
     |> Functions.registerScalar "VERSION" (fun _ -> lookupVar session "version" |> Option.map VString |> Option.defaultValue VNull)
     |> Functions.registerScalar "CONNECTION_ID" (fun _ -> VInt(int64 session.ConnectionId))

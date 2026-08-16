@@ -330,6 +330,15 @@ let tests =
               | ResultSet(_, [ [ Some "mydb" ] ]) -> ()
               | other -> failtestf "expected mydb, got %A" other
 
+          testCase "SCHEMA() is a synonym for DATABASE(), matching MySQL"
+          <| fun _ ->
+              let session = create 1 (Fsdb.Storage.create ())
+              let session, _ = handle session "USE mydb"
+
+              match handle session "SELECT SCHEMA()" |> snd with
+              | ResultSet(_, [ [ Some "mydb" ] ]) -> ()
+              | other -> failtestf "expected mydb, got %A" other
+
           testCase "SHOW DATABASES returns a resultset"
           <| fun _ ->
               let session = create 1 (Fsdb.Storage.create ())
