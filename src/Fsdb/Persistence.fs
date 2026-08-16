@@ -223,6 +223,7 @@ let rec private encodeExpr (expr: Expr) : JsonNode =
               "partitionBy", arr (partitionBy |> List.map encodeExpr)
               "orderBy", arr (orderBy |> List.map (fun (e, d) -> arr [ encodeExpr e; encodeDirection d ])) ]
     | Distinct e -> caseObj "Distinct" [ "e", encodeExpr e ]
+    | OrderBy(e, d) -> caseObj "OrderBy" [ "e", encodeExpr e; "d", encodeDirection d ]
     | Cast(e, t) -> caseObj "Cast" [ "e", encodeExpr e; "t", encodeColumnType t ]
     | Star q -> caseObj "Star" [ "q", strOptNode q ]
     | Case(subject, whens, elseBranch) ->
@@ -275,6 +276,7 @@ let rec private decodeExpr (node: JsonNode) : Expr =
             |> List.ofSeq
         )
     | "Distinct" -> Distinct(decodeExpr (f "e"))
+    | "OrderBy" -> OrderBy(decodeExpr (f "e"), decodeDirection (f "d"))
     | "Cast" -> Cast(decodeExpr (f "e"), decodeColumnType (f "t"))
     | "Star" -> Star(optStr (f "q"))
     | "Case" ->

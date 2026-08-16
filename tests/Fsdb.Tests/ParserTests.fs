@@ -1401,6 +1401,15 @@ let tests =
 
                     match parseOk "SELECT GROUP_CONCAT(x SEPARATOR '-'), GROUP_CONCAT(DISTINCT y) FROM t" with
                     | Select { Projections = projs } -> Expect.equal projs expectedProjections "two GROUP_CONCAT shapes"
+                    | other -> failtestf "expected a Select, got %A" other
+
+                testCase "GROUP_CONCAT(x ORDER BY y DESC SEPARATOR ',')"
+                <| fun _ ->
+                    let expected =
+                        [ FuncCall("GROUP_CONCAT", [ Col "x"; OrderBy(Col "y", Desc); Lit(VString ",") ]), None ]
+
+                    match parseOk "SELECT GROUP_CONCAT(x ORDER BY y DESC SEPARATOR ',') FROM t" with
+                    | Select { Projections = projs } -> Expect.equal projs expected "GROUP_CONCAT with an ORDER BY key"
                     | other -> failtestf "expected a Select, got %A" other ]
 
           testList

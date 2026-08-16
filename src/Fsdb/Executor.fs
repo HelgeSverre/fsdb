@@ -113,7 +113,8 @@ let rec private containsAggregate (registry: Registry) (expr: Expr) : bool =
     | IsNotNull e
     | IsTrue e
     | IsFalse e
-    | Distinct e -> containsAggregate registry e
+    | Distinct e
+    | OrderBy(e, _) -> containsAggregate registry e
     | Like(e, p, _) -> containsAggregate registry e || containsAggregate registry p
     | Regexp(e, p) -> containsAggregate registry e || containsAggregate registry p
     | In(e, xs) -> containsAggregate registry e || xs |> List.exists (containsAggregate registry)
@@ -156,6 +157,7 @@ let rec private collectWindowFuncs (expr: Expr) : Expr list =
     | IsTrue e
     | IsFalse e
     | Distinct e
+    | OrderBy(e, _)
     | Cast(e, _) -> collectWindowFuncs e
     | Like(e, p, _) -> collectWindowFuncs e @ collectWindowFuncs p
     | Regexp(e, p) -> collectWindowFuncs e @ collectWindowFuncs p
@@ -194,6 +196,7 @@ let rec private substituteWindowFuncs (synthetic: (Expr * string) list) (expr: E
         | IsTrue e -> IsTrue(sub e)
         | IsFalse e -> IsFalse(sub e)
         | Distinct e -> Distinct(sub e)
+        | OrderBy(e, dir) -> OrderBy(sub e, dir)
         | Cast(e, ty) -> Cast(sub e, ty)
         | Like(e, p, cs) -> Like(sub e, sub p, cs)
         | Regexp(e, p) -> Regexp(sub e, sub p)
@@ -256,6 +259,7 @@ let rec private exprLabel (expr: Expr) : string =
     | Between(e, lo, hi) -> sprintf "(%s between %s and %s)" (exprLabel e) (exprLabel lo) (exprLabel hi)
     | Cast(e, _) -> sprintf "cast(%s as ...)" (exprLabel e)
     | Distinct e -> sprintf "distinct %s" (exprLabel e)
+    | OrderBy(e, _) -> exprLabel e
     | Case _ -> "case"
     | Star None -> "*"
     | Star(Some q) -> sprintf "%s.*" q
@@ -531,7 +535,8 @@ let rec private evalExpr (ctx: EvalContext) (expr: Expr) : Result<Value, EvalErr
                         Ok VNull
                     else
                         Ok(VInt 0L))
-    | Distinct e -> eval e
+    | Distinct e
+    | OrderBy(e, _) -> eval e
     | Case(subject, whens, elseBranch) ->
         let fallback () =
             match elseBranch with
@@ -1088,22 +1093,40 @@ and private evalAggregate
     | [ Star _ ] when isCount -> Ok(VInt(int64 (List.length rows)))
     | arg :: rest when isGroupConcat ->
         // `GROUP_CONCAT` folds entirely here rather than through
-        // `registry.Aggregates` — see `isAggregateCall`'s doc.
+        // `registry.Aggregates` — see `isAggregateCall`'s doc. `rest` holds
+        // zero or more `OrderBy` markers (see `Parser.groupConcatAtom`)
+        // followed by an optional `SEPARATOR` literal.
         let distinct, innerExpr = unwrapDistinct arg
 
-        let separator =
-            match rest with
-            | [ Lit(VString s) ] -> s
-            | _ -> ","
+        let orderKeys = rest |> List.choose (function OrderBy(e, d) -> Some(e, d) | _ -> None)
 
-        evalNonNull innerExpr
-        |> Result.map (fun nonNull ->
-            let deduped = if distinct then List.distinct nonNull else nonNull
+        let separator =
+            match rest |> List.tryPick (function Lit(VString s) -> Some s | _ -> None) with
+            | Some s -> s
+            | None -> ","
+
+        let evalRow (row: Value[]) : Result<(Value * Value list) option, EvalError> =
+            let ctx = ctxFor row
+            evalExpr ctx innerExpr
+            |> Result.bind (function
+                | VNull -> Ok None
+                | v -> orderKeys |> traverse (fst >> evalExpr ctx) |> Result.map (fun keys -> Some(v, keys)))
+
+        rows
+        |> traverse evalRow
+        |> Result.map (fun results ->
+            let present = results |> List.choose id
+            let ordered =
+                if orderKeys.IsEmpty then
+                    present
+                else
+                    present |> List.sortWith (fun (_, ka) (_, kb) -> compareByOrderKeys (List.map snd orderKeys) ka kb)
+            let deduped = if distinct then List.distinctBy fst ordered else ordered
 
             if deduped.IsEmpty then
                 VNull
             else
-                deduped |> List.map (toText >> Option.defaultValue "") |> String.concat separator |> VString)
+                deduped |> List.map (fst >> toText >> Option.defaultValue "") |> String.concat separator |> VString)
     | [ arg ] ->
         let distinct, innerExpr = unwrapDistinct arg
 
@@ -1166,6 +1189,7 @@ and private rewriteAggregates
     | IsTrue e -> sub e |> Result.map IsTrue
     | IsFalse e -> sub e |> Result.map IsFalse
     | Distinct e -> sub e |> Result.map Distinct
+    | OrderBy(e, dir) -> sub e |> Result.map (fun e' -> OrderBy(e', dir))
     | Like(e, p, cs) -> sub e |> Result.bind (fun e' -> sub p |> Result.map (fun p' -> Like(e', p', cs)))
     | Regexp(e, p) -> sub e |> Result.bind (fun e' -> sub p |> Result.map (fun p' -> Regexp(e', p')))
     | In(e, xs) -> sub e |> Result.bind (fun e' -> xs |> traverse sub |> Result.map (fun xs' -> In(e', xs')))
@@ -1266,6 +1290,7 @@ and private resolveHavingRef (columnIndex: Map<string, int list>) (projections: 
     | IsTrue e -> sub e |> Result.map IsTrue
     | IsFalse e -> sub e |> Result.map IsFalse
     | Distinct e -> sub e |> Result.map Distinct
+    | OrderBy(e, dir) -> sub e |> Result.map (fun e' -> OrderBy(e', dir))
     | Like(e, p, cs) -> sub e |> Result.bind (fun e' -> sub p |> Result.map (fun p' -> Like(e', p', cs)))
     | Regexp(e, p) -> sub e |> Result.bind (fun e' -> sub p |> Result.map (fun p' -> Regexp(e', p')))
     | In(e, xs) -> sub e |> Result.bind (fun e' -> xs |> traverse sub |> Result.map (fun xs' -> In(e', xs')))
@@ -2003,6 +2028,7 @@ let rec private substituteValuesFunc (columnIndex: Map<string, int list>) (candi
     | IsTrue e -> IsTrue(sub e)
     | IsFalse e -> IsFalse(sub e)
     | Distinct e -> Distinct(sub e)
+    | OrderBy(e, dir) -> OrderBy(sub e, dir)
     | Like(e, p, cs) -> Like(sub e, sub p, cs)
     | Regexp(e, p) -> Regexp(sub e, sub p)
     | In(e, xs) -> In(sub e, xs |> List.map sub)
@@ -2062,7 +2088,8 @@ let rec private collectSubqueries (expr: Expr) : SelectStmt list =
     | IsNotNull e
     | IsTrue e
     | IsFalse e
-    | Distinct e -> collectSubqueries e
+    | Distinct e
+    | OrderBy(e, _) -> collectSubqueries e
     | Like(e, p, _) -> collectSubqueries e @ collectSubqueries p
     | Regexp(e, p) -> collectSubqueries e @ collectSubqueries p
     | In(e, xs) -> collectSubqueries e @ (xs |> List.collect collectSubqueries)
@@ -2124,7 +2151,8 @@ let private isCorrelated (sub: SelectStmt) : bool =
         | IsNotNull e
         | IsTrue e
         | IsFalse e
-        | Distinct e -> references e
+        | Distinct e
+        | OrderBy(e, _) -> references e
         | Like(e, p, _) -> references e || references p
         | Regexp(e, p) -> references e || references p
         | In(e, xs) -> references e || xs |> List.exists references

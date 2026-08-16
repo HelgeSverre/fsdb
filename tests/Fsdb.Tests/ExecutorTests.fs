@@ -1730,6 +1730,20 @@ let tests =
                     | ResultSet([ "c" ], [ [ Some "x|y" ] ]) -> ()
                     | other -> failtestf "expected DISTINCT deduping and a custom separator, got %A" other
 
+                testCase "GROUP_CONCAT(expr ORDER BY key [ASC|DESC]) sorts members before concatenating"
+                <| fun _ ->
+                    let store = newStore ()
+                    runDefault store "CREATE TABLE t (grp VARCHAR(10), tag VARCHAR(10), seq INT)" |> ignore
+                    runDefault store "INSERT INTO t VALUES ('a', 'x', 3), ('a', 'y', 1), ('a', 'z', 2)" |> ignore
+
+                    match runDefault store "SELECT GROUP_CONCAT(tag ORDER BY seq) AS c FROM t GROUP BY grp" with
+                    | ResultSet([ "c" ], [ [ Some "y,z,x" ] ]) -> ()
+                    | other -> failtestf "expected ascending-by-seq order, got %A" other
+
+                    match runDefault store "SELECT GROUP_CONCAT(tag ORDER BY seq DESC SEPARATOR '|') AS c FROM t GROUP BY grp" with
+                    | ResultSet([ "c" ], [ [ Some "x|z|y" ] ]) -> ()
+                    | other -> failtestf "expected descending-by-seq order with a custom separator, got %A" other
+
                 testCase "SELECT COUNT(*) FROM an empty table still returns one row with 0, not zero rows"
                 <| fun _ ->
                     let store = newStore ()

@@ -412,21 +412,30 @@ let private funcCallAtom: Parser<Expr, unit> =
     attempt ((many1Satisfy2 isIdentStart isIdentChar .>> ws) .>>. (sym "(" >>. sepBy distinctArg (sym ",") .>> sym ")"))
     |>> FuncCall
 
-/// `GROUP_CONCAT([DISTINCT] expr [SEPARATOR 'str'])` — parsed separately
-/// from `funcCallAtom` rather than folding `SEPARATOR` into the general
-/// call-argument grammar, since it's the one built-in whose argument list
-/// isn't just a comma-separated expression list. `ORDER BY` inside the call
-/// (`GROUP_CONCAT(x ORDER BY y)`) is real MySQL syntax too — ponytail: not
-/// accepted here, add it if a migration's assertion ever depends on the
-/// concatenation order rather than just the member set/count.
+/// `GROUP_CONCAT([DISTINCT] expr [ORDER BY key [ASC|DESC], ...] [SEPARATOR
+/// 'str'])` — parsed separately from `funcCallAtom` rather than folding
+/// `ORDER BY`/`SEPARATOR` into the general call-argument grammar, since it's
+/// the one built-in whose argument list isn't just a comma-separated
+/// expression list. Each `ORDER BY` key becomes an `OrderBy` marker in the
+/// trailing argument list (see its doc) so `Ast.FuncCall` doesn't need its
+/// own order-key vocabulary just for this one call; `Executor.evalAggregate`
+/// picks the markers back out.
 let private groupConcatAtom: Parser<Expr, unit> =
     attempt (keyword "GROUP_CONCAT" >>. sym "(")
     >>. (opt (keyword "DISTINCT") .>>. expr)
+    .>>. opt (
+        keyword "ORDER" >>. keyword "BY"
+        >>. sepBy1 (expr .>>. opt ((keyword "ASC" >>% Asc) <|> (keyword "DESC" >>% Desc))) (sym ",")
+    )
     .>>. opt (keyword "SEPARATOR" >>. (stringLit |>> Lit))
     .>> sym ")"
-    |>> fun ((distinctOpt, arg), sepOpt) ->
+    |>> fun (((distinctOpt, arg), orderByOpt), sepOpt) ->
         let argExpr = if distinctOpt.IsSome then Distinct arg else arg
-        FuncCall("GROUP_CONCAT", argExpr :: (sepOpt |> Option.toList))
+        let orderByArgs =
+            orderByOpt
+            |> Option.defaultValue []
+            |> List.map (fun (e, dirOpt) -> OrderBy(e, dirOpt |> Option.defaultValue Asc))
+        FuncCall("GROUP_CONCAT", argExpr :: orderByArgs @ (sepOpt |> Option.toList))
 
 /// The `PARTITION BY expr, ... ORDER BY expr [ASC|DESC], ...` body shared by
 /// every `OVER (...)` clause below. Written out here rather than reusing the

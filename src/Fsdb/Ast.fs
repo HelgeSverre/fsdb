@@ -110,6 +110,11 @@ type Expr =
     /// anywhere else it's a parse shape that can't occur, since the parser
     /// only ever produces it inside a function call's argument list.
     | Distinct of Expr
+    /// Marks one `ORDER BY` key inside `GROUP_CONCAT(expr ORDER BY key
+    /// [ASC|DESC], ...)` — only meaningful as one of `GROUP_CONCAT`'s
+    /// trailing arguments (see `Parser.groupConcatAtom`), the same
+    /// call-site-only contract `Distinct` documents above.
+    | OrderBy of Expr * Direction
     /// Minimal `CAST(expr AS type)` — reuses `ColumnType` rather than a
     /// separate cast-target vocabulary, coerced the same way a column of
     /// that type would be (see `Storage.coerceValue`).
