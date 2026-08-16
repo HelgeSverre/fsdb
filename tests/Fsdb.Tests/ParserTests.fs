@@ -1459,7 +1459,7 @@ let tests =
               [ testCase "FROM (SELECT ...) AS t is a derived table"
                 <| fun _ ->
                     match parseOk "SELECT * FROM (SELECT id FROM t) AS derived" with
-                    | Select { From = Some(FromSubquery({ From = Some(FromTable { Table = "t" }) }, "derived")) } -> ()
+                    | Select { From = Some(FromSubquery(PlainSelect { From = Some(FromTable { Table = "t" }) }, "derived")) } -> ()
                     | other -> failtestf "expected a FromSubquery, got %A" other
 
                 testCase "LEFT JOIN (SELECT ...) AS t ON ... is a derived table join source"
@@ -1467,7 +1467,7 @@ let tests =
                     // Eloquent's leftJoinSub/joinSub — a real table's JOIN
                     // target can be a subquery too, not just the leading FROM.
                     match parseOk "SELECT * FROM a LEFT JOIN (SELECT id FROM t) AS derived ON a.id = derived.id" with
-                    | Select { Joins = [ { Kind = LeftJoin; Table = FromSubquery({ From = Some(FromTable { Table = "t" }) }, "derived") } ] } -> ()
+                    | Select { Joins = [ { Kind = LeftJoin; Table = FromSubquery(PlainSelect { From = Some(FromTable { Table = "t" }) }, "derived") } ] } -> ()
                     | other -> failtestf "expected a FromSubquery join target, got %A" other
 
                 testCase "UNION ALL keeps duplicates, plain UNION dedupes"
@@ -1486,7 +1486,28 @@ let tests =
                 <| fun _ ->
                     match parseOk "SELECT a FROM t UNION SELECT a FROM u ORDER BY a LIMIT 5" with
                     | Union(_, _, [ (Col "a", Asc) ], Some 5, None) -> ()
-                    | other -> failtestf "expected the trailing ORDER BY/LIMIT to land on the Union, got %A" other ]
+                    | other -> failtestf "expected the trailing ORDER BY/LIMIT to land on the Union, got %A" other
+
+                testCase "(SELECT ...) UNION (SELECT ...) — each branch individually parenthesized"
+                <| fun _ ->
+                    match parseOk "(SELECT a FROM t) UNION (SELECT a FROM u)" with
+                    | Union(_, [ (false, _) ], _, _, _) -> ()
+                    | other -> failtestf "expected a two-branch Union, got %A" other
+
+                testCase "FROM ((SELECT ...) UNION (SELECT ...)) AS alias — a UNION as a derived table"
+                <| fun _ ->
+                    // Laravel's `unionAll(...)->paginate()` compiles to exactly
+                    // this shape: `SELECT COUNT(*) FROM ((SELECT ...) UNION
+                    // (SELECT ...)) AS alias`.
+                    match parseOk "SELECT COUNT(*) AS aggregate FROM ((SELECT a FROM t) UNION (SELECT a FROM u)) AS search_items" with
+                    | Select { From = Some(FromSubquery(UnionSelect(_, [ (false, _) ], _, _, _), "search_items")) } -> ()
+                    | other -> failtestf "expected a FromSubquery wrapping a UnionSelect, got %A" other
+
+                testCase "FROM ((SELECT ...)) AS alias — redundant double parens around a plain SELECT"
+                <| fun _ ->
+                    match parseOk "SELECT * FROM ((SELECT id FROM t)) AS derived" with
+                    | Select { From = Some(FromSubquery(PlainSelect { From = Some(FromTable { Table = "t" }) }, "derived")) } -> ()
+                    | other -> failtestf "expected a FromSubquery wrapping a PlainSelect, got %A" other ]
 
           testList
               "FOR UPDATE / LOCK IN SHARE MODE"

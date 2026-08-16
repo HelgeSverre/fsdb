@@ -720,7 +720,7 @@ let private executeStatement (session: Session) (sql: string) (upper: string) : 
                 let result, types = Executor.runTopLevelSelect store registry dbName select
                 session.LastInsertId, result, types
             | Union(first, rest, orderBy, limit, offset) ->
-                let result, types = Executor.runUnionStmt store registry dbName first rest orderBy limit offset
+                let result, types, _ = Executor.runUnionStmt store registry dbName first rest orderBy limit offset
                 session.LastInsertId, result, types
             | _ ->
                 let lastInsertId, result = Executor.execute store registry dbName session.LastInsertId stmt

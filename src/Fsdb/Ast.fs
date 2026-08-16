@@ -202,6 +202,16 @@ and TableRef =
       Table: string
       Alias: string option }
 
+/// A derived table's body: a plain `SELECT`, or `(SELECT ...) UNION
+/// (SELECT ...) ...` — MySQL allows a `UNION` directly inside `FROM (...)
+/// AS alias` (Laravel's `unionAll(...)->paginate()` compiles to exactly
+/// this: `SELECT COUNT(*) FROM ((SELECT ...) UNION (SELECT ...)) AS
+/// alias`), so `FromSubquery` needs to carry either shape rather than just
+/// a bare `SelectStmt`.
+and SelectOrUnion =
+    | PlainSelect of SelectStmt
+    | UnionSelect of first: SelectStmt * rest: (bool * SelectStmt) list * orderBy: OrderKey list * limit: int option * offset: int option
+
 /// A `SELECT`'s `FROM` target: a real (or `information_schema` virtual)
 /// table, or a derived table — `FROM (SELECT ...) AS alias` — whose alias is
 /// mandatory (MySQL requires one) and doubles as the qualifier later
@@ -209,7 +219,7 @@ and TableRef =
 /// does.
 and FromItem =
     | FromTable of TableRef
-    | FromSubquery of SelectStmt * alias: string
+    | FromSubquery of SelectOrUnion * alias: string
 
 /// `INNER`/`CROSS JOIN` require a matching row on `On` (`CROSS JOIN` has no
 /// `ON` at all — the parser gives it the always-true `Lit (VInt 1L)` so it

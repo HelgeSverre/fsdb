@@ -1079,15 +1079,50 @@ let private tableRef: Parser<TableRef, unit> =
         | Some table -> { Database = Some first; Table = table; Alias = alias }
         | None -> { Database = None; Table = first; Alias = alias }
 
+/// A single `SELECT`, redundantly wrapped in one or more parens —
+/// `(SELECT ...)` and `((SELECT ...))` both reduce to the same `SelectStmt`.
+/// This is what lets a `UNION` branch (`selectOrUnionBranches` below, shared
+/// with the top-level `selectOrUnionStmt`) accept MySQL's `(SELECT ...)
+/// UNION (SELECT ...)` form where every branch is individually
+/// parenthesized, rather than just the bare `SELECT ...` this engine already
+/// handled.
+let private parenSelect, parenSelectRef = createParserForwardedToRef<SelectStmt, unit> ()
+parenSelectRef.Value <- attempt (sym "(" >>. parenSelect .>> sym ")") <|> selectStmtRecord
+
+/// `UNION [ALL|DISTINCT]` between two `SELECT`s — `ALL` keeps duplicates,
+/// plain `UNION` (or explicit `DISTINCT`) dedupes, matching MySQL's default.
+let private unionOp: Parser<bool, unit> =
+    keyword "UNION" >>. ((keyword "ALL" >>% true) <|> (optional (keyword "DISTINCT") >>% false))
+
+/// One `SELECT`, or a `UNION`-chained sequence of them — shared between a
+/// top-level statement (`selectOrUnionStmt`) and a derived table's body
+/// (`derivedTable`), since MySQL allows `UNION` in both places and each
+/// branch may be individually parenthesized (`parenSelect`).
+let private selectOrUnionBranches: Parser<SelectStmt * (bool * SelectStmt) list, unit> =
+    parenSelect .>>. many (unionOp .>>. parenSelect)
+
 /// `FROM (SELECT ...) AS alias` — a derived table; the alias is required
 /// (MySQL rejects an unaliased one), so unlike `tableRef`'s optional alias
 /// this one is a plain `identifier`, not an `opt`. Tried with `attempt`
 /// ahead of `tableRef |>> FromTable` since both start by looking for `(` vs.
 /// a bare identifier — no ambiguity in practice (a real table name is never
-/// `(`), but `attempt` keeps the two alternatives cleanly independent.
+/// `(`), but `attempt` keeps the two alternatives cleanly independent. The
+/// body may itself be a `UNION` (Laravel's `unionAll(...)->paginate()`
+/// compiles to `SELECT COUNT(*) FROM ((SELECT ...) UNION (SELECT ...)) AS
+/// alias`), hence `selectOrUnionBranches` rather than a bare `selectStmtRecord`.
 let private derivedTable: Parser<FromItem, unit> =
-    attempt (sym "(" >>. selectStmtRecord .>> sym ")" .>>. ((keyword "AS" >>. identifier) <|> identifier))
-    |>> FromSubquery
+    attempt (
+        sym "("
+        >>. selectOrUnionBranches
+        .>> sym ")"
+        .>>. ((keyword "AS" >>. identifier) <|> identifier)
+    )
+    |>> fun ((first, rest), alias) ->
+        match rest with
+        | [] -> FromSubquery(PlainSelect first, alias)
+        | _ ->
+            let last = rest |> List.last |> snd
+            FromSubquery(UnionSelect(first, rest, last.OrderBy, last.Limit, last.Offset), alias)
 
 let private fromItem: Parser<FromItem, unit> = derivedTable <|> (tableRef |>> FromTable)
 
@@ -1171,20 +1206,16 @@ selectStmtRecordRef.Value <-
           Offset = offset
           Locking = locking.IsSome }
 
-/// `UNION [ALL|DISTINCT]` between two `SELECT`s — `ALL` keeps duplicates,
-/// plain `UNION` (or explicit `DISTINCT`) dedupes, matching MySQL's default.
-let private unionOp: Parser<bool, unit> =
-    keyword "UNION" >>. ((keyword "ALL" >>% true) <|> (optional (keyword "DISTINCT") >>% false))
-
-/// A single `SELECT`, or a `UNION`-chained sequence of them. Each branch is
-/// a full `selectStmtRecord` (so it can itself carry a trailing `ORDER
+/// A single `SELECT`, or a `UNION`-chained sequence of them (`selectOrUnionBranches`,
+/// shared with `derivedTable` — see its doc). Each branch is a full
+/// `selectStmtRecord` (so it can itself carry a trailing `ORDER
 /// BY`/`LIMIT`/lock clause), but only the *last* branch's ever ends up
 /// meaning anything: real MySQL requires parenthesizing an individual
 /// branch's own `ORDER BY`, so a bare trailing one only ever belongs to the
 /// combined result — reading it off whichever branch parsed last gets that
 /// for free without a separate "top-level" clause in the grammar.
 let private selectOrUnionStmt: Parser<Statement, unit> =
-    selectStmtRecord .>>. many (unionOp .>>. selectStmtRecord)
+    selectOrUnionBranches
     |>> function
         | first, [] -> Select first
         | first, rest ->

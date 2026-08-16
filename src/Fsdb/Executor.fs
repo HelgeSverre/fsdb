@@ -736,11 +736,16 @@ and private deriveColumns (names: string list) : ColumnDef list =
 and private resolveFromItem (store: Store) (registry: Registry) (dbName: string) (item: FromItem) : Result<ColumnDef list * Value[] list, QueryResult> =
     match item with
     | FromTable tableRef -> resolveTableRef store dbName tableRef
-    | FromSubquery(select, _alias) ->
-        match runSelectStmt store registry dbName select None with
-        | ResultSet(cols, _), _, typedRows -> Ok(deriveColumns cols, typedRows)
-        | Err(code, message), _, _ -> Error(Err(code, message))
-        | Affected _, _, _ -> Error(Err(1064, "derived table did not return a resultset"))
+    | FromSubquery(body, _alias) ->
+        let result, _, typedRows =
+            match body with
+            | PlainSelect select -> runSelectStmt store registry dbName select None
+            | UnionSelect(first, rest, orderBy, limit, offset) -> runUnionStmt store registry dbName first rest orderBy limit offset
+
+        match result with
+        | ResultSet(cols, _) -> Ok(deriveColumns cols, typedRows)
+        | Err(code, message) -> Error(Err(code, message))
+        | Affected _ -> Error(Err(1064, "derived table did not return a resultset"))
 
 /// The qualifier a `FROM`/`JOIN` source's columns resolve `qualifier.col`
 /// against: a real table's alias (or its own name), or a derived table's
@@ -1035,7 +1040,7 @@ and runUnionStmt
     (orderBy: OrderKey list)
     (limit: int option)
     (offset: int option)
-    : QueryResult * byte list =
+    : QueryResult * byte list * Value[] list =
     let runBranch (select: SelectStmt) = runSelectStmt store registry dbName select None
 
     // Each branch's text row paired with its own typed row, kept aligned
@@ -1060,11 +1065,11 @@ and runUnionStmt
                 Ok(cols, combined))
 
     match runSelectStmt store registry dbName first None with
-    | Err(code, message), _, _ -> Err(code, message), []
-    | Affected _, _, _ -> Err(1064, "UNION branch did not return a resultset"), []
+    | Err(code, message), _, _ -> Err(code, message), [], []
+    | Affected _, _, _ -> Err(1064, "UNION branch did not return a resultset"), [], []
     | ResultSet(firstCols, firstRows), firstTypes, firstTyped ->
         match rest |> List.fold combine (Ok(firstCols, List.zip firstRows firstTyped)) with
-        | Error e -> e, []
+        | Error e -> e, [], []
         | Ok(cols, allPaired) ->
             // `ORDER BY`/`LIMIT` on the combined result — same
             // alias/positional resolution as an ordinary `SELECT`, and now
@@ -1092,7 +1097,8 @@ and runUnionStmt
                             (orderBy |> List.map (fst >> orderKeyOf ta))
                             (orderBy |> List.map (fst >> orderKeyOf tb)))
 
-            ResultSet(cols, sortedPaired |> List.map fst |> applyLimitOffset limit offset), firstTypes
+            let limitedPaired = sortedPaired |> applyLimitOffset limit offset
+            ResultSet(cols, limitedPaired |> List.map fst), firstTypes, limitedPaired |> List.map snd
 
 /// One projection's `(column name, value)` pairs — a list because `SELECT
 /// *` expands to every column of the row.
@@ -2328,10 +2334,23 @@ let rec private explainJoinBlock
         | FromTable tref ->
             explainTableStats store dbName tref
             |> Result.map (fun (n, ty) -> emitTableRow idx (tref.Alias |> Option.defaultValue tref.Table) n ty)
-        | FromSubquery(sub, _alias) ->
+        | FromSubquery(PlainSelect sub, _alias) ->
             let derivedId = nextId ()
             emitTableRow idx (sprintf "<derived%d>" derivedId) None "ALL"
             explainSelectBlock store dbName nextId acc derivedId "DERIVED" sub
+        | FromSubquery(UnionSelect(first, rest, _, _, _), _alias) ->
+            // Same "DERIVED" + "UNION" per-branch shape as a top-level
+            // `Union`'s own `EXPLAIN` (see `explainStatement`'s `Union`
+            // case) — a derived table's body can be a `UNION` too
+            // (`Ast.SelectOrUnion`'s doc), so it gets the same per-branch
+            // rows nested one level under its own `<derivedN>` placeholder.
+            let derivedId = nextId ()
+            emitTableRow idx (sprintf "<derived%d>" derivedId) None "ALL"
+
+            explainSelectBlock store dbName nextId acc derivedId "DERIVED" first
+            |> Result.bind (fun () -> rest |> traverse (fun (_, s) -> explainSelectBlock store dbName nextId acc (nextId ()) "UNION" s))
+            |> Result.map ignore
+
 
     let fromResult = from |> Option.map (explainFromItem 0) |> Option.defaultValue (Ok())
 
@@ -2709,7 +2728,8 @@ let execute (store: Store) (registry: Registry) (dbName: string) (lastInsertId: 
         lastInsertId, result
 
     | Union(first, rest, orderBy, limit, offset) ->
-        lastInsertId, (runUnionStmt store registry dbName first rest orderBy limit offset |> fst)
+        let result, _, _ = runUnionStmt store registry dbName first rest orderBy limit offset
+        lastInsertId, result
 
     | Update updateStmt when updateStmt.Joins.IsEmpty ->
         let db, table = (updateStmt.From.Database |> Option.defaultValue dbName), updateStmt.From.Table

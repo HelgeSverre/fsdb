@@ -2016,6 +2016,27 @@ let tests =
                         Expect.equal rows [ [ Some "2" ]; [ Some "9" ]; [ Some "10" ] ] "sorted numerically, not lexicographically"
                     | other -> failtestf "expected a numerically-sorted UNION resultset, got %A" other
 
+                testCase "COUNT(*) FROM ((SELECT ...) UNION (SELECT ...)) AS alias — Laravel's paginate-over-union shape"
+                <| fun _ ->
+                    // `unionAll(...)->paginate()` and `->count()` compile to
+                    // exactly this: a `UNION` whose branches are each
+                    // individually parenthesized, itself wrapped in one more
+                    // pair of parens as a derived table's body.
+                    let store = newStore ()
+                    runDefault store "CREATE TABLE a (n INT)" |> ignore
+                    runDefault store "CREATE TABLE b (n INT)" |> ignore
+                    runDefault store "INSERT INTO a VALUES (1), (2)" |> ignore
+                    runDefault store "INSERT INTO b VALUES (2), (3)" |> ignore
+
+                    match runDefault store "SELECT COUNT(*) AS aggregate FROM ((SELECT n FROM a) UNION (SELECT n FROM b)) AS search_items" with
+                    | ResultSet([ "aggregate" ], [ [ Some "3" ] ]) -> ()
+                    | other -> failtestf "expected the deduped union's row count (3), got %A" other
+
+                    match runDefault store "SELECT n FROM ((SELECT n FROM a) UNION ALL (SELECT n FROM b)) AS search_items ORDER BY n" with
+                    | ResultSet([ "n" ], rows) ->
+                        Expect.equal rows [ [ Some "1" ]; [ Some "2" ]; [ Some "2" ]; [ Some "3" ] ] "UNION ALL keeps duplicates inside the derived table too"
+                    | other -> failtestf "expected the union-derived-table's rows, got %A" other
+
                 testCase "<=> is a null-safe equals: NULL <=> NULL is true, unlike ="
                 <| fun _ ->
                     let store = newStore ()
