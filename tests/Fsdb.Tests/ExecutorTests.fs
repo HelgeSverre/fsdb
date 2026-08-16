@@ -1634,6 +1634,54 @@ let tests =
                         Expect.equal rows [ [ Some "GB"; Some "2" ]; [ Some "NO"; Some "1" ] ] "LIMIT after grouping takes the first-occurrence groups"
                     | other -> failtestf "expected first-occurrence-order groups under LIMIT, got %A" other
 
+                testCase "GROUP BY with no ORDER BY sorts by the group key when a leftmost index covers it, matching MySQL"
+                <| fun _ ->
+                    let store = newStore ()
+                    runDefault store "CREATE TABLE t (code VARCHAR(10))" |> ignore
+                    runDefault store "INSERT INTO t VALUES ('GB'), ('NO'), ('DE'), ('NL'), ('GB')" |> ignore
+                    runDefault store "CREATE INDEX idx_code ON t (code)" |> ignore
+
+                    match runDefault store "SELECT code, COUNT(*) AS c FROM t GROUP BY code" with
+                    | ResultSet([ "code"; "c" ], rows) ->
+                        Expect.equal
+                            rows
+                            [ [ Some "DE"; Some "1" ]; [ Some "GB"; Some "2" ]; [ Some "NL"; Some "1" ]; [ Some "NO"; Some "1" ] ]
+                            "an index leading with the group column sorts, unlike the unindexed case above"
+                    | other -> failtestf "expected code-sorted groups, got %A" other
+
+                testCase "GROUP BY sorts through a composite index once WHERE pins every column ahead of the group key"
+                <| fun _ ->
+                    let store = newStore ()
+                    runDefault store "CREATE TABLE t (is_published INT, code VARCHAR(10), city VARCHAR(10))" |> ignore
+
+                    runDefault
+                        store
+                        "INSERT INTO t VALUES (1, 'GB', 'x'), (1, 'NO', 'x'), (1, 'DE', 'x'), (1, 'NL', 'x'), (0, 'ZZ', 'x')"
+                    |> ignore
+
+                    runDefault store "CREATE INDEX idx_pub_code_city ON t (is_published, code, city)" |> ignore
+
+                    // Without the WHERE pinning `is_published`, the group
+                    // column isn't a leading run of the index by itself, so
+                    // this stays unsorted (first-occurrence).
+                    match runDefault store "SELECT code, COUNT(*) AS c FROM t GROUP BY code" with
+                    | ResultSet([ "code"; "c" ], rows) ->
+                        Expect.equal
+                            rows
+                            [ [ Some "GB"; Some "1" ]; [ Some "NO"; Some "1" ]; [ Some "DE"; Some "1" ]; [ Some "NL"; Some "1" ]; [ Some "ZZ"; Some "1" ] ]
+                            "no WHERE pin means the composite index doesn't apply, so groups stay unsorted"
+                    | other -> failtestf "expected unsorted groups, got %A" other
+
+                    // With the equality WHERE, `is_published` is pinned and
+                    // `code` becomes the index's next column — sorted.
+                    match runDefault store "SELECT code, COUNT(*) AS c FROM t WHERE is_published = 1 GROUP BY code" with
+                    | ResultSet([ "code"; "c" ], rows) ->
+                        Expect.equal
+                            rows
+                            [ [ Some "DE"; Some "1" ]; [ Some "GB"; Some "1" ]; [ Some "NL"; Some "1" ]; [ Some "NO"; Some "1" ] ]
+                            "the WHERE-pinned composite index sorts, matching MySQL's GROUP BY-using-an-index optimization"
+                    | other -> failtestf "expected code-sorted groups, got %A" other
+
                 testCase "ORDER BY an aggregate not in the SELECT list, over a grouped query"
                 <| fun _ ->
                     let store = newStore ()

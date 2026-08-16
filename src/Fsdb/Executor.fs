@@ -1334,6 +1334,86 @@ and private resolveOrderKey (ctx: EvalContext) (outputCols: (string * Value) lis
 /// `rewriteAggregates` per group before evaluating what's left against that
 /// group's first row — MySQL's `ONLY_FULL_GROUP_BY`-off behavior for a bare
 /// non-aggregated column, equivalent to wrapping it in `ANY_VALUE`.
+/// Whether a `GROUP BY` key is a plain column list — real MySQL's own
+/// "GROUP BY optimization using an index" (see `groupByIsIndexOrdered`
+/// below) only ever applies to grouping by actual columns, never by an
+/// expression.
+and private groupByColumnNames (groupExprs: Expr list) : string list option =
+    let asColumnName =
+        function
+        | Col name
+        | QualifiedCol(_, name) -> Some name
+        | _ -> None
+
+    let names = groupExprs |> List.map asColumnName
+    if names |> List.forall Option.isSome then Some(names |> List.map Option.get) else None
+
+/// Column names pinned to a constant by a top-level `WHERE col = <literal>`
+/// equality, recursing through `AND` — the only shape MySQL's own GROUP BY
+/// index optimization looks for. An `OR`, a non-`=` comparison, or an
+/// equality against anything but a literal doesn't pin its column, which
+/// only ever makes `indexSortsGroupBy` below miss a real optimization
+/// opportunity (fsdb stays unsorted where MySQL would've sorted), never
+/// the other way around.
+and private whereEqualityPinnedColumns (whereExpr: Expr option) : Set<string> =
+    let rec walk expr acc =
+        match expr with
+        | BinOp(And, l, r) -> walk r (walk l acc)
+        | BinOp(Eq, Col name, Lit _)
+        | BinOp(Eq, Lit _, Col name)
+        | BinOp(Eq, QualifiedCol(_, name), Lit _)
+        | BinOp(Eq, Lit _, QualifiedCol(_, name)) -> Set.add (name.ToLowerInvariant()) acc
+        | _ -> acc
+
+    whereExpr |> Option.map (fun e -> walk e Set.empty) |> Option.defaultValue Set.empty
+
+/// Whether `groupCols` (lowercased, in `GROUP BY` order) sits right after
+/// `indexCols`' (lowercased, in index-declaration order) longest leading
+/// run of columns every one of which is in `pinned` — mirrors real MySQL's
+/// documented "GROUP BY optimization using an index": an equality
+/// condition on every index column before the grouped ones lets an ordered
+/// index/range scan feed rows already sorted by the group key, skipping
+/// the temp-table pass that would otherwise dedupe them in whatever order
+/// the table scan happened to visit them (fsdb's own first-occurrence
+/// default, since it never does real index-accelerated access — see
+/// `Storage.Table.Indexes`'s doc).
+and private indexSortsGroupBy (pinned: Set<string>) (groupCols: string list) (indexCols: string list) : bool =
+    let rec dropPinnedPrefix cols =
+        match cols with
+        | c :: rest when Set.contains c pinned -> dropPinnedPrefix rest
+        | _ -> cols
+
+    let remaining = indexCols |> List.map (fun c -> c.ToLowerInvariant()) |> dropPinnedPrefix
+
+    List.length remaining >= List.length groupCols
+    && List.truncate (List.length groupCols) remaining = groupCols
+
+/// Whether a bare `GROUP BY` (no `ORDER BY` to override it) comes back
+/// sorted by the group key ascending, the way real MySQL 8.4 does whenever
+/// an index makes that free (`indexSortsGroupBy`) — checked once per query
+/// rather than per group. Conservatively `false` (fsdb's oracle-verified
+/// default: first-occurrence order) for anything this simple index-metadata
+/// check can't answer: a join, a derived table, or a `GROUP BY` on
+/// something other than a plain column list. Verified against real MySQL
+/// 8.4: an unindexed key keeps first-occurrence order, a single-column
+/// index leading with the group column (or a composite one, once a WHERE
+/// equality pins every column ahead of it) sorts ascending.
+and private groupByIsIndexOrdered (store: Store) (dbName: string) (select: SelectStmt) (groupExprs: Expr list) : bool =
+    match select.From, select.Joins, groupByColumnNames groupExprs with
+    | Some(FromTable tref), [], Some groupCols ->
+        let groupColsLower = groupCols |> List.map (fun c -> c.ToLowerInvariant())
+        let tableDb = tref.Database |> Option.defaultValue dbName
+
+        match InformationSchema.findTable store.Catalog tableDb tref.Table with
+        | Error _ -> false
+        | Ok table ->
+            let pinned = whereEqualityPinnedColumns select.Where
+            let pkColumns = table.Columns |> List.filter (fun c -> c.PrimaryKey) |> List.map (fun c -> c.Name)
+
+            (if pkColumns.IsEmpty then [] else [ pkColumns ]) @ (table.Indexes |> List.map (fun ix -> ix.Columns))
+            |> List.exists (indexSortsGroupBy pinned groupColsLower)
+    | _ -> false
+
 and private runGroupedSelect
     (store: Store)
     (registry: Registry)
@@ -1422,25 +1502,41 @@ and private runGroupedSelect
         | Ok maybeMatched ->
             let matched = maybeMatched |> List.choose id
 
-            let buildGroups () : Result<Value[] list list, EvalError> =
+            // A bare `GROUP BY` with no `ORDER BY` isn't sorted by the SQL
+            // standard, but real MySQL sorts by the group key ascending
+            // whenever an index makes that free (see `groupByIsIndexOrdered`)
+            // — checked once here rather than per group, since it only
+            // depends on the query's shape, not any row's data.
+            let indexOrdered =
+                select.OrderBy.IsEmpty
+                && not groupExprs.IsEmpty
+                && groupByIsIndexOrdered store dbName select groupExprs
+
+            // Each group carries its own key alongside its rows so the
+            // `indexOrdered` branch below can sort by it; with an explicit
+            // `ORDER BY`, or when `indexOrdered` is false, `orderKeysOf`'s
+            // keys decide instead and this key goes unused.
+            let buildGroups () : Result<(Value list * Value[] list) list, EvalError> =
                 if groupExprs.IsEmpty then
-                    Ok [ matched ]
+                    Ok [ [], matched ]
                 else
                     matched
                     |> traverse (fun row -> groupExprs |> traverse (evalExpr (ctxFor row)) |> Result.map (fun key -> key, row))
-                    |> Result.map (fun keyed -> keyed |> List.groupBy fst |> List.map (snd >> List.map snd))
+                    |> Result.map (fun keyed -> keyed |> List.groupBy fst |> List.map (fun (key, rows) -> key, rows |> List.map snd))
 
             match buildGroups () with
             | Error(code, message) -> Err(code, message), [], []
             | Ok groups ->
-                let processGroup (groupRows: Value[] list) : Result<((string * Value) list * Value list) option, EvalError> =
+                let processGroup
+                    (key: Value list, groupRows: Value[] list)
+                    : Result<((string * Value) list * Value list * Value list) option, EvalError> =
                     havingOk groupRows
                     |> Result.bind (fun keep ->
                         if not keep then
                             Ok None
                         else
                             projectGroup groupRows
-                            |> Result.bind (fun proj -> orderKeysOf proj groupRows |> Result.map (fun keys -> Some(proj, keys))))
+                            |> Result.bind (fun proj -> orderKeysOf proj groupRows |> Result.map (fun keys -> Some(proj, keys, key))))
 
                 match groups |> traverse processGroup with
                 | Error(code, message) -> Err(code, message), [], []
@@ -1448,14 +1544,19 @@ and private runGroupedSelect
                     let kept = maybeRows |> List.choose id
 
                     let sorted =
-                        kept |> List.sortWith (fun (_, ka) (_, kb) -> compareByOrderKeys (List.map snd select.OrderBy) ka kb)
+                        if indexOrdered then
+                            kept
+                            |> List.sortWith (fun (_, _, ka) (_, _, kb) ->
+                                compareByOrderKeys (groupExprs |> List.map (fun _ -> Asc)) ka kb)
+                        else
+                            kept |> List.sortWith (fun (_, ka, _) (_, kb, _) -> compareByOrderKeys (List.map snd select.OrderBy) ka kb)
 
                     let paired =
                         sorted
-                        |> List.map (fun (proj, _) -> proj |> List.map (snd >> toText), proj |> List.map snd |> Array.ofList)
+                        |> List.map (fun (proj, _, _) -> proj |> List.map (snd >> toText), proj |> List.map snd |> Array.ofList)
 
                     let dedupedPaired = if select.Distinct then paired |> List.distinctBy fst else paired
-                    let types = columnTypesOf (List.length colNames) (sorted |> List.map fst)
+                    let types = columnTypesOf (List.length colNames) (sorted |> List.map (fun (proj, _, _) -> proj))
                     let limited = dedupedPaired |> applyLimitOffset select.Limit select.Offset
                     ResultSet(colNames, limited |> List.map fst), types, limited |> List.map snd
 
