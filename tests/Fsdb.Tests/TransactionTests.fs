@@ -114,4 +114,19 @@ let tests =
 
               match handle other "SELECT id FROM tx_m" |> snd with
               | ResultSet(_, [ [ Some "1" ] ]) -> ()
-              | result -> failtestf "expected the transaction's own write to also be there, got %A" result ]
+              | result -> failtestf "expected the transaction's own write to also be there, got %A" result
+
+          testCase "ROLLBACK does not roll back an AUTO_INCREMENT counter, matching MySQL"
+          <| fun _ ->
+              let session = create 1 (Fsdb.Storage.create ())
+              let session, _ = handle session "CREATE TABLE tx_ai (id INT AUTO_INCREMENT PRIMARY KEY, v INT)"
+              let session, _ = handle session "INSERT INTO tx_ai (v) VALUES (1)"
+              let session, _ = handle session "BEGIN"
+              let session, _ = handle session "INSERT INTO tx_ai (v) VALUES (2)"
+              let session, _ = handle session "INSERT INTO tx_ai (v) VALUES (3)"
+              let session, _ = handle session "ROLLBACK"
+              let session, _ = handle session "INSERT INTO tx_ai (v) VALUES (4)"
+
+              match handle session "SELECT id, v FROM tx_ai ORDER BY id" |> snd with
+              | ResultSet(_, [ [ Some "1"; Some "1" ]; [ Some "4"; Some "4" ] ]) -> ()
+              | result -> failtestf "expected the id 1/4 rows MySQL 8.4 produces, got %A" result ]

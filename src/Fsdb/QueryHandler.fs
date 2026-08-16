@@ -537,9 +537,37 @@ let private commitSession (session: Session) : Session =
         { session with Tx = None }
     | None -> session
 
-/// Discards the open transaction's snapshot without touching the shared
-/// store — a no-op, matching real MySQL, if there isn't one open.
-let private rollbackSession (session: Session) : Session = { session with Tx = None }
+/// Discards the open transaction's snapshot — a no-op, matching real MySQL,
+/// if there isn't one open — except for each table's AUTO_INCREMENT
+/// counter, which MySQL never rolls back (an id an aborted INSERT consumed
+/// stays burned). Bumps the shared store's counter up to the snapshot's if
+/// the snapshot ran it ahead; leaves everything else (rows, schema) alone.
+let private rollbackSession (session: Session) : Session =
+    match session.Tx with
+    | Some tx ->
+        lock session.Store.Lock (fun () ->
+            session.Store.Catalog <-
+                tx.Snapshot.Catalog
+                |> Map.fold
+                    (fun liveCatalog dbName snapshotDb ->
+                        match Map.tryFind dbName liveCatalog with
+                        | None -> liveCatalog
+                        | Some liveDb ->
+                            let mergedDb =
+                                snapshotDb
+                                |> Map.fold
+                                    (fun acc tableName (snapshotTable: Table) ->
+                                        match Map.tryFind tableName acc with
+                                        | Some(liveTable: Table) when snapshotTable.NextAutoId > liveTable.NextAutoId ->
+                                            Map.add tableName { liveTable with NextAutoId = snapshotTable.NextAutoId } acc
+                                        | _ -> acc)
+                                    liveDb
+
+                            Map.add dbName mergedDb liveCatalog)
+                    session.Store.Catalog)
+    | None -> ()
+
+    { session with Tx = None }
 
 /// Starts a new transaction, snapshotting the shared store's catalog as of
 /// right now. MySQL implicitly commits an already-open transaction before
