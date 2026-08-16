@@ -63,6 +63,17 @@ let tests =
                   Expect.equal session.LastResultColumnTypes [ TypeLongLong; TypeVarString ] "id is int, name is a string"
               | _, other -> failtestf "expected a resultset, got %A" other
 
+          testCase "SUM over an integer column reports MySQL's DECIMAL result type"
+          <| fun _ ->
+              let session = create 1 (Fsdb.Storage.create ())
+              let session, _ = handle session "CREATE TABLE t (n BIGINT)"
+              let session, _ = handle session "INSERT INTO t VALUES (9223372036854775807), (1)"
+
+              match handle session "SELECT SUM(n) AS total FROM t" with
+              | session, ResultSet([ "total" ], [ [ Some "9223372036854775808" ] ]) ->
+                  Expect.equal session.LastResultColumnTypes [ TypeNewDecimal ] "SUM(BIGINT) is NEWDECIMAL, not LONGLONG"
+              | _, other -> failtestf "expected a decimal SUM resultset, got %A" other
+
           testCase "LastResultColumnTypes doesn't leak from a real SELECT onto a later same-arity probe result"
           <| fun _ ->
               let session = create 1 (Fsdb.Storage.create ())
@@ -119,6 +130,18 @@ let tests =
               with
               | ResultSet(_, [ [ Some "1"; Some _; Some "REPEATABLE-READ" ] ]) -> ()
               | other -> failtestf "expected all three variables resolved, got %A" other
+
+          testCase "MySqlConnector's REPEATABLE READ transaction handshake is accepted"
+          <| fun _ ->
+              let session = create 1 (Fsdb.Storage.create ())
+
+              match handle session "SET SESSION TRANSACTION ISOLATION LEVEL REPEATABLE READ" with
+              | session, Affected 0UL ->
+                  Expect.equal
+                      (session.Variables |> Map.tryFind "transaction_isolation" |> Option.flatten)
+                      (Some "REPEATABLE-READ")
+                      "the advertised isolation matches FSDB's transaction snapshots"
+              | _, other -> failtestf "expected MySqlConnector's transaction preamble to return OK, got %A" other
 
           testCase "SELECT @@version_comment LIMIT 1 tolerates the trailing LIMIT clause"
           <| fun _ ->

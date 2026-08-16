@@ -1356,6 +1356,22 @@ let tests =
                         Expect.equal rows [ [ Some "alice"; Some "first" ]; [ Some "bob"; None ] ] "bob survives with a NULL title"
                     | other -> failtestf "expected a joined resultset, got %A" other
 
+                testCase "integer equality hash join preserves duplicate matches and never matches NULL keys"
+                <| fun _ ->
+                    let store = newStore ()
+                    runDefault store "CREATE TABLE lhs (id INT NULL)" |> ignore
+                    runDefault store "CREATE TABLE rhs (owner_id INT NULL, label VARCHAR(10))" |> ignore
+                    runDefault store "INSERT INTO lhs VALUES (1), (NULL), (2)" |> ignore
+                    runDefault store "INSERT INTO rhs VALUES (1, 'a'), (1, 'b'), (NULL, 'null-key')" |> ignore
+
+                    match runDefault store "SELECT lhs.id, rhs.label FROM lhs LEFT JOIN rhs ON lhs.id = rhs.owner_id ORDER BY lhs.id, rhs.label" with
+                    | ResultSet([ "id"; "label" ], rows) ->
+                        Expect.equal
+                            rows
+                            [ [ None; None ]; [ Some "1"; Some "a" ]; [ Some "1"; Some "b" ]; [ Some "2"; None ] ]
+                            "NULL does not equal NULL, duplicate right keys preserve both matches, and unmatched left rows are padded"
+                    | other -> failtestf "expected a duplicate-preserving left join resultset, got %A" other
+
                 testCase "RIGHT JOIN keeps an unmatched right row, padding the left side with NULL"
                 <| fun _ ->
                     let store = newStore ()

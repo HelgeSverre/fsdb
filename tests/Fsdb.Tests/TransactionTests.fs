@@ -99,14 +99,25 @@ let tests =
               let session, _ = handle session "INSERT INTO tx_m VALUES (1)"
 
               let other = create 2 store
-              let other, otherResult = handle other "INSERT INTO tx_other VALUES (99)"
+              use otherStarted = new Threading.ManualResetEventSlim(false)
+
+              let otherInsert =
+                  Threading.Tasks.Task.Run(fun () ->
+                      otherStarted.Set()
+                      handle other "INSERT INTO tx_other VALUES (99)")
+
+              Expect.isTrue (otherStarted.Wait(TimeSpan.FromSeconds 1.0)) "the concurrent different-table writer started"
+
+              // The current transaction gate deliberately serializes even
+              // disjoint-table writers. Commit the first transaction so the
+              // queued writer can run, then prove neither result was lost.
+              let session, _ = handle session "COMMIT"
+              ignore session
+              let other, otherResult = otherInsert.GetAwaiter().GetResult()
 
               match otherResult with
               | Affected 1UL -> ()
               | result -> failtestf "expected the concurrent insert into a different table to succeed, got %A" result
-
-              let session, _ = handle session "COMMIT"
-              ignore session
 
               match handle other "SELECT id FROM tx_other" |> snd with
               | ResultSet(_, [ [ Some "99" ] ]) -> ()
@@ -115,6 +126,42 @@ let tests =
               match handle other "SELECT id FROM tx_m" |> snd with
               | ResultSet(_, [ [ Some "1" ] ]) -> ()
               | result -> failtestf "expected the transaction's own write to also be there, got %A" result
+
+          testCase "concurrent transactions updating the same table serialize without losing a committed increment"
+          <| fun _ ->
+              let store = Fsdb.Storage.create ()
+              let first = create 1 store
+              let first, _ = handle first "CREATE TABLE tx_hot (id INT PRIMARY KEY, n INT)"
+              let first, _ = handle first "INSERT INTO tx_hot VALUES (1, 0)"
+              let first, _ = handle first "BEGIN"
+              let second, _ = handle (create 2 store) "BEGIN"
+              let first, firstUpdate = handle first "UPDATE tx_hot SET n = n + 1 WHERE id = 1"
+
+              match firstUpdate with
+              | Affected 1UL -> ()
+              | result -> failtestf "expected the first increment to succeed, got %A" result
+
+              use secondStarted = new Threading.ManualResetEventSlim(false)
+
+              let secondUpdate =
+                  Threading.Tasks.Task.Run(fun () ->
+                      secondStarted.Set()
+                      handle second "UPDATE tx_hot SET n = n + 1 WHERE id = 1")
+
+              Expect.isTrue (secondStarted.Wait(TimeSpan.FromSeconds 1.0)) "the second writer started"
+              let first, _ = handle first "COMMIT"
+              ignore first
+              let second, secondResult = secondUpdate.GetAwaiter().GetResult()
+
+              match secondResult with
+              | Affected 1UL -> ()
+              | result -> failtestf "expected the queued increment to succeed, got %A" result
+
+              let second, _ = handle second "COMMIT"
+
+              match handle second "SELECT n FROM tx_hot WHERE id = 1" |> snd with
+              | ResultSet(_, [ [ Some "2" ] ]) -> ()
+              | result -> failtestf "expected both committed increments to survive, got %A" result
 
           testCase "ROLLBACK does not roll back an AUTO_INCREMENT counter, matching MySQL"
           <| fun _ ->

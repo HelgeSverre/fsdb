@@ -4,6 +4,7 @@
 /// scan -> filter -> order -> limit/offset -> project.
 module Fsdb.Executor
 
+open System.Collections.Generic
 open System.Text.RegularExpressions
 open Fsdb.Ast
 open Fsdb.Value
@@ -781,12 +782,11 @@ and private whereMatches (ctxFor: Value[] -> EvalContext) (where: Expr option) (
 /// with whatever `join.Kind` needs added on top — `LEFT`/`RIGHT` also keep
 /// the side that matched nothing, `NULL`-padded on the other side; `INNER`
 /// and `CROSS` (the latter's `On` is always the literal-true `join.On` the
-/// parser gives it) keep only the matches. Indices (not row references)
+/// parser gives it) keep only the matches. A qualified integer equality
+/// predicate uses a right-side hash lookup; other predicates retain the
+/// general nested-loop evaluator. Indices (not row references)
 /// track which left/right rows matched anything, so outer-join padding is
-/// correct even if two rows happen to be structurally equal. A nested loop,
-/// not a hash join — fine at the row counts a migration/test table holds;
-/// ponytail: revisit if a JOIN over a realistically large table ever shows
-/// up in a profile.
+/// correct even if two rows happen to be structurally equal.
 and private applyJoin
     (store: Store)
     (registry: Registry)
@@ -810,14 +810,49 @@ and private applyJoin
         let leftIndexed = rowsSoFar |> List.indexed
         let rightIndexed = joinRows |> List.indexed
 
-        let pairs = [ for li, l in leftIndexed do for ri, r in rightIndexed -> li, ri, l, r ]
+        let isIntegerType =
+            function
+            | TTinyInt _
+            | TSmallInt _
+            | TMediumInt _
+            | TInt _
+            | TBigInt _
+            | TYear -> true
+            | _ -> false
 
-        pairs
-        |> traverse (fun (li, ri, l, r) ->
-            let combined = Array.append l r
-            evalExpr { ctxFor combined with Clause = OnClause } join.On |> Result.map (fun v -> li, ri, (truthy v = Some true), combined))
-        |> Result.mapError Err
-        |> Result.map (fun flagged ->
+        let resolveQualified (qualifier: string) (column: string) =
+            qualifiers
+            |> Map.tryFind (qualifier.ToLowerInvariant())
+            |> Option.bind (fun (columns, offset) ->
+                columns
+                |> List.tryFindIndex (fun definition -> System.String.Equals(definition.Name, column, System.StringComparison.OrdinalIgnoreCase))
+                |> Option.map (fun index -> offset + index, columns.[index].Type))
+
+        let tryIntegerEqualityKeys =
+            let tryPair left right =
+                match left, right with
+                | QualifiedCol(leftQualifier, leftColumn), QualifiedCol(rightQualifier, rightColumn) ->
+                    match resolveQualified leftQualifier leftColumn, resolveQualified rightQualifier rightColumn with
+                    | Some(leftIndex, leftType), Some(rightIndex, rightType)
+                        when leftIndex < combinedColumnsSoFar.Length
+                             && rightIndex >= combinedColumnsSoFar.Length
+                             && isIntegerType leftType
+                             && isIntegerType rightType ->
+                        Some(leftIndex, rightIndex - combinedColumnsSoFar.Length)
+                    | Some(rightIndex, rightType), Some(leftIndex, leftType)
+                        when leftIndex < combinedColumnsSoFar.Length
+                             && rightIndex >= combinedColumnsSoFar.Length
+                             && isIntegerType leftType
+                             && isIntegerType rightType ->
+                        Some(leftIndex, rightIndex - combinedColumnsSoFar.Length)
+                    | _ -> None
+                | _ -> None
+
+            match join.On with
+            | BinOp(Eq, left, right) -> tryPair left right
+            | _ -> None
+
+        let buildCombinedRows (flagged: (int * int * bool * Value[]) list) =
             let matched = flagged |> List.filter (fun (_, _, ok, _) -> ok)
             let matchedCombined = matched |> List.map (fun (_, _, _, c) -> c)
             let matchedLeft = matched |> List.map (fun (li, _, _, _) -> li) |> Set.ofList
@@ -840,7 +875,49 @@ and private applyJoin
                 | LeftJoin -> matchedCombined @ leftOnly
                 | RightJoin -> matchedCombined @ rightOnly
 
-            newSources, combinedRows)
+            newSources, combinedRows
+
+        match tryIntegerEqualityKeys with
+        | Some(leftKeyIndex, rightKeyIndex)
+            when rowsSoFar
+                 |> List.forall (fun row -> row.[leftKeyIndex] = VNull || match row.[leftKeyIndex] with VInt _ -> true | _ -> false)
+                 && joinRows
+                    |> List.forall (fun row -> row.[rightKeyIndex] = VNull || match row.[rightKeyIndex] with VInt _ -> true | _ -> false) ->
+            let rightByKey = Dictionary<int64, ResizeArray<int * Value[]>>()
+
+            for rightIndex, rightRow in rightIndexed do
+                match rightRow.[rightKeyIndex] with
+                | VInt key ->
+                    match rightByKey.TryGetValue key with
+                    | true, matches -> matches.Add(rightIndex, rightRow)
+                    | false, _ ->
+                        let matches = ResizeArray<int * Value[]>()
+                        matches.Add(rightIndex, rightRow)
+                        rightByKey.Add(key, matches)
+                | _ -> ()
+
+            let flagged = ResizeArray<int * int * bool * Value[]>()
+
+            for leftIndex, leftRow in leftIndexed do
+                match leftRow.[leftKeyIndex] with
+                | VInt key ->
+                    match rightByKey.TryGetValue key with
+                    | true, matches ->
+                        for rightIndex, rightRow in matches do
+                            flagged.Add(leftIndex, rightIndex, true, Array.append leftRow rightRow)
+                    | false, _ -> ()
+                | _ -> ()
+
+            Ok(buildCombinedRows (List.ofSeq flagged))
+        | _ ->
+            let pairs = [ for li, l in leftIndexed do for ri, r in rightIndexed -> li, ri, l, r ]
+
+            pairs
+            |> traverse (fun (li, ri, l, r) ->
+                let combined = Array.append l r
+                evalExpr { ctxFor combined with Clause = OnClause } join.On |> Result.map (fun v -> li, ri, (truthy v = Some true), combined))
+            |> Result.mapError Err
+            |> Result.map buildCombinedRows
 
 /// Like `applyJoin`, but for a multi-table `UPDATE`/`DELETE ... JOIN`
 /// rather than a `SELECT`: alongside the flattened row `evalExpr` needs,

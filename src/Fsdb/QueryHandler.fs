@@ -504,10 +504,22 @@ let private setAutocommit =
         RegexOptions.IgnoreCase
     )
 
+/// MySqlConnector's real `BeginTransaction[Async]` handshake explicitly
+/// selects REPEATABLE READ before it sends START TRANSACTION. That is the
+/// isolation model FSDB's private transaction snapshot actually implements,
+/// so accepting this exact setting is truthful. Other isolation levels stay
+/// unsupported rather than being acknowledged without matching semantics.
+let private setRepeatableRead =
+    Regex(
+        @"^SET\s+(?:SESSION\s+)?TRANSACTION\s+ISOLATION\s+LEVEL\s+REPEATABLE\s+READ$",
+        RegexOptions.IgnoreCase
+    )
+
 /// Three-way merges a transaction's snapshot back into a catalog: for every
 /// (database, table) that appears in any of the three, a table this
 /// transaction actually wrote — its snapshot copy differs from
-/// `baseCatalog`'s, the seed taken at BEGIN time — wins; a table it dropped
+/// `baseCatalog`'s, the seed established at the first database statement —
+/// wins; a table it dropped
 /// (present at BEGIN, gone from the snapshot) is removed; a table it never
 /// touched is left exactly as `liveCatalog` (the shared store's catalog
 /// *right now*, not as of BEGIN) already has it, so a concurrent write to
@@ -557,9 +569,12 @@ let private mergeCatalogs (baseCatalog: Catalog) (txCatalog: Catalog) (liveCatal
 let private commitSession (session: Session) : Session =
     match session.Tx with
     | Some tx ->
-        lock session.Store.Lock (fun () ->
-            session.Store.Catalog <- mergeCatalogs tx.BaseCatalog tx.Snapshot.Catalog session.Store.Catalog
-            Storage.commitTransactionEvents session.Store tx.Snapshot)
+        try
+            lock session.Store.Lock (fun () ->
+                session.Store.Catalog <- mergeCatalogs tx.BaseCatalog tx.Snapshot.Catalog session.Store.Catalog
+                Storage.commitTransactionEvents session.Store tx.Snapshot)
+        finally
+            tx.GateLease |> Option.iter (fun lease -> lease.Dispose())
 
         { session with Tx = None }
     | None -> session
@@ -572,41 +587,88 @@ let private commitSession (session: Session) : Session =
 let private rollbackSession (session: Session) : Session =
     match session.Tx with
     | Some tx ->
-        lock session.Store.Lock (fun () ->
-            session.Store.Catalog <-
-                tx.Snapshot.Catalog
-                |> Map.fold
-                    (fun liveCatalog dbName snapshotDb ->
-                        match Map.tryFind dbName liveCatalog with
-                        | None -> liveCatalog
-                        | Some liveDb ->
-                            let mergedDb =
-                                snapshotDb
-                                |> Map.fold
-                                    (fun acc tableName (snapshotTable: Table) ->
-                                        match Map.tryFind tableName acc with
-                                        | Some(liveTable: Table) when snapshotTable.NextAutoId > liveTable.NextAutoId ->
-                                            Map.add tableName { liveTable with NextAutoId = snapshotTable.NextAutoId } acc
-                                        | _ -> acc)
-                                    liveDb
+        try
+            lock session.Store.Lock (fun () ->
+                session.Store.Catalog <-
+                    tx.Snapshot.Catalog
+                    |> Map.fold
+                        (fun liveCatalog dbName snapshotDb ->
+                            match Map.tryFind dbName liveCatalog with
+                            | None -> liveCatalog
+                            | Some liveDb ->
+                                let mergedDb =
+                                    snapshotDb
+                                    |> Map.fold
+                                        (fun acc tableName (snapshotTable: Table) ->
+                                            match Map.tryFind tableName acc with
+                                            | Some(liveTable: Table) when snapshotTable.NextAutoId > liveTable.NextAutoId ->
+                                                Map.add tableName { liveTable with NextAutoId = snapshotTable.NextAutoId } acc
+                                            | _ -> acc)
+                                        liveDb
 
-                            Map.add dbName mergedDb liveCatalog)
-                    session.Store.Catalog)
+                                Map.add dbName mergedDb liveCatalog)
+                        session.Store.Catalog)
+        finally
+            tx.GateLease |> Option.iter (fun lease -> lease.Dispose())
     | None -> ()
 
     { session with Tx = None }
 
-/// Starts a new transaction, snapshotting the shared store's catalog as of
-/// right now. MySQL implicitly commits an already-open transaction before
-/// starting another one, so this does too rather than silently discarding
-/// whatever the first transaction had done.
+/// Starts a new transaction with a provisional snapshot. The real snapshot
+/// is rebound under the transaction gate by `startTransactionStatement` at
+/// the first database statement, matching InnoDB's default deferred
+/// consistent-snapshot timing. MySQL implicitly commits an already-open
+/// transaction before starting another one, so this does too.
 let private beginTransaction (session: Session) : Session =
     let session = commitSession session
     let baseCatalog = session.Store.Catalog
     let snapshot = Storage.beginTransactionSnapshot session.Store
 
     { session with
-        Tx = Some { Snapshot = snapshot; BaseCatalog = baseCatalog; Savepoints = Map.empty } }
+        Tx =
+            Some
+                { Snapshot = snapshot
+                  BaseCatalog = baseCatalog
+                  GateLease = None
+                  Savepoints = Map.empty } }
+
+/// Establishes the transaction's actual repeatable-read snapshot at its
+/// first database statement and holds the coarse write/transaction gate for
+/// the rest of its lifetime. BEGIN itself remains non-blocking, so several
+/// clients can enter a transaction concurrently; only their first real
+/// reads/writes serialize. Re-seeding here also ensures a transaction that
+/// sat idle after BEGIN sees commits that completed before its first read,
+/// matching InnoDB's default consistent-snapshot timing.
+let startTransactionStatement (session: Session) : Session =
+    match session.Tx with
+    | Some tx when tx.GateLease.IsNone ->
+        let lease = Storage.enterTransactionGate session.Store
+
+        try
+            let baseCatalog = session.Store.Catalog
+            let snapshot = Storage.beginTransactionSnapshot session.Store
+
+            let savepoints =
+                tx.Savepoints
+                |> Map.map (fun _ (_, eventCount) -> baseCatalog, eventCount)
+
+            { session with
+                Tx =
+                    Some
+                        { Snapshot = snapshot
+                          BaseCatalog = baseCatalog
+                          GateLease = Some lease
+                          Savepoints = savepoints } }
+        with _ ->
+            lease.Dispose()
+            reraise ()
+    | _ -> session
+
+/// Rolls an abandoned connection's transaction back and, critically,
+/// releases its transaction gate. The lease is idempotent, so calling this
+/// with a session snapshot that was already committed is harmless.
+let closeSession (session: Session) : unit =
+    rollbackSession session |> ignore
 
 let private savepointNotFound (name: string) : QueryResult =
     Err(1305, sprintf "SAVEPOINT %s does not exist" name)
@@ -693,43 +755,55 @@ let private registryFor (session: Session) : Functions.Registry =
 let private executeStatement (session: Session) (sql: string) (upper: string) : Session * QueryResult =
     match Parser.parse sql with
     | Result.Ok stmt ->
-        let store = Session.currentStore session
-        // `Store.StrictMode` is store-wide, not per-session (see its doc
-        // comment) — re-derive it from *this* session's own `sql_mode`
-        // right before every statement, so another connection's `SET
-        // SESSION sql_mode = ...` (which only ever touches its own
-        // `Session.Variables`) can't leak into this one's coercion
-        // behavior, and a transaction never runs on the stale StrictMode
-        // its snapshot happened to be seeded with at BEGIN time.
-        setStrictMode
-            store
-            (lookupVar session "sql_mode" |> Option.flatten |> Option.map isStrictSqlMode |> Option.defaultValue true)
-        let registry = registryFor session
-        let dbName = session.Database |> Option.defaultValue defaultDatabase
+        let execute session =
+            let store = Session.currentStore session
+            // `Store.StrictMode` is store-wide, not per-session (see its doc
+            // comment) — re-derive it from *this* session's own `sql_mode`
+            // right before every statement, so another connection's `SET
+            // SESSION sql_mode = ...` (which only ever touches its own
+            // `Session.Variables`) can't leak into this one's coercion
+            // behavior, and a transaction never runs on the stale StrictMode
+            // its snapshot happened to be seeded with at BEGIN time.
+            setStrictMode
+                store
+                (lookupVar session "sql_mode" |> Option.flatten |> Option.map isStrictSqlMode |> Option.defaultValue true)
+            let registry = registryFor session
+            let dbName = session.Database |> Option.defaultValue defaultDatabase
 
-        // `SELECT`/`UNION` go through `Executor`'s type-preserving entry
-        // points instead of the plain `execute` every other statement uses
-        // — those are the only two statement kinds that reach the wire as
-        // a `ResultSet`, and only they still have the typed `Value`s
-        // (rather than already-rendered text) `columnTypes` needs. See
-        // `Session.LastResultColumnTypes`'s doc for why this rides along
-        // on `session` instead of widening this function's own return type.
-        let lastInsertId, result, columnTypes =
+            // `SELECT`/`UNION` go through `Executor`'s type-preserving entry
+            // points instead of the plain `execute` every other statement uses
+            // — those are the only two statement kinds that reach the wire as
+            // a `ResultSet`, and only they still have the typed `Value`s
+            // (rather than already-rendered text) `columnTypes` needs. See
+            // `Session.LastResultColumnTypes`'s doc for why this rides along
+            // on `session` instead of widening this function's own return type.
+            let lastInsertId, result, columnTypes =
+                match stmt with
+                | Select select ->
+                    let result, types = Executor.runTopLevelSelect store registry dbName select
+                    session.LastInsertId, result, types
+                | Union(first, rest, orderBy, limit, offset) ->
+                    let result, types, _ = Executor.runUnionStmt store registry dbName first rest orderBy limit offset
+                    session.LastInsertId, result, types
+                | _ ->
+                    let lastInsertId, result = Executor.execute store registry dbName session.LastInsertId stmt
+                    lastInsertId, result, []
+
+            { session with
+                LastInsertId = lastInsertId
+                LastResultColumnTypes = columnTypes },
+            result
+
+        match session.Tx with
+        | Some _ -> session |> startTransactionStatement |> execute
+        | None ->
             match stmt with
-            | Select select ->
-                let result, types = Executor.runTopLevelSelect store registry dbName select
-                session.LastInsertId, result, types
-            | Union(first, rest, orderBy, limit, offset) ->
-                let result, types, _ = Executor.runUnionStmt store registry dbName first rest orderBy limit offset
-                session.LastInsertId, result, types
+            | Select _
+            | Union _
+            | Explain _ -> execute session
             | _ ->
-                let lastInsertId, result = Executor.execute store registry dbName session.LastInsertId stmt
-                lastInsertId, result, []
-
-        { session with
-            LastInsertId = lastInsertId
-            LastResultColumnTypes = columnTypes },
-        result
+                use _gate = Storage.enterTransactionGate session.Store
+                execute session
     | Result.Error _ when upper.StartsWith "SELECT" && upper.Contains "@" ->
         { session with LastResultColumnTypes = [] }, handleAtVarSelect session sql
     | Result.Error _ -> { session with LastResultColumnTypes = [] }, syntaxError sql
@@ -746,6 +820,7 @@ let private executeStatement (session: Session) (sql: string) (upper: string) : 
 /// production to validate it against.
 type private Probe =
     | SetAutocommit of value: string
+    | SetRepeatableRead
     | SetVar
     | RollbackTo of savepoint: string
     | Begin
@@ -772,6 +847,8 @@ type private Probe =
 let private tryProbe (sql: string) (upper: string) : Probe option =
     if setAutocommit.IsMatch sql then
         Some(SetAutocommit((setAutocommit.Match sql).Groups.[1].Value))
+    elif setRepeatableRead.IsMatch sql then
+        Some SetRepeatableRead
     elif upper.StartsWith "SET " then
         Some SetVar
     elif rollbackToSavepointStmt.IsMatch sql then
@@ -820,8 +897,21 @@ let private tryProbe (sql: string) (upper: string) : Probe option =
 /// every last capture group, since that parsing already lives in
 /// `handleSet`/`handleShowVariables`/etc. and shouldn't move twice.
 let private runProbe (session: Session) (sql: string) (probe: Probe) : Session * QueryResult =
+    let session =
+        match probe with
+        | ShowDatabases
+        | ShowTableStatus
+        | ShowTables
+        | ShowCreate _
+        | ShowColumns _
+        | Describe _
+        | ShowIndex _ -> startTransactionStatement session
+        | _ -> session
+
     match probe with
     | SetAutocommit value -> handleSetAutocommit value session
+    | SetRepeatableRead ->
+        { session with Variables = Map.add "transaction_isolation" (Some "REPEATABLE-READ") session.Variables }, Affected 0UL
     | SetVar -> handleSet session sql
     | RollbackTo name -> rollbackToSavepoint name session
     | Begin -> beginTransaction session, Affected 0UL

@@ -244,6 +244,72 @@ let tests =
               }
               |> Async.RunSynchronously
 
+          testCase "disconnect rolls back a prepared transaction and releases the transaction gate"
+          <| fun _ ->
+              async {
+                  let listener = Fsdb.Server.startListening System.Net.IPAddress.Loopback 0
+                  let port = Fsdb.Server.port listener
+                  Fsdb.Server.serve listener (Fsdb.Storage.create ()) Fsdb.Functions.empty |> Async.StartAsTask |> ignore
+
+                  try
+                      let connStr =
+                          sprintf
+                              "Server=127.0.0.1;Port=%d;User ID=root;Password=;AllowPublicKeyRetrieval=True;SslMode=None;Pooling=False"
+                              port
+
+                      use setup = new MySqlConnector.MySqlConnection(connStr)
+                      do! setup.OpenAsync() |> Async.AwaitTask
+                      use create = setup.CreateCommand()
+                      create.CommandText <- "CREATE TABLE disconnect_tx (id INT PRIMARY KEY, n INT)"
+                      do! create.ExecuteNonQueryAsync() |> Async.AwaitTask |> Async.Ignore
+                      use seed = setup.CreateCommand()
+                      seed.CommandText <- "INSERT INTO disconnect_tx VALUES (1, 0)"
+                      do! seed.ExecuteNonQueryAsync() |> Async.AwaitTask |> Async.Ignore
+                      do! setup.CloseAsync() |> Async.AwaitTask
+
+                      // Exercise COM_STMT_EXECUTE while holding the transaction
+                      // gate, then drop the client without COMMIT or ROLLBACK.
+                      let abandoned = new MySqlConnector.MySqlConnection(connStr)
+                      do! abandoned.OpenAsync() |> Async.AwaitTask
+                      let! abandonedTx = abandoned.BeginTransactionAsync().AsTask() |> Async.AwaitTask
+                      use abandonedUpdate = abandoned.CreateCommand()
+                      abandonedUpdate.Transaction <- abandonedTx
+                      abandonedUpdate.CommandText <- "UPDATE disconnect_tx SET n = n + @delta WHERE id = @id"
+                      abandonedUpdate.Parameters.AddWithValue("@delta", 100) |> ignore
+                      abandonedUpdate.Parameters.AddWithValue("@id", 1) |> ignore
+                      do! abandonedUpdate.PrepareAsync() |> Async.AwaitTask
+                      let! abandonedAffected = abandonedUpdate.ExecuteNonQueryAsync() |> Async.AwaitTask
+                      Expect.equal abandonedAffected 1 "the abandoned prepared update ran inside its transaction"
+                      abandoned.Dispose()
+                      abandonedTx.Dispose()
+
+                      // If disconnect cleanup fails, this prepared update blocks
+                      // behind the leaked gate. The deadline turns that into a
+                      // bounded and diagnostic test failure instead of a hung run.
+                      use timeout = new Threading.CancellationTokenSource(TimeSpan.FromSeconds 5.0)
+                      use survivor = new MySqlConnector.MySqlConnection(connStr)
+                      do! survivor.OpenAsync(timeout.Token) |> Async.AwaitTask
+                      let! survivorTx = survivor.BeginTransactionAsync(timeout.Token).AsTask() |> Async.AwaitTask
+                      use survivorTx = survivorTx
+                      use survivorUpdate = survivor.CreateCommand()
+                      survivorUpdate.Transaction <- survivorTx
+                      survivorUpdate.CommandText <- "UPDATE disconnect_tx SET n = n + @delta WHERE id = @id"
+                      survivorUpdate.Parameters.AddWithValue("@delta", 1) |> ignore
+                      survivorUpdate.Parameters.AddWithValue("@id", 1) |> ignore
+                      do! survivorUpdate.PrepareAsync(timeout.Token) |> Async.AwaitTask
+                      let! survivorAffected = survivorUpdate.ExecuteNonQueryAsync(timeout.Token) |> Async.AwaitTask
+                      Expect.equal survivorAffected 1 "a later transaction is not wedged behind the disconnected client"
+                      do! survivorTx.CommitAsync(timeout.Token) |> Async.AwaitTask
+
+                      use read = survivor.CreateCommand()
+                      read.CommandText <- "SELECT n FROM disconnect_tx WHERE id = 1"
+                      let! finalValue = read.ExecuteScalarAsync(timeout.Token) |> Async.AwaitTask
+                      Expect.equal (Convert.ToInt64 finalValue) 1L "the abandoned +100 rolled back and only +1 committed"
+                  finally
+                      listener.Stop()
+              }
+              |> Async.RunSynchronously
+
           testCase "a table with an index and a foreign key is visible through information_schema and SHOW CREATE TABLE"
           <| fun _ ->
               async {

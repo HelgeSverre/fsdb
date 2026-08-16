@@ -188,6 +188,7 @@ let private handleConnection
         // Negotiated once the handshake response arrives; used as a fallback
         // for the "packet too large" ERR reply if that happens beforehand.
         let mutable capabilities = ServerCapabilities
+        let mutable activeSession: Session option = None
 
         try
             let authData = randomAuthPluginData ()
@@ -211,6 +212,8 @@ let private handleConnection
                         Database = resp.Database
                         CustomFunctions = customFunctions }
 
+                activeSession <- Some session
+
                 do!
                     writePacketAsync
                         stream
@@ -220,6 +223,8 @@ let private handleConnection
 
                 let rec loop (session: Session) : Async<unit> =
                     async {
+                        activeSession <- Some session
+
                         match! readPacketAsync stream with
                         | None -> ()
                         | Some cmdPacket ->
@@ -248,6 +253,7 @@ let private handleConnection
                                 return! loop { session with Database = Some db }
                             | Some(Query sql) ->
                                 let session, result = QueryHandler.handle session sql
+                                activeSession <- Some session
 
                                 do!
                                     sendQueryResult
@@ -265,6 +271,8 @@ let private handleConnection
                                 // metadata probing can still send it —
                                 // reply with the table's columns, EOF-terminated,
                                 // or a 1146 ERR if the table doesn't exist.
+                                let session = QueryHandler.startTransactionStatement session
+                                activeSession <- Some session
                                 let dbName = session.Database |> Option.defaultValue defaultDatabase
 
                                 match Storage.scan (Session.currentStore session) dbName table with
@@ -404,6 +412,7 @@ let private handleConnection
                                                 LongData = session.LongData |> Map.filter (fun (sid, _) _ -> sid <> stmtId) }
 
                                         let session, result = QueryHandler.handle session finalSql
+                                        activeSession <- Some session
 
                                         do!
                                             sendBinaryQueryResult
@@ -478,7 +487,8 @@ let private handleConnection
                     }
 
                 do! loop session
-        with :? PacketTooLargeException ->
+        with
+        | :? PacketTooLargeException ->
             // Reassembling a multi-packet payload blew past
             // maxAccumulatedPacketSize. There's no way to resync mid-stream,
             // but a best-effort ERR beats silently dropping the connection.
@@ -490,6 +500,11 @@ let private handleConnection
                 |> Async.Ignore
                 |> Async.Catch
                 |> Async.Ignore
+        | error ->
+            activeSession |> Option.iter QueryHandler.closeSession
+            return raise error
+
+        activeSession |> Option.iter QueryHandler.closeSession
     }
 
 /// Starts listening on address:port. Pass port 0 for an OS-assigned

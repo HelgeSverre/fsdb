@@ -4,7 +4,9 @@
 module Fsdb.Storage
 
 open System
+open System.Collections.Generic
 open System.Globalization
+open System.Threading
 open Fsdb.Ast
 open Fsdb.Value
 
@@ -112,9 +114,11 @@ let splitQualified (defaultDb: string) (name: string) : string * string =
     | [| db; tbl |] -> stripBackticks db, stripBackticks tbl
     | _ -> defaultDb, stripBackticks name
 
-/// ponytail: one global write lock for the whole catalog rather than
-/// per-table locks — fine until write throughput across unrelated tables
-/// actually matters, at which point shard the lock per table.
+/// ponytail: one global catalog lock plus one coarse transaction/write gate
+/// rather than row/table locks. This preserves committed state under
+/// contention but serializes unrelated explicit transactions; replace it
+/// with row versions or sharded async locks when parallel write throughput
+/// matters.
 ///
 /// `ForeignKeyChecks` gates every FK enforcement in this module (cascading
 /// deletes, `RESTRICT`, parent-existence checks on insert/update) — the
@@ -157,6 +161,14 @@ type Store =
       /// buffer as one `TransactionCommitted` on the real store — a ROLLBACK
       /// just discards the snapshot, buffer and all.
       mutable PendingEvents: ResizeArray<CommitEvent> option
+      /// Serializes the lifetime of active transactions and individual
+      /// autocommit mutations. A transaction acquires this gate on its first
+      /// real database statement (not BEGIN) and releases it at
+      /// COMMIT/ROLLBACK, which prevents the snapshot merger from replacing
+      /// a concurrent writer's changes to the same table. SemaphoreSlim is
+      /// intentionally used instead of Monitor because a connection's
+      /// BEGIN, statements, and COMMIT may resume on different threads.
+      TransactionGate: SemaphoreSlim
       Lock: obj }
 
 let create () : Store =
@@ -165,7 +177,23 @@ let create () : Store =
       StrictMode = true
       OnCommit = None
       PendingEvents = None
+      TransactionGate = new SemaphoreSlim(1, 1)
       Lock = obj () }
+
+type private TransactionGateLease(gate: SemaphoreSlim) =
+    let mutable released = 0
+
+    interface IDisposable with
+        member _.Dispose() =
+            if Interlocked.Exchange(&released, 1) = 0 then
+                gate.Release() |> ignore
+
+/// Acquires the store's coarse transaction/write gate. The returned lease
+/// is idempotent so normal COMMIT/ROLLBACK and connection cleanup can both
+/// dispose it safely without over-releasing the semaphore.
+let enterTransactionGate (store: Store) : IDisposable =
+    store.TransactionGate.Wait()
+    new TransactionGateLease(store.TransactionGate) :> IDisposable
 
 /// Delivers `event` (if any): buffers it if `store` is a transaction
 /// snapshot (`PendingEvents`), otherwise hands it straight to `OnCommit` if
@@ -201,6 +229,7 @@ let beginTransactionSnapshot (store: Store) : Store =
       StrictMode = true
       OnCommit = None
       PendingEvents = if store.OnCommit.IsSome then Some(ResizeArray()) else None
+      TransactionGate = store.TransactionGate
       Lock = obj () }
 
 /// Flushes a committed transaction's buffered events onto the real `store`
@@ -761,6 +790,45 @@ let private findUniqueCollision (groups: (string * int list) list) (existingRows
             else
                 None))
 
+/// Stable equality key for values already coerced into a table column's
+/// declared type. Strings use the same case-insensitive, PAD SPACE semantics
+/// as Value.compare; every other same-typed value uses an exact encoding.
+/// NULL is deliberately absent because a UNIQUE key containing any NULL
+/// never collides under MySQL's semantics.
+let private encodeConstraintKey (indices: int list) (row: Value[]) : string option =
+    let encode =
+        function
+        | VNull -> None
+        | VInt value -> Some("I" + string value)
+        | VDouble value ->
+            let normalized = if value = 0.0 then 0.0 else value
+            Some("D" + normalized.ToString("R", CultureInfo.InvariantCulture))
+        | VDecimal value -> Some("M" + value.ToString("G29", CultureInfo.InvariantCulture))
+        | VString value -> Some("S" + value.TrimEnd(' ').ToUpperInvariant())
+        | VBytes value -> Some("B" + Convert.ToHexString value)
+        | VDate value -> Some("T" + string value.DayNumber)
+        | VDateTime value -> Some("V" + string value.Ticks)
+        | VJson value -> Some("J" + value.TrimEnd(' ').ToUpperInvariant())
+
+    let encoded = indices |> List.map (fun index -> encode row.[index])
+
+    if encoded |> List.exists Option.isNone then
+        None
+    else
+        encoded
+        |> List.choose id
+        |> List.map (fun value -> string value.Length + ":" + value)
+        |> String.concat ""
+        |> Some
+
+let private constraintLookup indices rows =
+    let lookup = HashSet<string>(StringComparer.Ordinal)
+
+    for row in rows do
+        encodeConstraintKey indices row |> Option.iter (lookup.Add >> ignore)
+
+    lookup
+
 /// Verifies every foreign key `fks` (a child table's own `ForeignKeys`) has
 /// a matching parent row for `row`'s values, per MySQL's MATCH SIMPLE
 /// semantics: a foreign key with any `NULL` column doesn't need a parent at
@@ -770,29 +838,29 @@ let private findUniqueCollision (groups: (string * int list) list) (existingRows
 /// blocking every write — `information_schema` can still show the stale FK,
 /// same as MySQL leaves a dangling constraint visible after `DROP TABLE ...
 /// FOREIGN_KEY_CHECKS=0`.
+let private checkFkParent (db: Database) (childColumns: ColumnDef list) (row: Value[]) (fk: ForeignKeyDef) : Result<unit, StorageError> =
+    match fk.Columns |> traverse (resolveColumn childColumns) with
+    | Error _ -> Ok()
+    | Ok idxs ->
+        let values = idxs |> List.map (fun i -> row.[i])
+
+        if values |> List.exists ((=) VNull) then
+            Ok()
+        else
+            match Map.tryFind (normalizeTableName fk.RefTable) db with
+            | None -> Ok()
+            | Some parent ->
+                match fk.RefColumns |> traverse (resolveColumn parent.Columns) with
+                | Error _ -> Ok()
+                | Ok refIdxs ->
+                    let found =
+                        parent.Rows
+                        |> List.exists (fun prow -> List.forall2 (fun i v -> compare prow.[i] v = 0) refIdxs values)
+
+                    if found then Ok() else Error(ForeignKeyParentMissing fk.Name)
+
 let private checkFkParents (db: Database) (childColumns: ColumnDef list) (fks: ForeignKeyDef list) (row: Value[]) : Result<unit, StorageError> =
-    let checkOne (fk: ForeignKeyDef) =
-        match fk.Columns |> traverse (resolveColumn childColumns) with
-        | Error _ -> Ok()
-        | Ok idxs ->
-            let values = idxs |> List.map (fun i -> row.[i])
-
-            if values |> List.exists ((=) VNull) then
-                Ok()
-            else
-                match Map.tryFind (normalizeTableName fk.RefTable) db with
-                | None -> Ok()
-                | Some parent ->
-                    match fk.RefColumns |> traverse (resolveColumn parent.Columns) with
-                    | Error _ -> Ok()
-                    | Ok refIdxs ->
-                        let found =
-                            parent.Rows
-                            |> List.exists (fun prow -> List.forall2 (fun i v -> compare prow.[i] v = 0) refIdxs values)
-
-                        if found then Ok() else Error(ForeignKeyParentMissing fk.Name)
-
-    fks |> traverse checkOne |> Result.map ignore
+    fks |> traverse (checkFkParent db childColumns row) |> Result.map ignore
 
 /// Resolves `columns` (the explicit column list, or `None` for "all columns
 /// in table order") to indices against `table`.
@@ -833,10 +901,44 @@ let private insertCore
     : Result<Database * (int64 * int * Value[] list), StorageError> =
     let table = Map.find tableKey db
     let uniqueGroups = uniqueKeyGroups table
+    let uniqueLookups =
+        uniqueGroups
+        |> List.map (fun (name, indices) -> name, indices, constraintLookup indices table.Rows)
+
+    // Parent keys are immutable for the duration of this INSERT. Build one
+    // compact lookup per ordinary FK instead of rescanning its parent table
+    // for every child candidate. A self-FK also records its parent-column
+    // indices so every accepted row can extend the lookup immediately.
+    let foreignKeyLookups =
+        if not checkFks then
+            Map.empty
+        else
+            table.ForeignKeys
+            |> List.choose (fun foreignKey ->
+                match
+                    foreignKey.Columns |> traverse (resolveColumn table.Columns),
+                    db |> Map.tryFind (normalizeTableName foreignKey.RefTable)
+                with
+                | Ok childIndices, Some parent ->
+                    match foreignKey.RefColumns |> traverse (resolveColumn parent.Columns) with
+                    | Ok parentIndices ->
+                        let selfParentIndices =
+                            if normalizeTableName foreignKey.RefTable = tableKey then Some parentIndices else None
+
+                        Some(foreignKey.Name, (childIndices, selfParentIndices, constraintLookup parentIndices parent.Rows))
+                    | Error _ -> None
+                | _ -> None)
+            |> Map.ofList
+
+    let hasUnacceleratedSelfForeignKey =
+        table.ForeignKeys
+        |> List.exists (fun foreignKey ->
+            normalizeTableName foreignKey.RefTable = tableKey
+            && not (foreignKeyLookups |> Map.containsKey foreignKey.Name))
 
     let step acc (rowValues: Value list) =
         acc
-        |> Result.bind (fun (accepted: Value[] list, nextAutoId, firstAuto, lastExplicit) ->
+        |> Result.bind (fun (acceptedRev: Value[] list, nextAutoId, firstAuto, lastExplicit) ->
             if List.length rowValues <> List.length idxs then
                 Error(ColumnCountMismatch(List.length idxs, List.length rowValues))
             else
@@ -848,7 +950,25 @@ let private insertCore
                     |> Result.bind (fun (finalValues, nextAutoId', assigned) ->
                         let candidate = Array.ofList finalValues
 
-                        match findUniqueCollision uniqueGroups (table.Rows @ accepted) candidate with
+                        // Avoid constructing `table.Rows @ accepted` for
+                        // every candidate. On an unkeyed volume table there
+                        // is nothing to inspect at all; on a keyed table the
+                        // two existing-row partitions can be searched in
+                        // turn without copying either one.
+                        let uniqueCollision =
+                            uniqueLookups
+                            |> List.tryPick (fun (name, indices, lookup) ->
+                                match encodeConstraintKey indices candidate with
+                                | Some key when lookup.Contains key ->
+                                    let value =
+                                        indices
+                                        |> List.map (fun index -> candidate.[index] |> toText |> Option.defaultValue "NULL")
+                                        |> String.concat "-"
+
+                                    Some(DuplicateKey(name, value))
+                                | _ -> None)
+
+                        match uniqueCollision with
                         | Some e -> Error e
                         | None ->
                             if checkFks then
@@ -858,9 +978,28 @@ let private insertCore
                                 // not just what was already committed before
                                 // the statement started — same reasoning as
                                 // `findUniqueCollision` just above.
-                                let dbView = Map.add tableKey { table with Rows = table.Rows @ accepted } db
-                                checkFkParents dbView table.Columns table.ForeignKeys candidate
-                                |> Result.map (fun () -> candidate, nextAutoId', assigned)
+                                // Ordinary parent tables need no overlay.
+                                // Only a self-FK needs rows accepted earlier
+                                // in this statement made visible, in their
+                                // original insertion order.
+                                let dbView =
+                                    if hasUnacceleratedSelfForeignKey && not acceptedRev.IsEmpty then
+                                        Map.add tableKey { table with Rows = table.Rows @ List.rev acceptedRev } db
+                                    else
+                                        db
+
+                                let checkOneForeignKey foreignKey =
+                                    match Map.tryFind foreignKey.Name foreignKeyLookups with
+                                    | Some(childIndices, _, parentKeys) ->
+                                        match encodeConstraintKey childIndices candidate with
+                                        | None -> Ok()
+                                        | Some key when parentKeys.Contains key -> Ok()
+                                        | Some _ -> Error(ForeignKeyParentMissing foreignKey.Name)
+                                    | None -> checkFkParent dbView table.Columns candidate foreignKey
+
+                                table.ForeignKeys
+                                |> traverse checkOneForeignKey
+                                |> Result.map (fun _ -> candidate, nextAutoId', assigned)
                             else
                                 Ok(candidate, nextAutoId', assigned))
 
@@ -872,13 +1011,25 @@ let private insertCore
                         | Some(false, v) -> firstAuto, Some v
                         | None -> firstAuto, lastExplicit
 
-                    Ok(accepted @ [ candidate ], nextAutoId', firstAuto', lastExplicit')
-                | Error _ when ignoreErrors -> Ok(accepted, nextAutoId, firstAuto, lastExplicit)
+                    for _, indices, lookup in uniqueLookups do
+                        encodeConstraintKey indices candidate |> Option.iter (lookup.Add >> ignore)
+
+                    for KeyValue(_, (_, selfParentIndices, lookup)) in foreignKeyLookups do
+                        selfParentIndices
+                        |> Option.bind (fun indices -> encodeConstraintKey indices candidate)
+                        |> Option.iter (lookup.Add >> ignore)
+
+                    // Prepending is O(1); reverse once after the fold so
+                    // externally observable insertion and commit-event
+                    // order remains unchanged.
+                    Ok(candidate :: acceptedRev, nextAutoId', firstAuto', lastExplicit')
+                | Error _ when ignoreErrors -> Ok(acceptedRev, nextAutoId, firstAuto, lastExplicit)
                 | Error e -> Error e)
 
     rowsIn
     |> List.fold step (Ok([], table.NextAutoId, None, None))
-    |> Result.map (fun (accepted, nextAutoId', firstAuto, lastExplicit) ->
+    |> Result.map (fun (acceptedRev, nextAutoId', firstAuto, lastExplicit) ->
+        let accepted = List.rev acceptedRev
         let firstAssigned = Option.orElse lastExplicit firstAuto
         let table' = { table with Rows = table.Rows @ accepted; NextAutoId = nextAutoId' }
         Map.add tableKey table' db, (Option.defaultValue 0L firstAssigned, List.length accepted, accepted))

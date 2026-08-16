@@ -1,6 +1,7 @@
 /// Per-connection session state: current database and session variables.
 module Fsdb.Session
 
+open System
 open Fsdb.Protocol
 open Fsdb.Storage
 
@@ -64,8 +65,9 @@ type PreparedStmt =
       LastParamTypes: (byte * bool) list option }
 
 /// One open transaction. `Snapshot` is a private `Store` — its own
-/// `Catalog`, its own lock — seeded from the shared store's catalog at
-/// BEGIN time; every statement inside the transaction reads/writes this
+/// `Catalog`, its own lock — seeded from the shared store's catalog when the
+/// transaction executes its first real database statement; every statement
+/// inside the transaction reads/writes this
 /// snapshot instead of the shared store, so concurrent connections see
 /// nothing from it until COMMIT merges `Snapshot.Catalog` back into the
 /// shared store's (see `QueryHandler.commitSession`). That's real
@@ -74,15 +76,21 @@ type PreparedStmt =
 /// transaction makes — COMMIT diffs `Snapshot.Catalog` against it,
 /// table-by-table, to tell "this transaction wrote table X" apart from
 /// "table X just happened to be in the snapshot", so a concurrent write to
-/// an *untouched* table by another connection survives the commit instead
-/// of being silently overwritten by a stale copy of it. ponytail: last-
-/// writer-wins per table, not per row — a concurrent write to the *same*
-/// table this transaction also wrote is still overwritten by whichever
-/// commits second; real MVCC write-write conflict detection is the upgrade
-/// path if that ever bites.
+/// an *untouched* table survives the commit instead of being silently
+/// overwritten by a stale copy. `GateLease` currently serializes active
+/// transaction lifetimes from that first statement through COMMIT/ROLLBACK,
+/// so two same-table writers cannot reach the merger concurrently. This is
+/// correct but deliberately coarse; row-version conflict detection/MVCC is
+/// the upgrade path for parallel write throughput.
 type Transaction =
     { Snapshot: Store
       BaseCatalog: Catalog
+      /// Acquired lazily on the transaction's first real database
+      /// statement, then held until COMMIT/ROLLBACK. `None` immediately
+      /// after BEGIN lets multiple connections begin concurrently and
+      /// matches InnoDB's default behavior of establishing a consistent
+      /// snapshot on the first statement rather than the BEGIN packet.
+      GateLease: IDisposable option
       /// Each savepoint's catalog plus how many events `Snapshot.PendingEvents`
       /// had buffered at that point — `ROLLBACK TO SAVEPOINT` truncates the
       /// buffer back to that length too, so a physical WAL never sees events

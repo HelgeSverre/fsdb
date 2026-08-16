@@ -1344,7 +1344,34 @@ let private inetNtoaFn: Scalar =
 // ---------------------------------------------------------------------------
 
 let private countAgg: Aggregate = fun vs -> VInt(int64 (List.length vs))
-let private sumAgg: Aggregate = List.reduce Value.add
+
+/// MySQL promotes SUM over exact integer inputs to DECIMAL rather than
+/// preserving the integer runtime type. Besides avoiding BIGINT overflow,
+/// this is observable in the resultset's column-definition packet: drivers
+/// see NEWDECIMAL for SUM(bigint), not LONGLONG. Accumulate exact numeric
+/// inputs as decimal from the first value so two valid BIGINT operands can
+/// produce a result larger than BIGINT without overflowing along the way.
+let private sumAgg: Aggregate =
+    fun values ->
+        if
+            values
+            |> List.forall (function
+                | VInt _
+                | VDecimal _ -> true
+                | _ -> false)
+        then
+            values
+            |> List.fold
+                (fun total value ->
+                    match value with
+                    | VInt integer -> total + decimal integer
+                    | VDecimal number -> total + number
+                    | _ -> total)
+                0M
+            |> VDecimal
+        else
+            List.reduce Value.add values
+
 let private avgAgg: Aggregate = fun vs -> Value.div (vs |> List.reduce Value.add) (VInt(int64 (List.length vs)))
 let private minAgg: Aggregate = List.reduce (fun a b -> if Value.compare a b <= 0 then a else b)
 let private maxAgg: Aggregate = List.reduce (fun a b -> if Value.compare a b >= 0 then a else b)
