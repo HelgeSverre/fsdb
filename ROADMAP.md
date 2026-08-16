@@ -21,11 +21,12 @@ CREATE TABLE / INSERT / SELECT with WHERE, ORDER BY, LIMIT via mysql CLI.
 ## M4 — Laravel migrations
 ALTER TABLE, indexes, foreign keys, information_schema virtual tables,
 prepared statements (COM_STMT_*), transactions.
-**Gate:** `php artisan migrate` on chatflow (94 migrations) succeeds, plus
+**Gate:** `php artisan migrate` on the reference application (a private
+Laravel 11 app, 94 migrations) succeeds, plus
 `migrate:status` (all Ran), `migrate:fresh` (DROP via SHOW/information_schema),
 and a second consecutive `migrate` (Nothing to migrate). Status: ✅
 
-## M5 — Chatflow test suite
+## M5 — Reference application test suite
 Joins, aggregates, subqueries, savepoints, JSON functions, expression breadth.
 **Gate:** `vendor/bin/pest tests --no-coverage --compact` (not `php artisan
 test` — that only resolves phpunit.xml's `Unit`/`Feature` testsuites, 269
@@ -51,7 +52,7 @@ Default stays pure in-memory (tests unchanged).
 "Nothing to migrate"; plus kill -9 mid-write leaves committed data intact
 and replayable. Status: ✅ (fresh `--data-dir` on 3424: create+insert incl.
 `NOW()`/`UUID()`, `kill -9`, restart — identical `SELECT`; graceful
-SIGTERM, restart — intact. Fresh `--data-dir` on 3307: chatflow's full 94
+SIGTERM, restart — intact. Fresh `--data-dir` on 3307: the reference app's 94
 migrations via `artisan migrate --force`, graceful restart, `migrate`
 again — "Nothing to migrate". WAL replay hardened along the way: a torn
 final line no longer poisons future appends, `RowsUpdated`/`RowsDeleted`
@@ -67,7 +68,7 @@ index usage), multi-table UPDATE/DELETE with JOINs, UPDATE/DELETE ORDER
 BY+LIMIT (currently parsed but ignored), AFTER/FIRST column positioning.
 **Gate:** EXPLAIN on join/subquery queries via mysql CLI; UPDATE/DELETE JOIN
 semantics differential-verified against real MySQL 8 (Docker oracle);
-chatflow suite still at exact parity. Status: ✅ (EXPLAIN on a join+correlated-subquery
+reference suite still at exact parity. Status: ✅ (EXPLAIN on a join+correlated-subquery
 query renders correctly via the mysql CLI and now validates the statement
 it describes — 1146/1054 for a missing table/column instead of a fake
 plan; UPDATE JOIN / DELETE JOIN / `UPDATE ... ORDER BY ... LIMIT` /
@@ -78,9 +79,9 @@ rows mutated — both fixed and statement-atomic now; `SET a = x, b = a`
 evaluates left-to-right, matching MySQL; comma (implicit-join) `FROM`
 lists now parse for `SELECT`/`UPDATE`/`DELETE` alike. Differential
 comparisons against real MySQL 8.4 for the fixes above came from the
-review that found them, not a Docker oracle run in this pass. Chatflow's
+review that found them, not a Docker oracle run in this pass. The reference app's
 full `vendor/bin/pest tests --no-coverage --compact` (in-memory, no
 data-dir): 288 passed/15 skipped/2 todos/0 failed, 792 assertions — 0
 failures either way, one more test (and 5 more assertions) than the M5
-baseline's 287/787, which tracks chatflow's own migrations/tests having
+baseline's 287/787, which tracks the app's own migrations/tests having
 grown since that baseline was recorded, not a regression here)
