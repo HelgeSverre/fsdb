@@ -217,6 +217,9 @@ let private columnsColumns =
       intCol "numeric_scale"
       strCol "column_key"
       strCol "extra"
+      // NULL for a non-string column, `utf8mb4` for a string one — same
+      // split `collation_name` right below already makes.
+      strCol "character_set_name"
       strCol "collation_name"
       // `Ast.ColumnDef` doesn't track a column comment or a generated-column
       // expression — both are always empty/NULL, present only so Laravel's
@@ -256,6 +259,7 @@ let private columnsRows (catalog: Catalog) : Value[] list =
                (scale |> Option.map VInt |> Option.defaultValue VNull)
                vs (columnKey t c)
                vs (if c.AutoIncrement then "auto_increment" else "")
+               (if isStringy c.Type then vs "utf8mb4" else VNull)
                (if isStringy c.Type then vs "utf8mb4_unicode_ci" else VNull)
                vs ""
                vs "" |]))

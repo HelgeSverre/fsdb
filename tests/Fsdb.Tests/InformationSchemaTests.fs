@@ -73,6 +73,24 @@ let tests =
               | ResultSet(_, [ [ Some "utf8mb4" ] ]) -> ()
               | other -> failtestf "expected a single utf8mb4 row, got %A" other
 
+          testCase "COLUMNS.character_set_name is utf8mb4 for a string column, NULL for a numeric one"
+          <| fun _ ->
+              // Doctrine DBAL's `selectTableColumns` (behind Laravel's
+              // `Blueprint::change()`) projects this alongside `collation_name`.
+              let store = setup ()
+
+              match
+                  run
+                      store
+                      "SELECT column_name, character_set_name FROM information_schema.columns WHERE table_schema = 'fsdb' AND table_name = 'users' ORDER BY ordinal_position"
+              with
+              | ResultSet(_, rows) ->
+                  Expect.equal
+                      rows
+                      [ [ Some "id"; None ]; [ Some "email"; Some "utf8mb4" ]; [ Some "name"; Some "utf8mb4" ] ]
+                      "numeric column NULL, string columns utf8mb4"
+              | other -> failtestf "expected a resultset, got %A" other
+
           testCase "COLUMNS projects declared columns with type/nullability/key metadata"
           <| fun _ ->
               let store = setup ()
