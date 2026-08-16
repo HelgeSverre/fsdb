@@ -33,6 +33,17 @@ let private storageErr (e: StorageError) : QueryResult =
     let code, message = toMySqlError e
     Err(code, message)
 
+/// The leading numeric run of `s` (optional sign, digits, optional
+/// fraction/exponent), the way MySQL's numeric `CAST`/implicit string-to-
+/// number conversion reads a string — `"12abc"` yields `Some "12"`, `"abc"`
+/// yields `None`. Unlike `Storage.coerceValue`'s `parseNumeric`, which
+/// requires the *whole* trimmed string to parse.
+let private leadingNumericPrefixRegex = Regex(@"^\s*[+-]?(\d+\.?\d*|\.\d+)([eE][+-]?\d+)?")
+
+let private leadingNumericPrefix (s: string) : string option =
+    let m = leadingNumericPrefixRegex.Match s
+    if m.Success && m.Value.Trim() <> "" then Some(m.Value.Trim()) else None
+
 /// Column name (case-insensitive) to *every* index it resolves to in a row
 /// array — usually exactly one, but a `JOIN` can combine two tables that
 /// both have a column of the same name (`SELECT id FROM u JOIN p ON
@@ -563,7 +574,17 @@ let rec private evalExpr (ctx: EvalContext) (expr: Expr) : Result<Value, EvalErr
         eval e
         |> Result.bind (fun v ->
             // Reuses `Storage.coerceValue` against a throwaway column of the
-            // cast's target type rather than a second coercion table.
+            // cast's target type rather than a second coercion table, always
+            // non-strict: MySQL's own CAST never raises 1366 for an
+            // out-of-range/unparseable conversion, independent of
+            // STRICT_TRANS_TABLES — `CAST('abc' AS SIGNED)` is `0` (with a
+            // warning), `CAST('abc' AS DATE)` is `NULL`, under the session's
+            // *default* strict sql_mode included. A numeric target still
+            // needs its own leading-numeric-prefix parse first
+            // (`leadingNumericPrefix`): `coerceValue`'s own `parseNumeric`
+            // requires the *whole* string to parse, so `CAST('12abc' AS
+            // SIGNED)` (MySQL: `12`) would otherwise fall all the way to the
+            // non-strict `0` fallback instead of `12`.
             let castCol: ColumnDef =
                 { Name = "CAST"
                   Type = ty
@@ -574,10 +595,13 @@ let rec private evalExpr (ctx: EvalContext) (expr: Expr) : Result<Value, EvalErr
                   Unique = false
                   Generated = None }
 
-            // CAST stays strict regardless of session sql_mode — MySQL raises
-            // a truncation error for CAST's own out-of-range/unparseable
-            // conversions independent of STRICT_TRANS_TABLES.
-            match Storage.coerceValue true castCol v with
+            let v =
+                match v, ty with
+                | VString s, (TTinyInt _ | TSmallInt _ | TMediumInt _ | TInt _ | TBigInt _ | TYear | TDouble | TFloat | TDecimal _) ->
+                    VString(leadingNumericPrefix s |> Option.defaultValue "")
+                | _ -> v
+
+            match Storage.coerceValue false castCol v with
             | Ok v' -> Ok v'
             | Error err -> Error(Storage.toMySqlError err))
     | Exists select ->

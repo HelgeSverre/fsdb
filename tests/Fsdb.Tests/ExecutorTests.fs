@@ -1019,6 +1019,19 @@ let tests =
                     | ResultSet(_, [ [ Some "42" ] ]) -> ()
                     | other -> failtestf "expected '42', got %A" other
 
+                testCase "CAST never raises 1366, even under the session's default strict sql_mode"
+                <| fun _ ->
+                    // Oracle (real MySQL 8, default sql_mode): CAST('abc' AS
+                    // SIGNED) = 0, CAST('12abc' AS SIGNED) = 12 (the leading
+                    // numeric run, not the non-strict-fallback 0),
+                    // CAST('abc' AS DATE) = NULL — all three with only a
+                    // truncation *warning*, never error 1366.
+                    let store = newStore ()
+
+                    match runDefault store "SELECT CAST('abc' AS SIGNED), CAST('12abc' AS SIGNED), CAST('abc' AS DATE)" with
+                    | ResultSet(_, [ [ Some "0"; Some "12"; None ] ]) -> ()
+                    | other -> failtestf "expected 0, 12, NULL, got %A" other
+
                 testCase "ENUM column accepts a listed value and rejects one outside the set"
                 <| fun _ ->
                     let store = newStore ()
