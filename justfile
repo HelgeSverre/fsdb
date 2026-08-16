@@ -87,6 +87,10 @@ bench-mysql-stop:
 _bench-run *ARGS: bench-mysql-start
     #!/usr/bin/env bash
     set -euo pipefail
+    if {{ MYSQL }} --protocol=tcp -h127.0.0.1 -P{{ PORT }} -uroot -e 'SELECT 1' &>/dev/null; then
+        echo "error: something is already listening on port {{ PORT }} — stop it first, benchmarking against a shared server would corrupt both" >&2
+        exit 1
+    fi
     dotnet build src/Fsdb -c Release -v q
     dotnet run -c Release --no-build --project src/Fsdb -- --port {{ PORT }} &
     FSDB_PID=$!

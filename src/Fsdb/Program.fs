@@ -46,6 +46,12 @@ let main argv =
                 Db.create () |> Db.withDataDir dataDir
             | None -> Db.create ()
 
-        printfn "fsdb listening on %O:%d" address port
-        db |> Db.listen address port |> Async.RunSynchronously
-        0
+        try
+            let serve = db |> Db.listen address port
+            printfn "fsdb listening on %O:%d" address port
+            serve |> Async.RunSynchronously
+            0
+        with :? System.Net.Sockets.SocketException as ex when
+            ex.SocketErrorCode = System.Net.Sockets.SocketError.AddressAlreadyInUse ->
+            eprintfn "fsdb: %O:%d is already in use — another server is running there (use --port to pick another)" address port
+            1
