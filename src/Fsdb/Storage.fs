@@ -676,14 +676,16 @@ let renameTable (store: Store) (dbName: string) (oldName: string) (newName: stri
 
 /// One column's value for one row being inserted, threaded through
 /// `processRow`'s fold: the column's final coerced value, the updated
-/// AUTO_INCREMENT counter, and the id assigned to this row's
-/// AUTO_INCREMENT column (if any).
+/// AUTO_INCREMENT counter, and the id assigned to this row's AUTO_INCREMENT
+/// column (if any) paired with whether `nextAutoId` generated it or it was
+/// supplied explicitly — `insertCore` needs that distinction to compute the
+/// statement's `last_insert_id` the way real MySQL does (see its doc).
 let private processRow
     (strict: bool)
     (nextAutoId: int64)
     (rawRow: Value option list)
     (columns: ColumnDef list)
-    : Result<Value list * int64 * int64 option, StorageError> =
+    : Result<Value list * int64 * (bool * int64) option, StorageError> =
     let step acc (col: ColumnDef, provided: Value option) =
         match acc with
         | Error e -> Error e
@@ -692,11 +694,11 @@ let private processRow
 
             if col.AutoIncrement then
                 match pending with
-                | VNull -> Ok(VInt nextAutoId :: valuesRev, nextAutoId + 1L, Some nextAutoId)
+                | VNull -> Ok(VInt nextAutoId :: valuesRev, nextAutoId + 1L, Some(true, nextAutoId))
                 | _ ->
                     match coerceValue strict col pending with
                     | Error e -> Error e
-                    | Ok(VInt i) -> Ok(VInt i :: valuesRev, max nextAutoId (i + 1L), assignedId)
+                    | Ok(VInt i) -> Ok(VInt i :: valuesRev, max nextAutoId (i + 1L), Some(false, i))
                     | Ok _ -> Error(InvalidValueForColumn(col.Name, "auto_increment"))
             else
                 match coerceAndCheck strict col pending with
@@ -799,6 +801,19 @@ let private resolveInsertColumns (table: Table) (columns: string list option) : 
 /// is always a hard error — `INSERT IGNORE` downgrades constraint
 /// violations per MySQL, not malformed statements — everything else is
 /// skipped rather than failing the batch when `ignoreErrors` is set.
+///
+/// The statement's reported `last_insert_id` (what `PDO::lastInsertId()`/
+/// `mysql_insert_id()` read off the OK packet, and what `Eloquent::create()`
+/// relies on to know a just-inserted row's id) follows real MySQL's rule,
+/// verified against a real MySQL 8.4 instance rather than assumed: the
+/// *first* row whose AUTO_INCREMENT column was actually generated (not
+/// supplied), or — only when no row in the statement generated one — the
+/// *last* row's explicitly-supplied value. A single-row `INSERT` that
+/// supplies its own id (e.g. a factory pre-assigning `id` before `create()`)
+/// is the common case this exists for: with only "the first generated
+/// value" tracked (as fsdb used to), that row's `last_insert_id` came back
+/// 0 instead of the id it was actually given, and every caller reading it
+/// back (`Eloquent`'s own model, here) silently got a wrong id instead.
 let private insertCore
     (checkFks: bool)
     (strict: bool)
@@ -813,7 +828,7 @@ let private insertCore
 
     let step acc (rowValues: Value list) =
         acc
-        |> Result.bind (fun (accepted: Value[] list, nextAutoId, firstAssigned) ->
+        |> Result.bind (fun (accepted: Value[] list, nextAutoId, firstAuto, lastExplicit) ->
             if List.length rowValues <> List.length idxs then
                 Error(ColumnCountMismatch(List.length idxs, List.length rowValues))
             else
@@ -822,7 +837,7 @@ let private insertCore
 
                 let rowResult =
                     processRow strict nextAutoId rawRow table.Columns
-                    |> Result.bind (fun (finalValues, nextAutoId', assignedId) ->
+                    |> Result.bind (fun (finalValues, nextAutoId', assigned) ->
                         let candidate = Array.ofList finalValues
 
                         match findUniqueCollision uniqueGroups (table.Rows @ accepted) candidate with
@@ -837,18 +852,26 @@ let private insertCore
                                 // `findUniqueCollision` just above.
                                 let dbView = Map.add tableKey { table with Rows = table.Rows @ accepted } db
                                 checkFkParents dbView table.Columns table.ForeignKeys candidate
-                                |> Result.map (fun () -> candidate, nextAutoId', assignedId)
+                                |> Result.map (fun () -> candidate, nextAutoId', assigned)
                             else
-                                Ok(candidate, nextAutoId', assignedId))
+                                Ok(candidate, nextAutoId', assigned))
 
                 match rowResult with
-                | Ok(candidate, nextAutoId', assignedId) -> Ok(accepted @ [ candidate ], nextAutoId', Option.orElse assignedId firstAssigned)
-                | Error _ when ignoreErrors -> Ok(accepted, nextAutoId, firstAssigned)
+                | Ok(candidate, nextAutoId', assigned) ->
+                    let firstAuto', lastExplicit' =
+                        match assigned with
+                        | Some(true, v) -> Option.orElse (Some v) firstAuto, lastExplicit
+                        | Some(false, v) -> firstAuto, Some v
+                        | None -> firstAuto, lastExplicit
+
+                    Ok(accepted @ [ candidate ], nextAutoId', firstAuto', lastExplicit')
+                | Error _ when ignoreErrors -> Ok(accepted, nextAutoId, firstAuto, lastExplicit)
                 | Error e -> Error e)
 
     rowsIn
-    |> List.fold step (Ok([], table.NextAutoId, None))
-    |> Result.map (fun (accepted, nextAutoId', firstAssigned) ->
+    |> List.fold step (Ok([], table.NextAutoId, None, None))
+    |> Result.map (fun (accepted, nextAutoId', firstAuto, lastExplicit) ->
+        let firstAssigned = Option.orElse lastExplicit firstAuto
         let table' = { table with Rows = table.Rows @ accepted; NextAutoId = nextAutoId' }
         Map.add tableKey table' db, (Option.defaultValue 0L firstAssigned, List.length accepted, accepted))
 
@@ -948,7 +971,7 @@ let upsertRows
                     let step acc (rowValues: Value list) =
                         acc
                         |> Result.bind
-                            (fun (rowsAcc: Value[] list, nextAutoId, firstAssigned, affected, inserted: Value[] list, updated: (Value[] * Value[]) list) ->
+                            (fun (rowsAcc: Value[] list, nextAutoId, firstAuto, lastExplicit, affected, inserted: Value[] list, updated: (Value[] * Value[]) list) ->
                                 if List.length rowValues <> List.length idxs then
                                     Error(ColumnCountMismatch(List.length idxs, List.length rowValues))
                                 else
@@ -956,7 +979,7 @@ let upsertRows
                                     let rawRow = table.Columns |> List.mapi (fun i _ -> Map.tryFind i provided)
 
                                     processRow store.StrictMode nextAutoId rawRow table.Columns
-                                    |> Result.bind (fun (finalValues, nextAutoId', assignedId) ->
+                                    |> Result.bind (fun (finalValues, nextAutoId', assigned) ->
                                         // A unique index over a *generated* column (e.g.
                                         // Laravel Pulse's `key_hash BINARY(16) AS
                                         // (unhex(md5(key)))`) is still NULL in the raw
@@ -976,25 +999,36 @@ let upsertRows
                                                 |> Result.map (fun applied ->
                                                     (rowsAcc |> List.map (fun r -> if r = existing then applied else r)),
                                                     nextAutoId',
-                                                    firstAssigned,
+                                                    firstAuto,
+                                                    lastExplicit,
                                                     affected + 1,
                                                     inserted,
                                                     (existing, applied) :: updated)
                                             | Choice2Of2 candidate ->
+                                                // Same "first generated, else last explicit"
+                                                // `last_insert_id` rule `insertCore` uses —
+                                                // see its doc.
+                                                let firstAuto', lastExplicit' =
+                                                    match assigned with
+                                                    | Some(true, v) -> Option.orElse (Some v) firstAuto, lastExplicit
+                                                    | Some(false, v) -> firstAuto, Some v
+                                                    | None -> firstAuto, lastExplicit
+
                                                 Ok(
                                                     rowsAcc @ [ candidate ],
                                                     nextAutoId',
-                                                    Option.orElse assignedId firstAssigned,
+                                                    firstAuto',
+                                                    lastExplicit',
                                                     affected + 1,
                                                     candidate :: inserted,
                                                     updated
                                                 ))))
 
                     rowsIn
-                    |> List.fold step (Ok(table.Rows, table.NextAutoId, None, 0, [], []))
-                    |> Result.map (fun (rows', nextAutoId', firstAssigned, affected, inserted, updated) ->
+                    |> List.fold step (Ok(table.Rows, table.NextAutoId, None, None, 0, [], []))
+                    |> Result.map (fun (rows', nextAutoId', firstAuto, lastExplicit, affected, inserted, updated) ->
                         { table with Rows = rows'; NextAutoId = nextAutoId' },
-                        (Option.defaultValue 0L firstAssigned, affected, List.rev inserted, List.rev updated))))
+                        (Option.defaultValue 0L (Option.orElse lastExplicit firstAuto), affected, List.rev inserted, List.rev updated))))
 
         match result with
         | Ok(lastId, affected, inserted, updated) ->

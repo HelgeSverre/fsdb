@@ -183,6 +183,48 @@ let tests =
                     | Ok(lastId, _) -> Expect.equal lastId 101L "counter continues past the explicit id"
                     | Error e -> failtestf "expected Ok, got %A" e
 
+                testCase "a single explicit-id insert reports that id as lastInsertId, matching real MySQL's OK packet (not the SQL LAST_INSERT_ID() function's 0)"
+                <| fun _ ->
+                    let store = withUsersTable ()
+
+                    match insertRows store defaultDatabase "users" None [ [ VInt 800L; VString "alice"; VInt 30L ] ] with
+                    | Ok(lastId, affected) ->
+                        Expect.equal lastId 800L "lastInsertId is the row's explicit id, like PDO::lastInsertId()"
+                        Expect.equal affected 1 "one row affected"
+                    | Error e -> failtestf "expected Ok, got %A" e
+
+                testCase "a generated id anywhere in a multi-row insert wins over an explicit id, even one earlier in the batch"
+                <| fun _ ->
+                    let store = withUsersTable ()
+
+                    match
+                        insertRows
+                            store
+                            defaultDatabase
+                            "users"
+                            None
+                            [ [ VInt 500L; VString "alice"; VInt 30L ]
+                              [ VNull; VString "bob"; VInt 25L ] ]
+                    with
+                    | Ok(lastId, _) -> Expect.equal lastId 501L "the generated second row's id wins over the first row's explicit one"
+                    | Error e -> failtestf "expected Ok, got %A" e
+
+                testCase "an all-explicit multi-row insert reports the last row's id, not the first"
+                <| fun _ ->
+                    let store = withUsersTable ()
+
+                    match
+                        insertRows
+                            store
+                            defaultDatabase
+                            "users"
+                            None
+                            [ [ VInt 700L; VString "alice"; VInt 30L ]
+                              [ VInt 701L; VString "bob"; VInt 25L ] ]
+                    with
+                    | Ok(lastId, _) -> Expect.equal lastId 701L "the last row's explicit id, matching real MySQL"
+                    | Error e -> failtestf "expected Ok, got %A" e
+
                 testCase "inserting by explicit column list fills the rest from defaults"
                 <| fun _ ->
                     let store = withUsersTable ()
