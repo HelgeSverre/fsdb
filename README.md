@@ -26,14 +26,12 @@ USAGE: fsdb [--help] [--port <port>] [--listen <address>] [--data-dir <path>]
 
 OPTIONS:
 
-    --port, -p <port>     port to listen on (default 3307)
-    --listen <address>    IP address to bind, or 'localhost' (default loopback)
-    --data-dir <path>     enable durability: WAL + snapshots stored here,
-                          replayed on startup
+    --port, -p <port>     listen port (default 3307)
+    --listen <address>    bind address (default 127.0.0.1)
+    --data-dir <path>     persist data here (WAL + snapshots); omit for
+                          in-memory
     --help                display this list of options.
 ```
-
-Without `--data-dir`, fsdb is pure in-memory.
 
 Install globally (publishes a single binary to `~/.local/bin/fsdb`):
 

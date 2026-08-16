@@ -11,9 +11,9 @@ type Arguments =
     interface IArgParserTemplate with
         member this.Usage =
             match this with
-            | Port _ -> "port to listen on (default 3307)"
-            | Listen _ -> "IP address to bind, or 'localhost' (default loopback)"
-            | Data_Dir _ -> "enable durability: WAL + snapshots stored here, replayed on startup"
+            | Port _ -> "listen port (default 3307)"
+            | Listen _ -> "bind address (default 127.0.0.1)"
+            | Data_Dir _ -> "persist data here (WAL + snapshots); omit for in-memory"
 
 let private parser =
     ArgumentParser.Create<Arguments>(programName = "fsdb", errorHandler = ProcessExiter())
