@@ -101,7 +101,7 @@ MySQL 8.4 — fsdb must match MySQL, not sqlite.
 | App A | 11 | 94 | full parity, 0 failures |
 | App B | 11 | 205 | parity; 5 residual failures reproduce identically on real MySQL (app-side factory/collation bugs) |
 | App C | 10 | 160 | behavioral equivalence with real MySQL (identical failure set from an app-side factory bug) |
-| App D | 13 | 43 | in progress |
+| App D | 13 | 43 | parity; 1 residual failure is a sqlite-only PRAGMA introspection test that fails identically on real MySQL |
 | App E | 13 | 487 | pending |
 
 The applications are private codebases, identified here only by framework
