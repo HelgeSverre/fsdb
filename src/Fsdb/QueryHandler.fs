@@ -322,12 +322,13 @@ let private resolveSetRhs (session: Session) (rhs: string) : string option =
 
     if m.Success then
         resolveAtRef session m.Groups.[1].Value m.Groups.[2].Value
+    else if String.Equals(rhs, "NULL", StringComparison.OrdinalIgnoreCase) then
+        // Checked against the raw (still-quoted) rhs: `SET @x = 'NULL'` is
+        // the four-character string, not the NULL literal — only a bare,
+        // unquoted NULL keyword means "no value".
+        None
     else
-        let unquoted = unquote rhs
-        if String.Equals(unquoted, "NULL", StringComparison.OrdinalIgnoreCase) then
-            None
-        else
-            Some unquoted
+        Some(unquote rhs)
 
 /// Whether a `sql_mode` value (comma-separated, as stored in
 /// `Session.Variables`) still contains STRICT_TRANS_TABLES/STRICT_ALL_TABLES

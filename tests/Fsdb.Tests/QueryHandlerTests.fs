@@ -302,6 +302,15 @@ let tests =
               | Err(1231, _) -> ()
               | other -> failtestf "expected a 1231 error, got %A" other
 
+          testCase "SET @x = 'NULL' stores the four-character string, not a real NULL"
+          <| fun _ ->
+              let session = create 1 (Fsdb.Storage.create ())
+              let session, _ = handle session "SET @x = 'NULL'"
+
+              match handle session "SELECT @x" |> snd with
+              | ResultSet([ "@x" ], [ [ Some "NULL" ] ]) -> ()
+              | other -> failtestf "expected the string 'NULL', not a real NULL, got %A" other
+
           testCase "SET x = @old_var restores a saved system variable, mysqldump's preamble/postamble idiom"
           <| fun _ ->
               let session = create 1 (Fsdb.Storage.create ())
