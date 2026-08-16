@@ -202,6 +202,36 @@ let tests =
 
               ignore laxSession
 
+          testCase "SET @@SESSION.sql_mode = CONCAT(@@sql_mode, ',ANSI_QUOTES') isn't split on the CONCAT's own comma"
+          <| fun _ ->
+              // `splitSetAssignments` must track paren depth, not just quote
+              // state — a function-call argument list has its own commas
+              // that aren't assignment separators.
+              let session = create 1 (Fsdb.Storage.create ())
+              let session, _ = handle session "SET sql_mode = 'STRICT_TRANS_TABLES'"
+
+              match handle session "SET @@SESSION.sql_mode = CONCAT(@@sql_mode, ',ANSI_QUOTES')" |> snd with
+              | Affected _ -> ()
+              | other -> failtestf "expected OK, got %A" other
+
+          testCase "a bad multi-assignment SET applies none of its assignments, not just the ones before the bad one"
+          <| fun _ ->
+              // Two-phase: every fragment parses before any of them apply,
+              // so a `SET` that fails partway through — the same as real
+              // MySQL — can't leave `sql_mode` (or any other variable it
+              // named first) half-updated.
+              let session = create 1 (Fsdb.Storage.create ())
+
+              let session, result = handle session "SET SESSION sql_mode='ANSI_QUOTES', @user_var=1"
+
+              match result with
+              | Err(1193, _) -> ()
+              | other -> failtestf "expected a 1193 error, got %A" other
+
+              match handle session "SELECT @@sql_mode" |> snd with
+              | ResultSet(_, [ [ Some mode ] ]) -> Expect.stringContains mode "STRICT_TRANS_TABLES" "sql_mode is unchanged from its default"
+              | other -> failtestf "expected a resultset, got %A" other
+
           testCase "SET @user_var = 1 is a loud 1193 error, not a silent fake OK"
           <| fun _ ->
               // `setVar`'s (\w+) can't match `@foo` — a silent

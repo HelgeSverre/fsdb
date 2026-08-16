@@ -301,14 +301,17 @@ let private isStrictSqlMode (value: string) : bool =
 /// `SET a = 1, b = 2` is one statement assigning several variables — real
 /// clients use it (Laravel's `MySqlConnector::configureConnection` sends
 /// `SET NAMES 'utf8mb4', SESSION sql_mode='...'` as one call). Splits on
-/// commas outside quotes, after stripping the leading `SET` keyword, so a
-/// quoted value with its own commas (`sql_mode`'s comma-separated mode
-/// list) doesn't get split apart.
+/// commas outside quotes and outside parens, after stripping the leading
+/// `SET` keyword, so neither a quoted value with its own commas
+/// (`sql_mode`'s comma-separated mode list) nor a function call's argument
+/// list (`SET @@SESSION.sql_mode = CONCAT(@@sql_mode, ',ANSI_QUOTES')`) gets
+/// split apart.
 let private splitSetAssignments (sql: string) : string list =
     let body = Regex.Replace(sql, @"^SET\s+", "", RegexOptions.IgnoreCase)
     let parts = ResizeArray()
     let current = StringBuilder()
     let mutable quoteChar = None
+    let mutable parenDepth = 0
 
     for c in body do
         match quoteChar with
@@ -321,7 +324,13 @@ let private splitSetAssignments (sql: string) : string list =
             | '\'' | '"' ->
                 quoteChar <- Some c
                 current.Append c |> ignore
-            | ',' ->
+            | '(' ->
+                parenDepth <- parenDepth + 1
+                current.Append c |> ignore
+            | ')' ->
+                parenDepth <- max 0 (parenDepth - 1)
+                current.Append c |> ignore
+            | ',' when parenDepth = 0 ->
                 parts.Add(current.ToString())
                 current.Clear() |> ignore
             | _ -> current.Append c |> ignore
@@ -329,52 +338,68 @@ let private splitSetAssignments (sql: string) : string list =
     parts.Add(current.ToString())
     parts |> Seq.map (fun s -> s.Trim()) |> Seq.filter (fun s -> s <> "") |> List.ofSeq
 
+/// One `SET` fragment's parsed effect, applied only once every fragment in
+/// the statement has parsed successfully (see `handleSet`) — mirrors real
+/// MySQL executing a multi-assignment `SET` all-or-nothing rather than
+/// left-to-right with partial effect.
+type private SetAction =
+    | SetNamesAction of charset: string
+    | SetVarAction of name: string * value: string
+
+/// Parses one comma-split fragment into the variable(s) it would assign,
+/// without touching `session`/`Store` — `handleSet` only applies any of
+/// these once every fragment in the statement has parsed.
+let private parseSetFragment (sql: string) (fragment: string) : Result<SetAction, QueryResult> =
+    let namesMatch = setNames.Match fragment
+
+    if namesMatch.Success then
+        Ok(SetNamesAction namesMatch.Groups.[1].Value)
+    else
+        let varMatch = setVar.Match fragment
+
+        if varMatch.Success then
+            Ok(SetVarAction(varMatch.Groups.[1].Value.ToLowerInvariant(), unquote varMatch.Groups.[2].Value))
+        else
+            match setVarNameForError.Match fragment with
+            | m when m.Success -> Error(Err(1193, sprintf "Unknown system variable '%s'" m.Groups.[1].Value))
+            | _ -> Error(syntaxError sql)
+
+/// Applies one already-parsed `SetAction` to `session`, including the
+/// `Store`-level side effects (`setForeignKeyChecks`/`setStrictMode`)
+/// `foreign_key_checks`/`sql_mode` trigger.
+let private applySetAction (session: Session) (action: SetAction) : Session =
+    match action with
+    | SetNamesAction charset ->
+        { session with
+            Variables =
+                session.Variables
+                |> Map.add "character_set_client" charset
+                |> Map.add "character_set_connection" charset
+                |> Map.add "character_set_results" charset }
+    | SetVarAction(name, value) ->
+        if name = "foreign_key_checks" then
+            setForeignKeyChecks session.Store (value.Trim() <> "0")
+
+        if name = "sql_mode" then
+            setStrictMode session.Store (isStrictSqlMode value)
+
+        { session with Variables = Map.add name value session.Variables }
+
 /// `SET NAMES x` and `SET [SESSION|@@session.]var = value` update
 /// Session.Variables so a later SELECT @@var / SHOW VARIABLES reflects them,
-/// one comma-split assignment at a time (`splitSetAssignments`) — the first
+/// one comma-split assignment at a time (`splitSetAssignments`). Two-phase:
+/// every fragment is parsed first (`parseSetFragment`), and only if *all* of
+/// them parse does any of them apply (`applySetAction`) — the first
 /// assignment recognizably shaped like one but not matched by `setVar`
 /// (`SET @user_var = 1` — user-defined variables aren't a session variable
 /// this server tracks; `Session.Variables`/`setVar` are both
-/// system-variable-shaped) aborts the whole statement with a loud 1193
-/// rather than a silent fake OK, same as real MySQL abandoning the rest of
-/// a multi-assignment `SET` on its first bad name.
+/// system-variable-shaped) aborts the whole statement with a loud 1193 and
+/// no partial effect, same as real MySQL abandoning a multi-assignment `SET`
+/// on its first bad name without acting on the assignments before it.
 let private handleSet (session: Session) (sql: string) : Session * QueryResult =
-    let rec loop (session: Session) (fragments: string list) : Session * QueryResult =
-        match fragments with
-        | [] -> session, Affected 0UL
-        | fragment :: rest ->
-            let namesMatch = setNames.Match fragment
-
-            if namesMatch.Success then
-                let charset = namesMatch.Groups.[1].Value
-
-                let vars =
-                    session.Variables
-                    |> Map.add "character_set_client" charset
-                    |> Map.add "character_set_connection" charset
-                    |> Map.add "character_set_results" charset
-
-                loop { session with Variables = vars } rest
-            else
-                let varMatch = setVar.Match fragment
-
-                if varMatch.Success then
-                    let name = varMatch.Groups.[1].Value.ToLowerInvariant()
-                    let value = unquote varMatch.Groups.[2].Value
-
-                    if name = "foreign_key_checks" then
-                        setForeignKeyChecks session.Store (value.Trim() <> "0")
-
-                    if name = "sql_mode" then
-                        setStrictMode session.Store (isStrictSqlMode value)
-
-                    loop { session with Variables = Map.add name value session.Variables } rest
-                else
-                    match setVarNameForError.Match fragment with
-                    | m when m.Success -> session, Err(1193, sprintf "Unknown system variable '%s'" m.Groups.[1].Value)
-                    | _ -> session, syntaxError sql
-
-    loop session (splitSetAssignments sql)
+    match splitSetAssignments sql |> traverse (parseSetFragment sql) with
+    | Error result -> session, result
+    | Ok actions -> (actions |> List.fold applySetAction session), Affected 0UL
 
 // ---------------------------------------------------------------------------
 // Transactions: BEGIN/COMMIT/ROLLBACK, SET autocommit, SAVEPOINT. Matched by
