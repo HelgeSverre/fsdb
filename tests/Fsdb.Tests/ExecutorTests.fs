@@ -1615,19 +1615,24 @@ let tests =
                     | ResultSet([ "g"; "c" ], rows) -> Expect.equal rows [ [ Some "a"; Some "2" ]; [ Some "b"; Some "1" ] ] "GROUP BY alias"
                     | other -> failtestf "expected GROUP BY alias to group by the aliased projection, got %A" other
 
-                testCase "GROUP BY with no ORDER BY sorts by the group key ascending, matching MySQL's indexed-grouping default"
+                testCase "GROUP BY with no ORDER BY keeps first-occurrence order, matching MySQL's unindexed-key default"
                 <| fun _ ->
                     let store = newStore ()
                     runDefault store "CREATE TABLE t (code VARCHAR(10))" |> ignore
-                    runDefault store "INSERT INTO t VALUES ('GB'), ('NO'), ('DE'), ('NL')" |> ignore
+                    runDefault store "INSERT INTO t VALUES ('GB'), ('NO'), ('DE'), ('NL'), ('GB')" |> ignore
 
                     match runDefault store "SELECT code, COUNT(*) AS c FROM t GROUP BY code" with
                     | ResultSet([ "code"; "c" ], rows) ->
                         Expect.equal
                             rows
-                            [ [ Some "DE"; Some "1" ]; [ Some "GB"; Some "1" ]; [ Some "NL"; Some "1" ]; [ Some "NO"; Some "1" ] ]
-                            "grouped rows come back sorted by code, not insertion order"
-                    | other -> failtestf "expected code-sorted groups, got %A" other
+                            [ [ Some "GB"; Some "2" ]; [ Some "NO"; Some "1" ]; [ Some "DE"; Some "1" ]; [ Some "NL"; Some "1" ] ]
+                            "grouped rows come back in first-occurrence order, not sorted by code"
+                    | other -> failtestf "expected first-occurrence-order groups, got %A" other
+
+                    match runDefault store "SELECT code, COUNT(*) AS c FROM t GROUP BY code LIMIT 2" with
+                    | ResultSet([ "code"; "c" ], rows) ->
+                        Expect.equal rows [ [ Some "GB"; Some "2" ]; [ Some "NO"; Some "1" ] ] "LIMIT after grouping takes the first-occurrence groups"
+                    | other -> failtestf "expected first-occurrence-order groups under LIMIT, got %A" other
 
                 testCase "ORDER BY an aggregate not in the SELECT list, over a grouped query"
                 <| fun _ ->
