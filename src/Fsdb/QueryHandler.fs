@@ -285,6 +285,19 @@ let private unquote (v: string) =
     else
         v
 
+/// Whether a `sql_mode` value (comma-separated, as stored in
+/// `Session.Variables`) still contains STRICT_TRANS_TABLES/STRICT_ALL_TABLES
+/// — shared by `handleSet` (which records a new `sql_mode`) and
+/// `executeStatement` (which re-derives it from the *current* session before
+/// every statement, since `Storage.Store.StrictMode` is store-wide state
+/// shared by every connection; see the note on `Storage.Store.StrictMode`).
+let private isStrictSqlMode (value: string) : bool =
+    value.Split(',')
+    |> Array.exists (fun m ->
+        let m = m.Trim()
+        String.Equals(m, "STRICT_TRANS_TABLES", StringComparison.OrdinalIgnoreCase)
+        || String.Equals(m, "STRICT_ALL_TABLES", StringComparison.OrdinalIgnoreCase))
+
 /// `SET a = 1, b = 2` is one statement assigning several variables — real
 /// clients use it (Laravel's `MySqlConnector::configureConnection` sends
 /// `SET NAMES 'utf8mb4', SESSION sql_mode='...'` as one call). Splits on
@@ -353,14 +366,7 @@ let private handleSet (session: Session) (sql: string) : Session * QueryResult =
                         setForeignKeyChecks session.Store (value.Trim() <> "0")
 
                     if name = "sql_mode" then
-                        let isStrict =
-                            value.Split(',')
-                            |> Array.exists (fun m ->
-                                let m = m.Trim()
-                                String.Equals(m, "STRICT_TRANS_TABLES", StringComparison.OrdinalIgnoreCase)
-                                || String.Equals(m, "STRICT_ALL_TABLES", StringComparison.OrdinalIgnoreCase))
-
-                        setStrictMode session.Store isStrict
+                        setStrictMode session.Store (isStrictSqlMode value)
 
                     loop { session with Variables = Map.add name value session.Variables } rest
                 else
@@ -549,6 +555,14 @@ let private executeStatement (session: Session) (sql: string) (upper: string) : 
     match Parser.parse sql with
     | Result.Ok stmt ->
         let store = Session.currentStore session
+        // `Store.StrictMode` is store-wide, not per-session (see its doc
+        // comment) — re-derive it from *this* session's own `sql_mode`
+        // right before every statement, so another connection's `SET
+        // SESSION sql_mode = ...` (which only ever touches its own
+        // `Session.Variables`) can't leak into this one's coercion
+        // behavior, and a transaction never runs on the stale StrictMode
+        // its snapshot happened to be seeded with at BEGIN time.
+        setStrictMode store (lookupVar session "sql_mode" |> Option.map isStrictSqlMode |> Option.defaultValue true)
         let registry = registryFor session
         let dbName = session.Database |> Option.defaultValue defaultDatabase
 

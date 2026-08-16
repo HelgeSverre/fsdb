@@ -123,18 +123,24 @@ let splitQualified (defaultDb: string) (name: string) : string * string =
 /// session concept; `QueryHandler`'s `SET FOREIGN_KEY_CHECKS = 0|1` probe
 /// (and Laravel's `Schema::disableForeignKeyConstraints`, which sends
 /// exactly that) calls `setForeignKeyChecks`.
-/// The storage-level mirror of MySQL's session `sql_mode`
-/// STRICT_TRANS_TABLES/STRICT_ALL_TABLES: `true` rejects a value that
-/// doesn't fit its column's type with error 1366 (`coerceValue`'s default);
-/// `false` coerces to MySQL's non-strict fallback instead — 0 for a numeric
-/// column, the zero date/datetime for a temporal one. Store-wide rather than
-/// per-session, same simplification as `ForeignKeyChecks` above.
-/// `QueryHandler`'s `SET SESSION sql_mode = ...` probe (and Laravel's
-/// `'strict' => false` connection config, which sends
-/// `SET SESSION sql_mode='NO_ENGINE_SUBSTITUTION'`) calls `setStrictMode`.
 type Store =
     { mutable Catalog: Catalog
       mutable ForeignKeyChecks: bool
+      /// The storage-level mirror of MySQL's session `sql_mode`
+      /// STRICT_TRANS_TABLES/STRICT_ALL_TABLES: `true` rejects a value that
+      /// doesn't fit its column's type with error 1366 (`coerceValue`'s
+      /// default); `false` coerces to `coerceValue`'s non-strict fallback
+      /// instead — 0 for a numeric column, NULL for a nullable temporal one
+      /// (still a hard 1366 on a NOT NULL temporal column; see
+      /// `coerceValue`'s doc for why). Store-wide, but re-derived from the
+      /// *current* session's own `sql_mode` by `QueryHandler.executeStatement`
+      /// before every statement, so it never leaks between connections or
+      /// runs stale inside a transaction — see the note there and on
+      /// `beginTransactionSnapshot`. `QueryHandler`'s `SET SESSION sql_mode =
+      /// ...` probe (and Laravel's `'strict' => false` connection config,
+      /// which sends `SET SESSION sql_mode='NO_ENGINE_SUBSTITUTION'`) calls
+      /// `setStrictMode` directly too, so `SELECT @@sql_mode` right after a
+      /// `SET` on the same connection reflects it immediately.
       mutable StrictMode: bool
       /// Fires once per committed write, under `Lock`, right after the
       /// catalog swap that made it visible — `None` (the default) means no
@@ -187,7 +193,12 @@ let private emit (store: Store) (event: CommitEvent option) : unit =
 let beginTransactionSnapshot (store: Store) : Store =
     { Catalog = store.Catalog
       ForeignKeyChecks = store.ForeignKeyChecks
-      StrictMode = store.StrictMode
+      // Not seeded from `store.StrictMode` — `QueryHandler.executeStatement`
+      // re-derives it from the session's own `sql_mode` before every
+      // statement (see the note there), so whatever this starts as is
+      // always overwritten before a transaction's first real statement
+      // runs.
+      StrictMode = true
       OnCommit = None
       PendingEvents = if store.OnCommit.IsSome then Some(ResizeArray()) else None
       Lock = obj () }

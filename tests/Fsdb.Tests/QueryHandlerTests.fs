@@ -181,6 +181,27 @@ let tests =
               | Affected 1UL -> ()
               | other -> failtestf "expected the non-strict insert to succeed, got %A" other
 
+          testCase "one connection's non-strict sql_mode doesn't leak into a sibling connection sharing the same Store"
+          <| fun _ ->
+              // Two independent sessions (e.g. Laravel's default + a
+              // 'strict' => false read connection) sharing one Store, the
+              // way `Server` hands every accepted connection the same
+              // `Store` — `Store.StrictMode` used to be set once by whoever
+              // last ran `SET sql_mode`, and stayed that way for every other
+              // connection forever after.
+              let store = Fsdb.Storage.create ()
+              let strictSession = create 1 store
+              let laxSession = create 2 store
+              let laxSession, _ = handle laxSession "SET SESSION sql_mode='NO_ENGINE_SUBSTITUTION'"
+
+              let strictSession, _ = handle strictSession "CREATE TABLE t (n INT)"
+
+              match handle strictSession "INSERT INTO t VALUES ('not a number')" |> snd with
+              | Err(1366, _) -> ()
+              | other -> failtestf "expected the strict sibling to still reject a bad value, got %A" other
+
+              ignore laxSession
+
           testCase "SET @user_var = 1 is a loud 1193 error, not a silent fake OK"
           <| fun _ ->
               // `setVar`'s (\w+) can't match `@foo` — a silent
