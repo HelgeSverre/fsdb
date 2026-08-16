@@ -1422,40 +1422,53 @@ and private runGroupedSelect
         | Ok maybeMatched ->
             let matched = maybeMatched |> List.choose id
 
-            let buildGroups () : Result<Value[] list list, EvalError> =
+            // Each group carries its own key alongside its rows: with an
+            // explicit `ORDER BY`, `orderKeysOf` below decides the final
+            // order and the group key is unused, but without one it's the
+            // fallback sort key (see `sorted`'s comment).
+            let buildGroups () : Result<(Value list * Value[] list) list, EvalError> =
                 if groupExprs.IsEmpty then
-                    Ok [ matched ]
+                    Ok [ [], matched ]
                 else
                     matched
                     |> traverse (fun row -> groupExprs |> traverse (evalExpr (ctxFor row)) |> Result.map (fun key -> key, row))
-                    |> Result.map (fun keyed -> keyed |> List.groupBy fst |> List.map (snd >> List.map snd))
+                    |> Result.map (fun keyed -> keyed |> List.groupBy fst |> List.map (fun (key, rows) -> key, rows |> List.map snd))
 
             match buildGroups () with
             | Error(code, message) -> Err(code, message), [], []
             | Ok groups ->
-                let processGroup (groupRows: Value[] list) : Result<((string * Value) list * Value list) option, EvalError> =
+                let processGroup (key: Value list, groupRows: Value[] list) : Result<((string * Value) list * Value list * Value list) option, EvalError> =
                     havingOk groupRows
                     |> Result.bind (fun keep ->
                         if not keep then
                             Ok None
                         else
                             projectGroup groupRows
-                            |> Result.bind (fun proj -> orderKeysOf proj groupRows |> Result.map (fun keys -> Some(proj, keys))))
+                            |> Result.bind (fun proj -> orderKeysOf proj groupRows |> Result.map (fun keys -> Some(proj, keys, key))))
 
                 match groups |> traverse processGroup with
                 | Error(code, message) -> Err(code, message), [], []
                 | Ok maybeRows ->
                     let kept = maybeRows |> List.choose id
 
+                    // A bare `GROUP BY` with no `ORDER BY` isn't sorted by
+                    // the SQL standard, but real MySQL groups via a
+                    // temp-table/index pass that comes out sorted by the
+                    // group key ascending whenever that key is indexed
+                    // (the common case) — matched here unconditionally,
+                    // since a real `ORDER BY` always overrides it anyway.
                     let sorted =
-                        kept |> List.sortWith (fun (_, ka) (_, kb) -> compareByOrderKeys (List.map snd select.OrderBy) ka kb)
+                        if select.OrderBy.IsEmpty && not groupExprs.IsEmpty then
+                            kept |> List.sortWith (fun (_, _, ka) (_, _, kb) -> compareByOrderKeys (groupExprs |> List.map (fun _ -> Asc)) ka kb)
+                        else
+                            kept |> List.sortWith (fun (_, ka, _) (_, kb, _) -> compareByOrderKeys (List.map snd select.OrderBy) ka kb)
 
                     let paired =
                         sorted
-                        |> List.map (fun (proj, _) -> proj |> List.map (snd >> toText), proj |> List.map snd |> Array.ofList)
+                        |> List.map (fun (proj, _, _) -> proj |> List.map (snd >> toText), proj |> List.map snd |> Array.ofList)
 
                     let dedupedPaired = if select.Distinct then paired |> List.distinctBy fst else paired
-                    let types = columnTypesOf (List.length colNames) (sorted |> List.map fst)
+                    let types = columnTypesOf (List.length colNames) (sorted |> List.map (fun (proj, _, _) -> proj))
                     let limited = dedupedPaired |> applyLimitOffset select.Limit select.Offset
                     ResultSet(colNames, limited |> List.map fst), types, limited |> List.map snd
 
