@@ -62,16 +62,12 @@ let toText (v: Value) : string option =
     | VDateTime dt -> Some(dt.ToString("yyyy-MM-dd HH:mm:ss", CultureInfo.InvariantCulture))
     | VJson j -> Some j
 
-/// A round-trippable encoding of a `Value` as one tagged, newline-free
-/// string — `ofWire (toWire v) = v` for every case. Exists for
-/// `Persistence`'s physical WAL/snapshot, which needs its own serialization
-/// distinct from `toText`'s display-only rendering: `toText` collapses
-/// `VNull` to `None` (indistinguishable from "no column" once flattened into
-/// a delimited line) and truncates `VDateTime` to whole seconds (real MySQL
-/// datetimes carry microseconds; round-tripping through `"yyyy-MM-dd
-/// HH:mm:ss"` would silently drop them on every replay). Strings/bytes/JSON
-/// are base64-encoded so the encoded line is safe to store one-per-line (or
-/// comma/pipe-joined) regardless of what the value itself contains.
+/// A round-trippable tagged-text encoding of a `Value` — `ofWire (toWire v) = v`
+/// for every case. Binary persistence uses `encodeValue`; this survives as the
+/// human-readable, one-line ASCII form the torture harness hashes rows with
+/// (`Harness.rowHash`) and `ValueTests` pins. Strings/bytes/JSON are
+/// base64-encoded so the result is safe regardless of what delimiters the
+/// caller puts around it.
 let toWire (v: Value) : string =
     let b64 (s: string) = Convert.ToBase64String(Text.Encoding.UTF8.GetBytes s)
 
@@ -88,8 +84,7 @@ let toWire (v: Value) : string =
     | VDateTime dt -> "V" + dt.ToString("O", CultureInfo.InvariantCulture)
     | VJson j -> "J" + b64 j
 
-/// Inverse of `toWire`. Throws on malformed input — a corrupt WAL line is a
-/// startup-time failure to surface loudly, not a value to silently coerce.
+/// Inverse of `toWire`. Throws on malformed input rather than coercing.
 let ofWire (s: string) : Value =
     let unb64 (payload: string) = Text.Encoding.UTF8.GetString(Convert.FromBase64String payload)
 
@@ -109,10 +104,10 @@ let ofWire (s: string) : Value =
         | 'J' -> VJson(unb64 payload)
         | tag -> failwithf "Value.ofWire: unknown tag '%c' in %s" tag s
 
-/// Binary WAL encoding of a `Value`, mirroring `toWire`'s tag scheme but
+/// Binary encoding of a `Value`, mirroring `toWire`'s tag scheme but
 /// length-prefixed rather than base64-encoded — `decodeValue (encodeValue v) = v`
-/// for every case. The row-level WAL uses this; `toWire` stays for the JSON
-/// snapshot's human-inspectable rendering.
+/// for every case. The WAL and the snapshot both use this; `toWire` stays as
+/// the human-readable tagged-text rendering (round-trip-tested in `ValueTests`).
 let encodeValue (w: Writer) (v: Value) : unit =
     match v with
     | VNull -> w.WriteByte 0x00uy
@@ -146,7 +141,7 @@ let encodeValue (w: Writer) (v: Value) : unit =
 
 /// Inverse of `encodeValue`. Throws on malformed input, same contract as
 /// `ofWire`.
-let decodeValue (r: Reader) : Value =
+let decodeValue (r: #IReader) : Value =
     match r.ReadByte() with
     | 0x00uy -> VNull
     | 0x01uy -> VInt(r.ReadInt64LE())
