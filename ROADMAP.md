@@ -113,7 +113,8 @@ MySQL's 239 µs on the same box — the hash join killed the cross-product
 pathology (previously ~425s), the remaining ~8x is `WHERE ... LIMIT 50`
 materializing and projecting every matched row before LIMIT slices it.
 Sub-gates carried over from M9: InsertSingle < 300µs (at 492µs),
-UpdateSingleRow < 500µs (at 2.3ms).
+UpdateSingleRow < 500µs (at 2.3ms; now 554µs after the fix below — see
+"Sub-gate profiling").
 
 **Landed:** `runSelect`'s plain (non-grouped, non-windowed) path streams —
 no `ORDER BY` means `WHERE`/`DISTINCT`/`LIMIT`/`OFFSET` pull rows lazily
@@ -149,3 +150,64 @@ reworked around a type that's genuinely single-pass — a separate, focused
 piece of work against `applyJoin`/`applyMutationJoin`, deliberately not
 rushed into this slice given how load-bearing (and delicately
 comment-documented) that code already is. Follow-up, not abandoned.
+
+**Sub-gate profiling (InsertSingle/UpdateSingleRow, measured at e92a77b,
+`just bench-quick` before/after plus an in-process `Executor.execute`
+harness at 10k rows, same methodology as the join numbers above):**
+
+`UpdateSingleRow` 2,626 µs → 554 µs (4.7x; gate is < 500 µs, 11% short).
+Root cause found by decomposition, not guessed: a single-table `UPDATE`
+ran the WHERE clause through the *interpreted expression evaluator*
+against every one of the table's 10k rows (`Executor.selectMutationTargets`,
+via `whereMatches`/`evalExpr`) just to find the one row `WHERE id = <pk>`
+means — measured in isolation at ~2.9 ms of the 3.1 ms in-process total,
+vs. a bare integer-equality `List.filter` over the same 10k rows at 66 µs.
+`Storage.updateRows`'s own rebuild-the-row-list pass added a second,
+separate full scan on top. Fix: `Executor`'s single-table `UPDATE` branch
+now tries `tryPointLookup` — the same PK/UNIQUE-index narrowing `SELECT`
+already used (`Storage.tryUniqueLookup`, O(log n)) — before falling back to
+`scan`'s full table read, exactly mirroring `runSelectStmt`'s existing
+`FromTable`/no-`JOIN` narrowing. Pure narrowing (a superset of the real
+WHERE match), so `selectMutationTargets` still runs the complete WHERE
+over whatever it returns — never a correctness risk, and no observable
+behavior changes (`UPDATE`/`DELETE` order isn't SQL-defined either way).
+Caught in the same pass: `Storage.updateRows` built `Array.ofList
+table.Rows`, converted it back with `List.ofArray`, and ran `List.indexed`
+over it — three full-table passes producing an index the fold's own `step`
+function then discarded (`let step acc (_, row) = ...`, the index was
+never read). Dead weight left over from an earlier shape; deleted, folding
+over `table.Rows` directly. Remaining 554 µs is the honest floor: even
+narrowed to one matching row, `Storage.updateRows` still walks every row
+of `table.Rows` once to rebuild the table's immutable list (a `Value[]
+list` cons-and-reverse, the same "still O(table)" ceiling the function's
+own doc comment already named). Closing that needs `Table.Rows` itself to
+become index-addressable (array/`ResizeArray`) — `docs/performance-design.md`
+section 2's change C, already scoped there as "Large" blast radius (every
+`Rows` consumer in `Executor`/`Persistence` snapshot-replay) precisely
+because the table's copy-on-write immutability is what the engine's
+per-database snapshot/transaction model leans on; not undertaken here for
+an 11%, now-isolated gap.
+
+`InsertSingle`: not changed this pass. The official `just bench-quick`
+number barely moved (492 µs → 459 µs, within its own noise — Error is
+±588 µs, a wider band than the mean). A clean, warm, minimal-harness
+measurement (a single reused connection, 300 real wire round trips against
+a Release server already primed with 10k rows and 200+ warmup calls) reads
+205 µs total, with the equivalent in-process `Executor.execute` call at
+105 µs and a bare `SELECT 1` round trip at 95-99 µs — i.e. the engine's
+own steady-state contribution is already comfortably inside a 300 µs
+budget once JIT tiering has caught up. `just bench-quick`'s much noisier,
+much higher number is a known property of its own methodology, not a
+regression to chase: `ServerBenchmarks` restarts fsdb per benchmark case
+(deliberately, to stop one case's leftover work poisoning the next — see
+section 1.1/1.6 above) and ShortRun only warms up 3 iterations before
+measuring, nowhere near enough for a branch-heavy, allocation-light
+per-statement path like a single `INSERT` to reach steady-state tiered
+JIT code — `UpdateSingleRow`'s tight O(n) loop hits that ceiling fast
+regardless (its StdDev dropped to 0.45% after the fix above), `InsertSingle`
+doesn't. Of the real, steady-state 60 µs (roughly half the 105-205 µs
+budget), `Storage.insertCore`'s own doc comment already names the cause:
+`table.Rows @ accepted` is an O(existing table size) list append per
+statement — the same `Table.Rows`-immutability ceiling `UpdateSingleRow`
+hit above, and the same deferred "Large" fix. Left alone this pass for the
+same reason.

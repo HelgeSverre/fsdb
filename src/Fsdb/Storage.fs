@@ -1859,30 +1859,29 @@ let updateRows
                 |> Result.bind (fun table ->
                     let uniqueGroups = uniqueKeyGroups table
                     let checkFks = store.ForeignKeyChecks
-                    let original = Array.ofList table.Rows
 
                     // Folds left-to-right, threading the rows already written this
                     // statement (`doneRowsRev`, holding their *new* values, newest
                     // first — cons is O(1); the whole accumulator is reversed once
                     // after the fold instead of appended to on every row) alongside
-                    // the rows not yet reached (their still-*original* values, read
-                    // straight out of `original` by index rather than re-filtered) —
-                    // mirrors `insertCore`'s cons-then-reverse, so a multi-row
-                    // `UPDATE` that moves several rows onto the same unique value
-                    // collides with a sibling row this same statement already
-                    // rewrote, not just against the frozen pre-statement snapshot.
-                    // `changesRev` likewise collects only the rows actually
-                    // rewritten (before, after), newest first — for `RowsUpdated`,
-                    // and for `changedCount` (its length), matching MySQL's
-                    // "Changed: n" rather than "Rows matched: n". `index`
-                    // mirrors `doneRowsRev`/`original` split: it starts as
+                    // the rows not yet reached (still their original values, read
+                    // straight off `table.Rows` as the fold walks it, no separate
+                    // array/index bookkeeping needed) — mirrors `insertCore`'s
+                    // cons-then-reverse, so a multi-row `UPDATE` that moves several
+                    // rows onto the same unique value collides with a sibling row
+                    // this same statement already rewrote, not just against the
+                    // frozen pre-statement snapshot. `changesRev` likewise collects
+                    // only the rows actually rewritten (before, after), newest
+                    // first — for `RowsUpdated`, and for `changedCount` (its
+                    // length), matching MySQL's "Changed: n" rather than "Rows
+                    // matched: n". `index` mirrors `doneRowsRev`: it starts as
                     // `table.UniqueIndex` (every row's *original* key) and is
                     // rekeyed one row at a time as rows are rewritten, so a
                     // later row's collision check still sees this same
                     // statement's earlier rewrites — same guarantee
                     // `others` gave the old full-scan check, just without
                     // scanning.
-                    let step acc (_, row) =
+                    let step acc row =
                         acc
                         |> Result.bind (fun (doneRowsRev: Value[] list, changesRev: (Value[] * Value[]) list, index: Map<string, Map<string, Value[]>>) ->
                             predicate row
@@ -1924,9 +1923,7 @@ let updateRows
                                     |> Result.map (fun (newRow, index') ->
                                         newRow :: doneRowsRev, (if newRow <> row then (row, newRow) :: changesRev else changesRev), index')))
 
-                    original
-                    |> List.ofArray
-                    |> List.indexed
+                    table.Rows
                     |> List.fold step (Ok([], [], table.UniqueIndex))
                     |> Result.map (fun (doneRowsRev, changesRev, index) -> Map.add key { table with Rows = List.rev doneRowsRev; UniqueIndex = index } db, List.rev changesRev)))
 

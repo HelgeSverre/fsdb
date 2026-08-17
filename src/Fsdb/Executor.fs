@@ -3317,7 +3317,23 @@ let execute (store: Store) (registry: Registry) (dbName: string) (ids: int64 * i
         let db, table = (updateStmt.From.Database |> Option.defaultValue dbName), updateStmt.From.Table
         let tableAlias = updateStmt.From.Alias |> Option.defaultValue updateStmt.From.Table
 
-        match scan store db table with
+        // `WHERE <PK/UNIQUE col> = <literal>` narrows to its O(log n) index
+        // candidate the same way `tryPointLookup` already does for `SELECT`
+        // (see its doc) — pure narrowing to a superset of the real WHERE
+        // match, so `selectMutationTargets` below still runs the complete,
+        // unmodified WHERE over whatever this produces; a miss (no such
+        // index, a non-literal operand, ...) falls back to the ordinary
+        // full scan, never a correctness risk. This only removes the
+        // O(table) cost of *evaluating* WHERE against every row —
+        // `Storage.updateRows` still walks every row of `table.Rows` once
+        // to rebuild the table's immutable row list (see its own doc for
+        // that remaining ceiling).
+        let scanned =
+            tryPointLookup store dbName updateStmt.From updateStmt.Where
+            |> Option.map (fun (cols, rows) -> Ok(cols, Seq.ofList rows))
+            |> Option.defaultWith (fun () -> scan store db table)
+
+        match scanned with
         | Error e -> ids, storageErr e
         | Ok(columns, rows) ->
             let columnIndex = columnIndexOf columns
