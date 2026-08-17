@@ -1245,9 +1245,6 @@ let private insertCore
     : Result<Database * (int64 * int64 option * int * Value[] list), StorageError> =
     let table = Map.find tableKey db
     let uniqueGroups = uniqueKeyGroups table
-    let uniqueLookups =
-        uniqueGroups
-        |> List.map (fun (name, indices) -> name, indices, constraintLookup indices table.Rows)
 
     // Parent keys are immutable for the duration of this INSERT. Build one
     // compact lookup per ordinary FK instead of rescanning its parent table
@@ -1282,7 +1279,7 @@ let private insertCore
 
     let step acc (rowValues: Value list) =
         acc
-        |> Result.bind (fun (acceptedRev: Value[] list, nextAutoId, firstAuto, lastExplicit) ->
+        |> Result.bind (fun (acceptedRev: Value[] list, nextAutoId, firstAuto, lastExplicit, index: Map<string, Map<string, Value[]>>) ->
             if List.length rowValues <> List.length idxs then
                 Error(ColumnCountMismatch(List.length idxs, List.length rowValues))
             else
@@ -1294,16 +1291,15 @@ let private insertCore
                     |> Result.bind (fun (finalValues, nextAutoId', assigned) ->
                         let candidate = Array.ofList finalValues
 
-                        // Avoid constructing `table.Rows @ accepted` for
-                        // every candidate. On an unkeyed volume table there
-                        // is nothing to inspect at all; on a keyed table the
-                        // two existing-row partitions can be searched in
-                        // turn without copying either one.
+                        // O(log n) per unique group via the running index
+                        // (seeded from `table.UniqueIndex`, extended below as
+                        // each candidate is accepted) instead of a full scan
+                        // of `table.Rows` per candidate.
                         let uniqueCollision =
-                            uniqueLookups
-                            |> List.tryPick (fun (name, indices, lookup) ->
+                            uniqueGroups
+                            |> List.tryPick (fun (name, indices) ->
                                 match encodeConstraintKey indices candidate with
-                                | Some key when lookup.Contains key ->
+                                | Some key when Map.find name index |> Map.containsKey key ->
                                     let value =
                                         indices
                                         |> List.map (fun index -> candidate.[index] |> toText |> Option.defaultValue "NULL")
@@ -1355,9 +1351,6 @@ let private insertCore
                         | Some(false, v) -> firstAuto, Some v
                         | None -> firstAuto, lastExplicit
 
-                    for _, indices, lookup in uniqueLookups do
-                        encodeConstraintKey indices candidate |> Option.iter (lookup.Add >> ignore)
-
                     for KeyValue(_, (_, selfParentIndices, lookup)) in foreignKeyLookups do
                         selfParentIndices
                         |> Option.bind (fun indices -> encodeConstraintKey indices candidate)
@@ -1366,16 +1359,16 @@ let private insertCore
                     // Prepending is O(1); reverse once after the fold so
                     // externally observable insertion and commit-event
                     // order remains unchanged.
-                    Ok(candidate :: acceptedRev, nextAutoId', firstAuto', lastExplicit')
-                | Error _ when ignoreErrors -> Ok(acceptedRev, nextAutoId, firstAuto, lastExplicit)
+                    Ok(candidate :: acceptedRev, nextAutoId', firstAuto', lastExplicit', reindexRow uniqueGroups None (Some candidate) index)
+                | Error _ when ignoreErrors -> Ok(acceptedRev, nextAutoId, firstAuto, lastExplicit, index)
                 | Error e -> Error e)
 
     rowsIn
-    |> List.fold step (Ok([], table.NextAutoId, None, None))
-    |> Result.map (fun (acceptedRev, nextAutoId', firstAuto, lastExplicit) ->
+    |> List.fold step (Ok([], table.NextAutoId, None, None, table.UniqueIndex))
+    |> Result.map (fun (acceptedRev, nextAutoId', firstAuto, lastExplicit, index) ->
         let accepted = List.rev acceptedRev
         let firstAssigned = Option.orElse lastExplicit firstAuto
-        let table' = { table with Rows = table.Rows @ accepted; NextAutoId = nextAutoId' }
+        let table' = { table with Rows = table.Rows @ accepted; NextAutoId = nextAutoId'; UniqueIndex = index }
         Map.add tableKey table' db, (Option.defaultValue 0L firstAssigned, firstAuto, List.length accepted, accepted))
 
 /// Inserts rows built from `columns` and matching value lists, applying
@@ -1817,38 +1810,61 @@ let updateRows
                     // `changesRev` likewise collects only the rows actually
                     // rewritten (before, after), newest first — for `RowsUpdated`,
                     // and for `changedCount` (its length), matching MySQL's
-                    // "Changed: n" rather than "Rows matched: n".
-                    let step acc (i, row) =
+                    // "Changed: n" rather than "Rows matched: n". `index`
+                    // mirrors `doneRowsRev`/`original` split: it starts as
+                    // `table.UniqueIndex` (every row's *original* key) and is
+                    // rekeyed one row at a time as rows are rewritten, so a
+                    // later row's collision check still sees this same
+                    // statement's earlier rewrites — same guarantee
+                    // `others` gave the old full-scan check, just without
+                    // scanning.
+                    let step acc (_, row) =
                         acc
-                        |> Result.bind (fun (doneRowsRev: Value[] list, changesRev: (Value[] * Value[]) list) ->
+                        |> Result.bind (fun (doneRowsRev: Value[] list, changesRev: (Value[] * Value[]) list, index: Map<string, Map<string, Value[]>>) ->
                             predicate row
                             |> Result.bind (fun keep ->
                                 if not keep then
-                                    Ok(row :: doneRowsRev, changesRev)
+                                    Ok(row :: doneRowsRev, changesRev, index)
                                 else
                                     updater row
                                     |> Result.bind (coerceRow store.StrictMode table.Columns)
                                     |> Result.bind (fun newRow ->
-                                        let notYetProcessed = Array.sub original (i + 1) (original.Length - i - 1) |> List.ofArray
-                                        let others = doneRowsRev @ notYetProcessed
+                                        // A group's key only collides against
+                                        // some *other* row still holding it —
+                                        // `row` itself (about to be rekeyed
+                                        // below) doesn't count, matching the
+                                        // old scan's exclusion of itself from
+                                        // `others`.
+                                        let collision =
+                                            uniqueGroups
+                                            |> List.tryPick (fun (name, idxs) ->
+                                                match encodeConstraintKey idxs newRow with
+                                                | Some k ->
+                                                    match Map.tryFind k (Map.find name index) with
+                                                    | Some existing when existing <> row ->
+                                                        let value = idxs |> List.map (fun i -> newRow.[i] |> toText |> Option.defaultValue "NULL") |> String.concat "-"
+                                                        Some(DuplicateKey(name, value))
+                                                    | _ -> None
+                                                | None -> None)
 
-                                        match findUniqueCollision uniqueGroups others newRow with
+                                        match collision with
                                         | Some e -> Error e
                                         | None ->
-                                            if checkFks then
-                                                checkFkParents db table.Columns table.ForeignKeys newRow
-                                                |> Result.bind (fun () -> checkNotOrphaning db key table.Columns row newRow)
-                                                |> Result.map (fun () -> newRow)
-                                            else
-                                                Ok newRow)
-                                    |> Result.map (fun newRow ->
-                                        newRow :: doneRowsRev, (if newRow <> row then (row, newRow) :: changesRev else changesRev))))
+                                            (if checkFks then
+                                                 checkFkParents db table.Columns table.ForeignKeys newRow
+                                                 |> Result.bind (fun () -> checkNotOrphaning db key table.Columns row newRow)
+                                                 |> Result.map (fun () -> newRow)
+                                             else
+                                                 Ok newRow)
+                                            |> Result.map (fun newRow -> newRow, reindexRow uniqueGroups (Some row) (Some newRow) index))
+                                    |> Result.map (fun (newRow, index') ->
+                                        newRow :: doneRowsRev, (if newRow <> row then (row, newRow) :: changesRev else changesRev), index')))
 
                     original
                     |> List.ofArray
                     |> List.indexed
-                    |> List.fold step (Ok([], []))
-                    |> Result.map (fun (doneRowsRev, changesRev) -> Map.add key { table with Rows = List.rev doneRowsRev } db, List.rev changesRev)))
+                    |> List.fold step (Ok([], [], table.UniqueIndex))
+                    |> Result.map (fun (doneRowsRev, changesRev, index) -> Map.add key { table with Rows = List.rev doneRowsRev; UniqueIndex = index } db, List.rev changesRev)))
 
         match result with
         | Ok changes ->
