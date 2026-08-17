@@ -83,14 +83,10 @@ let sendPayloads (stream: IO.Stream) (startSeq: byte) (payloads: byte[] list) : 
 
     loop startSeq payloads
 
-/// Builds the packet payloads for an OK/ERR/resultset reply, encoding
-/// resultset rows with `rowEncoder` — `textRowPayload` for COM_QUERY,
-/// `binaryRowPayload` for COM_STMT_EXECUTE (see `sendQueryResult` /
-/// `sendBinaryQueryResult`). The packet order reads top-to-bottom as the
-/// protocol spec describes a resultset: column count, column defs, an EOF
-/// (unless CLIENT_DEPRECATE_EOF), rows, then the terminator.
-let private resultPayloads
-    (rowEncoder: byte list -> string option list -> byte[])
+/// Builds the non-row packet payloads of an OK/ERR/resultset reply: the
+/// column count, column defs, and the pre-rows EOF. Rows stream separately
+/// (see `sendResult`) rather than materializing one `byte[]` per row here.
+let private resultHeadPayloads
     (capabilities: uint32)
     (statusFlags: int)
     (lastInsertId: uint64)
@@ -100,17 +96,14 @@ let private resultPayloads
     match result with
     | Affected affectedRows -> [ okPayload capabilities statusFlags affectedRows lastInsertId ]
     | Err(code, message) -> [ errPayload capabilities code message ]
-    | ResultSet(columns, rows) ->
+    | ResultSet(columns, _) ->
         let deprecateEof = capabilities &&& ClientDeprecateEof <> 0u
 
         // `columnTypes` only means anything if the caller actually had one
         // entry per column (a mismatch means "no real info", e.g. a probe
-        // result — see `Session.LastResultColumnTypes`'s doc) — fall back
-        // to VAR_STRING per column rather than zipping a too-short/too-long
-        // list. Both the column-definition packets and `rowEncoder` below
-        // use this same reconciled `types`, so the two can never disagree
-        // about a column's type the way passing `columnTypes` to each
-        // independently could.
+        // result — see `Session.LastResultColumnTypes`'s doc). The column
+        // definition packets and `sendResult`'s row encoder reconcile to
+        // this same `types`, so the two can never disagree.
         let types =
             if List.length columnTypes = columns.Length then
                 columnTypes
@@ -125,11 +118,74 @@ let private resultPayloads
         [ columnCountPayload ]
         @ (List.zip columns types |> List.map (fun (name, ty) -> columnDefPayload { Name = name; Type = ty }))
         @ (if deprecateEof then [] else [ eofPayload capabilities statusFlags ])
-        @ (rows |> List.map (rowEncoder types))
-        @ [ (if deprecateEof then
-                 okEndOfResultSetPayload capabilities statusFlags
-             else
-                 eofPayload capabilities statusFlags) ]
+
+/// Writes an OK/ERR/resultset reply. Rows are framed and written in batches —
+/// one `WriteAsync` per ~64 KiB instead of one per row packet — so a large
+/// result set neither pays a syscall per row nor holds every row's bytes at
+/// once. Column count/defs/EOF stay ordinary packets.
+let private sendResult
+    (stream: IO.Stream)
+    (capabilities: uint32)
+    (startSeq: byte)
+    (statusFlags: int)
+    (lastInsertId: uint64)
+    (columnTypes: byte list)
+    (rowEncoder: byte list -> string option list -> byte[])
+    (result: Executor.QueryResult)
+    : Async<unit> =
+    async {
+        let! seqId = sendPayloads stream startSeq (resultHeadPayloads capabilities statusFlags lastInsertId columnTypes result)
+
+        match result with
+        | ResultSet(columns, rows) ->
+            let types =
+                if List.length columnTypes = columns.Length then
+                    columnTypes
+                else
+                    List.replicate columns.Length TypeVarString
+
+            let mutable seqId = seqId
+            let buf = ResizeArray<byte>()
+
+            let flush () =
+                async {
+                    if buf.Count > 0 then
+                        let bytes = buf.ToArray()
+                        do! stream.WriteAsync(bytes, 0, bytes.Length) |> Async.AwaitTask
+                        buf.Clear()
+                }
+
+            for row in rows do
+                let payload = rowEncoder types row
+                // 4-byte packet header (3-byte length + seq id) written
+                // straight into the batch buffer — rows never approach the
+                // 16 MiB length ceiling, so no multi-packet split here, and
+                // inlining skips `frame`'s intermediate `byte[]` per row.
+                buf.Add(byte (payload.Length &&& 0xff))
+                buf.Add(byte ((payload.Length >>> 8) &&& 0xff))
+                buf.Add(byte ((payload.Length >>> 16) &&& 0xff))
+                buf.Add seqId
+                buf.AddRange payload
+                seqId <- seqId + 1uy
+
+                if buf.Count >= (1 <<< 16) then
+                    do! flush ()
+
+            do! flush ()
+
+            let deprecateEof = capabilities &&& ClientDeprecateEof <> 0u
+
+            do!
+                sendPayloads
+                    stream
+                    seqId
+                    [ (if deprecateEof then
+                           okEndOfResultSetPayload capabilities statusFlags
+                       else
+                           eofPayload capabilities statusFlags) ]
+                |> Async.Ignore
+        | _ -> ()
+    }
 
 /// Writes a text resultset (or OK/ERR) as one or more packets, continuing
 /// the sequence-id numbering from `startSeq`. Not private: exercised
@@ -145,11 +201,7 @@ let sendQueryResult
     (columnTypes: byte list)
     (result: Executor.QueryResult)
     : Async<unit> =
-    sendPayloads
-        stream
-        startSeq
-        (resultPayloads textRowPayloadTyped capabilities statusFlags lastInsertId columnTypes result)
-    |> Async.Ignore
+    sendResult stream capabilities startSeq statusFlags lastInsertId columnTypes textRowPayloadTyped result
 
 /// As `sendQueryResult`, but encodes resultset rows in the binary protocol
 /// row format COM_STMT_EXECUTE requires (`binaryRowPayload`, which — unlike
@@ -164,11 +216,7 @@ let sendBinaryQueryResult
     (columnTypes: byte list)
     (result: Executor.QueryResult)
     : Async<unit> =
-    sendPayloads
-        stream
-        startSeq
-        (resultPayloads binaryRowPayload capabilities statusFlags lastInsertId columnTypes result)
-    |> Async.Ignore
+    sendResult stream capabilities startSeq statusFlags lastInsertId columnTypes binaryRowPayload result
 
 /// `SERVER_STATUS_AUTOCOMMIT` always, plus `SERVER_STATUS_IN_TRANS` while
 /// `session.Tx` is open — every OK/EOF packet reports this so PDO's
