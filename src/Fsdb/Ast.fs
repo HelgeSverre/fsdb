@@ -239,19 +239,37 @@ and JoinKind =
     | LeftJoin
     | RightJoin
     | CrossJoin
+    /// `NATURAL [INNER] JOIN` — the equi-join over every column the two
+    /// sides have in common (matched case-insensitively by name, resolved
+    /// at execution time since the parser only sees names, not schemas);
+    /// no common columns degenerates to a full Cartesian product. The
+    /// parser rejects an `ON` after `NATURAL`, matching MySQL's 1064.
+    | NaturalJoin
+    /// `NATURAL LEFT [OUTER] JOIN` / `NATURAL RIGHT [OUTER] JOIN` — the
+    /// outer-join variants of `NaturalJoin`.
+    | NaturalLeftJoin
+    | NaturalRightJoin
 
-/// One `[INNER | LEFT [OUTER]] JOIN table ON expr` clause, applied against
-/// whatever's already in scope to its left (the `FROM` table, or the result
-/// of an earlier `Join` in the same list — this engine only ever nests
-/// joins left-to-right, matching how they're written). `Table` is a
-/// `FromItem`, not a bare `TableRef`, so `JOIN (SELECT ...) AS alias ON
-/// ...` (Eloquent's `joinSub`/`leftJoinSub`) parses the same derived-table
-/// shape the leading `FROM` already does; a multi-table `UPDATE`/`DELETE ...
-/// JOIN` still only accepts `FromTable` (see `Executor.applyMutationJoin`).
+/// One `[INNER | LEFT [OUTER] | RIGHT [OUTER]] JOIN table {ON expr |
+/// USING (cols)}` clause (plus the `NATURAL`/`CROSS` variants in
+/// `JoinKind`), applied against whatever's already in scope to its left
+/// (the `FROM` table, or the result of an earlier `Join` in the same list —
+/// this engine only ever nests joins left-to-right, matching how they're
+/// written). `Table` is a `FromItem`, not a bare `TableRef`, so
+/// `JOIN (SELECT ...) AS alias ON ...` (Eloquent's `joinSub`/`leftJoinSub`)
+/// parses the same derived-table shape the leading `FROM` already does; a
+/// multi-table `UPDATE`/`DELETE ... JOIN` still only accepts `FromTable`
+/// (see `Executor.applyMutationJoin`).
+///
+/// `Using` is the `JOIN ... USING (col, ...)` column list — like `ON`, it
+/// cannot be combined with an explicit `ON` (MySQL rejects that too), so
+/// `On` is always the always-true literal for the `Using`/`NATURAL` kinds
+/// and the equi-keys come from the column names at execution time instead.
 and Join =
     { Kind: JoinKind
       Table: FromItem
-      On: Expr }
+      On: Expr
+      Using: string list }
 
 /// A `SELECT` statement's clauses as a record rather than a positional
 /// tuple: every clause after `SELECT ... FROM` is optional and grows

@@ -198,6 +198,8 @@ let private reservedWords =
           "cross"
           "outer"
           "on"
+          "using"
+          "natural"
           "group"
           "having"
           "union"
@@ -1230,11 +1232,16 @@ let private derivedTable: Parser<FromItem, unit> =
 let private fromItem: Parser<FromItem, unit> = derivedTable <|> (tableRef |>> FromTable)
 
 /// `[INNER] JOIN`, `LEFT [OUTER] JOIN`, and `RIGHT [OUTER] JOIN` all require
-/// an `ON`; `CROSS JOIN` (parsed separately by `crossJoinClause` below) never
-/// takes one. A bare `JOIN` (no `INNER`) means the same as `INNER JOIN`,
-/// matching MySQL.
+/// an `ON` or a `USING (...)`; `NATURAL [INNER|LEFT [OUTER]|RIGHT [OUTER]]`
+/// JOIN` requires neither (an `ON` after `NATURAL` is a MySQL syntax error,
+/// which the grammar rejects naturally by not consuming it); `CROSS JOIN`
+/// (parsed separately by `crossJoinClause` below) never takes one. A bare
+/// `JOIN` (no `INNER`) means the same as `INNER JOIN`, matching MySQL.
 let private joinKind: Parser<JoinKind, unit> =
-    (keyword "INNER" >>. keyword "JOIN" >>% InnerJoin)
+    attempt (keyword "NATURAL" >>. keyword "LEFT" >>. optional (keyword "OUTER") >>. keyword "JOIN" >>% NaturalLeftJoin)
+    <|> attempt (keyword "NATURAL" >>. keyword "RIGHT" >>. optional (keyword "OUTER") >>. keyword "JOIN" >>% NaturalRightJoin)
+    <|> (keyword "NATURAL" >>. optional (keyword "INNER") >>. keyword "JOIN" >>% NaturalJoin)
+    <|> (keyword "INNER" >>. keyword "JOIN" >>% InnerJoin)
     <|> (keyword "LEFT" >>. optional (keyword "OUTER") >>. keyword "JOIN" >>% LeftJoin)
     <|> (keyword "RIGHT" >>. optional (keyword "OUTER") >>. keyword "JOIN" >>% RightJoin)
     <|> (keyword "JOIN" >>% InnerJoin)
@@ -1248,7 +1255,7 @@ let private joinKind: Parser<JoinKind, unit> =
 /// `JOIN`/`LEFT JOIN`.
 let private crossJoinClause: Parser<Join, unit> =
     attempt (keyword "CROSS" >>. keyword "JOIN" >>. fromItem)
-    |>> fun table -> { Kind = CrossJoin; Table = table; On = Lit(VInt 1L) }
+    |>> fun table -> { Kind = CrossJoin; Table = table; On = Lit(VInt 1L); Using = [] }
 
 /// `FROM t1, t2` — MySQL's legacy comma (implicit-join) syntax, still the
 /// form plenty of handwritten SQL uses for what an explicit `CROSS JOIN`
@@ -1260,20 +1267,36 @@ let private crossJoinClause: Parser<Join, unit> =
 /// `(SELECT ...)`.
 let private commaJoinClause: Parser<Join, unit> =
     attempt (sym "," >>. tableRef)
-    |>> fun table -> { Kind = CrossJoin; Table = FromTable table; On = Lit(VInt 1L) }
+    |>> fun table -> { Kind = CrossJoin; Table = FromTable table; On = Lit(VInt 1L); Using = [] }
+
+/// `JOIN ... USING (col, ...)`'s column list — the equi-keys are resolved by
+/// name at execution time (`Executor.applyJoin`), so the parser only carries
+/// the names. MySQL's `USING (...)` can't be combined with an `ON`, which
+/// the grammar below rejects naturally by not consuming an `ON` after it.
+let private usingClause: Parser<string list, unit> =
+    keyword "USING" >>. between (sym "(") (sym ")") (sepBy1 identifier (sym ","))
 
 /// `[INNER | LEFT [OUTER] | RIGHT [OUTER]] JOIN (table | (SELECT ...) AS
-/// alias) ON expr` — `fromItem` (not `tableRef`) so `JOIN (SELECT ...) AS
-/// alias ON ...` (Eloquent's `joinSub`/`leftJoinSub`/`rightJoinSub`) parses;
-/// a multi-table `UPDATE`/`DELETE ... JOIN` shares this same grammar but
-/// rejects a derived-table target at execution time (see
-/// `Executor.applyMutationJoin`), not here — the grammar itself doesn't know
-/// which statement kind it's parsing.
+/// alias) {ON expr | USING (cols)}`, plus the `NATURAL` kinds in `joinKind`
+/// which take no tail at all — `fromItem` (not `tableRef`) so
+/// `JOIN (SELECT ...) AS alias ON ...` (Eloquent's
+/// `joinSub`/`leftJoinSub`/`rightJoinSub`) parses; a multi-table
+/// `UPDATE`/`DELETE ... JOIN` shares this same grammar but rejects a
+/// derived-table target at execution time (see `Executor.applyMutationJoin`),
+/// not here — the grammar itself doesn't know which statement kind it's
+/// parsing.
 let private joinClause: Parser<Join, unit> =
     crossJoinClause
     <|> commaJoinClause
-    <|> ((joinKind .>>. fromItem .>> keyword "ON" .>>. expr)
-         |>> fun ((kind, table), onExpr) -> { Kind = kind; Table = table; On = onExpr })
+    <|> ((joinKind .>>. fromItem)
+         >>= fun (kind, table) ->
+             match kind with
+             | NaturalJoin
+             | NaturalLeftJoin
+             | NaturalRightJoin -> preturn { Kind = kind; Table = table; On = Lit(VInt 1L); Using = [] }
+             | _ ->
+                 (keyword "ON" >>. expr |>> fun onExpr -> { Kind = kind; Table = table; On = onExpr; Using = [] })
+                 <|> (usingClause |>> fun cols -> { Kind = kind; Table = table; On = Lit(VInt 1L); Using = cols }))
 
 let private groupByClause: Parser<Expr list, unit> = keyword "GROUP" >>. keyword "BY" >>. sepBy1 expr (sym ",")
 

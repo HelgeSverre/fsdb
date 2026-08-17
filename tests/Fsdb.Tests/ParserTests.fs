@@ -1504,19 +1504,39 @@ let tests =
                         ()
                     | other -> failtestf "expected two chained joins, got %A" other
 
-                testCase "NATURAL JOIN and JOIN ... USING are clean 1064s, not silent misparses (ponytail: not supported)"
+                testCase "NATURAL [LEFT|RIGHT] JOIN parses to the natural kinds, and takes no ON"
                 <| fun _ ->
-                    // Both are real MySQL syntax this grammar deliberately
-                    // doesn't have yet — a clean parse error keeps an app
-                    // from shipping a subtly-wrong query, rather than the
-                    // parser guessing.
-                    match parse "SELECT * FROM a NATURAL JOIN b" with
-                    | Error _ -> ()
-                    | Ok stmt -> failtestf "expected NATURAL JOIN to be a parse error, got %A" stmt
+                    match parseOk "SELECT * FROM a NATURAL JOIN b" with
+                    | Select { Joins = [ { Kind = NaturalJoin; Using = [] } ] } -> ()
+                    | other -> failtestf "expected a NaturalJoin, got %A" other
 
-                    match parse "SELECT * FROM a JOIN b USING (id)" with
+                    match parseOk "SELECT * FROM a NATURAL LEFT JOIN b" with
+                    | Select { Joins = [ { Kind = NaturalLeftJoin } ] } -> ()
+                    | other -> failtestf "expected a NaturalLeftJoin, got %A" other
+
+                    match parseOk "SELECT * FROM a NATURAL RIGHT OUTER JOIN b" with
+                    | Select { Joins = [ { Kind = NaturalRightJoin } ] } -> ()
+                    | other -> failtestf "expected a NaturalRightJoin, got %A" other
+
+                    // MySQL rejects an ON after NATURAL (and after USING) —
+                    // the grammar doesn't consume it, so this is a 1064.
+                    match parse "SELECT * FROM a NATURAL JOIN b ON a.j = b.j" with
                     | Error _ -> ()
-                    | Ok stmt -> failtestf "expected JOIN ... USING to be a parse error, got %A" stmt ]
+                    | Ok stmt -> failtestf "expected NATURAL JOIN ... ON to be a parse error, got %A" stmt
+
+                testCase "JOIN ... USING (cols) parses the column list; USING + ON is a 1064"
+                <| fun _ ->
+                    match parseOk "SELECT * FROM a JOIN b USING (id)" with
+                    | Select { Joins = [ { Kind = InnerJoin; Using = [ "id" ] } ] } -> ()
+                    | other -> failtestf "expected a USING inner join, got %A" other
+
+                    match parseOk "SELECT * FROM a LEFT JOIN b USING (x, y)" with
+                    | Select { Joins = [ { Kind = LeftJoin; Using = [ "x"; "y" ] } ] } -> ()
+                    | other -> failtestf "expected a LEFT USING join with two columns, got %A" other
+
+                    match parse "SELECT * FROM a JOIN b USING (id) ON a.id = b.id" with
+                    | Error _ -> ()
+                    | Ok stmt -> failtestf "expected USING ... ON to be a parse error, got %A" stmt ]
 
           testList
               "derived tables and UNION"

@@ -1793,6 +1793,140 @@ let tests =
                     | ResultSet(_, rows) -> Expect.equal rows [ [ Some "1"; Some "y" ]; [ Some "2"; Some "z" ] ] "max tag per joined group"
                     | other -> failtestf "expected the derived-table join, got %A" other
 
+                // NATURAL/USING expectations below were verified against a
+                // real MySQL 8.4 (same schema/data, differential probe) —
+                // column order, coalesced values, and padding all match.
+                testCase "NATURAL JOIN matches on every common column and coalesces SELECT *"
+                <| fun _ ->
+                    let store = newStore ()
+                    runDefault store "CREATE TABLE t1 (i INT, j INT, m INT)" |> ignore
+                    runDefault store "CREATE TABLE t2 (k INT, j INT, m INT)" |> ignore
+                    runDefault store "INSERT INTO t1 VALUES (1,10,100),(2,20,200),(3,30,300)" |> ignore
+                    runDefault store "INSERT INTO t2 VALUES (11,10,100),(22,20,999),(33,99,333)" |> ignore
+
+                    // only the row where BOTH j and m match survives; SELECT
+                    // * order is the coalesced commons, then left-rest, then
+                    // right-rest.
+                    match runDefault store "SELECT * FROM t1 NATURAL JOIN t2" with
+                    | ResultSet([ "j"; "m"; "i"; "k" ], [ [ Some "10"; Some "100"; Some "1"; Some "11" ] ]) -> ()
+                    | other -> failtestf "expected the coalesced commons-first row, got %A" other
+
+                testCase "NATURAL LEFT/RIGHT JOIN pad with the preserved side's coalesced values"
+                <| fun _ ->
+                    let store = newStore ()
+                    runDefault store "CREATE TABLE t1 (i INT, j INT, m INT)" |> ignore
+                    runDefault store "CREATE TABLE t2 (k INT, j INT, m INT)" |> ignore
+                    runDefault store "INSERT INTO t1 VALUES (1,10,100),(2,20,200),(3,30,300)" |> ignore
+                    runDefault store "INSERT INTO t2 VALUES (11,10,100),(22,20,999),(33,99,333)" |> ignore
+
+                    match runDefault store "SELECT j, m, i, k FROM t1 NATURAL LEFT JOIN t2 ORDER BY i" with
+                    | ResultSet(_, rows) ->
+                        Expect.equal
+                            rows
+                            [ [ Some "10"; Some "100"; Some "1"; Some "11" ]
+                              [ Some "20"; Some "200"; Some "2"; None ]
+                              [ Some "30"; Some "300"; Some "3"; None ] ]
+                            "left rows keep their own j/m when unmatched"
+                    | other -> failtestf "expected LEFT-padded coalesced rows, got %A" other
+
+                    // RIGHT puts the right table's remaining columns before
+                    // the left's, and unmatched right rows keep their values.
+                    match runDefault store "SELECT j, m, k, i FROM t1 NATURAL RIGHT JOIN t2 ORDER BY k" with
+                    | ResultSet(_, rows) ->
+                        Expect.equal
+                            rows
+                            [ [ Some "10"; Some "100"; Some "11"; Some "1" ]
+                              [ Some "20"; Some "999"; Some "22"; None ]
+                              [ Some "99"; Some "333"; Some "33"; None ] ]
+                            "right rows keep their own j/m when unmatched"
+                    | other -> failtestf "expected RIGHT-padded coalesced rows, got %A" other
+
+                testCase "JOIN ... USING coalesces the listed column and keeps both sides' other columns"
+                <| fun _ ->
+                    let store = newStore ()
+                    runDefault store "CREATE TABLE t1 (i INT, j INT, m INT)" |> ignore
+                    runDefault store "CREATE TABLE t2 (k INT, j INT, m INT)" |> ignore
+                    runDefault store "INSERT INTO t1 VALUES (1,10,100),(2,20,200),(3,30,300)" |> ignore
+                    runDefault store "INSERT INTO t2 VALUES (11,10,100),(22,20,999),(33,99,333)" |> ignore
+
+                    // j coalesced once, both m's survive (t1.m then t2.m).
+                    match runDefault store "SELECT j, i, t1.m, k, t2.m FROM t1 JOIN t2 USING (j) ORDER BY j" with
+                    | ResultSet(_, rows) ->
+                        Expect.equal
+                            rows
+                            [ [ Some "10"; Some "1"; Some "100"; Some "11"; Some "100" ]
+                              [ Some "20"; Some "2"; Some "200"; Some "22"; Some "999" ] ]
+                            "coalesced j, both m's in place"
+                    | other -> failtestf "expected the USING-joined rows, got %A" other
+
+                testCase "a USING column missing from either side is MySQL's 1054 from-clause error"
+                <| fun _ ->
+                    let store = newStore ()
+                    runDefault store "CREATE TABLE t1 (i INT)" |> ignore
+                    runDefault store "CREATE TABLE t2 (k INT)" |> ignore
+
+                    match runDefault store "SELECT * FROM t1 JOIN t2 USING (nope)" with
+                    | Err(1054, msg) -> Expect.stringContains msg "from clause" "message names the from clause"
+                    | other -> failtestf "expected 1054 for a missing USING column, got %A" other
+
+                testCase "NATURAL JOIN with no common columns is the Cartesian product"
+                <| fun _ ->
+                    let store = newStore ()
+                    runDefault store "CREATE TABLE n1 (a INT, b INT)" |> ignore
+                    runDefault store "CREATE TABLE n2 (c INT, d INT)" |> ignore
+                    runDefault store "INSERT INTO n1 VALUES (1,2)" |> ignore
+                    runDefault store "INSERT INTO n2 VALUES (3,4)" |> ignore
+
+                    match runDefault store "SELECT a, b, c, d FROM n1 NATURAL JOIN n2" with
+                    | ResultSet(_, rows) -> Expect.equal rows [ [ Some "1"; Some "2"; Some "3"; Some "4" ] ] "every pair, no coalescing"
+                    | other -> failtestf "expected the Cartesian product, got %A" other
+
+                testCase "chained NATURAL/USING joins fold left to right, commons first each step"
+                <| fun _ ->
+                    let store = newStore ()
+                    runDefault store "CREATE TABLE t1 (i INT, j INT, m INT)" |> ignore
+                    runDefault store "CREATE TABLE t2 (k INT, j INT, m INT)" |> ignore
+                    runDefault store "CREATE TABLE t3 (j INT, n INT)" |> ignore
+                    runDefault store "INSERT INTO t1 VALUES (1,10,100),(2,20,200),(3,30,300)" |> ignore
+                    runDefault store "INSERT INTO t2 VALUES (11,10,100),(22,20,999),(33,99,333)" |> ignore
+                    runDefault store "INSERT INTO t3 VALUES (10, 7), (20, 8)" |> ignore
+
+                    // t1 NATURAL t2 coalesces (j, m); then NATURAL t3 moves
+                    // j to the front again: j, m, i, k, n.
+                    match runDefault store "SELECT j, m, i, k, n FROM t1 NATURAL JOIN t2 NATURAL JOIN t3 ORDER BY j" with
+                    | ResultSet(_, rows) ->
+                        Expect.equal rows [ [ Some "10"; Some "100"; Some "1"; Some "11"; Some "7" ] ] "second join's common j first, rest preserved"
+                    | other -> failtestf "expected the chained natural join, got %A" other
+
+                    // t1 JOIN t2 USING (j) coalesces j; NATURAL t3 finds only
+                    // j again: j, i, t1.m, k, t2.m, n.
+                    match runDefault store "SELECT j, i, t1.m, k, t2.m, n FROM t1 JOIN t2 USING (j) NATURAL JOIN t3 ORDER BY j" with
+                    | ResultSet(_, rows) ->
+                        Expect.equal
+                            rows
+                            [ [ Some "10"; Some "1"; Some "100"; Some "11"; Some "100"; Some "7" ]
+                              [ Some "20"; Some "2"; Some "200"; Some "22"; Some "999"; Some "8" ] ]
+                            "mixed USING-then-NATURAL chain"
+                    | other -> failtestf "expected the mixed chain, got %A" other
+
+                testCase "unqualified references to a coalesced column see the COALESCE, and qualified stars stay untouched"
+                <| fun _ ->
+                    let store = newStore ()
+                    runDefault store "CREATE TABLE t1 (i INT, j INT, m INT)" |> ignore
+                    runDefault store "CREATE TABLE t2 (k INT, j INT, m INT)" |> ignore
+                    runDefault store "INSERT INTO t1 VALUES (1,10,100),(2,20,200),(3,30,300)" |> ignore
+                    runDefault store "INSERT INTO t2 VALUES (11,10,100),(22,20,999),(33,99,333)" |> ignore
+
+                    // unqualified j in WHERE resolves to the coalesced column
+                    match runDefault store "SELECT i FROM t1 NATURAL LEFT JOIN t2 WHERE j IS NOT NULL ORDER BY i" with
+                    | ResultSet(_, rows) -> Expect.equal rows [ [ Some "1" ]; [ Some "2" ]; [ Some "3" ] ] "every left row has a coalesced j"
+                    | other -> failtestf "expected unqualified j to resolve, got %A" other
+
+                    // t1.* keeps t1's own columns, common ones included
+                    match runDefault store "SELECT t1.* FROM t1 NATURAL JOIN t2" with
+                    | ResultSet([ "i"; "j"; "m" ], [ [ Some "1"; Some "10"; Some "100" ] ]) -> ()
+                    | other -> failtestf "expected t1's own full column list, got %A" other
+
                 testCase "an unqualified column present in two joined tables is error 1052, not a silent pick"
                 <| fun _ ->
                     let store = newStore ()

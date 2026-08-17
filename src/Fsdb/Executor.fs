@@ -1193,6 +1193,55 @@ and private whereMatches (ctxFor: Value[] -> EvalContext) (where: Expr option) (
     | None -> Ok true
     | Some expr -> evalExpr { ctxFor row with Clause = WhereClause } expr |> Result.map (fun v -> truthy v = Some true)
 
+/// `NATURAL JOIN`'s name set: every column name the two sides share,
+/// matched case-insensitively (MySQL matches `c1(X)` against `c2(x)`), in
+/// the left side's declaration order — which is also MySQL's output order
+/// for the coalesced columns of a `SELECT *`.
+and private naturalCommonNames (leftColumns: ColumnDef list) (rightColumns: ColumnDef list) : string list =
+    leftColumns
+    |> List.map (fun c -> c.Name)
+    |> List.filter (fun name ->
+        rightColumns |> List.exists (fun c -> System.String.Equals(c.Name, name, System.StringComparison.OrdinalIgnoreCase)))
+
+/// The equi-key index pairs for a `NATURAL`/`USING` join: `names` resolved
+/// case-insensitively against both sides' column lists. `NATURAL` passes
+/// `naturalCommonNames`' intersection (never missing); `USING` passes its
+/// explicit list, and a listed column absent from either side is MySQL's
+/// 1054 "Unknown column ... in 'from clause'".
+and private namedEquiKeys (leftColumns: ColumnDef list) (rightColumns: ColumnDef list) (names: string list) : Result<(int * int) list, QueryResult> =
+    let indexOf (cols: ColumnDef list) (name: string) =
+        cols |> List.tryFindIndex (fun c -> System.String.Equals(c.Name, name, System.StringComparison.OrdinalIgnoreCase))
+
+    names
+    |> traverse (fun name ->
+        match indexOf leftColumns name, indexOf rightColumns name with
+        | Some li, Some ri -> Ok(li, ri)
+        | _ -> Error(Err(1054, sprintf "Unknown column '%s' in 'from clause'" name)))
+
+/// Synthesizes the equality conjunction a `NATURAL`/`USING` join's
+/// equi-keys imply, for the nested-loop fallback — the hash path matches
+/// key values directly and never evaluates `join.On` (which is the
+/// always-true literal for these join kinds), so without this the fallback
+/// would pair every row. `qualifierOfLeft` maps a left index to its
+/// source's qualifier so the synthesized refs stay unambiguous.
+and private namedJoinOn
+    (leftColumns: ColumnDef list)
+    (qualifierOfLeft: int -> string)
+    (rightQualifier: string)
+    (rightColumns: ColumnDef list)
+    (equiKeys: (int * int) list)
+    : Expr =
+    equiKeys
+    |> List.fold
+        (fun acc (li, ri) ->
+            let cond =
+                BinOp(Eq, QualifiedCol(qualifierOfLeft li, leftColumns.[li].Name), QualifiedCol(rightQualifier, rightColumns.[ri].Name))
+
+            match acc with
+            | Lit(VInt 1L) -> cond
+            | _ -> BinOp(And, acc, cond))
+        (Lit(VInt 1L))
+
 /// Applies one `JOIN` clause against whatever's already in scope
 /// (`sourcesSoFar`/`rowsSoFar`, built by the `FROM` table and any earlier
 /// `JOIN`s in the same list): resolves the joined table, matches (left row,
@@ -1222,7 +1271,7 @@ and private applyJoin
     (outer: EvalContext option)
     ((sourcesSoFar, rowsSoFar): (string * ColumnDef list) list * Value[] seq)
     (join: Join)
-    : Result<(string * ColumnDef list) list * Value[] seq, QueryResult> =
+    : Result<(string * ColumnDef list) list * Value[] seq * string list, QueryResult> =
     match resolveFromItem store registry dbName join.Table with
     | Error e -> Error e
     | Ok(joinColumns, joinRows) ->
@@ -1232,6 +1281,17 @@ and private applyJoin
         let combinedColumnsSoFar = sourcesSoFar |> List.collect snd
         let leftNullPadding = combinedColumnsSoFar |> List.map (fun _ -> VNull) |> Array.ofList
         let rightNullPadding = joinColumns |> List.map (fun _ -> VNull) |> Array.ofList
+
+        // The column names this join coalesces (`SELECT *` shows them once):
+        // `NATURAL`'s intersection, or `USING`'s explicit list — empty for a
+        // plain `ON` join. Returned to `runSelectStmt` for its star/ref
+        // rewrite.
+        let coalesceNames =
+            match join.Kind with
+            | NaturalJoin
+            | NaturalLeftJoin
+            | NaturalRightJoin -> naturalCommonNames combinedColumnsSoFar joinColumns
+            | _ -> join.Using
 
         let ctxFor = contextFactory store registry dbName (columnIndexOf (combinedColumnsSoFar @ joinColumns)) qualifiers outer
 
@@ -1270,78 +1330,114 @@ and private applyJoin
             let combinedRows =
                 match join.Kind with
                 | InnerJoin
-                | CrossJoin -> matchedCombined
-                | LeftJoin -> matchedCombined @ leftOnly
-                | RightJoin -> matchedCombined @ rightOnly
+                | CrossJoin
+                | NaturalJoin -> matchedCombined
+                | LeftJoin
+                | NaturalLeftJoin -> matchedCombined @ leftOnly
+                | RightJoin
+                | NaturalRightJoin -> matchedCombined @ rightOnly
 
             newSources, combinedRows
 
-        let equiKeys, residualConjuncts = extractEquiKeys resolveQualified combinedColumnsSoFar.Length join.On
+        // `NATURAL`/`USING` equi-keys come straight from the coalesced
+        // names; a plain `ON` join keeps the expression-based extraction.
+        // An empty name set (a `NATURAL` join with no common columns) falls
+        // through to `extractEquiKeys` on the always-true `On`, which finds
+        // no keys and drops to the nested loop — MySQL's Cartesian product.
+        let equiKeysResult =
+            if coalesceNames.IsEmpty then
+                Ok(extractEquiKeys resolveQualified combinedColumnsSoFar.Length join.On)
+            else
+                namedEquiKeys combinedColumnsSoFar joinColumns coalesceNames |> Result.map (fun keys -> keys, [])
 
-        let keyClasses =
-            equiKeys |> List.map (fun (li, ri) -> keyClassOf combinedColumnsSoFar.[li].Type joinColumns.[ri].Type)
+        match equiKeysResult with
+        | Error e -> Error e
+        | Ok(equiKeys, residualConjuncts) ->
+            // For a named (NATURAL/USING) join the nested-loop fallback
+            // must still enforce the equi-keys — `join.On` is the
+            // always-true literal for these kinds, so synthesize the
+            // conjunction the hash path matches directly.
+            let effectiveOn =
+                if coalesceNames.IsEmpty then
+                    join.On
+                else
+                    let qualifierOfLeft idx =
+                        let rec find offset =
+                            function
+                            | [] -> failwith "applyJoin: left column index out of range"
+                            | (q, cols) :: rest ->
+                                if idx < offset + List.length cols then q
+                                else find (offset + List.length cols) rest
 
-        let hashEligible =
-            not equiKeys.IsEmpty
-            && keyClasses |> List.forall Option.isSome
-            && rowsMatchKeyClasses (keyClasses |> List.map Option.get) (equiKeys |> List.map fst) (leftIndexed |> Seq.map snd)
-            && rowsMatchKeyClasses (keyClasses |> List.map Option.get) (equiKeys |> List.map snd) joinRows
+                        find 0 sourcesSoFar
 
-        let residualHolds (combined: Value[]) : Result<bool, EvalError> =
-            residualConjuncts
-            |> traverse (fun c -> evalExpr { ctxFor combined with Clause = OnClause } c)
-            |> Result.map (List.forall (fun v -> truthy v = Some true))
+                    namedJoinOn combinedColumnsSoFar qualifierOfLeft joinQualifier joinColumns equiKeys
 
-        if hashEligible then
-            let leftKeyIndices = equiKeys |> List.map fst |> Array.ofList
-            let rightKeyIndices = equiKeys |> List.map snd |> Array.ofList
-            let buildOnLeft = leftIndexed.Length <= rightIndexed.Length
+            let keyClasses =
+                equiKeys |> List.map (fun (li, ri) -> keyClassOf combinedColumnsSoFar.[li].Type joinColumns.[ri].Type)
 
-            match join.Kind, residualConjuncts with
-            | (InnerJoin | CrossJoin), [] ->
-                // Nothing here needs to see every match up front: `INNER`/
-                // `CROSS` keep only matched pairs (no unmatched-side padding
-                // to compute, unlike `LEFT`/`RIGHT`), and an empty residual
-                // means every hash-bucket hit is already a real match (no
-                // `ON`-conjunct re-check that could itself fail past the
-                // point a caller stops pulling). So this is `hashPairs`'
-                // lazy `seq` straight through, `Array.append`-combined but
-                // not collected — `runSelect`'s `WHERE`/`LIMIT` streaming
-                // decides how much of it ever actually runs.
-                let combined : Value[] seq =
-                    if buildOnLeft then
-                        hashPairs (equiKeyOf leftKeyIndices) (equiKeyOf rightKeyIndices) leftIndexed rightIndexed
-                        |> Seq.map (fun (_, l, _, r) -> Array.append l r)
-                    else
-                        hashPairs (equiKeyOf rightKeyIndices) (equiKeyOf leftKeyIndices) rightIndexed leftIndexed
-                        |> Seq.map (fun (_, r, _, l) -> Array.append l r)
+            let hashEligible =
+                not equiKeys.IsEmpty
+                && keyClasses |> List.forall Option.isSome
+                && rowsMatchKeyClasses (keyClasses |> List.map Option.get) (equiKeys |> List.map fst) (leftIndexed |> Seq.map snd)
+                && rowsMatchKeyClasses (keyClasses |> List.map Option.get) (equiKeys |> List.map snd) joinRows
 
-                Ok(newSources, combined)
-            | _ ->
-                let candidates : (int * int * Value[]) list =
-                    if buildOnLeft then
-                        hashPairs (equiKeyOf leftKeyIndices) (equiKeyOf rightKeyIndices) leftIndexed rightIndexed
-                        |> Seq.map (fun (li, l, ri, r) -> li, ri, Array.append l r)
-                        |> List.ofSeq
-                    else
-                        hashPairs (equiKeyOf rightKeyIndices) (equiKeyOf leftKeyIndices) rightIndexed leftIndexed
-                        |> Seq.map (fun (ri, r, li, l) -> li, ri, Array.append l r)
-                        |> List.ofSeq
+            let residualHolds (combined: Value[]) : Result<bool, EvalError> =
+                residualConjuncts
+                |> traverse (fun c -> evalExpr { ctxFor combined with Clause = OnClause } c)
+                |> Result.map (List.forall (fun v -> truthy v = Some true))
 
-                candidates
-                |> keepMatches residualHolds id
-                |> Result.map (buildCombinedRows >> fun (s, r) -> s, r :> Value[] seq)
-        else
-            let pairs = seq { for li, l in leftIndexed do for ri, r in rightIndexed -> li, ri, l, r }
+            if hashEligible then
+                let leftKeyIndices = equiKeys |> List.map fst |> Array.ofList
+                let rightKeyIndices = equiKeys |> List.map snd |> Array.ofList
+                let buildOnLeft = leftIndexed.Length <= rightIndexed.Length
 
-            pairs
-            |> traverseSeq (fun (li, ri, l, r) ->
-                let combined = Array.append l r
+                match join.Kind, residualConjuncts with
+                | (InnerJoin | CrossJoin | NaturalJoin), [] ->
+                    // Nothing here needs to see every match up front: `INNER`/
+                    // `CROSS`/`NATURAL` keep only matched pairs (no
+                    // unmatched-side padding to compute, unlike `LEFT`/
+                    // `RIGHT`), and an empty residual means every hash-bucket
+                    // hit is already a real match (no `ON`-conjunct re-check
+                    // that could itself fail past the point a caller stops
+                    // pulling). So this is `hashPairs`' lazy `seq` straight
+                    // through, `Array.append`-combined but not collected —
+                    // `runSelect`'s `WHERE`/`LIMIT` streaming decides how
+                    // much of it ever actually runs.
+                    let combined : Value[] seq =
+                        if buildOnLeft then
+                            hashPairs (equiKeyOf leftKeyIndices) (equiKeyOf rightKeyIndices) leftIndexed rightIndexed
+                            |> Seq.map (fun (_, l, _, r) -> Array.append l r)
+                        else
+                            hashPairs (equiKeyOf rightKeyIndices) (equiKeyOf leftKeyIndices) rightIndexed leftIndexed
+                            |> Seq.map (fun (_, r, _, l) -> Array.append l r)
 
-                evalExpr { ctxFor combined with Clause = OnClause } join.On
-                |> Result.map (fun v -> if truthy v = Some true then Some(li, ri, combined) else None))
-            |> Result.mapError Err
-            |> Result.map (buildCombinedRows >> fun (s, r) -> s, r :> Value[] seq)
+                    Ok(newSources, combined, coalesceNames)
+                | _ ->
+                    let candidates : (int * int * Value[]) list =
+                        if buildOnLeft then
+                            hashPairs (equiKeyOf leftKeyIndices) (equiKeyOf rightKeyIndices) leftIndexed rightIndexed
+                            |> Seq.map (fun (li, l, ri, r) -> li, ri, Array.append l r)
+                            |> List.ofSeq
+                        else
+                            hashPairs (equiKeyOf rightKeyIndices) (equiKeyOf leftKeyIndices) rightIndexed leftIndexed
+                            |> Seq.map (fun (ri, r, li, l) -> li, ri, Array.append l r)
+                            |> List.ofSeq
+
+                    candidates
+                    |> keepMatches residualHolds id
+                    |> Result.map (buildCombinedRows >> fun (s, r) -> s, r :> Value[] seq, coalesceNames)
+            else
+                let pairs = seq { for li, l in leftIndexed do for ri, r in rightIndexed -> li, ri, l, r }
+
+                pairs
+                |> traverseSeq (fun (li, ri, l, r) ->
+                    let combined = Array.append l r
+
+                    evalExpr { ctxFor combined with Clause = OnClause } effectiveOn
+                    |> Result.map (fun v -> if truthy v = Some true then Some(li, ri, combined) else None))
+                |> Result.mapError Err
+                |> Result.map (buildCombinedRows >> fun (s, r) -> s, r :> Value[] seq, coalesceNames)
 
 /// Like `applyJoin`, but for a multi-table `UPDATE`/`DELETE ... JOIN`
 /// rather than a `SELECT`: alongside the flattened row `evalExpr` needs,
@@ -1411,64 +1507,101 @@ and private applyMutationJoin
                 let rows =
                     match join.Kind with
                     | InnerJoin
-                    | CrossJoin -> matchedRows
-                    | LeftJoin -> matchedRows @ leftOnly
-                    | RightJoin -> matchedRows @ rightOnly
+                    | CrossJoin
+                    | NaturalJoin -> matchedRows
+                    | LeftJoin
+                    | NaturalLeftJoin -> matchedRows @ leftOnly
+                    | RightJoin
+                    | NaturalRightJoin -> matchedRows @ rightOnly
 
                 newSources, rows
 
-            let equiKeys, residualConjuncts = extractEquiKeys resolveQualified combinedColumnsSoFar.Length join.On
+            let coalesceNames =
+                match join.Kind with
+                | NaturalJoin
+                | NaturalLeftJoin
+                | NaturalRightJoin -> naturalCommonNames combinedColumnsSoFar joinColumns
+                | _ -> join.Using
 
-            let keyClasses =
-                equiKeys |> List.map (fun (li, ri) -> keyClassOf combinedColumnsSoFar.[li].Type joinColumns.[ri].Type)
+            let equiKeysResult =
+                if coalesceNames.IsEmpty then
+                    Ok(extractEquiKeys resolveQualified combinedColumnsSoFar.Length join.On)
+                else
+                    namedEquiKeys combinedColumnsSoFar joinColumns coalesceNames |> Result.map (fun keys -> keys, [])
 
-            let hashEligible =
-                not equiKeys.IsEmpty
-                && keyClasses |> List.forall Option.isSome
-                && rowsMatchKeyClasses (keyClasses |> List.map Option.get) (equiKeys |> List.map fst) leftFlatRows
-                && rowsMatchKeyClasses (keyClasses |> List.map Option.get) (equiKeys |> List.map snd) joinRows
-
-            let residualHolds (combinedFlat: Value[]) : Result<bool, EvalError> =
-                residualConjuncts
-                |> traverse (fun c -> evalExpr { ctxFor combinedFlat with Clause = OnClause } c)
-                |> Result.map (List.forall (fun v -> truthy v = Some true))
-
-            if hashEligible then
-                let leftKeyIndices = equiKeys |> List.map fst |> Array.ofList
-                let rightKeyIndices = equiKeys |> List.map snd |> Array.ofList
-                let buildOnLeft = rowsSoFar.Length <= joinRows.Length
-
-                // Left rows carry their identity list alongside the flat
-                // row `equiKeyOf` needs; right rows (always a real scanned
-                // table — see the ponytail note above) are the flat row
-                // itself. `hashPairs` is generic over both shapes at once —
-                // each side just supplies its own key extractor — so
-                // neither side pays to wrap/unwrap the other's.
-                let leftKeyOf (lIdent: Value[] option list, lFlat: Value[]) = equiKeyOf leftKeyIndices lFlat
-                let rightKeyOf (r: Value[]) = equiKeyOf rightKeyIndices r
-
-                let candidates : (int * int * (Value[] option list * Value[])) list =
-                    if buildOnLeft then
-                        hashPairs leftKeyOf rightKeyOf leftIndexed rightIndexed
-                        |> Seq.map (fun (li, (lIdent, lFlat), ri, r) -> li, ri, (lIdent @ [ Some r ], Array.append lFlat r))
-                        |> List.ofSeq
+            match equiKeysResult with
+            | Error e -> Error e
+            | Ok(equiKeys, residualConjuncts) ->
+                // For a named (NATURAL/USING) join the nested-loop fallback
+                // must still enforce the equi-keys — `join.On` is the
+                // always-true literal for these kinds, so synthesize the
+                // conjunction the hash path matches directly.
+                let effectiveOn =
+                    if coalesceNames.IsEmpty then
+                        join.On
                     else
-                        hashPairs rightKeyOf leftKeyOf rightIndexed leftIndexed
-                        |> Seq.map (fun (ri, r, li, (lIdent, lFlat)) -> li, ri, (lIdent @ [ Some r ], Array.append lFlat r))
-                        |> List.ofSeq
+                        let qualifierOfLeft idx =
+                            let rec find offset =
+                                function
+                                | [] -> failwith "applyMutationJoin: left column index out of range"
+                                | (q, _, cols) :: rest ->
+                                    if idx < offset + List.length cols then q
+                                    else find (offset + List.length cols) rest
 
-                candidates |> keepMatches residualHolds snd |> Result.map buildCombinedRows
-            else
-                let pairs = seq { for li, l in leftIndexed do for ri, r in rightIndexed -> li, ri, l, r }
+                            find 0 sourcesSoFar
 
-                pairs
-                |> traverseSeq (fun (li, ri, (lIdent, lFlat), r) ->
-                    let combinedFlat = Array.append lFlat r
+                        namedJoinOn combinedColumnsSoFar qualifierOfLeft joinQualifier joinColumns equiKeys
 
-                    evalExpr { ctxFor combinedFlat with Clause = OnClause } join.On
-                    |> Result.map (fun v -> if truthy v = Some true then Some(li, ri, (lIdent @ [ Some r ], combinedFlat)) else None))
-                |> Result.mapError Err
-                |> Result.map buildCombinedRows
+                let keyClasses =
+                    equiKeys |> List.map (fun (li, ri) -> keyClassOf combinedColumnsSoFar.[li].Type joinColumns.[ri].Type)
+
+                let hashEligible =
+                    not equiKeys.IsEmpty
+                    && keyClasses |> List.forall Option.isSome
+                    && rowsMatchKeyClasses (keyClasses |> List.map Option.get) (equiKeys |> List.map fst) leftFlatRows
+                    && rowsMatchKeyClasses (keyClasses |> List.map Option.get) (equiKeys |> List.map snd) joinRows
+
+                let residualHolds (combinedFlat: Value[]) : Result<bool, EvalError> =
+                    residualConjuncts
+                    |> traverse (fun c -> evalExpr { ctxFor combinedFlat with Clause = OnClause } c)
+                    |> Result.map (List.forall (fun v -> truthy v = Some true))
+
+                if hashEligible then
+                    let leftKeyIndices = equiKeys |> List.map fst |> Array.ofList
+                    let rightKeyIndices = equiKeys |> List.map snd |> Array.ofList
+                    let buildOnLeft = rowsSoFar.Length <= joinRows.Length
+
+                    // Left rows carry their identity list alongside the flat
+                    // row `equiKeyOf` needs; right rows (always a real scanned
+                    // table — see the ponytail note above) are the flat row
+                    // itself. `hashPairs` is generic over both shapes at once —
+                    // each side just supplies its own key extractor — so
+                    // neither side pays to wrap/unwrap the other's.
+                    let leftKeyOf (lIdent: Value[] option list, lFlat: Value[]) = equiKeyOf leftKeyIndices lFlat
+                    let rightKeyOf (r: Value[]) = equiKeyOf rightKeyIndices r
+
+                    let candidates : (int * int * (Value[] option list * Value[])) list =
+                        if buildOnLeft then
+                            hashPairs leftKeyOf rightKeyOf leftIndexed rightIndexed
+                            |> Seq.map (fun (li, (lIdent, lFlat), ri, r) -> li, ri, (lIdent @ [ Some r ], Array.append lFlat r))
+                            |> List.ofSeq
+                        else
+                            hashPairs rightKeyOf leftKeyOf rightIndexed leftIndexed
+                            |> Seq.map (fun (ri, r, li, (lIdent, lFlat)) -> li, ri, (lIdent @ [ Some r ], Array.append lFlat r))
+                            |> List.ofSeq
+
+                    candidates |> keepMatches residualHolds snd |> Result.map buildCombinedRows
+                else
+                    let pairs = seq { for li, l in leftIndexed do for ri, r in rightIndexed -> li, ri, l, r }
+
+                    pairs
+                    |> traverseSeq (fun (li, ri, (lIdent, lFlat), r) ->
+                        let combinedFlat = Array.append lFlat r
+
+                        evalExpr { ctxFor combinedFlat with Clause = OnClause } effectiveOn
+                        |> Result.map (fun v -> if truthy v = Some true then Some(li, ri, (lIdent @ [ Some r ], combinedFlat)) else None))
+                    |> Result.mapError Err
+                    |> Result.map buildCombinedRows
 
 /// Resolves `from :: joins` into the same `(sources, rows)` shape
 /// `applyMutationJoin` builds up — the multi-table `UPDATE`/`DELETE`
@@ -1502,6 +1635,134 @@ and private runMutationJoin
 /// EvalContext option` would leak the `private` `EvalContext` type through
 /// a public signature); `runTopLevelSelect` near `execute` below is the
 /// type-preserving public entry point `QueryHandler` calls instead.
+/// Replaces every unqualified `Col` whose (case-insensitive) name is in
+/// `map` with `map`'s entry — the COALESCE expression a `NATURAL`/`USING`
+/// join synthesized for that common column, so WHERE/ORDER BY/GROUP
+/// BY/HAVING see MySQL's coalesced value instead of a 1052-ambiguous
+/// physical column. Subquery bodies (`Exists`/`Subquery`) are their own
+/// scope — their own `runSelectStmt` applies their own rewrite, and walking
+/// into them here could capture an inner column with an outer coalesce.
+and private rewriteCoalescedCols (map: Map<string, Expr>) (expr: Expr) : Expr =
+    let sub = rewriteCoalescedCols map
+
+    match expr with
+    | Col name ->
+        match Map.tryFind (name.ToLowerInvariant()) map with
+        | Some repl -> repl
+        | None -> expr
+    | QualifiedCol _
+    | Lit _
+    | Star _
+    | Exists _
+    | Subquery _
+    | RowNumberOver _
+    | LagOver _ -> expr
+    | BinOp(op, a, b) -> BinOp(op, sub a, sub b)
+    | Not e -> Not(sub e)
+    | IsNull e -> IsNull(sub e)
+    | IsNotNull e -> IsNotNull(sub e)
+    | IsTrue e -> IsTrue(sub e)
+    | IsFalse e -> IsFalse(sub e)
+    | Like(e, p, cs, esc) -> Like(sub e, sub p, cs, esc)
+    | Regexp(e, p) -> Regexp(sub e, sub p)
+    | In(e, xs) -> In(sub e, xs |> List.map sub)
+    | InSubquery(e, s) -> InSubquery(sub e, s)
+    | Between(e, lo, hi) -> Between(sub e, sub lo, sub hi)
+    | FuncCall(name, args) -> FuncCall(name, args |> List.map sub)
+    | Distinct e -> Distinct(sub e)
+    | OrderBy(e, dir) -> OrderBy(sub e, dir)
+    | Cast(e, ty) -> Cast(sub e, ty)
+    | Case(subject, whens, elseBranch) ->
+        Case(subject |> Option.map sub, whens |> List.map (fun (c, r) -> sub c, sub r), elseBranch |> Option.map sub)
+
+/// Rewrites a select whose joins coalesce columns (`NATURAL`/`USING`) into
+/// MySQL's exact shape: `SELECT *` expands to the coalesced common columns
+/// first (`COALESCE` of every source occurrence, left to right), then the
+/// left side's remaining columns, then the right's — except `RIGHT` joins,
+/// which put the right side's remaining columns before the left's (verified
+/// against MySQL 8.4). Chained joins fold left-to-right, each coalescing
+/// join moving its new commons to the front. Unqualified `Col` references
+/// to a coalesced name become the same COALESCE expression.
+///
+/// `sources` is the resolved `(qualifier, columns)` per source in FROM
+/// order (one more entry than `joins`); `namesPerJoin` is `applyJoin`'s
+/// coalesced-name list per join, same order.
+and private rewriteNaturalSelect
+    (select: SelectStmt)
+    (sources: (string * ColumnDef list) list)
+    (joins: Join list)
+    (namesPerJoin: string list list)
+    : SelectStmt =
+    let qualified (qualifier: string) (name: string) = QualifiedCol(qualifier, name)
+
+    let baseQualifier, baseColumns = List.head sources
+
+    // The ordered logical column plan: (output name, expr).
+    let plan =
+        (List.zip joins namesPerJoin, List.tail sources)
+        ||> List.fold2
+                (fun plan (join, names) rightSource ->
+                    let rightQualifier, rightCols = rightSource
+
+                    if names.IsEmpty then
+                        plan @ (rightCols |> List.map (fun c -> c.Name, qualified rightQualifier c.Name))
+                    else
+                        let common = names |> List.map (fun n -> n.ToLowerInvariant()) |> Set.ofList
+                        let isCommon ((name: string), _) = common.Contains(name.ToLowerInvariant())
+
+                        let commons =
+                            plan
+                            |> List.filter isCommon
+                            |> List.map (fun (name, expr) -> name, FuncCall("COALESCE", [ expr; qualified rightQualifier name ]))
+
+                        let leftRest = plan |> List.filter (isCommon >> not)
+
+                        let rightRest =
+                            rightCols
+                            |> List.filter (fun c -> not (common.Contains(c.Name.ToLowerInvariant())))
+                            |> List.map (fun c -> c.Name, qualified rightQualifier c.Name)
+
+                        match join.Kind with
+                        | RightJoin
+                        | NaturalRightJoin -> commons @ rightRest @ leftRest
+                        | _ -> commons @ leftRest @ rightRest)
+                (baseColumns |> List.map (fun c -> c.Name, qualified baseQualifier c.Name))
+
+    // Unqualified refs to a coalesced name resolve to the COALESCE over
+    // every source occurrence of that name (ponytail: a name re-added by a
+    // later plain join with the same column would be silently included —
+    // MySQL errors 1052 there; ORM-shaped queries never hit it).
+    let coalesceMap =
+        namesPerJoin
+        |> List.concat
+        |> List.distinctBy (fun n -> n.ToLowerInvariant())
+        |> List.map (fun name ->
+            let occurrences =
+                sources
+                |> List.filter (fun (_, cols) ->
+                    cols |> List.exists (fun c -> System.String.Equals(c.Name, name, System.StringComparison.OrdinalIgnoreCase)))
+                |> List.map (fun (q, _) -> qualified q name)
+
+            name.ToLowerInvariant(), FuncCall("COALESCE", occurrences))
+        |> Map.ofList
+
+    let rewriteExpr e = rewriteCoalescedCols coalesceMap e
+
+    let projections =
+        select.Projections
+        |> List.collect (fun (expr, alias) ->
+            match expr with
+            | Star None -> plan |> List.map (fun (name, e) -> e, Some name)
+            | Star(Some _) -> [ expr, alias ]
+            | _ -> [ rewriteExpr expr, alias ])
+
+    { select with
+        Projections = projections
+        Where = select.Where |> Option.map rewriteExpr
+        GroupBy = select.GroupBy |> List.map rewriteExpr
+        Having = select.Having |> Option.map rewriteExpr
+        OrderBy = select.OrderBy |> List.map (fun (e, d) -> rewriteExpr e, d) }
+
 and private runSelectStmt
     (store: Store)
     (registry: Registry)
@@ -1531,11 +1792,30 @@ and private runSelectStmt
         | Ok(baseColumns, baseRows) ->
             let baseQualifier = fromItemQualifier fromItem
 
-            let initial : Result<(string * ColumnDef list) list * Value[] seq, QueryResult> = Ok([ baseQualifier, baseColumns ], baseRows)
+            let initial : Result<((string * ColumnDef list) list * Value[] seq) * string list list, QueryResult> =
+                Ok(([ baseQualifier, baseColumns ], baseRows), [])
 
-            match select.Joins |> List.fold (fun acc join -> acc |> Result.bind (fun combined -> applyJoin store registry dbName outer combined join)) initial with
+            match
+                select.Joins
+                |> List.fold
+                    (fun acc join ->
+                        acc
+                        |> Result.bind (fun ((sources, rows), namesPerJoin) ->
+                            applyJoin store registry dbName outer (sources, rows) join
+                            |> Result.map (fun (sources', rows', names) -> (sources', rows'), names :: namesPerJoin)))
+                    initial
+            with
             | Error e -> e, [], []
-            | Ok(sources, rows) -> runSelect store registry dbName (sources |> List.collect snd) (qualifierRanges sources) rows select outer
+            | Ok((sources, rows), namesPerJoinRev) ->
+                let namesPerJoin = List.rev namesPerJoinRev
+
+                let select' =
+                    if namesPerJoin |> List.forall List.isEmpty then
+                        select
+                    else
+                        rewriteNaturalSelect select sources select.Joins namesPerJoin
+
+                runSelect store registry dbName (sources |> List.collect snd) (qualifierRanges sources) rows select' outer
 
 /// A WHERE expression's top-level `AND` chain flattened into its conjuncts
 /// — `a AND b AND c` (any nesting/associativity) yields `[a; b; c]`; any
