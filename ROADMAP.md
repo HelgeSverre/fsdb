@@ -106,10 +106,46 @@ where SQL requires them (GROUP BY, window functions, UNION DISTINCT).
 Wire boundary stays materialized.
 **Gate:** JoinUsersOrders < 25ms; no benchmark row regresses; differential
 tests prove streaming output equals materialized output wherever SQL
-defines order; Expecto + reference-app suite parity green. Status: ☐
+defines order; Expecto + reference-app suite parity green. Status: ☐ (partial
+— see below)
 Starting point (measured at 5037a48): JoinUsersOrders 202,198 µs vs
 MySQL's 239 µs on the same box — the hash join killed the cross-product
 pathology (previously ~425s), the remaining ~8x is `WHERE ... LIMIT 50`
 materializing and projecting every matched row before LIMIT slices it.
 Sub-gates carried over from M9: InsertSingle < 300µs (at 492µs),
 UpdateSingleRow < 500µs (at 2.3ms).
+
+**Landed:** `runSelect`'s plain (non-grouped, non-windowed) path streams —
+no `ORDER BY` means `WHERE`/`DISTINCT`/`LIMIT`/`OFFSET` pull rows lazily
+through `streamLimited` and stop the moment enough survive; `ORDER BY` +
+`LIMIT` (no `DISTINCT`) uses `boundedTopN`, a sorted-buffer top-`(limit +
+offset)` selection instead of a full sort. `ORDER BY` without `LIMIT`, or
+combined with `DISTINCT`, stays an honest full materialize+sort+dedupe
+(unsafe to bound: a duplicate inside a bounded window can starve a row just
+outside it). Cancellation checks verified still firing in the streaming
+paths (`streamLimited`/`traverseSeq` both check `queryCancellation` every
+256 rows). Error semantics decided against a live MySQL 8.4 oracle rather
+than assumed: no `ORDER BY` lets `LIMIT` skip evaluating a row past the cut
+entirely (no error surfaces); `ORDER BY` forcing a filesort evaluates every
+matched row regardless of whether it makes the final cut (error surfaces).
+Differential tests (`ExecutorTests.fs`, "M10 streaming pipeline") compare
+both paths against the engine's own unlimited-query output, randomized over
+plain scans, joins, and DISTINCT; a counting-scalar test proves `LIMIT 10`
+against a 20k-row table touches under 1,000 rows.
+
+**Not landed, and why the gate isn't ticked:** the join itself
+(`applyJoin`'s hash-probe candidate list) still fully materializes every
+matched left×right pair into `Value[]` before `WHERE`/`LIMIT` in `runSelect`
+ever see them — so `JoinUsersOrders`'s new streaming WHERE/LIMIT layer only
+gets to save work on the post-join filter/project step, not the join's own
+row-building. Same-methodology in-process timing (`Executor.execute`
+directly, no wire protocol, 10k users/50k orders, 15 runs, median):
+64,251 µs before this milestone's changes → 34,037 µs after — real, ~1.9x,
+consistent with the diagnosis, but short of the < 25 ms gate because the
+join's materialization is the now-dominant remaining cost. Making the
+hash-join probe itself a lazy seq (item 1's "join probe" clause) needs the
+build-side-size heuristic and the LEFT/RIGHT outer-join padding logic
+reworked around a type that's genuinely single-pass — a separate, focused
+piece of work against `applyJoin`/`applyMutationJoin`, deliberately not
+rushed into this slice given how load-bearing (and delicately
+comment-documented) that code already is. Follow-up, not abandoned.
