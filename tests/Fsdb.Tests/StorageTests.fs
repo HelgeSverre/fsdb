@@ -789,6 +789,14 @@ let tests =
                         | Error e -> failtestf "expected Ok, got %A" e
                     | Error e -> failtestf "expected Ok, got %A" e
 
+                testCase "UPDATE against an empty table succeeds with zero rows changed"
+                <| fun _ ->
+                    let store = withUsersTable ()
+
+                    match updateRows store defaultDatabase "users" None (fun _ -> Ok true) Ok with
+                    | Ok 0 -> ()
+                    | other -> failtestf "expected Ok 0, got %A" other
+
                 testCase "a no-op UPDATE that writes a row's PRIMARY KEY back to its own value never collides with itself"
                 <| fun _ ->
                     // `UniqueIndex` now maps a key to the row's *position* in

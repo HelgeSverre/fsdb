@@ -2110,7 +2110,7 @@ let updateRows
                 |> Result.bind (fun table ->
                     let uniqueGroups = uniqueKeyGroups table
                     let checkFks = store.ForeignKeyChecks
-                    // Statement-local; discarded (never `MoveToImmutable`d)
+                    // Statement-local; discarded (never `DrainToImmutable`d)
                     // if the fold below ends in `Error`, so a mid-statement
                     // failure never surfaces a partial rewrite — same
                     // all-or-nothing guarantee the old cons-then-reverse fold
@@ -2167,7 +2167,10 @@ let updateRows
                     candidates
                     |> Option.defaultWith (fun () -> table.RowsArray |> Seq.indexed |> List.ofSeq)
                     |> List.fold step (Ok([], table.UniqueIndex))
-                    |> Result.map (fun (changesRev, index) -> Map.add key { table with RowsArray = builder.MoveToImmutable(); UniqueIndex = index } db, List.rev changesRev)))
+                    // `DrainToImmutable`, not `MoveToImmutable`: the latter
+                    // demands Count = Capacity, which an empty table's
+                    // builder (capacity-8, count-0) never satisfies.
+                    |> Result.map (fun (changesRev, index) -> Map.add key { table with RowsArray = builder.DrainToImmutable(); UniqueIndex = index } db, List.rev changesRev)))
 
         match result with
         | Ok changes ->
