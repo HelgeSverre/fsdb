@@ -38,10 +38,12 @@ Prerequisites and rules:
   poison later measurements (see the module comment in
   `Fsdb.Benchmarks/ServerBenchmarks.fs`).
 - The default run measures fsdb in-memory (no `--data-dir`, so no WAL/fsync).
-  `bench-durable` adds the matched configs: fsdb `--data-dir` (WAL, one fsync
-  per commit — see `Persistence.attach`) against durable MySQL, and
-  in-memory fsdb against a no-fsync MySQL. A write-number only means
-  something when both engines pay (or both skip) the same durability cost.
+  `bench-durable` adds the matched configs: fsdb `--data-dir` (binary WAL,
+  one plain `fsync` per commit — see `Persistence.attach`; .NET's
+  `FileStream.Flush(true)` would instead issue macOS `F_FULLFSYNC` at ~5 ms)
+  against durable MySQL, and in-memory fsdb against a no-fsync MySQL. A
+  write-number only means something when both engines pay (or both skip) the
+  same durability cost.
 - `bench-load` measures throughput, not latency: N workers over disjoint id
   slices so MySQL sees no row contention, reporting ops/sec per workload.
   fsdb's whole write path sits behind a per-database `SemaphoreSlim(1,1)`
