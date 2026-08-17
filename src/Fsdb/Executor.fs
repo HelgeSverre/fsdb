@@ -615,12 +615,23 @@ type private JoinKeyComparer() =
 /// product as a list and only then handing it to `ON` — the pathology the
 /// design doc names as the reason a real-sized non-equi join never used to
 /// finish.
+/// As `Storage.traverse`, but over a lazy `seq` — the non-equi join fallback
+/// below (`applyJoin`'s "not hashEligible" branch) is the one caller with no
+/// build-side key to hash on, so it's the case most likely to run long
+/// enough for `queryCancellation` to matter (see that doc).
 let private traverseSeq (f: 'a -> Result<'b, 'e>) (xs: 'a seq) : Result<'b list, 'e> =
+    let token = queryCancellation.Value
     let acc = ResizeArray()
     let mutable error = None
+    let mutable i = 0
     use enumerator = xs.GetEnumerator()
 
     while error.IsNone && enumerator.MoveNext() do
+        if i % cancellationCheckInterval = 0 then
+            token.ThrowIfCancellationRequested()
+
+        i <- i + 1
+
         match f enumerator.Current with
         | Ok y -> acc.Add y
         | Error e -> error <- Some e

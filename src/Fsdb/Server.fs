@@ -6,6 +6,7 @@ open System
 open System.Net
 open System.Net.Sockets
 open System.Text
+open System.Threading
 open Fsdb.Functions
 open Fsdb.Packet
 open Fsdb.Protocol
@@ -176,6 +177,51 @@ let sendBinaryQueryResult
 let private statusFlagsFor (session: Session) : int =
     StatusAutocommit ||| (if session.Tx.IsSome then StatusInTrans else 0)
 
+/// A dead socket, detected without consuming any data: `Poll(SelectRead)`
+/// returns true both when the peer closed/reset the connection *and* when
+/// there's unread data waiting, so `Available = 0` is what tells the two
+/// cases apart.
+let private isSocketDead (client: TcpClient) : bool =
+    try
+        client.Client.Poll(0, SelectMode.SelectRead) && client.Client.Available = 0
+    with _ ->
+        true
+
+let private disconnectPollIntervalMs = 50
+
+/// Polls `client`'s socket while a query runs, cancelling `queryCts` the
+/// moment the peer is gone — the only way to notice a disconnect while
+/// `QueryHandler.handle` is busy inside a synchronous row fold with nothing
+/// of its own to `await`. Runs detached (`Async.Start`) under `watchToken`,
+/// which the caller cancels as soon as the query returns so this loop never
+/// outlives the query it's watching.
+let rec private watchForDisconnect (client: TcpClient) (queryCts: CancellationTokenSource) : Async<unit> =
+    async {
+        if isSocketDead client then
+            queryCts.Cancel()
+        else
+            do! Async.Sleep disconnectPollIntervalMs
+            return! watchForDisconnect client queryCts
+    }
+
+/// Runs `body` (a synchronous statement dispatch to `QueryHandler.handle`)
+/// with `Storage.queryCancellation` armed for this thread and a background
+/// watcher polling the socket — see `watchForDisconnect`. Cleared again
+/// afterwards, success or exception, so a thread-pool thread that later
+/// picks up an unrelated connection's query never inherits a stale
+/// cancelled token.
+let private withCancellationWatch (client: TcpClient) (body: unit -> 'a) : 'a =
+    use queryCts = new CancellationTokenSource()
+    use watchCts = new CancellationTokenSource()
+    Async.Start(watchForDisconnect client queryCts, watchCts.Token)
+    Storage.queryCancellation.Value <- queryCts.Token
+
+    try
+        body ()
+    finally
+        watchCts.Cancel()
+        Storage.queryCancellation.Value <- CancellationToken.None
+
 let private handleConnection
     (connectionId: int)
     (store: Storage.Store)
@@ -228,6 +274,23 @@ let private handleConnection
                           Payload = okPayload capabilities (statusFlagsFor session) 0UL 0UL }
                     |> Async.Ignore
 
+                // Runs a statement dispatch under `withCancellationWatch`,
+                // catching the `OperationCanceledException` a killed
+                // client's abandoned query unwinds with (see
+                // `Storage.queryCancellation`) rather than letting it fall
+                // through to the connection-level catch-all below, which
+                // logs a scarier "connection N: <exn message>" line meant
+                // for genuine bugs. `None` means the client is already
+                // gone — there's no one to send a reply to, so the caller
+                // just lets the command loop end instead of trying to reply
+                // then read the next command off a dead stream.
+                let runCancellable (dispatch: unit -> Session * Executor.QueryResult) : (Session * Executor.QueryResult) option =
+                    try
+                        Some(withCancellationWatch client dispatch)
+                    with :? OperationCanceledException ->
+                        eprintfn "fsdb: connection %d: query cancelled (client disconnected)" connectionId
+                        None
+
                 let rec loop (session: Session) : Async<unit> =
                     async {
                         activeSession <- Some session
@@ -268,20 +331,22 @@ let private handleConnection
 
                                     return! loop session
                             | Some(Query sql) ->
-                                let session, result = QueryHandler.handle session sql
-                                activeSession <- Some session
+                                match runCancellable (fun () -> QueryHandler.handle session sql) with
+                                | None -> ()
+                                | Some(session, result) ->
+                                    activeSession <- Some session
 
-                                do!
-                                    sendQueryResult
-                                        stream
-                                        capabilities
-                                        seqId
-                                        (statusFlagsFor session)
-                                        (uint64 session.LastInsertId)
-                                        session.LastResultColumnTypes
-                                        result
+                                    do!
+                                        sendQueryResult
+                                            stream
+                                            capabilities
+                                            seqId
+                                            (statusFlagsFor session)
+                                            (uint64 session.LastInsertId)
+                                            session.LastResultColumnTypes
+                                            result
 
-                                return! loop session
+                                    return! loop session
                             | Some(FieldList table) ->
                                 // Deprecated in MySQL 8.0, but PDO/mysqlnd's
                                 // metadata probing can still send it —
@@ -427,20 +492,22 @@ let private handleConnection
                                                 Statements = Map.add stmtId { stmt with LastParamTypes = Some types } session.Statements
                                                 LongData = session.LongData |> Map.filter (fun (sid, _) _ -> sid <> stmtId) }
 
-                                        let session, result = QueryHandler.handle session finalSql
-                                        activeSession <- Some session
+                                        match runCancellable (fun () -> QueryHandler.handle session finalSql) with
+                                        | None -> ()
+                                        | Some(session, result) ->
+                                            activeSession <- Some session
 
-                                        do!
-                                            sendBinaryQueryResult
-                                                stream
-                                                capabilities
-                                                seqId
-                                                (statusFlagsFor session)
-                                                (uint64 session.LastInsertId)
-                                                session.LastResultColumnTypes
-                                                result
+                                            do!
+                                                sendBinaryQueryResult
+                                                    stream
+                                                    capabilities
+                                                    seqId
+                                                    (statusFlagsFor session)
+                                                    (uint64 session.LastInsertId)
+                                                    session.LastResultColumnTypes
+                                                    result
 
-                                        return! loop session
+                                            return! loop session
                             | Some(StmtSendLongData payload) ->
                                 // No response is ever sent for this command,
                                 // success or failure — the client doesn't

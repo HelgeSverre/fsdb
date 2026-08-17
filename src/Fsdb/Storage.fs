@@ -491,20 +491,46 @@ let resolveColumn (columns: ColumnDef list) (name: string) : Result<int, Storage
         | Some i -> Ok i
         | None -> Error(UnknownColumn name)
 
+/// Ambient per-thread cancellation for the query currently executing on
+/// this thread — armed by the connection loop's disconnect watcher
+/// (`Server.withCancellationWatch`) right before dispatching a statement and
+/// cleared right after. `traverse` below (and `Executor.traverseSeq`, the
+/// non-equi join's lazy nested loop) is the only reader: a client that
+/// vanishes mid-query flips this token, and the next periodic check unwinds
+/// the row fold instead of computing into a closed connection. A plain
+/// per-thread field rather than something threaded through every one of
+/// `traverse`'s ~50 call sites — there is exactly one query running per
+/// thread at a time, so "current thread's token" is all a check needs.
+let queryCancellation = new ThreadLocal<CancellationToken>(fun () -> CancellationToken.None)
+
+/// How often a row-pipeline fold checks `queryCancellation` — a modulo and
+/// an occasional `IsCancellationRequested` read, cheap enough against a
+/// row's own `evalExpr` cost to be unmeasurable, frequent enough that a
+/// killed client's query unwinds within a few hundred rows rather than
+/// running to completion.
+let cancellationCheckInterval = 256
+
 /// Applies `f` to each element, short-circuiting on the first `Error` —
 /// generalized over any error type (not just `StorageError`) and public, so
 /// `Executor` reuses this tail-recursive traversal instead of keeping its
-/// own non-tail-recursive copy.
+/// own non-tail-recursive copy. The single choke point every row-pipeline
+/// fold in `Executor` (WHERE, projection, grouping, window functions,
+/// mutation joins) routes through — see `queryCancellation`.
 let traverse (f: 'a -> Result<'b, 'e>) (xs: 'a list) : Result<'b list, 'e> =
-    let rec loop acc =
+    let token = queryCancellation.Value
+
+    let rec loop i acc =
         function
         | [] -> Ok(List.rev acc)
         | x :: rest ->
+            if i % cancellationCheckInterval = 0 then
+                token.ThrowIfCancellationRequested()
+
             match f x with
-            | Ok y -> loop (y :: acc) rest
+            | Ok y -> loop (i + 1) (y :: acc) rest
             | Error e -> Error e
 
-    loop [] xs
+    loop 0 [] xs
 
 let private parseNumeric (s: string) : float option =
     match Double.TryParse(s.Trim(), NumberStyles.Float, CultureInfo.InvariantCulture) with
