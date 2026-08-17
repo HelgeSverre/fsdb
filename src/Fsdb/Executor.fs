@@ -1357,16 +1357,32 @@ and private flattenAnd (expr: Expr) : Expr list =
 /// opportunity here (a composite key, a non-literal operand, a value that
 /// needs real coercion, ...) just falls back to the ordinary full scan,
 /// never a correctness risk.
+///
+/// A qualified equality (`QualifiedCol(q, n)`) only counts when `q` names
+/// *this* FROM table (its alias, or its bare name with no alias) —
+/// otherwise it's an outer query's column reused inside a correlated
+/// subquery (`EXISTS (SELECT ... FROM posts WHERE posts.x = ... AND
+/// users.id = 5)`), and matching it against this table's index would probe
+/// the wrong table's key space entirely. An unqualified `Col n` doesn't
+/// need this check: SQL's own scoping already resolves a bare name to the
+/// innermost table that has it, and `tryUniqueLookup` only succeeds when
+/// `tref.Table` actually has an indexed column called `n` — so a bare name
+/// that (via that same scoping) really means an outer column simply finds
+/// no matching index here and falls back, same as any other miss.
 and private tryPointLookup (store: Store) (dbName: string) (tref: TableRef) (whereExpr: Expr option) : (ColumnDef list * Value[] list) option =
     match whereExpr with
     | None -> None
     | Some whereExpr ->
         let tableDb = tref.Database |> Option.defaultValue dbName
+        let selfQualifier = tref.Alias |> Option.defaultValue tref.Table
 
         flattenAnd whereExpr
         |> List.tryPick (function
-            | BinOp(Eq, (Col n | QualifiedCol(_, n)), Lit v)
-            | BinOp(Eq, Lit v, (Col n | QualifiedCol(_, n))) -> Storage.tryUniqueLookup store tableDb tref.Table n v
+            | BinOp(Eq, Col n, Lit v)
+            | BinOp(Eq, Lit v, Col n) -> Storage.tryUniqueLookup store tableDb tref.Table n v
+            | BinOp(Eq, QualifiedCol(q, n), Lit v)
+            | BinOp(Eq, Lit v, QualifiedCol(q, n)) when System.String.Equals(q, selfQualifier, System.StringComparison.OrdinalIgnoreCase) ->
+                Storage.tryUniqueLookup store tableDb tref.Table n v
             | _ -> None)
 
 /// Per-column MySQL wire type for a freshly-projected resultset, read off

@@ -2597,4 +2597,58 @@ let tests =
                     Expect.isLessThan
                         sw.Elapsed.TotalMilliseconds
                         20.0
-                        (sprintf "point SELECT by PK against 50,000 rows took %A — looks like a full scan again" sw.Elapsed) ] ]
+                        (sprintf "point SELECT by PK against 50,000 rows took %A — looks like a full scan again" sw.Elapsed)
+
+                testCase "a correlated subquery's outer equality never gets mistaken for the inner table's own index probe"
+                <| fun _ ->
+                    // Same indexed-vs-unindexed-twin method as the top-level
+                    // test above, but the equality now lives inside a
+                    // correlated subquery, ANDed alongside a *genuine*
+                    // correlation on the inner table — and the outer column
+                    // (`users.id`) shares its name with the inner table's own
+                    // indexed column (`posts.id`), which is exactly the shape
+                    // `tryPointLookup` used to confuse: a bare/qualified `id
+                    // = <literal>` belonging to the OUTER query got treated as
+                    // a probe into the INNER table's PK index.
+                    let store = newStore ()
+                    runDefault store "CREATE TABLE users (id INT PRIMARY KEY, name VARCHAR(20))" |> ignore
+                    runDefault store "CREATE TABLE postsIndexed (id INT PRIMARY KEY, user_id INT)" |> ignore
+                    runDefault store "CREATE TABLE postsUnindexed (id INT, user_id INT)" |> ignore
+                    runDefault store "INSERT INTO users VALUES (1, 'alice'), (5, 'eve')" |> ignore
+                    // Deliberately no row whose id equals the outer literal
+                    // (5), so a correct correlated EXISTS depends only on
+                    // `user_id = users.id`, not on `posts.id`.
+                    runDefault store "INSERT INTO postsIndexed VALUES (1, 5), (2, 1)" |> ignore
+                    runDefault store "INSERT INTO postsUnindexed VALUES (1, 5), (2, 1)" |> ignore
+
+                    let existsIndexed =
+                        runDefault
+                            store
+                            "SELECT id FROM users WHERE EXISTS (SELECT 1 FROM postsIndexed WHERE postsIndexed.user_id = users.id AND users.id = 5)"
+
+                    let existsUnindexed =
+                        runDefault
+                            store
+                            "SELECT id FROM users WHERE EXISTS (SELECT 1 FROM postsUnindexed WHERE postsUnindexed.user_id = users.id AND users.id = 5)"
+
+                    Expect.equal existsIndexed existsUnindexed "EXISTS: indexed and unindexed inner tables must agree"
+
+                    match existsIndexed with
+                    | ResultSet([ "id" ], rows) -> Expect.equal (rows |> List.sort) [ [ Some "5" ] ] "only the outer row whose id = 5 has a matching post"
+                    | other -> failtestf "expected a resultset, got %A" other
+
+                    let scalarIndexed =
+                        runDefault
+                            store
+                            "SELECT id, (SELECT COUNT(*) FROM postsIndexed WHERE postsIndexed.user_id = users.id AND users.id = 5) AS c FROM users ORDER BY id"
+
+                    let scalarUnindexed =
+                        runDefault
+                            store
+                            "SELECT id, (SELECT COUNT(*) FROM postsUnindexed WHERE postsUnindexed.user_id = users.id AND users.id = 5) AS c FROM users ORDER BY id"
+
+                    Expect.equal scalarIndexed scalarUnindexed "scalar subquery: indexed and unindexed inner tables must agree"
+
+                    match scalarIndexed with
+                    | ResultSet([ "id"; "c" ], rows) -> Expect.equal rows [ [ Some "1"; Some "0" ]; [ Some "5"; Some "1" ] ] "user 5 has exactly one matching post, user 1 has none"
+                    | other -> failtestf "expected a resultset, got %A" other ] ]
