@@ -623,7 +623,8 @@ let tests =
                                 AutoIncrement = true
                                 PrimaryKey = true
                                 Unique = false
-                                Generated = None }
+                                Generated = None
+                                Collation = None }
                               { Name = "name"
                                 Type = TVarchar 255
                                 Nullable = false
@@ -631,7 +632,8 @@ let tests =
                                 AutoIncrement = false
                                 PrimaryKey = false
                                 Unique = false
-                                Generated = None }
+                                Generated = None
+                                Collation = None }
                               { Name = "score"
                                 Type = TDecimal(5, 2)
                                 Nullable = true
@@ -639,7 +641,8 @@ let tests =
                                 AutoIncrement = false
                                 PrimaryKey = false
                                 Unique = false
-                                Generated = None } ],
+                                Generated = None
+                                Collation = None } ],
                             [],
                             [],
                             false
@@ -659,7 +662,8 @@ let tests =
                                 AutoIncrement = false
                                 PrimaryKey = false
                                 Unique = false
-                                Generated = None } ],
+                                Generated = None
+                                Collation = None } ],
                             [],
                             [],
                             true
@@ -679,7 +683,8 @@ let tests =
                                 AutoIncrement = false
                                 PrimaryKey = true
                                 Unique = false
-                                Generated = None }
+                                Generated = None
+                                Collation = None }
                               { Name = "name"
                                 Type = TVarchar 10
                                 Nullable = true
@@ -687,7 +692,8 @@ let tests =
                                 AutoIncrement = false
                                 PrimaryKey = false
                                 Unique = false
-                                Generated = None } ],
+                                Generated = None
+                                Collation = None } ],
                             [],
                             [],
                             false
@@ -706,7 +712,7 @@ let tests =
                     | CreateTable(_, [ { Type = TTimestamp; Default = Some DCurrentTimestamp } ], _, _, _) -> ()
                     | other -> failtestf "expected a CURRENT_TIMESTAMP default, got %A" other
 
-                testCase "ENGINE=/CHARSET=/COLLATE= table options are ignored but accepted"
+                testCase "ENGINE=/CHARSET= are accepted; table COLLATE becomes the columns' default"
                 <| fun _ ->
                     Expect.equal
                         (parseOk
@@ -720,12 +726,26 @@ let tests =
                                 AutoIncrement = false
                                 PrimaryKey = false
                                 Unique = false
-                                Generated = None } ],
+                                Generated = None
+                                Collation = Some "utf8mb4_unicode_ci" } ],
                             [],
                             [],
                             false
                         ))
-                        "table options"
+                        "table COLLATE baked into the column"
+
+                testCase "a column-level COLLATE wins over the table-level default, and an unknown collation is a parse error"
+                <| fun _ ->
+                    match
+                        parseOk "CREATE TABLE t (a VARCHAR(10) COLLATE utf8mb4_bin, b VARCHAR(10)) COLLATE=utf8mb4_unicode_ci"
+                    with
+                    | CreateTable(_, [ { Name = "a"; Collation = Some "utf8mb4_bin" }; { Name = "b"; Collation = Some "utf8mb4_unicode_ci" } ], [], [], false) ->
+                        ()
+                    | other -> failtestf "expected column-over-table COLLATE resolution, got %A" other
+
+                    match parse "CREATE TABLE t (a VARCHAR(10) COLLATE no_such_collation)" with
+                    | Error _ -> ()
+                    | Ok stmt -> failtestf "expected an unknown collation to be a parse error, got %A" stmt
 
                 testCase "COLLATE with a quoted value, as Laravel's MySQL grammar emits it"
                 <| fun _ ->

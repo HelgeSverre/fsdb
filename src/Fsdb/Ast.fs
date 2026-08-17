@@ -125,6 +125,11 @@ type Expr =
     /// separate cast-target vocabulary, coerced the same way a column of
     /// that type would be (see `Storage.coerceValue`).
     | Cast of Expr * ColumnType
+    /// `expr COLLATE collation_name` — evaluates as its inner expression;
+    /// the tag overrides the collation any *comparison* involving this
+    /// expression resolves under (see `Executor.resolvedCollation`).
+    /// Evaluated against the collation registry at parse time.
+    | Collate of Expr * collation: string
     /// `SELECT *` (`None`) / `SELECT t.*` (`Some "t"`) — the qualifier
     /// matters once there's a `JOIN` in scope: `Executor.evalProjection`
     /// expands `t.*` to just `t`'s own columns via `EvalContext.Qualifiers`,
@@ -175,7 +180,13 @@ and ColumnDef =
       /// plain column. Both VIRTUAL and STORED are persisted the same way
       /// here (this engine has no separate "recompute on every read" path),
       /// so only the expression itself is kept.
-      Generated: Expr option }
+      Generated: Expr option
+      /// The column's `COLLATE name` (table-level `COLLATE` baked in as the
+      /// default at parse time) — `None` means the server default
+      /// (`Collation.defaultCollation`, utf8mb4_0900_ai_ci). Only meaningful
+      /// for the string types; kept on every column so DDL round-trips the
+      /// declaration as written.
+      Collation: string option }
 
 /// A named `[UNIQUE] KEY|INDEX (cols)` — from a `CREATE TABLE` trailing item,
 /// `ALTER TABLE ADD INDEX`, `CREATE INDEX`, or a column-level `UNIQUE`

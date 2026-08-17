@@ -142,6 +142,75 @@ let tests =
                 // primary-weight based (accents and case fold; digraphs
                 // expand), so indexes/unique keys/joins match MySQL exactly.
                 testTheory
+                    "the registry resolves every utf8mb4 collation MySQL 8.4 ships"
+                    [ "utf8mb4_0900_ai_ci"; "utf8mb4_0900_as_ci"; "utf8mb4_0900_as_cs"; "utf8mb4_0900_bin"
+                      "utf8mb4_bin"; "utf8mb4_general_ci"; "utf8mb4_unicode_ci"; "utf8mb4_unicode_520_ci"
+                      "utf8mb4_da_0900_ai_ci"; "utf8mb4_da_0900_as_cs"
+                      "utf8mb4_nb_0900_ai_ci"; "utf8mb4_nb_0900_as_cs"
+                      "utf8mb4_nn_0900_ai_ci"; "utf8mb4_nn_0900_as_cs"
+                      "utf8mb4_sv_0900_ai_ci"; "utf8mb4_sv_0900_as_cs"
+                      "utf8mb4_de_pb_0900_ai_ci"; "utf8mb4_de_pb_0900_as_cs"
+                      "utf8mb4_tr_0900_ai_ci"; "utf8mb4_tr_0900_as_cs"
+                      "utf8mb4_es_0900_ai_ci"; "utf8mb4_es_0900_as_cs"; "utf8mb4_es_trad_0900_ai_ci"; "utf8mb4_es_trad_0900_as_cs"
+                      "utf8mb4_is_0900_ai_ci"; "utf8mb4_is_0900_as_cs"
+                      "utf8mb4_et_0900_ai_ci"; "utf8mb4_et_0900_as_cs"
+                      "utf8mb4_pl_0900_ai_ci"; "utf8mb4_pl_0900_as_cs"
+                      "utf8mb4_ro_0900_ai_ci"; "utf8mb4_ro_0900_as_cs"
+                      "utf8mb4_ru_0900_ai_ci"; "utf8mb4_ru_0900_as_cs"
+                      "utf8mb4_sk_0900_ai_ci"; "utf8mb4_sk_0900_as_cs"
+                      "utf8mb4_sl_0900_ai_ci"; "utf8mb4_sl_0900_as_cs"
+                      "utf8mb4_vi_0900_ai_ci"; "utf8mb4_vi_0900_as_cs"
+                      "utf8mb4_bg_0900_ai_ci"; "utf8mb4_bg_0900_as_cs"
+                      "utf8mb4_bs_0900_ai_ci"; "utf8mb4_bs_0900_as_cs"
+                      "utf8mb4_cs_0900_ai_ci"; "utf8mb4_cs_0900_as_cs"
+                      "utf8mb4_eo_0900_ai_ci"; "utf8mb4_eo_0900_as_cs"
+                      "utf8mb4_gl_0900_ai_ci"; "utf8mb4_gl_0900_as_cs"
+                      "utf8mb4_hr_0900_ai_ci"; "utf8mb4_hr_0900_as_cs"
+                      "utf8mb4_hu_0900_ai_ci"; "utf8mb4_hu_0900_as_cs"
+                      "utf8mb4_la_0900_ai_ci"; "utf8mb4_la_0900_as_cs"
+                      "utf8mb4_lt_0900_ai_ci"; "utf8mb4_lt_0900_as_cs"
+                      "utf8mb4_lv_0900_ai_ci"; "utf8mb4_lv_0900_as_cs"
+                      "utf8mb4_mn_cyrl_0900_ai_ci"; "utf8mb4_mn_cyrl_0900_as_cs"
+                      "utf8mb4_sr_latn_0900_ai_ci"; "utf8mb4_sr_latn_0900_as_cs"
+                      "utf8mb4_ja_0900_as_cs"; "utf8mb4_ja_0900_as_cs_ks"; "utf8mb4_zh_0900_as_cs"
+                      "utf8mb4_danish_ci"; "utf8mb4_swedish_ci"; "utf8mb4_norwegian_ci"; "utf8mb4_german2_ci"
+                      "utf8mb4_spanish_ci"; "utf8mb4_spanish2_ci"; "utf8mb4_turkish_ci"; "utf8mb4_icelandic_ci"
+                      "utf8mb4_estonian_ci"; "utf8mb4_polish_ci"; "utf8mb4_romanian_ci"; "utf8mb4_roman_ci"
+                      "utf8mb4_croatian_ci"; "utf8mb4_czech_ci"; "utf8mb4_esperanto_ci"; "utf8mb4_hungarian_ci"
+                      "utf8mb4_latvian_ci"; "utf8mb4_lithuanian_ci"; "utf8mb4_persian_ci"; "utf8mb4_sinhala_ci"
+                      "utf8mb4_slovak_ci"; "utf8mb4_slovenian_ci"; "utf8mb4_vietnamese_ci" ]
+                    <| fun name ->
+                        Expect.isTrue (Fsdb.Collation.tryFind name |> Option.isSome) (sprintf "registry resolves %s" name)
+
+                testTheory
+                    "the 0900 sensitivity matrix folds exactly what its name says"
+                    [ "utf8mb4_0900_ai_ci", "å", "a", true
+                      "utf8mb4_0900_as_ci", "å", "a", false
+                      "utf8mb4_0900_as_cs", "å", "a", false
+                      "utf8mb4_0900_as_ci", "A", "a", true
+                      "utf8mb4_0900_as_cs", "A", "a", false
+                      "utf8mb4_0900_ai_ci", "A", "a", true
+                      "utf8mb4_0900_bin", "a", "A", false
+                      "utf8mb4_0900_bin", "å", "a", false ]
+                    <| fun (name, x, y, expectedEqual) ->
+                        let col = Fsdb.Collation.tryFind name |> Option.get
+                        Expect.equal (col.Equals x y) expectedEqual (sprintf "%s: %s = %s" name x y)
+
+                testTheory
+                    "pad attributes: PAD SPACE folds trailing spaces in equality, NO PAD keeps them"
+                    [ "utf8mb4_unicode_ci", true; "utf8mb4_general_ci", true; "utf8mb4_bin", true
+                      "utf8mb4_0900_ai_ci", false; "utf8mb4_0900_bin", false; "utf8mb4_da_0900_ai_ci", false ]
+                    <| fun (name, expectedEqual) ->
+                        let col = Fsdb.Collation.tryFind name |> Option.get
+                        Expect.equal (col.Equals "a" "a ") expectedEqual (sprintf "%s: 'a' = 'a '" name)
+
+                testCase "PAD SPACE sorting puts the extra-space side first (MySQL-verified)"
+                <| fun _ ->
+                    let col = Fsdb.Collation.tryFind "utf8mb4_unicode_ci" |> Option.get
+                    let sorted = [ "ab"; "a"; "a " ] |> List.sortWith col.Compare
+                    Expect.equal sorted [ "a "; "a"; "ab" ] "['a '] < ['a'] < ['ab']"
+
+                testTheory
                     "utf8mb4_0900_ai_ci folds case and accents: accented variant equals its base letter"
                     [ "å", "a"; "ä", "a"; "à", "a"; "á", "a"; "â", "a"; "ã", "a"; "ā", "a"; "ǎ", "a"
                       "ø", "o"; "ö", "o"; "ò", "o"; "ó", "o"

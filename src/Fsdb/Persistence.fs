@@ -233,6 +233,7 @@ let rec private encodeExpr (expr: Expr) : JsonNode =
     | Distinct e -> caseObj "Distinct" [ "e", encodeExpr e ]
     | OrderBy(e, d) -> caseObj "OrderBy" [ "e", encodeExpr e; "d", encodeDirection d ]
     | Cast(e, t) -> caseObj "Cast" [ "e", encodeExpr e; "t", encodeColumnType t ]
+    | Collate(e, name) -> caseObj "Collate" [ "e", encodeExpr e; "name", str name ]
     | Star q -> caseObj "Star" [ "q", strOptNode q ]
     | Case(subject, whens, elseBranch) ->
         caseObj
@@ -286,6 +287,7 @@ let rec private decodeExpr (node: JsonNode) : Expr =
     | "Distinct" -> Distinct(decodeExpr (f "e"))
     | "OrderBy" -> OrderBy(decodeExpr (f "e"), decodeDirection (f "d"))
     | "Cast" -> Cast(decodeExpr (f "e"), decodeColumnType (f "t"))
+    | "Collate" -> Collate(decodeExpr (f "e"), o.["name"].GetValue<string>())
     | "Star" -> Star(optStr (f "q"))
     | "Case" ->
         Case(
@@ -336,6 +338,7 @@ let private encodeColumnDef (c: ColumnDef) : JsonNode =
     o.["primaryKey"] <- boolNode c.PrimaryKey
     o.["unique"] <- boolNode c.Unique
     o.["generated"] <- (c.Generated |> Option.map encodeExpr |> Option.defaultValue null)
+    o.["collation"] <- (c.Collation |> Option.map str |> Option.defaultValue null)
     o
 
 let private decodeColumnDef (node: JsonNode) : ColumnDef =
@@ -348,6 +351,7 @@ let private decodeColumnDef (node: JsonNode) : ColumnDef =
       AutoIncrement = o.["autoIncrement"].GetValue<bool>()
       PrimaryKey = o.["primaryKey"].GetValue<bool>()
       Unique = o.["unique"].GetValue<bool>()
+      Collation = (match o.["collation"] with null -> None | c -> Some(c.GetValue<string>()))
       Generated = (match o.["generated"] with null -> None | g -> Some(decodeExpr g)) }
 
 let private encodeIndexDef (ix: IndexDef) : JsonNode =

@@ -23,7 +23,8 @@ let private usersColumns =
         AutoIncrement = true
         PrimaryKey = true
         Unique = false
-        Generated = None }
+        Generated = None
+        Collation = None }
       { Name = "name"
         Type = TVarchar 255
         Nullable = false
@@ -31,7 +32,8 @@ let private usersColumns =
         AutoIncrement = false
         PrimaryKey = false
         Unique = false
-        Generated = None }
+        Generated = None
+        Collation = None }
       { Name = "note"
         Type = TText
         Nullable = true
@@ -39,7 +41,8 @@ let private usersColumns =
         AutoIncrement = false
         PrimaryKey = false
         Unique = false
-        Generated = None } ]
+        Generated = None
+        Collation = None } ]
 
 let private walPath dir = Path.Combine(dir, "wal.jsonl")
 let private snapshotPath dir = Path.Combine(dir, "snapshot.fsdb")
@@ -93,7 +96,8 @@ let tests =
                       AutoIncrement = true
                       PrimaryKey = true
                       Unique = false
-                      Generated = None }
+                      Generated = None
+                      Collation = None }
                     { Name = "created_at"
                       Type = TDateTime
                       Nullable = false
@@ -101,7 +105,8 @@ let tests =
                       AutoIncrement = false
                       PrimaryKey = false
                       Unique = false
-                      Generated = None }
+                      Generated = None
+                      Collation = None }
                     { Name = "token"
                       Type = TVarchar 64
                       Nullable = false
@@ -109,7 +114,8 @@ let tests =
                       AutoIncrement = false
                       PrimaryKey = false
                       Unique = false
-                      Generated = None } ]
+                      Generated = None
+                      Collation = None } ]
 
               createTable store defaultDatabase "events" eventsColumns [] [] |> ignore
 
@@ -161,7 +167,8 @@ let tests =
                     AutoIncrement = false
                     PrimaryKey = false
                     Unique = false
-                    Generated = None }
+                    Generated = None
+                    Collation = None }
 
               alterTable
                   store
@@ -260,7 +267,8 @@ let tests =
                       AutoIncrement = false
                       PrimaryKey = false
                       Unique = false
-                      Generated = None } ]
+                      Generated = None
+                      Collation = None } ]
                   []
                   []
               |> ignore
@@ -329,7 +337,8 @@ let tests =
                       AutoIncrement = false
                       PrimaryKey = true
                       Unique = false
-                      Generated = None }
+                      Generated = None
+                      Collation = None }
                     { Name = "n"
                       Type = TInt false
                       Nullable = false
@@ -337,7 +346,8 @@ let tests =
                       AutoIncrement = false
                       PrimaryKey = false
                       Unique = false
-                      Generated = None } ]
+                      Generated = None
+                      Collation = None } ]
                   []
                   []
               |> ignore
@@ -393,7 +403,8 @@ let tests =
                       AutoIncrement = false
                       PrimaryKey = false
                       Unique = false
-                      Generated = None } ]
+                      Generated = None
+                      Collation = None } ]
                   []
                   []
               |> ignore
@@ -436,7 +447,8 @@ let tests =
                       AutoIncrement = false
                       PrimaryKey = true
                       Unique = false
-                      Generated = None }
+                      Generated = None
+                      Collation = None }
                     { Name = "n"
                       Type = TInt false
                       Nullable = false
@@ -444,7 +456,8 @@ let tests =
                       AutoIncrement = false
                       PrimaryKey = false
                       Unique = false
-                      Generated = None } ]
+                      Generated = None
+                      Collation = None } ]
                   []
                   []
               |> ignore
@@ -483,7 +496,8 @@ let tests =
                     AutoIncrement = false
                     PrimaryKey = true
                     Unique = false
-                    Generated = None }
+                    Generated = None
+                    Collation = None }
 
               createTable store defaultDatabase "p" [ idCol "id" ] [] [] |> ignore
 
@@ -523,7 +537,8 @@ let tests =
                     AutoIncrement = false
                     PrimaryKey = false
                     Unique = false
-                    Generated = Some(BinOp(Mul, Col "a", Lit(VInt 2L))) }
+                    Generated = Some(BinOp(Mul, Col "a", Lit(VInt 2L)))
+                    Collation = None }
 
               createTable
                   store
@@ -536,7 +551,8 @@ let tests =
                       AutoIncrement = false
                       PrimaryKey = false
                       Unique = false
-                      Generated = None }
+                      Generated = None
+                      Collation = None }
                     genCol ]
                   []
                   []

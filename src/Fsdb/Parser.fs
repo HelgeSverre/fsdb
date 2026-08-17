@@ -625,7 +625,23 @@ let private jsonArrowAtom: Parser<Expr, unit> =
 /// unary `-x` becomes `0 - x`.
 let private opp = OperatorPrecedenceParser<Expr, unit, unit>()
 let private arithExpr = opp.ExpressionParser
-opp.TermParser <- jsonArrowAtom
+
+/// `expr COLLATE name` — a postfix on the arithmetic term (`a + b COLLATE c`
+/// is `a + (b COLLATE c)` in MySQL), validated against the collation
+/// registry here; the tag rides the `Collate` AST node into `Executor`,
+/// where comparisons resolve it.
+let private collateTerm: Parser<Expr, unit> =
+    jsonArrowAtom
+    .>>. opt (keyword "COLLATE" >>. (identifier <|> (stringLit |>> (function VString name -> name | _ -> ""))))
+    >>= fun (e, nameOpt) ->
+        match nameOpt with
+        | None -> preturn e
+        | Some name ->
+            match Collation.tryFind name with
+            | Some _ -> preturn (Collate(e, name))
+            | None -> fail (sprintf "Unknown collation '%s'" name)
+
+opp.TermParser <- collateTerm
 opp.AddOperator(InfixOperator("+", ws, 1, Associativity.Left, (fun a b -> BinOp(Add, a, b))))
 opp.AddOperator(InfixOperator("-", ws, 1, Associativity.Left, (fun a b -> BinOp(Sub, a, b))))
 opp.AddOperator(InfixOperator("*", ws, 2, Associativity.Left, (fun a b -> BinOp(Mul, a, b))))
@@ -739,10 +755,13 @@ type private ColMod =
     | MPrimaryKey
     | MUnique
     | MGenerated of Expr
-    /// `COMMENT 'txt'`, `CHARACTER SET x` / `COLLATE y`, `ON UPDATE
-    /// CURRENT_TIMESTAMP` — accepted so the column definition parses, but
-    /// nothing in `Ast.ColumnDef` tracks them (ponytail: add fields if a
-    /// migration's assertion ever depends on one).
+    /// A validated `COLLATE name` — the column's collation, resolved against
+    /// the registry at parse time so an unknown name is a clean error.
+    | MCollate of string
+    /// `COMMENT 'txt'`, `CHARACTER SET x`, `ON UPDATE CURRENT_TIMESTAMP` —
+    /// accepted so the column definition parses, but nothing in
+    /// `Ast.ColumnDef` tracks them (ponytail: add fields if a migration's
+    /// assertion ever depends on one).
     | MIgnored
 
 let private defaultValueLit: Parser<ColumnDefault, unit> =
@@ -779,7 +798,12 @@ let private colMod: Parser<ColMod, unit> =
           attempt (keyword "ON" >>. keyword "UPDATE" >>. keyword "CURRENT_TIMESTAMP") >>% MIgnored
           keyword "COMMENT" >>. stringLit >>% MIgnored
           attempt (keyword "CHARACTER" >>. keyword "SET") >>. identOrString >>% MIgnored
-          keyword "COLLATE" >>. identOrString >>% MIgnored
+          keyword "COLLATE"
+          >>. identOrString
+          >>= fun name ->
+              match Collation.tryFind name with
+              | Some _ -> preturn (MCollate name)
+              | None -> fail (sprintf "Unknown collation '%s'" name)
           attempt generatedColumn |>> MGenerated ]
 
 let private columnDef: Parser<ColumnDef, unit> =
@@ -792,7 +816,8 @@ let private columnDef: Parser<ColumnDef, unit> =
           AutoIncrement = List.contains MAutoIncrement mods
           PrimaryKey = List.contains MPrimaryKey mods
           Unique = List.contains MUnique mods
-          Generated = mods |> List.tryPick (function MGenerated e -> Some e | _ -> None) }
+          Generated = mods |> List.tryPick (function MGenerated e -> Some e | _ -> None)
+          Collation = mods |> List.tryPick (function MCollate c -> Some c | _ -> None) }
 
 /// `AFTER col` / `FIRST` after an `ADD`/`MODIFY`/`CHANGE COLUMN` —
 /// `PositionDefault` when neither is written.
@@ -889,27 +914,37 @@ let private createTableItem: Parser<CreateItem, unit> =
           attempt (indexItem |>> CIndex)
           columnDef |>> CColumn ]
 
-/// `ENGINE=`, `CHARSET=`/`DEFAULT CHARSET=`, `COLLATE=` table options:
-/// accepted and discarded, same treatment as column display widths.
-let private tableOption: Parser<unit, unit> =
+/// `ENGINE=`, `CHARSET=`/`DEFAULT CHARSET=` table options: accepted and
+/// discarded, same treatment as column display widths. `COLLATE=` is the
+/// one tracked option — it becomes the table's column default (validated
+/// against the collation registry), which `createTable` bakes into every
+/// column that didn't name one explicitly.
+let private tableOption: Parser<string option, unit> =
     choice
-        [ keyword "ENGINE" >>. opt (sym "=") >>. identOrString >>% ()
+        [ keyword "ENGINE" >>. opt (sym "=") >>. identOrString >>% None
           keyword "DEFAULT" >>. (keyword "CHARSET" <|> (keyword "CHARACTER" >>. keyword "SET"))
           >>. opt (sym "=")
           >>. identOrString
-          >>% ()
-          keyword "CHARSET" >>. opt (sym "=") >>. identOrString >>% ()
-          keyword "COLLATE" >>. opt (sym "=") >>. identOrString >>% () ]
+          >>% None
+          keyword "CHARSET" >>. opt (sym "=") >>. identOrString >>% None
+          keyword "COLLATE"
+          >>. opt (sym "=")
+          >>. identOrString
+          >>= fun name ->
+              match Collation.tryFind name with
+              | Some _ -> preturn (Some name)
+              | None -> fail (sprintf "Unknown collation '%s'" name) ]
 
-let private tableOptions: Parser<unit, unit> = skipMany tableOption
+let private tableOptions: Parser<string option, unit> =
+    many tableOption |>> (fun opts -> opts |> List.choose id |> List.tryLast)
 
 let private createTable: Parser<Statement, unit> =
     (keyword "CREATE" >>. keyword "TABLE"
      >>. (opt (attempt (keyword "IF" >>. keyword "NOT" >>. keyword "EXISTS")) |>> Option.isSome)
      .>>. qualifiedTableName
      .>>. between (sym "(") (sym ")") (sepBy1 createTableItem (sym ","))
-     .>> tableOptions)
-    |>> fun ((ifNotExists, name), items) ->
+     .>>. tableOptions)
+    |>> fun (((ifNotExists, name), items), tableCollation) ->
         let pkNames = items |> List.collect (function CPrimaryKey names -> names | _ -> [])
         let explicitIndexes = items |> List.choose (function CIndex ix -> Some ix | _ -> None)
         let foreignKeys = items |> List.choose (function CForeignKey fk -> Some fk | _ -> None)
@@ -917,7 +952,15 @@ let private createTable: Parser<Statement, unit> =
         let columns =
             items
             |> List.choose (function
-                | CColumn c -> Some(if List.contains c.Name pkNames then { c with PrimaryKey = true } else c)
+                | CColumn c ->
+                    // Table-level COLLATE is the default for columns that
+                    // didn't name one; the explicit column COLLATE wins.
+                    let withCollation =
+                        match c.Collation with
+                        | Some _ -> c
+                        | None -> { c with Collation = tableCollation }
+
+                    Some(if List.contains c.Name pkNames then { withCollation with PrimaryKey = true } else withCollation)
                 | _ -> None)
 
         // A column-level `UNIQUE` modifier is just sugar for a single-column

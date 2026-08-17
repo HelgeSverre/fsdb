@@ -21,7 +21,8 @@ let private col (name: string) (ty: ColumnType) : ColumnDef =
       AutoIncrement = false
       PrimaryKey = false
       Unique = false
-      Generated = None }
+      Generated = None
+                  Collation = None }
 
 let private strCol name = col name (TVarchar 255)
 let private intCol name = col name (TInt false)

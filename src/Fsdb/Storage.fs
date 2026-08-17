@@ -917,26 +917,31 @@ let private uniqueKeyGroups (table: Table) : (string * int list) list =
 /// as Value.compare; every other same-typed value uses an exact encoding.
 /// NULL is deliberately absent because a UNIQUE key containing any NULL
 /// never collides under MySQL's semantics.
-let private encodeConstraintKey (indices: int list) (row: Value[]) : string option =
-    let encode =
-        function
+let private encodeConstraintKey (columns: ColumnDef list) (indices: int list) (row: Value[]) : string option =
+    let encode (index: int) =
+        let collationOf () =
+            columns.[index].Collation
+            |> Option.bind Collation.tryFind
+            |> Option.defaultValue Collation.defaultCollation
+
+        match row.[index] with
         | VNull -> None
         | VInt value -> Some("I" + string value)
         | VDouble value ->
             let normalized = if value = 0.0 then 0.0 else value
             Some("D" + normalized.ToString("R", CultureInfo.InvariantCulture))
         | VDecimal value -> Some("M" + value.ToString("G29", CultureInfo.InvariantCulture))
-        // The collation's canonical key — case folds AND accent folds
-        // (utf8mb4_0900_ai_ci: 'åge' collides with 'age') while trailing
-        // spaces stay significant (NO PAD). Same rules as WHERE equality,
-        // so the index and the comparison can never disagree.
-        | VString value -> Some("S" + Collation.defaultCollation.KeyOf value)
+        // The column's own collation key — case/accent folding per the
+        // declared COLLATE (utf8mb4_bin stays byte-distinct, a PAD SPACE
+        // collation trims). Same rules as WHERE equality, so the index and
+        // the comparison can never disagree.
+        | VString value -> Some("S" + (collationOf ()).KeyOf value)
         | VBytes value -> Some("B" + Convert.ToHexString value)
         | VDate value -> Some("T" + string value.DayNumber)
         | VDateTime value -> Some("V" + string value.Ticks)
         | VJson value -> Some("J" + value.TrimEnd(' ').ToUpperInvariant())
 
-    let encoded = indices |> List.map (fun index -> encode row.[index])
+    let encoded = indices |> List.map encode
 
     if encoded |> List.exists Option.isNone then
         None
@@ -947,11 +952,11 @@ let private encodeConstraintKey (indices: int list) (row: Value[]) : string opti
         |> String.concat ""
         |> Some
 
-let private constraintLookup indices rows =
+let private constraintLookup columns indices rows =
     let lookup = HashSet<string>(StringComparer.Ordinal)
 
     for row in rows do
-        encodeConstraintKey indices row |> Option.iter (lookup.Add >> ignore)
+        encodeConstraintKey columns indices row |> Option.iter (lookup.Add >> ignore)
 
     lookup
 
@@ -969,7 +974,7 @@ let private rebuildUniqueIndex (table: Table) : Map<string, Map<string, int>> =
         let inner =
             table.RowsArray
             |> Seq.indexed
-            |> Seq.choose (fun (i, row) -> encodeConstraintKey idxs row |> Option.map (fun k -> k, i))
+            |> Seq.choose (fun (i, row) -> encodeConstraintKey table.Columns idxs row |> Option.map (fun k -> k, i))
             |> Map.ofSeq
 
         name, inner)
@@ -1004,6 +1009,7 @@ let reindexTable (table: Table) : Table =
 /// side for a plain `INSERT`/`DELETE`, and both for `upsertRows`'
 /// matched-row case.
 let private reindexRow
+    (columns: ColumnDef list)
     (uniqueGroups: (string * int list) list)
     (removed: Value[] option)
     (added: (int * Value[]) option)
@@ -1013,8 +1019,8 @@ let private reindexRow
     |> List.fold
         (fun accIndex (name, idxs) ->
             let group = Map.find name accIndex
-            let group = removed |> Option.fold (fun g r -> encodeConstraintKey idxs r |> Option.fold (fun g' k -> Map.remove k g') g) group
-            let group = added |> Option.fold (fun g (pos, a) -> encodeConstraintKey idxs a |> Option.fold (fun g' k -> Map.add k pos g') g) group
+            let group = removed |> Option.fold (fun g r -> encodeConstraintKey columns idxs r |> Option.fold (fun g' k -> Map.remove k g') g) group
+            let group = added |> Option.fold (fun g (pos, a) -> encodeConstraintKey columns idxs a |> Option.fold (fun g' k -> Map.add k pos g') g) group
             Map.add name group accIndex)
         index
 
@@ -1095,7 +1101,7 @@ let tryUniqueLookup
                 match coerceValue store.StrictMode table.Columns.[idx] literal with
                 | Ok coerced when coerced = literal ->
                     let rows =
-                        match encodeConstraintKey [ 0 ] [| literal |] with
+                        match encodeConstraintKey table.Columns [ idx ] [| literal |] with
                         | None -> []
                         | Some key ->
                             table.UniqueIndex
@@ -1141,7 +1147,7 @@ let private checkFkParent (db: Database) (childColumns: ColumnDef list) (row: Va
                     // group.
                     let found =
                         match parentUniqueIndex parent refIdxs with
-                        | Some index -> encodeConstraintKey [ 0 .. values.Length - 1 ] (Array.ofList values) |> Option.map index.ContainsKey |> Option.defaultValue false
+                        | Some index -> encodeConstraintKey parent.Columns refIdxs (Array.ofList values) |> Option.map index.ContainsKey |> Option.defaultValue false
                         | None -> parent.RowsArray |> Seq.exists (fun prow -> List.forall2 (fun i v -> compare prow.[i] v = 0) refIdxs values)
 
                     if found then Ok() else Error(ForeignKeyParentMissing fk.Name)
@@ -1331,7 +1337,7 @@ let private applyAlterAction (table: Table) (action: AlterAction) : Result<Table
                 match rows with
                 | [] -> None
                 | (row: Value[]) :: rest ->
-                    match encodeConstraintKey idxs row with
+                    match encodeConstraintKey table.Columns idxs row with
                     | Some key when Set.contains key seen ->
                         let value = idxs |> List.map (fun i -> row.[i] |> toText |> Option.defaultValue "NULL") |> String.concat "-"
                         Some(DuplicateKey(ix.Name, value))
@@ -1503,11 +1509,11 @@ let private insertCore
 
                         let source =
                             if isSelf then
-                                Mutable(constraintLookup parentIndices parent.RowsArray)
+                                Mutable(constraintLookup parent.Columns parentIndices parent.RowsArray)
                             else
                                 match parentUniqueIndex parent parentIndices with
                                 | Some idx -> Fixed idx
-                                | None -> Mutable(constraintLookup parentIndices parent.RowsArray)
+                                | None -> Mutable(constraintLookup parent.Columns parentIndices parent.RowsArray)
 
                         Some(foreignKey.Name, (childIndices, selfParentIndices, source))
                     | Error _ -> None
@@ -1541,7 +1547,7 @@ let private insertCore
                         let uniqueCollision =
                             uniqueGroups
                             |> List.tryPick (fun (name, indices) ->
-                                match encodeConstraintKey indices candidate with
+                                match encodeConstraintKey table.Columns indices candidate with
                                 | Some key when Map.find name index |> Map.containsKey key ->
                                     let value =
                                         indices
@@ -1574,7 +1580,7 @@ let private insertCore
                                 let checkOneForeignKey foreignKey =
                                     match Map.tryFind foreignKey.Name foreignKeyLookups with
                                     | Some(childIndices, _, parentKeys) ->
-                                        match encodeConstraintKey childIndices candidate with
+                                        match encodeConstraintKey table.Columns childIndices candidate with
                                         | None -> Ok()
                                         | Some key when parentKeySourceContains key parentKeys -> Ok()
                                         | Some _ -> Error(ForeignKeyParentMissing foreignKey.Name)
@@ -1596,7 +1602,7 @@ let private insertCore
 
                     for KeyValue(_, (_, selfParentIndices, lookup)) in foreignKeyLookups do
                         selfParentIndices
-                        |> Option.bind (fun indices -> encodeConstraintKey indices candidate)
+                        |> Option.bind (fun indices -> encodeConstraintKey table.Columns indices candidate)
                         |> Option.iter (fun key -> parentKeySourceAdd key lookup)
 
                     // Prepending is O(1); reverse once after the fold so
@@ -1606,7 +1612,7 @@ let private insertCore
                     // statement)` — every earlier row already occupies its
                     // own slot, appended rows never shift an existing one.
                     let position = table.RowsArray.Length + List.length acceptedRev
-                    Ok(candidate :: acceptedRev, nextAutoId', firstAuto', lastExplicit', reindexRow uniqueGroups None (Some(position, candidate)) index)
+                    Ok(candidate :: acceptedRev, nextAutoId', firstAuto', lastExplicit', reindexRow table.Columns uniqueGroups None (Some(position, candidate)) index)
                 | Error _ when ignoreErrors -> Ok(acceptedRev, nextAutoId, firstAuto, lastExplicit, index)
                 | Error e -> Error e)
 
@@ -1734,7 +1740,7 @@ let upsertRows
                     let findMatch (index: Map<string, Map<string, int>>) (candidate: Value[]) : (int * Value[]) option =
                         uniqueGroups
                         |> List.tryPick (fun (name, idxs) ->
-                            encodeConstraintKey idxs candidate
+                            encodeConstraintKey table.Columns idxs candidate
                             |> Option.bind (fun k -> Map.tryFind k (Map.find name index))
                             |> Option.map (fun pos -> pos, (if pos < current.Length then current.[pos] else newRows.[pos - current.Length])))
 
@@ -1781,7 +1787,7 @@ let upsertRows
                                                     affected + 1,
                                                     inserted,
                                                     (existing, applied) :: updated,
-                                                    reindexRow uniqueGroups (Some existing) (Some(pos, applied)) index)
+                                                    reindexRow table.Columns uniqueGroups (Some existing) (Some(pos, applied)) index)
                                             | candidate, None ->
                                                 // Same "first generated, else last explicit"
                                                 // `last_insert_id` rule `insertCore` uses —
@@ -1802,7 +1808,7 @@ let upsertRows
                                                     affected + 1,
                                                     candidate :: inserted,
                                                     updated,
-                                                    reindexRow uniqueGroups None (Some(position, candidate)) index
+                                                    reindexRow table.Columns uniqueGroups None (Some(position, candidate)) index
                                                 ))))
 
                     rowsIn
@@ -2002,7 +2008,7 @@ let rec private cascadeDeleteVisited
                                                 if isChild row then
                                                     let row' = Array.copy row
                                                     childIdxs |> List.iter (fun i -> row'.[i] <- VNull)
-                                                    row' :: rows, reindexRow childGroups (Some row) (Some(pos, row')) index
+                                                    row' :: rows, reindexRow childTbl.Columns childGroups (Some row) (Some(pos, row')) index
                                                 else
                                                     row :: rows, index)
                                             ([], childTbl.UniqueIndex)
@@ -2145,7 +2151,7 @@ let updateRows
                                         let collision =
                                             uniqueGroups
                                             |> List.tryPick (fun (name, idxs) ->
-                                                match encodeConstraintKey idxs newRow with
+                                                match encodeConstraintKey table.Columns idxs newRow with
                                                 | Some k ->
                                                     match Map.tryFind k (Map.find name index) with
                                                     | Some pos when pos <> rowPos ->
@@ -2163,7 +2169,7 @@ let updateRows
                                                  |> Result.map (fun () -> newRow)
                                              else
                                                  Ok newRow)
-                                            |> Result.map (fun newRow -> newRow, reindexRow uniqueGroups (Some row) (Some(rowPos, newRow)) index))
+                                            |> Result.map (fun newRow -> newRow, reindexRow table.Columns uniqueGroups (Some row) (Some(rowPos, newRow)) index))
                                     |> Result.map (fun (newRow, index') ->
                                         builder.[rowPos] <- newRow
                                         (if newRow <> row then (row, newRow) :: changesRev else changesRev), index')))

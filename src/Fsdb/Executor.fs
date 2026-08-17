@@ -121,6 +121,7 @@ let rec private containsAggregate (registry: Registry) (expr: Expr) : bool =
     | In(e, xs) -> containsAggregate registry e || xs |> List.exists (containsAggregate registry)
     | Between(e, lo, hi) -> containsAggregate registry e || containsAggregate registry lo || containsAggregate registry hi
     | Cast(e, _) -> containsAggregate registry e
+    | Collate(e, _) -> containsAggregate registry e
     | Case(subject, whens, elseBranch) ->
         (subject |> Option.map (containsAggregate registry) |> Option.defaultValue false)
         || whens |> List.exists (fun (c, r) -> containsAggregate registry c || containsAggregate registry r)
@@ -160,6 +161,7 @@ let rec private collectWindowFuncs (expr: Expr) : Expr list =
     | Distinct e
     | OrderBy(e, _)
     | Cast(e, _) -> collectWindowFuncs e
+    | Collate(e, _) -> collectWindowFuncs e
     | Like(e, p, _, _) -> collectWindowFuncs e @ collectWindowFuncs p
     | Regexp(e, p) -> collectWindowFuncs e @ collectWindowFuncs p
     | In(e, xs) -> collectWindowFuncs e @ (xs |> List.collect collectWindowFuncs)
@@ -199,6 +201,7 @@ let rec private substituteWindowFuncs (synthetic: (Expr * string) list) (expr: E
         | Distinct e -> Distinct(sub e)
         | OrderBy(e, dir) -> OrderBy(sub e, dir)
         | Cast(e, ty) -> Cast(sub e, ty)
+        | Collate(e, name) -> Collate(sub e, name)
         | Like(e, p, cs, esc) -> Like(sub e, sub p, cs, esc)
         | Regexp(e, p) -> Regexp(sub e, sub p)
         | In(e, xs) -> In(sub e, xs |> List.map sub)
@@ -260,6 +263,7 @@ let rec private exprLabel (expr: Expr) : string =
     | InSubquery(e, _) -> sprintf "(%s in (...))" (exprLabel e)
     | Between(e, lo, hi) -> sprintf "(%s between %s and %s)" (exprLabel e) (exprLabel lo) (exprLabel hi)
     | Cast(e, _) -> sprintf "cast(%s as ...)" (exprLabel e)
+    | Collate(e, _) -> exprLabel e
     | Distinct e -> sprintf "distinct %s" (exprLabel e)
     | OrderBy(e, _) -> exprLabel e
     | Case _ -> "case"
@@ -298,14 +302,19 @@ let private likeMatch (escape: char) (charEq: char -> char -> bool) (subject: st
 
     walk 0 0
 
-let private likeOp (caseSensitive: bool) (escape: char option) (subject: Value) (pattern: Value) : Value =
+let private likeOp (coll: Collation.Collation option) (caseSensitive: bool) (escape: char option) (subject: Value) (pattern: Value) : Value =
     match subject, pattern with
     | VNull, _
     | _, VNull -> VNull
     | _ ->
         let text = subject |> toText |> Option.defaultValue ""
         let pat = pattern |> toText |> Option.defaultValue ""
-        let charEq = if caseSensitive then (=) else Collation.defaultCollation.CharEquals
+        let col = coll |> Option.defaultValue Collation.defaultCollation
+        // MySQL's LIKE never trims trailing spaces, not even under a PAD
+        // SPACE collation ('a ' LIKE 'a' is false under utf8mb4_unicode_ci,
+        // MySQL-verified) — folding is per character only. LIKE BINARY is
+        // byte-for-byte with no folding at all.
+        let charEq = if caseSensitive then (=) else col.CharEquals
         boolToValue (likeMatch (escape |> Option.defaultValue '\\') charEq text pat)
 
 /// `REGEXP`/`RLIKE` — MySQL's default collation makes these case-insensitive
@@ -454,18 +463,38 @@ let rec private tryColumnDefForExpr (ctx: EvalContext) (expr: Expr) : ColumnDef 
         | None -> ctx.Outer |> Option.bind (fun outer -> tryColumnDefForExpr outer expr)
     | _ -> None
 
-/// Converts a displayed ENUM label into its 1-based declaration ordinal
-/// for one ORDER BY key. The original row/projection value remains a string;
-/// only the private sort key changes. Invalid labels cannot normally reach
+/// The collation a comparison involving `expr` resolves under: an
+/// explicit `expr COLLATE name` tag wins, then a string-typed column's
+/// declared `COLLATE`, then `None` (the caller falls back to the server
+/// default — literal-to-literal semantics).
+let private resolvedCollation (ctx: EvalContext) (expr: Expr) : Collation.Collation option =
+    match expr with
+    | Collate(_, name) -> Collation.tryFind name
+    | _ ->
+        match tryColumnDefForExpr ctx expr with
+        | Some def when
+            match def.Type with
+            | TChar _ | TVarchar _ | TTinyText | TText | TMediumText | TLongText | TEnum _ | TSet _ | TJson -> true
+            | _ -> false
+            ->
+            Some(def.Collation |> Option.bind Collation.tryFind |> Option.defaultValue Collation.defaultCollation)
+        | _ -> None
+
+/// Converts a displayed ENUM label into its 1-based declaration ordinal for
+/// one ORDER BY key, and tags string-typed columns with the collation their
+/// sort must use. The original row/projection value remains a string; only
+/// the private sort key changes. Invalid labels cannot normally reach
 /// storage, but ordinal 0 mirrors MySQL's sentinel ordering if one does.
-let private orderValueForExpr (ctx: EvalContext) (expr: Expr) (value: Value) : Value =
+let private orderValueForExpr (ctx: EvalContext) (expr: Expr) (value: Value) : Value * Collation.Collation option =
     match tryColumnDefForExpr ctx expr, value with
     | Some { Type = TEnum declared }, VString label ->
-        declared
-        |> List.tryFindIndex (fun item -> System.String.Equals(item, label, System.StringComparison.OrdinalIgnoreCase))
-        |> Option.map (fun index -> VInt(int64 (index + 1)))
-        |> Option.defaultValue (VInt 0L)
-    | _ -> value
+        let ordinal =
+            declared
+            |> List.tryFindIndex (fun item -> System.String.Equals(item, label, System.StringComparison.OrdinalIgnoreCase))
+            |> Option.map (fun index -> VInt(int64 (index + 1)))
+            |> Option.defaultValue (VInt 0L)
+        ordinal, None
+    | _ -> value, resolvedCollation ctx expr
 
 /// `Star(Some qualifier)` (`t.*`) resolution — same shape as
 /// `resolveQualifiedCol`, but hands back every one of that qualifier's own
@@ -909,7 +938,7 @@ let rec private evalExpr (ctx: EvalContext) (expr: Expr) : Result<Value, EvalErr
         |> Result.bind (fun va ->
             eval b
             |> Result.map (fun vb ->
-                let compareWith (pred: int -> bool) : Value =
+                let compareWith (op: Op) : Value =
                     match va, vb with
                     | VNull, _
                     | _, VNull -> VNull
@@ -925,7 +954,34 @@ let rec private evalExpr (ctx: EvalContext) (expr: Expr) : Result<Value, EvalErr
                                 | Some na, Some ob -> na, ob
                                 | _ -> va, vb
 
-                        boolToValue (pred (Value.compare pa pb))
+                        let pred =
+                            match op with
+                            | Eq -> fun (c: int) -> c = 0
+                            | Neq -> fun c -> c <> 0
+                            | Lt -> fun c -> c < 0
+                            | Lte -> fun c -> c <= 0
+                            | Gt -> fun c -> c > 0
+                            | Gte -> fun c -> c >= 0
+                            | _ -> fun _ -> false
+
+                        match pa, pb with
+                        | VString sa, VString sb ->
+                            // A string column's COLLATE (or an explicit
+                            // `expr COLLATE name` tag) drives the compare;
+                            // two literals fall back to the server default.
+                            match resolvedCollation ctx a |> Option.orElseWith (fun () -> resolvedCollation ctx b) with
+                            | Some col ->
+                                // Equality folds (ai_ci); the range
+                                // operators use the full weight order.
+                                let c =
+                                    match op with
+                                    | Eq
+                                    | Neq -> if col.Equals sa sb then 0 else 1
+                                    | _ -> col.Compare sa sb
+
+                                boolToValue (pred c)
+                            | None -> boolToValue (pred (Value.compare pa pb))
+                        | _ -> boolToValue (pred (Value.compare pa pb))
 
                 match op with
                 | And ->
@@ -952,12 +1008,12 @@ let rec private evalExpr (ctx: EvalContext) (expr: Expr) : Result<Value, EvalErr
                 | Mul -> Value.mul va vb
                 | Div -> Value.div va vb
                 | IntDiv -> Value.intDiv va vb
-                | Eq -> compareWith (fun c -> c = 0)
-                | Neq -> compareWith (fun c -> c <> 0)
-                | Lt -> compareWith (fun c -> c < 0)
-                | Lte -> compareWith (fun c -> c <= 0)
-                | Gt -> compareWith (fun c -> c > 0)
-                | Gte -> compareWith (fun c -> c >= 0)
+                | Eq -> compareWith Eq
+                | Neq -> compareWith Neq
+                | Lt -> compareWith Lt
+                | Lte -> compareWith Lte
+                | Gt -> compareWith Gt
+                | Gte -> compareWith Gte
                 // Never unknown, unlike every other comparison here: both
                 // sides `NULL` is true, either side (but not both) `NULL` is
                 // false, otherwise it's a plain `Eq`.
@@ -969,7 +1025,7 @@ let rec private evalExpr (ctx: EvalContext) (expr: Expr) : Result<Value, EvalErr
                     | _ -> boolToValue (Value.compare va vb = 0)))
     | Like(e, p, caseSensitive, escape) ->
         eval e
-        |> Result.bind (fun ve -> eval p |> Result.map (fun vp -> likeOp caseSensitive escape ve vp))
+        |> Result.bind (fun ve -> eval p |> Result.map (fun vp -> likeOp (resolvedCollation ctx e) caseSensitive escape ve vp))
     | Regexp(e, p) ->
         eval e
         |> Result.bind (fun ve -> eval p |> Result.map (fun vp -> regexpOp ve vp))
@@ -1069,6 +1125,9 @@ let rec private evalExpr (ctx: EvalContext) (expr: Expr) : Result<Value, EvalErr
         match Functions.lookup name ctx.Registry with
         | None -> Error(unknownFunction name)
         | Some fn -> args |> traverse eval |> Result.map fn
+    // `expr COLLATE name` evaluates as its inner expression — the tag
+    // only steers which collation comparisons resolve under.
+    | Collate(e, _) -> eval e
     | Cast(e, ty) ->
         eval e
         |> Result.bind (fun v ->
@@ -1092,7 +1151,8 @@ let rec private evalExpr (ctx: EvalContext) (expr: Expr) : Result<Value, EvalErr
                   AutoIncrement = false
                   PrimaryKey = false
                   Unique = false
-                  Generated = None }
+                  Generated = None
+                  Collation = None }
 
             let v =
                 match v, ty with
@@ -1130,7 +1190,7 @@ let rec private evalExpr (ctx: EvalContext) (expr: Expr) : Result<Value, EvalErr
 /// sort representation. Expressions such as CAST(enum_col AS CHAR) remain
 /// ordinary lexical strings; only a direct ENUM column reference uses its
 /// declaration ordinal, matching MySQL.
-and private evalOrderKey (ctx: EvalContext) (expr: Expr) : Result<Value, EvalError> =
+and private evalOrderKey (ctx: EvalContext) (expr: Expr) : Result<Value * Collation.Collation option, EvalError> =
     let orderCtx = { ctx with Clause = OrderClause }
     evalExpr orderCtx expr |> Result.map (orderValueForExpr orderCtx expr)
 
@@ -1168,7 +1228,8 @@ and private deriveColumns (names: string list) : ColumnDef list =
           AutoIncrement = false
           PrimaryKey = false
           Unique = false
-          Generated = None })
+          Generated = None
+          Collation = None })
 
 /// Resolves one `FromItem` — a real/virtual table via `resolveTableRef`, or
 /// a derived table by running its subquery (uncorrelated: a plain derived
@@ -1698,6 +1759,7 @@ and private rewriteCoalescedCols (map: Map<string, Expr>) (expr: Expr) : Expr =
     | Distinct e -> Distinct(sub e)
     | OrderBy(e, dir) -> OrderBy(sub e, dir)
     | Cast(e, ty) -> Cast(sub e, ty)
+    | Collate(e, name) -> Collate(sub e, name)
     | Case(subject, whens, elseBranch) ->
         Case(subject |> Option.map sub, whens |> List.map (fun (c, r) -> sub c, sub r), elseBranch |> Option.map sub)
 
@@ -1921,16 +1983,21 @@ and private applyLimitOffset (limit: int option) (offset: int option) (rows: 'a 
 /// The one comparator every `ORDER BY` sort site (plain
 /// `SELECT`, grouped, windowed, `UNION`) shares, instead of each carrying
 /// its own copy of the same fold.
-and private compareByOrderKeys (dirs: Direction list) (ka: Value list) (kb: Value list) : int =
+and private compareByOrderKeys (dirs: Direction list) (ka: (Value * Collation.Collation option) list) (kb: (Value * Collation.Collation option) list) : int =
     List.zip3 dirs ka kb
     |> List.fold
-        (fun acc (dir, va, vb) ->
+        (fun acc (dir, (va, ca), (vb, _)) ->
             if acc <> 0 then
                 acc
             else
+                let c =
+                    match va, vb, ca with
+                    | VString sa, VString sb, Some col -> col.Compare sa sb
+                    | _ -> Value.compareTotal va vb
+
                 match dir with
-                | Asc -> Value.compareTotal va vb
-                | Desc -> -(Value.compareTotal va vb))
+                | Asc -> c
+                | Desc -> -c)
         0
 
 /// A `UNION` statement's combined resultset, plus its column types —
@@ -2089,13 +2156,13 @@ and runUnionStmt
             let projections = cols |> List.map (fun c -> Col c, None)
             let resolveOrder = resolvePositionalOrAlias projections
 
-            let orderKeyOf (typedRow: Value[]) (expr: Expr) : Value =
+            let orderKeyOf (typedRow: Value[]) (expr: Expr) : Value * Collation.Collation option =
                 match resolveOrder expr with
                 | Col name ->
                     match cols |> List.tryFindIndex (fun c -> System.String.Equals(c, name, System.StringComparison.OrdinalIgnoreCase)) with
-                    | Some i when i < typedRow.Length -> typedRow.[i]
-                    | _ -> VNull
-                | _ -> VNull
+                    | Some i when i < typedRow.Length -> typedRow.[i], None
+                    | _ -> VNull, None
+                | _ -> VNull, None
 
             let sortedPaired =
                 if orderBy.IsEmpty then
@@ -2174,7 +2241,7 @@ and private evalAggregate
             | Some s -> s
             | None -> ","
 
-        let evalRow (row: Value[]) : Result<(Value * Value list) option, EvalError> =
+        let evalRow (row: Value[]) : Result<(Value * (Value * Collation.Collation option) list) option, EvalError> =
             let ctx = ctxFor row
             evalExpr ctx innerExpr
             |> Result.bind (function
@@ -2265,6 +2332,7 @@ and private rewriteAggregates
     | Between(e, lo, hi) ->
         sub e |> Result.bind (fun e' -> sub lo |> Result.bind (fun lo' -> sub hi |> Result.map (fun hi' -> Between(e', lo', hi'))))
     | Cast(e, ty) -> sub e |> Result.map (fun e' -> Cast(e', ty))
+    | Collate(e, name) -> sub e |> Result.map (fun e' -> Collate(e', name))
     | Case(subject, whens, elseBranch) ->
         let subOpt = function
             | Some e -> sub e |> Result.map Some
@@ -2366,6 +2434,7 @@ and private resolveHavingRef (columnIndex: Map<string, int list>) (projections: 
     | Between(e, lo, hi) ->
         sub e |> Result.bind (fun e' -> sub lo |> Result.bind (fun lo' -> sub hi |> Result.map (fun hi' -> Between(e', lo', hi'))))
     | Cast(e, ty) -> sub e |> Result.map (fun e' -> Cast(e', ty))
+    | Collate(e, name) -> sub e |> Result.map (fun e' -> Collate(e', name))
     | Case(subject, whens, elseBranch) ->
         let subOpt =
             function
@@ -2411,7 +2480,7 @@ and private resolveOrderKey
     (projections: Projection list)
     (outputCols: (string * Value) list)
     (expr: Expr)
-    : Result<Value, EvalError> =
+    : Result<Value * Collation.Collation option, EvalError> =
     match expr with
     | Col name ->
         match outputCols |> List.filter (fun (n, _) -> System.String.Equals(n, name, System.StringComparison.OrdinalIgnoreCase)) with
@@ -2578,7 +2647,7 @@ and private runGroupedSelect
     // FROM-first one — see `resolveOrderKey`'s doc) resolves against this
     // group's own already-projected output columns (`outputCols`, from
     // `projectGroup`) rather than the group's raw rows.
-    let orderKeysOf (outputCols: (string * Value) list) (groupRows: Value[] list) : Result<Value list, EvalError> =
+    let orderKeysOf (outputCols: (string * Value) list) (groupRows: Value[] list) : Result<(Value * Collation.Collation option) list, EvalError> =
         let representative = representativeOf groupRows
         let ctx = ctxFor representative
 
@@ -2656,7 +2725,7 @@ and private runGroupedSelect
             | Ok groups ->
                 let processGroup
                     (key: Value list, groupRows: Value[] list)
-                    : Result<((string * Value) list * Value list * Value list) option, EvalError> =
+                    : Result<((string * Value) list * (Value * Collation.Collation option) list * Value list) option, EvalError> =
                     havingOk groupRows
                     |> Result.bind (fun keep ->
                         if not keep then
@@ -2674,9 +2743,13 @@ and private runGroupedSelect
                         if indexOrdered then
                             kept
                             |> List.sortWith (fun (_, _, ka) (_, _, kb) ->
+                                // The index order path sorts by the GROUP
+                                // BY key itself — tag it with the same
+                                // collation/ordinal rules the full order
+                                // path uses.
                                 let probeCtx = ctxFor (probeRow columns)
-                                let enumAware keys = List.map2 (orderValueForExpr probeCtx) groupExprs keys
-                                compareByOrderKeys (groupExprs |> List.map (fun _ -> Asc)) (enumAware ka) (enumAware kb))
+                                let tagged keys = List.map2 (orderValueForExpr probeCtx) groupExprs keys
+                                compareByOrderKeys (groupExprs |> List.map (fun _ -> Asc)) (tagged ka) (tagged kb))
                         elif select.OrderBy.IsEmpty then
                             // Same reasoning as the plain-`SELECT` `sortRows`
                             // above: an empty `ORDER BY` makes every
@@ -2749,7 +2822,7 @@ and private runWindowedSelect
             let keyOf (exprs: Expr list) (row: Value[]) : Result<Value list, EvalError> =
                 exprs |> traverse (evalExpr (ctxFor row))
 
-            let orderKeyOf (exprs: Expr list) (row: Value[]) : Result<Value list, EvalError> =
+            let orderKeyOf (exprs: Expr list) (row: Value[]) : Result<(Value * Collation.Collation option) list, EvalError> =
                 exprs |> traverse (evalOrderKey (ctxFor row))
 
             matched
@@ -2818,7 +2891,8 @@ and private runWindowedSelect
                       AutoIncrement = false
                       PrimaryKey = false
                       Unique = false
-                      Generated = None })
+                      Generated = None
+                      Collation = None })
 
             let extendedColumns = columns @ syntheticColumns
 
@@ -2907,7 +2981,7 @@ and private runSelect
     // caller and threaded in here, rather than re-run per `ORDER BY`
     // key — re-running per key would call `projectRow` three times over
     // on the same row for `ORDER BY a, b, c`, for the same result.
-    let orderKeysOf (row: Value[]) (outputCols: (string * Value) list) : Result<Value list, EvalError> =
+    let orderKeysOf (row: Value[]) (outputCols: (string * Value) list) : Result<(Value * Collation.Collation option) list, EvalError> =
         orderBy |> traverse (fun (expr, _) -> resolveOrderKey (ctxFor row) projections outputCols (resolveOrderExpr expr))
 
     let pairOf (outputCols: (string * Value) list) : string option list * Value[] =
@@ -2952,7 +3026,7 @@ and private runSelect
         // Shared by both `ORDER BY` branches below: evaluates `WHERE`, the
         // projection, and the sort keys for one row, in that order, short-
         // circuiting to `None` on a `WHERE` miss without projecting it.
-        let evalKeyed (row: Value[]) : Result<(Value list * (string option list * Value[])) option, EvalError> =
+        let evalKeyed (row: Value[]) : Result<((Value * Collation.Collation option) list * (string option list * Value[])) option, EvalError> =
             matches row
             |> Result.bind (fun keep ->
                 if not keep then
@@ -3221,6 +3295,7 @@ let rec private substituteValuesFunc (columnIndex: Map<string, int list>) (candi
     | In(e, xs) -> In(sub e, xs |> List.map sub)
     | Between(e, lo, hi) -> Between(sub e, sub lo, sub hi)
     | Cast(e, ty) -> Cast(sub e, ty)
+    | Collate(e, name) -> Collate(sub e, name)
     | Case(subject, whens, elseBranch) ->
         Case(subject |> Option.map sub, whens |> List.map (fun (c, r) -> sub c, sub r), elseBranch |> Option.map sub)
     | Lit _
@@ -3282,6 +3357,7 @@ let rec private collectSubqueries (expr: Expr) : SelectStmt list =
     | In(e, xs) -> collectSubqueries e @ (xs |> List.collect collectSubqueries)
     | Between(e, lo, hi) -> collectSubqueries e @ collectSubqueries lo @ collectSubqueries hi
     | Cast(e, _) -> collectSubqueries e
+    | Collate(e, _) -> collectSubqueries e
     | Case(subject, whens, elseBranch) ->
         (subject |> Option.map collectSubqueries |> Option.defaultValue [])
         @ (whens |> List.collect (fun (c, r) -> collectSubqueries c @ collectSubqueries r))
@@ -3345,6 +3421,7 @@ let private isCorrelated (sub: SelectStmt) : bool =
         | In(e, xs) -> references e || xs |> List.exists references
         | Between(e, lo, hi) -> references e || references lo || references hi
         | Cast(e, _) -> references e
+        | Collate(e, _) -> references e
         | Case(subject, whens, elseBranch) ->
             (subject |> Option.map references |> Option.defaultValue false)
             || whens |> List.exists (fun (c, r) -> references c || references r)

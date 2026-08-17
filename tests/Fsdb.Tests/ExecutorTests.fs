@@ -236,6 +236,64 @@ let tests =
                         | ResultSet(_, [ [ Some "hit" ] ]) -> ()
                         | other -> failtestf "expected '%s' to join '%s' under ai_ci, got %A" leftName rightName other
 
+                // Expression-level `expr COLLATE name` — MySQL-verified
+                // behaviors, pinned per collation.
+                testTheory
+                    "expr COLLATE overrides the comparison collation"
+                    [ "SELECT 'å' COLLATE utf8mb4_0900_as_cs = 'a'", "0"
+                      "SELECT 'a' COLLATE utf8mb4_bin = 'A'", "0"
+                      "SELECT 'a' COLLATE utf8mb4_bin = 'a '", "1"
+                      "SELECT 'a' COLLATE utf8mb4_unicode_ci = 'a '", "1"
+                      "SELECT 'i' COLLATE utf8mb4_tr_0900_ai_ci = 'I'", "0"
+                      "SELECT 'ı' COLLATE utf8mb4_tr_0900_ai_ci = 'I'", "1"
+                      "SELECT 'ñ' COLLATE utf8mb4_es_0900_ai_ci = 'n'", "0" ]
+                    <| fun (sql, expected) ->
+                        match runDefault (newStore ()) sql with
+                        | ResultSet(_, [ [ Some v ] ]) -> Expect.equal v expected sql
+                        | other -> failtestf "expected a resultset for %s, got %A" sql other
+
+                testTheory
+                    "a bin-collated column compares byte-for-byte in WHERE and its unique key"
+                    [ "Bob", "bob", "2"
+                      "åge", "age", "2" ]
+                    <| fun (first, second, _) ->
+                        let store = newStore ()
+                        runDefault store "CREATE TABLE t (name VARCHAR(20) COLLATE utf8mb4_bin UNIQUE)" |> ignore
+                        runDefault store (sprintf "INSERT INTO t VALUES ('%s')" first) |> ignore
+                        // case/accent differences are distinct under bin
+                        runDefault store (sprintf "INSERT INTO t VALUES ('%s')" second) |> ignore
+
+                        match runDefault store "SELECT COUNT(*) FROM t" with
+                        | ResultSet(_, [ [ Some "2" ] ]) -> ()
+                        | other -> failtestf "expected both bin-distinct rows to insert, got %A" other
+
+                        match runDefault store (sprintf "SELECT COUNT(*) FROM t WHERE name = '%s'" first) with
+                        | ResultSet(_, [ [ Some "1" ] ]) -> ()
+                        | other -> failtestf "expected an exact byte match under bin, got %A" other
+
+                testCase "a unicode_ci-collated unique key folds case and trailing spaces (PAD SPACE)"
+                <| fun _ ->
+                    let store = newStore ()
+                    runDefault store "CREATE TABLE t (name VARCHAR(20) COLLATE utf8mb4_unicode_ci UNIQUE)" |> ignore
+                    runDefault store "INSERT INTO t VALUES ('Bob')" |> ignore
+
+                    match runDefault store "INSERT INTO t VALUES ('bob ')" with
+                    | Err(1062, _) -> ()
+                    | other -> failtestf "expected 'bob ' to collide with 'Bob' under unicode_ci, got %A" other
+
+                testCase "ORDER BY honors an expr-level COLLATE (da sorts æ ø å after z)"
+                <| fun _ ->
+                    let store = newStore ()
+
+                    match
+                        runDefault
+                            store
+                            "SELECT w FROM (SELECT 'a' w UNION ALL SELECT 'z' UNION ALL SELECT 'æ' UNION ALL SELECT 'ø' UNION ALL SELECT 'å') x ORDER BY w COLLATE utf8mb4_da_0900_ai_ci"
+                    with
+                    | ResultSet(_, rows) ->
+                        Expect.equal rows [ [ Some "a" ]; [ Some "z" ]; [ Some "æ" ]; [ Some "ø" ]; [ Some "å" ] ] "Danish order, MySQL-verified"
+                    | other -> failtestf "expected the Danish collation order, got %A" other
+
                 testCase "an unknown column in WHERE is a 1054 error"
                 <| fun _ ->
                     let store = newStore ()
