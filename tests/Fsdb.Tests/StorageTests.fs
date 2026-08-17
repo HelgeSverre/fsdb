@@ -129,7 +129,17 @@ let tests =
 
                     match truncate store defaultDatabase "ghosts" with
                     | Error(NoSuchTable "ghosts") -> ()
-                    | other -> failtestf "expected NoSuchTable, got %A" other ]
+                    | other -> failtestf "expected NoSuchTable, got %A" other
+
+                testCase "truncate resets the PRIMARY KEY index too, not just NextAutoId — re-inserting the same id after a truncate isn't a stale duplicate"
+                <| fun _ ->
+                    let store = withUsersTable ()
+                    insertRows store defaultDatabase "users" None [ [ VInt 1L; VString "alice"; VInt 30L ] ] |> ignore
+                    truncate store defaultDatabase "users" |> ignore
+
+                    match insertRows store defaultDatabase "users" None [ [ VInt 1L; VString "bob"; VInt 40L ] ] with
+                    | Ok(1L, _, 1) -> ()
+                    | other -> failtestf "expected id 1 to be free again after truncate, got %A" other ]
 
           testList
               "insertRows"
@@ -1025,7 +1035,29 @@ let tests =
                         match scan store defaultDatabase "people" with
                         | Ok(columns, _) -> Expect.equal (columns |> List.map (fun c -> c.Name)) [ "id"; "name" ] "both actions applied"
                         | Error e -> failtestf "expected Ok, got %A" e
-                    | Error e -> failtestf "expected Ok, got %A" e ]
+                    | Error e -> failtestf "expected Ok, got %A" e
+
+                testCase "the PRIMARY KEY's index is rebuilt at its new column position after an ALTER shifts it, not stale at the old one"
+                <| fun _ ->
+                    let store = withUsersTable ()
+                    insertRows store defaultDatabase "users" None [ [ VInt 1L; VString "alice"; VInt 30L ] ] |> ignore
+
+                    // `id` (the PRIMARY KEY) moves from column 0 to column 1
+                    // — if `UniqueIndex` weren't rebuilt against the new
+                    // layout, a duplicate-id INSERT would either wrongly
+                    // succeed (checked against the old position, now
+                    // holding the flag's value) or a distinct id could
+                    // wrongly collide.
+                    match alterTable store defaultDatabase "users" [ AddColumn(col "flag" (TInt false) true, PositionFirst) ] with
+                    | Error e -> failtestf "expected Ok, got %A" e
+                    | Ok() ->
+                        match insertRows store defaultDatabase "users" None [ [ VNull; VInt 1L; VString "bob"; VInt 40L ] ] with
+                        | Error(DuplicateKey("PRIMARY", _)) -> ()
+                        | other -> failtestf "expected id 1 to still be rejected as a duplicate after the shift, got %A" other
+
+                        match insertRows store defaultDatabase "users" None [ [ VNull; VInt 2L; VString "carol"; VInt 50L ] ] with
+                        | Ok(2L, _, 1) -> ()
+                        | other -> failtestf "expected a distinct id to still succeed after the shift, got %A" other ]
 
           testList
               "upsertRows"
