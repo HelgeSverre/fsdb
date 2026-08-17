@@ -249,3 +249,41 @@ ShortRun-class noise, not a regression to chase. Sub-gates: `InsertSingle`
 µs) both still miss, unchanged from the "Sub-gate profiling" diagnosis
 above — neither touches this milestone's join-laziness change, and both
 sit on the same already-documented `Table.Rows`-immutability floor.
+
+**Correctness fixes after gate closure:** `ORDER BY ... LIMIT` with MySQL's
+max `LIMIT` (the "OFFSET with no LIMIT" pagination idiom, clamped by the
+parser to `Int32.MaxValue`) silently returned zero rows — `boundedTopN`'s
+capacity (`limit + offset`) overflowed negative in unchecked 32-bit `int`.
+A large-but-unclamped `LIMIT` either preallocated a multi-gigabyte
+`ResizeArray` or faulted outright with `Array dimensions exceeded supported
+range`. Fixed: the capacity arithmetic runs in `int64` and clamps to
+`Int32.MaxValue`; `boundedTopN` no longer preallocates from that number
+either, and now folds the per-row `WHERE`/projection/order-key evaluation
+directly into its insertion loop, so peak memory during `ORDER BY` +
+`LIMIT` is `O(capacity)` rather than `O(matched rows)` (previously only the
+buffer's own capacity hint was bounded — every matched row's evaluation
+still landed in a separate full accumulator first). `LIMIT 0` (the
+`getColumnMeta`/"metadata, no rows" probe idiom) reported `VAR_STRING` for
+every column instead of its real MySQL wire type, because wire-type
+inference narrowed to the (empty) returned row set; it now takes a
+dedicated full-scan path matching MySQL and this engine's pre-M10 shape,
+costing nothing extra since `LIMIT 0` returns no rows either way.
+`applyJoin`'s hash-eligibility check re-walked a chained `JOIN`'s left side
+through `rowsSoFar` after it had already been forced into `leftIndexed`,
+re-driving a previous `JOIN`'s lazy `hashPairs` seq from scratch on a 3+
+table chain; routed through `leftIndexed` instead.
+
+Re-verified: 693 Expecto tests green, `vendor/bin/pest tests --no-coverage
+--compact` against a live fsdb on port 3307 (288 passed, 15 skipped, 2
+todos, 792 assertions — parity with the sqlite baseline), one `just bench`
+run (`benchmarks/results/f4ba12a.md`): `JoinUsersOrders` 10,742.98 µs,
+still clear of the < 25ms gate; `FilterScanOrderLimit` 6,258.65 µs, down
+from 15,804.64 µs at a90dfae. `PointSelectByPk`/`InsertSingle`/
+`InsertBatch100`/`GroupByAggregate`/`PreparedPointSelect` moved 12-27%
+against a90dfae in this single run — none of those paths were touched by
+these fixes (only `ORDER BY`/`LIMIT`/`JOIN` were), and the spread sits
+inside the run-to-run noise band the gate-closure entry above already
+measured on this same machine (up to 18.6% on an untouched row across two
+back-to-back runs). Sub-gates unchanged: `InsertSingle` 549 µs (gate < 300
+µs) and `UpdateSingleRow` 662 µs (gate < 500 µs) both still miss, on the
+same `Table.Rows`-immutability floor documented above.
