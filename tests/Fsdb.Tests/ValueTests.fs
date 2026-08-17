@@ -522,7 +522,9 @@ let tests =
                       testCase "HEX/UNHEX round-trip a string"
                       <| fun _ ->
                           Expect.equal (call "HEX" [ VString "AB" ]) (VString "4142") "hex"
-                          Expect.equal (call "UNHEX" [ VString "4142" ]) (VString "AB") "unhex"
+                          // UNHEX produces raw bytes (VBytes), not text — MySQL
+                          // treats its result as a binary string.
+                          Expect.equal (call "UNHEX" [ VString "4142" ]) (VBytes [| 0x41uy; 0x42uy |]) "unhex"
 
                       testCase "MD5/SHA1 produce lowercase hex digests of the known length"
                       <| fun _ ->

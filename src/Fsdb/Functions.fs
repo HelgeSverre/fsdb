@@ -1086,8 +1086,7 @@ let private unhexFn: Scalar =
             VNull
         else
             [| for i in 0 .. 2 .. s.Length - 1 -> Convert.ToByte(s.Substring(i, 2), 16) |]
-            |> Text.Encoding.Latin1.GetString
-            |> VString
+            |> VBytes
     | _ -> VNull
 
 let private md5Fn: Scalar = textMap (fun s -> Convert.ToHexString(MD5.HashData(Text.Encoding.UTF8.GetBytes s)).ToLowerInvariant())

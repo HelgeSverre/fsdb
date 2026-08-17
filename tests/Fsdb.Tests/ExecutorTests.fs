@@ -1152,6 +1152,22 @@ let tests =
                         | other -> failtestf "expected stored VBytes values, got %A" other
                     | Error error -> failtestf "expected the binary table to scan, got %A" error
 
+                testCase "UNHEX(MD5(...)) stored into a BINARY column round-trips through LENGTH/HEX"
+                <| fun _ ->
+                    // Regression: unhexFn used to hand back a Latin-1-carrier
+                    // VString, which the BINARY column coercion then
+                    // re-encoded as UTF-8 — doubling most bytes above 0x7F.
+                    let store = newStore ()
+                    runDefault store "CREATE TABLE bt (h BINARY(16))" |> ignore
+
+                    match runDefault store "INSERT INTO bt VALUES (UNHEX(MD5('k')))" with
+                    | Affected 1UL -> ()
+                    | other -> failtestf "expected the row to insert, got %A" other
+
+                    match runDefault store "SELECT LENGTH(h), HEX(h) FROM bt" with
+                    | ResultSet(_, [ [ Some "16"; Some "8CE4B16B22B58894AA86C421E8759DF3" ] ]) -> ()
+                    | other -> failtestf "expected a 16-byte round-tripped hash, got %A" other
+
                 testCase "SET column accepts any string without validating against the declared set"
                 <| fun _ ->
                     let store = newStore ()
