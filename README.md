@@ -286,6 +286,3 @@ most of these — the numbers track fsdb's hotspots, not parity.
 - [Torture harness](torture/README.md) — differential fuzzing against a MySQL 8.4 oracle
 - [Benchmarks](benchmarks/README.md) — workloads and methodology
 
-## License
-
-MIT — see [LICENSE](LICENSE).
