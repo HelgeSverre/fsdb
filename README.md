@@ -76,40 +76,24 @@ OPTIONS:
 
 ## How it works
 
-```mermaid
-flowchart LR
-    CLI["mysql CLI"] --> WIRE
-    PDO["PDO"] --> WIRE
-    CONN["MySqlConnector"] --> WIRE
-
-    subgraph F["fsdb"]
-        direction TB
-
-        WIRE["Packet / Protocol<br/>MySQL wire protocol"]:::wire
-        SESS["Session<br/>transactions · variables"]:::session
-        QH["QueryHandler<br/>COM_QUERY / COM_STMT_*"]:::session
-        PARSE["Parser · FParsec<br/>SQL text → AST"]:::plan
-        EXEC["Executor<br/>logical plan → lazy seq"]:::plan
-        STORE["Storage<br/>value-swapped catalog"]:::data
-        WAL["Persistence<br/>binary WAL · snapshot"]:::data
-
-        WIRE --> SESS --> QH --> PARSE --> EXEC
-        EXEC <-->|snapshots| STORE
-        STORE <-->|commit events| WAL
-
-        COL["Collation registry<br/>89 utf8mb4 collations"]:::side -.-> PARSE
-        COL -.-> EXEC
-        COL -.-> STORE
-        FN["Function registry<br/>built-in / custom / session"]:::side -.-> EXEC
-    end
-
-    EXEC -.->|result rows| WIRE
-
-    classDef wire fill:#e8f5e9,stroke:#43a047,color:#1b5e20
-    classDef session fill:#e3f2fd,stroke:#1e88e5,color:#0d47a1
-    classDef plan fill:#ede7f6,stroke:#8e24aa,color:#4a148c
-    classDef data fill:#fff8e1,stroke:#fb8c00,color:#e65100
-    classDef side fill:#fce4ec,stroke:#d81b60,color:#880e4f
+```
+mysql CLI · PDO · MySqlConnector
+         │
+         ▼  MySQL wire protocol
+┌────────────────────────────────────────────────────────────┐
+│ fsdb                                                       │
+│                                                            │
+│ Packet/Protocol → Session → QueryHandler → Parser → Executor │
+│ wire bytes        tx · vars    COM_QUERY,       FParsec    logical │
+│                                COM_STMT_*       SQL → AST  plan → │
+│                                                           lazy seq ──► result rows │
+│                                                            │
+│ Executor writes value snapshots → Storage (catalog, unique keys) │
+│ Storage ⇄ Persistence (binary WAL + snapshot, replayed on startup) │
+│                                                            │
+│ Collation registry (89 utf8mb4) ──┐                        │
+│ Function registry (custom)   ─────┼─► parser · executor · keys │
+└────────────────────────────────────────────────────────────┘
 ```
 
 - **Parser** — an FParsec combinator grammar over a discriminated-union AST.
