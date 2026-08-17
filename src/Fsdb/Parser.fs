@@ -1222,13 +1222,16 @@ let private joinKind: Parser<JoinKind, unit> =
     <|> (keyword "RIGHT" >>. optional (keyword "OUTER") >>. keyword "JOIN" >>% RightJoin)
     <|> (keyword "JOIN" >>% InnerJoin)
 
-/// `CROSS JOIN table` — no `ON` at all; encoded with the always-true
-/// `Lit (VInt 1L)` condition so `Executor.applyJoin` can run it through the
-/// exact same matching logic as `INNER JOIN` (every pair "matches") instead
-/// of a separate Cartesian-product code path.
+/// `CROSS JOIN (table | (SELECT ...) AS alias)` — no `ON` at all; encoded
+/// with the always-true `Lit (VInt 1L)` condition so `Executor.applyJoin`
+/// can run it through the exact same matching logic as `INNER JOIN` (every
+/// pair "matches") instead of a separate Cartesian-product code path.
+/// `fromItem` (not `tableRef`) so a derived-table right side parses too —
+/// MySQL accepts `CROSS JOIN (SELECT ...) AS alias` the same as it does for
+/// `JOIN`/`LEFT JOIN`.
 let private crossJoinClause: Parser<Join, unit> =
-    attempt (keyword "CROSS" >>. keyword "JOIN" >>. tableRef)
-    |>> fun table -> { Kind = CrossJoin; Table = FromTable table; On = Lit(VInt 1L) }
+    attempt (keyword "CROSS" >>. keyword "JOIN" >>. fromItem)
+    |>> fun table -> { Kind = CrossJoin; Table = table; On = Lit(VInt 1L) }
 
 /// `FROM t1, t2` — MySQL's legacy comma (implicit-join) syntax, still the
 /// form plenty of handwritten SQL uses for what an explicit `CROSS JOIN`

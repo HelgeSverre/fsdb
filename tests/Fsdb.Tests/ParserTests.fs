@@ -1471,6 +1471,12 @@ let tests =
                     | Select { Joins = [ { Kind = CrossJoin; On = Lit(VInt 1L) } ] } -> ()
                     | other -> failtestf "expected a CrossJoin, got %A" other
 
+                testCase "CROSS JOIN (SELECT ...) AS t is a derived table join source"
+                <| fun _ ->
+                    match parseOk "SELECT * FROM a CROSS JOIN (SELECT id FROM t) AS derived" with
+                    | Select { Joins = [ { Kind = CrossJoin; Table = FromSubquery(PlainSelect { From = Some(FromTable { Table = "t" }) }, "derived") } ] } -> ()
+                    | other -> failtestf "expected a CrossJoin over a FromSubquery, got %A" other
+
                 testCase "multiple chained joins with aliases"
                 <| fun _ ->
                     match parseOk "SELECT * FROM a AS x JOIN b AS y ON x.id = y.a_id LEFT JOIN c AS z ON y.id = z.b_id" with
