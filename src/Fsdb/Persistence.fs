@@ -43,6 +43,20 @@ let private shutdownRegistrations = ResizeArray<IDisposable>()
 let private walRotateBytes = 64L * 1024L * 1024L
 let private walRotateEntries = 100_000
 
+[<DllImport("libc", SetLastError = true)>]
+extern int private fsync(int fd)
+
+/// fsync-before-ack without .NET's `Flush(true)`: on macOS `FileStream.Flush(true)`
+/// issues `fcntl(fd, F_FULLFSYNC)` — a full drive-write-cache flush costing
+/// ~5 ms per call here — while plain `fsync` is ~16 us. MySQL's default
+/// `innodb_flush_method` on macOS is plain `fsync`, so this matches its
+/// durability semantics exactly: a write survives an OS crash, not a power
+/// loss that also drops the drive's write cache. `Flush(false)` pushes the
+/// .NET buffer out first; the raw `fsync` then orders it.
+let private flushToDisk (s: FileStream) : unit =
+    s.Flush false
+    fsync(s.SafeFileHandle.DangerousGetHandle().ToInt32()) |> ignore
+
 // ---------------------------------------------------------------------
 // JSON leaves: strings/bools/ints/lists, plus a `"case"`-tagged object for
 // every DU used here — `decodeXxx` is each `encodeXxx`'s exact inverse.
@@ -712,7 +726,7 @@ let private decodeCatalog (node: JsonNode) : Catalog =
 ///
 /// Ordered (and fsynced) so a crash at any point still leaves `load` a
 /// consistent state to recover from: write the *whole* catalog to
-/// `snapshot.fsdb.new` through a `FileStream` and `Flush true` (an fsync,
+/// `snapshot.fsdb.new` through a `FileStream` and `flushToDisk` (an fsync,
 /// matching `attach`'s WAL writes — `File.WriteAllText` never syncs, so the
 /// old tmp-file dance could lose the snapshot to a power loss right after
 /// the WAL truncation it's supposed to be a backup for), *then* truncate
@@ -731,7 +745,7 @@ let snapshotNow (dataDir: string) (store: Store) : unit =
         (use s = new FileStream(newPath, FileMode.Create, FileAccess.Write)
          let bytes = Text.Encoding.UTF8.GetBytes((encodeCatalog store.Catalog).ToJsonString())
          s.Write(bytes, 0, bytes.Length)
-         s.Flush true)
+         flushToDisk s)
 
         File.WriteAllText(Path.Combine(dataDir, walFileName), "")
         File.Move(newPath, finalPath, true))
@@ -819,7 +833,7 @@ let attach (dataDir: string) (store: Store) : unit =
                 use s = new FileStream(walPath, FileMode.Append, FileAccess.Write, FileShare.Read)
                 let bytes = Text.Encoding.UTF8.GetBytes(line + "\n")
                 s.Write(bytes, 0, bytes.Length)
-                s.Flush true
+                flushToDisk s
                 s.Length
             with ex ->
                 // By the time `OnCommit` fires, `Storage` has already
