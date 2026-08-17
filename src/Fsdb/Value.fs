@@ -109,10 +109,10 @@ let ofWire (s: string) : Value =
         | 'J' -> VJson(unb64 payload)
         | tag -> failwithf "Value.ofWire: unknown tag '%c' in %s" tag s
 
-/// Binary WAL encoding of a `Value`, mirroring `toWire`'s tag scheme but
+/// Binary encoding of a `Value`, mirroring `toWire`'s tag scheme but
 /// length-prefixed rather than base64-encoded — `decodeValue (encodeValue v) = v`
-/// for every case. The row-level WAL uses this; `toWire` stays for the JSON
-/// snapshot's human-inspectable rendering.
+/// for every case. The WAL and the snapshot both use this; `toWire` stays as
+/// the human-readable tagged-text rendering (round-trip-tested in `ValueTests`).
 let encodeValue (w: Writer) (v: Value) : unit =
     match v with
     | VNull -> w.WriteByte 0x00uy

@@ -608,8 +608,8 @@ let tests =
               // the rename), so both the fsynced `.new` and a full WAL are on
               // disk at once.
               snapshotNow dir store
-              let snap = File.ReadAllText(snapshotPath dir)
-              File.WriteAllText(snapshotPath dir + ".new", snap)
+              let snap = File.ReadAllBytes(snapshotPath dir)
+              File.WriteAllBytes(snapshotPath dir + ".new", snap)
               File.Delete(snapshotPath dir)
 
               let reloaded = load dir

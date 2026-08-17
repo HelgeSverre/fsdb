@@ -9,19 +9,18 @@
 /// expression" (the whole point: `INSERT ... VALUES (NOW(), UUID())`
 /// replays to the *same* row, not a freshly-evaluated one).
 ///
-/// The WAL is a binary log: each record is `[len][crc32][payload]`, the
-/// payload is one `CommitEvent` encoded with `Binary.Writer`, and row events
-/// encode their `Value[]`s through `Value.encodeValue`. Two exceptions stay
-/// JSON: `SchemaChanged`'s DDL payload (`encodeStatement` — rare, migrations
-/// only, human-inspectable) and the full-catalog snapshot (cold load path).
-/// Replay calls `Storage`'s own DDL functions directly (`Executor.execute`
-/// isn't reachable — `Executor.fs` compiles *after* this file).
+/// Both halves of persistence are binary. The WAL is `[len][crc32][payload]`
+/// records over a `CommitEvent` payload; the snapshot is a self-delimiting
+/// tree (`db count` → tables → rows) over the same codecs. Everything encodes
+/// through `Binary.Writer`/`Value.encodeValue` — no JSON anywhere. Replay
+/// calls `Storage`'s own DDL functions directly (`Executor.execute` isn't
+/// reachable — `Executor.fs` compiles *after* this file).
 module Fsdb.Persistence
 
 open System
+open System.Collections.Immutable
 open System.IO
 open System.Runtime.InteropServices
-open System.Text.Json.Nodes
 open Fsdb.Ast
 open Fsdb.Binary
 open Fsdb.Value
@@ -60,104 +59,105 @@ let private flushToDisk (s: FileStream) : unit =
     fsync(s.SafeFileHandle.DangerousGetHandle().ToInt32()) |> ignore
 
 // ---------------------------------------------------------------------
-// JSON leaves: strings/bools/ints/lists, plus a `"case"`-tagged object for
-// every DU used here — `decodeXxx` is each `encodeXxx`'s exact inverse.
+// Binary codecs: each DU encodes as a tag byte + its fields, written with
+// `Binary.Writer`; `decodeXxx` is each `encodeXxx`'s exact inverse. Options
+// are presence-flagged, lists are length-prefixed, so every record is
+// self-delimiting and a multi-GB snapshot needs no length table.
 // ---------------------------------------------------------------------
 
-let private str (s: string) : JsonNode = JsonValue.Create s
-let private boolNode (b: bool) : JsonNode = JsonValue.Create b
-let private intNode (i: int) : JsonNode = JsonValue.Create i
-let private i64Node (i: int64) : JsonNode = JsonValue.Create i
-let private arr (nodes: JsonNode list) : JsonNode = JsonArray(nodes |> Array.ofList)
-let private strArr (xs: string list) : JsonNode = arr (xs |> List.map str)
-let private strListOf (node: JsonNode) : string list = node.AsArray() |> Seq.map (fun n -> n.GetValue<string>()) |> List.ofSeq
-let private optStr (o: JsonNode) : string option = match o with null -> None | v -> Some(v.GetValue<string>())
-let private strOptNode (s: string option) : JsonNode = s |> Option.map str |> Option.defaultValue null
+let private writeBool (w: Writer) (b: bool) = w.WriteByte(if b then 1uy else 0uy)
 
-let private caseObj (name: string) (fields: (string * JsonNode) list) : JsonNode =
-    let o = JsonObject()
-    o.["case"] <- str name
-    fields |> List.iter (fun (k, v) -> o.[k] <- v)
-    o
+let private readBool (r: Reader) : bool = r.ReadByte() = 1uy
 
-let private caseName (node: JsonNode) : string * JsonObject =
-    let o = node.AsObject()
-    o.["case"].GetValue<string>(), o
+let private writeStr (w: Writer) (s: string) = w.WriteLenEncString s
 
-let private encodeRow (row: Value[]) : JsonNode = arr (row |> Array.toList |> List.map (toWire >> str))
-let private decodeRow (node: JsonNode) : Value[] = node.AsArray() |> Seq.map (fun n -> ofWire (n.GetValue<string>())) |> Array.ofSeq
-let private encodeRows (rows: Value[] seq) : JsonNode = arr (rows |> Seq.map encodeRow |> List.ofSeq)
-let private decodeRows (node: JsonNode) : Value[] list = node.AsArray() |> Seq.map decodeRow |> List.ofSeq
+let private readStr (r: Reader) : string = r.ReadLenEncString() |> Option.defaultValue ""
+
+let private writeOptStr (w: Writer) (s: string option) =
+    match s with
+    | None -> w.WriteByte 0uy
+    | Some x ->
+        w.WriteByte 1uy
+        writeStr w x
+
+let private readOptStr (r: Reader) : string option =
+    match r.ReadByte() with
+    | 0uy -> None
+    | _ -> Some(readStr r)
+
+let private writeStrList (w: Writer) (xs: string list) =
+    w.WriteInt32LE(List.length xs)
+    List.iter (writeStr w) xs
+
+let private readStrList (r: Reader) : string list =
+    List.init (r.ReadInt32LE()) (fun _ -> readStr r)
 
 // ---------------------------------------------------------------------
 // `Ast.ColumnType`
 // ---------------------------------------------------------------------
 
-let private encodeColumnType (t: ColumnType) : JsonNode =
+let private encodeColumnType (w: Writer) (t: ColumnType) : unit =
     match t with
-    | TTinyInt u -> caseObj "TTinyInt" [ "u", boolNode u ]
-    | TSmallInt u -> caseObj "TSmallInt" [ "u", boolNode u ]
-    | TMediumInt u -> caseObj "TMediumInt" [ "u", boolNode u ]
-    | TInt u -> caseObj "TInt" [ "u", boolNode u ]
-    | TBigInt u -> caseObj "TBigInt" [ "u", boolNode u ]
-    | TChar l -> caseObj "TChar" [ "l", intNode l ]
-    | TVarchar l -> caseObj "TVarchar" [ "l", intNode l ]
-    | TTinyText -> caseObj "TTinyText" []
-    | TText -> caseObj "TText" []
-    | TMediumText -> caseObj "TMediumText" []
-    | TLongText -> caseObj "TLongText" []
-    | TBinary l -> caseObj "TBinary" [ "l", intNode l ]
-    | TVarBinary l -> caseObj "TVarBinary" [ "l", intNode l ]
-    | TTinyBlob -> caseObj "TTinyBlob" []
-    | TBlob -> caseObj "TBlob" []
-    | TMediumBlob -> caseObj "TMediumBlob" []
-    | TLongBlob -> caseObj "TLongBlob" []
-    | TEnum values -> caseObj "TEnum" [ "values", strArr values ]
-    | TSet values -> caseObj "TSet" [ "values", strArr values ]
-    | TDecimal(p, s) -> caseObj "TDecimal" [ "p", intNode p; "s", intNode s ]
-    | TDouble -> caseObj "TDouble" []
-    | TFloat -> caseObj "TFloat" []
-    | TDate -> caseObj "TDate" []
-    | TDateTime -> caseObj "TDateTime" []
-    | TTimestamp -> caseObj "TTimestamp" []
-    | TTime -> caseObj "TTime" []
-    | TYear -> caseObj "TYear" []
-    | TJson -> caseObj "TJson" []
+    | TTinyInt u -> w.WriteByte 0x01uy; writeBool w u
+    | TSmallInt u -> w.WriteByte 0x02uy; writeBool w u
+    | TMediumInt u -> w.WriteByte 0x03uy; writeBool w u
+    | TInt u -> w.WriteByte 0x04uy; writeBool w u
+    | TBigInt u -> w.WriteByte 0x05uy; writeBool w u
+    | TChar l -> w.WriteByte 0x06uy; w.WriteInt32LE l
+    | TVarchar l -> w.WriteByte 0x07uy; w.WriteInt32LE l
+    | TTinyText -> w.WriteByte 0x08uy
+    | TText -> w.WriteByte 0x09uy
+    | TMediumText -> w.WriteByte 0x0Auy
+    | TLongText -> w.WriteByte 0x0Buy
+    | TBinary l -> w.WriteByte 0x0Cuy; w.WriteInt32LE l
+    | TVarBinary l -> w.WriteByte 0x0Duy; w.WriteInt32LE l
+    | TTinyBlob -> w.WriteByte 0x0Euy
+    | TBlob -> w.WriteByte 0x0Fuy
+    | TMediumBlob -> w.WriteByte 0x10uy
+    | TLongBlob -> w.WriteByte 0x11uy
+    | TEnum values -> w.WriteByte 0x12uy; writeStrList w values
+    | TSet values -> w.WriteByte 0x13uy; writeStrList w values
+    | TDecimal(p, s) -> w.WriteByte 0x14uy; w.WriteInt32LE p; w.WriteInt32LE s
+    | TDouble -> w.WriteByte 0x15uy
+    | TFloat -> w.WriteByte 0x16uy
+    | TDate -> w.WriteByte 0x17uy
+    | TDateTime -> w.WriteByte 0x18uy
+    | TTimestamp -> w.WriteByte 0x19uy
+    | TTime -> w.WriteByte 0x1Auy
+    | TYear -> w.WriteByte 0x1Buy
+    | TJson -> w.WriteByte 0x1Cuy
 
-let private decodeColumnType (node: JsonNode) : ColumnType =
-    let case, o = caseName node
-    let f (k: string) = o.[k]
-
-    match case with
-    | "TTinyInt" -> TTinyInt(f("u").GetValue<bool>())
-    | "TSmallInt" -> TSmallInt(f("u").GetValue<bool>())
-    | "TMediumInt" -> TMediumInt(f("u").GetValue<bool>())
-    | "TInt" -> TInt(f("u").GetValue<bool>())
-    | "TBigInt" -> TBigInt(f("u").GetValue<bool>())
-    | "TChar" -> TChar(f("l").GetValue<int>())
-    | "TVarchar" -> TVarchar(f("l").GetValue<int>())
-    | "TTinyText" -> TTinyText
-    | "TText" -> TText
-    | "TMediumText" -> TMediumText
-    | "TLongText" -> TLongText
-    | "TBinary" -> TBinary(f("l").GetValue<int>())
-    | "TVarBinary" -> TVarBinary(f("l").GetValue<int>())
-    | "TTinyBlob" -> TTinyBlob
-    | "TBlob" -> TBlob
-    | "TMediumBlob" -> TMediumBlob
-    | "TLongBlob" -> TLongBlob
-    | "TEnum" -> TEnum(strListOf (f "values"))
-    | "TSet" -> TSet(strListOf (f "values"))
-    | "TDecimal" -> TDecimal(f("p").GetValue<int>(), f("s").GetValue<int>())
-    | "TDouble" -> TDouble
-    | "TFloat" -> TFloat
-    | "TDate" -> TDate
-    | "TDateTime" -> TDateTime
-    | "TTimestamp" -> TTimestamp
-    | "TTime" -> TTime
-    | "TYear" -> TYear
-    | "TJson" -> TJson
-    | tag -> failwithf "Persistence: unknown ColumnType case '%s' in WAL/snapshot" tag
+let private decodeColumnType (r: Reader) : ColumnType =
+    match r.ReadByte() with
+    | 0x01uy -> TTinyInt(readBool r)
+    | 0x02uy -> TSmallInt(readBool r)
+    | 0x03uy -> TMediumInt(readBool r)
+    | 0x04uy -> TInt(readBool r)
+    | 0x05uy -> TBigInt(readBool r)
+    | 0x06uy -> TChar(r.ReadInt32LE())
+    | 0x07uy -> TVarchar(r.ReadInt32LE())
+    | 0x08uy -> TTinyText
+    | 0x09uy -> TText
+    | 0x0Auy -> TMediumText
+    | 0x0Buy -> TLongText
+    | 0x0Cuy -> TBinary(r.ReadInt32LE())
+    | 0x0Duy -> TVarBinary(r.ReadInt32LE())
+    | 0x0Euy -> TTinyBlob
+    | 0x0Fuy -> TBlob
+    | 0x10uy -> TMediumBlob
+    | 0x11uy -> TLongBlob
+    | 0x12uy -> TEnum(readStrList r)
+    | 0x13uy -> TSet(readStrList r)
+    | 0x14uy -> TDecimal(r.ReadInt32LE(), r.ReadInt32LE())
+    | 0x15uy -> TDouble
+    | 0x16uy -> TFloat
+    | 0x17uy -> TDate
+    | 0x18uy -> TDateTime
+    | 0x19uy -> TTimestamp
+    | 0x1Auy -> TTime
+    | 0x1Buy -> TYear
+    | 0x1Cuy -> TJson
+    | tag -> failwithf "Persistence: unknown ColumnType tag 0x%02x in WAL/snapshot" tag
 
 // ---------------------------------------------------------------------
 // `Ast.Expr` — the only place one needs to survive the WAL/snapshot at all
@@ -167,241 +167,250 @@ let private decodeColumnType (node: JsonNode) : ColumnType =
 // produce one here to lose in the first place.
 // ---------------------------------------------------------------------
 
-let private encodeOp (op: Op) : JsonNode =
-    str (
+let private encodeOp (w: Writer) (op: Op) : unit =
+    w.WriteByte(
         match op with
-        | And -> "And"
-        | Or -> "Or"
-        | Eq -> "Eq"
-        | Neq -> "Neq"
-        | Lt -> "Lt"
-        | Lte -> "Lte"
-        | Gt -> "Gt"
-        | Gte -> "Gte"
-        | Add -> "Add"
-        | Sub -> "Sub"
-        | Mul -> "Mul"
-        | Div -> "Div"
-        | IntDiv -> "IntDiv"
-        | NullSafeEq -> "NullSafeEq"
+        | And -> 0x01uy
+        | Or -> 0x02uy
+        | Eq -> 0x03uy
+        | Neq -> 0x04uy
+        | Lt -> 0x05uy
+        | Lte -> 0x06uy
+        | Gt -> 0x07uy
+        | Gte -> 0x08uy
+        | Add -> 0x09uy
+        | Sub -> 0x0Auy
+        | Mul -> 0x0Buy
+        | Div -> 0x0Cuy
+        | IntDiv -> 0x0Duy
+        | NullSafeEq -> 0x0Euy
     )
 
-let private decodeOp (node: JsonNode) : Op =
-    match node.GetValue<string>() with
-    | "And" -> And
-    | "Or" -> Or
-    | "Eq" -> Eq
-    | "Neq" -> Neq
-    | "Lt" -> Lt
-    | "Lte" -> Lte
-    | "Gt" -> Gt
-    | "Gte" -> Gte
-    | "Add" -> Add
-    | "Sub" -> Sub
-    | "Mul" -> Mul
-    | "Div" -> Div
-    | "IntDiv" -> IntDiv
-    | "NullSafeEq" -> NullSafeEq
-    | tag -> failwithf "Persistence: unknown Op case '%s' in WAL/snapshot" tag
+let private decodeOp (r: Reader) : Op =
+    match r.ReadByte() with
+    | 0x01uy -> And
+    | 0x02uy -> Or
+    | 0x03uy -> Eq
+    | 0x04uy -> Neq
+    | 0x05uy -> Lt
+    | 0x06uy -> Lte
+    | 0x07uy -> Gt
+    | 0x08uy -> Gte
+    | 0x09uy -> Add
+    | 0x0Auy -> Sub
+    | 0x0Buy -> Mul
+    | 0x0Cuy -> Div
+    | 0x0Duy -> IntDiv
+    | 0x0Euy -> NullSafeEq
+    | tag -> failwithf "Persistence: unknown Op tag 0x%02x in WAL/snapshot" tag
 
-let private encodeDirection (d: Direction) : JsonNode = str (match d with Asc -> "Asc" | Desc -> "Desc")
+let private encodeDirection (w: Writer) (d: Direction) : unit =
+    w.WriteByte(match d with Asc -> 0x00uy | Desc -> 0x01uy)
 
-let private decodeDirection (node: JsonNode) : Direction =
-    match node.GetValue<string>() with
-    | "Asc" -> Asc
-    | "Desc" -> Desc
-    | tag -> failwithf "Persistence: unknown Direction case '%s' in WAL/snapshot" tag
+let private decodeDirection (r: Reader) : Direction =
+    match r.ReadByte() with
+    | 0x00uy -> Asc
+    | _ -> Desc
 
-let rec private encodeExpr (expr: Expr) : JsonNode =
+let rec private encodeExpr (w: Writer) (expr: Expr) : unit =
     match expr with
-    | Lit v -> caseObj "Lit" [ "v", str (toWire v) ]
-    | Col name -> caseObj "Col" [ "name", str name ]
-    | QualifiedCol(t, c) -> caseObj "QualifiedCol" [ "table", str t; "column", str c ]
-    | BinOp(op, a, b) -> caseObj "BinOp" [ "op", encodeOp op; "a", encodeExpr a; "b", encodeExpr b ]
-    | Not e -> caseObj "Not" [ "e", encodeExpr e ]
-    | IsNull e -> caseObj "IsNull" [ "e", encodeExpr e ]
-    | IsNotNull e -> caseObj "IsNotNull" [ "e", encodeExpr e ]
-    | IsTrue e -> caseObj "IsTrue" [ "e", encodeExpr e ]
-    | IsFalse e -> caseObj "IsFalse" [ "e", encodeExpr e ]
+    | Lit v -> w.WriteByte 0x01uy; encodeValue w v
+    | Col name -> w.WriteByte 0x02uy; writeStr w name
+    | QualifiedCol(t, c) -> w.WriteByte 0x03uy; writeStr w t; writeStr w c
+    | BinOp(op, a, b) -> w.WriteByte 0x04uy; encodeOp w op; encodeExpr w a; encodeExpr w b
+    | Not e -> w.WriteByte 0x05uy; encodeExpr w e
+    | IsNull e -> w.WriteByte 0x06uy; encodeExpr w e
+    | IsNotNull e -> w.WriteByte 0x07uy; encodeExpr w e
+    | IsTrue e -> w.WriteByte 0x08uy; encodeExpr w e
+    | IsFalse e -> w.WriteByte 0x09uy; encodeExpr w e
     | Like(e, p, cs, esc) ->
-        caseObj
-            "Like"
-            [ "e", encodeExpr e
-              "p", encodeExpr p
-              "cs", boolNode cs
-              "esc", strOptNode (esc |> Option.map string) ]
-    | Regexp(e, p) -> caseObj "Regexp" [ "e", encodeExpr e; "p", encodeExpr p ]
-    | In(e, xs) -> caseObj "In" [ "e", encodeExpr e; "xs", arr (xs |> List.map encodeExpr) ]
-    | Between(e, lo, hi) -> caseObj "Between" [ "e", encodeExpr e; "lo", encodeExpr lo; "hi", encodeExpr hi ]
-    | FuncCall(name, args) -> caseObj "FuncCall" [ "name", str name; "args", arr (args |> List.map encodeExpr) ]
+        w.WriteByte 0x0Auy
+        encodeExpr w e
+        encodeExpr w p
+        writeBool w cs
+
+        match esc with
+        | None -> w.WriteByte 0uy
+        | Some c ->
+            w.WriteByte 1uy
+            w.WriteByte(byte c)
+    | Regexp(e, p) -> w.WriteByte 0x0Buy; encodeExpr w e; encodeExpr w p
+    | In(e, xs) ->
+        w.WriteByte 0x0Cuy
+        encodeExpr w e
+        w.WriteInt32LE(List.length xs)
+        List.iter (encodeExpr w) xs
+    | Between(e, lo, hi) -> w.WriteByte 0x0Duy; encodeExpr w e; encodeExpr w lo; encodeExpr w hi
+    | FuncCall(name, args) ->
+        w.WriteByte 0x0Euy
+        writeStr w name
+        w.WriteInt32LE(List.length args)
+        List.iter (encodeExpr w) args
     | RowNumberOver(partitionBy, orderBy) ->
-        caseObj
-            "RowNumberOver"
-            [ "partitionBy", arr (partitionBy |> List.map encodeExpr)
-              "orderBy", arr (orderBy |> List.map (fun (e, d) -> arr [ encodeExpr e; encodeDirection d ])) ]
+        w.WriteByte 0x0Fuy
+        w.WriteInt32LE(List.length partitionBy)
+        List.iter (encodeExpr w) partitionBy
+        w.WriteInt32LE(List.length orderBy)
+        List.iter (fun (e, d) -> encodeExpr w e; encodeDirection w d) orderBy
     | LagOver(e, offset, partitionBy, orderBy) ->
-        caseObj
-            "LagOver"
-            [ "e", encodeExpr e
-              "offset", i64Node offset
-              "partitionBy", arr (partitionBy |> List.map encodeExpr)
-              "orderBy", arr (orderBy |> List.map (fun (e, d) -> arr [ encodeExpr e; encodeDirection d ])) ]
-    | Distinct e -> caseObj "Distinct" [ "e", encodeExpr e ]
-    | OrderBy(e, d) -> caseObj "OrderBy" [ "e", encodeExpr e; "d", encodeDirection d ]
-    | Cast(e, t) -> caseObj "Cast" [ "e", encodeExpr e; "t", encodeColumnType t ]
-    | Collate(e, name) -> caseObj "Collate" [ "e", encodeExpr e; "name", str name ]
-    | Star q -> caseObj "Star" [ "q", strOptNode q ]
+        w.WriteByte 0x10uy
+        encodeExpr w e
+        w.WriteInt64LE offset
+        w.WriteInt32LE(List.length partitionBy)
+        List.iter (encodeExpr w) partitionBy
+        w.WriteInt32LE(List.length orderBy)
+        List.iter (fun (e, d) -> encodeExpr w e; encodeDirection w d) orderBy
+    | Distinct e -> w.WriteByte 0x11uy; encodeExpr w e
+    | OrderBy(e, d) -> w.WriteByte 0x12uy; encodeExpr w e; encodeDirection w d
+    | Cast(e, t) -> w.WriteByte 0x13uy; encodeExpr w e; encodeColumnType w t
+    | Collate(e, name) -> w.WriteByte 0x14uy; encodeExpr w e; writeStr w name
+    | Star q -> w.WriteByte 0x15uy; writeOptStr w q
     | Case(subject, whens, elseBranch) ->
-        caseObj
-            "Case"
-            [ "subject", (subject |> Option.map encodeExpr |> Option.defaultValue null)
-              "whens", arr (whens |> List.map (fun (c, r) -> arr [ encodeExpr c; encodeExpr r ]))
-              "else", (elseBranch |> Option.map encodeExpr |> Option.defaultValue null) ]
+        w.WriteByte 0x16uy
+
+        match subject with
+        | None -> w.WriteByte 0uy
+        | Some s ->
+            w.WriteByte 1uy
+            encodeExpr w s
+
+        w.WriteInt32LE(List.length whens)
+        List.iter (fun (c, r) -> encodeExpr w c; encodeExpr w r) whens
+
+        match elseBranch with
+        | None -> w.WriteByte 0uy
+        | Some e ->
+            w.WriteByte 1uy
+            encodeExpr w e
     | InSubquery _
     | Exists _
     | Subquery _ -> failwithf "Persistence: a GENERATED column can't hold a subquery (MySQL itself rejects one there)"
 
-let rec private decodeExpr (node: JsonNode) : Expr =
-    let case, o = caseName node
-    let f (k: string) = o.[k]
+let rec private decodeExpr (r: Reader) : Expr =
+    let optExpr () =
+        match r.ReadByte() with
+        | 0uy -> None
+        | _ -> Some(decodeExpr r)
 
-    match case with
-    | "Lit" -> Lit(ofWire (f("v").GetValue<string>()))
-    | "Col" -> Col(f("name").GetValue<string>())
-    | "QualifiedCol" -> QualifiedCol(f("table").GetValue<string>(), f("column").GetValue<string>())
-    | "BinOp" -> BinOp(decodeOp (f "op"), decodeExpr (f "a"), decodeExpr (f "b"))
-    | "Not" -> Not(decodeExpr (f "e"))
-    | "IsNull" -> IsNull(decodeExpr (f "e"))
-    | "IsNotNull" -> IsNotNull(decodeExpr (f "e"))
-    | "IsTrue" -> IsTrue(decodeExpr (f "e"))
-    | "IsFalse" -> IsFalse(decodeExpr (f "e"))
-    | "Like" -> Like(decodeExpr (f "e"), decodeExpr (f "p"), f("cs").GetValue<bool>(), optStr (f "esc") |> Option.map (fun s -> s.[0]))
-    | "Regexp" -> Regexp(decodeExpr (f "e"), decodeExpr (f "p"))
-    | "In" -> In(decodeExpr (f "e"), f("xs").AsArray() |> Seq.map decodeExpr |> List.ofSeq)
-    | "Between" -> Between(decodeExpr (f "e"), decodeExpr (f "lo"), decodeExpr (f "hi"))
-    | "FuncCall" -> FuncCall(f("name").GetValue<string>(), f("args").AsArray() |> Seq.map decodeExpr |> List.ofSeq)
-    | "RowNumberOver" ->
-        RowNumberOver(
-            f("partitionBy").AsArray() |> Seq.map decodeExpr |> List.ofSeq,
-            f("orderBy").AsArray()
-            |> Seq.map (fun p ->
-                let pair = p.AsArray()
-                decodeExpr pair.[0], decodeDirection pair.[1])
-            |> List.ofSeq
-        )
-    | "LagOver" ->
-        LagOver(
-            decodeExpr (f "e"),
-            f("offset").GetValue<int64>(),
-            f("partitionBy").AsArray() |> Seq.map decodeExpr |> List.ofSeq,
-            f("orderBy").AsArray()
-            |> Seq.map (fun p ->
-                let pair = p.AsArray()
-                decodeExpr pair.[0], decodeDirection pair.[1])
-            |> List.ofSeq
-        )
-    | "Distinct" -> Distinct(decodeExpr (f "e"))
-    | "OrderBy" -> OrderBy(decodeExpr (f "e"), decodeDirection (f "d"))
-    | "Cast" -> Cast(decodeExpr (f "e"), decodeColumnType (f "t"))
-    | "Collate" -> Collate(decodeExpr (f "e"), o.["name"].GetValue<string>())
-    | "Star" -> Star(optStr (f "q"))
-    | "Case" ->
-        Case(
-            (match f "subject" with
-             | null -> None
-             | s -> Some(decodeExpr s)),
-            f("whens").AsArray()
-            |> Seq.map (fun p ->
-                let pair = p.AsArray()
-                decodeExpr pair.[0], decodeExpr pair.[1])
-            |> List.ofSeq,
-            (match f "else" with
-             | null -> None
-             | e -> Some(decodeExpr e))
-        )
-    | tag -> failwithf "Persistence: unknown Expr case '%s' in WAL/snapshot" tag
+    let exprList () = List.init (r.ReadInt32LE()) (fun _ -> decodeExpr r)
+
+    let orderByList () = List.init (r.ReadInt32LE()) (fun _ -> decodeExpr r, decodeDirection r)
+
+    match r.ReadByte() with
+    | 0x01uy -> Lit(decodeValue r)
+    | 0x02uy -> Col(readStr r)
+    | 0x03uy -> QualifiedCol(readStr r, readStr r)
+    | 0x04uy -> BinOp(decodeOp r, decodeExpr r, decodeExpr r)
+    | 0x05uy -> Not(decodeExpr r)
+    | 0x06uy -> IsNull(decodeExpr r)
+    | 0x07uy -> IsNotNull(decodeExpr r)
+    | 0x08uy -> IsTrue(decodeExpr r)
+    | 0x09uy -> IsFalse(decodeExpr r)
+    | 0x0Auy ->
+        let e = decodeExpr r
+        let p = decodeExpr r
+        let cs = readBool r
+        let esc = match r.ReadByte() with 0uy -> None | _ -> Some(char (r.ReadByte()))
+        Like(e, p, cs, esc)
+    | 0x0Buy -> Regexp(decodeExpr r, decodeExpr r)
+    | 0x0Cuy -> In(decodeExpr r, exprList ())
+    | 0x0Duy -> Between(decodeExpr r, decodeExpr r, decodeExpr r)
+    | 0x0Euy -> FuncCall(readStr r, exprList ())
+    | 0x0Fuy -> RowNumberOver(exprList (), orderByList ())
+    | 0x10uy ->
+        let e = decodeExpr r
+        let offset = r.ReadInt64LE()
+        LagOver(e, offset, exprList (), orderByList ())
+    | 0x11uy -> Distinct(decodeExpr r)
+    | 0x12uy -> OrderBy(decodeExpr r, decodeDirection r)
+    | 0x13uy -> Cast(decodeExpr r, decodeColumnType r)
+    | 0x14uy -> Collate(decodeExpr r, readStr r)
+    | 0x15uy -> Star(readOptStr r)
+    | 0x16uy ->
+        let subject = optExpr ()
+        let whens = List.init (r.ReadInt32LE()) (fun _ -> decodeExpr r, decodeExpr r)
+        let elseBranch = optExpr ()
+        Case(subject, whens, elseBranch)
+    | tag -> failwithf "Persistence: unknown Expr tag 0x%02x in WAL/snapshot" tag
 
 // ---------------------------------------------------------------------
 // `Ast.ColumnDefault` / `ColumnDef` / `IndexDef` / `ForeignKeyDef`
 // ---------------------------------------------------------------------
 
-let private encodeColumnDefault (d: ColumnDefault) : JsonNode =
+let private encodeColumnDefault (w: Writer) (d: ColumnDefault) : unit =
     match d with
-    | DConst v -> caseObj "DConst" [ "value", str (toWire v) ]
-    | DCurrentTimestamp -> caseObj "DCurrentTimestamp" []
+    | DConst v -> w.WriteByte 0x01uy; encodeValue w v
+    | DCurrentTimestamp -> w.WriteByte 0x02uy
 
-let private decodeColumnDefault (node: JsonNode) : ColumnDefault =
-    let case, o = caseName node
-
-    match case with
-    | "DConst" -> DConst(ofWire (o.["value"].GetValue<string>()))
-    | "DCurrentTimestamp" -> DCurrentTimestamp
-    | tag -> failwithf "Persistence: unknown ColumnDefault case '%s' in WAL/snapshot" tag
+let private decodeColumnDefault (r: Reader) : ColumnDefault =
+    match r.ReadByte() with
+    | 0x01uy -> DConst(decodeValue r)
+    | _ -> DCurrentTimestamp
 
 /// `ColumnDef.Generated` (`GENERATED ALWAYS AS (expr)`) round-trips through
-/// the `Expr` encoder above — without it, a generated column silently
-/// stopped being computed after a restart (new rows got `NULL` where MySQL
-/// computes a value; Laravel Pulse's `key_hash ... AS (unhex(md5(key)))` is
-/// exactly this shape), not just the cosmetic `SHOW CREATE TABLE` gap
-/// `InformationSchema.showCreateTableDDL` has.
-let private encodeColumnDef (c: ColumnDef) : JsonNode =
-    let o = JsonObject()
-    o.["name"] <- str c.Name
-    o.["type"] <- encodeColumnType c.Type
-    o.["nullable"] <- boolNode c.Nullable
-    o.["default"] <- (c.Default |> Option.map encodeColumnDefault |> Option.defaultValue null)
-    o.["autoIncrement"] <- boolNode c.AutoIncrement
-    o.["primaryKey"] <- boolNode c.PrimaryKey
-    o.["unique"] <- boolNode c.Unique
-    o.["generated"] <- (c.Generated |> Option.map encodeExpr |> Option.defaultValue null)
-    o.["collation"] <- (c.Collation |> Option.map str |> Option.defaultValue null)
-    o.["charset"] <- (c.Charset |> Option.map str |> Option.defaultValue null)
-    o
+/// the `Expr` codec above — without it, a generated column silently stopped
+/// being computed after a restart (new rows got `NULL` where MySQL computes
+/// a value; Laravel Pulse's `key_hash ... AS (unhex(md5(key)))` is exactly
+/// this shape).
+let private encodeColumnDef (w: Writer) (c: ColumnDef) : unit =
+    writeStr w c.Name
+    encodeColumnType w c.Type
+    writeBool w c.Nullable
 
-let private decodeColumnDef (node: JsonNode) : ColumnDef =
-    let o = node.AsObject()
+    match c.Default with
+    | None -> w.WriteByte 0uy
+    | Some d ->
+        w.WriteByte 1uy
+        encodeColumnDefault w d
 
-    { Name = o.["name"].GetValue<string>()
-      Type = decodeColumnType o.["type"]
-      Nullable = o.["nullable"].GetValue<bool>()
-      Default = (match o.["default"] with null -> None | d -> Some(decodeColumnDefault d))
-      AutoIncrement = o.["autoIncrement"].GetValue<bool>()
-      PrimaryKey = o.["primaryKey"].GetValue<bool>()
-      Unique = o.["unique"].GetValue<bool>()
-      Collation = (match o.["collation"] with null -> None | c -> Some(c.GetValue<string>()))
-      Charset = (match o.["charset"] with null -> None | c -> Some(c.GetValue<string>()))
-      Generated = (match o.["generated"] with null -> None | g -> Some(decodeExpr g)) }
+    writeBool w c.AutoIncrement
+    writeBool w c.PrimaryKey
+    writeBool w c.Unique
 
-let private encodeIndexDef (ix: IndexDef) : JsonNode =
-    let o = JsonObject()
-    o.["name"] <- str ix.Name
-    o.["columns"] <- strArr ix.Columns
-    o.["unique"] <- boolNode ix.Unique
-    o
+    match c.Generated with
+    | None -> w.WriteByte 0uy
+    | Some g ->
+        w.WriteByte 1uy
+        encodeExpr w g
 
-let private decodeIndexDef (node: JsonNode) : IndexDef =
-    let o = node.AsObject()
-    { Name = o.["name"].GetValue<string>(); Columns = strListOf o.["columns"]; Unique = o.["unique"].GetValue<bool>() }
+    writeOptStr w c.Collation
+    writeOptStr w c.Charset
 
-let private encodeForeignKeyDef (fk: ForeignKeyDef) : JsonNode =
-    let o = JsonObject()
-    o.["name"] <- str fk.Name
-    o.["columns"] <- strArr fk.Columns
-    o.["refTable"] <- str fk.RefTable
-    o.["refColumns"] <- strArr fk.RefColumns
-    o.["onDelete"] <- strOptNode fk.OnDelete
-    o.["onUpdate"] <- strOptNode fk.OnUpdate
-    o
+let private decodeColumnDef (r: Reader) : ColumnDef =
+    { Name = readStr r
+      Type = decodeColumnType r
+      Nullable = readBool r
+      Default = (match r.ReadByte() with 0uy -> None | _ -> Some(decodeColumnDefault r))
+      AutoIncrement = readBool r
+      PrimaryKey = readBool r
+      Unique = readBool r
+      Generated = (match r.ReadByte() with 0uy -> None | _ -> Some(decodeExpr r))
+      Collation = readOptStr r
+      Charset = readOptStr r }
 
-let private decodeForeignKeyDef (node: JsonNode) : ForeignKeyDef =
-    let o = node.AsObject()
+let private encodeIndexDef (w: Writer) (ix: IndexDef) : unit =
+    writeStr w ix.Name
+    writeStrList w ix.Columns
+    writeBool w ix.Unique
 
-    { Name = o.["name"].GetValue<string>()
-      Columns = strListOf o.["columns"]
-      RefTable = o.["refTable"].GetValue<string>()
-      RefColumns = strListOf o.["refColumns"]
-      OnDelete = optStr o.["onDelete"]
-      OnUpdate = optStr o.["onUpdate"] }
+let private decodeIndexDef (r: Reader) : IndexDef =
+    { Name = readStr r; Columns = readStrList r; Unique = readBool r }
+
+let private encodeForeignKeyDef (w: Writer) (fk: ForeignKeyDef) : unit =
+    writeStr w fk.Name
+    writeStrList w fk.Columns
+    writeStr w fk.RefTable
+    writeStrList w fk.RefColumns
+    writeOptStr w fk.OnDelete
+    writeOptStr w fk.OnUpdate
+
+let private decodeForeignKeyDef (r: Reader) : ForeignKeyDef =
+    { Name = readStr r
+      Columns = readStrList r
+      RefTable = readStr r
+      RefColumns = readStrList r
+      OnDelete = readOptStr r
+      OnUpdate = readOptStr r }
 
 // ---------------------------------------------------------------------
 // `Ast.AlterAction` / `Ast.Statement` — only the DDL shapes `SchemaChanged`
@@ -410,120 +419,101 @@ let private decodeForeignKeyDef (node: JsonNode) : ForeignKeyDef =
 // WAL-format one, so it's a hard `failwithf` rather than a silent skip.
 // ---------------------------------------------------------------------
 
-let private encodeColumnPosition (p: ColumnPosition) : JsonNode =
+let private encodeColumnPosition (w: Writer) (p: ColumnPosition) : unit =
     match p with
-    | PositionDefault -> caseObj "PositionDefault" []
-    | PositionFirst -> caseObj "PositionFirst" []
-    | PositionAfter column -> caseObj "PositionAfter" [ "column", str column ]
+    | PositionDefault -> w.WriteByte 0x01uy
+    | PositionFirst -> w.WriteByte 0x02uy
+    | PositionAfter column -> w.WriteByte 0x03uy; writeStr w column
 
-let private decodeColumnPosition (node: JsonNode) : ColumnPosition =
-    let case, o = caseName node
+let private decodeColumnPosition (r: Reader) : ColumnPosition =
+    match r.ReadByte() with
+    | 0x01uy -> PositionDefault
+    | 0x02uy -> PositionFirst
+    | _ -> PositionAfter(readStr r)
 
-    match case with
-    | "PositionDefault" -> PositionDefault
-    | "PositionFirst" -> PositionFirst
-    | "PositionAfter" -> PositionAfter(o.["column"].GetValue<string>())
-    | tag -> failwithf "Persistence: unknown ColumnPosition case '%s' in WAL/snapshot" tag
-
-let private encodeAlterAction (a: AlterAction) : JsonNode =
+let private encodeAlterAction (w: Writer) (a: AlterAction) : unit =
     match a with
-    | AddColumn(c, position) -> caseObj "AddColumn" [ "column", encodeColumnDef c; "position", encodeColumnPosition position ]
-    | DropColumn name -> caseObj "DropColumn" [ "name", str name ]
-    | ModifyColumn(c, position) -> caseObj "ModifyColumn" [ "column", encodeColumnDef c; "position", encodeColumnPosition position ]
-    | ChangeColumn(oldName, c, position) ->
-        caseObj "ChangeColumn" [ "oldName", str oldName; "column", encodeColumnDef c; "position", encodeColumnPosition position ]
-    | RenameTo name -> caseObj "RenameTo" [ "name", str name ]
-    | RenameColumnTo(oldName, newName) -> caseObj "RenameColumnTo" [ "oldName", str oldName; "newName", str newName ]
-    | AddIndex ix -> caseObj "AddIndex" [ "index", encodeIndexDef ix ]
-    | DropIndexAction name -> caseObj "DropIndexAction" [ "name", str name ]
-    | AddForeignKey fk -> caseObj "AddForeignKey" [ "fk", encodeForeignKeyDef fk ]
-    | DropForeignKey name -> caseObj "DropForeignKey" [ "name", str name ]
-    | AddPrimaryKey columns -> caseObj "AddPrimaryKey" [ "columns", strArr columns ]
+    | AddColumn(c, position) -> w.WriteByte 0x01uy; encodeColumnDef w c; encodeColumnPosition w position
+    | DropColumn name -> w.WriteByte 0x02uy; writeStr w name
+    | ModifyColumn(c, position) -> w.WriteByte 0x03uy; encodeColumnDef w c; encodeColumnPosition w position
+    | ChangeColumn(oldName, c, position) -> w.WriteByte 0x04uy; writeStr w oldName; encodeColumnDef w c; encodeColumnPosition w position
+    | RenameTo name -> w.WriteByte 0x05uy; writeStr w name
+    | RenameColumnTo(oldName, newName) -> w.WriteByte 0x06uy; writeStr w oldName; writeStr w newName
+    | AddIndex ix -> w.WriteByte 0x07uy; encodeIndexDef w ix
+    | DropIndexAction name -> w.WriteByte 0x08uy; writeStr w name
+    | AddForeignKey fk -> w.WriteByte 0x09uy; encodeForeignKeyDef w fk
+    | DropForeignKey name -> w.WriteByte 0x0Auy; writeStr w name
+    | AddPrimaryKey columns -> w.WriteByte 0x0Buy; writeStrList w columns
 
-let private decodeAlterAction (node: JsonNode) : AlterAction =
-    let case, o = caseName node
+let private decodeAlterAction (r: Reader) : AlterAction =
+    match r.ReadByte() with
+    | 0x01uy -> AddColumn(decodeColumnDef r, decodeColumnPosition r)
+    | 0x02uy -> DropColumn(readStr r)
+    | 0x03uy -> ModifyColumn(decodeColumnDef r, decodeColumnPosition r)
+    | 0x04uy -> ChangeColumn(readStr r, decodeColumnDef r, decodeColumnPosition r)
+    | 0x05uy -> RenameTo(readStr r)
+    | 0x06uy -> RenameColumnTo(readStr r, readStr r)
+    | 0x07uy -> AddIndex(decodeIndexDef r)
+    | 0x08uy -> DropIndexAction(readStr r)
+    | 0x09uy -> AddForeignKey(decodeForeignKeyDef r)
+    | 0x0Auy -> DropForeignKey(readStr r)
+    | _ -> AddPrimaryKey(readStrList r)
 
-    match case with
-    | "AddColumn" -> AddColumn(decodeColumnDef o.["column"], decodeColumnPosition o.["position"])
-    | "DropColumn" -> DropColumn(o.["name"].GetValue<string>())
-    | "ModifyColumn" -> ModifyColumn(decodeColumnDef o.["column"], decodeColumnPosition o.["position"])
-    | "ChangeColumn" -> ChangeColumn(o.["oldName"].GetValue<string>(), decodeColumnDef o.["column"], decodeColumnPosition o.["position"])
-    | "RenameTo" -> RenameTo(o.["name"].GetValue<string>())
-    | "RenameColumnTo" -> RenameColumnTo(o.["oldName"].GetValue<string>(), o.["newName"].GetValue<string>())
-    | "AddIndex" -> AddIndex(decodeIndexDef o.["index"])
-    | "DropIndexAction" -> DropIndexAction(o.["name"].GetValue<string>())
-    | "AddForeignKey" -> AddForeignKey(decodeForeignKeyDef o.["fk"])
-    | "DropForeignKey" -> DropForeignKey(o.["name"].GetValue<string>())
-    | "AddPrimaryKey" -> AddPrimaryKey(strListOf o.["columns"])
-    | tag -> failwithf "Persistence: unknown AlterAction case '%s' in WAL/snapshot" tag
-
-let private encodeStatement (s: Statement) : JsonNode =
+let private encodeStatement (w: Writer) (s: Statement) : unit =
     match s with
-    | CreateDatabase(name, ifNotExists) -> caseObj "CreateDatabase" [ "name", str name; "ifNotExists", boolNode ifNotExists ]
-    | DropDatabase(name, ifExists) -> caseObj "DropDatabase" [ "name", str name; "ifExists", boolNode ifExists ]
+    | CreateDatabase(name, ifNotExists) -> w.WriteByte 0x01uy; writeStr w name; writeBool w ifNotExists
+    | DropDatabase(name, ifExists) -> w.WriteByte 0x02uy; writeStr w name; writeBool w ifExists
     | CreateTable(name, columns, indexes, fks, ifNotExists, tableCharset, tableCollation) ->
-        caseObj
-            "CreateTable"
-            [ "name", str name
-              "columns", arr (columns |> List.map encodeColumnDef)
-              "indexes", arr (indexes |> List.map encodeIndexDef)
-              "foreignKeys", arr (fks |> List.map encodeForeignKeyDef)
-              "ifNotExists", boolNode ifNotExists
-              "tableCharset", (tableCharset |> Option.map str |> Option.defaultValue null)
-              "tableCollation", (tableCollation |> Option.map str |> Option.defaultValue null) ]
-    | DropTable(names, ifExists) -> caseObj "DropTable" [ "names", strArr names; "ifExists", boolNode ifExists ]
-    | AlterTable(table, actions) -> caseObj "AlterTable" [ "table", str table; "actions", arr (actions |> List.map encodeAlterAction) ]
-    | RenameTable pairs -> caseObj "RenameTable" [ "pairs", arr (pairs |> List.map (fun (a, b) -> arr [ str a; str b ])) ]
-    | CreateIndex(name, table, columns, unique) ->
-        caseObj "CreateIndex" [ "name", str name; "table", str table; "columns", strArr columns; "unique", boolNode unique ]
-    | DropIndexStmt(name, table, ifExists) ->
-        caseObj "DropIndexStmt" [ "name", str name; "table", str table; "ifExists", boolNode ifExists ]
-    | Truncate table -> caseObj "Truncate" [ "table", str table ]
+        w.WriteByte 0x03uy
+        writeStr w name
+        w.WriteInt32LE(List.length columns)
+        List.iter (encodeColumnDef w) columns
+        w.WriteInt32LE(List.length indexes)
+        List.iter (encodeIndexDef w) indexes
+        w.WriteInt32LE(List.length fks)
+        List.iter (encodeForeignKeyDef w) fks
+        writeBool w ifNotExists
+        writeOptStr w tableCharset
+        writeOptStr w tableCollation
+    | DropTable(names, ifExists) -> w.WriteByte 0x04uy; writeStrList w names; writeBool w ifExists
+    | AlterTable(table, actions) ->
+        w.WriteByte 0x05uy
+        writeStr w table
+        w.WriteInt32LE(List.length actions)
+        List.iter (encodeAlterAction w) actions
+    | RenameTable pairs ->
+        w.WriteByte 0x06uy
+        w.WriteInt32LE(List.length pairs)
+        List.iter (fun (a, b) -> writeStr w a; writeStr w b) pairs
+    | CreateIndex(name, table, columns, unique) -> w.WriteByte 0x07uy; writeStr w name; writeStr w table; writeStrList w columns; writeBool w unique
+    | DropIndexStmt(name, table, ifExists) -> w.WriteByte 0x08uy; writeStr w name; writeStr w table; writeBool w ifExists
+    | Truncate table -> w.WriteByte 0x09uy; writeStr w table
     | other -> failwithf "Persistence: %A isn't a DDL statement SchemaChanged should ever carry" other
 
-let private decodeStatement (node: JsonNode) : Statement =
-    let case, o = caseName node
-
-    match case with
-    | "CreateDatabase" -> CreateDatabase(o.["name"].GetValue<string>(), o.["ifNotExists"].GetValue<bool>())
-    | "DropDatabase" -> DropDatabase(o.["name"].GetValue<string>(), o.["ifExists"].GetValue<bool>())
-    | "CreateTable" ->
-        CreateTable(
-            o.["name"].GetValue<string>(),
-            o.["columns"].AsArray() |> Seq.map decodeColumnDef |> List.ofSeq,
-            o.["indexes"].AsArray() |> Seq.map decodeIndexDef |> List.ofSeq,
-            o.["foreignKeys"].AsArray() |> Seq.map decodeForeignKeyDef |> List.ofSeq,
-            o.["ifNotExists"].GetValue<bool>(),
-            (match o.["tableCharset"] with null -> None | c -> Some(c.GetValue<string>())),
-            (match o.["tableCollation"] with null -> None | c -> Some(c.GetValue<string>()))
-        )
-    | "DropTable" -> DropTable(strListOf o.["names"], o.["ifExists"].GetValue<bool>())
-    | "AlterTable" -> AlterTable(o.["table"].GetValue<string>(), o.["actions"].AsArray() |> Seq.map decodeAlterAction |> List.ofSeq)
-    | "RenameTable" ->
-        RenameTable(
-            o.["pairs"].AsArray()
-            |> Seq.map (fun p ->
-                let pair = p.AsArray()
-                pair.[0].GetValue<string>(), pair.[1].GetValue<string>())
-            |> List.ofSeq
-        )
-    | "CreateIndex" ->
-        CreateIndex(o.["name"].GetValue<string>(), o.["table"].GetValue<string>(), strListOf o.["columns"], o.["unique"].GetValue<bool>())
-    | "DropIndexStmt" ->
-        // `ifExists` is optional in the encoding for WAL lines written
-        // before the flag existed — treat its absence as false.
-        let ifExists = match o.["ifExists"] with null -> false | v -> v.GetValue<bool>()
-        DropIndexStmt(o.["name"].GetValue<string>(), o.["table"].GetValue<string>(), ifExists)
-    | "Truncate" -> Truncate(o.["table"].GetValue<string>())
-    | tag -> failwithf "Persistence: unknown Statement case '%s' in WAL/snapshot" tag
+let private decodeStatement (r: Reader) : Statement =
+    match r.ReadByte() with
+    | 0x01uy -> CreateDatabase(readStr r, readBool r)
+    | 0x02uy -> DropDatabase(readStr r, readBool r)
+    | 0x03uy ->
+        let name = readStr r
+        let columns = List.init (r.ReadInt32LE()) (fun _ -> decodeColumnDef r)
+        let indexes = List.init (r.ReadInt32LE()) (fun _ -> decodeIndexDef r)
+        let fks = List.init (r.ReadInt32LE()) (fun _ -> decodeForeignKeyDef r)
+        let ifNotExists = readBool r
+        let tableCharset = readOptStr r
+        let tableCollation = readOptStr r
+        CreateTable(name, columns, indexes, fks, ifNotExists, tableCharset, tableCollation)
+    | 0x04uy -> DropTable(readStrList r, readBool r)
+    | 0x05uy -> AlterTable(readStr r, List.init (r.ReadInt32LE()) (fun _ -> decodeAlterAction r))
+    | 0x06uy -> RenameTable(List.init (r.ReadInt32LE()) (fun _ -> readStr r, readStr r))
+    | 0x07uy -> CreateIndex(readStr r, readStr r, readStrList r, readBool r)
+    | 0x08uy -> DropIndexStmt(readStr r, readStr r, readBool r)
+    | 0x09uy -> Truncate(readStr r)
+    | tag -> failwithf "Persistence: unknown Statement tag 0x%02x in WAL/snapshot" tag
 
 // ---------------------------------------------------------------------
-// `Storage.CommitEvent` — one WAL record each. The payload is binary: row
-// events (the hot path) encode fully binary via `Value.encodeValue`;
-// `SchemaChanged` embeds the JSON `encodeStatement` above because DDL is
-// rare (migrations) and its JSON stays human-inspectable. The
-// [len][crc][payload] framing around the payload lives in `attach` and
-// `replayWal`.
+// `Storage.CommitEvent` — one WAL record each, binary. The [len][crc][payload]
+// framing around the payload lives in `attach` and `replayWal`.
 // ---------------------------------------------------------------------
 
 let private KindRowsInserted = 0x01uy
@@ -571,7 +561,7 @@ let rec private encodeEvent (w: Writer) (event: CommitEvent) : unit =
     | SchemaChanged(db, stmt) ->
         w.WriteByte KindSchemaChanged
         w.WriteLenEncString db
-        w.WriteLenEncString ((encodeStatement stmt).ToJsonString())
+        encodeStatement w stmt
     | TransactionCommitted events ->
         w.WriteByte KindTransactionCommitted
         w.WriteInt32LE (List.length events)
@@ -600,7 +590,7 @@ let rec private decodeEvent (r: Reader) : CommitEvent =
         RowsDeleted(db, table, rows)
     | k when k = KindSchemaChanged ->
         let db = str ()
-        SchemaChanged(db, decodeStatement (JsonNode.Parse(str ())))
+        SchemaChanged(db, decodeStatement r)
     | k when k = KindTransactionCommitted ->
         TransactionCommitted(List.init (r.ReadInt32LE()) (fun _ -> decodeEvent r))
     | tag -> failwithf "Persistence: unknown WAL event kind 0x%02x" tag
@@ -749,52 +739,69 @@ let private replayWal (store: Store) (walPath: string) : int64 =
         offset
 
 // ---------------------------------------------------------------------
-// Snapshot: the whole catalog, JSON, written atomically (tmp + rename).
+// Snapshot: the whole catalog, binary, written atomically (tmp + rename).
+// The codec below is the same tag-byte scheme as the WAL; rows reuse
+// `encodeRowBin`/`decodeRowBin` so a snapshot and a WAL share one row format.
 // ---------------------------------------------------------------------
 
-let private encodeTable (t: Table) : JsonNode =
-    let o = JsonObject()
-    o.["originalName"] <- str t.OriginalName
-    o.["columns"] <- arr (t.Columns |> List.map encodeColumnDef)
-    o.["indexes"] <- arr (t.Indexes |> List.map encodeIndexDef)
-    o.["foreignKeys"] <- arr (t.ForeignKeys |> List.map encodeForeignKeyDef)
-    o.["nextAutoId"] <- i64Node t.NextAutoId
-    o.["rows"] <- encodeRows t.RowsArray
-    o
+let private encodeTable (w: Writer) (t: Table) : unit =
+    writeStr w t.OriginalName
+    w.WriteInt32LE(List.length t.Columns)
+    List.iter (encodeColumnDef w) t.Columns
+    w.WriteInt32LE(List.length t.Indexes)
+    List.iter (encodeIndexDef w) t.Indexes
+    w.WriteInt32LE(List.length t.ForeignKeys)
+    List.iter (encodeForeignKeyDef w) t.ForeignKeys
+    writeOptStr w t.TableCharset
+    writeOptStr w t.TableCollation
+    w.WriteInt64LE t.NextAutoId
+    w.WriteInt32LE t.RowsArray.Length
 
-let private decodeTable (node: JsonNode) : Table =
-    let o = node.AsObject()
+    for row in t.RowsArray do
+        encodeRowBin w row
+
+let private decodeTable (r: Reader) : Table =
+    let originalName = readStr r
+    let columns = List.init (r.ReadInt32LE()) (fun _ -> decodeColumnDef r)
+    let indexes = List.init (r.ReadInt32LE()) (fun _ -> decodeIndexDef r)
+    let fks = List.init (r.ReadInt32LE()) (fun _ -> decodeForeignKeyDef r)
+    let tableCharset = readOptStr r
+    let tableCollation = readOptStr r
+    let nextAutoId = r.ReadInt64LE()
+    let rows = List.init (r.ReadInt32LE()) (fun _ -> decodeRowBin r)
 
     reindexTable
-        { OriginalName = o.["originalName"].GetValue<string>()
-          Columns = o.["columns"].AsArray() |> Seq.map decodeColumnDef |> List.ofSeq
-          Indexes = o.["indexes"].AsArray() |> Seq.map decodeIndexDef |> List.ofSeq
-          ForeignKeys = o.["foreignKeys"].AsArray() |> Seq.map decodeForeignKeyDef |> List.ofSeq
-          TableCharset = (match o.["tableCharset"] with null -> None | c -> Some(c.GetValue<string>()))
-          TableCollation = (match o.["tableCollation"] with null -> None | c -> Some(c.GetValue<string>()))
-          RowsArray = decodeRows o.["rows"] |> System.Collections.Immutable.ImmutableArray.CreateRange
-          NextAutoId = o.["nextAutoId"].GetValue<int64>()
+        { OriginalName = originalName
+          Columns = columns
+          Indexes = indexes
+          ForeignKeys = fks
+          TableCharset = tableCharset
+          TableCollation = tableCollation
+          RowsArray = ImmutableArray.CreateRange rows
+          NextAutoId = nextAutoId
           UniqueIndex = Map.empty }
 
-let private encodeCatalog (catalog: Catalog) : JsonNode =
-    let databases = JsonObject()
+let private encodeCatalog (w: Writer) (catalog: Catalog) : unit =
+    w.WriteInt32LE(Map.count catalog)
 
     catalog
     |> Map.iter (fun dbName db ->
-        let tables = JsonObject()
-        db |> Map.iter (fun tableKey table -> tables.[tableKey] <- encodeTable table)
-        databases.[dbName] <- tables)
+        writeStr w dbName
+        w.WriteInt32LE(Map.count db)
 
-    let root = JsonObject()
-    root.["databases"] <- databases
-    root
+        db |> Map.iter (fun tableKey table ->
+            writeStr w tableKey
+            encodeTable w table))
 
-let private decodeCatalog (node: JsonNode) : Catalog =
-    node.AsObject().["databases"].AsObject()
-    |> Seq.map (fun dbEntry ->
-        let db = dbEntry.Value.AsObject() |> Seq.map (fun t -> t.Key, decodeTable t.Value) |> Map.ofSeq
-        dbEntry.Key, db)
-    |> Map.ofSeq
+let private decodeCatalog (r: Reader) : Catalog =
+    let dbCount = r.ReadInt32LE()
+
+    [ for _ in 1..dbCount ->
+          let dbName = readStr r
+          let tableCount = r.ReadInt32LE()
+          let tables = [ for _ in 1..tableCount -> readStr r, decodeTable r ] |> Map.ofList
+          dbName, tables ]
+    |> Map.ofList
 
 /// Snapshots `store`'s whole catalog to `dataDir/snapshot.fsdb` and
 /// truncates the WAL back to empty. Safe to call any time — holds
@@ -819,7 +826,9 @@ let snapshotNow (dataDir: string) (store: Store) : unit =
         let newPath = finalPath + ".new"
 
         (use s = new FileStream(newPath, FileMode.Create, FileAccess.Write)
-         let bytes = Text.Encoding.UTF8.GetBytes((encodeCatalog store.Catalog).ToJsonString())
+         let w = Writer()
+         encodeCatalog w store.Catalog
+         let bytes = w.ToArray()
          s.Write(bytes, 0, bytes.Length)
          flushToDisk s)
 
@@ -847,7 +856,7 @@ let load (dataDir: string) : Store =
     let loadedFromNew =
         File.Exists newPath
         && (try
-                setCatalog store (decodeCatalog (JsonNode.Parse(File.ReadAllText newPath)))
+                setCatalog store (decodeCatalog (Reader(File.ReadAllBytes newPath)))
                 true
             with _ ->
                 false)
@@ -857,7 +866,7 @@ let load (dataDir: string) : Store =
         File.WriteAllText(walPath, "")
     else
         if File.Exists snapshotPath then
-            setCatalog store (decodeCatalog (JsonNode.Parse(File.ReadAllText snapshotPath)))
+            setCatalog store (decodeCatalog (Reader(File.ReadAllBytes snapshotPath)))
 
         // The WAL holds rows that already passed every check once, at
         // commit time — re-validating foreign keys on replay only risks
