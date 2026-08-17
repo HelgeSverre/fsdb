@@ -106,20 +106,10 @@ where SQL requires them (GROUP BY, window functions, UNION DISTINCT).
 Wire boundary stays materialized.
 **Gate:** JoinUsersOrders < 25ms; no benchmark row regresses; differential
 tests prove streaming output equals materialized output wherever SQL
-defines order; Expecto + reference-app suite parity green. Status: ☐ (`just bench` at
-5037a48: UpdateSingleRow 2,356 µs < 10ms ✅, PointSelectByPk 102 µs <
-250µs ✅ and reproduces within 0.04% across runs (per f1b15ab/366fe1c) ✅,
-Expecto 684/684 ✅, reference-app gauntlet suite at exact parity with its
-sqlite baseline (288 passed/15 skipped/2 todos/792 assertions, both
-sides) ✅ — but **JoinUsersOrders 202,198 µs, ~8x over the < 25ms
-gate** (MySQL: 239 µs on the same box) ❌. The M9-2 hash join fixed the
-pathological O(pairs) cross product (`JoinUsersOrders` used to time out
-entirely, ~425s), but `WHERE u.age > 30 LIMIT 50` still materializes and
-fully projects/sorts every matched row before `LIMIT` slices it —
-`docs/performance-design.md` section 4 explicitly rejects the lazy `seq`
-pipeline that would fix this as out of scope for M9 (real, and still
-unaddressed: not just a documentation gap). Not marking this milestone
-done until that's either built or the gate number is renegotiated with
-a stated reason — see `docs/performance-design.md`'s M9-2/M9-3 "Gate
-reconciliation"/"Measured against this gate" notes for the JOIN gap and
-the InsertSingle/UpdateSingleRow sub-gates)
+defines order; Expecto + reference-app suite parity green. Status: ☐
+Starting point (measured at 5037a48): JoinUsersOrders 202,198 µs vs
+MySQL's 239 µs on the same box — the hash join killed the cross-product
+pathology (previously ~425s), the remaining ~8x is `WHERE ... LIMIT 50`
+materializing and projecting every matched row before LIMIT slices it.
+Sub-gates carried over from M9: InsertSingle < 300µs (at 492µs),
+UpdateSingleRow < 500µs (at 2.3ms).
