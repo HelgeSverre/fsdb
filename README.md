@@ -23,6 +23,7 @@ mysql --protocol=tcp -h127.0.0.1 -P3307 -e 'SELECT 1'
 
 ```
 USAGE: fsdb [--help] [--port <port>] [--listen <address>] [--data-dir <path>]
+            [--version]
 
 OPTIONS:
 
@@ -30,6 +31,7 @@ OPTIONS:
     --listen <address>    bind address (default 127.0.0.1)
     --data-dir <path>     persist data here (WAL + snapshots); omit for
                           in-memory
+    --version             print the fsdb version and exit
     --help                display this list of options.
 ```
 
