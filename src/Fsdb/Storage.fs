@@ -1309,13 +1309,27 @@ let upsertRows
                 |> Result.bind (fun idxs ->
                     let keySets = uniqueKeyGroups table |> List.map snd
 
-                    let findMatch (rows: Value[] list) (candidate: Value[]) =
-                        rows |> List.tryFind (fun existing -> keySets |> List.exists (fun ks -> rowsCollideOn ks existing candidate))
+                    // `rowsAcc` holds the table's original rows, rewritten in place
+                    // as sibling candidates match them; `newRowsRev` holds rows this
+                    // same statement has inserted so far, newest first (cons is
+                    // O(1) — appended to `rowsAcc` once, after the fold, instead of
+                    // on every inserted row). A later candidate in the same batch
+                    // can still collide with either, so `findMatch` searches both.
+                    let findMatch (rows: Value[] list) (newRows: Value[] list) (candidate: Value[]) =
+                        let collides existing = keySets |> List.exists (fun ks -> rowsCollideOn ks existing candidate)
+                        rows |> List.tryFind collides |> Option.orElseWith (fun () -> newRows |> List.tryFind collides)
 
                     let step acc (rowValues: Value list) =
                         acc
                         |> Result.bind
-                            (fun (rowsAcc: Value[] list, nextAutoId, firstAuto, lastExplicit, affected, inserted: Value[] list, updated: (Value[] * Value[]) list) ->
+                            (fun (rowsAcc: Value[] list,
+                                  newRowsRev: Value[] list,
+                                  nextAutoId,
+                                  firstAuto,
+                                  lastExplicit,
+                                  affected,
+                                  inserted: Value[] list,
+                                  updated: (Value[] * Value[]) list) ->
                                 if List.length rowValues <> List.length idxs then
                                     Error(ColumnCountMismatch(List.length idxs, List.length rowValues))
                                 else
@@ -1334,14 +1348,16 @@ let upsertRows
                                         // plain INSERT that then trips the unique check.
                                         computeGenerated (Array.ofList finalValues)
                                         |> Result.map (fun candidate ->
-                                            match findMatch rowsAcc candidate with
+                                            match findMatch rowsAcc newRowsRev candidate with
                                             | Some existing -> Choice1Of2(existing, candidate)
                                             | None -> Choice2Of2 candidate)
                                         |> Result.bind (function
                                             | Choice1Of2(existing, candidate) ->
                                                 applyUpdate existing candidate
                                                 |> Result.map (fun applied ->
-                                                    (rowsAcc |> List.map (fun r -> if r = existing then applied else r)),
+                                                    let replace r = if r = existing then applied else r
+                                                    (rowsAcc |> List.map replace),
+                                                    (newRowsRev |> List.map replace),
                                                     nextAutoId',
                                                     firstAuto,
                                                     lastExplicit,
@@ -1359,7 +1375,8 @@ let upsertRows
                                                     | None -> firstAuto, lastExplicit
 
                                                 Ok(
-                                                    rowsAcc @ [ candidate ],
+                                                    rowsAcc,
+                                                    candidate :: newRowsRev,
                                                     nextAutoId',
                                                     firstAuto',
                                                     lastExplicit',
@@ -1369,9 +1386,9 @@ let upsertRows
                                                 ))))
 
                     rowsIn
-                    |> List.fold step (Ok(table.Rows, table.NextAutoId, None, None, 0, [], []))
-                    |> Result.map (fun (rows', nextAutoId', firstAuto, lastExplicit, affected, inserted, updated) ->
-                        { table with Rows = rows'; NextAutoId = nextAutoId' },
+                    |> List.fold step (Ok(table.Rows, [], table.NextAutoId, None, None, 0, [], []))
+                    |> Result.map (fun (rowsAcc, newRowsRev, nextAutoId', firstAuto, lastExplicit, affected, inserted, updated) ->
+                        { table with Rows = rowsAcc @ List.rev newRowsRev; NextAutoId = nextAutoId' },
                         (Option.defaultValue 0L (Option.orElse lastExplicit firstAuto), firstAuto, affected, List.rev inserted, List.rev updated))))
 
         match result with
@@ -1631,31 +1648,32 @@ let updateRows
                     let original = Array.ofList table.Rows
 
                     // Folds left-to-right, threading the rows already written this
-                    // statement (`doneRows`, holding their *new* values) alongside
-                    // the rows not yet reached (their still-*original* values) —
-                    // mirrors `insertCore`'s `table.Rows @ accepted` pattern, so a
-                    // multi-row `UPDATE` that moves several rows onto the same
-                    // unique value collides with a sibling row this same statement
-                    // already rewrote, not just against the frozen pre-statement
-                    // snapshot. `changes` collects only the rows actually rewritten
-                    // (before, after) — for `RowsUpdated`, and for `changedCount`
-                    // (its length), matching MySQL's "Changed: n" rather than "Rows
-                    // matched: n".
+                    // statement (`doneRowsRev`, holding their *new* values, newest
+                    // first — cons is O(1); the whole accumulator is reversed once
+                    // after the fold instead of appended to on every row) alongside
+                    // the rows not yet reached (their still-*original* values, read
+                    // straight out of `original` by index rather than re-filtered) —
+                    // mirrors `insertCore`'s cons-then-reverse, so a multi-row
+                    // `UPDATE` that moves several rows onto the same unique value
+                    // collides with a sibling row this same statement already
+                    // rewrote, not just against the frozen pre-statement snapshot.
+                    // `changesRev` likewise collects only the rows actually
+                    // rewritten (before, after), newest first — for `RowsUpdated`,
+                    // and for `changedCount` (its length), matching MySQL's
+                    // "Changed: n" rather than "Rows matched: n".
                     let step acc (i, row) =
                         acc
-                        |> Result.bind (fun (doneRows: Value[] list, changes: (Value[] * Value[]) list) ->
+                        |> Result.bind (fun (doneRowsRev: Value[] list, changesRev: (Value[] * Value[]) list) ->
                             predicate row
                             |> Result.bind (fun keep ->
                                 if not keep then
-                                    Ok(doneRows @ [ row ], changes)
+                                    Ok(row :: doneRowsRev, changesRev)
                                 else
                                     updater row
                                     |> Result.bind (coerceRow store.StrictMode table.Columns)
                                     |> Result.bind (fun newRow ->
-                                        let notYetProcessed =
-                                            original |> Array.indexed |> Array.filter (fun (j, _) -> j > i) |> Array.map snd |> List.ofArray
-
-                                        let others = doneRows @ notYetProcessed
+                                        let notYetProcessed = Array.sub original (i + 1) (original.Length - i - 1) |> List.ofArray
+                                        let others = doneRowsRev @ notYetProcessed
 
                                         match findUniqueCollision uniqueGroups others newRow with
                                         | Some e -> Error e
@@ -1667,13 +1685,13 @@ let updateRows
                                             else
                                                 Ok newRow)
                                     |> Result.map (fun newRow ->
-                                        doneRows @ [ newRow ], (if newRow <> row then changes @ [ row, newRow ] else changes))))
+                                        newRow :: doneRowsRev, (if newRow <> row then (row, newRow) :: changesRev else changesRev))))
 
                     original
                     |> List.ofArray
                     |> List.indexed
                     |> List.fold step (Ok([], []))
-                    |> Result.map (fun (rows', changes) -> Map.add key { table with Rows = rows' } db, changes)))
+                    |> Result.map (fun (doneRowsRev, changesRev) -> Map.add key { table with Rows = List.rev doneRowsRev } db, List.rev changesRev)))
 
         match result with
         | Ok changes ->
