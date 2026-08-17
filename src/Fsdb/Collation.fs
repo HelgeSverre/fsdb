@@ -48,6 +48,12 @@ type Collation =
       /// A canonical index key: `Equals a b` iff `KeyOf a = KeyOf b` — the
       /// unique index and its point lookups both key on this.
       KeyOf: string -> string
+      /// A hash code consistent with `ComparePrimary`: strings `Equals`
+      /// says are equal hash equal (the converse never needs to hold). The
+      /// hash join buckets on this instead of `KeyOf` — a hash needs no
+      /// canonical form, and `KeyOf` materializes a full sort key (plus a
+      /// hex string) where a plain hash will do.
+      HashOf: string -> int
       /// Per-character LIKE folding, explicitly without expansions.
       CharEquals: char -> char -> bool
       /// PAD SPACE: trailing spaces are insignificant — `Equals` trims,
@@ -130,6 +136,12 @@ let private makeCollation (name: string) (spec: Spec) : Collation =
                 "B" + Convert.ToHexString(System.Text.Encoding.UTF8.GetBytes(trim s))
             else
                 Convert.ToHexString(ci.GetSortKey(trim s, spec.Fold).KeyData)
+      HashOf =
+        fun s ->
+            if spec.ByteOrder then
+                StringComparer.Ordinal.GetHashCode(trim s)
+            else
+                ci.GetHashCode(trim s, spec.Fold)
       CharEquals =
         if spec.ByteOrder then
             fun a b -> a = b

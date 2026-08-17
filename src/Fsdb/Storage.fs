@@ -918,12 +918,12 @@ let private uniqueKeyGroups (table: Table) : (string * int list) list =
 /// NULL is deliberately absent because a UNIQUE key containing any NULL
 /// never collides under MySQL's semantics.
 let private encodeConstraintKey (columns: ColumnDef list) (indices: int list) (row: Value[]) : string option =
-    let encode (index: int) =
-        let collationOf () =
-            columns.[index].Collation
-            |> Option.bind Collation.tryFind
-            |> Option.defaultValue Collation.defaultCollation
+    let collationOf index =
+        columns.[index].Collation
+        |> Option.bind Collation.tryFind
+        |> Option.defaultValue Collation.defaultCollation
 
+    let encode (index: int) =
         match row.[index] with
         | VNull -> None
         | VInt value -> Some("I" + string value)
@@ -935,7 +935,7 @@ let private encodeConstraintKey (columns: ColumnDef list) (indices: int list) (r
         // declared COLLATE (utf8mb4_bin stays byte-distinct, a PAD SPACE
         // collation trims). Same rules as WHERE equality, so the index and
         // the comparison can never disagree.
-        | VString value -> Some("S" + (collationOf ()).KeyOf value)
+        | VString value -> Some("S" + (collationOf index).KeyOf value)
         | VBytes value -> Some("B" + Convert.ToHexString value)
         | VDate value -> Some("T" + string value.DayNumber)
         | VDateTime value -> Some("V" + string value.Ticks)
