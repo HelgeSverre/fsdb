@@ -825,6 +825,24 @@ let private reindexRow
 let private parentUniqueIndex (parent: Table) (refIdxs: int list) : Map<string, Value[]> option =
     uniqueKeyGroups parent |> List.tryPick (fun (name, idxs) -> if idxs = refIdxs then Map.tryFind name parent.UniqueIndex else None)
 
+/// A per-statement FK parent-key membership test, either a live `HashSet`
+/// that a self-FK extends row by row (`Mutable`) or a snapshot of the
+/// parent's own `UniqueIndex` reused as-is (`Fixed`) — `insertCore`'s
+/// `foreignKeyLookups` picks whichever fits per FK; see its doc.
+type private ParentKeySource =
+    | Mutable of HashSet<string>
+    | Fixed of Map<string, Value[]>
+
+let private parentKeySourceContains (key: string) (source: ParentKeySource) : bool =
+    match source with
+    | Mutable set -> set.Contains key
+    | Fixed idx -> Map.containsKey key idx
+
+let private parentKeySourceAdd (key: string) (source: ParentKeySource) : unit =
+    match source with
+    | Mutable set -> set.Add key |> ignore
+    | Fixed _ -> () // A non-self FK's parent can't change mid-statement.
+
 /// `col = literal`'s columns and candidate rows via `dbName.tableName`'s
 /// PK/UNIQUE hash index, when `columnName` names a single-column PK/UNIQUE
 /// group and `literal` already has that column's exact stored `Value`
@@ -1241,10 +1259,17 @@ let private insertCore
     let table = Map.find tableKey db
     let uniqueGroups = uniqueKeyGroups table
 
-    // Parent keys are immutable for the duration of this INSERT. Build one
-    // compact lookup per ordinary FK instead of rescanning its parent table
-    // for every child candidate. A self-FK also records its parent-column
-    // indices so every accepted row can extend the lookup immediately.
+    // Parent keys are immutable for the duration of this INSERT (except a
+    // self-FK, see below). Build one compact lookup per ordinary FK instead
+    // of rescanning its parent table for every child candidate. A
+    // non-self FK whose target columns are a full PK/UNIQUE group reuses
+    // that group's already-maintained `UniqueIndex` (`parentUniqueIndex`) —
+    // O(log n) per probe, no per-statement scan of the parent at all.
+    // A self-FK still needs `constraintLookup`'s mutable `HashSet`: its
+    // parent IS this table, and a multi-row INSERT must see rows accepted
+    // earlier in the same statement, which only the mutable path extends
+    // as it goes (the `Add` loop below). The same HashSet fallback covers
+    // an FK whose target columns aren't a full PK/UNIQUE group.
     let foreignKeyLookups =
         if not checkFks then
             Map.empty
@@ -1258,10 +1283,18 @@ let private insertCore
                 | Ok childIndices, Some parent ->
                     match foreignKey.RefColumns |> traverse (resolveColumn parent.Columns) with
                     | Ok parentIndices ->
-                        let selfParentIndices =
-                            if normalizeTableName foreignKey.RefTable = tableKey then Some parentIndices else None
+                        let isSelf = normalizeTableName foreignKey.RefTable = tableKey
+                        let selfParentIndices = if isSelf then Some parentIndices else None
 
-                        Some(foreignKey.Name, (childIndices, selfParentIndices, constraintLookup parentIndices parent.Rows))
+                        let source =
+                            if isSelf then
+                                Mutable(constraintLookup parentIndices parent.Rows)
+                            else
+                                match parentUniqueIndex parent parentIndices with
+                                | Some idx -> Fixed idx
+                                | None -> Mutable(constraintLookup parentIndices parent.Rows)
+
+                        Some(foreignKey.Name, (childIndices, selfParentIndices, source))
                     | Error _ -> None
                 | _ -> None)
             |> Map.ofList
@@ -1328,7 +1361,7 @@ let private insertCore
                                     | Some(childIndices, _, parentKeys) ->
                                         match encodeConstraintKey childIndices candidate with
                                         | None -> Ok()
-                                        | Some key when parentKeys.Contains key -> Ok()
+                                        | Some key when parentKeySourceContains key parentKeys -> Ok()
                                         | Some _ -> Error(ForeignKeyParentMissing foreignKey.Name)
                                     | None -> checkFkParent dbView table.Columns candidate foreignKey
 
@@ -1349,7 +1382,7 @@ let private insertCore
                     for KeyValue(_, (_, selfParentIndices, lookup)) in foreignKeyLookups do
                         selfParentIndices
                         |> Option.bind (fun indices -> encodeConstraintKey indices candidate)
-                        |> Option.iter (lookup.Add >> ignore)
+                        |> Option.iter (fun key -> parentKeySourceAdd key lookup)
 
                     // Prepending is O(1); reverse once after the fold so
                     // externally observable insertion and commit-event

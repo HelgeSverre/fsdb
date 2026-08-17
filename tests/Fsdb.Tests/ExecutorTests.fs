@@ -2574,6 +2574,40 @@ let tests =
                         | Err(1452, _), Err(1452, _) -> ()
                         | a, b -> failtestf "indexed vs unindexed parent disagreed for parent_id = %d: %A vs %A" parentId a b
 
+                testCase "single-row INSERT into a child of a large PK-indexed parent stays flat, not linear in the parent's size"
+                <| fun _ ->
+                    // insertCore's own FK-parent lookup (`foreignKeyLookups`,
+                    // separate from `checkFkParent`'s fast path exercised
+                    // above) used to build a fresh HashSet by scanning the
+                    // *entire* parent table on every INSERT statement,
+                    // regardless of how many rows the parent's own
+                    // PK/UNIQUE index could have answered in O(log n).
+                    let store = newStore ()
+                    runDefault store "CREATE TABLE parent (id INT PRIMARY KEY)" |> ignore
+                    runDefault store "CREATE TABLE child (id INT PRIMARY KEY, parent_id INT, FOREIGN KEY (parent_id) REFERENCES parent(id))" |> ignore
+
+                    let batch = [ for i in 1 .. 20_000 -> sprintf "(%d)" i ] |> String.concat ", "
+                    runDefault store (sprintf "INSERT INTO parent VALUES %s" batch) |> ignore
+
+                    // Warm up (JIT, allocator) before timing.
+                    runDefault store "INSERT INTO child VALUES (1, 1)" |> ignore
+
+                    let sw = System.Diagnostics.Stopwatch.StartNew()
+
+                    for i in 2 .. 200 do
+                        runDefault store (sprintf "INSERT INTO child VALUES (%d, %d)" i i) |> ignore
+
+                    sw.Stop()
+
+                    let perInsertMs = sw.Elapsed.TotalMilliseconds / 199.0
+
+                    Expect.isLessThan
+                        perInsertMs
+                        1.0
+                        (sprintf
+                            "199 single-row INSERTs into a child of a 20,000-row PK-indexed parent averaged %f ms/insert — looks like a full parent scan again"
+                            perInsertMs)
+
                 testCase "point SELECT by PRIMARY KEY on a 50,000-row table stays flat, not linear in table size"
                 <| fun _ ->
                     // Only catches a regression back to a full table scan
