@@ -270,6 +270,25 @@ structural hashing.
   same rows as the nested loop.
 - Existing JOIN/LEFT JOIN/`UPDATE ... JOIN` tests green, unchanged.
 
+**Gate reconciliation, `< 25 ms` — not met, real gap, not a documentation
+error.** `just bench` at 5037a48: `JoinUsersOrders` 202,198 µs, ~8x over
+gate (MySQL: 239 µs on the same box). Everything else in this gate holds
+(no `NA`, all three correctness properties, existing JOIN tests green) —
+the hash join itself works and is fast: the `ON o.user_id = u.id` equi
+join over 10k × 50k rows is no longer the 425 s cross-product pathology
+section 1.1 measured. What's left is `WHERE u.age > 30 LIMIT 50`
+materializing, filtering, and fully projecting every matched row before
+`LIMIT` slices it down to 50 — section 1.4's ~2.4 µs/matched-row pipeline
+tax, at whatever row count the equi join actually produces before the
+`WHERE`/`LIMIT` narrow it. Section 4 ("Explicitly rejected") rejects the
+lazy-`seq` fix for exactly this *on purpose*, for reasons that still hold
+(no `ORDER BY` short-circuit, `Seq` measured 10x slower than `Array` on
+full scans, a wholesale pipeline type change). Net: this sub-gate's number
+was set before that trade-off was made explicit, and nothing in M9-1
+through M9-4 as scoped closes it. Renegotiated here rather than chased:
+`ROADMAP.md`'s M9 stays unticked until either the lazy-pipeline work is
+scheduled as its own milestone, or this number is formally revised.
+
 ### M9-3 — Index-addressable rows + PK/unique hash index (~1 week)
 
 One structure, four payoffs: point lookup, unique enforcement on INSERT,
@@ -289,6 +308,36 @@ to `Storage` and is rebuilt on snapshot replay.
 - `UpdateSingleRow` < **500 µs** (MySQL 136 µs).
 - Point-lookup latency flat from 10k to 40k rows (the linearity in section 1.3
   is the thing being deleted).
+
+**Measured against this gate** (`just bench` at 5037a48, in-memory, same
+rig as section 1's numbers; `tests/Fsdb.Tests/ExecutorTests.fs`'s "point
+SELECT by PRIMARY KEY latency is flat from 10k to 40k rows" for the last
+line — the earlier draft of this gate shipped with no scaling measurement
+at all, so the flatness claim rested on a single fixed-size number, which
+proves "faster" but not "O(1)"):
+
+| Sub-gate | Target | Measured | Holds? |
+|---|---|---|---|
+| `PointSelectByPk` | < 250 µs | 102 µs | ✅ |
+| `PreparedPointSelect` | < 250 µs, within 30% of `PointSelectByPk` | 89 µs, -13% (faster, not slower) | ✅ |
+| `InsertSingle` | < 300 µs | 496 µs | ❌ 1.65x over |
+| `InsertBatch100` | < 20 ms | 8.6 ms | ✅ |
+| `UpdateSingleRow` | < 500 µs | 2,356 µs | ❌ 4.7x over (still clears the *coarser* top-level ROADMAP gate, < 10 ms) |
+| Point-lookup flat 10k→40k | ratio ≈ 1 | ratio 0.76 (10k: 0.028 ms median of 21, 40k: 0.021 ms) | ✅ — genuinely O(1)/O(log n), not just a faster scan |
+
+`InsertSingle`/`UpdateSingleRow` missing their sub-gates is real, not a
+harness artifact (`InsertBatch100` clearing its own, looser, gate on the
+same run rules out a poisoned-benchmark explanation like section 1.6's).
+Both still touch a live TCP round trip plus fsync-free in-memory commit
+bookkeeping per statement — the O(1) index lookup this milestone added
+is real (see the flat-ratio row above), but per-statement overhead
+elsewhere in the write path (row coercion, unique-key re-encoding,
+`OnCommit` dispatch) is now the larger term at this table size. Left as
+open follow-up rather than re-chased here: chasing sub-millisecond
+per-statement overhead is a different, narrower problem than the O(n)
+scan pathology this milestone actually targeted, and every *pathology*
+this milestone named (full-scan SELECT/UPDATE/INSERT-unique-check) is
+fixed.
 
 ### M9-4 — Make the benchmark suite trustworthy (hours, land with M9-1)
 

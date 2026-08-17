@@ -94,4 +94,18 @@ rows + PK/unique hash indexes, disconnect cancellation, trustworthy
 benchmark harness.
 **Gate:** UpdateSingleRow < 10ms, JoinUsersOrders completes < 25ms,
 PointSelectByPk < 250µs, two consecutive bench runs agree within 20%,
-Expecto + one gauntlet suite regression green. Status: ☐
+Expecto + one gauntlet suite regression green. Status: ☐ (`just bench` at
+5037a48: UpdateSingleRow 2,356 µs < 10ms ✅, PointSelectByPk 102 µs <
+250µs ✅ and reproduces within 0.04% across runs (per f1b15ab/366fe1c) ✅,
+Expecto 683/683 ✅ — but **JoinUsersOrders 202,198 µs, ~8x over the < 25ms
+gate** (MySQL: 239 µs on the same box) ❌. The M9-2 hash join fixed the
+pathological O(pairs) cross product (`JoinUsersOrders` used to time out
+entirely, ~425s), but `WHERE u.age > 30 LIMIT 50` still materializes and
+fully projects/sorts every matched row before `LIMIT` slices it —
+`docs/performance-design.md` section 4 explicitly rejects the lazy `seq`
+pipeline that would fix this as out of scope for M9 (real, and still
+unaddressed: not just a documentation gap). Not marking this milestone
+done until that's either built or the gate number is renegotiated with
+a stated reason — see `docs/performance-design.md`'s M9-2/M9-3 "Gate
+reconciliation"/"Measured against this gate" notes for the JOIN gap and
+the InsertSingle/UpdateSingleRow sub-gates)

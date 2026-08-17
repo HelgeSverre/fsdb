@@ -2678,6 +2678,53 @@ let tests =
                         20.0
                         (sprintf "point SELECT by PK against 50,000 rows took %A — looks like a full scan again" sw.Elapsed)
 
+                testCase "point SELECT by PRIMARY KEY latency is flat from 10k to 40k rows, the actual O(1) proof, not just a single-size bound"
+                <| fun _ ->
+                    // The M9-3 gate in docs/performance-design.md says
+                    // verbatim "Point-lookup latency flat from 10k to 40k
+                    // rows" — the single-size test above (generous, at one
+                    // n) is consistent with a merely-faster linear scan; the
+                    // thing that actually proves the index is O(1) is this
+                    // ratio staying near 1 across a 4x size increase instead
+                    // of tracking it.
+                    let timeLookup (n: int) : float =
+                        let store = newStore ()
+                        runDefault store "CREATE TABLE flat (id INT PRIMARY KEY, name VARCHAR(20))" |> ignore
+                        let batch = [ for i in 1 .. n -> sprintf "(%d, 'name%d')" i i ] |> String.concat ", "
+                        runDefault store (sprintf "INSERT INTO flat VALUES %s" batch) |> ignore
+
+                        // Warm up (JIT) before timing; median of several
+                        // probes to smooth out GC/scheduler noise at this
+                        // small a per-call cost.
+                        runDefault store (sprintf "SELECT name FROM flat WHERE id = %d" (n / 2)) |> ignore
+
+                        [ for _ in 1 .. 21 ->
+                              let sw = System.Diagnostics.Stopwatch.StartNew()
+                              runDefault store (sprintf "SELECT name FROM flat WHERE id = %d" (n / 2)) |> ignore
+                              sw.Stop()
+                              sw.Elapsed.TotalMilliseconds ]
+                        |> List.sort
+                        |> List.item 10 // median of 21
+
+                    let at10k = timeLookup 10_000
+                    let at40k = timeLookup 40_000
+
+                    // O(n) would show ~4x here (section 1.3's own measured
+                    // scan cost: 1.315ms @10k -> 7.287ms @40k, a 5.5x
+                    // ratio); a real O(1)/O(log n) index stays well under
+                    // that. Floored by the harness's own per-call noise at
+                    // this scale, so the bound is generous, not tight.
+                    let ratio = at40k / (max at10k 0.001)
+
+                    Expect.isLessThan
+                        ratio
+                        2.5
+                        (sprintf
+                            "point SELECT by PK took %fms at 10k rows and %fms at 40k rows (ratio %f) — looks linear in table size again"
+                            at10k
+                            at40k
+                            ratio)
+
                 testCase "a correlated subquery's outer equality never gets mistaken for the inner table's own index probe"
                 <| fun _ ->
                     // Same indexed-vs-unindexed-twin method as the top-level
