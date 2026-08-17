@@ -988,7 +988,11 @@ let private locateAt (str: string) (sub: string) (startIdx: int) : Value =
 let private locateFn: Scalar =
     function
     | [ sub; str ] when not (anyNull [ sub; str ]) -> locateAt (req str) (req sub) 0
-    | [ sub; str; posV ] when not (anyNull [ sub; str; posV ]) -> locateAt (req str) (req sub) (max 0 (int (toDouble posV) - 1))
+    // A start position below 1 is invalid and yields 0, not a search from
+    // the beginning: LOCATE('l', 'Hello', 0) = 0 in MySQL.
+    | [ sub; str; posV ] when not (anyNull [ sub; str; posV ]) ->
+        let pos = int (toDouble posV)
+        if pos < 1 then VInt 0L else locateAt (req str) (req sub) (pos - 1)
     | _ -> VNull
 
 let private instrFn: Scalar =

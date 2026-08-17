@@ -536,6 +536,14 @@ let tests =
                           Expect.equal (call "LOCATE" [ VString "lo"; VString "Hello" ]) (VInt 4L) "locate"
                           Expect.equal (call "INSTR" [ VString "Hello"; VString "lo" ]) (VInt 4L) "instr"
                           Expect.equal (call "POSITION" [ VString "z"; VString "Hello" ]) (VInt 0L) "not found"
+                          // The three-argument LOCATE(sub, str, pos) starts
+                          // searching at an explicit 1-indexed offset, a
+                          // separate match branch from the two-argument form:
+                          // starting at position 4 skips the first 'l' at
+                          // position 3 and lands on the second one at 4.
+                          Expect.equal (call "LOCATE" [ VString "l"; VString "Hello"; VInt 4L ]) (VInt 4L) "three-arg locate from offset"
+                          Expect.equal (call "LOCATE" [ VString "l"; VString "Hello"; VInt 5L ]) (VInt 0L) "three-arg locate not found past offset"
+                          Expect.equal (call "LOCATE" [ VString "l"; VString "Hello"; VInt 0L ]) (VInt 0L) "start position below 1 yields 0, not a search from the beginning"
 
                       testCase "REPLACE substitutes every occurrence"
                       <| fun _ -> Expect.equal (call "REPLACE" [ VString "a-b-c"; VString "-"; VString "+" ]) (VString "a+b+c") "replace"
@@ -585,6 +593,14 @@ let tests =
                           | VString s -> Expect.equal s.Length 40 "sha1 length"
                           | v -> failwithf "expected VString, got %A" v
 
+                      testCase "SHA2 picks a hash by requested length and nulls unsupported/NULL input"
+                      <| fun _ ->
+                          Expect.equal (call "SHA2" [ VString "hello"; VInt 256L ]) (VString "2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824") "sha2-256"
+                          Expect.equal (call "SHA2" [ VString "hello"; VInt 384L ]) (VString "59e1748777448c69de6b800d7a33bbfb9ff1b463e44354c3553bcdb9c666fa90125a3c79f90397bdf5f6a13de828684f") "sha2-384"
+                          Expect.equal (call "SHA2" [ VString "hello"; VInt 512L ]) (VString "9b71d224bd62f3785d96d46ad3ea3d73319bfbc2890caadae2dff72519673ca72323c3d99ba5c11d7c7acc6e14b8c5da0c4663475c2e5c3adef46f73bcdec043") "sha2-512"
+                          Expect.equal (call "SHA2" [ VString "hello"; VInt 7L ]) VNull "unsupported length"
+                          Expect.equal (call "SHA2" [ VNull; VInt 256L ]) VNull "null input"
+
                       testCase "FORMAT adds thousands separators and fixes decimal places"
                       <| fun _ -> Expect.equal (call "FORMAT" [ VDouble 1234.5; VInt 2L ]) (VString "1,234.50") "format"
 
@@ -612,7 +628,13 @@ let tests =
                           Expect.equal (call "FIND_IN_SET" [ VString "b"; VString "a,b,c" ]) (VInt 2L) "find_in_set"
 
                       testCase "QUOTE wraps and escapes for a SQL literal"
-                      <| fun _ -> Expect.equal (call "QUOTE" [ VString "it's" ]) (VString "'it\\'s'") "quote"
+                      <| fun _ ->
+                          Expect.equal (call "QUOTE" [ VString "it's" ]) (VString "'it\\'s'") "quote"
+                          Expect.equal (call "QUOTE" [ VNull ]) (VString "NULL") "null renders as unquoted NULL"
+                          Expect.equal (call "QUOTE" [ VString "a\000b" ]) (VString "'a\\0b'") "escapes NUL"
+                          Expect.equal (call "QUOTE" [ VString "a\nb" ]) (VString "'a\\nb'") "escapes newline"
+                          Expect.equal (call "QUOTE" [ VString "a\rb" ]) (VString "'a\\rb'") "escapes carriage return"
+                          Expect.equal (call "QUOTE" [ VString "a\\b" ]) (VString "'a\\\\b'") "escapes a bare backslash"
 
                       testCase "STRCMP returns -1/0/1"
                       <| fun _ ->
