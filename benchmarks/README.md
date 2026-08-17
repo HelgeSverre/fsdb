@@ -7,8 +7,11 @@ hotspots, not to chase parity — fsdb optimizes for readable F# first.
 ## Running
 
 ```sh
-just bench        # full suite (~10 min), results -> results/<git-sha>.md
-just bench-quick  # ShortRun job for fast local iteration, no results file
+just bench          # full latency suite (~7 min), results -> results/<git-sha>.md
+just bench-quick    # ShortRun job for fast local iteration, no results file
+just bench-load     # N-writer throughput (ops/sec), results -> results/<git-sha>-load.md
+just bench-durable  # 4-target durability-matched latency, results -> results/<git-sha>-durable.md
+just bench-scale    # latency suite at 100k/500k rows, results -> results/<git-sha>-scale.md
 ```
 
 Prerequisites and rules:
@@ -16,6 +19,9 @@ Prerequisites and rules:
 - MySQL 8.4 keg-only at `/opt/homebrew/opt/mysql@8.4` (no brew services —
   the recipe runs `mysqld` ad hoc on port 3316 with a throwaway datadir at
   `benchmarks/mysql-data`, recreated automatically if deleted).
+  `bench-durable` also starts a second mysqld on port 3317 with
+  `--skip-log-bin --innodb_flush_log_at_trx_commit=0 --sync_binlog=0`
+  (datadir `benchmarks/mysql-data-nofsync`).
 - Port 3307 must be free — the recipe refuses to run if anything answers
   there, because benchmarking against a shared server corrupts both runs.
 - Don't run a bench while a heavy workload (test suites, agents) shares the
@@ -31,13 +37,23 @@ Prerequisites and rules:
 - fsdb restarts and reseeds per benchmark case so a pathological case can't
   poison later measurements (see the module comment in
   `Fsdb.Benchmarks/ServerBenchmarks.fs`).
-- fsdb runs in-memory (no `--data-dir`), so no WAL/fsync in any number.
+- The default run measures fsdb in-memory (no `--data-dir`, so no WAL/fsync).
+  `bench-durable` adds the matched configs: fsdb `--data-dir` (WAL, one fsync
+  per commit — see `Persistence.attach`) against durable MySQL, and
+  in-memory fsdb against a no-fsync MySQL. A write-number only means
+  something when both engines pay (or both skip) the same durability cost.
+- `bench-load` measures throughput, not latency: N workers over disjoint id
+  slices so MySQL sees no row contention, reporting ops/sec per workload.
+  fsdb's whole write path sits behind a per-database `SemaphoreSlim(1,1)`
+  (see `Storage.enterTransactionGate`), which a single-connection latency
+  suite structurally cannot expose.
 - Connection pooling is off (fsdb doesn't implement COM_RESET_CONNECTION).
 - The wire+client floor is ~200 µs/op on this machine (`SELECT 1` round
   trip ≈ 0.26 ms via MySqlConnector over loopback) — sub-millisecond rows
   are bounded by the harness as much as the engine.
-- Workloads: 10k users + 50k orders, deterministic seed. One operation per
-  invocation; BenchmarkDotNet handles warmup, outliers, and statistics.
+- Workloads: 10k users + 50k orders, deterministic seed (override with
+  `FSDB_BENCH_USERS`/`FSDB_BENCH_ORDERS`). One operation per invocation;
+  BenchmarkDotNet handles warmup, outliers, and statistics.
 
 ## Results history
 
@@ -63,6 +79,41 @@ cases. See `results/f1b15ab.md`'s annotation.
 Notable one-line context for the M9 jump: an O(n²) list-append in the
 UPDATE path, PK/unique hash indexes, a hash equi-join, and `TcpClient.NoDelay`
 (Nagle's algorithm had been taxing every round trip since M1).
+
+### Durability-matched (single-connection latency, `cbbdfb4-durable.md`)
+
+fsdb in-memory vs fsdb `--data-dir` (WAL) vs MySQL durable vs MySQL no-fsync:
+
+| Workload | fsdb | fsdb-wal | mysql | mysql-nofsync |
+|---|---:|---:|---:|---:|
+| Point SELECT by PK | 116 µs | 131 µs | 40 µs | 40 µs |
+| Single INSERT | 274 µs | 7.75 ms | 113 µs | 33 µs |
+| Batch-100 INSERT | 5.07 ms | 11.96 ms | 1.08 ms | 787 µs |
+| Single-row UPDATE | 90 µs* | 5.64 ms | 103 µs | 40 µs |
+
+\* the in-memory UPDATE row was noise-contaminated in this run (373 µs, 215%
+CI); 81–91 µs is the established value from the clean `f5ff5a4` run.
+
+fsdb's durable write is fsync-bound: one `fsync` per commit on a growing
+JSONL WAL (~5–7 ms here), while durable MySQL group-commits its redo log
+(~100 µs). The "fsdb beats MySQL on writes" reading is an artifact of
+comparing a non-durable engine against a durable one — matched on durability,
+fsdb's point write is ~60x slower.
+
+### Concurrency throughput (`4897506-load.md`, 8 workers, ops/sec)
+
+| Workload | fsdb | mysql |
+|---|---:|---:|
+| update-distinct | 21,777 | 20,399 |
+| insert | 5,673 | 22,703 |
+| mixed read/write | 20,537 | 47,801 |
+
+fsdb's write throughput grows sublinearly with workers (its per-database
+write gate serializes writers: ~20k → ~22k → ~26k ops/sec at 4/8/16
+workers) while MySQL scales on insert and mixed read/write. The cheapest
+write (point UPDATE) is the one place fsdb's serialized-but-in-memory path
+keeps pace with fsync-bound MySQL; anything heavier, or mixed with readers,
+and MySQL pulls ahead.
 
 Add a column here per milestone snapshot; keep intermediate runs in
 `results/` without a column.

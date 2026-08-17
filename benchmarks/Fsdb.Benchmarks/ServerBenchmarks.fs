@@ -159,15 +159,3 @@ type ServerBenchmarks() =
         // pays the full-table scan — the O(n) write shape the PK-narrowed
         // `UpdateSingleRow` never exercises.
         this.Exec $"UPDATE users SET age = age + 1 WHERE name = 'user_{randomUserId () - 1}'"
-
-    [<Benchmark>]
-    member this.InsertUniqueViolation() =
-        // A duplicate `email` exercises the unique-check and error path (and
-        // the client-side exception), not the happy insert path.
-        try
-            this.Exec(
-                "INSERT INTO users (name, email, age, meta, created_at) VALUES "
-                + "('dup', 'user_0@bench.test', 30, '{\"plan\":\"free\"}', '2024-01-01 00:00:00')"
-            )
-        with :? MySqlException ->
-            ()
