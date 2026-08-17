@@ -299,6 +299,35 @@ let private quoted (quote: char) : Parser<Value, unit> =
 
 let private stringLit: Parser<Value, unit> = quoted '\'' <|> quoted '"'
 
+/// MySQL's `_charset'text'` introducer — labels the literal's
+/// client-encoded (hence UTF-8) bytes with the named charset *without*
+/// converting them, verified against 8.4: `_latin1'é'` reads back as the
+/// two cp1252 chars of é's UTF-8 bytes (`Ã©`), `_ascii'å'` as `??` (one
+/// '?' per byte), and `_binary'abc'` compares byte-wise. Desugared at parse
+/// time into the final `Lit` — the common ASCII-subset cases are identical
+/// to a real conversion.
+let private introducedStringLit: Parser<Expr, unit> =
+    attempt (
+        pchar '_'
+        >>. many1Chars (satisfy isIdentChar)
+        .>> ws
+        .>>. stringLit
+        >>= fun (charset, v) ->
+            let text =
+                match v with
+                | VString s -> s
+                | _ -> ""
+
+            let bytes = Text.Encoding.UTF8.GetBytes text
+
+            match charset.ToLowerInvariant() with
+            | "utf8mb4"
+            | "utf8" -> preturn (Lit(VString text))
+            | "binary" -> preturn (Lit(VBytes bytes))
+            | "latin1" -> preturn (Lit(VString(Collation.Charset.decodeLatin1Bytes bytes)))
+            | "ascii" -> preturn (Lit(VString(Collation.Charset.decodeAsciiBytes bytes)))
+            | _ -> fail (sprintf "Unknown character set: '%s'" charset))
+
 /// MySQL's quoted hexadecimal binary literal (`X'00ff'`, case-insensitive
 /// on the introducer). The introducer and opening quote are attempted as a
 /// unit so an ordinary identifier beginning with `x` can still fall through
@@ -609,6 +638,7 @@ let private atom: Parser<Expr, unit> =
           lagOverAtom
           numberLit |>> Lit
           hexBytesLit |>> Lit
+          introducedStringLit
           stringLit |>> Lit
           keyword "NULL" >>% Lit VNull
           keyword "TRUE" >>% Lit(VInt 1L)
@@ -845,7 +875,20 @@ let private columnDef: Parser<ColumnDef, unit> =
           Unique = List.contains MUnique mods
           Generated = mods |> List.tryPick (function MGenerated e -> Some e | _ -> None)
           Collation = mods |> List.tryPick (function MCollate c -> Some c | _ -> None)
-          Charset = mods |> List.tryPick (function MCharset c -> Some c | _ -> None) }
+          Charset =
+              mods
+              |> List.tryPick (function
+                  | MCharset c -> Some c
+                  | _ -> None)
+              |> Option.orElseWith (fun () ->
+                  // A column-level `COLLATE` carries its charset explicitly
+                  // in MySQL — `varchar(10) COLLATE utf8mb4_bin` reports
+                  // `CHARACTER SET utf8mb4` in SHOW CREATE TABLE, unlike a
+                  // collation merely inherited from the table.
+                  mods
+                  |> List.tryPick (function
+                      | MCollate _ -> Some "utf8mb4"
+                      | _ -> None)) }
 
 /// `AFTER col` / `FIRST` after an `ADD`/`MODIFY`/`CHANGE COLUMN` —
 /// `PositionDefault` when neither is written.
@@ -1020,7 +1063,19 @@ let private createTable: Parser<Statement, unit> =
                     let withDefaults =
                         if isStringy then
                             { c with
-                                Collation = c.Collation |> Option.orElse tableCollation
+                                // A real column always ends up with an
+                                // explicit collation — the column-level
+                                // COLLATE, else the table's declaration,
+                                // else the server default — exactly like
+                                // MySQL, where a plain `name VARCHAR(20)`
+                                // still reports utf8mb4_0900_ai_ci. The
+                                // charset stays `None` unless declared, so
+                                // SHOW CREATE TABLE renders the default
+                                // case as plain `varchar(20)`.
+                                Collation =
+                                    c.Collation
+                                    |> Option.orElse tableCollation
+                                    |> Option.orElse (Some Collation.defaultCollation.Name)
                                 Charset = c.Charset |> Option.orElse tableCharset }
                         else
                             c

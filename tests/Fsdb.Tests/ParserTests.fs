@@ -634,7 +634,7 @@ let tests =
                                 PrimaryKey = false
                                 Unique = false
                                 Generated = None
-                                Collation = None
+                                Collation = Some "utf8mb4_0900_ai_ci"
                                 Charset = None }
                               { Name = "score"
                                 Type = TDecimal(5, 2)
@@ -702,7 +702,7 @@ let tests =
                                 PrimaryKey = false
                                 Unique = false
                                 Generated = None
-                                Collation = None
+                                Collation = Some "utf8mb4_0900_ai_ci"
                                 Charset = None } ],
                             [],
                             [],

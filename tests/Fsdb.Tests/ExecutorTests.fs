@@ -350,6 +350,129 @@ let tests =
                             "bin keeps both values in the union"
                     | other -> failtestf "expected a bin union to keep both rows, got %A" other
 
+                testCase "UNION of mixed-collation branches aggregates to the strictest collation, in either order"
+                <| fun _ ->
+                    let store = newStore ()
+                    runDefault store "CREATE TABLE m (a VARCHAR(10) COLLATE utf8mb4_0900_ai_ci, b VARCHAR(10) COLLATE utf8mb4_bin)" |> ignore
+                    runDefault store "INSERT INTO m VALUES ('åge', 'age')" |> ignore
+
+                    match runDefault store "SELECT a FROM m UNION SELECT b FROM m" with
+                    | ResultSet(_, rows) ->
+                        Expect.equal
+                            (rows |> List.sort)
+                            [ [ Some "age" ]; [ Some "åge" ] ]
+                            "a bin branch anywhere keeps åge/age apart"
+                    | other -> failtestf "expected the mixed union to stay distinct, got %A" other
+
+                    match runDefault store "SELECT b FROM m UNION SELECT a FROM m" with
+                    | ResultSet(_, rows) ->
+                        Expect.equal
+                            (rows |> List.sort)
+                            [ [ Some "age" ]; [ Some "åge" ] ]
+                            "order-independent"
+                    | other -> failtestf "expected the reversed mixed union to stay distinct, got %A" other
+
+                testCase "UNIQUE keys honor the collation's pad attribute: NO PAD keeps 'x'/'x ' apart, PAD SPACE rejects"
+                <| fun _ ->
+                    let store = newStore ()
+                    runDefault store "CREATE TABLE u (a VARCHAR(10) COLLATE utf8mb4_0900_ai_ci UNIQUE, b VARCHAR(10) COLLATE utf8mb4_bin UNIQUE)" |> ignore
+                    runDefault store "INSERT INTO u (a) VALUES ('x'), ('x ')" |> ignore
+
+                    match runDefault store "SELECT COUNT(*) FROM u WHERE a IS NOT NULL" with
+                    | ResultSet(_, [ [ Some "2" ] ]) -> ()
+                    | other -> failtestf "expected NO PAD to keep both rows, got %A" other
+
+                    match runDefault store "INSERT INTO u (b) VALUES ('y'), ('y ')" with
+                    | Err(1062, _) -> ()
+                    | other -> failtestf "expected PAD SPACE to reject the trailing-space duplicate, got %A" other
+
+                testCase "COUNT(DISTINCT x) folds by the column's collation"
+                <| fun _ ->
+                    let store = newStore ()
+                    runDefault store "CREATE TABLE g (name VARCHAR(20))" |> ignore
+                    runDefault store "CREATE TABLE b (name VARCHAR(20) COLLATE utf8mb4_bin)" |> ignore
+                    runDefault store "INSERT INTO g VALUES ('åge'), ('age'), ('ÅGE')" |> ignore
+                    runDefault store "INSERT INTO b VALUES ('åge'), ('age'), ('ÅGE')" |> ignore
+
+                    match runDefault store "SELECT COUNT(DISTINCT name) FROM g" with
+                    | ResultSet(_, [ [ Some "1" ] ]) -> ()
+                    | other -> failtestf "expected ai_ci COUNT(DISTINCT) to fold to 1, got %A" other
+
+                    match runDefault store "SELECT COUNT(DISTINCT name) FROM b" with
+                    | ResultSet(_, [ [ Some "3" ] ]) -> ()
+                    | other -> failtestf "expected bin COUNT(DISTINCT) to keep 3, got %A" other
+
+                testCase "COUNT(DISTINCT a, b) folds each tuple element by its own collation"
+                <| fun _ ->
+                    let store = newStore ()
+                    runDefault store "CREATE TABLE p (a VARCHAR(10), b VARCHAR(10))" |> ignore
+                    runDefault store "INSERT INTO p VALUES ('åge','x'), ('age','x'), ('ÅGE','x'), ('åge','y')" |> ignore
+
+                    match runDefault store "SELECT COUNT(DISTINCT a, b) FROM p" with
+                    | ResultSet(_, [ [ Some "2" ] ]) -> ()
+                    | other -> failtestf "expected the collation-equal pairs to fold to 2, got %A" other
+
+                testCase "GROUP_CONCAT(DISTINCT x) folds by the column's collation"
+                <| fun _ ->
+                    let store = newStore ()
+                    runDefault store "CREATE TABLE g (name VARCHAR(20))" |> ignore
+                    runDefault store "INSERT INTO g VALUES ('åge'), ('age'), ('ÅGE')" |> ignore
+
+                    match runDefault store "SELECT GROUP_CONCAT(DISTINCT name SEPARATOR ',') FROM g" with
+                    | ResultSet(_, [ [ Some "åge" ] ]) -> ()
+                    | other -> failtestf "expected GROUP_CONCAT(DISTINCT) to fold to one value, got %A" other
+
+                testCase "JOIN ON equality folds by each key column's own collation"
+                <| fun _ ->
+                    let store = newStore ()
+                    runDefault store "CREATE TABLE b1 (name VARCHAR(20) COLLATE utf8mb4_bin, v INT)" |> ignore
+                    runDefault store "CREATE TABLE b2 (name VARCHAR(20) COLLATE utf8mb4_bin, w INT)" |> ignore
+                    runDefault store "INSERT INTO b1 VALUES ('age', 1), ('ÅGE', 2)" |> ignore
+                    runDefault store "INSERT INTO b2 VALUES ('age', 10), ('ÅGE', 20), ('AGE', 30)" |> ignore
+
+                    match runDefault store "SELECT COUNT(*) FROM b1 JOIN b2 ON b1.name = b2.name" with
+                    | ResultSet(_, [ [ Some "2" ] ]) -> ()
+                    | other -> failtestf "expected a bin join to match byte-exactly (2), got %A" other
+
+                    runDefault store "CREATE TABLE c1 (name VARCHAR(20), v INT)" |> ignore
+                    runDefault store "CREATE TABLE c2 (name VARCHAR(20), w INT)" |> ignore
+                    runDefault store "INSERT INTO c1 VALUES ('åge', 1)" |> ignore
+                    runDefault store "INSERT INTO c2 VALUES ('age', 10), ('ÅGE', 20)" |> ignore
+
+                    match runDefault store "SELECT COUNT(*) FROM c1 JOIN c2 ON c1.name = c2.name" with
+                    | ResultSet(_, [ [ Some "2" ] ]) -> ()
+                    | other -> failtestf "expected an ai_ci join to fold åge/age/ÅGE (2), got %A" other
+
+                testCase "MIN/MAX over strings use the expression's collation, first-seen wins primary-equal ties"
+                <| fun _ ->
+                    let store = newStore ()
+                    runDefault store "CREATE TABLE g (name VARCHAR(20))" |> ignore
+                    runDefault store "CREATE TABLE b (name VARCHAR(20) COLLATE utf8mb4_bin)" |> ignore
+                    runDefault store "INSERT INTO g VALUES ('åge'), ('age'), ('ÅGE')" |> ignore
+                    runDefault store "INSERT INTO b VALUES ('age'), ('ÅGE')" |> ignore
+
+                    match runDefault store "SELECT MAX(name) FROM g" with
+                    | ResultSet(_, [ [ Some "åge" ] ]) -> ()
+                    | other -> failtestf "expected ai_ci MAX to keep the first-seen value, got %A" other
+
+                    match runDefault store "SELECT MIN(name) FROM g" with
+                    | ResultSet(_, [ [ Some "åge" ] ]) -> ()
+                    | other -> failtestf "expected ai_ci MIN to keep the first-seen value, got %A" other
+
+                    match runDefault store "SELECT MAX(name) FROM b" with
+                    | ResultSet(_, [ [ Some "ÅGE" ] ]) -> ()
+                    | other -> failtestf "expected bin MAX by byte order, got %A" other
+
+                    match runDefault store "SELECT MIN(name) FROM b" with
+                    | ResultSet(_, [ [ Some "age" ] ]) -> ()
+                    | other -> failtestf "expected bin MIN by byte order, got %A" other
+
+                    // literals compare under the connection collation:
+                    // primary-equal there too, so first-seen wins.
+                    match runDefault store "SELECT MAX(x) FROM (SELECT 'ÅGE' AS x UNION ALL SELECT 'age') t" with
+                    | ResultSet(_, [ [ Some "ÅGE" ] ]) -> ()
+                    | other -> failtestf "expected literal MAX to keep the first-seen value, got %A" other
+
                 testCase "window PARTITION BY folds by collation"
                 <| fun _ ->
                     let store = newStore ()
@@ -396,6 +519,49 @@ let tests =
                     match runDefault store "SELECT 1 COLLATE utf8mb4_bin" with
                     | ResultSet(_, [ [ Some "1" ] ]) -> ()
                     | other -> failtestf "expected COLLATE on a number to be a no-op, got %A" other
+
+                testCase "the `_charset'...'` introducer labels bytes without converting, like MySQL"
+                <| fun _ ->
+                    let store = newStore ()
+
+                    // binary: byte-wise comparison
+                    match runDefault store "SELECT _binary'abc' = 'ABC'" with
+                    | ResultSet(_, [ [ Some "0" ] ]) -> ()
+                    | other -> failtestf "expected _binary to compare byte-wise, got %A" other
+
+                    match runDefault store "SELECT _binary'abc' = 'abc'" with
+                    | ResultSet(_, [ [ Some "1" ] ]) -> ()
+                    | other -> failtestf "expected identical bytes to match, got %A" other
+
+                    // utf8mb4: the bytes are already utf8mb4, so nothing changes
+                    match runDefault store "SELECT _utf8mb4'ÅGE' = 'age'" with
+                    | ResultSet(_, [ [ Some "1" ] ]) -> ()
+                    | other -> failtestf "expected _utf8mb4 to fold under ai_ci, got %A" other
+
+                    // latin1 labels the UTF-8 bytes: é's two bytes decode as
+                    // the cp1252 pair Ã©, which doesn't equal é
+                    match runDefault store "SELECT _latin1'é'" with
+                    | ResultSet(_, [ [ Some "Ã©" ] ]) -> ()
+                    | other -> failtestf "expected _latin1'é' to read back as Ã©, got %A" other
+
+                    match runDefault store "SELECT _latin1'é' = 'é'" with
+                    | ResultSet(_, [ [ Some "0" ] ]) -> ()
+                    | other -> failtestf "expected the mojibake pair to differ from é, got %A" other
+
+                    // ascii labels byte-wise: one '?' per non-7-bit byte
+                    match runDefault store "SELECT _ascii'å'" with
+                    | ResultSet(_, [ [ Some "??" ] ]) -> ()
+                    | other -> failtestf "expected _ascii'å' to read back as ??, got %A" other
+
+                    // the ASCII subset behaves identically in every charset
+                    match runDefault store "SELECT _ascii'a' = 'A'" with
+                    | ResultSet(_, [ [ Some "1" ] ]) -> ()
+                    | other -> failtestf "expected the ascii subset to fold under the connection collation, got %A" other
+
+                    // an unknown charset is a syntax error, like MySQL
+                    match Fsdb.Parser.parse "SELECT _nosuchcharset'x'" with
+                    | Error _ -> ()
+                    | Ok _ -> failtestf "expected an unknown introducer charset to be a parse error"
 
                 testCase "CONVERT(expr USING charset) transcodes with MySQL's cp1252/lossy rules"
                 <| fun _ ->

@@ -1235,7 +1235,7 @@ let createTable
                 Ok(Map.add key (reindexTable table) db, ()))
 
     if result.IsOk then
-        emit store (Some(SchemaChanged(dbName, CreateTable(tableName, columns, indexes, foreignKeys, false, None, None))))
+        emit store (Some(SchemaChanged(dbName, CreateTable(tableName, columns, indexes, foreignKeys, false, tableCharset, tableCollation))))
 
     result
 
@@ -1305,10 +1305,34 @@ let private applyAlterAction (table: Table) (action: AlterAction) : Result<Table
     | AddColumn(col, position) ->
         let fill = addedColumnFill col
 
+        // The table's declared defaults attach to the new string column the
+        // same way `CREATE TABLE` bakes them — MySQL-verified: `ALTER TABLE
+        // t ADD COLUMN name VARCHAR(10)` on a table declared
+        // `COLLATE=utf8mb4_unicode_ci` reports that collation on the new
+        // column, while a column-level COLLATE still wins; a plain table
+        // lands on the server default.
+        let colWithDefaults =
+            match col.Type with
+            | TChar _
+            | TVarchar _
+            | TTinyText
+            | TText
+            | TMediumText
+            | TLongText
+            | TEnum _
+            | TSet _ ->
+                { col with
+                    Collation =
+                        col.Collation
+                        |> Option.orElse table.TableCollation
+                        |> Option.orElse (Some Collation.defaultCollation.Name)
+                    Charset = col.Charset |> Option.orElse table.TableCharset }
+            | _ -> col
+
         resolvePosition table.Columns (List.length table.Columns) position
         |> Result.map (fun idx ->
             { table with
-                Columns = table.Columns |> insertAt idx col
+                Columns = table.Columns |> insertAt idx colWithDefaults
                 RowsArray = table.RowsArray |> Seq.map (fun r -> r |> Array.toList |> insertAt idx fill |> Array.ofList) |> ImmutableArray.CreateRange },
             None)
     | DropColumn name ->

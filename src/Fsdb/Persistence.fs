@@ -760,6 +760,8 @@ let private encodeTable (t: Table) : JsonNode =
     o.["foreignKeys"] <- arr (t.ForeignKeys |> List.map encodeForeignKeyDef)
     o.["nextAutoId"] <- i64Node t.NextAutoId
     o.["rows"] <- encodeRows t.RowsArray
+    o.["tableCharset"] <- (t.TableCharset |> Option.map str |> Option.defaultValue null)
+    o.["tableCollation"] <- (t.TableCollation |> Option.map str |> Option.defaultValue null)
     o
 
 let private decodeTable (node: JsonNode) : Table =

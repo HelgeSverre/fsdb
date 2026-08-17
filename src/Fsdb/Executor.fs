@@ -483,7 +483,16 @@ let private resolvedCollation (ctx: EvalContext) (expr: Expr) : Collation.Collat
             // by the server default ai_ci (latin1_swedish_ci/ascii_general_ci
             // fold case and most accents the same way for the common cases).
             | Some "binary" -> Collation.tryFind "utf8mb4_bin"
-            | _ -> Some(def.Collation |> Option.bind Collation.tryFind |> Option.defaultValue Collation.defaultCollation)
+            | _ ->
+                // A real column always carries a baked-in collation; a
+                // stringy def with neither charset nor collation is a
+                // synthetic derived-table column (`deriveColumns`), whose
+                // value is whatever its source expression produced — so the
+                // connection collation is the closest resolution, and for
+                // literals the exact one.
+                def.Collation
+                |> Option.bind Collation.tryFind
+                |> Option.orElseWith (fun () -> Some ctx.Store.ConnectionCollation)
         | _ -> None
 
 /// The collation an equality-classified key resolves under: an explicit
@@ -660,33 +669,47 @@ let private equiKeyOf (keyIndices: int[]) (row: Value[]) : Value[] option =
     if key |> Array.exists (fun v -> v = VNull) then None else Some key
 
 /// `Dictionary<Value[], _>` key comparer for the hash join's build/probe
-/// keys — must agree with `Value.compare`'s SQL equality (case/pad-
-/// insensitive strings, numeric cross-type coercion), not .NET's ordinal/
-/// exact default, or matches the nested loop keeps (`'Alice' = 'alice'`, `1
-/// = 1.0`) would silently vanish from the hash path. `GetHashCode` only
-/// needs to *agree* with `Equals` — every value that could tie under
-/// `Value.compare` must land in the same bucket — so it hashes a coarser
-/// normalized form (case/pad-folded text, or a `double`) while `Equals`
-/// still defers to the real `Value.compare` for the exact answer.
+/// keys — must agree with the equality the nested-loop fallback's `ON`
+/// evaluation uses (each key column's own collation for strings, `Value.
+/// compare`'s numeric cross-type coercion otherwise), not .NET's ordinal/
+/// exact default, or matches the nested loop keeps (`'Alice' = 'alice'` on
+/// an ai_ci column, `1 = 1.0`) would silently vanish from the hash path.
+/// `GetHashCode` only needs to *agree* with `Equals` — every value that
+/// could tie under a column's collation must land in the same bucket — so
+/// it hashes a coarser normalized form (the column collation's folded hash,
+/// or a `double`) while `Equals` still does the exact per-column check.
 /// `keyClassOf`/`rowsMatchKeyClasses` keep this comparer from ever seeing a
 /// pair `Value.compare` treats non-uniformly depending on which side each
 /// value is on (a parseable-as-date string vs. a `DATE`).
-type private JoinKeyComparer() =
-    static let bucketOf (v: Value) : obj =
+type private JoinKeyComparer(collations: Collation.Collation list) =
+    let bucketOf (i: int) (v: Value) : obj =
         match v with
         | VInt _
         | VDouble _
         | VDecimal _ -> box (Value.toDouble v)
         // The collation's hash folds case *and* accents (keeping trailing
         // spaces significant) — 'åge' and 'age' must land in the same bucket
-        // for `Equals`' folded `Value.compare` to ever see them. A hash, not
-        // `KeyOf`: hashing needs no canonical form, so this avoids a full
-        // sort-key materialization per string per row.
-        | _ -> box (Collation.defaultCollation.HashOf (Value.toText v |> Option.defaultValue ""))
+        // for `Equals`' folded per-column check to ever see them. A hash,
+        // not `KeyOf`: hashing needs no canonical form, so this avoids a
+        // full sort-key materialization per string per row.
+        | _ -> box ((collations.[i]).HashOf (Value.toText v |> Option.defaultValue ""))
 
     interface IEqualityComparer<Value[]> with
-        member _.Equals(a: Value[], b: Value[]) = Array.forall2 (fun x y -> Value.compare x y = 0) a b
-        member _.GetHashCode(a: Value[]) = a |> Array.fold (fun h v -> h * 31 + (bucketOf v).GetHashCode()) 17
+        member _.Equals(a: Value[], b: Value[]) =
+            a
+            |> Array.mapi (fun i x ->
+                let y = b.[i]
+
+                match x, y with
+                // The key column's own collation decides string equality —
+                // a bin column matches byte-for-byte, an ai_ci one folds
+                // åge/age — the same rule the nested-loop path's `BinOp Eq`
+                // applies, so the two join paths can never disagree.
+                | VString sx, VString sy -> (collations.[i]).Equals sx sy
+                | _ -> Value.compare x y = 0)
+            |> Array.forall id
+
+        member _.GetHashCode(a: Value[]) = a |> Array.mapi (fun i v -> (bucketOf i v).GetHashCode()) |> Array.fold (fun h x -> h * 31 + x) 17
 
 /// Like `Storage.traverse`, but over a lazy `seq` rather than a strict
 /// `list` — short-circuits on the first `Error` without ever visiting (or
@@ -853,12 +876,13 @@ let private streamLimited
 /// needs every candidate re-checked), so laziness costs those nothing
 /// beyond a `seq`'s per-item overhead over a list comprehension's.
 let private hashPairs
+    (collations: Collation.Collation list)
     (buildKeyOf: 'b -> Value[] option)
     (probeKeyOf: 'p -> Value[] option)
     (build: (int * 'b) list)
     (probe: (int * 'p) list)
     : (int * 'b * int * 'p) seq =
-    let buckets = Dictionary<Value[], ResizeArray<int * 'b>>(JoinKeyComparer())
+    let buckets = Dictionary<Value[], ResizeArray<int * 'b>>(JoinKeyComparer(collations))
 
     for buildIndex, buildItem in build do
         match buildKeyOf buildItem with
@@ -1255,19 +1279,53 @@ and private resolveTableRef (store: Store) (dbName: string) (tableRef: TableRef)
 /// than trusting the declared type. The *rows* underneath these synthetic
 /// columns are still `runSelectStmt`'s real typed `Value`s, though — see
 /// `resolveFromItem` below — only the column metadata is synthesized.
-and private deriveColumns (names: string list) : ColumnDef list =
-    names
-    |> List.map (fun n ->
-        { Name = n
-          Type = TText
-          Nullable = true
-          Default = None
-          AutoIncrement = false
-          PrimaryKey = false
-          Unique = false
-          Generated = None
-          Collation = None
-          Charset = None })
+and private deriveColumns (names: string list) (collations: Collation.Collation list) : ColumnDef list =
+    List.map2
+        (fun n (col: Collation.Collation) ->
+            { Name = n
+              Type = TText
+              Nullable = true
+              Default = None
+              AutoIncrement = false
+              PrimaryKey = false
+              Unique = false
+              Generated = None
+              Collation = Some col.Name
+              Charset = None })
+        names
+        collations
+
+/// One `SELECT`'s per-output-column collations, resolved the same way
+/// `runSelect`'s own DISTINCT keys are (`keyCollation` on the output column
+/// name through the select's own context) — a bin column keeps åge/age/ÅGE
+/// apart, an ai_ci one folds them, and a literal output (no source column to
+/// resolve) falls back to the connection collation. Used by the UNION
+/// dedupe and by `resolveFromItem`'s derived-table metadata, so both see the
+/// same collation for the same select.
+and private selectColumnCollations
+    (store: Store)
+    (registry: Registry)
+    (dbName: string)
+    (select: SelectStmt)
+    (names: string list)
+    : Collation.Collation list =
+    let columns, qualifier =
+        match select.From with
+        | Some fromItem ->
+            match resolveFromItem store registry dbName fromItem with
+            | Ok(cols, _) -> cols, fromItemQualifier fromItem
+            | Error _ -> [], ""
+        | None -> [], ""
+
+    let qualifiers =
+        if qualifier = "" then
+            Map.empty
+        else
+            singleQualifier qualifier columns
+
+    let ctx = contextFactory store registry dbName (columnIndexOf columns) qualifiers None (probeRow columns)
+
+    names |> List.map (fun name -> keyCollation ctx (Col name))
 
 /// Resolves one `FromItem` — a real/virtual table via `resolveTableRef`, or
 /// a derived table by running its subquery (uncorrelated: a plain derived
@@ -1287,9 +1345,34 @@ and private resolveFromItem (store: Store) (registry: Registry) (dbName: string)
             | UnionSelect(first, rest, orderBy, limit, offset) -> runUnionStmt store registry dbName first rest orderBy limit offset
 
         match result with
-        | ResultSet(cols, _) -> Ok(deriveColumns cols, typedRows)
+        | ResultSet(cols, _) ->
+            // The derived columns carry their source collations — a literal
+            // resolves to the connection collation, a bin column stays bin,
+            // a union aggregates to its strictest branch — so outer
+            // comparisons against them use the same collation MySQL would.
+            let collations =
+                match body with
+                | PlainSelect select -> selectColumnCollations store registry dbName select cols
+                | UnionSelect(first, rest, _, _, _) ->
+                    (first :: (rest |> List.map snd))
+                    |> List.map (fun branch -> selectColumnCollations store registry dbName branch cols)
+                    |> List.reduce (List.map2 strictestUnionCollation)
+
+            Ok(deriveColumns cols collations, typedRows)
         | Err(code, message) -> Error(Err(code, message))
         | Affected _ -> Error(Err(1064, "derived table did not return a resultset"))
+
+/// MySQL's UNION result column collation aggregates across branches — the
+/// strictest wins, so a bin column on any branch makes the combined column
+/// byte-wise (verified: `SELECT a_ci ... UNION SELECT b_bin ...` keeps
+/// 'åge'/'age' apart in both orders). Among non-bin collations the first
+/// operand's stands (ponytail: MySQL's full UCA-level aggregation rules
+/// aren't modeled).
+and private strictestUnionCollation (a: Collation.Collation) (b: Collation.Collation) : Collation.Collation =
+    if a.Name = "utf8mb4_bin" || b.Name = "utf8mb4_bin" then
+        Collation.tryFind "utf8mb4_bin" |> Option.defaultValue a
+    else
+        a
 
 /// The qualifier a `FROM`/`JOIN` source's columns resolve `qualifier.col`
 /// against: a real table's alias (or its own name), or a derived table's
@@ -1389,6 +1472,31 @@ and private namedJoinOn
 /// than a materialized cross-product `list`, which is what lets a
 /// non-equi join at real table sizes actually finish instead of exhausting
 /// memory.
+/// The per-key-column collations `JoinKeyComparer` folds under — each key
+/// column's own collation (the left side's when it declares one, else the
+/// right's), the same resolution the nested-loop path's `ON` equality
+/// applies, so the two join paths can never disagree. Non-string key
+/// columns fall back to the default (unused for them — the comparer's
+/// numeric branch hashes a `double`).
+and private joinKeyCollations
+    (left: ColumnDef list)
+    (right: ColumnDef list)
+    (equiKeys: (int * int) list)
+    : Collation.Collation list =
+    let colOf (c: ColumnDef) =
+        if InformationSchema.isStringy c.Type then
+            match c.Charset with
+            | Some "binary" -> Collation.tryFind "utf8mb4_bin"
+            | _ -> c.Collation |> Option.bind Collation.tryFind
+        else
+            None
+
+    equiKeys
+    |> List.map (fun (li, ri) ->
+        colOf left.[li]
+        |> Option.orElseWith (fun () -> colOf right.[ri])
+        |> Option.defaultValue Collation.defaultCollation)
+
 and private applyJoin
     (store: Store)
     (registry: Registry)
@@ -1501,6 +1609,8 @@ and private applyJoin
             let keyClasses =
                 equiKeys |> List.map (fun (li, ri) -> keyClassOf combinedColumnsSoFar.[li].Type joinColumns.[ri].Type)
 
+            let keyCollations = joinKeyCollations combinedColumnsSoFar joinColumns equiKeys
+
             let hashEligible =
                 not equiKeys.IsEmpty
                 && keyClasses |> List.forall Option.isSome
@@ -1531,21 +1641,21 @@ and private applyJoin
                     // much of it ever actually runs.
                     let combined : Value[] seq =
                         if buildOnLeft then
-                            hashPairs (equiKeyOf leftKeyIndices) (equiKeyOf rightKeyIndices) leftIndexed rightIndexed
+                            hashPairs keyCollations (equiKeyOf leftKeyIndices) (equiKeyOf rightKeyIndices) leftIndexed rightIndexed
                             |> Seq.map (fun (_, l, _, r) -> Array.append l r)
                         else
-                            hashPairs (equiKeyOf rightKeyIndices) (equiKeyOf leftKeyIndices) rightIndexed leftIndexed
+                            hashPairs keyCollations (equiKeyOf rightKeyIndices) (equiKeyOf leftKeyIndices) rightIndexed leftIndexed
                             |> Seq.map (fun (_, r, _, l) -> Array.append l r)
 
                     Ok(newSources, combined, coalesceNames)
                 | _ ->
                     let candidates : (int * int * Value[]) list =
                         if buildOnLeft then
-                            hashPairs (equiKeyOf leftKeyIndices) (equiKeyOf rightKeyIndices) leftIndexed rightIndexed
+                            hashPairs keyCollations (equiKeyOf leftKeyIndices) (equiKeyOf rightKeyIndices) leftIndexed rightIndexed
                             |> Seq.map (fun (li, l, ri, r) -> li, ri, Array.append l r)
                             |> List.ofSeq
                         else
-                            hashPairs (equiKeyOf rightKeyIndices) (equiKeyOf leftKeyIndices) rightIndexed leftIndexed
+                            hashPairs keyCollations (equiKeyOf rightKeyIndices) (equiKeyOf leftKeyIndices) rightIndexed leftIndexed
                             |> Seq.map (fun (ri, r, li, l) -> li, ri, Array.append l r)
                             |> List.ofSeq
 
@@ -1680,6 +1790,8 @@ and private applyMutationJoin
                 let keyClasses =
                     equiKeys |> List.map (fun (li, ri) -> keyClassOf combinedColumnsSoFar.[li].Type joinColumns.[ri].Type)
 
+                let keyCollations = joinKeyCollations combinedColumnsSoFar joinColumns equiKeys
+
                 let hashEligible =
                     not equiKeys.IsEmpty
                     && keyClasses |> List.forall Option.isSome
@@ -1707,11 +1819,11 @@ and private applyMutationJoin
 
                     let candidates : (int * int * (Value[] option list * Value[])) list =
                         if buildOnLeft then
-                            hashPairs leftKeyOf rightKeyOf leftIndexed rightIndexed
+                            hashPairs keyCollations leftKeyOf rightKeyOf leftIndexed rightIndexed
                             |> Seq.map (fun (li, (lIdent, lFlat), ri, r) -> li, ri, (lIdent @ [ Some r ], Array.append lFlat r))
                             |> List.ofSeq
                         else
-                            hashPairs rightKeyOf leftKeyOf rightIndexed leftIndexed
+                            hashPairs keyCollations rightKeyOf leftKeyOf rightIndexed leftIndexed
                             |> Seq.map (fun (ri, r, li, (lIdent, lFlat)) -> li, ri, (lIdent @ [ Some r ], Array.append lFlat r))
                             |> List.ofSeq
 
@@ -2110,71 +2222,55 @@ and runUnionStmt
     : QueryResult * byte list * Value[] list =
     let runBranch (select: SelectStmt) = runSelectStmt store registry dbName select None
 
-    // The per-output-column collations the dedupe folds under, resolved the
-    // same way `runSelect`'s own DISTINCT keys are (`keyCollation` on the
-    // output column name through the first branch's context) — a bin column
-    // keeps åge/age/ÅGE apart, an ai_ci one folds them, and a literal
-    // branch column (no source column to resolve) falls back to the
-    // connection collation, exactly as MySQL's coercibility rules land.
-    let outputCollationOf : string -> Collation.Collation =
-        let columns, qualifier =
-            match first.From with
-            | Some fromItem ->
-                match resolveFromItem store registry dbName fromItem with
-                | Ok(cols, _) -> cols, fromItemQualifier fromItem
-                | Error _ -> [], ""
-            | None -> [], ""
-
-        let qualifiers =
-            if qualifier = "" then
-                Map.empty
-            else
-                singleQualifier qualifier columns
-
-        let ctx = contextFactory store registry dbName (columnIndexOf columns) qualifiers None (probeRow columns)
-
-        fun name -> keyCollation ctx (Col name)
-
     // Each branch's text row paired with its own typed row, kept aligned
     // through combining/deduping so the `ORDER BY` below can compare typed
     // values instead of re-wrapping the text back into a lexicographically-
     // comparing `VString` (`SELECT n FROM t UNION SELECT n FROM t ORDER BY
     // n` sorting "10" before "2" otherwise).
     let combine
-        (acc: Result<string list * ((string option list) * Value[]) list * byte list list, QueryResult>)
+        (acc: Result<string list * ((string option list) * Value[]) list * byte list list * Collation.Collation list, QueryResult>)
         (isAll: bool, select: SelectStmt)
         =
         acc
-        |> Result.bind (fun (cols, rowsSoFar, typesSoFar) ->
+        |> Result.bind (fun (cols, rowsSoFar, typesSoFar, collationsSoFar) ->
             match runBranch select with
             | Err(code, message), _, _ -> Error(Err(code, message))
             | Affected _, _, _ -> Error(Err(1064, "UNION branch did not return a resultset"))
             | ResultSet(branchCols, _), _, _ when List.length branchCols <> List.length cols ->
                 Error(Err(1222, "The used SELECT statements have a different number of columns"))
-            | ResultSet(_, branchRows), branchTypes, branchTyped ->
+            | ResultSet(branchCols, branchRows), branchTypes, branchTyped ->
                 let branchPaired = List.zip branchRows branchTyped
+
+                let branchCollations = selectColumnCollations store registry dbName select branchCols
+                let collations =
+                    if collationsSoFar.IsEmpty then
+                        branchCollations
+                    else
+                        List.map2 strictestUnionCollation collationsSoFar branchCollations
 
                 let combined =
                     if isAll then
                         rowsSoFar @ branchPaired
                     else
                         // Collation-aware dedupe: MySQL folds åge/age in a
-                        // UNION via each column's own collation — resolved
-                        // through the first branch's context above.
+                        // UNION via each column's aggregated collation
+                        // (strictest branch wins — bin never folds).
                         let dedupeKey (text: string option list) =
-                            List.map2 (fun name (cell: string option) -> cell |> Option.map (outputCollationOf name).KeyOf) cols text
+                            List.map2 (fun (col: Collation.Collation) (cell: string option) -> cell |> Option.map col.KeyOf) collations text
 
                         (rowsSoFar @ branchPaired) |> List.distinctBy (fst >> dedupeKey)
 
-                Ok(cols, combined, branchTypes :: typesSoFar))
+                Ok(cols, combined, branchTypes :: typesSoFar, collations))
 
     match runSelectStmt store registry dbName first None with
     | Err(code, message), _, _ -> Err(code, message), [], []
     | Affected _, _, _ -> Err(1064, "UNION branch did not return a resultset"), [], []
     | ResultSet(firstCols, firstRows), firstTypes, firstTyped ->
-        match rest |> List.fold combine (Ok(firstCols, List.zip firstRows firstTyped, [ firstTypes ])) with
+        let firstCollations = selectColumnCollations store registry dbName first firstCols
+
+        match rest |> List.fold combine (Ok(firstCols, List.zip firstRows firstTyped, [ firstTypes ], firstCollations)) with
         | Error e -> e, [], []
-        | Ok(cols, allPaired, typesSoFar) ->
+        | Ok(cols, allPaired, typesSoFar, _) ->
             // MySQL's union type reconciliation across every branch, and
             // every row's values coerced to it — an `ORDER BY` over the
             // mixed-typed union then sorts exactly as MySQL does.
@@ -2297,9 +2393,6 @@ and private evalAggregate
         | Distinct e -> true, e
         | e -> false, e
 
-    let evalNonNull (expr: Expr) : Result<Value list, EvalError> =
-        rows |> traverse (fun row -> evalExpr (ctxFor row) expr) |> Result.map (List.filter (function VNull -> false | _ -> true))
-
     match args with
     | [ Star _ ] when isCount -> Ok(VInt(int64 (List.length rows)))
     | arg :: rest when isGroupConcat ->
@@ -2316,12 +2409,12 @@ and private evalAggregate
             | Some s -> s
             | None -> ","
 
-        let evalRow (row: Value[]) : Result<(Value * (Value * Collation.Collation option) list) option, EvalError> =
+        let evalRow (row: Value[]) : Result<(Value * Value * (Value * Collation.Collation option) list) option, EvalError> =
             let ctx = ctxFor row
             evalExpr ctx innerExpr
             |> Result.bind (function
                 | VNull -> Ok None
-                | v -> orderKeys |> traverse (fst >> evalOrderKey ctx) |> Result.map (fun keys -> Some(v, keys)))
+                | v -> orderKeys |> traverse (fst >> evalOrderKey ctx) |> Result.map (fun keys -> Some(v, collationKeyOf ctx innerExpr v, keys)))
 
         rows
         |> traverse evalRow
@@ -2331,23 +2424,57 @@ and private evalAggregate
                 if orderKeys.IsEmpty then
                     present
                 else
-                    present |> List.sortWith (fun (_, ka) (_, kb) -> compareByOrderKeys (List.map snd orderKeys) ka kb)
-            let deduped = if distinct then List.distinctBy fst ordered else ordered
+                    present |> List.sortWith (fun (_, _, ka) (_, _, kb) -> compareByOrderKeys (List.map snd orderKeys) ka kb)
+            // Collation-aware dedupe: åge/age fold to one value under an
+            // ai_ci column, stay distinct under bin.
+            let deduped = if distinct then List.distinctBy (fun (_, key, _) -> key) ordered else ordered
 
             if deduped.IsEmpty then
                 VNull
             else
-                deduped |> List.map (fst >> toText >> Option.defaultValue "") |> String.concat separator |> VString)
+                deduped |> List.map (fun (v, _, _) -> v |> toText |> Option.defaultValue "") |> String.concat separator |> VString)
     | [ arg ] ->
         let distinct, innerExpr = unwrapDistinct arg
+        let isMin = System.String.Equals(name, "MIN", System.StringComparison.OrdinalIgnoreCase)
+        let isMax = System.String.Equals(name, "MAX", System.StringComparison.OrdinalIgnoreCase)
 
         match Functions.lookupAggregate name registry with
         | None -> Error(unknownFunction name)
         | Some fold ->
-            evalNonNull innerExpr
-            |> Result.map (fun nonNull ->
-                let deduped = if distinct then List.distinct nonNull else nonNull
-                if isCount || not deduped.IsEmpty then fold deduped else VNull)
+            rows
+            |> traverse (fun row ->
+                evalExpr (ctxFor row) innerExpr
+                |> Result.map (fun v -> v, collationKeyOf (ctxFor row) innerExpr v))
+            |> Result.map (fun keyed ->
+                let nonNull = keyed |> List.filter (fst >> function VNull -> false | _ -> true)
+                // `DISTINCT` folds by the expression's own collation
+                // (MySQL-verified: COUNT(DISTINCT name) over åge/age/ÅGE
+                // is 1 under ai_ci, 3 under bin).
+                let deduped = if distinct then nonNull |> List.distinctBy snd |> List.map fst else nonNull |> List.map fst
+
+                if isCount || not deduped.IsEmpty then
+                    // MIN/MAX over strings compare by the expression's own
+                    // collation weights, with primary-equal values keeping
+                    // the first-seen one (MySQL-verified: MAX('ÅGE','age')
+                    // and MAX('age','ÅGE') each return whichever came
+                    // first) — `Value.compare`'s folded server-default
+                    // order would pick wrong.
+                    if (isMin || isMax) && deduped |> List.forall (function VString _ -> true | _ -> false) then
+                        let col = keyCollation (ctxFor (List.tryHead rows |> Option.defaultValue [||])) innerExpr
+
+                        let text (v: Value) =
+                            match v with
+                            | VString s -> s
+                            | _ -> ""
+
+                        if isMax then
+                            List.reduce (fun best v -> if col.ComparePrimary (text best) (text v) >= 0 then best else v) deduped
+                        else
+                            List.reduce (fun best v -> if col.ComparePrimary (text best) (text v) <= 0 then best else v) deduped
+                    else
+                        fold deduped
+                else
+                    VNull)
     | Distinct firstExpr :: rest when isCount ->
         // `COUNT(DISTINCT a, b)` — `distinctArg` (the call-argument parser)
         // attaches `Distinct` only to the first comma-separated argument,
@@ -2355,15 +2482,20 @@ and private evalAggregate
         // not just `a`. Evaluate every argument per row, drop a row if
         // *any* column of it is NULL (SQL's usual "NULL drops the row from
         // an aggregate" rule, applied to the whole tuple), dedupe the
-        // tuples, and count what's left.
+        // tuples — by each element's own collation — and count what's
+        // left.
         let allArgs = firstExpr :: rest
 
         rows
-        |> traverse (fun row -> allArgs |> traverse (evalExpr (ctxFor row)))
+        |> traverse (fun row ->
+            let ctx = ctxFor row
+
+            allArgs
+            |> traverse (fun e -> evalExpr ctx e |> Result.map (fun v -> v, collationKeyOf ctx e v)))
         |> Result.map (fun tuples ->
             tuples
-            |> List.filter (List.exists (function VNull -> true | _ -> false) >> not)
-            |> List.distinct
+            |> List.filter (List.exists (fst >> function VNull -> true | _ -> false) >> not)
+            |> List.distinctBy (List.map snd)
             |> List.length
             |> int64
             |> VInt)
