@@ -672,8 +672,13 @@ let private rowsMatchKeyClasses (classes: bool list) (keyIndices: int list) (row
 /// and is simply never added to (or looked up in) the hash bucket, the same
 /// way it would silently fail every `Eq` check in the nested loop.
 let private equiKeyOf (keyIndices: int[]) (row: Value[]) : Value[] option =
-    let key = keyIndices |> Array.map (fun i -> row.[i])
-    if key |> Array.exists (fun v -> v = VNull) then None else Some key
+    match keyIndices with
+    | [| i |] ->
+        let v = row.[i]
+        if v = VNull then None else Some [| v |]
+    | _ ->
+        let key = keyIndices |> Array.map (fun i -> row.[i])
+        if key |> Array.exists (fun v -> v = VNull) then None else Some key
 
 /// `Dictionary<Value[], _>` key comparer for the hash join's build/probe
 /// keys — must agree with the equality the nested-loop fallback's `ON`
@@ -716,7 +721,13 @@ type private JoinKeyComparer(collations: Collation.Collation list) =
                 | _ -> Value.compare x y = 0)
             |> Array.forall id
 
-        member _.GetHashCode(a: Value[]) = a |> Array.mapi (fun i v -> (bucketOf i v).GetHashCode()) |> Array.fold (fun h x -> h * 31 + x) 17
+        member _.GetHashCode(a: Value[]) =
+            match a with
+            // Single-column key — the common case — hashes its one bucket
+            // without the `Array.mapi`/`Array.fold` the multi-column shape
+            // needs. Same hash function, no per-key array churn.
+            | [| v |] -> (bucketOf 0 v).GetHashCode()
+            | _ -> a |> Array.mapi (fun i v -> (bucketOf i v).GetHashCode()) |> Array.fold (fun h x -> h * 31 + x) 17
 
 /// Like `Storage.traverse`, but over a lazy `seq` rather than a strict
 /// `list` — short-circuits on the first `Error` without ever visiting (or
@@ -887,7 +898,7 @@ let private hashPairs
     (buildKeyOf: 'b -> Value[] option)
     (probeKeyOf: 'p -> Value[] option)
     (build: (int * 'b) list)
-    (probe: (int * 'p) list)
+    (probe: (int * 'p) seq)
     : (int * 'b * int * 'p) seq =
     let buckets = Dictionary<Value[], ResizeArray<int * 'b>>(JoinKeyComparer(collations))
 
@@ -1543,7 +1554,11 @@ and private applyJoin
         // never `rowsSoFar` itself, so a chain of `JOIN`s only pays this
         // force once per link, not once per read.
         let leftIndexed = rowsSoFar |> List.ofSeq |> List.indexed
-        let rightIndexed = joinRows |> List.indexed
+        // `rightCount` (not a materialized indexed list) sizes the build
+        // decision; the streaming inner-join path below probes `joinRows`
+        // directly with lazy indices, so the 50k (index, row) tuples are only
+        // forced where an outer join or the nested-loop fallback needs them.
+        let rightCount = joinRows |> Seq.length
 
         let resolveQualified (qualifier: string) (column: string) =
             qualifiers
@@ -1553,7 +1568,7 @@ and private applyJoin
                 |> List.tryFindIndex (fun definition -> System.String.Equals(definition.Name, column, System.StringComparison.OrdinalIgnoreCase))
                 |> Option.map (fun index -> offset + index, columns.[index].Type))
 
-        let buildCombinedRows (matched: (int * int * Value[]) list) =
+        let buildCombinedRows (rightIndexed: (int * Value[]) list) (matched: (int * int * Value[]) list) =
             let matchedCombined = matched |> List.map (fun (_, _, c) -> c)
             let matchedLeft = matched |> List.map (fun (li, _, _) -> li) |> Set.ofList
             let matchedRight = matched |> List.map (fun (_, ri, _) -> ri) |> Set.ofList
@@ -1633,7 +1648,7 @@ and private applyJoin
             if hashEligible then
                 let leftKeyIndices = equiKeys |> List.map fst |> Array.ofList
                 let rightKeyIndices = equiKeys |> List.map snd |> Array.ofList
-                let buildOnLeft = leftIndexed.Length <= rightIndexed.Length
+                let buildOnLeft = leftIndexed.Length <= rightCount
 
                 match join.Kind, residualConjuncts with
                 | (InnerJoin | CrossJoin | NaturalJoin), [] ->
@@ -1649,14 +1664,16 @@ and private applyJoin
                     // much of it ever actually runs.
                     let combined : Value[] seq =
                         if buildOnLeft then
-                            hashPairs keyCollations (equiKeyOf leftKeyIndices) (equiKeyOf rightKeyIndices) leftIndexed rightIndexed
+                            hashPairs keyCollations (equiKeyOf leftKeyIndices) (equiKeyOf rightKeyIndices) leftIndexed (joinRows |> Seq.indexed)
                             |> Seq.map (fun (_, l, _, r) -> Array.append l r)
                         else
-                            hashPairs keyCollations (equiKeyOf rightKeyIndices) (equiKeyOf leftKeyIndices) rightIndexed leftIndexed
+                            hashPairs keyCollations (equiKeyOf rightKeyIndices) (equiKeyOf leftKeyIndices) (joinRows |> Seq.indexed |> List.ofSeq) leftIndexed
                             |> Seq.map (fun (_, r, _, l) -> Array.append l r)
 
                     Ok(newSources, combined, coalesceNames)
                 | _ ->
+                    let rightIndexed = joinRows |> Seq.indexed |> List.ofSeq
+
                     let candidates : (int * int * Value[]) list =
                         if buildOnLeft then
                             hashPairs keyCollations (equiKeyOf leftKeyIndices) (equiKeyOf rightKeyIndices) leftIndexed rightIndexed
@@ -1669,8 +1686,10 @@ and private applyJoin
 
                     candidates
                     |> keepMatches residualHolds id
-                    |> Result.map (buildCombinedRows >> fun (s, r) -> s, r :> Value[] seq, coalesceNames)
+                    |> Result.map (buildCombinedRows rightIndexed >> fun (s, r) -> s, r :> Value[] seq, coalesceNames)
             else
+                let rightIndexed = joinRows |> Seq.indexed |> List.ofSeq
+
                 let pairs = seq { for li, l in leftIndexed do for ri, r in rightIndexed -> li, ri, l, r }
 
                 pairs
@@ -1680,7 +1699,7 @@ and private applyJoin
                     evalExpr { ctxFor combined with Clause = OnClause } effectiveOn
                     |> Result.map (fun v -> if truthy v = Some true then Some(li, ri, combined) else None))
                 |> Result.mapError Err
-                |> Result.map (buildCombinedRows >> fun (s, r) -> s, r :> Value[] seq, coalesceNames)
+                |> Result.map (buildCombinedRows rightIndexed >> fun (s, r) -> s, r :> Value[] seq, coalesceNames)
 
 /// Like `applyJoin`, but for a multi-table `UPDATE`/`DELETE ... JOIN`
 /// rather than a `SELECT`: alongside the flattened row `evalExpr` needs,
