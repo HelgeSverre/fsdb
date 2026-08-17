@@ -16,8 +16,8 @@ just bench-scale    # latency suite at 100k/500k rows, results -> results/<git-s
 
 Prerequisites and rules:
 
-- MySQL 8.4 keg-only at `/opt/homebrew/opt/mysql@8.4` (no brew services —
-  the recipe runs `mysqld` ad hoc on port 3316 with a throwaway datadir at
+- MySQL 8.4's `mysql`/`mysqld`/`mysqladmin` on PATH (no brew services — the
+  recipe runs `mysqld` ad hoc on port 3316 with a throwaway datadir at
   `benchmarks/mysql-data`, recreated automatically if deleted).
   `bench-durable` also starts a second mysqld on port 3317 with
   `--skip-log-bin --innodb_flush_log_at_trx_commit=0 --sync_binlog=0`

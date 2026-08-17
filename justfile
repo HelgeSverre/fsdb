@@ -1,6 +1,8 @@
 # fsdb — MySQL-compatible database server in F#
 
-MYSQL := "/opt/homebrew/opt/mysql-client/bin/mysql"
+# MySQL 8.4 client/server tools — resolved from PATH (e.g. homebrew's
+# `/opt/homebrew/opt/mysql@8.4/bin`), not hardcoded machine paths.
+MYSQL := "mysql"
 PORT := "3307"
 
 # Show available recipes
@@ -100,8 +102,8 @@ uninstall dest="~/.local/bin":
 # === Bench ===
 # fsdb vs a native MySQL 8.4, run ad hoc (no brew services / launchd).
 
-MYSQLD := "/opt/homebrew/opt/mysql@8.4/bin/mysqld"
-MYSQLADMIN := "/opt/homebrew/opt/mysql@8.4/bin/mysqladmin"
+MYSQLD := "mysqld"
+MYSQLADMIN := "mysqladmin"
 BENCH_MYSQL_PORT := "3316"
 BENCH_MYSQL_NOFSYNC_PORT := "3317"
 # mysqld chdirs internally before resolving relative paths, so these must be absolute.

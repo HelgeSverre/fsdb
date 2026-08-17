@@ -88,7 +88,7 @@ round-trip test (`SLUGIFY`/`MEDIAN`) against a real client over the wire.
 All eight roadmap milestones are done: wire protocol, PDO/mysql-CLI
 compatibility, the SQL engine core, Laravel migrations, test-suite parity,
 the embedding API, opt-in persistence (`--data-dir`), and EXPLAIN +
-multi-table DML. See [ROADMAP.md](ROADMAP.md) for the milestone plan,
+multi-table DML. See [ROADMAP.md](docs/ROADMAP.md) for the milestone plan,
 acceptance gates, and per-milestone evidence.
 
 ### Compatibility gauntlet

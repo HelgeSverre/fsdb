@@ -55,10 +55,10 @@ build fails with "not defined".
   or design-doc references in code, comments, or test names). The same rules
   apply to markdown prose, and docs use words or `[x]` checkboxes for status,
   never emoji markers.
-- MySQL binaries (homebrew): client `/opt/homebrew/opt/mysql-client/bin/mysql`,
-  server `/opt/homebrew/opt/mysql@8.4/bin/mysqld`. Benchmarks refuse to run if
-  anything is listening on 3307, and spin up throwaway mysqld on 3316/3317 (ad
-  hoc, no brew services).
+- The justfile resolves `mysql`/`mysqld`/`mysqladmin` from PATH (MySQL 8.4 —
+  homebrew's keg-only `/opt/homebrew/opt/mysql@8.4/bin` is the usual source).
+  Benchmarks refuse to run if anything is listening on 3307, and spin up
+  throwaway mysqld on 3316/3317 (ad hoc, no brew services).
 - Persistence is opt-in via `--data-dir` (WAL + snapshot); default in-memory.
   Both halves are binary, no JSON: WAL `wal.bin` = `[len][crc32]` records over
   `CommitEvent` payloads (CRC torn-tail detection); snapshot `snapshot.fsdb` =
