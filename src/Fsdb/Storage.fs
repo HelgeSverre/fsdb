@@ -67,12 +67,13 @@ let toMySqlError (err: StorageError) : int * string =
 /// A table's rows, newest last. `OriginalName` keeps the as-created casing
 /// for information_schema, even though the catalog keys tables by their
 /// lowercased name. `Indexes`' `UNIQUE` entries (plus the primary key) are
-/// enforced on every `INSERT`/`UPDATE`/`upsertRows` (see
-/// `findUniqueCollision`); `ForeignKeys` are enforced on
-/// `INSERT`/`UPDATE`/`DELETE` (see `checkFkParents`/`cascadeDelete`), gated
-/// by `Store.ForeignKeyChecks`. Non-`UNIQUE` plain indexes remain metadata
-/// only — nothing in this engine does index-accelerated lookup yet, every
-/// scan is a full table scan.
+/// enforced via `UniqueIndex` on every `INSERT`/`UPDATE`/`upsertRows`/
+/// `DELETE`; `ForeignKeys` are enforced on `INSERT`/`UPDATE`/`DELETE` (see
+/// `checkFkParents`/`cascadeDelete`, also `UniqueIndex`-accelerated on the
+/// parent side), gated by `Store.ForeignKeyChecks`. Non-`UNIQUE` plain
+/// indexes remain metadata only, and every WHERE that doesn't reduce to a
+/// single PK/UNIQUE equality (see `tryUniqueLookup`) is still a full table
+/// scan.
 type Table =
     { OriginalName: string
       Columns: ColumnDef list
@@ -718,9 +719,7 @@ let private coerceAndCheck (strict: bool) (col: ColumnDef) (v: Value) : Result<V
 /// The `(keyName, column indices)` groups that must be unique: the primary
 /// key (if any, named `"PRIMARY"` the way MySQL reports it in error 1062,
 /// and treated as one group across however many columns it spans) plus
-/// every `UNIQUE` index, named after itself. Used by `upsertRows` to find
-/// the row (if any) an incoming `INSERT ... ON DUPLICATE KEY UPDATE` row
-/// collides with, and by `findUniqueCollision` for plain `INSERT`/`UPDATE`.
+/// every `UNIQUE` index, named after itself.
 let private uniqueKeyGroups (table: Table) : (string * int list) list =
     let pk =
         table.Columns |> List.indexed |> List.choose (fun (i, c) -> if c.PrimaryKey then Some i else None)
@@ -731,33 +730,6 @@ let private uniqueKeyGroups (table: Table) : (string * int list) list =
         |> List.choose (fun ix -> ix.Columns |> traverse (resolveColumn table.Columns) |> Result.toOption |> Option.map (fun idxs -> ix.Name, idxs))
 
     (if pk.IsEmpty then [] else [ "PRIMARY", pk ]) @ fromIndexes
-
-/// Whether `a` and `b` collide on unique-key group `idxs`: every column
-/// compares equal under `Value.compare`'s collation-aware rules (so
-/// `'Alice' = 'alice'` and `'a' = 'a '` collide, matching MySQL's default
-/// collation), *unless* any column in the group is `NULL` on either side —
-/// MySQL's unique indexes treat `NULL` as distinct from every other `NULL`,
-/// so a `NULL` anywhere in the group means "no collision" rather than "not
-/// equal, so no collision" (the difference matters for `IS NULL` groups: two
-/// all-NULL rows still don't collide).
-let private rowsCollideOn (idxs: int list) (a: Value[]) (b: Value[]) : bool =
-    idxs |> List.forall (fun i -> a.[i] <> VNull && b.[i] <> VNull && compare a.[i] b.[i] = 0)
-
-/// The first unique-key violation `candidate` has against `existingRows`, if
-/// any, as the `DuplicateKey` error 1062 wraps (the colliding key's name and
-/// a MySQL-style `-`-joined value for composite keys).
-let private findUniqueCollision (groups: (string * int list) list) (existingRows: Value[] list) (candidate: Value[]) : StorageError option =
-    existingRows
-    |> List.tryPick (fun existing ->
-        groups
-        |> List.tryPick (fun (name, idxs) ->
-            if rowsCollideOn idxs existing candidate then
-                let value =
-                    idxs |> List.map (fun i -> candidate.[i] |> toText |> Option.defaultValue "NULL") |> String.concat "-"
-
-                Some(DuplicateKey(name, value))
-            else
-                None))
 
 /// Stable equality key for values already coerced into a table column's
 /// declared type. Strings use the same case-insensitive, PAD SPACE semantics
@@ -1317,7 +1289,7 @@ let private insertCore
                                 // same multi-row INSERT's earlier rows too,
                                 // not just what was already committed before
                                 // the statement started — same reasoning as
-                                // `findUniqueCollision` just above.
+                                // the running unique-key `index` just above.
                                 // Ordinary parent tables need no overlay.
                                 // Only a self-FK needs rows accepted earlier
                                 // in this statement made visible, in their
@@ -1437,8 +1409,9 @@ let insertRowsIgnore
 /// `INSERT ... ON DUPLICATE KEY UPDATE`: like `insertRows`, but a candidate
 /// row that collides with an existing row on any unique key or the primary
 /// key is applied to `applyUpdate existingRow candidateRow` instead of being
-/// appended. Collision detection is collation-aware (`rowsCollideOn`), same
-/// as plain `INSERT`'s unique check.
+/// appended. Collision detection goes through the same `UniqueIndex`
+/// (collation-aware via `encodeConstraintKey`) as plain `INSERT`'s unique
+/// check.
 let upsertRows
     (store: Store)
     (dbName: string)
@@ -1457,17 +1430,18 @@ let upsertRows
 
                 indices
                 |> Result.bind (fun idxs ->
-                    let keySets = uniqueKeyGroups table |> List.map snd
+                    let uniqueGroups = uniqueKeyGroups table
 
-                    // `rowsAcc` holds the table's original rows, rewritten in place
-                    // as sibling candidates match them; `newRowsRev` holds rows this
-                    // same statement has inserted so far, newest first (cons is
-                    // O(1) — appended to `rowsAcc` once, after the fold, instead of
-                    // on every inserted row). A later candidate in the same batch
-                    // can still collide with either, so `findMatch` searches both.
-                    let findMatch (rows: Value[] list) (newRows: Value[] list) (candidate: Value[]) =
-                        let collides existing = keySets |> List.exists (fun ks -> rowsCollideOn ks existing candidate)
-                        rows |> List.tryFind collides |> Option.orElseWith (fun () -> newRows |> List.tryFind collides)
+                    // The running index (seeded from `table.UniqueIndex`,
+                    // rekeyed after every matched/inserted candidate) finds
+                    // the one row (if any) sharing a key with `candidate` in
+                    // O(log n) per group instead of scanning `rowsAcc`/
+                    // `newRows` — a later candidate in the same batch still
+                    // sees an earlier one's rewrite/insert, since both go
+                    // through the same rekeying.
+                    let findMatch (index: Map<string, Map<string, Value[]>>) (candidate: Value[]) : Value[] option =
+                        uniqueGroups
+                        |> List.tryPick (fun (name, idxs) -> encodeConstraintKey idxs candidate |> Option.bind (fun k -> Map.tryFind k (Map.find name index)))
 
                     let step acc (rowValues: Value list) =
                         acc
@@ -1479,7 +1453,8 @@ let upsertRows
                                   lastExplicit,
                                   affected,
                                   inserted: Value[] list,
-                                  updated: (Value[] * Value[]) list) ->
+                                  updated: (Value[] * Value[]) list,
+                                  index: Map<string, Map<string, Value[]>>) ->
                                 if List.length rowValues <> List.length idxs then
                                     Error(ColumnCountMismatch(List.length idxs, List.length rowValues))
                                 else
@@ -1492,13 +1467,13 @@ let upsertRows
                                         // Laravel Pulse's `key_hash BINARY(16) AS
                                         // (unhex(md5(key)))`) is still NULL in the raw
                                         // candidate at this point — `computeGenerated`
-                                        // fills it in before `findMatch`/`rowsCollideOn`
-                                        // run, so ON DUPLICATE KEY UPDATE actually finds
-                                        // the collision instead of degrading into a
-                                        // plain INSERT that then trips the unique check.
+                                        // fills it in before `findMatch` runs, so ON
+                                        // DUPLICATE KEY UPDATE actually finds the
+                                        // collision instead of degrading into a plain
+                                        // INSERT that then trips the unique check.
                                         computeGenerated (Array.ofList finalValues)
                                         |> Result.map (fun candidate ->
-                                            match findMatch rowsAcc newRowsRev candidate with
+                                            match findMatch index candidate with
                                             | Some existing -> Choice1Of2(existing, candidate)
                                             | None -> Choice2Of2 candidate)
                                         |> Result.bind (function
@@ -1513,7 +1488,8 @@ let upsertRows
                                                     lastExplicit,
                                                     affected + 1,
                                                     inserted,
-                                                    (existing, applied) :: updated)
+                                                    (existing, applied) :: updated,
+                                                    reindexRow uniqueGroups (Some existing) (Some applied) index)
                                             | Choice2Of2 candidate ->
                                                 // Same "first generated, else last explicit"
                                                 // `last_insert_id` rule `insertCore` uses —
@@ -1532,13 +1508,14 @@ let upsertRows
                                                     lastExplicit',
                                                     affected + 1,
                                                     candidate :: inserted,
-                                                    updated
+                                                    updated,
+                                                    reindexRow uniqueGroups None (Some candidate) index
                                                 ))))
 
                     rowsIn
-                    |> List.fold step (Ok(table.Rows, [], table.NextAutoId, None, None, 0, [], []))
-                    |> Result.map (fun (rowsAcc, newRowsRev, nextAutoId', firstAuto, lastExplicit, affected, inserted, updated) ->
-                        { table with Rows = rowsAcc @ List.rev newRowsRev; NextAutoId = nextAutoId' },
+                    |> List.fold step (Ok(table.Rows, [], table.NextAutoId, None, None, 0, [], [], table.UniqueIndex))
+                    |> Result.map (fun (rowsAcc, newRowsRev, nextAutoId', firstAuto, lastExplicit, affected, inserted, updated, index) ->
+                        { table with Rows = rowsAcc @ List.rev newRowsRev; NextAutoId = nextAutoId'; UniqueIndex = index },
                         (Option.defaultValue 0L (Option.orElse lastExplicit firstAuto), firstAuto, affected, List.rev inserted, List.rev updated))))
 
         match result with
@@ -1646,17 +1623,18 @@ let rec private cascadeDeleteVisited
     // (or a cascaded child match) may legitimately match only one of them.
     let removeFrom (d: Database) =
         let t = Map.find tableKey d
+        let groups = uniqueKeyGroups t
 
-        let kept, _ =
+        let kept, _, index =
             t.Rows
             |> List.fold
-                (fun (kept, pending) row ->
+                (fun (kept, pending, index) row ->
                     match pending |> List.tryFindIndex ((=) row) with
-                    | Some i -> kept, List.removeAt i pending
-                    | None -> row :: kept, pending)
-                ([], toDelete)
+                    | Some i -> kept, List.removeAt i pending, reindexRow groups (Some row) None index
+                    | None -> row :: kept, pending, index)
+                ([], toDelete, t.UniqueIndex)
 
-        Map.add tableKey { t with Rows = List.rev kept } d
+        Map.add tableKey { t with Rows = List.rev kept; UniqueIndex = index } d
 
     if toDelete.IsEmpty then
         Ok(db, visited)
@@ -1704,15 +1682,21 @@ let rec private cascadeDeleteVisited
                                 match childIdxs |> List.tryFind (fun i -> not childTbl.Columns.[i].Nullable) with
                                 | Some i -> Error(NotNullViolation childTbl.Columns.[i].Name)
                                 | None ->
-                                    let blanked row =
-                                        if isChild row then
-                                            let row' = Array.copy row
-                                            childIdxs |> List.iter (fun i -> row'.[i] <- VNull)
-                                            row'
-                                        else
-                                            row
+                                    let childGroups = uniqueKeyGroups childTbl
 
-                                    Ok(Map.add childKey { childTbl with Rows = childTbl.Rows |> List.map blanked } d, visited)
+                                    let blankedRows, index =
+                                        childTbl.Rows
+                                        |> List.fold
+                                            (fun (rows, index) row ->
+                                                if isChild row then
+                                                    let row' = Array.copy row
+                                                    childIdxs |> List.iter (fun i -> row'.[i] <- VNull)
+                                                    row' :: rows, reindexRow childGroups (Some row) (Some row') index
+                                                else
+                                                    row :: rows, index)
+                                            ([], childTbl.UniqueIndex)
+
+                                    Ok(Map.add childKey { childTbl with Rows = List.rev blankedRows; UniqueIndex = index } d, visited)
                             | _ -> Error(ForeignKeyRestrict fk.Name))
 
             referencingForeignKeys db tableKey
