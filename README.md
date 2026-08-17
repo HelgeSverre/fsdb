@@ -19,6 +19,7 @@ production workloads use MySQL, PostgreSQL, or SQLite.
 - [Quick start](#quick-start)
 - [How it works](#how-it-works)
 - [SQL surface](#sql-surface)
+- [Persistence format](#persistence-format)
 - [Embedding & extensibility](#embedding--extensibility)
 - [Benchmarking](#benchmarking)
 - [Documentation](#documentation)
@@ -76,93 +77,122 @@ OPTIONS:
 
 ## How it works
 
-```
-mysql CLI · PDO · MySqlConnector
-         │
-         ▼  MySQL wire protocol
-┌────────────────────────────────────────────────────────────┐
-│ fsdb                                                       │
-│                                                            │
-│ Packet/Protocol → Session → QueryHandler → Parser → Executor │
-│ wire bytes        tx · vars    COM_QUERY,       FParsec    logical │
-│                                COM_STMT_*       SQL → AST  plan → │
-│                                                           lazy seq ──► result rows │
-│                                                            │
-│ Executor writes value snapshots → Storage (catalog, unique keys) │
-│ Storage ⇄ Persistence (binary WAL + snapshot, replayed on startup) │
-│                                                            │
-│ Collation registry (89 utf8mb4) ──┐                        │
-│ Function registry (custom)   ─────┼─► parser · executor · keys │
-└────────────────────────────────────────────────────────────┘
+One pipeline, all the way down:
+
+```mermaid
+flowchart LR
+    CLI["mysql CLI"] --> WIRE
+    PDO["PDO"] --> WIRE
+    CON["MySqlConnector"] --> WIRE
+
+    subgraph fsdb["fsdb"]
+        direction TB
+
+        WIRE["Packet / Protocol<br/>MySQL wire protocol"]:::wire
+        SESS["Session<br/>transactions · variables"]:::session
+        QH["QueryHandler<br/>COM_QUERY / COM_STMT_*"]:::session
+        PARSE["Parser · FParsec<br/>SQL text → AST"]:::plan
+        EXEC["Executor<br/>logical plan → lazy seq"]:::plan
+        STORE["Storage<br/>catalog · snapshots"]:::data
+        WAL["Persistence<br/>binary WAL · snapshot"]:::data
+
+        WIRE --> SESS --> QH --> PARSE --> EXEC
+        EXEC <-->|snapshots| STORE
+        STORE <-->|commit events| WAL
+        EXEC -.->|result rows| WIRE
+
+        COL["Collation registry<br/>89 utf8mb4 collations"]:::side
+        FN["Function registry<br/>built-in · custom · session"]:::side
+
+        PARSE -.-> COL
+        EXEC -.-> COL
+        STORE -.-> COL
+        EXEC -.-> FN
+    end
+
+    classDef wire fill:#e8f5e9,stroke:#43a047,color:#1b5e20
+    classDef session fill:#e3f2fd,stroke:#1e88e5,color:#0d47a1
+    classDef plan fill:#ede7f6,stroke:#8e24aa,color:#4a148c
+    classDef data fill:#fff8e1,stroke:#fb8c00,color:#e65100
+    classDef side fill:#fce4ec,stroke:#d81b60,color:#880e4f
 ```
 
-- **Parser** — an FParsec combinator grammar over a discriminated-union AST.
-  `SELECT`s compile to a logical plan that executes lazily: `LIMIT` stops the
-  scan once enough rows survive, and `ORDER BY ... LIMIT n` streams a bounded
-  top-(n+offset) set instead of materializing the full sort.
-- **Engine** — databases and tables live in a value-swapped catalog; every
-  write produces an immutable snapshot, which is what makes transactions
-  (`BEGIN`/`COMMIT`/`ROLLBACK`) free: each snapshot is a consistent view.
-  PK/UNIQUE lookups go through a map keyed by each column's collation-folded
-  encoding — `utf8mb4_0900_ai_ci` keys collide exactly as MySQL's do.
-  Equi-joins hash-join; everything else is a scan.
-- **Collations & charsets** — all 89 utf8mb4 collations MySQL 8.4 ships, each
-  a registry entry of locale, fold level, and pad attribute; ICU sort keys do
-  the work. Honored per-column and per `SET collation_connection` in grouping,
-  dedup, joins, and unique keys. Charsets `utf8mb4`/`latin1` (cp1252)/
-  `ascii`/`binary` follow MySQL's write-time semantics, with
-  `CONVERT(x USING …)` and `_charset'…'` introducers.
-- **Prepared statements** — `COM_STMT_PREPARE`/`COM_STMT_EXECUTE` bind
-  parameter `Value`s into the parsed AST (`?` → `Placeholder` → `Lit`), so a
-  bound value keeps its real type for every statement the grammar parses;
-  only the text-probed `SET`/`SHOW` forms still re-splice literals.
-- **Persistence** — opt-in `--data-dir`: a binary WAL of `[len][crc32]` records
-  (the CRC drops a torn final record from a crash mid-append) plus a snapshot,
-  fsync'd via libc and replayed on startup. Omit it and everything lives in
-  memory.
+### Parser
+
+An FParsec combinator grammar parses SQL into a discriminated-union AST.
+`SELECT`s compile to a logical plan that executes lazily: `LIMIT` stops the
+scan once enough rows survive, and `ORDER BY ... LIMIT n` streams a bounded
+top-(n+offset) set instead of materializing the full sort.
+
+### Engine
+
+Databases and tables live in a value-swapped catalog. Every write produces an
+immutable snapshot, which is what makes transactions (`BEGIN`/`COMMIT`/
+`ROLLBACK`) free: each snapshot is a consistent view. PK/UNIQUE lookups go
+through a map keyed by each column's collation-folded encoding, so
+`utf8mb4_0900_ai_ci` keys collide exactly as MySQL's do. Equi-joins
+hash-join; everything else is a scan.
+
+### Collations & charsets
+
+All 89 utf8mb4 collations MySQL 8.4 ships are registered, each as a locale,
+fold level, and pad attribute with ICU sort keys doing the work. Honored
+per-column and per `SET collation_connection` in grouping, dedup, joins, and
+unique keys. Charsets `utf8mb4`/`latin1` (cp1252)/`ascii`/`binary` follow
+MySQL's write-time semantics, with `CONVERT(x USING …)` and `_charset'…'`
+introducers.
+
+### Prepared statements
+
+`COM_STMT_PREPARE`/`COM_STMT_EXECUTE` bind parameter `Value`s into the
+parsed AST (`?` → `Placeholder` → `Lit`), so a bound value keeps its real
+type for every statement the grammar parses; only the text-probed `SET`/
+`SHOW` forms still re-splice literals.
 
 ## SQL surface
 
-```sql
-CREATE TABLE users (
-  id BIGINT AUTO_INCREMENT PRIMARY KEY,
-  name VARCHAR(100) COLLATE utf8mb4_bin,
-  tags JSON,
-  joined_at DATETIME DEFAULT CURRENT_TIMESTAMP
-);
+The grammar covers what MySQL-backed applications use: `SELECT` with joins
+(`NATURAL`/`USING` included), derived tables, `GROUP BY`/`HAVING`, window
+functions, `UNION [ALL]`, CTE-free subqueries in expressions, JSON paths,
+multi-table `UPDATE`/`DELETE`, `EXPLAIN`, `information_schema` tables, and
+`SHOW CREATE TABLE`.
 
-INSERT INTO users (name, tags) VALUES
-  ('Ada',   '{"langs": ["fsharp"]}'),
-  ('Grace', '{"langs": ["cobol"]}');
+What makes the SQL surface *this* server's rather than generic SQL: every
+comparison, sort, group, dedup, join, and unique key folds by the column's
+own collation. `SET collation_connection` governs literals, so
+`SELECT 'åge' = 'age' COLLATE utf8mb4_bin` is 0 while
+`... COLLATE utf8mb4_0900_ai_ci` is 1. Charsets transcode on write;
+`SHOW CREATE TABLE` reports declared collations, and
+`information_schema.COLUMNS` carries `CHARACTER_SET_NAME`/`COLLATION_NAME`.
 
--- window functions
-SELECT name, ROW_NUMBER() OVER (ORDER BY joined_at) FROM users;
+Missing SQL surface is tracked in [docs/ROADMAP.md](docs/ROADMAP.md).
 
--- JSON paths
-SELECT name, JSON_EXTRACT(tags, '$.langs[0]') FROM users;
+## Persistence format
 
--- per-column and connection collation
-SET collation_connection = utf8mb4_bin;
-SELECT 'åge' = 'age';                              -- 0
-SELECT 'åge' = 'age' COLLATE utf8mb4_0900_ai_ci;   -- 1
+`--data-dir` stores two files, both binary (no JSON):
 
--- joins, derived tables, transactions, EXPLAIN
-CREATE TABLE orders (id BIGINT PRIMARY KEY, user_id BIGINT, total INT);
-INSERT INTO orders VALUES (1, 1, 50), (2, 1, 150), (3, 2, 300);
+**`wal.bin`** — one framed record per committed event:
 
-BEGIN;
-SELECT u.name, COUNT(*) FROM users u
-  JOIN (SELECT * FROM orders WHERE total > 100) o ON o.user_id = u.id
-  GROUP BY u.name HAVING COUNT(*) > 1;
-COMMIT;
-
-EXPLAIN SELECT * FROM users WHERE id = 1;
+```
+[int32 LE payload length][uint32 LE CRC-32 of payload][payload bytes]
 ```
 
-Plus `UNION [ALL]`, `HAVING`, `NATURAL`/`USING` joins, `LAG`, `GROUP_CONCAT`,
-information_schema tables, `SHOW CREATE TABLE`, multi-table `UPDATE`/`DELETE`,
-and `--data-dir` durability across restarts. Missing SQL surface is tracked in
-[docs/ROADMAP.md](docs/ROADMAP.md).
+The payload is a `CommitEvent` in a tag-byte codec (schema DDL as
+pre-encoded statement trees; row events as physical `Value[]`s, so replay
+writes the exact committed values — `NOW()` replays to the same instant, not
+a fresh one). A crash mid-append leaves a torn final record; replay stops
+before it (length overrun or CRC mismatch), truncates the WAL back to the
+last good offset, and the next append glues onto a clean boundary. Once the
+WAL crosses 64 MiB or 100k events — or on SIGTERM/SIGINT — the whole catalog
+is snapshotted and the WAL truncates.
+
+**`snapshot.fsdb`** — the catalog as a self-delimiting binary tree
+(`database count` → tables → rows), same tag-byte codec and row format as the
+WAL. Written to `snapshot.fsdb.new`, fsynced via libc `fsync`, then renamed
+into place; a `.new` that parses cleanly supersedes the WAL on startup, a
+torn one falls back to the old snapshot plus full WAL replay. Nothing is
+written with `FileStream.Flush(true)` (macOS `F_FULLFSYNC` — ~5 ms per call);
+the plain `fsync` matches MySQL's own macOS durability semantics.
 
 ## Embedding & extensibility
 
