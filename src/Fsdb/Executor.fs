@@ -457,6 +457,178 @@ let rec private resolveStarQualifier (ctx: EvalContext) (qualifier: string) : Re
         | Some parent -> resolveStarQualifier parent qualifier
         | None -> Error(unknownColumn (sprintf "%s.*" qualifier))
 
+/// Splits an `ON`/`WHERE`-style expression into its top-level `AND`
+/// conjuncts — `a AND b AND c` flattens to `[a; b; c]`; anything else (an
+/// `OR`, a single predicate) is the one-element list `[expr]`. Only
+/// conjunction commutes freely enough to split an equi-join's hash keys
+/// from its residual filter (`extractEquiKeys` below) — `OR` can't, so a
+/// disjunction stays one opaque conjunct and reports no keys.
+let rec private conjuncts (expr: Expr) : Expr list =
+    match expr with
+    | BinOp(And, l, r) -> conjuncts l @ conjuncts r
+    | _ -> [ expr ]
+
+/// Splits a `JOIN ... ON` expression's `AND`-conjuncts into equi-join key
+/// pairs — a `QualifiedCol = QualifiedCol` conjunct with one side resolving
+/// into the columns already in scope and the other into the just-joined
+/// table's own columns, as `(leftIndex, rightIndex)` with `rightIndex`
+/// relative to the joined table's own row — and a residual list of
+/// everything else (a range predicate, `a.x + 1 = b.y`, a same-side
+/// equality like `a.x = a.y`, ...) that still needs per-candidate-pair
+/// evaluation. An empty key list means "no usable equi-join key anywhere in
+/// this ON clause" — `applyJoin`/`applyMutationJoin` fall back to the
+/// nested loop entirely rather than build a `Dictionary` with nothing to
+/// key it on.
+let private extractEquiKeys
+    (resolveQualified: string -> string -> (int * ColumnType) option)
+    (leftColumnCount: int)
+    (onExpr: Expr)
+    : (int * int) list * Expr list =
+    let classify (left: Expr) (right: Expr) =
+        match left, right with
+        | QualifiedCol(lq, lc), QualifiedCol(rq, rc) ->
+            match resolveQualified lq lc, resolveQualified rq rc with
+            | Some(ia, _), Some(ib, _) when ia < leftColumnCount && ib >= leftColumnCount -> Some(ia, ib - leftColumnCount)
+            | Some(ia, _), Some(ib, _) when ib < leftColumnCount && ia >= leftColumnCount -> Some(ib, ia - leftColumnCount)
+            | _ -> None
+        | _ -> None
+
+    let keys, residual =
+        conjuncts onExpr
+        |> List.fold
+            (fun (keys, residual) conjunct ->
+                match conjunct with
+                | BinOp(Eq, l, r) ->
+                    match classify l r with
+                    | Some pair -> pair :: keys, residual
+                    | None -> keys, conjunct :: residual
+                | _ -> keys, conjunct :: residual)
+            ([], [])
+
+    List.rev keys, List.rev residual
+
+/// Column types the hash join trusts to bucket safely: `Value.compare`
+/// coerces *any* pair of these numeric types through `toDouble` (so `1 =
+/// 1.0` joins), and folds any pair of these text types through the same
+/// case/pad-insensitive collation `compareStrings` uses (so `'Alice' =
+/// 'alice'` and `'a' = 'a '` join) — see the design doc's "non-obvious
+/// correctness trap". `keyClassOf` below only decides when it's safe to
+/// *attempt* a bucket at all; `JoinKeyComparer` still does the real
+/// equality check through `Value.compare` itself.
+let private isJoinNumericType =
+    function
+    | TTinyInt _
+    | TSmallInt _
+    | TMediumInt _
+    | TInt _
+    | TBigInt _
+    | TYear
+    | TDecimal _
+    | TDouble
+    | TFloat -> true
+    | _ -> false
+
+let private isJoinTextType =
+    function
+    | TChar _
+    | TVarchar _
+    | TTinyText
+    | TText
+    | TMediumText
+    | TLongText
+    | TEnum _
+    | TSet _ -> true
+    | _ -> false
+
+/// Whether an equi-join key's two column types are hash-safe together —
+/// `Some true` (numeric bucket) or `Some false` (text bucket) when both
+/// sides agree, `None` when they don't (a `DATE`, a `BLOB`/`JSON`, or a
+/// numeric-vs-text mismatch whose cross-type coercion `Value.compare`
+/// resolves case by case rather than uniformly). `None` sends the whole
+/// join to the nested loop instead of a bucket that could disagree with
+/// `Value.compare` about which rows tie.
+let private keyClassOf (leftType: ColumnType) (rightType: ColumnType) : bool option =
+    if isJoinNumericType leftType && isJoinNumericType rightType then Some true
+    elif isJoinTextType leftType && isJoinTextType rightType then Some false
+    else None
+
+/// Runtime twin of `keyClassOf`: every value actually occupying a hash key
+/// column must be `NULL` or the shape its declared class promises. Guards
+/// the gap a *declared* type alone can't close — a derived table's every
+/// column reports the synthetic `TText` (`deriveColumns`) no matter what
+/// `Value` shape its rows really carry — so a mismatch here falls the whole
+/// join back to the nested loop instead of building a bucket that silently
+/// drops rows it can't classify.
+let private valueMatchesKeyClass (isNumeric: bool) (v: Value) : bool =
+    match v with
+    | VNull -> true
+    | VInt _
+    | VDouble _
+    | VDecimal _ -> isNumeric
+    | VString _
+    | VBytes _ -> not isNumeric
+    | _ -> false
+
+let private rowsMatchKeyClasses (classes: bool list) (keyIndices: int list) (rows: Value[] list) : bool =
+    rows
+    |> List.forall (fun row -> List.forall2 (fun idx cls -> valueMatchesKeyClass cls row.[idx]) keyIndices classes)
+
+/// One equi-join key (however many `AND`-ed `=` conjuncts contributed a
+/// pair) read off one side's row, `None` if any column is `NULL` — SQL's
+/// `NULL = anything` is never true, so a `NULL`-keyed row can never join
+/// and is simply never added to (or looked up in) the hash bucket, the same
+/// way it would silently fail every `Eq` check in the nested loop.
+let private equiKeyOf (keyIndices: int[]) (row: Value[]) : Value[] option =
+    let key = keyIndices |> Array.map (fun i -> row.[i])
+    if key |> Array.exists (fun v -> v = VNull) then None else Some key
+
+/// `Dictionary<Value[], _>` key comparer for the hash join's build/probe
+/// keys — must agree with `Value.compare`'s SQL equality (case/pad-
+/// insensitive strings, numeric cross-type coercion), not .NET's ordinal/
+/// exact default, or matches the nested loop keeps (`'Alice' = 'alice'`, `1
+/// = 1.0`) would silently vanish from the hash path. `GetHashCode` only
+/// needs to *agree* with `Equals` — every value that could tie under
+/// `Value.compare` must land in the same bucket — so it hashes a coarser
+/// normalized form (case/pad-folded text, or a `double`) while `Equals`
+/// still defers to the real `Value.compare` for the exact answer.
+/// `keyClassOf`/`rowsMatchKeyClasses` keep this comparer from ever seeing a
+/// pair `Value.compare` treats non-uniformly depending on which side each
+/// value is on (a parseable-as-date string vs. a `DATE`).
+type private JoinKeyComparer() =
+    static let bucketOf (v: Value) : obj =
+        match v with
+        | VInt _
+        | VDouble _
+        | VDecimal _ -> box (Value.toDouble v)
+        | _ -> box ((Value.toText v |> Option.defaultValue "").TrimEnd(' ').ToUpperInvariant())
+
+    interface IEqualityComparer<Value[]> with
+        member _.Equals(a: Value[], b: Value[]) = Array.forall2 (fun x y -> Value.compare x y = 0) a b
+        member _.GetHashCode(a: Value[]) = a |> Array.fold (fun h v -> h * 31 + (bucketOf v).GetHashCode()) 17
+
+/// Like `Storage.traverse`, but over a lazy `seq` rather than a strict
+/// `list` — short-circuits on the first `Error` without ever visiting (or
+/// allocating a combined row for) later elements. The non-equi `JOIN`
+/// fallback (no extractable hash key anywhere in `ON`) uses this so its
+/// nested loop's (left row, right row) pairs stream one at a time, instead
+/// of `applyJoin`/`applyMutationJoin` first materializing the full cross
+/// product as a list and only then handing it to `ON` — the pathology the
+/// design doc names as the reason a real-sized non-equi join never used to
+/// finish.
+let private traverseSeq (f: 'a -> Result<'b, 'e>) (xs: 'a seq) : Result<'b list, 'e> =
+    let acc = ResizeArray()
+    let mutable error = None
+    use enumerator = xs.GetEnumerator()
+
+    while error.IsNone && enumerator.MoveNext() do
+        match f enumerator.Current with
+        | Ok y -> acc.Add y
+        | Error e -> error <- Some e
+
+    match error with
+    | Some e -> Error e
+    | None -> Ok(List.ofSeq acc)
+
 /// Evaluates one expression against one row. Three-valued logic throughout
 /// (comparisons/AND/OR/NOT return `VNull` — SQL's "unknown" — rather than a
 /// boolean whenever an operand is `VNull`, per `Value`'s helpers), function
@@ -785,16 +957,25 @@ and private whereMatches (ctxFor: Value[] -> EvalContext) (where: Expr option) (
 
 /// Applies one `JOIN` clause against whatever's already in scope
 /// (`sourcesSoFar`/`rowsSoFar`, built by the `FROM` table and any earlier
-/// `JOIN`s in the same list): resolves the joined table, evaluates `join.On`
-/// against every (left row, right row) pair, then combines the matched pairs
-/// with whatever `join.Kind` needs added on top — `LEFT`/`RIGHT` also keep
-/// the side that matched nothing, `NULL`-padded on the other side; `INNER`
-/// and `CROSS` (the latter's `On` is always the literal-true `join.On` the
-/// parser gives it) keep only the matches. A qualified integer equality
-/// predicate uses a right-side hash lookup; other predicates retain the
-/// general nested-loop evaluator. Indices (not row references)
+/// `JOIN`s in the same list): resolves the joined table, matches (left row,
+/// right row) pairs against `join.On`, then combines the matched pairs with
+/// whatever `join.Kind` needs added on top — `LEFT`/`RIGHT` also keep the
+/// side that matched nothing, `NULL`-padded on the other side; `INNER` and
+/// `CROSS` (the latter's `On` is always the literal-true `join.On` the
+/// parser gives it) keep only the matches. Indices (not row references)
 /// track which left/right rows matched anything, so outer-join padding is
 /// correct even if two rows happen to be structurally equal.
+///
+/// Matching itself is `extractEquiKeys`' choice: an `ON` with at least one
+/// extractable `col = col` equi-key (and every key's columns hash-safe
+/// together, `keyClassOf`) builds a `Dictionary` on whichever side has
+/// fewer rows and probes with the other, applying any residual conjuncts
+/// only to the (already key-equal) candidates a bucket lookup returns.
+/// Anything else — no equi-key at all, an `OR`, a range, `a.x + 1 = b.y` —
+/// falls back to a lazy nested loop over every pair instead: still
+/// evaluates `join.On` for each one, but as a `seq` (`traverseSeq`) rather
+/// than a materialized cross-product `list`, which is what let a
+/// non-equi join at real table sizes simply never finish before M9-2.
 and private applyJoin
     (store: Store)
     (registry: Registry)
@@ -818,16 +999,6 @@ and private applyJoin
         let leftIndexed = rowsSoFar |> List.indexed
         let rightIndexed = joinRows |> List.indexed
 
-        let isIntegerType =
-            function
-            | TTinyInt _
-            | TSmallInt _
-            | TMediumInt _
-            | TInt _
-            | TBigInt _
-            | TYear -> true
-            | _ -> false
-
         let resolveQualified (qualifier: string) (column: string) =
             qualifiers
             |> Map.tryFind (qualifier.ToLowerInvariant())
@@ -836,35 +1007,10 @@ and private applyJoin
                 |> List.tryFindIndex (fun definition -> System.String.Equals(definition.Name, column, System.StringComparison.OrdinalIgnoreCase))
                 |> Option.map (fun index -> offset + index, columns.[index].Type))
 
-        let tryIntegerEqualityKeys =
-            let tryPair left right =
-                match left, right with
-                | QualifiedCol(leftQualifier, leftColumn), QualifiedCol(rightQualifier, rightColumn) ->
-                    match resolveQualified leftQualifier leftColumn, resolveQualified rightQualifier rightColumn with
-                    | Some(leftIndex, leftType), Some(rightIndex, rightType)
-                        when leftIndex < combinedColumnsSoFar.Length
-                             && rightIndex >= combinedColumnsSoFar.Length
-                             && isIntegerType leftType
-                             && isIntegerType rightType ->
-                        Some(leftIndex, rightIndex - combinedColumnsSoFar.Length)
-                    | Some(rightIndex, rightType), Some(leftIndex, leftType)
-                        when leftIndex < combinedColumnsSoFar.Length
-                             && rightIndex >= combinedColumnsSoFar.Length
-                             && isIntegerType leftType
-                             && isIntegerType rightType ->
-                        Some(leftIndex, rightIndex - combinedColumnsSoFar.Length)
-                    | _ -> None
-                | _ -> None
-
-            match join.On with
-            | BinOp(Eq, left, right) -> tryPair left right
-            | _ -> None
-
-        let buildCombinedRows (flagged: (int * int * bool * Value[]) list) =
-            let matched = flagged |> List.filter (fun (_, _, ok, _) -> ok)
-            let matchedCombined = matched |> List.map (fun (_, _, _, c) -> c)
-            let matchedLeft = matched |> List.map (fun (li, _, _, _) -> li) |> Set.ofList
-            let matchedRight = matched |> List.map (fun (_, ri, _, _) -> ri) |> Set.ofList
+        let buildCombinedRows (matched: (int * int * Value[]) list) =
+            let matchedCombined = matched |> List.map (fun (_, _, c) -> c)
+            let matchedLeft = matched |> List.map (fun (li, _, _) -> li) |> Set.ofList
+            let matchedRight = matched |> List.map (fun (_, ri, _) -> ri) |> Set.ofList
 
             let leftOnly =
                 leftIndexed
@@ -885,61 +1031,89 @@ and private applyJoin
 
             newSources, combinedRows
 
-        match tryIntegerEqualityKeys with
-        | Some(leftKeyIndex, rightKeyIndex)
-            when rowsSoFar
-                 |> List.forall (fun row -> row.[leftKeyIndex] = VNull || match row.[leftKeyIndex] with VInt _ -> true | _ -> false)
-                 && joinRows
-                    |> List.forall (fun row -> row.[rightKeyIndex] = VNull || match row.[rightKeyIndex] with VInt _ -> true | _ -> false) ->
-            let rightByKey = Dictionary<int64, ResizeArray<int * Value[]>>()
+        let equiKeys, residualConjuncts = extractEquiKeys resolveQualified combinedColumnsSoFar.Length join.On
 
-            for rightIndex, rightRow in rightIndexed do
-                match rightRow.[rightKeyIndex] with
-                | VInt key ->
-                    match rightByKey.TryGetValue key with
-                    | true, matches -> matches.Add(rightIndex, rightRow)
+        let keyClasses =
+            equiKeys |> List.map (fun (li, ri) -> keyClassOf combinedColumnsSoFar.[li].Type joinColumns.[ri].Type)
+
+        let hashEligible =
+            not equiKeys.IsEmpty
+            && keyClasses |> List.forall Option.isSome
+            && rowsMatchKeyClasses (keyClasses |> List.map Option.get) (equiKeys |> List.map fst) rowsSoFar
+            && rowsMatchKeyClasses (keyClasses |> List.map Option.get) (equiKeys |> List.map snd) joinRows
+
+        let residualHolds (combined: Value[]) : Result<bool, EvalError> =
+            residualConjuncts
+            |> traverse (fun c -> evalExpr { ctxFor combined with Clause = OnClause } c)
+            |> Result.map (List.forall (fun v -> truthy v = Some true))
+
+        if hashEligible then
+            let leftKeyIndices = equiKeys |> List.map fst |> Array.ofList
+            let rightKeyIndices = equiKeys |> List.map snd |> Array.ofList
+            let buildOnLeft = rowsSoFar.Length <= joinRows.Length
+
+            let buildIndexed, buildKeyIndices, probeIndexed, probeKeyIndices =
+                if buildOnLeft then leftIndexed, leftKeyIndices, rightIndexed, rightKeyIndices
+                else rightIndexed, rightKeyIndices, leftIndexed, leftKeyIndices
+
+            let buckets = Dictionary<Value[], ResizeArray<int * Value[]>>(JoinKeyComparer())
+
+            for buildIndex, buildRow in buildIndexed do
+                match equiKeyOf buildKeyIndices buildRow with
+                | Some key ->
+                    match buckets.TryGetValue key with
+                    | true, bucket -> bucket.Add(buildIndex, buildRow)
                     | false, _ ->
-                        let matches = ResizeArray<int * Value[]>()
-                        matches.Add(rightIndex, rightRow)
-                        rightByKey.Add(key, matches)
-                | _ -> ()
+                        let bucket = ResizeArray()
+                        bucket.Add(buildIndex, buildRow)
+                        buckets.Add(key, bucket)
+                | None -> ()
 
-            let flagged = ResizeArray<int * int * bool * Value[]>()
+            let candidates =
+                [ for probeIndex, probeRow in probeIndexed do
+                      match equiKeyOf probeKeyIndices probeRow with
+                      | Some key ->
+                          match buckets.TryGetValue key with
+                          | true, bucket ->
+                              for buildIndex, buildRow in bucket do
+                                  let li, l, ri, r =
+                                      if buildOnLeft then buildIndex, buildRow, probeIndex, probeRow
+                                      else probeIndex, probeRow, buildIndex, buildRow
 
-            for leftIndex, leftRow in leftIndexed do
-                match leftRow.[leftKeyIndex] with
-                | VInt key ->
-                    match rightByKey.TryGetValue key with
-                    | true, matches ->
-                        for rightIndex, rightRow in matches do
-                            flagged.Add(leftIndex, rightIndex, true, Array.append leftRow rightRow)
-                    | false, _ -> ()
-                | _ -> ()
+                                  yield li, ri, Array.append l r
+                          | false, _ -> ()
+                      | None -> () ]
 
-            Ok(buildCombinedRows (List.ofSeq flagged))
-        | _ ->
-            let pairs = [ for li, l in leftIndexed do for ri, r in rightIndexed -> li, ri, l, r ]
+            candidates
+            |> traverse (fun (li, ri, combined) -> residualHolds combined |> Result.map (fun ok -> li, ri, combined, ok))
+            |> Result.mapError Err
+            |> Result.map (fun rows -> rows |> List.filter (fun (_, _, _, ok) -> ok) |> List.map (fun (li, ri, c, _) -> li, ri, c) |> buildCombinedRows)
+        else
+            let pairs = seq { for li, l in leftIndexed do for ri, r in rightIndexed -> li, ri, l, r }
 
             pairs
-            |> traverse (fun (li, ri, l, r) ->
+            |> traverseSeq (fun (li, ri, l, r) ->
                 let combined = Array.append l r
-                evalExpr { ctxFor combined with Clause = OnClause } join.On |> Result.map (fun v -> li, ri, (truthy v = Some true), combined))
+
+                evalExpr { ctxFor combined with Clause = OnClause } join.On
+                |> Result.map (fun v -> li, ri, combined, (truthy v = Some true)))
             |> Result.mapError Err
-            |> Result.map buildCombinedRows
+            |> Result.map (fun rows -> rows |> List.filter (fun (_, _, _, ok) -> ok) |> List.map (fun (li, ri, c, _) -> li, ri, c) |> buildCombinedRows)
 
 /// Like `applyJoin`, but for a multi-table `UPDATE`/`DELETE ... JOIN`
 /// rather than a `SELECT`: alongside the flattened row `evalExpr` needs,
 /// each combined row also keeps every source's own physical `Value[]`
 /// (`None` on an outer-join side that matched nothing — there's no real row
-/// there to update/delete). A separate, smaller nested-loop join from
-/// `applyJoin` rather than threading identity through the shared `SELECT`
-/// path — that path is the hot, heavily-tested read path; duplicating the
-/// (much smaller) join loop here keeps it untouched. ponytail: real tables
-/// only (no derived-table join source) — MySQL itself doesn't allow a
-/// derived table as a multi-table `UPDATE`/`DELETE` target anyway; a
-/// derived-table join *source* (`UPDATE t1 JOIN (SELECT ...) dt ON ...`)
-/// is real MySQL syntax this rejects with 1064 rather than silently
-/// mishandling, add it if a migration's `UPDATE`/`DELETE` actually needs one.
+/// there to update/delete). A separate, smaller near-duplicate of
+/// `applyJoin`'s equi-key hash-join/lazy-nested-loop split (see its doc)
+/// rather than threading identity through the shared `SELECT` path — that
+/// path is the hot, heavily-tested read path; duplicating the join loop
+/// here keeps it untouched. ponytail: real tables only (no derived-table
+/// join source) — MySQL itself doesn't allow a derived table as a
+/// multi-table `UPDATE`/`DELETE` target anyway; a derived-table join
+/// *source* (`UPDATE t1 JOIN (SELECT ...) dt ON ...`) is real MySQL syntax
+/// this rejects with 1064 rather than silently mishandling, add it if a
+/// migration's `UPDATE`/`DELETE` actually needs one.
 and private applyMutationJoin
     (store: Store)
     (registry: Registry)
@@ -966,20 +1140,20 @@ and private applyMutationJoin
 
             let leftIndexed = rowsSoFar |> List.indexed
             let rightIndexed = joinRows |> List.indexed
+            let leftFlatRows = rowsSoFar |> List.map snd
 
-            let pairs = [ for li, l in leftIndexed do for ri, r in rightIndexed -> li, ri, l, r ]
+            let resolveQualified (qualifier: string) (column: string) =
+                qualifiers
+                |> Map.tryFind (qualifier.ToLowerInvariant())
+                |> Option.bind (fun (columns, offset) ->
+                    columns
+                    |> List.tryFindIndex (fun definition -> System.String.Equals(definition.Name, column, System.StringComparison.OrdinalIgnoreCase))
+                    |> Option.map (fun index -> offset + index, columns.[index].Type))
 
-            pairs
-            |> traverse (fun (li, ri, (lIdent, lFlat), r) ->
-                let combinedFlat = Array.append lFlat r
-                evalExpr { ctxFor combinedFlat with Clause = OnClause } join.On
-                |> Result.map (fun v -> li, ri, (truthy v = Some true), (lIdent @ [ Some r ], combinedFlat)))
-            |> Result.mapError Err
-            |> Result.map (fun flagged ->
-                let matched = flagged |> List.filter (fun (_, _, ok, _) -> ok)
-                let matchedRows = matched |> List.map (fun (_, _, _, row) -> row)
-                let matchedLeft = matched |> List.map (fun (li, _, _, _) -> li) |> Set.ofList
-                let matchedRight = matched |> List.map (fun (_, ri, _, _) -> ri) |> Set.ofList
+            let buildCombinedRows (matched: (int * int * (Value[] option list * Value[])) list) =
+                let matchedRows = matched |> List.map (fun (_, _, row) -> row)
+                let matchedLeft = matched |> List.map (fun (li, _, _) -> li) |> Set.ofList
+                let matchedRight = matched |> List.map (fun (_, ri, _) -> ri) |> Set.ofList
 
                 let leftOnly =
                     leftIndexed
@@ -998,7 +1172,93 @@ and private applyMutationJoin
                     | LeftJoin -> matchedRows @ leftOnly
                     | RightJoin -> matchedRows @ rightOnly
 
-                newSources, rows)
+                newSources, rows
+
+            let equiKeys, residualConjuncts = extractEquiKeys resolveQualified combinedColumnsSoFar.Length join.On
+
+            let keyClasses =
+                equiKeys |> List.map (fun (li, ri) -> keyClassOf combinedColumnsSoFar.[li].Type joinColumns.[ri].Type)
+
+            let hashEligible =
+                not equiKeys.IsEmpty
+                && keyClasses |> List.forall Option.isSome
+                && rowsMatchKeyClasses (keyClasses |> List.map Option.get) (equiKeys |> List.map fst) leftFlatRows
+                && rowsMatchKeyClasses (keyClasses |> List.map Option.get) (equiKeys |> List.map snd) joinRows
+
+            let residualHolds (combinedFlat: Value[]) : Result<bool, EvalError> =
+                residualConjuncts
+                |> traverse (fun c -> evalExpr { ctxFor combinedFlat with Clause = OnClause } c)
+                |> Result.map (List.forall (fun v -> truthy v = Some true))
+
+            if hashEligible then
+                let leftKeyIndices = equiKeys |> List.map fst |> Array.ofList
+                let rightKeyIndices = equiKeys |> List.map snd |> Array.ofList
+                let buildOnLeft = rowsSoFar.Length <= joinRows.Length
+
+                // Left rows carry their identity list alongside the flat
+                // row `equiKeyOf` needs; right rows (always a real scanned
+                // table — see the ponytail note above) are the flat row
+                // itself. Two bucket shapes rather than one generic one, so
+                // neither side pays to wrap/unwrap the other's shape.
+                let candidates : (int * int * (Value[] option list * Value[])) list =
+                    if buildOnLeft then
+                        let buckets = Dictionary<Value[], ResizeArray<int * (Value[] option list * Value[])>>(JoinKeyComparer())
+
+                        for li, (lIdent, lFlat) in leftIndexed do
+                            match equiKeyOf leftKeyIndices lFlat with
+                            | Some key ->
+                                match buckets.TryGetValue key with
+                                | true, bucket -> bucket.Add(li, (lIdent, lFlat))
+                                | false, _ ->
+                                    let bucket = ResizeArray()
+                                    bucket.Add(li, (lIdent, lFlat))
+                                    buckets.Add(key, bucket)
+                            | None -> ()
+
+                        [ for ri, r in rightIndexed do
+                              match equiKeyOf rightKeyIndices r with
+                              | Some key ->
+                                  match buckets.TryGetValue key with
+                                  | true, bucket -> for li, (lIdent, lFlat) in bucket -> li, ri, (lIdent @ [ Some r ], Array.append lFlat r)
+                                  | false, _ -> ()
+                              | None -> () ]
+                    else
+                        let buckets = Dictionary<Value[], ResizeArray<int * Value[]>>(JoinKeyComparer())
+
+                        for ri, r in rightIndexed do
+                            match equiKeyOf rightKeyIndices r with
+                            | Some key ->
+                                match buckets.TryGetValue key with
+                                | true, bucket -> bucket.Add(ri, r)
+                                | false, _ ->
+                                    let bucket = ResizeArray()
+                                    bucket.Add(ri, r)
+                                    buckets.Add(key, bucket)
+                            | None -> ()
+
+                        [ for li, (lIdent, lFlat) in leftIndexed do
+                              match equiKeyOf leftKeyIndices lFlat with
+                              | Some key ->
+                                  match buckets.TryGetValue key with
+                                  | true, bucket -> for ri, r in bucket -> li, ri, (lIdent @ [ Some r ], Array.append lFlat r)
+                                  | false, _ -> ()
+                              | None -> () ]
+
+                candidates
+                |> traverse (fun (li, ri, (lIdent, combinedFlat)) -> residualHolds combinedFlat |> Result.map (fun ok -> li, ri, (lIdent, combinedFlat), ok))
+                |> Result.mapError Err
+                |> Result.map (fun rows -> rows |> List.filter (fun (_, _, _, ok) -> ok) |> List.map (fun (li, ri, row, _) -> li, ri, row) |> buildCombinedRows)
+            else
+                let pairs = seq { for li, l in leftIndexed do for ri, r in rightIndexed -> li, ri, l, r }
+
+                pairs
+                |> traverseSeq (fun (li, ri, (lIdent, lFlat), r) ->
+                    let combinedFlat = Array.append lFlat r
+
+                    evalExpr { ctxFor combinedFlat with Clause = OnClause } join.On
+                    |> Result.map (fun v -> li, ri, (lIdent @ [ Some r ], combinedFlat), (truthy v = Some true)))
+                |> Result.mapError Err
+                |> Result.map (fun rows -> rows |> List.filter (fun (_, _, _, ok) -> ok) |> List.map (fun (li, ri, row, _) -> li, ri, row) |> buildCombinedRows)
 
 /// Resolves `from :: joins` into the same `(sources, rows)` shape
 /// `applyMutationJoin` builds up — the multi-table `UPDATE`/`DELETE`
