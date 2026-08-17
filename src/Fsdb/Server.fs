@@ -184,6 +184,13 @@ let private handleConnection
     : Async<unit> =
     async {
         use client = client
+        // Nagle's algorithm batches small writes to wait for more data or an
+        // ACK before sending — exactly wrong for this protocol's
+        // one-small-packet-request, one-small-packet-response pattern
+        // (every statement is its own round trip), where it just adds
+        // latency with nothing to batch. Off, matching what a real MySQL
+        // server does for the same reason.
+        client.NoDelay <- true
         use stream = client.GetStream()
         // Negotiated once the handshake response arrives; used as a fallback
         // for the "packet too large" ERR reply if that happens beforehand.
