@@ -557,22 +557,28 @@ let private applyDdl (store: Store) (db: string) (stmt: Statement) : unit =
 /// row's `after` equals the next row's `before`). Any two rows the pass
 /// can't tell apart are byte-identical, so it never matters which one
 /// consumes which change.
-let rec private applyRowChanges (changes: (Value[] * Value[]) list) (rows: Value[] list) : Value[] list =
-    match rows, changes with
-    | [], _ -> []
-    | row :: restRows, (before, after) :: restChanges when row = before -> after :: applyRowChanges restChanges restRows
-    | row :: restRows, _ -> row :: applyRowChanges changes restRows
+let private applyRowChanges (changes: (Value[] * Value[]) list) (rows: Value[] list) : Value[] list =
+    let rec loop acc rows changes =
+        match rows, changes with
+        | [], _ -> List.rev acc
+        | row :: restRows, (before, after) :: restChanges when row = before -> loop (after :: acc) restRows restChanges
+        | row :: restRows, _ -> loop (row :: acc) restRows changes
+
+    loop [] rows changes
 
 /// As `applyRowChanges`, for `RowsDeleted`'s logged rows: drops the next
 /// not-yet-consumed match for each logged row, in order — fixes replaying a
 /// partial delete over duplicate-valued rows (`DELETE ... LIMIT 1` over two
 /// identical rows) wiping every row equal to the target instead of just the
 /// one that was actually removed.
-let rec private applyRowDeletes (targets: Value[] list) (rows: Value[] list) : Value[] list =
-    match rows, targets with
-    | [], _ -> []
-    | row :: restRows, target :: restTargets when row = target -> applyRowDeletes restTargets restRows
-    | row :: restRows, _ -> row :: applyRowDeletes targets restRows
+let private applyRowDeletes (targets: Value[] list) (rows: Value[] list) : Value[] list =
+    let rec loop acc rows targets =
+        match rows, targets with
+        | [], _ -> List.rev acc
+        | row :: restRows, target :: restTargets when row = target -> loop acc restRows restTargets
+        | row :: restRows, _ -> loop (row :: acc) restRows targets
+
+    loop [] rows targets
 
 /// Rewrites `dbName.tableName`'s `Rows` in `store.Catalog` directly with
 /// `f`, bypassing `Storage.updateRows`/`deleteRows` entirely. Replay is a

@@ -314,8 +314,6 @@ let tests =
               // updateRows calls, each fsync'd) so this test measures only
               // replay cost, not k fsyncs' worth of setup noise.
               let dir = tempDataDir ()
-              // Kept well under `applyRowChanges`'s own (pre-existing,
-              // unrelated to this fix) non-tail-recursive stack depth limit.
               let rowCount = 2500
 
               let setupStore = create ()
@@ -413,6 +411,62 @@ let tests =
 
               let reloaded = load dir
               Expect.equal (rowsOf reloaded defaultDatabase "dups" |> List.length) 2 "only the one deleted row is gone after replay"
+
+          testCase "WAL replay of a single RowsUpdated/RowsDeleted event over 10,000 rows doesn't stack-overflow"
+          <| fun _ ->
+              // `applyRowChanges`/`applyRowDeletes` used to recurse once per
+              // row *outside* tail position (`row :: applyRowChanges ...`),
+              // so a single bulk UPDATE/DELETE's replay — one `CommitEvent`
+              // covering thousands of physically distinct rows — blew the
+              // stack on restart. This pins the fix at well past the ~3800
+              // rows the old recursion crashed at.
+              let dir = tempDataDir ()
+              let store = load dir
+              attach dir store
+
+              createTable
+                  store
+                  defaultDatabase
+                  "bulk"
+                  [ { Name = "id"
+                      Type = TInt false
+                      Nullable = false
+                      Default = None
+                      AutoIncrement = false
+                      PrimaryKey = true
+                      Unique = false
+                      Generated = None }
+                    { Name = "n"
+                      Type = TInt false
+                      Nullable = false
+                      Default = None
+                      AutoIncrement = false
+                      PrimaryKey = false
+                      Unique = false
+                      Generated = None } ]
+                  []
+                  []
+              |> ignore
+
+              let rowCount = 10_000
+              insertRows store defaultDatabase "bulk" None [ for i in 1 .. rowCount -> [ VInt(int64 i); VInt 0L ] ]
+              |> ignore
+
+              // One bulk UPDATE touching every row, as a single `RowsUpdated` event.
+              updateRows store defaultDatabase "bulk" (fun _ -> Ok true) (fun row ->
+                  Ok [| row.[0]; VInt((row.[1] |> function VInt i -> i | _ -> 0L) + 1L) |])
+              |> ignore
+
+              let afterUpdate = load dir
+              attach dir afterUpdate
+              let updated = rowsOf afterUpdate defaultDatabase "bulk" |> List.map (fun r -> r.[1])
+              Expect.isTrue (updated |> List.forall (fun v -> v = VInt 1L)) "every one of the 10,000 rows' replayed update landed"
+
+              // One bulk DELETE removing every row, as a single `RowsDeleted` event.
+              deleteRows afterUpdate defaultDatabase "bulk" (fun _ -> Ok true) |> ignore
+
+              let afterDelete = load dir
+              Expect.isEmpty (rowsOf afterDelete defaultDatabase "bulk") "every one of the 10,000 rows' replayed delete landed"
 
           testCase "WAL replay doesn't re-validate foreign keys — a row written under SET FOREIGN_KEY_CHECKS=0 survives"
           <| fun _ ->
