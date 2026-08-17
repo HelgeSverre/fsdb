@@ -608,18 +608,25 @@ type private JoinKeyComparer() =
 
 /// Like `Storage.traverse`, but over a lazy `seq` rather than a strict
 /// `list` — short-circuits on the first `Error` without ever visiting (or
-/// allocating a combined row for) later elements. The non-equi `JOIN`
-/// fallback (no extractable hash key anywhere in `ON`) uses this so its
-/// nested loop's (left row, right row) pairs stream one at a time, instead
-/// of `applyJoin`/`applyMutationJoin` first materializing the full cross
-/// product as a list and only then handing it to `ON` — the pathology the
-/// design doc names as the reason a real-sized non-equi join never used to
-/// finish.
-/// As `Storage.traverse`, but over a lazy `seq` — the non-equi join fallback
-/// below (`applyJoin`'s "not hashEligible" branch) is the one caller with no
-/// build-side key to hash on, so it's the case most likely to run long
-/// enough for `queryCancellation` to matter (see that doc).
-let private traverseSeq (f: 'a -> Result<'b, 'e>) (xs: 'a seq) : Result<'b list, 'e> =
+/// allocating a combined row for) later elements — and match-only: `f`
+/// returns `None` for an element that doesn't belong in the result (the
+/// non-equi `JOIN` fallback's `ON` came back false), and only `Some` is
+/// added to the accumulator. That's the difference between "streams pairs
+/// instead of materializing" actually being true and merely not true: the
+/// non-equi fallback below hands this one `(left row, right row)` tuple per
+/// candidate pair, and without the `option` filter here, every one of those
+/// tuples (and its `Array.append`-combined row) still piled up in `acc`
+/// before the caller's own `List.filter (fun (..., ok) -> ok)` threw most of
+/// them away — an `a * b * bool` triple, not the pair itself, is small, but
+/// at cross-product scale (a 10k x 50k `ON a.x + 1 = b.y` is 500M candidate
+/// pairs) "small per element" was still O(left x right) overall. Filtering
+/// inside the fold makes memory O(output) instead.
+///
+/// The non-equi `JOIN` fallback (`applyJoin`'s/`applyMutationJoin`'s "not
+/// hashEligible" branch) is also the one caller with no build-side key to
+/// hash on, so it's the case most likely to run long enough for
+/// `queryCancellation` to matter (see that doc).
+let private traverseSeq (f: 'a -> Result<'b option, 'e>) (xs: 'a seq) : Result<'b list, 'e> =
     let token = queryCancellation.Value
     let acc = ResizeArray()
     let mutable error = None
@@ -633,7 +640,8 @@ let private traverseSeq (f: 'a -> Result<'b, 'e>) (xs: 'a seq) : Result<'b list,
         i <- i + 1
 
         match f enumerator.Current with
-        | Ok y -> acc.Add y
+        | Ok(Some y) -> acc.Add y
+        | Ok None -> ()
         | Error e -> error <- Some e
 
     match error with
@@ -1107,9 +1115,9 @@ and private applyJoin
                 let combined = Array.append l r
 
                 evalExpr { ctxFor combined with Clause = OnClause } join.On
-                |> Result.map (fun v -> li, ri, combined, (truthy v = Some true)))
+                |> Result.map (fun v -> if truthy v = Some true then Some(li, ri, combined) else None))
             |> Result.mapError Err
-            |> Result.map (fun rows -> rows |> List.filter (fun (_, _, _, ok) -> ok) |> List.map (fun (li, ri, c, _) -> li, ri, c) |> buildCombinedRows)
+            |> Result.map buildCombinedRows
 
 /// Like `applyJoin`, but for a multi-table `UPDATE`/`DELETE ... JOIN`
 /// rather than a `SELECT`: alongside the flattened row `evalExpr` needs,
@@ -1267,9 +1275,9 @@ and private applyMutationJoin
                     let combinedFlat = Array.append lFlat r
 
                     evalExpr { ctxFor combinedFlat with Clause = OnClause } join.On
-                    |> Result.map (fun v -> li, ri, (lIdent @ [ Some r ], combinedFlat), (truthy v = Some true)))
+                    |> Result.map (fun v -> if truthy v = Some true then Some(li, ri, (lIdent @ [ Some r ], combinedFlat)) else None))
                 |> Result.mapError Err
-                |> Result.map (fun rows -> rows |> List.filter (fun (_, _, _, ok) -> ok) |> List.map (fun (li, ri, row, _) -> li, ri, row) |> buildCombinedRows)
+                |> Result.map buildCombinedRows
 
 /// Resolves `from :: joins` into the same `(sources, rows)` shape
 /// `applyMutationJoin` builds up — the multi-table `UPDATE`/`DELETE`
