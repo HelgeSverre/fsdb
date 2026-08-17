@@ -10,9 +10,9 @@ over an in-memory engine built as a pipeline of discriminated unions.
 
 Readable F# is the primary goal; raw performance is not.
 
-fsdb is not a production database: no authentication, TLS, or replication —
-it's a single-node engine for learning, embedding, testing, and local tooling.
-For production workloads use MySQL, PostgreSQL, or SQLite.
+Not a production database: no authentication, TLS, or replication — a
+single-node engine for learning, embedding, testing, and local tooling. For
+production workloads use MySQL, PostgreSQL, or SQLite.
 
 ## Contents
 
@@ -25,16 +25,16 @@ For production workloads use MySQL, PostgreSQL, or SQLite.
 
 ## Quick start
 
-Requires the .NET 10 SDK (`global.json` pins 10.0.400), a MySQL client for
-smoke-testing, and optionally `just` for the recipes below.
+Needs the .NET 10 SDK (pinned by `global.json`) and a MySQL client; `just` is
+optional.
 
 ```sh
 dotnet run --project src/Fsdb        # listens on 127.0.0.1:3307
 mysql --protocol=tcp -h127.0.0.1 -P3307 -e 'SELECT 1'
 ```
 
-Port 3307 never collides with a real MySQL on 3306; override with `--port`.
-Any username/password is accepted — bind to loopback.
+Port 3307 avoids a real MySQL on 3306 (`--port` overrides). Any
+username/password is accepted, so bind to loopback.
 
 First queries:
 
@@ -113,22 +113,21 @@ flowchart LR
 ```
 
 - **Parser** — an FParsec combinator grammar over a discriminated-union AST.
-  `SELECT`s compile to a logical plan that executes lazily — `LIMIT` stops the
-  scan once enough rows survive, and `ORDER BY ... LIMIT n` never materializes
-  the full sort, streaming a bounded top-(n+offset) set instead.
+  `SELECT`s compile to a logical plan that executes lazily: `LIMIT` stops the
+  scan once enough rows survive, and `ORDER BY ... LIMIT n` streams a bounded
+  top-(n+offset) set instead of materializing the full sort.
 - **Engine** — databases and tables live in a value-swapped catalog; every
   write produces an immutable snapshot, which is what makes transactions
   (`BEGIN`/`COMMIT`/`ROLLBACK`) free: each snapshot is a consistent view.
   PK/UNIQUE lookups go through a map keyed by each column's collation-folded
   encoding — `utf8mb4_0900_ai_ci` keys collide exactly as MySQL's do.
   Equi-joins hash-join; everything else is a scan.
-- **Collations & charsets** — every one of the 89 utf8mb4 collations MySQL 8.4
-  ships, each a one-line registry entry (locale, fold level, pad attribute)
-  whose keys come from ICU sort keys. Honored per-column and per
-  `SET collation_connection`, across `GROUP BY`/`DISTINCT`/`UNION`, joins, and
-  unique keys. Charsets `utf8mb4`/`latin1` (cp1252)/`ascii`/`binary` with
-  MySQL's write-time semantics, plus `CONVERT(x USING …)` and `_charset'…'`
-  introducers.
+- **Collations & charsets** — all 89 utf8mb4 collations MySQL 8.4 ships, each
+  a registry entry of locale, fold level, and pad attribute; ICU sort keys do
+  the work. Honored per-column and per `SET collation_connection` in grouping,
+  dedup, joins, and unique keys. Charsets `utf8mb4`/`latin1` (cp1252)/
+  `ascii`/`binary` follow MySQL's write-time semantics, with
+  `CONVERT(x USING …)` and `_charset'…'` introducers.
 - **Prepared statements** — `COM_STMT_PREPARE`/`COM_STMT_EXECUTE` bind
   parameter `Value`s into the parsed AST (`?` → `Placeholder` → `Lit`), so a
   bound value keeps its real type for every statement the grammar parses;
@@ -269,7 +268,6 @@ most of these — the numbers track fsdb's hotspots, not parity.
 
 - [Compatibility](docs/compatibility.md) — how MySQL 8.4 equivalence is validated
 - [Roadmap](docs/ROADMAP.md) — milestone plan, acceptance gates, evidence
-- [Performance](docs/performance-design.md) — measurement methodology and hotspot forensics
 - [Comment style](docs/comment-style.md) — the grading every comment survives
 - [Torture harness](torture/README.md) — differential fuzzing against a MySQL 8.4 oracle
 - [Benchmarks](benchmarks/README.md) — workloads and methodology
