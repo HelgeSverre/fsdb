@@ -211,8 +211,17 @@ let rec private watchForDisconnect (client: TcpClient) (queryCts: CancellationTo
 /// picks up an unrelated connection's query never inherits a stale
 /// cancelled token.
 let private withCancellationWatch (client: TcpClient) (body: unit -> 'a) : 'a =
-    use queryCts = new CancellationTokenSource()
-    use watchCts = new CancellationTokenSource()
+    // Deliberately not `use`: `watchForDisconnect` runs detached
+    // (`Async.Start`) and `watchCts.Cancel()` below doesn't synchronously
+    // stop an iteration already past its `isSocketDead` check — that
+    // iteration can still call `queryCts.Cancel()` after this function has
+    // returned. Disposing either CTS here raced that call and could throw
+    // `ObjectDisposedException` on a thread-pool thread, which is
+    // unhandled and kills the process. Neither CTS holds timers or
+    // registrations of its own, so there is nothing to leak by skipping
+    // `Dispose`.
+    let queryCts = new CancellationTokenSource()
+    let watchCts = new CancellationTokenSource()
     Async.Start(watchForDisconnect client queryCts, watchCts.Token)
     Storage.queryCancellation.Value <- queryCts.Token
 
