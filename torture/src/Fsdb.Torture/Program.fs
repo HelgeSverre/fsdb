@@ -7,6 +7,7 @@ type private Command =
     | Run
     | Suite
     | Concurrency
+    | MultiDb
     | Replay
     | CheckTools
     | Help
@@ -25,6 +26,8 @@ type private Cli =
       Accounts: int
       HotAccounts: int
       RollbackEvery: int
+      Databases: int
+      ScalingFactor: float
       Artifacts: string
       MySql: string
       SqlSplitter: string
@@ -39,6 +42,7 @@ Usage:
   fsdb-torture run --scenario <scalar|relational|commerce|volume> [options]
   fsdb-torture suite [options]
   fsdb-torture concurrency [options]
+  fsdb-torture multidb [options]
   fsdb-torture replay --case <artifact-directory> [options]
   fsdb-torture check-tools [--sql-splitter <path>]
 
@@ -49,11 +53,13 @@ Options:
   --batch-size <n>           Override scenario INSERT batch size
   --invariant-every <n>      Validate every N statements; 0 means final only (default 1)
   --timeout-seconds <n>      Per-statement/query deadline (default 10)
-  --workers <n>              Concurrent prepared-statement sessions (default 8)
+  --workers <n>              Concurrent prepared-statement sessions per database (default 8)
   --operations <n>           Transactions per worker (default 100)
-  --accounts <n>             Total initialized accounts (default 32)
+  --accounts <n>             Total initialized accounts per database (default 32)
   --hot-accounts <n>         Contended account set, at least 2 (default 4)
   --rollback-every <n>       Roll back every Nth operation; 0 disables (default 5)
+  --databases <n>            multidb: databases run concurrently (default 4)
+  --scaling-factor <n>       multidb: multi-db wall-clock must be <= this fraction of the serial-projected cost (default 0.65)
   --artifacts <directory>    Artifact root (default torture/artifacts/runs)
   --mysql <connection>       MySQL admin connection string
   --sql-splitter <path>      SQL Splitter executable
@@ -74,12 +80,18 @@ Options:
         | true, parsed when parsed >= 0 -> Ok parsed
         | _ -> Error(sprintf "%s expects a non-negative integer, got '%s'" flag value)
 
+    let private parsePositiveFloat (flag: string) (value: string) =
+        match Double.TryParse(value, Globalization.NumberStyles.Float, Globalization.CultureInfo.InvariantCulture) with
+        | true, parsed when parsed > 0.0 -> Ok parsed
+        | _ -> Error(sprintf "%s expects a positive number, got '%s'" flag value)
+
     let parse (argv: string array) =
         let command, offset =
             match Array.tryHead argv |> Option.map (fun value -> value.ToLowerInvariant()) with
             | Some "run" -> Run, 1
             | Some "suite" -> Suite, 1
             | Some "concurrency" -> Concurrency, 1
+            | Some "multidb" -> MultiDb, 1
             | Some "replay" -> Replay, 1
             | Some "check-tools" -> CheckTools, 1
             | Some "--help"
@@ -99,6 +111,8 @@ Options:
         let mutable accounts = 32
         let mutable hotAccounts = 4
         let mutable rollbackEvery = 5
+        let mutable databases = 4
+        let mutable scalingFactor = 0.65
         let mutable artifacts = Paths.defaultArtifactRoot ()
         let mutable mysql = ""
         let mutable sqlSplitter = ""
@@ -169,6 +183,14 @@ Options:
                 match parseNonNegativeInt flag (nextValue flag) with
                 | Ok value -> rollbackEvery <- value
                 | Error error -> failure <- Some error
+            | "--databases" ->
+                match parseInt flag (nextValue flag) with
+                | Ok value -> databases <- value
+                | Error error -> failure <- Some error
+            | "--scaling-factor" ->
+                match parsePositiveFloat flag (nextValue flag) with
+                | Ok value -> scalingFactor <- value
+                | Error error -> failure <- Some error
             | "--artifacts" -> artifacts <- nextValue flag |> Path.GetFullPath
             | "--mysql" -> mysql <- nextValue flag
             | "--sql-splitter" -> sqlSplitter <- nextValue flag
@@ -183,10 +205,11 @@ Options:
         | Some error -> Error error
         | None when command = Run && scenario.IsNone -> Error "run requires --scenario"
         | None when command = Replay && String.IsNullOrWhiteSpace replayCase -> Error "replay requires --case"
-        | None when command = Concurrency && hotAccounts < 2 -> Error "concurrency requires --hot-accounts of at least 2"
-        | None when command = Concurrency && hotAccounts > accounts -> Error "--hot-accounts cannot exceed --accounts"
-        | None when (command = Run || command = Suite || command = Replay || command = Concurrency) && String.IsNullOrWhiteSpace mysql ->
-            Error "run, suite, concurrency, and replay require --mysql (torture/scripts/run.sh supplies it automatically)"
+        | None when (command = Concurrency || command = MultiDb) && hotAccounts < 2 -> Error "concurrency/multidb requires --hot-accounts of at least 2"
+        | None when (command = Concurrency || command = MultiDb) && hotAccounts > accounts -> Error "--hot-accounts cannot exceed --accounts"
+        | None when command = MultiDb && databases < 1 -> Error "multidb requires --databases of at least 1"
+        | None when (command = Run || command = Suite || command = Replay || command = Concurrency || command = MultiDb) && String.IsNullOrWhiteSpace mysql ->
+            Error "run, suite, concurrency, multidb, and replay require --mysql (torture/scripts/run.sh supplies it automatically)"
         | None ->
             Ok
                 { Command = command
@@ -202,6 +225,8 @@ Options:
                   Accounts = accounts
                   HotAccounts = hotAccounts
                   RollbackEvery = rollbackEvery
+                  Databases = databases
+                  ScalingFactor = scalingFactor
                   Artifacts = artifacts
                   MySql = mysql
                   SqlSplitter = sqlSplitter
@@ -226,6 +251,19 @@ Options:
           Accounts = cli.Accounts
           HotAccounts = cli.HotAccounts
           RollbackEvery = cli.RollbackEvery
+          TimeoutSeconds = cli.TimeoutSeconds
+          ArtifactRoot = cli.Artifacts
+          MySqlConnection = cli.MySql }
+
+    let multiDbOptions cli =
+        { Seed = cli.Seed
+          Databases = cli.Databases
+          WorkersPerDatabase = cli.Workers
+          OperationsPerWorker = cli.OperationsPerWorker
+          Accounts = cli.Accounts
+          HotAccounts = cli.HotAccounts
+          RollbackEvery = cli.RollbackEvery
+          ScalingFactor = cli.ScalingFactor
           TimeoutSeconds = cli.TimeoutSeconds
           ArtifactRoot = cli.Artifacts
           MySqlConnection = cli.MySql }
@@ -312,6 +350,36 @@ module Program =
         if not report.Passed then
             printfn "  signature: %s" report.FailureSignature
 
+    let private printMultiDb (report: MultiDbManifest) directory =
+        printfn "%s: %s — %s" report.CaseId report.Classification directory
+
+        for db in report.DatabaseReports do
+            printfn
+                "  db[%d] %s: %s fsdb committed=%d/%d rolled-back=%d failed=%d elapsed=%d ms throughput=%.0f tx/s"
+                db.DatabaseIndex
+                db.DatabaseName
+                db.Classification
+                db.Fsdb.CommittedOperations
+                db.Fsdb.ExpectedLedgerRows
+                db.Fsdb.RolledBackOperations
+                db.Fsdb.FailedOperations
+                db.Fsdb.ElapsedMs
+                db.Fsdb.OperationsPerSecond
+
+        printfn
+            "  baseline=%d ms serial-projected=%d ms multidb-wallclock=%d ms ratio=%.2f threshold=%.2f scaling=%s"
+            report.BaselineSingleDbElapsedMs
+            report.SerialProjectedElapsedMs
+            report.MultiDbWallClockElapsedMs
+            report.ScalingRatio
+            report.ScalingFactor
+            (if report.ScalingPassed then "pass" else "fail")
+
+        printfn "  peak=%.1f MiB detail: %s" (float report.PeakWorkingSetBytes / 1048576.0) report.ClassificationDetail
+
+        if not report.Passed then
+            printfn "  signature: %s" report.FailureSignature
+
     let execute argv =
         task {
             let parsed =
@@ -344,6 +412,24 @@ module Program =
                             return 2
                 with error ->
                     eprintfn "concurrency infrastructure exception: %O" error
+                    return 1
+            | Ok cli when cli.Command = MultiDb ->
+                try
+                    match! MultiDbRunner.run (Cli.multiDbOptions cli) with
+                    | Error error ->
+                        eprintfn "multidb infrastructure failure: %s" error
+                        return 1
+                    | Ok(report, directory) ->
+                        printMultiDb report directory
+
+                        if report.Passed then
+                            return 0
+                        elif report.Classification = "oracle_concurrency_failure" then
+                            return 1
+                        else
+                            return 2
+                with error ->
+                    eprintfn "multidb infrastructure exception: %O" error
                     return 1
             | Ok cli ->
                 match! inspectTool cli.SqlSplitter with

@@ -1,6 +1,10 @@
 services:
   mysql:
     image: mysql:8.4.11@sha256:b3b90af2a6552ae30c266fdb7d5dd55f3afb72404bb78d37fe8a23eb857fd3fb
+    # The multi-database concurrency lane opens one physical connection per
+    # worker per database (e.g. 8 databases x 32 workers = 256), well past
+    # MySQL's 151-connection default.
+    command: --max-connections=2000
     environment:
       MYSQL_ROOT_PASSWORD: torture-secret
     ports:

@@ -151,6 +151,62 @@ type ConcurrencyManifest =
       Passed: bool }
 
 [<CLIMutable>]
+type MultiDbOptions =
+    { Seed: uint64
+      Databases: int
+      WorkersPerDatabase: int
+      OperationsPerWorker: int
+      Accounts: int
+      HotAccounts: int
+      RollbackEvery: int
+      ScalingFactor: float
+      TimeoutSeconds: int
+      ArtifactRoot: string
+      MySqlConnection: string }
+
+[<CLIMutable>]
+type MultiDbDatabaseReport =
+    { DatabaseIndex: int
+      DatabaseName: string
+      MySql: ConcurrencyTargetReport
+      Fsdb: ConcurrencyTargetReport
+      Classification: string
+      Passed: bool }
+
+[<CLIMutable>]
+type MultiDbManifest =
+    { SchemaVersion: int
+      RunId: string
+      CaseId: string
+      StartedUtc: string
+      FinishedUtc: string
+      FsdbRevision: string
+      FsdbDirty: bool
+      FsdbAssemblySha256: string
+      MySqlVersion: string
+      Seed: uint64
+      Databases: int
+      WorkersPerDatabase: int
+      OperationsPerWorker: int
+      Accounts: int
+      HotAccounts: int
+      RollbackEvery: int
+      TimeoutSeconds: int
+      DatabaseReports: MultiDbDatabaseReport array
+      BaselineSingleDbElapsedMs: int64
+      MultiDbWallClockElapsedMs: int64
+      SerialProjectedElapsedMs: int64
+      ScalingRatio: float
+      ScalingFactor: float
+      ScalingPassed: bool
+      FsdbInvariantErrors: string array
+      PeakWorkingSetBytes: int64
+      Classification: string
+      ClassificationDetail: string
+      FailureSignature: string
+      Passed: bool }
+
+[<CLIMutable>]
 type ProcessResult =
     { ExitCode: int
       Stdout: string

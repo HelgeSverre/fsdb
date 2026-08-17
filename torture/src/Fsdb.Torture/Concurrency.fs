@@ -431,7 +431,10 @@ module ConcurrencyRunner =
           Passed = passed
           Detail = detail }
 
-    let private runTarget target connectionString (options: ConcurrencyOptions) =
+    /// Public so `MultiDbRunner` can reuse the exact same setup/worker/report
+    /// pipeline against several concurrently-opened databases instead of
+    /// re-implementing prepared-transaction execution for the multi-db lane.
+    let runTarget target connectionString (options: ConcurrencyOptions) =
         task {
             let connectionString = connectionStringWithoutPooling connectionString options.TimeoutSeconds
             do! setup target connectionString options
