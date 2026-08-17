@@ -172,23 +172,23 @@ let splitQualified (defaultDb: string) (name: string) : string * string =
 /// (and Laravel's `Schema::disableForeignKeyConstraints`, which sends
 /// exactly that) calls `setForeignKeyChecks`.
 type Store =
-    { /// Every database's table map, independently CAS'd per database via
-      /// its own `Database ref` cell — the sharded replacement for what used
-      /// to be one store-wide `Catalog` field with a single
-      /// `Interlocked.CompareExchange` target. A `ConcurrentDictionary` so
-      /// `CREATE`/`DROP DATABASE` (adding/removing a whole entry) is itself
-      /// a lock-free, atomic dictionary operation that never contends with
-      /// an unrelated database's row writer either (`createDatabase`/
-      /// `dropDatabase`, `ensureDatabase`). This is the fix for the
-      /// cross-database write bottleneck profiling found: every write to
-      /// *any* database used to CAS the same single `Catalog` reference, so
-      /// writers in unrelated databases constantly invalidated each other's
-      /// compare-exchange and had to retry their whole write under
-      /// contention; sharding the CAS target per database means database A's
-      /// writers never see database B's writes at all, let alone race them.
-      /// Not exposed beyond this module (no other module needs to touch it
-      /// directly — everything goes through `Store.Catalog`, `scan`,
-      /// `tryUniqueLookup`, or the write ops below).
+    { /// Every database's table map, each independently guarded by its own
+      /// `Database ref` cell (locked via that same cell — see `withDatabase`)
+      /// — the sharded replacement for what used to be one store-wide
+      /// `Catalog` field with a single `Interlocked.CompareExchange` target.
+      /// A `ConcurrentDictionary` so `CREATE`/`DROP DATABASE` (adding/
+      /// removing a whole entry) is itself a lock-free, atomic dictionary
+      /// operation that never contends with an unrelated database's row
+      /// writer either (`createDatabase`/`dropDatabase`, `ensureDatabase`).
+      /// This is the fix for the cross-database write bottleneck profiling
+      /// found: every write to *any* database used to CAS the same single
+      /// `Catalog` reference, so writers in unrelated databases constantly
+      /// invalidated each other's compare-exchange and had to retry their
+      /// whole write under contention; sharding per database means database
+      /// A's writers never see database B's writes at all, let alone race
+      /// them. Not exposed beyond this module (no other module needs to
+      /// touch it directly — everything goes through `Store.Catalog`,
+      /// `scan`, `tryUniqueLookup`, or the write ops below).
       Databases: ConcurrentDictionary<string, Database ref>
       mutable ForeignKeyChecks: bool
       /// The storage-level mirror of MySQL's session `sql_mode`
@@ -234,8 +234,7 @@ type Store =
       /// BEGIN, statements, and COMMIT may resume on different threads.
       TransactionGates: ConcurrentDictionary<string, SemaphoreSlim>
       /// Serializes `OnCommit`'s dispatch only (see `emit`) — every other
-      /// write serializes per-database via `TransactionGates` and swaps its
-      /// own `Database ref` cell lock-free (`Interlocked.CompareExchange`, see
+      /// write locks only its own database's `Database ref` cell (see
       /// `withDatabase`), so writers to different databases never wait on
       /// each other here either. `OnCommit`'s one subscriber
       /// (`Persistence.attach`'s WAL appender) isn't safe to call
@@ -431,20 +430,19 @@ let dropDatabase (store: Store) (dbName: string) : Result<unit, StorageError> =
         Ok()
     | false, _ -> Error(NoSuchDatabase dbName)
 
-/// Applies `f` to `dbName`'s current table map and atomically swaps the
-/// result into that database's own `Database ref` cell via
-/// `Interlocked.CompareExchange`. No lock: `QueryHandler` already serializes
-/// every write to the *same* database through its per-database
-/// `TransactionGates` (`enterTransactionGate`) before it ever reaches here,
-/// so two calls into this function for the same database never run
-/// concurrently in practice — the retry branch exists only because
-/// `Interlocked.CompareExchange` demands one, not because contention is
-/// expected. Crucially, a completely disjoint slot per database (see
-/// `Store.Databases`'s doc) means a write to database A never even reads,
-/// let alone spins retrying against, database B's slot — the cross-database
-/// contention a single store-wide `Catalog` CAS used to cause is gone by
-/// construction, not by luck avoiding the retry branch.
-let rec private withDatabase
+/// Applies `f` to `dbName`'s current table map and swaps the result into
+/// that database's own `Database ref` cell, under that cell's own lock (see
+/// below). `QueryHandler` already serializes every write to the *same*
+/// database through its per-database `TransactionGates`
+/// (`enterTransactionGate`) before it ever reaches here, so in the common
+/// case this lock is uncontended — but this module doesn't *rely* on that
+/// gate alone for correctness (see `mergeDatabaseSlot`'s doc for why a
+/// second, storage-level guarantee matters). Crucially, a completely
+/// disjoint slot per database (see `Store.Databases`'s doc) means a write to
+/// database A never even touches, let alone blocks on, database B's slot —
+/// the cross-database contention a single store-wide `Catalog` CAS used to
+/// cause is gone by construction.
+let private withDatabase
     (store: Store)
     (dbName: string)
     (f: Database -> Result<Database * 'a, StorageError>)
@@ -452,15 +450,23 @@ let rec private withDatabase
     match store.Databases.TryGetValue dbName with
     | false, _ -> Error(NoSuchDatabase dbName)
     | true, slot ->
-        let current = slot.Value
-
-        match f current with
-        | Error e -> Error e
-        | Ok(db', result) ->
-            if obj.ReferenceEquals(Interlocked.CompareExchange(&slot.contents, db', current), current) then
-                Ok result
-            else
-                withDatabase store dbName f
+        // `slot` (the `Database ref` cell itself) doubles as this
+        // database's own mutual-exclusion object — `lock` (a re-entrant
+        // .NET `Monitor`) rather than the `Interlocked.CompareExchange` this
+        // used to be: two writers to *different* databases still never
+        // block on each other (they lock different `slot`s), but two
+        // writers to the *same* database are now unconditionally mutually
+        // exclusive here, in `Storage` itself, rather than relying entirely
+        // on `QueryHandler`'s `TransactionGates` to have already kept them
+        // apart — a second, independent line of defense against exactly the
+        // lost-update hazard `mergeDatabaseSlot`'s doc describes, should a
+        // caller ever reach this module without holding the right gate.
+        lock slot (fun () ->
+            match f slot.Value with
+            | Error e -> Error e
+            | Ok(db', result) ->
+                slot.Value <- db'
+                Ok result)
 
 /// Every database name appearing as a key in `m` — the shared set-of-keys
 /// step `mergeDatabaseSlot`/`mergeCatalogInto`/`bumpAutoIncrementsInto`'s
@@ -468,37 +474,47 @@ let rec private withDatabase
 let private keysOf (m: Map<string, 'a>) : Set<string> = m |> Map.toList |> List.map fst |> Set.ofList
 
 /// Three-way merges one isolated unit of work's private before/after view of
-/// a *single* database (`baseDb`/`batchDb`, both `None` when the batch never
-/// saw that database at all) into that database's own live `slot`,
-/// table-by-table: a table the batch actually wrote (its snapshot copy
-/// differs from `baseDb`, the database as it stood when the batch started)
-/// wins; one it dropped (present at the start, gone from the snapshot) is
-/// removed; one it never touched is left exactly as the slot's *current*
-/// live value already has it, so a concurrent writer's change to that table
-/// (landed on this same slot while the batch was running) survives instead
-/// of being silently discarded by a stale copy. Retries only against this
-/// one database's slot on a lost compare-exchange — unlike the old
-/// whole-catalog merge this replaces, committing a transaction in database A
-/// never spins against database B's concurrent writers, because it never
-/// reads database B's slot at all.
-let rec private mergeDatabaseSlot (slot: Database ref) (baseDb: Database) (batchDb: Database) : unit =
-    let liveDb = slot.Value
-    let tableKeys = Set.unionMany [ keysOf baseDb; keysOf batchDb; keysOf liveDb ]
+/// a *single* database (`baseDb`/`batchDb`) into that database's own live
+/// `slot`, table-by-table: a table the batch actually wrote (its snapshot
+/// copy differs from `baseDb`, the database as it stood when the batch
+/// started) wins outright; one it dropped is removed; one it never touched
+/// is left exactly as the slot's *current* live value already has it, so a
+/// concurrent writer's change to that table survives instead of being
+/// silently discarded by a stale copy.
+///
+/// This "unconditionally take the batch's own final table" rule for a table
+/// the batch *did* touch is only safe if nothing else could have written
+/// that same table between `baseDb` being captured and this merge running —
+/// otherwise the batch's own precomputed `batchT` (built from its own stale
+/// `baseDb`) would silently clobber whatever that other writer landed,
+/// a genuine lost update, not just a wasted retry. `QueryHandler`'s
+/// per-database `TransactionGates` is *supposed* to guarantee that
+/// exclusivity, but this module doesn't take that on faith: `lock slot`
+/// below makes this database's own cell a real mutual-exclusion point
+/// inside `Storage` itself, shared with `withDatabase`'s plain writes — so
+/// even if a caller ever reached this module without holding the right
+/// gate, two writers to the *same* database still can't interleave here,
+/// while writers to *different* databases (locking different cells) remain
+/// fully independent.
+let private mergeDatabaseSlot (slot: Database ref) (baseDb: Database) (batchDb: Database) : unit =
+    // Same `lock slot` as `withDatabase` — this database's own mutual
+    // exclusion, independent of whatever gate the caller believes it's
+    // already holding (see `withDatabase`'s doc).
+    lock slot (fun () ->
+        let liveDb = slot.Value
+        let tableKeys = Set.unionMany [ keysOf baseDb; keysOf batchDb; keysOf liveDb ]
 
-    let mergedDb =
-        tableKeys
-        |> Set.fold
-            (fun tacc tableName ->
-                match Map.tryFind tableName baseDb, Map.tryFind tableName batchDb with
-                | Some _, None -> Map.remove tableName tacc // dropped by the batch
-                | None, Some t -> Map.add tableName t tacc // created by the batch
-                | Some baseT, Some batchT when baseT <> batchT -> Map.add tableName batchT tacc // modified by the batch
-                | _ -> tacc // untouched by the batch — keep whatever's live
-            )
-            liveDb
-
-    if not (obj.ReferenceEquals(Interlocked.CompareExchange(&slot.contents, mergedDb, liveDb), liveDb)) then
-        mergeDatabaseSlot slot baseDb batchDb
+        slot.Value <-
+            tableKeys
+            |> Set.fold
+                (fun tacc tableName ->
+                    match Map.tryFind tableName baseDb, Map.tryFind tableName batchDb with
+                    | Some _, None -> Map.remove tableName tacc // dropped by the batch
+                    | None, Some t -> Map.add tableName t tacc // created by the batch
+                    | Some baseT, Some batchT when baseT <> batchT -> Map.add tableName batchT tacc // modified by the batch
+                    | _ -> tacc // untouched by the batch — keep whatever's live
+                )
+                liveDb)
 
 /// Merges `batchCatalog` (built from `baseCatalog` by some isolated unit of
 /// work — a committing transaction, or a multi-table statement's private
@@ -510,6 +526,26 @@ let rec private mergeDatabaseSlot (slot: Database ref) (baseDb: Database) (batch
 /// by `QueryHandler`'s transaction commit and `Executor`'s multi-table
 /// `UPDATE`, both of which run a private snapshot store before merging its
 /// catalog back.
+/// A commit's merge (`baseCatalog`/`batchCatalog` -> live) is a
+/// *three-way* merge keyed off `baseCatalog` — a snapshot from whenever this
+/// batch began, which can be arbitrarily stale by the time it commits. Two
+/// merges racing the same table each decide "mine changed it, take mine"
+/// purely from their own (stale) base/batch pair, with no way to notice the
+/// other one *also* changed that table in between — the loser's whole-table
+/// `batchT` silently clobbers the winner's already-landed row, a genuine
+/// lost update, not just a wasted retry. Per-database `TransactionGates` are
+/// supposed to make this impossible for the common case (one transaction at
+/// a time per database), but this module has no way to prove every caller
+/// actually holds the right gate for every database a batch's snapshot might
+/// mention (a batch's `baseCatalog`/`batchCatalog` are always *whole-store*
+/// snapshots, not scoped to the database(s) it meant to touch) — so the merge
+/// step itself, not just the gate, needs to be the backstop. `store.Lock`
+/// (otherwise only used to serialize `OnCommit` dispatch) makes the merge a
+/// true store-wide critical section: two commits can still run their actual
+/// row/table writes fully in parallel across databases (`withDatabase`
+/// itself takes no lock at all), but they queue for this one relatively
+/// cheap step (an O(touched tables) map merge, not O(rows)) rather than ever
+/// racing each other's three-way decision.
 let mergeCatalogInto (store: Store) (baseCatalog: Catalog) (batchCatalog: Catalog) : unit =
     let dbKeys = Set.union (keysOf baseCatalog) (keysOf batchCatalog)
 
@@ -518,38 +554,64 @@ let mergeCatalogInto (store: Store) (baseCatalog: Catalog) (batchCatalog: Catalo
         | Some _, None -> store.Databases.TryRemove dbName |> ignore // the batch dropped this database
         | None, Some batchDb -> store.Databases.[dbName] <- ref batchDb // the batch created this database
         | None, None -> () // unreachable: dbKeys only ever holds keys from baseCatalog/batchCatalog
+        // `baseCatalog`/`batchCatalog` are always *whole-store* snapshots
+        // (`Store.Catalog`, taken at BEGIN and at commit time), so `dbKeys`
+        // includes every database in the store, not just the one(s) this
+        // batch actually wrote — most of the time `baseDb = batchDb` here,
+        // meaning the batch never touched this database at all. Skipping
+        // those isn't just an optimization: a no-op merge attempt would
+        // still take that database's lock, which is exactly the kind of
+        // unrelated-database contention this whole sharded design exists to
+        // avoid paying on every commit.
+        | Some baseDb, Some batchDb when baseDb = batchDb -> ()
         | Some baseDb, Some batchDb ->
-            // Existed both before and after the batch. `GetOrAdd` rather than
-            // a plain lookup: if a concurrent writer dropped this database
-            // entirely while the batch was running, merge back into a fresh
-            // empty slot instead of silently losing the batch's own writes —
-            // the same fallback the old whole-catalog merge's `Option.defaultValue
-            // Map.empty` gave a database missing from the live catalog.
+            // Existed both before and after the batch, and the batch really
+            // did write here. `GetOrAdd` rather than a plain lookup: if a
+            // concurrent writer dropped this database entirely while the
+            // batch was running, merge back into a fresh empty slot instead
+            // of silently losing the batch's own writes — the same fallback
+            // the old whole-catalog merge's `Option.defaultValue Map.empty`
+            // gave a database missing from the live catalog. `mergeDatabaseSlot`
+            // itself takes this database's own lock (see its doc) — two
+            // commits to *different* databases still merge fully in
+            // parallel here.
             let slot = store.Databases.GetOrAdd(dbName, (fun _ -> ref Map.empty))
             mergeDatabaseSlot slot baseDb batchDb
 
 /// Bumps the live catalog's AUTO_INCREMENT counters up to a discarded
 /// transaction's snapshot wherever it ran one ahead — MySQL never rolls
 /// back a burned id (see `QueryHandler.rollbackSession`'s doc) — leaving
-/// everything else (rows, schema) exactly as the live catalog has it. Same
-/// per-database CAS retry as `mergeCatalogInto`, and for the same reason:
-/// only the database(s) `snapshotCatalog` actually has are ever touched.
+/// everything else (rows, schema) exactly as the live catalog has it. Under
+/// `store.Lock`, same as `mergeCatalogInto` and for the same reason (a true
+/// store-wide critical section for the relatively rare merge/bump step, not
+/// the per-row write hot path) — `ROLLBACK` is rarer still than `COMMIT`, so
+/// this is even cheaper to serialize.
 let bumpAutoIncrementsInto (store: Store) (snapshotCatalog: Catalog) : unit =
-    let rec bumpSlot (slot: Database ref) (snapshotDb: Database) =
-        let liveDb = slot.Value
+    // `snapshotCatalog` is always a *whole-store* snapshot (`Store.Catalog`,
+    // taken at BEGIN), so it holds every database, not just the one(s) the
+    // rolled-back transaction actually wrote to. Only ever touch a
+    // database's slot when some table in it genuinely needs bumping
+    // (`mergedDb` differs from what's live, checked by reference — the
+    // `Map.fold` below only calls `Map.add` on an actual bump) — touching an
+    // untouched database's slot (and its lock) for no reason is exactly the
+    // unrelated-database work sharding `Store.Databases` exists to avoid.
+    let bumpSlot (slot: Database ref) (snapshotDb: Database) =
+        // Same per-database `lock slot` as `withDatabase`/`mergeDatabaseSlot`.
+        lock slot (fun () ->
+            let liveDb = slot.Value
 
-        let mergedDb =
-            snapshotDb
-            |> Map.fold
-                (fun acc tableName (snapshotTable: Table) ->
-                    match Map.tryFind tableName acc with
-                    | Some(liveTable: Table) when snapshotTable.NextAutoId > liveTable.NextAutoId ->
-                        Map.add tableName { liveTable with NextAutoId = snapshotTable.NextAutoId } acc
-                    | _ -> acc)
-                liveDb
+            let mergedDb =
+                snapshotDb
+                |> Map.fold
+                    (fun acc tableName (snapshotTable: Table) ->
+                        match Map.tryFind tableName acc with
+                        | Some(liveTable: Table) when snapshotTable.NextAutoId > liveTable.NextAutoId ->
+                            Map.add tableName { liveTable with NextAutoId = snapshotTable.NextAutoId } acc
+                        | _ -> acc)
+                    liveDb
 
-        if not (obj.ReferenceEquals(Interlocked.CompareExchange(&slot.contents, mergedDb, liveDb), liveDb)) then
-            bumpSlot slot snapshotDb
+            if not (obj.ReferenceEquals(mergedDb, liveDb)) then
+                slot.Value <- mergedDb)
 
     for KeyValue(dbName, snapshotDb) in snapshotCatalog do
         match store.Databases.TryGetValue dbName with
