@@ -2825,6 +2825,43 @@ let tests =
                         // exactly, not merely as sets.
                         Expect.equal limited expected (sprintf "sql=%s limit=%d offset=%d" baseSql limit offset)
 
+                testCase "a chain of two equi-JOINs (3 tables) matches a nested-loop reference over randomized data"
+                <| fun _ ->
+                    // The second JOIN's left side is the first JOIN's own
+                    // (possibly lazy) output rows, not a plain table scan —
+                    // this is the shape that exercises re-deriving that
+                    // input rather than just reading it once.
+                    let rnd = System.Random(20260817)
+
+                    for _ in 1 .. 40 do
+                        let store = newStore ()
+                        runDefault store "CREATE TABLE a (id INT PRIMARY KEY, k INT)" |> ignore
+                        runDefault store "CREATE TABLE b (id INT PRIMARY KEY, k INT)" |> ignore
+                        runDefault store "CREATE TABLE c (id INT PRIMARY KEY, k INT)" |> ignore
+
+                        let mkRows n = [ for i in 1 .. rnd.Next(5, 40) -> i, rnd.Next(0, n) ]
+                        let aRows, bRows, cRows = mkRows 6, mkRows 6, mkRows 6
+                        let valuesOf rows = rows |> List.map (fun (i, k) -> sprintf "(%d,%d)" i k) |> String.concat ", "
+                        runDefault store (sprintf "INSERT INTO a VALUES %s" (valuesOf aRows)) |> ignore
+                        runDefault store (sprintf "INSERT INTO b VALUES %s" (valuesOf bRows)) |> ignore
+                        runDefault store (sprintf "INSERT INTO c VALUES %s" (valuesOf cRows)) |> ignore
+
+                        let actual =
+                            runDefault store "SELECT a.id, b.id, c.id FROM a JOIN b ON a.k = b.k JOIN c ON b.k = c.k"
+                            |> resultRows
+                            |> List.sort
+
+                        let expected =
+                            [ for ai, ak in aRows do
+                                  for bi, bk in bRows do
+                                      if ak = bk then
+                                          for ci, ck in cRows do
+                                              if bk = ck then
+                                                  yield [ Some(string ai); Some(string bi); Some(string ci) ] ]
+                            |> List.sort
+
+                        Expect.equal actual expected "3-table equi-JOIN chain must match a nested-loop reference, as a set"
+
                 testCase
                     "bounded top-N for ORDER BY + LIMIT (+ OFFSET, incl. ties and OFFSET past the end) matches a full sort-then-slice reference over randomized data"
                 <| fun _ ->

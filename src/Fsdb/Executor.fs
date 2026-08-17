@@ -1188,9 +1188,9 @@ and private applyJoin
         // Forces whatever `rowsSoFar` is (a previous `JOIN` in this same
         // list may have handed back a lazy seq — see `hashPairs`' doc) up
         // front: the hash join's build side needs random-access counting
-        // either way, so only a chain of 2+ `JOIN`s pays this, and a single
-        // `JOIN`'s `rowsSoFar` is already the `FROM` table's own materialized
-        // scan.
+        // either way. Every later use of the left side reads `leftIndexed`,
+        // never `rowsSoFar` itself, so a chain of `JOIN`s only pays this
+        // force once per link, not once per read.
         let leftIndexed = rowsSoFar |> List.ofSeq |> List.indexed
         let rightIndexed = joinRows |> List.indexed
 
@@ -1234,7 +1234,7 @@ and private applyJoin
         let hashEligible =
             not equiKeys.IsEmpty
             && keyClasses |> List.forall Option.isSome
-            && rowsMatchKeyClasses (keyClasses |> List.map Option.get) (equiKeys |> List.map fst) rowsSoFar
+            && rowsMatchKeyClasses (keyClasses |> List.map Option.get) (equiKeys |> List.map fst) (leftIndexed |> Seq.map snd)
             && rowsMatchKeyClasses (keyClasses |> List.map Option.get) (equiKeys |> List.map snd) joinRows
 
         let residualHolds (combined: Value[]) : Result<bool, EvalError> =
