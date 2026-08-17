@@ -1085,6 +1085,29 @@ let private applyAlterAction (table: Table) (action: AlterAction) : Result<Table
             { table with
                 Columns = table.Columns |> List.mapi (fun i c -> if i = idx then { c with Name = newName } else c) },
             None)
+    | AddIndex ix when ix.Unique ->
+        // `CREATE UNIQUE INDEX`/`ALTER TABLE ... ADD UNIQUE` over rows that
+        // already collide must fail with the same 1062 a plain INSERT would
+        // give — otherwise `reindexTable` (Map.ofList, last-wins) silently
+        // drops every row but one from the new UniqueIndex, and both the
+        // fast path and the constraint itself go missing from then on.
+        ix.Columns
+        |> traverse (resolveColumn table.Columns)
+        |> Result.bind (fun idxs ->
+            let rec firstCollision seen rows =
+                match rows with
+                | [] -> None
+                | (row: Value[]) :: rest ->
+                    match encodeConstraintKey idxs row with
+                    | Some key when Set.contains key seen ->
+                        let value = idxs |> List.map (fun i -> row.[i] |> toText |> Option.defaultValue "NULL") |> String.concat "-"
+                        Some(DuplicateKey(ix.Name, value))
+                    | Some key -> firstCollision (Set.add key seen) rest
+                    | None -> firstCollision seen rest
+
+            match firstCollision Set.empty table.Rows with
+            | Some e -> Error e
+            | None -> Ok({ table with Indexes = table.Indexes @ [ ix ] }, None))
     | AddIndex ix -> Ok({ table with Indexes = table.Indexes @ [ ix ] }, None)
     | DropIndexAction name ->
         Ok(

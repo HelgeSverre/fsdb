@@ -999,6 +999,30 @@ let tests =
                     | Ok() -> ()
                     | Error e -> failtestf "expected Ok, got %A" e
 
+                testCase "AddIndex with Unique = true rejects existing duplicates instead of silently dropping rows from the index"
+                <| fun _ ->
+                    let store = withUsersTable ()
+
+                    insertRows
+                        store
+                        defaultDatabase
+                        "users"
+                        None
+                        [ [ VNull; VString "dup"; VInt 1L ]; [ VNull; VString "dup"; VInt 2L ]; [ VNull; VString "unique"; VInt 3L ] ]
+                    |> ignore
+
+                    let ix = { Name = "uq_name"; Columns = [ "name" ]; Unique = true }
+
+                    match alterTable store defaultDatabase "users" [ AddIndex ix ] with
+                    | Error(DuplicateKey("uq_name", _)) -> ()
+                    | other -> failtestf "expected DuplicateKey for the two 'dup' rows, got %A" other
+
+                    // Rejected DDL must leave the table exactly as it was —
+                    // no half-applied index, all three original rows intact.
+                    match scan store defaultDatabase "users" with
+                    | Ok(_, rows) -> Expect.equal (List.length (List.ofSeq rows)) 3 "all rows survive a rejected ADD UNIQUE"
+                    | Error e -> failtestf "expected Ok, got %A" e
+
                 testCase "AddForeignKey / DropForeignKey manage the table's FK metadata"
                 <| fun _ ->
                     let store = withUsersTable ()
