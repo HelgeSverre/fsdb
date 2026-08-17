@@ -2180,18 +2180,35 @@ let updateRows
             Ok changes.Length
         | Error e -> Error e
 
+/// Per-snapshot memo of `RowsArray` as a `Value[] list`, keyed by the
+/// `Table` instance itself: `Executor`'s row pipeline is list-based and
+/// materializes every scan with `List.ofSeq`, which is free when the seq
+/// already IS a list (FSharp.Core's fast path) but an O(row count) cons
+/// rebuild per query against a bare `ImmutableArray`. Caching the list per
+/// table version restores the free path for repeated scans of an unchanged
+/// table; a write swaps in a new `Table` instance, so its entry starts
+/// fresh and the old one dies with the old snapshot (weak keys, no
+/// lifetime management needed). Thread-safe per `ConditionalWeakTable`'s
+/// own contract.
+let private rowsListCache = System.Runtime.CompilerServices.ConditionalWeakTable<Table, Value[] list>()
+
+let private rowsList (table: Table) : Value[] list =
+    rowsListCache.GetValue(table, fun t -> List.ofSeq t.RowsArray)
+
 /// A snapshot read: the table's columns and its rows as they were at the
 /// moment of the call. Lock-free — reads `dbName`'s own slot directly (not
 /// the whole-catalog `Store.Catalog` view, which would pay an O(number of
 /// databases) rebuild on every single SELECT), and later writes swap in a
 /// new `Database` for that slot without mutating this snapshot's row list.
+/// The returned seq is a `Value[] list` under the hood (see `rowsList`), so
+/// a caller's `List.ofSeq` re-materialization stays O(1).
 let scan (store: Store) (dbName: string) (tableName: string) : Result<ColumnDef list * Value[] seq, StorageError> =
     match store.Databases.TryGetValue dbName with
     | false, _ -> Error(NoSuchDatabase dbName)
     | true, slot ->
         match tryGetTable slot.Value tableName with
         | Error e -> Error e
-        | Ok table -> Ok(table.Columns, table.RowsArray :> Value[] seq)
+        | Ok table -> Ok(table.Columns, rowsList table :> Value[] seq)
 
 /// Generated/virtual columns (`CREATE TABLE ... col AS (expr) [STORED |
 /// VIRTUAL]`) — `Ast.ColumnDef.Generated` carries the parsed `Expr`, but
