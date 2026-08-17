@@ -653,10 +653,12 @@ type private JoinKeyComparer() =
         | VInt _
         | VDouble _
         | VDecimal _ -> box (Value.toDouble v)
-        // The collation's canonical key folds case *and* accents (keeping
-        // trailing spaces significant) — 'åge' and 'age' must land in the
-        // same bucket for `Equals`' folded `Value.compare` to ever see them.
-        | _ -> box (Collation.defaultCollation.KeyOf (Value.toText v |> Option.defaultValue ""))
+        // The collation's hash folds case *and* accents (keeping trailing
+        // spaces significant) — 'åge' and 'age' must land in the same bucket
+        // for `Equals`' folded `Value.compare` to ever see them. A hash, not
+        // `KeyOf`: hashing needs no canonical form, so this avoids a full
+        // sort-key materialization per string per row.
+        | _ -> box (Collation.defaultCollation.HashOf (Value.toText v |> Option.defaultValue ""))
 
     interface IEqualityComparer<Value[]> with
         member _.Equals(a: Value[], b: Value[]) = Array.forall2 (fun x y -> Value.compare x y = 0) a b

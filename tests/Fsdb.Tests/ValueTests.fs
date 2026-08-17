@@ -204,6 +204,21 @@ let tests =
                         let col = Fsdb.Collation.tryFind name |> Option.get
                         Expect.equal (col.Equals "a" "a ") expectedEqual (sprintf "%s: 'a' = 'a '" name)
 
+                testTheory
+                    "HashOf agrees with ComparePrimary: strings equal under the folded order hash equal"
+                    [ "utf8mb4_0900_ai_ci", "åge", "age"
+                      "utf8mb4_0900_ai_ci", "ÅGE", "age"
+                      "utf8mb4_0900_ai_ci", "ß", "ss"
+                      "utf8mb4_0900_ai_ci", "Céline", "celine"
+                      "utf8mb4_unicode_ci", "a", "a "
+                      "utf8mb4_unicode_ci", "ÅGE", "age"
+                      "utf8mb4_0900_bin", "a", "a"
+                      "utf8mb4_bin", "x", "x " ]
+                    <| fun (name, a, b) ->
+                        let col = Fsdb.Collation.tryFind name |> Option.get
+                        Expect.isTrue (col.ComparePrimary a b = 0) (sprintf "%s: precondition %s = %s" name a b)
+                        Expect.equal (col.HashOf a) (col.HashOf b) (sprintf "%s: HashOf %s = HashOf %s" name a b)
+
                 testCase "PAD SPACE sorting puts the extra-space side first (MySQL-verified)"
                 <| fun _ ->
                     let col = Fsdb.Collation.tryFind "utf8mb4_unicode_ci" |> Option.get
