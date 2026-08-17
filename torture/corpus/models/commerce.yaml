@@ -1,0 +1,173 @@
+version: 1
+kind: model
+
+source:
+  dialect: mysql
+  fingerprint_policy: ignore
+
+output:
+  dialect: mysql
+  mode: schema_and_data
+  batch_size: 8
+
+seed: 1
+defaults:
+  inference: disabled
+
+tables:
+  customers:
+    rows: { kind: fixed, count: 1000 }
+    schema:
+      name: customers
+      primary_key: [id]
+      columns:
+        - { name: id, type: bigint, nullable: false, primary_key: true }
+        - { name: email, type: "varchar(255)", nullable: false, unique: true }
+        - { name: credit_limit, type: "decimal(24,6)", nullable: false }
+        - { name: profile, type: json, nullable: true }
+    columns:
+      id: { generator: { kind: sequence, start: 1 } }
+      email:
+        generator: { kind: internet.email }
+        modifiers: [{ kind: unique, max_attempts: 64, on_exhaustion: error }]
+      credit_limit: { generator: { kind: decimal, min: 0, max: 10000000, scale: 6 } }
+      profile:
+        generator: { kind: json_value }
+        modifiers: [{ kind: null_rate, rate: 0.2 }]
+
+  products:
+    rows: { kind: fixed, count: 1000 }
+    schema:
+      name: products
+      primary_key: [id]
+      columns:
+        - { name: id, type: bigint, nullable: false, primary_key: true }
+        - { name: sku, type: "varchar(40)", nullable: false, unique: true }
+        - { name: name, type: "varchar(200)", nullable: false }
+        - { name: unit_price, type: "decimal(24,6)", nullable: false }
+        - { name: stock, type: "integer unsigned", nullable: false }
+        - { name: attributes, type: json, nullable: false }
+        - { name: image, type: blob, nullable: true }
+    columns:
+      id: { generator: { kind: sequence, start: 1 } }
+      sku:
+        generator: { kind: pattern, mask: "SKU-########-????" }
+        modifiers: [{ kind: unique, max_attempts: 64, on_exhaustion: error }]
+      name: { generator: { kind: text.sentence } }
+      unit_price: { generator: { kind: decimal, min: 0.000001, max: 999999.999999, scale: 6 } }
+      stock: { generator: { kind: integer, min: 0, max: 1000000 } }
+      attributes: { generator: { kind: json_value } }
+      image:
+        generator: { kind: bytes, min_length: 0, max_length: 128 }
+        modifiers: [{ kind: null_rate, rate: 0.75 }]
+
+  orders:
+    rows: { kind: fixed, count: 4000 }
+    schema:
+      name: orders
+      primary_key: [id]
+      columns:
+        - { name: id, type: bigint, nullable: false, primary_key: true }
+        - { name: customer_id, type: bigint, nullable: false }
+        - { name: reference, type: "varchar(32)", nullable: false, unique: true }
+        - { name: status, type: "enum('draft','placed','paid','cancelled')", nullable: false }
+        - { name: subtotal, type: "decimal(30,10)", nullable: false }
+        - { name: tax, type: "decimal(30,10)", nullable: false }
+        - { name: total, type: "decimal(30,10)", nullable: false }
+        - { name: shipping_address, type: json, nullable: false }
+      relationships:
+        - { name: order_customer, columns: [customer_id], referenced_table: customers, referenced_columns: [id] }
+    relationships:
+      - name: order_customer
+        columns: [customer_id]
+        references: { table: customers, columns: [id] }
+    columns:
+      id: { generator: { kind: sequence, start: 1 } }
+      customer_id: { generator: { kind: relation.foreign_key, relationship: order_customer } }
+      reference:
+        generator: { kind: pattern, mask: "ORD-############" }
+        modifiers: [{ kind: unique, max_attempts: 64, on_exhaustion: error }]
+      status: { generator: { kind: choice, values: [draft, placed, paid, cancelled] } }
+      subtotal: { generator: { kind: decimal, min: 0, max: 10000000, scale: 10 } }
+      tax: { generator: { kind: decimal, min: 0, max: 2500000, scale: 10 } }
+      total: { generator: { kind: decimal, min: 0, max: 12500000, scale: 10 } }
+      shipping_address: { generator: { kind: json_value } }
+
+  order_items:
+    rows: { kind: fixed, count: 8000 }
+    schema:
+      name: order_items
+      primary_key: [id]
+      columns:
+        - { name: id, type: bigint, nullable: false, primary_key: true }
+        - { name: order_id, type: bigint, nullable: false }
+        - { name: product_id, type: bigint, nullable: true }
+        - { name: description, type: "varchar(255)", nullable: false }
+        - { name: quantity, type: integer, nullable: false }
+        - { name: unit_price, type: "decimal(30,10)", nullable: false }
+        - { name: line_total, type: "decimal(30,10)", nullable: false }
+        - { name: metadata, type: json, nullable: true }
+      relationships:
+        - { name: item_order, columns: [order_id], referenced_table: orders, referenced_columns: [id] }
+        - { name: item_product, columns: [product_id], referenced_table: products, referenced_columns: [id] }
+    relationships:
+      - name: item_order
+        columns: [order_id]
+        references: { table: orders, columns: [id] }
+      - name: item_product
+        columns: [product_id]
+        references: { table: products, columns: [id] }
+    columns:
+      id: { generator: { kind: sequence, start: 1 } }
+      order_id: { generator: { kind: relation.foreign_key, relationship: item_order } }
+      product_id:
+        generator: { kind: relation.foreign_key, relationship: item_product, null_rate: 0.1 }
+      description: { generator: { kind: text.sentence } }
+      quantity: { generator: { kind: integer, min: 1, max: 1000 } }
+      unit_price: { generator: { kind: decimal, min: 0.0000000001, max: 999999.9999999999, scale: 10 } }
+      line_total: { generator: { kind: decimal, min: 0.0000000001, max: 999999999.9999999999, scale: 10 } }
+      metadata:
+        generator: { kind: json_value }
+        modifiers: [{ kind: null_rate, rate: 0.4 }]
+
+  payments:
+    rows: { kind: fixed, count: 4000 }
+    schema:
+      name: payments
+      primary_key: [id]
+      columns:
+        - { name: id, type: bigint, nullable: false, primary_key: true }
+        - { name: order_id, type: bigint, nullable: false }
+        - { name: parent_id, type: bigint, nullable: true }
+        - { name: external_reference, type: "varchar(80)", nullable: false, unique: true }
+        - { name: amount, type: "decimal(30,10)", nullable: false }
+        - { name: state, type: "enum('pending','authorized','captured','refunded','failed')", nullable: false }
+        - { name: response, type: json, nullable: true }
+      relationships:
+        - { name: payment_order, columns: [order_id], referenced_table: orders, referenced_columns: [id] }
+        - { name: payment_parent, columns: [parent_id], referenced_table: payments, referenced_columns: [id] }
+    relationships:
+      - name: payment_order
+        columns: [order_id]
+        references: { table: orders, columns: [id] }
+      - name: payment_parent
+        columns: [parent_id]
+        references: { table: payments, columns: [id] }
+    columns:
+      id: { generator: { kind: sequence, start: 1 } }
+      order_id: { generator: { kind: relation.foreign_key, relationship: payment_order } }
+      external_reference:
+        generator: { kind: uuid }
+        modifiers: [{ kind: unique, max_attempts: 64, on_exhaustion: error }]
+      amount: { generator: { kind: decimal, min: -10000000, max: 10000000, scale: 10 } }
+      state: { generator: { kind: choice, values: [pending, authorized, captured, refunded, failed] } }
+      response:
+        generator: { kind: json_value }
+        modifiers: [{ kind: null_rate, rate: 0.3 }]
+    planners:
+      - kind: hierarchy.tree
+        relationship: payment_parent
+        columns: { parent: parent_id }
+        root_ratio: 0.7
+        max_depth: 3
+        max_branching: 8

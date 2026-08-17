@@ -1,0 +1,140 @@
+version: 1
+kind: model
+
+source:
+  dialect: mysql
+  fingerprint_policy: ignore
+
+output:
+  dialect: mysql
+  mode: schema_and_data
+  batch_size: 1
+
+seed: 1
+defaults:
+  inference: disabled
+
+tables:
+  tenants:
+    rows: { kind: fixed, count: 1000 }
+    schema:
+      name: tenants
+      primary_key: [id]
+      columns:
+        - { name: id, type: bigint, nullable: false, primary_key: true }
+        - { name: slug, type: "varchar(80)", nullable: false, unique: true }
+        - { name: settings, type: json, nullable: true }
+        - { name: created_at, type: datetime, nullable: false }
+    columns:
+      id: { generator: { kind: sequence, start: 1 } }
+      slug:
+        generator: { kind: identifier.nanoid }
+        modifiers: [{ kind: unique, max_attempts: 32, on_exhaustion: error }]
+      settings:
+        generator: { kind: json_value }
+        modifiers: [{ kind: null_rate, rate: 0.2 }]
+      created_at: { generator: { kind: datetime } }
+
+  users:
+    rows: { kind: fixed, count: 1000 }
+    schema:
+      name: users
+      primary_key: [id]
+      columns:
+        - { name: id, type: bigint, nullable: false, primary_key: true }
+        - { name: email, type: "varchar(255)", nullable: false, unique: true }
+        - { name: display_name, type: "varchar(160)", nullable: false }
+    columns:
+      id: { generator: { kind: sequence, start: 1 } }
+      email:
+        generator: { kind: internet.email }
+        modifiers: [{ kind: unique, max_attempts: 64, on_exhaustion: error }]
+      display_name: { generator: { kind: person.full_name } }
+
+  memberships:
+    rows: { kind: fixed, count: 4000 }
+    schema:
+      name: memberships
+      primary_key: [tenant_id, user_id]
+      columns:
+        - { name: tenant_id, type: bigint, nullable: false, primary_key: true }
+        - { name: user_id, type: bigint, nullable: false, primary_key: true }
+        - { name: role, type: "enum('owner','admin','member','viewer')", nullable: false }
+      relationships:
+        - { name: membership_tenant, columns: [tenant_id], referenced_table: tenants, referenced_columns: [id] }
+        - { name: membership_user, columns: [user_id], referenced_table: users, referenced_columns: [id] }
+    relationships:
+      - name: membership_tenant
+        columns: [tenant_id]
+        references: { table: tenants, columns: [id] }
+      - name: membership_user
+        columns: [user_id]
+        references: { table: users, columns: [id] }
+    columns:
+      role: { generator: { kind: choice, values: [owner, admin, member, viewer] } }
+    planners:
+      - kind: relation.junction_pair
+        left_relationship: membership_tenant
+        right_relationship: membership_user
+        columns: { left: tenant_id, right: user_id }
+
+  projects:
+    rows: { kind: fixed, count: 4000 }
+    schema:
+      name: projects
+      primary_key: [id]
+      columns:
+        - { name: id, type: bigint, nullable: false, primary_key: true }
+        - { name: tenant_id, type: bigint, nullable: false }
+        - { name: owner_id, type: bigint, nullable: false }
+        - { name: name, type: "varchar(180)", nullable: false }
+        - { name: budget, type: "decimal(20,4)", nullable: false }
+        - { name: metadata, type: json, nullable: true }
+      relationships:
+        - { name: project_tenant, columns: [tenant_id], referenced_table: tenants, referenced_columns: [id] }
+        - { name: project_owner, columns: [owner_id], referenced_table: users, referenced_columns: [id] }
+    relationships:
+      - name: project_tenant
+        columns: [tenant_id]
+        references: { table: tenants, columns: [id] }
+      - name: project_owner
+        columns: [owner_id]
+        references: { table: users, columns: [id] }
+    columns:
+      id: { generator: { kind: sequence, start: 1 } }
+      tenant_id: { generator: { kind: relation.foreign_key, relationship: project_tenant } }
+      owner_id: { generator: { kind: relation.foreign_key, relationship: project_owner } }
+      name: { generator: { kind: text.sentence } }
+      budget: { generator: { kind: decimal, min: -1000000, max: 1000000000, scale: 4 } }
+      metadata:
+        generator: { kind: json_value }
+        modifiers: [{ kind: null_rate, rate: 0.3 }]
+
+  tasks:
+    rows: { kind: fixed, count: 8000 }
+    schema:
+      name: tasks
+      primary_key: [id]
+      columns:
+        - { name: id, type: bigint, nullable: false, primary_key: true }
+        - { name: project_id, type: bigint, nullable: false }
+        - { name: assignee_id, type: bigint, nullable: true }
+        - { name: title, type: "varchar(240)", nullable: false }
+        - { name: status, type: "enum('open','active','done','blocked')", nullable: false }
+      relationships:
+        - { name: task_project, columns: [project_id], referenced_table: projects, referenced_columns: [id] }
+        - { name: task_assignee, columns: [assignee_id], referenced_table: users, referenced_columns: [id] }
+    relationships:
+      - name: task_project
+        columns: [project_id]
+        references: { table: projects, columns: [id] }
+      - name: task_assignee
+        columns: [assignee_id]
+        references: { table: users, columns: [id] }
+    columns:
+      id: { generator: { kind: sequence, start: 1 } }
+      project_id: { generator: { kind: relation.foreign_key, relationship: task_project } }
+      assignee_id:
+        generator: { kind: relation.foreign_key, relationship: task_assignee, null_rate: 0.25 }
+      title: { generator: { kind: text.sentence } }
+      status: { generator: { kind: choice, values: [open, active, done, blocked] } }

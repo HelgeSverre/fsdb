@@ -1,0 +1,41 @@
+version: 1
+kind: model
+
+source:
+  dialect: mysql
+  fingerprint_policy: ignore
+
+output:
+  dialect: mysql
+  mode: schema_and_data
+  batch_size: 10000
+
+seed: 1
+defaults:
+  inference: disabled
+
+# This lane deliberately has no PRIMARY or UNIQUE key. It isolates parser,
+# protocol, coercion, storage growth, aggregate, and snapshot costs from FSDB's
+# currently linear unique-key enforcement. The sequence remains deterministic,
+# and a non-unique index makes the final ordered snapshot contract explicit.
+tables:
+  volume_rows:
+    rows: { kind: fixed, count: 1000 }
+    schema:
+      name: volume_rows
+      columns:
+        - { name: id, type: bigint, nullable: false }
+        - { name: bucket, type: integer, nullable: false }
+        - { name: signed_value, type: bigint, nullable: false }
+        - { name: exact_value, type: "decimal(18,4)", nullable: false }
+        - { name: active, type: boolean, nullable: false }
+        - { name: payload, type: "varchar(24)", nullable: false }
+      indexes:
+        - { name: idx_volume_id, columns: [id] }
+    columns:
+      id: { generator: { kind: sequence, start: 1 } }
+      bucket: { generator: { kind: integer, min: 0, max: 1023 } }
+      signed_value: { generator: { kind: integer, min: -9000000000000, max: 9000000000000 } }
+      exact_value: { generator: { kind: decimal, min: -999999999.9999, max: 999999999.9999, scale: 4 } }
+      active: { generator: { kind: boolean, probability: 0.5 } }
+      payload: { generator: { kind: pattern, mask: "????-########-****" } }
