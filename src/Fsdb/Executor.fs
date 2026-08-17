@@ -550,9 +550,12 @@ let rec private resolveStarQualifier (ctx: EvalContext) (qualifier: string) : Re
 /// from its residual filter (`extractEquiKeys` below) — `OR` can't, so a
 /// disjunction stays one opaque conjunct and reports no keys.
 let rec private conjuncts (expr: Expr) : Expr list =
-    match expr with
-    | BinOp(And, l, r) -> conjuncts l @ conjuncts r
-    | _ -> [ expr ]
+    let rec loop acc expr =
+        match expr with
+        | BinOp(And, l, r) -> loop (loop acc l) r
+        | _ -> expr :: acc
+
+    List.rev (loop [] expr)
 
 /// Splits a `JOIN ... ON` expression's `AND`-conjuncts into equi-join key
 /// pairs — a `QualifiedCol = QualifiedCol` conjunct with one side resolving
