@@ -20,8 +20,10 @@ let private seedTarget (target: string) =
 
 [<EntryPoint>]
 let main argv =
-    for target in [ "fsdb"; "mysql" ] do
-        seedTarget target
+    // fsdb is seeded per benchmark case (see ServerBenchmarks) because it
+    // restarts per case; mysql is a single long-lived server for the whole
+    // run and only needs seeding once, here.
+    seedTarget "mysql"
 
     // Full run: 3 warmup + 6 measured iterations per (target x workload) —
     // fixed counts instead of BenchmarkDotNet's open-ended pilot stage, to
