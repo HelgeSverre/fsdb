@@ -274,6 +274,30 @@ let rec private exprLabel (expr: Expr) : string =
 /// `let`s rather than tied into its `rec ... and` group.
 let private boolToValue (b: bool) : Value = VInt(if b then 1L else 0L)
 
+/// LIKE under the engine's collation: case- and accent-insensitive per
+/// character ('ä' LIKE 'a' is true), but never expanding — 'æ' LIKE 'ae' is
+/// false while 'æ' = 'ae' is true, exactly as MySQL's per-character LIKE
+/// behaves (both verified against 8.4). A small backtracking matcher
+/// instead of `likeToRegex`: a regex can't fold per-character weight
+/// classes without enumerating every accented variant.
+/// `%` matches any run, `_` one character, and the escape character
+/// (default backslash, as the parser leaves it unresolved in the pattern)
+/// un-wildcards the character after it. `LIKE BINARY` (caseSensitive)
+/// compares characters byte-for-byte.
+let private likeMatch (escape: char) (charEq: char -> char -> bool) (subject: string) (pattern: string) : bool =
+    let rec walk (si: int) (pi: int) : bool =
+        if pi >= pattern.Length then
+            si >= subject.Length
+        else
+            match pattern.[pi] with
+            | c when c = escape && pi + 1 < pattern.Length && (pattern.[pi + 1] = '%' || pattern.[pi + 1] = '_') ->
+                si < subject.Length && charEq subject.[si] pattern.[pi + 1] && walk (si + 1) (pi + 2)
+            | '%' -> walk si (pi + 1) || (si < subject.Length && walk (si + 1) pi)
+            | '_' -> si < subject.Length && walk (si + 1) (pi + 1)
+            | p -> si < subject.Length && charEq subject.[si] p && walk (si + 1) (pi + 1)
+
+    walk 0 0
+
 let private likeOp (caseSensitive: bool) (escape: char option) (subject: Value) (pattern: Value) : Value =
     match subject, pattern with
     | VNull, _
@@ -281,9 +305,8 @@ let private likeOp (caseSensitive: bool) (escape: char option) (subject: Value) 
     | _ ->
         let text = subject |> toText |> Option.defaultValue ""
         let pat = pattern |> toText |> Option.defaultValue ""
-        let opts = if caseSensitive then RegexOptions.Singleline else RegexOptions.IgnoreCase ||| RegexOptions.Singleline
-        let regex = likeToRegexWith (escape |> Option.defaultValue '\\') pat
-        boolToValue (Regex.IsMatch(text, regex, opts))
+        let charEq = if caseSensitive then (=) else Collation.defaultCollation.CharEquals
+        boolToValue (likeMatch (escape |> Option.defaultValue '\\') charEq text pat)
 
 /// `REGEXP`/`RLIKE` — MySQL's default collation makes these case-insensitive
 /// too, same as `LIKE`; unlike `LIKE`'s translated wildcard syntax, the
@@ -601,7 +624,10 @@ type private JoinKeyComparer() =
         | VInt _
         | VDouble _
         | VDecimal _ -> box (Value.toDouble v)
-        | _ -> box ((Value.toText v |> Option.defaultValue "").TrimEnd(' ').ToUpperInvariant())
+        // The collation's canonical key folds case *and* accents (keeping
+        // trailing spaces significant) — 'åge' and 'age' must land in the
+        // same bucket for `Equals`' folded `Value.compare` to ever see them.
+        | _ -> box (Collation.defaultCollation.KeyOf (Value.toText v |> Option.defaultValue ""))
 
     interface IEqualityComparer<Value[]> with
         member _.Equals(a: Value[], b: Value[]) = Array.forall2 (fun x y -> Value.compare x y = 0) a b
@@ -1892,10 +1918,7 @@ and private applyLimitOffset (limit: int option) (offset: int option) (rows: 'a 
     | Some l -> afterOffset |> List.truncate (max 0 l)
     | None -> afterOffset
 
-/// Compares two rows by their pre-evaluated `ORDER BY` keys: a total order
-/// per key via `Value.compare` (NULLs first), folded left-to-right so the
-/// first key that differs between two rows decides, later keys only
-/// breaking ties. The one comparator every `ORDER BY` sort site (plain
+/// The one comparator every `ORDER BY` sort site (plain
 /// `SELECT`, grouped, windowed, `UNION`) shares, instead of each carrying
 /// its own copy of the same fold.
 and private compareByOrderKeys (dirs: Direction list) (ka: Value list) (kb: Value list) : int =
@@ -1906,8 +1929,8 @@ and private compareByOrderKeys (dirs: Direction list) (ka: Value list) (kb: Valu
                 acc
             else
                 match dir with
-                | Asc -> Value.compare va vb
-                | Desc -> -(Value.compare va vb))
+                | Asc -> Value.compareTotal va vb
+                | Desc -> -(Value.compareTotal va vb))
         0
 
 /// A `UNION` statement's combined resultset, plus its column types —

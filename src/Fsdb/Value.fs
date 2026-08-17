@@ -170,13 +170,15 @@ let toDouble (v: Value) : float =
 /// .NET's OrdinalIgnoreCase doesn't model — ponytail: ASCII/Latin case
 /// folding only, add real accent folding if a _ai collation edge case
 /// actually matters) and PAD SPACE-insensitive, so `'a' = 'a '` is true the
-/// MySQL 8's default collation (utf8mb4_0900_ai_ci) is NO PAD — trailing
-/// spaces are *significant* in `=`/`LIKE`/unique keys (`'a' <> 'a '`),
-/// unlike the older PAD SPACE collations. ponytail: real MySQL keeps PAD
-/// SPACE for `CHAR` columns even under NO PAD, but this engine compares
-/// values without column context, so CHAR values also compare NO PAD.
+/// MySQL 8's default collation (utf8mb4_0900_ai_ci) — accent- and
+/// case-insensitive, NO PAD (trailing spaces significant) — delegated to
+/// the one home for those rules, `Collation`. This is the *folded* order
+/// (accent/case-only differences compare equal, returning 0) because
+/// `compare` drives equality everywhere — `equals`, hash-join keys, unique
+/// lookups. `ORDER BY`'s tie-breaks among equal-primary strings use
+/// `compareTotal` instead.
 let private compareStrings (x: string) (y: string) : int =
-    String.Compare(x, y, StringComparison.OrdinalIgnoreCase) |> sign
+    Collation.defaultCollation.ComparePrimary x y |> sign
 
 /// `VDate`/`VDateTime` as one .NET `DateTime`, midnight for the date-only
 /// case — the shared instant `compare`'s VDate/VDateTime-vs-VString branch
@@ -222,6 +224,18 @@ let rec compare (a: Value) (b: Value) : int =
     | (VInt _ | VDouble _ | VDecimal _), _
     | _, (VInt _ | VDouble _ | VDecimal _) -> Operators.compare (toDouble a) (toDouble b)
     | _ -> compareStrings (toText a |> Option.defaultValue "") (toText b |> Option.defaultValue "")
+
+/// The `ORDER BY` total order: `compare` first (folded — accent/case-only
+/// differences tie at 0), then the collation's full secondary/tertiary
+/// weights break the tie, exactly as MySQL's ai_ci sorts equal-primary
+/// strings. Only the sort sites use this; equality/joins/keys keep `compare`.
+let compareTotal (a: Value) (b: Value) : int =
+    match a, b with
+    | VString x, VString y ->
+        match Collation.defaultCollation.ComparePrimary x y with
+        | 0 -> Collation.defaultCollation.Compare x y |> sign
+        | c -> sign c
+    | _ -> compare a b
 
 /// Translates a SQL LIKE pattern to a .NET regex source: `%` -> `.*`, `_` ->
 /// `.`, and an escape-prefixed `%`/`_` (backslash by default, or whatever an

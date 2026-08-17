@@ -187,6 +187,55 @@ let tests =
                     | ResultSet(_, [ [ Some "0" ] ]) -> ()
                     | other -> failtestf "expected no match, got %A" other
 
+                // LIKE under utf8mb4_0900_ai_ci, MySQL-verified: per-character
+                // case+accent folding, but *no* expansions — 'æ' LIKE 'ae' is
+                // false while 'æ' = 'ae' is true.
+                testTheory
+                    "LIKE folds case and accents per character"
+                    [ "ÅGE", "age", "1"
+                      "åge", "ag_", "1"
+                      "ä", "a", "1"
+                      "åge", "å%e", "1"
+                      "age", "åge", "1" ]
+                    <| fun (subject, pattern, expected) ->
+                        match runDefault (newStore ()) (sprintf "SELECT '%s' LIKE '%s'" subject pattern) with
+                        | ResultSet(_, [ [ Some v ] ]) -> Expect.equal v expected (sprintf "'%s' LIKE '%s'" subject pattern)
+                        | other -> failtestf "expected a resultset, got %A" other
+
+                testTheory
+                    "LIKE never expands digraphs, even though equality does"
+                    [ "æ", "ae"; "ß", "ss"; "ﬀ", "ff" ]
+                    <| fun (subject, pattern) ->
+                        match runDefault (newStore ()) (sprintf "SELECT '%s' LIKE '%s'" subject pattern) with
+                        | ResultSet(_, [ [ Some "0" ] ]) -> ()
+                        | other -> failtestf "expected no match (per-char), got %A" other
+
+                testTheory
+                    "unique keys collide under accent folding, exactly like MySQL's ai_ci"
+                    [ "åge", "age"; "ß", "ss"; "æra", "aera"; "Céline", "celine" ]
+                    <| fun (first, second) ->
+                        let store = newStore ()
+                        runDefault store "CREATE TABLE t (name VARCHAR(20) UNIQUE)" |> ignore
+                        runDefault store (sprintf "INSERT INTO t VALUES ('%s')" first) |> ignore
+
+                        match runDefault store (sprintf "INSERT INTO t VALUES ('%s')" second) with
+                        | Err(1062, _) -> ()
+                        | other -> failtestf "expected '%s' to collide with '%s' under ai_ci, got %A" second first other
+
+                testTheory
+                    "joins match accented keys to their base spelling"
+                    [ "åge", "age"; "ØL", "ol" ]
+                    <| fun (leftName, rightName) ->
+                        let store = newStore ()
+                        runDefault store "CREATE TABLE l (name VARCHAR(20))" |> ignore
+                        runDefault store "CREATE TABLE r (name VARCHAR(20), tag VARCHAR(20))" |> ignore
+                        runDefault store (sprintf "INSERT INTO l VALUES ('%s')" leftName) |> ignore
+                        runDefault store (sprintf "INSERT INTO r VALUES ('%s', 'hit')" rightName) |> ignore
+
+                        match runDefault store "SELECT r.tag FROM l JOIN r ON l.name = r.name" with
+                        | ResultSet(_, [ [ Some "hit" ] ]) -> ()
+                        | other -> failtestf "expected '%s' to join '%s' under ai_ci, got %A" leftName rightName other
+
                 testCase "an unknown column in WHERE is a 1054 error"
                 <| fun _ ->
                     let store = newStore ()

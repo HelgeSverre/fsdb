@@ -926,10 +926,11 @@ let private encodeConstraintKey (indices: int list) (row: Value[]) : string opti
             let normalized = if value = 0.0 then 0.0 else value
             Some("D" + normalized.ToString("R", CultureInfo.InvariantCulture))
         | VDecimal value -> Some("M" + value.ToString("G29", CultureInfo.InvariantCulture))
-        // Case folds (utf8mb4_0900_ai_ci) but keeps trailing spaces
-        // significant (NO PAD) — 'bob' and 'bob ' are distinct keys,
-        // exactly as MySQL 8's default collation treats them.
-        | VString value -> Some("S" + value.ToUpperInvariant())
+        // The collation's canonical key — case folds AND accent folds
+        // (utf8mb4_0900_ai_ci: 'åge' collides with 'age') while trailing
+        // spaces stay significant (NO PAD). Same rules as WHERE equality,
+        // so the index and the comparison can never disagree.
+        | VString value -> Some("S" + Collation.defaultCollation.KeyOf value)
         | VBytes value -> Some("B" + Convert.ToHexString value)
         | VDate value -> Some("T" + string value.DayNumber)
         | VDateTime value -> Some("V" + string value.Ticks)

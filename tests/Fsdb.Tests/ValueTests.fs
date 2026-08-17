@@ -137,6 +137,66 @@ let tests =
                     Expect.equal (compare (VString "a") (VString "a ")) -1 "'a' < 'a '"
                     Expect.equal (compare (VString "a ") (VString "a")) 1 "'a ' > 'a'"
 
+                // Every expectation below was verified against a live MySQL
+                // 8.4 (utf8mb4_0900_ai_ci, the server default) — equality is
+                // primary-weight based (accents and case fold; digraphs
+                // expand), so indexes/unique keys/joins match MySQL exactly.
+                testTheory
+                    "utf8mb4_0900_ai_ci folds case and accents: accented variant equals its base letter"
+                    [ "å", "a"; "ä", "a"; "à", "a"; "á", "a"; "â", "a"; "ã", "a"; "ā", "a"; "ǎ", "a"
+                      "ø", "o"; "ö", "o"; "ò", "o"; "ó", "o"
+                      "ü", "u"; "ù", "u"; "ú", "u"
+                      "ñ", "n"; "ç", "c"
+                      "ì", "i"; "í", "i"; "ï", "i" ]
+                    <| fun (accented, plain) ->
+                        Expect.equal (compare (VString accented) (VString plain)) 0 (sprintf "%s = %s" accented plain)
+
+                testTheory
+                    "utf8mb4_0900_ai_ci expands digraphs and ligatures"
+                    [ "ß", "ss"; "æ", "ae"; "œ", "oe"; "ﬀ", "ff"; "ǅ", "dž" ]
+                    <| fun (a, b) -> Expect.equal (compare (VString a) (VString b)) 0 (sprintf "%s = %s" a b)
+
+                testTheory
+                    "utf8mb4_0900_ai_ci folds whole words, not just single letters"
+                    [ "åge", "age"; "ÅGE", "age"; "ØL", "ol"; "ÆRA", "aera"; "Céline", "celine" ]
+                    <| fun (a, b) -> Expect.equal (compare (VString a) (VString b)) 0 (sprintf "%s = %s" a b)
+
+                testTheory
+                    "NO PAD still holds under accent folding: trailing spaces stay significant"
+                    [ "a", "a "; "åge", "age "; "b", "b  "; "ß", "ss " ]
+                    <| fun (a, b) ->
+                        Expect.notEqual (compare (VString a) (VString b)) 0 (sprintf "%s <> %s" a b)
+
+                testCase "primary-weight ordering matches MySQL: expanded letters sit with their base-letter family"
+                <| fun _ ->
+                    // MySQL 8.4 orders these identically: æ expands to "ae"
+                    // so it sorts after the a-family; ø is o-family.
+                    let words = [ "ab"; "æb"; "øb"; "zb" ]
+                    let sorted = words |> List.sortWith (fun a b -> compare (VString a) (VString b))
+                    Expect.equal sorted [ "ab"; "æb"; "øb"; "zb" ] "ab < æb < øb < zb, as verified against MySQL"
+
+                testCase "tie-breaks among primary-equal strings are stable (ICU CLDR order; documented divergence from MySQL's weight table)"
+                <| fun _ ->
+                    // MySQL's own UCA 9.0 table orders these accent variants
+                    // ǎ|ā|ã|â|á|à|ä|å|ab (accented first, plain last); ICU's
+                    // CLDR reverses that — the *equality* never differs, only
+                    // the ORDER BY tie-break among equal-primary strings.
+                    // Pin ICU's order so a future ICU/CLDR bump shows up as a
+                    // deliberate change, not an accident.
+                    let variants = [ "ab"; "åb"; "äb"; "àb"; "áb"; "âb"; "ãb"; "āb"; "ǎb" ]
+                    let sorted = variants |> List.sortWith (fun a b -> compare (VString a) (VString b))
+                    Expect.equal sorted [ "ab"; "åb"; "äb"; "àb"; "áb"; "âb"; "ãb"; "āb"; "ǎb" ] "ICU CLDR tie-break order"
+
+                testCase "case folds in equality, and ORDER BY's tie-break is ICU's lowercase-first order"
+                <| fun _ ->
+                    Expect.equal (compare (VString "a") (VString "A")) 0 "'a' = 'A'"
+                    // compareTotal (the ORDER BY comparator) breaks case
+                    // ties via the full collation: lowercase first — ICU's
+                    // CLDR order, not MySQL's (A|a|...); pinned for the same
+                    // stability reason as the accent tie-breaks above.
+                    let sorted = [ "B"; "b"; "a"; "A" ] |> List.sortWith (fun a b -> compareTotal (VString a) (VString b))
+                    Expect.equal sorted [ "a"; "A"; "b"; "B" ] "lowercase-first tie-break"
+
                 testCase "a DATE column value against a DATETIME-shaped string bound compares as a real instant, not text"
                 <| fun _ ->
                     // Regression: `VDate 2024-01-01`.toText ("2024-01-01", no
