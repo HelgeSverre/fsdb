@@ -44,17 +44,17 @@ Prerequisites and rules:
 Each run lands in `results/<git-sha>.md` with a provenance header
 (sha, date, OS, .NET, server mode). Milestone snapshots, medians:
 
-| Workload | f1b15ab (pre-M9) | a90dfae (M9) | MySQL 8.4 |
-|---|---:|---:|---:|
-| Point SELECT by PK | 1.32 ms | 103 µs | 38 µs |
-| Prepared point SELECT | 22.9 ms* | 90 µs | 40 µs |
-| Filter + sort + LIMIT scan | 21.6 ms | 15.8 ms | 1.8 ms |
-| Single INSERT | 1.25 ms | 492 µs | 105 µs |
-| Batch-100 INSERT | 142 ms | 8.6 ms | 1.2 ms |
-| Single-row UPDATE | 2.41 s | 2.33 ms | 125 µs |
-| Join users×orders | never finished | 201 ms | 239 µs |
-| GROUP BY aggregate | 212 ms | 21.8 ms | 21.2 ms |
-| JSON extract | 131 ms | 9.4 ms | 94 µs |
+| Workload | f1b15ab (pre-M9) | a90dfae (M9) | f4ba12a (M10) | MySQL 8.4 |
+|---|---:|---:|---:|---:|
+| Point SELECT by PK | 1.32 ms | 103 µs | 111 µs | 38 µs |
+| Prepared point SELECT | 22.9 ms* | 90 µs | 101 µs | 32 µs |
+| Filter + sort + LIMIT scan | 21.6 ms | 15.8 ms | 6.3 ms | 1.9 ms |
+| Single INSERT | 1.25 ms | 492 µs | 549 µs | 165 µs |
+| Batch-100 INSERT | 142 ms | 8.6 ms | 10.1 ms | 1.2 ms |
+| Single-row UPDATE | 2.41 s | 2.33 ms | 662 µs | 110 µs |
+| Join users×orders | never finished | 201 ms | 10.7 ms | 268 µs |
+| GROUP BY aggregate | 212 ms | 21.8 ms | 26.1 ms | 20.4 ms |
+| JSON extract | 131 ms | 9.4 ms | 225 µs | 62 µs |
 
 \* pre-M9 numbers after the join row were inflated by benchmark poisoning
 (the timed-out join kept computing server-side); the harness now isolates
