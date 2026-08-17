@@ -1644,7 +1644,100 @@ let tests =
                             "SELECT chat_sessions.id FROM chat_sessions JOIN chatbots ON chatbots.id = chat_sessions.chatbot_id ORDER BY created_at"
                     with
                     | Err(1052, msg) -> Expect.stringContains msg "order clause" "expected the order-clause wording"
-                    | other -> failtestf "expected error 1052 (ambiguous ORDER BY fallback), got %A" other ]
+                    | other -> failtestf "expected error 1052 (ambiguous ORDER BY fallback), got %A" other
+
+                testCase "hash join set-equals a reference nested-loop join, over randomized tables (pure equi, equi+residual, and a non-extractable arithmetic ON that must fall back)"
+                <| fun _ ->
+                    let rnd = System.Random(20260817)
+
+                    let readRows (store: Store) (sql: string) : (int64 * int64 * int64 * int64) list =
+                        match runDefault store sql with
+                        | ResultSet(_, rows) ->
+                            rows
+                            |> List.map (function
+                                | [ Some a; Some b; Some c; Some d ] -> int64 a, int64 b, int64 c, int64 d
+                                | other -> failtestf "expected 4 non-null columns, got %A" other)
+                        | other -> failtestf "expected a resultset for %s, got %A" sql other
+
+                    for _ in 1 .. 30 do
+                        let store = newStore ()
+                        runDefault store "CREATE TABLE l (k INT, x INT)" |> ignore
+                        runDefault store "CREATE TABLE r (k INT, y INT)" |> ignore
+
+                        // Small key range (0..3) on purpose, so most runs
+                        // produce duplicate keys on both sides — exercising
+                        // the hash join's one-key-to-many-rows bucket, not
+                        // just a 1:1 lookup.
+                        let leftRows = [ for _ in 1 .. rnd.Next(1, 8) -> int64 (rnd.Next(0, 4)), int64 (rnd.Next(0, 10)) ]
+                        let rightRows = [ for _ in 1 .. rnd.Next(1, 8) -> int64 (rnd.Next(0, 4)), int64 (rnd.Next(0, 10)) ]
+                        let valuesOf (rows: (int64 * int64) list) = rows |> List.map (fun (a, b) -> sprintf "(%d, %d)" a b) |> String.concat ", "
+
+                        runDefault store (sprintf "INSERT INTO l VALUES %s" (valuesOf leftRows)) |> ignore
+                        runDefault store (sprintf "INSERT INTO r VALUES %s" (valuesOf rightRows)) |> ignore
+
+                        // Pure equi ON — extractEquiKeys finds one key pair
+                        // and no residual, so this is the hash path end to
+                        // end.
+                        let referenceEqui = [ for lk, lx in leftRows do for rk, ry in rightRows do if lk = rk then yield lk, lx, rk, ry ]
+
+                        Expect.equal
+                            (readRows store "SELECT l.k, l.x, r.k, r.y FROM l JOIN r ON l.k = r.k" |> List.sort)
+                            (referenceEqui |> List.sort)
+                            "pure equi-join hash path"
+
+                        // Equi + residual ON — the equi key still drives the
+                        // hash probe; `l.x > 1` is the leftover conjunct
+                        // applied per matched candidate.
+                        let referenceResidual = referenceEqui |> List.filter (fun (_, lx, _, _) -> lx > 1L)
+
+                        Expect.equal
+                            (readRows store "SELECT l.k, l.x, r.k, r.y FROM l JOIN r ON l.k = r.k AND l.x > 1" |> List.sort)
+                            (referenceResidual |> List.sort)
+                            "equi-plus-residual ON"
+
+                        // `l.k + 1 = r.k` has no `QualifiedCol = QualifiedCol`
+                        // conjunct at all, so `extractEquiKeys` reports no
+                        // keys and this falls back to the lazy nested loop
+                        // entirely — still has to come out correct.
+                        let referenceArithmetic = [ for lk, lx in leftRows do for rk, ry in rightRows do if lk + 1L = rk then yield lk, lx, rk, ry ]
+
+                        Expect.equal
+                            (readRows store "SELECT l.k, l.x, r.k, r.y FROM l JOIN r ON l.k + 1 = r.k" |> List.sort)
+                            (referenceArithmetic |> List.sort)
+                            "non-extractable arithmetic ON falls back to the nested loop and stays correct"
+
+                testCase "hash join on string keys matches case-insensitively and pad-space-insensitively, same as the nested loop"
+                <| fun _ ->
+                    let store = newStore ()
+                    runDefault store "CREATE TABLE l (name VARCHAR(20))" |> ignore
+                    runDefault store "CREATE TABLE r (name VARCHAR(20), tag VARCHAR(20))" |> ignore
+                    runDefault store "INSERT INTO l VALUES ('Alice'), ('bob  '), ('Carol')" |> ignore
+                    runDefault store "INSERT INTO r VALUES ('alice', 'x'), ('BOB', 'y'), ('dave', 'z')" |> ignore
+
+                    match runDefault store "SELECT l.name, r.tag FROM l JOIN r ON l.name = r.name ORDER BY l.name" with
+                    | ResultSet(_, rows) ->
+                        Expect.equal
+                            rows
+                            [ [ Some "Alice"; Some "x" ]; [ Some "bob  "; Some "y" ] ]
+                            "MySQL's collation folds case and trailing spaces, so 'Alice'/'alice' and 'bob  '/'BOB' both join; 'Carol'/'dave' don't"
+                    | other -> failtestf "expected case/pad-insensitive matches, got %A" other
+
+                testCase "UPDATE ... JOIN hash-matches string keys case/pad-insensitively, same as the nested loop"
+                <| fun _ ->
+                    let store = newStore ()
+                    runDefault store "CREATE TABLE accounts2 (name VARCHAR(20), balance INT)" |> ignore
+                    runDefault store "CREATE TABLE rates (name VARCHAR(20), bonus INT)" |> ignore
+                    runDefault store "INSERT INTO accounts2 VALUES ('Alice', 0), ('bob  ', 0)" |> ignore
+                    runDefault store "INSERT INTO rates VALUES ('alice', 10), ('BOB', 20)" |> ignore
+
+                    match runDefault store "UPDATE accounts2 a JOIN rates r ON a.name = r.name SET a.balance = r.bonus" with
+                    | Affected 2UL -> ()
+                    | other -> failtestf "expected both accounts matched despite case/space differences, got %A" other
+
+                    match runDefault store "SELECT name, balance FROM accounts2 ORDER BY name" with
+                    | ResultSet(_, rows) ->
+                        Expect.equal rows [ [ Some "Alice"; Some "10" ]; [ Some "bob  "; Some "20" ] ] "case/pad-insensitive match updated both rows"
+                    | other -> failtestf "expected a resultset, got %A" other ]
 
           testList
               "real GROUP BY / HAVING / grouped aggregates"
