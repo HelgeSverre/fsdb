@@ -648,6 +648,87 @@ let private traverseSeq (f: 'a -> Result<'b option, 'e>) (xs: 'a seq) : Result<'
     | Some e -> Error e
     | None -> Ok(List.ofSeq acc)
 
+/// Bounded top-`capacity` selection for `ORDER BY ... LIMIT n [OFFSET m]`
+/// (`capacity` = `n + m`): a sorted `ResizeArray` kept at or under
+/// `capacity` by binary-search insertion, dropping whichever item currently
+/// sorts last the moment a new one beats it. O(rows * log capacity) and
+/// O(capacity) memory instead of a full O(rows * log rows) sort holding
+/// every matched row — the M10 replacement for `List.sortWith` on this path.
+/// Still visits every item in `items` (an `ORDER BY` that needs a real sort
+/// sees the whole scan in real MySQL too — confirmed against the oracle:
+/// a poison row past a `LIMIT`'s cut still raises once `ORDER BY` forces a
+/// filesort), so this bounds what gets *kept*, not what gets *evaluated*.
+let private boundedTopN (capacity: int) (cmp: 'a -> 'a -> int) (items: 'a seq) : 'a list =
+    if capacity <= 0 then
+        []
+    else
+        let buf = ResizeArray<'a>(capacity)
+
+        let insertSorted (item: 'a) =
+            let mutable lo, hi = 0, buf.Count
+            while lo < hi do
+                let mid = (lo + hi) / 2
+                if cmp buf.[mid] item <= 0 then lo <- mid + 1 else hi <- mid
+            buf.Insert(lo, item)
+
+        for item in items do
+            if buf.Count < capacity then
+                insertSorted item
+            elif cmp item buf.[buf.Count - 1] < 0 then
+                buf.RemoveAt(buf.Count - 1)
+                insertSorted item
+
+        List.ofSeq buf
+
+/// The no-`ORDER BY` `SELECT` pipeline's `WHERE`/`DISTINCT`/`LIMIT`/`OFFSET`
+/// stage: pulls rows from `xs` one at a time through `f` and stops the
+/// enumerator outright the moment `offset + limit` survivors exist, rather
+/// than visiting every row the way `traverseSeq` (which every `ORDER BY`
+/// path still needs, since sorting requires seeing everything) does. This
+/// is the actual LIMIT short-circuit — verified against a real MySQL oracle
+/// that a row-level error past a `LIMIT`'s cut, with no `ORDER BY`, never
+/// surfaces, because the row is never evaluated in the first place; this
+/// mirrors that by never calling `f` on it. `distinct` dedupes on the
+/// projected row's text key (`f`'s returned `string list`, the same
+/// encoding `SELECT DISTINCT`'s materialized path already keyed on) before
+/// counting a row toward `offset`/`limit`, so `DISTINCT ... LIMIT n` still
+/// streams instead of falling back to a full materialize.
+let private streamLimited
+    (distinct: bool)
+    (offset: int)
+    (limit: int option)
+    (f: 'a -> Result<(string option list * 'b) option, 'e>)
+    (xs: 'a list)
+    : Result<(string option list * 'b) list, 'e> =
+    let token = queryCancellation.Value
+    let seen = if distinct then Some(System.Collections.Generic.HashSet<string option list>(HashIdentity.Structural)) else None
+    let acc = ResizeArray()
+    let mutable skipped = 0
+    let mutable error : 'e option = None
+    let mutable i = 0
+    use enumerator = (xs :> seq<'a>).GetEnumerator()
+
+    let wantMore () = limit |> Option.forall (fun l -> acc.Count < l)
+
+    while error.IsNone && wantMore () && enumerator.MoveNext() do
+        if i % cancellationCheckInterval = 0 then
+            token.ThrowIfCancellationRequested()
+
+        i <- i + 1
+
+        match f enumerator.Current with
+        | Error e -> error <- Some e
+        | Ok None -> ()
+        | Ok(Some(key, value)) ->
+            let isNew = seen |> Option.forall (fun s -> s.Add key)
+
+            if isNew then
+                if skipped < offset then skipped <- skipped + 1 else acc.Add(key, value)
+
+    match error with
+    | Some e -> Error e
+    | None -> Ok(List.ofSeq acc)
+
 /// The hash-join build/probe loop `applyJoin`/`applyMutationJoin` each need
 /// on both sides of their own "build on the smaller side" choice: bucket
 /// `build` by `buildKeyOf`'s key into a `Dictionary`, then walk `probe` and
@@ -2304,64 +2385,113 @@ and private runSelect
         |> traverse (evalProjection (ctxFor row) columns)
         |> Result.map List.concat
 
-    let orderKeys (row: Value[]) : Result<Value list, EvalError> =
-        orderBy
-        |> traverse (fun (expr, _) ->
-            projectRow row
-            |> Result.bind (fun outputCols -> resolveOrderKey (ctxFor row) projections outputCols (resolveOrderExpr expr)))
+    // `outputCols` (the row's own projection) is computed once by the
+    // caller and threaded in here, rather than re-run per `ORDER BY`
+    // key as the pre-M10 shape did — `ORDER BY a, b, c` used to call
+    // `projectRow` three times over on the same row for the same result.
+    let orderKeysOf (row: Value[]) (outputCols: (string * Value) list) : Result<Value list, EvalError> =
+        orderBy |> traverse (fun (expr, _) -> resolveOrderKey (ctxFor row) projections outputCols (resolveOrderExpr expr))
 
-    // No `ORDER BY` means every key list is `[]`, so the comparator below
-    // always returns 0 — `List.sortWith` still pays for a full O(n log n)
-    // comparison pass to discover that. Skip it outright instead.
-    let sortRows (keyed: (Value list * Value[]) list) : (Value list * Value[]) list =
-        if orderBy.IsEmpty then
-            keyed
-        else
-            keyed |> List.sortWith (fun (ka, _) (kb, _) -> compareByOrderKeys (List.map snd orderBy) ka kb)
+    let pairOf (outputCols: (string * Value) list) : string option list * Value[] =
+        outputCols |> List.map (snd >> toText), outputCols |> List.map snd |> Array.ofList
 
     let probe = probeRow columns
 
-    match matches probe |> Result.bind (fun _ -> orderKeys probe) |> Result.bind (fun _ -> projectRow probe) with
+    match matches probe
+          |> Result.bind (fun _ -> projectRow probe)
+          |> Result.bind (fun outputCols -> orderKeysOf probe outputCols |> Result.map (fun _ -> outputCols)) with
     | Error(code, message) -> Err(code, message), [], []
     | Ok probeProjection ->
         let colNames = probeProjection |> List.map fst
 
-        // A row-level WHERE/ORDER BY failure (not reachable today, but a
-        // real possibility once a function can fail per row rather than
-        // just at the schema level the probe above already checks) must
-        // surface as an `Err`, not be silently treated as "row excluded"
-        // or "sorts as if no keys" — thread the `Result` through instead of
-        // defaulting it away.
-        let keepWithOrderKeys (row: Value[]) : Result<(Value list * Value[]) option, EvalError> =
-            matches row
-            |> Result.bind (fun keep -> if keep then orderKeys row |> Result.map (fun keys -> Some(keys, row)) else Ok None)
+        // Column wire types are read off whatever rows actually cross the
+        // wire (post `DISTINCT`/`LIMIT`/`OFFSET`), not the full matched set
+        // — the same data-driven "first non-NULL value" approximation
+        // `columnTypesOf` always used, narrowed to the rows a client can
+        // observe. ponytail: a column that's NULL in every *returned* row
+        // but non-NULL further down the matched set (past `LIMIT`) now
+        // reports `VAR_STRING` instead of that later type; scanning the
+        // full matched set just to pick a wire type would defeat the
+        // `LIMIT` short-circuit below for every query. Upgrade to schema-
+        // declared (not data-driven) column types if this ever bites.
+        let typesOf (finalRows: Value[] list) : byte list =
+            columnTypesOf (List.length colNames) (finalRows |> List.map (List.zip colNames << List.ofArray))
 
-        match rows |> traverse keepWithOrderKeys with
-        | Error(code, message) -> Err(code, message), [], []
-        | Ok maybeKeyed ->
-            let keyed = maybeKeyed |> List.choose id
+        // No `ORDER BY`: `WHERE`/`DISTINCT`/`LIMIT`/`OFFSET` stream lazily
+        // through `streamLimited`, which stops pulling rows the moment
+        // enough have survived — verified against a real MySQL oracle
+        // (`SELECT ..., CAST(bad_json AS JSON) ... LIMIT n` with the poison
+        // row past position `n`): no `ORDER BY` means the error is never
+        // raised, because the row is never evaluated. `ORDER BY` (below)
+        // forces a full scan either way — same oracle, `ORDER BY` on an
+        // unindexed column — so only that path keeps evaluating everything.
+        if orderBy.IsEmpty then
+            let evalPaired (row: Value[]) : Result<(string option list * Value[]) option, EvalError> =
+                matches row |> Result.bind (fun keep -> if keep then projectRow row |> Result.map (pairOf >> Some) else Ok None)
 
-            // Projects every sorted row *before* LIMIT/OFFSET (rather than
-            // after, as a non-DISTINCT `SELECT` could) so `DISTINCT` can
-            // dedupe on the projected columns while still honoring ORDER
-            // BY's row order (first occurrence wins) — deduping post-LIMIT
-            // would undercount, and deduping on the raw pre-projection row
-            // would miss two source rows that only agree on the columns
-            // actually selected.
-            match keyed |> sortRows |> List.map snd |> traverse projectRow with
+            match rows |> streamLimited select.Distinct (Option.defaultValue 0 offset) limit evalPaired with
             | Error(code, message) -> Err(code, message), [], []
-            | Ok projectedRows ->
-                // Pairs each row's text projection with its own typed
-                // projection, kept aligned through DISTINCT/LIMIT so a
-                // derived table (`resolveFromItem`), a scalar subquery
-                // (`evalExpr`'s `Subquery` case), or `UNION`'s sort can read
-                // the real `Value` instead of re-wrapping the text as a
-                // lexicographically-comparing `VString`.
-                let paired = projectedRows |> List.map (fun row -> row |> List.map (snd >> toText), row |> List.map snd |> Array.ofList)
+            | Ok limited -> ResultSet(colNames, limited |> List.map fst), typesOf (limited |> List.map snd), limited |> List.map snd
+
+        // `ORDER BY` + `LIMIT`, no `DISTINCT`: bounded top-(limit+offset)
+        // selection (`boundedTopN`) instead of a full sort — still touches
+        // every matched row (see above), but keeps only `limit + offset` of
+        // them at a time instead of the whole matched set.
+        elif limit.IsSome && not select.Distinct then
+            let evalKeyed (row: Value[]) : Result<(Value list * (string option list * Value[])) option, EvalError> =
+                matches row
+                |> Result.bind (fun keep ->
+                    if not keep then
+                        Ok None
+                    else
+                        projectRow row
+                        |> Result.bind (fun outputCols -> orderKeysOf row outputCols |> Result.map (fun keys -> Some(keys, pairOf outputCols))))
+
+            match rows |> traverseSeq evalKeyed with
+            | Error(code, message) -> Err(code, message), [], []
+            | Ok keyed ->
+                let dirs = List.map snd orderBy
+                let capacity = Option.get limit + Option.defaultValue 0 offset
+                let top = keyed |> boundedTopN capacity (fun (ka, _) (kb, _) -> compareByOrderKeys dirs ka kb)
+                let limited = top |> List.map snd |> applyLimitOffset limit offset
+                ResultSet(colNames, limited |> List.map fst), typesOf (limited |> List.map snd), limited |> List.map snd
+
+        // Honest barrier: `ORDER BY` with no `LIMIT` (nothing to bound a
+        // top-N by) or `DISTINCT` alongside `ORDER BY` (deduping after a
+        // bounded top-N could starve rows just outside the window that a
+        // dedupe-first pass would have kept) — full materialize, sort,
+        // dedupe, same as before M10.
+        else
+            let evalKeyed (row: Value[]) : Result<(Value list * (string option list * Value[])) option, EvalError> =
+                matches row
+                |> Result.bind (fun keep ->
+                    if not keep then
+                        Ok None
+                    else
+                        projectRow row
+                        |> Result.bind (fun outputCols -> orderKeysOf row outputCols |> Result.map (fun keys -> Some(keys, pairOf outputCols))))
+
+            match rows |> traverseSeq evalKeyed with
+            | Error(code, message) -> Err(code, message), [], []
+            | Ok keyed ->
+                // No `ORDER BY` means every key list is `[]`, so the
+                // comparator always returns 0 — skip the sort outright
+                // rather than pay for an O(n log n) pass to discover that.
+                let sorted =
+                    if orderBy.IsEmpty then
+                        keyed
+                    else
+                        keyed |> List.sortWith (fun (ka, _) (kb, _) -> compareByOrderKeys (List.map snd orderBy) ka kb)
+
+                // Dedupes on the projected columns while still honoring
+                // `ORDER BY`'s row order (first occurrence wins) — deduping
+                // post-`LIMIT` would undercount, and deduping on the raw
+                // pre-projection row would miss two source rows that only
+                // agree on the columns actually selected.
+                let paired = sorted |> List.map snd
                 let dedupedPaired = if select.Distinct then paired |> List.distinctBy fst else paired
-                let types = columnTypesOf (List.length colNames) projectedRows
                 let limited = dedupedPaired |> applyLimitOffset limit offset
-                ResultSet(colNames, limited |> List.map fst), types, limited |> List.map snd
+                ResultSet(colNames, limited |> List.map fst), typesOf (limited |> List.map snd), limited |> List.map snd
 
 /// A reference-identity set of physical rows — `HashIdentity.Reference`
 /// rather than `Value[]`'s own structural equality, so two rows that happen
