@@ -297,7 +297,7 @@ let private handleConnection
                     try
                         Some(withCancellationWatch client dispatch)
                     with :? OperationCanceledException ->
-                        eprintfn "fsdb: connection %d: query cancelled (client disconnected)" connectionId
+                        Log.diagnostic "fsdb: connection %d: query cancelled (client disconnected)" connectionId
                         None
 
                 let rec loop (session: Session) : Async<unit> =
@@ -638,7 +638,7 @@ let serve (listener: TcpListener) (store: Storage.Store) (customFunctions: Funct
                         try
                             do! handleConnection connectionId store customFunctions client
                         with ex ->
-                            eprintfn "fsdb: connection %d: %s" connectionId ex.Message
+                            Log.diagnostic "fsdb: connection %d: %s" connectionId ex.Message
                     }
                 )
 

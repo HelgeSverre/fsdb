@@ -4,6 +4,8 @@ open Expecto
 
 [<EntryPoint>]
 let main argv =
+    Fsdb.Log.silence ()
+
     Tests.runTestsWithCLIArgs
         []
         argv

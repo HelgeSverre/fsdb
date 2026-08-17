@@ -33,6 +33,14 @@ let withDataDir (dataDir: string) (db: Db) : Db =
     Persistence.attach dataDir store
     { db with Store = store; DataDir = Some dataDir }
 
+/// Routes fsdb's diagnostic output (connection drops, WAL replay warnings,
+/// server-side query errors) through `f` instead of stderr. Returns `db`
+/// unchanged — the sink is process-global (`Log`), not per-`Db` state — so
+/// this chains like every other builder purely for a consistent call style.
+let withLogger (f: string -> unit) (db: Db) : Db =
+    Log.useSink f
+    db
+
 /// Registers a scalar function under `name`, e.g.
 /// `db |> Db.registerScalar "slugify" (function ...)`. Free to override a
 /// built-in of the same name — `QueryHandler.registryFor` layers custom

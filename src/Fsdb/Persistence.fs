@@ -530,7 +530,7 @@ let rec private decodeEvent (node: JsonNode) : CommitEvent =
 let private warn (context: string) (result: Result<'a, StorageError>) : unit =
     match result with
     | Ok _ -> ()
-    | Error e -> eprintfn "fsdb: WAL replay warning (%s): %A" context e
+    | Error e -> Log.diagnostic "fsdb: WAL replay warning (%s): %A" context e
 
 let private applyDdl (store: Store) (db: string) (stmt: Statement) : unit =
     match stmt with
@@ -544,7 +544,7 @@ let private applyDdl (store: Store) (db: string) (stmt: Statement) : unit =
         warn "CreateIndex" (alterTable store db table [ AddIndex { Name = name; Columns = columns; Unique = unique } ])
     | DropIndexStmt(name, table) -> warn "DropIndexStmt" (alterTable store db table [ DropIndexAction name ])
     | Truncate table -> warn "Truncate" (truncate store db table)
-    | other -> eprintfn "fsdb: WAL replay warning (SchemaChanged): unexpected statement %A" other
+    | other -> Log.diagnostic "fsdb: WAL replay warning (SchemaChanged): unexpected statement %A" other
 
 /// Applies `changes` — `(before, after)` pairs in the same ascending
 /// original-row order `Storage.updateRows` emitted them, one entry per
@@ -599,10 +599,10 @@ let private mapTableRows (store: Store) (dbName: string) (tableName: string) (f:
     let key = normalizeTableName tableName
 
     match store.Catalog |> Map.tryFind dbName with
-    | None -> eprintfn "fsdb: WAL replay warning: unknown database '%s'" dbName
+    | None -> Log.diagnostic "fsdb: WAL replay warning: unknown database '%s'" dbName
     | Some db ->
         match db |> Map.tryFind key with
-        | None -> eprintfn "fsdb: WAL replay warning: unknown table '%s.%s'" dbName tableName
+        | None -> Log.diagnostic "fsdb: WAL replay warning: unknown table '%s.%s'" dbName tableName
         | Some table -> store.Catalog <- store.Catalog |> Map.add dbName (db |> Map.add key { table with Rows = f table.Rows })
 
 let rec private applyEvent (store: Store) (event: CommitEvent) : unit =
@@ -642,7 +642,7 @@ let private replayWal (store: Store) (walPath: string) : int64 =
                         applyEvent store (decodeEvent (JsonNode.Parse line))
                         offset <- offset + lineBytes
                     with ex ->
-                        eprintfn "fsdb: WAL replay stopped at a truncated/corrupt line (%s): %s" walPath ex.Message
+                        Log.diagnostic "fsdb: WAL replay stopped at a truncated/corrupt line (%s): %s" walPath ex.Message
                         stopped <- true
 
         offset
@@ -817,7 +817,7 @@ let attach (dataDir: string) (store: Store) : unit =
                 // memory, invisible to the very durability mechanism whose
                 // job is to keep it. Crash rather than keep serving reads
                 // and writes against a catalog the WAL can no longer prove.
-                eprintfn "fsdb: WAL append failed, catalog and disk have diverged: %s" ex.Message
+                Log.diagnostic "fsdb: WAL append failed, catalog and disk have diverged: %s" ex.Message
                 Environment.FailFast(sprintf "fsdb: fatal WAL append failure: %s" ex.Message, ex)
                 reraise ()
 

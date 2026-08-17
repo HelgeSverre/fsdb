@@ -963,12 +963,12 @@ let handle (session: Session) (rawSql: string) : Session * QueryResult =
     try
         match dispatch session rawSql with
         | _, Err(code, msg) as result ->
-            eprintfn "fsdb: ERR %d %s -- query: %s" code msg rawSql
+            Log.diagnostic "fsdb: ERR %d %s -- query: %s" code msg rawSql
             result
         | result -> result
     with
     | Storage.LockWaitTimeout dbName ->
-        eprintfn "fsdb: ERR 1205 lock wait timeout on database %s -- query: %s" dbName rawSql
+        Log.diagnostic "fsdb: ERR 1205 lock wait timeout on database %s -- query: %s" dbName rawSql
         session, Err(1205, "Lock wait timeout exceeded; try restarting transaction")
     // A killed client mid-query (`Storage.queryCancellation`, armed by
     // `Server.withCancellationWatch`) — not an internal error to report
@@ -978,5 +978,5 @@ let handle (session: Session) (rawSql: string) : Session * QueryResult =
     // clean line itself.
     | :? OperationCanceledException -> reraise ()
     | ex ->
-        eprintfn "fsdb: EXN %s -- query: %s" ex.Message rawSql
+        Log.diagnostic "fsdb: EXN %s -- query: %s" ex.Message rawSql
         session, Err(1105, sprintf "Internal error: %s" ex.Message) // ER_UNKNOWN_ERROR
