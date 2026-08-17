@@ -2881,6 +2881,41 @@ let tests =
                         1000
                         (sprintf "LIMIT 10 against a %d-row table touched %d rows via WHERE — the streaming short-circuit isn't firing" n touched)
 
+                testCase "LIMIT N against an equi-JOIN's WHERE matching nearly every combined row touches far fewer combined rows than the join itself"
+                <| fun _ ->
+                    // The hash-eligible INNER/CROSS join path streams its
+                    // matched pairs straight into WHERE/LIMIT instead of
+                    // combining every left×right match up front — same
+                    // short-circuit proof as the plain-scan test above, but
+                    // through `applyJoin`'s probe side instead of a bare
+                    // table scan.
+                    let mutable touched = 0
+
+                    let touch (args: Value list) : Value =
+                        touched <- touched + 1
+                        List.head args
+
+                    let registry = registerScalar "TOUCH" touch builtins
+                    let store = newStore ()
+                    runDefault store "CREATE TABLE u (id INT PRIMARY KEY)" |> ignore
+                    runDefault store "CREATE TABLE o (id INT PRIMARY KEY, user_id INT)" |> ignore
+                    let n = 5_000
+                    let uValues = [ for i in 1 .. n -> sprintf "(%d)" i ] |> String.concat ", "
+                    let oValues = [ for i in 1 .. n -> sprintf "(%d,%d)" i i ] |> String.concat ", "
+                    runDefault store (sprintf "INSERT INTO u VALUES %s" uValues) |> ignore
+                    runDefault store (sprintf "INSERT INTO o VALUES %s" oValues) |> ignore
+
+                    touched <- 0
+
+                    match run store registry "SELECT u.id FROM u JOIN o ON o.user_id = u.id WHERE TOUCH(u.id) > 0 LIMIT 10" with
+                    | ResultSet(_, rows) -> Expect.equal (List.length rows) 10 "LIMIT 10 returns exactly 10 rows"
+                    | other -> failtestf "expected a resultset, got %A" other
+
+                    Expect.isLessThan
+                        touched
+                        1000
+                        (sprintf "LIMIT 10 against a %d-row equi-JOIN touched %d combined rows via WHERE — the join's own streaming short-circuit isn't firing" n touched)
+
                 testCase
                     "a row-level error past what LIMIT needs never surfaces (no ORDER BY); ORDER BY forcing a full scan still raises it — verified against a live MySQL 8.4 oracle"
                 <| fun _ ->

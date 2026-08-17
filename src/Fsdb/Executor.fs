@@ -569,9 +569,9 @@ let private valueMatchesKeyClass (isNumeric: bool) (v: Value) : bool =
     | VBytes _ -> not isNumeric
     | _ -> false
 
-let private rowsMatchKeyClasses (classes: bool list) (keyIndices: int list) (rows: Value[] list) : bool =
+let private rowsMatchKeyClasses (classes: bool list) (keyIndices: int list) (rows: Value[] seq) : bool =
     rows
-    |> List.forall (fun row -> List.forall2 (fun idx cls -> valueMatchesKeyClass cls row.[idx]) keyIndices classes)
+    |> Seq.forall (fun row -> List.forall2 (fun idx cls -> valueMatchesKeyClass cls row.[idx]) keyIndices classes)
 
 /// One equi-join key (however many `AND`-ed `=` conjuncts contributed a
 /// pair) read off one side's row, `None` if any column is `NULL` — SQL's
@@ -698,7 +698,7 @@ let private streamLimited
     (offset: int)
     (limit: int option)
     (f: 'a -> Result<(string option list * 'b) option, 'e>)
-    (xs: 'a list)
+    (xs: 'a seq)
     : Result<(string option list * 'b) list, 'e> =
     let token = queryCancellation.Value
     let seen = if distinct then Some(System.Collections.Generic.HashSet<string option list>(HashIdentity.Structural)) else None
@@ -706,7 +706,7 @@ let private streamLimited
     let mutable skipped = 0
     let mutable error : 'e option = None
     let mutable i = 0
-    use enumerator = (xs :> seq<'a>).GetEnumerator()
+    use enumerator = xs.GetEnumerator()
 
     let wantMore () = limit |> Option.forall (fun l -> acc.Count < l)
 
@@ -739,12 +739,23 @@ let private streamLimited
 /// only ever touches an item through `buildKeyOf`/`probeKeyOf`, never its
 /// shape. One definition instead of the fill-then-probe loop written out
 /// per build-side choice (three times across the two callers).
+///
+/// The build side fills a `Dictionary` eagerly (unavoidable — that's the
+/// whole point of a hash join), but the probe side `yield`s matches lazily:
+/// nothing past the last pair a caller actually pulls ever runs. Real only
+/// when a caller stops pulling early — `applyJoin`'s `INNER`/`CROSS`,
+/// no-residual-conjunct case hands this straight through to `runSelect`'s
+/// `WHERE`/`LIMIT` streaming instead of collecting it into a list first.
+/// Every other caller still drains the whole thing (`LEFT`/`RIGHT` needs
+/// every match to know which rows *didn't* match; a residual `ON` conjunct
+/// needs every candidate re-checked), so laziness costs those nothing
+/// beyond a `seq`'s per-item overhead over a list comprehension's.
 let private hashPairs
     (buildKeyOf: 'b -> Value[] option)
     (probeKeyOf: 'p -> Value[] option)
     (build: (int * 'b) list)
     (probe: (int * 'p) list)
-    : (int * 'b * int * 'p) list =
+    : (int * 'b * int * 'p) seq =
     let buckets = Dictionary<Value[], ResizeArray<int * 'b>>(JoinKeyComparer())
 
     for buildIndex, buildItem in build do
@@ -758,13 +769,17 @@ let private hashPairs
                 buckets.Add(key, bucket)
         | None -> ()
 
-    [ for probeIndex, probeItem in probe do
-          match probeKeyOf probeItem with
-          | Some key ->
-              match buckets.TryGetValue key with
-              | true, bucket -> for buildIndex, buildItem in bucket -> buildIndex, buildItem, probeIndex, probeItem
-              | false, _ -> ()
-          | None -> () ]
+    seq {
+        for probeIndex, probeItem in probe do
+            match probeKeyOf probeItem with
+            | Some key ->
+                match buckets.TryGetValue key with
+                | true, bucket ->
+                    for buildIndex, buildItem in bucket do
+                        yield buildIndex, buildItem, probeIndex, probeItem
+                | false, _ -> ()
+            | None -> ()
+    }
 
 /// `hashPairs`' output, narrowed to the candidates whose residual (leftover,
 /// non-equi-key) `ON` conjuncts actually hold — the tail every hash-join
@@ -1135,9 +1150,9 @@ and private applyJoin
     (registry: Registry)
     (dbName: string)
     (outer: EvalContext option)
-    ((sourcesSoFar, rowsSoFar): (string * ColumnDef list) list * Value[] list)
+    ((sourcesSoFar, rowsSoFar): (string * ColumnDef list) list * Value[] seq)
     (join: Join)
-    : Result<(string * ColumnDef list) list * Value[] list, QueryResult> =
+    : Result<(string * ColumnDef list) list * Value[] seq, QueryResult> =
     match resolveFromItem store registry dbName join.Table with
     | Error e -> Error e
     | Ok(joinColumns, joinRows) ->
@@ -1150,7 +1165,13 @@ and private applyJoin
 
         let ctxFor = contextFactory store registry dbName (columnIndexOf (combinedColumnsSoFar @ joinColumns)) qualifiers outer
 
-        let leftIndexed = rowsSoFar |> List.indexed
+        // Forces whatever `rowsSoFar` is (a previous `JOIN` in this same
+        // list may have handed back a lazy seq — see `hashPairs`' doc) up
+        // front: the hash join's build side needs random-access counting
+        // either way, so only a chain of 2+ `JOIN`s pays this, and a single
+        // `JOIN`'s `rowsSoFar` is already the `FROM` table's own materialized
+        // scan.
+        let leftIndexed = rowsSoFar |> List.ofSeq |> List.indexed
         let rightIndexed = joinRows |> List.indexed
 
         let resolveQualified (qualifier: string) (column: string) =
@@ -1204,17 +1225,42 @@ and private applyJoin
         if hashEligible then
             let leftKeyIndices = equiKeys |> List.map fst |> Array.ofList
             let rightKeyIndices = equiKeys |> List.map snd |> Array.ofList
-            let buildOnLeft = rowsSoFar.Length <= joinRows.Length
+            let buildOnLeft = leftIndexed.Length <= rightIndexed.Length
 
-            let candidates : (int * int * Value[]) list =
-                if buildOnLeft then
-                    hashPairs (equiKeyOf leftKeyIndices) (equiKeyOf rightKeyIndices) leftIndexed rightIndexed
-                    |> List.map (fun (li, l, ri, r) -> li, ri, Array.append l r)
-                else
-                    hashPairs (equiKeyOf rightKeyIndices) (equiKeyOf leftKeyIndices) rightIndexed leftIndexed
-                    |> List.map (fun (ri, r, li, l) -> li, ri, Array.append l r)
+            match join.Kind, residualConjuncts with
+            | (InnerJoin | CrossJoin), [] ->
+                // Nothing here needs to see every match up front: `INNER`/
+                // `CROSS` keep only matched pairs (no unmatched-side padding
+                // to compute, unlike `LEFT`/`RIGHT`), and an empty residual
+                // means every hash-bucket hit is already a real match (no
+                // `ON`-conjunct re-check that could itself fail past the
+                // point a caller stops pulling). So this is `hashPairs`'
+                // lazy `seq` straight through, `Array.append`-combined but
+                // not collected — `runSelect`'s `WHERE`/`LIMIT` streaming
+                // decides how much of it ever actually runs.
+                let combined : Value[] seq =
+                    if buildOnLeft then
+                        hashPairs (equiKeyOf leftKeyIndices) (equiKeyOf rightKeyIndices) leftIndexed rightIndexed
+                        |> Seq.map (fun (_, l, _, r) -> Array.append l r)
+                    else
+                        hashPairs (equiKeyOf rightKeyIndices) (equiKeyOf leftKeyIndices) rightIndexed leftIndexed
+                        |> Seq.map (fun (_, r, _, l) -> Array.append l r)
 
-            candidates |> keepMatches residualHolds id |> Result.map buildCombinedRows
+                Ok(newSources, combined)
+            | _ ->
+                let candidates : (int * int * Value[]) list =
+                    if buildOnLeft then
+                        hashPairs (equiKeyOf leftKeyIndices) (equiKeyOf rightKeyIndices) leftIndexed rightIndexed
+                        |> Seq.map (fun (li, l, ri, r) -> li, ri, Array.append l r)
+                        |> List.ofSeq
+                    else
+                        hashPairs (equiKeyOf rightKeyIndices) (equiKeyOf leftKeyIndices) rightIndexed leftIndexed
+                        |> Seq.map (fun (ri, r, li, l) -> li, ri, Array.append l r)
+                        |> List.ofSeq
+
+                candidates
+                |> keepMatches residualHolds id
+                |> Result.map (buildCombinedRows >> fun (s, r) -> s, r :> Value[] seq)
         else
             let pairs = seq { for li, l in leftIndexed do for ri, r in rightIndexed -> li, ri, l, r }
 
@@ -1225,7 +1271,7 @@ and private applyJoin
                 evalExpr { ctxFor combined with Clause = OnClause } join.On
                 |> Result.map (fun v -> if truthy v = Some true then Some(li, ri, combined) else None))
             |> Result.mapError Err
-            |> Result.map buildCombinedRows
+            |> Result.map (buildCombinedRows >> fun (s, r) -> s, r :> Value[] seq)
 
 /// Like `applyJoin`, but for a multi-table `UPDATE`/`DELETE ... JOIN`
 /// rather than a `SELECT`: alongside the flattened row `evalExpr` needs,
@@ -1334,10 +1380,12 @@ and private applyMutationJoin
                 let candidates : (int * int * (Value[] option list * Value[])) list =
                     if buildOnLeft then
                         hashPairs leftKeyOf rightKeyOf leftIndexed rightIndexed
-                        |> List.map (fun (li, (lIdent, lFlat), ri, r) -> li, ri, (lIdent @ [ Some r ], Array.append lFlat r))
+                        |> Seq.map (fun (li, (lIdent, lFlat), ri, r) -> li, ri, (lIdent @ [ Some r ], Array.append lFlat r))
+                        |> List.ofSeq
                     else
                         hashPairs rightKeyOf leftKeyOf rightIndexed leftIndexed
-                        |> List.map (fun (ri, r, li, (lIdent, lFlat)) -> li, ri, (lIdent @ [ Some r ], Array.append lFlat r))
+                        |> Seq.map (fun (ri, r, li, (lIdent, lFlat)) -> li, ri, (lIdent @ [ Some r ], Array.append lFlat r))
+                        |> List.ofSeq
 
                 candidates |> keepMatches residualHolds snd |> Result.map buildCombinedRows
             else
@@ -1413,7 +1461,7 @@ and private runSelectStmt
         | Ok(baseColumns, baseRows) ->
             let baseQualifier = fromItemQualifier fromItem
 
-            let initial : Result<(string * ColumnDef list) list * Value[] list, QueryResult> = Ok([ baseQualifier, baseColumns ], baseRows)
+            let initial : Result<(string * ColumnDef list) list * Value[] seq, QueryResult> = Ok([ baseQualifier, baseColumns ], baseRows)
 
             match select.Joins |> List.fold (fun acc join -> acc |> Result.bind (fun combined -> applyJoin store registry dbName outer combined join)) initial with
             | Error e -> e, [], []
@@ -2344,7 +2392,7 @@ and private runSelect
     (dbName: string)
     (columns: ColumnDef list)
     (qualifiers: Map<string, ColumnDef list * int>)
-    (rows: Value[] list)
+    (rows: Value[] seq)
     (select: SelectStmt)
     (outer: EvalContext option)
     : QueryResult * byte list * Value[] list =
@@ -2358,14 +2406,19 @@ and private runSelect
     if select.From.IsNone && projections |> List.exists (fst >> function Star _ -> true | _ -> false) then
         Err(1096, "No tables used"), [], []
     elif projections |> List.exists (fst >> collectWindowFuncs >> List.isEmpty >> not) then
-        runWindowedSelect store registry dbName columns qualifiers rows select outer
+        // GROUP BY/window functions are honest barriers — every row must be
+        // seen before either can produce anything — so `rows` (lazy when a
+        // `JOIN`'s hash-probe fed it straight through) is forced here rather
+        // than threading `seq` any further than the paths that can actually
+        // stop early.
+        runWindowedSelect store registry dbName columns qualifiers (List.ofSeq rows) select outer
     elif
         not select.GroupBy.IsEmpty
         || select.Having.IsSome
         || projections |> List.exists (fst >> containsAggregate registry)
         || orderBy |> List.exists (fst >> containsAggregate registry)
     then
-        runGroupedSelect store registry dbName columns qualifiers rows select outer
+        runGroupedSelect store registry dbName columns qualifiers (List.ofSeq rows) select outer
     else
 
     let columnIndex = columnIndexOf columns
