@@ -79,6 +79,25 @@ type Writer() =
 
     member _.ToArray() = buf.ToArray()
 
+    /// Bytes accumulated so far — lets a streaming caller flush to disk in
+    /// bounded chunks instead of one ever-growing `byte[]`.
+    member _.Count = buf.Count
+
+    /// Drops the accumulated bytes so the same `Writer` can be reused after a
+    /// streaming flush.
+    member _.Clear() = buf.Clear()
+
+/// The read surface the persistence codecs need, so one decode implementation
+/// runs over both an in-memory `Reader` (WAL replay) and a streamed
+/// `StreamReader` (multi-GB snapshot load).
+type IReader =
+    abstract ReadByte: unit -> byte
+    abstract ReadBytes: int -> byte[]
+    abstract ReadInt32LE: unit -> int
+    abstract ReadInt64LE: unit -> int64
+    abstract ReadLenEncInt: unit -> uint64 option
+    abstract ReadLenEncString: unit -> string option
+
 /// Reads sequentially from a byte array. IO-free.
 type Reader(data: byte[]) =
     let mutable pos = 0
@@ -151,6 +170,107 @@ type Reader(data: byte[]) =
         let s = Encoding.UTF8.GetString(data, pos, data.Length - pos)
         pos <- data.Length
         s
+
+    interface IReader with
+        member this.ReadByte() = this.ReadByte()
+        member this.ReadBytes(n) = this.ReadBytes n
+        member this.ReadInt32LE() = this.ReadInt32LE()
+        member this.ReadInt64LE() = this.ReadInt64LE()
+        member this.ReadLenEncInt() = this.ReadLenEncInt()
+        member this.ReadLenEncString() = this.ReadLenEncString()
+
+/// A `Reader` over a `Stream`, buffering internally so a multi-GB snapshot
+/// decodes without ever being held in memory as one `byte[]`. Same `IReader`
+/// surface the persistence codecs run against.
+type StreamReader(stream: Stream) =
+    let buf = Array.zeroCreate<byte> (1 <<< 16)
+    let mutable pos = 0
+    let mutable len = 0
+    let mutable eof = false
+
+    let ensure () =
+        if pos >= len && not eof then
+            len <- stream.Read(buf, 0, buf.Length)
+            pos <- 0
+
+            if len = 0 then
+                eof <- true
+
+    member _.ReadByte() : byte =
+        ensure ()
+
+        if pos >= len then
+            raise (EndOfStreamException())
+
+        let b = buf.[pos]
+        pos <- pos + 1
+        b
+
+    member _.ReadBytes(n: int) : byte[] =
+        let result = Array.zeroCreate<byte> n
+        let mutable written = 0
+
+        if pos < len then
+            let take = min n (len - pos)
+            Array.Copy(buf, pos, result, 0, take)
+            pos <- pos + take
+            written <- take
+
+        while written < n do
+            let read = stream.Read(result, written, n - written)
+
+            if read = 0 then
+                raise (EndOfStreamException())
+
+            written <- written + read
+
+        result
+
+    member private this.ReadInt16LE() =
+        let a = int (this.ReadByte())
+        let b = int (this.ReadByte())
+        a ||| (b <<< 8)
+
+    member private this.ReadInt24LE() =
+        let a = int (this.ReadByte())
+        let b = int (this.ReadByte())
+        let c = int (this.ReadByte())
+        a ||| (b <<< 8) ||| (c <<< 16)
+
+    member this.ReadInt32LE() =
+        let a = int (this.ReadByte())
+        let b = int (this.ReadByte())
+        let c = int (this.ReadByte())
+        let d = int (this.ReadByte())
+        a ||| (b <<< 8) ||| (c <<< 16) ||| (d <<< 24)
+
+    member this.ReadInt64LE() =
+        let mutable v = 0L
+
+        for i in 0..7 do
+            v <- v ||| ((int64 (this.ReadByte())) <<< (i * 8))
+
+        v
+
+    member this.ReadLenEncInt() : uint64 option =
+        match this.ReadByte() with
+        | 0xfbuy -> None
+        | 0xfcuy -> Some(uint64 (this.ReadInt16LE()))
+        | 0xfduy -> Some(uint64 (this.ReadInt24LE()))
+        | 0xfeuy -> Some(BitConverter.ToUInt64(this.ReadBytes 8, 0))
+        | b -> Some(uint64 b)
+
+    member this.ReadLenEncString() : string option =
+        this.ReadLenEncInt()
+        |> Option.map (fun len -> Encoding.UTF8.GetString(this.ReadBytes(int len)))
+
+    interface IReader with
+        member this.ReadByte() = this.ReadByte()
+        member this.ReadBytes(n) = this.ReadBytes n
+        member this.ReadInt32LE() = this.ReadInt32LE()
+        member this.ReadInt64LE() = this.ReadInt64LE()
+        member this.ReadLenEncInt() = this.ReadLenEncInt()
+        member this.ReadLenEncString() = this.ReadLenEncString()
 
 // CRC-32 (IEEE 802.3), table-driven. Detects a torn/corrupt WAL record —
 // corruption detection, not security.

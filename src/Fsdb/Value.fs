@@ -146,7 +146,7 @@ let encodeValue (w: Writer) (v: Value) : unit =
 
 /// Inverse of `encodeValue`. Throws on malformed input, same contract as
 /// `ofWire`.
-let decodeValue (r: Reader) : Value =
+let decodeValue (r: #IReader) : Value =
     match r.ReadByte() with
     | 0x00uy -> VNull
     | 0x01uy -> VInt(r.ReadInt64LE())

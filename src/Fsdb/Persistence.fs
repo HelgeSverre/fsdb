@@ -67,11 +67,11 @@ let private flushToDisk (s: FileStream) : unit =
 
 let private writeBool (w: Writer) (b: bool) = w.WriteByte(if b then 1uy else 0uy)
 
-let private readBool (r: Reader) : bool = r.ReadByte() = 1uy
+let private readBool (r: #IReader) : bool = r.ReadByte() = 1uy
 
 let private writeStr (w: Writer) (s: string) = w.WriteLenEncString s
 
-let private readStr (r: Reader) : string = r.ReadLenEncString() |> Option.defaultValue ""
+let private readStr (r: #IReader) : string = r.ReadLenEncString() |> Option.defaultValue ""
 
 let private writeOptStr (w: Writer) (s: string option) =
     match s with
@@ -80,7 +80,7 @@ let private writeOptStr (w: Writer) (s: string option) =
         w.WriteByte 1uy
         writeStr w x
 
-let private readOptStr (r: Reader) : string option =
+let private readOptStr (r: #IReader) : string option =
     match r.ReadByte() with
     | 0uy -> None
     | _ -> Some(readStr r)
@@ -89,7 +89,7 @@ let private writeStrList (w: Writer) (xs: string list) =
     w.WriteInt32LE(List.length xs)
     List.iter (writeStr w) xs
 
-let private readStrList (r: Reader) : string list =
+let private readStrList (r: #IReader) : string list =
     List.init (r.ReadInt32LE()) (fun _ -> readStr r)
 
 // ---------------------------------------------------------------------
@@ -127,7 +127,7 @@ let private encodeColumnType (w: Writer) (t: ColumnType) : unit =
     | TYear -> w.WriteByte 0x1Buy
     | TJson -> w.WriteByte 0x1Cuy
 
-let private decodeColumnType (r: Reader) : ColumnType =
+let private decodeColumnType (r: #IReader) : ColumnType =
     match r.ReadByte() with
     | 0x01uy -> TTinyInt(readBool r)
     | 0x02uy -> TSmallInt(readBool r)
@@ -186,7 +186,7 @@ let private encodeOp (w: Writer) (op: Op) : unit =
         | NullSafeEq -> 0x0Euy
     )
 
-let private decodeOp (r: Reader) : Op =
+let private decodeOp (r: #IReader) : Op =
     match r.ReadByte() with
     | 0x01uy -> And
     | 0x02uy -> Or
@@ -207,7 +207,7 @@ let private decodeOp (r: Reader) : Op =
 let private encodeDirection (w: Writer) (d: Direction) : unit =
     w.WriteByte(match d with Asc -> 0x00uy | Desc -> 0x01uy)
 
-let private decodeDirection (r: Reader) : Direction =
+let private decodeDirection (r: #IReader) : Direction =
     match r.ReadByte() with
     | 0x00uy -> Asc
     | _ -> Desc
@@ -286,7 +286,7 @@ let rec private encodeExpr (w: Writer) (expr: Expr) : unit =
     | Exists _
     | Subquery _ -> failwithf "Persistence: a GENERATED column can't hold a subquery (MySQL itself rejects one there)"
 
-let rec private decodeExpr (r: Reader) : Expr =
+let rec private decodeExpr (r: #IReader) : Expr =
     let optExpr () =
         match r.ReadByte() with
         | 0uy -> None
@@ -342,7 +342,7 @@ let private encodeColumnDefault (w: Writer) (d: ColumnDefault) : unit =
     | DConst v -> w.WriteByte 0x01uy; encodeValue w v
     | DCurrentTimestamp -> w.WriteByte 0x02uy
 
-let private decodeColumnDefault (r: Reader) : ColumnDefault =
+let private decodeColumnDefault (r: #IReader) : ColumnDefault =
     match r.ReadByte() with
     | 0x01uy -> DConst(decodeValue r)
     | _ -> DCurrentTimestamp
@@ -376,7 +376,7 @@ let private encodeColumnDef (w: Writer) (c: ColumnDef) : unit =
     writeOptStr w c.Collation
     writeOptStr w c.Charset
 
-let private decodeColumnDef (r: Reader) : ColumnDef =
+let private decodeColumnDef (r: #IReader) : ColumnDef =
     { Name = readStr r
       Type = decodeColumnType r
       Nullable = readBool r
@@ -393,7 +393,7 @@ let private encodeIndexDef (w: Writer) (ix: IndexDef) : unit =
     writeStrList w ix.Columns
     writeBool w ix.Unique
 
-let private decodeIndexDef (r: Reader) : IndexDef =
+let private decodeIndexDef (r: #IReader) : IndexDef =
     { Name = readStr r; Columns = readStrList r; Unique = readBool r }
 
 let private encodeForeignKeyDef (w: Writer) (fk: ForeignKeyDef) : unit =
@@ -404,7 +404,7 @@ let private encodeForeignKeyDef (w: Writer) (fk: ForeignKeyDef) : unit =
     writeOptStr w fk.OnDelete
     writeOptStr w fk.OnUpdate
 
-let private decodeForeignKeyDef (r: Reader) : ForeignKeyDef =
+let private decodeForeignKeyDef (r: #IReader) : ForeignKeyDef =
     { Name = readStr r
       Columns = readStrList r
       RefTable = readStr r
@@ -425,7 +425,7 @@ let private encodeColumnPosition (w: Writer) (p: ColumnPosition) : unit =
     | PositionFirst -> w.WriteByte 0x02uy
     | PositionAfter column -> w.WriteByte 0x03uy; writeStr w column
 
-let private decodeColumnPosition (r: Reader) : ColumnPosition =
+let private decodeColumnPosition (r: #IReader) : ColumnPosition =
     match r.ReadByte() with
     | 0x01uy -> PositionDefault
     | 0x02uy -> PositionFirst
@@ -445,7 +445,7 @@ let private encodeAlterAction (w: Writer) (a: AlterAction) : unit =
     | DropForeignKey name -> w.WriteByte 0x0Auy; writeStr w name
     | AddPrimaryKey columns -> w.WriteByte 0x0Buy; writeStrList w columns
 
-let private decodeAlterAction (r: Reader) : AlterAction =
+let private decodeAlterAction (r: #IReader) : AlterAction =
     match r.ReadByte() with
     | 0x01uy -> AddColumn(decodeColumnDef r, decodeColumnPosition r)
     | 0x02uy -> DropColumn(readStr r)
@@ -490,7 +490,7 @@ let private encodeStatement (w: Writer) (s: Statement) : unit =
     | Truncate table -> w.WriteByte 0x09uy; writeStr w table
     | other -> failwithf "Persistence: %A isn't a DDL statement SchemaChanged should ever carry" other
 
-let private decodeStatement (r: Reader) : Statement =
+let private decodeStatement (r: #IReader) : Statement =
     match r.ReadByte() with
     | 0x01uy -> CreateDatabase(readStr r, readBool r)
     | 0x02uy -> DropDatabase(readStr r, readBool r)
@@ -528,7 +528,7 @@ let private encodeRowBin (w: Writer) (row: Value[]) : unit =
     for v in row do
         encodeValue w v
 
-let private decodeRowBin (r: Reader) : Value[] =
+let private decodeRowBin (r: #IReader) : Value[] =
     Array.init (r.ReadInt32LE()) (fun _ -> decodeValue r)
 
 let rec private encodeEvent (w: Writer) (event: CommitEvent) : unit =
@@ -569,7 +569,7 @@ let rec private encodeEvent (w: Writer) (event: CommitEvent) : unit =
         for e in events do
             encodeEvent w e
 
-let rec private decodeEvent (r: Reader) : CommitEvent =
+let rec private decodeEvent (r: #IReader) : CommitEvent =
     let str () = r.ReadLenEncString() |> Option.defaultValue ""
 
     match r.ReadByte() with
@@ -744,7 +744,7 @@ let private replayWal (store: Store) (walPath: string) : int64 =
 // `encodeRowBin`/`decodeRowBin` so a snapshot and a WAL share one row format.
 // ---------------------------------------------------------------------
 
-let private encodeTable (w: Writer) (t: Table) : unit =
+let private encodeTableMeta (w: Writer) (t: Table) : unit =
     writeStr w t.OriginalName
     w.WriteInt32LE(List.length t.Columns)
     List.iter (encodeColumnDef w) t.Columns
@@ -757,10 +757,39 @@ let private encodeTable (w: Writer) (t: Table) : unit =
     w.WriteInt64LE t.NextAutoId
     w.WriteInt32LE t.RowsArray.Length
 
-    for row in t.RowsArray do
-        encodeRowBin w row
+/// Writes the catalog straight to `s`, flushing the `Writer` every chunk so a
+/// multi-GB snapshot never materializes as one `byte[]`. Rows are the only
+/// unbounded part, so the flush checkpoint lives in the per-row loop.
+let private writeCatalog (s: FileStream) (catalog: Catalog) : unit =
+    let mutable w = Writer()
 
-let private decodeTable (r: Reader) : Table =
+    let flush () =
+        if w.Count > 0 then
+            let bytes = w.ToArray()
+            s.Write(bytes, 0, bytes.Length)
+            w.Clear()
+
+    w.WriteInt32LE(Map.count catalog)
+
+    catalog
+    |> Map.iter (fun dbName db ->
+        writeStr w dbName
+        w.WriteInt32LE(Map.count db)
+
+        db
+        |> Map.iter (fun tableKey table ->
+            writeStr w tableKey
+            encodeTableMeta w table
+
+            for row in table.RowsArray do
+                encodeRowBin w row
+
+                if w.Count >= (1 <<< 20) then
+                    flush ()))
+
+    flush ()
+
+let private decodeTable (r: #IReader) : Table =
     let originalName = readStr r
     let columns = List.init (r.ReadInt32LE()) (fun _ -> decodeColumnDef r)
     let indexes = List.init (r.ReadInt32LE()) (fun _ -> decodeIndexDef r)
@@ -781,19 +810,7 @@ let private decodeTable (r: Reader) : Table =
           NextAutoId = nextAutoId
           UniqueIndex = Map.empty }
 
-let private encodeCatalog (w: Writer) (catalog: Catalog) : unit =
-    w.WriteInt32LE(Map.count catalog)
-
-    catalog
-    |> Map.iter (fun dbName db ->
-        writeStr w dbName
-        w.WriteInt32LE(Map.count db)
-
-        db |> Map.iter (fun tableKey table ->
-            writeStr w tableKey
-            encodeTable w table))
-
-let private decodeCatalog (r: Reader) : Catalog =
+let private decodeCatalog (r: #IReader) : Catalog =
     let dbCount = r.ReadInt32LE()
 
     [ for _ in 1..dbCount ->
@@ -826,10 +843,7 @@ let snapshotNow (dataDir: string) (store: Store) : unit =
         let newPath = finalPath + ".new"
 
         (use s = new FileStream(newPath, FileMode.Create, FileAccess.Write)
-         let w = Writer()
-         encodeCatalog w store.Catalog
-         let bytes = w.ToArray()
-         s.Write(bytes, 0, bytes.Length)
+         writeCatalog s store.Catalog
          flushToDisk s)
 
         File.WriteAllText(Path.Combine(dataDir, walFileName), "")
@@ -853,10 +867,17 @@ let load (dataDir: string) : Store =
     // has. A `.new` that fails to parse means the crash landed mid-write,
     // before the fsync — it's garbage, not authoritative; fall through to
     // the untouched old snapshot + full WAL instead.
+    // A streamed reader, not `File.ReadAllBytes`: a multi-GB snapshot would
+    // exceed the `byte[]` size limit if slurped whole. `StreamReader` decodes
+    // it a buffer at a time.
+    let readSnapshot (path: string) : Catalog =
+        use s = new FileStream(path, FileMode.Open, FileAccess.Read)
+        decodeCatalog (StreamReader(s))
+
     let loadedFromNew =
         File.Exists newPath
         && (try
-                setCatalog store (decodeCatalog (Reader(File.ReadAllBytes newPath)))
+                setCatalog store (readSnapshot newPath)
                 true
             with _ ->
                 false)
@@ -866,7 +887,7 @@ let load (dataDir: string) : Store =
         File.WriteAllText(walPath, "")
     else
         if File.Exists snapshotPath then
-            setCatalog store (decodeCatalog (Reader(File.ReadAllBytes snapshotPath)))
+            setCatalog store (readSnapshot snapshotPath)
 
         // The WAL holds rows that already passed every check once, at
         // commit time — re-validating foreign keys on replay only risks

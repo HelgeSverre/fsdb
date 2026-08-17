@@ -158,6 +158,32 @@ let tests =
               let names = rowsOf reloaded defaultDatabase "t" |> List.map (fun r -> r.[1])
               Expect.containsAll names [ VString "before-snapshot"; VString "after-snapshot" ] "both the snapshotted row and the WAL-tail row are back"
 
+          testCase "a snapshot larger than the streaming flush threshold round-trips through the chunked writer and streamed reader"
+          <| fun _ ->
+              let dir = tempDataDir ()
+              let store = load dir
+              attach dir store
+              createTable store defaultDatabase "big" usersColumns [] [] None None |> ignore
+
+              // ~10k rows of ~150 bytes each ≈ 1.5 MB, past `writeCatalog`'s
+              // 1 MiB flush checkpoint — forces a mid-write flush on the way
+              // out and a chunk-spanning `StreamReader` on the way back in.
+              let rowCount = 10_000
+
+              insertRows
+                  store
+                  defaultDatabase
+                  "big"
+                  None
+                  [ for i in 1 .. rowCount -> [ VNull; VString(sprintf "row-%d-%s" i (String('x', 120))); VNull ] ]
+              |> ignore
+
+              snapshotNow dir store
+
+              let reloaded = load dir
+              let count = rowsOf reloaded defaultDatabase "big" |> List.length
+              Expect.equal count rowCount "every row survives a chunked snapshot write + streamed read"
+
           testCase "DDL replay reproduces schema: create, alter (add column + index), rename"
           <| fun _ ->
               let dir = tempDataDir ()
