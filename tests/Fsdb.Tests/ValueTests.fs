@@ -312,6 +312,15 @@ let tests =
                       testCase "JSON_UNQUOTE on a non-string JSON value renders its text unchanged"
                       <| fun _ -> Expect.equal (call "JSON_UNQUOTE" [ VJson "1" ]) (VString "1") "non-string"
 
+                      testCase "JSON null-argument and malformed-path edge cases return NULL"
+                      <| fun _ ->
+                          Expect.equal (call "JSON_UNQUOTE" [ VNull ]) VNull "unquote null"
+                          Expect.equal (call "JSON_VALID" [ VNull ]) VNull "valid null"
+                          Expect.equal (call "JSON_EXTRACT" [ VJson "\"scalar\""; VString "$.*" ]) VNull "wildcard over a scalar"
+                          Expect.equal (call "JSON_EXTRACT" [ VJson """{"a": 1}"""; VString "$.a.\"unterminated" ]) VNull "unterminated quoted path"
+                          // array-index insert never overwrites an existing element
+                          Expect.equal (call "JSON_INSERT" [ VJson "[1, 2]"; VString "$[0]"; VInt 9L ]) (VJson "[1, 2]") "array insert refuses existing index"
+
                       testCase "JSON_CONTAINS finds an object subset"
                       <| fun _ ->
                           Expect.equal
@@ -382,7 +391,65 @@ let tests =
                           Expect.equal (call "JSON_TYPE" [ VJson "1.5" ]) (VString "DOUBLE") "double"
                           Expect.equal (call "JSON_TYPE" [ VJson "true" ]) (VString "BOOLEAN") "boolean"
                           Expect.equal (call "JSON_TYPE" [ VJson "null" ]) (VString "NULL") "json null"
-                          Expect.equal (call "JSON_TYPE" [ VNull ]) VNull "sql null" ]
+                          Expect.equal (call "JSON_TYPE" [ VNull ]) VNull "sql null"
+
+                      testCase "JSON_CONTAINS with a path searches that subtree, and scalar/null equality works"
+                      <| fun _ ->
+                          Expect.equal (call "JSON_CONTAINS" [ VJson """{"a": [1, 2, 3]}"""; VJson "2"; VString "$.a" ]) (VInt 1L) "path hit"
+                          Expect.equal (call "JSON_CONTAINS" [ VJson """{"a": [1, 2, 3]}"""; VJson "9"; VString "$.a" ]) (VInt 0L) "path miss"
+                          Expect.equal (call "JSON_CONTAINS" [ VJson """{"a": 1}"""; VJson "1"; VString "$.b" ]) VNull "missing path is NULL"
+                          Expect.equal (call "JSON_CONTAINS" [ VJson "1"; VJson "1" ]) (VInt 1L) "scalar equality"
+                          Expect.equal (call "JSON_CONTAINS" [ VJson "1"; VJson "2" ]) (VInt 0L) "scalar inequality"
+                          Expect.equal (call "JSON_CONTAINS" [ VJson "null"; VJson "null" ]) (VInt 1L) "json null contains json null"
+                          Expect.equal (call "JSON_CONTAINS" [ VJson """{"a": 1}"""; VJson "null" ]) (VInt 0L) "non-null does not contain null"
+
+                      testCase "JSON_LENGTH with a path measures that subtree"
+                      <| fun _ ->
+                          Expect.equal (call "JSON_LENGTH" [ VJson """{"a": [1, 2, 3]}"""; VString "$.a" ]) (VInt 3L) "array subtree"
+                          Expect.equal (call "JSON_LENGTH" [ VJson """{"a": {"x": 1, "y": 2}}"""; VString "$.a" ]) (VInt 2L) "object subtree"
+
+                      testCase "JSON_KEYS with a path lists that object's keys"
+                      <| fun _ ->
+                          Expect.equal (call "JSON_KEYS" [ VJson """{"a": {"x": 1, "y": 2}}"""; VString "$.a" ]) (VJson """["x", "y"]""") "nested keys"
+
+                      testCase "JSON_SET/INSERT/REPLACE/REMOVE walk nested object and array paths"
+                      <| fun _ ->
+                          Expect.equal
+                              (call "JSON_SET" [ VJson """{"a": {"b": 1}}"""; VString "$.a.b"; VInt 2L ])
+                              (VJson """{"a": {"b": 2}}""")
+                              "set through a nested object key"
+                          Expect.equal
+                              (call "JSON_SET" [ VJson """[{"x": 1}]"""; VString "$[0].x"; VInt 9L ])
+                              (VJson """[{"x": 9}]""")
+                              "set through array index then object key"
+                          Expect.equal
+                              (call "JSON_INSERT" [ VJson """{"a": {"b": 1}}"""; VString "$.a.b"; VInt 99L ])
+                              (VJson """{"a": {"b": 1}}""")
+                              "insert never overwrites a nested existing key"
+                          Expect.equal
+                              (call "JSON_REPLACE" [ VJson """{"a": {"b": 1}}"""; VString "$.a.c"; VInt 99L ])
+                              (VJson """{"a": {"b": 1}}""")
+                              "replace never creates a nested missing key"
+                          Expect.equal
+                              (call "JSON_REMOVE" [ VJson """{"a": {"b": 1, "c": 2}}"""; VString "$.a.b" ])
+                              (VJson """{"a": {"c": 2}}""")
+                              "remove a nested object key"
+                          Expect.equal (call "JSON_REMOVE" [ VJson "[1, 2, 3]"; VString "$[0]" ]) (VJson "[2, 3]") "remove an array element"
+
+                      testCase "JSON_SEARCH finds string leaves by pattern in one/all modes"
+                      <| fun _ ->
+                          Expect.equal
+                              (call "JSON_SEARCH" [ VJson """{"a": ["x", "y"], "b": "y"}"""; VString "one"; VString "y" ])
+                              (VJson "\"$.a[1]\"")
+                              "one returns the first matching path"
+                          Expect.equal
+                              (call "JSON_SEARCH" [ VJson """{"a": "y", "b": ["z", "y"]}"""; VString "all"; VString "y" ])
+                              (VJson """["$.a", "$.b[1]"]""")
+                              "all returns every matching path"
+                          Expect.equal
+                              (call "JSON_SEARCH" [ VJson """{"a": "x"}"""; VString "one"; VString "zzz" ])
+                              VNull
+                              "no match is NULL" ]
 
                 testList
                     "Dates"
@@ -521,7 +588,71 @@ let tests =
 
                       testCase "STR_TO_DATE parses a common format"
                       <| fun _ ->
-                          Expect.equal (call "STR_TO_DATE" [ VString "2024-03-05"; VString "%Y-%m-%d" ]) (VDate(DateOnly(2024, 3, 5))) "str_to_date" ]
+                          Expect.equal (call "STR_TO_DATE" [ VString "2024-03-05"; VString "%Y-%m-%d" ]) (VDate(DateOnly(2024, 3, 5))) "str_to_date"
+
+                      testCase "STR_TO_DATE parses time parts, abbreviated and full month names"
+                      <| fun _ ->
+                          Expect.equal
+                              (call "STR_TO_DATE" [ VString "2024-03-05 13:45:09"; VString "%Y-%m-%d %H:%i:%s" ])
+                              (VDateTime(DateTime(2024, 3, 5, 13, 45, 9)))
+                              "date plus time"
+                          Expect.equal
+                              (call "STR_TO_DATE" [ VString "05-Mar-2024"; VString "%d-%b-%Y" ])
+                              (VDate(DateOnly(2024, 3, 5)))
+                              "abbreviated month"
+                          Expect.equal
+                              (call "STR_TO_DATE" [ VString "March 5, 2024"; VString "%M %e, %Y" ])
+                              (VDate(DateOnly(2024, 3, 5)))
+                              "full month and unpadded day"
+
+                      testCase "DATE_ADD applies every interval unit and the three-argument form"
+                      <| fun _ ->
+                          let d = VDate(DateOnly(2024, 1, 1))
+                          Expect.equal (call "DATE_ADD" [ d; VInt 3L; VString "DAY" ]) (VDate(DateOnly(2024, 1, 4))) "three-arg day"
+                          Expect.equal (call "DATE_ADD" [ d; call "INTERVAL" [ VInt 1L; VString "WEEK" ] ]) (VDate(DateOnly(2024, 1, 8))) "week"
+                          Expect.equal (call "DATE_ADD" [ d; call "INTERVAL" [ VInt 1L; VString "QUARTER" ] ]) (VDate(DateOnly(2024, 4, 1))) "quarter"
+                          Expect.equal (call "DATE_ADD" [ d; call "INTERVAL" [ VInt 1L; VString "YEAR" ] ]) (VDate(DateOnly(2025, 1, 1))) "year"
+                          // non-date-only units promote a VDate to VDateTime
+                          Expect.equal
+                              (call "DATE_ADD" [ d; call "INTERVAL" [ VInt 2L; VString "HOUR" ] ])
+                              (VDateTime(DateTime(2024, 1, 1, 2, 0, 0)))
+                              "hour promotes to datetime"
+                          Expect.equal
+                              (call "DATE_ADD" [ d; call "INTERVAL" [ VInt 30L; VString "SECOND" ] ])
+                              (VDateTime(DateTime(2024, 1, 1, 0, 0, 30)))
+                              "second promotes to datetime"
+
+                      testCase "DATE_FORMAT renders every supported specifier, ordinal suffixes, and 12-hour wrap"
+                      <| fun _ ->
+                          let dt = VDateTime(DateTime(2024, 3, 5, 13, 45, 9))
+
+                          Expect.equal
+                              (call "DATE_FORMAT" [ dt; VString "%Y-%y-%m-%c-%d-%e|%H-%h-%I-%i-%s-%S-%p|%W-%a-%M-%b|%j-%D-%w|%%|%x" ])
+                              (VString "2024-24-03-3-05-5|13-01-01-45-09-09-PM|Tuesday-Tue-March-Mar|065-5th-2|%|%x")
+                              "every specifier"
+
+                          // each ordinal suffix shape: st/nd/rd/th
+                          Expect.equal (call "DATE_FORMAT" [ VDate(DateOnly(2024, 1, 1)); VString "%D" ]) (VString "1st") "1st"
+                          Expect.equal (call "DATE_FORMAT" [ VDate(DateOnly(2024, 1, 2)); VString "%D" ]) (VString "2nd") "2nd"
+                          Expect.equal (call "DATE_FORMAT" [ VDate(DateOnly(2024, 1, 3)); VString "%D" ]) (VString "3rd") "3rd"
+                          Expect.equal (call "DATE_FORMAT" [ VDate(DateOnly(2024, 1, 21)); VString "%D" ]) (VString "21st") "21st"
+                          Expect.equal (call "DATE_FORMAT" [ VDate(DateOnly(2024, 1, 22)); VString "%D" ]) (VString "22nd") "22nd"
+                          Expect.equal (call "DATE_FORMAT" [ VDate(DateOnly(2024, 1, 23)); VString "%D" ]) (VString "23rd") "23rd"
+                          Expect.equal (call "DATE_FORMAT" [ VDate(DateOnly(2024, 1, 31)); VString "%D" ]) (VString "31st") "31st"
+                          Expect.equal (call "DATE_FORMAT" [ VDate(DateOnly(2024, 1, 4)); VString "%D" ]) (VString "4th") "4th"
+
+                          // 12-hour wrap: midnight is 12 AM, noon is 12 PM
+                          Expect.equal (call "DATE_FORMAT" [ VDateTime(DateTime(2024, 1, 1, 0, 0, 0)); VString "%h %p" ]) (VString "12 AM") "midnight"
+                          Expect.equal (call "DATE_FORMAT" [ VDateTime(DateTime(2024, 1, 1, 12, 0, 0)); VString "%h %p" ]) (VString "12 PM") "noon"
+
+                      testCase "TIME extracts the clock part; WEEK counts Sunday-first weeks"
+                      <| fun _ ->
+                          Expect.equal (call "TIME" [ VString "2024-03-05 13:45:09" ]) (VString "13:45:09") "time"
+                          Expect.equal (call "WEEK" [ VDate(DateOnly(2024, 1, 7)) ]) (VInt 2L) "sunday starts week 2 of 2024"
+
+                      testCase "FROM_UNIXTIME formats with a specifier"
+                      <| fun _ ->
+                          Expect.equal (call "FROM_UNIXTIME" [ VInt 0L; VString "%Y-%m-%d" ]) (VString "1970-01-01") "epoch formatted" ]
 
                 testList
                     "Strings"

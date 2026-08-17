@@ -2,6 +2,7 @@ module Fsdb.Tests.ProtocolTests
 
 open System
 open Expecto
+open Fsdb.Ast
 open Fsdb.Packet
 open Fsdb.Protocol
 open Fsdb.Value
@@ -110,4 +111,95 @@ let tests =
               let bytes = [| 0x00uy; 0xffuy; 0x80uy |]
               let writer = Writer()
               writer.WriteLenEncBytes bytes
-              Expect.equal (readBinaryValue (Reader(writer.ToArray())) TypeBlob false) (VBytes bytes) "raw BLOB parameter" ]
+              Expect.equal (readBinaryValue (Reader(writer.ToArray())) TypeBlob false) (VBytes bytes) "raw BLOB parameter"
+
+          testCase "wireTypeOfColumnType maps every declared-type family to its wire id"
+          <| fun _ ->
+              Expect.equal (wireTypeOfColumnType (TTinyInt false)) TypeTiny "tinyint"
+              Expect.equal (wireTypeOfColumnType (TSmallInt false)) TypeShort "smallint"
+              Expect.equal (wireTypeOfColumnType (TMediumInt false)) TypeLong "mediumint"
+              Expect.equal (wireTypeOfColumnType (TInt false)) TypeLong "int"
+              Expect.equal (wireTypeOfColumnType (TBigInt false)) TypeLongLong "bigint"
+              Expect.equal (wireTypeOfColumnType (TDecimal(10, 2))) TypeNewDecimal "decimal"
+              Expect.equal (wireTypeOfColumnType TDouble) TypeDouble "double"
+              Expect.equal (wireTypeOfColumnType TFloat) TypeFloat "float"
+              Expect.equal (wireTypeOfColumnType TDate) TypeDate "date"
+              Expect.equal (wireTypeOfColumnType TDateTime) TypeDateTime "datetime"
+              Expect.equal (wireTypeOfColumnType TTimestamp) TypeDateTime "timestamp"
+              Expect.equal (wireTypeOfColumnType (TBinary 16)) TypeBlob "binary"
+              Expect.equal (wireTypeOfColumnType (TVarBinary 16)) TypeBlob "varbinary"
+              Expect.equal (wireTypeOfColumnType TTinyBlob) TypeBlob "tinyblob"
+              Expect.equal (wireTypeOfColumnType TBlob) TypeBlob "blob"
+              Expect.equal (wireTypeOfColumnType TMediumBlob) TypeBlob "mediumblob"
+              Expect.equal (wireTypeOfColumnType TLongBlob) TypeBlob "longblob"
+              // every other declared type falls back to VAR_STRING
+              Expect.equal (wireTypeOfColumnType (TVarchar 10)) TypeVarString "varchar"
+              Expect.equal (wireTypeOfColumnType (TChar 10)) TypeVarString "char"
+              Expect.equal (wireTypeOfColumnType TText) TypeVarString "text"
+              Expect.equal (wireTypeOfColumnType (TEnum [ "a"; "b" ])) TypeVarString "enum"
+              Expect.equal (wireTypeOfColumnType (TSet [ "a" ])) TypeVarString "set"
+
+          testCase "textRowPayload encodes NULL and strings in one row"
+          <| fun _ ->
+              let reader = Reader(textRowPayload [ None; Some "hi"; Some "" ])
+              Expect.equal (reader.ReadLenEncInt ()) None "NULL marker"
+              Expect.equal (reader.ReadLenEncString ()) (Some "hi") "string value"
+              Expect.equal (reader.ReadLenEncString ()) (Some "") "empty string"
+
+          testCase "binary DATE/DATETIME/TIME decode length variants, zero values, and integer signs"
+          <| fun _ ->
+              // DATE (len=4): year, month, day
+              let date = Writer()
+              date.WriteByte 4uy
+              date.WriteInt16LE 2024
+              date.WriteByte 3uy
+              date.WriteByte 5uy
+              Expect.equal (readBinaryValue (Reader(date.ToArray())) TypeDate false) (VDate(DateOnly(2024, 3, 5))) "date"
+
+              // length 0 is the zero date — clamped, not thrown
+              let zero = Writer()
+              zero.WriteByte 0uy
+              Expect.equal (readBinaryValue (Reader(zero.ToArray())) TypeDateTime false) (VDateTime DateTime.MinValue) "zero datetime"
+
+              // full DATETIME (len=11): year..second plus microseconds
+              let dt = Writer()
+              dt.WriteByte 11uy
+              dt.WriteInt16LE 2024
+              dt.WriteByte 3uy
+              dt.WriteByte 5uy
+              dt.WriteByte 13uy
+              dt.WriteByte 45uy
+              dt.WriteByte 9uy
+              dt.WriteInt32LE 123456
+              Expect.equal
+                  (readBinaryValue (Reader(dt.ToArray())) TypeDateTime false)
+                  (VDateTime(DateTime(2024, 3, 5, 13, 45, 9).AddTicks 1234560L))
+                  "datetime with microseconds"
+
+              // length 0 TIME renders the zero text form
+              let tzero = Writer()
+              tzero.WriteByte 0uy
+              Expect.equal (readBinaryValue (Reader(tzero.ToArray())) TypeTime false) (VString "00:00:00") "zero time"
+
+              // negative TIME (len=12) with microseconds: 1 day + 10 hours
+              let time = Writer()
+              time.WriteByte 12uy
+              time.WriteByte 1uy // negative
+              time.WriteInt32LE 1 // days
+              time.WriteByte 10uy // hour
+              time.WriteByte 20uy
+              time.WriteByte 30uy
+              time.WriteInt32LE 123456
+              Expect.equal (readBinaryValue (Reader(time.ToArray())) TypeTime false) (VString "-34:20:30.123456") "negative time with microseconds"
+
+              // TINYINT: 0xFF is -1 signed, 255 unsigned
+              let tiny = Writer()
+              tiny.WriteByte 0xFFuy
+              Expect.equal (readBinaryValue (Reader(tiny.ToArray())) TypeTiny false) (VInt(-1L)) "tiny signed"
+              Expect.equal (readBinaryValue (Reader(tiny.ToArray())) TypeTiny true) (VInt 255L) "tiny unsigned"
+
+              // SMALLINT: 0xFFFF is -1 signed, 65535 unsigned
+              let small = Writer()
+              small.WriteInt16LE(-1)
+              Expect.equal (readBinaryValue (Reader(small.ToArray())) TypeShort false) (VInt(-1L)) "short signed"
+              Expect.equal (readBinaryValue (Reader(small.ToArray())) TypeShort true) (VInt 65535L) "short unsigned" ]

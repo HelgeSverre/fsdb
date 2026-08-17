@@ -473,6 +473,140 @@ let tests =
               }
               |> Async.RunSynchronously
 
+          // The wire-level commands the main MySqlConnector tests never
+          // exercise: COM_INIT_DB (USE), the deprecated COM_FIELD_LIST
+          // (PDO/mysqlnd metadata probing), COM_STMT_SEND_LONG_DATA, and
+          // COM_STMT_EXECUTE re-using the previous execution's parameter
+          // types. Raw packets, one connection, in order.
+          testCase "raw wire commands: USE, COM_FIELD_LIST, long data, and parameter-type reuse"
+          <| fun _ ->
+              async {
+                  let listener = Fsdb.Server.startListening System.Net.IPAddress.Loopback 0
+                  let port = Fsdb.Server.port listener
+                  Fsdb.Server.serve listener (Fsdb.Storage.create ()) Fsdb.Functions.empty |> Async.StartAsTask |> ignore
+
+                  try
+                      use client = new Net.Sockets.TcpClient()
+                      do! client.ConnectAsync(Net.IPAddress.Loopback, port) |> Async.AwaitTask
+                      use stream = client.GetStream()
+
+                      let! handshake = readPacketAsync stream
+                      let handshakeSeq = handshake.Value.SeqId
+
+                      let helloResponse =
+                          let w = Writer()
+                          w.WriteInt32LE(int ClientProtocol41)
+                          w.WriteInt32LE 16777216
+                          w.WriteByte 45uy
+                          w.WriteBytes(Array.zeroCreate<byte> 23)
+                          w.WriteNullTerminatedString "root"
+                          w.WriteByte 0uy
+                          w.ToArray()
+
+                      let! _ = writePacketAsync stream { SeqId = handshakeSeq + 1uy; Payload = helloResponse }
+                      let! _ = readPacketAsync stream // connection OK
+
+                      let query (sql: string) =
+                          writePacketAsync stream { SeqId = 0uy; Payload = Array.append [| 0x03uy |] (Text.Encoding.UTF8.GetBytes sql) }
+
+                      // USE an existing database: OK; USE a missing one: 1049.
+                      let! _ = query "CREATE DATABASE app"
+                      let! _ = readPacketAsync stream
+
+                      let! _ = writePacketAsync stream { SeqId = 0uy; Payload = Array.append [| 0x02uy |] (Text.Encoding.UTF8.GetBytes "app") }
+                      let! useOk = readPacketAsync stream
+                      Expect.equal useOk.Value.Payload.[0] 0x00uy "USE an existing database replies OK"
+
+                      let! _ = writePacketAsync stream { SeqId = 0uy; Payload = Array.append [| 0x02uy |] (Text.Encoding.UTF8.GetBytes "missing") }
+                      let! useErr = readPacketAsync stream
+                      Expect.equal useErr.Value.Payload.[0] 0xffuy "USE a missing database replies ERR"
+                      Expect.equal (Reader(useErr.Value.Payload.[1..]).ReadInt16LE()) 1049 "1049 unknown database"
+
+                      let! _ = query "CREATE TABLE t (n INT)"
+                      let! _ = readPacketAsync stream
+
+                      // COM_FIELD_LIST: column defs + EOF for an existing
+                      // table, ERR 1146 for a missing one.
+                      let! _ = writePacketAsync stream { SeqId = 0uy; Payload = Array.append [| 0x04uy |] (Array.append (Text.Encoding.UTF8.GetBytes "t") [| 0uy |]) }
+                      let! fieldList = readPacketAsync stream
+                      Expect.isTrue fieldList.IsSome "COM_FIELD_LIST answers"
+                      Expect.equal fieldList.Value.Payload.[0] 0x03uy "existing table: first packet is a column definition"
+                      let! _ = readPacketAsync stream // trailing EOF
+
+                      let! _ = writePacketAsync stream { SeqId = 0uy; Payload = Array.append [| 0x04uy |] (Array.append (Text.Encoding.UTF8.GetBytes "ghost") [| 0uy |]) }
+                      let! fieldListErr = readPacketAsync stream
+                      Expect.equal fieldListErr.Value.Payload.[0] 0xffuy "missing table: ERR"
+                      Expect.equal (Reader(fieldListErr.Value.Payload.[1..]).ReadInt16LE()) 1146 "1146 table not found"
+
+                      // Prepare "SELECT ?".
+                      let! _ = writePacketAsync stream { SeqId = 0uy; Payload = Array.append [| 0x16uy |] (Text.Encoding.UTF8.GetBytes "SELECT ?") }
+                      let! prepareOk = readPacketAsync stream
+                      let stmtId = Reader(prepareOk.Value.Payload.[1..]).ReadInt32LE()
+                      let! _ = readPacketAsync stream // param column def
+                      let! _ = readPacketAsync stream // trailing EOF
+
+                      // Long data for an unknown statement is silently
+                      // ignored (no reply, per protocol); for the real one it
+                      // is buffered and substituted at EXECUTE time.
+                      let longData (id: int) =
+                          let w = Writer()
+                          w.WriteByte 0x18uy
+                          w.WriteInt32LE id
+                          w.WriteInt16LE 0
+                          w.WriteBytes(Text.Encoding.UTF8.GetBytes "abc")
+                          writePacketAsync stream { SeqId = 0uy; Payload = w.ToArray() }
+
+                      let! _ = longData 9999
+                      let! _ = longData stmtId
+
+                      let execute newParamsBound =
+                          let w = Writer()
+                          w.WriteByte 0x17uy
+                          w.WriteInt32LE stmtId
+                          w.WriteByte 0uy
+                          w.WriteInt32LE 1
+                          w.WriteByte 0uy // null bitmap: param not NULL
+                          w.WriteByte newParamsBound
+
+                          if newParamsBound = 1uy then
+                              w.WriteByte TypeVarString
+                              w.WriteByte 0uy // not unsigned
+
+                          // Param values are always on the wire, whether or
+                          // not the type descriptors were re-bound. The first
+                          // execute ignores this (long data wins); the second
+                          // reads it.
+                          w.WriteLenEncString "def"
+                          writePacketAsync stream { SeqId = 0uy; Payload = w.ToArray() }
+
+                      // Executing without binding types on a never-executed
+                      // statement is an error (LastParamTypes = None).
+                      let! _ = execute 0uy
+                      let! noTypes = readPacketAsync stream
+                      Expect.equal noTypes.Value.Payload.[0] 0xffuy "execute with no bound types replies ERR"
+
+                      // Bind a type this time: the buffered long data is
+                      // substituted for the parameter value.
+                      let! _ = execute 1uy
+                      let! colCount = readPacketAsync stream
+                      let! _ = readPacketAsync stream // column def
+                      let! _ = readPacketAsync stream // EOF
+                      let! row = readPacketAsync stream
+                      let! _ = readPacketAsync stream // EOF
+                      Expect.equal colCount.Value.Payload.[0] 0x01uy "one-column resultset"
+                      Expect.stringContains (Text.Encoding.ASCII.GetString row.Value.Payload) "abc" "long data was substituted for the parameter"
+
+                      // Re-execute without re-binding: the stored types are
+                      // reused (LastParamTypes = Some).
+                      let! _ = execute 0uy
+                      let! reuseColCount = readPacketAsync stream
+                      Expect.isTrue reuseColCount.IsSome "type reuse re-execution gets a reply"
+                      Expect.equal reuseColCount.Value.Payload.[0] 0x01uy "reused types still produce the resultset"
+                  finally
+                      listener.Stop()
+              }
+              |> Async.RunSynchronously
+
           // The README's embedding example, exercised over the real wire
           // with a real MySqlConnector client — a custom scalar (SLUGIFY)
           // and a custom aggregate (MEDIAN) registered on a `Db` via
