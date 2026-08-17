@@ -2108,6 +2108,44 @@ let tests =
                         Expect.equal rows [ [ Some "1" ]; [ Some "2" ]; [ Some "2" ]; [ Some "3" ] ] "UNION ALL keeps duplicates inside the derived table too"
                     | other -> failtestf "expected the union-derived-table's rows, got %A" other
 
+                testCase "a parenthesized UNION branch's own ORDER BY/LIMIT stays that branch's, not the whole union's"
+                <| fun _ ->
+                    // Regression: the union's OrderBy/Limit used to be read
+                    // off whichever branch parsed last, even when that
+                    // branch was individually parenthesized — hijacking the
+                    // branch's own clause into a union-wide one instead of
+                    // running the union unordered/unlimited as MySQL does.
+                    let store = newStore ()
+                    runDefault store "CREATE TABLE u1 (n INT)" |> ignore
+                    runDefault store "CREATE TABLE u2 (n INT)" |> ignore
+                    runDefault store "INSERT INTO u1 VALUES (3)" |> ignore
+                    runDefault store "INSERT INTO u2 VALUES (1), (4)" |> ignore
+
+                    match runDefault store "(SELECT n FROM u1) UNION ALL (SELECT n FROM u2 ORDER BY n DESC LIMIT 1)" with
+                    | ResultSet([ "n" ], [ [ Some "3" ]; [ Some "4" ] ]) -> ()
+                    | other -> failtestf "expected u1's whole row plus u2's own top-1 DESC row, got %A" other
+
+                    match
+                        runDefault
+                            store
+                            "SELECT * FROM ((SELECT n FROM u1) UNION ALL (SELECT n FROM u2 ORDER BY n DESC LIMIT 1)) z"
+                    with
+                    | ResultSet([ "n" ], [ [ Some "3" ]; [ Some "4" ] ]) -> ()
+                    | other -> failtestf "expected the same result inside a derived table, got %A" other
+
+                testCase "a genuine union-level ORDER BY/LIMIT parses after every branch is parenthesized"
+                <| fun _ ->
+                    // What MySqlGrammar emits for ->union(...)->orderBy()->limit().
+                    let store = newStore ()
+                    runDefault store "CREATE TABLE u1 (n INT)" |> ignore
+                    runDefault store "CREATE TABLE u2 (n INT)" |> ignore
+                    runDefault store "INSERT INTO u1 VALUES (3)" |> ignore
+                    runDefault store "INSERT INTO u2 VALUES (1), (4)" |> ignore
+
+                    match runDefault store "(SELECT n FROM u1) UNION (SELECT n FROM u2) ORDER BY n DESC LIMIT 2" with
+                    | ResultSet([ "n" ], [ [ Some "4" ]; [ Some "3" ] ]) -> ()
+                    | other -> failtestf "expected the top 2 rows of the deduped union, sorted DESC, got %A" other
+
                 testCase "<=> is a null-safe equals: NULL <=> NULL is true, unlike ="
                 <| fun _ ->
                     let store = newStore ()

@@ -1103,6 +1103,13 @@ let private tableRef: Parser<TableRef, unit> =
 let private parenSelect, parenSelectRef = createParserForwardedToRef<SelectStmt, unit> ()
 parenSelectRef.Value <- attempt (sym "(" >>. parenSelect .>> sym ")") <|> selectStmtRecord
 
+/// `parenSelect`, paired with whether this particular branch was actually
+/// wrapped in parens — `selectOrUnionBranches` needs that to decide whose
+/// `ORDER BY`/`LIMIT` a union's final branch contributes (see its doc).
+let private parenSelectFlag: Parser<SelectStmt * bool, unit> =
+    (attempt (sym "(" >>. parenSelect .>> sym ")") |>> fun s -> s, true)
+    <|> (selectStmtRecord |>> fun s -> s, false)
+
 /// `UNION [ALL|DISTINCT]` between two `SELECT`s — `ALL` keeps duplicates,
 /// plain `UNION` (or explicit `DISTINCT`) dedupes, matching MySQL's default.
 let private unionOp: Parser<bool, unit> =
@@ -1111,9 +1118,48 @@ let private unionOp: Parser<bool, unit> =
 /// One `SELECT`, or a `UNION`-chained sequence of them — shared between a
 /// top-level statement (`selectOrUnionStmt`) and a derived table's body
 /// (`derivedTable`), since MySQL allows `UNION` in both places and each
-/// branch may be individually parenthesized (`parenSelect`).
-let private selectOrUnionBranches: Parser<SelectStmt * (bool * SelectStmt) list, unit> =
-    parenSelect .>>. many (unionOp .>>. parenSelect)
+/// branch may be individually parenthesized (`parenSelectFlag`).
+let private selectOrUnionBranches: Parser<(SelectStmt * bool) * (bool * (SelectStmt * bool)) list, unit> =
+    parenSelectFlag .>>. many (unionOp .>>. parenSelectFlag)
+
+/// A trailing union-level `ORDER BY`/`LIMIT`, tried only once at least one
+/// `UNION` branch has parsed — what `MySqlGrammar::compileUnionOrders`/
+/// `compileUnionLimit` emit for `->union(...)->orderBy()->limit()`, legal
+/// once every branch is individually parenthesized (a bare final branch's
+/// own trailing clause already grammatically belongs to the union as a
+/// whole, so there's nothing left here to parse in that case — see
+/// `combineUnion`'s doc). Independently optional, like a plain `SELECT`'s.
+let private unionTailClause: Parser<OrderKey list option * (int option * int option) option, unit> =
+    opt (keyword "ORDER" >>. keyword "BY" >>. sepBy1 orderKey (sym ",")) .>>. opt limitClause
+
+/// Resolves one `selectOrUnionBranches` parse plus its optional
+/// `unionTailClause` into the union's own `(first, rest, orderBy, limit,
+/// offset)`, shared between `selectOrUnionStmt` and `derivedTable`. Real
+/// MySQL only lets a branch's own trailing `ORDER BY`/`LIMIT` win over the
+/// union's when that branch is individually parenthesized
+/// (`(SELECT ... ORDER BY x)`) — a bare final branch's clause always belongs
+/// to the union as a whole instead, so it's promoted here when no explicit
+/// union-level clause was parsed. Requires `rest` non-empty; both call sites
+/// only invoke this once they've confirmed at least one `UNION` branch.
+let private combineUnion
+    ((first, _): SelectStmt * bool)
+    (rest: (bool * (SelectStmt * bool)) list)
+    ((unionOrderBy, unionLimitOffset): OrderKey list option * (int option * int option) option)
+    : SelectStmt * (bool * SelectStmt) list * OrderKey list * int option * int option =
+    let restStmts = rest |> List.map (fun (op, (s, _)) -> op, s)
+    let lastStmt, lastParenthesized = rest |> List.last |> snd
+
+    let promotedOrderBy, promotedLimit, promotedOffset =
+        if lastParenthesized then [], None, None else lastStmt.OrderBy, lastStmt.Limit, lastStmt.Offset
+
+    let orderBy = unionOrderBy |> Option.defaultValue promotedOrderBy
+
+    let limit, offset =
+        match unionLimitOffset with
+        | Some(l, o) -> l, o
+        | None -> promotedLimit, promotedOffset
+
+    first, restStmts, orderBy, limit, offset
 
 /// `FROM (SELECT ...) AS alias` — a derived table; the alias is required
 /// (MySQL rejects an unaliased one), so unlike `tableRef`'s optional alias
@@ -1123,20 +1169,21 @@ let private selectOrUnionBranches: Parser<SelectStmt * (bool * SelectStmt) list,
 /// `(`), but `attempt` keeps the two alternatives cleanly independent. The
 /// body may itself be a `UNION` (Laravel's `unionAll(...)->paginate()`
 /// compiles to `SELECT COUNT(*) FROM ((SELECT ...) UNION (SELECT ...)) AS
-/// alias`), hence `selectOrUnionBranches` rather than a bare `selectStmtRecord`.
+/// alias`), hence `selectOrUnionBranches` rather than a bare `selectStmtRecord`
+/// — and `unionTailClause` lets a union-level `ORDER BY`/`LIMIT` sit inside
+/// the derived table's own parens, ahead of its closing `)`.
 let private derivedTable: Parser<FromItem, unit> =
     attempt (
         sym "("
-        >>. selectOrUnionBranches
+        >>. (selectOrUnionBranches
+             >>= fun (first, rest) ->
+                 match rest with
+                 | [] -> preturn (PlainSelect(fst first))
+                 | _ -> unionTailClause |>> fun tail -> combineUnion first rest tail |> UnionSelect)
         .>> sym ")"
         .>>. ((keyword "AS" >>. identifier) <|> identifier)
     )
-    |>> fun ((first, rest), alias) ->
-        match rest with
-        | [] -> FromSubquery(PlainSelect first, alias)
-        | _ ->
-            let last = rest |> List.last |> snd
-            FromSubquery(UnionSelect(first, rest, last.OrderBy, last.Limit, last.Offset), alias)
+    |>> fun (selectOrUnion, alias) -> FromSubquery(selectOrUnion, alias)
 
 let private fromItem: Parser<FromItem, unit> = derivedTable <|> (tableRef |>> FromTable)
 
@@ -1220,21 +1267,18 @@ selectStmtRecordRef.Value <-
           Offset = offset
           Locking = locking.IsSome }
 
-/// A single `SELECT`, or a `UNION`-chained sequence of them (`selectOrUnionBranches`,
-/// shared with `derivedTable` — see its doc). Each branch is a full
-/// `selectStmtRecord` (so it can itself carry a trailing `ORDER
-/// BY`/`LIMIT`/lock clause), but only the *last* branch's ever ends up
-/// meaning anything: real MySQL requires parenthesizing an individual
-/// branch's own `ORDER BY`, so a bare trailing one only ever belongs to the
-/// combined result — reading it off whichever branch parsed last gets that
-/// for free without a separate "top-level" clause in the grammar.
+/// A single `SELECT`, or a `UNION`-chained sequence of them
+/// (`selectOrUnionBranches`, shared with `derivedTable` — see its doc). Each
+/// branch is a full `selectStmtRecord` (so it can itself carry a trailing
+/// `ORDER BY`/`LIMIT`/lock clause), and a genuine union-level clause
+/// (`unionTailClause`) is tried once at least one `UNION` branch parsed —
+/// `combineUnion` picks between the two per branch/clause.
 let private selectOrUnionStmt: Parser<Statement, unit> =
     selectOrUnionBranches
-    |>> function
-        | first, [] -> Select first
-        | first, rest ->
-            let last = rest |> List.last |> snd
-            Union(first, rest, last.OrderBy, last.Limit, last.Offset)
+    >>= fun (first, rest) ->
+        match rest with
+        | [] -> preturn (Select(fst first))
+        | _ -> unionTailClause |>> fun tail -> combineUnion first rest tail |> Union
 
 /// An assignment target, `col` or `table.col` (Laravel's `touch()` qualifies
 /// `updated_at` with the table name even in a single-table `UPDATE`) — the
