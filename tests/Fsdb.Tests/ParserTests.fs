@@ -1502,7 +1502,21 @@ let tests =
                     match parseOk "SELECT * FROM a AS x JOIN b AS y ON x.id = y.a_id LEFT JOIN c AS z ON y.id = z.b_id" with
                     | Select { Joins = [ { Kind = InnerJoin; Table = FromTable { Alias = Some "y" } }; { Kind = LeftJoin; Table = FromTable { Alias = Some "z" } } ] } ->
                         ()
-                    | other -> failtestf "expected two chained joins, got %A" other ]
+                    | other -> failtestf "expected two chained joins, got %A" other
+
+                testCase "NATURAL JOIN and JOIN ... USING are clean 1064s, not silent misparses (ponytail: not supported)"
+                <| fun _ ->
+                    // Both are real MySQL syntax this grammar deliberately
+                    // doesn't have yet — a clean parse error keeps an app
+                    // from shipping a subtly-wrong query, rather than the
+                    // parser guessing.
+                    match parse "SELECT * FROM a NATURAL JOIN b" with
+                    | Error _ -> ()
+                    | Ok stmt -> failtestf "expected NATURAL JOIN to be a parse error, got %A" stmt
+
+                    match parse "SELECT * FROM a JOIN b USING (id)" with
+                    | Error _ -> ()
+                    | Ok stmt -> failtestf "expected JOIN ... USING to be a parse error, got %A" stmt ]
 
           testList
               "derived tables and UNION"

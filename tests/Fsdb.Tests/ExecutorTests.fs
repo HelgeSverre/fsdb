@@ -1623,6 +1623,176 @@ let tests =
                     | ResultSet([ "id"; "name"; "pivot_role" ], [ [ Some "1"; Some "acme"; Some "admin" ] ]) -> ()
                     | other -> failtestf "expected teams' own id (1), not team_user's (99), got %A" other
 
+                // Every expectation below was verified against a real MySQL
+                // 8.4 with the identical schema/data (torture-style
+                // differential probe) — the exact rows, not just shapes.
+                testCase "self-join through two aliases pairs rows with a shared key"
+                <| fun _ ->
+                    let store = newStore ()
+                    runDefault store "CREATE TABLE b (id INT, aid INT, tag VARCHAR(10))" |> ignore
+                    runDefault store "INSERT INTO b VALUES (10, 1, 'x'), (11, 1, 'y'), (12, 2, 'z'), (13, 4, 'w')" |> ignore
+
+                    match
+                        runDefault store "SELECT x.id, y.id, y.tag FROM b x INNER JOIN b y ON y.aid = x.aid AND y.id <> x.id ORDER BY x.id, y.id"
+                    with
+                    | ResultSet(_, rows) ->
+                        Expect.equal rows [ [ Some "10"; Some "11"; Some "y" ]; [ Some "11"; Some "10"; Some "x" ] ] "aid=1 pairs, each excluding itself"
+                    | other -> failtestf "expected the self-join pairs, got %A" other
+
+                testCase "a three-table INNER chain keeps only rows matching through every link"
+                <| fun _ ->
+                    let store = newStore ()
+                    runDefault store "CREATE TABLE a (id INT, name VARCHAR(10))" |> ignore
+                    runDefault store "CREATE TABLE b (id INT, aid INT, tag VARCHAR(10))" |> ignore
+                    runDefault store "CREATE TABLE c (id INT, bid INT, note VARCHAR(10))" |> ignore
+                    runDefault store "INSERT INTO a VALUES (1,'alice'),(2,'bob'),(3,'carol')" |> ignore
+                    runDefault store "INSERT INTO b VALUES (10,1,'x'),(11,1,'y'),(12,2,'z'),(13,4,'w')" |> ignore
+                    runDefault store "INSERT INTO c VALUES (100,10,'n1'),(101,12,'n2'),(102,99,'n3')" |> ignore
+
+                    match
+                        runDefault store "SELECT a.id, b.id, c.id, c.note FROM a INNER JOIN b ON b.aid = a.id INNER JOIN c ON c.bid = b.id ORDER BY a.id, b.id, c.id"
+                    with
+                    | ResultSet(_, rows) ->
+                        Expect.equal rows [ [ Some "1"; Some "10"; Some "100"; Some "n1" ]; [ Some "2"; Some "12"; Some "101"; Some "n2" ] ] "rows surviving both links"
+                    | other -> failtestf "expected the chained matches, got %A" other
+
+                testCase "a LEFT chain pads NULLs at whichever link first fails"
+                <| fun _ ->
+                    let store = newStore ()
+                    runDefault store "CREATE TABLE a (id INT)" |> ignore
+                    runDefault store "CREATE TABLE b (id INT, aid INT)" |> ignore
+                    runDefault store "CREATE TABLE c (id INT, bid INT)" |> ignore
+                    runDefault store "INSERT INTO a VALUES (1), (2), (3)" |> ignore
+                    runDefault store "INSERT INTO b VALUES (10, 1), (11, 1), (12, 2), (13, 4)" |> ignore
+                    runDefault store "INSERT INTO c VALUES (100, 10), (101, 12), (102, 99)" |> ignore
+
+                    match runDefault store "SELECT a.id, b.id, c.id FROM a LEFT JOIN b ON b.aid = a.id LEFT JOIN c ON c.bid = b.id ORDER BY a.id, b.id, c.id" with
+                    | ResultSet(_, rows) ->
+                        Expect.equal
+                            rows
+                            [ [ Some "1"; Some "10"; Some "100" ]
+                              [ Some "1"; Some "11"; None ]
+                              [ Some "2"; Some "12"; Some "101" ]
+                              [ Some "3"; None; None ] ]
+                            "each link pads only the side past its failure point"
+                    | other -> failtestf "expected the chained LEFT matches, got %A" other
+
+                testCase "WHERE on the joined table filters LEFT JOIN rows exactly like MySQL (matched vs padded)"
+                <| fun _ ->
+                    let store = newStore ()
+                    runDefault store "CREATE TABLE a (id INT)" |> ignore
+                    runDefault store "CREATE TABLE b (id INT, aid INT, tag VARCHAR(10))" |> ignore
+                    runDefault store "INSERT INTO a VALUES (1), (2), (3)" |> ignore
+                    runDefault store "INSERT INTO b VALUES (10, 1, 'x'), (11, 1, 'y'), (12, 2, 'z'), (13, 4, 'w')" |> ignore
+
+                    match runDefault store "SELECT a.id, b.id, b.tag FROM a LEFT JOIN b ON b.aid = a.id WHERE b.tag IS NOT NULL ORDER BY a.id, b.id" with
+                    | ResultSet(_, rows) ->
+                        Expect.equal rows [ [ Some "1"; Some "10"; Some "x" ]; [ Some "1"; Some "11"; Some "y" ]; [ Some "2"; Some "12"; Some "z" ] ] "WHERE on the right side drops padded rows"
+                    | other -> failtestf "expected only matched rows, got %A" other
+
+                    match runDefault store "SELECT a.id, b.id, b.tag FROM a LEFT JOIN b ON b.aid = a.id WHERE b.tag IS NULL ORDER BY a.id" with
+                    | ResultSet(_, rows) -> Expect.equal rows [ [ Some "3"; None; None ] ] "only the unmatched left row survives"
+                    | other -> failtestf "expected only the padded row, got %A" other
+
+                testCase "aggregates over a LEFT JOIN count/SUM per group, NULLs included"
+                <| fun _ ->
+                    let store = newStore ()
+                    runDefault store "CREATE TABLE a (id INT)" |> ignore
+                    runDefault store "CREATE TABLE b (id INT, aid INT)" |> ignore
+                    runDefault store "INSERT INTO a VALUES (1), (2), (3)" |> ignore
+                    runDefault store "INSERT INTO b VALUES (10, 1), (11, 1), (12, 2), (13, 4)" |> ignore
+
+                    match
+                        runDefault
+                            store
+                            "SELECT a.id, COUNT(b.id), COALESCE(SUM(b.id), 0) FROM a LEFT JOIN b ON b.aid = a.id GROUP BY a.id ORDER BY a.id"
+                    with
+                    | ResultSet(_, rows) ->
+                        Expect.equal rows [ [ Some "1"; Some "2"; Some "21" ]; [ Some "2"; Some "1"; Some "12" ]; [ Some "3"; Some "0"; Some "0" ] ] "per-group counts and sums"
+                    | other -> failtestf "expected grouped aggregates, got %A" other
+
+                testCase "a multi-key ON keeps equi-key matches and filters by the residual conjunct"
+                <| fun _ ->
+                    let store = newStore ()
+                    runDefault store "CREATE TABLE a (id INT)" |> ignore
+                    runDefault store "CREATE TABLE b (id INT, aid INT, tag VARCHAR(10))" |> ignore
+                    runDefault store "INSERT INTO a VALUES (1), (2), (3)" |> ignore
+                    runDefault store "INSERT INTO b VALUES (10, 1, 'x'), (11, 1, 'y'), (12, 2, 'z'), (13, 4, 'w')" |> ignore
+
+                    match runDefault store "SELECT a.id, b.id, b.tag FROM a LEFT JOIN b ON b.aid = a.id AND b.tag = 'x' ORDER BY a.id, b.id" with
+                    | ResultSet(_, rows) ->
+                        Expect.equal rows [ [ Some "1"; Some "10"; Some "x" ]; [ Some "2"; None; None ]; [ Some "3"; None; None ] ] "only the x-tagged b row matches a=1"
+                    | other -> failtestf "expected the filtered multi-key matches, got %A" other
+
+                testCase "a non-equi ON falls back to nested loop, same matches as MySQL"
+                <| fun _ ->
+                    let store = newStore ()
+                    runDefault store "CREATE TABLE a (id INT)" |> ignore
+                    runDefault store "CREATE TABLE b (id INT, aid INT)" |> ignore
+                    runDefault store "INSERT INTO a VALUES (1), (2), (3)" |> ignore
+                    runDefault store "INSERT INTO b VALUES (10, 1), (11, 1), (12, 2), (13, 4)" |> ignore
+
+                    match runDefault store "SELECT a.id, b.id FROM a INNER JOIN b ON a.id < b.aid ORDER BY a.id, b.id" with
+                    | ResultSet(_, rows) ->
+                        Expect.equal
+                            rows
+                            [ [ Some "1"; Some "12" ]
+                              [ Some "1"; Some "13" ]
+                              [ Some "2"; Some "13" ]
+                              [ Some "3"; Some "13" ] ]
+                            "every a.id < b.aid pair"
+                    | other -> failtestf "expected the range-join pairs, got %A" other
+
+                testCase "an equi-key on a string-cast column still hash-matches (key class coercion)"
+                <| fun _ ->
+                    let store = newStore ()
+                    runDefault store "CREATE TABLE a (id INT, name VARCHAR(10))" |> ignore
+                    runDefault store "CREATE TABLE b (id INT, aid INT, tag VARCHAR(10))" |> ignore
+                    runDefault store "INSERT INTO a VALUES (1,'alice'),(2,'bob'),(3,'carol')" |> ignore
+                    runDefault store "INSERT INTO b VALUES (10,1,'x'),(11,1,'y'),(12,2,'z'),(13,4,'w')" |> ignore
+
+                    match runDefault store "SELECT a.id, b.id, b.tag FROM a INNER JOIN b ON b.aid = CAST(a.id AS CHAR) ORDER BY a.id, b.id" with
+                    | ResultSet(_, rows) ->
+                        Expect.equal rows [ [ Some "1"; Some "10"; Some "x" ]; [ Some "1"; Some "11"; Some "y" ]; [ Some "2"; Some "12"; Some "z" ] ] "same matches as the uncast equi-join"
+                    | other -> failtestf "expected the coerced-key matches, got %A" other
+
+                testCase "chaining RIGHT JOIN then LEFT JOIN pads each outer side independently"
+                <| fun _ ->
+                    let store = newStore ()
+                    runDefault store "CREATE TABLE a (id INT)" |> ignore
+                    runDefault store "CREATE TABLE b (id INT, aid INT)" |> ignore
+                    runDefault store "CREATE TABLE c (id INT, bid INT)" |> ignore
+                    runDefault store "INSERT INTO a VALUES (1), (2), (3)" |> ignore
+                    runDefault store "INSERT INTO b VALUES (10, 1), (11, 1), (12, 2), (13, 4)" |> ignore
+                    runDefault store "INSERT INTO c VALUES (100, 10), (101, 12), (102, 99)" |> ignore
+
+                    match runDefault store "SELECT a.id, b.id, c.id FROM a RIGHT JOIN b ON b.aid = a.id LEFT JOIN c ON c.bid = b.id ORDER BY b.id, a.id, c.id" with
+                    | ResultSet(_, rows) ->
+                        Expect.equal
+                            rows
+                            [ [ Some "1"; Some "10"; Some "100" ]
+                              [ Some "1"; Some "11"; None ]
+                              [ Some "2"; Some "12"; Some "101" ]
+                              [ None; Some "13"; None ] ]
+                            "b=13 is RIGHT-padded on a, then LEFT-padded on c"
+                    | other -> failtestf "expected the mixed RIGHT+LEFT chain, got %A" other
+
+                testCase "joining against an aggregate derived table matches MySQL's grouped results"
+                <| fun _ ->
+                    let store = newStore ()
+                    runDefault store "CREATE TABLE a (id INT)" |> ignore
+                    runDefault store "CREATE TABLE b (id INT, aid INT, tag VARCHAR(10))" |> ignore
+                    runDefault store "INSERT INTO a VALUES (1), (2), (3)" |> ignore
+                    runDefault store "INSERT INTO b VALUES (10, 1, 'x'), (11, 1, 'y'), (12, 2, 'z'), (13, 4, 'w')" |> ignore
+
+                    match
+                        runDefault
+                            store
+                            "SELECT a.id, q2.tag FROM a INNER JOIN (SELECT aid, MAX(tag) tag FROM b GROUP BY aid) q2 ON q2.aid = a.id ORDER BY a.id"
+                    with
+                    | ResultSet(_, rows) -> Expect.equal rows [ [ Some "1"; Some "y" ]; [ Some "2"; Some "z" ] ] "max tag per joined group"
+                    | other -> failtestf "expected the derived-table join, got %A" other
+
                 testCase "an unqualified column present in two joined tables is error 1052, not a silent pick"
                 <| fun _ ->
                     let store = newStore ()
