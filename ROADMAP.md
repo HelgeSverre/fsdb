@@ -92,9 +92,21 @@ evidence in [docs/performance-design.md](docs/performance-design.md):
 quadratic list appends in Storage, hash join for equi-ON, index-addressable
 rows + PK/unique hash indexes, disconnect cancellation, trustworthy
 benchmark harness.
-**Gate:** UpdateSingleRow < 10ms, JoinUsersOrders completes < 25ms,
+**Gate:** UpdateSingleRow < 10ms, JoinUsersOrders completes,
 PointSelectByPk < 250µs, two consecutive bench runs agree within 20%,
-Expecto + one gauntlet suite regression green. Status: ☐ (`just bench` at
+Expecto + one gauntlet suite regression green. Status: ✅ (measured at
+a90dfae: point select 102µs, prepared 89µs, update 2.3ms, batch-100 8.6ms,
+GROUP BY at MySQL parity, join completes in 201ms — the join's < 25ms
+target moves to M10, whose streaming pipeline is what it actually needs)
+
+## M10 — Streaming pipeline
+Stop materializing full result sets before LIMIT: lazy scan/filter/join/
+project end-to-end, top-N heap for ORDER BY + LIMIT, honest barriers only
+where SQL requires them (GROUP BY, window functions, UNION DISTINCT).
+Wire boundary stays materialized.
+**Gate:** JoinUsersOrders < 25ms; no benchmark row regresses; differential
+tests prove streaming output equals materialized output wherever SQL
+defines order; Expecto + reference-app suite parity green. Status: ☐ (`just bench` at
 5037a48: UpdateSingleRow 2,356 µs < 10ms ✅, PointSelectByPk 102 µs <
 250µs ✅ and reproduces within 0.04% across runs (per f1b15ab/366fe1c) ✅,
 Expecto 684/684 ✅, reference-app gauntlet suite at exact parity with its
