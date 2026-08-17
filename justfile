@@ -35,6 +35,39 @@ test:
 [group('qa')]
 check: build test
 
+# Branch coverage over the full suite. Expecto has no built-in coverage, so
+# this instruments the built Fsdb.dll the test assembly loads, via the
+# coverlet.console global tool (install once with
+# `dotnet tool install -g coverlet.console`). Report lands in
+# coverage/coverage.cobertura.xml (cobertura carries the branch data).
+[group('qa')]
+coverage:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    export PATH="$PATH:$HOME/.dotnet/tools"
+    if ! command -v coverlet >/dev/null 2>&1; then
+        echo "error: coverlet.console isn't installed — run: dotnet tool install -g coverlet.console" >&2
+        exit 1
+    fi
+    dotnet_bin="$(command -v dotnet)"
+    # Homebrew's dotnet lives outside the global-tool apphost's default
+    # search path (it needs DOTNET_ROOT); derive it from the resolved
+    # dotnet binary, leaving it alone where the default search already works.
+    if [ -z "${DOTNET_ROOT:-}" ]; then
+        resolved="$(readlink -f "$dotnet_bin" 2>/dev/null || echo "$dotnet_bin")"
+        candidate="$(dirname "$(dirname "$resolved")")/libexec"
+        if [ -d "$candidate/shared/Microsoft.NETCore.App" ]; then
+            export DOTNET_ROOT="$candidate"
+        fi
+    fi
+    dotnet build tests/Fsdb.Tests -c Debug -v q
+    coverlet "tests/Fsdb.Tests/bin/Debug/net10.0/Fsdb.Tests.dll" \
+        -t "$dotnet_bin" \
+        -a "tests/Fsdb.Tests/bin/Debug/net10.0/Fsdb.Tests.dll" \
+        --include "[Fsdb]*" \
+        -f cobertura \
+        -o coverage/coverage
+
 # === Build ===
 
 # Build the whole solution
