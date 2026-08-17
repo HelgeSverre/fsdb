@@ -649,36 +649,56 @@ let private traverseSeq (f: 'a -> Result<'b option, 'e>) (xs: 'a seq) : Result<'
     | None -> Ok(List.ofSeq acc)
 
 /// Bounded top-`capacity` selection for `ORDER BY ... LIMIT n [OFFSET m]`
-/// (`capacity` = `n + m`): a sorted `ResizeArray` kept at or under
-/// `capacity` by binary-search insertion, dropping whichever item currently
-/// sorts last the moment a new one beats it. O(rows * log capacity) and
-/// O(capacity) memory instead of a full O(rows * log rows) sort holding
-/// every matched row — the M10 replacement for `List.sortWith` on this path.
-/// Still visits every item in `items` (an `ORDER BY` that needs a real sort
-/// sees the whole scan in real MySQL too — confirmed against the oracle:
-/// a poison row past a `LIMIT`'s cut still raises once `ORDER BY` forces a
+/// (`capacity` = `n + m`, already clamped to a sane `int` by the caller):
+/// evaluates each item through `f` and keeps only the `capacity` best in a
+/// sorted `ResizeArray`, binary-search-inserting and dropping whichever
+/// item currently sorts last the moment a new one beats it. `f`'s output is
+/// never accumulated anywhere but this buffer, so peak memory is
+/// O(capacity), not O(matched rows) — the buffer also starts empty and
+/// grows with `Add`/`Insert` rather than preallocating `capacity` slots up
+/// front, so a client-supplied `LIMIT` can't size an allocation before a
+/// single row has been read. O(rows * log capacity) comparisons instead of
+/// a full O(rows * log rows) sort holding every matched row. Still visits
+/// every item in `items` (an `ORDER BY` that needs a real sort sees the
+/// whole scan in real MySQL too — confirmed against the oracle: a poison
+/// row past a `LIMIT`'s cut still raises once `ORDER BY` forces a
 /// filesort), so this bounds what gets *kept*, not what gets *evaluated*.
-let private boundedTopN (capacity: int) (cmp: 'a -> 'a -> int) (items: 'a seq) : 'a list =
+let private boundedTopN (capacity: int) (cmp: 'b -> 'b -> int) (f: 'a -> Result<'b option, 'e>) (items: 'a seq) : Result<'b list, 'e> =
     if capacity <= 0 then
-        []
+        Ok []
     else
-        let buf = ResizeArray<'a>(capacity)
+        let token = queryCancellation.Value
+        let buf = ResizeArray<'b>()
+        let mutable error = None
+        let mutable i = 0
+        use enumerator = items.GetEnumerator()
 
-        let insertSorted (item: 'a) =
+        let insertSorted (item: 'b) =
             let mutable lo, hi = 0, buf.Count
             while lo < hi do
                 let mid = (lo + hi) / 2
                 if cmp buf.[mid] item <= 0 then lo <- mid + 1 else hi <- mid
             buf.Insert(lo, item)
 
-        for item in items do
-            if buf.Count < capacity then
-                insertSorted item
-            elif cmp item buf.[buf.Count - 1] < 0 then
-                buf.RemoveAt(buf.Count - 1)
-                insertSorted item
+        while error.IsNone && enumerator.MoveNext() do
+            if i % cancellationCheckInterval = 0 then
+                token.ThrowIfCancellationRequested()
 
-        List.ofSeq buf
+            i <- i + 1
+
+            match f enumerator.Current with
+            | Ok(Some item) ->
+                if buf.Count < capacity then
+                    insertSorted item
+                elif cmp item buf.[buf.Count - 1] < 0 then
+                    buf.RemoveAt(buf.Count - 1)
+                    insertSorted item
+            | Ok None -> ()
+            | Error e -> error <- Some e
+
+        match error with
+        | Some e -> Error e
+        | None -> Ok(List.ofSeq buf)
 
 /// The no-`ORDER BY` `SELECT` pipeline's `WHERE`/`DISTINCT`/`LIMIT`/`OFFSET`
 /// stage: pulls rows from `xs` one at a time through `f` and stops the
@@ -2470,6 +2490,18 @@ and private runSelect
         let typesOf (finalRows: Value[] list) : byte list =
             columnTypesOf (List.length colNames) (finalRows |> List.map (List.zip colNames << List.ofArray))
 
+        // Shared by both `ORDER BY` branches below: evaluates `WHERE`, the
+        // projection, and the sort keys for one row, in that order, short-
+        // circuiting to `None` on a `WHERE` miss without projecting it.
+        let evalKeyed (row: Value[]) : Result<(Value list * (string option list * Value[])) option, EvalError> =
+            matches row
+            |> Result.bind (fun keep ->
+                if not keep then
+                    Ok None
+                else
+                    projectRow row
+                    |> Result.bind (fun outputCols -> orderKeysOf row outputCols |> Result.map (fun keys -> Some(keys, pairOf outputCols))))
+
         // No `ORDER BY`: `WHERE`/`DISTINCT`/`LIMIT`/`OFFSET` stream lazily
         // through `streamLimited`, which stops pulling rows the moment
         // enough have survived — verified against a real MySQL oracle
@@ -2489,23 +2521,19 @@ and private runSelect
         // `ORDER BY` + `LIMIT`, no `DISTINCT`: bounded top-(limit+offset)
         // selection (`boundedTopN`) instead of a full sort — still touches
         // every matched row (see above), but keeps only `limit + offset` of
-        // them at a time instead of the whole matched set.
+        // them at a time instead of the whole matched set. The `limit +
+        // offset` addition happens in `int64` and is clamped back into
+        // `int` afterward: the parser clamps a `LIMIT` up to MySQL's
+        // 2^64-1 down to `Int32.MaxValue` (a real idiom — "offset with no
+        // limit" pagination emits it verbatim), and adding a nonzero
+        // `OFFSET` to that in unchecked 32-bit `int` wraps negative.
         elif limit.IsSome && not select.Distinct then
-            let evalKeyed (row: Value[]) : Result<(Value list * (string option list * Value[])) option, EvalError> =
-                matches row
-                |> Result.bind (fun keep ->
-                    if not keep then
-                        Ok None
-                    else
-                        projectRow row
-                        |> Result.bind (fun outputCols -> orderKeysOf row outputCols |> Result.map (fun keys -> Some(keys, pairOf outputCols))))
+            let dirs = List.map snd orderBy
+            let capacity = int (min (int64 (Option.get limit) + int64 (Option.defaultValue 0 offset)) (int64 System.Int32.MaxValue))
 
-            match rows |> traverseSeq evalKeyed with
+            match rows |> boundedTopN capacity (fun (ka, _) (kb, _) -> compareByOrderKeys dirs ka kb) evalKeyed with
             | Error(code, message) -> Err(code, message), [], []
-            | Ok keyed ->
-                let dirs = List.map snd orderBy
-                let capacity = Option.get limit + Option.defaultValue 0 offset
-                let top = keyed |> boundedTopN capacity (fun (ka, _) (kb, _) -> compareByOrderKeys dirs ka kb)
+            | Ok top ->
                 let limited = top |> List.map snd |> applyLimitOffset limit offset
                 ResultSet(colNames, limited |> List.map fst), typesOf (limited |> List.map snd), limited |> List.map snd
 
@@ -2515,15 +2543,6 @@ and private runSelect
         // dedupe-first pass would have kept) — full materialize, sort,
         // dedupe, same as before M10.
         else
-            let evalKeyed (row: Value[]) : Result<(Value list * (string option list * Value[])) option, EvalError> =
-                matches row
-                |> Result.bind (fun keep ->
-                    if not keep then
-                        Ok None
-                    else
-                        projectRow row
-                        |> Result.bind (fun outputCols -> orderKeysOf row outputCols |> Result.map (fun keys -> Some(keys, pairOf outputCols))))
-
             match rows |> traverseSeq evalKeyed with
             | Error(code, message) -> Err(code, message), [], []
             | Ok keyed ->

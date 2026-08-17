@@ -2855,6 +2855,24 @@ let tests =
 
                         Expect.equal limited expected (sprintf "sql=%s limit=%d offset=%d" baseSql limit offset)
 
+                testCase "ORDER BY + LIMIT with MySQL's max LIMIT (the \"OFFSET with no LIMIT\" pagination idiom) still returns rows, not an overflowed-capacity empty set"
+                <| fun _ ->
+                    let store = newStore ()
+                    runDefault store "CREATE TABLE t (id INT PRIMARY KEY)" |> ignore
+                    runDefault store "INSERT INTO t VALUES (1),(2),(3),(4),(5),(6),(7),(8),(9),(10),(11),(12)" |> ignore
+
+                    match runDefault store "SELECT id FROM t ORDER BY id LIMIT 18446744073709551615 OFFSET 3" with
+                    | ResultSet(_, rows) -> Expect.equal rows [ [ Some "4" ]; [ Some "5" ]; [ Some "6" ]; [ Some "7" ]; [ Some "8" ]; [ Some "9" ]; [ Some "10" ]; [ Some "11" ]; [ Some "12" ] ] "rows 4..12, same as a plain OFFSET 3 with no LIMIT"
+                    | other -> failtestf "expected a resultset, got %A" other
+
+                    match runDefault store "SELECT id FROM t ORDER BY id LIMIT 18446744073709551615" with
+                    | ResultSet(_, rows) -> Expect.equal (List.length rows) 12 "the full table, not an array-dimensions fault from preallocating the clamped LIMIT"
+                    | other -> failtestf "expected a resultset, got %A" other
+
+                    match runDefault store "SELECT id FROM t ORDER BY id LIMIT 3 OFFSET 2147483640" with
+                    | ResultSet(_, rows) -> Expect.equal rows [] "an OFFSET past the table's end still returns cleanly, not an overflow fault"
+                    | other -> failtestf "expected a resultset, got %A" other
+
                 testCase "LIMIT N against a WHERE matching nearly the whole table touches far fewer rows than the table size"
                 <| fun _ ->
                     let mutable touched = 0
