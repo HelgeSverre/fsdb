@@ -47,7 +47,7 @@ let private usersColumns =
         Collation = None
         Charset = None } ]
 
-let private walPath dir = Path.Combine(dir, "wal.jsonl")
+let private walPath dir = Path.Combine(dir, "wal.bin")
 let private snapshotPath dir = Path.Combine(dir, "snapshot.fsdb")
 
 let private rowsOf (store: Store) (dbName: string) (table: string) : Value[] list =
@@ -199,7 +199,7 @@ let tests =
               | Error(NoSuchTable _) -> ()
               | other -> failtestf "expected the pre-rename name to be gone, got %A" other
 
-          testCase "a torn/corrupt final WAL line stops replay there instead of crashing"
+          testCase "a torn/corrupt final WAL record stops replay there instead of crashing"
           <| fun _ ->
               let dir = tempDataDir ()
               let store = load dir
@@ -207,12 +207,12 @@ let tests =
               createTable store defaultDatabase "t" usersColumns [] [] None None |> ignore
               insertRows store defaultDatabase "t" None [ [ VNull; VString "good"; VNull ] ] |> ignore
 
-              // Simulate a `kill -9` mid-`Write`: a half-written trailing
-              // line with no closing brace.
-              File.AppendAllText(walPath dir, "{\"case\":\"RowsInserted\",\"db\":\"fsdb\",\"table\":\"t\",\"rows\":[[\"I2\"")
+              // Simulate a `kill -9` mid-`Write`: a record header declaring
+              // 100 payload bytes that were never written.
+              File.AppendAllBytes(walPath dir, [| 100uy; 0uy; 0uy; 0uy; 0uy; 0uy; 0uy; 0uy |])
 
               let reloaded = load dir
-              Expect.equal (rowsOf reloaded defaultDatabase "t") [ [| VInt 1L; VString "good"; VNull |] ] "only the row before the torn line survives, no crash"
+              Expect.equal (rowsOf reloaded defaultDatabase "t") [ [| VInt 1L; VString "good"; VNull |] ] "only the row before the torn record survives, no crash"
 
           testCase "a rolled-back transaction leaves no WAL entries"
           <| fun _ ->
@@ -221,33 +221,34 @@ let tests =
               attach dir store
               createTable store defaultDatabase "t" usersColumns [] [] None None |> ignore
 
-              let beforeRollback = File.ReadAllLines(walPath dir) |> Array.length
+              let beforeRollback = FileInfo(walPath dir).Length
 
               let snapshot = beginTransactionSnapshot store
               insertRows snapshot defaultDatabase "t" None [ [ VNull; VString "never-committed"; VNull ] ] |> ignore
               // ROLLBACK: just discard `snapshot` — never call `commitTransactionEvents`.
 
-              let afterRollback = File.ReadAllLines(walPath dir) |> Array.length
+              let afterRollback = FileInfo(walPath dir).Length
               Expect.equal afterRollback beforeRollback "rollback wrote nothing to the WAL"
 
               let reloaded = load dir
               Expect.isEmpty (rowsOf reloaded defaultDatabase "t") "the rolled-back row never made it in"
 
-          testCase "a torn WAL line doesn't poison future appends: writes after a kill -9 restart still survive a second restart"
+          testCase "a torn WAL record doesn't poison future appends: writes after a kill -9 restart still survive a second restart"
           <| fun _ ->
               let dir = tempDataDir ()
               let store = load dir
               attach dir store
               createTable store defaultDatabase "t" usersColumns [] [] None None |> ignore
               insertRows store defaultDatabase "t" None [ [ VNull; VString "good"; VNull ] ] |> ignore
-              // Simulate a `kill -9` mid-`Write`: a half-written trailing line.
-              File.AppendAllText(walPath dir, "{\"case\":\"RowsInserted\",\"db\":\"fsdb\",\"table\":\"t\",\"rows\":[[\"I2\"")
+              // Simulate a `kill -9` mid-`Write`: a record header declaring
+              // 100 payload bytes that were never written.
+              File.AppendAllBytes(walPath dir, [| 100uy; 0uy; 0uy; 0uy; 0uy; 0uy; 0uy; 0uy |])
 
-              // Restart #1: replay stops at the torn line, but must also
+              // Restart #1: replay stops at the torn record, but must also
               // truncate it away so the next append starts clean.
               let restarted = load dir
               attach dir restarted
-              Expect.equal (rowsOf restarted defaultDatabase "t") [ [| VInt 1L; VString "good"; VNull |] ] "torn line dropped, good row survives"
+              Expect.equal (rowsOf restarted defaultDatabase "t") [ [| VInt 1L; VString "good"; VNull |] ] "torn record dropped, good row survives"
 
               insertRows restarted defaultDatabase "t" None [ [ VNull; VString "second"; VNull ] ] |> ignore
               insertRows restarted defaultDatabase "t" None [ [ VNull; VString "third"; VNull ] ] |> ignore
@@ -255,7 +256,7 @@ let tests =
               // Restart #2: both post-restart writes must be intact.
               let restarted2 = load dir
               let names = rowsOf restarted2 defaultDatabase "t" |> List.map (fun r -> r.[1])
-              Expect.containsAll names [ VString "good"; VString "second"; VString "third" ] "every row acked after the torn-line restart survives a second restart"
+              Expect.containsAll names [ VString "good"; VString "second"; VString "third" ] "every row acked after the torn-record restart survives a second restart"
 
           testCase "WAL replay of a sequential UPDATE (n = n + 1) doesn't cascade through its own earlier changes"
           <| fun _ ->
@@ -371,14 +372,12 @@ let tests =
 
               snapshotNow dir setupStore
 
-              let wireRow (values: Value list) = values |> List.map toWire |> List.map (sprintf "\"%s\"") |> String.concat ","
+              let records =
+                  [ for i in 1 .. rowCount ->
+                        encodeWalRecord (RowsUpdated(defaultDatabase, "hot", [ [| VInt(int64 i); VInt 0L |], [| VInt(int64 i); VInt 1L |] ])) ]
+                  |> Array.concat
 
-              let walLine i =
-                  let before = wireRow [ VInt(int64 i); VInt 0L ]
-                  let after = wireRow [ VInt(int64 i); VInt 1L ]
-                  sprintf """{"case":"RowsUpdated","db":"%s","table":"hot","changes":[[[%s],[%s]]]}""" defaultDatabase before after
-
-              File.WriteAllLines(Path.Combine(dir, "wal.jsonl"), [ for i in 1 .. rowCount -> walLine i ])
+              File.WriteAllBytes(Path.Combine(dir, "wal.bin"), records)
 
               let countBefore = reindexCallCount ()
               let reloaded = load dir

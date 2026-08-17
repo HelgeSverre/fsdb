@@ -4,6 +4,7 @@ module Fsdb.Protocol
 
 open System
 open System.Text
+open Fsdb.Binary
 open Fsdb.Packet
 open Fsdb.Value
 

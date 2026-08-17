@@ -8,6 +8,7 @@
 
   <ItemGroup>
     <Compile Include="Log.fs" />
+    <Compile Include="Binary.fs" />
     <Compile Include="Collation.fs" />
     <Compile Include="Value.fs" />
     <Compile Include="Ast.fs" />

@@ -3,6 +3,7 @@ module Fsdb.Tests.ProtocolTests
 open System
 open Expecto
 open Fsdb.Ast
+open Fsdb.Binary
 open Fsdb.Packet
 open Fsdb.Protocol
 open Fsdb.Value

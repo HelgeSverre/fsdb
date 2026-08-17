@@ -7,14 +7,15 @@
 /// carry physically-evaluated `Value[]`s — see `Storage.CommitEvent` — so
 /// replaying them is "write exactly these values back", never "re-run an
 /// expression" (the whole point: `INSERT ... VALUES (NOW(), UUID())`
-/// replays to the *same* row, not a freshly-evaluated one). DDL
-/// (`SchemaChanged`) carries the parsed `Ast.Statement`; this module hand-
-/// rolls its own compact JSON encoding for the handful of DDL shapes it can
-/// contain (there's no `System.Text.Json` F#-union support without a NuGet
-/// package this project doesn't take a dependency on — see `Fsdb.fsproj`)
-/// and replays it by calling `Storage`'s own DDL functions directly
-/// (`Executor.execute` isn't reachable — `Executor.fs` compiles *after*
-/// this file).
+/// replays to the *same* row, not a freshly-evaluated one).
+///
+/// The WAL is a binary log: each record is `[len][crc32][payload]`, the
+/// payload is one `CommitEvent` encoded with `Binary.Writer`, and row events
+/// encode their `Value[]`s through `Value.encodeValue`. Two exceptions stay
+/// JSON: `SchemaChanged`'s DDL payload (`encodeStatement` — rare, migrations
+/// only, human-inspectable) and the full-catalog snapshot (cold load path).
+/// Replay calls `Storage`'s own DDL functions directly (`Executor.execute`
+/// isn't reachable — `Executor.fs` compiles *after* this file).
 module Fsdb.Persistence
 
 open System
@@ -22,10 +23,11 @@ open System.IO
 open System.Runtime.InteropServices
 open System.Text.Json.Nodes
 open Fsdb.Ast
+open Fsdb.Binary
 open Fsdb.Value
 open Fsdb.Storage
 
-let private walFileName = "wal.jsonl"
+let private walFileName = "wal.bin"
 let private snapshotFileName = "snapshot.fsdb"
 
 /// `PosixSignalRegistration.Create` returns a disposable that unregisters
@@ -516,40 +518,106 @@ let private decodeStatement (node: JsonNode) : Statement =
     | tag -> failwithf "Persistence: unknown Statement case '%s' in WAL/snapshot" tag
 
 // ---------------------------------------------------------------------
-// `Storage.CommitEvent` — one WAL line each.
+// `Storage.CommitEvent` — one WAL record each. The payload is binary: row
+// events (the hot path) encode fully binary via `Value.encodeValue`;
+// `SchemaChanged` embeds the JSON `encodeStatement` above because DDL is
+// rare (migrations) and its JSON stays human-inspectable. The
+// [len][crc][payload] framing around the payload lives in `attach` and
+// `replayWal`.
 // ---------------------------------------------------------------------
 
-let rec private encodeEvent (event: CommitEvent) : JsonNode =
+let private KindRowsInserted = 0x01uy
+let private KindRowsUpdated = 0x02uy
+let private KindRowsDeleted = 0x03uy
+let private KindSchemaChanged = 0x04uy
+let private KindTransactionCommitted = 0x05uy
+
+let private encodeRowBin (w: Writer) (row: Value[]) : unit =
+    w.WriteInt32LE row.Length
+
+    for v in row do
+        encodeValue w v
+
+let private decodeRowBin (r: Reader) : Value[] =
+    Array.init (r.ReadInt32LE()) (fun _ -> decodeValue r)
+
+let rec private encodeEvent (w: Writer) (event: CommitEvent) : unit =
     match event with
-    | RowsInserted(db, table, rows) -> caseObj "RowsInserted" [ "db", str db; "table", str table; "rows", encodeRows rows ]
+    | RowsInserted(db, table, rows) ->
+        w.WriteByte KindRowsInserted
+        w.WriteLenEncString db
+        w.WriteLenEncString table
+        w.WriteInt32LE (List.length rows)
+
+        for row in rows do
+            encodeRowBin w row
     | RowsUpdated(db, table, changes) ->
-        caseObj
-            "RowsUpdated"
-            [ "db", str db
-              "table", str table
-              "changes", arr (changes |> List.map (fun (before, after) -> arr [ encodeRow before; encodeRow after ])) ]
-    | RowsDeleted(db, table, rows) -> caseObj "RowsDeleted" [ "db", str db; "table", str table; "rows", encodeRows rows ]
-    | SchemaChanged(db, stmt) -> caseObj "SchemaChanged" [ "db", str db; "stmt", encodeStatement stmt ]
-    | TransactionCommitted events -> caseObj "TransactionCommitted" [ "events", arr (events |> List.map encodeEvent) ]
+        w.WriteByte KindRowsUpdated
+        w.WriteLenEncString db
+        w.WriteLenEncString table
+        w.WriteInt32LE (List.length changes)
 
-let rec private decodeEvent (node: JsonNode) : CommitEvent =
-    let case, o = caseName node
+        for before, after in changes do
+            encodeRowBin w before
+            encodeRowBin w after
+    | RowsDeleted(db, table, rows) ->
+        w.WriteByte KindRowsDeleted
+        w.WriteLenEncString db
+        w.WriteLenEncString table
+        w.WriteInt32LE (List.length rows)
 
-    match case with
-    | "RowsInserted" -> RowsInserted(o.["db"].GetValue<string>(), o.["table"].GetValue<string>(), decodeRows o.["rows"])
-    | "RowsUpdated" ->
-        let changes =
-            o.["changes"].AsArray()
-            |> Seq.map (fun pair ->
-                let p = pair.AsArray()
-                decodeRow p.[0], decodeRow p.[1])
-            |> List.ofSeq
+        for row in rows do
+            encodeRowBin w row
+    | SchemaChanged(db, stmt) ->
+        w.WriteByte KindSchemaChanged
+        w.WriteLenEncString db
+        w.WriteLenEncString ((encodeStatement stmt).ToJsonString())
+    | TransactionCommitted events ->
+        w.WriteByte KindTransactionCommitted
+        w.WriteInt32LE (List.length events)
 
-        RowsUpdated(o.["db"].GetValue<string>(), o.["table"].GetValue<string>(), changes)
-    | "RowsDeleted" -> RowsDeleted(o.["db"].GetValue<string>(), o.["table"].GetValue<string>(), decodeRows o.["rows"])
-    | "SchemaChanged" -> SchemaChanged(o.["db"].GetValue<string>(), decodeStatement o.["stmt"])
-    | "TransactionCommitted" -> TransactionCommitted(o.["events"].AsArray() |> Seq.map decodeEvent |> List.ofSeq)
-    | tag -> failwithf "Persistence: unknown CommitEvent case '%s' in WAL" tag
+        for e in events do
+            encodeEvent w e
+
+let rec private decodeEvent (r: Reader) : CommitEvent =
+    let str () = r.ReadLenEncString() |> Option.defaultValue ""
+
+    match r.ReadByte() with
+    | k when k = KindRowsInserted ->
+        let db = str ()
+        let table = str ()
+        let rows = List.init (r.ReadInt32LE()) (fun _ -> decodeRowBin r)
+        RowsInserted(db, table, rows)
+    | k when k = KindRowsUpdated ->
+        let db = str ()
+        let table = str ()
+        let changes = List.init (r.ReadInt32LE()) (fun _ -> decodeRowBin r, decodeRowBin r)
+        RowsUpdated(db, table, changes)
+    | k when k = KindRowsDeleted ->
+        let db = str ()
+        let table = str ()
+        let rows = List.init (r.ReadInt32LE()) (fun _ -> decodeRowBin r)
+        RowsDeleted(db, table, rows)
+    | k when k = KindSchemaChanged ->
+        let db = str ()
+        SchemaChanged(db, decodeStatement (JsonNode.Parse(str ())))
+    | k when k = KindTransactionCommitted ->
+        TransactionCommitted(List.init (r.ReadInt32LE()) (fun _ -> decodeEvent r))
+    | tag -> failwithf "Persistence: unknown WAL event kind 0x%02x" tag
+
+/// One framed WAL record: `[int32 payload length][uint32 crc32][payload]`.
+/// Public so the tests can hand-build WAL files (and torn tails) without
+/// reimplementing the framing.
+let encodeWalRecord (event: CommitEvent) : byte[] =
+    let payloadWriter = Writer()
+    encodeEvent payloadWriter event
+    let payload = payloadWriter.ToArray()
+
+    let frame = Writer()
+    frame.WriteInt32LE payload.Length
+    frame.WriteUInt32LE(crc32 payload)
+    frame.WriteBytes payload
+    frame.ToArray()
 
 // ---------------------------------------------------------------------
 // Replay: applies a decoded `CommitEvent` to a live `Store` via `Storage`'s
@@ -640,34 +708,42 @@ let rec private applyEvent (store: Store) (event: CommitEvent) : unit =
     | SchemaChanged(db, stmt) -> applyDdl store db stmt
     | TransactionCommitted events -> events |> List.iter (applyEvent store)
 
-/// Replays every complete line in `walPath` into `store`, returning the
-/// byte offset just past the last successfully applied line. A torn final
-/// line (a `kill -9` mid-write) is expected, not corruption to panic over —
+/// Replays every complete record in `walPath` into `store`, returning the
+/// byte offset just past the last successfully applied record. A torn final
+/// record (a `kill -9` mid-write) is expected, not corruption to panic over —
 /// everything before it already committed durably — so replay stops there
-/// rather than guessing at what the rest of the line might have meant;
+/// rather than guessing at what the rest of the record might have meant;
 /// `load` truncates the WAL back to the returned offset so the *next*
 /// append glues onto a clean record boundary instead of the torn bytes
 /// (otherwise every write from then on decodes into one ever-growing
-/// corrupt line and is lost again at the next restart).
+/// corrupt record and is lost again at the next restart). A record whose
+/// length overruns the file or whose CRC doesn't match is the torn tail:
+/// either way replay stops before it.
 let private replayWal (store: Store) (walPath: string) : int64 =
     if not (File.Exists walPath) then
         0L
     else
+        let r = Reader(File.ReadAllBytes walPath)
         let mutable offset = 0L
         let mutable stopped = false
 
-        for line in File.ReadAllLines walPath do
-            if not stopped then
-                let lineBytes = int64 (Text.Encoding.UTF8.GetByteCount line) + 1L
+        while r.Remaining >= 8 && not stopped do
+            let recLen = r.ReadInt32LE()
+            let crc = r.ReadUInt32LE()
 
-                if String.IsNullOrWhiteSpace line then
-                    offset <- offset + lineBytes
+            if recLen < 0 || recLen > r.Remaining then
+                stopped <- true
+            else
+                let payload = r.ReadBytes recLen
+
+                if crc32 payload <> crc then
+                    stopped <- true
                 else
                     try
-                        applyEvent store (decodeEvent (JsonNode.Parse line))
-                        offset <- offset + lineBytes
+                        applyEvent store (decodeEvent (Reader(payload)))
+                        offset <- offset + int64 (8 + recLen)
                     with ex ->
-                        Log.diagnostic "fsdb: WAL replay stopped at a truncated/corrupt line (%s): %s" walPath ex.Message
+                        Log.diagnostic "fsdb: WAL replay stopped at an unreadable record (%s): %s" walPath ex.Message
                         stopped <- true
 
         offset
@@ -806,9 +882,9 @@ let load (dataDir: string) : Store =
     store
 
 /// Subscribes `store` to `Storage.Store.OnCommit`, appending every commit as
-/// one JSON line to `dataDir/wal.jsonl`, `Flush`ed (with an fsync) before
-/// the write that triggered it returns — durability means fsync-before-ack.
-/// Opens, writes and closes the file fresh per line rather than holding one
+/// one framed binary record to `dataDir/wal.bin`, fsynced before the write
+/// that triggered it returns — durability means fsync-before-ack. Opens,
+/// writes and closes the file fresh per record rather than holding one
 /// long-lived handle: `snapshotNow` (called both below, on rotation, and by
 /// any other caller) truncates this same file by path, and a cached
 /// `FileStream`'s internal position doesn't know that happened — its next
@@ -827,11 +903,11 @@ let attach (dataDir: string) (store: Store) : unit =
     let walPath = Path.Combine(dataDir, walFileName)
     let entryCount = ref 0
 
-    let appendLine (line: string) =
+    let appendRecord (event: CommitEvent) =
         let walSize =
             try
                 use s = new FileStream(walPath, FileMode.Append, FileAccess.Write, FileShare.Read)
-                let bytes = Text.Encoding.UTF8.GetBytes(line + "\n")
+                let bytes = encodeWalRecord event
                 s.Write(bytes, 0, bytes.Length)
                 flushToDisk s
                 s.Length
@@ -854,7 +930,7 @@ let attach (dataDir: string) (store: Store) : unit =
             snapshotNow dataDir store
             entryCount := 0
 
-    store.OnCommit <- Some(fun event -> appendLine ((encodeEvent event).ToJsonString()))
+    store.OnCommit <- Some appendRecord
 
     let onShutdown (_: PosixSignalContext) = snapshotNow dataDir store
 

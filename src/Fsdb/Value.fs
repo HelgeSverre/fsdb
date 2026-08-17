@@ -6,6 +6,7 @@ module Fsdb.Value
 open System
 open System.Globalization
 open System.Text.RegularExpressions
+open Fsdb.Binary
 
 type Value =
     | VNull
@@ -107,6 +108,71 @@ let ofWire (s: string) : Value =
         | 'V' -> VDateTime(DateTime.Parse(payload, CultureInfo.InvariantCulture, DateTimeStyles.RoundtripKind))
         | 'J' -> VJson(unb64 payload)
         | tag -> failwithf "Value.ofWire: unknown tag '%c' in %s" tag s
+
+/// Binary WAL encoding of a `Value`, mirroring `toWire`'s tag scheme but
+/// length-prefixed rather than base64-encoded — `decodeValue (encodeValue v) = v`
+/// for every case. The row-level WAL uses this; `toWire` stays for the JSON
+/// snapshot's human-inspectable rendering.
+let encodeValue (w: Writer) (v: Value) : unit =
+    match v with
+    | VNull -> w.WriteByte 0x00uy
+    | VInt i ->
+        w.WriteByte 0x01uy
+        w.WriteInt64LE i
+    | VDouble d ->
+        w.WriteByte 0x02uy
+        w.WriteDoubleLE d
+    | VDecimal d ->
+        w.WriteByte 0x03uy
+        let bits = Decimal.GetBits d
+        for i in 0..3 do
+            w.WriteInt32LE bits.[i]
+    | VString s ->
+        w.WriteByte 0x04uy
+        w.WriteLenEncString s
+    | VBytes b ->
+        w.WriteByte 0x05uy
+        w.WriteLenEncBytes b
+    | VDate d ->
+        w.WriteByte 0x06uy
+        w.WriteInt32LE d.DayNumber
+    | VDateTime dt ->
+        w.WriteByte 0x07uy
+        w.WriteInt64LE dt.Ticks
+        w.WriteByte(byte (int dt.Kind))
+    | VJson j ->
+        w.WriteByte 0x08uy
+        w.WriteLenEncString j
+
+/// Inverse of `encodeValue`. Throws on malformed input, same contract as
+/// `ofWire`.
+let decodeValue (r: Reader) : Value =
+    match r.ReadByte() with
+    | 0x00uy -> VNull
+    | 0x01uy -> VInt(r.ReadInt64LE())
+    | 0x02uy -> VDouble(BitConverter.Int64BitsToDouble(r.ReadInt64LE()))
+    | 0x03uy ->
+        let bits = [| for _ in 0..3 -> r.ReadInt32LE() |]
+        VDecimal(new decimal (bits))
+    | 0x04uy -> VString(r.ReadLenEncString() |> Option.defaultValue "")
+    | 0x05uy ->
+        r.ReadLenEncInt()
+        |> Option.map (fun n -> r.ReadBytes(int n))
+        |> Option.defaultValue [||]
+        |> VBytes
+    | 0x06uy -> VDate(DateOnly.FromDayNumber(r.ReadInt32LE()))
+    | 0x07uy ->
+        let ticks = r.ReadInt64LE()
+
+        let kind =
+            match r.ReadByte() with
+            | 0uy -> DateTimeKind.Unspecified
+            | 1uy -> DateTimeKind.Utc
+            | _ -> DateTimeKind.Local
+
+        VDateTime(new DateTime(ticks, kind))
+    | 0x08uy -> VJson(r.ReadLenEncString() |> Option.defaultValue "")
+    | tag -> failwithf "Value.decodeValue: unknown tag 0x%02x" tag
 
 /// The MySQL wire type this value's runtime shape reports as, so a
 /// resultset's column definition can match the value instead of a blanket

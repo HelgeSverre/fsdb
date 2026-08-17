@@ -2,6 +2,7 @@ module Fsdb.Tests.IntegrationTests
 
 open System
 open Expecto
+open Fsdb.Binary
 open Fsdb.Packet
 open Fsdb.Protocol
 open Fsdb.Value

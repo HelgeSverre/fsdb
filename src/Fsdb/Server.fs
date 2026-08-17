@@ -7,6 +7,7 @@ open System.Net
 open System.Net.Sockets
 open System.Text
 open System.Threading
+open Fsdb.Binary
 open Fsdb.Functions
 open Fsdb.Packet
 open Fsdb.Protocol

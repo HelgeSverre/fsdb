@@ -2,6 +2,7 @@ module Fsdb.Tests.PacketTests
 
 open System
 open Expecto
+open Fsdb.Binary
 open Fsdb.Packet
 
 let tests =
