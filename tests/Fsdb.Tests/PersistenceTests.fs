@@ -302,6 +302,81 @@ let tests =
               | Error(DuplicateKey("PRIMARY", _)) -> ()
               | other -> failtestf "expected id 10 to be rejected as a duplicate after replay, got %A" other
 
+          testCase "WAL replay of many single-row UPDATEs against a UNIQUE-indexed table doesn't rebuild the index once per event"
+          <| fun _ ->
+              // `mapTableRows` (RowsUpdated/RowsDeleted) used to call
+              // `reindexTable` — a full rescan of every unique group over
+              // every row — once per *replayed event*, not once per table.
+              // A table with k single-row UPDATEs in its WAL made replay
+              // O(k * n * groups); the fixed version is O(k + n * groups).
+              //
+              // The WAL is built by hand (rather than k real attached
+              // updateRows calls, each fsync'd) so this test measures only
+              // replay cost, not k fsyncs' worth of setup noise.
+              let dir = tempDataDir ()
+              // Kept well under `applyRowChanges`'s own (pre-existing,
+              // unrelated to this fix) non-tail-recursive stack depth limit.
+              let rowCount = 2500
+
+              let setupStore = create ()
+
+              createTable
+                  setupStore
+                  defaultDatabase
+                  "hot"
+                  [ { Name = "id"
+                      Type = TInt false
+                      Nullable = false
+                      Default = None
+                      AutoIncrement = false
+                      PrimaryKey = true
+                      Unique = false
+                      Generated = None }
+                    { Name = "n"
+                      Type = TInt false
+                      Nullable = false
+                      Default = None
+                      AutoIncrement = false
+                      PrimaryKey = false
+                      Unique = false
+                      Generated = None } ]
+                  []
+                  []
+              |> ignore
+
+              insertRows setupStore defaultDatabase "hot" None [ for i in 1 .. rowCount -> [ VInt(int64 i); VInt 0L ] ]
+              |> ignore
+
+              snapshotNow dir setupStore
+
+              let wireRow (values: Value list) = values |> List.map toWire |> List.map (sprintf "\"%s\"") |> String.concat ","
+
+              let walLine i =
+                  let before = wireRow [ VInt(int64 i); VInt 0L ]
+                  let after = wireRow [ VInt(int64 i); VInt 1L ]
+                  sprintf """{"case":"RowsUpdated","db":"%s","table":"hot","changes":[[[%s],[%s]]]}""" defaultDatabase before after
+
+              File.WriteAllLines(Path.Combine(dir, "wal.jsonl"), [ for i in 1 .. rowCount -> walLine i ])
+
+              let sw = Diagnostics.Stopwatch.StartNew()
+              let reloaded = load dir
+              sw.Stop()
+
+              let values = rowsOf reloaded defaultDatabase "hot" |> List.map (fun r -> r.[1])
+              Expect.isTrue (values |> List.forall (fun v -> v = VInt 1L)) "every row's replayed update landed"
+
+              // Generous margin (fixed: ~0.6s solo, ~1.3s under the full
+              // suite's parallel load; broken: 3.4s+ solo) — this only
+              // needs to catch "O(k*n) again", not pin an exact number.
+              Expect.isLessThan
+                  sw.Elapsed.TotalSeconds
+                  2.5
+                  (sprintf
+                      "replaying %d single-row UPDATEs against a %d-row UNIQUE-indexed table took %A — looks like a per-event reindex again"
+                      rowCount
+                      rowCount
+                      sw.Elapsed)
+
           testCase "WAL replay of a duplicate-row DELETE LIMIT 1 removes exactly one physical row, not every value-equal twin"
           <| fun _ ->
               let dir = tempDataDir ()

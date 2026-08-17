@@ -582,6 +582,13 @@ let rec private applyRowDeletes (targets: Value[] list) (rows: Value[] list) : V
 /// value-equality predicate scanning the *whole* table can't express "this
 /// one physical row"), and would also re-run FK/unique validation that a
 /// `SET FOREIGN_KEY_CHECKS = 0` write may have deliberately skipped.
+///
+/// Deliberately leaves `UniqueIndex` stale rather than calling
+/// `reindexTable` here — nothing reads it mid-replay (FK checks are off,
+/// see `load`), so paying its full-table-rescan cost once per *event*
+/// would be pure waste for a table with many updates/deletes in the WAL.
+/// `replayWal`'s caller reindexes every table exactly once, after the last
+/// event has been applied.
 let private mapTableRows (store: Store) (dbName: string) (tableName: string) (f: Value[] list -> Value[] list) : unit =
     let key = normalizeTableName tableName
 
@@ -590,7 +597,7 @@ let private mapTableRows (store: Store) (dbName: string) (tableName: string) (f:
     | Some db ->
         match db |> Map.tryFind key with
         | None -> eprintfn "fsdb: WAL replay warning: unknown table '%s.%s'" dbName tableName
-        | Some table -> store.Catalog <- store.Catalog |> Map.add dbName (db |> Map.add key (reindexTable { table with Rows = f table.Rows }))
+        | Some table -> store.Catalog <- store.Catalog |> Map.add dbName (db |> Map.add key { table with Rows = f table.Rows })
 
 let rec private applyEvent (store: Store) (event: CommitEvent) : unit =
     match event with
@@ -751,6 +758,11 @@ let load (dataDir: string) : Store =
         store.ForeignKeyChecks <- false
         let goodOffset = replayWal store walPath
         store.ForeignKeyChecks <- true
+
+        // `mapTableRows` (RowsUpdated/RowsDeleted) left `UniqueIndex` stale
+        // per-table, not per-event — one rescan per table here instead of
+        // one per replayed row-change event.
+        store.Catalog <- store.Catalog |> Map.map (fun _ db -> db |> Map.map (fun _ table -> reindexTable table))
 
         // A torn final line (`kill -9` mid-append) must not poison the WAL
         // forever — see `replayWal`'s doc comment.
