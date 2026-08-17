@@ -369,6 +369,7 @@ let tests =
           testCase "USE sets the session database, reflected by SELECT DATABASE()"
           <| fun _ ->
               let session = create 1 (Fsdb.Storage.create ())
+              let session, _ = handle session "CREATE DATABASE mydb"
               let session, _ = handle session "USE mydb"
 
               match handle session "SELECT DATABASE()" |> snd with
@@ -378,11 +379,58 @@ let tests =
           testCase "SCHEMA() is a synonym for DATABASE(), matching MySQL"
           <| fun _ ->
               let session = create 1 (Fsdb.Storage.create ())
+              let session, _ = handle session "CREATE DATABASE mydb"
               let session, _ = handle session "USE mydb"
 
               match handle session "SELECT SCHEMA()" |> snd with
               | ResultSet(_, [ [ Some "mydb" ] ]) -> ()
               | other -> failtestf "expected mydb, got %A" other
+
+          testCase "USE against a database that doesn't exist is a 1049, not a silent success"
+          <| fun _ ->
+              let session = create 1 (Fsdb.Storage.create ())
+
+              match handle session "USE nope_does_not_exist" |> snd with
+              | Err(1049, msg) -> Expect.stringContains msg "nope_does_not_exist" "message names the missing database"
+              | other -> failtestf "expected a 1049 Unknown database error, got %A" other
+
+              // The session's database is unchanged by the failed USE.
+              match handle session "SELECT DATABASE()" |> snd with
+              | ResultSet(_, [ [ None ] ]) -> ()
+              | other -> failtestf "expected DATABASE() to still be NULL, got %A" other
+
+          testCase "USE information_schema succeeds even though it isn't a real catalog entry"
+          <| fun _ ->
+              let session = create 1 (Fsdb.Storage.create ())
+
+              match handle session "USE information_schema" |> snd with
+              | Affected 0UL -> ()
+              | other -> failtestf "expected USE information_schema to succeed, got %A" other
+
+          testCase "CREATE DATABASE with a charset/collate tail actually creates the database"
+          <| fun _ ->
+              let session = create 1 (Fsdb.Storage.create ())
+
+              match handle session "CREATE DATABASE crescat_testing CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci" |> snd with
+              | Affected 0UL -> ()
+              | other -> failtestf "expected the CREATE DATABASE to succeed, got %A" other
+
+              match handle session "USE crescat_testing" |> snd with
+              | Affected 0UL -> ()
+              | other -> failtestf "expected the newly-created database to be usable, got %A" other
+
+          testCase "ALTER DATABASE succeeds on an existing database and 1049s on a missing one"
+          <| fun _ ->
+              let session = create 1 (Fsdb.Storage.create ())
+              let session, _ = handle session "CREATE DATABASE shop"
+
+              match handle session "ALTER DATABASE shop CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci" |> snd with
+              | Affected 0UL -> ()
+              | other -> failtestf "expected ALTER DATABASE to succeed, got %A" other
+
+              match handle session "ALTER DATABASE nope_does_not_exist CHARACTER SET utf8mb4" |> snd with
+              | Err(1049, _) -> ()
+              | other -> failtestf "expected a 1049 error, got %A" other
 
           testCase "SHOW DATABASES returns a resultset"
           <| fun _ ->
@@ -403,6 +451,7 @@ let tests =
           testCase "SHOW TABLES / SHOW FULL TABLES list the current database's tables"
           <| fun _ ->
               let session = create 1 (Fsdb.Storage.create ())
+              let session, _ = handle session "CREATE DATABASE shop"
               let session, _ = handle session "USE shop"
               let session, _ = handle session "CREATE TABLE widgets (id INT PRIMARY KEY)"
 
@@ -417,6 +466,7 @@ let tests =
           testCase "SHOW COLUMNS FROM t / DESCRIBE t report field metadata"
           <| fun _ ->
               let session = create 1 (Fsdb.Storage.create ())
+              let session, _ = handle session "CREATE DATABASE shop"
               let session, _ = handle session "USE shop"
 
               let session, _ =
@@ -438,6 +488,7 @@ let tests =
           testCase "SHOW CREATE TABLE reconstructs plausible DDL"
           <| fun _ ->
               let session = create 1 (Fsdb.Storage.create ())
+              let session, _ = handle session "CREATE DATABASE shop"
               let session, _ = handle session "USE shop"
 
               let session, _ =
@@ -453,6 +504,7 @@ let tests =
           testCase "SHOW CREATE TABLE with a backtick-quoted, db-qualified name matches the unqualified result"
           <| fun _ ->
               let session = create 1 (Fsdb.Storage.create ())
+              let session, _ = handle session "CREATE DATABASE shop"
               let session, _ = handle session "USE shop"
               let session, _ = handle session "CREATE TABLE users (id INT PRIMARY KEY)"
 
@@ -471,6 +523,7 @@ let tests =
           testCase "SHOW INDEX FROM t lists the primary key and other indexes"
           <| fun _ ->
               let session = create 1 (Fsdb.Storage.create ())
+              let session, _ = handle session "CREATE DATABASE shop"
               let session, _ = handle session "USE shop"
               let session, _ = handle session "CREATE TABLE widgets (id INT PRIMARY KEY, sku VARCHAR(20) UNIQUE)"
 

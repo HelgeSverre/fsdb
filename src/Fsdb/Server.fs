@@ -243,14 +243,23 @@ let private handleConnection
 
                                 return! loop session
                             | Some(InitDb db) ->
-                                do!
-                                    writePacketAsync
-                                        stream
-                                        { SeqId = seqId
-                                          Payload = okPayload capabilities (statusFlagsFor session) 0UL 0UL }
-                                    |> Async.Ignore
+                                if Storage.databaseExists (Session.currentStore session) db then
+                                    do!
+                                        writePacketAsync
+                                            stream
+                                            { SeqId = seqId
+                                              Payload = okPayload capabilities (statusFlagsFor session) 0UL 0UL }
+                                        |> Async.Ignore
 
-                                return! loop { session with Database = Some db }
+                                    return! loop { session with Database = Some db }
+                                else
+                                    let code, message = Storage.toMySqlError (Storage.NoSuchDatabase db)
+
+                                    do!
+                                        writePacketAsync stream { SeqId = seqId; Payload = errPayload capabilities code message }
+                                        |> Async.Ignore
+
+                                    return! loop session
                             | Some(Query sql) ->
                                 let session, result = QueryHandler.handle session sql
                                 activeSession <- Some session

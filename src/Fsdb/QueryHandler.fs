@@ -923,7 +923,12 @@ let private runProbe (session: Session) (sql: string) (probe: Probe) : Session *
     | Rollback -> rollbackSession session, Affected 0UL
     | Savepoint name -> savepoint name session
     | Release name -> releaseSavepoint name session
-    | Use dbName -> { session with Database = Some dbName }, Affected 0UL
+    | Use dbName ->
+        if Storage.databaseExists (Session.currentStore session) dbName then
+            { session with Database = Some dbName }, Affected 0UL
+        else
+            let code, msg = Storage.toMySqlError (Storage.NoSuchDatabase dbName)
+            session, Err(code, msg)
     | ShowVariables -> session, handleShowVariables session sql
     | ShowWarnings -> session, ResultSet([ "Level"; "Code"; "Message" ], [])
     | ShowDatabases -> session, handleShowDatabases session sql

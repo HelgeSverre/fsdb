@@ -312,6 +312,11 @@ type AlterAction =
 type Statement =
     | CreateDatabase of name: string * ifNotExists: bool
     | DropDatabase of name: string * ifExists: bool
+    /// `ALTER DATABASE name [CHARACTER SET x] [COLLATE y]` — parsed and
+    /// discarded, same treatment as `CREATE DATABASE`'s own charset/collate
+    /// tail (see `Parser.databaseOptions`'s doc); only errors if `name`
+    /// itself doesn't exist.
+    | AlterDatabase of name: string
     | CreateTable of
         name: string *
         columns: ColumnDef list *

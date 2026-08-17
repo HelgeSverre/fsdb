@@ -937,10 +937,31 @@ let private dropTable: Parser<Statement, unit> =
 let private truncateTable: Parser<Statement, unit> =
     keyword "TRUNCATE" >>. opt (keyword "TABLE") >>. qualifiedTableName |>> Truncate
 
+/// `[DEFAULT] CHARACTER SET [=] x` / `[DEFAULT] COLLATE [=] y`, in either
+/// order, either/both/neither present — `CREATE`/`ALTER DATABASE`'s own
+/// tail, accepted and discarded like `tableOption`'s charset/collate
+/// alternatives, but with `COLLATE` also taking the `DEFAULT` prefix Laravel
+/// emits (`MySqlGrammar::compileCreateDatabase`, what
+/// `Illuminate\Testing\Concerns\TestDatabases` calls to build each parallel
+/// worker's own database) which `tableOption` doesn't need to.
+let private databaseOption: Parser<unit, unit> =
+    choice
+        [ attempt (
+              optional (keyword "DEFAULT")
+              >>. (keyword "CHARSET" <|> (keyword "CHARACTER" >>. keyword "SET"))
+          )
+          >>. opt (sym "=")
+          >>. identOrString
+          >>% ()
+          optional (keyword "DEFAULT") >>. keyword "COLLATE" >>. opt (sym "=") >>. identOrString >>% () ]
+
+let private databaseOptions: Parser<unit, unit> = skipMany databaseOption
+
 let private createDatabaseStmt: Parser<Statement, unit> =
     (keyword "CREATE" >>. (keyword "DATABASE" <|> keyword "SCHEMA")
      >>. (opt (attempt (keyword "IF" >>. keyword "NOT" >>. keyword "EXISTS")) |>> Option.isSome)
-     .>>. identifier)
+     .>>. identifier
+     .>> databaseOptions)
     |>> fun (ifNotExists, name) -> CreateDatabase(name, ifNotExists)
 
 let private dropDatabaseStmt: Parser<Statement, unit> =
@@ -948,6 +969,10 @@ let private dropDatabaseStmt: Parser<Statement, unit> =
      >>. (opt (attempt (keyword "IF" >>. keyword "EXISTS")) |>> Option.isSome)
      .>>. identifier)
     |>> fun (ifExists, name) -> DropDatabase(name, ifExists)
+
+let private alterDatabaseStmt: Parser<Statement, unit> =
+    (keyword "ALTER" >>. (keyword "DATABASE" <|> keyword "SCHEMA") >>. identifier .>> databaseOptions)
+    |>> AlterDatabase
 
 // ---------------------------------------------------------------------------
 // ALTER TABLE / RENAME TABLE
@@ -1378,7 +1403,8 @@ statementRef.Value <-
           selectOrUnionStmt
           updateStmt
           deleteStmt
-          alterTableStmt
+          attempt alterTableStmt
+          alterDatabaseStmt
           renameTableStmt
           explainStmt ]
     <?> "statement"

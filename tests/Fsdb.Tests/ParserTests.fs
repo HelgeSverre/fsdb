@@ -878,7 +878,31 @@ let tests =
                     Expect.equal
                         (parseOk "DROP DATABASE IF EXISTS foo")
                         (DropDatabase("foo", true))
-                        "drop database if exists" ]
+                        "drop database if exists"
+
+                testCase "CREATE DATABASE with a trailing CHARACTER SET/COLLATE tail is accepted and discarded"
+                <| fun _ ->
+                    Expect.equal
+                        (parseOk "CREATE DATABASE IF NOT EXISTS crescat_testing CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci")
+                        (CreateDatabase("crescat_testing", true))
+                        "charset/collate tail parses and is ignored"
+
+                testCase "CREATE DATABASE with Laravel's exact DEFAULT CHARACTER SET/DEFAULT COLLATE, backticked, form"
+                <| fun _ ->
+                    // Verbatim what MySqlGrammar::compileCreateDatabase emits
+                    // — what Illuminate\Testing\Concerns\TestDatabases calls
+                    // to build each parallel worker's own database.
+                    Expect.equal
+                        (parseOk "create database `x` default character set `utf8mb4` default collate `utf8mb4_unicode_ci`")
+                        (CreateDatabase("x", false))
+                        "backticked default charset/collate tail parses and is ignored"
+
+                testCase "ALTER DATABASE with a CHARACTER SET/COLLATE tail parses"
+                <| fun _ ->
+                    Expect.equal
+                        (parseOk "ALTER DATABASE x CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci")
+                        (AlterDatabase "x")
+                        "alter database" ]
 
           testList
               "INSERT"

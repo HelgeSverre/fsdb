@@ -293,9 +293,9 @@ let setStrictMode (store: Store) (strict: bool) : unit =
 let normalizeTableName (name: string) = name.ToLowerInvariant()
 
 /// `CREATE DATABASE name` — unlike `ensureDatabase` (silent no-op used by
-/// `USE`/handshake auto-create), this errors 1007 if it already exists;
-/// `Executor` swallows that error for `IF NOT EXISTS`, same pattern as
-/// `createTable`.
+/// handshake auto-create/first-write auto-vivify), this errors 1007 if it
+/// already exists; `Executor` swallows that error for `IF NOT EXISTS`, same
+/// pattern as `createTable`.
 let createDatabase (store: Store) (dbName: string) : Result<unit, StorageError> =
     lock store.Lock (fun () ->
         if Map.containsKey dbName store.Catalog then
@@ -334,12 +334,26 @@ let private tryGetTable (db: Database) (tableName: string) : Result<Table, Stora
     | Some t -> Ok t
     | None -> Error(NoSuchTable tableName)
 
-/// Auto-creates a database on first use (e.g. `USE`, `CREATE TABLE`); a
-/// no-op if it already exists.
+/// Auto-creates a database the first time a real table is written into it
+/// (`withDatabase`), and for the database a client names at connect time
+/// (`mysql -D foo`/PDO's `dbname=foo` DSN, a zero-setup convenience for a
+/// fresh in-memory server); a no-op if it already exists. Deliberately
+/// *not* used by mid-session `USE`/`COM_INIT_DB` — those check
+/// `databaseExists` and report a real 1049 instead, matching MySQL (see
+/// `QueryHandler`'s `Use` probe).
 let ensureDatabase (store: Store) (dbName: string) : unit =
     lock store.Lock (fun () ->
         if not (Map.containsKey dbName store.Catalog) then
             store.Catalog <- Map.add dbName Map.empty store.Catalog)
+
+/// Whether `dbName` is a real catalog entry, or the always-present virtual
+/// `information_schema` — what `USE`/`COM_INIT_DB` check to match real
+/// MySQL's `ERROR 1049 Unknown database` instead of silently accepting (and
+/// then auto-vivifying on first write, via `ensureDatabase`) a typo'd or
+/// missing name.
+let databaseExists (store: Store) (dbName: string) : bool =
+    String.Equals(dbName, "information_schema", StringComparison.OrdinalIgnoreCase)
+    || Map.containsKey dbName store.Catalog
 
 /// Index of a column by name, case-insensitive.
 let resolveColumn (columns: ColumnDef list) (name: string) : Result<int, StorageError> =
