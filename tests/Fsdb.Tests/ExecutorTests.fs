@@ -2777,4 +2777,142 @@ let tests =
 
                     match scalarIndexed with
                     | ResultSet([ "id"; "c" ], rows) -> Expect.equal rows [ [ Some "1"; Some "0" ]; [ Some "5"; Some "1" ] ] "user 5 has exactly one matching post, user 1 has none"
-                    | other -> failtestf "expected a resultset, got %A" other ] ]
+                    | other -> failtestf "expected a resultset, got %A" other ]
+
+          testList
+              "M10 streaming pipeline"
+              [ let resultRows (result: QueryResult) : string option list list =
+                    match result with
+                    | ResultSet(_, rows) -> rows
+                    | other -> failtestf "expected a resultset, got %A" other
+
+                testCase
+                    "streaming LIMIT/OFFSET (no ORDER BY), plain or DISTINCT, plain scan or JOIN, matches a full-materialize-then-slice reference over randomized data"
+                <| fun _ ->
+                    let rnd = System.Random(20260817)
+
+                    for _ in 1 .. 40 do
+                        let store = newStore ()
+                        runDefault store "CREATE TABLE l (id INT PRIMARY KEY, k INT, x INT)" |> ignore
+                        runDefault store "CREATE TABLE r (id INT PRIMARY KEY, k INT, y INT)" |> ignore
+
+                        let leftRows = [ for i in 1 .. rnd.Next(20, 300) -> i, rnd.Next(0, 8), rnd.Next(0, 5) ]
+                        let rightRows = [ for i in 1 .. rnd.Next(20, 300) -> i, rnd.Next(0, 8), rnd.Next(0, 5) ]
+                        let valuesOf rows = rows |> List.map (fun (i, k, v) -> sprintf "(%d,%d,%d)" i k v) |> String.concat ", "
+                        runDefault store (sprintf "INSERT INTO l VALUES %s" (valuesOf leftRows)) |> ignore
+                        runDefault store (sprintf "INSERT INTO r VALUES %s" (valuesOf rightRows)) |> ignore
+
+                        let distinct = if rnd.Next(0, 2) = 0 then "DISTINCT " else ""
+                        let threshold = rnd.Next(0, 5)
+
+                        let baseSql =
+                            if rnd.Next(0, 2) = 0 then
+                                sprintf "SELECT %sl.x, r.y FROM l JOIN r ON l.k = r.k WHERE l.x >= %d" distinct threshold
+                            else
+                                sprintf "SELECT %sid, x FROM l WHERE x >= %d" distinct threshold
+
+                        let full = runDefault store baseSql |> resultRows
+                        let limit = rnd.Next(1, max 2 (List.length full + 5))
+                        let offset = rnd.Next(0, List.length full + 10)
+                        let limited = runDefault store (sprintf "%s LIMIT %d OFFSET %d" baseSql limit offset) |> resultRows
+                        let expected = full |> List.skip (min offset (List.length full)) |> List.truncate limit
+
+                        // SQL doesn't define which subset a no-ORDER-BY LIMIT
+                        // picks, but fsdb's own scan order is deterministic
+                        // for two runs against the same unmodified table —
+                        // the streaming path and a full materialize-then-
+                        // slice of the *same* engine must still agree
+                        // exactly, not merely as sets.
+                        Expect.equal limited expected (sprintf "sql=%s limit=%d offset=%d" baseSql limit offset)
+
+                testCase
+                    "bounded top-N for ORDER BY + LIMIT (+ OFFSET, incl. ties and OFFSET past the end) matches a full sort-then-slice reference over randomized data"
+                <| fun _ ->
+                    let rnd = System.Random(20260817)
+
+                    for _ in 1 .. 40 do
+                        let store = newStore ()
+                        runDefault store "CREATE TABLE t (id INT PRIMARY KEY, k INT, x INT)" |> ignore
+
+                        // Small key range on purpose: forces genuine ties in
+                        // the sort key, exercising boundedTopN's tie
+                        // stability at the capacity boundary — a single sort
+                        // key (not `k, id`) means the comparator itself
+                        // returns 0 for tied rows, not just "coincidentally
+                        // adjacent after a secondary key breaks it".
+                        let rows = [ for i in 1 .. rnd.Next(20, 400) -> i, rnd.Next(0, 6), rnd.Next(0, 100) ]
+                        let valuesOf rows = rows |> List.map (fun (i, k, x) -> sprintf "(%d,%d,%d)" i k x) |> String.concat ", "
+                        runDefault store (sprintf "INSERT INTO t VALUES %s" (valuesOf rows)) |> ignore
+
+                        let dir = if rnd.Next(0, 2) = 0 then "ASC" else "DESC"
+                        let baseSql = sprintf "SELECT id, k, x FROM t WHERE x >= %d ORDER BY k %s" (rnd.Next(0, 50)) dir
+
+                        let full = runDefault store baseSql |> resultRows
+                        let limit = rnd.Next(1, max 2 (List.length full + 5))
+                        let offset = rnd.Next(0, List.length full + 10)
+                        let limited = runDefault store (sprintf "%s LIMIT %d OFFSET %d" baseSql limit offset) |> resultRows
+                        let expected = full |> List.skip (min offset (List.length full)) |> List.truncate limit
+
+                        Expect.equal limited expected (sprintf "sql=%s limit=%d offset=%d" baseSql limit offset)
+
+                testCase "LIMIT N against a WHERE matching nearly the whole table touches far fewer rows than the table size"
+                <| fun _ ->
+                    let mutable touched = 0
+
+                    let touch (args: Value list) : Value =
+                        touched <- touched + 1
+                        List.head args
+
+                    let registry = registerScalar "TOUCH" touch builtins
+                    let store = newStore ()
+                    runDefault store "CREATE TABLE t (id INT PRIMARY KEY)" |> ignore
+                    let n = 20_000
+                    let values = [ for i in 1 .. n -> sprintf "(%d)" i ] |> String.concat ", "
+                    runDefault store (sprintf "INSERT INTO t VALUES %s" values) |> ignore
+
+                    touched <- 0
+
+                    match run store registry "SELECT id FROM t WHERE TOUCH(id) > 0 LIMIT 10" with
+                    | ResultSet(_, rows) -> Expect.equal (List.length rows) 10 "LIMIT 10 returns exactly 10 rows"
+                    | other -> failtestf "expected a resultset, got %A" other
+
+                    Expect.isLessThan
+                        touched
+                        1000
+                        (sprintf "LIMIT 10 against a %d-row table touched %d rows via WHERE — the streaming short-circuit isn't firing" n touched)
+
+                testCase
+                    "a row-level error past what LIMIT needs never surfaces (no ORDER BY); ORDER BY forcing a full scan still raises it — verified against a live MySQL 8.4 oracle"
+                <| fun _ ->
+                    // Oracle check (MySQL 8.4.11, `CAST(bad_json AS JSON)`
+                    // with the poison row at scan position 100 of a
+                    // `WHERE id <= 150` match set): a plain `LIMIT 10`/
+                    // `LIMIT 150` pair reproduces exactly this split — the
+                    // 10-row query returns cleanly, the 150-row one raises
+                    // 3141 — and `ORDER BY` on an unindexed column (forcing
+                    // a filesort) raises even at `LIMIT 10`, because the
+                    // filesort evaluates every matched row's projection
+                    // before `LIMIT` trims the sorted result.
+                    let poison (args: Value list) : Value =
+                        match args with
+                        | [ VInt 100L ] -> failwith "poison"
+                        | [ v ] -> v
+                        | _ -> VNull
+
+                    let registry = registerScalar "POISON" poison builtins
+                    let store = newStore ()
+                    runDefault store "CREATE TABLE t (id INT PRIMARY KEY, x INT)" |> ignore
+                    let values = [ for i in 1 .. 200 -> sprintf "(%d, %d)" i (if i = 100 then 0 else 1) ] |> String.concat ", "
+                    runDefault store (sprintf "INSERT INTO t VALUES %s" values) |> ignore
+
+                    match run store registry "SELECT id FROM t WHERE POISON(id) IS NOT NULL LIMIT 10" with
+                    | ResultSet(_, rows) -> Expect.equal (List.length rows) 10 "first 10 rows come back untouched by the poison row"
+                    | other -> failtestf "expected a resultset, got %A" other
+
+                    Expect.throws
+                        (fun () -> run store registry "SELECT id FROM t WHERE POISON(id) IS NOT NULL LIMIT 150" |> ignore)
+                        "a LIMIT that reaches the poison row's scan position must still evaluate it"
+
+                    Expect.throws
+                        (fun () -> run store registry "SELECT POISON(id) FROM t WHERE id <= 150 ORDER BY x LIMIT 10" |> ignore)
+                        "ORDER BY forcing a filesort must still evaluate every matched row's projection" ] ]
