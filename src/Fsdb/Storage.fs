@@ -1788,6 +1788,14 @@ let private cascadeDelete (checkFks: bool) (db: Database) (tableKey: string) (to
 /// treated as "didn't match". When `store.ForeignKeyChecks` is set (the
 /// default), applies every referencing foreign key's `ON DELETE` action —
 /// see `cascadeDelete`.
+///
+/// ponytail: `predicate` always runs against every row of `table.Rows` —
+/// unlike `SELECT` (`Executor.tryPointLookup`), a `WHERE <PK/UNIQUE col> =
+/// <literal>` DELETE never narrows to `UniqueIndex`'s O(log n) candidates
+/// first, so it's still O(table) even for a single-row delete by id. Route
+/// `predicate` through `tryUniqueLookup`-style narrowing (same "pure
+/// narrowing, never a correctness risk" shape `tryPointLookup` uses) once
+/// DELETE latency on a large table actually matters.
 let deleteRows
     (store: Store)
     (dbName: string)
@@ -1830,6 +1838,12 @@ let deleteRows
 /// structural equality (F# arrays compare structurally, element by
 /// element). As with `deleteRows`, `predicate` and `updater` both return
 /// `Result` rather than defaulting a failure away.
+///
+/// ponytail: same ceiling as `deleteRows` — `predicate` scans every row of
+/// `table.Rows`, so `WHERE <PK/UNIQUE col> = <literal>` still costs O(table)
+/// even though `UniqueIndex` could answer it in O(log n); `Executor`'s
+/// point-lookup fast path is SELECT-only. Route `predicate` through the
+/// same narrowing once UPDATE latency on a large table needs it.
 let updateRows
     (store: Store)
     (dbName: string)
