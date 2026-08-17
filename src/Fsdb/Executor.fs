@@ -648,6 +648,60 @@ let private traverseSeq (f: 'a -> Result<'b option, 'e>) (xs: 'a seq) : Result<'
     | Some e -> Error e
     | None -> Ok(List.ofSeq acc)
 
+/// The hash-join build/probe loop `applyJoin`/`applyMutationJoin` each need
+/// on both sides of their own "build on the smaller side" choice: bucket
+/// `build` by `buildKeyOf`'s key into a `Dictionary`, then walk `probe` and
+/// yield one `(buildIndex, buildItem, probeIndex, probeItem)` per bucket
+/// match. Fully generic over what a "build"/"probe" item actually *is* — a
+/// plain `Value[]` row in `applyJoin`, an identity-tracking
+/// `Value[] option list * Value[]` pair in `applyMutationJoin` — since it
+/// only ever touches an item through `buildKeyOf`/`probeKeyOf`, never its
+/// shape. One definition instead of the fill-then-probe loop written out
+/// per build-side choice (three times across the two callers).
+let private hashPairs
+    (buildKeyOf: 'b -> Value[] option)
+    (probeKeyOf: 'p -> Value[] option)
+    (build: (int * 'b) list)
+    (probe: (int * 'p) list)
+    : (int * 'b * int * 'p) list =
+    let buckets = Dictionary<Value[], ResizeArray<int * 'b>>(JoinKeyComparer())
+
+    for buildIndex, buildItem in build do
+        match buildKeyOf buildItem with
+        | Some key ->
+            match buckets.TryGetValue key with
+            | true, bucket -> bucket.Add(buildIndex, buildItem)
+            | false, _ ->
+                let bucket = ResizeArray()
+                bucket.Add(buildIndex, buildItem)
+                buckets.Add(key, bucket)
+        | None -> ()
+
+    [ for probeIndex, probeItem in probe do
+          match probeKeyOf probeItem with
+          | Some key ->
+              match buckets.TryGetValue key with
+              | true, bucket -> for buildIndex, buildItem in bucket -> buildIndex, buildItem, probeIndex, probeItem
+              | false, _ -> ()
+          | None -> () ]
+
+/// `hashPairs`' output, narrowed to the candidates whose residual (leftover,
+/// non-equi-key) `ON` conjuncts actually hold — the tail every hash-join
+/// branch needs after building its candidate list, shared instead of each
+/// writing its own `traverse |> Result.mapError |> filter ok |> map`.
+/// `extract` picks the piece `residualHolds` evaluates against out of a
+/// candidate item that may carry more than just the combined row (see
+/// `applyMutationJoin`'s identity-tracking shape).
+let private keepMatches
+    (residualHolds: 'c -> Result<bool, EvalError>)
+    (extract: 'x -> 'c)
+    (candidates: (int * int * 'x) list)
+    : Result<(int * int * 'x) list, QueryResult> =
+    candidates
+    |> traverse (fun (li, ri, x) -> residualHolds (extract x) |> Result.map (fun ok -> if ok then Some(li, ri, x) else None))
+    |> Result.mapError Err
+    |> Result.map (List.choose id)
+
 /// Evaluates one expression against one row. Three-valued logic throughout
 /// (comparisons/AND/OR/NOT return `VNull` — SQL's "unknown" — rather than a
 /// boolean whenever an operand is `VNull`, per `Value`'s helpers), function
@@ -1071,42 +1125,15 @@ and private applyJoin
             let rightKeyIndices = equiKeys |> List.map snd |> Array.ofList
             let buildOnLeft = rowsSoFar.Length <= joinRows.Length
 
-            let buildIndexed, buildKeyIndices, probeIndexed, probeKeyIndices =
-                if buildOnLeft then leftIndexed, leftKeyIndices, rightIndexed, rightKeyIndices
-                else rightIndexed, rightKeyIndices, leftIndexed, leftKeyIndices
+            let candidates : (int * int * Value[]) list =
+                if buildOnLeft then
+                    hashPairs (equiKeyOf leftKeyIndices) (equiKeyOf rightKeyIndices) leftIndexed rightIndexed
+                    |> List.map (fun (li, l, ri, r) -> li, ri, Array.append l r)
+                else
+                    hashPairs (equiKeyOf rightKeyIndices) (equiKeyOf leftKeyIndices) rightIndexed leftIndexed
+                    |> List.map (fun (ri, r, li, l) -> li, ri, Array.append l r)
 
-            let buckets = Dictionary<Value[], ResizeArray<int * Value[]>>(JoinKeyComparer())
-
-            for buildIndex, buildRow in buildIndexed do
-                match equiKeyOf buildKeyIndices buildRow with
-                | Some key ->
-                    match buckets.TryGetValue key with
-                    | true, bucket -> bucket.Add(buildIndex, buildRow)
-                    | false, _ ->
-                        let bucket = ResizeArray()
-                        bucket.Add(buildIndex, buildRow)
-                        buckets.Add(key, bucket)
-                | None -> ()
-
-            let candidates =
-                [ for probeIndex, probeRow in probeIndexed do
-                      match equiKeyOf probeKeyIndices probeRow with
-                      | Some key ->
-                          match buckets.TryGetValue key with
-                          | true, bucket ->
-                              for buildIndex, buildRow in bucket do
-                                  let li, l, ri, r =
-                                      if buildOnLeft then buildIndex, buildRow, probeIndex, probeRow
-                                      else probeIndex, probeRow, buildIndex, buildRow
-
-                                  yield li, ri, Array.append l r
-                          | false, _ -> ()
-                      | None -> () ]
-
-            candidates
-            |> traverse (fun (li, ri, combined) -> residualHolds combined |> Result.map (fun ok -> li, ri, combined, ok))
-            |> Result.mapError Err
-            |> Result.map (fun rows -> rows |> List.filter (fun (_, _, _, ok) -> ok) |> List.map (fun (li, ri, c, _) -> li, ri, c) |> buildCombinedRows)
+            candidates |> keepMatches residualHolds id |> Result.map buildCombinedRows
         else
             let pairs = seq { for li, l in leftIndexed do for ri, r in rightIndexed -> li, ri, l, r }
 
@@ -1217,56 +1244,21 @@ and private applyMutationJoin
                 // Left rows carry their identity list alongside the flat
                 // row `equiKeyOf` needs; right rows (always a real scanned
                 // table — see the ponytail note above) are the flat row
-                // itself. Two bucket shapes rather than one generic one, so
-                // neither side pays to wrap/unwrap the other's shape.
+                // itself. `hashPairs` is generic over both shapes at once —
+                // each side just supplies its own key extractor — so
+                // neither side pays to wrap/unwrap the other's.
+                let leftKeyOf (lIdent: Value[] option list, lFlat: Value[]) = equiKeyOf leftKeyIndices lFlat
+                let rightKeyOf (r: Value[]) = equiKeyOf rightKeyIndices r
+
                 let candidates : (int * int * (Value[] option list * Value[])) list =
                     if buildOnLeft then
-                        let buckets = Dictionary<Value[], ResizeArray<int * (Value[] option list * Value[])>>(JoinKeyComparer())
-
-                        for li, (lIdent, lFlat) in leftIndexed do
-                            match equiKeyOf leftKeyIndices lFlat with
-                            | Some key ->
-                                match buckets.TryGetValue key with
-                                | true, bucket -> bucket.Add(li, (lIdent, lFlat))
-                                | false, _ ->
-                                    let bucket = ResizeArray()
-                                    bucket.Add(li, (lIdent, lFlat))
-                                    buckets.Add(key, bucket)
-                            | None -> ()
-
-                        [ for ri, r in rightIndexed do
-                              match equiKeyOf rightKeyIndices r with
-                              | Some key ->
-                                  match buckets.TryGetValue key with
-                                  | true, bucket -> for li, (lIdent, lFlat) in bucket -> li, ri, (lIdent @ [ Some r ], Array.append lFlat r)
-                                  | false, _ -> ()
-                              | None -> () ]
+                        hashPairs leftKeyOf rightKeyOf leftIndexed rightIndexed
+                        |> List.map (fun (li, (lIdent, lFlat), ri, r) -> li, ri, (lIdent @ [ Some r ], Array.append lFlat r))
                     else
-                        let buckets = Dictionary<Value[], ResizeArray<int * Value[]>>(JoinKeyComparer())
+                        hashPairs rightKeyOf leftKeyOf rightIndexed leftIndexed
+                        |> List.map (fun (ri, r, li, (lIdent, lFlat)) -> li, ri, (lIdent @ [ Some r ], Array.append lFlat r))
 
-                        for ri, r in rightIndexed do
-                            match equiKeyOf rightKeyIndices r with
-                            | Some key ->
-                                match buckets.TryGetValue key with
-                                | true, bucket -> bucket.Add(ri, r)
-                                | false, _ ->
-                                    let bucket = ResizeArray()
-                                    bucket.Add(ri, r)
-                                    buckets.Add(key, bucket)
-                            | None -> ()
-
-                        [ for li, (lIdent, lFlat) in leftIndexed do
-                              match equiKeyOf leftKeyIndices lFlat with
-                              | Some key ->
-                                  match buckets.TryGetValue key with
-                                  | true, bucket -> for ri, r in bucket -> li, ri, (lIdent @ [ Some r ], Array.append lFlat r)
-                                  | false, _ -> ()
-                              | None -> () ]
-
-                candidates
-                |> traverse (fun (li, ri, (lIdent, combinedFlat)) -> residualHolds combinedFlat |> Result.map (fun ok -> li, ri, (lIdent, combinedFlat), ok))
-                |> Result.mapError Err
-                |> Result.map (fun rows -> rows |> List.filter (fun (_, _, _, ok) -> ok) |> List.map (fun (li, ri, row, _) -> li, ri, row) |> buildCombinedRows)
+                candidates |> keepMatches residualHolds snd |> Result.map buildCombinedRows
             else
                 let pairs = seq { for li, l in leftIndexed do for ri, r in rightIndexed -> li, ri, l, r }
 
