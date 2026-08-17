@@ -23,6 +23,7 @@ open System.Diagnostics
 open System.Threading
 open BenchmarkDotNet.Attributes
 open MySqlConnector
+open Fsdb.Benchmarks.BenchServer
 open Fsdb.Benchmarks.Schema
 
 [<MemoryDiagnoser>]
@@ -36,75 +37,13 @@ type ServerBenchmarks() =
     // Draw from the seeded id range so every read hits a real row.
     let randomUserId () = rng.Next(1, Schema.userCount + 1)
 
-    // Kill anything already bound to `port` — defensive cleanup in case a
-    // previous case's GlobalCleanup didn't run (e.g. the process was killed
-    // mid-benchmark).
-    let killPort (port: int) =
-        use killer =
-            Process.Start("/bin/sh", $"-c \"lsof -ti tcp:{port} | xargs -r kill -9\"")
-
-        killer.WaitForExit(5000) |> ignore
-
-    // Start a fresh in-memory fsdb (no --data-dir, matching the design doc's
-    // measurement environment) and block until it accepts connections.
-    let startFsdb () =
-        let bin =
-            Environment.GetEnvironmentVariable "FSDB_BENCH_BIN"
-            |> Option.ofObj
-            |> Option.defaultWith (fun () ->
-                failwith "FSDB_BENCH_BIN not set — run benchmarks via `just bench`/`just bench-quick`")
-
-        let port = Schema.portFor "fsdb"
-        killPort port
-
-        let psi = ProcessStartInfo("dotnet", $"exec \"{bin}\" --port {port}")
-        psi.UseShellExecute <- false
-        psi.RedirectStandardOutput <- true
-        psi.RedirectStandardError <- true
-        let proc = Process.Start psi
-        fsdbProcess <- Some proc
-
-        let deadline = DateTime.UtcNow.AddSeconds 30.0
-
-        let rec waitReady () =
-            try
-                use probe = new MySqlConnection(Schema.rootConnectionString "fsdb")
-                probe.Open()
-            with _ ->
-                if DateTime.UtcNow > deadline then
-                    failwith "fsdb did not become ready within 30s"
-
-                Thread.Sleep 200
-                waitReady ()
-
-        waitReady ()
-
-        Schema.resetDatabase "fsdb"
-        use seedConn = new MySqlConnection(Schema.connectionString "fsdb")
-        seedConn.Open()
-        Schema.createSchema seedConn
-        Schema.seed seedConn
-
-    let stopFsdb () =
-        match fsdbProcess with
-        | Some proc ->
-            (try
-                proc.Kill(entireProcessTree = true)
-             with _ ->
-                 ())
-
-            proc.WaitForExit(5000) |> ignore
-            proc.Dispose()
-            fsdbProcess <- None
-        | None -> ()
-
     [<Params("fsdb", "mysql")>]
     member val Target = "" with get, set
 
     [<GlobalSetup>]
     member this.Setup() =
         if this.Target = "fsdb" then
-            startFsdb ()
+            fsdbProcess <- Some(BenchServer.startFsdb (BenchServer.benchBin ()) None)
 
         conn <- new MySqlConnection(Schema.connectionString this.Target)
         conn.Open()
@@ -116,7 +55,8 @@ type ServerBenchmarks() =
         conn.Dispose()
 
         if this.Target = "fsdb" then
-            stopFsdb ()
+            fsdbProcess |> Option.iter BenchServer.stopFsdb
+            fsdbProcess <- None
 
     member private this.Exec(sql: string) =
         use cmd = conn.CreateCommand()

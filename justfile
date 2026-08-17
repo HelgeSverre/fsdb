@@ -183,3 +183,15 @@ _bench-header:
 bench-quick:
     @just _bench-run --quick
     @rm -rf BenchmarkDotNet.Artifacts
+
+# N-writer throughput under concurrency, fsdb vs MySQL (ops/sec, not latency).
+# Complements `bench`: the latency suite is single-connection and cannot see
+# fsdb's per-database write gate serialize writers.
+[group('bench')]
+bench-load:
+    @mkdir -p benchmarks/results
+    @just _bench-run --load
+    @just _bench-header > "benchmarks/results/$(git rev-parse --short HEAD)-load.md"
+    @cat benchmarks/load-report.md >> "benchmarks/results/$(git rev-parse --short HEAD)-load.md"
+    @rm -f benchmarks/load-report.md
+    @echo "results: benchmarks/results/$(git rev-parse --short HEAD)-load.md"
