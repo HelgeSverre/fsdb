@@ -787,6 +787,68 @@ let tests =
                                 [ VInt 1L; VInt 2L ]
                                 "one of the two duplicate 1-rows survives"
                         | Error e -> failtestf "expected Ok, got %A" e
+                    | Error e -> failtestf "expected Ok, got %A" e
+
+                testCase "a no-op UPDATE that writes a row's PRIMARY KEY back to its own value never collides with itself"
+                <| fun _ ->
+                    // `UniqueIndex` now maps a key to the row's *position* in
+                    // `Rows`, and `updateRows`'s collision check excludes the
+                    // row being rewritten by that position — this guards
+                    // against a regression back to excluding by structural
+                    // equality (`existing <> row`), which any no-op or a
+                    // row-position mixup could silently break.
+                    let store = withUsersTable ()
+
+                    insertRows
+                        store
+                        defaultDatabase
+                        "users"
+                        None
+                        [ [ VInt 1L; VString "alice"; VInt 30L ]
+                          [ VInt 2L; VString "bob"; VInt 25L ] ]
+                    |> ignore
+
+                    let predicate (row: Value[]) = Ok(row.[0] = VInt 1L)
+                    let updater (row: Value[]) = Ok [| row.[0]; row.[1]; VInt 31L |]
+
+                    match updateRows store defaultDatabase "users" predicate updater with
+                    | Ok affected -> Expect.equal affected 1 "alice's age changed, id rewritten to itself is not a collision"
+                    | Error e -> failtestf "expected Ok, got %A" e
+
+                testCase "insertion order survives an INSERT/UPDATE/DELETE/INSERT interleaving"
+                <| fun _ ->
+                    // `Rows`' scan order is its insertion order; a `DELETE`
+                    // compacts (shifting every later row down a slot) and a
+                    // later `INSERT` appends past the end — this exercises
+                    // both to guard the array-backed `Rows`' ordering
+                    // against an off-by-one in either.
+                    let store = withUsersTable ()
+
+                    insertRows
+                        store
+                        defaultDatabase
+                        "users"
+                        None
+                        [ [ VNull; VString "alice"; VInt 30L ]
+                          [ VNull; VString "bob"; VInt 25L ]
+                          [ VNull; VString "carol"; VInt 40L ] ]
+                    |> ignore
+
+                    updateRows store defaultDatabase "users" (fun row -> Ok(row.[1] = VString "bob")) (fun row -> Ok [| row.[0]; row.[1]; VInt 26L |])
+                    |> ignore
+
+                    deleteRows store defaultDatabase "users" (fun row -> Ok(row.[1] = VString "alice"))
+                    |> ignore
+
+                    insertRows store defaultDatabase "users" None [ [ VNull; VString "dave"; VInt 22L ] ]
+                    |> ignore
+
+                    match scan store defaultDatabase "users" with
+                    | Ok(_, rows) ->
+                        Expect.equal
+                            (rows |> Seq.map (fun r -> r.[1]) |> List.ofSeq)
+                            [ VString "bob"; VString "carol"; VString "dave" ]
+                            "scan order is bob, carol, dave — insertion order minus the deleted row, dave appended last"
                     | Error e -> failtestf "expected Ok, got %A" e ]
 
           testList

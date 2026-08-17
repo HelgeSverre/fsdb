@@ -70,7 +70,7 @@ let private caseName (node: JsonNode) : string * JsonObject =
 
 let private encodeRow (row: Value[]) : JsonNode = arr (row |> Array.toList |> List.map (toWire >> str))
 let private decodeRow (node: JsonNode) : Value[] = node.AsArray() |> Seq.map (fun n -> ofWire (n.GetValue<string>())) |> Array.ofSeq
-let private encodeRows (rows: Value[] list) : JsonNode = arr (rows |> List.map encodeRow)
+let private encodeRows (rows: Value[] seq) : JsonNode = arr (rows |> Seq.map encodeRow |> List.ofSeq)
 let private decodeRows (node: JsonNode) : Value[] list = node.AsArray() |> Seq.map decodeRow |> List.ofSeq
 
 // ---------------------------------------------------------------------
@@ -452,7 +452,8 @@ let private encodeStatement (s: Statement) : JsonNode =
     | RenameTable pairs -> caseObj "RenameTable" [ "pairs", arr (pairs |> List.map (fun (a, b) -> arr [ str a; str b ])) ]
     | CreateIndex(name, table, columns, unique) ->
         caseObj "CreateIndex" [ "name", str name; "table", str table; "columns", strArr columns; "unique", boolNode unique ]
-    | DropIndexStmt(name, table) -> caseObj "DropIndexStmt" [ "name", str name; "table", str table ]
+    | DropIndexStmt(name, table, ifExists) ->
+        caseObj "DropIndexStmt" [ "name", str name; "table", str table; "ifExists", boolNode ifExists ]
     | Truncate table -> caseObj "Truncate" [ "table", str table ]
     | other -> failwithf "Persistence: %A isn't a DDL statement SchemaChanged should ever carry" other
 
@@ -482,7 +483,11 @@ let private decodeStatement (node: JsonNode) : Statement =
         )
     | "CreateIndex" ->
         CreateIndex(o.["name"].GetValue<string>(), o.["table"].GetValue<string>(), strListOf o.["columns"], o.["unique"].GetValue<bool>())
-    | "DropIndexStmt" -> DropIndexStmt(o.["name"].GetValue<string>(), o.["table"].GetValue<string>())
+    | "DropIndexStmt" ->
+        // `ifExists` is optional in the encoding for WAL lines written
+        // before the flag existed — treat its absence as false.
+        let ifExists = match o.["ifExists"] with null -> false | v -> v.GetValue<bool>()
+        DropIndexStmt(o.["name"].GetValue<string>(), o.["table"].GetValue<string>(), ifExists)
     | "Truncate" -> Truncate(o.["table"].GetValue<string>())
     | tag -> failwithf "Persistence: unknown Statement case '%s' in WAL/snapshot" tag
 
@@ -544,7 +549,7 @@ let private applyDdl (store: Store) (db: string) (stmt: Statement) : unit =
     | RenameTable pairs -> pairs |> List.iter (fun (oldName, newName) -> warn "RenameTable" (renameTable store db oldName newName))
     | CreateIndex(name, table, columns, unique) ->
         warn "CreateIndex" (alterTable store db table [ AddIndex { Name = name; Columns = columns; Unique = unique } ])
-    | DropIndexStmt(name, table) -> warn "DropIndexStmt" (alterTable store db table [ DropIndexAction name ])
+    | DropIndexStmt(name, table, _) -> warn "DropIndexStmt" (alterTable store db table [ DropIndexAction name ])
     | Truncate table -> warn "Truncate" (truncate store db table)
     | other -> Log.diagnostic "fsdb: WAL replay warning (SchemaChanged): unexpected statement %A" other
 
@@ -664,7 +669,7 @@ let private decodeTable (node: JsonNode) : Table =
           Columns = o.["columns"].AsArray() |> Seq.map decodeColumnDef |> List.ofSeq
           Indexes = o.["indexes"].AsArray() |> Seq.map decodeIndexDef |> List.ofSeq
           ForeignKeys = o.["foreignKeys"].AsArray() |> Seq.map decodeForeignKeyDef |> List.ofSeq
-          Rows = decodeRows o.["rows"]
+          Rows = decodeRows o.["rows"] |> System.Collections.Immutable.ImmutableArray.CreateRange
           NextAutoId = o.["nextAutoId"].GetValue<int64>()
           UniqueIndex = Map.empty }
 

@@ -1475,7 +1475,7 @@ and private runSelectStmt
             match fromItem, select.Joins with
             | FromTable tref, [] ->
                 tryPointLookup store dbName tref select.Where
-                |> Option.map Ok
+                |> Option.map (fun (cols, rows) -> Ok(cols, rows |> List.map snd))
                 |> Option.defaultWith (fun () -> resolveFromItem store registry dbName fromItem)
             | _ -> resolveFromItem store registry dbName fromItem
 
@@ -1521,7 +1521,7 @@ and private flattenAnd (expr: Expr) : Expr list =
 /// `tref.Table` actually has an indexed column called `n` — so a bare name
 /// that (via that same scoping) really means an outer column simply finds
 /// no matching index here and falls back, same as any other miss.
-and private tryPointLookup (store: Store) (dbName: string) (tref: TableRef) (whereExpr: Expr option) : (ColumnDef list * Value[] list) option =
+and private tryPointLookup (store: Store) (dbName: string) (tref: TableRef) (whereExpr: Expr option) : (ColumnDef list * (int * Value[]) list) option =
     match whereExpr with
     | None -> None
     | Some whereExpr ->
@@ -3419,7 +3419,7 @@ let execute (store: Store) (registry: Registry) (dbName: string) (ids: int64 * i
         // that remaining ceiling).
         let scanned =
             tryPointLookup store dbName updateStmt.From updateStmt.Where
-            |> Option.map (fun (cols, rows) -> Ok(cols, Seq.ofList rows))
+            |> Option.map (fun (cols, rows) -> Ok(cols, rows |> List.map snd |> Seq.ofList))
             |> Option.defaultWith (fun () -> scan store db table)
 
         match scanned with
