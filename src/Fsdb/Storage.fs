@@ -787,12 +787,25 @@ let private rebuildUniqueIndex (table: Table) : Map<string, Map<string, Value[]>
         name, inner)
     |> Map.ofList
 
+/// Bumped once per `reindexTable` call — the full-scan rebuild it wraps is
+/// the O(table size) cost that per-event replay used to pay repeatedly.
+/// `AsyncLocal`, not a plain mutable: Expecto runs tests in parallel, each
+/// on its own async flow, so a test that increments this only sees its own
+/// count instead of racing every other test's `createTable`/`truncate`/WAL
+/// replay in the suite. Lets a test assert "reindexed a constant number of
+/// times", not race a wall-clock threshold under machine load.
+let private reindexCallCountLocal = System.Threading.AsyncLocal<int>()
+
+let reindexCallCount () = reindexCallCountLocal.Value
+
 /// Public because `Persistence`'s WAL replay (`mapTableRows`) and snapshot
 /// load (`decodeTable`) both write `Rows` directly — same reason
 /// `normalizeTableName` is public — so they need to rebuild the index
 /// themselves afterward instead of maintaining it incrementally the way
 /// every write path below does.
-let reindexTable (table: Table) : Table = { table with UniqueIndex = rebuildUniqueIndex table }
+let reindexTable (table: Table) : Table =
+    reindexCallCountLocal.Value <- reindexCallCountLocal.Value + 1
+    { table with UniqueIndex = rebuildUniqueIndex table }
 
 /// Removes/adds one row's entry in every unique group's map, the
 /// incremental update every write path below makes instead of

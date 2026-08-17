@@ -356,24 +356,25 @@ let tests =
 
               File.WriteAllLines(Path.Combine(dir, "wal.jsonl"), [ for i in 1 .. rowCount -> walLine i ])
 
-              let sw = Diagnostics.Stopwatch.StartNew()
+              let countBefore = reindexCallCount ()
               let reloaded = load dir
-              sw.Stop()
+              let reindexesDuringLoad = reindexCallCount () - countBefore
 
               let values = rowsOf reloaded defaultDatabase "hot" |> List.map (fun r -> r.[1])
               Expect.isTrue (values |> List.forall (fun v -> v = VInt 1L)) "every row's replayed update landed"
 
-              // Generous margin (fixed: ~0.6s solo, ~1.3s under the full
-              // suite's parallel load; broken: 3.4s+ solo) — this only
-              // needs to catch "O(k*n) again", not pin an exact number.
+              // `load` reindexes "hot" a small constant number of times
+              // (once decoding the snapshot, once after replay) no matter
+              // how many WAL events touch it — a per-event reindex would
+              // make this scale with `rowCount` (2500) instead.
               Expect.isLessThan
-                  sw.Elapsed.TotalSeconds
-                  2.5
+                  reindexesDuringLoad
+                  10
                   (sprintf
-                      "replaying %d single-row UPDATEs against a %d-row UNIQUE-indexed table took %A — looks like a per-event reindex again"
+                      "loading a snapshot + %d single-row UPDATEs against a %d-row UNIQUE-indexed table triggered %d reindexes — looks like a per-event reindex again"
                       rowCount
                       rowCount
-                      sw.Elapsed)
+                      reindexesDuringLoad)
 
           testCase "WAL replay of a duplicate-row DELETE LIMIT 1 removes exactly one physical row, not every value-equal twin"
           <| fun _ ->
