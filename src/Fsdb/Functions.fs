@@ -154,7 +154,7 @@ type private JPath =
 /// Parses MySQL's JSON path grammar: `$`, then any run of `.key`,
 /// `."quoted key"`, `[n]`, `.*`, or `[*]`. Returns `None` on anything it
 /// doesn't recognize rather than guessing.
-let private parseJsonPath (path: string) : JPath list option =
+let private parseJsonPathRaw (path: string) : JPath list option =
     if isNull path || path.Length = 0 || path.[0] <> '$' then
         None
     else
@@ -206,6 +206,14 @@ let private parseJsonPath (path: string) : JPath list option =
             | _ -> ok <- false
 
         if ok then Some(List.ofSeq segs) else None
+
+/// `parseJsonPathRaw`, memoized by path string: the path argument is almost
+/// always a query literal, so the same string parses once per process rather
+/// than once per row. Pure, so the cache never affects correctness — a rare
+/// `GetOrAdd` race just re-parses harmlessly.
+let private parseJsonPath : string -> JPath list option =
+    let cache = System.Collections.Concurrent.ConcurrentDictionary<string, JPath list option>()
+    fun path -> cache.GetOrAdd(path, parseJsonPathRaw)
 
 /// MySQL's negative-counts-from-the-end array index (`$[-1]` is the last
 /// element), bounds-checked against `a`'s actual length.
