@@ -590,7 +590,7 @@ let private mapTableRows (store: Store) (dbName: string) (tableName: string) (f:
     | Some db ->
         match db |> Map.tryFind key with
         | None -> eprintfn "fsdb: WAL replay warning: unknown table '%s.%s'" dbName tableName
-        | Some table -> store.Catalog <- store.Catalog |> Map.add dbName (db |> Map.add key { table with Rows = f table.Rows })
+        | Some table -> store.Catalog <- store.Catalog |> Map.add dbName (db |> Map.add key (reindexTable { table with Rows = f table.Rows }))
 
 let rec private applyEvent (store: Store) (event: CommitEvent) : unit =
     match event with
@@ -651,12 +651,14 @@ let private encodeTable (t: Table) : JsonNode =
 let private decodeTable (node: JsonNode) : Table =
     let o = node.AsObject()
 
-    { OriginalName = o.["originalName"].GetValue<string>()
-      Columns = o.["columns"].AsArray() |> Seq.map decodeColumnDef |> List.ofSeq
-      Indexes = o.["indexes"].AsArray() |> Seq.map decodeIndexDef |> List.ofSeq
-      ForeignKeys = o.["foreignKeys"].AsArray() |> Seq.map decodeForeignKeyDef |> List.ofSeq
-      Rows = decodeRows o.["rows"]
-      NextAutoId = o.["nextAutoId"].GetValue<int64>() }
+    reindexTable
+        { OriginalName = o.["originalName"].GetValue<string>()
+          Columns = o.["columns"].AsArray() |> Seq.map decodeColumnDef |> List.ofSeq
+          Indexes = o.["indexes"].AsArray() |> Seq.map decodeIndexDef |> List.ofSeq
+          ForeignKeys = o.["foreignKeys"].AsArray() |> Seq.map decodeForeignKeyDef |> List.ofSeq
+          Rows = decodeRows o.["rows"]
+          NextAutoId = o.["nextAutoId"].GetValue<int64>()
+          UniqueIndex = Map.empty }
 
 let private encodeCatalog (catalog: Catalog) : JsonNode =
     let databases = JsonObject()

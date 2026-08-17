@@ -79,7 +79,33 @@ type Table =
       Rows: Value[] list
       NextAutoId: int64
       Indexes: IndexDef list
-      ForeignKeys: ForeignKeyDef list }
+      ForeignKeys: ForeignKeyDef list
+      /// Hash index over every PRIMARY KEY / UNIQUE `Indexes` entry, kept in
+      /// sync with `Rows` by every write path below (`insertCore`,
+      /// `updateRows`, `upsertRows`, `deleteRows`'s `cascadeDeleteVisited`)
+      /// instead of rebuilt from a full scan on every call — that rebuild is
+      /// exactly the O(table size) tax M9-3 exists to remove from point
+      /// SELECT, unique-collision checks, and FK parent-existence checks
+      /// (see `uniqueKeyGroups`/`encodeConstraintKey`/`tryUniqueLookup`).
+      /// Outer map keyed by the unique group's name (`"PRIMARY"` or the
+      /// index's own name, matching `uniqueKeyGroups`); inner map from
+      /// `encodeConstraintKey`'s collation-correct key to the one row
+      /// holding it. A `Map`, not a `Dictionary`, on purpose: `Table` is
+      /// itself a value swapped in and out of `Catalog`'s snapshots (see
+      /// `Catalog`'s doc), so a transaction's private snapshot or a
+      /// concurrent reader's in-flight `scan` needs this index frozen at
+      /// exactly the version it read — `Map.add`/`Map.remove` share
+      /// structure with whatever earlier version still holds a reference,
+      /// the same property every other piece of `Catalog` state already
+      /// leans on, where a mutable `Dictionary` would need an explicit
+      /// clone on every write to keep it. A row with a NULL anywhere in the
+      /// group has no entry at all — MySQL never treats a NULL unique
+      /// column as a collision, so it isn't indexed (`encodeConstraintKey`
+      /// already returns `None` for one). Structural, not carried over the
+      /// wire: absent from the WAL/snapshot encoding, rebuilt instead by
+      /// `reindexTable` wherever `Rows` is written outside these checked
+      /// paths (`Persistence`'s replay/snapshot-load — see its doc).
+      UniqueIndex: Map<string, Map<string, Value[]>> }
 
 /// Table names are case-insensitive, keyed by their lowercased form.
 type Database = Map<string, Table>
@@ -689,6 +715,223 @@ let private coerceAndCheck (strict: bool) (col: ColumnDef) (v: Value) : Result<V
     | VNull when not col.Nullable -> Error(NotNullViolation col.Name)
     | _ -> coerceValue strict col v
 
+/// The `(keyName, column indices)` groups that must be unique: the primary
+/// key (if any, named `"PRIMARY"` the way MySQL reports it in error 1062,
+/// and treated as one group across however many columns it spans) plus
+/// every `UNIQUE` index, named after itself. Used by `upsertRows` to find
+/// the row (if any) an incoming `INSERT ... ON DUPLICATE KEY UPDATE` row
+/// collides with, and by `findUniqueCollision` for plain `INSERT`/`UPDATE`.
+let private uniqueKeyGroups (table: Table) : (string * int list) list =
+    let pk =
+        table.Columns |> List.indexed |> List.choose (fun (i, c) -> if c.PrimaryKey then Some i else None)
+
+    let fromIndexes =
+        table.Indexes
+        |> List.filter (fun ix -> ix.Unique)
+        |> List.choose (fun ix -> ix.Columns |> traverse (resolveColumn table.Columns) |> Result.toOption |> Option.map (fun idxs -> ix.Name, idxs))
+
+    (if pk.IsEmpty then [] else [ "PRIMARY", pk ]) @ fromIndexes
+
+/// Whether `a` and `b` collide on unique-key group `idxs`: every column
+/// compares equal under `Value.compare`'s collation-aware rules (so
+/// `'Alice' = 'alice'` and `'a' = 'a '` collide, matching MySQL's default
+/// collation), *unless* any column in the group is `NULL` on either side —
+/// MySQL's unique indexes treat `NULL` as distinct from every other `NULL`,
+/// so a `NULL` anywhere in the group means "no collision" rather than "not
+/// equal, so no collision" (the difference matters for `IS NULL` groups: two
+/// all-NULL rows still don't collide).
+let private rowsCollideOn (idxs: int list) (a: Value[]) (b: Value[]) : bool =
+    idxs |> List.forall (fun i -> a.[i] <> VNull && b.[i] <> VNull && compare a.[i] b.[i] = 0)
+
+/// The first unique-key violation `candidate` has against `existingRows`, if
+/// any, as the `DuplicateKey` error 1062 wraps (the colliding key's name and
+/// a MySQL-style `-`-joined value for composite keys).
+let private findUniqueCollision (groups: (string * int list) list) (existingRows: Value[] list) (candidate: Value[]) : StorageError option =
+    existingRows
+    |> List.tryPick (fun existing ->
+        groups
+        |> List.tryPick (fun (name, idxs) ->
+            if rowsCollideOn idxs existing candidate then
+                let value =
+                    idxs |> List.map (fun i -> candidate.[i] |> toText |> Option.defaultValue "NULL") |> String.concat "-"
+
+                Some(DuplicateKey(name, value))
+            else
+                None))
+
+/// Stable equality key for values already coerced into a table column's
+/// declared type. Strings use the same case-insensitive, PAD SPACE semantics
+/// as Value.compare; every other same-typed value uses an exact encoding.
+/// NULL is deliberately absent because a UNIQUE key containing any NULL
+/// never collides under MySQL's semantics.
+let private encodeConstraintKey (indices: int list) (row: Value[]) : string option =
+    let encode =
+        function
+        | VNull -> None
+        | VInt value -> Some("I" + string value)
+        | VDouble value ->
+            let normalized = if value = 0.0 then 0.0 else value
+            Some("D" + normalized.ToString("R", CultureInfo.InvariantCulture))
+        | VDecimal value -> Some("M" + value.ToString("G29", CultureInfo.InvariantCulture))
+        | VString value -> Some("S" + value.TrimEnd(' ').ToUpperInvariant())
+        | VBytes value -> Some("B" + Convert.ToHexString value)
+        | VDate value -> Some("T" + string value.DayNumber)
+        | VDateTime value -> Some("V" + string value.Ticks)
+        | VJson value -> Some("J" + value.TrimEnd(' ').ToUpperInvariant())
+
+    let encoded = indices |> List.map (fun index -> encode row.[index])
+
+    if encoded |> List.exists Option.isNone then
+        None
+    else
+        encoded
+        |> List.choose id
+        |> List.map (fun value -> string value.Length + ":" + value)
+        |> String.concat ""
+        |> Some
+
+let private constraintLookup indices rows =
+    let lookup = HashSet<string>(StringComparer.Ordinal)
+
+    for row in rows do
+        encodeConstraintKey indices row |> Option.iter (lookup.Add >> ignore)
+
+    lookup
+
+/// `table.UniqueIndex` recomputed from scratch against its current `Rows` —
+/// the one full-scan rebuild the M9-3 index still needs, used only at
+/// structural boundaries (`createTable`, `truncate`, `alterTable` — column
+/// positions may have shifted — and `Persistence`'s replay/snapshot-load,
+/// which write `Rows` directly, bypassing every checked path below that
+/// otherwise maintains the index incrementally). `Map.ofList` keeping the
+/// last entry for a repeated key is a non-issue here: a well-formed table
+/// never has two rows actually colliding on a real PK/UNIQUE group.
+let private rebuildUniqueIndex (table: Table) : Map<string, Map<string, Value[]>> =
+    uniqueKeyGroups table
+    |> List.map (fun (name, idxs) ->
+        let inner =
+            table.Rows |> List.choose (fun row -> encodeConstraintKey idxs row |> Option.map (fun k -> k, row)) |> Map.ofList
+
+        name, inner)
+    |> Map.ofList
+
+/// Public because `Persistence`'s WAL replay (`mapTableRows`) and snapshot
+/// load (`decodeTable`) both write `Rows` directly — same reason
+/// `normalizeTableName` is public — so they need to rebuild the index
+/// themselves afterward instead of maintaining it incrementally the way
+/// every write path below does.
+let reindexTable (table: Table) : Table = { table with UniqueIndex = rebuildUniqueIndex table }
+
+/// Removes/adds one row's entry in every unique group's map, the
+/// incremental update every write path below makes instead of
+/// `rebuildUniqueIndex`'s full rescan. `removed`/`added` are the same
+/// logical row for an `UPDATE` (its before/after values), just one side for
+/// a plain `INSERT`/`DELETE`, and both for `upsertRows`' matched-row case.
+let private reindexRow
+    (uniqueGroups: (string * int list) list)
+    (removed: Value[] option)
+    (added: Value[] option)
+    (index: Map<string, Map<string, Value[]>>)
+    : Map<string, Map<string, Value[]>> =
+    uniqueGroups
+    |> List.fold
+        (fun accIndex (name, idxs) ->
+            let group = Map.find name accIndex
+            let group = removed |> Option.fold (fun g r -> encodeConstraintKey idxs r |> Option.fold (fun g' k -> Map.remove k g') g) group
+            let group = added |> Option.fold (fun g a -> encodeConstraintKey idxs a |> Option.fold (fun g' k -> Map.add k a g') g) group
+            Map.add name group accIndex)
+        index
+
+/// The parent table's persistent unique-key index for exactly the column
+/// order `refIdxs` resolves to, if one of its PK/UNIQUE groups matches —
+/// the hash-index fast path `checkFkParent` uses for "does a parent row
+/// with this key exist". `None` when no such group exists (every real
+/// MySQL FK references a unique/PK constraint of the parent in matching
+/// column order, so this only misses on stale/malformed FK metadata) —
+/// `checkFkParent` falls back to a full scan in that case, same as before
+/// this index existed.
+let private parentUniqueIndex (parent: Table) (refIdxs: int list) : Map<string, Value[]> option =
+    uniqueKeyGroups parent |> List.tryPick (fun (name, idxs) -> if idxs = refIdxs then Map.tryFind name parent.UniqueIndex else None)
+
+/// `col = literal`'s columns and candidate rows via `dbName.tableName`'s
+/// PK/UNIQUE hash index, when `columnName` names a single-column PK/UNIQUE
+/// group and `literal` already has that column's exact stored `Value`
+/// shape — checked by round-tripping it through `coerceValue` and requiring
+/// the result back unchanged, rather than hand-listing which `Value`
+/// variant goes with which `ColumnType`: a literal that survives
+/// `coerceValue` untouched is, by construction, already in the one shape
+/// `insertCore` would ever have stored for that column (every other branch
+/// of `coerceValue` changes the value's shape or its content), so
+/// `encodeConstraintKey`'s encoding of it can't help but match however the
+/// index encoded a real row's value there — no separate proof that the two
+/// encodings agree is needed. `None` for anything this can't prove safe
+/// (multi-column groups, a literal that needs real coercion, a NULL
+/// literal's own encoding is `None` too but that correctly yields `Some []`
+/// — an `= NULL` conjunct can never match any row) — the caller's own full
+/// scan stays correct in every one of those cases, this is a pure,
+/// optional narrowing. `Executor.tryPointLookup` is the only caller.
+let tryUniqueLookup (store: Store) (dbName: string) (tableName: string) (columnName: string) (literal: Value) : (ColumnDef list * Value[] list) option =
+    match Map.tryFind dbName store.Catalog |> Option.bind (Map.tryFind (normalizeTableName tableName)) with
+    | None -> None
+    | Some table ->
+        match resolveColumn table.Columns columnName with
+        | Error _ -> None
+        | Ok idx ->
+            match uniqueKeyGroups table |> List.tryFind (fun (_, idxs) -> idxs = [ idx ]) with
+            | None -> None
+            | Some(groupName, _) ->
+                match coerceValue store.StrictMode table.Columns.[idx] literal with
+                | Ok coerced when coerced = literal ->
+                    let rows =
+                        match encodeConstraintKey [ 0 ] [| literal |] with
+                        | None -> []
+                        | Some key -> table.UniqueIndex |> Map.tryFind groupName |> Option.bind (Map.tryFind key) |> Option.toList
+
+                    Some(table.Columns, rows)
+                | _ -> None
+
+/// Verifies every foreign key `fks` (a child table's own `ForeignKeys`) has
+/// a matching parent row for `row`'s values, per MySQL's MATCH SIMPLE
+/// semantics: a foreign key with any `NULL` column doesn't need a parent at
+/// all. Malformed FK metadata (a column name that no longer resolves, e.g.
+/// after a `DROP COLUMN` that didn't also drop the FK) or a since-dropped
+/// referenced table/column is treated as "not enforceable" rather than
+/// blocking every write — `information_schema` can still show the stale FK,
+/// same as MySQL leaves a dangling constraint visible after `DROP TABLE ...
+/// FOREIGN_KEY_CHECKS=0`.
+let private checkFkParent (db: Database) (childColumns: ColumnDef list) (row: Value[]) (fk: ForeignKeyDef) : Result<unit, StorageError> =
+    match fk.Columns |> traverse (resolveColumn childColumns) with
+    | Error _ -> Ok()
+    | Ok idxs ->
+        let values = idxs |> List.map (fun i -> row.[i])
+
+        if values |> List.exists ((=) VNull) then
+            Ok()
+        else
+            match Map.tryFind (normalizeTableName fk.RefTable) db with
+            | None -> Ok()
+            | Some parent ->
+                match fk.RefColumns |> traverse (resolveColumn parent.Columns) with
+                | Error _ -> Ok()
+                | Ok refIdxs ->
+                    // The hash-index fast path when the parent's referenced
+                    // key is itself PK/UNIQUE (always true for a real FK) —
+                    // `values` is already in `refIdxs`' own order, so
+                    // encoding it at positions `[0 .. n-1]` reproduces
+                    // exactly the key `parentUniqueIndex` stored it under.
+                    // Falls back to the full scan only for stale/malformed
+                    // FK metadata that doesn't resolve to a real unique
+                    // group.
+                    let found =
+                        match parentUniqueIndex parent refIdxs with
+                        | Some index -> encodeConstraintKey [ 0 .. values.Length - 1 ] (Array.ofList values) |> Option.map index.ContainsKey |> Option.defaultValue false
+                        | None -> parent.Rows |> List.exists (fun prow -> List.forall2 (fun i v -> compare prow.[i] v = 0) refIdxs values)
+
+                    if found then Ok() else Error(ForeignKeyParentMissing fk.Name)
+
+let private checkFkParents (db: Database) (childColumns: ColumnDef list) (fks: ForeignKeyDef list) (row: Value[]) : Result<unit, StorageError> =
+    fks |> traverse (checkFkParent db childColumns row) |> Result.map ignore
+
 /// Runs `f` against `dbName`'s database, swapping the updated database back
 /// into the catalog on success. Every write op boils down to "look up a
 /// database, then a plain update" — this is the one seam `withWrite`'s
@@ -739,9 +982,10 @@ let createTable
                       Rows = []
                       NextAutoId = 1L
                       Indexes = indexes
-                      ForeignKeys = foreignKeys }
+                      ForeignKeys = foreignKeys
+                      UniqueIndex = Map.empty }
 
-                Ok(Map.add key table db, ()))
+                Ok(Map.add key (reindexTable table) db, ()))
 
     if result.IsOk then
         emit store (Some(SchemaChanged(dbName, CreateTable(tableName, columns, indexes, foreignKeys, false))))
@@ -764,7 +1008,7 @@ let dropTable (store: Store) (dbName: string) (tableName: string) : Result<unit,
     result
 
 let truncate (store: Store) (dbName: string) (tableName: string) : Result<unit, StorageError> =
-    let result = withTable store dbName tableName (fun table -> Ok({ table with Rows = []; NextAutoId = 1L }, ()))
+    let result = withTable store dbName tableName (fun table -> Ok(reindexTable { table with Rows = []; NextAutoId = 1L }, ()))
 
     if result.IsOk then
         emit store (Some(SchemaChanged(dbName, Truncate tableName)))
@@ -907,7 +1151,10 @@ let alterTable (store: Store) (dbName: string) (tableName: string) (actions: Alt
 
                 actions
                 |> List.fold step (Ok(origKey, table))
-                |> Result.map (fun (finalKey, finalTable) -> Map.remove origKey db |> Map.add finalKey finalTable, ())))
+                // Column positions/count may have shifted (`ADD`/`DROP`/
+                // `MODIFY COLUMN`), so a full rebuild rather than an
+                // incremental patch — ALTER isn't a hot path.
+                |> Result.map (fun (finalKey, finalTable) -> Map.remove origKey db |> Map.add finalKey (reindexTable finalTable), ())))
 
     if result.IsOk then
         emit store (Some(SchemaChanged(dbName, AlterTable(tableName, actions))))
@@ -951,122 +1198,6 @@ let private processRow
     List.zip columns rawRow
     |> List.fold step (Ok([], nextAutoId, None))
     |> Result.map (fun (valuesRev, nextAutoId, assignedId) -> List.rev valuesRev, nextAutoId, assignedId)
-
-/// The `(keyName, column indices)` groups that must be unique: the primary
-/// key (if any, named `"PRIMARY"` the way MySQL reports it in error 1062,
-/// and treated as one group across however many columns it spans) plus
-/// every `UNIQUE` index, named after itself. Used by `upsertRows` to find
-/// the row (if any) an incoming `INSERT ... ON DUPLICATE KEY UPDATE` row
-/// collides with, and by `findUniqueCollision` for plain `INSERT`/`UPDATE`.
-let private uniqueKeyGroups (table: Table) : (string * int list) list =
-    let pk =
-        table.Columns |> List.indexed |> List.choose (fun (i, c) -> if c.PrimaryKey then Some i else None)
-
-    let fromIndexes =
-        table.Indexes
-        |> List.filter (fun ix -> ix.Unique)
-        |> List.choose (fun ix -> ix.Columns |> traverse (resolveColumn table.Columns) |> Result.toOption |> Option.map (fun idxs -> ix.Name, idxs))
-
-    (if pk.IsEmpty then [] else [ "PRIMARY", pk ]) @ fromIndexes
-
-/// Whether `a` and `b` collide on unique-key group `idxs`: every column
-/// compares equal under `Value.compare`'s collation-aware rules (so
-/// `'Alice' = 'alice'` and `'a' = 'a '` collide, matching MySQL's default
-/// collation), *unless* any column in the group is `NULL` on either side —
-/// MySQL's unique indexes treat `NULL` as distinct from every other `NULL`,
-/// so a `NULL` anywhere in the group means "no collision" rather than "not
-/// equal, so no collision" (the difference matters for `IS NULL` groups: two
-/// all-NULL rows still don't collide).
-let private rowsCollideOn (idxs: int list) (a: Value[]) (b: Value[]) : bool =
-    idxs |> List.forall (fun i -> a.[i] <> VNull && b.[i] <> VNull && compare a.[i] b.[i] = 0)
-
-/// The first unique-key violation `candidate` has against `existingRows`, if
-/// any, as the `DuplicateKey` error 1062 wraps (the colliding key's name and
-/// a MySQL-style `-`-joined value for composite keys).
-let private findUniqueCollision (groups: (string * int list) list) (existingRows: Value[] list) (candidate: Value[]) : StorageError option =
-    existingRows
-    |> List.tryPick (fun existing ->
-        groups
-        |> List.tryPick (fun (name, idxs) ->
-            if rowsCollideOn idxs existing candidate then
-                let value =
-                    idxs |> List.map (fun i -> candidate.[i] |> toText |> Option.defaultValue "NULL") |> String.concat "-"
-
-                Some(DuplicateKey(name, value))
-            else
-                None))
-
-/// Stable equality key for values already coerced into a table column's
-/// declared type. Strings use the same case-insensitive, PAD SPACE semantics
-/// as Value.compare; every other same-typed value uses an exact encoding.
-/// NULL is deliberately absent because a UNIQUE key containing any NULL
-/// never collides under MySQL's semantics.
-let private encodeConstraintKey (indices: int list) (row: Value[]) : string option =
-    let encode =
-        function
-        | VNull -> None
-        | VInt value -> Some("I" + string value)
-        | VDouble value ->
-            let normalized = if value = 0.0 then 0.0 else value
-            Some("D" + normalized.ToString("R", CultureInfo.InvariantCulture))
-        | VDecimal value -> Some("M" + value.ToString("G29", CultureInfo.InvariantCulture))
-        | VString value -> Some("S" + value.TrimEnd(' ').ToUpperInvariant())
-        | VBytes value -> Some("B" + Convert.ToHexString value)
-        | VDate value -> Some("T" + string value.DayNumber)
-        | VDateTime value -> Some("V" + string value.Ticks)
-        | VJson value -> Some("J" + value.TrimEnd(' ').ToUpperInvariant())
-
-    let encoded = indices |> List.map (fun index -> encode row.[index])
-
-    if encoded |> List.exists Option.isNone then
-        None
-    else
-        encoded
-        |> List.choose id
-        |> List.map (fun value -> string value.Length + ":" + value)
-        |> String.concat ""
-        |> Some
-
-let private constraintLookup indices rows =
-    let lookup = HashSet<string>(StringComparer.Ordinal)
-
-    for row in rows do
-        encodeConstraintKey indices row |> Option.iter (lookup.Add >> ignore)
-
-    lookup
-
-/// Verifies every foreign key `fks` (a child table's own `ForeignKeys`) has
-/// a matching parent row for `row`'s values, per MySQL's MATCH SIMPLE
-/// semantics: a foreign key with any `NULL` column doesn't need a parent at
-/// all. Malformed FK metadata (a column name that no longer resolves, e.g.
-/// after a `DROP COLUMN` that didn't also drop the FK) or a since-dropped
-/// referenced table/column is treated as "not enforceable" rather than
-/// blocking every write — `information_schema` can still show the stale FK,
-/// same as MySQL leaves a dangling constraint visible after `DROP TABLE ...
-/// FOREIGN_KEY_CHECKS=0`.
-let private checkFkParent (db: Database) (childColumns: ColumnDef list) (row: Value[]) (fk: ForeignKeyDef) : Result<unit, StorageError> =
-    match fk.Columns |> traverse (resolveColumn childColumns) with
-    | Error _ -> Ok()
-    | Ok idxs ->
-        let values = idxs |> List.map (fun i -> row.[i])
-
-        if values |> List.exists ((=) VNull) then
-            Ok()
-        else
-            match Map.tryFind (normalizeTableName fk.RefTable) db with
-            | None -> Ok()
-            | Some parent ->
-                match fk.RefColumns |> traverse (resolveColumn parent.Columns) with
-                | Error _ -> Ok()
-                | Ok refIdxs ->
-                    let found =
-                        parent.Rows
-                        |> List.exists (fun prow -> List.forall2 (fun i v -> compare prow.[i] v = 0) refIdxs values)
-
-                    if found then Ok() else Error(ForeignKeyParentMissing fk.Name)
-
-let private checkFkParents (db: Database) (childColumns: ColumnDef list) (fks: ForeignKeyDef list) (row: Value[]) : Result<unit, StorageError> =
-    fks |> traverse (checkFkParent db childColumns row) |> Result.map ignore
 
 /// Resolves `columns` (the explicit column list, or `None` for "all columns
 /// in table order") to indices against `table`.
