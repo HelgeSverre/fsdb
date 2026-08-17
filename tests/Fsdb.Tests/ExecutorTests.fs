@@ -2547,4 +2547,54 @@ let tests =
                                 Expect.isFalse expectCollision (sprintf "engine accepted %A but the oracle says it collides with %A" key accepted)
                                 accepted <- key :: accepted
                             | Err(1062, _) -> Expect.isTrue expectCollision (sprintf "engine rejected %A as a duplicate but the oracle found no collision in %A" key accepted)
-                            | other -> failtestf "expected Affected 1 or a 1062 duplicate-key error, got %A" other ] ]
+                            | other -> failtestf "expected Affected 1 or a 1062 duplicate-key error, got %A" other
+
+                testCase "FK parent-existence checks (indexed parent PK) match an unindexed parent's full-scan fallback"
+                <| fun _ ->
+                    // `child`'s FK references `parentIndexed`'s real PRIMARY
+                    // KEY, so `checkFkParent` takes `parentUniqueIndex`'s
+                    // fast path; `childUnindexed`'s FK references
+                    // `parentPlain`'s `id`, which carries no PK/UNIQUE at
+                    // all, so the identical check there can only ever fall
+                    // back to the full scan.
+                    let store = newStore ()
+                    runDefault store "CREATE TABLE parentIndexed (id INT PRIMARY KEY)" |> ignore
+                    runDefault store "CREATE TABLE parentPlain (id INT)" |> ignore
+                    runDefault store "CREATE TABLE child (id INT PRIMARY KEY, parent_id INT, FOREIGN KEY (parent_id) REFERENCES parentIndexed(id))" |> ignore
+                    runDefault store "CREATE TABLE childUnindexed (id INT PRIMARY KEY, parent_id INT, FOREIGN KEY (parent_id) REFERENCES parentPlain(id))" |> ignore
+                    runDefault store "INSERT INTO parentIndexed VALUES (1), (2), (3)" |> ignore
+                    runDefault store "INSERT INTO parentPlain VALUES (1), (2), (3)" |> ignore
+
+                    for parentId in [ 1; 2; 3; 999 ] do
+                        let indexedResult = runDefault store (sprintf "INSERT INTO child VALUES (%d, %d)" parentId parentId)
+                        let scanResult = runDefault store (sprintf "INSERT INTO childUnindexed VALUES (%d, %d)" parentId parentId)
+
+                        match indexedResult, scanResult with
+                        | Affected 1UL, Affected 1UL -> ()
+                        | Err(1452, _), Err(1452, _) -> ()
+                        | a, b -> failtestf "indexed vs unindexed parent disagreed for parent_id = %d: %A vs %A" parentId a b
+
+                testCase "point SELECT by PRIMARY KEY on a 50,000-row table stays flat, not linear in table size"
+                <| fun _ ->
+                    // Only catches a regression back to a full table scan
+                    // (section 1.3 of docs/performance-design.md) — the 20ms
+                    // bound is generous, not a tight perf target (the design
+                    // doc's own network-round-trip gate is 250µs).
+                    let store = newStore ()
+                    runDefault store "CREATE TABLE points (id INT PRIMARY KEY, name VARCHAR(20))" |> ignore
+
+                    let batch = [ for i in 1 .. 50_000 -> sprintf "(%d, 'name%d')" i i ] |> String.concat ", "
+                    runDefault store (sprintf "INSERT INTO points VALUES %s" batch) |> ignore
+
+                    let sw = System.Diagnostics.Stopwatch.StartNew()
+                    let result = runDefault store "SELECT name FROM points WHERE id = 25000"
+                    sw.Stop()
+
+                    match result with
+                    | ResultSet([ "name" ], [ [ Some "name25000" ] ]) -> ()
+                    | other -> failtestf "expected exactly the row for id = 25000, got %A" other
+
+                    Expect.isLessThan
+                        sw.Elapsed.TotalMilliseconds
+                        20.0
+                        (sprintf "point SELECT by PK against 50,000 rows took %A — looks like a full scan again" sw.Elapsed) ] ]
