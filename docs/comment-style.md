@@ -28,6 +28,11 @@ behavior), which makes it an intent comment.
 - Session narration / meta-commentary: references to reviews, findings,
   agents, tasks, prior versions, or the act of writing the code ("moved from
   X", "per the finding", "this now handles...", "note that we...").
+- Plan/milestone references: "M9", "M10-3", roadmap phases, design-doc
+  section numbers. Code and tests describe behavior, not project history —
+  a test named "M10 streaming pipeline" says nothing; "LIMIT stops the scan
+  once enough rows survive" does. This applies to comments, test names, and
+  testList labels alike.
 - Reviewer-directed justification ("this is correct because...") — if the
   claim matters, it belongs in a test.
 - Journal/history comments — git owns history.
