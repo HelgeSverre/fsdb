@@ -175,6 +175,50 @@ let tests =
               with Fsdb.Storage.LockWaitTimeout db ->
                   Expect.equal db Fsdb.Storage.defaultDatabase "names the database still holding the gate"
 
+          testCase "an exception mid-statement releases the transaction gate it just acquired instead of leaking it"
+          <| fun _ ->
+              // A killed client's query cancellation (`Server.watchForDisconnect`
+              // flips `Storage.queryCancellation`) can land *after*
+              // `startTransactionStatement` has already acquired this
+              // database's transaction gate but *before* `execute` returns —
+              // the only place that acquired lease is referenced. Every path
+              // that turns an exception here into a reply (`handle`'s
+              // catch-all, and its deliberate `OperationCanceledException`
+              // reraise for `Server`'s command loop) hands back the
+              // *original* pre-statement `Session`, whose `Tx.GateLease` is
+              // still `None` — so nothing downstream (a later ROLLBACK, or
+              // connection cleanup's `closeSession`) ever disposes the lease
+              // that really did decrement the semaphore. Left unhandled, the
+              // gate stays decremented forever and every future transaction
+              // against this database hangs.
+              let store = Fsdb.Storage.create ()
+              let session = create 1 store
+              let session, _ = handle session "CREATE TABLE tx_cancel (id INT PRIMARY KEY, v INT)"
+              let session, _ = handle session "INSERT INTO tx_cancel VALUES (1, 1)"
+              let session, _ = handle session "BEGIN"
+
+              use cts = new Threading.CancellationTokenSource()
+              cts.Cancel()
+              Fsdb.Storage.queryCancellation.Value <- cts.Token
+
+              let threw =
+                  try
+                      handle session "UPDATE tx_cancel SET v = v + 1 WHERE id = 1" |> ignore
+                      false
+                  with :? OperationCanceledException ->
+                      true
+
+              Fsdb.Storage.queryCancellation.Value <- Threading.CancellationToken.None
+              Expect.isTrue threw "expected the cancelled statement to throw OperationCanceledException"
+
+              // The gate must not be leaked: a fresh transaction against the
+              // same (default) database has to be able to acquire it right
+              // away rather than hang.
+              use acquired =
+                  Fsdb.Storage.enterTransactionGate store Fsdb.Storage.defaultDatabase (TimeSpan.FromSeconds 5.0)
+
+              ignore acquired
+
           testCase "concurrent transactions updating the same table serialize without losing a committed increment"
           <| fun _ ->
               let store = Fsdb.Storage.create ()

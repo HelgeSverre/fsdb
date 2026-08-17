@@ -736,7 +736,34 @@ let private executeStatement (session: Session) (sql: string) (upper: string) : 
             result
 
         match session.Tx with
-        | Some _ -> session |> startTransactionStatement |> execute
+        | Some tx ->
+            // `startTransactionStatement` acquires this database's
+            // transaction gate on a transaction's first real statement and
+            // returns it embedded in the new `Session` it hands back — the
+            // *only* place that lease is referenced. If `execute` throws
+            // (a genuine bug, or `Storage.queryCancellation` unwinding a
+            // killed client's query — see `Server.watchForDisconnect`),
+            // that new `Session` is never returned to anyone: every catcher
+            // above this (`handle`'s catch-all, and its deliberate
+            // `OperationCanceledException` reraise for `Server`'s command
+            // loop) only has the *original*, pre-statement `session`, whose
+            // `Tx.GateLease` is still `None`. Nothing would ever dispose the
+            // lease that really did decrement the semaphore, wedging this
+            // database's gate for every future transaction. Only dispose it
+            // here when *this* call is the one that newly acquired it — a
+            // lease already held from an earlier statement in the same
+            // transaction stays held, since the transaction itself isn't
+            // over.
+            let heldBefore = tx.GateLease.IsSome
+            let started = startTransactionStatement session
+
+            try
+                execute started
+            with _ ->
+                if not heldBefore then
+                    started.Tx |> Option.iter (fun tx -> tx.GateLease |> Option.iter (fun lease -> lease.Dispose()))
+
+                reraise ()
         | None ->
             match stmt with
             | Select _
