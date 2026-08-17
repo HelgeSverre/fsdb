@@ -1636,4 +1636,31 @@ let tests =
                         match List.ofSeq rows with
                         | [ row ] -> Expect.equal (asInt row.[0]) (int64 (threadCount * incrementsPerThread)) "every increment landed, none lost to a race"
                         | other -> failtestf "expected exactly one row, got %A" other
-                    | Error e -> failtestf "expected Ok, got %A" e ] ]
+                    | Error e -> failtestf "expected Ok, got %A" e ]
+
+          testList
+              "performance canary"
+              [ testCase "a single-row UPDATE against a 50,000-row table stays roughly linear, not quadratic"
+                <| fun _ ->
+                    // Only catches a quadratic regression (M9-1: updateRows used
+                    // to fold with `doneRows @ [ row ]`, ~8.5s at this size) — the
+                    // 500ms bound is generous, not a tight perf target.
+                    let store = withUsersTable ()
+
+                    let rows = [ for i in 1 .. 50_000 -> [ VString(sprintf "name%d" i); VInt(int64 (i % 100)) ] ]
+                    insertRows store defaultDatabase "users" (Some [ "name"; "age" ]) rows |> ignore
+
+                    let sw = System.Diagnostics.Stopwatch.StartNew()
+
+                    let result = updateRows store defaultDatabase "users" (fun row -> Ok(row.[0] = VInt 25_000L)) (fun row -> Ok [| row.[0]; row.[1]; VInt 999L |])
+
+                    sw.Stop()
+
+                    match result with
+                    | Ok 1 -> ()
+                    | other -> failtestf "expected Ok 1, got %A" other
+
+                    Expect.isLessThan
+                        sw.Elapsed.TotalMilliseconds
+                        500.0
+                        (sprintf "single-row UPDATE against 50,000 rows took %A — looks quadratic again" sw.Elapsed) ] ]
