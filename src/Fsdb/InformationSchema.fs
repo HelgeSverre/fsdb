@@ -195,7 +195,7 @@ let private tablesRows (catalog: Catalog) : Value[] list =
            vs t.OriginalName
            vs "BASE TABLE"
            vs "InnoDB"
-           vi (t.Rows.Length)
+           vi (t.RowsArray.Length)
            VInt t.NextAutoId
            vs "utf8mb4_unicode_ci"
            vs ""
@@ -675,7 +675,7 @@ let showTableStatus (catalog: Catalog) (dbName: string) (likeOpt: string option)
                   Some "InnoDB"
                   Some "10"
                   Some "Dynamic"
-                  Some(string (t.Rows.Length))
+                  Some(string (t.RowsArray.Length))
                   Some "0"
                   Some "16384"
                   Some "0"

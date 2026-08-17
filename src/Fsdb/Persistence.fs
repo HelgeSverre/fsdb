@@ -653,7 +653,7 @@ let private encodeTable (t: Table) : JsonNode =
     o.["indexes"] <- arr (t.Indexes |> List.map encodeIndexDef)
     o.["foreignKeys"] <- arr (t.ForeignKeys |> List.map encodeForeignKeyDef)
     o.["nextAutoId"] <- i64Node t.NextAutoId
-    o.["rows"] <- encodeRows t.Rows
+    o.["rows"] <- encodeRows t.RowsArray
     o
 
 let private decodeTable (node: JsonNode) : Table =
@@ -664,7 +664,7 @@ let private decodeTable (node: JsonNode) : Table =
           Columns = o.["columns"].AsArray() |> Seq.map decodeColumnDef |> List.ofSeq
           Indexes = o.["indexes"].AsArray() |> Seq.map decodeIndexDef |> List.ofSeq
           ForeignKeys = o.["foreignKeys"].AsArray() |> Seq.map decodeForeignKeyDef |> List.ofSeq
-          Rows = decodeRows o.["rows"] |> System.Collections.Immutable.ImmutableArray.CreateRange
+          RowsArray = decodeRows o.["rows"] |> System.Collections.Immutable.ImmutableArray.CreateRange
           NextAutoId = o.["nextAutoId"].GetValue<int64>()
           UniqueIndex = Map.empty }
 

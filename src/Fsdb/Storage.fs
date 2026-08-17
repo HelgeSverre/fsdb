@@ -87,9 +87,10 @@ type Table =
       /// every cons cell, while `ImmutableArray.Add`/`.SetItem` are a single
       /// `Array.Copy` over reference-sized slots, no per-row heap traffic.
       /// Insertion order is the scan order (index `0` is the oldest row);
-      /// deletion compacts (see `deleteRows`), so `Rows.Length` is always
-      /// the table's real row count, never a tombstoned/padded one.
-      Rows: ImmutableArray<Value[]>
+      /// deletion compacts (see `deleteRows`), so `RowsArray.Length` is
+      /// always the table's real row count, never a tombstoned/padded one.
+      /// External readers that want a plain list use the `Rows` member.
+      RowsArray: ImmutableArray<Value[]>
       NextAutoId: int64
       Indexes: IndexDef list
       ForeignKeys: ForeignKeyDef list
@@ -125,6 +126,11 @@ type Table =
       /// `reindexTable` wherever `Rows` is written outside these checked
       /// paths (`Persistence`'s replay/snapshot-load — see its doc).
       UniqueIndex: Map<string, Map<string, int>> }
+
+    /// `RowsArray` as a plain list, in scan order — a fresh O(row count)
+    /// copy on every access, for external validators/tools that walk a
+    /// snapshot with `List.*`; every hot path reads `RowsArray` directly.
+    member this.Rows: Value[] list = List.ofSeq this.RowsArray
 
 /// Table names are case-insensitive, keyed by their lowercased form.
 type Database = Map<string, Table>
@@ -935,7 +941,7 @@ let private rebuildUniqueIndex (table: Table) : Map<string, Map<string, int>> =
     uniqueKeyGroups table
     |> List.map (fun (name, idxs) ->
         let inner =
-            table.Rows
+            table.RowsArray
             |> Seq.indexed
             |> Seq.choose (fun (i, row) -> encodeConstraintKey idxs row |> Option.map (fun k -> k, i))
             |> Map.ofSeq
@@ -1069,7 +1075,7 @@ let tryUniqueLookup
                             table.UniqueIndex
                             |> Map.tryFind groupName
                             |> Option.bind (Map.tryFind key)
-                            |> Option.map (fun pos -> pos, table.Rows.[pos])
+                            |> Option.map (fun pos -> pos, table.RowsArray.[pos])
                             |> Option.toList
 
                     Some(table.Columns, rows)
@@ -1110,7 +1116,7 @@ let private checkFkParent (db: Database) (childColumns: ColumnDef list) (row: Va
                     let found =
                         match parentUniqueIndex parent refIdxs with
                         | Some index -> encodeConstraintKey [ 0 .. values.Length - 1 ] (Array.ofList values) |> Option.map index.ContainsKey |> Option.defaultValue false
-                        | None -> parent.Rows |> Seq.exists (fun prow -> List.forall2 (fun i v -> compare prow.[i] v = 0) refIdxs values)
+                        | None -> parent.RowsArray |> Seq.exists (fun prow -> List.forall2 (fun i v -> compare prow.[i] v = 0) refIdxs values)
 
                     if found then Ok() else Error(ForeignKeyParentMissing fk.Name)
 
@@ -1150,7 +1156,7 @@ let createTable
                 let table =
                     { OriginalName = tableName
                       Columns = columns
-                      Rows = ImmutableArray.Empty
+                      RowsArray = ImmutableArray.Empty
                       NextAutoId = 1L
                       Indexes = indexes
                       ForeignKeys = foreignKeys
@@ -1179,7 +1185,7 @@ let dropTable (store: Store) (dbName: string) (tableName: string) : Result<unit,
     result
 
 let truncate (store: Store) (dbName: string) (tableName: string) : Result<unit, StorageError> =
-    let result = withTable store dbName tableName (fun table -> Ok(reindexTable { table with Rows = ImmutableArray.Empty; NextAutoId = 1L }, ()))
+    let result = withTable store dbName tableName (fun table -> Ok(reindexTable { table with RowsArray = ImmutableArray.Empty; NextAutoId = 1L }, ()))
 
     if result.IsOk then
         emit store (Some(SchemaChanged(dbName, Truncate tableName)))
@@ -1233,14 +1239,14 @@ let private applyAlterAction (table: Table) (action: AlterAction) : Result<Table
         |> Result.map (fun idx ->
             { table with
                 Columns = table.Columns |> insertAt idx col
-                Rows = table.Rows |> Seq.map (fun r -> r |> Array.toList |> insertAt idx fill |> Array.ofList) |> ImmutableArray.CreateRange },
+                RowsArray = table.RowsArray |> Seq.map (fun r -> r |> Array.toList |> insertAt idx fill |> Array.ofList) |> ImmutableArray.CreateRange },
             None)
     | DropColumn name ->
         resolveColumn table.Columns name
         |> Result.map (fun idx ->
             { table with
                 Columns = table.Columns |> List.indexed |> List.filter (fun (i, _) -> i <> idx) |> List.map snd
-                Rows = table.Rows |> Seq.map (removeColumnAt idx) |> ImmutableArray.CreateRange },
+                RowsArray = table.RowsArray |> Seq.map (removeColumnAt idx) |> ImmutableArray.CreateRange },
             None)
     | ModifyColumn(newDef, position) ->
         // ponytail: replaces the column's definition only — existing rows
@@ -1256,8 +1262,8 @@ let private applyAlterAction (table: Table) (action: AlterAction) : Result<Table
             |> Result.map (fun newIdx ->
                 { table with
                     Columns = columnsExcludingSelf |> insertAt newIdx newDef
-                    Rows =
-                        table.Rows
+                    RowsArray =
+                        table.RowsArray
                         |> Seq.map (fun r ->
                             let v = r.[oldIdx]
                             r |> removeColumnAt oldIdx |> Array.toList |> insertAt newIdx v |> Array.ofList)
@@ -1272,8 +1278,8 @@ let private applyAlterAction (table: Table) (action: AlterAction) : Result<Table
             |> Result.map (fun newIdx ->
                 { table with
                     Columns = columnsExcludingSelf |> insertAt newIdx newDef
-                    Rows =
-                        table.Rows
+                    RowsArray =
+                        table.RowsArray
                         |> Seq.map (fun r ->
                             let v = r.[oldIdx]
                             r |> removeColumnAt oldIdx |> Array.toList |> insertAt newIdx v |> Array.ofList)
@@ -1306,7 +1312,7 @@ let private applyAlterAction (table: Table) (action: AlterAction) : Result<Table
                     | Some key -> firstCollision (Set.add key seen) rest
                     | None -> firstCollision seen rest
 
-            match firstCollision Set.empty (List.ofSeq table.Rows) with
+            match firstCollision Set.empty (List.ofSeq table.RowsArray) with
             | Some e -> Error e
             | None -> Ok({ table with Indexes = table.Indexes @ [ ix ] }, None))
     | AddIndex ix -> Ok({ table with Indexes = table.Indexes @ [ ix ] }, None)
@@ -1471,11 +1477,11 @@ let private insertCore
 
                         let source =
                             if isSelf then
-                                Mutable(constraintLookup parentIndices parent.Rows)
+                                Mutable(constraintLookup parentIndices parent.RowsArray)
                             else
                                 match parentUniqueIndex parent parentIndices with
                                 | Some idx -> Fixed idx
-                                | None -> Mutable(constraintLookup parentIndices parent.Rows)
+                                | None -> Mutable(constraintLookup parentIndices parent.RowsArray)
 
                         Some(foreignKey.Name, (childIndices, selfParentIndices, source))
                     | Error _ -> None
@@ -1505,7 +1511,7 @@ let private insertCore
                         // O(log n) per unique group via the running index
                         // (seeded from `table.UniqueIndex`, extended below as
                         // each candidate is accepted) instead of a full scan
-                        // of `table.Rows` per candidate.
+                        // of `table.RowsArray` per candidate.
                         let uniqueCollision =
                             uniqueGroups
                             |> List.tryPick (fun (name, indices) ->
@@ -1535,7 +1541,7 @@ let private insertCore
                                 // original insertion order.
                                 let dbView =
                                     if hasUnacceleratedSelfForeignKey && not acceptedRev.IsEmpty then
-                                        Map.add tableKey { table with Rows = table.Rows.AddRange(List.rev acceptedRev) } db
+                                        Map.add tableKey { table with RowsArray = table.RowsArray.AddRange(List.rev acceptedRev) } db
                                     else
                                         db
 
@@ -1570,10 +1576,10 @@ let private insertCore
                     // Prepending is O(1); reverse once after the fold so
                     // externally observable insertion and commit-event
                     // order remains unchanged. `candidate` lands at
-                    // `table.Rows.Length + (rows already accepted this
+                    // `table.RowsArray.Length + (rows already accepted this
                     // statement)` — every earlier row already occupies its
                     // own slot, appended rows never shift an existing one.
-                    let position = table.Rows.Length + List.length acceptedRev
+                    let position = table.RowsArray.Length + List.length acceptedRev
                     Ok(candidate :: acceptedRev, nextAutoId', firstAuto', lastExplicit', reindexRow uniqueGroups None (Some(position, candidate)) index)
                 | Error _ when ignoreErrors -> Ok(acceptedRev, nextAutoId, firstAuto, lastExplicit, index)
                 | Error e -> Error e)
@@ -1587,7 +1593,7 @@ let private insertCore
         // not an O(existing table size) `list` rebuild — the unique/FK
         // checks above are already O(log n) per row; this was the last O(n)
         // step a single-row INSERT paid.
-        let table' = { table with Rows = table.Rows.AddRange accepted; NextAutoId = nextAutoId'; UniqueIndex = index }
+        let table' = { table with RowsArray = table.RowsArray.AddRange accepted; NextAutoId = nextAutoId'; UniqueIndex = index }
         Map.add tableKey table' db, (Option.defaultValue 0L firstAssigned, firstAuto, List.length accepted, accepted))
 
 /// Inserts rows built from `columns` and matching value lists, applying
@@ -1688,7 +1694,7 @@ let upsertRows
                     // function; the fold below still reports every actual
                     // change (`updated`/`inserted`) as pure `Result` data, so
                     // callers see nothing of the mutation.
-                    let current : Value[][] = table.Rows |> Seq.toArray
+                    let current : Value[][] = table.RowsArray |> Seq.toArray
                     let newRows = ResizeArray<Value[]>()
 
                     // The running index (seeded from `table.UniqueIndex`,
@@ -1785,7 +1791,7 @@ let upsertRows
                                 builder.AddRange newRows
                                 builder.MoveToImmutable()
 
-                        { table with Rows = finalRows; NextAutoId = nextAutoId'; UniqueIndex = index },
+                        { table with RowsArray = finalRows; NextAutoId = nextAutoId'; UniqueIndex = index },
                         (Option.defaultValue 0L (Option.orElse lastExplicit firstAuto), firstAuto, affected, List.rev inserted, List.rev updated))))
 
         match result with
@@ -1846,7 +1852,7 @@ let private checkNotOrphaning (db: Database) (tableKey: string) (parentColumns: 
                     | Error _ -> Ok()
                     | Ok childIdxs ->
                         let stillReferenced =
-                            childTbl.Rows
+                            childTbl.RowsArray
                             |> Seq.exists (fun row -> List.forall2 (fun i v -> compare row.[i] v = 0) childIdxs oldKey)
 
                         if stillReferenced then Error(ForeignKeyRestrict fk.Name) else Ok()
@@ -1901,7 +1907,7 @@ let rec private cascadeDeleteVisited
         let t = Map.find tableKey d
 
         let kept, _ =
-            t.Rows
+            t.RowsArray
             |> Seq.fold
                 (fun (kept, pending) row ->
                     match pending |> List.tryFindIndex ((=) row) with
@@ -1909,7 +1915,7 @@ let rec private cascadeDeleteVisited
                     | None -> row :: kept, pending)
                 ([], toDelete)
 
-        Map.add tableKey (reindexTable { t with Rows = List.rev kept |> ImmutableArray.CreateRange }) d
+        Map.add tableKey (reindexTable { t with RowsArray = List.rev kept |> ImmutableArray.CreateRange }) d
 
     if toDelete.IsEmpty then
         Ok(db, visited)
@@ -1938,7 +1944,7 @@ let rec private cascadeDeleteVisited
                             key |> List.forall ((<>) VNull)
                             && parentKeys |> List.exists (List.forall2 (fun a b -> compare a b = 0) key)
 
-                        let matching = childTbl.Rows |> Seq.filter isChild |> List.ofSeq
+                        let matching = childTbl.RowsArray |> Seq.filter isChild |> List.ofSeq
 
                         if matching.IsEmpty then
                             Ok(d, visited)
@@ -1963,7 +1969,7 @@ let rec private cascadeDeleteVisited
                                     // delete, every row keeps its position, so the index can
                                     // still be rekeyed incrementally instead of a full rebuild.
                                     let blankedRows, index =
-                                        childTbl.Rows
+                                        childTbl.RowsArray
                                         |> Seq.indexed
                                         |> Seq.fold
                                             (fun (rows, index) (pos, row) ->
@@ -1975,7 +1981,7 @@ let rec private cascadeDeleteVisited
                                                     row :: rows, index)
                                             ([], childTbl.UniqueIndex)
 
-                                    Ok(Map.add childKey { childTbl with Rows = List.rev blankedRows |> ImmutableArray.CreateRange; UniqueIndex = index } d, visited)
+                                    Ok(Map.add childKey { childTbl with RowsArray = List.rev blankedRows |> ImmutableArray.CreateRange; UniqueIndex = index } d, visited)
                             | _ -> Error(ForeignKeyRestrict fk.Name))
 
             referencingForeignKeys db tableKey
@@ -2002,7 +2008,7 @@ let private cascadeDelete (checkFks: bool) (db: Database) (tableKey: string) (to
 /// default), applies every referencing foreign key's `ON DELETE` action —
 /// see `cascadeDelete`.
 ///
-/// ponytail: `predicate` always runs against every row of `table.Rows` —
+/// ponytail: `predicate` always runs against every row of `table.RowsArray` —
 /// unlike `SELECT` (`Executor.tryPointLookup`), a `WHERE <PK/UNIQUE col> =
 /// <literal>` DELETE never narrows to `UniqueIndex`'s O(log n) candidates
 /// first, so it's still O(table) even for a single-row delete by id. Route
@@ -2021,7 +2027,7 @@ let deleteRows
 
             tryGetTable db tableName
             |> Result.bind (fun table ->
-                table.Rows
+                table.RowsArray
                 |> List.ofSeq
                 |> traverse (fun row -> predicate row |> Result.map (fun keep -> keep, row))
                 |> Result.bind (fun flagged ->
@@ -2055,13 +2061,13 @@ let deleteRows
 ///
 /// `candidates`, when given, is the exact `(position, row)` set to visit —
 /// `Executor`'s point-lookup narrowing (`tryPointLookup`) already resolved
-/// these via the PK/UNIQUE index, so this fold doesn't re-scan `table.Rows`
+/// these via the PK/UNIQUE index, so this fold doesn't re-scan `table.RowsArray`
 /// at all to find them; `predicate` still re-checks each one for
 /// correctness (this is a pure narrowing to a superset of the real WHERE
 /// match, same discipline `tryPointLookup` documents), it just no longer
 /// pays for the rows that were never candidates in the first place. `None`
 /// (a WHERE that didn't narrow, or none at all) falls back to visiting every
-/// row of `table.Rows`, `predicate` deciding which ones qualify — same
+/// row of `table.RowsArray`, `predicate` deciding which ones qualify — same
 /// fixed-per-row cost as before, now over an array instead of a `list`: the
 /// rewrite lands in a `Builder` (`Rows.ToBuilder()`, one `Array.Copy`)
 /// touched only at the positions that actually change, instead of a full
@@ -2088,7 +2094,7 @@ let updateRows
                     // all-or-nothing guarantee the old cons-then-reverse fold
                     // gave, just backed by a mutable builder instead of an
                     // immutable accumulator.
-                    let builder = table.Rows.ToBuilder()
+                    let builder = table.RowsArray.ToBuilder()
 
                     // `index` mirrors `table.UniqueIndex`, rekeyed one row at
                     // a time (by its `Rows` position, stable across this
@@ -2137,9 +2143,9 @@ let updateRows
                                         (if newRow <> row then (row, newRow) :: changesRev else changesRev), index')))
 
                     candidates
-                    |> Option.defaultWith (fun () -> table.Rows |> Seq.indexed |> List.ofSeq)
+                    |> Option.defaultWith (fun () -> table.RowsArray |> Seq.indexed |> List.ofSeq)
                     |> List.fold step (Ok([], table.UniqueIndex))
-                    |> Result.map (fun (changesRev, index) -> Map.add key { table with Rows = builder.MoveToImmutable(); UniqueIndex = index } db, List.rev changesRev)))
+                    |> Result.map (fun (changesRev, index) -> Map.add key { table with RowsArray = builder.MoveToImmutable(); UniqueIndex = index } db, List.rev changesRev)))
 
         match result with
         | Ok changes ->
@@ -2160,7 +2166,7 @@ let scan (store: Store) (dbName: string) (tableName: string) : Result<ColumnDef 
     | true, slot ->
         match tryGetTable slot.Value tableName with
         | Error e -> Error e
-        | Ok table -> Ok(table.Columns, table.Rows :> Value[] seq)
+        | Ok table -> Ok(table.Columns, table.RowsArray :> Value[] seq)
 
 /// Generated/virtual columns (`CREATE TABLE ... col AS (expr) [STORED |
 /// VIRTUAL]`) — `Ast.ColumnDef.Generated` carries the parsed `Expr`, but
@@ -2189,7 +2195,7 @@ let replaceTablesForReplay (store: Store) (dbName: string) (tableName: string) (
     | true, slot ->
         match slot.Value |> Map.tryFind key with
         | None -> onMissing (sprintf "unknown table '%s.%s'" dbName tableName)
-        | Some table -> slot.Value <- slot.Value |> Map.add key { table with Rows = table.Rows |> List.ofSeq |> f |> ImmutableArray.CreateRange }
+        | Some table -> slot.Value <- slot.Value |> Map.add key { table with RowsArray = table.RowsArray |> List.ofSeq |> f |> ImmutableArray.CreateRange }
 
 /// Rebuilds every table's `UniqueIndex` from its current `Rows` across the
 /// whole store, once — what `Persistence.load` calls after replaying the
