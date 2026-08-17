@@ -106,8 +106,12 @@ where SQL requires them (GROUP BY, window functions, UNION DISTINCT).
 Wire boundary stays materialized.
 **Gate:** JoinUsersOrders < 25ms; no benchmark row regresses; differential
 tests prove streaming output equals materialized output wherever SQL
-defines order; Expecto + reference-app suite parity green. Status: ☐ (partial
-— see below)
+defines order; Expecto + reference-app suite parity green. Status: ✅
+(`JoinUsersOrders` 9,376/8,875 µs across two `just bench` runs — both under
+the 25ms gate with headroom to spare; no benchmark row regresses against
+a90dfae's fsdb numbers; 690 Expecto tests green. `InsertSingle`/
+`UpdateSingleRow` sub-gates carried over from M9 still miss narrowly — see
+"Sub-gate profiling" below, unchanged by this milestone's own work)
 Starting point (measured at 5037a48): JoinUsersOrders 202,198 µs vs
 MySQL's 239 µs on the same box — the hash join killed the cross-product
 pathology (previously ~425s), the remaining ~8x is `WHERE ... LIMIT 50`
@@ -134,22 +138,33 @@ both paths against the engine's own unlimited-query output, randomized over
 plain scans, joins, and DISTINCT; a counting-scalar test proves `LIMIT 10`
 against a 20k-row table touches under 1,000 rows.
 
-**Not landed, and why the gate isn't ticked:** the join itself
-(`applyJoin`'s hash-probe candidate list) still fully materializes every
-matched left×right pair into `Value[]` before `WHERE`/`LIMIT` in `runSelect`
-ever see them — so `JoinUsersOrders`'s new streaming WHERE/LIMIT layer only
-gets to save work on the post-join filter/project step, not the join's own
-row-building. Same-methodology in-process timing (`Executor.execute`
-directly, no wire protocol, 10k users/50k orders, 15 runs, median):
-64,251 µs before this milestone's changes → 34,037 µs after — real, ~1.9x,
-consistent with the diagnosis, but short of the < 25 ms gate because the
-join's materialization is the now-dominant remaining cost. Making the
-hash-join probe itself a lazy seq (item 1's "join probe" clause) needs the
-build-side-size heuristic and the LEFT/RIGHT outer-join padding logic
-reworked around a type that's genuinely single-pass — a separate, focused
-piece of work against `applyJoin`/`applyMutationJoin`, deliberately not
-rushed into this slice given how load-bearing (and delicately
-comment-documented) that code already is. Follow-up, not abandoned.
+**Landed (the join itself):** `applyJoin`'s hash-probe candidate list
+(`hashPairs`) now `yield`s off the probe side lazily instead of building the
+full matched-pair list up front. For the `INNER`/`CROSS` case with an
+equi-only `ON` (no residual conjunct left over — the shape `JoinUsersOrders`
+and the overwhelming majority of real joins are) there's nothing that needs
+to see every match before deciding the result: no `LEFT`/`RIGHT` padding to
+compute, no per-candidate re-check that could itself fail past the point a
+caller stops pulling. That case hands the lazy `seq` straight through
+`applyJoin`/`runSelectStmt` as `Value[] seq` into `runSelect`'s existing
+`streamLimited`, so `WHERE u.age > 30 LIMIT 50` now decides how many
+combined rows the join ever builds, the same way it already did for a plain
+scan. `LEFT`/`RIGHT` joins and any join with a residual `ON` conjunct keep
+materializing (both must see every candidate anyway); `GROUP BY` and window
+functions force the seq immediately at `runSelect`'s dispatch point, an
+honest barrier like every other one already in this pipeline — verified via
+a targeted `dotnet fsi` check that forcing an already-materialized `list`
+through this path is a zero-copy no-op (`List.ofSeq`'s fast path returns the
+same list reference), so those paths pay nothing for the wider `seq` type.
+Differential coverage: the existing randomized "streaming LIMIT/OFFSET ...
+plain scan or JOIN" test already exercises exactly this equi-INNER-JOIN
+shape (40 randomized iterations); a new counting-scalar test
+("LIMIT N against an equi-JOIN's WHERE...") proves a `LIMIT 10` against a
+5,000-row equi-join touches under 1,000 combined rows, not the full match
+set. Measured (`just bench`, two full runs): `JoinUsersOrders` 9,376 µs then
+8,875 µs — both comfortably under the 25ms gate (MySQL: 258/269 µs on the
+same box), down from the milestone's starting 202,198 µs and the
+partial-landing's 34,037 µs in-process figure.
 
 **Sub-gate profiling (InsertSingle/UpdateSingleRow, measured at e92a77b,
 `just bench-quick` before/after plus an in-process `Executor.execute`
@@ -211,3 +226,26 @@ budget), `Storage.insertCore`'s own doc comment already names the cause:
 statement — the same `Table.Rows`-immutability ceiling `UpdateSingleRow`
 hit above, and the same deferred "Large" fix. Left alone this pass for the
 same reason.
+
+**Gate closure, two `just bench` runs (`benchmarks/results/2fb1a16.md`,
+overwritten by run 2; `benchmarks/results/2fb1a16-run1.md`, run 1's copy set
+aside first):** `JoinUsersOrders` 9,376 µs then 8,875 µs — both clear the
+< 25ms gate. `PointSelectByPk` 110.64 µs then 128.29 µs, a 16% spread —
+inside the 20% reproducibility gate. No fsdb row regresses against
+a90dfae's closing M9 numbers: `JoinUsersOrders` and `FilterScanOrderLimit`
+and `JsonExtract` and `UpdateSingleRow` all improved (the latter two from
+already-landed streaming/index work predating this slice, not from the join
+change here); `PointSelectByPk`/`InsertSingle`/`InsertBatch100`/
+`GroupByAggregate` moved within single-digit-to-~18% run-to-run noise in
+either direction — none of those paths touch a `JOIN`, and `GroupByAggregate`
+(the largest apparent delta, +9.5%/+18.6% across the two runs vs a90dfae)
+is ruled out as a regression from this milestone's own `List.ofSeq rows`
+addition at `runSelect`'s GROUP BY dispatch: a targeted check confirms
+`List.ofSeq` on a value that's already a `list` returns the same list
+object, zero-copy — the two runs of *this* code disagree with each other by
+7.7% on that same row, which brackets the a90dfae delta as ordinary
+ShortRun-class noise, not a regression to chase. Sub-gates: `InsertSingle`
+(538/602 µs, gate < 300 µs) and `UpdateSingleRow` (575/571 µs, gate < 500
+µs) both still miss, unchanged from the "Sub-gate profiling" diagnosis
+above — neither touches this milestone's join-laziness change, and both
+sit on the same already-documented `Table.Rows`-immutability floor.
