@@ -349,11 +349,10 @@ let tests =
 
           testCase "WAL replay of many single-row UPDATEs against a UNIQUE-indexed table doesn't rebuild the index once per event"
           <| fun _ ->
-              // `mapTableRows` (RowsUpdated/RowsDeleted) used to call
-              // `reindexTable` — a full rescan of every unique group over
-              // every row — once per *replayed event*, not once per table.
-              // A table with k single-row UPDATEs in its WAL made replay
-              // O(k * n * groups); the fixed version is O(k + n * groups).
+              // Replaying RowsUpdated/RowsDeleted must not reindex — a full
+              // rescan of every unique group over every row — once per
+              // event. A table with k single-row UPDATEs in its WAL would
+              // make replay O(k * n * groups) instead of O(k + n * groups).
               //
               // The WAL is built by hand (rather than k real attached
               // updateRows calls, each fsync'd) so this test measures only
@@ -468,12 +467,11 @@ let tests =
 
           testCase "WAL replay of a single RowsUpdated/RowsDeleted event over 10,000 rows doesn't stack-overflow"
           <| fun _ ->
-              // `applyRowChanges`/`applyRowDeletes` used to recurse once per
-              // row *outside* tail position (`row :: applyRowChanges ...`),
-              // so a single bulk UPDATE/DELETE's replay — one `CommitEvent`
-              // covering thousands of physically distinct rows — blew the
-              // stack on restart. This pins the fix at well past the ~3800
-              // rows the old recursion crashed at.
+              // Replay of one `CommitEvent` covering thousands of physically
+              // distinct rows must be tail-recursive — a non-tail per-row
+              // recursion (`row :: applyRowChanges ...`) overflows the stack
+              // on restart. The 10,000-row event here sits past the ~3800
+              // rows a non-tail recursion crashes at.
               let dir = tempDataDir ()
               let store = load dir
               attach dir store

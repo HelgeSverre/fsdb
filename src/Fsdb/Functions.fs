@@ -125,8 +125,8 @@ let private roundFn: Scalar =
 
 /// `MOD(a, b)` (and `%`, which desugars to this in `Parser`) — MySQL's
 /// numeric-promotion rules, shared with `Value.add`/`sub`/`mul` rather than
-/// re-deriving them here (a `DECIMAL` argument used to fall through to a
-/// `VDouble` result, losing its scale).
+/// re-deriving them here (a `DECIMAL` operand promotes to `DECIMAL`,
+/// keeping its scale).
 let private modFn: Scalar =
     function
     | [ a; b ] -> modulo a b

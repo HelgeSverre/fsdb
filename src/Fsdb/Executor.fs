@@ -597,8 +597,8 @@ let private extractEquiKeys
 /// coerces *any* pair of these numeric types through `toDouble` (so `1 =
 /// 1.0` joins), and folds any pair of these text types through the same
 /// case/pad-insensitive collation `compareStrings` uses (so `'Alice' =
-/// 'alice'` and `'a' = 'a '` join) — see the design doc's "non-obvious
-/// correctness trap". `keyClassOf` below only decides when it's safe to
+/// 'alice'` and `'a' = 'a '` join) — the "non-obvious correctness trap":
+/// `keyClassOf` below only decides when it's safe to
 /// *attempt* a bucket at all; `JoinKeyComparer` still does the real
 /// equality check through `Value.compare` itself.
 let private isJoinNumericType =

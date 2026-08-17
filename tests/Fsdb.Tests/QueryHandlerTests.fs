@@ -342,9 +342,9 @@ let tests =
               // Two independent sessions (e.g. Laravel's default + a
               // 'strict' => false read connection) sharing one Store, the
               // way `Server` hands every accepted connection the same
-              // `Store` — `Store.StrictMode` used to be set once by whoever
-              // last ran `SET sql_mode`, and stayed that way for every other
-              // connection forever after.
+              // `Store` — a session's `sql_mode` must stay scoped to that
+              // session, not leak to a sibling connection that shares the
+              // store.
               let store = Fsdb.Storage.create ()
               let strictSession = create 1 store
               let laxSession = create 2 store
@@ -377,8 +377,8 @@ let tests =
               // MySQL — can't leave `sql_mode` (or any other variable it
               // named first) half-updated. `bad-name` (a hyphen isn't a
               // valid identifier char) matches neither `setVar` nor
-              // `setUserVar` — `@user_var=1` used to be this fixture's bad
-              // fragment, before `SET @foo = ...` became a real feature.
+              // `setUserVar`; `@user_var=1` can't serve as the bad fragment
+              // because `SET @foo = ...` is a real feature.
               let session = create 1 (Fsdb.Storage.create ())
 
               let session, result = handle session "SET SESSION sql_mode='ANSI_QUOTES', bad-name=1"

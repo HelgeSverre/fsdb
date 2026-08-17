@@ -283,11 +283,10 @@ let tests =
 
                 testCase "a DATE column value against a DATETIME-shaped string bound compares as a real instant, not text"
                 <| fun _ ->
-                    // Regression: `VDate 2024-01-01`.toText ("2024-01-01", no
-                    // time part) sorted lexically *before* "2024-01-01
-                    // 00:00:00" as plain text, so `date BETWEEN '2024-01-01
-                    // 00:00:00' AND ...` wrongly excluded same-day rows at
-                    // the lower bound.
+                    // A `VDate` against a DATETIME-shaped string must compare
+                    // as a real instant, not as text — lexical order puts
+                    // "2024-01-01" *before* "2024-01-01 00:00:00" and would
+                    // exclude same-day rows at a BETWEEN lower bound.
                     Expect.equal (compare (VDate(DateOnly(2024, 1, 1))) (VString "2024-01-01 00:00:00")) 0 "midnight on the same day"
                     Expect.isGreaterThan (compare (VDate(DateOnly(2024, 1, 1))) (VString "2023-12-31 23:59:59")) 0 "a day after the bound"
                     Expect.isLessThan (compare (VString "2024-01-01 00:00:00") (VDate(DateOnly(2024, 1, 2)))) 0 "symmetric: string on the left"

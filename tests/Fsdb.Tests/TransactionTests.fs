@@ -129,12 +129,11 @@ let tests =
 
           testCase "an open transaction in one database doesn't block a write to an unrelated database"
           <| fun _ ->
-              // Regression: the transaction gate used to be a single
-              // store-wide semaphore, so every connection's writes
-              // serialized behind any one open transaction, anywhere —
-              // exactly what collapses a parallel test suite (each worker
-              // in its own database) to fully serial. The gate is now one
-              // `SemaphoreSlim` per database.
+              // The transaction gate is one `SemaphoreSlim` per database — a
+              // single store-wide semaphore would serialize every
+              // connection's writes behind any one open transaction,
+              // anywhere, collapsing a parallel test suite (each worker in
+              // its own database) to fully serial.
               let store = Fsdb.Storage.create ()
               Fsdb.Storage.createDatabase store "tx_db_a" |> ignore
               Fsdb.Storage.createDatabase store "tx_db_b" |> ignore

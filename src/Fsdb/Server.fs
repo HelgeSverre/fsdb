@@ -16,7 +16,7 @@ open Fsdb.Storage
 open Fsdb.Value
 open Fsdb.Executor
 
-// COM_* command byte values we handle.
+// COM_* command byte values handled here.
 // https://dev.mysql.com/doc/dev/mysql-server/latest/page_protocol_command_phase.html
 type private Command =
     | Quit

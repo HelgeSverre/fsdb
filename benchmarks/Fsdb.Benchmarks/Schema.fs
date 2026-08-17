@@ -31,12 +31,11 @@ let portFor (target: string) =
     | other -> failwith $"unknown benchmark target: {other}"
 
 // Pooling=false: fsdb doesn't implement COM_RESET_CONNECTION yet (a pooled
-// Open() sends it, fsdb replies "Unknown command" and the client throws —
-// see performance-design.md 1.7). M9-4's per-case server restart makes this
-// bite even a single-connection benchmark process, since GlobalSetup now
-// opens more than one connection against the same connection string
-// (the readiness probe, then the seeding connection) before the benchmark
-// proper ever runs.
+// Open() sends it, fsdb replies "Unknown command" and the client throws).
+// The per-case server restart makes this bite even a single-connection
+// benchmark process, since GlobalSetup opens more than one connection
+// against the same connection string (the readiness probe, then the seeding
+// connection) before the benchmark proper ever runs.
 let rootConnectionString (target: string) =
     $"Server=127.0.0.1;Port={portFor target};User=root;AllowPublicKeyRetrieval=true;SslMode=none;Pooling=false;"
 

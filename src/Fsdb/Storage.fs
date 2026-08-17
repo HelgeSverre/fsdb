@@ -208,19 +208,17 @@ let splitQualified (defaultDb: string) (name: string) : string * string =
 type Store =
     { /// Every database's table map, each independently guarded by its own
       /// `Database ref` cell (locked via that same cell — see `withDatabase`)
-      /// — the sharded replacement for what used to be one store-wide
-      /// `Catalog` field with a single `Interlocked.CompareExchange` target.
+      /// — sharded so one database's writes never contend with another's.
       /// A `ConcurrentDictionary` so `CREATE`/`DROP DATABASE` (adding/
       /// removing a whole entry) is itself a lock-free, atomic dictionary
       /// operation that never contends with an unrelated database's row
       /// writer either (`createDatabase`/`dropDatabase`, `ensureDatabase`).
-      /// This is the fix for the cross-database write bottleneck profiling
-      /// found: every write to *any* database used to CAS the same single
-      /// `Catalog` reference, so writers in unrelated databases constantly
-      /// invalidated each other's compare-exchange and had to retry their
-      /// whole write under contention; sharding per database means database
-      /// A's writers never see database B's writes at all, let alone race
-      /// them. Not exposed beyond this module (no other module needs to
+      /// Sharding means database A's writers never see database B's writes at
+      /// all, let alone race them — a single store-wide `Catalog` reference
+      /// would be one `Interlocked.CompareExchange` target where every write
+      /// to *any* database invalidates every other writer's compare-exchange
+      /// and forces a full write retry under contention. Not exposed beyond
+      /// this module (no other module needs to
       /// touch it directly — everything goes through `Store.Catalog`,
       /// `scan`, `tryUniqueLookup`, or the write ops below).
       Databases: ConcurrentDictionary<string, Database ref>
@@ -266,9 +264,9 @@ type Store =
       mutable PendingEvents: ResizeArray<CommitEvent> option
       /// Serializes the lifetime of active transactions and individual
       /// autocommit mutations, one `SemaphoreSlim` per database (created
-      /// lazily by `enterTransactionGate`) rather than one store-wide —
-      /// unrelated databases no longer block on each other's open
-      /// transactions. A transaction acquires its database's gate on its
+      /// lazily by `enterTransactionGate`) rather than one store-wide, so
+      /// unrelated databases never block on each other's open transactions.
+      /// A transaction acquires its database's gate on its
       /// first real database statement (not BEGIN) and releases it at
       /// COMMIT/ROLLBACK, which prevents the snapshot merger from replacing
       /// a concurrent writer's changes to the same table. SemaphoreSlim is
@@ -498,15 +496,15 @@ let private withDatabase
     | true, slot ->
         // `slot` (the `Database ref` cell itself) doubles as this
         // database's own mutual-exclusion object — `lock` (a re-entrant
-        // .NET `Monitor`) rather than the `Interlocked.CompareExchange` this
-        // used to be: two writers to *different* databases still never
-        // block on each other (they lock different `slot`s), but two
-        // writers to the *same* database are now unconditionally mutually
-        // exclusive here, in `Storage` itself, rather than relying entirely
-        // on `QueryHandler`'s `TransactionGates` to have already kept them
-        // apart — a second, independent line of defense against exactly the
-        // lost-update hazard `mergeDatabaseSlot`'s doc describes, should a
-        // caller ever reach this module without holding the right gate.
+        // .NET `Monitor`) rather than `Interlocked.CompareExchange`: two
+        // writers to *different* databases still never block on each other
+        // (they lock different `slot`s), but two writers to the *same*
+        // database are unconditionally mutually exclusive here, in
+        // `Storage` itself, rather than relying entirely on `QueryHandler`'s
+        // `TransactionGates` to have already kept them apart — a second,
+        // independent line of defense against exactly the lost-update hazard
+        // `mergeDatabaseSlot`'s doc describes, should a caller ever reach
+        // this module without holding the right gate.
         lock slot (fun () ->
             match f slot.Value with
             | Error e -> Error e
@@ -1015,8 +1013,9 @@ let private rebuildUniqueIndex (table: Table) : Map<string, Map<string, int>> =
     |> Map.ofList
 
 /// Bumped once per `reindexTable` call — the full-scan rebuild it wraps is
-/// the O(table size) cost that per-event replay used to pay repeatedly.
-/// `AsyncLocal`, not a plain mutable: Expecto runs tests in parallel, each
+/// the O(table size) cost a replay must pay a constant number of times, not
+/// once per replayed event. `AsyncLocal`, not a plain mutable: Expecto runs
+/// tests in parallel, each
 /// on its own async flow, so a test that increments this only sees its own
 /// count instead of racing every other test's `createTable`/`truncate`/WAL
 /// replay in the suite. Lets a test assert "reindexed a constant number of
@@ -2158,14 +2157,13 @@ let deleteRows
 /// these via the PK/UNIQUE index, so this fold doesn't re-scan `table.RowsArray`
 /// at all to find them; `predicate` still re-checks each one for
 /// correctness (this is a pure narrowing to a superset of the real WHERE
-/// match, same discipline `tryPointLookup` documents), it just no longer
-/// pays for the rows that were never candidates in the first place. `None`
-/// (a WHERE that didn't narrow, or none at all) falls back to visiting every
-/// row of `table.RowsArray`, `predicate` deciding which ones qualify — same
-/// fixed-per-row cost as before, now over an array instead of a `list`: the
-/// rewrite lands in a `Builder` (`Rows.ToBuilder()`, one `Array.Copy`)
-/// touched only at the positions that actually change, instead of a full
-/// `list` rebuild threaded through the whole fold.
+/// match, same discipline `tryPointLookup` documents), so it never pays for
+/// rows that weren't candidates. `None` (a WHERE that didn't narrow, or
+/// none at all) falls back to visiting every row of `table.RowsArray`,
+/// `predicate` deciding which ones qualify — the rewrite lands in a
+/// `Builder` (`Rows.ToBuilder()`, one `Array.Copy`) touched only at the
+/// positions that actually change, instead of a full `list` rebuild
+/// threaded through the whole fold.
 let updateRows
     (store: Store)
     (dbName: string)

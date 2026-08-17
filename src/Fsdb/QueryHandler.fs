@@ -1026,8 +1026,8 @@ let private dispatch (session: Session) (rawSql: string) : Session * QueryResult
 /// only when a statement failed badly enough to abort the whole transaction
 /// (see `handle`'s exception handlers below), never on a normal COMMIT/
 /// ROLLBACK (`commitSession`/`rollbackSession` already own that). Freeing
-/// the gate isn't itself the fix for a mid-transaction failure — a
-/// transaction's whole safety argument is that it holds its database's gate
+/// the gate alone doesn't recover a failed transaction — a transaction's
+/// whole safety argument is that it holds its database's gate
 /// *continuously* from its first real statement through COMMIT/ROLLBACK, so
 /// `mergeCatalogInto`'s three-way merge (`BaseCatalog`, captured at BEGIN,
 /// against the live catalog *right now*) never races a concurrent

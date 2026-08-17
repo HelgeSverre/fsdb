@@ -1325,7 +1325,7 @@ let tests =
                     | ResultSet([ "id"; "active" ], [ [ Some "1"; Some "1" ] ]) -> ()
                     | other -> failtestf "expected the new column filled with its default, got %A" other
 
-                testCase "DROP COLUMN then SELECT * no longer sees it"
+                testCase "DROP COLUMN then SELECT * doesn't see it"
                 <| fun _ ->
                     let store = newStore ()
                     runDefault store "CREATE TABLE t (id INT, junk INT)" |> ignore
@@ -1653,9 +1653,9 @@ let tests =
 
                 testCase "UNHEX(MD5(...)) stored into a BINARY column round-trips through LENGTH/HEX"
                 <| fun _ ->
-                    // Regression: unhexFn used to hand back a Latin-1-carrier
-                    // VString, which the BINARY column coercion then
-                    // re-encoded as UTF-8 — doubling most bytes above 0x7F.
+                    // UNHEX must surface the exact decoded bytes — if it
+                    // returned a UTF-8 VString, the BINARY column coercion
+                    // would re-encode it and double most bytes above 0x7F.
                     let store = newStore ()
                     runDefault store "CREATE TABLE bt (h BINARY(16))" |> ignore
 
@@ -1882,7 +1882,7 @@ let tests =
 
                     match runDefault store "SELECT u.id FROM u AS x" with
                     | Err(1054, _) -> ()
-                    | other -> failtestf "expected the pre-alias table name to no longer resolve, got %A" other ]
+                    | other -> failtestf "expected the pre-alias table name to not resolve, got %A" other ]
 
           testList
               "SELECT DISTINCT"
@@ -2548,21 +2548,19 @@ let tests =
 
                 testCase "the non-equi JOIN fallback's accumulator holds only matched rows, not one entry per candidate pair"
                 <| fun _ ->
-                    // `traverseSeq`'s accumulator used to grow by one
-                    // `(left, right, combined, matched: bool)` tuple per
-                    // *candidate pair*, filtering down to actual matches
-                    // only afterward — so a low-selectivity non-equi ON held
-                    // the full cross product in memory at once (the RSS
-                    // pathology the design doc measures), not just the
-                    // eventual result. Per-pair `evalExpr` cost dominates
-                    // wall time either way (unaffected by this fix and much
-                    // larger than the accumulator-shape difference at unit
-                    // test scale), so this is a correctness/doesn't-hang
-                    // check at a meaningfully low-selectivity size (n-1
-                    // matches out of n^2 candidate pairs), not a tight perf
-                    // assertion — see the perf-canary tests elsewhere in
-                    // this suite for that style of check where the gap is
-                    // wide enough to assert on reliably.
+                    // A low-selectivity non-equi ON must stream matches, not
+                    // hold a `(left, right, combined, matched: bool)` tuple
+                    // per *candidate pair* — that keeps the full cross
+                    // product in memory at once, not just the eventual
+                    // result. Per-pair `evalExpr` cost dominates wall time
+                    // either way (much larger than the accumulator-shape
+                    // difference at unit-test scale), so this is a
+                    // correctness/doesn't-hang check at a meaningfully
+                    // low-selectivity size (n-1 matches out of n^2 candidate
+                    // pairs), not a tight perf assertion — see the
+                    // perf-canary tests elsewhere in this suite for that
+                    // style of check where the gap is wide enough to assert
+                    // on reliably.
                     let store = newStore ()
                     runDefault store "CREATE TABLE l (n INT)" |> ignore
                     runDefault store "CREATE TABLE r (n INT)" |> ignore
@@ -2621,7 +2619,7 @@ let tests =
 
                     match runDefault store "SELECT name, balance FROM accounts2 ORDER BY name" with
                     | ResultSet(_, rows) ->
-                        Expect.equal rows [ [ Some "Alice"; Some "10" ]; [ Some "bob  "; Some "0" ] ] "'bob  ' vs 'BOB' no longer matches under NO PAD"
+                        Expect.equal rows [ [ Some "Alice"; Some "10" ]; [ Some "bob  "; Some "0" ] ] "'bob  ' vs 'BOB' doesn't match under NO PAD"
                     | other -> failtestf "expected a resultset, got %A" other ]
 
           testList
@@ -3185,11 +3183,10 @@ let tests =
 
                 testCase "a parenthesized UNION branch's own ORDER BY/LIMIT stays that branch's, not the whole union's"
                 <| fun _ ->
-                    // Regression: the union's OrderBy/Limit used to be read
-                    // off whichever branch parsed last, even when that
-                    // branch was individually parenthesized — hijacking the
-                    // branch's own clause into a union-wide one instead of
-                    // running the union unordered/unlimited as MySQL does.
+                    // A parenthesized branch's own ORDER BY/LIMIT must stay
+                    // attached to that branch — MySQL runs the union itself
+                    // unordered/unlimited here, not with one branch's clause
+                    // hijacked into a union-wide one.
                     let store = newStore ()
                     runDefault store "CREATE TABLE u1 (n INT)" |> ignore
                     runDefault store "CREATE TABLE u2 (n INT)" |> ignore
@@ -3561,10 +3558,9 @@ let tests =
                 <| fun _ ->
                     // insertCore's own FK-parent lookup (`foreignKeyLookups`,
                     // separate from `checkFkParent`'s fast path exercised
-                    // above) used to build a fresh HashSet by scanning the
-                    // *entire* parent table on every INSERT statement,
-                    // regardless of how many rows the parent's own
-                    // PK/UNIQUE index could have answered in O(log n).
+                    // above) must answer via the parent's PK/UNIQUE index in
+                    // O(log n), not by scanning the *entire* parent table on
+                    // every INSERT statement.
                     let store = newStore ()
                     runDefault store "CREATE TABLE parent (id INT PRIMARY KEY)" |> ignore
                     runDefault store "CREATE TABLE child (id INT PRIMARY KEY, parent_id INT, FOREIGN KEY (parent_id) REFERENCES parent(id))" |> ignore
@@ -3593,10 +3589,9 @@ let tests =
 
                 testCase "point SELECT by PRIMARY KEY on a 50,000-row table stays flat, not linear in table size"
                 <| fun _ ->
-                    // Only catches a regression back to a full table scan
-                    // (section 1.3 of docs/performance-design.md) — the 20ms
-                    // bound is generous, not a tight perf target (the design
-                    // doc's own network-round-trip gate is 250µs).
+                    // Only catches a regression back to a full table scan —
+                    // the 20ms bound is generous, not a tight perf target
+                    // (the network round-trip floor is ~250µs).
                     let store = newStore ()
                     runDefault store "CREATE TABLE points (id INT PRIMARY KEY, name VARCHAR(20))" |> ignore
 
@@ -3618,13 +3613,11 @@ let tests =
 
                 testCase "point SELECT by PRIMARY KEY latency is flat from 10k to 40k rows, the actual O(1) proof, not just a single-size bound"
                 <| fun _ ->
-                    // The performance gate in docs/performance-design.md says
-                    // verbatim "Point-lookup latency flat from 10k to 40k
-                    // rows" — the single-size test above (generous, at one
-                    // n) is consistent with a merely-faster linear scan; the
-                    // thing that actually proves the index is O(1) is this
-                    // ratio staying near 1 across a 4x size increase instead
-                    // of tracking it.
+                    // A single-size bound (generous, at one n) is consistent
+                    // with a merely-faster linear scan; the thing that
+                    // actually proves the index is O(1) is this ratio staying
+                    // near 1 across a 4x size increase instead of tracking
+                    // it.
                     let timeLookup (n: int) : float =
                         let store = newStore ()
                         runDefault store "CREATE TABLE flat (id INT PRIMARY KEY, name VARCHAR(20))" |> ignore
@@ -3647,11 +3640,11 @@ let tests =
                     let at10k = timeLookup 10_000
                     let at40k = timeLookup 40_000
 
-                    // O(n) would show ~4x here (section 1.3's own measured
-                    // scan cost: 1.315ms @10k -> 7.287ms @40k, a 5.5x
-                    // ratio); a real O(1)/O(log n) index stays well under
-                    // that. Floored by the harness's own per-call noise at
-                    // this scale, so the bound is generous, not tight.
+                    // An O(n) scan would show ~4x here (1.315ms @10k ->
+                    // 7.287ms @40k, a 5.5x ratio); a real O(1)/O(log n)
+                    // index stays well under that. Floored by the harness's
+                    // own per-call noise at this scale, so the bound is
+                    // generous, not tight.
                     let ratio = at40k / (max at10k 0.001)
 
                     Expect.isLessThan
@@ -3666,14 +3659,13 @@ let tests =
                 testCase "a correlated subquery's outer equality never gets mistaken for the inner table's own index probe"
                 <| fun _ ->
                     // Same indexed-vs-unindexed-twin method as the top-level
-                    // test above, but the equality now lives inside a
-                    // correlated subquery, ANDed alongside a *genuine*
-                    // correlation on the inner table — and the outer column
-                    // (`users.id`) shares its name with the inner table's own
-                    // indexed column (`posts.id`), which is exactly the shape
-                    // `tryPointLookup` used to confuse: a bare/qualified `id
-                    // = <literal>` belonging to the OUTER query got treated as
-                    // a probe into the INNER table's PK index.
+                    // test above, but the equality lives inside a correlated
+                    // subquery, ANDed alongside a *genuine* correlation on
+                    // the inner table — and the outer column (`users.id`)
+                    // shares its name with the inner table's own indexed
+                    // column (`posts.id`). A bare/qualified `id = <literal>`
+                    // belonging to the OUTER query must not be treated as a
+                    // probe into the INNER table's PK index.
                     let store = newStore ()
                     runDefault store "CREATE TABLE users (id INT PRIMARY KEY, name VARCHAR(20))" |> ignore
                     runDefault store "CREATE TABLE postsIndexed (id INT PRIMARY KEY, user_id INT)" |> ignore

@@ -4,10 +4,10 @@
 ///
 /// BenchmarkDotNet launches a fresh process per (Target x Benchmark method)
 /// case, so GlobalSetup/GlobalCleanup below run once per case, not once per
-/// suite. That's the granularity M9-4 needs: fsdb has a real bug (a timed-out
-/// JOIN keeps building its cross product server-side after the client gives
-/// up, see performance-design.md 1.1/1.6) where one case's leftover work
-/// inflates every later case's numbers 5-8x. The fix chosen here is
+/// suite. That per-case granularity is what makes the restart strategy
+/// possible: fsdb has a real bug (a timed-out JOIN keeps building its cross
+/// product server-side after the client gives up) where one case's leftover
+/// work inflates every later case's numbers 5-8x. The fix chosen here is
 /// "restart the fsdb server per case", not "reseed in place" or "run every
 /// case on its own port": a restart is the only thing that actually kills
 /// the leftover work, it needs just one well-known port (nothing else is

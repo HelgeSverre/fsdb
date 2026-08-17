@@ -49,9 +49,9 @@ let tests =
           <| fun _ ->
               // Laravel's `Blueprint::change()` (e.g. `$table->decimal(...)
               // ->change()`) goes through Doctrine DBAL, which probes
-              // `getListTableMetadataSQL` — `t.AUTO_INCREMENT` used to be a
-              // 1064 (AUTO_INCREMENT was a reserved word) and
-              // `t.CREATE_OPTIONS` a 1054 (column didn't exist at all).
+              // `getListTableMetadataSQL` — that query must handle
+              // `t.AUTO_INCREMENT` (a reserved word) and `t.CREATE_OPTIONS`
+              // without erroring.
               let store = setup ()
 
               match
