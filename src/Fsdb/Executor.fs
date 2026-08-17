@@ -2886,12 +2886,23 @@ let execute (store: Store) (registry: Registry) (dbName: string) (ids: int64 * i
         // whichever source table each `SET` target names, claiming a
         // physical row (by reference) the first time a matched row touches
         // it so a row reached through more than one join match is still
-        // updated at most once (see `Ast.UpdateStmt`'s doc). Held under one
-        // `store.Lock` for the whole statement (read *and* write) so no
-        // other write can interleave between the join scan and the apply
-        // below — same coarseness `Storage.updateRows` already uses for a
-        // single-table `UPDATE`.
-        lock store.Lock (fun () ->
+        // updated at most once (see `Ast.UpdateStmt`'s doc). Runs the writes
+        // against a private snapshot store, merged back via
+        // `Storage.mergeCatalogInto` (see its doc) — same optimistic,
+        // per-database-serialized pattern every other write uses, so this
+        // statement doesn't block a concurrent write to an unrelated
+        // database. ponytail: a join source qualified onto a database other
+        // than the current session's isn't covered by that database's own
+        // `TransactionGates` gate (only the session's current database's
+        // is held before reaching `Executor`), so a target table living in
+        // a *different* database can still race a concurrent writer to that
+        // same table there — the same documented gap as a cross-database
+        // transaction (see `Storage.Store`'s doc); upgrade to acquiring
+        // every database a statement's join sources actually name if that
+        // ever matters (Laravel's per-worker-database test parallelism,
+        // the case this all exists for, only ever joins within one
+        // database).
+        (
             match runMutationJoin store registry dbName updateStmt.From updateStmt.Joins with
             | Error e -> ids, e
             | Ok(sources, joinedRows) ->
@@ -3022,6 +3033,7 @@ let execute (store: Store) (registry: Registry) (dbName: string) (ids: int64 * i
                         // (as one `TransactionCommitted` WAL entry, not N
                         // separate ones) once every batch has actually
                         // succeeded.
+                        let baseCatalog = store.Catalog
                         let snapshot = Storage.beginTransactionSnapshot store
 
                         let apply =
@@ -3050,7 +3062,7 @@ let execute (store: Store) (registry: Registry) (dbName: string) (ids: int64 * i
 
                         match apply with
                         | Ok counts ->
-                            store.Catalog <- snapshot.Catalog
+                            Storage.mergeCatalogInto store baseCatalog snapshot.Catalog
                             Storage.commitTransactionEvents store snapshot
                             ids, Affected(uint64 (List.sum counts))
                         | Error e -> ids, storageErr e)

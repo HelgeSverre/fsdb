@@ -121,8 +121,8 @@ let splitQualified (defaultDb: string) (name: string) : string * string =
     | [| db; tbl |] -> stripBackticks db, stripBackticks tbl
     | _ -> defaultDb, stripBackticks name
 
-/// ponytail: one global catalog lock plus one coarse transaction/write gate
-/// *per database* rather than row/table locks. This preserves committed
+/// ponytail: one coarse transaction/write gate *per database* (see
+/// `TransactionGates`) rather than row/table locks. This preserves committed
 /// state under contention but serializes every write within one database,
 /// transactional or not; replace it with row versions or sharded async
 /// locks when parallel write throughput matters. A transaction that writes
@@ -185,6 +185,15 @@ type Store =
       /// intentionally used instead of Monitor because a connection's
       /// BEGIN, statements, and COMMIT may resume on different threads.
       TransactionGates: ConcurrentDictionary<string, SemaphoreSlim>
+      /// Serializes `OnCommit`'s dispatch only (see `emit`) — every other
+      /// write serializes per-database via `TransactionGates` and swaps
+      /// `Catalog` lock-free (`Interlocked.CompareExchange`, see `withWrite`),
+      /// so writers to different databases never wait on each other here.
+      /// `OnCommit`'s one subscriber (`Persistence.attach`'s WAL appender)
+      /// isn't safe to call concurrently from two databases' writer threads
+      /// at once — it appends to one shared file and tracks rotation state
+      /// in a plain `ref` — so its calls stay ordered by this lock, same as
+      /// `Persistence.snapshotNow`'s own use of it.
       Lock: obj }
 
 let create () : Store =
@@ -228,19 +237,17 @@ let enterTransactionGate (store: Store) (dbName: string) (timeout: TimeSpan) : I
     new TransactionGateLease(gate) :> IDisposable
 
 /// Delivers `event` (if any): buffers it if `store` is a transaction
-/// snapshot (`PendingEvents`), otherwise hands it straight to `OnCommit` if
-/// someone's listening. Callers hold `store.Lock` for the whole operation
-/// this event describes (every public write function below wraps its body
-/// in `lock store.Lock`, and F#'s `lock` — `Monitor` — is reentrant on the
-/// same thread), so this always runs "under the write lock after a
-/// successful catalog swap".
+/// snapshot (`PendingEvents` — private to the transaction's own thread, so
+/// no locking needed), otherwise hands it to `OnCommit` under `store.Lock`
+/// if someone's listening (see the doc on `Lock`). Always called after the
+/// catalog swap that made the event's write visible has already landed.
 let private emit (store: Store) (event: CommitEvent option) : unit =
     match event with
     | None -> ()
     | Some e ->
         match store.PendingEvents with
         | Some buffer -> buffer.Add e
-        | None -> store.OnCommit |> Option.iter (fun f -> f e)
+        | None -> store.OnCommit |> Option.iter (fun f -> lock store.Lock (fun () -> f e))
 
 /// A private per-transaction catalog snapshot seeded from `store`'s current
 /// catalog (see `Session.Transaction`) — writes against it stay invisible
@@ -296,33 +303,150 @@ let normalizeTableName (name: string) = name.ToLowerInvariant()
 /// handshake auto-create/first-write auto-vivify), this errors 1007 if it
 /// already exists; `Executor` swallows that error for `IF NOT EXISTS`, same
 /// pattern as `createTable`.
+/// Retries `body` against a freshly re-read `store.Catalog` if its
+/// `Interlocked.CompareExchange` swap loses a race to a concurrent writer on
+/// a *different* database — see `withWrite`'s doc (defined below, once
+/// `Catalog`'s write ops start needing the general form) for why a retry
+/// here only ever means that, never self-contention.
+let rec private createOrDropDatabase (store: Store) (body: Catalog -> Result<Catalog * CommitEvent, StorageError>) : Result<unit, StorageError> =
+    let current = store.Catalog
+
+    match body current with
+    | Error e -> Error e
+    | Ok(catalog', event) ->
+        if obj.ReferenceEquals(Interlocked.CompareExchange(&store.Catalog, catalog', current), current) then
+            emit store (Some event)
+            Ok()
+        else
+            createOrDropDatabase store body
+
 let createDatabase (store: Store) (dbName: string) : Result<unit, StorageError> =
-    lock store.Lock (fun () ->
-        if Map.containsKey dbName store.Catalog then
+    createOrDropDatabase store (fun catalog ->
+        if Map.containsKey dbName catalog then
             Error(DatabaseExists dbName)
         else
-            store.Catalog <- Map.add dbName Map.empty store.Catalog
-            emit store (Some(SchemaChanged(dbName, CreateDatabase(dbName, false))))
-            Ok())
+            Ok(Map.add dbName Map.empty catalog, SchemaChanged(dbName, CreateDatabase(dbName, false))))
 
 let dropDatabase (store: Store) (dbName: string) : Result<unit, StorageError> =
-    lock store.Lock (fun () ->
-        if Map.containsKey dbName store.Catalog then
-            store.Catalog <- Map.remove dbName store.Catalog
-            emit store (Some(SchemaChanged(dbName, DropDatabase(dbName, false))))
-            Ok()
+    createOrDropDatabase store (fun catalog ->
+        if Map.containsKey dbName catalog then
+            Ok(Map.remove dbName catalog, SchemaChanged(dbName, DropDatabase(dbName, false)))
         else
             Error(NoSuchDatabase dbName))
 
-/// Applies `f` to the current catalog and atomically swaps it in on
-/// success. All writes serialize through this one lock.
-let private withWrite (store: Store) (f: Catalog -> Result<Catalog * 'a, StorageError>) : Result<'a, StorageError> =
-    lock store.Lock (fun () ->
-        match f store.Catalog with
-        | Ok(catalog', result) ->
-            store.Catalog <- catalog'
+/// Applies `f` to the current catalog and atomically swaps the result in via
+/// `Interlocked.CompareExchange`, retrying against a fresh catalog if a
+/// concurrent writer's swap for a *different* database raced ahead in
+/// between. No lock: `QueryHandler` already serializes every write to the
+/// *same* database through its per-database `TransactionGates`
+/// (`enterTransactionGate`) before it ever reaches here, so two calls into
+/// this function for the same database never run concurrently — a retry
+/// here only ever means "another database's writer got there first", which
+/// this function alone can't avoid (the whole point is that unrelated
+/// databases don't wait on each other) but costs only a cheap re-run of `f`
+/// against the fresh catalog.
+let rec private withWrite (store: Store) (f: Catalog -> Result<Catalog * 'a, StorageError>) : Result<'a, StorageError> =
+    let current = store.Catalog
+
+    match f current with
+    | Error e -> Error e
+    | Ok(catalog', result) ->
+        if obj.ReferenceEquals(Interlocked.CompareExchange(&store.Catalog, catalog', current), current) then
             Ok result
-        | Error e -> Error e)
+        else
+            withWrite store f
+
+/// As `withWrite`, but for callers that already have the replacement
+/// catalog in hand (`f` never fails) rather than computing it from the live
+/// one — `mergeCatalogInto`/`bumpAutoIncrementsInto`'s shared CAS retry.
+let rec private swapCatalog (store: Store) (f: Catalog -> Catalog) : unit =
+    let current = store.Catalog
+    let updated = f current
+
+    if not (obj.ReferenceEquals(Interlocked.CompareExchange(&store.Catalog, updated, current), current)) then
+        swapCatalog store f
+
+/// Three-way merges an isolated unit of work's private snapshot catalog
+/// back into a live one: for every (database, table) appearing in any of
+/// the three, a table the batch actually wrote (its snapshot copy differs
+/// from `baseCatalog`, the catalog it started from) wins; one it dropped
+/// (present at the start, gone from the snapshot) is removed; one it never
+/// touched is left exactly as `liveCatalog` (the shared store's catalog
+/// *right now*, not as of the batch's start) already has it, so a
+/// concurrent write to that table by another database's writer during the
+/// batch's lifetime survives instead of being silently discarded by a stale
+/// copy of it. Same three-way logic one level up for whole databases the
+/// batch created/dropped. Shared by `QueryHandler`'s transaction commit and
+/// `Executor`'s multi-table `UPDATE`, both of which run a private snapshot
+/// store before merging its catalog back.
+let mergeCatalogs (baseCatalog: Catalog) (batchCatalog: Catalog) (liveCatalog: Catalog) : Catalog =
+    let keysOf (m: Map<string, 'a>) = m |> Map.toList |> List.map fst |> Set.ofList
+    let dbKeys = Set.unionMany [ keysOf baseCatalog; keysOf batchCatalog; keysOf liveCatalog ]
+
+    dbKeys
+    |> Set.fold
+        (fun acc dbName ->
+            match Map.tryFind dbName baseCatalog, Map.tryFind dbName batchCatalog with
+            | Some _, None -> Map.remove dbName acc // the batch dropped this database
+            | None, Some batchDb -> Map.add dbName batchDb acc // the batch created this database
+            | None, None -> acc // the batch never saw this database; leave the live entry alone
+            | Some baseDb, Some batchDb ->
+                // Existed both before and after the batch (whether or not it
+                // touched any table in it) — merge table-by-table against
+                // the *live* catalog's current version of the database, not
+                // the batch's, so a concurrent write to an untouched table
+                // survives.
+                let liveDb = Map.tryFind dbName liveCatalog |> Option.defaultValue Map.empty
+                let tableKeys = Set.unionMany [ keysOf baseDb; keysOf batchDb; keysOf liveDb ]
+
+                let mergedDb =
+                    tableKeys
+                    |> Set.fold
+                        (fun tacc tableName ->
+                            match Map.tryFind tableName baseDb, Map.tryFind tableName batchDb with
+                            | Some _, None -> Map.remove tableName tacc // dropped by the batch
+                            | None, Some t -> Map.add tableName t tacc // created by the batch
+                            | Some baseT, Some batchT when baseT <> batchT -> Map.add tableName batchT tacc // modified by the batch
+                            | _ -> tacc // untouched by the batch — keep whatever's live
+                        )
+                        liveDb
+
+                Map.add dbName mergedDb acc)
+        liveCatalog
+
+/// Merges `batchCatalog` (built from `baseCatalog` by some isolated unit of
+/// work — a committing transaction, or a multi-table statement's private
+/// snapshot store) into `store`'s live catalog via `mergeCatalogs`, retrying
+/// against a fresh live catalog if a concurrent writer to an unrelated
+/// database swapped in between (see `swapCatalog`).
+let mergeCatalogInto (store: Store) (baseCatalog: Catalog) (batchCatalog: Catalog) : unit =
+    swapCatalog store (mergeCatalogs baseCatalog batchCatalog)
+
+/// Bumps the live catalog's AUTO_INCREMENT counters up to a discarded
+/// transaction's snapshot wherever it ran one ahead — MySQL never rolls
+/// back a burned id (see `QueryHandler.rollbackSession`'s doc) — leaving
+/// everything else (rows, schema) exactly as the live catalog has it. Same
+/// CAS retry as `mergeCatalogInto`.
+let bumpAutoIncrementsInto (store: Store) (snapshotCatalog: Catalog) : unit =
+    swapCatalog store (fun liveCatalog ->
+        snapshotCatalog
+        |> Map.fold
+            (fun liveCatalog dbName snapshotDb ->
+                match Map.tryFind dbName liveCatalog with
+                | None -> liveCatalog
+                | Some liveDb ->
+                    let mergedDb =
+                        snapshotDb
+                        |> Map.fold
+                            (fun acc tableName (snapshotTable: Table) ->
+                                match Map.tryFind tableName acc with
+                                | Some(liveTable: Table) when snapshotTable.NextAutoId > liveTable.NextAutoId ->
+                                    Map.add tableName { liveTable with NextAutoId = snapshotTable.NextAutoId } acc
+                                | _ -> acc)
+                            liveDb
+
+                    Map.add dbName mergedDb liveCatalog)
+            liveCatalog)
 
 let private tryGetDatabase (catalog: Catalog) (dbName: string) : Result<Database, StorageError> =
     match Map.tryFind dbName catalog with
@@ -341,10 +465,14 @@ let private tryGetTable (db: Database) (tableName: string) : Result<Table, Stora
 /// *not* used by mid-session `USE`/`COM_INIT_DB` — those check
 /// `databaseExists` and report a real 1049 instead, matching MySQL (see
 /// `QueryHandler`'s `Use` probe).
-let ensureDatabase (store: Store) (dbName: string) : unit =
-    lock store.Lock (fun () ->
-        if not (Map.containsKey dbName store.Catalog) then
-            store.Catalog <- Map.add dbName Map.empty store.Catalog)
+let rec ensureDatabase (store: Store) (dbName: string) : unit =
+    let current = store.Catalog
+
+    if not (Map.containsKey dbName current) then
+        let updated = Map.add dbName Map.empty current
+
+        if not (obj.ReferenceEquals(Interlocked.CompareExchange(&store.Catalog, updated, current), current)) then
+            ensureDatabase store dbName
 
 /// Whether `dbName` is a real catalog entry, or the always-present virtual
 /// `information_schema` — what `USE`/`COM_INIT_DB` check to match real
@@ -570,55 +698,52 @@ let createTable
     (indexes: IndexDef list)
     (foreignKeys: ForeignKeyDef list)
     : Result<unit, StorageError> =
-    lock store.Lock (fun () ->
-        ensureDatabase store dbName
+    ensureDatabase store dbName
 
-        let result =
-            withDatabase store dbName (fun db ->
-                let key = normalizeTableName tableName
+    let result =
+        withDatabase store dbName (fun db ->
+            let key = normalizeTableName tableName
 
-                if Map.containsKey key db then
-                    Error(TableExists tableName)
-                else
-                    let table =
-                        { OriginalName = tableName
-                          Columns = columns
-                          Rows = []
-                          NextAutoId = 1L
-                          Indexes = indexes
-                          ForeignKeys = foreignKeys }
+            if Map.containsKey key db then
+                Error(TableExists tableName)
+            else
+                let table =
+                    { OriginalName = tableName
+                      Columns = columns
+                      Rows = []
+                      NextAutoId = 1L
+                      Indexes = indexes
+                      ForeignKeys = foreignKeys }
 
-                    Ok(Map.add key table db, ()))
+                Ok(Map.add key table db, ()))
 
-        if result.IsOk then
-            emit store (Some(SchemaChanged(dbName, CreateTable(tableName, columns, indexes, foreignKeys, false))))
+    if result.IsOk then
+        emit store (Some(SchemaChanged(dbName, CreateTable(tableName, columns, indexes, foreignKeys, false))))
 
-        result)
+    result
 
 let dropTable (store: Store) (dbName: string) (tableName: string) : Result<unit, StorageError> =
-    lock store.Lock (fun () ->
-        let result =
-            withDatabase store dbName (fun db ->
-                let key = normalizeTableName tableName
+    let result =
+        withDatabase store dbName (fun db ->
+            let key = normalizeTableName tableName
 
-                if Map.containsKey key db then
-                    Ok(Map.remove key db, ())
-                else
-                    Error(NoSuchTable tableName))
+            if Map.containsKey key db then
+                Ok(Map.remove key db, ())
+            else
+                Error(NoSuchTable tableName))
 
-        if result.IsOk then
-            emit store (Some(SchemaChanged(dbName, DropTable([ tableName ], false))))
+    if result.IsOk then
+        emit store (Some(SchemaChanged(dbName, DropTable([ tableName ], false))))
 
-        result)
+    result
 
 let truncate (store: Store) (dbName: string) (tableName: string) : Result<unit, StorageError> =
-    lock store.Lock (fun () ->
-        let result = withTable store dbName tableName (fun table -> Ok({ table with Rows = []; NextAutoId = 1L }, ()))
+    let result = withTable store dbName tableName (fun table -> Ok({ table with Rows = []; NextAutoId = 1L }, ()))
 
-        if result.IsOk then
-            emit store (Some(SchemaChanged(dbName, Truncate tableName)))
+    if result.IsOk then
+        emit store (Some(SchemaChanged(dbName, Truncate tableName)))
 
-        result)
+    result
 
 /// Removes column index `idx` from every row — used by `DropColumn`, since
 /// `Value[]` has no built-in "remove at" the way a `ResizeArray` would.
@@ -742,27 +867,26 @@ let private applyAlterAction (table: Table) (action: AlterAction) : Result<Table
 /// Applies `actions` in order against `tableName`, re-filing it under a new
 /// key if any action renamed it (`RENAME TO`/`RENAME [TABLE]`).
 let alterTable (store: Store) (dbName: string) (tableName: string) (actions: AlterAction list) : Result<unit, StorageError> =
-    lock store.Lock (fun () ->
-        let result =
-            withDatabase store dbName (fun db ->
-                tryGetTable db tableName
-                |> Result.bind (fun table ->
-                    let origKey = normalizeTableName tableName
+    let result =
+        withDatabase store dbName (fun db ->
+            tryGetTable db tableName
+            |> Result.bind (fun table ->
+                let origKey = normalizeTableName tableName
 
-                    let step acc action =
-                        acc
-                        |> Result.bind (fun (key, tbl) ->
-                            applyAlterAction tbl action
-                            |> Result.map (fun (tbl', newKey) -> (newKey |> Option.defaultValue key), tbl'))
+                let step acc action =
+                    acc
+                    |> Result.bind (fun (key, tbl) ->
+                        applyAlterAction tbl action
+                        |> Result.map (fun (tbl', newKey) -> (newKey |> Option.defaultValue key), tbl'))
 
-                    actions
-                    |> List.fold step (Ok(origKey, table))
-                    |> Result.map (fun (finalKey, finalTable) -> Map.remove origKey db |> Map.add finalKey finalTable, ())))
+                actions
+                |> List.fold step (Ok(origKey, table))
+                |> Result.map (fun (finalKey, finalTable) -> Map.remove origKey db |> Map.add finalKey finalTable, ())))
 
-        if result.IsOk then
-            emit store (Some(SchemaChanged(dbName, AlterTable(tableName, actions))))
+    if result.IsOk then
+        emit store (Some(SchemaChanged(dbName, AlterTable(tableName, actions))))
 
-        result)
+    result
 
 let renameTable (store: Store) (dbName: string) (oldName: string) (newName: string) : Result<unit, StorageError> =
     alterTable store dbName oldName [ RenameTo newName ]
@@ -1113,23 +1237,22 @@ let insertRows
     (columns: string list option)
     (rowsIn: Value list list)
     : Result<int64 * int64 option * int, StorageError> =
-    lock store.Lock (fun () ->
-        let key = normalizeTableName tableName
+    let key = normalizeTableName tableName
 
-        let result =
-            withDatabase store dbName (fun db ->
-                tryGetTable db tableName
-                |> Result.bind (fun table ->
-                    resolveInsertColumns table columns
-                    |> Result.bind (insertCore store.ForeignKeyChecks store.StrictMode false db key rowsIn)))
+    let result =
+        withDatabase store dbName (fun db ->
+            tryGetTable db tableName
+            |> Result.bind (fun table ->
+                resolveInsertColumns table columns
+                |> Result.bind (insertCore store.ForeignKeyChecks store.StrictMode false db key rowsIn)))
 
-        match result with
-        | Ok(lastId, generatedId, affected, rows) ->
-            if not rows.IsEmpty then
-                emit store (Some(RowsInserted(dbName, tableName, rows)))
+    match result with
+    | Ok(lastId, generatedId, affected, rows) ->
+        if not rows.IsEmpty then
+            emit store (Some(RowsInserted(dbName, tableName, rows)))
 
-            Ok(lastId, generatedId, affected)
-        | Error e -> Error e)
+        Ok(lastId, generatedId, affected)
+    | Error e -> Error e
 
 /// `INSERT IGNORE`: as `insertRows`, but a row that would violate NOT
 /// NULL/unique/foreign-key constraints is skipped instead of failing the
@@ -1144,23 +1267,22 @@ let insertRowsIgnore
     (columns: string list option)
     (rowsIn: Value list list)
     : Result<int64 * int64 option * int, StorageError> =
-    lock store.Lock (fun () ->
-        let key = normalizeTableName tableName
+    let key = normalizeTableName tableName
 
-        let result =
-            withDatabase store dbName (fun db ->
-                tryGetTable db tableName
-                |> Result.bind (fun table ->
-                    resolveInsertColumns table columns
-                    |> Result.bind (insertCore store.ForeignKeyChecks store.StrictMode true db key rowsIn)))
+    let result =
+        withDatabase store dbName (fun db ->
+            tryGetTable db tableName
+            |> Result.bind (fun table ->
+                resolveInsertColumns table columns
+                |> Result.bind (insertCore store.ForeignKeyChecks store.StrictMode true db key rowsIn)))
 
-        match result with
-        | Ok(lastId, generatedId, affected, rows) ->
-            if not rows.IsEmpty then
-                emit store (Some(RowsInserted(dbName, tableName, rows)))
+    match result with
+    | Ok(lastId, generatedId, affected, rows) ->
+        if not rows.IsEmpty then
+            emit store (Some(RowsInserted(dbName, tableName, rows)))
 
-            Ok(lastId, generatedId, affected)
-        | Error e -> Error e)
+        Ok(lastId, generatedId, affected)
+    | Error e -> Error e
 
 /// `INSERT ... ON DUPLICATE KEY UPDATE`: like `insertRows`, but a candidate
 /// row that collides with an existing row on any unique key or the primary
@@ -1176,7 +1298,6 @@ let upsertRows
     (computeGenerated: Value[] -> Result<Value[], StorageError>)
     (applyUpdate: Value[] -> Value[] -> Result<Value[], StorageError>)
     : Result<int64 * int64 option * int, StorageError> =
-    lock store.Lock (fun () ->
         let result =
             withTable store dbName tableName (fun table ->
                 let indices =
@@ -1262,7 +1383,7 @@ let upsertRows
                 emit store (Some(RowsUpdated(dbName, tableName, updated)))
 
             Ok(lastId, generatedId, affected)
-        | Error e -> Error e)
+        | Error e -> Error e
 
 let private coerceRow (strict: bool) (columns: ColumnDef list) (row: Value[]) : Result<Value[], StorageError> =
     List.zip columns (Array.toList row)
@@ -1456,31 +1577,30 @@ let deleteRows
     (tableName: string)
     (predicate: Value[] -> Result<bool, StorageError>)
     : Result<int, StorageError> =
-    lock store.Lock (fun () ->
-        let result =
-            withDatabase store dbName (fun db ->
-                let key = normalizeTableName tableName
+    let result =
+        withDatabase store dbName (fun db ->
+            let key = normalizeTableName tableName
 
-                tryGetTable db tableName
-                |> Result.bind (fun table ->
-                    table.Rows
-                    |> traverse (fun row -> predicate row |> Result.map (fun keep -> keep, row))
-                    |> Result.bind (fun flagged ->
-                        let toDelete = flagged |> List.filter fst |> List.map snd
+            tryGetTable db tableName
+            |> Result.bind (fun table ->
+                table.Rows
+                |> traverse (fun row -> predicate row |> Result.map (fun keep -> keep, row))
+                |> Result.bind (fun flagged ->
+                    let toDelete = flagged |> List.filter fst |> List.map snd
 
-                        cascadeDelete store.ForeignKeyChecks db key toDelete
-                        |> Result.map (fun (db', removed) -> db', (toDelete.Length, db, removed)))))
+                    cascadeDelete store.ForeignKeyChecks db key toDelete
+                    |> Result.map (fun (db', removed) -> db', (toDelete.Length, db, removed)))))
 
-        match result with
-        | Ok(affected, db, removed) ->
-            removed
-            |> Map.iter (fun tableKey rows ->
-                if not rows.IsEmpty then
-                    let originalName = db |> Map.tryFind tableKey |> Option.map (fun t -> t.OriginalName) |> Option.defaultValue tableKey
-                    emit store (Some(RowsDeleted(dbName, originalName, rows))))
+    match result with
+    | Ok(affected, db, removed) ->
+        removed
+        |> Map.iter (fun tableKey rows ->
+            if not rows.IsEmpty then
+                let originalName = db |> Map.tryFind tableKey |> Option.map (fun t -> t.OriginalName) |> Option.defaultValue tableKey
+                emit store (Some(RowsDeleted(dbName, originalName, rows))))
 
-            Ok affected
-        | Error e -> Error e)
+        Ok affected
+    | Error e -> Error e
 
 /// Replaces every row matching `predicate` with `updater row`, coercing the
 /// result back to the table's column types, then checking it against the
@@ -1500,7 +1620,6 @@ let updateRows
     (predicate: Value[] -> Result<bool, StorageError>)
     (updater: Value[] -> Result<Value[], StorageError>)
     : Result<int, StorageError> =
-    lock store.Lock (fun () ->
         let result =
             withDatabase store dbName (fun db ->
                 let key = normalizeTableName tableName
@@ -1562,7 +1681,7 @@ let updateRows
                 emit store (Some(RowsUpdated(dbName, tableName, changes)))
 
             Ok changes.Length
-        | Error e -> Error e)
+        | Error e -> Error e
 
 /// A snapshot read: the table's columns and its rows as they were at the
 /// moment of the call. Lock-free — reads a single reference field, and

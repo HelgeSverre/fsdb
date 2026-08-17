@@ -515,64 +515,18 @@ let private setRepeatableRead =
         RegexOptions.IgnoreCase
     )
 
-/// Three-way merges a transaction's snapshot back into a catalog: for every
-/// (database, table) that appears in any of the three, a table this
-/// transaction actually wrote — its snapshot copy differs from
-/// `baseCatalog`'s, the seed established at the first database statement —
-/// wins; a table it dropped
-/// (present at BEGIN, gone from the snapshot) is removed; a table it never
-/// touched is left exactly as `liveCatalog` (the shared store's catalog
-/// *right now*, not as of BEGIN) already has it, so a concurrent write to
-/// that table by another connection during the transaction's lifetime
-/// survives instead of being silently discarded by a stale copy of it. Same
-/// three-way logic one level up for whole databases the transaction
-/// created/dropped.
-let private mergeCatalogs (baseCatalog: Catalog) (txCatalog: Catalog) (liveCatalog: Catalog) : Catalog =
-    let keysOf (m: Map<string, 'a>) = m |> Map.toList |> List.map fst |> Set.ofList
-
-    let dbKeys = Set.unionMany [ keysOf baseCatalog; keysOf txCatalog; keysOf liveCatalog ]
-
-    dbKeys
-    |> Set.fold
-        (fun acc dbName ->
-            match Map.tryFind dbName baseCatalog, Map.tryFind dbName txCatalog with
-            | Some _, None -> Map.remove dbName acc // the tx dropped this database
-            | None, Some txDb -> Map.add dbName txDb acc // the tx created this database
-            | None, None -> acc // the tx never saw this database; leave the live entry alone
-            | Some baseDb, Some txDb ->
-                // Existed both before and after the tx (whether or not the
-                // tx touched any table in it) — merge table-by-table
-                // against the *live* catalog's current version of the
-                // database, not the tx's, so a concurrent write to an
-                // untouched table survives.
-                let liveDb = Map.tryFind dbName liveCatalog |> Option.defaultValue Map.empty
-                let tableKeys = Set.unionMany [ keysOf baseDb; keysOf txDb; keysOf liveDb ]
-
-                let mergedDb =
-                    tableKeys
-                    |> Set.fold
-                        (fun tacc tableName ->
-                            match Map.tryFind tableName baseDb, Map.tryFind tableName txDb with
-                            | Some _, None -> Map.remove tableName tacc // dropped by the tx
-                            | None, Some t -> Map.add tableName t tacc // created by the tx
-                            | Some baseT, Some txT when baseT <> txT -> Map.add tableName txT tacc // modified by the tx
-                            | _ -> tacc // untouched by the tx — keep whatever's live
-                        )
-                        liveDb
-
-                Map.add dbName mergedDb acc)
-        liveCatalog
-
 /// Commits the open transaction (if any) by merging its snapshot catalog
-/// back into the shared store's (see `mergeCatalogs`) — a no-op, matching
-/// real MySQL, if there isn't one open.
+/// back into the shared store's (`Storage.mergeCatalogInto`, a CAS-safe
+/// three-way merge against whatever the live catalog is *right now* — not a
+/// stale copy from BEGIN — so a concurrent write to another database, or an
+/// untouched table in this one, during the transaction's lifetime survives)
+/// — a no-op, matching real MySQL, if there isn't one open.
 let private commitSession (session: Session) : Session =
     match session.Tx with
     | Some tx ->
         try
-            lock session.Store.Lock (fun () ->
-                session.Store.Catalog <- mergeCatalogs tx.BaseCatalog tx.Snapshot.Catalog session.Store.Catalog
-                Storage.commitTransactionEvents session.Store tx.Snapshot)
+            Storage.mergeCatalogInto session.Store tx.BaseCatalog tx.Snapshot.Catalog
+            Storage.commitTransactionEvents session.Store tx.Snapshot
         finally
             tx.GateLease |> Option.iter (fun lease -> lease.Dispose())
 
@@ -583,31 +537,14 @@ let private commitSession (session: Session) : Session =
 /// if there isn't one open — except for each table's AUTO_INCREMENT
 /// counter, which MySQL never rolls back (an id an aborted INSERT consumed
 /// stays burned). Bumps the shared store's counter up to the snapshot's if
-/// the snapshot ran it ahead; leaves everything else (rows, schema) alone.
+/// the snapshot ran it ahead (`Storage.bumpAutoIncrementsInto`, same
+/// CAS-safe merge as `commitSession`); leaves everything else (rows,
+/// schema) alone.
 let private rollbackSession (session: Session) : Session =
     match session.Tx with
     | Some tx ->
         try
-            lock session.Store.Lock (fun () ->
-                session.Store.Catalog <-
-                    tx.Snapshot.Catalog
-                    |> Map.fold
-                        (fun liveCatalog dbName snapshotDb ->
-                            match Map.tryFind dbName liveCatalog with
-                            | None -> liveCatalog
-                            | Some liveDb ->
-                                let mergedDb =
-                                    snapshotDb
-                                    |> Map.fold
-                                        (fun acc tableName (snapshotTable: Table) ->
-                                            match Map.tryFind tableName acc with
-                                            | Some(liveTable: Table) when snapshotTable.NextAutoId > liveTable.NextAutoId ->
-                                                Map.add tableName { liveTable with NextAutoId = snapshotTable.NextAutoId } acc
-                                            | _ -> acc)
-                                        liveDb
-
-                                Map.add dbName mergedDb liveCatalog)
-                        session.Store.Catalog)
+            Storage.bumpAutoIncrementsInto session.Store tx.Snapshot.Catalog
         finally
             tx.GateLease |> Option.iter (fun lease -> lease.Dispose())
     | None -> ()
