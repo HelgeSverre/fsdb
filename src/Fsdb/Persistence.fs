@@ -1,5 +1,5 @@
-/// Opt-in durability (`--data-dir`): WAL + snapshot, replay on startup — M7
-/// on the roadmap. `Db.withDataDir` is the door in: `load` rebuilds a
+/// Opt-in durability (`--data-dir`): WAL + snapshot, replay on startup.
+/// `Db.withDataDir` is the door in: `load` rebuilds a
 /// `Store` from whatever's on disk, `attach` subscribes it (via
 /// `Storage.Store.OnCommit`) to keep writing.
 ///

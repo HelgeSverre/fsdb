@@ -22,7 +22,7 @@ let create () : Db =
       Functions = Functions.empty
       DataDir = None }
 
-/// Opts into durability under `dataDir` — M7 on the roadmap. Loads whatever
+/// Opts into durability under `dataDir`. Loads whatever
 /// state is already there (a snapshot plus any WAL entries after it, or
 /// nothing for a fresh directory) and subscribes the result to keep writing
 /// every future commit to its WAL, so this replaces `db.Store` rather than

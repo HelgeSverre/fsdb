@@ -557,9 +557,9 @@ let tests =
               }
               |> Async.RunSynchronously
 
-          // M9-4b: a client that vanishes mid-query must not leave the
-          // server computing into the void (design doc: 88MB -> 2.65GB RSS
-          // from one abandoned join). A registered scalar (`PROBE`) spliced
+          // A client that vanishes mid-query must not leave the server
+          // computing into the void (88MB -> 2.65GB RSS observed from one
+          // abandoned join). A registered scalar (`PROBE`) spliced
           // into the ON clause of a non-equi cross join — `t1.n <> t2.n`
           // has no equi key, so `applyJoin` takes the lazy nested-loop
           // fallback (`traverseSeq`), not the hash-join path — gives an
@@ -592,8 +592,8 @@ let tests =
                       // connections against the same connection string
                       // (setup, then a follow-up health check), and a
                       // pooled `Open()` sends `COM_RESET_CONNECTION` —
-                      // unimplemented (design doc section 1.7), unrelated
-                      // to what this test is actually checking.
+                      // unimplemented, unrelated to what this test is
+                      // actually checking.
                       let connStr =
                           sprintf
                               "Server=127.0.0.1;Port=%d;User ID=root;Password=;AllowPublicKeyRetrieval=True;SslMode=None;Pooling=false"

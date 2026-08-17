@@ -85,7 +85,7 @@ type Table =
       /// sync with `Rows` by every write path below (`insertCore`,
       /// `updateRows`, `upsertRows`, `deleteRows`'s `cascadeDeleteVisited`)
       /// instead of rebuilt from a full scan on every call — that rebuild is
-      /// exactly the O(table size) tax M9-3 exists to remove from point
+      /// exactly the O(table size) tax this index exists to remove from point
       /// SELECT, unique-collision checks, and FK parent-existence checks
       /// (see `uniqueKeyGroups`/`encodeConstraintKey`/`tryUniqueLookup`).
       /// Outer map keyed by the unique group's name (`"PRIMARY"` or the
@@ -771,7 +771,7 @@ let private constraintLookup indices rows =
     lookup
 
 /// `table.UniqueIndex` recomputed from scratch against its current `Rows` —
-/// the one full-scan rebuild the M9-3 index still needs, used only at
+/// the one full-scan rebuild this index still needs, used only at
 /// structural boundaries (`createTable`, `truncate`, `alterTable` — column
 /// positions may have shifted — and `Persistence`'s replay/snapshot-load,
 /// which write `Rows` directly, bypassing every checked path below that
@@ -1399,10 +1399,10 @@ let private insertCore
         // ponytail: `table.Rows @ accepted` is still O(existing table size)
         // per statement — the unique/FK checks above no longer are, but
         // `Rows` itself is still a plain list, not the array/`ResizeArray`
-        // "index-addressable rows" half of the M9-3 design (see
+        // "index-addressable rows" half of that design (see
         // docs/performance-design.md's change C). That's the remaining gap
         // between this and the design doc's <300µs `InsertSingle` gate; the
-        // point-SELECT gate this milestone actually targets doesn't touch
+        // point-SELECT gate the index actually targets doesn't touch
         // this path at all. Upgrade to an array-backed `Rows` (O(1)
         // amortized append) if single-row INSERT throughput at large table
         // sizes ever becomes the bottleneck being chased.

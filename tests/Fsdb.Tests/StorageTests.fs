@@ -1698,7 +1698,7 @@ let tests =
               "performance canary"
               [ testCase "a single-row UPDATE against a 50,000-row table stays roughly linear, not quadratic"
                 <| fun _ ->
-                    // Only catches a quadratic regression (M9-1: updateRows used
+                    // Only catches a quadratic regression (updateRows used
                     // to fold with `doneRows @ [ row ]`, ~8.5s at this size) — the
                     // 500ms bound is generous, not a tight perf target.
                     let store = withUsersTable ()

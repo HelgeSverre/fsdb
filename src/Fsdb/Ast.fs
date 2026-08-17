@@ -197,7 +197,7 @@ and Projection = Expr * string option
 
 /// `FROM [db.]table [[AS] alias]`. A record (not a bare string) so a
 /// qualified name (`information_schema.tables`) and an alias have somewhere
-/// to live — needed for M4's schema introspection and, later, joins —
+/// to live — needed for schema introspection and, later, joins —
 /// without another breaking edit to every `Select` call site.
 and TableRef =
     { Database: string option
@@ -251,7 +251,7 @@ and Join =
 
 /// A `SELECT` statement's clauses as a record rather than a positional
 /// tuple: every clause after `SELECT ... FROM` is optional and grows
-/// independently (M5 adds `GroupBy`/`Having`), so a record avoids a breaking
+/// independently, so a record avoids a breaking
 /// edit — and an 8-argument re-spelling at every call site — each time one
 /// does.
 and SelectStmt =

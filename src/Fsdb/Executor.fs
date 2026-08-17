@@ -87,7 +87,7 @@ let private clauseLabel =
 
 /// Aggregate-call recognition: a `FuncCall` whose name is registered as an
 /// aggregate on `registry` (see `Functions.Registry.Aggregates`) rather than
-/// a hardcoded name set here — M6's `registerAggregate` extension point is
+/// a hardcoded name set here — the `registerAggregate` extension point is
 /// the same one `Functions` itself uses for COUNT/SUM/AVG/MIN/MAX — plus
 /// `GROUP_CONCAT`, which is always recognized directly since its
 /// `SEPARATOR`/multi-arg evaluation lives entirely in `evalAggregate` below
@@ -300,7 +300,7 @@ let private regexpOp (subject: Value) (pattern: Value) : Value =
 
 /// The three pieces of context `evalExpr` needs to resolve a `Col`/`FuncCall`
 /// against, bundled into one record rather than three loose parameters
-/// threaded through every call site — M5's aggregates add a fourth
+/// threaded through every call site — aggregates add a fourth
 /// (per-group accumulated results the outer expression binds against),
 /// which becomes a field here instead of a fourth parameter at every one of
 /// those call sites.
@@ -1163,8 +1163,9 @@ and private whereMatches (ctxFor: Value[] -> EvalContext) (where: Expr option) (
 /// Anything else — no equi-key at all, an `OR`, a range, `a.x + 1 = b.y` —
 /// falls back to a lazy nested loop over every pair instead: still
 /// evaluates `join.On` for each one, but as a `seq` (`traverseSeq`) rather
-/// than a materialized cross-product `list`, which is what let a
-/// non-equi join at real table sizes simply never finish before M9-2.
+/// than a materialized cross-product `list`, which is what lets a
+/// non-equi join at real table sizes actually finish instead of exhausting
+/// memory.
 and private applyJoin
     (store: Store)
     (registry: Registry)
@@ -2460,8 +2461,8 @@ and private runSelect
 
     // `outputCols` (the row's own projection) is computed once by the
     // caller and threaded in here, rather than re-run per `ORDER BY`
-    // key as the pre-M10 shape did — `ORDER BY a, b, c` used to call
-    // `projectRow` three times over on the same row for the same result.
+    // key — re-running per key would call `projectRow` three times over
+    // on the same row for `ORDER BY a, b, c`, for the same result.
     let orderKeysOf (row: Value[]) (outputCols: (string * Value) list) : Result<Value list, EvalError> =
         orderBy |> traverse (fun (expr, _) -> resolveOrderKey (ctxFor row) projections outputCols (resolveOrderExpr expr))
 
@@ -2477,7 +2478,7 @@ and private runSelect
     | Ok probeProjection when limit = Some 0 ->
         // `LIMIT 0` is the standard "column metadata, no rows" probe
         // (PDO/Doctrine's `getColumnMeta` and friends) — MySQL, and this
-        // engine's own pre-M10 shape, both answer it by evaluating every
+        // engine, both answer it by evaluating every
         // matched row's projection once rather than short-circuiting to
         // nothing, so wire types (and a row-level error) come out the same
         // as any other query would give them. No row ever needs to cross
@@ -2555,7 +2556,7 @@ and private runSelect
         // top-N by) or `DISTINCT` alongside `ORDER BY` (deduping after a
         // bounded top-N could starve rows just outside the window that a
         // dedupe-first pass would have kept) — full materialize, sort,
-        // dedupe, same as before M10.
+        // dedupe.
         else
             match rows |> traverseSeq evalKeyed with
             | Error(code, message) -> Err(code, message), [], []

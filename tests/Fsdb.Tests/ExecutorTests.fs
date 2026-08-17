@@ -2483,7 +2483,7 @@ let tests =
                     | other -> failtestf "expected offset-2 lag, got %A" other ]
 
           testList
-              "M9-3: PK/UNIQUE point-lookup fast path (Storage.tryUniqueLookup)"
+              "PK/UNIQUE point-lookup fast path (Storage.tryUniqueLookup)"
               [ testCase "WHERE pk = <literal>, alone or ANDed with a residual condition, matches a forced-scan twin table over randomized data"
                 <| fun _ ->
                     // `indexed`'s `id` is PRIMARY KEY, so a point SELECT on
@@ -2680,7 +2680,7 @@ let tests =
 
                 testCase "point SELECT by PRIMARY KEY latency is flat from 10k to 40k rows, the actual O(1) proof, not just a single-size bound"
                 <| fun _ ->
-                    // The M9-3 gate in docs/performance-design.md says
+                    // The performance gate in docs/performance-design.md says
                     // verbatim "Point-lookup latency flat from 10k to 40k
                     // rows" — the single-size test above (generous, at one
                     // n) is consistent with a merely-faster linear scan; the
@@ -2780,7 +2780,7 @@ let tests =
                     | other -> failtestf "expected a resultset, got %A" other ]
 
           testList
-              "M10 streaming pipeline"
+              "streaming SELECT pipeline"
               [ let resultRows (result: QueryResult) : string option list list =
                     match result with
                     | ResultSet(_, rows) -> rows
