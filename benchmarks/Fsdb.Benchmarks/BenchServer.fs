@@ -6,6 +6,7 @@ module Fsdb.Benchmarks.BenchServer
 
 open System
 open System.Diagnostics
+open System.IO
 open System.Threading
 open MySqlConnector
 open Fsdb.Benchmarks.Schema
@@ -15,6 +16,15 @@ let benchBin () =
     Environment.GetEnvironmentVariable "FSDB_BENCH_BIN"
     |> Option.ofObj
     |> Option.defaultWith (fun () -> failwith "FSDB_BENCH_BIN not set — run via `just bench`/`just bench-load`")
+
+/// The durability-matched run (`just bench-durable`) adds `fsdb-wal` and
+/// `mysql-nofsync` to the target list via this env flag.
+let isDurableRun () =
+    Environment.GetEnvironmentVariable "FSDB_BENCH_TARGETS" = "durable"
+
+/// A fresh throwaway data dir for the `fsdb-wal` (durable) variant.
+let tempDataDir () =
+    Path.Combine(Path.GetTempPath(), "fsdb-bench-" + Guid.NewGuid().ToString("N"))
 
 /// Kills anything already bound to `port` — defensive cleanup in case a
 /// previous case's cleanup didn't run (the host was killed mid-benchmark)

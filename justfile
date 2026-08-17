@@ -103,8 +103,10 @@ uninstall dest="~/.local/bin":
 MYSQLD := "/opt/homebrew/opt/mysql@8.4/bin/mysqld"
 MYSQLADMIN := "/opt/homebrew/opt/mysql@8.4/bin/mysqladmin"
 BENCH_MYSQL_PORT := "3316"
-# mysqld chdirs internally before resolving relative paths, so this must be absolute.
+BENCH_MYSQL_NOFSYNC_PORT := "3317"
+# mysqld chdirs internally before resolving relative paths, so these must be absolute.
 BENCH_MYSQL_DATADIR := justfile_directory() + "/benchmarks/mysql-data"
+BENCH_MYSQL_NOFSYNC_DATADIR := justfile_directory() + "/benchmarks/mysql-data-nofsync"
 
 # Initialize (first run only) and start the throwaway benchmark MySQL server
 [group('bench')]
@@ -130,6 +132,34 @@ bench-mysql-start:
 bench-mysql-stop:
     {{ MYSQLADMIN }} -P{{ BENCH_MYSQL_PORT }} --protocol=tcp -h127.0.0.1 -uroot shutdown 2>/dev/null || true
 
+# Initialize (first run only) and start the no-fsync throwaway MySQL server.
+# `--skip-log-bin --innodb_flush_log_at_trx_commit=0 --sync_binlog=0` removes
+# the per-commit fsyncs so engine work can be compared apples-to-apples
+# against in-memory fsdb (the `mysql-nofsync` bench target).
+[group('bench')]
+bench-mysql-start-nofsync:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    if [ ! -d {{ BENCH_MYSQL_NOFSYNC_DATADIR }} ]; then
+        {{ MYSQLD }} --no-defaults --initialize-insecure --datadir={{ BENCH_MYSQL_NOFSYNC_DATADIR }}
+    fi
+    {{ MYSQLD }} --no-defaults --datadir={{ BENCH_MYSQL_NOFSYNC_DATADIR }} --port={{ BENCH_MYSQL_NOFSYNC_PORT }} \
+        --socket={{ BENCH_MYSQL_NOFSYNC_DATADIR }}/mysql.sock --pid-file={{ BENCH_MYSQL_NOFSYNC_DATADIR }}/mysql.pid \
+        --skip-log-bin --innodb_flush_log_at_trx_commit=0 --sync_binlog=0 \
+        > {{ BENCH_MYSQL_NOFSYNC_DATADIR }}/mysqld.log 2>&1 &
+    disown
+    for _ in $(seq 1 30); do
+        {{ MYSQLADMIN }} -P{{ BENCH_MYSQL_NOFSYNC_PORT }} --protocol=tcp -h127.0.0.1 -uroot ping &>/dev/null && exit 0
+        sleep 1
+    done
+    echo "mysqld (no-fsync) did not become ready, see {{ BENCH_MYSQL_NOFSYNC_DATADIR }}/mysqld.log" >&2
+    exit 1
+
+# Shut down the no-fsync throwaway MySQL server
+[group('bench')]
+bench-mysql-stop-nofsync:
+    {{ MYSQLADMIN }} -P{{ BENCH_MYSQL_NOFSYNC_PORT }} --protocol=tcp -h127.0.0.1 -uroot shutdown 2>/dev/null || true
+
 # Build fsdb (Release) and run the benchmark suite; shared by bench/bench-quick.
 # fsdb itself is no longer started here — ServerBenchmarks restarts it per
 # benchmark case (see the module comment there for why) — this just builds
@@ -153,6 +183,24 @@ _bench-run *ARGS: bench-mysql-start
     export FSDB_BENCH_BIN="$(pwd)/src/Fsdb/bin/Release/net10.0/Fsdb.dll"
     dotnet exec benchmarks/Fsdb.Benchmarks/bin/Release/net10.0/Fsdb.Benchmarks.dll {{ ARGS }}
 
+# As `_bench-run`, but with both mysqld variants up and the four-target
+# durability-matched set selected (`FSDB_BENCH_TARGETS=durable`).
+[group('bench')]
+[private]
+_bench-durable-run *ARGS: bench-mysql-start bench-mysql-start-nofsync
+    #!/usr/bin/env bash
+    set -euo pipefail
+    if {{ MYSQL }} --protocol=tcp -h127.0.0.1 -P{{ PORT }} -uroot -e 'SELECT 1' &>/dev/null; then
+        echo "error: something is already listening on port {{ PORT }} — stop it first, benchmarking against a shared server would corrupt both" >&2
+        exit 1
+    fi
+    trap 'just bench-mysql-stop; just bench-mysql-stop-nofsync' EXIT
+    dotnet build src/Fsdb -c Release -v q
+    dotnet build benchmarks/Fsdb.Benchmarks -c Release -v q
+    export FSDB_BENCH_BIN="$(pwd)/src/Fsdb/bin/Release/net10.0/Fsdb.dll"
+    export FSDB_BENCH_TARGETS=durable
+    dotnet exec benchmarks/Fsdb.Benchmarks/bin/Release/net10.0/Fsdb.Benchmarks.dll {{ ARGS }}
+
 # Run the full benchmark suite (fsdb vs MySQL 8.4); results land in benchmarks/results/<git-sha>.md
 [group('bench')]
 bench:
@@ -162,6 +210,29 @@ bench:
     @cat BenchmarkDotNet.Artifacts/results/Fsdb.Benchmarks.ServerBenchmarks.ServerBenchmarks-report-github.md >> "benchmarks/results/$(git rev-parse --short HEAD).md"
     @rm -rf BenchmarkDotNet.Artifacts
     @echo "results: benchmarks/results/$(git rev-parse --short HEAD).md"
+
+# Durability-matched latency: fsdb in-memory and --data-dir (WAL) vs MySQL
+# durable and no-fsync. Reclassifies the "fsdb beats MySQL on writes" number
+# by matching what each engine actually pays for.
+[group('bench')]
+bench-durable:
+    @just _bench-durable-run
+    @mkdir -p benchmarks/results
+    @just _bench-header > "benchmarks/results/$(git rev-parse --short HEAD)-durable.md"
+    @cat BenchmarkDotNet.Artifacts/results/Fsdb.Benchmarks.ServerBenchmarks.ServerBenchmarks-report-github.md >> "benchmarks/results/$(git rev-parse --short HEAD)-durable.md"
+    @rm -rf BenchmarkDotNet.Artifacts
+    @echo "results: benchmarks/results/$(git rev-parse --short HEAD)-durable.md"
+
+# Latency suite at 100k users / 500k orders so O(n) vs O(log n) scaling stops
+# hiding at the default 10k/50k (seeding per fsdb case dominates the runtime).
+[group('bench')]
+bench-scale:
+    @FSDB_BENCH_USERS=100000 FSDB_BENCH_ORDERS=500000 just _bench-run
+    @mkdir -p benchmarks/results
+    @just _bench-header > "benchmarks/results/$(git rev-parse --short HEAD)-scale.md"
+    @cat BenchmarkDotNet.Artifacts/results/Fsdb.Benchmarks.ServerBenchmarks.ServerBenchmarks-report-github.md >> "benchmarks/results/$(git rev-parse --short HEAD)-scale.md"
+    @rm -rf BenchmarkDotNet.Artifacts
+    @echo "results: benchmarks/results/$(git rev-parse --short HEAD)-scale.md"
 
 # Environment/provenance header prepended to each results file
 [group('bench')]

@@ -1,3 +1,4 @@
 mysql-data/
+mysql-data-nofsync/
 Fsdb.Benchmarks/BenchmarkDotNet.Artifacts/
 load-report.md

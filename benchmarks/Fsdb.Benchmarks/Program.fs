@@ -14,9 +14,11 @@ let main argv =
         LoadBenchmarks.run ()
     else
         // fsdb is seeded per benchmark case (see ServerBenchmarks) because it
-        // restarts per case; mysql is a single long-lived server for the whole
-        // run and only needs seeding once, here.
+        // restarts per case; the mysql servers are long-lived for the whole
+        // run and only need seeding once each, here.
         BenchServer.resetAndSeed "mysql"
+        if BenchServer.isDurableRun () then
+            BenchServer.resetAndSeed "mysql-nofsync"
 
         // Full run: 3 warmup + 6 measured iterations per (target x workload) —
         // fixed counts instead of BenchmarkDotNet's open-ended pilot stage, to

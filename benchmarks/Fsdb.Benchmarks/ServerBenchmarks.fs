@@ -20,6 +20,7 @@ module Fsdb.Benchmarks.ServerBenchmarks
 
 open System
 open System.Diagnostics
+open System.IO
 open System.Threading
 open BenchmarkDotNet.Attributes
 open MySqlConnector
@@ -31,19 +32,33 @@ type ServerBenchmarks() =
 
     let mutable conn : MySqlConnection = Unchecked.defaultof<_>
     let mutable fsdbProcess : Process option = None
+    let mutable dataDir : string option = None
     let mutable rng = Random(1234)
     let mutable insertCounter = 0
 
     // Draw from the seeded id range so every read hits a real row.
     let randomUserId () = rng.Next(1, Schema.userCount + 1)
 
-    [<Params("fsdb", "mysql")>]
+    // The durability-matched run (`just bench-durable`) adds `fsdb-wal` and
+    // `mysql-nofsync` so each engine is measured with and without the fsync
+    // cost its writes actually pay.
+    member this.Targets() : string[] =
+        if BenchServer.isDurableRun () then
+            [| "fsdb"; "fsdb-wal"; "mysql"; "mysql-nofsync" |]
+        else
+            [| "fsdb"; "mysql" |]
+
+    [<ParamsSource("Targets")>]
     member val Target = "" with get, set
 
     [<GlobalSetup>]
     member this.Setup() =
         if this.Target = "fsdb" then
             fsdbProcess <- Some(BenchServer.startFsdb (BenchServer.benchBin ()) None)
+        elif this.Target = "fsdb-wal" then
+            let dir = BenchServer.tempDataDir ()
+            dataDir <- Some dir
+            fsdbProcess <- Some(BenchServer.startFsdb (BenchServer.benchBin ()) (Some dir))
 
         conn <- new MySqlConnection(Schema.connectionString this.Target)
         conn.Open()
@@ -54,9 +69,17 @@ type ServerBenchmarks() =
     member this.Cleanup() =
         conn.Dispose()
 
-        if this.Target = "fsdb" then
+        if this.Target = "fsdb" || this.Target = "fsdb-wal" then
             fsdbProcess |> Option.iter BenchServer.stopFsdb
             fsdbProcess <- None
+
+            dataDir |> Option.iter (fun d ->
+                (try
+                    Directory.Delete(d, true)
+                 with _ ->
+                     ()))
+
+            dataDir <- None
 
     member private this.Exec(sql: string) =
         use cmd = conn.CreateCommand()
@@ -128,4 +151,23 @@ type ServerBenchmarks() =
         use reader = cmd.ExecuteReader()
 
         while reader.Read() do
+            ()
+
+    [<Benchmark>]
+    member this.UpdateByNonIndexed() =
+        // `name` has no index, so the WHERE narrows to nothing and the UPDATE
+        // pays the full-table scan — the O(n) write shape the PK-narrowed
+        // `UpdateSingleRow` never exercises.
+        this.Exec $"UPDATE users SET age = age + 1 WHERE name = 'user_{randomUserId () - 1}'"
+
+    [<Benchmark>]
+    member this.InsertUniqueViolation() =
+        // A duplicate `email` exercises the unique-check and error path (and
+        // the client-side exception), not the happy insert path.
+        try
+            this.Exec(
+                "INSERT INTO users (name, email, age, meta, created_at) VALUES "
+                + "('dup', 'user_0@bench.test', 30, '{\"plan\":\"free\"}', '2024-01-01 00:00:00')"
+            )
+        with :? MySqlException ->
             ()

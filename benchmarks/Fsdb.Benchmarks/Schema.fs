@@ -6,16 +6,28 @@ open System
 open System.Globalization
 open MySqlConnector
 
-let userCount = 10_000
-let orderCount = 50_000
+let private envCount (name: string) (fallback: int) : int =
+    match Environment.GetEnvironmentVariable name with
+    | null -> fallback
+    | s ->
+        match Int32.TryParse s with
+        | true, v when v > 0 -> v
+        | _ -> fallback
+
+// Overridable via FSDB_BENCH_USERS/FSDB_BENCH_ORDERS (`just bench-scale`) so
+// O(n) vs O(log n) scaling stops hiding at the default 10k/50k.
+let userCount = envCount "FSDB_BENCH_USERS" 10_000
+let orderCount = envCount "FSDB_BENCH_ORDERS" 50_000
 
 let private plans = [| "free"; "pro"; "enterprise" |]
 let private statuses = [| "pending"; "paid"; "shipped"; "cancelled" |]
 
 let portFor (target: string) =
     match target with
-    | "fsdb" -> 3307
+    | "fsdb"
+    | "fsdb-wal" -> 3307
     | "mysql" -> 3316
+    | "mysql-nofsync" -> 3317
     | other -> failwith $"unknown benchmark target: {other}"
 
 // Pooling=false: fsdb doesn't implement COM_RESET_CONNECTION yet (a pooled
