@@ -5,25 +5,21 @@
 [![MySQL 8.4](https://img.shields.io/badge/MySQL-8.4%20compatible-4479A1.svg)](https://dev.mysql.com/)
 
 A MySQL-compatible database server in idiomatic F#. It speaks the MySQL wire
-protocol — point `mysql`, PDO, or any MySQL driver at it and run queries against
-an in-memory engine built as a pipeline of discriminated unions: bytes →
-`Command` → AST → logical plan → lazy `seq` execution.
+protocol — point `mysql`, PDO, or any MySQL driver at it and run queries
+against an in-memory engine. Readable F# is the primary goal; raw performance
+is not.
 
-Readable F# is the primary goal; raw performance is not.
-
-## Why
-
-To see how far a parser-combinator SQL grammar, DU-based relational algebra, and
-a registry-driven function system can go — the benchmark is running a real Laravel
-application's migrations and test suite against it unmodified.
-
-## Running
-
-Requires the .NET 10 SDK (pinned by `global.json`).
+## Quick start
 
 ```sh
 dotnet run --project src/Fsdb        # listens on 127.0.0.1:3307
 mysql --protocol=tcp -h127.0.0.1 -P3307 -e 'SELECT 1'
+```
+
+Or install it as a single binary:
+
+```sh
+just install      # publishes to ~/.local/bin/fsdb, then: fsdb --help
 ```
 
 ```
@@ -40,21 +36,85 @@ OPTIONS:
     --help                display this list of options.
 ```
 
-Install globally (publishes a single binary to `~/.local/bin/fsdb`):
+## How it works
 
-```sh
-just install      # then: fsdb --help
-just uninstall
+One pipeline, all the way down:
+
+```
+client ── MySQL wire protocol ──► Packet ──► Protocol ──► QueryHandler ──┐
+                                                                        ▼
+                     Parser (FParsec) ──► AST ──► Executor ──► lazy seq ──► rows
+                                                                        ▲
+                     Storage (catalog, immutable snapshots) ◄── Persistence
 ```
 
-Or via the [justfile](justfile):
+- **Grammar** — a parser-combinator SQL grammar over an AST of discriminated
+  unions; `SELECT`s compile to a logical plan that executes lazily (`LIMIT`
+  stops the scan once enough rows survive).
+- **Engine** — databases and tables live in a value-swapped catalog; every
+  write produces an immutable snapshot, which is what makes transactions
+  (`BEGIN`/`COMMIT`/`ROLLBACK`) free: each snapshot is a consistent view.
+  PRIMARY KEY/UNIQUE lookups go through a hash index; equi-joins hash-join,
+  everything else is a scan.
+- **Collations & charsets** — all 89 utf8mb4 collations MySQL 8.4 ships,
+  honored per-column and per-`SET collation_connection`; `GROUP BY`/`DISTINCT`/
+  `UNION`/joins/unique keys all fold by the column's own collation. Charsets
+  `utf8mb4`/`latin1` (cp1252)/`ascii`/`binary` with MySQL's write-time
+  semantics, plus `CONVERT(x USING …)` and `_charset'…'` introducers.
+- **Prepared statements** — `COM_STMT_PREPARE`/`COM_STMT_EXECUTE` bind
+  parameter `Value`s into the parsed AST (`?` → `Placeholder` → `Lit`), so a
+  bound value keeps its real type and never round-trips through string
+  escaping.
+- **Persistence** — opt-in `--data-dir`: a binary WAL (`[len][crc32]` records)
+  plus snapshot, fsync'd and replayed on startup; omit it and everything
+  lives in memory.
 
-```sh
-just run      # dotnet run --project src/Fsdb, flags pass through (--port, --listen)
-just client   # open a mysql shell against a running server (optional port=)
-just smoke    # quick SELECT 1 / SELECT @@version liveness probe (optional port=)
-just test     # run the Expecto suite
-just check    # build + test
+## SQL surface
+
+```sql
+CREATE TABLE users (
+  id BIGINT AUTO_INCREMENT PRIMARY KEY,
+  name VARCHAR(100) COLLATE utf8mb4_bin,
+  tags JSON,
+  joined_at DATETIME DEFAULT CURRENT_TIMESTAMP
+);
+
+INSERT INTO users (name, tags) VALUES
+  ('Ada',   '{"langs": ["fsharp"]}'),
+  ('Grace', '{"langs": ["cobol"]}');
+
+-- window functions
+SELECT name, ROW_NUMBER() OVER (ORDER BY joined_at) FROM users;
+
+-- JSON paths
+SELECT name, JSON_EXTRACT(tags, '$.langs[0]') FROM users;
+
+-- per-column and connection collation
+SET collation_connection = utf8mb4_bin;
+SELECT 'åge' = 'age';                        -- 0
+SELECT 'åge' = 'age' COLLATE utf8mb4_0900_ai_ci;  -- 1
+
+-- joins, derived tables, transactions, EXPLAIN
+BEGIN;
+SELECT u.name, COUNT(*) FROM users u
+  JOIN (SELECT * FROM orders WHERE total > 100) o ON o.user_id = u.id
+  GROUP BY u.name HAVING COUNT(*) > 1;
+COMMIT;
+
+EXPLAIN SELECT * FROM users WHERE id = 1;
+```
+
+Plus `UNION [ALL]`, `HAVING`, `NATURAL`/`USING` joins, `LAG`, `GROUP_CONCAT`,
+information_schema views, `SHOW CREATE TABLE`, multi-table `UPDATE`/`DELETE`,
+and `--data-dir` durability across restarts.
+
+## Using it from your stack
+
+It's just MySQL on port 3307 — configure any client like a local MySQL:
+
+```php
+// PDO
+$pdo = new PDO('mysql:host=127.0.0.1;port=3307;dbname=app', 'root', '');
 ```
 
 ## Extensibility
@@ -124,33 +184,6 @@ Db.create () |> Db.withDataDir "./fsdb-data" |> Db.listen System.Net.IPAddress.L
 `tests/Fsdb.Tests/IntegrationTests.fs` for the full round-trip test
 (`SLUGIFY`/`MEDIAN`) against a real client over the wire.
 
-## Status
-
-All ten roadmap milestones are done: wire protocol, PDO/mysql-CLI
-compatibility, the SQL engine core, Laravel migrations, test-suite parity,
-the embedding API, opt-in persistence (`--data-dir`), EXPLAIN +
-multi-table DML, performance-without-ugliness, and the streaming pipeline.
-See [ROADMAP.md](docs/ROADMAP.md) for the milestone plan, acceptance gates,
-and per-milestone evidence.
-
-### Compatibility gauntlet
-
-fsdb is validated by migrating and running the test suites of real Laravel
-applications against it, unmodified. Where a suite diverges from its sqlite
-baseline, the dispute is settled by running the same tests against a real
-MySQL 8.4 — fsdb must match MySQL, not sqlite.
-
-| Application | Laravel | Migrations | Result |
-|---|---|---|---|
-| App A | 11 | 94 | full parity, 0 failures |
-| App B | 11 | 205 | parity; 5 residual failures reproduce identically on real MySQL (app-side factory/collation bugs) |
-| App C | 10 | 160 | behavioral equivalence with real MySQL (identical failure set from an app-side factory bug) |
-| App D | 13 | 43 | parity; 1 residual failure is a sqlite-only PRAGMA introspection test that fails identically on real MySQL |
-| App E | 13 | 487 | full 10,972-test suite: 10,913 passed, all 36 failures individually verified as app-side bugs or real-MySQL-identical; one documented order divergence on an unordered query |
-
-The applications are private codebases, identified here only by framework
-version and size.
-
 ## Benchmarking
 
 `benchmarks/Fsdb.Benchmarks` runs fsdb head-to-head against a native MySQL
@@ -168,11 +201,6 @@ Both servers run ad hoc (no brew services) and are torn down afterwards.
 fsdb optimizes for readable, idiomatic F# over raw speed, so expect MySQL to
 win most of these — the numbers are here to find and track the hotspots,
 not to chase parity.
-
-`torture/` is a separate differential fuzz harness: generated SQL run against
-both fsdb and a MySQL 8.4 oracle, with the first divergence classified and
-replayed (`torture/scripts/run.sh suite`; exit 0 = pass/known gaps, 2 = new
-fsdb findings).
 
 ## License
 
