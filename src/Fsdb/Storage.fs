@@ -1340,6 +1340,16 @@ let private insertCore
     |> Result.map (fun (acceptedRev, nextAutoId', firstAuto, lastExplicit, index) ->
         let accepted = List.rev acceptedRev
         let firstAssigned = Option.orElse lastExplicit firstAuto
+        // ponytail: `table.Rows @ accepted` is still O(existing table size)
+        // per statement — the unique/FK checks above no longer are, but
+        // `Rows` itself is still a plain list, not the array/`ResizeArray`
+        // "index-addressable rows" half of the M9-3 design (see
+        // docs/performance-design.md's change C). That's the remaining gap
+        // between this and the design doc's <300µs `InsertSingle` gate; the
+        // point-SELECT gate this milestone actually targets doesn't touch
+        // this path at all. Upgrade to an array-backed `Rows` (O(1)
+        // amortized append) if single-row INSERT throughput at large table
+        // sizes ever becomes the bottleneck being chased.
         let table' = { table with Rows = table.Rows @ accepted; NextAutoId = nextAutoId'; UniqueIndex = index }
         Map.add tableKey table' db, (Option.defaultValue 0L firstAssigned, firstAuto, List.length accepted, accepted))
 
