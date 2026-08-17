@@ -49,10 +49,12 @@ build fails with "not defined".
 
 - No CI in this repo; verify locally with `just check` (and the torture harness
   for compatibility work).
-- Comment style (`docs/comment-style.md`): why-not-what only; `ponytail:` debt
-  markers; present tense, no "we". No session narration, milestone names,
-  roadmap, or design-doc references in code, comments, or test names — git owns
-  history; tests describe behavior.
+- Comment & doc style: `docs/comment-style.md` is the authority — every
+  comment there must survive a KEEP/DELETE/REWRITE grading (why-not-what,
+  `ponytail:` debt markers, no session narration, milestone names, roadmap,
+  or design-doc references in code, comments, or test names). The same rules
+  apply to markdown prose, and docs use words or `[x]` checkboxes for status,
+  never emoji markers.
 - MySQL binaries (homebrew): client `/opt/homebrew/opt/mysql-client/bin/mysql`,
   server `/opt/homebrew/opt/mysql@8.4/bin/mysqld`. Benchmarks refuse to run if
   anything is listening on 3307, and spin up throwaway mysqld on 3316/3317 (ad
