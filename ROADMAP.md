@@ -85,3 +85,13 @@ data-dir): 288 passed/15 skipped/2 todos/0 failed, 792 assertions — 0
 failures either way, one more test (and 5 more assertions) than the M5
 baseline's 287/787, which tracks the app's own migrations/tests having
 grown since that baseline was recorded, not a regression here)
+
+## M9 — Performance without ugliness
+Kill the measured pathologies while the code stays idiomatic — design and
+evidence in [docs/performance-design.md](docs/performance-design.md):
+quadratic list appends in Storage, hash join for equi-ON, index-addressable
+rows + PK/unique hash indexes, disconnect cancellation, trustworthy
+benchmark harness.
+**Gate:** UpdateSingleRow < 10ms, JoinUsersOrders completes < 25ms,
+PointSelectByPk < 250µs, two consecutive bench runs agree within 20%,
+Expecto + one gauntlet suite regression green. Status: ☐
