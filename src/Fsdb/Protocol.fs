@@ -161,6 +161,7 @@ let sqlStateForCode (code: int) : string =
     | 1048 -> "23000" // ER_BAD_NULL_ERROR
     | 1052 -> "23000" // ER_NON_UNIQ_ERROR
     | 1062 -> "23000" // ER_DUP_ENTRY
+    | 1265 -> "01000" // ER_WARN_DATA_TRUNCATED
     | 1451 -> "23000" // ER_ROW_IS_REFERENCED_2
     | 1452 -> "23000" // ER_NO_REFERENCED_ROW_2
     | _ -> "HY000"

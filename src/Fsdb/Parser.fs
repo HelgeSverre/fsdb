@@ -938,8 +938,12 @@ let private createIndexStmt: Parser<Statement, unit> =
     |>> fun (((unique, name), table), cols) -> CreateIndex(name, table, cols, unique)
 
 let private dropIndexStmt: Parser<Statement, unit> =
-    (keyword "DROP" >>. keyword "INDEX" >>. identifier .>> keyword "ON" .>>. qualifiedTableName)
-    |>> fun (name, table) -> DropIndexStmt(name, table)
+    (keyword "DROP" >>. keyword "INDEX"
+     >>. (opt (attempt (keyword "IF" >>. keyword "EXISTS")) |>> Option.isSome)
+     .>>. identifier
+     .>> keyword "ON"
+     .>>. qualifiedTableName)
+    |>> fun ((ifExists, name), table) -> DropIndexStmt(name, table, ifExists)
 
 let private dropTable: Parser<Statement, unit> =
     (keyword "DROP" >>. keyword "TABLE"

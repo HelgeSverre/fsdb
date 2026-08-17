@@ -824,6 +824,34 @@ let private keepMatches
 /// boolean whenever an operand is `VNull`, per `Value`'s helpers), function
 /// calls resolve through `ctx.Registry` (error 1305 if unregistered), and a
 /// bare column resolves through `ctx.ColumnIndex` (error 1054 if unknown).
+/// MySQL compares an ENUM column against a number by declaration ordinal —
+/// `WHERE status = 1`, and `= '1'` too (a quoted number that isn't itself a
+/// declared label), match the first declared value, not the text "1".
+/// `Some` is that label's 1-based ordinal when `expr` resolves to an
+/// ENUM-typed column and `v` is its stored label; `None` lets the caller
+/// fall back to the plain comparison.
+let private enumOrdinalFor (ctx: EvalContext) (expr: Expr) (v: Value) : Value option =
+    match tryColumnDefForExpr ctx expr with
+    | Some { Type = TEnum declared } ->
+        match v with
+        | VString label ->
+            declared
+            |> List.tryFindIndex (fun item -> System.String.Equals(item, label, System.StringComparison.OrdinalIgnoreCase))
+            |> Option.map (fun idx -> VInt(int64 (idx + 1)))
+        | _ -> None
+    | _ -> None
+
+/// The numeric side of an ENUM comparison: a real integer, or a
+/// fully-numeric string (MySQL reads quoted numbers as indices too).
+let private ordinalComparand (v: Value) : Value option =
+    match v with
+    | VInt _ -> Some v
+    | VString s ->
+        match System.Int64.TryParse(s.Trim(), System.Globalization.NumberStyles.Integer, System.Globalization.CultureInfo.InvariantCulture) with
+        | true, i -> Some(VInt i)
+        | false, _ -> None
+    | _ -> None
+
 let rec private evalExpr (ctx: EvalContext) (expr: Expr) : Result<Value, EvalError> =
     let eval = evalExpr ctx
 
@@ -859,7 +887,19 @@ let rec private evalExpr (ctx: EvalContext) (expr: Expr) : Result<Value, EvalErr
                     match va, vb with
                     | VNull, _
                     | _, VNull -> VNull
-                    | _ -> boolToValue (pred (Value.compare va vb))
+                    | _ ->
+                        // ENUM columns compare by ordinal against a numeric
+                        // operand (see `enumOrdinalFor`) — either side may be
+                        // the column.
+                        let pa, pb =
+                            match enumOrdinalFor ctx a va, ordinalComparand vb with
+                            | Some oa, Some nb -> oa, nb
+                            | _ ->
+                                match ordinalComparand va, enumOrdinalFor ctx b vb with
+                                | Some na, Some ob -> na, ob
+                                | _ -> va, vb
+
+                        boolToValue (pred (Value.compare pa pb))
 
                 match op with
                 | And ->
@@ -916,7 +956,14 @@ let rec private evalExpr (ctx: EvalContext) (expr: Expr) : Result<Value, EvalErr
                 xs
                 |> traverse eval
                 |> Result.map (fun vs ->
-                    if vs |> List.exists (fun v -> Value.equals ve v = Some true) then
+                    // `status IN (1, 2)` matches by declaration ordinal,
+                    // same as the BinOp comparisons above.
+                    let eq (v: Value) =
+                        match enumOrdinalFor ctx e ve, ordinalComparand v with
+                        | Some oe, Some nv -> Value.equals oe nv
+                        | _ -> Value.equals ve v
+
+                    if vs |> List.exists (fun v -> eq v = Some true) then
                         VInt 1L
                     elif vs |> List.exists (function VNull -> true | _ -> false) then
                         VNull
@@ -3308,7 +3355,10 @@ let execute (store: Store) (registry: Registry) (dbName: string) (ids: int64 * i
         | Ok() -> ids, Affected 0UL
         | Error e -> ids, storageErr e
 
-    | DropIndexStmt(name, table) ->
+    | DropIndexStmt(name, table, _) ->
+        // `ifExists` needs no executor logic (see the AST case's doc):
+        // dropping a missing index is already a silent no-op, and a missing
+        // table errors here even under `IF EXISTS`, matching MySQL.
         let db, table = splitQualified dbName table
 
         match alterTable store db table [ DropIndexAction name ] with

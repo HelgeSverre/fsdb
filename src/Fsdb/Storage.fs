@@ -34,6 +34,10 @@ type StorageError =
     | ColumnCountMismatch of expected: int * actual: int
     | NotNullViolation of column: string
     | InvalidValueForColumn of column: string * value: string
+    /// An ENUM (or SET) column rejected a value — MySQL's own 1265
+    /// "Data truncated" (SQLSTATE 01000), distinct from the 1366 incorrect-
+    /// value error other column types raise in strict mode.
+    | DataTruncatedForColumn of column: string
     | ExpressionError of code: int * message: string
     /// A unique index (or the primary key, reported as `"PRIMARY"`) already
     /// has a row with this value.
@@ -58,6 +62,7 @@ let toMySqlError (err: StorageError) : int * string =
         1136, sprintf "Column count doesn't match value count at row 1 (expected %d, got %d)" expected actual
     | NotNullViolation column -> 1048, sprintf "Column '%s' cannot be null" column
     | InvalidValueForColumn(column, value) -> 1366, sprintf "Incorrect value: '%s' for column '%s'" value column
+    | DataTruncatedForColumn column -> 1265, sprintf "Data truncated for column '%s' at row 1" column
     | ExpressionError(code, message) -> code, message
     | DuplicateKey(keyName, value) -> 1062, sprintf "Duplicate entry '%s' for key '%s'" value keyName
     | ForeignKeyRestrict fkName ->
@@ -824,12 +829,29 @@ let coerceValue (strict: bool) (col: ColumnDef) (v: Value) : Result<Value, Stora
             | VString text -> Ok(VBytes(Text.Encoding.UTF8.GetBytes text))
             | _ -> Ok(VBytes(v |> toText |> Option.defaultValue "" |> Text.Encoding.UTF8.GetBytes))
         | TEnum values ->
+            // MySQL's own error for a rejected ENUM value is 1265 "Data
+            // truncated" (SQLSTATE 01000), not the 1366 incorrect-value
+            // error other column types raise in strict mode.
+            let enumFail () = Error(DataTruncatedForColumn col.Name)
+
             match v with
-            | VString s when values |> List.exists (fun allowed -> String.Equals(allowed, s, StringComparison.OrdinalIgnoreCase)) ->
-                Ok(VString s)
+            | VString s ->
+                match values |> List.tryFind (fun allowed -> String.Equals(allowed, s, StringComparison.OrdinalIgnoreCase)) with
+                // MySQL stores the declaration index and reads back the
+                // *declared* spelling — canonicalize the casing rather than
+                // round-tripping the input's ('ADMIN' comes back 'admin').
+                | Some canonical -> Ok(VString canonical)
+                | None ->
+                    // A quoted number that isn't a declared label is still a
+                    // 1-based index (MySQL: "If the numeric value is quoted,
+                    // it is still interpreted as an index if there is no
+                    // matching string in the list of enumeration members").
+                    match Int64.TryParse(s.Trim(), NumberStyles.Integer, CultureInfo.InvariantCulture) with
+                    | true, i when i >= 1L && i <= int64 (List.length values) -> Ok(VString values.[int i - 1])
+                    | _ -> enumFail ()
             // MySQL also accepts a 1-based index into the declared value list.
             | VInt i when i >= 1L && i <= int64 (List.length values) -> Ok(VString values.[int i - 1])
-            | _ -> fail ()
+            | _ -> enumFail ()
         | TDate ->
             match v with
             | VDate d -> Ok(VDate d)

@@ -452,7 +452,8 @@ let private encodeStatement (s: Statement) : JsonNode =
     | RenameTable pairs -> caseObj "RenameTable" [ "pairs", arr (pairs |> List.map (fun (a, b) -> arr [ str a; str b ])) ]
     | CreateIndex(name, table, columns, unique) ->
         caseObj "CreateIndex" [ "name", str name; "table", str table; "columns", strArr columns; "unique", boolNode unique ]
-    | DropIndexStmt(name, table) -> caseObj "DropIndexStmt" [ "name", str name; "table", str table ]
+    | DropIndexStmt(name, table, ifExists) ->
+        caseObj "DropIndexStmt" [ "name", str name; "table", str table; "ifExists", boolNode ifExists ]
     | Truncate table -> caseObj "Truncate" [ "table", str table ]
     | other -> failwithf "Persistence: %A isn't a DDL statement SchemaChanged should ever carry" other
 
@@ -482,7 +483,11 @@ let private decodeStatement (node: JsonNode) : Statement =
         )
     | "CreateIndex" ->
         CreateIndex(o.["name"].GetValue<string>(), o.["table"].GetValue<string>(), strListOf o.["columns"], o.["unique"].GetValue<bool>())
-    | "DropIndexStmt" -> DropIndexStmt(o.["name"].GetValue<string>(), o.["table"].GetValue<string>())
+    | "DropIndexStmt" ->
+        // `ifExists` is optional in the encoding for WAL lines written
+        // before the flag existed — treat its absence as false.
+        let ifExists = match o.["ifExists"] with null -> false | v -> v.GetValue<bool>()
+        DropIndexStmt(o.["name"].GetValue<string>(), o.["table"].GetValue<string>(), ifExists)
     | "Truncate" -> Truncate(o.["table"].GetValue<string>())
     | tag -> failwithf "Persistence: unknown Statement case '%s' in WAL/snapshot" tag
 
@@ -544,7 +549,7 @@ let private applyDdl (store: Store) (db: string) (stmt: Statement) : unit =
     | RenameTable pairs -> pairs |> List.iter (fun (oldName, newName) -> warn "RenameTable" (renameTable store db oldName newName))
     | CreateIndex(name, table, columns, unique) ->
         warn "CreateIndex" (alterTable store db table [ AddIndex { Name = name; Columns = columns; Unique = unique } ])
-    | DropIndexStmt(name, table) -> warn "DropIndexStmt" (alterTable store db table [ DropIndexAction name ])
+    | DropIndexStmt(name, table, _) -> warn "DropIndexStmt" (alterTable store db table [ DropIndexAction name ])
     | Truncate table -> warn "Truncate" (truncate store db table)
     | other -> Log.diagnostic "fsdb: WAL replay warning (SchemaChanged): unexpected statement %A" other
 

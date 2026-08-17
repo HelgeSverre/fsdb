@@ -1135,8 +1135,60 @@ let tests =
                     | other -> failtestf "expected the valid enum value to insert, got %A" other
 
                     match runDefault store "INSERT INTO t VALUES ('bogus')" with
-                    | Err(1366, _) -> ()
-                    | other -> failtestf "expected a 1366 error for an unlisted enum value, got %A" other
+                    | Err(1265, _) -> ()
+                    | other -> failtestf "expected MySQL's 1265 Data-truncated error for an unlisted enum value, got %A" other
+
+                testCase "ENUM stores the declared spelling, and accepts integer and quoted-number indices like MySQL"
+                <| fun _ ->
+                    let store = newStore ()
+                    runDefault store "CREATE TABLE t (status ENUM('open', 'closed'))" |> ignore
+
+                    // Case-insensitive label match, canonicalized to the
+                    // declared spelling on read (MySQL stores the index).
+                    runDefault store "INSERT INTO t VALUES ('OPEN')" |> ignore
+
+                    match runDefault store "SELECT status FROM t" with
+                    | ResultSet(_, [ [ Some "open" ] ]) -> ()
+                    | other -> failtestf "expected 'OPEN' to read back as the declared 'open', got %A" other
+
+                    // Integer index (1-based) into the declared list.
+                    runDefault store "INSERT INTO t VALUES (2)" |> ignore
+
+                    // A quoted number with no matching label is still an index.
+                    runDefault store "INSERT INTO t VALUES ('2')" |> ignore
+
+                    match runDefault store "SELECT status FROM t" with
+                    | ResultSet(_, rows) ->
+                        Expect.equal rows [ [ Some "open" ]; [ Some "closed" ]; [ Some "closed" ] ] "index insertions land on the declared values"
+                    | other -> failtestf "expected index-based insertions, got %A" other
+
+                    // Out-of-range indices are rejected, like an invalid label.
+                    match runDefault store "INSERT INTO t VALUES (0)" with
+                    | Err(1265, _) -> ()
+                    | other -> failtestf "expected 1265 for out-of-range index 0, got %A" other
+
+                testCase "ENUM comparisons in WHERE/IN use declaration ordinals against numbers, strings against labels"
+                <| fun _ ->
+                    let store = newStore ()
+                    runDefault store "CREATE TABLE t (status ENUM('open', 'closed'))" |> ignore
+                    runDefault store "INSERT INTO t VALUES ('open'), ('closed'), ('open')" |> ignore
+
+                    let where (cond: string) =
+                        match runDefault store $"SELECT COUNT(*) FROM t WHERE {cond}" with
+                        | ResultSet(_, [ [ Some n ] ]) -> n
+                        | other -> failtestf "expected a count for WHERE %s, got %A" cond other
+
+                    // label comparison is the plain case-insensitive string match
+                    Expect.equal (where "status = 'open'") "2" "label match"
+                    Expect.equal (where "status = 'OPEN'") "2" "label match is case-insensitive"
+                    // numbers — bare or quoted — compare by declaration ordinal
+                    Expect.equal (where "status = 1") "2" "ordinal 1 matches the first declared value"
+                    Expect.equal (where "status = '1'") "2" "a quoted number is still an ordinal"
+                    Expect.equal (where "status = 2") "1" "ordinal 2 matches the second declared value"
+                    Expect.equal (where "status > 1") "1" "ordinal ordering drives numeric comparisons"
+                    Expect.equal (where "status = 9") "0" "an out-of-range ordinal matches nothing"
+                    Expect.equal (where "status IN (1, 2)") "3" "IN (numbers) matches by ordinal"
+                    Expect.equal (where "status IN ('open')") "2" "IN (labels) matches by string"
 
                 testCase "hexadecimal literals preserve arbitrary bytes in VARBINARY and BLOB columns"
                 <| fun _ ->
@@ -1251,7 +1303,7 @@ let tests =
                     | Affected 0UL -> ()
                     | other -> failtestf "expected DROP DATABASE IF EXISTS to be a no-op, got %A" other
 
-                testCase "CREATE TABLE IF NOT EXISTS / DROP TABLE IF EXISTS are no-ops when absent"
+                testCase "CREATE TABLE IF NOT EXISTS / DROP TABLE IF EXISTS / DROP INDEX IF EXISTS are no-ops when absent"
                 <| fun _ ->
                     let store = newStore ()
 
@@ -1268,7 +1320,25 @@ let tests =
 
                     match runDefault store "DROP TABLE IF EXISTS missing" with
                     | Affected 0UL -> ()
-                    | other -> failtestf "expected DROP TABLE IF EXISTS to no-op for a missing table, got %A" other ]
+                    | other -> failtestf "expected DROP TABLE IF EXISTS to no-op for a missing table, got %A" other
+
+                    // DROP INDEX on an existing table with a missing index is
+                    // a no-op whether or not IF EXISTS is given (MySQL 1091
+                    // suppressed by IF EXISTS; fsdb's ALTER drops to the same
+                    // silent no-op).
+                    match runDefault store "DROP INDEX no_such_idx ON t" with
+                    | Affected 0UL -> ()
+                    | other -> failtestf "expected DROP INDEX on a missing index to no-op, got %A" other
+
+                    match runDefault store "DROP INDEX IF EXISTS no_such_idx ON t" with
+                    | Affected 0UL -> ()
+                    | other -> failtestf "expected DROP INDEX IF EXISTS to no-op for a missing index, got %A" other
+
+                    // a missing table still errors even under IF EXISTS,
+                    // matching MySQL.
+                    match runDefault store "DROP INDEX IF EXISTS no_such_idx ON missing_table" with
+                    | Err(1146, _) -> ()
+                    | other -> failtestf "expected 1146 for DROP INDEX IF EXISTS on a missing table, got %A" other ]
 
           testList
               "EXISTS (subquery)"

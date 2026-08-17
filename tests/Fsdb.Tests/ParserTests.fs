@@ -1276,9 +1276,10 @@ let tests =
                         (CreateIndex("uq_a", "t", [ "a" ], true))
                         "create unique index"
 
-                testCase "DROP INDEX name ON table"
+                testCase "DROP INDEX [IF EXISTS] name ON table"
                 <| fun _ ->
-                    Expect.equal (parseOk "DROP INDEX idx_a ON t") (DropIndexStmt("idx_a", "t")) "drop index"
+                    Expect.equal (parseOk "DROP INDEX idx_a ON t") (DropIndexStmt("idx_a", "t", false)) "drop index"
+                    Expect.equal (parseOk "DROP INDEX IF EXISTS idx_a ON t") (DropIndexStmt("idx_a", "t", true)) "drop index if exists"
 
                 testCase "CAST(expr AS type), including SIGNED/UNSIGNED"
                 <| fun _ ->
