@@ -111,7 +111,11 @@ type Table =
 /// Table names are case-insensitive, keyed by their lowercased form.
 type Database = Map<string, Table>
 
-/// Database names, as given, to a `Database`.
+/// Database names, as given, to a `Database`. Only ever materialized as a
+/// whole `Map` for callers that genuinely need a point-in-time view spanning
+/// every database at once (`Store.Catalog`, see its doc) — the live mutable
+/// state backing it is sharded per database (`Store.Databases`), not one
+/// value of this type.
 type Catalog = Map<string, Database>
 
 /// One committed change to the catalog, for a physical WAL. Data changes
@@ -168,7 +172,24 @@ let splitQualified (defaultDb: string) (name: string) : string * string =
 /// (and Laravel's `Schema::disableForeignKeyConstraints`, which sends
 /// exactly that) calls `setForeignKeyChecks`.
 type Store =
-    { mutable Catalog: Catalog
+    { /// Every database's table map, independently CAS'd per database via
+      /// its own `Database ref` cell — the sharded replacement for what used
+      /// to be one store-wide `Catalog` field with a single
+      /// `Interlocked.CompareExchange` target. A `ConcurrentDictionary` so
+      /// `CREATE`/`DROP DATABASE` (adding/removing a whole entry) is itself
+      /// a lock-free, atomic dictionary operation that never contends with
+      /// an unrelated database's row writer either (`createDatabase`/
+      /// `dropDatabase`, `ensureDatabase`). This is the fix for the
+      /// cross-database write bottleneck profiling found: every write to
+      /// *any* database used to CAS the same single `Catalog` reference, so
+      /// writers in unrelated databases constantly invalidated each other's
+      /// compare-exchange and had to retry their whole write under
+      /// contention; sharding the CAS target per database means database A's
+      /// writers never see database B's writes at all, let alone race them.
+      /// Not exposed beyond this module (no other module needs to touch it
+      /// directly — everything goes through `Store.Catalog`, `scan`,
+      /// `tryUniqueLookup`, or the write ops below).
+      Databases: ConcurrentDictionary<string, Database ref>
       mutable ForeignKeyChecks: bool
       /// The storage-level mirror of MySQL's session `sql_mode`
       /// STRICT_TRANS_TABLES/STRICT_ALL_TABLES: `true` rejects a value that
@@ -213,18 +234,66 @@ type Store =
       /// BEGIN, statements, and COMMIT may resume on different threads.
       TransactionGates: ConcurrentDictionary<string, SemaphoreSlim>
       /// Serializes `OnCommit`'s dispatch only (see `emit`) — every other
-      /// write serializes per-database via `TransactionGates` and swaps
-      /// `Catalog` lock-free (`Interlocked.CompareExchange`, see `withWrite`),
-      /// so writers to different databases never wait on each other here.
-      /// `OnCommit`'s one subscriber (`Persistence.attach`'s WAL appender)
-      /// isn't safe to call concurrently from two databases' writer threads
-      /// at once — it appends to one shared file and tracks rotation state
-      /// in a plain `ref` — so its calls stay ordered by this lock, same as
+      /// write serializes per-database via `TransactionGates` and swaps its
+      /// own `Database ref` cell lock-free (`Interlocked.CompareExchange`, see
+      /// `withDatabase`), so writers to different databases never wait on
+      /// each other here either. `OnCommit`'s one subscriber
+      /// (`Persistence.attach`'s WAL appender) isn't safe to call
+      /// concurrently from two databases' writer threads at once — it
+      /// appends to one shared file and tracks rotation state in a plain
+      /// `ref` — so its calls stay ordered by this lock, same as
       /// `Persistence.snapshotNow`'s own use of it.
       Lock: obj }
 
+    /// Assembles a point-in-time `Catalog` (whole-map) view across every
+    /// database's independent slot — an O(number of databases) allocation,
+    /// not O(rows), paid only by callers that genuinely need a snapshot
+    /// spanning every database at once: a transaction's BEGIN/savepoint
+    /// base, `information_schema`, and WAL/snapshot persistence. A
+    /// live-traffic hot path (`scan`, `tryUniqueLookup`, `databaseExists`)
+    /// reads `Databases` directly instead, to avoid paying this rebuild once
+    /// per row/query.
+    ///
+    /// ponytail: this reads each database's slot one at a time while other
+    /// databases' writers keep running, so it isn't a single atomic instant
+    /// across every database — a concurrent cross-database observer could in
+    /// principle see database A's tables as of slightly after database B's.
+    /// The one place this could ever surface is a single `information_schema`
+    /// `SELECT` spanning multiple databases mid another database's unrelated
+    /// commit; each database's own transactional/snapshot correctness (what
+    /// every torture lane actually checks) is untouched — this relaxation
+    /// only affects a *global* view stitched from independent databases, not
+    /// any one database's own consistency. Upgrade to a store-wide epoch
+    /// counter if a caller ever needs `information_schema` to be
+    /// linearizable across databases too.
+    member this.Catalog
+        with get () : Catalog = this.Databases |> Seq.map (fun kv -> kv.Key, kv.Value.Value) |> Map.ofSeq
+        /// Wholesale-replaces every database's slot from `catalog` in one go
+        /// — correct only when nothing else can be reading/writing
+        /// `Databases` concurrently: `Persistence.load`'s snapshot/WAL replay
+        /// (before the server starts accepting connections), a
+        /// transaction's own private snapshot store resetting itself to an
+        /// earlier savepoint (`QueryHandler.rollbackToSavepoint` — that
+        /// snapshot is only ever touched by its one owning connection, never
+        /// shared), and test code building a store's contents directly.
+        /// Never used on the *live, shared* store; see `mergeCatalogInto`/
+        /// `bumpAutoIncrementsInto` for the concurrency-safe, per-database
+        /// merges real commits use instead.
+        and set (catalog: Catalog) =
+            this.Databases.Clear()
+
+            for KeyValue(dbName, db) in catalog do
+                this.Databases.[dbName] <- ref db
+
+/// As `store.Catalog <- catalog`, spelled as a function for callers that
+/// prefer piping/partial application over the property-set syntax.
+let setCatalog (store: Store) (catalog: Catalog) : unit = store.Catalog <- catalog
+
 let create () : Store =
-    { Catalog = Map.ofList [ defaultDatabase, Map.empty ]
+    let databases = ConcurrentDictionary<string, Database ref>()
+    databases.[defaultDatabase] <- ref Map.empty
+
+    { Databases = databases
       ForeignKeyChecks = true
       StrictMode = true
       OnCommit = None
@@ -285,7 +354,18 @@ let private emit (store: Store) (event: CommitEvent option) : unit =
 /// `emit`'s buffer check, same zero-overhead-when-nobody's-listening
 /// property as the non-transactional path.
 let beginTransactionSnapshot (store: Store) : Store =
-    { Catalog = store.Catalog
+    // A fresh `Database ref` cell per database, each wrapping the *value*
+    // `store`'s cell holds right now — sharing the immutable `Database` Map
+    // (cheap, structural sharing) but never the mutable cell itself, so a
+    // write against the snapshot's copy can never be seen by (or race) a
+    // concurrent write against the live store's own cell for the same
+    // database.
+    let databases = ConcurrentDictionary<string, Database ref>()
+
+    for KeyValue(dbName, slot) in store.Databases do
+        databases.[dbName] <- ref slot.Value
+
+    { Databases = databases
       ForeignKeyChecks = store.ForeignKeyChecks
       // Not seeded from `store.StrictMode` — `QueryHandler.executeStatement`
       // re-derives it from the session's own `sql_mode` before every
@@ -329,156 +409,152 @@ let normalizeTableName (name: string) = name.ToLowerInvariant()
 /// `CREATE DATABASE name` — unlike `ensureDatabase` (silent no-op used by
 /// handshake auto-create/first-write auto-vivify), this errors 1007 if it
 /// already exists; `Executor` swallows that error for `IF NOT EXISTS`, same
-/// pattern as `createTable`.
-/// Retries `body` against a freshly re-read `store.Catalog` if its
-/// `Interlocked.CompareExchange` swap loses a race to a concurrent writer on
-/// a *different* database — see `withWrite`'s doc (defined below, once
-/// `Catalog`'s write ops start needing the general form) for why a retry
-/// here only ever means that, never self-contention.
-let rec private createOrDropDatabase (store: Store) (body: Catalog -> Result<Catalog * CommitEvent, StorageError>) : Result<unit, StorageError> =
-    let current = store.Catalog
-
-    match body current with
-    | Error e -> Error e
-    | Ok(catalog', event) ->
-        if obj.ReferenceEquals(Interlocked.CompareExchange(&store.Catalog, catalog', current), current) then
-            emit store (Some event)
-            Ok()
-        else
-            createOrDropDatabase store body
-
+/// pattern as `createTable`. `ConcurrentDictionary.TryAdd` is itself atomic,
+/// so two concurrent `CREATE DATABASE`s racing for the same name always
+/// leave exactly one winner and one honest `DatabaseExists` — no CAS/retry
+/// loop needed here at all, and (unlike the whole-catalog CAS this replaced)
+/// touching one database's dictionary entry can never be invalidated by an
+/// unrelated database's concurrent row writer.
 let createDatabase (store: Store) (dbName: string) : Result<unit, StorageError> =
-    createOrDropDatabase store (fun catalog ->
-        if Map.containsKey dbName catalog then
-            Error(DatabaseExists dbName)
-        else
-            Ok(Map.add dbName Map.empty catalog, SchemaChanged(dbName, CreateDatabase(dbName, false))))
+    if store.Databases.TryAdd(dbName, ref Map.empty) then
+        emit store (Some(SchemaChanged(dbName, CreateDatabase(dbName, false))))
+        Ok()
+    else
+        Error(DatabaseExists dbName)
 
+/// `DROP DATABASE name` — same atomicity argument as `createDatabase`, via
+/// `ConcurrentDictionary.TryRemove`.
 let dropDatabase (store: Store) (dbName: string) : Result<unit, StorageError> =
-    createOrDropDatabase store (fun catalog ->
-        if Map.containsKey dbName catalog then
-            Ok(Map.remove dbName catalog, SchemaChanged(dbName, DropDatabase(dbName, false)))
-        else
-            Error(NoSuchDatabase dbName))
+    match store.Databases.TryRemove dbName with
+    | true, _ ->
+        emit store (Some(SchemaChanged(dbName, DropDatabase(dbName, false))))
+        Ok()
+    | false, _ -> Error(NoSuchDatabase dbName)
 
-/// Applies `f` to the current catalog and atomically swaps the result in via
-/// `Interlocked.CompareExchange`, retrying against a fresh catalog if a
-/// concurrent writer's swap for a *different* database raced ahead in
-/// between. No lock: `QueryHandler` already serializes every write to the
-/// *same* database through its per-database `TransactionGates`
-/// (`enterTransactionGate`) before it ever reaches here, so two calls into
-/// this function for the same database never run concurrently — a retry
-/// here only ever means "another database's writer got there first", which
-/// this function alone can't avoid (the whole point is that unrelated
-/// databases don't wait on each other) but costs only a cheap re-run of `f`
-/// against the fresh catalog.
-let rec private withWrite (store: Store) (f: Catalog -> Result<Catalog * 'a, StorageError>) : Result<'a, StorageError> =
-    let current = store.Catalog
+/// Applies `f` to `dbName`'s current table map and atomically swaps the
+/// result into that database's own `Database ref` cell via
+/// `Interlocked.CompareExchange`. No lock: `QueryHandler` already serializes
+/// every write to the *same* database through its per-database
+/// `TransactionGates` (`enterTransactionGate`) before it ever reaches here,
+/// so two calls into this function for the same database never run
+/// concurrently in practice — the retry branch exists only because
+/// `Interlocked.CompareExchange` demands one, not because contention is
+/// expected. Crucially, a completely disjoint slot per database (see
+/// `Store.Databases`'s doc) means a write to database A never even reads,
+/// let alone spins retrying against, database B's slot — the cross-database
+/// contention a single store-wide `Catalog` CAS used to cause is gone by
+/// construction, not by luck avoiding the retry branch.
+let rec private withDatabase
+    (store: Store)
+    (dbName: string)
+    (f: Database -> Result<Database * 'a, StorageError>)
+    : Result<'a, StorageError> =
+    match store.Databases.TryGetValue dbName with
+    | false, _ -> Error(NoSuchDatabase dbName)
+    | true, slot ->
+        let current = slot.Value
 
-    match f current with
-    | Error e -> Error e
-    | Ok(catalog', result) ->
-        if obj.ReferenceEquals(Interlocked.CompareExchange(&store.Catalog, catalog', current), current) then
-            Ok result
-        else
-            withWrite store f
+        match f current with
+        | Error e -> Error e
+        | Ok(db', result) ->
+            if obj.ReferenceEquals(Interlocked.CompareExchange(&slot.contents, db', current), current) then
+                Ok result
+            else
+                withDatabase store dbName f
 
-/// As `withWrite`, but for callers that already have the replacement
-/// catalog in hand (`f` never fails) rather than computing it from the live
-/// one — `mergeCatalogInto`/`bumpAutoIncrementsInto`'s shared CAS retry.
-let rec private swapCatalog (store: Store) (f: Catalog -> Catalog) : unit =
-    let current = store.Catalog
-    let updated = f current
+/// Every database name appearing as a key in `m` — the shared set-of-keys
+/// step `mergeDatabaseSlot`/`mergeCatalogInto`/`bumpAutoIncrementsInto`'s
+/// per-database merges all need.
+let private keysOf (m: Map<string, 'a>) : Set<string> = m |> Map.toList |> List.map fst |> Set.ofList
 
-    if not (obj.ReferenceEquals(Interlocked.CompareExchange(&store.Catalog, updated, current), current)) then
-        swapCatalog store f
+/// Three-way merges one isolated unit of work's private before/after view of
+/// a *single* database (`baseDb`/`batchDb`, both `None` when the batch never
+/// saw that database at all) into that database's own live `slot`,
+/// table-by-table: a table the batch actually wrote (its snapshot copy
+/// differs from `baseDb`, the database as it stood when the batch started)
+/// wins; one it dropped (present at the start, gone from the snapshot) is
+/// removed; one it never touched is left exactly as the slot's *current*
+/// live value already has it, so a concurrent writer's change to that table
+/// (landed on this same slot while the batch was running) survives instead
+/// of being silently discarded by a stale copy. Retries only against this
+/// one database's slot on a lost compare-exchange — unlike the old
+/// whole-catalog merge this replaces, committing a transaction in database A
+/// never spins against database B's concurrent writers, because it never
+/// reads database B's slot at all.
+let rec private mergeDatabaseSlot (slot: Database ref) (baseDb: Database) (batchDb: Database) : unit =
+    let liveDb = slot.Value
+    let tableKeys = Set.unionMany [ keysOf baseDb; keysOf batchDb; keysOf liveDb ]
 
-/// Three-way merges an isolated unit of work's private snapshot catalog
-/// back into a live one: for every (database, table) appearing in any of
-/// the three, a table the batch actually wrote (its snapshot copy differs
-/// from `baseCatalog`, the catalog it started from) wins; one it dropped
-/// (present at the start, gone from the snapshot) is removed; one it never
-/// touched is left exactly as `liveCatalog` (the shared store's catalog
-/// *right now*, not as of the batch's start) already has it, so a
-/// concurrent write to that table by another database's writer during the
-/// batch's lifetime survives instead of being silently discarded by a stale
-/// copy of it. Same three-way logic one level up for whole databases the
-/// batch created/dropped. Shared by `QueryHandler`'s transaction commit and
-/// `Executor`'s multi-table `UPDATE`, both of which run a private snapshot
-/// store before merging its catalog back.
-let mergeCatalogs (baseCatalog: Catalog) (batchCatalog: Catalog) (liveCatalog: Catalog) : Catalog =
-    let keysOf (m: Map<string, 'a>) = m |> Map.toList |> List.map fst |> Set.ofList
-    let dbKeys = Set.unionMany [ keysOf baseCatalog; keysOf batchCatalog; keysOf liveCatalog ]
+    let mergedDb =
+        tableKeys
+        |> Set.fold
+            (fun tacc tableName ->
+                match Map.tryFind tableName baseDb, Map.tryFind tableName batchDb with
+                | Some _, None -> Map.remove tableName tacc // dropped by the batch
+                | None, Some t -> Map.add tableName t tacc // created by the batch
+                | Some baseT, Some batchT when baseT <> batchT -> Map.add tableName batchT tacc // modified by the batch
+                | _ -> tacc // untouched by the batch — keep whatever's live
+            )
+            liveDb
 
-    dbKeys
-    |> Set.fold
-        (fun acc dbName ->
-            match Map.tryFind dbName baseCatalog, Map.tryFind dbName batchCatalog with
-            | Some _, None -> Map.remove dbName acc // the batch dropped this database
-            | None, Some batchDb -> Map.add dbName batchDb acc // the batch created this database
-            | None, None -> acc // the batch never saw this database; leave the live entry alone
-            | Some baseDb, Some batchDb ->
-                // Existed both before and after the batch (whether or not it
-                // touched any table in it) — merge table-by-table against
-                // the *live* catalog's current version of the database, not
-                // the batch's, so a concurrent write to an untouched table
-                // survives.
-                let liveDb = Map.tryFind dbName liveCatalog |> Option.defaultValue Map.empty
-                let tableKeys = Set.unionMany [ keysOf baseDb; keysOf batchDb; keysOf liveDb ]
-
-                let mergedDb =
-                    tableKeys
-                    |> Set.fold
-                        (fun tacc tableName ->
-                            match Map.tryFind tableName baseDb, Map.tryFind tableName batchDb with
-                            | Some _, None -> Map.remove tableName tacc // dropped by the batch
-                            | None, Some t -> Map.add tableName t tacc // created by the batch
-                            | Some baseT, Some batchT when baseT <> batchT -> Map.add tableName batchT tacc // modified by the batch
-                            | _ -> tacc // untouched by the batch — keep whatever's live
-                        )
-                        liveDb
-
-                Map.add dbName mergedDb acc)
-        liveCatalog
+    if not (obj.ReferenceEquals(Interlocked.CompareExchange(&slot.contents, mergedDb, liveDb), liveDb)) then
+        mergeDatabaseSlot slot baseDb batchDb
 
 /// Merges `batchCatalog` (built from `baseCatalog` by some isolated unit of
 /// work — a committing transaction, or a multi-table statement's private
-/// snapshot store) into `store`'s live catalog via `mergeCatalogs`, retrying
-/// against a fresh live catalog if a concurrent writer to an unrelated
-/// database swapped in between (see `swapCatalog`).
+/// snapshot store) into `store`'s live databases, one at a time via
+/// `mergeDatabaseSlot`/`Databases.TryRemove`/`GetOrAdd` — only for the
+/// database(s) the batch actually saw (almost always exactly one; see
+/// `Store.TransactionGates`'s doc on cross-database transactions), never
+/// iterating or contending on any database the batch never touched. Shared
+/// by `QueryHandler`'s transaction commit and `Executor`'s multi-table
+/// `UPDATE`, both of which run a private snapshot store before merging its
+/// catalog back.
 let mergeCatalogInto (store: Store) (baseCatalog: Catalog) (batchCatalog: Catalog) : unit =
-    swapCatalog store (mergeCatalogs baseCatalog batchCatalog)
+    let dbKeys = Set.union (keysOf baseCatalog) (keysOf batchCatalog)
+
+    for dbName in dbKeys do
+        match Map.tryFind dbName baseCatalog, Map.tryFind dbName batchCatalog with
+        | Some _, None -> store.Databases.TryRemove dbName |> ignore // the batch dropped this database
+        | None, Some batchDb -> store.Databases.[dbName] <- ref batchDb // the batch created this database
+        | None, None -> () // unreachable: dbKeys only ever holds keys from baseCatalog/batchCatalog
+        | Some baseDb, Some batchDb ->
+            // Existed both before and after the batch. `GetOrAdd` rather than
+            // a plain lookup: if a concurrent writer dropped this database
+            // entirely while the batch was running, merge back into a fresh
+            // empty slot instead of silently losing the batch's own writes —
+            // the same fallback the old whole-catalog merge's `Option.defaultValue
+            // Map.empty` gave a database missing from the live catalog.
+            let slot = store.Databases.GetOrAdd(dbName, (fun _ -> ref Map.empty))
+            mergeDatabaseSlot slot baseDb batchDb
 
 /// Bumps the live catalog's AUTO_INCREMENT counters up to a discarded
 /// transaction's snapshot wherever it ran one ahead — MySQL never rolls
 /// back a burned id (see `QueryHandler.rollbackSession`'s doc) — leaving
 /// everything else (rows, schema) exactly as the live catalog has it. Same
-/// CAS retry as `mergeCatalogInto`.
+/// per-database CAS retry as `mergeCatalogInto`, and for the same reason:
+/// only the database(s) `snapshotCatalog` actually has are ever touched.
 let bumpAutoIncrementsInto (store: Store) (snapshotCatalog: Catalog) : unit =
-    swapCatalog store (fun liveCatalog ->
-        snapshotCatalog
-        |> Map.fold
-            (fun liveCatalog dbName snapshotDb ->
-                match Map.tryFind dbName liveCatalog with
-                | None -> liveCatalog
-                | Some liveDb ->
-                    let mergedDb =
-                        snapshotDb
-                        |> Map.fold
-                            (fun acc tableName (snapshotTable: Table) ->
-                                match Map.tryFind tableName acc with
-                                | Some(liveTable: Table) when snapshotTable.NextAutoId > liveTable.NextAutoId ->
-                                    Map.add tableName { liveTable with NextAutoId = snapshotTable.NextAutoId } acc
-                                | _ -> acc)
-                            liveDb
+    let rec bumpSlot (slot: Database ref) (snapshotDb: Database) =
+        let liveDb = slot.Value
 
-                    Map.add dbName mergedDb liveCatalog)
-            liveCatalog)
+        let mergedDb =
+            snapshotDb
+            |> Map.fold
+                (fun acc tableName (snapshotTable: Table) ->
+                    match Map.tryFind tableName acc with
+                    | Some(liveTable: Table) when snapshotTable.NextAutoId > liveTable.NextAutoId ->
+                        Map.add tableName { liveTable with NextAutoId = snapshotTable.NextAutoId } acc
+                    | _ -> acc)
+                liveDb
 
-let private tryGetDatabase (catalog: Catalog) (dbName: string) : Result<Database, StorageError> =
-    match Map.tryFind dbName catalog with
-    | Some db -> Ok db
-    | None -> Error(NoSuchDatabase dbName)
+        if not (obj.ReferenceEquals(Interlocked.CompareExchange(&slot.contents, mergedDb, liveDb), liveDb)) then
+            bumpSlot slot snapshotDb
+
+    for KeyValue(dbName, snapshotDb) in snapshotCatalog do
+        match store.Databases.TryGetValue dbName with
+        | false, _ -> () // dropped since the snapshot was taken — nothing to bump
+        | true, slot -> bumpSlot slot snapshotDb
 
 let private tryGetTable (db: Database) (tableName: string) : Result<Table, StorageError> =
     match Map.tryFind (normalizeTableName tableName) db with
@@ -491,24 +567,21 @@ let private tryGetTable (db: Database) (tableName: string) : Result<Table, Stora
 /// fresh in-memory server); a no-op if it already exists. Deliberately
 /// *not* used by mid-session `USE`/`COM_INIT_DB` — those check
 /// `databaseExists` and report a real 1049 instead, matching MySQL (see
-/// `QueryHandler`'s `Use` probe).
-let rec ensureDatabase (store: Store) (dbName: string) : unit =
-    let current = store.Catalog
-
-    if not (Map.containsKey dbName current) then
-        let updated = Map.add dbName Map.empty current
-
-        if not (obj.ReferenceEquals(Interlocked.CompareExchange(&store.Catalog, updated, current), current)) then
-            ensureDatabase store dbName
+/// `QueryHandler`'s `Use` probe). `ConcurrentDictionary.TryAdd` is already
+/// atomic, so unlike the old whole-catalog CAS this needs no retry loop.
+let ensureDatabase (store: Store) (dbName: string) : unit =
+    store.Databases.TryAdd(dbName, ref Map.empty) |> ignore
 
 /// Whether `dbName` is a real catalog entry, or the always-present virtual
 /// `information_schema` — what `USE`/`COM_INIT_DB` check to match real
 /// MySQL's `ERROR 1049 Unknown database` instead of silently accepting (and
 /// then auto-vivifying on first write, via `ensureDatabase`) a typo'd or
-/// missing name.
+/// missing name. Checks `Databases` directly rather than going through the
+/// whole-catalog `Store.Catalog` view — this is on the per-statement hot
+/// path, not just a diagnostic.
 let databaseExists (store: Store) (dbName: string) : bool =
     String.Equals(dbName, "information_schema", StringComparison.OrdinalIgnoreCase)
-    || Map.containsKey dbName store.Catalog
+    || store.Databases.ContainsKey dbName
 
 /// Index of a column by name, case-insensitive.
 let resolveColumn (columns: ColumnDef list) (name: string) : Result<int, StorageError> =
@@ -874,7 +947,15 @@ let private parentKeySourceAdd (key: string) (source: ParentKeySource) : unit =
 /// scan stays correct in every one of those cases, this is a pure,
 /// optional narrowing. `Executor.tryPointLookup` is the only caller.
 let tryUniqueLookup (store: Store) (dbName: string) (tableName: string) (columnName: string) (literal: Value) : (ColumnDef list * Value[] list) option =
-    match Map.tryFind dbName store.Catalog |> Option.bind (Map.tryFind (normalizeTableName tableName)) with
+    // Reads `dbName`'s slot directly, same reason `scan` does — this is a
+    // per-row-lookup hot path, not somewhere to pay `Store.Catalog`'s
+    // whole-catalog rebuild.
+    let table =
+        match store.Databases.TryGetValue dbName with
+        | false, _ -> None
+        | true, slot -> Map.tryFind (normalizeTableName tableName) slot.Value
+
+    match table with
     | None -> None
     | Some table ->
         match resolveColumn table.Columns columnName with
@@ -934,20 +1015,6 @@ let private checkFkParent (db: Database) (childColumns: ColumnDef list) (row: Va
 
 let private checkFkParents (db: Database) (childColumns: ColumnDef list) (fks: ForeignKeyDef list) (row: Value[]) : Result<unit, StorageError> =
     fks |> traverse (checkFkParent db childColumns row) |> Result.map ignore
-
-/// Runs `f` against `dbName`'s database, swapping the updated database back
-/// into the catalog on success. Every write op boils down to "look up a
-/// database, then a plain update" — this is the one seam `withWrite`'s
-/// callers actually vary on, factored out so each op below is just its own
-/// two lines of logic instead of a hand-rolled hierarchy of hasErrord binds.
-let private withDatabase
-    (store: Store)
-    (dbName: string)
-    (f: Database -> Result<Database * 'a, StorageError>)
-    : Result<'a, StorageError> =
-    withWrite store (fun catalog ->
-        tryGetDatabase catalog dbName
-        |> Result.bind (fun db -> f db |> Result.map (fun (db', result) -> Map.add dbName db' catalog, result)))
 
 /// As `withDatabase`, one level deeper: look up `tableName` within the
 /// database too, and re-key the updated table back under its normalized
@@ -1949,16 +2016,15 @@ let updateRows
         | Error e -> Error e
 
 /// A snapshot read: the table's columns and its rows as they were at the
-/// moment of the call. Lock-free — reads a single reference field, and
-/// later writes swap in a new `Catalog` without mutating this snapshot's
-/// row list.
+/// moment of the call. Lock-free — reads `dbName`'s own slot directly (not
+/// the whole-catalog `Store.Catalog` view, which would pay an O(number of
+/// databases) rebuild on every single SELECT), and later writes swap in a
+/// new `Database` for that slot without mutating this snapshot's row list.
 let scan (store: Store) (dbName: string) (tableName: string) : Result<ColumnDef list * Value[] seq, StorageError> =
-    let catalog = store.Catalog
-
-    match tryGetDatabase catalog dbName with
-    | Error e -> Error e
-    | Ok db ->
-        match tryGetTable db tableName with
+    match store.Databases.TryGetValue dbName with
+    | false, _ -> Error(NoSuchDatabase dbName)
+    | true, slot ->
+        match tryGetTable slot.Value tableName with
         | Error e -> Error e
         | Ok table -> Ok(table.Columns, Seq.ofList table.Rows)
 
@@ -1970,3 +2036,33 @@ let scan (store: Store) (dbName: string) (tableName: string) : Result<ColumnDef 
 /// `INSERT`/`UPDATE`. `VIRTUAL` isn't distinguished from `STORED` — both
 /// are persisted in `Rows` the same way, since this engine has no separate
 /// "recompute on every read" path.
+
+/// `Persistence`'s WAL replay rewrites one table's `Rows` directly with `f`,
+/// bypassing every checked write path in this module on purpose (replay
+/// re-applies rows that already passed every check once, at commit time —
+/// see `Persistence.applyEvent`'s doc). A plain slot mutation, not a CAS:
+/// replay only ever runs single-threaded, before `Persistence.attach`
+/// subscribes the store to live traffic, so nothing else can be racing this
+/// write. A no-op (via `onMissing`) if `dbName`/`tableName` no longer
+/// exist — the WAL can reference a table a later, not-yet-replayed DROP
+/// TABLE event will remove, so replay tolerates a stale reference here
+/// instead of crashing startup over it.
+let replaceTablesForReplay (store: Store) (dbName: string) (tableName: string) (f: Value[] list -> Value[] list) (onMissing: string -> unit) : unit =
+    let key = normalizeTableName tableName
+
+    match store.Databases.TryGetValue dbName with
+    | false, _ -> onMissing (sprintf "unknown database '%s'" dbName)
+    | true, slot ->
+        match slot.Value |> Map.tryFind key with
+        | None -> onMissing (sprintf "unknown table '%s.%s'" dbName tableName)
+        | Some table -> slot.Value <- slot.Value |> Map.add key { table with Rows = f table.Rows }
+
+/// Rebuilds every table's `UniqueIndex` from its current `Rows` across the
+/// whole store, once — what `Persistence.load` calls after replaying the
+/// WAL, since `replaceTablesForReplay` (`RowsUpdated`/`RowsDeleted` replay)
+/// deliberately leaves `UniqueIndex` stale per-table rather than paying
+/// `reindexTable`'s full-table rescan once per replayed event (see its doc).
+/// Same single-threaded, pre-`attach` assumption as `replaceTablesForReplay`.
+let reindexAllForReplay (store: Store) : unit =
+    for KeyValue(_, slot) in store.Databases do
+        slot.Value <- slot.Value |> Map.map (fun _ table -> reindexTable table)

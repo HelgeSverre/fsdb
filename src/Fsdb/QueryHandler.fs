@@ -624,7 +624,7 @@ let private savepoint (name: string) (session: Session) : Session * QueryResult 
 let private rollbackToSavepoint (name: string) (session: Session) : Session * QueryResult =
     match session.Tx |> Option.bind (fun tx -> Map.tryFind name tx.Savepoints |> Option.map (fun seed -> tx, seed)) with
     | Some(tx, (catalog, eventCount)) ->
-        tx.Snapshot.Catalog <- catalog
+        Storage.setCatalog tx.Snapshot catalog
         // Drop every event this transaction buffered after the savepoint —
         // otherwise a WAL replay would apply writes the savepoint rollback
         // just undid.

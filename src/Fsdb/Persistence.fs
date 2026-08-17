@@ -598,14 +598,7 @@ let private applyRowDeletes (targets: Value[] list) (rows: Value[] list) : Value
 /// `replayWal`'s caller reindexes every table exactly once, after the last
 /// event has been applied.
 let private mapTableRows (store: Store) (dbName: string) (tableName: string) (f: Value[] list -> Value[] list) : unit =
-    let key = normalizeTableName tableName
-
-    match store.Catalog |> Map.tryFind dbName with
-    | None -> Log.diagnostic "fsdb: WAL replay warning: unknown database '%s'" dbName
-    | Some db ->
-        match db |> Map.tryFind key with
-        | None -> Log.diagnostic "fsdb: WAL replay warning: unknown table '%s.%s'" dbName tableName
-        | Some table -> store.Catalog <- store.Catalog |> Map.add dbName (db |> Map.add key { table with Rows = f table.Rows })
+    replaceTablesForReplay store dbName tableName f (Log.diagnostic "fsdb: WAL replay warning: %s")
 
 let rec private applyEvent (store: Store) (event: CommitEvent) : unit =
     match event with
@@ -746,7 +739,7 @@ let load (dataDir: string) : Store =
     let loadedFromNew =
         File.Exists newPath
         && (try
-                store.Catalog <- decodeCatalog (JsonNode.Parse(File.ReadAllText newPath))
+                setCatalog store (decodeCatalog (JsonNode.Parse(File.ReadAllText newPath)))
                 true
             with _ ->
                 false)
@@ -756,7 +749,7 @@ let load (dataDir: string) : Store =
         File.WriteAllText(walPath, "")
     else
         if File.Exists snapshotPath then
-            store.Catalog <- decodeCatalog (JsonNode.Parse(File.ReadAllText snapshotPath))
+            setCatalog store (decodeCatalog (JsonNode.Parse(File.ReadAllText snapshotPath)))
 
         // The WAL holds rows that already passed every check once, at
         // commit time — re-validating foreign keys on replay only risks
@@ -770,7 +763,7 @@ let load (dataDir: string) : Store =
         // `mapTableRows` (RowsUpdated/RowsDeleted) left `UniqueIndex` stale
         // per-table, not per-event — one rescan per table here instead of
         // one per replayed row-change event.
-        store.Catalog <- store.Catalog |> Map.map (fun _ db -> db |> Map.map (fun _ table -> reindexTable table))
+        reindexAllForReplay store
 
         // A torn final line (`kill -9` mid-append) must not poison the WAL
         // forever — see `replayWal`'s doc comment.

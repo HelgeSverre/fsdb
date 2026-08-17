@@ -1578,7 +1578,7 @@ let tests =
 
                     // Merge the snapshot's catalog back in (what
                     // QueryHandler.commitSession does) and flush its buffer.
-                    store.Catalog <- snapshot.Catalog
+                    setCatalog store snapshot.Catalog
                     commitTransactionEvents store snapshot
 
                     match List.ofSeq events with
