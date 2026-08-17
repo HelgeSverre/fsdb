@@ -14,7 +14,8 @@ let private col name ty nullable =
       PrimaryKey = false
       Unique = false
       Generated = None
-      Collation = None }
+      Collation = None
+      Charset = None }
 
 let private idCol =
     { (col "id" (TInt false) false) with
@@ -29,7 +30,7 @@ let private usersColumns =
 /// A store with an empty `users` table, ready to insert into.
 let private withUsersTable () =
     let store = create ()
-    createTable store defaultDatabase "users" usersColumns [] [] |> ignore
+    createTable store defaultDatabase "users" usersColumns [] [] None None |> ignore
     store
 
 let tests =
@@ -51,7 +52,7 @@ let tests =
                 <| fun _ ->
                     let store = withUsersTable ()
 
-                    match createTable store defaultDatabase "users" usersColumns [] [] with
+                    match createTable store defaultDatabase "users" usersColumns [] [] None None with
                     | Error(TableExists "users") -> ()
                     | other -> failtestf "expected TableExists, got %A" other
 
@@ -59,7 +60,7 @@ let tests =
                 <| fun _ ->
                     let store = withUsersTable ()
 
-                    match createTable store defaultDatabase "USERS" usersColumns [] [] with
+                    match createTable store defaultDatabase "USERS" usersColumns [] [] None None with
                     | Error(TableExists _) -> ()
                     | other -> failtestf "expected TableExists, got %A" other
 
@@ -67,7 +68,7 @@ let tests =
                 <| fun _ ->
                     let store = create ()
 
-                    match createTable store "newdb" "users" usersColumns [] [] with
+                    match createTable store "newdb" "users" usersColumns [] [] None None with
                     | Ok() ->
                         match scan store "newdb" "users" with
                         | Ok _ -> ()
@@ -263,7 +264,7 @@ let tests =
                         [ col "id" (TInt false) false
                           { (col "created_at" TTimestamp true) with Default = Some DCurrentTimestamp } ]
 
-                    createTable store defaultDatabase "posts" columns [] [] |> ignore
+                    createTable store defaultDatabase "posts" columns [] [] None None |> ignore
 
                     match insertRows store defaultDatabase "posts" (Some [ "id" ]) [ [ VInt 1L ] ] with
                     | Ok _ ->
@@ -285,7 +286,7 @@ let tests =
                     let columns =
                         [ col "id" (TInt false) false; col "nickname" (TVarchar 50) true ]
 
-                    createTable store defaultDatabase "t" columns [] [] |> ignore
+                    createTable store defaultDatabase "t" columns [] [] None None |> ignore
 
                     match insertRows store defaultDatabase "t" (Some [ "id" ]) [ [ VInt 1L ] ] with
                     | Ok _ ->
@@ -405,6 +406,8 @@ let tests =
                         [ col "id" (TInt false) false; col "email" (TVarchar 255) false ]
                         [ { Name = "uq_email"; Columns = [ "email" ]; Unique = true } ]
                         []
+                        None
+                        None
                     |> ignore
 
                 testCase "a plain INSERT violating a UNIQUE index returns error 1062"
@@ -507,6 +510,8 @@ let tests =
                           { (col "user_id" (TInt false) false) with PrimaryKey = true } ]
                         []
                         []
+                        None
+                        None
                     |> ignore
 
                     insertRows store defaultDatabase "role_user" None [ [ VInt 1L; VInt 2L ] ] |> ignore
@@ -527,6 +532,8 @@ let tests =
                           { (col "user_id" (TInt false) false) with PrimaryKey = true } ]
                         []
                         []
+                        None
+                        None
                     |> ignore
 
                     insertRows store defaultDatabase "role_user" None [ [ VInt 1L; VInt 2L ] ] |> ignore
@@ -587,6 +594,8 @@ let tests =
                         [ col "id" (TInt false) false; col "email" (TVarchar 255) false ]
                         [ { Name = "uq_email"; Columns = [ "email" ]; Unique = true } ]
                         []
+                        None
+                        None
                     |> ignore
 
                     insertRows store defaultDatabase "emails" None [ [ VInt 1L; VString "a@x.com" ] ] |> ignore
@@ -612,7 +621,7 @@ let tests =
                 <| fun _ ->
                     let store = create ()
 
-                    createTable store defaultDatabase "departments" [ col "id" (TInt false) false ] [] []
+                    createTable store defaultDatabase "departments" [ col "id" (TInt false) false ] [] [] None None
                     |> ignore
 
                     let fk =
@@ -630,6 +639,8 @@ let tests =
                         [ col "id" (TInt false) false; col "dept_id" (TInt false) true ]
                         []
                         [ fk ]
+                        None
+                        None
                     |> ignore
 
                     match
@@ -766,7 +777,7 @@ let tests =
                 testCase "deleteRows removes only the rows the predicate matched, not every byte-identical row (DELETE ... LIMIT semantics)"
                 <| fun _ ->
                     let store = create ()
-                    createTable store defaultDatabase "dup" [ col "v" (TInt false) true ] [] [] |> ignore
+                    createTable store defaultDatabase "dup" [ col "v" (TInt false) true ] [] [] None None |> ignore
 
                     insertRows store defaultDatabase "dup" None [ [ VInt 1L ]; [ VInt 1L ]; [ VInt 2L ] ]
                     |> ignore
@@ -1119,7 +1130,7 @@ let tests =
                 testCase "AddPrimaryKey marks the named columns as primary key"
                 <| fun _ ->
                     let store = create ()
-                    createTable store defaultDatabase "t" [ col "a" (TInt false) true; col "b" (TInt false) true ] [] [] |> ignore
+                    createTable store defaultDatabase "t" [ col "a" (TInt false) true; col "b" (TInt false) true ] [] [] None None |> ignore
 
                     match alterTable store defaultDatabase "t" [ AddPrimaryKey [ "a"; "b" ] ] with
                     | Ok() ->
@@ -1202,6 +1213,8 @@ let tests =
                         [ col "id" (TInt false) false; col "email" (TVarchar 255) false ]
                         [ { Name = "uq_email"; Columns = [ "email" ]; Unique = true } ]
                         []
+                        None
+                        None
                     |> ignore
 
                     insertRows store defaultDatabase "emails" None [ [ VInt 1L; VString "a@x.com" ] ] |> ignore
@@ -1230,7 +1243,7 @@ let tests =
                 let withDeptEmployees (onDelete: string option) =
                     let store = create ()
 
-                    createTable store defaultDatabase "departments" [ idCol; col "name" (TVarchar 255) false ] [] []
+                    createTable store defaultDatabase "departments" [ idCol; col "name" (TVarchar 255) false ] [] [] None None
                     |> ignore
 
                     let fk =
@@ -1248,6 +1261,8 @@ let tests =
                         [ idCol; col "dept_id" (TInt false) true; col "name" (TVarchar 255) false ]
                         []
                         [ fk ]
+                        None
+                        None
                     |> ignore
 
                     insertRows store defaultDatabase "departments" None [ [ VInt 1L; VString "eng" ] ]
@@ -1344,7 +1359,7 @@ let tests =
                 <| fun _ ->
                     let store = create ()
 
-                    createTable store defaultDatabase "pa" [ idCol ] [] [] |> ignore
+                    createTable store defaultDatabase "pa" [ idCol ] [] [] None None |> ignore
 
                     let fk =
                         { Name = "fk_ch"
@@ -1354,7 +1369,7 @@ let tests =
                           OnDelete = Some "SET NULL"
                           OnUpdate = None }
 
-                    createTable store defaultDatabase "ch" [ idCol; col "pid" (TInt false) false ] [] [ fk ]
+                    createTable store defaultDatabase "ch" [ idCol; col "pid" (TInt false) false ] [] [ fk ] None None
                     |> ignore
 
                     insertRows store defaultDatabase "pa" None [ [ VInt 1L ] ] |> ignore
@@ -1388,6 +1403,8 @@ let tests =
                         [ idCol; col "owner_id" (TInt false) true; col "title" (TVarchar 255) false ]
                         []
                         [ projFk ]
+                        None
+                        None
                     |> ignore
 
                     insertRows store defaultDatabase "projects" None [ [ VInt 1L; VInt 1L; VString "roadmap" ] ]
@@ -1412,7 +1429,7 @@ let tests =
                           OnDelete = Some "CASCADE"
                           OnUpdate = None }
 
-                    createTable store defaultDatabase "node" [ idCol; col "parent_id" (TInt false) true ] [] [ selfFk ]
+                    createTable store defaultDatabase "node" [ idCol; col "parent_id" (TInt false) true ] [] [ selfFk ] None None
                     |> ignore
 
                     // Two rows that reference each other — needs the checks
@@ -1467,7 +1484,7 @@ let tests =
                           OnDelete = None
                           OnUpdate = None }
 
-                    createTable store defaultDatabase "node" [ idCol; col "parent_id" (TInt false) true ] [] [ selfFk ]
+                    createTable store defaultDatabase "node" [ idCol; col "parent_id" (TInt false) true ] [] [ selfFk ] None None
                     |> ignore
 
                     match
@@ -1616,7 +1633,7 @@ let tests =
                     store.OnCommit <- Some events.Add
 
                     createDatabase store "shop" |> ignore
-                    createTable store "shop" "widgets" usersColumns [] [] |> ignore
+                    createTable store "shop" "widgets" usersColumns [] [] None None |> ignore
                     alterTable store "shop" "widgets" [ AddColumn(col "sku" (TVarchar 64) true, PositionDefault) ] |> ignore
                     truncate store "shop" "widgets" |> ignore
                     dropTable store "shop" "widgets" |> ignore
@@ -1710,7 +1727,7 @@ let tests =
 
                     let workload (store: Store) (dbName: string) =
                         createDatabase store dbName |> ignore
-                        createTable store dbName "counters" [ col "n" (TInt false) false ] [] [] |> ignore
+                        createTable store dbName "counters" [ col "n" (TInt false) false ] [] [] None None |> ignore
                         insertRows store dbName "counters" None [ [ VInt 0L ] ] |> ignore
 
                         for _ in 1 .. opsPerThread do
@@ -1746,7 +1763,7 @@ let tests =
                 testCase "two threads incrementing the same row in the same database serialize correctly (no lost updates)"
                 <| fun _ ->
                     let store = create ()
-                    createTable store defaultDatabase "counters" [ col "n" (TInt false) false ] [] [] |> ignore
+                    createTable store defaultDatabase "counters" [ col "n" (TInt false) false ] [] [] None None |> ignore
                     insertRows store defaultDatabase "counters" None [ [ VInt 0L ] ] |> ignore
 
                     let threadCount = 8

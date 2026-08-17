@@ -294,6 +294,172 @@ let tests =
                         Expect.equal rows [ [ Some "a" ]; [ Some "z" ]; [ Some "æ" ]; [ Some "ø" ]; [ Some "å" ] ] "Danish order, MySQL-verified"
                     | other -> failtestf "expected the Danish collation order, got %A" other
 
+                // Collation-aware grouping/dedup: MySQL folds åge/age/ÅGE
+                // into ONE group under ai_ci, in GROUP BY, DISTINCT, UNION,
+                // and window PARTITION BY alike.
+                testCase "GROUP BY folds by collation: åge/age/ÅGE are one group under ai_ci"
+                <| fun _ ->
+                    let store = newStore ()
+                    runDefault store "CREATE TABLE g (name VARCHAR(20))" |> ignore
+                    runDefault store "INSERT INTO g VALUES ('åge'), ('age'), ('ÅGE')" |> ignore
+
+                    match runDefault store "SELECT name, COUNT(*) AS c FROM g GROUP BY name" with
+                    | ResultSet(_, rows) -> Expect.equal rows [ [ Some "åge"; Some "3" ] ] "one collation-equal group, first value wins"
+                    | other -> failtestf "expected one group, got %A" other
+
+                testCase "GROUP BY keeps case/accent distinctions under a bin column"
+                <| fun _ ->
+                    let store = newStore ()
+                    runDefault store "CREATE TABLE g (name VARCHAR(20) COLLATE utf8mb4_bin)" |> ignore
+                    runDefault store "INSERT INTO g VALUES ('åge'), ('age')" |> ignore
+
+                    match runDefault store "SELECT name, COUNT(*) AS c FROM g GROUP BY name ORDER BY name" with
+                    | ResultSet(_, rows) ->
+                        Expect.equal rows [ [ Some "age"; Some "1" ]; [ Some "åge"; Some "1" ] ] "bin keeps them distinct"
+                    | other -> failtestf "expected two bin-distinct groups, got %A" other
+
+                testCase "SELECT DISTINCT dedupes collation-equal strings, first occurrence wins"
+                <| fun _ ->
+                    let store = newStore ()
+                    runDefault store "CREATE TABLE g (name VARCHAR(20))" |> ignore
+                    runDefault store "INSERT INTO g VALUES ('åge'), ('age'), ('ÅGE')" |> ignore
+
+                    match runDefault store "SELECT DISTINCT name FROM g" with
+                    | ResultSet(_, rows) -> Expect.equal rows [ [ Some "åge" ] ] "one distinct value"
+                    | other -> failtestf "expected one distinct row, got %A" other
+
+                testCase "UNION (without ALL) dedupes collation-equal strings"
+                <| fun _ ->
+                    let store = newStore ()
+
+                    match runDefault store "SELECT 'åge' AS v UNION SELECT 'age'" with
+                    | ResultSet(_, rows) -> Expect.equal rows [ [ Some "åge" ] ] "one union row"
+                    | other -> failtestf "expected the union to fold, got %A" other
+
+                testCase "UNION keeps case/accent distinctions under a bin column"
+                <| fun _ ->
+                    let store = newStore ()
+                    runDefault store "CREATE TABLE g (name VARCHAR(20) COLLATE utf8mb4_bin)" |> ignore
+                    runDefault store "INSERT INTO g VALUES ('åge'), ('age')" |> ignore
+
+                    match runDefault store "SELECT name FROM g UNION SELECT name FROM g" with
+                    | ResultSet(_, rows) ->
+                        Expect.equal
+                            (rows |> List.sort)
+                            [ [ Some "age" ]; [ Some "åge" ] ]
+                            "bin keeps both values in the union"
+                    | other -> failtestf "expected a bin union to keep both rows, got %A" other
+
+                testCase "window PARTITION BY folds by collation"
+                <| fun _ ->
+                    let store = newStore ()
+                    runDefault store "CREATE TABLE g (name VARCHAR(20))" |> ignore
+                    runDefault store "INSERT INTO g VALUES ('åge'), ('age'), ('ÅGE')" |> ignore
+
+                    match
+                        runDefault
+                            store
+                            "SELECT name, ROW_NUMBER() OVER (PARTITION BY name ORDER BY name) AS r FROM g"
+                    with
+                    | ResultSet(_, rows) ->
+                        // one partition (collation-folded): row numbers are
+                        // exactly {1,2,3} — their order follows the
+                        // documented ICU tie-break, so assert the set.
+                        Expect.equal
+                            (rows |> List.map (fun r -> r.[1]) |> List.sort)
+                            [ Some "1"; Some "2"; Some "3" ]
+                            "one partition numbers 1..3"
+                    | other -> failtestf "expected one window partition, got %A" other
+
+                testCase "CHAR follows its collation's pad attribute: 0900 = NO PAD, unicode_ci = PAD SPACE"
+                <| fun _ ->
+                    let store = newStore ()
+                    runDefault store "CREATE TABLE c1 (c CHAR(10) COLLATE utf8mb4_unicode_ci)" |> ignore
+                    runDefault store "CREATE TABLE c2 (c CHAR(10) COLLATE utf8mb4_0900_ai_ci)" |> ignore
+                    runDefault store "INSERT INTO c1 VALUES ('a')" |> ignore
+                    runDefault store "INSERT INTO c2 VALUES ('a')" |> ignore
+
+                    match runDefault store "SELECT c = 'a ' FROM c1" with
+                    | ResultSet(_, [ [ Some "1" ] ]) -> ()
+                    | other -> failtestf "expected PAD SPACE equality for CHAR under unicode_ci, got %A" other
+
+                    match runDefault store "SELECT c = 'a ' FROM c2" with
+                    | ResultSet(_, [ [ Some "0" ] ]) -> ()
+                    | other -> failtestf "expected NO PAD for CHAR under 0900_ai_ci, got %A" other
+
+                testCase "COLLATE on a non-string column is accepted and ignored, like MySQL"
+                <| fun _ ->
+                    let store = newStore ()
+                    runDefault store "CREATE TABLE t (i INT COLLATE utf8mb4_bin)" |> ignore
+                    runDefault store "INSERT INTO t VALUES (1)" |> ignore
+
+                    match runDefault store "SELECT 1 COLLATE utf8mb4_bin" with
+                    | ResultSet(_, [ [ Some "1" ] ]) -> ()
+                    | other -> failtestf "expected COLLATE on a number to be a no-op, got %A" other
+
+                testCase "CONVERT(expr USING charset) transcodes with MySQL's cp1252/lossy rules"
+                <| fun _ ->
+                    let store = newStore ()
+
+                    match runDefault store "SELECT CONVERT('é' USING latin1) = 'é'" with
+                    | ResultSet(_, [ [ Some "1" ] ]) -> ()
+                    | other -> failtestf "expected latin1 to keep é, got %A" other
+
+                    // latin1 is cp1252 in MySQL: € is encodable (byte 0x80),
+                    // so it survives rather than mapping to '?' — MySQL-verified.
+                    match runDefault store "SELECT CONVERT('€' USING latin1)" with
+                    | ResultSet(_, [ [ Some "€" ] ]) -> ()
+                    | other -> failtestf "expected € to survive latin1 (cp1252), got %A" other
+
+                    // a character cp1252 genuinely lacks (☃) maps to '?'
+                    match runDefault store "SELECT CONVERT('☃' USING latin1)" with
+                    | ResultSet(_, [ [ Some "?" ] ]) -> ()
+                    | other -> failtestf "expected ☃ to lossy-map to ?, got %A" other
+
+                    match runDefault store "SELECT CONVERT('é' USING ascii)" with
+                    | ResultSet(_, [ [ Some "?" ] ]) -> ()
+                    | other -> failtestf "expected é to lossy-map to ? under ascii, got %A" other
+
+                testCase "CONVERT(expr USING binary) compares byte-for-byte, not via the connection collation"
+                <| fun _ ->
+                    let store = newStore ()
+
+                    match runDefault store "SELECT CONVERT('abc' USING binary) = 'ABC'" with
+                    | ResultSet(_, [ [ Some "0" ] ]) -> ()
+                    | other -> failtestf "expected a binary string to compare byte-wise (0), got %A" other
+
+                    match runDefault store "SELECT CONVERT('abc' USING binary) = 'abc'" with
+                    | ResultSet(_, [ [ Some "1" ] ]) -> ()
+                    | other -> failtestf "expected identical bytes to compare equal (1), got %A" other
+
+                testCase "latin1 columns store latin1-encodable text; ascii columns reject non-ascii with 1366"
+                <| fun _ ->
+                    let store = newStore ()
+                    runDefault store "CREATE TABLE lat (v VARCHAR(10) CHARACTER SET latin1)" |> ignore
+                    runDefault store "CREATE TABLE asc_t (v VARCHAR(10) CHARACTER SET ascii)" |> ignore
+                    runDefault store "INSERT INTO lat VALUES ('é'), ('ø')" |> ignore
+
+                    match runDefault store "SELECT COUNT(*) FROM lat WHERE v = 'é'" with
+                    | ResultSet(_, [ [ Some "1" ] ]) -> ()
+                    | other -> failtestf "expected latin1 to keep é, got %A" other
+
+                    match runDefault store "INSERT INTO asc_t VALUES ('é')" with
+                    | Err(1366, _) -> ()
+                    | other -> failtestf "expected 1366 for é into ascii, got %A" other
+
+                    // latin1 is cp1252: € is encodable and survives the
+                    // round-trip; a char cp1252 lacks maps to '?' — both
+                    // even in strict mode (MySQL-verified).
+                    runDefault store "INSERT INTO lat VALUES ('€'), ('☃')" |> ignore
+
+                    match runDefault store "SELECT COUNT(*) FROM lat WHERE v = '€'" with
+                    | ResultSet(_, [ [ Some "1" ] ]) -> ()
+                    | other -> failtestf "expected € to store as € under latin1/cp1252, got %A" other
+
+                    match runDefault store "SELECT COUNT(*) FROM lat WHERE v = '?'" with
+                    | ResultSet(_, [ [ Some "1" ] ]) -> ()
+                    | other -> failtestf "expected ☃ to store as ?, got %A" other
+
                 testCase "an unknown column in WHERE is a 1054 error"
                 <| fun _ ->
                     let store = newStore ()

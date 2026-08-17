@@ -433,6 +433,10 @@ let private parseSetFragment (sql: string) (session: Session) (fragment: string)
                 let name = varMatch.Groups.[1].Value.ToLowerInvariant()
 
                 match resolveSetRhs session varMatch.Groups.[2].Value with
+                | Some value when name = "collation_connection" ->
+                    match Collation.tryFind value with
+                    | Some _ -> Ok(SetVarAction(name, Some value))
+                    | None -> Error(Err(1273, sprintf "Unknown collation: '%s'" value))
                 | Some value -> Ok(SetVarAction(name, Some value))
                 | None when nullableSystemVars.Contains name -> Ok(SetVarAction(name, None))
                 | None -> Error(Err(1231, sprintf "Variable '%s' can't be set to the value of 'NULL'" name))
@@ -463,6 +467,13 @@ let private applySetAction (session: Session) (action: SetAction) : Session =
 
         if name = "sql_mode" then
             value |> Option.iter (fun v -> setStrictMode session.Store (isStrictSqlMode v))
+
+        if name = "collation_connection" then
+            value
+            |> Option.iter (fun v ->
+                match Collation.tryFind v with
+                | Some col -> setConnectionCollation session.Store col
+                | None -> ())
 
         { session with Variables = Map.add name value session.Variables }
     | SetUserVarAction(name, value) -> { session with UserVariables = Map.add name value session.UserVariables }

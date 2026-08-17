@@ -587,6 +587,27 @@ let private jsonSearchFn: Scalar =
         | _ -> VNull
     | _ -> VNull
 
+/// `CONVERT(expr USING charset)` — MySQL's transcode form, desugared by the
+/// parser into this scalar (second argument = the charset name). Same
+/// write-time semantics as column charsets: latin1 is cp1252 (so `€`
+/// survives, unencodables map to '?'), ascii keeps 7-bit and maps the rest
+/// to '?', binary returns raw UTF-8 bytes; the common utf8mb4 aliases pass
+/// text through unchanged.
+let private convertFn: Scalar =
+    function
+    | [ VNull; _ ] -> VNull
+    | [ v; VString charset ] ->
+        let text = v |> toText |> Option.defaultValue ""
+
+        match charset.ToLowerInvariant() with
+        | "utf8mb4"
+        | "utf8" -> VString text
+        | "latin1" -> VString(Collation.Charset.transcodeLatin1 text)
+        | "ascii" -> VString(Collation.Charset.transcodeAscii text)
+        | "binary" -> VBytes(Text.Encoding.UTF8.GetBytes text)
+        | _ -> VNull
+    | _ -> VNull
+
 // ---------------------------------------------------------------------------
 // Dates. `NOW()`/`CURRENT_TIMESTAMP` already exist above; everything else
 // MySQL's date/time surface needs for a Laravel app (timestamps, `Carbon`
@@ -1445,6 +1466,7 @@ let builtins: Registry =
     |> registerScalar "INTERVAL" intervalFn
     |> registerScalar "DATEDIFF" dateDiffFn
     |> registerScalar "DATE_FORMAT" dateFormatFn
+    |> registerScalar "CONVERT" convertFn
     |> registerScalar "DATE" dateFn
     |> registerScalar "TIME" timeFn
     |> registerScalar "TIMESTAMP" timestampFn

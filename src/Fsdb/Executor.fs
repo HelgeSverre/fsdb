@@ -477,8 +477,29 @@ let private resolvedCollation (ctx: EvalContext) (expr: Expr) : Collation.Collat
             | TChar _ | TVarchar _ | TTinyText | TText | TMediumText | TLongText | TEnum _ | TSet _ | TJson -> true
             | _ -> false
             ->
-            Some(def.Collation |> Option.bind Collation.tryFind |> Option.defaultValue Collation.defaultCollation)
+            match def.Charset with
+            // `CHARACTER SET binary` compares byte-for-byte; ascii/latin1
+            // columns use their charset's default collation, approximated
+            // by the server default ai_ci (latin1_swedish_ci/ascii_general_ci
+            // fold case and most accents the same way for the common cases).
+            | Some "binary" -> Collation.tryFind "utf8mb4_bin"
+            | _ -> Some(def.Collation |> Option.bind Collation.tryFind |> Option.defaultValue Collation.defaultCollation)
         | _ -> None
+
+/// The collation an equality-classified key resolves under: an explicit
+/// `expr COLLATE`, then a string column's own collation, then the
+/// connection collation (literals) — the same resolution comparisons use.
+let private keyCollation (ctx: EvalContext) (expr: Expr) : Collation.Collation =
+    resolvedCollation ctx expr |> Option.defaultValue ctx.Store.ConnectionCollation
+
+/// A group/distinct/partition key normalized to collation equality: string
+/// values become their collation's canonical key (`KeyOf` is injective per
+/// collation), so structural equality of the normalized keys is exactly
+/// MySQL's collation equality. Non-string values pass through untouched.
+let private collationKeyOf (ctx: EvalContext) (expr: Expr) (value: Value) : Value =
+    match value with
+    | VString text -> VString((keyCollation ctx expr).KeyOf text)
+    | _ -> value
 
 /// Converts a displayed ENUM label into its 1-based declaration ordinal for
 /// one ORDER BY key, and tags string-typed columns with the collation their
@@ -494,7 +515,10 @@ let private orderValueForExpr (ctx: EvalContext) (expr: Expr) (value: Value) : V
             |> Option.map (fun index -> VInt(int64 (index + 1)))
             |> Option.defaultValue (VInt 0L)
         ordinal, None
-    | _ -> value, resolvedCollation ctx expr
+    | _ ->
+        match value with
+        | VString _ -> value, Some(keyCollation ctx expr)
+        | _ -> value, None
 
 /// `Star(Some qualifier)` (`t.*`) resolution — same shape as
 /// `resolveQualifiedCol`, but hands back every one of that qualifier's own
@@ -982,7 +1006,17 @@ let rec private evalExpr (ctx: EvalContext) (expr: Expr) : Result<Value, EvalErr
                                     | _ -> col.Compare sa sb
 
                                 boolToValue (pred c)
-                            | None -> boolToValue (pred (Value.compare pa pb))
+                            | None ->
+                                // Two literals (or a string against a
+                                // non-column expression): the connection
+                                // collation decides.
+                                let c =
+                                    match op with
+                                    | Eq
+                                    | Neq -> if ctx.Store.ConnectionCollation.Equals sa sb then 0 else 1
+                                    | _ -> ctx.Store.ConnectionCollation.Compare sa sb
+
+                                boolToValue (pred c)
                         | _ -> boolToValue (pred (Value.compare pa pb))
 
                 match op with
@@ -1027,7 +1061,7 @@ let rec private evalExpr (ctx: EvalContext) (expr: Expr) : Result<Value, EvalErr
                     | _ -> boolToValue (Value.compare va vb = 0)))
     | Like(e, p, caseSensitive, escape) ->
         eval e
-        |> Result.bind (fun ve -> eval p |> Result.map (fun vp -> likeOp (resolvedCollation ctx e) caseSensitive escape ve vp))
+        |> Result.bind (fun ve -> eval p |> Result.map (fun vp -> likeOp (Some(keyCollation ctx e)) caseSensitive escape ve vp))
     | Regexp(e, p) ->
         eval e
         |> Result.bind (fun ve -> eval p |> Result.map (fun vp -> regexpOp ve vp))
@@ -1154,7 +1188,8 @@ let rec private evalExpr (ctx: EvalContext) (expr: Expr) : Result<Value, EvalErr
                   PrimaryKey = false
                   Unique = false
                   Generated = None
-                  Collation = None }
+                  Collation = None
+                  Charset = None }
 
             let v =
                 match v, ty with
@@ -1231,7 +1266,8 @@ and private deriveColumns (names: string list) : ColumnDef list =
           PrimaryKey = false
           Unique = false
           Generated = None
-          Collation = None })
+          Collation = None
+          Charset = None })
 
 /// Resolves one `FromItem` — a real/virtual table via `resolveTableRef`, or
 /// a derived table by running its subquery (uncorrelated: a plain derived
@@ -2074,6 +2110,31 @@ and runUnionStmt
     : QueryResult * byte list * Value[] list =
     let runBranch (select: SelectStmt) = runSelectStmt store registry dbName select None
 
+    // The per-output-column collations the dedupe folds under, resolved the
+    // same way `runSelect`'s own DISTINCT keys are (`keyCollation` on the
+    // output column name through the first branch's context) — a bin column
+    // keeps åge/age/ÅGE apart, an ai_ci one folds them, and a literal
+    // branch column (no source column to resolve) falls back to the
+    // connection collation, exactly as MySQL's coercibility rules land.
+    let outputCollationOf : string -> Collation.Collation =
+        let columns, qualifier =
+            match first.From with
+            | Some fromItem ->
+                match resolveFromItem store registry dbName fromItem with
+                | Ok(cols, _) -> cols, fromItemQualifier fromItem
+                | Error _ -> [], ""
+            | None -> [], ""
+
+        let qualifiers =
+            if qualifier = "" then
+                Map.empty
+            else
+                singleQualifier qualifier columns
+
+        let ctx = contextFactory store registry dbName (columnIndexOf columns) qualifiers None (probeRow columns)
+
+        fun name -> keyCollation ctx (Col name)
+
     // Each branch's text row paired with its own typed row, kept aligned
     // through combining/deduping so the `ORDER BY` below can compare typed
     // values instead of re-wrapping the text back into a lexicographically-
@@ -2092,7 +2153,19 @@ and runUnionStmt
                 Error(Err(1222, "The used SELECT statements have a different number of columns"))
             | ResultSet(_, branchRows), branchTypes, branchTyped ->
                 let branchPaired = List.zip branchRows branchTyped
-                let combined = if isAll then rowsSoFar @ branchPaired else (rowsSoFar @ branchPaired) |> List.distinctBy fst
+
+                let combined =
+                    if isAll then
+                        rowsSoFar @ branchPaired
+                    else
+                        // Collation-aware dedupe: MySQL folds åge/age in a
+                        // UNION via each column's own collation — resolved
+                        // through the first branch's context above.
+                        let dedupeKey (text: string option list) =
+                            List.map2 (fun name (cell: string option) -> cell |> Option.map (outputCollationOf name).KeyOf) cols text
+
+                        (rowsSoFar @ branchPaired) |> List.distinctBy (fst >> dedupeKey)
+
                 Ok(cols, combined, branchTypes :: typesSoFar))
 
     match runSelectStmt store registry dbName first None with
@@ -2719,7 +2792,12 @@ and private runGroupedSelect
                     Ok [ [], matched ]
                 else
                     matched
-                    |> traverse (fun row -> groupExprs |> traverse (evalExpr (ctxFor row)) |> Result.map (fun key -> key, row))
+                    |> traverse (fun row ->
+                        groupExprs
+                        |> traverse (evalExpr (ctxFor row))
+                        // Collation-aware keys: åge/age/ÅGE group together
+                        // under ai_ci, stay distinct under bin.
+                        |> Result.map (fun key -> List.map2 (collationKeyOf (ctxFor row)) groupExprs key, row))
                     |> Result.map (fun keyed -> keyed |> List.groupBy fst |> List.map (fun (key, rows) -> key, rows |> List.map snd))
 
             match buildGroups () with
@@ -2822,7 +2900,9 @@ and private runWindowedSelect
                 | _ -> [], []
 
             let keyOf (exprs: Expr list) (row: Value[]) : Result<Value list, EvalError> =
-                exprs |> traverse (evalExpr (ctxFor row))
+                exprs
+                |> traverse (evalExpr (ctxFor row))
+                |> Result.map (fun key -> List.map2 (collationKeyOf (ctxFor row)) exprs key)
 
             let orderKeyOf (exprs: Expr list) (row: Value[]) : Result<(Value * Collation.Collation option) list, EvalError> =
                 exprs |> traverse (evalOrderKey (ctxFor row))
@@ -2894,7 +2974,8 @@ and private runWindowedSelect
                       PrimaryKey = false
                       Unique = false
                       Generated = None
-                      Collation = None })
+                      Collation = None
+                      Charset = None })
 
             let extendedColumns = columns @ syntheticColumns
 
@@ -3028,14 +3109,27 @@ and private runSelect
         // Shared by both `ORDER BY` branches below: evaluates `WHERE`, the
         // projection, and the sort keys for one row, in that order, short-
         // circuiting to `None` on a `WHERE` miss without projecting it.
-        let evalKeyed (row: Value[]) : Result<((Value * Collation.Collation option) list * (string option list * Value[])) option, EvalError> =
+        // Collation-aware DISTINCT key: string output columns fold to
+        // their collation's canonical key, so åge/age dedupe under ai_ci
+        // while the emitted text stays the first row's original value.
+        let dedupeKeyOf (row: Value[]) (outputCols: (string * Value) list) : string option list =
+            let ctx = ctxFor row
+
+            outputCols
+            |> List.map (fun (name, v) ->
+                match v with
+                | VString text -> Some((keyCollation ctx (Col name)).KeyOf text)
+                | _ -> Value.toText v)
+
+        let evalKeyed (row: Value[]) : Result<((Value * Collation.Collation option) list * (string option list * Value[]) * (string option list)) option, EvalError> =
             matches row
             |> Result.bind (fun keep ->
                 if not keep then
                     Ok None
                 else
                     projectRow row
-                    |> Result.bind (fun outputCols -> orderKeysOf row outputCols |> Result.map (fun keys -> Some(keys, pairOf outputCols))))
+                    |> Result.bind (fun outputCols ->
+                        orderKeysOf row outputCols |> Result.map (fun keys -> Some(keys, pairOf outputCols, dedupeKeyOf row outputCols))))
 
         // No `ORDER BY`: `WHERE`/`DISTINCT`/`LIMIT`/`OFFSET` stream lazily
         // through `streamLimited`, which stops pulling rows the moment
@@ -3046,12 +3140,17 @@ and private runSelect
         // forces a full scan either way — same oracle, `ORDER BY` on an
         // unindexed column — so only that path keeps evaluating everything.
         if orderBy.IsEmpty then
-            let evalPaired (row: Value[]) : Result<(string option list * Value[]) option, EvalError> =
-                matches row |> Result.bind (fun keep -> if keep then projectRow row |> Result.map (pairOf >> Some) else Ok None)
+            let evalPaired (row: Value[]) : Result<(string option list * (string option list * Value[])) option, EvalError> =
+                matches row
+                |> Result.bind (fun keep ->
+                    if keep then
+                        projectRow row |> Result.map (fun outputCols -> dedupeKeyOf row outputCols, pairOf outputCols) |> Result.map Some
+                    else
+                        Ok None)
 
             match rows |> streamLimited select.Distinct (Option.defaultValue 0 offset) limit evalPaired with
             | Error(code, message) -> Err(code, message), [], []
-            | Ok limited -> ResultSet(colNames, limited |> List.map fst), typesOf (limited |> List.map snd), limited |> List.map snd
+            | Ok limited -> ResultSet(colNames, limited |> List.map (snd >> fst)), typesOf (limited |> List.map (snd >> snd)), limited |> List.map (snd >> snd)
 
         // `ORDER BY` + `LIMIT`, no `DISTINCT`: bounded top-(limit+offset)
         // selection (`boundedTopN`) instead of a full sort — still touches
@@ -3066,10 +3165,10 @@ and private runSelect
             let dirs = List.map snd orderBy
             let capacity = int (min (int64 (Option.get limit) + int64 (Option.defaultValue 0 offset)) (int64 System.Int32.MaxValue))
 
-            match rows |> boundedTopN capacity (fun (ka, _) (kb, _) -> compareByOrderKeys dirs ka kb) evalKeyed with
+            match rows |> boundedTopN capacity (fun (ka, _, _) (kb, _, _) -> compareByOrderKeys dirs ka kb) evalKeyed with
             | Error(code, message) -> Err(code, message), [], []
             | Ok top ->
-                let limited = top |> List.map snd |> applyLimitOffset limit offset
+                let limited = top |> List.map (fun (_, p, _) -> p) |> applyLimitOffset limit offset
                 ResultSet(colNames, limited |> List.map fst), typesOf (limited |> List.map snd), limited |> List.map snd
 
         // Honest barrier: `ORDER BY` with no `LIMIT` (nothing to bound a
@@ -3088,17 +3187,17 @@ and private runSelect
                     if orderBy.IsEmpty then
                         keyed
                     else
-                        keyed |> List.sortWith (fun (ka, _) (kb, _) -> compareByOrderKeys (List.map snd orderBy) ka kb)
+                        keyed |> List.sortWith (fun (ka, _, _) (kb, _, _) -> compareByOrderKeys (List.map snd orderBy) ka kb)
 
                 // Dedupes on the projected columns while still honoring
                 // `ORDER BY`'s row order (first occurrence wins) — deduping
                 // post-`LIMIT` would undercount, and deduping on the raw
                 // pre-projection row would miss two source rows that only
                 // agree on the columns actually selected.
-                let paired = sorted |> List.map snd
-                let dedupedPaired = if select.Distinct then paired |> List.distinctBy fst else paired
+                let paired = sorted |> List.map (fun (_, p, d) -> p, d)
+                let dedupedPaired = if select.Distinct then paired |> List.distinctBy snd else paired
                 let limited = dedupedPaired |> applyLimitOffset limit offset
-                ResultSet(colNames, limited |> List.map fst), typesOf (limited |> List.map snd), limited |> List.map snd
+                ResultSet(colNames, limited |> List.map (fst >> fst)), typesOf (limited |> List.map (fst >> snd)), limited |> List.map (fst >> snd)
 
 /// A reference-identity set of physical rows — `HashIdentity.Reference`
 /// rather than `Value[]`'s own structural equality, so two rows that happen
@@ -3780,10 +3879,10 @@ let execute (store: Store) (registry: Registry) (dbName: string) (ids: int64 * i
         else
             ids, storageErr (NoSuchDatabase name)
 
-    | CreateTable(name, columns, indexes, foreignKeys, ifNotExists) ->
+    | CreateTable(name, columns, indexes, foreignKeys, ifNotExists, tableCharset, tableCollation) ->
         let db, name = splitQualified dbName name
 
-        match createTable store db name columns indexes foreignKeys with
+        match createTable store db name columns indexes foreignKeys tableCharset tableCollation with
         | Ok() -> ids, Affected 0UL
         | Error(TableExists _) when ifNotExists -> ids, Affected 0UL
         | Error e -> ids, storageErr e

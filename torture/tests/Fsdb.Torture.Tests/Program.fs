@@ -1,6 +1,7 @@
 module Fsdb.Torture.Tests.Program
 
 open System
+open System.Collections.Immutable
 open System.IO
 open System.Text
 open System.Text.Json
@@ -38,7 +39,9 @@ let private column name primary unique autoIncrement =
       AutoIncrement = autoIncrement
       PrimaryKey = primary
       Unique = unique
-      Generated = None }
+      Generated = None
+      Collation = None
+      Charset = None }
 
 let private emptyComparison =
     { Equal = true
@@ -327,10 +330,12 @@ let tests =
                     let table =
                         { OriginalName = "items"
                           Columns = [ column "id" true false true ]
-                          Rows = [ [| VInt 1L |]; [| VInt 2L |] ]
+                          RowsArray = ImmutableArray.CreateRange [ [| VInt 1L |]; [| VInt 2L |] ]
                           NextAutoId = 3L
                           Indexes = []
                           ForeignKeys = []
+                          TableCharset = None
+                          TableCollation = None
                           UniqueIndex = Map.empty }
 
                     store.Catalog <- Map.ofList [ defaultDatabase, Map.ofList [ "items", table ] ]
@@ -342,10 +347,12 @@ let tests =
                     let table =
                         { OriginalName = "items"
                           Columns = [ column "id" true false true ]
-                          Rows = [ [| VInt 1L |]; [| VInt 1L |]; [| VInt 2L; VInt 3L |] ]
+                          RowsArray = ImmutableArray.CreateRange [ [| VInt 1L |]; [| VInt 1L |]; [| VInt 2L; VInt 3L |] ]
                           NextAutoId = 1L
                           Indexes = []
                           ForeignKeys = []
+                          TableCharset = None
+                          TableCollation = None
                           UniqueIndex = Map.empty }
 
                     store.Catalog <- Map.ofList [ defaultDatabase, Map.ofList [ "items", table ] ]

@@ -203,6 +203,11 @@ let rec compare (a: Value) (b: Value) : int =
     | VInt x, VInt y -> Operators.compare x y
     | VString x, VString y -> compareStrings x y
     | VBytes x, VBytes y -> Operators.compare x y
+    // A binary string against a character string compares byte-for-byte
+    // (MySQL: `CONVERT('abc' USING binary) = 'ABC'` is false), not via the
+    // character collation the generic text fallback below would apply.
+    | VBytes x, VString s -> Operators.compare x (Text.Encoding.UTF8.GetBytes s)
+    | VString s, VBytes y -> Operators.compare (Text.Encoding.UTF8.GetBytes s) y
     | VDate x, VDate y -> Operators.compare x y
     | VDateTime x, VDateTime y -> Operators.compare x y
     | VDate x, VDateTime y -> Operators.compare (x.ToDateTime(TimeOnly.MinValue)) y

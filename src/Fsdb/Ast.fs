@@ -186,7 +186,14 @@ and ColumnDef =
       /// (`Collation.defaultCollation`, utf8mb4_0900_ai_ci). Only meaningful
       /// for the string types; kept on every column so DDL round-trips the
       /// declaration as written.
-      Collation: string option }
+      Collation: string option
+      /// The column's `CHARACTER SET name` (table-level charset baked in
+      /// the same way) — `None` means utf8mb4. Supported: utf8mb4, latin1,
+      /// ascii. String storage is still .NET UTF-16; the charset drives
+      /// write-time validation (`ascii` rejects non-ASCII with 1366 in
+      /// strict mode, `latin1` lossy-maps unencodables to '?' — both
+      /// MySQL-verified).
+      Charset: string option }
 
 /// A named `[UNIQUE] KEY|INDEX (cols)` — from a `CREATE TABLE` trailing item,
 /// `ALTER TABLE ADD INDEX`, `CREATE INDEX`, or a column-level `UNIQUE`
@@ -355,7 +362,14 @@ type Statement =
         columns: ColumnDef list *
         indexes: IndexDef list *
         foreignKeys: ForeignKeyDef list *
-        ifNotExists: bool
+        ifNotExists: bool *
+        /// The table's own declared `[DEFAULT] CHARSET`/`COLLATE` options
+        /// (`None` = server default) — kept separate from the per-column
+        /// values they default to, so `SHOW CREATE TABLE` renders the
+        /// table-level declaration MySQL reports rather than the baked-in
+        /// column defaults.
+        tableCharset: string option *
+        tableCollation: string option
     | DropTable of names: string list * ifExists: bool
     | AlterTable of table: string * actions: AlterAction list
     | RenameTable of pairs: (string * string) list

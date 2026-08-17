@@ -91,6 +91,59 @@ let tests =
                       "numeric column NULL, string columns utf8mb4"
               | other -> failtestf "expected a resultset, got %A" other
 
+          testCase "COLUMNS.collation_name reports the server default and the declared COLLATE"
+          <| fun _ ->
+              let store = setup ()
+              run store "CREATE TABLE tagged (name VARCHAR(20) COLLATE utf8mb4_bin, plain VARCHAR(20))" |> ignore
+
+              match
+                  run
+                      store
+                      "SELECT column_name, collation_name, character_set_name FROM information_schema.columns WHERE table_schema = 'fsdb' AND table_name = 'tagged' ORDER BY ordinal_position"
+              with
+              | ResultSet(_, rows) ->
+                  Expect.equal
+                      rows
+                      [ [ Some "name"; Some "utf8mb4_bin"; Some "utf8mb4" ]
+                        [ Some "plain"; Some "utf8mb4_0900_ai_ci"; Some "utf8mb4" ] ]
+                      "explicit COLLATE reported, default otherwise"
+              | other -> failtestf "expected a resultset, got %A" other
+
+          testCase "SHOW CREATE TABLE renders per-column CHARACTER SET/COLLATE and table defaults"
+          <| fun _ ->
+              let store = setup ()
+              run store "CREATE TABLE gc (name VARCHAR(20) COLLATE utf8mb4_bin)" |> ignore
+
+              // SHOW statements live in QueryHandler (text-probed, like
+              // SET), not the Executor grammar.
+              let session = Fsdb.Session.create 1 store
+
+              match Fsdb.QueryHandler.handle session "SHOW CREATE TABLE gc" |> snd with
+              | ResultSet(_, [ [ Some "gc"; Some ddl ] ]) ->
+                  Expect.stringContains ddl "`name` varchar(20) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin" "the column's declared collation"
+                  Expect.stringContains ddl "DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci" "the table defaults"
+              | other -> failtestf "expected SHOW CREATE TABLE output, got %A" other
+
+          testCase "SHOW CREATE TABLE keeps the table-level declaration, and never attaches charset/collation to a non-string column"
+          <| fun _ ->
+              let store = setup ()
+              run store "CREATE TABLE gc_decl (id INT) DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci" |> ignore
+              run store "CREATE TABLE gc_intcoll (id INT COLLATE utf8mb4_bin)" |> ignore
+
+              let session = Fsdb.Session.create 1 store
+
+              match Fsdb.QueryHandler.handle session "SHOW CREATE TABLE gc_decl" |> snd with
+              | ResultSet(_, [ [ Some "gc_decl"; Some ddl ] ]) ->
+                  Expect.stringContains ddl "`id` int DEFAULT NULL" "the INT column renders plain"
+                  Expect.stringContains ddl "DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci" "the table's declared defaults"
+              | other -> failtestf "expected SHOW CREATE TABLE output, got %A" other
+
+              match Fsdb.QueryHandler.handle session "SHOW CREATE TABLE gc_intcoll" |> snd with
+              | ResultSet(_, [ [ Some "gc_intcoll"; Some ddl ] ]) ->
+                  Expect.stringContains ddl "`id` int DEFAULT NULL" "a column-level COLLATE on an INT is a no-op"
+                  Expect.stringContains ddl "DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci" "server-default table options"
+              | other -> failtestf "expected SHOW CREATE TABLE output, got %A" other
+
           testCase "COLUMNS projects declared columns with type/nullability/key metadata"
           <| fun _ ->
               let store = setup ()

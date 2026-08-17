@@ -99,6 +99,11 @@ type Table =
       NextAutoId: int64
       Indexes: IndexDef list
       ForeignKeys: ForeignKeyDef list
+      /// The table's own declared `[DEFAULT] CHARSET`/`COLLATE` options
+      /// (`None` = server default) — rendered by `SHOW CREATE TABLE`, and
+      /// distinct from the baked-in per-column defaults.
+      TableCharset: string option
+      TableCollation: string option
       /// Hash index over every PRIMARY KEY / UNIQUE `Indexes` entry, kept in
       /// sync with `Rows` by every write path below (`insertCore`,
       /// `updateRows`, `upsertRows`, `deleteRows`'s `cascadeDeleteVisited`)
@@ -236,6 +241,14 @@ type Store =
       /// `setStrictMode` directly too, so `SELECT @@sql_mode` right after a
       /// `SET` on the same connection reflects it immediately.
       mutable StrictMode: bool
+      /// The storage-level mirror of MySQL's session
+      /// `collation_connection` — the collation literal-vs-literal string
+      /// comparisons (and literal ORDER BY/LIKE operands) resolve under.
+      /// Store-wide like `StrictMode`, re-derived from the *current*
+      /// session's own variable by `QueryHandler` before every statement,
+      /// so it never leaks between connections. Column comparisons are
+      /// unaffected — a column's own `COLLATE` always wins.
+      mutable ConnectionCollation: Collation.Collation
       /// Fires once per committed write, under `Lock`, right after the
       /// catalog swap that made it visible — `None` (the default) means no
       /// subscriber, so every write path's event-construction work still
@@ -324,6 +337,7 @@ let create () : Store =
     { Databases = databases
       ForeignKeyChecks = true
       StrictMode = true
+      ConnectionCollation = Collation.defaultCollation
       OnCommit = None
       PendingEvents = None
       TransactionGates = ConcurrentDictionary<string, SemaphoreSlim>()
@@ -401,6 +415,7 @@ let beginTransactionSnapshot (store: Store) : Store =
       // always overwritten before a transaction's first real statement
       // runs.
       StrictMode = true
+      ConnectionCollation = store.ConnectionCollation
       OnCommit = None
       PendingEvents = if store.OnCommit.IsSome then Some(ResizeArray()) else None
       TransactionGates = store.TransactionGates
@@ -425,6 +440,8 @@ let setForeignKeyChecks (store: Store) (enabled: bool) : unit =
 /// `SET SESSION sql_mode = ...` — wired from `QueryHandler`'s `SET` probe
 /// (see the note on `Store.StrictMode`). `strict` is whether the new mode
 /// still contains STRICT_TRANS_TABLES/STRICT_ALL_TABLES.
+let setConnectionCollation (store: Store) (collation: Collation.Collation) : unit = store.ConnectionCollation <- collation
+
 let setStrictMode (store: Store) (strict: bool) : unit =
     lock store.Lock (fun () -> store.StrictMode <- strict)
 
@@ -746,6 +763,23 @@ let coerceValue (strict: bool) (col: ColumnDef) (v: Value) : Result<Value, Stora
     let fail () =
         Error(InvalidValueForColumn(col.Name, v |> toText |> Option.defaultValue "NULL"))
 
+    /// Charset write-time semantics, MySQL-verified: `ascii` rejects
+    /// non-ASCII with 1366 in strict mode (lossy '?' otherwise); `latin1`
+    /// (cp1252) lossy-maps anything unencodable to '?' even in strict mode
+    /// (its all-256-slots table has no unassigned code points to reject);
+    /// the rest (utf8mb4/None) pass through unchanged.
+    let charsetChecked (text: string) : Result<string, StorageError> =
+        match col.Charset with
+        | Some "ascii" ->
+            if text |> String.forall (fun c -> int c < 0x80) then
+                Ok text
+            elif strict then
+                fail ()
+            else
+                Ok(Collation.Charset.transcodeAscii text)
+        | Some "latin1" -> Ok(Collation.Charset.transcodeLatin1 text)
+        | _ -> Ok text
+
     /// Non-strict's numeric fallback: 0, always representable.
     let numericFallback (zero: unit -> Value) = if strict then fail () else Ok(zero ())
 
@@ -813,7 +847,7 @@ let coerceValue (strict: bool) (col: ColumnDef) (v: Value) : Result<Value, Stora
         | TLongText
         | TSet _
         | TTime
-        | TJson -> Ok(VString(v |> toText |> Option.defaultValue ""))
+        | TJson -> charsetChecked (v |> toText |> Option.defaultValue "") |> Result.map VString
         | TBinary _
         | TVarBinary _
         | TTinyBlob
@@ -1175,6 +1209,8 @@ let createTable
     (columns: ColumnDef list)
     (indexes: IndexDef list)
     (foreignKeys: ForeignKeyDef list)
+    (tableCharset: string option)
+    (tableCollation: string option)
     : Result<unit, StorageError> =
     ensureDatabase store dbName
 
@@ -1192,12 +1228,14 @@ let createTable
                       NextAutoId = 1L
                       Indexes = indexes
                       ForeignKeys = foreignKeys
+                      TableCharset = tableCharset
+                      TableCollation = tableCollation
                       UniqueIndex = Map.empty }
 
                 Ok(Map.add key (reindexTable table) db, ()))
 
     if result.IsOk then
-        emit store (Some(SchemaChanged(dbName, CreateTable(tableName, columns, indexes, foreignKeys, false))))
+        emit store (Some(SchemaChanged(dbName, CreateTable(tableName, columns, indexes, foreignKeys, false, None, None))))
 
     result
 

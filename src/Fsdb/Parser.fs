@@ -427,9 +427,25 @@ let private distinctArg: Parser<Expr, unit> =
 /// `Executor`'s substitution of it). `attempt`ed so a bare reserved word
 /// with no `(` falls through to `identAtom`'s normal (and still
 /// reserved-word-rejecting) column/qualified-column path.
-let private funcCallAtom: Parser<Expr, unit> =
+/// `CONVERT(expr USING charset)` — MySQL's special transcode form, parsed
+/// ahead of the generic call grammar (its argument list isn't comma-
+/// separated expressions). Desugars to a `FuncCall("CONVERT", [expr;
+/// charset-name])` that `Functions.convertFn` evaluates.
+let private convertUsingAtom: Parser<Expr, unit> =
+    attempt (
+        keyword "CONVERT"
+        >>. between
+            (sym "(")
+            (sym ")")
+            (expr .>> keyword "USING" .>>. (identifier <|> (stringLit |>> (function VString s -> s | _ -> ""))))
+    )
+    |>> fun (e, charset) -> FuncCall("CONVERT", [ e; Lit(VString charset) ])
+
+let private genericFuncCall: Parser<Expr, unit> =
     attempt ((many1Satisfy2 isIdentStart isIdentChar .>> ws) .>>. (sym "(" >>. sepBy distinctArg (sym ",") .>> sym ")"))
     |>> FuncCall
+
+let private funcCallAtom: Parser<Expr, unit> = attempt (convertUsingAtom) <|> genericFuncCall
 
 /// `GROUP_CONCAT([DISTINCT] expr [ORDER BY key [ASC|DESC], ...] [SEPARATOR
 /// 'str'])` — parsed separately from `funcCallAtom` rather than folding
@@ -758,6 +774,8 @@ type private ColMod =
     /// A validated `COLLATE name` — the column's collation, resolved against
     /// the registry at parse time so an unknown name is a clean error.
     | MCollate of string
+    /// A validated `CHARACTER SET name` (utf8mb4/latin1/ascii).
+    | MCharset of string
     /// `COMMENT 'txt'`, `CHARACTER SET x`, `ON UPDATE CURRENT_TIMESTAMP` —
     /// accepted so the column definition parses, but nothing in
     /// `Ast.ColumnDef` tracks them (ponytail: add fields if a migration's
@@ -797,7 +815,16 @@ let private colMod: Parser<ColMod, unit> =
           keyword "UNIQUE" >>. optional (keyword "KEY") >>% MUnique
           attempt (keyword "ON" >>. keyword "UPDATE" >>. keyword "CURRENT_TIMESTAMP") >>% MIgnored
           keyword "COMMENT" >>. stringLit >>% MIgnored
-          attempt (keyword "CHARACTER" >>. keyword "SET") >>. identOrString >>% MIgnored
+          attempt (keyword "CHARACTER" >>. keyword "SET" <|> keyword "CHARSET")
+          >>. identOrString
+          >>= fun name ->
+              match name.ToLowerInvariant() with
+              | "utf8mb4"
+              | "utf8"
+              | "latin1"
+              | "ascii"
+              | "binary" -> preturn (MCharset(name.ToLowerInvariant()))
+              | _ -> fail (sprintf "Unknown character set: '%s'" name)
           keyword "COLLATE"
           >>. identOrString
           >>= fun name ->
@@ -817,7 +844,8 @@ let private columnDef: Parser<ColumnDef, unit> =
           PrimaryKey = List.contains MPrimaryKey mods
           Unique = List.contains MUnique mods
           Generated = mods |> List.tryPick (function MGenerated e -> Some e | _ -> None)
-          Collation = mods |> List.tryPick (function MCollate c -> Some c | _ -> None) }
+          Collation = mods |> List.tryPick (function MCollate c -> Some c | _ -> None)
+          Charset = mods |> List.tryPick (function MCharset c -> Some c | _ -> None) }
 
 /// `AFTER col` / `FIRST` after an `ADD`/`MODIFY`/`CHANGE COLUMN` —
 /// `PositionDefault` when neither is written.
@@ -919,24 +947,41 @@ let private createTableItem: Parser<CreateItem, unit> =
 /// one tracked option — it becomes the table's column default (validated
 /// against the collation registry), which `createTable` bakes into every
 /// column that didn't name one explicitly.
-let private tableOption: Parser<string option, unit> =
+let private tableOption: Parser<string option * string option, unit> =
     choice
-        [ keyword "ENGINE" >>. opt (sym "=") >>. identOrString >>% None
-          keyword "DEFAULT" >>. (keyword "CHARSET" <|> (keyword "CHARACTER" >>. keyword "SET"))
+        [ keyword "ENGINE" >>. opt (sym "=") >>. identOrString >>% (None, None)
+          attempt (keyword "DEFAULT" >>. (keyword "CHARSET" <|> (keyword "CHARACTER" >>. keyword "SET")))
           >>. opt (sym "=")
           >>. identOrString
-          >>% None
-          keyword "CHARSET" >>. opt (sym "=") >>. identOrString >>% None
+          >>= fun name ->
+              match name.ToLowerInvariant() with
+              | "utf8mb4"
+              | "utf8"
+              | "latin1"
+              | "ascii"
+              | "binary" -> preturn (Some(name.ToLowerInvariant()), None)
+              | _ -> fail (sprintf "Unknown character set: '%s'" name)
+          keyword "CHARSET" >>. opt (sym "=") >>. identOrString
+          >>= fun name ->
+              match name.ToLowerInvariant() with
+              | "utf8mb4"
+              | "utf8"
+              | "latin1"
+              | "ascii"
+              | "binary" -> preturn (Some(name.ToLowerInvariant()), None)
+              | _ -> fail (sprintf "Unknown character set: '%s'" name)
           keyword "COLLATE"
           >>. opt (sym "=")
           >>. identOrString
           >>= fun name ->
               match Collation.tryFind name with
-              | Some _ -> preturn (Some name)
+              | Some _ -> preturn (None, Some name)
               | None -> fail (sprintf "Unknown collation '%s'" name) ]
 
-let private tableOptions: Parser<string option, unit> =
-    many tableOption |>> (fun opts -> opts |> List.choose id |> List.tryLast)
+let private tableOptions: Parser<string option * string option, unit> =
+    many tableOption
+    |>> fun opts ->
+        opts |> List.fold (fun (cs, col) (c, l) -> c |> Option.orElse cs, l |> Option.orElse col) (None, None)
 
 let private createTable: Parser<Statement, unit> =
     (keyword "CREATE" >>. keyword "TABLE"
@@ -944,7 +989,7 @@ let private createTable: Parser<Statement, unit> =
      .>>. qualifiedTableName
      .>>. between (sym "(") (sym ")") (sepBy1 createTableItem (sym ","))
      .>>. tableOptions)
-    |>> fun (((ifNotExists, name), items), tableCollation) ->
+    |>> fun (((ifNotExists, name), items), (tableCharset, tableCollation)) ->
         let pkNames = items |> List.collect (function CPrimaryKey names -> names | _ -> [])
         let explicitIndexes = items |> List.choose (function CIndex ix -> Some ix | _ -> None)
         let foreignKeys = items |> List.choose (function CForeignKey fk -> Some fk | _ -> None)
@@ -955,12 +1000,32 @@ let private createTable: Parser<Statement, unit> =
                 | CColumn c ->
                     // Table-level COLLATE is the default for columns that
                     // didn't name one; the explicit column COLLATE wins.
-                    let withCollation =
-                        match c.Collation with
-                        | Some _ -> c
-                        | None -> { c with Collation = tableCollation }
+                    // String-typed columns only — MySQL doesn't attach the
+                    // table charset/collation to numeric/temporal columns
+                    // (verified: `CREATE TABLE t (id INT) COLLATE=utf8mb4_bin`
+                    // shows plain `id int` in SHOW CREATE and NULLs in
+                    // information_schema.COLUMNS).
+                    let isStringy =
+                        match c.Type with
+                        | TChar _
+                        | TVarchar _
+                        | TTinyText
+                        | TText
+                        | TMediumText
+                        | TLongText
+                        | TEnum _
+                        | TSet _ -> true
+                        | _ -> false
 
-                    Some(if List.contains c.Name pkNames then { withCollation with PrimaryKey = true } else withCollation)
+                    let withDefaults =
+                        if isStringy then
+                            { c with
+                                Collation = c.Collation |> Option.orElse tableCollation
+                                Charset = c.Charset |> Option.orElse tableCharset }
+                        else
+                            c
+
+                    Some(if List.contains c.Name pkNames then { withDefaults with PrimaryKey = true } else withDefaults)
                 | _ -> None)
 
         // A column-level `UNIQUE` modifier is just sugar for a single-column
@@ -971,7 +1036,7 @@ let private createTable: Parser<Statement, unit> =
             |> List.filter (fun c -> c.Unique)
             |> List.map (fun c -> { Name = c.Name; Columns = [ c.Name ]; Unique = true })
 
-        CreateTable(name, columns, explicitIndexes @ uniqueColumnIndexes, foreignKeys, ifNotExists)
+        CreateTable(name, columns, explicitIndexes @ uniqueColumnIndexes, foreignKeys, ifNotExists, tableCharset, tableCollation)
 
 let private createIndexStmt: Parser<Statement, unit> =
     (keyword "CREATE" >>. (opt (keyword "UNIQUE") |>> Option.isSome)

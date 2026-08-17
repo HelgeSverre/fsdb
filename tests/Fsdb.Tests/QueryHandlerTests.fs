@@ -208,6 +208,36 @@ let tests =
               | ResultSet(_, [ [ Some "utf8mb4"; Some "NO_ENGINE_SUBSTITUTION" ] ]) -> ()
               | other -> failtestf "expected both variables updated, got %A" other
 
+          testCase "SET collation_connection drives literal comparisons, column collations still win"
+          <| fun _ ->
+              let store = Fsdb.Storage.create ()
+              let session = create 1 store
+
+              handle session "CREATE TABLE g (name VARCHAR(20))" |> ignore
+              handle session "INSERT INTO g VALUES ('age')" |> ignore
+
+              match handle session "SELECT 'a' = 'A'" |> snd with
+              | ResultSet(_, [ [ Some "1" ] ]) -> ()
+              | other -> failtestf "expected the default ai_ci to fold, got %A" other
+
+              match handle session "SET collation_connection = utf8mb4_bin" |> snd with
+              | Affected _ -> ()
+              | other -> failtestf "expected SET collation_connection to succeed, got %A" other
+
+              match handle session "SELECT 'a' = 'A'" |> snd with
+              | ResultSet(_, [ [ Some "0" ] ]) -> ()
+              | other -> failtestf "expected bin literals after SET, got %A" other
+
+              // the column's own ai_ci still folds
+              match handle session "SELECT COUNT(*) FROM g WHERE name = 'AGE'" |> snd with
+              | ResultSet(_, [ [ Some "1" ] ]) -> ()
+              | other -> failtestf "expected the column collation to win, got %A" other
+
+              // an unknown collation is MySQL's 1273
+              match handle session "SET collation_connection = no_such_collation" |> snd with
+              | Err(1273, _) -> ()
+              | other -> failtestf "expected 1273 for an unknown collation, got %A" other
+
           testCase "sql_mode inside a comma-joined SET still splits on its own internal commas correctly"
           <| fun _ ->
               // The mode list itself is comma-separated *inside its quotes*

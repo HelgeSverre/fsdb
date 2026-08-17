@@ -24,7 +24,8 @@ let private usersColumns =
         PrimaryKey = true
         Unique = false
         Generated = None
-        Collation = None }
+        Collation = None
+        Charset = None }
       { Name = "name"
         Type = TVarchar 255
         Nullable = false
@@ -33,7 +34,8 @@ let private usersColumns =
         PrimaryKey = false
         Unique = false
         Generated = None
-        Collation = None }
+        Collation = None
+        Charset = None }
       { Name = "note"
         Type = TText
         Nullable = true
@@ -42,7 +44,8 @@ let private usersColumns =
         PrimaryKey = false
         Unique = false
         Generated = None
-        Collation = None } ]
+        Collation = None
+        Charset = None } ]
 
 let private walPath dir = Path.Combine(dir, "wal.jsonl")
 let private snapshotPath dir = Path.Combine(dir, "snapshot.fsdb")
@@ -60,7 +63,7 @@ let tests =
               let dir = tempDataDir ()
               let store = load dir
               attach dir store
-              createTable store defaultDatabase "vals" usersColumns [] [] |> ignore
+              createTable store defaultDatabase "vals" usersColumns [] [] None None |> ignore
 
               insertRows store defaultDatabase "vals" None [ [ VNull; VString "row1"; VNull ] ] |> ignore
 
@@ -97,7 +100,8 @@ let tests =
                       PrimaryKey = true
                       Unique = false
                       Generated = None
-                      Collation = None }
+                      Collation = None
+                      Charset = None }
                     { Name = "created_at"
                       Type = TDateTime
                       Nullable = false
@@ -106,7 +110,8 @@ let tests =
                       PrimaryKey = false
                       Unique = false
                       Generated = None
-                      Collation = None }
+                      Collation = None
+                      Charset = None }
                     { Name = "token"
                       Type = TVarchar 64
                       Nullable = false
@@ -115,9 +120,10 @@ let tests =
                       PrimaryKey = false
                       Unique = false
                       Generated = None
-                      Collation = None } ]
+                      Collation = None
+                      Charset = None } ]
 
-              createTable store defaultDatabase "events" eventsColumns [] [] |> ignore
+              createTable store defaultDatabase "events" eventsColumns [] [] None None |> ignore
 
               // Stand-ins for what `Executor` would have already evaluated
               // NOW()/UUID() into before calling `insertRows` — the WAL logs
@@ -139,7 +145,7 @@ let tests =
               let dir = tempDataDir ()
               let store = load dir
               attach dir store
-              createTable store defaultDatabase "t" usersColumns [] [] |> ignore
+              createTable store defaultDatabase "t" usersColumns [] [] None None |> ignore
               insertRows store defaultDatabase "t" None [ [ VNull; VString "before-snapshot"; VNull ] ] |> ignore
 
               snapshotNow dir store
@@ -157,7 +163,7 @@ let tests =
               let dir = tempDataDir ()
               let store = load dir
               attach dir store
-              createTable store defaultDatabase "widgets" usersColumns [] [] |> ignore
+              createTable store defaultDatabase "widgets" usersColumns [] [] None None |> ignore
 
               let extraCol =
                   { Name = "sku"
@@ -168,7 +174,8 @@ let tests =
                     PrimaryKey = false
                     Unique = false
                     Generated = None
-                    Collation = None }
+                    Collation = None
+                    Charset = None }
 
               alterTable
                   store
@@ -197,7 +204,7 @@ let tests =
               let dir = tempDataDir ()
               let store = load dir
               attach dir store
-              createTable store defaultDatabase "t" usersColumns [] [] |> ignore
+              createTable store defaultDatabase "t" usersColumns [] [] None None |> ignore
               insertRows store defaultDatabase "t" None [ [ VNull; VString "good"; VNull ] ] |> ignore
 
               // Simulate a `kill -9` mid-`Write`: a half-written trailing
@@ -212,7 +219,7 @@ let tests =
               let dir = tempDataDir ()
               let store = load dir
               attach dir store
-              createTable store defaultDatabase "t" usersColumns [] [] |> ignore
+              createTable store defaultDatabase "t" usersColumns [] [] None None |> ignore
 
               let beforeRollback = File.ReadAllLines(walPath dir) |> Array.length
 
@@ -231,7 +238,7 @@ let tests =
               let dir = tempDataDir ()
               let store = load dir
               attach dir store
-              createTable store defaultDatabase "t" usersColumns [] [] |> ignore
+              createTable store defaultDatabase "t" usersColumns [] [] None None |> ignore
               insertRows store defaultDatabase "t" None [ [ VNull; VString "good"; VNull ] ] |> ignore
               // Simulate a `kill -9` mid-`Write`: a half-written trailing line.
               File.AppendAllText(walPath dir, "{\"case\":\"RowsInserted\",\"db\":\"fsdb\",\"table\":\"t\",\"rows\":[[\"I2\"")
@@ -268,9 +275,12 @@ let tests =
                       PrimaryKey = false
                       Unique = false
                       Generated = None
-                      Collation = None } ]
+                      Collation = None
+                      Charset = None } ]
                   []
                   []
+                  None
+                  None
               |> ignore
 
               insertRows store defaultDatabase "seq" None [ [ VInt 1L ]; [ VInt 2L ]; [ VInt 3L ] ] |> ignore
@@ -290,7 +300,7 @@ let tests =
               let dir = tempDataDir ()
               let store = load dir
               attach dir store
-              createTable store defaultDatabase "pk" (usersColumns |> List.filter (fun c -> c.Name <> "note")) [] [] |> ignore
+              createTable store defaultDatabase "pk" (usersColumns |> List.filter (fun c -> c.Name <> "note")) [] [] None None |> ignore
               insertRows store defaultDatabase "pk" (Some [ "id"; "name" ]) [ [ VInt 1L; VString "a" ]; [ VInt 2L; VString "b" ]; [ VInt 3L; VString "c" ] ]
               |> ignore
 
@@ -338,7 +348,8 @@ let tests =
                       PrimaryKey = true
                       Unique = false
                       Generated = None
-                      Collation = None }
+                      Collation = None
+                      Charset = None }
                     { Name = "n"
                       Type = TInt false
                       Nullable = false
@@ -347,9 +358,12 @@ let tests =
                       PrimaryKey = false
                       Unique = false
                       Generated = None
-                      Collation = None } ]
+                      Collation = None
+                      Charset = None } ]
                   []
                   []
+                  None
+                  None
               |> ignore
 
               insertRows setupStore defaultDatabase "hot" None [ for i in 1 .. rowCount -> [ VInt(int64 i); VInt 0L ] ]
@@ -404,9 +418,12 @@ let tests =
                       PrimaryKey = false
                       Unique = false
                       Generated = None
-                      Collation = None } ]
+                      Collation = None
+                      Charset = None } ]
                   []
                   []
+                  None
+                  None
               |> ignore
 
               insertRows store defaultDatabase "dups" None [ [ VInt 7L ]; [ VInt 7L ]; [ VInt 7L ] ] |> ignore
@@ -448,7 +465,8 @@ let tests =
                       PrimaryKey = true
                       Unique = false
                       Generated = None
-                      Collation = None }
+                      Collation = None
+                      Charset = None }
                     { Name = "n"
                       Type = TInt false
                       Nullable = false
@@ -457,9 +475,12 @@ let tests =
                       PrimaryKey = false
                       Unique = false
                       Generated = None
-                      Collation = None } ]
+                      Collation = None
+                      Charset = None } ]
                   []
                   []
+                  None
+                  None
               |> ignore
 
               let rowCount = 10_000
@@ -497,9 +518,10 @@ let tests =
                     PrimaryKey = true
                     Unique = false
                     Generated = None
-                    Collation = None }
+                    Collation = None
+                    Charset = None }
 
-              createTable store defaultDatabase "p" [ idCol "id" ] [] [] |> ignore
+              createTable store defaultDatabase "p" [ idCol "id" ] [] [] None None |> ignore
 
               createTable
                   store
@@ -508,6 +530,8 @@ let tests =
                   [ idCol "id"; { (idCol "pid") with PrimaryKey = false } ]
                   []
                   [ { Name = "fkc"; Columns = [ "pid" ]; RefTable = "p"; RefColumns = [ "id" ]; OnDelete = None; OnUpdate = None } ]
+                  None
+                  None
               |> ignore
 
               insertRows store defaultDatabase "p" None [ [ VInt 1L ] ] |> ignore
@@ -538,7 +562,8 @@ let tests =
                     PrimaryKey = false
                     Unique = false
                     Generated = Some(BinOp(Mul, Col "a", Lit(VInt 2L)))
-                    Collation = None }
+                    Collation = None
+                    Charset = None }
 
               createTable
                   store
@@ -552,10 +577,13 @@ let tests =
                       PrimaryKey = false
                       Unique = false
                       Generated = None
-                      Collation = None }
+                      Collation = None
+                      Charset = None }
                     genCol ]
                   []
                   []
+                  None
+                  None
               |> ignore
 
               let reloaded = load dir
@@ -572,7 +600,7 @@ let tests =
               let dir = tempDataDir ()
               let store = load dir
               attach dir store
-              createTable store defaultDatabase "t" usersColumns [] [] |> ignore
+              createTable store defaultDatabase "t" usersColumns [] [] None None |> ignore
               insertRows store defaultDatabase "t" None [ [ VNull; VString "a"; VNull ]; [ VNull; VString "b"; VNull ] ] |> ignore
 
               // Manually reproduce the on-disk state right after `snapshotNow`

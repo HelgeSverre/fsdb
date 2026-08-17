@@ -22,7 +22,8 @@ let private col (name: string) (ty: ColumnType) : ColumnDef =
       PrimaryKey = false
       Unique = false
       Generated = None
-                  Collation = None }
+      Collation = None
+      Charset = None }
 
 let private strCol name = col name (TVarchar 255)
 let private intCol name = col name (TInt false)
@@ -260,8 +261,8 @@ let private columnsRows (catalog: Catalog) : Value[] list =
                (scale |> Option.map VInt |> Option.defaultValue VNull)
                vs (columnKey t c)
                vs (if c.AutoIncrement then "auto_increment" else "")
-               (if isStringy c.Type then vs "utf8mb4" else VNull)
-               (if isStringy c.Type then vs "utf8mb4_unicode_ci" else VNull)
+               (if isStringy c.Type then vs (c.Charset |> Option.defaultValue "utf8mb4") else VNull)
+               (if isStringy c.Type then vs (c.Collation |> Option.defaultValue "utf8mb4_0900_ai_ci") else VNull)
                vs ""
                vs "" |]))
 
@@ -579,7 +580,20 @@ let private showCreateTableDDL (t: Table) : string =
 
         let extra = if c.AutoIncrement then "AUTO_INCREMENT" else ""
 
-        [ backtick c.Name; columnTypeText c.Type; notNull; defaultPart; extra ]
+        // MySQL renders both CHARACTER SET and COLLATE whenever a column
+        // declares either (verified: a column with only COLLATE utf8mb4_bin
+        // shows `CHARACTER SET utf8mb4 COLLATE utf8mb4_bin`) — and never
+        // on non-string columns (an INT column shows plain `id int` even
+        // under a table-level COLLATE).
+        let charsetCollate =
+            if not (isStringy c.Type) then
+                []
+            else
+                match c.Charset, c.Collation with
+                | None, None -> []
+                | cs, col -> [ sprintf "CHARACTER SET %s" (cs |> Option.defaultValue "utf8mb4"); sprintf "COLLATE %s" (col |> Option.defaultValue "utf8mb4_0900_ai_ci") ]
+
+        [ backtick c.Name; columnTypeText c.Type ] @ charsetCollate @ [ notNull; defaultPart; extra ]
         |> List.filter ((<>) "")
         |> String.concat " "
 
@@ -589,6 +603,12 @@ let private showCreateTableDDL (t: Table) : string =
     let indexLines =
         t.Indexes
         |> List.map (fun ix -> sprintf "%sKEY %s (%s)" (if ix.Unique then "UNIQUE " else "") (backtick ix.Name) (backtickCols ix.Columns))
+
+    // The table's own declared defaults (server defaults when unset) —
+    // MySQL renders these in the table options even when a column carries
+    // its own COLLATE.
+    let tableCharset = t.TableCharset |> Option.defaultValue "utf8mb4"
+    let tableCollation = t.TableCollation |> Option.defaultValue "utf8mb4_0900_ai_ci"
 
     let fkLines =
         t.ForeignKeys
@@ -608,9 +628,11 @@ let private showCreateTableDDL (t: Table) : string =
     let lines = (t.Columns |> List.map columnLine) @ pkLine @ indexLines @ fkLines
 
     sprintf
-        "CREATE TABLE %s (\n  %s\n) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci"
+        "CREATE TABLE %s (\n  %s\n) ENGINE=InnoDB DEFAULT CHARSET=%s COLLATE=%s"
         (backtick t.OriginalName)
         (String.concat ",\n  " lines)
+        tableCharset
+        tableCollation
 
 /// `SHOW CREATE TABLE t`.
 let showCreateTable (catalog: Catalog) (dbName: string) (tableName: string) : ShowResult =

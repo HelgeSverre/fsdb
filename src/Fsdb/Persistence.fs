@@ -339,6 +339,7 @@ let private encodeColumnDef (c: ColumnDef) : JsonNode =
     o.["unique"] <- boolNode c.Unique
     o.["generated"] <- (c.Generated |> Option.map encodeExpr |> Option.defaultValue null)
     o.["collation"] <- (c.Collation |> Option.map str |> Option.defaultValue null)
+    o.["charset"] <- (c.Charset |> Option.map str |> Option.defaultValue null)
     o
 
 let private decodeColumnDef (node: JsonNode) : ColumnDef =
@@ -352,6 +353,7 @@ let private decodeColumnDef (node: JsonNode) : ColumnDef =
       PrimaryKey = o.["primaryKey"].GetValue<bool>()
       Unique = o.["unique"].GetValue<bool>()
       Collation = (match o.["collation"] with null -> None | c -> Some(c.GetValue<string>()))
+      Charset = (match o.["charset"] with null -> None | c -> Some(c.GetValue<string>()))
       Generated = (match o.["generated"] with null -> None | g -> Some(decodeExpr g)) }
 
 let private encodeIndexDef (ix: IndexDef) : JsonNode =
@@ -443,14 +445,16 @@ let private encodeStatement (s: Statement) : JsonNode =
     match s with
     | CreateDatabase(name, ifNotExists) -> caseObj "CreateDatabase" [ "name", str name; "ifNotExists", boolNode ifNotExists ]
     | DropDatabase(name, ifExists) -> caseObj "DropDatabase" [ "name", str name; "ifExists", boolNode ifExists ]
-    | CreateTable(name, columns, indexes, fks, ifNotExists) ->
+    | CreateTable(name, columns, indexes, fks, ifNotExists, tableCharset, tableCollation) ->
         caseObj
             "CreateTable"
             [ "name", str name
               "columns", arr (columns |> List.map encodeColumnDef)
               "indexes", arr (indexes |> List.map encodeIndexDef)
               "foreignKeys", arr (fks |> List.map encodeForeignKeyDef)
-              "ifNotExists", boolNode ifNotExists ]
+              "ifNotExists", boolNode ifNotExists
+              "tableCharset", (tableCharset |> Option.map str |> Option.defaultValue null)
+              "tableCollation", (tableCollation |> Option.map str |> Option.defaultValue null) ]
     | DropTable(names, ifExists) -> caseObj "DropTable" [ "names", strArr names; "ifExists", boolNode ifExists ]
     | AlterTable(table, actions) -> caseObj "AlterTable" [ "table", str table; "actions", arr (actions |> List.map encodeAlterAction) ]
     | RenameTable pairs -> caseObj "RenameTable" [ "pairs", arr (pairs |> List.map (fun (a, b) -> arr [ str a; str b ])) ]
@@ -473,7 +477,9 @@ let private decodeStatement (node: JsonNode) : Statement =
             o.["columns"].AsArray() |> Seq.map decodeColumnDef |> List.ofSeq,
             o.["indexes"].AsArray() |> Seq.map decodeIndexDef |> List.ofSeq,
             o.["foreignKeys"].AsArray() |> Seq.map decodeForeignKeyDef |> List.ofSeq,
-            o.["ifNotExists"].GetValue<bool>()
+            o.["ifNotExists"].GetValue<bool>(),
+            (match o.["tableCharset"] with null -> None | c -> Some(c.GetValue<string>())),
+            (match o.["tableCollation"] with null -> None | c -> Some(c.GetValue<string>()))
         )
     | "DropTable" -> DropTable(strListOf o.["names"], o.["ifExists"].GetValue<bool>())
     | "AlterTable" -> AlterTable(o.["table"].GetValue<string>(), o.["actions"].AsArray() |> Seq.map decodeAlterAction |> List.ofSeq)
@@ -547,7 +553,8 @@ let private applyDdl (store: Store) (db: string) (stmt: Statement) : unit =
     match stmt with
     | CreateDatabase(name, _) -> warn "CreateDatabase" (createDatabase store name)
     | DropDatabase(name, _) -> warn "DropDatabase" (dropDatabase store name)
-    | CreateTable(name, columns, indexes, fks, _) -> warn "CreateTable" (createTable store db name columns indexes fks)
+    | CreateTable(name, columns, indexes, fks, _, tableCharset, tableCollation) ->
+        warn "CreateTable" (createTable store db name columns indexes fks tableCharset tableCollation)
     | DropTable(names, _) -> names |> List.iter (fun n -> warn "DropTable" (dropTable store db n))
     | AlterTable(table, actions) -> warn "AlterTable" (alterTable store db table actions)
     | RenameTable pairs -> pairs |> List.iter (fun (oldName, newName) -> warn "RenameTable" (renameTable store db oldName newName))
@@ -673,6 +680,8 @@ let private decodeTable (node: JsonNode) : Table =
           Columns = o.["columns"].AsArray() |> Seq.map decodeColumnDef |> List.ofSeq
           Indexes = o.["indexes"].AsArray() |> Seq.map decodeIndexDef |> List.ofSeq
           ForeignKeys = o.["foreignKeys"].AsArray() |> Seq.map decodeForeignKeyDef |> List.ofSeq
+          TableCharset = (match o.["tableCharset"] with null -> None | c -> Some(c.GetValue<string>()))
+          TableCollation = (match o.["tableCollation"] with null -> None | c -> Some(c.GetValue<string>()))
           RowsArray = decodeRows o.["rows"] |> System.Collections.Immutable.ImmutableArray.CreateRange
           NextAutoId = o.["nextAutoId"].GetValue<int64>()
           UniqueIndex = Map.empty }

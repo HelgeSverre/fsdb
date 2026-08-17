@@ -624,7 +624,8 @@ let tests =
                                 PrimaryKey = true
                                 Unique = false
                                 Generated = None
-                                Collation = None }
+                                Collation = None
+                                Charset = None }
                               { Name = "name"
                                 Type = TVarchar 255
                                 Nullable = false
@@ -633,7 +634,8 @@ let tests =
                                 PrimaryKey = false
                                 Unique = false
                                 Generated = None
-                                Collation = None }
+                                Collation = None
+                                Charset = None }
                               { Name = "score"
                                 Type = TDecimal(5, 2)
                                 Nullable = true
@@ -642,10 +644,13 @@ let tests =
                                 PrimaryKey = false
                                 Unique = false
                                 Generated = None
-                                Collation = None } ],
+                                Collation = None
+                                Charset = None } ],
                             [],
                             [],
-                            false
+                            false,
+                            None,
+                            None
                         ))
                         "create table"
 
@@ -663,10 +668,13 @@ let tests =
                                 PrimaryKey = false
                                 Unique = false
                                 Generated = None
-                                Collation = None } ],
+                                Collation = None
+                                Charset = None } ],
                             [],
                             [],
-                            true
+                            true,
+                            None,
+                            None
                         ))
                         "if not exists"
 
@@ -684,7 +692,8 @@ let tests =
                                 PrimaryKey = true
                                 Unique = false
                                 Generated = None
-                                Collation = None }
+                                Collation = None
+                                Charset = None }
                               { Name = "name"
                                 Type = TVarchar 10
                                 Nullable = true
@@ -693,26 +702,29 @@ let tests =
                                 PrimaryKey = false
                                 Unique = false
                                 Generated = None
-                                Collation = None } ],
+                                Collation = None
+                                Charset = None } ],
                             [],
                             [],
-                            false
+                            false,
+                            None,
+                            None
                         ))
                         "trailing primary key"
 
                 testCase "BIGINT UNSIGNED"
                 <| fun _ ->
                     match parseOk "CREATE TABLE t (id BIGINT UNSIGNED)" with
-                    | CreateTable(_, [ { Type = TBigInt true } ], _, _, _) -> ()
+                    | CreateTable(_, [ { Type = TBigInt true } ], _, _, _, _, _) -> ()
                     | other -> failtestf "expected an unsigned bigint column, got %A" other
 
                 testCase "DEFAULT CURRENT_TIMESTAMP"
                 <| fun _ ->
                     match parseOk "CREATE TABLE t (created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP)" with
-                    | CreateTable(_, [ { Type = TTimestamp; Default = Some DCurrentTimestamp } ], _, _, _) -> ()
+                    | CreateTable(_, [ { Type = TTimestamp; Default = Some DCurrentTimestamp } ], _, _, _, _, _) -> ()
                     | other -> failtestf "expected a CURRENT_TIMESTAMP default, got %A" other
 
-                testCase "ENGINE=/CHARSET= are accepted; table COLLATE becomes the columns' default"
+                testCase "ENGINE=/CHARSET= are accepted; the table's defaults stay table-level (numeric columns don't inherit them)"
                 <| fun _ ->
                     Expect.equal
                         (parseOk
@@ -727,19 +739,22 @@ let tests =
                                 PrimaryKey = false
                                 Unique = false
                                 Generated = None
-                                Collation = Some "utf8mb4_unicode_ci" } ],
+                                Collation = None
+                                Charset = None } ],
                             [],
                             [],
-                            false
+                            false,
+                            Some "utf8mb4",
+                            Some "utf8mb4_unicode_ci"
                         ))
-                        "table COLLATE baked into the column"
+                        "table defaults kept on the table; an INT column inherits nothing"
 
                 testCase "a column-level COLLATE wins over the table-level default, and an unknown collation is a parse error"
                 <| fun _ ->
                     match
                         parseOk "CREATE TABLE t (a VARCHAR(10) COLLATE utf8mb4_bin, b VARCHAR(10)) COLLATE=utf8mb4_unicode_ci"
                     with
-                    | CreateTable(_, [ { Name = "a"; Collation = Some "utf8mb4_bin" }; { Name = "b"; Collation = Some "utf8mb4_unicode_ci" } ], [], [], false) ->
+                    | CreateTable(_, [ { Name = "a"; Collation = Some "utf8mb4_bin" }; { Name = "b"; Collation = Some "utf8mb4_unicode_ci" } ], [], [], false, _, _) ->
                         ()
                     | other -> failtestf "expected column-over-table COLLATE resolution, got %A" other
 
@@ -750,13 +765,13 @@ let tests =
                 testCase "COLLATE with a quoted value, as Laravel's MySQL grammar emits it"
                 <| fun _ ->
                     match parseOk "CREATE TABLE t (id INT) DEFAULT CHARACTER SET utf8mb4 COLLATE 'utf8mb4_unicode_ci'" with
-                    | CreateTable("t", [ { Name = "id" } ], [], [], false) -> ()
+                    | CreateTable("t", [ { Name = "id" } ], [], [], false, _, _) -> ()
                     | other -> failtestf "expected the quoted collation to parse, got %A" other
 
                 testCase "column-level UNIQUE synthesizes a unique index named after the column"
                 <| fun _ ->
                     match parseOk "CREATE TABLE t (email VARCHAR(255) UNIQUE)" with
-                    | CreateTable(_, [ { Unique = true } ], [ { Name = "email"; Columns = [ "email" ]; Unique = true } ], [], false) -> ()
+                    | CreateTable(_, [ { Unique = true } ], [ { Name = "email"; Columns = [ "email" ]; Unique = true } ], [], false, _, _) -> ()
                     | other -> failtestf "expected a synthesized unique index, got %A" other
 
                 testCase "trailing UNIQUE KEY / KEY / INDEX with an explicit name"
@@ -768,7 +783,7 @@ let tests =
                         [ { Name = "uq_a"; Columns = [ "a" ]; Unique = true }
                           { Name = "idx_b"; Columns = [ "b" ]; Unique = false } ],
                         [],
-                        false) -> ()
+                        false, _, _) -> ()
                     | other -> failtestf "expected two indexes, got %A" other
 
                 testCase "trailing CONSTRAINT ... FOREIGN KEY with ON DELETE/ON UPDATE"
@@ -787,25 +802,25 @@ let tests =
                             RefColumns = [ "id" ]
                             OnDelete = Some "CASCADE"
                             OnUpdate = Some "RESTRICT" } ],
-                        false) -> ()
+                        false, _, _) -> ()
                     | other -> failtestf "expected a foreign key, got %A" other
 
                 testCase "unnamed trailing FOREIGN KEY gets a synthesized name"
                 <| fun _ ->
                     match parseOk "CREATE TABLE posts (user_id INT, FOREIGN KEY (user_id) REFERENCES users (id))" with
-                    | CreateTable(_, _, [], [ { Name = "users_user_id_foreign" } ], false) -> ()
+                    | CreateTable(_, _, [], [ { Name = "users_user_id_foreign" } ], false, _, _) -> ()
                     | other -> failtestf "expected a synthesized FK name, got %A" other
 
                 testCase "a bare CONSTRAINT with no symbol name before FOREIGN KEY still parses"
                 <| fun _ ->
                     match parseOk "CREATE TABLE posts (user_id INT, CONSTRAINT FOREIGN KEY (user_id) REFERENCES users (id))" with
-                    | CreateTable(_, _, [], [ { Name = "users_user_id_foreign" } ], false) -> ()
+                    | CreateTable(_, _, [], [ { Name = "users_user_id_foreign" } ], false, _, _) -> ()
                     | other -> failtestf "expected an unnamed CONSTRAINT to still synthesize a name, got %A" other
 
                 testCase "ENUM and SET column types carry their declared values"
                 <| fun _ ->
                     match parseOk "CREATE TABLE t (status ENUM('a', 'b'), flags SET('x', 'y'))" with
-                    | CreateTable(_, [ { Type = TEnum [ "a"; "b" ] }; { Type = TSet [ "x"; "y" ] } ], [], [], false) -> ()
+                    | CreateTable(_, [ { Type = TEnum [ "a"; "b" ] }; { Type = TSet [ "x"; "y" ] } ], [], [], false, _, _) -> ()
                     | other -> failtestf "expected enum/set types, got %A" other
 
                 testCase "CHAR/TEXT/BLOB family and TINY/MEDIUM/SMALL int variants all parse"
@@ -831,13 +846,13 @@ let tests =
                           { Type = TDouble } ],
                         [],
                         [],
-                        false) -> ()
+                        false, _, _) -> ()
                     | other -> failtestf "expected every new column type to parse, got %A" other
 
                 testCase "BOOLEAN/BOOL is an alias for TINYINT"
                 <| fun _ ->
                     match parseOk "CREATE TABLE t (a BOOLEAN, b BOOL)" with
-                    | CreateTable(_, [ { Type = TTinyInt false }; { Type = TTinyInt false } ], [], [], false) -> ()
+                    | CreateTable(_, [ { Type = TTinyInt false }; { Type = TTinyInt false } ], [], [], false, _, _) -> ()
                     | other -> failtestf "expected TTinyInt for BOOLEAN/BOOL, got %A" other
 
                 testCase "COMMENT / CHARACTER SET / COLLATE column modifiers are accepted and ignored"
@@ -846,7 +861,7 @@ let tests =
                         parseOk
                             "CREATE TABLE t (name VARCHAR(255) CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci COMMENT 'a name')"
                     with
-                    | CreateTable(_, [ { Name = "name" } ], [], [], false) -> ()
+                    | CreateTable(_, [ { Name = "name" } ], [], [], false, _, _) -> ()
                     | other -> failtestf "expected the comment/charset/collate to be ignored, got %A" other
 
                 testCase "a generated column's AS (expr) [VIRTUAL|STORED] is captured on ColumnDef.Generated (Laravel Pulse's key_hash)"
@@ -860,7 +875,7 @@ let tests =
                                     { Name = "key_hash"; Type = TChar 16; Generated = Some(FuncCall("UNHEX", _)) } ],
                                   [],
                                   [],
-                                  false) -> ()
+                                  false, _, _) -> ()
                     | other -> failtestf "expected the generated column's AS (...) to be captured, got %A" other ]
 
           testList

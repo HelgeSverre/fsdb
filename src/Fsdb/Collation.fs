@@ -251,3 +251,66 @@ let tryFind (name: string) : Collation option = Map.tryFind (name.ToLowerInvaria
 /// The engine's one active default — a `Store`-level default today, the
 /// seam a per-session/per-column `COLLATE` resolves against.
 let defaultCollation = Map.find "utf8mb4_0900_ai_ci" registry
+
+// ---------------------------------------------------------------------------
+// Charset write-time transcoding. MySQL's `latin1` is really cp1252, not
+// ISO-8859-1: `€` stores fine as byte 0x80, and the 0x80–0x9F range holds
+// printable punctuation (quotes, dashes, ™, …) where ISO-8859-1 has control
+// characters — verified against 8.4. `ascii` is 7-bit. Both map anything
+// unencodable to '?' rather than erroring (`ascii` columns still reject in
+// strict mode at the storage layer; this mapping is the lossy fallback).
+// ---------------------------------------------------------------------------
+
+/// The Unicode code points cp1252 adds above ISO-8859-1, in 0x80–0x9F slot
+/// order (0x81/0x8D/0x8F/0x90/0x9D are undefined in cp1252 and skipped).
+module Charset =
+    // € ‚ ƒ „ … † ‡ ˆ ‰ Š ‹ Œ Ž ' ' " " • – — ˜ ™ š › œ ž Ÿ
+    let private cp1252Extras =
+        set
+            [ 0x20AC
+              0x201A
+              0x0192
+              0x201E
+              0x2026
+              0x2020
+              0x2021
+              0x02C6
+              0x2030
+              0x0160
+              0x2039
+              0x0152
+              0x017D
+              0x2018
+              0x2019
+              0x201C
+              0x201D
+              0x2022
+              0x2013
+              0x2014
+              0x02DC
+              0x2122
+              0x0161
+              0x203A
+              0x0153
+              0x017E
+              0x0178 ]
+
+    /// Maps text to what a `latin1` (cp1252) column can hold: ASCII and
+    /// 0xA0–0xFF pass through, the cp1252 extras pass through, everything
+    /// else (including the C1 range 0x80–0x9F) becomes '?'. The engine
+    /// stores text, not bytes, so a representable char keeps its Unicode
+    /// form — `€` reads back as `€`, exactly what MySQL displays.
+    let transcodeLatin1 (s: string) : string =
+        s
+        |> String.map (fun c ->
+            let code = int c
+
+            if code < 0x80 || (code >= 0xA0 && code <= 0xFF) || cp1252Extras.Contains code then
+                c
+            else
+                '?')
+
+    /// Maps text to what an `ascii` column can hold: 7-bit passes through,
+    /// everything else becomes '?'.
+    let transcodeAscii (s: string) : string =
+        s |> String.map (fun c -> if int c < 0x80 then c else '?')
