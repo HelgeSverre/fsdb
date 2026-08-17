@@ -2474,6 +2474,20 @@ and private runSelect
           |> Result.bind (fun _ -> projectRow probe)
           |> Result.bind (fun outputCols -> orderKeysOf probe outputCols |> Result.map (fun _ -> outputCols)) with
     | Error(code, message) -> Err(code, message), [], []
+    | Ok probeProjection when limit = Some 0 ->
+        // `LIMIT 0` is the standard "column metadata, no rows" probe
+        // (PDO/Doctrine's `getColumnMeta` and friends) — MySQL, and this
+        // engine's own pre-M10 shape, both answer it by evaluating every
+        // matched row's projection once rather than short-circuiting to
+        // nothing, so wire types (and a row-level error) come out the same
+        // as any other query would give them. No row ever needs to cross
+        // the wire either way, so the scan doesn't cost the thing a
+        // `LIMIT 0` caller actually asked for.
+        let colNames = probeProjection |> List.map fst
+
+        match rows |> traverseSeq (fun row -> matches row |> Result.bind (fun keep -> if keep then projectRow row |> Result.map Some else Ok None)) with
+        | Error(code, message) -> Err(code, message), [], []
+        | Ok allProjected -> ResultSet(colNames, []), columnTypesOf (List.length colNames) allProjected, []
     | Ok probeProjection ->
         let colNames = probeProjection |> List.map fst
 

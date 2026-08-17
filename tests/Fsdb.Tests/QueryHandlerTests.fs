@@ -63,6 +63,17 @@ let tests =
                   Expect.equal session.LastResultColumnTypes [ TypeLongLong; TypeVarString ] "id is int, name is a string"
               | _, other -> failtestf "expected a resultset, got %A" other
 
+          testCase "LIMIT 0 (the getColumnMeta/\"metadata, no rows\" idiom) still reports real column wire types, not a blanket VAR_STRING"
+          <| fun _ ->
+              let session = create 1 (Fsdb.Storage.create ())
+              let session, _ = handle session "CREATE TABLE t (id INT, name VARCHAR(10))"
+              let session, _ = handle session "INSERT INTO t VALUES (1, 'a')"
+
+              match handle session "SELECT id, name FROM t LIMIT 0" with
+              | session, ResultSet([ "id"; "name" ], []) ->
+                  Expect.equal session.LastResultColumnTypes [ TypeLongLong; TypeVarString ] "LIMIT 0 must not narrow types to the empty row set it returns"
+              | _, other -> failtestf "expected an empty resultset, got %A" other
+
           testCase "SUM over an integer column reports MySQL's DECIMAL result type"
           <| fun _ ->
               let session = create 1 (Fsdb.Storage.create ())
