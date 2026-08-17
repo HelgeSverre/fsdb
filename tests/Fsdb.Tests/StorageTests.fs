@@ -471,7 +471,7 @@ let tests =
 
                     let updater (row: Value[]) = Ok [| row.[0]; VString "a@x.com" |]
 
-                    match updateRows store defaultDatabase "emails" (fun row -> Ok(row.[0] = VInt 2L)) updater with
+                    match updateRows store defaultDatabase "emails" None (fun row -> Ok(row.[0] = VInt 2L)) updater with
                     | Error(DuplicateKey("uq_email", "a@x.com")) -> ()
                     | other -> failtestf "expected DuplicateKey, got %A" other
 
@@ -483,7 +483,7 @@ let tests =
 
                     let updater (row: Value[]) = Ok row
 
-                    match updateRows store defaultDatabase "emails" (fun _ -> Ok true) updater with
+                    match updateRows store defaultDatabase "emails" None (fun _ -> Ok true) updater with
                     | Ok _ -> ()
                     | Error e -> failtestf "expected Ok (no self-collision), got %A" e
 
@@ -541,7 +541,7 @@ let tests =
                           [ VInt 2L; VString "b@x.com" ] ]
                     |> ignore
 
-                    match updateRows store defaultDatabase "emails" (fun _ -> Ok true) (fun row -> Ok [| row.[0]; VString "same@x.com" |]) with
+                    match updateRows store defaultDatabase "emails" None (fun _ -> Ok true) (fun row -> Ok [| row.[0]; VString "same@x.com" |]) with
                     | Error(DuplicateKey("uq_email", "same@x.com")) -> ()
                     | other -> failtestf "expected DuplicateKey, got %A" other ]
 
@@ -702,7 +702,7 @@ let tests =
                     let predicate (row: Value[]) = Ok(row.[1] = VString "alice")
                     let updater (row: Value[]) = Ok [| row.[0]; row.[1]; VString "31" |]
 
-                    match updateRows store defaultDatabase "users" predicate updater with
+                    match updateRows store defaultDatabase "users" None predicate updater with
                     | Ok affected ->
                         Expect.equal affected 1 "one row updated"
 
@@ -725,7 +725,7 @@ let tests =
 
                     let updater (row: Value[]) = Ok [| row.[0]; VNull; row.[2] |]
 
-                    match updateRows store defaultDatabase "users" (fun _ -> Ok true) updater with
+                    match updateRows store defaultDatabase "users" None (fun _ -> Ok true) updater with
                     | Error(NotNullViolation "name") -> ()
                     | other -> failtestf "expected NotNullViolation, got %A" other
 
@@ -811,7 +811,7 @@ let tests =
                     let predicate (row: Value[]) = Ok(row.[0] = VInt 1L)
                     let updater (row: Value[]) = Ok [| row.[0]; row.[1]; VInt 31L |]
 
-                    match updateRows store defaultDatabase "users" predicate updater with
+                    match updateRows store defaultDatabase "users" None predicate updater with
                     | Ok affected -> Expect.equal affected 1 "alice's age changed, id rewritten to itself is not a collision"
                     | Error e -> failtestf "expected Ok, got %A" e
 
@@ -834,7 +834,7 @@ let tests =
                           [ VNull; VString "carol"; VInt 40L ] ]
                     |> ignore
 
-                    updateRows store defaultDatabase "users" (fun row -> Ok(row.[1] = VString "bob")) (fun row -> Ok [| row.[0]; row.[1]; VInt 26L |])
+                    updateRows store defaultDatabase "users" None (fun row -> Ok(row.[1] = VString "bob")) (fun row -> Ok [| row.[0]; row.[1]; VInt 26L |])
                     |> ignore
 
                     deleteRows store defaultDatabase "users" (fun row -> Ok(row.[1] = VString "alice"))
@@ -1273,7 +1273,7 @@ let tests =
 
                     let updater (row: Value[]) = Ok [| row.[0]; VInt 999L; row.[2] |]
 
-                    match updateRows store defaultDatabase "employees" (fun _ -> Ok true) updater with
+                    match updateRows store defaultDatabase "employees" None (fun _ -> Ok true) updater with
                     | Error(ForeignKeyParentMissing "fk_dept") -> ()
                     | other -> failtestf "expected ForeignKeyParentMissing, got %A" other
 
@@ -1477,7 +1477,7 @@ let tests =
 
                     let updater (row: Value[]) = Ok [| VInt 99L; row.[1] |]
 
-                    match updateRows store defaultDatabase "departments" (fun _ -> Ok true) updater with
+                    match updateRows store defaultDatabase "departments" None (fun _ -> Ok true) updater with
                     | Error(ForeignKeyRestrict "fk_dept") ->
                         match scan store defaultDatabase "departments" with
                         | Ok(_, rows) -> Expect.equal (rows |> Seq.map (fun r -> r.[0]) |> List.ofSeq) [ VInt 1L ] "the parent row is untouched"
@@ -1538,6 +1538,7 @@ let tests =
                         store
                         defaultDatabase
                         "users"
+                        None
                         (fun _ -> Ok true)
                         (fun row -> if row.[0] = VInt 1L then Ok [| row.[0]; row.[1]; VInt 31L |] else Ok row)
                     |> ignore
@@ -1697,7 +1698,7 @@ let tests =
                         insertRows store dbName "counters" None [ [ VInt 0L ] ] |> ignore
 
                         for _ in 1 .. opsPerThread do
-                            updateRows store dbName "counters" (fun _ -> Ok true) (fun row -> Ok [| VInt(asInt row.[0] + 1L) |])
+                            updateRows store dbName "counters" None (fun _ -> Ok true) (fun row -> Ok [| VInt(asInt row.[0] + 1L) |])
                             |> ignore
 
                     let time f =
@@ -1742,7 +1743,7 @@ let tests =
 
                     let increment () =
                         for _ in 1 .. incrementsPerThread do
-                            updateRows store defaultDatabase "counters" (fun _ -> Ok true) (fun row -> Ok [| VInt(asInt row.[0] + 1L) |])
+                            updateRows store defaultDatabase "counters" None (fun _ -> Ok true) (fun row -> Ok [| VInt(asInt row.[0] + 1L) |])
                             |> ignore
 
                     [ 1 .. threadCount ]
@@ -1770,7 +1771,7 @@ let tests =
 
                     let sw = System.Diagnostics.Stopwatch.StartNew()
 
-                    let result = updateRows store defaultDatabase "users" (fun row -> Ok(row.[0] = VInt 25_000L)) (fun row -> Ok [| row.[0]; row.[1]; VInt 999L |])
+                    let result = updateRows store defaultDatabase "users" None (fun row -> Ok(row.[0] = VInt 25_000L)) (fun row -> Ok [| row.[0]; row.[1]; VInt 999L |])
 
                     sw.Stop()
 

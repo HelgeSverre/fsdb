@@ -2728,7 +2728,7 @@ let private recomputeGeneratedColumns
     if columns |> List.exists (fun c -> c.Generated.IsSome) |> not then
         Ok()
     else
-        updateRows store db table (fun _ -> Ok true) (computeGeneratedRow store registry dbName table columns)
+        updateRows store db table None (fun _ -> Ok true) (computeGeneratedRow store registry dbName table columns)
         |> Result.map ignore
 
 /// Threads `recomputeGeneratedColumns` onto the tail of an `INSERT`/`UPDATE`
@@ -3412,13 +3412,14 @@ let execute (store: Store) (registry: Registry) (dbName: string) (ids: int64 * i
         // match, so `selectMutationTargets` below still runs the complete,
         // unmodified WHERE over whatever this produces; a miss (no such
         // index, a non-literal operand, ...) falls back to the ordinary
-        // full scan, never a correctness risk. This only removes the
-        // O(table) cost of *evaluating* WHERE against every row —
-        // `Storage.updateRows` still walks every row of `table.Rows` once
-        // to rebuild the table's immutable row list (see its own doc for
-        // that remaining ceiling).
+        // full scan, never a correctness risk. `narrowed`'s positions are
+        // threaded into `Storage.updateRows` below too, so a narrowed
+        // `UPDATE` never walks the rest of `table.Rows` at all — not just
+        // the WHERE evaluation, but the rewrite fold itself.
+        let narrowed = tryPointLookup store dbName updateStmt.From updateStmt.Where
+
         let scanned =
-            tryPointLookup store dbName updateStmt.From updateStmt.Where
+            narrowed
             |> Option.map (fun (cols, rows) -> Ok(cols, rows |> List.map snd |> Seq.ofList))
             |> Option.defaultWith (fun () -> scan store db table)
 
@@ -3453,8 +3454,9 @@ let execute (store: Store) (registry: Registry) (dbName: string) (ids: int64 * i
                         let targetSet = referenceSet targetRows
                         let predicate row = Ok(targetSet.Contains row)
                         let updater row = applyAssignments store registry dbName columnIndex qualifiers indexedAssignments row
+                        let candidates = narrowed |> Option.map snd
 
-                        match updateRows store db table predicate updater |> withGeneratedRecomputed store registry dbName db table with
+                        match updateRows store db table candidates predicate updater |> withGeneratedRecomputed store registry dbName db table with
                         | Ok affected -> ids, Affected(uint64 affected)
                         | Error e -> ids, storageErr e
 
@@ -3634,7 +3636,7 @@ let execute (store: Store) (registry: Registry) (dbName: string) (ids: int64 * i
                                             Ok newRow
                                         | false, _ -> Ok row
 
-                                    updateRows snapshot tdb tname predicate updater |> withGeneratedRecomputed snapshot registry dbName tdb tname)
+                                    updateRows snapshot tdb tname None predicate updater |> withGeneratedRecomputed snapshot registry dbName tdb tname)
                             |> Array.toList
                             |> traverse id
 

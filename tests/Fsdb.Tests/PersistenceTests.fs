@@ -266,7 +266,7 @@ let tests =
               |> ignore
 
               insertRows store defaultDatabase "seq" None [ [ VInt 1L ]; [ VInt 2L ]; [ VInt 3L ] ] |> ignore
-              updateRows store defaultDatabase "seq" (fun _ -> Ok true) (fun row -> Ok [| VInt((row.[0] |> function VInt i -> i | _ -> 0L) + 1L) |])
+              updateRows store defaultDatabase "seq" None (fun _ -> Ok true) (fun row -> Ok [| VInt((row.[0] |> function VInt i -> i | _ -> 0L) + 1L) |])
               |> ignore
 
               let reloaded = load dir
@@ -286,7 +286,7 @@ let tests =
               insertRows store defaultDatabase "pk" (Some [ "id"; "name" ]) [ [ VInt 1L; VString "a" ]; [ VInt 2L; VString "b" ]; [ VInt 3L; VString "c" ] ]
               |> ignore
 
-              updateRows store defaultDatabase "pk" (fun row -> Ok(row.[0] = VInt 1L)) (fun row -> Ok [| VInt 10L; row.[1] |])
+              updateRows store defaultDatabase "pk" None (fun row -> Ok(row.[0] = VInt 1L)) (fun row -> Ok [| VInt 10L; row.[1] |])
               |> ignore
 
               let reloaded = load dir
@@ -454,7 +454,7 @@ let tests =
               |> ignore
 
               // One bulk UPDATE touching every row, as a single `RowsUpdated` event.
-              updateRows store defaultDatabase "bulk" (fun _ -> Ok true) (fun row ->
+              updateRows store defaultDatabase "bulk" None (fun _ -> Ok true) (fun row ->
                   Ok [| row.[0]; VInt((row.[1] |> function VInt i -> i | _ -> 0L) + 1L) |])
               |> ignore
 

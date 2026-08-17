@@ -2053,22 +2053,24 @@ let deleteRows
 /// element). As with `deleteRows`, `predicate` and `updater` both return
 /// `Result` rather than defaulting a failure away.
 ///
-/// ponytail: `predicate` still runs against every row of `table.Rows` —
-/// `Executor`'s point-lookup narrowing (`tryPointLookup`) only shrinks *which*
-/// rows the surrounding WHERE/ORDER BY/LIMIT logic considers before it ever
-/// gets here, not how many rows this fold itself visits. What changed with
-/// `Rows` becoming array-backed is what visiting a row now costs: no more
-/// per-row cons cell, and the rewrite lands in a `Builder` (`Rows.ToBuilder()`,
-/// one `Array.Copy`) touched only at the positions that actually change,
-/// instead of a full `list` rebuild threaded through the whole fold. Route
-/// `predicate` through real index narrowing (skip the other rows' `predicate`
-/// calls entirely) if UPDATE latency on a large table with a highly selective,
-/// non-point WHERE ever needs it — a single PK/UNIQUE equality already pays
-/// only the fixed cost of this fold, not `table.Rows.Length` times it.
+/// `candidates`, when given, is the exact `(position, row)` set to visit —
+/// `Executor`'s point-lookup narrowing (`tryPointLookup`) already resolved
+/// these via the PK/UNIQUE index, so this fold doesn't re-scan `table.Rows`
+/// at all to find them; `predicate` still re-checks each one for
+/// correctness (this is a pure narrowing to a superset of the real WHERE
+/// match, same discipline `tryPointLookup` documents), it just no longer
+/// pays for the rows that were never candidates in the first place. `None`
+/// (a WHERE that didn't narrow, or none at all) falls back to visiting every
+/// row of `table.Rows`, `predicate` deciding which ones qualify — same
+/// fixed-per-row cost as before, now over an array instead of a `list`: the
+/// rewrite lands in a `Builder` (`Rows.ToBuilder()`, one `Array.Copy`)
+/// touched only at the positions that actually change, instead of a full
+/// `list` rebuild threaded through the whole fold.
 let updateRows
     (store: Store)
     (dbName: string)
     (tableName: string)
+    (candidates: (int * Value[]) list option)
     (predicate: Value[] -> Result<bool, StorageError>)
     (updater: Value[] -> Result<Value[], StorageError>)
     : Result<int, StorageError> =
@@ -2134,9 +2136,8 @@ let updateRows
                                         builder.[rowPos] <- newRow
                                         (if newRow <> row then (row, newRow) :: changesRev else changesRev), index')))
 
-                    table.Rows
-                    |> Seq.indexed
-                    |> List.ofSeq
+                    candidates
+                    |> Option.defaultWith (fun () -> table.Rows |> Seq.indexed |> List.ofSeq)
                     |> List.fold step (Ok([], table.UniqueIndex))
                     |> Result.map (fun (changesRev, index) -> Map.add key { table with Rows = builder.MoveToImmutable(); UniqueIndex = index } db, List.rev changesRev)))
 
