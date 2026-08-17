@@ -50,6 +50,7 @@ two sentences of fluff.
 
 ## Markdown documents
 
-No emojis. Status markers are words ("Status: done", "Status: open") or
-task-list checkboxes (`[x]`/`[ ]`), never ✅/☐/🎉. The same DELETE rules
-apply to prose: no session narration, no milestone-name-as-explanation.
+No emojis, including check-mark and box symbols as status markers. Status
+markers are words ("Status: done", "Status: open") or task-list checkboxes
+(`[x]`/`[ ]`). The same DELETE rules apply to prose: no session narration,
+no milestone-name-as-explanation.
