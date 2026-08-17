@@ -47,3 +47,9 @@ behavior), which makes it an intent comment.
 Present tense, declarative, no "we"/"our". No apologies, no hedging, no
 "note that". A comment that needs three sentences is usually one fact plus
 two sentences of fluff.
+
+## Markdown documents
+
+No emojis. Status markers are words ("Status: done", "Status: open") or
+task-list checkboxes (`[x]`/`[ ]`), never ✅/☐/🎉. The same DELETE rules
+apply to prose: no session narration, no milestone-name-as-explanation.
