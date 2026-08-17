@@ -7,16 +7,16 @@ gate passes against a real external client.
 `mysql --protocol=tcp -h127.0.0.1 -P3307 -e 'SELECT 1'` returns a resultset.
 Handshake, mysql_native_password auth, packet framing, COM_QUERY, COM_PING,
 COM_QUIT, text resultset encoding.
-**Gate:** mysql CLI gets `1` back. Status: ✅
+**Gate:** mysql CLI gets `1` back. Status: done
 
 ## M2 — PDO connects
 Session variables (`SET NAMES`, `sql_mode`), `@@version`, `SELECT DATABASE()`.
-**Gate:** a 5-line PHP PDO script connects and queries. Status: ✅
+**Gate:** a 5-line PHP PDO script connects and queries. Status: done
 
 ## M3 — SQL engine core
 FParsec parser, in-memory storage, Value coercion rules.
 CREATE TABLE / INSERT / SELECT with WHERE, ORDER BY, LIMIT via mysql CLI.
-**Gate:** Expecto suite + mysql CLI session exercising CRUD. Status: ✅
+**Gate:** Expecto suite + mysql CLI session exercising CRUD. Status: done
 
 ## M4 — Laravel migrations
 ALTER TABLE, indexes, foreign keys, information_schema virtual tables,
@@ -24,7 +24,7 @@ prepared statements (COM_STMT_*), transactions.
 **Gate:** `php artisan migrate` on the reference application (a private
 Laravel 11 app, 94 migrations) succeeds, plus
 `migrate:status` (all Ran), `migrate:fresh` (DROP via SHOW/information_schema),
-and a second consecutive `migrate` (Nothing to migrate). Status: ✅
+and a second consecutive `migrate` (Nothing to migrate). Status: done
 
 ## M5 — Reference application test suite
 Joins, aggregates, subqueries, savepoints, JSON functions, expression breadth.
@@ -33,12 +33,12 @@ test` — that only resolves phpunit.xml's `Unit`/`Feature` testsuites, 269
 tests, and silently skips `tests/Arch`/`tests/Integration`, which the sqlite
 REFERENCE baseline's `vendor/bin/pest tests` does sweep in, 304 tests) run
 against fsdb on port 3307, same scope/command both sides, dot-pattern
-compared against the sqlite baseline. Status: ✅ (287 passed, 15 skipped, 2
+compared against the sqlite baseline. Status: done (287 passed, 15 skipped, 2
 todos, 787 assertions — parity with the sqlite baseline)
 
 ## M6 — Extensibility polish
 Public `registerScalar` / `registerAggregate` API, docs, examples.
-**Gate:** README example runs as written. Status: ✅ (`Fsdb.Db` embedding
+**Gate:** README example runs as written. Status: done (`Fsdb.Db` embedding
 facade — `Db.create`/`registerScalar`/`registerAggregate`/`listen`; the
 README's compilable example builds against `Fsdb.dll` as written, and
 `tests/Fsdb.Tests/IntegrationTests.fs`'s "Db.registerScalar/registerAggregate
@@ -50,7 +50,7 @@ Opt-in durability via `--data-dir`: WAL + snapshot, replay on startup.
 Default stays pure in-memory (tests unchanged).
 **Gate:** with --data-dir: `artisan migrate`, restart fsdb, `migrate` says
 "Nothing to migrate"; plus kill -9 mid-write leaves committed data intact
-and replayable. Status: ✅ (fresh `--data-dir` on 3424: create+insert incl.
+and replayable. Status: done (fresh `--data-dir` on 3424: create+insert incl.
 `NOW()`/`UUID()`, `kill -9`, restart — identical `SELECT`; graceful
 SIGTERM, restart — intact. Fresh `--data-dir` on 3307: the reference app's 94
 migrations via `artisan migrate --force`, graceful restart, `migrate`
@@ -68,7 +68,7 @@ index usage), multi-table UPDATE/DELETE with JOINs, UPDATE/DELETE ORDER
 BY+LIMIT (currently parsed but ignored), AFTER/FIRST column positioning.
 **Gate:** EXPLAIN on join/subquery queries via mysql CLI; UPDATE/DELETE JOIN
 semantics differential-verified against real MySQL 8 (Docker oracle);
-reference suite still at exact parity. Status: ✅ (EXPLAIN on a join+correlated-subquery
+reference suite still at exact parity. Status: done (EXPLAIN on a join+correlated-subquery
 query renders correctly via the mysql CLI and now validates the statement
 it describes — 1146/1054 for a missing table/column instead of a fake
 plan; UPDATE JOIN / DELETE JOIN / `UPDATE ... ORDER BY ... LIMIT` /
@@ -94,7 +94,7 @@ rows + PK/unique hash indexes, disconnect cancellation, trustworthy
 benchmark harness.
 **Gate:** UpdateSingleRow < 10ms, JoinUsersOrders completes,
 PointSelectByPk < 250µs, two consecutive bench runs agree within 20%,
-Expecto + one gauntlet suite regression green. Status: ✅ (measured at
+Expecto + one gauntlet suite regression green. Status: done (measured at
 a90dfae: point select 102µs, prepared 89µs, update 2.3ms, batch-100 8.6ms,
 GROUP BY at MySQL parity, join completes in 201ms — the join's < 25ms
 target moves to M10, whose streaming pipeline is what it actually needs)
@@ -106,7 +106,7 @@ where SQL requires them (GROUP BY, window functions, UNION DISTINCT).
 Wire boundary stays materialized.
 **Gate:** JoinUsersOrders < 25ms; no benchmark row regresses; differential
 tests prove streaming output equals materialized output wherever SQL
-defines order; Expecto + reference-app suite parity green. Status: ✅
+defines order; Expecto + reference-app suite parity green. Status: done
 (`JoinUsersOrders` 9,376/8,875 µs across two `just bench` runs — both under
 the 25ms gate with headroom to spare; no benchmark row regresses against
 a90dfae's fsdb numbers; 690 Expecto tests green. `InsertSingle`/

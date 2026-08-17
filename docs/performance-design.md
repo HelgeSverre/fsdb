@@ -318,12 +318,12 @@ proves "faster" but not "O(1)"):
 
 | Sub-gate | Target | Measured | Holds? |
 |---|---|---|---|
-| `PointSelectByPk` | < 250 µs | 102 µs | ✅ |
-| `PreparedPointSelect` | < 250 µs, within 30% of `PointSelectByPk` | 89 µs, -13% (faster, not slower) | ✅ |
-| `InsertSingle` | < 300 µs | 496 µs | ❌ 1.65x over |
-| `InsertBatch100` | < 20 ms | 8.6 ms | ✅ |
-| `UpdateSingleRow` | < 500 µs | 2,356 µs | ❌ 4.7x over (still clears the *coarser* top-level ROADMAP gate, < 10 ms) |
-| Point-lookup flat 10k→40k | ratio ≈ 1 | ratio 0.76 (10k: 0.028 ms median of 21, 40k: 0.021 ms) | ✅ — genuinely O(1)/O(log n), not just a faster scan |
+| `PointSelectByPk` | < 250 µs | 102 µs | pass |
+| `PreparedPointSelect` | < 250 µs, within 30% of `PointSelectByPk` | 89 µs, -13% (faster, not slower) | pass |
+| `InsertSingle` | < 300 µs | 496 µs | fail — 1.65x over |
+| `InsertBatch100` | < 20 ms | 8.6 ms | pass |
+| `UpdateSingleRow` | < 500 µs | 2,356 µs | fail — 4.7x over (still clears the *coarser* top-level ROADMAP gate, < 10 ms) |
+| Point-lookup flat 10k→40k | ratio ≈ 1 | ratio 0.76 (10k: 0.028 ms median of 21, 40k: 0.021 ms) | pass — genuinely O(1)/O(log n), not just a faster scan |
 
 `InsertSingle`/`UpdateSingleRow` missing their sub-gates is real, not a
 harness artifact (`InsertBatch100` clearing its own, looser, gate on the
