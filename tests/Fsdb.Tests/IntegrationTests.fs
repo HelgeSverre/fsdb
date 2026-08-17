@@ -555,4 +555,160 @@ let tests =
                   finally
                       listener.Stop()
               }
+              |> Async.RunSynchronously
+
+          // M9-4b: a client that vanishes mid-query must not leave the
+          // server computing into the void (design doc: 88MB -> 2.65GB RSS
+          // from one abandoned join). A registered scalar (`PROBE`) spliced
+          // into the ON clause of a non-equi cross join — `t1.n <> t2.n`
+          // has no equi key, so `applyJoin` takes the lazy nested-loop
+          // fallback (`traverseSeq`), not the hash-join path — gives an
+          // honest, non-flaky signal that server-side row evaluation
+          // actually stopped: not "the socket closed" and not "a
+          // *different* connection still feels responsive" (which a
+          // multi-core box would show even if cancellation were a no-op),
+          // but the real call count the row loop drives, watched until it
+          // stops moving.
+          testCase "a client disconnect mid-query stops server-side row evaluation"
+          <| fun _ ->
+              async {
+                  let mutable probeCount = 0L
+
+                  let probe =
+                      function
+                      | [ _ ] ->
+                          System.Threading.Interlocked.Increment(&probeCount) |> ignore
+                          VInt 1L
+                      | _ -> VInt 1L
+
+                  let registry = Fsdb.Functions.empty |> Fsdb.Functions.registerScalar "PROBE" probe
+
+                  let listener = Fsdb.Server.startListening System.Net.IPAddress.Loopback 0
+                  let port = Fsdb.Server.port listener
+                  Fsdb.Server.serve listener (Fsdb.Storage.create ()) registry |> Async.StartAsTask |> ignore
+
+                  try
+                      // `Pooling=false`: this test opens two separate
+                      // connections against the same connection string
+                      // (setup, then a follow-up health check), and a
+                      // pooled `Open()` sends `COM_RESET_CONNECTION` —
+                      // unimplemented (design doc section 1.7), unrelated
+                      // to what this test is actually checking.
+                      let connStr =
+                          sprintf
+                              "Server=127.0.0.1;Port=%d;User ID=root;Password=;AllowPublicKeyRetrieval=True;SslMode=None;Pooling=false"
+                              port
+
+                      // Seed two plain tables big enough that their non-equi
+                      // cross join (2,250,000 pairs) runs for several
+                      // seconds — long enough to kill the client mid-flight
+                      // and still have room to observe the row loop unwind.
+                      use setupConn = new MySqlConnector.MySqlConnection(connStr)
+                      do! setupConn.OpenAsync() |> Async.AwaitTask
+
+                      let exec (sql: string) =
+                          async {
+                              use cmd = setupConn.CreateCommand()
+                              cmd.CommandText <- sql
+                              return! cmd.ExecuteNonQueryAsync() |> Async.AwaitTask
+                          }
+
+                      // Sized so the full cross product (16,000,000 pairs)
+                      // couldn't finish inside this test's own polling
+                      // window even on a fast machine — cancellation kicks
+                      // in on wall-clock time regardless of table size, so
+                      // this costs nothing on the passing path, but it's
+                      // what keeps a *broken* cancellation path from
+                      // accidentally passing this test just by finishing
+                      // the join naturally before the poll deadline.
+                      let rowsPerTable = 4000
+                      let totalPairs = int64 rowsPerTable * int64 rowsPerTable
+                      do! exec "CREATE TABLE t1 (n INT)" |> Async.Ignore
+                      do! exec "CREATE TABLE t2 (n INT)" |> Async.Ignore
+                      let values n = String.Join(",", [ for i in 1 .. n -> sprintf "(%d)" i ])
+                      do! exec (sprintf "INSERT INTO t1 (n) VALUES %s" (values rowsPerTable)) |> Async.Ignore
+                      do! exec (sprintf "INSERT INTO t2 (n) VALUES %s" (values rowsPerTable)) |> Async.Ignore
+                      do! setupConn.CloseAsync() |> Async.AwaitTask
+
+                      // Fire the doomed query over its own raw socket —
+                      // handshake by hand so the test can kill the
+                      // connection out from under the query without any
+                      // higher-level client machinery muddying what "the
+                      // client vanished" means.
+                      use doomed = new Net.Sockets.TcpClient()
+                      do! doomed.ConnectAsync(Net.IPAddress.Loopback, port) |> Async.AwaitTask
+                      let stream = doomed.GetStream()
+                      let! handshake = readPacketAsync stream
+                      let handshakeSeq = handshake.Value.SeqId
+
+                      let helloResponse =
+                          let w = Writer()
+                          w.WriteInt32LE(int ClientProtocol41)
+                          w.WriteInt32LE 16777216
+                          w.WriteByte 45uy
+                          w.WriteBytes(Array.zeroCreate<byte> 23)
+                          w.WriteNullTerminatedString "root"
+                          w.WriteByte 0uy
+                          w.ToArray()
+
+                      let! _ = writePacketAsync stream { SeqId = handshakeSeq + 1uy; Payload = helloResponse }
+                      let! _ = readPacketAsync stream // connection OK
+
+                      let joinSql = "SELECT COUNT(*) FROM t1 JOIN t2 ON t1.n <> t2.n AND PROBE(t1.n) = 1"
+                      let queryPayload = Array.append [| 0x03uy |] (Text.Encoding.UTF8.GetBytes joinSql)
+                      let! _ = writePacketAsync stream { SeqId = 0uy; Payload = queryPayload }
+
+                      // Let the join get properly underway, then kill the
+                      // client without ever reading a reply — exactly what
+                      // a killed CLI client or a closed browser tab looks
+                      // like from the server's side.
+                      do! Async.Sleep 1000
+                      let countAfterKick = System.Threading.Interlocked.Read(&probeCount)
+                      Expect.isTrue (countAfterKick > 0L) "the join was actually underway before the kill"
+                      doomed.Close()
+
+                      // Poll PROBE's call count until two checks in a row
+                      // agree — the honest "stopped" signal. A genuinely
+                      // cancelled query settles within a couple of poll
+                      // ticks (the watcher polls the socket every 50ms,
+                      // `traverse`/`traverseSeq` check cancellation every
+                      // 256 rows); a query that ignores cancellation keeps
+                      // incrementing right through this whole window.
+                      let mutable lastCount = System.Threading.Interlocked.Read(&probeCount)
+                      let mutable stable = false
+                      let deadline = DateTime.UtcNow.AddSeconds 5.0
+
+                      while not stable && DateTime.UtcNow < deadline do
+                          do! Async.Sleep 300
+                          let current = System.Threading.Interlocked.Read(&probeCount)
+                          stable <- current = lastCount
+                          lastCount <- current
+
+                      Expect.isTrue
+                          stable
+                          "PROBE's call count stopped growing after the client disconnected — the row fold actually unwound"
+
+                      // Rules out the one way the above could pass without
+                      // cancellation actually doing anything: the join
+                      // finishing the full cross product on its own before
+                      // the polling loop ever caught it stopping.
+                      Expect.isTrue
+                          (lastCount < totalPairs / 2L)
+                          (sprintf
+                              "only a fraction of the %d-pair cross product should have been evaluated (got %d) — it was interrupted, not finished"
+                              totalPairs
+                              lastCount)
+
+                      // The server itself is unharmed — a fresh connection
+                      // still gets served.
+                      use followUp = new MySqlConnector.MySqlConnection(connStr)
+                      do! followUp.OpenAsync() |> Async.AwaitTask
+                      use pingCmd = followUp.CreateCommand()
+                      pingCmd.CommandText <- "SELECT 1"
+                      let! pingResult = pingCmd.ExecuteScalarAsync() |> Async.AwaitTask
+                      Expect.equal (string pingResult) "1" "a follow-up connection is still served"
+                      do! followUp.CloseAsync() |> Async.AwaitTask
+                  finally
+                      listener.Stop()
+              }
               |> Async.RunSynchronously ]
