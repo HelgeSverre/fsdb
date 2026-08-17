@@ -2200,15 +2200,31 @@ let private rowsList (table: Table) : Value[] list =
 /// the whole-catalog `Store.Catalog` view, which would pay an O(number of
 /// databases) rebuild on every single SELECT), and later writes swap in a
 /// new `Database` for that slot without mutating this snapshot's row list.
-/// The returned seq is a `Value[] list` under the hood (see `rowsList`), so
-/// a caller's `List.ofSeq` re-materialization stays O(1).
+/// The rows come back as the raw array-backed seq, never materialized —
+/// several callers (`Executor.withGeneratedRecomputed`, upsert's
+/// column-resolution probe) run this once per *write* purely for the
+/// columns, so any eager per-call row copy here becomes an O(table) tax on
+/// every INSERT/UPDATE. A caller that really consumes the rows as a list
+/// uses `scanList` instead.
 let scan (store: Store) (dbName: string) (tableName: string) : Result<ColumnDef list * Value[] seq, StorageError> =
     match store.Databases.TryGetValue dbName with
     | false, _ -> Error(NoSuchDatabase dbName)
     | true, slot ->
         match tryGetTable slot.Value tableName with
         | Error e -> Error e
-        | Ok table -> Ok(table.Columns, rowsList table :> Value[] seq)
+        | Ok table -> Ok(table.Columns, table.RowsArray :> Value[] seq)
+
+/// As `scan`, with the rows as the memoized per-snapshot list (see
+/// `rowsList`) — repeated scans of an unchanged table share one list
+/// instead of re-copying the array per query. The SELECT pipeline's
+/// row-materialization point (`Executor.resolveTableRef`) is the caller.
+let scanList (store: Store) (dbName: string) (tableName: string) : Result<ColumnDef list * Value[] list, StorageError> =
+    match store.Databases.TryGetValue dbName with
+    | false, _ -> Error(NoSuchDatabase dbName)
+    | true, slot ->
+        match tryGetTable slot.Value tableName with
+        | Error e -> Error e
+        | Ok table -> Ok(table.Columns, rowsList table)
 
 /// Generated/virtual columns (`CREATE TABLE ... col AS (expr) [STORED |
 /// VIRTUAL]`) — `Ast.ColumnDef.Generated` carries the parsed `Expr`, but

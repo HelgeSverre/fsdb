@@ -1120,9 +1120,9 @@ and private resolveTableRef (store: Store) (dbName: string) (tableRef: TableRef)
         | Some(columns, rows) -> Ok(columns, rows)
         | None -> Error(storageErr (NoSuchTable tableRef.Table))
     else
-        match scan store tableDb tableRef.Table with
+        match scanList store tableDb tableRef.Table with
         | Error e -> Error(storageErr e)
-        | Ok(columns, rows) -> Ok(columns, List.ofSeq rows)
+        | Ok(columns, rows) -> Ok(columns, rows)
 
 /// Synthetic, all-nullable-text `ColumnDef`s for a derived table's columns —
 /// `runSelectStmt`'s own resultset has no real per-column `ColumnType` to
