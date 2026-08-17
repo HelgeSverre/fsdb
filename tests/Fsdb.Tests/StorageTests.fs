@@ -1555,4 +1555,85 @@ let tests =
                 <| fun _ ->
                     let store = withUsersTable ()
                     let snapshot = beginTransactionSnapshot store
-                    Expect.isNone snapshot.PendingEvents "no subscriber on the real store means nothing to buffer" ] ]
+                    Expect.isNone snapshot.PendingEvents "no subscriber on the real store means nothing to buffer" ]
+
+          testList
+              "concurrent writers"
+              [ testCase "N threads writing to N different databases finish in roughly one thread's time, not N times"
+                <| fun _ ->
+                    let threadCount = 4
+                    let opsPerThread = 4000
+
+                    // One counter row per database — cheap enough per-op
+                    // that any accidental store-wide serialization (the
+                    // blocker this guards against) shows up as a multiple
+                    // of wall time, not just noise.
+                    let asInt =
+                        function
+                        | VInt i -> i
+                        | v -> failwithf "expected VInt, got %A" v
+
+                    let workload (store: Store) (dbName: string) =
+                        createDatabase store dbName |> ignore
+                        createTable store dbName "counters" [ col "n" (TInt false) false ] [] [] |> ignore
+                        insertRows store dbName "counters" None [ [ VInt 0L ] ] |> ignore
+
+                        for _ in 1 .. opsPerThread do
+                            updateRows store dbName "counters" (fun _ -> Ok true) (fun row -> Ok [| VInt(asInt row.[0] + 1L) |])
+                            |> ignore
+
+                    let time f =
+                        let sw = System.Diagnostics.Stopwatch.StartNew()
+                        f ()
+                        sw.Elapsed
+
+                    let baselineStore = create ()
+                    let baseline = time (fun () -> workload baselineStore "solo")
+
+                    let store = create ()
+
+                    let parallelElapsed =
+                        time (fun () ->
+                            [ 0 .. threadCount - 1 ]
+                            |> List.map (fun i -> System.Threading.Tasks.Task.Run(fun () -> workload store (sprintf "db%d" i)))
+                            |> System.Threading.Tasks.Task.WaitAll)
+
+                    // A generous bound — this only needs to catch the
+                    // pathological case (global serialization, where
+                    // `threadCount` databases' worth of writes takes
+                    // roughly `threadCount` times as long as one), not hold
+                    // parallel writers to near-perfect scaling.
+                    Expect.isLessThan
+                        parallelElapsed.TotalMilliseconds
+                        (baseline.TotalMilliseconds * 2.0 + 200.0)
+                        (sprintf "4 databases in parallel (%A) vs 1 database serially (%A) — writers to different databases shouldn't serialize" parallelElapsed baseline)
+
+                testCase "two threads incrementing the same row in the same database serialize correctly (no lost updates)"
+                <| fun _ ->
+                    let store = create ()
+                    createTable store defaultDatabase "counters" [ col "n" (TInt false) false ] [] [] |> ignore
+                    insertRows store defaultDatabase "counters" None [ [ VInt 0L ] ] |> ignore
+
+                    let threadCount = 8
+                    let incrementsPerThread = 500
+
+                    let asInt =
+                        function
+                        | VInt i -> i
+                        | v -> failwithf "expected VInt, got %A" v
+
+                    let increment () =
+                        for _ in 1 .. incrementsPerThread do
+                            updateRows store defaultDatabase "counters" (fun _ -> Ok true) (fun row -> Ok [| VInt(asInt row.[0] + 1L) |])
+                            |> ignore
+
+                    [ 1 .. threadCount ]
+                    |> List.map (fun _ -> System.Threading.Tasks.Task.Run increment)
+                    |> System.Threading.Tasks.Task.WaitAll
+
+                    match scan store defaultDatabase "counters" with
+                    | Ok(_, rows) ->
+                        match List.ofSeq rows with
+                        | [ row ] -> Expect.equal (asInt row.[0]) (int64 (threadCount * incrementsPerThread)) "every increment landed, none lost to a race"
+                        | other -> failtestf "expected exactly one row, got %A" other
+                    | Error e -> failtestf "expected Ok, got %A" e ] ]
