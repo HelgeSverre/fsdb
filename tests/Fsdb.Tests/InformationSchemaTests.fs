@@ -13,7 +13,7 @@ open Fsdb.Executor
 let private run (store: Store) (sql: string) : QueryResult =
     match Fsdb.Parser.parse sql with
     | Error msg -> failtestf "expected %s to parse, got error: %s" sql msg
-    | Ok stmt -> execute store builtins defaultDatabase 0L stmt |> snd
+    | Ok stmt -> execute store builtins defaultDatabase (0L, 0L) stmt |> snd
 
 let private setup () : Store =
     let store = create ()
@@ -205,6 +205,6 @@ let tests =
               match Fsdb.Parser.parse "SELECT table_name FROM tables WHERE table_schema = 'fsdb' AND table_name = 'users'" with
               | Error msg -> failtestf "expected the query to parse, got error: %s" msg
               | Ok stmt ->
-                  match execute store builtins "information_schema" 0L stmt |> snd with
+                  match execute store builtins "information_schema" (0L, 0L) stmt |> snd with
                   | ResultSet(_, [ [ Some "users" ] ]) -> ()
                   | other -> failtestf "expected the unqualified lookup to still resolve, got %A" other ]

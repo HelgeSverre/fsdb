@@ -523,4 +523,36 @@ let tests =
 
               match handle session "INSERT INTO overflow_t VALUES (1e300)" |> snd with
               | Err(1105, _) -> ()
-              | other -> failtestf "expected a 1105 internal-error Err, got %A" other ]
+              | other -> failtestf "expected a 1105 internal-error Err, got %A" other
+
+          testCase "LAST_INSERT_ID() stays 0 for an explicit AUTO_INCREMENT id, unlike the OK packet's last_insert_id"
+          <| fun _ ->
+              // Real MySQL 8.4: PDO::lastInsertId()/the OK packet reports an
+              // explicitly-supplied AUTO_INCREMENT id back to the caller, but
+              // the separate LAST_INSERT_ID() SQL function only ever reflects
+              // a *generated* id and stays 0 until one actually is.
+              let session = create 1 (Fsdb.Storage.create ())
+              let session, _ = handle session "CREATE TABLE t (id INT AUTO_INCREMENT PRIMARY KEY, n INT)"
+              let session, _ = handle session "INSERT INTO t (id, n) VALUES (5, 1)"
+              Expect.equal session.LastInsertId 5L "OK packet reports the explicit id"
+
+              match handle session "SELECT LAST_INSERT_ID()" |> snd with
+              | ResultSet(_, [ [ Some "0" ] ]) -> ()
+              | other -> failtestf "expected LAST_INSERT_ID() to stay 0, got %A" other
+
+              // A later statement that *does* generate an id moves
+              // LAST_INSERT_ID() to it, and a further all-explicit multi-row
+              // insert after that leaves LAST_INSERT_ID() unchanged (matching
+              // MySQL) while still reporting its own id on the OK packet.
+              let session, _ = handle session "INSERT INTO t (n) VALUES (2)"
+
+              match handle session "SELECT LAST_INSERT_ID()" |> snd with
+              | ResultSet(_, [ [ Some "6" ] ]) -> ()
+              | other -> failtestf "expected LAST_INSERT_ID() to report the generated id 6, got %A" other
+
+              let session, _ = handle session "INSERT INTO t (id, n) VALUES (20, 1), (21, 2)"
+              Expect.equal session.LastInsertId 21L "OK packet reports the last row's explicit id"
+
+              match handle session "SELECT LAST_INSERT_ID()" |> snd with
+              | ResultSet(_, [ [ Some "6" ] ]) -> ()
+              | other -> failtestf "expected LAST_INSERT_ID() to still be 6, unchanged by the all-explicit insert, got %A" other ]

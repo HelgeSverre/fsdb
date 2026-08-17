@@ -900,6 +900,13 @@ let private resolveInsertColumns (table: Table) (columns: string list option) : 
 /// value" tracked (as fsdb used to), that row's `last_insert_id` came back
 /// 0 instead of the id it was actually given, and every caller reading it
 /// back (`Eloquent`'s own model, here) silently got a wrong id instead.
+///
+/// That OK-packet value is also returned separately as `generatedId` — the
+/// first *actually generated* id, or `None` if every row supplied its own —
+/// because the SQL function `LAST_INSERT_ID()` has a narrower rule than the
+/// OK packet: it only ever reflects a generated id, never an explicitly
+/// supplied one, and holds its previous value across a statement that
+/// generated none at all (see `QueryHandler`'s `LAST_INSERT_ID` doc).
 let private insertCore
     (checkFks: bool)
     (strict: bool)
@@ -908,7 +915,7 @@ let private insertCore
     (tableKey: string)
     (rowsIn: Value list list)
     (idxs: int list)
-    : Result<Database * (int64 * int * Value[] list), StorageError> =
+    : Result<Database * (int64 * int64 option * int * Value[] list), StorageError> =
     let table = Map.find tableKey db
     let uniqueGroups = uniqueKeyGroups table
     let uniqueLookups =
@@ -1042,15 +1049,16 @@ let private insertCore
         let accepted = List.rev acceptedRev
         let firstAssigned = Option.orElse lastExplicit firstAuto
         let table' = { table with Rows = table.Rows @ accepted; NextAutoId = nextAutoId' }
-        Map.add tableKey table' db, (Option.defaultValue 0L firstAssigned, List.length accepted, accepted))
+        Map.add tableKey table' db, (Option.defaultValue 0L firstAssigned, firstAuto, List.length accepted, accepted))
 
 /// Inserts rows built from `columns` and matching value lists, applying
 /// defaults, AUTO_INCREMENT assignment, NOT NULL/type-coercion checks, and
 /// — new here — unique-key (error 1062) and, when `store.ForeignKeyChecks`
 /// is set, foreign-key parent-existence (error 1452) checks. Returns
-/// `(lastInsertId, affected row count)`; `lastInsertId` is the first
-/// AUTO_INCREMENT id assigned by this statement, or 0 if none was. Fails the
-/// whole statement on the first bad row — see `insertRowsIgnore` for `INSERT
+/// `(lastInsertId, generatedId, affected row count)`; `lastInsertId` is the
+/// OK-packet value (see `insertCore`'s doc), `generatedId` is `None` unless
+/// this statement actually generated an AUTO_INCREMENT id. Fails the whole
+/// statement on the first bad row — see `insertRowsIgnore` for `INSERT
 /// IGNORE`'s per-row skip semantics.
 let insertRows
     (store: Store)
@@ -1058,7 +1066,7 @@ let insertRows
     (tableName: string)
     (columns: string list option)
     (rowsIn: Value list list)
-    : Result<int64 * int, StorageError> =
+    : Result<int64 * int64 option * int, StorageError> =
     lock store.Lock (fun () ->
         let key = normalizeTableName tableName
 
@@ -1070,26 +1078,26 @@ let insertRows
                     |> Result.bind (insertCore store.ForeignKeyChecks store.StrictMode false db key rowsIn)))
 
         match result with
-        | Ok(lastId, affected, rows) ->
+        | Ok(lastId, generatedId, affected, rows) ->
             if not rows.IsEmpty then
                 emit store (Some(RowsInserted(dbName, tableName, rows)))
 
-            Ok(lastId, affected)
+            Ok(lastId, generatedId, affected)
         | Error e -> Error e)
 
 /// `INSERT IGNORE`: as `insertRows`, but a row that would violate NOT
 /// NULL/unique/foreign-key constraints is skipped instead of failing the
 /// statement — MySQL downgrades the error to a warning per row. The
 /// returned affected count is only the rows actually inserted;
-/// `lastInsertId` is the first one assigned, same as `insertRows` (0 if
-/// every row was skipped).
+/// `lastInsertId`/`generatedId` follow the same rule as `insertRows` (`None`
+/// if every row was skipped or none generated an id).
 let insertRowsIgnore
     (store: Store)
     (dbName: string)
     (tableName: string)
     (columns: string list option)
     (rowsIn: Value list list)
-    : Result<int64 * int, StorageError> =
+    : Result<int64 * int64 option * int, StorageError> =
     lock store.Lock (fun () ->
         let key = normalizeTableName tableName
 
@@ -1101,11 +1109,11 @@ let insertRowsIgnore
                     |> Result.bind (insertCore store.ForeignKeyChecks store.StrictMode true db key rowsIn)))
 
         match result with
-        | Ok(lastId, affected, rows) ->
+        | Ok(lastId, generatedId, affected, rows) ->
             if not rows.IsEmpty then
                 emit store (Some(RowsInserted(dbName, tableName, rows)))
 
-            Ok(lastId, affected)
+            Ok(lastId, generatedId, affected)
         | Error e -> Error e)
 
 /// `INSERT ... ON DUPLICATE KEY UPDATE`: like `insertRows`, but a candidate
@@ -1121,7 +1129,7 @@ let upsertRows
     (rowsIn: Value list list)
     (computeGenerated: Value[] -> Result<Value[], StorageError>)
     (applyUpdate: Value[] -> Value[] -> Result<Value[], StorageError>)
-    : Result<int64 * int, StorageError> =
+    : Result<int64 * int64 option * int, StorageError> =
     lock store.Lock (fun () ->
         let result =
             withTable store dbName tableName (fun table ->
@@ -1197,17 +1205,17 @@ let upsertRows
                     |> List.fold step (Ok(table.Rows, table.NextAutoId, None, None, 0, [], []))
                     |> Result.map (fun (rows', nextAutoId', firstAuto, lastExplicit, affected, inserted, updated) ->
                         { table with Rows = rows'; NextAutoId = nextAutoId' },
-                        (Option.defaultValue 0L (Option.orElse lastExplicit firstAuto), affected, List.rev inserted, List.rev updated))))
+                        (Option.defaultValue 0L (Option.orElse lastExplicit firstAuto), firstAuto, affected, List.rev inserted, List.rev updated))))
 
         match result with
-        | Ok(lastId, affected, inserted, updated) ->
+        | Ok(lastId, generatedId, affected, inserted, updated) ->
             if not inserted.IsEmpty then
                 emit store (Some(RowsInserted(dbName, tableName, inserted)))
 
             if not updated.IsEmpty then
                 emit store (Some(RowsUpdated(dbName, tableName, updated)))
 
-            Ok(lastId, affected)
+            Ok(lastId, generatedId, affected)
         | Error e -> Error e)
 
 let private coerceRow (strict: bool) (columns: ColumnDef list) (row: Value[]) : Result<Value[], StorageError> =

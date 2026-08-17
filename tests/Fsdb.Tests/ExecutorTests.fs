@@ -13,7 +13,7 @@ open Fsdb.Executor
 let private run (store: Store) (registry: Registry) (sql: string) : QueryResult =
     match Fsdb.Parser.parse sql with
     | Error msg -> failtestf "expected %s to parse, got error: %s" sql msg
-    | Ok stmt -> execute store registry defaultDatabase 0L stmt |> snd
+    | Ok stmt -> execute store registry defaultDatabase (0L, 0L) stmt |> snd
 
 let private runDefault (store: Store) (sql: string) : QueryResult = run store builtins sql
 

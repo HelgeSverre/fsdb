@@ -2652,32 +2652,49 @@ let runTopLevelSelect (store: Store) (registry: Registry) (dbName: string) (sele
     let result, types, _ = runSelectStmt store registry dbName select None
     result, types
 
+/// Folds one `insertRows`/`insertRowsIgnore`/`upsertRows` result's
+/// `(okPacketId, generatedId)` pair into `execute`'s own `ids` accumulator —
+/// see `execute`'s doc for what each half means. `0L` from storage means
+/// "this statement assigned no id at all", so the OK-packet half falls back
+/// to its previous value the same way it always has; the `LAST_INSERT_ID()`
+/// half only ever moves forward on an actual generated id.
+let private nextIds ((okId, generatedId): int64 * int64) ((newOkId: int64), (newGenerated: int64 option)) : int64 * int64 =
+    (if newOkId <> 0L then newOkId else okId), (newGenerated |> Option.defaultValue generatedId)
+
 /// Executes one parsed statement against `store`, threading the session's
 /// AUTO_INCREMENT bookkeeping through as a plain value rather than a
 /// `Session` (this module knows nothing about sessions or connections —
 /// `QueryHandler` is the layer that owns that). Returns the (possibly
-/// updated) `lastInsertId` alongside the result.
-let execute (store: Store) (registry: Registry) (dbName: string) (lastInsertId: int64) (stmt: Statement) : int64 * QueryResult =
+/// updated) `ids` alongside the result.
+///
+/// `ids` is `(okPacketId, generatedId)`: `okPacketId` is what the OK
+/// packet's `last_insert_id` reports (first generated id this statement, or
+/// else the last explicitly-supplied one — see `Storage.insertCore`'s doc),
+/// `generatedId` is the narrower value the SQL function `LAST_INSERT_ID()`
+/// reads, which only ever reflects a *generated* id and holds its previous
+/// value across a statement that generated none at all. Every non-insert
+/// statement passes both straight through unchanged.
+let execute (store: Store) (registry: Registry) (dbName: string) (ids: int64 * int64) (stmt: Statement) : (int64 * int64) * QueryResult =
     match stmt with
     | CreateDatabase(name, ifNotExists) ->
         match Storage.createDatabase store name with
-        | Ok() -> lastInsertId, Affected 0UL
-        | Error(DatabaseExists _) when ifNotExists -> lastInsertId, Affected 0UL
-        | Error e -> lastInsertId, storageErr e
+        | Ok() -> ids, Affected 0UL
+        | Error(DatabaseExists _) when ifNotExists -> ids, Affected 0UL
+        | Error e -> ids, storageErr e
 
     | DropDatabase(name, ifExists) ->
         match Storage.dropDatabase store name with
-        | Ok() -> lastInsertId, Affected 0UL
-        | Error(NoSuchDatabase _) when ifExists -> lastInsertId, Affected 0UL
-        | Error e -> lastInsertId, storageErr e
+        | Ok() -> ids, Affected 0UL
+        | Error(NoSuchDatabase _) when ifExists -> ids, Affected 0UL
+        | Error e -> ids, storageErr e
 
     | CreateTable(name, columns, indexes, foreignKeys, ifNotExists) ->
         let db, name = splitQualified dbName name
 
         match createTable store db name columns indexes foreignKeys with
-        | Ok() -> lastInsertId, Affected 0UL
-        | Error(TableExists _) when ifNotExists -> lastInsertId, Affected 0UL
-        | Error e -> lastInsertId, storageErr e
+        | Ok() -> ids, Affected 0UL
+        | Error(TableExists _) when ifNotExists -> ids, Affected 0UL
+        | Error e -> ids, storageErr e
 
     | DropTable(names, ifExists) ->
         let dropOne name =
@@ -2689,15 +2706,15 @@ let execute (store: Store) (registry: Registry) (dbName: string) (lastInsertId: 
             | Error e -> Error e
 
         match names |> traverse dropOne with
-        | Ok _ -> lastInsertId, Affected 0UL
-        | Error e -> lastInsertId, storageErr e
+        | Ok _ -> ids, Affected 0UL
+        | Error e -> ids, storageErr e
 
     | AlterTable(table, actions) ->
         let db, table = splitQualified dbName table
 
         match alterTable store db table actions with
-        | Ok() -> lastInsertId, Affected 0UL
-        | Error e -> lastInsertId, storageErr e
+        | Ok() -> ids, Affected 0UL
+        | Error e -> ids, storageErr e
 
     | RenameTable pairs ->
         // A cross-database `RENAME TABLE a.t TO b.t` only takes the target
@@ -2710,29 +2727,29 @@ let execute (store: Store) (registry: Registry) (dbName: string) (lastInsertId: 
             renameTable store db oldTable newTable
 
         match pairs |> traverse renameOne with
-        | Ok _ -> lastInsertId, Affected 0UL
-        | Error e -> lastInsertId, storageErr e
+        | Ok _ -> ids, Affected 0UL
+        | Error e -> ids, storageErr e
 
     | CreateIndex(name, table, columns, unique) ->
         let db, table = splitQualified dbName table
 
         match alterTable store db table [ AddIndex { Name = name; Columns = columns; Unique = unique } ] with
-        | Ok() -> lastInsertId, Affected 0UL
-        | Error e -> lastInsertId, storageErr e
+        | Ok() -> ids, Affected 0UL
+        | Error e -> ids, storageErr e
 
     | DropIndexStmt(name, table) ->
         let db, table = splitQualified dbName table
 
         match alterTable store db table [ DropIndexAction name ] with
-        | Ok() -> lastInsertId, Affected 0UL
-        | Error e -> lastInsertId, storageErr e
+        | Ok() -> ids, Affected 0UL
+        | Error e -> ids, storageErr e
 
     | Truncate table ->
         let db, table = splitQualified dbName table
 
         match truncate store db table with
-        | Ok() -> lastInsertId, Affected 0UL
-        | Error e -> lastInsertId, storageErr e
+        | Ok() -> ids, Affected 0UL
+        | Error e -> ids, storageErr e
 
     | Insert(table, columns, rowsExprs, onDuplicateUpdate, ignoreDuplicates) ->
         // INSERT ... VALUES expressions aren't evaluated against any row
@@ -2744,7 +2761,7 @@ let execute (store: Store) (registry: Registry) (dbName: string) (lastInsertId: 
         let literalCtx = contextFactory store registry dbName Map.empty Map.empty None [||]
 
         match rowsExprs |> traverse (traverse (evalExpr literalCtx)) with
-        | Error(code, message) -> lastInsertId, Err(code, message)
+        | Error(code, message) -> ids, Err(code, message)
         | Ok rowsValues ->
             let cols = if columns.IsEmpty then None else Some columns
 
@@ -2752,12 +2769,11 @@ let execute (store: Store) (registry: Registry) (dbName: string) (lastInsertId: 
                 let insert = if ignoreDuplicates then insertRowsIgnore else insertRows
 
                 match insert store db table cols rowsValues |> withGeneratedRecomputed store registry dbName db table with
-                | Ok(newLastId, affected) ->
-                    (if newLastId <> 0L then newLastId else lastInsertId), Affected(uint64 affected)
-                | Error e -> lastInsertId, storageErr e
+                | Ok(newLastId, newGenerated, affected) -> nextIds ids (newLastId, newGenerated), Affected(uint64 affected)
+                | Error e -> ids, storageErr e
             else
                 match scan store db table with
-                | Error e -> lastInsertId, storageErr e
+                | Error e -> ids, storageErr e
                 | Ok(tableColumns, _) ->
                     let columnIndex = columnIndexOf tableColumns
 
@@ -2781,9 +2797,8 @@ let execute (store: Store) (registry: Registry) (dbName: string) (lastInsertId: 
                     let computeGenerated = computeGeneratedRow store registry dbName table tableColumns
 
                     match upsertRows store db table cols rowsValues computeGenerated applyUpdate |> withGeneratedRecomputed store registry dbName db table with
-                    | Ok(newLastId, affected) ->
-                        (if newLastId <> 0L then newLastId else lastInsertId), Affected(uint64 affected)
-                    | Error e -> lastInsertId, storageErr e
+                    | Ok(newLastId, newGenerated, affected) -> nextIds ids (newLastId, newGenerated), Affected(uint64 affected)
+                    | Error e -> ids, storageErr e
 
     | InsertSelect(table, columns, select, ignoreDuplicates) ->
         let db, table = splitQualified dbName table
@@ -2791,8 +2806,8 @@ let execute (store: Store) (registry: Registry) (dbName: string) (lastInsertId: 
         let selectResult, _, _ = runSelectStmt store registry dbName select None
 
         match selectResult with
-        | Err(code, message) -> lastInsertId, Err(code, message)
-        | Affected _ -> lastInsertId, Err(1064, "INSERT ... SELECT source did not return a resultset")
+        | Err(code, message) -> ids, Err(code, message)
+        | Affected _ -> ids, Err(1064, "INSERT ... SELECT source did not return a resultset")
         | ResultSet(_, rows) ->
             // The source rows are already the wire's flat `string option`
             // text (see `Value.mysqlTypeOf`'s callers) rather than the
@@ -2805,28 +2820,28 @@ let execute (store: Store) (registry: Registry) (dbName: string) (lastInsertId: 
             let insert = if ignoreDuplicates then insertRowsIgnore else insertRows
 
             match insert store db table cols rowsValues |> withGeneratedRecomputed store registry dbName db table with
-            | Ok(newLastId, affected) -> (if newLastId <> 0L then newLastId else lastInsertId), Affected(uint64 affected)
-            | Error e -> lastInsertId, storageErr e
+            | Ok(newLastId, newGenerated, affected) -> nextIds ids (newLastId, newGenerated), Affected(uint64 affected)
+            | Error e -> ids, storageErr e
 
     | Select select ->
         let result, _, _ = runSelectStmt store registry dbName select None
-        lastInsertId, result
+        ids, result
 
     | Union(first, rest, orderBy, limit, offset) ->
         let result, _, _ = runUnionStmt store registry dbName first rest orderBy limit offset
-        lastInsertId, result
+        ids, result
 
     | Update updateStmt when updateStmt.Joins.IsEmpty ->
         let db, table = (updateStmt.From.Database |> Option.defaultValue dbName), updateStmt.From.Table
         let tableAlias = updateStmt.From.Alias |> Option.defaultValue updateStmt.From.Table
 
         match scan store db table with
-        | Error e -> lastInsertId, storageErr e
+        | Error e -> ids, storageErr e
         | Ok(columns, rows) ->
             let columnIndex = columnIndexOf columns
 
             match updateStmt.Assignments |> traverse (fun a -> resolveColumn columns a.Column |> Result.map (fun i -> i, a.Value)) with
-            | Error e -> lastInsertId, storageErr e
+            | Error e -> ids, storageErr e
             | Ok indexedAssignments ->
                 let qualifiers = singleQualifier tableAlias columns
 
@@ -2843,18 +2858,18 @@ let execute (store: Store) (registry: Registry) (dbName: string) (lastInsertId: 
                 // one, and shouldn't depend on whether any row happens to
                 // match (or exist at all).
                 match check (probeRow columns) |> Result.bind (fun _ -> checkAssignments (probeRow columns)) with
-                | Error(code, message) -> lastInsertId, Err(code, message)
+                | Error(code, message) -> ids, Err(code, message)
                 | Ok _ ->
                     match selectMutationTargets ctxFor (List.ofSeq rows) check updateStmt.OrderBy updateStmt.Limit with
-                    | Error(code, message) -> lastInsertId, Err(code, message)
+                    | Error(code, message) -> ids, Err(code, message)
                     | Ok targetRows ->
                         let targetSet = referenceSet targetRows
                         let predicate row = Ok(targetSet.Contains row)
                         let updater row = applyAssignments store registry dbName columnIndex qualifiers indexedAssignments row
 
                         match updateRows store db table predicate updater |> withGeneratedRecomputed store registry dbName db table with
-                        | Ok affected -> lastInsertId, Affected(uint64 affected)
-                        | Error e -> lastInsertId, storageErr e
+                        | Ok affected -> ids, Affected(uint64 affected)
+                        | Error e -> ids, storageErr e
 
     | Update updateStmt ->
         // Multi-table `UPDATE t1 JOIN t2 ON ... SET ...` — resolves the
@@ -2869,7 +2884,7 @@ let execute (store: Store) (registry: Registry) (dbName: string) (lastInsertId: 
         // single-table `UPDATE`.
         lock store.Lock (fun () ->
             match runMutationJoin store registry dbName updateStmt.From updateStmt.Joins with
-            | Error e -> lastInsertId, e
+            | Error e -> ids, e
             | Ok(sources, joinedRows) ->
                 let sourceIndex = sources |> List.mapi (fun i (q, _, _) -> q.ToLowerInvariant(), i) |> Map.ofList
                 let combinedColumns = sources |> List.map (fun (q, _, c) -> q, c)
@@ -2904,7 +2919,7 @@ let execute (store: Store) (registry: Registry) (dbName: string) (lastInsertId: 
                         | _ -> Error(1052, sprintf "Column '%s' in field list is ambiguous" a.Column)
 
                 match updateStmt.Assignments |> traverse resolveAssignment with
-                | Error(code, message) -> lastInsertId, Err(code, message)
+                | Error(code, message) -> ids, Err(code, message)
                 | Ok resolvedAssignments ->
                     let check = whereMatches ctxFor updateStmt.Where
 
@@ -2986,7 +3001,7 @@ let execute (store: Store) (registry: Registry) (dbName: string) (lastInsertId: 
                                 go resolvedAssignments)
 
                     match joinedRows |> traverse processRow with
-                    | Error(code, message) -> lastInsertId, Err(code, message)
+                    | Error(code, message) -> ids, Err(code, message)
                     | Ok _ ->
                         // All per-table writes must succeed together or not
                         // at all — MySQL rolls back the whole statement when
@@ -3028,15 +3043,15 @@ let execute (store: Store) (registry: Registry) (dbName: string) (lastInsertId: 
                         | Ok counts ->
                             store.Catalog <- snapshot.Catalog
                             Storage.commitTransactionEvents store snapshot
-                            lastInsertId, Affected(uint64 (List.sum counts))
-                        | Error e -> lastInsertId, storageErr e)
+                            ids, Affected(uint64 (List.sum counts))
+                        | Error e -> ids, storageErr e)
 
     | Delete deleteStmt when deleteStmt.Joins.IsEmpty ->
         let db, table = (deleteStmt.From.Database |> Option.defaultValue dbName), deleteStmt.From.Table
         let tableAlias = deleteStmt.From.Alias |> Option.defaultValue deleteStmt.From.Table
 
         match scan store db table with
-        | Error e -> lastInsertId, storageErr e
+        | Error e -> ids, storageErr e
         | Ok(columns, rows) ->
             let columnIndex = columnIndexOf columns
 
@@ -3045,17 +3060,17 @@ let execute (store: Store) (registry: Registry) (dbName: string) (lastInsertId: 
             let check = whereMatches ctxFor deleteStmt.Where
 
             match check (probeRow columns) with
-            | Error(code, message) -> lastInsertId, Err(code, message)
+            | Error(code, message) -> ids, Err(code, message)
             | Ok _ ->
                 match selectMutationTargets ctxFor (List.ofSeq rows) check deleteStmt.OrderBy deleteStmt.Limit with
-                | Error(code, message) -> lastInsertId, Err(code, message)
+                | Error(code, message) -> ids, Err(code, message)
                 | Ok targetRows ->
                     let targetSet = referenceSet targetRows
                     let predicate row = Ok(targetSet.Contains row)
 
                     match deleteRows store db table predicate with
-                    | Ok affected -> lastInsertId, Affected(uint64 affected)
-                    | Error e -> lastInsertId, storageErr e
+                    | Ok affected -> ids, Affected(uint64 affected)
+                    | Error e -> ids, storageErr e
 
     | Delete deleteStmt ->
         // Multi-table `DELETE t1[, t2] FROM t1 JOIN t2 ON ...` / `DELETE
@@ -3066,7 +3081,7 @@ let execute (store: Store) (registry: Registry) (dbName: string) (lastInsertId: 
         // A physical row reached through more than one join match is still
         // only in the set once (a `HashSet`), so it's deleted at most once.
         match runMutationJoin store registry dbName deleteStmt.From deleteStmt.Joins with
-        | Error e -> lastInsertId, e
+        | Error e -> ids, e
         | Ok(sources, joinedRows) ->
             let sourceIndex = sources |> List.mapi (fun i (q, _, _) -> q.ToLowerInvariant(), i) |> Map.ofList
             let combinedColumns = sources |> List.map (fun (q, _, c) -> q, c)
@@ -3079,7 +3094,7 @@ let execute (store: Store) (registry: Registry) (dbName: string) (lastInsertId: 
                     | Some i -> Ok i
                     | None -> Error(1109, sprintf "Unknown table '%s' in MULTI DELETE" t))
             with
-            | Error(code, message) -> lastInsertId, Err(code, message)
+            | Error(code, message) -> ids, Err(code, message)
             | Ok targetIndices ->
                 let check = whereMatches ctxFor deleteStmt.Where
 
@@ -3095,7 +3110,7 @@ let execute (store: Store) (registry: Registry) (dbName: string) (lastInsertId: 
                                 | None -> ())
 
                 match joinedRows |> traverse processRow with
-                | Error(code, message) -> lastInsertId, Err(code, message)
+                | Error(code, message) -> ids, Err(code, message)
                 | Ok _ ->
                     let apply =
                         targetIndices
@@ -3107,8 +3122,8 @@ let execute (store: Store) (registry: Registry) (dbName: string) (lastInsertId: 
                             deleteRows store tdb tname (fun row -> Ok(set.Contains row)))
 
                     match apply with
-                    | Ok counts -> lastInsertId, Affected(uint64 (List.sum counts))
-                    | Error e -> lastInsertId, storageErr e
+                    | Ok counts -> ids, Affected(uint64 (List.sum counts))
+                    | Error e -> ids, storageErr e
 
     | Explain inner ->
-        lastInsertId, explainStatement store registry dbName inner
+        ids, explainStatement store registry dbName inner

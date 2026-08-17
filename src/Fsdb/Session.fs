@@ -123,9 +123,21 @@ type Session =
       /// shared store, even inside a transaction — use `currentStore` to
       /// get the store statements should actually run against.
       Store: Store
-      /// The AUTO_INCREMENT id assigned by this session's most recent
-      /// INSERT, for `LAST_INSERT_ID()`. 0 until the first such INSERT.
+      /// The OK packet's `last_insert_id` (what `PDO::lastInsertId()`/
+      /// `mysql_insert_id()` read) for this session's most recent statement:
+      /// the first AUTO_INCREMENT id it generated, or else the last one it
+      /// explicitly supplied. 0 until the first INSERT that assigns either.
+      /// See `LastGeneratedId` for the narrower value the SQL function
+      /// `LAST_INSERT_ID()` reads — the two diverge for an INSERT that
+      /// supplies its own id instead of letting AUTO_INCREMENT generate one.
       LastInsertId: int64
+      /// The AUTO_INCREMENT id actually *generated* (never explicitly
+      /// supplied) by this session's most recent statement that generated
+      /// one, for the SQL function `LAST_INSERT_ID()`. 0 until the first
+      /// such INSERT; unlike `LastInsertId`, a statement that generates
+      /// none — including one that supplies its own id — leaves this
+      /// unchanged rather than resetting it, matching real MySQL.
+      LastGeneratedId: int64
       /// Per-column MySQL wire types for the most recent statement's
       /// `ResultSet`, if any — `[]` for anything else (an `Affected`/`Err`
       /// result, or a `ResultSet` this session's dispatch path didn't
@@ -166,6 +178,7 @@ let create (connectionId: int) (store: Store) : Session =
       UserVariables = Map.empty
       Store = store
       LastInsertId = 0L
+      LastGeneratedId = 0L
       LastResultColumnTypes = []
       Tx = None
       Statements = Map.empty

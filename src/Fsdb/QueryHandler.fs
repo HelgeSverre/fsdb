@@ -722,9 +722,10 @@ let private handleSetAutocommit (value: string) (session: Session) : Session * Q
 /// `registerAggregate` calls — free to override a built-in), then the
 /// session-dependent entries that can't be plain `Value list -> Value`
 /// closures until they're given a session to close over (`DATABASE()`
-/// reads `session.Database`, `LAST_INSERT_ID()` reads `session.LastInsertId`,
-/// `VERSION()` just reuses the same `@@version` value `SELECT @@version`
-/// already serves) — those go last so they always win.
+/// reads `session.Database`, `LAST_INSERT_ID()` reads `session.LastGeneratedId`
+/// — deliberately not `LastInsertId`, see that field's doc for why the two
+/// diverge — `VERSION()` just reuses the same `@@version` value `SELECT
+/// @@version` already serves) — those go last so they always win.
 let private registryFor (session: Session) : Functions.Registry =
     let withCustom =
         session.CustomFunctions.Scalars
@@ -736,7 +737,7 @@ let private registryFor (session: Session) : Functions.Registry =
     withCustom
     |> Functions.registerScalar "DATABASE" databaseFn
     |> Functions.registerScalar "SCHEMA" databaseFn
-    |> Functions.registerScalar "LAST_INSERT_ID" (fun _ -> VInt session.LastInsertId)
+    |> Functions.registerScalar "LAST_INSERT_ID" (fun _ -> VInt session.LastGeneratedId)
     |> Functions.registerScalar
         "VERSION"
         (fun _ -> lookupVar session "version" |> Option.flatten |> Option.map VString |> Option.defaultValue VNull)
@@ -777,20 +778,23 @@ let private executeStatement (session: Session) (sql: string) (upper: string) : 
             // (rather than already-rendered text) `columnTypes` needs. See
             // `Session.LastResultColumnTypes`'s doc for why this rides along
             // on `session` instead of widening this function's own return type.
-            let lastInsertId, result, columnTypes =
+            let lastInsertId, lastGeneratedId, result, columnTypes =
                 match stmt with
                 | Select select ->
                     let result, types = Executor.runTopLevelSelect store registry dbName select
-                    session.LastInsertId, result, types
+                    session.LastInsertId, session.LastGeneratedId, result, types
                 | Union(first, rest, orderBy, limit, offset) ->
                     let result, types, _ = Executor.runUnionStmt store registry dbName first rest orderBy limit offset
-                    session.LastInsertId, result, types
+                    session.LastInsertId, session.LastGeneratedId, result, types
                 | _ ->
-                    let lastInsertId, result = Executor.execute store registry dbName session.LastInsertId stmt
-                    lastInsertId, result, []
+                    let (lastInsertId, lastGeneratedId), result =
+                        Executor.execute store registry dbName (session.LastInsertId, session.LastGeneratedId) stmt
+
+                    lastInsertId, lastGeneratedId, result, []
 
             { session with
                 LastInsertId = lastInsertId
+                LastGeneratedId = lastGeneratedId
                 LastResultColumnTypes = columnTypes },
             result
 
