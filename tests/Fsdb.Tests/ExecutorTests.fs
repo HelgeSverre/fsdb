@@ -2435,4 +2435,116 @@ let tests =
                         runDefault store "SELECT value, LAG(value, 2) OVER (ORDER BY created_at) AS prev2 FROM readings ORDER BY created_at"
                     with
                     | ResultSet([ "value"; "prev2" ], [ [ Some "10"; None ]; [ Some "20"; None ]; [ Some "30"; Some "10" ] ]) -> ()
-                    | other -> failtestf "expected offset-2 lag, got %A" other ] ]
+                    | other -> failtestf "expected offset-2 lag, got %A" other ]
+
+          testList
+              "M9-3: PK/UNIQUE point-lookup fast path (Storage.tryUniqueLookup)"
+              [ testCase "WHERE pk = <literal>, alone or ANDed with a residual condition, matches a forced-scan twin table over randomized data"
+                <| fun _ ->
+                    // `indexed`'s `id` is PRIMARY KEY, so a point SELECT on
+                    // it takes runSelectStmt's index fast path;
+                    // `unindexed`'s otherwise-identical `id` has no
+                    // constraint at all, so the exact same query against it
+                    // can never take that path and falls back to the
+                    // ordinary full scan — same data, same SQL, two
+                    // different code paths to reach it.
+                    let rnd = System.Random(20260817)
+                    let store = newStore ()
+                    runDefault store "CREATE TABLE indexed (id INT PRIMARY KEY, name VARCHAR(20), age INT)" |> ignore
+                    runDefault store "CREATE TABLE unindexed (id INT, name VARCHAR(20), age INT)" |> ignore
+
+                    // Collation edge cases ('Foo' vs 'foo  ') alongside
+                    // plain rows, and a duplicate-`age` value so the
+                    // residual (non-indexed) predicate actually discriminates.
+                    let rows =
+                        [ 1, "Alice", 30
+                          2, "Foo", 30
+                          3, "foo  ", 40
+                          4, "bob", 40
+                          5, "BOB", 50 ]
+                        @ [ for i in 6 .. 40 -> i, sprintf "name%d" i, rnd.Next(20, 60) ]
+
+                    for id, name, age in rows do
+                        runDefault store (sprintf "INSERT INTO indexed VALUES (%d, '%s', %d)" id name age) |> ignore
+                        runDefault store (sprintf "INSERT INTO unindexed VALUES (%d, '%s', %d)" id name age) |> ignore
+
+                    let readRows (sql: string) : (string * string) list =
+                        match runDefault store sql with
+                        | ResultSet(_, rowsOut) ->
+                            rowsOut
+                            |> List.map (function
+                                | [ Some a; Some b ] -> a, b
+                                | other -> failtestf "expected 2 non-null columns, got %A" other)
+                        | other -> failtestf "expected a resultset for %s, got %A" sql other
+
+                    for id, _, _ in rows do
+                        Expect.equal
+                            (readRows (sprintf "SELECT name, age FROM indexed WHERE id = %d" id) |> List.sort)
+                            (readRows (sprintf "SELECT name, age FROM unindexed WHERE id = %d" id) |> List.sort)
+                            (sprintf "plain point lookup, id = %d" id)
+
+                        Expect.equal
+                            (readRows (sprintf "SELECT name, age FROM indexed WHERE id = %d AND age > 25" id) |> List.sort)
+                            (readRows (sprintf "SELECT name, age FROM unindexed WHERE id = %d AND age > 25" id) |> List.sort)
+                            (sprintf "index-narrowed candidate plus a residual filter, id = %d" id)
+
+                    // A miss (no row has this id) must narrow to zero
+                    // candidates, not accidentally fall through to "every
+                    // row".
+                    Expect.equal (readRows "SELECT name, age FROM indexed WHERE id = 9999") [] "a missed PK lookup returns no rows"
+
+                    // A literal that needs real coercion (a numeric-looking
+                    // string against the INT PK) can't safely use the
+                    // index's encoding (see `tryUniqueLookup`'s doc) — must
+                    // still fall back to a correct full scan, not silently
+                    // drop the row.
+                    Expect.equal
+                        (readRows "SELECT name, age FROM indexed WHERE id = '3'" |> List.sort)
+                        (readRows "SELECT name, age FROM unindexed WHERE id = '3'" |> List.sort)
+                        "a string literal against an INT PK still matches correctly"
+
+                testCase "a composite PRIMARY KEY (out of the single-column fast path's scope) still returns correct results"
+                <| fun _ ->
+                    let store = newStore ()
+                    runDefault store "CREATE TABLE composite (a INT, b INT, v VARCHAR(10), PRIMARY KEY (a, b))" |> ignore
+                    runDefault store "INSERT INTO composite VALUES (1, 1, 'x'), (1, 2, 'y'), (2, 1, 'z')" |> ignore
+
+                    match runDefault store "SELECT v FROM composite WHERE a = 1" with
+                    | ResultSet([ "v" ], rows) -> Expect.equal (rows |> List.sort) [ [ Some "x" ]; [ Some "y" ] ] "a = 1 alone (not the whole composite key) still scans correctly"
+                    | other -> failtestf "expected a resultset, got %A" other
+
+                testCase "INSERT/UPDATE unique-collision decisions (indexed PRIMARY KEY) match an independent full-scan oracle, incl. collation edge cases and NULL-never-collides"
+                <| fun _ ->
+                    let rnd = System.Random(20260817)
+
+                    // Independent of Storage.encodeConstraintKey on purpose
+                    // — this is MySQL's own collation rule (case- and
+                    // trailing-space-insensitive), reimplemented directly
+                    // against .NET string comparison rather than reusing
+                    // any engine internals, so it can catch a real
+                    // disagreement between the index's encoding and the
+                    // engine's WHERE-equality semantics.
+                    let collide (a: string option) (b: string option) =
+                        match a, b with
+                        | Some x, Some y -> System.String.Equals(x.TrimEnd(' '), y.TrimEnd(' '), System.StringComparison.OrdinalIgnoreCase)
+                        | _ -> false // NULL never collides with anything, including another NULL
+
+                    for _ in 1 .. 20 do
+                        let store = newStore ()
+                        runDefault store "CREATE TABLE uniq (k VARCHAR(10) UNIQUE, v INT)" |> ignore
+
+                        let candidates = [ "Foo"; "foo  "; "FOO"; "bar"; "bar "; "Baz"; "baz" ]
+                        let mutable accepted : string option list = []
+
+                        for _ in 1 .. 15 do
+                            let key = if rnd.Next(4) = 0 then None else Some candidates.[rnd.Next(candidates.Length)]
+                            let literal = key |> Option.map (sprintf "'%s'") |> Option.defaultValue "NULL"
+
+                            let expectCollision = key |> Option.exists (fun k -> accepted |> List.exists (collide (Some k)))
+
+                            match runDefault store (sprintf "INSERT INTO uniq VALUES (%s, %d)" literal (rnd.Next(100))) with
+                            | Affected 1UL ->
+                                Expect.isFalse expectCollision (sprintf "engine accepted %A but the oracle says it collides with %A" key accepted)
+                                accepted <- key :: accepted
+                            | Err(1062, _) -> Expect.isTrue expectCollision (sprintf "engine rejected %A as a duplicate but the oracle found no collision in %A" key accepted)
+                            | other -> failtestf "expected Affected 1 or a 1062 duplicate-key error, got %A" other ] ]
