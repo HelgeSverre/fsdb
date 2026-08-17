@@ -1927,6 +1927,49 @@ and private compareByOrderKeys (dirs: Direction list) (ka: Value list) (kb: Valu
 /// unioned with a DECIMAL one comes back DECIMAL), this only ever reports
 /// the first branch's types; add real reconciliation if a mixed-type
 /// UNION ever needs it.
+/// MySQL's UNION type reconciliation, at wire-type granularity: all-integer
+/// columns aggregate to LONGLONG; a DECIMAL promotes the numeric result;
+/// FLOAT/DOUBLE promote it further; a string anywhere poisons the column to
+/// VAR_STRING (verified: `UNION` of '10', '9', 2, 1.5 sorts as strings —
+/// '1.5,10,2,9', not numerically); DATE + DATETIME lands on DATETIME;
+/// anything else falls back to text.
+and private unionAggregateType (types: byte list) : byte =
+    let isInt t = t = Value.TypeTiny || t = Value.TypeShort || t = Value.TypeLong || t = Value.TypeLongLong
+    let isDate t = t = Value.TypeDate
+    let isDateTime t = t = Value.TypeDateTime || t = Value.TypeTimestamp
+
+    if types |> List.exists (fun t -> t = Value.TypeVarString || t = Value.TypeString || t = Value.TypeVarchar || t = Value.TypeBlob) then
+        Value.TypeVarString
+    elif types |> List.exists (fun t -> t = Value.TypeDouble) then
+        Value.TypeDouble
+    elif types |> List.exists (fun t -> t = Value.TypeFloat) then
+        Value.TypeFloat
+    elif types |> List.exists (fun t -> t = Value.TypeNewDecimal) then
+        Value.TypeNewDecimal
+    elif types |> List.forall isInt then
+        Value.TypeLongLong
+    elif types |> List.forall (fun t -> isDate t || isDateTime t) then
+        if types |> List.exists isDateTime then Value.TypeDateTime else Value.TypeDate
+    else
+        Value.TypeVarString
+
+/// Coerces one combined-UNION value to the column's reconciled wire type,
+/// so `ORDER BY` (and the wire types) see what MySQL's own reconciliation
+/// produces instead of each branch's original per-branch type. Temporal and
+/// unrecognized types pass through unchanged; NULL stays NULL.
+and private coerceUnionValue (ty: byte) (v: Value) : Value =
+    match v with
+    | VNull -> VNull
+    | _ ->
+        match ty with
+        | t when t = Value.TypeTiny || t = Value.TypeShort || t = Value.TypeLong || t = Value.TypeLongLong ->
+            VInt(int64 (Value.toDouble v))
+        | t when t = Value.TypeNewDecimal -> VDecimal(decimal (Value.toDouble v))
+        | t when t = Value.TypeDouble || t = Value.TypeFloat -> VDouble(Value.toDouble v)
+        | t when t = Value.TypeVarString || t = Value.TypeString || t = Value.TypeVarchar || t = Value.TypeBlob ->
+            VString(Value.toText v |> Option.defaultValue "")
+        | _ -> v
+
 and runUnionStmt
     (store: Store)
     (registry: Registry)
@@ -1945,28 +1988,77 @@ and runUnionStmt
     // comparing `VString` (`SELECT n FROM t UNION SELECT n FROM t ORDER BY
     // n` sorting "10" before "2" otherwise).
     let combine
-        (acc: Result<string list * ((string option list) * Value[]) list, QueryResult>)
+        (acc: Result<string list * ((string option list) * Value[]) list * byte list list, QueryResult>)
         (isAll: bool, select: SelectStmt)
         =
         acc
-        |> Result.bind (fun (cols, rowsSoFar) ->
+        |> Result.bind (fun (cols, rowsSoFar, typesSoFar) ->
             match runBranch select with
             | Err(code, message), _, _ -> Error(Err(code, message))
             | Affected _, _, _ -> Error(Err(1064, "UNION branch did not return a resultset"))
             | ResultSet(branchCols, _), _, _ when List.length branchCols <> List.length cols ->
                 Error(Err(1222, "The used SELECT statements have a different number of columns"))
-            | ResultSet(_, branchRows), _, branchTyped ->
+            | ResultSet(_, branchRows), branchTypes, branchTyped ->
                 let branchPaired = List.zip branchRows branchTyped
                 let combined = if isAll then rowsSoFar @ branchPaired else (rowsSoFar @ branchPaired) |> List.distinctBy fst
-                Ok(cols, combined))
+                Ok(cols, combined, branchTypes :: typesSoFar))
 
     match runSelectStmt store registry dbName first None with
     | Err(code, message), _, _ -> Err(code, message), [], []
     | Affected _, _, _ -> Err(1064, "UNION branch did not return a resultset"), [], []
     | ResultSet(firstCols, firstRows), firstTypes, firstTyped ->
-        match rest |> List.fold combine (Ok(firstCols, List.zip firstRows firstTyped)) with
+        match rest |> List.fold combine (Ok(firstCols, List.zip firstRows firstTyped, [ firstTypes ])) with
         | Error e -> e, [], []
-        | Ok(cols, allPaired) ->
+        | Ok(cols, allPaired, typesSoFar) ->
+            // MySQL's union type reconciliation across every branch, and
+            // every row's values coerced to it — an `ORDER BY` over the
+            // mixed-typed union then sorts exactly as MySQL does.
+            let reconciled =
+                cols
+                |> List.mapi (fun i _ -> typesSoFar |> List.map (fun ts -> ts.[i]) |> unionAggregateType)
+
+            // A DECIMAL-reconciled column renders at the union's scale —
+            // MySQL shows `SELECT 2 UNION SELECT 1.5` as 1.5 / 2.0, not 2.
+            // The scale is the widest fraction any branch's value carries.
+            let decimalScale (v: Value) =
+                match v with
+                | VDecimal _ ->
+                    match Value.toText v with
+                    | Some text ->
+                        match text.IndexOf '.' with
+                        | -1 -> 0
+                        | dot -> text.Length - dot - 1
+                    | None -> 0
+                | _ -> 0
+
+            let rescale (scale: int) (v: Value) : Value =
+                match v with
+                | VDecimal d when scale > 0 ->
+                    VDecimal(
+                        System.Decimal.Parse(
+                            d.ToString("F" + string scale, System.Globalization.CultureInfo.InvariantCulture),
+                            System.Globalization.CultureInfo.InvariantCulture
+                        )
+                    )
+                | _ -> v
+
+            let scales =
+                cols
+                |> List.mapi (fun i _ -> allPaired |> List.map (fun (_, typed) -> decimalScale typed.[i]) |> List.max)
+
+            let coerceColumn (i: int) (v: Value) : Value =
+                let coerced = coerceUnionValue reconciled.[i] v
+                if reconciled.[i] = Value.TypeNewDecimal then rescale scales.[i] coerced else coerced
+
+            let coercedPaired =
+                allPaired
+                |> List.map (fun (_, typed) ->
+                    let coerced = typed |> Array.mapi coerceColumn
+                    // Re-render the text row from the coerced values, so the
+                    // wire text carries the reconciliation too (2 -> 2.0).
+                    let text = coerced |> Array.map (function VNull -> None | v -> Value.toText v) |> List.ofArray
+                    text, coerced)
+
             // `ORDER BY`/`LIMIT` on the combined result — same
             // alias/positional resolution as an ordinary `SELECT`, and now
             // the same typed `Value.compare` sort too, via each row's own
@@ -1984,9 +2076,9 @@ and runUnionStmt
 
             let sortedPaired =
                 if orderBy.IsEmpty then
-                    allPaired
+                    coercedPaired
                 else
-                    allPaired
+                    coercedPaired
                     |> List.sortWith (fun (_, ta) (_, tb) ->
                         compareByOrderKeys
                             (orderBy |> List.map snd)
@@ -1994,7 +2086,7 @@ and runUnionStmt
                             (orderBy |> List.map (fst >> orderKeyOf tb)))
 
             let limitedPaired = sortedPaired |> applyLimitOffset limit offset
-            ResultSet(cols, limitedPaired |> List.map fst), firstTypes, limitedPaired |> List.map snd
+            ResultSet(cols, limitedPaired |> List.map fst), reconciled, limitedPaired |> List.map snd
 
 /// One projection's `(column name, value)` pairs — a list because `SELECT
 /// *` expands to every column of the row.

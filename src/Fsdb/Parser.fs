@@ -1190,7 +1190,19 @@ let private combineUnion
     (rest: (bool * (SelectStmt * bool)) list)
     ((unionOrderBy, unionLimitOffset): OrderKey list option * (int option * int option) option)
     : SelectStmt * (bool * SelectStmt) list * OrderKey list * int option * int option =
-    let restStmts = rest |> List.map (fun (op, (s, _)) -> op, s)
+    // The bare (unparenthesized) final branch's trailing ORDER BY/LIMIT
+    // belongs to the union as a whole — strip it from that branch so it
+    // doesn't re-run the clause against its own columns (`... UNION SELECT
+    // 2 ORDER BY v` would otherwise resolve `v` — a union-level alias —
+    // inside the branch and 1054). Parenthesized branches keep their own.
+    let restStmts =
+        rest
+        |> List.mapi (fun i (op, (s, parenthesized)) ->
+            if i = rest.Length - 1 && not parenthesized then
+                op, { s with OrderBy = []; Limit = None; Offset = None }
+            else
+                op, s)
+
     let lastStmt, lastParenthesized = rest |> List.last |> snd
 
     let promotedOrderBy, promotedLimit, promotedOffset =

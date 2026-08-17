@@ -428,15 +428,22 @@ let tests =
                     | Error(DuplicateKey("PRIMARY", "1")) -> ()
                     | other -> failtestf "expected DuplicateKey on PRIMARY, got %A" other
 
-                testCase "the unique check is collation-aware: case and trailing spaces don't dodge it"
+                testCase "the unique check is collation-aware: case folds, trailing spaces stay distinct (NO PAD)"
                 <| fun _ ->
                     let store = create ()
                     emailsTable store
                     insertRows store defaultDatabase "emails" None [ [ VInt 1L; VString "a@x.com" ] ] |> ignore
 
-                    match insertRows store defaultDatabase "emails" None [ [ VInt 2L; VString "A@X.COM " ] ] with
+                    // case-insensitive: 'A@X.COM' collides with 'a@x.com'
+                    match insertRows store defaultDatabase "emails" None [ [ VInt 2L; VString "A@X.COM" ] ] with
                     | Error(DuplicateKey("uq_email", _)) -> ()
                     | other -> failtestf "expected DuplicateKey, got %A" other
+
+                    // NO PAD: a trailing space makes it a different value,
+                    // exactly as MySQL 8's utf8mb4_0900_ai_ci treats it
+                    match insertRows store defaultDatabase "emails" None [ [ VInt 3L; VString "a@x.com " ] ] with
+                    | Ok _ -> ()
+                    | other -> failtestf "expected the space-suffixed email to insert under NO PAD, got %A" other
 
                 testCase "two colliding rows within the same multi-row INSERT also return error 1062"
                 <| fun _ ->

@@ -170,9 +170,13 @@ let toDouble (v: Value) : float =
 /// .NET's OrdinalIgnoreCase doesn't model — ponytail: ASCII/Latin case
 /// folding only, add real accent folding if a _ai collation edge case
 /// actually matters) and PAD SPACE-insensitive, so `'a' = 'a '` is true the
-/// same way a CHAR/VARCHAR compare trims trailing spaces before comparing.
+/// MySQL 8's default collation (utf8mb4_0900_ai_ci) is NO PAD — trailing
+/// spaces are *significant* in `=`/`LIKE`/unique keys (`'a' <> 'a '`),
+/// unlike the older PAD SPACE collations. ponytail: real MySQL keeps PAD
+/// SPACE for `CHAR` columns even under NO PAD, but this engine compares
+/// values without column context, so CHAR values also compare NO PAD.
 let private compareStrings (x: string) (y: string) : int =
-    String.Compare(x.TrimEnd(' '), y.TrimEnd(' '), StringComparison.OrdinalIgnoreCase) |> sign
+    String.Compare(x, y, StringComparison.OrdinalIgnoreCase) |> sign
 
 /// `VDate`/`VDateTime` as one .NET `DateTime`, midnight for the date-only
 /// case — the shared instant `compare`'s VDate/VDateTime-vs-VString branch

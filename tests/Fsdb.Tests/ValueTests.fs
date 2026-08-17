@@ -132,8 +132,10 @@ let tests =
                 testCase "string comparison is case-insensitive, matching utf8mb4_0900_ai_ci"
                 <| fun _ -> Expect.equal (compare (VString "a") (VString "A")) 0 "'a' = 'A'"
 
-                testCase "string comparison ignores trailing spaces, matching PAD SPACE"
-                <| fun _ -> Expect.equal (compare (VString "a") (VString "a ")) 0 "'a' = 'a '"
+                testCase "string comparison treats trailing spaces as significant, matching utf8mb4_0900_ai_ci's NO PAD"
+                <| fun _ ->
+                    Expect.equal (compare (VString "a") (VString "a ")) -1 "'a' < 'a '"
+                    Expect.equal (compare (VString "a ") (VString "a")) 1 "'a ' > 'a'"
 
                 testCase "a DATE column value against a DATETIME-shaped string bound compares as a real instant, not text"
                 <| fun _ ->
@@ -453,7 +455,13 @@ let tests =
 
                 testList
                     "Dates"
-                    [ testCase "DATE_ADD/DATE_SUB apply an INTERVAL-encoded argument"
+                    [ testCase "TIMESTAMP coerces a date or string to a datetime"
+                      <| fun _ ->
+                          Expect.equal (call "TIMESTAMP" [ VDate(DateOnly(2024, 1, 1)) ]) (VDateTime(DateTime(2024, 1, 1, 0, 0, 0))) "date gains midnight"
+                          Expect.equal (call "TIMESTAMP" [ VString "2024-03-05 13:45:09" ]) (VDateTime(DateTime(2024, 3, 5, 13, 45, 9))) "string parses"
+                          Expect.equal (call "TIMESTAMP" [ VNull ]) VNull "null"
+
+                      testCase "DATE_ADD/DATE_SUB apply an INTERVAL-encoded argument"
                       <| fun _ ->
                           let interval = call "INTERVAL" [ VInt 3L; VString "DAY" ]
 

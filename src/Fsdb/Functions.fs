@@ -794,6 +794,15 @@ let private dateFn: Scalar =
     | [ v ] when not (anyNull [ v ]) -> asDateOnly v |> Option.map VDate |> Option.defaultValue VNull
     | _ -> VNull
 
+/// `TIMESTAMP(expr)` — coerces to a datetime the way MySQL does (a date
+/// gains `00:00:00`); real MySQL also parses *two* string arguments as
+/// `TIMESTAMP(expr1, expr2)` (= `expr1 + expr2` as a time), which nothing
+/// here needs yet — add it if a migration calls that form.
+let private timestampFn: Scalar =
+    function
+    | [ v ] when not (anyNull [ v ]) -> asDateTime v |> Option.map VDateTime |> Option.defaultValue VNull
+    | _ -> VNull
+
 /// No `TIME` case in `Value` (see the `VJson` comment on the same theme) —
 /// ponytail: rendered as a plain `"HH:mm:ss"` string, add a `VTime` case if
 /// a migration needs it to compare/sort as a real time value.
@@ -1438,6 +1447,7 @@ let builtins: Registry =
     |> registerScalar "DATE_FORMAT" dateFormatFn
     |> registerScalar "DATE" dateFn
     |> registerScalar "TIME" timeFn
+    |> registerScalar "TIMESTAMP" timestampFn
     |> registerScalar "YEAR" (datePartFn (fun d -> d.Year))
     |> registerScalar "MONTH" (datePartFn (fun d -> d.Month))
     |> registerScalar "DAY" (datePartFn (fun d -> d.Day))

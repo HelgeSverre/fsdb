@@ -2152,7 +2152,7 @@ let tests =
                         10.0
                         (sprintf "a %d x %d non-equi join with only %d matches took %A — looks hung, not just slow" n n (n - 1) sw.Elapsed)
 
-                testCase "hash join on string keys matches case-insensitively and pad-space-insensitively, same as the nested loop"
+                testCase "hash join on string keys matches case-insensitively, and trailing spaces stay distinct (NO PAD)"
                 <| fun _ ->
                     let store = newStore ()
                     runDefault store "CREATE TABLE l (name VARCHAR(20))" |> ignore
@@ -2164,11 +2164,11 @@ let tests =
                     | ResultSet(_, rows) ->
                         Expect.equal
                             rows
-                            [ [ Some "Alice"; Some "x" ]; [ Some "bob  "; Some "y" ] ]
-                            "MySQL's collation folds case and trailing spaces, so 'Alice'/'alice' and 'bob  '/'BOB' both join; 'Carol'/'dave' don't"
-                    | other -> failtestf "expected case/pad-insensitive matches, got %A" other
+                            [ [ Some "Alice"; Some "x" ] ]
+                            "utf8mb4_0900_ai_ci folds case but not trailing spaces: 'Alice'/'alice' join, 'bob  '/'BOB' don't"
+                    | other -> failtestf "expected case-insensitive-only matches, got %A" other
 
-                testCase "UPDATE ... JOIN hash-matches string keys case/pad-insensitively, same as the nested loop"
+                testCase "UPDATE ... JOIN hash-matches string keys case-insensitively, trailing spaces distinct"
                 <| fun _ ->
                     let store = newStore ()
                     runDefault store "CREATE TABLE accounts2 (name VARCHAR(20), balance INT)" |> ignore
@@ -2177,12 +2177,12 @@ let tests =
                     runDefault store "INSERT INTO rates VALUES ('alice', 10), ('BOB', 20)" |> ignore
 
                     match runDefault store "UPDATE accounts2 a JOIN rates r ON a.name = r.name SET a.balance = r.bonus" with
-                    | Affected 2UL -> ()
-                    | other -> failtestf "expected both accounts matched despite case/space differences, got %A" other
+                    | Affected 1UL -> ()
+                    | other -> failtestf "expected only 'Alice'/'alice' to match, got %A" other
 
                     match runDefault store "SELECT name, balance FROM accounts2 ORDER BY name" with
                     | ResultSet(_, rows) ->
-                        Expect.equal rows [ [ Some "Alice"; Some "10" ]; [ Some "bob  "; Some "20" ] ] "case/pad-insensitive match updated both rows"
+                        Expect.equal rows [ [ Some "Alice"; Some "10" ]; [ Some "bob  "; Some "0" ] ] "'bob  ' vs 'BOB' no longer matches under NO PAD"
                     | other -> failtestf "expected a resultset, got %A" other ]
 
           testList
@@ -2704,6 +2704,25 @@ let tests =
                         Expect.equal rows [ [ Some "2" ]; [ Some "9" ]; [ Some "10" ] ] "sorted numerically, not lexicographically"
                     | other -> failtestf "expected a numerically-sorted UNION resultset, got %A" other
 
+                testCase "UNION reconciles mixed branch types like MySQL — a string anywhere makes the column sort as text"
+                <| fun _ ->
+                    // Verified against MySQL 8.4: the reconciled column is
+                    // VARCHAR, so ORDER BY is lexical — '1.5,10,2,9', not a
+                    // numeric 1.5,2,9,10.
+                    let store = newStore ()
+
+                    match runDefault store "SELECT '10' AS v UNION SELECT '9' UNION SELECT 2 UNION SELECT 1.5 ORDER BY v" with
+                    | ResultSet([ "v" ], rows) ->
+                        Expect.equal rows [ [ Some "1.5" ]; [ Some "10" ]; [ Some "2" ]; [ Some "9" ] ] "string-reconciled lexical sort"
+                    | other -> failtestf "expected the string-reconciled sort, got %A" other
+
+                    // all-numeric branches still sort numerically, and the
+                    // DECIMAL reconciliation re-renders at the union's scale
+                    // (MySQL shows 2.0, not 2)
+                    match runDefault store "SELECT 2 AS n UNION SELECT 1.5 ORDER BY n" with
+                    | ResultSet(_, rows) -> Expect.equal rows [ [ Some "1.5" ]; [ Some "2.0" ] ] "numeric branches sort numerically"
+                    | other -> failtestf "expected the numeric sort, got %A" other
+
                 testCase "COUNT(*) FROM ((SELECT ...) UNION (SELECT ...)) AS alias — Laravel's paginate-over-union shape"
                 <| fun _ ->
                     // `unionAll(...)->paginate()` and `->count()` compile to
@@ -3042,15 +3061,16 @@ let tests =
                     let rnd = System.Random(20260817)
 
                     // Independent of Storage.encodeConstraintKey on purpose
-                    // — this is MySQL's own collation rule (case- and
-                    // trailing-space-insensitive), reimplemented directly
+                    // — this is MySQL 8's own collation rule
+                    // (utf8mb4_0900_ai_ci: case-insensitive, NO PAD —
+                    // trailing spaces stay distinct), reimplemented directly
                     // against .NET string comparison rather than reusing
                     // any engine internals, so it can catch a real
                     // disagreement between the index's encoding and the
                     // engine's WHERE-equality semantics.
                     let collide (a: string option) (b: string option) =
                         match a, b with
-                        | Some x, Some y -> System.String.Equals(x.TrimEnd(' '), y.TrimEnd(' '), System.StringComparison.OrdinalIgnoreCase)
+                        | Some x, Some y -> System.String.Equals(x, y, System.StringComparison.OrdinalIgnoreCase)
                         | _ -> false // NULL never collides with anything, including another NULL
 
                     for _ in 1 .. 20 do
