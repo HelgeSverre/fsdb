@@ -1313,7 +1313,21 @@ and private runSelectStmt
     match select.From with
     | None -> runSelect store registry dbName [] Map.empty [ [||] ] select outer
     | Some fromItem ->
-        match resolveFromItem store registry dbName fromItem with
+        // A single real table, no `JOIN`, narrows to its PK/UNIQUE index's
+        // candidates instead of a full `resolveFromItem` scan when the
+        // WHERE clause allows it (see `tryPointLookup`'s doc) — pure
+        // narrowing, so everything below (`applyJoin`, `runSelect`'s own
+        // WHERE/ORDER BY/LIMIT/GROUP BY) runs completely unmodified over
+        // whatever this produces.
+        let resolved =
+            match fromItem, select.Joins with
+            | FromTable tref, [] ->
+                tryPointLookup store dbName tref select.Where
+                |> Option.map Ok
+                |> Option.defaultWith (fun () -> resolveFromItem store registry dbName fromItem)
+            | _ -> resolveFromItem store registry dbName fromItem
+
+        match resolved with
         | Error e -> e, [], []
         | Ok(baseColumns, baseRows) ->
             let baseQualifier = fromItemQualifier fromItem
@@ -1323,6 +1337,37 @@ and private runSelectStmt
             match select.Joins |> List.fold (fun acc join -> acc |> Result.bind (fun combined -> applyJoin store registry dbName outer combined join)) initial with
             | Error e -> e, [], []
             | Ok(sources, rows) -> runSelect store registry dbName (sources |> List.collect snd) (qualifierRanges sources) rows select outer
+
+/// A WHERE expression's top-level `AND` chain flattened into its conjuncts
+/// — `a AND b AND c` (any nesting/associativity) yields `[a; b; c]`; any
+/// other shape (an `OR`, a single comparison, ...) is its own one-element
+/// list. `tryPointLookup` uses this to find an indexed equality anywhere
+/// among several ANDed conditions, not just when it's the *whole* WHERE.
+and private flattenAnd (expr: Expr) : Expr list =
+    match expr with
+    | BinOp(And, l, r) -> flattenAnd l @ flattenAnd r
+    | e -> [ e ]
+
+/// `SELECT`'s single-table, no-`JOIN` `FROM`, narrowed to its PK/UNIQUE
+/// index's candidates via `Storage.tryUniqueLookup`, when `whereExpr` ANDs
+/// in an equality against an indexed column with a directly-literal value.
+/// Only ever narrows (a superset of what the full WHERE could match) —
+/// `runSelectStmt` still runs the complete, unmodified WHERE/ORDER
+/// BY/LIMIT/GROUP BY pipeline over whatever this returns, so a missed
+/// opportunity here (a composite key, a non-literal operand, a value that
+/// needs real coercion, ...) just falls back to the ordinary full scan,
+/// never a correctness risk.
+and private tryPointLookup (store: Store) (dbName: string) (tref: TableRef) (whereExpr: Expr option) : (ColumnDef list * Value[] list) option =
+    match whereExpr with
+    | None -> None
+    | Some whereExpr ->
+        let tableDb = tref.Database |> Option.defaultValue dbName
+
+        flattenAnd whereExpr
+        |> List.tryPick (function
+            | BinOp(Eq, (Col n | QualifiedCol(_, n)), Lit v)
+            | BinOp(Eq, Lit v, (Col n | QualifiedCol(_, n))) -> Storage.tryUniqueLookup store tableDb tref.Table n v
+            | _ -> None)
 
 /// Per-column MySQL wire type for a freshly-projected resultset, read off
 /// the first non-NULL `Value` in each column across `rows` — a plain
@@ -2022,6 +2067,11 @@ and private runGroupedSelect
                                 let probeCtx = ctxFor (probeRow columns)
                                 let enumAware keys = List.map2 (orderValueForExpr probeCtx) groupExprs keys
                                 compareByOrderKeys (groupExprs |> List.map (fun _ -> Asc)) (enumAware ka) (enumAware kb))
+                        elif select.OrderBy.IsEmpty then
+                            // Same reasoning as the plain-`SELECT` `sortRows`
+                            // above: an empty `ORDER BY` makes every
+                            // comparison a no-op, so skip the sort outright.
+                            kept
                         else
                             kept |> List.sortWith (fun (_, ka, _) (_, kb, _) -> compareByOrderKeys (List.map snd select.OrderBy) ka kb)
 
@@ -2244,8 +2294,14 @@ and private runSelect
             projectRow row
             |> Result.bind (fun outputCols -> resolveOrderKey (ctxFor row) projections outputCols (resolveOrderExpr expr)))
 
+    // No `ORDER BY` means every key list is `[]`, so the comparator below
+    // always returns 0 — `List.sortWith` still pays for a full O(n log n)
+    // comparison pass to discover that. Skip it outright instead.
     let sortRows (keyed: (Value list * Value[]) list) : (Value list * Value[]) list =
-        keyed |> List.sortWith (fun (ka, _) (kb, _) -> compareByOrderKeys (List.map snd orderBy) ka kb)
+        if orderBy.IsEmpty then
+            keyed
+        else
+            keyed |> List.sortWith (fun (ka, _) (kb, _) -> compareByOrderKeys (List.map snd orderBy) ka kb)
 
     let probe = probeRow columns
 
