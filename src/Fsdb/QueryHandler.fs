@@ -642,7 +642,7 @@ let private beginTransaction (session: Session) : Session =
 let startTransactionStatement (session: Session) : Session =
     match session.Tx with
     | Some tx when tx.GateLease.IsNone ->
-        let lease = Storage.enterTransactionGate session.Store
+        let lease = Storage.enterTransactionGate session.Store (session.Database |> Option.defaultValue defaultDatabase) defaultLockWaitTimeout
 
         try
             let baseCatalog = session.Store.Catalog
@@ -806,7 +806,7 @@ let private executeStatement (session: Session) (sql: string) (upper: string) : 
             | Union _
             | Explain _ -> execute session
             | _ ->
-                use _gate = Storage.enterTransactionGate session.Store
+                use _gate = Storage.enterTransactionGate session.Store (session.Database |> Option.defaultValue defaultDatabase) defaultLockWaitTimeout
                 execute session
     | Result.Error _ when upper.StartsWith "SELECT" && upper.Contains "@" ->
         { session with LastResultColumnTypes = [] }, handleAtVarSelect session sql
@@ -1012,6 +1012,11 @@ let private dispatch (session: Session) (rawSql: string) : Session * QueryResult
 /// straight to the socket read loop and silently drop the connection with
 /// no ERR packet. Verified reachable: `INSERT INTO t VALUES (1e300)` into a
 /// DECIMAL column throws `OverflowException` from `decimal d`.
+///
+/// `Storage.LockWaitTimeout` gets its own real MySQL error code (1205)
+/// rather than falling into the generic 1105 below — a stuck transaction
+/// elsewhere should look to the client like an ordinary, retryable lock
+/// wait timeout, not an internal error.
 let handle (session: Session) (rawSql: string) : Session * QueryResult =
     try
         match dispatch session rawSql with
@@ -1019,6 +1024,10 @@ let handle (session: Session) (rawSql: string) : Session * QueryResult =
             eprintfn "fsdb: ERR %d %s -- query: %s" code msg rawSql
             result
         | result -> result
-    with ex ->
+    with
+    | Storage.LockWaitTimeout dbName ->
+        eprintfn "fsdb: ERR 1205 lock wait timeout on database %s -- query: %s" dbName rawSql
+        session, Err(1205, "Lock wait timeout exceeded; try restarting transaction")
+    | ex ->
         eprintfn "fsdb: EXN %s -- query: %s" ex.Message rawSql
         session, Err(1105, sprintf "Internal error: %s" ex.Message) // ER_UNKNOWN_ERROR

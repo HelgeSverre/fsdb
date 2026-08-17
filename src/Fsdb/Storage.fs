@@ -4,11 +4,18 @@
 module Fsdb.Storage
 
 open System
+open System.Collections.Concurrent
 open System.Collections.Generic
 open System.Globalization
 open System.Threading
 open Fsdb.Ast
 open Fsdb.Value
+
+/// Raised by `enterTransactionGate` when a database's write gate doesn't
+/// clear within `innodb_lock_wait_timeout`'s default — caught by
+/// `QueryHandler.handle`'s catch-all and reported as MySQL error 1205
+/// rather than hanging the connection forever.
+exception LockWaitTimeout of dbName: string
 
 /// Storage-layer failures, mapped to MySQL error codes by `toMySqlError`.
 /// `ExpressionError` carries an already-formed MySQL (code, message) pair
@@ -115,10 +122,16 @@ let splitQualified (defaultDb: string) (name: string) : string * string =
     | _ -> defaultDb, stripBackticks name
 
 /// ponytail: one global catalog lock plus one coarse transaction/write gate
-/// rather than row/table locks. This preserves committed state under
-/// contention but serializes unrelated explicit transactions; replace it
-/// with row versions or sharded async locks when parallel write throughput
-/// matters.
+/// *per database* rather than row/table locks. This preserves committed
+/// state under contention but serializes every write within one database,
+/// transactional or not; replace it with row versions or sharded async
+/// locks when parallel write throughput matters. A transaction that writes
+/// across more than one database only holds the gate for the database
+/// active when it entered — a cross-database transaction can still race a
+/// concurrent writer in its *other* databases; upgrade to acquiring every
+/// database a transaction actually touches if that ever matters (Laravel's
+/// per-worker-database test parallelism, the case this exists for, never
+/// does).
 ///
 /// `ForeignKeyChecks` gates every FK enforcement in this module (cascading
 /// deletes, `RESTRICT`, parent-existence checks on insert/update) — the
@@ -162,13 +175,16 @@ type Store =
       /// just discards the snapshot, buffer and all.
       mutable PendingEvents: ResizeArray<CommitEvent> option
       /// Serializes the lifetime of active transactions and individual
-      /// autocommit mutations. A transaction acquires this gate on its first
-      /// real database statement (not BEGIN) and releases it at
+      /// autocommit mutations, one `SemaphoreSlim` per database (created
+      /// lazily by `enterTransactionGate`) rather than one store-wide —
+      /// unrelated databases no longer block on each other's open
+      /// transactions. A transaction acquires its database's gate on its
+      /// first real database statement (not BEGIN) and releases it at
       /// COMMIT/ROLLBACK, which prevents the snapshot merger from replacing
       /// a concurrent writer's changes to the same table. SemaphoreSlim is
       /// intentionally used instead of Monitor because a connection's
       /// BEGIN, statements, and COMMIT may resume on different threads.
-      TransactionGate: SemaphoreSlim
+      TransactionGates: ConcurrentDictionary<string, SemaphoreSlim>
       Lock: obj }
 
 let create () : Store =
@@ -177,7 +193,7 @@ let create () : Store =
       StrictMode = true
       OnCommit = None
       PendingEvents = None
-      TransactionGate = new SemaphoreSlim(1, 1)
+      TransactionGates = ConcurrentDictionary<string, SemaphoreSlim>()
       Lock = obj () }
 
 type private TransactionGateLease(gate: SemaphoreSlim) =
@@ -188,12 +204,28 @@ type private TransactionGateLease(gate: SemaphoreSlim) =
             if Interlocked.Exchange(&released, 1) = 0 then
                 gate.Release() |> ignore
 
-/// Acquires the store's coarse transaction/write gate. The returned lease
-/// is idempotent so normal COMMIT/ROLLBACK and connection cleanup can both
-/// dispose it safely without over-releasing the semaphore.
-let enterTransactionGate (store: Store) : IDisposable =
-    store.TransactionGate.Wait()
-    new TransactionGateLease(store.TransactionGate) :> IDisposable
+/// How long a connection waits for `dbName`'s write gate before giving up —
+/// matches `innodb_lock_wait_timeout`'s MySQL default (50s) rather than
+/// waiting forever. `enterTransactionGate` takes this as a parameter rather
+/// than hardcoding it so a test can pass a short one instead of a real
+/// 50-second wait to exercise the timeout path.
+let defaultLockWaitTimeout = TimeSpan.FromSeconds 50.0
+
+/// Acquires `dbName`'s coarse transaction/write gate (see `Store`'s doc for
+/// why it's per-database, not store-wide). The returned lease is idempotent
+/// so normal COMMIT/ROLLBACK and connection cleanup can both dispose it
+/// safely without over-releasing the semaphore. Raises `LockWaitTimeout`
+/// instead of blocking forever if the gate doesn't clear within `timeout` —
+/// a stuck transaction elsewhere degrades the waiter to a retryable MySQL
+/// error (`QueryHandler.handle` maps it to 1205) rather than wedging the
+/// connection.
+let enterTransactionGate (store: Store) (dbName: string) (timeout: TimeSpan) : IDisposable =
+    let gate = store.TransactionGates.GetOrAdd(dbName, (fun _ -> new SemaphoreSlim(1, 1)))
+
+    if not (gate.Wait timeout) then
+        raise (LockWaitTimeout dbName)
+
+    new TransactionGateLease(gate) :> IDisposable
 
 /// Delivers `event` (if any): buffers it if `store` is a transaction
 /// snapshot (`PendingEvents`), otherwise hands it straight to `OnCommit` if
@@ -229,7 +261,7 @@ let beginTransactionSnapshot (store: Store) : Store =
       StrictMode = true
       OnCommit = None
       PendingEvents = if store.OnCommit.IsSome then Some(ResizeArray()) else None
-      TransactionGate = store.TransactionGate
+      TransactionGates = store.TransactionGates
       Lock = obj () }
 
 /// Flushes a committed transaction's buffered events onto the real `store`

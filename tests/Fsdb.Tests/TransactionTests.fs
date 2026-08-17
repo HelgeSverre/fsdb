@@ -127,6 +127,54 @@ let tests =
               | ResultSet(_, [ [ Some "1" ] ]) -> ()
               | result -> failtestf "expected the transaction's own write to also be there, got %A" result
 
+          testCase "an open transaction in one database doesn't block a write to an unrelated database"
+          <| fun _ ->
+              // Regression: the transaction gate used to be a single
+              // store-wide semaphore, so every connection's writes
+              // serialized behind any one open transaction, anywhere —
+              // exactly what collapses a parallel test suite (each worker
+              // in its own database) to fully serial. The gate is now one
+              // `SemaphoreSlim` per database.
+              let store = Fsdb.Storage.create ()
+              Fsdb.Storage.createDatabase store "tx_db_a" |> ignore
+              Fsdb.Storage.createDatabase store "tx_db_b" |> ignore
+
+              let a = create 1 store
+              let a, _ = handle a "USE tx_db_a"
+              let a, _ = handle a "CREATE TABLE t (id INT)"
+              let a, _ = handle a "BEGIN"
+              let a, _ = handle a "INSERT INTO t VALUES (1)"
+
+              let b = create 2 store
+              let b, _ = handle b "USE tx_db_b"
+              let b, _ = handle b "CREATE TABLE t (id INT)"
+
+              let bInsert = Threading.Tasks.Task.Run(fun () -> handle b "INSERT INTO t VALUES (99)")
+
+              Expect.isTrue
+                  (bInsert.Wait(TimeSpan.FromSeconds 5.0))
+                  "the unrelated database's write completed without waiting for tx_db_a's still-open transaction"
+
+              match bInsert.GetAwaiter().GetResult() |> snd with
+              | Affected 1UL -> ()
+              | result -> failtestf "expected the unrelated database's insert to succeed, got %A" result
+
+              handle a "ROLLBACK" |> ignore
+
+          testCase "a write gate that doesn't clear within its timeout raises a retryable 1205, not an indefinite hang"
+          <| fun _ ->
+              let store = Fsdb.Storage.create ()
+
+              use held = Fsdb.Storage.enterTransactionGate store Fsdb.Storage.defaultDatabase (TimeSpan.FromSeconds 30.0)
+
+              try
+                  Fsdb.Storage.enterTransactionGate store Fsdb.Storage.defaultDatabase (TimeSpan.FromMilliseconds 50.0)
+                  |> ignore
+
+                  failtest "expected the second waiter to time out"
+              with Fsdb.Storage.LockWaitTimeout db ->
+                  Expect.equal db Fsdb.Storage.defaultDatabase "names the database still holding the gate"
+
           testCase "concurrent transactions updating the same table serialize without losing a committed increment"
           <| fun _ ->
               let store = Fsdb.Storage.create ()
