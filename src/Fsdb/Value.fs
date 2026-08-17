@@ -326,12 +326,80 @@ let add = arith (+) (+) (+)
 let sub = arith (-) (-) (-)
 let mul = arith ( * ) ( * ) ( * )
 
-/// Division always yields a double (or NULL for `x / NULL`), and MySQL
-/// returns NULL rather than raising on divide-by-zero.
+/// A `decimal`'s own scale (digits after the point) as constructed —
+/// `10.00m` reports 2, `5m` reports 0 — read straight out of its bit
+/// representation the way `System.Decimal` stores it (bits 16-23 of the
+/// fourth `int32`), since the BCL exposes no `.Scale` property.
+let private scaleOf (d: decimal) : int = (Decimal.GetBits d).[3] >>> 16 &&& 0xFF
+
+/// `/`'s `div_precision_increment`, MySQL's fixed default (`SELECT
+/// @@div_precision_increment` is 4 on a stock install, and MySQL doesn't
+/// let a plain expression see a session override reflected in its own
+/// scale math the way this constant does) — the extra fractional digits
+/// `/` adds on top of the dividend's own scale.
+let private divPrecisionIncrement = 4
+
+/// Rounds to `scale` fractional digits *and* pads short results back out to
+/// it (`Math.Round(5m, 4)` is still `5m`, not `5.0000m`) — `decimal`
+/// remembers trailing zeros baked into its own scale, so round-tripping
+/// through a fixed-point format string is what actually forces it.
+let private withScale (scale: int) (d: decimal) : decimal =
+    let rounded = Math.Round(d, scale, MidpointRounding.AwayFromZero)
+    Decimal.Parse(rounded.ToString("F" + string scale, CultureInfo.InvariantCulture), CultureInfo.InvariantCulture)
+
+/// `/`: MySQL divides exact-value operands (INT/DECIMAL) to a `DECIMAL`
+/// whose scale is the *dividend's* scale plus `div_precision_increment`
+/// — `5/2` is `2.5000`, `10.00/3` is `3.333333` (2 + 4) — rather than
+/// truncating to either input's scale the way `+`/`-`/`*` do. A `DOUBLE`
+/// operand anywhere taints the result to `DOUBLE` instead (no fixed
+/// scale to pad), and division by zero is `NULL`, not an exception, for
+/// either shape.
 let div (a: Value) (b: Value) : Value =
     match classify a, classify b with
     | None, _
     | _, None -> VNull
     | Some ka, Some kb ->
-        let y = asDouble kb
-        if y = 0.0 then VNull else VDouble(asDouble ka / y)
+        match ka, kb with
+        | KDouble _, _
+        | _, KDouble _ ->
+            let y = asDouble kb
+            if y = 0.0 then VNull else VDouble(asDouble ka / y)
+        | _ ->
+            let y = asDecimal kb
+            if y = 0m then
+                VNull
+            else
+                let dividendScale = match ka with KDecimal d -> scaleOf d | _ -> 0
+                VDecimal(withScale (dividendScale + divPrecisionIncrement) (asDecimal ka / y))
+
+/// `MOD`/`%`: ordinary MySQL numeric promotion, same as `+`/`-`/`*` (int
+/// op int stays int; a `DECIMAL` operand with no `DOUBLE` promotes to
+/// `DECIMAL`, keeping `%`'s natural scale rather than `/`'s
+/// `div_precision_increment` bump; a `DOUBLE` operand taints to
+/// `DOUBLE`), except a zero divisor is `NULL` rather than a `DivideByZeroException`.
+let modulo (a: Value) (b: Value) : Value =
+    match classify a, classify b with
+    | None, _
+    | _, None -> VNull
+    | Some ka, Some kb ->
+        match ka, kb with
+        | KInt x, KInt y -> if y = 0L then VNull else VInt(x % y)
+        | KDouble _, _
+        | _, KDouble _ ->
+            let y = asDouble kb
+            if y = 0.0 then VNull else VDouble(asDouble ka % y)
+        | _ ->
+            let y = asDecimal kb
+            if y = 0m then VNull else VDecimal(asDecimal ka % y)
+
+/// `DIV`: MySQL's integer-division operator — always an `INT` (or `NULL`),
+/// truncated toward zero, regardless of whether either operand is a
+/// float/decimal (`7.5 DIV 2` is `3`, not `4`; MySQL doesn't pre-round the
+/// operands, it truncates the quotient).
+let intDiv (a: Value) (b: Value) : Value =
+    match classify a, classify b with
+    | None, _
+    | _, None -> VNull
+    | Some ka, Some kb ->
+        let y = asDecimal kb
+        if y = 0m then VNull else VInt(int64 (Math.Truncate(asDecimal ka / y)))

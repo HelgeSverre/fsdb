@@ -617,7 +617,7 @@ let private jsonArrowAtom: Parser<Expr, unit> =
         )
         |>> List.fold (fun acc f -> f acc) a
 
-/// Arithmetic: `+ -` bind loosest, `* / %` tighter, unary `-` tightest.
+/// Arithmetic: `+ -` bind loosest, `* / % DIV` tighter, unary `-` tightest.
 /// `Ast.Op` has no modulo or unary-negation case, so both desugar: `%`
 /// becomes a call to `MOD` (which is what MySQL's `%` already means) and
 /// unary `-x` becomes `0 - x`.
@@ -629,6 +629,19 @@ opp.AddOperator(InfixOperator("-", ws, 1, Associativity.Left, (fun a b -> BinOp(
 opp.AddOperator(InfixOperator("*", ws, 2, Associativity.Left, (fun a b -> BinOp(Mul, a, b))))
 opp.AddOperator(InfixOperator("/", ws, 2, Associativity.Left, (fun a b -> BinOp(Div, a, b))))
 opp.AddOperator(InfixOperator("%", ws, 2, Associativity.Left, (fun a b -> FuncCall("MOD", [ a; b ]))))
+
+// `DIV` is a keyword operator, not punctuation, so it needs the same
+// word-boundary guard `keyword` uses (`nextCharSatisfiesNot isIdentChar`) —
+// without it, a column named `div_price` would parse as the operator `DIV`
+// followed by a stray `_price` term. `OperatorPrecedenceParser.InfixOperator`
+// matches its operator string case-sensitively with no case-insensitive
+// option, so both the all-caps and all-lowercase spellings (by far the two
+// real-world casings) are registered explicitly — ponytail: a query mixing
+// case mid-keyword (`Div`) won't match; fold in real case-insensitive
+// matching if that ever shows up outside a lint test.
+let private divKeywordBoundary: Parser<unit, unit> = nextCharSatisfiesNot isIdentChar >>. ws
+opp.AddOperator(InfixOperator("DIV", divKeywordBoundary, 2, Associativity.Left, (fun a b -> BinOp(IntDiv, a, b))))
+opp.AddOperator(InfixOperator("div", divKeywordBoundary, 2, Associativity.Left, (fun a b -> BinOp(IntDiv, a, b))))
 opp.AddOperator(PrefixOperator("-", ws, 3, true, (fun e -> BinOp(Sub, Lit(VInt 0L), e))))
 
 /// `IN (SELECT ...)` vs. `IN (expr, expr, ...)` — both start with `(`, so

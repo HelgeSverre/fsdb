@@ -235,6 +235,7 @@ let private opSymbol =
     | Sub -> "-"
     | Mul -> "*"
     | Div -> "/"
+    | IntDiv -> "DIV"
     | NullSafeEq -> "<=>"
 
 /// The column name MySQL gives an unaliased projection — exact for columns
@@ -884,6 +885,7 @@ let rec private evalExpr (ctx: EvalContext) (expr: Expr) : Result<Value, EvalErr
                 | Sub -> Value.sub va vb
                 | Mul -> Value.mul va vb
                 | Div -> Value.div va vb
+                | IntDiv -> Value.intDiv va vb
                 | Eq -> compareWith (fun c -> c = 0)
                 | Neq -> compareWith (fun c -> c <> 0)
                 | Lt -> compareWith (fun c -> c < 0)

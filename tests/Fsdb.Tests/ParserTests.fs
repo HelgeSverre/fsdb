@@ -322,6 +322,25 @@ let tests =
                         (mkSelect([ FuncCall("MOD", [ col "a"; Lit(VInt 2L) ]), None ], None, None, [], None, None))
                         "modulo"
 
+                testCase "DIV parses as integer division, case-insensitively, at the same precedence as * / %"
+                <| fun _ ->
+                    Expect.equal
+                        (parseOk "SELECT a DIV 2")
+                        (mkSelect([ BinOp(IntDiv, col "a", Lit(VInt 2L)), None ], None, None, [], None, None))
+                        "uppercase DIV"
+
+                    Expect.equal
+                        (parseOk "SELECT a div 2")
+                        (mkSelect([ BinOp(IntDiv, col "a", Lit(VInt 2L)), None ], None, None, [], None, None))
+                        "lowercase div"
+
+                testCase "DIV only matches on a word boundary, not the prefix of an identifier like div_price"
+                <| fun _ ->
+                    Expect.equal
+                        (parseOk "SELECT div_price FROM t")
+                        (mkSelect([ col "div_price", None ], Some "t", None, [], None, None))
+                        "div_price stays one identifier"
+
                 testCase "comparison operators: <=, >=, <>, !=, <, >"
                 <| fun _ ->
                     let cases =

@@ -123,14 +123,13 @@ let private roundFn: Scalar =
     | [ v; VInt digits ] -> VDouble(Math.Round(toDouble v, int digits, MidpointRounding.AwayFromZero))
     | _ -> VNull
 
+/// `MOD(a, b)` (and `%`, which desugars to this in `Parser`) — MySQL's
+/// numeric-promotion rules, shared with `Value.add`/`sub`/`mul` rather than
+/// re-deriving them here (a `DECIMAL` argument used to fall through to a
+/// `VDouble` result, losing its scale).
 let private modFn: Scalar =
     function
-    | [ VNull; _ ]
-    | [ _; VNull ] -> VNull
-    | [ VInt a; VInt b ] -> if b = 0L then VNull else VInt(a % b)
-    | [ a; b ] ->
-        let db = toDouble b
-        if db = 0.0 then VNull else VDouble(toDouble a % db)
+    | [ a; b ] -> modulo a b
     | _ -> VNull
 
 let private nowFn: Scalar = fun _ -> VDateTime DateTime.Now

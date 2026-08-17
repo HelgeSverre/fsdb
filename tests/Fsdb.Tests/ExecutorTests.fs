@@ -720,6 +720,14 @@ let tests =
                     | ResultSet(_, [ [ Some "5"; Some "7" ] ]) -> ()
                     | other -> failtestf "expected 5/7, got %A" other
 
+                    // A non-NULL first argument is returned unchanged — the
+                    // second branch of IFNULL's match. Cover it directly so an
+                    // inverted/incorrect NULL check can't hide in a test that
+                    // only ever feeds the NULL-first shape.
+                    match runDefault store "SELECT IFNULL('x', 'y')" with
+                    | ResultSet(_, [ [ Some "x" ] ]) -> ()
+                    | other -> failtestf "expected IFNULL('x','y') = 'x', got %A" other
+
                 testCase "a custom registerScalar function is callable through the same registry"
                 <| fun _ ->
                     // Proves the extensibility API end to end: a function
@@ -1296,7 +1304,7 @@ let tests =
                     runDefault store "INSERT INTO t VALUES (10), (NULL), (20)" |> ignore
 
                     match runDefault store "SELECT COUNT(*) AS c, COUNT(n) AS cn, SUM(n) AS s, AVG(n) AS a FROM t" with
-                    | ResultSet([ "c"; "cn"; "s"; "a" ], [ [ Some "3"; Some "2"; Some "30"; Some "15" ] ]) -> ()
+                    | ResultSet([ "c"; "cn"; "s"; "a" ], [ [ Some "3"; Some "2"; Some "30"; Some "15.0000" ] ]) -> ()
                     | other -> failtestf "expected NULLs to drop out of COUNT(n)/SUM/AVG, got %A" other
 
                 testCase "an aggregate nested inside an expression is detected and evaluated, not just a bare top-level call"
@@ -1310,7 +1318,7 @@ let tests =
                     | other -> failtestf "expected COUNT(*) + 1 = 3, got %A" other
 
                     match runDefault store "SELECT ROUND(AVG(n), 1) AS a FROM t" with
-                    | ResultSet([ "a" ], [ [ Some "15" ] ]) -> ()
+                    | ResultSet([ "a" ], [ [ Some "15.0" ] ]) -> ()
                     | other -> failtestf "expected a scalar function wrapping an aggregate to work, got %A" other ]
 
           testList
@@ -1853,7 +1861,7 @@ let tests =
                     | ResultSet([ "grp"; "cn"; "s"; "a" ], rows) ->
                         Expect.equal
                             rows
-                            [ [ Some "a"; Some "0"; None; None ]; [ Some "b"; Some "1"; Some "10"; Some "10" ] ]
+                            [ [ Some "a"; Some "0"; None; None ]; [ Some "b"; Some "1"; Some "10"; Some "10.0000" ] ]
                             "group 'a' is all-NULL (COUNT 0, SUM/AVG NULL), group 'b' has one real value"
                     | other -> failtestf "expected NULL-aware aggregates per group, got %A" other
 

@@ -20,6 +20,10 @@ type Op =
     | Sub
     | Mul
     | Div
+    /// `DIV` — MySQL's integer-division operator: always an `INT` (or
+    /// `NULL`), truncated toward zero, distinct from `/`'s decimal-scaled
+    /// result.
+    | IntDiv
     /// `<=>` — the null-safe equals operator: like `Eq` except `NULL <=> NULL`
     /// is true (rather than `NULL`) and `NULL <=> anything-else` is false
     /// (rather than `NULL`) — it never returns SQL's three-valued unknown.

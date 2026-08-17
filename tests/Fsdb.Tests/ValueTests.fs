@@ -206,11 +206,60 @@ let tests =
                     Expect.equal (add VNull (VInt 1L)) VNull "null + 1"
                     Expect.equal (mul (VInt 1L) VNull) VNull "1 * null"
 
-                testCase "division always yields a double"
-                <| fun _ -> Expect.equal (div (VInt 1L) (VInt 2L)) (VDouble 0.5) "1 / 2"
+                testCase "int / int divides to decimal, scaled to the dividend's scale plus 4 (MySQL's div_precision_increment)"
+                <| fun _ -> Expect.equal (div (VInt 5L) (VInt 2L)) (VDecimal 2.5000M) "5 / 2"
 
-                testCase "division by zero yields NULL, not an exception"
-                <| fun _ -> Expect.equal (div (VInt 1L) (VInt 0L)) VNull "1 / 0" ]
+                testCase "a repeating quotient truncates at the same 4 extra digits, not a double's shortest round-trip"
+                <| fun _ -> Expect.equal (div (VInt 1L) (VInt 3L)) (VDecimal 0.3333M) "1 / 3"
+
+                testCase "a negative dividend keeps the sign through the decimal scale bump"
+                <| fun _ -> Expect.equal (div (VInt -7L) (VInt 2L)) (VDecimal -3.5000M) "-7 / 2"
+
+                testCase "the dividend's own scale carries into the +4, not just its type"
+                <| fun _ -> Expect.equal (div (VDecimal 10.00M) (VInt 3L)) (VDecimal 3.333333M) "10.00 / 3"
+
+                testCase "an INT dividend against a DECIMAL divisor still scales off the INT's own (zero) scale"
+                <| fun _ -> Expect.equal (div (VInt 1L) (VDecimal 3.00M)) (VDecimal 0.3333M) "1 / 3.00"
+
+                testCase "a DOUBLE operand taints the result to DOUBLE instead of DECIMAL"
+                <| fun _ -> Expect.equal (div (VDouble 1.0) (VInt 3L)) (VDouble(1.0 / 3.0)) "1e0 / 3"
+
+                testCase "division by zero yields NULL, not an exception, for both the decimal and double paths"
+                <| fun _ ->
+                    Expect.equal (div (VInt 1L) (VInt 0L)) VNull "1 / 0"
+                    Expect.equal (div (VDouble 1.0) (VInt 0L)) VNull "1e0 / 0" ]
+
+          testList
+              "modulo"
+              [ testCase "int MOD int stays int"
+                <| fun _ -> Expect.equal (modulo (VInt 8L) (VInt 3L)) (VInt 2L) "8 MOD 3"
+
+                testCase "a decimal operand keeps DECIMAL (and its own scale), unlike / — no div_precision_increment bump"
+                <| fun _ -> Expect.equal (modulo (VDecimal 5.0M) (VInt 2L)) (VDecimal 1.0M) "5.0 MOD 2"
+
+                testCase "a double operand taints the result to DOUBLE"
+                <| fun _ -> Expect.equal (modulo (VDouble 5.5) (VInt 2L)) (VDouble 1.5) "5.5 MOD 2"
+
+                testCase "modulo by zero yields NULL, not an exception"
+                <| fun _ ->
+                    Expect.equal (modulo (VInt 5L) (VInt 0L)) VNull "5 MOD 0"
+                    Expect.equal (modulo (VDecimal 5.0M) (VInt 0L)) VNull "5.0 MOD 0" ]
+
+          testList
+              "intDiv"
+              [ testCase "DIV always yields an int, truncated toward zero"
+                <| fun _ -> Expect.equal (intDiv (VInt 5L) (VInt 2L)) (VInt 2L) "5 DIV 2"
+
+                testCase "a negative dividend truncates toward zero rather than flooring"
+                <| fun _ -> Expect.equal (intDiv (VInt -7L) (VInt 2L)) (VInt -3L) "-7 DIV 2"
+
+                testCase "a float operand doesn't pre-round — DIV truncates the true quotient, not the rounded operands"
+                <| fun _ ->
+                    Expect.equal (intDiv (VDecimal 7.5M) (VInt 2L)) (VInt 3L) "7.5 DIV 2"
+                    Expect.equal (intDiv (VInt 7L) (VDecimal 2.5M)) (VInt 2L) "7 DIV 2.5"
+
+                testCase "DIV by zero yields NULL, not an exception"
+                <| fun _ -> Expect.equal (intDiv (VInt 5L) (VInt 0L)) VNull "5 DIV 0" ]
 
           // `Functions.fs` has no dedicated `FunctionsTests.fs` — its home
           // in the `.fsproj`'s `<Compile>` list isn't this module's file to
@@ -549,6 +598,12 @@ let tests =
                           Expect.equal (call "CONCAT_WS" [ VString ","; VString "a"; VNull; VString "b" ]) (VString "a,b") "skips null"
                           Expect.equal (call "CONCAT_WS" [ VNull; VString "a"; VString "b" ]) VNull "null separator"
 
+                      testCase "CONCAT joins non-NULL arguments and returns NULL if any argument is NULL"
+                      <| fun _ ->
+                          Expect.equal (call "CONCAT" [ VString "a"; VString "b" ]) (VString "ab") "joins two strings"
+                          Expect.equal (call "CONCAT" [ VString "a"; VNull; VString "b" ]) VNull "any NULL nulls the whole result"
+                          Expect.equal (call "CONCAT" [ VNull ]) VNull "single NULL argument"
+
                       testCase "ELT/FIELD/FIND_IN_SET are all 1-indexed, 0/NULL when not found"
                       <| fun _ ->
                           Expect.equal (call "ELT" [ VInt 2L; VString "a"; VString "b"; VString "c" ]) (VString "b") "elt"
@@ -570,6 +625,15 @@ let tests =
                       <| fun _ ->
                           Expect.equal (call "CEIL" [ VDouble 1.1 ]) (VInt 2L) "ceil"
                           Expect.equal (call "FLOOR" [ VDouble 1.9 ]) (VInt 1L) "floor"
+                          // An integer passes through unchanged, and a
+                          // numeric string is coerced the same way a plain
+                          // value would be.
+                          Expect.equal (call "CEIL" [ VInt 3L ]) (VInt 3L) "int ceil passthrough"
+                          Expect.equal (call "FLOOR" [ VInt 3L ]) (VInt 3L) "int floor passthrough"
+                          Expect.equal (call "CEIL" [ VString "1.1" ]) (VInt 2L) "string ceil coerced"
+                          Expect.equal (call "FLOOR" [ VString "1.9" ]) (VInt 1L) "string floor coerced"
+                          Expect.equal (call "CEIL" [ VNull ]) VNull "null ceil"
+                          Expect.equal (call "FLOOR" [ VNull ]) VNull "null floor"
 
                       testCase "POW/SQRT compute doubles, SQRT of a negative is NULL"
                       <| fun _ ->
@@ -584,13 +648,50 @@ let tests =
                           Expect.equal (call "SIGN" [ VInt 5L ]) (VInt 1L) "positive"
 
                       testCase "TRUNCATE cuts toward zero without rounding"
-                      <| fun _ -> Expect.equal (call "TRUNCATE" [ VDouble 1.999; VInt 2L ]) (VDouble 1.99) "truncate"
+                      <| fun _ ->
+                          Expect.equal (call "TRUNCATE" [ VDouble 1.999; VInt 2L ]) (VDouble 1.99) "double truncate"
+                          // A DECIMAL first operand stays DECIMAL (keeps its
+                          // scale) via a separate, dedicated match branch.
+                          Expect.equal (call "TRUNCATE" [ VDecimal 1.999M; VInt 2L ]) (VDecimal 1.99M) "decimal truncate"
+                          Expect.equal (call "TRUNCATE" [ VNull; VInt 2L ]) VNull "null truncate"
+
+                      testCase "ABS handles every numeric kind and NULL"
+                      <| fun _ ->
+                          Expect.equal (call "ABS" [ VInt(-5L) ]) (VInt 5L) "int"
+                          Expect.equal (call "ABS" [ VDouble(-5.5) ]) (VDouble 5.5) "double"
+                          Expect.equal (call "ABS" [ VDecimal(-5.5M) ]) (VDecimal 5.5M) "decimal"
+                          Expect.equal (call "ABS" [ VNull ]) VNull "null"
+
+                      testCase "ROUND rounds per kind, honours a digit arg, and nulls NULL"
+                      <| fun _ ->
+                          Expect.equal (call "ROUND" [ VInt 5L ]) (VInt 5L) "int passthrough"
+                          Expect.equal (call "ROUND" [ VInt 5L; VInt 2L ]) (VInt 5L) "int with digits"
+                          Expect.equal (call "ROUND" [ VDouble 3.7 ]) (VDouble 4.0) "double nearest"
+                          Expect.equal (call "ROUND" [ VDouble 3.14159; VInt 2L ]) (VDouble 3.14) "double with digits"
+                          Expect.equal (call "ROUND" [ VDecimal 3.5M ]) (VDecimal 4M) "decimal half away from zero"
+                          Expect.equal (call "ROUND" [ VNull ]) VNull "single null"
+                          Expect.equal (call "ROUND" [ VNull; VInt 2L ]) VNull "null with digits"
+                          Expect.equal (call "ROUND" [ VDouble 1.5; VNull ]) VNull "value with null digits"
+
+                      testCase "MOD divides modulo across int/double/decimal and nulls a zero divisor"
+                      <| fun _ ->
+                          Expect.equal (call "MOD" [ VInt 7L; VInt 3L ]) (VInt 1L) "int mod"
+                          Expect.equal (call "MOD" [ VInt 7L; VInt 0L ]) VNull "int mod by zero"
+                          Expect.equal (call "MOD" [ VDouble 7.5; VDouble 2.0 ]) (VDouble 1.5) "double mod"
+                          Expect.equal (call "MOD" [ VDouble 7.5; VDouble 0.0 ]) VNull "double mod by zero"
+                          Expect.equal (call "MOD" [ VDecimal 7.5M; VDecimal 2M ]) (VDecimal 1.5M) "decimal mod"
+                          Expect.equal (call "MOD" [ VDecimal 7.5M; VDecimal 0M ]) VNull "decimal mod by zero"
+                          Expect.equal (call "MOD" [ VInt 7L; VNull ]) VNull "null divisor"
+                          Expect.equal (call "MOD" [ VNull; VInt 3L ]) VNull "null dividend"
 
                       testCase "GREATEST/LEAST propagate NULL and otherwise compare like ORDER BY"
                       <| fun _ ->
                           Expect.equal (call "GREATEST" [ VInt 1L; VInt 5L; VInt 3L ]) (VInt 5L) "greatest"
                           Expect.equal (call "LEAST" [ VInt 1L; VInt 5L; VInt 3L ]) (VInt 1L) "least"
-                          Expect.equal (call "GREATEST" [ VInt 1L; VNull ]) VNull "null propagates"
+                          Expect.equal (call "GREATEST" [ VInt 1L; VNull ]) VNull "null propagates greatest"
+                          Expect.equal (call "LEAST" [ VInt 1L; VNull ]) VNull "null propagates least"
+                          Expect.equal (call "GREATEST" [ VNull ]) VNull "single null greatest"
+                          Expect.equal (call "LEAST" [ VNull ]) VNull "single null least"
 
                       testCase "NULLIF nulls out equal arguments, passes through unequal ones"
                       <| fun _ ->

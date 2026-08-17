@@ -166,6 +166,7 @@ let private encodeOp (op: Op) : JsonNode =
         | Sub -> "Sub"
         | Mul -> "Mul"
         | Div -> "Div"
+        | IntDiv -> "IntDiv"
         | NullSafeEq -> "NullSafeEq"
     )
 
@@ -183,6 +184,7 @@ let private decodeOp (node: JsonNode) : Op =
     | "Sub" -> Sub
     | "Mul" -> Mul
     | "Div" -> Div
+    | "IntDiv" -> IntDiv
     | "NullSafeEq" -> NullSafeEq
     | tag -> failwithf "Persistence: unknown Op case '%s' in WAL/snapshot" tag
 
