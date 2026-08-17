@@ -273,6 +273,35 @@ let tests =
               let values = rowsOf reloaded defaultDatabase "seq" |> List.map (fun r -> r.[0]) |> List.sortBy (function VInt i -> i | _ -> 0L)
               Expect.equal values [ VInt 2L; VInt 3L; VInt 4L ] "each row incremented exactly once on replay, not cascaded"
 
+          testCase "the reloaded store's PRIMARY KEY index reflects a replayed UPDATE's new values, not the pre-update ones"
+          <| fun _ ->
+              // `RowsUpdated` replay goes through `mapTableRows`, which
+              // rewrites `Rows` directly (bypassing `Storage.updateRows`'
+              // checked, index-maintaining path — see its doc) — this
+              // proves `reindexTable` picks the slack back up afterward.
+              let dir = tempDataDir ()
+              let store = load dir
+              attach dir store
+              createTable store defaultDatabase "pk" (usersColumns |> List.filter (fun c -> c.Name <> "note")) [] [] |> ignore
+              insertRows store defaultDatabase "pk" (Some [ "id"; "name" ]) [ [ VInt 1L; VString "a" ]; [ VInt 2L; VString "b" ]; [ VInt 3L; VString "c" ] ]
+              |> ignore
+
+              updateRows store defaultDatabase "pk" (fun row -> Ok(row.[0] = VInt 1L)) (fun row -> Ok [| VInt 10L; row.[1] |])
+              |> ignore
+
+              let reloaded = load dir
+
+              // id 1 is free again after the replayed update moved that row to id 10.
+              match insertRows reloaded defaultDatabase "pk" (Some [ "id"; "name" ]) [ [ VInt 1L; VString "d" ] ] with
+              | Ok(1L, _, 1) -> ()
+              | other -> failtestf "expected id 1 to be free again after replay, got %A" other
+
+              // id 10 is now occupied — a stale (pre-update) index would
+              // wrongly accept this as if id 10 never existed.
+              match insertRows reloaded defaultDatabase "pk" (Some [ "id"; "name" ]) [ [ VInt 10L; VString "e" ] ] with
+              | Error(DuplicateKey("PRIMARY", _)) -> ()
+              | other -> failtestf "expected id 10 to be rejected as a duplicate after replay, got %A" other
+
           testCase "WAL replay of a duplicate-row DELETE LIMIT 1 removes exactly one physical row, not every value-equal twin"
           <| fun _ ->
               let dir = tempDataDir ()
