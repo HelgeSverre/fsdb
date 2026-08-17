@@ -642,4 +642,19 @@ let tests =
               let names = rowsOf reloaded defaultDatabase "t" |> List.map (fun r -> r.[1])
               Expect.equal (List.length names) 2 "the .new snapshot is trusted as-is, not merged with an (already-truncated, in the real path) WAL"
               Expect.containsAll names [ VString "a"; VString "b" ] "no data lost"
-              Expect.isFalse (File.Exists(snapshotPath dir + ".new")) ".new is renamed into place after a successful load" ]
+              Expect.isFalse (File.Exists(snapshotPath dir + ".new")) ".new is renamed into place after a successful load"
+
+          testCase "a table's declared charset/collation survives a restart, so SHOW CREATE stays faithful"
+          <| fun _ ->
+              let dir = tempDataDir ()
+              let store = load dir
+              attach dir store
+              createTable store defaultDatabase "decl" usersColumns [] [] (Some "utf8mb4") (Some "utf8mb4_unicode_ci") |> ignore
+
+              let reloaded = load dir
+
+              match Fsdb.InformationSchema.findTable reloaded.Catalog defaultDatabase "decl" with
+              | Ok table ->
+                  Expect.equal table.TableCharset (Some "utf8mb4") "the declared charset survives the restart"
+                  Expect.equal table.TableCollation (Some "utf8mb4_unicode_ci") "the declared collation survives the restart"
+              | Error e -> failtestf "expected table 'decl' to reload, got %A" e ]

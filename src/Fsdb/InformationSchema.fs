@@ -442,6 +442,56 @@ let private collationCharacterSetApplicabilityRows: Value[] list =
       "utf8mb4_0900_ai_ci", "utf8mb4" ]
     |> List.map (fun (collation, charset) -> [| vs collation; vs charset |])
 
+/// The character sets fsdb knows about, with MySQL 8.4's defaults — the
+/// metadata a schema-compare tool (Doctrine's platform setup, DB-browser
+/// dropdowns) reads to learn which charsets exist and what each defaults
+/// to.
+let private characterSetsColumns =
+    [ strCol "CHARACTER_SET_NAME"
+      strCol "DEFAULT_COLLATE_NAME"
+      strCol "DESCRIPTION"
+      strCol "MAXLEN" ]
+
+let private characterSetsRows: Value[] list =
+    [ "utf8mb4", "utf8mb4_0900_ai_ci", "UTF-8 Unicode", "4"
+      "latin1", "latin1_swedish_ci", "cp1252 West European", "1"
+      "ascii", "ascii_general_ci", "US ASCII", "1"
+      "binary", "binary", "Binary pseudo charset", "1" ]
+    |> List.map (fun (cs, defaultCollation, description, maxlen) ->
+        [| vs cs; vs defaultCollation; vs description; vs maxlen |])
+
+/// One row per registered collation — name, its utf8mb4 charset, and its
+/// pad attribute — shared by the `information_schema.COLLATIONS` view and
+/// `SHOW COLLATION` so the two can't disagree.
+let private registeredCollationRows : (string * string * string) list =
+    Collation.registry
+    |> Map.toList
+    |> List.map (fun (name, col) -> name, "utf8mb4", (if col.PadSpace then "PAD SPACE" else "NO PAD"))
+
+let private collationsColumns =
+    [ strCol "COLLATION_NAME"
+      strCol "CHARACTER_SET_NAME"
+      strCol "ID"
+      strCol "IS_DEFAULT"
+      strCol "IS_COMPILED"
+      strCol "SORTLEN"
+      strCol "PAD_ATTRIBUTE" ]
+
+/// ponytail: `id`/`sortlen` are 0 for every row rather than MySQL's real
+/// per-collation IDs and sort lengths — nothing in the registry tracks
+/// them, and tooling reads the name/charset/default/pad columns. Add the
+/// real table if a client ever keys off a collation ID.
+let private collationsRows: Value[] list =
+    registeredCollationRows
+    |> List.map (fun (name, charset, pad) ->
+        [| vs name
+           vs charset
+           vs "0"
+           vs (if name = "utf8mb4_0900_ai_ci" then "Yes" else "")
+           vs "Yes"
+           vs "0"
+           vs pad |])
+
 /// Resolves one `information_schema` table name (case-insensitive) to its
 /// columns and freshly-projected rows, or `None` if `name` isn't one of the
 /// virtual tables this module knows about (a real 1146 from `Executor`, same
@@ -456,6 +506,8 @@ let scan (catalog: Catalog) (name: string) : (ColumnDef list * Value[] list) opt
     | "TABLE_CONSTRAINTS" -> Some(tableConstraintsColumns, tableConstraintsRows catalog)
     | "COLLATION_CHARACTER_SET_APPLICABILITY" ->
         Some(collationCharacterSetApplicabilityColumns, collationCharacterSetApplicabilityRows)
+    | "COLLATIONS" -> Some(collationsColumns, collationsRows)
+    | "CHARACTER_SETS" -> Some(characterSetsColumns, characterSetsRows)
     | "SCHEMATA" -> Some(schemataColumns, schemataRows catalog)
     | _ -> None
 
@@ -514,6 +566,28 @@ let showTables (catalog: Catalog) (dbName: string) (full: bool) (likeOpt: string
             Ok([ col; "Table_type" ], names |> List.map (fun n -> [ Some n; Some "BASE TABLE" ]))
         else
             Ok([ col ], names |> List.map (fun n -> [ Some n ]))
+
+/// `SHOW COLLATION [LIKE 'pattern']` — the registered collations with
+/// `SHOW`'s column labels (MySQL's `Collation/Charset/Id/...`, distinct
+/// from `information_schema.COLLATIONS`' `collation_name/...`).
+let showCollation (likeOpt: string option) : ShowResult =
+    let rows =
+        registeredCollationRows
+        |> List.filter (fun (name, _, _) -> likeFilter likeOpt name)
+        |> List.sortBy (fun (name, _, _) -> name)
+        |> List.map (fun (name, charset, pad) ->
+            [ Some name
+              Some charset
+              Some "0"
+              Some(if name = "utf8mb4_0900_ai_ci" then "Yes" else "")
+              Some "Yes"
+              Some "0"
+              Some pad ])
+
+    Ok(
+        [ "Collation"; "Charset"; "Id"; "Default"; "Compiled"; "Sortlen"; "Pad_attribute" ],
+        rows
+    )
 
 /// `SHOW DATABASES [LIKE 'pattern']`.
 let showDatabases (catalog: Catalog) (likeOpt: string option) : string list * (string option list) list =
@@ -584,12 +658,21 @@ let private showCreateTableDDL (t: Table) : string =
         // declares either (verified: a column with only COLLATE utf8mb4_bin
         // shows `CHARACTER SET utf8mb4 COLLATE utf8mb4_bin`) — and never
         // on non-string columns (an INT column shows plain `id int` even
-        // under a table-level COLLATE).
+        // under a table-level COLLATE). ponytail: a charset/collation the
+        // column merely *inherits* from the table's declaration renders
+        // here too, where MySQL shows only the collation when it differs
+        // from the charset's default (`varchar(10) COLLATE utf8mb4_unicode_ci`
+        // without the `CHARACTER SET`) — semantically equivalent DDL, since
+        // baking it into the column is exactly what the parser does.
         let charsetCollate =
             if not (isStringy c.Type) then
                 []
             else
                 match c.Charset, c.Collation with
+                // The baked-in server default renders as nothing, exactly
+                // like MySQL's plain `varchar(20)` — the column declared
+                // neither a charset nor a collation and inherited nothing.
+                | None, Some "utf8mb4_0900_ai_ci" -> []
                 | None, None -> []
                 | cs, col -> [ sprintf "CHARACTER SET %s" (cs |> Option.defaultValue "utf8mb4"); sprintf "COLLATE %s" (col |> Option.defaultValue "utf8mb4_0900_ai_ci") ]
 

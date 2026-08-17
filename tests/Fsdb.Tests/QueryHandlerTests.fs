@@ -208,6 +208,74 @@ let tests =
               | ResultSet(_, [ [ Some "utf8mb4"; Some "NO_ENGINE_SUBSTITUTION" ] ]) -> ()
               | other -> failtestf "expected both variables updated, got %A" other
 
+          testCase "SET NAMES drives collation_connection, with an explicit COLLATE winning"
+          <| fun _ ->
+              let store = Fsdb.Storage.create ()
+              let session = create 1 store
+
+              // the explicit COLLATE in the Laravel connector shape wins
+              let session, _ = handle session "SET NAMES utf8mb4 COLLATE utf8mb4_bin"
+
+              match handle session "SELECT @@collation_connection" |> snd with
+              | ResultSet(_, [ [ Some "utf8mb4_bin" ] ]) -> ()
+              | other -> failtestf "expected the explicit COLLATE to set collation_connection, got %A" other
+
+              match handle session "SELECT 'ÅGE' = 'age'" |> snd with
+              | ResultSet(_, [ [ Some "0" ] ]) -> ()
+              | other -> failtestf "expected literal comparisons under bin, got %A" other
+
+              // the charset's default collation when no COLLATE is written
+              let session, _ = handle session "SET NAMES utf8mb4"
+
+              match handle session "SELECT @@collation_connection" |> snd with
+              | ResultSet(_, [ [ Some "utf8mb4_0900_ai_ci" ] ]) -> ()
+              | other -> failtestf "expected SET NAMES utf8mb4 to restore ai_ci, got %A" other
+
+              match handle session "SELECT 'ÅGE' = 'age'" |> snd with
+              | ResultSet(_, [ [ Some "1" ] ]) -> ()
+              | other -> failtestf "expected literal comparisons under ai_ci again, got %A" other
+
+              // binary's byte-wise comparisons map to utf8mb4_bin
+              let session, _ = handle session "SET NAMES binary"
+
+              match handle session "SELECT @@collation_connection" |> snd with
+              | ResultSet(_, [ [ Some "utf8mb4_bin" ] ]) -> ()
+              | other -> failtestf "expected SET NAMES binary to report utf8mb4_bin, got %A" other
+
+              match handle session "SELECT 'ÅGE' = 'age'" |> snd with
+              | ResultSet(_, [ [ Some "0" ] ]) -> ()
+              | other -> failtestf "expected SET NAMES binary to compare byte-wise, got %A" other
+
+              // an unknown COLLATE is a 1273, same as the assignment form
+              match handle session "SET NAMES utf8mb4 COLLATE no_such_collation" |> snd with
+              | Err(1273, _) -> ()
+              | other -> failtestf "expected 1273 for an unknown COLLATE in SET NAMES, got %A" other
+
+          testCase "collation_connection drives LIKE, DISTINCT, and GROUP BY over literals"
+          <| fun _ ->
+              let store = Fsdb.Storage.create ()
+              let session = create 1 store
+
+              let session, _ = handle session "SET collation_connection = utf8mb4_bin"
+
+              match handle session "SELECT 'åge' LIKE 'ÅGE'" |> snd with
+              | ResultSet(_, [ [ Some "0" ] ]) -> ()
+              | other -> failtestf "expected bin LIKE on literals to be case-sensitive, got %A" other
+
+              match handle session "SELECT DISTINCT v FROM (SELECT 'åge' AS v UNION ALL SELECT 'ÅGE') t" |> snd with
+              | ResultSet(_, rows) -> Expect.equal (List.length rows) 2 "bin connection keeps both literals distinct"
+              | other -> failtestf "expected bin DISTINCT over literals to keep both, got %A" other
+
+              match handle session "SELECT COUNT(*) FROM (SELECT 'åge' AS v UNION ALL SELECT 'ÅGE') t GROUP BY v" |> snd with
+              | ResultSet(_, [ [ Some "1" ]; [ Some "1" ] ]) -> ()
+              | other -> failtestf "expected bin GROUP BY over literals to split them, got %A" other
+
+              let session, _ = handle session "SET collation_connection = utf8mb4_0900_ai_ci"
+
+              match handle session "SELECT 'åge' LIKE 'ÅGE'" |> snd with
+              | ResultSet(_, [ [ Some "1" ] ]) -> ()
+              | other -> failtestf "expected ai_ci LIKE on literals to fold, got %A" other
+
           testCase "SET collation_connection drives literal comparisons, column collations still win"
           <| fun _ ->
               let store = Fsdb.Storage.create ()

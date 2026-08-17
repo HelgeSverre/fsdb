@@ -289,7 +289,7 @@ let private handleShowTableStatus (session: Session) (sql: string) : QueryResult
 /// These match one already-comma-split assignment (`splitSetAssignments`
 /// strips the leading `SET` keyword before splitting), not a whole `SET`
 /// statement.
-let private setNames = Regex(@"^NAMES\s+'?(\w+)'?", RegexOptions.IgnoreCase)
+let private setNames = Regex(@"^NAMES\s+'?(\w+)'?(?:\s+COLLATE\s+'?(\w+)'?)?", RegexOptions.IgnoreCase)
 
 let private setVar =
     Regex(@"^(?:SESSION\s+|GLOBAL\s+|@@(?:SESSION\.|GLOBAL\.)?)?(\w+)\s*=\s*(.+)$", RegexOptions.IgnoreCase)
@@ -394,7 +394,7 @@ let private splitSetAssignments (sql: string) : string list =
 /// MySQL executing a multi-assignment `SET` all-or-nothing rather than
 /// left-to-right with partial effect.
 type private SetAction =
-    | SetNamesAction of charset: string
+    | SetNamesAction of charset: string * collation: string option
     | SetVarAction of name: string * value: string option
     | SetUserVarAction of name: string * value: string option
 
@@ -415,7 +415,17 @@ let private parseSetFragment (sql: string) (session: Session) (fragment: string)
     let namesMatch = setNames.Match fragment
 
     if namesMatch.Success then
-        Ok(SetNamesAction namesMatch.Groups.[1].Value)
+        let explicitCollation =
+            if namesMatch.Groups.[2].Success then
+                Some namesMatch.Groups.[2].Value
+            else
+                None
+
+        // MySQL rejects a `SET NAMES x COLLATE unknown` outright (1273),
+        // same as the collation_connection assignment path below.
+        match explicitCollation |> Option.map Collation.tryFind with
+        | Some None -> Error(Err(1273, sprintf "Unknown collation: '%s'" namesMatch.Groups.[2].Value))
+        | _ -> Ok(SetNamesAction(namesMatch.Groups.[1].Value, explicitCollation))
     else
         let userVarMatch = setUserVar.Match fragment
 
@@ -450,13 +460,37 @@ let private parseSetFragment (sql: string) (session: Session) (fragment: string)
 /// `foreign_key_checks`/`sql_mode` trigger.
 let private applySetAction (session: Session) (action: SetAction) : Session =
     match action with
-    | SetNamesAction charset ->
+    | SetNamesAction(charset, collation) ->
+        // `SET NAMES x` also drives `collation_connection` in MySQL — the
+        // charset's default collation, or the explicit `COLLATE` when
+        // written (Laravel's connector sends `SET NAMES utf8mb4 COLLATE
+        // utf8mb4_unicode_ci`). latin1/ascii's real defaults
+        // (latin1_swedish_ci/ascii_general_ci) aren't registered; the
+        // server default ai_ci stands in, the same approximation column
+        // charsets use. `binary` compares byte-wise, i.e. utf8mb4_bin.
+        let connectionCollation =
+            match collation |> Option.bind Collation.tryFind with
+            | Some col -> Some col
+            | None ->
+                match charset.ToLowerInvariant() with
+                | "binary" -> Collation.tryFind "utf8mb4_bin"
+                | "utf8mb4"
+                | "utf8"
+                | "latin1"
+                | "ascii" -> Some Collation.defaultCollation
+                | _ -> None
+
+        connectionCollation |> Option.iter (setConnectionCollation session.Store)
+
         { session with
             Variables =
                 session.Variables
                 |> Map.add "character_set_client" (Some charset)
                 |> Map.add "character_set_connection" (Some charset)
-                |> Map.add "character_set_results" (Some charset) }
+                |> Map.add "character_set_results" (Some charset)
+                |> Map.add
+                    "collation_connection"
+                    (connectionCollation |> Option.map (fun c -> c.Name)) }
     | SetVarAction(name, value) ->
         // Neither `foreign_key_checks` nor `sql_mode` is in
         // `nullableSystemVars`, so `value` is always `Some` here — but the
@@ -817,6 +851,7 @@ type private Probe =
     | ShowColumns of full: bool * name: string * dbOverride: string option
     | Describe of name: string
     | ShowIndex of name: string * dbOverride: string option
+    | ShowCollation
 
 /// The one ordered list of text-probed forms — matching `Probe`'s cases
 /// exactly (the compiler enforces `runProbe` covers every one of them), so
@@ -852,6 +887,8 @@ let private tryProbe (sql: string) (upper: string) : Probe option =
         Some ShowDatabases
     elif upper.StartsWith "SHOW TABLE STATUS" then
         Some ShowTableStatus
+    elif upper.StartsWith "SHOW COLLATION" then
+        Some ShowCollation
     elif upper.StartsWith "SHOW TABLES" || upper.StartsWith "SHOW FULL TABLES" then
         Some ShowTables
     elif showCreateTableRe.IsMatch sql then
@@ -908,6 +945,7 @@ let private runProbe (session: Session) (sql: string) (probe: Probe) : Session *
     | ShowWarnings -> session, ResultSet([ "Level"; "Code"; "Message" ], [])
     | ShowDatabases -> session, handleShowDatabases session sql
     | ShowTableStatus -> session, handleShowTableStatus session sql
+    | ShowCollation -> session, InformationSchema.showCollation (likeSuffix sql) |> showResult
     | ShowTables -> session, handleShowTables session sql
     | ShowCreate name ->
         let sessionDb = session.Database |> Option.defaultValue defaultDatabase

@@ -144,6 +144,61 @@ let tests =
                   Expect.stringContains ddl "DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci" "server-default table options"
               | other -> failtestf "expected SHOW CREATE TABLE output, got %A" other
 
+          testCase "ALTER TABLE ADD COLUMN attaches the table's declared defaults to string columns"
+          <| fun _ ->
+              let store = setup ()
+              run store "CREATE TABLE alt (id INT) DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci" |> ignore
+              run store "ALTER TABLE alt ADD COLUMN name VARCHAR(10)" |> ignore
+              run store "ALTER TABLE alt ADD COLUMN tag VARCHAR(10) COLLATE utf8mb4_bin" |> ignore
+
+              let session = Fsdb.Session.create 1 store
+
+              match Fsdb.QueryHandler.handle session "SHOW CREATE TABLE alt" |> snd with
+              | ResultSet(_, [ [ Some "alt"; Some ddl ] ]) ->
+                  Expect.stringContains ddl "`name` varchar(10) CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci" "the added column inherits the table's declared collation"
+                  Expect.stringContains ddl "`tag` varchar(10) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin" "an explicit column COLLATE wins over the table default"
+                  Expect.stringContains ddl "`id` int DEFAULT NULL" "the INT column renders plain"
+              | other -> failtestf "expected SHOW CREATE TABLE output, got %A" other
+
+          testCase "CHARACTER_SETS and COLLATIONS list the supported charsets and registered collations"
+          <| fun _ ->
+              let store = setup ()
+
+              match
+                  run
+                      store
+                      "SELECT character_set_name, default_collate_name, maxlen FROM information_schema.character_sets WHERE character_set_name = 'utf8mb4'"
+              with
+              | ResultSet(_, rows) ->
+                  Expect.equal rows [ [ Some "utf8mb4"; Some "utf8mb4_0900_ai_ci"; Some "4" ] ] "utf8mb4 with its MySQL 8.4 default"
+              | other -> failtestf "expected a resultset, got %A" other
+
+              match
+                  run
+                      store
+                      "SELECT collation_name, character_set_name, is_default, pad_attribute FROM information_schema.collations WHERE collation_name IN ('utf8mb4_bin', 'utf8mb4_0900_ai_ci') ORDER BY collation_name"
+              with
+              | ResultSet(_, rows) ->
+                  Expect.equal
+                      rows
+                      [ [ Some "utf8mb4_0900_ai_ci"; Some "utf8mb4"; Some "Yes"; Some "NO PAD" ]
+                        [ Some "utf8mb4_bin"; Some "utf8mb4"; Some ""; Some "PAD SPACE" ] ]
+                      "the charset default flagged, pad attributes reported"
+              | other -> failtestf "expected a resultset, got %A" other
+
+          testCase "SHOW COLLATION lists the registered collations and honors LIKE"
+          <| fun _ ->
+              let store = setup ()
+              let session = Fsdb.Session.create 1 store
+
+              match Fsdb.QueryHandler.handle session "SHOW COLLATION LIKE 'utf8mb4_bin'" |> snd with
+              | ResultSet([ "Collation"; "Charset"; "Id"; "Default"; "Compiled"; "Sortlen"; "Pad_attribute" ], rows) ->
+                  Expect.equal
+                      rows
+                      [ [ Some "utf8mb4_bin"; Some "utf8mb4"; Some "0"; Some ""; Some "Yes"; Some "0"; Some "PAD SPACE" ] ]
+                      "one bin row with its pad attribute"
+              | other -> failtestf "expected SHOW COLLATION output, got %A" other
+
           testCase "COLUMNS projects declared columns with type/nullability/key metadata"
           <| fun _ ->
               let store = setup ()

@@ -264,36 +264,43 @@ let defaultCollation = Map.find "utf8mb4_0900_ai_ci" registry
 /// The Unicode code points cp1252 adds above ISO-8859-1, in 0x80–0x9F slot
 /// order (0x81/0x8D/0x8F/0x90/0x9D are undefined in cp1252 and skipped).
 module Charset =
-    // € ‚ ƒ „ … † ‡ ˆ ‰ Š ‹ Œ Ž ' ' " " • – — ˜ ™ š › œ ž Ÿ
-    let private cp1252Extras =
-        set
-            [ 0x20AC
-              0x201A
-              0x0192
-              0x201E
-              0x2026
-              0x2020
-              0x2021
-              0x02C6
-              0x2030
-              0x0160
-              0x2039
-              0x0152
-              0x017D
-              0x2018
-              0x2019
-              0x201C
-              0x201D
-              0x2022
-              0x2013
-              0x2014
-              0x02DC
-              0x2122
-              0x0161
-              0x203A
-              0x0153
-              0x017E
-              0x0178 ]
+    /// cp1252's 0x80–0x9F slots, in slot order — the five slots cp1252
+    /// leaves undefined (0x81/0x8D/0x8F/0x90/0x9D) are `None`.
+    let private cp1252HighSlots : char option array =
+        [| Some '€' // 0x80
+           None // 0x81
+           Some '‚' // 0x82
+           Some 'ƒ' // 0x83
+           Some '„' // 0x84
+           Some '…' // 0x85
+           Some '†' // 0x86
+           Some '‡' // 0x87
+           Some 'ˆ' // 0x88
+           Some '‰' // 0x89
+           Some 'Š' // 0x8A
+           Some '‹' // 0x8B
+           Some 'Œ' // 0x8C
+           None // 0x8D
+           Some 'Ž' // 0x8E
+           None // 0x8F
+           None // 0x90
+           Some '‘' // 0x91
+           Some '’' // 0x92
+           Some '“' // 0x93
+           Some '”' // 0x94
+           Some '•' // 0x95
+           Some '–' // 0x96
+           Some '—' // 0x97
+           Some '˜' // 0x98
+           Some '™' // 0x99
+           Some 'š' // 0x9A
+           Some '›' // 0x9B
+           Some 'œ' // 0x9C
+           None // 0x9D
+           Some 'ž' // 0x9E
+           Some 'Ÿ' |] // 0x9F
+
+    let private cp1252Extras = cp1252HighSlots |> Array.choose id |> Array.map int |> Set.ofArray
 
     /// Maps text to what a `latin1` (cp1252) column can hold: ASCII and
     /// 0xA0–0xFF pass through, the cp1252 extras pass through, everything
@@ -310,7 +317,30 @@ module Charset =
             else
                 '?')
 
+    /// Decodes raw bytes as cp1252 — what a `_latin1'...'` introducer needs,
+    /// since MySQL labels the literal's client-encoded bytes without
+    /// converting them (verified: `_latin1'é'` reads back as the two cp1252
+    /// chars `Ã©`).
+    let decodeLatin1Bytes (bytes: byte[]) : string =
+        bytes
+        |> Array.map (fun b ->
+            if b < 0x80uy then
+                char (int b)
+            elif b >= 0xA0uy then
+                char (int b)
+            else
+                match cp1252HighSlots.[int b - 0x80] with
+                | Some c -> c
+                | None -> '?')
+        |> System.String
+
     /// Maps text to what an `ascii` column can hold: 7-bit passes through,
     /// everything else becomes '?'.
     let transcodeAscii (s: string) : string =
         s |> String.map (fun c -> if int c < 0x80 then c else '?')
+
+    /// Decodes raw bytes as ASCII — the `_ascii'...'` introducer's byte
+    /// labeling, where each non-7-bit byte becomes one '?' (verified:
+    /// `_ascii'å'` reads back as `??`, one per byte).
+    let decodeAsciiBytes (bytes: byte[]) : string =
+        bytes |> Array.map (fun b -> if b < 0x80uy then char (int b) else '?') |> System.String
