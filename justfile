@@ -97,7 +97,14 @@ bench-mysql-start:
 bench-mysql-stop:
     {{ MYSQLADMIN }} -P{{ BENCH_MYSQL_PORT }} --protocol=tcp -h127.0.0.1 -uroot shutdown 2>/dev/null || true
 
-# Build + run fsdb (Release) and the benchmark suite against it; shared by bench/bench-quick
+# Build fsdb (Release) and run the benchmark suite; shared by bench/bench-quick.
+# fsdb itself is no longer started here — ServerBenchmarks restarts it per
+# benchmark case (see the module comment there for why) — this just builds
+# it once and hands the binary path down via FSDB_BENCH_BIN. The benchmark
+# host is run with `dotnet exec` on a prebuilt Release binary rather than
+# `dotnet run`, because `dotnet run` sets DOTNET_MODIFIABLE_ASSEMBLIES=debug
+# for hot reload, which made BenchmarkDotNet's own [Host] line report DEBUG
+# even though the binary was genuinely built Release.
 [group('bench')]
 [private]
 _bench-run *ARGS: bench-mysql-start
@@ -107,24 +114,36 @@ _bench-run *ARGS: bench-mysql-start
         echo "error: something is already listening on port {{ PORT }} — stop it first, benchmarking against a shared server would corrupt both" >&2
         exit 1
     fi
+    trap 'just bench-mysql-stop' EXIT
     dotnet build src/Fsdb -c Release -v q
-    dotnet run -c Release --no-build --project src/Fsdb -- --port {{ PORT }} &
-    FSDB_PID=$!
-    trap 'kill $FSDB_PID 2>/dev/null || true; just bench-mysql-stop' EXIT
-    for _ in $(seq 1 30); do
-        {{ MYSQL }} --protocol=tcp -h127.0.0.1 -P{{ PORT }} -uroot -e 'SELECT 1' &>/dev/null && break
-        sleep 1
-    done
-    dotnet run -c Release --project benchmarks/Fsdb.Benchmarks -- {{ ARGS }}
+    dotnet build benchmarks/Fsdb.Benchmarks -c Release -v q
+    export FSDB_BENCH_BIN="$(pwd)/src/Fsdb/bin/Release/net10.0/Fsdb.dll"
+    dotnet exec benchmarks/Fsdb.Benchmarks/bin/Release/net10.0/Fsdb.Benchmarks.dll {{ ARGS }}
 
 # Run the full benchmark suite (fsdb vs MySQL 8.4); results land in benchmarks/results/<git-sha>.md
 [group('bench')]
 bench:
     @just _bench-run
     @mkdir -p benchmarks/results
-    @cp BenchmarkDotNet.Artifacts/results/Fsdb.Benchmarks.ServerBenchmarks.ServerBenchmarks-report-github.md "benchmarks/results/$(git rev-parse --short HEAD).md"
+    @just _bench-header > "benchmarks/results/$(git rev-parse --short HEAD).md"
+    @cat BenchmarkDotNet.Artifacts/results/Fsdb.Benchmarks.ServerBenchmarks.ServerBenchmarks-report-github.md >> "benchmarks/results/$(git rev-parse --short HEAD).md"
     @rm -rf BenchmarkDotNet.Artifacts
     @echo "results: benchmarks/results/$(git rev-parse --short HEAD).md"
+
+# Environment/provenance header prepended to each results file
+[group('bench')]
+[private]
+_bench-header:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    echo "<!--"
+    echo "sha: $(git rev-parse --short HEAD)"
+    echo "date: $(date -u +%Y-%m-%dT%H:%M:%SZ)"
+    echo "os: $(uname -srm)"
+    echo "dotnet: $(dotnet --version)"
+    echo "fsdb server mode: in-memory (no --data-dir, no WAL/fsync)"
+    echo "-->"
+    echo
 
 # Same as `bench`, but with BenchmarkDotNet's ShortRun job for fast local iteration
 [group('bench')]

@@ -4,6 +4,12 @@
     <OutputType>Exe</OutputType>
     <TargetFramework>net10.0</TargetFramework>
     <Optimize>true</Optimize>
+    <!-- Portable PDBs (the SDK default even under Release) set the
+         assembly's DebuggableAttribute.IsJITTrackingEnabled, which
+         BenchmarkDotNet reads as "this is a DEBUG build" and stamps onto
+         the [Host] line regardless of Optimize/Configuration. Optimize=true
+         alone doesn't clear that flag; DebugType=none does. -->
+    <DebugType>none</DebugType>
   </PropertyGroup>
 
   <ItemGroup>
