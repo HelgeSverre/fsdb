@@ -623,6 +623,20 @@ let private identAtom: Parser<Expr, unit> =
                         <|> (identifier |>> fun col -> QualifiedCol(name, col)))
                    preturn (Col name) ])
 
+/// `?` parameter placeholder, numbered by SQL-text position via an
+/// `AsyncLocal` counter (reset per `parse` call, so concurrent connections'
+/// parses never share one). The counter stays out of FParsec user state, so
+/// every parser keeps its `unit` state and the placeholder index rides in the
+/// AST node instead.
+let private placeholderCounterLocal = System.Threading.AsyncLocal<int>()
+
+let private placeholderAtom: Parser<Expr, unit> =
+    pchar '?' .>> ws
+    |>> (fun _ ->
+        let n = placeholderCounterLocal.Value
+        placeholderCounterLocal.Value <- n + 1
+        Placeholder n)
+
 let private atom: Parser<Expr, unit> =
     choice
         [ subqueryExpr
@@ -643,6 +657,7 @@ let private atom: Parser<Expr, unit> =
           keyword "NULL" >>% Lit VNull
           keyword "TRUE" >>% Lit(VInt 1L)
           keyword "FALSE" >>% Lit(VInt 0L)
+          placeholderAtom
           identAtom ]
     <?> "expression"
 
@@ -1631,6 +1646,7 @@ statementRef.Value <-
 /// forms like `SELECT @@version` are deliberately out of scope — those are
 /// handled by `QueryHandler` before reaching this parser.
 let parse (sql: string) : Result<Statement, string> =
+    placeholderCounterLocal.Value <- 0
     let full = ws >>. statement .>> opt (sym ";") .>> eof
 
     // `open FParsec` brings its own `Ok`/`Error` (from `Reply`'s status) into
@@ -1646,3 +1662,8 @@ let parse (sql: string) : Result<Statement, string> =
         | Failure(msg, _, _) -> Result.Error msg
     with ex ->
         Result.Error ex.Message
+
+/// Number of `?` placeholders the most recent `parse` on this async flow saw —
+/// read after a successful parse to size the prepared statement's parameter
+/// list.
+let placeholderCount () : int = placeholderCounterLocal.Value

@@ -391,11 +391,12 @@ let private handleConnection
                                         |> Async.Ignore
 
                                     return! loop session
-                                | Result.Ok paramCount ->
+                                | Result.Ok(ast, paramCount) ->
                                     let stmtId = session.NextStmtId
 
                                     let stmt: PreparedStmt =
-                                        { Sql = sql
+                                        { Ast = ast
+                                          Sql = sql
                                           ParamCount = paramCount
                                           LastParamTypes = None }
 
@@ -478,12 +479,7 @@ let private handleConnection
                                                         | Some bytes -> VString(Encoding.UTF8.GetString bytes)
                                                         | None -> if isNull i then VNull else readBinaryValue r typeId unsigned)
 
-                                                let finalSql =
-                                                    QueryHandler.substitutePlaceholders
-                                                        stmt.Sql
-                                                        (values |> List.map QueryHandler.valueToSqlLiteral)
-
-                                                Result.Ok(types, finalSql)
+                                                Result.Ok(types, values)
                                         with ex ->
                                             Result.Error ex.Message
 
@@ -496,13 +492,13 @@ let private handleConnection
                                             |> Async.Ignore
 
                                         return! loop session
-                                    | Result.Ok(types, finalSql) ->
+                                    | Result.Ok(types, values) ->
                                         let session =
                                             { session with
                                                 Statements = Map.add stmtId { stmt with LastParamTypes = Some types } session.Statements
                                                 LongData = session.LongData |> Map.filter (fun (sid, _) _ -> sid <> stmtId) }
 
-                                        match runCancellable (fun () -> QueryHandler.handle session finalSql) with
+                                        match runCancellable (fun () -> QueryHandler.executePrepared session stmt values) with
                                         | None -> ()
                                         | Some(session, result) ->
                                             activeSession <- Some session

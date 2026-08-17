@@ -2,6 +2,7 @@
 module Fsdb.Session
 
 open System
+open Fsdb.Ast
 open Fsdb.Protocol
 open Fsdb.Storage
 
@@ -45,22 +46,21 @@ let defaultVariables: Map<string, string option> =
           "query_cache_type", "OFF" ]
         |> Map.map (fun _ v -> Some v)
 
-/// A server-side prepared statement (COM_STMT_PREPARE / COM_STMT_EXECUTE):
-/// the SQL text as given, `?` placeholders and all. Execution substitutes
-/// bound parameters back into this text as SQL literals and re-parses (see
-/// `QueryHandler.substitutePlaceholders`) — a typed plan tree would avoid
-/// the double-parse, but the parser runs in well under a millisecond for
-/// anything Laravel throws at it, and reusing COM_QUERY's own execution
-/// path beats keeping two in sync. ponytail: textual substitution instead
-/// of a typed plan; revisit if EXECUTE-heavy workloads ever make the
-/// reparse show up in a profile.
+/// A server-side prepared statement (COM_STMT_PREPARE / COM_STMT_EXECUTE).
+/// `Ast` is the parsed statement for everything the grammar produces —
+/// EXECUTE binds parameters as `Value`s into it (see
+/// `QueryHandler.bindPlaceholders`) instead of splicing SQL literals back
+/// into text and re-parsing. It's `None` for the text-probed forms the
+/// grammar doesn't produce (SET/SHOW/transaction control), which still
+/// substitute into `Sql` and re-probe.
 ///
 /// `LastParamTypes` caches the (type id, unsigned) pairs from the most
 /// recent EXECUTE that actually sent them — COM_STMT_EXECUTE's
 /// new-params-bound-flag lets a client omit them on a later EXECUTE and
 /// reuse what it sent before.
 type PreparedStmt =
-    { Sql: string
+    { Ast: Statement option
+      Sql: string
       ParamCount: int
       LastParamTypes: (byte * bool) list option }
 

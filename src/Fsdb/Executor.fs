@@ -107,6 +107,7 @@ let private isAggregateCall (registry: Registry) (expr: Expr) : bool =
 /// `substituteValuesFunc` already does for `VALUES(col)` rewriting.
 let rec private containsAggregate (registry: Registry) (expr: Expr) : bool =
     match expr with
+    | Placeholder _ -> false
     | FuncCall(_, args) -> isAggregateCall registry expr || args |> List.exists (containsAggregate registry)
     | BinOp(_, a, b) -> containsAggregate registry a || containsAggregate registry b
     | Not e
@@ -149,6 +150,7 @@ let rec private containsAggregate (registry: Registry) (expr: Expr) : bool =
 /// rewrite need every occurrence rather than only a top-level one.
 let rec private collectWindowFuncs (expr: Expr) : Expr list =
     match expr with
+    | Placeholder _ -> []
     | RowNumberOver _
     | LagOver _ -> [ expr ]
     | FuncCall(_, args) -> args |> List.collect collectWindowFuncs
@@ -191,6 +193,7 @@ let rec private substituteWindowFuncs (synthetic: (Expr * string) list) (expr: E
         let sub = substituteWindowFuncs synthetic
 
         match expr with
+        | Placeholder _ -> expr
         | FuncCall(name, args) -> FuncCall(name, args |> List.map sub)
         | BinOp(op, a, b) -> BinOp(op, sub a, sub b)
         | Not e -> Not(sub e)
@@ -248,6 +251,7 @@ let private opSymbol =
 let rec private exprLabel (expr: Expr) : string =
     match expr with
     | Lit v -> v |> toText |> Option.defaultValue "NULL"
+    | Placeholder _ -> "?"
     | Col name -> name
     | QualifiedCol(_, col) -> col
     | FuncCall(name, args) -> sprintf "%s(%s)" (name.ToUpperInvariant()) (args |> List.map exprLabel |> String.concat ", ")
@@ -965,6 +969,7 @@ let rec private evalExpr (ctx: EvalContext) (expr: Expr) : Result<Value, EvalErr
 
     match expr with
     | Lit v -> Ok v
+    | Placeholder _ -> Error(1064, "unbound prepared-statement placeholder")
     | Star _ -> Error(1054, "Invalid use of '*'")
     // Only reachable if a `RowNumberOver`/`LagOver` ever escapes
     // `runWindowedSelect`'s rewrite (which substitutes every occurrence,
@@ -1886,6 +1891,7 @@ and private rewriteCoalescedCols (map: Map<string, Expr>) (expr: Expr) : Expr =
     let sub = rewriteCoalescedCols map
 
     match expr with
+    | Placeholder _ -> expr
     | Col name ->
         match Map.tryFind (name.ToLowerInvariant()) map with
         | Some repl -> repl
@@ -2526,6 +2532,7 @@ and private rewriteAggregates
     let sub = rewriteAggregates registry ctxFor rows
 
     match expr with
+    | Placeholder _ -> Ok expr
     | FuncCall(name, args) when isAggregateCall registry expr -> evalAggregate registry ctxFor rows name args |> Result.map Lit
     | FuncCall(name, args) -> args |> traverse sub |> Result.map (fun args' -> FuncCall(name, args'))
     | BinOp(op, a, b) -> sub a |> Result.bind (fun a' -> sub b |> Result.map (fun b' -> BinOp(op, a', b')))
@@ -2628,6 +2635,7 @@ and private resolveHavingRef (columnIndex: Map<string, int list>) (projections: 
     let sub = resolveHavingRef columnIndex projections
 
     match expr with
+    | Placeholder _ -> Ok expr
     | Col name -> resolveGroupOrHavingCol columnIndex projections name
     | FuncCall(name, args) -> args |> traverse sub |> Result.map (fun args' -> FuncCall(name, args'))
     | BinOp(op, a, b) -> sub a |> Result.bind (fun a' -> sub b |> Result.map (fun b' -> BinOp(op, a', b')))
@@ -3510,6 +3518,7 @@ let rec private substituteValuesFunc (columnIndex: Map<string, int list>) (candi
     let sub = substituteValuesFunc columnIndex candidate
 
     match expr with
+    | Placeholder _ -> expr
     | FuncCall(name, [ Col c ]) when System.String.Equals(name, "VALUES", System.StringComparison.OrdinalIgnoreCase) ->
         // `candidate` is always the row for the one table this INSERT
         // targets, so there's no cross-table ambiguity to consider here
@@ -3577,6 +3586,7 @@ type private ExplainRow =
 /// found this way.
 let rec private collectSubqueries (expr: Expr) : SelectStmt list =
     match expr with
+    | Placeholder _ -> []
     | Exists s
     | Subquery s -> [ s ]
     | InSubquery(e, s) -> collectSubqueries e @ [ s ]
@@ -3640,6 +3650,7 @@ let private isCorrelated (sub: SelectStmt) : bool =
 
     let rec references (expr: Expr) : bool =
         match expr with
+        | Placeholder _ -> false
         | QualifiedCol(t, _) -> not (ownAliases.Contains(t.ToLowerInvariant()))
         | Exists _
         | Subquery _ -> false

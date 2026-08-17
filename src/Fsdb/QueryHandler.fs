@@ -735,88 +735,94 @@ let private registryFor (session: Session) : Functions.Registry =
 /// normally instead of being hijacked into the probe path and rejected.
 /// Anything else is a 1064 syntax error with SQLSTATE 42000 (the mapping
 /// `errPayload` already has for that code).
+/// Executes an already-parsed `Statement` — shared by COM_QUERY (parse then
+/// execute) and COM_STMT_EXECUTE (bind placeholders then execute), so the
+/// prepared path reuses this one execution body instead of splicing literals
+/// back into SQL text and re-parsing.
+let private executeParsed (session: Session) (stmt: Statement) : Session * QueryResult =
+    let execute session =
+        let store = Session.currentStore session
+        // `Store.StrictMode` is store-wide, not per-session (see its doc
+        // comment) — re-derive it from *this* session's own `sql_mode`
+        // right before every statement, so another connection's `SET
+        // SESSION sql_mode = ...` (which only ever touches its own
+        // `Session.Variables`) can't leak into this one's coercion
+        // behavior, and a transaction never runs on the stale StrictMode
+        // its snapshot happened to be seeded with at BEGIN time.
+        setStrictMode
+            store
+            (lookupVar session "sql_mode" |> Option.flatten |> Option.map isStrictSqlMode |> Option.defaultValue true)
+        let registry = registryFor session
+        let dbName = session.Database |> Option.defaultValue defaultDatabase
+
+        // `SELECT`/`UNION` go through `Executor`'s type-preserving entry
+        // points instead of the plain `execute` every other statement uses
+        // — those are the only two statement kinds that reach the wire as
+        // a `ResultSet`, and only they still have the typed `Value`s
+        // (rather than already-rendered text) `columnTypes` needs. See
+        // `Session.LastResultColumnTypes`'s doc for why this rides along
+        // on `session` instead of widening this function's own return type.
+        let lastInsertId, lastGeneratedId, result, columnTypes =
+            match stmt with
+            | Select select ->
+                let result, types = Executor.runTopLevelSelect store registry dbName select
+                session.LastInsertId, session.LastGeneratedId, result, types
+            | Union(first, rest, orderBy, limit, offset) ->
+                let result, types, _ = Executor.runUnionStmt store registry dbName first rest orderBy limit offset
+                session.LastInsertId, session.LastGeneratedId, result, types
+            | _ ->
+                let (lastInsertId, lastGeneratedId), result =
+                    Executor.execute store registry dbName (session.LastInsertId, session.LastGeneratedId) stmt
+
+                lastInsertId, lastGeneratedId, result, []
+
+        { session with
+            LastInsertId = lastInsertId
+            LastGeneratedId = lastGeneratedId
+            LastResultColumnTypes = columnTypes },
+        result
+
+    match session.Tx with
+    | Some _ ->
+        // `startTransactionStatement` acquires this database's
+        // transaction gate on a transaction's first real statement and
+        // returns it embedded in the new `Session` it hands back — the
+        // *only* place that lease is referenced until `execute` itself
+        // returns. If `execute` throws (a genuine bug, or
+        // `Storage.queryCancellation` unwinding a killed client's query
+        // — see `Server.watchForDisconnect`), that new `Session` is
+        // never returned to anyone: every catcher above this only has
+        // the *original*, pre-statement `session`, whose `Tx.GateLease`
+        // doesn't reflect a lease newly acquired by *this* call.
+        // Disposing it here — unconditionally, whether newly acquired
+        // or already held from an earlier statement in the same
+        // transaction — is safe (`TransactionGateLease.Dispose` is
+        // idempotent) and guarantees the lease is never simply lost.
+        // This alone isn't the whole fix, though: `handle`'s exception
+        // handlers still need to abort the *whole* transaction (not
+        // just free its gate), since a `Session` that keeps a stale
+        // `BaseCatalog`/`Snapshot` alive after its gate was released
+        // mid-transaction could otherwise still reach a later COMMIT —
+        // see `abortTransactionGate`'s doc.
+        let started = startTransactionStatement session
+
+        try
+            execute started
+        with _ ->
+            started.Tx |> Option.iter (fun tx -> tx.GateLease |> Option.iter (fun lease -> lease.Dispose()))
+            reraise ()
+    | None ->
+        match stmt with
+        | Select _
+        | Union _
+        | Explain _ -> execute session
+        | _ ->
+            use _gate = Storage.enterTransactionGate session.Store (session.Database |> Option.defaultValue defaultDatabase) defaultLockWaitTimeout
+            execute session
+
 let private executeStatement (session: Session) (sql: string) (upper: string) : Session * QueryResult =
     match Parser.parse sql with
-    | Result.Ok stmt ->
-        let execute session =
-            let store = Session.currentStore session
-            // `Store.StrictMode` is store-wide, not per-session (see its doc
-            // comment) — re-derive it from *this* session's own `sql_mode`
-            // right before every statement, so another connection's `SET
-            // SESSION sql_mode = ...` (which only ever touches its own
-            // `Session.Variables`) can't leak into this one's coercion
-            // behavior, and a transaction never runs on the stale StrictMode
-            // its snapshot happened to be seeded with at BEGIN time.
-            setStrictMode
-                store
-                (lookupVar session "sql_mode" |> Option.flatten |> Option.map isStrictSqlMode |> Option.defaultValue true)
-            let registry = registryFor session
-            let dbName = session.Database |> Option.defaultValue defaultDatabase
-
-            // `SELECT`/`UNION` go through `Executor`'s type-preserving entry
-            // points instead of the plain `execute` every other statement uses
-            // — those are the only two statement kinds that reach the wire as
-            // a `ResultSet`, and only they still have the typed `Value`s
-            // (rather than already-rendered text) `columnTypes` needs. See
-            // `Session.LastResultColumnTypes`'s doc for why this rides along
-            // on `session` instead of widening this function's own return type.
-            let lastInsertId, lastGeneratedId, result, columnTypes =
-                match stmt with
-                | Select select ->
-                    let result, types = Executor.runTopLevelSelect store registry dbName select
-                    session.LastInsertId, session.LastGeneratedId, result, types
-                | Union(first, rest, orderBy, limit, offset) ->
-                    let result, types, _ = Executor.runUnionStmt store registry dbName first rest orderBy limit offset
-                    session.LastInsertId, session.LastGeneratedId, result, types
-                | _ ->
-                    let (lastInsertId, lastGeneratedId), result =
-                        Executor.execute store registry dbName (session.LastInsertId, session.LastGeneratedId) stmt
-
-                    lastInsertId, lastGeneratedId, result, []
-
-            { session with
-                LastInsertId = lastInsertId
-                LastGeneratedId = lastGeneratedId
-                LastResultColumnTypes = columnTypes },
-            result
-
-        match session.Tx with
-        | Some _ ->
-            // `startTransactionStatement` acquires this database's
-            // transaction gate on a transaction's first real statement and
-            // returns it embedded in the new `Session` it hands back — the
-            // *only* place that lease is referenced until `execute` itself
-            // returns. If `execute` throws (a genuine bug, or
-            // `Storage.queryCancellation` unwinding a killed client's query
-            // — see `Server.watchForDisconnect`), that new `Session` is
-            // never returned to anyone: every catcher above this only has
-            // the *original*, pre-statement `session`, whose `Tx.GateLease`
-            // doesn't reflect a lease newly acquired by *this* call.
-            // Disposing it here — unconditionally, whether newly acquired
-            // or already held from an earlier statement in the same
-            // transaction — is safe (`TransactionGateLease.Dispose` is
-            // idempotent) and guarantees the lease is never simply lost.
-            // This alone isn't the whole fix, though: `handle`'s exception
-            // handlers still need to abort the *whole* transaction (not
-            // just free its gate), since a `Session` that keeps a stale
-            // `BaseCatalog`/`Snapshot` alive after its gate was released
-            // mid-transaction could otherwise still reach a later COMMIT —
-            // see `abortTransactionGate`'s doc.
-            let started = startTransactionStatement session
-
-            try
-                execute started
-            with _ ->
-                started.Tx |> Option.iter (fun tx -> tx.GateLease |> Option.iter (fun lease -> lease.Dispose()))
-                reraise ()
-        | None ->
-            match stmt with
-            | Select _
-            | Union _
-            | Explain _ -> execute session
-            | _ ->
-                use _gate = Storage.enterTransactionGate session.Store (session.Database |> Option.defaultValue defaultDatabase) defaultLockWaitTimeout
-                execute session
+    | Result.Ok stmt -> executeParsed session stmt
     | Result.Error _ when upper.StartsWith "SELECT" && upper.Contains "@" ->
         { session with LastResultColumnTypes = [] }, handleAtVarSelect session sql
     | Result.Error _ -> { session with LastResultColumnTypes = [] }, syntaxError sql
@@ -969,32 +975,118 @@ let private runProbe (session: Session) (sql: string) (probe: Probe) : Session *
 /// Parses and validates SQL for COM_STMT_PREPARE without executing it: a
 /// parse failure is the same 1064 (code, message) pair a COM_QUERY syntax
 /// error gets, so `Server` doesn't need its own copy of that formatting.
-/// `Ok` carries the placeholder count `Server` needs for the
-/// COM_STMT_PREPARE_OK reply.
+/// `Ok` carries the parsed `Statement` (with `Placeholder` nodes where the
+/// `?`s were) plus the placeholder count for COM_STMT_PREPARE_OK.
 ///
-/// The grammar has no notion of a `?` placeholder token (bound parameters
-/// are this module's own textual-substitution concern, not the parser's —
-/// see the `PreparedStmt` ponytail note in Session.fs), so validating the
-/// statement as given would reject every parameterized query. Standing in
-/// `NULL` for each placeholder validates the surrounding SQL is
-/// syntactically real without needing the grammar to know placeholders
-/// exist; the *stored* statement (what `Server` puts in `PreparedStmt.Sql`)
-/// is still the original text with the real `?`s, untouched by this probe.
-let prepareStatement (sql: string) : Result<int, int * string> =
-    let placeholderCount = placeholderPositions sql |> List.length
-    let probeSql = substitutePlaceholders sql (List.replicate placeholderCount "NULL")
-    let trimmed = probeSql.Trim().TrimEnd(';').Trim()
+/// `None` for the text-probed forms the grammar doesn't produce
+/// (SET/SHOW/transaction control) — those still execute textually through
+/// `Sql`, so their placeholder count is the plain `placeholderPositions`
+/// count rather than a parser one.
+let prepareStatement (sql: string) : Result<Statement option * int, int * string> =
+    let trimmed = sql.Trim().TrimEnd(';').Trim()
     let upper = trimmed.ToUpperInvariant()
 
     if (tryProbe trimmed upper).IsSome then
-        Result.Ok placeholderCount
+        Result.Ok(None, placeholderPositions sql |> List.length)
     else
-        match Parser.parse probeSql with
-        | Result.Ok _ -> Result.Ok placeholderCount
+        match Parser.parse sql with
+        | Result.Ok stmt -> Result.Ok(Some stmt, Parser.placeholderCount ())
         | Result.Error _ ->
             match syntaxError sql with
             | Err(code, msg) -> Result.Error(code, msg)
             | _ -> Result.Error(1064, "syntax error")
+
+/// Binds prepared-statement parameter `Value`s into a parsed `Statement`,
+/// replacing every `Placeholder i` with `Lit values.[i]`. Total — after this
+/// no `Placeholder` survives and the statement executes through the ordinary
+/// path. This walk is the one place that must touch every expression position
+/// in the AST, so a placeholder in any legal spot gets bound; DDL is left as
+/// the `_` pass-through since MySQL never accepts a `?` there.
+let rec bindPlaceholders (stmt: Statement) (values: Value list) : Statement =
+    let lit i = Lit(List.item i values)
+
+    let rec mapExpr (e: Expr) : Expr =
+        match e with
+        | Placeholder i -> lit i
+        | Lit _
+        | Col _
+        | QualifiedCol _
+        | Star _ -> e
+        | BinOp(op, a, b) -> BinOp(op, mapExpr a, mapExpr b)
+        | Not x -> Not(mapExpr x)
+        | IsNull x -> IsNull(mapExpr x)
+        | IsNotNull x -> IsNotNull(mapExpr x)
+        | IsTrue x -> IsTrue(mapExpr x)
+        | IsFalse x -> IsFalse(mapExpr x)
+        | Like(x, p, cs, esc) -> Like(mapExpr x, mapExpr p, cs, esc)
+        | Regexp(x, p) -> Regexp(mapExpr x, mapExpr p)
+        | In(x, xs) -> In(mapExpr x, List.map mapExpr xs)
+        | InSubquery(x, s) -> InSubquery(mapExpr x, mapSelect s)
+        | Between(x, lo, hi) -> Between(mapExpr x, mapExpr lo, mapExpr hi)
+        | FuncCall(name, args) -> FuncCall(name, List.map mapExpr args)
+        | RowNumberOver(partitionBy, orderBy) -> RowNumberOver(List.map mapExpr partitionBy, List.map mapOrderKey orderBy)
+        | LagOver(x, offset, partitionBy, orderBy) -> LagOver(mapExpr x, offset, List.map mapExpr partitionBy, List.map mapOrderKey orderBy)
+        | Distinct x -> Distinct(mapExpr x)
+        | OrderBy(x, d) -> OrderBy(mapExpr x, d)
+        | Cast(x, t) -> Cast(mapExpr x, t)
+        | Collate(x, c) -> Collate(mapExpr x, c)
+        | Case(subject, whens, elseBranch) ->
+            Case(Option.map mapExpr subject, whens |> List.map (fun (c, r) -> mapExpr c, mapExpr r), Option.map mapExpr elseBranch)
+        | Exists s -> Exists(mapSelect s)
+        | Subquery s -> Subquery(mapSelect s)
+
+    and mapOrderKey (x, d) = mapExpr x, d
+
+    and mapFromItem (fi: FromItem) : FromItem =
+        match fi with
+        | FromTable _ -> fi
+        | FromSubquery(sou, alias) -> FromSubquery(mapSelectOrUnion sou, alias)
+
+    and mapJoin (j: Join) : Join = { j with On = mapExpr j.On; Table = mapFromItem j.Table }
+
+    and mapSelect (s: SelectStmt) : SelectStmt =
+        { Projections = s.Projections |> List.map (fun (e, alias) -> mapExpr e, alias)
+          Distinct = s.Distinct
+          From = Option.map mapFromItem s.From
+          Joins = List.map mapJoin s.Joins
+          Where = Option.map mapExpr s.Where
+          GroupBy = List.map mapExpr s.GroupBy
+          Having = Option.map mapExpr s.Having
+          OrderBy = List.map mapOrderKey s.OrderBy
+          Limit = s.Limit
+          Offset = s.Offset
+          Locking = s.Locking }
+
+    and mapSelectOrUnion (sou: SelectOrUnion) : SelectOrUnion =
+        match sou with
+        | PlainSelect s -> PlainSelect(mapSelect s)
+        | UnionSelect(first, rest, orderBy, limit, offset) ->
+            UnionSelect(mapSelect first, rest |> List.map (fun (b, s) -> b, mapSelect s), List.map mapOrderKey orderBy, limit, offset)
+
+    let mapAssignment (a: Assignment) = { a with Value = mapExpr a.Value }
+
+    match stmt with
+    | Select s -> Select(mapSelect s)
+    | Union(first, rest, orderBy, limit, offset) ->
+        Union(mapSelect first, rest |> List.map (fun (b, s) -> b, mapSelect s), List.map mapOrderKey orderBy, limit, offset)
+    | Insert(table, columns, rows, onDup, ignore) ->
+        Insert(table, columns, rows |> List.map (List.map mapExpr), onDup |> List.map (fun (c, e) -> c, mapExpr e), ignore)
+    | InsertSelect(table, columns, select, ignore) -> InsertSelect(table, columns, mapSelect select, ignore)
+    | Update u ->
+        Update
+            { u with
+                Assignments = List.map mapAssignment u.Assignments
+                Where = Option.map mapExpr u.Where
+                OrderBy = List.map mapOrderKey u.OrderBy
+                Joins = List.map mapJoin u.Joins }
+    | Delete d ->
+        Delete
+            { d with
+                Where = Option.map mapExpr d.Where
+                OrderBy = List.map mapOrderKey d.OrderBy
+                Joins = List.map mapJoin d.Joins }
+    | Explain s -> Explain(bindPlaceholders s values)
+    | _ -> stmt
 
 let private dispatch (session: Session) (rawSql: string) : Session * QueryResult =
     let sql = (Parser.stripVersionComments rawSql).Trim().TrimEnd(';').Trim()
@@ -1085,3 +1177,13 @@ let handle (session: Session) (rawSql: string) : Session * QueryResult =
         Log.diagnostic "fsdb: EXN %s -- query: %s" ex.Message rawSql
         abortTransactionGate session
         { session with Tx = None }, Err(1105, sprintf "Internal error: %s" ex.Message) // ER_UNKNOWN_ERROR
+
+/// Executes a prepared statement with its bound parameter values. Parser-
+/// produced statements bind the values into the parsed AST and run it
+/// directly (no re-parse, no SQL escaping); the text-probed forms
+/// (SET/SHOW/transaction control, which have no AST) still substitute into
+/// `Sql` and go through the ordinary text path.
+let executePrepared (session: Session) (stmt: PreparedStmt) (values: Value list) : Session * QueryResult =
+    match stmt.Ast with
+    | Some ast -> executeParsed session (bindPlaceholders ast values)
+    | None -> handle session (substitutePlaceholders stmt.Sql (values |> List.map valueToSqlLiteral))

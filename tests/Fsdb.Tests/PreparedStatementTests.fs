@@ -74,7 +74,7 @@ let tests =
           testCase "prepareStatement reports the placeholder count for a valid statement"
           <| fun _ ->
               match prepareStatement "INSERT INTO t (a, b) VALUES (?, ?)" with
-              | Result.Ok 2 -> ()
+              | Result.Ok(Some _, 2) -> ()
               | other -> failtestf "expected Ok 2, got %A" other
 
           testCase "prepareStatement reports a 1064 syntax error for invalid SQL"
@@ -97,26 +97,32 @@ let tests =
                     "COMMIT"
                     "SHOW TABLES" ] do
                   match prepareStatement sql with
-                  | Result.Ok 0 -> ()
+                  | Result.Ok(None, 0) -> ()
                   | other -> failtestf "expected %s to prepare with 0 placeholders, got %A" sql other
 
-          testCase "a prepared INSERT/SELECT round-trips through textual substitution + the normal execution path"
+          testCase "a prepared INSERT/SELECT binds values into the parsed AST and executes"
           <| fun _ ->
               let session = create 1 (Fsdb.Storage.create ())
               let session, _ = handle session "CREATE TABLE ps_t (id INT, name VARCHAR(50))"
-              let stmtSql = "INSERT INTO ps_t (id, name) VALUES (?, ?)"
 
-              let finalSql =
-                  substitutePlaceholders
-                      stmtSql
-                      [ valueToSqlLiteral (VInt 1L); valueToSqlLiteral (VString "alice") ]
+              match prepareStatement "INSERT INTO ps_t (id, name) VALUES (?, ?)" with
+              | Result.Ok(Some ast, 2) ->
+                  let stmt =
+                      { Ast = Some ast
+                        Sql = "INSERT INTO ps_t (id, name) VALUES (?, ?)"
+                        ParamCount = 2
+                        LastParamTypes = None }
 
-              let session, insertResult = handle session finalSql
+                  // The name carries a quote and a backslash — bound as a
+                  // `Value` into the AST, never re-spliced SQL text, so there
+                  // is nothing to escape and the string arrives intact.
+                  let session, insertResult = executePrepared session stmt [ VInt 1L; VString "O'Brien\\" ]
 
-              match insertResult with
-              | Affected 1UL -> ()
-              | other -> failtestf "expected 1 affected row, got %A" other
+                  match insertResult with
+                  | Affected 1UL -> ()
+                  | other -> failtestf "expected 1 affected row, got %A" other
 
-              match handle session "SELECT name FROM ps_t WHERE id = 1" |> snd with
-              | ResultSet(_, [ [ Some "alice" ] ]) -> ()
-              | other -> failtestf "expected alice, got %A" other ]
+                  match handle session "SELECT name FROM ps_t WHERE id = 1" |> snd with
+                  | ResultSet(_, [ [ Some "O'Brien\\" ] ]) -> ()
+                  | other -> failtestf "expected the bound name back, got %A" other
+              | other -> failtestf "expected a parsed statement with 2 params, got %A" other ]

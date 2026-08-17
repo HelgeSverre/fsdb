@@ -70,6 +70,10 @@ type ColumnType =
 // rides along in the same `and` chain since `SelectStmt` needs them.
 type Expr =
     | Lit of Value
+    // A `?` parameter placeholder in a prepared statement, numbered by its
+    // position in the SQL text. Bound to a `Lit` by `QueryHandler.bindPlaceholders`
+    // before execution — the executor never sees one.
+    | Placeholder of index: int
     | Col of name: string
     | QualifiedCol of table: string * column: string
     | BinOp of Op * Expr * Expr
