@@ -2,21 +2,59 @@
 
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 [![.NET 10](https://img.shields.io/badge/.NET-10-512BD4.svg)](global.json)
-[![MySQL 8.4](https://img.shields.io/badge/MySQL-8.4%20compatible-4479A1.svg)](https://dev.mysql.com/)
+[![MySQL 8.4 wire protocol](https://img.shields.io/badge/MySQL-8.4%20wire%20protocol-4479A1.svg)](docs/compatibility.md)
 
 A MySQL-compatible database server in idiomatic F#. It speaks the MySQL wire
-protocol — point `mysql`, PDO, or any MySQL driver at it and run queries
-against an in-memory engine. Readable F# is the primary goal; raw performance
-is not.
+protocol, so `mysql`, PDO, or any MySQL driver works against it unchanged —
+over an in-memory engine built as a pipeline of discriminated unions.
+
+Readable F# is the primary goal; raw performance is not.
+
+fsdb is not a production database: no authentication, TLS, or replication —
+it's a single-node engine for learning, embedding, testing, and local tooling.
+For production workloads use MySQL, PostgreSQL, or SQLite.
+
+## Contents
+
+- [Quick start](#quick-start)
+- [How it works](#how-it-works)
+- [SQL surface](#sql-surface)
+- [Embedding & extensibility](#embedding--extensibility)
+- [Benchmarking](#benchmarking)
+- [Documentation](#documentation)
 
 ## Quick start
+
+Requires the .NET 10 SDK (`global.json` pins 10.0.400), a MySQL client for
+smoke-testing, and optionally `just` for the recipes below.
 
 ```sh
 dotnet run --project src/Fsdb        # listens on 127.0.0.1:3307
 mysql --protocol=tcp -h127.0.0.1 -P3307 -e 'SELECT 1'
 ```
 
-Or install it as a single binary:
+Port 3307 never collides with a real MySQL on 3306; override with `--port`.
+Any username/password is accepted — bind to loopback.
+
+First queries:
+
+```sql
+CREATE DATABASE app;
+USE app;
+CREATE TABLE notes (id BIGINT AUTO_INCREMENT PRIMARY KEY, body TEXT);
+INSERT INTO notes (body) VALUES ('hello fsdb');
+SELECT * FROM notes;
+```
+
+Any MySQL client works unchanged:
+
+| Client | Connect |
+|---|---|
+| mysql CLI | `mysql --protocol=tcp -h127.0.0.1 -P3307 -uroot` |
+| PDO (PHP) | `new PDO('mysql:host=127.0.0.1;port=3307;dbname=app', 'root', '')` |
+| MySqlConnector (.NET) | `new MySqlConnection("Server=127.0.0.1;Port=3307;User ID=root;Database=app")` |
+
+Install as a single framework-dependent binary (needs the .NET 10 runtime):
 
 ```sh
 just install      # publishes to ~/.local/bin/fsdb, then: fsdb --help
@@ -38,36 +76,67 @@ OPTIONS:
 
 ## How it works
 
-One pipeline, all the way down:
+```mermaid
+flowchart LR
+    CLI["mysql CLI"] --> WIRE
+    PDO["PDO"] --> WIRE
+    CONN["MySqlConnector"] --> WIRE
 
-```
-client ── MySQL wire protocol ──► Packet ──► Protocol ──► QueryHandler ──┐
-                                                                        ▼
-                     Parser (FParsec) ──► AST ──► Executor ──► lazy seq ──► rows
-                                                                        ▲
-                     Storage (catalog, immutable snapshots) ◄── Persistence
+    subgraph F["fsdb"]
+        direction TB
+
+        WIRE["Packet / Protocol<br/>MySQL wire protocol"]:::wire
+        SESS["Session<br/>transactions · variables"]:::session
+        QH["QueryHandler<br/>COM_QUERY / COM_STMT_*"]:::session
+        PARSE["Parser · FParsec<br/>SQL text → AST"]:::plan
+        EXEC["Executor<br/>logical plan → lazy seq"]:::plan
+        STORE["Storage<br/>value-swapped catalog"]:::data
+        WAL["Persistence<br/>binary WAL · snapshot"]:::data
+
+        WIRE --> SESS --> QH --> PARSE --> EXEC
+        EXEC <-->|snapshots| STORE
+        STORE <-->|commit events| WAL
+
+        COL["Collation registry<br/>89 utf8mb4 collations"]:::side -.-> PARSE
+        COL -.-> EXEC
+        COL -.-> STORE
+        FN["Function registry<br/>built-in / custom / session"]:::side -.-> EXEC
+    end
+
+    EXEC -.->|result rows| WIRE
+
+    classDef wire fill:#e8f5e9,stroke:#43a047,color:#1b5e20
+    classDef session fill:#e3f2fd,stroke:#1e88e5,color:#0d47a1
+    classDef plan fill:#ede7f6,stroke:#8e24aa,color:#4a148c
+    classDef data fill:#fff8e1,stroke:#fb8c00,color:#e65100
+    classDef side fill:#fce4ec,stroke:#d81b60,color:#880e4f
 ```
 
-- **Grammar** — a parser-combinator SQL grammar over an AST of discriminated
-  unions; `SELECT`s compile to a logical plan that executes lazily (`LIMIT`
-  stops the scan once enough rows survive).
+- **Parser** — an FParsec combinator grammar over a discriminated-union AST.
+  `SELECT`s compile to a logical plan that executes lazily — `LIMIT` stops the
+  scan once enough rows survive, and `ORDER BY ... LIMIT n` never materializes
+  the full sort, streaming a bounded top-(n+offset) set instead.
 - **Engine** — databases and tables live in a value-swapped catalog; every
   write produces an immutable snapshot, which is what makes transactions
   (`BEGIN`/`COMMIT`/`ROLLBACK`) free: each snapshot is a consistent view.
-  PRIMARY KEY/UNIQUE lookups go through a hash index; equi-joins hash-join,
-  everything else is a scan.
-- **Collations & charsets** — all 89 utf8mb4 collations MySQL 8.4 ships,
-  honored per-column and per-`SET collation_connection`; `GROUP BY`/`DISTINCT`/
-  `UNION`/joins/unique keys all fold by the column's own collation. Charsets
-  `utf8mb4`/`latin1` (cp1252)/`ascii`/`binary` with MySQL's write-time
-  semantics, plus `CONVERT(x USING …)` and `_charset'…'` introducers.
+  PK/UNIQUE lookups go through a map keyed by each column's collation-folded
+  encoding — `utf8mb4_0900_ai_ci` keys collide exactly as MySQL's do.
+  Equi-joins hash-join; everything else is a scan.
+- **Collations & charsets** — every one of the 89 utf8mb4 collations MySQL 8.4
+  ships, each a one-line registry entry (locale, fold level, pad attribute)
+  whose keys come from ICU sort keys. Honored per-column and per
+  `SET collation_connection`, across `GROUP BY`/`DISTINCT`/`UNION`, joins, and
+  unique keys. Charsets `utf8mb4`/`latin1` (cp1252)/`ascii`/`binary` with
+  MySQL's write-time semantics, plus `CONVERT(x USING …)` and `_charset'…'`
+  introducers.
 - **Prepared statements** — `COM_STMT_PREPARE`/`COM_STMT_EXECUTE` bind
   parameter `Value`s into the parsed AST (`?` → `Placeholder` → `Lit`), so a
-  bound value keeps its real type and never round-trips through string
-  escaping.
-- **Persistence** — opt-in `--data-dir`: a binary WAL (`[len][crc32]` records)
-  plus snapshot, fsync'd and replayed on startup; omit it and everything
-  lives in memory.
+  bound value keeps its real type for every statement the grammar parses;
+  only the text-probed `SET`/`SHOW` forms still re-splice literals.
+- **Persistence** — opt-in `--data-dir`: a binary WAL of `[len][crc32]` records
+  (the CRC drops a torn final record from a crash mid-append) plus a snapshot,
+  fsync'd via libc and replayed on startup. Omit it and everything lives in
+  memory.
 
 ## SQL surface
 
@@ -91,10 +160,13 @@ SELECT name, JSON_EXTRACT(tags, '$.langs[0]') FROM users;
 
 -- per-column and connection collation
 SET collation_connection = utf8mb4_bin;
-SELECT 'åge' = 'age';                        -- 0
-SELECT 'åge' = 'age' COLLATE utf8mb4_0900_ai_ci;  -- 1
+SELECT 'åge' = 'age';                              -- 0
+SELECT 'åge' = 'age' COLLATE utf8mb4_0900_ai_ci;   -- 1
 
 -- joins, derived tables, transactions, EXPLAIN
+CREATE TABLE orders (id BIGINT PRIMARY KEY, user_id BIGINT, total INT);
+INSERT INTO orders VALUES (1, 1, 50), (2, 1, 150), (3, 2, 300);
+
 BEGIN;
 SELECT u.name, COUNT(*) FROM users u
   JOIN (SELECT * FROM orders WHERE total > 100) o ON o.user_id = u.id
@@ -105,19 +177,11 @@ EXPLAIN SELECT * FROM users WHERE id = 1;
 ```
 
 Plus `UNION [ALL]`, `HAVING`, `NATURAL`/`USING` joins, `LAG`, `GROUP_CONCAT`,
-information_schema views, `SHOW CREATE TABLE`, multi-table `UPDATE`/`DELETE`,
-and `--data-dir` durability across restarts.
+information_schema tables, `SHOW CREATE TABLE`, multi-table `UPDATE`/`DELETE`,
+and `--data-dir` durability across restarts. Missing SQL surface is tracked in
+[docs/ROADMAP.md](docs/ROADMAP.md).
 
-## Using it from your stack
-
-It's just MySQL on port 3307 — configure any client like a local MySQL:
-
-```php
-// PDO
-$pdo = new PDO('mysql:host=127.0.0.1;port=3307;dbname=app', 'root', '');
-```
-
-## Extensibility
+## Embedding & extensibility
 
 Every function call — including built-ins like `CONCAT` and `JSON_EXTRACT` —
 resolves through one registry, SQLite-style. Embed fsdb in your own program and
@@ -165,7 +229,8 @@ let db =
 ```
 
 A custom function can override a built-in of the same name — the registry
-doesn't distinguish "shipped with fsdb" from "registered by the embedder":
+doesn't distinguish "shipped with fsdb" from "registered by the embedder",
+though session-bound functions like `DATABASE()` always shadow both:
 
 ```fsharp
 // Deterministic timestamps for reproducible tests.
@@ -173,8 +238,7 @@ Db.create ()
 |> Db.registerScalar "NOW" (fun _ -> VDateTime(System.DateTime(2026, 1, 1)))
 ```
 
-Add `--data-dir` durability to the embedded server the same way — a binary WAL
-and snapshot, replayed on restart:
+`--data-dir` durability works the same way when embedding:
 
 ```fsharp
 Db.create () |> Db.withDataDir "./fsdb-data" |> Db.listen System.Net.IPAddress.Loopback 3307
@@ -190,17 +254,25 @@ Db.create () |> Db.withDataDir "./fsdb-data" |> Db.listen System.Net.IPAddress.L
 8.4, same schema, same seeded data, same queries, via BenchmarkDotNet.
 
 ```sh
-just bench         # full latency suite, ~30 min, results -> benchmarks/results/<git-sha>.md
+just bench         # full latency suite, results -> benchmarks/results/<git-sha>.md
 just bench-quick   # ShortRun job for fast local iteration, no results file
-just bench-durable # durability-matched: fsdb WAL vs MySQL fsync/no-fsync, results -> <git-sha>-durable.md
+just bench-durable # durability-matched: fsdb WAL vs MySQL fsync/no-fsync
 just bench-scale   # latency suite at 100k users / 500k orders
 just bench-load    # N-writer throughput under concurrency (ops/sec)
 ```
 
-Both servers run ad hoc (no brew services) and are torn down afterwards.
-fsdb optimizes for readable, idiomatic F# over raw speed, so expect MySQL to
-win most of these — the numbers are here to find and track the hotspots,
-not to chase parity.
+Both servers start ad hoc (no brew services) and shut down after. fsdb
+optimizes for readable, idiomatic F# over raw speed, so expect MySQL to win
+most of these — the numbers track fsdb's hotspots, not parity.
+
+## Documentation
+
+- [Compatibility](docs/compatibility.md) — how MySQL 8.4 equivalence is validated
+- [Roadmap](docs/ROADMAP.md) — milestone plan, acceptance gates, evidence
+- [Performance](docs/performance-design.md) — measurement methodology and hotspot forensics
+- [Comment style](docs/comment-style.md) — the grading every comment survives
+- [Torture harness](torture/README.md) — differential fuzzing against a MySQL 8.4 oracle
+- [Benchmarks](benchmarks/README.md) — workloads and methodology
 
 ## License
 
