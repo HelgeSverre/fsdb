@@ -97,7 +97,9 @@ PointSelectByPk < 250µs, two consecutive bench runs agree within 20%,
 Expecto + one gauntlet suite regression green. Status: ☐ (`just bench` at
 5037a48: UpdateSingleRow 2,356 µs < 10ms ✅, PointSelectByPk 102 µs <
 250µs ✅ and reproduces within 0.04% across runs (per f1b15ab/366fe1c) ✅,
-Expecto 683/683 ✅ — but **JoinUsersOrders 202,198 µs, ~8x over the < 25ms
+Expecto 684/684 ✅, reference-app gauntlet suite at exact parity with its
+sqlite baseline (288 passed/15 skipped/2 todos/792 assertions, both
+sides) ✅ — but **JoinUsersOrders 202,198 µs, ~8x over the < 25ms
 gate** (MySQL: 239 µs on the same box) ❌. The M9-2 hash join fixed the
 pathological O(pairs) cross product (`JoinUsersOrders` used to time out
 entirely, ~425s), but `WHERE u.age > 30 LIMIT 50` still materializes and
