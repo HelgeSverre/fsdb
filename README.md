@@ -1,12 +1,15 @@
 # fsdb
 
-A MySQL-compatible database server written in idiomatic F#.
+[![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
+[![.NET 10](https://img.shields.io/badge/.NET-10-512BD4.svg)](global.json)
+[![MySQL 8.4](https://img.shields.io/badge/MySQL-8.4%20compatible-4479A1.svg)](https://dev.mysql.com/)
 
-fsdb speaks the MySQL wire protocol — point `mysql`, PDO, or any MySQL driver at it
-and run queries against an in-memory engine built as a pipeline of discriminated
-unions: bytes → `Command` → AST → logical plan → lazy `seq` execution.
+A MySQL-compatible database server in idiomatic F#. It speaks the MySQL wire
+protocol — point `mysql`, PDO, or any MySQL driver at it and run queries against
+an in-memory engine built as a pipeline of discriminated unions: bytes →
+`Command` → AST → logical plan → lazy `seq` execution.
 
-Beautiful F# is the primary goal; raw performance is not.
+Readable F# is the primary goal; raw performance is not.
 
 ## Why
 
@@ -15,6 +18,8 @@ a registry-driven function system can go — the benchmark is running a real Lar
 application's migrations and test suite against it unmodified.
 
 ## Running
+
+Requires the .NET 10 SDK (pinned by `global.json`).
 
 ```sh
 dotnet run --project src/Fsdb        # listens on 127.0.0.1:3307
@@ -46,8 +51,8 @@ Or via the [justfile](justfile):
 
 ```sh
 just run      # dotnet run --project src/Fsdb, flags pass through (--port, --listen)
-just client   # open a mysql shell against a running server
-just smoke    # quick SELECT 1 / SELECT @@version liveness probe
+just client   # open a mysql shell against a running server (optional port=)
+just smoke    # quick SELECT 1 / SELECT @@version liveness probe (optional port=)
 just test     # run the Expecto suite
 just check    # build + test
 ```
@@ -77,19 +82,56 @@ let main _ =
     0
 ```
 
-`Db.registerAggregate` works the same way for aggregate functions (`MEDIAN`,
-custom rollups, ...). A custom function can override a built-in of the same
-name — the registry doesn't distinguish "shipped with fsdb" from "registered
-by the embedder". See `tests/Fsdb.Tests/IntegrationTests.fs` for a full
-round-trip test (`SLUGIFY`/`MEDIAN`) against a real client over the wire.
+`Db.registerAggregate` works the same way for aggregate functions — the fold
+receives every non-NULL row's value and returns one:
+
+```fsharp
+let median (values: Value list) =
+    let sorted = values |> List.choose (function VInt i -> Some(float i) | _ -> None) |> List.sort
+
+    match sorted with
+    | [] -> VNull
+    | _ ->
+        let mid = sorted.Length / 2
+
+        if sorted.Length % 2 = 0 then
+            VDouble((sorted.[mid - 1] + sorted.[mid]) / 2.0)
+        else
+            VDouble sorted.[mid]
+
+let db =
+    Db.create ()
+    |> Db.registerAggregate "MEDIAN" median
+```
+
+A custom function can override a built-in of the same name — the registry
+doesn't distinguish "shipped with fsdb" from "registered by the embedder":
+
+```fsharp
+// Deterministic timestamps for reproducible tests.
+Db.create ()
+|> Db.registerScalar "NOW" (fun _ -> VDateTime(System.DateTime(2026, 1, 1)))
+```
+
+Add `--data-dir` durability to the embedded server the same way — a binary WAL
+and snapshot, replayed on restart:
+
+```fsharp
+Db.create () |> Db.withDataDir "./fsdb-data" |> Db.listen System.Net.IPAddress.Loopback 3307
+```
+
+`Db.withLogger` hooks a log sink in the same style. See
+`tests/Fsdb.Tests/IntegrationTests.fs` for the full round-trip test
+(`SLUGIFY`/`MEDIAN`) against a real client over the wire.
 
 ## Status
 
-All eight roadmap milestones are done: wire protocol, PDO/mysql-CLI
+All ten roadmap milestones are done: wire protocol, PDO/mysql-CLI
 compatibility, the SQL engine core, Laravel migrations, test-suite parity,
-the embedding API, opt-in persistence (`--data-dir`), and EXPLAIN +
-multi-table DML. See [ROADMAP.md](docs/ROADMAP.md) for the milestone plan,
-acceptance gates, and per-milestone evidence.
+the embedding API, opt-in persistence (`--data-dir`), EXPLAIN +
+multi-table DML, performance-without-ugliness, and the streaming pipeline.
+See [ROADMAP.md](docs/ROADMAP.md) for the milestone plan, acceptance gates,
+and per-milestone evidence.
 
 ### Compatibility gauntlet
 
@@ -115,8 +157,11 @@ version and size.
 8.4, same schema, same seeded data, same queries, via BenchmarkDotNet.
 
 ```sh
-just bench        # full suite, ~10 min, results -> benchmarks/results/<git-sha>.md
-just bench-quick  # ShortRun job for fast local iteration, no results file
+just bench         # full latency suite, ~30 min, results -> benchmarks/results/<git-sha>.md
+just bench-quick   # ShortRun job for fast local iteration, no results file
+just bench-durable # durability-matched: fsdb WAL vs MySQL fsync/no-fsync, results -> <git-sha>-durable.md
+just bench-scale   # latency suite at 100k users / 500k orders
+just bench-load    # N-writer throughput under concurrency (ops/sec)
 ```
 
 Both servers run ad hoc (no brew services) and are torn down afterwards.
@@ -124,6 +169,11 @@ fsdb optimizes for readable, idiomatic F# over raw speed, so expect MySQL to
 win most of these — the numbers are here to find and track the hotspots,
 not to chase parity.
 
+`torture/` is a separate differential fuzz harness: generated SQL run against
+both fsdb and a MySQL 8.4 oracle, with the first divergence classified and
+replayed (`torture/scripts/run.sh suite`; exit 0 = pass/known gaps, 2 = new
+fsdb findings).
+
 ## License
 
-MIT
+MIT — see [LICENSE](LICENSE).
