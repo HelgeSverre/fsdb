@@ -219,6 +219,57 @@ let tests =
 
               ignore acquired
 
+          testCase "an exception on a transaction's second statement aborts the whole transaction, not just leaks its gate"
+          <| fun _ ->
+              // Merely disposing the just-acquired lease on the statement
+              // that throws isn't enough: `TransactionGates`'s whole
+              // contract is that a transaction holds its database's gate
+              // *continuously* from its first real statement through
+              // COMMIT/ROLLBACK, so `mergeCatalogInto`'s three-way merge
+              // (`baseCatalog` captured at BEGIN vs. the live catalog *right
+              // now*) never races a concurrent committer. Freeing the gate
+              // mid-transaction and then leaving `session.Tx` still `Some`
+              // — its `BaseCatalog`/`Snapshot` now stale — lets a later
+              // COMMIT on this same (zombie) transaction silently clobber
+              // whatever another transaction committed to this database in
+              // the gap, a real lost update. The whole transaction must die
+              // with the statement that broke it.
+              let store = Fsdb.Storage.create ()
+              let session = create 1 store
+              let session, _ = handle session "CREATE TABLE tx_abort (id INT PRIMARY KEY, v DECIMAL(10,2))"
+              let session, _ = handle session "INSERT INTO tx_abort VALUES (1, 1)"
+              let session, _ = handle session "BEGIN"
+              // First statement: a normal write that really does acquire
+              // and hold the gate.
+              let session, firstResult = handle session "UPDATE tx_abort SET v = 2 WHERE id = 1"
+
+              match firstResult with
+              | Affected 1UL -> ()
+              | other -> failtestf "expected the first statement to succeed, got %A" other
+
+              // Second statement: an out-of-range DECIMAL literal throws
+              // `OverflowException` straight out of `Storage.coerceValue`'s
+              // numeric cast (see `QueryHandler.handle`'s own doc comment) —
+              // a genuine internal error, not a normal `StorageError` reply.
+              let session, secondResult = handle session "INSERT INTO tx_abort VALUES (2, 1e300)"
+
+              match secondResult with
+              | Err(1105, _) -> ()
+              | other -> failtestf "expected the overflow to surface as a 1105 internal error, got %A" other
+
+              Expect.isTrue session.Tx.IsNone "expected the broken statement to abort the whole transaction"
+
+              // A stray COMMIT against the now-transactionless session must
+              // be the no-op real MySQL gives after a fatal statement error
+              // — not a merge of the aborted transaction's stale snapshot.
+              let session, _ = handle session "COMMIT"
+              ignore session
+
+              use acquired =
+                  Fsdb.Storage.enterTransactionGate store Fsdb.Storage.defaultDatabase (TimeSpan.FromSeconds 5.0)
+
+              ignore acquired
+
           testCase "concurrent transactions updating the same table serialize without losing a committed increment"
           <| fun _ ->
               let store = Fsdb.Storage.create ()

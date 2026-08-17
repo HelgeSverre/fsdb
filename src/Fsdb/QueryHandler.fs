@@ -736,33 +736,33 @@ let private executeStatement (session: Session) (sql: string) (upper: string) : 
             result
 
         match session.Tx with
-        | Some tx ->
+        | Some _ ->
             // `startTransactionStatement` acquires this database's
             // transaction gate on a transaction's first real statement and
             // returns it embedded in the new `Session` it hands back — the
-            // *only* place that lease is referenced. If `execute` throws
-            // (a genuine bug, or `Storage.queryCancellation` unwinding a
-            // killed client's query — see `Server.watchForDisconnect`),
-            // that new `Session` is never returned to anyone: every catcher
-            // above this (`handle`'s catch-all, and its deliberate
-            // `OperationCanceledException` reraise for `Server`'s command
-            // loop) only has the *original*, pre-statement `session`, whose
-            // `Tx.GateLease` is still `None`. Nothing would ever dispose the
-            // lease that really did decrement the semaphore, wedging this
-            // database's gate for every future transaction. Only dispose it
-            // here when *this* call is the one that newly acquired it — a
-            // lease already held from an earlier statement in the same
-            // transaction stays held, since the transaction itself isn't
-            // over.
-            let heldBefore = tx.GateLease.IsSome
+            // *only* place that lease is referenced until `execute` itself
+            // returns. If `execute` throws (a genuine bug, or
+            // `Storage.queryCancellation` unwinding a killed client's query
+            // — see `Server.watchForDisconnect`), that new `Session` is
+            // never returned to anyone: every catcher above this only has
+            // the *original*, pre-statement `session`, whose `Tx.GateLease`
+            // doesn't reflect a lease newly acquired by *this* call.
+            // Disposing it here — unconditionally, whether newly acquired
+            // or already held from an earlier statement in the same
+            // transaction — is safe (`TransactionGateLease.Dispose` is
+            // idempotent) and guarantees the lease is never simply lost.
+            // This alone isn't the whole fix, though: `handle`'s exception
+            // handlers still need to abort the *whole* transaction (not
+            // just free its gate), since a `Session` that keeps a stale
+            // `BaseCatalog`/`Snapshot` alive after its gate was released
+            // mid-transaction could otherwise still reach a later COMMIT —
+            // see `abortTransactionGate`'s doc.
             let started = startTransactionStatement session
 
             try
                 execute started
             with _ ->
-                if not heldBefore then
-                    started.Tx |> Option.iter (fun tx -> tx.GateLease |> Option.iter (fun lease -> lease.Dispose()))
-
+                started.Tx |> Option.iter (fun tx -> tx.GateLease |> Option.iter (fun lease -> lease.Dispose()))
                 reraise ()
         | None ->
             match stmt with
@@ -973,6 +973,26 @@ let private dispatch (session: Session) (rawSql: string) : Session * QueryResult
             { session with LastResultColumnTypes = [] }, result
         | None -> executeStatement session sql upper
 
+/// Disposes `session.Tx`'s transaction gate lease, if it holds one — called
+/// only when a statement failed badly enough to abort the whole transaction
+/// (see `handle`'s exception handlers below), never on a normal COMMIT/
+/// ROLLBACK (`commitSession`/`rollbackSession` already own that). Freeing
+/// the gate isn't itself the fix for a mid-transaction failure — a
+/// transaction's whole safety argument is that it holds its database's gate
+/// *continuously* from its first real statement through COMMIT/ROLLBACK, so
+/// `mergeCatalogInto`'s three-way merge (`BaseCatalog`, captured at BEGIN,
+/// against the live catalog *right now*) never races a concurrent
+/// committer. A `Session` that frees its gate mid-transaction but keeps
+/// `Tx = Some` alive — its `BaseCatalog`/`Snapshot` now stale — could still
+/// reach a later COMMIT and silently clobber whatever another transaction
+/// committed to this database in the gap: a real lost update, not just a
+/// wasted retry. `handle`'s callers always pair this with `Tx = None`, so
+/// the broken transaction can never be resumed or committed, only quietly
+/// forgotten (matching real MySQL's "current transaction has been rolled
+/// back" after a fatal statement error).
+let private abortTransactionGate (session: Session) : unit =
+    session.Tx |> Option.iter (fun tx -> tx.GateLease |> Option.iter (fun lease -> lease.Dispose()))
+
 /// No SQL engine failure should ever escape as a raw .NET exception — the
 /// only two paths into `dispatch` (the parser, well guarded, and
 /// `Storage.coerceValue`'s numeric casts, which are not) both funnel into
@@ -985,7 +1005,10 @@ let private dispatch (session: Session) (rawSql: string) : Session * QueryResult
 /// `Storage.LockWaitTimeout` gets its own real MySQL error code (1205)
 /// rather than falling into the generic 1105 below — a stuck transaction
 /// elsewhere should look to the client like an ordinary, retryable lock
-/// wait timeout, not an internal error.
+/// wait timeout, not an internal error; the transaction itself is untouched
+/// (the gate was never acquired — `Storage.enterTransactionGate` only
+/// raises this when its `Wait` timed out), so unlike the two handlers
+/// below, this one leaves `session.Tx` exactly as it was.
 let handle (session: Session) (rawSql: string) : Session * QueryResult =
     try
         match dispatch session rawSql with
@@ -1002,8 +1025,14 @@ let handle (session: Session) (rawSql: string) : Session * QueryResult =
     // back to a client that's already gone, so this re-raises rather than
     // folding into the generic `Err(1105, ...)` below: `Server`'s command
     // loop catches it, skips the now-pointless reply, and logs the one
-    // clean line itself.
-    | :? OperationCanceledException -> reraise ()
+    // clean line itself. `abortTransactionGate` still runs first — see its
+    // doc for why freeing the gate here (not just on the newly-acquired
+    // path `executeStatement` already covers) matters even though nothing
+    // is returned.
+    | :? OperationCanceledException ->
+        abortTransactionGate session
+        reraise ()
     | ex ->
         Log.diagnostic "fsdb: EXN %s -- query: %s" ex.Message rawSql
-        session, Err(1105, sprintf "Internal error: %s" ex.Message) // ER_UNKNOWN_ERROR
+        abortTransactionGate session
+        { session with Tx = None }, Err(1105, sprintf "Internal error: %s" ex.Message) // ER_UNKNOWN_ERROR
