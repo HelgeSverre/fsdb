@@ -1249,7 +1249,26 @@ let tests =
 
                     match runDefault store "DROP DATABASE IF EXISTS app" with
                     | Affected 0UL -> ()
-                    | other -> failtestf "expected DROP DATABASE IF EXISTS to be a no-op, got %A" other ]
+                    | other -> failtestf "expected DROP DATABASE IF EXISTS to be a no-op, got %A" other
+
+                testCase "CREATE TABLE IF NOT EXISTS / DROP TABLE IF EXISTS are no-ops when absent"
+                <| fun _ ->
+                    let store = newStore ()
+
+                    match runDefault store "CREATE TABLE IF NOT EXISTS t (a INT)" with
+                    | Affected 0UL -> ()
+                    | other -> failtestf "expected CREATE TABLE IF NOT EXISTS to succeed, got %A" other
+
+                    // a second create with IF NOT EXISTS is a silent no-op.
+                    runDefault store "CREATE TABLE t (a INT)" |> ignore
+
+                    match runDefault store "CREATE TABLE IF NOT EXISTS t (a INT)" with
+                    | Affected 0UL -> ()
+                    | other -> failtestf "expected CREATE TABLE IF NOT EXISTS to no-op on an existing table, got %A" other
+
+                    match runDefault store "DROP TABLE IF EXISTS missing" with
+                    | Affected 0UL -> ()
+                    | other -> failtestf "expected DROP TABLE IF EXISTS to no-op for a missing table, got %A" other ]
 
           testList
               "EXISTS (subquery)"
@@ -2034,7 +2053,85 @@ let tests =
 
                     match runDefault store "SELECT grp, COUNT(*) AS c FROM t GROUP BY grp" with
                     | ResultSet(_, []) -> ()
-                    | other -> failtestf "expected zero grouped rows on an empty table, got %A" other ]
+                    | other -> failtestf "expected zero grouped rows on an empty table, got %A" other
+
+                testCase "every Expr operand shape recurses when it wraps an aggregate in the projection"
+                <| fun _ ->
+                    // `rewriteAggregates` walks the whole projection expression
+                    // to pre-evaluate each aggregate call, descending through
+                    // every `Expr` node kind. Each of these wraps `COUNT(*)`
+                    // in a different constructor so that walk's per-kind
+                    // recursion arms are all exercised, not just the common
+                    // BinOp/FuncCall ones.
+                    let store = newStore ()
+                    runDefault store "CREATE TABLE t (n INT)" |> ignore
+                    runDefault store "INSERT INTO t VALUES (1), (2), (3)" |> ignore
+
+                    let expectInt (sql: string) (expected: string) =
+                        match runDefault store sql with
+                        | ResultSet(_, [ [ Some v ] ]) -> Expect.equal v expected sql
+                        | other -> failtestf "expected %s -> %s, got %A" sql expected other
+
+                    // `FROM t` so COUNT(*) = 3, not the no-FROM single row.
+                    expectInt "SELECT COUNT(*) IS NULL FROM t" "0"
+                    expectInt "SELECT COUNT(*) IS NOT NULL FROM t" "1"
+                    expectInt "SELECT NOT (COUNT(*) = 0) FROM t" "1"
+                    expectInt "SELECT (COUNT(*) = 0) IS TRUE FROM t" "0"
+                    expectInt "SELECT (COUNT(*) = 0) IS FALSE FROM t" "1"
+                    expectInt "SELECT COUNT(*) BETWEEN 1 AND 5 FROM t" "1"
+                    expectInt "SELECT COUNT(*) IN (1, 2, 3) FROM t" "1"
+                    expectInt "SELECT COUNT(*) LIKE '3' FROM t" "1"
+                    expectInt "SELECT COUNT(*) REGEXP '3' FROM t" "1"
+
+                    match runDefault store "SELECT CAST(COUNT(*) AS CHAR) FROM t" with
+                    | ResultSet(_, [ [ Some "3" ] ]) -> ()
+                    | other -> failtestf "expected CAST(COUNT(*)) = '3', got %A" other
+
+                    match runDefault store "SELECT CASE WHEN COUNT(*) > 5 THEN 'big' ELSE 'small' END FROM t" with
+                    | ResultSet(_, [ [ Some "small" ] ]) -> ()
+                    | other -> failtestf "expected searched-CASE else branch (3 is not > 5), got %A" other
+
+                    match runDefault store "SELECT CASE COUNT(*) WHEN 3 THEN 'three' ELSE 'other' END FROM t" with
+                    | ResultSet(_, [ [ Some "three" ] ]) -> ()
+                    | other -> failtestf "expected simple-CASE matching arm, got %A" other
+
+                testCase "every Expr operand shape recurses when it wraps an aggregate alias in HAVING"
+                <| fun _ ->
+                    // `resolveHavingRef` resolves SELECT aliases nested anywhere
+                    // inside a HAVING boolean expression, again recursing
+                    // through every Expr node kind. Here each construct wraps
+                    // the aliased count `c` (and the real column `grp`) so
+                    // those per-kind arms fire.
+                    let store = newStore ()
+                    runDefault store "CREATE TABLE t (grp VARCHAR(10), n INT)" |> ignore
+                    runDefault store "INSERT INTO t VALUES ('a', 1), ('a', 2), ('b', 3)" |> ignore
+
+                    let grouped (having: string) expected : unit =
+                        match runDefault store $"SELECT grp, COUNT(*) AS c FROM t GROUP BY grp HAVING {having} ORDER BY grp" with
+                        | ResultSet(_, rows) -> Expect.equal rows expected having
+                        | other -> failtestf "expected %A for HAVING %s, got %A" expected having other
+
+                    // both groups pass, in order
+                    grouped "c IS NOT NULL" [ [ Some "a"; Some "2" ]; [ Some "b"; Some "1" ] ]
+                    grouped "NOT (c = 5)" [ [ Some "a"; Some "2" ]; [ Some "b"; Some "1" ] ]
+                    grouped "c BETWEEN 1 AND 2" [ [ Some "a"; Some "2" ]; [ Some "b"; Some "1" ] ]
+                    grouped "c IN (1, 2)" [ [ Some "a"; Some "2" ]; [ Some "b"; Some "1" ] ]
+                    // no group has a NULL count, so nothing matches (still
+                    // exercises the HAVING-side IS NULL recursion arm)
+                    grouped "c IS NULL" []
+                    grouped "c LIKE '2'" [ [ Some "a"; Some "2" ] ]
+                    grouped "c REGEXP '2'" [ [ Some "a"; Some "2" ] ]
+                    grouped "CAST(c AS CHAR) = '1'" [ [ Some "b"; Some "1" ] ]
+                    grouped "CASE WHEN c > 1 THEN 1 ELSE 0 END = 1" [ [ Some "a"; Some "2" ] ]
+                    // simple CASE over the real GROUP BY column
+                    grouped "CASE grp WHEN 'a' THEN 1 ELSE 0 END = 1" [ [ Some "a"; Some "2" ] ]
+                    // HAVING-side IS TRUE / IS FALSE arms (covered in the
+                    // projection walk above, but each walk is its own match).
+                    grouped "(c = 2) IS TRUE" [ [ Some "a"; Some "2" ] ]
+                    // (c = 2) is false for group 'b' (c = 1)
+                    grouped "(c = 2) IS FALSE" [ [ Some "b"; Some "1" ] ]
+
+                    ]
 
           testList
               "correlated subqueries"
