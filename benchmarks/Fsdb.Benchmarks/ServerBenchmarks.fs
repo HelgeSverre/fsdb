@@ -31,6 +31,10 @@ open Fsdb.Benchmarks.Schema
 type ServerBenchmarks() =
 
     let mutable conn : MySqlConnection = Unchecked.defaultof<_>
+    // A second connection authenticated as the SELECT-only `bench_reader`
+    // account (created in Setup) — statements on it exercise the db-level
+    // privilege-check path instead of root's all-global fast path.
+    let mutable limitedConn : MySqlConnection = Unchecked.defaultof<_>
     let mutable fsdbProcess : Process option = None
     let mutable dataDir : string option = None
     let mutable rng = Random(1234)
@@ -62,11 +66,26 @@ type ServerBenchmarks() =
 
         conn <- new MySqlConnection(Schema.connectionString this.Target)
         conn.Open()
+
+        // The limited account the auth/enforcement benchmarks use — created
+        // idempotently per case (fsdb restarts fresh; the long-lived mysql
+        // just re-creates it).
+        for sql in
+            [ "DROP USER IF EXISTS 'bench_reader'@'%'"
+              "CREATE USER 'bench_reader'@'%' IDENTIFIED BY 'benchpw'"
+              "GRANT SELECT ON fsdb_bench.* TO 'bench_reader'@'%'" ] do
+            use cmd = conn.CreateCommand()
+            cmd.CommandText <- sql
+            cmd.ExecuteNonQuery() |> ignore
+
+        limitedConn <- new MySqlConnection(Schema.userConnectionString this.Target "bench_reader" "benchpw")
+        limitedConn.Open()
         rng <- Random(1234)
         insertCounter <- 0
 
     [<GlobalCleanup>]
     member this.Cleanup() =
+        limitedConn.Dispose()
         conn.Dispose()
 
         if this.Target = "fsdb" || this.Target = "fsdb-wal" then
@@ -159,3 +178,109 @@ type ServerBenchmarks() =
         // pays the full-table scan — the O(n) write shape the PK-narrowed
         // `UpdateSingleRow` never exercises.
         this.Exec $"UPDATE users SET age = age + 1 WHERE name = 'user_{randomUserId () - 1}'"
+
+    // -----------------------------------------------------------------------
+    // Auth / accounts / information_schema — the GUI-client and user-system
+    // surfaces. Each has a real per-statement or per-connection cost now
+    // (privilege checks read mysql.* rows, the handshake verifies
+    // credentials), so they're measured against MySQL like everything else.
+    // -----------------------------------------------------------------------
+
+    [<Benchmark>]
+    member this.PointSelectAsLimitedUser() =
+        // Same query as PointSelectByPk but as the SELECT-only account:
+        // measures the db-level privilege-check path (root short-circuits on
+        // its all-global row).
+        use cmd = limitedConn.CreateCommand()
+        cmd.CommandText <- $"SELECT id, name, email, age, meta, created_at FROM users WHERE id = {randomUserId ()}"
+        use reader = cmd.ExecuteReader()
+
+        while reader.Read() do
+            ()
+
+    [<Benchmark>]
+    member this.SelectCurrentUser() =
+        this.Query "SELECT CURRENT_USER(), USER()"
+
+    [<Benchmark>]
+    member this.ShowGrants() =
+        this.Query "SHOW GRANTS FOR 'bench_reader'@'%'"
+
+    [<Benchmark>]
+    member this.ShowFullTables() =
+        this.Query "SHOW FULL TABLES"
+
+    [<Benchmark>]
+    member this.InfoSchemaColumnsForTable() =
+        // TablePlus/phpMyAdmin's structure-pane query shape.
+        this.Query
+            "SELECT COLUMN_NAME, DATA_TYPE, IS_NULLABLE, COLUMN_KEY, COLUMN_DEFAULT, EXTRA FROM information_schema.COLUMNS WHERE TABLE_SCHEMA = 'fsdb_bench' AND TABLE_NAME = 'users' ORDER BY ORDINAL_POSITION"
+
+    [<Benchmark>]
+    member this.InfoSchemaTablesScan() =
+        this.Query "SELECT TABLE_SCHEMA, TABLE_NAME, TABLE_ROWS FROM information_schema.TABLES"
+
+    [<Benchmark>]
+    member this.UserPrivilegesScan() =
+        this.Query "SELECT GRANTEE, PRIVILEGE_TYPE, IS_GRANTABLE FROM information_schema.USER_PRIVILEGES"
+
+    [<Benchmark>]
+    member this.CreateGrantDropUser() =
+        // The account-DDL round trip: three statements mutating mysql.user /
+        // mysql.db, unique name per invocation.
+        let i = Interlocked.Increment(&insertCounter)
+        this.Exec $"CREATE USER 'bench_u_{i}'@'%%' IDENTIFIED BY 'pw_{i}'"
+        this.Exec $"GRANT SELECT, INSERT ON fsdb_bench.* TO 'bench_u_{i}'@'%%'"
+        this.Exec $"DROP USER 'bench_u_{i}'@'%%'"
+
+/// The full connect + authenticated-handshake + teardown cycle, in its own
+/// class because it needs a *fixed, small* invocation count: each op leaves
+/// a loopback socket in TIME_WAIT, and BenchmarkDotNet's auto-pilot would
+/// otherwise scale to thousands of ops per iteration and exhaust the
+/// ephemeral port range — which is exactly what poisoned every following
+/// benchmark case on the first run of this suite.
+[<MemoryDiagnoser>]
+[<InvocationCount(32, 1)>]
+type ConnectBenchmarks() =
+
+    let mutable fsdbProcess : Process option = None
+
+    member this.Targets() : string[] =
+        if BenchServer.isDurableRun () then
+            [| "fsdb"; "fsdb-wal"; "mysql"; "mysql-nofsync" |]
+        else
+            [| "fsdb"; "mysql" |]
+
+    [<ParamsSource("Targets")>]
+    member val Target = "" with get, set
+
+    [<GlobalSetup>]
+    member this.Setup() =
+        if this.Target = "fsdb" || this.Target = "fsdb-wal" then
+            fsdbProcess <- Some(BenchServer.startFsdb (BenchServer.benchBin ()) None)
+
+        // The password-verified account the connect cycle authenticates as.
+        use conn = new MySqlConnection(Schema.connectionString this.Target)
+        conn.Open()
+
+        for sql in
+            [ "DROP USER IF EXISTS 'bench_reader'@'%'"
+              "CREATE USER 'bench_reader'@'%' IDENTIFIED BY 'benchpw'"
+              "GRANT SELECT ON fsdb_bench.* TO 'bench_reader'@'%'" ] do
+            use cmd = conn.CreateCommand()
+            cmd.CommandText <- sql
+            cmd.ExecuteNonQuery() |> ignore
+
+    [<GlobalCleanup>]
+    member this.Cleanup() =
+        if this.Target = "fsdb" || this.Target = "fsdb-wal" then
+            fsdbProcess |> Option.iter BenchServer.stopFsdb
+            fsdbProcess <- None
+
+    [<Benchmark>]
+    member this.ConnectAuthenticateClose() =
+        // A fresh TCP connect + mysql_native_password/caching_sha2 handshake
+        // as the password-verified account, then teardown (Pooling=false
+        // makes each Open a real handshake).
+        use c = new MySqlConnection(Schema.userConnectionString this.Target "bench_reader" "benchpw")
+        c.Open()

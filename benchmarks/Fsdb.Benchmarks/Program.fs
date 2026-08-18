@@ -36,4 +36,7 @@ let main argv =
         let config = DefaultConfig.Instance.AddJob(job)
 
         BenchmarkRunner.Run<ServerBenchmarks>(config) |> ignore
+        // Separate class/run: the connect cycle needs its fixed small
+        // invocation count (see its doc) which the shared job must not have.
+        BenchmarkRunner.Run<ConnectBenchmarks>(config) |> ignore
         0

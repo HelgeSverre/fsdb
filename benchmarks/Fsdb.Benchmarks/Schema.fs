@@ -42,6 +42,11 @@ let rootConnectionString (target: string) =
 let connectionString (target: string) =
     $"{rootConnectionString target}Database=fsdb_bench;"
 
+/// As `connectionString`, but authenticated as a specific account — the
+/// auth/enforcement benchmarks' non-root connections.
+let userConnectionString (target: string) (user: string) (password: string) =
+    $"Server=127.0.0.1;Port={portFor target};User={user};Password={password};AllowPublicKeyRetrieval=true;SslMode=none;Pooling=false;Database=fsdb_bench;"
+
 // fsdb doesn't support semicolon-batched multi-statement commands, so every
 // DDL/DML step here is its own round trip rather than one joined CommandText.
 let private exec (conn: MySqlConnection) (sql: string) =

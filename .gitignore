@@ -5,3 +5,4 @@ obj/
 coverage/
 spike/
 .claude/worktrees/
+BenchmarkDotNet.Artifacts/

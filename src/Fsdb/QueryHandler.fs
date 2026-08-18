@@ -1366,7 +1366,6 @@ let private runProbe (session: Session) (sql: string) (probe: Probe) : Session *
         match Auth.renderGrants (Session.currentStore session) name with
         | Ok(header, lines) -> session, ResultSet([ header ], lines |> List.map (fun l -> [ Some l ]))
         | Error(code, msg) -> session, Err(code, msg)
-    | ShowPrivileges -> session, InformationSchema.showPrivileges () |> showResult
     | FlushPrivileges -> session, Affected 0UL
 
 /// Parses and validates SQL for COM_STMT_PREPARE without executing it: a
