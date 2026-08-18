@@ -29,12 +29,13 @@ version and size.
 
 ## Milestones
 
-All ten roadmap milestones are done — wire protocol, PDO/mysql-CLI
+All ten original milestones are done — wire protocol, PDO/mysql-CLI
 compatibility, the SQL engine core, Laravel migrations, test-suite parity,
 the embedding API, opt-in persistence, EXPLAIN + multi-table DML,
-performance-without-ugliness, and the streaming pipeline. See
-[ROADMAP.md](ROADMAP.md) for the plan, acceptance gates, and per-milestone
-evidence.
+performance-without-ugliness, and the streaming pipeline. Each shipped
+against a runnable acceptance gate (a real external client, the reference
+app's suite, or a benchmark threshold); the per-milestone evidence lives in
+git history.
 
 ## GUI clients and introspection
 

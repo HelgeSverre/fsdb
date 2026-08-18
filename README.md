@@ -298,7 +298,6 @@ most of these — the numbers track fsdb's hotspots, not parity.
 ## Documentation
 
 - [Compatibility](docs/compatibility.md) — how MySQL 8.4 equivalence is validated
-- [Roadmap](docs/ROADMAP.md) — milestone plan, acceptance gates, evidence
 - [Comment style](docs/comment-style.md) — the grading every comment survives
 - [Torture harness](torture/README.md) — differential fuzzing against a MySQL 8.4 oracle
 - [Benchmarks](benchmarks/README.md) — workloads and methodology

@@ -291,7 +291,7 @@ lazy-`seq` fix for exactly this *on purpose*, for reasons that still hold
 full scans, a wholesale pipeline type change). Net: this sub-gate's number
 was set before that trade-off was made explicit, and nothing in M9-1
 through M9-4 as scoped closes it. Renegotiated here rather than chased:
-`docs/ROADMAP.md`'s M9 stays unticked until either the lazy-pipeline work is
+the M9 milestone stayed unticked until either the lazy-pipeline work was
 scheduled as its own milestone, or this number is formally revised.
 
 ### M9-3 — Index-addressable rows + PK/unique hash index (~1 week)
@@ -327,7 +327,7 @@ proves "faster" but not "O(1)"):
 | `PreparedPointSelect` | < 250 µs, within 30% of `PointSelectByPk` | 89 µs, -13% (faster, not slower) | pass |
 | `InsertSingle` | < 300 µs | 496 µs | fail — 1.65x over |
 | `InsertBatch100` | < 20 ms | 8.6 ms | pass |
-| `UpdateSingleRow` | < 500 µs | 2,356 µs | fail — 4.7x over (still clears the *coarser* top-level docs/ROADMAP.md gate, < 10 ms) |
+| `UpdateSingleRow` | < 500 µs | 2,356 µs | fail — 4.7x over (still clears the coarser top-level milestone gate, < 10 ms) |
 | Point-lookup flat 10k→40k | ratio ≈ 1 | ratio 0.76 (10k: 0.028 ms median of 21, 40k: 0.021 ms) | pass — genuinely O(1)/O(log n), not just a faster scan |
 
 `InsertSingle`/`UpdateSingleRow` missing their sub-gates is real, not a
