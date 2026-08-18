@@ -201,10 +201,13 @@ let splitQualified (defaultDb: string) (name: string) : string * string =
 /// `ForeignKeyChecks` gates every FK enforcement in this module (cascading
 /// deletes, `RESTRICT`, parent-existence checks on insert/update) — the
 /// storage-level mirror of MySQL's session `FOREIGN_KEY_CHECKS` variable.
-/// A single store-wide flag rather than per-session, since `Store` has no
-/// session concept; `QueryHandler`'s `SET FOREIGN_KEY_CHECKS = 0|1` probe
-/// (and Laravel's `Schema::disableForeignKeyConstraints`, which sends
-/// exactly that) calls `setForeignKeyChecks`.
+/// Per-session in practice: `Session.create` gives every connection its own
+/// clone of the master `Store` (sharing `Databases`/`Lock`/`TransactionGates`
+/// but with private `ForeignKeyChecks`/`StrictMode`/`ConnectionCollation`
+/// cells), so one connection's `SET` can't flip another's. `QueryHandler`'s
+/// `SET FOREIGN_KEY_CHECKS = 0|1` probe (and Laravel's
+/// `Schema::disableForeignKeyConstraints`, which sends exactly that) calls
+/// `setForeignKeyChecks` on that clone.
 type Store =
     { /// Every database's table map, each independently guarded by its own
       /// `Database ref` cell (locked via that same cell — see `withDatabase`)
@@ -229,11 +232,13 @@ type Store =
       /// default); `false` coerces to `coerceValue`'s non-strict fallback
       /// instead — 0 for a numeric column, NULL for a nullable temporal one
       /// (still a hard 1366 on a NOT NULL temporal column; see
-      /// `coerceValue`'s doc for why). Store-wide, but re-derived from the
-      /// *current* session's own `sql_mode` by `QueryHandler.executeStatement`
-      /// before every statement, so it never leaks between connections or
-      /// runs stale inside a transaction — see the note there and on
-      /// `beginTransactionSnapshot`. `QueryHandler`'s `SET SESSION sql_mode =
+      /// `coerceValue`'s doc for why). Lives on this session's own private
+      /// `Store` clone (see the `ForeignKeyChecks` note above) and is
+      /// re-derived from the *current* session's own `sql_mode` by
+      /// `QueryHandler.executeParsed` before every statement, so it neither
+      /// leaks between connections nor runs stale inside a transaction — see
+      /// the note there and on `beginTransactionSnapshot`. `QueryHandler`'s
+      /// `SET SESSION sql_mode =
       /// ...` probe (and Laravel's `'strict' => false` connection config,
       /// which sends `SET SESSION sql_mode='NO_ENGINE_SUBSTITUTION'`) calls
       /// `setStrictMode` directly too, so `SELECT @@sql_mode` right after a
@@ -242,10 +247,11 @@ type Store =
       /// The storage-level mirror of MySQL's session
       /// `collation_connection` — the collation literal-vs-literal string
       /// comparisons (and literal ORDER BY/LIKE operands) resolve under.
-      /// Store-wide like `StrictMode`, re-derived from the *current*
-      /// session's own variable by `QueryHandler` before every statement,
-      /// so it never leaks between connections. Column comparisons are
-      /// unaffected — a column's own `COLLATE` always wins.
+      /// On this session's own private `Store` clone like `StrictMode`,
+      /// re-derived from the *current* session's own variable by
+      /// `QueryHandler` before every statement, so it never leaks between
+      /// connections. Column comparisons are unaffected — a column's own
+      /// `COLLATE` always wins.
       mutable ConnectionCollation: Collation.Collation
       /// Fires once per committed write, under `Lock`, right after the
       /// catalog swap that made it visible — `None` (the default) means no

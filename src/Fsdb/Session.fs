@@ -182,7 +182,18 @@ let create (connectionId: int) (store: Store) : Session =
       Database = None
       Variables = defaultVariables
       UserVariables = Map.empty
-      Store = store
+      // A per-connection clone of `store`, not `store` itself. `Databases`,
+      // `TransactionGates`, `Lock`, and `OnCommit` are reference-typed, so the
+      // clone still shares the one real catalog and all of its cross-connection
+      // synchronization (the shared `Lock` still serializes WAL appends) — but
+      // `StrictMode`/`ForeignKeyChecks`/`ConnectionCollation` get their own
+      // independent mutable cells. Those three are re-derived from this
+      // session's own variables before every statement
+      // (`QueryHandler.executeParsed`); without this clone they'd be the literal
+      // same fields every other connection's re-derivation also flips, and
+      // nothing serializes that across connections (a plain SELECT takes no gate
+      // at all, a write gates only its own database).
+      Store = { store with StrictMode = store.StrictMode }
       LastInsertId = 0L
       LastGeneratedId = 0L
       LastResultColumnTypes = []
