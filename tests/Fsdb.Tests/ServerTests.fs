@@ -112,4 +112,41 @@ let tests =
                   finally
                       listener.Stop()
               }
+              |> Async.RunSynchronously
+
+          // `readPacketAsync` raises `PacketTooLargeException` synchronously,
+          // before its `Task` (started by `Async.StartAsTask` inside
+          // `readPacketWithTimeoutMs`) ever suspends on real I/O — awaiting
+          // such a task surfaces the fault wrapped in `AggregateException`
+          // rather than the original exception. `Server`'s connection-level
+          // `with` match on `PacketTooLargeException` (the best-effort 1153
+          // reply) needs the unwrapped exception to ever fire.
+          testCase "readPacketWithTimeoutMs surfaces PacketTooLargeException unwrapped, not as AggregateException"
+          <| fun _ ->
+              async {
+                  use stream = new IO.MemoryStream()
+                  let chunkCount = maxAccumulatedPacketSize / maxPacketPayload + 2
+                  let chunk = Array.zeroCreate<byte> maxPacketPayload
+
+                  for i in 0 .. chunkCount - 1 do
+                      let bytes = frame { SeqId = byte i; Payload = chunk }
+                      stream.Write(bytes, 0, bytes.Length)
+
+                  stream.Position <- 0L
+
+                  use dummyListener = new Net.Sockets.TcpListener(Net.IPAddress.Loopback, 0)
+                  dummyListener.Start()
+                  let port = (dummyListener.LocalEndpoint :?> Net.IPEndPoint).Port
+                  use dummyClient = new Net.Sockets.TcpClient()
+                  do! dummyClient.ConnectAsync(Net.IPAddress.Loopback, port) |> Async.AwaitTask
+
+                  let! outcome = Async.Catch(Fsdb.Server.readPacketWithTimeoutMs 5000 dummyClient stream)
+
+                  match outcome with
+                  | Choice2Of2(:? PacketTooLargeException) -> ()
+                  | Choice2Of2 ex -> failtestf "expected PacketTooLargeException, got %s" (ex.GetType().FullName)
+                  | Choice1Of2 _ -> failtest "expected the oversized read to fail"
+
+                  dummyListener.Stop()
+              }
               |> Async.RunSynchronously ]

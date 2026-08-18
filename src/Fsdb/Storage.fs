@@ -2026,6 +2026,11 @@ let private checkNotOrphaning (db: Database) (tableKey: string) (parentColumns: 
 /// appended. Collision detection goes through the same `UniqueIndex`
 /// (collation-aware via `encodeConstraintKey`) as plain `INSERT`'s unique
 /// check.
+/// `foundRows` is the session's negotiated CLIENT_FOUND_ROWS capability: a
+/// matched row that `applyUpdate` leaves unchanged (every column still
+/// equal to what it already held) counts toward the returned total when set,
+/// same as MySQL's `affected_rows` for a no-op `ON DUPLICATE KEY UPDATE`
+/// match, and is excluded when not.
 let rec upsertRows
     (store: Store)
     (dbName: string)
@@ -2034,13 +2039,14 @@ let rec upsertRows
     (rowsIn: Value list list)
     (computeGenerated: Value[] -> Result<Value[], StorageError>)
     (applyUpdate: Value[] -> Value[] -> Result<Value[], StorageError>)
+    (foundRows: bool)
     : Result<int64 * int64 option * int, StorageError> =
         let key = normalizeTableName tableName
 
         let result =
             withDatabase store dbName (fun db ->
                 tryGetTable db tableName
-                |> Result.bind (fun table -> upsertRowsInTable store db key table columns rowsIn computeGenerated applyUpdate)
+                |> Result.bind (fun table -> upsertRowsInTable store db key table columns rowsIn computeGenerated applyUpdate foundRows)
                 |> Result.map (fun (table', result) -> Map.add key table' db, result))
 
         match result with
@@ -2067,6 +2073,7 @@ and private upsertRowsInTable
     (rowsIn: Value list list)
     (computeGenerated: Value[] -> Result<Value[], StorageError>)
     (applyUpdate: Value[] -> Value[] -> Result<Value[], StorageError>)
+    (foundRows: bool)
     : Result<Table * (int64 * int64 option * int * Value[] list * (Value[] * Value[]) list), StorageError> =
                 let checkFks = store.ForeignKeyChecks
 
@@ -2155,10 +2162,17 @@ and private upsertRowsInTable
                                                         else
                                                             newRows.[pos - current.Length] <- applied
 
+                                                        // A no-op match (every column still equal
+                                                        // to what it already held) only counts
+                                                        // toward `affected_rows` when the client
+                                                        // negotiated CLIENT_FOUND_ROWS — MySQL's
+                                                        // `ON DUPLICATE KEY UPDATE` row-count rule.
+                                                        let weight = if foundRows || applied <> existing then 1 else 0
+
                                                         nextAutoId',
                                                         firstAuto,
                                                         lastExplicit,
-                                                        affected + 1,
+                                                        affected + weight,
                                                         inserted,
                                                         (existing, applied) :: updated,
                                                         reindexRow table.Columns uniqueGroups (Some existing) (Some(pos, applied)) index))

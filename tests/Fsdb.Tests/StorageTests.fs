@@ -1227,7 +1227,7 @@ let tests =
                     let store = withUsersTable ()
                     let applyUpdate (_: Value[]) (candidate: Value[]) = Ok candidate
 
-                    match upsertRows store defaultDatabase "users" None [ [ VNull; VString "alice"; VInt 30L ] ] Ok applyUpdate with
+                    match upsertRows store defaultDatabase "users" None [ [ VNull; VString "alice"; VInt 30L ] ] Ok applyUpdate false with
                     | Ok(lastId, _, affected) ->
                         Expect.equal lastId 1L "inserted with a fresh id"
                         Expect.equal affected 1 "one row"
@@ -1241,7 +1241,7 @@ let tests =
                     let applyUpdate (existing: Value[]) (_candidate: Value[]) =
                         Ok [| existing.[0]; existing.[1]; VInt 31L |]
 
-                    match upsertRows store defaultDatabase "users" None [ [ VInt 1L; VString "alice"; VInt 999L ] ] Ok applyUpdate with
+                    match upsertRows store defaultDatabase "users" None [ [ VInt 1L; VString "alice"; VInt 999L ] ] Ok applyUpdate false with
                     | Ok(_, _, affected) ->
                         Expect.equal affected 1 "one row affected (the update, not an insert)"
 
@@ -1269,13 +1269,21 @@ let tests =
 
                     let applyUpdate (existing: Value[]) (_candidate: Value[]) = Ok existing
 
-                    match upsertRows store defaultDatabase "emails" None [ [ VInt 2L; VString "a@x.com" ] ] Ok applyUpdate with
+                    // `applyUpdate` here is a genuine no-op (every column
+                    // stays exactly what it already held) — MySQL's own
+                    // `affected_rows` rule for a matched `ON DUPLICATE KEY
+                    // UPDATE` row: 0 without `CLIENT_FOUND_ROWS`, 1 with it.
+                    match upsertRows store defaultDatabase "emails" None [ [ VInt 2L; VString "a@x.com" ] ] Ok applyUpdate false with
                     | Ok(_, _, affected) ->
-                        Expect.equal affected 1 "matched via the unique index"
+                        Expect.equal affected 0 "matched via the unique index, but no-op: not counted without CLIENT_FOUND_ROWS"
 
                         match scan store defaultDatabase "emails" with
                         | Ok(_, rows) -> Expect.equal (List.ofSeq rows |> List.length) 1 "no duplicate row inserted"
                         | Error e -> failtestf "expected Ok, got %A" e
+                    | Error e -> failtestf "expected Ok, got %A" e
+
+                    match upsertRows store defaultDatabase "emails" None [ [ VInt 3L; VString "a@x.com" ] ] Ok applyUpdate true with
+                    | Ok(_, _, affected) -> Expect.equal affected 1 "the same no-op match counts once CLIENT_FOUND_ROWS is negotiated"
                     | Error e -> failtestf "expected Ok, got %A" e ]
 
           testList
@@ -1361,7 +1369,7 @@ let tests =
                     let store = withDeptEmployees None
                     let applyUpdate (_: Value[]) (candidate: Value[]) = Ok candidate
 
-                    match upsertRows store defaultDatabase "employees" None [ [ VInt 1L; VInt 999L; VString "alice" ] ] Ok applyUpdate with
+                    match upsertRows store defaultDatabase "employees" None [ [ VInt 1L; VInt 999L; VString "alice" ] ] Ok applyUpdate false with
                     | Error(ForeignKeyParentMissing "fk_dept") -> ()
                     | other -> failtestf "expected ForeignKeyParentMissing, got %A" other
 
@@ -1378,7 +1386,7 @@ let tests =
                     // `UPDATE` already is.
                     let applyUpdate (existing: Value[]) (_candidate: Value[]) = Ok [| existing.[0]; VInt 999L; existing.[2] |]
 
-                    match upsertRows store defaultDatabase "employees" None [ [ VInt 1L; VInt 1L; VString "alice" ] ] Ok applyUpdate with
+                    match upsertRows store defaultDatabase "employees" None [ [ VInt 1L; VInt 1L; VString "alice" ] ] Ok applyUpdate false with
                     | Error(ForeignKeyParentMissing "fk_dept") -> ()
                     | other -> failtestf "expected ForeignKeyParentMissing, got %A" other
 
@@ -1731,6 +1739,7 @@ let tests =
                         [ [ VInt 1L; VString "alice"; VInt 1L ]; [ VInt 2L; VString "carol"; VInt 20L ] ]
                         Ok
                         applyUpdate
+                        false
                     |> ignore
 
                     Expect.contains

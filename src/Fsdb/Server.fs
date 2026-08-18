@@ -307,7 +307,19 @@ let readPacketWithTimeoutMs (timeoutMs: int) (client: TcpClient) (stream: IO.Str
             |> Async.AwaitTask
 
         if obj.ReferenceEquals(winner, readTask) then
-            return! Async.AwaitTask readTask
+            // `Async.AwaitTask` on a task that faulted synchronously inside
+            // `Async.StartAsTask` (before any real `await`, as
+            // `PacketTooLargeException` does — raised straight out of
+            // `readPacketAsync`'s loop) surfaces the fault wrapped in an
+            // `AggregateException` rather than unwrapped, unlike a task that
+            // faults after suspending on real I/O. The caller's `with` match
+            // on the specific exception type (`PacketTooLargeException`,
+            // for the best-effort 1153 reply) needs the original exception,
+            // not its wrapper.
+            try
+                return! Async.AwaitTask readTask
+            with :? AggregateException as agg when agg.InnerExceptions.Count = 1 ->
+                return raise (agg.InnerExceptions.[0])
         else
             client.Close()
             return None
@@ -406,7 +418,8 @@ let private handleConnection
                 let session =
                     { Session.create connectionId store with
                         Database = resp.Database
-                        CustomFunctions = customFunctions }
+                        CustomFunctions = customFunctions
+                        Capabilities = capabilities }
 
                 activeSession <- Some session
 
@@ -569,6 +582,25 @@ let private handleConnection
                                         |> Async.Ignore
 
                                     return! loop session
+                                | Some _ when session.LongDataOverflow |> Set.exists (fun (sid, _) -> sid = stmtId) ->
+                                    // A COM_STMT_SEND_LONG_DATA chunk for this statement
+                                    // overflowed the accumulation cap (see there) — that
+                                    // command got no reply, so the failure surfaces here
+                                    // instead, and the connection stays usable rather than
+                                    // executing on silently truncated parameter data.
+                                    let session =
+                                        { session with
+                                            LongData = session.LongData |> Map.filter (fun (sid, _) _ -> sid <> stmtId)
+                                            LongDataOverflow = session.LongDataOverflow |> Set.filter (fun (sid, _) -> sid <> stmtId) }
+
+                                    do!
+                                        writePacketAsync
+                                            stream
+                                            { SeqId = seqId
+                                              Payload = errPayload capabilities 1153 "Got a packet bigger than 'max_allowed_packet' bytes" }
+                                        |> Async.Ignore
+
+                                    return! loop session
                                 | Some stmt ->
                                     // A malformed COM_STMT_EXECUTE payload (a declared type not
                                     // matching what's actually on the wire, a truncated param,
@@ -671,19 +703,22 @@ let private handleConnection
                                     let key = stmtId, paramIndex
                                     let existing = session.LongData |> Map.tryFind key |> Option.defaultValue [||]
                                     // Cap accumulated long-data per param at the same ceiling
-                                    // `readPacketAsync` enforces for a reassembled packet, so a
-                                    // client streaming chunk after chunk forever can't grow a
-                                    // param's buffer without bound — extra bytes past the cap
-                                    // are silently dropped, matching this command's "no reply
-                                    // ever" contract.
+                                    // `readPacketAsync` enforces for a reassembled packet.
+                                    // COM_STMT_SEND_LONG_DATA never gets a reply, success or
+                                    // failure, so a chunk that would blow the cap can't error
+                                    // out here — it marks the param overflowed instead, and
+                                    // the next COM_STMT_EXECUTE turns that into ER_NET_PACKET_
+                                    // TOO_LARGE (1153) rather than silently truncating the
+                                    // parameter's data and executing on short input.
                                     let room = maxAccumulatedPacketSize - existing.Length
 
-                                    let chunk =
-                                        if room <= 0 then [||]
-                                        elif chunk.Length > room then chunk.[.. room - 1]
-                                        else chunk
-
-                                    return! loop { session with LongData = Map.add key (Array.append existing chunk) session.LongData }
+                                    if room <= 0 || chunk.Length > room then
+                                        return!
+                                            loop
+                                                { session with
+                                                    LongDataOverflow = Set.add key session.LongDataOverflow }
+                                    else
+                                        return! loop { session with LongData = Map.add key (Array.append existing chunk) session.LongData }
                                 else
                                     return! loop session
                             | Some(StmtClose stmtId) ->
@@ -692,11 +727,14 @@ let private handleConnection
                                     loop
                                         { session with
                                             Statements = Map.remove stmtId session.Statements
-                                            LongData = session.LongData |> Map.filter (fun (sid, _) _ -> sid <> stmtId) }
+                                            LongData = session.LongData |> Map.filter (fun (sid, _) _ -> sid <> stmtId)
+                                            LongDataOverflow = session.LongDataOverflow |> Set.filter (fun (sid, _) -> sid <> stmtId) }
                             | Some(StmtReset stmtId) ->
                                 if session.Statements.ContainsKey stmtId then
                                     let session =
-                                        { session with LongData = session.LongData |> Map.filter (fun (sid, _) _ -> sid <> stmtId) }
+                                        { session with
+                                            LongData = session.LongData |> Map.filter (fun (sid, _) _ -> sid <> stmtId)
+                                            LongDataOverflow = session.LongDataOverflow |> Set.filter (fun (sid, _) -> sid <> stmtId) }
 
                                     do!
                                         writePacketAsync
@@ -726,7 +764,8 @@ let private handleConnection
                                 let session =
                                     { Session.create session.ConnectionId session.Store with
                                         Database = session.Database
-                                        CustomFunctions = session.CustomFunctions }
+                                        CustomFunctions = session.CustomFunctions
+                                        Capabilities = session.Capabilities }
 
                                 activeSession <- Some session
 

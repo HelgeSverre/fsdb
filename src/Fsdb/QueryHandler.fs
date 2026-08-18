@@ -918,8 +918,10 @@ let private executeParsed (session: Session) (stmt: Statement) : Session * Query
                 let result, types, _ = Executor.runUnionStmt store registry dbName first rest orderBy limit offset
                 session.LastInsertId, session.LastGeneratedId, result, types
             | _ ->
+                let foundRows = session.Capabilities &&& Fsdb.Protocol.ClientFoundRows <> 0u
+
                 let (lastInsertId, lastGeneratedId), result =
-                    Executor.execute store registry dbName (session.LastInsertId, session.LastGeneratedId) stmt
+                    Executor.execute store registry dbName (session.LastInsertId, session.LastGeneratedId) foundRows stmt
 
                 lastInsertId, lastGeneratedId, result, []
 

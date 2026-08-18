@@ -11,6 +11,33 @@ open Fsdb.Session
 open Fsdb.Executor
 open Fsdb.QueryHandler
 
+/// Connects a raw `TcpClient` to `port` and completes a minimal, no-auth
+/// HandshakeResponse41 (no database) — the same boilerplate every raw-socket
+/// wire test below needs before it can send its own command packets.
+let private connectRaw (port: int) : Async<Net.Sockets.TcpClient * IO.Stream> =
+    async {
+        let client = new Net.Sockets.TcpClient()
+        do! client.ConnectAsync(Net.IPAddress.Loopback, port) |> Async.AwaitTask
+        let stream = client.GetStream()
+
+        let! handshake = readPacketAsync stream
+        let handshakeSeq = handshake.Value.SeqId
+
+        let helloResponse =
+            let w = Writer()
+            w.WriteInt32LE(int ClientProtocol41)
+            w.WriteInt32LE 16777216
+            w.WriteByte 45uy
+            w.WriteBytes(Array.zeroCreate<byte> 23)
+            w.WriteNullTerminatedString "root"
+            w.WriteByte 0uy // zero-length auth response
+            w.ToArray()
+
+        let! _ = writePacketAsync stream { SeqId = handshakeSeq + 1uy; Payload = helloResponse }
+        let! _ = readPacketAsync stream // connection OK
+        return client, (stream :> IO.Stream)
+    }
+
 let tests =
     testList
         "Integration"
@@ -1177,6 +1204,383 @@ let tests =
                       Expect.equal (rr.ReadByte()) 45uy "minute"
                       Expect.equal (rr.ReadByte()) 9uy "second"
                       Expect.equal (rr.ReadInt32LE()) 123456 "microseconds"
+                  finally
+                      listener.Stop()
+              }
+              |> Async.RunSynchronously
+
+          testCase "COM_PING replies OK and the connection stays usable"
+          <| fun _ ->
+              async {
+                  let listener = Fsdb.Server.startListening System.Net.IPAddress.Loopback 0
+                  let port = Fsdb.Server.port listener
+                  Fsdb.Server.serve listener (Fsdb.Storage.create ()) Fsdb.Functions.empty |> Async.StartAsTask |> ignore
+
+                  try
+                      let! client, stream = connectRaw port
+                      use client = client
+
+                      let! _ = writePacketAsync stream { SeqId = 0uy; Payload = [| 0x0euy |] }
+                      let! pingReply = readPacketAsync stream
+                      Expect.equal pingReply.Value.Payload.[0] 0x00uy "COM_PING replies OK"
+
+                      let! _ = writePacketAsync stream { SeqId = 0uy; Payload = Array.append [| 0x03uy |] (Text.Encoding.UTF8.GetBytes "SELECT 1") }
+                      let! afterReply = readPacketAsync stream
+                      Expect.isTrue afterReply.IsSome "a later query on the same connection still gets a reply"
+                  finally
+                      listener.Stop()
+              }
+              |> Async.RunSynchronously
+
+          testCase "COM_STMT_PREPARE on invalid SQL replies ERR and the connection stays usable"
+          <| fun _ ->
+              async {
+                  let listener = Fsdb.Server.startListening System.Net.IPAddress.Loopback 0
+                  let port = Fsdb.Server.port listener
+                  Fsdb.Server.serve listener (Fsdb.Storage.create ()) Fsdb.Functions.empty |> Async.StartAsTask |> ignore
+
+                  try
+                      let! client, stream = connectRaw port
+                      use client = client
+
+                      let! _ = writePacketAsync stream { SeqId = 0uy; Payload = Array.append [| 0x16uy |] (Text.Encoding.UTF8.GetBytes "SELEC GARBAGE") }
+                      let! prepareErr = readPacketAsync stream
+                      Expect.equal prepareErr.Value.Payload.[0] 0xffuy "COM_STMT_PREPARE on a parse error replies ERR"
+
+                      let! _ = writePacketAsync stream { SeqId = 0uy; Payload = Array.append [| 0x03uy |] (Text.Encoding.UTF8.GetBytes "SELECT 1") }
+                      let! afterReply = readPacketAsync stream
+                      Expect.isTrue afterReply.IsSome "a later query on the same connection still gets a reply"
+                  finally
+                      listener.Stop()
+              }
+              |> Async.RunSynchronously
+
+          testCase "COM_STMT_EXECUTE on an unknown statement id replies 1243"
+          <| fun _ ->
+              async {
+                  let listener = Fsdb.Server.startListening System.Net.IPAddress.Loopback 0
+                  let port = Fsdb.Server.port listener
+                  Fsdb.Server.serve listener (Fsdb.Storage.create ()) Fsdb.Functions.empty |> Async.StartAsTask |> ignore
+
+                  try
+                      let! client, stream = connectRaw port
+                      use client = client
+
+                      let execPayload =
+                          let w = Writer()
+                          w.WriteByte 0x17uy
+                          w.WriteInt32LE 9999
+                          w.WriteByte 0uy
+                          w.WriteInt32LE 1
+                          w.ToArray()
+
+                      let! _ = writePacketAsync stream { SeqId = 0uy; Payload = execPayload }
+                      let! execErr = readPacketAsync stream
+                      Expect.equal execErr.Value.Payload.[0] 0xffuy "unknown statement id replies ERR"
+                      Expect.equal (Reader(execErr.Value.Payload.[1..]).ReadInt16LE()) 1243 "1243 unknown prepared statement handler"
+
+                      let! _ = writePacketAsync stream { SeqId = 0uy; Payload = Array.append [| 0x03uy |] (Text.Encoding.UTF8.GetBytes "SELECT 1") }
+                      let! afterReply = readPacketAsync stream
+                      Expect.isTrue afterReply.IsSome "a later query on the same connection still gets a reply"
+                  finally
+                      listener.Stop()
+              }
+              |> Async.RunSynchronously
+
+          testCase "COM_STMT_CLOSE gets no reply and the connection stays usable"
+          <| fun _ ->
+              async {
+                  let listener = Fsdb.Server.startListening System.Net.IPAddress.Loopback 0
+                  let port = Fsdb.Server.port listener
+                  Fsdb.Server.serve listener (Fsdb.Storage.create ()) Fsdb.Functions.empty |> Async.StartAsTask |> ignore
+
+                  try
+                      let! client, stream = connectRaw port
+                      use client = client
+
+                      let! _ = writePacketAsync stream { SeqId = 0uy; Payload = Array.append [| 0x16uy |] (Text.Encoding.UTF8.GetBytes "SELECT 1") }
+                      let! prepareOk = readPacketAsync stream
+                      let stmtId = Reader(prepareOk.Value.Payload.[1..]).ReadInt32LE()
+
+                      let closePayload =
+                          let w = Writer()
+                          w.WriteByte 0x19uy
+                          w.WriteInt32LE stmtId
+                          w.ToArray()
+
+                      let! _ = writePacketAsync stream { SeqId = 0uy; Payload = closePayload }
+
+                      let! _ = writePacketAsync stream { SeqId = 0uy; Payload = Array.append [| 0x03uy |] (Text.Encoding.UTF8.GetBytes "SELECT 1") }
+                      let! afterReply = readPacketAsync stream
+                      Expect.isTrue afterReply.IsSome "a query right after COM_STMT_CLOSE (no reply) still gets a reply"
+                      let! _ = readPacketAsync stream // column def
+                      let! _ = readPacketAsync stream // EOF
+                      let! _ = readPacketAsync stream // row
+                      let! _ = readPacketAsync stream // trailing EOF
+
+                      // The closed statement id is now unknown.
+                      let execPayload =
+                          let w = Writer()
+                          w.WriteByte 0x17uy
+                          w.WriteInt32LE stmtId
+                          w.WriteByte 0uy
+                          w.WriteInt32LE 1
+                          w.ToArray()
+
+                      let! _ = writePacketAsync stream { SeqId = 0uy; Payload = execPayload }
+                      let! execErr = readPacketAsync stream
+                      Expect.equal (Reader(execErr.Value.Payload.[1..]).ReadInt16LE()) 1243 "the closed statement id is gone"
+                  finally
+                      listener.Stop()
+              }
+              |> Async.RunSynchronously
+
+          testCase "COM_STMT_RESET replies OK, drops buffered long data, and 1243s for an unknown id"
+          <| fun _ ->
+              async {
+                  let listener = Fsdb.Server.startListening System.Net.IPAddress.Loopback 0
+                  let port = Fsdb.Server.port listener
+                  Fsdb.Server.serve listener (Fsdb.Storage.create ()) Fsdb.Functions.empty |> Async.StartAsTask |> ignore
+
+                  try
+                      let! client, stream = connectRaw port
+                      use client = client
+
+                      let! _ = writePacketAsync stream { SeqId = 0uy; Payload = Array.append [| 0x16uy |] (Text.Encoding.UTF8.GetBytes "SELECT ?") }
+                      let! prepareOk = readPacketAsync stream
+                      let stmtId = Reader(prepareOk.Value.Payload.[1..]).ReadInt32LE()
+                      let! _ = readPacketAsync stream // param column def
+                      let! _ = readPacketAsync stream // trailing EOF
+
+                      // Buffer long data for the one param, then reset — the
+                      // reset must drop it, not leave it to be picked up by a
+                      // later EXECUTE.
+                      let longDataPayload =
+                          let w = Writer()
+                          w.WriteByte 0x18uy
+                          w.WriteInt32LE stmtId
+                          w.WriteInt16LE 0
+                          w.WriteBytes(Text.Encoding.UTF8.GetBytes "buffered")
+                          w.ToArray()
+
+                      let! _ = writePacketAsync stream { SeqId = 0uy; Payload = longDataPayload }
+
+                      let resetPayload =
+                          let w = Writer()
+                          w.WriteByte 0x1auy
+                          w.WriteInt32LE stmtId
+                          w.ToArray()
+
+                      let! _ = writePacketAsync stream { SeqId = 0uy; Payload = resetPayload }
+                      let! resetOk = readPacketAsync stream
+                      Expect.equal resetOk.Value.Payload.[0] 0x00uy "COM_STMT_RESET on a known statement replies OK"
+
+                      // Execute with a fresh bound value — if the buffered
+                      // long data had survived, this would return "buffered"
+                      // instead of "fresh".
+                      let execPayload =
+                          let w = Writer()
+                          w.WriteByte 0x17uy
+                          w.WriteInt32LE stmtId
+                          w.WriteByte 0uy
+                          w.WriteInt32LE 1
+                          w.WriteByte 0uy // null bitmap
+                          w.WriteByte 1uy // new-params-bound
+                          w.WriteByte TypeVarString
+                          w.WriteByte 0uy
+                          w.WriteLenEncString "fresh"
+                          w.ToArray()
+
+                      let! _ = writePacketAsync stream { SeqId = 0uy; Payload = execPayload }
+                      let! _ = readPacketAsync stream // column count
+                      let! _ = readPacketAsync stream // column def
+                      let! _ = readPacketAsync stream // EOF
+                      let! row = readPacketAsync stream
+                      Expect.stringContains (Text.Encoding.ASCII.GetString row.Value.Payload) "fresh" "the reset dropped the buffered long data"
+                      let! _ = readPacketAsync stream // trailing EOF
+
+                      let resetUnknownPayload =
+                          let w = Writer()
+                          w.WriteByte 0x1auy
+                          w.WriteInt32LE 9999
+                          w.ToArray()
+
+                      let! _ = writePacketAsync stream { SeqId = 0uy; Payload = resetUnknownPayload }
+                      let! resetErr = readPacketAsync stream
+                      Expect.equal (Reader(resetErr.Value.Payload.[1..]).ReadInt16LE()) 1243 "COM_STMT_RESET on an unknown id replies 1243"
+                  finally
+                      listener.Stop()
+              }
+              |> Async.RunSynchronously
+
+          testCase "an unsupported command byte replies ERR 1047 and the connection stays usable"
+          <| fun _ ->
+              async {
+                  let listener = Fsdb.Server.startListening System.Net.IPAddress.Loopback 0
+                  let port = Fsdb.Server.port listener
+                  Fsdb.Server.serve listener (Fsdb.Storage.create ()) Fsdb.Functions.empty |> Async.StartAsTask |> ignore
+
+                  try
+                      let! client, stream = connectRaw port
+                      use client = client
+
+                      // 0x11 = COM_CHANGE_USER, never implemented by this server.
+                      let! _ = writePacketAsync stream { SeqId = 0uy; Payload = [| 0x11uy |] }
+                      let! unsupportedErr = readPacketAsync stream
+                      Expect.equal unsupportedErr.Value.Payload.[0] 0xffuy "unsupported command byte replies ERR"
+                      Expect.equal (Reader(unsupportedErr.Value.Payload.[1..]).ReadInt16LE()) 1047 "1047 unknown command"
+
+                      let! _ = writePacketAsync stream { SeqId = 0uy; Payload = Array.append [| 0x03uy |] (Text.Encoding.UTF8.GetBytes "SELECT 1") }
+                      let! afterReply = readPacketAsync stream
+                      Expect.isTrue afterReply.IsSome "a later query on the same connection still gets a reply"
+                  finally
+                      listener.Stop()
+              }
+              |> Async.RunSynchronously
+
+          // A long-data param whose chunks together exceed the accumulation
+          // cap can't error out of COM_STMT_SEND_LONG_DATA itself (no reply,
+          // per protocol) — the failure has to surface at the next EXECUTE
+          // instead of silently truncating the parameter and running anyway.
+          testCase "COM_STMT_SEND_LONG_DATA past the accumulation cap fails the next EXECUTE with 1153"
+          <| fun _ ->
+              async {
+                  let listener = Fsdb.Server.startListening System.Net.IPAddress.Loopback 0
+                  let port = Fsdb.Server.port listener
+                  Fsdb.Server.serve listener (Fsdb.Storage.create ()) Fsdb.Functions.empty |> Async.StartAsTask |> ignore
+
+                  try
+                      let! client, stream = connectRaw port
+                      use client = client
+
+                      let! _ = writePacketAsync stream { SeqId = 0uy; Payload = Array.append [| 0x16uy |] (Text.Encoding.UTF8.GetBytes "SELECT ?") }
+                      let! prepareOk = readPacketAsync stream
+                      let stmtId = Reader(prepareOk.Value.Payload.[1..]).ReadInt32LE()
+                      let! _ = readPacketAsync stream // param column def
+                      let! _ = readPacketAsync stream // trailing EOF
+
+                      let sendChunk (bytes: byte[]) =
+                          let w = Writer()
+                          w.WriteByte 0x18uy
+                          w.WriteInt32LE stmtId
+                          w.WriteInt16LE 0
+                          w.WriteBytes bytes
+                          writePacketAsync stream { SeqId = 0uy; Payload = w.ToArray() }
+
+                      // Fill up to (not past) the cap first — the command's
+                      // own header (1 command byte + 4 stmt id + 2 param
+                      // index = 7 bytes) counts against the same
+                      // reassembly limit, so the first chunk is 7 bytes
+                      // short of the cap to land the logical command payload
+                      // exactly on it — then a second, small chunk overflows
+                      // the per-param accumulation.
+                      let! _ = sendChunk (Array.zeroCreate<byte> (maxAccumulatedPacketSize - 7))
+                      let! _ = sendChunk (Array.zeroCreate<byte> 8)
+
+                      let execPayload =
+                          let w = Writer()
+                          w.WriteByte 0x17uy
+                          w.WriteInt32LE stmtId
+                          w.WriteByte 0uy
+                          w.WriteInt32LE 1
+                          w.WriteByte 0uy // null bitmap
+                          w.WriteByte 1uy // new-params-bound
+                          w.WriteByte TypeVarString
+                          w.WriteByte 0uy
+                          w.WriteLenEncString "" // placeholder; overflow wins
+                          w.ToArray()
+
+                      let! _ = writePacketAsync stream { SeqId = 0uy; Payload = execPayload }
+                      let! execErr = readPacketAsync stream
+                      Expect.equal execErr.Value.Payload.[0] 0xffuy "overflowed long data fails EXECUTE with ERR"
+                      Expect.equal (Reader(execErr.Value.Payload.[1..]).ReadInt16LE()) 1153 "1153 ER_NET_PACKET_TOO_LARGE"
+
+                      let! _ = writePacketAsync stream { SeqId = 0uy; Payload = Array.append [| 0x03uy |] (Text.Encoding.UTF8.GetBytes "SELECT 1") }
+                      let! afterReply = readPacketAsync stream
+                      Expect.isTrue afterReply.IsSome "the connection stays usable after the 1153 ERR"
+                  finally
+                      listener.Stop()
+              }
+              |> Async.RunSynchronously
+
+          // A single command whose own payload (reassembled from consecutive
+          // 0xffffff-length fragments) blows past the accumulation cap can't
+          // even be decoded into a command — `Server`'s connection-level
+          // catch sends a best-effort ERR 1153, then the connection ends.
+          testCase "streaming a single command past the accumulation cap gets a best-effort ERR 1153 before close"
+          <| fun _ ->
+              async {
+                  let listener = Fsdb.Server.startListening System.Net.IPAddress.Loopback 0
+                  let port = Fsdb.Server.port listener
+                  Fsdb.Server.serve listener (Fsdb.Storage.create ()) Fsdb.Functions.empty |> Async.StartAsTask |> ignore
+
+                  try
+                      let! client, stream = connectRaw port
+                      use client = client
+
+                      // A COM_QUERY payload one byte over the cap: `writePacketAsync`
+                      // splits it into `maxPacketPayload`-sized fragments; the
+                      // server's reassembly raises before `parseCommand` ever runs.
+                      let hugeQuery = Array.append [| 0x03uy |] (Array.zeroCreate<byte> maxAccumulatedPacketSize)
+                      let! _ = writePacketAsync stream { SeqId = 0uy; Payload = hugeQuery }
+
+                      let! tooLargeErr = readPacketAsync stream
+                      Expect.isTrue tooLargeErr.IsSome "a best-effort ERR arrives before the connection closes"
+                      Expect.equal tooLargeErr.Value.Payload.[0] 0xffuy "server replies ERR"
+                      Expect.equal (Reader(tooLargeErr.Value.Payload.[1..]).ReadInt16LE()) 1153 "1153 ER_NET_PACKET_TOO_LARGE"
+
+                      let! closed = readPacketAsync stream
+                      Expect.isNone closed "the connection is closed after the oversized-packet ERR"
+                  finally
+                      listener.Stop()
+              }
+              |> Async.RunSynchronously
+
+          // CLIENT_FOUND_ROWS (negotiated in HandshakeResponse41's capability
+          // flags) changes a no-op UPDATE's affected_rows from 0 (changed
+          // rows, the default) to the matched-row count.
+          testCase "CLIENT_FOUND_ROWS makes a no-op UPDATE report matched rows, not changed rows"
+          <| fun _ ->
+              async {
+                  let listener = Fsdb.Server.startListening System.Net.IPAddress.Loopback 0
+                  let port = Fsdb.Server.port listener
+                  Fsdb.Server.serve listener (Fsdb.Storage.create ()) Fsdb.Functions.empty |> Async.StartAsTask |> ignore
+
+                  try
+                      use client = new Net.Sockets.TcpClient()
+                      do! client.ConnectAsync(Net.IPAddress.Loopback, port) |> Async.AwaitTask
+                      use stream = client.GetStream()
+
+                      let! handshake = readPacketAsync stream
+                      let handshakeSeq = handshake.Value.SeqId
+
+                      let helloResponse =
+                          let w = Writer()
+                          w.WriteInt32LE(int (ClientProtocol41 ||| ClientFoundRows))
+                          w.WriteInt32LE 16777216
+                          w.WriteByte 45uy
+                          w.WriteBytes(Array.zeroCreate<byte> 23)
+                          w.WriteNullTerminatedString "root"
+                          w.WriteByte 0uy
+                          w.ToArray()
+
+                      let! _ = writePacketAsync stream { SeqId = handshakeSeq + 1uy; Payload = helloResponse }
+                      let! _ = readPacketAsync stream // connection OK
+
+                      let query (sql: string) =
+                          writePacketAsync stream { SeqId = 0uy; Payload = Array.append [| 0x03uy |] (Text.Encoding.UTF8.GetBytes sql) }
+
+                      let! _ = query "CREATE TABLE t (n INT)"
+                      let! _ = readPacketAsync stream
+                      let! _ = query "INSERT INTO t VALUES (1), (2), (3)"
+                      let! _ = readPacketAsync stream
+
+                      // Every row already holds its current value: 0 changed
+                      // rows, but 3 matched rows.
+                      let! _ = query "UPDATE t SET n = n"
+                      let! updateOk = readPacketAsync stream
+                      Expect.equal updateOk.Value.Payload.[0] 0x00uy "UPDATE replies OK"
+                      Expect.equal (Reader(updateOk.Value.Payload.[1..]).ReadLenEncInt()) (Some 3UL) "CLIENT_FOUND_ROWS reports the matched-row count for a no-op UPDATE"
                   finally
                       listener.Stop()
               }

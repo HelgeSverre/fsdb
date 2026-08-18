@@ -4633,7 +4633,13 @@ let private nextIds ((okId, generatedId): int64 * int64) ((newOkId: int64), (new
 /// reads, which only ever reflects a *generated* id and holds its previous
 /// value across a statement that generated none at all. Every non-insert
 /// statement passes both straight through unchanged.
-let execute (store: Store) (registry: Registry) (dbName: string) (ids: int64 * int64) (stmt: Statement) : (int64 * int64) * QueryResult =
+/// `foundRows` is the session's negotiated CLIENT_FOUND_ROWS capability
+/// (`Protocol.ClientFoundRows`, read by `QueryHandler` off `Session.Capabilities`
+/// — this module can't reference `Protocol` itself, it compiles earlier).
+/// UPDATE's affected-rows count is MySQL's one behavior this flag actually
+/// changes: matched rows (including no-op `SET x = x` ones) when set, changed
+/// rows (the default) when not. Every other statement kind ignores it.
+let execute (store: Store) (registry: Registry) (dbName: string) (ids: int64 * int64) (foundRows: bool) (stmt: Statement) : (int64 * int64) * QueryResult =
     match stmt with
     | CreateDatabase(name, ifNotExists) ->
         match Storage.createDatabase store name with
@@ -4768,7 +4774,7 @@ let execute (store: Store) (registry: Registry) (dbName: string) (ids: int64 * i
 
                     let computeGenerated = computeGeneratedRow store registry dbName table tableColumns
 
-                    match upsertRows store db table cols rowsValues computeGenerated applyUpdate |> withGeneratedRecomputed store registry dbName db table with
+                    match upsertRows store db table cols rowsValues computeGenerated applyUpdate foundRows |> withGeneratedRecomputed store registry dbName db table with
                     | Ok(newLastId, newGenerated, affected) -> nextIds ids (newLastId, newGenerated), Affected(uint64 affected)
                     | Error e -> ids, storageErr e
 
@@ -4858,7 +4864,12 @@ let execute (store: Store) (registry: Registry) (dbName: string) (ids: int64 * i
                         let candidates = narrowed |> Option.map snd
 
                         match updateRows store db table candidates predicate updater |> withGeneratedRecomputed store registry dbName db table with
-                        | Ok affected -> ids, Affected(uint64 affected)
+                        | Ok changed ->
+                            // `targetRows` is the WHERE/ORDER BY/LIMIT match
+                            // set already computed above — matched rows,
+                            // unlike `changed`, needs no extra pass over the
+                            // table.
+                            ids, Affected(uint64 (if foundRows then targetRows.Length else changed))
                         | Error e -> ids, storageErr e
 
     | Update updateStmt ->
@@ -5075,7 +5086,14 @@ let execute (store: Store) (registry: Registry) (dbName: string) (ids: int64 * i
                         | Ok counts ->
                             Storage.mergeCatalogInto store baseCatalog snapshot.Catalog
                             Storage.commitTransactionEvents store snapshot
-                            ids, Affected(uint64 (List.sum counts))
+                            // `pending.[i].Count` is the matched-row count per
+                            // physical table (every row this JOIN claimed for
+                            // it, whether or not the write actually changed
+                            // anything) — `counts` from `updateRows` is the
+                            // changed-row count `List.sum counts` reports by
+                            // default.
+                            let matched = pending |> Array.sumBy (fun d -> d.Count)
+                            ids, Affected(uint64 (if foundRows then matched else List.sum counts))
                         | Error e -> ids, storageErr e)
 
     | Delete deleteStmt when deleteStmt.Joins.IsEmpty ->

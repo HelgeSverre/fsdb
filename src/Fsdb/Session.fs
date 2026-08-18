@@ -216,12 +216,27 @@ type Session =
       /// param index), appended to on each call and consumed (then cleared)
       /// by the next COM_STMT_EXECUTE or COM_STMT_RESET for that statement.
       LongData: Map<int * int, byte[]>
+      /// (statement id, param index) pairs whose COM_STMT_SEND_LONG_DATA
+      /// chunks together exceeded `Server.maxAccumulatedPacketSize` — the
+      /// send-long-data command itself never gets a reply (per protocol),
+      /// so the overflow surfaces as ER_NET_PACKET_TOO_LARGE (1153) on the
+      /// next COM_STMT_EXECUTE for that statement instead of silently
+      /// truncating the parameter's data. Cleared alongside `LongData` by
+      /// that EXECUTE, or by COM_STMT_RESET/COM_STMT_CLOSE.
+      LongDataOverflow: Set<int * int>
       /// Custom functions registered on the embedding `Db` this session's
       /// connection was accepted on (see `Fsdb.Db.registerScalar`/
       /// `registerAggregate`) — empty for a session built directly (every
       /// test). `QueryHandler.registryFor` layers these over the built-ins,
       /// under session-bound overrides like `DATABASE()`.
-      CustomFunctions: Fsdb.Functions.Registry }
+      CustomFunctions: Fsdb.Functions.Registry
+      /// Effective capabilities negotiated at handshake (`Server`'s
+      /// `resp.Capabilities &&& ServerCapabilities`) — 0 for a session built
+      /// directly (every test that doesn't set it). Only `ClientFoundRows`
+      /// is read back out of this today, to pick matched- vs changed-row
+      /// counts for UPDATE, multi-table UPDATE, and INSERT ... ON DUPLICATE
+      /// KEY UPDATE (see `Executor.execute`'s `foundRows` param).
+      Capabilities: uint32 }
 
 let create (connectionId: int) (store: Store) : Session =
     // Overlays every `SET GLOBAL`-ed override onto the compiled-in
@@ -254,7 +269,9 @@ let create (connectionId: int) (store: Store) : Session =
       Statements = Map.empty
       NextStmtId = 1
       LongData = Map.empty
-      CustomFunctions = Fsdb.Functions.empty }
+      LongDataOverflow = Set.empty
+      CustomFunctions = Fsdb.Functions.empty
+      Capabilities = 0u }
 
 /// The catalog store all statements on this session currently execute
 /// against: the shared store outside a transaction, or the transaction's
