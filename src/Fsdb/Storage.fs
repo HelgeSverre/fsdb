@@ -190,13 +190,9 @@ let splitQualified (defaultDb: string) (name: string) : string * string =
 /// `TransactionGates`) rather than row/table locks. This preserves committed
 /// state under contention but serializes every write within one database,
 /// transactional or not; replace it with row versions or sharded async
-/// locks when parallel write throughput matters. A transaction that writes
-/// across more than one database only holds the gate for the database
-/// active when it entered — a cross-database transaction can still race a
-/// concurrent writer in its *other* databases; upgrade to acquiring every
-/// database a transaction actually touches if that ever matters (Laravel's
-/// per-worker-database test parallelism, the case this exists for, never
-/// does).
+/// locks when parallel write throughput matters. A transaction acquires the
+/// gate of every database its statements actually touch
+/// (`QueryHandler.targetDatabases`), not just its session default.
 ///
 /// `ForeignKeyChecks` gates every FK enforcement in this module (cascading
 /// deletes, `RESTRICT`, parent-existence checks on insert/update) — the
