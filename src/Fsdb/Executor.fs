@@ -133,6 +133,9 @@ let rec private containsAggregate (registry: Registry) (expr: Expr) : bool =
     | Star _
     | RowNumberOver _
     | LagOver _
+    | RankOver _
+    | PercentRankOver _
+    | NTileOver _
     // A subquery's own aggregates belong to *its* grouping, not the query
     // this expression sits in — `containsAggregate` only asks whether
     // `runSelect` needs to switch itself onto the grouped path, so these
@@ -152,7 +155,10 @@ let rec private collectWindowFuncs (expr: Expr) : Expr list =
     match expr with
     | Placeholder _ -> []
     | RowNumberOver _
-    | LagOver _ -> [ expr ]
+    | LagOver _
+    | RankOver _
+    | PercentRankOver _
+    | NTileOver _ -> [ expr ]
     | FuncCall(_, args) -> args |> List.collect collectWindowFuncs
     | BinOp(_, a, b) -> collectWindowFuncs a @ collectWindowFuncs b
     | Not e
@@ -188,7 +194,10 @@ let rec private collectColRefs (expr: Expr) : string list =
     match expr with
     | Col name -> [ name ]
     | RowNumberOver _
-    | LagOver _ -> []
+    | LagOver _
+    | RankOver _
+    | PercentRankOver _
+    | NTileOver _ -> []
     | FuncCall(_, args) -> args |> List.collect collectColRefs
     | BinOp(_, a, b) -> collectColRefs a @ collectColRefs b
     | Not e
@@ -259,6 +268,9 @@ let rec private substituteWindowFuncs (synthetic: (Expr * string) list) (expr: E
         | Star _
         | RowNumberOver _
         | LagOver _
+        | RankOver _
+        | PercentRankOver _
+        | NTileOver _
         | Exists _
         | Subquery _
         | InSubquery _ -> expr
@@ -311,6 +323,9 @@ let rec private exprLabel (expr: Expr) : string =
     | Star(Some q) -> sprintf "%s.*" q
     | RowNumberOver _ -> "row_number() over ()"
     | LagOver(e, offset, _, _) -> sprintf "%s(%s) over ()" (if offset < 0L then "lead" else "lag") (exprLabel e)
+    | RankOver(dense, _, _) -> sprintf "%s() over ()" (if dense then "dense_rank" else "rank")
+    | PercentRankOver _ -> "percent_rank() over ()"
+    | NTileOver(n, _, _) -> sprintf "ntile(%d) over ()" n
     | Exists _ -> "exists"
     | Subquery _ -> "(...)"
 
@@ -1168,7 +1183,10 @@ let rec private evalExpr (ctx: EvalContext) (expr: Expr) : Result<Value, EvalErr
     // runs) — real MySQL itself rejects a window function outside a
     // `SELECT`'s own projection/`ORDER BY` list the same way.
     | RowNumberOver _
-    | LagOver _ -> Error(1054, "Invalid use of a group function")
+    | LagOver _
+    | RankOver _
+    | PercentRankOver _
+    | NTileOver _ -> Error(1054, "Invalid use of a group function")
     | Col name -> resolveCol ctx name
     | QualifiedCol(table, col) -> resolveQualifiedCol ctx table col
     | Not e -> eval e |> Result.map (fun v -> truthy v |> Option.map (not >> boolToValue) |> Option.defaultValue VNull)
@@ -2147,7 +2165,10 @@ and private rewriteCoalescedCols (map: Map<string, Expr>) (expr: Expr) : Expr =
     | Exists _
     | Subquery _
     | RowNumberOver _
-    | LagOver _ -> expr
+    | LagOver _
+    | RankOver _
+    | PercentRankOver _
+    | NTileOver _ -> expr
     | BinOp(op, a, b) -> BinOp(op, sub a, sub b)
     | Not e -> Not(sub e)
     | IsNull e -> IsNull(sub e)
@@ -2419,12 +2440,8 @@ and private compareByOrderKeys (dirs: Direction list) (ka: (Value * Collation.Co
 /// Each branch runs as an independent, uncorrelated `SELECT` (`outer =
 /// None`) — `Union` only ever occurs as a top-level statement (see
 /// `Ast.Union`'s doc), never nested inside another query's expression, so
-/// there's no outer row to thread through. The combined resultset's
-/// column types are just the first branch's — ponytail: real MySQL
-/// reconciles each column's type across every branch (e.g. an INT column
-/// unioned with a DECIMAL one comes back DECIMAL), this only ever reports
-/// the first branch's types; add real reconciliation if a mixed-type
-/// UNION ever needs it.
+/// there's no outer row to thread through.
+///
 /// MySQL's UNION type reconciliation, at wire-type granularity: all-integer
 /// columns aggregate to LONGLONG; a DECIMAL promotes the numeric result;
 /// FLOAT/DOUBLE promote it further; a string anywhere poisons the column to
@@ -2898,6 +2915,9 @@ and private rewriteAggregates
     // that ever changes.
     | RowNumberOver _
     | LagOver _
+    | RankOver _
+    | PercentRankOver _
+    | NTileOver _
     // A subquery is its own scope with its own grouping — nothing inside it
     // is one of *this* query's aggregate calls to pre-evaluate, even though
     // (via `EvalContext.Outer`) it can still read this query's columns.
@@ -2995,6 +3015,9 @@ and private resolveHavingRef (columnIndex: Map<string, int list>) (projections: 
     | Star _
     | RowNumberOver _
     | LagOver _
+    | RankOver _
+    | PercentRankOver _
+    | NTileOver _
     // A subquery is its own scope — nothing inside it can be *this*
     // query's projection alias.
     | Exists _
@@ -3413,6 +3436,9 @@ and private runWindowedSelect
                 match windowFunc with
                 | RowNumberOver(p, o) -> p, o
                 | LagOver(_, _, p, o) -> p, o
+                | RankOver(_, p, o) -> p, o
+                | PercentRankOver(p, o) -> p, o
+                | NTileOver(_, p, o) -> p, o
                 | _ -> [], []
 
             let keyOf (exprs: Expr list) (row: Value[]) : Result<Value list, EvalError> =
@@ -3438,12 +3464,96 @@ and private runWindowedSelect
                         |> List.sortWith (fun (_, (_, ka, _)) (_, (_, kb, _)) -> compareByOrderKeys (windowOrderBy |> List.map snd) ka kb)
                         |> Array.ofList)
 
+                // `RANK`'s number for each row in an ORDER BY-sorted partition
+                // group: the 1-based position of the first row in its tie
+                // group (so ties share a rank and the next distinct value
+                // skips ahead by the tie-group's size); an empty window
+                // ORDER BY ties every row in the partition together, same as
+                // MySQL. `PERCENT_RANK` reuses this (always non-dense, see
+                // `Ast.Expr.PercentRankOver`'s doc) rather than a separate walk.
+                let ranksOf (group: (int * (Value list * (Value * Collation.Collation option) list * Value[])) []) : int[] =
+                    let dirs = windowOrderBy |> List.map snd
+
+                    group
+                    |> Array.mapi (fun pos (_, (_, ordKey, _)) -> pos, ordKey)
+                    |> Array.mapFold
+                        (fun (prevKey, lastRank) (pos, ordKey) ->
+                            let tie =
+                                match prevKey with
+                                | Some pk -> compareByOrderKeys dirs pk ordKey = 0
+                                | None -> false
+
+                            let rank = if tie then lastRank else pos + 1
+                            rank, (Some ordKey, rank))
+                        (None, 0)
+                    |> fst
+
                 match windowFunc with
                 | RowNumberOver _ ->
                     partitions
                     |> Array.ofList
                     |> Array.collect (Array.mapi (fun rank (origIdx, _) -> origIdx, VInt(int64 (rank + 1))))
                     |> Ok
+                | RankOver(dense, _, _) ->
+                    partitions
+                    |> Array.ofList
+                    |> Array.collect (fun group ->
+                        if dense then
+                            // Dense rank increments by 1 at every tie-group
+                            // boundary instead of jumping to the leader's
+                            // 1-based position, so it never skips a number.
+                            group
+                            |> Array.mapFold
+                                (fun (prevKey, denseRank) (origIdx, (_, ordKey, _)) ->
+                                    let newGroup =
+                                        match prevKey with
+                                        | Some pk -> compareByOrderKeys (windowOrderBy |> List.map snd) pk ordKey <> 0
+                                        | None -> true
+
+                                    let rank = if newGroup then denseRank + 1 else denseRank
+                                    (origIdx, VInt(int64 rank)), (Some ordKey, rank))
+                                (None, 0)
+                            |> fst
+                        else
+                            Array.map2 (fun (origIdx, _) rank -> origIdx, VInt(int64 rank)) group (ranksOf group))
+                    |> Ok
+                | PercentRankOver _ ->
+                    partitions
+                    |> Array.ofList
+                    |> Array.collect (fun group ->
+                        let n = group.Length
+                        let ranks = ranksOf group
+
+                        Array.map2
+                            (fun (origIdx, _) rank ->
+                                origIdx, VDouble(if n <= 1 then 0.0 else float (rank - 1) / float (n - 1)))
+                            group
+                            ranks)
+                    |> Ok
+                | NTileOver(buckets, _, _) ->
+                    if buckets <= 0L then
+                        Error(1210, "Incorrect arguments to ntile")
+                    else
+                        let buckets = int buckets
+
+                        partitions
+                        |> Array.ofList
+                        |> Array.collect (fun group ->
+                            let n = group.Length
+                            let baseSize = n / buckets
+                            let remainder = n % buckets
+
+                            // Earlier buckets absorb the remainder (a 10-row
+                            // partition into 3 buckets is 4/3/3), matching
+                            // MySQL rather than splitting evenly from the end.
+                            let sizes = Array.init buckets (fun b -> baseSize + (if b < remainder then 1 else 0))
+                            let bucketStarts = sizes |> Array.scan (+) 0
+
+                            group
+                            |> Array.mapi (fun pos (origIdx, _) ->
+                                let bucket = bucketStarts |> Array.findIndexBack (fun start -> start <= pos)
+                                origIdx, VInt(int64 (bucket + 1))))
+                        |> Ok
                 | LagOver(lagExpr, offset, _, _) ->
                     // `pos - offset` indexes within the same partition's
                     // ORDER BY-sorted rows — backward for `LAG` (positive
@@ -3969,6 +4079,9 @@ let rec private substituteValuesFunc (columnIndex: Map<string, int list>) (candi
     | Star _
     | RowNumberOver _
     | LagOver _
+    | RankOver _
+    | PercentRankOver _
+    | NTileOver _
     // `VALUES(col)` only ever occurs directly in an `ON DUPLICATE KEY
     // UPDATE` assignment, never inside a subquery's own text — nothing to
     // substitute inside one, so it's left as-is like `Exists` always was.
@@ -4039,7 +4152,10 @@ let rec private collectSubqueries (expr: Expr) : SelectStmt list =
     | QualifiedCol _
     | Star _
     | RowNumberOver _
-    | LagOver _ -> []
+    | LagOver _
+    | RankOver _
+    | PercentRankOver _
+    | NTileOver _ -> []
 
 /// Whether `expr` contains a subquery form (`Exists`/`Subquery`/
 /// `InSubquery`) anywhere inside it — the same walk `collectSubqueries`
@@ -4103,7 +4219,10 @@ let private isCorrelated (sub: SelectStmt) : bool =
         | Col _
         | Star _
         | RowNumberOver _
-        | LagOver _ -> false
+        | LagOver _
+        | RankOver _
+        | PercentRankOver _
+        | NTileOver _ -> false
 
     let exprs =
         (sub.Projections |> List.map fst)

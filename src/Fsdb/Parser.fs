@@ -597,6 +597,31 @@ let private lagOverAtom: Parser<Expr, unit> =
     |>> fun (((direction, lagExpr), offsetOpt), (partitionBy, orderBy)) ->
         LagOver(lagExpr, direction * (offsetOpt |> Option.map int64 |> Option.defaultValue 1L), partitionBy, orderBy)
 
+/// `RANK() OVER (...)` / `DENSE_RANK() OVER (...)` — see `Ast.Expr.RankOver`'s
+/// doc.
+let private rankOverAtom: Parser<Expr, unit> =
+    attempt (
+        ((keyword "DENSE_RANK" >>% true) <|> (keyword "RANK" >>% false))
+        .>> sym "(" .>> sym ")" .>> keyword "OVER" .>> sym "("
+    )
+    .>>. windowClause
+    .>> sym ")"
+    |>> fun (dense, (partitionBy, orderBy)) -> RankOver(dense, partitionBy, orderBy)
+
+/// `PERCENT_RANK() OVER (...)` — see `Ast.Expr.PercentRankOver`'s doc.
+let private percentRankOverAtom: Parser<Expr, unit> =
+    attempt (keyword "PERCENT_RANK" >>. sym "(" >>. sym ")" >>. keyword "OVER" >>. sym "(")
+    >>. windowClause
+    .>> sym ")"
+    |>> PercentRankOver
+
+/// `NTILE(n) OVER (...)` — see `Ast.Expr.NTileOver`'s doc.
+let private ntileOverAtom: Parser<Expr, unit> =
+    attempt (keyword "NTILE" >>. sym "(" >>. intTok .>> sym ")" .>> keyword "OVER" .>> sym "(")
+    .>>. windowClause
+    .>> sym ")"
+    |>> fun (buckets, (partitionBy, orderBy)) -> NTileOver(int64 buckets, partitionBy, orderBy)
+
 /// `CAST(expr AS type)` — `SIGNED`/`UNSIGNED [INTEGER]` are only valid as a
 /// cast target, not a column type, so they're handled here rather than in
 /// `columnType`.
@@ -707,6 +732,9 @@ let private atom: Parser<Expr, unit> =
           groupConcatAtom
           rowNumberOverAtom
           lagOverAtom
+          rankOverAtom
+          percentRankOverAtom
+          ntileOverAtom
           numberLit |>> Lit
           hexBytesLit |>> Lit
           introducedStringLit

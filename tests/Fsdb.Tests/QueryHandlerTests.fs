@@ -101,6 +101,24 @@ let tests =
               let session, _ = handle session "SELECT @@version"
               Expect.equal session.LastResultColumnTypes [] "an unrelated probe result clears it"
 
+          testCase "RANK/DENSE_RANK/NTILE report LONGLONG and PERCENT_RANK reports DOUBLE over the wire"
+          <| fun _ ->
+              let session = create 1 (Fsdb.Storage.create ())
+              let session, _ = handle session "CREATE TABLE t (id INT PRIMARY KEY, v INT)"
+              let session, _ = handle session "INSERT INTO t VALUES (1, 10), (2, 20)"
+
+              match
+                  handle
+                      session
+                      "SELECT RANK() OVER (ORDER BY v) AS r, DENSE_RANK() OVER (ORDER BY v) AS dr, PERCENT_RANK() OVER (ORDER BY v) AS pr, NTILE(2) OVER (ORDER BY v) AS nt FROM t"
+              with
+              | session, ResultSet([ "r"; "dr"; "pr"; "nt" ], _) ->
+                  Expect.equal
+                      session.LastResultColumnTypes
+                      [ TypeLongLong; TypeLongLong; TypeDouble; TypeLongLong ]
+                      "RANK/DENSE_RANK/NTILE are integers, PERCENT_RANK is a double, same as real MySQL"
+              | _, other -> failtestf "expected a resultset, got %A" other
+
           testCase "SELECT @@version returns the server version"
           <| fun _ ->
               let session = create 1 (Fsdb.Storage.create ())

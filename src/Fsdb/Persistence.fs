@@ -355,6 +355,26 @@ let rec private encodeExpr (w: Writer) (expr: Expr) : unit =
         | Some e ->
             w.WriteByte 1uy
             encodeExpr w e
+    | RankOver(dense, partitionBy, orderBy) ->
+        w.WriteByte 0x17uy
+        w.WriteByte(if dense then 1uy else 0uy)
+        w.WriteInt32LE(List.length partitionBy)
+        List.iter (encodeExpr w) partitionBy
+        w.WriteInt32LE(List.length orderBy)
+        List.iter (fun (e, d) -> encodeExpr w e; encodeDirection w d) orderBy
+    | PercentRankOver(partitionBy, orderBy) ->
+        w.WriteByte 0x18uy
+        w.WriteInt32LE(List.length partitionBy)
+        List.iter (encodeExpr w) partitionBy
+        w.WriteInt32LE(List.length orderBy)
+        List.iter (fun (e, d) -> encodeExpr w e; encodeDirection w d) orderBy
+    | NTileOver(buckets, partitionBy, orderBy) ->
+        w.WriteByte 0x19uy
+        w.WriteInt64LE buckets
+        w.WriteInt32LE(List.length partitionBy)
+        List.iter (encodeExpr w) partitionBy
+        w.WriteInt32LE(List.length orderBy)
+        List.iter (fun (e, d) -> encodeExpr w e; encodeDirection w d) orderBy
     | InSubquery _
     | Exists _
     | Subquery _ -> failwithf "Persistence: a GENERATED column can't hold a subquery (MySQL itself rejects one there)"
@@ -404,6 +424,13 @@ let rec private decodeExpr (r: #IReader) : Expr =
         let whens = List.init (r.ReadInt32LE()) (fun _ -> decodeExpr r, decodeExpr r)
         let elseBranch = optExpr ()
         Case(subject, whens, elseBranch)
+    | 0x17uy ->
+        let dense = r.ReadByte() = 1uy
+        RankOver(dense, exprList (), orderByList ())
+    | 0x18uy -> PercentRankOver(exprList (), orderByList ())
+    | 0x19uy ->
+        let buckets = r.ReadInt64LE()
+        NTileOver(buckets, exprList (), orderByList ())
     | tag -> failwithf "Persistence: unknown Expr tag 0x%02x in WAL/snapshot" tag
 
 // ---------------------------------------------------------------------

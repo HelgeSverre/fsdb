@@ -3938,7 +3938,112 @@ let tests =
                             (rows |> List.map (List.item 3))
                             [ None; Some "100"; Some "200"; None ]
                             "a/A/á chain within one folded partition, b restarts"
-                    | other -> failtestf "expected collation-folded LAG chain, got %A" other ]
+                    | other -> failtestf "expected collation-folded LAG chain, got %A" other
+
+                testCase "RANK() ties share a rank and the next distinct value skips ahead; DENSE_RANK() never skips"
+                <| fun _ ->
+                    // Oracle (MySQL 8.4.11): g=1's two 10s tie at rank 1,
+                    // then 20 is rank 3 (RANK) / rank 2 (DENSE_RANK).
+                    let store = newStore ()
+                    runDefault store "CREATE TABLE t (id INT PRIMARY KEY, g INT, v INT)" |> ignore
+
+                    runDefault store "INSERT INTO t VALUES (1, 1, 10), (2, 1, 10), (3, 1, 20), (4, 2, 5)"
+                    |> ignore
+
+                    match
+                        runDefault
+                            store
+                            "SELECT id, g, v, RANK() OVER (PARTITION BY g ORDER BY v) AS r, DENSE_RANK() OVER (PARTITION BY g ORDER BY v) AS dr FROM t ORDER BY id"
+                    with
+                    | ResultSet([ "id"; "g"; "v"; "r"; "dr" ], rows) ->
+                        Expect.equal
+                            rows
+                            [ [ Some "1"; Some "1"; Some "10"; Some "1"; Some "1" ]
+                              [ Some "2"; Some "1"; Some "10"; Some "1"; Some "1" ]
+                              [ Some "3"; Some "1"; Some "20"; Some "3"; Some "2" ]
+                              [ Some "4"; Some "2"; Some "5"; Some "1"; Some "1" ] ]
+                            "RANK skips the tied count, DENSE_RANK doesn't, and g=2 resets per partition"
+                    | other -> failtestf "expected tie-aware RANK/DENSE_RANK, got %A" other
+
+                testCase "RANK()/DENSE_RANK() with no ORDER BY tie every row in the partition together"
+                <| fun _ ->
+                    let store = newStore ()
+                    runDefault store "CREATE TABLE t (id INT PRIMARY KEY, v INT)" |> ignore
+                    runDefault store "INSERT INTO t VALUES (1, 10), (2, 30), (3, 20)" |> ignore
+
+                    match
+                        runDefault store "SELECT id, RANK() OVER () AS r, DENSE_RANK() OVER () AS dr FROM t ORDER BY id"
+                    with
+                    | ResultSet([ "id"; "r"; "dr" ], rows) ->
+                        Expect.equal
+                            rows
+                            [ [ Some "1"; Some "1"; Some "1" ]
+                              [ Some "2"; Some "1"; Some "1" ]
+                              [ Some "3"; Some "1"; Some "1" ] ]
+                            "no ORDER BY means every row ties at rank 1"
+                    | other -> failtestf "expected every row tied at rank 1, got %A" other
+
+                testCase "PERCENT_RANK() is (rank - 1) / (rows_in_partition - 1), 0 for a one-row partition"
+                <| fun _ ->
+                    let store = newStore ()
+                    runDefault store "CREATE TABLE t (id INT PRIMARY KEY, g INT, v INT)" |> ignore
+
+                    runDefault
+                        store
+                        "INSERT INTO t VALUES (1, 1, 10), (2, 1, 10), (3, 1, 20), (4, 1, 30), (5, 2, 100)"
+                    |> ignore
+
+                    match
+                        runDefault
+                            store
+                            "SELECT id, PERCENT_RANK() OVER (PARTITION BY g ORDER BY v) AS pr FROM t ORDER BY id"
+                    with
+                    | ResultSet([ "id"; "pr" ], rows) ->
+                        Expect.equal
+                            rows
+                            [ [ Some "1"; Some "0" ]
+                              [ Some "2"; Some "0" ]
+                              [ Some "3"; Some "0.6666666666666666" ]
+                              [ Some "4"; Some "1" ]
+                              [ Some "5"; Some "0" ] ]
+                            "(rank-1)/(n-1) per partition, 0 when the partition has one row"
+                    | other -> failtestf "expected PERCENT_RANK values, got %A" other
+
+                testCase "NTILE(n) distributes the remainder to earlier buckets, per partition"
+                <| fun _ ->
+                    // 4 rows into 3 buckets is 2/1/1, not 1/1/2 — Oracle
+                    // (MySQL 8.4.11) confirmed.
+                    let store = newStore ()
+                    runDefault store "CREATE TABLE t (id INT PRIMARY KEY, g INT, v INT)" |> ignore
+
+                    runDefault
+                        store
+                        "INSERT INTO t VALUES (1, 1, 1), (2, 1, 2), (3, 1, 3), (4, 1, 4), (5, 2, 1)"
+                    |> ignore
+
+                    match
+                        runDefault store "SELECT id, NTILE(3) OVER (PARTITION BY g ORDER BY v) AS nt FROM t ORDER BY id"
+                    with
+                    | ResultSet([ "id"; "nt" ], rows) ->
+                        Expect.equal
+                            rows
+                            [ [ Some "1"; Some "1" ]
+                              [ Some "2"; Some "1" ]
+                              [ Some "3"; Some "2" ]
+                              [ Some "4"; Some "3" ]
+                              [ Some "5"; Some "1" ] ]
+                            "4 rows into 3 buckets is 2/1/1, earlier buckets absorbing the remainder"
+                    | other -> failtestf "expected NTILE bucket assignment, got %A" other
+
+                testCase "NTILE(0) errors 1210 like MySQL's ER_WRONG_ARGUMENTS"
+                <| fun _ ->
+                    let store = newStore ()
+                    runDefault store "CREATE TABLE t (id INT PRIMARY KEY)" |> ignore
+                    runDefault store "INSERT INTO t VALUES (1)" |> ignore
+
+                    match runDefault store "SELECT NTILE(0) OVER (ORDER BY id) FROM t" with
+                    | Err(1210, "Incorrect arguments to ntile") -> ()
+                    | other -> failtestf "expected error 1210, got %A" other ]
 
           testList
               "PK/UNIQUE point-lookup fast path (Storage.tryUniqueLookup)"

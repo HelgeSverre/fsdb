@@ -316,6 +316,9 @@ let rec private exprToSql (e: Expr) : string =
     | InSubquery _ -> "(...)"
     | RowNumberOver _ -> "row_number() over ()"
     | LagOver _ -> "lag() over ()"
+    | RankOver(dense, _, _) -> (if dense then "dense_rank" else "rank") + "() over ()"
+    | PercentRankOver _ -> "percent_rank() over ()"
+    | NTileOver _ -> "ntile() over ()"
 
 /// `EXTRA` / SHOW COLUMNS `Extra` for a column — MySQL says
 /// `VIRTUAL GENERATED`/`STORED GENERATED` for generated columns (uppercase),

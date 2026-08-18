@@ -120,9 +120,25 @@ type Expr =
     /// anywhere inside a larger expression (`value - LAG(value) OVER (...)`
     /// is a real report query), so `Executor` finds and substitutes every
     /// occurrence rather than only a bare top-level projection.
-    /// ponytail: `LAG`/`LEAD` only — no `RANK`/`DENSE_RANK`/`NTILE`/frame
-    /// clauses; add them if a migration's query needs one.
+    /// ponytail: no `ROWS BETWEEN`/frame clauses — every window here is the
+    /// implicit whole-partition frame; add frame support if a migration's
+    /// query needs one.
     | LagOver of expr: Expr * offset: int64 * partitionBy: Expr list * orderBy: OrderKey list
+    /// `RANK() OVER (...)` (`dense = false`) / `DENSE_RANK() OVER (...)`
+    /// (`dense = true`) — one case for both, same pairing `LagOver` uses for
+    /// `LAG`/`LEAD`. Both assign every row in a partition the same rank as
+    /// any row it ties with under the window's `ORDER BY` (all rows tie when
+    /// there's no `ORDER BY`); `RANK` then skips as many following ranks as
+    /// there were tied rows, `DENSE_RANK` never skips.
+    | RankOver of dense: bool * partitionBy: Expr list * orderBy: OrderKey list
+    /// `PERCENT_RANK() OVER (...)` — `(rank - 1) / (rows_in_partition - 1)`
+    /// using the same tie-aware `RANK` numbering as `RankOver(false, ...)`;
+    /// `0` for a one-row partition (MySQL never divides by zero here).
+    | PercentRankOver of partitionBy: Expr list * orderBy: OrderKey list
+    /// `NTILE(buckets) OVER (...)` — splits each partition into `buckets`
+    /// groups as evenly as possible, earlier groups absorbing the remainder
+    /// (a 10-row partition into 3 buckets is 4/3/3, not 3/3/4).
+    | NTileOver of buckets: int64 * partitionBy: Expr list * orderBy: OrderKey list
     /// Marks `DISTINCT expr` as an aggregate call's argument (`COUNT(DISTINCT
     /// x)`, `SUM(DISTINCT x)`, ...) — only meaningful as the (unwrapped) sole
     /// argument of a `FuncCall` the executor recognizes as an aggregate;
