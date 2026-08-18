@@ -440,10 +440,15 @@ let private encodeColumnDef (w: Writer) (c: ColumnDef) : unit =
     writeBool w c.PrimaryKey
     writeBool w c.Unique
 
+    // Tag doubles as the VIRTUAL/STORED kind: old snapshots wrote 1uy for
+    // every generated column, which decodes as Virtual (MySQL's default).
     match c.Generated with
     | None -> w.WriteByte 0uy
-    | Some g ->
+    | Some(g, Virtual) ->
         w.WriteByte 1uy
+        encodeExpr w g
+    | Some(g, Stored) ->
+        w.WriteByte 2uy
         encodeExpr w g
 
     writeOptStr w c.Collation
@@ -457,7 +462,11 @@ let private decodeColumnDef (r: #IReader) : ColumnDef =
       AutoIncrement = readBool r
       PrimaryKey = readBool r
       Unique = readBool r
-      Generated = (match r.ReadByte() with 0uy -> None | _ -> Some(decodeExpr r))
+      Generated =
+        (match r.ReadByte() with
+         | 0uy -> None
+         | 2uy -> Some(decodeExpr r, Stored)
+         | _ -> Some(decodeExpr r, Virtual))
       Collation = readOptStr r
       Charset = readOptStr r }
 
@@ -701,7 +710,17 @@ let private applyDdl (store: Store) (db: string) (stmt: Statement) : unit =
     | CreateTable(name, columns, indexes, fks, _, tableCharset, tableCollation) ->
         warn "CreateTable" (createTable store db name columns indexes fks tableCharset tableCollation)
     | DropTable(names, _) -> names |> List.iter (fun n -> warn "DropTable" (dropTable store db n))
-    | AlterTable(table, actions) -> warn "AlterTable" (alterTable store db table actions)
+    | AlterTable(table, actions) ->
+        // Replay non-strict, whatever the store's current mode: MODIFY/
+        // CHANGE re-coerce existing rows, and a logged ALTER already
+        // succeeded once — if it ran strict, every value was in range, so
+        // non-strict re-coercion is the identity; if it ran non-strict, the
+        // clamping replays identically. Replaying strict instead would
+        // reject (and silently skip) an ALTER that clamped values.
+        let saved = store.StrictMode
+        store.StrictMode <- false
+        warn "AlterTable" (alterTable store db table actions)
+        store.StrictMode <- saved
     | RenameTable pairs -> pairs |> List.iter (fun (oldName, newName) -> warn "RenameTable" (renameTable store db oldName newName))
     | CreateIndex(name, table, columns, unique) ->
         warn "CreateIndex" (alterTable store db table [ AddIndex { Name = name; Columns = columns; Unique = unique } ])

@@ -38,6 +38,10 @@ type StorageError =
     /// "Data truncated" (SQLSTATE 01000), distinct from the 1366 incorrect-
     /// value error other column types raise in strict mode.
     | DataTruncatedForColumn of column: string
+    /// A value doesn't fit the column's numeric range — MySQL's 1264
+    /// (SQLSTATE 22003), raised in strict mode when `ALTER ... MODIFY`
+    /// narrows an integer type over existing out-of-range rows.
+    | OutOfRangeForColumn of column: string
     | ExpressionError of code: int * message: string
     /// A unique index (or the primary key, reported as `"PRIMARY"`) already
     /// has a row with this value.
@@ -51,6 +55,9 @@ type StorageError =
     /// A temporal column declared a fractional-seconds precision above 6
     /// (`DATETIME(7)`) — MySQL's 1426, which names the offending column.
     | PrecisionTooBig of column: string * precision: int
+    /// An `INSERT` column list or `UPDATE ... SET` explicitly targeted a
+    /// generated column — MySQL's 3105.
+    | GeneratedColumnAssignment of column: string * table: string
 
 /// MySQL error code + message for a `StorageError`, ready for the wire
 /// protocol's ERR packet.
@@ -66,6 +73,7 @@ let toMySqlError (err: StorageError) : int * string =
     | NotNullViolation column -> 1048, sprintf "Column '%s' cannot be null" column
     | InvalidValueForColumn(column, value) -> 1366, sprintf "Incorrect value: '%s' for column '%s'" value column
     | DataTruncatedForColumn column -> 1265, sprintf "Data truncated for column '%s' at row 1" column
+    | OutOfRangeForColumn column -> 1264, sprintf "Out of range value for column '%s' at row 1" column
     | ExpressionError(code, message) -> code, message
     | DuplicateKey(keyName, value) -> 1062, sprintf "Duplicate entry '%s' for key '%s'" value keyName
     | ForeignKeyRestrict fkName ->
@@ -74,6 +82,8 @@ let toMySqlError (err: StorageError) : int * string =
         1452, sprintf "Cannot add or update a child row: a foreign key constraint fails (`%s`)" fkName
     | PrecisionTooBig(column, precision) ->
         1426, sprintf "Too-big precision %d specified for '%s'. Maximum is 6." precision column
+    | GeneratedColumnAssignment(column, table) ->
+        3105, sprintf "The value specified for generated column '%s' in table '%s' is not allowed." column table
 
 /// A table's rows, newest last. `OriginalName` keeps the as-created casing
 /// for information_schema, even though the catalog keys tables by their
@@ -517,8 +527,7 @@ let dropDatabase (store: Store) (dbName: string) : Result<unit, StorageError> =
 /// second, storage-level guarantee matters). Crucially, a completely
 /// disjoint slot per database (see `Store.Databases`'s doc) means a write to
 /// database A never even touches, let alone blocks on, database B's slot —
-/// the cross-database contention a single store-wide `Catalog` CAS used to
-/// cause is gone by construction.
+/// cross-database writes can't contend by construction.
 let private withDatabase
     (store: Store)
     (dbName: string)
@@ -759,6 +768,16 @@ let resolveColumn (columns: ColumnDef list) (name: string) : Result<int, Storage
     |> function
         | Some i -> Ok i
         | None -> Error(UnknownColumn name)
+
+/// `resolveColumn` for a write target: a generated column can't be
+/// explicitly assigned (MySQL 3105).
+let resolveAssignableColumn (columns: ColumnDef list) (tableName: string) (name: string) : Result<int, StorageError> =
+    resolveColumn columns name
+    |> Result.bind (fun i ->
+        if (List.item i columns).Generated.IsSome then
+            Error(GeneratedColumnAssignment ((List.item i columns).Name, tableName))
+        else
+            Ok i)
 
 /// Ambient per-thread cancellation for the query currently executing on
 /// this thread — armed by the connection loop's disconnect watcher
@@ -1169,8 +1188,7 @@ let private reindexRow
 /// with this key exist". `None` when no such group exists (every real
 /// MySQL FK references a unique/PK constraint of the parent in matching
 /// column order, so this only misses on stale/malformed FK metadata) —
-/// `checkFkParent` falls back to a full scan in that case, same as before
-/// this index existed.
+/// `checkFkParent` falls back to a full scan in that case.
 let private parentUniqueIndex (parent: Table) (refIdxs: int list) : Map<string, int> option =
     uniqueKeyGroups parent |> List.tryPick (fun (name, idxs) -> if idxs = refIdxs then Map.tryFind name parent.UniqueIndex else None)
 
@@ -1441,7 +1459,37 @@ let private resolvePosition (columnsExcludingSelf: ColumnDef list) (fallback: in
 /// Applies one `Ast.AlterAction` to `table`, returning its replacement and,
 /// for `RenameTo`, the new key it should be re-filed under in the database
 /// map (`None` means "same key").
-let private applyAlterAction (table: Table) (action: AlterAction) : Result<Table * string option, StorageError> =
+let private applyAlterAction (strict: bool) (table: Table) (action: AlterAction) : Result<Table * string option, StorageError> =
+    // MODIFY/CHANGE re-coerce every existing row into the new definition —
+    // MySQL's copy-alter semantics. `coerceValue` gives temporal fsp
+    // narrowing its half-up rounding for free; on top of it, ALTER enforces
+    // the narrowing checks the oracle showed: a string longer than the new
+    // CHAR/VARCHAR length is 1265 "Data truncated" (not INSERT's 1406) in
+    // strict mode (silently truncated non-strict), an integer outside the
+    // new type's range is 1264 "Out of range" in strict mode (clamped
+    // non-strict). The first failing row aborts the whole ALTER, leaving
+    // the table untouched.
+    let recoerce (newDef: ColumnDef) (v: Value) : Result<Value, StorageError> =
+        coerceValue strict newDef v
+        |> Result.bind (fun coerced ->
+            match newDef.Type, coerced with
+            | (TChar n | TVarchar n), VString s when String.length s > n ->
+                if strict then Error(DataTruncatedForColumn newDef.Name) else Ok(VString(s.Substring(0, n)))
+            | intType, VInt i ->
+                let range =
+                    match intType with
+                    | TTinyInt unsigned -> Some(if unsigned then 0L, 255L else -128L, 127L)
+                    | TSmallInt unsigned -> Some(if unsigned then 0L, 65535L else -32768L, 32767L)
+                    | TMediumInt unsigned -> Some(if unsigned then 0L, 16777215L else -8388608L, 8388607L)
+                    | TInt unsigned -> Some(if unsigned then 0L, 4294967295L else -2147483648L, 2147483647L)
+                    | _ -> None
+
+                match range with
+                | Some(lo, hi) when i < lo || i > hi ->
+                    if strict then Error(OutOfRangeForColumn newDef.Name) else Ok(VInt(max lo (min hi i)))
+                | _ -> Ok coerced
+            | _ -> Ok coerced)
+
     // Reject a too-big fsp on any column this action introduces (1426),
     // before it can reach the table — the DDL-time counterpart to
     // `createTable`'s own `validateColumnFsp` pass.
@@ -1497,43 +1545,53 @@ let private applyAlterAction (table: Table) (action: AlterAction) : Result<Table
                 Columns = table.Columns |> List.indexed |> List.filter (fun (i, _) -> i <> idx) |> List.map snd
                 RowsArray = table.RowsArray |> Seq.map (removeColumnAt idx) |> ImmutableArray.CreateRange },
             None)
-    | ModifyColumn(newDef, position) ->
-        // ponytail: replaces the column's definition only — existing rows
-        // aren't re-coerced into the new type, so a `MODIFY` that narrows a
-        // type can leave a row holding a value that wouldn't itself pass
-        // `coerceValue` today. Add a re-coercion pass if a migration's
-        // assertions ever depend on it.
-        resolveColumn table.Columns newDef.Name
-        |> Result.bind (fun oldIdx ->
-            let columnsExcludingSelf = table.Columns |> List.indexed |> List.filter (fun (i, _) -> i <> oldIdx) |> List.map snd
+    | ModifyColumn(newDef, position)
+    | ChangeColumn(_, newDef, position) ->
+        let oldName =
+            match action with
+            | ChangeColumn(oldName, _, _) -> oldName
+            | _ -> newDef.Name
 
-            resolvePosition columnsExcludingSelf oldIdx position
-            |> Result.map (fun newIdx ->
-                { table with
-                    Columns = columnsExcludingSelf |> insertAt newIdx newDef
-                    RowsArray =
-                        table.RowsArray
-                        |> Seq.map (fun r ->
-                            let v = r.[oldIdx]
-                            r |> removeColumnAt oldIdx |> Array.toList |> insertAt newIdx v |> Array.ofList)
-                        |> ImmutableArray.CreateRange },
-                None))
-    | ChangeColumn(oldName, newDef, position) ->
         resolveColumn table.Columns oldName
         |> Result.bind (fun oldIdx ->
             let columnsExcludingSelf = table.Columns |> List.indexed |> List.filter (fun (i, _) -> i <> oldIdx) |> List.map snd
 
             resolvePosition columnsExcludingSelf oldIdx position
-            |> Result.map (fun newIdx ->
-                { table with
-                    Columns = columnsExcludingSelf |> insertAt newIdx newDef
-                    RowsArray =
-                        table.RowsArray
-                        |> Seq.map (fun r ->
-                            let v = r.[oldIdx]
-                            r |> removeColumnAt oldIdx |> Array.toList |> insertAt newIdx v |> Array.ofList)
-                        |> ImmutableArray.CreateRange },
-                None))
+            |> Result.bind (fun newIdx ->
+                table.RowsArray
+                |> List.ofSeq
+                |> traverse (fun (r: Value[]) ->
+                    recoerce newDef r.[oldIdx]
+                    |> Result.map (fun v -> r |> removeColumnAt oldIdx |> Array.toList |> insertAt newIdx v |> Array.ofList))
+                |> Result.bind (fun rows ->
+                    let candidate =
+                        { table with
+                            Columns = columnsExcludingSelf |> insertAt newIdx newDef
+                            RowsArray = ImmutableArray.CreateRange rows }
+
+                    // A narrowing re-coercion that folds two unique-key
+                    // values together must fail with 1062 (MySQL errors even
+                    // non-strict) — otherwise `reindexTable`'s last-wins
+                    // rebuild would silently drop rows from the index.
+                    let collision =
+                        uniqueKeyGroups candidate
+                        |> List.tryPick (fun (name, idxs) ->
+                            let rec loop seen remaining =
+                                match remaining with
+                                | [] -> None
+                                | (row: Value[]) :: rest ->
+                                    match encodeConstraintKey candidate.Columns idxs row with
+                                    | Some key when Set.contains key seen ->
+                                        let value = idxs |> List.map (fun i -> row.[i] |> toText |> Option.defaultValue "NULL") |> String.concat "-"
+                                        Some(DuplicateKey(name, value))
+                                    | Some key -> loop (Set.add key seen) rest
+                                    | None -> loop seen rest
+
+                            loop Set.empty rows)
+
+                    match collision with
+                    | Some e -> Error e
+                    | None -> Ok(candidate, None))))
     | RenameTo newName -> Ok({ table with OriginalName = newName }, Some(normalizeTableName newName))
     | RenameColumnTo(oldName, newName) ->
         resolveColumn table.Columns oldName
@@ -1597,7 +1655,7 @@ let alterTable (store: Store) (dbName: string) (tableName: string) (actions: Alt
                 let step acc action =
                     acc
                     |> Result.bind (fun (key, tbl) ->
-                        applyAlterAction tbl action
+                        applyAlterAction store.StrictMode tbl action
                         |> Result.map (fun (tbl', newKey) -> (newKey |> Option.defaultValue key), tbl'))
 
                 actions
@@ -1654,8 +1712,12 @@ let private processRow
 /// in table order") to indices against `table`.
 let private resolveInsertColumns (table: Table) (columns: string list option) : Result<int list, StorageError> =
     match columns with
+    // ponytail: a bare `INSERT INTO t VALUES (...)` still accepts a value in
+    // a generated column's slot and recomputes over it (MySQL demands the
+    // `DEFAULT` keyword per cell, which the parser doesn't have) — add that
+    // once the parser learns `DEFAULT` in a VALUES row.
     | None -> Ok [ 0 .. table.Columns.Length - 1 ]
-    | Some names -> names |> traverse (resolveColumn table.Columns)
+    | Some names -> names |> traverse (resolveAssignableColumn table.Columns table.OriginalName)
 
 /// Shared core of `insertRows` and `insertRowsIgnore`: builds each row via
 /// `processRow`, then checks it against the table's unique keys (including
@@ -1675,9 +1737,9 @@ let private resolveInsertColumns (table: Table) (columns: string list option) : 
 /// *last* row's explicitly-supplied value. A single-row `INSERT` that
 /// supplies its own id (e.g. a factory pre-assigning `id` before `create()`)
 /// is the common case this exists for: with only "the first generated
-/// value" tracked (as fsdb used to), that row's `last_insert_id` came back
+/// value" tracked, that row's `last_insert_id` would come back
 /// 0 instead of the id it was actually given, and every caller reading it
-/// back (`Eloquent`'s own model, here) silently got a wrong id instead.
+/// back (`Eloquent`'s own model, here) would silently get a wrong id.
 ///
 /// That OK-packet value is also returned separately as `generatedId` — the
 /// first *actually generated* id, or `None` if every row supplied its own —
@@ -2542,9 +2604,10 @@ let scanList (store: Store) (dbName: string) (tableName: string) : Result<Column
 /// evaluating it needs `Executor.evalExpr` (a whole registry/row-context
 /// this module doesn't have), so the actual recompute-on-write lives in
 /// `Executor.recomputeGeneratedColumns`, called after every successful
-/// `INSERT`/`UPDATE`. `VIRTUAL` isn't distinguished from `STORED` — both
-/// are persisted in `Rows` the same way, since this engine has no separate
-/// "recompute on every read" path.
+/// `INSERT`/`UPDATE`. `VIRTUAL` and `STORED` are tracked
+/// (`Ast.GeneratedKind`, surfaced in metadata) but both materialize into
+/// `Rows` the same way, since this engine has no separate "recompute on
+/// every read" path.
 
 /// `Persistence`'s WAL replay rewrites one table's `Rows` directly with `f`,
 /// bypassing every checked write path in this module on purpose (replay

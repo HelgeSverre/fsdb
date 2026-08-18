@@ -133,7 +133,7 @@ let private resultHeadPayloads
         // TIMESTAMP/TIME column, read back the fractional digits the renderer
         // already emitted into the rows (see `Protocol.fractionalDigitsOf`),
         // so a client learns a `DATETIME(6)`/`TIME(3)`'s precision even on an
-        // exact second. Non-temporal columns advertise 0, as before.
+        // exact second. Non-temporal columns advertise 0.
         let decimalsOf (colIndex: int) (ty: byte) : byte =
             if ty = TypeDateTime || ty = TypeTime then
                 rows |> List.map (fun r -> List.tryItem colIndex r |> Option.flatten) |> Protocol.fractionalDigitsOf

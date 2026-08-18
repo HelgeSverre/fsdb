@@ -247,11 +247,84 @@ let private columnsColumns =
       // split `collation_name` right below already makes.
       strCol "character_set_name"
       strCol "collation_name"
-      // `Ast.ColumnDef` doesn't track a column comment or a generated-column
-      // expression — both are always empty/NULL, present only so Laravel's
-      // `compileColumns` (which projects them unconditionally) doesn't 1054.
+      // `Ast.ColumnDef` doesn't track a column comment — always empty,
+      // present only so Laravel's `compileColumns` (which projects it
+      // unconditionally) doesn't 1054.
       strCol "column_comment"
       strCol "generation_expression" ]
+
+/// Renders a generated-column expression back to SQL for
+/// `GENERATION_EXPRESSION` / `SHOW CREATE TABLE`, in MySQL's normalized
+/// style: backticked column refs, paren-wrapped binops, lowercased function
+/// names. Total over every `Expr` case — the subquery/window shapes can't
+/// appear in a generated expression, but must render rather than throw.
+/// ponytail: no charset introducer on string literals (MySQL prints
+/// `_latin1'x'`, this prints `'x'`) — add it if a tool ever diffs the text.
+let rec private exprToSql (e: Expr) : string =
+    let opText =
+        function
+        | And -> "and"
+        | Or -> "or"
+        | Eq -> "="
+        | Neq -> "<>"
+        | Lt -> "<"
+        | Lte -> "<="
+        | Gt -> ">"
+        | Gte -> ">="
+        | Add -> "+"
+        | Sub -> "-"
+        | Mul -> "*"
+        | Div -> "/"
+        | IntDiv -> "DIV"
+        | NullSafeEq -> "<=>"
+
+    let litText (v: Value) =
+        match v with
+        | VNull -> "NULL"
+        | VString s -> "'" + s.Replace("\\", "\\\\").Replace("'", "\\'") + "'"
+        | v -> v |> toText |> Option.defaultValue "NULL"
+
+    match e with
+    | Lit v -> litText v
+    | Placeholder _ -> "?"
+    | Col n -> sprintf "`%s`" n
+    | QualifiedCol(t, c) -> sprintf "`%s`.`%s`" t c
+    | BinOp(op, a, b) -> sprintf "(%s %s %s)" (exprToSql a) (opText op) (exprToSql b)
+    | Not e -> sprintf "(not(%s))" (exprToSql e)
+    | IsNull e -> sprintf "(%s is null)" (exprToSql e)
+    | IsNotNull e -> sprintf "(%s is not null)" (exprToSql e)
+    | IsTrue e -> sprintf "(%s is true)" (exprToSql e)
+    | IsFalse e -> sprintf "(%s is false)" (exprToSql e)
+    | Like(e, p, _, _) -> sprintf "(%s like %s)" (exprToSql e) (exprToSql p)
+    | Regexp(e, p) -> sprintf "(%s regexp %s)" (exprToSql e) (exprToSql p)
+    | In(e, cs) -> sprintf "(%s in (%s))" (exprToSql e) (cs |> List.map exprToSql |> String.concat ",")
+    | Between(e, lo, hi) -> sprintf "(%s between %s and %s)" (exprToSql e) (exprToSql lo) (exprToSql hi)
+    | FuncCall(name, args) -> sprintf "%s(%s)" (name.ToLowerInvariant()) (args |> List.map exprToSql |> String.concat ",")
+    | Distinct e -> sprintf "distinct %s" (exprToSql e)
+    | OrderBy(e, _) -> exprToSql e
+    | Cast(e, ty) -> sprintf "cast(%s as %s)" (exprToSql e) (columnTypeText ty)
+    | Collate(e, c) -> sprintf "(%s collate %s)" (exprToSql e) c
+    | Case(subject, whens, elseBranch) ->
+        let subj = subject |> Option.map (exprToSql >> sprintf " %s") |> Option.defaultValue ""
+        let whenText = whens |> List.map (fun (w, t) -> sprintf " when %s then %s" (exprToSql w) (exprToSql t)) |> String.concat ""
+        let elseText = elseBranch |> Option.map (exprToSql >> sprintf " else %s") |> Option.defaultValue ""
+        sprintf "(case%s%s%s end)" subj whenText elseText
+    // Shapes a generated expression can't contain — legal-ish placeholders.
+    | Star q -> (q |> Option.map (sprintf "`%s`.") |> Option.defaultValue "") + "*"
+    | Exists _ -> "exists(...)"
+    | Subquery _
+    | InSubquery _ -> "(...)"
+    | RowNumberOver _ -> "row_number() over ()"
+    | LagOver _ -> "lag() over ()"
+
+/// `EXTRA` / SHOW COLUMNS `Extra` for a column — MySQL says
+/// `VIRTUAL GENERATED`/`STORED GENERATED` for generated columns (uppercase),
+/// `auto_increment` (lowercase) otherwise when applicable.
+let private extraText (c: ColumnDef) : string =
+    match c.Generated with
+    | Some(_, Virtual) -> "VIRTUAL GENERATED"
+    | Some(_, Stored) -> "STORED GENERATED"
+    | None -> if c.AutoIncrement then "auto_increment" else ""
 
 let defaultText (d: ColumnDefault option) : string option =
     match d with
@@ -285,11 +358,11 @@ let private columnsRows (catalog: Catalog) : Value[] list =
                (scale |> Option.map VInt |> Option.defaultValue VNull)
                (datetimePrecision c.Type |> Option.map VInt |> Option.defaultValue VNull)
                vs (columnKey t c)
-               vs (if c.AutoIncrement then "auto_increment" else "")
+               vs (extraText c)
                (if isStringy c.Type then vs (c.Charset |> Option.defaultValue "utf8mb4") else VNull)
                (if isStringy c.Type then vs (c.Collation |> Option.defaultValue "utf8mb4_0900_ai_ci") else VNull)
                vs ""
-               vs "" |]))
+               vs (c.Generated |> Option.map (fst >> exprToSql) |> Option.defaultValue "") |]))
 
 let private statisticsColumns =
     [ strCol "table_schema"
@@ -635,7 +708,7 @@ let showColumns (catalog: Catalog) (full: bool) (dbName: string) (tableName: str
     |> Result.map (fun t ->
         let isNullable (c: ColumnDef) = if c.PrimaryKey || not c.Nullable then "NO" else "YES"
         let defaultCol (c: ColumnDef) = defaultText c.Default
-        let extra (c: ColumnDef) = if c.AutoIncrement then "auto_increment" else ""
+        let extra = extraText
 
         let cols = t.Columns |> List.filter (fun c -> likeFilter likeOpt c.Name)
 
@@ -677,8 +750,15 @@ let private showCreateTableDDL (t: Table) : string =
     let columnLine (c: ColumnDef) =
         let notNull = if c.PrimaryKey || not c.Nullable then "NOT NULL" else ""
 
+        // MySQL prints no DEFAULT clause at all on a generated column.
+        let generatedPart =
+            match c.Generated with
+            | Some(e, k) -> sprintf "GENERATED ALWAYS AS (%s) %s" (exprToSql e) (match k with Virtual -> "VIRTUAL" | Stored -> "STORED")
+            | None -> ""
+
         let defaultPart =
             match defaultText c.Default with
+            | _ when c.Generated.IsSome -> ""
             | Some d when c.Default = Some DCurrentTimestamp -> sprintf "DEFAULT %s" d
             | Some d -> sprintf "DEFAULT '%s'" d
             | None -> if c.PrimaryKey || not c.Nullable then "" else "DEFAULT NULL"
@@ -707,7 +787,7 @@ let private showCreateTableDDL (t: Table) : string =
                 | None, None -> []
                 | cs, col -> [ sprintf "CHARACTER SET %s" (cs |> Option.defaultValue "utf8mb4"); sprintf "COLLATE %s" (col |> Option.defaultValue "utf8mb4_0900_ai_ci") ]
 
-        [ backtick c.Name; columnTypeText c.Type ] @ charsetCollate @ [ notNull; defaultPart; extra ]
+        [ backtick c.Name; columnTypeText c.Type ] @ charsetCollate @ [ generatedPart; notNull; defaultPart; extra ]
         |> List.filter ((<>) "")
         |> String.concat " "
 

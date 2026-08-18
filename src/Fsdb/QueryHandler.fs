@@ -321,7 +321,7 @@ let private unquote (v: string) =
 /// exactly this, not full expression evaluation. A literal `NULL` resolves
 /// to `None` too, same as an unset variable reference — `SET @x = NULL`
 /// must leave `@x` a real SQL NULL, not the four-character string `"NULL"`.
-/// Anything else is a literal, unquoted as before.
+/// Anything else is a literal, taken unquoted.
 let private resolveSetRhs (session: Session) (rhs: string) : string option =
     let rhs = rhs.Trim()
     let m = atVarItem.Match rhs

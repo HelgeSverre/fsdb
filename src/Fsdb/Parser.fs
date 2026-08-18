@@ -872,7 +872,7 @@ type private ColMod =
     | MAutoIncrement
     | MPrimaryKey
     | MUnique
-    | MGenerated of Expr
+    | MGenerated of Expr * GeneratedKind
     /// A validated `COLLATE name` — the column's collation, resolved against
     /// the registry at parse time so an unknown name is a clean error.
     | MCollate of string
@@ -901,15 +901,16 @@ let private identOrString: Parser<string, unit> =
 /// (`char(16) ... AS (UNHEX(MD5(\`key\`)))`, Laravel Pulse's dedup key hash).
 /// Reuses the full `expr` grammar (arbitrary nested function calls), and the
 /// parsed `Expr` is kept on `ColumnDef.Generated` for `Executor`/`Storage`
-/// to evaluate on insert/update — VIRTUAL vs STORED isn't distinguished
-/// (see the doc on `Ast.ColumnDef.Generated`).
-let private generatedColumn: Parser<Expr, unit> =
+/// to evaluate on insert/update, alongside the VIRTUAL/STORED kind
+/// (VIRTUAL when omitted, matching MySQL).
+let private generatedColumn: Parser<Expr * GeneratedKind, unit> =
     optional (keyword "GENERATED" >>. keyword "ALWAYS")
     >>. keyword "AS"
     >>. sym "("
     >>. expr
     .>> sym ")"
-    .>> optional (keyword "VIRTUAL" <|> keyword "STORED")
+    .>>. (opt ((keyword "VIRTUAL" >>% Virtual) <|> (keyword "STORED" >>% Stored))
+          |>> Option.defaultValue Virtual)
 
 let private colMod: Parser<ColMod, unit> =
     choice
@@ -951,7 +952,7 @@ let private columnDef: Parser<ColumnDef, unit> =
           AutoIncrement = List.contains MAutoIncrement mods
           PrimaryKey = List.contains MPrimaryKey mods
           Unique = List.contains MUnique mods
-          Generated = mods |> List.tryPick (function MGenerated e -> Some e | _ -> None)
+          Generated = mods |> List.tryPick (function MGenerated(e, k) -> Some(e, k) | _ -> None)
           Collation = mods |> List.tryPick (function MCollate c -> Some c | _ -> None)
           Charset =
               mods

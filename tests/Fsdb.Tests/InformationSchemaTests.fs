@@ -144,6 +144,40 @@ let tests =
                   Expect.stringContains ddl "DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci" "server-default table options"
               | other -> failtestf "expected SHOW CREATE TABLE output, got %A" other
 
+          testCase "generated columns surface in SHOW CREATE TABLE, information_schema.columns and SHOW COLUMNS"
+          <| fun _ ->
+              let store = setup ()
+              run store "CREATE TABLE gen (n INT, doubled INT AS (n * 2) STORED, tripled INT AS (n * 3))" |> ignore
+
+              let session = Fsdb.Session.create 1 store
+
+              match Fsdb.QueryHandler.handle session "SHOW CREATE TABLE gen" |> snd with
+              | ResultSet(_, [ [ Some "gen"; Some ddl ] ]) ->
+                  Expect.stringContains ddl "`doubled` int GENERATED ALWAYS AS ((`n` * 2)) STORED" "STORED renders like MySQL"
+                  Expect.stringContains ddl "`tripled` int GENERATED ALWAYS AS ((`n` * 3)) VIRTUAL" "bare AS defaults to VIRTUAL"
+                  Expect.isFalse (ddl.Contains "`doubled` int GENERATED ALWAYS AS ((`n` * 2)) STORED DEFAULT") "no DEFAULT clause on a generated column"
+              | other -> failtestf "expected SHOW CREATE TABLE output, got %A" other
+
+              match
+                  run
+                      store
+                      "SELECT column_name, extra, generation_expression FROM information_schema.columns WHERE table_schema = 'fsdb' AND table_name = 'gen' ORDER BY ordinal_position"
+              with
+              | ResultSet(_, rows) ->
+                  Expect.equal
+                      rows
+                      [ [ Some "n"; Some ""; Some "" ]
+                        [ Some "doubled"; Some "STORED GENERATED"; Some "(`n` * 2)" ]
+                        [ Some "tripled"; Some "VIRTUAL GENERATED"; Some "(`n` * 3)" ] ]
+                      "EXTRA and GENERATION_EXPRESSION per kind"
+              | other -> failtestf "expected a resultset, got %A" other
+
+              match Fsdb.QueryHandler.handle session "SHOW COLUMNS FROM gen" |> snd with
+              | ResultSet(cols, rows) ->
+                  let extraIdx = cols |> List.findIndex ((=) "Extra")
+                  Expect.equal (rows |> List.map (fun r -> List.item extraIdx r)) [ Some ""; Some "STORED GENERATED"; Some "VIRTUAL GENERATED" ] "SHOW COLUMNS Extra"
+              | other -> failtestf "expected SHOW COLUMNS output, got %A" other
+
           testCase "ALTER TABLE ADD COLUMN attaches the table's declared defaults to string columns"
           <| fun _ ->
               let store = setup ()
@@ -257,6 +291,50 @@ let tests =
               | ResultSet(cols, [ row ]) ->
                   let get name = List.item (List.findIndex ((=) name) cols) row
                   Expect.equal (get "Auto_increment") None "no AUTO_INCREMENT column, no next value"
+              | other -> failtestf "expected one status row, got %A" other
+
+          testCase "SHOW TABLE STATUS Rows/Data_length track the live table through DELETE and ADD COLUMN"
+          <| fun _ ->
+              // Deliberate divergence from InnoDB: fsdb reports live values
+              // where MySQL keeps stale page-count estimates until ANALYZE
+              // (real 8.4.11 still shows Rows=3 right after DELETE FROM, and
+              // an unchanged Data_length after ADD COLUMN).
+              let store = setup ()
+              run store "CREATE TABLE ts (id INT)" |> ignore
+              run store "INSERT INTO ts VALUES (1), (2), (3)" |> ignore
+              let session = Fsdb.Session.create 1 store
+
+              let status () =
+                  match Fsdb.QueryHandler.handle session "SHOW TABLE STATUS LIKE 'ts'" |> snd with
+                  | ResultSet(cols, [ row ]) -> fun name -> List.item (List.findIndex ((=) name) cols) row
+                  | other -> failtestf "expected one status row, got %A" other
+
+              let before = status ()
+              Expect.equal (before "Rows") (Some "3") "live row count"
+              let dataBefore = before "Data_length" |> Option.defaultValue "0" |> int
+              Expect.isTrue (dataBefore > 0) "payload bytes for three rows"
+
+              run store "ALTER TABLE ts ADD COLUMN extra VARCHAR(20)" |> ignore
+              let widened = status ()
+              let dataAfter = widened "Data_length" |> Option.defaultValue "0" |> int
+              Expect.isTrue (dataAfter > dataBefore) "ADD COLUMN grows the live payload (NULL fill per row)"
+
+              run store "DELETE FROM ts" |> ignore
+              let emptied = status ()
+              Expect.equal (emptied "Rows") (Some "0") "live zero immediately after DELETE, no stale estimate"
+              Expect.equal (emptied "Avg_row_length") (Some "0") "no division-by-zero"
+
+          testCase "SHOW TABLE STATUS Data_length stays 0 when ADD COLUMN hits an empty table"
+          <| fun _ ->
+              let store = setup ()
+              run store "CREATE TABLE bare (id INT)" |> ignore
+              run store "ALTER TABLE bare ADD COLUMN extra VARCHAR(20)" |> ignore
+              let session = Fsdb.Session.create 1 store
+
+              match Fsdb.QueryHandler.handle session "SHOW TABLE STATUS LIKE 'bare'" |> snd with
+              | ResultSet(cols, [ row ]) ->
+                  let get name = List.item (List.findIndex ((=) name) cols) row
+                  Expect.equal (get "Data_length") (Some "0") "no rows, no payload"
               | other -> failtestf "expected one status row, got %A" other
 
           testCase "COLUMNS projects declared columns with type/nullability/key metadata"

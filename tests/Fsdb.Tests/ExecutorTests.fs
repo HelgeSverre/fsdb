@@ -1574,7 +1574,84 @@ let tests =
 
                     match runDefault store "SELECT * FROM t" with
                     | ResultSet([ "id"; "extra" ], _) -> ()
-                    | other -> failtestf "expected both actions applied, got %A" other ]
+                    | other -> failtestf "expected both actions applied, got %A" other
+
+                testCase "MODIFY narrowing DATETIME(6) to DATETIME(2) rounds stored values half-up"
+                <| fun _ ->
+                    let store = newStore ()
+                    runDefault store "CREATE TABLE t (c DATETIME(6))" |> ignore
+                    runDefault store "INSERT INTO t VALUES ('2024-01-01 10:00:00.987654')" |> ignore
+                    runDefault store "ALTER TABLE t MODIFY c DATETIME(2)" |> ignore
+
+                    match runDefault store "SELECT c FROM t" with
+                    | ResultSet(_, [ [ Some "2024-01-01 10:00:00.99" ] ]) -> ()
+                    | other -> failtestf "expected the stored value rounded to fsp 2, got %A" other
+
+                testCase "MODIFY narrowing DATETIME(6) to DATETIME(0) rounds up into the next second"
+                <| fun _ ->
+                    let store = newStore ()
+                    runDefault store "CREATE TABLE t (c DATETIME(6))" |> ignore
+                    runDefault store "INSERT INTO t VALUES ('2024-01-01 10:00:00.987654')" |> ignore
+                    runDefault store "ALTER TABLE t MODIFY c DATETIME(0)" |> ignore
+
+                    match runDefault store "SELECT c FROM t" with
+                    | ResultSet(_, [ [ Some "2024-01-01 10:00:01" ] ]) -> ()
+                    | other -> failtestf "expected the stored value rounded to the next second, got %A" other
+
+                testCase "MODIFY narrowing VARCHAR over too-long data errors 1265 and leaves the table untouched"
+                <| fun _ ->
+                    let store = newStore ()
+                    runDefault store "CREATE TABLE t (c VARCHAR(20))" |> ignore
+                    runDefault store "INSERT INTO t VALUES ('hello world')" |> ignore
+
+                    match runDefault store "ALTER TABLE t MODIFY c VARCHAR(5)" with
+                    | Err(1265, "Data truncated for column 'c' at row 1") -> ()
+                    | other -> failtestf "expected error 1265, got %A" other
+
+                    match runDefault store "SELECT c FROM t" with
+                    | ResultSet(_, [ [ Some "hello world" ] ]) -> ()
+                    | other -> failtestf "expected the value intact after the aborted ALTER, got %A" other
+
+                testCase "MODIFY INT to TINYINT with an out-of-range value errors 1264 and leaves the table untouched"
+                <| fun _ ->
+                    let store = newStore ()
+                    runDefault store "CREATE TABLE t (c INT)" |> ignore
+                    runDefault store "INSERT INTO t VALUES (300)" |> ignore
+
+                    match runDefault store "ALTER TABLE t MODIFY c TINYINT" with
+                    | Err(1264, "Out of range value for column 'c' at row 1") -> ()
+                    | other -> failtestf "expected error 1264, got %A" other
+
+                    match runDefault store "SELECT c FROM t" with
+                    | ResultSet(_, [ [ Some "300" ] ]) -> ()
+                    | other -> failtestf "expected the value intact after the aborted ALTER, got %A" other
+
+                testCase "non-strict MODIFY narrowing clamps values, but errors 1062 when the clamp collides on a UNIQUE key"
+                <| fun _ ->
+                    // Oracle (MySQL 8.4.11, sql_mode=''): INT 300 -> TINYINT
+                    // clamps to 127; a VARCHAR narrowing that folds two
+                    // unique values together fails the whole ALTER with 1062
+                    // even non-strict.
+                    let store = newStore ()
+                    setStrictMode store false
+                    runDefault store "CREATE TABLE nums (c INT)" |> ignore
+                    runDefault store "INSERT INTO nums VALUES (300)" |> ignore
+                    runDefault store "ALTER TABLE nums MODIFY c TINYINT" |> ignore
+
+                    match runDefault store "SELECT c FROM nums" with
+                    | ResultSet(_, [ [ Some "127" ] ]) -> ()
+                    | other -> failtestf "expected 300 clamped to 127 non-strict, got %A" other
+
+                    runDefault store "CREATE TABLE u (s VARCHAR(10) UNIQUE)" |> ignore
+                    runDefault store "INSERT INTO u VALUES ('abcdef1'), ('abcdef2')" |> ignore
+
+                    match runDefault store "ALTER TABLE u MODIFY s VARCHAR(6)" with
+                    | Err(1062, _) -> ()
+                    | other -> failtestf "expected 1062 from the colliding narrow, got %A" other
+
+                    match runDefault store "SELECT s FROM u ORDER BY s" with
+                    | ResultSet(_, [ [ Some "abcdef1" ] ; [ Some "abcdef2" ] ]) -> ()
+                    | other -> failtestf "expected the table untouched after the aborted ALTER, got %A" other ]
 
           testList
               "INSERT ... ON DUPLICATE KEY UPDATE / INSERT IGNORE"
@@ -3535,7 +3612,48 @@ let tests =
 
                     match runDefault store "SELECT doubled FROM t" with
                     | ResultSet([ "doubled" ], [ [ Some "20" ] ]) -> ()
-                    | other -> failtestf "expected doubled to recompute to 20, got %A" other ]
+                    | other -> failtestf "expected doubled to recompute to 20, got %A" other
+
+                testCase "an INSERT naming a generated column errors 3105 like MySQL"
+                <| fun _ ->
+                    let store = newStore ()
+                    runDefault store "CREATE TABLE t (n INT, doubled INT AS (n * 2) STORED)" |> ignore
+
+                    match runDefault store "INSERT INTO t (n, doubled) VALUES (3, 7)" with
+                    | Err(3105, "The value specified for generated column 'doubled' in table 't' is not allowed.") -> ()
+                    | other -> failtestf "expected error 3105, got %A" other
+
+                testCase "an UPDATE SET of a generated column errors 3105"
+                <| fun _ ->
+                    let store = newStore ()
+                    runDefault store "CREATE TABLE t (n INT, doubled INT AS (n * 2))" |> ignore
+                    runDefault store "INSERT INTO t (n) VALUES (3)" |> ignore
+
+                    match runDefault store "UPDATE t SET doubled = 7" with
+                    | Err(3105, "The value specified for generated column 'doubled' in table 't' is not allowed.") -> ()
+                    | other -> failtestf "expected error 3105, got %A" other
+
+                testCase "an ON DUPLICATE KEY UPDATE targeting a generated column errors 3105"
+                <| fun _ ->
+                    let store = newStore ()
+                    runDefault store "CREATE TABLE t (n INT PRIMARY KEY, doubled INT AS (n * 2))" |> ignore
+                    runDefault store "INSERT INTO t (n) VALUES (3)" |> ignore
+
+                    match runDefault store "INSERT INTO t (n) VALUES (3) ON DUPLICATE KEY UPDATE doubled = 9" with
+                    | Err(3105, _) -> ()
+                    | other -> failtestf "expected error 3105, got %A" other
+
+                testCase "ALTER TABLE ADD COLUMN AS (expr) backfills existing rows, not NULL"
+                <| fun _ ->
+                    let store = newStore ()
+                    runDefault store "CREATE TABLE t (n INT)" |> ignore
+                    runDefault store "INSERT INTO t (n) VALUES (3), (5)" |> ignore
+                    runDefault store "ALTER TABLE t ADD COLUMN doubled INT AS (n * 2) STORED" |> ignore
+
+                    match runDefault store "SELECT n, doubled FROM t ORDER BY n" with
+                    | ResultSet(_, rows) ->
+                        Expect.equal rows [ [ Some "3"; Some "6" ]; [ Some "5"; Some "10" ] ] "backfilled from existing n values"
+                    | other -> failtestf "expected the added generated column backfilled, got %A" other ]
 
           testList
               "DATE column coercion"
@@ -3720,7 +3838,107 @@ let tests =
 
                     match runDefault store "SELECT LAG(v) OVER (ORDER BY id) FROM t" with
                     | ResultSet([ "lag(v) over ()" ], _) -> ()
-                    | other -> failtestf "expected the column header 'lag(v) over ()', got %A" other ]
+                    | other -> failtestf "expected the column header 'lag(v) over ()', got %A" other
+
+                testCase "a window function in ORDER BY alone (not in the SELECT list) sorts by it, NULLs first"
+                <| fun _ ->
+                    // Oracle (MySQL 8.4.11): LAG values NULL,NULL,10,30 sort
+                    // NULLs first -> (a,10),(b,30),(a,20),(b,5).
+                    let store = newStore ()
+
+                    runDefault store "CREATE TABLE readings (id INT PRIMARY KEY, sensor VARCHAR(10), value INT, created_at INT)"
+                    |> ignore
+
+                    runDefault store "INSERT INTO readings VALUES (1, 'a', 10, 1), (2, 'a', 20, 2), (3, 'b', 30, 1), (4, 'b', 5, 2)"
+                    |> ignore
+
+                    match
+                        runDefault
+                            store
+                            "SELECT sensor, value FROM readings ORDER BY LAG(value) OVER (PARTITION BY sensor ORDER BY created_at)"
+                    with
+                    | ResultSet([ "sensor"; "value" ], rows) ->
+                        Expect.equal
+                            rows
+                            [ [ Some "a"; Some "10" ]
+                              [ Some "b"; Some "30" ]
+                              [ Some "a"; Some "20" ]
+                              [ Some "b"; Some "5" ] ]
+                            "rows sorted by the LAG value, NULLs first"
+                    | other -> failtestf "expected rows ordered by the windowed LAG, got %A" other
+
+                testCase "LEAD + LAG + ROW_NUMBER together in one SELECT each compute independently"
+                <| fun _ ->
+                    let store = newStore ()
+
+                    runDefault store "CREATE TABLE readings (id INT PRIMARY KEY, sensor VARCHAR(10), value INT, created_at INT)"
+                    |> ignore
+
+                    runDefault store "INSERT INTO readings VALUES (1, 'a', 10, 1), (2, 'a', 20, 2), (3, 'b', 30, 1), (4, 'b', 5, 2)"
+                    |> ignore
+
+                    match
+                        runDefault
+                            store
+                            "SELECT id, sensor, value, LEAD(value) OVER (PARTITION BY sensor ORDER BY created_at) AS nxt, LAG(value) OVER (PARTITION BY sensor ORDER BY created_at) AS prv, ROW_NUMBER() OVER (PARTITION BY sensor ORDER BY created_at) AS rn FROM readings ORDER BY id"
+                    with
+                    | ResultSet([ "id"; "sensor"; "value"; "nxt"; "prv"; "rn" ], rows) ->
+                        Expect.equal
+                            rows
+                            [ [ Some "1"; Some "a"; Some "10"; Some "20"; None; Some "1" ]
+                              [ Some "2"; Some "a"; Some "20"; None; Some "10"; Some "2" ]
+                              [ Some "3"; Some "b"; Some "30"; Some "5"; None; Some "1" ]
+                              [ Some "4"; Some "b"; Some "5"; None; Some "30"; Some "2" ] ]
+                            "all three window functions computed per partition"
+                    | other -> failtestf "expected LEAD/LAG/ROW_NUMBER side by side, got %A" other
+
+                testCase "a window function in HAVING errors 3593 like MySQL, a window alias in HAVING errors 3594"
+                <| fun _ ->
+                    // MySQL's ER_WINDOW_INVALID_WINDOW_FUNC_USE /
+                    // ..._ALIAS_USE messages both really end with a stray
+                    // `.'` — verified against 8.4.11.
+                    let store = newStore ()
+                    runDefault store "CREATE TABLE readings (sensor VARCHAR(10), value INT, created_at INT)" |> ignore
+                    runDefault store "INSERT INTO readings VALUES ('a', 10, 1), ('a', 20, 2)" |> ignore
+
+                    match
+                        runDefault
+                            store
+                            "SELECT sensor, value FROM readings HAVING LAG(value) OVER (PARTITION BY sensor ORDER BY created_at) IS NULL"
+                    with
+                    | Err(3593, "You cannot use the window function 'lag' in this context.'") -> ()
+                    | other -> failtestf "expected error 3593, got %A" other
+
+                    match
+                        runDefault
+                            store
+                            "SELECT sensor, value, LAG(value) OVER (PARTITION BY sensor ORDER BY created_at) AS d FROM readings HAVING d IS NULL"
+                    with
+                    | Err(3594, "You cannot use the alias 'd' of an expression containing a window function in this context.'") -> ()
+                    | other -> failtestf "expected error 3594, got %A" other
+
+                testCase "PARTITION BY over an explicitly collated column folds 'a'/'A'/'á' into one partition"
+                <| fun _ ->
+                    // Oracle (MySQL 8.4.11): all three of a/A/á share one
+                    // utf8mb4_0900_ai_ci partition, so LAG chains through
+                    // them; 'b' starts fresh.
+                    let store = newStore ()
+
+                    runDefault store "CREATE TABLE t3 (id INT PRIMARY KEY, k VARCHAR(10) COLLATE utf8mb4_0900_ai_ci, v INT)"
+                    |> ignore
+
+                    runDefault store "INSERT INTO t3 VALUES (1, 'a', 100), (2, 'A', 200), (3, 'á', 300), (4, 'b', 400)"
+                    |> ignore
+
+                    match
+                        runDefault store "SELECT id, k, v, LAG(v) OVER (PARTITION BY k ORDER BY id) AS prev_v FROM t3 ORDER BY id"
+                    with
+                    | ResultSet([ "id"; "k"; "v"; "prev_v" ], rows) ->
+                        Expect.equal
+                            (rows |> List.map (List.item 3))
+                            [ None; Some "100"; Some "200"; None ]
+                            "a/A/á chain within one folded partition, b restarts"
+                    | other -> failtestf "expected collation-folded LAG chain, got %A" other ]
 
           testList
               "PK/UNIQUE point-lookup fast path (Storage.tryUniqueLookup)"

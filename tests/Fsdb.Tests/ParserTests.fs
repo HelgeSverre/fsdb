@@ -893,11 +893,24 @@ let tests =
                     with
                     | CreateTable(_,
                                   [ { Name = "key"; Generated = None }
-                                    { Name = "key_hash"; Type = TChar 16; Generated = Some(FuncCall("UNHEX", _)) } ],
+                                    { Name = "key_hash"; Type = TChar 16; Generated = Some(FuncCall("UNHEX", _), _) } ],
                                   [],
                                   [],
                                   false, _, _) -> ()
-                    | other -> failtestf "expected the generated column's AS (...) to be captured, got %A" other ]
+                    | other -> failtestf "expected the generated column's AS (...) to be captured, got %A" other
+
+                testCase "VIRTUAL/STORED is captured on the generated column, defaulting to VIRTUAL like MySQL"
+                <| fun _ ->
+                    match parseOk "CREATE TABLE t (n INT, s INT AS (n) STORED, v INT GENERATED ALWAYS AS (n) VIRTUAL, d INT AS (n))" with
+                    | CreateTable(_,
+                                  [ { Generated = None }
+                                    { Name = "s"; Generated = Some(_, Stored) }
+                                    { Name = "v"; Generated = Some(_, Virtual) }
+                                    { Name = "d"; Generated = Some(_, Virtual) } ],
+                                  [],
+                                  [],
+                                  false, _, _) -> ()
+                    | other -> failtestf "expected STORED/VIRTUAL/default-VIRTUAL kinds captured, got %A" other ]
 
           testList
               "DROP TABLE / TRUNCATE"

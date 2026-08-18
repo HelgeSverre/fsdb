@@ -101,6 +101,45 @@ let tests =
               // actually carries and replay should reproduce.
               Expect.contains rows [| VInt 42L; VString "unicode héllo 🎉"; VString """{"a":1}""" |] "unicode/JSON-text round-trip"
 
+          testCase "WAL replay reapplies a non-strict clamping ALTER MODIFY instead of skipping it"
+          <| fun _ ->
+              // The replayed store starts strict (fresh-store default);
+              // replay must still reapply an ALTER whose re-coercion only
+              // succeeded because the original session was non-strict —
+              // `applyDdl` forces non-strict for exactly this.
+              let dir = tempDataDir ()
+              let store = load dir
+              attach dir store
+
+              let cCol =
+                  { Name = "c"
+                    Type = TInt false
+                    Nullable = true
+                    Default = None
+                    AutoIncrement = false
+                    PrimaryKey = false
+                    Unique = false
+                    Generated = None
+                    Collation = None
+                    Charset = None }
+
+              createTable store defaultDatabase "narrow" [ cCol ] [] [] None None |> ignore
+              insertRows store defaultDatabase "narrow" None [ [ VInt 300L ] ] |> ignore
+              setStrictMode store false
+
+              alterTable store defaultDatabase "narrow" [ ModifyColumn({ cCol with Type = TTinyInt false }, PositionDefault) ]
+              |> Result.mapError (failtestf "non-strict clamping ALTER should succeed, got %A")
+              |> ignore
+
+              Expect.equal (rowsOf store defaultDatabase "narrow") [ [| VInt 127L |] ] "clamped to 127 before the restart"
+
+              let reloaded = load dir
+              Expect.equal (rowsOf reloaded defaultDatabase "narrow") [ [| VInt 127L |] ] "replay reapplies the clamp"
+
+              match scan reloaded defaultDatabase "narrow" with
+              | Ok(columns, _) -> Expect.equal (columns |> List.map (fun c -> c.Type)) [ TTinyInt false ] "narrowed type survives replay"
+              | Error e -> failtestf "scan after reload failed: %A" e
+
           testCase "WAL replay reproduces NOW()/UUID()-generated values identically, not re-evaluated"
           <| fun _ ->
               let dir = tempDataDir ()
@@ -604,7 +643,7 @@ let tests =
                     AutoIncrement = false
                     PrimaryKey = false
                     Unique = false
-                    Generated = Some(BinOp(Mul, Col "a", Lit(VInt 2L)))
+                    Generated = Some(BinOp(Mul, Col "a", Lit(VInt 2L)), Stored)
                     Collation = None
                     Charset = None }
 
@@ -634,7 +673,7 @@ let tests =
               match scan reloaded defaultDatabase "g" with
               | Ok(columns, _) ->
                   match columns |> List.tryFind (fun c -> c.Name = "b") |> Option.bind (fun c -> c.Generated) with
-                  | Some(BinOp(Mul, Col "a", Lit(VInt 2L))) -> ()
+                  | Some(BinOp(Mul, Col "a", Lit(VInt 2L)), Stored) -> ()
                   | other -> failtestf "expected the generated expression to survive the restart intact, got %A" other
               | Error e -> failtestf "expected table 'g' to reload, got %A" e
 

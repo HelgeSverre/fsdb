@@ -180,6 +180,42 @@ let rec private collectWindowFuncs (expr: Expr) : Expr list =
     | Subquery _
     | InSubquery _ -> []
 
+/// Every bare `Col` name inside `expr` — same walk shape as
+/// `collectWindowFuncs`. `runWindowedSelect` uses it to spot a `HAVING`
+/// clause referencing a windowed projection's alias, which MySQL rejects
+/// with a dedicated error (3594) rather than resolving.
+let rec private collectColRefs (expr: Expr) : string list =
+    match expr with
+    | Col name -> [ name ]
+    | RowNumberOver _
+    | LagOver _ -> []
+    | FuncCall(_, args) -> args |> List.collect collectColRefs
+    | BinOp(_, a, b) -> collectColRefs a @ collectColRefs b
+    | Not e
+    | IsNull e
+    | IsNotNull e
+    | IsTrue e
+    | IsFalse e
+    | Distinct e
+    | OrderBy(e, _)
+    | Cast(e, _) -> collectColRefs e
+    | Collate(e, _) -> collectColRefs e
+    | Like(e, p, _, _) -> collectColRefs e @ collectColRefs p
+    | Regexp(e, p) -> collectColRefs e @ collectColRefs p
+    | In(e, xs) -> collectColRefs e @ (xs |> List.collect collectColRefs)
+    | Between(e, lo, hi) -> collectColRefs e @ collectColRefs lo @ collectColRefs hi
+    | Case(subject, whens, elseBranch) ->
+        (subject |> Option.map collectColRefs |> Option.defaultValue [])
+        @ (whens |> List.collect (fun (c, r) -> collectColRefs c @ collectColRefs r))
+        @ (elseBranch |> Option.map collectColRefs |> Option.defaultValue [])
+    | Lit _
+    | Placeholder _
+    | QualifiedCol _
+    | Star _
+    | Exists _
+    | Subquery _
+    | InSubquery _ -> []
+
 /// Replaces every window-function node `collectWindowFuncs` would find with
 /// the plain `Col` reference `synthetic` maps it to (structural lookup — a
 /// small association list rather than a `Map`, since `Expr` carries no
@@ -1501,6 +1537,41 @@ and private selectColumnCollations
 
     names |> List.map (fun name -> keyCollation ctx (Col name))
 
+/// The declared fsp per output column of one UNION branch — the same
+/// probe-row context setup as `selectColumnCollations`, resolved through
+/// `outputColumnFsps` so a `DATETIME(6)` column or `CAST(... AS DATETIME(1))`
+/// reports its declared digits and a bare literal reports `None`. Falls back
+/// to all-`None` when the projection expansion doesn't line up with the
+/// branch's output columns (e.g. its `FROM` failed to resolve).
+and private selectColumnFsps
+    (store: Store)
+    (registry: Registry)
+    (dbName: string)
+    (select: SelectStmt)
+    (names: string list)
+    : int option list =
+    let columns, qualifier =
+        match select.From with
+        | Some fromItem ->
+            match resolveFromItem store registry dbName fromItem with
+            | Ok(cols, _) -> cols, fromItemQualifier fromItem
+            | Error _ -> [], ""
+        | None -> [], ""
+
+    let qualifiers =
+        if qualifier = "" then
+            Map.empty
+        else
+            singleQualifier qualifier columns
+
+    let ctx = contextFactory store registry dbName (columnIndexOf columns) qualifiers None (probeRow columns)
+    let fsps = outputColumnFsps ctx columns select.Projections
+
+    if List.length fsps = List.length names then
+        fsps
+    else
+        names |> List.map (fun _ -> None)
+
 /// Resolves one `FromItem` — a real/virtual table via `resolveTableRef`, or
 /// a derived table by running its subquery (uncorrelated: a plain derived
 /// table can't see the outer query's columns, only `LATERAL` ones could,
@@ -2423,12 +2494,24 @@ and runUnionStmt
     // cumulative length)` boundary marker per branch, and the actual dedup
     // runs after `reconciled`/`coerceColumn` below, replayed over those
     // boundaries.
+    // MySQL reconciles a temporal UNION column's fsp the same way it does
+    // types/collations: the max declared fsp across branches wins, and every
+    // row renders exactly that many digits (a whole-second DATETIME row
+    // unioned with a DATETIME(6) one shows `.000000`). Declared, not
+    // value-derived — so it comes from each branch's column/CAST fsp.
+    let unionFsp (a: int option) (b: int option) =
+        match a, b with
+        | Some x, Some y -> Some(max x y)
+        | Some x, None
+        | None, Some x -> Some x
+        | None, None -> None
+
     let combine
-        (acc: Result<string list * ((string option list) * Value[]) list * byte list list * Collation.Collation list * (bool * int) list, QueryResult>)
+        (acc: Result<string list * ((string option list) * Value[]) list * byte list list * Collation.Collation list * int option list * (bool * int) list, QueryResult>)
         (isAll: bool, select: SelectStmt)
         =
         acc
-        |> Result.bind (fun (cols, rowsSoFar, typesSoFar, collationsSoFar, boundaries) ->
+        |> Result.bind (fun (cols, rowsSoFar, typesSoFar, collationsSoFar, fspsSoFar, boundaries) ->
             match runBranch select with
             | Err(code, message), _, _ -> Error(Err(code, message))
             | Affected _, _, _ -> Error(Err(1064, "UNION branch did not return a resultset"))
@@ -2444,20 +2527,24 @@ and runUnionStmt
                     else
                         List.map2 strictestUnionCollation collationsSoFar branchCollations
 
+                let branchFsps = selectColumnFsps store registry dbName select branchCols
+                let fsps = List.map2 unionFsp fspsSoFar branchFsps
+
                 let combined = rowsSoFar @ branchPaired
-                Ok(cols, combined, branchTypes :: typesSoFar, collations, boundaries @ [ isAll, List.length combined ]))
+                Ok(cols, combined, branchTypes :: typesSoFar, collations, fsps, boundaries @ [ isAll, List.length combined ]))
 
     match runSelectStmt store registry dbName first None with
     | Err(code, message), _, _ -> Err(code, message), [], []
     | Affected _, _, _ -> Err(1064, "UNION branch did not return a resultset"), [], []
     | ResultSet(firstCols, firstRows), firstTypes, firstTyped ->
         let firstCollations = selectColumnCollations store registry dbName first firstCols
+        let firstFsps = selectColumnFsps store registry dbName first firstCols
         let firstPaired = List.zip firstRows firstTyped
         let firstLen = List.length firstPaired
 
-        match rest |> List.fold combine (Ok(firstCols, firstPaired, [ firstTypes ], firstCollations, [])) with
+        match rest |> List.fold combine (Ok(firstCols, firstPaired, [ firstTypes ], firstCollations, firstFsps, [])) with
         | Error e -> e, [], []
-        | Ok(cols, allPaired, typesSoFar, collations, boundaries) ->
+        | Ok(cols, allPaired, typesSoFar, collations, fsps, boundaries) ->
             // MySQL's union type reconciliation across every branch, and
             // every row's values coerced to it — an `ORDER BY` over the
             // mixed-typed union then sorts exactly as MySQL does.
@@ -2503,8 +2590,19 @@ and runUnionStmt
                 |> List.map (fun (_, typed) ->
                     let coerced = typed |> Array.mapi coerceColumn
                     // Re-render the text row from the coerced values, so the
-                    // wire text carries the reconciliation too (2 -> 2.0).
-                    let text = coerced |> Array.map (function VNull -> None | v -> Value.toText v) |> List.ofArray
+                    // wire text carries the reconciliation too (2 -> 2.0), and
+                    // a DATETIME-reconciled column at the union's fsp so every
+                    // branch's rows show the same digit count.
+                    let text =
+                        coerced
+                        |> Array.mapi (fun i v ->
+                            match v with
+                            | VNull -> None
+                            | v ->
+                                match (if reconciled.[i] = Value.TypeDateTime then fsps.[i] else None) with
+                                | Some fsp -> Value.toTextFsp fsp v
+                                | None -> Value.toText v)
+                        |> List.ofArray
                     text, coerced)
 
             // Replays each branch's `isAll`/boundary from `combine` above,
@@ -3255,11 +3353,46 @@ and private runWindowedSelect
     (select: SelectStmt)
     (outer: EvalContext option)
     : QueryResult * byte list * Value[] list =
-    let windowFuncs = select.Projections |> List.collect (fst >> collectWindowFuncs) |> List.distinct
+    // MySQL allows a window function in `ORDER BY` even when no projection
+    // carries one (`SELECT v FROM t ORDER BY LAG(v) OVER (...)`), so
+    // collection spans both lists — each becomes a synthetic column either
+    // way, and the `select'` rewrite below substitutes both lists too.
+    let windowFuncs =
+        (select.Projections |> List.collect (fst >> collectWindowFuncs))
+        @ (select.OrderBy |> List.collect (fst >> collectWindowFuncs))
+        |> List.distinct
 
     if windowFuncs.IsEmpty then
         Err(1064, "runWindowedSelect called without a window-function projection"), [], []
     else
+
+    // MySQL rejects a `HAVING` referencing a windowed projection's alias
+    // with a dedicated error (3594, ER_WINDOW_INVALID_WINDOW_FUNC_ALIAS_USE
+    // — its errmsg really does end with a stray `.'`) rather than resolving
+    // the alias.
+    let windowedAliases =
+        select.Projections
+        |> List.choose (fun (expr, alias) ->
+            match alias with
+            | Some a when not (collectWindowFuncs expr |> List.isEmpty) -> Some(a.ToLowerInvariant())
+            | _ -> None)
+        |> Set.ofList
+
+    let havingWindowAlias =
+        select.Having
+        |> Option.map collectColRefs
+        |> Option.defaultValue []
+        |> List.tryFind (fun name -> windowedAliases.Contains(name.ToLowerInvariant()))
+
+    match havingWindowAlias with
+    | Some alias ->
+        Err(
+            3594,
+            sprintf "You cannot use the alias '%s' of an expression containing a window function in this context.'" alias
+        ),
+        [],
+        []
+    | None ->
 
     let columnIndex = columnIndexOf columns
     let ctxFor = contextFactory store registry dbName columnIndex qualifiers outer
@@ -3392,7 +3525,9 @@ and private runWindowedSelect
                     [ substituteWindowFuncs synthetic expr, alias ]
 
             let select' =
-                { select with Projections = select.Projections |> List.collect rewriteProjection }
+                { select with
+                    Projections = select.Projections |> List.collect rewriteProjection
+                    OrderBy = select.OrderBy |> List.map (fun (e, dir) -> substituteWindowFuncs synthetic e, dir) }
 
             runSelect store registry dbName extendedColumns qualifiers extendedRows select' outer
 
@@ -3415,7 +3550,20 @@ and private runSelect
     // packet and aborts the client's whole session.
     if select.From.IsNone && projections |> List.exists (fst >> function Star _ -> true | _ -> false) then
         Err(1096, "No tables used"), [], []
-    elif projections |> List.exists (fst >> collectWindowFuncs >> List.isEmpty >> not) then
+    elif select.Having |> Option.map collectWindowFuncs |> Option.exists (List.isEmpty >> not) then
+        // MySQL rejects a window function in HAVING with a dedicated error
+        // (3593, ER_WINDOW_INVALID_WINDOW_FUNC_USE) naming the function —
+        // its errmsg really does end with a stray `.'`.
+        let name =
+            match select.Having |> Option.map collectWindowFuncs |> Option.defaultValue [] with
+            | LagOver(_, offset, _, _) :: _ -> if offset < 0L then "lead" else "lag"
+            | _ -> "row_number"
+
+        Err(3593, sprintf "You cannot use the window function '%s' in this context.'" name), [], []
+    elif
+        projections |> List.exists (fst >> collectWindowFuncs >> List.isEmpty >> not)
+        || orderBy |> List.exists (fst >> collectWindowFuncs >> List.isEmpty >> not)
+    then
         // GROUP BY/window functions are honest barriers — every row must be
         // seen before either can produce anything — so `rows` (lazy when a
         // `JOIN`'s hash-probe fed it straight through) is forced here rather
@@ -3700,6 +3848,11 @@ let private applyAssignments
 /// (unhex(md5(key)))`) sees its real value at collision-detection time
 /// instead of a not-yet-computed NULL. Left-to-right column order lets one
 /// generated column reference an earlier one in the same row.
+/// ponytail: MySQL's DDL-time restriction errors (3102 nondeterministic fn,
+/// 3106 VIRTUAL as PK, 3107 forward reference, 3109 auto_increment ref)
+/// aren't validated — misuse degrades to a stale/NULL value, not
+/// corruption; add a CREATE/ALTER validation pass if a real workload hits
+/// one.
 let private computeGeneratedRow
     (store: Store)
     (registry: Registry)
@@ -3708,7 +3861,7 @@ let private computeGeneratedRow
     (columns: ColumnDef list)
     (row: Value[])
     : Result<Value[], StorageError> =
-    let generated = columns |> List.choose (fun c -> c.Generated |> Option.map (fun e -> c, e))
+    let generated = columns |> List.choose (fun c -> c.Generated |> Option.map (fun (e, _) -> c, e))
 
     if generated.IsEmpty then
         Ok row
@@ -4408,7 +4561,8 @@ let execute (store: Store) (registry: Registry) (dbName: string) (ids: int64 * i
     | AlterTable(table, actions) ->
         let db, table = splitQualified dbName table
 
-        match alterTable store db table actions with
+        // Backfills a just-added/modified generated column over existing rows.
+        match alterTable store db table actions |> withGeneratedRecomputed store registry dbName db table with
         | Ok() -> ids, Affected 0UL
         | Error e -> ids, storageErr e
 
@@ -4481,7 +4635,7 @@ let execute (store: Store) (registry: Registry) (dbName: string) (ids: int64 * i
 
                         onDuplicateUpdate
                         |> traverse (fun (name, expr) ->
-                            match resolveColumn tableColumns name with
+                            match resolveAssignableColumn tableColumns table name with
                             | Error e -> Error e
                             | Ok idx ->
                                 match evalExpr ctx (substituteValuesFunc columnIndex candidate expr) with
@@ -4556,7 +4710,7 @@ let execute (store: Store) (registry: Registry) (dbName: string) (ids: int64 * i
         | Ok(columns, rows) ->
             let columnIndex = columnIndexOf columns
 
-            match updateStmt.Assignments |> traverse (fun a -> resolveColumn columns a.Column |> Result.map (fun i -> i, a.Value)) with
+            match updateStmt.Assignments |> traverse (fun a -> resolveAssignableColumn columns table a.Column |> Result.map (fun i -> i, a.Value)) with
             | Error e -> ids, storageErr e
             | Ok indexedAssignments ->
                 let qualifiers = singleQualifier tableAlias columns
@@ -4646,7 +4800,17 @@ let execute (store: Store) (registry: Registry) (dbName: string) (ids: int64 * i
                         | [] -> Error(unknownColumn a.Column)
                         | _ -> Error(1052, sprintf "Column '%s' in field list is ambiguous" a.Column)
 
-                match updateStmt.Assignments |> traverse resolveAssignment with
+                // A generated column can't be a SET target (MySQL 3105).
+                let guardAssignable ((srcIdx, colIdx, v): int * int * Expr) : Result<int * int * Expr, EvalError> =
+                    let _, tableRef, cols = sources.[srcIdx]
+                    let col = List.item colIdx cols
+
+                    if col.Generated.IsSome then
+                        Error(toMySqlError (GeneratedColumnAssignment(col.Name, tableRef.Table)))
+                    else
+                        Ok(srcIdx, colIdx, v)
+
+                match updateStmt.Assignments |> traverse (resolveAssignment >> Result.bind guardAssignable) with
                 | Error(code, message) -> ids, Err(code, message)
                 | Ok resolvedAssignments ->
                     let check = whereMatches ctxFor updateStmt.Where
@@ -4675,7 +4839,7 @@ let execute (store: Store) (registry: Registry) (dbName: string) (ids: int64 * i
                         |> Array.ofList
 
                     // `claims` stays keyed by *source* (one set per alias,
-                    // as before `Ast.UpdateStmt`'s "at most once" doc
+                    // as `Ast.UpdateStmt`'s "at most once" doc
                     // describes) — a physical row matched twice through the
                     // *same* alias (`t1 JOIN t2` where two `t2` rows both
                     // join the same `t1` row) is only written once by that

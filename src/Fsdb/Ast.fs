@@ -181,6 +181,14 @@ and ColumnDefault =
     | DConst of Value
     | DCurrentTimestamp
 
+/// VIRTUAL vs STORED on a generated column. Both are materialized at write
+/// time in this engine (no recompute-on-read path), so the kind only drives
+/// metadata (SHOW CREATE TABLE, information_schema `EXTRA`). MySQL's default
+/// when the keyword is omitted is VIRTUAL.
+and GeneratedKind =
+    | Virtual
+    | Stored
+
 and ColumnDef =
     { Name: string
       Type: ColumnType
@@ -190,10 +198,8 @@ and ColumnDef =
       PrimaryKey: bool
       Unique: bool
       /// `[GENERATED ALWAYS] AS (expr) [VIRTUAL | STORED]` — `None` for a
-      /// plain column. Both VIRTUAL and STORED are persisted the same way
-      /// here (this engine has no separate "recompute on every read" path),
-      /// so only the expression itself is kept.
-      Generated: Expr option
+      /// plain column.
+      Generated: (Expr * GeneratedKind) option
       /// The column's `COLLATE name` (table-level `COLLATE` baked in as the
       /// default at parse time) — `None` means the server default
       /// (`Collation.defaultCollation`, utf8mb4_0900_ai_ci). Only meaningful

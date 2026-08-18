@@ -110,7 +110,7 @@ type Session =
       /// `string`) distinguishes a variable MySQL accepts NULL for (e.g.
       /// `SET character_set_results = NULL`) from one holding an ordinary
       /// string — the map lookup's own `None` for a key that isn't in the
-      /// map at all still means "unknown variable" (1193), same as before;
+      /// map at all still means "unknown variable" (1193);
       /// only a *present* key can hold `None`. See `UserVariables` below
       /// for the analogous convention on user-defined variables.
       Variables: Map<string, string option>
