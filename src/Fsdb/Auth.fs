@@ -1,12 +1,9 @@
 /// Account lookup and mysql_native_password verification against the
 /// `mysql.user` system table (see `Storage`'s bootstrap). The rule the
-/// handshake enforces: an account must exist, and is verified only when it
-/// has a non-empty stored hash — an empty `authentication_string` accepts
-/// any offered credential. ponytail: that last part deliberately diverges
-/// from real MySQL (which would reject a wrong password even for an
-/// empty-password account) so every existing passwordless client and the
-/// torture harness keep connecting unchanged; tighten if fsdb ever fronts
-/// anything but loopback.
+/// handshake enforces matches real MySQL: an account must exist, a
+/// non-empty stored hash is scramble-verified, and an empty
+/// `authentication_string` (no password set) accepts only an empty offered
+/// password.
 module Fsdb.Auth
 
 open System

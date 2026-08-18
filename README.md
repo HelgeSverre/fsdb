@@ -37,9 +37,8 @@ mysql --protocol=tcp -h127.0.0.1 -P3307 -e 'SELECT 1'
 Port 3307 avoids a real MySQL on 3306 (`--port` overrides). A `root` account
 with all privileges and no password exists out of the box; accounts, `GRANT`s,
 and passwords are managed with the usual `CREATE USER` / `GRANT` / `SET
-PASSWORD` statements (mysql_native_password, verified at the handshake). An
-account with no password accepts any offered credential, so still bind to
-loopback.
+PASSWORD` statements (mysql_native_password, verified at the handshake — a
+passwordless account accepts only an empty password, same as MySQL).
 
 First queries:
 

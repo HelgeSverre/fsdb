@@ -53,9 +53,6 @@ Deliberate divergences (each marked `ponytail:` at its code site):
 
 - One host per account, matched by name only; the connecting host always
   renders as `localhost`, accounts default to `'%'`.
-- An account with an **empty** `authentication_string` accepts any offered
-  password (real MySQL would reject a wrong one) — keeps passwordless setups
-  and the torture harness's `root`/`torture-secret` connection working.
 - Enforcement covers parsed statements' top-level table references;
   SHOW/SET text probes and subqueries/derived tables are unchecked.
 - No roles, dynamic privileges, column-level privileges, proxy users, or

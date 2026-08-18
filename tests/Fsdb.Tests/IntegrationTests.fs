@@ -182,10 +182,11 @@ let tests =
                       do! expectDenied (connStr "bob" "wrong") "wrong password"
                       do! expectDenied (connStr "nobody" "") "unknown user"
 
-                      // The empty-hash divergence: root has no stored password,
-                      // so even an offered password is accepted (keeps the
-                      // torture harness's root/torture-secret working).
-                      use conn2 = new MySqlConnector.MySqlConnection(connStr "root" "anything")
+                      // A passwordless account matches real MySQL: an empty
+                      // offered password connects, a non-empty one is 1045.
+                      do! expectDenied (connStr "root" "anything") "passwordless account, offered password"
+
+                      use conn2 = new MySqlConnector.MySqlConnection(connStr "root" "")
                       do! conn2.OpenAsync() |> Async.AwaitTask
 
                       // Account created over the wire is immediately usable.

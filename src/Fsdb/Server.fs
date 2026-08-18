@@ -389,10 +389,11 @@ let private authSwitchPayload (authData: byte[]) : byte[] =
     w.ToArray()
 
 /// Authenticates a parsed handshake response against `mysql.user`: the
-/// account must exist, and is verified (mysql_native_password over
-/// `authData`'s scramble) only when it has a non-empty stored hash — an
-/// empty hash accepts any offered credential (see `Auth`'s module doc for
-/// why). Writes the 1045 ERR itself on denial and returns `None`; returns
+/// account must exist, and its credential must match: a non-empty stored
+/// hash is verified as mysql_native_password over `authData`'s scramble; an
+/// empty stored hash (no password set) accepts only an *empty* offered
+/// password, exactly like real MySQL — offering one is `1045 (using
+/// password: YES)`. Writes the 1045 ERR itself on denial and returns `None`; returns
 /// `Some seqId` (the sequence id the OK packet must use) on success —
 /// `firstSeq + 1` more when an AuthSwitch round trip happened.
 let private authenticateHandshake
@@ -423,7 +424,13 @@ let private authenticateHandshake
             let stored = Auth.storedPasswordHash cols row
 
             if stored = "" then
-                return Some firstSeq
+                // No password set: only an empty offered password matches
+                // (every auth plugin sends a zero-length response for an
+                // empty password, so no AuthSwitch round trip is needed).
+                if resp.AuthResponse.Length = 0 then
+                    return Some firstSeq
+                else
+                    return! deny firstSeq true
             elif Auth.verifyNative stored authData resp.AuthResponse then
                 return Some firstSeq
             elif resp.ClientPlugin = Some "mysql_native_password" then
