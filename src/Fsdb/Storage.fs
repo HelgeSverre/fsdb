@@ -1308,8 +1308,9 @@ let private mysqlGlobalGrantsColumns: ColumnDef list =
       sysCol "WITH_GRANT_OPTION" (TEnum [ "N"; "Y" ]) false (Some(VString "N")) ]
 
 /// The bootstrap `root`@`%` row: every static privilege 'Y', empty
-/// authentication_string (= no password; the handshake accepts anything for
-/// an empty hash), remaining columns their type's rest state.
+/// authentication_string (= no password; the handshake accepts only an
+/// empty offered password for it), remaining columns their type's rest
+/// state.
 let private rootUserRow: Value[] =
     mysqlUserColumns
     |> List.map (fun c ->
