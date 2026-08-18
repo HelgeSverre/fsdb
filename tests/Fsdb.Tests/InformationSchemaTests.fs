@@ -468,7 +468,10 @@ let tests =
 
               match run store "SELECT schema_name FROM information_schema.schemata ORDER BY schema_name" with
               | ResultSet(_, rows) ->
-                  Expect.equal rows [ [ Some "app" ]; [ Some "fsdb" ]; [ Some "information_schema" ] ] "every schema present"
+                  Expect.equal
+                      rows
+                      [ [ Some "app" ]; [ Some "fsdb" ]; [ Some "information_schema" ]; [ Some "mysql" ] ]
+                      "every schema present"
               | other -> failtestf "expected a resultset, got %A" other
 
           testCase "an unknown information_schema table is a plain 1146"

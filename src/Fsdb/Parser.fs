@@ -692,11 +692,19 @@ let private caseExpr: Parser<Expr, unit> =
     )
     |>> fun ((subject, whens), elseBranch) -> Case(subject, whens, elseBranch)
 
+/// Paren-less `CURRENT_USER` — MySQL's one niladic user function callable
+/// without `()` in expressions (TablePlus/phpMyAdmin both emit `SELECT
+/// CURRENT_USER`), which would otherwise parse as a column reference below.
+/// `CURRENT_USER()` still goes through `funcCallAtom`.
+let private currentUserAtom: Parser<Expr, unit> =
+    attempt (keyword "CURRENT_USER" .>> notFollowedBy (pstring "(")) >>% FuncCall("CURRENT_USER", [])
+
 /// A bare word: a column, a qualified `t.col` (or `t.*`, `Star(Some "t")`),
 /// or a function call if followed by `(args)` (handled by `funcCallAtom`
 /// above, tried first so a reserved-word function name still parses).
 let private identAtom: Parser<Expr, unit> =
-    funcCallAtom
+    currentUserAtom
+    <|> funcCallAtom
     <|> (identifier
          >>= fun name ->
              choice

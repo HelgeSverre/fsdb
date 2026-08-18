@@ -73,6 +73,53 @@ let tests =
               }
               |> Async.RunSynchronously
 
+          testCase "the handshake username reaches USER()/CURRENT_USER() over the real wire protocol"
+          <| fun _ ->
+              async {
+                  let listener = Fsdb.Server.startListening System.Net.IPAddress.Loopback 0
+                  let port = Fsdb.Server.port listener
+                  let store = Fsdb.Storage.create ()
+
+                  // The account has to exist: a passwordless `alice` row,
+                  // same shape CREATE USER will write.
+                  Fsdb.Storage.insertRows
+                      store
+                      "mysql"
+                      "user"
+                      (Some [ "Host"; "User"; "plugin"; "authentication_string" ])
+                      [ [ Fsdb.Value.VString "%"
+                          Fsdb.Value.VString "alice"
+                          Fsdb.Value.VString "mysql_native_password"
+                          Fsdb.Value.VString "" ] ]
+                  |> ignore
+
+                  Fsdb.Server.serve listener store Fsdb.Functions.empty |> Async.StartAsTask |> ignore
+
+                  try
+                      let connStr =
+                          sprintf
+                              "Server=127.0.0.1;Port=%d;User ID=alice;Password=;AllowPublicKeyRetrieval=True;SslMode=None"
+                              port
+
+                      use conn = new MySqlConnector.MySqlConnection(connStr)
+                      do! conn.OpenAsync() |> Async.AwaitTask
+
+                      use cmd = conn.CreateCommand()
+                      cmd.CommandText <- "SELECT USER()"
+                      let! user = cmd.ExecuteScalarAsync() |> Async.AwaitTask
+                      Expect.equal (string user) "alice@localhost" "USER() reports the handshake username"
+
+                      use cmd2 = conn.CreateCommand()
+                      cmd2.CommandText <- "SELECT CURRENT_USER"
+                      let! current = cmd2.ExecuteScalarAsync() |> Async.AwaitTask
+                      Expect.equal (string current) "alice@%" "paren-less CURRENT_USER works over the wire"
+
+                      do! conn.CloseAsync() |> Async.AwaitTask
+                  finally
+                      listener.Stop()
+              }
+              |> Async.RunSynchronously
+
           // mysql CLI sends `SHOW WARNINGS LIMIT n` and mysqli's
           // `mysqli_report`/error-checking idiom sends `SHOW COUNT(*)
           // WARNINGS` — both routinely enough that either one dying with a

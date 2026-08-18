@@ -672,20 +672,38 @@ let findTable (catalog: Catalog) (dbName: string) (tableName: string) : Result<T
         | Some t -> Ok t
         | None -> Error(1146, sprintf "Table '%s' doesn't exist" tableName)
 
+/// The virtual tables `scan` above answers for — what `SHOW TABLES FROM
+/// information_schema` lists, since the catalog has no real entry for the
+/// schema. Keep in sync with `scan`'s match.
+let private informationSchemaTableNames =
+    [ "CHARACTER_SETS"
+      "COLLATIONS"
+      "COLLATION_CHARACTER_SET_APPLICABILITY"
+      "COLUMNS"
+      "KEY_COLUMN_USAGE"
+      "REFERENTIAL_CONSTRAINTS"
+      "SCHEMATA"
+      "STATISTICS"
+      "TABLES"
+      "TABLE_CONSTRAINTS" ]
+
 /// `SHOW [FULL] TABLES [FROM db] [LIKE 'pattern']`.
 let showTables (catalog: Catalog) (dbName: string) (full: bool) (likeOpt: string option) : ShowResult =
-    match Map.tryFind dbName catalog with
-    | None -> Error(1049, sprintf "Unknown database '%s'" dbName)
-    | Some db ->
-        let names =
-            db |> Map.toList |> List.map (fun (_, t) -> t.OriginalName) |> List.filter (likeFilter likeOpt) |> List.sort
-
+    let render (tableType: string) (names: string list) =
+        let names = names |> List.filter (likeFilter likeOpt) |> List.sort
         let col = sprintf "Tables_in_%s" dbName
 
         if full then
-            Ok([ col; "Table_type" ], names |> List.map (fun n -> [ Some n; Some "BASE TABLE" ]))
+            Ok([ col; "Table_type" ], names |> List.map (fun n -> [ Some n; Some tableType ]))
         else
             Ok([ col ], names |> List.map (fun n -> [ Some n ]))
+
+    if String.Equals(dbName, "information_schema", StringComparison.OrdinalIgnoreCase) then
+        render "SYSTEM VIEW" informationSchemaTableNames
+    else
+        match Map.tryFind dbName catalog with
+        | None -> Error(1049, sprintf "Unknown database '%s'" dbName)
+        | Some db -> render "BASE TABLE" (db |> Map.toList |> List.map (fun (_, t) -> t.OriginalName))
 
 /// `SHOW COLLATION [LIKE 'pattern']` — the registered collations with
 /// `SHOW`'s column labels (MySQL's `Collation/Charset/Id/...`, distinct

@@ -848,4 +848,89 @@ let tests =
 
               match handle session "SET TRANSACTION ISOLATION LEVEL SERIALIZABLE" |> snd with
               | Err(1235, _) -> ()
-              | other -> failtestf "expected a 1235 unsupported-feature error, got %A" other ]
+              | other -> failtestf "expected a 1235 unsupported-feature error, got %A" other
+
+          // -----------------------------------------------------------------
+          // Session user identity + the built-in `mysql` system schema
+          // -----------------------------------------------------------------
+
+          testCase "CURRENT_USER()/USER()/SESSION_USER() report the session's user, not a hardcoded name"
+          <| fun _ ->
+              let session = { create 1 (Fsdb.Storage.create ()) with User = "alice" }
+
+              match handle session "SELECT CURRENT_USER(), USER(), SESSION_USER()" |> snd with
+              | ResultSet(_, [ [ Some "alice@%"; Some "alice@localhost"; Some "alice@localhost" ] ]) -> ()
+              | other -> failtestf "expected the session user's identities, got %A" other
+
+          testCase "paren-less SELECT CURRENT_USER parses as the function, not a column (TablePlus/phpMyAdmin form)"
+          <| fun _ ->
+              let session = create 1 (Fsdb.Storage.create ())
+
+              match handle session "SELECT CURRENT_USER" |> snd with
+              | ResultSet(_, [ [ Some "root@%" ] ]) -> ()
+              | other -> failtestf "expected root@%%, got %A" other
+
+          testCase "SHOW DATABASES lists mysql alphabetically interleaved with real databases"
+          <| fun _ ->
+              let session = create 1 (Fsdb.Storage.create ())
+              let session, _ = handle session "CREATE DATABASE zoo"
+
+              match handle session "SHOW DATABASES" |> snd with
+              | ResultSet(_, rows) ->
+                  let names = rows |> List.map (List.head >> Option.get)
+                  Expect.equal names [ "fsdb"; "information_schema"; "mysql"; "zoo" ] "sorted, mysql included"
+              | other -> failtestf "expected a resultset, got %A" other
+
+          testCase "USE mysql works and SHOW TABLES FROM mysql lists the system tables"
+          <| fun _ ->
+              let session = create 1 (Fsdb.Storage.create ())
+
+              match handle session "USE mysql" with
+              | session, Affected 0UL ->
+                  match handle session "SHOW TABLES" |> snd with
+                  | ResultSet([ "Tables_in_mysql" ], rows) ->
+                      let names = rows |> List.map (List.head >> Option.get)
+                      Expect.equal names [ "columns_priv"; "db"; "global_grants"; "tables_priv"; "user" ] "the 5 system tables"
+                  | other -> failtestf "expected the mysql table list, got %A" other
+              | _, other -> failtestf "expected USE mysql to succeed, got %A" other
+
+          testCase "SHOW TABLES FROM information_schema lists the virtual tables instead of 1049"
+          <| fun _ ->
+              let session = create 1 (Fsdb.Storage.create ())
+
+              match handle session "SHOW FULL TABLES FROM information_schema" |> snd with
+              | ResultSet([ "Tables_in_information_schema"; "Table_type" ], rows) ->
+                  Expect.isTrue
+                      (rows |> List.exists (fun r -> r = [ Some "TABLES"; Some "SYSTEM VIEW" ]))
+                      "TABLES present as a SYSTEM VIEW"
+              | other -> failtestf "expected the virtual table list, got %A" other
+
+          testCase "SELECT from mysql.user finds the bootstrap root row (phpMyAdmin's isSuperUser probe shape)"
+          <| fun _ ->
+              let session = create 1 (Fsdb.Storage.create ())
+
+              match handle session "SELECT User, Host, plugin, Select_priv FROM mysql.user" |> snd with
+              | ResultSet(_, [ [ Some "root"; Some "%"; Some "mysql_native_password"; Some "Y" ] ]) -> ()
+              | other -> failtestf "expected the root row, got %A" other
+
+              match handle session "SELECT 1 FROM mysql.user LIMIT 1" |> snd with
+              | ResultSet(_, [ [ Some "1" ] ]) -> ()
+              | other -> failtestf "expected the isSuperUser probe to succeed, got %A" other
+
+          testCase "mysql.user has MySQL 8.4's exact 51-column shape and mysql.db its 22"
+          <| fun _ ->
+              let store = Fsdb.Storage.create ()
+
+              match Fsdb.Storage.scanList store "mysql" "user" with
+              | Ok(cols, rows) ->
+                  Expect.equal (List.length cols) 51 "51 columns"
+                  Expect.equal (cols |> List.item 2 |> fun c -> c.Name) "Select_priv" "priv columns start at 3"
+                  Expect.equal (cols |> List.last |> fun c -> c.Name) "User_attributes" "last column"
+                  Expect.equal (List.length rows) 1 "just root"
+              | Error e -> failtestf "expected mysql.user to scan, got %A" e
+
+              match Fsdb.Storage.scanList store "mysql" "db" with
+              | Ok(cols, rows) ->
+                  Expect.equal (List.length cols) 22 "22 columns"
+                  Expect.isEmpty rows "no db-level grants out of the box"
+              | Error e -> failtestf "expected mysql.db to scan, got %A" e ]

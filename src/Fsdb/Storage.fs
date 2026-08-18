@@ -352,18 +352,8 @@ type Store =
 /// prefer piping/partial application over the property-set syntax.
 let setCatalog (store: Store) (catalog: Catalog) : unit = store.Catalog <- catalog
 
-let create () : Store =
-    let databases = ConcurrentDictionary<string, Database ref>()
-    databases.[defaultDatabase] <- ref Map.empty
-
-    { Databases = databases
-      ForeignKeyChecks = true
-      StrictMode = true
-      ConnectionCollation = Collation.defaultCollation
-      OnCommit = None
-      PendingEvents = None
-      TransactionGates = ConcurrentDictionary<string, SemaphoreSlim>()
-      Lock = obj () }
+// `create` itself lives after `reindexTable` below — it seeds the built-in
+// `mysql` system schema, whose bootstrap needs the index rebuild.
 
 type private TransactionGateLease(gate: SemaphoreSlim) =
     let mutable released = 0
@@ -1209,6 +1199,174 @@ let reindexCallCount () = reindexCallCountLocal.Value
 let reindexTable (table: Table) : Table =
     reindexCallCountLocal.Value <- reindexCallCountLocal.Value + 1
     { table with UniqueIndex = rebuildUniqueIndex table }
+
+// ---------------------------------------------------------------------------
+// The built-in `mysql` system schema: real stored tables (not virtual
+// projections), so `USE mysql`, `SELECT ... FROM mysql.user`, SHOW TABLES,
+// direct DML, and WAL/snapshot persistence all ride the ordinary catalog
+// paths with zero special-casing. Column shapes follow MySQL 8.4
+// (oracle-verified); only the 5 functionally-relevant tables of MySQL's 38
+// exist. Bootstrapped by `create` below and re-ensured after a snapshot
+// load (`ensureMysqlSchema`) so pre-feature snapshots pick it up.
+// ponytail: no charset/collation fidelity on these columns (MySQL uses
+// utf8mb3_bin/ascii here) — add if a client diff ever cares.
+// ---------------------------------------------------------------------------
+
+let private sysCol (name: string) (ty: ColumnType) (nullable: bool) (dflt: Value option) : ColumnDef =
+    { Name = name
+      Type = ty
+      Nullable = nullable
+      Default = dflt |> Option.map DConst
+      AutoIncrement = false
+      PrimaryKey = false
+      Unique = false
+      OnUpdateCurrentTimestamp = false
+      Generated = None
+      Collation = None
+      Charset = None }
+
+let private privCol (name: string) = sysCol name (TEnum [ "N"; "Y" ]) false (Some(VString "N"))
+
+let private keyCol (name: string) (len: int) =
+    { sysCol name (TChar len) false (Some(VString "")) with PrimaryKey = true }
+
+/// mysql.user's 51 columns, in MySQL 8.4's exact order.
+let private mysqlUserColumns: ColumnDef list =
+    [ keyCol "Host" 255; keyCol "User" 32 ]
+    @ ([ "Select"; "Insert"; "Update"; "Delete"; "Create"; "Drop"; "Reload"; "Shutdown"; "Process"; "File"
+         "Grant"; "References"; "Index"; "Alter"; "Show_db"; "Super"; "Create_tmp_table"; "Lock_tables"
+         "Execute"; "Repl_slave"; "Repl_client"; "Create_view"; "Show_view"; "Create_routine"
+         "Alter_routine"; "Create_user"; "Event"; "Trigger"; "Create_tablespace" ]
+       |> List.map (fun p -> privCol (p + "_priv")))
+    @ [ sysCol "ssl_type" (TEnum [ ""; "ANY"; "X509"; "SPECIFIED" ]) false (Some(VString ""))
+        // Real MySQL declares these blobs NOT NULL with no default; giving
+        // them an empty-bytes default keeps partial-column inserts (the shape
+        // CREATE USER writes) working without special-casing.
+        sysCol "ssl_cipher" TBlob false (Some(VBytes [||]))
+        sysCol "x509_issuer" TBlob false (Some(VBytes [||]))
+        sysCol "x509_subject" TBlob false (Some(VBytes [||]))
+        sysCol "max_questions" (TInt true) false (Some(VInt 0L))
+        sysCol "max_updates" (TInt true) false (Some(VInt 0L))
+        sysCol "max_connections" (TInt true) false (Some(VInt 0L))
+        sysCol "max_user_connections" (TInt true) false (Some(VInt 0L))
+        sysCol "plugin" (TChar 64) false (Some(VString "caching_sha2_password"))
+        sysCol "authentication_string" TText true None
+        sysCol "password_expired" (TEnum [ "N"; "Y" ]) false (Some(VString "N"))
+        sysCol "password_last_changed" (TTimestamp 0) true None
+        sysCol "password_lifetime" (TSmallInt true) true None
+        sysCol "account_locked" (TEnum [ "N"; "Y" ]) false (Some(VString "N"))
+        privCol "Create_role_priv"
+        privCol "Drop_role_priv"
+        sysCol "Password_reuse_history" (TSmallInt true) true None
+        sysCol "Password_reuse_time" (TSmallInt true) true None
+        sysCol "Password_require_current" (TEnum [ "N"; "Y" ]) true None
+        sysCol "User_attributes" TJson true None ]
+
+/// mysql.db's 22 columns (per-database privilege rows).
+let private mysqlDbColumns: ColumnDef list =
+    [ keyCol "Host" 255; keyCol "Db" 64; keyCol "User" 32 ]
+    @ ([ "Select"; "Insert"; "Update"; "Delete"; "Create"; "Drop"; "Grant"; "References"; "Index"; "Alter"
+         "Create_tmp_table"; "Lock_tables"; "Create_view"; "Show_view"; "Create_routine"; "Alter_routine"
+         "Execute"; "Event"; "Trigger" ]
+       |> List.map (fun p -> privCol (p + "_priv")))
+
+let private tablePrivSet =
+    [ "Select"; "Insert"; "Update"; "Delete"; "Create"; "Drop"; "Grant"; "References"; "Index"; "Alter"
+      "Create View"; "Show view"; "Trigger" ]
+
+let private columnPrivSet = [ "Select"; "Insert"; "Update"; "References" ]
+
+let private mysqlTablesPrivColumns: ColumnDef list =
+    [ keyCol "Host" 255
+      keyCol "Db" 64
+      keyCol "User" 32
+      keyCol "Table_name" 64
+      sysCol "Grantor" (TVarchar 288) false (Some(VString ""))
+      sysCol "Timestamp" (TTimestamp 0) true None
+      sysCol "Table_priv" (TSet tablePrivSet) false (Some(VString ""))
+      sysCol "Column_priv" (TSet columnPrivSet) false (Some(VString "")) ]
+
+let private mysqlColumnsPrivColumns: ColumnDef list =
+    [ keyCol "Host" 255
+      keyCol "Db" 64
+      keyCol "User" 32
+      keyCol "Table_name" 64
+      keyCol "Column_name" 64
+      sysCol "Timestamp" (TTimestamp 0) true None
+      sysCol "Column_priv" (TSet columnPrivSet) false (Some(VString "")) ]
+
+let private mysqlGlobalGrantsColumns: ColumnDef list =
+    [ keyCol "USER" 32
+      keyCol "HOST" 255
+      keyCol "PRIV" 32
+      sysCol "WITH_GRANT_OPTION" (TEnum [ "N"; "Y" ]) false (Some(VString "N")) ]
+
+/// The bootstrap `root`@`%` row: every static privilege 'Y', empty
+/// authentication_string (= no password; the handshake accepts anything for
+/// an empty hash), remaining columns their type's rest state.
+let private rootUserRow: Value[] =
+    mysqlUserColumns
+    |> List.map (fun c ->
+        match c.Name with
+        | "Host" -> VString "%"
+        | "User" -> VString "root"
+        | "plugin" -> VString "mysql_native_password"
+        | "authentication_string" -> VString ""
+        | n when n.EndsWith "_priv" -> VString "Y"
+        | _ ->
+            match c.Default with
+            | Some(DConst v) -> v
+            | _ ->
+                match c.Type with
+                | TBlob -> VBytes [||]
+                | _ -> VNull)
+    |> List.toArray
+
+let private sysTable (name: string) (columns: ColumnDef list) (rows: Value[] list) : Table =
+    let table =
+        { OriginalName = name
+          Columns = columns
+          RowsArray = ImmutableArray.CreateRange rows
+          NextAutoId = 1L
+          Indexes = []
+          ForeignKeys = []
+          TableCharset = None
+          TableCollation = None
+          UniqueIndex = Map.empty }
+
+    // `rebuildUniqueIndex` directly, not `reindexTable`: the latter bumps the
+    // replay-cost counter tests use to catch per-event reindexing, and
+    // bootstrap isn't replay.
+    { table with UniqueIndex = rebuildUniqueIndex table }
+
+let private mysqlSystemDatabase () : Database =
+    [ "user", sysTable "user" mysqlUserColumns [ rootUserRow ]
+      "db", sysTable "db" mysqlDbColumns []
+      "tables_priv", sysTable "tables_priv" mysqlTablesPrivColumns []
+      "columns_priv", sysTable "columns_priv" mysqlColumnsPrivColumns []
+      "global_grants", sysTable "global_grants" mysqlGlobalGrantsColumns [] ]
+    |> Map.ofList
+
+/// Re-seeds the `mysql` system schema when it's absent — called after a
+/// snapshot load replaces the whole catalog (a snapshot written before this
+/// schema existed doesn't carry it). A no-op when `mysql` is already there,
+/// so a snapshot that *does* carry it (users/grants included) wins.
+let ensureMysqlSchema (store: Store) : unit =
+    store.Databases.TryAdd("mysql", ref (mysqlSystemDatabase ())) |> ignore
+
+let create () : Store =
+    let databases = ConcurrentDictionary<string, Database ref>()
+    databases.[defaultDatabase] <- ref Map.empty
+    databases.["mysql"] <- ref (mysqlSystemDatabase ())
+
+    { Databases = databases
+      ForeignKeyChecks = true
+      StrictMode = true
+      ConnectionCollation = Collation.defaultCollation
+      OnCommit = None
+      PendingEvents = None
+      TransactionGates = ConcurrentDictionary<string, SemaphoreSlim>()
+      Lock = obj () }
 
 /// Removes/adds one row's entry in every unique group's map, the
 /// incremental update every write path below makes instead of

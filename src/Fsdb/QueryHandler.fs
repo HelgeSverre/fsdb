@@ -870,8 +870,12 @@ let private registryFor (session: Session) : Functions.Registry =
         "VERSION"
         (fun _ -> lookupVar session "version" |> Option.flatten |> Option.map VString |> Option.defaultValue VNull)
     |> Functions.registerScalar "CONNECTION_ID" (fun _ -> VInt(int64 session.ConnectionId))
-    |> Functions.registerScalar "CURRENT_USER" (fun _ -> VString "fsdb@localhost")
-    |> Functions.registerScalar "USER" (fun _ -> VString "fsdb@localhost")
+    // CURRENT_USER() is the matched *account* (host part `%`, the only host
+    // accounts have — see `Session.User`); USER()/SESSION_USER() are the
+    // connecting user@client-host, which always renders `localhost` here.
+    |> Functions.registerScalar "CURRENT_USER" (fun _ -> VString(session.User + "@%"))
+    |> Functions.registerScalar "USER" (fun _ -> VString(session.User + "@localhost"))
+    |> Functions.registerScalar "SESSION_USER" (fun _ -> VString(session.User + "@localhost"))
 
 /// Parses and executes anything that isn't one of the text-probe special
 /// cases above. A parse failure that also looks like a `SELECT @@...`/

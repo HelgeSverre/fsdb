@@ -151,6 +151,13 @@ type Transaction =
 
 type Session =
     { ConnectionId: int
+      /// The account name the client authenticated as at handshake —
+      /// `CURRENT_USER()`/`USER()`/`SHOW GRANTS` and privilege checks read
+      /// it. `"root"` for a session built directly (every test).
+      /// ponytail: name only, no host part — every account is `'name'@'%'`
+      /// and the connecting host renders as `localhost`; add real host
+      /// matching if remote-host account rules are ever needed.
+      User: string
       Database: string option
       /// Real, known system variables. `string option` per value (not just
       /// `string`) distinguishes a variable MySQL accepts NULL for (e.g.
@@ -247,6 +254,7 @@ let create (connectionId: int) (store: Store) : Session =
         (globalVariablesOf store) |> Seq.fold (fun acc (KeyValue(k, v)) -> Map.add k v acc) defaultVariables
 
     { ConnectionId = connectionId
+      User = "root"
       Database = None
       Variables = variables
       UserVariables = Map.empty

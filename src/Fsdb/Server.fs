@@ -417,6 +417,7 @@ let private handleConnection
                 resp.Database |> Option.iter (Storage.ensureDatabase store)
                 let session =
                     { Session.create connectionId store with
+                        User = resp.Username
                         Database = resp.Database
                         CustomFunctions = customFunctions
                         Capabilities = capabilities }
@@ -763,6 +764,7 @@ let private handleConnection
                                 // for instead of a full reconnect.
                                 let session =
                                     { Session.create session.ConnectionId session.Store with
+                                        User = session.User
                                         Database = session.Database
                                         CustomFunctions = session.CustomFunctions
                                         Capabilities = session.Capabilities }
