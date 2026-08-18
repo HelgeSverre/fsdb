@@ -397,6 +397,58 @@ let tests =
                     | other -> failtestf "expected InvalidValueForColumn, got %A" other ]
 
           testList
+              "coerceValue SET columns"
+              [ let tagsCol = col "tags" (TSet [ "a"; "b"; "c" ]) true
+
+                testCase "members land in declaration order, deduplicated, regardless of input order"
+                <| fun _ ->
+                    match coerceValue true tagsCol (VString "b,a") with
+                    | Ok(VString "a,b") -> ()
+                    | other -> failtestf "expected 'a,b', got %A" other
+
+                    match coerceValue true tagsCol (VString "a,a,b") with
+                    | Ok(VString "a,b") -> ()
+                    | other -> failtestf "expected 'a,b', got %A" other
+
+                testCase "the empty string is always a legal SET value"
+                <| fun _ ->
+                    match coerceValue true tagsCol (VString "") with
+                    | Ok(VString "") -> ()
+                    | other -> failtestf "expected Ok(VString \"\"), got %A" other
+
+                testCase "a numeric value is a bitmask over the declared members"
+                <| fun _ ->
+                    match coerceValue true tagsCol (VInt 5L) with
+                    | Ok(VString "a,c") -> ()
+                    | other -> failtestf "expected 'a,c' (bits 0 and 2), got %A" other
+
+                testCase "strict mode rejects a member that isn't declared"
+                <| fun _ ->
+                    match coerceValue true tagsCol (VString "a,x") with
+                    | Error(DataTruncatedForColumn "tags") ->
+                        let code, _ = toMySqlError (DataTruncatedForColumn "tags")
+                        Expect.equal code 1265 "MySQL error code"
+                    | other -> failtestf "expected DataTruncatedForColumn, got %A" other
+
+                testCase "non-strict mode silently drops undeclared members instead of failing"
+                <| fun _ ->
+                    match coerceValue false tagsCol (VString "a,x") with
+                    | Ok(VString "a") -> ()
+                    | other -> failtestf "expected 'a' (x dropped), got %A" other
+
+                testCase "non-strict mode masks an out-of-range numeric bitmask down to the valid bits"
+                <| fun _ ->
+                    match coerceValue false tagsCol (VInt 999L) with
+                    | Ok(VString "a,b,c") -> ()
+                    | other -> failtestf "expected 'a,b,c' (999 masked to the 3 declared bits), got %A" other
+
+                testCase "strict mode rejects an out-of-range numeric bitmask"
+                <| fun _ ->
+                    match coerceValue true tagsCol (VInt 999L) with
+                    | Error(DataTruncatedForColumn "tags") -> ()
+                    | other -> failtestf "expected DataTruncatedForColumn, got %A" other ]
+
+          testList
               "unique constraints"
               [ let emailsTable store =
                     createTable
@@ -964,6 +1016,61 @@ let tests =
                         | Ok(columns, rows) ->
                             Expect.equal (List.length columns) 4 "one more column"
                             Expect.equal (List.ofSeq rows |> List.map (fun r -> r.[3])) [ VInt 1L ] "filled with the new column's default"
+                        | Error e -> failtestf "expected Ok, got %A" e
+                    | Error e -> failtestf "expected Ok, got %A" e
+
+                testCase "AddColumn NOT NULL with no DEFAULT on a non-empty table fills the type's implicit zero value"
+                <| fun _ ->
+                    let store = withUsersTable ()
+                    insertRows store defaultDatabase "users" None [ [ VNull; VString "alice"; VInt 30L ] ] |> ignore
+
+                    match alterTable store defaultDatabase "users" [ AddColumn(col "score" (TInt false) false, PositionDefault) ] with
+                    | Ok() ->
+                        match scan store defaultDatabase "users" with
+                        | Ok(_, rows) -> Expect.equal (List.ofSeq rows |> List.map (fun r -> r.[3])) [ VInt 0L ] "implicit zero, not NULL"
+                        | Error e -> failtestf "expected Ok, got %A" e
+                    | Error e -> failtestf "expected Ok, got %A" e
+
+                testCase "AddColumn NOT NULL with no DEFAULT on an empty table succeeds without needing a fill value"
+                <| fun _ ->
+                    let store = withUsersTable ()
+
+                    match alterTable store defaultDatabase "users" [ AddColumn(col "score" (TInt false) false, PositionDefault) ] with
+                    | Ok() -> ()
+                    | Error e -> failtestf "expected Ok, got %A" e
+
+                testCase "AddColumn NOT NULL DATE with no DEFAULT on a non-empty table fails with 1292 (implicit zero date under NO_ZERO_DATE)"
+                <| fun _ ->
+                    let store = withUsersTable ()
+                    insertRows store defaultDatabase "users" None [ [ VNull; VString "alice"; VInt 30L ] ] |> ignore
+
+                    match alterTable store defaultDatabase "users" [ AddColumn(col "born" TDate false, PositionDefault) ] with
+                    | Error(ZeroTemporalForColumn("date", "0000-00-00", "born")) ->
+                        let code, _ = toMySqlError (ZeroTemporalForColumn("date", "0000-00-00", "born"))
+                        Expect.equal code 1292 "MySQL error code"
+                    | other -> failtestf "expected ZeroTemporalForColumn, got %A" other
+
+                testCase "AddColumn NOT NULL with no DEFAULT fills empty string for a text column and the first member for an ENUM"
+                <| fun _ ->
+                    let store = withUsersTable ()
+                    insertRows store defaultDatabase "users" None [ [ VNull; VString "alice"; VInt 30L ] ] |> ignore
+
+                    match
+                        alterTable
+                            store
+                            defaultDatabase
+                            "users"
+                            [ AddColumn(col "bio" (TVarchar 100) false, PositionDefault)
+                              AddColumn(col "role" (TEnum [ "admin"; "member" ]) false, PositionDefault) ]
+                    with
+                    | Ok() ->
+                        match scan store defaultDatabase "users" with
+                        | Ok(_, rows) ->
+                            match List.ofSeq rows with
+                            | [ row ] ->
+                                Expect.equal row.[3] (VString "") "text column implicit default is ''"
+                                Expect.equal row.[4] (VString "admin") "ENUM implicit default is its first declared member"
+                            | other -> failtestf "expected one row, got %A" other
                         | Error e -> failtestf "expected Ok, got %A" e
                     | Error e -> failtestf "expected Ok, got %A" e
 
@@ -1640,7 +1747,121 @@ let tests =
                         match scan store defaultDatabase "departments" with
                         | Ok(_, rows) -> Expect.equal (rows |> Seq.map (fun r -> r.[0]) |> List.ofSeq) [ VInt 1L ] "the parent row is untouched"
                         | Error e -> failtestf "expected Ok, got %A" e
-                    | other -> failtestf "expected ForeignKeyRestrict, got %A" other ]
+                    | other -> failtestf "expected ForeignKeyRestrict, got %A" other
+
+                /// As `withDeptEmployees`, but the FK's `ON UPDATE` action is
+                /// the one under test rather than `ON DELETE`.
+                let withDeptEmployeesOnUpdate (onUpdate: string) =
+                    let store = create ()
+
+                    createTable store defaultDatabase "departments" [ idCol; col "name" (TVarchar 255) false ] [] [] None None
+                    |> ignore
+
+                    let fk =
+                        { Name = "fk_dept"
+                          Columns = [ "dept_id" ]
+                          RefTable = "departments"
+                          RefColumns = [ "id" ]
+                          OnDelete = None
+                          OnUpdate = Some onUpdate }
+
+                    createTable
+                        store
+                        defaultDatabase
+                        "employees"
+                        [ idCol; col "dept_id" (TInt false) true; col "name" (TVarchar 255) false ]
+                        []
+                        [ fk ]
+                        None
+                        None
+                    |> ignore
+
+                    insertRows store defaultDatabase "departments" None [ [ VInt 1L; VString "eng" ] ]
+                    |> ignore
+
+                    store
+
+                testCase "UPDATE of a referenced parent key with ON UPDATE CASCADE rewrites the children's foreign key"
+                <| fun _ ->
+                    let store = withDeptEmployeesOnUpdate "CASCADE"
+
+                    insertRows store defaultDatabase "employees" None [ [ VInt 1L; VInt 1L; VString "alice" ] ]
+                    |> ignore
+
+                    let updater (row: Value[]) = Ok [| VInt 99L; row.[1] |]
+
+                    match updateRows store defaultDatabase "departments" None (fun _ -> Ok true) updater with
+                    | Ok _ ->
+                        match scan store defaultDatabase "employees" with
+                        | Ok(_, rows) -> Expect.equal (List.ofSeq rows |> List.map (fun r -> r.[1])) [ VInt 99L ] "dept_id follows the parent's new key"
+                        | Error e -> failtestf "expected Ok, got %A" e
+                    | Error e -> failtestf "expected Ok, got %A" e
+
+                testCase "UPDATE of a referenced parent key with ON UPDATE SET NULL blanks the children's foreign key"
+                <| fun _ ->
+                    let store = withDeptEmployeesOnUpdate "SET NULL"
+
+                    insertRows store defaultDatabase "employees" None [ [ VInt 1L; VInt 1L; VString "alice" ] ]
+                    |> ignore
+
+                    let updater (row: Value[]) = Ok [| VInt 99L; row.[1] |]
+
+                    match updateRows store defaultDatabase "departments" None (fun _ -> Ok true) updater with
+                    | Ok _ ->
+                        match scan store defaultDatabase "employees" with
+                        | Ok(_, rows) -> Expect.equal (List.ofSeq rows |> List.map (fun r -> r.[1])) [ VNull ] "dept_id blanked, row otherwise survives"
+                        | Error e -> failtestf "expected Ok, got %A" e
+                    | Error e -> failtestf "expected Ok, got %A" e
+
+                testCase "ON UPDATE CASCADE fires a RowsUpdated event for the cascaded child too"
+                <| fun _ ->
+                    let store = withDeptEmployeesOnUpdate "CASCADE"
+
+                    insertRows store defaultDatabase "employees" None [ [ VInt 1L; VInt 1L; VString "alice" ] ]
+                    |> ignore
+
+                    let events = ResizeArray<CommitEvent>()
+                    store.OnCommit <- Some events.Add
+
+                    let updater (row: Value[]) = Ok [| VInt 99L; row.[1] |]
+
+                    match updateRows store defaultDatabase "departments" None (fun _ -> Ok true) updater with
+                    | Ok _ ->
+                        match List.ofSeq events with
+                        | [ RowsUpdated(_, "departments", _); RowsUpdated(_, "employees", [ (oldRow, newRow) ]) ] ->
+                            Expect.equal oldRow.[1] (VInt 1L) "before value still holds the pre-cascade dept_id"
+                            Expect.equal newRow.[1] (VInt 99L) "after value follows the parent's new key"
+                        | other -> failtestf "expected a RowsUpdated for departments and a RowsUpdated for employees, got %A" other
+                    | Error e -> failtestf "expected Ok, got %A" e
+
+                testCase "ON UPDATE SET NULL against a NOT NULL foreign key column fails the update instead of blanking it"
+                <| fun _ ->
+                    let store = create ()
+
+                    createTable store defaultDatabase "pa" [ idCol ] [] [] None None |> ignore
+
+                    let fk =
+                        { Name = "fk_ch"
+                          Columns = [ "pid" ]
+                          RefTable = "pa"
+                          RefColumns = [ "id" ]
+                          OnDelete = None
+                          OnUpdate = Some "SET NULL" }
+
+                    createTable store defaultDatabase "ch" [ idCol; col "pid" (TInt false) false ] [] [ fk ] None None
+                    |> ignore
+
+                    insertRows store defaultDatabase "pa" None [ [ VInt 1L ] ] |> ignore
+                    insertRows store defaultDatabase "ch" None [ [ VInt 5L; VInt 1L ] ] |> ignore
+
+                    let updater (row: Value[]) = Ok [| VInt 99L |]
+
+                    match updateRows store defaultDatabase "pa" None (fun _ -> Ok true) updater with
+                    | Error(NotNullViolation "pid") ->
+                        match scan store defaultDatabase "ch" with
+                        | Ok(_, rows) -> Expect.equal (List.ofSeq rows) [ [| VInt 5L; VInt 1L |] ] "the child row is untouched"
+                        | Error e -> failtestf "expected Ok, got %A" e
+                    | other -> failtestf "expected NotNullViolation, got %A" other ]
 
           testList
               "OnCommit notification hook"
