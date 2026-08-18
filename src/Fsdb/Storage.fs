@@ -2096,8 +2096,9 @@ let private referencingForeignKeys (db: Database) (parentKey: string) : (string 
 /// column some other table's FK references at all: most `UPDATE`s never
 /// touch the referenced key, so this is a no-op the moment `oldKey = newKey`.
 /// `CASCADE` rewrites every matching child row's FK columns to `newRow`'s key
-/// and recurses (a rewritten child row can itself be a parent, chained or
-/// self-referencing); `SET NULL` blanks them, failing 1048 instead if any of
+/// and recurses (a rewritten child row can itself be a parent of further
+/// tables); a cascade that loops back into any table already on the current
+/// cascade path fails 1451, matching MySQL. `SET NULL` blanks them, failing 1048 instead if any of
 /// the FK columns is itself `NOT NULL` (real MySQL refuses to create such a
 /// constraint at all, error 1215; this engine doesn't validate DDL that
 /// strictly, so the equivalent check happens here — same as
@@ -2115,25 +2116,19 @@ let rec private cascadeUpdateVisited
     (oldRow: Value[])
     (newRow: Value[])
     : Result<Database * Map<string, Value[] list> * Map<string, (Value[] * Value[]) list>, StorageError> =
-    cascadeUpdateVisitedFrom checkFks db visited changes tableKey tableKey parentColumns oldRow newRow
+    cascadeUpdateVisitedFrom checkFks db visited changes (Set.singleton tableKey) tableKey parentColumns oldRow newRow
 
-/// `cascadeUpdateVisited`'s actual body, with `rootKey` threaded through the
-/// recursion as the table `updateRows`/`upsertRowsInTable` is rewriting via
-/// their own in-progress `current`/`builder` array rather than through `db`.
-/// A cascade that loops back into `rootKey` — directly self-referencing or
-/// through any number of intermediate tables — has to be rejected the same
-/// way MySQL rejects it (1451/1048): a rewrite landing on `rootKey` here
-/// would go into the threaded `Database` copy, which the caller's own final
-/// `Map.add rootKey ...` then silently clobbers, corrupting referential
-/// integrity. `tableKey` (the *current* level) still names whose children
-/// `referencingForeignKeys` looks up; only the loop-back check compares
-/// against `rootKey`.
+/// `cascadeUpdateVisited`'s actual body, with `path` — every table on the
+/// current cascade chain, root included — threaded through the recursion.
+/// MySQL 8.4 refuses an ON UPDATE cascade that recurses back into a table
+/// already on its cascade path with 1451, whether directly self-referencing
+/// or through intermediate tables.
 and private cascadeUpdateVisitedFrom
     (checkFks: bool)
     (db: Database)
     (visited: Map<string, Value[] list>)
     (changes: Map<string, (Value[] * Value[]) list>)
-    (rootKey: string)
+    (path: Set<string>)
     (tableKey: string)
     (parentColumns: ColumnDef list)
     (oldRow: Value[])
@@ -2173,19 +2168,12 @@ and private cascadeUpdateVisitedFrom
 
                                 if matching.IsEmpty then
                                     Ok(d, visited, changes)
-                                // A cascade looping back into `rootKey` — directly
-                                // self-referencing (`childKey = tableKey = rootKey`) or through
-                                // any chain of intermediate tables — can't cascade an update:
-                                // the rewrite has to land in the same in-progress
-                                // `current`/`builder` array the statement's own writes go
-                                // through, not a separate `Database` copy this recursion
-                                // threads back — writing there would be silently discarded by
-                                // the caller's own final `Map.add`, corrupting referential
-                                // integrity and desyncing the WAL from memory. MySQL 8.4
-                                // refuses the same case outright with 1451 (oracle-verified for
-                                // both the direct self-reference and a 2-table A<->B cycle), so
-                                // this matches real behavior rather than merely avoiding the bug.
-                                elif childKey = rootKey then
+                                // A cascade looping back into a table already on the cascade
+                                // path fails 1451, matching MySQL 8.4. A loop back into the
+                                // root would also land in a `Database` copy the caller's own
+                                // final `Map.add` silently clobbers, corrupting referential
+                                // integrity and desyncing the WAL from memory.
+                                elif Set.contains childKey path then
                                     Error(ForeignKeyRestrict fk.Name)
                                 else
                                     match fk.OnUpdate |> Option.map (fun s -> s.Trim().ToUpperInvariant()) with
@@ -2214,7 +2202,7 @@ and private cascadeUpdateVisitedFrom
                                             (fun acc (oldC, newC) ->
                                                 acc
                                                 |> Result.bind (fun (d, visited, changes) ->
-                                                    cascadeUpdateVisitedFrom checkFks d visited changes rootKey childKey childTbl.Columns oldC newC))
+                                                    cascadeUpdateVisitedFrom checkFks d visited changes (Set.add childKey path) childKey childTbl.Columns oldC newC))
                                             (Ok(d', visited', changes'))
                                     | Some "SET NULL" ->
                                         match childIdxs |> List.tryFind (fun i -> not childTbl.Columns.[i].Nullable) with

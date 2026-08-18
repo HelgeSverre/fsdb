@@ -1953,7 +1953,65 @@ let tests =
                             Expect.equal (List.ofSeq aRows) [ [| VInt 1L; VInt 1L |] ] "a untouched"
                             Expect.equal (List.ofSeq bRows) [ [| VInt 1L |] ] "b untouched"
                         | other -> failtestf "expected Ok scans, got %A" other
-                    | other -> failtestf "expected ForeignKeyRestrict, got %A" other ]
+                    | other -> failtestf "expected ForeignKeyRestrict, got %A" other
+
+                testCase "a self-referencing ON UPDATE CASCADE nested below another cascade fails 1451"
+                <| fun _ ->
+                    let store = create ()
+
+                    let fkBA =
+                        { Name = "fk_b_a"
+                          Columns = [ "k" ]
+                          RefTable = "a"
+                          RefColumns = [ "id" ]
+                          OnDelete = None
+                          OnUpdate = Some "CASCADE" }
+
+                    let fkBB =
+                        { Name = "fk_b_b"
+                          Columns = [ "pk" ]
+                          RefTable = "b"
+                          RefColumns = [ "k" ]
+                          OnDelete = None
+                          OnUpdate = Some "CASCADE" }
+
+                    (match createTable store defaultDatabase "a" [ idCol ] [] [] None None with
+                     | Ok _ -> ()
+                     | Error e -> failtestf "createTable a: %A" e)
+
+                    let kCol =
+                        { (col "k" (TInt false) false) with
+                            PrimaryKey = true }
+
+                    (match createTable store defaultDatabase "b" [ kCol; col "pk" (TInt false) true ] [] [ fkBA; fkBB ] None None with
+                     | Ok _ -> ()
+                     | Error e -> failtestf "createTable b: %A" e)
+
+                    (match insertRows store defaultDatabase "a" None [ [ VInt 1L ]; [ VInt 2L ] ] with
+                     | Ok _ -> ()
+                     | Error e -> failtestf "insert a: %A" e)
+
+                    (match insertRows store defaultDatabase "b" None [ [ VInt 1L; VNull ]; [ VInt 2L; VInt 1L ] ] with
+                     | Ok _ -> ()
+                     | Error e -> failtestf "insert b: %A" e)
+
+                    let updater (_: Value[]) = Ok [| VInt 100L |]
+
+                    match updateRows store defaultDatabase "a" None (fun row -> Ok(row.[0] = VInt 1L)) updater with
+                    | Error(ForeignKeyRestrict "fk_b_b") ->
+                        match scan store defaultDatabase "a", scan store defaultDatabase "b" with
+                        | Ok(_, aRows), Ok(_, bRows) ->
+                            Expect.equal
+                                (List.ofSeq aRows |> List.sortBy (fun r -> r.[0]))
+                                [ [| VInt 1L |]; [| VInt 2L |] ]
+                                "a untouched"
+
+                            Expect.equal
+                                (List.ofSeq bRows |> List.sortBy (fun r -> r.[0]))
+                                [ [| VInt 1L; VNull |]; [| VInt 2L; VInt 1L |] ]
+                                "b untouched"
+                        | other -> failtestf "expected Ok scans, got %A" other
+                    | other -> failtestf "expected ForeignKeyRestrict fk_b_b, got %A" other ]
 
           testList
               "OnCommit notification hook"
