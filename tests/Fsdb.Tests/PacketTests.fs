@@ -128,7 +128,12 @@ let tests =
 
                   match result with
                   | Some p ->
-                      Expect.equal p.SeqId 9uy "reassembled packet keeps the FIRST fragment's seq id"
+                      // Each fragment consumes its own seq id on the wire, so
+                      // the reassembled packet must report the LAST
+                      // fragment's id — a reply computed as `p.SeqId + 1uy`
+                      // needs to continue past every fragment sent, not just
+                      // the first.
+                      Expect.equal p.SeqId 10uy "reassembled packet keeps the LAST fragment's seq id"
                       Expect.equal p.Payload.Length (maxPacketPayload + 3) "payload is the concatenation of both chunks"
                       Expect.equal p.Payload.[maxPacketPayload..] secondChunk "tail bytes come from the second chunk"
                   | None -> failtest "expected a reassembled packet"

@@ -21,7 +21,16 @@ open Fsdb.Value
 // Whitespace, comments, tokens
 // ---------------------------------------------------------------------------
 
-let private lineComment: Parser<unit, unit> = pstring "--" >>. skipManyTill anyChar (skipNewline <|> eof)
+/// MySQL only treats `--` as the start of a comment when followed by
+/// whitespace or end of input — `SELECT 1--1` is subtraction (`0`), not
+/// `1` with the rest commented out. `attempt` backtracks over the whole
+/// `--` when the lookahead fails, rather than leaving `--` consumed and
+/// turning a plain `1--1` into a hard parse error: `ws` tries this inside a
+/// `choice`, which only tries the next alternative when a branch fails
+/// *without* consuming input.
+let private lineComment: Parser<unit, unit> =
+    attempt (pstring "--" .>> followedBy (skipSatisfy Char.IsWhiteSpace <|> eof))
+    >>. skipManyTill anyChar (skipNewline <|> eof)
 
 let private blockComment: Parser<unit, unit> = pstring "/*" >>. skipManyTill anyChar (pstring "*/" >>% ())
 
@@ -243,7 +252,10 @@ let private qualifiedTableName: Parser<string, unit> =
 // Literals
 // ---------------------------------------------------------------------------
 
-let private numberFormat = NumberLiteralOptions.AllowFraction ||| NumberLiteralOptions.AllowExponent
+let private numberFormat =
+    NumberLiteralOptions.AllowFraction
+    ||| NumberLiteralOptions.AllowExponent
+    ||| NumberLiteralOptions.AllowHexadecimal
 
 /// Plain integers become `VInt`, exponent notation becomes `VDouble`, and
 /// everything else with a decimal point stays exact as `VDecimal` — an
@@ -251,10 +263,24 @@ let private numberFormat = NumberLiteralOptions.AllowFraction ||| NumberLiteralO
 /// `VDouble` (as MySQL's own DECIMAL/BIGINT overflow handling does) instead
 /// of throwing `int64`/`decimal`'s unguarded overflow exception, which would
 /// otherwise escape the parser and drop the client's connection.
+///
+/// `0x..` hex literals become `VBytes` — MySQL treats them as binary strings
+/// by default (only numeric *context*, e.g. `0x41 + 1`, coerces to a number,
+/// which fsdb doesn't model), so `0x41 = 'A'` compares equal the same way it
+/// does against a real server. Without `AllowHexadecimal` above, `0x41` used
+/// to tokenize as the number `0` followed by a stray `x41`, which MySQL's
+/// bare-identifier-next-to-an-expression rule silently turned into a column
+/// alias instead of a syntax error.
 let private numberLit: Parser<Value, unit> =
     (numberLiteral numberFormat "number" .>> ws)
     |>> fun nl ->
-        if nl.IsInteger then
+        if nl.IsHexadecimal then
+            let digits = nl.String.Substring(2)
+            let digits = if digits.Length % 2 = 1 then "0" + digits else digits
+
+            Array.init (digits.Length / 2) (fun i -> Convert.ToByte(digits.Substring(i * 2, 2), 16))
+            |> VBytes
+        elif nl.IsInteger then
             match Int64.TryParse(nl.String, NumberStyles.Integer, CultureInfo.InvariantCulture) with
             | true, i -> VInt i
             | false, _ -> VDouble(float nl.String)
@@ -415,6 +441,29 @@ let private columnType: Parser<ColumnType, unit> =
 // ---------------------------------------------------------------------------
 // Expressions
 // ---------------------------------------------------------------------------
+
+/// FParsec recurses on the real call stack with no depth check of its own —
+/// `((((...1000s deep...))))`, `NOT NOT NOT ...`, or nested subqueries/CASE
+/// would otherwise blow the stack with an uncatchable `StackOverflowException`
+/// that kills the whole process instead of a clean syntax error. `AsyncLocal`
+/// so concurrent connections parsing at the same time don't share a counter —
+/// same pattern as `placeholderCounterLocal` below. `expr` and `notExpr` are
+/// wrapped with this (see their definitions) since every parenthesized
+/// expression, subquery, `CASE`, and `NOT` chain recurses back through one of
+/// the two.
+let private exprDepth = System.Threading.AsyncLocal<int>()
+let private maxExprDepth = 150
+
+let private depthGuard (p: Parser<'a, unit>) : Parser<'a, unit> =
+    fun stream ->
+        if exprDepth.Value >= maxExprDepth then
+            (fail "expression nested too deeply") stream
+        else
+            exprDepth.Value <- exprDepth.Value + 1
+
+            let reply = p stream
+            exprDepth.Value <- exprDepth.Value - 1
+            reply
 
 // `parenExpr`, function-call arguments and `IN (...)` lists all recurse back
 // into the full expression grammar, which is itself built on top of them —
@@ -798,7 +847,7 @@ let private comparisonExpr: Parser<Expr, unit> =
 /// since `let rec` on a parser *value* (rather than a function) would
 /// evaluate the right-hand side eagerly and see itself undefined.
 let private notExpr, notExprRef = createParserForwardedToRef<Expr, unit> ()
-notExprRef.Value <- (keyword "NOT" >>. notExpr |>> Not) <|> comparisonExpr
+notExprRef.Value <- depthGuard ((keyword "NOT" >>. notExpr |>> Not) <|> comparisonExpr)
 
 let private andExpr: Parser<Expr, unit> =
     chainl1 notExpr (keyword "AND" >>% fun a b -> BinOp(And, a, b))
@@ -806,7 +855,7 @@ let private andExpr: Parser<Expr, unit> =
 let private orExpr: Parser<Expr, unit> =
     chainl1 andExpr (keyword "OR" >>% fun a b -> BinOp(Or, a, b))
 
-do exprRef.Value <- orExpr
+do exprRef.Value <- depthGuard orExpr
 
 type private ColMod =
     | MNotNull
@@ -1647,6 +1696,7 @@ statementRef.Value <-
 /// handled by `QueryHandler` before reaching this parser.
 let parse (sql: string) : Result<Statement, string> =
     placeholderCounterLocal.Value <- 0
+    exprDepth.Value <- 0
     let full = ws >>. statement .>> opt (sym ";") .>> eof
 
     // `open FParsec` brings its own `Ok`/`Error` (from `Reply`'s status) into

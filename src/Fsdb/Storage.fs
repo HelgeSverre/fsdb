@@ -415,19 +415,47 @@ let beginTransactionSnapshot (store: Store) : Store =
       StrictMode = true
       ConnectionCollation = store.ConnectionCollation
       OnCommit = None
-      PendingEvents = if store.OnCommit.IsSome then Some(ResizeArray()) else None
+      // Allocate a buffer whenever `store` itself would ever deliver an
+      // event — either it has a real `OnCommit` subscriber, or (the case
+      // that used to be missed) `store` is *itself* a transaction snapshot
+      // with its own `PendingEvents` already buffering. The latter is
+      // exactly `Executor`'s multi-table `UPDATE`/`DELETE` path: it opens a
+      // private snapshot of the *transaction's own* snapshot store to
+      // isolate one statement's writes, then commits that snapshot back via
+      // `commitTransactionEvents`. Without this, that nested snapshot's
+      // `PendingEvents` stayed `None` (its source's `OnCommit` is always
+      // `None` — only the real store has one), every event it built was
+      // silently dropped by `emit`'s no-buffer-no-subscriber branch, and
+      // `commitTransactionEvents` then had nothing to flush — the whole
+      // statement's writes reached memory but never the WAL.
+      PendingEvents = if store.OnCommit.IsSome || store.PendingEvents.IsSome then Some(ResizeArray()) else None
       TransactionGates = store.TransactionGates
       Lock = obj () }
 
-/// Flushes a committed transaction's buffered events onto the real `store`
-/// as one `TransactionCommitted`, if it buffered any — a no-op for an empty
-/// or subscriber-less snapshot. Call under `store.Lock`, after merging
-/// `snapshot`'s catalog back in (see `QueryHandler.commitSession`); there's
-/// no rollback counterpart, since discarding `snapshot` discards its buffer
-/// too.
+/// Flushes a committed transaction's buffered events onto `store`, if it
+/// buffered any — a no-op for an empty or subscriber-less snapshot. Call
+/// after merging `snapshot`'s catalog back in (see
+/// `QueryHandler.commitSession`); there's no rollback counterpart, since
+/// discarding `snapshot` discards its buffer too.
+///
+/// `store` itself being a transaction snapshot (its own `PendingEvents` is
+/// `Some` — the nested-statement case `beginTransactionSnapshot`'s doc
+/// describes) appends `snapshot`'s raw events onto `store`'s own buffer
+/// flat, rather than wrapping them in a nested `TransactionCommitted` —
+/// `Persistence.applyEvent` replays a `TransactionCommitted`'s member events
+/// one level deep, so a `TransactionCommitted [ TransactionCommitted [...] ]`
+/// would need it to recurse (or would silently drop the inner layer) for no
+/// reason: every event this transaction's real COMMIT eventually flushes to
+/// the WAL is already flat by construction, wrapped exactly once at the
+/// real top-level commit. Only when `store` is the real, live store (no
+/// `PendingEvents` of its own) does this wrap `snapshot`'s events in one
+/// `TransactionCommitted`, same as before.
 let commitTransactionEvents (store: Store) (snapshot: Store) : unit =
     match snapshot.PendingEvents with
-    | Some buffer when buffer.Count > 0 -> emit store (Some(TransactionCommitted(List.ofSeq buffer)))
+    | Some buffer when buffer.Count > 0 ->
+        match store.PendingEvents with
+        | Some targetBuffer -> targetBuffer.AddRange buffer
+        | None -> emit store (Some(TransactionCommitted(List.ofSeq buffer)))
     | _ -> ()
 
 /// `SET FOREIGN_KEY_CHECKS = 0|1` — wired from `QueryHandler`'s `SET` probe
@@ -661,6 +689,36 @@ let bumpAutoIncrementsInto (store: Store) (snapshotCatalog: Catalog) : unit =
         match store.Databases.TryGetValue dbName with
         | false, _ -> () // dropped since the snapshot was taken — nothing to bump
         | true, slot -> bumpSlot slot snapshotDb
+
+/// Pure catalog-level version of `bumpAutoIncrementsInto`'s "never roll back
+/// a burned AUTO_INCREMENT id" rule — returns `target` with every table's
+/// `NextAutoId` raised to `current`'s wherever `current` ran it further
+/// ahead (a table missing from `target` is left out, same as
+/// `bumpAutoIncrementsInto`'s "dropped since the snapshot" case). Used by
+/// `QueryHandler.rollbackToSavepoint`, which discards a transaction
+/// snapshot's catalog wholesale back to an earlier savepoint (`setCatalog`)
+/// but must still keep whatever id a statement *after* that savepoint
+/// burned — MySQL never rolls back a burned id, savepoint rollback
+/// included, same as a full `ROLLBACK` (see `bumpAutoIncrementsInto`'s doc).
+let bumpAutoIncrements (current: Catalog) (target: Catalog) : Catalog =
+    current
+    |> Map.fold
+        (fun acc dbName (currentDb: Database) ->
+            match Map.tryFind dbName acc with
+            | None -> acc
+            | Some targetDb ->
+                let mergedDb =
+                    currentDb
+                    |> Map.fold
+                        (fun tacc tableName (currentTable: Table) ->
+                            match Map.tryFind tableName tacc with
+                            | Some(targetTable: Table) when currentTable.NextAutoId > targetTable.NextAutoId ->
+                                Map.add tableName { targetTable with NextAutoId = currentTable.NextAutoId } tacc
+                            | _ -> tacc)
+                        targetDb
+
+                Map.add dbName mergedDb acc)
+        target
 
 let private tryGetTable (db: Database) (tableName: string) : Result<Table, StorageError> =
     match Map.tryFind (normalizeTableName tableName) db with
@@ -1752,13 +1810,63 @@ let insertRowsIgnore
         Ok(lastId, generatedId, affected)
     | Error e -> Error e
 
+/// Every `(childTableKey, fk)` in `db` whose `fk.RefTable` is `parentKey` —
+/// every foreign key elsewhere in the database that a delete from
+/// `parentKey` needs to check. Same-database only: `Ast.ForeignKeyDef`
+/// carries no database qualifier, so a cross-database FK (rare even in
+/// MySQL, and not something Laravel migrations emit) isn't found here.
+let private referencingForeignKeys (db: Database) (parentKey: string) : (string * ForeignKeyDef) list =
+    db
+    |> Map.toList
+    |> List.collect (fun (childKey, childTbl) ->
+        childTbl.ForeignKeys
+        |> List.filter (fun fk -> normalizeTableName fk.RefTable = parentKey)
+        |> List.map (fun fk -> childKey, fk))
+
+/// Whether rewriting `tableKey`'s `oldRow` into `newRow` would orphan a
+/// child row elsewhere in `db` — `updateRows`'s parent-side counterpart to
+/// `checkFkParents`'s child-side check, using the same `referencingForeignKeys`
+/// `cascadeDelete` uses for `DELETE`. Only relevant when the update actually
+/// changes a column some other table's FK references at all: most `UPDATE`s
+/// never touch the referenced key, so this is a no-op the moment `oldKey =
+/// newKey`. Always RESTRICT (error 1451) rather than dispatching on the FK's
+/// `OnUpdate` clause — this engine doesn't move/blank child rows on UPDATE
+/// (unlike `cascadeDelete`'s DELETE-side CASCADE/SET NULL), so refusing the
+/// update is the safe default even for a `ON UPDATE CASCADE` FK; upgrade to
+/// real cascading UPDATE if a migration ever depends on it. Also
+/// `upsertRows`' parent-side counterpart, for the same reason.
+let private checkNotOrphaning (db: Database) (tableKey: string) (parentColumns: ColumnDef list) (oldRow: Value[]) (newRow: Value[]) : Result<unit, StorageError> =
+    let checkOne (childKey: string, fk: ForeignKeyDef) =
+        match fk.RefColumns |> traverse (resolveColumn parentColumns) with
+        | Error _ -> Ok() // stale FK metadata — see `checkFkParents`'s note.
+        | Ok refIdxs ->
+            let oldKey = refIdxs |> List.map (fun i -> oldRow.[i])
+            let newKey = refIdxs |> List.map (fun i -> newRow.[i])
+
+            if oldKey = newKey || oldKey |> List.exists ((=) VNull) then
+                Ok()
+            else
+                match Map.tryFind childKey db with
+                | None -> Ok()
+                | Some childTbl ->
+                    match fk.Columns |> traverse (resolveColumn childTbl.Columns) with
+                    | Error _ -> Ok()
+                    | Ok childIdxs ->
+                        let stillReferenced =
+                            childTbl.RowsArray
+                            |> Seq.exists (fun row -> List.forall2 (fun i v -> compare row.[i] v = 0) childIdxs oldKey)
+
+                        if stillReferenced then Error(ForeignKeyRestrict fk.Name) else Ok()
+
+    referencingForeignKeys db tableKey |> traverse checkOne |> Result.map ignore
+
 /// `INSERT ... ON DUPLICATE KEY UPDATE`: like `insertRows`, but a candidate
 /// row that collides with an existing row on any unique key or the primary
 /// key is applied to `applyUpdate existingRow candidateRow` instead of being
 /// appended. Collision detection goes through the same `UniqueIndex`
 /// (collation-aware via `encodeConstraintKey`) as plain `INSERT`'s unique
 /// check.
-let upsertRows
+let rec upsertRows
     (store: Store)
     (dbName: string)
     (tableName: string)
@@ -1767,8 +1875,43 @@ let upsertRows
     (computeGenerated: Value[] -> Result<Value[], StorageError>)
     (applyUpdate: Value[] -> Value[] -> Result<Value[], StorageError>)
     : Result<int64 * int64 option * int, StorageError> =
+        let key = normalizeTableName tableName
+
         let result =
-            withTable store dbName tableName (fun table ->
+            withDatabase store dbName (fun db ->
+                tryGetTable db tableName
+                |> Result.bind (fun table -> upsertRowsInTable store db key table columns rowsIn computeGenerated applyUpdate)
+                |> Result.map (fun (table', result) -> Map.add key table' db, result))
+
+        match result with
+        | Ok(lastId, generatedId, affected, inserted, updated) ->
+            if not inserted.IsEmpty then
+                emit store (Some(RowsInserted(dbName, tableName, inserted)))
+
+            if not updated.IsEmpty then
+                emit store (Some(RowsUpdated(dbName, tableName, updated)))
+
+            Ok(lastId, generatedId, affected)
+        | Error e -> Error e
+
+/// `upsertRows`'s per-table body, pulled out only so it can take `db` (needed
+/// for `checkFkParents`/`checkNotOrphaning`, same FK enforcement
+/// `insertRows`/`updateRows` already apply — this path previously did
+/// neither, so `ON DUPLICATE KEY UPDATE` could insert an orphan child row or
+/// rewrite a parent's key out from under an existing child) alongside
+/// `table`, which `withTable` alone doesn't expose.
+and private upsertRowsInTable
+    (store: Store)
+    (db: Database)
+    (key: string)
+    (table: Table)
+    (columns: string list option)
+    (rowsIn: Value list list)
+    (computeGenerated: Value[] -> Result<Value[], StorageError>)
+    (applyUpdate: Value[] -> Value[] -> Result<Value[], StorageError>)
+    : Result<Table * (int64 * int64 option * int * Value[] list * (Value[] * Value[]) list), StorageError> =
+                let checkFks = store.ForeignKeyChecks
+
                 let indices =
                     match columns with
                     | None -> Ok [ 0 .. table.Columns.Length - 1 ]
@@ -1836,41 +1979,62 @@ let upsertRows
                                         |> Result.bind (function
                                             | candidate, Some(pos, existing) ->
                                                 applyUpdate existing candidate
-                                                |> Result.map (fun applied ->
-                                                    if pos < current.Length then
-                                                        current.[pos] <- applied
-                                                    else
-                                                        newRows.[pos - current.Length] <- applied
+                                                |> Result.bind (fun applied ->
+                                                    // Same FK enforcement `updateRows` applies:
+                                                    // `applied`'s own foreign keys need a live
+                                                    // parent (child-side), and if this rewrite
+                                                    // changed a column some *other* table's FK
+                                                    // references, it can't orphan an existing
+                                                    // child (parent-side) — plain `INSERT ...
+                                                    // ON DUPLICATE KEY UPDATE` skipped both
+                                                    // checks entirely before this.
+                                                    (if checkFks then
+                                                         checkFkParents db table.Columns table.ForeignKeys applied
+                                                         |> Result.bind (fun () -> checkNotOrphaning db key table.Columns existing applied)
+                                                     else
+                                                         Ok())
+                                                    |> Result.map (fun () ->
+                                                        if pos < current.Length then
+                                                            current.[pos] <- applied
+                                                        else
+                                                            newRows.[pos - current.Length] <- applied
 
-                                                    nextAutoId',
-                                                    firstAuto,
-                                                    lastExplicit,
-                                                    affected + 1,
-                                                    inserted,
-                                                    (existing, applied) :: updated,
-                                                    reindexRow table.Columns uniqueGroups (Some existing) (Some(pos, applied)) index)
+                                                        nextAutoId',
+                                                        firstAuto,
+                                                        lastExplicit,
+                                                        affected + 1,
+                                                        inserted,
+                                                        (existing, applied) :: updated,
+                                                        reindexRow table.Columns uniqueGroups (Some existing) (Some(pos, applied)) index))
                                             | candidate, None ->
-                                                // Same "first generated, else last explicit"
-                                                // `last_insert_id` rule `insertCore` uses —
-                                                // see its doc.
-                                                let firstAuto', lastExplicit' =
-                                                    match assigned with
-                                                    | Some(true, v) -> Option.orElse (Some v) firstAuto, lastExplicit
-                                                    | Some(false, v) -> firstAuto, Some v
-                                                    | None -> firstAuto, lastExplicit
+                                                // Same FK-parent check `insertCore` applies to
+                                                // a plain `INSERT`'s new rows — this candidate
+                                                // didn't collide with anything, so it's really
+                                                // an insert.
+                                                (if checkFks then
+                                                     checkFkParents db table.Columns table.ForeignKeys candidate
+                                                 else
+                                                     Ok())
+                                                |> Result.map (fun () ->
+                                                    // Same "first generated, else last explicit"
+                                                    // `last_insert_id` rule `insertCore` uses —
+                                                    // see its doc.
+                                                    let firstAuto', lastExplicit' =
+                                                        match assigned with
+                                                        | Some(true, v) -> Option.orElse (Some v) firstAuto, lastExplicit
+                                                        | Some(false, v) -> firstAuto, Some v
+                                                        | None -> firstAuto, lastExplicit
 
-                                                let position = current.Length + newRows.Count
-                                                newRows.Add candidate
+                                                    let position = current.Length + newRows.Count
+                                                    newRows.Add candidate
 
-                                                Ok(
                                                     nextAutoId',
                                                     firstAuto',
                                                     lastExplicit',
                                                     affected + 1,
                                                     candidate :: inserted,
                                                     updated,
-                                                    reindexRow table.Columns uniqueGroups None (Some(position, candidate)) index
-                                                ))))
+                                                    reindexRow table.Columns uniqueGroups None (Some(position, candidate)) index))))
 
                     rowsIn
                     |> List.fold step (Ok(table.NextAutoId, None, None, 0, [], [], table.UniqueIndex))
@@ -1885,72 +2049,12 @@ let upsertRows
                                 builder.MoveToImmutable()
 
                         { table with RowsArray = finalRows; NextAutoId = nextAutoId'; UniqueIndex = index },
-                        (Option.defaultValue 0L (Option.orElse lastExplicit firstAuto), firstAuto, affected, List.rev inserted, List.rev updated))))
-
-        match result with
-        | Ok(lastId, generatedId, affected, inserted, updated) ->
-            if not inserted.IsEmpty then
-                emit store (Some(RowsInserted(dbName, tableName, inserted)))
-
-            if not updated.IsEmpty then
-                emit store (Some(RowsUpdated(dbName, tableName, updated)))
-
-            Ok(lastId, generatedId, affected)
-        | Error e -> Error e
+                        (Option.defaultValue 0L (Option.orElse lastExplicit firstAuto), firstAuto, affected, List.rev inserted, List.rev updated)))
 
 let private coerceRow (strict: bool) (columns: ColumnDef list) (row: Value[]) : Result<Value[], StorageError> =
     List.zip columns (Array.toList row)
     |> traverse (fun (col, v) -> coerceAndCheck strict col v)
     |> Result.map Array.ofList
-
-/// Every `(childTableKey, fk)` in `db` whose `fk.RefTable` is `parentKey` —
-/// every foreign key elsewhere in the database that a delete from
-/// `parentKey` needs to check. Same-database only: `Ast.ForeignKeyDef`
-/// carries no database qualifier, so a cross-database FK (rare even in
-/// MySQL, and not something Laravel migrations emit) isn't found here.
-let private referencingForeignKeys (db: Database) (parentKey: string) : (string * ForeignKeyDef) list =
-    db
-    |> Map.toList
-    |> List.collect (fun (childKey, childTbl) ->
-        childTbl.ForeignKeys
-        |> List.filter (fun fk -> normalizeTableName fk.RefTable = parentKey)
-        |> List.map (fun fk -> childKey, fk))
-
-/// Whether rewriting `tableKey`'s `oldRow` into `newRow` would orphan a
-/// child row elsewhere in `db` — `updateRows`'s parent-side counterpart to
-/// `checkFkParents`'s child-side check, using the same `referencingForeignKeys`
-/// `cascadeDelete` uses for `DELETE`. Only relevant when the update actually
-/// changes a column some other table's FK references at all: most `UPDATE`s
-/// never touch the referenced key, so this is a no-op the moment `oldKey =
-/// newKey`. Always RESTRICT (error 1451) rather than dispatching on the FK's
-/// `OnUpdate` clause — this engine doesn't move/blank child rows on UPDATE
-/// (unlike `cascadeDelete`'s DELETE-side CASCADE/SET NULL), so refusing the
-/// update is the safe default even for a `ON UPDATE CASCADE` FK; upgrade to
-/// real cascading UPDATE if a migration ever depends on it.
-let private checkNotOrphaning (db: Database) (tableKey: string) (parentColumns: ColumnDef list) (oldRow: Value[]) (newRow: Value[]) : Result<unit, StorageError> =
-    let checkOne (childKey: string, fk: ForeignKeyDef) =
-        match fk.RefColumns |> traverse (resolveColumn parentColumns) with
-        | Error _ -> Ok() // stale FK metadata — see `checkFkParents`'s note.
-        | Ok refIdxs ->
-            let oldKey = refIdxs |> List.map (fun i -> oldRow.[i])
-            let newKey = refIdxs |> List.map (fun i -> newRow.[i])
-
-            if oldKey = newKey || oldKey |> List.exists ((=) VNull) then
-                Ok()
-            else
-                match Map.tryFind childKey db with
-                | None -> Ok()
-                | Some childTbl ->
-                    match fk.Columns |> traverse (resolveColumn childTbl.Columns) with
-                    | Error _ -> Ok()
-                    | Ok childIdxs ->
-                        let stillReferenced =
-                            childTbl.RowsArray
-                            |> Seq.exists (fun row -> List.forall2 (fun i v -> compare row.[i] v = 0) childIdxs oldKey)
-
-                        if stillReferenced then Error(ForeignKeyRestrict fk.Name) else Ok()
-
-    referencingForeignKeys db tableKey |> traverse checkOne |> Result.map ignore
 
 /// Deletes `toDelete` (rows already known to belong to `tableKey`, e.g. from
 /// `deleteRows`'s WHERE match) from `db`, applying every other table's
@@ -1981,9 +2085,10 @@ let rec private cascadeDeleteVisited
     (checkFks: bool)
     (db: Database)
     (visited: Map<string, Value[] list>)
+    (blanked: Map<string, (Value[] * Value[]) list>)
     (tableKey: string)
     (toDelete: Value[] list)
-    : Result<Database * Map<string, Value[] list>, StorageError> =
+    : Result<Database * Map<string, Value[] list> * Map<string, (Value[] * Value[]) list>, StorageError> =
     let alreadyVisited = visited |> Map.tryFind tableKey |> Option.defaultValue []
     let toDelete = toDelete |> List.filter (fun row -> not (alreadyVisited |> List.exists ((=) row)))
 
@@ -2011,23 +2116,23 @@ let rec private cascadeDeleteVisited
         Map.add tableKey (reindexTable { t with RowsArray = List.rev kept |> ImmutableArray.CreateRange }) d
 
     if toDelete.IsEmpty then
-        Ok(db, visited)
+        Ok(db, visited, blanked)
     else
         let visited = visited |> Map.add tableKey (alreadyVisited @ toDelete)
 
         if not checkFks then
-            Ok(removeFrom db, visited)
+            Ok(removeFrom db, visited, blanked)
         else
             let table = Map.find tableKey db
 
             let applyChild acc (childKey: string, fk: ForeignKeyDef) =
                 acc
-                |> Result.bind (fun (d, visited) ->
+                |> Result.bind (fun (d, visited, blanked) ->
                     let childTbl = Map.find childKey d
 
                     match fk.Columns |> traverse (resolveColumn childTbl.Columns), fk.RefColumns |> traverse (resolveColumn table.Columns) with
                     | Error _, _
-                    | _, Error _ -> Ok(d, visited) // stale FK metadata — see `checkFkParents`'s note.
+                    | _, Error _ -> Ok(d, visited, blanked) // stale FK metadata — see `checkFkParents`'s note.
                     | Ok childIdxs, Ok refIdxs ->
                         let parentKeys = toDelete |> List.map (fun row -> refIdxs |> List.map (fun i -> row.[i]))
 
@@ -2040,10 +2145,10 @@ let rec private cascadeDeleteVisited
                         let matching = childTbl.RowsArray |> Seq.filter isChild |> List.ofSeq
 
                         if matching.IsEmpty then
-                            Ok(d, visited)
+                            Ok(d, visited, blanked)
                         else
                             match fk.OnDelete |> Option.map (fun s -> s.Trim().ToUpperInvariant()) with
-                            | Some "CASCADE" -> cascadeDeleteVisited checkFks d visited childKey matching
+                            | Some "CASCADE" -> cascadeDeleteVisited checkFks d visited blanked childKey matching
                             | Some "SET NULL" ->
                                 // A `NOT NULL` FK column can't actually be
                                 // blanked — real MySQL refuses to create
@@ -2061,36 +2166,49 @@ let rec private cascadeDeleteVisited
                                     // Blanking rewrites a row's values in place — unlike a
                                     // delete, every row keeps its position, so the index can
                                     // still be rekeyed incrementally instead of a full rebuild.
-                                    let blankedRows, index =
+                                    // `changes` pairs each blanked row's before/after values —
+                                    // the WAL needs the exact same `RowsUpdated` shape a plain
+                                    // `UPDATE` reports, or replay resurrects the pre-blank FK
+                                    // value the next time the WAL is replayed (only the
+                                    // parent's own `RowsDeleted` used to reach the WAL here).
+                                    let blankedRows, changes, index =
                                         childTbl.RowsArray
                                         |> Seq.indexed
                                         |> Seq.fold
-                                            (fun (rows, index) (pos, row) ->
+                                            (fun (rows, changes, index) (pos, row) ->
                                                 if isChild row then
                                                     let row' = Array.copy row
                                                     childIdxs |> List.iter (fun i -> row'.[i] <- VNull)
-                                                    row' :: rows, reindexRow childTbl.Columns childGroups (Some row) (Some(pos, row')) index
+                                                    row' :: rows, (row, row') :: changes, reindexRow childTbl.Columns childGroups (Some row) (Some(pos, row')) index
                                                 else
-                                                    row :: rows, index)
-                                            ([], childTbl.UniqueIndex)
+                                                    row :: rows, changes, index)
+                                            ([], [], childTbl.UniqueIndex)
 
-                                    Ok(Map.add childKey { childTbl with RowsArray = List.rev blankedRows |> ImmutableArray.CreateRange; UniqueIndex = index } d, visited)
+                                    let blanked =
+                                        blanked
+                                        |> Map.add childKey ((blanked |> Map.tryFind childKey |> Option.defaultValue []) @ List.rev changes)
+
+                                    Ok(Map.add childKey { childTbl with RowsArray = List.rev blankedRows |> ImmutableArray.CreateRange; UniqueIndex = index } d, visited, blanked)
                             | _ -> Error(ForeignKeyRestrict fk.Name))
 
             referencingForeignKeys db tableKey
-            |> List.fold applyChild (Ok(db, visited))
-            |> Result.map (fun (d, visited) -> removeFrom d, visited)
+            |> List.fold applyChild (Ok(db, visited, blanked))
+            |> Result.map (fun (d, visited, blanked) -> removeFrom d, visited, blanked)
 
-/// As `cascadeDeleteVisited`, seeded with an empty `visited` — its second
-/// return value is every row actually removed, by table key, including
-/// `tableKey` itself and every table a `CASCADE` reached, for `deleteRows`
-/// to report as `RowsDeleted` events. ponytail: `ON DELETE SET NULL`
-/// blanks child rows in place rather than deleting them, so those changes
-/// aren't in `visited` and don't get their own `RowsUpdated` event yet —
-/// add that (thread a similar accumulator through the `"SET NULL"` branch
-/// above) once a migration's FK actually uses it.
-let private cascadeDelete (checkFks: bool) (db: Database) (tableKey: string) (toDelete: Value[] list) : Result<Database * Map<string, Value[] list>, StorageError> =
-    cascadeDeleteVisited checkFks db Map.empty tableKey toDelete
+/// As `cascadeDeleteVisited`, seeded with empty `visited`/`blanked` — its
+/// second return value is every row actually removed, by table key,
+/// including `tableKey` itself and every table a `CASCADE` reached, for
+/// `deleteRows` to report as `RowsDeleted` events; its third is every
+/// `ON DELETE SET NULL` blanked row's before/after values, by table key, for
+/// `deleteRows` to report as `RowsUpdated` events the same way a plain
+/// `UPDATE` would.
+let private cascadeDelete
+    (checkFks: bool)
+    (db: Database)
+    (tableKey: string)
+    (toDelete: Value[] list)
+    : Result<Database * Map<string, Value[] list> * Map<string, (Value[] * Value[]) list>, StorageError> =
+    cascadeDeleteVisited checkFks db Map.empty Map.empty tableKey toDelete
 
 /// Deletes every row matching `predicate`. Returns the number of rows
 /// removed. `predicate` returns a `Result` rather than a plain `bool` so a
@@ -2127,15 +2245,21 @@ let deleteRows
                     let toDelete = flagged |> List.filter fst |> List.map snd
 
                     cascadeDelete store.ForeignKeyChecks db key toDelete
-                    |> Result.map (fun (db', removed) -> db', (toDelete.Length, db, removed)))))
+                    |> Result.map (fun (db', removed, blanked) -> db', (toDelete.Length, db, removed, blanked)))))
 
     match result with
-    | Ok(affected, db, removed) ->
+    | Ok(affected, db, removed, blanked) ->
+        let originalNameOf tableKey = db |> Map.tryFind tableKey |> Option.map (fun t -> t.OriginalName) |> Option.defaultValue tableKey
+
         removed
-        |> Map.iter (fun tableKey rows ->
-            if not rows.IsEmpty then
-                let originalName = db |> Map.tryFind tableKey |> Option.map (fun t -> t.OriginalName) |> Option.defaultValue tableKey
-                emit store (Some(RowsDeleted(dbName, originalName, rows))))
+        |> Map.iter (fun tableKey rows -> if not rows.IsEmpty then emit store (Some(RowsDeleted(dbName, originalNameOf tableKey, rows))))
+
+        // `ON DELETE SET NULL`'s blanked child rows — same `RowsUpdated`
+        // shape a plain `UPDATE` reports, so replay rewrites them the same
+        // way instead of a WAL replay resurrecting the pre-blank FK value
+        // (see `cascadeDeleteVisited`'s doc).
+        blanked
+        |> Map.iter (fun tableKey changes -> if not changes.IsEmpty then emit store (Some(RowsUpdated(dbName, originalNameOf tableKey, changes))))
 
         Ok affected
     | Error e -> Error e
@@ -2196,43 +2320,67 @@ let updateRows
                     let step acc (rowPos, row) =
                         acc
                         |> Result.bind (fun (changesRev: (Value[] * Value[]) list, index: Map<string, Map<string, int>>) ->
-                            predicate row
-                            |> Result.bind (fun keep ->
-                                if not keep then
-                                    Ok(changesRev, index)
+                            // `rowPos` may have been captured by a lock-free
+                            // point lookup outside any lock
+                            // (`tryUniqueLookup`, via `Executor.tryPointLookup`)
+                            // — a concurrent write since then (a DELETE
+                            // compacting an earlier row, say) can have shifted
+                            // `row` to a different slot, or removed it
+                            // entirely. Re-locate it by reference identity
+                            // under this call's lock before writing anything
+                            // at `rowPos`: still there, the fast path stands;
+                            // moved, a full-array identity scan finds where;
+                            // gone, there's nothing left to update — the same
+                            // outcome `predicate` returning false for a row it
+                            // no longer sees would give, rather than silently
+                            // clobbering whatever unrelated row now occupies
+                            // that slot.
+                            let rowPos =
+                                if rowPos < builder.Count && obj.ReferenceEquals(builder.[rowPos], row) then
+                                    Some rowPos
                                 else
-                                    updater row
-                                    |> Result.bind (coerceRow store.StrictMode table.Columns)
-                                    |> Result.bind (fun newRow ->
-                                        // A group's key only collides against
-                                        // some *other* row still holding it —
-                                        // `row`'s own position (about to be
-                                        // rekeyed below) doesn't count.
-                                        let collision =
-                                            uniqueGroups
-                                            |> List.tryPick (fun (name, idxs) ->
-                                                match encodeConstraintKey table.Columns idxs newRow with
-                                                | Some k ->
-                                                    match Map.tryFind k (Map.find name index) with
-                                                    | Some pos when pos <> rowPos ->
-                                                        let value = idxs |> List.map (fun i -> newRow.[i] |> toText |> Option.defaultValue "NULL") |> String.concat "-"
-                                                        Some(DuplicateKey(name, value))
-                                                    | _ -> None
-                                                | None -> None)
+                                    seq { 0 .. builder.Count - 1 } |> Seq.tryFind (fun i -> obj.ReferenceEquals(builder.[i], row))
 
-                                        match collision with
-                                        | Some e -> Error e
-                                        | None ->
-                                            (if checkFks then
-                                                 checkFkParents db table.Columns table.ForeignKeys newRow
-                                                 |> Result.bind (fun () -> checkNotOrphaning db key table.Columns row newRow)
-                                                 |> Result.map (fun () -> newRow)
-                                             else
-                                                 Ok newRow)
-                                            |> Result.map (fun newRow -> newRow, reindexRow table.Columns uniqueGroups (Some row) (Some(rowPos, newRow)) index))
-                                    |> Result.map (fun (newRow, index') ->
-                                        builder.[rowPos] <- newRow
-                                        (if newRow <> row then (row, newRow) :: changesRev else changesRev), index')))
+                            match rowPos with
+                            | None -> Ok(changesRev, index)
+                            | Some rowPos ->
+                                predicate row
+                                |> Result.bind (fun keep ->
+                                    if not keep then
+                                        Ok(changesRev, index)
+                                    else
+                                        updater row
+                                        |> Result.bind (coerceRow store.StrictMode table.Columns)
+                                        |> Result.bind (fun newRow ->
+                                            // A group's key only collides against
+                                            // some *other* row still holding it —
+                                            // `row`'s own position (about to be
+                                            // rekeyed below) doesn't count.
+                                            let collision =
+                                                uniqueGroups
+                                                |> List.tryPick (fun (name, idxs) ->
+                                                    match encodeConstraintKey table.Columns idxs newRow with
+                                                    | Some k ->
+                                                        match Map.tryFind k (Map.find name index) with
+                                                        | Some pos when pos <> rowPos ->
+                                                            let value = idxs |> List.map (fun i -> newRow.[i] |> toText |> Option.defaultValue "NULL") |> String.concat "-"
+                                                            Some(DuplicateKey(name, value))
+                                                        | _ -> None
+                                                    | None -> None)
+
+                                            match collision with
+                                            | Some e -> Error e
+                                            | None ->
+                                                (if checkFks then
+                                                     checkFkParents db table.Columns table.ForeignKeys newRow
+                                                     |> Result.bind (fun () -> checkNotOrphaning db key table.Columns row newRow)
+                                                     |> Result.map (fun () -> newRow)
+                                                 else
+                                                     Ok newRow)
+                                                |> Result.map (fun newRow -> newRow, reindexRow table.Columns uniqueGroups (Some row) (Some(rowPos, newRow)) index))
+                                        |> Result.map (fun (newRow, index') ->
+                                            builder.[rowPos] <- newRow
+                                            (if newRow <> row then (row, newRow) :: changesRev else changesRev), index')))
 
                     candidates
                     |> Option.defaultWith (fun () -> table.RowsArray |> Seq.indexed |> List.ofSeq)

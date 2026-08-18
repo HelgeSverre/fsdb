@@ -32,9 +32,19 @@ type private Command =
     | StmtSendLongData of payload: byte[]
     | StmtClose of stmtId: int
     | StmtReset of stmtId: int
+    | ResetConnection
     | Unsupported of code: byte
+    /// A command byte this server recognizes, but whose payload was too
+    /// short/malformed to decode (e.g. a truncated COM_STMT_CLOSE with no
+    /// 4-byte statement id). Answered with an ERR rather than let the
+    /// `Reader`/`Encoding` exception escape the command loop and drop the
+    /// connection.
+    | Malformed of code: byte
 
-/// None means a malformed (empty) command packet — treat as disconnect.
+/// None means a completely empty command packet — treat as disconnect (real
+/// clients never send one). A non-empty payload always decodes to `Some`,
+/// falling back to `Malformed` if the command byte's own payload is too
+/// short to parse — see that case's doc.
 let private parseCommand (payload: byte[]) : Command option =
     if payload.Length = 0 then
         None
@@ -42,20 +52,24 @@ let private parseCommand (payload: byte[]) : Command option =
         let rest () = Encoding.UTF8.GetString(payload, 1, payload.Length - 1)
         let restBytes () = payload.[1..]
 
-        Some(
-            match payload.[0] with
-            | 0x01uy -> Quit
-            | 0x02uy -> InitDb(rest ())
-            | 0x03uy -> Query(rest ())
-            | 0x04uy -> FieldList(Reader(restBytes ()).ReadNullTerminatedString())
-            | 0x0euy -> Ping
-            | 0x16uy -> StmtPrepare(rest ())
-            | 0x17uy -> StmtExecute(restBytes ())
-            | 0x18uy -> StmtSendLongData(restBytes ())
-            | 0x19uy -> StmtClose(Reader(restBytes ()).ReadInt32LE())
-            | 0x1auy -> StmtReset(Reader(restBytes ()).ReadInt32LE())
-            | b -> Unsupported b
-        )
+        try
+            Some(
+                match payload.[0] with
+                | 0x01uy -> Quit
+                | 0x02uy -> InitDb(rest ())
+                | 0x03uy -> Query(rest ())
+                | 0x04uy -> FieldList(Reader(restBytes ()).ReadNullTerminatedString())
+                | 0x0euy -> Ping
+                | 0x16uy -> StmtPrepare(rest ())
+                | 0x17uy -> StmtExecute(restBytes ())
+                | 0x18uy -> StmtSendLongData(restBytes ())
+                | 0x19uy -> StmtClose(Reader(restBytes ()).ReadInt32LE())
+                | 0x1auy -> StmtReset(Reader(restBytes ()).ReadInt32LE())
+                | 0x1fuy -> ResetConnection
+                | b -> Unsupported b
+            )
+        with _ ->
+            Some(Malformed payload.[0])
 
 let private randomAuthPluginData () : byte[] =
     let bytes = Array.zeroCreate<byte> 20
@@ -157,16 +171,28 @@ let private sendResult
 
             for row in rows do
                 let payload = rowEncoder types row
-                // 4-byte packet header (3-byte length + seq id) written
-                // straight into the batch buffer — rows never approach the
-                // 16 MiB length ceiling, so no multi-packet split here, and
-                // inlining skips `frame`'s intermediate `byte[]` per row.
-                buf.Add(byte (payload.Length &&& 0xff))
-                buf.Add(byte ((payload.Length >>> 8) &&& 0xff))
-                buf.Add(byte ((payload.Length >>> 16) &&& 0xff))
-                buf.Add seqId
-                buf.AddRange payload
-                seqId <- seqId + 1uy
+
+                if payload.Length < maxPacketPayload then
+                    // 4-byte packet header (3-byte length + seq id) written
+                    // straight into the batch buffer — the common case, a
+                    // row safely under the 16 MiB single-packet ceiling, so
+                    // inlining skips `frame`'s intermediate `byte[]` per row.
+                    buf.Add(byte (payload.Length &&& 0xff))
+                    buf.Add(byte ((payload.Length >>> 8) &&& 0xff))
+                    buf.Add(byte ((payload.Length >>> 16) &&& 0xff))
+                    buf.Add seqId
+                    buf.AddRange payload
+                    seqId <- seqId + 1uy
+                else
+                    // A row >= 16 MiB (an uncapped REPEAT, a large BLOB/TEXT
+                    // selected back, ...) can't fit the inlined 3-byte
+                    // length header — that silently truncated the length
+                    // mod 2^24 and desynced the connection forever. Flush
+                    // whatever's batched so far to keep ordering, then route
+                    // this one row through the real multi-packet framing.
+                    do! flush ()
+                    let! nextSeqId = writePacketAsync stream { SeqId = seqId; Payload = payload }
+                    seqId <- nextSeqId
 
                 if buf.Count >= (1 <<< 16) then
                     do! flush ()
@@ -238,6 +264,53 @@ let private isSocketDead (client: TcpClient) : bool =
 
 let private disconnectPollIntervalMs = 50
 
+/// Idle timeout for waiting on the *next* command packet — a half-open peer
+/// that opens a connection and sends nothing (or only a partial 4-byte
+/// packet header) would otherwise pin a thread-pool task and a socket
+/// forever. `Socket.ReceiveTimeout` doesn't help here: it only bounds the
+/// synchronous `Read()`, and this server exclusively awaits `ReadAsync` —
+/// which .NET does not honor it for, and which F#'s own cooperative
+/// cancellation (including `Async.StartChild`'s timeout) can't preempt
+/// either, since a `Task`-backed await only resumes when that task actually
+/// completes. Only bounds time spent waiting to *start* reading a packet,
+/// not time spent running a long query in between.
+let private socketIdleTimeoutMs = 5 * 60 * 1000
+
+/// `readPacketAsync`, but abandoned if no complete packet arrives within
+/// `timeoutMs` — see `socketIdleTimeoutMs`'s doc for why this races the
+/// read against `Task.Delay` instead of a cancellation token. When the
+/// timer wins, the stuck read has to be forced to unblock: closing
+/// `client`'s socket faults the pending `ReadAsync` with an exception,
+/// which is what actually reaps the connection (this function then reports
+/// that as `None`, same as any other clean-disconnect path — the caller
+/// already treats `None` as "stop the command loop"). Not private: the
+/// timeout itself is exercised directly by the test suite with a short
+/// `timeoutMs` rather than waiting out the real 5-minute production value.
+let readPacketWithTimeoutMs (timeoutMs: int) (client: TcpClient) (stream: IO.Stream) : Async<Packet option> =
+    async {
+        let readTask = Async.StartAsTask(readPacketAsync stream)
+
+        let! winner =
+            Threading.Tasks.Task.WhenAny(readTask :> Threading.Tasks.Task, Threading.Tasks.Task.Delay timeoutMs)
+            |> Async.AwaitTask
+
+        if obj.ReferenceEquals(winner, readTask) then
+            return! Async.AwaitTask readTask
+        else
+            client.Close()
+            return None
+    }
+
+let private readPacketWithTimeout (client: TcpClient) (stream: IO.Stream) : Async<Packet option> =
+    readPacketWithTimeoutMs socketIdleTimeoutMs client stream
+
+/// Ceiling on concurrently handled connections — past this, `serve` stops
+/// calling `AcceptTcpClientAsync` until a slot frees, so excess connection
+/// attempts queue at the OS socket backlog (or get refused) instead of each
+/// one costing this process a thread-pool task and a 16 MiB read buffer's
+/// worth of memory pressure.
+let private maxConcurrentConnections = 500
+
 /// Polls `client`'s socket while a query runs, cancelling `queryCts` the
 /// moment the peer is gone — the only way to notice a disconnect while
 /// `QueryHandler.handle` is busy inside a synchronous row fold with nothing
@@ -308,7 +381,7 @@ let private handleConnection
                 writePacketAsync stream { SeqId = 0uy; Payload = buildHandshakeV10 connectionId authData }
                 |> Async.Ignore
 
-            match! readPacketAsync stream with
+            match! readPacketWithTimeout client stream with
             | None -> ()
             | Some handshakeResp ->
                 let resp = parseHandshakeResponse handshakeResp.Payload
@@ -353,7 +426,7 @@ let private handleConnection
                     async {
                         activeSession <- Some session
 
-                        match! readPacketAsync stream with
+                        match! readPacketWithTimeout client stream with
                         | None -> ()
                         | Some cmdPacket ->
                             let seqId = cmdPacket.SeqId + 1uy
@@ -524,7 +597,12 @@ let private handleConnection
                                                     types
                                                     |> List.mapi (fun i (typeId, unsigned) ->
                                                         match Map.tryFind (stmtId, i) session.LongData with
-                                                        | Some bytes -> VString(Encoding.UTF8.GetString bytes)
+                                                        // Binary/blob params keep the raw bytes a
+                                                        // COM_STMT_SEND_LONG_DATA sender streamed in —
+                                                        // force-decoding them as UTF-8 corrupts any byte
+                                                        // sequence that isn't valid UTF-8 (an image, a
+                                                        // compressed column, ...). Only text types decode.
+                                                        | Some bytes -> if typeId = TypeBlob then VBytes bytes else VString(Encoding.UTF8.GetString bytes)
                                                         | None -> if isNull i then VNull else readBinaryValue r typeId unsigned)
 
                                                 Result.Ok(types, values)
@@ -580,6 +658,19 @@ let private handleConnection
                                 if session.Statements.ContainsKey stmtId then
                                     let key = stmtId, paramIndex
                                     let existing = session.LongData |> Map.tryFind key |> Option.defaultValue [||]
+                                    // Cap accumulated long-data per param at the same ceiling
+                                    // `readPacketAsync` enforces for a reassembled packet, so a
+                                    // client streaming chunk after chunk forever can't grow a
+                                    // param's buffer without bound — extra bytes past the cap
+                                    // are silently dropped, matching this command's "no reply
+                                    // ever" contract.
+                                    let room = maxAccumulatedPacketSize - existing.Length
+
+                                    let chunk =
+                                        if room <= 0 then [||]
+                                        elif chunk.Length > room then chunk.[.. room - 1]
+                                        else chunk
+
                                     return! loop { session with LongData = Map.add key (Array.append existing chunk) session.LongData }
                                 else
                                     return! loop session
@@ -612,12 +703,49 @@ let private handleConnection
                                         |> Async.Ignore
 
                                     return! loop session
+                            | Some ResetConnection ->
+                                // Resets session state (variables, prepared
+                                // statements, buffered long-data, any open
+                                // transaction) the same way a fresh
+                                // connection would start, but keeps the
+                                // already-authenticated socket and current
+                                // database — what connection pools use this
+                                // for instead of a full reconnect.
+                                let session =
+                                    { Session.create session.ConnectionId session.Store with
+                                        Database = session.Database
+                                        CustomFunctions = session.CustomFunctions }
+
+                                activeSession <- Some session
+
+                                do!
+                                    writePacketAsync
+                                        stream
+                                        { SeqId = seqId
+                                          Payload = okPayload capabilities (statusFlagsFor session) 0UL 0UL }
+                                    |> Async.Ignore
+
+                                return! loop session
                             | Some(Unsupported _) ->
                                 do!
                                     writePacketAsync
                                         stream
                                         { SeqId = seqId
                                           Payload = errPayload capabilities 1047 "Unknown command" }
+                                    |> Async.Ignore
+
+                                return! loop session
+                            | Some(Malformed _) ->
+                                // A recognized command byte with too short/
+                                // malformed a payload to parse — reply ERR
+                                // and keep the connection alive instead of
+                                // letting the decode exception escape and
+                                // drop the socket.
+                                do!
+                                    writePacketAsync
+                                        stream
+                                        { SeqId = seqId
+                                          Payload = errPayload capabilities 1047 "Malformed command packet" }
                                     |> Async.Ignore
 
                                 return! loop session
@@ -673,17 +801,32 @@ let private tryAccept (listener: TcpListener) : Async<TcpClient option> =
 /// connection runs. A failing connection is logged, never fatal to the
 /// server.
 let serve (listener: TcpListener) (store: Storage.Store) (customFunctions: Functions.Registry) : Async<unit> =
+    // Bounds concurrent connections (see `maxConcurrentConnections`): held
+    // for the lifetime of each connection, acquired before accepting the
+    // next one so the accept loop itself blocks once the cap is hit rather
+    // than accepting unboundedly and queuing work behind the scenes.
+    // Deliberately not `use` — `serve` returns this `Async<unit>` unevaluated;
+    // disposing here would run at function-return time, before the loop
+    // that actually needs it ever executes. Lives for the process's
+    // lifetime, same as the listener it's paired with.
+    let connectionSlots = new SemaphoreSlim(maxConcurrentConnections)
+
     let rec loop (connectionId: int) : Async<unit> =
         async {
+            do! connectionSlots.WaitAsync() |> Async.AwaitTask
+
             match! tryAccept listener with
-            | None -> ()
+            | None -> connectionSlots.Release() |> ignore
             | Some client ->
                 Async.Start(
                     async {
                         try
-                            do! handleConnection connectionId store customFunctions client
-                        with ex ->
-                            Log.diagnostic "fsdb: connection %d: %s" connectionId ex.Message
+                            try
+                                do! handleConnection connectionId store customFunctions client
+                            with ex ->
+                                Log.diagnostic "fsdb: connection %d: %s" connectionId ex.Message
+                        finally
+                            connectionSlots.Release() |> ignore
                     }
                 )
 

@@ -734,6 +734,18 @@ let tests =
                               (VInt -1L)
                               "backwards year diff"
 
+                      testCase "TIMESTAMPDIFF QUARTER applies the same whole-unit day guard as MONTH/YEAR"
+                      <| fun _ ->
+                          Expect.equal
+                              (call "TIMESTAMPDIFF" [ VString "QUARTER"; VDate(DateOnly(2024, 1, 31)); VDate(DateOnly(2024, 4, 30)) ])
+                              (VInt 0L)
+                              "not a whole quarter yet — day 30 < day 31"
+
+                          Expect.equal
+                              (call "TIMESTAMPDIFF" [ VString "QUARTER"; VDate(DateOnly(2024, 1, 30)); VDate(DateOnly(2024, 4, 30)) ])
+                              (VInt 1L)
+                              "exactly 3 whole months is a whole quarter"
+
                       testCase "LAST_DAY finds the month's final day"
                       <| fun _ -> Expect.equal (call "LAST_DAY" [ VDate(DateOnly(2024, 2, 15)) ]) (VDate(DateOnly(2024, 2, 29))) "leap february"
 
@@ -799,7 +811,8 @@ let tests =
                       testCase "TIME extracts the clock part; WEEK counts Sunday-first weeks"
                       <| fun _ ->
                           Expect.equal (call "TIME" [ VString "2024-03-05 13:45:09" ]) (VString "13:45:09") "time"
-                          Expect.equal (call "WEEK" [ VDate(DateOnly(2024, 1, 7)) ]) (VInt 2L) "sunday starts week 2 of 2024"
+                          Expect.equal (call "WEEK" [ VDate(DateOnly(2024, 1, 7)) ]) (VInt 1L) "first sunday of 2024 starts week 1"
+                          Expect.equal (call "WEEK" [ VDate(DateOnly(2024, 1, 1)) ]) (VInt 0L) "days before the first sunday are week 0"
 
                       testCase "FROM_UNIXTIME formats with a specifier"
                       <| fun _ ->
@@ -812,6 +825,7 @@ let tests =
                           Expect.equal (call "SUBSTRING" [ VString "Hello world"; VInt 7L ]) (VString "world") "positive pos"
                           Expect.equal (call "SUBSTRING" [ VString "Hello world"; VInt 1L; VInt 5L ]) (VString "Hello") "with length"
                           Expect.equal (call "SUBSTRING" [ VString "Hello"; VInt(-3L) ]) (VString "llo") "negative pos"
+                          Expect.equal (call "SUBSTRING" [ VString "hello"; VInt(-10L) ]) (VString "") "negative pos past the start is empty, not the whole string"
 
                       testCase "LOCATE/INSTR/POSITION find a 1-indexed offset, or 0"
                       <| fun _ ->
@@ -841,6 +855,8 @@ let tests =
                           Expect.equal (call "LPAD" [ VString "5"; VInt 3L; VString "0" ]) (VString "005") "lpad"
                           Expect.equal (call "RPAD" [ VString "5"; VInt 3L; VString "0" ]) (VString "500") "rpad"
                           Expect.equal (call "LPAD" [ VString "12345"; VInt 3L; VString "0" ]) (VString "123") "lpad truncates"
+                          Expect.equal (call "LPAD" [ VString "5"; VInt(-1L); VString "0" ]) VNull "lpad negative length is null, not empty"
+                          Expect.equal (call "LPAD" [ VString "5"; VInt 0L; VString "0" ]) (VString "") "lpad zero length is still empty"
 
                       testCase "LEFT/RIGHT take from either end"
                       <| fun _ ->
@@ -852,18 +868,28 @@ let tests =
                           Expect.equal (call "REVERSE" [ VString "abc" ]) (VString "cba") "reverse"
                           Expect.equal (call "REPEAT" [ VString "ab"; VInt 3L ]) (VString "ababab") "repeat"
                           Expect.equal (call "SPACE" [ VInt 3L ]) (VString "   ") "space"
+                          Expect.equal (call "REPEAT" [ VString "ab"; VInt 100_000_000L ]) VNull "repeat past max_allowed_packet is null, not an OOM"
+                          Expect.equal (call "SPACE" [ VInt 100_000_000L ]) VNull "space past max_allowed_packet is null"
 
-                      testCase "ASCII returns the first character's code, 0 for empty"
+                      testCase "ASCII returns the first UTF-8 byte's code, 0 for empty"
                       <| fun _ ->
                           Expect.equal (call "ASCII" [ VString "A" ]) (VInt 65L) "ascii"
                           Expect.equal (call "ASCII" [ VString "" ]) (VInt 0L) "empty"
+                          Expect.equal (call "ASCII" [ VString "é" ]) (VInt 195L) "e-acute's lead UTF-8 byte, not its UTF-16 codepoint"
 
                       testCase "HEX/UNHEX round-trip a string"
                       <| fun _ ->
                           Expect.equal (call "HEX" [ VString "AB" ]) (VString "4142") "hex"
+                          Expect.equal (call "HEX" [ VString "é" ]) (VString "C3A9") "hex over utf-8 bytes, not utf-16 code units"
                           // UNHEX produces raw bytes (VBytes), not text — MySQL
                           // treats its result as a binary string.
                           Expect.equal (call "UNHEX" [ VString "4142" ]) (VBytes [| 0x41uy; 0x42uy |]) "unhex"
+
+                      testCase "LENGTH counts UTF-8 bytes; CHAR_LENGTH counts code points"
+                      <| fun _ ->
+                          Expect.equal (call "LENGTH" [ VString "é" ]) (VInt 2L) "e-acute is 2 UTF-8 bytes"
+                          Expect.equal (call "CHAR_LENGTH" [ VString "é" ]) (VInt 1L) "e-acute is 1 code point"
+                          Expect.equal (call "CHAR_LENGTH" [ VString "\U0001F600" ]) (VInt 1L) "an astral emoji is 1 code point despite being a UTF-16 surrogate pair"
 
                       testCase "MD5/SHA1 produce lowercase hex digests of the known length"
                       <| fun _ ->
@@ -917,6 +943,7 @@ let tests =
                           Expect.equal (call "QUOTE" [ VString "a\nb" ]) (VString "'a\\nb'") "escapes newline"
                           Expect.equal (call "QUOTE" [ VString "a\rb" ]) (VString "'a\\rb'") "escapes carriage return"
                           Expect.equal (call "QUOTE" [ VString "a\\b" ]) (VString "'a\\\\b'") "escapes a bare backslash"
+                          Expect.equal (call "QUOTE" [ VString "a\026b" ]) (VString "'a\\Zb'") "escapes Ctrl-Z"
 
                       testCase "STRCMP returns -1/0/1"
                       <| fun _ ->
@@ -976,6 +1003,9 @@ let tests =
                           Expect.equal (call "ROUND" [ VNull ]) VNull "single null"
                           Expect.equal (call "ROUND" [ VNull; VInt 2L ]) VNull "null with digits"
                           Expect.equal (call "ROUND" [ VDouble 1.5; VNull ]) VNull "value with null digits"
+                          Expect.equal (call "ROUND" [ VDecimal 123.456M; VInt(-1L) ]) (VDecimal 120M) "decimal negative digits rounds left of the point"
+                          Expect.equal (call "ROUND" [ VInt 15L; VInt(-1L) ]) (VInt 20L) "int negative digits rounds left of the point"
+                          Expect.equal (call "ROUND" [ VDouble 123.456; VInt(-1L) ]) (VDouble 120.0) "double negative digits doesn't throw"
 
                       testCase "MOD divides modulo across int/double/decimal and nulls a zero divisor"
                       <| fun _ ->

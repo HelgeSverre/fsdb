@@ -748,6 +748,54 @@ let tests =
                     | Error(NotNullViolation "name") -> ()
                     | other -> failtestf "expected NotNullViolation, got %A" other
 
+                testCase "updateRows re-validates a stale candidate position instead of clobbering whatever row now sits there"
+                <| fun _ ->
+                    let store = withUsersTable ()
+
+                    insertRows
+                        store
+                        defaultDatabase
+                        "users"
+                        None
+                        [ [ VNull; VString "alice"; VInt 30L ]
+                          [ VNull; VString "bob"; VInt 25L ] ]
+                    |> ignore
+
+                    // Simulate `Executor.tryPointLookup`'s lock-free read:
+                    // capture bob's `(position, row)` up front, the exact
+                    // shape `candidates` takes — `scan` hands back the
+                    // store's own row arrays, not copies, so `staleRow`
+                    // below is reference-identical to what's still sitting
+                    // in the table.
+                    let stalePos, staleRow =
+                        match scan store defaultDatabase "users" with
+                        | Ok(_, rows) ->
+                            rows |> Seq.toList |> List.indexed |> List.find (fun (_, r) -> r.[1] = VString "bob")
+                        | Error e -> failtestf "expected Ok, got %A" e
+
+                    Expect.equal stalePos 1 "bob starts at position 1"
+
+                    // A concurrent DELETE of the earlier row (alice)
+                    // compacts bob down from position 1 to position 0 —
+                    // `stalePos` still says 1, and blindly trusting it would
+                    // index past the now-1-row table.
+                    deleteRows store defaultDatabase "users" (fun row -> Ok(row.[1] = VString "alice")) |> ignore
+
+                    let updater (row: Value[]) = Ok [| row.[0]; row.[1]; VInt 99L |]
+
+                    match updateRows store defaultDatabase "users" (Some [ stalePos, staleRow ]) (fun _ -> Ok true) updater with
+                    | Ok affected ->
+                        Expect.equal affected 1 "bob, re-located by identity, still gets updated"
+
+                        match scan store defaultDatabase "users" with
+                        | Ok(_, rows) ->
+                            Expect.equal
+                                (List.ofSeq rows |> List.map (fun r -> r.[1], r.[2]))
+                                [ VString "bob", VInt 99L ]
+                                "bob's row was updated in place — no crash, no unrelated row clobbered"
+                        | Error e -> failtestf "expected Ok, got %A" e
+                    | Error e -> failtestf "expected Ok, got %A" e
+
                 testCase "deleteRows removes matching rows and returns the count"
                 <| fun _ ->
                     let store = withUsersTable ()
@@ -1308,6 +1356,32 @@ let tests =
                     | Error(ForeignKeyParentMissing "fk_dept") -> ()
                     | other -> failtestf "expected ForeignKeyParentMissing, got %A" other
 
+                testCase "upsertRows' insert branch (no collision) still checks foreign keys, unlike before this fix"
+                <| fun _ ->
+                    let store = withDeptEmployees None
+                    let applyUpdate (_: Value[]) (candidate: Value[]) = Ok candidate
+
+                    match upsertRows store defaultDatabase "employees" None [ [ VInt 1L; VInt 999L; VString "alice" ] ] Ok applyUpdate with
+                    | Error(ForeignKeyParentMissing "fk_dept") -> ()
+                    | other -> failtestf "expected ForeignKeyParentMissing, got %A" other
+
+                testCase "upsertRows' update branch (ON DUPLICATE KEY UPDATE) still checks foreign keys, unlike before this fix"
+                <| fun _ ->
+                    let store = withDeptEmployees None
+                    insertRows store defaultDatabase "employees" None [ [ VInt 1L; VInt 1L; VString "alice" ] ]
+                    |> ignore
+
+                    // Collides on the primary key (id = 1), so this goes
+                    // through `applyUpdate` rather than the insert path —
+                    // rewriting `dept_id` to a department that doesn't
+                    // exist must still be rejected the same way a plain
+                    // `UPDATE` already is.
+                    let applyUpdate (existing: Value[]) (_candidate: Value[]) = Ok [| existing.[0]; VInt 999L; existing.[2] |]
+
+                    match upsertRows store defaultDatabase "employees" None [ [ VInt 1L; VInt 1L; VString "alice" ] ] Ok applyUpdate with
+                    | Error(ForeignKeyParentMissing "fk_dept") -> ()
+                    | other -> failtestf "expected ForeignKeyParentMissing, got %A" other
+
                 testCase "DELETE of a parent row with children and no ON DELETE clause returns error 1451 (RESTRICT default)"
                 <| fun _ ->
                     let store = withDeptEmployees None
@@ -1354,6 +1428,49 @@ let tests =
                             | other -> failtestf "expected the child row to survive, got %A" other
                         | Error e -> failtestf "expected Ok, got %A" e
                     | Error e -> failtestf "expected Ok, got %A" e
+
+                testCase "ON DELETE SET NULL blanking fires a RowsUpdated event too, not just the parent's RowsDeleted"
+                <| fun _ ->
+                    let store = withDeptEmployees (Some "SET NULL")
+                    insertRows store defaultDatabase "employees" None [ [ VInt 1L; VInt 1L; VString "alice" ] ]
+                    |> ignore
+
+                    let events = ResizeArray<CommitEvent>()
+                    store.OnCommit <- Some events.Add
+
+                    match deleteRows store defaultDatabase "departments" (fun _ -> Ok true) with
+                    | Ok _ ->
+                        match List.ofSeq events with
+                        | [ RowsDeleted(_, "departments", _); RowsUpdated(_, "employees", [ (oldRow, newRow) ]) ] ->
+                            Expect.equal oldRow.[1] (VInt 1L) "before value still holds the pre-blank dept_id"
+                            Expect.equal newRow.[1] VNull "after value is the blanked dept_id"
+                        | other -> failtestf "expected a RowsDeleted for departments and a RowsUpdated for employees, got %A" other
+                    | Error e -> failtestf "expected Ok, got %A" e
+
+                testCase "ON DELETE SET NULL blanking replays correctly (WAL round-trip via the emitted events)"
+                <| fun _ ->
+                    // Guards the same gap as the event-shape test above, but
+                    // from the replay side: apply the emitted events to a
+                    // second, fresh store the way `Persistence.applyEvent`
+                    // would, and confirm it lands on the blanked value
+                    // instead of resurrecting the pre-delete FK.
+                    let store = withDeptEmployees (Some "SET NULL")
+                    insertRows store defaultDatabase "employees" None [ [ VInt 1L; VInt 1L; VString "alice" ] ]
+                    |> ignore
+
+                    let events = ResizeArray<CommitEvent>()
+                    store.OnCommit <- Some events.Add
+                    deleteRows store defaultDatabase "departments" (fun _ -> Ok true) |> ignore
+
+                    let updated =
+                        events
+                        |> Seq.tryPick (function
+                            | RowsUpdated(_, "employees", changes) -> Some changes
+                            | _ -> None)
+
+                    match updated with
+                    | Some [ (_, newRow) ] -> Expect.equal newRow.[1] VNull "the row the WAL would replay already has the FK blanked"
+                    | other -> failtestf "expected exactly one RowsUpdated change for employees, got %A" other
 
                 testCase "ON DELETE SET NULL against a NOT NULL foreign key column fails the delete instead of blanking it"
                 <| fun _ ->
@@ -1707,7 +1824,52 @@ let tests =
                 <| fun _ ->
                     let store = withUsersTable ()
                     let snapshot = beginTransactionSnapshot store
-                    Expect.isNone snapshot.PendingEvents "no subscriber on the real store means nothing to buffer" ]
+                    Expect.isNone snapshot.PendingEvents "no subscriber on the real store means nothing to buffer"
+
+                testCase "a snapshot of a transaction's own snapshot (Executor's multi-table UPDATE/DELETE) reaches the WAL flat, not dropped or double-wrapped"
+                <| fun _ ->
+                    // Mirrors `Executor`'s multi-table `UPDATE`/`DELETE`
+                    // path exactly: it opens its own private snapshot of
+                    // the *transaction's own* snapshot store (not the real
+                    // store) to isolate one statement's writes, then
+                    // commits that nested snapshot back onto the outer one
+                    // via `commitTransactionEvents` — and only later does
+                    // the outer transaction's own COMMIT flush everything
+                    // to the real store.
+                    let store = withUsersTable ()
+                    let events = ResizeArray<CommitEvent>()
+                    store.OnCommit <- Some events.Add
+
+                    let txSnapshot = beginTransactionSnapshot store
+                    Expect.isSome txSnapshot.PendingEvents "the transaction's own snapshot must buffer — the real store has a subscriber"
+
+                    let nested = beginTransactionSnapshot txSnapshot
+                    Expect.isSome nested.PendingEvents "regression guard: the nested snapshot must buffer too, even though its own source (txSnapshot) has no OnCommit of its own — only PendingEvents"
+
+                    insertRows nested defaultDatabase "users" None [ [ VInt 1L; VString "alice"; VInt 30L ] ]
+                    |> ignore
+
+                    // The nested statement "commits" back onto the
+                    // transaction's own snapshot.
+                    setCatalog txSnapshot nested.Catalog
+                    commitTransactionEvents txSnapshot nested
+
+                    Expect.isEmpty events "still invisible to the real store — only the outer transaction's own COMMIT reaches it"
+
+                    // The outer transaction's real COMMIT.
+                    setCatalog store txSnapshot.Catalog
+                    commitTransactionEvents store txSnapshot
+
+                    match List.ofSeq events with
+                    | [ TransactionCommitted [ RowsInserted(_, "users", _) ] ] -> ()
+                    | other ->
+                        failtestf
+                            "expected exactly one flat TransactionCommitted wrapping the single RowsInserted (not dropped, not double-wrapped in a nested TransactionCommitted), got %A"
+                            other
+
+                    match scan store defaultDatabase "users" with
+                    | Ok(_, rows) -> Expect.equal (List.ofSeq rows |> List.length) 1 "the write also actually reached the real store's memory"
+                    | Error e -> failtestf "expected Ok, got %A" e ]
 
           testList
               "concurrent writers"

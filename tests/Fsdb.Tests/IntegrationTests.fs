@@ -608,6 +608,199 @@ let tests =
               }
               |> Async.RunSynchronously
 
+          // A truncated COM_STMT_CLOSE (needs a 4-byte statement id, gets
+          // none) used to throw straight out of `Reader.ReadInt32LE` inside
+          // `parseCommand`, which escaped the command loop entirely and
+          // dropped the socket with no reply. It must now answer ERR and
+          // leave the connection usable.
+          testCase "a malformed short command packet gets an ERR, not a dropped connection"
+          <| fun _ ->
+              async {
+                  let listener = Fsdb.Server.startListening System.Net.IPAddress.Loopback 0
+                  let port = Fsdb.Server.port listener
+                  Fsdb.Server.serve listener (Fsdb.Storage.create ()) Fsdb.Functions.empty |> Async.StartAsTask |> ignore
+
+                  try
+                      use client = new Net.Sockets.TcpClient()
+                      do! client.ConnectAsync(Net.IPAddress.Loopback, port) |> Async.AwaitTask
+                      use stream = client.GetStream()
+
+                      let! handshake = readPacketAsync stream
+                      let handshakeSeq = handshake.Value.SeqId
+
+                      let helloResponse =
+                          let w = Writer()
+                          w.WriteInt32LE(int ClientProtocol41)
+                          w.WriteInt32LE 16777216
+                          w.WriteByte 45uy
+                          w.WriteBytes(Array.zeroCreate<byte> 23)
+                          w.WriteNullTerminatedString "root"
+                          w.WriteByte 0uy
+                          w.ToArray()
+
+                      let! _ = writePacketAsync stream { SeqId = handshakeSeq + 1uy; Payload = helloResponse }
+                      let! _ = readPacketAsync stream // connection OK
+
+                      // COM_STMT_CLOSE (0x19) with no statement id bytes at all.
+                      let! _ = writePacketAsync stream { SeqId = 0uy; Payload = [| 0x19uy |] }
+                      let! errReply = readPacketAsync stream
+                      Expect.isTrue errReply.IsSome "the connection survives a truncated command"
+                      Expect.equal errReply.Value.Payload.[0] 0xffuy "server replies ERR, not silence/close"
+
+                      let! _ = writePacketAsync stream { SeqId = 0uy; Payload = Array.append [| 0x03uy |] (Text.Encoding.UTF8.GetBytes "SELECT 1") }
+                      let! afterReply = readPacketAsync stream
+                      Expect.isTrue afterReply.IsSome "a later query on the same connection still gets a reply"
+                  finally
+                      listener.Stop()
+              }
+              |> Async.RunSynchronously
+
+          // COM_RESET_CONNECTION (0x1f): connection pools (PDO's persistent
+          // connections, Doctrine's DBAL, ...) send this instead of a full
+          // reconnect to clear session state. Used to fall through to
+          // `Unsupported` and answer ERR 1047, breaking pooled reconnect.
+          testCase "COM_RESET_CONNECTION replies OK and clears session state"
+          <| fun _ ->
+              async {
+                  let listener = Fsdb.Server.startListening System.Net.IPAddress.Loopback 0
+                  let port = Fsdb.Server.port listener
+                  Fsdb.Server.serve listener (Fsdb.Storage.create ()) Fsdb.Functions.empty |> Async.StartAsTask |> ignore
+
+                  try
+                      use client = new Net.Sockets.TcpClient()
+                      do! client.ConnectAsync(Net.IPAddress.Loopback, port) |> Async.AwaitTask
+                      use stream = client.GetStream()
+
+                      let! handshake = readPacketAsync stream
+                      let handshakeSeq = handshake.Value.SeqId
+
+                      let helloResponse =
+                          let w = Writer()
+                          w.WriteInt32LE(int ClientProtocol41)
+                          w.WriteInt32LE 16777216
+                          w.WriteByte 45uy
+                          w.WriteBytes(Array.zeroCreate<byte> 23)
+                          w.WriteNullTerminatedString "root"
+                          w.WriteByte 0uy
+                          w.ToArray()
+
+                      let! _ = writePacketAsync stream { SeqId = handshakeSeq + 1uy; Payload = helloResponse }
+                      let! _ = readPacketAsync stream // connection OK
+
+                      let query (sql: string) =
+                          writePacketAsync stream { SeqId = 0uy; Payload = Array.append [| 0x03uy |] (Text.Encoding.UTF8.GetBytes sql) }
+
+                      let! _ = query "SET @x = 42"
+                      let! _ = readPacketAsync stream
+
+                      let! _ = writePacketAsync stream { SeqId = 0uy; Payload = [| 0x1fuy |] }
+                      let! resetReply = readPacketAsync stream
+                      Expect.equal resetReply.Value.Payload.[0] 0x00uy "COM_RESET_CONNECTION replies OK"
+
+                      // The user variable set before the reset no longer reads back.
+                      let! _ = query "SELECT @x"
+                      let! colCount = readPacketAsync stream
+                      let! _ = readPacketAsync stream // column def
+                      let! _ = readPacketAsync stream // EOF
+                      let! row = readPacketAsync stream
+                      Expect.equal colCount.Value.Payload.[0] 0x01uy "SELECT @x still answers after reset"
+                      Expect.equal (Reader(row.Value.Payload).ReadLenEncInt()) None "@x reads back NULL: the reset cleared user variables"
+                  finally
+                      listener.Stop()
+              }
+              |> Async.RunSynchronously
+
+          // COM_STMT_SEND_LONG_DATA force-decoded every buffered chunk as
+          // UTF-8 before substituting it as the bound parameter, corrupting
+          // any byte sequence that isn't valid UTF-8. A BLOB param's bytes
+          // must round-trip byte-identical.
+          testCase "COM_STMT_SEND_LONG_DATA round-trips non-UTF-8 bytes for a BLOB parameter"
+          <| fun _ ->
+              async {
+                  let listener = Fsdb.Server.startListening System.Net.IPAddress.Loopback 0
+                  let port = Fsdb.Server.port listener
+                  Fsdb.Server.serve listener (Fsdb.Storage.create ()) Fsdb.Functions.empty |> Async.StartAsTask |> ignore
+
+                  try
+                      use client = new Net.Sockets.TcpClient()
+                      do! client.ConnectAsync(Net.IPAddress.Loopback, port) |> Async.AwaitTask
+                      use stream = client.GetStream()
+
+                      let! handshake = readPacketAsync stream
+                      let handshakeSeq = handshake.Value.SeqId
+
+                      let helloResponse =
+                          let w = Writer()
+                          w.WriteInt32LE(int ClientProtocol41)
+                          w.WriteInt32LE 16777216
+                          w.WriteByte 45uy
+                          w.WriteBytes(Array.zeroCreate<byte> 23)
+                          w.WriteNullTerminatedString "root"
+                          w.WriteByte 0uy
+                          w.ToArray()
+
+                      let! _ = writePacketAsync stream { SeqId = handshakeSeq + 1uy; Payload = helloResponse }
+                      let! _ = readPacketAsync stream // connection OK
+
+                      let query (sql: string) =
+                          writePacketAsync stream { SeqId = 0uy; Payload = Array.append [| 0x03uy |] (Text.Encoding.UTF8.GetBytes sql) }
+
+                      let! _ = query "CREATE TABLE blobs (b BLOB)"
+                      let! _ = readPacketAsync stream
+
+                      let! _ = writePacketAsync stream { SeqId = 0uy; Payload = Array.append [| 0x16uy |] (Text.Encoding.UTF8.GetBytes "INSERT INTO blobs VALUES (?)") }
+                      let! prepareOk = readPacketAsync stream
+                      let stmtId = Reader(prepareOk.Value.Payload.[1..]).ReadInt32LE()
+                      let! _ = readPacketAsync stream // param column def
+                      let! _ = readPacketAsync stream // trailing EOF
+
+                      // Invalid UTF-8: a lone continuation byte and a byte
+                      // that's never valid in UTF-8 at all — decoding this
+                      // as UTF-8 and re-encoding would change the bytes.
+                      let bytes = [| 0uy; 0xffuy; 0x80uy; 65uy; 66uy; 0xC0uy |]
+
+                      let longDataPayload =
+                          let w = Writer()
+                          w.WriteByte 0x18uy
+                          w.WriteInt32LE stmtId
+                          w.WriteInt16LE 0
+                          w.WriteBytes bytes
+                          w.ToArray()
+
+                      let! _ = writePacketAsync stream { SeqId = 0uy; Payload = longDataPayload }
+
+                      let execPayload =
+                          let w = Writer()
+                          w.WriteByte 0x17uy
+                          w.WriteInt32LE stmtId
+                          w.WriteByte 0uy
+                          w.WriteInt32LE 1
+                          w.WriteByte 0uy // null bitmap: param not NULL
+                          w.WriteByte 1uy // new-params-bound
+                          w.WriteByte TypeBlob
+                          w.WriteByte 0uy // not unsigned
+                          w.WriteLenEncString "" // placeholder value; long data wins
+                          w.ToArray()
+
+                      let! _ = writePacketAsync stream { SeqId = 0uy; Payload = execPayload }
+                      let! _ = readPacketAsync stream // OK (INSERT)
+
+                      let! _ = query "SELECT b FROM blobs"
+                      let! _ = readPacketAsync stream // column count
+                      let! _ = readPacketAsync stream // column def
+                      let! _ = readPacketAsync stream // EOF
+                      let! row = readPacketAsync stream
+
+                      let r = Reader(row.Value.Payload)
+
+                      match r.ReadLenEncInt() with
+                      | Some len -> Expect.equal (r.ReadBytes(int len)) bytes "BLOB long-data bytes survive byte-identical"
+                      | None -> failtest "expected a non-NULL blob value"
+                  finally
+                      listener.Stop()
+              }
+              |> Async.RunSynchronously
+
           // The README's embedding example, exercised over the real wire
           // with a real MySqlConnector client — a custom scalar (SLUGIFY)
           // and a custom aggregate (MEDIAN) registered on a `Db` via

@@ -85,12 +85,18 @@ type PreparedStmt =
 type Transaction =
     { Snapshot: Store
       BaseCatalog: Catalog
-      /// Acquired lazily on the transaction's first real database
-      /// statement, then held until COMMIT/ROLLBACK. `None` immediately
-      /// after BEGIN lets multiple connections begin concurrently and
-      /// matches InnoDB's default behavior of establishing a consistent
-      /// snapshot on the first statement rather than the BEGIN packet.
-      GateLease: IDisposable option
+      /// Every database's write gate this transaction currently holds,
+      /// keyed by database name — not just `session.Database`: a qualified
+      /// `INSERT/UPDATE INTO otherdb.t` needs `otherdb`'s own gate too, or a
+      /// concurrent writer to `otherdb` can race this transaction's merge
+      /// back at COMMIT (see `Storage.mergeDatabaseSlot`'s doc). Acquired
+      /// lazily, one database at a time as each statement in the
+      /// transaction first names it, then all held until COMMIT/ROLLBACK.
+      /// Empty immediately after BEGIN lets multiple connections begin
+      /// concurrently and matches InnoDB's default behavior of establishing
+      /// a consistent snapshot on the first statement rather than the BEGIN
+      /// packet.
+      GateLease: Map<string, IDisposable>
       /// Each savepoint's catalog plus how many events `Snapshot.PendingEvents`
       /// had buffered at that point — `ROLLBACK TO SAVEPOINT` truncates the
       /// buffer back to that length too, so a physical WAL never sees events

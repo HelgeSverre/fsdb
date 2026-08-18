@@ -296,13 +296,21 @@ let private writeBinaryValue (w: Writer) (typeId: byte) (s: string) : unit =
         w.WriteByte(byte d.Day)
     elif typeId = TypeDateTime || typeId = TypeTimestamp then
         let dt = DateTime.Parse(s, Globalization.CultureInfo.InvariantCulture)
-        w.WriteByte 7uy
+        // Sub-second precision: ticks are 100ns, so the sub-second
+        // remainder divided by 10 is microseconds. A value with a non-zero
+        // fractional second needs the 11-byte wire form (length 7 has no
+        // room for it) or the fraction silently drops on the wire.
+        let micros = int ((dt.Ticks % TimeSpan.TicksPerSecond) / 10L)
+        w.WriteByte(if micros = 0 then 7uy else 11uy)
         w.WriteInt16LE dt.Year
         w.WriteByte(byte dt.Month)
         w.WriteByte(byte dt.Day)
         w.WriteByte(byte dt.Hour)
         w.WriteByte(byte dt.Minute)
         w.WriteByte(byte dt.Second)
+
+        if micros <> 0 then
+            w.WriteInt32LE micros
     elif typeId = TypeBlob then
         w.WriteLenEncBytes(Encoding.Latin1.GetBytes s)
     else

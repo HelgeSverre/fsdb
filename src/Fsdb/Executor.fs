@@ -321,19 +321,40 @@ let private likeOp (coll: Collation.Collation option) (caseSensitive: bool) (esc
         let charEq = if caseSensitive then (=) else col.CharEquals
         boolToValue (likeMatch (escape |> Option.defaultValue '\\') charEq text pat)
 
-/// `REGEXP`/`RLIKE` — MySQL's default collation makes these case-insensitive
-/// too, same as `LIKE`; unlike `LIKE`'s translated wildcard syntax, the
-/// pattern is already a real (POSIX-flavored, close enough to .NET's for the
-/// common cases Eloquent generates) regex, so it's handed to `Regex`
-/// directly rather than through `likeToRegex`.
-let private regexpOp (subject: Value) (pattern: Value) : Value =
+/// `REGEXP`/`RLIKE` — case sensitivity follows the operand's collation
+/// (case-insensitive under the usual `_ci` default, but case-sensitive
+/// under `_bin`/`_cs`, same as `LIKE`/`=`) rather than a hardcoded
+/// `IgnoreCase`; unlike `LIKE`'s translated wildcard syntax, the pattern is
+/// already a real (POSIX-flavored, close enough to .NET's for the common
+/// cases Eloquent generates) regex, so it's handed to `Regex` directly
+/// rather than through `likeToRegex`. Every match carries a `MatchTimeout`
+/// so a catastrophically-backtracking pattern (`'(a+)+$'` against a long
+/// non-matching subject) errors out instead of pinning a core forever.
+/// No `Singleline`: MySQL's REGEXP `.` does not match a newline by default,
+/// so .NET's default (also newline-excluding) `.` is the matching behavior.
+let private regexpMatchTimeout = System.TimeSpan.FromSeconds 5.0
+
+let private regexpOp (coll: Collation.Collation option) (subject: Value) (pattern: Value) : Result<Value, EvalError> =
     match subject, pattern with
     | VNull, _
-    | _, VNull -> VNull
+    | _, VNull -> Ok VNull
     | _ ->
         let text = subject |> toText |> Option.defaultValue ""
         let pat = pattern |> toText |> Option.defaultValue ""
-        boolToValue (Regex.IsMatch(text, pat, RegexOptions.IgnoreCase))
+        let col = coll |> Option.defaultValue Collation.defaultCollation
+        // No separate "REGEXP BINARY" AST flag the way `Like` has one —
+        // case sensitivity is read straight off the collation by asking it
+        // whether 'a' and 'A' fold together.
+        let caseSensitive = not (col.CharEquals 'a' 'A')
+
+        let opts =
+            if caseSensitive then RegexOptions.None else RegexOptions.IgnoreCase
+
+        try
+            Ok(boolToValue (Regex.IsMatch(text, pat, opts, regexpMatchTimeout)))
+        with
+        | :? RegexMatchTimeoutException -> Error(1030, "Got error 'regexp match timed out' from regexp")
+        | :? System.ArgumentException as ex -> Error(1139, sprintf "Got error '%s' from regexp" ex.Message)
 
 /// The three pieces of context `evalExpr` needs to resolve a `Col`/`FuncCall`
 /// against, bundled into one record rather than three loose parameters
@@ -975,6 +996,30 @@ let private ordinalComparand (v: Value) : Value option =
         | false, _ -> None
     | _ -> None
 
+/// Resolves a `Value * Value` comparison the same way `BinOp`'s `=`/`<`/...
+/// cases do: an ENUM column compares by ordinal against a numeric operand
+/// (either side may be the column), and a string compare folds through the
+/// operand's own `COLLATE`/column collation rather than a raw ordinal
+/// `Value.compare`. Factored out so `Between` (two `AND`ed range checks)
+/// gets the same resolution instead of the raw `Value.compare` it used to
+/// call directly — a column comparison that BinOp/`IN` treat as
+/// collation-aware, `BETWEEN` was silently treating as byte-ordinal.
+let private resolvedCompare (ctx: EvalContext) (aExpr: Expr) (va: Value) (bExpr: Expr) (vb: Value) : int =
+    let pa, pb =
+        match enumOrdinalFor ctx aExpr va, ordinalComparand vb with
+        | Some oa, Some nb -> oa, nb
+        | _ ->
+            match ordinalComparand va, enumOrdinalFor ctx bExpr vb with
+            | Some na, Some ob -> na, ob
+            | _ -> va, vb
+
+    match pa, pb with
+    | VString sa, VString sb ->
+        match resolvedCollation ctx aExpr |> Option.orElseWith (fun () -> resolvedCollation ctx bExpr) with
+        | Some col -> col.Compare sa sb
+        | None -> ctx.Store.ConnectionCollation.Compare sa sb
+    | _ -> Value.compare pa pb
+
 let rec private evalExpr (ctx: EvalContext) (expr: Expr) : Result<Value, EvalError> =
     let eval = evalExpr ctx
 
@@ -1107,7 +1152,7 @@ let rec private evalExpr (ctx: EvalContext) (expr: Expr) : Result<Value, EvalErr
         |> Result.bind (fun ve -> eval p |> Result.map (fun vp -> likeOp (Some(keyCollation ctx e)) caseSensitive escape ve vp))
     | Regexp(e, p) ->
         eval e
-        |> Result.bind (fun ve -> eval p |> Result.map (fun vp -> regexpOp ve vp))
+        |> Result.bind (fun ve -> eval p |> Result.bind (fun vp -> regexpOp (Some(keyCollation ctx e)) ve vp))
     | In(e, xs) ->
         eval e
         |> Result.bind (fun ve ->
@@ -1131,28 +1176,35 @@ let rec private evalExpr (ctx: EvalContext) (expr: Expr) : Result<Value, EvalErr
                     else
                         VInt 0L))
     | InSubquery(e, select) ->
+        // `ve = NULL` can't short-circuit before running the subquery the
+        // way the literal-list `In` case above does: `NULL IN (<empty
+        // set>)` is FALSE (an OR over zero disjuncts), not UNKNOWN — only a
+        // *non-empty* candidate set makes it UNKNOWN — and emptiness is
+        // exactly what the subquery has to run to find out. `NOT IN` over
+        // an empty subquery (a common "no matching rows yet" shape) would
+        // otherwise wrongly drop every row whose `e` is `NULL`.
         eval e
         |> Result.bind (fun ve ->
-            match ve with
-            | VNull -> Ok VNull
-            | _ ->
-                match runSelectStmt ctx.Store ctx.Registry ctx.DbName select (Some ctx) with
-                | Err(code, message), _, _ -> Error(code, message)
-                | Affected _, _, _ -> Ok VNull
-                | ResultSet(_, _), _, typedRows ->
-                    // The candidate set is the subquery's first column —
-                    // real MySQL requires exactly one, but ponytail: not
-                    // enforced here (extra columns are just ignored) rather
-                    // than adding an 1241-style check that `Subquery`
-                    // already has to have for its own single-value case;
-                    // add it here too if a migration's `IN (SELECT a, b
-                    // ...)` ever needs the real error instead of silently
-                    // matching on `a`. Reads the subquery's own typed
-                    // `Value`, not its re-wrapped-as-text `VString` — see
-                    // the note on `deriveRows`/`runSelectStmt`'s typed
-                    // third component.
-                    let candidates = typedRows |> List.map (fun row -> if row.Length > 0 then row.[0] else VNull)
+            match runSelectStmt ctx.Store ctx.Registry ctx.DbName select (Some ctx) with
+            | Err(code, message), _, _ -> Error(code, message)
+            | Affected _, _, _ -> Ok VNull
+            | ResultSet(_, _), _, typedRows ->
+                // The candidate set is the subquery's first column —
+                // real MySQL requires exactly one, but ponytail: not
+                // enforced here (extra columns are just ignored) rather
+                // than adding an 1241-style check that `Subquery`
+                // already has to have for its own single-value case;
+                // add it here too if a migration's `IN (SELECT a, b
+                // ...)` ever needs the real error instead of silently
+                // matching on `a`. Reads the subquery's own typed
+                // `Value`, not its re-wrapped-as-text `VString` — see
+                // the note on `deriveRows`/`runSelectStmt`'s typed
+                // third component.
+                let candidates = typedRows |> List.map (fun row -> if row.Length > 0 then row.[0] else VNull)
 
+                match ve with
+                | VNull -> if candidates.IsEmpty then Ok(VInt 0L) else Ok VNull
+                | _ ->
                     if candidates |> List.exists (fun v -> Value.equals ve v = Some true) then
                         Ok(VInt 1L)
                     elif candidates |> List.exists (function VNull -> true | _ -> false) then
@@ -1199,7 +1251,11 @@ let rec private evalExpr (ctx: EvalContext) (expr: Expr) : Result<Value, EvalErr
                     | VNull, _, _
                     | _, VNull, _
                     | _, _, VNull -> VNull
-                    | _ -> boolToValue (Value.compare ve vlo >= 0 && Value.compare ve vhi <= 0))))
+                    | _ ->
+                        boolToValue (
+                            resolvedCompare ctx e ve lo vlo >= 0
+                            && resolvedCompare ctx e ve hi vhi <= 0
+                        ))))
     | FuncCall(name, args) ->
         match Functions.lookup name ctx.Registry with
         | None -> Error(unknownFunction name)
@@ -2251,16 +2307,25 @@ and runUnionStmt
     let runBranch (select: SelectStmt) = runSelectStmt store registry dbName select None
 
     // Each branch's text row paired with its own typed row, kept aligned
-    // through combining/deduping so the `ORDER BY` below can compare typed
-    // values instead of re-wrapping the text back into a lexicographically-
+    // through combining so the `ORDER BY` below can compare typed values
+    // instead of re-wrapping the text back into a lexicographically-
     // comparing `VString` (`SELECT n FROM t UNION SELECT n FROM t ORDER BY
     // n` sorting "10" before "2" otherwise).
+    //
+    // `DISTINCT` dedup used to run right here, branch by branch, keyed on
+    // each branch's own *pre-reconciliation* text (`"1.0"` vs `"1"`), so
+    // `SELECT 1.0 UNION SELECT 1` (MySQL: one row, `1.0`) came out as two —
+    // MySQL reconciles every branch's column type across the whole UNION
+    // first and only *then* compares for DISTINCT. So this pass just
+    // concatenates every branch's raw rows plus an `(isAll, cumulative
+    // length)` boundary marker per branch, and the actual dedup runs after
+    // `reconciled`/`coerceColumn` below, replayed over those boundaries.
     let combine
-        (acc: Result<string list * ((string option list) * Value[]) list * byte list list * Collation.Collation list, QueryResult>)
+        (acc: Result<string list * ((string option list) * Value[]) list * byte list list * Collation.Collation list * (bool * int) list, QueryResult>)
         (isAll: bool, select: SelectStmt)
         =
         acc
-        |> Result.bind (fun (cols, rowsSoFar, typesSoFar, collationsSoFar) ->
+        |> Result.bind (fun (cols, rowsSoFar, typesSoFar, collationsSoFar, boundaries) ->
             match runBranch select with
             | Err(code, message), _, _ -> Error(Err(code, message))
             | Affected _, _, _ -> Error(Err(1064, "UNION branch did not return a resultset"))
@@ -2276,29 +2341,20 @@ and runUnionStmt
                     else
                         List.map2 strictestUnionCollation collationsSoFar branchCollations
 
-                let combined =
-                    if isAll then
-                        rowsSoFar @ branchPaired
-                    else
-                        // Collation-aware dedupe: MySQL folds åge/age in a
-                        // UNION via each column's aggregated collation
-                        // (strictest branch wins — bin never folds).
-                        let dedupeKey (text: string option list) =
-                            List.map2 (fun (col: Collation.Collation) (cell: string option) -> cell |> Option.map col.KeyOf) collations text
-
-                        (rowsSoFar @ branchPaired) |> List.distinctBy (fst >> dedupeKey)
-
-                Ok(cols, combined, branchTypes :: typesSoFar, collations))
+                let combined = rowsSoFar @ branchPaired
+                Ok(cols, combined, branchTypes :: typesSoFar, collations, boundaries @ [ isAll, List.length combined ]))
 
     match runSelectStmt store registry dbName first None with
     | Err(code, message), _, _ -> Err(code, message), [], []
     | Affected _, _, _ -> Err(1064, "UNION branch did not return a resultset"), [], []
     | ResultSet(firstCols, firstRows), firstTypes, firstTyped ->
         let firstCollations = selectColumnCollations store registry dbName first firstCols
+        let firstPaired = List.zip firstRows firstTyped
+        let firstLen = List.length firstPaired
 
-        match rest |> List.fold combine (Ok(firstCols, List.zip firstRows firstTyped, [ firstTypes ], firstCollations)) with
+        match rest |> List.fold combine (Ok(firstCols, firstPaired, [ firstTypes ], firstCollations, [])) with
         | Error e -> e, [], []
-        | Ok(cols, allPaired, typesSoFar, _) ->
+        | Ok(cols, allPaired, typesSoFar, collations, boundaries) ->
             // MySQL's union type reconciliation across every branch, and
             // every row's values coerced to it — an `ORDER BY` over the
             // mixed-typed union then sorts exactly as MySQL does.
@@ -2339,7 +2395,7 @@ and runUnionStmt
                 let coerced = coerceUnionValue reconciled.[i] v
                 if reconciled.[i] = Value.TypeNewDecimal then rescale scales.[i] coerced else coerced
 
-            let coercedPaired =
+            let coercedPairedRaw =
                 allPaired
                 |> List.map (fun (_, typed) ->
                     let coerced = typed |> Array.mapi coerceColumn
@@ -2348,6 +2404,26 @@ and runUnionStmt
                     let text = coerced |> Array.map (function VNull -> None | v -> Value.toText v) |> List.ofArray
                     text, coerced)
 
+            // Replays each branch's `isAll`/boundary from `combine` above,
+            // now keyed on the reconciled text/collation rather than each
+            // branch's own pre-reconciliation one — collation-aware, so
+            // åge/age still fold under the UNION's aggregated collation
+            // (strictest branch wins — bin never folds).
+            let dedupeKey (text: string option list) =
+                List.map2 (fun (col: Collation.Collation) (cell: string option) -> cell |> Option.map col.KeyOf) collations text
+
+            let coercedFirst = coercedPairedRaw |> List.truncate firstLen
+
+            let _, coercedPaired =
+                boundaries
+                |> List.fold
+                    (fun (prevUpto: int, accRows: (string option list * Value[]) list) (isAll, upto) ->
+                        let newRows = coercedPairedRaw |> List.skip prevUpto |> List.take (upto - prevUpto)
+                        let extended = accRows @ newRows
+                        let result = if isAll then extended else extended |> List.distinctBy (fst >> dedupeKey)
+                        upto, result)
+                    (firstLen, coercedFirst)
+
             // `ORDER BY`/`LIMIT` on the combined result — same
             // alias/positional resolution as an ordinary `SELECT`, and now
             // the same typed `Value.compare` sort too, via each row's own
@@ -2355,27 +2431,59 @@ and runUnionStmt
             let projections = cols |> List.map (fun c -> Col c, None)
             let resolveOrder = resolvePositionalOrAlias projections
 
-            let orderKeyOf (typedRow: Value[]) (expr: Expr) : Value * Collation.Collation option =
+            // The combined result's own synthetic columns (name + reconciled
+            // wire type), so an `ORDER BY` expression beyond a bare output
+            // column (`ORDER BY -v`, `ORDER BY UPPER(name)`, ...) can be
+            // evaluated for real against a row instead of `orderKeyOf`
+            // silently sorting as if no `ORDER BY` were given at all — the
+            // only case it used to handle was `Col name`.
+            // Only `Name` matters here — `columnIndexOf` reads nothing else,
+            // and `ctxForOrder`'s empty `Qualifiers` means the `Type`-aware
+            // helpers (`resolvedCollation`/`enumOrdinalFor`) never look this
+            // `ColumnDef` up anyway, so the rest of the record is filler.
+            let orderColumns: ColumnDef list =
+                cols
+                |> List.map (fun c ->
+                    { Name = c
+                      Type = TVarchar 255
+                      Nullable = true
+                      Default = None
+                      AutoIncrement = false
+                      PrimaryKey = false
+                      Unique = false
+                      Generated = None
+                      Collation = None
+                      Charset = None })
+
+            let ctxForOrder = contextFactory store registry dbName (columnIndexOf orderColumns) Map.empty None
+
+            let orderKeyOf (typedRow: Value[]) (expr: Expr) : Result<Value * Collation.Collation option, EvalError> =
                 match resolveOrder expr with
                 | Col name ->
                     match cols |> List.tryFindIndex (fun c -> System.String.Equals(c, name, System.StringComparison.OrdinalIgnoreCase)) with
-                    | Some i when i < typedRow.Length -> typedRow.[i], None
-                    | _ -> VNull, None
-                | _ -> VNull, None
+                    | Some i when i < typedRow.Length -> Ok(typedRow.[i], None)
+                    | _ -> Ok(VNull, None)
+                | resolved -> evalExpr (ctxForOrder typedRow) resolved |> Result.map (fun v -> v, None)
 
-            let sortedPaired =
+            let sortedResult =
                 if orderBy.IsEmpty then
-                    coercedPaired
+                    Ok coercedPaired
                 else
                     coercedPaired
-                    |> List.sortWith (fun (_, ta) (_, tb) ->
-                        compareByOrderKeys
-                            (orderBy |> List.map snd)
-                            (orderBy |> List.map (fst >> orderKeyOf ta))
-                            (orderBy |> List.map (fst >> orderKeyOf tb)))
+                    |> traverse (fun (text, typed) ->
+                        orderBy
+                        |> traverse (fun (expr, _) -> orderKeyOf typed expr)
+                        |> Result.map (fun keys -> keys, (text, typed)))
+                    |> Result.map (
+                        List.sortWith (fun (ka, _) (kb, _) -> compareByOrderKeys (orderBy |> List.map snd) ka kb)
+                        >> List.map snd
+                    )
 
-            let limitedPaired = sortedPaired |> applyLimitOffset limit offset
-            ResultSet(cols, limitedPaired |> List.map fst), reconciled, limitedPaired |> List.map snd
+            match sortedResult with
+            | Error(code, message) -> Err(code, message), [], []
+            | Ok sortedPaired ->
+                let limitedPaired = sortedPaired |> applyLimitOffset limit offset
+                ResultSet(cols, limitedPaired |> List.map fst), reconciled, limitedPaired |> List.map snd
 
 /// One projection's `(column name, value)` pairs — a list because `SELECT
 /// *` expands to every column of the row.
@@ -3198,7 +3306,7 @@ and private runSelect
         runWindowedSelect store registry dbName columns qualifiers (List.ofSeq rows) select outer
     elif
         not select.GroupBy.IsEmpty
-        || select.Having.IsSome
+        || (select.Having |> Option.exists (containsAggregate registry))
         || projections |> List.exists (fst >> containsAggregate registry)
         || orderBy |> List.exists (fst >> containsAggregate registry)
     then
@@ -3215,7 +3323,20 @@ and private runSelect
     // expansion) itself.
     let resolveOrderExpr = resolveOrderPosition projections
 
-    let matches = whereMatches ctxFor whereExpr
+    // A non-aggregate, GROUP-BY-less `HAVING` (e.g. `HAVING v > 5`) filters
+    // per-row exactly like `WHERE` — `runGroupedSelect` only owns the case
+    // where `HAVING` actually needs a group's aggregated results (see the
+    // `containsAggregate`/`GroupBy.IsEmpty` routing above) — so it's just
+    // ANDed onto the same per-row `matches` check here.
+    let matches (row: Value[]) : Result<bool, EvalError> =
+        whereMatches ctxFor whereExpr row
+        |> Result.bind (fun keep ->
+            if not keep then
+                Ok false
+            else
+                match select.Having with
+                | None -> Ok true
+                | Some expr -> evalExpr { ctxFor row with Clause = WhereClause } expr |> Result.map (fun v -> truthy v = Some true))
 
     let projectRow (row: Value[]) : Result<(string * Value) list, EvalError> =
         projections
@@ -4366,6 +4487,29 @@ let execute (store: Store) (registry: Registry) (dbName: string) (ids: int64 * i
                                 // across tables too.
                                 let working = Array.copy flat
 
+                                // Claimed once per (srcIdx, physRow) *before*
+                                // the assignment loop below, not inside it —
+                                // checking `claims` on every single
+                                // assignment meant only that row's *first*
+                                // `SET` column for a given table ever landed
+                                // (`claims.Contains` flips true the moment
+                                // that first column claims the row, so every
+                                // later column in the same `SET` list for
+                                // the same table silently no-ops):
+                                // `SET t1.a = 10, t1.b = 20` dropped `b`.
+                                let claimedThisRow =
+                                    identities
+                                    |> List.mapi (fun srcIdx identity ->
+                                        match identity with
+                                        | None -> false
+                                        | Some physRow ->
+                                            if claims.[srcIdx].Contains physRow then
+                                                false
+                                            else
+                                                claims.[srcIdx].Add physRow |> ignore
+                                                true)
+                                    |> Array.ofList
+
                                 let rec go assignments =
                                     match assignments with
                                     | [] -> Ok()
@@ -4379,8 +4523,7 @@ let execute (store: Store) (registry: Registry) (dbName: string) (ids: int64 * i
                                             | Some physRow ->
                                                 let physIdx = sourcePhys.[srcIdx]
 
-                                                if not (claims.[srcIdx].Contains physRow) then
-                                                    claims.[srcIdx].Add physRow |> ignore
+                                                if claimedThisRow.[srcIdx] then
                                                     let existing = match pending.[physIdx].TryGetValue physRow with true, vs -> vs | false, _ -> []
                                                     pending.[physIdx].[physRow] <- existing @ [ colIdx, v ]
 

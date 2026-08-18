@@ -29,6 +29,37 @@ open Fsdb.Storage
 let private walFileName = "wal.bin"
 let private snapshotFileName = "snapshot.fsdb"
 
+/// 4-byte magic that opens every `snapshot.fsdb`/`.new` — the first line of
+/// defense against a torn/zero-filled `.new` being accepted as an empty-but-
+/// valid catalog (a truncated file's leading bytes read as zero, which
+/// `decodeCatalog` alone happily parses as `dbCount = 0`). Paired with the
+/// trailing length+CRC below for the rest of the file.
+let private snapshotMagic = [| 0x46uy; 0x53uy; 0x4Euy; 0x31uy |] // "FSN1"
+
+/// Trailer written right after the catalog payload: `[int64 payload
+/// length][uint32 crc32]`. Same incremental IEEE-802.3 CRC as
+/// `Binary.crc32` (reimplemented here, not imported, so it can be folded in
+/// one flushed chunk at a time instead of requiring the whole multi-GB
+/// payload as one `byte[]` — see `writeCatalog`).
+let private snapshotTrailerSize = 12
+
+let private crcTable =
+    [| for n in 0..255 ->
+           let mutable c = uint32 n
+
+           for _ in 1..8 do
+               c <- if (c &&& 1u) <> 0u then (c >>> 1) ^^^ 0xEDB88320u else c >>> 1
+
+           c |]
+
+let private crc32Update (crc: uint32) (data: byte[]) (count: int) : uint32 =
+    let mutable c = crc
+
+    for i in 0 .. count - 1 do
+        c <- crcTable.[int (c ^^^ uint32 data.[i]) &&& 0xFF] ^^^ (c >>> 8)
+
+    c
+
 /// `PosixSignalRegistration.Create` returns a disposable that unregisters
 /// its handler when finalized — `attach`'s SIGTERM/SIGINT registrations
 /// have to stay reachable for the process's whole lifetime, or the first GC
@@ -44,6 +75,12 @@ let private shutdownRegistrations = ResizeArray<IDisposable>()
 let private walRotateBytes = 64L * 1024L * 1024L
 let private walRotateEntries = 100_000
 
+/// Test-only override for `walRotateEntries` — lets a test force rotation
+/// deterministically (e.g. to exercise `attach`'s concurrent-write-vs-
+/// rotation path) without waiting for 100k real commits. `None` (default)
+/// keeps the fixed production threshold above; never set outside a test.
+let mutable testRotateEntriesOverride: int option = None
+
 [<DllImport("libc", SetLastError = true)>]
 extern int private fsync(int fd)
 
@@ -56,7 +93,36 @@ extern int private fsync(int fd)
 /// .NET buffer out first; the raw `fsync` then orders it.
 let private flushToDisk (s: FileStream) : unit =
     s.Flush false
-    fsync(s.SafeFileHandle.DangerousGetHandle().ToInt32()) |> ignore
+    let rc = fsync(s.SafeFileHandle.DangerousGetHandle().ToInt32())
+
+    if rc <> 0 then
+        // A `0` return is the only proof the bytes actually reached disk;
+        // silently ignoring EIO/ENOSPC here means every caller above
+        // (WAL append, snapshot write) goes on believing a write is durable
+        // when it isn't. Same "crash rather than serve an unprovable
+        // durability guarantee" call `attach`'s WAL-append failure makes.
+        let err = Marshal.GetLastWin32Error()
+        Environment.FailFast(sprintf "fsdb: fatal fsync failure (errno %d) — write cannot be confirmed durable" err)
+
+/// Fsyncs `dir` itself so a rename into it (`File.Move .new -> snapshot.fsdb`)
+/// survives a crash — a file's own `flushToDisk` only guarantees the file's
+/// *bytes*, not that the directory entry pointing at its new name landed.
+/// POSIX-only, same as `fsync` above (no Windows guard — see the deferred
+/// finding); best-effort since a directory that fails to `open` here (e.g.
+/// already gone) isn't itself an unwritten row to lose sleep over.
+[<DllImport("libc", SetLastError = true, EntryPoint = "open")>]
+extern int private posixOpen(string path, int flags)
+
+[<DllImport("libc", SetLastError = true, EntryPoint = "close")>]
+extern int private posixClose(int fd)
+
+let private fsyncDir (dir: string) : unit =
+    let O_RDONLY = 0
+    let fd = posixOpen (dir, O_RDONLY)
+
+    if fd >= 0 then
+        fsync fd |> ignore
+        posixClose fd |> ignore
 
 // ---------------------------------------------------------------------
 // Binary codecs: each DU encodes as a tag byte + its fields, written with
@@ -761,13 +827,25 @@ let private encodeTableMeta (w: Writer) (t: Table) : unit =
 /// Writes the catalog straight to `s`, flushing the `Writer` every chunk so a
 /// multi-GB snapshot never materializes as one `byte[]`. Rows are the only
 /// unbounded part, so the flush checkpoint lives in the per-row loop.
+///
+/// Framed as `[magic][payload][int64 payload length][uint32 crc32]` — see
+/// `snapshotMagic`'s doc — so `load` can tell a torn/zero-filled `.new`
+/// apart from a genuinely empty catalog instead of trusting whatever
+/// `decodeCatalog` happens to parse out of partial bytes. The CRC is folded
+/// in per flushed chunk (`crc32Update`), not computed over one assembled
+/// `byte[]`, for the same reason the flush loop exists at all.
 let private writeCatalog (s: FileStream) (catalog: Catalog) : unit =
+    s.Write(snapshotMagic, 0, snapshotMagic.Length)
     let mutable w = Writer()
+    let mutable crc = 0xFFFFFFFFu
+    let mutable payloadLen = 0L
 
     let flush () =
         if w.Count > 0 then
             let bytes = w.ToArray()
             s.Write(bytes, 0, bytes.Length)
+            crc <- crc32Update crc bytes bytes.Length
+            payloadLen <- payloadLen + int64 bytes.Length
             w.Clear()
 
     w.WriteInt32LE(Map.count catalog)
@@ -790,6 +868,12 @@ let private writeCatalog (s: FileStream) (catalog: Catalog) : unit =
 
     flush ()
 
+    let trailer = Writer()
+    trailer.WriteInt64LE payloadLen
+    trailer.WriteUInt32LE(~~~crc)
+    let trailerBytes = trailer.ToArray()
+    s.Write(trailerBytes, 0, trailerBytes.Length)
+
 let private decodeTable (r: #IReader) : Table =
     let originalName = readStr r
     let columns = List.init (r.ReadInt32LE()) (fun _ -> decodeColumnDef r)
@@ -810,6 +894,61 @@ let private decodeTable (r: #IReader) : Table =
           RowsArray = ImmutableArray.CreateRange rows
           NextAutoId = nextAutoId
           UniqueIndex = Map.empty }
+
+/// Rejects a `snapshot.fsdb`/`.new` whose magic, claimed payload length, or
+/// CRC doesn't match what's actually on disk — the guard `load` needs before
+/// trusting a `.new` as authoritative (see `writeCatalog`'s doc): a
+/// torn/zero-filled write parses to a "valid" empty catalog otherwise,
+/// silently wiping every prior row once it's promoted over the real
+/// snapshot and the WAL is truncated. Streams the payload in bounded chunks,
+/// same reasoning as `writeCatalog`, so checking a multi-GB snapshot doesn't
+/// need a multi-GB buffer.
+let private verifySnapshotIntegrity (path: string) : bool =
+    try
+        use s = new FileStream(path, FileMode.Open, FileAccess.Read)
+        let total = s.Length
+
+        if total < int64 snapshotMagic.Length + int64 snapshotTrailerSize then
+            false
+        else
+            let header = Array.zeroCreate<byte> snapshotMagic.Length
+
+            if s.Read(header, 0, header.Length) <> header.Length || header <> snapshotMagic then
+                false
+            else
+                let payloadLen = total - int64 snapshotMagic.Length - int64 snapshotTrailerSize
+                s.Seek(int64 snapshotMagic.Length + payloadLen, SeekOrigin.Begin) |> ignore
+                let trailerBytes = Array.zeroCreate<byte> snapshotTrailerSize
+
+                if s.Read(trailerBytes, 0, trailerBytes.Length) <> trailerBytes.Length then
+                    false
+                else
+                    let trailer = Reader(trailerBytes)
+                    let claimedLen = trailer.ReadInt64LE()
+                    let claimedCrc = trailer.ReadUInt32LE()
+
+                    if claimedLen <> payloadLen then
+                        false
+                    else
+                        s.Seek(int64 snapshotMagic.Length, SeekOrigin.Begin) |> ignore
+                        let buf = Array.zeroCreate<byte> (1 <<< 16)
+                        let mutable crc = 0xFFFFFFFFu
+                        let mutable remaining = payloadLen
+                        let mutable ok = true
+
+                        while remaining > 0L && ok do
+                            let toRead = int (min (int64 buf.Length) remaining)
+                            let n = s.Read(buf, 0, toRead)
+
+                            if n <= 0 then
+                                ok <- false
+                            else
+                                crc <- crc32Update crc buf n
+                                remaining <- remaining - int64 n
+
+                        ok && (~~~crc) = claimedCrc
+    with _ ->
+        false
 
 let private decodeCatalog (r: #IReader) : Catalog =
     let dbCount = r.ReadInt32LE()
@@ -837,18 +976,26 @@ let private decodeCatalog (r: #IReader) : Catalog =
 /// when it's there and parses cleanly. A crash *before* the fsync leaves an
 /// incomplete/absent `.new` and the WAL untouched, so `load` falls back to
 /// the old snapshot + full WAL replay — nothing lost either way.
+/// The filesystem half of `snapshotNow`, factored out so `attach`'s
+/// rotation/shutdown paths (see `attach`'s `replica`) can write a snapshot
+/// from a catalog other than the live `store.Catalog` while still sharing
+/// every on-disk guarantee (integrity trailer, fsync, fsynced rename).
+/// Callers are responsible for holding `store.Lock` for the duration.
+let private writeSnapshotAndTruncate (dataDir: string) (catalog: Catalog) : unit =
+    Directory.CreateDirectory dataDir |> ignore
+    let finalPath = Path.Combine(dataDir, snapshotFileName)
+    let newPath = finalPath + ".new"
+
+    (use s = new FileStream(newPath, FileMode.Create, FileAccess.Write)
+     writeCatalog s catalog
+     flushToDisk s)
+
+    File.WriteAllText(Path.Combine(dataDir, walFileName), "")
+    File.Move(newPath, finalPath, true)
+    fsyncDir dataDir
+
 let snapshotNow (dataDir: string) (store: Store) : unit =
-    lock store.Lock (fun () ->
-        Directory.CreateDirectory dataDir |> ignore
-        let finalPath = Path.Combine(dataDir, snapshotFileName)
-        let newPath = finalPath + ".new"
-
-        (use s = new FileStream(newPath, FileMode.Create, FileAccess.Write)
-         writeCatalog s store.Catalog
-         flushToDisk s)
-
-        File.WriteAllText(Path.Combine(dataDir, walFileName), "")
-        File.Move(newPath, finalPath, true))
+    lock store.Lock (fun () -> writeSnapshotAndTruncate dataDir store.Catalog)
 
 /// Loads durable state from `dataDir` into a fresh `Store`: the snapshot if
 /// one exists, then any WAL entries written after it. Call once at startup,
@@ -871,12 +1018,27 @@ let load (dataDir: string) : Store =
     // A streamed reader, not `File.ReadAllBytes`: a multi-GB snapshot would
     // exceed the `byte[]` size limit if slurped whole. `StreamReader` decodes
     // it a buffer at a time.
+    // Skip the `FSN1` magic only when it's actually there. A committed
+    // `snapshot.fsdb` written before magic/CRC framing existed is pure
+    // payload from offset 0 — seeking +4 unconditionally would drop its
+    // first 4 bytes and crash-loop the server on every start after an
+    // upgrade. `.new` always carries the magic (`verifySnapshotIntegrity`
+    // requires it), so only the legacy committed snapshot needs this.
     let readSnapshot (path: string) : Catalog =
         use s = new FileStream(path, FileMode.Open, FileAccess.Read)
+        let header = Array.zeroCreate<byte> snapshotMagic.Length
+        let read = s.Read(header, 0, header.Length)
+        let start = if read = snapshotMagic.Length && header = snapshotMagic then int64 snapshotMagic.Length else 0L
+        s.Seek(start, SeekOrigin.Begin) |> ignore
         decodeCatalog (StreamReader(s))
 
+    // `verifySnapshotIntegrity` first: a `.new` that fails its magic/length/
+    // CRC check is a torn write from a crash mid-`writeCatalog`, not
+    // authoritative data — falls straight through to the untouched old
+    // snapshot + full WAL below, same as a `.new` that doesn't exist at all.
     let loadedFromNew =
         File.Exists newPath
+        && verifySnapshotIntegrity newPath
         && (try
                 setCatalog store (readSnapshot newPath)
                 true
@@ -886,6 +1048,7 @@ let load (dataDir: string) : Store =
     if loadedFromNew then
         File.Move(newPath, snapshotPath, true)
         File.WriteAllText(walPath, "")
+        fsyncDir dataDir
     else
         if File.Exists snapshotPath then
             setCatalog store (readSnapshot snapshotPath)
@@ -934,6 +1097,42 @@ let attach (dataDir: string) (store: Store) : unit =
     let walPath = Path.Combine(dataDir, walFileName)
     let entryCount = ref 0
 
+    // `Storage`'s writers publish a mutation to `store.Catalog` (the
+    // `Database ref` swap in `withDatabase`) and only *afterwards* call
+    // `emit`, which is what actually reaches `appendRecord` below — two
+    // separate, unlocked steps. A rotation/shutdown snapshot that read
+    // `store.Catalog` directly could land in that gap: it'd capture a row
+    // that's visible in the catalog but whose WAL record hasn't been
+    // appended yet, and — since the same snapshot also truncates the WAL —
+    // that record then lands in the *truncated* WAL right after, applying
+    // the row twice on the next replay (`load`'s snapshot-then-WAL replay
+    // has no way to tell the duplicate apart from a real second insert).
+    //
+    // `replica` closes that window by never trusting the live catalog for a
+    // snapshot at all: it starts as a copy of `store`'s catalog at `attach`
+    // time (before any commit can reach it) and from then on only ever
+    // advances by replaying an `event` right here, immediately after that
+    // same event's WAL record is confirmed on disk — both steps inside the
+    // one `store.Lock` critical section `emit` already wraps every
+    // `appendRecord` call in. So `replica.Catalog` is always exactly "what
+    // the WAL can currently prove", never ahead of it — a snapshot taken
+    // from it can truncate the WAL without ever discarding a record that
+    // hasn't been folded in yet.
+    let replica = Storage.create ()
+    setCatalog replica store.Catalog
+    replica.ForeignKeyChecks <- false
+
+    // Rotates from `replica`, not `store` — see `replica`'s doc above.
+    // `reindexAllForReplay` mirrors `load`'s own "reindex once, after every
+    // event up to this point has landed" — `applyEvent`'s row-update/delete
+    // path (`mapTableRows`) deliberately leaves `UniqueIndex` stale per
+    // event for the same reason `load` accepts it: rebuilding it on every
+    // single replayed event would cost a full-table rescan per WAL record;
+    // once per rotation matches `load`'s own amortization.
+    let rotateFromReplica () =
+        reindexAllForReplay replica
+        writeSnapshotAndTruncate dataDir replica.Catalog
+
     let appendRecord (event: CommitEvent) =
         let walSize =
             try
@@ -955,15 +1154,31 @@ let attach (dataDir: string) (store: Store) : unit =
                 Environment.FailFast(sprintf "fsdb: fatal WAL append failure: %s" ex.Message, ex)
                 reraise ()
 
+        // `event`'s WAL record is durably on disk as of the line above —
+        // safe to fold into `replica` now (see `replica`'s doc). `applyEvent`
+        // is the same function `load` trusts for a cold-start WAL replay, so
+        // a failure here would mean that replay itself can't reproduce this
+        // event either — logged, not fatal, since the WAL (the actual
+        // durability guarantee) already has the record regardless of what
+        // `replica` does with it; only `replica`-sourced rotation snapshots
+        // would miss the row until the next full replay (a fresh `load`)
+        // rebuilds `replica`'s equivalent from scratch.
+        (try
+            applyEvent replica event
+         with ex ->
+             Log.diagnostic "fsdb: WAL mirror apply failed: %s" ex.Message)
+
         entryCount := !entryCount + 1
 
-        if walSize > walRotateBytes || !entryCount > walRotateEntries then
-            snapshotNow dataDir store
+        let entryLimit = defaultArg testRotateEntriesOverride walRotateEntries
+
+        if walSize > walRotateBytes || !entryCount > entryLimit then
+            rotateFromReplica ()
             entryCount := 0
 
     store.OnCommit <- Some appendRecord
 
-    let onShutdown (_: PosixSignalContext) = snapshotNow dataDir store
+    let onShutdown (_: PosixSignalContext) = lock store.Lock rotateFromReplica
 
     // `PosixSignalRegistration` unregisters its handler when finalized —
     // `attach` returning right after this would leave nothing holding a

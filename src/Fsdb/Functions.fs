@@ -78,10 +78,35 @@ let private anyNull (args: Value list) : bool =
 /// ruled NULL out, so every call site isn't re-deriving the same default.
 let private req (v: Value) : string = v |> toText |> Option.defaultValue ""
 
+/// `LENGTH` counts UTF-8 bytes (MySQL's `LENGTH` is a byte length, not a
+/// character count — that's `CHAR_LENGTH`), so the two aren't aliases of the
+/// same function despite `.NET string.Length` making them look
+/// interchangeable for ASCII-only test data. `VBytes`' own byte count is
+/// used directly rather than round-tripping through `toText` (which decodes
+/// raw bytes 1:1 as Latin-1 chars for display, and re-encoding *that* as
+/// UTF-8 would inflate any byte ≥ 0x80 to two bytes).
 let private lengthFn: Scalar =
     function
     | [ VNull ] -> VNull
-    | [ v ] -> v |> toText |> Option.defaultValue "" |> String.length |> int64 |> VInt
+    | [ VBytes b ] -> VInt(int64 b.Length)
+    | [ v ] -> v |> toText |> Option.defaultValue "" |> Text.Encoding.UTF8.GetByteCount |> int64 |> VInt
+    | _ -> VNull
+
+/// `CHAR_LENGTH` counts Unicode code points, not UTF-16 units — a surrogate
+/// pair (an astral character) is one character, not two.
+let private charLengthFn: Scalar =
+    function
+    | [ VNull ] -> VNull
+    | [ v ] ->
+        let s = v |> toText |> Option.defaultValue ""
+        let mutable n = 0
+        let mutable i = 0
+
+        while i < s.Length do
+            i <- i + (if Char.IsHighSurrogate s.[i] && i + 1 < s.Length && Char.IsLowSurrogate s.[i + 1] then 2 else 1)
+            n <- n + 1
+
+        VInt(int64 n)
     | _ -> VNull
 
 let private coalesceFn (args: Value list) : Value =
@@ -107,20 +132,46 @@ let private absFn: Scalar =
     | [ v ] -> VDouble(abs (toDouble v))
     | _ -> VNull
 
+/// `Math.Round` throws outside 0..15 (double) / 0..28 (decimal) digits, so
+/// `ROUND(x, -n)` — MySQL rounds to the left of the decimal point, e.g.
+/// `ROUND(123.456, -1) = 120` — needs its own scaling rather than passing a
+/// negative digit count straight through. Used for digit counts outside the
+/// BCL's supported range in either direction; a factor of 0/∞ (digits far
+/// outside a double's meaningful exponent range) collapses to 0, matching
+/// what rounding to a vastly-larger-than-the-value power of 10 means.
+let private roundDoubleAt (d: float) (digits: int) : float =
+    if digits >= 0 && digits <= 15 then
+        Math.Round(d, digits, MidpointRounding.AwayFromZero)
+    else
+        let factor = Math.Pow(10.0, float -digits)
+        if Double.IsInfinity factor || factor = 0.0 then 0.0
+        else Math.Round(d / factor, MidpointRounding.AwayFromZero) * factor
+
+let private roundDecimalAt (d: decimal) (digits: int) : decimal =
+    if digits >= 0 && digits <= 28 then
+        Math.Round(d, digits, MidpointRounding.AwayFromZero)
+    else
+        try
+            let factor = pown 10M -digits
+            Math.Round(d / factor, MidpointRounding.AwayFromZero) * factor
+        with :? OverflowException ->
+            0M
+
 /// ROUND(x) rounds to the nearest integer; ROUND(x, n) to `n` decimal
-/// places, matching (roughly) MySQL's half-away-from-zero rounding.
+/// places (negative `n` rounds left of the point), matching (roughly)
+/// MySQL's half-away-from-zero rounding.
 let private roundFn: Scalar =
     function
     | [ VNull ]
     | [ VNull; _ ] -> VNull
     | [ VInt i ] -> VInt i
-    | [ VInt i; _ ] -> VInt i
+    | [ VInt i; VInt digits ] -> if digits >= 0L then VInt i else VInt(int64 (roundDecimalAt (decimal i) (int digits)))
     | [ VDecimal d ] -> VDecimal(Math.Round(d, MidpointRounding.AwayFromZero))
-    | [ VDecimal d; VInt digits ] -> VDecimal(Math.Round(d, int digits, MidpointRounding.AwayFromZero))
+    | [ VDecimal d; VInt digits ] -> VDecimal(roundDecimalAt d (int digits))
     | [ VDouble d ] -> VDouble(Math.Round(d, MidpointRounding.AwayFromZero))
-    | [ VDouble d; VInt digits ] -> VDouble(Math.Round(d, int digits, MidpointRounding.AwayFromZero))
+    | [ VDouble d; VInt digits ] -> VDouble(roundDoubleAt d (int digits))
     | [ v ] -> VDouble(Math.Round(toDouble v, MidpointRounding.AwayFromZero))
-    | [ v; VInt digits ] -> VDouble(Math.Round(toDouble v, int digits, MidpointRounding.AwayFromZero))
+    | [ v; VInt digits ] -> VDouble(roundDoubleAt (toDouble v) (int digits))
     | _ -> VNull
 
 /// `MOD(a, b)` (and `%`, which desugars to this in `Parser`) — MySQL's
@@ -672,11 +723,11 @@ let private addInterval (dt: DateTime) (amount: float) (unit: string) : DateTime
 /// returns is exactly `dateAddCore`'s 2-arg-form input. Still independently
 /// testable by evaluating the registered functions with `Value` args
 /// directly.
-let private intervalMarker = " INTERVAL "
+let private intervalMarker = "\x01INTERVAL\x01"
 
 let private intervalFn: Scalar =
     function
-    | [ amt; unit ] -> VString(intervalMarker + req amt + " " + req unit)
+    | [ amt; unit ] -> VString(intervalMarker + req amt + "\x01" + req unit)
     | _ -> VNull
 
 /// Reads the `INTERVAL` encoding above, or tolerates a plain `"N UNIT"`
@@ -684,7 +735,7 @@ let private intervalFn: Scalar =
 let private tryParseIntervalArg (v: Value) : (float * string) option =
     match v with
     | VString s when s.StartsWith intervalMarker ->
-        match s.Substring(intervalMarker.Length).Split(' ') with
+        match s.Substring(intervalMarker.Length).Split('\x01') with
         | [| n; u |] ->
             match Double.TryParse(n, NumberStyles.Float, CultureInfo.InvariantCulture) with
             | true, d -> Some(d, u)
@@ -838,7 +889,9 @@ let private timestampFn: Scalar =
 let private timeFn: Scalar =
     function
     | [ v ] when not (anyNull [ v ]) ->
-        asDateTime v |> Option.map (fun dt -> VString(dt.ToString("HH:mm:ss"))) |> Option.defaultValue VNull
+        asDateTime v
+        |> Option.map (fun dt -> VString(dt.ToString("HH:mm:ss", CultureInfo.InvariantCulture)))
+        |> Option.defaultValue VNull
     | _ -> VNull
 
 let private datePartFn (f: DateTime -> int) : Scalar =
@@ -862,17 +915,22 @@ let private monthNameFn: Scalar =
 /// `WEEK(date[, mode])` — ponytail: only the mode-0-ish default (Sunday
 /// first day of the week) is modeled; a `mode` argument, if given, is
 /// accepted but ignored rather than implementing all 8 MySQL week modes.
+/// MySQL mode-0 week numbering: weeks start on Sunday, and any days before
+/// the year's first Sunday fall in week 0 — not `Calendar.GetWeekOfYear`'s
+/// `FirstDay` rule, which puts Jan 1 itself in week 1 regardless of what day
+/// of the week it falls on.
+let private weekMode0 (dt: DateTime) : int64 =
+    let jan1 = DateTime(dt.Year, 1, 1)
+    let firstSunday = jan1.AddDays(float ((7 - int jan1.DayOfWeek) % 7))
+    if dt < firstSunday then 0L else int64 ((dt - firstSunday).Days / 7) + 1L
+
 let private weekFn: Scalar =
     function
-    | (v :: _) when not (anyNull [ v ]) ->
-        asDateTime v
-        |> Option.map (fun dt ->
-            VInt(int64 (CultureInfo.InvariantCulture.Calendar.GetWeekOfYear(dt, CalendarWeekRule.FirstDay, DayOfWeek.Sunday))))
-        |> Option.defaultValue VNull
+    | (v :: _) when not (anyNull [ v ]) -> asDateTime v |> Option.map (weekMode0 >> VInt) |> Option.defaultValue VNull
     | _ -> VNull
 
 let private curDateFn: Scalar = fun _ -> VDate(DateOnly.FromDateTime DateTime.Now)
-let private curTimeFn: Scalar = fun _ -> VString(DateTime.Now.ToString "HH:mm:ss")
+let private curTimeFn: Scalar = fun _ -> VString(DateTime.Now.ToString("HH:mm:ss", CultureInfo.InvariantCulture))
 
 let private unixEpoch = DateTime(1970, 1, 1, 0, 0, 0, DateTimeKind.Unspecified)
 
@@ -921,7 +979,10 @@ let private timestampDiffFn: Scalar =
                 | "MONTH" ->
                     let earlier, later, sign = if db < da then db, da, -1.0 else da, db, 1.0
                     sign * (float ((later.Year - earlier.Year) * 12 + later.Month - earlier.Month) - (if later.Day < earlier.Day then 1.0 else 0.0))
-                | "QUARTER" -> float ((db.Year - da.Year) * 12 + db.Month - da.Month) / 3.0
+                | "QUARTER" ->
+                    let earlier, later, sign = if db < da then db, da, -1.0 else da, db, 1.0
+                    let months = float ((later.Year - earlier.Year) * 12 + later.Month - earlier.Month) - (if later.Day < earlier.Day then 1.0 else 0.0)
+                    sign * Math.Truncate(months / 3.0)
                 | "YEAR" ->
                     let earlier, later, sign = if db < da then db, da, -1.0 else da, db, 1.0
                     sign * (float (later.Year - earlier.Year) - (if (later.Month, later.Day) < (earlier.Month, earlier.Day) then 1.0 else 0.0))
@@ -996,7 +1057,11 @@ let private strToDateFn: Scalar =
 /// start offset.
 let private resolveStart (len: int) (pos: int) : int option =
     if pos > 0 then Some(min (pos - 1) len)
-    elif pos < 0 then Some(max 0 (len + pos))
+    elif pos < 0 then
+        // A negative position further back than the string is long has no
+        // valid start (MySQL: SUBSTRING('hello', -10) = ''), unlike clamping
+        // to 0 which would return the whole string instead.
+        if len + pos < 0 then None else Some(len + pos)
     else None
 
 let private substringFn: Scalar =
@@ -1017,11 +1082,41 @@ let private substringFn: Scalar =
         | Some start -> VString(str.Substring(start, min takeLen (str.Length - start)))
     | _ -> VNull
 
+/// Character-by-character substring search using the engine's default
+/// collation's `CharEquals` rather than `StringComparison.OrdinalIgnoreCase`
+/// — so accent/case sensitivity follows the collation (e.g. `_bin`/`_cs`
+/// don't fold, `_ai_ci` also ignores accents) instead of always being
+/// ordinal case-insensitive. Not per-column collation-aware (that needs the
+/// column's collation threaded through `Scalar`'s signature, which this
+/// engine doesn't do yet) — the shared default is still strictly more
+/// correct than a hardcoded ordinal fold.
+let private collationIndexOf (str: string) (sub: string) (startIdx: int) : int =
+    if sub = "" then
+        startIdx
+    else
+        let charEquals = Collation.defaultCollation.CharEquals
+        let maxStart = str.Length - sub.Length
+        let mutable result = -1
+        let mutable i = startIdx
+
+        while result < 0 && i <= maxStart do
+            let mutable matched = true
+            let mutable j = 0
+
+            while matched && j < sub.Length do
+                if not (charEquals str.[i + j] sub.[j]) then matched <- false
+                j <- j + 1
+
+            if matched then result <- i
+            i <- i + 1
+
+        result
+
 let private locateAt (str: string) (sub: string) (startIdx: int) : Value =
     if startIdx > str.Length || startIdx < 0 then
         VInt 0L
     else
-        VInt(int64 (str.IndexOf(sub, startIdx, StringComparison.OrdinalIgnoreCase) + 1))
+        VInt(int64 (collationIndexOf str sub startIdx + 1))
 
 let private locateFn: Scalar =
     function
@@ -1051,7 +1146,9 @@ let private padFn (left: bool) : Scalar =
         let str, pad = req s, req p
         let targetLen = int (toDouble lenV)
 
-        if targetLen <= 0 then
+        if targetLen < 0 then
+            VNull
+        elif targetLen = 0 then
             VString ""
         elif targetLen <= str.Length then
             VString(str.Substring(0, targetLen))
@@ -1078,23 +1175,37 @@ let private rightFn: Scalar =
         VString(str.Substring(str.Length - k))
     | _ -> VNull
 
+/// MySQL's `max_allowed_packet` default/hard ceiling — `REPEAT`/`SPACE`
+/// return NULL rather than allocate past it, instead of an unbounded string
+/// for a runaway count.
+let private maxAllowedPacket = 16 * 1024 * 1024
+
 let private repeatFn: Scalar =
     function
     | [ s; n ] when not (anyNull [ s; n ]) ->
         let k = int (toDouble n)
-        VString(if k <= 0 then "" else String.replicate k (req s))
+        let str = req s
+        if k <= 0 then VString ""
+        elif int64 k * int64 str.Length > int64 maxAllowedPacket then VNull
+        else VString(String.replicate k str)
     | _ -> VNull
 
 let private spaceFn: Scalar =
     function
-    | [ n ] when not (anyNull [ n ]) -> VString(String(' ', max 0 (int (toDouble n))))
+    | [ n ] when not (anyNull [ n ]) ->
+        let k = max 0 (int (toDouble n))
+        if k > maxAllowedPacket then VNull else VString(String(' ', k))
     | _ -> VNull
 
+/// The first byte of the string's UTF-8 encoding, not the first UTF-16 code
+/// unit — `ASCII('é')` is `195` (0xC3, the lead byte of é's 2-byte UTF-8
+/// encoding) in MySQL, not é's UTF-16 value 233.
 let private asciiFn: Scalar =
     function
+    | [ VBytes b ] -> VInt(if b.Length = 0 then 0L else int64 b.[0])
     | [ s ] when not (anyNull [ s ]) ->
         let str = req s
-        VInt(if str = "" then 0L else int64 (byte str.[0]))
+        VInt(if str = "" then 0L else int64 (Text.Encoding.UTF8.GetBytes(str).[0]))
     | _ -> VNull
 
 /// Minimal `CHAR(n1, n2, ...)`: builds a string from Unicode code points
@@ -1113,7 +1224,7 @@ let private charFn: Scalar =
 let private hexFn: Scalar =
     function
     | [ VInt i ] -> VString(i.ToString "X")
-    | [ VString s ] -> VString(s |> Seq.map (fun c -> (int c).ToString "X2") |> String.concat "")
+    | [ VString s ] -> VString(Text.Encoding.UTF8.GetBytes s |> Array.map (fun b -> b.ToString "X2") |> String.concat "")
     | [ VBytes b ] -> VString(b |> Array.map (fun x -> x.ToString "X2") |> String.concat "")
     | [ v ] when not (anyNull [ v ]) -> VString((int64 (toDouble v)).ToString "X")
     | _ -> VNull
@@ -1204,7 +1315,7 @@ let private findInSetFn: Scalar =
     | [ s; list ] when not (anyNull [ s; list ]) ->
         let target = req s
 
-        match (req list).Split(',') |> Array.tryFindIndex (fun x -> String.Equals(x, target, StringComparison.OrdinalIgnoreCase)) with
+        match (req list).Split(',') |> Array.tryFindIndex (fun x -> Collation.defaultCollation.Equals x target) with
         | Some i -> VInt(int64 (i + 1))
         | None -> VInt 0L
     | _ -> VNull
@@ -1223,6 +1334,7 @@ let private quoteFn: Scalar =
             | '\000' -> sb.Append "\\0" |> ignore
             | '\n' -> sb.Append "\\n" |> ignore
             | '\r' -> sb.Append "\\r" |> ignore
+            | '\026' -> sb.Append "\\Z" |> ignore
             | c -> sb.Append c |> ignore
 
         sb.Append '\'' |> ignore
@@ -1444,7 +1556,7 @@ let builtins: Registry =
     |> registerScalar "UPPER" (textMap (fun s -> s.ToUpperInvariant()))
     |> registerScalar "LOWER" (textMap (fun s -> s.ToLowerInvariant()))
     |> registerScalar "LENGTH" lengthFn
-    |> registerScalar "CHAR_LENGTH" lengthFn
+    |> registerScalar "CHAR_LENGTH" charLengthFn
     |> registerScalar "COALESCE" coalesceFn
     |> registerScalar "IFNULL" ifNullFn
     |> registerScalar "IF" ifFn

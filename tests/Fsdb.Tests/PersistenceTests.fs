@@ -47,6 +47,23 @@ let private usersColumns =
         Collation = None
         Charset = None } ]
 
+/// No PK/AUTO_INCREMENT/UNIQUE at all — unlike `usersColumns`, a row
+/// physically replayed twice (the exact bug a race between rotation and an
+/// in-flight WAL append would produce) inserts twice instead of the second
+/// copy silently dying on a uniqueness violation. Needed to make a
+/// duplicate-replay regression actually visible as a row-count difference.
+let private tagColumns =
+    [ { Name = "tag"
+        Type = TVarchar 64
+        Nullable = false
+        Default = None
+        AutoIncrement = false
+        PrimaryKey = false
+        Unique = false
+        Generated = None
+        Collation = None
+        Charset = None } ]
+
 let private walPath dir = Path.Combine(dir, "wal.bin")
 let private snapshotPath dir = Path.Combine(dir, "snapshot.fsdb")
 
@@ -655,4 +672,73 @@ let tests =
               | Ok table ->
                   Expect.equal table.TableCharset (Some "utf8mb4") "the declared charset survives the restart"
                   Expect.equal table.TableCollation (Some "utf8mb4_unicode_ci") "the declared collation survives the restart"
-              | Error e -> failtestf "expected table 'decl' to reload, got %A" e ]
+              | Error e -> failtestf "expected table 'decl' to reload, got %A" e
+
+          testCase "a torn/zero-filled .new is rejected, not promoted as an empty catalog that wipes the real snapshot"
+          <| fun _ ->
+              let dir = tempDataDir ()
+              let store = load dir
+              attach dir store
+              createTable store defaultDatabase "t" usersColumns [] [] None None |> ignore
+              insertRows store defaultDatabase "t" None [ [ VNull; VString "keep-me"; VNull ] ] |> ignore
+              snapshotNow dir store // a real, valid snapshot.fsdb now exists
+
+              // Simulate a crash mid-`writeCatalog`: `.new` exists but is
+              // truncated to a handful of zero bytes — `decodeCatalog` alone
+              // would happily parse that as `dbCount = 0`, an empty-but-
+              // "valid" catalog, and `load` used to promote it over the real
+              // snapshot on nothing more than "it parsed".
+              File.WriteAllBytes(snapshotPath dir + ".new", Array.zeroCreate<byte> 8)
+
+              let reloaded = load dir
+              let names = rowsOf reloaded defaultDatabase "t" |> List.map (fun r -> r.[1])
+              Expect.containsAll names [ VString "keep-me" ] "the real snapshot survives a torn .new instead of being wiped"
+              Expect.isTrue (File.Exists(snapshotPath dir + ".new")) "the rejected .new is left alone, not promoted"
+
+          testCase "concurrent writes to two databases across a forced WAL rotation replay with no duplicated/lost rows"
+          <| fun _ ->
+              let dir = tempDataDir ()
+              let store = load dir
+              // Rotate on every single WAL entry instead of the real 100k —
+              // forces `attach`'s rotation to fire continuously *during* the
+              // write storm below, landing squarely (and often) in the
+              // window `Storage`'s writers leave between publishing a row to
+              // the catalog and this module's WAL append actually recording
+              // it (see `attach`'s `replica` doc): before the fix, a
+              // rotation caught in that window could duplicate the in-flight
+              // row (already in the snapshot, then appended again to the
+              // freshly-truncated WAL). Primarily a stress/regression check
+              // that heavy concurrent multi-database writes survive
+              // continuous rotation with exactly the right row count — the
+              // race itself is a narrow timing window, not reliably
+              // reproducible on demand.
+              testRotateEntriesOverride <- Some 0
+
+              try
+                  attach dir store
+                  createDatabase store "db_a" |> ignore
+                  createDatabase store "db_b" |> ignore
+                  createTable store "db_a" "t" tagColumns [] [] None None |> ignore
+                  createTable store "db_b" "t" tagColumns [] [] None None |> ignore
+
+                  let perThread = 300
+
+                  let writer (dbName: string) (tag: string) =
+                      fun () ->
+                          for i in 1..perThread do
+                              insertRows store dbName "t" None [ [ VString(sprintf "%s-%d" tag i) ] ] |> ignore
+
+                  let threads =
+                      [ writer "db_a" "a1"; writer "db_a" "a2"; writer "db_b" "b1"; writer "db_b" "b2" ]
+                      |> List.map (fun f -> System.Threading.Thread(System.Threading.ThreadStart f))
+
+                  threads |> List.iter (fun t -> t.Start())
+                  threads |> List.iter (fun t -> t.Join())
+
+                  let reloaded = load dir
+                  let countA = rowsOf reloaded "db_a" "t" |> List.length
+                  let countB = rowsOf reloaded "db_b" "t" |> List.length
+                  Expect.equal countA (2 * perThread) "db_a has exactly its inserted rows, no dup/loss across rotation"
+                  Expect.equal countB (2 * perThread) "db_b has exactly its inserted rows, no dup/loss across rotation"
+              finally
+                  testRotateEntriesOverride <- None ]

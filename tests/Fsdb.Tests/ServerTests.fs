@@ -80,4 +80,36 @@ let tests =
                   let! deprecated = run (ClientProtocol41 ||| ClientDeprecateEof)
                   let! legacy = run ClientProtocol41
                   Expect.equal (List.length legacy) (List.length deprecated + 1) "legacy path has one extra packet" }
+              |> Async.RunSynchronously
+
+          // A half-open peer that never sends a complete packet (here: never
+          // sends anything at all) must eventually be reaped rather than
+          // pinning a thread and a socket forever — `Socket.ReceiveTimeout`
+          // doesn't bound `ReadAsync`, so this exercises the `Task.WhenAny`
+          // race directly (see `readPacketWithTimeoutMs`'s doc). Uses a real
+          // loopback socket pair, not a `MemoryStream`, since the point is
+          // the socket actually getting closed out from under a stuck read.
+          testCase "readPacketWithTimeoutMs reaps a connection that never sends a packet"
+          <| fun _ ->
+              async {
+                  let listener = new Net.Sockets.TcpListener(Net.IPAddress.Loopback, 0)
+                  listener.Start()
+                  let port = (listener.LocalEndpoint :?> Net.IPEndPoint).Port
+
+                  try
+                      let accepted = listener.AcceptTcpClientAsync() |> Async.AwaitTask
+
+                      use idleClient = new Net.Sockets.TcpClient()
+                      do! idleClient.ConnectAsync(Net.IPAddress.Loopback, port) |> Async.AwaitTask
+
+                      use! serverSideClient = accepted
+                      let stream = serverSideClient.GetStream()
+
+                      let sw = Diagnostics.Stopwatch.StartNew()
+                      let! result = Fsdb.Server.readPacketWithTimeoutMs 300 serverSideClient stream
+                      Expect.equal result None "a connection that never sends anything is reaped, not hung forever"
+                      Expect.isLessThan sw.ElapsedMilliseconds 5000L "reaped close to the requested timeout, not by some other means"
+                  finally
+                      listener.Stop()
+              }
               |> Async.RunSynchronously ]

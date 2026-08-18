@@ -203,4 +203,27 @@ let tests =
               let small = Writer()
               small.WriteInt16LE(-1)
               Expect.equal (readBinaryValue (Reader(small.ToArray())) TypeShort false) (VInt(-1L)) "short signed"
-              Expect.equal (readBinaryValue (Reader(small.ToArray())) TypeShort true) (VInt 65535L) "short unsigned" ]
+              Expect.equal (readBinaryValue (Reader(small.ToArray())) TypeShort true) (VInt 65535L) "short unsigned"
+
+          testCase "binaryRowPayload writes DATETIME with length 7 when there's no sub-second part"
+          <| fun _ ->
+              let payload = binaryRowPayload [ TypeDateTime ] [ Some "2024-03-05 13:45:09" ]
+              let r = Reader(payload)
+              r.ReadBytes 2 |> ignore // row header byte + null bitmap
+              Expect.equal (r.ReadByte ()) 7uy "no microseconds: the compact 7-byte form"
+
+          testCase "binaryRowPayload writes the 11-byte DATETIME form when microseconds are non-zero"
+          <| fun _ ->
+              // Protocol.fs used to always write length 7, silently dropping
+              // any sub-second precision a DATETIME(6)/TIMESTAMP(6) value had.
+              let payload = binaryRowPayload [ TypeDateTime ] [ Some "2024-03-05 13:45:09.123456" ]
+              let r = Reader(payload)
+              r.ReadBytes 2 |> ignore // row header byte + null bitmap
+              Expect.equal (r.ReadByte ()) 11uy "microseconds present: the full 11-byte form"
+              Expect.equal (r.ReadInt16LE ()) 2024 "year"
+              Expect.equal (r.ReadByte ()) 3uy "month"
+              Expect.equal (r.ReadByte ()) 5uy "day"
+              Expect.equal (r.ReadByte ()) 13uy "hour"
+              Expect.equal (r.ReadByte ()) 45uy "minute"
+              Expect.equal (r.ReadByte ()) 9uy "second"
+              Expect.equal (r.ReadInt32LE ()) 123456 "microseconds" ]

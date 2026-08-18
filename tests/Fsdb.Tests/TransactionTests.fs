@@ -127,6 +127,55 @@ let tests =
               | ResultSet(_, [ [ Some "1" ] ]) -> ()
               | result -> failtestf "expected the transaction's own write to also be there, got %A" result
 
+          testCase "a transaction writing into a qualified other database holds THAT database's gate too, not just its own session database"
+          <| fun _ ->
+              // The gate used to be keyed only on `session.Database`
+              // (`tx_db_x` here) — a qualified `INSERT INTO
+              // tx_db_y.t` wrote a database whose gate this transaction
+              // never held, so a concurrent autocommit writer to
+              // `tx_db_y` could race straight past it and land its own
+              // commit in the gap between this transaction's base-catalog
+              // read and its own COMMIT merge, losing one of the two rows
+              // (`Storage.mergeDatabaseSlot`'s "batch's table wins
+              // outright" rule).
+              let store = Fsdb.Storage.create ()
+              Fsdb.Storage.createDatabase store "tx_db_x" |> ignore
+              Fsdb.Storage.createDatabase store "tx_db_y" |> ignore
+
+              let a = create 1 store
+              let a, _ = handle a "USE tx_db_x"
+              let a, _ = handle a "CREATE TABLE tx_db_y.t (id INT PRIMARY KEY)"
+              let a, _ = handle a "BEGIN"
+              let a, _ = handle a "INSERT INTO tx_db_y.t VALUES (1)"
+
+              let b = create 2 store
+              let b, _ = handle b "USE tx_db_y"
+              use otherStarted = new Threading.ManualResetEventSlim(false)
+
+              let bInsert =
+                  Threading.Tasks.Task.Run(fun () ->
+                      otherStarted.Set()
+                      handle b "INSERT INTO t VALUES (2)")
+
+              Expect.isTrue (otherStarted.Wait(TimeSpan.FromSeconds 1.0)) "the concurrent writer to tx_db_y started"
+
+              Expect.isFalse
+                  (bInsert.Wait(TimeSpan.FromMilliseconds 300.0))
+                  "the concurrent write to tx_db_y must wait for the open transaction's gate on tx_db_y, not race past it"
+
+              let a, _ = handle a "COMMIT"
+              ignore a
+
+              Expect.isTrue (bInsert.Wait(TimeSpan.FromSeconds 5.0)) "the queued writer completed once the transaction released tx_db_y's gate"
+
+              match bInsert.GetAwaiter().GetResult() |> snd with
+              | Affected 1UL -> ()
+              | result -> failtestf "expected the concurrent insert to succeed once unblocked, got %A" result
+
+              match handle b "SELECT id FROM t ORDER BY id" |> snd with
+              | ResultSet(_, [ [ Some "1" ]; [ Some "2" ] ]) -> ()
+              | result -> failtestf "expected both the transaction's row and the concurrent row to survive — neither lost, got %A" result
+
           testCase "an open transaction in one database doesn't block a write to an unrelated database"
           <| fun _ ->
               // The transaction gate is one `SemaphoreSlim` per database — a
@@ -318,4 +367,20 @@ let tests =
 
               match handle session "SELECT id, v FROM tx_ai ORDER BY id" |> snd with
               | ResultSet(_, [ [ Some "1"; Some "1" ]; [ Some "4"; Some "4" ] ]) -> ()
-              | result -> failtestf "expected the id 1/4 rows MySQL 8.4 produces, got %A" result ]
+              | result -> failtestf "expected the id 1/4 rows MySQL 8.4 produces, got %A" result
+
+          testCase "ROLLBACK TO SAVEPOINT does not roll back an AUTO_INCREMENT counter either, matching a full ROLLBACK"
+          <| fun _ ->
+              let session = create 1 (Fsdb.Storage.create ())
+              let session, _ = handle session "CREATE TABLE tx_sp_ai (id INT AUTO_INCREMENT PRIMARY KEY, v INT)"
+              let session, _ = handle session "BEGIN"
+              let session, _ = handle session "INSERT INTO tx_sp_ai (v) VALUES (1)" // burns id 1
+              let session, _ = handle session "SAVEPOINT sp1"
+              let session, _ = handle session "INSERT INTO tx_sp_ai (v) VALUES (2)" // burns id 2
+              let session, _ = handle session "ROLLBACK TO SAVEPOINT sp1" // undoes the row, not the burned id
+              let session, _ = handle session "INSERT INTO tx_sp_ai (v) VALUES (3)"
+              let session, _ = handle session "COMMIT"
+
+              match handle session "SELECT id, v FROM tx_sp_ai ORDER BY id" |> snd with
+              | ResultSet(_, [ [ Some "1"; Some "1" ]; [ Some "3"; Some "3" ] ]) -> ()
+              | result -> failtestf "expected id 2 to stay burned across the savepoint rollback (rows 1 and 3, not 1 and 2), got %A" result ]

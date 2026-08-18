@@ -20,21 +20,35 @@ let frame (p: Packet) : byte[] =
     w.WriteBytes p.Payload
     w.ToArray()
 
+/// Chunk size for `readExactAsync`'s read loop — deliberately far smaller
+/// than a packet's declared length can be (up to 16 MiB). A client that
+/// sends a 4-byte header declaring a huge length and then no payload (or a
+/// slow trickle) must not make the server allocate that whole length
+/// up front; reading into a small buffer and growing a `MemoryStream` only
+/// as bytes actually arrive keeps the allocation proportional to what was
+/// really received.
+let private readChunkSize = 64 * 1024
+
 let private readExactAsync (stream: Stream) (n: int) : Async<byte[] option> =
     async {
         if n = 0 then
             return Some [||]
         else
-            let buf = Array.zeroCreate<byte> n
-            let mutable total = 0
+            use ms = new MemoryStream(min n readChunkSize)
+            let buf = Array.zeroCreate<byte> (min n readChunkSize)
+            let mutable remaining = n
             let mutable eof = false
 
-            while total < n && not eof do
-                let! read = stream.ReadAsync(buf, total, n - total) |> Async.AwaitTask
+            while remaining > 0 && not eof do
+                let! read = stream.ReadAsync(buf, 0, min remaining buf.Length) |> Async.AwaitTask
 
-                if read = 0 then eof <- true else total <- total + read
+                if read = 0 then
+                    eof <- true
+                else
+                    ms.Write(buf, 0, read)
+                    remaining <- remaining - read
 
-            return if eof then None else Some buf
+            return if eof then None else Some(ms.ToArray())
     }
 
 /// The largest payload a single packet header can declare (2^24 - 1). A
@@ -59,10 +73,14 @@ let maxAccumulatedPacketSize = 64 * 1024 * 1024 // 64 MiB
 /// Reassembles packets split across the wire per the MySQL protocol: a
 /// chunk of exactly maxPacketPayload bytes means "more packets follow"; the
 /// terminating chunk is the first one shorter than that (possibly empty).
-/// Returns the sequence id of the FIRST fragment, so callers computing the
-/// next response seq id (`packet.SeqId + 1uy`) stay correct.
+/// Returns the sequence id of the LAST fragment (each fragment consumes its
+/// own sequence number on the wire, so the first fragment's id is already
+/// "used up" by the time reassembly finishes) — callers computing the next
+/// response seq id as `packet.SeqId + 1uy` need that last id, not the
+/// first, or their reply's seq id collides with a fragment the client
+/// already sent.
 let readPacketAsync (stream: Stream) : Async<Packet option> =
-    let rec loop (firstSeqId: byte option) (acc: byte[]) : Async<Packet option> =
+    let rec loop (acc: byte[]) : Async<Packet option> =
         async {
             match! readExactAsync stream 4 with
             | None -> return None
@@ -79,15 +97,13 @@ let readPacketAsync (stream: Stream) : Async<Packet option> =
                     if acc.Length > maxAccumulatedPacketSize then
                         raise (PacketTooLargeException acc.Length)
 
-                    let firstSeqId = firstSeqId |> Option.defaultValue seqId
-
                     if len = maxPacketPayload then
-                        return! loop (Some firstSeqId) acc
+                        return! loop acc
                     else
-                        return Some { SeqId = firstSeqId; Payload = acc }
+                        return Some { SeqId = seqId; Payload = acc }
         }
 
-    loop None [||]
+    loop [||]
 
 /// Writes one logical packet to a stream, splitting the payload into
 /// maxPacketPayload-byte chunks with incrementing sequence ids if it's too

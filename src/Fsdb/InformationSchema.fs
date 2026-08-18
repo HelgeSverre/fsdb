@@ -193,13 +193,20 @@ let private tablesColumns =
 let private tablesRows (catalog: Catalog) : Value[] list =
     allTables catalog
     |> List.map (fun (dbName, t) ->
+        // NULL, not 1 (`NextAutoId`'s idle starting value), for a table
+        // that never declared an AUTO_INCREMENT column at all — matching
+        // real MySQL, which only reports a next-value once a table actually
+        // has one.
+        let autoIncrement =
+            if t.Columns |> List.exists (fun c -> c.AutoIncrement) then VInt t.NextAutoId else VNull
+
         [| vs dbName
            vs t.OriginalName
            vs "BASE TABLE"
            vs "InnoDB"
            vi (t.RowsArray.Length)
-           VInt t.NextAutoId
-           vs "utf8mb4_unicode_ci"
+           autoIncrement
+           vs (t.TableCollation |> Option.defaultValue "utf8mb4_0900_ai_ci")
            vs ""
            vi 16384
            vi 0
@@ -367,8 +374,12 @@ let private referentialConstraintsRows (catalog: Catalog) : Value[] list =
                vs fk.Name
                vs dbName
                vs "PRIMARY"
-               vs (fk.OnUpdate |> Option.defaultValue "RESTRICT")
-               vs (fk.OnDelete |> Option.defaultValue "RESTRICT")
+               // MySQL's actual default when a `FOREIGN KEY` declares no
+               // `ON UPDATE`/`ON DELETE` clause is `NO ACTION`, not
+               // `RESTRICT` (the two enforce identically, but
+               // `information_schema` reports the former).
+               vs (fk.OnUpdate |> Option.defaultValue "NO ACTION")
+               vs (fk.OnDelete |> Option.defaultValue "NO ACTION")
                vs t.OriginalName
                vs fk.RefTable |]))
 
@@ -617,7 +628,11 @@ let showColumns (catalog: Catalog) (full: bool) (dbName: string) (tableName: str
                 |> List.map (fun c ->
                     [ Some c.Name
                       Some(columnTypeText c.Type)
-                      (if isStringy c.Type then Some "utf8mb4_unicode_ci" else None)
+                      // The column's actual declared/inherited collation —
+                      // matching `information_schema.columns.collation_name`
+                      // (`columnsRows` above), not always the same fixed
+                      // string regardless of what the column declared.
+                      (if isStringy c.Type then Some(c.Collation |> Option.defaultValue "utf8mb4_0900_ai_ci") else None)
                       Some(isNullable c)
                       Some(columnKey t c)
                       defaultCol c
@@ -787,11 +802,11 @@ let showTableStatus (catalog: Catalog) (dbName: string) (likeOpt: string option)
                   Some "0"
                   Some "0"
                   Some "0"
-                  Some(string t.NextAutoId)
+                  (if t.Columns |> List.exists (fun c -> c.AutoIncrement) then Some(string t.NextAutoId) else None)
                   None
                   None
                   None
-                  Some "utf8mb4_unicode_ci"
+                  Some(t.TableCollation |> Option.defaultValue "utf8mb4_0900_ai_ci")
                   None
                   Some ""
                   Some "" ])

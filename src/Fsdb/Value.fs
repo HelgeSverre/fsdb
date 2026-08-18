@@ -46,6 +46,28 @@ let TypeBlob = 0xfcuy
 let TypeVarString = 0xfduy
 let TypeString = 0xfeuy
 
+/// .NET's shortest-round-trip double formatting agrees with MySQL on the
+/// mantissa but not the exponent: "1E+20" vs MySQL's "1e20" (lowercase,
+/// no '+', no zero-padding). Reshapes just the exponent part when present.
+let private formatDouble (d: float) : string =
+    let s = d.ToString(CultureInfo.InvariantCulture)
+
+    match s.IndexOf 'E' with
+    | -1 -> s
+    | i ->
+        let mantissa = s.Substring(0, i)
+        let exp = s.Substring(i + 1)
+
+        let sign, digits =
+            if exp.StartsWith "-" then "-", exp.Substring(1) else "", exp.TrimStart '+'
+
+        let digits =
+            match digits.TrimStart '0' with
+            | "" -> "0"
+            | d -> d
+
+        mantissa + "e" + sign + digits
+
 /// Renders a value the way the text resultset protocol does: NULL becomes
 /// the lenenc-null marker (`None`), everything else its textual form.
 let toText (v: Value) : string option =
@@ -53,8 +75,9 @@ let toText (v: Value) : string option =
     | VNull -> None
     | VInt i -> Some(string i)
     // .NET Core's default double ToString is already the shortest
-    // round-trippable representation (no "0.1000000000000001" noise).
-    | VDouble d -> Some(d.ToString(CultureInfo.InvariantCulture))
+    // round-trippable representation (no "0.1000000000000001" noise); only
+    // the exponent's shape needs reworking to match MySQL's rendering.
+    | VDouble d -> Some(formatDouble d)
     | VDecimal d -> Some(d.ToString(CultureInfo.InvariantCulture))
     | VString s -> Some s
     | VBytes b -> Some(Text.Encoding.Latin1.GetString b)
@@ -241,6 +264,23 @@ let toDouble (v: Value) : float =
 let private compareStrings (x: string) (y: string) : int =
     Collation.defaultCollation.ComparePrimary x y |> sign
 
+/// Byte-lexicographic (memcmp-style) order for `VARBINARY`/`BLOB` content:
+/// compare byte-by-byte, shorter-is-less only once every shared prefix byte
+/// ties. F#'s structural `compare` on `byte[]` compares length first, which
+/// puts `UNHEX('02')` (length 1) before `UNHEX('0101')` (length 2) even
+/// though byte 0x02 is greater than byte 0x01 — wrong versus MySQL's binary
+/// collation.
+let private compareBytesLex (x: byte[]) (y: byte[]) : int =
+    let len = min x.Length y.Length
+    let mutable i = 0
+    let mutable result = 0
+
+    while result = 0 && i < len do
+        result <- Operators.compare x.[i] y.[i]
+        i <- i + 1
+
+    if result <> 0 then result else Operators.compare x.Length y.Length
+
 /// `VDate`/`VDateTime` as one .NET `DateTime`, midnight for the date-only
 /// case — the shared instant `compare`'s VDate/VDateTime-vs-VString branch
 /// parses a string bound against.
@@ -263,12 +303,12 @@ let rec compare (a: Value) (b: Value) : int =
     | VDecimal x, VDecimal y -> Decimal.Compare(x, y)
     | VInt x, VInt y -> Operators.compare x y
     | VString x, VString y -> compareStrings x y
-    | VBytes x, VBytes y -> Operators.compare x y
+    | VBytes x, VBytes y -> compareBytesLex x y
     // A binary string against a character string compares byte-for-byte
     // (MySQL: `CONVERT('abc' USING binary) = 'ABC'` is false), not via the
     // character collation the generic text fallback below would apply.
-    | VBytes x, VString s -> Operators.compare x (Text.Encoding.UTF8.GetBytes s)
-    | VString s, VBytes y -> Operators.compare (Text.Encoding.UTF8.GetBytes s) y
+    | VBytes x, VString s -> compareBytesLex x (Text.Encoding.UTF8.GetBytes s)
+    | VString s, VBytes y -> compareBytesLex (Text.Encoding.UTF8.GetBytes s) y
     | VDate x, VDate y -> Operators.compare x y
     | VDateTime x, VDateTime y -> Operators.compare x y
     | VDate x, VDateTime y -> Operators.compare (x.ToDateTime(TimeOnly.MinValue)) y
@@ -287,6 +327,13 @@ let rec compare (a: Value) (b: Value) : int =
         | true, dt -> Operators.compare (asDateTime a) dt
         | false, _ -> compareStrings (toText a |> Option.defaultValue "") s
     | VString _, (VDate _ | VDateTime _) -> -(compare b a)
+    // BIGINT vs DECIMAL with neither side a DOUBLE: promote both to
+    // `decimal` and compare exactly. Routing this through `toDouble`
+    // (float has only 53 bits of mantissa) silently merges distinct
+    // int64/decimal values above 2^53 — wrong for equality, hash-join
+    // keys, and unique-index lookups alike.
+    | VInt x, VDecimal y -> Decimal.Compare(decimal x, y)
+    | VDecimal x, VInt y -> Decimal.Compare(x, decimal y)
     | (VInt _ | VDouble _ | VDecimal _), _
     | _, (VInt _ | VDouble _ | VDecimal _) -> Operators.compare (toDouble a) (toDouble b)
     | _ -> compareStrings (toText a |> Option.defaultValue "") (toText b |> Option.defaultValue "")
@@ -319,7 +366,11 @@ let likeToRegexWith (escapeChar: char) (pattern: string) : string =
 
     while i < pattern.Length do
         match pattern.[i] with
-        | c when c = escapeChar && i + 1 < pattern.Length && (pattern.[i + 1] = '%' || pattern.[i + 1] = '_') ->
+        // Escape-prefixed char matches literally, whatever it is — not just
+        // %/_. This also covers the escape char escaping itself (`\\` in
+        // the pattern means one literal backslash) and `\<ordinary char>`,
+        // both of which MySQL's LIKE also treats as that literal char.
+        | c when c = escapeChar && i + 1 < pattern.Length ->
             sb.Append(Regex.Escape(string pattern.[i + 1])) |> ignore
             i <- i + 2
         | '%' ->
@@ -399,16 +450,25 @@ let private arith
     match classify a, classify b with
     | None, _
     | _, None -> VNull
-    | Some(KInt x), Some(KInt y) -> VInt(opInt x y)
+    | Some(KInt x), Some(KInt y) ->
+        // MySQL errors (1690) on int64 overflow rather than wrapping to a
+        // bogus negative; there's no error channel to `Value` arithmetic
+        // here, so the safe compat move is to promote to `decimal` (exact,
+        // just like MySQL's own DECIMAL fallback for oversized literals)
+        // instead of silently wrapping.
+        try
+            VInt(opInt x y)
+        with :? OverflowException ->
+            VDecimal(opDec (decimal x) (decimal y))
     | Some ka, Some kb ->
         match ka, kb with
         | KDouble _, _
         | _, KDouble _ -> VDouble(opDbl (asDouble ka) (asDouble kb))
         | _ -> VDecimal(opDec (asDecimal ka) (asDecimal kb))
 
-let add = arith (+) (+) (+)
-let sub = arith (-) (-) (-)
-let mul = arith ( * ) ( * ) ( * )
+let add = arith (Checked.(+)) (+) (+)
+let sub = arith (Checked.(-)) (-) (-)
+let mul = arith (Checked.( * )) ( * ) ( * )
 
 /// A `decimal`'s own scale (digits after the point) as constructed —
 /// `10.00m` reports 2, `5m` reports 0 — read straight out of its bit
@@ -428,6 +488,12 @@ let private divPrecisionIncrement = 4
 /// remembers trailing zeros baked into its own scale, so round-tripping
 /// through a fixed-point format string is what actually forces it.
 let private withScale (scale: int) (d: decimal) : decimal =
+    // `decimal` only carries 28-29 significant digits; a dividend with a
+    // large scale plus `divPrecisionIncrement` can ask for more fractional
+    // digits than fit alongside its integer part. Clamp to `decimal`'s max
+    // scale rather than let `Math.Round`/`Decimal.Parse` throw (MySQL error
+    // 1105) — callers treat this as best-effort formatting, not validation.
+    let scale = max 0 (min 28 scale)
     let rounded = Math.Round(d, scale, MidpointRounding.AwayFromZero)
     Decimal.Parse(rounded.ToString("F" + string scale, CultureInfo.InvariantCulture), CultureInfo.InvariantCulture)
 
@@ -453,8 +519,11 @@ let div (a: Value) (b: Value) : Value =
             if y = 0m then
                 VNull
             else
-                let dividendScale = match ka with KDecimal d -> scaleOf d | _ -> 0
-                VDecimal(withScale (dividendScale + divPrecisionIncrement) (asDecimal ka / y))
+                try
+                    let dividendScale = match ka with KDecimal d -> scaleOf d | _ -> 0
+                    VDecimal(withScale (dividendScale + divPrecisionIncrement) (asDecimal ka / y))
+                with :? OverflowException ->
+                    VNull
 
 /// `MOD`/`%`: ordinary MySQL numeric promotion, same as `+`/`-`/`*` (int
 /// op int stays int; a `DECIMAL` operand with no `DOUBLE` promotes to
@@ -486,4 +555,15 @@ let intDiv (a: Value) (b: Value) : Value =
     | _, None -> VNull
     | Some ka, Some kb ->
         let y = asDecimal kb
-        if y = 0m then VNull else VInt(int64 (Math.Truncate(asDecimal ka / y)))
+
+        if y = 0m then
+            VNull
+        else
+            // Both the decimal division and the narrowing to int64 can
+            // overflow (a huge dividend, or a divisor near zero); MySQL
+            // errors (1105/1690) here, and the domain-appropriate stand-in
+            // with no error channel is NULL rather than an internal crash.
+            try
+                VInt(int64 (Math.Truncate(asDecimal ka / y)))
+            with :? OverflowException ->
+                VNull

@@ -301,6 +301,27 @@ let tests =
                         (mkSelect([ BinOp(And, col "a", Not(col "b")), None ], None, None, [], None, None))
                         "not scoped to right operand"
 
+                testCase "SELECT 1--1 is subtraction (1 - -1), not `1` with a trailing comment"
+                <| fun _ ->
+                    Expect.equal
+                        (parseOk "SELECT 1--1")
+                        (mkSelect([ BinOp(Sub, Lit(VInt 1L), BinOp(Sub, Lit(VInt 0L), Lit(VInt 1L))), None ], None, None, [], None, None))
+                        "-- with no trailing space is not a comment"
+
+                testCase "-- followed by a space is still a line comment"
+                <| fun _ ->
+                    Expect.equal
+                        (parseOk "SELECT 1 -- trailing comment\n")
+                        (mkSelect([ Lit(VInt 1L), None ], None, None, [], None, None))
+                        "-- with trailing space is a comment"
+
+                testCase "0x41 parses as a hex literal, not `0` aliased as `x41`"
+                <| fun _ ->
+                    Expect.equal
+                        (parseOk "SELECT 0x41")
+                        (mkSelect([ Lit(VBytes [| 0x41uy |]), None ], None, None, [], None, None))
+                        "hex literal"
+
                 testCase "unary minus binds tighter than binary minus"
                 <| fun _ ->
                     Expect.equal
@@ -1682,4 +1703,20 @@ let tests =
                 <| fun _ ->
                     match parse "SELECT @@version" with
                     | Error _ -> ()
-                    | Ok stmt -> failtestf "expected an error, got %A" stmt ] ]
+                    | Ok stmt -> failtestf "expected an error, got %A" stmt
+
+                testCase "1000 levels of nested parens is a syntax error, not a stack overflow"
+                <| fun _ ->
+                    let deep = String.replicate 1000 "(" + "1" + String.replicate 1000 ")"
+
+                    match parse (sprintf "SELECT %s" deep) with
+                    | Error _ -> ()
+                    | Ok stmt -> failtestf "expected a depth-limit error, got %A" stmt
+
+                testCase "1000 levels of NOT NOT NOT ... is a syntax error, not a stack overflow"
+                <| fun _ ->
+                    let deep = String.replicate 1000 "NOT " + "TRUE"
+
+                    match parse (sprintf "SELECT %s" deep) with
+                    | Error _ -> ()
+                    | Ok stmt -> failtestf "expected a depth-limit error, got %A" stmt ] ]

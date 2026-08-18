@@ -783,6 +783,25 @@ let tests =
                     | ResultSet(_, [ [ Some "other" ] ]) -> ()
                     | other -> failtestf "expected the unmatched account untouched, got %A" other
 
+                testCase "UPDATE JOIN with multiple SET assignments on the same target table applies all of them"
+                <| fun _ ->
+                    // Regression: `claims` used to be checked per-assignment
+                    // instead of once per (source, physical row), so `SET
+                    // t1.a = 10, t1.b = 20` only ever landed `a`.
+                    let store = newStore ()
+                    runDefault store "CREATE TABLE mt1 (id INT, a INT, b INT)" |> ignore
+                    runDefault store "CREATE TABLE mt2 (id INT, x INT)" |> ignore
+                    runDefault store "INSERT INTO mt1 VALUES (1, 0, 0)" |> ignore
+                    runDefault store "INSERT INTO mt2 VALUES (1, 5)" |> ignore
+
+                    match runDefault store "UPDATE mt1 JOIN mt2 ON mt1.id = mt2.id SET mt1.a = 10, mt1.b = 20" with
+                    | Affected 1UL -> ()
+                    | other -> failtestf "expected 1 row affected, got %A" other
+
+                    match runDefault store "SELECT a, b FROM mt1" with
+                    | ResultSet(_, [ [ Some "10"; Some "20" ] ]) -> ()
+                    | other -> failtestf "expected both a and b written, got %A" other
+
                 testCase "UPDATE JOIN updates a physical row at most once even when the join matches it multiple times"
                 <| fun _ ->
                     let store = newStore ()
@@ -1268,6 +1287,28 @@ let tests =
 
                     match runDefault store "SELECT n FROM t WHERE n BETWEEN 2 AND 3 ORDER BY n" with
                     | ResultSet(_, rows) -> Expect.equal rows [ [ Some "2" ]; [ Some "3" ] ] "includes both endpoints"
+                    | other -> failtestf "expected a resultset, got %A" other
+
+                testCase "BETWEEN on an ENUM compares by declaration ordinal, same as =/IN"
+                <| fun _ ->
+                    // Regression: `Between` called `Value.compare` directly,
+                    // skipping the ENUM-ordinal resolution `=`/`IN` apply.
+                    let store = newStore ()
+                    runDefault store "CREATE TABLE te (e ENUM('a','b','c'))" |> ignore
+                    runDefault store "INSERT INTO te VALUES ('a'), ('b'), ('c')" |> ignore
+
+                    match runDefault store "SELECT e FROM te WHERE e BETWEEN 1 AND 2 ORDER BY e" with
+                    | ResultSet(_, rows) -> Expect.equal rows [ [ Some "a" ]; [ Some "b" ] ] "ordinal 1..2 is a..b, not lexical"
+                    | other -> failtestf "expected a resultset, got %A" other
+
+                testCase "BETWEEN on a _bin column is case-sensitive, same as =/IN"
+                <| fun _ ->
+                    let store = newStore ()
+                    runDefault store "CREATE TABLE tb (s VARCHAR(10) COLLATE utf8mb4_bin)" |> ignore
+                    runDefault store "INSERT INTO tb VALUES ('A'), ('B'), ('a'), ('b'), ('c')" |> ignore
+
+                    match runDefault store "SELECT s FROM tb WHERE s BETWEEN 'A' AND 'B' ORDER BY s" with
+                    | ResultSet(_, rows) -> Expect.equal rows [ [ Some "A" ]; [ Some "B" ] ] "byte-ordinal range, lowercase excluded"
                     | other -> failtestf "expected a resultset, got %A" other
 
                 testCase "LIKE with % and _ wildcards"
@@ -2656,6 +2697,19 @@ let tests =
                     | ResultSet([ "region" ], rows) -> Expect.equal rows [ [ Some "east" ] ] "only east has more than one row"
                     | other -> failtestf "expected only 'east' to survive HAVING, got %A" other
 
+                testCase "HAVING with no GROUP BY and no aggregate filters per row, not the whole table down to one"
+                <| fun _ ->
+                    // Regression: any `Having.IsSome` routed to the grouped
+                    // path, which collapses the whole (ungrouped) table to
+                    // one row before the filter even runs.
+                    let store = newStore ()
+                    runDefault store "CREATE TABLE hv (id INT, v INT)" |> ignore
+                    runDefault store "INSERT INTO hv VALUES (1, 1), (2, 6), (3, 10)" |> ignore
+
+                    match runDefault store "SELECT id FROM hv HAVING v > 5 ORDER BY id" with
+                    | ResultSet([ "id" ], rows) -> Expect.equal rows [ [ Some "2" ]; [ Some "3" ] ] "filters per-row like WHERE"
+                    | other -> failtestf "expected HAVING without GROUP BY to filter per row, got %A" other
+
                 testCase "HAVING can reference a SELECT list alias, not just a bare aggregate call"
                 <| fun _ ->
                     let store = newStore ()
@@ -2999,6 +3053,22 @@ let tests =
                     | ResultSet([ "name" ], [ [ Some "bob" ] ]) -> ()
                     | other -> failtestf "expected only bob, got %A" other
 
+                testCase "NULL NOT IN (SELECT ...) survives when the subquery has no rows"
+                <| fun _ ->
+                    // Regression: `ve = NULL` short-circuited to `VNull`
+                    // (dropping the row from `NOT IN`) before ever running
+                    // the subquery — but `NULL IN (<empty set>)` is FALSE,
+                    // not UNKNOWN, so `NOT IN` against an empty subquery
+                    // should be TRUE regardless of `v`'s own NULL-ness.
+                    let store = newStore ()
+                    runDefault store "CREATE TABLE t (id INT, v INT)" |> ignore
+                    runDefault store "CREATE TABLE empty_t (id INT)" |> ignore
+                    runDefault store "INSERT INTO t VALUES (1, NULL), (2, 5)" |> ignore
+
+                    match runDefault store "SELECT id FROM t WHERE v NOT IN (SELECT id FROM empty_t) ORDER BY id" with
+                    | ResultSet([ "id" ], rows) -> Expect.equal rows [ [ Some "1" ]; [ Some "2" ] ] "both rows survive against an empty candidate set"
+                    | other -> failtestf "expected both rows to survive NOT IN against an empty subquery, got %A" other
+
                 testCase "scalar subquery: (SELECT ...) used as a value, zero rows is NULL, one row is that value"
                 <| fun _ ->
                     let store = newStore ()
@@ -3160,6 +3230,24 @@ let tests =
                     | ResultSet(_, rows) -> Expect.equal rows [ [ Some "1.5" ]; [ Some "2.0" ] ] "numeric branches sort numerically"
                     | other -> failtestf "expected the numeric sort, got %A" other
 
+                testCase "UNION DISTINCT dedupes after type reconciliation, not on each branch's raw text"
+                <| fun _ ->
+                    // Regression: dedup used to key on each branch's own
+                    // pre-reconciliation text ("1.0" vs "1"), so this stayed
+                    // two rows instead of collapsing to the one MySQL gives.
+                    match runDefault (newStore ()) "SELECT 1.0 UNION SELECT 1" with
+                    | ResultSet(_, [ [ Some "1.0" ] ]) -> ()
+                    | other -> failtestf "expected UNION to dedupe post-reconciliation to one row, got %A" other
+
+                testCase "UNION ... ORDER BY an expression sorts by it, not silently by insertion order"
+                <| fun _ ->
+                    // Regression: `orderKeyOf` only matched a bare `Col`, so
+                    // `ORDER BY -v` fell through to VNull for every row and
+                    // the union came out unsorted.
+                    match runDefault (newStore ()) "SELECT 1 AS v UNION SELECT 3 UNION SELECT 2 ORDER BY -v" with
+                    | ResultSet([ "v" ], rows) -> Expect.equal rows [ [ Some "3" ]; [ Some "2" ]; [ Some "1" ] ] "sorted by -v descending"
+                    | other -> failtestf "expected ORDER BY -v to actually sort, got %A" other
+
                 testCase "COUNT(*) FROM ((SELECT ...) UNION (SELECT ...)) AS alias — Laravel's paginate-over-union shape"
                 <| fun _ ->
                     // `unionAll(...)->paginate()` and `->count()` compile to
@@ -3243,6 +3331,36 @@ let tests =
                     match runDefault store "SELECT s FROM t WHERE s REGEXP '^h' ORDER BY s" with
                     | ResultSet([ "s" ], [ [ Some "Hello" ] ]) -> ()
                     | other -> failtestf "expected REGEXP to case-insensitively match 'Hello', got %A" other
+
+                testCase "REGEXP on a _bin column is case-sensitive, like =/LIKE BINARY"
+                <| fun _ ->
+                    // Regression: `regexpOp` hardcoded `IgnoreCase`
+                    // regardless of the column's collation.
+                    let store = newStore ()
+                    runDefault store "CREATE TABLE t (s VARCHAR(10) COLLATE utf8mb4_bin)" |> ignore
+                    runDefault store "INSERT INTO t VALUES ('Hello'), ('world')" |> ignore
+
+                    match runDefault store "SELECT s FROM t WHERE s REGEXP '^h'" with
+                    | ResultSet(_, []) -> ()
+                    | other -> failtestf "expected a case-sensitive REGEXP not to match 'Hello' against '^h', got %A" other
+
+                    match runDefault store "SELECT s FROM t WHERE s REGEXP '^H'" with
+                    | ResultSet([ "s" ], [ [ Some "Hello" ] ]) -> ()
+                    | other -> failtestf "expected the case-sensitive REGEXP to match 'Hello' against '^H', got %A" other
+
+                testCase "REGEXP on a catastrophically-backtracking pattern errors instead of hanging"
+                <| fun _ ->
+                    // Regression: no `Regex` in `regexpOp` ever carried a
+                    // `MatchTimeout`, so `(a+)+$` against a long non-matching
+                    // subject could pin a core forever.
+                    let store = newStore ()
+                    runDefault store "CREATE TABLE t (s VARCHAR(200))" |> ignore
+                    let pathological = String.replicate 40 "a" + "!"
+                    runDefault store (sprintf "INSERT INTO t VALUES ('%s')" pathological) |> ignore
+
+                    match runDefault store "SELECT s FROM t WHERE s REGEXP '(a+)+$'" with
+                    | Err(_, _) -> ()
+                    | other -> failtestf "expected a catastrophic-backtracking REGEXP to error out (timeout), got %A" other
 
                 testCase "LIKE BINARY is case-sensitive, unlike plain LIKE"
                 <| fun _ ->
