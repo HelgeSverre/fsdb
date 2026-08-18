@@ -74,33 +74,33 @@ Each run lands in `results/<git-sha>.md` with a provenance header
 | GROUP BY aggregate | 212 ms | 21.8 ms | 26.1 ms | 20.4 ms |
 | JSON extract | 131 ms | 9.4 ms | 225 µs | 62 µs |
 
-\* pre-M9 numbers after the join row were inflated by benchmark poisoning
-(the timed-out join kept computing server-side); the harness now isolates
-cases. See `results/f1b15ab.md`'s annotation.
+\* Numbers in the leftmost column after the join row were inflated by
+benchmark poisoning (the timed-out join kept computing server-side); the
+harness now isolates cases. See `results/f1b15ab.md`'s annotation.
 
-Notable one-line context for the M9 jump: an O(n²) list-append in the
-UPDATE path, PK/unique hash indexes, a hash equi-join, and `TcpClient.NoDelay`
-(Nagle's algorithm had been taxing every round trip since M1).
+Notable one-line context for the jump between the first two columns: an
+O(n²) list-append in the UPDATE path, PK/unique hash indexes, a hash
+equi-join, and `TcpClient.NoDelay` (Nagle's algorithm had been taxing every
+round trip from the start).
 
-### Durability-matched (single-connection latency, `cbbdfb4-durable.md`)
+### Durability-matched (single-connection latency, `e8b848f-durable.md`)
 
-fsdb in-memory vs fsdb `--data-dir` (WAL) vs MySQL durable vs MySQL no-fsync:
+fsdb in-memory vs fsdb `--data-dir` (binary WAL) vs MySQL durable vs MySQL no-fsync:
 
 | Workload | fsdb | fsdb-wal | mysql | mysql-nofsync |
 |---|---:|---:|---:|---:|
-| Point SELECT by PK | 116 µs | 131 µs | 40 µs | 40 µs |
-| Single INSERT | 274 µs | 7.75 ms | 113 µs | 33 µs |
-| Batch-100 INSERT | 5.07 ms | 11.96 ms | 1.08 ms | 787 µs |
-| Single-row UPDATE | 90 µs* | 5.64 ms | 103 µs | 40 µs |
+| Point SELECT by PK | 114 µs | 108 µs | 41 µs | 41 µs |
+| Single INSERT | 276 µs | 302 µs | 116 µs | 33 µs |
+| Batch-100 INSERT | 4.84 ms | 4.97 ms | 1.05 ms | 796 µs |
+| Single-row UPDATE | 82 µs | 122 µs | 117 µs | 40 µs |
 
-\* the in-memory UPDATE row was noise-contaminated in this run (373 µs, 215%
-CI); 81–91 µs is the established value from the clean `f5ff5a4` run.
-
-fsdb's durable write is fsync-bound: one `fsync` per commit on a growing
-JSONL WAL (~5–7 ms here), while durable MySQL group-commits its redo log
-(~100 µs). The "fsdb beats MySQL on writes" reading is an artifact of
-comparing a non-durable engine against a durable one — matched on durability,
-fsdb's point write is ~60x slower.
+Durable fsdb's UPDATE is at MySQL parity (122 vs 117 µs) and INSERT within
+~2.6×. The original ~5–7 ms durable writes were an artifact of .NET's
+`FileStream.Flush(true)` issuing `F_FULLFSYNC` on macOS (a full drive-write-
+cache flush); a plain libc `fsync` — MySQL's own macOS default — drops it to
+~16 µs per commit. The WAL is a binary `[len][crc32]` log and the snapshot
+streams, so what remains is engine cost: fsdb's in-memory single INSERT is
+276 µs and the WAL adds ~26 µs on top.
 
 ### Concurrency throughput (`4897506-load.md`, 8 workers, ops/sec)
 

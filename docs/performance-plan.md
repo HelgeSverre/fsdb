@@ -39,7 +39,7 @@ pattern.
 | 1 — beauty-positive quick wins | **done** (1.1 JSON-path memo, 1.2 AST-bound prepared stmts, 1.3 `conjuncts`) |
 | 2 — streaming wire boundary | **done** (batched row writes, inline framing) |
 | 3 — join predicate pushdown | **re-scoped** — see the note below |
-| 4 — `[<Struct>] Value` | not started |
+| 4 — `[<Struct>] Value` | **tried, regressed — dropped** |
 | 5 — WAL group commit | **dropped** — obsolete |
 | 6 — strategic ceiling | not planned (by design) |
 
@@ -63,13 +63,16 @@ inner-join path probes `joinRows` directly with `Seq.indexed`, so the 50k
 tuples only materialize where an outer join / nested-loop fallback needs them)
 and single-column fast paths in `JoinKeyComparer.GetHashCode` / `equiKeyOf`.
 The join's remaining gap is broad per-row interpretation overhead, not a
-fixable hotspot — Phase 4 (`[<Struct>] Value`) is the real lever on it.
+fixable hotspot — Phase 4 (`[<Struct>] Value`) was tried against it and
+regressed (see below), so that overhead stands as the documented floor.
 
 **Done since writing** (persistence, outside these phases): the WAL and
 snapshot are binary (no JSON) with CRC torn-tail detection, and the snapshot
 streams past the 2 GB `byte[]` ceiling.
 
-**Next:** Phase 4 — `[<Struct>] Value`, the broad 2–3× boxing tax everywhere.
+**Next:** nothing scheduled. Phase 4 was the last planned item and it
+regressed (see below); the remaining gap is per-row interpretation overhead
+with no beauty-preserving lever identified.
 
 ---
 
@@ -204,7 +207,21 @@ project, not a patch — see Phase 6.)*
 
 ---
 
-## Phase 4 — `[<Struct>] Value` *(1–2 weeks, the big one, beauty-preserving but risky)*
+## Phase 4 — `[<Struct>] Value` *(tried 2026-08-18, regressed — dropped)*
+
+*(This section's premise is disproven. The one-line annotation shipped on a
+branch and all 966 Expecto tests passed, but the clean full bench regressed
+the scan/aggregate paths hard: `FilterScanOrderLimit` 6.65 → 16.7 ms,
+`GroupByAggregate` 25.4 → 104 ms, `JoinUsersOrders` 9.16 → 12.9 ms. The
+mistake in the analysis below: it treats a row as "an array of pointers to
+heap objects," but the hot path isn't reading rows — it's the
+expression-evaluation pipeline, where `Value` flows through `Result`, `Option`,
+`list`, and tuples. A struct DU makes every one of those positions *box* and
+copies 24 bytes by value at every pass, which swamps the inline-`Value[]`
+win. The only gain was prepared point-select (~100 → ~71 µs), not worth the
+2.5–4× regressions. A future attempt would need to first eliminate the
+generic positions `Value` flows through — a much bigger change than the
+one-line annotation.)*
 
 The design doc deferred this "until the index work is done, when scan count
 stops being the top term." That condition is now met — point ops are

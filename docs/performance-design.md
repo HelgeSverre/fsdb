@@ -1,5 +1,10 @@
 # Making fsdb fast without making it ugly — the M9 performance design
 
+> **Status (2026-08-18):** the slice in section 3 has shipped — Phases 1–3 of
+> `performance-plan.md`, the living status doc, cover it. The struct-`Value`
+> idea floated in section 2 was tried and regressed; see the Phase 4 note
+> there. This document remains the forensic analysis that motivated the plan.
+
 Three research lanes (hotspot forensics, F# idiom microbenchmarks, candidate
 designs) fed this document. Where the lanes disagreed on a number or a
 mechanism, the decisive measurement was re-run against the **real server**
