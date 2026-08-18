@@ -583,17 +583,19 @@ let private rowNumberOverAtom: Parser<Expr, unit> =
     .>> sym ")"
     |>> RowNumberOver
 
-/// `LAG(expr[, offset]) OVER (...)` — see `Ast.Expr.LagOver`'s doc.
+/// `LAG(expr[, offset]) OVER (...)` and `LEAD(expr[, offset]) OVER (...)` —
+/// one rule, since `LEAD` is `LAG` with the offset negated (see
+/// `Ast.Expr.LagOver`'s doc).
 let private lagOverAtom: Parser<Expr, unit> =
-    attempt (keyword "LAG" >>. sym "(") >>. expr
+    attempt ((keyword "LAG" >>% 1L <|> (keyword "LEAD" >>% -1L)) .>> sym "(") .>>. expr
     .>>. opt (sym "," >>. intTok)
     .>> sym ")"
     .>> keyword "OVER"
     .>> sym "("
     .>>. windowClause
     .>> sym ")"
-    |>> fun ((lagExpr, offsetOpt), (partitionBy, orderBy)) ->
-        LagOver(lagExpr, offsetOpt |> Option.map int64 |> Option.defaultValue 1L, partitionBy, orderBy)
+    |>> fun (((direction, lagExpr), offsetOpt), (partitionBy, orderBy)) ->
+        LagOver(lagExpr, direction * (offsetOpt |> Option.map int64 |> Option.defaultValue 1L), partitionBy, orderBy)
 
 /// `CAST(expr AS type)` — `SIGNED`/`UNSIGNED [INTEGER]` are only valid as a
 /// cast target, not a column type, so they're handled here rather than in

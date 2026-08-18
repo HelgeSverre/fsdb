@@ -489,13 +489,16 @@ let private characterSetsRows: Value[] list =
     |> List.map (fun (cs, defaultCollation, description, maxlen) ->
         [| vs cs; vs defaultCollation; vs description; vs maxlen |])
 
-/// One row per registered collation — name, its utf8mb4 charset, and its
-/// pad attribute — shared by the `information_schema.COLLATIONS` view and
-/// `SHOW COLLATION` so the two can't disagree.
-let private registeredCollationRows : (string * string * string) list =
+/// One row per registered collation — name, its utf8mb4 charset, MySQL's
+/// real id/sortlen (`Collation.idAndSortlen`), and its pad attribute —
+/// shared by the `information_schema.COLLATIONS` view and `SHOW COLLATION`
+/// so the two can't disagree.
+let private registeredCollationRows : (string * string * int * int * string) list =
     Collation.registry
     |> Map.toList
-    |> List.map (fun (name, col) -> name, "utf8mb4", (if col.PadSpace then "PAD SPACE" else "NO PAD"))
+    |> List.map (fun (name, col) ->
+        let id, sortlen = Collation.idAndSortlen |> Map.tryFind name |> Option.defaultValue (0, 0)
+        name, "utf8mb4", id, sortlen, (if col.PadSpace then "PAD SPACE" else "NO PAD"))
 
 let private collationsColumns =
     [ strCol "COLLATION_NAME"
@@ -506,19 +509,15 @@ let private collationsColumns =
       strCol "SORTLEN"
       strCol "PAD_ATTRIBUTE" ]
 
-/// ponytail: `id`/`sortlen` are 0 for every row rather than MySQL's real
-/// per-collation IDs and sort lengths — nothing in the registry tracks
-/// them, and tooling reads the name/charset/default/pad columns. Add the
-/// real table if a client ever keys off a collation ID.
 let private collationsRows: Value[] list =
     registeredCollationRows
-    |> List.map (fun (name, charset, pad) ->
+    |> List.map (fun (name, charset, id, sortlen, pad) ->
         [| vs name
            vs charset
-           vs "0"
+           vs (string id)
            vs (if name = "utf8mb4_0900_ai_ci" then "Yes" else "")
            vs "Yes"
-           vs "0"
+           vs (string sortlen)
            vs pad |])
 
 /// Resolves one `information_schema` table name (case-insensitive) to its
@@ -602,15 +601,15 @@ let showTables (catalog: Catalog) (dbName: string) (full: bool) (likeOpt: string
 let showCollation (likeOpt: string option) : ShowResult =
     let rows =
         registeredCollationRows
-        |> List.filter (fun (name, _, _) -> likeFilter likeOpt name)
-        |> List.sortBy (fun (name, _, _) -> name)
-        |> List.map (fun (name, charset, pad) ->
+        |> List.filter (fun (name, _, _, _, _) -> likeFilter likeOpt name)
+        |> List.sortBy (fun (name, _, _, _, _) -> name)
+        |> List.map (fun (name, charset, id, sortlen, pad) ->
             [ Some name
               Some charset
-              Some "0"
+              Some(string id)
               Some(if name = "utf8mb4_0900_ai_ci" then "Yes" else "")
               Some "Yes"
-              Some "0"
+              Some(string sortlen)
               Some pad ])
 
     Ok(
@@ -809,13 +808,22 @@ let showTableStatus (catalog: Catalog) (dbName: string) (likeOpt: string option)
             |> List.filter (fun t -> likeFilter likeOpt t.OriginalName)
             |> List.sortBy (fun t -> t.OriginalName)
             |> List.map (fun t ->
+                // `Data_length`/`Avg_row_length` are the rows' actual
+                // in-memory text payload size — this engine has no 16 KiB
+                // pages, so real bytes beat InnoDB's page-count fiction.
+                let dataLength =
+                    t.RowsArray
+                    |> Seq.sumBy (fun r -> r |> Array.sumBy (fun v -> (Value.toText v |> Option.map String.length |> Option.defaultValue 0) + 1))
+
+                let avgRowLength = if t.RowsArray.Length = 0 then 0 else dataLength / t.RowsArray.Length
+
                 [ Some t.OriginalName
                   Some "InnoDB"
                   Some "10"
                   Some "Dynamic"
                   Some(string (t.RowsArray.Length))
-                  Some "0"
-                  Some "16384"
+                  Some(string avgRowLength)
+                  Some(string dataLength)
                   Some "0"
                   Some "0"
                   Some "0"

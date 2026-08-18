@@ -190,7 +190,7 @@ let tests =
                       "utf8mb4_mn_cyrl_0900_ai_ci"; "utf8mb4_mn_cyrl_0900_as_cs"
                       "utf8mb4_sr_latn_0900_ai_ci"; "utf8mb4_sr_latn_0900_as_cs"
                       "utf8mb4_ja_0900_as_cs"; "utf8mb4_ja_0900_as_cs_ks"; "utf8mb4_zh_0900_as_cs"
-                      "utf8mb4_danish_ci"; "utf8mb4_swedish_ci"; "utf8mb4_norwegian_ci"; "utf8mb4_german2_ci"
+                      "utf8mb4_danish_ci"; "utf8mb4_swedish_ci"; "utf8mb4_german2_ci"
                       "utf8mb4_spanish_ci"; "utf8mb4_spanish2_ci"; "utf8mb4_turkish_ci"; "utf8mb4_icelandic_ci"
                       "utf8mb4_estonian_ci"; "utf8mb4_polish_ci"; "utf8mb4_romanian_ci"; "utf8mb4_roman_ci"
                       "utf8mb4_croatian_ci"; "utf8mb4_czech_ci"; "utf8mb4_esperanto_ci"; "utf8mb4_hungarian_ci"
@@ -625,6 +625,20 @@ let tests =
                           | VDateTime dt ->
                               Expect.equal (dt.Ticks % TimeSpan.TicksPerSecond) 0L "NOW() has no sub-second component"
                           | other -> failtestf "expected VDateTime from NOW(), got %A" other
+
+                      testCase "NOW(N) rounds the clock to N fractional digits (MySQL NOW(6) has microseconds)"
+                      <| fun _ ->
+                          // Can't assert an exact time, but the tick granularity
+                          // is deterministic: fsp 6 rounds to whole microseconds
+                          // (10-tick units), fsp 3 to milliseconds (10_000-tick
+                          // units), fsp 0 to whole seconds.
+                          let ticksOf args =
+                              match call "NOW" args with
+                              | VDateTime dt -> dt.Ticks
+                              | other -> failtestf "expected VDateTime, got %A" other
+                          Expect.equal (ticksOf [ VInt 6L ] % 10L) 0L "NOW(6) rounded to microseconds"
+                          Expect.equal (ticksOf [ VInt 3L ] % 10_000L) 0L "NOW(3) rounded to milliseconds"
+                          Expect.equal (ticksOf [ VInt 0L ] % TimeSpan.TicksPerSecond) 0L "NOW(0) rounded to seconds"
 
                       testCase "TIMESTAMP coerces a date or string to a datetime"
                       <| fun _ ->

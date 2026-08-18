@@ -274,7 +274,7 @@ let rec private exprLabel (expr: Expr) : string =
     | Star None -> "*"
     | Star(Some q) -> sprintf "%s.*" q
     | RowNumberOver _ -> "row_number() over ()"
-    | LagOver(e, _, _, _) -> sprintf "lag(%s) over ()" (exprLabel e)
+    | LagOver(e, offset, _, _) -> sprintf "%s(%s) over ()" (if offset < 0L then "lead" else "lag") (exprLabel e)
     | Exists _ -> "exists"
     | Subquery _ -> "(...)"
 
@@ -510,6 +510,12 @@ let rec private fspOfExpr (ctx: EvalContext) (expr: Expr) : int option =
     match expr with
     | Cast(_, ty) -> fspOfType ty
     | FuncCall(name, [ arg ]) when (let n = name.ToUpperInvariant() in n = "MAX" || n = "MIN") -> fspOfExpr ctx arg
+    | FuncCall(name, args) when (let n = name.ToUpperInvariant() in n = "NOW" || n = "CURRENT_TIMESTAMP") ->
+        // `NOW(N)` renders exactly N digits (matching the precision `nowFn`
+        // rounds the clock to); bare `NOW()` renders none (precision 0).
+        match args with
+        | [ Lit v ] -> Some(Value.toDouble v |> int |> max 0 |> min 6)
+        | _ -> Some 0
     | _ -> tryColumnDefForExpr ctx expr |> Option.bind (fun c -> fspOfType c.Type)
 
 /// The declared fsp for each output column a projection produces — parallel,
@@ -2226,21 +2232,25 @@ and private flattenAnd (expr: Expr) : Expr list =
 /// `tref.Table` actually has an indexed column called `n` — so a bare name
 /// that (via that same scoping) really means an outer column simply finds
 /// no matching index here and falls back, same as any other miss.
-and private tryPointLookup (store: Store) (dbName: string) (tref: TableRef) (whereExpr: Expr option) : (ColumnDef list * (int * Value[]) list) option =
+and private pointLookupEqualities (tref: TableRef) (whereExpr: Expr option) : (string * Value) list =
     match whereExpr with
-    | None -> None
+    | None -> []
     | Some whereExpr ->
-        let tableDb = tref.Database |> Option.defaultValue dbName
         let selfQualifier = tref.Alias |> Option.defaultValue tref.Table
 
         flattenAnd whereExpr
-        |> List.tryPick (function
+        |> List.choose (function
             | BinOp(Eq, Col n, Lit v)
-            | BinOp(Eq, Lit v, Col n) -> Storage.tryUniqueLookup store tableDb tref.Table n v
+            | BinOp(Eq, Lit v, Col n) -> Some(n, v)
             | BinOp(Eq, QualifiedCol(q, n), Lit v)
-            | BinOp(Eq, Lit v, QualifiedCol(q, n)) when System.String.Equals(q, selfQualifier, System.StringComparison.OrdinalIgnoreCase) ->
-                Storage.tryUniqueLookup store tableDb tref.Table n v
+            | BinOp(Eq, Lit v, QualifiedCol(q, n)) when System.String.Equals(q, selfQualifier, System.StringComparison.OrdinalIgnoreCase) -> Some(n, v)
             | _ -> None)
+
+and private tryPointLookup (store: Store) (dbName: string) (tref: TableRef) (whereExpr: Expr option) : (ColumnDef list * (int * Value[]) list) option =
+    let tableDb = tref.Database |> Option.defaultValue dbName
+
+    pointLookupEqualities tref whereExpr
+    |> List.tryPick (fun (n, v) -> Storage.tryUniqueLookup store tableDb tref.Table n v)
 
 /// Per-column MySQL wire type for a freshly-projected resultset, read off
 /// the first non-NULL `Value` in each column across `rows` — a plain
@@ -3260,17 +3270,18 @@ and private runWindowedSelect
                     |> Array.collect (Array.mapi (fun rank (origIdx, _) -> origIdx, VInt(int64 (rank + 1))))
                     |> Ok
                 | LagOver(lagExpr, offset, _, _) ->
-                    // `pos - offset` indexes back within the same
-                    // partition's ORDER BY-sorted rows; before the
-                    // partition's start (no such predecessor) is NULL, same
-                    // as real MySQL's `LAG`.
+                    // `pos - offset` indexes within the same partition's
+                    // ORDER BY-sorted rows — backward for `LAG` (positive
+                    // offset), forward for `LEAD` (negative, see
+                    // `Ast.Expr.LagOver`). Outside the partition (no such
+                    // predecessor/successor) is NULL, same as real MySQL.
                     partitions
                     |> traverse (fun group ->
                         group
                         |> Array.mapi (fun pos (origIdx, _) ->
                             let srcPos = pos - int offset
 
-                            if srcPos < 0 then
+                            if srcPos < 0 || srcPos >= group.Length then
                                 Ok(origIdx, VNull)
                             else
                                 let (_, (_, _, srcRow)) = group.[srcPos]
@@ -3766,13 +3777,13 @@ let rec private substituteValuesFunc (columnIndex: Map<string, int list>) (candi
 // ---------------------------------------------------------------------------
 // EXPLAIN — a pure *description* of what this executor would actually do
 // (join order, subquery/derived-table/union structure, current row counts),
-// never a real index-planner: this engine has no indexes at execution time,
-// so `type` is always `ALL` (a full scan) or `system` for a 0/1-row table,
-// and `possible_keys`/`key`/`key_len`/`ref` are always NULL — faking index
-// usage here would just be a second, disconnected lie about what `execute`
-// does. `rows` is the table's *actual* current row count (an in-memory
-// `scan`, not an estimate) since this engine can afford that where real
-// MySQL's cost-based planner can't.
+// never a speculative index-planner: `type` is `ALL` (a full scan),
+// `system` for a 0/1-row table, or `const` with `key`/`key_len`/`ref`
+// filled in exactly when `execute`'s own `tryPointLookup` would resolve the
+// block through a unique index — the plan reports an index only when the
+// execution genuinely uses one. `rows` is the table's *actual* current row
+// count (an in-memory `scan`, not an estimate) since this engine can
+// afford that where real MySQL's cost-based planner can't.
 // ---------------------------------------------------------------------------
 
 /// One row of `EXPLAIN`'s classic 12-column tabular output. `Id`/`Table` are
@@ -3785,6 +3796,11 @@ type private ExplainRow =
       SelectType: string
       Table: string option
       Type: string option
+      /// `Some(keyName, keyLen)` when this table row is a `const` unique-key
+      /// lookup — rendered into `possible_keys`/`key`/`key_len` with
+      /// `ref = const`, exactly when `execute`'s `tryPointLookup` would
+      /// take that path.
+      Key: (string * int option) option
       Rows: uint64 option
       Extra: string list }
 
@@ -3924,6 +3940,33 @@ let private explainTableStats (store: Store) (dbName: string) (tableRef: TableRe
 /// and `execute`'s `UPDATE`/`DELETE ... JOIN` explain handling both drive,
 /// since neither `Ast.UpdateStmt` nor `Ast.DeleteStmt` has a `SelectStmt` to
 /// hand this the way a `SELECT`/derived table does.
+/// MySQL's `key_len` for a one-column unique key: the key part's byte
+/// length as real MySQL reports it (utf8mb4 chars are 4 bytes each, `VAR*`
+/// adds a 2-byte length prefix, a nullable column adds 1 for the null
+/// flag); `None` for a type MySQL wouldn't report a fixed length on.
+let private explainKeyLen (col: ColumnDef) : int option =
+    let baseLen =
+        match col.Type with
+        | TTinyInt _ -> Some 1
+        | TSmallInt _ -> Some 2
+        | TMediumInt _ -> Some 3
+        | TInt _ -> Some 4
+        | TBigInt _ -> Some 8
+        | TChar n -> Some(n * 4)
+        | TVarchar n -> Some(n * 4 + 2)
+        | TBinary n -> Some n
+        | TVarBinary n -> Some(n + 2)
+        | TFloat -> Some 4
+        | TDouble -> Some 8
+        | TDate -> Some 3
+        | TEnum values -> Some(if List.length values <= 255 then 1 else 2)
+        | _ -> None
+
+    // A PRIMARY KEY column is implicitly NOT NULL in MySQL even when the
+    // DDL never said so (and this engine's ColumnDef keeps `Nullable = true`
+    // for it), so only a genuinely nullable unique column pays the null flag.
+    baseLen |> Option.map (fun n -> if col.Nullable && not col.PrimaryKey then n + 1 else n)
+
 let rec private explainJoinBlock
     (store: Store)
     (dbName: string)
@@ -3933,6 +3976,7 @@ let rec private explainJoinBlock
     (selectType: string)
     (from: FromItem option)
     (joins: Join list)
+    (whereOpt: Expr option)
     (extra: string list)
     (subqueryExprs: Expr list)
     : Result<unit, QueryResult> =
@@ -3944,8 +3988,64 @@ let rec private explainJoinBlock
               SelectType = selectType
               Table = Some label
               Type = Some typeLabel
+              Key = None
               Rows = rowCount
               Extra = (if idx = tableCount - 1 then extra else []) }
+
+    /// A single-table block whose WHERE ANDs in a unique-key equality is the
+    /// exact case `execute` resolves through `tryPointLookup` — report it as
+    /// MySQL's `const` (key/key_len/ref filled in, rows = 1), or as the
+    /// `no matching row in const table` shape when the key has no such row,
+    /// instead of pretending a full scan. Shares `pointLookupEqualities`/
+    /// `Storage.tryUniqueKeyProbe` with the executor so the plan can't claim
+    /// an index the execution wouldn't use.
+    let tryExplainConst (tref: TableRef) : bool =
+        if tableCount <> 1 then
+            false
+        else
+            let tableDb = tref.Database |> Option.defaultValue dbName
+
+            let probed =
+                pointLookupEqualities tref whereOpt
+                |> List.tryPick (fun (n, v) ->
+                    Storage.tryUniqueKeyProbe store tableDb tref.Table n v
+                    |> Option.map (fun (table, keyName, colIdx) ->
+                        let found =
+                            Storage.tryUniqueLookup store tableDb tref.Table n v
+                            |> Option.map (snd >> List.isEmpty >> not)
+                            |> Option.defaultValue false
+
+                        keyName, table.Columns.[colIdx], found))
+
+            match probed with
+            | None -> false
+            | Some(keyName, keyCol, found) when found ->
+                // MySQL shows no `Using where` on a const row — the single
+                // row is read at plan time and any leftover conditions are
+                // checked against it, not scanned for.
+                let extra' = extra |> List.filter ((<>) "Using where")
+
+                acc.Add
+                    { Id = Some id
+                      SelectType = selectType
+                      Table = Some(tref.Alias |> Option.defaultValue tref.Table)
+                      Type = Some "const"
+                      Key = Some(keyName, explainKeyLen keyCol)
+                      Rows = Some 1UL
+                      Extra = extra' }
+
+                true
+            | Some _ ->
+                acc.Add
+                    { Id = Some id
+                      SelectType = selectType
+                      Table = None
+                      Type = None
+                      Key = None
+                      Rows = None
+                      Extra = [ "no matching row in const table" ] }
+
+                true
 
     /// One `FromItem`'s row(s): a real table's stats, or a derived table's
     /// `<derivedN>` placeholder plus its own recursive `DERIVED` block.
@@ -3953,7 +4053,9 @@ let rec private explainJoinBlock
         match item with
         | FromTable tref ->
             explainTableStats store dbName tref
-            |> Result.map (fun (n, ty) -> emitTableRow idx (tref.Alias |> Option.defaultValue tref.Table) n ty)
+            |> Result.map (fun (n, ty) ->
+                if not (tryExplainConst tref) then
+                    emitTableRow idx (tref.Alias |> Option.defaultValue tref.Table) n ty)
         | FromSubquery(PlainSelect sub, _alias) ->
             let derivedId = nextId ()
             emitTableRow idx (sprintf "<derived%d>" derivedId) None "ALL"
@@ -3983,6 +4085,7 @@ let rec private explainJoinBlock
                   SelectType = selectType
                   Table = None
                   Type = None
+                  Key = None
                   Rows = None
                   Extra = [ "No tables used" ] })
     |> Result.bind (fun () ->
@@ -4014,7 +4117,7 @@ and private explainSelectBlock
           if not select.OrderBy.IsEmpty then "Using filesort"
           if not select.GroupBy.IsEmpty || select.Distinct then "Using temporary" ]
 
-    explainJoinBlock store dbName nextId acc id selectType select.From select.Joins extra (selectSubqueryExprs select)
+    explainJoinBlock store dbName nextId acc id selectType select.From select.Joins select.Where extra (selectSubqueryExprs select)
 
 /// Renders every collected `ExplainRow` into `EXPLAIN`'s classic 12-column
 /// resultset — `id` ascending, `None -> NULL` in every `option` cell the
@@ -4034,10 +4137,10 @@ let private renderExplainRows (rows: ExplainRow list) : QueryResult =
           r.Table
           None
           r.Type
-          None
-          None
-          None
-          None
+          r.Key |> Option.map fst
+          r.Key |> Option.map fst
+          r.Key |> Option.bind (snd >> Option.map string)
+          r.Key |> Option.map (fun _ -> "const")
           r.Rows |> Option.map string
           (r.Type |> Option.map (fun _ -> "100.00"))
           (if r.Extra.IsEmpty then None else Some(String.concat "; " r.Extra)) ]
@@ -4128,7 +4231,7 @@ let rec private explainStatement (store: Store) (registry: Registry) (dbName: st
             |> Result.map (fun restIds ->
                 if not restIds.IsEmpty then
                     let label = sprintf "<union%s>" (id1 :: restIds |> List.map string |> String.concat ",")
-                    acc.Add { Id = None; SelectType = "UNION RESULT"; Table = Some label; Type = None; Rows = None; Extra = [] })
+                    acc.Add { Id = None; SelectType = "UNION RESULT"; Table = Some label; Type = None; Key = None; Rows = None; Extra = [] })
         )
     | Update u ->
         let id = nextId ()
@@ -4138,7 +4241,7 @@ let rec private explainStatement (store: Store) (registry: Registry) (dbName: st
 
         finish (
             checkMutationWhere u.From u.Joins ((u.Where |> Option.toList) @ (u.Assignments |> List.map (fun a -> a.Value)))
-            |> Result.bind (fun () -> explainJoinBlock store dbName nextId acc id "UPDATE" (Some(FromTable u.From)) u.Joins extra subqueryExprs)
+            |> Result.bind (fun () -> explainJoinBlock store dbName nextId acc id "UPDATE" (Some(FromTable u.From)) u.Joins u.Where extra subqueryExprs)
         )
     | Delete d ->
         let id = nextId ()
@@ -4148,14 +4251,14 @@ let rec private explainStatement (store: Store) (registry: Registry) (dbName: st
 
         finish (
             checkMutationWhere d.From d.Joins (d.Where |> Option.toList)
-            |> Result.bind (fun () -> explainJoinBlock store dbName nextId acc id "DELETE" (Some(FromTable d.From)) d.Joins extra subqueryExprs)
+            |> Result.bind (fun () -> explainJoinBlock store dbName nextId acc id "DELETE" (Some(FromTable d.From)) d.Joins d.Where extra subqueryExprs)
         )
     | Insert(table, _, rowsExprs, _, _) ->
         let id = nextId ()
 
         finish (
             checkTableExists table
-            |> Result.map (fun () -> acc.Add { Id = Some id; SelectType = "INSERT"; Table = Some table; Type = None; Rows = None; Extra = [] })
+            |> Result.map (fun () -> acc.Add { Id = Some id; SelectType = "INSERT"; Table = Some table; Type = None; Key = None; Rows = None; Extra = [] })
             |> Result.bind (fun () ->
                 List.concat rowsExprs
                 |> List.collect collectSubqueries
@@ -4170,7 +4273,7 @@ let rec private explainStatement (store: Store) (registry: Registry) (dbName: st
         finish (
             checkTableExists table
             |> Result.bind (fun () -> checkSelect select)
-            |> Result.map (fun () -> acc.Add { Id = Some id; SelectType = "INSERT"; Table = Some table; Type = None; Rows = None; Extra = [] })
+            |> Result.map (fun () -> acc.Add { Id = Some id; SelectType = "INSERT"; Table = Some table; Type = None; Key = None; Rows = None; Extra = [] })
             |> Result.bind (fun () ->
                 let sid = nextId ()
                 explainSelectBlock store dbName nextId acc sid "SUBQUERY" select)

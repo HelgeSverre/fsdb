@@ -1000,6 +1000,31 @@ let tests =
                         Expect.stringContains extra "Using where" "WHERE noted on the last table"
                     | other -> failtestf "expected a two-row join plan, got %A" other
 
+                testCase "EXPLAIN SELECT by unique key is MySQL's const row, key columns filled in"
+                <| fun _ ->
+                    let store = newStore ()
+                    runDefault store "CREATE TABLE users (id INT PRIMARY KEY, name VARCHAR(50))" |> ignore
+                    runDefault store "INSERT INTO users VALUES (1, 'a'), (2, 'b')" |> ignore
+
+                    // Oracle (MySQL 8.4.11): type=const, possible_keys/key=PRIMARY,
+                    // key_len=4, ref=const, rows=1, Extra NULL.
+                    match runDefault store "EXPLAIN SELECT * FROM users WHERE id = 1" with
+                    | ResultSet(_, [ [ Some "1"; Some "SIMPLE"; Some "users"; None; Some "const"; Some "PRIMARY"; Some "PRIMARY"; Some "4"; Some "const"; Some "1"; Some "100.00"; None ] ]) ->
+                        ()
+                    | other -> failtestf "expected a const plan row, got %A" other
+
+                testCase "EXPLAIN by unique key with no matching row is the const-miss shape"
+                <| fun _ ->
+                    let store = newStore ()
+                    runDefault store "CREATE TABLE users (id INT PRIMARY KEY, name VARCHAR(50))" |> ignore
+                    runDefault store "INSERT INTO users VALUES (1, 'a')" |> ignore
+
+                    // Oracle: every cell NULL, Extra 'no matching row in const table'.
+                    match runDefault store "EXPLAIN SELECT * FROM users WHERE id = 99" with
+                    | ResultSet(_, [ [ Some "1"; Some "SIMPLE"; None; None; None; None; None; None; None; None; None; Some "no matching row in const table" ] ]) ->
+                        ()
+                    | other -> failtestf "expected the const-miss row, got %A" other
+
                 testCase "EXPLAIN SELECT with a correlated EXISTS subquery is DEPENDENT SUBQUERY"
                 <| fun _ ->
                     let store = newStore ()
@@ -3505,6 +3530,43 @@ let tests =
                               [ Some "b"; Some "100"; None ] ]
                             "each partition's first row has no predecessor, later rows see the prior one"
                     | other -> failtestf "expected lagged values, got %A" other
+
+                testCase "LEAD yields the next row's value per partition, NULL for the last"
+                <| fun _ ->
+                    let store = newStore ()
+                    runDefault store "CREATE TABLE readings (sensor VARCHAR(10), created_at INT, value INT)" |> ignore
+
+                    runDefault
+                        store
+                        "INSERT INTO readings VALUES ('a', 1, 10), ('a', 2, 14), ('a', 3, 9), ('b', 1, 100)"
+                    |> ignore
+
+                    // Oracle (MySQL 8.4.11): a -> 14, 9, NULL; b -> NULL.
+                    match
+                        runDefault
+                            store
+                            "SELECT sensor, value, LEAD(value) OVER (PARTITION BY sensor ORDER BY created_at) AS nxt FROM readings ORDER BY sensor, created_at"
+                    with
+                    | ResultSet([ "sensor"; "value"; "nxt" ], rows) ->
+                        Expect.equal
+                            rows
+                            [ [ Some "a"; Some "10"; Some "14" ]
+                              [ Some "a"; Some "14"; Some "9" ]
+                              [ Some "a"; Some "9"; None ]
+                              [ Some "b"; Some "100"; None ] ]
+                            "each partition's last row has no successor, earlier rows see the next one"
+                    | other -> failtestf "expected led values, got %A" other
+
+                testCase "LEAD with an explicit offset skips forward within the partition"
+                <| fun _ ->
+                    let store = newStore ()
+                    runDefault store "CREATE TABLE readings (created_at INT, value INT)" |> ignore
+                    runDefault store "INSERT INTO readings VALUES (1, 10), (2, 14), (3, 9)" |> ignore
+
+                    // Oracle: 10 -> 9 (two ahead), 14 -> NULL, 9 -> NULL.
+                    match runDefault store "SELECT value, LEAD(value, 2) OVER (ORDER BY created_at) AS n2 FROM readings ORDER BY created_at" with
+                    | ResultSet([ "value"; "n2" ], [ [ Some "10"; Some "9" ]; [ Some "14"; None ]; [ Some "9"; None ] ]) -> ()
+                    | other -> failtestf "expected LEAD(value, 2), got %A" other
 
                 testCase "usable nested inside arithmetic, not just as a bare projection"
                 <| fun _ ->
