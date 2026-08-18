@@ -163,6 +163,7 @@ let sqlStateForCode (code: int) : string =
     | 1052 -> "23000" // ER_NON_UNIQ_ERROR
     | 1062 -> "23000" // ER_DUP_ENTRY
     | 1265 -> "01000" // ER_WARN_DATA_TRUNCATED
+    | 1426 -> "42000" // ER_TOO_BIG_PRECISION
     | 1451 -> "23000" // ER_ROW_IS_REFERENCED_2
     | 1452 -> "23000" // ER_NO_REFERENCED_ROW_2
     | _ -> "HY000"
@@ -196,7 +197,32 @@ let eofPayload (capabilities: uint32) (statusFlags: int) : byte[] =
 /// `Value.mysqlTypeOf` (the data-driven source for most resultsets) and
 /// `wireTypeOfColumnType` below (the declared-schema source for the
 /// COM_FIELD_LIST path, which has no row data to read a type off of).
-type ColumnDef = { Name: string; Type: byte }
+type ColumnDef =
+    { Name: string
+      Type: byte
+      /// The column-definition packet's `decimals` field. For a temporal
+      /// column it carries the fractional-seconds precision (fsp 0-6) — a
+      /// MySQL client reads a `DATETIME(6)`'s precision off exactly this byte
+      /// (it surfaces as `MySqlConnector`'s `NumericScale`), so an exact-second
+      /// value still reports scale 6. `0` for everything else (the old
+      /// hardcoded value), matching MySQL for non-fractional columns.
+      Decimals: byte }
+
+/// Counts the fractional-second digits a temporal value's already-rendered
+/// text carries (`... :00.000000` → 6, `... :00` → 0) — the fsp the wire
+/// `decimals` field must advertise. The resultset path has no `ColumnType`
+/// in hand at send time (only the rendered rows), but the renderer already
+/// emitted exactly fsp digits (see `Value.toTextFsp`), so reading them back
+/// off the first non-NULL value recovers the precision without threading the
+/// schema all the way to the wire. Gated by the caller on a temporal wire
+/// type, so a `VARCHAR` that merely looks like a timestamp is never counted.
+let fractionalDigitsOf (values: string option list) : byte =
+    match values |> List.tryPick id with
+    | Some s ->
+        match s.LastIndexOf '.' with
+        | -1 -> 0uy
+        | dot -> byte (min 6 (s.Length - dot - 1))
+    | None -> 0uy
 
 let columnDefPayload (col: ColumnDef) : byte[] =
     let w = Writer()
@@ -212,7 +238,7 @@ let columnDefPayload (col: ColumnDef) : byte[] =
     w.WriteInt32LE 0 // column length
     w.WriteByte col.Type
     w.WriteInt16LE(if isBinary then BlobFlag ||| BinaryFlag else 0)
-    w.WriteByte 0uy // decimals
+    w.WriteByte col.Decimals // fsp for temporal columns, else 0
     w.WriteInt16LE 0 // filler
     w.ToArray()
 
@@ -232,8 +258,8 @@ let wireTypeOfColumnType (ty: Ast.ColumnType) : byte =
     | Ast.TDouble -> TypeDouble
     | Ast.TFloat -> TypeFloat
     | Ast.TDate -> TypeDate
-    | Ast.TDateTime
-    | Ast.TTimestamp -> TypeDateTime
+    | Ast.TDateTime _
+    | Ast.TTimestamp _ -> TypeDateTime
     | Ast.TBinary _
     | Ast.TVarBinary _
     | Ast.TTinyBlob
@@ -241,6 +267,16 @@ let wireTypeOfColumnType (ty: Ast.ColumnType) : byte =
     | Ast.TMediumBlob
     | Ast.TLongBlob -> TypeBlob
     | _ -> TypeVarString
+
+/// The `decimals` (fsp) a *declared* column type advertises — the COM_FIELD_LIST
+/// counterpart to `fractionalDigitsOf` (which recovers it from rendered rows),
+/// used where the real `Ast.ColumnType` is in hand instead of row data.
+let decimalsOfColumnType (ty: Ast.ColumnType) : byte =
+    match ty with
+    | Ast.TDateTime fsp
+    | Ast.TTimestamp fsp
+    | Ast.TTime fsp -> byte fsp
+    | _ -> 0uy
 
 /// Encodes one text-protocol row. None means SQL NULL.
 let textRowPayload (values: string option list) : byte[] =

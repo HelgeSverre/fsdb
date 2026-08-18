@@ -119,7 +119,11 @@ let tests =
                       Collation = None
                       Charset = None }
                     { Name = "created_at"
-                      Type = TDateTime
+                      // fsp 6 so the sub-second stand-in below survives
+                      // coercion (a bare DATETIME is fsp 0 and would round
+                      // the fraction away) — the point of this test is that
+                      // the WAL replays the stored physical value verbatim.
+                      Type = TDateTime 6
                       Nullable = false
                       Default = None
                       AutoIncrement = false

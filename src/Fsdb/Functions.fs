@@ -189,6 +189,25 @@ let private modFn: Scalar =
 let truncateToSecond (dt: DateTime) : DateTime =
     DateTime(dt.Ticks - dt.Ticks % TimeSpan.TicksPerSecond, dt.Kind)
 
+/// Rounds a non-negative 100 ns tick count to `fsp` fractional-second digits
+/// (fsp 0-6), MySQL's rounding for a value coerced into a `DATETIME(N)`/
+/// `TIME(N)` column: half away from zero (`.5` rounds up, verified against
+/// the oracle — `00:00:00.5`/`.01.5`/`.02.5` all round up, not banker's).
+/// A tick is 10^-7 s, so one fsp digit is 10^(7-fsp) ticks; the rounding can
+/// carry across seconds/minutes/days, which the plain tick arithmetic handles.
+let roundTicksToFsp (fsp: int) (ticks: int64) : int64 =
+    if fsp >= 7 then
+        ticks
+    else
+        let unit = pown 10L (7 - fsp)
+        let rem = ticks % unit
+        ticks - rem + (if rem * 2L >= unit then unit else 0L)
+
+/// `roundTicksToFsp` on a whole `DateTime` (see `Storage.coerceValue`'s
+/// `DATETIME`/`TIMESTAMP` case).
+let roundDateTimeToFsp (fsp: int) (dt: DateTime) : DateTime =
+    DateTime(roundTicksToFsp fsp dt.Ticks, dt.Kind)
+
 let private nowFn: Scalar = fun _ -> VDateTime(truncateToSecond DateTime.Now)
 
 // ---------------------------------------------------------------------------

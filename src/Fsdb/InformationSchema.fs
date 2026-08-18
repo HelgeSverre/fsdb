@@ -63,9 +63,11 @@ let private dataTypeName (ty: ColumnType) : string =
     | TDouble -> "double"
     | TFloat -> "float"
     | TDate -> "date"
-    | TDateTime -> "datetime"
-    | TTimestamp -> "timestamp"
-    | TTime -> "time"
+    // `data_type` is the bare name — the `(N)` fsp only shows up in
+    // `column_type` below, never here (MySQL-verified).
+    | TDateTime _ -> "datetime"
+    | TTimestamp _ -> "timestamp"
+    | TTime _ -> "time"
     | TYear -> "year"
     | TJson -> "json"
 
@@ -100,9 +102,12 @@ let columnTypeText (ty: ColumnType) : string =
     | TDouble -> "double"
     | TFloat -> "float"
     | TDate -> "date"
-    | TDateTime -> "datetime"
-    | TTimestamp -> "timestamp"
-    | TTime -> "time"
+    // `datetime(6)` when fsp > 0, bare `datetime` at fsp 0 — the exact
+    // strings `SHOW COLUMNS`/`information_schema.columns.column_type` report
+    // (MySQL-verified for all three temporal types).
+    | TDateTime fsp -> if fsp > 0 then sprintf "datetime(%d)" fsp else "datetime"
+    | TTimestamp fsp -> if fsp > 0 then sprintf "timestamp(%d)" fsp else "timestamp"
+    | TTime fsp -> if fsp > 0 then sprintf "time(%d)" fsp else "time"
     | TYear -> "year(4)"
     | TJson -> "json"
 
@@ -135,6 +140,17 @@ let private numericPrecisionScale (ty: ColumnType) : (int64 * int64) option =
     | TDecimal(p, s) -> Some(int64 p, int64 s)
     | TFloat -> Some(10L, 0L)
     | TDouble -> Some(22L, 0L)
+    | _ -> None
+
+/// `datetime_precision` — the fsp for a temporal type (0 for a bare
+/// `DATETIME`), `NULL` for everything else. MySQL populates it for `DATE`
+/// too (as 0); this only reports it for the fractional-second types, which
+/// is what a client reads a `DATETIME(6)`'s precision off of.
+let private datetimePrecision (ty: ColumnType) : int64 option =
+    match ty with
+    | TDateTime fsp
+    | TTimestamp fsp
+    | TTime fsp -> Some(int64 fsp)
     | _ -> None
 
 let isStringy (ty: ColumnType) : bool =
@@ -224,6 +240,7 @@ let private columnsColumns =
       intCol "character_maximum_length"
       intCol "numeric_precision"
       intCol "numeric_scale"
+      intCol "datetime_precision"
       strCol "column_key"
       strCol "extra"
       // NULL for a non-string column, `utf8mb4` for a string one — same
@@ -266,6 +283,7 @@ let private columnsRows (catalog: Catalog) : Value[] list =
                (charMaxLength c.Type |> Option.map VInt |> Option.defaultValue VNull)
                (precision |> Option.map VInt |> Option.defaultValue VNull)
                (scale |> Option.map VInt |> Option.defaultValue VNull)
+               (datetimePrecision c.Type |> Option.map VInt |> Option.defaultValue VNull)
                vs (columnKey t c)
                vs (if c.AutoIncrement then "auto_increment" else "")
                (if isStringy c.Type then vs (c.Charset |> Option.defaultValue "utf8mb4") else VNull)

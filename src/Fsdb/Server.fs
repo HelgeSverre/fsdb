@@ -110,7 +110,7 @@ let private resultHeadPayloads
     match result with
     | Affected affectedRows -> [ okPayload capabilities statusFlags affectedRows lastInsertId ]
     | Err(code, message) -> [ errPayload capabilities code message ]
-    | ResultSet(columns, _) ->
+    | ResultSet(columns, rows) ->
         let deprecateEof = capabilities &&& ClientDeprecateEof <> 0u
 
         // `columnTypes` only means anything if the caller actually had one
@@ -129,8 +129,21 @@ let private resultHeadPayloads
             w.WriteLenEncInt(uint64 columns.Length)
             w.ToArray()
 
+        // The `decimals` (fsp) each column advertises: for a DATETIME/
+        // TIMESTAMP column, read back the fractional digits the renderer
+        // already emitted into the rows (see `Protocol.fractionalDigitsOf`),
+        // so a client learns a `DATETIME(6)`'s precision even on an exact
+        // second. Non-temporal columns (and the TIME wire type, which fsdb
+        // sends as VAR_STRING) advertise 0, as before.
+        let decimalsOf (colIndex: int) (ty: byte) : byte =
+            if ty = TypeDateTime then
+                rows |> List.map (fun r -> List.tryItem colIndex r |> Option.flatten) |> Protocol.fractionalDigitsOf
+            else
+                0uy
+
         [ columnCountPayload ]
-        @ (List.zip columns types |> List.map (fun (name, ty) -> columnDefPayload { Name = name; Type = ty }))
+        @ (List.zip columns types
+           |> List.mapi (fun i (name, ty) -> columnDefPayload { Name = name; Type = ty; Decimals = decimalsOf i ty }))
         @ (if deprecateEof then [] else [ eofPayload capabilities statusFlags ])
 
 /// Writes an OK/ERR/resultset reply. Rows are framed and written in batches —
@@ -499,7 +512,7 @@ let private handleConnection
                                 | Result.Ok(columns, _rows) ->
                                     let payloads =
                                         (columns
-                                         |> List.map (fun c -> columnDefPayload { Name = c.Name; Type = wireTypeOfColumnType c.Type }))
+                                         |> List.map (fun c -> columnDefPayload { Name = c.Name; Type = wireTypeOfColumnType c.Type; Decimals = decimalsOfColumnType c.Type }))
                                         @ [ eofPayload capabilities (statusFlagsFor session) ]
 
                                     do! sendPayloads stream seqId payloads |> Async.Ignore
@@ -536,7 +549,7 @@ let private handleConnection
 
                                     let payloads =
                                         stmtPrepareOkPayload stmtId paramCount
-                                        :: List.replicate paramCount (columnDefPayload { Name = "?"; Type = TypeVarString })
+                                        :: List.replicate paramCount (columnDefPayload { Name = "?"; Type = TypeVarString; Decimals = 0uy })
                                         @ paramDefEof
 
                                     do! sendPayloads stream seqId payloads |> Async.Ignore

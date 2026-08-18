@@ -19,6 +19,7 @@
     <Compile Include="TransactionTests.fs" />
     <Compile Include="ServerTests.fs" />
     <Compile Include="IntegrationTests.fs" />
+    <Compile Include="TemporalPrecisionTests.fs" />
     <Compile Include="Program.fs" />
   </ItemGroup>
 

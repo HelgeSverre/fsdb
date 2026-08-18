@@ -58,9 +58,16 @@ type ColumnType =
     | TDouble
     | TFloat
     | TDate
-    | TDateTime
-    | TTimestamp
-    | TTime
+    /// The `int` is the fractional-seconds precision (fsp, 0-6) a
+    /// `DATETIME(N)`/`TIMESTAMP(N)`/`TIME(N)` declares — 0 for a bare
+    /// `DATETIME`. It drives how many sub-second digits a value of the
+    /// column renders with (a `DATETIME(6)` on an exact second still shows
+    /// `.000000`), the coercion rounding of an inserted value's fraction,
+    /// the binary-protocol `decimals` field, and the `datetime(N)`
+    /// `information_schema`/`SHOW COLUMNS` type text.
+    | TDateTime of fsp: int
+    | TTimestamp of fsp: int
+    | TTime of fsp: int
     | TYear
     | TJson
 

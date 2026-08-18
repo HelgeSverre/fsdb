@@ -187,9 +187,14 @@ let private encodeColumnType (w: Writer) (t: ColumnType) : unit =
     | TDouble -> w.WriteByte 0x15uy
     | TFloat -> w.WriteByte 0x16uy
     | TDate -> w.WriteByte 0x17uy
-    | TDateTime -> w.WriteByte 0x18uy
-    | TTimestamp -> w.WriteByte 0x19uy
-    | TTime -> w.WriteByte 0x1Auy
+    // An fsp byte rides after the tag for the three fractional-second types
+    // so a `DATETIME(6)` column survives a snapshot/WAL round-trip with its
+    // precision — legacy snapshots predating fsp never wrote these three with
+    // a trailing byte, but they also can't contain them (the old parser
+    // dropped the precision), so nothing legacy needs to read one back.
+    | TDateTime fsp -> w.WriteByte 0x18uy; w.WriteByte(byte fsp)
+    | TTimestamp fsp -> w.WriteByte 0x19uy; w.WriteByte(byte fsp)
+    | TTime fsp -> w.WriteByte 0x1Auy; w.WriteByte(byte fsp)
     | TYear -> w.WriteByte 0x1Buy
     | TJson -> w.WriteByte 0x1Cuy
 
@@ -218,9 +223,9 @@ let private decodeColumnType (r: #IReader) : ColumnType =
     | 0x15uy -> TDouble
     | 0x16uy -> TFloat
     | 0x17uy -> TDate
-    | 0x18uy -> TDateTime
-    | 0x19uy -> TTimestamp
-    | 0x1Auy -> TTime
+    | 0x18uy -> TDateTime(int (r.ReadByte()))
+    | 0x19uy -> TTimestamp(int (r.ReadByte()))
+    | 0x1Auy -> TTime(int (r.ReadByte()))
     | 0x1Buy -> TYear
     | 0x1Cuy -> TJson
     | tag -> failwithf "Persistence: unknown ColumnType tag 0x%02x in WAL/snapshot" tag

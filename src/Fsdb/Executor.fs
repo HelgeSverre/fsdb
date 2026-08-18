@@ -488,6 +488,52 @@ let rec private tryColumnDefForExpr (ctx: EvalContext) (expr: Expr) : ColumnDef 
         | None -> ctx.Outer |> Option.bind (fun outer -> tryColumnDefForExpr outer expr)
     | _ -> None
 
+/// The declared fractional-seconds precision (fsp) a temporal `ColumnType`
+/// renders at — `Some 0..6` for the three fractional-second types, `None`
+/// for anything else. `Some 0` (a bare `DATETIME`) still forces no fraction
+/// at render, distinct from `None` (an expression/literal, which falls back
+/// to `Value.toText`'s show-the-actual-digits behavior).
+let private fspOfType (ty: ColumnType) : int option =
+    match ty with
+    | TDateTime fsp
+    | TTimestamp fsp
+    | TTime fsp -> Some fsp
+    | _ -> None
+
+/// The declared fsp for each output column a projection produces — parallel,
+/// in length and order, to the `(name, Value)` list `evalProjection` builds
+/// for the same projection (`Star None` → every table column, `t.*` → that
+/// qualifier's columns, a bare/qualified column → its own declared type, and
+/// `None` for a literal/function/arithmetic that has no schema type). Threaded
+/// into the resultset renderer so a `DATETIME(6)` column shows exactly six
+/// digits where the bare `VDateTime` alone can't say how many. Mirrors
+/// `evalProjection`/`resolveStarQualifier`'s own expansion so the two lists
+/// line up column-for-column.
+let rec private outputColumnFsps (ctx: EvalContext) (columns: ColumnDef list) (projections: Projection list) : int option list =
+    let rec starQualifierCols (ctx: EvalContext) (qualifier: string) : ColumnDef list =
+        match Map.tryFind (qualifier.ToLowerInvariant()) ctx.Qualifiers with
+        | Some(cols, _) -> cols
+        | None -> ctx.Outer |> Option.map (fun o -> starQualifierCols o qualifier) |> Option.defaultValue []
+
+    projections
+    |> List.collect (fun proj ->
+        match proj with
+        | Star None, _ -> columns |> List.map (fun c -> fspOfType c.Type)
+        | Star(Some qualifier), _ -> starQualifierCols ctx qualifier |> List.map (fun c -> fspOfType c.Type)
+        | expr, _ -> [ tryColumnDefForExpr ctx expr |> Option.bind (fun c -> fspOfType c.Type) ])
+
+/// Renders a projection's `(name, Value)` output columns to the resultset's
+/// `string option list`, honoring each column's declared fsp (`fsps`, from
+/// `outputColumnFsps`) — a temporal column shows exactly its fsp digits, and
+/// everything else falls back to `Value.toText`. Falls back wholesale if the
+/// two lists somehow disagree in length (they shouldn't — both come from the
+/// same projection expansion), rather than throwing from `List.map2`.
+let private renderOutputCols (fsps: int option list) (outputCols: (string * Value) list) : string option list =
+    if List.length fsps = List.length outputCols then
+        List.map2 (fun fspOpt (_, v) -> match fspOpt with Some fsp -> Value.toTextFsp fsp v | None -> Value.toText v) fsps outputCols
+    else
+        outputCols |> List.map (snd >> toText)
+
 /// The collation a comparison involving `expr` resolves under: an
 /// explicit `expr COLLATE name` tag wins, then a string-typed column's
 /// declared `COLLATE`, then `None` (the caller falls back to the server
@@ -3104,9 +3150,16 @@ and private runGroupedSelect
                         else
                             kept |> List.sortWith (fun (_, ka, _) (_, kb, _) -> compareByOrderKeys (List.map snd select.OrderBy) ka kb)
 
+                    // Declared fsp per output column, same as the plain path
+                    // — a bare grouped temporal column (`SELECT dt ... GROUP
+                    // BY dt`) still renders its precision; an aggregate over
+                    // one (`MAX(dt)`) has no resolvable column type and falls
+                    // back to `toText`.
+                    let groupFsps = outputColumnFsps (ctxFor (probeRow columns)) columns select.Projections
+
                     let paired =
                         sorted
-                        |> List.map (fun (proj, _, _) -> proj |> List.map (snd >> toText), proj |> List.map snd |> Array.ofList)
+                        |> List.map (fun (proj, _, _) -> renderOutputCols groupFsps proj, proj |> List.map snd |> Array.ofList)
 
                     let dedupedPaired = if select.Distinct then paired |> List.distinctBy fst else paired
                     let types = columnTypesOf (List.length colNames) (sorted |> List.map (fun (proj, _, _) -> proj))
@@ -3346,8 +3399,14 @@ and private runSelect
     let orderKeysOf (row: Value[]) (outputCols: (string * Value) list) : Result<(Value * Collation.Collation option) list, EvalError> =
         orderBy |> traverse (fun (expr, _) -> resolveOrderKey (ctxFor row) projections outputCols (resolveOrderExpr expr))
 
+    // The declared fsp per output column, computed once off the probe
+    // context — a temporal column renders exactly its fsp digits (see
+    // `renderOutputCols`), independent of row values, so it's stable across
+    // every row this select emits.
+    let outputFsps = outputColumnFsps (ctxFor (probeRow columns)) columns projections
+
     let pairOf (outputCols: (string * Value) list) : string option list * Value[] =
-        outputCols |> List.map (snd >> toText), outputCols |> List.map snd |> Array.ofList
+        renderOutputCols outputFsps outputCols, outputCols |> List.map snd |> Array.ofList
 
     let probe = probeRow columns
 

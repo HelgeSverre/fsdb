@@ -23,4 +23,5 @@ let main argv =
               PersistenceTests.tests
               ExecutorTests.tests
               InformationSchemaTests.tests
+              TemporalPrecisionTests.tests
               IntegrationTests.tests ])
