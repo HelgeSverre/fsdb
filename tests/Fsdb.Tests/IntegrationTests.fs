@@ -46,6 +46,45 @@ let tests =
               }
               |> Async.RunSynchronously
 
+          // mysql CLI sends `SHOW WARNINGS LIMIT n` and mysqli's
+          // `mysqli_report`/error-checking idiom sends `SHOW COUNT(*)
+          // WARNINGS` — both routinely enough that either one dying with a
+          // 1064 breaks real client connect/error-handling flows, not just
+          // an edge case.
+          testCase "SHOW WARNINGS LIMIT n and SHOW COUNT(*) WARNINGS round-trip over the real wire protocol"
+          <| fun _ ->
+              async {
+                  let listener = Fsdb.Server.startListening System.Net.IPAddress.Loopback 0
+                  let port = Fsdb.Server.port listener
+                  Fsdb.Server.serve listener (Fsdb.Storage.create ()) Fsdb.Functions.empty |> Async.StartAsTask |> ignore
+
+                  try
+                      let connStr =
+                          sprintf
+                              "Server=127.0.0.1;Port=%d;User ID=root;Password=;AllowPublicKeyRetrieval=True;SslMode=None"
+                              port
+
+                      use conn = new MySqlConnector.MySqlConnection(connStr)
+                      do! conn.OpenAsync() |> Async.AwaitTask
+
+                      use cmd1 = conn.CreateCommand()
+                      cmd1.CommandText <- "SHOW WARNINGS LIMIT 10"
+                      use! reader1 = cmd1.ExecuteReaderAsync() |> Async.AwaitTask
+                      let! hasRow = reader1.ReadAsync() |> Async.AwaitTask
+                      Expect.isFalse hasRow "SHOW WARNINGS LIMIT 10 returns no rows on a clean connection"
+                      do! reader1.CloseAsync() |> Async.AwaitTask
+
+                      use cmd2 = conn.CreateCommand()
+                      cmd2.CommandText <- "SHOW COUNT(*) WARNINGS"
+                      let! count = cmd2.ExecuteScalarAsync() |> Async.AwaitTask
+                      Expect.equal (string count) "0" "SHOW COUNT(*) WARNINGS reports 0"
+
+                      do! conn.CloseAsync() |> Async.AwaitTask
+                  finally
+                      listener.Stop()
+              }
+              |> Async.RunSynchronously
+
           testCase "a real CRUD round-trip: create table, insert, select, update, delete"
           <| fun _ ->
               async {

@@ -735,4 +735,117 @@ let tests =
 
               match handle session "SELECT LAST_INSERT_ID()" |> snd with
               | ResultSet(_, [ [ Some "6" ] ]) -> ()
-              | other -> failtestf "expected LAST_INSERT_ID() to still be 6, unchanged by the all-explicit insert, got %A" other ]
+              | other -> failtestf "expected LAST_INSERT_ID() to still be 6, unchanged by the all-explicit insert, got %A" other
+
+          testCase "SHOW WARNINGS LIMIT n is accepted, matching the mysql CLI's/mysqli's routine probe"
+          <| fun _ ->
+              let session = create 1 (Fsdb.Storage.create ())
+
+              match handle session "SHOW WARNINGS LIMIT 10" |> snd with
+              | ResultSet([ "Level"; "Code"; "Message" ], []) -> ()
+              | other -> failtestf "expected an empty warnings resultset, got %A" other
+
+              match handle session "SHOW WARNINGS LIMIT 5, 10" |> snd with
+              | ResultSet([ "Level"; "Code"; "Message" ], []) -> ()
+              | other -> failtestf "expected an empty warnings resultset with offset, got %A" other
+
+          testCase "SHOW COUNT(*) WARNINGS / SHOW COUNT(*) ERRORS report a single zero row"
+          <| fun _ ->
+              let session = create 1 (Fsdb.Storage.create ())
+
+              match handle session "SHOW COUNT(*) WARNINGS" |> snd with
+              | ResultSet([ "@@session.warning_count" ], [ [ Some "0" ] ]) -> ()
+              | other -> failtestf "expected @@session.warning_count = 0, got %A" other
+
+              match handle session "SHOW COUNT(*) ERRORS" |> snd with
+              | ResultSet([ "@@session.error_count" ], [ [ Some "0" ] ]) -> ()
+              | other -> failtestf "expected @@session.error_count = 0, got %A" other
+
+          testCase "SHOW ERRORS is accepted like SHOW WARNINGS"
+          <| fun _ ->
+              let session = create 1 (Fsdb.Storage.create ())
+
+              match handle session "SHOW ERRORS" |> snd with
+              | ResultSet([ "Level"; "Code"; "Message" ], []) -> ()
+              | other -> failtestf "expected an empty errors resultset, got %A" other
+
+          testCase "SET GLOBAL never changes the issuing session's own variable"
+          <| fun _ ->
+              let store = Fsdb.Storage.create ()
+              let session = create 1 store
+              let session, ok = handle session "SET GLOBAL max_connections = 500"
+              Expect.equal ok (Affected 0UL) "SET GLOBAL acks"
+
+              // `max_connections` was never in this session's own `Variables`
+              // (only in the store-wide GLOBAL map SET GLOBAL just wrote) —
+              // `@@SESSION.` scoped explicitly, it stays unknown to this
+              // session, proving the GLOBAL write never touched
+              // `session.Variables`.
+              match handle session "SELECT @@SESSION.max_connections" |> snd with
+              | Err(1193, _) -> ()
+              | other -> failtestf "SET GLOBAL must not leak into this session's own @@SESSION value, got %A" other
+
+          testCase "SET GLOBAL x = y is visible to SELECT @@GLOBAL.x on the same connection"
+          <| fun _ ->
+              let session = create 1 (Fsdb.Storage.create ())
+              let session, _ = handle session "SET GLOBAL max_connections = 500"
+
+              match handle session "SELECT @@GLOBAL.max_connections" |> snd with
+              | ResultSet(_, [ [ Some "500" ] ]) -> ()
+              | other -> failtestf "expected @@GLOBAL.max_connections = 500, got %A" other
+
+          testCase "a new session inherits a SET GLOBAL made before it connected"
+          <| fun _ ->
+              let store = Fsdb.Storage.create ()
+              let setter = create 1 store
+              let setter, _ = handle setter "SET GLOBAL max_connections = 500"
+              ignore setter
+
+              let newcomer = create 2 store
+
+              Expect.equal
+                  (newcomer.Variables |> Map.tryFind "max_connections" |> Option.flatten)
+                  (Some "500")
+                  "a session created after the GLOBAL write inherits it as its own session default"
+
+          testCase "SET @@GLOBAL.x = y is equivalent to SET GLOBAL x = y"
+          <| fun _ ->
+              let store = Fsdb.Storage.create ()
+              let session = create 1 store
+              let session, _ = handle session "SET @@GLOBAL.max_connections = 777"
+              ignore session
+
+              let newcomer = create 2 store
+
+              Expect.equal
+                  (newcomer.Variables |> Map.tryFind "max_connections" |> Option.flatten)
+                  (Some "777")
+                  "the @@GLOBAL. spelling reaches the same global map as SET GLOBAL"
+
+          testCase "SET [SESSION] TRANSACTION ISOLATION LEVEL accepts READ COMMITTED and READ UNCOMMITTED"
+          <| fun _ ->
+              let session = create 1 (Fsdb.Storage.create ())
+
+              match handle session "SET SESSION TRANSACTION ISOLATION LEVEL READ COMMITTED" with
+              | session, Affected 0UL ->
+                  Expect.equal
+                      (session.Variables |> Map.tryFind "transaction_isolation" |> Option.flatten)
+                      (Some "READ-COMMITTED")
+                      "hyphenated, matching MySQL's own @@transaction_isolation spelling"
+              | _, other -> failtestf "expected OK, got %A" other
+
+              match handle session "SET TRANSACTION ISOLATION LEVEL READ UNCOMMITTED" with
+              | session, Affected 0UL ->
+                  Expect.equal
+                      (session.Variables |> Map.tryFind "transaction_isolation" |> Option.flatten)
+                      (Some "READ-UNCOMMITTED")
+                      "hyphenated"
+              | _, other -> failtestf "expected OK, got %A" other
+
+          testCase "SET TRANSACTION ISOLATION LEVEL SERIALIZABLE is a clear 1235, not a silent lie or a 1064"
+          <| fun _ ->
+              let session = create 1 (Fsdb.Storage.create ())
+
+              match handle session "SET TRANSACTION ISOLATION LEVEL SERIALIZABLE" |> snd with
+              | Err(1235, _) -> ()
+              | other -> failtestf "expected a 1235 unsupported-feature error, got %A" other ]

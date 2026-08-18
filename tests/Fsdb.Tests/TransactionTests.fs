@@ -381,4 +381,58 @@ let tests =
 
               match handle session "SELECT id, v FROM tx_sp_ai ORDER BY id" |> snd with
               | ResultSet(_, [ [ Some "1"; Some "1" ]; [ Some "3"; Some "3" ] ]) -> ()
-              | result -> failtestf "expected id 2 to stay burned across the savepoint rollback (rows 1 and 3, not 1 and 2), got %A" result ]
+              | result -> failtestf "expected id 2 to stay burned across the savepoint rollback (rows 1 and 3, not 1 and 2), got %A" result
+
+          testCase "ROLLBACK TO SAVEPOINT destroys every savepoint established after it, but not the named one"
+          <| fun _ ->
+              let session = create 1 (Fsdb.Storage.create ())
+              let session, _ = handle session "BEGIN"
+              let session, _ = handle session "SAVEPOINT a"
+              let session, _ = handle session "SAVEPOINT b"
+              let session, _ = handle session "SAVEPOINT c"
+              let session, _ = handle session "ROLLBACK TO SAVEPOINT a"
+
+              // b and c were established after a, so both are gone.
+              match handle session "RELEASE SAVEPOINT b" |> snd with
+              | Err(1305, _) -> ()
+              | other -> failtestf "expected b to have been dropped by the rollback, got %A" other
+
+              // a itself survives a rollback to it.
+              match handle session "ROLLBACK TO SAVEPOINT a" |> snd with
+              | Affected 0UL -> ()
+              | other -> failtestf "expected a to still exist after rolling back to itself, got %A" other
+
+          testCase "RELEASE SAVEPOINT destroys every savepoint established after it, matching real MySQL's cascade"
+          <| fun _ ->
+              let session = create 1 (Fsdb.Storage.create ())
+              let session, _ = handle session "BEGIN"
+              let session, _ = handle session "SAVEPOINT a"
+              let session, _ = handle session "SAVEPOINT b"
+              let session, _ = handle session "SAVEPOINT c"
+              let session, _ = handle session "RELEASE SAVEPOINT a"
+
+              match handle session "RELEASE SAVEPOINT b" |> snd with
+              | Err(1305, _) -> ()
+              | other -> failtestf "expected b to have been dropped along with a, got %A" other
+
+              match handle session "RELEASE SAVEPOINT c" |> snd with
+              | Err(1305, _) -> ()
+              | other -> failtestf "expected c to have been dropped along with a, got %A" other
+
+          testCase "re-issuing SAVEPOINT with an existing name moves it to the end of the establishment order"
+          <| fun _ ->
+              let session = create 1 (Fsdb.Storage.create ())
+              let session, _ = handle session "BEGIN"
+              let session, _ = handle session "SAVEPOINT a"
+              let session, _ = handle session "SAVEPOINT b"
+              let session, _ = handle session "SAVEPOINT a" // re-establishes a after b
+
+              // b was established before this second `a`, so releasing a
+              // must not cascade-drop it.
+              match handle session "RELEASE SAVEPOINT a" |> snd with
+              | Affected 0UL -> ()
+              | other -> failtestf "expected RELEASE SAVEPOINT a to succeed, got %A" other
+
+              match handle session "RELEASE SAVEPOINT b" |> snd with
+              | Affected 0UL -> ()
+              | other -> failtestf "expected b to survive releasing the re-established a, got %A" other ]

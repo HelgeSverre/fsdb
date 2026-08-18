@@ -2,6 +2,8 @@
 module Fsdb.Session
 
 open System
+open System.Collections.Concurrent
+open System.Runtime.CompilerServices
 open Fsdb.Ast
 open Fsdb.Protocol
 open Fsdb.Storage
@@ -45,6 +47,40 @@ let defaultVariables: Map<string, string option> =
           "query_cache_size", "0"
           "query_cache_type", "OFF" ]
         |> Map.map (fun _ v -> Some v)
+
+/// GLOBAL-scope system variable overrides (`SET GLOBAL x = y` / `SET
+/// @@GLOBAL.x = y`), shared by every session on the same underlying
+/// `Store` — keyed off `Store.Lock`, the one field every per-connection
+/// `Store` clone (`create` below) shares by reference with the real store,
+/// since `Storage.Store` has no such map of its own (adding one there
+/// means widening every `{ store with ... }` clone site instead of one
+/// lookup table here). `ConditionalWeakTable` needs no explicit
+/// store-teardown hook and can never outlive the store it's keyed on.
+let private globalVariablesByStore =
+    ConditionalWeakTable<obj, ConcurrentDictionary<string, string option>>()
+
+let private globalVariablesOf (store: Store) : ConcurrentDictionary<string, string option> =
+    globalVariablesByStore.GetValue(store.Lock, (fun _ -> ConcurrentDictionary()))
+
+/// Applies `SET GLOBAL name = value` (or `SET @@GLOBAL.name = value`):
+/// visible to every session created on this store afterwards (`create`
+/// seeds `Variables` from this map) and to `SELECT @@GLOBAL.name` on any
+/// existing one, but never touches the issuing session's own `Variables` —
+/// real MySQL's GLOBAL/SESSION split.
+let setGlobalVariable (store: Store) (name: string) (value: string option) : unit =
+    (globalVariablesOf store).[name.ToLowerInvariant()] <- value
+
+/// Reads a GLOBAL-scope variable, falling back to the same compiled-in
+/// default `create` seeds a new session from, so `SELECT @@GLOBAL.x` for a
+/// variable nobody ever `SET GLOBAL`-ed answers with that default instead
+/// of "unknown". `None` means genuinely unknown (`SELECT @@GLOBAL.bogus`);
+/// `Some None` means known and currently NULL.
+let tryGlobalVariable (store: Store) (name: string) : string option option =
+    let name = name.ToLowerInvariant()
+
+    match (globalVariablesOf store).TryGetValue name with
+    | true, v -> Some v
+    | false, _ -> defaultVariables |> Map.tryFind name
 
 /// A server-side prepared statement (COM_STMT_PREPARE / COM_STMT_EXECUTE).
 /// `Ast` is the parsed statement for everything the grammar produces —
@@ -97,11 +133,21 @@ type Transaction =
       /// a consistent snapshot on the first statement rather than the BEGIN
       /// packet.
       GateLease: Map<string, IDisposable>
-      /// Each savepoint's catalog plus how many events `Snapshot.PendingEvents`
-      /// had buffered at that point — `ROLLBACK TO SAVEPOINT` truncates the
-      /// buffer back to that length too, so a physical WAL never sees events
-      /// for writes the savepoint rollback just undid.
-      Savepoints: Map<string, Catalog * int> }
+      /// Each savepoint's establishment order (see `NextSavepointSeq`), its
+      /// catalog, and how many events `Snapshot.PendingEvents` had buffered
+      /// at that point — `ROLLBACK TO SAVEPOINT` truncates the buffer back
+      /// to that length too, so a physical WAL never sees events for writes
+      /// the savepoint rollback just undid. The order lets `ROLLBACK TO
+      /// SAVEPOINT`/`RELEASE SAVEPOINT` drop every savepoint established
+      /// *after* the named one, matching real MySQL — a plain `Map` alone
+      /// has no notion of "after", since re-`SAVEPOINT`-ing an existing name
+      /// moves it, not creates a second entry.
+      Savepoints: Map<string, int * Catalog * int>
+      /// Monotonically increasing counter, one `SAVEPOINT` = one tick —
+      /// never reused even if the savepoint it tagged is later dropped, so
+      /// two savepoints established back-to-back with no write between them
+      /// (same buffered-event count) still compare correctly by this alone.
+      NextSavepointSeq: int }
 
 type Session =
     { ConnectionId: int
@@ -178,9 +224,16 @@ type Session =
       CustomFunctions: Fsdb.Functions.Registry }
 
 let create (connectionId: int) (store: Store) : Session =
+    // Overlays every `SET GLOBAL`-ed override onto the compiled-in
+    // defaults — a fresh session inherits whatever GLOBAL state is live on
+    // this store, matching real MySQL's "new sessions pick up the current
+    // global value" semantics (see `tryGlobalVariable`/`setGlobalVariable`).
+    let variables =
+        (globalVariablesOf store) |> Seq.fold (fun acc (KeyValue(k, v)) -> Map.add k v acc) defaultVariables
+
     { ConnectionId = connectionId
       Database = None
-      Variables = defaultVariables
+      Variables = variables
       UserVariables = Map.empty
       // A per-connection clone of `store`, not `store` itself. `Databases`,
       // `TransactionGates`, `Lock`, and `OnCommit` are reference-typed, so the

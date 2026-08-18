@@ -148,22 +148,41 @@ let valueToSqlLiteral (v: Value) : string =
 /// Matches `@@var` (system, optionally `session.`/`global.`-qualified) or
 /// `@var` (user-defined), optionally aliased, optionally followed by a
 /// trailing `LIMIT n` (mysql CLI probes `@@version_comment` this way at
-/// connect time). Group 1 is the sigil (`"@"` or `"@@"`), so a single regex
-/// covers both — `resolveAtRef` below is the only place that branches on
-/// which.
+/// connect time). Group 1 is the sigil (`"@"` or `"@@"`); group 2 the
+/// `SESSION.`/`GLOBAL.` qualifier (empty for neither) — `resolveAtRef`
+/// below is the only place that branches on either.
 let private atVarItem =
-    Regex(@"^(@@?)(?:SESSION\.|GLOBAL\.)?(\w+)(?:\s+AS\s+(\S+))?(?:\s+LIMIT\s+\d+)?$", RegexOptions.IgnoreCase)
+    Regex(@"^(@@?)(SESSION\.|GLOBAL\.)?(\w+)(?:\s+AS\s+(\S+))?(?:\s+LIMIT\s+\d+)?$", RegexOptions.IgnoreCase)
+
+/// Whether a matched scope prefix means GLOBAL — `Contains`, not
+/// `StartsWith`: `atVarItem`'s scope group is bare (`"GLOBAL."`) but
+/// `setVar`'s includes the `@@` sigil (`"@@GLOBAL."`), so the literal
+/// "GLOBAL" can start at either position 0 or 2.
+let private isGlobalScope (scope: string) : bool =
+    scope.IndexOf("GLOBAL", StringComparison.OrdinalIgnoreCase) >= 0
+
+/// The raw (unflattened) lookup behind `resolveAtRef` — kept separate so
+/// `handleAtVarSelect` can still tell "unknown system variable" (outer
+/// `None`) apart from "known, currently NULL" when deciding whether to
+/// raise 1193, the one case `resolveAtRef`'s flattened `string option`
+/// can't distinguish.
+let private lookupAtRef (session: Session) (sigil: string) (scope: string) (name: string) : string option option =
+    if sigil = "@@" then
+        if isGlobalScope scope then
+            Session.tryGlobalVariable session.Store name
+        else
+            lookupVar session name
+    else
+        Some(session.UserVariables |> Map.tryFind (name.ToLowerInvariant()) |> Option.flatten)
 
 /// Resolves one `@@name`/`@name` reference to its current value. A system
-/// variable (`@@`) is looked up in `Session.Variables`; a user variable
+/// variable (`@@`) is looked up in `Session.Variables` (or the store's
+/// GLOBAL overrides for an explicit `@@GLOBAL.` qualifier); a user variable
 /// (`@`) in `Session.UserVariables`, where "never `SET`" and "`SET` to
 /// NULL" both collapse to `None` via `Option.flatten` — real MySQL reads
 /// both back as NULL, and callers here don't need to tell them apart.
-let private resolveAtRef (session: Session) (sigil: string) (name: string) : string option =
-    if sigil = "@@" then
-        lookupVar session name |> Option.flatten
-    else
-        session.UserVariables |> Map.tryFind (name.ToLowerInvariant()) |> Option.flatten
+let private resolveAtRef (session: Session) (sigil: string) (scope: string) (name: string) : string option =
+    lookupAtRef session sigil scope name |> Option.flatten
 
 /// `SELECT @@version`, `SELECT @foo`, `SELECT @@version AS v, @foo` etc.
 /// A referenced *system* variable that isn't known is a loud 1193
@@ -179,23 +198,25 @@ let private handleAtVarSelect (session: Session) (sql: string) : QueryResult =
     if parsed |> Array.forall (fun m -> m.Success) then
         let unknownSysVar =
             parsed
-            |> Array.tryFind (fun m -> m.Groups.[1].Value = "@@" && lookupVar session m.Groups.[2].Value |> Option.isNone)
+            |> Array.tryFind (fun m ->
+                m.Groups.[1].Value = "@@"
+                && lookupAtRef session m.Groups.[1].Value m.Groups.[2].Value m.Groups.[3].Value |> Option.isNone)
 
         match unknownSysVar with
-        | Some m -> Err(1193, sprintf "Unknown system variable '%s'" m.Groups.[2].Value)
+        | Some m -> Err(1193, sprintf "Unknown system variable '%s'" m.Groups.[3].Value)
         | None ->
             let cols =
                 parsed
                 |> Array.map (fun m ->
-                    if m.Groups.[3].Success then
-                        m.Groups.[3].Value
+                    if m.Groups.[4].Success then
+                        m.Groups.[4].Value
                     else
-                        m.Groups.[1].Value + m.Groups.[2].Value)
+                        m.Groups.[1].Value + m.Groups.[2].Value + m.Groups.[3].Value)
                 |> Array.toList
 
             let vals =
                 parsed
-                |> Array.map (fun m -> resolveAtRef session m.Groups.[1].Value m.Groups.[2].Value)
+                |> Array.map (fun m -> resolveAtRef session m.Groups.[1].Value m.Groups.[2].Value m.Groups.[3].Value)
                 |> Array.toList
 
             ResultSet(cols, [ vals ])
@@ -250,6 +271,20 @@ let private showResult: InformationSchema.ShowResult -> QueryResult =
     | Ok(cols, rows) -> ResultSet(cols, rows)
     | Error(code, msg) -> Err(code, msg)
 
+/// `LIMIT [offset,] n` is accepted but applied trivially: fsdb never
+/// actually buffers a diagnostics area, so `SHOW WARNINGS`/`SHOW ERRORS`
+/// always answer empty regardless of the limit — real clients (mysql CLI,
+/// mysqli's `mysqli_report`) send this form routinely and only care that it
+/// doesn't 1064.
+let private showWarningsRe =
+    Regex(@"^SHOW\s+WARNINGS(\s+LIMIT\s+\d+(\s*,\s*\d+)?)?$", RegexOptions.IgnoreCase)
+
+let private showErrorsRe =
+    Regex(@"^SHOW\s+ERRORS(\s+LIMIT\s+\d+(\s*,\s*\d+)?)?$", RegexOptions.IgnoreCase)
+
+let private showCountWarningsRe = Regex(@"^SHOW\s+COUNT\(\*\)\s+WARNINGS$", RegexOptions.IgnoreCase)
+let private showCountErrorsRe = Regex(@"^SHOW\s+COUNT\(\*\)\s+ERRORS$", RegexOptions.IgnoreCase)
+
 let private showTablesRe =
     Regex(@"^SHOW\s+(FULL\s+)?TABLES(\s+FROM\s+(\S+))?", RegexOptions.IgnoreCase)
 
@@ -291,8 +326,12 @@ let private handleShowTableStatus (session: Session) (sql: string) : QueryResult
 /// statement.
 let private setNames = Regex(@"^NAMES\s+'?(\w+)'?(?:\s+COLLATE\s+'?(\w+)'?)?", RegexOptions.IgnoreCase)
 
+/// Group 1 (optional) is the scope prefix — `"SESSION "`, `"GLOBAL "`,
+/// `"@@SESSION."`, `"@@GLOBAL."`, or bare `"@@"` — read by `parseSetFragment`
+/// via `isGlobalScope` to route `GLOBAL`-scoped assignments to the store's
+/// global-variable map instead of this session's own `Variables`.
 let private setVar =
-    Regex(@"^(?:SESSION\s+|GLOBAL\s+|@@(?:SESSION\.|GLOBAL\.)?)?(\w+)\s*=\s*(.+)$", RegexOptions.IgnoreCase)
+    Regex(@"^(SESSION\s+|GLOBAL\s+|@@SESSION\.|@@GLOBAL\.|@@)?(\w+)\s*=\s*(.+)$", RegexOptions.IgnoreCase)
 
 /// `SET @name = ...` — a user-defined variable assignment, distinct from
 /// `setVar`'s system-variable form (bare `\w+`, or `@@`-prefixed): real
@@ -327,7 +366,7 @@ let private resolveSetRhs (session: Session) (rhs: string) : string option =
     let m = atVarItem.Match rhs
 
     if m.Success then
-        resolveAtRef session m.Groups.[1].Value m.Groups.[2].Value
+        resolveAtRef session m.Groups.[1].Value m.Groups.[2].Value m.Groups.[3].Value
     else if String.Equals(rhs, "NULL", StringComparison.OrdinalIgnoreCase) then
         // Checked against the raw (still-quoted) rhs: `SET @x = 'NULL'` is
         // the four-character string, not the NULL literal — only a bare,
@@ -395,7 +434,7 @@ let private splitSetAssignments (sql: string) : string list =
 /// left-to-right with partial effect.
 type private SetAction =
     | SetNamesAction of charset: string * collation: string option
-    | SetVarAction of name: string * value: string option
+    | SetVarAction of name: string * value: string option * isGlobal: bool
     | SetUserVarAction of name: string * value: string option
 
 /// System variables real MySQL accepts an explicit `NULL` for (rather than
@@ -440,15 +479,16 @@ let private parseSetFragment (sql: string) (session: Session) (fragment: string)
             let varMatch = setVar.Match fragment
 
             if varMatch.Success then
-                let name = varMatch.Groups.[1].Value.ToLowerInvariant()
+                let isGlobal = isGlobalScope varMatch.Groups.[1].Value
+                let name = varMatch.Groups.[2].Value.ToLowerInvariant()
 
-                match resolveSetRhs session varMatch.Groups.[2].Value with
+                match resolveSetRhs session varMatch.Groups.[3].Value with
                 | Some value when name = "collation_connection" ->
                     match Collation.tryFind value with
-                    | Some _ -> Ok(SetVarAction(name, Some value))
+                    | Some _ -> Ok(SetVarAction(name, Some value, isGlobal))
                     | None -> Error(Err(1273, sprintf "Unknown collation: '%s'" value))
-                | Some value -> Ok(SetVarAction(name, Some value))
-                | None when nullableSystemVars.Contains name -> Ok(SetVarAction(name, None))
+                | Some value -> Ok(SetVarAction(name, Some value, isGlobal))
+                | None when nullableSystemVars.Contains name -> Ok(SetVarAction(name, None, isGlobal))
                 | None -> Error(Err(1231, sprintf "Variable '%s' can't be set to the value of 'NULL'" name))
             else
                 match setVarNameForError.Match fragment with
@@ -491,7 +531,18 @@ let private applySetAction (session: Session) (action: SetAction) : Session =
                 |> Map.add
                     "collation_connection"
                     (connectionCollation |> Option.map (fun c -> c.Name)) }
-    | SetVarAction(name, value) ->
+    | SetVarAction(name, value, true) ->
+        // `SET GLOBAL`/`SET @@GLOBAL.` writes only the store-wide override —
+        // it never touches this session's own `Variables` (a live session
+        // keeps whatever it already had; only a session created afterwards
+        // picks the new value up, via `Session.create`'s seeding), and none
+        // of the per-connection `Store` side effects below apply either:
+        // `foreign_key_checks`/`sql_mode`/`collation_connection` are
+        // inherently per-session state, not something a GLOBAL write should
+        // reach into this connection's own mutable cells to flip.
+        Session.setGlobalVariable session.Store name value
+        session
+    | SetVarAction(name, value, false) ->
         // Neither `foreign_key_checks` nor `sql_mode` is in
         // `nullableSystemVars`, so `value` is always `Some` here — but the
         // type is shared with every other system variable, so this still
@@ -550,15 +601,25 @@ let private setAutocommit =
     )
 
 /// MySqlConnector's real `BeginTransaction[Async]` handshake explicitly
-/// selects REPEATABLE READ before it sends START TRANSACTION. That is the
-/// isolation model FSDB's private transaction snapshot actually implements,
-/// so accepting this exact setting is truthful. Other isolation levels stay
-/// unsupported rather than being acknowledged without matching semantics.
-let private setRepeatableRead =
+/// selects REPEATABLE READ before it sends START TRANSACTION — the
+/// isolation model FSDB's private transaction snapshot actually implements.
+/// READ COMMITTED/READ UNCOMMITTED are accepted too: FSDB's actual
+/// isolation (one snapshot per transaction, ~REPEATABLE READ) is *stronger*
+/// than either, so recording the level a client asked for is truthful even
+/// though every transaction still runs the same snapshot underneath.
+/// SERIALIZABLE is matched here too, but only so `runProbe` can reject it
+/// outright (see its ponytail note) instead of it falling through to the
+/// generic `SET name = value` parser and dying with a confusing 1064.
+let private setTransactionIsolation =
     Regex(
-        @"^SET\s+(?:SESSION\s+)?TRANSACTION\s+ISOLATION\s+LEVEL\s+REPEATABLE\s+READ$",
+        @"^SET\s+(?:SESSION\s+)?TRANSACTION\s+ISOLATION\s+LEVEL\s+(REPEATABLE\s+READ|READ\s+COMMITTED|READ\s+UNCOMMITTED|SERIALIZABLE)$",
         RegexOptions.IgnoreCase
     )
+
+/// MySQL's `transaction_isolation` value is the level name with spaces
+/// replaced by hyphens (`"REPEATABLE READ"` -> `"REPEATABLE-READ"`).
+let private normalizeIsolationLevel (raw: string) : string =
+    Regex.Replace(raw.Trim().ToUpperInvariant(), @"\s+", "-")
 
 /// Every database name `stmt` actually writes into, given the session's own
 /// default `dbName` — almost always just `[dbName]`, but a qualified
@@ -640,7 +701,8 @@ let private beginTransaction (session: Session) : Session =
                 { Snapshot = snapshot
                   BaseCatalog = baseCatalog
                   GateLease = Map.empty
-                  Savepoints = Map.empty } }
+                  Savepoints = Map.empty
+                  NextSavepointSeq = 0 } }
 
 /// Establishes the transaction's actual repeatable-read snapshot at its
 /// first database statement, and holds the coarse write/transaction gate
@@ -681,7 +743,7 @@ let startTransactionStatementFor (targetDbs: string list) (session: Session) : S
 
                 let savepoints =
                     tx.Savepoints
-                    |> Map.map (fun _ (_, eventCount) -> baseCatalog, eventCount)
+                    |> Map.map (fun _ (seq, _, eventCount) -> seq, baseCatalog, eventCount)
 
                 { session with
                     Tx =
@@ -714,19 +776,33 @@ let private savepointNotFound (name: string) : QueryResult =
     Err(1305, sprintf "SAVEPOINT %s does not exist" name)
 
 /// `SAVEPOINT name` outside an explicit transaction implicitly starts one,
-/// matching real MySQL.
+/// matching real MySQL. Re-issuing an existing name deletes the old
+/// savepoint and sets a new one in its place (also real MySQL behavior) —
+/// `Map.add` already does the "replace" half; giving it a fresh
+/// `NextSavepointSeq` tick does the "moves to the end of the establishment
+/// order" half, so a savepoint set *before* this one but named earlier
+/// doesn't wrongly get cascade-dropped by a later `ROLLBACK TO`/`RELEASE`
+/// naming something established before this redefinition.
 let private savepoint (name: string) (session: Session) : Session * QueryResult =
     let session = if session.Tx.IsNone then beginTransaction session else session
 
     match session.Tx with
     | Some tx ->
         let eventCount = tx.Snapshot.PendingEvents |> Option.map (fun b -> b.Count) |> Option.defaultValue 0
-        { session with Tx = Some { tx with Savepoints = Map.add name (tx.Snapshot.Catalog, eventCount) tx.Savepoints } }, Affected 0UL
+        let seq = tx.NextSavepointSeq
+
+        { session with
+            Tx =
+                Some
+                    { tx with
+                        Savepoints = Map.add name (seq, tx.Snapshot.Catalog, eventCount) tx.Savepoints
+                        NextSavepointSeq = seq + 1 } },
+        Affected 0UL
     | None -> session, Affected 0UL // unreachable: beginTransaction always sets Tx
 
 let private rollbackToSavepoint (name: string) (session: Session) : Session * QueryResult =
     match session.Tx |> Option.bind (fun tx -> Map.tryFind name tx.Savepoints |> Option.map (fun seed -> tx, seed)) with
-    | Some(tx, (catalog, eventCount)) ->
+    | Some(tx, (seq, catalog, eventCount)) ->
         // Real MySQL never rolls back a burned AUTO_INCREMENT id — not even
         // a savepoint rollback (`bumpAutoIncrementsInto`'s doc covers the
         // full-ROLLBACK case, which is a separate code path from this one).
@@ -741,17 +817,22 @@ let private rollbackToSavepoint (name: string) (session: Session) : Session * Qu
         tx.Snapshot.PendingEvents
         |> Option.iter (fun buffer -> if buffer.Count > eventCount then buffer.RemoveRange(eventCount, buffer.Count - eventCount))
 
-        session, Affected 0UL
+        // Real MySQL also destroys every savepoint established *after* the
+        // one rolled back to — the named savepoint itself survives (a
+        // second `ROLLBACK TO` naming it again is legal).
+        let survivors = tx.Savepoints |> Map.filter (fun _ (s, _, _) -> s <= seq)
+
+        { session with Tx = Some { tx with Savepoints = survivors } }, Affected 0UL
     | None -> session, savepointNotFound name
 
-/// Drops one savepoint. ponytail: real MySQL also drops every savepoint
-/// established *after* the released one; this only drops the named one —
-/// add that if a real client ever relies on the cascade.
+/// Drops the named savepoint and, matching real MySQL, every savepoint
+/// established after it too.
 let private releaseSavepoint (name: string) (session: Session) : Session * QueryResult =
-    match session.Tx with
-    | Some tx when Map.containsKey name tx.Savepoints ->
-        { session with Tx = Some { tx with Savepoints = Map.remove name tx.Savepoints } }, Affected 0UL
-    | _ -> session, savepointNotFound name
+    match session.Tx |> Option.bind (fun tx -> Map.tryFind name tx.Savepoints |> Option.map (fun seed -> tx, seed)) with
+    | Some(tx, (seq, _, _)) ->
+        let survivors = tx.Savepoints |> Map.filter (fun _ (s, _, _) -> s < seq)
+        { session with Tx = Some { tx with Savepoints = survivors } }, Affected 0UL
+    | None -> session, savepointNotFound name
 
 let private handleSetAutocommit (value: string) (session: Session) : Session * QueryResult =
     let session = { session with Variables = Map.add "autocommit" (Some value) session.Variables }
@@ -917,7 +998,7 @@ let private executeStatement (session: Session) (sql: string) (upper: string) : 
 /// production to validate it against.
 type private Probe =
     | SetAutocommit of value: string
-    | SetRepeatableRead
+    | SetTransactionIsolation of level: string
     | SetVar
     | RollbackTo of savepoint: string
     | Begin
@@ -928,6 +1009,8 @@ type private Probe =
     | Use of dbName: string
     | ShowVariables
     | ShowWarnings
+    | ShowErrors
+    | ShowMessageCount of isError: bool
     | ShowDatabases
     | ShowTableStatus
     | ShowTables
@@ -945,8 +1028,8 @@ type private Probe =
 let private tryProbe (sql: string) (upper: string) : Probe option =
     if setAutocommit.IsMatch sql then
         Some(SetAutocommit((setAutocommit.Match sql).Groups.[1].Value))
-    elif setRepeatableRead.IsMatch sql then
-        Some SetRepeatableRead
+    elif setTransactionIsolation.IsMatch sql then
+        Some(SetTransactionIsolation((setTransactionIsolation.Match sql).Groups.[1].Value))
     elif upper.StartsWith "SET " then
         Some SetVar
     elif rollbackToSavepointStmt.IsMatch sql then
@@ -965,8 +1048,14 @@ let private tryProbe (sql: string) (upper: string) : Probe option =
         Some(Use(sql.Substring(4).Trim().Trim('`')))
     elif upper.StartsWith "SHOW VARIABLES" then
         Some ShowVariables
-    elif upper = "SHOW WARNINGS" then
+    elif showCountWarningsRe.IsMatch sql then
+        Some(ShowMessageCount false)
+    elif showCountErrorsRe.IsMatch sql then
+        Some(ShowMessageCount true)
+    elif showWarningsRe.IsMatch sql then
         Some ShowWarnings
+    elif showErrorsRe.IsMatch sql then
+        Some ShowErrors
     elif upper.StartsWith "SHOW DATABASES" then
         Some ShowDatabases
     elif upper.StartsWith "SHOW TABLE STATUS" then
@@ -1010,8 +1099,17 @@ let private runProbe (session: Session) (sql: string) (probe: Probe) : Session *
 
     match probe with
     | SetAutocommit value -> handleSetAutocommit value session
-    | SetRepeatableRead ->
-        { session with Variables = Map.add "transaction_isolation" (Some "REPEATABLE-READ") session.Variables }, Affected 0UL
+    | SetTransactionIsolation level ->
+        match normalizeIsolationLevel level with
+        | "SERIALIZABLE" ->
+            // ponytail: fsdb's transaction model is one fixed snapshot per
+            // transaction (~REPEATABLE READ) with a coarse per-database write
+            // gate, not the range-locking SERIALIZABLE actually needs — a
+            // client that asked for stronger isolation than fsdb gives must
+            // see a clear error, not a silent downgrade. Upgrade path: real
+            // predicate/range locking, if a client ever genuinely needs it.
+            session, Err(1235, "This version of MySQL doesn't yet support 'SERIALIZABLE transaction isolation'")
+        | normalized -> { session with Variables = Map.add "transaction_isolation" (Some normalized) session.Variables }, Affected 0UL
     | SetVar -> handleSet session sql
     | RollbackTo name -> rollbackToSavepoint name session
     | Begin -> beginTransaction session, Affected 0UL
@@ -1026,7 +1124,11 @@ let private runProbe (session: Session) (sql: string) (probe: Probe) : Session *
             let code, msg = Storage.toMySqlError (Storage.NoSuchDatabase dbName)
             session, Err(code, msg)
     | ShowVariables -> session, handleShowVariables session sql
-    | ShowWarnings -> session, ResultSet([ "Level"; "Code"; "Message" ], [])
+    | ShowWarnings
+    | ShowErrors -> session, ResultSet([ "Level"; "Code"; "Message" ], [])
+    | ShowMessageCount isError ->
+        let col = if isError then "@@session.error_count" else "@@session.warning_count"
+        session, ResultSet([ col ], [ [ Some "0" ] ])
     | ShowDatabases -> session, handleShowDatabases session sql
     | ShowTableStatus -> session, handleShowTableStatus session sql
     | ShowCollation -> session, InformationSchema.showCollation (likeSuffix sql) |> showResult
