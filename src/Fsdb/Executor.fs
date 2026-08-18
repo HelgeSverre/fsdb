@@ -500,6 +500,18 @@ let private fspOfType (ty: ColumnType) : int option =
     | TTime fsp -> Some fsp
     | _ -> None
 
+/// The fsp an output *expression* renders at, so an explicit precision request
+/// shows exactly its digits (an exact-second `.000000` and all): `CAST(x AS
+/// DATETIME(6))` takes the cast's declared fsp, and `MAX`/`MIN` of a temporal
+/// column inherit that column's fsp (they return one of the stored, already
+/// rounded-to-fsp values unchanged). A plain column resolves through its
+/// `ColumnDef`; everything else is `None` and falls back to `Value.toText`.
+let rec private fspOfExpr (ctx: EvalContext) (expr: Expr) : int option =
+    match expr with
+    | Cast(_, ty) -> fspOfType ty
+    | FuncCall(name, [ arg ]) when (let n = name.ToUpperInvariant() in n = "MAX" || n = "MIN") -> fspOfExpr ctx arg
+    | _ -> tryColumnDefForExpr ctx expr |> Option.bind (fun c -> fspOfType c.Type)
+
 /// The declared fsp for each output column a projection produces — parallel,
 /// in length and order, to the `(name, Value)` list `evalProjection` builds
 /// for the same projection (`Star None` → every table column, `t.*` → that
@@ -520,7 +532,7 @@ let rec private outputColumnFsps (ctx: EvalContext) (columns: ColumnDef list) (p
         match proj with
         | Star None, _ -> columns |> List.map (fun c -> fspOfType c.Type)
         | Star(Some qualifier), _ -> starQualifierCols ctx qualifier |> List.map (fun c -> fspOfType c.Type)
-        | expr, _ -> [ tryColumnDefForExpr ctx expr |> Option.bind (fun c -> fspOfType c.Type) ])
+        | expr, _ -> [ fspOfExpr ctx expr ])
 
 /// Renders a projection's `(name, Value)` output columns to the resultset's
 /// `string option list`, honoring each column's declared fsp (`fsps`, from

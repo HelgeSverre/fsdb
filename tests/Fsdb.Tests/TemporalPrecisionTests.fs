@@ -167,6 +167,35 @@ let tests =
                     Expect.equal (Fsdb.Protocol.fractionalDigitsOf [ None; Some "2024-01-01 00:00:00.000000" ]) 6uy "skips leading NULL" ]
 
           testList
+              "expression results render their declared fsp"
+              [ testCase "CAST(x AS DATETIME(6)) on an exact second pads to .000000"
+                <| fun _ ->
+                    // The cast rounds the value to fsp; its result must also
+                    // render six digits, the same as a declared DATETIME(6)
+                    // column would (MySQL: 2024-01-03 00:00:00.000000).
+                    Expect.equal
+                        (oneRow [ "SELECT CAST('2024-01-02 23:59:59.9999995' AS DATETIME(6))" ])
+                        [ Some "2024-01-03 00:00:00.000000" ]
+                        "cast to (6) pads exact second"
+
+                testCase "CAST(x AS DATETIME(3)) renders exactly three digits"
+                <| fun _ ->
+                    Expect.equal
+                        (oneRow [ "SELECT CAST('2024-01-02 10:00:00.126' AS DATETIME(3))" ])
+                        [ Some "2024-01-02 10:00:00.126" ]
+                        "cast to (3)"
+
+                testCase "MAX/MIN of a DATETIME(6) column inherit its fsp, including an exact second"
+                <| fun _ ->
+                    Expect.equal
+                        (oneRow
+                            [ "CREATE TABLE t (c DATETIME(6))"
+                              "INSERT INTO t VALUES ('2024-01-01 00:00:00'), ('2024-01-01 00:00:05.250000')"
+                              "SELECT MAX(c) FROM t WHERE c < '2024-01-01 00:00:01'" ])
+                        [ Some "2024-01-01 00:00:00.000000" ]
+                        "MAX exact-second keeps (6) precision" ]
+
+          testList
               "persistence round-trips fsp"
               [ testCase "a DATETIME(6)/TIME(3) column keeps its precision across a snapshot+reload"
                 <| fun _ ->
