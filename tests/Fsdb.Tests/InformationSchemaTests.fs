@@ -228,6 +228,9 @@ let tests =
                   Expect.equal (get "Auto_increment") (Some "2") "next id after one insert"
                   Expect.equal (get "Collation") (Some "utf8mb4_0900_ai_ci") "table collation"
                   Expect.isTrue ((get "Data_length" |> Option.defaultValue "0") <> "0") "in-memory payload size, not a constant"
+                  // One row, so the average must equal the total — pins
+                  // Avg_row_length to Data_length / Rows, not a constant.
+                  Expect.equal (get "Avg_row_length") (get "Data_length") "avg row length is data_length / rows"
               | other -> failtestf "expected one status row, got %A" other
 
           testCase "SHOW TABLE STATUS on an empty table reports zeros, not an error"

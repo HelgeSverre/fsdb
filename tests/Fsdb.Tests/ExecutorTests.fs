@@ -1013,6 +1013,33 @@ let tests =
                         ()
                     | other -> failtestf "expected a const plan row, got %A" other
 
+                testCase "EXPLAIN const also fires on an alias-qualified equality (WHERE u.id = 1)"
+                <| fun _ ->
+                    let store = newStore ()
+                    runDefault store "CREATE TABLE users (id INT PRIMARY KEY, v INT)" |> ignore
+                    runDefault store "INSERT INTO users VALUES (1, 10)" |> ignore
+
+                    match runDefault store "EXPLAIN SELECT * FROM users u WHERE u.id = 1" with
+                    | ResultSet(_, [ [ Some "1"; Some "SIMPLE"; Some "u"; None; Some "const"; Some "PRIMARY"; Some "PRIMARY"; Some "4"; Some "const"; Some "1"; Some "100.00"; None ] ]) ->
+                        ()
+                    | other -> failtestf "expected a const plan for the alias-qualified lookup, got %A" other
+
+                testCase "EXPLAIN UPDATE/DELETE by primary key report the same const row a SELECT does"
+                <| fun _ ->
+                    let store = newStore ()
+                    runDefault store "CREATE TABLE users (id INT PRIMARY KEY, v INT)" |> ignore
+                    runDefault store "INSERT INTO users VALUES (1, 10), (2, 20)" |> ignore
+
+                    match runDefault store "EXPLAIN UPDATE users SET v = 5 WHERE id = 1" with
+                    | ResultSet(_, [ [ Some "1"; Some "UPDATE"; Some "users"; None; Some "const"; Some "PRIMARY"; Some "PRIMARY"; Some "4"; Some "const"; Some "1"; Some "100.00"; None ] ]) ->
+                        ()
+                    | other -> failtestf "expected a const UPDATE plan, got %A" other
+
+                    match runDefault store "EXPLAIN DELETE FROM users WHERE id = 2" with
+                    | ResultSet(_, [ [ Some "1"; Some "DELETE"; Some "users"; None; Some "const"; Some "PRIMARY"; Some "PRIMARY"; Some "4"; Some "const"; Some "1"; Some "100.00"; None ] ]) ->
+                        ()
+                    | other -> failtestf "expected a const DELETE plan, got %A" other
+
                 testCase "EXPLAIN by a nullable VARCHAR(50) UNIQUE key reports key_len 203 (50*4+2+1 for the null flag)"
                 <| fun _ ->
                     // The UNIQUE column sits at index 1, not 0 — a point
@@ -1226,13 +1253,25 @@ let tests =
                     let store = newStore ()
                     runDefault store "CREATE TABLE t (id INT, c DATETIME(6) DEFAULT CURRENT_TIMESTAMP(6))" |> ignore
                     runDefault store "INSERT INTO t (id) VALUES (1)" |> ignore
+                    System.Threading.Thread.Sleep 2
+                    runDefault store "INSERT INTO t (id) VALUES (2)" |> ignore
 
                     match runDefault store "SELECT c FROM t" with
-                    | ResultSet([ "c" ], [ [ Some text ] ]) ->
+                    | ResultSet([ "c" ], [ [ Some a ]; [ Some b ] ]) ->
+                        for text in [ a; b ] do
+                            Expect.isTrue
+                                (System.Text.RegularExpressions.Regex.IsMatch(text, @"\.\d{6}$"))
+                                (sprintf "expected six fractional digits, got %s" text)
+
+                        // The default must carry the clock's actual
+                        // sub-second component, not a truncated-to-seconds
+                        // value that the fsp-6 rendering merely pads back out
+                        // to `.000000` — two inserts 2ms apart can't both
+                        // land on an exact whole second.
                         Expect.isTrue
-                            (System.Text.RegularExpressions.Regex.IsMatch(text, @"\.\d{6}$"))
-                            (sprintf "expected six fractional digits, got %s" text)
-                    | other -> failtestf "expected one row with a rendered timestamp, got %A" other
+                            (not (a.EndsWith ".000000") || not (b.EndsWith ".000000"))
+                            (sprintf "expected real microseconds in at least one of %s / %s" a b)
+                    | other -> failtestf "expected two rows with rendered timestamps, got %A" other
 
                 testCase "bare DEFAULT CURRENT_TIMESTAMP on a fsp-0 DATETIME stores no fraction"
                 <| fun _ ->

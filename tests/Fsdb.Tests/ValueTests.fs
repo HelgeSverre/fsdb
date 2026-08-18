@@ -61,6 +61,15 @@ let tests =
                         (Some "2024-03-05 13:45:09.500000")
                         "datetime half-second pads trailing zeros like MySQL DATETIME(6)"
 
+                testCase "VDateTime with tiny microseconds pads LEADING zeros to 6 digits"
+                <| fun _ ->
+                    // 50 ticks = 5 microseconds — must render `.000005`,
+                    // never an unpadded `.5` that reads as half a second.
+                    Expect.equal
+                        (toText (VDateTime(DateTime(2024, 3, 5, 13, 45, 9).AddTicks 50L)))
+                        (Some "2024-03-05 13:45:09.000005")
+                        "leading zeros are significant in the fraction"
+
                 testCase "VJson renders the raw text unchanged"
                 <| fun _ -> Expect.equal (toText (VJson "{\"a\":1}")) (Some "{\"a\":1}") "json" ]
 
