@@ -1500,6 +1500,59 @@ and private resolveTableRef (store: Store) (dbName: string) (tableRef: TableRef)
         | Error e -> Error(storageErr e)
         | Ok(columns, rows) -> Ok(columns, rows)
 
+/// Pre-filters an `information_schema` scan by the WHERE's top-level
+/// `col = 'literal'` equality conjuncts (`TABLE_SCHEMA`/`TABLE_NAME` is what
+/// GUI clients send) — building every catalog row only for the executor to
+/// discard all but one table's was the `COLUMNS` hotspot. Pure narrowing:
+/// the full WHERE still runs over the result, so an equality this drops
+/// nothing for costs nothing. `None` when the FROM isn't information_schema
+/// or the WHERE has no usable conjunct (plain scan then).
+/// ponytail: the pre-filter compares OrdinalIgnoreCase where the WHERE
+/// proper compares ai_ci — an accented table name queried by its unaccented
+/// spelling would be over-filtered; GUI clients echo names the server gave
+/// them, so this stays until something real hits it.
+and private tryInformationSchemaNarrow
+    (store: Store)
+    (dbName: string)
+    (tableRef: TableRef)
+    (where: Expr option)
+    : (ColumnDef list * Value[] list) option =
+    let tableDb = tableRef.Database |> Option.defaultValue dbName
+
+    if not (System.String.Equals(tableDb, "information_schema", System.StringComparison.OrdinalIgnoreCase)) then
+        None
+    else
+        let rec eqConjuncts (e: Expr) : (string * string) list =
+            match e with
+            | BinOp(And, a, b) -> eqConjuncts a @ eqConjuncts b
+            | BinOp(Eq, Col c, Lit(VString v))
+            | BinOp(Eq, Lit(VString v), Col c)
+            | BinOp(Eq, QualifiedCol(_, c), Lit(VString v))
+            | BinOp(Eq, Lit(VString v), QualifiedCol(_, c)) -> [ c, v ]
+            | _ -> []
+
+        match where |> Option.map eqConjuncts |> Option.defaultValue [] with
+        | [] -> None
+        | eqs ->
+            InformationSchema.scan store.Catalog tableRef.Table
+            |> Option.map (fun (cols, rows) ->
+                let filters =
+                    eqs
+                    |> List.choose (fun (name, v) ->
+                        cols
+                        |> List.tryFindIndex (fun cd ->
+                            System.String.Equals(cd.Name, name, System.StringComparison.OrdinalIgnoreCase))
+                        |> Option.map (fun i -> i, v))
+
+                let keep (row: Value[]) =
+                    filters
+                    |> List.forall (fun (i, v) ->
+                        match row.[i] with
+                        | VString s -> System.String.Equals(s, v, System.StringComparison.OrdinalIgnoreCase)
+                        | _ -> false)
+
+                cols, rows |> List.filter keep)
+
 /// Synthetic, all-nullable-text `ColumnDef`s for a derived table's columns —
 /// `runSelectStmt`'s own resultset has no real per-column `ColumnType` to
 /// recover (its `byte list` is the MySQL *wire* type, not an `Ast`
@@ -2299,6 +2352,7 @@ and private runSelectStmt
             | FromTable tref, [] ->
                 tryPointLookup store dbName tref select.Where
                 |> Option.map (fun (cols, rows) -> Ok(cols, rows |> List.map snd))
+                |> Option.orElseWith (fun () -> tryInformationSchemaNarrow store dbName tref select.Where |> Option.map Ok)
                 |> Option.defaultWith (fun () -> resolveFromItem store registry dbName fromItem)
             | _ -> resolveFromItem store registry dbName fromItem
 

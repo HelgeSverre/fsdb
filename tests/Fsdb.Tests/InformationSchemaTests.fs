@@ -474,6 +474,26 @@ let tests =
                       "every schema present"
               | other -> failtestf "expected a resultset, got %A" other
 
+          testCase "the COLUMNS equality pre-filter narrows without changing results (case-insensitive, OR untouched)"
+          <| fun _ ->
+              // `Executor.tryInformationSchemaNarrow` pre-filters by
+              // top-level `col = 'lit'` conjuncts; these shapes are the ones
+              // that must not over-filter.
+              let store = setup ()
+              run store "CREATE TABLE narrow_probe (id INT PRIMARY KEY, body TEXT)" |> ignore
+
+              // Different case than the stored names — both the pre-filter
+              // and the WHERE proper are case-insensitive.
+              match run store "SELECT COLUMN_NAME FROM information_schema.COLUMNS WHERE TABLE_SCHEMA = 'FSDB' AND TABLE_NAME = 'NARROW_PROBE' ORDER BY ORDINAL_POSITION" with
+              | ResultSet(_, rows) ->
+                  Expect.equal rows [ [ Some "id" ]; [ Some "body" ] ] "case-insensitive match survives the narrow"
+              | other -> failtestf "expected the narrow_probe columns, got %A" other
+
+              // An OR of equalities must NOT be treated as conjuncts.
+              match run store "SELECT COUNT(*) FROM information_schema.TABLES WHERE TABLE_NAME = 'narrow_probe' OR TABLE_NAME = 'nope'" with
+              | ResultSet(_, [ [ Some "1" ] ]) -> ()
+              | other -> failtestf "expected the OR filter to still find narrow_probe, got %A" other
+
           testCase "an unknown information_schema table is a plain 1146"
           <| fun _ ->
               let store = setup ()

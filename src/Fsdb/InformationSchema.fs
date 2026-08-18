@@ -1144,10 +1144,16 @@ let private selfTablesRows () : Value[] list =
            vs ""
            vs "" |])
 
-let private selfColumnsRows () : Value[] list =
-    virtualTableDefs
-    |> List.collect (fun (name, cols) ->
-        cols |> List.mapi (fun i c -> columnRowWith "select" "information_schema" name i "" c))
+// Built once: `virtualTableDefs` never changes after startup, and these
+// ~330 rows were most of every COLUMNS scan's cost (readers never mutate
+// row arrays, same sharing contract `Storage.scanList` already has).
+let private selfColumnsRowsCached : Lazy<Value[] list> =
+    lazy
+        (virtualTableDefs
+         |> List.collect (fun (name, cols) ->
+             cols |> List.mapi (fun i c -> columnRowWith "select" "information_schema" name i "" c)))
+
+let private selfColumnsRows () : Value[] list = selfColumnsRowsCached.Value
 
 /// Resolves one `information_schema` table name (case-insensitive) to its
 /// columns and freshly-projected rows, or `None` if `name` isn't one of the

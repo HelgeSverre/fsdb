@@ -223,6 +223,7 @@ bench-durable:
     @mkdir -p benchmarks/results
     @just _bench-header > "benchmarks/results/$(git rev-parse --short HEAD)-durable.md"
     @cat BenchmarkDotNet.Artifacts/results/Fsdb.Benchmarks.ServerBenchmarks.ServerBenchmarks-report-github.md >> "benchmarks/results/$(git rev-parse --short HEAD)-durable.md"
+    @cat BenchmarkDotNet.Artifacts/results/Fsdb.Benchmarks.ServerBenchmarks.ConnectBenchmarks-report-github.md >> "benchmarks/results/$(git rev-parse --short HEAD)-durable.md"
     @rm -rf BenchmarkDotNet.Artifacts
     @echo "results: benchmarks/results/$(git rev-parse --short HEAD)-durable.md"
 
