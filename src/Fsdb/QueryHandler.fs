@@ -227,17 +227,21 @@ let private handleAtVarSelect (session: Session) (sql: string) : QueryResult =
 /// reads the store-wide space (defaults + `SET GLOBAL` overrides) instead of
 /// this session's values.
 let private handleShowVariables (session: Session) (isGlobal: bool) (sql: string) : QueryResult =
-    let likeMatch = Regex.Match(sql, @"LIKE\s+'([^']*)'", RegexOptions.IgnoreCase)
+    let pattern =
+        let m = Regex.Match(sql, @"LIKE\s+'([^']*)'", RegexOptions.IgnoreCase)
+
+        if m.Success then
+            Some m.Groups.[1].Value
+        else
+            let w =
+                Regex.Match(sql, @"WHERE\s+`?Variable_name`?\s*=\s*'([^']*)'\s*$", RegexOptions.IgnoreCase)
+
+            if w.Success then Some w.Groups.[1].Value else None
 
     let matches (name: string) =
-        if likeMatch.Success then
-            Regex.IsMatch(
-                name,
-                likeToRegex likeMatch.Groups.[1].Value,
-                RegexOptions.IgnoreCase ||| RegexOptions.Singleline
-            )
-        else
-            true
+        match pattern with
+        | Some p -> Regex.IsMatch(name, likeToRegex p, RegexOptions.IgnoreCase ||| RegexOptions.Singleline)
+        | None -> true
 
     let source =
         if isGlobal then
@@ -269,6 +273,18 @@ let private likeSuffix (sql: string) : string option =
     let m = Regex.Match(sql, @"LIKE\s+'([^']*)'\s*$", RegexOptions.IgnoreCase)
     if m.Success then Some m.Groups.[1].Value else None
 
+/// `WHERE Variable_name = '...'` — SHOW STATUS/VARIABLES' other filter form,
+/// folded into the same name-pattern the LIKE path uses (an exact name is a
+/// wildcard-free pattern).
+let private whereVariableName (sql: string) : string option =
+    let m =
+        Regex.Match(sql, @"WHERE\s+`?Variable_name`?\s*=\s*'([^']*)'\s*$", RegexOptions.IgnoreCase)
+
+    if m.Success then Some m.Groups.[1].Value else None
+
+let private statusFilter (sql: string) : string option =
+    likeSuffix sql |> Option.orElse (whereVariableName sql)
+
 let private stripBackticks (s: string) = s.Trim().Trim('`')
 
 let private showStatusRe =
@@ -296,14 +312,20 @@ let private showGrantsRe =
 
 let private killRe = Regex(@"^KILL\s+(?:(QUERY|CONNECTION)\s+)?(\d+)\s*$", RegexOptions.IgnoreCase)
 
-/// `SHOW [FULL] TABLES ... WHERE Table_type IN (...)` / `= '...'` —
-/// phpMyAdmin's DisableIS listing path. Only the `Table_type` pseudo-column
-/// is filtered on; anything else in the WHERE is 1064 via the fallthrough.
-let private showTablesWhereRe =
+/// `SHOW [FULL] TABLES ... WHERE ...` filters — phpMyAdmin's DisableIS
+/// listing sends `Table_type IN (...)`, mysqldump-era tooling sends
+/// `Tables_in_<db> = '...'`. Any other filter column is a real 1054, the
+/// same error MySQL gives for an unknown column in a SHOW filter.
+let private showTablesWhereTypeRe =
     Regex(
         @"WHERE\s+`?Table_type`?\s+(?:IN\s*\(([^)]*)\)|=\s*'([^']*)')\s*$",
         RegexOptions.IgnoreCase
     )
+
+let private showTablesWhereNameRe =
+    Regex(@"WHERE\s+`?Tables_in_\w+`?\s*=\s*'([^']*)'\s*$", RegexOptions.IgnoreCase)
+
+let private showTablesWhereColumnRe = Regex(@"WHERE\s+`?(\w+)`?", RegexOptions.IgnoreCase)
 
 
 /// Lifts an `InformationSchema.ShowResult` into `QueryResult` — the one spot
@@ -339,21 +361,20 @@ let private handleShowTables (session: Session) (sql: string) : QueryResult =
     let result =
         InformationSchema.showTables (Session.currentStore session).Catalog dbName full (likeSuffix sql)
 
-    let whereMatch = showTablesWhereRe.Match sql
+    let typeMatch = showTablesWhereTypeRe.Match sql
+    let nameMatch = showTablesWhereNameRe.Match sql
 
-    if not whereMatch.Success then
-        result |> showResult
-    else
+    if typeMatch.Success then
         // Every table in a real database is a BASE TABLE and every
         // information_schema one a SYSTEM VIEW, so the filter reduces to
         // "does the allowed set contain this database's one type".
         let allowed =
-            if whereMatch.Groups.[1].Success then
-                whereMatch.Groups.[1].Value.Split(',')
+            if typeMatch.Groups.[1].Success then
+                typeMatch.Groups.[1].Value.Split(',')
                 |> Array.map (fun t -> t.Trim().Trim('\''))
                 |> Array.toList
             else
-                [ whereMatch.Groups.[2].Value ]
+                [ typeMatch.Groups.[2].Value ]
             |> List.map (fun t -> t.ToUpperInvariant())
 
         let thisDbType =
@@ -362,6 +383,17 @@ let private handleShowTables (session: Session) (sql: string) : QueryResult =
         result
         |> Result.map (fun (cols, rows) -> cols, (if List.contains thisDbType allowed then rows else []))
         |> showResult
+    elif nameMatch.Success then
+        let wanted = nameMatch.Groups.[1].Value
+
+        result
+        |> Result.map (fun (cols, rows) -> cols, rows |> List.filter (fun row -> List.tryHead row = Some(Some wanted)))
+        |> showResult
+    elif showTablesWhereColumnRe.IsMatch sql then
+        let column = (showTablesWhereColumnRe.Match sql).Groups.[1].Value
+        Err(1054, sprintf "Unknown column '%s' in 'where clause'" column)
+    else
+        result |> showResult
 
 let private handleShowDatabases (session: Session) (sql: string) : QueryResult =
     InformationSchema.showDatabases (Session.currentStore session).Catalog (likeSuffix sql) |> ResultSet
@@ -938,8 +970,28 @@ let private registryFor (session: Session) : Functions.Registry =
         "VERSION"
         (fun _ -> lookupVar session "version" |> Option.flatten |> Option.map VString |> Option.defaultValue VNull)
     |> Functions.registerScalar "CONNECTION_ID" (fun _ -> VInt(int64 session.ConnectionId))
-    |> Functions.registerScalar "CURRENT_USER" (fun _ -> VString "fsdb@localhost")
-    |> Functions.registerScalar "USER" (fun _ -> VString "fsdb@localhost")
+    // The wire identity: the handshake user the process registry recorded
+    // for this connection — the same source SHOW GRANTS and PROCESSLIST
+    // report, so the three can't disagree. Off the wire (embedded `Db`,
+    // tests) there's no registry entry, and the fixed fsdb identity stands.
+    |> Functions.registerScalar
+        "CURRENT_USER"
+        (fun _ ->
+            InformationSchema.tryFindProcess (int64 session.ConnectionId)
+            |> Option.map (fun p -> VString(p.User + "@%"))
+            |> Option.defaultValue (VString "fsdb@localhost"))
+    |> Functions.registerScalar
+        "USER"
+        (fun _ ->
+            InformationSchema.tryFindProcess (int64 session.ConnectionId)
+            |> Option.map (fun p ->
+                let host =
+                    match p.Host.LastIndexOf ':' with
+                    | -1 -> p.Host
+                    | i -> p.Host.Substring(0, i)
+
+                VString(p.User + "@" + host))
+            |> Option.defaultValue (VString "fsdb@localhost"))
 
 /// Parses and executes anything that isn't one of the text-probe special
 /// cases above. A parse failure that also looks like a `SELECT @@...`/
@@ -1139,10 +1191,10 @@ let private tryProbe (sql: string) (upper: string) : Probe option =
         Some ShowPrivileges
     elif showProcesslistRe.IsMatch sql then
         Some(ShowProcesslist((showProcesslistRe.Match sql).Groups.[1].Success))
-    elif showTriggersRe.IsMatch sql && upper.StartsWith "SHOW TRIGGERS" then
+    elif showTriggersRe.IsMatch sql then
         let m = showTriggersRe.Match sql
         Some(ShowTriggers(if m.Groups.[1].Success then Some(stripBackticks m.Groups.[1].Value) else None))
-    elif showEventsRe.IsMatch sql && upper.StartsWith "SHOW EVENTS" then
+    elif showEventsRe.IsMatch sql then
         let m = showEventsRe.Match sql
         Some(ShowEvents(if m.Groups.[1].Success then Some(stripBackticks m.Groups.[1].Value) else None))
     elif showRoutineStatusRe.IsMatch sql then
@@ -1228,7 +1280,7 @@ let private runProbe (session: Session) (sql: string) (probe: Probe) : Session *
             let code, msg = Storage.toMySqlError (Storage.NoSuchDatabase dbName)
             session, Err(code, msg)
     | ShowVariables isGlobal -> session, handleShowVariables session isGlobal sql
-    | ShowStatus -> session, InformationSchema.showStatus (likeSuffix sql) |> showResult
+    | ShowStatus -> session, InformationSchema.showStatus (statusFilter sql) |> showResult
     | ShowEngines -> session, InformationSchema.showEngines () |> showResult
     | ShowCharset -> session, InformationSchema.showCharacterSet (likeSuffix sql) |> showResult
     | ShowPrivileges -> session, InformationSchema.showPrivileges () |> showResult

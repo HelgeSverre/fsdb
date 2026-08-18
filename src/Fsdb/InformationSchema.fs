@@ -391,8 +391,9 @@ let defaultText (d: ColumnDefault option) : string option =
     | Some DCurrentTimestamp -> Some "CURRENT_TIMESTAMP"
 
 /// One `COLUMNS` row — shared by real tables (with the table's key
-/// metadata) and information_schema's own self-listing (no keys).
-let private columnRow (dbName: string) (tableName: string) (i: int) (key: string) (c: ColumnDef) : Value[] =
+/// metadata and full DML privileges) and information_schema's own
+/// self-listing (no keys, select-only, like real SYSTEM VIEWs).
+let private columnRowWith (privileges: string) (dbName: string) (tableName: string) (i: int) (key: string) (c: ColumnDef) : Value[] =
     let precision, scale = numericPrecisionScale c.Type |> Option.map (fun (p, s) -> Some p, Some s) |> Option.defaultValue (None, None)
 
     [| vs "def"
@@ -419,10 +420,12 @@ let private columnRow (dbName: string) (tableName: string) (i: int) (key: string
        vs (columnTypeText c.Type)
        vs key
        vs (extraText c)
-       vs "select,insert,update,references"
+       vs privileges
        vs ""
        vs (c.Generated |> Option.map (fst >> exprToSql) |> Option.defaultValue "")
        VNull |]
+
+let private columnRow = columnRowWith "select,insert,update,references"
 
 let private columnsRows (catalog: Catalog) : Value[] list =
     allTables catalog
@@ -1084,7 +1087,7 @@ let private selfTablesRows () : Value[] list =
 let private selfColumnsRows () : Value[] list =
     virtualTableDefs
     |> List.collect (fun (name, cols) ->
-        cols |> List.mapi (fun i c -> columnRow "information_schema" name i "" c))
+        cols |> List.mapi (fun i c -> columnRowWith "select" "information_schema" name i "" c))
 
 /// Resolves one `information_schema` table name (case-insensitive) to its
 /// columns and freshly-projected rows, or `None` if `name` isn't one of the

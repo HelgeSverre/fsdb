@@ -563,6 +563,14 @@ let tests =
               | ResultSet(_, [ [ Some "utf8mb4"; Some "users" ] ]) -> ()
               | other -> failtestf "expected the joined charset row, got %A" other
 
+          testCase "information_schema's own columns report select-only privileges"
+          <| fun _ ->
+              let store = setup ()
+
+              match run store "SELECT DISTINCT privileges FROM information_schema.columns WHERE table_schema = 'information_schema'" with
+              | ResultSet(_, [ [ Some "select" ] ]) -> ()
+              | other -> failtestf "expected select-only on SYSTEM VIEW columns, got %A" other
+
           testCase "legacy-charset collations resolve, utf8_bin included as the utf8mb3 alias"
           <| fun _ ->
               let store = setup ()

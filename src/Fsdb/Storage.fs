@@ -1473,7 +1473,10 @@ let dropTable (store: Store) (dbName: string) (tableName: string) : Result<unit,
     result
 
 let truncate (store: Store) (dbName: string) (tableName: string) : Result<unit, StorageError> =
-    let result = withTable store dbName tableName (fun table -> Ok(reindexTable { table with RowsArray = ImmutableArray.Empty; NextAutoId = 1L }, ()))
+    // MySQL implements TRUNCATE as drop-and-recreate, so CREATE_TIME resets.
+    let result =
+        withTable store dbName tableName (fun table ->
+            Ok(reindexTable { table with RowsArray = ImmutableArray.Empty; NextAutoId = 1L; CreateTime = DateTime.Now }, ()))
 
     if result.IsOk then
         emit store (Some(SchemaChanged(dbName, Truncate tableName)))

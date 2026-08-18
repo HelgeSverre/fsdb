@@ -2014,6 +2014,29 @@ let tests =
                     | other -> failtestf "expected ForeignKeyRestrict fk_b_b, got %A" other ]
 
           testList
+              "truncate"
+              [ testCase "TRUNCATE TABLE re-stamps CreateTime, matching MySQL's drop-and-recreate"
+                <| fun _ ->
+                    let store = create ()
+
+                    createTable store defaultDatabase "t" [ { (col "id" (TInt false) false) with PrimaryKey = true } ] [] [] None None
+                    |> ignore
+
+                    let createTimeOf () =
+                        match Map.tryFind defaultDatabase store.Catalog |> Option.bind (Map.tryFind "t") with
+                        | Some table -> table.CreateTime
+                        | None -> failtest "table missing"
+
+                    let before = createTimeOf ()
+                    System.Threading.Thread.Sleep 20
+
+                    (match truncate store defaultDatabase "t" with
+                     | Ok() -> ()
+                     | Error e -> failtestf "truncate: %A" e)
+
+                    Expect.isGreaterThan (createTimeOf ()) before "recreated, not preserved" ]
+
+          testList
               "OnCommit notification hook"
               [ testCase "insertRows fires RowsInserted with the physically-coerced row (defaults/autoincrement resolved)"
                 <| fun _ ->

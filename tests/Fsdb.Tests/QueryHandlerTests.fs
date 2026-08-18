@@ -704,6 +704,55 @@ let tests =
               | Err(1094, _) -> ()
               | other -> failtestf "expected 1094 for an unknown thread id, got %A" other
 
+          testCase "SHOW TABLES WHERE filters on Tables_in_<db> and 1054s an unknown column"
+          <| fun _ ->
+              let session = create 999901 (Fsdb.Storage.create ())
+              let session, _ = handle session "CREATE DATABASE shop"
+              let session, _ = handle session "USE shop"
+              let session, _ = handle session "CREATE TABLE widgets (id INT PRIMARY KEY)"
+              let session, _ = handle session "CREATE TABLE gears (id INT PRIMARY KEY)"
+
+              match handle session "SHOW TABLES FROM shop WHERE Tables_in_shop = 'widgets'" |> snd with
+              | ResultSet(_, [ [ Some "widgets" ] ]) -> ()
+              | other -> failtestf "expected only the named table, got %A" other
+
+              match handle session "SHOW TABLES FROM shop WHERE bogus_col = 'x'" |> snd with
+              | Err(1054, _) -> ()
+              | other -> failtestf "expected 1054 for an unknown filter column, got %A" other
+
+          testCase "SHOW TRIGGERS/EVENTS tolerate extra whitespace between keywords"
+          <| fun _ ->
+              let session = create 999902 (Fsdb.Storage.create ())
+              let session, _ = handle session "CREATE DATABASE shop"
+
+              match handle session "SHOW  TRIGGERS  FROM shop" |> snd with
+              | ResultSet("Trigger" :: _, []) -> ()
+              | other -> failtestf "expected empty triggers despite doubled spaces, got %A" other
+
+              match handle session "SHOW  EVENTS FROM shop" |> snd with
+              | ResultSet("Db" :: _, []) -> ()
+              | other -> failtestf "expected empty events despite doubled spaces, got %A" other
+
+          testCase "SHOW STATUS/VARIABLES accept WHERE Variable_name = '...'"
+          <| fun _ ->
+              let session = create 999903 (Fsdb.Storage.create ())
+
+              match handle session "SHOW SESSION STATUS WHERE Variable_name = 'Uptime'" |> snd with
+              | ResultSet(_, [ [ Some "Uptime"; Some _ ] ]) -> ()
+              | other -> failtestf "expected the one Uptime row, got %A" other
+
+              match handle session "SHOW VARIABLES WHERE Variable_name = 'autocommit'" |> snd with
+              | ResultSet(_, [ [ Some "autocommit"; Some "1" ] ]) -> ()
+              | other -> failtestf "expected the one autocommit row, got %A" other
+
+          testCase "CURRENT_USER()/USER() fall back to the fsdb identity off the wire"
+          <| fun _ ->
+              let session = create 999904 (Fsdb.Storage.create ())
+
+              match handle session "SELECT CURRENT_USER(), USER()" |> snd with
+              | ResultSet(_, [ [ Some "fsdb@localhost"; Some "fsdb@localhost" ] ]) -> ()
+              | other -> failtestf "expected the fallback identity, got %A" other
+
           testCase "SHOW COLUMNS FROM t / DESCRIBE t report field metadata"
           <| fun _ ->
               let session = create 1 (Fsdb.Storage.create ())

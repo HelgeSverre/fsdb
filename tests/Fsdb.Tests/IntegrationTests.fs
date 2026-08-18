@@ -117,6 +117,14 @@ let tests =
                       Expect.equal ours.Length 2 "both connections listed"
                       Expect.all ours (fun (user, _) -> user = "root") "the handshake user, not a stub"
 
+                      // The wire identity is one story: CURRENT_USER(),
+                      // SHOW GRANTS, and PROCESSLIST all report the
+                      // handshake user.
+                      use whoami = killer.CreateCommand()
+                      whoami.CommandText <- "SELECT CURRENT_USER()"
+                      let! whoamiValue = whoami.ExecuteScalarAsync() |> Async.AwaitTask
+                      Expect.equal (string whoamiValue) "root@%" "CURRENT_USER() reports the handshake user"
+
                       use kill = killer.CreateCommand()
                       kill.CommandText <- sprintf "KILL CONNECTION %s" (string victimIdValue)
                       let! _ = kill.ExecuteNonQueryAsync() |> Async.AwaitTask
