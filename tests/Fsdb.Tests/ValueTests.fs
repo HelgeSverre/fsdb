@@ -1193,12 +1193,17 @@ let tests =
                               (VString "a1b#c3")
                               "second occurrence only"
 
-                      testCase "REGEXP_REPLACE supports \\N backreferences"
+                      testCase "REGEXP_REPLACE uses $N for backreferences; \\N is a literal digit"
                       <| fun _ ->
                           Expect.equal
-                              (call "REGEXP_REPLACE" [ VString "2024-01-15"; VString "(\\d+)-(\\d+)-(\\d+)"; VString "\\3/\\2/\\1" ])
+                              (call "REGEXP_REPLACE" [ VString "2024-01-15"; VString "(\\d+)-(\\d+)-(\\d+)"; VString "$3/$2/$1" ])
                               (VString "15/01/2024")
-                              "backreference reorder" ]
+                              "backreference reorder"
+
+                          Expect.equal
+                              (call "REGEXP_REPLACE" [ VString "2024-01-15"; VString "(\\d+)-(\\d+)-(\\d+)"; VString "\\3/\\2/\\1" ])
+                              (VString "3/2/1")
+                              "\\N is a literal digit, not a backreference" ]
 
                 testList
                     "UUID_TO_BIN/BIN_TO_UUID/IS_UUID"

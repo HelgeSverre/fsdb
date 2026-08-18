@@ -1623,17 +1623,13 @@ let private regexpSubstrFn: Scalar =
         | None -> VNull
     | _ -> VNull
 
-/// MySQL replacement text uses `\1`-`\9` backreferences and a literal `\0`/
-/// whole-match; .NET's `Match.Result`/`Regex.Replace` use `$1`..`$9` and
-/// treat a bare `$` specially, so a literal `$` in the caller's replacement
-/// text needs escaping to `$$` and `\N` needs translating to `$N` before
-/// either .NET API sees it.
+/// MySQL (ICU) replacement text uses `$1`-`$9` for backreferences, same
+/// syntax .NET's `Regex.Replace` already understands, so `$N` passes
+/// through untouched. `\N` is a literal digit and `\\` a literal backslash
+/// in MySQL, not a backreference escape, so both need translating away
+/// before .NET sees them (oracle-verified: MySQL 8.4).
 let private toDotNetReplacement (repl: string) : string =
-    Regex.Replace(
-        repl,
-        @"\$|\\(\d)",
-        fun m -> if m.Value = "$" then "$$" else "$" + m.Groups.[1].Value
-    )
+    Regex.Replace(repl, @"\\\\|\\(\d)", fun m -> if m.Value = "\\\\" then "\\" else m.Groups.[1].Value)
 
 /// `occurrence = 0` (the default) replaces every match; a positive
 /// `occurrence` replaces only that one match, leaving the rest of the

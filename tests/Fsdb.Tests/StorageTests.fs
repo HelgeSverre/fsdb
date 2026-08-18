@@ -1351,7 +1351,9 @@ let tests =
 
                     match upsertRows store defaultDatabase "users" None [ [ VInt 1L; VString "alice"; VInt 999L ] ] Ok applyUpdate false with
                     | Ok(_, _, affected) ->
-                        Expect.equal affected 1 "one row affected (the update, not an insert)"
+                        // MySQL counts a changed ON DUPLICATE KEY UPDATE match as 2
+                        // (the attempted insert plus the update), not 1.
+                        Expect.equal affected 2 "two: the attempted insert plus the update that changed the row"
 
                         match scan store defaultDatabase "users" with
                         | Ok(_, rows) -> Expect.equal (List.ofSeq rows |> List.map (fun r -> r.[2])) [ VInt 31L ] "existing row updated, not duplicated"
@@ -1862,7 +1864,38 @@ let tests =
                         match scan store defaultDatabase "ch" with
                         | Ok(_, rows) -> Expect.equal (List.ofSeq rows) [ [| VInt 5L; VInt 1L |] ] "the child row is untouched"
                         | Error e -> failtestf "expected Ok, got %A" e
-                    | other -> failtestf "expected NotNullViolation, got %A" other ]
+                    | other -> failtestf "expected NotNullViolation, got %A" other
+
+                testCase "a self-referencing ON UPDATE CASCADE fails 1451 instead of silently half-applying"
+                <| fun _ ->
+                    let store = create ()
+
+                    let fk =
+                        { Name = "fk_parent"
+                          Columns = [ "parent_id" ]
+                          RefTable = "cat"
+                          RefColumns = [ "id" ]
+                          OnDelete = None
+                          OnUpdate = Some "CASCADE" }
+
+                    createTable store defaultDatabase "cat" [ idCol; col "parent_id" (TInt false) true ] [] [ fk ] None None
+                    |> ignore
+
+                    insertRows store defaultDatabase "cat" None [ [ VInt 1L; VNull ]; [ VInt 2L; VInt 1L ] ]
+                    |> ignore
+
+                    let updater (row: Value[]) = Ok [| VInt 100L; row.[1] |]
+
+                    match updateRows store defaultDatabase "cat" None (fun row -> Ok(row.[0] = VInt 1L)) updater with
+                    | Error(ForeignKeyRestrict "fk_parent") ->
+                        match scan store defaultDatabase "cat" with
+                        | Ok(_, rows) ->
+                            Expect.equal
+                                (List.ofSeq rows |> List.sortBy (fun r -> r.[0]))
+                                [ [| VInt 1L; VNull |]; [| VInt 2L; VInt 1L |] ]
+                                "rejected before any row (self or child) was rewritten"
+                        | Error e -> failtestf "expected Ok, got %A" e
+                    | other -> failtestf "expected ForeignKeyRestrict, got %A" other ]
 
           testList
               "OnCommit notification hook"

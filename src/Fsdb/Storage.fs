@@ -2149,6 +2149,18 @@ let rec private cascadeUpdateVisited
 
                                 if matching.IsEmpty then
                                     Ok(d, visited, changes)
+                                // A self-referencing FK (`childKey = tableKey`) can't cascade
+                                // an update: the rewrite has to land in the same in-progress
+                                // `current`/`builder` array the statement's own writes go
+                                // through, not a separate `Database` copy this recursion
+                                // threads back — writing there would be silently discarded by
+                                // the caller's own final `Map.add`, corrupting referential
+                                // integrity and desyncing the WAL from memory. MySQL 8.4
+                                // refuses the same case outright with 1451 (oracle-verified),
+                                // so this matches real behavior rather than merely avoiding
+                                // the bug.
+                                elif childKey = tableKey then
+                                    Error(ForeignKeyRestrict fk.Name)
                                 else
                                     match fk.OnUpdate |> Option.map (fun s -> s.Trim().ToUpperInvariant()) with
                                     | Some "CASCADE" ->
@@ -2209,11 +2221,13 @@ let rec private cascadeUpdateVisited
 /// appended. Collision detection goes through the same `UniqueIndex`
 /// (collation-aware via `encodeConstraintKey`) as plain `INSERT`'s unique
 /// check.
-/// `foundRows` is the session's negotiated CLIENT_FOUND_ROWS capability: a
-/// matched row that `applyUpdate` leaves unchanged (every column still
-/// equal to what it already held) counts toward the returned total when set,
-/// same as MySQL's `affected_rows` for a no-op `ON DUPLICATE KEY UPDATE`
-/// match, and is excluded when not.
+/// A matched row `applyUpdate` actually changes counts 2 toward the
+/// returned total (MySQL counts the attempted insert plus the update);
+/// `foundRows` is the session's negotiated CLIENT_FOUND_ROWS capability —
+/// a matched row `applyUpdate` leaves unchanged (every column still equal
+/// to what it already held) counts 1 when set, same as MySQL's
+/// `affected_rows` for a no-op `ON DUPLICATE KEY UPDATE` match, and 0
+/// when not.
 let rec upsertRows
     (store: Store)
     (dbName: string)
@@ -2360,12 +2374,18 @@ and private upsertRowsInTable
                                                         else
                                                             newRows.[pos - current.Length] <- applied
 
-                                                        // A no-op match (every column still equal
-                                                        // to what it already held) only counts
-                                                        // toward `affected_rows` when the client
-                                                        // negotiated CLIENT_FOUND_ROWS — MySQL's
-                                                        // `ON DUPLICATE KEY UPDATE` row-count rule.
-                                                        let weight = if foundRows || applied <> existing then 1 else 0
+                                                        // MySQL's `ON DUPLICATE KEY UPDATE`
+                                                        // row-count rule: a match that actually
+                                                        // changes the row counts as 2 (one for the
+                                                        // attempted insert, one for the update); a
+                                                        // no-op match (every column still equal to
+                                                        // what it already held) counts as 1 only
+                                                        // when the client negotiated
+                                                        // CLIENT_FOUND_ROWS, else 0.
+                                                        let weight =
+                                                            if applied <> existing then 2
+                                                            elif foundRows then 1
+                                                            else 0
 
                                                         nextAutoId',
                                                         firstAuto,

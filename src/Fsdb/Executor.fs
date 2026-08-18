@@ -4798,7 +4798,8 @@ let execute (store: Store) (registry: Registry) (dbName: string) (ids: int64 * i
                             let newRow = Array.copy existing
                             for idx, v in idxVals do
                                 newRow.[idx] <- v
-                            newRow)
+                            let assignedIdxs = idxVals |> List.map fst |> Set.ofList
+                            applyOnUpdateTimestamps tableColumns assignedIdxs existing newRow)
 
                     let computeGenerated = computeGeneratedRow store registry dbName table tableColumns
 

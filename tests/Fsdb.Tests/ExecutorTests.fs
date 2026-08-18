@@ -1341,7 +1341,25 @@ let tests =
 
                     match runDefault store "SELECT stamp FROM t WHERE id = 1" with
                     | ResultSet(_, [ [ Some s ] ]) -> Expect.equal s "2000-01-01 00:00:00.000000" "the explicit value is kept, not overwritten by NOW()"
-                    | other -> failtestf "expected one row, got %A" other ]
+                    | other -> failtestf "expected one row, got %A" other
+
+                testCase "INSERT ... ON DUPLICATE KEY UPDATE that changes a row bumps its ON UPDATE CURRENT_TIMESTAMP column"
+                <| fun _ ->
+                    let store = newStore ()
+                    runDefault store "CREATE TABLE t (id INT PRIMARY KEY, n INT, stamp DATETIME(6) DEFAULT CURRENT_TIMESTAMP(6) ON UPDATE CURRENT_TIMESTAMP(6))" |> ignore
+                    runDefault store "INSERT INTO t (id, n) VALUES (1, 10)" |> ignore
+
+                    let stampOf () =
+                        match runDefault store "SELECT stamp FROM t WHERE id = 1" with
+                        | ResultSet(_, [ [ Some s ] ]) -> s
+                        | other -> failtestf "expected one row, got %A" other
+
+                    let before = stampOf ()
+                    System.Threading.Thread.Sleep 20
+                    runDefault store "INSERT INTO t (id, n) VALUES (1, 99) ON DUPLICATE KEY UPDATE n = 99" |> ignore
+                    let after = stampOf ()
+
+                    Expect.notEqual after before "ODKU changing another column bumps the auto column too" ]
 
           testList
               "functions"
