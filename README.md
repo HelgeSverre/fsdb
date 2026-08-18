@@ -10,9 +10,9 @@ over an in-memory engine built as a pipeline of discriminated unions.
 
 Readable F# is the primary goal; raw performance is not.
 
-Not a production database: no authentication, TLS, or replication — a
-single-node engine for learning, embedding, testing, and local tooling. For
-production workloads use MySQL, PostgreSQL, or SQLite.
+Not a production database: no TLS or replication — a single-node engine for
+learning, embedding, testing, and local tooling. For production workloads use
+MySQL, PostgreSQL, or SQLite.
 
 ## Contents
 
@@ -34,8 +34,12 @@ dotnet run --project src/Fsdb        # listens on 127.0.0.1:3307
 mysql --protocol=tcp -h127.0.0.1 -P3307 -e 'SELECT 1'
 ```
 
-Port 3307 avoids a real MySQL on 3306 (`--port` overrides). Any
-username/password is accepted, so bind to loopback.
+Port 3307 avoids a real MySQL on 3306 (`--port` overrides). A `root` account
+with all privileges and no password exists out of the box; accounts, `GRANT`s,
+and passwords are managed with the usual `CREATE USER` / `GRANT` / `SET
+PASSWORD` statements (mysql_native_password, verified at the handshake). An
+account with no password accepts any offered credential, so still bind to
+loopback.
 
 First queries:
 
