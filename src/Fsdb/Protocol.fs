@@ -55,11 +55,10 @@ let StatusInTrans = 0x0001
 /// SERVER_STATUS_AUTOCOMMIT
 let StatusAutocommit = 2
 
-/// Builds the initial HandshakeV10 payload. `authPluginData` must be 20 bytes;
-/// its contents are irrelevant because any password is accepted (see
-/// `parseHandshakeResponse` — ponytail: no auth verification, this is a dev
-/// server; add real mysql_native_password checking if this ever needs to be
-/// exposed beyond localhost).
+/// Builds the initial HandshakeV10 payload. `authPluginData` must be 20
+/// bytes — the mysql_native_password scramble `Server.authenticateHandshake`
+/// verifies the client's response against when the account has a stored
+/// password (an account with no password accepts anything, see `Auth`).
 let buildHandshakeV10 (connectionId: int) (authPluginData: byte[]) : byte[] =
     let w = Writer()
     w.WriteByte 10uy // protocol version

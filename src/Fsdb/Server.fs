@@ -377,6 +377,71 @@ let private withCancellationWatch (client: TcpClient) (body: unit -> 'a) : 'a =
         watchCts.Cancel()
         Storage.queryCancellation.Value <- CancellationToken.None
 
+/// The AuthSwitchRequest packet payload: asks the client to answer the same
+/// 20-byte scramble with mysql_native_password (sent when it responded with
+/// a different plugin, or with nothing, and the account needs verification).
+let private authSwitchPayload (authData: byte[]) : byte[] =
+    let w = Writer()
+    w.WriteByte 0xFEuy
+    w.WriteNullTerminatedString "mysql_native_password"
+    w.WriteBytes authData
+    w.WriteByte 0uy
+    w.ToArray()
+
+/// Authenticates a parsed handshake response against `mysql.user`: the
+/// account must exist, and is verified (mysql_native_password over
+/// `authData`'s scramble) only when it has a non-empty stored hash — an
+/// empty hash accepts any offered credential (see `Auth`'s module doc for
+/// why). Writes the 1045 ERR itself on denial and returns `None`; returns
+/// `Some seqId` (the sequence id the OK packet must use) on success —
+/// `firstSeq + 1` more when an AuthSwitch round trip happened.
+let private authenticateHandshake
+    (client: TcpClient)
+    (stream: IO.Stream)
+    (capabilities: uint32)
+    (store: Storage.Store)
+    (authData: byte[])
+    (resp: HandshakeResponse)
+    (firstSeq: byte)
+    : Async<byte option> =
+    async {
+        let deny (seqId: byte) (usingPassword: bool) =
+            async {
+                let msg =
+                    sprintf
+                        "Access denied for user '%s'@'localhost' (using password: %s)"
+                        resp.Username
+                        (if usingPassword then "YES" else "NO")
+
+                do! writePacketAsync stream { SeqId = seqId; Payload = errPayload capabilities 1045 msg } |> Async.Ignore
+                return None
+            }
+
+        match Auth.tryUserRow store resp.Username with
+        | None -> return! deny firstSeq (resp.AuthResponse.Length > 0)
+        | Some(cols, row) ->
+            let stored = Auth.storedPasswordHash cols row
+
+            if stored = "" then
+                return Some firstSeq
+            elif Auth.verifyNative stored authData resp.AuthResponse then
+                return Some firstSeq
+            elif resp.ClientPlugin = Some "mysql_native_password" then
+                // Right plugin, wrong password — no switch will fix it.
+                return! deny firstSeq (resp.AuthResponse.Length > 0)
+            else
+                // The client answered with another plugin (mysql CLI 8.x
+                // defaults to caching_sha2_password) or nothing; ask it to
+                // redo the same scramble with mysql_native_password.
+                do! writePacketAsync stream { SeqId = firstSeq; Payload = authSwitchPayload authData } |> Async.Ignore
+
+                match! readPacketWithTimeout client stream with
+                | None -> return None // client gave up; nothing to reply to
+                | Some switchResp when Auth.verifyNative stored authData switchResp.Payload ->
+                    return Some(switchResp.SeqId + 1uy)
+                | Some switchResp -> return! deny (switchResp.SeqId + 1uy) (switchResp.Payload.Length > 0)
+    }
+
 let private handleConnection
     (connectionId: int)
     (store: Storage.Store)
@@ -415,6 +480,13 @@ let private handleConnection
                 // foo`, PDO's DSN `dbname=foo`) gets it auto-created, same
                 // as `USE` on a fresh in-memory server with no setup step.
                 resp.Database |> Option.iter (Storage.ensureDatabase store)
+
+                // Authenticate before any session state exists; on denial the
+                // 1045 is already written and the command loop below never
+                // runs (see the guard on `do! loop session` at the bottom).
+                let! authOkSeq =
+                    authenticateHandshake client stream capabilities store authData resp (handshakeResp.SeqId + 1uy)
+
                 let session =
                     { Session.create connectionId store with
                         User = resp.Username
@@ -424,12 +496,15 @@ let private handleConnection
 
                 activeSession <- Some session
 
-                do!
-                    writePacketAsync
-                        stream
-                        { SeqId = handshakeResp.SeqId + 1uy
-                          Payload = okPayload capabilities (statusFlagsFor session) 0UL 0UL }
-                    |> Async.Ignore
+                match authOkSeq with
+                | None -> ()
+                | Some okSeq ->
+                    do!
+                        writePacketAsync
+                            stream
+                            { SeqId = okSeq
+                              Payload = okPayload capabilities (statusFlagsFor session) 0UL 0UL }
+                        |> Async.Ignore
 
                 // Runs a statement dispatch under `withCancellationWatch`,
                 // catching the `OperationCanceledException` a killed
@@ -801,7 +876,8 @@ let private handleConnection
                                 return! loop session
                     }
 
-                do! loop session
+                if authOkSeq.IsSome then
+                    do! loop session
         with
         | :? PacketTooLargeException ->
             // Reassembling a multi-packet payload blew past

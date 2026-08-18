@@ -120,6 +120,79 @@ let tests =
               }
               |> Async.RunSynchronously
 
+          testCase "handshake auth verifies stored passwords: right password connects, wrong password and unknown user get 1045"
+          <| fun _ ->
+              async {
+                  let listener = Fsdb.Server.startListening System.Net.IPAddress.Loopback 0
+                  let port = Fsdb.Server.port listener
+                  let store = Fsdb.Storage.create ()
+
+                  Fsdb.Storage.insertRows
+                      store
+                      "mysql"
+                      "user"
+                      (Some [ "Host"; "User"; "plugin"; "authentication_string" ])
+                      [ [ Fsdb.Value.VString "%"
+                          Fsdb.Value.VString "bob"
+                          Fsdb.Value.VString "mysql_native_password"
+                          Fsdb.Value.VString(Fsdb.Auth.nativePasswordHash "s3cret") ] ]
+                  |> ignore
+
+                  Fsdb.Server.serve listener store Fsdb.Functions.empty |> Async.StartAsTask |> ignore
+
+                  let connStr (user: string) (password: string) =
+                      sprintf
+                          "Server=127.0.0.1;Port=%d;User ID=%s;Password=%s;AllowPublicKeyRetrieval=True;SslMode=None"
+                          port
+                          user
+                          password
+
+                  // `Async.AwaitTask` can surface the failure wrapped in an
+                  // AggregateException, so dig the MySqlException out.
+                  let rec mysqlError (e: exn) : MySqlConnector.MySqlException option =
+                      match e with
+                      | :? MySqlConnector.MySqlException as m -> Some m
+                      | :? AggregateException as a -> a.InnerExceptions |> Seq.tryPick mysqlError
+                      | _ -> None
+
+                  let expectDenied (cs: string) (label: string) =
+                      async {
+                          use conn = new MySqlConnector.MySqlConnection(cs)
+                          let! result = conn.OpenAsync() |> Async.AwaitTask |> Async.Catch
+
+                          match result with
+                          | Choice1Of2() -> failtestf "%s: expected the connection to be denied" label
+                          | Choice2Of2 e ->
+                              match mysqlError e with
+                              | Some m ->
+                                  Expect.equal m.ErrorCode MySqlConnector.MySqlErrorCode.AccessDenied (label + ": 1045")
+                              | None -> raise e
+                      }
+
+                  try
+                      // Right password connects and reports its identity.
+                      use conn = new MySqlConnector.MySqlConnection(connStr "bob" "s3cret")
+                      do! conn.OpenAsync() |> Async.AwaitTask
+                      use cmd = conn.CreateCommand()
+                      cmd.CommandText <- "SELECT CURRENT_USER()"
+                      let! current = cmd.ExecuteScalarAsync() |> Async.AwaitTask
+                      Expect.equal (string current) "bob@%" "authenticated as bob"
+                      do! conn.CloseAsync() |> Async.AwaitTask
+
+                      do! expectDenied (connStr "bob" "wrong") "wrong password"
+                      do! expectDenied (connStr "nobody" "") "unknown user"
+
+                      // The empty-hash divergence: root has no stored password,
+                      // so even an offered password is accepted (keeps the
+                      // torture harness's root/torture-secret working).
+                      use conn2 = new MySqlConnector.MySqlConnection(connStr "root" "anything")
+                      do! conn2.OpenAsync() |> Async.AwaitTask
+                      do! conn2.CloseAsync() |> Async.AwaitTask
+                  finally
+                      listener.Stop()
+              }
+              |> Async.RunSynchronously
+
           // mysql CLI sends `SHOW WARNINGS LIMIT n` and mysqli's
           // `mysqli_report`/error-checking idiom sends `SHOW COUNT(*)
           // WARNINGS` — both routinely enough that either one dying with a
