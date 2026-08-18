@@ -7,6 +7,9 @@ open Fsdb.Ast
 open Fsdb.Value
 open Fsdb.Storage
 open Fsdb.Persistence
+open Fsdb.Binary
+open Fsdb.Executor
+open Fsdb.QueryHandler
 
 /// A fresh, empty scratch directory under the OS temp dir — one per test, so
 /// tests never trip over each other's `wal.jsonl`/`snapshot.fsdb`.
@@ -69,6 +72,19 @@ let private tagColumns =
 
 let private walPath dir = Path.Combine(dir, "wal.bin")
 let private snapshotPath dir = Path.Combine(dir, "snapshot.fsdb")
+
+let private mkCol (name: string) (typ: ColumnType) : ColumnDef =
+    { Name = name
+      Type = typ
+      Nullable = true
+      Default = None
+      AutoIncrement = false
+      PrimaryKey = false
+      Unique = false
+      Generated = None
+      Collation = None
+      Charset = None
+      OnUpdateCurrentTimestamp = false }
 
 let private rowsOf (store: Store) (dbName: string) (table: string) : Value[] list =
     match scan store dbName table with
@@ -838,4 +854,216 @@ let tests =
                   Expect.equal countA (2 * perThread) "db_a has exactly its inserted rows, no dup/loss across rotation"
                   Expect.equal countB (2 * perThread) "db_b has exactly its inserted rows, no dup/loss across rotation"
               finally
-                  testRotateEntriesOverride <- None ]
+                  testRotateEntriesOverride <- None
+
+          testCase "the Value binary codec (encodeValue/decodeValue) round-trips VJson non-ASCII text exactly"
+          <| fun _ ->
+              // No column type ever carries a `VJson` value all the way into
+              // a stored row — every JSON-typed column coerces it down to
+              // `VString` at write time (`Storage.coerceValue`, `TJson` case;
+              // see also the round-trip test above). This pins the WAL/
+              // snapshot binary codec's own VJson tag (`Value.encodeValue`
+              // 0x08) directly, since no table column can exercise it.
+              let original = VJson """{"emoji":"🎉","key":"ünïcödé"}"""
+              let w = Writer()
+              encodeValue w original
+              let r = Reader(w.ToArray())
+              Expect.equal (decodeValue r) original "VJson round-trips through encodeValue/decodeValue"
+
+          testCase "DOUBLE/DECIMAL/BLOB/DATE values round-trip exactly through real columns, both via a WAL-only reload and a snapshot+reload"
+          <| fun _ ->
+              let dir = tempDataDir ()
+              let store = load dir
+              attach dir store
+
+              let columns =
+                  [ { (mkCol "id" (TInt false)) with Nullable = false; AutoIncrement = true; PrimaryKey = true }
+                    mkCol "d" TDouble
+                    mkCol "dec" (TDecimal(20, 4))
+                    mkCol "blb" TBlob
+                    mkCol "dt" TDate ]
+
+              createTable store defaultDatabase "codec" columns [] [] None None |> ignore
+
+              // A negative double, a DECIMAL(20,4) at its exact digit ceiling
+              // (16 integer digits + 4 fractional = 20, the column's own
+              // limit) whose unscaled magnitude (~1e20) exceeds 2^64 and so
+              // sets all three of `Decimal.GetBits`' integer words, and a
+              // zero-length byte string.
+              let row1: Value list =
+                  [ VNull; VDouble -1.5e300; VDecimal 9999999999999999.9999M; VBytes [||]; VDate(DateOnly(2026, 8, 18)) ]
+
+              // A 300-byte string (past the 255-byte lenenc-int boundary)
+              // and a negative, differently-scaled decimal.
+              let bigBytes = Array.init 300 (fun i -> byte (i % 256))
+              let row2: Value list =
+                  [ VNull; VDouble 3.14159265358979; VDecimal -1234567890123.456M; VBytes bigBytes; VDate(DateOnly(1970, 1, 1)) ]
+
+              insertRows store defaultDatabase "codec" None [ row1; row2 ] |> ignore
+
+              let expected =
+                  [ [| VInt 1L; VDouble -1.5e300; VDecimal 9999999999999999.9999M; VBytes [||]; VDate(DateOnly(2026, 8, 18)) |]
+                    [| VInt 2L; VDouble 3.14159265358979; VDecimal -1234567890123.4560M; VBytes bigBytes; VDate(DateOnly(1970, 1, 1)) |] ]
+
+              // WAL-only reload: no snapshot has been taken yet.
+              let walOnly = load dir
+              Expect.equal (rowsOf walOnly defaultDatabase "codec") expected "every value round-trips through a WAL-only reload"
+
+              snapshotNow dir store
+
+              let snapshotted = load dir
+              Expect.equal (rowsOf snapshotted defaultDatabase "codec") expected "every value round-trips through a snapshot + reload"
+
+          testCase "a table with a column of every ColumnType survives a restart with byte-identical SHOW CREATE TABLE output"
+          <| fun _ ->
+              let dir = tempDataDir ()
+              let store = load dir
+              attach dir store
+
+              let allTypeColumns =
+                  [ mkCol "c_tinyint" (TTinyInt false)
+                    mkCol "c_smallint" (TSmallInt false)
+                    mkCol "c_mediumint" (TMediumInt true)
+                    mkCol "c_int" (TInt false)
+                    mkCol "c_bigint" (TBigInt true)
+                    mkCol "c_char" (TChar 10)
+                    mkCol "c_varchar" (TVarchar 20)
+                    mkCol "c_tinytext" TTinyText
+                    mkCol "c_text" TText
+                    mkCol "c_mediumtext" TMediumText
+                    mkCol "c_longtext" TLongText
+                    mkCol "c_binary" (TBinary 4)
+                    mkCol "c_varbinary" (TVarBinary 8)
+                    mkCol "c_tinyblob" TTinyBlob
+                    mkCol "c_blob" TBlob
+                    mkCol "c_mediumblob" TMediumBlob
+                    mkCol "c_longblob" TLongBlob
+                    mkCol "c_enum" (TEnum [ "a"; "b" ])
+                    mkCol "c_set" (TSet [ "x"; "y" ])
+                    mkCol "c_decimal" (TDecimal(10, 2))
+                    mkCol "c_double" TDouble
+                    mkCol "c_float" TFloat
+                    mkCol "c_date" TDate
+                    mkCol "c_datetime" (TDateTime 3)
+                    mkCol "c_timestamp" (TTimestamp 6)
+                    mkCol "c_time" (TTime 2)
+                    mkCol "c_year" TYear
+                    mkCol "c_json" TJson ]
+
+              createTable store defaultDatabase "alltypes" allTypeColumns [] [] None None |> ignore
+
+              let before =
+                  match Fsdb.InformationSchema.showCreateTable store.Catalog defaultDatabase "alltypes" with
+                  | Ok(_, [ [ _; Some ddl ] ]) -> ddl
+                  | other -> failtestf "expected SHOW CREATE TABLE to succeed before restart, got %A" other
+
+              let reloaded = load dir
+
+              let after =
+                  match Fsdb.InformationSchema.showCreateTable reloaded.Catalog defaultDatabase "alltypes" with
+                  | Ok(_, [ [ _; Some ddl ] ]) -> ddl
+                  | other -> failtestf "expected SHOW CREATE TABLE to succeed after restart, got %A" other
+
+              Expect.equal after before "SHOW CREATE TABLE is byte-identical before and after the restart, across every ColumnType tag"
+
+          testCase "a GENERATED column using CASE/LIKE ESCAPE/IN/BETWEEN/CAST/CONCAT survives a restart and still computes correctly"
+          <| fun _ ->
+              let dir = tempDataDir ()
+              let store = load dir
+              attach dir store
+              let session = Fsdb.Session.create 1 store
+
+              let run (session: Fsdb.Session.Session) (sql: string) =
+                  let session', result = handle session sql
+
+                  match result with
+                  | Err(code, msg) -> failtestf "%s failed: %d %s" sql code msg
+                  | _ -> ()
+
+                  session'
+
+              let ddl =
+                  "CREATE TABLE g ("
+                  + "a INT, name VARCHAR(20), "
+                  + "case_full VARCHAR(20) AS (CASE WHEN a > 10 THEN 'big' WHEN a > 0 THEN 'small' ELSE 'non-positive' END) STORED, "
+                  + "case_bare VARCHAR(20) AS (CASE WHEN a = 1 THEN 'one' END) STORED, "
+                  + "like_esc INT AS (name LIKE '50!%' ESCAPE '!') STORED, "
+                  + "in_set INT AS (a IN (1, 2, 3)) STORED, "
+                  + "betw INT AS (a BETWEEN 1 AND 10) STORED, "
+                  + "casted VARCHAR(20) AS (CAST(a AS CHAR)) STORED, "
+                  + "conc VARCHAR(30) AS (CONCAT('x-', a)) STORED)"
+
+              let session = run session ddl
+
+              // Restart *before* any row exists, so the row below is
+              // computed entirely by the reloaded store's own generated-
+              // column expressions, not carried over from the live one.
+              let reloaded = load dir
+              let session2 = Fsdb.Session.create 1 reloaded
+              let session2 = run session2 "INSERT INTO g (a, name) VALUES (5, '50%')"
+
+              match handle session2 "SELECT case_full, case_bare, like_esc, in_set, betw, casted, conc FROM g" |> snd with
+              | ResultSet(_, [ row ]) ->
+                  Expect.equal
+                      row
+                      [ Some "small"; None; Some "1"; Some "0"; Some "1"; Some "5"; Some "x-5" ]
+                      "every generated expression computes correctly post-reload"
+              | other -> failtestf "expected one row back, got %A" other
+
+              ignore session
+
+          testCase "WAL-only replay (no snapshot ever taken) reproduces ADD COLUMN AFTER, ADD PRIMARY KEY, a FOREIGN KEY add+drop, CREATE/DROP INDEX, TRUNCATE, DROP TABLE, and DROP DATABASE"
+          <| fun _ ->
+              let dir = tempDataDir ()
+              let store = load dir
+              attach dir store
+              let session = Fsdb.Session.create 1 store
+
+              let run (session: Fsdb.Session.Session) (sql: string) =
+                  let session', result = handle session sql
+
+                  match result with
+                  | Err(code, msg) -> failtestf "%s failed: %d %s" sql code msg
+                  | _ -> ()
+
+                  session'
+
+              let session = run session "CREATE DATABASE db2"
+              let session = run session "CREATE TABLE p (id INT NOT NULL)"
+              let session = run session "ALTER TABLE p ADD PRIMARY KEY (id)"
+              let session = run session "INSERT INTO p (id) VALUES (1)"
+              let session = run session "CREATE TABLE t (id INT NOT NULL, name VARCHAR(20))"
+              let session = run session "ALTER TABLE t ADD COLUMN extra VARCHAR(10) AFTER id"
+              let session = run session "ALTER TABLE t ADD CONSTRAINT fk_t_p FOREIGN KEY (id) REFERENCES p (id)"
+              let session = run session "ALTER TABLE t DROP FOREIGN KEY fk_t_p"
+              let session = run session "CREATE INDEX ix_name ON t (name)"
+              let session = run session "DROP INDEX ix_name ON t"
+              let session = run session "INSERT INTO t (id, extra, name) VALUES (1, 'e1', 'n1'), (2, 'e2', 'n2')"
+              let session = run session "TRUNCATE TABLE t"
+              let session = run session "DROP TABLE p"
+              let session = run session "DROP DATABASE db2"
+              ignore session
+
+              // `snapshotNow` is never called above — the catalog reaches
+              // this restart as WAL records only (barring an unrelated
+              // background rotation via `attach`'s size/entry threshold,
+              // which a handful of statements never crosses), so `load`
+              // rebuilds it entirely through `applyDdl`/`applyEvent` replay.
+              let reloaded = load dir
+
+              match Fsdb.InformationSchema.showCreateTable reloaded.Catalog defaultDatabase "t" with
+              | Ok(_, [ [ _; Some ddl ] ]) ->
+                  Expect.stringContains ddl "`extra`" "the AFTER-positioned ADD COLUMN survives"
+                  Expect.isFalse (ddl.Contains "FOREIGN KEY") "the added-then-dropped foreign key is gone"
+                  Expect.isFalse (ddl.Contains "ix_name") "the created-then-dropped index is gone"
+              | other -> failtestf "expected table 't' to reload, got %A" other
+
+              Expect.isEmpty (rowsOf reloaded defaultDatabase "t") "TRUNCATE survives replay"
+
+              match scan reloaded defaultDatabase "p" with
+              | Error(NoSuchTable _) -> ()
+              | other -> failtestf "expected table 'p' to be gone (DROP TABLE), got %A" other
+
+              match scan reloaded "db2" "anything" with
+              | Error(NoSuchDatabase _) -> ()
+              | other -> failtestf "expected database 'db2' to be gone (DROP DATABASE), got %A" other ]
