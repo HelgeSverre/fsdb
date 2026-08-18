@@ -1189,9 +1189,19 @@ let tests =
               | Err(1227, _) -> ()
               | other -> failtestf "expected CREATE USER to be 1227, got %A" other
 
+              // MySQL's grant-denial codes are level-shaped (oracle-verified):
+              // 1142 for a table target, 1044 db, 1045 global.
               match handle worker "GRANT SELECT ON shop.secrets TO worker" |> snd with
-              | Err(1227, _) -> ()
-              | other -> failtestf "expected GRANT without grant option to be 1227, got %A" other
+              | Err(1142, _) -> ()
+              | other -> failtestf "expected table-level GRANT without grant option to be 1142, got %A" other
+
+              match handle worker "GRANT SELECT ON shop.* TO worker" |> snd with
+              | Err(1044, _) -> ()
+              | other -> failtestf "expected db-level GRANT without grant option to be 1044, got %A" other
+
+              match handle worker "GRANT SELECT ON *.* TO worker" |> snd with
+              | Err(1045, _) -> ()
+              | other -> failtestf "expected global GRANT without grant option to be 1045, got %A" other
 
               // A db-level grant covers every table in the db.
               let root, _ = handle root "GRANT INSERT ON shop.* TO worker"
@@ -1211,6 +1221,77 @@ let tests =
               match handle worker "SELECT * FROM orders" |> snd with
               | Err(1142, _) -> ()
               | other -> failtestf "expected the revoked SELECT to be denied again, got %A" other
+
+          testCase "WITH GRANT OPTION delegates at its own level, only for held privileges (MySQL-differential-verified)"
+          <| fun _ ->
+              let store = Fsdb.Storage.create ()
+              let root = create 1 store
+              let root, _ = handle root "CREATE DATABASE shop"
+              let root, _ = handle root "USE shop"
+              let root, _ = handle root "CREATE TABLE t1 (id INT PRIMARY KEY)"
+              let root, _ = handle root "CREATE USER dave"
+              let root, _ = handle root "CREATE USER eve"
+              let root, _ = handle root "CREATE USER carol"
+              let root, _ = handle root "GRANT SELECT ON shop.* TO dave WITH GRANT OPTION"
+              let root, _ = handle root "GRANT SELECT ON shop.t1 TO carol WITH GRANT OPTION"
+
+              let dave = { create 2 store with User = "dave"; Database = Some "shop" }
+              let carol = { create 3 store with User = "carol"; Database = Some "shop" }
+              let eve = { create 4 store with User = "eve"; Database = Some "shop" }
+
+              // db-scoped grant option delegates within the db...
+              match handle dave "GRANT SELECT ON shop.* TO eve" |> snd with
+              | Affected 0UL -> ()
+              | other -> failtestf "expected dave's db-scoped delegation to work, got %A" other
+
+              match handle eve "SELECT COUNT(*) FROM t1" |> snd with
+              | ResultSet _ -> ()
+              | other -> failtestf "expected eve's delegated SELECT to work, got %A" other
+
+              // ...but not privileges the grantor doesn't hold (1044 at db
+              // level), nor scopes above its own (1045 at global).
+              match handle dave "GRANT INSERT ON shop.* TO eve" |> snd with
+              | Err(1044, _) -> ()
+              | other -> failtestf "expected granting an unheld privilege to be 1044, got %A" other
+
+              match handle dave "GRANT SELECT ON *.* TO eve" |> snd with
+              | Err(1045, _) -> ()
+              | other -> failtestf "expected escalating to global to be 1045, got %A" other
+
+              // Table-scoped grant option: that one table only.
+              match handle carol "GRANT SELECT ON shop.t1 TO eve" |> snd with
+              | Affected 0UL -> ()
+              | other -> failtestf "expected carol's table-scoped delegation to work, got %A" other
+
+              match handle carol "GRANT SELECT ON shop.* TO eve" |> snd with
+              | Err(1044, _) -> ()
+              | other -> failtestf "expected table-scoped option not to cover the db, got %A" other
+
+              // The delegate can revoke what it could grant.
+              match handle dave "REVOKE SELECT ON shop.* FROM eve" |> snd with
+              | Affected 0UL -> ()
+              | other -> failtestf "expected dave's revoke to work, got %A" other
+
+          testCase "REVOKE ALL deletes the emptied grant rows — no ghost USAGE lines in SHOW GRANTS"
+          <| fun _ ->
+              let store = Fsdb.Storage.create ()
+              let root = create 1 store
+              let root, _ = handle root "CREATE DATABASE shop"
+              let root, _ = handle root "USE shop"
+              let root, _ = handle root "CREATE TABLE t1 (id INT PRIMARY KEY)"
+              let root, _ = handle root "CREATE USER gina"
+              let root, _ = handle root "GRANT ALL PRIVILEGES ON shop.* TO gina"
+              let root, _ = handle root "GRANT SELECT ON shop.t1 TO gina"
+              let root, _ = handle root "REVOKE ALL PRIVILEGES ON shop.* FROM gina"
+              let root, _ = handle root "REVOKE SELECT ON shop.t1 FROM gina"
+
+              match handle root "SHOW GRANTS FOR gina" |> snd with
+              | ResultSet(_, rows) ->
+                  Expect.equal
+                      (rows |> List.map (List.head >> Option.get))
+                      [ "GRANT USAGE ON *.* TO `gina`@`%`" ]
+                      "only the global USAGE line remains, like MySQL"
+              | other -> failtestf "expected gina's grants, got %A" other
 
           testCase "SHOW GRANTS renders global/db/table lines; USER_PRIVILEGES and SHOW PRIVILEGES enumerate"
           <| fun _ ->

@@ -231,6 +231,15 @@ type PrivTarget =
     | OnDb of db: string
     | OnTable of db: string * table: string
 
+/// Resolves `Ast.Grant`/`Revoke`'s `(db, table)` level encoding against the
+/// session database (a bare `ON t` means the current db's table).
+let targetOfLevel (defaultDb: string) (level: string option * string option) : PrivTarget =
+    match level with
+    | None, None -> Global
+    | Some db, None -> OnDb db
+    | Some db, Some t -> OnTable(db, t)
+    | None, Some t -> OnTable(defaultDb, t)
+
 let private eqI (a: string) (b: string) = String.Equals(a, b, StringComparison.OrdinalIgnoreCase)
 
 /// Splits a `Table_priv`/`Column_priv` SET string into its members.
@@ -312,7 +321,27 @@ let private applyAtLevel
             | Result.Ok _ -> Result.Ok()
             | Result.Error e -> Result.Error(toMySqlError e)
         | Result.Ok 0 -> Result.Error(1141, sprintf "There is no such grant defined for user '%s' on host '%s'" name host)
-        | Result.Ok _ -> Result.Ok()
+        | Result.Ok _ ->
+            if not granting then
+                // MySQL deletes a mysql.db row once nothing is left in it —
+                // an all-N row would otherwise render a ghost `GRANT USAGE
+                // ON db.*` line in SHOW GRANTS.
+                match scanList store "mysql" "db" with
+                | Result.Error _ -> ()
+                | Result.Ok(cols, _) ->
+                    let dbLevelCols =
+                        "Grant_priv" :: (staticPrivileges |> List.choose (fun d -> d.DbCol))
+
+                    let allN (r: Value[]) =
+                        dbLevelCols
+                        |> List.forall (fun c ->
+                            match resolveColumn cols c with
+                            | Result.Ok i -> r.[i] <> VString "Y"
+                            | _ -> true)
+
+                    deleteRows store "mysql" "db" (fun r -> Result.Ok(matches cols r && allN r)) |> ignore
+
+            Result.Ok()
     | OnTable(db, table) ->
         let wanted =
             (defs |> List.choose (fun d -> d.TablePriv))
@@ -343,6 +372,11 @@ let private applyAtLevel
                         currentSet |> List.filter (fun c -> not (wanted |> List.exists (eqI c)))
 
                 match existing with
+                | Some _ when newSet.IsEmpty && not granting ->
+                    // Same as mysql.db above: MySQL removes a tables_priv row
+                    // once its SET is empty.
+                    deleteRows store "mysql" "tables_priv" (fun r -> Result.Ok(matchesRow r)) |> ignore
+                    Result.Ok()
                 | Some _ ->
                     updateSystemRows
                         store
@@ -450,8 +484,21 @@ let rec requiredPrivileges (defaultDb: string) (stmt: Statement) : (string * Pri
     | CreateUser _
     | DropUser _
     | AlterUser _ -> [ "CREATE USER", Global ]
-    | Grant _
-    | Revoke _ -> [ "GRANT OPTION", Global ]
+    | Grant(privs, level, _, _)
+    | Revoke(privs, level, _) ->
+        // MySQL requires the grantor to hold grant option *at the target's
+        // level* (a db-scoped WITH GRANT OPTION delegates that db, no global
+        // Grant_priv needed) plus every privilege being granted, also at
+        // that level — `check`'s global ⊃ db ⊃ table hierarchy supplies the
+        // "or higher" part.
+        let target = targetOfLevel defaultDb level
+
+        let privReqs =
+            match expandPrivs privs target with
+            | Result.Ok defs -> defs |> List.map (fun d -> d.Sql, target)
+            | Result.Error _ -> [] // invalid list — the executor reports it
+
+        ("GRANT OPTION", target) :: privReqs
     | Explain inner -> requiredPrivileges defaultDb inner
 
 /// Checks `user` against every required privilege, denying with MySQL's
@@ -518,20 +565,75 @@ let check (store: Store) (user: string) (required: (string * PrivTarget) list) :
                 | _ -> false
             | _ -> false
 
-        let hasGrantOption () =
+        let hasGlobalGrantOption () =
             match userRow with
             | Some(cols, row) -> userColumnText cols row "Grant_priv" = "Y"
             | None -> false
 
+        /// mysql.db's `Grant_priv` for (user, db) — a db-scoped WITH GRANT
+        /// OPTION.
+        let hasDbGrantOption (db: string) =
+            match dbRowGrants.Value with
+            | Some(cols, rows) ->
+                let idx n = resolveColumn cols n |> Result.toOption
+
+                match idx "User", idx "Db", idx "Grant_priv" with
+                | Some u, Some d, Some g ->
+                    rows
+                    |> List.exists (fun r ->
+                        r.[u] = VString user
+                        && (match r.[d] with
+                            | VString s -> eqI s db
+                            | _ -> false)
+                        && r.[g] = VString "Y")
+                | _ -> false
+            | None -> false
+
+        /// tables_priv's `Grant` SET member for (user, db, table).
+        let hasTableGrantOption (db: string) (table: string) =
+            match tablePrivGrants.Value with
+            | Some(cols, rows) ->
+                let idx n = resolveColumn cols n |> Result.toOption
+
+                match idx "User", idx "Db", idx "Table_name", idx "Table_priv" with
+                | Some u, Some d, Some t, Some tp ->
+                    rows
+                    |> List.exists (fun r ->
+                        r.[u] = VString user
+                        && (match r.[d] with
+                            | VString s -> eqI s db
+                            | _ -> false)
+                        && (match r.[t] with
+                            | VString s -> eqI s table
+                            | _ -> false)
+                        && (match r.[tp] with
+                            | VString s -> setMembers s |> List.exists (eqI "Grant")
+                            | _ -> false))
+                | _ -> false
+            | None -> false
+
         let checkOne (privSql: string, target: PrivTarget) : Result<unit, int * string> =
             if privSql = "GRANT OPTION" then
-                // GRANT/REVOKE themselves — global Grant_priv only
-                // (ponytail: real MySQL also accepts db/table-scoped grant
-                // option; add when someone actually delegates grants).
-                if hasGrantOption () then
+                // GRANT/REVOKE themselves: grant option held at the target's
+                // level or higher (global Grant_priv ⊃ mysql.db row ⊃
+                // tables_priv `Grant` member). Denials use MySQL's
+                // level-shaped codes (oracle-verified): 1045 global, 1044
+                // db, 1142 table.
+                let allowed =
+                    hasGlobalGrantOption ()
+                    || (match target with
+                        | Global -> false
+                        | OnDb db -> hasDbGrantOption db
+                        | OnTable(db, table) -> hasDbGrantOption db || hasTableGrantOption db table)
+
+                if allowed then
                     Ok()
                 else
-                    Error(1227, "Access denied; you need (at least one of) the GRANT OPTION privilege(s) for this operation")
+                    match target with
+                    | Global -> Error(1045, sprintf "Access denied for user '%s'@'%%' (using password: YES)" user)
+                    | OnDb db -> Error(1044, sprintf "Access denied for user '%s'@'%%' to database '%s'" user db)
+                    | OnTable(_, table) ->
+                        Error(1142, sprintf "GRANT command denied to user '%s'@'localhost' for table '%s'" user table)
             else
 
             match privBySql privSql with
@@ -555,7 +657,9 @@ let check (store: Store) (user: string) (required: (string * PrivTarget) list) :
                             1227,
                             sprintf "Access denied; you need (at least one of) the %s privilege(s) for this operation" privSql
                         )
-                    | OnDb db -> Error(1044, sprintf "Access denied for user '%s'@'localhost' to database '%s'" user db)
+                    // 1044 carries the *account* host, 1142 the connecting
+                    // host — mirroring real MySQL's (odd) split.
+                    | OnDb db -> Error(1044, sprintf "Access denied for user '%s'@'%%' to database '%s'" user db)
                     | OnTable(_, table) ->
                         Error(1142, sprintf "%s command denied to user '%s'@'localhost' for table '%s'" privSql user table)
 
