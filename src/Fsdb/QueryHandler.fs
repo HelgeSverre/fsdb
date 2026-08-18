@@ -607,6 +607,13 @@ let private setAutocommit =
 let private setPasswordRe =
     Regex(@"^SET\s+PASSWORD\s*(?:FOR\s+([^=\s]+)\s*)?=\s*'([^']*)'\s*;?$", RegexOptions.IgnoreCase)
 
+/// `SHOW GRANTS [FOR 'user'@'host' | FOR CURRENT_USER[()]]`.
+let private showGrantsRe = Regex(@"^SHOW\s+GRANTS(?:\s+FOR\s+(.+?))?\s*;?$", RegexOptions.IgnoreCase)
+
+/// `FLUSH [LOCAL] PRIVILEGES` — a no-op OK: privilege reads always hit the
+/// live mysql.* rows, there's no cache to flush.
+let private flushPrivilegesRe = Regex(@"^FLUSH\s+(?:LOCAL\s+)?PRIVILEGES\s*;?$", RegexOptions.IgnoreCase)
+
 /// MySqlConnector's real `BeginTransaction[Async]` handshake explicitly
 /// selects REPEATABLE READ before it sends START TRANSACTION — the
 /// isolation model FSDB's private transaction snapshot actually implements.
@@ -901,6 +908,13 @@ let private executeParsed (session: Session) (stmt: Statement) : Session * Query
 
     let execute session =
         let store = Session.currentStore session
+
+        // Privilege enforcement — the one gate every parsed statement goes
+        // through (probes are exempt, see `Auth.requiredPrivileges`'s doc).
+        match Auth.check store session.User (Auth.requiredPrivileges dbName stmt) with
+        | Error(code, msg) -> session, Err(code, msg)
+        | Ok() ->
+
         // `Store.StrictMode` is store-wide, not per-session (see its doc
         // comment) — re-derive it from *this* session's own `sql_mode`
         // right before every statement, so another connection's `SET
@@ -1033,6 +1047,9 @@ type private Probe =
     | Describe of name: string
     | ShowIndex of name: string * dbOverride: string option
     | ShowCollation
+    | ShowGrants of user: string option
+    | ShowPrivileges
+    | FlushPrivileges
 
 /// The one ordered list of text-probed forms — matching `Probe`'s cases
 /// exactly (the compiler enforces `runProbe` covers every one of them), so
@@ -1073,6 +1090,13 @@ let private tryProbe (sql: string) (upper: string) : Probe option =
         Some ShowWarnings
     elif showErrorsRe.IsMatch sql then
         Some ShowErrors
+    elif upper.StartsWith "SHOW PRIVILEGES" then
+        Some ShowPrivileges
+    elif showGrantsRe.IsMatch sql then
+        let m = showGrantsRe.Match sql
+        Some(ShowGrants(if m.Groups.[1].Success then Some m.Groups.[1].Value else None))
+    elif flushPrivilegesRe.IsMatch sql then
+        Some FlushPrivileges
     elif upper.StartsWith "SHOW DATABASES" then
         Some ShowDatabases
     elif upper.StartsWith "SHOW TABLE STATUS" then
@@ -1179,6 +1203,28 @@ let private runProbe (session: Session) (sql: string) (probe: Probe) : Session *
         let dbName, table = splitQualified sessionDb name
         let dbName = dbOverride |> Option.map stripBackticks |> Option.defaultValue dbName
         session, InformationSchema.showIndex (Session.currentStore session).Catalog dbName table |> showResult
+    | ShowGrants userOpt ->
+        // `FOR 'name'@'host'` — the name is what matters (accounts match by
+        // name, see `Auth`); no FOR, or FOR CURRENT_USER[()], means the
+        // session's own user.
+        let name =
+            match userOpt with
+            | None -> session.User
+            | Some u ->
+                let t = u.Trim()
+
+                if t.ToUpperInvariant().StartsWith "CURRENT_USER" then
+                    session.User
+                else
+                    t.Split('@').[0].Trim().Trim([| '\''; '`'; '"' |])
+
+        match Auth.renderGrants (Session.currentStore session) name with
+        | Ok(header, lines) -> session, ResultSet([ header ], lines |> List.map (fun l -> [ Some l ]))
+        | Error(code, msg) -> session, Err(code, msg)
+    | ShowPrivileges ->
+        let cols, rows = InformationSchema.showPrivileges ()
+        session, ResultSet(cols, rows)
+    | FlushPrivileges -> session, Affected 0UL
 
 /// Parses and validates SQL for COM_STMT_PREPARE without executing it: a
 /// parse failure is the same 1064 (code, message) pair a COM_QUERY syntax

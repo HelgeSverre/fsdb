@@ -4667,6 +4667,15 @@ let private nextIds ((okId, generatedId): int64 * int64) ((newOkId: int64), (new
 /// UPDATE's affected-rows count is MySQL's one behavior this flag actually
 /// changes: matched rows (including no-op `SET x = x` ones) when set, changed
 /// rows (the default) when not. Every other statement kind ignores it.
+/// Resolves `Ast.Grant`/`Revoke`'s `(db, table)` level encoding against the
+/// session database (a bare `ON t` means the current db's table).
+let private grantTarget (dbName: string) (level: string option * string option) : Auth.PrivTarget =
+    match level with
+    | None, None -> Auth.Global
+    | Some db, None -> Auth.OnDb db
+    | Some db, Some t -> Auth.OnTable(db, t)
+    | None, Some t -> Auth.OnTable(dbName, t)
+
 let execute (store: Store) (registry: Registry) (dbName: string) (ids: int64 * int64) (foundRows: bool) (stmt: Statement) : (int64 * int64) * QueryResult =
     match stmt with
     | CreateDatabase(name, ifNotExists) ->
@@ -4784,6 +4793,16 @@ let execute (store: Store) (registry: Registry) (dbName: string) (ids: int64 * i
         match Auth.setPassword store name host password with
         | Ok() -> ids, Affected 0UL
         | Error(1396, _) when ifExists -> ids, Affected 0UL
+        | Error(code, msg) -> ids, Err(code, msg)
+
+    | Grant(privs, level, users, withGrantOption) ->
+        match Auth.grant store privs (grantTarget dbName level) users withGrantOption with
+        | Ok() -> ids, Affected 0UL
+        | Error(code, msg) -> ids, Err(code, msg)
+
+    | Revoke(privs, level, users) ->
+        match Auth.revoke store privs (grantTarget dbName level) users with
+        | Ok() -> ids, Affected 0UL
         | Error(code, msg) -> ids, Err(code, msg)
 
     | Insert(table, columns, rowsExprs, onDuplicateUpdate, ignoreDuplicates) ->

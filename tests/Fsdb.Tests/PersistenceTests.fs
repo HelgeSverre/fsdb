@@ -560,6 +560,30 @@ let tests =
 
               Expect.isNone (Fsdb.Auth.tryUserRow reloaded "bob") "bob's replayed drop stuck"
 
+          testCase "GRANT/REVOKE mutations to mysql.db and tables_priv replay from the WAL"
+          <| fun _ ->
+              let dir = tempDataDir ()
+              let store = load dir
+              attach dir store
+
+              Fsdb.Auth.createUser store "worker" "%" None |> ignore
+              Fsdb.Auth.grant store [ "SELECT"; "UPDATE" ] (Fsdb.Auth.OnDb "shop") [ "worker", "%" ] false |> ignore
+              Fsdb.Auth.grant store [ "DELETE" ] (Fsdb.Auth.OnTable("shop", "orders")) [ "worker", "%" ] false |> ignore
+              Fsdb.Auth.grant store [ "INSERT" ] (Fsdb.Auth.OnDb "shop") [ "worker", "%" ] false |> ignore
+              Fsdb.Auth.revoke store [ "UPDATE" ] (Fsdb.Auth.OnDb "shop") [ "worker", "%" ] |> ignore
+
+              let reloaded = load dir
+
+              match Fsdb.Auth.renderGrants reloaded "worker" with
+              | Ok(_, lines) ->
+                  Expect.equal
+                      lines
+                      [ "GRANT USAGE ON *.* TO `worker`@`%`"
+                        "GRANT SELECT, INSERT ON `shop`.* TO `worker`@`%`"
+                        "GRANT DELETE ON `shop`.`orders` TO `worker`@`%`" ]
+                      "replayed grants minus the revoked UPDATE"
+              | Error e -> failtestf "expected worker's grants after reload, got %A" e
+
           testCase "a snapshot written without the mysql schema gets it re-seeded on load"
           <| fun _ ->
               let dir = tempDataDir ()

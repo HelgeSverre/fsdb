@@ -203,6 +203,34 @@ let tests =
                       do! conn3.CloseAsync() |> Async.AwaitTask
 
                       do! expectDenied (connStr "carol" "nope") "created account, wrong password"
+
+                      // Privilege enforcement over the wire: carol has no
+                      // grants, so a SELECT on a real table is 1142.
+                      use conn4 = new MySqlConnector.MySqlConnection(connStr "root" "")
+                      do! conn4.OpenAsync() |> Async.AwaitTask
+                      use ddl = conn4.CreateCommand()
+                      ddl.CommandText <- "CREATE TABLE fsdb.things (id INT PRIMARY KEY)"
+                      let! _ = ddl.ExecuteNonQueryAsync() |> Async.AwaitTask
+                      do! conn4.CloseAsync() |> Async.AwaitTask
+
+                      use conn5 = new MySqlConnector.MySqlConnection(connStr "carol" "cpw")
+                      do! conn5.OpenAsync() |> Async.AwaitTask
+                      use denied = conn5.CreateCommand()
+                      denied.CommandText <- "SELECT * FROM fsdb.things"
+                      let! deniedResult = denied.ExecuteScalarAsync() |> Async.AwaitTask |> Async.Catch
+
+                      match deniedResult with
+                      | Choice1Of2 _ -> failtest "expected carol's SELECT to be denied"
+                      | Choice2Of2 e ->
+                          match mysqlError e with
+                          | Some m ->
+                              Expect.equal
+                                  m.ErrorCode
+                                  MySqlConnector.MySqlErrorCode.TableAccessDenied
+                                  "1142 over the wire"
+                          | None -> raise e
+
+                      do! conn5.CloseAsync() |> Async.AwaitTask
                   finally
                       listener.Stop()
               }

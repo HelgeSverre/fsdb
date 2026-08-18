@@ -612,6 +612,36 @@ let private collationsRows: Value[] list =
            vs (string sortlen)
            vs pad |])
 
+let private userPrivilegesColumns: ColumnDef list =
+    [ strCol "GRANTEE"; strCol "TABLE_CATALOG"; strCol "PRIVILEGE_TYPE"; strCol "IS_GRANTABLE" ]
+
+/// `information_schema.USER_PRIVILEGES` — each account's global privileges
+/// projected off `mysql.user`'s rows (an account with none gets the single
+/// `USAGE` row, same as MySQL).
+let private userPrivilegesRows (catalog: Catalog) : Value[] list =
+    match Map.tryFind "mysql" catalog |> Option.bind (Map.tryFind "user") with
+    | None -> []
+    | Some t ->
+        let idx name =
+            t.Columns |> List.tryFindIndex (fun c -> String.Equals(c.Name, name, StringComparison.OrdinalIgnoreCase))
+
+        match idx "User", idx "Host", idx "Grant_priv" with
+        | Some userIdx, Some hostIdx, Some grantIdx ->
+            t.Rows
+            |> List.collect (fun row ->
+                let text i = match row.[i] with VString s -> s | _ -> ""
+                let grantee = sprintf "'%s'@'%s'" (text userIdx) (text hostIdx)
+                let grantable = if text grantIdx = "Y" then "YES" else "NO"
+
+                let granted =
+                    Fsdb.Auth.staticPrivileges
+                    |> List.filter (fun d ->
+                        idx d.UserCol |> Option.map (fun i -> text i = "Y") |> Option.defaultValue false)
+
+                let privNames = if granted.IsEmpty then [ "USAGE" ] else granted |> List.map (fun d -> d.Sql)
+                privNames |> List.map (fun p -> [| vs grantee; vs "def"; vs p; vs grantable |]))
+        | _ -> []
+
 /// Resolves one `information_schema` table name (case-insensitive) to its
 /// columns and freshly-projected rows, or `None` if `name` isn't one of the
 /// virtual tables this module knows about (a real 1146 from `Executor`, same
@@ -619,6 +649,7 @@ let private collationsRows: Value[] list =
 let scan (catalog: Catalog) (name: string) : (ColumnDef list * Value[] list) option =
     match name.ToUpperInvariant() with
     | "TABLES" -> Some(tablesColumns, tablesRows catalog)
+    | "USER_PRIVILEGES" -> Some(userPrivilegesColumns, userPrivilegesRows catalog)
     | "COLUMNS" -> Some(columnsColumns, columnsRows catalog)
     | "STATISTICS" -> Some(statisticsColumns, statisticsRows catalog)
     | "KEY_COLUMN_USAGE" -> Some(keyColumnUsageColumns, keyColumnUsageRows catalog)
@@ -685,7 +716,8 @@ let private informationSchemaTableNames =
       "SCHEMATA"
       "STATISTICS"
       "TABLES"
-      "TABLE_CONSTRAINTS" ]
+      "TABLE_CONSTRAINTS"
+      "USER_PRIVILEGES" ]
 
 /// `SHOW [FULL] TABLES [FROM db] [LIKE 'pattern']`.
 let showTables (catalog: Catalog) (dbName: string) (full: bool) (likeOpt: string option) : ShowResult =
@@ -726,6 +758,62 @@ let showCollation (likeOpt: string option) : ShowResult =
         [ "Collation"; "Charset"; "Id"; "Default"; "Compiled"; "Sortlen"; "Pad_attribute" ],
         rows
     )
+
+/// `SHOW PRIVILEGES` — MySQL 8.4.11's exact 73 rows (oracle-verified): the
+/// 33 static privileges with their contexts/comments, then the dynamic
+/// privileges (Server Admin, empty comment). Static data — fsdb enforces
+/// only the static set, but clients enumerate this list as-is.
+let showPrivileges () : string list * (string option list) list =
+    let staticRows =
+        [ "Alter", "Tables", "To alter the table"
+          "Alter routine", "Functions,Procedures", "To alter or drop stored functions/procedures"
+          "Create", "Databases,Tables,Indexes", "To create new databases and tables"
+          "Create routine", "Databases", "To use CREATE FUNCTION/PROCEDURE"
+          "Create role", "Server Admin", "To create new roles"
+          "Create temporary tables", "Databases", "To use CREATE TEMPORARY TABLE"
+          "Create view", "Tables", "To create new views"
+          "Create user", "Server Admin", "To create new users"
+          "Delete", "Tables", "To delete existing rows"
+          "Drop", "Databases,Tables", "To drop databases, tables, and views"
+          "Drop role", "Server Admin", "To drop roles"
+          "Event", "Server Admin", "To create, alter, drop and execute events"
+          "Execute", "Functions,Procedures", "To execute stored routines"
+          "File", "File access on server", "To read and write files on the server"
+          "Grant option", "Databases,Tables,Functions,Procedures", "To give to other users those privileges you possess"
+          "Index", "Tables", "To create or drop indexes"
+          "Insert", "Tables", "To insert data into tables"
+          "Lock tables", "Databases", "To use LOCK TABLES (together with SELECT privilege)"
+          "Process", "Server Admin", "To view the plain text of currently executing queries"
+          "Proxy", "Server Admin", "To make proxy user possible"
+          "References", "Databases,Tables", "To have references on tables"
+          "Reload", "Server Admin", "To reload or refresh tables, logs and privileges"
+          "Replication client", "Server Admin", "To ask where the slave or master servers are"
+          "Replication slave", "Server Admin", "To read binary log events from the master"
+          "Select", "Tables", "To retrieve rows from table"
+          "Show databases", "Server Admin", "To see all databases with SHOW DATABASES"
+          "Show view", "Tables", "To see views with SHOW CREATE VIEW"
+          "Shutdown", "Server Admin", "To shut down the server"
+          "Super", "Server Admin", "To use KILL thread, SET GLOBAL, CHANGE REPLICATION SOURCE, etc."
+          "Trigger", "Tables", "To use triggers"
+          "Create tablespace", "Server Admin", "To create/alter/drop tablespaces"
+          "Update", "Tables", "To update existing rows"
+          "Usage", "Server Admin", "No privileges - allow connect only" ]
+
+    let dynamicRows =
+        [ "FIREWALL_EXEMPT"; "AUDIT_ABORT_EXEMPT"; "ALLOW_NONEXISTENT_DEFINER"; "SENSITIVE_VARIABLES_OBSERVER"
+          "AUTHENTICATION_POLICY_ADMIN"; "GROUP_REPLICATION_STREAM"; "FLUSH_PRIVILEGES"; "PASSWORDLESS_USER_ADMIN"
+          "FLUSH_TABLES"; "FLUSH_OPTIMIZER_COSTS"; "OPTIMIZE_LOCAL_TABLE"; "INNODB_REDO_LOG_ENABLE"
+          "APPLICATION_PASSWORD_ADMIN"; "REPLICATION_APPLIER"; "SESSION_VARIABLES_ADMIN"; "TELEMETRY_LOG_ADMIN"
+          "AUDIT_ADMIN"; "TABLE_ENCRYPTION_ADMIN"; "SERVICE_CONNECTION_ADMIN"; "FLUSH_USER_RESOURCES"
+          "REPLICATION_SLAVE_ADMIN"; "CLONE_ADMIN"; "CONNECTION_ADMIN"; "SYSTEM_USER"; "ENCRYPTION_KEY_ADMIN"
+          "RESOURCE_GROUP_ADMIN"; "SHOW_ROUTINE"; "XA_RECOVER_ADMIN"; "SET_ANY_DEFINER"; "ROLE_ADMIN"
+          "PERSIST_RO_VARIABLES_ADMIN"; "BINLOG_ADMIN"; "BINLOG_ENCRYPTION_ADMIN"; "BACKUP_ADMIN"
+          "GROUP_REPLICATION_ADMIN"; "TRANSACTION_GTID_TAG"; "RESOURCE_GROUP_USER"; "SYSTEM_VARIABLES_ADMIN"
+          "FLUSH_STATUS"; "INNODB_REDO_LOG_ARCHIVE" ]
+        |> List.map (fun n -> n, "Server Admin", "")
+
+    [ "Privilege"; "Context"; "Comment" ],
+    staticRows @ dynamicRows |> List.map (fun (p, c, m) -> [ Some p; Some c; Some m ])
 
 /// `SHOW DATABASES [LIKE 'pattern']`.
 let showDatabases (catalog: Catalog) (likeOpt: string option) : string list * (string option list) list =

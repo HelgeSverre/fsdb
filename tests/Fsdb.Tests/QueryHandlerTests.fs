@@ -991,6 +991,108 @@ let tests =
               | Err(3552, msg) -> Expect.stringContains msg "system schema" "names the rejection"
               | other -> failtestf "expected 3552, got %A" other
 
+          testCase "privilege enforcement: db and table grants gate SELECT/INSERT/DDL with 1142/1044/1227"
+          <| fun _ ->
+              let store = Fsdb.Storage.create ()
+              let root = create 1 store
+              let root, _ = handle root "CREATE DATABASE shop"
+              let root, _ = handle root "USE shop"
+              let root, _ = handle root "CREATE TABLE orders (id INT PRIMARY KEY)"
+              let root, _ = handle root "CREATE TABLE secrets (id INT PRIMARY KEY)"
+              let root, _ = handle root "CREATE USER worker"
+              let root, _ = handle root "GRANT SELECT ON shop.orders TO worker"
+
+              let worker = { create 2 store with User = "worker"; Database = Some "shop" }
+
+              match handle worker "SELECT * FROM orders" |> snd with
+              | ResultSet _ -> ()
+              | other -> failtestf "expected the table grant to allow SELECT, got %A" other
+
+              match handle worker "SELECT * FROM secrets" |> snd with
+              | Err(1142, msg) -> Expect.stringContains msg "SELECT command denied to user 'worker'" "1142 shape"
+              | other -> failtestf "expected 1142 on the ungranted table, got %A" other
+
+              match handle worker "INSERT INTO orders VALUES (1)" |> snd with
+              | Err(1142, _) -> ()
+              | other -> failtestf "expected INSERT to be denied, got %A" other
+
+              match handle worker "CREATE DATABASE sneaky" |> snd with
+              | Err(1044, _) -> ()
+              | other -> failtestf "expected CREATE DATABASE to be 1044, got %A" other
+
+              match handle worker "CREATE USER accomplice" |> snd with
+              | Err(1227, _) -> ()
+              | other -> failtestf "expected CREATE USER to be 1227, got %A" other
+
+              match handle worker "GRANT SELECT ON shop.secrets TO worker" |> snd with
+              | Err(1227, _) -> ()
+              | other -> failtestf "expected GRANT without grant option to be 1227, got %A" other
+
+              // A db-level grant covers every table in the db.
+              let root, _ = handle root "GRANT INSERT ON shop.* TO worker"
+
+              match handle worker "INSERT INTO secrets VALUES (2)" |> snd with
+              | Affected 1UL -> ()
+              | other -> failtestf "expected the db-level INSERT grant to work, got %A" other
+
+              // information_schema stays readable for everyone.
+              match handle worker "SELECT COUNT(*) FROM information_schema.TABLES" |> snd with
+              | ResultSet _ -> ()
+              | other -> failtestf "expected information_schema to stay readable, got %A" other
+
+              // REVOKE takes it back.
+              let _root, _ = handle root "REVOKE SELECT ON shop.orders FROM worker"
+
+              match handle worker "SELECT * FROM orders" |> snd with
+              | Err(1142, _) -> ()
+              | other -> failtestf "expected the revoked SELECT to be denied again, got %A" other
+
+          testCase "SHOW GRANTS renders global/db/table lines; USER_PRIVILEGES and SHOW PRIVILEGES enumerate"
+          <| fun _ ->
+              let store = Fsdb.Storage.create ()
+              let root = create 1 store
+
+              match handle root "SHOW GRANTS" |> snd with
+              | ResultSet([ header ], rows) ->
+                  Expect.equal header "Grants for root@%" "header names the account"
+
+                  Expect.equal
+                      (rows |> List.map (List.head >> Option.get))
+                      [ "GRANT ALL PRIVILEGES ON *.* TO `root`@`%` WITH GRANT OPTION" ]
+                      "root's single global line"
+              | other -> failtestf "expected root's grants, got %A" other
+
+              let root, _ = handle root "CREATE USER worker"
+              let root, _ = handle root "GRANT SELECT, UPDATE ON shop.* TO worker"
+              let root, _ = handle root "GRANT DELETE ON shop.orders TO worker"
+
+              match handle root "SHOW GRANTS FOR 'worker'@'%'" |> snd with
+              | ResultSet(_, rows) ->
+                  Expect.equal
+                      (rows |> List.map (List.head >> Option.get))
+                      [ "GRANT USAGE ON *.* TO `worker`@`%`"
+                        "GRANT SELECT, UPDATE ON `shop`.* TO `worker`@`%`"
+                        "GRANT DELETE ON `shop`.`orders` TO `worker`@`%`" ]
+                      "usage + db + table lines in order"
+              | other -> failtestf "expected worker's grants, got %A" other
+
+              match handle root "SHOW GRANTS FOR nobody" |> snd with
+              | Err(1141, _) -> ()
+              | other -> failtestf "expected 1141 for an unknown grantee, got %A" other
+
+              match handle root "SELECT PRIVILEGE_TYPE FROM information_schema.USER_PRIVILEGES WHERE GRANTEE = \"'worker'@'%'\"" |> snd with
+              | ResultSet(_, [ [ Some "USAGE" ] ]) -> ()
+              | other -> failtestf "expected worker's USAGE row in USER_PRIVILEGES, got %A" other
+
+              match handle root "SHOW PRIVILEGES" |> snd with
+              | ResultSet([ "Privilege"; "Context"; "Comment" ], rows) ->
+                  Expect.equal (List.length rows) 73 "MySQL 8.4's 73 privileges"
+              | other -> failtestf "expected the privilege table, got %A" other
+
+              match handle root "FLUSH PRIVILEGES" |> snd with
+              | Affected 0UL -> ()
+              | other -> failtestf "expected FLUSH PRIVILEGES to be an OK no-op, got %A" other
+
           testCase "mysql.user has MySQL 8.4's exact 51-column shape and mysql.db its 22"
           <| fun _ ->
               let store = Fsdb.Storage.create ()

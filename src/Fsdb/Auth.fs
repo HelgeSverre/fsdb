@@ -65,6 +65,59 @@ let userColumnText (cols: ColumnDef list) (row: Value[]) (name: string) : string
 let storedPasswordHash (cols: ColumnDef list) (row: Value[]) : string = userColumnText cols row "authentication_string"
 
 // ---------------------------------------------------------------------------
+// The static privilege vocabulary: SQL name ↔ mysql.user column, plus where
+// (if anywhere) the privilege exists at db level (mysql.db column) and table
+// level (a `tables_priv.Table_priv` SET member). Order matches mysql.user's
+// column order — SHOW GRANTS and USER_PRIVILEGES render in this order, same
+// as MySQL. GRANT OPTION is deliberately absent (it's `Grant_priv`/the
+// `WITH GRANT OPTION` suffix, not a grantable list member); roles/dynamic
+// privileges don't exist here at all.
+// ---------------------------------------------------------------------------
+
+type PrivDef =
+    { Sql: string
+      UserCol: string
+      DbCol: string option
+      TablePriv: string option }
+
+let staticPrivileges: PrivDef list =
+    let p sql userCol dbCol tablePriv = { Sql = sql; UserCol = userCol; DbCol = dbCol; TablePriv = tablePriv }
+
+    [ p "SELECT" "Select_priv" (Some "Select_priv") (Some "Select")
+      p "INSERT" "Insert_priv" (Some "Insert_priv") (Some "Insert")
+      p "UPDATE" "Update_priv" (Some "Update_priv") (Some "Update")
+      p "DELETE" "Delete_priv" (Some "Delete_priv") (Some "Delete")
+      p "CREATE" "Create_priv" (Some "Create_priv") (Some "Create")
+      p "DROP" "Drop_priv" (Some "Drop_priv") (Some "Drop")
+      p "RELOAD" "Reload_priv" None None
+      p "SHUTDOWN" "Shutdown_priv" None None
+      p "PROCESS" "Process_priv" None None
+      p "FILE" "File_priv" None None
+      p "REFERENCES" "References_priv" (Some "References_priv") (Some "References")
+      p "INDEX" "Index_priv" (Some "Index_priv") (Some "Index")
+      p "ALTER" "Alter_priv" (Some "Alter_priv") (Some "Alter")
+      p "SHOW DATABASES" "Show_db_priv" None None
+      p "SUPER" "Super_priv" None None
+      p "CREATE TEMPORARY TABLES" "Create_tmp_table_priv" (Some "Create_tmp_table_priv") None
+      p "LOCK TABLES" "Lock_tables_priv" (Some "Lock_tables_priv") None
+      p "EXECUTE" "Execute_priv" (Some "Execute_priv") None
+      p "REPLICATION SLAVE" "Repl_slave_priv" None None
+      p "REPLICATION CLIENT" "Repl_client_priv" None None
+      p "CREATE VIEW" "Create_view_priv" (Some "Create_view_priv") (Some "Create View")
+      p "SHOW VIEW" "Show_view_priv" (Some "Show_view_priv") (Some "Show view")
+      p "CREATE ROUTINE" "Create_routine_priv" (Some "Create_routine_priv") None
+      p "ALTER ROUTINE" "Alter_routine_priv" (Some "Alter_routine_priv") None
+      p "CREATE USER" "Create_user_priv" None None
+      p "EVENT" "Event_priv" (Some "Event_priv") None
+      p "TRIGGER" "Trigger_priv" (Some "Trigger_priv") (Some "Trigger")
+      p "CREATE TABLESPACE" "Create_tablespace_priv" None None
+      p "CREATE ROLE" "Create_role_priv" None None
+      p "DROP ROLE" "Drop_role_priv" None None ]
+
+let private privBySql (sql: string) : PrivDef option =
+    staticPrivileges |> List.tryFind (fun d -> d.Sql = sql)
+
+// ---------------------------------------------------------------------------
 // Account mutations — all through `Storage`'s ordinary row functions so the
 // WAL/snapshot carry them like any other data change. Accounts are matched
 // by name only (host is stored as written but never matched — see the
@@ -111,6 +164,36 @@ let dropUser (store: Store) (name: string) (host: string) : Result<unit, int * s
         deleteWhere "tables_priv"
         Ok()
 
+/// Rewrites the columns named in `changes` on every mysql.`table` row
+/// matching `matches` — the one shared row-mutation shape grant/revoke/
+/// password changes all reduce to.
+let private updateSystemRows
+    (store: Store)
+    (table: string)
+    (matches: ColumnDef list -> Value[] -> bool)
+    (changes: (string * Value) list)
+    : Result<int, int * string> =
+    match scanList store "mysql" table with
+    | Error e -> Error(toMySqlError e)
+    | Ok(cols, _) ->
+        let indexed =
+            changes |> List.choose (fun (name, v) -> resolveColumn cols name |> Result.toOption |> Option.map (fun i -> i, v))
+
+        match
+            updateRows
+                store
+                "mysql"
+                table
+                None
+                (fun r -> Ok(matches cols r))
+                (fun r ->
+                    let r' = Array.copy r
+                    indexed |> List.iter (fun (i, v) -> r'.[i] <- v)
+                    Ok r')
+        with
+        | Ok n -> Ok n
+        | Error e -> Error(toMySqlError e)
+
 /// `ALTER USER ... IDENTIFIED BY 'pw'` / `SET PASSWORD [FOR user] = 'pw'` —
 /// rewrites the stored hash (empty password clears it back to
 /// accept-anything).
@@ -137,3 +220,432 @@ let setPassword (store: Store) (name: string) (host: string) (password: string) 
             | Ok _ -> Ok()
             | Error e -> Error(toMySqlError e)
         | _ -> operationFailed "ALTER USER" name host
+
+// ---------------------------------------------------------------------------
+// GRANT / REVOKE and privilege checks. Scope hierarchy is MySQL's:
+// global (mysql.user) ⊃ db (mysql.db) ⊃ table (mysql.tables_priv).
+// ponytail: no column-level privileges, no roles, no partial-revoke — the
+// three levels above are what real clients and apps actually exercise.
+// ---------------------------------------------------------------------------
+
+/// Where a privilege applies.
+type PrivTarget =
+    | Global
+    | OnDb of db: string
+    | OnTable of db: string * table: string
+
+let private eqI (a: string) (b: string) = String.Equals(a, b, StringComparison.OrdinalIgnoreCase)
+
+/// Splits a `Table_priv`/`Column_priv` SET string into its members.
+let private setMembers (s: string) : string list =
+    s.Split(',') |> Array.toList |> List.map (fun m -> m.Trim()) |> List.filter (fun m -> m <> "")
+
+/// Expands a GRANT/REVOKE privilege list for a target level: `ALL` becomes
+/// every static privilege that exists at that level, `USAGE` becomes
+/// nothing, and a privilege that doesn't exist at the level is a MySQL
+/// 1221/1144.
+let private expandPrivs (privs: string list) (target: PrivTarget) : Result<PrivDef list, int * string> =
+    let atLevel (d: PrivDef) =
+        match target with
+        | Global -> true
+        | OnDb _ -> d.DbCol.IsSome
+        | OnTable _ -> d.TablePriv.IsSome
+
+    if privs |> List.exists (fun p -> p = "ALL") then
+        Ok(staticPrivileges |> List.filter atLevel)
+    else
+        privs
+        |> List.filter (fun p -> p <> "USAGE")
+        |> traverse (fun p ->
+            match privBySql p with
+            | Some d when atLevel d -> Result.Ok d
+            | Some _ ->
+                match target with
+                | OnTable _ -> Result.Error(1144, "Illegal GRANT/REVOKE command; please consult the manual to see which privileges can be used")
+                | _ -> Result.Error(1221, "Incorrect usage of DB GRANT and GLOBAL PRIVILEGES")
+            | None -> Result.Error(1149, sprintf "Unknown privilege '%s'" p))
+
+/// One user's grant/revoke at one level. `yes` is `'Y'` for GRANT, `'N'`
+/// for REVOKE; table-level edits union/subtract the SET string instead.
+let private applyAtLevel
+    (store: Store)
+    (name: string)
+    (host: string)
+    (defs: PrivDef list)
+    (target: PrivTarget)
+    (withGrantOption: bool)
+    (granting: bool)
+    : Result<unit, int * string> =
+    let yn = if granting then "Y" else "N"
+
+    match target with
+    | Global ->
+        let changes =
+            (defs |> List.map (fun d -> d.UserCol, VString yn))
+            @ (if withGrantOption then [ "Grant_priv", VString yn ] else [])
+
+        let matchUser (cols: ColumnDef list) (r: Value[]) =
+            match resolveColumn cols "User" with
+            | Result.Ok i -> r.[i] = VString name
+            | _ -> false
+
+        updateSystemRows store "user" matchUser changes |> Result.map ignore
+    | OnDb db ->
+        let matches (cols: ColumnDef list) (r: Value[]) =
+            match resolveColumn cols "User", resolveColumn cols "Db" with
+            | Result.Ok u, Result.Ok d -> r.[u] = VString name && (match r.[d] with VString s -> eqI s db | _ -> false)
+            | _ -> false
+
+        let changes =
+            (defs |> List.choose (fun d -> d.DbCol |> Option.map (fun c -> c, VString yn)))
+            @ (if withGrantOption then [ "Grant_priv", VString yn ] else [])
+
+        match updateSystemRows store "db" matches changes with
+        | Result.Error e -> Result.Error e
+        | Result.Ok 0 when granting ->
+            let grantedCols = changes |> List.map fst
+            match
+                insertRows
+                    store
+                    "mysql"
+                    "db"
+                    (Some([ "Host"; "Db"; "User" ] @ grantedCols))
+                    [ [ VString host; VString db; VString name ] @ (grantedCols |> List.map (fun _ -> VString "Y")) ]
+            with
+            | Result.Ok _ -> Result.Ok()
+            | Result.Error e -> Result.Error(toMySqlError e)
+        | Result.Ok 0 -> Result.Error(1141, sprintf "There is no such grant defined for user '%s' on host '%s'" name host)
+        | Result.Ok _ -> Result.Ok()
+    | OnTable(db, table) ->
+        let wanted =
+            (defs |> List.choose (fun d -> d.TablePriv))
+            @ (if withGrantOption then [ "Grant" ] else [])
+
+        match scanList store "mysql" "tables_priv" with
+        | Result.Error e -> Result.Error(toMySqlError e)
+        | Result.Ok(cols, rows) ->
+            let idx n = resolveColumn cols n |> Result.toOption
+            match idx "User", idx "Db", idx "Table_name", idx "Table_priv" with
+            | Some u, Some d, Some t, Some tp ->
+                let matchesRow (r: Value[]) =
+                    r.[u] = VString name
+                    && (match r.[d] with VString s -> eqI s db | _ -> false)
+                    && (match r.[t] with VString s -> eqI s table | _ -> false)
+
+                let existing = rows |> List.tryFind matchesRow
+
+                let currentSet =
+                    existing
+                    |> Option.map (fun r -> match r.[tp] with VString s -> setMembers s | _ -> [])
+                    |> Option.defaultValue []
+
+                let newSet =
+                    if granting then
+                        currentSet @ (wanted |> List.filter (fun w -> not (currentSet |> List.exists (eqI w))))
+                    else
+                        currentSet |> List.filter (fun c -> not (wanted |> List.exists (eqI c)))
+
+                match existing with
+                | Some _ ->
+                    updateSystemRows
+                        store
+                        "tables_priv"
+                        (fun _ r -> matchesRow r)
+                        [ "Table_priv", VString(String.concat "," newSet) ]
+                    |> Result.map ignore
+                | None when granting ->
+                    match
+                        insertRows
+                            store
+                            "mysql"
+                            "tables_priv"
+                            (Some [ "Host"; "Db"; "User"; "Table_name"; "Grantor"; "Table_priv" ])
+                            [ [ VString host
+                                VString db
+                                VString name
+                                VString table
+                                VString "root@%"
+                                VString(String.concat "," newSet) ] ]
+                    with
+                    | Result.Ok _ -> Result.Ok()
+                    | Result.Error e -> Result.Error(toMySqlError e)
+                | None -> Result.Error(1141, sprintf "There is no such grant defined for user '%s' on host '%s'" name host)
+            | _ -> Result.Error(1146, "Table 'tables_priv' doesn't exist")
+
+/// `GRANT privs ON target TO users [WITH GRANT OPTION]`. MySQL 8 no longer
+/// auto-creates unknown grantees — that's 1410.
+let grant
+    (store: Store)
+    (privs: string list)
+    (target: PrivTarget)
+    (users: (string * string) list)
+    (withGrantOption: bool)
+    : Result<unit, int * string> =
+    expandPrivs privs target
+    |> Result.bind (fun defs ->
+        users
+        |> traverse (fun (name, host) ->
+            if (tryUserRow store name).IsNone then
+                Result.Error(1410, "You are not allowed to create a user with GRANT")
+            else
+                applyAtLevel store name host defs target withGrantOption true)
+        |> Result.map ignore)
+
+/// `REVOKE privs ON target FROM users`.
+let revoke (store: Store) (privs: string list) (target: PrivTarget) (users: (string * string) list) : Result<unit, int * string> =
+    let revokesGrantOption = privs |> List.exists (fun p -> p = "GRANT OPTION" || p = "ALL")
+
+    expandPrivs (privs |> List.filter (fun p -> p <> "GRANT OPTION")) target
+    |> Result.bind (fun defs ->
+        users
+        |> traverse (fun (name, host) ->
+            if (tryUserRow store name).IsNone then
+                Result.Error(1141, sprintf "There is no such grant defined for user '%s' on host '%s'" name host)
+            else
+                applyAtLevel store name host defs target revokesGrantOption false)
+        |> Result.map ignore)
+
+// ---------------------------------------------------------------------------
+// Enforcement: the privileges a parsed statement needs, and whether a user
+// has them. ponytail: per-check linear scans of the tiny grant tables via
+// the lock-free catalog snapshot — cache the lookups if profiling ever says
+// a real workload notices.
+// ---------------------------------------------------------------------------
+
+let private tableRefsOfFrom (defaultDb: string) (from: FromItem option) (joins: Join list) : (string * string) list =
+    let ofItem =
+        function
+        | FromTable(r: TableRef) -> [ (defaultArg r.Database defaultDb), r.Table ]
+        | FromSubquery _ -> [] // ponytail: derived tables unchecked
+
+    (from |> Option.map ofItem |> Option.defaultValue [])
+    @ (joins |> List.collect (fun j -> ofItem j.Table))
+
+let private selectTables (defaultDb: string) (s: SelectStmt) : (string * string) list =
+    tableRefsOfFrom defaultDb s.From s.Joins
+
+/// The `(privilege, target)` pairs `stmt` needs. Top-level table references
+/// only — subqueries inside expressions and SHOW/SET probes are unchecked
+/// (ponytail: enforce them when a real client depends on it).
+let rec requiredPrivileges (defaultDb: string) (stmt: Statement) : (string * PrivTarget) list =
+    let onTables priv tables = tables |> List.map (fun (db, t) -> priv, OnTable(db, t))
+    let split (name: string) = splitQualified defaultDb name
+
+    match stmt with
+    | Select s -> onTables "SELECT" (selectTables defaultDb s)
+    | Union(first, rest, _, _, _) ->
+        onTables "SELECT" (selectTables defaultDb first @ (rest |> List.collect (snd >> selectTables defaultDb)))
+    | Insert(table, _, _, _, _) -> onTables "INSERT" [ split table ]
+    | InsertSelect(table, _, select, _) ->
+        onTables "INSERT" [ split table ] @ onTables "SELECT" (selectTables defaultDb select)
+    | Update u -> onTables "UPDATE" (tableRefsOfFrom defaultDb (Some(FromTable u.From)) u.Joins)
+    | Delete d -> onTables "DELETE" (tableRefsOfFrom defaultDb (Some(FromTable d.From)) d.Joins)
+    | CreateTable(name, _, _, _, _, _, _) -> onTables "CREATE" [ split name ]
+    | DropTable(names, _) -> onTables "DROP" (names |> List.map split)
+    | Truncate table -> onTables "DROP" [ split table ]
+    | AlterTable(table, _) -> onTables "ALTER" [ split table ]
+    | RenameTable pairs -> onTables "ALTER" (pairs |> List.map (fst >> split))
+    | CreateIndex(_, table, _, _) -> onTables "INDEX" [ split table ]
+    | DropIndexStmt(_, table, _) -> onTables "INDEX" [ split table ]
+    | CreateDatabase(name, _) -> [ "CREATE", OnDb name ]
+    | DropDatabase(name, _) -> [ "DROP", OnDb name ]
+    | AlterDatabase name -> [ "ALTER", OnDb name ]
+    | CreateUser _
+    | DropUser _
+    | AlterUser _ -> [ "CREATE USER", Global ]
+    | Grant _
+    | Revoke _ -> [ "GRANT OPTION", Global ]
+    | Explain inner -> requiredPrivileges defaultDb inner
+
+/// Checks `user` against every required privilege, denying with MySQL's
+/// 1142 (table), 1044 (database), or 1227 (admin privilege) shape.
+let check (store: Store) (user: string) (required: (string * PrivTarget) list) : Result<unit, int * string> =
+    match required with
+    | [] -> Ok()
+    | _ ->
+        let userRow = tryUserRow store user
+
+        let hasGlobal (def: PrivDef) =
+            match userRow with
+            | Some(cols, row) -> userColumnText cols row def.UserCol = "Y"
+            | None -> false
+
+        let dbRowGrants =
+            lazy
+                (match scanList store "mysql" "db" with
+                 | Result.Ok(cols, rows) -> Some(cols, rows)
+                 | Result.Error _ -> None)
+
+        let tablePrivGrants =
+            lazy
+                (match scanList store "mysql" "tables_priv" with
+                 | Result.Ok(cols, rows) -> Some(cols, rows)
+                 | Result.Error _ -> None)
+
+        let hasDb (def: PrivDef) (db: string) =
+            match def.DbCol, dbRowGrants.Value with
+            | Some dbCol, Some(cols, rows) ->
+                let idx n = resolveColumn cols n |> Result.toOption
+
+                match idx "User", idx "Db", idx dbCol with
+                | Some u, Some d, Some c ->
+                    rows
+                    |> List.exists (fun r ->
+                        r.[u] = VString user
+                        && (match r.[d] with
+                            | VString s -> eqI s db
+                            | _ -> false)
+                        && r.[c] = VString "Y")
+                | _ -> false
+            | _ -> false
+
+        let hasTable (def: PrivDef) (db: string) (table: string) =
+            match def.TablePriv, tablePrivGrants.Value with
+            | Some setName, Some(cols, rows) ->
+                let idx n = resolveColumn cols n |> Result.toOption
+
+                match idx "User", idx "Db", idx "Table_name", idx "Table_priv" with
+                | Some u, Some d, Some t, Some tp ->
+                    rows
+                    |> List.exists (fun r ->
+                        r.[u] = VString user
+                        && (match r.[d] with
+                            | VString s -> eqI s db
+                            | _ -> false)
+                        && (match r.[t] with
+                            | VString s -> eqI s table
+                            | _ -> false)
+                        && (match r.[tp] with
+                            | VString s -> setMembers s |> List.exists (eqI setName)
+                            | _ -> false))
+                | _ -> false
+            | _ -> false
+
+        let hasGrantOption () =
+            match userRow with
+            | Some(cols, row) -> userColumnText cols row "Grant_priv" = "Y"
+            | None -> false
+
+        let checkOne (privSql: string, target: PrivTarget) : Result<unit, int * string> =
+            if privSql = "GRANT OPTION" then
+                // GRANT/REVOKE themselves — global Grant_priv only
+                // (ponytail: real MySQL also accepts db/table-scoped grant
+                // option; add when someone actually delegates grants).
+                if hasGrantOption () then
+                    Ok()
+                else
+                    Error(1227, "Access denied; you need (at least one of) the GRANT OPTION privilege(s) for this operation")
+            else
+
+            match privBySql privSql with
+            | None -> Ok() // unknown requirement — never deny on our own bug
+            | Some def ->
+                let allowed =
+                    hasGlobal def
+                    || (match target with
+                        | Global -> false
+                        | OnDb db
+                        | OnTable(db, _) when eqI db "information_schema" -> true
+                        | OnDb db -> hasDb def db
+                        | OnTable(db, table) -> hasDb def db || hasTable def db table)
+
+                if allowed then
+                    Ok()
+                else
+                    match target with
+                    | Global ->
+                        Error(
+                            1227,
+                            sprintf "Access denied; you need (at least one of) the %s privilege(s) for this operation" privSql
+                        )
+                    | OnDb db -> Error(1044, sprintf "Access denied for user '%s'@'localhost' to database '%s'" user db)
+                    | OnTable(_, table) ->
+                        Error(1142, sprintf "%s command denied to user '%s'@'localhost' for table '%s'" privSql user table)
+
+        required |> traverse checkOne |> Result.map ignore
+
+// ---------------------------------------------------------------------------
+// SHOW GRANTS rendering.
+// ---------------------------------------------------------------------------
+
+/// A privilege list rendered MySQL-style: every static privilege → `ALL
+/// PRIVILEGES`, none → `USAGE`, otherwise the names in column order.
+let private renderPrivList (granted: PrivDef list) (all: PrivDef list) : string =
+    if List.length granted = List.length all then "ALL PRIVILEGES"
+    elif granted.IsEmpty then "USAGE"
+    else granted |> List.map (fun d -> d.Sql) |> String.concat ", "
+
+/// The `SHOW GRANTS FOR 'name'@'host'` rows: the global line from the
+/// mysql.user row, one line per mysql.db row, one per tables_priv row —
+/// 1141 when the account doesn't exist. ponytail: no dynamic-privilege or
+/// PROXY lines (real root shows both; nothing here models either).
+let renderGrants (store: Store) (name: string) : Result<string * string list, int * string> =
+    match tryUserRow store name with
+    | None -> Error(1141, sprintf "There is no such grant defined for user '%s' on host '%%'" name)
+    | Some(cols, row) ->
+        let host = userColumnText cols row "Host"
+        let quoted = sprintf "`%s`@`%s`" name host
+
+        let withOption (grantCol: string) (getCols: ColumnDef list) (r: Value[]) =
+            if userColumnText getCols r grantCol = "Y" then " WITH GRANT OPTION" else ""
+
+        let globalGranted =
+            staticPrivileges |> List.filter (fun d -> userColumnText cols row d.UserCol = "Y")
+
+        let globalLine =
+            sprintf
+                "GRANT %s ON *.* TO %s%s"
+                (renderPrivList globalGranted staticPrivileges)
+                quoted
+                (withOption "Grant_priv" cols row)
+
+        let dbLines =
+            match scanList store "mysql" "db" with
+            | Result.Error _ -> []
+            | Result.Ok(dbCols, rows) ->
+                let dbLevel = staticPrivileges |> List.filter (fun d -> d.DbCol.IsSome)
+
+                rows
+                |> List.filter (fun r -> userColumnText dbCols r "User" = name)
+                |> List.map (fun r ->
+                    let granted = dbLevel |> List.filter (fun d -> userColumnText dbCols r d.DbCol.Value = "Y")
+
+                    sprintf
+                        "GRANT %s ON `%s`.* TO %s%s"
+                        (renderPrivList granted dbLevel)
+                        (userColumnText dbCols r "Db")
+                        quoted
+                        (withOption "Grant_priv" dbCols r))
+
+        let tableLines =
+            match scanList store "mysql" "tables_priv" with
+            | Result.Error _ -> []
+            | Result.Ok(tCols, rows) ->
+                rows
+                |> List.filter (fun r -> userColumnText tCols r "User" = name)
+                |> List.map (fun r ->
+                    let members = setMembers (userColumnText tCols r "Table_priv")
+                    let hasOption = members |> List.exists (eqI "Grant")
+
+                    let granted =
+                        staticPrivileges
+                        |> List.filter (fun d ->
+                            match d.TablePriv with
+                            | Some tp -> members |> List.exists (eqI tp)
+                            | None -> false)
+
+                    let privText =
+                        if granted.IsEmpty then
+                            "USAGE"
+                        else
+                            granted |> List.map (fun d -> d.Sql) |> String.concat ", "
+
+                    sprintf
+                        "GRANT %s ON `%s`.`%s` TO %s%s"
+                        privText
+                        (userColumnText tCols r "Db")
+                        (userColumnText tCols r "Table_name")
+                        quoted
+                        (if hasOption then " WITH GRANT OPTION" else ""))
+
+        Ok(sprintf "Grants for %s@%s" name host, globalLine :: dbLines @ tableLines)

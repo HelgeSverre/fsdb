@@ -463,6 +463,16 @@ type Statement =
     /// `ALTER USER [IF EXISTS] 'name'@'host' IDENTIFIED BY 'pw'` — the one
     /// supported alteration (password change).
     | AlterUser of name: string * host: string * password: string * ifExists: bool
+    /// `GRANT privs ON level TO users [WITH GRANT OPTION]` — `privs` are the
+    /// SQL privilege names (`"ALL"` for ALL PRIVILEGES, `"USAGE"` grants
+    /// nothing); `level` is `(db, table)`: `(None, None)` = `*.*`,
+    /// `(Some db, None)` = `db.*`, `(Some db, Some t)` = `db.t`, and
+    /// `(None, Some t)` = bare `t`, resolved against the session database at
+    /// execution time.
+    | Grant of privs: string list * level: (string option * string option) * users: (string * string) list * withGrantOption: bool
+    /// `REVOKE privs ON level FROM users` — same shapes as `Grant`;
+    /// `"GRANT OPTION"` may appear in `privs`.
+    | Revoke of privs: string list * level: (string option * string option) * users: (string * string) list
     /// `EXPLAIN [FORMAT=TRADITIONAL] stmt` — MySQL's classic tabular
     /// `EXPLAIN` accepts `SELECT`/`UPDATE`/`DELETE`/`INSERT`, all handled by
     /// describing what `Executor` would actually do rather than running it.

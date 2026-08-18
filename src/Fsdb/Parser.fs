@@ -1750,6 +1750,77 @@ let private alterUserStmt: Parser<Statement, unit> =
      .>>. identifiedBy)
     |>> fun ((ifExists, (name, host)), pw) -> AlterUser(name, host, pw, ifExists)
 
+// ---------------------------------------------------------------------------
+// GRANT / REVOKE
+// ---------------------------------------------------------------------------
+
+/// One privilege name — multi-word forms tried longest-first so `CREATE
+/// TEMPORARY TABLES` never half-matches as `CREATE`. Normalized to the
+/// canonical uppercase spelling `Auth.staticPrivileges` uses.
+let private privilegeName: Parser<string, unit> =
+    let kw2 a b result = attempt (keyword a >>. keyword b >>% result)
+    let kw3 a b c result = attempt (keyword a >>. keyword b >>. keyword c >>% result)
+
+    choice
+        [ attempt (keyword "ALL" >>. optional (keyword "PRIVILEGES") >>% "ALL")
+          kw2 "GRANT" "OPTION" "GRANT OPTION"
+          kw3 "CREATE" "TEMPORARY" "TABLES" "CREATE TEMPORARY TABLES"
+          kw2 "CREATE" "VIEW" "CREATE VIEW"
+          kw2 "CREATE" "ROUTINE" "CREATE ROUTINE"
+          kw2 "CREATE" "USER" "CREATE USER"
+          kw2 "CREATE" "ROLE" "CREATE ROLE"
+          kw2 "CREATE" "TABLESPACE" "CREATE TABLESPACE"
+          keyword "CREATE" >>% "CREATE"
+          kw2 "ALTER" "ROUTINE" "ALTER ROUTINE"
+          keyword "ALTER" >>% "ALTER"
+          kw2 "SHOW" "DATABASES" "SHOW DATABASES"
+          kw2 "SHOW" "VIEW" "SHOW VIEW"
+          kw2 "DROP" "ROLE" "DROP ROLE"
+          keyword "DROP" >>% "DROP"
+          kw2 "LOCK" "TABLES" "LOCK TABLES"
+          kw2 "REPLICATION" "SLAVE" "REPLICATION SLAVE"
+          kw2 "REPLICATION" "CLIENT" "REPLICATION CLIENT"
+          keyword "SELECT" >>% "SELECT"
+          keyword "INSERT" >>% "INSERT"
+          keyword "UPDATE" >>% "UPDATE"
+          keyword "DELETE" >>% "DELETE"
+          keyword "RELOAD" >>% "RELOAD"
+          keyword "SHUTDOWN" >>% "SHUTDOWN"
+          keyword "PROCESS" >>% "PROCESS"
+          keyword "FILE" >>% "FILE"
+          keyword "REFERENCES" >>% "REFERENCES"
+          keyword "INDEX" >>% "INDEX"
+          keyword "SUPER" >>% "SUPER"
+          keyword "EXECUTE" >>% "EXECUTE"
+          keyword "EVENT" >>% "EVENT"
+          keyword "TRIGGER" >>% "TRIGGER"
+          keyword "USAGE" >>% "USAGE" ]
+
+/// `ON *.* | db.* | db.tbl | tbl` — see `Ast.Grant`'s doc for the encoding.
+let private grantLevel: Parser<string option * string option, unit> =
+    choice
+        [ attempt (sym "*" >>. sym "." >>. sym "*") >>% (None, None)
+          attempt (identOrString .>> sym "." .>> sym "*") |>> fun db -> Some db, None
+          attempt (identOrString .>> sym "." .>>. identOrString) |>> fun (db, t) -> Some db, Some t
+          identOrString |>> fun t -> None, Some t ]
+
+let private grantStmt: Parser<Statement, unit> =
+    (keyword "GRANT" >>. sepBy1 privilegeName (sym ",")
+     .>> keyword "ON"
+     .>>. grantLevel
+     .>> keyword "TO"
+     .>>. sepBy1 userRef (sym ",")
+     .>>. (opt (keyword "WITH" >>. keyword "GRANT" >>. keyword "OPTION") |>> Option.isSome))
+    |>> fun (((privs, level), users), wgo) -> Grant(privs, level, users, wgo)
+
+let private revokeStmt: Parser<Statement, unit> =
+    (keyword "REVOKE" >>. sepBy1 privilegeName (sym ",")
+     .>> keyword "ON"
+     .>>. grantLevel
+     .>> keyword "FROM"
+     .>>. sepBy1 userRef (sym ","))
+    |>> fun ((privs, level), users) -> Revoke(privs, level, users)
+
 /// `CREATE TABLE` vs. `CREATE INDEX` and `DROP TABLE` vs. `DROP INDEX` share
 /// a leading keyword before diverging, so those four need `attempt` to
 /// backtrack cleanly between alternatives; every other statement starts on
@@ -1774,6 +1845,8 @@ statementRef.Value <-
           attempt alterTableStmt
           alterDatabaseStmt
           renameTableStmt
+          grantStmt
+          revokeStmt
           explainStmt ]
     <?> "statement"
 

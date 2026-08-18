@@ -1774,6 +1774,35 @@ let tests =
                         (CreateUser([ "a", "localhost", None; "b", "%", Some "pw" ], false))
                         "per-account password in a list"
 
+                testCase "GRANT parses privilege lists, all four ON levels, and WITH GRANT OPTION"
+                <| fun _ ->
+                    Expect.equal
+                        (parseOk "GRANT SELECT, INSERT ON shop.* TO 'bob'@'%'")
+                        (Grant([ "SELECT"; "INSERT" ], (Some "shop", None), [ "bob", "%" ], false))
+                        "db level"
+
+                    Expect.equal
+                        (parseOk "GRANT ALL PRIVILEGES ON *.* TO bob WITH GRANT OPTION")
+                        (Grant([ "ALL" ], (None, None), [ "bob", "%" ], true))
+                        "global with grant option"
+
+                    Expect.equal
+                        (parseOk "GRANT CREATE TEMPORARY TABLES, SHOW DATABASES ON *.* TO bob")
+                        (Grant([ "CREATE TEMPORARY TABLES"; "SHOW DATABASES" ], (None, None), [ "bob", "%" ], false))
+                        "multi-word privilege names"
+
+                    Expect.equal
+                        (parseOk "GRANT SELECT ON shop.orders TO bob")
+                        (Grant([ "SELECT" ], (Some "shop", Some "orders"), [ "bob", "%" ], false))
+                        "table level"
+
+                testCase "REVOKE parses, including GRANT OPTION in the list"
+                <| fun _ ->
+                    Expect.equal
+                        (parseOk "REVOKE SELECT, GRANT OPTION ON shop.* FROM 'bob'@'%'")
+                        (Revoke([ "SELECT"; "GRANT OPTION" ], (Some "shop", None), [ "bob", "%" ]))
+                        "revoke with grant option"
+
                 testCase "DROP USER and ALTER USER ... IDENTIFIED BY parse"
                 <| fun _ ->
                     Expect.equal
