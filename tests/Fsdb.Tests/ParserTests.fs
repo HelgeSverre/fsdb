@@ -1753,4 +1753,35 @@ let tests =
 
                     match parse (sprintf "SELECT %s" deep) with
                     | Error _ -> ()
-                    | Ok stmt -> failtestf "expected a depth-limit error, got %A" stmt ] ]
+                    | Ok stmt -> failtestf "expected a depth-limit error, got %A" stmt ]
+
+          testList
+              "user statements"
+              [ testCase "CREATE USER parses quoted user@host, IDENTIFIED BY, IF NOT EXISTS, and multiple accounts"
+                <| fun _ ->
+                    Expect.equal
+                        (parseOk "CREATE USER 'bob'@'%' IDENTIFIED BY 's3cret'")
+                        (CreateUser([ "bob", "%", Some "s3cret" ], false))
+                        "quoted with password"
+
+                    Expect.equal
+                        (parseOk "CREATE USER IF NOT EXISTS bob")
+                        (CreateUser([ "bob", "%", None ], true))
+                        "bare name defaults host to %"
+
+                    Expect.equal
+                        (parseOk "CREATE USER 'a'@'localhost', 'b'@'%' IDENTIFIED BY 'pw'")
+                        (CreateUser([ "a", "localhost", None; "b", "%", Some "pw" ], false))
+                        "per-account password in a list"
+
+                testCase "DROP USER and ALTER USER ... IDENTIFIED BY parse"
+                <| fun _ ->
+                    Expect.equal
+                        (parseOk "DROP USER IF EXISTS 'bob'@'%', carol")
+                        (DropUser([ "bob", "%"; "carol", "%" ], true))
+                        "drop list"
+
+                    Expect.equal
+                        (parseOk "ALTER USER 'bob'@'%' IDENTIFIED BY 'newpw'")
+                        (AlterUser("bob", "%", "newpw", false))
+                        "alter password" ] ]

@@ -1718,6 +1718,38 @@ let private explainStmt: Parser<Statement, unit> =
     >>. statement
     |>> Explain
 
+// ---------------------------------------------------------------------------
+// CREATE USER / DROP USER / ALTER USER — account DDL over `mysql.user`.
+// ---------------------------------------------------------------------------
+
+/// `'name'[@'host']` — name and host each an identifier or quoted string
+/// (`'bob'@'%'`, `bob@localhost`, bare `bob`); host defaults to `'%'`.
+let private userRef: Parser<string * string, unit> =
+    identOrString .>>. (opt (sym "@" >>. identOrString) |>> Option.defaultValue "%")
+
+let private identifiedBy: Parser<string, unit> =
+    keyword "IDENTIFIED" >>. keyword "BY"
+    >>. (stringLit |>> (function VString s -> s | _ -> ""))
+
+let private createUserStmt: Parser<Statement, unit> =
+    (keyword "CREATE" >>. keyword "USER"
+     >>. (opt (attempt (keyword "IF" >>. keyword "NOT" >>. keyword "EXISTS")) |>> Option.isSome)
+     .>>. sepBy1 (userRef .>>. opt identifiedBy) (sym ","))
+    |>> fun (ifNotExists, users) -> CreateUser(users |> List.map (fun ((n, h), pw) -> n, h, pw), ifNotExists)
+
+let private dropUserStmt: Parser<Statement, unit> =
+    (keyword "DROP" >>. keyword "USER"
+     >>. (opt (attempt (keyword "IF" >>. keyword "EXISTS")) |>> Option.isSome)
+     .>>. sepBy1 userRef (sym ","))
+    |>> fun (ifExists, users) -> DropUser(users, ifExists)
+
+let private alterUserStmt: Parser<Statement, unit> =
+    (keyword "ALTER" >>. keyword "USER"
+     >>. (opt (attempt (keyword "IF" >>. keyword "EXISTS")) |>> Option.isSome)
+     .>>. userRef
+     .>>. identifiedBy)
+    |>> fun ((ifExists, (name, host)), pw) -> AlterUser(name, host, pw, ifExists)
+
 /// `CREATE TABLE` vs. `CREATE INDEX` and `DROP TABLE` vs. `DROP INDEX` share
 /// a leading keyword before diverging, so those four need `attempt` to
 /// backtrack cleanly between alternatives; every other statement starts on
@@ -1725,9 +1757,11 @@ let private explainStmt: Parser<Statement, unit> =
 /// just that first token without needing to backtrack at all.
 statementRef.Value <-
     choice
-        [ attempt createDatabaseStmt
+        [ attempt createUserStmt
+          attempt createDatabaseStmt
           attempt createTable
           attempt createIndexStmt
+          attempt dropUserStmt
           attempt dropDatabaseStmt
           attempt dropTable
           dropIndexStmt
@@ -1736,6 +1770,7 @@ statementRef.Value <-
           selectOrUnionStmt
           updateStmt
           deleteStmt
+          attempt alterUserStmt
           attempt alterTableStmt
           alterDatabaseStmt
           renameTableStmt

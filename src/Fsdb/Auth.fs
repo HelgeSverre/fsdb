@@ -63,3 +63,77 @@ let userColumnText (cols: ColumnDef list) (row: Value[]) (name: string) : string
 /// The stored password hash for a user row — `""` means "no password set,
 /// accept anything".
 let storedPasswordHash (cols: ColumnDef list) (row: Value[]) : string = userColumnText cols row "authentication_string"
+
+// ---------------------------------------------------------------------------
+// Account mutations — all through `Storage`'s ordinary row functions so the
+// WAL/snapshot carry them like any other data change. Accounts are matched
+// by name only (host is stored as written but never matched — see the
+// module doc); every error shape matches MySQL's 1396.
+// ---------------------------------------------------------------------------
+
+let private operationFailed (op: string) (name: string) (host: string) =
+    Error(1396, sprintf "Operation %s failed for '%s'@'%s'" op name host)
+
+/// `CREATE USER 'name'@'host' [IDENTIFIED BY 'pw']` — one account.
+let createUser (store: Store) (name: string) (host: string) (password: string option) : Result<unit, int * string> =
+    if (tryUserRow store name).IsSome then
+        operationFailed "CREATE USER" name host
+    else
+        let hash = password |> Option.map nativePasswordHash |> Option.defaultValue ""
+
+        match
+            insertRows
+                store
+                "mysql"
+                "user"
+                (Some [ "Host"; "User"; "plugin"; "authentication_string" ])
+                [ [ VString host; VString name; VString "mysql_native_password"; VString hash ] ]
+        with
+        | Ok _ -> Ok()
+        | Error e -> Error(toMySqlError e)
+
+/// `DROP USER 'name'@'host'` — removes the account and any of its rows in
+/// the other grant tables.
+let dropUser (store: Store) (name: string) (host: string) : Result<unit, int * string> =
+    let deleteWhere (table: string) =
+        match scanList store "mysql" table with
+        | Error _ -> ()
+        | Ok(cols, _) ->
+            match resolveColumn cols "User" with
+            | Error _ -> ()
+            | Ok userIdx -> deleteRows store "mysql" table (fun r -> Ok(r.[userIdx] = VString name)) |> ignore
+
+    if (tryUserRow store name).IsNone then
+        operationFailed "DROP USER" name host
+    else
+        deleteWhere "user"
+        deleteWhere "db"
+        deleteWhere "tables_priv"
+        Ok()
+
+/// `ALTER USER ... IDENTIFIED BY 'pw'` / `SET PASSWORD [FOR user] = 'pw'` —
+/// rewrites the stored hash (empty password clears it back to
+/// accept-anything).
+let setPassword (store: Store) (name: string) (host: string) (password: string) : Result<unit, int * string> =
+    match tryUserRow store name with
+    | None -> operationFailed "ALTER USER" name host
+    | Some(cols, _) ->
+        match resolveColumn cols "User", resolveColumn cols "authentication_string" with
+        | Ok userIdx, Ok authIdx ->
+            let hash = if password = "" then "" else nativePasswordHash password
+
+            match
+                updateRows
+                    store
+                    "mysql"
+                    "user"
+                    None
+                    (fun r -> Ok(r.[userIdx] = VString name))
+                    (fun r ->
+                        let r' = Array.copy r
+                        r'.[authIdx] <- VString hash
+                        Ok r')
+            with
+            | Ok _ -> Ok()
+            | Error e -> Error(toMySqlError e)
+        | _ -> operationFailed "ALTER USER" name host

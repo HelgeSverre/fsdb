@@ -917,6 +917,80 @@ let tests =
               | ResultSet(_, [ [ Some "1" ] ]) -> ()
               | other -> failtestf "expected the isSuperUser probe to succeed, got %A" other
 
+          testCase "CREATE USER / DROP USER manage mysql.user rows with MySQL's 1396 duplicate/missing semantics"
+          <| fun _ ->
+              let store = Fsdb.Storage.create ()
+              let session = create 1 store
+
+              match handle session "CREATE USER 'bob'@'%' IDENTIFIED BY 's3cret'" |> snd with
+              | Affected 0UL -> ()
+              | other -> failtestf "expected CREATE USER to succeed, got %A" other
+
+              match Fsdb.Auth.tryUserRow store "bob" with
+              | Some(cols, row) ->
+                  Expect.equal
+                      (Fsdb.Auth.storedPasswordHash cols row)
+                      (Fsdb.Auth.nativePasswordHash "s3cret")
+                      "hash landed in authentication_string"
+              | None -> failtest "expected bob to exist"
+
+              match handle session "CREATE USER bob" |> snd with
+              | Err(1396, msg) -> Expect.stringContains msg "CREATE USER failed" "duplicate is 1396"
+              | other -> failtestf "expected 1396, got %A" other
+
+              match handle session "CREATE USER IF NOT EXISTS bob" |> snd with
+              | Affected 0UL -> ()
+              | other -> failtestf "expected IF NOT EXISTS to be a no-op, got %A" other
+
+              match handle session "DROP USER bob" |> snd with
+              | Affected 0UL -> Expect.isNone (Fsdb.Auth.tryUserRow store "bob") "bob gone"
+              | other -> failtestf "expected DROP USER to succeed, got %A" other
+
+              match handle session "DROP USER bob" |> snd with
+              | Err(1396, _) -> ()
+              | other -> failtestf "expected dropping a missing user to be 1396, got %A" other
+
+          testCase "ALTER USER and SET PASSWORD rewrite the stored hash; SET PASSWORD defaults to the session user"
+          <| fun _ ->
+              let store = Fsdb.Storage.create ()
+              let session = create 1 store
+              let session, _ = handle session "CREATE USER carol"
+
+              match handle session "ALTER USER 'carol'@'%' IDENTIFIED BY 'first'" |> snd with
+              | Affected 0UL -> ()
+              | other -> failtestf "expected ALTER USER to succeed, got %A" other
+
+              match handle session "SET PASSWORD FOR 'carol'@'%' = 'second'" |> snd with
+              | Affected 0UL ->
+                  match Fsdb.Auth.tryUserRow store "carol" with
+                  | Some(cols, row) ->
+                      Expect.equal
+                          (Fsdb.Auth.storedPasswordHash cols row)
+                          (Fsdb.Auth.nativePasswordHash "second")
+                          "SET PASSWORD FOR overwrote ALTER USER's hash"
+                  | None -> failtest "carol vanished"
+              | other -> failtestf "expected SET PASSWORD FOR to succeed, got %A" other
+
+              // No FOR clause: applies to the session's own user (root).
+              match handle session "SET PASSWORD = 'rootpw'" |> snd with
+              | Affected 0UL ->
+                  match Fsdb.Auth.tryUserRow store "root" with
+                  | Some(cols, row) ->
+                      Expect.equal
+                          (Fsdb.Auth.storedPasswordHash cols row)
+                          (Fsdb.Auth.nativePasswordHash "rootpw")
+                          "session user's hash set"
+                  | None -> failtest "root vanished"
+              | other -> failtestf "expected SET PASSWORD to succeed, got %A" other
+
+          testCase "DROP DATABASE mysql is rejected with 3552 like a real system schema"
+          <| fun _ ->
+              let session = create 1 (Fsdb.Storage.create ())
+
+              match handle session "DROP DATABASE mysql" |> snd with
+              | Err(3552, msg) -> Expect.stringContains msg "system schema" "names the rejection"
+              | other -> failtestf "expected 3552, got %A" other
+
           testCase "mysql.user has MySQL 8.4's exact 51-column shape and mysql.db its 22"
           <| fun _ ->
               let store = Fsdb.Storage.create ()

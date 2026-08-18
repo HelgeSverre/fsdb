@@ -187,7 +187,22 @@ let tests =
                       // torture harness's root/torture-secret working).
                       use conn2 = new MySqlConnector.MySqlConnection(connStr "root" "anything")
                       do! conn2.OpenAsync() |> Async.AwaitTask
+
+                      // Account created over the wire is immediately usable.
+                      use create = conn2.CreateCommand()
+                      create.CommandText <- "CREATE USER 'carol'@'%' IDENTIFIED BY 'cpw'"
+                      let! _ = create.ExecuteNonQueryAsync() |> Async.AwaitTask
                       do! conn2.CloseAsync() |> Async.AwaitTask
+
+                      use conn3 = new MySqlConnector.MySqlConnection(connStr "carol" "cpw")
+                      do! conn3.OpenAsync() |> Async.AwaitTask
+                      use whoami = conn3.CreateCommand()
+                      whoami.CommandText <- "SELECT CURRENT_USER()"
+                      let! carol = whoami.ExecuteScalarAsync() |> Async.AwaitTask
+                      Expect.equal (string carol) "carol@%" "authenticated as the created account"
+                      do! conn3.CloseAsync() |> Async.AwaitTask
+
+                      do! expectDenied (connStr "carol" "nope") "created account, wrong password"
                   finally
                       listener.Stop()
               }

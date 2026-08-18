@@ -4676,10 +4676,13 @@ let execute (store: Store) (registry: Registry) (dbName: string) (ids: int64 * i
         | Error e -> ids, storageErr e
 
     | DropDatabase(name, ifExists) ->
-        match Storage.dropDatabase store name with
-        | Ok() -> ids, Affected 0UL
-        | Error(NoSuchDatabase _) when ifExists -> ids, Affected 0UL
-        | Error e -> ids, storageErr e
+        if name.ToLowerInvariant() = "mysql" then
+            ids, Err(3552, "Access to system schema 'mysql' is rejected.")
+        else
+            match Storage.dropDatabase store name with
+            | Ok() -> ids, Affected 0UL
+            | Error(NoSuchDatabase _) when ifExists -> ids, Affected 0UL
+            | Error e -> ids, storageErr e
 
     | AlterDatabase name ->
         // The charset/collate tail is parsed and discarded (see
@@ -4756,6 +4759,32 @@ let execute (store: Store) (registry: Registry) (dbName: string) (ids: int64 * i
         match truncate store db table with
         | Ok() -> ids, Affected 0UL
         | Error e -> ids, storageErr e
+
+    | CreateUser(users, ifNotExists) ->
+        let createOne (name, host, password) =
+            match Auth.createUser store name host password with
+            | Error(1396, _) when ifNotExists -> Ok()
+            | r -> r
+
+        match users |> traverse createOne with
+        | Ok _ -> ids, Affected 0UL
+        | Error(code, msg) -> ids, Err(code, msg)
+
+    | DropUser(users, ifExists) ->
+        let dropOne (name, host) =
+            match Auth.dropUser store name host with
+            | Error(1396, _) when ifExists -> Ok()
+            | r -> r
+
+        match users |> traverse dropOne with
+        | Ok _ -> ids, Affected 0UL
+        | Error(code, msg) -> ids, Err(code, msg)
+
+    | AlterUser(name, host, password, ifExists) ->
+        match Auth.setPassword store name host password with
+        | Ok() -> ids, Affected 0UL
+        | Error(1396, _) when ifExists -> ids, Affected 0UL
+        | Error(code, msg) -> ids, Err(code, msg)
 
     | Insert(table, columns, rowsExprs, onDuplicateUpdate, ignoreDuplicates) ->
         // INSERT ... VALUES expressions aren't evaluated against any row

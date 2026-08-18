@@ -600,6 +600,13 @@ let private setAutocommit =
         RegexOptions.IgnoreCase
     )
 
+/// `SET PASSWORD [FOR user] = 'pw'` — probed ahead of the generic `SET `
+/// check, which would otherwise treat PASSWORD as a session variable. The
+/// optional user part captures everything before `=` (`'bob'@'%'`, `bob`);
+/// `runProbe` strips the quoting/host.
+let private setPasswordRe =
+    Regex(@"^SET\s+PASSWORD\s*(?:FOR\s+([^=\s]+)\s*)?=\s*'([^']*)'\s*;?$", RegexOptions.IgnoreCase)
+
 /// MySqlConnector's real `BeginTransaction[Async]` handshake explicitly
 /// selects REPEATABLE READ before it sends START TRANSACTION — the
 /// isolation model FSDB's private transaction snapshot actually implements.
@@ -1005,6 +1012,7 @@ let private executeStatement (session: Session) (sql: string) (upper: string) : 
 type private Probe =
     | SetAutocommit of value: string
     | SetTransactionIsolation of level: string
+    | SetPassword of user: string option * password: string
     | SetVar
     | RollbackTo of savepoint: string
     | Begin
@@ -1036,6 +1044,9 @@ let private tryProbe (sql: string) (upper: string) : Probe option =
         Some(SetAutocommit((setAutocommit.Match sql).Groups.[1].Value))
     elif setTransactionIsolation.IsMatch sql then
         Some(SetTransactionIsolation((setTransactionIsolation.Match sql).Groups.[1].Value))
+    elif setPasswordRe.IsMatch sql then
+        let m = setPasswordRe.Match sql
+        Some(SetPassword((if m.Groups.[1].Success then Some m.Groups.[1].Value else None), m.Groups.[2].Value))
     elif upper.StartsWith "SET " then
         Some SetVar
     elif rollbackToSavepointStmt.IsMatch sql then
@@ -1116,6 +1127,17 @@ let private runProbe (session: Session) (sql: string) (probe: Probe) : Session *
             // predicate/range locking, if a client ever genuinely needs it.
             session, Err(1235, "This version of MySQL doesn't yet support 'SERIALIZABLE transaction isolation'")
         | normalized -> { session with Variables = Map.add "transaction_isolation" (Some normalized) session.Variables }, Affected 0UL
+    | SetPassword(userOpt, password) ->
+        // `FOR 'name'@'host'` — only the name matters (accounts are matched
+        // by name, see `Auth`); no FOR clause means the session's own user.
+        let name =
+            match userOpt with
+            | Some u -> u.Split('@').[0].Trim().Trim([| '\''; '`'; '"' |])
+            | None -> session.User
+
+        match Auth.setPassword (Session.currentStore session) name "%" password with
+        | Ok() -> session, Affected 0UL
+        | Error(code, msg) -> session, Err(code, msg)
     | SetVar -> handleSet session sql
     | RollbackTo name -> rollbackToSavepoint name session
     | Begin -> beginTransaction session, Affected 0UL

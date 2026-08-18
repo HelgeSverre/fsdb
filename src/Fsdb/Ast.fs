@@ -452,6 +452,17 @@ type Statement =
     | Update of UpdateStmt
     | Delete of DeleteStmt
     | Truncate of table: string
+    /// `CREATE USER [IF NOT EXISTS] 'name'@'host' [IDENTIFIED BY 'pw'], ...`
+    /// — each account as `(name, host, password)`; host defaults to `'%'`
+    /// when omitted. Executed against `mysql.user` (see `Auth.createUser`);
+    /// no `REQUIRE`/`WITH`/`ACCOUNT LOCK`/role tail — ponytail, add clauses
+    /// when a client actually sends them.
+    | CreateUser of users: (string * string * string option) list * ifNotExists: bool
+    /// `DROP USER [IF EXISTS] 'name'@'host', ...`
+    | DropUser of users: (string * string) list * ifExists: bool
+    /// `ALTER USER [IF EXISTS] 'name'@'host' IDENTIFIED BY 'pw'` — the one
+    /// supported alteration (password change).
+    | AlterUser of name: string * host: string * password: string * ifExists: bool
     /// `EXPLAIN [FORMAT=TRADITIONAL] stmt` — MySQL's classic tabular
     /// `EXPLAIN` accepts `SELECT`/`UPDATE`/`DELETE`/`INSERT`, all handled by
     /// describing what `Executor` would actually do rather than running it.
