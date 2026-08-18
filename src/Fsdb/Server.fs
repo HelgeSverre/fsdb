@@ -130,13 +130,12 @@ let private resultHeadPayloads
             w.ToArray()
 
         // The `decimals` (fsp) each column advertises: for a DATETIME/
-        // TIMESTAMP column, read back the fractional digits the renderer
+        // TIMESTAMP/TIME column, read back the fractional digits the renderer
         // already emitted into the rows (see `Protocol.fractionalDigitsOf`),
-        // so a client learns a `DATETIME(6)`'s precision even on an exact
-        // second. Non-temporal columns (and the TIME wire type, which fsdb
-        // sends as VAR_STRING) advertise 0, as before.
+        // so a client learns a `DATETIME(6)`/`TIME(3)`'s precision even on an
+        // exact second. Non-temporal columns advertise 0, as before.
         let decimalsOf (colIndex: int) (ty: byte) : byte =
-            if ty = TypeDateTime then
+            if ty = TypeDateTime || ty = TypeTime then
                 rows |> List.map (fun r -> List.tryItem colIndex r |> Option.flatten) |> Protocol.fractionalDigitsOf
             else
                 0uy

@@ -510,6 +510,12 @@ let rec private fspOfExpr (ctx: EvalContext) (expr: Expr) : int option =
     match expr with
     | Cast(_, ty) -> fspOfType ty
     | FuncCall(name, [ arg ]) when (let n = name.ToUpperInvariant() in n = "MAX" || n = "MIN") -> fspOfExpr ctx arg
+    | FuncCall(name, args) when (let n = name.ToUpperInvariant() in n = "NOW" || n = "CURRENT_TIMESTAMP") ->
+        // `NOW(N)` renders exactly N digits (matching the precision `nowFn`
+        // rounds the clock to); bare `NOW()` renders none (precision 0).
+        match args with
+        | [ Lit v ] -> Some(Value.toDouble v |> int |> max 0 |> min 6)
+        | _ -> Some 0
     | _ -> tryColumnDefForExpr ctx expr |> Option.bind (fun c -> fspOfType c.Type)
 
 /// The declared fsp for each output column a projection produces — parallel,
@@ -533,6 +539,43 @@ let rec private outputColumnFsps (ctx: EvalContext) (columns: ColumnDef list) (p
         | Star None, _ -> columns |> List.map (fun c -> fspOfType c.Type)
         | Star(Some qualifier), _ -> starQualifierCols ctx qualifier |> List.map (fun c -> fspOfType c.Type)
         | expr, _ -> [ fspOfExpr ctx expr ])
+
+/// The MySQL wire type to *override* each output column with when its
+/// data-driven type (`columnTypesOf`, from the row `Value`s) disagrees with
+/// its declared schema type — currently only a declared `TIME(N)` column,
+/// which fsdb stores as a `VString` (so `mysqlTypeOf` would call it
+/// `VAR_STRING`) but MySQL sends as its own `TIME` wire type. `Some TypeTime`
+/// for a declared-`TIME` output column, `None` otherwise (keep the data-driven
+/// type). Mirrors `outputColumnFsps`'s projection expansion so the lists line
+/// up column-for-column. DATE/DATETIME already agree (their `Value`s carry the
+/// right type), so they need no override here.
+let private outputColumnWireOverrides (ctx: EvalContext) (columns: ColumnDef list) (projections: Projection list) : byte option list =
+    let rec starQualifierCols (ctx: EvalContext) (qualifier: string) : ColumnDef list =
+        match Map.tryFind (qualifier.ToLowerInvariant()) ctx.Qualifiers with
+        | Some(cols, _) -> cols
+        | None -> ctx.Outer |> Option.map (fun o -> starQualifierCols o qualifier) |> Option.defaultValue []
+
+    let overrideOf (c: ColumnDef) =
+        match c.Type with
+        | TTime _ -> Some Value.TypeTime
+        | _ -> None
+
+    projections
+    |> List.collect (fun proj ->
+        match proj with
+        | Star None, _ -> columns |> List.map overrideOf
+        | Star(Some qualifier), _ -> starQualifierCols ctx qualifier |> List.map overrideOf
+        | expr, _ -> [ tryColumnDefForExpr ctx expr |> Option.bind overrideOf ])
+
+/// Applies `outputColumnWireOverrides` on top of a data-driven wire-type list,
+/// keeping the data-driven type wherever there's no override. Falls back
+/// wholesale on a length mismatch (both lists come from the same projection
+/// expansion, so they shouldn't disagree) rather than throwing from `map2`.
+let private applyWireOverrides (overrides: byte option list) (types: byte list) : byte list =
+    if List.length overrides = List.length types then
+        List.map2 (fun ov ty -> defaultArg ov ty) overrides types
+    else
+        types
 
 /// Renders a projection's `(name, Value)` output columns to the resultset's
 /// `string option list`, honoring each column's declared fsp (`fsps`, from
@@ -3167,14 +3210,19 @@ and private runGroupedSelect
                     // BY dt`) still renders its precision; an aggregate over
                     // one (`MAX(dt)`) has no resolvable column type and falls
                     // back to `toText`.
-                    let groupFsps = outputColumnFsps (ctxFor (probeRow columns)) columns select.Projections
+                    let groupCtx = ctxFor (probeRow columns)
+                    let groupFsps = outputColumnFsps groupCtx columns select.Projections
+                    let groupWireOverrides = outputColumnWireOverrides groupCtx columns select.Projections
 
                     let paired =
                         sorted
                         |> List.map (fun (proj, _, _) -> renderOutputCols groupFsps proj, proj |> List.map snd |> Array.ofList)
 
                     let dedupedPaired = if select.Distinct then paired |> List.distinctBy fst else paired
-                    let types = columnTypesOf (List.length colNames) (sorted |> List.map (fun (proj, _, _) -> proj))
+
+                    let types =
+                        columnTypesOf (List.length colNames) (sorted |> List.map (fun (proj, _, _) -> proj))
+                        |> applyWireOverrides groupWireOverrides
                     let limited = dedupedPaired |> applyLimitOffset select.Limit select.Offset
                     ResultSet(colNames, limited |> List.map fst), types, limited |> List.map snd
 
@@ -3416,6 +3464,7 @@ and private runSelect
     // `renderOutputCols`), independent of row values, so it's stable across
     // every row this select emits.
     let outputFsps = outputColumnFsps (ctxFor (probeRow columns)) columns projections
+    let outputWireOverrides = outputColumnWireOverrides (ctxFor (probeRow columns)) columns projections
 
     let pairOf (outputCols: (string * Value) list) : string option list * Value[] =
         renderOutputCols outputFsps outputCols, outputCols |> List.map snd |> Array.ofList
@@ -3439,7 +3488,8 @@ and private runSelect
 
         match rows |> traverseSeq (fun row -> matches row |> Result.bind (fun keep -> if keep then projectRow row |> Result.map Some else Ok None)) with
         | Error(code, message) -> Err(code, message), [], []
-        | Ok allProjected -> ResultSet(colNames, []), columnTypesOf (List.length colNames) allProjected, []
+        | Ok allProjected ->
+            ResultSet(colNames, []), applyWireOverrides outputWireOverrides (columnTypesOf (List.length colNames) allProjected), []
     | Ok probeProjection ->
         let colNames = probeProjection |> List.map fst
 
@@ -3455,6 +3505,7 @@ and private runSelect
         // declared (not data-driven) column types if this ever bites.
         let typesOf (finalRows: Value[] list) : byte list =
             columnTypesOf (List.length colNames) (finalRows |> List.map (List.zip colNames << List.ofArray))
+            |> applyWireOverrides outputWireOverrides
 
         // Shared by both `ORDER BY` branches below: evaluates `WHERE`, the
         // projection, and the sort keys for one row, in that order, short-

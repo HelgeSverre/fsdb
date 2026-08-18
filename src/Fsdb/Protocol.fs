@@ -319,6 +319,39 @@ let textRowPayloadTyped (columnTypes: byte list) (values: string option list) : 
 /// same length-encoded string DECIMAL/VARCHAR/VARSTRING/STRING already use
 /// on the wire (see `readBinaryValue`) — decimal precision has to survive
 /// as text either way, so there's no fixed-width form to prefer.
+/// Encodes a `[-]H+:MM:SS[.ffffff]` time string into the binary-protocol TIME
+/// form — the inverse of `readBinaryTime`. MySQL's TIME hours run past 24
+/// (up to 838), so the hour field splits into a `days`+`hour` pair the same
+/// way `readBinaryTime` recombines them. Length 0 for the all-zero time, 8
+/// without a fraction, 12 with microseconds.
+let private writeBinaryTime (w: Writer) (s: string) : unit =
+    let neg = s.StartsWith "-"
+    let body = if neg then s.Substring 1 else s
+
+    let timePart, micros =
+        match body.IndexOf '.' with
+        | -1 -> body, 0
+        | i -> body.Substring(0, i), Int32.Parse(body.Substring(i + 1).PadRight(6, '0').Substring(0, 6), Globalization.CultureInfo.InvariantCulture)
+
+    let parts = timePart.Split ':'
+    let totalHours = Int32.Parse(parts.[0], Globalization.CultureInfo.InvariantCulture)
+    let minute = Int32.Parse(parts.[1], Globalization.CultureInfo.InvariantCulture)
+    let second = Int32.Parse(parts.[2], Globalization.CultureInfo.InvariantCulture)
+    let days, hour = totalHours / 24, totalHours % 24
+
+    if totalHours = 0 && minute = 0 && second = 0 && micros = 0 then
+        w.WriteByte 0uy
+    else
+        w.WriteByte(if micros = 0 then 8uy else 12uy)
+        w.WriteByte(if neg then 1uy else 0uy)
+        w.WriteInt32LE days
+        w.WriteByte(byte hour)
+        w.WriteByte(byte minute)
+        w.WriteByte(byte second)
+
+        if micros <> 0 then
+            w.WriteInt32LE micros
+
 let private writeBinaryValue (w: Writer) (typeId: byte) (s: string) : unit =
     if typeId = TypeLongLong then
         w.WriteInt64LE(Int64.Parse(s, Globalization.CultureInfo.InvariantCulture))
@@ -347,6 +380,8 @@ let private writeBinaryValue (w: Writer) (typeId: byte) (s: string) : unit =
 
         if micros <> 0 then
             w.WriteInt32LE micros
+    elif typeId = TypeTime then
+        writeBinaryTime w s
     elif typeId = TypeBlob then
         w.WriteLenEncBytes(Encoding.Latin1.GetBytes s)
     else

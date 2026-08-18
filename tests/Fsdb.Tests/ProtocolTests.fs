@@ -163,6 +163,24 @@ let tests =
                   (VDateTime(DateTime(2024, 3, 5, 13, 45, 9).AddTicks 1234560L))
                   "microseconds survive the binary resultset round-trip"
 
+          testCase "binary resultset TIME encodes as the TIME wire form, not a string"
+          <| fun _ ->
+              // A declared TIME column reaches the wire as MySQL's binary TIME
+              // form (readBinaryValue's TypeTime case decodes it), not a
+              // length-encoded string. Covers microseconds, the >24h hour that
+              // splits into a days field, and a negative duration.
+              let roundTrip (s: string) =
+                  let payload = binaryRowPayload [ TypeTime ] [ Some s ]
+                  let r = Reader payload
+                  r.ReadByte() |> ignore // row header
+                  r.ReadByte() |> ignore // null bitmap
+                  readBinaryValue r TypeTime false
+
+              Expect.equal (roundTrip "10:20:30.126") (VString "10:20:30.126000") "microseconds (padded to 6 on decode)"
+              Expect.equal (roundTrip "838:59:59") (VString "838:59:59") "hours past 24 split into a days field"
+              Expect.equal (roundTrip "-01:02:03") (VString "-01:02:03") "negative duration"
+              Expect.equal (roundTrip "00:00:00") (VString "00:00:00") "zero time is the length-0 form"
+
           testCase "binary DATE/DATETIME/TIME decode length variants, zero values, and integer signs"
           <| fun _ ->
               // DATE (len=4): year, month, day

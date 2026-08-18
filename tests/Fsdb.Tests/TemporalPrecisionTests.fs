@@ -196,6 +196,22 @@ let tests =
                         "MAX exact-second keeps (6) precision" ]
 
           testList
+              "TIME columns report the TIME wire type"
+              [ testCase "a declared TIME(N) column advertises TypeTime, not VAR_STRING"
+                <| fun _ ->
+                    let mutable session = create 1 (Fsdb.Storage.create ())
+
+                    for sql in [ "CREATE TABLE t (tm TIME(3))"; "INSERT INTO t VALUES ('10:20:30.126')" ] do
+                        let s, _ = handle session sql
+                        session <- s
+
+                    let s, _ = handle session "SELECT tm FROM t"
+                    // fsdb stores TIME as a VString, so the data-driven type
+                    // would be VAR_STRING; the declared-type override restores
+                    // the real TIME wire type a MySQL client expects.
+                    Expect.equal s.LastResultColumnTypes [ Fsdb.Value.TypeTime ] "TIME wire type override" ]
+
+          testList
               "persistence round-trips fsp"
               [ testCase "a DATETIME(6)/TIME(3) column keeps its precision across a snapshot+reload"
                 <| fun _ ->

@@ -626,6 +626,20 @@ let tests =
                               Expect.equal (dt.Ticks % TimeSpan.TicksPerSecond) 0L "NOW() has no sub-second component"
                           | other -> failtestf "expected VDateTime from NOW(), got %A" other
 
+                      testCase "NOW(N) rounds the clock to N fractional digits (MySQL NOW(6) has microseconds)"
+                      <| fun _ ->
+                          // Can't assert an exact time, but the tick granularity
+                          // is deterministic: fsp 6 rounds to whole microseconds
+                          // (10-tick units), fsp 3 to milliseconds (10_000-tick
+                          // units), fsp 0 to whole seconds.
+                          let ticksOf args =
+                              match call "NOW" args with
+                              | VDateTime dt -> dt.Ticks
+                              | other -> failtestf "expected VDateTime, got %A" other
+                          Expect.equal (ticksOf [ VInt 6L ] % 10L) 0L "NOW(6) rounded to microseconds"
+                          Expect.equal (ticksOf [ VInt 3L ] % 10_000L) 0L "NOW(3) rounded to milliseconds"
+                          Expect.equal (ticksOf [ VInt 0L ] % TimeSpan.TicksPerSecond) 0L "NOW(0) rounded to seconds"
+
                       testCase "TIMESTAMP coerces a date or string to a datetime"
                       <| fun _ ->
                           Expect.equal (call "TIMESTAMP" [ VDate(DateOnly(2024, 1, 1)) ]) (VDateTime(DateTime(2024, 1, 1, 0, 0, 0))) "date gains midnight"

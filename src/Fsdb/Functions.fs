@@ -208,7 +208,18 @@ let roundTicksToFsp (fsp: int) (ticks: int64) : int64 =
 let roundDateTimeToFsp (fsp: int) (dt: DateTime) : DateTime =
     DateTime(roundTicksToFsp fsp dt.Ticks, dt.Kind)
 
-let private nowFn: Scalar = fun _ -> VDateTime(truncateToSecond DateTime.Now)
+/// `NOW()`/`CURRENT_TIMESTAMP` (no arg, MySQL precision 0) truncate to whole
+/// seconds; `NOW(N)`/`CURRENT_TIMESTAMP(N)` round the clock to N fractional
+/// digits (`NOW(6)` → microseconds). N is clamped to 0-6 — MySQL raises 1426
+/// on a larger fsp, but a scalar has no error channel, so this caps rather
+/// than throwing a raw exception. `Executor.fspOfExpr` renders these at N
+/// digits so an `NOW(3)` shows exactly three, not `toText`'s full six.
+let private nowFn: Scalar =
+    function
+    | [ n ] when not (anyNull [ n ]) ->
+        let fsp = toDouble n |> int |> max 0 |> min 6
+        VDateTime(roundDateTimeToFsp fsp DateTime.Now)
+    | _ -> VDateTime(truncateToSecond DateTime.Now)
 
 // ---------------------------------------------------------------------------
 // JSON. `VJson`/`VString` both hold raw JSON text (a JSON column coerces to
