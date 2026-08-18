@@ -190,7 +190,7 @@ let tests =
                       "utf8mb4_mn_cyrl_0900_ai_ci"; "utf8mb4_mn_cyrl_0900_as_cs"
                       "utf8mb4_sr_latn_0900_ai_ci"; "utf8mb4_sr_latn_0900_as_cs"
                       "utf8mb4_ja_0900_as_cs"; "utf8mb4_ja_0900_as_cs_ks"; "utf8mb4_zh_0900_as_cs"
-                      "utf8mb4_danish_ci"; "utf8mb4_swedish_ci"; "utf8mb4_norwegian_ci"; "utf8mb4_german2_ci"
+                      "utf8mb4_danish_ci"; "utf8mb4_swedish_ci"; "utf8mb4_german2_ci"
                       "utf8mb4_spanish_ci"; "utf8mb4_spanish2_ci"; "utf8mb4_turkish_ci"; "utf8mb4_icelandic_ci"
                       "utf8mb4_estonian_ci"; "utf8mb4_polish_ci"; "utf8mb4_romanian_ci"; "utf8mb4_roman_ci"
                       "utf8mb4_croatian_ci"; "utf8mb4_czech_ci"; "utf8mb4_esperanto_ci"; "utf8mb4_hungarian_ci"

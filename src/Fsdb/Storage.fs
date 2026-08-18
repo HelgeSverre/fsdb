@@ -1204,13 +1204,17 @@ let private parentKeySourceAdd (key: string) (source: ParentKeySource) : unit =
 /// `UPDATE`/`DELETE` narrowing threads that position straight into
 /// `updateRows`/`deleteRows` so they can replace/remove it in place instead
 /// of re-deriving its position with a full scan.
-let tryUniqueLookup
+/// The `(table, unique key name, column index)` a `columnName = literal`
+/// equality would probe — the guard chain `tryUniqueLookup` (the actual row
+/// fetch) and `Executor`'s `EXPLAIN` `key`/`ref` reporting both read, so
+/// EXPLAIN reports an index exactly when execution would use it.
+let tryUniqueKeyProbe
     (store: Store)
     (dbName: string)
     (tableName: string)
     (columnName: string)
     (literal: Value)
-    : (ColumnDef list * (int * Value[]) list) option =
+    : (Table * string * int) option =
     // Reads `dbName`'s slot directly, same reason `scan` does — this is a
     // per-row-lookup hot path, not somewhere to pay `Store.Catalog`'s
     // whole-catalog rebuild.
@@ -1229,19 +1233,29 @@ let tryUniqueLookup
             | None -> None
             | Some(groupName, _) ->
                 match coerceValue store.StrictMode table.Columns.[idx] literal with
-                | Ok coerced when coerced = literal ->
-                    let rows =
-                        match encodeConstraintKey table.Columns [ idx ] [| literal |] with
-                        | None -> []
-                        | Some key ->
-                            table.UniqueIndex
-                            |> Map.tryFind groupName
-                            |> Option.bind (Map.tryFind key)
-                            |> Option.map (fun pos -> pos, table.RowsArray.[pos])
-                            |> Option.toList
-
-                    Some(table.Columns, rows)
+                | Ok coerced when coerced = literal -> Some(table, groupName, idx)
                 | _ -> None
+
+let tryUniqueLookup
+    (store: Store)
+    (dbName: string)
+    (tableName: string)
+    (columnName: string)
+    (literal: Value)
+    : (ColumnDef list * (int * Value[]) list) option =
+    tryUniqueKeyProbe store dbName tableName columnName literal
+    |> Option.map (fun (table, groupName, idx) ->
+        let rows =
+            match encodeConstraintKey table.Columns [ idx ] [| literal |] with
+            | None -> []
+            | Some key ->
+                table.UniqueIndex
+                |> Map.tryFind groupName
+                |> Option.bind (Map.tryFind key)
+                |> Option.map (fun pos -> pos, table.RowsArray.[pos])
+                |> Option.toList
+
+        table.Columns, rows)
 
 /// Verifies every foreign key `fks` (a child table's own `ForeignKeys`) has
 /// a matching parent row for `row`'s values, per MySQL's MATCH SIMPLE

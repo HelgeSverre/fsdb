@@ -214,15 +214,22 @@ let registry : Map<string, Collation> =
         language
         |> List.fold
             (fun m (suffix, locale) ->
-                m
-                |> register ("utf8mb4_" + suffix + "_0900_ai_ci") { Locale = locale; Fold = aiCi; PadSpace = noPad; ByteOrder = false }
-                |> register ("utf8mb4_" + suffix + "_0900_as_cs") { Locale = locale; Fold = asCs; PadSpace = noPad; ByteOrder = false })
+                // MySQL ships no `_0900_ai_ci` for ja/zh (kana/hanzi
+                // sensitivity makes accent-insensitivity meaningless there) —
+                // registering one would resolve a collation a real server
+                // rejects with error 1273.
+                let m =
+                    if suffix = "ja" || suffix = "zh" then
+                        m
+                    else
+                        m |> register ("utf8mb4_" + suffix + "_0900_ai_ci") { Locale = locale; Fold = aiCi; PadSpace = noPad; ByteOrder = false }
+
+                m |> register ("utf8mb4_" + suffix + "_0900_as_cs") { Locale = locale; Fold = asCs; PadSpace = noPad; ByteOrder = false })
             map
     |> register "utf8mb4_ja_0900_as_cs_ks" { Locale = Some "ja-JP"; Fold = asCs; PadSpace = noPad; ByteOrder = false }
     // Legacy language collations (PAD SPACE, folded, _ci only)
     |> register "utf8mb4_danish_ci" { Locale = Some "da-DK"; Fold = aiCi; PadSpace = pad; ByteOrder = false }
     |> register "utf8mb4_swedish_ci" { Locale = Some "sv-SE"; Fold = aiCi; PadSpace = pad; ByteOrder = false }
-    |> register "utf8mb4_norwegian_ci" { Locale = Some "nb-NO"; Fold = aiCi; PadSpace = pad; ByteOrder = false }
     |> register "utf8mb4_german2_ci" { Locale = Some "de-DE"; Fold = aiCi; PadSpace = pad; ByteOrder = false }
     |> register "utf8mb4_spanish_ci" { Locale = Some "es-ES"; Fold = aiCi; PadSpace = pad; ByteOrder = false }
     |> register "utf8mb4_spanish2_ci" { Locale = Some "es-ES_tradnl"; Fold = aiCi; PadSpace = pad; ByteOrder = false }
@@ -243,6 +250,104 @@ let registry : Map<string, Collation> =
     |> register "utf8mb4_slovak_ci" { Locale = Some "sk-SK"; Fold = aiCi; PadSpace = pad; ByteOrder = false }
     |> register "utf8mb4_slovenian_ci" { Locale = Some "sl-SI"; Fold = aiCi; PadSpace = pad; ByteOrder = false }
     |> register "utf8mb4_vietnamese_ci" { Locale = Some "vi-VN"; Fold = aiCi; PadSpace = pad; ByteOrder = false }
+
+/// MySQL 8.4's `information_schema.collations` `ID` and `SORTLEN` for every
+/// registered collation — harvested from a real 8.4.11 server
+/// (`SELECT collation_name, id, sortlen FROM information_schema.collations`)
+/// so `information_schema.COLLATIONS` and `SHOW COLLATION` report the same
+/// values a client sees against real MySQL. Keep in lockstep with `registry`;
+/// the test suite asserts the two key sets match exactly.
+let idAndSortlen : Map<string, int * int> =
+    Map.ofList
+        [ "utf8mb4_0900_ai_ci", (255, 0)
+          "utf8mb4_0900_as_ci", (305, 0)
+          "utf8mb4_0900_as_cs", (278, 0)
+          "utf8mb4_0900_bin", (309, 1)
+          "utf8mb4_bin", (46, 1)
+          "utf8mb4_general_ci", (45, 1)
+          "utf8mb4_unicode_ci", (224, 8)
+          "utf8mb4_unicode_520_ci", (246, 8)
+          "utf8mb4_bg_0900_ai_ci", (318, 0)
+          "utf8mb4_bg_0900_as_cs", (319, 0)
+          "utf8mb4_bs_0900_ai_ci", (316, 0)
+          "utf8mb4_bs_0900_as_cs", (317, 0)
+          "utf8mb4_cs_0900_ai_ci", (266, 0)
+          "utf8mb4_cs_0900_as_cs", (289, 0)
+          "utf8mb4_da_0900_ai_ci", (267, 0)
+          "utf8mb4_da_0900_as_cs", (290, 0)
+          "utf8mb4_de_pb_0900_ai_ci", (256, 0)
+          "utf8mb4_de_pb_0900_as_cs", (279, 0)
+          "utf8mb4_eo_0900_ai_ci", (273, 0)
+          "utf8mb4_eo_0900_as_cs", (296, 0)
+          "utf8mb4_es_0900_ai_ci", (263, 0)
+          "utf8mb4_es_0900_as_cs", (286, 0)
+          "utf8mb4_es_trad_0900_ai_ci", (270, 0)
+          "utf8mb4_es_trad_0900_as_cs", (293, 0)
+          "utf8mb4_et_0900_ai_ci", (262, 0)
+          "utf8mb4_et_0900_as_cs", (285, 0)
+          "utf8mb4_gl_0900_ai_ci", (320, 0)
+          "utf8mb4_gl_0900_as_cs", (321, 0)
+          "utf8mb4_hr_0900_ai_ci", (275, 0)
+          "utf8mb4_hr_0900_as_cs", (298, 0)
+          "utf8mb4_hu_0900_ai_ci", (274, 0)
+          "utf8mb4_hu_0900_as_cs", (297, 0)
+          "utf8mb4_is_0900_ai_ci", (257, 0)
+          "utf8mb4_is_0900_as_cs", (280, 0)
+          "utf8mb4_ja_0900_as_cs", (303, 0)
+          "utf8mb4_ja_0900_as_cs_ks", (304, 24)
+          "utf8mb4_la_0900_ai_ci", (271, 0)
+          "utf8mb4_la_0900_as_cs", (294, 0)
+          "utf8mb4_lt_0900_ai_ci", (268, 0)
+          "utf8mb4_lt_0900_as_cs", (291, 0)
+          "utf8mb4_lv_0900_ai_ci", (258, 0)
+          "utf8mb4_lv_0900_as_cs", (281, 0)
+          "utf8mb4_mn_cyrl_0900_ai_ci", (322, 0)
+          "utf8mb4_mn_cyrl_0900_as_cs", (323, 0)
+          "utf8mb4_nb_0900_ai_ci", (310, 0)
+          "utf8mb4_nb_0900_as_cs", (311, 0)
+          "utf8mb4_nn_0900_ai_ci", (312, 0)
+          "utf8mb4_nn_0900_as_cs", (313, 0)
+          "utf8mb4_pl_0900_ai_ci", (261, 0)
+          "utf8mb4_pl_0900_as_cs", (284, 0)
+          "utf8mb4_ro_0900_ai_ci", (259, 0)
+          "utf8mb4_ro_0900_as_cs", (282, 0)
+          "utf8mb4_ru_0900_ai_ci", (306, 0)
+          "utf8mb4_ru_0900_as_cs", (307, 0)
+          "utf8mb4_sk_0900_ai_ci", (269, 0)
+          "utf8mb4_sk_0900_as_cs", (292, 0)
+          "utf8mb4_sl_0900_ai_ci", (260, 0)
+          "utf8mb4_sl_0900_as_cs", (283, 0)
+          "utf8mb4_sr_latn_0900_ai_ci", (314, 0)
+          "utf8mb4_sr_latn_0900_as_cs", (315, 0)
+          "utf8mb4_sv_0900_ai_ci", (264, 0)
+          "utf8mb4_sv_0900_as_cs", (287, 0)
+          "utf8mb4_tr_0900_ai_ci", (265, 0)
+          "utf8mb4_tr_0900_as_cs", (288, 0)
+          "utf8mb4_vi_0900_ai_ci", (277, 0)
+          "utf8mb4_vi_0900_as_cs", (300, 0)
+          "utf8mb4_zh_0900_as_cs", (308, 0)
+          "utf8mb4_croatian_ci", (245, 8)
+          "utf8mb4_czech_ci", (234, 8)
+          "utf8mb4_danish_ci", (235, 8)
+          "utf8mb4_esperanto_ci", (241, 8)
+          "utf8mb4_estonian_ci", (230, 8)
+          "utf8mb4_german2_ci", (244, 8)
+          "utf8mb4_hungarian_ci", (242, 8)
+          "utf8mb4_icelandic_ci", (225, 8)
+          "utf8mb4_latvian_ci", (226, 8)
+          "utf8mb4_lithuanian_ci", (236, 8)
+          "utf8mb4_persian_ci", (240, 8)
+          "utf8mb4_polish_ci", (229, 8)
+          "utf8mb4_roman_ci", (239, 8)
+          "utf8mb4_romanian_ci", (227, 8)
+          "utf8mb4_sinhala_ci", (243, 8)
+          "utf8mb4_slovak_ci", (237, 8)
+          "utf8mb4_slovenian_ci", (228, 8)
+          "utf8mb4_spanish2_ci", (238, 8)
+          "utf8mb4_spanish_ci", (231, 8)
+          "utf8mb4_swedish_ci", (232, 8)
+          "utf8mb4_turkish_ci", (233, 8)
+          "utf8mb4_vietnamese_ci", (247, 8) ]
 
 /// Looks a collation up by its MySQL name — `COLLATE x` resolution and
 /// column definitions both route through here.

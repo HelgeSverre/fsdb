@@ -176,13 +176,16 @@ let tests =
               match
                   run
                       store
-                      "SELECT collation_name, character_set_name, is_default, pad_attribute FROM information_schema.collations WHERE collation_name IN ('utf8mb4_bin', 'utf8mb4_0900_ai_ci') ORDER BY collation_name"
+                      "SELECT collation_name, character_set_name, id, sortlen, is_default, pad_attribute FROM information_schema.collations WHERE collation_name IN ('utf8mb4_bin', 'utf8mb4_0900_ai_ci', 'utf8mb4_unicode_ci') ORDER BY collation_name"
               with
               | ResultSet(_, rows) ->
+                  // id/sortlen are MySQL 8.4.11's real values
+                  // (information_schema.collations on the bench oracle).
                   Expect.equal
                       rows
-                      [ [ Some "utf8mb4_0900_ai_ci"; Some "utf8mb4"; Some "Yes"; Some "NO PAD" ]
-                        [ Some "utf8mb4_bin"; Some "utf8mb4"; Some ""; Some "PAD SPACE" ] ]
+                      [ [ Some "utf8mb4_0900_ai_ci"; Some "utf8mb4"; Some "255"; Some "0"; Some "Yes"; Some "NO PAD" ]
+                        [ Some "utf8mb4_bin"; Some "utf8mb4"; Some "46"; Some "1"; Some ""; Some "PAD SPACE" ]
+                        [ Some "utf8mb4_unicode_ci"; Some "utf8mb4"; Some "224"; Some "8"; Some ""; Some "PAD SPACE" ] ]
                       "the charset default flagged, pad attributes reported"
               | other -> failtestf "expected a resultset, got %A" other
 
@@ -195,9 +198,37 @@ let tests =
               | ResultSet([ "Collation"; "Charset"; "Id"; "Default"; "Compiled"; "Sortlen"; "Pad_attribute" ], rows) ->
                   Expect.equal
                       rows
-                      [ [ Some "utf8mb4_bin"; Some "utf8mb4"; Some "0"; Some ""; Some "Yes"; Some "0"; Some "PAD SPACE" ] ]
-                      "one bin row with its pad attribute"
+                      [ [ Some "utf8mb4_bin"; Some "utf8mb4"; Some "46"; Some ""; Some "Yes"; Some "1"; Some "PAD SPACE" ] ]
+                      "one bin row with MySQL's real id/sortlen and its pad attribute"
               | other -> failtestf "expected SHOW COLLATION output, got %A" other
+
+          testCase "every registered collation carries MySQL's real id, and vice versa"
+          <| fun _ ->
+              // `Collation.idAndSortlen` is harvested from a real 8.4.11
+              // server; a collation in one map but not the other means the
+              // registry drifted from what MySQL actually ships.
+              Expect.equal
+                  (Fsdb.Collation.registry |> Map.toList |> List.map fst |> Set.ofList)
+                  (Fsdb.Collation.idAndSortlen |> Map.toList |> List.map fst |> Set.ofList)
+                  "registry and id table cover exactly the same collations"
+
+              for invented in [ "utf8mb4_norwegian_ci"; "utf8mb4_ja_0900_ai_ci"; "utf8mb4_zh_0900_ai_ci" ] do
+                  Expect.isNone (Fsdb.Collation.tryFind invented) (sprintf "%s doesn't exist in MySQL 8.4 and must not resolve" invented)
+
+          testCase "SHOW TABLE STATUS reports real row counts, sizes, and auto_increment"
+          <| fun _ ->
+              let store = setup ()
+              let session = Fsdb.Session.create 1 store
+
+              match Fsdb.QueryHandler.handle session "SHOW TABLE STATUS LIKE 'users'" |> snd with
+              | ResultSet(cols, [ row ]) ->
+                  let get name = List.item (List.findIndex ((=) name) cols) row
+                  Expect.equal (get "Name") (Some "users") "table name"
+                  Expect.equal (get "Rows") (Some "1") "actual row count"
+                  Expect.equal (get "Auto_increment") (Some "2") "next id after one insert"
+                  Expect.equal (get "Collation") (Some "utf8mb4_0900_ai_ci") "table collation"
+                  Expect.isTrue ((get "Data_length" |> Option.defaultValue "0") <> "0") "in-memory payload size, not a constant"
+              | other -> failtestf "expected one status row, got %A" other
 
           testCase "COLUMNS projects declared columns with type/nullability/key metadata"
           <| fun _ ->
