@@ -85,10 +85,10 @@ clean:
 
 # === Install ===
 
-# Install fsdb globally as a single binary (framework-dependent)
+# Install fsdb globally as a single self-contained binary (no .NET needed)
 [group('install')]
 install dest="~/.local/bin":
-    dotnet publish src/Fsdb -c Release -o src/Fsdb/bin/dist -p:PublishSingleFile=true --self-contained false -v q
+    dotnet publish src/Fsdb -c Release -o src/Fsdb/bin/dist -p:PublishSingleFile=true --self-contained true -v q
     mkdir -p {{ dest }}
     install -m 0755 src/Fsdb/bin/dist/Fsdb {{ dest }}/fsdb
     @echo "Installed {{ dest }}/fsdb — try: fsdb --help"
