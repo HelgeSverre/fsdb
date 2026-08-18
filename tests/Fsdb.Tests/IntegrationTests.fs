@@ -154,6 +154,170 @@ let tests =
               }
               |> Async.RunSynchronously
 
+          testCase "the handshake username reaches USER()/CURRENT_USER() over the real wire protocol"
+          <| fun _ ->
+              async {
+                  let listener = Fsdb.Server.startListening System.Net.IPAddress.Loopback 0
+                  let port = Fsdb.Server.port listener
+                  let store = Fsdb.Storage.create ()
+
+                  // The account has to exist: a passwordless `alice` row,
+                  // same shape CREATE USER will write.
+                  Fsdb.Storage.insertRows
+                      store
+                      "mysql"
+                      "user"
+                      (Some [ "Host"; "User"; "plugin"; "authentication_string" ])
+                      [ [ Fsdb.Value.VString "%"
+                          Fsdb.Value.VString "alice"
+                          Fsdb.Value.VString "mysql_native_password"
+                          Fsdb.Value.VString "" ] ]
+                  |> ignore
+
+                  Fsdb.Server.serve listener store Fsdb.Functions.empty |> Async.StartAsTask |> ignore
+
+                  try
+                      let connStr =
+                          sprintf
+                              "Server=127.0.0.1;Port=%d;User ID=alice;Password=;AllowPublicKeyRetrieval=True;SslMode=None"
+                              port
+
+                      use conn = new MySqlConnector.MySqlConnection(connStr)
+                      do! conn.OpenAsync() |> Async.AwaitTask
+
+                      use cmd = conn.CreateCommand()
+                      cmd.CommandText <- "SELECT USER()"
+                      let! user = cmd.ExecuteScalarAsync() |> Async.AwaitTask
+                      Expect.equal (string user) "alice@localhost" "USER() reports the handshake username"
+
+                      use cmd2 = conn.CreateCommand()
+                      cmd2.CommandText <- "SELECT CURRENT_USER"
+                      let! current = cmd2.ExecuteScalarAsync() |> Async.AwaitTask
+                      Expect.equal (string current) "alice@%" "paren-less CURRENT_USER works over the wire"
+
+                      do! conn.CloseAsync() |> Async.AwaitTask
+                  finally
+                      listener.Stop()
+              }
+              |> Async.RunSynchronously
+
+          testCase "handshake auth verifies stored passwords: right password connects, wrong password and unknown user get 1045"
+          <| fun _ ->
+              async {
+                  let listener = Fsdb.Server.startListening System.Net.IPAddress.Loopback 0
+                  let port = Fsdb.Server.port listener
+                  let store = Fsdb.Storage.create ()
+
+                  Fsdb.Storage.insertRows
+                      store
+                      "mysql"
+                      "user"
+                      (Some [ "Host"; "User"; "plugin"; "authentication_string" ])
+                      [ [ Fsdb.Value.VString "%"
+                          Fsdb.Value.VString "bob"
+                          Fsdb.Value.VString "mysql_native_password"
+                          Fsdb.Value.VString(Fsdb.Auth.nativePasswordHash "s3cret") ] ]
+                  |> ignore
+
+                  Fsdb.Server.serve listener store Fsdb.Functions.empty |> Async.StartAsTask |> ignore
+
+                  let connStr (user: string) (password: string) =
+                      sprintf
+                          "Server=127.0.0.1;Port=%d;User ID=%s;Password=%s;AllowPublicKeyRetrieval=True;SslMode=None"
+                          port
+                          user
+                          password
+
+                  // `Async.AwaitTask` can surface the failure wrapped in an
+                  // AggregateException, so dig the MySqlException out.
+                  let rec mysqlError (e: exn) : MySqlConnector.MySqlException option =
+                      match e with
+                      | :? MySqlConnector.MySqlException as m -> Some m
+                      | :? AggregateException as a -> a.InnerExceptions |> Seq.tryPick mysqlError
+                      | _ -> None
+
+                  let expectDenied (cs: string) (label: string) =
+                      async {
+                          use conn = new MySqlConnector.MySqlConnection(cs)
+                          let! result = conn.OpenAsync() |> Async.AwaitTask |> Async.Catch
+
+                          match result with
+                          | Choice1Of2() -> failtestf "%s: expected the connection to be denied" label
+                          | Choice2Of2 e ->
+                              match mysqlError e with
+                              | Some m ->
+                                  Expect.equal m.ErrorCode MySqlConnector.MySqlErrorCode.AccessDenied (label + ": 1045")
+                              | None -> raise e
+                      }
+
+                  try
+                      // Right password connects and reports its identity.
+                      use conn = new MySqlConnector.MySqlConnection(connStr "bob" "s3cret")
+                      do! conn.OpenAsync() |> Async.AwaitTask
+                      use cmd = conn.CreateCommand()
+                      cmd.CommandText <- "SELECT CURRENT_USER()"
+                      let! current = cmd.ExecuteScalarAsync() |> Async.AwaitTask
+                      Expect.equal (string current) "bob@%" "authenticated as bob"
+                      do! conn.CloseAsync() |> Async.AwaitTask
+
+                      do! expectDenied (connStr "bob" "wrong") "wrong password"
+                      do! expectDenied (connStr "nobody" "") "unknown user"
+
+                      // A passwordless account matches real MySQL: an empty
+                      // offered password connects, a non-empty one is 1045.
+                      do! expectDenied (connStr "root" "anything") "passwordless account, offered password"
+
+                      use conn2 = new MySqlConnector.MySqlConnection(connStr "root" "")
+                      do! conn2.OpenAsync() |> Async.AwaitTask
+
+                      // Account created over the wire is immediately usable.
+                      use create = conn2.CreateCommand()
+                      create.CommandText <- "CREATE USER 'carol'@'%' IDENTIFIED BY 'cpw'"
+                      let! _ = create.ExecuteNonQueryAsync() |> Async.AwaitTask
+                      do! conn2.CloseAsync() |> Async.AwaitTask
+
+                      use conn3 = new MySqlConnector.MySqlConnection(connStr "carol" "cpw")
+                      do! conn3.OpenAsync() |> Async.AwaitTask
+                      use whoami = conn3.CreateCommand()
+                      whoami.CommandText <- "SELECT CURRENT_USER()"
+                      let! carol = whoami.ExecuteScalarAsync() |> Async.AwaitTask
+                      Expect.equal (string carol) "carol@%" "authenticated as the created account"
+                      do! conn3.CloseAsync() |> Async.AwaitTask
+
+                      do! expectDenied (connStr "carol" "nope") "created account, wrong password"
+
+                      // Privilege enforcement over the wire: carol has no
+                      // grants, so a SELECT on a real table is 1142.
+                      use conn4 = new MySqlConnector.MySqlConnection(connStr "root" "")
+                      do! conn4.OpenAsync() |> Async.AwaitTask
+                      use ddl = conn4.CreateCommand()
+                      ddl.CommandText <- "CREATE TABLE fsdb.things (id INT PRIMARY KEY)"
+                      let! _ = ddl.ExecuteNonQueryAsync() |> Async.AwaitTask
+                      do! conn4.CloseAsync() |> Async.AwaitTask
+
+                      use conn5 = new MySqlConnector.MySqlConnection(connStr "carol" "cpw")
+                      do! conn5.OpenAsync() |> Async.AwaitTask
+                      use denied = conn5.CreateCommand()
+                      denied.CommandText <- "SELECT * FROM fsdb.things"
+                      let! deniedResult = denied.ExecuteScalarAsync() |> Async.AwaitTask |> Async.Catch
+
+                      match deniedResult with
+                      | Choice1Of2 _ -> failtest "expected carol's SELECT to be denied"
+                      | Choice2Of2 e ->
+                          match mysqlError e with
+                          | Some m ->
+                              Expect.equal
+                                  m.ErrorCode
+                                  MySqlConnector.MySqlErrorCode.TableAccessDenied
+                                  "1142 over the wire"
+                          | None -> raise e
+
+                      do! conn5.CloseAsync() |> Async.AwaitTask
+                  finally
+                      listener.Stop()
+              }
+              |> Async.RunSynchronously
+
           // mysql CLI sends `SHOW WARNINGS LIMIT n` and mysqli's
           // `mysqli_report`/error-checking idiom sends `SHOW COUNT(*)
           // WARNINGS` — both routinely enough that either one dying with a

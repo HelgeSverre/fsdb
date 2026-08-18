@@ -1110,6 +1110,10 @@ let load (dataDir: string) : Store =
         if File.Exists snapshotPath then
             setCatalog store (readSnapshot snapshotPath)
 
+        // A pre-feature snapshot has no `mysql` system schema; re-seed it
+        // *before* replay so WAL events touching mysql.* find their tables.
+        Storage.ensureMysqlSchema store
+
         // The WAL holds rows that already passed every check once, at
         // commit time — re-validating foreign keys on replay only risks
         // dropping one written under `SET FOREIGN_KEY_CHECKS = 0` (wired up
@@ -1130,6 +1134,9 @@ let load (dataDir: string) : Store =
             use fs = new FileStream(walPath, FileMode.Open, FileAccess.Write)
             fs.SetLength goodOffset
 
+    // Covers the `.new`-snapshot path above the same way (no-op if the
+    // snapshot already carried the schema, or the else-branch re-seeded it).
+    Storage.ensureMysqlSchema store
     store
 
 /// Subscribes `store` to `Storage.Store.OnCommit`, appending every commit as

@@ -15,6 +15,7 @@
     <Compile Include="Parser.fs" />
     <Compile Include="Functions.fs" />
     <Compile Include="Storage.fs" />
+    <Compile Include="Auth.fs" />
     <Compile Include="Persistence.fs" />
     <Compile Include="InformationSchema.fs" />
     <Compile Include="Executor.fs" />

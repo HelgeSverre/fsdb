@@ -55,11 +55,10 @@ let StatusInTrans = 0x0001
 /// SERVER_STATUS_AUTOCOMMIT
 let StatusAutocommit = 2
 
-/// Builds the initial HandshakeV10 payload. `authPluginData` must be 20 bytes;
-/// its contents are irrelevant because any password is accepted (see
-/// `parseHandshakeResponse` — ponytail: no auth verification, this is a dev
-/// server; add real mysql_native_password checking if this ever needs to be
-/// exposed beyond localhost).
+/// Builds the initial HandshakeV10 payload. `authPluginData` must be 20
+/// bytes — the mysql_native_password scramble `Server.authenticateHandshake`
+/// verifies the client's response against when the account has a stored
+/// password (an account with no password accepts anything, see `Auth`).
 let buildHandshakeV10 (connectionId: int) (authPluginData: byte[]) : byte[] =
     let w = Writer()
     w.WriteByte 10uy // protocol version
@@ -81,11 +80,19 @@ let buildHandshakeV10 (connectionId: int) (authPluginData: byte[]) : byte[] =
 type HandshakeResponse =
     { Capabilities: uint32
       Username: string
+      /// The client's answer to the auth challenge — for
+      /// mysql_native_password, `SHA1(pw) XOR SHA1(scramble + SHA1(SHA1(pw)))`
+      /// (20 bytes), or empty for an empty password. Verified by `Server`
+      /// only when the account has a stored password hash.
+      AuthResponse: byte[]
+      /// The auth plugin the client answered with (CLIENT_PLUGIN_AUTH) —
+      /// `Server` sends an AuthSwitchRequest when this isn't
+      /// mysql_native_password and the account needs verification.
+      ClientPlugin: string option
       Database: string option }
 
-/// Parses a HandshakeResponse41 payload. Only the capability flags, username,
-/// and optional database matter — the auth response bytes are read (to advance
-/// past them correctly) but never checked.
+/// Parses a HandshakeResponse41 payload: capability flags, username, auth
+/// response bytes, optional database, and the client's auth plugin name.
 let parseHandshakeResponse (payload: byte[]) : HandshakeResponse =
     let r = Reader(payload)
     let capabilities = uint32 (r.ReadInt32LE())
@@ -94,13 +101,16 @@ let parseHandshakeResponse (payload: byte[]) : HandshakeResponse =
     r.ReadBytes 23 |> ignore // reserved
     let username = r.ReadNullTerminatedString()
 
-    (if capabilities &&& ClientPluginAuthLenencClientData <> 0u then
-         r.ReadLenEncString() |> ignore
-     elif capabilities &&& ClientSecureConnection <> 0u then
-         let len = int (r.ReadByte())
-         r.ReadBytes len |> ignore
-     else
-         r.ReadNullTerminatedString() |> ignore)
+    let authResponse =
+        if capabilities &&& ClientPluginAuthLenencClientData <> 0u then
+            match r.ReadLenEncInt() with
+            | Some len -> r.ReadBytes(int len)
+            | None -> [||]
+        elif capabilities &&& ClientSecureConnection <> 0u then
+            let len = int (r.ReadByte())
+            r.ReadBytes len
+        else
+            Text.Encoding.UTF8.GetBytes(r.ReadNullTerminatedString())
 
     let database =
         if capabilities &&& ClientConnectWithDb <> 0u && r.Remaining > 0 then
@@ -108,8 +118,16 @@ let parseHandshakeResponse (payload: byte[]) : HandshakeResponse =
         else
             None
 
+    let clientPlugin =
+        if capabilities &&& ClientPluginAuth <> 0u && r.Remaining > 0 then
+            Some(r.ReadNullTerminatedString())
+        else
+            None
+
     { Capabilities = capabilities
       Username = username
+      AuthResponse = authResponse
+      ClientPlugin = clientPlugin
       Database = database }
 
 let private okPayloadWithHeader

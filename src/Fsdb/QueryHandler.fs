@@ -307,9 +307,6 @@ let private showEventsRe =
 let private showRoutineStatusRe =
     Regex(@"^SHOW\s+(?:PROCEDURE|FUNCTION)\s+STATUS(\s|$)", RegexOptions.IgnoreCase)
 
-let private showGrantsRe =
-    Regex(@"^SHOW\s+GRANTS(\s+FOR\s+CURRENT_USER(\(\))?)?\s*$", RegexOptions.IgnoreCase)
-
 let private killRe = Regex(@"^KILL\s+(?:(QUERY|CONNECTION)\s+)?(\d+)\s*$", RegexOptions.IgnoreCase)
 
 /// `SHOW [FULL] TABLES ... WHERE ...` filters — phpMyAdmin's DisableIS
@@ -700,6 +697,20 @@ let private setAutocommit =
         RegexOptions.IgnoreCase
     )
 
+/// `SET PASSWORD [FOR user] = 'pw'` — probed ahead of the generic `SET `
+/// check, which would otherwise treat PASSWORD as a session variable. The
+/// optional user part captures everything before `=` (`'bob'@'%'`, `bob`);
+/// `runProbe` strips the quoting/host.
+let private setPasswordRe =
+    Regex(@"^SET\s+PASSWORD\s*(?:FOR\s+([^=\s]+)\s*)?=\s*'([^']*)'\s*;?$", RegexOptions.IgnoreCase)
+
+/// `SHOW GRANTS [FOR 'user'@'host' | FOR CURRENT_USER[()]]`.
+let private showGrantsRe = Regex(@"^SHOW\s+GRANTS(?:\s+FOR\s+(.+?))?\s*;?$", RegexOptions.IgnoreCase)
+
+/// `FLUSH [LOCAL] PRIVILEGES` — a no-op OK: privilege reads always hit the
+/// live mysql.* rows, there's no cache to flush.
+let private flushPrivilegesRe = Regex(@"^FLUSH\s+(?:LOCAL\s+)?PRIVILEGES\s*;?$", RegexOptions.IgnoreCase)
+
 /// MySqlConnector's real `BeginTransaction[Async]` handshake explicitly
 /// selects REPEATABLE READ before it sends START TRANSACTION — the
 /// isolation model FSDB's private transaction snapshot actually implements.
@@ -970,28 +981,14 @@ let private registryFor (session: Session) : Functions.Registry =
         "VERSION"
         (fun _ -> lookupVar session "version" |> Option.flatten |> Option.map VString |> Option.defaultValue VNull)
     |> Functions.registerScalar "CONNECTION_ID" (fun _ -> VInt(int64 session.ConnectionId))
-    // The wire identity: the handshake user the process registry recorded
-    // for this connection — the same source SHOW GRANTS and PROCESSLIST
-    // report, so the three can't disagree. Off the wire (embedded `Db`,
-    // tests) there's no registry entry, and the fixed fsdb identity stands.
-    |> Functions.registerScalar
-        "CURRENT_USER"
-        (fun _ ->
-            InformationSchema.tryFindProcess (int64 session.ConnectionId)
-            |> Option.map (fun p -> VString(p.User + "@%"))
-            |> Option.defaultValue (VString "fsdb@localhost"))
-    |> Functions.registerScalar
-        "USER"
-        (fun _ ->
-            InformationSchema.tryFindProcess (int64 session.ConnectionId)
-            |> Option.map (fun p ->
-                let host =
-                    match p.Host.LastIndexOf ':' with
-                    | -1 -> p.Host
-                    | i -> p.Host.Substring(0, i)
-
-                VString(p.User + "@" + host))
-            |> Option.defaultValue (VString "fsdb@localhost"))
+    // CURRENT_USER() is the matched *account* (host part `%`, the only host
+    // accounts have — see `Session.User`, threaded from the handshake and
+    // "root" for a session built off-wire); USER()/SESSION_USER() are the
+    // connecting user@client-host, which always renders `localhost` here.
+    // Same source PROCESSLIST and SHOW GRANTS report, so they can't disagree.
+    |> Functions.registerScalar "CURRENT_USER" (fun _ -> VString(session.User + "@%"))
+    |> Functions.registerScalar "USER" (fun _ -> VString(session.User + "@localhost"))
+    |> Functions.registerScalar "SESSION_USER" (fun _ -> VString(session.User + "@localhost"))
 
 /// Parses and executes anything that isn't one of the text-probe special
 /// cases above. A parse failure that also looks like a `SELECT @@...`/
@@ -1010,6 +1007,13 @@ let private executeParsed (session: Session) (stmt: Statement) : Session * Query
 
     let execute session =
         let store = Session.currentStore session
+
+        // Privilege enforcement — the one gate every parsed statement goes
+        // through (probes are exempt, see `Auth.requiredPrivileges`'s doc).
+        match Auth.check store session.User (Auth.requiredPrivileges dbName stmt) with
+        | Error(code, msg) -> session, Err(code, msg)
+        | Ok() ->
+
         // `Store.StrictMode` is store-wide, not per-session (see its doc
         // comment) — re-derive it from *this* session's own `sql_mode`
         // right before every statement, so another connection's `SET
@@ -1121,6 +1125,7 @@ let private executeStatement (session: Session) (sql: string) (upper: string) : 
 type private Probe =
     | SetAutocommit of value: string
     | SetTransactionIsolation of level: string
+    | SetPassword of user: string option * password: string
     | SetVar
     | RollbackTo of savepoint: string
     | Begin
@@ -1133,12 +1138,10 @@ type private Probe =
     | ShowStatus
     | ShowEngines
     | ShowCharset
-    | ShowPrivileges
     | ShowProcesslist of full: bool
     | ShowTriggers of db: string option
     | ShowEvents of db: string option
     | ShowRoutineStatus
-    | ShowGrants
     | Kill of queryOnly: bool * id: int64
     | ShowWarnings
     | ShowErrors
@@ -1151,6 +1154,9 @@ type private Probe =
     | Describe of name: string
     | ShowIndex of name: string * dbOverride: string option
     | ShowCollation
+    | ShowGrants of user: string option
+    | ShowPrivileges
+    | FlushPrivileges
 
 /// The one ordered list of text-probed forms — matching `Probe`'s cases
 /// exactly (the compiler enforces `runProbe` covers every one of them), so
@@ -1162,6 +1168,9 @@ let private tryProbe (sql: string) (upper: string) : Probe option =
         Some(SetAutocommit((setAutocommit.Match sql).Groups.[1].Value))
     elif setTransactionIsolation.IsMatch sql then
         Some(SetTransactionIsolation((setTransactionIsolation.Match sql).Groups.[1].Value))
+    elif setPasswordRe.IsMatch sql then
+        let m = setPasswordRe.Match sql
+        Some(SetPassword((if m.Groups.[1].Success then Some m.Groups.[1].Value else None), m.Groups.[2].Value))
     elif upper.StartsWith "SET " then
         Some SetVar
     elif rollbackToSavepointStmt.IsMatch sql then
@@ -1189,6 +1198,11 @@ let private tryProbe (sql: string) (upper: string) : Probe option =
         Some ShowCharset
     elif showPrivilegesRe.IsMatch sql then
         Some ShowPrivileges
+    elif showGrantsRe.IsMatch sql then
+        let m = showGrantsRe.Match sql
+        Some(ShowGrants(if m.Groups.[1].Success then Some m.Groups.[1].Value else None))
+    elif flushPrivilegesRe.IsMatch sql then
+        Some FlushPrivileges
     elif showProcesslistRe.IsMatch sql then
         Some(ShowProcesslist((showProcesslistRe.Match sql).Groups.[1].Success))
     elif showTriggersRe.IsMatch sql then
@@ -1199,8 +1213,6 @@ let private tryProbe (sql: string) (upper: string) : Probe option =
         Some(ShowEvents(if m.Groups.[1].Success then Some(stripBackticks m.Groups.[1].Value) else None))
     elif showRoutineStatusRe.IsMatch sql then
         Some ShowRoutineStatus
-    elif showGrantsRe.IsMatch sql then
-        Some ShowGrants
     elif killRe.IsMatch sql then
         let m = killRe.Match sql
         Some(Kill(m.Groups.[1].Value.ToUpperInvariant() = "QUERY", int64 m.Groups.[2].Value))
@@ -1266,6 +1278,17 @@ let private runProbe (session: Session) (sql: string) (probe: Probe) : Session *
             // predicate/range locking, if a client ever genuinely needs it.
             session, Err(1235, "This version of MySQL doesn't yet support 'SERIALIZABLE transaction isolation'")
         | normalized -> { session with Variables = Map.add "transaction_isolation" (Some normalized) session.Variables }, Affected 0UL
+    | SetPassword(userOpt, password) ->
+        // `FOR 'name'@'host'` — only the name matters (accounts are matched
+        // by name, see `Auth`); no FOR clause means the session's own user.
+        let name =
+            match userOpt with
+            | Some u -> u.Split('@').[0].Trim().Trim([| '\''; '`'; '"' |])
+            | None -> session.User
+
+        match Auth.setPassword (Session.currentStore session) name "%" password with
+        | Ok() -> session, Affected 0UL
+        | Error(code, msg) -> session, Err(code, msg)
     | SetVar -> handleSet session sql
     | RollbackTo name -> rollbackToSavepoint name session
     | Begin -> beginTransaction session, Affected 0UL
@@ -1288,13 +1311,6 @@ let private runProbe (session: Session) (sql: string) (probe: Probe) : Session *
     | ShowTriggers db -> session, InformationSchema.showTriggers (Session.currentStore session).Catalog db |> showResult
     | ShowEvents db -> session, InformationSchema.showEvents (Session.currentStore session).Catalog db |> showResult
     | ShowRoutineStatus -> session, InformationSchema.showRoutineStatus () |> showResult
-    | ShowGrants ->
-        let user =
-            InformationSchema.tryFindProcess (int64 session.ConnectionId)
-            |> Option.map (fun p -> p.User)
-            |> Option.defaultValue "fsdb"
-
-        session, InformationSchema.showGrants user |> showResult
     | Kill(queryOnly, id) ->
         match InformationSchema.tryFindProcess id with
         | None -> session, Err(1094, sprintf "Unknown thread id: %d" id)
@@ -1332,6 +1348,26 @@ let private runProbe (session: Session) (sql: string) (probe: Probe) : Session *
         let dbName, table = splitQualified sessionDb name
         let dbName = dbOverride |> Option.map stripBackticks |> Option.defaultValue dbName
         session, InformationSchema.showIndex (Session.currentStore session).Catalog dbName table |> showResult
+    | ShowGrants userOpt ->
+        // `FOR 'name'@'host'` — the name is what matters (accounts match by
+        // name, see `Auth`); no FOR, or FOR CURRENT_USER[()], means the
+        // session's own user.
+        let name =
+            match userOpt with
+            | None -> session.User
+            | Some u ->
+                let t = u.Trim()
+
+                if t.ToUpperInvariant().StartsWith "CURRENT_USER" then
+                    session.User
+                else
+                    t.Split('@').[0].Trim().Trim([| '\''; '`'; '"' |])
+
+        match Auth.renderGrants (Session.currentStore session) name with
+        | Ok(header, lines) -> session, ResultSet([ header ], lines |> List.map (fun l -> [ Some l ]))
+        | Error(code, msg) -> session, Err(code, msg)
+    | ShowPrivileges -> session, InformationSchema.showPrivileges () |> showResult
+    | FlushPrivileges -> session, Affected 0UL
 
 /// Parses and validates SQL for COM_STMT_PREPARE without executing it: a
 /// parse failure is the same 1064 (code, message) pair a COM_QUERY syntax

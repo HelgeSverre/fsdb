@@ -383,6 +383,78 @@ let private withCancellationWatch (client: TcpClient) (entry: InformationSchema.
 
 let private connectionCounter = ref 0L
 
+/// The AuthSwitchRequest packet payload: asks the client to answer the same
+/// 20-byte scramble with mysql_native_password (sent when it responded with
+/// a different plugin, or with nothing, and the account needs verification).
+let private authSwitchPayload (authData: byte[]) : byte[] =
+    let w = Writer()
+    w.WriteByte 0xFEuy
+    w.WriteNullTerminatedString "mysql_native_password"
+    w.WriteBytes authData
+    w.WriteByte 0uy
+    w.ToArray()
+
+/// Authenticates a parsed handshake response against `mysql.user`: the
+/// account must exist, and its credential must match: a non-empty stored
+/// hash is verified as mysql_native_password over `authData`'s scramble; an
+/// empty stored hash (no password set) accepts only an *empty* offered
+/// password, exactly like real MySQL — offering one is `1045 (using
+/// password: YES)`. Writes the 1045 ERR itself on denial and returns `None`; returns
+/// `Some seqId` (the sequence id the OK packet must use) on success —
+/// `firstSeq + 1` more when an AuthSwitch round trip happened.
+let private authenticateHandshake
+    (client: TcpClient)
+    (stream: IO.Stream)
+    (capabilities: uint32)
+    (store: Storage.Store)
+    (authData: byte[])
+    (resp: HandshakeResponse)
+    (firstSeq: byte)
+    : Async<byte option> =
+    async {
+        let deny (seqId: byte) (usingPassword: bool) =
+            async {
+                let msg =
+                    sprintf
+                        "Access denied for user '%s'@'localhost' (using password: %s)"
+                        resp.Username
+                        (if usingPassword then "YES" else "NO")
+
+                do! writePacketAsync stream { SeqId = seqId; Payload = errPayload capabilities 1045 msg } |> Async.Ignore
+                return None
+            }
+
+        match Auth.tryUserRow store resp.Username with
+        | None -> return! deny firstSeq (resp.AuthResponse.Length > 0)
+        | Some(cols, row) ->
+            let stored = Auth.storedPasswordHash cols row
+
+            if stored = "" then
+                // No password set: only an empty offered password matches
+                // (every auth plugin sends a zero-length response for an
+                // empty password, so no AuthSwitch round trip is needed).
+                if resp.AuthResponse.Length = 0 then
+                    return Some firstSeq
+                else
+                    return! deny firstSeq true
+            elif Auth.verifyNative stored authData resp.AuthResponse then
+                return Some firstSeq
+            elif resp.ClientPlugin = Some "mysql_native_password" then
+                // Right plugin, wrong password — no switch will fix it.
+                return! deny firstSeq (resp.AuthResponse.Length > 0)
+            else
+                // The client answered with another plugin (mysql CLI 8.x
+                // defaults to caching_sha2_password) or nothing; ask it to
+                // redo the same scramble with mysql_native_password.
+                do! writePacketAsync stream { SeqId = firstSeq; Payload = authSwitchPayload authData } |> Async.Ignore
+
+                match! readPacketWithTimeout client stream with
+                | None -> return None // client gave up; nothing to reply to
+                | Some switchResp when Auth.verifyNative stored authData switchResp.Payload ->
+                    return Some(switchResp.SeqId + 1uy)
+                | Some switchResp -> return! deny (switchResp.SeqId + 1uy) (switchResp.Payload.Length > 0)
+    }
+
 let private handleConnection
     (connectionId: int)
     (store: Storage.Store)
@@ -421,8 +493,16 @@ let private handleConnection
                 // foo`, PDO's DSN `dbname=foo`) gets it auto-created, same
                 // as `USE` on a fresh in-memory server with no setup step.
                 resp.Database |> Option.iter (Storage.ensureDatabase store)
+
+                // Authenticate before any session state exists; on denial the
+                // 1045 is already written and the command loop below never
+                // runs (see the guard on `do! loop session` at the bottom).
+                let! authOkSeq =
+                    authenticateHandshake client stream capabilities store authData resp (handshakeResp.SeqId + 1uy)
+
                 let session =
                     { Session.create connectionId store with
+                        User = resp.Username
                         Database = resp.Database
                         CustomFunctions = customFunctions
                         Capabilities = capabilities }
@@ -435,18 +515,24 @@ let private handleConnection
                     with _ ->
                         ""
 
+                // Registered even when auth is about to deny — the command
+                // loop below never runs then, and the connection teardown's
+                // `unregisterProcess` removes the short-lived entry.
                 let processEntry = InformationSchema.registerProcess (int64 connectionId) resp.Username remoteHost
                 processEntry.Db <- resp.Database
                 // `KILL CONNECTION <id>`: closing the socket makes this
                 // connection's next read fail, which ends its command loop.
                 processEntry.CloseConnection <- Some(fun () -> try client.Close() with _ -> ())
 
-                do!
-                    writePacketAsync
-                        stream
-                        { SeqId = handshakeResp.SeqId + 1uy
-                          Payload = okPayload capabilities (statusFlagsFor session) 0UL 0UL }
-                    |> Async.Ignore
+                match authOkSeq with
+                | None -> () // denied: the 1045 is already written, no OK
+                | Some okSeq ->
+                    do!
+                        writePacketAsync
+                            stream
+                            { SeqId = okSeq
+                              Payload = okPayload capabilities (statusFlagsFor session) 0UL 0UL }
+                        |> Async.Ignore
 
                 // Runs a statement dispatch under `withCancellationWatch`,
                 // catching the `OperationCanceledException` a killed
@@ -793,6 +879,7 @@ let private handleConnection
                                 // for instead of a full reconnect.
                                 let session =
                                     { Session.create session.ConnectionId session.Store with
+                                        User = session.User
                                         Database = session.Database
                                         CustomFunctions = session.CustomFunctions
                                         Capabilities = session.Capabilities }
@@ -829,7 +916,8 @@ let private handleConnection
                                 return! loop session
                     }
 
-                do! loop session
+                if authOkSeq.IsSome then
+                    do! loop session
         with
         | :? PacketTooLargeException ->
             // Reassembling a multi-packet payload blew past

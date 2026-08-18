@@ -36,6 +36,11 @@ module AstKind =
         | Update _ -> "update"
         | Delete _ -> "delete"
         | Truncate _ -> "truncate"
+        | CreateUser _ -> "create_user"
+        | DropUser _ -> "drop_user"
+        | AlterUser _ -> "alter_user"
+        | Grant _ -> "grant"
+        | Revoke _ -> "revoke"
         | Explain statement -> "explain_" + ofStatement statement
 
 [<RequireQualifiedAccess>]

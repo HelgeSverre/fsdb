@@ -498,18 +498,106 @@ let tests =
               let values = rowsOf reloaded defaultDatabase "hot" |> List.map (fun r -> r.[1])
               Expect.isTrue (values |> List.forall (fun v -> v = VInt 1L)) "every row's replayed update landed"
 
-              // `load` reindexes "hot" a small constant number of times
+              // `load` reindexes each table a small constant number of times
               // (once decoding the snapshot, once after replay) no matter
               // how many WAL events touch it — a per-event reindex would
-              // make this scale with `rowCount` (2500) instead.
+              // make this scale with `rowCount` (2500) instead. The catalog
+              // always carries the 5 built-in `mysql` system tables besides
+              // "hot", hence the bound of ~2 × 6 tables with headroom.
               Expect.isLessThan
                   reindexesDuringLoad
-                  10
+                  20
                   (sprintf
                       "loading a snapshot + %d single-row UPDATEs against a %d-row UNIQUE-indexed table triggered %d reindexes — looks like a per-event reindex again"
                       rowCount
                       rowCount
                       reindexesDuringLoad)
+
+          testCase "the mysql system schema round-trips through snapshot + reload, and a mutated user row survives"
+          <| fun _ ->
+              let dir = tempDataDir ()
+              let store = load dir
+              attach dir store
+
+              // Mutate mysql.user through the ordinary row path (what CREATE
+              // USER will do) so the WAL carries it.
+              insertRows
+                  store
+                  "mysql"
+                  "user"
+                  (Some [ "Host"; "User"; "plugin"; "authentication_string" ])
+                  [ [ VString "%"; VString "alice"; VString "mysql_native_password"; VString "*HASH" ] ]
+              |> Result.mapError (failtestf "insert into mysql.user failed: %A")
+              |> ignore
+
+              let reloaded = load dir
+
+              let users =
+                  rowsOf reloaded "mysql" "user" |> List.map (fun r -> r.[1]) |> List.sortBy string
+
+              Expect.equal users [ VString "alice"; VString "root" ] "root bootstrap row + the persisted alice row"
+
+          testCase "CREATE USER / SET PASSWORD / DROP USER mutations replay from the WAL"
+          <| fun _ ->
+              let dir = tempDataDir ()
+              let store = load dir
+              attach dir store
+
+              Fsdb.Auth.createUser store "alice" "%" (Some "pw1") |> ignore
+              Fsdb.Auth.createUser store "bob" "%" None |> ignore
+              Fsdb.Auth.setPassword store "alice" "%" "pw2" |> ignore
+              Fsdb.Auth.dropUser store "bob" "%" |> ignore
+
+              let reloaded = load dir
+
+              match Fsdb.Auth.tryUserRow reloaded "alice" with
+              | Some(cols, row) ->
+                  Expect.equal
+                      (Fsdb.Auth.storedPasswordHash cols row)
+                      (Fsdb.Auth.nativePasswordHash "pw2")
+                      "replayed alice with her updated hash"
+              | None -> failtest "expected alice to survive the reload"
+
+              Expect.isNone (Fsdb.Auth.tryUserRow reloaded "bob") "bob's replayed drop stuck"
+
+          testCase "GRANT/REVOKE mutations to mysql.db and tables_priv replay from the WAL"
+          <| fun _ ->
+              let dir = tempDataDir ()
+              let store = load dir
+              attach dir store
+
+              Fsdb.Auth.createUser store "worker" "%" None |> ignore
+              Fsdb.Auth.grant store [ "SELECT"; "UPDATE" ] (Fsdb.Auth.OnDb "shop") [ "worker", "%" ] false |> ignore
+              Fsdb.Auth.grant store [ "DELETE" ] (Fsdb.Auth.OnTable("shop", "orders")) [ "worker", "%" ] false |> ignore
+              Fsdb.Auth.grant store [ "INSERT" ] (Fsdb.Auth.OnDb "shop") [ "worker", "%" ] false |> ignore
+              Fsdb.Auth.revoke store [ "UPDATE" ] (Fsdb.Auth.OnDb "shop") [ "worker", "%" ] |> ignore
+
+              let reloaded = load dir
+
+              match Fsdb.Auth.renderGrants reloaded "worker" with
+              | Ok(_, lines) ->
+                  Expect.equal
+                      lines
+                      [ "GRANT USAGE ON *.* TO `worker`@`%`"
+                        "GRANT SELECT, INSERT ON `shop`.* TO `worker`@`%`"
+                        "GRANT DELETE ON `shop`.`orders` TO `worker`@`%`" ]
+                      "replayed grants minus the revoked UPDATE"
+              | Error e -> failtestf "expected worker's grants after reload, got %A" e
+
+          testCase "a snapshot written without the mysql schema gets it re-seeded on load"
+          <| fun _ ->
+              let dir = tempDataDir ()
+              let store = create ()
+              // Simulate a pre-feature snapshot: drop mysql from the catalog
+              // before writing it out.
+              store.Databases.TryRemove "mysql" |> ignore
+              snapshotNow dir store
+
+              let reloaded = load dir
+              Expect.isTrue (databaseExists reloaded "mysql") "mysql re-seeded"
+
+              let users = rowsOf reloaded "mysql" "user" |> List.map (fun r -> r.[1])
+              Expect.equal users [ VString "root" ] "bootstrap root row present"
 
           testCase "WAL replay of a duplicate-row DELETE LIMIT 1 removes exactly one physical row, not every value-equal twin"
           <| fun _ ->

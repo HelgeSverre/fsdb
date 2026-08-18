@@ -745,12 +745,14 @@ let tests =
               | ResultSet(_, [ [ Some "autocommit"; Some "1" ] ]) -> ()
               | other -> failtestf "expected the one autocommit row, got %A" other
 
-          testCase "CURRENT_USER()/USER() fall back to the fsdb identity off the wire"
+          testCase "CURRENT_USER()/USER() fall back to the root identity off the wire"
           <| fun _ ->
+              // A session built directly (embedded `Db`, tests) has no
+              // handshake — `Session.create` defaults its user to root.
               let session = create 999904 (Fsdb.Storage.create ())
 
               match handle session "SELECT CURRENT_USER(), USER()" |> snd with
-              | ResultSet(_, [ [ Some "fsdb@localhost"; Some "fsdb@localhost" ] ]) -> ()
+              | ResultSet(_, [ [ Some "root@%"; Some "root@localhost" ] ]) -> ()
               | other -> failtestf "expected the fallback identity, got %A" other
 
           testCase "SHOW COLUMNS FROM t / DESCRIBE t report field metadata"
@@ -1011,4 +1013,265 @@ let tests =
 
               match handle session "SET TRANSACTION ISOLATION LEVEL SERIALIZABLE" |> snd with
               | Err(1235, _) -> ()
-              | other -> failtestf "expected a 1235 unsupported-feature error, got %A" other ]
+              | other -> failtestf "expected a 1235 unsupported-feature error, got %A" other
+
+          // -----------------------------------------------------------------
+          // Session user identity + the built-in `mysql` system schema
+          // -----------------------------------------------------------------
+
+          testCase "CURRENT_USER()/USER()/SESSION_USER() report the session's user, not a hardcoded name"
+          <| fun _ ->
+              let session = { create 1 (Fsdb.Storage.create ()) with User = "alice" }
+
+              match handle session "SELECT CURRENT_USER(), USER(), SESSION_USER()" |> snd with
+              | ResultSet(_, [ [ Some "alice@%"; Some "alice@localhost"; Some "alice@localhost" ] ]) -> ()
+              | other -> failtestf "expected the session user's identities, got %A" other
+
+          testCase "paren-less SELECT CURRENT_USER parses as the function, not a column (TablePlus/phpMyAdmin form)"
+          <| fun _ ->
+              let session = create 1 (Fsdb.Storage.create ())
+
+              match handle session "SELECT CURRENT_USER" |> snd with
+              | ResultSet(_, [ [ Some "root@%" ] ]) -> ()
+              | other -> failtestf "expected root@%%, got %A" other
+
+          testCase "SHOW DATABASES lists mysql alphabetically interleaved with real databases"
+          <| fun _ ->
+              let session = create 1 (Fsdb.Storage.create ())
+              let session, _ = handle session "CREATE DATABASE zoo"
+
+              match handle session "SHOW DATABASES" |> snd with
+              | ResultSet(_, rows) ->
+                  let names = rows |> List.map (List.head >> Option.get)
+                  Expect.equal names [ "fsdb"; "information_schema"; "mysql"; "zoo" ] "sorted, mysql included"
+              | other -> failtestf "expected a resultset, got %A" other
+
+          testCase "USE mysql works and SHOW TABLES FROM mysql lists the system tables"
+          <| fun _ ->
+              let session = create 1 (Fsdb.Storage.create ())
+
+              match handle session "USE mysql" with
+              | session, Affected 0UL ->
+                  match handle session "SHOW TABLES" |> snd with
+                  | ResultSet([ "Tables_in_mysql" ], rows) ->
+                      let names = rows |> List.map (List.head >> Option.get)
+                      Expect.equal names [ "columns_priv"; "db"; "global_grants"; "tables_priv"; "user" ] "the 5 system tables"
+                  | other -> failtestf "expected the mysql table list, got %A" other
+              | _, other -> failtestf "expected USE mysql to succeed, got %A" other
+
+          testCase "SHOW TABLES FROM information_schema lists the virtual tables instead of 1049"
+          <| fun _ ->
+              let session = create 1 (Fsdb.Storage.create ())
+
+              match handle session "SHOW FULL TABLES FROM information_schema" |> snd with
+              | ResultSet([ "Tables_in_information_schema"; "Table_type" ], rows) ->
+                  Expect.isTrue
+                      (rows |> List.exists (fun r -> r = [ Some "TABLES"; Some "SYSTEM VIEW" ]))
+                      "TABLES present as a SYSTEM VIEW"
+              | other -> failtestf "expected the virtual table list, got %A" other
+
+          testCase "SELECT from mysql.user finds the bootstrap root row (phpMyAdmin's isSuperUser probe shape)"
+          <| fun _ ->
+              let session = create 1 (Fsdb.Storage.create ())
+
+              match handle session "SELECT User, Host, plugin, Select_priv FROM mysql.user" |> snd with
+              | ResultSet(_, [ [ Some "root"; Some "%"; Some "mysql_native_password"; Some "Y" ] ]) -> ()
+              | other -> failtestf "expected the root row, got %A" other
+
+              match handle session "SELECT 1 FROM mysql.user LIMIT 1" |> snd with
+              | ResultSet(_, [ [ Some "1" ] ]) -> ()
+              | other -> failtestf "expected the isSuperUser probe to succeed, got %A" other
+
+          testCase "CREATE USER / DROP USER manage mysql.user rows with MySQL's 1396 duplicate/missing semantics"
+          <| fun _ ->
+              let store = Fsdb.Storage.create ()
+              let session = create 1 store
+
+              match handle session "CREATE USER 'bob'@'%' IDENTIFIED BY 's3cret'" |> snd with
+              | Affected 0UL -> ()
+              | other -> failtestf "expected CREATE USER to succeed, got %A" other
+
+              match Fsdb.Auth.tryUserRow store "bob" with
+              | Some(cols, row) ->
+                  Expect.equal
+                      (Fsdb.Auth.storedPasswordHash cols row)
+                      (Fsdb.Auth.nativePasswordHash "s3cret")
+                      "hash landed in authentication_string"
+              | None -> failtest "expected bob to exist"
+
+              match handle session "CREATE USER bob" |> snd with
+              | Err(1396, msg) -> Expect.stringContains msg "CREATE USER failed" "duplicate is 1396"
+              | other -> failtestf "expected 1396, got %A" other
+
+              match handle session "CREATE USER IF NOT EXISTS bob" |> snd with
+              | Affected 0UL -> ()
+              | other -> failtestf "expected IF NOT EXISTS to be a no-op, got %A" other
+
+              match handle session "DROP USER bob" |> snd with
+              | Affected 0UL -> Expect.isNone (Fsdb.Auth.tryUserRow store "bob") "bob gone"
+              | other -> failtestf "expected DROP USER to succeed, got %A" other
+
+              match handle session "DROP USER bob" |> snd with
+              | Err(1396, _) -> ()
+              | other -> failtestf "expected dropping a missing user to be 1396, got %A" other
+
+          testCase "ALTER USER and SET PASSWORD rewrite the stored hash; SET PASSWORD defaults to the session user"
+          <| fun _ ->
+              let store = Fsdb.Storage.create ()
+              let session = create 1 store
+              let session, _ = handle session "CREATE USER carol"
+
+              match handle session "ALTER USER 'carol'@'%' IDENTIFIED BY 'first'" |> snd with
+              | Affected 0UL -> ()
+              | other -> failtestf "expected ALTER USER to succeed, got %A" other
+
+              match handle session "SET PASSWORD FOR 'carol'@'%' = 'second'" |> snd with
+              | Affected 0UL ->
+                  match Fsdb.Auth.tryUserRow store "carol" with
+                  | Some(cols, row) ->
+                      Expect.equal
+                          (Fsdb.Auth.storedPasswordHash cols row)
+                          (Fsdb.Auth.nativePasswordHash "second")
+                          "SET PASSWORD FOR overwrote ALTER USER's hash"
+                  | None -> failtest "carol vanished"
+              | other -> failtestf "expected SET PASSWORD FOR to succeed, got %A" other
+
+              // No FOR clause: applies to the session's own user (root).
+              match handle session "SET PASSWORD = 'rootpw'" |> snd with
+              | Affected 0UL ->
+                  match Fsdb.Auth.tryUserRow store "root" with
+                  | Some(cols, row) ->
+                      Expect.equal
+                          (Fsdb.Auth.storedPasswordHash cols row)
+                          (Fsdb.Auth.nativePasswordHash "rootpw")
+                          "session user's hash set"
+                  | None -> failtest "root vanished"
+              | other -> failtestf "expected SET PASSWORD to succeed, got %A" other
+
+          testCase "DROP DATABASE mysql is rejected with 3552 like a real system schema"
+          <| fun _ ->
+              let session = create 1 (Fsdb.Storage.create ())
+
+              match handle session "DROP DATABASE mysql" |> snd with
+              | Err(3552, msg) -> Expect.stringContains msg "system schema" "names the rejection"
+              | other -> failtestf "expected 3552, got %A" other
+
+          testCase "privilege enforcement: db and table grants gate SELECT/INSERT/DDL with 1142/1044/1227"
+          <| fun _ ->
+              let store = Fsdb.Storage.create ()
+              let root = create 1 store
+              let root, _ = handle root "CREATE DATABASE shop"
+              let root, _ = handle root "USE shop"
+              let root, _ = handle root "CREATE TABLE orders (id INT PRIMARY KEY)"
+              let root, _ = handle root "CREATE TABLE secrets (id INT PRIMARY KEY)"
+              let root, _ = handle root "CREATE USER worker"
+              let root, _ = handle root "GRANT SELECT ON shop.orders TO worker"
+
+              let worker = { create 2 store with User = "worker"; Database = Some "shop" }
+
+              match handle worker "SELECT * FROM orders" |> snd with
+              | ResultSet _ -> ()
+              | other -> failtestf "expected the table grant to allow SELECT, got %A" other
+
+              match handle worker "SELECT * FROM secrets" |> snd with
+              | Err(1142, msg) -> Expect.stringContains msg "SELECT command denied to user 'worker'" "1142 shape"
+              | other -> failtestf "expected 1142 on the ungranted table, got %A" other
+
+              match handle worker "INSERT INTO orders VALUES (1)" |> snd with
+              | Err(1142, _) -> ()
+              | other -> failtestf "expected INSERT to be denied, got %A" other
+
+              match handle worker "CREATE DATABASE sneaky" |> snd with
+              | Err(1044, _) -> ()
+              | other -> failtestf "expected CREATE DATABASE to be 1044, got %A" other
+
+              match handle worker "CREATE USER accomplice" |> snd with
+              | Err(1227, _) -> ()
+              | other -> failtestf "expected CREATE USER to be 1227, got %A" other
+
+              match handle worker "GRANT SELECT ON shop.secrets TO worker" |> snd with
+              | Err(1227, _) -> ()
+              | other -> failtestf "expected GRANT without grant option to be 1227, got %A" other
+
+              // A db-level grant covers every table in the db.
+              let root, _ = handle root "GRANT INSERT ON shop.* TO worker"
+
+              match handle worker "INSERT INTO secrets VALUES (2)" |> snd with
+              | Affected 1UL -> ()
+              | other -> failtestf "expected the db-level INSERT grant to work, got %A" other
+
+              // information_schema stays readable for everyone.
+              match handle worker "SELECT COUNT(*) FROM information_schema.TABLES" |> snd with
+              | ResultSet _ -> ()
+              | other -> failtestf "expected information_schema to stay readable, got %A" other
+
+              // REVOKE takes it back.
+              let _root, _ = handle root "REVOKE SELECT ON shop.orders FROM worker"
+
+              match handle worker "SELECT * FROM orders" |> snd with
+              | Err(1142, _) -> ()
+              | other -> failtestf "expected the revoked SELECT to be denied again, got %A" other
+
+          testCase "SHOW GRANTS renders global/db/table lines; USER_PRIVILEGES and SHOW PRIVILEGES enumerate"
+          <| fun _ ->
+              let store = Fsdb.Storage.create ()
+              let root = create 1 store
+
+              match handle root "SHOW GRANTS" |> snd with
+              | ResultSet([ header ], rows) ->
+                  Expect.equal header "Grants for root@%" "header names the account"
+
+                  Expect.equal
+                      (rows |> List.map (List.head >> Option.get))
+                      [ "GRANT ALL PRIVILEGES ON *.* TO `root`@`%` WITH GRANT OPTION" ]
+                      "root's single global line"
+              | other -> failtestf "expected root's grants, got %A" other
+
+              let root, _ = handle root "CREATE USER worker"
+              let root, _ = handle root "GRANT SELECT, UPDATE ON shop.* TO worker"
+              let root, _ = handle root "GRANT DELETE ON shop.orders TO worker"
+
+              match handle root "SHOW GRANTS FOR 'worker'@'%'" |> snd with
+              | ResultSet(_, rows) ->
+                  Expect.equal
+                      (rows |> List.map (List.head >> Option.get))
+                      [ "GRANT USAGE ON *.* TO `worker`@`%`"
+                        "GRANT SELECT, UPDATE ON `shop`.* TO `worker`@`%`"
+                        "GRANT DELETE ON `shop`.`orders` TO `worker`@`%`" ]
+                      "usage + db + table lines in order"
+              | other -> failtestf "expected worker's grants, got %A" other
+
+              match handle root "SHOW GRANTS FOR nobody" |> snd with
+              | Err(1141, _) -> ()
+              | other -> failtestf "expected 1141 for an unknown grantee, got %A" other
+
+              match handle root "SELECT PRIVILEGE_TYPE FROM information_schema.USER_PRIVILEGES WHERE GRANTEE = \"'worker'@'%'\"" |> snd with
+              | ResultSet(_, [ [ Some "USAGE" ] ]) -> ()
+              | other -> failtestf "expected worker's USAGE row in USER_PRIVILEGES, got %A" other
+
+              match handle root "SHOW PRIVILEGES" |> snd with
+              | ResultSet([ "Privilege"; "Context"; "Comment" ], rows) ->
+                  Expect.equal (List.length rows) 73 "MySQL 8.4's 73 privileges"
+              | other -> failtestf "expected the privilege table, got %A" other
+
+              match handle root "FLUSH PRIVILEGES" |> snd with
+              | Affected 0UL -> ()
+              | other -> failtestf "expected FLUSH PRIVILEGES to be an OK no-op, got %A" other
+
+          testCase "mysql.user has MySQL 8.4's exact 51-column shape and mysql.db its 22"
+          <| fun _ ->
+              let store = Fsdb.Storage.create ()
+
+              match Fsdb.Storage.scanList store "mysql" "user" with
+              | Ok(cols, rows) ->
+                  Expect.equal (List.length cols) 51 "51 columns"
+                  Expect.equal (cols |> List.item 2 |> fun c -> c.Name) "Select_priv" "priv columns start at 3"
+                  Expect.equal (cols |> List.last |> fun c -> c.Name) "User_attributes" "last column"
+                  Expect.equal (List.length rows) 1 "just root"
+              | Error e -> failtestf "expected mysql.user to scan, got %A" e
+
+              match Fsdb.Storage.scanList store "mysql" "db" with
+              | Ok(cols, rows) ->
+                  Expect.equal (List.length cols) 22 "22 columns"
+                  Expect.isEmpty rows "no db-level grants out of the box"
+              | Error e -> failtestf "expected mysql.db to scan, got %A" e ]

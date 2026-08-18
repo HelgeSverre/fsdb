@@ -35,3 +35,27 @@ the embedding API, opt-in persistence, EXPLAIN + multi-table DML,
 performance-without-ugliness, and the streaming pipeline. See
 [ROADMAP.md](ROADMAP.md) for the plan, acceptance gates, and per-milestone
 evidence.
+
+## Users, authentication, and privileges
+
+fsdb has a real account system backed by a stored `mysql` schema (`user`,
+`db`, `tables_priv`, `columns_priv`, `global_grants` — MySQL 8.4 column
+shapes, oracle-verified). `CREATE USER` / `DROP USER` / `ALTER USER` /
+`SET PASSWORD` / `GRANT` / `REVOKE` persist through the ordinary WAL/snapshot
+path; passwords are mysql_native_password hashes verified at the handshake
+(with an AuthSwitchRequest for clients that answer with caching_sha2 first);
+statements are privilege-checked at global, database, and table scope with
+MySQL's 1045/1142/1044/1227 error shapes. `SHOW GRANTS [FOR user]`,
+`SHOW PRIVILEGES` (8.4's 73 rows), `information_schema.USER_PRIVILEGES`, and
+`FLUSH PRIVILEGES` (no-op OK) are served; `DROP DATABASE mysql` is 3552.
+
+Deliberate divergences (each marked `ponytail:` at its code site):
+
+- One host per account, matched by name only; the connecting host always
+  renders as `localhost`, accounts default to `'%'`.
+- Enforcement covers parsed statements' top-level table references;
+  SHOW/SET text probes and subqueries/derived tables are unchecked.
+- No roles, dynamic privileges, column-level privileges, proxy users, or
+  password expiry — the columns exist in the table shapes but stay at their
+  defaults. 5 of MySQL's 38 `mysql.*` tables exist.
+- `SHOW GRANTS` omits root's dynamic-privilege and PROXY lines.

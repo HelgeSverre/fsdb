@@ -20,6 +20,7 @@ let main argv =
               ValueTests.tests
               ParserTests.tests
               StorageTests.tests
+              AuthTests.tests
               PersistenceTests.tests
               ExecutorTests.tests
               InformationSchemaTests.tests

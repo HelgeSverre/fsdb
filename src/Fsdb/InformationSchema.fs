@@ -969,32 +969,92 @@ let private partitionsRows (catalog: Catalog) : Value[] list =
            VNull |])
 
 // ---------------------------------------------------------------------------
-// Privilege views. fsdb has no user system (`Protocol.parseHandshakeResponse`
-// accepts any credentials), so the truthful global statement is "every
-// connected session can do everything": USER_PRIVILEGES lists the live
-// sessions' users with the full global privilege set, and the narrower
-// schema/table/column grant views are genuinely empty.
+// Privilege views — projected straight off the `mysql` system schema's rows
+// (`user`/`db`/`tables_priv`, see `Storage`'s bootstrap and `Auth`), the
+// same source SHOW GRANTS renders and the executor enforces, so the three
+// can't disagree. COLUMN_PRIVILEGES stays genuinely empty: fsdb has no
+// column-level grants.
 // ---------------------------------------------------------------------------
 
-/// MySQL 8.4's global privilege names, `SHOW PRIVILEGES` order.
-let globalPrivileges =
-    [ "SELECT"; "INSERT"; "UPDATE"; "DELETE"; "CREATE"; "DROP"; "RELOAD"
-      "SHUTDOWN"; "PROCESS"; "FILE"; "REFERENCES"; "INDEX"; "ALTER"
-      "SHOW DATABASES"; "SUPER"; "CREATE TEMPORARY TABLES"; "LOCK TABLES"
-      "EXECUTE"; "REPLICATION SLAVE"; "REPLICATION CLIENT"; "CREATE VIEW"
-      "SHOW VIEW"; "CREATE ROUTINE"; "ALTER ROUTINE"; "CREATE USER"; "EVENT"
-      "TRIGGER"; "CREATE TABLESPACE"; "CREATE ROLE"; "DROP ROLE" ]
+let private mysqlTable (catalog: Catalog) (table: string) : Table option =
+    Map.tryFind "mysql" catalog |> Option.bind (Map.tryFind table)
+
+let private colIdx (t: Table) (name: string) : int option =
+    t.Columns |> List.tryFindIndex (fun c -> String.Equals(c.Name, name, StringComparison.OrdinalIgnoreCase))
+
+let private rowText (row: Value[]) (i: int) : string =
+    match row.[i] with
+    | VString s -> s
+    | _ -> ""
 
 let private userPrivilegesColumns =
     [ strCol "GRANTEE"; strCol "TABLE_CATALOG"; strCol "PRIVILEGE_TYPE"; strCol "IS_GRANTABLE" ]
 
-let private userPrivilegesRows () : Value[] list =
-    listProcesses ()
-    |> List.map (fun ptmp -> ptmp.User)
-    |> List.distinct
-    |> List.collect (fun user ->
-        globalPrivileges
-        |> List.map (fun priv -> [| vs (sprintf "'%s'@'%%'" user); vs "def"; vs priv; vs "YES" |]))
+/// Each account's global privileges off `mysql.user` (an account with none
+/// gets the single `USAGE` row, same as MySQL).
+let private userPrivilegesRows (catalog: Catalog) : Value[] list =
+    match mysqlTable catalog "user" with
+    | None -> []
+    | Some t ->
+        match colIdx t "User", colIdx t "Host", colIdx t "Grant_priv" with
+        | Some userIdx, Some hostIdx, Some grantIdx ->
+            t.Rows
+            |> List.collect (fun row ->
+                let grantee = sprintf "'%s'@'%s'" (rowText row userIdx) (rowText row hostIdx)
+                let grantable = if rowText row grantIdx = "Y" then "YES" else "NO"
+
+                let granted =
+                    Fsdb.Auth.staticPrivileges
+                    |> List.filter (fun d ->
+                        colIdx t d.UserCol |> Option.map (fun i -> rowText row i = "Y") |> Option.defaultValue false)
+
+                let privNames = if granted.IsEmpty then [ "USAGE" ] else granted |> List.map (fun d -> d.Sql)
+                privNames |> List.map (fun p -> [| vs grantee; vs "def"; vs p; vs grantable |]))
+        | _ -> []
+
+/// Per-database grants off `mysql.db`.
+let private schemaPrivilegesRows (catalog: Catalog) : Value[] list =
+    match mysqlTable catalog "db" with
+    | None -> []
+    | Some t ->
+        match colIdx t "User", colIdx t "Host", colIdx t "Db", colIdx t "Grant_priv" with
+        | Some u, Some h, Some d, Some g ->
+            t.Rows
+            |> List.collect (fun row ->
+                let grantee = sprintf "'%s'@'%s'" (rowText row u) (rowText row h)
+                let grantable = if rowText row g = "Y" then "YES" else "NO"
+
+                Fsdb.Auth.staticPrivileges
+                |> List.filter (fun p ->
+                    p.DbCol.IsSome
+                    && (colIdx t p.DbCol.Value |> Option.map (fun i -> rowText row i = "Y") |> Option.defaultValue false))
+                |> List.map (fun p -> [| vs grantee; vs "def"; vs (rowText row d); vs p.Sql; vs grantable |]))
+        | _ -> []
+
+/// Per-table grants off `mysql.tables_priv`'s `Table_priv` SET strings.
+let private tablePrivilegesRows (catalog: Catalog) : Value[] list =
+    match mysqlTable catalog "tables_priv" with
+    | None -> []
+    | Some t ->
+        match colIdx t "User", colIdx t "Host", colIdx t "Db", colIdx t "Table_name", colIdx t "Table_priv" with
+        | Some u, Some h, Some d, Some tn, Some tp ->
+            t.Rows
+            |> List.collect (fun row ->
+                let members =
+                    (rowText row tp).Split(',')
+                    |> Array.map (fun m -> m.Trim())
+                    |> Array.filter (fun m -> m <> "")
+                    |> Array.toList
+
+                let hasMember s = members |> List.exists (fun m -> String.Equals(m, s, StringComparison.OrdinalIgnoreCase))
+                let grantee = sprintf "'%s'@'%s'" (rowText row u) (rowText row h)
+                let grantable = if hasMember "Grant" then "YES" else "NO"
+
+                Fsdb.Auth.staticPrivileges
+                |> List.filter (fun p -> p.TablePriv |> Option.map hasMember |> Option.defaultValue false)
+                |> List.map (fun p ->
+                    [| vs grantee; vs "def"; vs (rowText row d); vs (rowText row tn); vs p.Sql; vs grantable |]))
+        | _ -> []
 
 let private schemaPrivilegesColumns =
     [ strCol "GRANTEE"; strCol "TABLE_CATALOG"; strCol "TABLE_SCHEMA"; strCol "PRIVILEGE_TYPE"; strCol "IS_GRANTABLE" ]
@@ -1110,16 +1170,17 @@ let scan (catalog: Catalog) (name: string) : (ColumnDef list * Value[] list) opt
         | "SCHEMATA" -> Some(schemataRows catalog)
         | "PROCESSLIST" -> Some(processlistRows ())
         | "PARTITIONS" -> Some(partitionsRows catalog)
-        | "USER_PRIVILEGES" -> Some(userPrivilegesRows ())
+        | "USER_PRIVILEGES" -> Some(userPrivilegesRows catalog)
+        | "SCHEMA_PRIVILEGES" -> Some(schemaPrivilegesRows catalog)
+        | "TABLE_PRIVILEGES" -> Some(tablePrivilegesRows catalog)
         | "ENGINES" -> Some enginesRows
-        // Object catalogs fsdb has no objects for — real empty sets.
+        // Object catalogs fsdb has no objects for — real empty sets
+        // (COLUMN_PRIVILEGES too: no column-level grants exist).
         | "VIEWS"
         | "ROUTINES"
         | "PARAMETERS"
         | "TRIGGERS"
         | "EVENTS"
-        | "SCHEMA_PRIVILEGES"
-        | "TABLE_PRIVILEGES"
         | "COLUMN_PRIVILEGES" -> Some []
         | _ -> None
 
@@ -1210,6 +1271,64 @@ let showCollation (likeOpt: string option) : ShowResult =
     Ok(
         [ "Collation"; "Charset"; "Id"; "Default"; "Compiled"; "Sortlen"; "Pad_attribute" ],
         rows
+    )
+
+/// `SHOW PRIVILEGES` — MySQL 8.4.11's exact 73 rows (oracle-verified): the
+/// 33 static privileges with their contexts/comments, then the dynamic
+/// privileges (Server Admin, empty comment). Static data — fsdb enforces
+/// only the static set, but clients enumerate this list as-is.
+let showPrivileges () : ShowResult =
+    let staticRows =
+        [ "Alter", "Tables", "To alter the table"
+          "Alter routine", "Functions,Procedures", "To alter or drop stored functions/procedures"
+          "Create", "Databases,Tables,Indexes", "To create new databases and tables"
+          "Create routine", "Databases", "To use CREATE FUNCTION/PROCEDURE"
+          "Create role", "Server Admin", "To create new roles"
+          "Create temporary tables", "Databases", "To use CREATE TEMPORARY TABLE"
+          "Create view", "Tables", "To create new views"
+          "Create user", "Server Admin", "To create new users"
+          "Delete", "Tables", "To delete existing rows"
+          "Drop", "Databases,Tables", "To drop databases, tables, and views"
+          "Drop role", "Server Admin", "To drop roles"
+          "Event", "Server Admin", "To create, alter, drop and execute events"
+          "Execute", "Functions,Procedures", "To execute stored routines"
+          "File", "File access on server", "To read and write files on the server"
+          "Grant option", "Databases,Tables,Functions,Procedures", "To give to other users those privileges you possess"
+          "Index", "Tables", "To create or drop indexes"
+          "Insert", "Tables", "To insert data into tables"
+          "Lock tables", "Databases", "To use LOCK TABLES (together with SELECT privilege)"
+          "Process", "Server Admin", "To view the plain text of currently executing queries"
+          "Proxy", "Server Admin", "To make proxy user possible"
+          "References", "Databases,Tables", "To have references on tables"
+          "Reload", "Server Admin", "To reload or refresh tables, logs and privileges"
+          "Replication client", "Server Admin", "To ask where the slave or master servers are"
+          "Replication slave", "Server Admin", "To read binary log events from the master"
+          "Select", "Tables", "To retrieve rows from table"
+          "Show databases", "Server Admin", "To see all databases with SHOW DATABASES"
+          "Show view", "Tables", "To see views with SHOW CREATE VIEW"
+          "Shutdown", "Server Admin", "To shut down the server"
+          "Super", "Server Admin", "To use KILL thread, SET GLOBAL, CHANGE REPLICATION SOURCE, etc."
+          "Trigger", "Tables", "To use triggers"
+          "Create tablespace", "Server Admin", "To create/alter/drop tablespaces"
+          "Update", "Tables", "To update existing rows"
+          "Usage", "Server Admin", "No privileges - allow connect only" ]
+
+    let dynamicRows =
+        [ "FIREWALL_EXEMPT"; "AUDIT_ABORT_EXEMPT"; "ALLOW_NONEXISTENT_DEFINER"; "SENSITIVE_VARIABLES_OBSERVER"
+          "AUTHENTICATION_POLICY_ADMIN"; "GROUP_REPLICATION_STREAM"; "FLUSH_PRIVILEGES"; "PASSWORDLESS_USER_ADMIN"
+          "FLUSH_TABLES"; "FLUSH_OPTIMIZER_COSTS"; "OPTIMIZE_LOCAL_TABLE"; "INNODB_REDO_LOG_ENABLE"
+          "APPLICATION_PASSWORD_ADMIN"; "REPLICATION_APPLIER"; "SESSION_VARIABLES_ADMIN"; "TELEMETRY_LOG_ADMIN"
+          "AUDIT_ADMIN"; "TABLE_ENCRYPTION_ADMIN"; "SERVICE_CONNECTION_ADMIN"; "FLUSH_USER_RESOURCES"
+          "REPLICATION_SLAVE_ADMIN"; "CLONE_ADMIN"; "CONNECTION_ADMIN"; "SYSTEM_USER"; "ENCRYPTION_KEY_ADMIN"
+          "RESOURCE_GROUP_ADMIN"; "SHOW_ROUTINE"; "XA_RECOVER_ADMIN"; "SET_ANY_DEFINER"; "ROLE_ADMIN"
+          "PERSIST_RO_VARIABLES_ADMIN"; "BINLOG_ADMIN"; "BINLOG_ENCRYPTION_ADMIN"; "BACKUP_ADMIN"
+          "GROUP_REPLICATION_ADMIN"; "TRANSACTION_GTID_TAG"; "RESOURCE_GROUP_USER"; "SYSTEM_VARIABLES_ADMIN"
+          "FLUSH_STATUS"; "INNODB_REDO_LOG_ARCHIVE" ]
+        |> List.map (fun n -> n, "Server Admin", "")
+
+    Ok(
+        [ "Privilege"; "Context"; "Comment" ],
+        staticRows @ dynamicRows |> List.map (fun (p, c, m) -> [ Some p; Some c; Some m ])
     )
 
 /// `SHOW DATABASES [LIKE 'pattern']`.
@@ -1501,48 +1620,6 @@ let showCharacterSet (likeOpt: string option) : ShowResult =
 
     Ok([ "Charset"; "Default collation"; "Description"; "Maxlen" ], rows)
 
-/// `SHOW PRIVILEGES` — MySQL 8.4's static grantable-privilege vocabulary
-/// (contexts and comments verbatim from a real 8.4 server). fsdb enforces
-/// none of them; this is the reference list clients render.
-let showPrivileges () : ShowResult =
-    let rows =
-        [ "Alter", "Tables", "To alter the table"
-          "Alter routine", "Functions,Procedures", "To alter or drop stored functions/procedures"
-          "Create", "Databases,Tables,Indexes", "To create new databases and tables"
-          "Create routine", "Databases", "To use CREATE FUNCTION/PROCEDURE"
-          "Create role", "Server Admin", "To create new roles"
-          "Create temporary tables", "Databases", "To use CREATE TEMPORARY TABLE"
-          "Create view", "Tables", "To create new views"
-          "Create user", "Server Admin", "To create new users"
-          "Delete", "Tables", "To delete existing rows"
-          "Drop", "Databases,Tables", "To drop databases, tables, and views"
-          "Drop role", "Server Admin", "To drop roles"
-          "Event", "Server Admin", "To create, alter, drop and execute events"
-          "Execute", "Functions,Procedures", "To execute stored routines"
-          "File", "File access on server", "To read and write files on the server"
-          "Grant option", "Databases,Tables,Functions,Procedures", "To give to other users those privileges you possess"
-          "Index", "Tables", "To create or drop indexes"
-          "Insert", "Tables", "To insert data into tables"
-          "Lock tables", "Databases", "To use LOCK TABLES (together with SELECT privilege)"
-          "Process", "Server Admin", "To view the plain text of currently executing queries"
-          "Proxy", "Server Admin", "To make proxy user possible"
-          "References", "Databases,Tables", "To have references on tables"
-          "Reload", "Server Admin", "To reload or refresh tables, logs and privileges"
-          "Replication client", "Server Admin", "To ask where the slave or master servers are"
-          "Replication slave", "Server Admin", "To read binary log events from the master"
-          "Select", "Tables", "To retrieve rows from table"
-          "Show databases", "Server Admin", "To see all databases with SHOW DATABASES"
-          "Show view", "Tables", "To see views with SHOW CREATE VIEW"
-          "Shutdown", "Server Admin", "To shut down the server"
-          "Super", "Server Admin", "To use KILL thread, SET GLOBAL, CHANGE REPLICATION SOURCE, etc."
-          "Trigger", "Tables", "To use triggers"
-          "Create tablespace", "Server Admin", "To create/alter/drop tablespaces"
-          "Update", "Tables", "To update existing rows"
-          "Usage", "Server Admin", "No privileges - allow connect only" ]
-        |> List.map (fun (p, c, comment) -> [ Some p; Some c; Some comment ])
-
-    Ok([ "Privilege"; "Context"; "Comment" ], rows)
-
 /// `SHOW [FULL] PROCESSLIST` — the registry's rows under `SHOW`'s labels;
 /// the non-FULL form truncates `Info` to 100 chars like real MySQL.
 let showProcesslist (full: bool) : ShowResult =
@@ -1613,11 +1690,3 @@ let showRoutineStatus () : ShowResult =
         []
     )
 
-/// `SHOW GRANTS [FOR CURRENT_USER[()]]` — one truthful row: fsdb verifies no
-/// credentials and enforces no grants, so the connected user holds
-/// everything.
-let showGrants (user: string) : ShowResult =
-    Ok(
-        [ sprintf "Grants for %s@%%" user ],
-        [ [ Some(sprintf "GRANT ALL PRIVILEGES ON *.* TO `%s`@`%%`" user) ] ]
-    )

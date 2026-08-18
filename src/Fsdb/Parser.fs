@@ -708,11 +708,19 @@ let private caseExpr: Parser<Expr, unit> =
     )
     |>> fun ((subject, whens), elseBranch) -> Case(subject, whens, elseBranch)
 
+/// Paren-less `CURRENT_USER` — MySQL's one niladic user function callable
+/// without `()` in expressions (TablePlus/phpMyAdmin both emit `SELECT
+/// CURRENT_USER`), which would otherwise parse as a column reference below.
+/// `CURRENT_USER()` still goes through `funcCallAtom`.
+let private currentUserAtom: Parser<Expr, unit> =
+    attempt (keyword "CURRENT_USER" .>> notFollowedBy (pstring "(")) >>% FuncCall("CURRENT_USER", [])
+
 /// A bare word: a column, a qualified `t.col` (or `t.*`, `Star(Some "t")`),
 /// or a function call if followed by `(args)` (handled by `funcCallAtom`
 /// above, tried first so a reserved-word function name still parses).
 let private identAtom: Parser<Expr, unit> =
-    funcCallAtom
+    currentUserAtom
+    <|> funcCallAtom
     <|> (identifier
          >>= fun name ->
              choice
@@ -1729,6 +1737,109 @@ let private explainStmt: Parser<Statement, unit> =
     >>. statement
     |>> Explain
 
+// ---------------------------------------------------------------------------
+// CREATE USER / DROP USER / ALTER USER — account DDL over `mysql.user`.
+// ---------------------------------------------------------------------------
+
+/// `'name'[@'host']` — name and host each an identifier or quoted string
+/// (`'bob'@'%'`, `bob@localhost`, bare `bob`); host defaults to `'%'`.
+let private userRef: Parser<string * string, unit> =
+    identOrString .>>. (opt (sym "@" >>. identOrString) |>> Option.defaultValue "%")
+
+let private identifiedBy: Parser<string, unit> =
+    keyword "IDENTIFIED" >>. keyword "BY"
+    >>. (stringLit |>> (function VString s -> s | _ -> ""))
+
+let private createUserStmt: Parser<Statement, unit> =
+    (keyword "CREATE" >>. keyword "USER"
+     >>. (opt (attempt (keyword "IF" >>. keyword "NOT" >>. keyword "EXISTS")) |>> Option.isSome)
+     .>>. sepBy1 (userRef .>>. opt identifiedBy) (sym ","))
+    |>> fun (ifNotExists, users) -> CreateUser(users |> List.map (fun ((n, h), pw) -> n, h, pw), ifNotExists)
+
+let private dropUserStmt: Parser<Statement, unit> =
+    (keyword "DROP" >>. keyword "USER"
+     >>. (opt (attempt (keyword "IF" >>. keyword "EXISTS")) |>> Option.isSome)
+     .>>. sepBy1 userRef (sym ","))
+    |>> fun (ifExists, users) -> DropUser(users, ifExists)
+
+let private alterUserStmt: Parser<Statement, unit> =
+    (keyword "ALTER" >>. keyword "USER"
+     >>. (opt (attempt (keyword "IF" >>. keyword "EXISTS")) |>> Option.isSome)
+     .>>. userRef
+     .>>. identifiedBy)
+    |>> fun ((ifExists, (name, host)), pw) -> AlterUser(name, host, pw, ifExists)
+
+// ---------------------------------------------------------------------------
+// GRANT / REVOKE
+// ---------------------------------------------------------------------------
+
+/// One privilege name — multi-word forms tried longest-first so `CREATE
+/// TEMPORARY TABLES` never half-matches as `CREATE`. Normalized to the
+/// canonical uppercase spelling `Auth.staticPrivileges` uses.
+let private privilegeName: Parser<string, unit> =
+    let kw2 a b result = attempt (keyword a >>. keyword b >>% result)
+    let kw3 a b c result = attempt (keyword a >>. keyword b >>. keyword c >>% result)
+
+    choice
+        [ attempt (keyword "ALL" >>. optional (keyword "PRIVILEGES") >>% "ALL")
+          kw2 "GRANT" "OPTION" "GRANT OPTION"
+          kw3 "CREATE" "TEMPORARY" "TABLES" "CREATE TEMPORARY TABLES"
+          kw2 "CREATE" "VIEW" "CREATE VIEW"
+          kw2 "CREATE" "ROUTINE" "CREATE ROUTINE"
+          kw2 "CREATE" "USER" "CREATE USER"
+          kw2 "CREATE" "ROLE" "CREATE ROLE"
+          kw2 "CREATE" "TABLESPACE" "CREATE TABLESPACE"
+          keyword "CREATE" >>% "CREATE"
+          kw2 "ALTER" "ROUTINE" "ALTER ROUTINE"
+          keyword "ALTER" >>% "ALTER"
+          kw2 "SHOW" "DATABASES" "SHOW DATABASES"
+          kw2 "SHOW" "VIEW" "SHOW VIEW"
+          kw2 "DROP" "ROLE" "DROP ROLE"
+          keyword "DROP" >>% "DROP"
+          kw2 "LOCK" "TABLES" "LOCK TABLES"
+          kw2 "REPLICATION" "SLAVE" "REPLICATION SLAVE"
+          kw2 "REPLICATION" "CLIENT" "REPLICATION CLIENT"
+          keyword "SELECT" >>% "SELECT"
+          keyword "INSERT" >>% "INSERT"
+          keyword "UPDATE" >>% "UPDATE"
+          keyword "DELETE" >>% "DELETE"
+          keyword "RELOAD" >>% "RELOAD"
+          keyword "SHUTDOWN" >>% "SHUTDOWN"
+          keyword "PROCESS" >>% "PROCESS"
+          keyword "FILE" >>% "FILE"
+          keyword "REFERENCES" >>% "REFERENCES"
+          keyword "INDEX" >>% "INDEX"
+          keyword "SUPER" >>% "SUPER"
+          keyword "EXECUTE" >>% "EXECUTE"
+          keyword "EVENT" >>% "EVENT"
+          keyword "TRIGGER" >>% "TRIGGER"
+          keyword "USAGE" >>% "USAGE" ]
+
+/// `ON *.* | db.* | db.tbl | tbl` — see `Ast.Grant`'s doc for the encoding.
+let private grantLevel: Parser<string option * string option, unit> =
+    choice
+        [ attempt (sym "*" >>. sym "." >>. sym "*") >>% (None, None)
+          attempt (identOrString .>> sym "." .>> sym "*") |>> fun db -> Some db, None
+          attempt (identOrString .>> sym "." .>>. identOrString) |>> fun (db, t) -> Some db, Some t
+          identOrString |>> fun t -> None, Some t ]
+
+let private grantStmt: Parser<Statement, unit> =
+    (keyword "GRANT" >>. sepBy1 privilegeName (sym ",")
+     .>> keyword "ON"
+     .>>. grantLevel
+     .>> keyword "TO"
+     .>>. sepBy1 userRef (sym ",")
+     .>>. (opt (keyword "WITH" >>. keyword "GRANT" >>. keyword "OPTION") |>> Option.isSome))
+    |>> fun (((privs, level), users), wgo) -> Grant(privs, level, users, wgo)
+
+let private revokeStmt: Parser<Statement, unit> =
+    (keyword "REVOKE" >>. sepBy1 privilegeName (sym ",")
+     .>> keyword "ON"
+     .>>. grantLevel
+     .>> keyword "FROM"
+     .>>. sepBy1 userRef (sym ","))
+    |>> fun ((privs, level), users) -> Revoke(privs, level, users)
+
 /// `CREATE TABLE` vs. `CREATE INDEX` and `DROP TABLE` vs. `DROP INDEX` share
 /// a leading keyword before diverging, so those four need `attempt` to
 /// backtrack cleanly between alternatives; every other statement starts on
@@ -1736,9 +1847,11 @@ let private explainStmt: Parser<Statement, unit> =
 /// just that first token without needing to backtrack at all.
 statementRef.Value <-
     choice
-        [ attempt createDatabaseStmt
+        [ attempt createUserStmt
+          attempt createDatabaseStmt
           attempt createTable
           attempt createIndexStmt
+          attempt dropUserStmt
           attempt dropDatabaseStmt
           attempt dropTable
           dropIndexStmt
@@ -1747,9 +1860,12 @@ statementRef.Value <-
           selectOrUnionStmt
           updateStmt
           deleteStmt
+          attempt alterUserStmt
           attempt alterTableStmt
           alterDatabaseStmt
           renameTableStmt
+          grantStmt
+          revokeStmt
           explainStmt ]
     <?> "statement"
 

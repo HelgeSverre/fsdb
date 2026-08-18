@@ -1753,4 +1753,64 @@ let tests =
 
                     match parse (sprintf "SELECT %s" deep) with
                     | Error _ -> ()
-                    | Ok stmt -> failtestf "expected a depth-limit error, got %A" stmt ] ]
+                    | Ok stmt -> failtestf "expected a depth-limit error, got %A" stmt ]
+
+          testList
+              "user statements"
+              [ testCase "CREATE USER parses quoted user@host, IDENTIFIED BY, IF NOT EXISTS, and multiple accounts"
+                <| fun _ ->
+                    Expect.equal
+                        (parseOk "CREATE USER 'bob'@'%' IDENTIFIED BY 's3cret'")
+                        (CreateUser([ "bob", "%", Some "s3cret" ], false))
+                        "quoted with password"
+
+                    Expect.equal
+                        (parseOk "CREATE USER IF NOT EXISTS bob")
+                        (CreateUser([ "bob", "%", None ], true))
+                        "bare name defaults host to %"
+
+                    Expect.equal
+                        (parseOk "CREATE USER 'a'@'localhost', 'b'@'%' IDENTIFIED BY 'pw'")
+                        (CreateUser([ "a", "localhost", None; "b", "%", Some "pw" ], false))
+                        "per-account password in a list"
+
+                testCase "GRANT parses privilege lists, all four ON levels, and WITH GRANT OPTION"
+                <| fun _ ->
+                    Expect.equal
+                        (parseOk "GRANT SELECT, INSERT ON shop.* TO 'bob'@'%'")
+                        (Grant([ "SELECT"; "INSERT" ], (Some "shop", None), [ "bob", "%" ], false))
+                        "db level"
+
+                    Expect.equal
+                        (parseOk "GRANT ALL PRIVILEGES ON *.* TO bob WITH GRANT OPTION")
+                        (Grant([ "ALL" ], (None, None), [ "bob", "%" ], true))
+                        "global with grant option"
+
+                    Expect.equal
+                        (parseOk "GRANT CREATE TEMPORARY TABLES, SHOW DATABASES ON *.* TO bob")
+                        (Grant([ "CREATE TEMPORARY TABLES"; "SHOW DATABASES" ], (None, None), [ "bob", "%" ], false))
+                        "multi-word privilege names"
+
+                    Expect.equal
+                        (parseOk "GRANT SELECT ON shop.orders TO bob")
+                        (Grant([ "SELECT" ], (Some "shop", Some "orders"), [ "bob", "%" ], false))
+                        "table level"
+
+                testCase "REVOKE parses, including GRANT OPTION in the list"
+                <| fun _ ->
+                    Expect.equal
+                        (parseOk "REVOKE SELECT, GRANT OPTION ON shop.* FROM 'bob'@'%'")
+                        (Revoke([ "SELECT"; "GRANT OPTION" ], (Some "shop", None), [ "bob", "%" ]))
+                        "revoke with grant option"
+
+                testCase "DROP USER and ALTER USER ... IDENTIFIED BY parse"
+                <| fun _ ->
+                    Expect.equal
+                        (parseOk "DROP USER IF EXISTS 'bob'@'%', carol")
+                        (DropUser([ "bob", "%"; "carol", "%" ], true))
+                        "drop list"
+
+                    Expect.equal
+                        (parseOk "ALTER USER 'bob'@'%' IDENTIFIED BY 'newpw'")
+                        (AlterUser("bob", "%", "newpw", false))
+                        "alter password" ] ]
