@@ -230,6 +230,32 @@ let tests =
                   Expect.isTrue ((get "Data_length" |> Option.defaultValue "0") <> "0") "in-memory payload size, not a constant"
               | other -> failtestf "expected one status row, got %A" other
 
+          testCase "SHOW TABLE STATUS on an empty table reports zeros, not an error"
+          <| fun _ ->
+              let store = setup ()
+              run store "CREATE TABLE empties (id INT)" |> ignore
+              let session = Fsdb.Session.create 1 store
+
+              match Fsdb.QueryHandler.handle session "SHOW TABLE STATUS LIKE 'empties'" |> snd with
+              | ResultSet(cols, [ row ]) ->
+                  let get name = List.item (List.findIndex ((=) name) cols) row
+                  Expect.equal (get "Rows") (Some "0") "no rows"
+                  Expect.equal (get "Avg_row_length") (Some "0") "no division-by-zero"
+                  Expect.equal (get "Data_length") (Some "0") "no payload bytes"
+              | other -> failtestf "expected one status row, got %A" other
+
+          testCase "SHOW TABLE STATUS on a table with no AUTO_INCREMENT column reports Auto_increment NULL"
+          <| fun _ ->
+              let store = setup ()
+              run store "CREATE TABLE plain (id INT, name VARCHAR(20))" |> ignore
+              let session = Fsdb.Session.create 1 store
+
+              match Fsdb.QueryHandler.handle session "SHOW TABLE STATUS LIKE 'plain'" |> snd with
+              | ResultSet(cols, [ row ]) ->
+                  let get name = List.item (List.findIndex ((=) name) cols) row
+                  Expect.equal (get "Auto_increment") None "no AUTO_INCREMENT column, no next value"
+              | other -> failtestf "expected one status row, got %A" other
+
           testCase "COLUMNS projects declared columns with type/nullability/key metadata"
           <| fun _ ->
               let store = setup ()

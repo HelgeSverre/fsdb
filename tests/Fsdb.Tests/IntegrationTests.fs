@@ -1037,4 +1037,108 @@ let tests =
                   finally
                       listener.Stop()
               }
+              |> Async.RunSynchronously
+
+          // A DATETIME(6) value round-tripped through COM_STMT_PREPARE +
+          // COM_STMT_EXECUTE must use the binary protocol's 11-byte datetime
+          // form (microseconds present) and advertise `decimals = 6` on the
+          // column-definition packet — the two things a real binary-protocol
+          // client (mysqlnd, MySqlConnector's Prepare()) reads to recover
+          // sub-second precision. Raw sockets, since MySqlConnector itself
+          // never exposes either the wire byte length or the column-def
+          // Decimals byte.
+          testCase "COM_STMT_EXECUTE on a DATETIME(6) column uses the 11-byte binary form with decimals=6"
+          <| fun _ ->
+              async {
+                  let listener = Fsdb.Server.startListening System.Net.IPAddress.Loopback 0
+                  let port = Fsdb.Server.port listener
+                  Fsdb.Server.serve listener (Fsdb.Storage.create ()) Fsdb.Functions.empty |> Async.StartAsTask |> ignore
+
+                  try
+                      use client = new Net.Sockets.TcpClient()
+                      do! client.ConnectAsync(Net.IPAddress.Loopback, port) |> Async.AwaitTask
+                      use stream = client.GetStream()
+
+                      let! handshake = readPacketAsync stream
+                      let handshakeSeq = handshake.Value.SeqId
+
+                      let helloResponse =
+                          let w = Writer()
+                          w.WriteInt32LE(int ClientProtocol41)
+                          w.WriteInt32LE 16777216
+                          w.WriteByte 45uy
+                          w.WriteBytes(Array.zeroCreate<byte> 23)
+                          w.WriteNullTerminatedString "root"
+                          w.WriteByte 0uy
+                          w.ToArray()
+
+                      let! _ = writePacketAsync stream { SeqId = handshakeSeq + 1uy; Payload = helloResponse }
+                      let! _ = readPacketAsync stream // connection OK
+
+                      let query (sql: string) =
+                          writePacketAsync stream { SeqId = 0uy; Payload = Array.append [| 0x03uy |] (Text.Encoding.UTF8.GetBytes sql) }
+
+                      let! _ = query "CREATE TABLE t (d DATETIME(6))"
+                      let! _ = readPacketAsync stream
+                      let! _ = query "INSERT INTO t VALUES ('2024-03-05 13:45:09.123456')"
+                      let! _ = readPacketAsync stream
+
+                      // COM_STMT_PREPARE "SELECT d FROM t" — no `?` params,
+                      // so PREPARE_OK is the only packet (no per-param
+                      // column-def/EOF pair).
+                      let! _ = writePacketAsync stream { SeqId = 0uy; Payload = Array.append [| 0x16uy |] (Text.Encoding.UTF8.GetBytes "SELECT d FROM t") }
+                      let! prepareOk = readPacketAsync stream
+                      let stmtId = Reader(prepareOk.Value.Payload.[1..]).ReadInt32LE()
+
+                      // COM_STMT_EXECUTE with zero params: stmtId, cursor
+                      // flags, iteration count — no null bitmap/type array
+                      // when the statement has no parameters.
+                      let execPayload =
+                          let w = Writer()
+                          w.WriteByte 0x17uy
+                          w.WriteInt32LE stmtId
+                          w.WriteByte 0uy
+                          w.WriteInt32LE 1
+                          w.ToArray()
+
+                      let! _ = writePacketAsync stream { SeqId = 0uy; Payload = execPayload }
+                      let! _ = readPacketAsync stream // column count
+                      let! colDef = readPacketAsync stream
+                      let! _ = readPacketAsync stream // EOF
+                      let! row = readPacketAsync stream
+                      let! _ = readPacketAsync stream // trailing EOF
+
+                      // Column-definition packet: skip the six length-encoded
+                      // strings (catalog/schema/table/org_table/name/org_name)
+                      // and the lenenc-int fixed-fields-length marker, then
+                      // charset(2)/column length(4)/type(1)/flags(2) before
+                      // the decimals byte.
+                      let cr = Reader(colDef.Value.Payload)
+                      for _ in 1..6 do
+                          cr.ReadLenEncString() |> ignore
+
+                      cr.ReadLenEncInt() |> ignore
+                      cr.ReadInt16LE() |> ignore // charset
+                      cr.ReadInt32LE() |> ignore // column length
+                      Expect.equal (cr.ReadByte()) TypeDateTime "column advertises the DATETIME wire type"
+                      cr.ReadInt16LE() |> ignore // flags
+                      Expect.equal (cr.ReadByte()) 6uy "decimals byte reports fsp 6"
+
+                      // Binary row: header byte, null bitmap ((1 col + 7 + 2)
+                      // / 8 = 1 byte), then the datetime value itself.
+                      let rr = Reader(row.Value.Payload)
+                      rr.ReadByte() |> ignore // row packet header (0x00)
+                      rr.ReadBytes 1 |> ignore // null bitmap, one column, not null
+                      let length = rr.ReadByte()
+                      Expect.equal length 11uy "sub-second value uses the 11-byte datetime form"
+                      Expect.equal (rr.ReadInt16LE()) 2024 "year"
+                      Expect.equal (rr.ReadByte()) 3uy "month"
+                      Expect.equal (rr.ReadByte()) 5uy "day"
+                      Expect.equal (rr.ReadByte()) 13uy "hour"
+                      Expect.equal (rr.ReadByte()) 45uy "minute"
+                      Expect.equal (rr.ReadByte()) 9uy "second"
+                      Expect.equal (rr.ReadInt32LE()) 123456 "microseconds"
+                  finally
+                      listener.Stop()
+              }
               |> Async.RunSynchronously ]

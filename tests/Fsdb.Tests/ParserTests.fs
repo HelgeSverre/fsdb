@@ -1090,6 +1090,20 @@ let tests =
                     | other -> failtestf "expected LagOver nested in a BinOp, got %A" other ]
 
           testList
+              "LEAD(expr[, offset]) OVER (...)"
+              [ testCase "no explicit offset defaults to a LagOver with offset -1"
+                <| fun _ ->
+                    match parseOk "SELECT LEAD(value) OVER (ORDER BY id) FROM t" with
+                    | Select { Projections = [ LagOver(Col "value", -1L, [], [ Col "id", Asc ]), None ] } -> ()
+                    | other -> failtestf "expected a LagOver projection with offset -1, got %A" other
+
+                testCase "an explicit offset is negated through"
+                <| fun _ ->
+                    match parseOk "SELECT LEAD(value, 2) OVER (ORDER BY id) FROM t" with
+                    | Select { Projections = [ LagOver(Col "value", -2L, [], [ Col "id", Asc ]), None ] } -> ()
+                    | other -> failtestf "expected offset -2, got %A" other ]
+
+          testList
               "UPDATE / DELETE"
               [ testCase "UPDATE t SET a=expr, b=expr WHERE ..."
                 <| fun _ ->

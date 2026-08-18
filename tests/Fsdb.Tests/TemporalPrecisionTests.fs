@@ -193,7 +193,24 @@ let tests =
                               "INSERT INTO t VALUES ('2024-01-01 00:00:00'), ('2024-01-01 00:00:05.250000')"
                               "SELECT MAX(c) FROM t WHERE c < '2024-01-01 00:00:01'" ])
                         [ Some "2024-01-01 00:00:00.000000" ]
-                        "MAX exact-second keeps (6) precision" ]
+                        "MAX exact-second keeps (6) precision"
+
+                testCase "MIN of a DATETIME(6) column inherits its fsp, including an exact second"
+                <| fun _ ->
+                    Expect.equal
+                        (oneRow
+                            [ "CREATE TABLE t (c DATETIME(6))"
+                              "INSERT INTO t VALUES ('2024-01-01 00:00:00'), ('2024-01-01 00:00:05.250000')"
+                              "SELECT MIN(c) FROM t WHERE c < '2024-01-01 00:00:01'" ])
+                        [ Some "2024-01-01 00:00:00.000000" ]
+                        "MIN exact-second keeps (6) precision"
+
+                testCase "CAST(x AS TIME(3)) renders exactly three digits"
+                <| fun _ ->
+                    Expect.equal
+                        (oneRow [ "SELECT CAST('10:00:00.126' AS TIME(3))" ])
+                        [ Some "10:00:00.126" ]
+                        "cast to TIME(3)" ]
 
           testList
               "TIME columns report the TIME wire type"

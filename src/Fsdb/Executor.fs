@@ -3376,14 +3376,18 @@ and private runWindowedSelect
                     | None -> [ expr, aliasOpt ]
                 | _ ->
                     // A bare (unwrapped) window-function projection with no
-                    // explicit alias defaults its label to the synthetic
-                    // column's own name, same as before generalizing this
-                    // to arbitrary nesting — anything wrapping one falls
-                    // through to `runSelect`'s ordinary unaliased-label
-                    // handling instead.
+                    // explicit alias labels itself like MySQL's function-call
+                    // headers (`lead(v) over ()`), never the internal
+                    // `__fsdb_window_N__` synthetic column name — anything
+                    // wrapping one falls through to `runSelect`'s ordinary
+                    // unaliased-label handling instead.
                     let alias =
                         aliasOpt
-                        |> Option.orElse (synthetic |> List.tryFind (fun (wf, _) -> wf = expr) |> Option.map snd)
+                        |> Option.orElse (
+                            synthetic
+                            |> List.tryFind (fun (wf, _) -> wf = expr)
+                            |> Option.map (fun _ -> exprLabel expr)
+                        )
 
                     [ substituteWindowFuncs synthetic expr, alias ]
 

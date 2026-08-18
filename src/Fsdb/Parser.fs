@@ -884,8 +884,12 @@ type private ColMod =
     /// assertion ever depends on one).
     | MIgnored
 
+/// `CURRENT_TIMESTAMP[(N)]` — the `(N)` is accepted and dropped: MySQL
+/// requires it to match the column's own declared fsp, and the default is
+/// evaluated at that declared fsp regardless (`Storage.evalDefault`).
 let private defaultValueLit: Parser<ColumnDefault, unit> =
-    (keyword "CURRENT_TIMESTAMP" >>% DCurrentTimestamp) <|> (literalValue |>> DConst)
+    (keyword "CURRENT_TIMESTAMP" >>. optional widthLen >>% DCurrentTimestamp)
+    <|> (literalValue |>> DConst)
 
 /// A charset/collation name — Laravel emits `COLLATE 'utf8mb4_unicode_ci'`
 /// (quoted) at the table level but a bare identifier at the column level, so
@@ -911,11 +915,13 @@ let private colMod: Parser<ColMod, unit> =
     choice
         [ attempt (keyword "NOT" >>. keyword "NULL") >>% MNotNull
           keyword "NULL" >>% MNull
-          keyword "DEFAULT" >>. defaultValueLit .>> optional (keyword "ON" >>. keyword "UPDATE" >>. keyword "CURRENT_TIMESTAMP") |>> MDefault
+          keyword "DEFAULT" >>. defaultValueLit
+          .>> optional (keyword "ON" >>. keyword "UPDATE" >>. keyword "CURRENT_TIMESTAMP" >>. optional widthLen)
+          |>> MDefault
           keyword "AUTO_INCREMENT" >>% MAutoIncrement
           attempt (keyword "PRIMARY" >>. keyword "KEY") >>% MPrimaryKey
           keyword "UNIQUE" >>. optional (keyword "KEY") >>% MUnique
-          attempt (keyword "ON" >>. keyword "UPDATE" >>. keyword "CURRENT_TIMESTAMP") >>% MIgnored
+          attempt (keyword "ON" >>. keyword "UPDATE" >>. keyword "CURRENT_TIMESTAMP" >>. optional widthLen) >>% MIgnored
           keyword "COMMENT" >>. stringLit >>% MIgnored
           attempt (keyword "CHARACTER" >>. keyword "SET" <|> keyword "CHARSET")
           >>. identOrString

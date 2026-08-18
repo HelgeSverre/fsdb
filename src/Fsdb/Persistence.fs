@@ -189,13 +189,10 @@ let private encodeColumnType (w: Writer) (t: ColumnType) : unit =
     | TDate -> w.WriteByte 0x17uy
     // An fsp byte rides after the tag for the three fractional-second types
     // so a `DATETIME(6)` column survives a snapshot/WAL round-trip with its
-    // precision. This is a codec change: a snapshot written before fsp existed
-    // encoded these three tags with *no* trailing byte (the old parser dropped
-    // the `(N)` but still stored the column as a temporal type), so the new
-    // decoder would misread such a file. The persistence format carries no
-    // version field, so cross-version durable data isn't guaranteed across this
-    // change — acceptable pre-1.0, and self-consistent for any data this build
-    // both wrote and reads.
+    // precision. The persistence format carries no version field, so a
+    // snapshot encoding these tags without the trailing fsp byte would be
+    // misread — acceptable pre-1.0, and self-consistent for any data this
+    // build both wrote and reads.
     | TDateTime fsp -> w.WriteByte 0x18uy; w.WriteByte(byte fsp)
     | TTimestamp fsp -> w.WriteByte 0x19uy; w.WriteByte(byte fsp)
     | TTime fsp -> w.WriteByte 0x1Auy; w.WriteByte(byte fsp)

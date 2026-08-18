@@ -1013,6 +1013,43 @@ let tests =
                         ()
                     | other -> failtestf "expected a const plan row, got %A" other
 
+                testCase "EXPLAIN by a nullable VARCHAR(50) UNIQUE key reports key_len 203 (50*4+2+1 for the null flag)"
+                <| fun _ ->
+                    // The UNIQUE column sits at index 1, not 0 — a point
+                    // lookup on a non-first key column must work (regression:
+                    // `Storage.tryUniqueLookup` once indexed its one-element
+                    // probe array by the column's absolute table index).
+                    let store = newStore ()
+                    runDefault store "CREATE TABLE users (id INT, name VARCHAR(50) UNIQUE)" |> ignore
+                    runDefault store "INSERT INTO users VALUES (1, 'a')" |> ignore
+
+                    match runDefault store "EXPLAIN SELECT * FROM users WHERE name = 'a'" with
+                    | ResultSet(_, [ [ Some "1"; Some "SIMPLE"; Some "users"; None; Some "const"; Some "name"; Some "name"; Some "203"; Some "const"; Some "1"; Some "100.00"; None ] ]) ->
+                        ()
+                    | other -> failtestf "expected key_len 203 for the nullable unique varchar, got %A" other
+
+                testCase "EXPLAIN by a NOT NULL VARCHAR(50) UNIQUE key reports key_len 202 (no null flag)"
+                <| fun _ ->
+                    let store = newStore ()
+                    runDefault store "CREATE TABLE users (id INT, name VARCHAR(50) NOT NULL UNIQUE)" |> ignore
+                    runDefault store "INSERT INTO users VALUES (1, 'a')" |> ignore
+
+                    match runDefault store "EXPLAIN SELECT * FROM users WHERE name = 'a'" with
+                    | ResultSet(_, [ [ Some "1"; Some "SIMPLE"; Some "users"; None; Some "const"; Some "name"; Some "name"; Some "202"; Some "const"; Some "1"; Some "100.00"; None ] ]) ->
+                        ()
+                    | other -> failtestf "expected key_len 202 for the NOT NULL unique varchar, got %A" other
+
+                testCase "EXPLAIN by a BIGINT PRIMARY KEY reports key_len 8"
+                <| fun _ ->
+                    let store = newStore ()
+                    runDefault store "CREATE TABLE users (id BIGINT PRIMARY KEY)" |> ignore
+                    runDefault store "INSERT INTO users VALUES (1)" |> ignore
+
+                    match runDefault store "EXPLAIN SELECT * FROM users WHERE id = 1" with
+                    | ResultSet(_, [ [ Some "1"; Some "SIMPLE"; Some "users"; None; Some "const"; Some "PRIMARY"; Some "PRIMARY"; Some "8"; Some "const"; Some "1"; Some "100.00"; None ] ]) ->
+                        ()
+                    | other -> failtestf "expected key_len 8 for the bigint primary key, got %A" other
+
                 testCase "EXPLAIN by unique key with no matching row is the const-miss shape"
                 <| fun _ ->
                     let store = newStore ()
@@ -1181,6 +1218,44 @@ let tests =
                     match runDefault store "EXPLAIN DELETE FROM t1 WHERE nosuchcol = 1" with
                     | Err(1054, _) -> ()
                     | other -> failtestf "expected 1054, got %A" other ]
+
+          testList
+              "DEFAULT CURRENT_TIMESTAMP(N) honors the column's declared fsp"
+              [ testCase "DATETIME(6) DEFAULT CURRENT_TIMESTAMP(6) parses, and an omitted column stores 6 fractional digits"
+                <| fun _ ->
+                    let store = newStore ()
+                    runDefault store "CREATE TABLE t (id INT, c DATETIME(6) DEFAULT CURRENT_TIMESTAMP(6))" |> ignore
+                    runDefault store "INSERT INTO t (id) VALUES (1)" |> ignore
+
+                    match runDefault store "SELECT c FROM t" with
+                    | ResultSet([ "c" ], [ [ Some text ] ]) ->
+                        Expect.isTrue
+                            (System.Text.RegularExpressions.Regex.IsMatch(text, @"\.\d{6}$"))
+                            (sprintf "expected six fractional digits, got %s" text)
+                    | other -> failtestf "expected one row with a rendered timestamp, got %A" other
+
+                testCase "bare DEFAULT CURRENT_TIMESTAMP on a fsp-0 DATETIME stores no fraction"
+                <| fun _ ->
+                    let store = newStore ()
+                    runDefault store "CREATE TABLE t (id INT, c DATETIME DEFAULT CURRENT_TIMESTAMP)" |> ignore
+                    runDefault store "INSERT INTO t (id) VALUES (1)" |> ignore
+
+                    match runDefault store "SELECT c FROM t" with
+                    | ResultSet([ "c" ], [ [ Some text ] ]) ->
+                        Expect.isFalse (text.Contains ".") (sprintf "expected no fractional part, got %s" text)
+                    | other -> failtestf "expected one row with a rendered timestamp, got %A" other
+
+                testCase "ON UPDATE CURRENT_TIMESTAMP(6) parses"
+                <| fun _ ->
+                    let store = newStore ()
+
+                    match
+                        runDefault
+                            store
+                            "CREATE TABLE t (id INT, c DATETIME(6) DEFAULT CURRENT_TIMESTAMP(6) ON UPDATE CURRENT_TIMESTAMP(6))"
+                    with
+                    | Affected 0UL -> ()
+                    | other -> failtestf "expected CREATE TABLE to parse and succeed, got %A" other ]
 
           testList
               "functions"
@@ -3592,7 +3667,21 @@ let tests =
                         runDefault store "SELECT value, LAG(value, 2) OVER (ORDER BY created_at) AS prev2 FROM readings ORDER BY created_at"
                     with
                     | ResultSet([ "value"; "prev2" ], [ [ Some "10"; None ]; [ Some "20"; None ]; [ Some "30"; Some "10" ] ]) -> ()
-                    | other -> failtestf "expected offset-2 lag, got %A" other ]
+                    | other -> failtestf "expected offset-2 lag, got %A" other
+
+                testCase "an un-aliased LEAD/LAG projection labels itself like MySQL, not the internal synthetic column name"
+                <| fun _ ->
+                    let store = newStore ()
+                    runDefault store "CREATE TABLE t (id INT, v INT)" |> ignore
+                    runDefault store "INSERT INTO t VALUES (1, 10), (2, 20)" |> ignore
+
+                    match runDefault store "SELECT LEAD(v) OVER (ORDER BY id) FROM t" with
+                    | ResultSet([ "lead(v) over ()" ], _) -> ()
+                    | other -> failtestf "expected the column header 'lead(v) over ()', got %A" other
+
+                    match runDefault store "SELECT LAG(v) OVER (ORDER BY id) FROM t" with
+                    | ResultSet([ "lag(v) over ()" ], _) -> ()
+                    | other -> failtestf "expected the column header 'lag(v) over ()', got %A" other ]
 
           testList
               "PK/UNIQUE point-lookup fast path (Storage.tryUniqueLookup)"
@@ -3659,6 +3748,20 @@ let tests =
                         (readRows "SELECT name, age FROM indexed WHERE id = '3'" |> List.sort)
                         (readRows "SELECT name, age FROM unindexed WHERE id = '3'" |> List.sort)
                         "a string literal against an INT PK still matches correctly"
+
+                testCase "point lookup by a UNIQUE column that isn't the table's first returns the row"
+                <| fun _ ->
+                    // Regression: `Storage.tryUniqueLookup` indexed its
+                    // one-element probe array by the column's absolute table
+                    // index, so any point lookup on a key column past
+                    // position 0 threw IndexOutOfRangeException.
+                    let store = newStore ()
+                    runDefault store "CREATE TABLE t (a INT, b INT, email VARCHAR(100) UNIQUE, v INT)" |> ignore
+                    runDefault store "INSERT INTO t VALUES (1, 2, 'x@y.z', 9), (3, 4, 'q@w.e', 8)" |> ignore
+
+                    match runDefault store "SELECT v FROM t WHERE email = 'q@w.e'" with
+                    | ResultSet([ "v" ], [ [ Some "8" ] ]) -> ()
+                    | other -> failtestf "expected the point lookup on column index 2 to find v=8, got %A" other
 
                 testCase "a composite PRIMARY KEY (out of the single-column fast path's scope) still returns correct results"
                 <| fun _ ->

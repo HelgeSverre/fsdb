@@ -915,7 +915,7 @@ let coerceValue (strict: bool) (col: ColumnDef) (v: Value) : Result<Value, Stora
             // fraction to `fsp` digits and re-render with exactly that many
             // (a `TIME(6)` on a whole second shows `.000000`, matching MySQL),
             // parsing the input as a `TimeSpan`; anything unparseable keeps
-            // its raw text the way the old string-passthrough path did.
+            // its raw text unchanged.
             let raw = v |> toText |> Option.defaultValue ""
 
             match TimeSpan.TryParse(raw.Trim(), CultureInfo.InvariantCulture) with
@@ -1011,13 +1011,22 @@ let coerceValue (strict: bool) (col: ColumnDef) (v: Value) : Result<Value, Stora
 /// Evaluates a column's `DEFAULT` clause into the value to insert when none
 /// was provided — `CURRENT_TIMESTAMP` evaluates fresh here (insert time),
 /// rather than being carried around as a stored marker value.
-let private evalDefault (d: ColumnDefault option) : Value =
-    match d with
+let private evalDefault (col: ColumnDef) : Value =
+    match col.Default with
     | None -> VNull
     | Some(DConst v) -> v
-    // Precision 0, same as MySQL's `DEFAULT CURRENT_TIMESTAMP` and `NOW()`:
-    // truncate the sub-second part `Value.toText` would otherwise render.
-    | Some DCurrentTimestamp -> VDateTime(Functions.truncateToSecond DateTime.Now)
+    | Some DCurrentTimestamp ->
+        // Current time at the column's own declared fsp — a `TIMESTAMP(6)`
+        // default keeps microseconds, a bare `DATETIME`/`TIMESTAMP` truncates
+        // to whole seconds, same rounding `NOW(N)` applies.
+        let fsp =
+            match col.Type with
+            | TDateTime fsp
+            | TTimestamp fsp
+            | TTime fsp -> fsp
+            | _ -> 0
+
+        VDateTime(Functions.roundDateTimeToFsp fsp DateTime.Now)
 
 /// Coerces a value to its column's type and rejects NULL for a non-nullable
 /// column.
@@ -1245,8 +1254,14 @@ let tryUniqueLookup
     : (ColumnDef list * (int * Value[]) list) option =
     tryUniqueKeyProbe store dbName tableName columnName literal
     |> Option.map (fun (table, groupName, idx) ->
+        // `encodeConstraintKey` indexes its row by the column's absolute
+        // position, so the literal has to sit at `idx` of a full-width row —
+        // a bare `[| literal |]` throws for any key column past position 0.
+        let probeRow = Array.create (List.length table.Columns) VNull
+        probeRow.[idx] <- literal
+
         let rows =
-            match encodeConstraintKey table.Columns [ idx ] [| literal |] with
+            match encodeConstraintKey table.Columns [ idx ] probeRow with
             | None -> []
             | Some key ->
                 table.UniqueIndex
@@ -1398,7 +1413,7 @@ let private removeColumnAt (idx: int) (row: Value[]) : Value[] =
 /// column with no `DEFAULT` added to a non-empty table silently gets `NULL`
 /// in every existing row rather than MySQL's strict-mode 1364 error; add the
 /// check once a migration actually exercises that combination against data.
-let private addedColumnFill (col: ColumnDef) : Value = evalDefault col.Default
+let private addedColumnFill (col: ColumnDef) : Value = evalDefault col
 
 /// Inserts `x` at `idx` (clamped to `xs`'s length, so `idx = List.length xs`
 /// appends) — used by `AFTER`/`FIRST` column positioning, since `Columns`
@@ -1616,7 +1631,7 @@ let private processRow
         match acc with
         | Error e -> Error e
         | Ok(valuesRev, nextAutoId, assignedId) ->
-            let pending = provided |> Option.defaultValue (evalDefault col.Default)
+            let pending = provided |> Option.defaultValue (evalDefault col)
 
             if col.AutoIncrement then
                 match pending with

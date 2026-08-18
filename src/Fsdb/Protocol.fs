@@ -204,8 +204,8 @@ type ColumnDef =
       /// column it carries the fractional-seconds precision (fsp 0-6) — a
       /// MySQL client reads a `DATETIME(6)`'s precision off exactly this byte
       /// (it surfaces as `MySqlConnector`'s `NumericScale`), so an exact-second
-      /// value still reports scale 6. `0` for everything else (the old
-      /// hardcoded value), matching MySQL for non-fractional columns.
+      /// value still reports scale 6. `0` for everything else, matching
+      /// MySQL for non-fractional columns.
       Decimals: byte }
 
 /// Counts the fractional-second digits a temporal value's already-rendered

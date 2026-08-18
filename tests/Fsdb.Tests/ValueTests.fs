@@ -953,6 +953,12 @@ let tests =
                           Expect.equal (call "SHA2" [ VString "hello"; VInt 512L ]) (VString "9b71d224bd62f3785d96d46ad3ea3d73319bfbc2890caadae2dff72519673ca72323c3d99ba5c11d7c7acc6e14b8c5da0c4663475c2e5c3adef46f73bcdec043") "sha2-512"
                           Expect.equal (call "SHA2" [ VString "hello"; VInt 7L ]) VNull "unsupported length"
                           Expect.equal (call "SHA2" [ VNull; VInt 256L ]) VNull "null input"
+                          Expect.equal (call "SHA2" [ VString ""; VInt 224L ]) (VString "d14a028c2a3a2bc9476102bb288234c415a2b01f828ea62ac5b3e42f") "sha2-224 of the empty string"
+                          // 120 bytes: exercises the three-block padding path.
+                          Expect.equal
+                              (call "SHA2" [ VString(String.replicate 120 "a"); VInt 224L ])
+                              (VString "66924e30a9929327e7a6cf03747397226ed2efc180ebe3dea7132a79")
+                              "sha2-224 three-block padding"
 
                       testCase "FORMAT adds thousands separators and fixes decimal places"
                       <| fun _ -> Expect.equal (call "FORMAT" [ VDouble 1234.5; VInt 2L ]) (VString "1,234.50") "format"
