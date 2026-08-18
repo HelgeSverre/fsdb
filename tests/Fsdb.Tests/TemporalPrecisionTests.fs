@@ -24,7 +24,8 @@ let private col name ty : ColumnDef =
       Unique = false
       Generated = None
       Collation = None
-      Charset = None }
+      Charset = None
+      OnUpdateCurrentTimestamp = false }
 
 /// Runs `sql` on a fresh in-memory session, threading each statement's
 /// session forward, and returns the last statement's `QueryResult`.

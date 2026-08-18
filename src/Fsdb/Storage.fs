@@ -1075,6 +1075,21 @@ let coerceValue (strict: bool) (col: ColumnDef) (v: Value) : Result<Value, Stora
                 | false, _ -> temporalFallback ()
             | _ -> temporalFallback ()
 
+/// `NOW()` rounded to `col`'s own declared fsp — a `TIMESTAMP(6)` column
+/// keeps microseconds, a bare `DATETIME`/`TIMESTAMP` truncates to whole
+/// seconds. Shared by `DEFAULT CURRENT_TIMESTAMP` (`evalDefault`, insert
+/// time) and `ON UPDATE CURRENT_TIMESTAMP` (`Executor`, update time) since
+/// both evaluate the same "current time at this column's precision" rule.
+let currentTimestampForColumn (col: ColumnDef) : Value =
+    let fsp =
+        match col.Type with
+        | TDateTime fsp
+        | TTimestamp fsp
+        | TTime fsp -> fsp
+        | _ -> 0
+
+    VDateTime(Functions.roundDateTimeToFsp fsp DateTime.Now)
+
 /// Evaluates a column's `DEFAULT` clause into the value to insert when none
 /// was provided — `CURRENT_TIMESTAMP` evaluates fresh here (insert time),
 /// rather than being carried around as a stored marker value.
@@ -1082,18 +1097,7 @@ let private evalDefault (col: ColumnDef) : Value =
     match col.Default with
     | None -> VNull
     | Some(DConst v) -> v
-    | Some DCurrentTimestamp ->
-        // Current time at the column's own declared fsp — a `TIMESTAMP(6)`
-        // default keeps microseconds, a bare `DATETIME`/`TIMESTAMP` truncates
-        // to whole seconds, same rounding `NOW(N)` applies.
-        let fsp =
-            match col.Type with
-            | TDateTime fsp
-            | TTimestamp fsp
-            | TTime fsp -> fsp
-            | _ -> 0
-
-        VDateTime(Functions.roundDateTimeToFsp fsp DateTime.Now)
+    | Some DCurrentTimestamp -> currentTimestampForColumn col
 
 /// Coerces a value to its column's type and rejects NULL for a non-nullable
 /// column.

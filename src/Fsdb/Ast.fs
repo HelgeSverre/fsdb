@@ -213,6 +213,11 @@ and ColumnDef =
       AutoIncrement: bool
       PrimaryKey: bool
       Unique: bool
+      /// `ON UPDATE CURRENT_TIMESTAMP` — bumped by `Executor`'s `UPDATE`
+      /// path to the current time (at the column's own declared fsp, same
+      /// as `DCurrentTimestamp`) whenever the row actually changes and the
+      /// statement didn't already assign this column itself.
+      OnUpdateCurrentTimestamp: bool
       /// `[GENERATED ALWAYS] AS (expr) [VIRTUAL | STORED]` — `None` for a
       /// plain column.
       Generated: (Expr * GeneratedKind) option

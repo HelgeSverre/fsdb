@@ -646,7 +646,8 @@ let tests =
                                 Unique = false
                                 Generated = None
                                 Collation = None
-                                Charset = None }
+                                Charset = None
+                                OnUpdateCurrentTimestamp = false }
                               { Name = "name"
                                 Type = TVarchar 255
                                 Nullable = false
@@ -656,7 +657,8 @@ let tests =
                                 Unique = false
                                 Generated = None
                                 Collation = Some "utf8mb4_0900_ai_ci"
-                                Charset = None }
+                                Charset = None
+                                OnUpdateCurrentTimestamp = false }
                               { Name = "score"
                                 Type = TDecimal(5, 2)
                                 Nullable = true
@@ -666,7 +668,8 @@ let tests =
                                 Unique = false
                                 Generated = None
                                 Collation = None
-                                Charset = None } ],
+                                Charset = None
+                                OnUpdateCurrentTimestamp = false } ],
                             [],
                             [],
                             false,
@@ -690,7 +693,8 @@ let tests =
                                 Unique = false
                                 Generated = None
                                 Collation = None
-                                Charset = None } ],
+                                Charset = None
+                                OnUpdateCurrentTimestamp = false } ],
                             [],
                             [],
                             true,
@@ -714,7 +718,8 @@ let tests =
                                 Unique = false
                                 Generated = None
                                 Collation = None
-                                Charset = None }
+                                Charset = None
+                                OnUpdateCurrentTimestamp = false }
                               { Name = "name"
                                 Type = TVarchar 10
                                 Nullable = true
@@ -724,7 +729,8 @@ let tests =
                                 Unique = false
                                 Generated = None
                                 Collation = Some "utf8mb4_0900_ai_ci"
-                                Charset = None } ],
+                                Charset = None
+                                OnUpdateCurrentTimestamp = false } ],
                             [],
                             [],
                             false,
@@ -761,7 +767,8 @@ let tests =
                                 Unique = false
                                 Generated = None
                                 Collation = None
-                                Charset = None } ],
+                                Charset = None
+                                OnUpdateCurrentTimestamp = false } ],
                             [],
                             [],
                             false,

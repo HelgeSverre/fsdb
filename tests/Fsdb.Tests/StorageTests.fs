@@ -15,7 +15,8 @@ let private col name ty nullable =
       Unique = false
       Generated = None
       Collation = None
-      Charset = None }
+      Charset = None
+      OnUpdateCurrentTimestamp = false }
 
 let private idCol =
     { (col "id" (TInt false) false) with

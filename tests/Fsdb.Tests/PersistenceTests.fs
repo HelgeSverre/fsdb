@@ -25,7 +25,8 @@ let private usersColumns =
         Unique = false
         Generated = None
         Collation = None
-        Charset = None }
+        Charset = None
+        OnUpdateCurrentTimestamp = false }
       { Name = "name"
         Type = TVarchar 255
         Nullable = false
@@ -35,7 +36,8 @@ let private usersColumns =
         Unique = false
         Generated = None
         Collation = None
-        Charset = None }
+        Charset = None
+        OnUpdateCurrentTimestamp = false }
       { Name = "note"
         Type = TText
         Nullable = true
@@ -45,7 +47,8 @@ let private usersColumns =
         Unique = false
         Generated = None
         Collation = None
-        Charset = None } ]
+        Charset = None
+        OnUpdateCurrentTimestamp = false } ]
 
 /// No PK/AUTO_INCREMENT/UNIQUE at all — unlike `usersColumns`, a row
 /// replayed twice inserts twice instead of the second copy silently dying
@@ -61,7 +64,8 @@ let private tagColumns =
         Unique = false
         Generated = None
         Collation = None
-        Charset = None } ]
+        Charset = None
+        OnUpdateCurrentTimestamp = false } ]
 
 let private walPath dir = Path.Combine(dir, "wal.bin")
 let private snapshotPath dir = Path.Combine(dir, "snapshot.fsdb")
@@ -121,7 +125,8 @@ let tests =
                     Unique = false
                     Generated = None
                     Collation = None
-                    Charset = None }
+                    Charset = None
+                    OnUpdateCurrentTimestamp = false }
 
               createTable store defaultDatabase "narrow" [ cCol ] [] [] None None |> ignore
               insertRows store defaultDatabase "narrow" None [ [ VInt 300L ] ] |> ignore
@@ -156,7 +161,8 @@ let tests =
                       Unique = false
                       Generated = None
                       Collation = None
-                      Charset = None }
+                      Charset = None
+                      OnUpdateCurrentTimestamp = false }
                     { Name = "created_at"
                       // fsp 6 so the sub-second stand-in below survives
                       // coercion (a bare DATETIME is fsp 0 and would round
@@ -170,7 +176,8 @@ let tests =
                       Unique = false
                       Generated = None
                       Collation = None
-                      Charset = None }
+                      Charset = None
+                      OnUpdateCurrentTimestamp = false }
                     { Name = "token"
                       Type = TVarchar 64
                       Nullable = false
@@ -180,7 +187,8 @@ let tests =
                       Unique = false
                       Generated = None
                       Collation = None
-                      Charset = None } ]
+                      Charset = None
+                      OnUpdateCurrentTimestamp = false } ]
 
               createTable store defaultDatabase "events" eventsColumns [] [] None None |> ignore
 
@@ -260,7 +268,8 @@ let tests =
                     Unique = false
                     Generated = None
                     Collation = None
-                    Charset = None }
+                    Charset = None
+                    OnUpdateCurrentTimestamp = false }
 
               alterTable
                   store
@@ -362,7 +371,8 @@ let tests =
                       Unique = false
                       Generated = None
                       Collation = None
-                      Charset = None } ]
+                      Charset = None
+                      OnUpdateCurrentTimestamp = false } ]
                   []
                   []
                   None
@@ -434,7 +444,8 @@ let tests =
                       Unique = false
                       Generated = None
                       Collation = None
-                      Charset = None }
+                      Charset = None
+                      OnUpdateCurrentTimestamp = false }
                     { Name = "n"
                       Type = TInt false
                       Nullable = false
@@ -444,7 +455,8 @@ let tests =
                       Unique = false
                       Generated = None
                       Collation = None
-                      Charset = None } ]
+                      Charset = None
+                      OnUpdateCurrentTimestamp = false } ]
                   []
                   []
                   None
@@ -502,7 +514,8 @@ let tests =
                       Unique = false
                       Generated = None
                       Collation = None
-                      Charset = None } ]
+                      Charset = None
+                      OnUpdateCurrentTimestamp = false } ]
                   []
                   []
                   None
@@ -548,7 +561,8 @@ let tests =
                       Unique = false
                       Generated = None
                       Collation = None
-                      Charset = None }
+                      Charset = None
+                      OnUpdateCurrentTimestamp = false }
                     { Name = "n"
                       Type = TInt false
                       Nullable = false
@@ -558,7 +572,8 @@ let tests =
                       Unique = false
                       Generated = None
                       Collation = None
-                      Charset = None } ]
+                      Charset = None
+                      OnUpdateCurrentTimestamp = false } ]
                   []
                   []
                   None
@@ -601,7 +616,8 @@ let tests =
                     Unique = false
                     Generated = None
                     Collation = None
-                    Charset = None }
+                    Charset = None
+                    OnUpdateCurrentTimestamp = false }
 
               createTable store defaultDatabase "p" [ idCol "id" ] [] [] None None |> ignore
 
@@ -645,7 +661,8 @@ let tests =
                     Unique = false
                     Generated = Some(BinOp(Mul, Col "a", Lit(VInt 2L)), Stored)
                     Collation = None
-                    Charset = None }
+                    Charset = None
+                    OnUpdateCurrentTimestamp = false }
 
               createTable
                   store
@@ -660,7 +677,8 @@ let tests =
                       Unique = false
                       Generated = None
                       Collation = None
-                      Charset = None }
+                      Charset = None
+                      OnUpdateCurrentTimestamp = false }
                     genCol ]
                   []
                   []
@@ -715,6 +733,46 @@ let tests =
                   Expect.equal table.TableCharset (Some "utf8mb4") "the declared charset survives the restart"
                   Expect.equal table.TableCollation (Some "utf8mb4_unicode_ci") "the declared collation survives the restart"
               | Error e -> failtestf "expected table 'decl' to reload, got %A" e
+
+          testCase "a column's ON UPDATE CURRENT_TIMESTAMP flag survives a restart"
+          <| fun _ ->
+              let dir = tempDataDir ()
+              let store = load dir
+              attach dir store
+
+              let stampColumns =
+                  [ { Name = "id"
+                      Type = TInt false
+                      Nullable = false
+                      Default = None
+                      AutoIncrement = false
+                      PrimaryKey = false
+                      Unique = false
+                      Generated = None
+                      Collation = None
+                      Charset = None
+                      OnUpdateCurrentTimestamp = false }
+                    { Name = "stamp"
+                      Type = TDateTime 3
+                      Nullable = true
+                      Default = Some DCurrentTimestamp
+                      AutoIncrement = false
+                      PrimaryKey = false
+                      Unique = false
+                      Generated = None
+                      Collation = None
+                      Charset = None
+                      OnUpdateCurrentTimestamp = true } ]
+
+              createTable store defaultDatabase "stamped" stampColumns [] [] None None |> ignore
+
+              let reloaded = load dir
+
+              match Fsdb.InformationSchema.findTable reloaded.Catalog defaultDatabase "stamped" with
+              | Ok table ->
+                  let stampCol = table.Columns |> List.find (fun c -> c.Name = "stamp")
+                  Expect.isTrue stampCol.OnUpdateCurrentTimestamp "ON UPDATE CURRENT_TIMESTAMP survives the restart"
+              | Error e -> failtestf "expected table 'stamped' to reload, got %A" e
 
           testCase "a torn/zero-filled .new is rejected, not promoted as an empty catalog that wipes the real snapshot"
           <| fun _ ->

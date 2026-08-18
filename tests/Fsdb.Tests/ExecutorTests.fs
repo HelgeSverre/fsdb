@@ -1294,7 +1294,54 @@ let tests =
                             "CREATE TABLE t (id INT, c DATETIME(6) DEFAULT CURRENT_TIMESTAMP(6) ON UPDATE CURRENT_TIMESTAMP(6))"
                     with
                     | Affected 0UL -> ()
-                    | other -> failtestf "expected CREATE TABLE to parse and succeed, got %A" other ]
+                    | other -> failtestf "expected CREATE TABLE to parse and succeed, got %A" other
+
+                testCase "UPDATE that actually changes a row bumps its ON UPDATE CURRENT_TIMESTAMP column"
+                <| fun _ ->
+                    let store = newStore ()
+                    runDefault store "CREATE TABLE t (id INT, n INT, stamp DATETIME(6) DEFAULT CURRENT_TIMESTAMP(6) ON UPDATE CURRENT_TIMESTAMP(6))" |> ignore
+                    runDefault store "INSERT INTO t (id, n) VALUES (1, 10)" |> ignore
+
+                    let stampOf () =
+                        match runDefault store "SELECT stamp FROM t WHERE id = 1" with
+                        | ResultSet(_, [ [ Some s ] ]) -> s
+                        | other -> failtestf "expected one row, got %A" other
+
+                    let before = stampOf ()
+                    System.Threading.Thread.Sleep 20
+                    runDefault store "UPDATE t SET n = 20 WHERE id = 1" |> ignore
+                    let after = stampOf ()
+
+                    Expect.notEqual after before "changing another column bumps the auto column too"
+
+                testCase "a no-op UPDATE (same values) doesn't bump ON UPDATE CURRENT_TIMESTAMP"
+                <| fun _ ->
+                    let store = newStore ()
+                    runDefault store "CREATE TABLE t (id INT, n INT, stamp DATETIME(6) DEFAULT CURRENT_TIMESTAMP(6) ON UPDATE CURRENT_TIMESTAMP(6))" |> ignore
+                    runDefault store "INSERT INTO t (id, n) VALUES (1, 10)" |> ignore
+
+                    let stampOf () =
+                        match runDefault store "SELECT stamp FROM t WHERE id = 1" with
+                        | ResultSet(_, [ [ Some s ] ]) -> s
+                        | other -> failtestf "expected one row, got %A" other
+
+                    let before = stampOf ()
+                    System.Threading.Thread.Sleep 20
+                    runDefault store "UPDATE t SET n = 10 WHERE id = 1" |> ignore
+                    let after = stampOf ()
+
+                    Expect.equal after before "setting a column to its current value leaves the row unchanged, no bump"
+
+                testCase "an explicit assignment to the ON UPDATE CURRENT_TIMESTAMP column wins over the auto-bump"
+                <| fun _ ->
+                    let store = newStore ()
+                    runDefault store "CREATE TABLE t (id INT, n INT, stamp DATETIME(6) DEFAULT CURRENT_TIMESTAMP(6) ON UPDATE CURRENT_TIMESTAMP(6))" |> ignore
+                    runDefault store "INSERT INTO t (id, n) VALUES (1, 10)" |> ignore
+                    runDefault store "UPDATE t SET n = 20, stamp = '2000-01-01 00:00:00.000000' WHERE id = 1" |> ignore
+
+                    match runDefault store "SELECT stamp FROM t WHERE id = 1" with
+                    | ResultSet(_, [ [ Some s ] ]) -> Expect.equal s "2000-01-01 00:00:00.000000" "the explicit value is kept, not overwritten by NOW()"
+                    | other -> failtestf "expected one row, got %A" other ]
 
           testList
               "functions"

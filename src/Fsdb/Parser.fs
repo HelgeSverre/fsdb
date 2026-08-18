@@ -906,10 +906,10 @@ type private ColMod =
     | MCollate of string
     /// A validated `CHARACTER SET name` (utf8mb4/latin1/ascii).
     | MCharset of string
-    /// `COMMENT 'txt'`, `CHARACTER SET x`, `ON UPDATE CURRENT_TIMESTAMP` —
-    /// accepted so the column definition parses, but nothing in
-    /// `Ast.ColumnDef` tracks them (ponytail: add fields if a migration's
-    /// assertion ever depends on one).
+    | MOnUpdateCurrentTimestamp
+    /// `COMMENT 'txt'` — accepted so the column definition parses, but
+    /// nothing in `Ast.ColumnDef` tracks it (ponytail: add a field if a
+    /// migration's assertion ever depends on it).
     | MIgnored
 
 /// `CURRENT_TIMESTAMP[(N)]` — the `(N)` is accepted and dropped: MySQL
@@ -944,13 +944,12 @@ let private colMod: Parser<ColMod, unit> =
     choice
         [ attempt (keyword "NOT" >>. keyword "NULL") >>% MNotNull
           keyword "NULL" >>% MNull
-          keyword "DEFAULT" >>. defaultValueLit
-          .>> optional (keyword "ON" >>. keyword "UPDATE" >>. keyword "CURRENT_TIMESTAMP" >>. optional widthLen)
-          |>> MDefault
+          keyword "DEFAULT" >>. defaultValueLit |>> MDefault
           keyword "AUTO_INCREMENT" >>% MAutoIncrement
           attempt (keyword "PRIMARY" >>. keyword "KEY") >>% MPrimaryKey
           keyword "UNIQUE" >>. optional (keyword "KEY") >>% MUnique
-          attempt (keyword "ON" >>. keyword "UPDATE" >>. keyword "CURRENT_TIMESTAMP" >>. optional widthLen) >>% MIgnored
+          attempt (keyword "ON" >>. keyword "UPDATE" >>. keyword "CURRENT_TIMESTAMP" >>. optional widthLen)
+          >>% MOnUpdateCurrentTimestamp
           keyword "COMMENT" >>. stringLit >>% MIgnored
           attempt (keyword "CHARACTER" >>. keyword "SET" <|> keyword "CHARSET")
           >>. identOrString
@@ -980,6 +979,7 @@ let private columnDef: Parser<ColumnDef, unit> =
           AutoIncrement = List.contains MAutoIncrement mods
           PrimaryKey = List.contains MPrimaryKey mods
           Unique = List.contains MUnique mods
+          OnUpdateCurrentTimestamp = List.contains MOnUpdateCurrentTimestamp mods
           Generated = mods |> List.tryPick (function MGenerated(e, k) -> Some(e, k) | _ -> None)
           Collation = mods |> List.tryPick (function MCollate c -> Some c | _ -> None)
           Charset =

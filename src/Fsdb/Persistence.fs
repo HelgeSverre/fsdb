@@ -480,6 +480,7 @@ let private encodeColumnDef (w: Writer) (c: ColumnDef) : unit =
 
     writeOptStr w c.Collation
     writeOptStr w c.Charset
+    writeBool w c.OnUpdateCurrentTimestamp
 
 let private decodeColumnDef (r: #IReader) : ColumnDef =
     { Name = readStr r
@@ -495,7 +496,8 @@ let private decodeColumnDef (r: #IReader) : ColumnDef =
          | 2uy -> Some(decodeExpr r, Stored)
          | _ -> Some(decodeExpr r, Virtual))
       Collation = readOptStr r
-      Charset = readOptStr r }
+      Charset = readOptStr r
+      OnUpdateCurrentTimestamp = readBool r }
 
 let private encodeIndexDef (w: Writer) (ix: IndexDef) : unit =
     writeStr w ix.Name

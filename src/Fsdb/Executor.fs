@@ -1441,7 +1441,8 @@ let rec private evalExpr (ctx: EvalContext) (expr: Expr) : Result<Value, EvalErr
                   Unique = false
                   Generated = None
                   Collation = None
-                  Charset = None }
+                  Charset = None
+                  OnUpdateCurrentTimestamp = false }
 
             let v =
                 match v, ty with
@@ -1519,7 +1520,8 @@ and private deriveColumns (names: string list) (collations: Collation.Collation 
               Unique = false
               Generated = None
               Collation = Some col.Name
-              Charset = None })
+              Charset = None
+              OnUpdateCurrentTimestamp = false })
         names
         collations
 
@@ -2669,7 +2671,8 @@ and runUnionStmt
                       Unique = false
                       Generated = None
                       Collation = None
-                      Charset = None })
+                      Charset = None
+                      OnUpdateCurrentTimestamp = false })
 
             let ctxForOrder = contextFactory store registry dbName (columnIndexOf orderColumns) Map.empty None
 
@@ -3602,7 +3605,8 @@ and private runWindowedSelect
                       Unique = false
                       Generated = None
                       Collation = None
-                      Charset = None })
+                      Charset = None
+                      OnUpdateCurrentTimestamp = false })
 
             let extendedColumns = columns @ syntheticColumns
 
@@ -3946,6 +3950,30 @@ let private applyAssignments
                     newRow.[idx] <- v
                     newRow)))
         (Ok(Array.copy row))
+
+/// `ON UPDATE CURRENT_TIMESTAMP` columns not named in this statement's own
+/// `SET` list (`assignedIdxs`) get bumped to the current time, but only when
+/// `row` (after the explicit assignments) actually differs from `original`
+/// — MySQL's documented rule ("no update takes place if all columns are set
+/// to their current values"); an `UPDATE t SET x = x` that touches nothing
+/// real leaves the auto column alone too. An explicit assignment to the
+/// auto column itself always wins, whether or not it changes the value —
+/// `assignedIdxs` excludes it from this pass entirely.
+let private applyOnUpdateTimestamps (columns: ColumnDef list) (assignedIdxs: Set<int>) (original: Value[]) (row: Value[]) : Value[] =
+    let autoCols =
+        columns
+        |> List.indexed
+        |> List.filter (fun (i, c) -> c.OnUpdateCurrentTimestamp && not (Set.contains i assignedIdxs))
+
+    if autoCols.IsEmpty || row = original then
+        row
+    else
+        let newRow = Array.copy row
+
+        for i, c in autoCols do
+            newRow.[i] <- Storage.currentTimestampForColumn c
+
+        newRow
 
 /// Computes every `Generated` column of `row` (`CREATE TABLE ... col AS
 /// (expr)`) fresh from its other columns' current values, leaving every
@@ -4860,7 +4888,12 @@ let execute (store: Store) (registry: Registry) (dbName: string) (ids: int64 * i
                     | Ok targetRows ->
                         let targetSet = referenceSet targetRows
                         let predicate row = Ok(targetSet.Contains row)
-                        let updater row = applyAssignments store registry dbName columnIndex qualifiers indexedAssignments row
+                        let assignedIdxs = indexedAssignments |> List.map fst |> Set.ofList
+
+                        let updater row =
+                            applyAssignments store registry dbName columnIndex qualifiers indexedAssignments row
+                            |> Result.map (applyOnUpdateTimestamps columns assignedIdxs row)
+
                         let candidates = narrowed |> Option.map snd
 
                         match updateRows store db table candidates predicate updater |> withGeneratedRecomputed store registry dbName db table with
@@ -5058,6 +5091,24 @@ let execute (store: Store) (registry: Registry) (dbName: string) (ids: int64 * i
                         let baseCatalog = store.Catalog
                         let snapshot = Storage.beginTransactionSnapshot store
 
+                        // Any source alias resolving to a given physical
+                        // table shares its column list (same physical
+                        // schema), so the first one found suffices to look
+                        // up `ON UPDATE CURRENT_TIMESTAMP` columns for it.
+                        let physicalColumns =
+                            physicalGroups
+                            |> Array.mapi (fun i _ ->
+                                let srcIdx = sourcePhys |> Array.findIndex ((=) i)
+                                let _, _, cols = sources.[srcIdx]
+                                cols)
+
+                        let assignedIdxsByPhys =
+                            physicalGroups
+                            |> Array.mapi (fun i _ ->
+                                resolvedAssignments
+                                |> List.choose (fun (srcIdx, colIdx, _) -> if sourcePhys.[srcIdx] = i then Some colIdx else None)
+                                |> Set.ofList)
+
                         let apply =
                             physicalGroups
                             |> Array.mapi (fun i tableRef ->
@@ -5075,7 +5126,7 @@ let execute (store: Store) (registry: Registry) (dbName: string) (ids: int64 * i
                                             for colIdx, v in vals do
                                                 newRow.[colIdx] <- v
 
-                                            Ok newRow
+                                            Ok(applyOnUpdateTimestamps physicalColumns.[i] assignedIdxsByPhys.[i] row newRow)
                                         | false, _ -> Ok row
 
                                     updateRows snapshot tdb tname None predicate updater |> withGeneratedRecomputed snapshot registry dbName tdb tname)

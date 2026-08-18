@@ -178,6 +178,41 @@ let tests =
                   Expect.equal (rows |> List.map (fun r -> List.item extraIdx r)) [ Some ""; Some "STORED GENERATED"; Some "VIRTUAL GENERATED" ] "SHOW COLUMNS Extra"
               | other -> failtestf "expected SHOW COLUMNS output, got %A" other
 
+          testCase "ON UPDATE CURRENT_TIMESTAMP surfaces in SHOW CREATE TABLE and information_schema.columns EXTRA"
+          <| fun _ ->
+              let store = setup ()
+
+              run
+                  store
+                  "CREATE TABLE stamped (id INT, updated_at DATETIME(3) DEFAULT CURRENT_TIMESTAMP(3) ON UPDATE CURRENT_TIMESTAMP(3), plain DATETIME DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP)"
+              |> ignore
+
+              let session = Fsdb.Session.create 1 store
+
+              match Fsdb.QueryHandler.handle session "SHOW CREATE TABLE stamped" |> snd with
+              | ResultSet(_, [ [ Some "stamped"; Some ddl ] ]) ->
+                  Expect.stringContains ddl "ON UPDATE CURRENT_TIMESTAMP(3)" "fsp > 0 renders the (N) suffix on ON UPDATE"
+                  Expect.stringContains
+                      ddl
+                      "`plain` datetime DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP"
+                      "fsp 0 renders the bare keyword, no (0), right after DEFAULT"
+                  Expect.isFalse (ddl.Contains "ON UPDATE CURRENT_TIMESTAMP(0)") "fsp 0 never renders (0)"
+              | other -> failtestf "expected SHOW CREATE TABLE output, got %A" other
+
+              match
+                  run
+                      store
+                      "SELECT column_name, extra FROM information_schema.columns WHERE table_schema = 'fsdb' AND table_name = 'stamped' ORDER BY ordinal_position"
+              with
+              | ResultSet(_, rows) ->
+                  Expect.equal
+                      rows
+                      [ [ Some "id"; Some "" ]
+                        [ Some "updated_at"; Some "on update CURRENT_TIMESTAMP(3)" ]
+                        [ Some "plain"; Some "on update CURRENT_TIMESTAMP" ] ]
+                      "EXTRA renders the lowercase keyword with an fsp suffix when declared"
+              | other -> failtestf "expected a resultset, got %A" other
+
           testCase "ALTER TABLE ADD COLUMN attaches the table's declared defaults to string columns"
           <| fun _ ->
               let store = setup ()

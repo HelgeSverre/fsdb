@@ -23,7 +23,8 @@ let private col (name: string) (ty: ColumnType) : ColumnDef =
       Unique = false
       Generated = None
       Collation = None
-      Charset = None }
+      Charset = None
+      OnUpdateCurrentTimestamp = false }
 
 let private strCol name = col name (TVarchar 255)
 let private intCol name = col name (TInt false)
@@ -320,14 +321,29 @@ let rec private exprToSql (e: Expr) : string =
     | PercentRankOver _ -> "percent_rank() over ()"
     | NTileOver _ -> "ntile() over ()"
 
+/// The `(N)` suffix MySQL appends to `on update CURRENT_TIMESTAMP` for a
+/// column declared with a nonzero fractional-seconds precision — empty for
+/// fsp 0, matching how it renders the bare keyword with no `(0)`.
+let private onUpdateFspSuffix (c: ColumnDef) : string =
+    match c.Type with
+    | TDateTime fsp
+    | TTimestamp fsp
+    | TTime fsp when fsp > 0 -> sprintf "(%d)" fsp
+    | _ -> ""
+
 /// `EXTRA` / SHOW COLUMNS `Extra` for a column — MySQL says
 /// `VIRTUAL GENERATED`/`STORED GENERATED` for generated columns (uppercase),
-/// `auto_increment` (lowercase) otherwise when applicable.
+/// `auto_increment` and `on update CURRENT_TIMESTAMP` (lowercase keyword,
+/// uppercase `CURRENT_TIMESTAMP`) otherwise, space-joined when both apply.
 let private extraText (c: ColumnDef) : string =
     match c.Generated with
     | Some(_, Virtual) -> "VIRTUAL GENERATED"
     | Some(_, Stored) -> "STORED GENERATED"
-    | None -> if c.AutoIncrement then "auto_increment" else ""
+    | None ->
+        [ if c.AutoIncrement then "auto_increment"
+          if c.OnUpdateCurrentTimestamp then
+              sprintf "on update CURRENT_TIMESTAMP%s" (onUpdateFspSuffix c) ]
+        |> String.concat " "
 
 let defaultText (d: ColumnDefault option) : string option =
     match d with
@@ -766,6 +782,12 @@ let private showCreateTableDDL (t: Table) : string =
             | Some d -> sprintf "DEFAULT '%s'" d
             | None -> if c.PrimaryKey || not c.Nullable then "" else "DEFAULT NULL"
 
+        let onUpdatePart =
+            if c.OnUpdateCurrentTimestamp then
+                sprintf "ON UPDATE CURRENT_TIMESTAMP%s" (onUpdateFspSuffix c)
+            else
+                ""
+
         let extra = if c.AutoIncrement then "AUTO_INCREMENT" else ""
 
         // MySQL renders both CHARACTER SET and COLLATE whenever a column
@@ -790,7 +812,9 @@ let private showCreateTableDDL (t: Table) : string =
                 | None, None -> []
                 | cs, col -> [ sprintf "CHARACTER SET %s" (cs |> Option.defaultValue "utf8mb4"); sprintf "COLLATE %s" (col |> Option.defaultValue "utf8mb4_0900_ai_ci") ]
 
-        [ backtick c.Name; columnTypeText c.Type ] @ charsetCollate @ [ generatedPart; notNull; defaultPart; extra ]
+        [ backtick c.Name; columnTypeText c.Type ]
+        @ charsetCollate
+        @ [ generatedPart; notNull; defaultPart; onUpdatePart; extra ]
         |> List.filter ((<>) "")
         |> String.concat " "
 
