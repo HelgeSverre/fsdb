@@ -356,7 +356,7 @@ let rec private watchForDisconnect (client: TcpClient) (queryCts: CancellationTo
 /// afterwards, success or exception, so a thread-pool thread that later
 /// picks up an unrelated connection's query never inherits a stale
 /// cancelled token.
-let private withCancellationWatch (client: TcpClient) (body: unit -> 'a) : 'a =
+let private withCancellationWatch (client: TcpClient) (entry: InformationSchema.ProcessEntry option) (body: unit -> 'a) : 'a =
     // Deliberately not `use`: `watchForDisconnect` runs detached
     // (`Async.Start`) and `watchCts.Cancel()` below doesn't synchronously
     // stop an iteration already past its `isSocketDead` check — that
@@ -370,12 +370,18 @@ let private withCancellationWatch (client: TcpClient) (body: unit -> 'a) : 'a =
     let watchCts = new CancellationTokenSource()
     Async.Start(watchForDisconnect client queryCts, watchCts.Token)
     Storage.queryCancellation.Value <- queryCts.Token
+    // `KILL QUERY <id>` from another connection cancels through the same
+    // token the disconnect watcher uses.
+    entry |> Option.iter (fun e -> e.CancelQuery <- Some(fun () -> queryCts.Cancel()))
 
     try
         body ()
     finally
+        entry |> Option.iter (fun e -> e.CancelQuery <- None)
         watchCts.Cancel()
         Storage.queryCancellation.Value <- CancellationToken.None
+
+let private connectionCounter = ref 0L
 
 let private handleConnection
     (connectionId: int)
@@ -423,6 +429,18 @@ let private handleConnection
 
                 activeSession <- Some session
 
+                let remoteHost =
+                    try
+                        string client.Client.RemoteEndPoint
+                    with _ ->
+                        ""
+
+                let processEntry = InformationSchema.registerProcess (int64 connectionId) resp.Username remoteHost
+                processEntry.Db <- resp.Database
+                // `KILL CONNECTION <id>`: closing the socket makes this
+                // connection's next read fail, which ends its command loop.
+                processEntry.CloseConnection <- Some(fun () -> try client.Close() with _ -> ())
+
                 do!
                     writePacketAsync
                         stream
@@ -442,7 +460,7 @@ let private handleConnection
                 // then read the next command off a dead stream.
                 let runCancellable (dispatch: unit -> Session * Executor.QueryResult) : (Session * Executor.QueryResult) option =
                     try
-                        Some(withCancellationWatch client dispatch)
+                        Some(withCancellationWatch client (Some processEntry) dispatch)
                     with :? OperationCanceledException ->
                         Log.diagnostic "fsdb: connection %d: query cancelled (client disconnected)" connectionId
                         None
@@ -487,10 +505,22 @@ let private handleConnection
 
                                     return! loop session
                             | Some(Query sql) ->
-                                match runCancellable (fun () -> QueryHandler.handle session sql) with
+                                processEntry.Command <- "Query"
+                                processEntry.State <- "executing"
+                                processEntry.StateSince <- DateTime.Now
+                                processEntry.Info <- Some sql
+
+                                let dispatched = runCancellable (fun () -> QueryHandler.handle session sql)
+                                processEntry.Command <- "Sleep"
+                                processEntry.State <- ""
+                                processEntry.StateSince <- DateTime.Now
+                                processEntry.Info <- None
+
+                                match dispatched with
                                 | None -> ()
                                 | Some(session, result) ->
                                     activeSession <- Some session
+                                    processEntry.Db <- session.Database
 
                                     do!
                                         sendQueryResult
@@ -814,15 +844,18 @@ let private handleConnection
                 |> Async.Catch
                 |> Async.Ignore
         | error ->
+            InformationSchema.unregisterProcess (int64 connectionId)
             activeSession |> Option.iter QueryHandler.closeSession
             return raise error
 
+        InformationSchema.unregisterProcess (int64 connectionId)
         activeSession |> Option.iter QueryHandler.closeSession
     }
 
 /// Starts listening on address:port. Pass port 0 for an OS-assigned
 /// ephemeral port (used by the integration tests); read it back via `port`.
 let startListening (address: IPAddress) (port: int) : TcpListener =
+    InformationSchema.serverStartedAt <- DateTime.Now
     let listener = new TcpListener(address, port)
     listener.Start()
     listener
@@ -859,13 +892,19 @@ let serve (listener: TcpListener) (store: Storage.Store) (customFunctions: Funct
     // lifetime, same as the listener it's paired with.
     let connectionSlots = new SemaphoreSlim(maxConcurrentConnections)
 
-    let rec loop (connectionId: int) : Async<unit> =
+    let rec loop () : Async<unit> =
         async {
             do! connectionSlots.WaitAsync() |> Async.AwaitTask
 
             match! tryAccept listener with
             | None -> connectionSlots.Release() |> ignore
             | Some client ->
+                // Process-wide, not per-listener: the process registry
+                // (`InformationSchema.registerProcess`) and `KILL <id>` key
+                // on this number, so two listeners in one process (the test
+                // suite, the embedding API) must never hand out the same id.
+                let connectionId = int (Interlocked.Increment connectionCounter)
+
                 Async.Start(
                     async {
                         try
@@ -878,7 +917,7 @@ let serve (listener: TcpListener) (store: Storage.Store) (customFunctions: Funct
                     }
                 )
 
-                return! loop (connectionId + 1)
+                return! loop ()
         }
 
-    loop 1
+    loop ()

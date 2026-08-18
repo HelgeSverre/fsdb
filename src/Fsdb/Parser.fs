@@ -631,9 +631,25 @@ let private castTargetType: Parser<ColumnType, unit> =
           attempt (keyword "UNSIGNED" >>. optional (keyword "INTEGER")) >>% TInt true
           columnType ]
 
+/// `CAST(x AS CHAR CHARACTER SET cs)` — strings are Unicode internally, so
+/// the charset is parsed and dropped, except `binary`, which MySQL defines
+/// as equivalent to `CAST(x AS BINARY)` and lands as a `binary` collation
+/// tag so comparisons turn byte-wise.
+let private castCharsetClause: Parser<string, unit> =
+    (keyword "CHARACTER" >>. keyword "SET" >>. identifier) <|> (keyword "CHARSET" >>. identifier)
+
 let private castExpr: Parser<Expr, unit> =
-    attempt (keyword "CAST" >>. sym "(" >>. expr .>> keyword "AS" .>>. castTargetType .>> sym ")")
-    |>> Cast
+    attempt (
+        keyword "CAST" >>. sym "(" >>. expr .>> keyword "AS" .>>. castTargetType
+        .>>. opt castCharsetClause
+        .>> sym ")"
+    )
+    |>> fun ((e, target), charset) ->
+        let cast = Cast(e, target)
+
+        match charset with
+        | Some cs when cs.ToLowerInvariant() = "binary" -> Collate(cast, "binary")
+        | _ -> cast
 
 let private existsExpr: Parser<Expr, unit> =
     attempt (keyword "EXISTS" >>. sym "(" >>. selectStmtRecord .>> sym ")") |>> Exists
@@ -777,7 +793,10 @@ let private arithExpr = opp.ExpressionParser
 /// registry here; the tag rides the `Collate` AST node into `Executor`,
 /// where comparisons resolve it.
 let private collateTerm: Parser<Expr, unit> =
-    jsonArrowAtom
+    // `BINARY x` prefix — MySQL's shorthand for a byte-wise comparison cast,
+    // expressed as the `binary` collation tag on the operand.
+    ((attempt (keyword "BINARY" >>. jsonArrowAtom) |>> fun e -> Collate(e, "binary"))
+     <|> jsonArrowAtom)
     .>>. opt (keyword "COLLATE" >>. (identifier <|> (stringLit |>> (function VString name -> name | _ -> ""))))
     >>= fun (e, nameOpt) ->
         match nameOpt with

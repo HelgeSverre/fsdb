@@ -126,6 +126,12 @@ type Table =
       /// distinct from the baked-in per-column defaults.
       TableCharset: string option
       TableCollation: string option
+      /// When the table was created — surfaced as
+      /// `information_schema.tables.CREATE_TIME`. Survives a snapshot;
+      /// ponytail: a WAL-only replay re-stamps it at replay time (the
+      /// CreateTable commit event carries no clock), refreshed by the next
+      /// snapshot.
+      CreateTime: DateTime
       /// Hash index over every PRIMARY KEY / UNIQUE `Indexes` entry, kept in
       /// sync with `Rows` by every write path below (`insertCore`,
       /// `updateRows`, `upsertRows`, `deleteRows`'s `cascadeDeleteVisited`)
@@ -1441,6 +1447,7 @@ let createTable
                       ForeignKeys = foreignKeys
                       TableCharset = tableCharset
                       TableCollation = tableCollation
+                      CreateTime = DateTime.Now
                       UniqueIndex = Map.empty }
 
                 Ok(Map.add key (reindexTable table) db, ()))

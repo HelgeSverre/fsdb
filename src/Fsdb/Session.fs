@@ -22,6 +22,7 @@ let defaultVariables: Map<string, string option> =
           "character_set_server", "utf8mb4"
           "collation_connection", "utf8mb4_general_ci"
           "collation_server", "utf8mb4_general_ci"
+          "collation_database", "utf8mb4_general_ci"
           "autocommit", "1"
           "max_allowed_packet", "16777216"
           "system_time_zone", "UTC"
@@ -81,6 +82,12 @@ let tryGlobalVariable (store: Store) (name: string) : string option option =
     match (globalVariablesOf store).TryGetValue name with
     | true, v -> Some v
     | false, _ -> defaultVariables |> Map.tryFind name
+
+/// The GLOBAL variable space as a whole — compiled-in defaults with every
+/// `SET GLOBAL` override applied; `SHOW GLOBAL VARIABLES`' row source.
+let globalVariablesSnapshot (store: Store) : Map<string, string option> =
+    globalVariablesOf store
+    |> Seq.fold (fun m (kv: System.Collections.Generic.KeyValuePair<string, string option>) -> Map.add kv.Key kv.Value m) defaultVariables
 
 /// A server-side prepared statement (COM_STMT_PREPARE / COM_STMT_EXECUTE).
 /// `Ast` is the parsed statement for everything the grammar produces —

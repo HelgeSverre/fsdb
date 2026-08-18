@@ -250,6 +250,19 @@ let registry : Map<string, Collation> =
     |> register "utf8mb4_slovak_ci" { Locale = Some "sk-SK"; Fold = aiCi; PadSpace = pad; ByteOrder = false }
     |> register "utf8mb4_slovenian_ci" { Locale = Some "sl-SI"; Fold = aiCi; PadSpace = pad; ByteOrder = false }
     |> register "utf8mb4_vietnamese_ci" { Locale = Some "vi-VN"; Fold = aiCi; PadSpace = pad; ByteOrder = false }
+    // Legacy-charset collations (utf8mb3/latin1/ascii/binary) — clients and
+    // GUI tools compare information_schema strings with `COLLATE utf8_bin`
+    // and columns declared in these charsets; values are stored as .NET
+    // strings either way, so only the comparison semantics differ.
+    |> register "utf8mb3_general_ci" { Locale = None; Fold = aiCi; PadSpace = pad; ByteOrder = false }
+    |> register "utf8mb3_unicode_ci" { Locale = None; Fold = aiCi; PadSpace = pad; ByteOrder = false }
+    |> register "utf8mb3_bin" { Locale = None; Fold = asCs; PadSpace = pad; ByteOrder = true }
+    |> register "latin1_swedish_ci" { Locale = None; Fold = aiCi; PadSpace = pad; ByteOrder = false }
+    |> register "latin1_general_ci" { Locale = None; Fold = aiCi; PadSpace = pad; ByteOrder = false }
+    |> register "latin1_bin" { Locale = None; Fold = asCs; PadSpace = pad; ByteOrder = true }
+    |> register "ascii_general_ci" { Locale = None; Fold = aiCi; PadSpace = pad; ByteOrder = false }
+    |> register "ascii_bin" { Locale = None; Fold = asCs; PadSpace = pad; ByteOrder = true }
+    |> register "binary" { Locale = None; Fold = asCs; PadSpace = noPad; ByteOrder = true }
 
 /// MySQL 8.4's `information_schema.collations` `ID` and `SORTLEN` for every
 /// registered collation — harvested from a real 8.4.11 server
@@ -347,11 +360,38 @@ let idAndSortlen : Map<string, int * int> =
           "utf8mb4_spanish_ci", (231, 8)
           "utf8mb4_swedish_ci", (232, 8)
           "utf8mb4_turkish_ci", (233, 8)
-          "utf8mb4_vietnamese_ci", (247, 8) ]
+          "utf8mb4_vietnamese_ci", (247, 8)
+          "utf8mb3_general_ci", (33, 1)
+          "utf8mb3_unicode_ci", (192, 8)
+          "utf8mb3_bin", (83, 1)
+          "latin1_swedish_ci", (8, 1)
+          "latin1_general_ci", (48, 1)
+          "latin1_bin", (47, 1)
+          "ascii_general_ci", (11, 1)
+          "ascii_bin", (65, 1)
+          "binary", (63, 1) ]
 
 /// Looks a collation up by its MySQL name — `COLLATE x` resolution and
-/// column definitions both route through here.
-let tryFind (name: string) : Collation option = Map.tryFind (name.ToLowerInvariant()) registry
+/// column definitions both route through here. `utf8_*` resolves as MySQL's
+/// deprecated alias for `utf8mb3_*` (accepted in SQL, listed only under the
+/// canonical name).
+let tryFind (name: string) : Collation option =
+    let lower = name.ToLowerInvariant()
+
+    let canonical =
+        if lower.StartsWith "utf8_" then "utf8mb3_" + lower.Substring 5 else lower
+
+    Map.tryFind canonical registry
+
+/// The charset a collation name belongs to — the prefix before the suffix
+/// MySQL appends (`binary` is its own one-collation pseudo charset).
+let charsetOfCollation (name: string) : string =
+    match name.ToLowerInvariant() with
+    | "binary" -> "binary"
+    | lower ->
+        match lower.IndexOf '_' with
+        | -1 -> lower
+        | i -> lower.Substring(0, i)
 
 /// The engine's one active default — a `Store`-level default today, the
 /// seam a per-session/per-column `COLLATE` resolves against.

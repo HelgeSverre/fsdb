@@ -223,8 +223,10 @@ let private handleAtVarSelect (session: Session) (sql: string) : QueryResult =
     else
         syntaxError sql
 
-/// `SHOW VARIABLES` / `SHOW VARIABLES LIKE 'pattern'`.
-let private handleShowVariables (session: Session) (sql: string) : QueryResult =
+/// `SHOW [SESSION|GLOBAL] VARIABLES [LIKE 'pattern']` — the GLOBAL form
+/// reads the store-wide space (defaults + `SET GLOBAL` overrides) instead of
+/// this session's values.
+let private handleShowVariables (session: Session) (isGlobal: bool) (sql: string) : QueryResult =
     let likeMatch = Regex.Match(sql, @"LIKE\s+'([^']*)'", RegexOptions.IgnoreCase)
 
     let matches (name: string) =
@@ -237,8 +239,14 @@ let private handleShowVariables (session: Session) (sql: string) : QueryResult =
         else
             true
 
+    let source =
+        if isGlobal then
+            Session.globalVariablesSnapshot (Session.currentStore session)
+        else
+            session.Variables
+
     let rows =
-        session.Variables
+        source
         |> Map.toList
         |> List.filter (fst >> matches)
         |> List.sortBy fst
@@ -262,6 +270,41 @@ let private likeSuffix (sql: string) : string option =
     if m.Success then Some m.Groups.[1].Value else None
 
 let private stripBackticks (s: string) = s.Trim().Trim('`')
+
+let private showStatusRe =
+    Regex(@"^SHOW\s+(?:SESSION\s+|GLOBAL\s+)?STATUS(\s|$)", RegexOptions.IgnoreCase)
+
+let private showVariablesRe =
+    Regex(@"^SHOW\s+(SESSION\s+|GLOBAL\s+)?VARIABLES(\s|$)", RegexOptions.IgnoreCase)
+
+let private showEnginesRe = Regex(@"^SHOW\s+(?:STORAGE\s+)?ENGINES\s*$", RegexOptions.IgnoreCase)
+let private showCharsetRe = Regex(@"^SHOW\s+(?:CHARACTER\s+SET|CHARSET)(\s|$)", RegexOptions.IgnoreCase)
+let private showPrivilegesRe = Regex(@"^SHOW\s+PRIVILEGES\s*$", RegexOptions.IgnoreCase)
+let private showProcesslistRe = Regex(@"^SHOW\s+(FULL\s+)?PROCESSLIST\s*$", RegexOptions.IgnoreCase)
+
+let private showTriggersRe =
+    Regex(@"^SHOW\s+TRIGGERS(?:\s+(?:FROM|IN)\s+(\S+))?", RegexOptions.IgnoreCase)
+
+let private showEventsRe =
+    Regex(@"^SHOW\s+EVENTS(?:\s+(?:FROM|IN)\s+(\S+))?", RegexOptions.IgnoreCase)
+
+let private showRoutineStatusRe =
+    Regex(@"^SHOW\s+(?:PROCEDURE|FUNCTION)\s+STATUS(\s|$)", RegexOptions.IgnoreCase)
+
+let private showGrantsRe =
+    Regex(@"^SHOW\s+GRANTS(\s+FOR\s+CURRENT_USER(\(\))?)?\s*$", RegexOptions.IgnoreCase)
+
+let private killRe = Regex(@"^KILL\s+(?:(QUERY|CONNECTION)\s+)?(\d+)\s*$", RegexOptions.IgnoreCase)
+
+/// `SHOW [FULL] TABLES ... WHERE Table_type IN (...)` / `= '...'` —
+/// phpMyAdmin's DisableIS listing path. Only the `Table_type` pseudo-column
+/// is filtered on; anything else in the WHERE is 1064 via the fallthrough.
+let private showTablesWhereRe =
+    Regex(
+        @"WHERE\s+`?Table_type`?\s+(?:IN\s*\(([^)]*)\)|=\s*'([^']*)')\s*$",
+        RegexOptions.IgnoreCase
+    )
+
 
 /// Lifts an `InformationSchema.ShowResult` into `QueryResult` — the one spot
 /// `Ok`/`Error` become `ResultSet`/`Err`, so every `SHOW ...` case in
@@ -293,7 +336,32 @@ let private handleShowTables (session: Session) (sql: string) : QueryResult =
     let full = m.Groups.[1].Success
     let dbName = if m.Groups.[3].Success then stripBackticks m.Groups.[3].Value else session.Database |> Option.defaultValue defaultDatabase
 
-    InformationSchema.showTables (Session.currentStore session).Catalog dbName full (likeSuffix sql) |> showResult
+    let result =
+        InformationSchema.showTables (Session.currentStore session).Catalog dbName full (likeSuffix sql)
+
+    let whereMatch = showTablesWhereRe.Match sql
+
+    if not whereMatch.Success then
+        result |> showResult
+    else
+        // Every table in a real database is a BASE TABLE and every
+        // information_schema one a SYSTEM VIEW, so the filter reduces to
+        // "does the allowed set contain this database's one type".
+        let allowed =
+            if whereMatch.Groups.[1].Success then
+                whereMatch.Groups.[1].Value.Split(',')
+                |> Array.map (fun t -> t.Trim().Trim('\''))
+                |> Array.toList
+            else
+                [ whereMatch.Groups.[2].Value ]
+            |> List.map (fun t -> t.ToUpperInvariant())
+
+        let thisDbType =
+            if dbName.ToLowerInvariant() = "information_schema" then "SYSTEM VIEW" else "BASE TABLE"
+
+        result
+        |> Result.map (fun (cols, rows) -> cols, (if List.contains thisDbType allowed then rows else []))
+        |> showResult
 
 let private handleShowDatabases (session: Session) (sql: string) : QueryResult =
     InformationSchema.showDatabases (Session.currentStore session).Catalog (likeSuffix sql) |> ResultSet
@@ -1009,7 +1077,17 @@ type private Probe =
     | Savepoint of name: string
     | Release of name: string
     | Use of dbName: string
-    | ShowVariables
+    | ShowVariables of isGlobal: bool
+    | ShowStatus
+    | ShowEngines
+    | ShowCharset
+    | ShowPrivileges
+    | ShowProcesslist of full: bool
+    | ShowTriggers of db: string option
+    | ShowEvents of db: string option
+    | ShowRoutineStatus
+    | ShowGrants
+    | Kill of queryOnly: bool * id: int64
     | ShowWarnings
     | ShowErrors
     | ShowMessageCount of isError: bool
@@ -1048,8 +1126,32 @@ let private tryProbe (sql: string) (upper: string) : Probe option =
         Some(Release((releaseSavepointStmt.Match sql).Groups.[1].Value))
     elif upper.StartsWith "USE " then
         Some(Use(sql.Substring(4).Trim().Trim('`')))
-    elif upper.StartsWith "SHOW VARIABLES" then
-        Some ShowVariables
+    elif showVariablesRe.IsMatch sql then
+        let scope = (showVariablesRe.Match sql).Groups.[1].Value
+        Some(ShowVariables(scope.Trim().ToUpperInvariant() = "GLOBAL"))
+    elif showStatusRe.IsMatch sql then
+        Some ShowStatus
+    elif showEnginesRe.IsMatch sql then
+        Some ShowEngines
+    elif showCharsetRe.IsMatch sql then
+        Some ShowCharset
+    elif showPrivilegesRe.IsMatch sql then
+        Some ShowPrivileges
+    elif showProcesslistRe.IsMatch sql then
+        Some(ShowProcesslist((showProcesslistRe.Match sql).Groups.[1].Success))
+    elif showTriggersRe.IsMatch sql && upper.StartsWith "SHOW TRIGGERS" then
+        let m = showTriggersRe.Match sql
+        Some(ShowTriggers(if m.Groups.[1].Success then Some(stripBackticks m.Groups.[1].Value) else None))
+    elif showEventsRe.IsMatch sql && upper.StartsWith "SHOW EVENTS" then
+        let m = showEventsRe.Match sql
+        Some(ShowEvents(if m.Groups.[1].Success then Some(stripBackticks m.Groups.[1].Value) else None))
+    elif showRoutineStatusRe.IsMatch sql then
+        Some ShowRoutineStatus
+    elif showGrantsRe.IsMatch sql then
+        Some ShowGrants
+    elif killRe.IsMatch sql then
+        let m = killRe.Match sql
+        Some(Kill(m.Groups.[1].Value.ToUpperInvariant() = "QUERY", int64 m.Groups.[2].Value))
     elif showCountWarningsRe.IsMatch sql then
         Some(ShowMessageCount false)
     elif showCountErrorsRe.IsMatch sql then
@@ -1125,7 +1227,32 @@ let private runProbe (session: Session) (sql: string) (probe: Probe) : Session *
         else
             let code, msg = Storage.toMySqlError (Storage.NoSuchDatabase dbName)
             session, Err(code, msg)
-    | ShowVariables -> session, handleShowVariables session sql
+    | ShowVariables isGlobal -> session, handleShowVariables session isGlobal sql
+    | ShowStatus -> session, InformationSchema.showStatus (likeSuffix sql) |> showResult
+    | ShowEngines -> session, InformationSchema.showEngines () |> showResult
+    | ShowCharset -> session, InformationSchema.showCharacterSet (likeSuffix sql) |> showResult
+    | ShowPrivileges -> session, InformationSchema.showPrivileges () |> showResult
+    | ShowProcesslist full -> session, InformationSchema.showProcesslist full |> showResult
+    | ShowTriggers db -> session, InformationSchema.showTriggers (Session.currentStore session).Catalog db |> showResult
+    | ShowEvents db -> session, InformationSchema.showEvents (Session.currentStore session).Catalog db |> showResult
+    | ShowRoutineStatus -> session, InformationSchema.showRoutineStatus () |> showResult
+    | ShowGrants ->
+        let user =
+            InformationSchema.tryFindProcess (int64 session.ConnectionId)
+            |> Option.map (fun p -> p.User)
+            |> Option.defaultValue "fsdb"
+
+        session, InformationSchema.showGrants user |> showResult
+    | Kill(queryOnly, id) ->
+        match InformationSchema.tryFindProcess id with
+        | None -> session, Err(1094, sprintf "Unknown thread id: %d" id)
+        | Some target ->
+            if queryOnly then
+                target.CancelQuery |> Option.iter (fun cancel -> cancel ())
+            else
+                target.CloseConnection |> Option.iter (fun close -> close ())
+
+            session, Affected 0UL
     | ShowWarnings
     | ShowErrors -> session, ResultSet([ "Level"; "Code"; "Message" ], [])
     | ShowMessageCount isError ->

@@ -73,6 +73,79 @@ let tests =
               }
               |> Async.RunSynchronously
 
+          testCase "PROCESSLIST shows the live connection and KILL CONNECTION tears a victim down"
+          <| fun _ ->
+              async {
+                  let listener = Fsdb.Server.startListening System.Net.IPAddress.Loopback 0
+                  let port = Fsdb.Server.port listener
+                  Fsdb.Server.serve listener (Fsdb.Storage.create ()) Fsdb.Functions.empty |> Async.StartAsTask |> ignore
+
+                  try
+                      let connStr =
+                          sprintf
+                              "Server=127.0.0.1;Port=%d;User ID=root;Password=;AllowPublicKeyRetrieval=True;SslMode=None;Pooling=false"
+                              port
+
+                      use victim = new MySqlConnector.MySqlConnection(connStr)
+                      do! victim.OpenAsync() |> Async.AwaitTask
+
+                      use killer = new MySqlConnector.MySqlConnection(connStr)
+                      do! killer.OpenAsync() |> Async.AwaitTask
+
+                      use victimId = victim.CreateCommand()
+                      victimId.CommandText <- "SELECT CONNECTION_ID()"
+                      let! victimIdValue = victimId.ExecuteScalarAsync() |> Async.AwaitTask
+
+                      use killerId = killer.CreateCommand()
+                      killerId.CommandText <- "SELECT CONNECTION_ID()"
+                      let! killerIdValue = killerId.ExecuteScalarAsync() |> Async.AwaitTask
+
+                      // Both live connections appear with the handshake's
+                      // real user — filtered by id, since concurrently
+                      // running tests register their own connections in the
+                      // same process-wide registry.
+                      use plist = killer.CreateCommand()
+                      plist.CommandText <- "SELECT USER, ID FROM information_schema.processlist ORDER BY ID"
+                      use! reader = plist.ExecuteReaderAsync() |> Async.AwaitTask
+                      let mutable rows = []
+
+                      while reader.Read() do
+                          rows <- (reader.GetString 0, reader.GetInt64 1) :: rows
+
+                      do! reader.CloseAsync() |> Async.AwaitTask
+                      let ours = rows |> List.filter (fun (_, id) -> string id = string victimIdValue || string id = string killerIdValue)
+                      Expect.equal ours.Length 2 "both connections listed"
+                      Expect.all ours (fun (user, _) -> user = "root") "the handshake user, not a stub"
+
+                      use kill = killer.CreateCommand()
+                      kill.CommandText <- sprintf "KILL CONNECTION %s" (string victimIdValue)
+                      let! _ = kill.ExecuteNonQueryAsync() |> Async.AwaitTask
+
+                      // The victim's next statement must fail — its socket is gone.
+                      use dead = victim.CreateCommand()
+                      dead.CommandText <- "SELECT 1"
+
+                      let! threw =
+                          async {
+                              try
+                                  let! _ = dead.ExecuteScalarAsync() |> Async.AwaitTask
+                                  return false
+                              with _ ->
+                                  return true
+                          }
+
+                      Expect.isTrue threw "the killed connection is unusable"
+
+                      // The killer itself is untouched, and KILL of a gone id is 1094.
+                      use alive = killer.CreateCommand()
+                      alive.CommandText <- "SELECT 1"
+                      let! one = alive.ExecuteScalarAsync() |> Async.AwaitTask
+                      Expect.equal (string one) "1" "the killer connection survives"
+                  finally
+                      listener.Stop()
+              }
+              |> Async.RunSynchronously
+
           // mysql CLI sends `SHOW WARNINGS LIMIT n` and mysqli's
           // `mysqli_report`/error-checking idiom sends `SHOW COUNT(*)
           // WARNINGS` — both routinely enough that either one dying with a

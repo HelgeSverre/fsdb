@@ -875,6 +875,7 @@ let private encodeTableMeta (w: Writer) (t: Table) : unit =
     List.iter (encodeForeignKeyDef w) t.ForeignKeys
     writeOptStr w t.TableCharset
     writeOptStr w t.TableCollation
+    w.WriteInt64LE t.CreateTime.Ticks
     w.WriteInt64LE t.NextAutoId
     w.WriteInt32LE t.RowsArray.Length
 
@@ -935,6 +936,7 @@ let private decodeTable (r: #IReader) : Table =
     let fks = List.init (r.ReadInt32LE()) (fun _ -> decodeForeignKeyDef r)
     let tableCharset = readOptStr r
     let tableCollation = readOptStr r
+    let createTime = DateTime(r.ReadInt64LE())
     let nextAutoId = r.ReadInt64LE()
     let rows = List.init (r.ReadInt32LE()) (fun _ -> decodeRowBin r)
 
@@ -945,6 +947,7 @@ let private decodeTable (r: #IReader) : Table =
           ForeignKeys = fks
           TableCharset = tableCharset
           TableCollation = tableCollation
+          CreateTime = createTime
           RowsArray = ImmutableArray.CreateRange rows
           NextAutoId = nextAutoId
           UniqueIndex = Map.empty }

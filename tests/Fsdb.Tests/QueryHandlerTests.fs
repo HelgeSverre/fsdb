@@ -590,6 +590,120 @@ let tests =
               | ResultSet([ "Tables_in_shop"; "Table_type" ], [ [ Some "widgets"; Some "BASE TABLE" ] ]) -> ()
               | other -> failtestf "expected the FULL variant's extra column, got %A" other
 
+          testCase "SHOW STATUS answers session/global forms and unmatched patterns with empty sets"
+          <| fun _ ->
+              let session = create 1 (Fsdb.Storage.create ())
+
+              match handle session "show session status like 'ssl_version'" |> snd with
+              | ResultSet([ "Variable_name"; "Value" ], [ [ Some "Ssl_version"; Some "" ] ]) -> ()
+              | other -> failtestf "expected the empty Ssl_version row, got %A" other
+
+              match handle session "SHOW GLOBAL STATUS LIKE 'Uptime'" |> snd with
+              | ResultSet(_, [ [ Some "Uptime"; Some _ ] ]) -> ()
+              | other -> failtestf "expected an Uptime row, got %A" other
+
+              match handle session "SHOW STATUS LIKE 'no_such_counter%'" |> snd with
+              | ResultSet(_, []) -> ()
+              | other -> failtestf "expected an empty set, got %A" other
+
+          testCase "SHOW SESSION/GLOBAL VARIABLES match like the bare form; GLOBAL reads the store scope"
+          <| fun _ ->
+              let session = create 1 (Fsdb.Storage.create ())
+              let session, _ = handle session "SET GLOBAL wait_timeout = 123"
+
+              match handle session "SHOW SESSION VARIABLES LIKE 'wait_timeout'" |> snd with
+              | ResultSet(_, [ [ Some "wait_timeout"; Some "28800" ] ]) -> ()
+              | other -> failtestf "expected the session value untouched, got %A" other
+
+              match handle session "SHOW GLOBAL VARIABLES LIKE 'wait_timeout'" |> snd with
+              | ResultSet(_, [ [ Some "wait_timeout"; Some "123" ] ]) -> ()
+              | other -> failtestf "expected the global override, got %A" other
+
+          testCase "SHOW ENGINES / STORAGE ENGINES / CHARACTER SET / PRIVILEGES / GRANTS answer"
+          <| fun _ ->
+              let session = create 1 (Fsdb.Storage.create ())
+
+              match handle session "SHOW ENGINES" |> snd with
+              | ResultSet(_, [ [ Some "InnoDB"; Some "DEFAULT"; _; Some "YES"; Some "YES"; Some "YES" ] ]) -> ()
+              | other -> failtestf "expected the InnoDB engine row, got %A" other
+
+              match handle session "SHOW STORAGE ENGINES" |> snd with
+              | ResultSet(_, [ _ ]) -> ()
+              | other -> failtestf "expected the same single row, got %A" other
+
+              match handle session "SHOW CHARACTER SET LIKE 'utf8mb4'" |> snd with
+              | ResultSet([ "Charset"; "Default collation"; "Description"; "Maxlen" ], [ [ Some "utf8mb4"; Some "utf8mb4_0900_ai_ci"; _; Some "4" ] ]) -> ()
+              | other -> failtestf "expected the utf8mb4 charset row, got %A" other
+
+              match handle session "SHOW PRIVILEGES" |> snd with
+              | ResultSet([ "Privilege"; "Context"; "Comment" ], rows) -> Expect.isGreaterThan rows.Length 30 "the full static list"
+              | other -> failtestf "expected the privileges list, got %A" other
+
+              match handle session "SHOW GRANTS FOR CURRENT_USER()" |> snd with
+              | ResultSet(_, [ [ Some grant ] ]) -> Expect.stringContains grant "GRANT ALL PRIVILEGES ON *.*" "the one truthful grant"
+              | other -> failtestf "expected one grant row, got %A" other
+
+          testCase "SHOW TRIGGERS/EVENTS/PROCEDURE STATUS are empty with real headers; unknown db still 1049"
+          <| fun _ ->
+              let session = create 1 (Fsdb.Storage.create ())
+              let session, _ = handle session "CREATE DATABASE shop"
+
+              match handle session "SHOW TRIGGERS FROM shop" |> snd with
+              | ResultSet("Trigger" :: _, []) -> ()
+              | other -> failtestf "expected empty triggers, got %A" other
+
+              match handle session "SHOW TRIGGERS FROM nope" |> snd with
+              | Err(1049, _) -> ()
+              | other -> failtestf "expected 1049, got %A" other
+
+              match handle session "SHOW EVENTS FROM shop" |> snd with
+              | ResultSet("Db" :: _, []) -> ()
+              | other -> failtestf "expected empty events, got %A" other
+
+              match handle session "SHOW PROCEDURE STATUS WHERE Db='shop'" |> snd with
+              | ResultSet("Db" :: _, []) -> ()
+              | other -> failtestf "expected empty procedure status, got %A" other
+
+              match handle session "SHOW FUNCTION STATUS" |> snd with
+              | ResultSet(_, []) -> ()
+              | other -> failtestf "expected empty function status, got %A" other
+
+          testCase "SHOW FULL TABLES WHERE Table_type filters on the pseudo-column"
+          <| fun _ ->
+              let session = create 1 (Fsdb.Storage.create ())
+              let session, _ = handle session "CREATE DATABASE shop"
+              let session, _ = handle session "USE shop"
+              let session, _ = handle session "CREATE TABLE widgets (id INT PRIMARY KEY)"
+
+              match handle session "SHOW FULL TABLES FROM shop WHERE Table_type IN ('BASE TABLE', 'SYSTEM VERSIONED')" |> snd with
+              | ResultSet(_, [ [ Some "widgets"; Some "BASE TABLE" ] ]) -> ()
+              | other -> failtestf "expected the table to pass the filter, got %A" other
+
+              match handle session "SHOW FULL TABLES FROM shop WHERE Table_type = 'VIEW'" |> snd with
+              | ResultSet(_, []) -> ()
+              | other -> failtestf "expected the VIEW filter to exclude everything, got %A" other
+
+          testCase "SHOW TABLES FROM information_schema lists the virtual tables"
+          <| fun _ ->
+              let session = create 1 (Fsdb.Storage.create ())
+
+              match handle session "SHOW TABLES FROM information_schema" |> snd with
+              | ResultSet([ "Tables_in_information_schema" ], rows) ->
+                  Expect.isGreaterThan rows.Length 20 "all virtual tables listed"
+              | other -> failtestf "expected the virtual-table listing, got %A" other
+
+          testCase "SHOW PROCESSLIST answers (empty registry outside a server); KILL of an unknown id is 1094"
+          <| fun _ ->
+              let session = create 1 (Fsdb.Storage.create ())
+
+              match handle session "SHOW FULL PROCESSLIST" |> snd with
+              | ResultSet([ "Id"; "User"; "Host"; "db"; "Command"; "Time"; "State"; "Info" ], _) -> ()
+              | other -> failtestf "expected the processlist shape, got %A" other
+
+              match handle session "KILL QUERY 999999" |> snd with
+              | Err(1094, _) -> ()
+              | other -> failtestf "expected 1094 for an unknown thread id, got %A" other
+
           testCase "SHOW COLUMNS FROM t / DESCRIBE t report field metadata"
           <| fun _ ->
               let session = create 1 (Fsdb.Storage.create ())

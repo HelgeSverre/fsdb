@@ -488,4 +488,85 @@ let tests =
               | Ok stmt ->
                   match execute store builtins "information_schema" (0L, 0L) false stmt |> snd with
                   | ResultSet(_, [ [ Some "users" ] ]) -> ()
-                  | other -> failtestf "expected the unqualified lookup to still resolve, got %A" other ]
+                  | other -> failtestf "expected the unqualified lookup to still resolve, got %A" other
+
+          testCase "TABLES carries MySQL 8.4's full column set with a real CREATE_TIME"
+          <| fun _ ->
+              let store = setup ()
+
+              match run store "SELECT engine, version, row_format, create_time, checksum FROM information_schema.tables WHERE table_schema = 'fsdb' AND table_name = 'users'" with
+              | ResultSet(_, [ [ Some "InnoDB"; Some "10"; Some "Dynamic"; Some createTime; None ] ]) ->
+                  Expect.isTrue (createTime.Contains "-") "CREATE_TIME renders as a datetime"
+              | other -> failtestf "expected the full TABLES row, got %A" other
+
+          testCase "information_schema lists its own tables as SYSTEM VIEWs, matching the scan registry"
+          <| fun _ ->
+              let store = setup ()
+
+              match run store "SELECT table_name, table_type FROM information_schema.tables WHERE table_schema = 'information_schema' ORDER BY table_name" with
+              | ResultSet(_, rows) ->
+                  Expect.isGreaterThan rows.Length 20 "all virtual tables listed"
+                  Expect.all rows (fun r -> r.[1] = Some "SYSTEM VIEW") "typed SYSTEM VIEW"
+
+                  // Every self-listed name must actually resolve through scan.
+                  for row in rows do
+                      match row.[0] with
+                      | Some name ->
+                          match run store (sprintf "SELECT * FROM information_schema.%s LIMIT 1" name) with
+                          | ResultSet _ -> ()
+                          | other -> failtestf "self-listed %s doesn't resolve: %A" name other
+                      | None -> failtestf "NULL table_name in self-listing"
+              | other -> failtestf "expected a resultset, got %A" other
+
+          testCase "COLUMNS reports CHARACTER_OCTET_LENGTH and PRIVILEGES"
+          <| fun _ ->
+              let store = setup ()
+
+              match run store "SELECT character_maximum_length, character_octet_length, privileges FROM information_schema.columns WHERE table_name = 'users' AND column_name = 'name'" with
+              | ResultSet(_, [ [ Some "100"; Some "400"; Some "select,insert,update,references" ] ]) -> ()
+              | other -> failtestf "expected varchar(100) octet metadata, got %A" other
+
+          testCase "VIEWS/ROUTINES/TRIGGERS/EVENTS/PARAMETERS are genuinely empty, not 1146"
+          <| fun _ ->
+              let store = setup ()
+
+              for table in [ "views"; "routines"; "triggers"; "events"; "parameters" ] do
+                  match run store (sprintf "SELECT * FROM information_schema.%s" table) with
+                  | ResultSet(_, []) -> ()
+                  | other -> failtestf "expected empty %s, got %A" table other
+
+          testCase "the verbatim TablePlus routines query returns an empty set with aliased columns"
+          <| fun _ ->
+              let store = setup ()
+
+              match run store "SELECT ROUTINE_SCHEMA as function_schema,ROUTINE_NAME as function_name,ROUTINE_DEFINITION as create_statement,ROUTINE_TYPE as function_type FROM information_schema.routines where ROUTINE_SCHEMA='fsdb'" with
+              | ResultSet([ "function_schema"; "function_name"; "create_statement"; "function_type" ], []) -> ()
+              | other -> failtestf "expected the aliased empty set, got %A" other
+
+          testCase "ENGINES reports the one real engine; PARTITIONS one unpartitioned row per table"
+          <| fun _ ->
+              let store = setup ()
+
+              match run store "SELECT engine, support FROM information_schema.engines" with
+              | ResultSet(_, [ [ Some "InnoDB"; Some "DEFAULT" ] ]) -> ()
+              | other -> failtestf "expected the single InnoDB row, got %A" other
+
+              match run store "SELECT table_name, partition_name FROM information_schema.partitions WHERE table_schema = 'fsdb' ORDER BY table_name" with
+              | ResultSet(_, [ [ Some "posts"; None ]; [ Some "users"; None ] ]) -> ()
+              | other -> failtestf "expected NULL-partition rows, got %A" other
+
+          testCase "the TablePlus TABLES x COLLATION_CHARACTER_SET_APPLICABILITY comma join resolves charsets"
+          <| fun _ ->
+              let store = setup ()
+
+              match run store "SELECT CCSA.character_set_name as charset, T.table_name AS name FROM information_schema.TABLES T, information_schema.COLLATION_CHARACTER_SET_APPLICABILITY CCSA WHERE CCSA.collation_name = T.table_collation AND T.TABLE_SCHEMA = 'fsdb' AND T.TABLE_NAME = 'users'" with
+              | ResultSet(_, [ [ Some "utf8mb4"; Some "users" ] ]) -> ()
+              | other -> failtestf "expected the joined charset row, got %A" other
+
+          testCase "legacy-charset collations resolve, utf8_bin included as the utf8mb3 alias"
+          <| fun _ ->
+              let store = setup ()
+
+              match run store "SELECT 'demo' COLLATE utf8_bin = 'demo', BINARY 'a' = 'A', CAST('x' AS CHAR CHARACTER SET utf8)" with
+              | ResultSet(_, [ [ Some "1"; Some "0"; Some "x" ] ]) -> ()
+              | other -> failtestf "expected COLLATE/BINARY/CAST forms to evaluate, got %A" other ]

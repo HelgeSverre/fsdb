@@ -186,26 +186,37 @@ let private vs (s: string) = VString s
 let private vi (i: int) = VInt(int64 i)
 let private vopt (s: string option) = s |> Option.map VString |> Option.defaultValue VNull
 
+/// MySQL 8.4's full `TABLES` column set, in MySQL's order — clients
+/// `SELECT *` here (phpMyAdmin's table-status query aliases every one of
+/// these), so the shape must match, not just the columns fsdb has real
+/// numbers for.
 let private tablesColumns =
-    [ strCol "table_schema"
-      strCol "table_name"
-      strCol "table_type"
-      strCol "engine"
-      intCol "table_rows"
-      intCol "auto_increment"
-      strCol "table_collation"
-      strCol "table_comment"
-      // Fake but present: Laravel's `compileTables` projects `(data_length +
-      // index_length) as size` — this in-memory engine has no real page
-      // storage to report, so both are a constant stand-in rather than
-      // absent columns that would 1054 on that expression.
-      intCol "data_length"
-      intCol "index_length"
-      // Always empty: `Ast`'s `CREATE TABLE` has no notion of extra table
-      // options (`ROW_FORMAT=...` etc.) to echo back. Present only so
-      // Doctrine DBAL's `getListTableMetadataSQL` (behind Laravel's
-      // `Blueprint::change()`) doesn't 1054 projecting it.
-      strCol "create_options" ]
+    [ strCol "TABLE_CATALOG"
+      strCol "TABLE_SCHEMA"
+      strCol "TABLE_NAME"
+      strCol "TABLE_TYPE"
+      strCol "ENGINE"
+      intCol "VERSION"
+      strCol "ROW_FORMAT"
+      intCol "TABLE_ROWS"
+      intCol "AVG_ROW_LENGTH"
+      // Constant page-size stand-ins: this in-memory engine has no real
+      // page storage to report, but Laravel's `compileTables` projects
+      // `(data_length + index_length) as size`, so the columns must exist.
+      intCol "DATA_LENGTH"
+      intCol "MAX_DATA_LENGTH"
+      intCol "INDEX_LENGTH"
+      intCol "DATA_FREE"
+      intCol "AUTO_INCREMENT"
+      col "CREATE_TIME" (TDateTime 0)
+      col "UPDATE_TIME" (TDateTime 0)
+      col "CHECK_TIME" (TDateTime 0)
+      strCol "TABLE_COLLATION"
+      intCol "CHECKSUM"
+      strCol "CREATE_OPTIONS"
+      strCol "TABLE_COMMENT" ]
+
+let private truncateToSecond (d: DateTime) = d.AddTicks(-(d.Ticks % TimeSpan.TicksPerSecond))
 
 let private tablesRows (catalog: Catalog) : Value[] list =
     allTables catalog
@@ -217,42 +228,70 @@ let private tablesRows (catalog: Catalog) : Value[] list =
         let autoIncrement =
             if t.Columns |> List.exists (fun c -> c.AutoIncrement) then VInt t.NextAutoId else VNull
 
-        [| vs dbName
+        [| vs "def"
+           vs dbName
            vs t.OriginalName
            vs "BASE TABLE"
            vs "InnoDB"
+           vi 10
+           vs "Dynamic"
            vi (t.RowsArray.Length)
-           autoIncrement
-           vs (t.TableCollation |> Option.defaultValue "utf8mb4_0900_ai_ci")
-           vs ""
+           vi 0
            vi 16384
            vi 0
+           vi 0
+           vi 0
+           autoIncrement
+           VDateTime(truncateToSecond t.CreateTime)
+           // NULL like real InnoDB, which doesn't maintain them either.
+           VNull
+           VNull
+           vs (t.TableCollation |> Option.defaultValue "utf8mb4_0900_ai_ci")
+           VNull
+           vs ""
            vs "" |])
 
+/// MySQL 8.4's full `COLUMNS` column set, in MySQL's order — same
+/// `SELECT *` contract as `tablesColumns`.
 let private columnsColumns =
-    [ strCol "table_schema"
-      strCol "table_name"
-      strCol "column_name"
-      intCol "ordinal_position"
-      strCol "column_default"
-      strCol "is_nullable"
-      strCol "data_type"
-      strCol "column_type"
-      intCol "character_maximum_length"
-      intCol "numeric_precision"
-      intCol "numeric_scale"
-      intCol "datetime_precision"
-      strCol "column_key"
-      strCol "extra"
-      // NULL for a non-string column, `utf8mb4` for a string one — same
-      // split `collation_name` right below already makes.
-      strCol "character_set_name"
-      strCol "collation_name"
+    [ strCol "TABLE_CATALOG"
+      strCol "TABLE_SCHEMA"
+      strCol "TABLE_NAME"
+      strCol "COLUMN_NAME"
+      intCol "ORDINAL_POSITION"
+      strCol "COLUMN_DEFAULT"
+      strCol "IS_NULLABLE"
+      strCol "DATA_TYPE"
+      intCol "CHARACTER_MAXIMUM_LENGTH"
+      intCol "CHARACTER_OCTET_LENGTH"
+      intCol "NUMERIC_PRECISION"
+      intCol "NUMERIC_SCALE"
+      intCol "DATETIME_PRECISION"
+      // NULL for a non-string column, the charset/collation for a string
+      // one — same split real MySQL makes.
+      strCol "CHARACTER_SET_NAME"
+      strCol "COLLATION_NAME"
+      strCol "COLUMN_TYPE"
+      strCol "COLUMN_KEY"
+      strCol "EXTRA"
+      strCol "PRIVILEGES"
       // `Ast.ColumnDef` doesn't track a column comment — always empty,
       // present only so Laravel's `compileColumns` (which projects it
       // unconditionally) doesn't 1054.
-      strCol "column_comment"
-      strCol "generation_expression" ]
+      strCol "COLUMN_COMMENT"
+      strCol "GENERATION_EXPRESSION"
+      intCol "SRS_ID" ]
+
+/// `CHARACTER_OCTET_LENGTH` — the byte capacity behind
+/// `CHARACTER_MAXIMUM_LENGTH`: x4 for utf8mb4 CHAR/VARCHAR, equal for the
+/// fixed-capacity TEXT/BLOB/BINARY families.
+let private charOctetLength (ty: ColumnType) : int64 option =
+    charMaxLength ty
+    |> Option.map (fun n ->
+        match ty with
+        | TChar _
+        | TVarchar _ -> n * 4L
+        | _ -> n)
 
 /// Renders a generated-column expression back to SQL for
 /// `GENERATION_EXPRESSION` / `SHOW CREATE TABLE`, in MySQL's normalized
@@ -351,53 +390,68 @@ let defaultText (d: ColumnDefault option) : string option =
     | Some(DConst v) -> v |> toText
     | Some DCurrentTimestamp -> Some "CURRENT_TIMESTAMP"
 
+/// One `COLUMNS` row — shared by real tables (with the table's key
+/// metadata) and information_schema's own self-listing (no keys).
+let private columnRow (dbName: string) (tableName: string) (i: int) (key: string) (c: ColumnDef) : Value[] =
+    let precision, scale = numericPrecisionScale c.Type |> Option.map (fun (p, s) -> Some p, Some s) |> Option.defaultValue (None, None)
+
+    [| vs "def"
+       vs dbName
+       vs tableName
+       vs c.Name
+       vi (i + 1)
+       vopt (defaultText c.Default)
+       // A primary key column is implicitly NOT NULL in MySQL even
+       // without an explicit `NOT NULL` — `Ast.ColumnDef.Nullable`
+       // only tracks the explicit modifier (ponytail: `Storage`
+       // itself still doesn't reject a NULL insert into an implicit
+       // PK column; add that enforcement too if a migration's
+       // assertions ever depend on it, not just this metadata view).
+       vs (if c.PrimaryKey || not c.Nullable then "NO" else "YES")
+       vs (dataTypeName c.Type)
+       (charMaxLength c.Type |> Option.map VInt |> Option.defaultValue VNull)
+       (charOctetLength c.Type |> Option.map VInt |> Option.defaultValue VNull)
+       (precision |> Option.map VInt |> Option.defaultValue VNull)
+       (scale |> Option.map VInt |> Option.defaultValue VNull)
+       (datetimePrecision c.Type |> Option.map VInt |> Option.defaultValue VNull)
+       (if isStringy c.Type then vs (c.Charset |> Option.defaultValue "utf8mb4") else VNull)
+       (if isStringy c.Type then vs (c.Collation |> Option.defaultValue "utf8mb4_0900_ai_ci") else VNull)
+       vs (columnTypeText c.Type)
+       vs key
+       vs (extraText c)
+       vs "select,insert,update,references"
+       vs ""
+       vs (c.Generated |> Option.map (fst >> exprToSql) |> Option.defaultValue "")
+       VNull |]
+
 let private columnsRows (catalog: Catalog) : Value[] list =
     allTables catalog
     |> List.collect (fun (dbName, t) ->
-        t.Columns
-        |> List.mapi (fun i c ->
-            let precision, scale = numericPrecisionScale c.Type |> Option.map (fun (p, s) -> Some p, Some s) |> Option.defaultValue (None, None)
-
-            [| vs dbName
-               vs t.OriginalName
-               vs c.Name
-               vi (i + 1)
-               vopt (defaultText c.Default)
-               // A primary key column is implicitly NOT NULL in MySQL even
-               // without an explicit `NOT NULL` — `Ast.ColumnDef.Nullable`
-               // only tracks the explicit modifier (ponytail: `Storage`
-               // itself still doesn't reject a NULL insert into an implicit
-               // PK column; add that enforcement too if a migration's
-               // assertions ever depend on it, not just this metadata view).
-               vs (if c.PrimaryKey || not c.Nullable then "NO" else "YES")
-               vs (dataTypeName c.Type)
-               vs (columnTypeText c.Type)
-               (charMaxLength c.Type |> Option.map VInt |> Option.defaultValue VNull)
-               (precision |> Option.map VInt |> Option.defaultValue VNull)
-               (scale |> Option.map VInt |> Option.defaultValue VNull)
-               (datetimePrecision c.Type |> Option.map VInt |> Option.defaultValue VNull)
-               vs (columnKey t c)
-               vs (extraText c)
-               (if isStringy c.Type then vs (c.Charset |> Option.defaultValue "utf8mb4") else VNull)
-               (if isStringy c.Type then vs (c.Collation |> Option.defaultValue "utf8mb4_0900_ai_ci") else VNull)
-               vs ""
-               vs (c.Generated |> Option.map (fst >> exprToSql) |> Option.defaultValue "") |]))
+        t.Columns |> List.mapi (fun i c -> columnRow dbName t.OriginalName i (columnKey t c) c))
 
 let private statisticsColumns =
-    [ strCol "table_schema"
-      strCol "table_name"
-      intCol "non_unique"
-      strCol "index_name"
-      intCol "seq_in_index"
-      strCol "column_name"
-      strCol "collation"
-      intCol "cardinality"
-      strCol "index_type"
+    [ strCol "TABLE_CATALOG"
+      strCol "TABLE_SCHEMA"
+      strCol "TABLE_NAME"
+      intCol "NON_UNIQUE"
+      strCol "INDEX_SCHEMA"
+      strCol "INDEX_NAME"
+      intCol "SEQ_IN_INDEX"
+      strCol "COLUMN_NAME"
+      strCol "COLLATION"
+      intCol "CARDINALITY"
       // A prefix index's `(N)` length (`INDEX(col(10))`) — always NULL
       // (whole-column) since `Ast.IndexDef` doesn't track a prefix length
       // to begin with. Doctrine DBAL's `selectIndexColumns` (behind
       // Laravel's `Blueprint::change()`) projects it unconditionally.
-      intCol "sub_part" ]
+      intCol "SUB_PART"
+      strCol "PACKED"
+      strCol "NULLABLE"
+      strCol "INDEX_TYPE"
+      strCol "COMMENT"
+      strCol "INDEX_COMMENT"
+      strCol "IS_VISIBLE"
+      strCol "EXPRESSION" ]
 
 /// One row per `(index, column)` pair — the primary key surfaces as a
 /// synthesized index literally named `PRIMARY`, same as real MySQL, since
@@ -415,27 +469,44 @@ let private statisticsRows (catalog: Catalog) : Value[] list =
         |> List.collect (fun ix ->
             ix.Columns
             |> List.mapi (fun i colName ->
-                [| vs dbName
+                let nullable =
+                    t.Columns
+                    |> List.tryFind (fun c -> c.Name = colName)
+                    |> Option.map (fun c -> if c.PrimaryKey || not c.Nullable then "" else "YES")
+                    |> Option.defaultValue ""
+
+                [| vs "def"
+                   vs dbName
                    vs t.OriginalName
                    vi (if ix.Unique then 0 else 1)
+                   vs dbName
                    vs ix.Name
                    vi (i + 1)
                    vs colName
                    vs "A"
                    vi 0
+                   VNull
+                   VNull
+                   vs nullable
                    vs "BTREE"
+                   vs ""
+                   vs ""
+                   vs "YES"
                    VNull |])))
 
 let private keyColumnUsageColumns =
-    [ strCol "constraint_schema"
-      strCol "constraint_name"
-      strCol "table_schema"
-      strCol "table_name"
-      strCol "column_name"
-      intCol "ordinal_position"
-      strCol "referenced_table_schema"
-      strCol "referenced_table_name"
-      strCol "referenced_column_name" ]
+    [ strCol "CONSTRAINT_CATALOG"
+      strCol "CONSTRAINT_SCHEMA"
+      strCol "CONSTRAINT_NAME"
+      strCol "TABLE_CATALOG"
+      strCol "TABLE_SCHEMA"
+      strCol "TABLE_NAME"
+      strCol "COLUMN_NAME"
+      intCol "ORDINAL_POSITION"
+      intCol "POSITION_IN_UNIQUE_CONSTRAINT"
+      strCol "REFERENCED_TABLE_SCHEMA"
+      strCol "REFERENCED_TABLE_NAME"
+      strCol "REFERENCED_COLUMN_NAME" ]
 
 let private keyColumnUsageRows (catalog: Catalog) : Value[] list =
     allTables catalog
@@ -444,7 +515,18 @@ let private keyColumnUsageRows (catalog: Catalog) : Value[] list =
             t.Columns
             |> List.filter (fun c -> c.PrimaryKey)
             |> List.mapi (fun i c ->
-                [| vs dbName; vs "PRIMARY"; vs dbName; vs t.OriginalName; vs c.Name; vi (i + 1); VNull; VNull; VNull |])
+                [| vs "def"
+                   vs dbName
+                   vs "PRIMARY"
+                   vs "def"
+                   vs dbName
+                   vs t.OriginalName
+                   vs c.Name
+                   vi (i + 1)
+                   VNull
+                   VNull
+                   VNull
+                   VNull |])
 
         let fkRows =
             t.ForeignKeys
@@ -453,11 +535,14 @@ let private keyColumnUsageRows (catalog: Catalog) : Value[] list =
                 |> List.mapi (fun i colName ->
                     let refCol = fk.RefColumns |> List.tryItem i |> Option.defaultValue ""
 
-                    [| vs dbName
+                    [| vs "def"
+                       vs dbName
                        vs fk.Name
+                       vs "def"
                        vs dbName
                        vs t.OriginalName
                        vs colName
+                       vi (i + 1)
                        vi (i + 1)
                        vs dbName
                        vs fk.RefTable
@@ -466,24 +551,30 @@ let private keyColumnUsageRows (catalog: Catalog) : Value[] list =
         pkRows @ fkRows)
 
 let private referentialConstraintsColumns =
-    [ strCol "constraint_schema"
-      strCol "constraint_name"
-      strCol "unique_constraint_schema"
-      strCol "unique_constraint_name"
-      strCol "update_rule"
-      strCol "delete_rule"
-      strCol "table_name"
-      strCol "referenced_table_name" ]
+    [ strCol "CONSTRAINT_CATALOG"
+      strCol "CONSTRAINT_SCHEMA"
+      strCol "CONSTRAINT_NAME"
+      strCol "UNIQUE_CONSTRAINT_CATALOG"
+      strCol "UNIQUE_CONSTRAINT_SCHEMA"
+      strCol "UNIQUE_CONSTRAINT_NAME"
+      strCol "MATCH_OPTION"
+      strCol "UPDATE_RULE"
+      strCol "DELETE_RULE"
+      strCol "TABLE_NAME"
+      strCol "REFERENCED_TABLE_NAME" ]
 
 let private referentialConstraintsRows (catalog: Catalog) : Value[] list =
     allTables catalog
     |> List.collect (fun (dbName, t) ->
         t.ForeignKeys
         |> List.map (fun fk ->
-            [| vs dbName
+            [| vs "def"
+               vs dbName
                vs fk.Name
+               vs "def"
                vs dbName
                vs "PRIMARY"
+               vs "NONE"
                // MySQL's actual default when a `FOREIGN KEY` declares no
                // `ON UPDATE`/`ON DELETE` clause is `NO ACTION`, not
                // `RESTRICT` (the two enforce identically, but
@@ -494,13 +585,13 @@ let private referentialConstraintsRows (catalog: Catalog) : Value[] list =
                vs fk.RefTable |]))
 
 let private tableConstraintsColumns =
-    [ strCol "constraint_catalog"
-      strCol "constraint_schema"
-      strCol "constraint_name"
-      strCol "table_schema"
-      strCol "table_name"
-      strCol "constraint_type"
-      strCol "enforced" ]
+    [ strCol "CONSTRAINT_CATALOG"
+      strCol "CONSTRAINT_SCHEMA"
+      strCol "CONSTRAINT_NAME"
+      strCol "TABLE_SCHEMA"
+      strCol "TABLE_NAME"
+      strCol "CONSTRAINT_TYPE"
+      strCol "ENFORCED" ]
 
 /// One row per named `PRIMARY KEY`/`UNIQUE`/`FOREIGN KEY` constraint —
 /// unlike `STATISTICS` (above), a plain non-unique `INDEX` has no row here,
@@ -532,20 +623,22 @@ let private tableConstraintsRows (catalog: Catalog) : Value[] list =
         pkRows @ uniqueRows @ fkRows)
 
 let private schemataColumns =
-    [ strCol "catalog_name"
-      strCol "schema_name"
-      strCol "default_character_set_name"
-      strCol "default_collation_name" ]
+    [ strCol "CATALOG_NAME"
+      strCol "SCHEMA_NAME"
+      strCol "DEFAULT_CHARACTER_SET_NAME"
+      strCol "DEFAULT_COLLATION_NAME"
+      strCol "SQL_PATH"
+      strCol "DEFAULT_ENCRYPTION" ]
 
 let private schemataRows (catalog: Catalog) : Value[] list =
     let real = catalog |> Map.toList |> List.map fst
 
     "information_schema" :: real
     |> List.distinct
-    |> List.map (fun dbName -> [| vs "def"; vs dbName; vs "utf8mb4"; vs "utf8mb4_unicode_ci" |])
+    |> List.map (fun dbName -> [| vs "def"; vs dbName; vs "utf8mb4"; vs "utf8mb4_unicode_ci"; VNull; vs "NO" |])
 
 let private collationCharacterSetApplicabilityColumns =
-    [ strCol "collation_name"; strCol "character_set_name" ]
+    [ strCol "COLLATION_NAME"; strCol "CHARACTER_SET_NAME" ]
 
 /// Real MySQL's version lists all ~280 collations the server ships with,
 /// regardless of whether anything actually uses them. This only needs to
@@ -557,11 +650,9 @@ let private collationCharacterSetApplicabilityColumns =
 /// ccsa ON ccsa.COLLATION_NAME = t.TABLE_COLLATION`, behind Laravel's
 /// `Blueprint::change()`) to find a match, not a full reference table.
 let private collationCharacterSetApplicabilityRows: Value[] list =
-    [ "utf8mb4_unicode_ci", "utf8mb4"
-      "utf8mb4_general_ci", "utf8mb4"
-      "utf8mb4_bin", "utf8mb4"
-      "utf8mb4_0900_ai_ci", "utf8mb4" ]
-    |> List.map (fun (collation, charset) -> [| vs collation; vs charset |])
+    Collation.registry
+    |> Map.toList
+    |> List.map (fun (name, _) -> [| vs name; vs (Collation.charsetOfCollation name) |])
 
 /// The character sets fsdb knows about, with MySQL 8.4's defaults — the
 /// metadata a schema-compare tool (Doctrine's platform setup, DB-browser
@@ -575,6 +666,7 @@ let private characterSetsColumns =
 
 let private characterSetsRows: Value[] list =
     [ "utf8mb4", "utf8mb4_0900_ai_ci", "UTF-8 Unicode", "4"
+      "utf8mb3", "utf8mb3_general_ci", "UTF-8 Unicode", "3"
       "latin1", "latin1_swedish_ci", "cp1252 West European", "1"
       "ascii", "ascii_general_ci", "US ASCII", "1"
       "binary", "binary", "Binary pseudo charset", "1" ]
@@ -590,7 +682,12 @@ let private registeredCollationRows : (string * string * int * int * string) lis
     |> Map.toList
     |> List.map (fun (name, col) ->
         let id, sortlen = Collation.idAndSortlen |> Map.tryFind name |> Option.defaultValue (0, 0)
-        name, "utf8mb4", id, sortlen, (if col.PadSpace then "PAD SPACE" else "NO PAD"))
+        name, Collation.charsetOfCollation name, id, sortlen, (if col.PadSpace then "PAD SPACE" else "NO PAD"))
+
+/// Each charset's default collation, mirroring `characterSetsRows` — drives
+/// `IS_DEFAULT` in the COLLATIONS view.
+let private defaultCollationPerCharset =
+    Set.ofList [ "utf8mb4_0900_ai_ci"; "utf8mb3_general_ci"; "latin1_swedish_ci"; "ascii_general_ci"; "binary" ]
 
 let private collationsColumns =
     [ strCol "COLLATION_NAME"
@@ -607,29 +704,427 @@ let private collationsRows: Value[] list =
         [| vs name
            vs charset
            vs (string id)
-           vs (if name = "utf8mb4_0900_ai_ci" then "Yes" else "")
+           vs (if Set.contains name defaultCollationPerCharset then "Yes" else "")
            vs "Yes"
            vs (string sortlen)
            vs pad |])
+
+
+// ---------------------------------------------------------------------------
+// Live-connection registry — `Server` registers each connection here so
+// `information_schema.PROCESSLIST`, `SHOW PROCESSLIST`, `Threads_connected`,
+// and `KILL` report/act on real sessions instead of stubs.
+// ---------------------------------------------------------------------------
+
+type ProcessEntry =
+    { Id: int64
+      User: string
+      Host: string
+      mutable Db: string option
+      mutable Command: string
+      mutable State: string
+      mutable StateSince: DateTime
+      mutable Info: string option
+      /// Cancels the query currently executing on this connection, if any —
+      /// `KILL QUERY`'s hook, wired by `Server` around each statement.
+      mutable CancelQuery: (unit -> unit) option
+      /// Tears the connection down — `KILL CONNECTION`'s hook.
+      mutable CloseConnection: (unit -> unit) option }
+
+let private processes = System.Collections.Concurrent.ConcurrentDictionary<int64, ProcessEntry>()
+
+/// Stamped by `Server.listen` — `SHOW STATUS`'s `Uptime` baseline.
+let mutable serverStartedAt = DateTime.Now
+
+let registerProcess (id: int64) (user: string) (host: string) : ProcessEntry =
+    let entry =
+        { Id = id
+          User = user
+          Host = host
+          Db = None
+          Command = "Sleep"
+          State = ""
+          StateSince = DateTime.Now
+          Info = None
+          CancelQuery = None
+          CloseConnection = None }
+
+    processes.[id] <- entry
+    entry
+
+let unregisterProcess (id: int64) = processes.TryRemove id |> ignore
+
+let tryFindProcess (id: int64) : ProcessEntry option =
+    match processes.TryGetValue id with
+    | true, p -> Some p
+    | _ -> None
+
+let listProcesses () : ProcessEntry list =
+    processes.Values |> Seq.sortBy (fun p -> p.Id) |> List.ofSeq
+
+let connectedThreads () = processes.Count
+
+let private processlistColumns =
+    [ intCol "ID"
+      strCol "USER"
+      strCol "HOST"
+      strCol "DB"
+      strCol "COMMAND"
+      intCol "TIME"
+      strCol "STATE"
+      strCol "INFO" ]
+
+/// `(ID, USER, HOST, DB, COMMAND, TIME, STATE, INFO)` per live connection —
+/// also `SHOW [FULL] PROCESSLIST`'s row source, so the two can't drift.
+let private processlistRows () : Value[] list =
+    listProcesses ()
+    |> List.map (fun ptmp ->
+        [| VInt ptmp.Id
+           vs ptmp.User
+           vs ptmp.Host
+           vopt ptmp.Db
+           vs ptmp.Command
+           vi (int (DateTime.Now - ptmp.StateSince).TotalSeconds)
+           vs ptmp.State
+           vopt ptmp.Info |])
+
+// ---------------------------------------------------------------------------
+// Object catalogs fsdb has no objects for — views, stored routines,
+// triggers, events. The columns are MySQL 8.4's exactly; the row sets are
+// genuinely empty rather than stubbed.
+// ---------------------------------------------------------------------------
+
+let private viewsColumns =
+    [ strCol "TABLE_CATALOG"
+      strCol "TABLE_SCHEMA"
+      strCol "TABLE_NAME"
+      strCol "VIEW_DEFINITION"
+      strCol "CHECK_OPTION"
+      strCol "IS_UPDATABLE"
+      strCol "DEFINER"
+      strCol "SECURITY_TYPE"
+      strCol "CHARACTER_SET_CLIENT"
+      strCol "COLLATION_CONNECTION" ]
+
+let private routinesColumns =
+    [ strCol "SPECIFIC_NAME"
+      strCol "ROUTINE_CATALOG"
+      strCol "ROUTINE_SCHEMA"
+      strCol "ROUTINE_NAME"
+      strCol "ROUTINE_TYPE"
+      strCol "DATA_TYPE"
+      intCol "CHARACTER_MAXIMUM_LENGTH"
+      intCol "CHARACTER_OCTET_LENGTH"
+      intCol "NUMERIC_PRECISION"
+      intCol "NUMERIC_SCALE"
+      intCol "DATETIME_PRECISION"
+      strCol "CHARACTER_SET_NAME"
+      strCol "COLLATION_NAME"
+      strCol "DTD_IDENTIFIER"
+      strCol "ROUTINE_BODY"
+      strCol "ROUTINE_DEFINITION"
+      strCol "EXTERNAL_NAME"
+      strCol "EXTERNAL_LANGUAGE"
+      strCol "PARAMETER_STYLE"
+      strCol "IS_DETERMINISTIC"
+      strCol "SQL_DATA_ACCESS"
+      strCol "SQL_PATH"
+      strCol "SECURITY_TYPE"
+      col "CREATED" (TDateTime 0)
+      col "LAST_ALTERED" (TDateTime 0)
+      strCol "SQL_MODE"
+      strCol "ROUTINE_COMMENT"
+      strCol "DEFINER"
+      strCol "CHARACTER_SET_CLIENT"
+      strCol "COLLATION_CONNECTION"
+      strCol "DATABASE_COLLATION" ]
+
+let private parametersColumns =
+    [ strCol "SPECIFIC_CATALOG"
+      strCol "SPECIFIC_SCHEMA"
+      strCol "SPECIFIC_NAME"
+      intCol "ORDINAL_POSITION"
+      strCol "PARAMETER_MODE"
+      strCol "PARAMETER_NAME"
+      strCol "DATA_TYPE"
+      intCol "CHARACTER_MAXIMUM_LENGTH"
+      intCol "CHARACTER_OCTET_LENGTH"
+      intCol "NUMERIC_PRECISION"
+      intCol "NUMERIC_SCALE"
+      intCol "DATETIME_PRECISION"
+      strCol "CHARACTER_SET_NAME"
+      strCol "COLLATION_NAME"
+      strCol "DTD_IDENTIFIER"
+      strCol "ROUTINE_TYPE" ]
+
+let private triggersColumns =
+    [ strCol "TRIGGER_CATALOG"
+      strCol "TRIGGER_SCHEMA"
+      strCol "TRIGGER_NAME"
+      strCol "EVENT_MANIPULATION"
+      strCol "EVENT_OBJECT_CATALOG"
+      strCol "EVENT_OBJECT_SCHEMA"
+      strCol "EVENT_OBJECT_TABLE"
+      intCol "ACTION_ORDER"
+      strCol "ACTION_CONDITION"
+      strCol "ACTION_STATEMENT"
+      strCol "ACTION_ORIENTATION"
+      strCol "ACTION_TIMING"
+      strCol "ACTION_REFERENCE_OLD_TABLE"
+      strCol "ACTION_REFERENCE_NEW_TABLE"
+      strCol "ACTION_REFERENCE_OLD_ROW"
+      strCol "ACTION_REFERENCE_NEW_ROW"
+      col "CREATED" (TDateTime 2)
+      strCol "SQL_MODE"
+      strCol "DEFINER"
+      strCol "CHARACTER_SET_CLIENT"
+      strCol "COLLATION_CONNECTION"
+      strCol "DATABASE_COLLATION" ]
+
+let private eventsColumns =
+    [ strCol "EVENT_CATALOG"
+      strCol "EVENT_SCHEMA"
+      strCol "EVENT_NAME"
+      strCol "DEFINER"
+      strCol "TIME_ZONE"
+      strCol "EVENT_BODY"
+      strCol "EVENT_DEFINITION"
+      strCol "EVENT_TYPE"
+      col "EXECUTE_AT" (TDateTime 0)
+      strCol "INTERVAL_VALUE"
+      strCol "INTERVAL_FIELD"
+      strCol "SQL_MODE"
+      col "STARTS" (TDateTime 0)
+      col "ENDS" (TDateTime 0)
+      strCol "STATUS"
+      strCol "ON_COMPLETION"
+      col "CREATED" (TDateTime 0)
+      col "LAST_ALTERED" (TDateTime 0)
+      col "LAST_EXECUTED" (TDateTime 0)
+      strCol "EVENT_COMMENT"
+      intCol "ORIGINATOR"
+      strCol "CHARACTER_SET_CLIENT"
+      strCol "COLLATION_CONNECTION"
+      strCol "DATABASE_COLLATION" ]
+
+/// One row per user table with NULL partition fields — what real MySQL
+/// emits for every unpartitioned table.
+let private partitionsColumns =
+    [ strCol "TABLE_CATALOG"
+      strCol "TABLE_SCHEMA"
+      strCol "TABLE_NAME"
+      strCol "PARTITION_NAME"
+      strCol "SUBPARTITION_NAME"
+      intCol "PARTITION_ORDINAL_POSITION"
+      intCol "SUBPARTITION_ORDINAL_POSITION"
+      strCol "PARTITION_METHOD"
+      strCol "SUBPARTITION_METHOD"
+      strCol "PARTITION_EXPRESSION"
+      strCol "SUBPARTITION_EXPRESSION"
+      strCol "PARTITION_DESCRIPTION"
+      intCol "TABLE_ROWS"
+      intCol "AVG_ROW_LENGTH"
+      intCol "DATA_LENGTH"
+      intCol "MAX_DATA_LENGTH"
+      intCol "INDEX_LENGTH"
+      intCol "DATA_FREE"
+      col "CREATE_TIME" (TDateTime 0)
+      col "UPDATE_TIME" (TDateTime 0)
+      col "CHECK_TIME" (TDateTime 0)
+      intCol "CHECKSUM"
+      strCol "PARTITION_COMMENT"
+      strCol "NODEGROUP"
+      strCol "TABLESPACE_NAME" ]
+
+let private partitionsRows (catalog: Catalog) : Value[] list =
+    allTables catalog
+    |> List.map (fun (dbName, t) ->
+        [| vs "def"
+           vs dbName
+           vs t.OriginalName
+           VNull
+           VNull
+           VNull
+           VNull
+           VNull
+           VNull
+           VNull
+           VNull
+           VNull
+           vi (t.RowsArray.Length)
+           vi 0
+           vi 16384
+           vi 0
+           vi 0
+           vi 0
+           VDateTime(truncateToSecond t.CreateTime)
+           VNull
+           VNull
+           VNull
+           vs ""
+           vs ""
+           VNull |])
+
+// ---------------------------------------------------------------------------
+// Privilege views. fsdb has no user system (`Protocol.parseHandshakeResponse`
+// accepts any credentials), so the truthful global statement is "every
+// connected session can do everything": USER_PRIVILEGES lists the live
+// sessions' users with the full global privilege set, and the narrower
+// schema/table/column grant views are genuinely empty.
+// ---------------------------------------------------------------------------
+
+/// MySQL 8.4's global privilege names, `SHOW PRIVILEGES` order.
+let globalPrivileges =
+    [ "SELECT"; "INSERT"; "UPDATE"; "DELETE"; "CREATE"; "DROP"; "RELOAD"
+      "SHUTDOWN"; "PROCESS"; "FILE"; "REFERENCES"; "INDEX"; "ALTER"
+      "SHOW DATABASES"; "SUPER"; "CREATE TEMPORARY TABLES"; "LOCK TABLES"
+      "EXECUTE"; "REPLICATION SLAVE"; "REPLICATION CLIENT"; "CREATE VIEW"
+      "SHOW VIEW"; "CREATE ROUTINE"; "ALTER ROUTINE"; "CREATE USER"; "EVENT"
+      "TRIGGER"; "CREATE TABLESPACE"; "CREATE ROLE"; "DROP ROLE" ]
+
+let private userPrivilegesColumns =
+    [ strCol "GRANTEE"; strCol "TABLE_CATALOG"; strCol "PRIVILEGE_TYPE"; strCol "IS_GRANTABLE" ]
+
+let private userPrivilegesRows () : Value[] list =
+    listProcesses ()
+    |> List.map (fun ptmp -> ptmp.User)
+    |> List.distinct
+    |> List.collect (fun user ->
+        globalPrivileges
+        |> List.map (fun priv -> [| vs (sprintf "'%s'@'%%'" user); vs "def"; vs priv; vs "YES" |]))
+
+let private schemaPrivilegesColumns =
+    [ strCol "GRANTEE"; strCol "TABLE_CATALOG"; strCol "TABLE_SCHEMA"; strCol "PRIVILEGE_TYPE"; strCol "IS_GRANTABLE" ]
+
+let private tablePrivilegesColumns =
+    [ strCol "GRANTEE"
+      strCol "TABLE_CATALOG"
+      strCol "TABLE_SCHEMA"
+      strCol "TABLE_NAME"
+      strCol "PRIVILEGE_TYPE"
+      strCol "IS_GRANTABLE" ]
+
+let private columnPrivilegesColumns =
+    [ strCol "GRANTEE"
+      strCol "TABLE_CATALOG"
+      strCol "TABLE_SCHEMA"
+      strCol "TABLE_NAME"
+      strCol "COLUMN_NAME"
+      strCol "PRIVILEGE_TYPE"
+      strCol "IS_GRANTABLE" ]
+
+/// The one storage engine fsdb reports for every table — `SHOW ENGINES`'
+/// twin lives in `showEngines` below off this same row.
+let private enginesColumns =
+    [ strCol "ENGINE"; strCol "SUPPORT"; strCol "COMMENT"; strCol "TRANSACTIONS"; strCol "XA"; strCol "SAVEPOINTS" ]
+
+let private enginesRows: Value[] list =
+    [ [| vs "InnoDB"
+         vs "DEFAULT"
+         vs "Supports transactions, row-level locking, and foreign keys"
+         vs "YES"
+         vs "YES"
+         vs "YES" |] ]
+
+/// Every virtual table this module serves, name -> columns — `scan`'s
+/// dispatch source and the self-listing the `TABLES`/`COLUMNS` views and
+/// `SHOW TABLES FROM information_schema` append, so listing and resolution
+/// can't drift.
+let private virtualTableDefs : (string * ColumnDef list) list =
+    [ "CHARACTER_SETS", characterSetsColumns
+      "COLLATIONS", collationsColumns
+      "COLLATION_CHARACTER_SET_APPLICABILITY", collationCharacterSetApplicabilityColumns
+      "COLUMNS", columnsColumns
+      "COLUMN_PRIVILEGES", columnPrivilegesColumns
+      "ENGINES", enginesColumns
+      "EVENTS", eventsColumns
+      "KEY_COLUMN_USAGE", keyColumnUsageColumns
+      "PARAMETERS", parametersColumns
+      "PARTITIONS", partitionsColumns
+      "PROCESSLIST", processlistColumns
+      "REFERENTIAL_CONSTRAINTS", referentialConstraintsColumns
+      "ROUTINES", routinesColumns
+      "SCHEMATA", schemataColumns
+      "SCHEMA_PRIVILEGES", schemaPrivilegesColumns
+      "STATISTICS", statisticsColumns
+      "TABLES", tablesColumns
+      "TABLE_CONSTRAINTS", tableConstraintsColumns
+      "TABLE_PRIVILEGES", tablePrivilegesColumns
+      "TRIGGERS", triggersColumns
+      "USER_PRIVILEGES", userPrivilegesColumns
+      "VIEWS", viewsColumns ]
+
+/// information_schema's own tables as `TABLES` rows — `SYSTEM VIEW`, NULL
+/// engine/format/collation like real MySQL's.
+let private selfTablesRows () : Value[] list =
+    virtualTableDefs
+    |> List.map (fun (name, _) ->
+        [| vs "def"
+           vs "information_schema"
+           vs name
+           vs "SYSTEM VIEW"
+           VNull
+           vi 10
+           VNull
+           VNull
+           VNull
+           VNull
+           VNull
+           VNull
+           VNull
+           VNull
+           VDateTime(truncateToSecond serverStartedAt)
+           VNull
+           VNull
+           VNull
+           VNull
+           vs ""
+           vs "" |])
+
+let private selfColumnsRows () : Value[] list =
+    virtualTableDefs
+    |> List.collect (fun (name, cols) ->
+        cols |> List.mapi (fun i c -> columnRow "information_schema" name i "" c))
 
 /// Resolves one `information_schema` table name (case-insensitive) to its
 /// columns and freshly-projected rows, or `None` if `name` isn't one of the
 /// virtual tables this module knows about (a real 1146 from `Executor`, same
 /// as any other unknown table).
 let scan (catalog: Catalog) (name: string) : (ColumnDef list * Value[] list) option =
-    match name.ToUpperInvariant() with
-    | "TABLES" -> Some(tablesColumns, tablesRows catalog)
-    | "COLUMNS" -> Some(columnsColumns, columnsRows catalog)
-    | "STATISTICS" -> Some(statisticsColumns, statisticsRows catalog)
-    | "KEY_COLUMN_USAGE" -> Some(keyColumnUsageColumns, keyColumnUsageRows catalog)
-    | "REFERENTIAL_CONSTRAINTS" -> Some(referentialConstraintsColumns, referentialConstraintsRows catalog)
-    | "TABLE_CONSTRAINTS" -> Some(tableConstraintsColumns, tableConstraintsRows catalog)
-    | "COLLATION_CHARACTER_SET_APPLICABILITY" ->
-        Some(collationCharacterSetApplicabilityColumns, collationCharacterSetApplicabilityRows)
-    | "COLLATIONS" -> Some(collationsColumns, collationsRows)
-    | "CHARACTER_SETS" -> Some(characterSetsColumns, characterSetsRows)
-    | "SCHEMATA" -> Some(schemataColumns, schemataRows catalog)
-    | _ -> None
+    let upper = name.ToUpperInvariant()
+
+    let rows =
+        match upper with
+        | "TABLES" -> Some(tablesRows catalog @ selfTablesRows ())
+        | "COLUMNS" -> Some(columnsRows catalog @ selfColumnsRows ())
+        | "STATISTICS" -> Some(statisticsRows catalog)
+        | "KEY_COLUMN_USAGE" -> Some(keyColumnUsageRows catalog)
+        | "REFERENTIAL_CONSTRAINTS" -> Some(referentialConstraintsRows catalog)
+        | "TABLE_CONSTRAINTS" -> Some(tableConstraintsRows catalog)
+        | "COLLATION_CHARACTER_SET_APPLICABILITY" -> Some collationCharacterSetApplicabilityRows
+        | "COLLATIONS" -> Some collationsRows
+        | "CHARACTER_SETS" -> Some characterSetsRows
+        | "SCHEMATA" -> Some(schemataRows catalog)
+        | "PROCESSLIST" -> Some(processlistRows ())
+        | "PARTITIONS" -> Some(partitionsRows catalog)
+        | "USER_PRIVILEGES" -> Some(userPrivilegesRows ())
+        | "ENGINES" -> Some enginesRows
+        // Object catalogs fsdb has no objects for — real empty sets.
+        | "VIEWS"
+        | "ROUTINES"
+        | "PARAMETERS"
+        | "TRIGGERS"
+        | "EVENTS"
+        | "SCHEMA_PRIVILEGES"
+        | "TABLE_PRIVILEGES"
+        | "COLUMN_PRIVILEGES" -> Some []
+        | _ -> None
+
+    rows
+    |> Option.bind (fun rows ->
+        virtualTableDefs
+        |> List.tryFind (fst >> (=) upper)
+        |> Option.map (fun (_, cols) -> cols, rows))
 
 // ---------------------------------------------------------------------------
 // `SHOW TABLES / DATABASES / COLUMNS / CREATE TABLE / INDEX / TABLE STATUS`,
@@ -674,18 +1169,23 @@ let findTable (catalog: Catalog) (dbName: string) (tableName: string) : Result<T
 
 /// `SHOW [FULL] TABLES [FROM db] [LIKE 'pattern']`.
 let showTables (catalog: Catalog) (dbName: string) (full: bool) (likeOpt: string option) : ShowResult =
-    match Map.tryFind dbName catalog with
-    | None -> Error(1049, sprintf "Unknown database '%s'" dbName)
-    | Some db ->
-        let names =
-            db |> Map.toList |> List.map (fun (_, t) -> t.OriginalName) |> List.filter (likeFilter likeOpt) |> List.sort
-
+    let render (names: string list) (tableType: string) =
+        let names = names |> List.filter (likeFilter likeOpt) |> List.sort
         let col = sprintf "Tables_in_%s" dbName
 
         if full then
-            Ok([ col; "Table_type" ], names |> List.map (fun n -> [ Some n; Some "BASE TABLE" ]))
+            Ok([ col; "Table_type" ], names |> List.map (fun n -> [ Some n; Some tableType ]))
         else
             Ok([ col ], names |> List.map (fun n -> [ Some n ]))
+
+    // The virtual database is browsable like `USE information_schema`
+    // already is — its tables are the `scan` registry's, typed SYSTEM VIEW.
+    if dbName.ToLowerInvariant() = "information_schema" then
+        render (virtualTableDefs |> List.map fst) "SYSTEM VIEW"
+    else
+        match Map.tryFind dbName catalog with
+        | None -> Error(1049, sprintf "Unknown database '%s'" dbName)
+        | Some db -> render (db |> Map.toList |> List.map (fun (_, t) -> t.OriginalName)) "BASE TABLE"
 
 /// `SHOW COLLATION [LIKE 'pattern']` — the registered collations with
 /// `SHOW`'s column labels (MySQL's `Collation/Charset/Id/...`, distinct
@@ -906,6 +1406,22 @@ let showIndex (catalog: Catalog) (dbName: string) (tableName: string) : ShowResu
 /// `SHOW TABLE STATUS [FROM db] [LIKE 'pattern']`.
 let showTableStatus (catalog: Catalog) (dbName: string) (likeOpt: string option) : ShowResult =
     match Map.tryFind dbName catalog with
+    | None when dbName.ToLowerInvariant() = "information_schema" ->
+        // SYSTEM VIEWs: name plus NULL storage stats, like real MySQL.
+        let rows =
+            virtualTableDefs
+            |> List.map fst
+            |> List.filter (likeFilter likeOpt)
+            |> List.map (fun n ->
+                [ Some n; None; Some "10"; None; None; None; None; None; None; None; None
+                  (Value.toText (VDateTime(truncateToSecond serverStartedAt))); None; None; None; None; Some ""; Some "" ])
+
+        Ok(
+            [ "Name"; "Engine"; "Version"; "Row_format"; "Rows"; "Avg_row_length"; "Data_length"
+              "Max_data_length"; "Index_length"; "Data_free"; "Auto_increment"; "Create_time"
+              "Update_time"; "Check_time"; "Collation"; "Checksum"; "Create_options"; "Comment" ],
+            rows
+        )
     | None -> Error(1049, sprintf "Unknown database '%s'" dbName)
     | Some db ->
         let rows =
@@ -935,7 +1451,7 @@ let showTableStatus (catalog: Catalog) (dbName: string) (likeOpt: string option)
                   Some "0"
                   Some "0"
                   (if t.Columns |> List.exists (fun c -> c.AutoIncrement) then Some(string t.NextAutoId) else None)
-                  None
+                  (Value.toText (VDateTime(truncateToSecond t.CreateTime)))
                   None
                   None
                   Some(t.TableCollation |> Option.defaultValue "utf8mb4_0900_ai_ci")
@@ -964,3 +1480,141 @@ let showTableStatus (catalog: Catalog) (dbName: string) (likeOpt: string option)
               "Comment" ],
             rows
         )
+
+/// `SHOW ENGINES` / `SHOW STORAGE ENGINES` — the `ENGINES` view's row under
+/// `SHOW`'s labels.
+let showEngines () : ShowResult =
+    Ok(
+        [ "Engine"; "Support"; "Comment"; "Transactions"; "XA"; "Savepoints" ],
+        enginesRows |> List.map (fun r -> r |> Array.toList |> List.map Value.toText)
+    )
+
+/// `SHOW CHARACTER SET` / `SHOW CHARSET [LIKE 'pattern']`.
+let showCharacterSet (likeOpt: string option) : ShowResult =
+    let rows =
+        characterSetsRows
+        |> List.filter (fun r -> match r.[0] with VString n -> likeFilter likeOpt n | _ -> true)
+        |> List.map (fun r -> r |> Array.toList |> List.map Value.toText)
+
+    Ok([ "Charset"; "Default collation"; "Description"; "Maxlen" ], rows)
+
+/// `SHOW PRIVILEGES` — MySQL 8.4's static grantable-privilege vocabulary
+/// (contexts and comments verbatim from a real 8.4 server). fsdb enforces
+/// none of them; this is the reference list clients render.
+let showPrivileges () : ShowResult =
+    let rows =
+        [ "Alter", "Tables", "To alter the table"
+          "Alter routine", "Functions,Procedures", "To alter or drop stored functions/procedures"
+          "Create", "Databases,Tables,Indexes", "To create new databases and tables"
+          "Create routine", "Databases", "To use CREATE FUNCTION/PROCEDURE"
+          "Create role", "Server Admin", "To create new roles"
+          "Create temporary tables", "Databases", "To use CREATE TEMPORARY TABLE"
+          "Create view", "Tables", "To create new views"
+          "Create user", "Server Admin", "To create new users"
+          "Delete", "Tables", "To delete existing rows"
+          "Drop", "Databases,Tables", "To drop databases, tables, and views"
+          "Drop role", "Server Admin", "To drop roles"
+          "Event", "Server Admin", "To create, alter, drop and execute events"
+          "Execute", "Functions,Procedures", "To execute stored routines"
+          "File", "File access on server", "To read and write files on the server"
+          "Grant option", "Databases,Tables,Functions,Procedures", "To give to other users those privileges you possess"
+          "Index", "Tables", "To create or drop indexes"
+          "Insert", "Tables", "To insert data into tables"
+          "Lock tables", "Databases", "To use LOCK TABLES (together with SELECT privilege)"
+          "Process", "Server Admin", "To view the plain text of currently executing queries"
+          "Proxy", "Server Admin", "To make proxy user possible"
+          "References", "Databases,Tables", "To have references on tables"
+          "Reload", "Server Admin", "To reload or refresh tables, logs and privileges"
+          "Replication client", "Server Admin", "To ask where the slave or master servers are"
+          "Replication slave", "Server Admin", "To read binary log events from the master"
+          "Select", "Tables", "To retrieve rows from table"
+          "Show databases", "Server Admin", "To see all databases with SHOW DATABASES"
+          "Show view", "Tables", "To see views with SHOW CREATE VIEW"
+          "Shutdown", "Server Admin", "To shut down the server"
+          "Super", "Server Admin", "To use KILL thread, SET GLOBAL, CHANGE REPLICATION SOURCE, etc."
+          "Trigger", "Tables", "To use triggers"
+          "Create tablespace", "Server Admin", "To create/alter/drop tablespaces"
+          "Update", "Tables", "To update existing rows"
+          "Usage", "Server Admin", "No privileges - allow connect only" ]
+        |> List.map (fun (p, c, comment) -> [ Some p; Some c; Some comment ])
+
+    Ok([ "Privilege"; "Context"; "Comment" ], rows)
+
+/// `SHOW [FULL] PROCESSLIST` — the registry's rows under `SHOW`'s labels;
+/// the non-FULL form truncates `Info` to 100 chars like real MySQL.
+let showProcesslist (full: bool) : ShowResult =
+    let rows =
+        listProcesses ()
+        |> List.map (fun p ->
+            let info =
+                p.Info
+                |> Option.map (fun q -> if not full && q.Length > 100 then q.Substring(0, 100) else q)
+
+            [ Some(string p.Id)
+              Some p.User
+              Some p.Host
+              p.Db
+              Some p.Command
+              Some(string (int (DateTime.Now - p.StateSince).TotalSeconds))
+              Some p.State
+              info ])
+
+    Ok([ "Id"; "User"; "Host"; "db"; "Command"; "Time"; "State"; "Info" ], rows)
+
+/// `SHOW [SESSION|GLOBAL] STATUS [LIKE 'pattern']` — only counters fsdb
+/// really tracks (uptime, live connections) plus the always-empty SSL pair
+/// (no TLS support, so '' is the truthful value); an unmatched pattern is an
+/// empty set, never an error.
+let showStatus (likeOpt: string option) : ShowResult =
+    let rows =
+        [ "Ssl_cipher", ""
+          "Ssl_version", ""
+          "Threads_connected", string (connectedThreads ())
+          "Uptime", string (int (DateTime.Now - serverStartedAt).TotalSeconds) ]
+        |> List.filter (fun (name, _) -> likeFilter likeOpt name)
+        |> List.map (fun (name, value) -> [ Some name; Some value ])
+
+    Ok([ "Variable_name"; "Value" ], rows)
+
+/// A `SHOW` over a per-database object catalog fsdb has no objects for
+/// (`SHOW TRIGGERS`/`SHOW EVENTS`/`SHOW PROCEDURE STATUS`...) — headers
+/// exactly MySQL 8.4's, rows genuinely empty; an unknown database still
+/// 1049s.
+let private showEmptyOf (catalog: Catalog) (dbName: string option) (headers: string list) : ShowResult =
+    match dbName with
+    | Some db when db.ToLowerInvariant() <> "information_schema" && not (Map.containsKey db catalog) ->
+        Error(1049, sprintf "Unknown database '%s'" db)
+    | _ -> Ok(headers, [])
+
+let showTriggers (catalog: Catalog) (dbName: string option) : ShowResult =
+    showEmptyOf
+        catalog
+        dbName
+        [ "Trigger"; "Event"; "Table"; "Statement"; "Timing"; "Created"; "sql_mode"; "Definer"
+          "character_set_client"; "collation_connection"; "Database Collation" ]
+
+let showEvents (catalog: Catalog) (dbName: string option) : ShowResult =
+    showEmptyOf
+        catalog
+        dbName
+        [ "Db"; "Name"; "Definer"; "Time zone"; "Type"; "Execute at"; "Interval value"; "Interval field"
+          "Starts"; "Ends"; "Status"; "Originator"; "character_set_client"; "collation_connection"
+          "Database Collation" ]
+
+/// `SHOW PROCEDURE STATUS` / `SHOW FUNCTION STATUS [LIKE|WHERE ...]` — the
+/// trailing filter never matters against zero routines.
+let showRoutineStatus () : ShowResult =
+    Ok(
+        [ "Db"; "Name"; "Type"; "Language"; "Definer"; "Modified"; "Created"; "Security_type"; "Comment"
+          "character_set_client"; "collation_connection"; "Database Collation" ],
+        []
+    )
+
+/// `SHOW GRANTS [FOR CURRENT_USER[()]]` — one truthful row: fsdb verifies no
+/// credentials and enforces no grants, so the connected user holds
+/// everything.
+let showGrants (user: string) : ShowResult =
+    Ok(
+        [ sprintf "Grants for %s@%%" user ],
+        [ [ Some(sprintf "GRANT ALL PRIVILEGES ON *.* TO `%s`@`%%`" user) ] ]
+    )
