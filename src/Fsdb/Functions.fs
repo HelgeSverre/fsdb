@@ -815,6 +815,21 @@ let private dateAddCore (sign: float) : Scalar =
         | None -> VNull
     | _ -> VNull
 
+/// `ADDDATE`/`SUBDATE` additionally accept a bare number as the second
+/// argument (`ADDDATE(d, 3)` means 3 DAYs) where `DATE_ADD`/`DATE_SUB`
+/// require the `INTERVAL` form — falls back to `dateAddCore` for the
+/// `INTERVAL`/3-arg shapes so both spellings share one implementation.
+let private addSubDateCore (sign: float) : Scalar =
+    function
+    | [ dateV; amtV ] when not (anyNull [ dateV; amtV ]) ->
+        match asDateTime dateV with
+        | None -> VNull
+        | Some dt ->
+            match tryParseIntervalArg amtV with
+            | Some(n, unit) -> applyDateInterval sign dateV dt n unit
+            | None -> applyDateInterval sign dateV dt (toDouble amtV) "DAY"
+    | args -> dateAddCore sign args
+
 /// Whether `v` is the encoded result of an `INTERVAL n unit` expression
 /// (see `intervalFn` above) — the marker `Executor.evalExpr`'s `BinOp(Add,
 /// ...)`/`BinOp(Sub, ...)` cases check before falling back to plain numeric
@@ -948,21 +963,96 @@ let private monthNameFn: Scalar =
         |> Option.defaultValue VNull
     | _ -> VNull
 
-/// `WEEK(date[, mode])` — ponytail: only the mode-0-ish default (Sunday
-/// first day of the week) is modeled; a `mode` argument, if given, is
-/// accepted but ignored rather than implementing all 8 MySQL week modes.
-/// MySQL mode-0 week numbering: weeks start on Sunday, and any days before
-/// the year's first Sunday fall in week 0 — not `Calendar.GetWeekOfYear`'s
-/// `FirstDay` rule, which puts Jan 1 itself in week 1 regardless of what day
-/// of the week it falls on.
-let private weekMode0 (dt: DateTime) : int64 =
-    let jan1 = DateTime(dt.Year, 1, 1)
-    let firstSunday = jan1.AddDays(float ((7 - int jan1.DayOfWeek) % 7))
-    if dt < firstSunday then 0L else int64 ((dt - firstSunday).Days / 7) + 1L
+/// MySQL's 8 `WEEK(date, mode)` modes are 3 independent choices packed into
+/// 3 bits: bit 0 picks Monday- (set) vs Sunday-first (unset) weeks; bit 1
+/// picks a 1-53 range where the days before week 1 borrow the previous
+/// year's last week (set) vs a 0-53 range where they're week 0 (unset);
+/// bit 2 picks whether week 1 is the first week *containing* the year's
+/// first Monday/Sunday (unset) or the ISO-style first week with 4+ days in
+/// this year (set). MySQL's `week_mode()` XORs bit 2 when bit 0 is unset —
+/// without that flip, Sunday-first and Monday-first modes wouldn't line up
+/// with the docs' mode table (e.g. mode 0 uses the "contains" rule, mode 1
+/// uses the "4+ days" rule, even though both have bit 2 unset in the raw
+/// mode number).
+let private weekModeBits (mode: int) : bool * bool * bool =
+    let monday = mode &&& 1 <> 0
+    let rangeFrom1 = mode &&& 2 <> 0
+    let rawFirstWeekday = mode &&& 4 <> 0
+    let firstWeekday = if monday then rawFirstWeekday else not rawFirstWeekday
+    (monday, rangeFrom1, not firstWeekday)
+
+/// The first day of week 1 of `year`, under the "contains the first
+/// Mon/Sun" rule (`not rule4day`: the on-or-after occurrence of the week's
+/// start weekday from Jan 1) or the ISO-style "4+ days in this year" rule
+/// (`rule4day`: Jan 1's week counts as week 1 only if it has at least 4
+/// days in `year`, i.e. its start weekday is within 3 days of Jan 1).
+let private weekStart (year: int) (monday: bool) (rule4day: bool) : DateOnly =
+    let jan1 = DateOnly(year, 1, 1)
+    let raw = int jan1.DayOfWeek
+    let wd = if monday then (raw + 6) % 7 else raw
+    if rule4day then
+        (if wd <= 3 then jan1.AddDays(-wd) else jan1.AddDays(7 - wd))
+    else
+        jan1.AddDays((7 - wd) % 7)
+
+/// Days before `date`'s own-year week 1 belong either to week 0
+/// (`not rangeFrom1`) or to the previous year's real last week
+/// (`rangeFrom1`); a date on/after next year's week 1 start similarly
+/// rolls forward to week 1 of next year, but only under `rangeFrom1` —
+/// MySQL's 0-53 modes let a trailing week run all the way to 53 instead.
+let private calcWeek (date: DateOnly) (monday: bool) (rule4day: bool) (rangeFrom1: bool) : int * int =
+    let year = date.Year
+    let w1 = weekStart year monday rule4day
+
+    if date < w1 then
+        if rangeFrom1 then
+            let py = year - 1
+            ((date.DayNumber - (weekStart py monday rule4day).DayNumber) / 7 + 1, py)
+        else
+            (0, year)
+    else
+        let weeknr = (date.DayNumber - w1.DayNumber) / 7 + 1
+
+        if rangeFrom1 && date >= weekStart (year + 1) monday rule4day then
+            (1, year + 1)
+        else
+            (weeknr, year)
+
+let private weekOf (mode: int) (date: DateOnly) : int * int =
+    let monday, rangeFrom1, rule4day = weekModeBits mode
+    calcWeek date monday rule4day rangeFrom1
 
 let private weekFn: Scalar =
     function
-    | (v :: _) when not (anyNull [ v ]) -> asDateTime v |> Option.map (weekMode0 >> VInt) |> Option.defaultValue VNull
+    | [ v ] when not (anyNull [ v ]) -> asDateOnly v |> Option.map (weekOf 0 >> fst >> int64 >> VInt) |> Option.defaultValue VNull
+    | [ v; m ] when not (anyNull [ v; m ]) ->
+        asDateOnly v |> Option.map (weekOf (int (toDouble m)) >> fst >> int64 >> VInt) |> Option.defaultValue VNull
+    | _ -> VNull
+
+let private weekdayFn: Scalar =
+    function
+    | [ v ] when not (anyNull [ v ]) -> asDateTime v |> Option.map (fun d -> VInt(int64 ((int d.DayOfWeek + 6) % 7))) |> Option.defaultValue VNull
+    | _ -> VNull
+
+let private weekOfYearFn: Scalar =
+    function
+    | [ v ] when not (anyNull [ v ]) -> asDateOnly v |> Option.map (weekOf 3 >> fst >> int64 >> VInt) |> Option.defaultValue VNull
+    | _ -> VNull
+
+/// `YEARWEEK` always uses the mode's day-of-week and week-1 rule but forces
+/// the 1-53/rollover range (`rangeFrom1 = true`) regardless of the mode's
+/// own range bit — a `(year, week)` pair has to be unambiguous, which a
+/// week-0 or a trailing week-53-that's-really-next-year's-week-1 isn't.
+let private yearWeekOf (mode: int) (date: DateOnly) : int =
+    let monday, _, rule4day = weekModeBits mode
+    let w, y = calcWeek date monday rule4day true
+    y * 100 + w
+
+let private yearWeekFn: Scalar =
+    function
+    | [ v ] when not (anyNull [ v ]) -> asDateOnly v |> Option.map (yearWeekOf 0 >> int64 >> VInt) |> Option.defaultValue VNull
+    | [ v; m ] when not (anyNull [ v; m ]) ->
+        asDateOnly v |> Option.map (yearWeekOf (int (toDouble m)) >> int64 >> VInt) |> Option.defaultValue VNull
     | _ -> VNull
 
 let private curDateFn: Scalar = fun _ -> VDate(DateOnly.FromDateTime DateTime.Now)
@@ -1443,6 +1533,145 @@ let private strcmpFn: Scalar =
     | _ -> VNull
 
 // ---------------------------------------------------------------------------
+// REGEXP_LIKE/REPLACE/SUBSTR/INSTR. Same timeout guard as `Executor.regexpOp`
+// (the `REGEXP`/`RLIKE` operator) against catastrophic backtracking, but
+// unlike that operator these can't thread a real MySQL error back to the
+// client — `Scalar` is a total `Value list -> Value`, no error channel —
+// so a malformed pattern degrades to NULL, the same tolerate-and-return-NULL
+// treatment this file already gives malformed JSON input (see
+// `jsonExtractFn`'s neighbors) rather than the operator's 1139.
+// ---------------------------------------------------------------------------
+
+let private regexpTimeout = TimeSpan.FromSeconds 5.0
+
+/// MySQL's default is case-insensitive matching; `match_type` characters
+/// flip options on top of that default, applied left to right so the last
+/// conflicting flag (e.g. "ci") wins rather than erroring on conflicts.
+/// `u` (Unix-only line endings) has no .NET equivalent and is ignored.
+let private regexOptsOfMatchType (matchType: string option) : RegexOptions =
+    let mutable opts = RegexOptions.IgnoreCase
+
+    for c in matchType |> Option.defaultValue "" do
+        match c with
+        | 'c' -> opts <- opts &&& ~~~RegexOptions.IgnoreCase
+        | 'i' -> opts <- opts ||| RegexOptions.IgnoreCase
+        | 'm' -> opts <- opts ||| RegexOptions.Multiline
+        | 'n' -> opts <- opts ||| RegexOptions.Singleline
+        | _ -> ()
+
+    opts
+
+let private tryRegex (pattern: string) (opts: RegexOptions) : Regex option =
+    try
+        Some(Regex(pattern, opts, regexpTimeout))
+    with :? ArgumentException ->
+        None
+
+/// The `occurrence`-th match (1-based) at or after 1-based `pos` — MySQL's
+/// pos/occurrence pair, common to all four REGEXP_* functions. `pos`
+/// outside `[1, text.Length + 1]` or a non-positive `occurrence` has no
+/// match, same as an occurrence beyond how many matches actually exist.
+let private nthMatch (rx: Regex) (text: string) (pos: int) (occurrence: int) : Match option =
+    if pos < 1 || pos > text.Length + 1 || occurrence < 1 then
+        None
+    else
+        let matches = rx.Matches(text, pos - 1) |> Seq.cast<Match> |> Seq.toArray
+        if occurrence <= matches.Length then Some matches.[occurrence - 1] else None
+
+let private matchTypeArg (args: Value list) (idx: int) : string option =
+    args |> List.tryItem idx |> Option.filter (fun v -> v <> VNull) |> Option.map req
+
+let private intArgOr (dflt: int) (args: Value list) (idx: int) : int =
+    args |> List.tryItem idx |> Option.filter (fun v -> v <> VNull) |> Option.map (toDouble >> int) |> Option.defaultValue dflt
+
+let private regexpLikeFn: Scalar =
+    function
+    | e :: p :: rest when not (anyNull [ e; p ]) ->
+        match tryRegex (req p) (regexOptsOfMatchType (matchTypeArg rest 0)) with
+        | Some rx -> if rx.IsMatch(req e) then VInt 1L else VInt 0L
+        | None -> VNull
+    | _ -> VNull
+
+let private regexpInstrFn: Scalar =
+    function
+    | e :: p :: rest when not (anyNull [ e; p ]) ->
+        let text = req e
+        let pos = intArgOr 1 rest 0
+        let occurrence = intArgOr 1 rest 1
+        let returnEnd = intArgOr 0 rest 2 <> 0
+
+        match tryRegex (req p) (regexOptsOfMatchType (matchTypeArg rest 3)) with
+        | Some rx ->
+            match nthMatch rx text pos occurrence with
+            | Some m -> VInt(int64 ((if returnEnd then m.Index + m.Length else m.Index) + 1))
+            | None -> VInt 0L
+        | None -> VNull
+    | _ -> VNull
+
+let private regexpSubstrFn: Scalar =
+    function
+    | e :: p :: rest when not (anyNull [ e; p ]) ->
+        let text = req e
+        let pos = intArgOr 1 rest 0
+        let occurrence = intArgOr 1 rest 1
+
+        match tryRegex (req p) (regexOptsOfMatchType (matchTypeArg rest 2)) with
+        | Some rx ->
+            match nthMatch rx text pos occurrence with
+            | Some m -> VString m.Value
+            | None -> VNull
+        | None -> VNull
+    | _ -> VNull
+
+/// MySQL replacement text uses `\1`-`\9` backreferences and a literal `\0`/
+/// whole-match; .NET's `Match.Result`/`Regex.Replace` use `$1`..`$9` and
+/// treat a bare `$` specially, so a literal `$` in the caller's replacement
+/// text needs escaping to `$$` and `\N` needs translating to `$N` before
+/// either .NET API sees it.
+let private toDotNetReplacement (repl: string) : string =
+    Regex.Replace(
+        repl,
+        @"\$|\\(\d)",
+        fun m -> if m.Value = "$" then "$$" else "$" + m.Groups.[1].Value
+    )
+
+/// `occurrence = 0` (the default) replaces every match; a positive
+/// `occurrence` replaces only that one match, leaving the rest of the
+/// string untouched either way.
+let private regexpReplaceFn: Scalar =
+    function
+    | e :: p :: r :: rest when not (anyNull [ e; p; r ]) ->
+        let text = req e
+        let repl = toDotNetReplacement (req r)
+        let pos = intArgOr 1 rest 0
+        let occurrence = intArgOr 0 rest 1
+
+        match tryRegex (req p) (regexOptsOfMatchType (matchTypeArg rest 2)) with
+        | Some rx ->
+            if pos < 1 || pos > text.Length + 1 then
+                VNull
+            else
+                let head = text.Substring(0, pos - 1)
+                let tail = text.Substring(pos - 1)
+
+                let replaced =
+                    if occurrence <= 0 then
+                        rx.Replace(tail, repl)
+                    else
+                        let mutable n = 0
+
+                        rx.Replace(
+                            tail,
+                            (fun m ->
+                                n <- n + 1
+                                if n = occurrence then m.Result repl else m.Value)
+                        )
+
+                VString(head + replaced)
+        | None -> VNull
+    | _ -> VNull
+
+// ---------------------------------------------------------------------------
 // Math/misc.
 // ---------------------------------------------------------------------------
 
@@ -1587,6 +1816,80 @@ let private crc32Fn: Scalar =
 
 let private uuidFn: Scalar = fun _ -> VString(Guid.NewGuid().ToString())
 
+/// Accepts the three textual UUID spellings `UUID_TO_BIN`/`IS_UUID` do:
+/// dashed (`8-4-4-4-12`), undashed (32 hex digits), either optionally
+/// wrapped in `{}` — and returns the 32 hex digits in field order with no
+/// separators, or `None` if `s` isn't one of those three shapes.
+let private normalizeUuidHex (s: string) : string option =
+    let inner =
+        let t = s.Trim()
+        if t.StartsWith "{" && t.EndsWith "}" then t.Substring(1, t.Length - 2) else t
+
+    let dashed =
+        Regex.Match(inner, @"^([0-9A-Fa-f]{8})-([0-9A-Fa-f]{4})-([0-9A-Fa-f]{4})-([0-9A-Fa-f]{4})-([0-9A-Fa-f]{12})$")
+
+    if dashed.Success then
+        Some(dashed.Groups |> Seq.cast<Group> |> Seq.skip 1 |> Seq.map (fun g -> g.Value) |> String.concat "")
+    elif inner.Length = 32 && inner |> Seq.forall Uri.IsHexDigit then
+        Some inner
+    else
+        None
+
+/// Swapped byte order moves the time-high and time-mid fields ahead of
+/// time-low (`time_hi | time_mid | time_low | clock_seq | node` instead of
+/// the RFC 4122 field order) so a UUIDv1's mostly-incrementing time-low
+/// isn't the top bits of an indexed binary column — verified byte-for-byte
+/// against `UUID_TO_BIN`'s own oracle output, not derived from the RFC.
+let private swapUuidBytes (standard: byte[]) : byte[] =
+    Array.concat [ standard.[6..7]; standard.[4..5]; standard.[0..3]; standard.[8..15] ]
+
+let private unswapUuidBytes (swapped: byte[]) : byte[] =
+    Array.concat [ swapped.[4..7]; swapped.[2..3]; swapped.[0..1]; swapped.[8..15] ]
+
+let private uuidToBinFn: Scalar =
+    let bytesOf (hex32: string) (swap: bool) : byte[] =
+        let standard = [| for i in 0 .. 2 .. 30 -> Convert.ToByte(hex32.Substring(i, 2), 16) |]
+        if swap then swapUuidBytes standard else standard
+
+    function
+    | [ v ] when not (anyNull [ v ]) -> normalizeUuidHex (req v) |> Option.map (fun h -> VBytes(bytesOf h false)) |> Option.defaultValue VNull
+    | [ v; s ] when not (anyNull [ v; s ]) ->
+        normalizeUuidHex (req v) |> Option.map (fun h -> VBytes(bytesOf h (toDouble s <> 0.0))) |> Option.defaultValue VNull
+    | _ -> VNull
+
+let private binToUuidFn: Scalar =
+    let format (b: byte[]) : Value =
+        if b.Length <> 16 then
+            VNull
+        else
+            let hex = b |> Array.map (fun x -> x.ToString "x2") |> String.concat ""
+
+            VString(
+                sprintf
+                    "%s-%s-%s-%s-%s"
+                    (hex.Substring(0, 8))
+                    (hex.Substring(8, 4))
+                    (hex.Substring(12, 4))
+                    (hex.Substring(16, 4))
+                    (hex.Substring(20, 12))
+            )
+
+    function
+    | [ v ] when not (anyNull [ v ]) -> format (Text.Encoding.Latin1.GetBytes(req v))
+    | [ v; s ] when not (anyNull [ v; s ]) ->
+        let raw = Text.Encoding.Latin1.GetBytes(req v)
+
+        if raw.Length <> 16 then
+            VNull
+        else
+            format (if toDouble s <> 0.0 then unswapUuidBytes raw else raw)
+    | _ -> VNull
+
+let private isUuidFn: Scalar =
+    function
+    | [ v ] when not (anyNull [ v ]) -> if (normalizeUuidHex (req v)).IsSome then VInt 1L else VInt 0L
+    | _ -> VNull
+
 let private inetAtonFn: Scalar =
     function
     | [ v ] when not (anyNull [ v ]) ->
@@ -1644,6 +1947,37 @@ let private avgAgg: Aggregate = fun vs -> Value.div (vs |> List.reduce Value.add
 let private minAgg: Aggregate = List.reduce (fun a b -> if Value.compare a b <= 0 then a else b)
 let private maxAgg: Aggregate = List.reduce (fun a b -> if Value.compare a b >= 0 then a else b)
 
+/// Population variance divides by `n`, sample variance by `n - 1` — the
+/// latter is undefined (MySQL: NULL, not an error) for the single-row
+/// group `Executor.evalAggregate` still calls this with (it only
+/// short-circuits truly *empty* groups to NULL before reaching here).
+let private variance (sample: bool) (values: Value list) : float option =
+    let xs = values |> List.map toDouble
+    let n = float xs.Length
+
+    if sample && n < 2.0 then
+        None
+    else
+        let mean = List.sum xs / n
+        let sumSquares = xs |> List.sumBy (fun x -> (x - mean) ** 2.0)
+        Some(sumSquares / (if sample then n - 1.0 else n))
+
+let private stddevPopAgg: Aggregate = fun vs -> variance false vs |> Option.get |> sqrt |> VDouble
+let private stddevSampAgg: Aggregate = fun vs -> variance true vs |> Option.map (sqrt >> VDouble) |> Option.defaultValue VNull
+let private varPopAgg: Aggregate = fun vs -> variance false vs |> Option.get |> VDouble
+let private varSampAgg: Aggregate = fun vs -> variance true vs |> Option.map VDouble |> Option.defaultValue VNull
+
+/// `BIT_AND`/`BIT_OR`/`BIT_XOR` over a truly empty group have MySQL
+/// identities of all-ones/all-zero/all-zero respectively. ponytail:
+/// `Executor.evalAggregate` short-circuits an empty (post-NULL-filter)
+/// group to NULL before any `Aggregate` ever runs, so those identities
+/// can't surface through this registry entry as it stands; giving
+/// `evalAggregate` a registry-driven empty-group identity (instead of the
+/// hardcoded NULL) would let this fold in like any other case.
+let private bitAndAgg: Aggregate = fun vs -> VInt(vs |> List.map (toDouble >> int64) |> List.reduce (&&&))
+let private bitOrAgg: Aggregate = fun vs -> VInt(vs |> List.map (toDouble >> int64) |> List.reduce (|||))
+let private bitXorAgg: Aggregate = fun vs -> VInt(vs |> List.map (toDouble >> int64) |> List.reduce (^^^))
+
 let builtins: Registry =
     empty
     |> registerScalar "NOW" nowFn
@@ -1676,9 +2010,9 @@ let builtins: Registry =
     |> registerScalar "JSON_SEARCH" jsonSearchFn
     // Dates
     |> registerScalar "DATE_ADD" (dateAddCore 1.0)
-    |> registerScalar "ADDDATE" (dateAddCore 1.0)
+    |> registerScalar "ADDDATE" (addSubDateCore 1.0)
     |> registerScalar "DATE_SUB" (dateAddCore -1.0)
-    |> registerScalar "SUBDATE" (dateAddCore -1.0)
+    |> registerScalar "SUBDATE" (addSubDateCore -1.0)
     |> registerScalar "INTERVAL" intervalFn
     |> registerScalar "DATEDIFF" dateDiffFn
     |> registerScalar "DATE_FORMAT" dateFormatFn
@@ -1697,6 +2031,9 @@ let builtins: Registry =
     |> registerScalar "DAYNAME" dayNameFn
     |> registerScalar "MONTHNAME" monthNameFn
     |> registerScalar "WEEK" weekFn
+    |> registerScalar "WEEKDAY" weekdayFn
+    |> registerScalar "WEEKOFYEAR" weekOfYearFn
+    |> registerScalar "YEARWEEK" yearWeekFn
     |> registerScalar "QUARTER" (datePartFn (fun d -> (d.Month - 1) / 3 + 1))
     |> registerScalar "CURDATE" curDateFn
     |> registerScalar "CURRENT_DATE" curDateFn
@@ -1738,6 +2075,10 @@ let builtins: Registry =
     |> registerScalar "FIND_IN_SET" findInSetFn
     |> registerScalar "QUOTE" quoteFn
     |> registerScalar "STRCMP" strcmpFn
+    |> registerScalar "REGEXP_LIKE" regexpLikeFn
+    |> registerScalar "REGEXP_REPLACE" regexpReplaceFn
+    |> registerScalar "REGEXP_SUBSTR" regexpSubstrFn
+    |> registerScalar "REGEXP_INSTR" regexpInstrFn
     // Math/misc
     |> registerScalar "CEIL" ceilFn
     |> registerScalar "CEILING" ceilFn
@@ -1757,6 +2098,9 @@ let builtins: Registry =
     |> registerScalar "OCT" octFn
     |> registerScalar "CRC32" crc32Fn
     |> registerScalar "UUID" uuidFn
+    |> registerScalar "UUID_TO_BIN" uuidToBinFn
+    |> registerScalar "BIN_TO_UUID" binToUuidFn
+    |> registerScalar "IS_UUID" isUuidFn
     |> registerScalar "INET_ATON" inetAtonFn
     |> registerScalar "INET_NTOA" inetNtoaFn
     |> registerAggregate "COUNT" countAgg
@@ -1764,3 +2108,13 @@ let builtins: Registry =
     |> registerAggregate "AVG" avgAgg
     |> registerAggregate "MIN" minAgg
     |> registerAggregate "MAX" maxAgg
+    |> registerAggregate "STDDEV_POP" stddevPopAgg
+    |> registerAggregate "STDDEV" stddevPopAgg
+    |> registerAggregate "STD" stddevPopAgg
+    |> registerAggregate "STDDEV_SAMP" stddevSampAgg
+    |> registerAggregate "VAR_POP" varPopAgg
+    |> registerAggregate "VARIANCE" varPopAgg
+    |> registerAggregate "VAR_SAMP" varSampAgg
+    |> registerAggregate "BIT_AND" bitAndAgg
+    |> registerAggregate "BIT_OR" bitOrAgg
+    |> registerAggregate "BIT_XOR" bitXorAgg

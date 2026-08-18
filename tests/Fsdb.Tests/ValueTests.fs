@@ -13,6 +13,14 @@ let private call (name: string) (args: Value list) : Value =
     | Some fn -> fn args
     | None -> failwithf "no such builtin: %s" name
 
+/// Same as `call`, against the aggregate half of the registry — the
+/// `Value list` here plays the already-NULL-filtered, already-nonempty
+/// per-group values `Executor.evalAggregate` would hand an `Aggregate`.
+let private callAgg (name: string) (args: Value list) : Value =
+    match lookupAggregate name builtins with
+    | Some fn -> fn args
+    | None -> failwithf "no such aggregate: %s" name
+
 let tests =
     testList
         "Value"
@@ -1118,4 +1126,181 @@ let tests =
                       testCase "INET_ATON/INET_NTOA round-trip an IPv4 address"
                       <| fun _ ->
                           Expect.equal (call "INET_ATON" [ VString "192.168.1.1" ]) (VInt 3232235777L) "aton"
-                          Expect.equal (call "INET_NTOA" [ VInt 3232235777L ]) (VString "192.168.1.1") "ntoa" ] ] ]
+                          Expect.equal (call "INET_NTOA" [ VInt 3232235777L ]) (VString "192.168.1.1") "ntoa" ]
+
+                testList
+                    "ADDDATE/SUBDATE bare-number form"
+                    [ testCase "a bare numeric second argument means that many DAYs"
+                      <| fun _ ->
+                          Expect.equal
+                              (call "ADDDATE" [ VDate(DateOnly(2024, 1, 1)); VInt 3L ])
+                              (VDate(DateOnly(2024, 1, 4)))
+                              "adddate"
+
+                          Expect.equal
+                              (call "SUBDATE" [ VDate(DateOnly(2024, 1, 4)); VInt 3L ])
+                              (VDate(DateOnly(2024, 1, 1)))
+                              "subdate"
+
+                      testCase "ADDDATE/SUBDATE still accept the INTERVAL form"
+                      <| fun _ ->
+                          Expect.equal
+                              (call "ADDDATE" [ VDate(DateOnly(2024, 1, 1)); call "INTERVAL" [ VInt 1L; VString "MONTH" ] ])
+                              (VDate(DateOnly(2024, 2, 1)))
+                              "adddate interval"
+
+                      testCase "ADDDATE/SUBDATE propagate NULL"
+                      <| fun _ ->
+                          Expect.equal (call "ADDDATE" [ VNull; VInt 3L ]) VNull "null date"
+                          Expect.equal (call "ADDDATE" [ VDate(DateOnly(2024, 1, 1)); VNull ]) VNull "null amount" ]
+
+                testList
+                    "REGEXP_LIKE/REPLACE/SUBSTR/INSTR"
+                    [ testCase "REGEXP_LIKE matches case-insensitively by default"
+                      <| fun _ ->
+                          Expect.equal (call "REGEXP_LIKE" [ VString "Hello"; VString "^hello$" ]) (VInt 1L) "ci match"
+                          Expect.equal (call "REGEXP_LIKE" [ VString "Hello"; VString "^hello$"; VString "c" ]) (VInt 0L) "c flag forces case-sensitive"
+                          Expect.equal (call "REGEXP_LIKE" [ VString "abc"; VString "^z" ]) (VInt 0L) "no match"
+
+                      testCase "REGEXP_LIKE propagates NULL"
+                      <| fun _ -> Expect.equal (call "REGEXP_LIKE" [ VNull; VString "a" ]) VNull "null subject"
+
+                      testCase "REGEXP_LIKE returns NULL for a malformed pattern rather than erroring"
+                      <| fun _ -> Expect.equal (call "REGEXP_LIKE" [ VString "abc"; VString "(" ]) VNull "unbalanced paren"
+
+                      testCase "REGEXP_SUBSTR returns the matched substring, or NULL if none"
+                      <| fun _ ->
+                          Expect.equal (call "REGEXP_SUBSTR" [ VString "abc123def"; VString "[0-9]+" ]) (VString "123") "found"
+                          Expect.equal (call "REGEXP_SUBSTR" [ VString "abcdef"; VString "[0-9]+" ]) VNull "not found"
+
+                      testCase "REGEXP_SUBSTR honors pos and occurrence"
+                      <| fun _ ->
+                          Expect.equal (call "REGEXP_SUBSTR" [ VString "a1b2c3"; VString "[0-9]"; VInt 1L; VInt 2L ]) (VString "2") "second digit"
+                          Expect.equal (call "REGEXP_SUBSTR" [ VString "a1b2c3"; VString "[0-9]"; VInt 4L ]) (VString "2") "starting past the first digit"
+
+                      testCase "REGEXP_INSTR returns a 1-based match start, or the end position past the match"
+                      <| fun _ ->
+                          Expect.equal (call "REGEXP_INSTR" [ VString "abc123"; VString "[0-9]+" ]) (VInt 4L) "start"
+                          Expect.equal (call "REGEXP_INSTR" [ VString "abc123"; VString "[0-9]+"; VInt 1L; VInt 1L; VInt 1L ]) (VInt 7L) "end"
+                          Expect.equal (call "REGEXP_INSTR" [ VString "abcdef"; VString "[0-9]+" ]) (VInt 0L) "not found"
+
+                      testCase "REGEXP_REPLACE replaces every match by default, or just one occurrence"
+                      <| fun _ ->
+                          Expect.equal (call "REGEXP_REPLACE" [ VString "a1b2c3"; VString "[0-9]"; VString "#" ]) (VString "a#b#c#") "all"
+
+                          Expect.equal
+                              (call "REGEXP_REPLACE" [ VString "a1b2c3"; VString "[0-9]"; VString "#"; VInt 1L; VInt 2L ])
+                              (VString "a1b#c3")
+                              "second occurrence only"
+
+                      testCase "REGEXP_REPLACE supports \\N backreferences"
+                      <| fun _ ->
+                          Expect.equal
+                              (call "REGEXP_REPLACE" [ VString "2024-01-15"; VString "(\\d+)-(\\d+)-(\\d+)"; VString "\\3/\\2/\\1" ])
+                              (VString "15/01/2024")
+                              "backreference reorder" ]
+
+                testList
+                    "UUID_TO_BIN/BIN_TO_UUID/IS_UUID"
+                    [ testCase "UUID_TO_BIN matches the oracle's byte order, swapped and not"
+                      <| fun _ ->
+                          let uuid = VString "6ccd780c-baba-1026-9564-5b8c656024db"
+
+                          Expect.equal
+                              (call "UUID_TO_BIN" [ uuid; VInt 0L ])
+                              (VBytes(Convert.FromHexString "6CCD780CBABA102695645B8C656024DB"))
+                              "no swap"
+
+                          Expect.equal
+                              (call "UUID_TO_BIN" [ uuid; VInt 1L ])
+                              (VBytes(Convert.FromHexString "1026BABA6CCD780C95645B8C656024DB"))
+                              "swap"
+
+                      testCase "UUID_TO_BIN/BIN_TO_UUID round-trip, swapped and not"
+                      <| fun _ ->
+                          let uuid = VString "6ccd780c-baba-1026-9564-5b8c656024db"
+
+                          Expect.equal (call "BIN_TO_UUID" [ call "UUID_TO_BIN" [ uuid ] ]) uuid "no swap round-trip"
+                          Expect.equal (call "BIN_TO_UUID" [ call "UUID_TO_BIN" [ uuid; VInt 1L ]; VInt 1L ]) uuid "swap round-trip"
+
+                      testCase "UUID_TO_BIN/BIN_TO_UUID propagate NULL and reject malformed input"
+                      <| fun _ ->
+                          Expect.equal (call "UUID_TO_BIN" [ VNull ]) VNull "null in"
+                          Expect.equal (call "UUID_TO_BIN" [ VString "not-a-uuid" ]) VNull "malformed"
+                          Expect.equal (call "BIN_TO_UUID" [ VBytes [| 1uy; 2uy |] ]) VNull "wrong length"
+
+                      testCase "IS_UUID accepts dashed, undashed, and braced forms"
+                      <| fun _ ->
+                          Expect.equal (call "IS_UUID" [ VString "6ccd780c-baba-1026-9564-5b8c656024db" ]) (VInt 1L) "dashed"
+                          Expect.equal (call "IS_UUID" [ VString "6ccd780cbaba10269564 5b8c656024db" ]) (VInt 0L) "embedded space is not a valid form"
+                          Expect.equal (call "IS_UUID" [ VString "6ccd780cbaba102695645b8c656024db" ]) (VInt 1L) "undashed"
+                          Expect.equal (call "IS_UUID" [ VString "{6ccd780c-baba-1026-9564-5b8c656024db}" ]) (VInt 1L) "braced"
+                          Expect.equal (call "IS_UUID" [ VString "not-a-uuid" ]) (VInt 0L) "malformed"
+                          Expect.equal (call "IS_UUID" [ VNull ]) VNull "null" ]
+
+                testList
+                    "WEEK/WEEKDAY/WEEKOFYEAR/YEARWEEK"
+                    [ testCase "WEEK covers all 8 MySQL modes at a mode-0-first-Sunday boundary"
+                      <| fun _ ->
+                          let d2000 = VDate(DateOnly(2000, 1, 1))
+                          let expected = [ 0L; 0L; 52L; 52L; 0L; 0L; 52L; 52L ]
+
+                          for mode in 0..7 do
+                              Expect.equal (call "WEEK" [ d2000; VInt(int64 mode) ]) (VInt expected.[mode]) (sprintf "mode %d" mode)
+
+                      testCase "WEEK covers all 8 modes at a leap-year Jan-1-is-Monday boundary"
+                      <| fun _ ->
+                          let d2024 = VDate(DateOnly(2024, 1, 1))
+                          let expected = [ 0L; 1L; 53L; 1L; 1L; 1L; 1L; 1L ]
+
+                          for mode in 0..7 do
+                              Expect.equal (call "WEEK" [ d2024; VInt(int64 mode) ]) (VInt expected.[mode]) (sprintf "mode %d" mode)
+
+                      testCase "YEARWEEK forces the 1-53 rollover range regardless of mode"
+                      <| fun _ ->
+                          Expect.equal (call "YEARWEEK" [ VDate(DateOnly(2000, 1, 1)) ]) (VInt 199952L) "default mode 0"
+                          Expect.equal (call "YEARWEEK" [ VDate(DateOnly(2024, 1, 1)); VInt 3L ]) (VInt 202401L) "mode 3"
+                          Expect.equal (call "YEARWEEK" [ VDate(DateOnly(2024, 12, 31)); VInt 1L ]) (VInt 202501L) "rolls into next year's week 1"
+
+                      testCase "WEEKDAY is 0-indexed from Monday"
+                      <| fun _ ->
+                          Expect.equal (call "WEEKDAY" [ VDate(DateOnly(2024, 1, 1)) ]) (VInt 0L) "monday"
+                          Expect.equal (call "WEEKDAY" [ VDate(DateOnly(2024, 1, 7)) ]) (VInt 6L) "sunday"
+
+                      testCase "WEEKOFYEAR is WEEK(d, 3)"
+                      <| fun _ -> Expect.equal (call "WEEKOFYEAR" [ VDate(DateOnly(2024, 1, 1)) ]) (call "WEEK" [ VDate(DateOnly(2024, 1, 1)); VInt 3L ]) "matches mode 3"
+
+                      testCase "WEEK/WEEKDAY/WEEKOFYEAR/YEARWEEK propagate NULL"
+                      <| fun _ ->
+                          Expect.equal (call "WEEK" [ VNull ]) VNull "week"
+                          Expect.equal (call "WEEKDAY" [ VNull ]) VNull "weekday"
+                          Expect.equal (call "WEEKOFYEAR" [ VNull ]) VNull "weekofyear"
+                          Expect.equal (call "YEARWEEK" [ VNull ]) VNull "yearweek" ]
+
+                testList
+                    "Aggregates"
+                    [ testCase "STDDEV_POP/STDDEV_SAMP/VAR_POP/VAR_SAMP over 1,2,3,4"
+                      <| fun _ ->
+                          let xs = [ VInt 1L; VInt 2L; VInt 3L; VInt 4L ]
+
+                          Expect.equal (callAgg "STDDEV_POP" xs) (VDouble 1.118033988749895) "stddev_pop"
+                          Expect.equal (callAgg "STDDEV" xs) (VDouble 1.118033988749895) "stddev alias"
+                          Expect.equal (callAgg "STD" xs) (VDouble 1.118033988749895) "std alias"
+                          Expect.equal (callAgg "STDDEV_SAMP" xs) (VDouble 1.2909944487358056) "stddev_samp"
+                          Expect.equal (callAgg "VAR_POP" xs) (VDouble 1.25) "var_pop"
+                          Expect.equal (callAgg "VARIANCE" xs) (VDouble 1.25) "variance alias"
+                          Expect.equal (callAgg "VAR_SAMP" xs) (VDouble 1.6666666666666667) "var_samp"
+
+                      testCase "STDDEV_SAMP/VAR_SAMP over a single value is NULL (n - 1 = 0), STDDEV_POP/VAR_POP is 0"
+                      <| fun _ ->
+                          Expect.equal (callAgg "STDDEV_POP" [ VInt 1L ]) (VDouble 0.0) "pop"
+                          Expect.equal (callAgg "STDDEV_SAMP" [ VInt 1L ]) VNull "samp"
+                          Expect.equal (callAgg "VAR_SAMP" [ VInt 1L ]) VNull "var samp"
+
+                      testCase "BIT_AND/BIT_OR/BIT_XOR fold bitwise over a group"
+                      <| fun _ ->
+                          let ys = [ VInt 1L; VInt 2L; VInt 3L; VInt 4L ]
+
+                          Expect.equal (callAgg "BIT_AND" ys) (VInt 0L) "bit_and"
+                          Expect.equal (callAgg "BIT_OR" ys) (VInt 7L) "bit_or"
+                          Expect.equal (callAgg "BIT_XOR" ys) (VInt 4L) "bit_xor" ] ] ]
