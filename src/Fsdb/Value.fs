@@ -97,6 +97,28 @@ let toText (v: Value) : string option =
         Some(if micros = 0L then baseStr else sprintf "%s.%06d" baseStr micros)
     | VJson j -> Some j
 
+/// Renders a value at a declared fractional-seconds precision (fsp 0-6),
+/// for a column whose schema says `DATETIME(fsp)`/`TIMESTAMP(fsp)` — exactly
+/// `fsp` fractional digits, trailing zeros included, so a `DATETIME(6)` on an
+/// exact second shows `.000000` and a `DATETIME(0)` shows none (where the
+/// bare `VDateTime` alone, via `toText`, can't say how many digits the column
+/// wants). The stored value is already rounded to `fsp` at coercion
+/// (`Storage.coerceValue`), so the top `fsp` micro-digits are exact — this
+/// only chooses how many to show. Any non-`VDateTime` value (a `TIME` column
+/// is stored pre-formatted as `VString`; every other type) falls through to
+/// `toText`.
+let toTextFsp (fsp: int) (v: Value) : string option =
+    match v with
+    | VDateTime dt ->
+        let baseStr = dt.ToString("yyyy-MM-dd HH:mm:ss", CultureInfo.InvariantCulture)
+
+        if fsp <= 0 then
+            Some baseStr
+        else
+            let micros = (dt.Ticks % TimeSpan.TicksPerSecond) / 10L
+            Some(sprintf "%s.%s" baseStr ((sprintf "%06d" micros).Substring(0, min fsp 6)))
+    | _ -> toText v
+
 /// A round-trippable tagged-text encoding of a `Value` — `ofWire (toWire v) = v`
 /// for every case. Binary persistence uses `encodeValue`; this survives as the
 /// human-readable, one-line ASCII form the torture harness hashes rows with

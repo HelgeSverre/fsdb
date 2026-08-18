@@ -96,7 +96,7 @@ let tests =
 
           testCase "BLOB column definitions advertise binary collation and flags"
           <| fun _ ->
-              let reader = Reader(columnDefPayload { Name = "payload"; Type = TypeBlob })
+              let reader = Reader(columnDefPayload { Name = "payload"; Type = TypeBlob; Decimals = 0uy })
               for _ in 1..6 do
                   reader.ReadLenEncString() |> ignore
               reader.ReadLenEncInt() |> ignore
@@ -125,8 +125,8 @@ let tests =
               Expect.equal (wireTypeOfColumnType TDouble) TypeDouble "double"
               Expect.equal (wireTypeOfColumnType TFloat) TypeFloat "float"
               Expect.equal (wireTypeOfColumnType TDate) TypeDate "date"
-              Expect.equal (wireTypeOfColumnType TDateTime) TypeDateTime "datetime"
-              Expect.equal (wireTypeOfColumnType TTimestamp) TypeDateTime "timestamp"
+              Expect.equal (wireTypeOfColumnType (TDateTime 0)) TypeDateTime "datetime"
+              Expect.equal (wireTypeOfColumnType (TTimestamp 0)) TypeDateTime "timestamp"
               Expect.equal (wireTypeOfColumnType (TBinary 16)) TypeBlob "binary"
               Expect.equal (wireTypeOfColumnType (TVarBinary 16)) TypeBlob "varbinary"
               Expect.equal (wireTypeOfColumnType TTinyBlob) TypeBlob "tinyblob"

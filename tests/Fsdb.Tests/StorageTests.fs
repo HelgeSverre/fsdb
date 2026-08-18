@@ -262,7 +262,7 @@ let tests =
 
                     let columns =
                         [ col "id" (TInt false) false
-                          { (col "created_at" TTimestamp true) with Default = Some DCurrentTimestamp } ]
+                          { (col "created_at" (TTimestamp 0) true) with Default = Some DCurrentTimestamp } ]
 
                     createTable store defaultDatabase "posts" columns [] [] None None |> ignore
 
@@ -380,19 +380,19 @@ let tests =
               "coerceValue non-strict fallback"
               [ testCase "strict mode rejects an unparseable datetime string"
                 <| fun _ ->
-                    match coerceValue true (col "established" TDateTime true) (VString "") with
+                    match coerceValue true (col "established" (TDateTime 0) true) (VString "") with
                     | Error(InvalidValueForColumn("established", "")) -> ()
                     | other -> failtestf "expected InvalidValueForColumn, got %A" other
 
                 testCase "non-strict mode coerces an unparseable datetime string on a nullable column to NULL"
                 <| fun _ ->
-                    match coerceValue false (col "established" TDateTime true) (VString "") with
+                    match coerceValue false (col "established" (TDateTime 0) true) (VString "") with
                     | Ok VNull -> ()
                     | other -> failtestf "expected Ok VNull, got %A" other
 
                 testCase "non-strict mode still rejects an unparseable datetime string on a NOT NULL column"
                 <| fun _ ->
-                    match coerceValue false (col "established" TDateTime false) (VString "") with
+                    match coerceValue false (col "established" (TDateTime 0) false) (VString "") with
                     | Error(InvalidValueForColumn("established", "")) -> ()
                     | other -> failtestf "expected InvalidValueForColumn, got %A" other ]
 

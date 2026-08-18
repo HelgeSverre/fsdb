@@ -742,7 +742,7 @@ let tests =
                 testCase "DEFAULT CURRENT_TIMESTAMP"
                 <| fun _ ->
                     match parseOk "CREATE TABLE t (created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP)" with
-                    | CreateTable(_, [ { Type = TTimestamp; Default = Some DCurrentTimestamp } ], _, _, _, _, _) -> ()
+                    | CreateTable(_, [ { Type = TTimestamp 0; Default = Some DCurrentTimestamp } ], _, _, _, _, _) -> ()
                     | other -> failtestf "expected a CURRENT_TIMESTAMP default, got %A" other
 
                 testCase "ENGINE=/CHARSET= are accepted; the table's defaults stay table-level (numeric columns don't inherit them)"
@@ -861,7 +861,7 @@ let tests =
                           { Type = TBinary 4 }
                           { Type = TSmallInt false }
                           { Type = TMediumInt true }
-                          { Type = TTime }
+                          { Type = TTime 0 }
                           { Type = TYear }
                           { Type = TFloat }
                           { Type = TDouble } ],

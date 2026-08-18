@@ -187,9 +187,18 @@ let private encodeColumnType (w: Writer) (t: ColumnType) : unit =
     | TDouble -> w.WriteByte 0x15uy
     | TFloat -> w.WriteByte 0x16uy
     | TDate -> w.WriteByte 0x17uy
-    | TDateTime -> w.WriteByte 0x18uy
-    | TTimestamp -> w.WriteByte 0x19uy
-    | TTime -> w.WriteByte 0x1Auy
+    // An fsp byte rides after the tag for the three fractional-second types
+    // so a `DATETIME(6)` column survives a snapshot/WAL round-trip with its
+    // precision. This is a codec change: a snapshot written before fsp existed
+    // encoded these three tags with *no* trailing byte (the old parser dropped
+    // the `(N)` but still stored the column as a temporal type), so the new
+    // decoder would misread such a file. The persistence format carries no
+    // version field, so cross-version durable data isn't guaranteed across this
+    // change — acceptable pre-1.0, and self-consistent for any data this build
+    // both wrote and reads.
+    | TDateTime fsp -> w.WriteByte 0x18uy; w.WriteByte(byte fsp)
+    | TTimestamp fsp -> w.WriteByte 0x19uy; w.WriteByte(byte fsp)
+    | TTime fsp -> w.WriteByte 0x1Auy; w.WriteByte(byte fsp)
     | TYear -> w.WriteByte 0x1Buy
     | TJson -> w.WriteByte 0x1Cuy
 
@@ -218,9 +227,9 @@ let private decodeColumnType (r: #IReader) : ColumnType =
     | 0x15uy -> TDouble
     | 0x16uy -> TFloat
     | 0x17uy -> TDate
-    | 0x18uy -> TDateTime
-    | 0x19uy -> TTimestamp
-    | 0x1Auy -> TTime
+    | 0x18uy -> TDateTime(int (r.ReadByte()))
+    | 0x19uy -> TTimestamp(int (r.ReadByte()))
+    | 0x1Auy -> TTime(int (r.ReadByte()))
     | 0x1Buy -> TYear
     | 0x1Cuy -> TJson
     | tag -> failwithf "Persistence: unknown ColumnType tag 0x%02x in WAL/snapshot" tag

@@ -48,6 +48,9 @@ type StorageError =
     /// `INSERT`/`UPDATE` of a child row whose foreign key columns don't
     /// match any row in the referenced table.
     | ForeignKeyParentMissing of fkName: string
+    /// A temporal column declared a fractional-seconds precision above 6
+    /// (`DATETIME(7)`) — MySQL's 1426, which names the offending column.
+    | PrecisionTooBig of column: string * precision: int
 
 /// MySQL error code + message for a `StorageError`, ready for the wire
 /// protocol's ERR packet.
@@ -69,6 +72,8 @@ let toMySqlError (err: StorageError) : int * string =
         1451, sprintf "Cannot delete or update a parent row: a foreign key constraint fails (`%s`)" fkName
     | ForeignKeyParentMissing fkName ->
         1452, sprintf "Cannot add or update a child row: a foreign key constraint fails (`%s`)" fkName
+    | PrecisionTooBig(column, precision) ->
+        1426, sprintf "Too-big precision %d specified for '%s'. Maximum is 6." precision column
 
 /// A table's rows, newest last. `OriginalName` keeps the as-created casing
 /// for information_schema, even though the catalog keys tables by their
@@ -902,8 +907,32 @@ let coerceValue (strict: bool) (col: ColumnDef) (v: Value) : Result<Value, Stora
         | TMediumText
         | TLongText
         | TSet _
-        | TTime
         | TJson -> charsetChecked (v |> toText |> Option.defaultValue "") |> Result.map VString
+        | TTime fsp ->
+            // TIME is stored pre-formatted as a `VString` (there's no `VTime`
+            // value) — so unlike DATETIME, its fsp lives *in the string* and
+            // the resultset renderer just passes it through. Round the
+            // fraction to `fsp` digits and re-render with exactly that many
+            // (a `TIME(6)` on a whole second shows `.000000`, matching MySQL),
+            // parsing the input as a `TimeSpan`; anything unparseable keeps
+            // its raw text the way the old string-passthrough path did.
+            let raw = v |> toText |> Option.defaultValue ""
+
+            match TimeSpan.TryParse(raw.Trim(), CultureInfo.InvariantCulture) with
+            | true, ts ->
+                let a = TimeSpan(Functions.roundTicksToFsp fsp (abs ts.Ticks)).Duration()
+                let sign = if ts.Ticks < 0L then "-" else ""
+                let baseStr = sprintf "%s%02d:%02d:%02d" sign (int (floor a.TotalHours)) a.Minutes a.Seconds
+
+                let text =
+                    if fsp <= 0 then
+                        baseStr
+                    else
+                        let micros = (a.Ticks % TimeSpan.TicksPerSecond) / 10L
+                        sprintf "%s.%s" baseStr ((sprintf "%06d" micros).Substring(0, min fsp 6))
+
+                charsetChecked text |> Result.map VString
+            | false, _ -> charsetChecked raw |> Result.map VString
         | TBinary _
         | TVarBinary _
         | TTinyBlob
@@ -960,14 +989,22 @@ let coerceValue (strict: bool) (col: ColumnDef) (v: Value) : Result<Value, Stora
                     | true, dt -> Ok(VDate(DateOnly.FromDateTime dt))
                     | false, _ -> temporalFallback ()
             | _ -> temporalFallback ()
-        | TDateTime
-        | TTimestamp ->
+        | TDateTime fsp
+        | TTimestamp fsp ->
+            // Round the sub-second part to the column's declared fsp so the
+            // stored ticks already reflect the precision — MySQL rounds (half
+            // up), it does not truncate: `DATETIME(0)` of `.6` stores `:01`,
+            // and a `.9999995` into `(6)` carries all the way to the next day
+            // (both oracle-verified). The resultset renderer then shows
+            // exactly `fsp` digits off these rounded ticks.
+            let round dt = VDateTime(Functions.roundDateTimeToFsp fsp dt)
+
             match v with
-            | VDateTime dt -> Ok(VDateTime dt)
-            | VDate d -> Ok(VDateTime(d.ToDateTime(TimeOnly.MinValue)))
+            | VDateTime dt -> Ok(round dt)
+            | VDate d -> Ok(round (d.ToDateTime(TimeOnly.MinValue)))
             | VString s ->
                 match DateTime.TryParse(s.Trim(), CultureInfo.InvariantCulture, DateTimeStyles.None) with
-                | true, dt -> Ok(VDateTime dt)
+                | true, dt -> Ok(round dt)
                 | false, _ -> temporalFallback ()
             | _ -> temporalFallback ()
 
@@ -1261,6 +1298,18 @@ let private withTable
         tryGetTable db tableName
         |> Result.bind (fun table -> f table |> Result.map (fun (table', result) -> Map.add (normalizeTableName tableName) table' db, result)))
 
+/// Rejects a temporal column whose declared fsp exceeds 6 with MySQL's 1426
+/// (the parser accepts any int; the range check lives here, at DDL time,
+/// where the column name is in scope to name in the error). Called by every
+/// path that introduces a column — `createTable` and the column-adding
+/// `alterTable` actions.
+let private validateColumnFsp (c: ColumnDef) : Result<unit, StorageError> =
+    match c.Type with
+    | TDateTime fsp
+    | TTimestamp fsp
+    | TTime fsp when fsp > 6 -> Error(PrecisionTooBig(c.Name, fsp))
+    | _ -> Ok()
+
 let createTable
     (store: Store)
     (dbName: string)
@@ -1276,6 +1325,10 @@ let createTable
     let result =
         withDatabase store dbName (fun db ->
             let key = normalizeTableName tableName
+
+            match columns |> traverse validateColumnFsp with
+            | Error e -> Error e
+            | Ok _ ->
 
             if Map.containsKey key db then
                 Error(TableExists tableName)
@@ -1360,6 +1413,20 @@ let private resolvePosition (columnsExcludingSelf: ColumnDef list) (fallback: in
 /// for `RenameTo`, the new key it should be re-filed under in the database
 /// map (`None` means "same key").
 let private applyAlterAction (table: Table) (action: AlterAction) : Result<Table * string option, StorageError> =
+    // Reject a too-big fsp on any column this action introduces (1426),
+    // before it can reach the table — the DDL-time counterpart to
+    // `createTable`'s own `validateColumnFsp` pass.
+    let fspCheck =
+        match action with
+        | AddColumn(col, _)
+        | ModifyColumn(col, _)
+        | ChangeColumn(_, col, _) -> validateColumnFsp col
+        | _ -> Ok()
+
+    match fspCheck with
+    | Error e -> Error e
+    | Ok() ->
+
     match action with
     | AddColumn(col, position) ->
         let fill = addedColumnFill col

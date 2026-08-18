@@ -396,6 +396,13 @@ let private unsignedFlag: Parser<bool, unit> = opt (keyword "UNSIGNED") |>> Opti
 let private widthLen: Parser<int, unit> = between (sym "(") (sym ")") intTok
 let private optWidthLen: Parser<int option, unit> = opt widthLen
 
+/// The fractional-seconds precision on a temporal type — `DATETIME(6)` →
+/// `6`, a bare `DATETIME` → `0`. Any non-negative int parses here; the
+/// `fsp > 6` rejection (MySQL error 1426, which names the column) happens at
+/// DDL time in `Storage`, where the column name is in scope — not here,
+/// where only the type is.
+let private optFsp: Parser<int, unit> = opt widthLen |>> Option.defaultValue 0
+
 let private stringListParen: Parser<string list, unit> =
     between (sym "(") (sym ")") (sepBy1 (stringLit |>> (function VString s -> s | _ -> "")) (sym ","))
 
@@ -428,10 +435,10 @@ let private columnType: Parser<ColumnType, unit> =
               | None -> TDecimal(10, 0)
           keyword "DOUBLE" >>. ignoredWidth >>. unsignedFlag >>% TDouble
           keyword "FLOAT" >>. ignoredWidth >>. unsignedFlag >>% TFloat
-          keyword "DATETIME" >>. ignoredWidth >>% TDateTime
-          keyword "TIMESTAMP" >>. ignoredWidth >>% TTimestamp
+          keyword "DATETIME" >>. optFsp |>> TDateTime
+          keyword "TIMESTAMP" >>. optFsp |>> TTimestamp
           keyword "DATE" >>% TDate
-          keyword "TIME" >>. ignoredWidth >>% TTime
+          keyword "TIME" >>. optFsp |>> TTime
           keyword "YEAR" >>. ignoredWidth >>% TYear
           keyword "JSON" >>% TJson
           (keyword "BOOLEAN" <|> keyword "BOOL") >>% TTinyInt false ]
