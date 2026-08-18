@@ -34,7 +34,7 @@ build fails with "not defined".
 
 - `src/Fsdb/` — library + executable in one project (`OutputType` Exe). Compile
   order is the module dependency order: `Log`/`Binary`/`Collation` → `Value`/
-  `Ast` → `Parser` → `Functions` → `Storage`/`Persistence` →
+  `Ast` → `Parser` → `Functions` → `Storage` → `Auth`/`Persistence` →
   `InformationSchema` → `Executor` → `Packet`/`Protocol`/`Session`/
   `QueryHandler` → `Server` → `Db` (public embedding facade) → `Program`.
 - `tests/Fsdb.Tests/` — Expecto unit + wire-level integration tests.
@@ -49,6 +49,10 @@ build fails with "not defined".
 
 - No CI in this repo; verify locally with `just check` (and the torture harness
   for compatibility work).
+- Connections authenticate against `mysql.user`: the bootstrap account is
+  `root` with no password (`-uroot`, empty password only); an unknown user is
+  a 1045. Text-probed statements (SET/SHOW/KILL/USE) bypass privilege
+  checks — a documented divergence, see docs/compatibility.md.
 - Comment & doc style: `docs/comment-style.md` is the authority — every
   comment there must survive a KEEP/DELETE/REWRITE grading (why-not-what,
   `ponytail:` debt markers, no session narration, milestone names, roadmap,

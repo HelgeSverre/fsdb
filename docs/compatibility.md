@@ -36,6 +36,19 @@ performance-without-ugliness, and the streaming pipeline. See
 [ROADMAP.md](ROADMAP.md) for the plan, acceptance gates, and per-milestone
 evidence.
 
+## GUI clients and introspection
+
+The introspection surface was built from what real clients actually send:
+TablePlus 26.9.6's queries extracted verbatim from its binary, and
+phpMyAdmin 5.2.x's query builders read from source. All 22
+`information_schema` tables have column sets diffed byte-for-byte against a
+live MySQL 8.4.11 (`SHOW COLUMNS` per table, both sides), and a ~70-query
+replay fixture covering both clients' connect/browse/structure flows runs
+with a single divergence: `SHOW SLAVE STATUS`, which real 8.4 also rejects
+with 1064. Object catalogs fsdb has no objects for (views, routines,
+triggers, events) are genuinely empty rather than stubbed; PROCESSLIST,
+`Threads_connected`, and `KILL` operate on the real connection registry.
+
 ## Users, authentication, and privileges
 
 fsdb has a real account system backed by a stored `mysql` schema (`user`,

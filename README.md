@@ -58,7 +58,7 @@ Any MySQL client works unchanged:
 | PDO (PHP) | `new PDO('mysql:host=127.0.0.1;port=3307;dbname=app', 'root', '')` |
 | MySqlConnector (.NET) | `new MySqlConnection("Server=127.0.0.1;Port=3307;User ID=root;Database=app")` |
 
-Install as a single framework-dependent binary (needs the .NET 10 runtime):
+Install as a single self-contained binary (no .NET needed on the machine):
 
 ```sh
 just install      # publishes to ~/.local/bin/fsdb, then: fsdb --help
@@ -104,9 +104,12 @@ flowchart LR
         STORE <-->|commit events| WAL
         EXEC -.->|result rows| WIRE
 
-        COL["Collation registry<br/>89 utf8mb4 collations"]:::side
+        AUTH["Auth<br/>mysql.user · privileges"]:::side
+        COL["Collation registry<br/>98 collations · 5 charsets"]:::side
         FN["Function registry<br/>built-in · custom · session"]:::side
 
+        WIRE -.-> AUTH
+        QH -.-> AUTH
         PARSE -.-> COL
         EXEC -.-> COL
         STORE -.-> COL
@@ -138,10 +141,12 @@ hash-join; everything else is a scan.
 
 ### Collations & charsets
 
-All 89 utf8mb4 collations MySQL 8.4 ships are registered, each as a locale,
-fold level, and pad attribute with ICU sort keys doing the work. Honored
-per-column and per `SET collation_connection` in grouping, dedup, joins, and
-unique keys. Charsets `utf8mb4`/`latin1` (cp1252)/`ascii`/`binary` follow
+All 89 utf8mb4 collations MySQL 8.4 ships are registered — plus the legacy
+`utf8mb3`/`latin1`/`ascii`/`binary` ones (`utf8_*` accepted as MySQL's
+deprecated alias), 98 in all — each as a locale, fold level, and pad
+attribute with ICU sort keys doing the work. Honored per-column and per
+`SET collation_connection` in grouping, dedup, joins, and unique keys.
+Charsets `utf8mb4`/`utf8mb3`/`latin1` (cp1252)/`ascii`/`binary` follow
 MySQL's write-time semantics, with `CONVERT(x USING …)` and `_charset'…'`
 introducers.
 
@@ -157,8 +162,14 @@ type for every statement the grammar parses; only the text-probed `SET`/
 The grammar covers what MySQL-backed applications use: `SELECT` with joins
 (`NATURAL`/`USING` included), derived tables, `GROUP BY`/`HAVING`, window
 functions, `UNION [ALL]`, CTE-free subqueries in expressions, JSON paths,
-multi-table `UPDATE`/`DELETE`, `EXPLAIN`, `information_schema` tables, and
-`SHOW CREATE TABLE`.
+multi-table `UPDATE`/`DELETE`, `EXPLAIN`, and user accounts with real
+`CREATE USER`/`GRANT`/`REVOKE` privilege enforcement.
+
+The introspection surface GUI clients lean on is served with real data:
+22 `information_schema` tables whose column sets are diffed against a live
+MySQL 8.4, the `SHOW` family (`STATUS`, `VARIABLES`, `ENGINES`, `GRANTS`,
+`CREATE TABLE`, ...), and a live `PROCESSLIST` with working
+`KILL QUERY|CONNECTION`.
 
 What makes the SQL surface *this* server's rather than generic SQL: every
 comparison, sort, group, dedup, join, and unique key folds by the column's
@@ -168,7 +179,10 @@ own collation. `SET collation_connection` governs literals, so
 `SHOW CREATE TABLE` reports declared collations, and
 `information_schema.COLUMNS` carries `CHARACTER_SET_NAME`/`COLLATION_NAME`.
 
-Missing SQL surface is tracked in [docs/ROADMAP.md](docs/ROADMAP.md).
+The deliberate gaps — no CTEs, views, stored routines, triggers, or events —
+and every smaller divergence are documented in
+[docs/compatibility.md](docs/compatibility.md) and marked `ponytail:` at
+their code sites.
 
 ## Persistence format
 
