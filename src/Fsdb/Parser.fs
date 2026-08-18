@@ -267,10 +267,9 @@ let private numberFormat =
 /// `0x..` hex literals become `VBytes` — MySQL treats them as binary strings
 /// by default (only numeric *context*, e.g. `0x41 + 1`, coerces to a number,
 /// which fsdb doesn't model), so `0x41 = 'A'` compares equal the same way it
-/// does against a real server. Without `AllowHexadecimal` above, `0x41` used
-/// to tokenize as the number `0` followed by a stray `x41`, which MySQL's
-/// bare-identifier-next-to-an-expression rule silently turned into a column
-/// alias instead of a syntax error.
+/// does against a real server. `AllowHexadecimal` above is what makes
+/// `0x41` a single token here rather than the number `0` followed by a
+/// bare identifier `x41`.
 let private numberLit: Parser<Value, unit> =
     (numberLiteral numberFormat "number" .>> ws)
     |>> fun nl ->

@@ -422,18 +422,16 @@ let beginTransactionSnapshot (store: Store) : Store =
       ConnectionCollation = store.ConnectionCollation
       OnCommit = None
       // Allocate a buffer whenever `store` itself would ever deliver an
-      // event — either it has a real `OnCommit` subscriber, or (the case
-      // that used to be missed) `store` is *itself* a transaction snapshot
-      // with its own `PendingEvents` already buffering. The latter is
-      // exactly `Executor`'s multi-table `UPDATE`/`DELETE` path: it opens a
-      // private snapshot of the *transaction's own* snapshot store to
-      // isolate one statement's writes, then commits that snapshot back via
-      // `commitTransactionEvents`. Without this, that nested snapshot's
-      // `PendingEvents` stayed `None` (its source's `OnCommit` is always
-      // `None` — only the real store has one), every event it built was
-      // silently dropped by `emit`'s no-buffer-no-subscriber branch, and
-      // `commitTransactionEvents` then had nothing to flush — the whole
-      // statement's writes reached memory but never the WAL.
+      // event — either it has a real `OnCommit` subscriber, or `store` is
+      // *itself* a transaction snapshot with its own `PendingEvents` already
+      // buffering. The latter is exactly `Executor`'s multi-table
+      // `UPDATE`/`DELETE` path: it opens a private snapshot of the
+      // *transaction's own* snapshot store to isolate one statement's
+      // writes, then commits that snapshot back via
+      // `commitTransactionEvents`. A snapshot's `OnCommit` is always `None`
+      // (only the real store has one), so `PendingEvents.IsSome` is the only
+      // signal that events built here must be buffered rather than dropped
+      // by `emit`'s no-buffer-no-subscriber branch.
       PendingEvents = if store.OnCommit.IsSome || store.PendingEvents.IsSome then Some(ResizeArray()) else None
       TransactionGates = store.TransactionGates
       Lock = obj () }
@@ -455,7 +453,7 @@ let beginTransactionSnapshot (store: Store) : Store =
 /// the WAL is already flat by construction, wrapped exactly once at the
 /// real top-level commit. Only when `store` is the real, live store (no
 /// `PendingEvents` of its own) does this wrap `snapshot`'s events in one
-/// `TransactionCommitted`, same as before.
+/// `TransactionCommitted`.
 let commitTransactionEvents (store: Store) (snapshot: Store) : unit =
     match snapshot.PendingEvents with
     | Some buffer when buffer.Count > 0 ->
@@ -984,7 +982,9 @@ let private evalDefault (d: ColumnDefault option) : Value =
     match d with
     | None -> VNull
     | Some(DConst v) -> v
-    | Some DCurrentTimestamp -> VDateTime DateTime.Now
+    // Precision 0, same as MySQL's `DEFAULT CURRENT_TIMESTAMP` and `NOW()`:
+    // truncate the sub-second part `Value.toText` would otherwise render.
+    | Some DCurrentTimestamp -> VDateTime(Functions.truncateToSecond DateTime.Now)
 
 /// Coerces a value to its column's type and rejects NULL for a non-nullable
 /// column.
@@ -1901,11 +1901,9 @@ let rec upsertRows
         | Error e -> Error e
 
 /// `upsertRows`'s per-table body, pulled out only so it can take `db` (needed
-/// for `checkFkParents`/`checkNotOrphaning`, same FK enforcement
-/// `insertRows`/`updateRows` already apply — this path previously did
-/// neither, so `ON DUPLICATE KEY UPDATE` could insert an orphan child row or
-/// rewrite a parent's key out from under an existing child) alongside
-/// `table`, which `withTable` alone doesn't expose.
+/// for `checkFkParents`/`checkNotOrphaning`, the same FK enforcement
+/// `insertRows`/`updateRows` apply) alongside `table`, which `withTable`
+/// alone doesn't expose.
 and private upsertRowsInTable
     (store: Store)
     (db: Database)
@@ -1991,9 +1989,7 @@ and private upsertRowsInTable
                                                     // parent (child-side), and if this rewrite
                                                     // changed a column some *other* table's FK
                                                     // references, it can't orphan an existing
-                                                    // child (parent-side) — plain `INSERT ...
-                                                    // ON DUPLICATE KEY UPDATE` skipped both
-                                                    // checks entirely before this.
+                                                    // child (parent-side).
                                                     (if checkFks then
                                                          checkFkParents db table.Columns table.ForeignKeys applied
                                                          |> Result.bind (fun () -> checkNotOrphaning db key table.Columns existing applied)
@@ -2175,8 +2171,7 @@ let rec private cascadeDeleteVisited
                                     // `changes` pairs each blanked row's before/after values —
                                     // the WAL needs the exact same `RowsUpdated` shape a plain
                                     // `UPDATE` reports, or replay resurrects the pre-blank FK
-                                    // value the next time the WAL is replayed (only the
-                                    // parent's own `RowsDeleted` used to reach the WAL here).
+                                    // value.
                                     let blankedRows, changes, index =
                                         childTbl.RowsArray
                                         |> Seq.indexed

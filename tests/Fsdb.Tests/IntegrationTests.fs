@@ -609,10 +609,9 @@ let tests =
               |> Async.RunSynchronously
 
           // A truncated COM_STMT_CLOSE (needs a 4-byte statement id, gets
-          // none) used to throw straight out of `Reader.ReadInt32LE` inside
-          // `parseCommand`, which escaped the command loop entirely and
-          // dropped the socket with no reply. It must now answer ERR and
-          // leave the connection usable.
+          // none) must answer ERR and leave the connection usable — a
+          // `Reader` throw inside `parseCommand` must not escape the
+          // command loop and drop the socket with no reply.
           testCase "a malformed short command packet gets an ERR, not a dropped connection"
           <| fun _ ->
               async {
@@ -657,8 +656,8 @@ let tests =
 
           // COM_RESET_CONNECTION (0x1f): connection pools (PDO's persistent
           // connections, Doctrine's DBAL, ...) send this instead of a full
-          // reconnect to clear session state. Used to fall through to
-          // `Unsupported` and answer ERR 1047, breaking pooled reconnect.
+          // reconnect to clear session state — it must answer OK, not
+          // ERR 1047 `Unsupported`.
           testCase "COM_RESET_CONNECTION replies OK and clears session state"
           <| fun _ ->
               async {
@@ -710,10 +709,9 @@ let tests =
               }
               |> Async.RunSynchronously
 
-          // COM_STMT_SEND_LONG_DATA force-decoded every buffered chunk as
-          // UTF-8 before substituting it as the bound parameter, corrupting
-          // any byte sequence that isn't valid UTF-8. A BLOB param's bytes
-          // must round-trip byte-identical.
+          // COM_STMT_SEND_LONG_DATA chunks must stay raw bytes — decoding
+          // them as UTF-8 corrupts any invalid sequence. A BLOB param's
+          // bytes must round-trip byte-identical.
           testCase "COM_STMT_SEND_LONG_DATA round-trips non-UTF-8 bytes for a BLOB parameter"
           <| fun _ ->
               async {

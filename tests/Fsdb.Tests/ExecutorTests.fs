@@ -785,9 +785,8 @@ let tests =
 
                 testCase "UPDATE JOIN with multiple SET assignments on the same target table applies all of them"
                 <| fun _ ->
-                    // Regression: `claims` used to be checked per-assignment
-                    // instead of once per (source, physical row), so `SET
-                    // t1.a = 10, t1.b = 20` only ever landed `a`.
+                    // `claims` must be checked once per (source, physical
+                    // row), not per assignment, or only the first SET lands.
                     let store = newStore ()
                     runDefault store "CREATE TABLE mt1 (id INT, a INT, b INT)" |> ignore
                     runDefault store "CREATE TABLE mt2 (id INT, x INT)" |> ignore
@@ -1291,8 +1290,8 @@ let tests =
 
                 testCase "BETWEEN on an ENUM compares by declaration ordinal, same as =/IN"
                 <| fun _ ->
-                    // Regression: `Between` called `Value.compare` directly,
-                    // skipping the ENUM-ordinal resolution `=`/`IN` apply.
+                    // BETWEEN must apply the same ENUM-ordinal resolution as
+                    // `=`/`IN`, not raw `Value.compare`.
                     let store = newStore ()
                     runDefault store "CREATE TABLE te (e ENUM('a','b','c'))" |> ignore
                     runDefault store "INSERT INTO te VALUES ('a'), ('b'), ('c')" |> ignore
@@ -2699,9 +2698,9 @@ let tests =
 
                 testCase "HAVING with no GROUP BY and no aggregate filters per row, not the whole table down to one"
                 <| fun _ ->
-                    // Regression: any `Having.IsSome` routed to the grouped
-                    // path, which collapses the whole (ungrouped) table to
-                    // one row before the filter even runs.
+                    // HAVING alone must not route to the grouped path, which
+                    // collapses the ungrouped table to one row before the
+                    // filter runs.
                     let store = newStore ()
                     runDefault store "CREATE TABLE hv (id INT, v INT)" |> ignore
                     runDefault store "INSERT INTO hv VALUES (1, 1), (2, 6), (3, 10)" |> ignore
@@ -3055,11 +3054,10 @@ let tests =
 
                 testCase "NULL NOT IN (SELECT ...) survives when the subquery has no rows"
                 <| fun _ ->
-                    // Regression: `ve = NULL` short-circuited to `VNull`
-                    // (dropping the row from `NOT IN`) before ever running
-                    // the subquery — but `NULL IN (<empty set>)` is FALSE,
-                    // not UNKNOWN, so `NOT IN` against an empty subquery
-                    // should be TRUE regardless of `v`'s own NULL-ness.
+                    // `NULL IN (<empty set>)` is FALSE, not UNKNOWN, so
+                    // `NOT IN` against an empty subquery must be TRUE
+                    // regardless of `v`'s own NULL-ness — the subquery has
+                    // to run before any NULL short-circuit.
                     let store = newStore ()
                     runDefault store "CREATE TABLE t (id INT, v INT)" |> ignore
                     runDefault store "CREATE TABLE empty_t (id INT)" |> ignore
@@ -3232,18 +3230,18 @@ let tests =
 
                 testCase "UNION DISTINCT dedupes after type reconciliation, not on each branch's raw text"
                 <| fun _ ->
-                    // Regression: dedup used to key on each branch's own
-                    // pre-reconciliation text ("1.0" vs "1"), so this stayed
-                    // two rows instead of collapsing to the one MySQL gives.
+                    // Dedup must key on the reconciled value, not each
+                    // branch's raw text ("1.0" vs "1"), to collapse to the
+                    // one row MySQL gives.
                     match runDefault (newStore ()) "SELECT 1.0 UNION SELECT 1" with
                     | ResultSet(_, [ [ Some "1.0" ] ]) -> ()
                     | other -> failtestf "expected UNION to dedupe post-reconciliation to one row, got %A" other
 
                 testCase "UNION ... ORDER BY an expression sorts by it, not silently by insertion order"
                 <| fun _ ->
-                    // Regression: `orderKeyOf` only matched a bare `Col`, so
-                    // `ORDER BY -v` fell through to VNull for every row and
-                    // the union came out unsorted.
+                    // `orderKeyOf` must evaluate full expressions, not just
+                    // a bare `Col` — otherwise every key is VNull and the
+                    // union stays unsorted.
                     match runDefault (newStore ()) "SELECT 1 AS v UNION SELECT 3 UNION SELECT 2 ORDER BY -v" with
                     | ResultSet([ "v" ], rows) -> Expect.equal rows [ [ Some "3" ]; [ Some "2" ]; [ Some "1" ] ] "sorted by -v descending"
                     | other -> failtestf "expected ORDER BY -v to actually sort, got %A" other
@@ -3334,8 +3332,8 @@ let tests =
 
                 testCase "REGEXP on a _bin column is case-sensitive, like =/LIKE BINARY"
                 <| fun _ ->
-                    // Regression: `regexpOp` hardcoded `IgnoreCase`
-                    // regardless of the column's collation.
+                    // `regexpOp` must honor the column's collation, not
+                    // hardcode `IgnoreCase`.
                     let store = newStore ()
                     runDefault store "CREATE TABLE t (s VARCHAR(10) COLLATE utf8mb4_bin)" |> ignore
                     runDefault store "INSERT INTO t VALUES ('Hello'), ('world')" |> ignore
@@ -3350,9 +3348,9 @@ let tests =
 
                 testCase "REGEXP on a catastrophically-backtracking pattern errors instead of hanging"
                 <| fun _ ->
-                    // Regression: no `Regex` in `regexpOp` ever carried a
-                    // `MatchTimeout`, so `(a+)+$` against a long non-matching
-                    // subject could pin a core forever.
+                    // Every `Regex` in `regexpOp` must carry a `MatchTimeout`
+                    // — `(a+)+$` against a long non-matching subject would
+                    // otherwise pin a core forever.
                     let store = newStore ()
                     runDefault store "CREATE TABLE t (s VARCHAR(200))" |> ignore
                     let pathological = String.replicate 40 "a" + "!"

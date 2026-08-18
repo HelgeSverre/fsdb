@@ -48,10 +48,9 @@ let private usersColumns =
         Charset = None } ]
 
 /// No PK/AUTO_INCREMENT/UNIQUE at all — unlike `usersColumns`, a row
-/// physically replayed twice (the exact bug a race between rotation and an
-/// in-flight WAL append would produce) inserts twice instead of the second
-/// copy silently dying on a uniqueness violation. Needed to make a
-/// duplicate-replay regression actually visible as a row-count difference.
+/// replayed twice inserts twice instead of the second copy silently dying
+/// on a uniqueness violation, so a duplicate-replay bug shows up as a
+/// row-count difference.
 let private tagColumns =
     [ { Name = "tag"
         Type = TVarchar 64
@@ -685,9 +684,9 @@ let tests =
 
               // Simulate a crash mid-`writeCatalog`: `.new` exists but is
               // truncated to a handful of zero bytes — `decodeCatalog` alone
-              // would happily parse that as `dbCount = 0`, an empty-but-
-              // "valid" catalog, and `load` used to promote it over the real
-              // snapshot on nothing more than "it parsed".
+              // happily parses that as `dbCount = 0`, an empty-but-"valid"
+              // catalog, so `load` must demand more than "it parsed" before
+              // promoting a `.new` over the real snapshot.
               File.WriteAllBytes(snapshotPath dir + ".new", Array.zeroCreate<byte> 8)
 
               let reloaded = load dir
@@ -703,14 +702,11 @@ let tests =
               // forces `attach`'s rotation to fire continuously *during* the
               // write storm below, landing squarely (and often) in the
               // window `Storage`'s writers leave between publishing a row to
-              // the catalog and this module's WAL append actually recording
-              // it (see `attach`'s `replica` doc): before the fix, a
-              // rotation caught in that window could duplicate the in-flight
-              // row (already in the snapshot, then appended again to the
-              // freshly-truncated WAL). Primarily a stress/regression check
-              // that heavy concurrent multi-database writes survive
-              // continuous rotation with exactly the right row count — the
-              // race itself is a narrow timing window, not reliably
+              // the catalog and this module's WAL append recording it (see
+              // `attach`'s `replica` doc). A rotation caught in that window
+              // must not duplicate the in-flight row (snapshotted, then
+              // appended again to the freshly-truncated WAL). Stress check:
+              // the race is a narrow timing window, not reliably
               // reproducible on demand.
               testRotateEntriesOverride <- Some 0
 

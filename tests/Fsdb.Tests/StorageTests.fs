@@ -1356,7 +1356,7 @@ let tests =
                     | Error(ForeignKeyParentMissing "fk_dept") -> ()
                     | other -> failtestf "expected ForeignKeyParentMissing, got %A" other
 
-                testCase "upsertRows' insert branch (no collision) still checks foreign keys, unlike before this fix"
+                testCase "upsertRows' insert branch (no collision) checks foreign keys"
                 <| fun _ ->
                     let store = withDeptEmployees None
                     let applyUpdate (_: Value[]) (candidate: Value[]) = Ok candidate
@@ -1365,7 +1365,7 @@ let tests =
                     | Error(ForeignKeyParentMissing "fk_dept") -> ()
                     | other -> failtestf "expected ForeignKeyParentMissing, got %A" other
 
-                testCase "upsertRows' update branch (ON DUPLICATE KEY UPDATE) still checks foreign keys, unlike before this fix"
+                testCase "upsertRows' update branch (ON DUPLICATE KEY UPDATE) checks foreign keys"
                 <| fun _ ->
                     let store = withDeptEmployees None
                     insertRows store defaultDatabase "employees" None [ [ VInt 1L; VInt 1L; VString "alice" ] ]

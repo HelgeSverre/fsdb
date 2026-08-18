@@ -628,10 +628,9 @@ let showColumns (catalog: Catalog) (full: bool) (dbName: string) (tableName: str
                 |> List.map (fun c ->
                     [ Some c.Name
                       Some(columnTypeText c.Type)
-                      // The column's actual declared/inherited collation —
+                      // The column's declared/inherited collation —
                       // matching `information_schema.columns.collation_name`
-                      // (`columnsRows` above), not always the same fixed
-                      // string regardless of what the column declared.
+                      // (`columnsRows` above).
                       (if isStringy c.Type then Some(c.Collation |> Option.defaultValue "utf8mb4_0900_ai_ci") else None)
                       Some(isNullable c)
                       Some(columnKey t c)

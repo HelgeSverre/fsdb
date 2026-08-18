@@ -323,8 +323,8 @@ let private likeOp (coll: Collation.Collation option) (caseSensitive: bool) (esc
 
 /// `REGEXP`/`RLIKE` — case sensitivity follows the operand's collation
 /// (case-insensitive under the usual `_ci` default, but case-sensitive
-/// under `_bin`/`_cs`, same as `LIKE`/`=`) rather than a hardcoded
-/// `IgnoreCase`; unlike `LIKE`'s translated wildcard syntax, the pattern is
+/// under `_bin`/`_cs`, same as `LIKE`/`=`); unlike `LIKE`'s translated
+/// wildcard syntax, the pattern is
 /// already a real (POSIX-flavored, close enough to .NET's for the common
 /// cases Eloquent generates) regex, so it's handed to `Regex` directly
 /// rather than through `likeToRegex`. Every match carries a `MatchTimeout`
@@ -1000,10 +1000,8 @@ let private ordinalComparand (v: Value) : Value option =
 /// cases do: an ENUM column compares by ordinal against a numeric operand
 /// (either side may be the column), and a string compare folds through the
 /// operand's own `COLLATE`/column collation rather than a raw ordinal
-/// `Value.compare`. Factored out so `Between` (two `AND`ed range checks)
-/// gets the same resolution instead of the raw `Value.compare` it used to
-/// call directly — a column comparison that BinOp/`IN` treat as
-/// collation-aware, `BETWEEN` was silently treating as byte-ordinal.
+/// `Value.compare`. Shared so `Between` (two `AND`ed range checks) gets
+/// the same resolution as BinOp/`IN`.
 let private resolvedCompare (ctx: EvalContext) (aExpr: Expr) (va: Value) (bExpr: Expr) (vb: Value) : int =
     let pa, pb =
         match enumOrdinalFor ctx aExpr va, ordinalComparand vb with
@@ -2312,14 +2310,14 @@ and runUnionStmt
     // comparing `VString` (`SELECT n FROM t UNION SELECT n FROM t ORDER BY
     // n` sorting "10" before "2" otherwise).
     //
-    // `DISTINCT` dedup used to run right here, branch by branch, keyed on
-    // each branch's own *pre-reconciliation* text (`"1.0"` vs `"1"`), so
-    // `SELECT 1.0 UNION SELECT 1` (MySQL: one row, `1.0`) came out as two —
     // MySQL reconciles every branch's column type across the whole UNION
-    // first and only *then* compares for DISTINCT. So this pass just
-    // concatenates every branch's raw rows plus an `(isAll, cumulative
-    // length)` boundary marker per branch, and the actual dedup runs after
-    // `reconciled`/`coerceColumn` below, replayed over those boundaries.
+    // first and only *then* compares for DISTINCT (`SELECT 1.0 UNION
+    // SELECT 1` is one row, `1.0` — a dedup keyed on each branch's own
+    // pre-reconciliation text, `"1.0"` vs `"1"`, would keep two). So this
+    // pass just concatenates every branch's raw rows plus an `(isAll,
+    // cumulative length)` boundary marker per branch, and the actual dedup
+    // runs after `reconciled`/`coerceColumn` below, replayed over those
+    // boundaries.
     let combine
         (acc: Result<string list * ((string option list) * Value[]) list * byte list list * Collation.Collation list * (bool * int) list, QueryResult>)
         (isAll: bool, select: SelectStmt)
@@ -2405,9 +2403,9 @@ and runUnionStmt
                     text, coerced)
 
             // Replays each branch's `isAll`/boundary from `combine` above,
-            // now keyed on the reconciled text/collation rather than each
+            // keyed on the reconciled text/collation rather than each
             // branch's own pre-reconciliation one — collation-aware, so
-            // åge/age still fold under the UNION's aggregated collation
+            // åge/age fold under the UNION's aggregated collation
             // (strictest branch wins — bin never folds).
             let dedupeKey (text: string option list) =
                 List.map2 (fun (col: Collation.Collation) (cell: string option) -> cell |> Option.map col.KeyOf) collations text
@@ -2434,9 +2432,7 @@ and runUnionStmt
             // The combined result's own synthetic columns (name + reconciled
             // wire type), so an `ORDER BY` expression beyond a bare output
             // column (`ORDER BY -v`, `ORDER BY UPPER(name)`, ...) can be
-            // evaluated for real against a row instead of `orderKeyOf`
-            // silently sorting as if no `ORDER BY` were given at all — the
-            // only case it used to handle was `Col name`.
+            // evaluated for real against a row.
             // Only `Name` matters here — `columnIndexOf` reads nothing else,
             // and `ctxForOrder`'s empty `Qualifiers` means the `Type`-aware
             // helpers (`resolvedCollation`/`enumOrdinalFor`) never look this
@@ -4488,15 +4484,13 @@ let execute (store: Store) (registry: Registry) (dbName: string) (ids: int64 * i
                                 let working = Array.copy flat
 
                                 // Claimed once per (srcIdx, physRow) *before*
-                                // the assignment loop below, not inside it —
-                                // checking `claims` on every single
-                                // assignment meant only that row's *first*
-                                // `SET` column for a given table ever landed
+                                // the assignment loop below, not inside it:
+                                // the claim must span the whole `SET` list
                                 // (`claims.Contains` flips true the moment
-                                // that first column claims the row, so every
-                                // later column in the same `SET` list for
-                                // the same table silently no-ops):
-                                // `SET t1.a = 10, t1.b = 20` dropped `b`.
+                                // the first column claims the row, so a
+                                // per-assignment check would drop every
+                                // later column for the same table, e.g. `b`
+                                // in `SET t1.a = 10, t1.b = 20`).
                                 let claimedThisRow =
                                     identities
                                     |> List.mapi (fun srcIdx identity ->

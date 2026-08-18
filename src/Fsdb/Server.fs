@@ -186,10 +186,10 @@ let private sendResult
                 else
                     // A row >= 16 MiB (an uncapped REPEAT, a large BLOB/TEXT
                     // selected back, ...) can't fit the inlined 3-byte
-                    // length header — that silently truncated the length
-                    // mod 2^24 and desynced the connection forever. Flush
-                    // whatever's batched so far to keep ordering, then route
-                    // this one row through the real multi-packet framing.
+                    // length header — the length would wrap mod 2^24 and
+                    // desync the connection. Flush whatever's batched so far
+                    // to keep ordering, then route this one row through the
+                    // real multi-packet framing.
                     do! flush ()
                     let! nextSeqId = writePacketAsync stream { SeqId = seqId; Payload = payload }
                     seqId <- nextSeqId
@@ -736,11 +736,8 @@ let private handleConnection
 
                                 return! loop session
                             | Some(Malformed _) ->
-                                // A recognized command byte with too short/
-                                // malformed a payload to parse — reply ERR
-                                // and keep the connection alive instead of
-                                // letting the decode exception escape and
-                                // drop the socket.
+                                // Reply ERR and keep the connection alive —
+                                // see `Malformed`'s doc.
                                 do!
                                     writePacketAsync
                                         stream

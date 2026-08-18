@@ -129,13 +129,11 @@ let tests =
 
           testCase "a transaction writing into a qualified other database holds THAT database's gate too, not just its own session database"
           <| fun _ ->
-              // The gate used to be keyed only on `session.Database`
-              // (`tx_db_x` here) — a qualified `INSERT INTO
-              // tx_db_y.t` wrote a database whose gate this transaction
-              // never held, so a concurrent autocommit writer to
-              // `tx_db_y` could race straight past it and land its own
-              // commit in the gap between this transaction's base-catalog
-              // read and its own COMMIT merge, losing one of the two rows
+              // A qualified `INSERT INTO tx_db_y.t` must take tx_db_y's
+              // gate, not only the session database's (`tx_db_x`) —
+              // otherwise a concurrent autocommit writer to `tx_db_y` can
+              // land its commit between this transaction's base-catalog
+              // read and its COMMIT merge, losing one of the two rows
               // (`Storage.mergeDatabaseSlot`'s "batch's table wins
               // outright" rule).
               let store = Fsdb.Storage.create ()

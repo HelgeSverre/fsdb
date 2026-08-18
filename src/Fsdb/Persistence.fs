@@ -107,9 +107,9 @@ let private flushToDisk (s: FileStream) : unit =
 /// Fsyncs `dir` itself so a rename into it (`File.Move .new -> snapshot.fsdb`)
 /// survives a crash — a file's own `flushToDisk` only guarantees the file's
 /// *bytes*, not that the directory entry pointing at its new name landed.
-/// POSIX-only, same as `fsync` above (no Windows guard — see the deferred
-/// finding); best-effort since a directory that fails to `open` here (e.g.
-/// already gone) isn't itself an unwritten row to lose sleep over.
+/// POSIX-only, same as `fsync` above (no Windows guard); best-effort since
+/// a directory that fails to `open` here (e.g. already gone) isn't itself
+/// an unwritten row to lose sleep over.
 [<DllImport("libc", SetLastError = true, EntryPoint = "open")>]
 extern int private posixOpen(string path, int flags)
 

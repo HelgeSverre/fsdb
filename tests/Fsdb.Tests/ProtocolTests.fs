@@ -147,6 +147,22 @@ let tests =
               Expect.equal (reader.ReadLenEncString ()) (Some "hi") "string value"
               Expect.equal (reader.ReadLenEncString ()) (Some "") "empty string"
 
+          testCase "binary resultset DATETIME round-trips microseconds through the 11-byte form"
+          <| fun _ ->
+              // A DATETIME value carrying microseconds must reach the wire as
+              // the 11-byte form, not silently collapse to the 7-byte
+              // (second-precision) form. Encode a one-column binary row, skip
+              // its header byte + 1-byte null bitmap, and decode the value.
+              let payload = binaryRowPayload [ TypeDateTime ] [ Some "2024-03-05 13:45:09.123456" ]
+              let r = Reader payload
+              r.ReadByte() |> ignore // 0x00 row header
+              r.ReadByte() |> ignore // null bitmap (1 column => 1 byte)
+
+              Expect.equal
+                  (readBinaryValue r TypeDateTime false)
+                  (VDateTime(DateTime(2024, 3, 5, 13, 45, 9).AddTicks 1234560L))
+                  "microseconds survive the binary resultset round-trip"
+
           testCase "binary DATE/DATETIME/TIME decode length variants, zero values, and integer signs"
           <| fun _ ->
               // DATE (len=4): year, month, day
@@ -214,8 +230,9 @@ let tests =
 
           testCase "binaryRowPayload writes the 11-byte DATETIME form when microseconds are non-zero"
           <| fun _ ->
-              // Protocol.fs used to always write length 7, silently dropping
-              // any sub-second precision a DATETIME(6)/TIMESTAMP(6) value had.
+              // Non-zero microseconds require the full 11-byte form — the
+              // compact 7-byte form silently drops the sub-second precision
+              // of a DATETIME(6)/TIMESTAMP(6) value.
               let payload = binaryRowPayload [ TypeDateTime ] [ Some "2024-03-05 13:45:09.123456" ]
               let r = Reader(payload)
               r.ReadBytes 2 |> ignore // row header byte + null bitmap

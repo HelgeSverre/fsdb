@@ -44,6 +44,23 @@ let tests =
                         (Some "2024-03-05 13:45:09")
                         "datetime"
 
+                testCase "VDateTime with a sub-second component renders 6 fractional digits"
+                <| fun _ ->
+                    // 1_234_560 ticks past the second = 123456 microseconds
+                    // (ticks are 100 ns). MySQL's DATETIME(6) keeps these and
+                    // renders exactly six digits.
+                    Expect.equal
+                        (toText (VDateTime(DateTime(2024, 3, 5, 13, 45, 9).AddTicks 1_234_560L)))
+                        (Some "2024-03-05 13:45:09.123456")
+                        "datetime with microseconds"
+
+                testCase "VDateTime with an exactly-half-second component pads to 6 digits"
+                <| fun _ ->
+                    Expect.equal
+                        (toText (VDateTime(DateTime(2024, 3, 5, 13, 45, 9, 500))))
+                        (Some "2024-03-05 13:45:09.500000")
+                        "datetime half-second pads trailing zeros like MySQL DATETIME(6)"
+
                 testCase "VJson renders the raw text unchanged"
                 <| fun _ -> Expect.equal (toText (VJson "{\"a\":1}")) (Some "{\"a\":1}") "json" ]
 
@@ -598,7 +615,18 @@ let tests =
 
                 testList
                     "Dates"
-                    [ testCase "TIMESTAMP coerces a date or string to a datetime"
+                    [ testCase "NOW truncates to whole seconds (MySQL NOW() has precision 0)"
+                      <| fun _ ->
+                          // `DateTime.Now` carries 100 ns ticks; MySQL's NOW()
+                          // has no fractional part, so NOW() must truncate at
+                          // the source or `toText` would render spurious
+                          // microseconds real MySQL never shows.
+                          match call "NOW" [] with
+                          | VDateTime dt ->
+                              Expect.equal (dt.Ticks % TimeSpan.TicksPerSecond) 0L "NOW() has no sub-second component"
+                          | other -> failtestf "expected VDateTime from NOW(), got %A" other
+
+                      testCase "TIMESTAMP coerces a date or string to a datetime"
                       <| fun _ ->
                           Expect.equal (call "TIMESTAMP" [ VDate(DateOnly(2024, 1, 1)) ]) (VDateTime(DateTime(2024, 1, 1, 0, 0, 0))) "date gains midnight"
                           Expect.equal (call "TIMESTAMP" [ VString "2024-03-05 13:45:09" ]) (VDateTime(DateTime(2024, 3, 5, 13, 45, 9))) "string parses"

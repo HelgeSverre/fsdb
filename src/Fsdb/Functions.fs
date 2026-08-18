@@ -79,9 +79,7 @@ let private anyNull (args: Value list) : bool =
 let private req (v: Value) : string = v |> toText |> Option.defaultValue ""
 
 /// `LENGTH` counts UTF-8 bytes (MySQL's `LENGTH` is a byte length, not a
-/// character count — that's `CHAR_LENGTH`), so the two aren't aliases of the
-/// same function despite `.NET string.Length` making them look
-/// interchangeable for ASCII-only test data. `VBytes`' own byte count is
+/// character count — that's `CHAR_LENGTH`). `VBytes`' own byte count is
 /// used directly rather than round-tripping through `toText` (which decodes
 /// raw bytes 1:1 as Latin-1 chars for display, and re-encoding *that* as
 /// UTF-8 would inflate any byte ≥ 0x80 to two bytes).
@@ -183,7 +181,15 @@ let private modFn: Scalar =
     | [ a; b ] -> modulo a b
     | _ -> VNull
 
-let private nowFn: Scalar = fun _ -> VDateTime DateTime.Now
+/// Drops the sub-second part of a `DateTime`. `DateTime.Now` carries 100 ns
+/// ticks, but MySQL's `NOW()`/`CURRENT_TIMESTAMP` default to precision 0 (no
+/// fraction); `Value.toText` renders any sub-second component, so the
+/// current-time sources have to truncate at the source or they'd show
+/// microseconds real MySQL never does.
+let truncateToSecond (dt: DateTime) : DateTime =
+    DateTime(dt.Ticks - dt.Ticks % TimeSpan.TicksPerSecond, dt.Kind)
+
+let private nowFn: Scalar = fun _ -> VDateTime(truncateToSecond DateTime.Now)
 
 // ---------------------------------------------------------------------------
 // JSON. `VJson`/`VString` both hold raw JSON text (a JSON column coerces to
@@ -1059,8 +1065,7 @@ let private resolveStart (len: int) (pos: int) : int option =
     if pos > 0 then Some(min (pos - 1) len)
     elif pos < 0 then
         // A negative position further back than the string is long has no
-        // valid start (MySQL: SUBSTRING('hello', -10) = ''), unlike clamping
-        // to 0 which would return the whole string instead.
+        // valid start (MySQL: SUBSTRING('hello', -10) = '').
         if len + pos < 0 then None else Some(len + pos)
     else None
 
@@ -1083,13 +1088,11 @@ let private substringFn: Scalar =
     | _ -> VNull
 
 /// Character-by-character substring search using the engine's default
-/// collation's `CharEquals` rather than `StringComparison.OrdinalIgnoreCase`
-/// — so accent/case sensitivity follows the collation (e.g. `_bin`/`_cs`
-/// don't fold, `_ai_ci` also ignores accents) instead of always being
-/// ordinal case-insensitive. Not per-column collation-aware (that needs the
-/// column's collation threaded through `Scalar`'s signature, which this
-/// engine doesn't do yet) — the shared default is still strictly more
-/// correct than a hardcoded ordinal fold.
+/// collation's `CharEquals`, so accent/case sensitivity follows the
+/// collation (e.g. `_bin`/`_cs` don't fold, `_ai_ci` also ignores accents).
+/// Not per-column collation-aware (that needs the column's collation
+/// threaded through `Scalar`'s signature, which this engine doesn't do
+/// yet).
 let private collationIndexOf (str: string) (sub: string) (startIdx: int) : int =
     if sub = "" then
         startIdx
@@ -1176,8 +1179,7 @@ let private rightFn: Scalar =
     | _ -> VNull
 
 /// MySQL's `max_allowed_packet` default/hard ceiling — `REPEAT`/`SPACE`
-/// return NULL rather than allocate past it, instead of an unbounded string
-/// for a runaway count.
+/// return NULL rather than allocate past it for a runaway count.
 let private maxAllowedPacket = 16 * 1024 * 1024
 
 let private repeatFn: Scalar =

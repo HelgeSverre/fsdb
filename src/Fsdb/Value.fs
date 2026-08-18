@@ -82,7 +82,19 @@ let toText (v: Value) : string option =
     | VString s -> Some s
     | VBytes b -> Some(Text.Encoding.Latin1.GetString b)
     | VDate d -> Some(d.ToString("yyyy-MM-dd", CultureInfo.InvariantCulture))
-    | VDateTime dt -> Some(dt.ToString("yyyy-MM-dd HH:mm:ss", CultureInfo.InvariantCulture))
+    | VDateTime dt ->
+        // Render sub-second precision (MySQL DATETIME(6)) as exactly six
+        // fractional digits when present, none when the value lands on a whole
+        // second. Ticks are 100 ns, so the sub-second remainder / 10 is
+        // microseconds. The binary protocol encoder keys off this rendering:
+        // it only emits its 11-byte, microsecond-bearing form when the
+        // rendered string carries the fraction.
+        // Current-time sources (`NOW()`, `DEFAULT CURRENT_TIMESTAMP`)
+        // truncate to whole seconds so they don't sprout a fraction MySQL's
+        // precision-0 NOW() never shows.
+        let micros = (dt.Ticks % TimeSpan.TicksPerSecond) / 10L
+        let baseStr = dt.ToString("yyyy-MM-dd HH:mm:ss", CultureInfo.InvariantCulture)
+        Some(if micros = 0L then baseStr else sprintf "%s.%06d" baseStr micros)
     | VJson j -> Some j
 
 /// A round-trippable tagged-text encoding of a `Value` — `ofWire (toWire v) = v`
@@ -366,10 +378,10 @@ let likeToRegexWith (escapeChar: char) (pattern: string) : string =
 
     while i < pattern.Length do
         match pattern.[i] with
-        // Escape-prefixed char matches literally, whatever it is — not just
-        // %/_. This also covers the escape char escaping itself (`\\` in
-        // the pattern means one literal backslash) and `\<ordinary char>`,
-        // both of which MySQL's LIKE also treats as that literal char.
+        // An escape-prefixed char matches literally, whatever it is. This
+        // covers the escape char escaping itself (`\\` in the pattern
+        // means one literal backslash) and `\<ordinary char>`, both of
+        // which MySQL's LIKE also treats as that literal char.
         | c when c = escapeChar && i + 1 < pattern.Length ->
             sb.Append(Regex.Escape(string pattern.[i + 1])) |> ignore
             i <- i + 2
@@ -454,8 +466,7 @@ let private arith
         // MySQL errors (1690) on int64 overflow rather than wrapping to a
         // bogus negative; there's no error channel to `Value` arithmetic
         // here, so the safe compat move is to promote to `decimal` (exact,
-        // just like MySQL's own DECIMAL fallback for oversized literals)
-        // instead of silently wrapping.
+        // just like MySQL's own DECIMAL fallback for oversized literals).
         try
             VInt(opInt x y)
         with :? OverflowException ->
