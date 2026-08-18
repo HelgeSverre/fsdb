@@ -2115,6 +2115,30 @@ let rec private cascadeUpdateVisited
     (oldRow: Value[])
     (newRow: Value[])
     : Result<Database * Map<string, Value[] list> * Map<string, (Value[] * Value[]) list>, StorageError> =
+    cascadeUpdateVisitedFrom checkFks db visited changes tableKey tableKey parentColumns oldRow newRow
+
+/// `cascadeUpdateVisited`'s actual body, with `rootKey` threaded through the
+/// recursion as the table `updateRows`/`upsertRowsInTable` is rewriting via
+/// their own in-progress `current`/`builder` array rather than through `db`.
+/// A cascade that loops back into `rootKey` — directly self-referencing or
+/// through any number of intermediate tables — has to be rejected the same
+/// way MySQL rejects it (1451/1048): a rewrite landing on `rootKey` here
+/// would go into the threaded `Database` copy, which the caller's own final
+/// `Map.add rootKey ...` then silently clobbers, corrupting referential
+/// integrity. `tableKey` (the *current* level) still names whose children
+/// `referencingForeignKeys` looks up; only the loop-back check compares
+/// against `rootKey`.
+and private cascadeUpdateVisitedFrom
+    (checkFks: bool)
+    (db: Database)
+    (visited: Map<string, Value[] list>)
+    (changes: Map<string, (Value[] * Value[]) list>)
+    (rootKey: string)
+    (tableKey: string)
+    (parentColumns: ColumnDef list)
+    (oldRow: Value[])
+    (newRow: Value[])
+    : Result<Database * Map<string, Value[] list> * Map<string, (Value[] * Value[]) list>, StorageError> =
     if not checkFks then
         Ok(db, visited, changes)
     else
@@ -2149,17 +2173,19 @@ let rec private cascadeUpdateVisited
 
                                 if matching.IsEmpty then
                                     Ok(d, visited, changes)
-                                // A self-referencing FK (`childKey = tableKey`) can't cascade
-                                // an update: the rewrite has to land in the same in-progress
+                                // A cascade looping back into `rootKey` — directly
+                                // self-referencing (`childKey = tableKey = rootKey`) or through
+                                // any chain of intermediate tables — can't cascade an update:
+                                // the rewrite has to land in the same in-progress
                                 // `current`/`builder` array the statement's own writes go
                                 // through, not a separate `Database` copy this recursion
                                 // threads back — writing there would be silently discarded by
                                 // the caller's own final `Map.add`, corrupting referential
                                 // integrity and desyncing the WAL from memory. MySQL 8.4
-                                // refuses the same case outright with 1451 (oracle-verified),
-                                // so this matches real behavior rather than merely avoiding
-                                // the bug.
-                                elif childKey = tableKey then
+                                // refuses the same case outright with 1451 (oracle-verified for
+                                // both the direct self-reference and a 2-table A<->B cycle), so
+                                // this matches real behavior rather than merely avoiding the bug.
+                                elif childKey = rootKey then
                                     Error(ForeignKeyRestrict fk.Name)
                                 else
                                     match fk.OnUpdate |> Option.map (fun s -> s.Trim().ToUpperInvariant()) with
@@ -2186,7 +2212,9 @@ let rec private cascadeUpdateVisited
                                         List.rev rowChanges
                                         |> List.fold
                                             (fun acc (oldC, newC) ->
-                                                acc |> Result.bind (fun (d, visited, changes) -> cascadeUpdateVisited checkFks d visited changes childKey childTbl.Columns oldC newC))
+                                                acc
+                                                |> Result.bind (fun (d, visited, changes) ->
+                                                    cascadeUpdateVisitedFrom checkFks d visited changes rootKey childKey childTbl.Columns oldC newC))
                                             (Ok(d', visited', changes'))
                                     | Some "SET NULL" ->
                                         match childIdxs |> List.tryFind (fun i -> not childTbl.Columns.[i].Nullable) with

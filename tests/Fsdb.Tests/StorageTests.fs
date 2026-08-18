@@ -1895,6 +1895,64 @@ let tests =
                                 [ [| VInt 1L; VNull |]; [| VInt 2L; VInt 1L |] ]
                                 "rejected before any row (self or child) was rewritten"
                         | Error e -> failtestf "expected Ok, got %A" e
+                    | other -> failtestf "expected ForeignKeyRestrict, got %A" other
+
+                testCase "a two-table ON UPDATE CASCADE cycle (A -> B -> A) fails 1451 instead of corrupting the root"
+                <| fun _ ->
+                    let store = create ()
+
+                    let fkAB =
+                        { Name = "fk_a_b"
+                          Columns = [ "bid" ]
+                          RefTable = "b"
+                          RefColumns = [ "id" ]
+                          OnDelete = None
+                          OnUpdate = Some "CASCADE" }
+
+                    let fkBA =
+                        { Name = "fk_b_a"
+                          Columns = [ "id" ]
+                          RefTable = "a"
+                          RefColumns = [ "id" ]
+                          OnDelete = None
+                          OnUpdate = Some "CASCADE" }
+
+                    (match createTable store defaultDatabase "b" [ idCol ] [] [] None None with
+                     | Ok _ -> ()
+                     | Error e -> failtestf "createTable b: %A" e)
+
+                    (match createTable store defaultDatabase "a" [ idCol; col "bid" (TInt false) true ] [] [ fkAB ] None None with
+                     | Ok _ -> ()
+                     | Error e -> failtestf "createTable a: %A" e)
+                    // `b.id` also references `a.id`, closing the cycle A -> B -> A.
+                    (match alterTable store defaultDatabase "b" [ AddForeignKey fkBA ] with
+                     | Ok _ -> ()
+                     | Error e -> failtestf "alterTable b: %A" e)
+
+                    // Both FKs are now live, so seed with the FK checks disabled — plain
+                    // insertion order can't satisfy `a.bid -> b.id` and `b.id -> a.id`
+                    // simultaneously, same as MySQL needs `FOREIGN_KEY_CHECKS=0` here.
+                    store.ForeignKeyChecks <- false
+
+                    (match insertRows store defaultDatabase "b" None [ [ VInt 1L ] ] with
+                     | Ok _ -> ()
+                     | Error e -> failtestf "insert b: %A" e)
+
+                    (match insertRows store defaultDatabase "a" None [ [ VInt 1L; VInt 1L ] ] with
+                     | Ok _ -> ()
+                     | Error e -> failtestf "insert a: %A" e)
+
+                    store.ForeignKeyChecks <- true
+
+                    let updater (row: Value[]) = Ok [| VInt 100L; row.[1] |]
+
+                    match updateRows store defaultDatabase "a" None (fun _ -> Ok true) updater with
+                    | Error(ForeignKeyRestrict _) ->
+                        match scan store defaultDatabase "a", scan store defaultDatabase "b" with
+                        | Ok(_, aRows), Ok(_, bRows) ->
+                            Expect.equal (List.ofSeq aRows) [ [| VInt 1L; VInt 1L |] ] "a untouched"
+                            Expect.equal (List.ofSeq bRows) [ [| VInt 1L |] ] "b untouched"
+                        | other -> failtestf "expected Ok scans, got %A" other
                     | other -> failtestf "expected ForeignKeyRestrict, got %A" other ]
 
           testList
