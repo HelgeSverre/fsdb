@@ -532,8 +532,11 @@ let rec requiredPrivileges (defaultDb: string) (stmt: Statement) : (string * Pri
             |> List.distinct
 
         onTables "INSERT" [ split table ] @ onTables "SELECT" readInExprs
-    | InsertSelect(table, _, select, _) ->
-        onTables "INSERT" [ split table ] @ onTables "SELECT" (selectTables defaultDb select)
+    | InsertSelect(table, _, select, onDup, _) ->
+        let readInExprs = onDup |> List.collect (snd >> exprReadTables defaultDb) |> List.distinct
+
+        onTables "INSERT" [ split table ]
+        @ onTables "SELECT" ((selectTables defaultDb select @ readInExprs) |> List.distinct)
     | Update u ->
         let readInExprs =
             (u.Assignments |> List.collect (fun a -> exprReadTables defaultDb a.Value))

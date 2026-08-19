@@ -963,6 +963,31 @@ let tests =
               | ResultSet(_, [ [ Some "6" ] ]) -> ()
               | other -> failtestf "expected LAST_INSERT_ID() to still be 6, unchanged by the all-explicit insert, got %A" other
 
+          testCase "LAST_INSERT_ID() after an INSERT ... SELECT upsert: set by the insert path, untouched by an update-only run"
+          <| fun _ ->
+              // MySQL 8.4.11 write probe (disposable server, 2026-08-19):
+              // after an INSERT...SELECT ODKU that inserted rows,
+              // LAST_INSERT_ID() = the first generated id; a later run that
+              // only updates leaves it unchanged.
+              let session = create 1 (Fsdb.Storage.create ())
+              let session, _ = handle session "CREATE TABLE src (k INT, v INT)"
+              let session, _ = handle session "INSERT INTO src VALUES (1, 10), (2, 20)"
+              let session, _ = handle session "CREATE TABLE dst (id INT AUTO_INCREMENT PRIMARY KEY, k INT UNIQUE, v INT)"
+
+              let session, _ =
+                  handle session "INSERT INTO dst (k, v) SELECT k, v FROM src ON DUPLICATE KEY UPDATE v = VALUES(v)"
+
+              match handle session "SELECT LAST_INSERT_ID()" |> snd with
+              | ResultSet(_, [ [ Some "1" ] ]) -> ()
+              | other -> failtestf "expected LAST_INSERT_ID() = 1 from the insert path, got %A" other
+
+              let session, _ =
+                  handle session "INSERT INTO dst (k, v) SELECT k, v + 100 FROM src ON DUPLICATE KEY UPDATE v = VALUES(v)"
+
+              match handle session "SELECT LAST_INSERT_ID()" |> snd with
+              | ResultSet(_, [ [ Some "1" ] ]) -> ()
+              | other -> failtestf "expected LAST_INSERT_ID() unchanged by the update-only run, got %A" other
+
           testCase "SHOW WARNINGS LIMIT n is accepted, matching the mysql CLI's/mysqli's routine probe"
           <| fun _ ->
               let session = create 1 (Fsdb.Storage.create ())

@@ -1537,13 +1537,14 @@ let private insertStmt: Parser<Statement, unit> =
               [ (keyword "VALUES" >>. sepBy1 (between (sym "(") (sym ")") (sepBy1 insertValue (sym ","))) (sym ",")
                  .>>. opt onDuplicateKeyUpdate)
                 |>> Choice1Of2
-                selectStmtRecord |>> Choice2Of2 ])
+                (selectStmtRecord .>>. opt onDuplicateKeyUpdate) |>> Choice2Of2 ])
     |>> fun (((ignoreDuplicates, table), cols), branch) ->
         let cols = cols |> Option.defaultValue []
 
         match branch with
         | Choice1Of2(rows, onDup) -> Insert(table, cols, rows, onDup |> Option.defaultValue [], ignoreDuplicates)
-        | Choice2Of2 select -> InsertSelect(table, cols, select, ignoreDuplicates)
+        | Choice2Of2(select, onDup) ->
+            InsertSelect(table, cols, select, onDup |> Option.defaultValue [], ignoreDuplicates)
 
 /// A projection's alias — `AS name`, or real MySQL's implicit form with no
 /// `AS` at all (`SELECT 1 x FROM t`, `SELECT price * qty total FROM

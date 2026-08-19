@@ -1840,7 +1840,60 @@ let tests =
 
                     match runDefault store "INSERT IGNORE INTO dst (id) SELECT id FROM src ORDER BY id" with
                     | Affected 1UL -> ()
-                    | other -> failtestf "expected only id=2 inserted (id=1 collides), got %A" other ]
+                    | other -> failtestf "expected only id=2 inserted (id=1 collides), got %A" other
+
+                // MySQL 8.4.11 write probe (disposable server, 2026-08-19):
+                // src = (1,10),(2,20),(1,30) into empty dst(k PK, v, n DEFAULT 0)
+                // with `v = VALUES(v), n = n + 1` → 4 affected (insert=1,
+                // update=2 per row; the third source row collides with the
+                // first's fresh insert), final v=30 (last dup wins), n=1.
+                // Second run → 6 affected (all three rows hit existing keys).
+                // A run whose updates change nothing counts 0 per row.
+                testCase "ON DUPLICATE KEY UPDATE on INSERT ... SELECT collapses dupes with MySQL's affected-row counts"
+                <| fun _ ->
+                    let store = newStore ()
+                    runDefault store "CREATE TABLE src (k INT, v INT)" |> ignore
+                    runDefault store "INSERT INTO src VALUES (1, 10), (2, 20), (1, 30)" |> ignore
+                    runDefault store "CREATE TABLE dst (k INT PRIMARY KEY, v INT, n INT DEFAULT 0)" |> ignore
+
+                    match runDefault store "INSERT INTO dst (k, v) SELECT k, v FROM src ON DUPLICATE KEY UPDATE v = VALUES(v), n = n + 1" with
+                    | Affected 4UL -> ()
+                    | other -> failtestf "expected 4 affected (2 inserts + 1 in-batch dup update), got %A" other
+
+                    match runDefault store "SELECT k, v, n FROM dst ORDER BY k" with
+                    | ResultSet(_, [ [ Some "1"; Some "30"; Some "1" ]; [ Some "2"; Some "20"; Some "0" ] ]) -> ()
+                    | other -> failtestf "expected last-dup-wins v and bumped n, got %A" other
+
+                    match runDefault store "INSERT INTO dst (k, v) SELECT k, v FROM src ON DUPLICATE KEY UPDATE v = VALUES(v), n = n + 1" with
+                    | Affected 6UL -> ()
+                    | other -> failtestf "expected 6 affected (3 changing updates x 2), got %A" other
+
+                testCase "an update that changes nothing counts 0, matching MySQL's no-op semantics"
+                <| fun _ ->
+                    let store = newStore ()
+                    runDefault store "CREATE TABLE src (k INT, v INT)" |> ignore
+                    runDefault store "INSERT INTO src VALUES (1, 10)" |> ignore
+                    runDefault store "CREATE TABLE dst (k INT PRIMARY KEY, v INT)" |> ignore
+                    runDefault store "INSERT INTO dst VALUES (1, 10)" |> ignore
+
+                    match runDefault store "INSERT INTO dst (k, v) SELECT k, v FROM src ON DUPLICATE KEY UPDATE v = VALUES(v)" with
+                    | Affected 0UL -> ()
+                    | other -> failtestf "expected a 0-affected no-op update, got %A" other
+
+                testCase "VALUES(col) resolves against the select-derived candidate row"
+                <| fun _ ->
+                    let store = newStore ()
+                    runDefault store "CREATE TABLE src (k INT, v INT)" |> ignore
+                    runDefault store "INSERT INTO src VALUES (1, 999)" |> ignore
+                    runDefault store "CREATE TABLE dst (k INT PRIMARY KEY, v INT)" |> ignore
+                    runDefault store "INSERT INTO dst VALUES (1, 10)" |> ignore
+
+                    runDefault store "INSERT INTO dst (k, v) SELECT k, v * 2 FROM src ON DUPLICATE KEY UPDATE v = VALUES(v)"
+                    |> ignore
+
+                    match runDefault store "SELECT v FROM dst WHERE k = 1" with
+                    | ResultSet(_, [ [ Some "1998" ] ]) -> ()
+                    | other -> failtestf "expected v replaced with the select's computed 1998, got %A" other ]
 
           testList
               "CAST and new column types"

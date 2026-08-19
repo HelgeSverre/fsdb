@@ -1063,6 +1063,7 @@ let tests =
                               Limit = None
                               Offset = None
                               Locking = false },
+                            [],
                             false
                         ))
                         "insert select"
@@ -1070,8 +1071,19 @@ let tests =
                 testCase "INSERT IGNORE INTO t SELECT ... sets the ignore flag"
                 <| fun _ ->
                     match parseOk "INSERT IGNORE INTO t SELECT * FROM u" with
-                    | InsertSelect("t", [], _, true) -> ()
-                    | other -> failtestf "expected an ignore-flagged InsertSelect, got %A" other ]
+                    | InsertSelect("t", [], _, [], true) -> ()
+                    | other -> failtestf "expected an ignore-flagged InsertSelect, got %A" other
+
+                testCase "INSERT ... SELECT carries a trailing ON DUPLICATE KEY UPDATE"
+                <| fun _ ->
+                    match parseOk "INSERT INTO t (a, b) SELECT x, y FROM u ON DUPLICATE KEY UPDATE b = VALUES(b), a = a + 1" with
+                    | InsertSelect(
+                        "t",
+                        [ "a"; "b" ],
+                        _,
+                        [ "b", FuncCall("VALUES", [ Col "b" ]); "a", BinOp(Add, Col "a", Lit(VInt 1L)) ],
+                        false) -> ()
+                    | other -> failtestf "expected an InsertSelect with the ODKU assignments, got %A" other ]
 
           testList
               "ROW_NUMBER() OVER (...)"

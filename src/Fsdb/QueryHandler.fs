@@ -800,7 +800,7 @@ let private targetDatabases (dbName: string) (stmt: Statement) : string list =
 
     match stmt with
     | Insert(table, _, _, _, _)
-    | InsertSelect(table, _, _, _) -> [ fst (splitQualified dbName table) ]
+    | InsertSelect(table, _, _, _, _) -> [ fst (splitQualified dbName table) ]
     | Update u -> tableRefDb u.From :: joinDbs u.Joins
     | Delete d -> tableRefDb d.From :: joinDbs d.Joins
     | _ -> [ dbName ]
@@ -1512,7 +1512,8 @@ let rec mapPlaceholders (replace: int -> Expr) (stmt: Statement) : Statement =
         Union(mapSelect first, rest |> List.map (fun (b, s) -> b, mapSelect s), List.map mapOrderKey orderBy, limit, offset)
     | Insert(table, columns, rows, onDup, ignore) ->
         Insert(table, columns, rows |> List.map (List.map mapExpr), onDup |> List.map (fun (c, e) -> c, mapExpr e), ignore)
-    | InsertSelect(table, columns, select, ignore) -> InsertSelect(table, columns, mapSelect select, ignore)
+    | InsertSelect(table, columns, select, onDup, ignore) ->
+        InsertSelect(table, columns, mapSelect select, onDup |> List.map (fun (c, e) -> c, mapExpr e), ignore)
     | Update u ->
         Update
             { u with

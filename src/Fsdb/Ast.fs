@@ -466,12 +466,20 @@ type Statement =
         rows: Expr list list *
         onDuplicateUpdate: (string * Expr) list *
         ignoreDuplicates: bool
-    /// `INSERT INTO t (cols) SELECT ...` — a separate case rather than
-    /// folding a `SelectStmt` into `Insert`'s `rows` shape, since the two
-    /// forms don't otherwise share anything (no `ON DUPLICATE KEY UPDATE`
-    /// support here yet: ponytail, add it if a migration needs it the way
-    /// plain `Insert` already does).
-    | InsertSelect of table: string * columns: string list * select: SelectStmt * ignoreDuplicates: bool
+    /// `INSERT INTO t (cols) SELECT ... [ON DUPLICATE KEY UPDATE ...]` — a
+    /// separate case rather than folding a `SelectStmt` into `Insert`'s
+    /// `rows` shape, since the row sources don't otherwise share anything.
+    /// `onDuplicateUpdate` mirrors `Insert`'s: `VALUES(col)` resolves
+    /// against the select-derived candidate row, bare column refs against
+    /// the stored row (ponytail: MySQL also allows `alias.col` refs into
+    /// the SELECT's own columns here — ledgered in known-gaps.json, add if
+    /// a migration needs them).
+    | InsertSelect of
+        table: string *
+        columns: string list *
+        select: SelectStmt *
+        onDuplicateUpdate: (string * Expr) list *
+        ignoreDuplicates: bool
     | Select of SelectStmt
     /// `select1 UNION [ALL|DISTINCT] select2 [UNION [ALL|DISTINCT] select3 ...]
     /// [ORDER BY ...] [LIMIT ...]` — `First`/`Rest` are the branches with

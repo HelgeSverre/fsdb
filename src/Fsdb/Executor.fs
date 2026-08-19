@@ -4948,7 +4948,7 @@ let rec private explainStatement (store: Store) (registry: Registry) (dbName: st
                     explainSelectBlock store dbName nextId acc sid (if isCorrelated sub then "DEPENDENT SUBQUERY" else "SUBQUERY") sub)
                 |> Result.map ignore)
         )
-    | InsertSelect(table, _, select, _) ->
+    | InsertSelect(table, _, select, _, _) ->
         let id = nextId ()
 
         finish (
@@ -5046,6 +5046,54 @@ let private rejectDirectOnlyGenerated (registry: Registry) (columns: Ast.ColumnD
     |> Option.map (fun col -> Err(3102, sprintf "Expression of generated column '%s' contains a disallowed function." col))
 
 let execute (store: Store) (registry: Registry) (dbName: string) (ids: int64 * int64) (foundRows: bool) (stmt: Statement) : (int64 * int64) * QueryResult =
+    /// The `ON DUPLICATE KEY UPDATE` evaluator shared by the `Insert` and
+    /// `InsertSelect` branches — builds `upsertRows`' update callback.
+    /// `existing` is the stored row that collided (bare column refs read
+    /// from it: `n = n + 1` increments the stored value, MySQL's probed
+    /// semantics), `candidate` is the row that would have been inserted,
+    /// which `VALUES(col)` rewrites resolve against — for `InsertSelect`
+    /// that's the select-derived row, so `VALUES(col)` is how the update
+    /// reaches the SELECT's values.
+    let onDuplicateUpdater
+        (table: string)
+        (tableColumns: ColumnDef list)
+        (columnIndex: Map<string, int list>)
+        (onDuplicateUpdate: (string * Expr) list)
+        (existing: Value[])
+        (candidate: Value[])
+        : Result<Value[], StorageError> =
+        let ctx = contextFactory store registry dbName columnIndex (singleQualifier table tableColumns) None existing
+
+        onDuplicateUpdate
+        |> traverse (fun (name, expr) ->
+            match resolveAssignableColumn tableColumns table name with
+            | Error e -> Error e
+            | Ok idx ->
+                match evalExpr ctx (substituteValuesFunc columnIndex candidate expr) with
+                | Ok v -> Ok(idx, v)
+                | Error err -> Error(ExpressionError err))
+        |> Result.map (fun idxVals ->
+            let newRow = Array.copy existing
+            for idx, v in idxVals do
+                newRow.[idx] <- v
+            let assignedIdxs = idxVals |> List.map fst |> Set.ofList
+            applyOnUpdateTimestamps tableColumns assignedIdxs existing newRow)
+
+    /// `INSERT ... ON DUPLICATE KEY UPDATE` for an already-evaluated batch
+    /// of rows — the tail both `Insert` and `InsertSelect` share once their
+    /// row sources have produced `rowsValues`.
+    let upsertEvaluated (db: string) (table: string) (cols: string list option) (rowsValues: Value list list) (onDuplicateUpdate: (string * Expr) list) =
+        match scan store db table with
+        | Error e -> ids, storageErr e
+        | Ok(tableColumns, _) ->
+            let columnIndex = columnIndexOf tableColumns
+            let applyUpdate = onDuplicateUpdater table tableColumns columnIndex onDuplicateUpdate
+            let computeGenerated = computeGeneratedRow store registry dbName table tableColumns
+
+            match upsertRows store db table cols rowsValues computeGenerated applyUpdate foundRows |> withGeneratedRecomputed store registry dbName db table with
+            | Ok(newLastId, newGenerated, affected) -> nextIds ids (newLastId, newGenerated), Affected(uint64 affected)
+            | Error e -> ids, storageErr e
+
     match stmt with
     | CreateDatabase(name, ifNotExists) ->
         match Storage.createDatabase store name with
@@ -5208,36 +5256,9 @@ let execute (store: Store) (registry: Registry) (dbName: string) (ids: int64 * i
                 | Ok(newLastId, newGenerated, affected) -> nextIds ids (newLastId, newGenerated), Affected(uint64 affected)
                 | Error e -> ids, storageErr e
             else
-                match scan store db table with
-                | Error e -> ids, storageErr e
-                | Ok(tableColumns, _) ->
-                    let columnIndex = columnIndexOf tableColumns
+                upsertEvaluated db table cols rowsValues onDuplicateUpdate
 
-                    let applyUpdate (existing: Value[]) (candidate: Value[]) : Result<Value[], StorageError> =
-                        let ctx = contextFactory store registry dbName columnIndex (singleQualifier table tableColumns) None existing
-
-                        onDuplicateUpdate
-                        |> traverse (fun (name, expr) ->
-                            match resolveAssignableColumn tableColumns table name with
-                            | Error e -> Error e
-                            | Ok idx ->
-                                match evalExpr ctx (substituteValuesFunc columnIndex candidate expr) with
-                                | Ok v -> Ok(idx, v)
-                                | Error err -> Error(ExpressionError err))
-                        |> Result.map (fun idxVals ->
-                            let newRow = Array.copy existing
-                            for idx, v in idxVals do
-                                newRow.[idx] <- v
-                            let assignedIdxs = idxVals |> List.map fst |> Set.ofList
-                            applyOnUpdateTimestamps tableColumns assignedIdxs existing newRow)
-
-                    let computeGenerated = computeGeneratedRow store registry dbName table tableColumns
-
-                    match upsertRows store db table cols rowsValues computeGenerated applyUpdate foundRows |> withGeneratedRecomputed store registry dbName db table with
-                    | Ok(newLastId, newGenerated, affected) -> nextIds ids (newLastId, newGenerated), Affected(uint64 affected)
-                    | Error e -> ids, storageErr e
-
-    | InsertSelect(table, columns, select, ignoreDuplicates) ->
+    | InsertSelect(table, columns, select, onDuplicateUpdate, ignoreDuplicates) ->
         let db, table = splitQualified dbName table
 
         let selectResult, _, _ = runSelectStmt store registry dbName select None
@@ -5254,11 +5275,15 @@ let execute (store: Store) (registry: Registry) (dbName: string) (ids: int64 * i
             // `Lit(VString ...)` would.
             let rowsValues = rows |> List.map (List.map (function Some s -> VString s | None -> VNull))
             let cols = if columns.IsEmpty then None else Some columns
-            let insert = if ignoreDuplicates then insertRowsIgnore else insertRows
 
-            match insert store db table cols rowsValues |> withGeneratedRecomputed store registry dbName db table with
-            | Ok(newLastId, newGenerated, affected) -> nextIds ids (newLastId, newGenerated), Affected(uint64 affected)
-            | Error e -> ids, storageErr e
+            if onDuplicateUpdate.IsEmpty then
+                let insert = if ignoreDuplicates then insertRowsIgnore else insertRows
+
+                match insert store db table cols rowsValues |> withGeneratedRecomputed store registry dbName db table with
+                | Ok(newLastId, newGenerated, affected) -> nextIds ids (newLastId, newGenerated), Affected(uint64 affected)
+                | Error e -> ids, storageErr e
+            else
+                upsertEvaluated db table cols rowsValues onDuplicateUpdate
 
     | Select select ->
         let result, _, _ = runSelectStmt store registry dbName select None
