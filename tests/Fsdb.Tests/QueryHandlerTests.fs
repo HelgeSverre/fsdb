@@ -1551,6 +1551,30 @@ let tests =
                   Expect.equal ctx (db + "|" + (user.Split '@').[0]) "context Database/User match the SQL-visible session"
               | other -> failtestf "expected one row, got %A" other
 
+          testCase "a bare ? over COM_QUERY, incl. in a DDL generated column, is a 1064 (never reaches storage)"
+          <| fun _ ->
+              let session = create 991001 (Fsdb.Storage.create ())
+
+              match handle session "SELECT ?" |> snd with
+              | Err(1064, _) -> ()
+              | other -> failtestf "expected 1064 for a bare ?, got %A" other
+
+              // The crash vector: a placeholder in a generated-column DDL
+              // expression must not survive into Storage/Persistence.
+              match handle session "CREATE TABLE t (a INT, b INT AS (?))" |> snd with
+              | Err(1064, _) -> ()
+              | other -> failtestf "expected 1064 for a DDL placeholder, got %A" other
+
+              match handle session "SHOW TABLES FROM d WHERE Tables_in_d = ?" |> snd with
+              | Err(1064, _) -> ()
+              | other -> failtestf "expected 1064 for a probe placeholder, got %A" other
+
+          testCase "prepareStatement rejects a placeholder the binder can't reach (DDL generated column)"
+          <| fun _ ->
+              match prepareStatement "CREATE TABLE t (a INT, b INT AS (?))" with
+              | Result.Error(1064, _) -> ()
+              | other -> failtestf "expected a 1064 prepare error, got %A" other
+
           testCase "redactSql hides credential statements and string/number literals"
           <| fun _ ->
               Expect.equal

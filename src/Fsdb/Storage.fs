@@ -1615,16 +1615,20 @@ let private checkFkParent (db: Database) (childColumns: ColumnDef list) (row: Va
                 | Error _ -> Ok()
                 | Ok refIdxs ->
                     // The hash-index fast path when the parent's referenced
-                    // key is itself PK/UNIQUE (always true for a real FK) —
-                    // `values` is already in `refIdxs`' own order, so
-                    // encoding it at positions `[0 .. n-1]` reproduces
-                    // exactly the key `parentUniqueIndex` stored it under.
-                    // Falls back to the full scan only for stale/malformed
-                    // FK metadata that doesn't resolve to a real unique
-                    // group.
+                    // key is itself PK/UNIQUE (always true for a real FK).
+                    // `parentUniqueIndex` is keyed by `encodeConstraintKey`
+                    // over full parent rows at the columns' *absolute*
+                    // positions, so the compact `values` have to sit at
+                    // `refIdxs` of a full-width probe row — encoding a bare
+                    // `[| values |]` throws for any referenced key column past
+                    // position 0. Falls back to the full scan only for
+                    // stale/malformed FK metadata.
                     let found =
                         match parentUniqueIndex parent refIdxs with
-                        | Some index -> encodeConstraintKey parent.Columns refIdxs (Array.ofList values) |> Option.map index.ContainsKey |> Option.defaultValue false
+                        | Some index ->
+                            let probeRow = Array.create (List.length parent.Columns) VNull
+                            List.iter2 (fun i v -> probeRow.[i] <- v) refIdxs values
+                            encodeConstraintKey parent.Columns refIdxs probeRow |> Option.map index.ContainsKey |> Option.defaultValue false
                         | None -> parent.RowsArray |> Seq.exists (fun prow -> List.forall2 (fun i v -> compare prow.[i] v = 0) refIdxs values)
 
                     if found then Ok() else Error(ForeignKeyParentMissing fk.Name)

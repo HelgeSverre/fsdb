@@ -24,6 +24,16 @@ type QueryResult =
 /// into `Err` the same way.
 type private EvalError = int * string
 
+/// Per-statement memo of derived-table (`FROM (SELECT ...)`) resolutions,
+/// keyed by the AST node's identity. Within one statement the same derived
+/// table is resolved by the executor *and* by the collation/fsp metadata
+/// helpers, and a nested derived table would otherwise run once per level
+/// per caller — 3^depth executions. Derived tables are uncorrelated, so the
+/// result is stable across those calls; reset per `execute` so it never
+/// carries across statements (the store changes between them).
+let private fromSubqueryMemo =
+    System.Threading.AsyncLocal<Dictionary<FromItem, Result<ColumnDef list * Value[] list, QueryResult>>>()
+
 let private unknownColumn (name: string) : EvalError =
     1054, sprintf "Unknown column '%s' in 'field list'" name
 
@@ -404,19 +414,73 @@ let private boolToValue (b: bool) : Value = VInt(if b then 1L else 0L)
 /// (default backslash, as the parser leaves it unresolved in the pattern)
 /// un-wildcards the character after it. `LIKE BINARY` (caseSensitive)
 /// compares characters byte-for-byte.
+/// Iterative glob matcher (two pointers with `%`-backtracking) — O(1) stack,
+/// so a pattern with thousands of `%` or a long subject can't overflow it
+/// the way a recursive matcher would. `escape` before a `%`/`_` makes it a
+/// literal; `charEq` folds per the collation.
 let private likeMatch (escape: char) (charEq: char -> char -> bool) (subject: string) (pattern: string) : bool =
-    let rec walk (si: int) (pi: int) : bool =
-        if pi >= pattern.Length then
-            si >= subject.Length
-        else
-            match pattern.[pi] with
-            | c when c = escape && pi + 1 < pattern.Length && (pattern.[pi + 1] = '%' || pattern.[pi + 1] = '_') ->
-                si < subject.Length && charEq subject.[si] pattern.[pi + 1] && walk (si + 1) (pi + 2)
-            | '%' -> walk si (pi + 1) || (si < subject.Length && walk (si + 1) pi)
-            | '_' -> si < subject.Length && walk (si + 1) (pi + 1)
-            | p -> si < subject.Length && charEq subject.[si] p && walk (si + 1) (pi + 1)
+    let slen, plen = subject.Length, pattern.Length
+    let mutable si, pi = 0, 0
+    // The last `%` position and the subject index to resume from if the
+    // tail fails — the one backtrack point a glob match needs.
+    let mutable star = -1
+    let mutable mark = 0
 
-    walk 0 0
+    // Whether pattern[pi] is an escaped literal `%`/`_`, and the char it
+    // stands for.
+    let escapedLiteralAt (p: int) =
+        if p < plen && pattern.[p] = escape && p + 1 < plen && (pattern.[p + 1] = '%' || pattern.[p + 1] = '_') then
+            Some pattern.[p + 1]
+        else
+            None
+
+    let mutable result = ValueNone
+
+    while result.IsNone do
+        if pi >= plen then
+            // Pattern consumed: match iff the subject is too, else backtrack
+            // to the last `%` if there was one.
+            if si >= slen then result <- ValueSome true
+            elif star >= 0 then
+                pi <- star + 1
+                mark <- mark + 1
+                si <- mark
+            else
+                result <- ValueSome false
+        else
+            match escapedLiteralAt pi with
+            | Some lit ->
+                if si < slen && charEq subject.[si] lit then
+                    si <- si + 1
+                    pi <- pi + 2
+                elif star >= 0 then
+                    pi <- star + 1
+                    mark <- mark + 1
+                    si <- mark
+                else
+                    result <- ValueSome false
+            | None ->
+                match pattern.[pi] with
+                | '%' ->
+                    star <- pi
+                    mark <- si
+                    pi <- pi + 1
+                | '_' when si < slen ->
+                    si <- si + 1
+                    pi <- pi + 1
+                | p when si < slen && p <> '%' && p <> '_' && charEq subject.[si] p ->
+                    si <- si + 1
+                    pi <- pi + 1
+                | _ ->
+                    // Mismatch (or `_`/literal past the subject): backtrack.
+                    if star >= 0 then
+                        pi <- star + 1
+                        mark <- mark + 1
+                        si <- mark
+                    else
+                        result <- ValueSome false
+
+    result |> ValueOption.defaultValue false
 
 let private likeOp (coll: Collation.Collation option) (caseSensitive: bool) (escape: char option) (subject: Value) (pattern: Value) : Value =
     match subject, pattern with
@@ -1761,6 +1825,21 @@ and private selectColumnFsps
 and private resolveFromItem (store: Store) (registry: Registry) (dbName: string) (item: FromItem) : Result<ColumnDef list * Value[] list, QueryResult> =
     match item with
     | FromTable tableRef -> resolveTableRef store dbName tableRef
+    | FromSubquery _ ->
+        // Serve a derived table from the per-statement memo if already
+        // resolved (see `fromSubqueryMemo`), else compute and record it.
+        let memo = fromSubqueryMemo.Value
+
+        match (if isNull (box memo) then None else (match memo.TryGetValue item with | true, v -> Some v | _ -> None)) with
+        | Some cached -> cached
+        | None ->
+            let computed = resolveFromSubquery store registry dbName item
+            if not (isNull (box memo)) then memo.[item] <- computed
+            computed
+
+and private resolveFromSubquery (store: Store) (registry: Registry) (dbName: string) (item: FromItem) : Result<ColumnDef list * Value[] list, QueryResult> =
+    match item with
+    | FromTable _ -> resolveFromItem store registry dbName item
     | FromSubquery(body, _alias) ->
         let result, _, typedRows =
             match body with
@@ -2767,7 +2846,11 @@ and runUnionStmt
 
             let scales =
                 cols
-                |> List.mapi (fun i _ -> allPaired |> List.map (fun (_, typed) -> decimalScale typed.[i]) |> List.max)
+                // `List.fold max 0`, not `List.max`: an all-empty union
+                // (`SELECT 1 WHERE FALSE UNION SELECT 2 WHERE FALSE`) has no
+                // rows to take a scale from, and `List.max` throws on the
+                // empty list — a scale of 0 is correct there.
+                |> List.mapi (fun i _ -> allPaired |> List.fold (fun acc (_, typed) -> max acc (decimalScale typed.[i])) 0)
 
             let coerceColumn (i: int) (v: Value) : Value =
                 let coerced = coerceUnionValue reconciled.[i] v
@@ -5054,6 +5137,9 @@ let private rejectDirectOnlyGenerated (registry: Registry) (columns: Ast.ColumnD
     |> Option.map (fun col -> Err(3102, sprintf "Expression of generated column '%s' contains a disallowed function." col))
 
 let execute (store: Store) (registry: Registry) (dbName: string) (ids: int64 * int64) (foundRows: bool) (stmt: Statement) : (int64 * int64) * QueryResult =
+    // Fresh derived-table memo per statement (see `fromSubqueryMemo`).
+    fromSubqueryMemo.Value <- Dictionary<FromItem, Result<ColumnDef list * Value[] list, QueryResult>>(HashIdentity.Reference)
+
     /// The `ON DUPLICATE KEY UPDATE` evaluator shared by the `Insert` and
     /// `InsertSelect` branches — builds `upsertRows`' update callback.
     /// `existing` is the stored row that collided (bare column refs read

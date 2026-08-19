@@ -4733,4 +4733,55 @@ let tests =
                 <| fun _ ->
                     match runDefault (newStore ()) "SELECT FROM_UNIXTIME(1000000000000000000)" with
                     | ResultSet(_, [ [ None ] ]) -> ()
-                    | other -> failtestf "expected NULL, got %A" other ] ]
+                    | other -> failtestf "expected NULL, got %A" other ]
+
+          testList
+              "resource-exhaustion guards"
+              [ testCase "LIKE with thousands of wildcards returns without a stack overflow"
+                <| fun _ ->
+                    let store = newStore ()
+                    let pat = String.replicate 20000 "%"
+
+                    match runDefault store (sprintf "SELECT 'abc' LIKE '%s' AS m" pat) with
+                    | ResultSet(_, [ [ Some "1" ] ]) -> ()
+                    | other -> failtestf "expected a match without crashing, got %A" other
+
+                testCase "LIKE over a long subject with a leading wildcard does not overflow"
+                <| fun _ ->
+                    let store = newStore ()
+                    let subj = String.replicate 50000 "a" + "z"
+
+                    match runDefault store (sprintf "SELECT '%s' LIKE '%%z' AS m" subj) with
+                    | ResultSet(_, [ [ Some "1" ] ]) -> ()
+                    | other -> failtestf "expected a tail match, got %A" other
+
+                testCase "an all-empty UNION returns an empty set, not an internal error"
+                <| fun _ ->
+                    match runDefault (newStore ()) "SELECT 1 WHERE FALSE UNION SELECT 2 WHERE FALSE" with
+                    | ResultSet(_, []) -> ()
+                    | other -> failtestf "expected an empty resultset, got %A" other
+
+                testCase "a point lookup on a UNIQUE column that isn't column 0 doesn't throw"
+                <| fun _ ->
+                    let store = newStore ()
+                    runDefault store "CREATE TABLE t (id INT PRIMARY KEY, email VARCHAR(255) UNIQUE)" |> ignore
+                    runDefault store "INSERT INTO t VALUES (1, 'a@b.com')" |> ignore
+
+                    match runDefault store "SELECT id FROM t WHERE email = 'a@b.com'" with
+                    | ResultSet(_, [ [ Some "1" ] ]) -> ()
+                    | other -> failtestf "expected the row via the unique index, got %A" other
+
+                testCase "an FK whose parent key isn't column 0 validates without throwing"
+                <| fun _ ->
+                    let store = newStore ()
+                    runDefault store "CREATE TABLE p (name VARCHAR(50), code INT UNIQUE)" |> ignore
+                    runDefault store "INSERT INTO p VALUES ('x', 5)" |> ignore
+                    runDefault store "CREATE TABLE c (id INT PRIMARY KEY, pcode INT, CONSTRAINT fk FOREIGN KEY (pcode) REFERENCES p (code))" |> ignore
+
+                    match runDefault store "INSERT INTO c VALUES (1, 5)" with
+                    | Affected 1UL -> ()
+                    | other -> failtestf "expected the child insert to satisfy the FK, got %A" other
+
+                    match runDefault store "INSERT INTO c VALUES (2, 999)" with
+                    | Err(1452, _) -> ()
+                    | other -> failtestf "expected 1452 for a missing parent key, got %A" other ] ]

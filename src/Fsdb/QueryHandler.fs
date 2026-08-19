@@ -1596,7 +1596,19 @@ let prepareStatement (sql: string) : Result<Statement option * int, int * string
         match Parser.parse sql with
         | Result.Ok stmt ->
             let renumbered, count = renumberPlaceholders stmt
-            Result.Ok(Some renumbered, count)
+
+            // A `?` the AST binder can't reach — e.g. in a generated-column
+            // DDL expression, which `bindPlaceholders` leaves untouched —
+            // shows up in the source text but not the renumbered count. It
+            // would survive unbound into execution (and `FailFast` a
+            // --data-dir server via `Persistence.encodeExpr`), so reject the
+            // prepare as a 1064, same as the COM_QUERY guard in `dispatch`.
+            if (placeholderPositions sql |> List.length) <> count then
+                match syntaxError sql with
+                | Err(code, msg) -> Result.Error(code, msg)
+                | _ -> Result.Error(1064, "syntax error")
+            else
+                Result.Ok(Some renumbered, count)
         | Result.Error _ ->
             match syntaxError sql with
             | Err(code, msg) -> Result.Error(code, msg)
@@ -1618,6 +1630,13 @@ let private dispatch (session: Session) (rawSql: string) : Session * QueryResult
     // not a syntax error.
     if Parser.isBlank sql then
         session, Affected 0UL
+    elif not (placeholderPositions sql |> List.isEmpty) then
+        // A `?` outside a string/comment is a bind parameter, only legal via
+        // COM_STMT_PREPARE — over COM_QUERY it's a 1064 in MySQL. Rejecting
+        // here also stops a `?` in a spot the prepared binder never reaches
+        // (a generated-column DDL expression) from surviving unbound into
+        // Storage/Persistence, where it would `FailFast` a --data-dir server.
+        session, syntaxError sql
     else
         let upper = sql.ToUpperInvariant()
 

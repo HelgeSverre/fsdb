@@ -394,7 +394,15 @@ let private parseJsonPathRaw (path: string) : JPath list option =
 /// `GetOrAdd` race just re-parses harmlessly.
 let private parseJsonPath : string -> JPath list option =
     let cache = System.Collections.Concurrent.ConcurrentDictionary<string, JPath list option>()
-    fun path -> cache.GetOrAdd(path, parseJsonPathRaw)
+    // Path strings are attacker-controlled, so the cache is bounded: a flood
+    // of distinct paths clears it rather than growing memory without limit.
+    // Real workloads reuse a handful of literal paths and stay well under
+    // the cap, keeping the memoization.
+    let maxEntries = 4096
+
+    fun path ->
+        if cache.Count > maxEntries then cache.Clear()
+        cache.GetOrAdd(path, parseJsonPathRaw)
 
 /// MySQL's negative-counts-from-the-end array index (`$[-1]` is the last
 /// element), bounds-checked against `a`'s actual length.
