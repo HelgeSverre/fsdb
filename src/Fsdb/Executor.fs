@@ -1503,14 +1503,18 @@ and private resolveTableRef (store: Store) (dbName: string) (tableRef: TableRef)
 /// Pre-filters an `information_schema` scan by the WHERE's top-level
 /// `col = 'literal'` equality conjuncts (`TABLE_SCHEMA`/`TABLE_NAME` is what
 /// GUI clients send) — building every catalog row only for the executor to
-/// discard all but one table's was the `COLUMNS` hotspot. Pure narrowing:
-/// the full WHERE still runs over the result, so an equality this drops
-/// nothing for costs nothing. `None` when the FROM isn't information_schema
-/// or the WHERE has no usable conjunct (plain scan then).
+/// discard all but one table's was the `COLUMNS` hotspot. Conjuncts come
+/// from the same `pointLookupEqualities` the PK fast path uses (inheriting
+/// its correlated-qualifier guard); for the self-contained per-table views
+/// the catalog itself is narrowed before row construction, and every view's
+/// rows are post-filtered. Pure narrowing: the full WHERE still runs over
+/// the result. `None` when the FROM isn't information_schema or the WHERE
+/// has no usable conjunct (plain scan then).
 /// ponytail: the pre-filter compares OrdinalIgnoreCase where the WHERE
 /// proper compares ai_ci — an accented table name queried by its unaccented
 /// spelling would be over-filtered; GUI clients echo names the server gave
-/// them, so this stays until something real hits it.
+/// them, so this stays until something real hits it. Joined
+/// information_schema queries take the unnarrowed path.
 and private tryInformationSchemaNarrow
     (store: Store)
     (dbName: string)
@@ -1522,33 +1526,51 @@ and private tryInformationSchemaNarrow
     if not (System.String.Equals(tableDb, "information_schema", System.StringComparison.OrdinalIgnoreCase)) then
         None
     else
-        let rec eqConjuncts (e: Expr) : (string * string) list =
-            match e with
-            | BinOp(And, a, b) -> eqConjuncts a @ eqConjuncts b
-            | BinOp(Eq, Col c, Lit(VString v))
-            | BinOp(Eq, Lit(VString v), Col c)
-            | BinOp(Eq, QualifiedCol(_, c), Lit(VString v))
-            | BinOp(Eq, Lit(VString v), QualifiedCol(_, c)) -> [ c, v ]
-            | _ -> []
+        let eqI (a: string) (b: string) =
+            System.String.Equals(a, b, System.StringComparison.OrdinalIgnoreCase)
 
-        match where |> Option.map eqConjuncts |> Option.defaultValue [] with
+        match
+            pointLookupEqualities tableRef where
+            |> List.choose (function
+                | n, VString v -> Some(n, v)
+                | _ -> None)
+        with
         | [] -> None
         | eqs ->
-            InformationSchema.scan store.Catalog tableRef.Table
+            // The heavy per-table views derive each row from exactly one
+            // catalog table, so a TABLE_SCHEMA/TABLE_NAME equality can
+            // shrink the catalog before any row is built (cross-table views
+            // like KEY_COLUMN_USAGE only get the post-filter).
+            let eqFor col = eqs |> List.tryPick (fun (n, v) -> if eqI n col then Some v else None)
+
+            let selfContained =
+                match tableRef.Table.ToUpperInvariant() with
+                | "TABLES" | "COLUMNS" | "STATISTICS" | "PARTITIONS" -> true
+                | _ -> false
+
+            let catalog =
+                if selfContained then
+                    let bySchema =
+                        match eqFor "TABLE_SCHEMA" with
+                        | Some s -> store.Catalog |> Map.filter (fun db _ -> eqI db s)
+                        | None -> store.Catalog
+
+                    match eqFor "TABLE_NAME" with
+                    | Some t -> bySchema |> Map.map (fun _ db -> db |> Map.filter (fun _ tbl -> eqI tbl.OriginalName t))
+                    | None -> bySchema
+                else
+                    store.Catalog
+
+            InformationSchema.scan catalog tableRef.Table
             |> Option.map (fun (cols, rows) ->
                 let filters =
-                    eqs
-                    |> List.choose (fun (name, v) ->
-                        cols
-                        |> List.tryFindIndex (fun cd ->
-                            System.String.Equals(cd.Name, name, System.StringComparison.OrdinalIgnoreCase))
-                        |> Option.map (fun i -> i, v))
+                    eqs |> List.choose (fun (name, v) -> resolveColumn cols name |> Result.toOption |> Option.map (fun i -> i, v))
 
                 let keep (row: Value[]) =
                     filters
                     |> List.forall (fun (i, v) ->
                         match row.[i] with
-                        | VString s -> System.String.Equals(s, v, System.StringComparison.OrdinalIgnoreCase)
+                        | VString s -> eqI s v
                         | _ -> false)
 
                 cols, rows |> List.filter keep)
@@ -4730,13 +4752,10 @@ let execute (store: Store) (registry: Registry) (dbName: string) (ids: int64 * i
         | Error e -> ids, storageErr e
 
     | DropDatabase(name, ifExists) ->
-        if name.ToLowerInvariant() = "mysql" then
-            ids, Err(3552, "Access to system schema 'mysql' is rejected.")
-        else
-            match Storage.dropDatabase store name with
-            | Ok() -> ids, Affected 0UL
-            | Error(NoSuchDatabase _) when ifExists -> ids, Affected 0UL
-            | Error e -> ids, storageErr e
+        match Storage.dropDatabase store name with
+        | Ok() -> ids, Affected 0UL
+        | Error(NoSuchDatabase _) when ifExists -> ids, Affected 0UL
+        | Error e -> ids, storageErr e
 
     | AlterDatabase name ->
         // The charset/collate tail is parsed and discarded (see

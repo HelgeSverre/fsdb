@@ -1209,6 +1209,30 @@ let tests =
                   | None -> failtest "root vanished"
               | other -> failtestf "expected SET PASSWORD to succeed, got %A" other
 
+          testCase "SET PASSWORD is enforced: own password is free, someone else's needs CREATE USER"
+          <| fun _ ->
+              let store = Fsdb.Storage.create ()
+              let root = create 1 store
+              let root, _ = handle root "CREATE USER mallory"
+              let _root, _ = handle root "CREATE USER victim"
+
+              let mallory = { create 2 store with User = "mallory" }
+
+              match handle mallory "SET PASSWORD FOR victim = 'owned'" |> snd with
+              | Err(1227, _) -> ()
+              | other -> failtestf "expected changing another user's password to be 1227, got %A" other
+
+              match handle mallory "SET PASSWORD = 'mine'" |> snd with
+              | Affected 0UL ->
+                  match Fsdb.Auth.tryUserRow store "mallory" with
+                  | Some(cols, row) ->
+                      Expect.equal
+                          (Fsdb.Auth.storedPasswordHash cols row)
+                          (Fsdb.Auth.nativePasswordHash "mine")
+                          "own password change works without privileges"
+                  | None -> failtest "mallory vanished"
+              | other -> failtestf "expected own-password SET PASSWORD to succeed, got %A" other
+
           testCase "DROP DATABASE mysql is rejected with 3552 like a real system schema"
           <| fun _ ->
               let session = create 1 (Fsdb.Storage.create ())

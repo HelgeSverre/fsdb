@@ -28,6 +28,9 @@ exception LockWaitTimeout of dbName: string
 type StorageError =
     | NoSuchDatabase of name: string
     | DatabaseExists of name: string
+    /// Dropping a system schema (`mysql`) — MySQL's 3552. Guarded here at
+    /// the storage layer so every caller (executor, WAL replay) is covered.
+    | SystemSchemaAccess of schema: string
     | TableExists of name: string
     | NoSuchTable of name: string
     | UnknownColumn of name: string
@@ -69,6 +72,7 @@ type StorageError =
 let toMySqlError (err: StorageError) : int * string =
     match err with
     | NoSuchDatabase name -> 1049, sprintf "Unknown database '%s'" name
+    | SystemSchemaAccess schema -> 3552, sprintf "Access to system schema '%s' is rejected." schema
     | DatabaseExists name -> 1007, sprintf "Can't create database '%s'; database exists" name
     | TableExists name -> 1050, sprintf "Table '%s' already exists" name
     | NoSuchTable name -> 1146, sprintf "Table '%s' doesn't exist" name
@@ -514,11 +518,14 @@ let createDatabase (store: Store) (dbName: string) : Result<unit, StorageError> 
 /// `DROP DATABASE name` — same atomicity argument as `createDatabase`, via
 /// `ConcurrentDictionary.TryRemove`.
 let dropDatabase (store: Store) (dbName: string) : Result<unit, StorageError> =
-    match store.Databases.TryRemove dbName with
-    | true, _ ->
-        emit store (Some(SchemaChanged(dbName, DropDatabase(dbName, false))))
-        Ok()
-    | false, _ -> Error(NoSuchDatabase dbName)
+    if dbName.ToLowerInvariant() = "mysql" then
+        Error(SystemSchemaAccess "mysql")
+    else
+        match store.Databases.TryRemove dbName with
+        | true, _ ->
+            emit store (Some(SchemaChanged(dbName, DropDatabase(dbName, false))))
+            Ok()
+        | false, _ -> Error(NoSuchDatabase dbName)
 
 /// Applies `f` to `dbName`'s current table map and swaps the result into
 /// that database's own `Database ref` cell, under that cell's own lock (see

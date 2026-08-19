@@ -111,8 +111,14 @@ let staticPrivileges: PrivDef list =
       p "CREATE ROLE" "Create_role_priv" None None
       p "DROP ROLE" "Drop_role_priv" None None ]
 
+// Keyed once — `check` looks privileges up per required privilege on every
+// enforced statement.
+let private privBySqlMap = staticPrivileges |> List.map (fun d -> d.Sql, d) |> dict
+
 let private privBySql (sql: string) : PrivDef option =
-    staticPrivileges |> List.tryFind (fun d -> d.Sql = sql)
+    match privBySqlMap.TryGetValue sql with
+    | true, d -> Some d
+    | _ -> None
 
 // ---------------------------------------------------------------------------
 // Account mutations — all through `Storage`'s ordinary row functions so the
@@ -191,32 +197,24 @@ let private updateSystemRows
         | Ok n -> Ok n
         | Error e -> Error(toMySqlError e)
 
+/// A mysql.user row-matcher for one account name — the shape both
+/// `setPassword` and `applyAtLevel`'s global branch filter by.
+let private matchUserRow (name: string) (cols: ColumnDef list) (r: Value[]) =
+    match resolveColumn cols "User" with
+    | Ok i -> r.[i] = VString name
+    | Error _ -> false
+
 /// `ALTER USER ... IDENTIFIED BY 'pw'` / `SET PASSWORD [FOR user] = 'pw'` —
 /// rewrites the stored hash (empty password clears it back to
 /// accept-anything).
 let setPassword (store: Store) (name: string) (host: string) (password: string) : Result<unit, int * string> =
-    match tryUserRow store name with
-    | None -> operationFailed "ALTER USER" name host
-    | Some(cols, _) ->
-        match resolveColumn cols "User", resolveColumn cols "authentication_string" with
-        | Ok userIdx, Ok authIdx ->
-            let hash = if password = "" then "" else nativePasswordHash password
+    if (tryUserRow store name).IsNone then
+        operationFailed "ALTER USER" name host
+    else
+        let hash = if password = "" then "" else nativePasswordHash password
 
-            match
-                updateRows
-                    store
-                    "mysql"
-                    "user"
-                    None
-                    (fun r -> Ok(r.[userIdx] = VString name))
-                    (fun r ->
-                        let r' = Array.copy r
-                        r'.[authIdx] <- VString hash
-                        Ok r')
-            with
-            | Ok _ -> Ok()
-            | Error e -> Error(toMySqlError e)
-        | _ -> operationFailed "ALTER USER" name host
+        updateSystemRows store "user" (matchUserRow name) [ "authentication_string", VString hash ]
+        |> Result.map ignore
 
 // ---------------------------------------------------------------------------
 // GRANT / REVOKE and privilege checks. Scope hierarchy is MySQL's:
@@ -242,8 +240,9 @@ let targetOfLevel (defaultDb: string) (level: string option * string option) : P
 
 let private eqI (a: string) (b: string) = String.Equals(a, b, StringComparison.OrdinalIgnoreCase)
 
-/// Splits a `Table_priv`/`Column_priv` SET string into its members.
-let private setMembers (s: string) : string list =
+/// Splits a `Table_priv`/`Column_priv` SET string into its members — public
+/// because `InformationSchema.TABLE_PRIVILEGES` reads the same encoding.
+let setMembers (s: string) : string list =
     s.Split(',') |> Array.toList |> List.map (fun m -> m.Trim()) |> List.filter (fun m -> m <> "")
 
 /// Expands a GRANT/REVOKE privilege list for a target level: `ALL` becomes
@@ -284,18 +283,13 @@ let private applyAtLevel
     : Result<unit, int * string> =
     let yn = if granting then "Y" else "N"
 
+    let grantOptCol =
+        if withGrantOption then [ "Grant_priv", VString yn ] else []
+
     match target with
     | Global ->
-        let changes =
-            (defs |> List.map (fun d -> d.UserCol, VString yn))
-            @ (if withGrantOption then [ "Grant_priv", VString yn ] else [])
-
-        let matchUser (cols: ColumnDef list) (r: Value[]) =
-            match resolveColumn cols "User" with
-            | Result.Ok i -> r.[i] = VString name
-            | _ -> false
-
-        updateSystemRows store "user" matchUser changes |> Result.map ignore
+        let changes = (defs |> List.map (fun d -> d.UserCol, VString yn)) @ grantOptCol
+        updateSystemRows store "user" (matchUserRow name) changes |> Result.map ignore
     | OnDb db ->
         let matches (cols: ColumnDef list) (r: Value[]) =
             match resolveColumn cols "User", resolveColumn cols "Db" with
@@ -303,8 +297,7 @@ let private applyAtLevel
             | _ -> false
 
         let changes =
-            (defs |> List.choose (fun d -> d.DbCol |> Option.map (fun c -> c, VString yn)))
-            @ (if withGrantOption then [ "Grant_priv", VString yn ] else [])
+            (defs |> List.choose (fun d -> d.DbCol |> Option.map (fun c -> c, VString yn))) @ grantOptCol
 
         match updateSystemRows store "db" matches changes with
         | Result.Error e -> Result.Error e
@@ -508,6 +501,28 @@ let check (store: Store) (user: string) (required: (string * PrivTarget) list) :
     | [] -> Ok()
     | _ ->
         let userRow = tryUserRow store user
+
+        // Fast path: every requirement satisfied by the user's own global
+        // row — root's all-Y row is the overwhelming common case, and this
+        // runs per statement, so exit before any of the db/table lookup
+        // machinery below is even allocated.
+        let globallyHeld (privSql: string) =
+            match userRow with
+            | None -> false
+            | Some(cols, row) ->
+                let col =
+                    if privSql = "GRANT OPTION" then
+                        Some "Grant_priv"
+                    else
+                        privBySql privSql |> Option.map (fun d -> d.UserCol)
+
+                match col with
+                | Some c -> userColumnText cols row c = "Y"
+                | None -> true // unknown requirement — never deny on our own bug
+
+        if required |> List.forall (fst >> globallyHeld) then
+            Ok()
+        else
 
         let hasGlobal (def: PrivDef) =
             match userRow with

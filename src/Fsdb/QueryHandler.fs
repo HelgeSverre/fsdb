@@ -223,20 +223,27 @@ let private handleAtVarSelect (session: Session) (sql: string) : QueryResult =
     else
         syntaxError sql
 
+let private likeSuffix (sql: string) : string option =
+    let m = Regex.Match(sql, @"LIKE\s+'([^']*)'\s*$", RegexOptions.IgnoreCase)
+    if m.Success then Some m.Groups.[1].Value else None
+
+/// `WHERE Variable_name = '...'` — SHOW STATUS/VARIABLES' other filter form,
+/// folded into the same name-pattern the LIKE path uses (an exact name is a
+/// wildcard-free pattern).
+let private whereVariableName (sql: string) : string option =
+    let m =
+        Regex.Match(sql, @"WHERE\s+`?Variable_name`?\s*=\s*'([^']*)'\s*$", RegexOptions.IgnoreCase)
+
+    if m.Success then Some m.Groups.[1].Value else None
+
+let private statusFilter (sql: string) : string option =
+    likeSuffix sql |> Option.orElse (whereVariableName sql)
+
 /// `SHOW [SESSION|GLOBAL] VARIABLES [LIKE 'pattern']` — the GLOBAL form
 /// reads the store-wide space (defaults + `SET GLOBAL` overrides) instead of
 /// this session's values.
 let private handleShowVariables (session: Session) (isGlobal: bool) (sql: string) : QueryResult =
-    let pattern =
-        let m = Regex.Match(sql, @"LIKE\s+'([^']*)'", RegexOptions.IgnoreCase)
-
-        if m.Success then
-            Some m.Groups.[1].Value
-        else
-            let w =
-                Regex.Match(sql, @"WHERE\s+`?Variable_name`?\s*=\s*'([^']*)'\s*$", RegexOptions.IgnoreCase)
-
-            if w.Success then Some w.Groups.[1].Value else None
+    let pattern = statusFilter sql
 
     let matches (name: string) =
         match pattern with
@@ -268,22 +275,6 @@ let private handleShowVariables (session: Session) (isGlobal: bool) (sql: string
 // (colocated with its `information_schema`-view row-builders), reached via
 // `showResult` below.
 // ---------------------------------------------------------------------------
-
-let private likeSuffix (sql: string) : string option =
-    let m = Regex.Match(sql, @"LIKE\s+'([^']*)'\s*$", RegexOptions.IgnoreCase)
-    if m.Success then Some m.Groups.[1].Value else None
-
-/// `WHERE Variable_name = '...'` — SHOW STATUS/VARIABLES' other filter form,
-/// folded into the same name-pattern the LIKE path uses (an exact name is a
-/// wildcard-free pattern).
-let private whereVariableName (sql: string) : string option =
-    let m =
-        Regex.Match(sql, @"WHERE\s+`?Variable_name`?\s*=\s*'([^']*)'\s*$", RegexOptions.IgnoreCase)
-
-    if m.Success then Some m.Groups.[1].Value else None
-
-let private statusFilter (sql: string) : string option =
-    likeSuffix sql |> Option.orElse (whereVariableName sql)
 
 let private stripBackticks (s: string) = s.Trim().Trim('`')
 
@@ -707,6 +698,12 @@ let private setAutocommit =
 /// check, which would otherwise treat PASSWORD as a session variable. The
 /// optional user part captures everything before `=` (`'bob'@'%'`, `bob`);
 /// `runProbe` strips the quoting/host.
+/// The account name out of a probe-captured `'name'@'host'` / `name@host` /
+/// bare `name` reference — accounts match by name only (see `Auth`), so the
+/// host part is dropped along with any quoting.
+let private userNameOf (userRef: string) : string =
+    userRef.Split('@').[0].Trim().Trim([| '\''; '`'; '"' |])
+
 let private setPasswordRe =
     Regex(@"^SET\s+PASSWORD\s*(?:FOR\s+([^=\s]+)\s*)?=\s*'([^']*)'\s*;?$", RegexOptions.IgnoreCase)
 
@@ -1290,12 +1287,15 @@ let private runProbe (session: Session) (sql: string) (probe: Probe) : Session *
     | SetPassword(userOpt, password) ->
         // `FOR 'name'@'host'` — only the name matters (accounts are matched
         // by name, see `Auth`); no FOR clause means the session's own user.
-        let name =
-            match userOpt with
-            | Some u -> u.Split('@').[0].Trim().Trim([| '\''; '`'; '"' |])
-            | None -> session.User
+        let name = userOpt |> Option.map userNameOf |> Option.defaultValue session.User
+        let store = Session.currentStore session
 
-        match Auth.setPassword (Session.currentStore session) name "%" password with
+        // MySQL's rule: changing your own password is free, anyone else's
+        // needs CREATE USER — probes bypass `executeParsed`'s enforcement
+        // gate, so this one carries its own check.
+        let required = if name = session.User then [] else [ "CREATE USER", Auth.Global ]
+
+        match Auth.check store session.User required |> Result.bind (fun () -> Auth.setPassword store name "%" password) with
         | Ok() -> session, Affected 0UL
         | Error(code, msg) -> session, Err(code, msg)
     | SetVar -> handleSet session sql
@@ -1371,13 +1371,8 @@ let private runProbe (session: Session) (sql: string) (probe: Probe) : Session *
         let name =
             match userOpt with
             | None -> session.User
-            | Some u ->
-                let t = u.Trim()
-
-                if t.ToUpperInvariant().StartsWith "CURRENT_USER" then
-                    session.User
-                else
-                    t.Split('@').[0].Trim().Trim([| '\''; '`'; '"' |])
+            | Some u when u.Trim().ToUpperInvariant().StartsWith "CURRENT_USER" -> session.User
+            | Some u -> userNameOf u
 
         match Auth.renderGrants (Session.currentStore session) name with
         | Ok(header, lines) -> session, ResultSet([ header ], lines |> List.map (fun l -> [ Some l ]))

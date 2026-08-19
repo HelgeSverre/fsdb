@@ -1000,6 +1000,21 @@ let private generatedColumn: Parser<Expr * GeneratedKind, unit> =
     .>>. (opt ((keyword "VIRTUAL" >>% Virtual) <|> (keyword "STORED" >>% Stored))
           |>> Option.defaultValue Virtual)
 
+/// The charsets fsdb accepts in DDL (see `ColumnDef.Charset`'s doc for what
+/// each actually does at runtime), lowercased; anything else is a parse
+/// error. One validator shared by column mods and table options.
+let private knownCharset: Parser<string, unit> =
+    identOrString
+    >>= fun name ->
+        match name.ToLowerInvariant() with
+        | "utf8mb4"
+        | "utf8mb3"
+        | "utf8"
+        | "latin1"
+        | "ascii"
+        | "binary" as cs -> preturn cs
+        | _ -> fail (sprintf "Unknown character set: '%s'" name)
+
 let private colMod: Parser<ColMod, unit> =
     choice
         [ attempt (keyword "NOT" >>. keyword "NULL") >>% MNotNull
@@ -1015,17 +1030,7 @@ let private colMod: Parser<ColMod, unit> =
           )
           >>% MOnUpdateCurrentTimestamp
           keyword "COMMENT" >>. stringLit >>% MIgnored
-          attempt (keyword "CHARACTER" >>. keyword "SET" <|> keyword "CHARSET")
-          >>. identOrString
-          >>= fun name ->
-              match name.ToLowerInvariant() with
-              | "utf8mb4"
-              | "utf8mb3"
-              | "utf8"
-              | "latin1"
-              | "ascii"
-              | "binary" -> preturn (MCharset(name.ToLowerInvariant()))
-              | _ -> fail (sprintf "Unknown character set: '%s'" name)
+          attempt (keyword "CHARACTER" >>. keyword "SET" <|> keyword "CHARSET") >>. knownCharset |>> MCharset
           keyword "COLLATE"
           >>. identOrString
           >>= fun name ->
@@ -1199,28 +1204,13 @@ let private tableOption: Parser<TableOption, unit> =
           >>. opt (sym "=")
           >>. identOrString
           >>% TableOptionIgnored
-          attempt (keyword "DEFAULT" >>. (keyword "CHARSET" <|> (keyword "CHARACTER" >>. keyword "SET")))
+          attempt (
+              optional (keyword "DEFAULT")
+              >>. (keyword "CHARSET" <|> (keyword "CHARACTER" >>. keyword "SET"))
+          )
           >>. opt (sym "=")
-          >>. identOrString
-          >>= fun name ->
-              match name.ToLowerInvariant() with
-              | "utf8mb4"
-              | "utf8mb3"
-              | "utf8"
-              | "latin1"
-              | "ascii"
-              | "binary" -> preturn (TableCharset(name.ToLowerInvariant()))
-              | _ -> fail (sprintf "Unknown character set: '%s'" name)
-          keyword "CHARSET" >>. opt (sym "=") >>. identOrString
-          >>= fun name ->
-              match name.ToLowerInvariant() with
-              | "utf8mb4"
-              | "utf8mb3"
-              | "utf8"
-              | "latin1"
-              | "ascii"
-              | "binary" -> preturn (TableCharset(name.ToLowerInvariant()))
-              | _ -> fail (sprintf "Unknown character set: '%s'" name)
+          >>. knownCharset
+          |>> TableCharset
           keyword "COLLATE"
           >>. opt (sym "=")
           >>. identOrString
@@ -1234,11 +1224,12 @@ let private tableOptions: Parser<string option * string option * int64 option, u
     |>> fun opts ->
         opts
         |> List.fold
+            // A repeated option's last occurrence wins, same as MySQL.
             (fun (cs, col, seed) opt ->
                 match opt with
-                | TableCharset c -> Some c |> Option.orElse cs, col, seed
-                | TableCollate l -> cs, Some l |> Option.orElse col, seed
-                | TableAutoIncrement n -> cs, col, Some n |> Option.orElse seed
+                | TableCharset c -> Some c, col, seed
+                | TableCollate l -> cs, Some l, seed
+                | TableAutoIncrement n -> cs, col, Some n
                 | TableOptionIgnored -> cs, col, seed)
             (None, None, None)
 
@@ -1470,20 +1461,15 @@ let private insertValue: Parser<Expr, unit> =
     let cellEnd = followedBy (pchar ',' <|> pchar ')')
     let literal p = attempt (p .>> cellEnd |>> Lit)
 
-    let negated =
-        function
-        | VInt i -> VInt(-i)
-        | VDouble d -> VDouble(-d)
-        | VDecimal d -> VDecimal(-d)
-        | v -> v
-
     // Numbers/NULL before strings: dump cells are mostly numeric, and a
-    // failed string attempt is cheaper than a failed number parse.
+    // failed string attempt is cheaper than a failed number parse. The
+    // negative form desugars to the exact `0 - x` AST the grammar's unary
+    // minus produces, so both paths share one negation semantics.
     choice
         [ literal numberLit
           literal (keyword "NULL" >>% VNull)
           literal stringLit
-          literal (pchar '-' >>. ws >>. numberLit |>> negated)
+          attempt (pchar '-' >>. ws >>. numberLit .>> cellEnd |>> fun v -> BinOp(Sub, Lit(VInt 0L), Lit v))
           expr ]
 
 let private insertStmt: Parser<Statement, unit> =
@@ -1889,47 +1875,49 @@ let private alterUserStmt: Parser<Statement, unit> =
 // GRANT / REVOKE
 // ---------------------------------------------------------------------------
 
-/// One privilege name — multi-word forms tried longest-first so `CREATE
-/// TEMPORARY TABLES` never half-matches as `CREATE`. Normalized to the
-/// canonical uppercase spelling `Auth.staticPrivileges` uses.
+/// One privilege name, normalized to the canonical uppercase spelling
+/// `Auth.staticPrivileges` uses. Each name compiles to "match its words in
+/// order"; list order matters — multi-word forms come before their prefix
+/// word (`CREATE TEMPORARY TABLES` before `CREATE`) so nothing half-matches.
 let private privilegeName: Parser<string, unit> =
-    let kw2 a b result = attempt (keyword a >>. keyword b >>% result)
-    let kw3 a b c result = attempt (keyword a >>. keyword b >>. keyword c >>% result)
+    let ofName (name: string) : Parser<string, unit> =
+        attempt (name.Split ' ' |> Array.map keyword |> Array.reduce (>>.) >>% name)
 
-    choice
-        [ attempt (keyword "ALL" >>. optional (keyword "PRIVILEGES") >>% "ALL")
-          kw2 "GRANT" "OPTION" "GRANT OPTION"
-          kw3 "CREATE" "TEMPORARY" "TABLES" "CREATE TEMPORARY TABLES"
-          kw2 "CREATE" "VIEW" "CREATE VIEW"
-          kw2 "CREATE" "ROUTINE" "CREATE ROUTINE"
-          kw2 "CREATE" "USER" "CREATE USER"
-          kw2 "CREATE" "ROLE" "CREATE ROLE"
-          kw2 "CREATE" "TABLESPACE" "CREATE TABLESPACE"
-          keyword "CREATE" >>% "CREATE"
-          kw2 "ALTER" "ROUTINE" "ALTER ROUTINE"
-          keyword "ALTER" >>% "ALTER"
-          kw2 "SHOW" "DATABASES" "SHOW DATABASES"
-          kw2 "SHOW" "VIEW" "SHOW VIEW"
-          kw2 "DROP" "ROLE" "DROP ROLE"
-          keyword "DROP" >>% "DROP"
-          kw2 "LOCK" "TABLES" "LOCK TABLES"
-          kw2 "REPLICATION" "SLAVE" "REPLICATION SLAVE"
-          kw2 "REPLICATION" "CLIENT" "REPLICATION CLIENT"
-          keyword "SELECT" >>% "SELECT"
-          keyword "INSERT" >>% "INSERT"
-          keyword "UPDATE" >>% "UPDATE"
-          keyword "DELETE" >>% "DELETE"
-          keyword "RELOAD" >>% "RELOAD"
-          keyword "SHUTDOWN" >>% "SHUTDOWN"
-          keyword "PROCESS" >>% "PROCESS"
-          keyword "FILE" >>% "FILE"
-          keyword "REFERENCES" >>% "REFERENCES"
-          keyword "INDEX" >>% "INDEX"
-          keyword "SUPER" >>% "SUPER"
-          keyword "EXECUTE" >>% "EXECUTE"
-          keyword "EVENT" >>% "EVENT"
-          keyword "TRIGGER" >>% "TRIGGER"
-          keyword "USAGE" >>% "USAGE" ]
+    let names =
+        [ "GRANT OPTION"
+          "CREATE TEMPORARY TABLES"
+          "CREATE VIEW"
+          "CREATE ROUTINE"
+          "CREATE USER"
+          "CREATE ROLE"
+          "CREATE TABLESPACE"
+          "CREATE"
+          "ALTER ROUTINE"
+          "ALTER"
+          "SHOW DATABASES"
+          "SHOW VIEW"
+          "DROP ROLE"
+          "DROP"
+          "LOCK TABLES"
+          "REPLICATION SLAVE"
+          "REPLICATION CLIENT"
+          "SELECT"
+          "INSERT"
+          "UPDATE"
+          "DELETE"
+          "RELOAD"
+          "SHUTDOWN"
+          "PROCESS"
+          "FILE"
+          "REFERENCES"
+          "INDEX"
+          "SUPER"
+          "EXECUTE"
+          "EVENT"
+          "TRIGGER"
+          "USAGE" ]
+
+    choice ((attempt (keyword "ALL" >>. optional (keyword "PRIVILEGES") >>% "ALL")) :: (names |> List.map ofName))
 
 /// `ON *.* | db.* | db.tbl | tbl` — see `Ast.Grant`'s doc for the encoding.
 let private grantLevel: Parser<string option * string option, unit> =

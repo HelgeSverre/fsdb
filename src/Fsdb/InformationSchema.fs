@@ -980,7 +980,7 @@ let private mysqlTable (catalog: Catalog) (table: string) : Table option =
     Map.tryFind "mysql" catalog |> Option.bind (Map.tryFind table)
 
 let private colIdx (t: Table) (name: string) : int option =
-    t.Columns |> List.tryFindIndex (fun c -> String.Equals(c.Name, name, StringComparison.OrdinalIgnoreCase))
+    resolveColumn t.Columns name |> Result.toOption
 
 let private rowText (row: Value[]) (i: int) : string =
     match row.[i] with
@@ -1040,12 +1040,7 @@ let private tablePrivilegesRows (catalog: Catalog) : Value[] list =
         | Some u, Some h, Some d, Some tn, Some tp ->
             t.Rows
             |> List.collect (fun row ->
-                let members =
-                    (rowText row tp).Split(',')
-                    |> Array.map (fun m -> m.Trim())
-                    |> Array.filter (fun m -> m <> "")
-                    |> Array.toList
-
+                let members = Fsdb.Auth.setMembers (rowText row tp)
                 let hasMember s = members |> List.exists (fun m -> String.Equals(m, s, StringComparison.OrdinalIgnoreCase))
                 let grantee = sprintf "'%s'@'%s'" (rowText row u) (rowText row h)
                 let grantable = if hasMember "Grant" then "YES" else "NO"
@@ -1153,7 +1148,6 @@ let private selfColumnsRowsCached : Lazy<Value[] list> =
          |> List.collect (fun (name, cols) ->
              cols |> List.mapi (fun i c -> columnRowWith "select" "information_schema" name i "" c)))
 
-let private selfColumnsRows () : Value[] list = selfColumnsRowsCached.Value
 
 /// Resolves one `information_schema` table name (case-insensitive) to its
 /// columns and freshly-projected rows, or `None` if `name` isn't one of the
@@ -1165,7 +1159,7 @@ let scan (catalog: Catalog) (name: string) : (ColumnDef list * Value[] list) opt
     let rows =
         match upper with
         | "TABLES" -> Some(tablesRows catalog @ selfTablesRows ())
-        | "COLUMNS" -> Some(columnsRows catalog @ selfColumnsRows ())
+        | "COLUMNS" -> Some(columnsRows catalog @ selfColumnsRowsCached.Value)
         | "STATISTICS" -> Some(statisticsRows catalog)
         | "KEY_COLUMN_USAGE" -> Some(keyColumnUsageRows catalog)
         | "REFERENTIAL_CONSTRAINTS" -> Some(referentialConstraintsRows catalog)
