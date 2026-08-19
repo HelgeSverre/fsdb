@@ -953,23 +953,50 @@ let coerceValue (strict: bool) (col: ColumnDef) (v: Value) : Result<Value, Stora
         // cannot hold; everything narrower (`INT UNSIGNED`'s 4294967295 and
         // down) fits a signed 64-bit value exactly and stays `VInt`.
         //
-        // ponytail: MySQL range-checks an out-of-domain value here (1264 in
-        // strict mode, clamped otherwise) and this clamps unconditionally —
-        // the same "no range enforcement on integer columns" ceiling every
-        // other integer type above already has. Add the 1264 path for the
-        // whole integer family at once, not just this branch.
+        // MySQL range-checks the value: 1264 under STRICT_TRANS_TABLES,
+        // clamped to the domain's edge otherwise. `INSERT INTO t VALUES (-1)`
+        // into a BIGINT UNSIGNED must not silently store 0.
+        //
+        // ponytail: only this branch enforces its range — the signed integer
+        // types below still clamp unconditionally (inherited behaviour). Give
+        // the whole integer family one shared range check when that gap is
+        // addressed.
         | TBigInt true ->
-            let clamp (d: decimal) =
-                Ok(VUInt(uint64 (max 0m (min d (decimal UInt64.MaxValue)))))
+            // 1264 ("Out of range value"), MySQL's code for a value outside
+            // the column's numeric domain — not `fail`'s 1366, which is the
+            // *uncoercible* case (a non-numeric string).
+            let outOfRange () = Error(OutOfRangeForColumn col.Name)
+
+            let narrow (d: decimal) =
+                if d >= 0m && d <= decimal UInt64.MaxValue then
+                    Ok(VUInt(uint64 d))
+                elif strict then
+                    outOfRange ()
+                else
+                    Ok(VUInt(uint64 (max 0m (min d (decimal UInt64.MaxValue)))))
 
             match v with
             | VUInt u -> Ok(VUInt u)
-            | VInt i -> Ok(VUInt(uint64 (max 0L i)))
-            | VDouble d -> clamp (Math.Truncate(decimal (max 0.0 (min d 1.8446744073709552e19))))
-            | VDecimal d -> clamp (Math.Truncate d)
+            | VInt i -> narrow (decimal i)
+            | VDouble d ->
+                // `decimal d` itself overflows outside ±7.9e28, so the range
+                // verdict comes from the `double` before any conversion.
+                if d >= 0.0 && d < 1.8446744073709552e19 then
+                    narrow (Math.Truncate(decimal d))
+                elif strict then
+                    outOfRange ()
+                else
+                    Ok(VUInt(if d < 0.0 then 0UL else UInt64.MaxValue))
+            | VDecimal d -> narrow (Math.Truncate d)
             | VString s ->
                 match parseNumeric s with
-                | Some d -> clamp (Math.Truncate(decimal d))
+                | Some d ->
+                    if d >= 0.0 && d < 1.8446744073709552e19 then
+                        narrow (Math.Truncate(decimal d))
+                    elif strict then
+                        outOfRange ()
+                    else
+                        Ok(VUInt(if d < 0.0 then 0UL else UInt64.MaxValue))
                 | None -> numericFallback (fun () -> VUInt 0UL)
             | _ -> numericFallback (fun () -> VUInt 0UL)
         | TInt _
@@ -1028,8 +1055,14 @@ let coerceValue (strict: bool) (col: ColumnDef) (v: Value) : Result<Value, Stora
         | TTinyText
         | TText
         | TMediumText
-        | TLongText
-        | TJson -> charsetChecked (v |> toText |> Option.defaultValue "") |> Result.map VString
+        | TLongText -> charsetChecked (v |> toText |> Option.defaultValue "") |> Result.map VString
+        // A JSON column's value must carry its JSON-ness in the `Value` itself:
+        // `Value.compare` puts a `VJson` operand's whole comparison into the
+        // JSON domain (type precedence, then content), and a `VString` there
+        // would instead be treated as the JSON *string* scalar it isn't — so
+        // `json_col = CAST('"a"' AS JSON)` would be false and ORDER BY would
+        // sort documents as text.
+        | TJson -> charsetChecked (v |> toText |> Option.defaultValue "") |> Result.map VJson
         | TSet values ->
             // Same 1265 "Data truncated" MySQL raises for a rejected ENUM
             // value, not TChar/TVarchar's plain string coercion — a SET only

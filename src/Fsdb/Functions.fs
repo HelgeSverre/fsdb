@@ -172,6 +172,22 @@ let private anyNull (args: Value list) : bool =
 /// ruled NULL out, so every call site isn't re-deriving the same default.
 let private req (v: Value) : string = v |> toText |> Option.defaultValue ""
 
+/// A value as the 64-bit pattern MySQL's bit-oriented functions (BIN, OCT,
+/// CONV, HEX) read it as: those treat their argument as `BIGINT UNSIGNED`,
+/// so `BIN(-1)` is 64 ones. `toDouble` can't be the route for the top half
+/// of the domain — it saturates `int64` at 2^63-1 — so `VUInt`/`VInt` pass
+/// through their exact bits and only inexact inputs go via `double`.
+let private toUInt64 (v: Value) : uint64 =
+    match v with
+    | VUInt u -> u
+    | VInt i -> uint64 i
+    | _ ->
+        let d = toDouble v
+
+        if d >= 1.8446744073709552e19 then UInt64.MaxValue
+        elif d < 0.0 then uint64 (int64 (max d -9.2233720368547758e18))
+        else uint64 d
+
 /// `LENGTH` counts UTF-8 bytes (MySQL's `LENGTH` is a byte length, not a
 /// character count — that's `CHAR_LENGTH`). `VBytes`' own byte count is
 /// used directly rather than round-tripping through `toText` (which decodes
@@ -219,6 +235,9 @@ let private absFn: Scalar =
     function
     | [ VNull ] -> VNull
     | [ VInt i ] -> VInt(abs i)
+    // Already non-negative and outside `int64`/`double`'s exact reach past
+    // 2^63 — the generic `toDouble` arm below would answer 1.8446744073709552e19.
+    | [ VUInt u ] -> VUInt u
     | [ VDouble d ] -> VDouble(abs d)
     | [ VDecimal d ] -> VDecimal(abs d)
     | [ v ] -> VDouble(abs (toDouble v))
@@ -272,6 +291,17 @@ let private roundFn: Scalar =
     | [ VNull; _ ] -> VNull
     | [ VInt i ] -> VInt i
     | [ VInt i; VInt digits ] -> if digits >= 0L then VInt i else VInt(int64 (roundDecimalAt (decimal i) (int digits)))
+    // `BIGINT UNSIGNED` is exact and integral already, so a non-negative
+    // digit count is the identity; rounding left of the point can leave the
+    // unsigned domain (MySQL then raises 1690, which `Value.narrowUnsigned`
+    // does for the arithmetic path — here the exact `DECIMAL` is the answer
+    // MySQL gives for every in-domain case).
+    | [ VUInt u ] -> VUInt u
+    | [ VUInt u; VInt digits ] ->
+        if digits >= 0L then
+            VUInt u
+        else
+            Value.narrowUnsigned (roundDecimalAt (decimal u) (int digits))
     | [ VDecimal d ] -> VDecimal(Math.Round(d, MidpointRounding.AwayFromZero))
     | [ VDecimal d; VInt digits ] -> VDecimal(roundDecimalAt d (int digits))
     | [ VDouble d ] -> VDouble(Math.Round(d, MidpointRounding.ToEven))
@@ -564,6 +594,7 @@ let private valueToJsonNode (v: Value) : JsonNode =
     match v with
     | VNull -> null
     | VInt i -> JsonValue.Create i
+    | VUInt u -> JsonValue.Create u
     | VDouble d -> JsonValue.Create d
     | VDecimal d -> JsonValue.Create d
     | VJson j ->
@@ -1572,6 +1603,7 @@ let private charFn: Scalar =
 let private hexFn: Scalar =
     function
     | [ VInt i ] -> VString(i.ToString "X")
+    | [ VUInt u ] -> VString(u.ToString "X")
     | [ VString s ] -> VString(Text.Encoding.UTF8.GetBytes s |> Array.map (fun b -> b.ToString "X2") |> String.concat "")
     | [ VBytes b ] -> VString(b |> Array.map (fun x -> x.ToString "X2") |> String.concat "")
     | [ v ] when not (anyNull [ v ]) -> VString((int64 (toDouble v)).ToString "X")
@@ -1920,6 +1952,7 @@ let private regexpReplaceFn: Scalar =
 let private ceilFn: Scalar =
     function
     | [ VInt i ] -> VInt i
+    | [ VUInt u ] -> VUInt u
     | [ VDecimal d ] -> VDecimal(Math.Ceiling d)
     | [ v ] when not (anyNull [ v ]) -> VInt(int64 (Math.Ceiling(toDouble v)))
     | _ -> VNull
@@ -1927,6 +1960,7 @@ let private ceilFn: Scalar =
 let private floorFn: Scalar =
     function
     | [ VInt i ] -> VInt i
+    | [ VUInt u ] -> VUInt u
     | [ VDecimal d ] -> VDecimal(Math.Floor d)
     | [ v ] when not (anyNull [ v ]) -> VInt(int64 (Math.Floor(toDouble v)))
     | _ -> VNull
@@ -1954,6 +1988,18 @@ let private signFn: Scalar =
 /// fixed-point rendering pads the scale back on.
 let private truncateFn: Scalar =
     function
+    // Exact and integral: only a negative digit count changes anything, and
+    // it can only shrink the value, so it stays in the unsigned domain.
+    | [ VUInt u; d ] when not (anyNull [ d ]) ->
+        let digits = int (toDouble d)
+
+        if digits >= 0 then VUInt u
+        // 10^20 already exceeds the whole domain, so anything beyond that
+        // truncates to 0 without asking `decimal` for an overflowing factor.
+        elif digits <= -20 then VUInt 0UL
+        else
+            let factor = pown 10M -digits
+            Value.narrowUnsigned (Math.Truncate(decimal u / factor) * factor)
     | [ VDecimal dec; d ] when not (anyNull [ d ]) ->
         let digits = int (toDouble d)
         let factor = decimal (Math.Pow(10.0, float digits))
@@ -1998,7 +2044,15 @@ let private isNullFn: Scalar =
 
 let private baseDigits = "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ"
 
-let private parseInBase (s: string) (b: int) : int64 option =
+/// CONV/BIN/OCT work in MySQL's 64-bit *unsigned* domain: a negative input
+/// wraps to its two's-complement pattern (`CONV('-1', 10, 16)` is
+/// FFFFFFFFFFFFFFFF, `BIN(-1)` is 64 ones), and 18446744073709551615 has to
+/// survive rather than saturate `int64`.
+///
+/// ponytail: MySQL's negative `to_base` (signed output, `CONV(-5, 10, -16)`
+/// = '-5') isn't supported — the digit table can't index a negative base.
+/// Branch on the sign of `to_base` if a workload needs it.
+let private parseInBase (s: string) (b: int) : uint64 option =
     let s = s.Trim().ToUpperInvariant()
     let neg, s = if s.StartsWith "-" then true, s.Substring 1 else false, s
 
@@ -2006,27 +2060,26 @@ let private parseInBase (s: string) (b: int) : int64 option =
         None
     else
         let mutable ok = true
-        let mutable acc = 0L
+        let mutable acc = 0UL
 
         for c in s do
             let d = baseDigits.IndexOf c
-            if d < 0 || d >= b then ok <- false else acc <- acc * int64 b + int64 d
+            if d < 0 || d >= b then ok <- false else acc <- acc * uint64 b + uint64 d
 
-        if ok then Some(if neg then -acc else acc) else None
+        if ok then Some(if neg then 0UL - acc else acc) else None
 
-let private toBase (n: int64) (b: int) : string =
-    if n = 0L then
+let private toBase (n: uint64) (b: int) : string =
+    if n = 0UL then
         "0"
     else
-        let neg = n < 0L
-        let mutable v = abs n
+        let mutable v = n
         let sb = StringBuilder()
 
-        while v > 0L do
-            sb.Insert(0, baseDigits.[int (v % int64 b)]) |> ignore
-            v <- v / int64 b
+        while v > 0UL do
+            sb.Insert(0, baseDigits.[int (v % uint64 b)]) |> ignore
+            v <- v / uint64 b
 
-        (if neg then "-" else "") + sb.ToString()
+        sb.ToString()
 
 let private convFn: Scalar =
     function
@@ -2038,12 +2091,12 @@ let private convFn: Scalar =
 
 let private binFn: Scalar =
     function
-    | [ v ] when not (anyNull [ v ]) -> VString(toBase (int64 (toDouble v)) 2)
+    | [ v ] when not (anyNull [ v ]) -> VString(toBase (toUInt64 v) 2)
     | _ -> VNull
 
 let private octFn: Scalar =
     function
-    | [ v ] when not (anyNull [ v ]) -> VString(toBase (int64 (toDouble v)) 8)
+    | [ v ] when not (anyNull [ v ]) -> VString(toBase (toUInt64 v) 8)
     | _ -> VNull
 
 /// The zlib/IEEE-802.3 CRC-32 MySQL's `CRC32()` implements — the standard
@@ -2183,6 +2236,7 @@ let private sumAgg: Aggregate =
             values
             |> List.forall (function
                 | VInt _
+                | VUInt _
                 | VDecimal _ -> true
                 | _ -> false)
         then
@@ -2191,6 +2245,7 @@ let private sumAgg: Aggregate =
                 (fun total value ->
                     match value with
                     | VInt integer -> total + decimal integer
+                    | VUInt unsigned -> total + decimal unsigned
                     | VDecimal number -> total + number
                     | _ -> total)
                 0M
@@ -2198,7 +2253,11 @@ let private sumAgg: Aggregate =
         else
             List.reduce Value.add values
 
-let private avgAgg: Aggregate = fun vs -> Value.div (vs |> List.reduce Value.add) (VInt(int64 (List.length vs)))
+/// AVG shares SUM's exact-decimal accumulation rather than reducing with
+/// `Value.add`: MySQL's AVG over exact inputs is a DECIMAL too, and summing
+/// `BIGINT UNSIGNED` rows through unsigned arithmetic would leave the
+/// unsigned domain (error 1690) on the way to a perfectly ordinary average.
+let private avgAgg: Aggregate = fun vs -> Value.div (sumAgg vs) (VInt(int64 (List.length vs)))
 let private minAgg: Aggregate = List.reduce (fun a b -> if Value.compare a b <= 0 then a else b)
 let private maxAgg: Aggregate = List.reduce (fun a b -> if Value.compare a b >= 0 then a else b)
 

@@ -1378,111 +1378,119 @@ let rec private evalExpr (ctx: EvalContext) (expr: Expr) : Result<Value, EvalErr
     | IsTrue e -> eval e |> Result.map (fun v -> boolToValue (truthy v = Some true))
     | IsFalse e -> eval e |> Result.map (fun v -> boolToValue (truthy v = Some false))
     | BinOp(op, a, b) ->
-        // And/Or already evaluate both operands (no short-circuit, since
-        // SQL's three-valued logic needs both sides to tell "false" apart
-        // from "unknown"), so every `BinOp` collapses into one total match
-        // on `op` here — all 12 `Ast.Op` cases handled in the one place,
-        // rather than two more `failwith`-guarded helpers each only
-        // partially matching the same type.
-        eval a
-        |> Result.bind (fun va ->
-            eval b
-            |> Result.map (fun vb ->
-                let compareWith (op: Op) : Value =
-                    match va, vb with
-                    | VNull, _
-                    | _, VNull -> VNull
-                    | _ ->
-                        // ENUM columns compare by ordinal against a numeric
-                        // operand (see `enumOrdinalFor`) — either side may be
-                        // the column.
-                        let pa, pb =
-                            match enumOrdinalFor ctx a va, ordinalComparand vb with
-                            | Some oa, Some nb -> oa, nb
-                            | _ ->
-                                match ordinalComparand va, enumOrdinalFor ctx b vb with
-                                | Some na, Some ob -> na, ob
-                                | _ -> va, vb
+        // Arithmetic can leave the `BIGINT UNSIGNED` domain, which MySQL
+        // refuses with 1690 rather than answering in a wider type. That
+        // refusal arrives as an exception (`Value.narrowUnsigned` — the
+        // arithmetic has no error channel of its own) and becomes an
+        // ordinary `EvalError` here, at the first frame that has one.
+        try
+            // And/Or already evaluate both operands (no short-circuit, since
+            // SQL's three-valued logic needs both sides to tell "false" apart
+            // from "unknown"), so every `BinOp` collapses into one total match
+            // on `op` here — all 12 `Ast.Op` cases handled in the one place,
+            // rather than two more `failwith`-guarded helpers each only
+            // partially matching the same type.
+            eval a
+            |> Result.bind (fun va ->
+                eval b
+                |> Result.map (fun vb ->
+                    let compareWith (op: Op) : Value =
+                        match va, vb with
+                        | VNull, _
+                        | _, VNull -> VNull
+                        | _ ->
+                            // ENUM columns compare by ordinal against a numeric
+                            // operand (see `enumOrdinalFor`) — either side may be
+                            // the column.
+                            let pa, pb =
+                                match enumOrdinalFor ctx a va, ordinalComparand vb with
+                                | Some oa, Some nb -> oa, nb
+                                | _ ->
+                                    match ordinalComparand va, enumOrdinalFor ctx b vb with
+                                    | Some na, Some ob -> na, ob
+                                    | _ -> va, vb
 
-                        let pred =
-                            match op with
-                            | Eq -> fun (c: int) -> c = 0
-                            | Neq -> fun c -> c <> 0
-                            | Lt -> fun c -> c < 0
-                            | Lte -> fun c -> c <= 0
-                            | Gt -> fun c -> c > 0
-                            | Gte -> fun c -> c >= 0
-                            | _ -> fun _ -> false
+                            let pred =
+                                match op with
+                                | Eq -> fun (c: int) -> c = 0
+                                | Neq -> fun c -> c <> 0
+                                | Lt -> fun c -> c < 0
+                                | Lte -> fun c -> c <= 0
+                                | Gt -> fun c -> c > 0
+                                | Gte -> fun c -> c >= 0
+                                | _ -> fun _ -> false
 
-                        match pa, pb with
-                        | VString sa, VString sb ->
-                            // A string column's COLLATE (or an explicit
-                            // `expr COLLATE name` tag) drives the compare;
-                            // two literals fall back to the server default.
-                            match resolvedCollation ctx a |> Option.orElseWith (fun () -> resolvedCollation ctx b) with
-                            | Some col ->
-                                // Equality folds (ai_ci); the range
-                                // operators use the full weight order.
-                                let c =
-                                    match op with
-                                    | Eq
-                                    | Neq -> if col.Equals sa sb then 0 else 1
-                                    | _ -> col.Compare sa sb
+                            match pa, pb with
+                            | VString sa, VString sb ->
+                                // A string column's COLLATE (or an explicit
+                                // `expr COLLATE name` tag) drives the compare;
+                                // two literals fall back to the server default.
+                                match resolvedCollation ctx a |> Option.orElseWith (fun () -> resolvedCollation ctx b) with
+                                | Some col ->
+                                    // Equality folds (ai_ci); the range
+                                    // operators use the full weight order.
+                                    let c =
+                                        match op with
+                                        | Eq
+                                        | Neq -> if col.Equals sa sb then 0 else 1
+                                        | _ -> col.Compare sa sb
 
-                                boolToValue (pred c)
-                            | None ->
-                                // Two literals (or a string against a
-                                // non-column expression): the connection
-                                // collation decides.
-                                let c =
-                                    match op with
-                                    | Eq
-                                    | Neq -> if ctx.Store.ConnectionCollation.Equals sa sb then 0 else 1
-                                    | _ -> ctx.Store.ConnectionCollation.Compare sa sb
+                                    boolToValue (pred c)
+                                | None ->
+                                    // Two literals (or a string against a
+                                    // non-column expression): the connection
+                                    // collation decides.
+                                    let c =
+                                        match op with
+                                        | Eq
+                                        | Neq -> if ctx.Store.ConnectionCollation.Equals sa sb then 0 else 1
+                                        | _ -> ctx.Store.ConnectionCollation.Compare sa sb
 
-                                boolToValue (pred c)
-                        | _ -> boolToValue (pred (Value.compare pa pb))
+                                    boolToValue (pred c)
+                            | _ -> boolToValue (pred (Value.compare pa pb))
 
-                match op with
-                | And ->
-                    match truthy va, truthy vb with
-                    | Some false, _
-                    | _, Some false -> VInt 0L
-                    | Some true, Some true -> VInt 1L
-                    | _ -> VNull
-                | Or ->
-                    match truthy va, truthy vb with
-                    | Some true, _
-                    | _, Some true -> VInt 1L
-                    | Some false, Some false -> VInt 0L
-                    | _ -> VNull
-                // `datetime_expr +/- INTERVAL n unit` parses to a plain
-                // `BinOp`, same as `1 + 2` — `vb` here is `INTERVAL`'s own
-                // encoded marker value (see `Functions.intervalFn`), so it
-                // needs the same real date arithmetic `DATE_ADD`/`DATE_SUB`
-                // give it rather than falling into generic numeric add/sub.
-                | Add when isIntervalValue vb -> tryDateIntervalBinOp 1.0 va vb |> Option.defaultValue (Value.add va vb)
-                | Sub when isIntervalValue vb -> tryDateIntervalBinOp -1.0 va vb |> Option.defaultValue (Value.sub va vb)
-                | Add -> Value.add va vb
-                | Sub -> Value.sub va vb
-                | Mul -> Value.mul va vb
-                | Div -> Value.div va vb
-                | IntDiv -> Value.intDiv va vb
-                | Eq -> compareWith Eq
-                | Neq -> compareWith Neq
-                | Lt -> compareWith Lt
-                | Lte -> compareWith Lte
-                | Gt -> compareWith Gt
-                | Gte -> compareWith Gte
-                // Never unknown, unlike every other comparison here: both
-                // sides `NULL` is true, either side (but not both) `NULL` is
-                // false, otherwise it's a plain `Eq`.
-                | NullSafeEq ->
-                    match va, vb with
-                    | VNull, VNull -> VInt 1L
-                    | VNull, _
-                    | _, VNull -> VInt 0L
-                    | _ -> boolToValue (Value.compare va vb = 0)))
+                    match op with
+                    | And ->
+                        match truthy va, truthy vb with
+                        | Some false, _
+                        | _, Some false -> VInt 0L
+                        | Some true, Some true -> VInt 1L
+                        | _ -> VNull
+                    | Or ->
+                        match truthy va, truthy vb with
+                        | Some true, _
+                        | _, Some true -> VInt 1L
+                        | Some false, Some false -> VInt 0L
+                        | _ -> VNull
+                    // `datetime_expr +/- INTERVAL n unit` parses to a plain
+                    // `BinOp`, same as `1 + 2` — `vb` here is `INTERVAL`'s own
+                    // encoded marker value (see `Functions.intervalFn`), so it
+                    // needs the same real date arithmetic `DATE_ADD`/`DATE_SUB`
+                    // give it rather than falling into generic numeric add/sub.
+                    | Add when isIntervalValue vb -> tryDateIntervalBinOp 1.0 va vb |> Option.defaultValue (Value.add va vb)
+                    | Sub when isIntervalValue vb -> tryDateIntervalBinOp -1.0 va vb |> Option.defaultValue (Value.sub va vb)
+                    | Add -> Value.add va vb
+                    | Sub -> Value.sub va vb
+                    | Mul -> Value.mul va vb
+                    | Div -> Value.div va vb
+                    | IntDiv -> Value.intDiv va vb
+                    | Eq -> compareWith Eq
+                    | Neq -> compareWith Neq
+                    | Lt -> compareWith Lt
+                    | Lte -> compareWith Lte
+                    | Gt -> compareWith Gt
+                    | Gte -> compareWith Gte
+                    // Never unknown, unlike every other comparison here: both
+                    // sides `NULL` is true, either side (but not both) `NULL` is
+                    // false, otherwise it's a plain `Eq`.
+                    | NullSafeEq ->
+                        match va, vb with
+                        | VNull, VNull -> VInt 1L
+                        | VNull, _
+                        | _, VNull -> VInt 0L
+                        | _ -> boolToValue (Value.compare va vb = 0)))
+        with Value.UnsignedOutOfRange ->
+            Error(1690, "BIGINT UNSIGNED value is out of range")
     | Like(e, p, caseSensitive, escape) ->
         eval e
         |> Result.bind (fun ve -> eval p |> Result.map (fun vp -> likeOp (Some(keyCollation ctx e)) caseSensitive escape ve vp))
@@ -1992,7 +2000,7 @@ and private jsonTableRows (doc: Value) (path: string) (columns: JsonTableColumn 
     let columnValue (ty: ColumnType) (node: JsonNode) : Value =
         match node with
         | null -> VNull // a matched JSON null
-        | _ when ty = TJson -> VString(Functions.jsonNodeText node)
+        | _ when ty = TJson -> VJson(Functions.jsonNodeText node)
         | _ ->
             let raw =
                 match node.GetValueKind() with
@@ -3036,7 +3044,12 @@ and private compareByOrderKeys (dirs: Direction list) (ka: (Value * Collation.Co
 /// '1.5,10,2,9', not numerically); DATE + DATETIME lands on DATETIME;
 /// anything else falls back to text.
 and private unionAggregateType (types: byte list) : byte =
-    let isInt t = t = Value.TypeTiny || t = Value.TypeShort || t = Value.TypeLong || t = Value.TypeLongLong
+    let isInt t =
+        t = Value.TypeTiny
+        || t = Value.TypeShort
+        || t = Value.TypeLong
+        || t = Value.TypeLongLong
+        || t = Value.TypeLongLongUnsigned
     let isDate t = t = Value.TypeDate
     let isDateTime t = t = Value.TypeDateTime || t = Value.TypeTimestamp
 
@@ -3049,7 +3062,12 @@ and private unionAggregateType (types: byte list) : byte =
     elif types |> List.exists (fun t -> t = Value.TypeNewDecimal) then
         Value.TypeNewDecimal
     elif types |> List.forall isInt then
-        Value.TypeLongLong
+        // An unsigned branch keeps the column unsigned — the aggregate has to
+        // hold 2^63..2^64-1, which LONGLONG can't.
+        if types |> List.contains Value.TypeLongLongUnsigned then
+            Value.TypeLongLongUnsigned
+        else
+            Value.TypeLongLong
     elif types |> List.forall (fun t -> isDate t || isDateTime t) then
         if types |> List.exists isDateTime then Value.TypeDateTime else Value.TypeDate
     else
@@ -3066,6 +3084,13 @@ and private coerceUnionValue (ty: byte) (v: Value) : Value =
         match ty with
         | t when t = Value.TypeTiny || t = Value.TypeShort || t = Value.TypeLong || t = Value.TypeLongLong ->
             VInt(int64 (Value.toDouble v))
+        // An already-unsigned value passes through: `toDouble` would round it
+        // past 2^53 and `int64` would saturate. A signed branch's value stays
+        // signed (`Value.compare` promotes both to `decimal` to order them).
+        | t when t = Value.TypeLongLongUnsigned ->
+            match v with
+            | VUInt _ -> v
+            | _ -> VInt(int64 (Value.toDouble v))
         | t when t = Value.TypeNewDecimal -> VDecimal(decimal (Value.toDouble v))
         | t when t = Value.TypeDouble || t = Value.TypeFloat -> VDouble(Value.toDouble v)
         | t when t = Value.TypeVarString || t = Value.TypeString || t = Value.TypeVarchar || t = Value.TypeBlob ->

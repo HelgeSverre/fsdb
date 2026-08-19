@@ -143,19 +143,25 @@ because a cast *wraps* into the domain where a column clamps. An integer
 literal past `BIGINT`'s signed range now parses as `VUInt` rather than
 collapsing to a double.
 
-Not covered, deliberately:
+Follow-up (same campaign, later commit): the first two "not covered"
+ceilings below were themselves silent wrong answers, so they are now closed
+rather than deferred.
 
-- MySQL raises 1690 when an unsigned expression leaves `[0, 2^64)`
-  (`CAST(-1 AS UNSIGNED) * 2`, `CAST(1 AS UNSIGNED) - 2`). `Value`'s
-  arithmetic has no error channel, so the result stays an exact `DECIMAL` —
-  the same exit `VInt` overflow already takes. Marked `ponytail` on
-  `Value.narrowUnsigned`.
-- No range enforcement on an out-of-domain value written to an integer
-  column (1264 in strict mode); `BIGINT UNSIGNED` clamps, matching the
-  existing "integer columns are not range-checked" ceiling for every other
-  integer type. Marked `ponytail` on `Storage.coerceValue`.
-- `CAST(<double too large> AS UNSIGNED)` clamps at the *unsigned* ceiling
-  where MySQL clamps at signed `BIGINT` max. Marked `ponytail` on the cast.
+- Unsigned arithmetic outside `[0, 2^64)` raises 1690 like MySQL
+  (`CAST(1 AS UNSIGNED) - 2`). `Value.narrowUnsigned` throws
+  `Value.UnsignedOutOfRange` — arithmetic still has no `Result` channel —
+  and `Executor`'s `BinOp` arm (plus a `QueryHandler` net for the paths that
+  reach `Value.add` some other way) turns it into the ERR packet. MySQL's
+  message names the offending expression; this one doesn't.
+- A `BIGINT UNSIGNED` column range-checks its writes: 1264 in strict mode,
+  clamped otherwise. The signed integer types still clamp unconditionally —
+  that inherited ceiling stays, marked `ponytail` on `Storage.coerceValue`.
+- Unary minus folds into a numeric *literal* (MySQL's own lexing), so
+  `-9223372036854775808` is BIGINT's signed minimum rather than `0 -` an
+  unsigned literal, which the 1690 rule above would now refuse.
+- `CAST(<double too large> AS UNSIGNED)` still clamps at the *unsigned*
+  ceiling where MySQL clamps at signed `BIGINT` max. Marked `ponytail` on
+  the cast.
 
 ### 2-3. JSON comparison — fixed
 
@@ -167,6 +173,14 @@ by code unit, not the `ai_ci` collation — oracle-verified. `CAST(x AS JSON)`
 now yields a JSON-*typed* value (and normalizes the document, and raises 3141
 on non-JSON text) instead of routing through `coerceValue`'s text branch,
 which is what let the ordering rules apply to it at all.
+
+Follow-up: `CAST` was not the only source of JSON-typed values. A `JSON`
+*column* (`Storage.coerceValue`) and a `JSON_TABLE` `COLUMNS(... JSON PATH
+...)` column both handed back `VString`, so their comparisons fell out of
+the JSON domain again — `json_col = CAST('"a"' AS JSON)` was 0 and `ORDER BY
+json_col` sorted rendered text. Both now yield `VJson`. A SQL *string*
+operand still converts to the JSON string it spells, not a parsed document
+(oracle: `CAST('"a"' AS JSON) = '"a"'` is 0, `= 'a'` is 1).
 
 TIME and OPAQUE ranks are unreachable placeholders — no `Value` case produces
 them, and fsdb has no BIT type.

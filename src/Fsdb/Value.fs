@@ -644,19 +644,24 @@ let private maxUInt64 = decimal UInt64.MaxValue
 /// Narrows an exact `decimal` result of unsigned-domain arithmetic back to
 /// `VUInt` when it lands inside `BIGINT UNSIGNED`, keeping the operation's
 /// unsigned result type the way MySQL does (`unsigned - signed` is
-/// unsigned).
+/// unsigned), and refusing outright when it doesn't: MySQL raises 1690 for
+/// `CAST(1 AS UNSIGNED) - 2` and `CAST(-1 AS UNSIGNED) * 2` rather than
+/// answering in a wider type, and a returned `DECIMAL` there is a wrong
+/// answer a caller cannot tell from a right one.
 ///
-/// ponytail: MySQL raises 1690 ("BIGINT UNSIGNED value is out of range")
-/// when the result leaves [0, 2^64) — `CAST(-1 AS UNSIGNED) * 2` and
-/// `CAST(1 AS UNSIGNED) - 2` both error there. `Value`'s arithmetic has no
-/// error channel (see `arith`'s int64-overflow note, which already takes
-/// this same exit), so an out-of-domain result stays an exact `DECIMAL`
-/// instead. Route arithmetic through a `Result` if 1690 needs raising.
-let private narrowUnsigned (d: decimal) : Value =
-    if d >= 0m && d <= maxUInt64 && Decimal.Truncate d = d then
-        VUInt(uint64 d)
+/// An exception, not a `Result`: `Value`'s arithmetic has no error channel
+/// and every operator plus every aggregate would have to grow one.
+/// `QueryHandler.handle` turns this into the ERR packet.
+///
+/// A non-integral `decimal` (a fractional intermediate inside a still-exact
+/// promotion) is in-domain and just stays a `DECIMAL`.
+exception UnsignedOutOfRange
+
+let narrowUnsigned (d: decimal) : Value =
+    if d >= 0m && d <= maxUInt64 then
+        if Decimal.Truncate d = d then VUInt(uint64 d) else VDecimal d
     else
-        VDecimal d
+        raise UnsignedOutOfRange
 
 /// MySQL arithmetic type promotion: int op int stays int; decimal involved
 /// (with no double operand) promotes to decimal; a double operand (or a

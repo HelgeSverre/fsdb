@@ -1724,6 +1724,18 @@ let handle (session: Session) (rawSql: string) : Session * QueryResult =
     | :? OperationCanceledException ->
         abortTransactionGate session
         reraise ()
+    // Arithmetic that left the `BIGINT UNSIGNED` domain (`Value.narrowUnsigned`).
+    // MySQL fails the statement but keeps the transaction, and so does this:
+    // `executeStatement` already released this statement's gate leases on the
+    // way out, and no rows were written (the throw happens during expression
+    // evaluation), so there is nothing to abort.
+    //
+    // ponytail: MySQL's message names the offending expression
+    // (`... out of range in '(cast(-(1) as unsigned) + 1)'`) and this doesn't —
+    // there's no AST printer to render it. Add one if a client parses the text.
+    | Value.UnsignedOutOfRange ->
+        Log.diagnostic "fsdb: ERR 1690 unsigned out of range -- query: %s" (Log.redactSql rawSql)
+        session, Err(1690, "BIGINT UNSIGNED value is out of range")
     // An extension function's *chosen* error code (`Functions.SqlError`) —
     // delivered verbatim instead of the generic 1105, but with the exact
     // same transaction-abort semantics as any other throw: a failing
@@ -1756,6 +1768,7 @@ let executePrepared (session: Session) (stmt: PreparedStmt) (values: Value list)
     with
     | PlaceholderCountMismatch(expected, got) ->
         session, Err(1210, sprintf "Incorrect arguments to EXECUTE (expected %d, got %d)" expected got)
+    | Value.UnsignedOutOfRange -> session, Err(1690, "BIGINT UNSIGNED value is out of range")
     | :? OperationCanceledException -> reraise ()
     | ex ->
         Log.diagnostic "fsdb: EXN %s -- prepared statement" ex.Message

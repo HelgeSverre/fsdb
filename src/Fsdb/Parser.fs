@@ -926,7 +926,26 @@ opp.AddOperator(InfixOperator("%", ws, 2, Associativity.Left, (fun a b -> FuncCa
 let private divKeywordBoundary: Parser<unit, unit> = nextCharSatisfiesNot isIdentChar >>. ws
 opp.AddOperator(InfixOperator("DIV", divKeywordBoundary, 2, Associativity.Left, (fun a b -> BinOp(IntDiv, a, b))))
 opp.AddOperator(InfixOperator("div", divKeywordBoundary, 2, Associativity.Left, (fun a b -> BinOp(IntDiv, a, b))))
-opp.AddOperator(PrefixOperator("-", ws, 3, true, (fun e -> BinOp(Sub, Lit(VInt 0L), e))))
+/// Unary minus. On a *literal* the sign is part of the literal, the way
+/// MySQL's own lexer reads it — `-9223372036854775808` is BIGINT's signed
+/// minimum and `-18446744073709551615` an exact DECIMAL, where the general
+/// `0 - x` desugaring would subtract from the `BIGINT UNSIGNED` those digits
+/// parse as and leave the unsigned domain (error 1690).
+///
+/// ponytail: `-(<unsigned expression>)` still desugars, so it raises 1690
+/// where MySQL negates into DECIMAL. Give `Ast.Expr` a real `Neg` case if
+/// that shape shows up outside literals.
+let private negateExpr (e: Expr) : Expr =
+    match e with
+    | Lit(VInt i) -> Lit(VInt(-i))
+    | Lit(VUInt u) when u <= uint64 Int64.MaxValue -> Lit(VInt(-(int64 u)))
+    | Lit(VUInt u) when u = 9223372036854775808UL -> Lit(VInt Int64.MinValue)
+    | Lit(VUInt u) -> Lit(VDecimal(-(decimal u)))
+    | Lit(VDecimal d) -> Lit(VDecimal(-d))
+    | Lit(VDouble d) -> Lit(VDouble(-d))
+    | _ -> BinOp(Sub, Lit(VInt 0L), e)
+
+opp.AddOperator(PrefixOperator("-", ws, 3, true, negateExpr))
 
 /// `IN (SELECT ...)` vs. `IN (expr, expr, ...)` — both start with `(`, so
 /// the subquery form is tried first (`attempt`ed since `selectStmtRecord`
@@ -1529,13 +1548,13 @@ let private insertValue: Parser<Expr, unit> =
 
     // Numbers/NULL before strings: dump cells are mostly numeric, and a
     // failed string attempt is cheaper than a failed number parse. The
-    // negative form desugars to the exact `0 - x` AST the grammar's unary
-    // minus produces, so both paths share one negation semantics.
+    // negative form goes through the same `negateExpr` the grammar's unary
+    // minus uses, so both paths share one negation semantics.
     choice
         [ literal numberLit
           literal (keyword "NULL" >>% VNull)
           literal stringLit
-          attempt (pchar '-' >>. ws >>. numberLit .>> cellEnd |>> fun v -> BinOp(Sub, Lit(VInt 0L), Lit v))
+          attempt (pchar '-' >>. ws >>. numberLit .>> cellEnd |>> (Lit >> negateExpr))
           expr ]
 
 let private insertStmt: Parser<Statement, unit> =

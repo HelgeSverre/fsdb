@@ -4746,6 +4746,17 @@ let tests =
                     | ResultSet(_, [ [ Some "1" ] ]) -> ()
                     | other -> failtestf "expected a match without crashing, got %A" other
 
+                // A pattern ending in an escape character used to spin
+                // forever (the escape consumed no input and the matcher
+                // never advanced) — a remote DoS from one client string.
+                testCase "a pattern ending in a trailing escape terminates"
+                <| fun _ ->
+                    let store = newStore ()
+
+                    match runDefault store @"SELECT 'x' LIKE '%\%' AS no_match, 'x%' LIKE '%\%' AS literal_percent" with
+                    | ResultSet(_, [ [ Some "0"; Some "1" ] ]) -> ()
+                    | other -> failtestf "expected 0 then 1, got %A" other
+
                 testCase "LIKE over a long subject with a leading wildcard does not overflow"
                 <| fun _ ->
                     let store = newStore ()
@@ -5156,4 +5167,153 @@ let tests =
 
                     match runDefault store "SELECT id FROM t WHERE u = 18446744073709551615" with
                     | ResultSet(_, [ [ Some "1" ] ]) -> ()
-                    | other -> failtestf "expected only row 1, got %A" other ] ]
+                    | other -> failtestf "expected only row 1, got %A" other
+
+                testCase "the scalar-function family answers in the unsigned domain instead of saturating"
+                <| fun _ ->
+                    match
+                        runDefault
+                            (newStore ())
+                            "SELECT HEX(CAST(-1 AS UNSIGNED)) AS h,
+                                    ABS(CAST(-1 AS UNSIGNED)) AS a,
+                                    ROUND(CAST(-1 AS UNSIGNED)) AS r,
+                                    FLOOR(CAST(-1 AS UNSIGNED)) AS f,
+                                    CEIL(CAST(-1 AS UNSIGNED)) AS c,
+                                    TRUNCATE(CAST(-1 AS UNSIGNED), 0) AS t,
+                                    BIN(CAST(-1 AS UNSIGNED)) AS b,
+                                    CONV(CAST(-1 AS UNSIGNED), 10, 16) AS cv,
+                                    JSON_ARRAY(CAST(-1 AS UNSIGNED)) AS j,
+                                    BIN(-1) AS signed_bin"
+                    with
+                    | ResultSet(_, [ row ]) ->
+                        Expect.equal
+                            row
+                            [ Some "FFFFFFFFFFFFFFFF"
+                              Some "18446744073709551615"
+                              Some "18446744073709551615"
+                              Some "18446744073709551615"
+                              Some "18446744073709551615"
+                              Some "18446744073709551615"
+                              Some(String.replicate 64 "1")
+                              Some "FFFFFFFFFFFFFFFF"
+                              Some "[18446744073709551615]"
+                              Some(String.replicate 64 "1") ]
+                            "the top half of the domain survives every scalar, and BIN reads its argument unsigned"
+                    | other -> failtestf "expected a single row, got %A" other
+
+                testCase "a UNION over an unsigned branch stays numeric instead of poisoning the column to text"
+                <| fun _ ->
+                    match runDefault (newStore ()) "SELECT CAST(-1 AS UNSIGNED) AS u UNION SELECT 9 ORDER BY u" with
+                    | ResultSet(_, rows) ->
+                        Expect.equal
+                            rows
+                            [ [ Some "9" ]; [ Some "18446744073709551615" ] ]
+                            "UNION reconciliation knows BIGINT UNSIGNED, so ORDER BY sorts numerically"
+                    | other -> failtestf "expected two rows, got %A" other
+
+                    match runDefault (newStore ()) "SELECT x FROM (SELECT CAST(10 AS UNSIGNED) x UNION SELECT 9) t ORDER BY x" with
+                    | ResultSet(_, rows) ->
+                        Expect.equal rows [ [ Some "9" ]; [ Some "10" ] ] "10 sorts after 9, not before it as text"
+                    | other -> failtestf "expected two rows, got %A" other
+
+                // MySQL 8.4 errors on both rather than answering in a wider
+                // type, and an answer here is indistinguishable from a
+                // correct one.
+                testCase "arithmetic outside the unsigned domain refuses with 1690 rather than answering"
+                <| fun _ ->
+                    match runDefault (newStore ()) "SELECT CAST(-1 AS UNSIGNED) + 1" with
+                    | Err(1690, _) -> ()
+                    | other -> failtestf "expected 1690, got %A" other
+
+                    match runDefault (newStore ()) "SELECT CAST(1 AS UNSIGNED) - 2" with
+                    | Err(1690, _) -> ()
+                    | other -> failtestf "expected 1690, got %A" other
+
+                    // Unary minus is part of the literal, not `0 - x`, so
+                    // these stay answers (MySQL agrees).
+                    match runDefault (newStore ()) "SELECT -9223372036854775808 AS a, -18446744073709551615 AS b" with
+                    | ResultSet(_, [ [ Some "-9223372036854775808"; Some "-18446744073709551615" ] ]) -> ()
+                    | other -> failtestf "expected both negative literals, got %A" other
+
+                testCase "a BIGINT UNSIGNED column rejects an out-of-range write in strict mode"
+                <| fun _ ->
+                    let store = newStore ()
+                    runDefault store "CREATE TABLE s (v BIGINT UNSIGNED)" |> ignore
+
+                    match runDefault store "INSERT INTO s VALUES (-1)" with
+                    | Err(1264, _) -> ()
+                    | other -> failtestf "expected 1264, got %A" other
+
+                    match runDefault store "SELECT COUNT(*) FROM s" with
+                    | ResultSet(_, [ [ Some "0" ] ]) -> ()
+                    | other -> failtestf "expected the rejected row to be absent, got %A" other ]
+
+          testList
+              "JSON-typed values compare in the JSON domain"
+              [ testCase "a JSON column compares and sorts as a document, not as its rendered text"
+                <| fun _ ->
+                    let store = newStore ()
+                    runDefault store "CREATE TABLE jd (id INT, j JSON)" |> ignore
+
+                    runDefault store """INSERT INTO jd VALUES (1, '"a"'), (2, '1'), (3, '{"k": 1}'), (4, '[1]'), (5, 'true')"""
+                    |> ignore
+
+                    // MySQL's JSON type precedence: number < string < object
+                    // < array < boolean — not the rendered text's order.
+                    match runDefault store """SELECT id, j = CAST('"a"' AS JSON) AS eq FROM jd ORDER BY j""" with
+                    | ResultSet(_, rows) ->
+                        Expect.equal
+                            rows
+                            [ [ Some "2"; Some "0" ]
+                              [ Some "1"; Some "1" ]
+                              [ Some "3"; Some "0" ]
+                              [ Some "4"; Some "0" ]
+                              [ Some "5"; Some "0" ] ]
+                            "a JSON column value is JSON-typed, so equality parses and ORDER BY ranks by type"
+                    | other -> failtestf "expected five rows, got %A" other
+
+                    // A SQL string operand is the JSON *string* it spells,
+                    // not a document to parse: MySQL answers 0 here.
+                    match runDefault store """SELECT id FROM jd WHERE j = '"a"'""" with
+                    | ResultSet(_, []) -> ()
+                    | other -> failtestf "expected no rows, got %A" other
+
+                testCase "JSON_TABLE's JSON columns carry their JSON-ness out of the table function"
+                <| fun _ ->
+                    match
+                        runDefault
+                            (newStore ())
+                            """SELECT j, j = CAST('"a"' AS JSON) AS eq
+                               FROM JSON_TABLE('["a", 1, {"k":1}]', '$[*]' COLUMNS(j JSON PATH '$')) t
+                               ORDER BY j"""
+                    with
+                    | ResultSet(_, rows) ->
+                        Expect.equal
+                            rows
+                            [ [ Some "1"; Some "0" ]
+                              [ Some "\"a\""; Some "1" ]
+                              [ Some "{\"k\": 1}"; Some "0" ] ]
+                            "the number sorts first, the string matches the JSON literal"
+                    | other -> failtestf "expected three rows, got %A" other ]
+
+          testList
+              "rounding and truncation rules pinned to the 8.4 oracle"
+              [ testCase "ROUND splits half-away-from-zero for exact values and half-to-even for approximate ones"
+                <| fun _ ->
+                    match
+                        runDefault
+                            (newStore ())
+                            "SELECT ROUND(2.5) AS exact, ROUND(2.5e0) AS approx, ROUND(-2.5) AS exact_neg, ROUND(-2.5e0) AS approx_neg, ROUND(0.5e0) AS approx_half"
+                    with
+                    | ResultSet(_, [ row ]) ->
+                        Expect.equal
+                            row
+                            [ Some "3"; Some "2"; Some "-3"; Some "-2"; Some "0" ]
+                            "DECIMAL rounds away from zero, DOUBLE rounds to even — MySQL's split, not one rule for both"
+                    | other -> failtestf "expected a single row, got %A" other
+
+                testCase "TRUNCATE keeps the requested scale and FLOOR/CEILING keep a DECIMAL exact"
+                <| fun _ ->
+                    match runDefault (newStore ()) "SELECT TRUNCATE(1.999, 2) AS t, FLOOR(1.5) AS f, CEILING(1.5) AS c" with
+                    | ResultSet(_, [ [ Some "1.99"; Some "1"; Some "2" ] ]) -> ()
+                    | other -> failtestf "expected 1.99, 1, 2, got %A" other ] ]

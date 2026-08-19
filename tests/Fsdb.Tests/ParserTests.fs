@@ -305,8 +305,8 @@ let tests =
                 <| fun _ ->
                     Expect.equal
                         (parseOk "SELECT 1--1")
-                        (mkSelect([ BinOp(Sub, Lit(VInt 1L), BinOp(Sub, Lit(VInt 0L), Lit(VInt 1L))), None ], None, None, [], None, None))
-                        "-- with no trailing space is not a comment"
+                        (mkSelect([ BinOp(Sub, Lit(VInt 1L), Lit(VInt -1L)), None ], None, None, [], None, None))
+                        "-- with no trailing space is not a comment; the sign folds into the literal"
 
                 testCase "-- followed by a space is still a line comment"
                 <| fun _ ->
