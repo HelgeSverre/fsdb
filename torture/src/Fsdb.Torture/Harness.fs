@@ -183,7 +183,7 @@ type FsdbSubject() =
     let store = Fsdb.Storage.create ()
     let events = ConcurrentQueue<string>()
 
-    do store.OnCommit <- Some(CommitEvents.summarize >> events.Enqueue)
+    do store.OnCommit.Add(CommitEvents.summarize >> events.Enqueue)
 
     let listener = Fsdb.Server.startListening IPAddress.Loopback 0
     let port = Fsdb.Server.port listener

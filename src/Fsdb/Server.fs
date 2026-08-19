@@ -952,7 +952,9 @@ let port (listener: TcpListener) : int =
     (listener.LocalEndpoint :?> IPEndPoint).Port
 
 /// None once the listener has been stopped/disposed — the clean way to shut
-/// the server down from the outside.
+/// the server down from the outside. `InvalidOperationException` is what
+/// `AcceptTcpClientAsync` throws when a concurrent `Stop()` lands before the
+/// accept starts ("Not listening") — same shutdown, third spelling.
 let private tryAccept (listener: TcpListener) : Async<TcpClient option> =
     async {
         try
@@ -960,6 +962,7 @@ let private tryAccept (listener: TcpListener) : Async<TcpClient option> =
             return Some client
         with
         | :? ObjectDisposedException
+        | :? InvalidOperationException
         | :? SocketException -> return None
     }
 
