@@ -4953,6 +4953,47 @@ let private nextIds ((okId, generatedId): int64 * int64) ((newOkId: int64), (new
 /// UPDATE's affected-rows count is MySQL's one behavior this flag actually
 /// changes: matched rows (including no-op `SET x = x` ones) when set, changed
 /// rows (the default) when not. Every other statement kind ignores it.
+/// The first call to a `DirectOnly` extension function anywhere inside
+/// `expr` — the DDL-time half of DIRECTONLY enforcement (see
+/// `Functions.ScalarFunction`): a generated column's expression is
+/// re-evaluated by the *engine* on every later write, exactly the indirect
+/// invocation the flag exists to ban, so the definition itself is rejected
+/// rather than letting every future INSERT trip over it. Subquery-carrying
+/// cases return `None` — the generated-column grammar can't produce them.
+let rec private firstDirectOnlyCall (registry: Registry) (expr: Expr) : string option =
+    let inExprs exprs = exprs |> List.tryPick (firstDirectOnlyCall registry)
+
+    match expr with
+    | FuncCall(name, args) ->
+        match Map.tryFind (name.ToUpperInvariant()) registry.Extensions with
+        | Some ext when ext.DirectOnly -> Some name
+        | _ -> inExprs args
+    | MatchAgainst(_, q, _) -> firstDirectOnlyCall registry q
+    | BinOp(_, a, b) -> inExprs [ a; b ]
+    | Not e
+    | IsNull e
+    | IsNotNull e
+    | IsTrue e
+    | IsFalse e
+    | Distinct e
+    | OrderBy(e, _)
+    | Cast(e, _)
+    | Collate(e, _) -> firstDirectOnlyCall registry e
+    | Like(e, p, _, _) -> inExprs [ e; p ]
+    | Regexp(e, p) -> inExprs [ e; p ]
+    | In(e, xs) -> inExprs (e :: xs)
+    | Between(e, lo, hi) -> inExprs [ e; lo; hi ]
+    | Case(subject, whens, elseBranch) ->
+        inExprs (Option.toList subject @ (whens |> List.collect (fun (c, r) -> [ c; r ])) @ Option.toList elseBranch)
+    | _ -> None
+
+/// MySQL's own ER_GENERATED_COLUMN_FUNCTION_IS_NOT_ALLOWED (3102) shape,
+/// for the first offending column in a CREATE/ALTER's column definitions.
+let private rejectDirectOnlyGenerated (registry: Registry) (columns: Ast.ColumnDef list) : QueryResult option =
+    columns
+    |> List.tryPick (fun c -> c.Generated |> Option.bind (fun (e, _) -> firstDirectOnlyCall registry e |> Option.map (fun _ -> c.Name)))
+    |> Option.map (fun col -> Err(3102, sprintf "Expression of generated column '%s' contains a disallowed function." col))
+
 let execute (store: Store) (registry: Registry) (dbName: string) (ids: int64 * int64) (foundRows: bool) (stmt: Statement) : (int64 * int64) * QueryResult =
     match stmt with
     | CreateDatabase(name, ifNotExists) ->
@@ -4979,6 +5020,10 @@ let execute (store: Store) (registry: Registry) (dbName: string) (ids: int64 * i
     | CreateTable(name, columns, indexes, foreignKeys, ifNotExists, tableCharset, tableCollation, autoIncrementSeed) ->
         let db, name = splitQualified dbName name
 
+        match rejectDirectOnlyGenerated registry columns with
+        | Some err -> ids, err
+        | None ->
+
         match createTableSeeded store db name columns indexes foreignKeys tableCharset tableCollation autoIncrementSeed with
         | Ok() -> ids, Affected 0UL
         | Error(TableExists _) when ifNotExists -> ids, Affected 0UL
@@ -4999,6 +5044,18 @@ let execute (store: Store) (registry: Registry) (dbName: string) (ids: int64 * i
 
     | AlterTable(table, actions) ->
         let db, table = splitQualified dbName table
+
+        let addedColumns =
+            actions
+            |> List.choose (function
+                | AddColumn(c, _)
+                | ModifyColumn(c, _)
+                | ChangeColumn(_, c, _) -> Some c
+                | _ -> None)
+
+        match rejectDirectOnlyGenerated registry addedColumns with
+        | Some err -> ids, err
+        | None ->
 
         // Backfills a just-added/modified generated column over existing rows.
         match alterTable store db table actions |> withGeneratedRecomputed store registry dbName db table with

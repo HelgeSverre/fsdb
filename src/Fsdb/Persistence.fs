@@ -1260,7 +1260,9 @@ let attach (dataDir: string) (store: Store) : unit =
             rotateFromReplica ()
             entryCount := 0
 
-    store.OnCommit <- Some appendRecord
+    // Appended, never assigned — `OnCommit` is multi-subscriber, so
+    // durability and a host's `Db.onCommit` CDC handlers coexist.
+    store.OnCommit.Add appendRecord
 
     let onShutdown (_: PosixSignalContext) = lock store.Lock rotateFromReplica
 

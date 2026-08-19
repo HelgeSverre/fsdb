@@ -1440,4 +1440,70 @@ let tests =
               | Ok(cols, rows) ->
                   Expect.equal (List.length cols) 22 "22 columns"
                   Expect.isEmpty rows "no db-level grants out of the box"
-              | Error e -> failtestf "expected mysql.db to scan, got %A" e ]
+              | Error e -> failtestf "expected mysql.db to scan, got %A" e
+
+          testCase "SqlError surfaces its chosen code and message and still aborts the transaction"
+          <| fun _ ->
+              let boom =
+                  Fsdb.Functions.ScalarFunction.create "BOOM" (fun _ _ -> raise (Fsdb.Functions.SqlError(1210, "no such model")))
+
+              let session =
+                  { create 1 (Fsdb.Storage.create ()) with
+                      CustomFunctions = Fsdb.Functions.empty |> Fsdb.Functions.registerExtension boom }
+
+              let session, _ = handle session "CREATE TABLE t (n INT)"
+              let session, _ = handle session "BEGIN"
+              let session, _ = handle session "INSERT INTO t VALUES (1)"
+              let session, result = handle session "SELECT BOOM()"
+
+              match result with
+              | Err(1210, msg) -> Expect.stringContains msg "no such model" "the chosen message reaches the client"
+              | other -> failtestf "expected the chosen 1210, got %A" other
+
+              Expect.isNone session.Tx "the transaction aborts, same as any other throwing function"
+
+              match handle session "SELECT COUNT(*) FROM t" |> snd with
+              | ResultSet(_, [ [ Some "0" ] ]) -> ()
+              | other -> failtestf "expected the aborted transaction's INSERT rolled back, got %A" other
+
+          testCase "a DirectOnly function is rejected inside a generated column definition but fine in SELECT"
+          <| fun _ ->
+              let embeddish =
+                  Fsdb.Functions.ScalarFunction.create "EMBEDDISH" (fun _ _ -> VString "x")
+                  |> Fsdb.Functions.ScalarFunction.effectful
+
+              let session =
+                  { create 1 (Fsdb.Storage.create ()) with
+                      CustomFunctions = Fsdb.Functions.empty |> Fsdb.Functions.registerExtension embeddish }
+
+              match handle session "SELECT EMBEDDISH('a')" |> snd with
+              | ResultSet(_, [ [ Some "x" ] ]) -> ()
+              | other -> failtestf "expected the effectful function to run in a plain SELECT, got %A" other
+
+              match handle session "CREATE TABLE d (a VARCHAR(10), b VARCHAR(10) AS (EMBEDDISH(a)))" |> snd with
+              | Err(3102, msg) -> Expect.stringContains msg "generated column 'b'" "names the offending column"
+              | other -> failtestf "expected 3102 at CREATE time, got %A" other
+
+              let session, _ = handle session "CREATE TABLE d2 (a VARCHAR(10))"
+
+              match handle session "ALTER TABLE d2 ADD COLUMN b VARCHAR(10) AS (EMBEDDISH(a))" |> snd with
+              | Err(3102, _) -> ()
+              | other -> failtestf "expected 3102 at ALTER time, got %A" other
+
+          testCase "a rich function's QueryContext agrees with DATABASE() and CURRENT_USER()"
+          <| fun _ ->
+              let probe =
+                  Fsdb.Functions.ScalarFunction.create "CTXPROBE" (fun ctx _ ->
+                      VString(sprintf "%s|%s" (ctx.Database |> Option.defaultValue "<none>") ctx.User))
+
+              let session =
+                  { create 1 (Fsdb.Storage.create ()) with
+                      CustomFunctions = Fsdb.Functions.empty |> Fsdb.Functions.registerExtension probe }
+
+              let session, _ = handle session "CREATE DATABASE app"
+              let session, _ = handle session "USE app"
+
+              match handle session "SELECT CTXPROBE(), DATABASE(), CURRENT_USER()" |> snd with
+              | ResultSet(_, [ [ Some ctx; Some db; Some user ] ]) ->
+                  Expect.equal ctx (db + "|" + (user.Split '@').[0]) "context Database/User match the SQL-visible session"
+              | other -> failtestf "expected one row, got %A" other ]

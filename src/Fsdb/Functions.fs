@@ -17,6 +17,50 @@ open Fsdb.Value
 /// A scalar function: its already-evaluated arguments in, one `Value` out.
 type Scalar = Value list -> Value
 
+/// How an extension function raises a *chosen* MySQL error code instead of
+/// the generic 1105 the catch-all would give it — `raise (SqlError(1210,
+/// "no such model"))` reaches the client as exactly that code/message.
+/// Deliberately still an exception (not a `Result`-widening of `Scalar`):
+/// builtins and the executor's evaluation pipeline stay untouched, and the
+/// transaction-abort semantics of a throwing function stay identical to any
+/// other failure (`QueryHandler.handle` clears `session.Tx` either way).
+exception SqlError of code: int * message: string
+
+/// What a rich extension function (`ScalarFunction`) sees about the query
+/// it's executing inside. `Cancellation` is the killed-client token
+/// (`Storage.queryCancellation`) — hosts hand it to `HttpClient` so a
+/// network-calling function stops when its client vanishes. No async
+/// executor: scalars block the connection thread for as long as they run.
+type QueryContext =
+    { Database: string option
+      User: string
+      Cancellation: System.Threading.CancellationToken }
+
+/// The rich registration shape: a context-aware function plus the two
+/// SQLite-style flags. Only `DirectOnly` is *enforced* (rejected inside
+/// generated-column definitions — SQLite's DIRECTONLY rationale: a
+/// network-calling UDF re-invoked by every later write is a footgun);
+/// `Deterministic` is carried metadata for host-side caches.
+/// ponytail: no planner constant-folding reads `Deterministic` — add that
+/// only if repeated evaluation of a deterministic call ever shows up hot.
+type ScalarFunction =
+    { Name: string
+      Fn: QueryContext -> Value list -> Value
+      Deterministic: bool
+      DirectOnly: bool }
+
+module ScalarFunction =
+    /// Deterministic, callable anywhere — the default shape.
+    let create (name: string) (fn: QueryContext -> Value list -> Value) : ScalarFunction =
+        { Name = name; Fn = fn; Deterministic = true; DirectOnly = false }
+
+    /// The network-calling shape in one word: non-deterministic (results
+    /// may differ per call) and direct-only (banned from generated-column
+    /// definitions, where the engine — not the user's statement — would
+    /// re-invoke it on every later write).
+    let effectful (fn: ScalarFunction) : ScalarFunction =
+        { fn with Deterministic = false; DirectOnly = true }
+
 /// An aggregate function: the whole-row-set list of one already-evaluated,
 /// already NULL-filtered `Value` per row, folded to one `Value` out —
 /// `Executor.evalAggregate` owns evaluating the argument expression against
@@ -35,15 +79,28 @@ type Aggregate = Value list -> Value
 /// `QueryHandler.registryFor`, every test).
 type Registry =
     { Scalars: Map<string, Scalar>
-      Aggregates: Map<string, Aggregate> }
+      Aggregates: Map<string, Aggregate>
+      /// Rich (`QueryContext`-aware) registrations, kept separate from
+      /// `Scalars` so builtins and plain `registerScalar` users never pay
+      /// for the context plumbing — `QueryHandler.registryFor` collapses
+      /// each entry to a plain `Scalar` by applying the per-statement
+      /// context, and `Executor`'s DDL path reads the `DirectOnly` flag
+      /// here to reject generated-column definitions.
+      Extensions: Map<string, ScalarFunction> }
 
-let empty: Registry = { Scalars = Map.empty; Aggregates = Map.empty }
+let empty: Registry =
+    { Scalars = Map.empty
+      Aggregates = Map.empty
+      Extensions = Map.empty }
 
 let registerScalar (name: string) (fn: Scalar) (registry: Registry) : Registry =
     { registry with Scalars = Map.add (name.ToUpperInvariant()) fn registry.Scalars }
 
 let registerAggregate (name: string) (fn: Aggregate) (registry: Registry) : Registry =
     { registry with Aggregates = Map.add (name.ToUpperInvariant()) fn registry.Aggregates }
+
+let registerExtension (fn: ScalarFunction) (registry: Registry) : Registry =
+    { registry with Extensions = Map.add (fn.Name.ToUpperInvariant()) fn registry.Extensions }
 
 let lookup (name: string) (registry: Registry) : Scalar option =
     Map.tryFind (name.ToUpperInvariant()) registry.Scalars

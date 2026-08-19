@@ -1154,4 +1154,32 @@ let tests =
 
               match scan reloaded "db2" "anything" with
               | Error(NoSuchDatabase _) -> ()
-              | other -> failtestf "expected database 'db2' to be gone (DROP DATABASE), got %A" other ]
+              | other -> failtestf "expected database 'db2' to be gone (DROP DATABASE), got %A" other
+
+          testCase "withDataDir durability and Db.onCommit CDC coexist on one store"
+          <| fun _ ->
+              // Regression guard for the old single-slot `Store.OnCommit`:
+              // `Persistence.attach` used to *claim* the slot, so durability
+              // and a host's CDC handler were mutually exclusive.
+              let dir = tempDataDir ()
+              let events = ResizeArray<CommitEvent>()
+
+              let db =
+                  Fsdb.Db.create () |> Fsdb.Db.withDataDir dir |> Fsdb.Db.onCommit events.Add
+
+              let conn = Fsdb.Db.connect db
+              conn.Query "CREATE TABLE t (n INT)" |> ignore
+              conn.Query "INSERT INTO t VALUES (1)" |> ignore
+
+              Expect.isTrue
+                  (events
+                   |> Seq.exists (function
+                       | RowsInserted(_, "t", _) -> true
+                       | _ -> false))
+                  "the CDC subscriber saw the insert"
+
+              let reloaded = load dir
+
+              match scanList reloaded defaultDatabase "t" with
+              | Ok(_, rows) -> Expect.equal (List.length rows) 1 "the WAL subscriber persisted the same insert"
+              | Error e -> failtestf "expected table 't' to reload from the WAL, got %A" e ]

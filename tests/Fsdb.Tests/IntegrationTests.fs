@@ -1829,4 +1829,65 @@ let tests =
                   finally
                       listener.Stop()
               }
-              |> Async.RunSynchronously ]
+              |> Async.RunSynchronously
+
+          testCase "Db.connect persists USE and session state across queries, with registered functions in scope"
+          <| fun _ ->
+              let shout =
+                  function
+                  | [ VString s ] -> VString(s.ToUpperInvariant())
+                  | _ -> VNull
+
+              let db = Fsdb.Db.create () |> Fsdb.Db.registerScalar "SHOUT" shout
+              let conn = Fsdb.Db.connect db
+              conn.Query "CREATE DATABASE app" |> ignore
+              conn.Query "USE app" |> ignore
+              conn.Query "CREATE TABLE t (n INT)" |> ignore
+              conn.Query "INSERT INTO t VALUES (7)" |> ignore
+
+              match conn.Query "SELECT n, SHOUT('hi') FROM t" with
+              | ResultSet(_, [ [ Some "7"; Some "HI" ] ]) -> ()
+              | other -> failtestf "expected the USE'd database's row plus the custom scalar, got %A" other
+
+          testCase "two Db.onCommit subscribers both receive one TransactionCommitted per transaction"
+          <| fun _ ->
+              let a = ResizeArray<Fsdb.Storage.CommitEvent>()
+              let b = ResizeArray<Fsdb.Storage.CommitEvent>()
+
+              let db = Fsdb.Db.create () |> Fsdb.Db.onCommit a.Add |> Fsdb.Db.onCommit b.Add
+              let conn = Fsdb.Db.connect db
+              conn.Query "CREATE TABLE t (n INT)" |> ignore
+              conn.Query "BEGIN" |> ignore
+              conn.Query "INSERT INTO t VALUES (1)" |> ignore
+              conn.Query "INSERT INTO t VALUES (2)" |> ignore
+              conn.Query "COMMIT" |> ignore
+
+              let commits (events: ResizeArray<Fsdb.Storage.CommitEvent>) =
+                  events
+                  |> Seq.filter (function
+                      | Fsdb.Storage.TransactionCommitted inner -> List.length inner = 2
+                      | _ -> false)
+                  |> Seq.length
+
+              Expect.equal (commits a) 1 "subscriber A sees exactly one TransactionCommitted wrapping both inserts"
+              Expect.equal (commits b) 1 "subscriber B sees the same single TransactionCommitted"
+
+          testCase "Db.serve returns a RunningServer whose Stop stops accepting connections"
+          <| fun _ ->
+              let running = Fsdb.Db.create () |> Fsdb.Db.serve Net.IPAddress.Loopback 0
+              Expect.isTrue (running.Port > 0) "port 0 resolves to the OS-assigned port"
+
+              // Accepting before Stop...
+              use alive = new Net.Sockets.TcpClient()
+              alive.Connect(Net.IPAddress.Loopback, running.Port)
+              Expect.isTrue alive.Connected "connects while running"
+
+              running.Stop()
+
+              // ...refused after: the listener socket is closed, so a fresh
+              // connect gets ECONNREFUSED rather than hanging.
+              Expect.throws
+                  (fun () ->
+                      use dead = new Net.Sockets.TcpClient()
+                      dead.Connect(Net.IPAddress.Loopback, running.Port))
+                  "connections are refused after Stop" ]

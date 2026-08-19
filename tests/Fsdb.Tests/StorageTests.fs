@@ -1554,7 +1554,7 @@ let tests =
                     |> ignore
 
                     let events = ResizeArray<CommitEvent>()
-                    store.OnCommit <- Some events.Add
+                    store.OnCommit.Add events.Add
 
                     match deleteRows store defaultDatabase "departments" (fun _ -> Ok true) with
                     | Ok _ ->
@@ -1577,7 +1577,7 @@ let tests =
                     |> ignore
 
                     let events = ResizeArray<CommitEvent>()
-                    store.OnCommit <- Some events.Add
+                    store.OnCommit.Add events.Add
                     deleteRows store defaultDatabase "departments" (fun _ -> Ok true) |> ignore
 
                     let updated =
@@ -1824,7 +1824,7 @@ let tests =
                     |> ignore
 
                     let events = ResizeArray<CommitEvent>()
-                    store.OnCommit <- Some events.Add
+                    store.OnCommit.Add events.Add
 
                     let updater (row: Value[]) = Ok [| VInt 99L; row.[1] |]
 
@@ -2042,7 +2042,7 @@ let tests =
                 <| fun _ ->
                     let store = withUsersTable ()
                     let events = ResizeArray<CommitEvent>()
-                    store.OnCommit <- Some events.Add
+                    store.OnCommit.Add events.Add
 
                     insertRows store defaultDatabase "users" None [ [ VNull; VString "alice"; VNull ] ] |> ignore
 
@@ -2054,7 +2054,7 @@ let tests =
                 testCase "insertRows with no subscriber fires nothing (no OnCommit set)"
                 <| fun _ ->
                     let store = withUsersTable ()
-                    Expect.isNone store.OnCommit "no subscriber by default"
+                    Expect.isEmpty store.OnCommit "no subscriber by default"
                     // Just proving this doesn't throw with OnCommit = None.
                     insertRows store defaultDatabase "users" None [ [ VNull; VString "alice"; VNull ] ] |> ignore
 
@@ -2063,7 +2063,7 @@ let tests =
                     let store = withUsersTable ()
                     insertRows store defaultDatabase "users" None [ [ VInt 1L; VString "alice"; VNull ] ] |> ignore
                     let events = ResizeArray<CommitEvent>()
-                    store.OnCommit <- Some events.Add
+                    store.OnCommit.Add events.Add
 
                     insertRowsIgnore store defaultDatabase "users" None [ [ VInt 1L; VString "bob"; VNull ] ] |> ignore
 
@@ -2082,7 +2082,7 @@ let tests =
                     |> ignore
 
                     let events = ResizeArray<CommitEvent>()
-                    store.OnCommit <- Some events.Add
+                    store.OnCommit.Add events.Add
 
                     // A no-op SET (age stays 40) on bob's row must not appear
                     // in the event's changes, matching "Changed: n" semantics.
@@ -2106,7 +2106,7 @@ let tests =
                     insertRows store defaultDatabase "users" None [ [ VInt 1L; VString "alice"; VInt 30L ] ] |> ignore
 
                     let events = ResizeArray<CommitEvent>()
-                    store.OnCommit <- Some events.Add
+                    store.OnCommit.Add events.Add
 
                     deleteRows store defaultDatabase "users" (fun _ -> Ok true) |> ignore
 
@@ -2121,7 +2121,7 @@ let tests =
                     insertRows store defaultDatabase "users" None [ [ VInt 1L; VString "alice"; VInt 30L ] ] |> ignore
 
                     let events = ResizeArray<CommitEvent>()
-                    store.OnCommit <- Some events.Add
+                    store.OnCommit.Add events.Add
 
                     let applyUpdate (existing: Value[]) (_candidate: Value[]) = Ok [| existing.[0]; existing.[1]; VInt 99L |]
 
@@ -2150,7 +2150,7 @@ let tests =
                 <| fun _ ->
                     let store = create ()
                     let events = ResizeArray<CommitEvent>()
-                    store.OnCommit <- Some events.Add
+                    store.OnCommit.Add events.Add
 
                     createDatabase store "shop" |> ignore
                     createTable store "shop" "widgets" usersColumns [] [] None None |> ignore
@@ -2172,7 +2172,7 @@ let tests =
                     insertRows store defaultDatabase "users" None [ [ VInt 1L; VString "alice"; VInt 30L ] ] |> ignore
 
                     let events = ResizeArray<CommitEvent>()
-                    store.OnCommit <- Some events.Add
+                    store.OnCommit.Add events.Add
 
                     match insertRows store defaultDatabase "users" None [ [ VInt 1L; VString "bob"; VInt 40L ] ] with
                     | Error(DuplicateKey _) -> ()
@@ -2184,7 +2184,7 @@ let tests =
                 <| fun _ ->
                     let store = withUsersTable ()
                     let events = ResizeArray<CommitEvent>()
-                    store.OnCommit <- Some events.Add
+                    store.OnCommit.Add events.Add
 
                     let snapshot = beginTransactionSnapshot store
                     insertRows snapshot defaultDatabase "users" None [ [ VInt 1L; VString "alice"; VInt 30L ] ] |> ignore
@@ -2210,7 +2210,7 @@ let tests =
                 <| fun _ ->
                     let store = withUsersTable ()
                     let events = ResizeArray<CommitEvent>()
-                    store.OnCommit <- Some events.Add
+                    store.OnCommit.Add events.Add
 
                     let snapshot = beginTransactionSnapshot store
                     insertRows snapshot defaultDatabase "users" None [ [ VInt 1L; VString "alice"; VInt 30L ] ] |> ignore
@@ -2241,7 +2241,7 @@ let tests =
                     // to the real store.
                     let store = withUsersTable ()
                     let events = ResizeArray<CommitEvent>()
-                    store.OnCommit <- Some events.Add
+                    store.OnCommit.Add events.Add
 
                     let txSnapshot = beginTransactionSnapshot store
                     Expect.isSome txSnapshot.PendingEvents "the transaction's own snapshot must buffer — the real store has a subscriber"

@@ -53,9 +53,73 @@ let registerScalar (name: string) (fn: Scalar) (db: Db) : Db =
 let registerAggregate (name: string) (fn: Aggregate) (db: Db) : Db =
     { db with Functions = registerAggregate name fn db.Functions }
 
+/// Registers a rich (`QueryContext`-aware) scalar function — the shape a
+/// network-calling extension needs, e.g.
+/// `db |> Db.registerFunction (ScalarFunction.create "LLM_EMBED" embed |> ScalarFunction.effectful)`.
+/// `registerScalar` stays the sugar for context-free functions.
+let registerFunction (fn: ScalarFunction) (db: Db) : Db =
+    { db with Functions = registerExtension fn db.Functions }
+
+/// Subscribes `handler` to every committed write (the CDC feed
+/// `Persistence.attach` also rides) — multi-subscriber, so it coexists with
+/// `withDataDir`'s WAL appender and any other handlers. Called
+/// synchronously under the commit lock: keep it fast, and never write back
+/// into the database from inside it (re-entry deadlocks). Subscribe after
+/// `withDataDir` — that builder replaces `db.Store` with the loaded one,
+/// dropping subscriptions made before it.
+let onCommit (handler: Storage.CommitEvent -> unit) (db: Db) : Db =
+    lock db.Store.Lock (fun () -> db.Store.OnCommit.Add handler)
+    db
+
+/// Distinguishes in-process `connect` sessions from each other (for
+/// `CONNECTION_ID()`); negative so they can never collide with the
+/// wire-protocol server's own positive connection ids.
+let private connectionCounter = ref 0
+
+/// An in-process connection — no socket, no wire protocol, just
+/// `QueryHandler.handle` over its own private session, so per-connection
+/// state (`USE`, variables, open transaction) persists across `Query` calls
+/// exactly as it would on a real connection.
+type Connection internal (db: Db) =
+    let mutable session =
+        { Session.create (System.Threading.Interlocked.Decrement connectionCounter) db.Store with
+            CustomFunctions = db.Functions }
+
+    member _.Query(sql: string) : QueryHandler.QueryResult =
+        let updated, result = QueryHandler.handle session sql
+        session <- updated
+        result
+
+/// Opens an in-process connection to `db` — the sanctioned way for a host
+/// to run SQL against its own embedded instance without a socket.
+let connect (db: Db) : Connection = Connection(db)
+
+/// A server started by `serve`: `Port` is the actual bound port (matters
+/// when `serve` was given port 0 for an OS-assigned one), `Stop` stops
+/// accepting new connections. `IDisposable` so `use running = ...` works;
+/// stopping twice is a no-op.
+type RunningServer =
+    { Port: int
+      Stop: unit -> unit }
+
+    interface System.IDisposable with
+        member this.Dispose() = this.Stop()
+
 /// Starts the MySQL wire-protocol server on `address:port` and serves
 /// connections until the process ends — `db`'s custom functions are
-/// available to every statement any connection runs.
+/// available to every statement any connection runs. Kept alongside
+/// `serve` for compat: use `serve` when the host needs the bound port or a
+/// way to stop.
 let listen (address: IPAddress) (port: int) (db: Db) : Async<unit> =
     let listener = Server.startListening address port
     Server.serve listener db.Store db.Functions
+
+/// Like `listen`, but starts serving on a background async and hands back
+/// a stoppable `RunningServer` — pass port 0 for an OS-assigned port and
+/// read it back off `Port`.
+let serve (address: IPAddress) (port: int) (db: Db) : RunningServer =
+    let listener = Server.startListening address port
+    Async.Start(Server.serve listener db.Store db.Functions)
+
+    { Port = Server.port listener
+      Stop = fun () -> listener.Stop() }

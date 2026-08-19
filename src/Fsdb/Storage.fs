@@ -284,13 +284,17 @@ type Store =
       /// `COLLATE` always wins.
       mutable ConnectionCollation: Collation.Collation
       /// Fires once per committed write, under `Lock`, right after the
-      /// catalog swap that made it visible — `None` (the default) means no
+      /// catalog swap that made it visible — empty (the default) means no
       /// subscriber, so every write path's event-construction work still
       /// happens (it's cheap: the row values were already computed for the
-      /// write itself) but delivery is a no-op. Set directly (e.g.
-      /// `store.OnCommit <- Some handler`) before serving traffic; nothing
-      /// here mutates it mid-flight.
-      mutable OnCommit: (CommitEvent -> unit) option
+      /// write itself) but delivery is a no-op. Multi-subscriber
+      /// (`Persistence.attach`'s WAL appender and any number of
+      /// `Db.onCommit` handlers coexist), called in registration order;
+      /// subscribe (`store.OnCommit.Add handler`) before serving traffic —
+      /// registration isn't synchronized against in-flight commits, only
+      /// dispatch is (see `emit`). A handler must not write back into the
+      /// store (re-entry would deadlock on `Lock`).
+      OnCommit: ResizeArray<CommitEvent -> unit>
       /// `Some` only for a transaction's private snapshot `Store` (see
       /// `beginTransactionSnapshot`): while set, every write path appends its
       /// event here instead of calling `OnCommit`, so nothing is visible
@@ -409,7 +413,9 @@ let private emit (store: Store) (event: CommitEvent option) : unit =
     | Some e ->
         match store.PendingEvents with
         | Some buffer -> buffer.Add e
-        | None -> store.OnCommit |> Option.iter (fun f -> lock store.Lock (fun () -> f e))
+        | None ->
+            if store.OnCommit.Count > 0 then
+                lock store.Lock (fun () -> for f in store.OnCommit do f e)
 
 /// A private per-transaction catalog snapshot seeded from `store`'s current
 /// catalog (see `Session.Transaction`) — writes against it stay invisible
@@ -440,7 +446,7 @@ let beginTransactionSnapshot (store: Store) : Store =
       // runs.
       StrictMode = true
       ConnectionCollation = store.ConnectionCollation
-      OnCommit = None
+      OnCommit = ResizeArray()
       // Allocate a buffer whenever `store` itself would ever deliver an
       // event — either it has a real `OnCommit` subscriber, or `store` is
       // *itself* a transaction snapshot with its own `PendingEvents` already
@@ -452,7 +458,7 @@ let beginTransactionSnapshot (store: Store) : Store =
       // (only the real store has one), so `PendingEvents.IsSome` is the only
       // signal that events built here must be buffered rather than dropped
       // by `emit`'s no-buffer-no-subscriber branch.
-      PendingEvents = if store.OnCommit.IsSome || store.PendingEvents.IsSome then Some(ResizeArray()) else None
+      PendingEvents = if store.OnCommit.Count > 0 || store.PendingEvents.IsSome then Some(ResizeArray()) else None
       TransactionGates = store.TransactionGates
       Lock = obj () }
 
@@ -1380,7 +1386,7 @@ let create () : Store =
       ForeignKeyChecks = true
       StrictMode = true
       ConnectionCollation = Collation.defaultCollation
-      OnCommit = None
+      OnCommit = ResizeArray()
       PendingEvents = None
       TransactionGates = ConcurrentDictionary<string, SemaphoreSlim>()
       Lock = obj () }

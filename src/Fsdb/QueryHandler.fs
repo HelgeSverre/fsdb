@@ -969,10 +969,31 @@ let private handleSetAutocommit (value: string) (session: Session) : Session * Q
 /// diverge — `VERSION()` just reuses the same `@@version` value `SELECT
 /// @@version` already serves) — those go last so they always win.
 let private registryFor (session: Session) : Functions.Registry =
+    // Each rich registration (`Db.registerFunction`) collapses to a plain
+    // `Scalar` here by closing over this statement's `QueryContext` — the
+    // executor never learns the rich shape exists. `Cancellation` is read
+    // inside the closure (call time, same thread as the row fold), so it's
+    // the token `Server.withCancellationWatch` armed for *this* query, not
+    // whatever thread happened to run this composition. The `Extensions`
+    // map itself is carried through so the executor's DDL path can still
+    // see each function's `DirectOnly` flag.
+    let collapseExtension name (ext: Functions.ScalarFunction) r =
+        let fn args =
+            let ctx: Functions.QueryContext =
+                { Database = session.Database
+                  User = session.User
+                  Cancellation = Storage.queryCancellation.Value }
+
+            ext.Fn ctx args
+
+        Functions.registerScalar name fn r
+
     let withCustom =
         session.CustomFunctions.Scalars
         |> Map.fold (fun r name fn -> Functions.registerScalar name fn r) Functions.builtins
         |> fun r -> session.CustomFunctions.Aggregates |> Map.fold (fun r name fn -> Functions.registerAggregate name fn r) r
+        |> fun r -> session.CustomFunctions.Extensions |> Map.fold (fun r name ext -> collapseExtension name ext r) r
+        |> fun r -> { r with Extensions = session.CustomFunctions.Extensions }
 
     let databaseFn _ = session.Database |> Option.map VString |> Option.defaultValue VNull
 
@@ -1584,6 +1605,15 @@ let handle (session: Session) (rawSql: string) : Session * QueryResult =
     | :? OperationCanceledException ->
         abortTransactionGate session
         reraise ()
+    // An extension function's *chosen* error code (`Functions.SqlError`) —
+    // delivered verbatim instead of the generic 1105, but with the exact
+    // same transaction-abort semantics as any other throw: a failing
+    // effectful function mid-transaction must not leave a half-applied
+    // snapshot reachable by a later COMMIT.
+    | Functions.SqlError(code, msg) ->
+        Log.diagnostic "fsdb: ERR %d %s -- query: %s" code msg rawSql
+        abortTransactionGate session
+        { session with Tx = None }, Err(code, msg)
     | ex ->
         Log.diagnostic "fsdb: EXN %s -- query: %s" ex.Message rawSql
         abortTransactionGate session
