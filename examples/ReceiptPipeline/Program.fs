@@ -246,7 +246,7 @@ let llmSchema (ctx: QueryContext) (args: Value list) : Value =
             // content IS the JSON document — the tool-call dual path some
             // providers offer is unnecessary here.
             try
-                VString((resp["choices"][0]["message"]["content"]).GetValue<string>())
+                VString(resp["choices"].[0].["message"].["content"].GetValue<string>())
             with
             | :? SqlError -> reraise ()
             | ex -> raise (SqlError(1296, sprintf "Unexpected response shape from %s: %s" m.Endpoint ex.Message))
