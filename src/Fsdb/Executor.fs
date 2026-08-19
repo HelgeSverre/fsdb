@@ -152,11 +152,7 @@ let rec private containsAggregate (registry: Registry) (expr: Expr) : bool =
     | Col _
     | QualifiedCol _
     | Star _
-    | RowNumberOver _
-    | LagOver _
-    | RankOver _
-    | PercentRankOver _
-    | NTileOver _
+    | WindowOver _
     // A subquery's own aggregates belong to *its* grouping, not the query
     // this expression sits in — `containsAggregate` only asks whether
     // `runSelect` needs to switch itself onto the grouped path, so these
@@ -176,11 +172,7 @@ let rec private collectWindowFuncs (expr: Expr) : Expr list =
     match expr with
     | Placeholder _ -> []
     | MatchAgainst(_, q, _) -> collectWindowFuncs q
-    | RowNumberOver _
-    | LagOver _
-    | RankOver _
-    | PercentRankOver _
-    | NTileOver _ -> [ expr ]
+    | WindowOver _ -> [ expr ]
     | FuncCall(_, args) -> args |> List.collect collectWindowFuncs
     | BinOp(_, a, b) -> collectWindowFuncs a @ collectWindowFuncs b
     | Not e
@@ -207,6 +199,91 @@ let rec private collectWindowFuncs (expr: Expr) : Expr list =
     | Exists _
     | Subquery _
     | InSubquery _ -> []
+
+/// Every topmost aggregate call inside `expr` (an aggregate nested in
+/// another aggregate's arguments is never reached — MySQL rejects that
+/// shape anyway) plus every aggregate inside a window function's own
+/// arguments, which is where `SUM(COUNT(*)) OVER (...)` keeps its grouped
+/// half. `runGroupedWindowSelect` projects each one from the grouped pass
+/// so the window pass can read it back as a plain column.
+let rec private collectAggregateCalls (registry: Registry) (expr: Expr) : Expr list =
+    let recur = collectAggregateCalls registry
+
+    match expr with
+    | _ when isAggregateCall registry expr -> [ expr ]
+    | WindowOver(fn, over) -> windowFnExprs fn @ overExprs over |> List.collect recur
+    | MatchAgainst(_, q, _) -> recur q
+    | FuncCall(_, args) -> args |> List.collect recur
+    | BinOp(_, a, b) -> recur a @ recur b
+    | Not e
+    | IsNull e
+    | IsNotNull e
+    | IsTrue e
+    | IsFalse e
+    | Distinct e
+    | OrderBy(e, _)
+    | Cast(e, _)
+    | Collate(e, _) -> recur e
+    | Like(e, p, _, _)
+    | Regexp(e, p) -> recur e @ recur p
+    | In(e, xs) -> recur e @ (xs |> List.collect recur)
+    | Between(e, lo, hi) -> recur e @ recur lo @ recur hi
+    | Case(subject, whens, elseBranch) ->
+        (subject |> Option.map recur |> Option.defaultValue [])
+        @ (whens |> List.collect (fun (c, r) -> recur c @ recur r))
+        @ (elseBranch |> Option.map recur |> Option.defaultValue [])
+    | Placeholder _
+    | Lit _
+    | Col _
+    | QualifiedCol _
+    | Star _
+    | Exists _
+    | Subquery _
+    | InSubquery _ -> []
+
+/// The sub-expressions a window function and its `OVER` clause carry —
+/// used both by the collector above and by the grouped-window rewrite,
+/// which has to substitute inside them too.
+and private windowFnExprs (fn: WindowFn) : Expr list =
+    match fn with
+    | WinRowNumber
+    | WinRank _
+    | WinPercentRank
+    | WinCumeDist -> []
+    | WinNTile n -> [ n ]
+    | WinLagLead(_, e, offset, deflt) -> e :: (Option.toList offset @ Option.toList deflt)
+    | WinFirstValue e
+    | WinLastValue e -> [ e ]
+    | WinNthValue(e, n) -> [ e; n ]
+    | WinAggregate(_, args) -> args
+
+and private overExprs (over: OverClause) : Expr list =
+    match over with
+    | OverName _ -> []
+    | OverSpec spec -> spec.PartitionBy @ (spec.OrderBy |> List.map fst)
+
+/// Rebuilds a window function with each carried sub-expression mapped.
+let private mapWindowFnExprs (f: Expr -> Expr) (fn: WindowFn) : WindowFn =
+    match fn with
+    | WinRowNumber
+    | WinRank _
+    | WinPercentRank
+    | WinCumeDist -> fn
+    | WinNTile n -> WinNTile(f n)
+    | WinLagLead(lead, e, offset, deflt) -> WinLagLead(lead, f e, Option.map f offset, Option.map f deflt)
+    | WinFirstValue e -> WinFirstValue(f e)
+    | WinLastValue e -> WinLastValue(f e)
+    | WinNthValue(e, n) -> WinNthValue(f e, f n)
+    | WinAggregate(name, args) -> WinAggregate(name, List.map f args)
+
+let private mapOverExprs (f: Expr -> Expr) (over: OverClause) : OverClause =
+    match over with
+    | OverName _ -> over
+    | OverSpec spec ->
+        OverSpec
+            { spec with
+                PartitionBy = spec.PartitionBy |> List.map f
+                OrderBy = spec.OrderBy |> List.map (fun (e, d) -> f e, d) }
 
 /// Every bare `Col` name inside `expr` — same walk shape as
 /// `collectWindowFuncs`. `runWindowedSelect` uses it to spot a `HAVING`
@@ -262,21 +339,13 @@ let rec private collectMatchAgainst (expr: Expr) : Expr list =
     | Exists _
     | Subquery _
     | InSubquery _
-    | RowNumberOver _
-    | LagOver _
-    | RankOver _
-    | PercentRankOver _
-    | NTileOver _ -> []
+    | WindowOver _ -> []
 
 let rec private collectColRefs (expr: Expr) : string list =
     match expr with
     | Col name -> [ name ]
     | MatchAgainst(cols, q, _) -> cols @ collectColRefs q
-    | RowNumberOver _
-    | LagOver _
-    | RankOver _
-    | PercentRankOver _
-    | NTileOver _ -> []
+    | WindowOver _ -> []
     | FuncCall(_, args) -> args |> List.collect collectColRefs
     | BinOp(_, a, b) -> collectColRefs a @ collectColRefs b
     | Not e
@@ -345,11 +414,7 @@ let rec private firstColumnRef (expr: Expr) : Expr option =
     | Exists _
     | Subquery _
     | InSubquery _
-    | RowNumberOver _
-    | LagOver _
-    | RankOver _
-    | PercentRankOver _
-    | NTileOver _ -> None
+    | WindowOver _ -> None
 
 /// Replaces every window-function node `collectWindowFuncs` would find with
 /// the plain `Col` reference `synthetic` maps it to (structural lookup — a
@@ -357,11 +422,11 @@ let rec private firstColumnRef (expr: Expr) : Expr option =
 /// `Comparison` instance for a `Map` key to lean on). `runWindowedSelect`'s
 /// rewrite step, generalized to substitute a window function nested inside
 /// arithmetic/`CASE`/... in place, not just a bare top-level projection.
-let rec private substituteWindowFuncs (synthetic: (Expr * string) list) (expr: Expr) : Expr =
-    match synthetic |> List.tryFind (fun (e, _) -> e = expr) with
-    | Some(_, name) -> Col name
+let rec private substituteExprs (replacements: (Expr * Expr) list) (expr: Expr) : Expr =
+    match replacements |> List.tryFind (fun (e, _) -> e = expr) with
+    | Some(_, replacement) -> replacement
     | None ->
-        let sub = substituteWindowFuncs synthetic
+        let sub = substituteExprs replacements
 
         match expr with
         | Placeholder _ -> expr
@@ -389,18 +454,22 @@ let rec private substituteWindowFuncs (synthetic: (Expr * string) list) (expr: E
         // them, which can't happen given `runWindowedSelect` always builds
         // `synthetic` from `collectWindowFuncs`'s own result — a leaf
         // passthrough is the safe default regardless.
+        // A window node that isn't itself one of the replacements still
+        // carries sub-expressions the grouped-window rewrite has to reach
+        // (`SUM(COUNT(*)) OVER (ORDER BY bucket)`).
+        | WindowOver(fn, over) -> WindowOver(mapWindowFnExprs sub fn, mapOverExprs sub over)
         | Lit _
         | Col _
         | QualifiedCol _
         | Star _
-        | RowNumberOver _
-        | LagOver _
-        | RankOver _
-        | PercentRankOver _
-        | NTileOver _
         | Exists _
         | Subquery _
         | InSubquery _ -> expr
+
+/// `substituteExprs` specialized to the window pre-pass: every window node
+/// becomes the synthetic column that now holds its computed value.
+and private substituteWindowFuncs (synthetic: (Expr * string) list) (expr: Expr) : Expr =
+    substituteExprs (synthetic |> List.map (fun (e, name) -> e, Col name)) expr
 
 let private opSymbol =
     function
@@ -450,13 +519,60 @@ let rec private exprLabel (expr: Expr) : string =
     | Case _ -> "case"
     | Star None -> "*"
     | Star(Some q) -> sprintf "%s.*" q
-    | RowNumberOver _ -> "row_number() over ()"
-    | LagOver(e, offset, _, _) -> sprintf "%s(%s) over ()" (if offset < 0L then "lead" else "lag") (exprLabel e)
-    | RankOver(dense, _, _) -> sprintf "%s() over ()" (if dense then "dense_rank" else "rank")
-    | PercentRankOver _ -> "percent_rank() over ()"
-    | NTileOver(n, _, _) -> sprintf "ntile(%d) over ()" n
+    | WindowOver(fn, over) -> sprintf "%s over %s" (windowFnLabel fn) (overLabel over)
     | Exists _ -> "exists"
     | Subquery _ -> "(...)"
+
+/// The `fn(args)` half of a window call's default column name — MySQL
+/// echoes the query's own source text there, which the parser doesn't keep,
+/// so this reconstructs it in MySQL's own lowercase spelling.
+and private windowFnLabel (fn: WindowFn) : string =
+    let args = List.map exprLabel >> String.concat ","
+
+    match fn with
+    | WinRowNumber -> "row_number()"
+    | WinRank dense -> (if dense then "dense_rank" else "rank") + "()"
+    | WinPercentRank -> "percent_rank()"
+    | WinCumeDist -> "cume_dist()"
+    | WinNTile n -> sprintf "ntile(%s)" (exprLabel n)
+    | WinLagLead(lead, e, offset, deflt) ->
+        sprintf "%s(%s)" (if lead then "lead" else "lag") (args (e :: (Option.toList offset @ Option.toList deflt)))
+    | WinFirstValue e -> sprintf "first_value(%s)" (exprLabel e)
+    | WinLastValue e -> sprintf "last_value(%s)" (exprLabel e)
+    | WinNthValue(e, n) -> sprintf "nth_value(%s)" (args [ e; n ])
+    | WinAggregate(name, args) -> exprLabel (FuncCall(name, args))
+
+and private overLabel (over: OverClause) : string =
+    match over with
+    | OverName name -> name
+    | OverSpec spec ->
+        let boundLabel bound =
+            match bound with
+            | UnboundedPreceding -> "unbounded preceding"
+            | UnboundedFollowing -> "unbounded following"
+            | CurrentRow -> "current row"
+            | BoundPreceding e -> sprintf "%s preceding" (exprLabel e)
+            | BoundFollowing e -> sprintf "%s following" (exprLabel e)
+
+        [ if not spec.PartitionBy.IsEmpty then
+              yield "partition by " + (spec.PartitionBy |> List.map exprLabel |> String.concat ",")
+          if not spec.OrderBy.IsEmpty then
+              yield
+                  "order by "
+                  + (spec.OrderBy
+                     |> List.map (fun (e, dir) -> exprLabel e + (if dir = Desc then " desc" else ""))
+                     |> String.concat ",")
+          match spec.Frame with
+          | Some frame ->
+              yield
+                  sprintf
+                      "%s between %s and %s"
+                      (if frame.Unit = FrameRows then "rows" else "range")
+                      (boundLabel frame.Start)
+                      (boundLabel frame.End)
+          | None -> () ]
+        |> String.concat " "
+        |> sprintf "(%s)"
 
 /// Neither of these recurse into `evalExpr`, so they're plain top-level
 /// `let`s rather than tied into its `rec ... and` group.
@@ -1374,11 +1490,7 @@ let rec private evalExpr (ctx: EvalContext) (expr: Expr) : Result<Value, EvalErr
     // wherever it's nested, for a plain `Col` reference before any of this
     // runs) — real MySQL itself rejects a window function outside a
     // `SELECT`'s own projection/`ORDER BY` list the same way.
-    | RowNumberOver _
-    | LagOver _
-    | RankOver _
-    | PercentRankOver _
-    | NTileOver _ -> Error(1054, "Invalid use of a group function")
+    | WindowOver _ -> Error(1054, "Invalid use of a group function")
     | Col name -> resolveCol ctx name
     | QualifiedCol(table, col) -> resolveQualifiedCol ctx table col
     | Not e -> eval e |> Result.map (fun v -> truthy v |> Option.map (not >> boolToValue) |> Option.defaultValue VNull)
@@ -2792,11 +2904,7 @@ and private rewriteCoalescedCols (map: Map<string, Expr>) (expr: Expr) : Expr =
     | Star _
     | Exists _
     | Subquery _
-    | RowNumberOver _
-    | LagOver _
-    | RankOver _
-    | PercentRankOver _
-    | NTileOver _ -> expr
+    | WindowOver _ -> expr
     | BinOp(op, a, b) -> BinOp(op, sub a, sub b)
     | Not e -> Not(sub e)
     | IsNull e -> IsNull(sub e)
@@ -3654,11 +3762,7 @@ and private rewriteAggregates
     // evaluated (see `runSelect`'s dispatch) — but a leaf passthrough here
     // is the same "nothing to pre-evaluate" answer `Star`'s already is if
     // that ever changes.
-    | RowNumberOver _
-    | LagOver _
-    | RankOver _
-    | PercentRankOver _
-    | NTileOver _
+    | WindowOver _
     // A subquery is its own scope with its own grouping — nothing inside it
     // is one of *this* query's aggregate calls to pre-evaluate, even though
     // (via `EvalContext.Outer`) it can still read this query's columns.
@@ -3755,11 +3859,7 @@ and private resolveHavingRef (columnIndex: Map<string, int list>) (projections: 
     | Lit _
     | QualifiedCol _
     | Star _
-    | RowNumberOver _
-    | LagOver _
-    | RankOver _
-    | PercentRankOver _
-    | NTileOver _
+    | WindowOver _
     // A subquery is its own scope — nothing inside it can be *this*
     // query's projection alias.
     | Exists _
@@ -4108,6 +4208,79 @@ and private runGroupedSelect
 /// handling) keeps the synthetic columns out of a bare `SELECT *`'s
 /// expansion, so they show up only where a window function itself was
 /// written.
+/// `SELECT ..., SUM(COUNT(*)) OVER (...) ... GROUP BY ...` — a window
+/// function over *grouped* rows. MySQL evaluates windows after grouping, so
+/// this splits the query in two: an inner grouped SELECT projecting every
+/// group-level leaf (the GROUP BY keys and every aggregate call, including
+/// the ones inside a window function's arguments) as a synthetic column,
+/// then the ordinary window pass over those grouped rows with each leaf
+/// substituted for its synthetic column reference.
+and private runGroupedWindowSelect
+    (store: Store)
+    (registry: Registry)
+    (dbName: string)
+    (columns: ColumnDef list)
+    (qualifiers: Map<string, ColumnDef list * int>)
+    (rows: Value[] list)
+    (select: SelectStmt)
+    (outer: EvalContext option)
+    : QueryResult * byte list * Value[] list =
+    let columnIndex = columnIndexOf columns
+
+    match select.GroupBy |> traverse (resolveGroupByRef columnIndex select.Projections) with
+    | Error(code, message) -> Err(code, message), [], []
+    | Ok groupExprs ->
+
+    let aggregates =
+        (select.Projections |> List.collect (fst >> collectAggregateCalls registry))
+        @ (select.OrderBy |> List.collect (fst >> collectAggregateCalls registry))
+
+    let leaves = (groupExprs @ aggregates) |> List.distinct
+
+    if leaves.IsEmpty then
+        // Nothing to group on and nothing to aggregate — not this path's
+        // shape; the plain window pass handles it.
+        runWindowedSelect store registry dbName columns qualifiers rows select outer
+    else
+
+    let leafNames = leaves |> List.mapi (fun i _ -> sprintf "__fsdb_group_%d__" i)
+    let replacements = List.map2 (fun leaf name -> leaf, Col name) leaves leafNames
+
+    let innerSelect =
+        { select with
+            Projections = List.map2 (fun leaf name -> leaf, Some name) leaves leafNames
+            Distinct = false
+            OrderBy = []
+            Limit = None
+            Offset = None
+            GroupBy = groupExprs }
+
+    let grouped = runGroupedSelect store registry dbName columns qualifiers rows innerSelect outer
+
+    match grouped with
+    | Err(code, message), _, _ -> Err(code, message), [], []
+    | _, _, groupedRows ->
+        let groupedColumns = leafNames |> List.map (fun name -> syntheticColumn name (TBigInt false) true)
+
+        // Each projection keeps the column name it would have had before the
+        // rewrite — the substitution below turns its expression into
+        // synthetic column references, which must not become its header.
+        let rewrite (expr: Expr, alias: string option) =
+            substituteExprs replacements expr, Some(alias |> Option.defaultValue (exprLabel expr))
+
+        let outerSelect =
+            { select with
+                Projections = select.Projections |> List.map rewrite
+                From = None
+                Joins = []
+                Where = None
+                GroupBy = []
+                Rollup = false
+                Having = None
+                OrderBy = select.OrderBy |> List.map (fun (e, d) -> substituteExprs replacements e, d) }
+
+        runWindowedSelect store registry dbName groupedColumns Map.empty groupedRows outerSelect outer
+
 and private runWindowedSelect
     (store: Store)
     (registry: Registry)
@@ -4173,15 +4346,153 @@ and private runWindowedSelect
         // relative order (`List.groupBy` is stable), which only matters as
         // a tiebreak among rows the window's own ORDER BY doesn't otherwise
         // distinguish.
+        // Every window function's `OVER` clause, resolved: a named window
+        // binds to this SELECT's own `WINDOW w AS (...)` list, an inline
+        // one is already a spec. MySQL's own error (3579) for an undefined
+        // name.
+        let resolveOver (over: OverClause) : Result<WindowSpec, EvalError> =
+            match over with
+            | OverSpec spec -> Ok spec
+            | OverName name ->
+                select.Windows
+                |> List.tryFind (fun (n, _) -> System.String.Equals(n, name, System.StringComparison.OrdinalIgnoreCase))
+                |> Option.map (snd >> Ok)
+                |> Option.defaultValue (Error(3579, sprintf "Window name '%s' is not defined." name))
+
+        // A frame offset (`ROWS BETWEEN <n> PRECEDING ...`) must be a
+        // constant — MySQL rejects a column reference there — so it
+        // evaluates once, in a no-columns literal context.
+        let literalCtx = contextFactory store registry dbName Map.empty Map.empty None [||]
+
+        // A window function's own integer argument (NTILE's bucket count,
+        // NTH_VALUE's n, LAG/LEAD's offset) — MySQL reports a bad one as
+        // 1210 naming the function.
+        let constantInt (funcName: string) (e: Expr) : Result<int64, EvalError> =
+            evalExpr literalCtx e
+            |> Result.bind (fun v ->
+                match v with
+                | VInt n -> Ok n
+                | VUInt n -> Ok(int64 n)
+                | _ -> Error(1210, sprintf "Incorrect arguments to %s" funcName))
+
+        // The numeric position a RANGE frame measures distances along —
+        // only numbers, since a RANGE offset is arithmetic on the ORDER BY
+        // value. ponytail: no `INTERVAL ... ` temporal RANGE offsets; add a
+        // date-arithmetic branch here (and in `rangeBounds`) when needed.
+        let rangeKeyOf (v: Value) : decimal option =
+            match v with
+            | VInt i -> Some(decimal i)
+            | VUInt u -> Some(decimal u)
+            | VDecimal d -> Some d
+            | VDouble d when System.Double.IsFinite d && abs d < 7.9e28 -> Some(decimal d)
+            | _ -> None
+
         let computeColumn (windowFunc: Expr) : Result<Value[], EvalError> =
-            let partitionBy, windowOrderBy =
-                match windowFunc with
-                | RowNumberOver(p, o) -> p, o
-                | LagOver(_, _, p, o) -> p, o
-                | RankOver(_, p, o) -> p, o
-                | PercentRankOver(p, o) -> p, o
-                | NTileOver(_, p, o) -> p, o
-                | _ -> [], []
+            match windowFunc with
+            | WindowOver(fn, over) ->
+
+            resolveOver over
+            |> Result.bind (fun spec ->
+
+            let partitionBy = spec.PartitionBy
+            let windowOrderBy = spec.OrderBy
+            let dirs = windowOrderBy |> List.map snd
+
+            // MySQL's default frame: a running one when the window is
+            // ordered, the whole partition when it isn't.
+            let frame =
+                spec.Frame
+                |> Option.defaultValue (
+                    if windowOrderBy.IsEmpty then
+                        { Unit = FrameRows; Start = UnboundedPreceding; End = UnboundedFollowing }
+                    else
+                        { Unit = FrameRange; Start = UnboundedPreceding; End = CurrentRow })
+
+            // MySQL names the offending window in every frame error;
+            // an inline `OVER (...)` is reported as `<unnamed window>`.
+            let windowName =
+                match over with
+                | OverName name -> name
+                | OverSpec _ -> "<unnamed window>"
+
+            let badOffset () : Result<'a, EvalError> =
+                Error(
+                    3586,
+                    sprintf "Window '%s': frame start or end is negative, NULL or of non-integral type" windowName
+                )
+
+            // A `ROWS` offset counts rows: a non-negative integer only.
+            let rowsOffset (e: Expr) : Result<int64, EvalError> =
+                evalExpr literalCtx e
+                |> Result.bind (function
+                    | VInt n when n >= 0L -> Ok n
+                    | VUInt n -> Ok(int64 n)
+                    | _ -> badOffset ())
+
+            // A `RANGE` offset is a distance along the ORDER BY value, so
+            // MySQL takes any non-negative number, `1.5 PRECEDING` included.
+            let rangeDelta (e: Expr) : Result<decimal, EvalError> =
+                evalExpr literalCtx e
+                |> Result.bind (fun v ->
+                    match rangeKeyOf v with
+                    | Some d when d >= 0M -> Ok d
+                    | _ -> badOffset ())
+
+            let hasRangeOffset =
+                frame.Unit = FrameRange
+                && [ frame.Start; frame.End ]
+                   |> List.exists (function BoundPreceding _ | BoundFollowing _ -> true | _ -> false)
+
+            // Oracle-pinned frame validation, all before any row is read.
+            let validateFrame () : Result<unit, EvalError> =
+                match frame.Start, frame.End with
+                | UnboundedFollowing, _ ->
+                    Error(3584, sprintf "Window '%s': frame start cannot be UNBOUNDED FOLLOWING." windowName)
+                | _, UnboundedPreceding ->
+                    Error(3585, sprintf "Window '%s': frame end cannot be UNBOUNDED PRECEDING." windowName)
+                // A frame that runs backwards (start after end in bound
+                // order) is MySQL's 3586, not an empty result — except
+                // between two bounds of the same kind, where `2 PRECEDING
+                // AND 1 PRECEDING` is legal and just frames fewer rows.
+                | CurrentRow, BoundPreceding _
+                | BoundFollowing _, BoundPreceding _
+                | BoundFollowing _, CurrentRow -> badOffset () |> Result.map ignore
+                | _ when hasRangeOffset && List.length windowOrderBy <> 1 ->
+                    Error(
+                        3587,
+                        sprintf
+                            "Window '%s' with RANGE N PRECEDING/FOLLOWING frame requires exactly one ORDER BY expression, of numeric or temporal type"
+                            windowName
+                    )
+                | _ -> Ok()
+
+            // The RANGE-offset ORDER BY type check MySQL makes statically,
+            // made here off the first non-NULL key instead: a string key is
+            // its 3587, a temporal one is an honest refusal (this engine has
+            // no INTERVAL frame arithmetic).
+            let validateRangeOrderType () : Result<unit, EvalError> =
+                if not hasRangeOffset then
+                    Ok()
+                else
+                    matched
+                    |> traverse (fun row -> windowOrderBy |> List.map fst |> traverse (evalExpr (ctxFor row)))
+                    |> Result.bind (fun keys ->
+                        match keys |> List.collect id |> List.tryFind (fun v -> v <> VNull) with
+                        | Some((VDate _ | VDateTime _) as v) ->
+                            Error(
+                                1235,
+                                sprintf
+                                    "This version of MySQL doesn't yet support 'RANGE frame over a %s ORDER BY expression'"
+                                    (match v with VDate _ -> "DATE" | _ -> "DATETIME")
+                            )
+                        | Some v when (rangeKeyOf v).IsNone ->
+                            Error(
+                                3587,
+                                sprintf
+                                    "Window '%s' with RANGE N PRECEDING/FOLLOWING frame requires exactly one ORDER BY expression, of numeric or temporal type"
+                                    windowName
+                            )
+                        | _ -> Ok())
 
             let keyOf (exprs: Expr list) (row: Value[]) : Result<Value list, EvalError> =
                 exprs
@@ -4191,6 +4502,9 @@ and private runWindowedSelect
             let orderKeyOf (exprs: Expr list) (row: Value[]) : Result<(Value * Collation.Collation option) list, EvalError> =
                 exprs |> traverse (evalOrderKey (ctxFor row))
 
+            validateFrame ()
+            |> Result.bind validateRangeOrderType
+            |> Result.bind (fun () ->
             matched
             |> traverse (fun row ->
                 keyOf partitionBy row
@@ -4211,11 +4525,9 @@ and private runWindowedSelect
                 // group (so ties share a rank and the next distinct value
                 // skips ahead by the tie-group's size); an empty window
                 // ORDER BY ties every row in the partition together, same as
-                // MySQL. `PERCENT_RANK` reuses this (always non-dense, see
-                // `Ast.Expr.PercentRankOver`'s doc) rather than a separate walk.
+                // MySQL. `PERCENT_RANK`/`CUME_DIST` reuse this (always
+                // non-dense) rather than a separate walk.
                 let ranksOf (group: (int * (Value list * (Value * Collation.Collation option) list * Value[])) []) : int[] =
-                    let dirs = windowOrderBy |> List.map snd
-
                     group
                     |> Array.mapi (fun pos (_, (_, ordKey, _)) -> pos, ordKey)
                     |> Array.mapFold
@@ -4230,16 +4542,138 @@ and private runWindowedSelect
                         (None, 0)
                     |> fst
 
-                match windowFunc with
-                | RowNumberOver _ ->
+                let ordKeyAt (group: (int * (Value list * (Value * Collation.Collation option) list * Value[])) []) (pos: int) =
+                    let (_, (_, ordKey, _)) = group.[pos]
+                    ordKey
+
+                let rowAt (group: (int * (Value list * (Value * Collation.Collation option) list * Value[])) []) (pos: int) =
+                    let (_, (_, _, row)) = group.[pos]
+                    row
+
+                // The current row's peer group under the window ORDER BY —
+                // the rows a RANGE frame's CURRENT ROW bound covers.
+                // ponytail: linear scan per row (O(n²) per partition); swap
+                // in a precomputed peer-boundary array if a wide partition
+                // ever shows up hot.
+                let peerLow group pos =
+                    let key = ordKeyAt group pos
+                    let mutable i = pos
+                    while i > 0 && compareByOrderKeys dirs (ordKeyAt group (i - 1)) key = 0 do
+                        i <- i - 1
+                    i
+
+                let peerHigh group (pos: int) =
+                    let key = ordKeyAt group pos
+                    let mutable i = pos
+                    while i < Array.length group - 1 && compareByOrderKeys dirs (ordKeyAt group (i + 1)) key = 0 do
+                        i <- i + 1
+                    i
+
+                // A RANGE offset bound over the (single) ORDER BY key: rows
+                // whose key sits within `delta` of the current row's, in
+                // whichever direction the ORDER BY sorts. A NULL key (or a
+                // non-numeric one) frames only its own peers, matching
+                // MySQL's treatment of NULLs as a peer group of their own.
+                let rangeBounds group pos (lowDelta: decimal option) (highDelta: decimal option) =
+                    let selfKey = ordKeyAt group pos |> List.tryHead |> Option.map fst
+
+                    match selfKey |> Option.bind rangeKeyOf with
+                    | None -> Ok(peerLow group pos, peerHigh group pos)
+                    | Some v ->
+                        let descending = dirs |> List.tryHead |> Option.map ((=) Desc) |> Option.defaultValue false
+
+                        let within (other: Value) =
+                            match rangeKeyOf other with
+                            | None -> false
+                            | Some o ->
+                                let low = lowDelta |> Option.map (fun d -> if descending then v + d else v - d)
+                                let high = highDelta |> Option.map (fun d -> if descending then v - d else v + d)
+
+                                let lowOk =
+                                    match low with
+                                    | Some l -> if descending then o <= l else o >= l
+                                    | None -> true
+
+                                let highOk =
+                                    match high with
+                                    | Some h -> if descending then o >= h else o <= h
+                                    | None -> true
+
+                                lowOk && highOk
+
+                        let keys = group |> Array.map (fun _ -> ()) |> Array.mapi (fun i () -> ordKeyAt group i |> List.tryHead |> Option.map fst)
+                        let inFrame = keys |> Array.map (function Some k -> within k | None -> false)
+
+                        match inFrame |> Array.tryFindIndex id, inFrame |> Array.tryFindIndexBack id with
+                        | Some lo, Some hi -> Ok(lo, hi)
+                        | _ -> Ok(pos, pos - 1)
+
+                // [lo, hi] row indexes (inclusive; `hi < lo` means an empty
+                // frame) this row's frame covers within its partition.
+                let frameRange group pos : Result<int * int, EvalError> =
+                    let last = Array.length group - 1
+
+                    let boundIndex (bound: FrameBound) (isStart: bool) : Result<int, EvalError> =
+                        match frame.Unit, bound with
+                        | _, UnboundedPreceding -> Ok 0
+                        | _, UnboundedFollowing -> Ok last
+                        | FrameRows, CurrentRow -> Ok pos
+                        | FrameRange, CurrentRow -> Ok(if isStart then peerLow group pos else peerHigh group pos)
+                        // Unclamped on purpose: a frame that starts past
+                        // the last row (`ROWS BETWEEN 1 FOLLOWING AND 2
+                        // FOLLOWING` on the final row) must come out empty,
+                        // which clamping to `last` would silently turn into
+                        // a one-row frame.
+                        | FrameRows, BoundPreceding e -> rowsOffset e |> Result.map (fun n -> pos - int n)
+                        | FrameRows, BoundFollowing e -> rowsOffset e |> Result.map (fun n -> pos + int n)
+                        | FrameRange, _ -> Ok pos // handled by `rangeBounds` below
+
+                    match frame.Unit, frame.Start, frame.End with
+                    | FrameRange, (BoundPreceding _ | BoundFollowing _), _
+                    | FrameRange, _, (BoundPreceding _ | BoundFollowing _) ->
+                        let deltaOf bound sign =
+                            match bound with
+                            | BoundPreceding e -> rangeDelta e |> Result.map (fun n -> Some(sign * n))
+                            | BoundFollowing e -> rangeDelta e |> Result.map (fun n -> Some(-(sign * n)))
+                            | CurrentRow -> Ok(Some 0M)
+                            | UnboundedPreceding
+                            | UnboundedFollowing -> Ok None
+
+                        deltaOf frame.Start 1M
+                        |> Result.bind (fun low -> deltaOf frame.End -1M |> Result.map (fun high -> low, high))
+                        |> Result.bind (fun (low, high) -> rangeBounds group pos low high)
+                    | _ ->
+                        boundIndex frame.Start true
+                        |> Result.bind (fun lo ->
+                            boundIndex frame.End false |> Result.map (fun hi -> max 0 lo, min last hi))
+
+                let frameRows group pos =
+                    frameRange group pos
+                    |> Result.map (fun (lo, hi) -> [ for i in lo .. hi -> rowAt group i ])
+
+                // The frame-relative row `FIRST_VALUE`/`LAST_VALUE`/
+                // `NTH_VALUE` read, or None when the frame is too short.
+                let frameRowAt group pos (pick: int -> int -> int option) =
+                    frameRange group pos
+                    |> Result.map (fun (lo, hi) -> pick lo hi |> Option.filter (fun i -> i >= lo && i <= hi) |> Option.map (rowAt group))
+
+                let perRow (compute: (int * (Value list * (Value * Collation.Collation option) list * Value[])) [] -> int -> Result<Value, EvalError>) =
                     partitions
-                    |> Array.ofList
-                    |> Array.collect (Array.mapi (fun rank (origIdx, _) -> origIdx, VInt(int64 (rank + 1))))
-                    |> Ok
-                | RankOver(dense, _, _) ->
+                    |> traverse (fun group ->
+                        group
+                        |> Array.mapi (fun pos (origIdx, _) -> compute group pos |> Result.map (fun v -> origIdx, v))
+                        |> Array.toList
+                        |> traverse id)
+                    |> Result.map (List.collect id >> Array.ofList)
+
+                let aggregateOver (name: string) (args: Expr list) group pos =
+                    frameRows group pos |> Result.bind (fun rows -> evalAggregate registry ctxFor rows name args)
+
+                match fn with
+                | WinRowNumber -> perRow (fun _ pos -> Ok(VInt(int64 pos + 1L)))
+                | WinRank dense ->
                     partitions
-                    |> Array.ofList
-                    |> Array.collect (fun group ->
+                    |> List.collect (fun group ->
                         if dense then
                             // Dense rank increments by 1 at every tie-group
                             // boundary instead of jumping to the leader's
@@ -4249,20 +4683,22 @@ and private runWindowedSelect
                                 (fun (prevKey, denseRank) (origIdx, (_, ordKey, _)) ->
                                     let newGroup =
                                         match prevKey with
-                                        | Some pk -> compareByOrderKeys (windowOrderBy |> List.map snd) pk ordKey <> 0
+                                        | Some pk -> compareByOrderKeys dirs pk ordKey <> 0
                                         | None -> true
 
                                     let rank = if newGroup then denseRank + 1 else denseRank
                                     (origIdx, VInt(int64 rank)), (Some ordKey, rank))
                                 (None, 0)
                             |> fst
+                            |> Array.toList
                         else
-                            Array.map2 (fun (origIdx, _) rank -> origIdx, VInt(int64 rank)) group (ranksOf group))
-                    |> Ok
-                | PercentRankOver _ ->
-                    partitions
+                            Array.map2 (fun (origIdx, _) rank -> origIdx, VInt(int64 rank)) group (ranksOf group)
+                            |> Array.toList)
                     |> Array.ofList
-                    |> Array.collect (fun group ->
+                    |> Ok
+                | WinPercentRank ->
+                    partitions
+                    |> List.collect (fun group ->
                         let n = group.Length
                         let ranks = ranksOf group
 
@@ -4270,64 +4706,106 @@ and private runWindowedSelect
                             (fun (origIdx, _) rank ->
                                 origIdx, VDouble(if n <= 1 then 0.0 else float (rank - 1) / float (n - 1)))
                             group
-                            ranks)
+                            ranks
+                        |> Array.toList)
+                    |> Array.ofList
                     |> Ok
-                | NTileOver(buckets, _, _) ->
-                    if buckets <= 0L then
-                        Error(1210, "Incorrect arguments to ntile")
-                    else
-                        let buckets = int64 buckets
+                | WinCumeDist ->
+                    // Rows at or before the current row's peer group, over
+                    // the partition size — so every peer shares one value.
+                    perRow (fun group pos -> Ok(VDouble(float (peerHigh group pos + 1) / float (Array.length group))))
+                | WinNTile buckets ->
+                    constantInt "ntile" buckets
+                    |> Result.bind (fun buckets ->
+                        if buckets <= 0L then
+                            Error(1210, "Incorrect arguments to ntile")
+                        else
+                            partitions
+                            |> List.collect (fun group ->
+                                let n = int64 group.Length
+                                let baseSize = n / buckets
+                                let remainder = n % buckets
 
-                        partitions
-                        |> Array.ofList
-                        |> Array.collect (fun group ->
-                            let n = int64 group.Length
-                            let baseSize = n / buckets
-                            let remainder = n % buckets
+                                // Earlier buckets absorb the remainder (a 10-row
+                                // partition into 3 buckets is 4/3/3), matching
+                                // MySQL. Computed per row in closed form rather
+                                // than materializing a `buckets`-sized array — a
+                                // huge NTILE(n) over a tiny table must stay O(rows),
+                                // not O(n).
+                                let boundary = remainder * (baseSize + 1L)
 
-                            // Earlier buckets absorb the remainder (a 10-row
-                            // partition into 3 buckets is 4/3/3), matching
-                            // MySQL. Computed per row in closed form rather
-                            // than materializing a `buckets`-sized array — a
-                            // huge NTILE(n) over a tiny table must stay O(rows),
-                            // not O(n).
-                            let boundary = remainder * (baseSize + 1L)
+                                group
+                                |> Array.mapi (fun pos (origIdx, _) ->
+                                    let p = int64 pos
 
-                            group
-                            |> Array.mapi (fun pos (origIdx, _) ->
-                                let p = int64 pos
+                                    let bucket =
+                                        if p < boundary then p / (baseSize + 1L)
+                                        else remainder + (p - boundary) / baseSize
 
-                                let bucket =
-                                    if p < boundary then p / (baseSize + 1L)
-                                    else remainder + (p - boundary) / baseSize
-
-                                origIdx, VInt(bucket + 1L))
-                            )
-                        |> Ok
-                | LagOver(lagExpr, offset, _, _) ->
+                                    origIdx, VInt(bucket + 1L))
+                                |> Array.toList)
+                            |> Array.ofList
+                            |> Ok)
+                | WinLagLead(lead, valueExpr, offsetExpr, deflt) ->
                     // `pos - offset` indexes within the same partition's
-                    // ORDER BY-sorted rows — backward for `LAG` (positive
-                    // offset), forward for `LEAD` (negative, see
-                    // `Ast.Expr.LagOver`). Outside the partition (no such
-                    // predecessor/successor) is NULL, same as real MySQL.
-                    partitions
-                    |> traverse (fun group ->
-                        group
-                        |> Array.mapi (fun pos (origIdx, _) ->
-                            let srcPos = pos - int offset
+                    // ORDER BY-sorted rows — backward for `LAG`, forward for
+                    // `LEAD`. Outside the partition is the `default`
+                    // argument, or NULL when it was omitted; the frame never
+                    // applies (MySQL ignores it for this family).
+                    offsetExpr
+                    |> Option.map (constantInt "lag/lead")
+                    |> Option.defaultValue (Ok 1L)
+                    |> Result.bind (fun offset ->
+                        let step = if lead then int offset else -(int offset)
 
-                            if srcPos < 0 || srcPos >= group.Length then
-                                Ok(origIdx, VNull)
+                        perRow (fun group pos ->
+                            let srcPos = pos + step
+
+                            if srcPos < 0 || srcPos >= Array.length group then
+                                match deflt with
+                                | Some d -> evalExpr (ctxFor (rowAt group pos)) d
+                                | None -> Ok VNull
                             else
-                                let (_, (_, _, srcRow)) = group.[srcPos]
-                                evalExpr (ctxFor srcRow) lagExpr |> Result.map (fun v -> origIdx, v))
-                        |> Array.toList
-                        |> traverse id)
-                    |> Result.map (List.collect id >> Array.ofList)
-                | _ -> Ok [||])
+                                evalExpr (ctxFor (rowAt group srcPos)) valueExpr))
+                | WinFirstValue e ->
+                    perRow (fun group pos ->
+                        frameRowAt group pos (fun lo _ -> Some lo)
+                        |> Result.bind (function
+                            | Some row -> evalExpr (ctxFor row) e
+                            | None -> Ok VNull))
+                | WinLastValue e ->
+                    perRow (fun group pos ->
+                        frameRowAt group pos (fun _ hi -> Some hi)
+                        |> Result.bind (function
+                            | Some row -> evalExpr (ctxFor row) e
+                            | None -> Ok VNull))
+                | WinNthValue(e, nExpr) ->
+                    constantInt "nth_value" nExpr
+                    |> Result.bind (fun n ->
+                        if n < 1L then
+                            Error(1210, "Incorrect arguments to nth_value")
+                        else
+                            perRow (fun group pos ->
+                                frameRowAt group pos (fun lo _ -> Some(lo + int n - 1))
+                                |> Result.bind (function
+                                    | Some row -> evalExpr (ctxFor row) e
+                                    | None -> Ok VNull)))
+                | WinAggregate(name, args) ->
+                    // Oracle-pinned refusals: MySQL 8.4 rejects both of
+                    // these as 1235 rather than evaluating them.
+                    if System.String.Equals(name, "GROUP_CONCAT", System.StringComparison.OrdinalIgnoreCase) then
+                        Error(1235, "This version of MySQL doesn't yet support 'group_concat as window function'")
+                    elif args |> List.exists (function Distinct _ -> true | _ -> false) then
+                        Error(1235, "This version of MySQL doesn't yet support '<window function>(DISTINCT ..)'")
+                    else
+                        perRow (aggregateOver name args))
+            // Back into `matched`'s own row order: every branch above
+            // computes `(original index, value)` pairs partition by
+            // partition.
             |> Result.map (fun pairs ->
                 let byIndex = pairs |> Array.toList |> Map.ofList
-                matched |> List.mapi (fun i _ -> Map.find i byIndex) |> Array.ofList)
+                matched |> List.mapi (fun i _ -> Map.find i byIndex) |> Array.ofList)))
+            | _ -> Error(1105, "window pre-pass collected a non-window node")
 
         match windowFuncs |> traverse computeColumn with
         | Error(code, message) -> Err(code, message), [], []
@@ -4335,10 +4813,18 @@ and private runWindowedSelect
             let synthetic =
                 windowFuncs |> List.mapi (fun i wf -> wf, sprintf "__fsdb_window_%d__" i)
 
+            // The ranking family always produces a number; every other
+            // window function can land on NULL (an offset outside the
+            // partition, an empty frame, an aggregate over no rows).
             let syntheticColumns =
                 synthetic
                 |> List.map (fun (wf, name) ->
-                    syntheticColumn name (TBigInt false) (match wf with LagOver _ -> true | _ -> false))
+                    let nullable =
+                        match wf with
+                        | WindowOver((WinRowNumber | WinRank _ | WinPercentRank | WinCumeDist | WinNTile _), _) -> false
+                        | _ -> true
+
+                    syntheticColumn name (TBigInt false) nullable)
 
             let extendedColumns = columns @ syntheticColumns
 
@@ -4541,13 +5027,21 @@ and private runSelect
     // packet and aborts the client's whole session.
     if select.From.IsNone && projections |> List.exists (fst >> function Star _ -> true | _ -> false) then
         Err(1096, "No tables used"), [], []
-    elif select.Having |> Option.map collectWindowFuncs |> Option.exists (List.isEmpty >> not) then
-        // MySQL rejects a window function in HAVING with a dedicated error
-        // (3593, ER_WINDOW_INVALID_WINDOW_FUNC_USE) naming the function —
-        // its errmsg really does end with a stray `.'`.
+    elif
+        [ select.Having; select.Where ]
+        |> List.exists (Option.map collectWindowFuncs >> Option.exists (List.isEmpty >> not))
+        || select.GroupBy |> List.exists (collectWindowFuncs >> List.isEmpty >> not)
+    then
+        // MySQL rejects a window function in WHERE/GROUP BY/HAVING with a
+        // dedicated error (3593, ER_WINDOW_INVALID_WINDOW_FUNC_USE) naming
+        // the function — its errmsg really does end with a stray `.'`.
         let name =
-            match select.Having |> Option.map collectWindowFuncs |> Option.defaultValue [] with
-            | LagOver(_, offset, _, _) :: _ -> if offset < 0L then "lead" else "lag"
+            match
+                (select.Having |> Option.map collectWindowFuncs |> Option.defaultValue [])
+                @ (select.Where |> Option.map collectWindowFuncs |> Option.defaultValue [])
+                @ (select.GroupBy |> List.collect collectWindowFuncs)
+            with
+            | WindowOver(fn, _) :: _ -> (windowFnLabel fn).Split('(').[0]
             | _ -> "row_number"
 
         Err(3593, sprintf "You cannot use the window function '%s' in this context.'" name), [], []
@@ -4559,8 +5053,19 @@ and private runSelect
         // seen before either can produce anything — so `rows` (lazy when a
         // `JOIN`'s hash-probe fed it straight through) is forced here rather
         // than threading `seq` any further than the paths that can actually
-        // stop early.
-        runWindowedSelect store registry dbName columns qualifiers (List.ofSeq rows) select outer
+        // stop early. A windowed SELECT that *also* groups runs the window
+        // pass over the grouped rows, MySQL's own evaluation order.
+        let grouping =
+            not select.GroupBy.IsEmpty
+            || (select.Having |> Option.exists (containsAggregate registry))
+            || projections |> List.exists (fst >> containsAggregate registry)
+            || orderBy |> List.exists (fst >> containsAggregate registry)
+            || projections |> List.exists (fst >> collectAggregateCalls registry >> List.isEmpty >> not)
+
+        if grouping then
+            runGroupedWindowSelect store registry dbName columns qualifiers (List.ofSeq rows) select outer
+        else
+            runWindowedSelect store registry dbName columns qualifiers (List.ofSeq rows) select outer
     elif
         not select.GroupBy.IsEmpty
         || (select.Having |> Option.exists (containsAggregate registry))
@@ -5006,11 +5511,7 @@ let rec private rewriteExprWith (rw: Expr -> Expr option) (expr: Expr) : Expr =
     | Col _
     | QualifiedCol _
     | Star _
-    | RowNumberOver _
-    | LagOver _
-    | RankOver _
-    | PercentRankOver _
-    | NTileOver _
+    | WindowOver _
     // `VALUES(col)`/`NEW.col` only ever occur directly in their statement's
     // own assignments/values, never inside a subquery's own text — nothing
     // to substitute inside one, so it's left as-is like `Exists` always was.
@@ -5132,11 +5633,7 @@ let rec private collectSubqueries (expr: Expr) : SelectStmt list =
     | Col _
     | QualifiedCol _
     | Star _
-    | RowNumberOver _
-    | LagOver _
-    | RankOver _
-    | PercentRankOver _
-    | NTileOver _ -> []
+    | WindowOver _ -> []
 
 /// Whether `expr` contains a subquery form (`Exists`/`Subquery`/
 /// `InSubquery`) anywhere inside it — the same walk `collectSubqueries`
@@ -5200,11 +5697,7 @@ let private isCorrelated (sub: SelectStmt) : bool =
         | Lit _
         | Col _
         | Star _
-        | RowNumberOver _
-        | LagOver _
-        | RankOver _
-        | PercentRankOver _
-        | NTileOver _ -> false
+        | WindowOver _ -> false
 
     let exprs =
         (sub.Projections |> List.map fst)

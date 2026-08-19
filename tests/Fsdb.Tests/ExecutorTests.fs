@@ -3951,12 +3951,12 @@ let tests =
                     runDefault store "INSERT INTO t VALUES (1, 10), (2, 20)" |> ignore
 
                     match runDefault store "SELECT LEAD(v) OVER (ORDER BY id) FROM t" with
-                    | ResultSet([ "lead(v) over ()" ], _) -> ()
-                    | other -> failtestf "expected the column header 'lead(v) over ()', got %A" other
+                    | ResultSet([ "lead(v) over (order by id)" ], _) -> ()
+                    | other -> failtestf "expected the column header 'lead(v) over (order by id)', got %A" other
 
                     match runDefault store "SELECT LAG(v) OVER (ORDER BY id) FROM t" with
-                    | ResultSet([ "lag(v) over ()" ], _) -> ()
-                    | other -> failtestf "expected the column header 'lag(v) over ()', got %A" other
+                    | ResultSet([ "lag(v) over (order by id)" ], _) -> ()
+                    | other -> failtestf "expected the column header 'lag(v) over (order by id)', got %A" other
 
                 testCase "a window function in ORDER BY alone (not in the SELECT list) sorts by it, NULLs first"
                 <| fun _ ->
@@ -5699,6 +5699,199 @@ let tests =
                     for sql in
                         [ "SELECT * FROM JSON_TABLE('[{}]', '$[*]' COLUMNS (v VARCHAR(10) PATH '$.v' DEFAULT 'zz' ON EMPTY)) AS jt"
                           "SELECT * FROM JSON_TABLE('[{}]', '$[*]' COLUMNS (v INT PATH '$.v' DEFAULT 7 ON EMPTY)) AS jt" ] do
+                        match Fsdb.Parser.parse sql with
+                        | Result.Error _ -> ()
+                        | Result.Ok other -> failtestf "expected a parse refusal for %s, got %A" sql other ]
+
+          // Every expectation below was read off the MySQL 8.4.11 oracle over
+          // the same six-row table (id, v, g, d):
+          //   (1,10,1,1.50) (2,10,1,2.25) (3,30,2,3.00)
+          //   (4,NULL,2,4.75) (5,50,2,5.10) (6,50,3,6.00)
+          testList
+              "window frames, the wider window-function set, and named windows"
+              [ let windowStore () =
+                    let store = newStore ()
+                    runDefault store "CREATE TABLE t (id INT, v INT, g INT, d DECIMAL(10,2))" |> ignore
+
+                    runDefault
+                        store
+                        "INSERT INTO t VALUES (1,10,1,1.50),(2,10,1,2.25),(3,30,2,3.00),(4,NULL,2,4.75),(5,50,2,5.10),(6,50,3,6.00)"
+                    |> ignore
+
+                    store
+
+                let expectRows (sql: string) (expected: string option list list) =
+                    match runDefault (windowStore ()) sql with
+                    | ResultSet(_, rows) -> Expect.equal rows expected sql
+                    | other -> failtestf "expected a resultset from %s, got %A" sql other
+
+                let expectError (sql: string) (code: int) (message: string) =
+                    match runDefault (windowStore ()) sql with
+                    | Err(actualCode, actualMessage) ->
+                        Expect.equal (actualCode, actualMessage) (code, message) sql
+                    | other -> failtestf "expected error %d from %s, got %A" code sql other
+
+                testCase "ROWS BETWEEN n PRECEDING AND CURRENT ROW is a trailing window"
+                <| fun _ ->
+                    expectRows
+                        "SELECT id, SUM(v) OVER (ORDER BY id ROWS BETWEEN 2 PRECEDING AND CURRENT ROW) AS s FROM t ORDER BY id"
+                        [ [ Some "1"; Some "10" ]
+                          [ Some "2"; Some "20" ]
+                          [ Some "3"; Some "50" ]
+                          [ Some "4"; Some "40" ]
+                          [ Some "5"; Some "80" ]
+                          [ Some "6"; Some "100" ] ]
+
+                testCase "a frame starting past the last row is empty, not clamped"
+                <| fun _ ->
+                    expectRows
+                        "SELECT id, SUM(v) OVER (ORDER BY id ROWS BETWEEN 1 FOLLOWING AND 2 FOLLOWING) AS s FROM t ORDER BY id"
+                        [ [ Some "1"; Some "40" ]
+                          [ Some "2"; Some "30" ]
+                          [ Some "3"; Some "50" ]
+                          [ Some "4"; Some "100" ]
+                          [ Some "5"; Some "50" ]
+                          [ Some "6"; None ] ]
+
+                testCase "RANGE frames count value distance, so peers enter together"
+                <| fun _ ->
+                    expectRows
+                        "SELECT id, COUNT(*) OVER (ORDER BY id RANGE BETWEEN 1 PRECEDING AND 1 FOLLOWING) AS c FROM t ORDER BY id"
+                        [ [ Some "1"; Some "2" ]
+                          [ Some "2"; Some "3" ]
+                          [ Some "3"; Some "3" ]
+                          [ Some "4"; Some "3" ]
+                          [ Some "5"; Some "3" ]
+                          [ Some "6"; Some "2" ] ]
+
+                testCase "a RANGE offset may be fractional and follows a DESC ORDER BY"
+                <| fun _ ->
+                    expectRows
+                        "SELECT id, SUM(v) OVER (ORDER BY d RANGE BETWEEN 1.5 PRECEDING AND 1.5 FOLLOWING) AS s FROM t ORDER BY id"
+                        [ [ Some "1"; Some "50" ]
+                          [ Some "2"; Some "50" ]
+                          [ Some "3"; Some "50" ]
+                          [ Some "4"; Some "100" ]
+                          [ Some "5"; Some "100" ]
+                          [ Some "6"; Some "100" ] ]
+
+                testCase "the default frame with an ORDER BY is a running total, without one the whole partition"
+                <| fun _ ->
+                    expectRows
+                        "SELECT id, SUM(d) OVER (PARTITION BY g ORDER BY id) AS running, SUM(d) OVER (PARTITION BY g) AS total FROM t ORDER BY id"
+                        [ [ Some "1"; Some "1.50"; Some "3.75" ]
+                          [ Some "2"; Some "3.75"; Some "3.75" ]
+                          [ Some "3"; Some "3.00"; Some "12.85" ]
+                          [ Some "4"; Some "7.75"; Some "12.85" ]
+                          [ Some "5"; Some "12.85"; Some "12.85" ]
+                          [ Some "6"; Some "6.00"; Some "6.00" ] ]
+
+                testCase "LAG/LEAD take an offset and a default for rows outside the partition"
+                <| fun _ ->
+                    expectRows
+                        "SELECT id, LAG(v, 2, -1) OVER (ORDER BY id) AS l2, LEAD(v, 3, -1) OVER (ORDER BY id) AS d3 FROM t ORDER BY id"
+                        [ [ Some "1"; Some "-1"; None ]
+                          [ Some "2"; Some "-1"; Some "50" ]
+                          [ Some "3"; Some "10"; Some "50" ]
+                          [ Some "4"; Some "10"; Some "-1" ]
+                          [ Some "5"; Some "30"; Some "-1" ]
+                          [ Some "6"; None; Some "-1" ] ]
+
+                testCase "FIRST_VALUE/LAST_VALUE/NTH_VALUE over a named whole-partition window"
+                <| fun _ ->
+                    expectRows
+                        ("SELECT id, FIRST_VALUE(v) OVER w AS f, LAST_VALUE(v) OVER w AS l, NTH_VALUE(v, 2) OVER w AS n2 FROM t "
+                         + "WINDOW w AS (ORDER BY id ROWS BETWEEN UNBOUNDED PRECEDING AND UNBOUNDED FOLLOWING) ORDER BY id LIMIT 2")
+                        [ [ Some "1"; Some "10"; Some "50"; Some "10" ]
+                          [ Some "2"; Some "10"; Some "50"; Some "10" ] ]
+
+                testCase "NTH_VALUE past the end of the frame is NULL"
+                <| fun _ ->
+                    expectRows
+                        "SELECT id, NTH_VALUE(v, 3) OVER (ORDER BY id ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW) AS n3 FROM t ORDER BY id LIMIT 3"
+                        [ [ Some "1"; None ]; [ Some "2"; None ]; [ Some "3"; Some "30" ] ]
+
+                testCase "PERCENT_RANK, CUME_DIST and NTILE over a tied ORDER BY"
+                <| fun _ ->
+                    expectRows
+                        ("SELECT id, ROUND(PERCENT_RANK() OVER (ORDER BY v), 4) AS pr, ROUND(CUME_DIST() OVER (ORDER BY v), 4) AS cd, "
+                         + "NTILE(3) OVER (ORDER BY id) AS bucket FROM t ORDER BY id")
+                        [ [ Some "1"; Some "0.2"; Some "0.5"; Some "1" ]
+                          [ Some "2"; Some "0.2"; Some "0.5"; Some "1" ]
+                          [ Some "3"; Some "0.6"; Some "0.6667"; Some "2" ]
+                          [ Some "4"; Some "0"; Some "0.1667"; Some "2" ]
+                          [ Some "5"; Some "0.8"; Some "1"; Some "3" ]
+                          [ Some "6"; Some "0.8"; Some "1"; Some "3" ] ]
+
+                testCase "an aggregate window over grouped rows runs after the GROUP BY"
+                <| fun _ ->
+                    expectRows
+                        "SELECT g, COUNT(*) AS c, SUM(COUNT(*)) OVER (ORDER BY g ROWS UNBOUNDED PRECEDING) AS running FROM t GROUP BY g ORDER BY g"
+                        [ [ Some "1"; Some "2"; Some "2" ]
+                          [ Some "2"; Some "3"; Some "5" ]
+                          [ Some "3"; Some "1"; Some "6" ] ]
+
+                testCase "a window function over an aggregate's output ranks the groups"
+                <| fun _ ->
+                    expectRows
+                        "SELECT g, SUM(v) AS sv, RANK() OVER (ORDER BY SUM(v) DESC) AS r FROM t GROUP BY g ORDER BY g"
+                        [ [ Some "1"; Some "20"; Some "3" ]
+                          [ Some "2"; Some "80"; Some "1" ]
+                          [ Some "3"; Some "50"; Some "2" ] ]
+
+                testCase "an undefined window name is MySQL's 3579"
+                <| fun _ ->
+                    expectError
+                        "SELECT SUM(v) OVER nosuch FROM t"
+                        3579
+                        "Window name 'nosuch' is not defined."
+
+                testCase "frame bound rules match the oracle's 3584/3585/3586/3587"
+                <| fun _ ->
+                    expectError
+                        "SELECT SUM(v) OVER (ORDER BY id ROWS BETWEEN UNBOUNDED FOLLOWING AND CURRENT ROW) FROM t"
+                        3584
+                        "Window '<unnamed window>': frame start cannot be UNBOUNDED FOLLOWING."
+
+                    expectError
+                        "SELECT SUM(v) OVER (ORDER BY id ROWS BETWEEN CURRENT ROW AND UNBOUNDED PRECEDING) FROM t"
+                        3585
+                        "Window '<unnamed window>': frame end cannot be UNBOUNDED PRECEDING."
+
+                    expectError
+                        "SELECT SUM(v) OVER (ORDER BY id ROWS BETWEEN CURRENT ROW AND 1 PRECEDING) FROM t"
+                        3586
+                        "Window '<unnamed window>': frame start or end is negative, NULL or of non-integral type"
+
+                    expectError
+                        "SELECT SUM(v) OVER w FROM t WINDOW w AS (ORDER BY id, v RANGE BETWEEN 1 PRECEDING AND CURRENT ROW)"
+                        3587
+                        "Window 'w' with RANGE N PRECEDING/FOLLOWING frame requires exactly one ORDER BY expression, of numeric or temporal type"
+
+                testCase "a window function in WHERE is MySQL's 3593"
+                <| fun _ ->
+                    expectError
+                        "SELECT id FROM t WHERE ROW_NUMBER() OVER (ORDER BY id) = 1"
+                        3593
+                        "You cannot use the window function 'row_number' in this context.'"
+
+                testCase "GROUP_CONCAT and DISTINCT as window aggregates are MySQL's 1235 refusals"
+                <| fun _ ->
+                    expectError
+                        "SELECT GROUP_CONCAT(v) OVER (ORDER BY id) FROM t"
+                        1235
+                        "This version of MySQL doesn't yet support 'group_concat as window function'"
+
+                    expectError
+                        "SELECT SUM(DISTINCT v) OVER (ORDER BY id) FROM t"
+                        1235
+                        "This version of MySQL doesn't yet support '<window function>(DISTINCT ..)'"
+
+                testCase "a negative LAG offset or frame bound is a parse error, like MySQL's grammar"
+                <| fun _ ->
+                    for sql in
+                        [ "SELECT LAG(v, -1) OVER (ORDER BY id) FROM t"
+                          "SELECT SUM(v) OVER (ORDER BY id ROWS BETWEEN -1 PRECEDING AND CURRENT ROW) FROM t" ] do
                         match Fsdb.Parser.parse sql with
                         | Result.Error _ -> ()
                         | Result.Ok other -> failtestf "expected a parse refusal for %s, got %A" sql other ] ]

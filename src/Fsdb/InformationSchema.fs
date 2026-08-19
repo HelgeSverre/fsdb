@@ -360,11 +360,9 @@ let rec private exprToSql (e: Expr) : string =
     | Exists _ -> "exists(...)"
     | Subquery _
     | InSubquery _ -> "(...)"
-    | RowNumberOver _ -> "row_number() over ()"
-    | LagOver _ -> "lag() over ()"
-    | RankOver(dense, _, _) -> (if dense then "dense_rank" else "rank") + "() over ()"
-    | PercentRankOver _ -> "percent_rank() over ()"
-    | NTileOver _ -> "ntile() over ()"
+    // A window function can't appear in a generated-column expression at
+    // all (MySQL rejects it at DDL time), so one spelling covers the case.
+    | WindowOver _ -> "window function() over ()"
 
 /// The `(N)` suffix MySQL appends to `on update CURRENT_TIMESTAMP` for a
 /// column declared with a nonzero fractional-seconds precision — empty for

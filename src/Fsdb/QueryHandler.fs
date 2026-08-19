@@ -1492,11 +1492,7 @@ let rec mapPlaceholders (replace: int -> Expr) (stmt: Statement) : Statement =
         | InSubquery(x, s) -> InSubquery(mapExpr x, mapSelect s)
         | Between(x, lo, hi) -> Between(mapExpr x, mapExpr lo, mapExpr hi)
         | FuncCall(name, args) -> FuncCall(name, List.map mapExpr args)
-        | RowNumberOver(partitionBy, orderBy) -> RowNumberOver(List.map mapExpr partitionBy, List.map mapOrderKey orderBy)
-        | LagOver(x, offset, partitionBy, orderBy) -> LagOver(mapExpr x, offset, List.map mapExpr partitionBy, List.map mapOrderKey orderBy)
-        | RankOver(dense, partitionBy, orderBy) -> RankOver(dense, List.map mapExpr partitionBy, List.map mapOrderKey orderBy)
-        | PercentRankOver(partitionBy, orderBy) -> PercentRankOver(List.map mapExpr partitionBy, List.map mapOrderKey orderBy)
-        | NTileOver(buckets, partitionBy, orderBy) -> NTileOver(buckets, List.map mapExpr partitionBy, List.map mapOrderKey orderBy)
+        | WindowOver(fn, over) -> WindowOver(mapWindowFn fn, mapOver over)
         | Distinct x -> Distinct(mapExpr x)
         | OrderBy(x, d) -> OrderBy(mapExpr x, d)
         | Cast(x, t) -> Cast(mapExpr x, t)
@@ -1508,26 +1504,56 @@ let rec mapPlaceholders (replace: int -> Expr) (stmt: Statement) : Statement =
 
     and mapOrderKey (x, d) = mapExpr x, d
 
+    and mapWindowFn (fn: WindowFn) : WindowFn =
+        match fn with
+        | WinRowNumber
+        | WinRank _
+        | WinPercentRank
+        | WinCumeDist -> fn
+        | WinNTile n -> WinNTile(mapExpr n)
+        | WinLagLead(lead, x, offset, deflt) ->
+            WinLagLead(lead, mapExpr x, Option.map mapExpr offset, Option.map mapExpr deflt)
+        | WinFirstValue x -> WinFirstValue(mapExpr x)
+        | WinLastValue x -> WinLastValue(mapExpr x)
+        | WinNthValue(x, n) -> WinNthValue(mapExpr x, mapExpr n)
+        | WinAggregate(name, args) -> WinAggregate(name, List.map mapExpr args)
+
+    and mapWindowSpec (spec: WindowSpec) : WindowSpec =
+        let mapBound bound =
+            match bound with
+            | BoundPreceding e -> BoundPreceding(mapExpr e)
+            | BoundFollowing e -> BoundFollowing(mapExpr e)
+            | other -> other
+
+        { PartitionBy = List.map mapExpr spec.PartitionBy
+          OrderBy = List.map mapOrderKey spec.OrderBy
+          Frame = spec.Frame |> Option.map (fun f -> { f with Start = mapBound f.Start; End = mapBound f.End }) }
+
+    and mapOver (over: OverClause) : OverClause =
+        match over with
+        | OverSpec spec -> OverSpec(mapWindowSpec spec)
+        | OverName _ -> over
+
     and mapFromItem (fi: FromItem) : FromItem =
         match fi with
         | FromTable _ -> fi
         | FromSubquery(sou, alias) -> FromSubquery(mapSelectOrUnion sou, alias)
         | FromJsonTable(source, path, cols, alias) -> FromJsonTable(mapExpr source, path, cols, alias)
+        | FromLateral(sou, alias) -> FromLateral(mapSelectOrUnion sou, alias)
 
     and mapJoin (j: Join) : Join = { j with On = mapExpr j.On; Table = mapFromItem j.Table }
 
     and mapSelect (s: SelectStmt) : SelectStmt =
-        { Projections = s.Projections |> List.map (fun (e, alias) -> mapExpr e, alias)
-          Distinct = s.Distinct
-          From = Option.map mapFromItem s.From
-          Joins = List.map mapJoin s.Joins
-          Where = Option.map mapExpr s.Where
-          GroupBy = List.map mapExpr s.GroupBy
-          Having = Option.map mapExpr s.Having
-          OrderBy = List.map mapOrderKey s.OrderBy
-          Limit = s.Limit
-          Offset = s.Offset
-          Locking = s.Locking }
+        { s with
+            Projections = s.Projections |> List.map (fun (e, alias) -> mapExpr e, alias)
+            From = Option.map mapFromItem s.From
+            Joins = List.map mapJoin s.Joins
+            Where = Option.map mapExpr s.Where
+            GroupBy = List.map mapExpr s.GroupBy
+            Windows = s.Windows |> List.map (fun (n, spec) -> n, mapWindowSpec spec)
+            Ctes = s.Ctes |> List.map (fun cte -> { cte with Body = mapSelectOrUnion cte.Body })
+            Having = Option.map mapExpr s.Having
+            OrderBy = List.map mapOrderKey s.OrderBy }
 
     and mapSelectOrUnion (sou: SelectOrUnion) : SelectOrUnion =
         match sou with

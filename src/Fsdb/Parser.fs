@@ -252,6 +252,9 @@ let private reservedWords =
           "all"
           "when"
           "for"
+          // Reserved in MySQL 8 too: without it, `FROM t WINDOW w AS (...)`
+          // reads `WINDOW` as `t`'s alias and dies on the window name.
+          "window"
           "lock" ],
         StringComparer.OrdinalIgnoreCase
     )
@@ -629,71 +632,115 @@ let private groupConcatAtom: Parser<Expr, unit> =
             |> List.map (fun (e, dirOpt) -> OrderBy(e, dirOpt |> Option.defaultValue Asc))
         FuncCall("GROUP_CONCAT", argExpr :: orderByArgs @ (sepOpt |> Option.toList))
 
-/// The `PARTITION BY expr, ... ORDER BY expr [ASC|DESC], ...` body shared by
-/// every `OVER (...)` clause below. Written out here rather than reusing the
-/// later `orderKey` parser (which needs `Asc`/`Desc`'s default already
-/// applied) since `orderKey` isn't defined until after `atom`; duplicating
-/// its two-line direction-defaulting logic is cheaper than reordering the
-/// file to hoist it.
-let private windowClause: Parser<Expr list * OrderKey list, unit> =
+/// The `PARTITION BY expr, ... ORDER BY expr [ASC|DESC], ... [frame]` body
+/// of an `OVER (...)`, also reused verbatim by the `WINDOW w AS (...)`
+/// clause. Written out here rather than reusing the later `orderKey` parser
+/// (which needs `Asc`/`Desc`'s default already applied) since `orderKey`
+/// isn't defined until after `atom`; duplicating its two-line
+/// direction-defaulting logic is cheaper than reordering the file to hoist
+/// it.
+let internal windowFrameBound: Parser<FrameBound, unit> =
+    choice
+        [ attempt (keyword "UNBOUNDED" >>. keyword "PRECEDING") >>% UnboundedPreceding
+          attempt (keyword "UNBOUNDED" >>. keyword "FOLLOWING") >>% UnboundedFollowing
+          attempt (keyword "CURRENT" >>. keyword "ROW") >>% CurrentRow
+          // MySQL's grammar takes only an unsigned literal/parameter here,
+          // so a negative offset is its 1064, not a runtime error.
+          expr
+          .>>. ((keyword "PRECEDING" >>% true) <|> (keyword "FOLLOWING" >>% false))
+          >>= fun (offset, preceding) ->
+              match offset with
+              | Lit(VInt n) when n < 0L -> fail "a window frame offset cannot be negative"
+              | Lit VNull -> fail "a window frame offset cannot be NULL"
+              | _ -> preturn (if preceding then BoundPreceding offset else BoundFollowing offset) ]
+
+/// `ROWS|RANGE BETWEEN a AND b`, or the shorthand `ROWS|RANGE a` — which
+/// MySQL defines as `BETWEEN a AND CURRENT ROW`.
+let internal windowFrameClause: Parser<WindowFrame, unit> =
+    ((keyword "ROWS" >>% FrameRows) <|> (keyword "RANGE" >>% FrameRange))
+    .>>. ((attempt (keyword "BETWEEN" >>. windowFrameBound .>> keyword "AND") .>>. windowFrameBound)
+          <|> (windowFrameBound |>> fun b -> b, CurrentRow))
+    |>> fun (unit', (startBound, endBound)) -> { Unit = unit'; Start = startBound; End = endBound }
+
+let internal windowSpecBody: Parser<WindowSpec, unit> =
     opt (keyword "PARTITION" >>. keyword "BY" >>. sepBy1 expr (sym ","))
     .>>. opt (
         keyword "ORDER" >>. keyword "BY"
         >>. sepBy1 (expr .>>. opt ((keyword "ASC" >>% Asc) <|> (keyword "DESC" >>% Desc))) (sym ",")
     )
-    |>> fun (partitionBy, orderBy) ->
-        let orderBy =
+    .>>. opt windowFrameClause
+    |>> fun ((partitionBy, orderBy), frame) ->
+        { PartitionBy = partitionBy |> Option.defaultValue []
+          OrderBy =
             orderBy
             |> Option.defaultValue []
             |> List.map (fun (e, dir) -> e, dir |> Option.defaultValue Asc)
+          Frame = frame }
 
-        partitionBy |> Option.defaultValue [], orderBy
+/// `OVER (...)` or `OVER window_name` — the named form resolves at
+/// execution time (see `Ast.OverClause`).
+let private overClause: Parser<OverClause, unit> =
+    keyword "OVER"
+    >>. ((between (sym "(") (sym ")") windowSpecBody |>> OverSpec) <|> (identifier |>> OverName))
 
-/// `ROW_NUMBER() OVER (...)` — see `Ast.Expr.RowNumberOver`'s doc.
-let private rowNumberOverAtom: Parser<Expr, unit> =
-    attempt (keyword "ROW_NUMBER" >>. sym "(" >>. sym ")" >>. keyword "OVER" >>. sym "(")
-    >>. windowClause
-    .>> sym ")"
-    |>> RowNumberOver
-
-/// `LAG(expr[, offset]) OVER (...)` and `LEAD(expr[, offset]) OVER (...)` —
-/// one rule, since `LEAD` is `LAG` with the offset negated (see
-/// `Ast.Expr.LagOver`'s doc).
-let private lagOverAtom: Parser<Expr, unit> =
-    attempt ((keyword "LAG" >>% 1L <|> (keyword "LEAD" >>% -1L)) .>> sym "(") .>>. expr
-    .>>. opt (sym "," >>. intTok)
-    .>> sym ")"
-    .>> keyword "OVER"
-    .>> sym "("
-    .>>. windowClause
-    .>> sym ")"
-    |>> fun (((direction, lagExpr), offsetOpt), (partitionBy, orderBy)) ->
-        LagOver(lagExpr, direction * (offsetOpt |> Option.map int64 |> Option.defaultValue 1L), partitionBy, orderBy)
-
-/// `RANK() OVER (...)` / `DENSE_RANK() OVER (...)` — see `Ast.Expr.RankOver`'s
-/// doc.
-let private rankOverAtom: Parser<Expr, unit> =
-    attempt (
-        ((keyword "DENSE_RANK" >>% true) <|> (keyword "RANK" >>% false))
-        .>> sym "(" .>> sym ")" .>> keyword "OVER" .>> sym "("
+/// The function names that may carry an `OVER` clause: the window-only
+/// family plus the aggregates MySQL also allows as window functions. Any
+/// other name followed by `OVER` is a 1064, same as MySQL.
+let private windowFunctionNames =
+    System.Collections.Generic.HashSet<string>(
+        [ "ROW_NUMBER"; "RANK"; "DENSE_RANK"; "PERCENT_RANK"; "CUME_DIST"; "NTILE"
+          "LAG"; "LEAD"; "FIRST_VALUE"; "LAST_VALUE"; "NTH_VALUE"
+          "SUM"; "COUNT"; "AVG"; "MIN"; "MAX"; "GROUP_CONCAT"; "BIT_AND"; "BIT_OR"; "BIT_XOR"
+          "STD"; "STDDEV"; "STDDEV_POP"; "STDDEV_SAMP"; "VARIANCE"; "VAR_POP"; "VAR_SAMP"
+          "JSON_ARRAYAGG" ],
+        System.StringComparer.OrdinalIgnoreCase
     )
-    .>>. windowClause
-    .>> sym ")"
-    |>> fun (dense, (partitionBy, orderBy)) -> RankOver(dense, partitionBy, orderBy)
 
-/// `PERCENT_RANK() OVER (...)` — see `Ast.Expr.PercentRankOver`'s doc.
-let private percentRankOverAtom: Parser<Expr, unit> =
-    attempt (keyword "PERCENT_RANK" >>. sym "(" >>. sym ")" >>. keyword "OVER" >>. sym "(")
-    >>. windowClause
-    .>> sym ")"
-    |>> PercentRankOver
+/// Maps a parsed `name(args)` head onto its `WindowFn`, rejecting a wrong
+/// argument count the way MySQL's own grammar/1582 does.
+let private windowFnOf (name: string) (args: Expr list) : Choice<WindowFn, string> =
+    let ok = Choice1Of2
+    let wrongCount () =
+        Choice2Of2(sprintf "Incorrect parameter count in the call to native function '%s'" (name.ToUpperInvariant()))
 
-/// `NTILE(n) OVER (...)` — see `Ast.Expr.NTileOver`'s doc.
-let private ntileOverAtom: Parser<Expr, unit> =
-    attempt (keyword "NTILE" >>. sym "(" >>. intTok .>> sym ")" .>> keyword "OVER" .>> sym "(")
-    .>>. windowClause
-    .>> sym ")"
-    |>> fun (buckets, (partitionBy, orderBy)) -> NTileOver(int64 buckets, partitionBy, orderBy)
+    match name.ToUpperInvariant(), args with
+    | "ROW_NUMBER", [] -> ok WinRowNumber
+    | "RANK", [] -> ok (WinRank false)
+    | "DENSE_RANK", [] -> ok (WinRank true)
+    | "PERCENT_RANK", [] -> ok WinPercentRank
+    | "CUME_DIST", [] -> ok WinCumeDist
+    | "NTILE", [ n ] -> ok (WinNTile n)
+    | ("LAG" | "LEAD"), (_ :: offset :: _) when (match offset with Lit(VInt n) -> n < 0L | _ -> false) ->
+        // Same unsigned-literal-only grammar rule as a frame offset above.
+        Choice2Of2 "a LAG/LEAD offset cannot be negative"
+    | ("LAG" | "LEAD"), (value :: rest) when List.length rest <= 2 ->
+        let lead = System.String.Equals(name, "LEAD", System.StringComparison.OrdinalIgnoreCase)
+        ok (WinLagLead(lead, value, List.tryItem 0 rest, List.tryItem 1 rest))
+    | "FIRST_VALUE", [ e ] -> ok (WinFirstValue e)
+    | "LAST_VALUE", [ e ] -> ok (WinLastValue e)
+    | "NTH_VALUE", [ e; n ] -> ok (WinNthValue(e, n))
+    | _, args -> ok (WinAggregate(name, args))
+    | _ -> wrongCount ()
+
+/// `fn(args) OVER (...)` — one rule for every window function (see
+/// `Ast.WindowFn`). The `followedBy` keeps a plain aggregate call
+/// (`SUM(x)` with no `OVER`) on the ordinary `funcCallAtom` path.
+let private windowCallAtom: Parser<Expr, unit> =
+    attempt (
+        (many1Satisfy2 isIdentStart isIdentChar .>> ws)
+        >>= fun name ->
+            if not (windowFunctionNames.Contains name) then
+                fail "not a window function"
+            else
+                between (sym "(") (sym ")") (sepBy (if distinctAggregates.Contains name then distinctArg else expr) (sym ","))
+                .>> followedByL (keyword "OVER") "OVER"
+                |>> fun args -> name, args
+    )
+    .>>. overClause
+    >>= fun ((name, args), over) ->
+        match windowFnOf name args with
+        | Choice1Of2 fn -> preturn (WindowOver(fn, over))
+        | Choice2Of2 message -> fail message
 
 /// `CAST(expr AS type)` — `SIGNED`/`UNSIGNED [INTEGER]` are only valid as a
 /// cast target, not a column type, so they're handled here rather than in
@@ -1093,12 +1140,8 @@ let private atom: Parser<Expr, unit> =
           timestampFuncAtom
           extractAtom
           temporalLit
+          windowCallAtom
           groupConcatAtom
-          rowNumberOverAtom
-          lagOverAtom
-          rankOverAtom
-          percentRankOverAtom
-          ntileOverAtom
           numberLit |>> Lit
           hexBytesLit |>> Lit
           introducedStringLit
@@ -2021,6 +2064,15 @@ let private derivedTable: Parser<FromItem, unit> =
     )
     |>> fun (selectOrUnion, alias) -> FromSubquery(selectOrUnion, alias)
 
+/// `LATERAL (SELECT ...) [AS] alias` — same grammar as `derivedTable`, one
+/// `LATERAL` keyword ahead of it, landing on the correlated `FromLateral`
+/// case instead (see its doc).
+let private lateralTable: Parser<FromItem, unit> =
+    attempt (keyword "LATERAL" >>. derivedTable)
+    |>> function
+        | FromSubquery(body, alias) -> FromLateral(body, alias)
+        | other -> other
+
 /// `(VALUES ROW(...), ROW(...)) [AS] alias [(c1, c2, ...)]` — MySQL 8's table
 /// value constructor. Desugared into the `UNION ALL` of one-row `SELECT`s it
 /// is exactly equivalent to, so it needs no `FromItem` case and no executor
@@ -2056,6 +2108,9 @@ let private valuesTable: Parser<FromItem, unit> =
                       Joins = []
                       Where = None
                       GroupBy = []
+                      Rollup = false
+                      Windows = []
+                      Ctes = []
                       Having = None
                       OrderBy = []
                       Limit = None
@@ -2076,10 +2131,19 @@ let private valuesTable: Parser<FromItem, unit> =
 /// One `COLUMNS (...)` entry: `name FOR ORDINALITY`, `name TYPE PATH 'path'`
 /// with its optional `DEFAULT ... ON EMPTY|ERROR` clauses, or `name TYPE
 /// EXISTS PATH 'path'`. `columnType` is the CREATE TABLE/CAST type grammar,
-/// so every declarable type works here too. ponytail: no NESTED PATH, and
-/// `ERROR ON EMPTY|ERROR` (raise instead of substitute) isn't accepted —
-/// grow this parser + `Ast.JsonTableColumn` when one's needed.
-let private jsonTableColumn: Parser<JsonTableColumn, unit> =
+/// so every declarable type works here too, and `NESTED [PATH] 'p' COLUMNS
+/// (...)` recurses into this same rule. ponytail: `ERROR ON EMPTY|ERROR`
+/// (raise instead of substitute) isn't accepted — grow this parser +
+/// `Ast.JsonTableColumn` when one's needed.
+let private jsonTableColumn, jsonTableColumnRef = createParserForwardedToRef<JsonTableColumn, unit> ()
+
+let private nestedJsonTableColumn: Parser<JsonTableColumn, unit> =
+    attempt (keyword "NESTED" >>. optional (keyword "PATH") >>. stringLit)
+    .>> keyword "COLUMNS"
+    .>>. between (sym "(") (sym ")") (sepBy1 jsonTableColumn (sym ","))
+    |>> fun (path, columns) -> NestedColumns((match path with VString s -> s | _ -> ""), columns)
+
+let private flatJsonTableColumn: Parser<JsonTableColumn, unit> =
     let asText v = match v with VString s -> s | _ -> ""
 
     // The DEFAULT value is a string of *JSON text*, not a SQL literal:
@@ -2127,6 +2191,8 @@ let private jsonTableColumn: Parser<JsonTableColumn, unit> =
                  <|> (keyword "PATH" >>. stringLit .>>. onClause "EMPTY" .>>. onClause "ERROR"
                       |>> fun ((p, onEmpty), onError) -> PathColumn(name, ty, asText p, onEmpty, onError)))
 
+jsonTableColumnRef.Value <- nestedJsonTableColumn <|> flatJsonTableColumn
+
 /// `JSON_TABLE(expr, 'path' COLUMNS (col, ...)) [AS] alias` — the alias is
 /// required (MySQL's 3667 "Every table function must have an alias"), same
 /// grammar shape as `derivedTable`'s mandatory alias. The `attempt` only
@@ -2154,7 +2220,7 @@ let private jsonTable: Parser<FromItem, unit> =
         )
 
 let private fromItem: Parser<FromItem, unit> =
-    derivedTable <|> valuesTable <|> jsonTable <|> (tableRef |>> FromTable)
+    lateralTable <|> derivedTable <|> valuesTable <|> jsonTable <|> (tableRef |>> FromTable)
 
 /// `[INNER] JOIN`, `LEFT [OUTER] JOIN`, and `RIGHT [OUTER] JOIN` all require
 /// an `ON` or a `USING (...)`; `NATURAL [INNER|LEFT [OUTER]|RIGHT [OUTER]]`
@@ -2224,7 +2290,18 @@ let private joinClause: Parser<Join, unit> =
                  (keyword "ON" >>. expr |>> fun onExpr -> { Kind = kind; Table = table; On = onExpr; Using = [] })
                  <|> (usingClause |>> fun cols -> { Kind = kind; Table = table; On = Lit(VInt 1L); Using = cols }))
 
-let private groupByClause: Parser<Expr list, unit> = keyword "GROUP" >>. keyword "BY" >>. sepBy1 expr (sym ",")
+/// `GROUP BY expr, ... [WITH ROLLUP]` — the flag rides along with the keys
+/// since it only ever qualifies them.
+let private groupByClause: Parser<Expr list * bool, unit> =
+    keyword "GROUP" >>. keyword "BY" >>. sepBy1 expr (sym ",")
+    .>>. opt (attempt (keyword "WITH" >>. keyword "ROLLUP"))
+    |>> fun (keys, rollup) -> keys, rollup.IsSome
+
+/// `WINDOW w AS (...), w2 AS (...)` — named window definitions an `OVER w`
+/// resolves against at execution time.
+let private windowClause: Parser<(string * WindowSpec) list, unit> =
+    keyword "WINDOW"
+    >>. sepBy1 (identifier .>> keyword "AS" .>>. between (sym "(") (sym ")") windowSpecBody) (sym ",")
 
 let private havingClause: Parser<Expr, unit> = keyword "HAVING" >>. expr
 
@@ -2241,10 +2318,11 @@ selectStmtRecordRef.Value <-
      .>>. opt (keyword "WHERE" >>. expr)
      .>>. opt groupByClause
      .>>. opt havingClause
+     .>>. opt windowClause
      .>>. opt (keyword "ORDER" >>. keyword "BY" >>. sepBy1 orderKey (sym ","))
      .>>. opt limitClause
      .>>. opt lockClause)
-    |>> fun ((((((((distinct, projs), fromAndJoins), where), groupBy), having), orderBy), limitOffset), locking) ->
+    |>> fun (((((((((distinct, projs), fromAndJoins), where), groupBy), having), windows), orderBy), limitOffset), locking) ->
         let limit, offset = limitOffset |> Option.defaultValue (None, None)
         let from = fromAndJoins |> Option.map fst
         let joins = fromAndJoins |> Option.map snd |> Option.defaultValue []
@@ -2254,12 +2332,44 @@ selectStmtRecordRef.Value <-
           From = from
           Joins = joins
           Where = where
-          GroupBy = groupBy |> Option.defaultValue []
+          GroupBy = groupBy |> Option.map fst |> Option.defaultValue []
+          Rollup = groupBy |> Option.map snd |> Option.defaultValue false
+          Windows = windows |> Option.defaultValue []
+          Ctes = []
           Having = having
           OrderBy = orderBy |> Option.defaultValue []
           Limit = limit
           Offset = offset
           Locking = locking.IsSome }
+
+/// `WITH [RECURSIVE] name [(col, ...)] AS (body), ...` — the CTE list that
+/// may precede a `SELECT`/`UNION`. Attached to the statement's *first*
+/// `SelectStmt` (`Ctes`), which is where the executor pushes the scope from
+/// for a union too (`Ast.Statement.Union` carries no clause list of its
+/// own). ponytail: CTEs only lead a top-level `SELECT`/`UNION` — not
+/// `INSERT ... WITH ...`, not a derived table's own body; both are a
+/// `withClause` call away if a client sends one.
+let private withClause: Parser<CommonTableExpr list, unit> =
+    keyword "WITH" >>. opt (keyword "RECURSIVE")
+    >>= fun recursive ->
+        sepBy1
+            (identifier
+             .>>. opt (between (sym "(") (sym ")") (sepBy1 identifier (sym ",")))
+             .>> keyword "AS"
+             .>>. between
+                 (sym "(")
+                 (sym ")")
+                 (selectOrUnionBranches
+                  >>= fun (first, rest) ->
+                      match rest with
+                      | [] -> preturn (PlainSelect(fst first))
+                      | _ -> unionTailClause |>> fun tail -> combineUnion first rest tail |> UnionSelect)
+             |>> fun ((name, cols), body) ->
+                 { CteName = name
+                   CteColumns = cols |> Option.defaultValue []
+                   Recursive = recursive.IsSome
+                   Body = body })
+            (sym ",")
 
 /// A single `SELECT`, or a `UNION`-chained sequence of them
 /// (`selectOrUnionBranches`, shared with `derivedTable` — see its doc). Each
@@ -2268,8 +2378,13 @@ selectStmtRecordRef.Value <-
 /// (`unionTailClause`) is tried once at least one `UNION` branch parsed —
 /// `combineUnion` picks between the two per branch/clause.
 let private selectOrUnionStmt: Parser<Statement, unit> =
-    selectOrUnionBranches
-    >>= fun (first, rest) ->
+    opt withClause .>>. selectOrUnionBranches
+    >>= fun (ctes, (first, rest)) ->
+        let first =
+            match ctes with
+            | Some ctes -> { fst first with Ctes = ctes }, snd first
+            | None -> first
+
         match rest with
         | [] -> preturn (Select(fst first))
         | _ -> unionTailClause |>> fun tail -> combineUnion first rest tail |> Union

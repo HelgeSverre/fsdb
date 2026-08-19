@@ -191,6 +191,7 @@ let sqlStateForCode (code: int) : string =
     | 1265 -> "01000" // ER_WARN_DATA_TRUNCATED
     | 1690 -> "22003" // ER_DATA_OUT_OF_RANGE
     | 1426 -> "42000" // ER_TOO_BIG_PRECISION
+    | 1235 -> "42000" // ER_NOT_SUPPORTED_YET
     | 1451 -> "23000" // ER_ROW_IS_REFERENCED_2
     | 1452 -> "23000" // ER_NO_REFERENCED_ROW_2
     | _ -> "HY000"

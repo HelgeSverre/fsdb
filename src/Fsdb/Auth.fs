@@ -475,11 +475,7 @@ let rec private exprReadTables (defaultDb: string) (expr: Expr) : (string * stri
     | Col _
     | QualifiedCol _
     | Star _
-    | RowNumberOver _
-    | LagOver _
-    | RankOver _
-    | PercentRankOver _
-    | NTileOver _ -> []
+    | WindowOver _ -> []
 
 and private fromItemReadTables (defaultDb: string) (item: FromItem) : (string * string) list =
     match item with

@@ -115,43 +115,18 @@ type Expr =
     | InSubquery of Expr * SelectStmt
     | Between of Expr * lo: Expr * hi: Expr
     | FuncCall of name: string * args: Expr list
-    /// `ROW_NUMBER() OVER (PARTITION BY expr, ... ORDER BY expr, ...)` —
-    /// the one window-function shape Laravel's constrained eager loading
-    /// compiles a relation query's `->limit()` into (e.g. `->with(['messages'
-    /// => fn ($q) => $q->orderBy('created_at', 'desc')->limit(1)])`).
     /// `MATCH (cols) AGAINST ('query' [mode])` — relevance over the
     /// FULLTEXT-indexed columns; computed as a whole-table pre-pass (the
     /// IDF half needs corpus statistics), like the window functions below.
     | MatchAgainst of columns: string list * query: Expr * mode: MatchMode
-    | RowNumberOver of partitionBy: Expr list * orderBy: OrderKey list
-    /// `LAG(expr[, offset]) OVER (PARTITION BY expr, ... ORDER BY expr, ...)`
-    /// — the value of `expr` `offset` rows back (default 1) within the same
-    /// partition, ordered by the window's own `ORDER BY`; `NULL` for a row
-    /// with no such predecessor. `LEAD` is the same node with the offset
-    /// negated (rows *forward*), so one case covers both directions.
-    /// Unlike `RowNumberOver`, this can sit
-    /// anywhere inside a larger expression (`value - LAG(value) OVER (...)`
-    /// is a real report query), so `Executor` finds and substitutes every
-    /// occurrence rather than only a bare top-level projection.
-    /// ponytail: no `ROWS BETWEEN`/frame clauses — every window here is the
-    /// implicit whole-partition frame; add frame support if a migration's
-    /// query needs one.
-    | LagOver of expr: Expr * offset: int64 * partitionBy: Expr list * orderBy: OrderKey list
-    /// `RANK() OVER (...)` (`dense = false`) / `DENSE_RANK() OVER (...)`
-    /// (`dense = true`) — one case for both, same pairing `LagOver` uses for
-    /// `LAG`/`LEAD`. Both assign every row in a partition the same rank as
-    /// any row it ties with under the window's `ORDER BY` (all rows tie when
-    /// there's no `ORDER BY`); `RANK` then skips as many following ranks as
-    /// there were tied rows, `DENSE_RANK` never skips.
-    | RankOver of dense: bool * partitionBy: Expr list * orderBy: OrderKey list
-    /// `PERCENT_RANK() OVER (...)` — `(rank - 1) / (rows_in_partition - 1)`
-    /// using the same tie-aware `RANK` numbering as `RankOver(false, ...)`;
-    /// `0` for a one-row partition (MySQL never divides by zero here).
-    | PercentRankOver of partitionBy: Expr list * orderBy: OrderKey list
-    /// `NTILE(buckets) OVER (...)` — splits each partition into `buckets`
-    /// groups as evenly as possible, earlier groups absorbing the remainder
-    /// (a 10-row partition into 3 buckets is 4/3/3, not 3/3/4).
-    | NTileOver of buckets: int64 * partitionBy: Expr list * orderBy: OrderKey list
+    /// `fn(...) OVER (spec)` / `fn(...) OVER window_name` — every window
+    /// function in one case (see `WindowFn`), since the executor's pre-pass
+    /// treats them all the same way: partition, order, frame, then one
+    /// synthetic column per distinct node. A window call can sit anywhere
+    /// inside a larger expression (`value - LAG(value) OVER (...)` is a real
+    /// report query), so `Executor` finds and substitutes every occurrence
+    /// rather than only a bare top-level projection.
+    | WindowOver of fn: WindowFn * over: OverClause
     /// Marks `DISTINCT expr` as an aggregate call's argument (`COUNT(DISTINCT
     /// x)`, `SUM(DISTINCT x)`, ...) — only meaningful as the (unwrapped) sole
     /// argument of a `FuncCall` the executor recognizes as an aggregate;
@@ -200,6 +175,82 @@ and Direction =
 
 /// One `ORDER BY` key: the expression to sort by and its direction.
 and OrderKey = Expr * Direction
+
+/// `ROWS` counts physical rows around the current one; `RANGE` counts
+/// *values* of the window's single `ORDER BY` key (so tied rows — peers —
+/// enter and leave the frame together).
+and FrameUnit =
+    | FrameRows
+    | FrameRange
+
+/// One end of a `BETWEEN ... AND ...` frame. The `Expr` of a
+/// `PRECEDING`/`FOLLOWING` bound is MySQL's offset — a row count under
+/// `ROWS`, a value distance under `RANGE`.
+and FrameBound =
+    | UnboundedPreceding
+    | BoundPreceding of Expr
+    | CurrentRow
+    | BoundFollowing of Expr
+    | UnboundedFollowing
+
+and WindowFrame =
+    { Unit: FrameUnit
+      Start: FrameBound
+      End: FrameBound }
+
+/// An `OVER (...)` body. `Frame = None` means MySQL's default: `RANGE
+/// BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW` when `OrderBy` is non-empty
+/// (a running total), the whole partition when it's empty.
+and WindowSpec =
+    { PartitionBy: Expr list
+      OrderBy: OrderKey list
+      Frame: WindowFrame option }
+
+/// `OVER (...)` written inline, or `OVER w` naming a `WINDOW w AS (...)`
+/// definition — resolved against `SelectStmt.Windows` at execution time
+/// (the parser can't: the `WINDOW` clause is written *after* the
+/// projections that reference it).
+/// ponytail: no `OVER (w ORDER BY ...)` inheriting-plus-extending form —
+/// add a spec-merge in `Executor.resolveWindowSpec` if something needs it.
+and OverClause =
+    | OverSpec of WindowSpec
+    | OverName of string
+
+/// Which window function a `WindowOver` node calls. Frame-sensitive ones
+/// (the aggregates, `FIRST_VALUE`/`LAST_VALUE`/`NTH_VALUE`) read only the
+/// rows the frame covers; the ranking and offset families ignore the frame
+/// entirely, exactly as MySQL defines them.
+and WindowFn =
+    | WinRowNumber
+    /// `RANK()` (`dense = false`) / `DENSE_RANK()` (`dense = true`) — both
+    /// give tied rows (under the window `ORDER BY`) the same number; `RANK`
+    /// then skips as many following ranks as there were ties, `DENSE_RANK`
+    /// never skips.
+    | WinRank of dense: bool
+    /// `(rank - 1) / (rows_in_partition - 1)`, using `RANK`'s tie-aware
+    /// numbering; `0` for a one-row partition (MySQL never divides by zero).
+    | WinPercentRank
+    /// `CUME_DIST()` — rows at or before the current row's peer group over
+    /// the partition size.
+    | WinCumeDist
+    /// `NTILE(n)` — splits each partition into `n` groups as evenly as
+    /// possible, earlier groups absorbing the remainder (a 10-row partition
+    /// into 3 buckets is 4/3/3, not 3/3/4).
+    | WinNTile of buckets: Expr
+    /// `LAG(expr[, offset[, default]])` / `LEAD(...)` (`lead = true`) — the
+    /// value `offset` rows back (or forward) in the partition; `default`
+    /// (NULL when omitted) when that row falls outside the partition.
+    | WinLagLead of lead: bool * expr: Expr * offset: Expr option * deflt: Expr option
+    | WinFirstValue of Expr
+    | WinLastValue of Expr
+    /// `NTH_VALUE(expr, n)` — the nth row of the frame (1-based), NULL when
+    /// the frame is shorter than `n`.
+    | WinNthValue of Expr * n: Expr
+    /// An ordinary aggregate used as a window function (`SUM(x) OVER (...)`)
+    /// — evaluated by handing the frame's rows to the same
+    /// `Executor.rewriteAggregates` a `GROUP BY` uses, so every aggregate
+    /// (including `GROUP_CONCAT`/`COUNT(DISTINCT ...)`) works unchanged.
+    | WinAggregate of name: string * args: Expr list
 
 /// A column's `DEFAULT`: either a fixed value, or `CURRENT_TIMESTAMP`, which
 /// evaluates fresh at insert time rather than once at parse time — kept as
@@ -311,6 +362,20 @@ and SelectOrUnion =
     | PlainSelect of SelectStmt
     | UnionSelect of first: SelectStmt * rest: (SetOp * SelectStmt) list * orderBy: OrderKey list * limit: int option * offset: int option
 
+/// One `WITH` binding: `name [(col, ...)] AS (body)`. `Recursive` is the
+/// whole `WITH RECURSIVE` clause's flag (MySQL marks the clause, not the
+/// individual CTE), which only changes how the body is evaluated — a
+/// recursive body's `UNION [ALL]` splits into an anchor half and a half
+/// that re-reads `name` until it stops producing rows.
+/// (Field names are `Cte`-prefixed so record-label inference elsewhere in
+/// the AST — `ForeignKeyDef`, `IndexDef`, both `Name`/`Columns` records —
+/// keeps resolving to what it always did.)
+and CommonTableExpr =
+    { CteName: string
+      CteColumns: string list
+      Recursive: bool
+      Body: SelectOrUnion }
+
 /// One `UNION`/`INTERSECT`/`EXCEPT` between two branches. `all` keeps
 /// duplicates (multiset semantics); without it the operator's result is
 /// distinct, which is MySQL's default for all three.
@@ -333,6 +398,13 @@ and SetOp =
 and FromItem =
     | FromTable of TableRef
     | FromSubquery of SelectOrUnion * alias: string
+    /// `LATERAL (SELECT ...) AS alias` — a derived table that may reference
+    /// the columns of the tables to its left in the same `FROM`, so it is
+    /// re-evaluated once per left row (like `FromJsonTable`'s correlated
+    /// form) instead of resolved once. Only ever reachable as a join
+    /// target: a leading `FROM LATERAL (...)` has nothing to correlate to,
+    /// and MySQL rejects it too.
+    | FromLateral of SelectOrUnion * alias: string
     /// `JSON_TABLE(expr, 'path' COLUMNS (...)) alias` — the table function
     /// that explodes a JSON document into rows, one per node the row path
     /// matches. `source` is an arbitrary expression so the correlated form
@@ -360,6 +432,13 @@ and JsonTableColumn =
     /// `name TYPE EXISTS PATH 'path'` — 1 when the path matches at least one
     /// node in the row, 0 otherwise; never NULL, never an error.
     | ExistsColumn of name: string * ColumnType * path: string
+    /// `NESTED PATH 'path' COLUMNS (...)` — expands each node the nested
+    /// path matches *within* the parent node into its own row, repeating
+    /// the parent's columns; a parent whose nested path matches nothing
+    /// still yields one row with the nested columns NULL (MySQL's outer
+    /// semantics), and sibling NESTED PATHs never cross-join — each
+    /// sibling's rows carry NULL for the others' columns.
+    | NestedColumns of path: string * columns: JsonTableColumn list
 
 /// `INNER`/`CROSS JOIN` require a matching row on `On` (`CROSS JOIN` has no
 /// `ON` at all — the parser gives it the always-true `Lit (VInt 1L)` so it
@@ -423,6 +502,17 @@ and SelectStmt =
       /// here, since resolving an alias needs the sibling projection list in
       /// scope.
       GroupBy: Expr list
+      /// `GROUP BY ... WITH ROLLUP` — adds one super-aggregate row per
+      /// dropped `GroupBy` suffix (plus the grand total), each with the
+      /// dropped keys reported as NULL and `GROUPING(key)` returning 1.
+      Rollup: bool
+      /// `WINDOW w AS (...), w2 AS (...)` definitions an `OVER w` in this
+      /// same SELECT resolves against (see `OverClause`).
+      Windows: (string * WindowSpec) list
+      /// `WITH [RECURSIVE] name AS (...)` bindings in scope for this
+      /// statement — visible to its own FROM, its joins, and every
+      /// subquery nested inside it (see `Executor.cteScope`).
+      Ctes: CommonTableExpr list
       /// `HAVING` filters *grouped* rows (after `GroupBy` collapses the
       /// `WHERE`-filtered set, or the whole result as one group when
       /// `GroupBy` is empty) — unlike `Where`, its expression may contain

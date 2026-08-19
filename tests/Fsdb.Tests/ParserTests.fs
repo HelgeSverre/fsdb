@@ -28,6 +28,9 @@ let private mkSelect
           Joins = []
           Where = where
           GroupBy = []
+          Rollup = false
+          Windows = []
+          Ctes = []
           Having = None
           OrderBy = orderBy
           Limit = limit
@@ -63,6 +66,9 @@ let tests =
                               Joins = []
                               Where = None
                               GroupBy = []
+                              Rollup = false
+                              Windows = []
+                              Ctes = []
                               Having = None
                               OrderBy = []
                               Limit = None
@@ -81,6 +87,9 @@ let tests =
                               Joins = []
                               Where = None
                               GroupBy = []
+                              Rollup = false
+                              Windows = []
+                              Ctes = []
                               Having = None
                               OrderBy = []
                               Limit = None
@@ -1058,6 +1067,9 @@ let tests =
                               Joins = []
                               Where = Some(BinOp(Gt, col "x", Lit(VInt 1L)))
                               GroupBy = []
+                              Rollup = false
+                              Windows = []
+                              Ctes = []
                               Having = None
                               OrderBy = []
                               Limit = None
@@ -1090,19 +1102,19 @@ let tests =
               [ testCase "PARTITION BY and ORDER BY both present"
                 <| fun _ ->
                     match parseOk "SELECT ROW_NUMBER() OVER (PARTITION BY a ORDER BY b DESC) AS rn FROM t" with
-                    | Select { Projections = [ RowNumberOver([ Col "a" ], [ Col "b", Desc ]), Some "rn" ] } -> ()
+                    | Select { Projections = [ WindowOver(WinRowNumber, OverSpec { PartitionBy = [ Col "a" ]; OrderBy = [ Col "b", Desc ]; Frame = None }), Some "rn" ] } -> ()
                     | other -> failtestf "expected a RowNumberOver projection, got %A" other
 
                 testCase "PARTITION BY with multiple columns, ORDER BY defaulting to ASC"
                 <| fun _ ->
                     match parseOk "SELECT ROW_NUMBER() OVER (PARTITION BY a, b ORDER BY c) FROM t" with
-                    | Select { Projections = [ RowNumberOver([ Col "a"; Col "b" ], [ Col "c", Asc ]), None ] } -> ()
+                    | Select { Projections = [ WindowOver(WinRowNumber, OverSpec { PartitionBy = [ Col "a"; Col "b" ]; OrderBy = [ Col "c", Asc ]; Frame = None }), None ] } -> ()
                     | other -> failtestf "expected a two-column partition key, got %A" other
 
                 testCase "OVER () with neither PARTITION BY nor ORDER BY"
                 <| fun _ ->
                     match parseOk "SELECT ROW_NUMBER() OVER () FROM t" with
-                    | Select { Projections = [ RowNumberOver([], []), None ] } -> ()
+                    | Select { Projections = [ WindowOver(WinRowNumber, OverSpec { PartitionBy = []; OrderBy = []; Frame = None }), None ] } -> ()
                     | other -> failtestf "expected an empty partition/order spec, got %A" other ]
 
           testList
@@ -1110,34 +1122,34 @@ let tests =
               [ testCase "no explicit offset defaults to 1"
                 <| fun _ ->
                     match parseOk "SELECT LAG(value) OVER (PARTITION BY a ORDER BY b) AS prev FROM t" with
-                    | Select { Projections = [ LagOver(Col "value", 1L, [ Col "a" ], [ Col "b", Asc ]), Some "prev" ] } -> ()
+                    | Select { Projections = [ WindowOver(WinLagLead(false, Col "value", None, None), OverSpec { PartitionBy = [ Col "a" ]; OrderBy = [ Col "b", Asc ]; Frame = None }), Some "prev" ] } -> ()
                     | other -> failtestf "expected a LagOver projection with offset 1, got %A" other
 
                 testCase "an explicit offset is parsed through"
                 <| fun _ ->
                     match parseOk "SELECT LAG(value, 2) OVER (ORDER BY b) FROM t" with
-                    | Select { Projections = [ LagOver(Col "value", 2L, [], [ Col "b", Asc ]), None ] } -> ()
+                    | Select { Projections = [ WindowOver(WinLagLead(false, Col "value", Some(Lit(VInt 2L)), None), OverSpec { PartitionBy = []; OrderBy = [ Col "b", Asc ]; Frame = None }), None ] } -> ()
                     | other -> failtestf "expected offset 2, got %A" other
 
                 testCase "usable nested inside arithmetic"
                 <| fun _ ->
                     match parseOk "SELECT value - LAG(value) OVER (ORDER BY b) AS diff FROM t" with
-                    | Select { Projections = [ BinOp(Sub, Col "value", LagOver(Col "value", 1L, [], [ Col "b", Asc ])), Some "diff" ] } -> ()
+                    | Select { Projections = [ BinOp(Sub, Col "value", WindowOver(WinLagLead(false, Col "value", None, None), OverSpec { PartitionBy = []; OrderBy = [ Col "b", Asc ]; Frame = None })), Some "diff" ] } -> ()
                     | other -> failtestf "expected LagOver nested in a BinOp, got %A" other ]
 
           testList
               "LEAD(expr[, offset]) OVER (...)"
-              [ testCase "no explicit offset defaults to a LagOver with offset -1"
+              [ testCase "no explicit offset leaves the offset argument absent"
                 <| fun _ ->
                     match parseOk "SELECT LEAD(value) OVER (ORDER BY id) FROM t" with
-                    | Select { Projections = [ LagOver(Col "value", -1L, [], [ Col "id", Asc ]), None ] } -> ()
-                    | other -> failtestf "expected a LagOver projection with offset -1, got %A" other
+                    | Select { Projections = [ WindowOver(WinLagLead(true, Col "value", None, None), _), None ] } -> ()
+                    | other -> failtestf "expected a LEAD window projection, got %A" other
 
-                testCase "an explicit offset is negated through"
+                testCase "an explicit offset is parsed through"
                 <| fun _ ->
                     match parseOk "SELECT LEAD(value, 2) OVER (ORDER BY id) FROM t" with
-                    | Select { Projections = [ LagOver(Col "value", -2L, [], [ Col "id", Asc ]), None ] } -> ()
-                    | other -> failtestf "expected offset -2, got %A" other ]
+                    | Select { Projections = [ WindowOver(WinLagLead(true, Col "value", Some(Lit(VInt 2L)), None), _), None ] } -> ()
+                    | other -> failtestf "expected offset 2, got %A" other ]
 
           testList
               "UPDATE / DELETE"

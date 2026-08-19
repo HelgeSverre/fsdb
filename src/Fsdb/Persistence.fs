@@ -323,20 +323,6 @@ let rec private encodeExpr (w: Writer) (expr: Expr) : unit =
         writeStr w name
         w.WriteInt32LE(List.length args)
         List.iter (encodeExpr w) args
-    | RowNumberOver(partitionBy, orderBy) ->
-        w.WriteByte 0x0Fuy
-        w.WriteInt32LE(List.length partitionBy)
-        List.iter (encodeExpr w) partitionBy
-        w.WriteInt32LE(List.length orderBy)
-        List.iter (fun (e, d) -> encodeExpr w e; encodeDirection w d) orderBy
-    | LagOver(e, offset, partitionBy, orderBy) ->
-        w.WriteByte 0x10uy
-        encodeExpr w e
-        w.WriteInt64LE offset
-        w.WriteInt32LE(List.length partitionBy)
-        List.iter (encodeExpr w) partitionBy
-        w.WriteInt32LE(List.length orderBy)
-        List.iter (fun (e, d) -> encodeExpr w e; encodeDirection w d) orderBy
     | Distinct e -> w.WriteByte 0x11uy; encodeExpr w e
     | OrderBy(e, d) -> w.WriteByte 0x12uy; encodeExpr w e; encodeDirection w d
     | Cast(e, t) -> w.WriteByte 0x13uy; encodeExpr w e; encodeColumnType w t
@@ -359,30 +345,12 @@ let rec private encodeExpr (w: Writer) (expr: Expr) : unit =
         | Some e ->
             w.WriteByte 1uy
             encodeExpr w e
-    | RankOver(dense, partitionBy, orderBy) ->
-        w.WriteByte 0x17uy
-        w.WriteByte(if dense then 1uy else 0uy)
-        w.WriteInt32LE(List.length partitionBy)
-        List.iter (encodeExpr w) partitionBy
-        w.WriteInt32LE(List.length orderBy)
-        List.iter (fun (e, d) -> encodeExpr w e; encodeDirection w d) orderBy
-    | PercentRankOver(partitionBy, orderBy) ->
-        w.WriteByte 0x18uy
-        w.WriteInt32LE(List.length partitionBy)
-        List.iter (encodeExpr w) partitionBy
-        w.WriteInt32LE(List.length orderBy)
-        List.iter (fun (e, d) -> encodeExpr w e; encodeDirection w d) orderBy
-    | NTileOver(buckets, partitionBy, orderBy) ->
-        w.WriteByte 0x19uy
-        w.WriteInt64LE buckets
-        w.WriteInt32LE(List.length partitionBy)
-        List.iter (encodeExpr w) partitionBy
-        w.WriteInt32LE(List.length orderBy)
-        List.iter (fun (e, d) -> encodeExpr w e; encodeDirection w d) orderBy
     | InSubquery _
     | Exists _
     | Subquery _
-    | MatchAgainst _ -> failwithf "Persistence: a GENERATED column can't hold a subquery or MATCH (MySQL itself rejects them there)"
+    | WindowOver _
+    | MatchAgainst _ ->
+        failwithf "Persistence: a GENERATED column can't hold a subquery, MATCH or window function (MySQL itself rejects them there)"
 
 let rec private decodeExpr (r: #IReader) : Expr =
     let optExpr () =
@@ -414,11 +382,6 @@ let rec private decodeExpr (r: #IReader) : Expr =
     | 0x0Cuy -> In(decodeExpr r, exprList ())
     | 0x0Duy -> Between(decodeExpr r, decodeExpr r, decodeExpr r)
     | 0x0Euy -> FuncCall(readStr r, exprList ())
-    | 0x0Fuy -> RowNumberOver(exprList (), orderByList ())
-    | 0x10uy ->
-        let e = decodeExpr r
-        let offset = r.ReadInt64LE()
-        LagOver(e, offset, exprList (), orderByList ())
     | 0x11uy -> Distinct(decodeExpr r)
     | 0x12uy -> OrderBy(decodeExpr r, decodeDirection r)
     | 0x13uy -> Cast(decodeExpr r, decodeColumnType r)
@@ -429,13 +392,6 @@ let rec private decodeExpr (r: #IReader) : Expr =
         let whens = List.init (r.ReadInt32LE()) (fun _ -> decodeExpr r, decodeExpr r)
         let elseBranch = optExpr ()
         Case(subject, whens, elseBranch)
-    | 0x17uy ->
-        let dense = r.ReadByte() = 1uy
-        RankOver(dense, exprList (), orderByList ())
-    | 0x18uy -> PercentRankOver(exprList (), orderByList ())
-    | 0x19uy ->
-        let buckets = r.ReadInt64LE()
-        NTileOver(buckets, exprList (), orderByList ())
     | tag -> failwithf "Persistence: unknown Expr tag 0x%02x in WAL/snapshot" tag
 
 // ---------------------------------------------------------------------
