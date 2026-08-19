@@ -70,6 +70,11 @@ type ColumnType =
     | TTime of fsp: int
     | TYear
     | TJson
+    /// MySQL 9's `VECTOR(N)` — N little-endian 4-byte floats stored/wired as
+    /// a binary string. A bare `VECTOR` declares MySQL's default dimension
+    /// 2048; the 16383 ceiling (and the can't-be-a-key rule) is enforced at
+    /// DDL time in `Storage`, where the column name is in scope to report.
+    | TVector of dim: int
 
 // `Expr` and `SelectStmt` are mutually recursive: `Exists`/a scalar subquery
 // carries a nested `SelectStmt`, whose projections/`WHERE` are themselves

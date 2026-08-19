@@ -71,6 +71,7 @@ let private dataTypeName (ty: ColumnType) : string =
     | TTime _ -> "time"
     | TYear -> "year"
     | TJson -> "json"
+    | TVector _ -> "vector"
 
 /// `information_schema.columns.column_type` — the full declared type text
 /// (`int unsigned`, `varchar(255)`, `enum('a','b')`, ...), the same text
@@ -111,6 +112,9 @@ let columnTypeText (ty: ColumnType) : string =
     | TTime fsp -> if fsp > 0 then sprintf "time(%d)" fsp else "time"
     | TYear -> "year(4)"
     | TJson -> "json"
+    // Always with the dimension — a bare `VECTOR` declaration reports its
+    // implicit 2048, the way MySQL 9 echoes it back.
+    | TVector dim -> sprintf "vector(%d)" dim
 
 /// `character_maximum_length` — only meaningful for the string-ish types;
 /// MySQL's fixed per-type ceilings for the `TEXT`/`BLOB` family (`TINYTEXT`
@@ -1439,7 +1443,8 @@ let private showCreateTableDDL (t: Table) : string =
             | TBlob
             | TMediumBlob
             | TLongBlob
-            | TJson -> true
+            | TJson
+            | TVector _ -> true
             | _ -> false
 
         let defaultPart =

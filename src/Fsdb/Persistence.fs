@@ -198,6 +198,7 @@ let private encodeColumnType (w: Writer) (t: ColumnType) : unit =
     | TTime fsp -> w.WriteByte 0x1Auy; w.WriteByte(byte fsp)
     | TYear -> w.WriteByte 0x1Buy
     | TJson -> w.WriteByte 0x1Cuy
+    | TVector dim -> w.WriteByte 0x1Duy; w.WriteInt32LE dim
 
 let private decodeColumnType (r: #IReader) : ColumnType =
     match r.ReadByte() with
@@ -229,6 +230,7 @@ let private decodeColumnType (r: #IReader) : ColumnType =
     | 0x1Auy -> TTime(int (r.ReadByte()))
     | 0x1Buy -> TYear
     | 0x1Cuy -> TJson
+    | 0x1Duy -> TVector(r.ReadInt32LE())
     | tag -> failwithf "Persistence: unknown ColumnType tag 0x%02x in WAL/snapshot" tag
 
 // ---------------------------------------------------------------------

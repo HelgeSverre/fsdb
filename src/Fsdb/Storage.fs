@@ -1050,6 +1050,15 @@ let coerceValue (strict: bool) (col: ColumnDef) (v: Value) : Result<Value, Stora
             // conversion, preserving every byte including invalid UTF-8.
             | VString text -> Ok(VBytes(Text.Encoding.UTF8.GetBytes text))
             | _ -> Ok(VBytes(v |> toText |> Option.defaultValue "" |> Text.Encoding.UTF8.GetBytes))
+        | TVector dim ->
+            // A vector column accepts exactly its dimension in little-endian
+            // float32 bytes (dim × 4) — the shape STRING_TO_VECTOR (or an
+            // `X'...'` literal) produces. No string/number coercion and no
+            // non-strict fallback: MySQL 9 refuses anything else regardless
+            // of sql_mode, so this always fails in the 1366 shape.
+            match v with
+            | VBytes bytes when bytes.Length = dim * 4 -> Ok(VBytes bytes)
+            | _ -> Error(InvalidValueForColumn(col.Name, v |> toText |> Option.defaultValue ""))
         | TEnum values ->
             // MySQL's own error for a rejected ENUM value is 1265 "Data
             // truncated" (SQLSTATE 01000), not the 1366 incorrect-value
@@ -1622,7 +1631,37 @@ let private validateColumnFsp (c: ColumnDef) : Result<unit, StorageError> =
     | TDateTime fsp
     | TTimestamp fsp
     | TTime fsp when fsp > 6 -> Error(PrecisionTooBig(c.Name, fsp))
+    // VECTOR shares the parse-anything-validate-at-DDL discipline: the
+    // parser accepts any dimension, MySQL 9's 1..16383 range is enforced
+    // here with real MySQL's 1074 shape for an over-long column.
+    | TVector dim when dim < 1 || dim > 16383 ->
+        Error(ExpressionError(1074, sprintf "Column length too big for column '%s' (max = 16383); use BLOB or TEXT instead" c.Name))
     | _ -> Ok()
+
+/// MySQL 9 forbids a VECTOR column in any key — primary, unique, or plain
+/// index (a 16KB-per-row float blob is nothing an index can order). Same
+/// message shape as JSON's ER_JSON_USED_AS_KEY, whose code this borrows
+/// since the 8.4 oracle can't arbitrate the real MySQL 9 number.
+let private checkVectorKeyColumns (columns: ColumnDef list) (indexes: IndexDef list) : Result<unit, StorageError> =
+    let vectorKeyError name =
+        Error(ExpressionError(3152, sprintf "VECTOR column '%s' cannot be used in key specification." name))
+
+    let isVector (c: ColumnDef) =
+        match c.Type with
+        | TVector _ -> true
+        | _ -> false
+
+    match columns |> List.tryFind (fun c -> isVector c && (c.PrimaryKey || c.Unique)) with
+    | Some c -> vectorKeyError c.Name
+    | None ->
+        indexes
+        |> List.collect (fun ix -> ix.Columns)
+        |> List.tryFind (fun name ->
+            columns
+            |> List.exists (fun c -> isVector c && String.Equals(c.Name, name, StringComparison.OrdinalIgnoreCase)))
+        |> function
+            | Some name -> vectorKeyError name
+            | None -> Ok()
 
 /// FULLTEXT indexes only cover text columns — CHAR/VARCHAR and the TEXT
 /// family — matching MySQL's 1283 for anything else.
@@ -1670,6 +1709,10 @@ let createTableSeeded
             match columns |> traverse validateColumnFsp with
             | Error e -> Error e
             | Ok _ ->
+
+            match checkVectorKeyColumns columns indexes with
+            | Error e -> Error e
+            | Ok() ->
 
             if Map.containsKey key db then
                 Error(TableExists tableName)
@@ -1791,6 +1834,9 @@ let private implicitZeroSeed (col: ColumnDef) : Result<Value, StorageError> =
     | TBlob
     | TMediumBlob
     | TLongBlob -> Ok(VBytes [||])
+    // The all-zeros vector at the column's declared dimension — the only
+    // value `coerceValue`'s exact-length check would accept as a seed.
+    | TVector dim -> Ok(VBytes(Array.zeroCreate (dim * 4)))
     | TEnum _ -> Ok(VInt 1L)
     | TTime _ -> Ok(VString "00:00:00")
     | TDate -> Error(ZeroTemporalForColumn("date", "0000-00-00", col.Name))
@@ -1876,7 +1922,17 @@ let private applyAlterAction (strict: bool) (table: Table) (action: AlterAction)
         match action with
         | AddColumn(col, _)
         | ModifyColumn(col, _)
-        | ChangeColumn(_, col, _) -> validateColumnFsp col
+        | ChangeColumn(_, col, _) ->
+            validateColumnFsp col
+            |> Result.bind (fun () -> checkVectorKeyColumns [ col ] [])
+        // The key-introducing actions must refuse a VECTOR column the same
+        // way CREATE TABLE does — otherwise ALTER is a back door into the
+        // very keys `checkVectorKeyColumns` exists to forbid.
+        | AddIndex ix -> checkVectorKeyColumns table.Columns [ ix ]
+        | AddPrimaryKey cols ->
+            checkVectorKeyColumns
+                (table.Columns |> List.map (fun c -> if List.contains c.Name cols then { c with PrimaryKey = true } else c))
+                []
         | _ -> Ok()
 
     match fspCheck with

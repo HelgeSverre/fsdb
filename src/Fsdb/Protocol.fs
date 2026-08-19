@@ -286,6 +286,10 @@ let wireTypeOfColumnType (ty: Ast.ColumnType) : byte =
     | Ast.TBlob
     | Ast.TMediumBlob
     | Ast.TLongBlob -> TypeBlob
+    // ponytail: MySQL 9's real wire type for VECTOR is 242 — blob + binary
+    // charset is what pre-9 clients (MySqlConnector, the 8.4 CLI) see and
+    // understand; move to 242 when a client that knows it shows up.
+    | Ast.TVector _ -> TypeBlob
     | _ -> TypeVarString
 
 /// The `decimals` (fsp) a *declared* column type advertises — the COM_FIELD_LIST

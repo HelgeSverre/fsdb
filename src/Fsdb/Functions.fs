@@ -2068,6 +2068,118 @@ let private bitAndAgg: Aggregate = fun vs -> VInt(vs |> List.map (toDouble >> in
 let private bitOrAgg: Aggregate = fun vs -> VInt(vs |> List.map (toDouble >> int64) |> List.reduce (|||))
 let private bitXorAgg: Aggregate = fun vs -> VInt(vs |> List.map (toDouble >> int64) |> List.reduce (^^^))
 
+// ---------------------------------------------------------------------------
+// MySQL 9 VECTOR. A vector is a `VBytes` of little-endian 4-byte floats —
+// no new `Value` case, so storage/persistence/wire all carry it as the
+// binary string real pre-9 clients see anyway. ponytail: only these
+// functions interpret the bytes — no whitelist polices which expressions a
+// vector flows through; anything byte-shaped is allowed until it reaches a
+// function that must decode it.
+// ---------------------------------------------------------------------------
+
+/// MySQL 9's own refusal shape for a value that can't become (or isn't) a
+/// vector, reused for every malformed input below.
+let private vectorError (detail: string) : 'a =
+    raise (SqlError(6138, sprintf "Data cannot be converted to vector: %s" detail))
+
+let private vectorOfBytes (b: byte[]) : float32[] =
+    if b.Length = 0 || b.Length % 4 <> 0 then
+        vectorError (sprintf "%d bytes is not a whole number of 4-byte floats" b.Length)
+
+    Array.init (b.Length / 4) (fun i -> BitConverter.ToSingle(b, i * 4))
+
+let private bytesOfVector (fs: float32[]) : byte[] =
+    let bytes = Array.zeroCreate (fs.Length * 4)
+
+    fs
+    |> Array.iteri (fun i f -> BitConverter.TryWriteBytes(Span(bytes, i * 4, 4), f) |> ignore)
+
+    bytes
+
+/// `STRING_TO_VECTOR('[1.05, -17.8]')` / `TO_VECTOR` — MySQL rejects the
+/// empty vector, non-numeric elements, and more than 16383 dimensions.
+let private stringToVectorFn: Scalar =
+    function
+    | [ VNull ] -> VNull
+    | [ VBytes b ] -> VBytes b // already a vector — MySQL passes it through
+    | [ v ] ->
+        let s = (toText v |> Option.defaultValue "").Trim()
+
+        if not (s.StartsWith "[" && s.EndsWith "]" && s.Length >= 2) then
+            vectorError (sprintf "'%s'" s)
+
+        let inner = s.Substring(1, s.Length - 2).Trim()
+
+        if inner = "" then vectorError (sprintf "'%s'" s)
+
+        let parts = inner.Split ','
+
+        if parts.Length > 16383 then vectorError (sprintf "%d dimensions exceeds the maximum 16383" parts.Length)
+
+        parts
+        |> Array.map (fun p ->
+            match Single.TryParse(p.Trim(), NumberStyles.Float, CultureInfo.InvariantCulture) with
+            | true, f when Single.IsFinite f -> f
+            | _ -> vectorError (sprintf "'%s'" s))
+        |> bytesOfVector
+        |> VBytes
+    | _ -> raise (SqlError(1582, "Incorrect parameter count in the call to native function 'string_to_vector'"))
+
+/// `VECTOR_TO_STRING` / `FROM_VECTOR` — pinned to MySQL 9's exact scientific
+/// rendering: 5 fractional digits, lowercase `e`, always-signed two-digit
+/// exponent, comma-separated with no spaces (`[1.05000e+00,-1.78000e+01]`).
+let private vectorToStringFn: Scalar =
+    function
+    | [ VNull ] -> VNull
+    | [ VBytes b ] ->
+        vectorOfBytes b
+        |> Array.map (fun f -> f.ToString("0.00000e+00", CultureInfo.InvariantCulture))
+        |> String.concat ","
+        |> sprintf "[%s]"
+        |> VString
+    | [ v ] -> vectorError (sprintf "'%s'" (toText v |> Option.defaultValue ""))
+    | _ -> raise (SqlError(1582, "Incorrect parameter count in the call to native function 'vector_to_string'"))
+
+let private vectorDimFn: Scalar =
+    function
+    | [ VNull ] -> VNull
+    | [ VBytes b ] -> VInt(int64 (vectorOfBytes b).Length)
+    | [ v ] -> vectorError (sprintf "'%s'" (toText v |> Option.defaultValue ""))
+    | _ -> raise (SqlError(1582, "Incorrect parameter count in the call to native function 'vector_dim'"))
+
+/// `DISTANCE(v1, v2, 'COSINE'|'EUCLIDEAN'|'DOT')` / `VECTOR_DISTANCE` —
+/// HeatWave-only in real MySQL, so purely additive here. Brute force over
+/// the decoded floats; 1210 (ER_WRONG_ARGUMENTS) for a dimension mismatch
+/// or an unknown metric, the generic real-MySQL code since the HeatWave
+/// numbers can't be oracle-verified. COSINE is `1 - cos(a,b)`, EUCLIDEAN is
+/// the L2 norm of the difference, DOT is the raw dot product.
+let private distanceFn: Scalar =
+    function
+    | args when anyNull args -> VNull
+    | [ VBytes b1; VBytes b2; metric ] ->
+        let v1 = vectorOfBytes b1
+        let v2 = vectorOfBytes b2
+
+        if v1.Length <> v2.Length then
+            raise (SqlError(1210, sprintf "Incorrect arguments to DISTANCE: vectors have different dimensions %d and %d" v1.Length v2.Length))
+
+        let dot = Array.fold2 (fun acc (a: float32) (b: float32) -> acc + float a * float b) 0.0 v1 v2
+
+        match (toText metric |> Option.defaultValue "").ToUpperInvariant() with
+        | "EUCLIDEAN" -> VDouble(sqrt (Array.fold2 (fun acc (a: float32) (b: float32) -> acc + (float a - float b) ** 2.0) 0.0 v1 v2))
+        | "DOT" -> VDouble dot
+        | "COSINE" ->
+            let norm (v: float32[]) = sqrt (v |> Array.sumBy (fun x -> float x * float x))
+            let n1, n2 = norm v1, norm v2
+
+            if n1 = 0.0 || n2 = 0.0 then
+                raise (SqlError(1210, "Incorrect arguments to DISTANCE: cosine distance is undefined for a zero vector"))
+
+            VDouble(1.0 - dot / (n1 * n2))
+        | other -> raise (SqlError(1210, sprintf "Incorrect arguments to DISTANCE: unknown metric '%s'" other))
+    | [ _; _; _ ] -> raise (SqlError(1210, "Incorrect arguments to DISTANCE: arguments must be vectors"))
+    | _ -> raise (SqlError(1582, "Incorrect parameter count in the call to native function 'distance'"))
+
 let builtins: Registry =
     empty
     |> registerScalar "NOW" nowFn
@@ -2193,6 +2305,14 @@ let builtins: Registry =
     |> registerScalar "IS_UUID" isUuidFn
     |> registerScalar "INET_ATON" inetAtonFn
     |> registerScalar "INET_NTOA" inetNtoaFn
+    // MySQL 9 VECTOR
+    |> registerScalar "STRING_TO_VECTOR" stringToVectorFn
+    |> registerScalar "TO_VECTOR" stringToVectorFn
+    |> registerScalar "VECTOR_TO_STRING" vectorToStringFn
+    |> registerScalar "FROM_VECTOR" vectorToStringFn
+    |> registerScalar "VECTOR_DIM" vectorDimFn
+    |> registerScalar "DISTANCE" distanceFn
+    |> registerScalar "VECTOR_DISTANCE" distanceFn
     |> registerAggregate "COUNT" countAgg
     |> registerAggregate "SUM" sumAgg
     |> registerAggregate "AVG" avgAgg

@@ -1481,6 +1481,10 @@ let rec private evalExpr (ctx: EvalContext) (expr: Expr) : Result<Value, EvalErr
     // `expr COLLATE name` evaluates as its inner expression — the tag
     // only steers which collation comparisons resolve under.
     | Collate(e, _) -> eval e
+    // MySQL doesn't support CAST-ing to VECTOR (STRING_TO_VECTOR is the
+    // sanctioned conversion), and quietly blob-coercing here would mint
+    // wrong-dimension vectors that only fail much later, at INSERT time.
+    | Cast(_, TVector _) -> Error(1064, "CAST to VECTOR is not supported; use STRING_TO_VECTOR()")
     | Cast(e, ty) ->
         eval e
         |> Result.bind (fun v ->

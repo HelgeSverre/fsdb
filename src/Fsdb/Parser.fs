@@ -486,6 +486,10 @@ let private columnType: Parser<ColumnType, unit> =
           keyword "TIME" >>. optFsp |>> TTime
           keyword "YEAR" >>. ignoredWidth >>% TYear
           keyword "JSON" >>% TJson
+          // Bare `VECTOR` is MySQL 9's default dimension 2048; `VECTOR()` is
+          // a syntax error there too — `attempt widthLen` backtracks off the
+          // empty parens, which then fail the rest of the column grammar.
+          keyword "VECTOR" >>. opt (attempt widthLen) |>> (fun n -> TVector(defaultArg n 2048))
           (keyword "BOOLEAN" <|> keyword "BOOL") >>% TTinyInt false ]
     <?> "column type"
 
