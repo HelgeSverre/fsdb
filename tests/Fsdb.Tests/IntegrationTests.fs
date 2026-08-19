@@ -1350,16 +1350,20 @@ let tests =
               }
               |> Async.RunSynchronously
 
-          // A batch UPDATE whose SET calls a slow registered function
-          // (`SET ocr_text = ocr(pdf)`-shaped) runs its per-row updater
-          // inside `Storage.updateRows`'s fold — which, unlike the SELECT
-          // row pipeline's `traverse`, had no cancellation check until
-          // `foldWithCancellation`. MySqlConnector's `Cancel()` is the
-          // client-side shape of that: it opens a side connection and
-          // issues `KILL QUERY <id>`, which flips the victim's
-          // `queryCancellation` token. The fold must unwind all-or-nothing:
-          // the statement-local builder is discarded, so the table shows
-          // no partial rewrite.
+          // A batch UPDATE whose WHERE calls a slow registered function
+          // runs its per-row predicate inside `Storage.updateRows`'s fold
+          // — which, unlike the SELECT row pipeline's `traverse`, had no
+          // cancellation check until `foldWithCancellation`. The slow call
+          // sits in the WHERE (matching zero rows) rather than the SET
+          // deliberately: a SET-side slow function is also caught by
+          // `coerceRow`'s `traverse` on each rewritten row, so only a
+          // never-matching WHERE pins `foldWithCancellation` itself as the
+          // thing that unwinds the scan. MySqlConnector's `Cancel()` is
+          // the client-side shape of the trigger: it opens a side
+          // connection and issues `KILL QUERY <id>`, which flips the
+          // victim's `queryCancellation` token. The fold must unwind
+          // all-or-nothing: the statement-local builder is discarded, so
+          // the table shows no partial rewrite.
           testCase "MySqlCommand.Cancel mid-UPDATE over a slow function unwinds with the table unmodified"
           <| fun _ ->
               async {
@@ -1414,7 +1418,10 @@ let tests =
                       use victim = new MySqlConnector.MySqlConnection(connStr)
                       do! victim.OpenAsync() |> Async.AwaitTask
                       use updCmd = victim.CreateCommand()
-                      updCmd.CommandText <- "UPDATE upd_cancel SET v = SLOWFN(v)"
+                      // SLOWFN(v) is v+1, never -1: zero rows match, so the
+                      // updater/coerceRow path never runs and only the
+                      // fold's own cancellation check can stop the scan.
+                      updCmd.CommandText <- "UPDATE upd_cancel SET v = 1 WHERE SLOWFN(v) = -1"
                       let updTask = updCmd.ExecuteNonQueryAsync()
 
                       // Let the fold get properly underway before cancelling.
@@ -1461,9 +1468,10 @@ let tests =
                           (lastCount < int64 rowCount)
                           (sprintf "only a fraction of the %d rows should have been visited (got %d)" rowCount lastCount)
 
-                      // All-or-nothing: the discarded builder means not one
-                      // row shows the rewrite, including the ones SLOWFN
-                      // already computed before the cancel.
+                      // The discarded builder means not one row shows the
+                      // `SET v = 1` rewrite (none should match anyway —
+                      // this also catches a broken predicate mistaking the
+                      // cancel for a match).
                       use checkCmd = setup.CreateCommand()
                       checkCmd.CommandText <- "SELECT COALESCE(SUM(v), -1) FROM upd_cancel"
                       let! sumResult = checkCmd.ExecuteScalarAsync() |> Async.AwaitTask

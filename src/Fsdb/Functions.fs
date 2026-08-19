@@ -1412,9 +1412,13 @@ let private rightFn: Scalar =
         VString(str.Substring(str.Length - k))
     | _ -> VNull
 
-/// MySQL's `max_allowed_packet` default/hard ceiling — `REPEAT`/`SPACE`
-/// return NULL rather than allocate past it for a runaway count.
-let private maxAllowedPacket = 16 * 1024 * 1024
+/// The server's advertised `max_allowed_packet` — `REPEAT`/`SPACE` return
+/// NULL rather than allocate past it for a runaway count, and MySQL NULLs
+/// them only past the *actual* max_allowed_packet, so this must match what
+/// `Session.defaultVariables` reports. That is
+/// `Packet.maxAccumulatedPacketSize` (64 MiB), but Functions.fs compiles
+/// before Packet.fs, so the value is duplicated here; keep the two in sync.
+let private maxAllowedPacket = 64 * 1024 * 1024
 
 let private repeatFn: Scalar =
     function
