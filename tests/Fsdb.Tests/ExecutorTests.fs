@@ -4643,4 +4643,24 @@ let tests =
 
                     Expect.throws
                         (fun () -> run store registry "SELECT POISON(id) FROM t WHERE id <= 150 ORDER BY x LIMIT 10" |> ignore)
-                        "ORDER BY forcing a filesort must still evaluate every matched row's projection" ] ]
+                        "ORDER BY forcing a filesort must still evaluate every matched row's projection" ]
+
+          testList
+              "out-of-range temporal functions yield NULL, not an exception"
+              [ testCase "DATE_ADD past DateTime's range is NULL like MySQL"
+                <| fun _ ->
+                    match runDefault (newStore ()) "SELECT DATE_ADD('2020-01-01', INTERVAL 100000 YEAR)" with
+                    | ResultSet(_, [ [ None ] ]) -> ()
+                    | other -> failtestf "expected NULL, got %A" other
+
+                testCase "DATE_ADD with an enormous month interval is NULL"
+                <| fun _ ->
+                    match runDefault (newStore ()) "SELECT DATE_ADD(NOW(), INTERVAL 1000000000000000000 MONTH)" with
+                    | ResultSet(_, [ [ None ] ]) -> ()
+                    | other -> failtestf "expected NULL, got %A" other
+
+                testCase "FROM_UNIXTIME past the representable range is NULL"
+                <| fun _ ->
+                    match runDefault (newStore ()) "SELECT FROM_UNIXTIME(1000000000000000000)" with
+                    | ResultSet(_, [ [ None ] ]) -> ()
+                    | other -> failtestf "expected NULL, got %A" other ] ]

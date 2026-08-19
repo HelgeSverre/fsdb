@@ -82,7 +82,9 @@ let placeholderPositions (sql: string) : int list =
 
             if not closed then
                 i <- n
-        | '-' when i + 1 < n && sql.[i + 1] = '-' ->
+        | '-' when i + 1 < n && sql.[i + 1] = '-' && (i + 2 >= n || System.Char.IsWhiteSpace sql.[i + 2]) ->
+            // MySQL only treats `--` as a comment when whitespace/EOL follows
+            // (`5--3` is arithmetic) — same rule as `Parser.stripVersionComments`.
             let idx = sql.IndexOf('\n', i)
             i <- if idx = -1 then n else idx + 1
         | '#' ->
@@ -104,8 +106,14 @@ let placeholderPositions (sql: string) : int list =
 /// lengths already match — this is the one substitution path prepared
 /// statements use (see the `PreparedStmt` ponytail note in Session.fs for
 /// why it's textual rather than a typed plan).
+exception PlaceholderCountMismatch of expected: int * got: int
+
 let substitutePlaceholders (sql: string) (literals: string list) : string =
     let positions = placeholderPositions sql
+
+    if positions.Length <> literals.Length then
+        raise (PlaceholderCountMismatch(positions.Length, literals.Length))
+
     let sb = StringBuilder()
     let mutable last = 0
 
@@ -1433,43 +1441,10 @@ let private runProbe (session: Session) (sql: string) (probe: Probe) : Session *
         | Ok(header, lines) -> session, ResultSet([ header ], lines |> List.map (fun l -> [ Some l ]))
         | Error(code, msg) -> session, Err(code, msg)
     | FlushPrivileges -> session, Affected 0UL
-
-/// Parses and validates SQL for COM_STMT_PREPARE without executing it: a
-/// parse failure is the same 1064 (code, message) pair a COM_QUERY syntax
-/// error gets, so `Server` doesn't need its own copy of that formatting.
-/// `Ok` carries the parsed `Statement` (with `Placeholder` nodes where the
-/// `?`s were) plus the placeholder count for COM_STMT_PREPARE_OK.
-///
-/// `None` for the text-probed forms the grammar doesn't produce
-/// (SET/SHOW/transaction control) — those still execute textually through
-/// `Sql`, so their placeholder count is the plain `placeholderPositions`
-/// count rather than a parser one.
-let prepareStatement (sql: string) : Result<Statement option * int, int * string> =
-    let trimmed = sql.Trim().TrimEnd(';').Trim()
-    let upper = trimmed.ToUpperInvariant()
-
-    if (tryProbe trimmed upper).IsSome then
-        Result.Ok(None, placeholderPositions sql |> List.length)
-    else
-        match Parser.parse sql with
-        | Result.Ok stmt -> Result.Ok(Some stmt, Parser.placeholderCount ())
-        | Result.Error _ ->
-            match syntaxError sql with
-            | Err(code, msg) -> Result.Error(code, msg)
-            | _ -> Result.Error(1064, "syntax error")
-
-/// Binds prepared-statement parameter `Value`s into a parsed `Statement`,
-/// replacing every `Placeholder i` with `Lit values.[i]`. Total — after this
-/// no `Placeholder` survives and the statement executes through the ordinary
-/// path. This walk is the one place that must touch every expression position
-/// in the AST, so a placeholder in any legal spot gets bound; DDL is left as
-/// the `_` pass-through since MySQL never accepts a `?` there.
-let rec bindPlaceholders (stmt: Statement) (values: Value list) : Statement =
-    let lit i = Lit(List.item i values)
-
+let rec mapPlaceholders (replace: int -> Expr) (stmt: Statement) : Statement =
     let rec mapExpr (e: Expr) : Expr =
         match e with
-        | Placeholder i -> lit i
+        | Placeholder i -> replace i
         | MatchAgainst(cols, q, mode) -> MatchAgainst(cols, mapExpr q, mode)
         | Lit _
         | Col _
@@ -1551,9 +1526,68 @@ let rec bindPlaceholders (stmt: Statement) (values: Value list) : Statement =
                 Where = Option.map mapExpr d.Where
                 OrderBy = List.map mapOrderKey d.OrderBy
                 Joins = List.map mapJoin d.Joins }
-    | Explain s -> Explain(bindPlaceholders s values)
+    | Explain s -> Explain(mapPlaceholders replace s)
     | _ -> stmt
 
+/// Binds parameter `Value`s into a parsed `Statement`, replacing every
+/// `Placeholder i` with `Lit values.[i]`.
+let bindPlaceholders (stmt: Statement) (values: Value list) : Statement =
+    mapPlaceholders (fun i -> Lit(List.item i values)) stmt
+
+/// Renumbers surviving `Placeholder` nodes densely in traversal (= source)
+/// order, returning the statement and the true parameter count. FParsec's
+/// `attempt` rewinds the input but not the parse-time placeholder counter,
+/// so a backtracked atom (`CONVERT(?, x)`) can leave a gap/overcount in the
+/// AST indices; renumbering here is the source of truth `bindPlaceholders`
+/// then binds against, so COM_STMT_PREPARE_OK advertises the right count and
+/// each value lands on the right `?`.
+let renumberPlaceholders (stmt: Statement) : Statement * int =
+    let next = ref 0
+
+    let renumbered =
+        mapPlaceholders
+            (fun _ ->
+                let n = next.Value
+                next.Value <- n + 1
+                Placeholder n)
+            stmt
+
+    renumbered, next.Value
+
+
+
+/// Parses and validates SQL for COM_STMT_PREPARE without executing it: a
+/// parse failure is the same 1064 (code, message) pair a COM_QUERY syntax
+/// error gets, so `Server` doesn't need its own copy of that formatting.
+/// `Ok` carries the parsed `Statement` (with `Placeholder` nodes where the
+/// `?`s were) plus the placeholder count for COM_STMT_PREPARE_OK.
+///
+/// `None` for the text-probed forms the grammar doesn't produce
+/// (SET/SHOW/transaction control) — those still execute textually through
+/// `Sql`, so their placeholder count is the plain `placeholderPositions`
+/// count rather than a parser one.
+let prepareStatement (sql: string) : Result<Statement option * int, int * string> =
+    let trimmed = sql.Trim().TrimEnd(';').Trim()
+    let upper = trimmed.ToUpperInvariant()
+
+    if (tryProbe trimmed upper).IsSome then
+        Result.Ok(None, placeholderPositions sql |> List.length)
+    else
+        match Parser.parse sql with
+        | Result.Ok stmt ->
+            let renumbered, count = renumberPlaceholders stmt
+            Result.Ok(Some renumbered, count)
+        | Result.Error _ ->
+            match syntaxError sql with
+            | Err(code, msg) -> Result.Error(code, msg)
+            | _ -> Result.Error(1064, "syntax error")
+
+/// Binds prepared-statement parameter `Value`s into a parsed `Statement`,
+/// replacing every `Placeholder i` with `Lit values.[i]`. Total — after this
+/// no `Placeholder` survives and the statement executes through the ordinary
+/// path. This walk is the one place that must touch every expression position
+/// in the AST, so a placeholder in any legal spot gets bound; DDL is left as
+/// the `_` pass-through since MySQL never accepts a `?` there.
 let private dispatch (session: Session) (rawSql: string) : Session * QueryResult =
     let sql = (Parser.stripVersionComments rawSql).Trim().TrimEnd(';').Trim()
 
@@ -1659,6 +1693,19 @@ let handle (session: Session) (rawSql: string) : Session * QueryResult =
 /// (SET/SHOW/transaction control, which have no AST) still substitute into
 /// `Sql` and go through the ordinary text path.
 let executePrepared (session: Session) (stmt: PreparedStmt) (values: Value list) : Session * QueryResult =
-    match stmt.Ast with
-    | Some ast -> executeParsed session (bindPlaceholders ast values)
-    | None -> handle session (substitutePlaceholders stmt.Sql (values |> List.map valueToSqlLiteral))
+    // The AST path calls `executeParsed` directly, which — unlike `handle` —
+    // doesn't convert a stray .NET exception into an `Err`, so a bound value
+    // that overflows a temporal/numeric op (or any bug) would otherwise drop
+    // the connection with no ERR packet. Give it the same 1105 safety net
+    // `handle` gives the text path.
+    try
+        match stmt.Ast with
+        | Some ast -> executeParsed session (bindPlaceholders ast values)
+        | None -> handle session (substitutePlaceholders stmt.Sql (values |> List.map valueToSqlLiteral))
+    with
+    | PlaceholderCountMismatch(expected, got) ->
+        session, Err(1210, sprintf "Incorrect arguments to EXECUTE (expected %d, got %d)" expected got)
+    | :? OperationCanceledException -> reraise ()
+    | ex ->
+        Log.diagnostic "fsdb: EXN %s -- prepared statement" ex.Message
+        session, Err(1105, "Internal error")

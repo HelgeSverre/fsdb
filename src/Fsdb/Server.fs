@@ -682,6 +682,18 @@ let private handleConnection
 
                                     do! sendPayloads stream seqId payloads |> Async.Ignore
                                     return! loop session
+                            | Some(StmtExecute payload) when payload.Length < 9 ->
+                                // Header is stmt-id(4) + flags(1) + iteration(4);
+                                // a shorter payload can't be decoded — ERR
+                                // rather than let the reader throw and drop
+                                // the connection.
+                                do!
+                                    writePacketAsync
+                                        stream
+                                        { SeqId = seqId; Payload = errPayload capabilities 1047 "Malformed command packet" }
+                                    |> Async.Ignore
+
+                                return! loop session
                             | Some(StmtExecute payload) ->
                                 let r = Reader(payload)
                                 let stmtId = r.ReadInt32LE()
@@ -800,6 +812,11 @@ let private handleConnection
                                                     result
 
                                             return! loop session
+                            | Some(StmtSendLongData payload) when payload.Length < 6 ->
+                                // stmt-id(4) + param-index(2); a shorter payload
+                                // is malformed. COM_STMT_SEND_LONG_DATA takes
+                                // no reply, so just skip it (never throw).
+                                return! loop session
                             | Some(StmtSendLongData payload) ->
                                 // No response is ever sent for this command,
                                 // success or failure — the client doesn't
@@ -813,7 +830,7 @@ let private handleConnection
                                 let r = Reader(payload)
                                 let stmtId = r.ReadInt32LE()
                                 let paramIndex = r.ReadInt16LE()
-                                let chunk = r.ReadBytes r.Remaining
+                                let chunk = r.ReadBytes(max 0 r.Remaining)
 
                                 if session.Statements.ContainsKey stmtId then
                                     let key = stmtId, paramIndex

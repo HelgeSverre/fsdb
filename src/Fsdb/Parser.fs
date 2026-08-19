@@ -2051,7 +2051,4 @@ let parse (sql: string) : Result<Statement, string> =
     with ex ->
         Result.Error ex.Message
 
-/// Number of `?` placeholders the most recent `parse` on this async flow saw —
-/// read after a successful parse to size the prepared statement's parameter
-/// list.
-let placeholderCount () : int = placeholderCounterLocal.Value
+

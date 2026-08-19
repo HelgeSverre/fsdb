@@ -834,17 +834,28 @@ let private asDateOnly (v: Value) : DateOnly option = asDateTime v |> Option.map
 
 let private dateOnlyUnits = set [ "DAY"; "WEEK"; "MONTH"; "QUARTER"; "YEAR" ]
 
-let private addInterval (dt: DateTime) (amount: float) (unit: string) : DateTime =
-    match unit.ToUpperInvariant() with
-    | "SECOND" -> dt.AddSeconds amount
-    | "MINUTE" -> dt.AddMinutes amount
-    | "HOUR" -> dt.AddHours amount
-    | "DAY" -> dt.AddDays amount
-    | "WEEK" -> dt.AddDays(amount * 7.0)
-    | "MONTH" -> dt.AddMonths(int amount)
-    | "QUARTER" -> dt.AddMonths(int amount * 3)
-    | "YEAR" -> dt.AddYears(int amount)
-    | _ -> dt
+/// Adds an interval, returning `None` when the result falls outside
+/// `DateTime`'s range — MySQL yields NULL for an out-of-range temporal
+/// rather than erroring. `int amount` for the month/year units can itself
+/// overflow, so those are bounds-checked before the conversion.
+let private addInterval (dt: DateTime) (amount: float) (unit: string) : DateTime option =
+    let monthsAmount (scale: int) =
+        let scaled = amount * float scale
+        if Double.IsNaN scaled || abs scaled > 1.0e8 then None else Some(int scaled)
+
+    try
+        match unit.ToUpperInvariant() with
+        | "SECOND" -> Some(dt.AddSeconds amount)
+        | "MINUTE" -> Some(dt.AddMinutes amount)
+        | "HOUR" -> Some(dt.AddHours amount)
+        | "DAY" -> Some(dt.AddDays amount)
+        | "WEEK" -> Some(dt.AddDays(amount * 7.0))
+        | "MONTH" -> monthsAmount 1 |> Option.map dt.AddMonths
+        | "QUARTER" -> monthsAmount 3 |> Option.map dt.AddMonths
+        | "YEAR" -> (if abs amount > 1.0e8 then None else Some(int amount)) |> Option.map dt.AddYears
+        | _ -> Some dt
+    with :? ArgumentOutOfRangeException ->
+        None
 
 /// `Parser.fs`'s `INTERVAL n UNIT` grammar desugars to
 /// `FuncCall("INTERVAL", [n; Lit(VString UNIT)])` (no separate `Interval`
@@ -891,11 +902,13 @@ let private looksDateOnly (v: Value) : bool =
     | _ -> false
 
 let private applyDateInterval (sign: float) (dateV: Value) (dt: DateTime) (amount: float) (unit: string) : Value =
-    let result = addInterval dt (sign * amount) unit
-    if looksDateOnly dateV && dateOnlyUnits.Contains(unit.ToUpperInvariant()) then
-        VDate(DateOnly.FromDateTime result)
-    else
-        VDateTime result
+    match addInterval dt (sign * amount) unit with
+    | None -> VNull // out of range — MySQL yields NULL
+    | Some result ->
+        if looksDateOnly dateV && dateOnlyUnits.Contains(unit.ToUpperInvariant()) then
+            VDate(DateOnly.FromDateTime result)
+        else
+            VDateTime result
 
 let private dateAddCore (sign: float) : Scalar =
     function
@@ -1166,13 +1179,20 @@ let private unixTimestampFn: Scalar =
     | [ v ] when not (anyNull [ v ]) -> asDateTime v |> Option.map (fun dt -> VInt(int64 (dt - unixEpoch).TotalSeconds)) |> Option.defaultValue VNull
     | _ -> VNull
 
+let private fromUnixSeconds (ts: Value) : DateTime option =
+    let secs = toDouble ts
+    if Double.IsNaN secs || abs secs > 3.2e11 then
+        None // MySQL's FROM_UNIXTIME range tops out near year 3001; NULL past it
+    else
+        try Some(unixEpoch.AddSeconds secs) with :? ArgumentOutOfRangeException -> None
+
 let private fromUnixTimeFn: Scalar =
     function
-    | [ ts ] when not (anyNull [ ts ]) -> VDateTime(unixEpoch.AddSeconds(toDouble ts))
+    | [ ts ] when not (anyNull [ ts ]) -> fromUnixSeconds ts |> Option.map VDateTime |> Option.defaultValue VNull
     | [ ts; f ] when not (anyNull [ ts; f ]) ->
-        match toText f with
-        | Some fmt -> VString(formatDate (unixEpoch.AddSeconds(toDouble ts)) fmt)
-        | None -> VNull
+        match toText f, fromUnixSeconds ts with
+        | Some fmt, Some dt -> VString(formatDate dt fmt)
+        | _ -> VNull
     | _ -> VNull
 
 let private timestampDiffFn: Scalar =

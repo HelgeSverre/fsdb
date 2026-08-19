@@ -436,21 +436,87 @@ let revoke (store: Store) (privs: string list) (target: PrivTarget) (users: (str
 // a real workload notices.
 // ---------------------------------------------------------------------------
 
-let private tableRefsOfFrom (defaultDb: string) (from: FromItem option) (joins: Join list) : (string * string) list =
-    let ofItem =
-        function
-        | FromTable(r: TableRef) -> [ (defaultArg r.Database defaultDb), r.Table ]
-        | FromSubquery _ -> [] // ponytail: derived tables unchecked
+/// Every real table a statement's expressions and sources read, walked
+/// recursively — a derived table (`FROM (SELECT ... secret)`), a scalar or
+/// `IN`/`EXISTS` subquery in any clause (WHERE, projections, SET, VALUES),
+/// and unions nested in either all reach their tables here, so a privilege
+/// check can't be dodged by burying the reference below the top level.
+/// Mirrors `Executor.collectSubqueries`' traversal; kept local since
+/// `Auth` compiles before `Executor`.
+let rec private exprReadTables (defaultDb: string) (expr: Expr) : (string * string) list =
+    let recur = exprReadTables defaultDb
 
-    (from |> Option.map ofItem |> Option.defaultValue [])
-    @ (joins |> List.collect (fun j -> ofItem j.Table))
+    match expr with
+    | Subquery s
+    | Exists s -> selectReadTables defaultDb s
+    | InSubquery(e, s) -> recur e @ selectReadTables defaultDb s
+    | BinOp(_, a, b) -> recur a @ recur b
+    | Not e
+    | IsNull e
+    | IsNotNull e
+    | IsTrue e
+    | IsFalse e
+    | Distinct e
+    | OrderBy(e, _)
+    | Cast(e, _)
+    | Collate(e, _) -> recur e
+    | Like(e, p, _, _) -> recur e @ recur p
+    | Regexp(e, p) -> recur e @ recur p
+    | In(e, xs) -> recur e @ (xs |> List.collect recur)
+    | Between(e, lo, hi) -> recur e @ recur lo @ recur hi
+    | FuncCall(_, args) -> args |> List.collect recur
+    | MatchAgainst(_, q, _) -> recur q
+    | Case(subject, whens, elseBranch) ->
+        (subject |> Option.map recur |> Option.defaultValue [])
+        @ (whens |> List.collect (fun (c, r) -> recur c @ recur r))
+        @ (elseBranch |> Option.map recur |> Option.defaultValue [])
+    | Placeholder _
+    | Lit _
+    | Col _
+    | QualifiedCol _
+    | Star _
+    | RowNumberOver _
+    | LagOver _
+    | RankOver _
+    | PercentRankOver _
+    | NTileOver _ -> []
+
+and private fromItemReadTables (defaultDb: string) (item: FromItem) : (string * string) list =
+    match item with
+    | FromTable(r: TableRef) -> [ (defaultArg r.Database defaultDb), r.Table ]
+    | FromSubquery(body, _) -> selectOrUnionReadTables defaultDb body
+
+and private selectOrUnionReadTables (defaultDb: string) (body: SelectOrUnion) : (string * string) list =
+    match body with
+    | PlainSelect s -> selectReadTables defaultDb s
+    | UnionSelect(first, rest, _, _, _) ->
+        selectReadTables defaultDb first @ (rest |> List.collect (snd >> selectReadTables defaultDb))
+
+and private selectReadTables (defaultDb: string) (s: SelectStmt) : (string * string) list =
+    (s.From |> Option.map (fromItemReadTables defaultDb) |> Option.defaultValue [])
+    @ (s.Joins |> List.collect (fun j -> fromItemReadTables defaultDb j.Table @ exprReadTables defaultDb j.On))
+    @ (s.Where |> Option.map (exprReadTables defaultDb) |> Option.defaultValue [])
+    @ (s.Having |> Option.map (exprReadTables defaultDb) |> Option.defaultValue [])
+    @ (s.Projections |> List.collect (fst >> exprReadTables defaultDb))
+    @ (s.GroupBy |> List.collect (exprReadTables defaultDb))
+    @ (s.OrderBy |> List.collect (fst >> exprReadTables defaultDb))
+    |> List.distinct
+
+/// Kept for callers that still want the top-level `From`/`Joins` set with a
+/// per-item transform; `selectReadTables` is the recursive whole-statement
+/// collector.
+let private tableRefsOfFrom (defaultDb: string) (from: FromItem option) (joins: Join list) : (string * string) list =
+    (from |> Option.map (fromItemReadTables defaultDb) |> Option.defaultValue [])
+    @ (joins |> List.collect (fun j -> fromItemReadTables defaultDb j.Table))
 
 let private selectTables (defaultDb: string) (s: SelectStmt) : (string * string) list =
-    tableRefsOfFrom defaultDb s.From s.Joins
+    selectReadTables defaultDb s
 
-/// The `(privilege, target)` pairs `stmt` needs. Top-level table references
-/// only — subqueries inside expressions and SHOW/SET probes are unchecked
-/// (ponytail: enforce them when a real client depends on it).
+/// The `(privilege, target)` pairs `stmt` needs. Table references are
+/// collected recursively (`selectReadTables`/`exprReadTables`), so a table
+/// read through a derived table or a subquery in any clause still requires
+/// SELECT on it. SHOW/SET text probes are dispatched before this gate and
+/// carry their own checks; `information_schema` is allow-listed in `check`.
 let rec requiredPrivileges (defaultDb: string) (stmt: Statement) : (string * PrivTarget) list =
     let onTables priv tables = tables |> List.map (fun (db, t) -> priv, OnTable(db, t))
     let split (name: string) = splitQualified defaultDb name
@@ -459,11 +525,32 @@ let rec requiredPrivileges (defaultDb: string) (stmt: Statement) : (string * Pri
     | Select s -> onTables "SELECT" (selectTables defaultDb s)
     | Union(first, rest, _, _, _) ->
         onTables "SELECT" (selectTables defaultDb first @ (rest |> List.collect (snd >> selectTables defaultDb)))
-    | Insert(table, _, _, _, _) -> onTables "INSERT" [ split table ]
+    | Insert(table, _, rows, onDup, _) ->
+        let readInExprs =
+            (rows |> List.collect (List.collect (exprReadTables defaultDb)))
+            @ (onDup |> List.collect (snd >> exprReadTables defaultDb))
+            |> List.distinct
+
+        onTables "INSERT" [ split table ] @ onTables "SELECT" readInExprs
     | InsertSelect(table, _, select, _) ->
         onTables "INSERT" [ split table ] @ onTables "SELECT" (selectTables defaultDb select)
-    | Update u -> onTables "UPDATE" (tableRefsOfFrom defaultDb (Some(FromTable u.From)) u.Joins)
-    | Delete d -> onTables "DELETE" (tableRefsOfFrom defaultDb (Some(FromTable d.From)) d.Joins)
+    | Update u ->
+        let readInExprs =
+            (u.Assignments |> List.collect (fun a -> exprReadTables defaultDb a.Value))
+            @ (u.Where |> Option.map (exprReadTables defaultDb) |> Option.defaultValue [])
+            @ (u.Joins |> List.collect (fun j -> exprReadTables defaultDb j.On))
+            |> List.distinct
+
+        onTables "UPDATE" (tableRefsOfFrom defaultDb (Some(FromTable u.From)) u.Joins)
+        @ onTables "SELECT" readInExprs
+    | Delete d ->
+        let readInExprs =
+            (d.Where |> Option.map (exprReadTables defaultDb) |> Option.defaultValue [])
+            @ (d.Joins |> List.collect (fun j -> exprReadTables defaultDb j.On))
+            |> List.distinct
+
+        onTables "DELETE" (tableRefsOfFrom defaultDb (Some(FromTable d.From)) d.Joins)
+        @ onTables "SELECT" readInExprs
     | CreateTable(name, _, _, _, _, _, _, _) -> onTables "CREATE" [ split name ]
     | DropTable(names, _) -> onTables "DROP" (names |> List.map split)
     | Truncate table -> onTables "DROP" [ split table ]
@@ -518,7 +605,12 @@ let check (store: Store) (user: string) (required: (string * PrivTarget) list) :
 
                 match col with
                 | Some c -> userColumnText cols row c = "Y"
-                | None -> true // unknown requirement — never deny on our own bug
+                | None ->
+                    // An unknown privilege name means the emitter and the
+                    // static vocabulary drifted — fail closed and log, never
+                    // silently grant.
+                    Log.diagnostic "fsdb: auth: unknown privilege '%s' required — denying" privSql
+                    false
 
         if required |> List.forall (fst >> globallyHeld) then
             Ok()
@@ -619,7 +711,9 @@ let check (store: Store) (user: string) (required: (string * PrivTarget) list) :
             else
 
             match privBySql privSql with
-            | None -> Ok() // unknown requirement — never deny on our own bug
+            | None ->
+                Log.diagnostic "fsdb: auth: unknown privilege '%s' required — denying" privSql
+                Error(1227, sprintf "Access denied; you need (at least one of) the %s privilege(s) for this operation" privSql)
             | Some def ->
                 let allowed =
                     hasGlobal def

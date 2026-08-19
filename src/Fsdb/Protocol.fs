@@ -522,7 +522,9 @@ let private readBinaryTime (r: Reader) : string =
         let minute = int (r.ReadByte())
         let second = int (r.ReadByte())
         let micros = if len > 8 then r.ReadInt32LE() else 0
-        let totalHours = days * 24 + hour
+        // int32 `days` can be attacker-controlled; widen so `days * 24`
+        // can't wrap to a bogus hour count.
+        let totalHours = int64 days * 24L + int64 hour
         let sign = if isNegative <> 0uy then "-" else ""
         let frac = if micros > 0 then sprintf ".%06d" micros else ""
         sprintf "%s%02d:%02d:%02d%s" sign totalHours minute second frac
@@ -534,15 +536,25 @@ let private readBinaryTime (r: Reader) : string =
 /// decoded as UTF-8 text, matching how the rest of fsdb treats them (see
 /// `Storage.coerceValue`).
 let readBinaryValue (r: Reader) (typeId: byte) (unsigned: bool) : Value =
+    // A length-encoded length is a uint64 off the wire; casting a value
+    // above Int32.MaxValue to `int` goes negative and `ReadBytes` would
+    // silently yield an empty slice. Reject it so the COM_STMT_EXECUTE
+    // decode loop's catch turns it into a clean 1210 instead.
+    let boundedLen (len: uint64) : int =
+        if len > uint64 System.Int32.MaxValue then
+            failwith "length-encoded parameter length out of range"
+        else
+            int len
+
     let lenEncText () =
         match r.ReadLenEncInt() with
         | None -> ""
-        | Some len -> Encoding.UTF8.GetString(r.ReadBytes(int len))
+        | Some len -> Encoding.UTF8.GetString(r.ReadBytes(boundedLen len))
 
     let lenEncBytes () =
         match r.ReadLenEncInt() with
         | None -> [||]
-        | Some len -> r.ReadBytes(int len)
+        | Some len -> r.ReadBytes(boundedLen len)
 
     if typeId = TypeTiny then
         let b = r.ReadByte()

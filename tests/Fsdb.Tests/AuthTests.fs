@@ -44,4 +44,45 @@ let tests =
               | Some(cols, row) -> Expect.equal (storedPasswordHash cols row) "" "no password out of the box"
               | None -> failtest "expected the bootstrap root row"
 
-              Expect.isNone (tryUserRow store "nobody") "unknown user is None" ]
+              Expect.isNone (tryUserRow store "nobody") "unknown user is None"
+
+          testCase "requiredPrivileges reaches SELECT tables hidden in subqueries and derived tables"
+          <| fun _ ->
+              let selectTablesOf sql =
+                  match Fsdb.Parser.parse sql with
+                  | Ok stmt ->
+                      requiredPrivileges "app" stmt
+                      |> List.choose (function
+                          | "SELECT", OnTable(_, t) -> Some t
+                          | _ -> None)
+                      |> List.sort
+                  | Error e -> failtestf "parse %s: %s" sql e
+
+              // Each of these reads `secret` and must require SELECT on it.
+              Expect.equal (selectTablesOf "SELECT (SELECT s FROM secret)") [ "secret" ] "scalar subquery in projection"
+              Expect.equal (selectTablesOf "SELECT * FROM (SELECT * FROM secret) x") [ "secret" ] "derived table"
+              Expect.equal (selectTablesOf "SELECT * FROM mine WHERE id IN (SELECT id FROM secret)") [ "mine"; "secret" ] "IN subquery in WHERE"
+              Expect.equal (selectTablesOf "SELECT * FROM mine WHERE EXISTS (SELECT 1 FROM secret)") [ "mine"; "secret" ] "EXISTS in WHERE"
+              Expect.equal (selectTablesOf "SELECT * FROM mine JOIN (SELECT * FROM secret) d ON 1=1") [ "mine"; "secret" ] "joined derived table"
+              Expect.equal (selectTablesOf "SELECT * FROM ((SELECT * FROM a) UNION (SELECT * FROM secret)) x") [ "a"; "secret" ] "union inside a derived table"
+
+              match Fsdb.Parser.parse "UPDATE mine SET x = (SELECT s FROM secret)" with
+              | Ok stmt ->
+                  Expect.isTrue
+                      (requiredPrivileges "app" stmt |> List.contains ("SELECT", OnTable("app", "secret")))
+                      "subquery in an UPDATE SET clause needs SELECT on secret"
+              | Error e -> failtestf "parse update: %s" e
+
+              match Fsdb.Parser.parse "DELETE FROM mine WHERE EXISTS (SELECT 1 FROM secret)" with
+              | Ok stmt ->
+                  Expect.isTrue
+                      (requiredPrivileges "app" stmt |> List.contains ("SELECT", OnTable("app", "secret")))
+                      "EXISTS in a DELETE WHERE needs SELECT on secret"
+              | Error e -> failtestf "parse delete: %s" e
+
+              match Fsdb.Parser.parse "INSERT INTO mine VALUES ((SELECT s FROM secret))" with
+              | Ok stmt ->
+                  Expect.isTrue
+                      (requiredPrivileges "app" stmt |> List.contains ("SELECT", OnTable("app", "secret")))
+                      "subquery in an INSERT VALUES needs SELECT on secret"
+              | Error e -> failtestf "parse insert: %s" e ]

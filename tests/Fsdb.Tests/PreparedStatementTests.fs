@@ -125,4 +125,22 @@ let tests =
                   match handle session "SELECT name FROM ps_t WHERE id = 1" |> snd with
                   | ResultSet(_, [ [ Some "O'Brien\\" ] ]) -> ()
                   | other -> failtestf "expected the bound name back, got %A" other
-              | other -> failtestf "expected a parsed statement with 2 params, got %A" other ]
+              | other -> failtestf "expected a parsed statement with 2 params, got %A" other
+
+          testCase "a backtracked atom does not double-count its placeholder, and renumbering binds it correctly"
+          <| fun _ ->
+              // CONVERT(?, x) makes `convertUsingAtom` consume the `?` then
+              // fail over to `genericFuncCall`; FParsec rewinds the input but
+              // not the parse-time counter, so the raw count was 2 for one `?`
+              // and the surviving node was `Placeholder 1` (a gap).
+              match prepareStatement "SELECT CONVERT(?, CHAR)" with
+              | Result.Ok(Some _, 1) -> ()
+              | Result.Ok(Some _, n) -> failtestf "expected ParamCount 1, got %d" n
+              | other -> failtestf "expected a parsed statement, got %A" other
+
+              // A second `?` after the backtracked one: the raw counter
+              // reported 3 for two placeholders; renumbering restores 2.
+              match prepareStatement "SELECT CONVERT(?, CHAR), ? AS second" with
+              | Result.Ok(Some _, 2) -> ()
+              | Result.Ok(Some _, n) -> failtestf "expected ParamCount 2, got %d" n
+              | other -> failtestf "expected a parsed statement, got %A" other ]
