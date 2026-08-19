@@ -2780,17 +2780,24 @@ and private upsertRowsInTable
                                                         // what it already held) counts as 1 only
                                                         // when the client negotiated
                                                         // CLIENT_FOUND_ROWS, else 0.
+                                                        let changed = applied <> existing
                                                         let weight =
-                                                            if applied <> existing then 2
+                                                            if changed then 2
                                                             elif foundRows then 1
                                                             else 0
 
+                                                        // A no-op match stays out of `updated`:
+                                                        // MySQL's row-based binlog logs nothing
+                                                        // for a no-op ODKU, and emitting a
+                                                        // before=after RowsUpdated here would let
+                                                        // an onCommit-driven pipeline whose drain
+                                                        // upsert no-ops re-fire itself forever.
                                                         nextAutoId',
                                                         firstAuto,
                                                         lastExplicit,
                                                         affected + weight,
                                                         inserted,
-                                                        (existing, applied) :: updated,
+                                                        (if changed then (existing, applied) :: updated else updated),
                                                         reindexRow table.Columns uniqueGroups (Some existing) (Some(pos, applied)) index,
                                                         cascadeDb',
                                                         visited',

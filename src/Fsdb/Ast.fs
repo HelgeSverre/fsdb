@@ -472,8 +472,9 @@ type Statement =
     /// `onDuplicateUpdate` mirrors `Insert`'s: `VALUES(col)` resolves
     /// against the select-derived candidate row, bare column refs against
     /// the stored row (ponytail: MySQL also allows `alias.col` refs into
-    /// the SELECT's own columns here — ledgered in known-gaps.json, add if
-    /// a migration needs them).
+    /// the SELECT's own columns here — deferred, see
+    /// torture/findings/2026-08-19-insert-select-odku-gap.md; add if a
+    /// migration needs them).
     | InsertSelect of
         table: string *
         columns: string list *

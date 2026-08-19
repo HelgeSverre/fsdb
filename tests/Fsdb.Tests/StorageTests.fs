@@ -2146,6 +2146,27 @@ let tests =
                         (RowsUpdated(defaultDatabase, "users", [ [| VInt 1L; VString "alice"; VInt 30L |], [| VInt 1L; VString "alice"; VInt 99L |] ]))
                         "alice's row collided and was updated"
 
+                testCase "upsertRows fires no RowsUpdated for a no-op ON DUPLICATE KEY UPDATE match"
+                <| fun _ ->
+                    // Probed against real MySQL 8 (row-based binlog): an ODKU
+                    // match that leaves every column unchanged logs nothing.
+                    // Emitting a before=after RowsUpdated here would let an
+                    // onCommit-driven pipeline whose drain upsert no-ops
+                    // re-trigger itself on every pass.
+                    let store = withUsersTable ()
+                    insertRows store defaultDatabase "users" None [ [ VInt 1L; VString "alice"; VInt 30L ] ] |> ignore
+
+                    let events = ResizeArray<CommitEvent>()
+                    store.OnCommit.Add events.Add
+
+                    // "Update" that reasserts the stored row verbatim.
+                    let applyUpdate (existing: Value[]) (_candidate: Value[]) = Ok(Array.copy existing)
+
+                    upsertRows store defaultDatabase "users" None [ [ VInt 1L; VString "alice"; VInt 99L ] ] Ok applyUpdate false
+                    |> ignore
+
+                    Expect.equal (List.ofSeq events) [] "a no-op ODKU match commits nothing"
+
                 testCase "createTable/dropTable/alterTable/truncate/createDatabase/dropDatabase all fire SchemaChanged, logically (the DDL statement, not row data)"
                 <| fun _ ->
                     let store = create ()
