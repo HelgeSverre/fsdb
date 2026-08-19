@@ -1054,6 +1054,59 @@ let tests =
 
               Expect.equal after before "SHOW CREATE TABLE is byte-identical before and after the restart, across every ColumnType tag"
 
+          testCase "RENAME TABLE / CREATE INDEX / DROP INDEX replay from the WAL"
+          <| fun _ ->
+              // All three reach the WAL as `AlterTable` actions, not as their
+              // own statements: `Storage.renameTable` is `alterTable [RenameTo
+              // ...]`, and the executor's CREATE/DROP INDEX cases are
+              // `alterTable [AddIndex ...]`/`[DropIndexAction ...]`. So what
+              // this pins is `encodeAlterAction`'s 0x05/0x07/0x08 tags — the
+              // only path SQL can actually produce (mutation-checked: breaking
+              // `RenameTo`'s encoding fails this test).
+              //
+              // `encodeStatement`'s own RenameTable/CreateIndex/DropIndexStmt
+              // tags are unreachable for the same reason — nothing emits
+              // `SchemaChanged` carrying them — which is why coverage flags
+              // them and why no test can pin them.
+              let dir = tempDataDir ()
+              let store = load dir
+              attach dir store
+              let session = Fsdb.Session.create 1 store
+
+              let run (session: Fsdb.Session.Session) (sql: string) =
+                  match handle session sql with
+                  | session', Err(code, msg) -> failtestf "%s failed: %d %s" sql code msg
+                  | session', _ -> session'
+
+              let session =
+                  [ "CREATE TABLE old_name (id INT PRIMARY KEY, c VARCHAR(20))"
+                    "INSERT INTO old_name VALUES (1, 'x')"
+                    "RENAME TABLE old_name TO new_name" // 0x06
+                    "CREATE INDEX ix_c ON new_name (c)" // 0x07
+                    "CREATE INDEX ix_gone ON new_name (id)"
+                    "DROP INDEX ix_gone ON new_name" ] // 0x08
+                  |> List.fold run session
+
+              ignore session
+              let reloaded = load dir
+
+              Expect.isTrue (databaseExists reloaded defaultDatabase) "database replayed"
+
+              // The rename replayed: rows live under the new name, and the
+              // old one is gone rather than lingering as a stale copy.
+              Expect.equal (rowsOf reloaded defaultDatabase "new_name") [ [| VInt 1L; VString "x" |] ] "renamed table kept its rows"
+
+              match scanList reloaded defaultDatabase "old_name" with
+              | Error(NoSuchTable _) -> ()
+              | other -> failtestf "the pre-rename name should be gone, got %A" other
+
+              let indexes =
+                  match Map.tryFind defaultDatabase reloaded.Catalog |> Option.bind (Map.tryFind "new_name") with
+                  | Some t -> t.Indexes |> List.map (fun ix -> ix.Name) |> List.sort
+                  | None -> failtest "new_name missing after reload"
+
+              Expect.equal indexes [ "ix_c" ] "the created index replayed and the dropped one stayed dropped"
+
           testCase "a GENERATED column using CASE/LIKE ESCAPE/IN/BETWEEN/CAST/CONCAT survives a restart and still computes correctly"
           <| fun _ ->
               let dir = tempDataDir ()
