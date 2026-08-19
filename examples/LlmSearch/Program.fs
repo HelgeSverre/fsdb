@@ -57,6 +57,16 @@ let private post (ctx: QueryContext) (m: Model) (path: string) (body: JsonObject
     | :? SqlError | :? OperationCanceledException -> reraise ()
     | ex -> raise (SqlError(1296, sprintf "Got error '%s' from %s" ex.Message m.Endpoint))
 
+/// Shape drift (valid JSON missing the expected keys) must land on the same
+/// SqlError 1296 as transport failures — a bare NullReferenceException here
+/// would surface as the generic 1105.
+let private shape (m: Model) (parse: unit -> 'a) : 'a =
+    try
+        parse ()
+    with
+    | :? SqlError -> reraise ()
+    | ex -> raise (SqlError(1296, sprintf "Unexpected response shape from %s: %s" m.Endpoint ex.Message))
+
 let private vectorOf (floats: float32[]) : Value =
     let bytes = Array.zeroCreate (floats.Length * 4)
     Buffer.BlockCopy(floats, 0, bytes, 0, bytes.Length)
@@ -91,10 +101,12 @@ let llmEmbed (ctx: QueryContext) (args: Value list) : Value =
                     body["model"] <- m.ModelName
                     body["input"] <- text
                     let resp = post ctx m "/embeddings" body
-                    resp.["data"].[0].["embedding"].AsArray()
-                    |> Seq.map (fun n -> n.GetValue<float32>())
-                    |> Array.ofSeq
-                    |> vectorOf
+
+                    shape m (fun () ->
+                        resp.["data"].[0].["embedding"].AsArray()
+                        |> Seq.map (fun n -> n.GetValue<float32>())
+                        |> Array.ofSeq
+                        |> vectorOf)
         )
     | _ -> raise (SqlError(1582, "llm_embed expects (alias, text)"))
 
@@ -118,7 +130,7 @@ let rec llmComplete (ctx: QueryContext) (args: Value list) : Value =
             msg["content"] <- prompt
             body["messages"] <- JsonArray(msg)
             let resp = post ctx m "/chat/completions" body
-            VString(resp.["choices"].[0].["message"].["content"].GetValue<string>())
+            VString(shape m (fun () -> resp.["choices"].[0].["message"].["content"].GetValue<string>()))
     | _ -> raise (SqlError(1582, "llm_complete expects (alias, prompt [, json_options])"))
 
 /// Prints a result set as aligned columns; fails loudly on errors so the
@@ -137,6 +149,13 @@ let query (conn: Db.Connection) (sql: string) =
     | Executor.Err(code, msg) -> failwithf "query failed (%d): %s" code msg
 
     printfn ""
+
+/// Setup/drain statements: quiet on success, loud on failure — an ignored
+/// Err here would let the demo claim work it never did.
+let exec (conn: Db.Connection) (sql: string) =
+    match conn.Query sql with
+    | Executor.Err(code, msg) -> failwithf "'%s' failed (%d): %s" sql code msg
+    | _ -> ()
 
 let escape (s: string) = s.Replace("'", "''")
 
@@ -178,7 +197,7 @@ let main argv =
     let conn = Db.connect db
     query conn "SELECT * FROM fsdb.models"
 
-    conn.Query "CREATE TABLE docs (id INT PRIMARY KEY, body TEXT, embedding VECTOR(768))" |> ignore
+    exec conn "CREATE TABLE docs (id INT PRIMARY KEY, body TEXT, embedding VECTOR(768))"
 
     [ "fsdb persists data with a write-ahead log plus periodic snapshots"
       "the parser is a hand-rolled recursive-descent parser in one F# file"
@@ -186,14 +205,14 @@ let main argv =
       "the wire protocol speaks MySQL so any client or ORM just connects"
       "aggregate functions fold every non-NULL row value into one result"
       "virtual tables expose host state to SQL without inserting rows" ]
-    |> List.iteri (fun i body -> conn.Query(sprintf "INSERT INTO docs (id, body) VALUES (%d, '%s')" i (escape body)) |> ignore)
+    |> List.iteri (fun i body -> exec conn (sprintf "INSERT INTO docs (id, body) VALUES (%d, '%s')" i (escape body)))
 
     let mutable embedded = 0
     let mutable item = Unchecked.defaultof<int64 * string>
 
     while pending.TryDequeue &item do
         let id, _ = item
-        conn.Query(sprintf "UPDATE docs SET embedding = llm_embed('local', body) WHERE id = %d" id) |> ignore
+        exec conn (sprintf "UPDATE docs SET embedding = llm_embed('local', body) WHERE id = %d" id)
         embedded <- embedded + 1
 
     printfn "embedded %d docs via the onCommit queue\n" embedded
