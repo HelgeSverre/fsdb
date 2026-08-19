@@ -1350,6 +1350,189 @@ let tests =
               }
               |> Async.RunSynchronously
 
+          // A batch UPDATE whose SET calls a slow registered function
+          // (`SET ocr_text = ocr(pdf)`-shaped) runs its per-row updater
+          // inside `Storage.updateRows`'s fold — which, unlike the SELECT
+          // row pipeline's `traverse`, had no cancellation check until
+          // `foldWithCancellation`. MySqlConnector's `Cancel()` is the
+          // client-side shape of that: it opens a side connection and
+          // issues `KILL QUERY <id>`, which flips the victim's
+          // `queryCancellation` token. The fold must unwind all-or-nothing:
+          // the statement-local builder is discarded, so the table shows
+          // no partial rewrite.
+          testCase "MySqlCommand.Cancel mid-UPDATE over a slow function unwinds with the table unmodified"
+          <| fun _ ->
+              async {
+                  let mutable slowCalls = 0L
+
+                  let slow =
+                      function
+                      | [ VInt i ] ->
+                          System.Threading.Interlocked.Increment(&slowCalls) |> ignore
+                          System.Threading.Thread.Sleep 5
+                          VInt(i + 1L)
+                      | _ -> VNull // the all-NULL probe row's type check
+
+                  let registry = Fsdb.Functions.empty |> Fsdb.Functions.registerScalar "SLOWFN" slow
+
+                  let listener = Fsdb.Server.startListening System.Net.IPAddress.Loopback 0
+                  let port = Fsdb.Server.port listener
+                  Fsdb.Server.serve listener (Fsdb.Storage.create ()) registry |> Async.StartAsTask |> ignore
+
+                  try
+                      let connStr =
+                          sprintf
+                              "Server=127.0.0.1;Port=%d;User ID=root;Password=;AllowPublicKeyRetrieval=True;SslMode=None;Pooling=false"
+                              port
+
+                      use setup = new MySqlConnector.MySqlConnection(connStr)
+                      do! setup.OpenAsync() |> Async.AwaitTask
+
+                      let exec (sql: string) =
+                          async {
+                              use cmd = setup.CreateCommand()
+                              cmd.CommandText <- sql
+                              return! cmd.ExecuteNonQueryAsync() |> Async.AwaitTask |> Async.Ignore
+                          }
+
+                      // 2000 rows at ~5ms of SLOWFN each is ~10s of honest
+                      // work — far past this test's cancel point, so a
+                      // broken cancellation path can't pass by the UPDATE
+                      // simply finishing; and well past `Storage.
+                      // cancellationCheckInterval` (256), so the periodic
+                      // check actually gets a turn after the cancel lands.
+                      let rowCount = 2000
+                      do! exec "CREATE TABLE upd_cancel (id INT PRIMARY KEY, v INT)"
+
+                      do!
+                          exec (
+                              sprintf
+                                  "INSERT INTO upd_cancel VALUES %s"
+                                  (String.Join(",", [ for i in 1..rowCount -> sprintf "(%d, 0)" i ]))
+                          )
+
+                      use victim = new MySqlConnector.MySqlConnection(connStr)
+                      do! victim.OpenAsync() |> Async.AwaitTask
+                      use updCmd = victim.CreateCommand()
+                      updCmd.CommandText <- "UPDATE upd_cancel SET v = SLOWFN(v)"
+                      let updTask = updCmd.ExecuteNonQueryAsync()
+
+                      // Let the fold get properly underway before cancelling.
+                      let mutable spins = 0
+
+                      while System.Threading.Interlocked.Read(&slowCalls) < 10L && spins < 100 do
+                          do! Async.Sleep 50
+                          spins <- spins + 1
+
+                      Expect.isTrue (System.Threading.Interlocked.Read(&slowCalls) >= 10L) "the UPDATE was actually underway before Cancel"
+                      updCmd.Cancel()
+
+                      // The cancelled statement surfaces as a client-side
+                      // exception (fsdb ends the victim's command loop on
+                      // cancellation rather than replying 1317) — either
+                      // way it must not report success.
+                      let! threw =
+                          async {
+                              try
+                                  let! _ = updTask |> Async.AwaitTask
+                                  return false
+                              with _ ->
+                                  return true
+                          }
+
+                      Expect.isTrue threw "the cancelled UPDATE did not report success"
+
+                      // Same honest "stopped" signal the disconnect test
+                      // uses: SLOWFN's call count settles instead of
+                      // grinding through all 2000 rows.
+                      let mutable lastCount = System.Threading.Interlocked.Read(&slowCalls)
+                      let mutable stable = false
+                      let deadline = DateTime.UtcNow.AddSeconds 10.0
+
+                      while not stable && DateTime.UtcNow < deadline do
+                          do! Async.Sleep 300
+                          let current = System.Threading.Interlocked.Read(&slowCalls)
+                          stable <- current = lastCount
+                          lastCount <- current
+
+                      Expect.isTrue stable "SLOWFN's call count stopped growing after Cancel — the update fold actually unwound"
+
+                      Expect.isTrue
+                          (lastCount < int64 rowCount)
+                          (sprintf "only a fraction of the %d rows should have been visited (got %d)" rowCount lastCount)
+
+                      // All-or-nothing: the discarded builder means not one
+                      // row shows the rewrite, including the ones SLOWFN
+                      // already computed before the cancel.
+                      use checkCmd = setup.CreateCommand()
+                      checkCmd.CommandText <- "SELECT COALESCE(SUM(v), -1) FROM upd_cancel"
+                      let! sumResult = checkCmd.ExecuteScalarAsync() |> Async.AwaitTask
+                      Expect.equal (string sumResult) "0" "the table is unmodified — no partial rewrite survived the cancel"
+
+                      do! setup.CloseAsync() |> Async.AwaitTask
+                  finally
+                      listener.Stop()
+              }
+              |> Async.RunSynchronously
+
+          // `Session.defaultVariables` advertises the wire's real per-packet
+          // ceiling (`Packet.maxAccumulatedPacketSize`, 64 MiB) as
+          // max_allowed_packet — advertising MySQL's 16 MiB default made
+          // MySqlConnector refuse a >16 MiB statement client-side before
+          // ever sending it, even though the server would have taken it.
+          testCase "max_allowed_packet reads 64MiB and a >16MiB blob inserted as query text round-trips"
+          <| fun _ ->
+              async {
+                  let listener = Fsdb.Server.startListening System.Net.IPAddress.Loopback 0
+                  let port = Fsdb.Server.port listener
+                  Fsdb.Server.serve listener (Fsdb.Storage.create ()) Fsdb.Functions.empty |> Async.StartAsTask |> ignore
+
+                  try
+                      let connStr =
+                          sprintf
+                              "Server=127.0.0.1;Port=%d;User ID=root;Password=;AllowPublicKeyRetrieval=True;SslMode=None"
+                              port
+
+                      use conn = new MySqlConnector.MySqlConnection(connStr)
+                      do! conn.OpenAsync() |> Async.AwaitTask
+
+                      use varCmd = conn.CreateCommand()
+                      varCmd.CommandText <- "SELECT @@max_allowed_packet"
+                      let! varResult = varCmd.ExecuteScalarAsync() |> Async.AwaitTask
+                      Expect.equal (string varResult) "67108864" "@@max_allowed_packet advertises the real 64 MiB wire ceiling"
+
+                      use ddl = conn.CreateCommand()
+                      ddl.CommandText <- "CREATE TABLE big_blobs (id INT PRIMARY KEY, data LONGBLOB)"
+                      do! ddl.ExecuteNonQueryAsync() |> Async.AwaitTask |> Async.Ignore
+
+                      // 17 MiB of deterministic bytes → a ~34 MiB hex
+                      // literal, so the COM_QUERY payload itself crosses
+                      // MySQL's 16 MiB single-frame limit and exercises
+                      // both multi-frame reassembly (client → server) and
+                      // multi-frame writes (the SELECT reply back).
+                      let blob = Array.zeroCreate<byte> (17 * 1024 * 1024)
+                      Random(42).NextBytes blob
+
+                      use ins = conn.CreateCommand()
+                      ins.CommandText <- sprintf "INSERT INTO big_blobs VALUES (1, x'%s')" (Convert.ToHexString blob)
+                      ins.CommandTimeout <- 120
+                      let! affected = ins.ExecuteNonQueryAsync() |> Async.AwaitTask
+                      Expect.equal affected 1 "the >16MiB INSERT was accepted"
+
+                      use sel = conn.CreateCommand()
+                      sel.CommandText <- "SELECT data FROM big_blobs WHERE id = 1"
+                      sel.CommandTimeout <- 120
+                      let! back = sel.ExecuteScalarAsync() |> Async.AwaitTask
+                      let backBytes = back :?> byte[]
+                      Expect.equal backBytes.Length blob.Length "the blob's length survived the round-trip"
+                      Expect.isTrue (backBytes = blob) "the blob's bytes survived the round-trip"
+
+                      do! conn.CloseAsync() |> Async.AwaitTask
+                  finally
+                      listener.Stop()
+              }
+              |> Async.RunSynchronously
+
           // A DATETIME(6) value round-tripped through COM_STMT_PREPARE +
           // COM_STMT_EXECUTE must use the binary protocol's 11-byte datetime
           // form (microseconds present) and advertise `decimals = 6` on the

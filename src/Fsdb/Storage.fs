@@ -863,6 +863,30 @@ let traverse (f: 'a -> Result<'b, 'e>) (xs: 'a list) : Result<'b list, 'e> =
 
     loop 0 [] xs
 
+/// `List.fold` with `traverse`'s periodic `queryCancellation` check — for
+/// the mutation folds (`updateRows`, `upsertRows`) whose per-row `step` can
+/// call an arbitrarily slow registered function (`SET ocr_text = ocr(pdf)`):
+/// without it a killed client's batch write only unwinds by the *accident*
+/// that each row's `coerceRow`/`processRow` happens to route through
+/// `traverse` (whose check fires on its first element) — this fold owns its
+/// own check instead of leaning on that. Throwing mid-fold is safe — both
+/// folds accumulate into statement-local state (`updateRows`'s builder,
+/// upsert's working copy) that is only committed when the fold completes,
+/// so cancellation stays all-or-nothing. (`deleteRows` needs nothing: its
+/// row scan already routes through `traverse`.)
+let foldWithCancellation (step: 'acc -> 'a -> 'acc) (init: 'acc) (xs: 'a list) : 'acc =
+    let token = queryCancellation.Value
+
+    xs
+    |> List.fold
+        (fun (i, acc) x ->
+            if i % cancellationCheckInterval = 0 then
+                token.ThrowIfCancellationRequested()
+
+            i + 1, step acc x)
+        (0, init)
+    |> snd
+
 let private parseNumeric (s: string) : float option =
     match Double.TryParse(s.Trim(), NumberStyles.Float, CultureInfo.InvariantCulture) with
     | true, d -> Some d
@@ -2805,7 +2829,7 @@ and private upsertRowsInTable
                                                     cascaded))))
 
                     rowsIn
-                    |> List.fold step (Ok(table.NextAutoId, None, None, 0, [], [], table.UniqueIndex, db, Map.empty, Map.empty))
+                    |> foldWithCancellation step (Ok(table.NextAutoId, None, None, 0, [], [], table.UniqueIndex, db, Map.empty, Map.empty))
                     |> Result.map (fun (nextAutoId', firstAuto, lastExplicit, affected, inserted, updated, index, cascadeDb, _visited, cascaded) ->
                         let finalRows =
                             if newRows.Count = 0 then
@@ -3162,7 +3186,7 @@ let updateRows
 
                     candidates
                     |> Option.defaultWith (fun () -> table.RowsArray |> Seq.indexed |> List.ofSeq)
-                    |> List.fold step (Ok([], table.UniqueIndex, db, Map.empty, Map.empty))
+                    |> foldWithCancellation step (Ok([], table.UniqueIndex, db, Map.empty, Map.empty))
                     // `DrainToImmutable`, not `MoveToImmutable`: the latter
                     // demands Count = Capacity, which an empty table's
                     // builder (capacity-8, count-0) never satisfies.

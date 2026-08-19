@@ -24,7 +24,11 @@ let defaultVariables: Map<string, string option> =
           "collation_server", "utf8mb4_general_ci"
           "collation_database", "utf8mb4_general_ci"
           "autocommit", "1"
-          "max_allowed_packet", "16777216"
+          // The wire really accepts `Packet.maxAccumulatedPacketSize`
+          // (64 MiB) per logical packet; advertising less made clients
+          // (MySqlConnector included) refuse >16 MiB statements — e.g. a
+          // large blob inserted as a hex literal — before ever sending them.
+          "max_allowed_packet", string Fsdb.Packet.maxAccumulatedPacketSize
           "system_time_zone", "UTC"
           "time_zone", "SYSTEM"
           "auto_increment_increment", "1"
