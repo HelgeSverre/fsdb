@@ -21,6 +21,11 @@ run *ARGS:
 client port=PORT:
     {{ MYSQL }} --protocol=tcp -h127.0.0.1 -P{{ port }} -uroot
 
+# Run the LlmSearch example (pass --dry-run to stub the LLM HTTP calls)
+[group('server')]
+example *ARGS:
+    dotnet run --project examples/LlmSearch -- {{ ARGS }}
+
 # Quick liveness probe against a running server
 [group('server')]
 smoke port=PORT:

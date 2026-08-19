@@ -278,6 +278,80 @@ Db.create () |> Db.withDataDir "./fsdb-data" |> Db.listen System.Net.IPAddress.L
 `tests/Fsdb.Tests/IntegrationTests.fs` for the full round-trip test
 (`SLUGIFY`/`MEDIAN`) against a real client over the wire.
 
+### The rich extension API
+
+`registerScalar` is the sugar for context-free functions. A function that
+calls the network (or needs to know who's asking) uses the rich form:
+
+```fsharp
+Db.create ()
+|> Db.registerFunction (
+    ScalarFunction.create "LLM_EMBED" (fun ctx args -> embed ctx.Cancellation args)
+    |> ScalarFunction.effectful)
+```
+
+- **`QueryContext`** — what the function sees about the executing query:
+  `Database` (current schema, matches `DATABASE()`), `User` (matches
+  `CURRENT_USER()`), and `Cancellation`, the killed-client token — hand it
+  to `HttpClient` so a network call stops when its client vanishes.
+- **`ScalarFunction.create name fn`** builds the default shape:
+  deterministic, callable anywhere. **`ScalarFunction.effectful`** is the
+  network-calling shape in one word: non-deterministic plus direct-only.
+  Direct-only functions are rejected inside generated-column definitions
+  (SQLite's DIRECTONLY rationale: the engine — not the user's statement —
+  would re-invoke them on every later write); the deterministic flag is
+  carried metadata for host-side caches.
+- **`SqlError`** — `raise (SqlError(1210, "no such model"))` reaches the
+  client as exactly that code/message instead of the generic 1105
+  catch-all. A throwing function still aborts the transaction like any
+  other failure.
+- **Arity is a pattern match**, not a registration parameter — one function
+  handles all its shapes: `function [p] -> ... | [m; p] -> ... | _ -> raise ...`.
+  Handle `VNull` arguments too: the executor type-checks expressions
+  against an all-NULL probe row before touching real rows, so return
+  `VNull` for NULL inputs like every builtin does.
+- **Blocking, honestly**: there is no async executor. A scalar blocks its
+  connection thread for as long as it runs — a slow HTTP call is a slow
+  query, on that connection only.
+
+`Db.registerTable` exposes host state as a read-only table in the reserved
+`fsdb` schema, and `Db.onCommit` subscribes to the committed-write feed
+(the same CDC feed the WAL rides, multi-subscriber):
+
+```fsharp
+db
+|> Db.registerTable (
+    VirtualTable.create "models" [ VirtualTable.text "name"; VirtualTable.text "endpoint" ] listModels)
+|> Db.onCommit (fun event -> queue.Enqueue event)
+```
+
+The `onCommit` contract: handlers run synchronously under the commit lock,
+so keep them fast, and never write back into the database from inside one —
+re-entry deadlocks. Queue what you saw and act after the statement returns
+(see the auto-embedding loop in the example below). Subscribe after
+`withDataDir`, which replaces the store.
+
+`Db.connect` opens an in-process connection (no socket — `USE`, variables,
+and transactions persist across `Query` calls), and `Db.serve` starts a
+stoppable wire server (`RunningServer.Port` matters when you pass port 0):
+
+```fsharp
+let conn = Db.connect db
+conn.Query "SELECT * FROM fsdb.models" |> ignore
+
+use running = db |> Db.serve System.Net.IPAddress.Loopback 0
+printfn "listening on %d" running.Port
+```
+
+`examples/LlmSearch` puts all of it together — `llm_complete`/`llm_embed`
+against any OpenAI-compatible endpoint (Ollama by default), a `fsdb.models`
+virtual table, auto-embedding on insert via `onCommit`, and semantic search
+with `ORDER BY DISTANCE(..., 'COSINE')`. Run it without a model server:
+
+```sh
+just example -- --dry-run
+```
+
 ## Benchmarking
 
 `benchmarks/Fsdb.Benchmarks` runs fsdb head-to-head against a native MySQL
