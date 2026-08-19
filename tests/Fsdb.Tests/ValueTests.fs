@@ -1203,7 +1203,26 @@ let tests =
                           Expect.equal
                               (call "REGEXP_REPLACE" [ VString "2024-01-15"; VString "(\\d+)-(\\d+)-(\\d+)"; VString "\\3/\\2/\\1" ])
                               (VString "3/2/1")
-                              "\\N is a literal digit, not a backreference" ]
+                              "\\N is a literal digit, not a backreference"
+
+                      testCase "REGEXP_REPLACE rejects .NET-only $ tokens with MySQL's 3887"
+                      <| fun _ ->
+                          // A `$` not followed by a digit isn't a valid MySQL
+                          // backreference — MySQL errors 3887 rather than run
+                          // .NET's own `$``/`$&`/`$'` substitutions (which also
+                          // amplify output to O(n^2)). Oracle-verified 8.4.
+                          let rejects (repl: string) =
+                              Expect.throwsC
+                                  (fun () -> call "REGEXP_REPLACE" [ VString "x"; VString "."; VString repl ] |> ignore)
+                                  (fun e ->
+                                      match e with
+                                      | Fsdb.Functions.SqlError(3887, _) -> ()
+                                      | other -> failtestf "expected 3887, got %A" other)
+
+                          rejects "$`"
+                          rejects "$&"
+                          rejects "$'"
+                          rejects "a$" ]
 
                 testList
                     "UUID_TO_BIN/BIN_TO_UUID/IS_UUID"

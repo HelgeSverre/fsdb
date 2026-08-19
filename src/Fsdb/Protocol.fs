@@ -352,15 +352,32 @@ let private writeBinaryTime (w: Writer) (s: string) : unit =
     let neg = s.StartsWith "-"
     let body = if neg then s.Substring 1 else s
 
+    // A TIME column keeps raw text when TimeSpan parsing failed at insert
+    // time, so the rendered string here can be anything a client stored.
+    // Parse defensively — any malformed component collapses the whole value
+    // to a zero TIME rather than throwing in the binary send path (which
+    // runs after the handler returned and would otherwise drop the
+    // connection with no ERR).
+    let tryInt (x: string) =
+        match Int32.TryParse(x, Globalization.NumberStyles.Integer, Globalization.CultureInfo.InvariantCulture) with
+        | true, v -> Some v
+        | _ -> None
+
     let timePart, micros =
         match body.IndexOf '.' with
         | -1 -> body, 0
-        | i -> body.Substring(0, i), Int32.Parse(body.Substring(i + 1).PadRight(6, '0').Substring(0, 6), Globalization.CultureInfo.InvariantCulture)
+        | i -> body.Substring(0, i), (tryInt (body.Substring(i + 1).PadRight(6, '0').Substring(0, 6)) |> Option.defaultValue 0)
 
     let parts = timePart.Split ':'
-    let totalHours = Int32.Parse(parts.[0], Globalization.CultureInfo.InvariantCulture)
-    let minute = Int32.Parse(parts.[1], Globalization.CultureInfo.InvariantCulture)
-    let second = Int32.Parse(parts.[2], Globalization.CultureInfo.InvariantCulture)
+
+    let totalHours, minute, second =
+        if parts.Length = 3 then
+            match tryInt parts.[0], tryInt parts.[1], tryInt parts.[2] with
+            | Some h, Some m, Some s -> h, m, s
+            | _ -> 0, 0, 0
+        else
+            0, 0, 0
+
     let days, hour = totalHours / 24, totalHours % 24
 
     if totalHours = 0 && minute = 0 && second = 0 && micros = 0 then

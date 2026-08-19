@@ -109,10 +109,19 @@ let private naturalTerms (query: string) : string[] =
 
 /// Element-wise sum of every term's per-doc contribution — the natural and
 /// query-expansion modes are both exactly this over different term sets.
+/// Accumulates into one result array in place rather than mapping every term
+/// to its own row array first, so peak memory stays O(rows), not
+/// O(terms × rows) for a query with many distinct terms.
 let private sumTermScores (corpus: Corpus) (terms: string[]) : float[] =
-    terms
-    |> Array.map (termScores corpus)
-    |> Array.fold (Array.map2 (+)) (Array.zeroCreate corpus.Docs.Length)
+    let scores = Array.zeroCreate corpus.Docs.Length
+
+    for term in terms do
+        let ts = termScores corpus term
+
+        for i in 0 .. scores.Length - 1 do
+            scores.[i] <- scores.[i] + ts.[i]
+
+    scores
 
 let naturalScoresOf (corpus: Corpus) (query: string) : float[] =
     sumTermScores corpus (naturalTerms query)
@@ -159,7 +168,13 @@ let private parseBooleanQuery (query: string) : (BoolOp * BoolTerm) list =
             i <- i + 1
         query.Substring(start, i - start).Trim('\'').ToLowerInvariant()
 
-    let rec nodes (stopAtParen: bool) : (BoolOp * BoolTerm) list =
+    // Cap parenthesis nesting so a query like "((((...))))" with thousands
+    // of groups can't overflow the recursive-descent stack (a
+    // StackOverflowException is not catchable and would kill the process).
+    // Past the cap, an open paren is treated as ignorable punctuation.
+    let maxDepth = 64
+
+    let rec nodes (depth: int) (stopAtParen: bool) : (BoolOp * BoolTerm) list =
         let acc = ResizeArray()
         let mutable go = true
 
@@ -186,7 +201,7 @@ let private parseBooleanQuery (query: string) : (BoolOp * BoolTerm) list =
                 if i >= len then go <- false
                 elif query.[i] = '(' then
                     i <- i + 1
-                    acc.Add(op, BGroup(nodes true))
+                    if depth < maxDepth then acc.Add(op, BGroup(nodes (depth + 1) true))
                 elif query.[i] = '"' then
                     i <- i + 1
                     let start = i
@@ -220,7 +235,7 @@ let private parseBooleanQuery (query: string) : (BoolOp * BoolTerm) list =
 
         List.ofSeq acc
 
-    nodes false
+    nodes 0 false
 
 /// Whether `doc` contains the quoted words as adjacent tokens in order
 /// (`proximity = None`) or all within an (N+1)-token window (`Some N`).

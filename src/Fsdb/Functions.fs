@@ -1693,8 +1693,18 @@ let private nthMatch (rx: Regex) (text: string) (pos: int) (occurrence: int) : M
     if pos < 1 || pos > text.Length + 1 || occurrence < 1 then
         None
     else
-        let matches = rx.Matches(text, pos - 1) |> Seq.cast<Match> |> Seq.toArray
-        if occurrence <= matches.Length then Some matches.[occurrence - 1] else None
+        // Walk matches lazily via `NextMatch` and stop at the requested
+        // occurrence — materializing the whole MatchCollection would let a
+        // `.`-style pattern over a large string build millions of Match
+        // objects for what is usually occurrence 1.
+        let mutable m = rx.Match(text, pos - 1)
+        let mutable remaining = occurrence - 1
+
+        while m.Success && remaining > 0 do
+            m <- m.NextMatch()
+            remaining <- remaining - 1
+
+        if m.Success then Some m else None
 
 let private matchTypeArg (args: Value list) (idx: int) : string option =
     args |> List.tryItem idx |> Option.filter (fun v -> v <> VNull) |> Option.map req
@@ -1741,12 +1751,18 @@ let private regexpSubstrFn: Scalar =
         | None -> VNull
     | _ -> VNull
 
-/// MySQL (ICU) replacement text uses `$1`-`$9` for backreferences, same
-/// syntax .NET's `Regex.Replace` already understands, so `$N` passes
-/// through untouched. `\N` is a literal digit and `\\` a literal backslash
-/// in MySQL, not a backreference escape, so both need translating away
-/// before .NET sees them (oracle-verified: MySQL 8.4).
+/// MySQL (ICU) replacement text uses `$N` for backreferences, the same
+/// syntax .NET's `Regex.Replace` understands, so `$N` passes through
+/// untouched. `\N` is a literal digit and `\\` a literal backslash in MySQL,
+/// not a backreference escape, so both are translated away before .NET sees
+/// them (oracle-verified: MySQL 8.4). A `$` NOT followed by a digit is
+/// rejected with MySQL's 3887 — leaving it for .NET would enable its
+/// non-MySQL `$``/`$'`/`$&`/`$_` substitution tokens (and `$`` amplifies
+/// output to O(n²)); MySQL itself errors on all of them.
 let private toDotNetReplacement (repl: string) : string =
+    if Regex.IsMatch(repl, @"\$(?!\d)") then
+        raise (SqlError(3887, "A capture group has an invalid name."))
+
     Regex.Replace(repl, @"\\\\|\\(\d)", fun m -> if m.Value = "\\\\" then "\\" else m.Groups.[1].Value)
 
 /// `occurrence = 0` (the default) replaces every match; a positive
@@ -2135,6 +2151,12 @@ let private stringToVectorFn: Scalar =
         let inner = s.Substring(1, s.Length - 2).Trim()
 
         if inner = "" then vectorError (sprintf "'%s'" s)
+
+        // Count separators before splitting so a literal with millions of
+        // commas is rejected without first allocating the whole split array.
+        let commaCount = inner |> Seq.sumBy (fun c -> if c = ',' then 1 else 0)
+
+        if commaCount + 1 > 16383 then vectorError (sprintf "%d dimensions exceeds the maximum 16383" (commaCount + 1))
 
         let parts = inner.Split ','
 

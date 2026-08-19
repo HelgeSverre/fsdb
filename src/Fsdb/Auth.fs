@@ -576,8 +576,15 @@ let rec requiredPrivileges (defaultDb: string) (stmt: Statement) : (string * Pri
         // "or higher" part.
         let target = targetOfLevel defaultDb level
 
+        // `GRANT OPTION` is required unconditionally below and isn't a
+        // static privilege `expandPrivs` knows — filter it out first (same
+        // as `revoke`'s own expansion) so a statement like
+        // `REVOKE GRANT OPTION, SELECT ...` still collects the SELECT
+        // requirement instead of `expandPrivs` erroring and dropping every
+        // privilege-specific check, which would let a scoped grant-option
+        // holder revoke privileges it doesn't hold.
         let privReqs =
-            match expandPrivs privs target with
+            match expandPrivs (privs |> List.filter (fun p -> p <> "GRANT OPTION")) target with
             | Result.Ok defs -> defs |> List.map (fun d -> d.Sql, target)
             | Result.Error _ -> [] // invalid list — the executor reports it
 

@@ -3708,25 +3708,33 @@ and private runWindowedSelect
                     if buckets <= 0L then
                         Error(1210, "Incorrect arguments to ntile")
                     else
-                        let buckets = int buckets
+                        let buckets = int64 buckets
 
                         partitions
                         |> Array.ofList
                         |> Array.collect (fun group ->
-                            let n = group.Length
+                            let n = int64 group.Length
                             let baseSize = n / buckets
                             let remainder = n % buckets
 
                             // Earlier buckets absorb the remainder (a 10-row
                             // partition into 3 buckets is 4/3/3), matching
-                            // MySQL rather than splitting evenly from the end.
-                            let sizes = Array.init buckets (fun b -> baseSize + (if b < remainder then 1 else 0))
-                            let bucketStarts = sizes |> Array.scan (+) 0
+                            // MySQL. Computed per row in closed form rather
+                            // than materializing a `buckets`-sized array — a
+                            // huge NTILE(n) over a tiny table must stay O(rows),
+                            // not O(n).
+                            let boundary = remainder * (baseSize + 1L)
 
                             group
                             |> Array.mapi (fun pos (origIdx, _) ->
-                                let bucket = bucketStarts |> Array.findIndexBack (fun start -> start <= pos)
-                                origIdx, VInt(int64 (bucket + 1))))
+                                let p = int64 pos
+
+                                let bucket =
+                                    if p < boundary then p / (baseSize + 1L)
+                                    else remainder + (p - boundary) / baseSize
+
+                                origIdx, VInt(bucket + 1L))
+                            )
                         |> Ok
                 | LagOver(lagExpr, offset, _, _) ->
                     // `pos - offset` indexes within the same partition's

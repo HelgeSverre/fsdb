@@ -894,6 +894,14 @@ let private handleConnection
                                 // already-authenticated socket and current
                                 // database — what connection pools use this
                                 // for instead of a full reconnect.
+                                //
+                                // Roll the old session back first: an open
+                                // transaction holds a per-database write gate
+                                // lease that only `closeSession`'s rollback
+                                // disposes — dropping the session record alone
+                                // would leak the gate until process restart.
+                                QueryHandler.closeSession session
+
                                 let session =
                                     { Session.create session.ConnectionId session.Store with
                                         User = session.User

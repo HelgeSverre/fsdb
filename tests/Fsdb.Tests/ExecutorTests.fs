@@ -4161,7 +4161,24 @@ let tests =
 
                     match runDefault store "SELECT NTILE(0) OVER (ORDER BY id) FROM t" with
                     | Err(1210, "Incorrect arguments to ntile") -> ()
-                    | other -> failtestf "expected error 1210, got %A" other ]
+                    | other -> failtestf "expected error 1210, got %A" other
+
+                testCase "NTILE with a huge bucket count stays O(rows): each row gets its own bucket, no giant allocation"
+                <| fun _ ->
+                    let store = newStore ()
+                    runDefault store "CREATE TABLE t (id INT PRIMARY KEY)" |> ignore
+                    runDefault store "INSERT INTO t VALUES (1), (2), (3)" |> ignore
+
+                    // buckets >> rows: MySQL puts one row per bucket, so the
+                    // three rows are buckets 1,2,3. Must not allocate a
+                    // 2-billion-element array.
+                    match runDefault store "SELECT id, NTILE(2147483647) OVER (ORDER BY id) AS nt FROM t ORDER BY id" with
+                    | ResultSet(_, rows) ->
+                        Expect.equal
+                            rows
+                            [ [ Some "1"; Some "1" ]; [ Some "2"; Some "2" ]; [ Some "3"; Some "3" ] ]
+                            "each row its own bucket"
+                    | other -> failtestf "expected NTILE assignment, got %A" other ]
 
           testList
               "PK/UNIQUE point-lookup fast path (Storage.tryUniqueLookup)"

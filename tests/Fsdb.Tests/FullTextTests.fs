@@ -104,4 +104,14 @@ let tests =
                   s |> Array.mapi (fun i v -> i + 1, v) |> Array.sortByDescending snd |> Array.map fst
 
               Expect.equal order.[0] 1 "the direct match ranks first"
-              Expect.equal order.[1] 5 "the other direct match second" ]
+              Expect.equal order.[1] 5 "the other direct match second"
+
+          testCase "a deeply nested boolean query is bounded, not a stack overflow"
+          <| fun _ ->
+              // Thousands of open parens must not overflow the recursive
+              // parser/evaluator — the depth cap turns excess nesting into
+              // ignorable punctuation.
+              let deep = String.replicate 5000 "(" + "mysql" + String.replicate 5000 ")"
+              let scores = booleanScoresOf corpus deep
+              Expect.equal scores.Length corpus.Docs.Length "returns a score per doc without crashing" ]
+

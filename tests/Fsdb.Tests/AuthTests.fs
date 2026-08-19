@@ -85,4 +85,16 @@ let tests =
                   Expect.isTrue
                       (requiredPrivileges "app" stmt |> List.contains ("SELECT", OnTable("app", "secret")))
                       "subquery in an INSERT VALUES needs SELECT on secret"
-              | Error e -> failtestf "parse insert: %s" e ]
+              | Error e -> failtestf "parse insert: %s" e
+
+          testCase "REVOKE GRANT OPTION, SELECT still requires SELECT on the target"
+          <| fun _ ->
+              // The GRANT OPTION token must not make expandPrivs error and
+              // drop the SELECT requirement — otherwise a scoped grant-option
+              // holder could revoke a privilege it doesn't hold.
+              match Fsdb.Parser.parse "REVOKE GRANT OPTION, SELECT ON shop.* FROM victim" with
+              | Ok stmt ->
+                  let reqs = requiredPrivileges "app" stmt
+                  Expect.isTrue (reqs |> List.contains ("SELECT", OnDb "shop")) "SELECT on shop is still required"
+                  Expect.isTrue (reqs |> List.contains ("GRANT OPTION", OnDb "shop")) "GRANT OPTION is also required"
+              | Error e -> failtestf "parse: %s" e ]
