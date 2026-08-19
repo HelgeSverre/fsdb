@@ -63,7 +63,7 @@ let tests =
               [ testCase "DATETIME(6)/TIMESTAMP(3)/TIME(2) carry their precision; a bare DATETIME is fsp 0"
                 <| fun _ ->
                     match Fsdb.Parser.parse "CREATE TABLE t (a DATETIME(6), b TIMESTAMP(3), c TIME(2), d DATETIME)" with
-                    | Ok(CreateTable(_, [ { Type = TDateTime 6 }; { Type = TTimestamp 3 }; { Type = TTime 2 }; { Type = TDateTime 0 } ], _, _, _, _, _)) -> ()
+                    | Ok(CreateTable(_, [ { Type = TDateTime 6 }; { Type = TTimestamp 3 }; { Type = TTime 2 }; { Type = TDateTime 0 } ], _, _, _, _, _, _)) -> ()
                     | other -> failtestf "unexpected parse: %A" other ]
 
           testList

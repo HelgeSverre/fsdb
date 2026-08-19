@@ -394,6 +394,9 @@ type AlterAction =
     | AddForeignKey of ForeignKeyDef
     | DropForeignKey of name: string
     | AddPrimaryKey of columns: string list
+    /// `ALTER TABLE t AUTO_INCREMENT = n` — moves the counter forward
+    /// (never below what existing rows already require, like InnoDB).
+    | SetAutoIncrement of value: int64
 
 type Statement =
     | CreateDatabase of name: string * ifNotExists: bool
@@ -415,7 +418,11 @@ type Statement =
         /// table-level declaration MySQL reports rather than the baked-in
         /// column defaults.
         tableCharset: string option *
-        tableCollation: string option
+        tableCollation: string option *
+        /// `AUTO_INCREMENT = n` from the table-options tail — dump files
+        /// carry it on every table so restored inserts continue at the
+        /// dumped counter even before any row lands.
+        autoIncrementSeed: int64 option
     | DropTable of names: string list * ifExists: bool
     | AlterTable of table: string * actions: AlterAction list
     | RenameTable of pairs: (string * string) list

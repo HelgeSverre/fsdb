@@ -309,6 +309,12 @@ let private showRoutineStatusRe =
 
 let private killRe = Regex(@"^KILL\s+(?:(QUERY|CONNECTION)\s+)?(\d+)\s*$", RegexOptions.IgnoreCase)
 
+/// `ALTER TABLE t DISABLE|ENABLE KEYS` — a MyISAM index-maintenance toggle
+/// InnoDB itself treats as a no-op; mysqldump wraps every table's data with
+/// it (`/*!40000 ... */`), so restores need the OK.
+let private alterKeysRe =
+    Regex(@"^ALTER\s+TABLE\s+(\S+)\s+(?:DISABLE|ENABLE)\s+KEYS\s*$", RegexOptions.IgnoreCase)
+
 /// `SHOW [FULL] TABLES ... WHERE ...` filters — phpMyAdmin's DisableIS
 /// listing sends `Table_type IN (...)`, mysqldump-era tooling sends
 /// `Tables_in_<db> = '...'`. Any other filter column is a real 1054, the
@@ -1143,6 +1149,7 @@ type private Probe =
     | ShowEvents of db: string option
     | ShowRoutineStatus
     | Kill of queryOnly: bool * id: int64
+    | AlterKeysNoop of table: string
     | ShowWarnings
     | ShowErrors
     | ShowMessageCount of isError: bool
@@ -1216,6 +1223,8 @@ let private tryProbe (sql: string) (upper: string) : Probe option =
     elif killRe.IsMatch sql then
         let m = killRe.Match sql
         Some(Kill(m.Groups.[1].Value.ToUpperInvariant() = "QUERY", int64 m.Groups.[2].Value))
+    elif alterKeysRe.IsMatch sql then
+        Some(AlterKeysNoop(stripBackticks (alterKeysRe.Match sql).Groups.[1].Value))
     elif showCountWarningsRe.IsMatch sql then
         Some(ShowMessageCount false)
     elif showCountErrorsRe.IsMatch sql then
@@ -1321,6 +1330,13 @@ let private runProbe (session: Session) (sql: string) (probe: Probe) : Session *
                 target.CloseConnection |> Option.iter (fun close -> close ())
 
             session, Affected 0UL
+    | AlterKeysNoop name ->
+        let sessionDb = session.Database |> Option.defaultValue defaultDatabase
+        let dbName, table = splitQualified sessionDb name
+
+        match InformationSchema.findTable (Session.currentStore session).Catalog dbName table with
+        | Ok _ -> session, Affected 0UL
+        | Error(code, msg) -> session, Err(code, msg)
     | ShowWarnings
     | ShowErrors -> session, ResultSet([ "Level"; "Code"; "Message" ], [])
     | ShowMessageCount isError ->

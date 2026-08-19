@@ -4747,10 +4747,10 @@ let execute (store: Store) (registry: Registry) (dbName: string) (ids: int64 * i
         else
             ids, storageErr (NoSuchDatabase name)
 
-    | CreateTable(name, columns, indexes, foreignKeys, ifNotExists, tableCharset, tableCollation) ->
+    | CreateTable(name, columns, indexes, foreignKeys, ifNotExists, tableCharset, tableCollation, autoIncrementSeed) ->
         let db, name = splitQualified dbName name
 
-        match createTable store db name columns indexes foreignKeys tableCharset tableCollation with
+        match createTableSeeded store db name columns indexes foreignKeys tableCharset tableCollation autoIncrementSeed with
         | Ok() -> ids, Affected 0UL
         | Error(TableExists _) when ifNotExists -> ids, Affected 0UL
         | Error e -> ids, storageErr e

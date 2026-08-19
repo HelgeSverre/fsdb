@@ -52,6 +52,13 @@ let private serverVersionNumber = 80036
 /// second half (skip it); this rewrites the SQL text ahead of parsing so
 /// the first half (splice it back in) doesn't need its own grammar rule.
 /// Not recursive — mysqldump never nests these.
+///
+/// Ordinary comments are stripped in the same pass — `# ...`-to-EOL,
+/// `-- `-to-EOL (MySQL requires whitespace/EOL after the `--`, `5--3` is
+/// arithmetic), and plain `/* ... */` — because `QueryHandler`'s text
+/// probes (SET/SHOW/...) match on this normalized text, and a dump-import
+/// client (TablePlus) ships each statement with its surrounding comment
+/// banner attached rather than stripping client-side like the mysql CLI.
 let stripVersionComments (sql: string) : string =
     let sb = Text.StringBuilder(sql.Length)
     let mutable i = 0
@@ -81,6 +88,30 @@ let stripVersionComments (sql: string) : string =
             quoteChar <- Some sql.[i]
             sb.Append(sql.[i]) |> ignore
             i <- i + 1
+        | None when sql.[i] = '#' ->
+            // `# ...` comment: to end of line.
+            let eol = sql.IndexOf('\n', i)
+            i <- (if eol = -1 then sql.Length else eol)
+        | None when
+            sql.[i] = '-'
+            && i + 1 < sql.Length
+            && sql.[i + 1] = '-'
+            && (i + 2 = sql.Length || Char.IsWhiteSpace sql.[i + 2])
+            ->
+            // `-- ` comment: to end of line.
+            let eol = sql.IndexOf('\n', i)
+            i <- (if eol = -1 then sql.Length else eol)
+        | None when
+            i + 2 < sql.Length
+            && sql.[i] = '/'
+            && sql.[i + 1] = '*'
+            && sql.[i + 2] <> '!'
+            ->
+            // Plain `/* ... */` comment: replaced by one space so it can't
+            // glue two tokens together.
+            let closeAt = sql.IndexOf("*/", i + 2)
+            sb.Append ' ' |> ignore
+            i <- (if closeAt = -1 then sql.Length else closeAt + 2)
         | None when i + 2 < sql.Length && sql.[i] = '/' && sql.[i + 1] = '*' && sql.[i + 2] = '!' ->
             let closeAt =
                 match sql.IndexOf("*/", i + 3) with
@@ -943,7 +974,9 @@ type private ColMod =
 /// requires it to match the column's own declared fsp, and the default is
 /// evaluated at that declared fsp regardless (`Storage.evalDefault`).
 let private defaultValueLit: Parser<ColumnDefault, unit> =
-    (keyword "CURRENT_TIMESTAMP" >>. optional widthLen >>% DCurrentTimestamp)
+    // MariaDB dumps emit the function-call spelling `current_timestamp()`;
+    // the empty parens are the same as none.
+    (keyword "CURRENT_TIMESTAMP" >>. optional (attempt widthLen) >>. optional (sym "(" >>. sym ")") >>% DCurrentTimestamp)
     <|> (literalValue |>> DConst)
 
 /// A charset/collation name — Laravel emits `COLLATE 'utf8mb4_unicode_ci'`
@@ -975,7 +1008,11 @@ let private colMod: Parser<ColMod, unit> =
           keyword "AUTO_INCREMENT" >>% MAutoIncrement
           attempt (keyword "PRIMARY" >>. keyword "KEY") >>% MPrimaryKey
           keyword "UNIQUE" >>. optional (keyword "KEY") >>% MUnique
-          attempt (keyword "ON" >>. keyword "UPDATE" >>. keyword "CURRENT_TIMESTAMP" >>. optional widthLen)
+          attempt (
+              keyword "ON" >>. keyword "UPDATE" >>. keyword "CURRENT_TIMESTAMP"
+              >>. optional (attempt widthLen)
+              >>. optional (sym "(" >>. sym ")")
+          )
           >>% MOnUpdateCurrentTimestamp
           keyword "COMMENT" >>. stringLit >>% MIgnored
           attempt (keyword "CHARACTER" >>. keyword "SET" <|> keyword "CHARSET")
@@ -983,6 +1020,7 @@ let private colMod: Parser<ColMod, unit> =
           >>= fun name ->
               match name.ToLowerInvariant() with
               | "utf8mb4"
+              | "utf8mb3"
               | "utf8"
               | "latin1"
               | "ascii"
@@ -1051,10 +1089,18 @@ let private indexColumn: Parser<string, unit> = identifier .>> optional (between
 /// doesn't swallow an ordinary column definition.
 let private indexPrefix: Parser<bool, unit> =
     (keyword "UNIQUE" >>. optional (keyword "KEY" <|> keyword "INDEX") >>% true)
+    // FULLTEXT/SPATIAL land as ordinary non-unique indexes: the data and
+    // DDL restore, and a MATCH ... AGAINST query still fails loudly at
+    // parse rather than silently scanning.
+    <|> ((keyword "FULLTEXT" <|> keyword "SPATIAL") >>. optional (keyword "KEY" <|> keyword "INDEX") >>% false)
     <|> ((keyword "KEY" <|> keyword "INDEX") >>% false)
 
 let private indexItem: Parser<IndexDef, unit> =
-    (indexPrefix .>>. opt identifier .>>. between (sym "(") (sym ")") (sepBy1 indexColumn (sym ",")))
+    (indexPrefix .>>. opt identifier
+     .>>. between (sym "(") (sym ")") (sepBy1 indexColumn (sym ","))
+     // `USING BTREE|HASH` — parsed and discarded, every index here is the
+     // same structure either way.
+     .>> optional (keyword "USING" >>. (keyword "BTREE" <|> keyword "HASH")))
     |>> fun ((unique, name), cols) ->
         { Name = name |> Option.defaultValue (List.head cols)
           Columns = cols
@@ -1124,41 +1170,77 @@ let private createTableItem: Parser<CreateItem, unit> =
 /// one tracked option — it becomes the table's column default (validated
 /// against the collation registry), which `createTable` bakes into every
 /// column that didn't name one explicitly.
-let private tableOption: Parser<string option * string option, unit> =
+type private TableOption =
+    | TableCharset of string
+    | TableCollate of string
+    | TableAutoIncrement of int64
+    | TableOptionIgnored
+
+/// One table-option tail entry. Options fsdb has no behavior for
+/// (ROW_FORMAT, COMMENT, KEY_BLOCK_SIZE, the STATS_* family) are accepted
+/// and discarded so a dump's `) ENGINE=... ROW_FORMAT=DYNAMIC COMMENT='x'`
+/// tail restores; only charset/collation/AUTO_INCREMENT change anything.
+let private tableOption: Parser<TableOption, unit> =
     choice
-        [ keyword "ENGINE" >>. opt (sym "=") >>. identOrString >>% (None, None)
+        [ keyword "ENGINE" >>. opt (sym "=") >>. identOrString >>% TableOptionIgnored
+          attempt (keyword "AUTO_INCREMENT" >>. opt (sym "=")) >>. pint64 .>> ws |>> TableAutoIncrement
+          keyword "COMMENT" >>. opt (sym "=") >>. stringLit >>% TableOptionIgnored
+          (keyword "ROW_FORMAT" <|> keyword "CHECKSUM" <|> keyword "DELAY_KEY_WRITE" <|> keyword "PACK_KEYS")
+          >>. opt (sym "=")
+          >>. identOrString
+          >>% TableOptionIgnored
+          (keyword "KEY_BLOCK_SIZE"
+           <|> keyword "STATS_PERSISTENT"
+           <|> keyword "STATS_AUTO_RECALC"
+           <|> keyword "STATS_SAMPLE_PAGES"
+           <|> keyword "AVG_ROW_LENGTH"
+           <|> keyword "MAX_ROWS"
+           <|> keyword "MIN_ROWS")
+          >>. opt (sym "=")
+          >>. identOrString
+          >>% TableOptionIgnored
           attempt (keyword "DEFAULT" >>. (keyword "CHARSET" <|> (keyword "CHARACTER" >>. keyword "SET")))
           >>. opt (sym "=")
           >>. identOrString
           >>= fun name ->
               match name.ToLowerInvariant() with
               | "utf8mb4"
+              | "utf8mb3"
               | "utf8"
               | "latin1"
               | "ascii"
-              | "binary" -> preturn (Some(name.ToLowerInvariant()), None)
+              | "binary" -> preturn (TableCharset(name.ToLowerInvariant()))
               | _ -> fail (sprintf "Unknown character set: '%s'" name)
           keyword "CHARSET" >>. opt (sym "=") >>. identOrString
           >>= fun name ->
               match name.ToLowerInvariant() with
               | "utf8mb4"
+              | "utf8mb3"
               | "utf8"
               | "latin1"
               | "ascii"
-              | "binary" -> preturn (Some(name.ToLowerInvariant()), None)
+              | "binary" -> preturn (TableCharset(name.ToLowerInvariant()))
               | _ -> fail (sprintf "Unknown character set: '%s'" name)
           keyword "COLLATE"
           >>. opt (sym "=")
           >>. identOrString
           >>= fun name ->
               match Collation.tryFind name with
-              | Some _ -> preturn (None, Some name)
+              | Some _ -> preturn (TableCollate name)
               | None -> fail (sprintf "Unknown collation '%s'" name) ]
 
-let private tableOptions: Parser<string option * string option, unit> =
+let private tableOptions: Parser<string option * string option * int64 option, unit> =
     many tableOption
     |>> fun opts ->
-        opts |> List.fold (fun (cs, col) (c, l) -> c |> Option.orElse cs, l |> Option.orElse col) (None, None)
+        opts
+        |> List.fold
+            (fun (cs, col, seed) opt ->
+                match opt with
+                | TableCharset c -> Some c |> Option.orElse cs, col, seed
+                | TableCollate l -> cs, Some l |> Option.orElse col, seed
+                | TableAutoIncrement n -> cs, col, Some n |> Option.orElse seed
+                | TableOptionIgnored -> cs, col, seed)
+            (None, None, None)
 
 let private createTable: Parser<Statement, unit> =
     (keyword "CREATE" >>. keyword "TABLE"
@@ -1166,7 +1248,7 @@ let private createTable: Parser<Statement, unit> =
      .>>. qualifiedTableName
      .>>. between (sym "(") (sym ")") (sepBy1 createTableItem (sym ","))
      .>>. tableOptions)
-    |>> fun (((ifNotExists, name), items), (tableCharset, tableCollation)) ->
+    |>> fun (((ifNotExists, name), items), (tableCharset, tableCollation, autoIncrementSeed)) ->
         let pkNames = items |> List.collect (function CPrimaryKey names -> names | _ -> [])
         let explicitIndexes = items |> List.choose (function CIndex ix -> Some ix | _ -> None)
         let foreignKeys = items |> List.choose (function CForeignKey fk -> Some fk | _ -> None)
@@ -1225,7 +1307,7 @@ let private createTable: Parser<Statement, unit> =
             |> List.filter (fun c -> c.Unique)
             |> List.map (fun c -> { Name = c.Name; Columns = [ c.Name ]; Unique = true })
 
-        CreateTable(name, columns, explicitIndexes @ uniqueColumnIndexes, foreignKeys, ifNotExists, tableCharset, tableCollation)
+        CreateTable(name, columns, explicitIndexes @ uniqueColumnIndexes, foreignKeys, ifNotExists, tableCharset, tableCollation, autoIncrementSeed)
 
 let private createIndexStmt: Parser<Statement, unit> =
     (keyword "CREATE" >>. (opt (keyword "UNIQUE") |>> Option.isSome)
@@ -1331,6 +1413,9 @@ let private renameColumnAction: Parser<AlterAction, unit> =
 let private renameToAction: Parser<AlterAction, unit> =
     attempt (keyword "RENAME" >>. opt (keyword "TO" <|> keyword "AS") >>. identifier) |>> RenameTo
 
+let private setAutoIncrementAction: Parser<AlterAction, unit> =
+    attempt (keyword "AUTO_INCREMENT" >>. opt (sym "=")) >>. pint64 .>> ws |>> SetAutoIncrement
+
 let private alterAction: Parser<AlterAction, unit> =
     choice
         [ addForeignKeyAction
@@ -1343,6 +1428,7 @@ let private alterAction: Parser<AlterAction, unit> =
           modifyColumnAction
           changeColumnAction
           renameColumnAction
+          setAutoIncrementAction
           renameToAction ]
     <?> "ALTER TABLE action"
 
@@ -1370,13 +1456,43 @@ let private onDuplicateKeyUpdate: Parser<(string * Expr) list, unit> =
 /// `SELECT` keyword right after it, so parsing that prefix once and
 /// `choice`-ing between the two row sources needs no `attempt` backtracking
 /// (see the `statement` parser's doc on why that matters).
+/// One `INSERT ... VALUES` cell, literal fast path first: bulk dump/ORM
+/// inserts are overwhelmingly plain literals (quoted string, [signed]
+/// number, NULL), and running the full `expr` operator-precedence machinery
+/// per cell made a 500-row × 20-column INSERT parse in ~60 ms — the whole
+/// import bottleneck. Each fast alternative requires the cell to end right
+/// after the literal (next char `,` or `)`), so any real expression
+/// (`1 + 2`, `NOW()`, `?`, `_binary'..'`) still falls through to `expr`
+/// with identical semantics.
+let private insertValue: Parser<Expr, unit> =
+    // A fast alternative only wins the cell if the literal is the whole
+    // cell — the next char must be the tuple's `,` or `)`.
+    let cellEnd = followedBy (pchar ',' <|> pchar ')')
+    let literal p = attempt (p .>> cellEnd |>> Lit)
+
+    let negated =
+        function
+        | VInt i -> VInt(-i)
+        | VDouble d -> VDouble(-d)
+        | VDecimal d -> VDecimal(-d)
+        | v -> v
+
+    // Numbers/NULL before strings: dump cells are mostly numeric, and a
+    // failed string attempt is cheaper than a failed number parse.
+    choice
+        [ literal numberLit
+          literal (keyword "NULL" >>% VNull)
+          literal stringLit
+          literal (pchar '-' >>. ws >>. numberLit |>> negated)
+          expr ]
+
 let private insertStmt: Parser<Statement, unit> =
     (keyword "INSERT" >>. (opt (keyword "IGNORE") |>> Option.isSome)
      .>> keyword "INTO"
      .>>. qualifiedTableName
      .>>. opt (between (sym "(") (sym ")") (sepBy1 identifier (sym ",")))
      .>>. choice
-              [ (keyword "VALUES" >>. sepBy1 (between (sym "(") (sym ")") (sepBy1 expr (sym ","))) (sym ",")
+              [ (keyword "VALUES" >>. sepBy1 (between (sym "(") (sym ")") (sepBy1 insertValue (sym ","))) (sym ",")
                  .>>. opt onDuplicateKeyUpdate)
                 |>> Choice1Of2
                 selectStmtRecord |>> Choice2Of2 ])

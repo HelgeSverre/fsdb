@@ -755,6 +755,67 @@ let tests =
               | ResultSet(_, [ [ Some "root@%"; Some "root@localhost" ] ]) -> ()
               | other -> failtestf "expected the fallback identity, got %A" other
 
+          testCase "comments ahead of text-probed statements are stripped like real MySQL's lexer"
+          <| fun _ ->
+              let session = create 999905 (Fsdb.Storage.create ())
+
+              // The TablePlus dump preamble shape: a -- comment banner, blank
+              // lines, then a version-gated SET reaching the probe path.
+              let preamble =
+                  "-- ----------------
+-- TablePlus 6.1.2
+--
+-- Database: x
+-- ----------------
+
+
+/*!40101 SET @OLD_CHARACTER_SET_CLIENT=@@CHARACTER_SET_CLIENT */"
+
+              match handle session preamble |> snd with
+              | Affected 0UL -> ()
+              | other -> failtestf "expected the preamble SET to succeed, got %A" other
+
+              match handle session "/* c */ SET @x = 1" |> snd with
+              | Affected 0UL -> ()
+              | other -> failtestf "expected the block-commented SET to succeed, got %A" other
+
+              match handle session "SELECT 3 # hash comment" |> snd with
+              | ResultSet(_, [ [ Some "3" ] ]) -> ()
+              | other -> failtestf "expected the hash comment to be stripped, got %A" other
+
+              match handle session "SET @a = 1 -- trailing" |> snd with
+              | Affected 0UL -> ()
+              | other -> failtestf "expected the trailing comment to be stripped, got %A" other
+
+              // `--` without following whitespace is arithmetic, not a comment.
+              match handle session "SELECT 5--3" |> snd with
+              | ResultSet(_, [ [ Some "8" ] ]) -> ()
+              | other -> failtestf "expected 5--3 = 8, got %A" other
+
+              // Comment markers inside string literals are data.
+              match handle session "SELECT '-- not # a /* comment */'" |> snd with
+              | ResultSet(_, [ [ Some "-- not # a /* comment */" ] ]) -> ()
+              | other -> failtestf "expected the literal preserved, got %A" other
+
+          testCase "ALTER TABLE ... DISABLE/ENABLE KEYS is a no-op OK, 1146 for a missing table"
+          <| fun _ ->
+              let session = create 999906 (Fsdb.Storage.create ())
+              let session, _ = handle session "CREATE DATABASE shop"
+              let session, _ = handle session "USE shop"
+              let session, _ = handle session "CREATE TABLE t (id INT PRIMARY KEY)"
+
+              match handle session "/*!40000 ALTER TABLE `t` DISABLE KEYS */" |> snd with
+              | Affected 0UL -> ()
+              | other -> failtestf "expected the versioned DISABLE KEYS no-op, got %A" other
+
+              match handle session "ALTER TABLE t ENABLE KEYS" |> snd with
+              | Affected 0UL -> ()
+              | other -> failtestf "expected the ENABLE KEYS no-op, got %A" other
+
+              match handle session "ALTER TABLE nope DISABLE KEYS" |> snd with
+              | Err(1146, _) -> ()
+              | other -> failtestf "expected 1146 for a missing table, got %A" other
+
           testCase "SHOW COLUMNS FROM t / DESCRIBE t report field metadata"
           <| fun _ ->
               let session = create 1 (Fsdb.Storage.create ())

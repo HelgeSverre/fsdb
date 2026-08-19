@@ -471,7 +471,7 @@ let rec requiredPrivileges (defaultDb: string) (stmt: Statement) : (string * Pri
         onTables "INSERT" [ split table ] @ onTables "SELECT" (selectTables defaultDb select)
     | Update u -> onTables "UPDATE" (tableRefsOfFrom defaultDb (Some(FromTable u.From)) u.Joins)
     | Delete d -> onTables "DELETE" (tableRefsOfFrom defaultDb (Some(FromTable d.From)) d.Joins)
-    | CreateTable(name, _, _, _, _, _, _) -> onTables "CREATE" [ split name ]
+    | CreateTable(name, _, _, _, _, _, _, _) -> onTables "CREATE" [ split name ]
     | DropTable(names, _) -> onTables "DROP" (names |> List.map split)
     | Truncate table -> onTables "DROP" [ split table ]
     | AlterTable(table, _) -> onTables "ALTER" [ split table ]
@@ -526,91 +526,58 @@ let check (store: Store) (user: string) (required: (string * PrivTarget) list) :
                  | Result.Ok(cols, rows) -> Some(cols, rows)
                  | Result.Error _ -> None)
 
-        let hasDb (def: PrivDef) (db: string) =
-            match def.DbCol, dbRowGrants.Value with
-            | Some dbCol, Some(cols, rows) ->
-                let idx n = resolveColumn cols n |> Result.toOption
-
-                match idx "User", idx "Db", idx dbCol with
-                | Some u, Some d, Some c ->
-                    rows
-                    |> List.exists (fun r ->
-                        r.[u] = VString user
-                        && (match r.[d] with
-                            | VString s -> eqI s db
-                            | _ -> false)
-                        && r.[c] = VString "Y")
-                | _ -> false
+        // Every grant-table lookup below is the same question — "does some
+        // row satisfy a predicate per named column?" — asked with different
+        // columns. One matcher, three cell predicates.
+        let textIs expected =
+            function
+            | VString s -> eqI s expected
             | _ -> false
+
+        let isYes v = v = VString "Y"
+
+        let hasSetMember memberName =
+            function
+            | VString s -> setMembers s |> List.exists (eqI memberName)
+            | _ -> false
+
+        let rowExists (scanned: (ColumnDef list * Value[] list) option) (conds: (string * (Value -> bool)) list) =
+            match scanned with
+            | None -> false
+            | Some(cols, rows) ->
+                match conds |> traverse (fun (name, p) -> resolveColumn cols name |> Result.map (fun i -> i, p)) with
+                | Result.Error _ -> false
+                | Result.Ok resolved -> rows |> List.exists (fun r -> resolved |> List.forall (fun (i, p) -> p r.[i]))
+
+        let mine = "User", (=) (VString user)
+
+        let hasDb (def: PrivDef) (db: string) =
+            match def.DbCol with
+            | Some dbCol -> rowExists dbRowGrants.Value [ mine; "Db", textIs db; dbCol, isYes ]
+            | None -> false
 
         let hasTable (def: PrivDef) (db: string) (table: string) =
-            match def.TablePriv, tablePrivGrants.Value with
-            | Some setName, Some(cols, rows) ->
-                let idx n = resolveColumn cols n |> Result.toOption
-
-                match idx "User", idx "Db", idx "Table_name", idx "Table_priv" with
-                | Some u, Some d, Some t, Some tp ->
-                    rows
-                    |> List.exists (fun r ->
-                        r.[u] = VString user
-                        && (match r.[d] with
-                            | VString s -> eqI s db
-                            | _ -> false)
-                        && (match r.[t] with
-                            | VString s -> eqI s table
-                            | _ -> false)
-                        && (match r.[tp] with
-                            | VString s -> setMembers s |> List.exists (eqI setName)
-                            | _ -> false))
-                | _ -> false
-            | _ -> false
+            match def.TablePriv with
+            | Some setName ->
+                rowExists
+                    tablePrivGrants.Value
+                    [ mine; "Db", textIs db; "Table_name", textIs table; "Table_priv", hasSetMember setName ]
+            | None -> false
 
         let hasGlobalGrantOption () =
             match userRow with
             | Some(cols, row) -> userColumnText cols row "Grant_priv" = "Y"
             | None -> false
 
-        /// mysql.db's `Grant_priv` for (user, db) — a db-scoped WITH GRANT
-        /// OPTION.
+        // Grant option below the global level: mysql.db's `Grant_priv` for
+        // (user, db), or tables_priv's `Grant` SET member for the table.
         let hasDbGrantOption (db: string) =
-            match dbRowGrants.Value with
-            | Some(cols, rows) ->
-                let idx n = resolveColumn cols n |> Result.toOption
+            rowExists dbRowGrants.Value [ mine; "Db", textIs db; "Grant_priv", isYes ]
 
-                match idx "User", idx "Db", idx "Grant_priv" with
-                | Some u, Some d, Some g ->
-                    rows
-                    |> List.exists (fun r ->
-                        r.[u] = VString user
-                        && (match r.[d] with
-                            | VString s -> eqI s db
-                            | _ -> false)
-                        && r.[g] = VString "Y")
-                | _ -> false
-            | None -> false
-
-        /// tables_priv's `Grant` SET member for (user, db, table).
         let hasTableGrantOption (db: string) (table: string) =
-            match tablePrivGrants.Value with
-            | Some(cols, rows) ->
-                let idx n = resolveColumn cols n |> Result.toOption
-
-                match idx "User", idx "Db", idx "Table_name", idx "Table_priv" with
-                | Some u, Some d, Some t, Some tp ->
-                    rows
-                    |> List.exists (fun r ->
-                        r.[u] = VString user
-                        && (match r.[d] with
-                            | VString s -> eqI s db
-                            | _ -> false)
-                        && (match r.[t] with
-                            | VString s -> eqI s table
-                            | _ -> false)
-                        && (match r.[tp] with
-                            | VString s -> setMembers s |> List.exists (eqI "Grant")
-                            | _ -> false))
-                | _ -> false
-            | None -> false
+            rowExists
+                tablePrivGrants.Value
+                [ mine; "Db", textIs db; "Table_name", textIs table; "Table_priv", hasSetMember "Grant" ]
 
         let checkOne (privSql: string, target: PrivTarget) : Result<unit, int * string> =
             if privSql = "GRANT OPTION" then

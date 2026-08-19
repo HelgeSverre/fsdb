@@ -1575,7 +1575,7 @@ let private validateColumnFsp (c: ColumnDef) : Result<unit, StorageError> =
     | TTime fsp when fsp > 6 -> Error(PrecisionTooBig(c.Name, fsp))
     | _ -> Ok()
 
-let createTable
+let createTableSeeded
     (store: Store)
     (dbName: string)
     (tableName: string)
@@ -1584,6 +1584,7 @@ let createTable
     (foreignKeys: ForeignKeyDef list)
     (tableCharset: string option)
     (tableCollation: string option)
+    (autoIncrementSeed: int64 option)
     : Result<unit, StorageError> =
     ensureDatabase store dbName
 
@@ -1602,7 +1603,7 @@ let createTable
                     { OriginalName = tableName
                       Columns = columns
                       RowsArray = ImmutableArray.Empty
-                      NextAutoId = 1L
+                      NextAutoId = autoIncrementSeed |> Option.defaultValue 1L
                       Indexes = indexes
                       ForeignKeys = foreignKeys
                       TableCharset = tableCharset
@@ -1613,9 +1614,22 @@ let createTable
                 Ok(Map.add key (reindexTable table) db, ()))
 
     if result.IsOk then
-        emit store (Some(SchemaChanged(dbName, CreateTable(tableName, columns, indexes, foreignKeys, false, tableCharset, tableCollation))))
+        emit store (Some(SchemaChanged(dbName, CreateTable(tableName, columns, indexes, foreignKeys, false, tableCharset, tableCollation, autoIncrementSeed))))
 
     result
+
+
+let createTable
+    (store: Store)
+    (dbName: string)
+    (tableName: string)
+    (columns: ColumnDef list)
+    (indexes: IndexDef list)
+    (foreignKeys: ForeignKeyDef list)
+    (tableCharset: string option)
+    (tableCollation: string option)
+    : Result<unit, StorageError> =
+    createTableSeeded store dbName tableName columns indexes foreignKeys tableCharset tableCollation None
 
 let dropTable (store: Store) (dbName: string) (tableName: string) : Result<unit, StorageError> =
     let result =
@@ -1915,6 +1929,10 @@ let private applyAlterAction (strict: bool) (table: Table) (action: AlterAction)
                 Columns = table.Columns |> List.map (fun c -> if List.contains c.Name cols then { c with PrimaryKey = true } else c) },
             None
         )
+    | SetAutoIncrement value ->
+        // Forward only, like InnoDB: a value below what existing rows
+        // already claimed leaves the counter where it is.
+        Ok({ table with NextAutoId = max value table.NextAutoId }, None)
 
 /// Applies `actions` in order against `tableName`, re-filing it under a new
 /// key if any action renamed it (`RENAME TO`/`RENAME [TABLE]`).
