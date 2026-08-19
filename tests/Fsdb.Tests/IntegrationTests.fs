@@ -1965,6 +1965,17 @@ let tests =
               | ResultSet(_, [ [ Some "m" ] ]) -> ()
               | other -> failtestf "expected an unqualified select after USE fsdb, got %A" other
 
+              // Anything SHOW TABLES lists must be describable — ORMs
+              // introspect via DESCRIBE — even here, where no real `fsdb`
+              // database backs the schema the registry keeps alive.
+              (match conn.Query "DESCRIBE fsdb.models" with
+               | ResultSet("Field" :: _, [ Some "name" :: _ ]) -> ()
+               | other -> failtestf "expected DESCRIBE to render the virtual columns, got %A" other)
+
+              match conn.Query "SHOW COLUMNS FROM fsdb.models" with
+              | ResultSet("Field" :: _, [ Some "name" :: _ ]) -> ()
+              | other -> failtestf "expected SHOW COLUMNS to render the virtual columns, got %A" other
+
           testCase "a registered virtual table overlays a same-named real table, others resolve unchanged"
           <| fun _ ->
               let t =
@@ -1973,7 +1984,27 @@ let tests =
 
               let conn = Fsdb.Db.connect (Fsdb.Db.create () |> Fsdb.Db.registerTable t)
               conn.Query "CREATE TABLE fsdb.v (n INT)" |> ignore
-              conn.Query "INSERT INTO fsdb.v VALUES (1)" |> ignore
+
+              // The overlay is read-only: a write addressed to the
+              // registered name must error (1036) rather than silently land
+              // in the shadowed real table while SELECT keeps answering
+              // from the overlay — the host would lose read-your-writes.
+              (match conn.Query "INSERT INTO fsdb.v VALUES (1)" with
+               | Err(1036, _) -> ()
+               | other -> failtestf "expected 1036 for INSERT into a virtual table, got %A" other)
+
+              (match conn.Query "UPDATE fsdb.v SET n = 2" with
+               | Err(1036, _) -> ()
+               | other -> failtestf "expected 1036 for UPDATE of a virtual table, got %A" other)
+
+              (match conn.Query "DELETE FROM fsdb.v" with
+               | Err(1036, _) -> ()
+               | other -> failtestf "expected 1036 for DELETE from a virtual table, got %A" other)
+
+              (match conn.Query "DROP TABLE fsdb.v" with
+               | Err(1036, _) -> ()
+               | other -> failtestf "expected 1036 for DROP of a virtual table, got %A" other)
+
               conn.Query "CREATE TABLE fsdb.real_t (n INT)" |> ignore
               conn.Query "INSERT INTO fsdb.real_t VALUES (7)" |> ignore
 

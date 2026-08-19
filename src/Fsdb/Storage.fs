@@ -67,6 +67,12 @@ type StorageError =
     /// implicitly back-filling a `NOT NULL` temporal column with no
     /// `DEFAULT` on a non-empty table.
     | ZeroTemporalForColumn of typeName: string * literal: string * column: string
+    /// A write aimed at a registered `fsdb` virtual table — reads resolve to
+    /// the host's overlay, so letting the write through would land it in an
+    /// invisible shadowed real table and silently break read-your-writes.
+    /// Guarded at the storage layer (like `SystemSchemaAccess`) so every
+    /// executor path — DML, DROP, TRUNCATE, ALTER — is covered at once.
+    | VirtualTableReadOnly of name: string
 
 /// MySQL error code + message for a `StorageError`, ready for the wire
 /// protocol's ERR packet.
@@ -97,6 +103,9 @@ let toMySqlError (err: StorageError) : int * string =
         3105, sprintf "The value specified for generated column '%s' in table '%s' is not allowed." column table
     | ZeroTemporalForColumn(typeName, literal, column) ->
         1292, sprintf "Incorrect %s value: '%s' for column '%s' at row 1" typeName literal column
+    // MySQL's ER_OPEN_AS_READONLY — the closest real vocabulary for "this
+    // table exists but refuses writes".
+    | VirtualTableReadOnly name -> 1036, sprintf "Table '%s' is read only" name
 
 /// A table's rows, newest last. `OriginalName` keeps the as-created casing
 /// for information_schema, even though the catalog keys tables by their
@@ -1378,6 +1387,14 @@ let private sysTable (name: string) (columns: ColumnDef list) (rows: Value[] lis
     // bootstrap isn't replay.
     { table with UniqueIndex = rebuildUniqueIndex table }
 
+/// A registered virtual table dressed up as a rowless catalog `Table`, so
+/// the `SHOW COLUMNS`/`DESCRIBE`/`SHOW CREATE TABLE`/`SHOW INDEX` renderers
+/// (which all resolve through `InformationSchema.findTable`, catalog-only)
+/// can describe what `SHOW TABLES` already advertises — MySQL never lists a
+/// table it can't describe. Rows deliberately absent: introspection reads
+/// metadata, and data reads go through the executor's overlay.
+let virtualTableStub (vt: Functions.VirtualTable) : Table = sysTable vt.Name vt.Columns []
+
 let private mysqlSystemDatabase () : Database =
     [ "user", sysTable "user" mysqlUserColumns [ rootUserRow ]
       "db", sysTable "db" mysqlDbColumns []
@@ -1693,15 +1710,31 @@ let createTable
     : Result<unit, StorageError> =
     createTableSeeded store dbName tableName columns indexes foreignKeys tableCharset tableCollation None
 
+/// The docs promise the `fsdb` overlay is read-only, so the engine has to
+/// keep that promise too: without this, a write to a registered name lands
+/// in the shadowed real table while reads keep answering from the overlay —
+/// silent loss of read-your-writes. Every mutation entry point below calls
+/// this before resolving its target (the `SystemSchemaAccess` discipline);
+/// creating/registering a shadowed real table stays allowed — only writes
+/// addressed to the registered name are refused.
+let private virtualWriteGuard (store: Store) (dbName: string) (tableName: string) : Result<unit, StorageError> =
+    if
+        String.Equals(dbName, defaultDatabase, StringComparison.OrdinalIgnoreCase)
+        && Map.containsKey (normalizeTableName tableName) store.VirtualTables
+    then
+        Error(VirtualTableReadOnly tableName)
+    else
+        Ok()
+
 let dropTable (store: Store) (dbName: string) (tableName: string) : Result<unit, StorageError> =
     let result =
         withDatabase store dbName (fun db ->
             let key = normalizeTableName tableName
 
-            if Map.containsKey key db then
-                Ok(Map.remove key db, ())
-            else
-                Error(NoSuchTable tableName))
+            match virtualWriteGuard store dbName tableName with
+            | Error e -> Error e
+            | Ok() when Map.containsKey key db -> Ok(Map.remove key db, ())
+            | Ok() -> Error(NoSuchTable tableName))
 
     if result.IsOk then
         emit store (Some(SchemaChanged(dbName, DropTable([ tableName ], false))))
@@ -1711,8 +1744,10 @@ let dropTable (store: Store) (dbName: string) (tableName: string) : Result<unit,
 let truncate (store: Store) (dbName: string) (tableName: string) : Result<unit, StorageError> =
     // MySQL implements TRUNCATE as drop-and-recreate, so CREATE_TIME resets.
     let result =
-        withTable store dbName tableName (fun table ->
-            Ok(reindexTable { table with RowsArray = ImmutableArray.Empty; NextAutoId = 1L; CreateTime = DateTime.Now }, ()))
+        virtualWriteGuard store dbName tableName
+        |> Result.bind (fun () ->
+            withTable store dbName tableName (fun table ->
+                Ok(reindexTable { table with RowsArray = ImmutableArray.Empty; NextAutoId = 1L; CreateTime = DateTime.Now }, ())))
 
     if result.IsOk then
         emit store (Some(SchemaChanged(dbName, Truncate tableName)))
@@ -2003,7 +2038,8 @@ let private applyAlterAction (strict: bool) (table: Table) (action: AlterAction)
 let alterTable (store: Store) (dbName: string) (tableName: string) (actions: AlterAction list) : Result<unit, StorageError> =
     let result =
         withDatabase store dbName (fun db ->
-            tryGetTable db tableName
+            virtualWriteGuard store dbName tableName
+            |> Result.bind (fun () -> tryGetTable db tableName)
             |> Result.bind (fun table ->
                 let origKey = normalizeTableName tableName
 
@@ -2282,7 +2318,8 @@ let insertRows
 
     let result =
         withDatabase store dbName (fun db ->
-            tryGetTable db tableName
+            virtualWriteGuard store dbName tableName
+            |> Result.bind (fun () -> tryGetTable db tableName)
             |> Result.bind (fun table ->
                 resolveInsertColumns table columns
                 |> Result.bind (insertCore store.ForeignKeyChecks store.StrictMode false db key rowsIn)))
@@ -2312,7 +2349,8 @@ let insertRowsIgnore
 
     let result =
         withDatabase store dbName (fun db ->
-            tryGetTable db tableName
+            virtualWriteGuard store dbName tableName
+            |> Result.bind (fun () -> tryGetTable db tableName)
             |> Result.bind (fun table ->
                 resolveInsertColumns table columns
                 |> Result.bind (insertCore store.ForeignKeyChecks store.StrictMode true db key rowsIn)))
@@ -2510,7 +2548,8 @@ let rec upsertRows
 
         let result =
             withDatabase store dbName (fun db ->
-                tryGetTable db tableName
+                virtualWriteGuard store dbName tableName
+                |> Result.bind (fun () -> tryGetTable db tableName)
                 |> Result.bind (fun table -> upsertRowsInTable store db key table columns rowsIn computeGenerated applyUpdate foundRows)
                 |> Result.map (fun (db', cascaded, summary) -> db', (summary, cascaded, db)))
 
@@ -2898,7 +2937,8 @@ let deleteRows
         withDatabase store dbName (fun db ->
             let key = normalizeTableName tableName
 
-            tryGetTable db tableName
+            virtualWriteGuard store dbName tableName
+            |> Result.bind (fun () -> tryGetTable db tableName)
             |> Result.bind (fun table ->
                 table.RowsArray
                 |> List.ofSeq
@@ -2962,7 +3002,8 @@ let updateRows
             withDatabase store dbName (fun db ->
                 let key = normalizeTableName tableName
 
-                tryGetTable db tableName
+                virtualWriteGuard store dbName tableName
+                |> Result.bind (fun () -> tryGetTable db tableName)
                 |> Result.bind (fun table ->
                     let uniqueGroups = uniqueKeyGroups table
                     let checkFks = store.ForeignKeyChecks

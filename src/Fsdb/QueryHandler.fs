@@ -409,6 +409,23 @@ let private handleShowDatabases (session: Session) (sql: string) : QueryResult =
     InformationSchema.showDatabases store.Catalog (not (Map.isEmpty store.VirtualTables)) (likeSuffix sql)
     |> ResultSet
 
+/// The catalog `SHOW COLUMNS`/`DESCRIBE`/`SHOW CREATE TABLE`/`SHOW INDEX`
+/// should resolve against: a registered `fsdb` virtual table isn't in the
+/// real catalog (and the real `fsdb` database may not even exist while the
+/// registry keeps the schema alive), yet anything `SHOW TABLES` lists must
+/// be describable — clients/ORMs introspect via DESCRIBE. Splicing the
+/// overlay in as a one-table catalog reuses the existing renderers
+/// unchanged instead of teaching each one about the registry.
+let private catalogWithOverlay (session: Session) (dbName: string) (table: string) : Storage.Catalog =
+    let store = Session.currentStore session
+
+    if String.Equals(dbName, Storage.defaultDatabase, StringComparison.OrdinalIgnoreCase) then
+        match Map.tryFind (table.ToLowerInvariant()) store.VirtualTables with
+        | Some vt -> Map.ofList [ dbName, Map.ofList [ table.ToLowerInvariant(), Storage.virtualTableStub vt ] ]
+        | None -> store.Catalog
+    else
+        store.Catalog
+
 let private showColumnsRe =
     Regex(@"^SHOW\s+(FULL\s+)?COLUMNS\s+FROM\s+(\S+)(\s+FROM\s+(\S+))?", RegexOptions.IgnoreCase)
 
@@ -1387,21 +1404,21 @@ let private runProbe (session: Session) (sql: string) (probe: Probe) : Session *
     | ShowCreate name ->
         let sessionDb = session.Database |> Option.defaultValue defaultDatabase
         let dbName, table = splitQualified sessionDb name
-        session, InformationSchema.showCreateTable (Session.currentStore session).Catalog dbName table |> showResult
+        session, InformationSchema.showCreateTable (catalogWithOverlay session dbName table) dbName table |> showResult
     | ShowColumns(full, name, dbOverride) ->
         let sessionDb = session.Database |> Option.defaultValue defaultDatabase
         let dbName, table = splitQualified sessionDb name
         let dbName = dbOverride |> Option.map stripBackticks |> Option.defaultValue dbName
-        session, InformationSchema.showColumns (Session.currentStore session).Catalog full dbName table (likeSuffix sql) |> showResult
+        session, InformationSchema.showColumns (catalogWithOverlay session dbName table) full dbName table (likeSuffix sql) |> showResult
     | Describe name ->
         let sessionDb = session.Database |> Option.defaultValue defaultDatabase
         let dbName, table = splitQualified sessionDb name
-        session, InformationSchema.showColumns (Session.currentStore session).Catalog false dbName table None |> showResult
+        session, InformationSchema.showColumns (catalogWithOverlay session dbName table) false dbName table None |> showResult
     | ShowIndex(name, dbOverride) ->
         let sessionDb = session.Database |> Option.defaultValue defaultDatabase
         let dbName, table = splitQualified sessionDb name
         let dbName = dbOverride |> Option.map stripBackticks |> Option.defaultValue dbName
-        session, InformationSchema.showIndex (Session.currentStore session).Catalog dbName table |> showResult
+        session, InformationSchema.showIndex (catalogWithOverlay session dbName table) dbName table |> showResult
     | ShowGrants userOpt ->
         // `FOR 'name'@'host'` — the name is what matters (accounts match by
         // name, see `Auth`); no FOR, or FOR CURRENT_USER[()], means the
