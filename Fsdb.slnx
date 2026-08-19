@@ -4,6 +4,7 @@
   </Folder>
   <Folder Name="/examples/">
     <Project Path="examples/LlmSearch/LlmSearch.fsproj" />
+    <Project Path="examples/ReceiptPipeline/ReceiptPipeline.fsproj" />
   </Folder>
   <Folder Name="/src/">
     <Project Path="src/Fsdb/Fsdb.fsproj" />

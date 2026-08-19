@@ -352,6 +352,31 @@ with `ORDER BY DISTANCE(..., 'COSINE')`. Run it without a model server:
 just example -- --dry-run
 ```
 
+`examples/ReceiptPipeline` goes further: PDFs in, relational rows out, with
+the work in SQL rather than host code. The host registers `ocr` (pdftotext)
+and `llm_schema` (structured extraction), then six statements do the rest —
+two cancellable batch `UPDATE`s, an `INSERT ... SELECT ... ON DUPLICATE KEY
+UPDATE` vendor upsert, `INSERT IGNORE` against a unique key as the receipt
+dedupe, and `JSON_TABLE` exploding `$.items[*]` into line-item rows. An
+`AFTER INSERT` trigger journals each enqueued file.
+
+```sh
+just receipts -- --dry-run                       # offline fixtures
+RECEIPT_ENDPOINT=https://api.openai.com/v1 \
+RECEIPT_MODEL=gpt-5-mini RECEIPT_API_KEY=$OPENAI_API_KEY \
+  just receipts -- --dump ~/receipts/*.pdf       # real PDFs, real model
+```
+
+Two things that example teaches the hard way. **Constrain formats in the
+schema, not the prompt**: without a `"ISO 8601 YYYY-MM-DD"` description on
+the date field, a live run returned `25/01/2026` for two receipts, which
+doesn't coerce to `DATE` — and `INSERT IGNORE`, being both the dedupe and the
+failure sink, dropped them silently. **Dedupe in two layers**: a `UNIQUE` sha
+on the queue catches byte-identical resubmissions before spending an LLM
+call, while the unique key on `receipts` catches the same receipt arriving as
+different bytes. Keying dedupe solely on model output makes it only as stable
+as the model.
+
 ## Benchmarking
 
 `benchmarks/Fsdb.Benchmarks` runs fsdb head-to-head against a native MySQL

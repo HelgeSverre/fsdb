@@ -26,6 +26,12 @@ client port=PORT:
 example *ARGS:
     dotnet run --project examples/LlmSearch -- {{ ARGS }}
 
+# Run the ReceiptPipeline example: --dry-run for offline fixtures, or pass PDF
+# paths (needs pdftotext plus RECEIPT_ENDPOINT/RECEIPT_MODEL/RECEIPT_API_KEY)
+[group('server')]
+receipts *ARGS:
+    dotnet run --project examples/ReceiptPipeline -- {{ ARGS }}
+
 # Quick liveness probe against a running server
 [group('server')]
 smoke port=PORT:
