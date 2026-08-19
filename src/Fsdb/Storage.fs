@@ -1920,11 +1920,22 @@ let private applyAlterAction (strict: bool) (table: Table) (action: AlterAction)
     // `createTable`'s own `validateColumnFsp` pass.
     let fspCheck =
         match action with
-        | AddColumn(col, _)
-        | ModifyColumn(col, _)
-        | ChangeColumn(_, col, _) ->
+        | AddColumn(col, _) ->
             validateColumnFsp col
             |> Result.bind (fun () -> checkVectorKeyColumns [ col ] [])
+        // Existing indexes reference the column by its pre-ALTER name, so a
+        // type change into an already-indexed column must be checked under
+        // the old name — otherwise MODIFY/CHANGE is a back door into a
+        // `KEY` over VECTOR that CREATE would have refused.
+        | ModifyColumn(col, _)
+        | ChangeColumn(_, col, _) ->
+            let oldName =
+                match action with
+                | ChangeColumn(oldName, _, _) -> oldName
+                | _ -> col.Name
+
+            validateColumnFsp col
+            |> Result.bind (fun () -> checkVectorKeyColumns [ { col with Name = oldName } ] table.Indexes)
         // The key-introducing actions must refuse a VECTOR column the same
         // way CREATE TABLE does — otherwise ALTER is a back door into the
         // very keys `checkVectorKeyColumns` exists to forbid.

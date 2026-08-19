@@ -147,6 +147,18 @@ let tests =
                   [ "CREATE TABLE v (id INT, e VECTOR(3))"; "ALTER TABLE v ADD PRIMARY KEY (e)" ]
                   "ALTER ADD PRIMARY KEY"
 
+              // Type changes into an already-indexed column are the sneakiest
+              // back door: the key exists before the column becomes VECTOR.
+              expectErr
+                  3152
+                  [ "CREATE TABLE v (e INT, KEY ix (e))"; "ALTER TABLE v MODIFY e VECTOR(3)" ]
+                  "ALTER MODIFY into existing index"
+
+              expectErr
+                  3152
+                  [ "CREATE TABLE v (e INT, KEY ix (e))"; "ALTER TABLE v CHANGE e e2 VECTOR(3)" ]
+                  "ALTER CHANGE into existing index"
+
           testCase "CAST(... AS VECTOR) is an error — STRING_TO_VECTOR is the sanctioned conversion"
           <| fun _ -> expectErr 1064 [ "SELECT CAST('[1,2]' AS VECTOR(2))" ] "CAST to VECTOR"
 
