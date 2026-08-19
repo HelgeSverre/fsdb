@@ -1452,9 +1452,9 @@ let private runProbe (session: Session) (sql: string) (probe: Probe) : Session *
             | Some u -> userNameOf u
 
         if name <> session.User && not (Auth.hasGlobalPriv session.Store session.User "SELECT") then
-            // Seeing another account's grants needs a mysql-schema read
-            // privilege in MySQL; deny like a missing global SELECT.
-            session, Err(1044, sprintf "Access denied for user '%s'@'%%' to database 'mysql'" session.User)
+            // Seeing another account's grants reads `mysql.user`; without
+            // SELECT there, MySQL denies with 1142 on that table.
+            session, Err(1142, sprintf "SELECT command denied to user '%s'@'localhost' for table 'user'" session.User)
         else
             match Auth.renderGrants (Session.currentStore session) name with
             | Ok(header, lines) -> session, ResultSet([ header ], lines |> List.map (fun l -> [ Some l ]))
