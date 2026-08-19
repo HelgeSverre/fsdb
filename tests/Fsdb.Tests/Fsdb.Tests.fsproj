@@ -16,6 +16,7 @@
     <Compile Include="AuthTests.fs" />
     <Compile Include="PersistenceTests.fs" />
     <Compile Include="ExecutorTests.fs" />
+    <Compile Include="TriggerTests.fs" />
     <Compile Include="InformationSchemaTests.fs" />
     <Compile Include="QueryHandlerTests.fs" />
     <Compile Include="PreparedStatementTests.fs" />

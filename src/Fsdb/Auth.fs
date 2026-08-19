@@ -592,6 +592,12 @@ let rec requiredPrivileges (defaultDb: string) (stmt: Statement) : (string * Pri
             | Result.Error _ -> [] // invalid list — the executor reports it
 
         ("GRANT OPTION", target) :: privReqs
+    // CREATE TRIGGER needs TRIGGER on the subject table, like MySQL.
+    // ponytail: DROP TRIGGER should too, but the subject table lives in a
+    // mysql.triggers row this pure statement-shape pass can't see — add a
+    // store-aware lookup if trigger DDL ever needs per-table denial.
+    | CreateTrigger(_, table, _) -> onTables "TRIGGER" [ split table ]
+    | DropTrigger _ -> []
     | Explain inner -> requiredPrivileges defaultDb inner
 
 /// Checks `user` against every required privilege, denying with MySQL's

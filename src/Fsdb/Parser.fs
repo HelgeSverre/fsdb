@@ -1975,6 +1975,33 @@ let private alterUserStmt: Parser<Statement, unit> =
     |>> fun ((ifExists, (name, host)), pw) -> AlterUser(name, host, pw, ifExists)
 
 // ---------------------------------------------------------------------------
+// CREATE TRIGGER / DROP TRIGGER — see `Ast.CreateTrigger`'s doc for the
+// deliberate subset (AFTER INSERT, FOR EACH ROW, single-statement body).
+// ---------------------------------------------------------------------------
+
+/// The trigger body: everything after `FOR EACH ROW` to end of input,
+/// captured as raw text (validated by parsing in the executor, not here —
+/// the AST carries the text once, see `Ast.CreateTrigger`). A trailing `;`
+/// belongs to the outer statement, not the body, so it's trimmed off.
+let private createTriggerStmt: Parser<Statement, unit> =
+    (keyword "CREATE" >>. keyword "TRIGGER" >>. identifier
+     .>> keyword "AFTER"
+     .>> keyword "INSERT"
+     .>> keyword "ON"
+     .>>. qualifiedTableName
+     .>> keyword "FOR"
+     .>> keyword "EACH"
+     .>> keyword "ROW"
+     .>>. manyChars anyChar)
+    |>> fun ((name, table), body) -> CreateTrigger(name, table, body.Trim().TrimEnd(';').Trim())
+
+let private dropTriggerStmt: Parser<Statement, unit> =
+    (keyword "DROP" >>. keyword "TRIGGER"
+     >>. (opt (attempt (keyword "IF" >>. keyword "EXISTS")) |>> Option.isSome)
+     .>>. identifier)
+    |>> fun (ifExists, name) -> DropTrigger(name, ifExists)
+
+// ---------------------------------------------------------------------------
 // GRANT / REVOKE
 // ---------------------------------------------------------------------------
 
@@ -2055,10 +2082,12 @@ let private revokeStmt: Parser<Statement, unit> =
 statementRef.Value <-
     choice
         [ attempt createUserStmt
+          attempt createTriggerStmt
           attempt createDatabaseStmt
           attempt createTable
           attempt createIndexStmt
           attempt dropUserStmt
+          attempt dropTriggerStmt
           attempt dropDatabaseStmt
           attempt dropTable
           dropIndexStmt

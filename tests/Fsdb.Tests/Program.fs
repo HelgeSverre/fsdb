@@ -25,6 +25,7 @@ let main argv =
               FullTextExecutorTests.tests
               PersistenceTests.tests
               ExecutorTests.tests
+              TriggerTests.tests
               InformationSchemaTests.tests
               TemporalPrecisionTests.tests
               IntegrationTests.tests

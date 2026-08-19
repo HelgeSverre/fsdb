@@ -1428,20 +1428,44 @@ let private sysTable (name: string) (columns: ColumnDef list) (rows: Value[] lis
 /// metadata, and data reads go through the executor's overlay.
 let virtualTableStub (vt: Functions.VirtualTable) : Table = sysTable vt.Name vt.Columns []
 
+/// `mysql.triggers` — fsdb's row-backed trigger catalog (real MySQL keeps
+/// triggers in the data dictionary; a plain system table means trigger
+/// rows ride ordinary WAL row events with zero codec changes, the same
+/// persistence route `mysql.user` accounts take). One row per trigger;
+/// `action_statement` is the raw body text after `FOR EACH ROW`, re-parsed
+/// at fire time (see `Ast.CreateTrigger`).
+let mysqlTriggersColumns: ColumnDef list =
+    [ keyCol "trigger_name" 64
+      keyCol "trigger_schema" 64
+      sysCol "event_table" (TChar 64) false (Some(VString ""))
+      sysCol "action_timing" (TChar 6) false (Some(VString "AFTER"))
+      sysCol "event_manipulation" (TChar 6) false (Some(VString "INSERT"))
+      sysCol "action_statement" TText false (Some(VString ""))
+      sysCol "created" (TDateTime 2) true None ]
+
 let private mysqlSystemDatabase () : Database =
     [ "user", sysTable "user" mysqlUserColumns [ rootUserRow ]
       "db", sysTable "db" mysqlDbColumns []
       "tables_priv", sysTable "tables_priv" mysqlTablesPrivColumns []
       "columns_priv", sysTable "columns_priv" mysqlColumnsPrivColumns []
-      "global_grants", sysTable "global_grants" mysqlGlobalGrantsColumns [] ]
+      "global_grants", sysTable "global_grants" mysqlGlobalGrantsColumns []
+      "triggers", sysTable "triggers" mysqlTriggersColumns [] ]
     |> Map.ofList
 
 /// Re-seeds the `mysql` system schema when it's absent — called after a
 /// snapshot load replaces the whole catalog (a snapshot written before this
 /// schema existed doesn't carry it). A no-op when `mysql` is already there,
-/// so a snapshot that *does* carry it (users/grants included) wins.
+/// so a snapshot that *does* carry it (users/grants included) wins — except
+/// for individual system tables added after that snapshot was written
+/// (`triggers`), which are seeded empty into the existing schema so DDL and
+/// WAL replay against them can't hit `NoSuchTable`.
 let ensureMysqlSchema (store: Store) : unit =
     store.Databases.TryAdd("mysql", ref (mysqlSystemDatabase ())) |> ignore
+
+    let dbRef = store.Databases.["mysql"]
+
+    if not (Map.containsKey "triggers" dbRef.Value) then
+        dbRef.Value <- Map.add "triggers" (sysTable "triggers" mysqlTriggersColumns []) dbRef.Value
 
 let create () : Store =
     let databases = ConcurrentDictionary<string, Database ref>()
@@ -2233,6 +2257,16 @@ let private resolveInsertColumns (table: Table) (columns: string list option) : 
 /// OK packet: it only ever reflects a generated id, never an explicitly
 /// supplied one, and holds its previous value across a statement that
 /// generated none at all (see `QueryHandler`'s `LAST_INSERT_ID` doc).
+/// What one INSERT/UPSERT actually did — the OK-packet numbers plus the
+/// concrete rows written (AFTER INSERT triggers bind NEW.* from these).
+/// `insertRows`/`insertRowsIgnore`/`upsertRows` always built these rows
+/// internally for the WAL emit; the record just stops discarding them.
+type InsertOutcome =
+    { LastInsertId: int64
+      GeneratedId: int64 option
+      Affected: int
+      InsertedRows: Value[] list }
+
 let private insertCore
     (checkFks: bool)
     (strict: bool)
@@ -2408,7 +2442,7 @@ let insertRows
     (tableName: string)
     (columns: string list option)
     (rowsIn: Value list list)
-    : Result<int64 * int64 option * int, StorageError> =
+    : Result<InsertOutcome, StorageError> =
     let key = normalizeTableName tableName
 
     let result =
@@ -2424,7 +2458,7 @@ let insertRows
         if not rows.IsEmpty then
             emit store (Some(RowsInserted(dbName, tableName, rows)))
 
-        Ok(lastId, generatedId, affected)
+        Ok { LastInsertId = lastId; GeneratedId = generatedId; Affected = affected; InsertedRows = rows }
     | Error e -> Error e
 
 /// `INSERT IGNORE`: as `insertRows`, but a row that would violate NOT
@@ -2439,7 +2473,7 @@ let insertRowsIgnore
     (tableName: string)
     (columns: string list option)
     (rowsIn: Value list list)
-    : Result<int64 * int64 option * int, StorageError> =
+    : Result<InsertOutcome, StorageError> =
     let key = normalizeTableName tableName
 
     let result =
@@ -2455,7 +2489,7 @@ let insertRowsIgnore
         if not rows.IsEmpty then
             emit store (Some(RowsInserted(dbName, tableName, rows)))
 
-        Ok(lastId, generatedId, affected)
+        Ok { LastInsertId = lastId; GeneratedId = generatedId; Affected = affected; InsertedRows = rows }
     | Error e -> Error e
 
 /// Every `(childTableKey, fk)` in `db` whose `fk.RefTable` is `parentKey` —
@@ -2638,7 +2672,7 @@ let rec upsertRows
     (computeGenerated: Value[] -> Result<Value[], StorageError>)
     (applyUpdate: Value[] -> Value[] -> Result<Value[], StorageError>)
     (foundRows: bool)
-    : Result<int64 * int64 option * int, StorageError> =
+    : Result<InsertOutcome, StorageError> =
         let key = normalizeTableName tableName
 
         let result =
@@ -2664,7 +2698,7 @@ let rec upsertRows
             cascaded
             |> Map.iter (fun tableKey changes -> if not changes.IsEmpty then emit store (Some(RowsUpdated(dbName, originalNameOf tableKey, changes))))
 
-            Ok(lastId, generatedId, affected)
+            Ok { LastInsertId = lastId; GeneratedId = generatedId; Affected = affected; InsertedRows = inserted }
         | Error e -> Error e
 
 /// `upsertRows`'s per-table body, pulled out only so it can take `db` (needed

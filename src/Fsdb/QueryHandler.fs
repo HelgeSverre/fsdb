@@ -1389,7 +1389,11 @@ let private runProbe (session: Session) (sql: string) (probe: Probe) : Session *
             InformationSchema.withViewer session.Store session.User (fun () -> InformationSchema.showProcesslist full |> showResult)
 
         session, result
-    | ShowTriggers db -> session, InformationSchema.showTriggers (Session.currentStore session).Catalog db |> showResult
+    | ShowTriggers db ->
+        // `FROM db` when given, else the session's current database — same
+        // resolution MySQL applies.
+        let dbName = db |> Option.defaultValue (session.Database |> Option.defaultValue defaultDatabase)
+        session, InformationSchema.showTriggers (Session.currentStore session).Catalog dbName |> showResult
     | ShowEvents db -> session, InformationSchema.showEvents (Session.currentStore session).Catalog db |> showResult
     | ShowRoutineStatus -> session, InformationSchema.showRoutineStatus () |> showResult
     | Kill(queryOnly, id) ->

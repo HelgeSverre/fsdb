@@ -123,7 +123,7 @@ let tests =
                     | Error e -> failtestf "expected Ok, got %A" e
 
                     match insertRows store defaultDatabase "users" None [ [ VNull; VString "bob"; VInt 40L ] ] with
-                    | Ok(lastId, _, _) -> Expect.equal lastId 1L "AUTO_INCREMENT restarts at 1 after truncate"
+                    | Ok { LastInsertId = lastId } -> Expect.equal lastId 1L "AUTO_INCREMENT restarts at 1 after truncate"
                     | Error e -> failtestf "expected Ok, got %A" e
 
                 testCase "truncate on an unknown table returns NoSuchTable"
@@ -141,7 +141,7 @@ let tests =
                     truncate store defaultDatabase "users" |> ignore
 
                     match insertRows store defaultDatabase "users" None [ [ VInt 1L; VString "bob"; VInt 40L ] ] with
-                    | Ok(1L, _, 1) -> ()
+                    | Ok { LastInsertId = 1L; Affected = 1 } -> ()
                     | other -> failtestf "expected id 1 to be free again after truncate, got %A" other ]
 
           testList
@@ -151,7 +151,7 @@ let tests =
                     let store = withUsersTable ()
 
                     match insertRows store defaultDatabase "users" None [ [ VNull; VString "alice"; VInt 30L ] ] with
-                    | Ok(lastId, generatedId, affected) ->
+                    | Ok { LastInsertId = lastId; GeneratedId = generatedId; Affected = affected } ->
                         Expect.equal lastId 1L "first assigned id"
                         Expect.equal generatedId (Some 1L) "the id was actually generated, so LAST_INSERT_ID() sees it too"
                         Expect.equal affected 1 "one row affected"
@@ -165,7 +165,7 @@ let tests =
                     |> ignore
 
                     match insertRows store defaultDatabase "users" None [ [ VNull; VString "bob"; VInt 25L ] ] with
-                    | Ok(lastId, _, _) -> Expect.equal lastId 2L "second row gets id 2"
+                    | Ok { LastInsertId = lastId } -> Expect.equal lastId 2L "second row gets id 2"
                     | Error e -> failtestf "expected Ok, got %A" e
 
                 testCase "AUTO_INCREMENT assigns lastInsertId to the first row of a multi-row insert"
@@ -181,7 +181,7 @@ let tests =
                             [ [ VNull; VString "alice"; VInt 30L ]
                               [ VNull; VString "bob"; VInt 25L ] ]
                     with
-                    | Ok(lastId, _, affected) ->
+                    | Ok { LastInsertId = lastId; Affected = affected } ->
                         Expect.equal lastId 1L "lastInsertId is the first row's id"
                         Expect.equal affected 2 "two rows affected"
                     | Error e -> failtestf "expected Ok, got %A" e
@@ -194,7 +194,7 @@ let tests =
                     |> ignore
 
                     match insertRows store defaultDatabase "users" None [ [ VNull; VString "bob"; VInt 25L ] ] with
-                    | Ok(lastId, _, _) -> Expect.equal lastId 101L "counter continues past the explicit id"
+                    | Ok { LastInsertId = lastId } -> Expect.equal lastId 101L "counter continues past the explicit id"
                     | Error e -> failtestf "expected Ok, got %A" e
 
                 testCase "a single explicit-id insert reports that id as lastInsertId, matching real MySQL's OK packet (not the SQL LAST_INSERT_ID() function's 0)"
@@ -202,7 +202,7 @@ let tests =
                     let store = withUsersTable ()
 
                     match insertRows store defaultDatabase "users" None [ [ VInt 800L; VString "alice"; VInt 30L ] ] with
-                    | Ok(lastId, generatedId, affected) ->
+                    | Ok { LastInsertId = lastId; GeneratedId = generatedId; Affected = affected } ->
                         Expect.equal lastId 800L "lastInsertId is the row's explicit id, like PDO::lastInsertId()"
                         Expect.equal generatedId None "no id was actually generated, so LAST_INSERT_ID() must not see 800"
                         Expect.equal affected 1 "one row affected"
@@ -221,7 +221,7 @@ let tests =
                             [ [ VInt 500L; VString "alice"; VInt 30L ]
                               [ VNull; VString "bob"; VInt 25L ] ]
                     with
-                    | Ok(lastId, _, _) -> Expect.equal lastId 501L "the generated second row's id wins over the first row's explicit one"
+                    | Ok { LastInsertId = lastId } -> Expect.equal lastId 501L "the generated second row's id wins over the first row's explicit one"
                     | Error e -> failtestf "expected Ok, got %A" e
 
                 testCase "an all-explicit multi-row insert reports the last row's id, not the first"
@@ -237,7 +237,7 @@ let tests =
                             [ [ VInt 700L; VString "alice"; VInt 30L ]
                               [ VInt 701L; VString "bob"; VInt 25L ] ]
                     with
-                    | Ok(lastId, _, _) -> Expect.equal lastId 701L "the last row's explicit id, matching real MySQL"
+                    | Ok { LastInsertId = lastId } -> Expect.equal lastId 701L "the last row's explicit id, matching real MySQL"
                     | Error e -> failtestf "expected Ok, got %A" e
 
                 testCase "inserting by explicit column list fills the rest from defaults"
@@ -245,7 +245,7 @@ let tests =
                     let store = withUsersTable ()
 
                     match insertRows store defaultDatabase "users" (Some [ "name" ]) [ [ VString "alice" ] ] with
-                    | Ok(lastId, _, affected) ->
+                    | Ok { LastInsertId = lastId; Affected = affected } ->
                         Expect.equal lastId 1L "AUTO_INCREMENT still assigned"
                         Expect.equal affected 1 "one row"
 
@@ -628,7 +628,7 @@ let tests =
                             [ [ VNull; VNull; VInt 30L ] // violates NOT NULL on name
                               [ VNull; VString "bob"; VInt 25L ] ]
                     with
-                    | Ok(_, _, affected) ->
+                    | Ok { Affected = affected } ->
                         Expect.equal affected 1 "only the good row counted"
 
                         match scan store defaultDatabase "users" with
@@ -662,7 +662,7 @@ let tests =
                             [ [ VInt 2L; VString "a@x.com" ] // dup, skipped
                               [ VInt 3L; VString "b@x.com" ] ]
                     with
-                    | Ok(_, _, affected) ->
+                    | Ok { Affected = affected } ->
                         Expect.equal affected 1 "only the non-colliding row counted"
 
                         match scan store defaultDatabase "emails" with
@@ -705,7 +705,7 @@ let tests =
                             [ [ VInt 1L; VInt 999L ] // no such department, skipped
                               [ VInt 2L; VNull ] ]
                     with
-                    | Ok(_, _, affected) ->
+                    | Ok { Affected = affected } ->
                         Expect.equal affected 1 "only the row with no dangling FK counted"
                     | Error e -> failtestf "expected Ok, got %A" e
 
@@ -714,7 +714,7 @@ let tests =
                     let store = withUsersTable ()
 
                     match insertRowsIgnore store defaultDatabase "users" (Some [ "id"; "age" ]) [ [ VInt 1L; VInt 30L ] ] with
-                    | Ok(lastId, _, affected) ->
+                    | Ok { LastInsertId = lastId; Affected = affected } ->
                         Expect.equal lastId 0L "nothing was assigned"
                         Expect.equal affected 0 "nothing was inserted"
                     | Error e -> failtestf "expected Ok, got %A" e
@@ -739,7 +739,7 @@ let tests =
                     deleteRows store defaultDatabase "users" (fun _ -> Ok true) |> ignore
 
                     match insertRows store defaultDatabase "users" None [ [ VNull; VString "bob"; VInt 25L ] ] with
-                    | Ok(lastId, _, _) -> Expect.equal lastId 2L "the counter kept climbing across the delete"
+                    | Ok { LastInsertId = lastId } -> Expect.equal lastId 2L "the counter kept climbing across the delete"
                     | Error e -> failtestf "expected Ok, got %A" e ]
 
           testList
@@ -1325,7 +1325,7 @@ let tests =
                         | other -> failtestf "expected id 1 to still be rejected as a duplicate after the shift, got %A" other
 
                         match insertRows store defaultDatabase "users" None [ [ VNull; VInt 2L; VString "carol"; VInt 50L ] ] with
-                        | Ok(2L, _, 1) -> ()
+                        | Ok { LastInsertId = 2L; Affected = 1 } -> ()
                         | other -> failtestf "expected a distinct id to still succeed after the shift, got %A" other ]
 
           testList
@@ -1336,7 +1336,7 @@ let tests =
                     let applyUpdate (_: Value[]) (candidate: Value[]) = Ok candidate
 
                     match upsertRows store defaultDatabase "users" None [ [ VNull; VString "alice"; VInt 30L ] ] Ok applyUpdate false with
-                    | Ok(lastId, _, affected) ->
+                    | Ok { LastInsertId = lastId; Affected = affected } ->
                         Expect.equal lastId 1L "inserted with a fresh id"
                         Expect.equal affected 1 "one row"
                     | Error e -> failtestf "expected Ok, got %A" e
@@ -1350,7 +1350,7 @@ let tests =
                         Ok [| existing.[0]; existing.[1]; VInt 31L |]
 
                     match upsertRows store defaultDatabase "users" None [ [ VInt 1L; VString "alice"; VInt 999L ] ] Ok applyUpdate false with
-                    | Ok(_, _, affected) ->
+                    | Ok { Affected = affected } ->
                         // MySQL counts a changed ON DUPLICATE KEY UPDATE match as 2
                         // (the attempted insert plus the update), not 1.
                         Expect.equal affected 2 "two: the attempted insert plus the update that changed the row"
@@ -1384,7 +1384,7 @@ let tests =
                     // `affected_rows` rule for a matched `ON DUPLICATE KEY
                     // UPDATE` row: 0 without `CLIENT_FOUND_ROWS`, 1 with it.
                     match upsertRows store defaultDatabase "emails" None [ [ VInt 2L; VString "a@x.com" ] ] Ok applyUpdate false with
-                    | Ok(_, _, affected) ->
+                    | Ok { Affected = affected } ->
                         Expect.equal affected 0 "matched via the unique index, but no-op: not counted without CLIENT_FOUND_ROWS"
 
                         match scan store defaultDatabase "emails" with
@@ -1393,7 +1393,7 @@ let tests =
                     | Error e -> failtestf "expected Ok, got %A" e
 
                     match upsertRows store defaultDatabase "emails" None [ [ VInt 3L; VString "a@x.com" ] ] Ok applyUpdate true with
-                    | Ok(_, _, affected) -> Expect.equal affected 1 "the same no-op match counts once CLIENT_FOUND_ROWS is negotiated"
+                    | Ok { Affected = affected } -> Expect.equal affected 1 "the same no-op match counts once CLIENT_FOUND_ROWS is negotiated"
                     | Error e -> failtestf "expected Ok, got %A" e ]
 
           testList
@@ -1733,7 +1733,7 @@ let tests =
                               [ VInt 3L; VInt 2L ]
                               [ VInt 4L; VInt 3L ] ]
                     with
-                    | Ok(_, _, affected) -> Expect.equal affected 4 "every row's parent was already inserted earlier in the same statement"
+                    | Ok { Affected = affected } -> Expect.equal affected 4 "every row's parent was already inserted earlier in the same statement"
                     | Error e -> failtestf "expected Ok, got %A" e
 
                 testCase "UPDATE of a referenced parent key with an existing child row returns error 1451"

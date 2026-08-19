@@ -423,7 +423,7 @@ let tests =
 
               // id 1 is free again after the replayed update moved that row to id 10.
               match insertRows reloaded defaultDatabase "pk" (Some [ "id"; "name" ]) [ [ VInt 1L; VString "d" ] ] with
-              | Ok(1L, _, 1) -> ()
+              | Ok { LastInsertId = 1L; Affected = 1 } -> ()
               | other -> failtestf "expected id 1 to be free again after replay, got %A" other
 
               // id 10 is now occupied — a stale (pre-update) index would

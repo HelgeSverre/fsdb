@@ -928,6 +928,40 @@ let private triggersColumns =
       strCol "COLLATION_CONNECTION"
       strCol "DATABASE_COLLATION" ]
 
+/// The `mysql.triggers` rows (see `Storage.mysqlTriggersColumns` for the
+/// fixed cell order: name, schema, event_table, timing, event, statement,
+/// created), decoded once for both `information_schema.TRIGGERS` and
+/// `SHOW TRIGGERS`. Definer/sql_mode/charset cells are the server's own
+/// constants — fsdb has no per-trigger definer or sql_mode capture.
+let private triggerCatalogRows (catalog: Catalog) : (string * string * string * string * string) list =
+    catalog
+    |> Map.tryFind "mysql"
+    |> Option.bind (Map.tryFind "triggers")
+    |> Option.map (fun t ->
+        t.RowsArray
+        |> Seq.map (fun r ->
+            let text i = r.[i] |> Value.toText |> Option.defaultValue ""
+            let created = r.[6] |> Value.toTextFsp 2 |> Option.defaultValue ""
+            text 0, text 1, text 2, text 5, created)
+        |> List.ofSeq)
+    |> Option.defaultValue []
+
+// The definer/sql_mode/charset constants every trigger row renders —
+// fsdb captures none of these per trigger; values match the server's own
+// advertised defaults (charset/collation as write-probed on MySQL 8.4.11).
+let private triggerSqlMode = "STRICT_TRANS_TABLES,NO_ENGINE_SUBSTITUTION"
+let private triggerDefiner = "root@localhost"
+
+/// `information_schema.TRIGGERS` rows off the trigger catalog — constant
+/// cells (ACTION_ORDER 1, ORIENTATION ROW, OLD/NEW row refs) exactly as
+/// write-probed on MySQL 8.4.11.
+let private triggersRows (catalog: Catalog) : Value[] list =
+    triggerCatalogRows catalog
+    |> List.map (fun (name, schema, table, body, created) ->
+        [| vs "def"; vs schema; vs name; vs "INSERT"; vs "def"; vs schema; vs table; VInt 1L; VNull; vs body
+           vs "ROW"; vs "AFTER"; VNull; VNull; vs "OLD"; vs "NEW"; vs created; vs triggerSqlMode
+           vs triggerDefiner; vs "utf8mb4"; vs "utf8mb4_0900_ai_ci"; vs "utf8mb4_0900_ai_ci" |])
+
 let private eventsColumns =
     [ strCol "EVENT_CATALOG"
       strCol "EVENT_SCHEMA"
@@ -1223,10 +1257,10 @@ let scan (catalog: Catalog) (name: string) : (ColumnDef list * Value[] list) opt
         | "ENGINES" -> Some enginesRows
         // Object catalogs fsdb has no objects for — real empty sets
         // (COLUMN_PRIVILEGES too: no column-level grants exist).
+        | "TRIGGERS" -> Some(triggersRows catalog)
         | "VIEWS"
         | "ROUTINES"
         | "PARAMETERS"
-        | "TRIGGERS"
         | "EVENTS"
         | "COLUMN_PRIVILEGES" -> Some []
         | _ -> None
@@ -1762,12 +1796,24 @@ let private showEmptyOf (catalog: Catalog) (dbName: string option) (headers: str
         Error(1049, sprintf "Unknown database '%s'" db)
     | _ -> Ok(headers, [])
 
-let showTriggers (catalog: Catalog) (dbName: string option) : ShowResult =
-    showEmptyOf
-        catalog
-        dbName
-        [ "Trigger"; "Event"; "Table"; "Statement"; "Timing"; "Created"; "sql_mode"; "Definer"
-          "character_set_client"; "collation_connection"; "Database Collation" ]
+/// `SHOW TRIGGERS [FROM db]` — headers and row shape exactly MySQL 8.4.11's
+/// (write-probed), rows off the `mysql.triggers` catalog for `dbName`.
+let showTriggers (catalog: Catalog) (dbName: string) : ShowResult =
+    if dbName.ToLowerInvariant() <> "information_schema" && not (Map.containsKey dbName catalog) then
+        Error(1049, sprintf "Unknown database '%s'" dbName)
+    else
+        let rows =
+            triggerCatalogRows catalog
+            |> List.filter (fun (_, schema, _, _, _) -> String.Equals(schema, dbName, StringComparison.OrdinalIgnoreCase))
+            |> List.map (fun (name, _, table, body, created) ->
+                [ Some name; Some "INSERT"; Some table; Some body; Some "AFTER"; Some created; Some triggerSqlMode
+                  Some triggerDefiner; Some "utf8mb4"; Some "utf8mb4_0900_ai_ci"; Some "utf8mb4_0900_ai_ci" ])
+
+        Ok(
+            [ "Trigger"; "Event"; "Table"; "Statement"; "Timing"; "Created"; "sql_mode"; "Definer"
+              "character_set_client"; "collation_connection"; "Database Collation" ],
+            rows
+        )
 
 let showEvents (catalog: Catalog) (dbName: string option) : ShowResult =
     showEmptyOf

@@ -4621,6 +4621,29 @@ let private applyOnUpdateTimestamps (columns: ColumnDef list) (assignedIdxs: Set
 
         newRow
 
+/// Shadows every `DirectOnly` extension with a 3102 raiser for the duration
+/// of an engine-driven (indirect) evaluation — the eval-time half of
+/// DIRECTONLY enforcement (`firstDirectOnlyCall` below is the DDL-time
+/// half). A definition can reach evaluation without ever passing the DDL
+/// check — a subquery smuggling the call past that traversal, or an object
+/// loaded from a data dir persisted before the function was registered —
+/// so whatever shape the expression takes, the moment the engine would
+/// actually invoke the function it gets the same 3102 the DDL check gives.
+/// `what` names the offending context in the message ("generated column",
+/// "trigger").
+let private shadowDirectOnly (what: string) (registry: Registry) : Registry =
+    registry.Extensions
+    |> Map.fold
+        (fun r name ext ->
+            if ext.DirectOnly then
+                registerScalar
+                    name
+                    (fun _ -> raise (SqlError(3102, sprintf "Expression of %s contains a disallowed function: %s" what name)))
+                    r
+            else
+                r)
+        registry
+
 /// Computes every `Generated` column of `row` (`CREATE TABLE ... col AS
 /// (expr)`) fresh from its other columns' current values, leaving every
 /// other column untouched — a no-op when `table` has no generated columns.
@@ -4650,33 +4673,8 @@ let private computeGeneratedRow
     if generated.IsEmpty then
         Ok row
     else
-        // The eval-time half of DIRECTONLY enforcement (`firstDirectOnlyCall`
-        // below is the DDL-time half): a definition can reach this point
-        // without ever passing the DDL check — a subquery smuggling the call
-        // past that traversal, or a table loaded from a data dir persisted
-        // before the function was registered — so every DirectOnly extension
-        // is shadowed by a raiser for the duration of this evaluation.
-        // Whatever shape the expression takes, the moment the engine would
-        // actually invoke the function it gets the same 3102 the DDL check
-        // gives, instead of the indirect invocation the flag exists to ban.
-        let registry =
-            registry.Extensions
-            |> Map.fold
-                (fun r name ext ->
-                    if ext.DirectOnly then
-                        registerScalar
-                            name
-                            (fun _ ->
-                                raise (
-                                    SqlError(
-                                        3102,
-                                        sprintf "Expression of generated column contains a disallowed function: %s" name
-                                    )
-                                ))
-                            r
-                    else
-                        r)
-                registry
+        // Eval-time DIRECTONLY backstop — see `shadowDirectOnly`'s doc.
+        let registry = shadowDirectOnly "generated column" registry
 
         let row' = Array.copy row
 
@@ -4740,25 +4738,22 @@ let private withGeneratedRecomputed
         | Ok(cols, _) -> recomputeGeneratedColumns store registry dbName db table cols |> Result.map (fun () -> r)
         | Error _ -> Ok r)
 
-/// Rewrites `VALUES(col)` calls (MySQL's way of referring, inside an
-/// `INSERT ... ON DUPLICATE KEY UPDATE` assignment, to the value that row
-/// would have inserted) into the literal `candidate` value for that column —
-/// `funcCallAtom` already parses `VALUES(col)` as an ordinary `FuncCall`
-/// since it just looks like one syntactically, so this is a plain
-/// pre-evaluation rewrite rather than new grammar.
-let rec private substituteValuesFunc (columnIndex: Map<string, int list>) (candidate: Value[]) (expr: Expr) : Expr =
-    let sub = substituteValuesFunc columnIndex candidate
+/// Bottom-up expression rewrite: `rw` gets first look at every node — a
+/// `Some` replaces the node wholesale (no further descent), a `None`
+/// recurses into its children. The shared walk under `substituteValuesFunc`
+/// (`VALUES(col)` in ON DUPLICATE KEY UPDATE) and `substituteNewRefs`
+/// (`NEW.col` in trigger bodies), which only differ in the one node they
+/// replace.
+let rec private rewriteExprWith (rw: Expr -> Expr option) (expr: Expr) : Expr =
+    let sub = rewriteExprWith rw
+
+    match rw expr with
+    | Some replaced -> replaced
+    | None ->
 
     match expr with
     | Placeholder _ -> expr
     | MatchAgainst(cols, q, mode) -> MatchAgainst(cols, sub q, mode)
-    | FuncCall(name, [ Col c ]) when System.String.Equals(name, "VALUES", System.StringComparison.OrdinalIgnoreCase) ->
-        // `candidate` is always the row for the one table this INSERT
-        // targets, so there's no cross-table ambiguity to consider here
-        // the way `resolveCol` has to for a JOIN — just take the column.
-        match Map.tryFind (c.ToLowerInvariant()) columnIndex with
-        | Some(i :: _) -> Lit candidate.[i]
-        | _ -> expr
     | FuncCall(name, args) -> FuncCall(name, args |> List.map sub)
     | BinOp(op, a, b) -> BinOp(op, sub a, sub b)
     | Not e -> Not(sub e)
@@ -4785,12 +4780,61 @@ let rec private substituteValuesFunc (columnIndex: Map<string, int list>) (candi
     | RankOver _
     | PercentRankOver _
     | NTileOver _
-    // `VALUES(col)` only ever occurs directly in an `ON DUPLICATE KEY
-    // UPDATE` assignment, never inside a subquery's own text — nothing to
-    // substitute inside one, so it's left as-is like `Exists` always was.
+    // `VALUES(col)`/`NEW.col` only ever occur directly in their statement's
+    // own assignments/values, never inside a subquery's own text — nothing
+    // to substitute inside one, so it's left as-is like `Exists` always was.
     | Exists _
     | Subquery _
     | InSubquery _ -> expr
+
+/// Rewrites `VALUES(col)` calls (MySQL's way of referring, inside an
+/// `INSERT ... ON DUPLICATE KEY UPDATE` assignment, to the value that row
+/// would have inserted) into the literal `candidate` value for that column —
+/// `funcCallAtom` already parses `VALUES(col)` as an ordinary `FuncCall`
+/// since it just looks like one syntactically, so this is a plain
+/// pre-evaluation rewrite rather than new grammar.
+let private substituteValuesFunc (columnIndex: Map<string, int list>) (candidate: Value[]) : Expr -> Expr =
+    rewriteExprWith (function
+        | FuncCall(name, [ Col c ]) when System.String.Equals(name, "VALUES", System.StringComparison.OrdinalIgnoreCase) ->
+            // `candidate` is always the row for the one table this INSERT
+            // targets, so there's no cross-table ambiguity to consider here
+            // the way `resolveCol` has to for a JOIN — just take the column.
+            match Map.tryFind (c.ToLowerInvariant()) columnIndex with
+            | Some(i :: _) -> Some(Lit candidate.[i])
+            | _ -> None
+        | _ -> None)
+
+/// Rewrites `NEW.col` (an AFTER INSERT trigger body's reference to the
+/// just-inserted row — already parsed as an ordinary `QualifiedCol("NEW",
+/// col)`) into the literal inserted value, the same pre-evaluation rewrite
+/// shape as `substituteValuesFunc`. An unknown `NEW.x` is left in place and
+/// fails at eval time as an unknown qualifier, same as any bad column ref.
+let private substituteNewRefs (columnIndex: Map<string, int list>) (row: Value[]) : Expr -> Expr =
+    rewriteExprWith (function
+        | QualifiedCol(q, c) when System.String.Equals(q, "NEW", System.StringComparison.OrdinalIgnoreCase) ->
+            match Map.tryFind (c.ToLowerInvariant()) columnIndex with
+            | Some(i :: _) -> Some(Lit row.[i])
+            | _ -> None
+        | _ -> None)
+
+/// Binds one inserted row into a trigger body: every `NEW.col` becomes that
+/// row's literal value. Only the body kinds CREATE TRIGGER accepts appear
+/// here; ponytail: `NEW.*` inside an INSERT...SELECT body's own SELECT
+/// isn't substituted (it fails at eval as an unknown table 'NEW') — add a
+/// SelectStmt walk when a real trigger needs it.
+let private bindNewRow (columnIndex: Map<string, int list>) (row: Value[]) (stmt: Statement) : Statement =
+    let sub = substituteNewRefs columnIndex row
+
+    match stmt with
+    | Insert(t, cols, rows, onDup, ig) ->
+        Insert(t, cols, rows |> List.map (List.map sub), onDup |> List.map (fun (c, e) -> c, sub e), ig)
+    | Update u ->
+        Update
+            { u with
+                Assignments = u.Assignments |> List.map (fun a -> { a with Value = sub a.Value })
+                Where = Option.map sub u.Where }
+    | Delete d -> Delete { d with Where = Option.map sub d.Where }
+    | other -> other
 
 // ---------------------------------------------------------------------------
 // EXPLAIN — a pure *description* of what this executor would actually do
@@ -5397,9 +5441,156 @@ let private rejectDirectOnlyGenerated (registry: Registry) (columns: Ast.ColumnD
     |> List.tryPick (fun c -> c.Generated |> Option.bind (fun (e, _) -> firstDirectOnlyCall registry e |> Option.map (fun _ -> c.Name)))
     |> Option.map (fun col -> Err(3102, sprintf "Expression of generated column '%s' contains a disallowed function." col))
 
-let execute (store: Store) (registry: Registry) (dbName: string) (ids: int64 * int64) (foundRows: bool) (stmt: Statement) : (int64 * int64) * QueryResult =
+// ---------------------------------------------------------------------------
+// Triggers — AFTER INSERT only, persisted as `mysql.triggers` rows (see
+// `Storage.mysqlTriggersColumns`); bodies fire by recursing into `execute`.
+// ---------------------------------------------------------------------------
+
+/// The `(db, normalized table)` tables whose INSERTs are currently firing
+/// triggers on this thread — the "statement which invoked this stored
+/// function/trigger" chain error 1442 checks against; its length is the
+/// trigger recursion depth. Thread-local like `Storage.queryCancellation`:
+/// one statement executes on one thread, and firing never crosses threads.
+let private triggerChain = new System.Threading.ThreadLocal<(string * string) list>(fun () -> [])
+
+/// MySQL 8.4.11's exact 1442 text (write-probed on the disposable server):
+/// fired when a trigger body writes a table the invoking statement chain is
+/// already writing — and, here, also when the chain depth exceeds the cap.
+let private err1442 (table: string) : QueryResult =
+    Err(
+        1442,
+        sprintf
+            "Can't update table '%s' in stored function/trigger because it is already used by statement which invoked this stored function/trigger."
+            table
+    )
+
+/// `mysql.triggers` rows for `(db, table)`'s AFTER INSERT event, as
+/// `(name, bodyText)`. Cell positions are `Storage.mysqlTriggersColumns`'
+/// fixed order (name, schema, event_table, timing, event, statement,
+/// created).
+let private afterInsertTriggers (store: Store) (db: string) (table: string) : (string * string) list =
+    match scan store "mysql" "triggers" with
+    | Error _ -> []
+    | Ok(_, rows) ->
+        let text i (r: Value[]) = toText r.[i] |> Option.defaultValue ""
+        let eqI (a: string) (b: string) = System.String.Equals(a, b, System.StringComparison.OrdinalIgnoreCase)
+
+        rows
+        |> Seq.filter (fun r ->
+            eqI (text 1 r) db
+            && eqI (text 2 r) (normalizeTableName table)
+            && eqI (text 3 r) "AFTER"
+            && eqI (text 4 r) "INSERT")
+        |> Seq.map (fun r -> text 0 r, text 5 r)
+        |> List.ofSeq
+
+/// The one table a trigger body statement writes — what 1442's "already
+/// used by the statement which invoked this trigger" check points at.
+let private writtenTableOf (dbName: string) (stmt: Statement) : (string * string) option =
+    match stmt with
+    | Insert(t, _, _, _, _)
+    | InsertSelect(t, _, _, _, _) ->
+        let db, t = splitQualified dbName t
+        Some(db, normalizeTableName t)
+    | Update u -> Some(u.From.Database |> Option.defaultValue dbName, normalizeTableName u.From.Table)
+    | Delete d -> Some(d.From.Database |> Option.defaultValue dbName, normalizeTableName d.From.Table)
+    | _ -> None
+
+/// The exprs a trigger body evaluates at fire time, for the CREATE-time
+/// half of DIRECTONLY enforcement (`firstDirectOnlyCall` over each). An
+/// INSERT...SELECT body's SELECT isn't traversed — the fire-time
+/// `shadowDirectOnly` backstop still catches those, the same backstop that
+/// covers functions registered only after the trigger was created.
+let private triggerBodyExprs (stmt: Statement) : Expr list =
+    match stmt with
+    | Insert(_, _, rows, onDup, _) -> List.concat rows @ (onDup |> List.map snd)
+    | InsertSelect(_, _, _, onDup, _) -> onDup |> List.map snd
+    | Update u -> (u.Assignments |> List.map (fun a -> a.Value)) @ Option.toList u.Where
+    | Delete d -> Option.toList d.Where
+    | _ -> []
+
+let rec execute (store: Store) (registry: Registry) (dbName: string) (ids: int64 * int64) (foundRows: bool) (stmt: Statement) : (int64 * int64) * QueryResult =
     // Fresh derived-table memo per statement (see `fromSubqueryMemo`).
     fromSubqueryMemo.Value <- Dictionary<FromItem, Result<ColumnDef list * Value[] list, QueryResult>>(HashIdentity.Reference)
+
+    /// Fires `(db, table)`'s AFTER INSERT triggers once per row in
+    /// `insertedRows` — called by the insert branches *after* storage
+    /// released its locks (and never from onCommit: lock re-entry). Body
+    /// effects recurse into `execute` against the same store, so inside a
+    /// transaction they land in the snapshot and roll back with it; their
+    /// row events ride the WAL like any other write, ordered after the
+    /// originating statement's. Returns `Some err` when a body failed.
+    /// ponytail: on a body error MySQL rolls the whole originating
+    /// statement back; fsdb outside a transaction keeps the already-landed
+    /// originating rows — wrap in a transaction for statement atomicity.
+    let fireAfterInsertTriggers (db: string) (table: string) (insertedRows: Value[] list) : QueryResult option =
+        if insertedRows.IsEmpty then
+            None
+        else
+            match afterInsertTriggers store db table with
+            | [] -> None
+            | triggers ->
+                match scan store db table with
+                | Error _ -> None
+                | Ok(columns, _) ->
+                    let columnIndex = columnIndexOf columns
+                    let chain = triggerChain.Value
+                    let self = db, normalizeTableName table
+
+                    // Re-parse (body text is the single source of truth, see
+                    // `Ast.CreateTrigger`) and run the 1442 checks up front,
+                    // before any row's body executes: a body targeting a
+                    // table the invoking chain is already writing, or a
+                    // chain deeper than the cap, fires nothing at all.
+                    // ponytail: fixed depth cap 8 — raise it if a legitimate
+                    // trigger chain that deep ever exists.
+                    let checkBody ((name, body): string * string) =
+                        match Parser.parse body with
+                        | Result.Error msg -> Result.Error(Err(1064, sprintf "Trigger '%s' body has a syntax error: %s" name msg))
+                        | Result.Ok bodyStmt ->
+                            match writtenTableOf dbName bodyStmt with
+                            | Some target when List.contains target (self :: chain) -> Result.Error(err1442 (snd target))
+                            | Some target when List.length chain >= 8 -> Result.Error(err1442 (snd target))
+                            | _ -> Result.Ok bodyStmt
+
+                    match triggers |> traverse checkBody with
+                    | Result.Error err -> Some err
+                    | Result.Ok bodies ->
+                        // Eval-time DIRECTONLY backstop, same as generated
+                        // columns — see `shadowDirectOnly`'s doc.
+                        let shadowed = shadowDirectOnly "trigger" registry
+                        triggerChain.Value <- self :: chain
+
+                        // An extension's own `SqlError` (including the
+                        // DirectOnly shadow's 3102) surfaces as a clean
+                        // error result here rather than an exception, so a
+                        // failing body doesn't abort a surrounding
+                        // transaction the way an escaped exception would.
+                        let runBody (stmt: Statement) : QueryResult =
+                            try
+                                execute store shadowed dbName (0L, 0L) foundRows stmt |> snd
+                            with SqlError(code, msg) ->
+                                Err(code, msg)
+
+                        try
+                            insertedRows
+                            |> List.tryPick (fun row ->
+                                bodies
+                                |> List.tryPick (fun body ->
+                                    match runBody (bindNewRow columnIndex row body) with
+                                    | Err(code, msg) -> Some(Err(code, msg))
+                                    | _ -> None))
+                        finally
+                            triggerChain.Value <- chain
+
+    /// Threads an insert branch's `InsertOutcome` through trigger firing:
+    /// the OK-packet ids always advance (the rows are in), the result is
+    /// the statement's `Affected` unless a trigger body failed.
+    let finishInsert (db: string) (table: string) (outcome: InsertOutcome) : (int64 * int64) * QueryResult =
+        nextIds ids (outcome.LastInsertId, outcome.GeneratedId),
+        (match fireAfterInsertTriggers db table outcome.InsertedRows with
+         | Some err -> err
+         | None -> Affected(uint64 outcome.Affected))
 
     /// The `ON DUPLICATE KEY UPDATE` evaluator shared by the `Insert` and
     /// `InsertSelect` branches — builds `upsertRows`' update callback.
@@ -5446,7 +5637,7 @@ let execute (store: Store) (registry: Registry) (dbName: string) (ids: int64 * i
             let computeGenerated = computeGeneratedRow store registry dbName table tableColumns
 
             match upsertRows store db table cols rowsValues computeGenerated applyUpdate foundRows |> withGeneratedRecomputed store registry dbName db table with
-            | Ok(newLastId, newGenerated, affected) -> nextIds ids (newLastId, newGenerated), Affected(uint64 affected)
+            | Ok outcome -> finishInsert db table outcome
             | Error e -> ids, storageErr e
 
     match stmt with
@@ -5554,6 +5745,85 @@ let execute (store: Store) (registry: Registry) (dbName: string) (ids: int64 * i
         | Ok() -> ids, Affected 0UL
         | Error e -> ids, storageErr e
 
+    | CreateTrigger(name, table, body) ->
+        let db, table = splitQualified dbName table
+
+        // Subject table must exist (MySQL's 1146), and the body — carried
+        // only as raw text, see `Ast.CreateTrigger` — must parse to one of
+        // the statement kinds a body may hold, with no DirectOnly extension
+        // call anywhere in its exprs (3102-style, same policy as generated
+        // columns: ocr()/llm_schema() run from a drain or batch UPDATE,
+        // never re-invoked by the engine).
+        match scan store db table with
+        | Error e -> ids, storageErr e
+        | Ok _ ->
+            match Parser.parse body with
+            | Result.Error msg -> ids, Err(1064, sprintf "Trigger body has a syntax error: %s" msg)
+            | Result.Ok bodyStmt ->
+
+            match bodyStmt with
+            | Insert _
+            | InsertSelect _
+            | Update _
+            | Delete _ ->
+                match triggerBodyExprs bodyStmt |> List.tryPick (firstDirectOnlyCall registry) with
+                | Some fn -> ids, Err(3102, sprintf "Expression of trigger contains a disallowed function: %s" fn)
+                | None ->
+                    match scan store "mysql" "triggers" with
+                    | Error e -> ids, storageErr e
+                    | Ok(_, existing) ->
+                        let text i (r: Value[]) = toText r.[i] |> Option.defaultValue ""
+                        let eqI (a: string) (b: string) = System.String.Equals(a, b, System.StringComparison.OrdinalIgnoreCase)
+
+                        // Duplicate name in this schema, or a second trigger
+                        // on the same table/timing/event, both refuse with
+                        // MySQL 8.4.11's exact 1359 text (write-probed).
+                        // ponytail: MySQL 8 allows multiple triggers per
+                        // table/timing/event (FOLLOWS/PRECEDES) — one per
+                        // slot here; add ACTION_ORDER when a workload
+                        // stacks them.
+                        let duplicate =
+                            existing
+                            |> Seq.exists (fun r ->
+                                eqI (text 1 r) db
+                                && (eqI (text 0 r) name || eqI (text 2 r) (normalizeTableName table)))
+
+                        if duplicate then
+                            ids, Err(1359, "Trigger already exists")
+                        else
+                            match
+                                insertRows
+                                    store
+                                    "mysql"
+                                    "triggers"
+                                    (Some
+                                        [ "trigger_name"; "trigger_schema"; "event_table"; "action_timing"
+                                          "event_manipulation"; "action_statement"; "created" ])
+                                    [ [ VString name
+                                        VString db
+                                        VString(normalizeTableName table)
+                                        VString "AFTER"
+                                        VString "INSERT"
+                                        VString body
+                                        VDateTime System.DateTime.Now ] ]
+                            with
+                            | Ok _ -> ids, Affected 0UL
+                            | Error e -> ids, storageErr e
+            | _ -> ids, Err(1064, "Trigger body must be a single INSERT, UPDATE, or DELETE statement")
+
+    | DropTrigger(name, ifExists) ->
+        let matchesRow (r: Value[]) =
+            Ok(
+                System.String.Equals(toText r.[0] |> Option.defaultValue "", name, System.StringComparison.OrdinalIgnoreCase)
+                && System.String.Equals(toText r.[1] |> Option.defaultValue "", dbName, System.StringComparison.OrdinalIgnoreCase)
+            )
+
+        match deleteRows store "mysql" "triggers" matchesRow with
+        // MySQL 8.4.11's exact 1360 text (write-probed).
+        | Ok 0 when not ifExists -> ids, Err(1360, "Trigger does not exist")
+        | Ok _ -> ids, Affected 0UL
+        | Error e -> ids, storageErr e
+
     | CreateUser(users, ifNotExists) ->
         let createOne (name, host, password) =
             match Auth.createUser store name host password with
@@ -5608,7 +5878,7 @@ let execute (store: Store) (registry: Registry) (dbName: string) (ids: int64 * i
                 let insert = if ignoreDuplicates then insertRowsIgnore else insertRows
 
                 match insert store db table cols rowsValues |> withGeneratedRecomputed store registry dbName db table with
-                | Ok(newLastId, newGenerated, affected) -> nextIds ids (newLastId, newGenerated), Affected(uint64 affected)
+                | Ok outcome -> finishInsert db table outcome
                 | Error e -> ids, storageErr e
             else
                 upsertEvaluated db table cols rowsValues onDuplicateUpdate
@@ -5635,7 +5905,7 @@ let execute (store: Store) (registry: Registry) (dbName: string) (ids: int64 * i
                 let insert = if ignoreDuplicates then insertRowsIgnore else insertRows
 
                 match insert store db table cols rowsValues |> withGeneratedRecomputed store registry dbName db table with
-                | Ok(newLastId, newGenerated, affected) -> nextIds ids (newLastId, newGenerated), Affected(uint64 affected)
+                | Ok outcome -> finishInsert db table outcome
                 | Error e -> ids, storageErr e
             else
                 upsertEvaluated db table cols rowsValues onDuplicateUpdate

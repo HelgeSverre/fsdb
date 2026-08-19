@@ -1141,7 +1141,7 @@ let tests =
                   match handle session "SHOW TABLES" |> snd with
                   | ResultSet([ "Tables_in_mysql" ], rows) ->
                       let names = rows |> List.map (List.head >> Option.get)
-                      Expect.equal names [ "columns_priv"; "db"; "global_grants"; "tables_priv"; "user" ] "the 5 system tables"
+                      Expect.equal names [ "columns_priv"; "db"; "global_grants"; "tables_priv"; "triggers"; "user" ] "the 6 system tables"
                   | other -> failtestf "expected the mysql table list, got %A" other
               | _, other -> failtestf "expected USE mysql to succeed, got %A" other
 
