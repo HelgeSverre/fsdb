@@ -803,7 +803,7 @@ let tests =
                 testCase "column-level UNIQUE synthesizes a unique index named after the column"
                 <| fun _ ->
                     match parseOk "CREATE TABLE t (email VARCHAR(255) UNIQUE)" with
-                    | CreateTable(_, [ { Unique = true } ], [ { Name = "email"; Columns = [ "email" ]; Unique = true } ], [], false, _, _, _) -> ()
+                    | CreateTable(_, [ { Unique = true } ], [ { Name = "email"; Columns = [ "email" ]; Unique = true; Kind = BTree } ], [], false, _, _, _) -> ()
                     | other -> failtestf "expected a synthesized unique index, got %A" other
 
                 testCase "trailing UNIQUE KEY / KEY / INDEX with an explicit name"
@@ -812,8 +812,8 @@ let tests =
                     | CreateTable(
                         _,
                         _,
-                        [ { Name = "uq_a"; Columns = [ "a" ]; Unique = true }
-                          { Name = "idx_b"; Columns = [ "b" ]; Unique = false } ],
+                        [ { Name = "uq_a"; Columns = [ "a" ]; Unique = true; Kind = BTree }
+                          { Name = "idx_b"; Columns = [ "b" ]; Unique = false; Kind = BTree } ],
                         [],
                         false, _, _, _) -> ()
                     | other -> failtestf "expected two indexes, got %A" other
@@ -1325,8 +1325,8 @@ let tests =
                         (parseOk "ALTER TABLE t ADD UNIQUE INDEX uq (a), ADD KEY idx (b), DROP INDEX uq, DROP KEY idx")
                         (AlterTable(
                             "t",
-                            [ AddIndex { Name = "uq"; Columns = [ "a" ]; Unique = true }
-                              AddIndex { Name = "idx"; Columns = [ "b" ]; Unique = false }
+                            [ AddIndex { Name = "uq"; Columns = [ "a" ]; Unique = true; Kind = BTree }
+                              AddIndex { Name = "idx"; Columns = [ "b" ]; Unique = false; Kind = BTree }
                               DropIndexAction "uq"
                               DropIndexAction "idx" ]
                         ))
@@ -1362,12 +1362,12 @@ let tests =
                 <| fun _ ->
                     Expect.equal
                         (parseOk "CREATE INDEX idx_a ON t (a)")
-                        (CreateIndex("idx_a", "t", [ "a" ], false))
+                        (CreateIndex("idx_a", "t", [ "a" ], false, BTree))
                         "create index"
 
                     Expect.equal
                         (parseOk "CREATE UNIQUE INDEX uq_a ON t (a)")
-                        (CreateIndex("uq_a", "t", [ "a" ], true))
+                        (CreateIndex("uq_a", "t", [ "a" ], true, BTree))
                         "create unique index"
 
                 testCase "DROP INDEX [IF EXISTS] name ON table"
@@ -1837,4 +1837,30 @@ let tests =
 
               match Fsdb.Parser.parse "ALTER TABLE t MODIFY id INT NOT NULL AUTO_INCREMENT, AUTO_INCREMENT=5" with
               | Ok(AlterTable(_, [ ModifyColumn _; SetAutoIncrement 5L ])) -> ()
-              | other -> failtestf "expected the ALTER AUTO_INCREMENT action, got %A" other ]
+              | other -> failtestf "expected the ALTER AUTO_INCREMENT action, got %A" other
+          testCase "MATCH ... AGAINST parses in every modifier spelling; FULLTEXT DDL carries its kind"
+          <| fun _ ->
+              let modeOf sql =
+                  match Fsdb.Parser.parse sql with
+                  | Ok(Select { Where = Some(MatchAgainst(cols, Lit(VString "q"), mode)) }) -> cols, mode
+                  | other -> failtestf "unexpected parse of %s: %A" sql other
+
+              Expect.equal (modeOf "SELECT 1 FROM t WHERE MATCH (a,b) AGAINST ('q')") ([ "a"; "b" ], NaturalLanguage) "default mode"
+              Expect.equal (modeOf "SELECT 1 FROM t WHERE MATCH (a) AGAINST ('q' IN NATURAL LANGUAGE MODE)") ([ "a" ], NaturalLanguage) "explicit NL"
+              Expect.equal (modeOf "SELECT 1 FROM t WHERE MATCH (a) AGAINST ('q' IN BOOLEAN MODE)") ([ "a" ], BooleanMode) "boolean"
+              Expect.equal (modeOf "SELECT 1 FROM t WHERE MATCH (a) AGAINST ('q' WITH QUERY EXPANSION)") ([ "a" ], QueryExpansion) "expansion"
+
+              Expect.equal
+                  (modeOf "SELECT 1 FROM t WHERE MATCH (a) AGAINST ('q' IN NATURAL LANGUAGE MODE WITH QUERY EXPANSION)")
+                  ([ "a" ], QueryExpansion)
+                  "NL with expansion is expansion"
+
+              match Fsdb.Parser.parse "CREATE TABLE t (a TEXT, FULLTEXT KEY ft (a), KEY plain (a))" with
+              | Ok(CreateTable(_, _, [ ft; plain ], _, _, _, _, _)) ->
+                  Expect.equal ft.Kind FullTextIndex "FULLTEXT KEY kind"
+                  Expect.equal plain.Kind BTree "plain KEY kind"
+              | other -> failtestf "unexpected parse: %A" other
+
+              match Fsdb.Parser.parse "CREATE FULLTEXT INDEX ft ON t (a)" with
+              | Ok(CreateIndex("ft", "t", [ "a" ], false, FullTextIndex)) -> ()
+              | other -> failtestf "unexpected parse: %A" other ]

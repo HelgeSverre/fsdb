@@ -326,6 +326,7 @@ let rec private exprToSql (e: Expr) : string =
 
     match e with
     | Lit v -> litText v
+    | MatchAgainst(cols, q, _) -> sprintf "match (%s) against (%s)" (cols |> List.map (sprintf "`%s`") |> String.concat ",") (exprToSql q)
     | Placeholder _ -> "?"
     | Col n -> sprintf "`%s`" n
     | QualifiedCol(t, c) -> sprintf "`%s`.`%s`" t c
@@ -466,7 +467,7 @@ let private statisticsRows (catalog: Catalog) : Value[] list =
         let pkCols = t.Columns |> List.filter (fun c -> c.PrimaryKey) |> List.map (fun c -> c.Name)
 
         let primaryIndex =
-            if pkCols.IsEmpty then [] else [ { Name = "PRIMARY"; Columns = pkCols; Unique = true } ]
+            if pkCols.IsEmpty then [] else [ { Name = "PRIMARY"; Columns = pkCols; Unique = true; Kind = BTree } ]
 
         primaryIndex @ t.Indexes
         |> List.collect (fun ix ->
@@ -478,6 +479,8 @@ let private statisticsRows (catalog: Catalog) : Value[] list =
                     |> Option.map (fun c -> if c.PrimaryKey || not c.Nullable then "" else "YES")
                     |> Option.defaultValue ""
 
+                // A FULLTEXT entry reports no sort collation and type
+                // FULLTEXT, like real MySQL's STATISTICS rows.
                 [| vs "def"
                    vs dbName
                    vs t.OriginalName
@@ -486,12 +489,12 @@ let private statisticsRows (catalog: Catalog) : Value[] list =
                    vs ix.Name
                    vi (i + 1)
                    vs colName
-                   vs "A"
+                   (if ix.Kind = FullTextIndex then VNull else vs "A")
                    vi 0
                    VNull
                    VNull
                    vs nullable
-                   vs "BTREE"
+                   vs (if ix.Kind = FullTextIndex then "FULLTEXT" else "BTREE")
                    vs ""
                    vs ""
                    vs "YES"
@@ -1386,7 +1389,9 @@ let showColumns (catalog: Catalog) (full: bool) (dbName: string) (tableName: str
             [ "Field"; "Type"; "Null"; "Key"; "Default"; "Extra" ], rows)
 
 let private backtick (s: string) = "`" + s + "`"
-let private backtickCols = List.map backtick >> String.concat ", "
+// Joined with a bare comma — byte-for-byte what MySQL's own SHOW CREATE
+// TABLE emits for multi-column key lists.
+let private backtickCols = List.map backtick >> String.concat ","
 
 /// Reconstructs plausible `CREATE TABLE` DDL from a table's stored metadata
 /// for `SHOW CREATE TABLE` — not the original DDL text (nothing keeps that
@@ -1451,7 +1456,13 @@ let private showCreateTableDDL (t: Table) : string =
 
     let indexLines =
         t.Indexes
-        |> List.map (fun ix -> sprintf "%sKEY %s (%s)" (if ix.Unique then "UNIQUE " else "") (backtick ix.Name) (backtickCols ix.Columns))
+        |> List.map (fun ix ->
+            let prefix =
+                if ix.Unique then "UNIQUE "
+                elif ix.Kind = FullTextIndex then "FULLTEXT "
+                else ""
+
+            sprintf "%sKEY %s (%s)" prefix (backtick ix.Name) (backtickCols ix.Columns))
 
     // The table's own declared defaults (server defaults when unset) —
     // MySQL renders these in the table options even when a column carries
@@ -1495,7 +1506,7 @@ let showIndex (catalog: Catalog) (dbName: string) (tableName: string) : ShowResu
     findTable catalog dbName tableName
     |> Result.map (fun t ->
         let pkCols = t.Columns |> List.filter (fun c -> c.PrimaryKey) |> List.map (fun c -> c.Name)
-        let primaryIndex = if pkCols.IsEmpty then [] else [ { Name = "PRIMARY"; Columns = pkCols; Unique = true } ]
+        let primaryIndex = if pkCols.IsEmpty then [] else [ { Name = "PRIMARY"; Columns = pkCols; Unique = true; Kind = BTree } ]
 
         let rows =
             primaryIndex @ t.Indexes
@@ -1507,12 +1518,12 @@ let showIndex (catalog: Catalog) (dbName: string) (tableName: string) : ShowResu
                       Some ix.Name
                       Some(string (i + 1))
                       Some colName
-                      Some "A"
+                      (if ix.Kind = FullTextIndex then None else Some "A")
                       Some "0"
                       None
                       None
                       Some "YES"
-                      Some "BTREE"
+                      Some(if ix.Kind = FullTextIndex then "FULLTEXT" else "BTREE")
                       Some ""
                       Some "" ]))
 

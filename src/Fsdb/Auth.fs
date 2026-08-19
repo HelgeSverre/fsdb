@@ -476,7 +476,7 @@ let rec requiredPrivileges (defaultDb: string) (stmt: Statement) : (string * Pri
     | Truncate table -> onTables "DROP" [ split table ]
     | AlterTable(table, _) -> onTables "ALTER" [ split table ]
     | RenameTable pairs -> onTables "ALTER" (pairs |> List.map (fst >> split))
-    | CreateIndex(_, table, _, _) -> onTables "INDEX" [ split table ]
+    | CreateIndex(_, table, _, _, _) -> onTables "INDEX" [ split table ]
     | DropIndexStmt(_, table, _) -> onTables "INDEX" [ split table ]
     | CreateDatabase(name, _) -> [ "CREATE", OnDb name ]
     | DropDatabase(name, _) -> [ "DROP", OnDb name ]

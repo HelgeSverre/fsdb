@@ -457,7 +457,7 @@ let tests =
                         defaultDatabase
                         "emails"
                         [ col "id" (TInt false) false; col "email" (TVarchar 255) false ]
-                        [ { Name = "uq_email"; Columns = [ "email" ]; Unique = true } ]
+                        [ { Name = "uq_email"; Columns = [ "email" ]; Unique = true; Kind = BTree } ]
                         []
                         None
                         None
@@ -645,7 +645,7 @@ let tests =
                         defaultDatabase
                         "emails"
                         [ col "id" (TInt false) false; col "email" (TVarchar 255) false ]
-                        [ { Name = "uq_email"; Columns = [ "email" ]; Unique = true } ]
+                        [ { Name = "uq_email"; Columns = [ "email" ]; Unique = true; Kind = BTree } ]
                         []
                         None
                         None
@@ -1231,7 +1231,7 @@ let tests =
                 testCase "AddIndex / DropIndexAction manage the table's index metadata"
                 <| fun _ ->
                     let store = withUsersTable ()
-                    let ix = { Name = "idx_name"; Columns = [ "name" ]; Unique = false }
+                    let ix = { Name = "idx_name"; Columns = [ "name" ]; Unique = false; Kind = BTree }
 
                     match alterTable store defaultDatabase "users" [ AddIndex ix ] with
                     | Ok() ->
@@ -1256,7 +1256,7 @@ let tests =
                         [ [ VNull; VString "dup"; VInt 1L ]; [ VNull; VString "dup"; VInt 2L ]; [ VNull; VString "unique"; VInt 3L ] ]
                     |> ignore
 
-                    let ix = { Name = "uq_name"; Columns = [ "name" ]; Unique = true }
+                    let ix = { Name = "uq_name"; Columns = [ "name" ]; Unique = true; Kind = BTree }
 
                     match alterTable store defaultDatabase "users" [ AddIndex ix ] with
                     | Error(DuplicateKey("uq_name", _)) -> ()
@@ -1369,7 +1369,7 @@ let tests =
                         defaultDatabase
                         "emails"
                         [ col "id" (TInt false) false; col "email" (TVarchar 255) false ]
-                        [ { Name = "uq_email"; Columns = [ "email" ]; Unique = true } ]
+                        [ { Name = "uq_email"; Columns = [ "email" ]; Unique = true; Kind = BTree } ]
                         []
                         None
                         None
