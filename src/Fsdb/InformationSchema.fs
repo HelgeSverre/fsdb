@@ -743,6 +743,21 @@ type ProcessEntry =
 
 let private processes = System.Collections.Concurrent.ConcurrentDictionary<int64, ProcessEntry>()
 
+/// The store + user on whose behalf a SELECT into `information_schema` is
+/// running, set by `QueryHandler` around statement execution. `None` (the
+/// embedded/internal default) means unrestricted. PROCESSLIST and the
+/// privilege views read it to scope rows to the caller unless the caller
+/// holds the privilege that reveals everyone (`PROCESS`, or a mysql-schema
+/// read for the grant views) — the same information hiding real MySQL does.
+let currentViewer = System.Threading.AsyncLocal<(Store * string) option>()
+
+/// The user a viewer is limited to, or `None` when it may see all rows
+/// (embedded/internal, or it holds `priv`).
+let private restrictedTo (priv: string) : string option =
+    match currentViewer.Value with
+    | Some(store, user) when not (Fsdb.Auth.hasGlobalPriv store user priv) -> Some user
+    | _ -> None
+
 /// Stamped by `Server.listen` — `SHOW STATUS`'s `Uptime` baseline.
 let mutable serverStartedAt = DateTime.Now
 
@@ -787,7 +802,13 @@ let private processlistColumns =
 /// `(ID, USER, HOST, DB, COMMAND, TIME, STATE, INFO)` per live connection —
 /// also `SHOW [FULL] PROCESSLIST`'s row source, so the two can't drift.
 let private processlistRows () : Value[] list =
+    let visible =
+        match restrictedTo "PROCESS" with
+        | Some user -> fun (p: ProcessEntry) -> p.User = user
+        | None -> fun _ -> true
+
     listProcesses ()
+    |> List.filter visible
     |> List.map (fun ptmp ->
         [| VInt ptmp.Id
            vs ptmp.User
@@ -1005,7 +1026,10 @@ let private userPrivilegesRows (catalog: Catalog) : Value[] list =
     | Some t ->
         match colIdx t "User", colIdx t "Host", colIdx t "Grant_priv" with
         | Some userIdx, Some hostIdx, Some grantIdx ->
+            let ownOnly = restrictedTo "SELECT"
+
             t.Rows
+            |> List.filter (fun row -> match ownOnly with Some u -> rowText row userIdx = u | None -> true)
             |> List.collect (fun row ->
                 let grantee = sprintf "'%s'@'%s'" (rowText row userIdx) (rowText row hostIdx)
                 let grantable = if rowText row grantIdx = "Y" then "YES" else "NO"
@@ -1679,8 +1703,14 @@ let showCharacterSet (likeOpt: string option) : ShowResult =
 /// `SHOW [FULL] PROCESSLIST` — the registry's rows under `SHOW`'s labels;
 /// the non-FULL form truncates `Info` to 100 chars like real MySQL.
 let showProcesslist (full: bool) : ShowResult =
+    let visible =
+        match restrictedTo "PROCESS" with
+        | Some user -> fun (p: ProcessEntry) -> p.User = user
+        | None -> fun _ -> true
+
     let rows =
         listProcesses ()
+        |> List.filter visible
         |> List.map (fun p ->
             let info =
                 p.Info

@@ -1549,4 +1549,26 @@ let tests =
               match handle session "SELECT CTXPROBE(), DATABASE(), CURRENT_USER()" |> snd with
               | ResultSet(_, [ [ Some ctx; Some db; Some user ] ]) ->
                   Expect.equal ctx (db + "|" + (user.Split '@').[0]) "context Database/User match the SQL-visible session"
-              | other -> failtestf "expected one row, got %A" other ]
+              | other -> failtestf "expected one row, got %A" other
+
+          testCase "redactSql hides credential statements and string/number literals"
+          <| fun _ ->
+              Expect.equal
+                  (Fsdb.Log.redactSql "CREATE USER 'a'@'%' IDENTIFIED BY 'hunter2'")
+                  "[REDACTED CREDENTIAL STATEMENT]"
+                  "credential statement collapses whole"
+
+              Expect.equal
+                  (Fsdb.Log.redactSql "SET PASSWORD FOR 'a' = 'secret'")
+                  "[REDACTED CREDENTIAL STATEMENT]"
+                  "SET PASSWORD collapses"
+
+              Expect.equal
+                  (Fsdb.Log.redactSql "SELECT * FROM t WHERE token = 'secret' AND n = 42")
+                  "SELECT * FROM t WHERE token = ? AND n = ?"
+                  "string and number literals become ?"
+
+              Expect.equal
+                  (Fsdb.Log.redactSql "SELECT `id_1` FROM `t2`")
+                  "SELECT `id_1` FROM `t2`"
+                  "backticked identifiers and their digits are kept" ]

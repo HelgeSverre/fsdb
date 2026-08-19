@@ -1069,6 +1069,10 @@ let private registryFor (session: Session) : Functions.Registry =
 /// prepared path reuses this one execution body instead of splicing literals
 /// back into SQL text and re-parsing.
 let private executeParsed (session: Session) (stmt: Statement) : Session * QueryResult =
+    // A SELECT into information_schema.processlist / the privilege views
+    // scopes its rows to this session's user (unless it holds the revealing
+    // privilege) — see `InformationSchema.currentViewer`.
+    InformationSchema.currentViewer.Value <- Some(session.Store, session.User)
     let dbName = session.Database |> Option.defaultValue defaultDatabase
 
     let execute session =
@@ -1379,12 +1383,22 @@ let private runProbe (session: Session) (sql: string) (probe: Probe) : Session *
     | ShowEngines -> session, InformationSchema.showEngines () |> showResult
     | ShowCharset -> session, InformationSchema.showCharacterSet (likeSuffix sql) |> showResult
     | ShowPrivileges -> session, InformationSchema.showPrivileges () |> showResult
-    | ShowProcesslist full -> session, InformationSchema.showProcesslist full |> showResult
+    | ShowProcesslist full ->
+        InformationSchema.currentViewer.Value <- Some(session.Store, session.User)
+        let result = InformationSchema.showProcesslist full |> showResult
+        InformationSchema.currentViewer.Value <- None
+        session, result
     | ShowTriggers db -> session, InformationSchema.showTriggers (Session.currentStore session).Catalog db |> showResult
     | ShowEvents db -> session, InformationSchema.showEvents (Session.currentStore session).Catalog db |> showResult
     | ShowRoutineStatus -> session, InformationSchema.showRoutineStatus () |> showResult
     | Kill(queryOnly, id) ->
+        let privileged = Auth.hasGlobalPriv session.Store session.User "PROCESS"
+
         match InformationSchema.tryFindProcess id with
+        // A caller without PROCESS can't see another user's connection, so
+        // it can neither name nor kill it — MySQL reports the id as unknown.
+        | Some target when target.User <> session.User && not privileged ->
+            session, Err(1094, sprintf "Unknown thread id: %d" id)
         | None -> session, Err(1094, sprintf "Unknown thread id: %d" id)
         | Some target ->
             if queryOnly then
@@ -1437,9 +1451,14 @@ let private runProbe (session: Session) (sql: string) (probe: Probe) : Session *
             | Some u when u.Trim().ToUpperInvariant().StartsWith "CURRENT_USER" -> session.User
             | Some u -> userNameOf u
 
-        match Auth.renderGrants (Session.currentStore session) name with
-        | Ok(header, lines) -> session, ResultSet([ header ], lines |> List.map (fun l -> [ Some l ]))
-        | Error(code, msg) -> session, Err(code, msg)
+        if name <> session.User && not (Auth.hasGlobalPriv session.Store session.User "SELECT") then
+            // Seeing another account's grants needs a mysql-schema read
+            // privilege in MySQL; deny like a missing global SELECT.
+            session, Err(1044, sprintf "Access denied for user '%s'@'%%' to database 'mysql'" session.User)
+        else
+            match Auth.renderGrants (Session.currentStore session) name with
+            | Ok(header, lines) -> session, ResultSet([ header ], lines |> List.map (fun l -> [ Some l ]))
+            | Error(code, msg) -> session, Err(code, msg)
     | FlushPrivileges -> session, Affected 0UL
 let rec mapPlaceholders (replace: int -> Expr) (stmt: Statement) : Statement =
     let rec mapExpr (e: Expr) : Expr =
@@ -1655,12 +1674,12 @@ let handle (session: Session) (rawSql: string) : Session * QueryResult =
     try
         match dispatch session rawSql with
         | _, Err(code, msg) as result ->
-            Log.diagnostic "fsdb: ERR %d %s -- query: %s" code msg rawSql
+            Log.diagnostic "fsdb: ERR %d %s -- query: %s" code msg (Log.redactSql rawSql)
             result
         | result -> result
     with
     | Storage.LockWaitTimeout dbName ->
-        Log.diagnostic "fsdb: ERR 1205 lock wait timeout on database %s -- query: %s" dbName rawSql
+        Log.diagnostic "fsdb: ERR 1205 lock wait timeout on database %s -- query: %s" dbName (Log.redactSql rawSql)
         session, Err(1205, "Lock wait timeout exceeded; try restarting transaction")
     // A killed client mid-query (`Storage.queryCancellation`, armed by
     // `Server.withCancellationWatch`) — not an internal error to report
@@ -1680,11 +1699,11 @@ let handle (session: Session) (rawSql: string) : Session * QueryResult =
     // effectful function mid-transaction must not leave a half-applied
     // snapshot reachable by a later COMMIT.
     | Functions.SqlError(code, msg) ->
-        Log.diagnostic "fsdb: ERR %d %s -- query: %s" code msg rawSql
+        Log.diagnostic "fsdb: ERR %d %s -- query: %s" code msg (Log.redactSql rawSql)
         abortTransactionGate session
         { session with Tx = None }, Err(code, msg)
     | ex ->
-        Log.diagnostic "fsdb: EXN %s -- query: %s" ex.Message rawSql
+        Log.diagnostic "fsdb: EXN %s -- query: %s" ex.Message (Log.redactSql rawSql)
         abortTransactionGate session
         { session with Tx = None }, Err(1105, sprintf "Internal error: %s" ex.Message) // ER_UNKNOWN_ERROR
 

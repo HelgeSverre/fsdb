@@ -594,7 +594,7 @@ let private handleConnection
                                 processEntry.Command <- "Query"
                                 processEntry.State <- "executing"
                                 processEntry.StateSince <- DateTime.Now
-                                processEntry.Info <- Some sql
+                                processEntry.Info <- Some(Log.redactSql sql)
 
                                 let dispatched = runCancellable (fun () -> QueryHandler.handle session sql)
                                 processEntry.Command <- "Sleep"

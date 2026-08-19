@@ -312,6 +312,61 @@ let tests =
                                   "1142 over the wire"
                           | None -> raise e
 
+                      // The subquery-bypass hole: carol reads `things` through
+                      // a scalar subquery — must still be 1142, not allowed.
+                      use sub = conn5.CreateCommand()
+                      sub.CommandText <- "SELECT (SELECT id FROM fsdb.things)"
+                      let! subResult = sub.ExecuteScalarAsync() |> Async.AwaitTask |> Async.Catch
+
+                      match subResult with
+                      | Choice1Of2 _ -> failtest "expected the subquery read to be denied"
+                      | Choice2Of2 e ->
+                          match mysqlError e with
+                          | Some m -> Expect.equal m.ErrorCode MySqlConnector.MySqlErrorCode.TableAccessDenied "subquery read is 1142"
+                          | None -> raise e
+
+                      // Process visibility: with a root connection live, carol
+                      // sees only her own row and can't kill or inspect root.
+                      use root = new MySqlConnector.MySqlConnection(connStr "root" "")
+                      do! root.OpenAsync() |> Async.AwaitTask
+                      use rootId = root.CreateCommand()
+                      rootId.CommandText <- "SELECT CONNECTION_ID()"
+                      let! rootIdValue = rootId.ExecuteScalarAsync() |> Async.AwaitTask
+
+                      use plist = conn5.CreateCommand()
+                      plist.CommandText <- "SELECT DISTINCT USER FROM information_schema.processlist"
+                      use! preader = plist.ExecuteReaderAsync() |> Async.AwaitTask
+                      let mutable users = []
+
+                      while preader.Read() do
+                          users <- preader.GetString 0 :: users
+
+                      do! preader.CloseAsync() |> Async.AwaitTask
+                      Expect.equal users [ "carol" ] "carol sees only her own connection"
+
+                      use kill = conn5.CreateCommand()
+                      kill.CommandText <- sprintf "KILL %s" (string rootIdValue)
+                      let! killResult = kill.ExecuteNonQueryAsync() |> Async.AwaitTask |> Async.Catch
+
+                      match killResult with
+                      | Choice1Of2 _ -> failtest "expected carol's KILL of root to be denied"
+                      | Choice2Of2 e ->
+                          match mysqlError e with
+                          | Some _ -> ()
+                          | None -> raise e
+
+                      use grants = conn5.CreateCommand()
+                      grants.CommandText <- "SHOW GRANTS FOR 'root'"
+                      let! grantsResult = grants.ExecuteScalarAsync() |> Async.AwaitTask |> Async.Catch
+
+                      match grantsResult with
+                      | Choice1Of2 _ -> failtest "expected carol's SHOW GRANTS FOR root to be denied"
+                      | Choice2Of2 e ->
+                          match mysqlError e with
+                          | Some _ -> ()
+                          | None -> raise e
+
+                      do! root.CloseAsync() |> Async.AwaitTask
                       do! conn5.CloseAsync() |> Async.AwaitTask
                   finally
                       listener.Stop()

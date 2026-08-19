@@ -750,6 +750,15 @@ let check (store: Store) (user: string) (required: (string * PrivTarget) list) :
 
 /// A privilege list rendered MySQL-style: every static privilege → `ALL
 /// PRIVILEGES`, none → `USAGE`, otherwise the names in column order.
+
+/// Whether `user` holds a global privilege — the gate for PROCESS-scoped
+/// visibility (PROCESSLIST, KILL) and mysql-schema reads. Reuses `check`'s
+/// hierarchy, so root's all-Y row and any GLOBAL grant satisfy it.
+let hasGlobalPriv (store: Store) (user: string) (privSql: string) : bool =
+    match check store user [ privSql, Global ] with
+    | Result.Ok() -> true
+    | Result.Error _ -> false
+
 let private renderPrivList (granted: PrivDef list) (all: PrivDef list) : string =
     if List.length granted = List.length all then "ALL PRIVILEGES"
     elif granted.IsEmpty then "USAGE"
