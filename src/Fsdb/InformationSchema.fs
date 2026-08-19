@@ -751,6 +751,18 @@ let private processes = System.Collections.Concurrent.ConcurrentDictionary<int64
 /// read for the grant views) — the same information hiding real MySQL does.
 let currentViewer = System.Threading.AsyncLocal<(Store * string) option>()
 
+/// Runs `f` with the viewer scoped to `store`/`user`, restoring the previous
+/// value afterwards — for probe-path SHOW handlers that build their result
+/// outside the executor (which sets the viewer itself).
+let withViewer (store: Store) (user: string) (f: unit -> 'a) : 'a =
+    let previous = currentViewer.Value
+    currentViewer.Value <- Some(store, user)
+
+    try
+        f ()
+    finally
+        currentViewer.Value <- previous
+
 /// The user a viewer is limited to, or `None` when it may see all rows
 /// (embedded/internal, or it holds `priv`).
 let private restrictedTo (priv: string) : string option =
@@ -801,14 +813,18 @@ let private processlistColumns =
 
 /// `(ID, USER, HOST, DB, COMMAND, TIME, STATE, INFO)` per live connection —
 /// also `SHOW [FULL] PROCESSLIST`'s row source, so the two can't drift.
-let private processlistRows () : Value[] list =
-    let visible =
-        match restrictedTo "PROCESS" with
-        | Some user -> fun (p: ProcessEntry) -> p.User = user
-        | None -> fun _ -> true
+/// Live connections the current viewer may see — its own only, unless it
+/// holds `PROCESS`. Shared by the `information_schema.processlist` view and
+/// `SHOW PROCESSLIST`.
+let private visibleProcesses () : ProcessEntry list =
+    let all = listProcesses ()
 
-    listProcesses ()
-    |> List.filter visible
+    match restrictedTo "PROCESS" with
+    | Some user -> all |> List.filter (fun p -> p.User = user)
+    | None -> all
+
+let private processlistRows () : Value[] list =
+    visibleProcesses ()
     |> List.map (fun ptmp ->
         [| VInt ptmp.Id
            vs ptmp.User
@@ -1703,14 +1719,8 @@ let showCharacterSet (likeOpt: string option) : ShowResult =
 /// `SHOW [FULL] PROCESSLIST` — the registry's rows under `SHOW`'s labels;
 /// the non-FULL form truncates `Info` to 100 chars like real MySQL.
 let showProcesslist (full: bool) : ShowResult =
-    let visible =
-        match restrictedTo "PROCESS" with
-        | Some user -> fun (p: ProcessEntry) -> p.User = user
-        | None -> fun _ -> true
-
     let rows =
-        listProcesses ()
-        |> List.filter visible
+        visibleProcesses ()
         |> List.map (fun p ->
             let info =
                 p.Info

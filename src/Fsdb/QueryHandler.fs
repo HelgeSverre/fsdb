@@ -1384,9 +1384,9 @@ let private runProbe (session: Session) (sql: string) (probe: Probe) : Session *
     | ShowCharset -> session, InformationSchema.showCharacterSet (likeSuffix sql) |> showResult
     | ShowPrivileges -> session, InformationSchema.showPrivileges () |> showResult
     | ShowProcesslist full ->
-        InformationSchema.currentViewer.Value <- Some(session.Store, session.User)
-        let result = InformationSchema.showProcesslist full |> showResult
-        InformationSchema.currentViewer.Value <- None
+        let result =
+            InformationSchema.withViewer session.Store session.User (fun () -> InformationSchema.showProcesslist full |> showResult)
+
         session, result
     | ShowTriggers db -> session, InformationSchema.showTriggers (Session.currentStore session).Catalog db |> showResult
     | ShowEvents db -> session, InformationSchema.showEvents (Session.currentStore session).Catalog db |> showResult
