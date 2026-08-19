@@ -268,6 +268,12 @@ let private scoresFromTfs (corpus: Corpus) (tfs: int[]) : (bool * float)[] =
 /// Per-doc (matched, contribution) for one boolean term.
 let rec private evalTerm (corpus: Corpus) (term: BoolTerm) : (bool * float)[] =
     match term with
+    | BWord(w, false) when not (isSearchable w) ->
+        // Stopwords and sub-minimum tokens are never in InnoDB's index, so
+        // a plain boolean term for one can't match anything — `+was`
+        // excludes every row (oracle-verified). Phrases and proximity below
+        // still see them: position data counts every token.
+        Array.create corpus.Docs.Length (false, 0.0)
     | BWord(w, false) ->
         let ts = termScores corpus w
         ts |> Array.map (fun s -> s > 0.0, s)

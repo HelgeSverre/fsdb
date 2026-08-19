@@ -1863,4 +1863,16 @@ let tests =
 
               match Fsdb.Parser.parse "CREATE FULLTEXT INDEX ft ON t (a)" with
               | Ok(CreateIndex("ft", "t", [ "a" ], false, FullTextIndex)) -> ()
+              | other -> failtestf "unexpected parse: %A" other
+          testCase "TEXT(n)/BLOB(n) map to the smallest family member that fits, like MySQL"
+          <| fun _ ->
+              // TEXT(n) counts characters (×4 bytes under utf8mb4), BLOB(n)
+              // bytes — boundaries read off a live 8.4: TEXT(63) is the last
+              // tinytext, TEXT(16384) the first mediumtext.
+              match Fsdb.Parser.parse "CREATE TABLE t (a TEXT(63), b TEXT(500), c TEXT(16384), d BLOB(100), e BLOB(90000))" with
+              | Ok(CreateTable(_, cols, _, _, _, _, _, _)) ->
+                  Expect.equal
+                      (cols |> List.map (fun c -> c.Type))
+                      [ TTinyText; TText; TMediumText; TTinyBlob; TMediumBlob ]
+                      "length-directed family selection"
               | other -> failtestf "unexpected parse: %A" other ]

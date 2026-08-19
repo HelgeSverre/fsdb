@@ -83,6 +83,16 @@ let tests =
               closeTo (s.[0] * 2.0) s.[5] "soft negation contributes nothing"
               Expect.all (List.ofArray s |> List.map (fun v -> v > 0.0)) id "no row excluded"
 
+          testCase "a required boolean stopword can never match — the index doesn't contain it"
+          <| fun _ ->
+              // Oracle: '+(love pleasure) +was' returns no rows even though
+              // both docs contain 'was' — stopwords are never indexed.
+              let s = booleanScoresOf corpus "+tutorial +the"
+              Expect.equal (s |> Array.filter (fun v -> v > 0.0)) [||] "the required stopword excludes everything"
+
+              let optional = booleanScoresOf corpus "tutorial the"
+              Expect.isTrue (optional.[0] > 0.0) "an optional stopword just contributes nothing"
+
           testCase "query expansion ranks the seed docs first and pulls in term-sharing docs"
           <| fun _ ->
               // Oracle: AGAINST ('database' WITH QUERY EXPANSION) returns all

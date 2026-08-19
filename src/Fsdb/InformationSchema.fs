@@ -1402,12 +1402,28 @@ let private showCreateTableDDL (t: Table) : string =
             | Some(e, k) -> sprintf "GENERATED ALWAYS AS (%s) %s" (exprToSql e) (match k with Virtual -> "VIRTUAL" | Stored -> "STORED")
             | None -> ""
 
+        // TEXT/BLOB/JSON columns can't carry a default, so MySQL's own
+        // SHOW CREATE TABLE omits the `DEFAULT NULL` it prints for other
+        // nullable columns.
+        let defaultless =
+            match c.Type with
+            | TTinyText
+            | TText
+            | TMediumText
+            | TLongText
+            | TTinyBlob
+            | TBlob
+            | TMediumBlob
+            | TLongBlob
+            | TJson -> true
+            | _ -> false
+
         let defaultPart =
             match defaultText c.Default with
             | _ when c.Generated.IsSome -> ""
             | Some d when c.Default = Some DCurrentTimestamp -> sprintf "DEFAULT %s" d
             | Some d -> sprintf "DEFAULT '%s'" d
-            | None -> if c.PrimaryKey || not c.Nullable then "" else "DEFAULT NULL"
+            | None -> if c.PrimaryKey || not c.Nullable || defaultless then "" else "DEFAULT NULL"
 
         let onUpdatePart =
             if c.OnUpdateCurrentTimestamp then

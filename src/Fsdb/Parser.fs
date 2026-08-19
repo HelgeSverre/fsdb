@@ -449,13 +449,27 @@ let private columnType: Parser<ColumnType, unit> =
           keyword "TINYTEXT" >>% TTinyText
           keyword "MEDIUMTEXT" >>% TMediumText
           keyword "LONGTEXT" >>% TLongText
-          keyword "TEXT" >>% TText
+          // `TEXT(n)`/`BLOB(n)` pick the smallest family member that holds
+          // n — measured in CHARACTERS for TEXT (×4 bytes under utf8mb4:
+          // TEXT(64) is already a plain TEXT) and bytes for BLOB
+          // (oracle-verified boundaries: 63/16383 vs 255/65535).
+          keyword "TEXT" >>. opt (attempt widthLen)
+          |>> (function
+              | Some n when n <= 63 -> TTinyText
+              | Some n when n > 16383 && n <= 4194303 -> TMediumText
+              | Some n when n > 4194303 -> TLongText
+              | _ -> TText)
           keyword "VARBINARY" >>. widthLen |>> TVarBinary
           keyword "BINARY" >>. optWidthLen |>> (fun n -> TBinary(defaultArg n 1))
           keyword "TINYBLOB" >>% TTinyBlob
           keyword "MEDIUMBLOB" >>% TMediumBlob
           keyword "LONGBLOB" >>% TLongBlob
-          keyword "BLOB" >>% TBlob
+          keyword "BLOB" >>. opt (attempt widthLen)
+          |>> (function
+              | Some n when n <= 255 -> TTinyBlob
+              | Some n when n > 65535 && n <= 16777215 -> TMediumBlob
+              | Some n when n > 16777215 -> TLongBlob
+              | _ -> TBlob)
           keyword "ENUM" >>. stringListParen |>> TEnum
           keyword "SET" >>. stringListParen |>> TSet
           (keyword "DECIMAL" <|> keyword "NUMERIC")
