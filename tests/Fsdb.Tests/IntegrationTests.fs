@@ -352,7 +352,7 @@ let tests =
                       | Choice1Of2 _ -> failtest "expected carol's KILL of root to be denied"
                       | Choice2Of2 e ->
                           match mysqlError e with
-                          | Some _ -> ()
+                          | Some _ -> () // 1094 unknown thread id — root is invisible to carol
                           | None -> raise e
 
                       use grants = conn5.CreateCommand()

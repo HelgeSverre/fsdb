@@ -704,6 +704,61 @@ let tests =
               | Err(1094, _) -> ()
               | other -> failtestf "expected 1094 for an unknown thread id, got %A" other
 
+          testCase "PROCESS-scoped visibility: PROCESSLIST hides other users, KILL denies with 1094, SHOW GRANTS with 1044"
+          <| fun _ ->
+              let store = Fsdb.Storage.create ()
+              let root = create 1 store
+              let root, created = handle root "CREATE USER 'pviewer' IDENTIFIED BY 'pw'"
+
+              match created with
+              | Err(code, msg) -> failtestf "create user: %d %s" code msg
+              | _ -> ()
+
+              // Unique-to-this-test ids/user so a concurrently running
+              // server test's registered processes can't interfere.
+              Fsdb.InformationSchema.registerProcess 777001L "root" "localhost" |> ignore
+              Fsdb.InformationSchema.registerProcess 777002L "pviewer" "localhost" |> ignore
+
+              try
+                  let viewer = { create 777002 store with User = "pviewer" }
+
+                  // Without the global PROCESS privilege, PROCESSLIST is
+                  // scoped to the caller's own connections.
+                  match handle viewer "SHOW PROCESSLIST" |> snd with
+                  | ResultSet(_, rows) ->
+                      Expect.equal
+                          (rows |> List.map (List.item 1))
+                          [ Some "pviewer" ]
+                          "pviewer sees only its own connection"
+                  | other -> failtestf "expected a processlist, got %A" other
+
+                  match handle root "SHOW PROCESSLIST" |> snd with
+                  | ResultSet(_, rows) ->
+                      let ids = rows |> List.map (List.item 0)
+                      Expect.contains ids (Some "777001") "root sees its own row"
+                      Expect.contains ids (Some "777002") "root sees pviewer's row too"
+                  | other -> failtestf "expected a processlist, got %A" other
+
+                  // A connection pviewer can't see is one it can't name:
+                  // MySQL reports the id as unknown, not as denied.
+                  match handle viewer "KILL 777001" |> snd with
+                  | Err(1094, msg) -> Expect.equal msg "Unknown thread id: 777001" "MySQL's 1094 text"
+                  | other -> failtestf "expected 1094 for another user's connection, got %A" other
+
+                  // Another account's grants need a mysql-schema read.
+                  match handle viewer "SHOW GRANTS FOR 'root'" |> snd with
+                  | Err(1044, msg) ->
+                      Expect.equal msg "Access denied for user 'pviewer'@'%' to database 'mysql'" "MySQL's 1044 text"
+                  | other -> failtestf "expected 1044 for another account's grants, got %A" other
+
+                  // Its own grants stay readable.
+                  match handle viewer "SHOW GRANTS" |> snd with
+                  | ResultSet(_, _) -> ()
+                  | other -> failtestf "expected pviewer's own grants, got %A" other
+              finally
+                  Fsdb.InformationSchema.unregisterProcess 777001L
+                  Fsdb.InformationSchema.unregisterProcess 777002L
+
           testCase "SHOW TABLES WHERE filters on Tables_in_<db> and 1054s an unknown column"
           <| fun _ ->
               let session = create 999901 (Fsdb.Storage.create ())

@@ -4821,13 +4821,15 @@ let private substituteNewRefs (columnIndex: Map<string, int list>) (row: Value[]
 /// row's literal value. Only the body kinds CREATE TRIGGER accepts appear
 /// here; ponytail: `NEW.*` inside an INSERT...SELECT body's own SELECT
 /// isn't substituted (it fails at eval as an unknown table 'NEW') — add a
-/// SelectStmt walk when a real trigger needs it.
+/// SelectStmt walk when a real trigger needs it. The body's ON DUPLICATE
+/// KEY UPDATE clause *is* substituted, for both Insert and InsertSelect.
 let private bindNewRow (columnIndex: Map<string, int list>) (row: Value[]) (stmt: Statement) : Statement =
     let sub = substituteNewRefs columnIndex row
 
     match stmt with
     | Insert(t, cols, rows, onDup, ig) ->
         Insert(t, cols, rows |> List.map (List.map sub), onDup |> List.map (fun (c, e) -> c, sub e), ig)
+    | InsertSelect(t, cols, select, onDup, ig) -> InsertSelect(t, cols, select, onDup |> List.map (fun (c, e) -> c, sub e), ig)
     | Update u ->
         Update
             { u with
@@ -5513,84 +5515,122 @@ let rec execute (store: Store) (registry: Registry) (dbName: string) (ids: int64
     // Fresh derived-table memo per statement (see `fromSubqueryMemo`).
     fromSubqueryMemo.Value <- Dictionary<FromItem, Result<ColumnDef list * Value[] list, QueryResult>>(HashIdentity.Reference)
 
-    /// Fires `(db, table)`'s AFTER INSERT triggers once per row in
-    /// `insertedRows` — called by the insert branches *after* storage
-    /// released its locks (and never from onCommit: lock re-entry). Body
-    /// effects recurse into `execute` against the same store, so inside a
-    /// transaction they land in the snapshot and roll back with it; their
-    /// row events ride the WAL like any other write, ordered after the
-    /// originating statement's. Returns `Some err` when a body failed.
-    /// ponytail: on a body error MySQL rolls the whole originating
-    /// statement back; fsdb outside a transaction keeps the already-landed
-    /// originating rows — wrap in a transaction for statement atomicity.
-    let fireAfterInsertTriggers (db: string) (table: string) (insertedRows: Value[] list) : QueryResult option =
-        if insertedRows.IsEmpty then
-            None
-        else
-            match afterInsertTriggers store db table with
-            | [] -> None
-            | triggers ->
-                match scan store db table with
-                | Error _ -> None
-                | Ok(columns, _) ->
-                    let columnIndex = columnIndexOf columns
-                    let chain = triggerChain.Value
-                    let self = db, normalizeTableName table
+    /// Fires `(db, table)`'s AFTER INSERT `triggers` once per row in
+    /// `insertedRows`, against `runStore` — the private statement snapshot
+    /// `finishInsert` opened (see its doc), so a body's writes only land if
+    /// the whole statement does. Never fired from onCommit (lock re-entry).
+    /// Bodies execute with the *trigger's* schema `db` as the default
+    /// database — MySQL resolves a body's unqualified table names against
+    /// the schema the trigger lives in, not the session's current database
+    /// (probed: `INSERT INTO a.t` from a session on db b runs the body's
+    /// `INSERT INTO work_log` against a.work_log). Returns `Some err` when
+    /// a body failed.
+    let fireAfterInsertTriggers (runStore: Store) (db: string) (table: string) (triggers: (string * string) list) (insertedRows: Value[] list) : QueryResult option =
+        match scan runStore db table with
+        | Error _ -> None
+        | Ok(columns, _) ->
+            let columnIndex = columnIndexOf columns
+            let chain = triggerChain.Value
+            let self = db, normalizeTableName table
 
-                    // Re-parse (body text is the single source of truth, see
-                    // `Ast.CreateTrigger`) and run the 1442 checks up front,
-                    // before any row's body executes: a body targeting a
-                    // table the invoking chain is already writing, or a
-                    // chain deeper than the cap, fires nothing at all.
-                    // ponytail: fixed depth cap 8 — raise it if a legitimate
-                    // trigger chain that deep ever exists.
-                    let checkBody ((name, body): string * string) =
-                        match Parser.parse body with
-                        | Result.Error msg -> Result.Error(Err(1064, sprintf "Trigger '%s' body has a syntax error: %s" name msg))
-                        | Result.Ok bodyStmt ->
-                            match writtenTableOf dbName bodyStmt with
-                            | Some target when List.contains target (self :: chain) -> Result.Error(err1442 (snd target))
-                            | Some target when List.length chain >= 8 -> Result.Error(err1442 (snd target))
-                            | _ -> Result.Ok bodyStmt
+            // Re-parse (body text is the single source of truth, see
+            // `Ast.CreateTrigger`) and run the 1442 checks up front,
+            // before any row's body executes: a body targeting a
+            // table the invoking chain is already writing, or a
+            // chain deeper than the cap, fires nothing at all.
+            // ponytail: fixed depth cap 8 — raise it if a legitimate
+            // trigger chain that deep ever exists.
+            let checkBody ((name, body): string * string) =
+                match Parser.parse body with
+                | Result.Error msg -> Result.Error(Err(1064, sprintf "Trigger '%s' body has a syntax error: %s" name msg))
+                | Result.Ok bodyStmt ->
+                    match writtenTableOf db bodyStmt with
+                    | Some target when List.contains target (self :: chain) -> Result.Error(err1442 (snd target))
+                    | Some target when List.length chain >= 8 -> Result.Error(err1442 (snd target))
+                    | _ -> Result.Ok bodyStmt
 
-                    match triggers |> traverse checkBody with
-                    | Result.Error err -> Some err
-                    | Result.Ok bodies ->
-                        // Eval-time DIRECTONLY backstop, same as generated
-                        // columns — see `shadowDirectOnly`'s doc.
-                        let shadowed = shadowDirectOnly "trigger" registry
-                        triggerChain.Value <- self :: chain
+            match triggers |> traverse checkBody with
+            | Result.Error err -> Some err
+            | Result.Ok bodies ->
+                // Eval-time DIRECTONLY backstop, same as generated
+                // columns — see `shadowDirectOnly`'s doc.
+                let shadowed = shadowDirectOnly "trigger" registry
+                triggerChain.Value <- self :: chain
 
-                        // An extension's own `SqlError` (including the
-                        // DirectOnly shadow's 3102) surfaces as a clean
-                        // error result here rather than an exception, so a
-                        // failing body doesn't abort a surrounding
-                        // transaction the way an escaped exception would.
-                        let runBody (stmt: Statement) : QueryResult =
-                            try
-                                execute store shadowed dbName (0L, 0L) foundRows stmt |> snd
-                            with SqlError(code, msg) ->
-                                Err(code, msg)
+                // An extension's own `SqlError` (including the
+                // DirectOnly shadow's 3102) surfaces as a clean
+                // error result here rather than an exception, so a
+                // failing body doesn't abort a surrounding
+                // transaction the way an escaped exception would.
+                let runBody (stmt: Statement) : QueryResult =
+                    try
+                        execute runStore shadowed db (0L, 0L) foundRows stmt |> snd
+                    with SqlError(code, msg) ->
+                        Err(code, msg)
 
-                        try
-                            insertedRows
-                            |> List.tryPick (fun row ->
-                                bodies
-                                |> List.tryPick (fun body ->
-                                    match runBody (bindNewRow columnIndex row body) with
-                                    | Err(code, msg) -> Some(Err(code, msg))
-                                    | _ -> None))
-                        finally
-                            triggerChain.Value <- chain
+                // `InsertedRows` was captured by the insert itself, *before*
+                // the post-insert generated-column recompute — so refresh
+                // each row's generated columns before binding `NEW.*`
+                // (probed: MySQL binds the computed value, `NEW.b` = 10 for
+                // `b INT AS (a*2)` after `INSERT (a) VALUES (5)`). A
+                // generated column is a pure function of the row, so this
+                // reproduces exactly what the recompute wrote back.
+                let refreshGenerated (row: Value[]) : Value[] =
+                    match computeGeneratedRow runStore registry db table columns row with
+                    | Ok r -> r
+                    | Error _ -> row // unreachable: the table-wide recompute already succeeded
 
-    /// Threads an insert branch's `InsertOutcome` through trigger firing:
-    /// the OK-packet ids always advance (the rows are in), the result is
-    /// the statement's `Affected` unless a trigger body failed.
-    let finishInsert (db: string) (table: string) (outcome: InsertOutcome) : (int64 * int64) * QueryResult =
-        nextIds ids (outcome.LastInsertId, outcome.GeneratedId),
-        (match fireAfterInsertTriggers db table outcome.InsertedRows with
-         | Some err -> err
-         | None -> Affected(uint64 outcome.Affected))
+                try
+                    insertedRows
+                    |> List.tryPick (fun row ->
+                        let row = refreshGenerated row
+
+                        bodies
+                        |> List.tryPick (fun body ->
+                            match runBody (bindNewRow columnIndex row body) with
+                            | Err(code, msg) -> Some(Err(code, msg))
+                            | _ -> None))
+                finally
+                    triggerChain.Value <- chain
+
+    /// Runs an insert branch's storage write (`doInsert`, against whichever
+    /// store it's handed) and fires the target's AFTER INSERT triggers with
+    /// MySQL's statement atomicity: when triggers exist, the insert and
+    /// every body's effects land in a private `beginTransactionSnapshot`
+    /// (the multi-table UPDATE precedent), merged back — one commit, WAL
+    /// events ordered after the originating statement's — only when every
+    /// body succeeded. A body error discards the snapshot, so the
+    /// originating rows roll back with it (probed MySQL semantics) and the
+    /// OK-packet ids don't advance. With no triggers this is the plain
+    /// direct write it always was.
+    let finishInsert (db: string) (table: string) (doInsert: Store -> Result<InsertOutcome, StorageError>) : (int64 * int64) * QueryResult =
+        let ok (outcome: InsertOutcome) =
+            nextIds ids (outcome.LastInsertId, outcome.GeneratedId), Affected(uint64 outcome.Affected)
+
+        match afterInsertTriggers store db table with
+        | [] ->
+            match doInsert store with
+            | Ok outcome -> ok outcome
+            | Error e -> ids, storageErr e
+        | triggers ->
+            let baseCatalog = store.Catalog
+            let snapshot = Storage.beginTransactionSnapshot store
+
+            match doInsert snapshot with
+            | Error e -> ids, storageErr e
+            | Ok outcome when outcome.InsertedRows.IsEmpty ->
+                // Nothing actually inserted (all-duplicate upsert/IGNORE) —
+                // nothing to fire, but the update-path writes still count.
+                Storage.mergeCatalogInto store baseCatalog snapshot.Catalog
+                Storage.commitTransactionEvents store snapshot
+                ok outcome
+            | Ok outcome ->
+                match fireAfterInsertTriggers snapshot db table triggers outcome.InsertedRows with
+                | Some err -> ids, err
+                | None ->
+                    Storage.mergeCatalogInto store baseCatalog snapshot.Catalog
+                    Storage.commitTransactionEvents store snapshot
+                    ok outcome
 
     /// The `ON DUPLICATE KEY UPDATE` evaluator shared by the `Insert` and
     /// `InsertSelect` branches — builds `upsertRows`' update callback.
@@ -5636,9 +5676,9 @@ let rec execute (store: Store) (registry: Registry) (dbName: string) (ids: int64
             let applyUpdate = onDuplicateUpdater table tableColumns columnIndex onDuplicateUpdate
             let computeGenerated = computeGeneratedRow store registry dbName table tableColumns
 
-            match upsertRows store db table cols rowsValues computeGenerated applyUpdate foundRows |> withGeneratedRecomputed store registry dbName db table with
-            | Ok outcome -> finishInsert db table outcome
-            | Error e -> ids, storageErr e
+            finishInsert db table (fun s ->
+                upsertRows s db table cols rowsValues computeGenerated applyUpdate foundRows
+                |> withGeneratedRecomputed s registry dbName db table)
 
     match stmt with
     | CreateDatabase(name, ifNotExists) ->
@@ -5877,9 +5917,7 @@ let rec execute (store: Store) (registry: Registry) (dbName: string) (ids: int64
             if onDuplicateUpdate.IsEmpty then
                 let insert = if ignoreDuplicates then insertRowsIgnore else insertRows
 
-                match insert store db table cols rowsValues |> withGeneratedRecomputed store registry dbName db table with
-                | Ok outcome -> finishInsert db table outcome
-                | Error e -> ids, storageErr e
+                finishInsert db table (fun s -> insert s db table cols rowsValues |> withGeneratedRecomputed s registry dbName db table)
             else
                 upsertEvaluated db table cols rowsValues onDuplicateUpdate
 
@@ -5904,9 +5942,7 @@ let rec execute (store: Store) (registry: Registry) (dbName: string) (ids: int64
             if onDuplicateUpdate.IsEmpty then
                 let insert = if ignoreDuplicates then insertRowsIgnore else insertRows
 
-                match insert store db table cols rowsValues |> withGeneratedRecomputed store registry dbName db table with
-                | Ok outcome -> finishInsert db table outcome
-                | Error e -> ids, storageErr e
+                finishInsert db table (fun s -> insert s db table cols rowsValues |> withGeneratedRecomputed s registry dbName db table)
             else
                 upsertEvaluated db table cols rowsValues onDuplicateUpdate
 

@@ -91,6 +91,66 @@ let tests =
                   [ [ Some "5" ] ]
                   "only the first statement's insert path fired; the duplicate's update path didn't"
 
+          testCase "NEW.<generated column> binds the computed value, not the pre-recompute NULL"
+          <| fun _ ->
+              let store = Fsdb.Storage.create ()
+              // Probed on the disposable server: for `b INT AS (a*2)`,
+              // `INSERT INTO g(a) VALUES (5)` binds NEW.b = 10 in the body.
+              expectOk (runDefault store "CREATE TABLE g (a INT, b INT AS (a * 2))") "create g"
+              expectOk (runDefault store "CREATE TABLE log (id INT AUTO_INCREMENT PRIMARY KEY, n INT)") "create log"
+
+              expectOk
+                  (runDefault store "CREATE TRIGGER trg AFTER INSERT ON g FOR EACH ROW INSERT INTO log(n) VALUES (NEW.b)")
+                  "create trigger"
+
+              expectOk (runDefault store "INSERT INTO g(a) VALUES (5)") "insert"
+              Expect.equal (rows store "SELECT n FROM log") [ [ Some "10" ] ] "NEW.b is the computed 10, not NULL"
+
+          testCase "the body executes in the trigger's schema, not the session's current database"
+          <| fun _ ->
+              let store = Fsdb.Storage.create ()
+              expectOk (runDefault store "CREATE DATABASE a") "create a"
+              expectOk (runDefault store "CREATE DATABASE b") "create b"
+              expectOk (runDefault store "CREATE TABLE a.t (n INT)") "create a.t"
+              expectOk (runDefault store "CREATE TABLE a.work_log (n INT)") "create a.work_log"
+              expectOk (runDefault store "CREATE TABLE b.work_log (n INT)") "create b.work_log"
+
+              expectOk
+                  (runDefault store "CREATE TRIGGER trg AFTER INSERT ON a.t FOR EACH ROW INSERT INTO work_log(n) VALUES (NEW.n)")
+                  "create trigger on a.t"
+
+              // Probed: MySQL resolves the body's unqualified `work_log`
+              // against the trigger's schema `a` even when the session is
+              // defaulted to `b` — b.work_log stays untouched (and the body
+              // must not 1146 when b.work_log doesn't exist).
+              let runOnB sql =
+                  match Fsdb.Parser.parse sql with
+                  | Error msg -> failtestf "expected %s to parse, got error: %s" sql msg
+                  | Ok stmt -> execute store builtins "b" (0L, 0L) false stmt |> snd
+
+              expectOk (runOnB "INSERT INTO a.t(n) VALUES (7)") "insert from a session on b"
+              Expect.equal (rows store "SELECT n FROM a.work_log") [ [ Some "7" ] ] "landed in the trigger's schema"
+              Expect.equal (rows store "SELECT n FROM b.work_log") [] "the session's database was not written"
+
+          testCase "an INSERT ... SELECT body substitutes NEW.* in its ON DUPLICATE KEY UPDATE clause"
+          <| fun _ ->
+              let store = Fsdb.Storage.create ()
+              setup store
+              expectOk (runDefault store "CREATE TABLE agg (k INT PRIMARY KEY, total INT)") "create agg"
+              expectOk (runDefault store "INSERT INTO log(n) VALUES (100)") "seed the body's SELECT source"
+
+              expectOk
+                  (runDefault
+                      store
+                      "CREATE TRIGGER trg AFTER INSERT ON t FOR EACH ROW INSERT INTO agg(k, total) SELECT 1, n FROM log ON DUPLICATE KEY UPDATE total = total + NEW.n")
+                  "create InsertSelect-bodied trigger"
+
+              expectOk (runDefault store "INSERT INTO t(n) VALUES (5)") "insert path (agg empty)"
+              Expect.equal (rows store "SELECT total FROM agg") [ [ Some "100" ] ] "insert path took the SELECT's value"
+
+              expectOk (runDefault store "INSERT INTO t(n) VALUES (7)") "dup-key path binds NEW.n"
+              Expect.equal (rows store "SELECT total FROM agg") [ [ Some "107" ] ] "NEW.n substituted inside the body's ODKU"
+
           testCase "a chained trigger's effects land too, and errors in a body fail the statement"
           <| fun _ ->
               let store = Fsdb.Storage.create ()
@@ -107,6 +167,30 @@ let tests =
 
               expectOk (runDefault store "INSERT INTO t(n) VALUES (9)") "insert"
               Expect.equal (rows store "SELECT n FROM audit") [ [ Some "9" ] ] "chain fired through log into audit"
+
+              // Error path: a *runtime* body failure (unique violation in
+              // the log insert, past the pre-flight 1442/parse checks) is
+              // the statement's error, and — probed MySQL semantics — the
+              // whole statement rolls back: no originating rows, no
+              // earlier rows' trigger effects.
+              expectOk (runDefault store "CREATE TABLE t2 (n INT)") "create t2"
+              expectOk (runDefault store "CREATE TABLE ulog (n INT PRIMARY KEY)") "create ulog"
+              expectOk (runDefault store "INSERT INTO ulog(n) VALUES (20)") "seed the collision"
+
+              expectOk
+                  (runDefault store "CREATE TRIGGER trg3 AFTER INSERT ON t2 FOR EACH ROW INSERT INTO ulog(n) VALUES (NEW.n)")
+                  "trigger t2 -> ulog"
+
+              match runDefault store "INSERT INTO t2(n) VALUES (10), (20), (30)" with
+              | Err(1062, _) -> ()
+              | other -> failtestf "expected row 2's body 1062 to fail the statement, got %A" other
+
+              Expect.equal (rows store "SELECT n FROM t2") [] "the originating rows rolled back with the failed body"
+
+              Expect.equal
+                  (rows store "SELECT n FROM ulog")
+                  [ [ Some "20" ] ]
+                  "row 1's trigger effect rolled back too — only the seed row remains"
 
           testCase "a self-targeting trigger fires 1442 with MySQL's exact text"
           <| fun _ ->
