@@ -606,15 +606,13 @@ let private encodeStatement (w: Writer) (s: Statement) : unit =
         w.WriteByte 0x06uy
         w.WriteInt32LE(List.length pairs)
         List.iter (fun (a, b) -> writeStr w a; writeStr w b) pairs
-    | CreateIndex(name, table, columns, unique, kind) ->
-        w.WriteByte 0x07uy
-        writeStr w name
-        writeStr w table
-        writeStrList w columns
-        writeBool w unique
-        writeBool w (kind = FullTextIndex)
-    | DropIndexStmt(name, table, ifExists) -> w.WriteByte 0x08uy; writeStr w name; writeStr w table; writeBool w ifExists
     | Truncate table -> w.WriteByte 0x09uy; writeStr w table
+    // Tags 0x07/0x08 used to encode `CreateIndex`/`DropIndexStmt`, which
+    // nothing ever emitted: the executor routes both through `alterTable`, so
+    // they reach the WAL as `AlterTable [AddIndex ...]`/`[DropIndexAction ...]`
+    // — byte-identical payloads via `encodeAlterAction`. Two spellings of one
+    // event is one that can silently rot, so the duplicates are gone and the
+    // tags stay retired (no WAL ever contained them).
     | other -> failwithf "Persistence: %A isn't a DDL statement SchemaChanged should ever carry" other
 
 let private decodeStatement (r: #IReader) : Statement =
@@ -634,14 +632,10 @@ let private decodeStatement (r: #IReader) : Statement =
     | 0x04uy -> DropTable(readStrList r, readBool r)
     | 0x05uy -> AlterTable(readStr r, List.init (r.ReadInt32LE()) (fun _ -> decodeAlterAction r))
     | 0x06uy -> RenameTable(List.init (r.ReadInt32LE()) (fun _ -> readStr r, readStr r))
-    | 0x07uy ->
-        let name = readStr r
-        let table = readStr r
-        let columns = readStrList r
-        let unique = readBool r
-        CreateIndex(name, table, columns, unique, (if readBool r then FullTextIndex else BTree))
-    | 0x08uy -> DropIndexStmt(readStr r, readStr r, readBool r)
     | 0x09uy -> Truncate(readStr r)
+    // 0x07/0x08 are retired — see `encodeStatement`. No WAL ever carried them,
+    // so an unknown-tag failure here is the honest answer rather than decoding
+    // into statements the replay would only re-route through `alterTable`.
     | tag -> failwithf "Persistence: unknown Statement tag 0x%02x in WAL/snapshot" tag
 
 // ---------------------------------------------------------------------
@@ -772,10 +766,10 @@ let private applyDdl (store: Store) (db: string) (stmt: Statement) : unit =
         store.StrictMode <- false
         warn "AlterTable" (alterTable store db table actions)
         store.StrictMode <- saved
-    | RenameTable pairs -> pairs |> List.iter (fun (oldName, newName) -> warn "RenameTable" (renameTable store db oldName newName))
-    | CreateIndex(name, table, columns, unique, kind) ->
-        warn "CreateIndex" (alterTable store db table [ AddIndex { Name = name; Columns = columns; Unique = unique; Kind = kind } ])
-    | DropIndexStmt(name, table, _) -> warn "DropIndexStmt" (alterTable store db table [ DropIndexAction name ])
+    // One catalog swap for the whole event, matching how it was logged (see
+    // `Storage.renameTables`) — replaying pair-by-pair would reintroduce the
+    // partial rename the single event exists to prevent.
+    | RenameTable pairs -> warn "RenameTable" (renameTables store db pairs)
     | Truncate table -> warn "Truncate" (truncate store db table)
     | other -> Log.diagnostic "fsdb: WAL replay warning (SchemaChanged): unexpected statement %A" other
 

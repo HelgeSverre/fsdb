@@ -2183,6 +2183,35 @@ let alterTable (store: Store) (dbName: string) (tableName: string) (actions: Alt
 let renameTable (store: Store) (dbName: string) (oldName: string) (newName: string) : Result<unit, StorageError> =
     alterTable store dbName oldName [ RenameTo newName ]
 
+/// `RENAME TABLE a TO b, c TO d` — every pair inside one catalog swap and one
+/// WAL event, because MySQL's RENAME TABLE is atomic across its pairs and
+/// per-pair `alterTable` calls are not: N events mean a crash can replay half
+/// a rename, leaving `a` renamed and `c` untouched.
+/// ponytail: atomic *per database*. A cross-database rename still emits one
+/// event per database, since each database is its own catalog cell — spanning
+/// them would need a lock above the per-database one.
+let renameTables (store: Store) (dbName: string) (pairs: (string * string) list) : Result<unit, StorageError> =
+    let result =
+        withDatabase store dbName (fun db ->
+            let step acc (oldName, newName) =
+                acc
+                |> Result.bind (fun db ->
+                    virtualWriteGuard store dbName oldName
+                    |> Result.bind (fun () -> tryGetTable db oldName)
+                    |> Result.bind (fun table ->
+                        applyAlterAction store.StrictMode table (RenameTo newName)
+                        |> Result.map (fun (table', newKey) ->
+                            let origKey = normalizeTableName oldName
+                            let key = newKey |> Option.defaultValue origKey
+                            db |> Map.remove origKey |> Map.add key (reindexTable table'))))
+
+            pairs |> List.fold step (Ok db) |> Result.map (fun db' -> db', ()))
+
+    if result.IsOk then
+        emit store (Some(SchemaChanged(dbName, RenameTable pairs)))
+
+    result
+
 /// One column's value for one row being inserted, threaded through
 /// `processRow`'s fold: the column's final coerced value, the updated
 /// AUTO_INCREMENT counter, and the id assigned to this row's AUTO_INCREMENT

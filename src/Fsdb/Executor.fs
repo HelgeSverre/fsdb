@@ -5752,12 +5752,20 @@ let rec execute (store: Store) (registry: Registry) (dbName: string) (ids: int64
         // name's table part — ponytail: doesn't actually move the table
         // between catalogs, add that once a migration renames across
         // databases rather than within one.
-        let renameOne (oldName, newName) =
-            let db, oldTable = splitQualified dbName oldName
-            let _, newTable = splitQualified dbName newName
-            renameTable store db oldTable newTable
+        // Grouped by database and applied per group, so a multi-pair rename
+        // within one database is one atomic catalog swap and one WAL event
+        // (see `Storage.renameTables`) rather than N independently-replayable
+        // ones. Grouping preserves each group's original pair order.
+        let groups =
+            pairs
+            |> List.map (fun (oldName, newName) ->
+                let db, oldTable = splitQualified dbName oldName
+                let _, newTable = splitQualified dbName newName
+                db, (oldTable, newTable))
+            |> List.groupBy fst
+            |> List.map (fun (db, entries) -> db, entries |> List.map snd)
 
-        match pairs |> traverse renameOne with
+        match groups |> traverse (fun (db, dbPairs) -> renameTables store db dbPairs) with
         | Ok _ -> ids, Affected 0UL
         | Error e -> ids, storageErr e
 

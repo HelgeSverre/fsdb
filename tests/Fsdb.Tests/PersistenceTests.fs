@@ -1056,18 +1056,12 @@ let tests =
 
           testCase "RENAME TABLE / CREATE INDEX / DROP INDEX replay from the WAL"
           <| fun _ ->
-              // All three reach the WAL as `AlterTable` actions, not as their
-              // own statements: `Storage.renameTable` is `alterTable [RenameTo
-              // ...]`, and the executor's CREATE/DROP INDEX cases are
-              // `alterTable [AddIndex ...]`/`[DropIndexAction ...]`. So what
-              // this pins is `encodeAlterAction`'s 0x05/0x07/0x08 tags — the
-              // only path SQL can actually produce (mutation-checked: breaking
-              // `RenameTo`'s encoding fails this test).
-              //
-              // `encodeStatement`'s own RenameTable/CreateIndex/DropIndexStmt
-              // tags are unreachable for the same reason — nothing emits
-              // `SchemaChanged` carrying them — which is why coverage flags
-              // them and why no test can pin them.
+              // CREATE/DROP INDEX reach the WAL as `AlterTable` actions (the
+              // executor routes both through `alterTable`), so those pin
+              // `encodeAlterAction`'s tags. RENAME TABLE has its own statement
+              // tag now — see the multi-pair test below for why — so this
+              // also pins `encodeStatement` 0x06 end to end.
+              // Mutation-checked: breaking either encoding fails this test.
               let dir = tempDataDir ()
               let store = load dir
               attach dir store
@@ -1106,6 +1100,147 @@ let tests =
                   | None -> failtest "new_name missing after reload"
 
               Expect.equal indexes [ "ix_c" ] "the created index replayed and the dropped one stayed dropped"
+
+          testCase "every Op tag and every ALTER action survives a WAL round-trip"
+          <| fun _ ->
+              // `encodeOp`/`encodeAlterAction` are reachable from ordinary SQL
+              // — any operator can appear in a generated column's expression,
+              // and every action is an ALTER a migration can issue — but most
+              // tags had no test, so a wrong byte would only surface as a
+              // database that won't reopen. One table exercises the operator
+              // set; one ALTER sequence exercises the action set.
+              let dir = tempDataDir ()
+              let store = load dir
+              attach dir store
+              let session = Fsdb.Session.create 1 store
+
+              let run (session: Fsdb.Session.Session) (sql: string) =
+                  match handle session sql with
+                  | _, Err(code, msg) -> failtestf "%s failed: %d %s" sql code msg
+                  | session', _ -> session'
+
+              // One generated column per operator tag (0x01-0x0E).
+              let ddl =
+                  "CREATE TABLE ops (a INT, b INT, "
+                  + "g_and INT GENERATED ALWAYS AS (a > 0 AND b > 0) STORED, "
+                  + "g_or INT GENERATED ALWAYS AS (a > 0 OR b > 0) STORED, "
+                  + "g_eq INT GENERATED ALWAYS AS (a = b) STORED, "
+                  + "g_neq INT GENERATED ALWAYS AS (a <> b) STORED, "
+                  + "g_lt INT GENERATED ALWAYS AS (a < b) STORED, "
+                  + "g_lte INT GENERATED ALWAYS AS (a <= b) STORED, "
+                  + "g_gt INT GENERATED ALWAYS AS (a > b) STORED, "
+                  + "g_gte INT GENERATED ALWAYS AS (a >= b) STORED, "
+                  + "g_add INT GENERATED ALWAYS AS (a + b) STORED, "
+                  + "g_sub INT GENERATED ALWAYS AS (a - b) STORED, "
+                  + "g_mul INT GENERATED ALWAYS AS (a * b) STORED, "
+                  + "g_div DOUBLE GENERATED ALWAYS AS (a / b) STORED, "
+                  + "g_intdiv INT GENERATED ALWAYS AS (a DIV b) STORED, "
+                  + "g_nseq INT GENERATED ALWAYS AS (a <=> b) STORED)"
+
+              let session = [ ddl; "INSERT INTO ops (a, b) VALUES (7, 2)" ] |> List.fold run session
+
+              // One ALTER per action tag.
+              let session =
+                  [ "CREATE TABLE parent (id INT PRIMARY KEY)"
+                    "CREATE TABLE acts (id INT, spare INT, note VARCHAR(20), pid INT)"
+                    "ALTER TABLE acts ADD COLUMN extra INT"
+                    "ALTER TABLE acts DROP COLUMN spare"
+                    "ALTER TABLE acts MODIFY COLUMN note VARCHAR(40)"
+                    "ALTER TABLE acts CHANGE COLUMN note remark VARCHAR(60)"
+                    "ALTER TABLE acts RENAME COLUMN remark TO comment"
+                    "ALTER TABLE acts ADD INDEX ix_extra (extra)"
+                    "ALTER TABLE acts DROP INDEX ix_extra"
+                    "ALTER TABLE acts ADD CONSTRAINT fk_p FOREIGN KEY (pid) REFERENCES parent(id)"
+                    "ALTER TABLE acts DROP FOREIGN KEY fk_p"
+                    "ALTER TABLE acts ADD PRIMARY KEY (id)"
+                    "ALTER TABLE acts AUTO_INCREMENT = 500" ]
+                  |> List.fold run session
+
+              ignore session
+              let reloaded = load dir
+
+              // Insert *after* the reload, so the generated columns are
+              // recomputed from the decoded expressions rather than read back
+              // as stored values — otherwise a swapped operator tag would sail
+              // through on the row written before the restart (verified: this
+              // test only catches an encodeOp mutation because of this row).
+              let reloadedSession = Fsdb.Session.create 2 reloaded
+
+              match handle reloadedSession "INSERT INTO ops (a, b) VALUES (7, 2)" with
+              | _, Err(code, msg) -> failtestf "post-reload insert failed: %d %s" code msg
+              | _ -> ()
+
+              // 7 and 2 give a distinct answer per operator, so the recomputed
+              // row pins which operator each tag decoded to.
+              match scanList reloaded defaultDatabase "ops" with
+              | Ok(cols, [ _; row ]) ->
+                  let value name =
+                      cols
+                      |> List.tryFindIndex (fun c -> String.Equals(c.Name, name, StringComparison.OrdinalIgnoreCase))
+                      |> Option.map (fun i -> row.[i])
+
+                  Expect.equal (value "g_and") (Some(VInt 1L)) "AND"
+                  Expect.equal (value "g_or") (Some(VInt 1L)) "OR"
+                  Expect.equal (value "g_eq") (Some(VInt 0L)) "="
+                  Expect.equal (value "g_neq") (Some(VInt 1L)) "<>"
+                  Expect.equal (value "g_lt") (Some(VInt 0L)) "<"
+                  Expect.equal (value "g_lte") (Some(VInt 0L)) "<="
+                  Expect.equal (value "g_gt") (Some(VInt 1L)) ">"
+                  Expect.equal (value "g_gte") (Some(VInt 1L)) ">="
+                  Expect.equal (value "g_add") (Some(VInt 9L)) "+"
+                  Expect.equal (value "g_sub") (Some(VInt 5L)) "-"
+                  Expect.equal (value "g_mul") (Some(VInt 14L)) "*"
+                  Expect.equal (value "g_div") (Some(VDouble 3.5)) "/"
+                  Expect.equal (value "g_intdiv") (Some(VInt 3L)) "DIV"
+                  Expect.equal (value "g_nseq") (Some(VInt 0L)) "<=>"
+              | other -> failtestf "ops table did not survive the reload: %A" other
+
+              match Map.tryFind defaultDatabase reloaded.Catalog |> Option.bind (Map.tryFind "acts") with
+              | Some t ->
+                  let names = t.Columns |> List.map (fun c -> c.Name.ToLowerInvariant()) |> List.sort
+                  Expect.equal names [ "comment"; "extra"; "id"; "pid" ] "add/drop/change/rename column all replayed"
+                  Expect.isEmpty t.ForeignKeys "the dropped foreign key stayed dropped"
+                  Expect.equal (t.Indexes |> List.filter (fun ix -> ix.Name = "ix_extra")) [] "the dropped index stayed dropped"
+                  Expect.isTrue (t.Columns |> List.exists (fun c -> c.PrimaryKey)) "ADD PRIMARY KEY replayed"
+                  Expect.equal t.NextAutoId 500L "AUTO_INCREMENT seed replayed"
+              | None -> failtest "acts table missing after reload"
+
+          testCase "a multi-pair RENAME TABLE is one WAL event, so replay can't apply half of it"
+          <| fun _ ->
+              // MySQL's RENAME TABLE is atomic across its pairs. Emitting one
+              // `alterTable` per pair would log N independently-replayable
+              // events, and a WAL truncated between them (the torn-tail case
+              // `replayWal` handles) would restore `a` renamed and `c` not.
+              let dir = tempDataDir ()
+              let store = load dir
+              attach dir store
+              let session = Fsdb.Session.create 1 store
+
+              let run (session: Fsdb.Session.Session) (sql: string) =
+                  match handle session sql with
+                  | _, Err(code, msg) -> failtestf "%s failed: %d %s" sql code msg
+                  | session', _ -> session'
+
+              let session =
+                  [ "CREATE TABLE a (id INT PRIMARY KEY)"
+                    "CREATE TABLE c (id INT PRIMARY KEY)"
+                    "INSERT INTO a VALUES (1)"
+                    "INSERT INTO c VALUES (2)" ]
+                  |> List.fold run session
+
+              // One statement, both pairs.
+              run session "RENAME TABLE a TO b, c TO d" |> ignore
+
+              let reloaded = load dir
+
+              let tables =
+                  Map.tryFind defaultDatabase reloaded.Catalog
+                  |> Option.map (Map.toList >> List.map fst >> List.sort)
+                  |> Option.defaultValue []
+
+              Expect.equal tables [ "b"; "d" ] "both renames replayed, neither original name lingers"
+              Expect.equal (rowsOf reloaded defaultDatabase "b") [ [| VInt 1L |] ] "b kept a's row"
+              Expect.equal (rowsOf reloaded defaultDatabase "d") [ [| VInt 2L |] ] "d kept c's row"
 
           testCase "a GENERATED column using CASE/LIKE ESCAPE/IN/BETWEEN/CAST/CONCAT survives a restart and still computes correctly"
           <| fun _ ->
