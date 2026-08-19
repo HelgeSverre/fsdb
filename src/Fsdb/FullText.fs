@@ -107,15 +107,15 @@ let private termScores (corpus: Corpus) (term: string) : float[] =
 let private naturalTerms (query: string) : string[] =
     tokenize query |> Array.filter isSearchable |> Array.distinct
 
+/// Element-wise sum of every term's per-doc contribution — the natural and
+/// query-expansion modes are both exactly this over different term sets.
+let private sumTermScores (corpus: Corpus) (terms: string[]) : float[] =
+    terms
+    |> Array.map (termScores corpus)
+    |> Array.fold (Array.map2 (+)) (Array.zeroCreate corpus.Docs.Length)
+
 let naturalScoresOf (corpus: Corpus) (query: string) : float[] =
-    let scores = Array.zeroCreate corpus.Docs.Length
-
-    for term in naturalTerms query do
-        let ts = termScores corpus term
-        for i in 0 .. scores.Length - 1 do
-            scores.[i] <- scores.[i] + ts.[i]
-
-    scores
+    sumTermScores corpus (naturalTerms query)
 
 // ---------------------------------------------------------------------------
 // Boolean mode. Query grammar (recursive descent):
@@ -240,6 +240,10 @@ let private phraseCount (doc: string[]) (words: string[]) (proximity: int option
             count
         | Some dist ->
             // All words present with positions spanning at most `dist`.
+            // ponytail: the window search is exponential in the phrase's
+            // word count over each word's occurrence list — fine for the
+            // short quoted phrases proximity is used with; make it a sliding
+            // window if anyone feeds it a paragraph.
             let positions = words |> Array.map (fun w -> doc |> Array.mapi (fun i t -> i, t) |> Array.filter (snd >> (=) w) |> Array.map fst)
             if positions |> Array.exists Array.isEmpty then
                 0
@@ -254,6 +258,13 @@ let private phraseCount (doc: string[]) (words: string[]) (proximity: int option
                         fits 1 p0 p0)
                 if found then 1 else 0
 
+/// `(matched, TF×IDF²)` per doc from raw per-doc frequencies — for terms
+/// with no single index token to count (prefix wildcards, phrases), whose
+/// df falls out of the frequencies themselves.
+let private scoresFromTfs (corpus: Corpus) (tfs: int[]) : (bool * float)[] =
+    let weight = idf corpus (tfs |> Array.sumBy (fun tf -> if tf > 0 then 1 else 0))
+    tfs |> Array.map (fun tf -> tf > 0, float tf * weight * weight)
+
 /// Per-doc (matched, contribution) for one boolean term.
 let rec private evalTerm (corpus: Corpus) (term: BoolTerm) : (bool * float)[] =
     match term with
@@ -261,17 +272,13 @@ let rec private evalTerm (corpus: Corpus) (term: BoolTerm) : (bool * float)[] =
         let ts = termScores corpus w
         ts |> Array.map (fun s -> s > 0.0, s)
     | BWord(w, true) ->
-        // Prefix wildcard: TF counts every token with the prefix; df counts
-        // docs containing any such token. Bypasses stopword/min-length.
-        let tfs = corpus.Docs |> Array.map (fun doc -> doc |> Array.sumBy (fun t -> if t.StartsWith w then 1 else 0))
-        let df = tfs |> Array.sumBy (fun tf -> if tf > 0 then 1 else 0)
-        let weight = idf corpus df
-        tfs |> Array.map (fun tf -> tf > 0, float tf * weight * weight)
+        // Prefix wildcard: TF counts every token with the prefix (ordinal —
+        // tokens are already case-folded). Bypasses stopword/min-length.
+        corpus.Docs
+        |> Array.map (fun doc -> doc |> Array.sumBy (fun t -> if t.StartsWith(w, StringComparison.Ordinal) then 1 else 0))
+        |> scoresFromTfs corpus
     | BPhrase(words, proximity) ->
-        let tfs = corpus.Docs |> Array.map (fun doc -> phraseCount doc words proximity)
-        let df = tfs |> Array.sumBy (fun tf -> if tf > 0 then 1 else 0)
-        let weight = idf corpus df
-        tfs |> Array.map (fun tf -> tf > 0, float tf * weight * weight)
+        corpus.Docs |> Array.map (fun doc -> phraseCount doc words proximity) |> scoresFromTfs corpus
     | BGroup nodes ->
         evalNodes corpus nodes
 
@@ -316,6 +323,9 @@ and private evalNodes (corpus: Corpus) (nodes: (BoolOp * BoolTerm) list) : (bool
         (anyMatch && not excluded), (if excluded then 0.0 else score))
 
 let booleanScoresOf (corpus: Corpus) (query: string) : float[] =
+    // A matched row whose contributions all cancelled (only `~` terms hit,
+    // or everywhere-present words at the floor) still has to read as a
+    // match in a WHERE clause — the same epsilon rank the floor gives.
     evalNodes corpus (parseBooleanQuery query)
     |> Array.map (fun (matched, score) -> if matched then (if score = 0.0 then idfFloor * idfFloor else score) else 0.0)
 
@@ -336,14 +346,6 @@ let expansionScoresOf (corpus: Corpus) (query: string) : float[] =
         |> Array.collect (fun (i, _) -> corpus.Docs.[i])
         |> Array.filter isSearchable
 
-    let expanded =
-        Array.append (naturalTerms query) seedTerms |> Array.distinct
-
-    let scores = Array.zeroCreate corpus.Docs.Length
-
-    for term in expanded do
-        let ts = termScores corpus term
-        for i in 0 .. scores.Length - 1 do
-            scores.[i] <- scores.[i] + ts.[i]
-
-    scores
+    Array.append (naturalTerms query) seedTerms
+    |> Array.distinct
+    |> sumTermScores corpus

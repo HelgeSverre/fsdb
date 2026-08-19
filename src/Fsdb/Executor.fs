@@ -192,6 +192,22 @@ let rec private collectWindowFuncs (expr: Expr) : Expr list =
 /// `collectWindowFuncs`. `runWindowedSelect` uses it to spot a `HAVING`
 /// clause referencing a windowed projection's alias, which MySQL rejects
 /// with a dedicated error (3594) rather than resolving.
+/// A synthetic pre-pass column (`__fsdb_window_N__`/`__fsdb_match_N__`):
+/// the declared type is only ever read for `Nullable` — the row's actual
+/// `Value` drives the wire type downstream (see `columnTypesOf`).
+let private syntheticColumn (name: string) (ty: ColumnType) (nullable: bool) : ColumnDef =
+    { Name = name
+      Type = ty
+      Nullable = nullable
+      Default = None
+      AutoIncrement = false
+      PrimaryKey = false
+      Unique = false
+      Generated = None
+      Collation = None
+      Charset = None
+      OnUpdateCurrentTimestamp = false }
+
 /// Every `MATCH ... AGAINST` node in an expression tree — the fulltext
 /// pre-pass (`runFullTextSelect`) computes one whole-table score column per
 /// distinct node, exactly like `collectWindowFuncs` feeds
@@ -3706,22 +3722,7 @@ and private runWindowedSelect
             let syntheticColumns =
                 synthetic
                 |> List.map (fun (wf, name) ->
-                    { Name = name
-                      // The row's actual `Value` (a real int for
-                      // `RowNumberOver`, `lagExpr`'s own runtime type for
-                      // `LagOver`) drives the wire type downstream (see
-                      // `columnTypesOf`), so this declared type is never
-                      // read for anything but `Nullable`.
-                      Type = TBigInt false
-                      Nullable = (match wf with LagOver _ -> true | _ -> false)
-                      Default = None
-                      AutoIncrement = false
-                      PrimaryKey = false
-                      Unique = false
-                      Generated = None
-                      Collation = None
-                      Charset = None
-                      OnUpdateCurrentTimestamp = false })
+                    syntheticColumn name (TBigInt false) (match wf with LagOver _ -> true | _ -> false))
 
             let extendedColumns = columns @ syntheticColumns
 
@@ -3796,50 +3797,44 @@ and private runFullTextSelect
 
             let rows = table.Rows
 
-            // Per node: validate against an index, evaluate the constant
-            // query, and compute one score per row.
-            let computed =
-                matchNodes
-                |> List.map (fun node ->
-                    match node with
-                    | MatchAgainst(cols, query, mode) ->
-                        // The column list must equal a FULLTEXT index's set —
-                        // order-insensitive, oracle-verified (a reversed list
-                        // matches; a subset is 1191).
-                        let colSet = cols |> List.map (fun c -> c.ToLowerInvariant()) |> Set.ofList
+            // The column list must equal a FULLTEXT index's set —
+            // order-insensitive, oracle-verified (a reversed list matches;
+            // a subset is 1191) — and the query must already be a constant.
+            let validateNode node =
+                match node with
+                | MatchAgainst(cols, Lit queryValue, mode) when
+                    fulltextSets |> List.contains (cols |> List.map (fun c -> c.ToLowerInvariant()) |> Set.ofList)
+                    ->
+                    match Value.toText queryValue with
+                    | Some queryText ->
+                        cols
+                        |> traverse (Storage.resolveColumn table.Columns)
+                        |> Result.mapError Storage.toMySqlError
+                        |> Result.map (fun idxs -> node, mode, queryText, idxs)
+                    | None -> Error(1210, "Incorrect arguments to AGAINST")
+                | MatchAgainst(cols, _, _) when
+                    not (fulltextSets |> List.contains (cols |> List.map (fun c -> c.ToLowerInvariant()) |> Set.ofList))
+                    ->
+                    Error(1191, "Can't find FULLTEXT index matching the column list")
+                | MatchAgainst _ -> Error(1210, "Incorrect arguments to AGAINST")
+                | _ -> Error(1105, "fulltext pre-pass collected a non-MATCH node")
 
-                        if not (fulltextSets |> List.contains colSet) then
-                            Error(1191, "Can't find FULLTEXT index matching the column list")
-                        else
-                            match query with
-                            | Lit queryValue ->
-                                match Value.toText queryValue with
-                                | None -> Error(1210, "Incorrect arguments to AGAINST")
-                                | Some queryText ->
-                                    cols
-                                    |> traverse (Storage.resolveColumn table.Columns)
-                                    |> Result.mapError Storage.toMySqlError
-                                    |> Result.map (fun idxs ->
-                                        let docs =
-                                            rows
-                                            |> List.map (fun row ->
-                                                idxs
-                                                |> List.map (fun i -> Value.toText row.[i] |> Option.defaultValue "")
-                                                |> String.concat " ")
+            let scoreNode (node, mode, queryText: string, idxs: int list) =
+                let corpus =
+                    rows
+                    |> List.map (fun (row: Value[]) ->
+                        idxs |> List.map (fun i -> Value.toText row.[i] |> Option.defaultValue "") |> String.concat " ")
+                    |> FullText.buildCorpus
 
-                                        let corpus = FullText.buildCorpus docs
+                let scores =
+                    match mode with
+                    | NaturalLanguage -> FullText.naturalScoresOf corpus queryText
+                    | BooleanMode -> FullText.booleanScoresOf corpus queryText
+                    | QueryExpansion -> FullText.expansionScoresOf corpus queryText
 
-                                        let scores =
-                                            match mode with
-                                            | NaturalLanguage -> FullText.naturalScoresOf corpus queryText
-                                            | BooleanMode -> FullText.booleanScoresOf corpus queryText
-                                            | QueryExpansion -> FullText.expansionScoresOf corpus queryText
+                node, mode, scores
 
-                                        node, mode, scores)
-                            | _ -> Error(1210, "Incorrect arguments to AGAINST")
-                    | _ -> Error(1105, "fulltext pre-pass collected a non-MATCH node"))
-
-            match computed |> traverse id with
+            match matchNodes |> traverse validateNode |> Result.map (List.map scoreNode) with
             | Error(code, msg) -> Err(code, msg), [], []
             | Ok computed ->
 
@@ -3847,19 +3842,7 @@ and private runFullTextSelect
                 computed |> List.mapi (fun i (node, _, _) -> node, sprintf "__fsdb_match_%d__" i)
 
             let syntheticColumns =
-                synthetic
-                |> List.map (fun (_, name) ->
-                    { Name = name
-                      Type = TDouble
-                      Nullable = false
-                      Default = None
-                      AutoIncrement = false
-                      PrimaryKey = false
-                      Unique = false
-                      Generated = None
-                      Collation = None
-                      Charset = None
-                      OnUpdateCurrentTimestamp = false })
+                synthetic |> List.map (fun (_, name) -> syntheticColumn name TDouble false)
 
             let extendedColumns = table.Columns @ syntheticColumns
 
