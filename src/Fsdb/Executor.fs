@@ -276,6 +276,45 @@ and private overExprs (over: OverClause) : Expr list =
     | OverName _ -> []
     | OverSpec spec -> spec.PartitionBy @ (spec.OrderBy |> List.map fst)
 
+/// Every call to the named function inside `expr` — one walker, since the
+/// only caller (`GROUPING`, whose value depends on the ROLLUP level rather
+/// than on any row) needs the nodes themselves to substitute, not a boolean.
+let rec private collectCallsNamed (name: string) (expr: Expr) : Expr list =
+    let recur = collectCallsNamed name
+
+    match expr with
+    | FuncCall(called, args) when System.String.Equals(called, name, System.StringComparison.OrdinalIgnoreCase) ->
+        [ expr ] @ (args |> List.collect recur)
+    | WindowOver(fn, over) -> windowFnExprs fn @ overExprs over |> List.collect recur
+    | MatchAgainst(_, q, _) -> recur q
+    | FuncCall(_, args) -> args |> List.collect recur
+    | BinOp(_, a, b) -> recur a @ recur b
+    | Not e
+    | IsNull e
+    | IsNotNull e
+    | IsTrue e
+    | IsFalse e
+    | Distinct e
+    | OrderBy(e, _)
+    | Cast(e, _)
+    | Collate(e, _) -> recur e
+    | Like(e, p, _, _)
+    | Regexp(e, p) -> recur e @ recur p
+    | In(e, xs) -> recur e @ (xs |> List.collect recur)
+    | Between(e, lo, hi) -> recur e @ recur lo @ recur hi
+    | Case(subject, whens, elseBranch) ->
+        (subject |> Option.map recur |> Option.defaultValue [])
+        @ (whens |> List.collect (fun (c, r) -> recur c @ recur r))
+        @ (elseBranch |> Option.map recur |> Option.defaultValue [])
+    | Placeholder _
+    | Lit _
+    | Col _
+    | QualifiedCol _
+    | Star _
+    | Exists _
+    | Subquery _
+    | InSubquery _ -> []
+
 /// Rebuilds a window function with each carried sub-expression mapped.
 let private mapWindowFnExprs (f: Expr -> Expr) (fn: WindowFn) : WindowFn =
     match fn with
@@ -4201,7 +4240,7 @@ and private runGroupedSelect
 
     let representativeOf (groupRows: Value[] list) : Value[] = groupRows |> List.tryHead |> Option.defaultValue (probeRow columns)
 
-    let projectGroup (groupRows: Value[] list) : Result<(string * Value) list, EvalError> =
+    let projectGroup (rollup: Expr -> Expr) (groupRows: Value[] list) : Result<(string * Value) list, EvalError> =
         let representative = representativeOf groupRows
 
         select.Projections
@@ -4210,12 +4249,12 @@ and private runGroupedSelect
             | Star None -> Ok(columns |> List.mapi (fun i c -> c.Name, representative.[i]))
             | Star(Some qualifier) -> resolveStarQualifier (ctxFor representative) qualifier
             | _ ->
-                rewriteAggregates registry ctxFor groupRows expr
+                rewriteAggregates registry ctxFor groupRows (rollup expr)
                 |> Result.bind (evalExpr (ctxFor representative))
                 |> Result.map (fun v -> [ aliasOpt |> Option.defaultValue (exprLabel expr), v ]))
         |> Result.map List.concat
 
-    let havingOk (groupRows: Value[] list) : Result<bool, EvalError> =
+    let havingOk (rollup: Expr -> Expr) (groupRows: Value[] list) : Result<bool, EvalError> =
         match select.Having with
         | None -> Ok true
         | Some h ->
@@ -4225,6 +4264,7 @@ and private runGroupedSelect
             // alias nested anywhere inside it, e.g. Eloquent's
             // `having('aggregate_alias', ...)`), FROM-table columns first.
             resolveHavingRef columnIndex select.Projections h
+            |> Result.map rollup
             |> Result.bind (rewriteAggregates registry ctxFor groupRows)
             |> Result.bind (evalExpr { ctxFor (representativeOf groupRows) with Clause = GroupStatement })
             |> Result.map (fun v -> truthy v = Some true)
@@ -4233,7 +4273,7 @@ and private runGroupedSelect
     // FROM-first one — see `resolveOrderKey`'s doc) resolves against this
     // group's own already-projected output columns (`outputCols`, from
     // `projectGroup`) rather than the group's raw rows.
-    let orderKeysOf (outputCols: (string * Value) list) (groupRows: Value[] list) : Result<(Value * Collation.Collation option) list, EvalError> =
+    let orderKeysOf (rollup: Expr -> Expr) (outputCols: (string * Value) list) (groupRows: Value[] list) : Result<(Value * Collation.Collation option) list, EvalError> =
         let representative = representativeOf groupRows
         let ctx = ctxFor representative
 
@@ -4257,9 +4297,9 @@ and private runGroupedSelect
                     Ok(orderValueForExpr { ctx with Clause = OrderClause } sourceExpr v)
                 | _ :: _ :: _ -> Error(1052, sprintf "Column '%s' in order clause is ambiguous" name)
                 | [] ->
-                    rewriteAggregates registry ctxFor groupRows (Col name)
+                    rewriteAggregates registry ctxFor groupRows (rollup (Col name))
                     |> Result.bind (evalOrderKey ctx)
-            | e -> rewriteAggregates registry ctxFor groupRows e |> Result.bind (evalOrderKey ctx))
+            | e -> rewriteAggregates registry ctxFor groupRows (rollup e) |> Result.bind (evalOrderKey ctx))
 
     // Schema probe: type-checks WHERE/GROUP BY/HAVING/ORDER BY/projections
     // against an all-NULL row first, the same reasoning as `probeRow`'s
@@ -4270,11 +4310,65 @@ and private runGroupedSelect
     | Error(code, message) -> Err(code, message), [], []
     | Ok groupExprs ->
 
+    // `GROUPING(k, ...)` reports, per output row, which of its arguments this
+    // row rolled up: bit (argCount - 1 - i) for argument i, so the last
+    // argument is the low bit — MySQL's own encoding. Every argument must be
+    // a `GROUP BY` key (3602), and the whole function only exists under
+    // WITH ROLLUP (1111).
+    let groupingCalls =
+        (select.Projections |> List.map fst)
+        @ (select.OrderBy |> List.map fst)
+        @ Option.toList select.Having
+        |> List.collect (collectCallsNamed "GROUPING")
+        |> List.distinct
+
+    let groupingValue (rolledCount: int) (args: Expr list) : Result<Value, EvalError> =
+        let total = List.length groupExprs
+
+        args
+        |> List.mapi (fun i arg -> i, arg)
+        |> traverse (fun (i, arg) ->
+            match groupExprs |> List.tryFindIndex ((=) arg) with
+            | Some keyIndex ->
+                let rolled = keyIndex >= total - rolledCount
+                Ok(if rolled then 1L <<< (List.length args - 1 - i) else 0L)
+            | None -> Error(3602, sprintf "Argument #%d of GROUPING function is not in GROUP BY" (i + 1)))
+        |> Result.map (List.fold (|||) 0L >> VInt)
+
+    // The per-group expression rewrite: a key this row rolled up reads back
+    // as NULL (that is what a super-aggregate row *is*), and each GROUPING
+    // call collapses to its computed bitmask.
+    let rollupRewrite (rolledCount: int) : Result<Expr -> Expr, EvalError> =
+        if not select.Rollup then
+            if groupingCalls.IsEmpty then
+                Ok id
+            else
+                Error(1111, "Invalid use of group function")
+        else
+            groupingCalls
+            |> traverse (fun call ->
+                match call with
+                | FuncCall(_, []) -> Error(1210, "Incorrect arguments to GROUPING function")
+                | FuncCall(_, args) -> groupingValue rolledCount args |> Result.map (fun v -> call, Lit v)
+                | _ -> Error(1105, "GROUPING collector returned a non-call"))
+            |> Result.map (fun groupingPairs ->
+                let rolledKeys =
+                    groupExprs
+                    |> List.mapi (fun i key -> i, key)
+                    |> List.filter (fun (i, _) -> i >= List.length groupExprs - rolledCount)
+                    |> List.map (fun (_, key) -> key, Lit VNull)
+
+                substituteExprs (groupingPairs @ rolledKeys))
+
+    match rollupRewrite 0 with
+    | Error(code, message) -> Err(code, message), [], []
+    | Ok probeRewrite ->
+
     match matches (probeRow columns)
           |> Result.bind (fun _ -> groupExprs |> traverse (evalExpr (ctxFor (probeRow columns))) |> Result.map ignore)
-          |> Result.bind (fun _ -> havingOk [])
-          |> Result.bind (fun _ -> projectGroup [])
-          |> Result.bind (fun probeProjected -> orderKeysOf probeProjected [] |> Result.map (fun _ -> probeProjected)) with
+          |> Result.bind (fun _ -> havingOk probeRewrite [])
+          |> Result.bind (fun _ -> projectGroup probeRewrite [])
+          |> Result.bind (fun probeProjected -> orderKeysOf probeRewrite probeProjected [] |> Result.map (fun _ -> probeProjected)) with
     | Error(code, message) -> Err(code, message), [], []
     | Ok probeProjected ->
         let colNames = probeProjected |> List.map fst
@@ -4292,6 +4386,10 @@ and private runGroupedSelect
             let indexOrdered =
                 select.OrderBy.IsEmpty
                 && not groupExprs.IsEmpty
+                // WITH ROLLUP already emits in key order, with each subtotal
+                // placed after its own group — re-sorting by the key alone
+                // would scatter the subtotal rows (their key is a prefix).
+                && not select.Rollup
                 && groupByIsIndexOrdered store dbName select groupExprs
 
             // Each group carries its own key alongside its rows so the
@@ -4311,19 +4409,59 @@ and private runGroupedSelect
                         |> Result.map (fun key -> List.map2 (collationKeyOf (ctxFor row)) groupExprs key, row))
                     |> Result.map (fun keyed -> keyed |> List.groupBy fst |> List.map (fun (key, rows) -> key, rows |> List.map snd))
 
+            // `WITH ROLLUP` adds one super-aggregate row per dropped GROUP BY
+            // suffix. MySQL emits them in key order with each subtotal right
+            // after the rows it summarizes and the grand total last, which is
+            // exactly what walking the key-sorted groups prefix by prefix
+            // produces — so the rollup expansion also fixes the output order
+            // that a plain GROUP BY leaves to first-occurrence.
+            let expandRollup (groups: (Value list * Value[] list) list) : (int * Value list * Value[] list) list =
+                let probeCtx = ctxFor (probeRow columns)
+                let tagged keys = List.map2 (orderValueForExpr probeCtx) groupExprs keys
+                let ascending = groupExprs |> List.map (fun _ -> Asc)
+
+                let sortedGroups =
+                    groups |> List.sortWith (fun (ka, _) (kb, _) -> compareByOrderKeys ascending (tagged ka) (tagged kb))
+
+                let total = List.length groupExprs
+
+                let rec emit (level: int) (groups: (Value list * Value[] list) list) =
+                    if level = total then
+                        groups |> List.map (fun (key, rows) -> 0, key, rows)
+                    else
+                        groups
+                        |> List.groupBy (fun (key, _) -> List.truncate (level + 1) key)
+                        |> List.collect (fun (prefix, subgroups) ->
+                            emit (level + 1) subgroups
+                            @ (if level + 1 = total then
+                                   []
+                               else
+                                   [ total - (level + 1), prefix, subgroups |> List.collect snd ]))
+
+                emit 0 sortedGroups @ [ total, [], groups |> List.collect snd ]
+
             match buildGroups () with
             | Error(code, message) -> Err(code, message), [], []
-            | Ok groups ->
+            | Ok baseGroups ->
+                let groups =
+                    if select.Rollup then
+                        expandRollup baseGroups
+                    else
+                        baseGroups |> List.map (fun (key, rows) -> 0, key, rows)
+
                 let processGroup
-                    (key: Value list, groupRows: Value[] list)
+                    (rolledCount: int, key: Value list, groupRows: Value[] list)
                     : Result<((string * Value) list * (Value * Collation.Collation option) list * Value list) option, EvalError> =
-                    havingOk groupRows
-                    |> Result.bind (fun keep ->
-                        if not keep then
-                            Ok None
-                        else
-                            projectGroup groupRows
-                            |> Result.bind (fun proj -> orderKeysOf proj groupRows |> Result.map (fun keys -> Some(proj, keys, key))))
+                    rollupRewrite rolledCount
+                    |> Result.bind (fun rollup ->
+                        havingOk rollup groupRows
+                        |> Result.bind (fun keep ->
+                            if not keep then
+                                Ok None
+                            else
+                                projectGroup rollup groupRows
+                                |> Result.bind (fun proj ->
+                                    orderKeysOf rollup proj groupRows |> Result.map (fun keys -> Some(proj, keys, key)))))
 
                 match groups |> traverse processGroup with
                 | Error(code, message) -> Err(code, message), [], []

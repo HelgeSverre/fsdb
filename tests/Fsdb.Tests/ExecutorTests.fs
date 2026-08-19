@@ -5991,4 +5991,78 @@ let tests =
                             message
                             "In definition of view, derived table or common table expression, SELECT list and column names list have different column counts"
                             "the oracle's 1353 wording"
-                    | other -> failtestf "expected 1353, got %A" other ] ]
+                    | other -> failtestf "expected 1353, got %A" other ]
+
+          // Expectations read off the MySQL 8.4.11 oracle over
+          //   t = ('x',1,10) ('x',2,20) ('y',1,30) ('y',NULL,40) (NULL,3,50)
+          //   [a, b, v]
+          testList
+              "GROUP BY ... WITH ROLLUP and GROUPING()"
+              [ let rollupStore () =
+                    let store = newStore ()
+                    runDefault store "CREATE TABLE t (a VARCHAR(5), b INT, v INT)" |> ignore
+                    runDefault store "INSERT INTO t VALUES ('x',1,10),('x',2,20),('y',1,30),('y',NULL,40),(NULL,3,50)" |> ignore
+                    store
+
+                let expectRows (sql: string) (expected: string option list list) =
+                    match runDefault (rollupStore ()) sql with
+                    | ResultSet(_, rows) -> Expect.equal rows expected sql
+                    | other -> failtestf "expected a resultset from %s, got %A" sql other
+
+                testCase "one super-aggregate row per dropped suffix, in MySQL's own order"
+                <| fun _ ->
+                    expectRows
+                        "SELECT a, b, COUNT(*) AS c, SUM(v) AS s FROM t GROUP BY a, b WITH ROLLUP"
+                        [ [ None; Some "3"; Some "1"; Some "50" ]
+                          [ None; None; Some "1"; Some "50" ]
+                          [ Some "x"; Some "1"; Some "1"; Some "10" ]
+                          [ Some "x"; Some "2"; Some "1"; Some "20" ]
+                          [ Some "x"; None; Some "2"; Some "30" ]
+                          [ Some "y"; None; Some "1"; Some "40" ]
+                          [ Some "y"; Some "1"; Some "1"; Some "30" ]
+                          [ Some "y"; None; Some "2"; Some "70" ]
+                          [ None; None; Some "5"; Some "150" ] ]
+
+                testCase "GROUPING tells a rolled-up NULL from a real one, and packs several keys into a bitmask"
+                <| fun _ ->
+                    expectRows
+                        "SELECT a, b, GROUPING(a) AS ga, GROUPING(b) AS gb, GROUPING(a, b) AS gab FROM t GROUP BY a, b WITH ROLLUP"
+                        [ [ None; Some "3"; Some "0"; Some "0"; Some "0" ]
+                          [ None; None; Some "0"; Some "1"; Some "1" ]
+                          [ Some "x"; Some "1"; Some "0"; Some "0"; Some "0" ]
+                          [ Some "x"; Some "2"; Some "0"; Some "0"; Some "0" ]
+                          [ Some "x"; None; Some "0"; Some "1"; Some "1" ]
+                          [ Some "y"; None; Some "0"; Some "0"; Some "0" ]
+                          [ Some "y"; Some "1"; Some "0"; Some "0"; Some "0" ]
+                          [ Some "y"; None; Some "0"; Some "1"; Some "1" ]
+                          [ None; None; Some "1"; Some "1"; Some "3" ] ]
+
+                testCase "an expression group key rolls up like a column one"
+                <| fun _ ->
+                    expectRows
+                        "SELECT b MOD 2 AS m, COUNT(*) AS c, GROUPING(b MOD 2) AS g FROM t GROUP BY b MOD 2 WITH ROLLUP"
+                        [ [ None; Some "1"; Some "0" ]
+                          [ Some "0"; Some "1"; Some "0" ]
+                          [ Some "1"; Some "3"; Some "0" ]
+                          [ None; Some "5"; Some "1" ] ]
+
+                testCase "HAVING and ORDER BY both see GROUPING"
+                <| fun _ ->
+                    expectRows "SELECT a, COUNT(*) AS c FROM t GROUP BY a WITH ROLLUP HAVING GROUPING(a) = 1" [ [ None; Some "5" ] ]
+
+                    expectRows
+                        "SELECT a, SUM(v) AS s FROM t GROUP BY a WITH ROLLUP ORDER BY a DESC"
+                        [ [ Some "y"; Some "70" ]
+                          [ Some "x"; Some "30" ]
+                          [ None; Some "50" ]
+                          [ None; Some "150" ] ]
+
+                testCase "GROUPING without ROLLUP is 1111, and over a non-key is 3602"
+                <| fun _ ->
+                    match runDefault (rollupStore ()) "SELECT a, GROUPING(a) FROM t GROUP BY a" with
+                    | Err(1111, "Invalid use of group function") -> ()
+                    | other -> failtestf "expected 1111, got %A" other
+
+                    match runDefault (rollupStore ()) "SELECT a, GROUPING(b) FROM t GROUP BY a WITH ROLLUP" with
+                    | Err(3602, "Argument #1 of GROUPING function is not in GROUP BY") -> ()
+                    | other -> failtestf "expected 3602, got %A" other ] ]
