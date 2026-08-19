@@ -5588,7 +5588,7 @@ let rec execute (store: Store) (registry: Registry) (dbName: string) (ids: int64
                         bodies
                         |> List.tryPick (fun body ->
                             match runBody (bindNewRow columnIndex row body) with
-                            | Err(code, msg) -> Some(Err(code, msg))
+                            | Err _ as e -> Some e
                             | _ -> None))
                 finally
                     triggerChain.Value <- chain

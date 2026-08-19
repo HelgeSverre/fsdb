@@ -811,8 +811,6 @@ let private processlistColumns =
       strCol "STATE"
       strCol "INFO" ]
 
-/// `(ID, USER, HOST, DB, COMMAND, TIME, STATE, INFO)` per live connection —
-/// also `SHOW [FULL] PROCESSLIST`'s row source, so the two can't drift.
 /// Live connections the current viewer may see — its own only, unless it
 /// holds `PROCESS`. Shared by the `information_schema.processlist` view and
 /// `SHOW PROCESSLIST`.
@@ -823,6 +821,8 @@ let private visibleProcesses () : ProcessEntry list =
     | Some user -> all |> List.filter (fun p -> p.User = user)
     | None -> all
 
+/// `(ID, USER, HOST, DB, COMMAND, TIME, STATE, INFO)` per visible connection —
+/// the `information_schema.processlist` row source.
 let private processlistRows () : Value[] list =
     visibleProcesses ()
     |> List.map (fun ptmp ->
