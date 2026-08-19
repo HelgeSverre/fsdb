@@ -20,10 +20,19 @@ open Fsdb.Functions
 type Model =
     { Endpoint: string; ModelName: string; ApiKeyEnv: string option }
 
+// Model names differ per machine (`ollama list`), so they're overridable
+// without editing code; the endpoint is any OpenAI-compatible server.
+let private envOr (name: string) (fallback: string) =
+    match Environment.GetEnvironmentVariable name with
+    | null | "" -> fallback
+    | v -> v
+
 let models =
+    let endpoint = envOr "LLMSEARCH_ENDPOINT" "http://localhost:11434/v1"
+
     Map
-        [ "local", { Endpoint = "http://localhost:11434/v1"; ModelName = "nomic-embed-text"; ApiKeyEnv = None }
-          "local-chat", { Endpoint = "http://localhost:11434/v1"; ModelName = "llama3.2"; ApiKeyEnv = None } ]
+        [ "local", { Endpoint = endpoint; ModelName = envOr "LLMSEARCH_EMBED_MODEL" "nomic-embed-text"; ApiKeyEnv = None }
+          "local-chat", { Endpoint = endpoint; ModelName = envOr "LLMSEARCH_CHAT_MODEL" "llama3.2"; ApiKeyEnv = None } ]
 
 let http = new HttpClient()
 let mutable dryRun = false
