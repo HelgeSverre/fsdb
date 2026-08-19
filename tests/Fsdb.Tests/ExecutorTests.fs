@@ -5361,6 +5361,35 @@ let tests =
                         "SELECT BIT_COUNT(255) a, BIT_COUNT(-1) b, BIT_COUNT(0) c, BIT_COUNT('12') d, BIT_COUNT(NULL) e"
                         [ Some "8"; Some "64"; Some "0"; Some "2"; None ]
 
+                testCase "a fractional argument rounds for BIT_COUNT/EXPORT_SET/MAKEDATE but truncates for BIN and strings"
+                <| fun _ ->
+                    expectRow
+                        "SELECT BIT_COUNT(3.5) a, BIT_COUNT(2.5) b, BIT_COUNT(2.5e0) c, BIT_COUNT('3.5') d, BIT_COUNT(-0.5) e, BIN(2.5) f, OCT(9.7) g, EXPORT_SET(5.7,'Y','N',',',4) h, EXPORT_SET(5,'Y','N',',',3.7) i, EXPORT_SET('5.7','Y','N',',',4) j"
+                        [ Some "1"
+                          Some "2"
+                          Some "1"
+                          Some "2"
+                          Some "64"
+                          Some "10"
+                          Some "11"
+                          Some "N,Y,Y,N"
+                          Some "Y,N,Y,N"
+                          Some "Y,N,Y,N" ]
+
+                testCase "CONV saturates an overflowing magnitude instead of wrapping, and NULLs Int32.MinValue bases"
+                <| fun _ ->
+                    expectRow
+                        "SELECT CONV('18446744073709551616',10,10) a, CONV('9999999999999999999999',10,16) b, CONV('-18446744073709551615',10,10) c, CONV('-18446744073709551616',10,10) d, CONV('-1FFFFFFFFFFFFFFFF',16,10) e, CONV('-FFFFFFFFFFFFFFFF0',16,10) f, CONV(1,10,-2147483648) g, CONV(1,-2147483648,10) h, CONV(10,2.5,10) i"
+                        [ Some "18446744073709551615"
+                          Some "FFFFFFFFFFFFFFFF"
+                          Some "1"
+                          Some "0"
+                          Some "0"
+                          Some "18446744073709551615"
+                          None
+                          None
+                          Some "3" ]
+
                 testCase "CRC32 is the zlib CRC over the argument's text form"
                 <| fun _ ->
                     expectRow
@@ -5410,6 +5439,30 @@ let tests =
                           None
                           None
                           None ]
+
+                testCase "MAKEDATE rounds its arguments, which decides the two-digit-year pivot"
+                <| fun _ ->
+                    expectRow
+                        "SELECT MAKEDATE(2024,1.7) a, MAKEDATE(2023.7,1) b, MAKEDATE(69.6,1) c, MAKEDATE(2024,2.5) d, MAKEDATE(2024,2.5e0) e, MAKEDATE('2024','1.7') f"
+                        [ Some "2024-01-02"
+                          Some "2024-01-01"
+                          Some "1970-01-01"
+                          Some "2024-01-03"
+                          Some "2024-01-02"
+                          Some "2024-01-01" ]
+
+                testCase "CONVERT_TZ returns its argument unchanged outside the TIMESTAMP window, and rejects offsets under -13:59"
+                <| fun _ ->
+                    expectRow
+                        "SELECT CONVERT_TZ('1970-01-01 00:00:00','+05:00','+00:00') a, CONVERT_TZ('1000-01-01 00:00:00','+05:00','+00:00') b, CONVERT_TZ('9999-12-31 23:59:59','+00:00','+05:00') c, CONVERT_TZ('3001-01-18 23:59:59','+00:00','+05:00') d, CONVERT_TZ('3001-01-19 00:00:00','+00:00','+05:00') e, CONVERT_TZ('1970-01-01 00:00:01','+00:00','-05:00') f, CONVERT_TZ('2024-01-01 12:00:00','+00:00','-14:00') g, CONVERT_TZ('2024-01-01 12:00:00','+00:00','-13:59') h"
+                        [ Some "1970-01-01 00:00:00"
+                          Some "1000-01-01 00:00:00"
+                          Some "9999-12-31 23:59:59"
+                          Some "3001-01-19 04:59:59"
+                          Some "3001-01-19 00:00:00"
+                          Some "1969-12-31 19:00:01"
+                          None
+                          Some "2023-12-31 22:01:00" ]
 
                 testCase "FIELD, ELT, and EXPORT_SET match the oracle's index and bit ordering"
                 <| fun _ ->

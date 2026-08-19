@@ -549,11 +549,16 @@ let private parenExpr: Parser<Expr, unit> = between (sym "(") (sym ")") expr
 
 let private starAtom: Parser<Expr, unit> = pstring "*" >>. ws >>% Star None
 
+/// MySQL's grammar allows `DISTINCT` inside a call only for these
+/// aggregates; every other name — including `JSON_ARRAYAGG` and
+/// `JSON_OBJECTAGG`, which have no de-duplicating form at all — is a 1064
+/// syntax error, so accepting it anywhere would mean answering where MySQL
+/// refuses.
+let private distinctAggregates =
+    System.Collections.Generic.HashSet<string>([ "COUNT"; "SUM"; "AVG"; "MIN"; "MAX"; "GROUP_CONCAT" ], System.StringComparer.OrdinalIgnoreCase)
+
 /// `DISTINCT expr` inside a function call's argument list (`COUNT(DISTINCT
-/// x)`, `SUM(DISTINCT x)`, ...) — only meaningful for an aggregate, but
-/// accepted for any call syntactically, same as the codebase's other
-/// accept-and-let-the-executor-care choices (e.g. `MIgnored` column
-/// modifiers).
+/// x)`, `SUM(DISTINCT x)`, ...).
 let private distinctArg: Parser<Expr, unit> =
     (attempt (keyword "DISTINCT" >>. expr) |>> Distinct) <|> expr
 
@@ -582,8 +587,14 @@ let private convertUsingAtom: Parser<Expr, unit> =
     |>> fun (e, charset) -> FuncCall("CONVERT", [ e; Lit(VString charset) ])
 
 let private genericFuncCall: Parser<Expr, unit> =
-    attempt ((many1Satisfy2 isIdentStart isIdentChar .>> ws) .>>. (sym "(" >>. sepBy distinctArg (sym ",") .>> sym ")"))
-    |>> FuncCall
+    attempt (
+        (many1Satisfy2 isIdentStart isIdentChar .>> ws)
+        .>> sym "("
+        >>= fun name ->
+            sepBy (if distinctAggregates.Contains name then distinctArg else expr) (sym ",")
+            .>> sym ")"
+            |>> fun args -> FuncCall(name, args)
+    )
 
 let private funcCallAtom: Parser<Expr, unit> = attempt (convertUsingAtom) <|> genericFuncCall
 

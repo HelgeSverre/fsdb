@@ -3419,7 +3419,7 @@ and private evalAggregate
             Ok VNull
         else
             rows
-            |> traverse (fun row -> evalExpr (ctxFor row) (snd (unwrapDistinct arg)))
+            |> traverse (fun row -> evalExpr (ctxFor row) arg)
             |> Result.map Functions.jsonArrayAggregate
     | [ keyExpr; valueExpr ] when upper = "JSON_OBJECTAGG" ->
         if rows.IsEmpty then

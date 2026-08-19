@@ -1564,6 +1564,27 @@ let tests =
                     | Select { Projections = [ FuncCall("COUNT", [ Distinct(Col "x") ]), None ] } -> ()
                     | other -> failtestf "expected COUNT(DISTINCT x), got %A" other
 
+                testCase "DISTINCT inside a call MySQL's grammar doesn't allow it in is a 1064"
+                <| fun _ ->
+                    // Answering `[1, 1]` where the oracle refuses is worse
+                    // than refusing: JSON_ARRAYAGG/JSON_OBJECTAGG have no
+                    // DISTINCT form at all, and neither does a scalar.
+                    for sql in
+                        [ "SELECT JSON_ARRAYAGG(DISTINCT x) FROM t"
+                          "SELECT JSON_OBJECTAGG(DISTINCT k, v) FROM t"
+                          "SELECT BIT_OR(DISTINCT x) FROM t"
+                          "SELECT CONCAT(DISTINCT x) FROM t" ] do
+                        match parse sql with
+                        | Error _ -> ()
+                        | Ok stmt -> failtestf "expected %s to be a parse error, got %A" sql stmt
+
+                    for sql in
+                        [ "SELECT SUM(DISTINCT x) FROM t"
+                          "SELECT AVG(DISTINCT x) FROM t"
+                          "SELECT MIN(DISTINCT x) FROM t"
+                          "SELECT MAX(DISTINCT x) FROM t" ] do
+                        parseOk sql |> ignore
+
                 testCase "GROUP_CONCAT(x SEPARATOR '-') and GROUP_CONCAT(DISTINCT x)"
                 <| fun _ ->
                     let expectedProjections =

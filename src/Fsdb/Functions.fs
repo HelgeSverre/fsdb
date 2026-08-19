@@ -188,6 +188,22 @@ let private toUInt64 (v: Value) : uint64 =
         elif d < 0.0 then uint64 (int64 (max d -9.2233720368547758e18))
         else uint64 d
 
+/// A numeric argument to an integer-domain builtin (BIT_COUNT, EXPORT_SET,
+/// MAKEDATE, CONV's bases), rounded the way MySQL rounds it: DECIMAL half
+/// away from zero, DOUBLE half to even. A *string* argument truncates
+/// instead, so it passes through untouched and the caller's plain `int`
+/// cast does the truncating (MySQL-verified: `BIT_COUNT(3.5)` = 1 — 3.5
+/// rounds to 4 — where `BIT_COUNT('3.5')` = 2, truncating to 3).
+///
+/// Not folded into `toUInt64`: BIN/OCT/HEX are `CONV(N, 10, b)` in MySQL,
+/// which reads its first argument as a *string*, so those truncate
+/// (`BIN(2.5)` is '10', not '11').
+let private roundNumeric (v: Value) : Value =
+    match v with
+    | VDecimal d -> VDecimal(Math.Round(d, MidpointRounding.AwayFromZero))
+    | VDouble d -> VDouble(Math.Round(d, MidpointRounding.ToEven))
+    | _ -> v
+
 /// `LENGTH` counts UTF-8 bytes (MySQL's `LENGTH` is a byte length, not a
 /// character count — that's `CHAR_LENGTH`). `VBytes`' own byte count is
 /// used directly rather than round-tripping through `toText` (which decodes
@@ -1408,12 +1424,14 @@ let private lastDayFn: Scalar =
 /// days, so day 366 of a non-leap year rolls into the next year
 /// (MySQL-verified: `MAKEDATE(2024, 367)` = 2025-01-01). `dayofyear < 1`
 /// and a year outside 0..9999 are NULL, and a two-digit year follows
-/// MySQL's usual pivot (0..69 → 2000s, 70..99 → 1900s).
+/// MySQL's usual pivot (0..69 → 2000s, 70..99 → 1900s). Both arguments
+/// round rather than truncate, which decides which side of that pivot a
+/// fractional year lands on (`MAKEDATE(69.6, 1)` is 1970-01-01).
 let private makeDateFn: Scalar =
     function
     | [ y; d ] when not (anyNull [ y; d ]) ->
-        let year = int (toDouble y)
-        let day = int (toDouble d)
+        let year = int (toDouble (roundNumeric y))
+        let day = int (toDouble (roundNumeric d))
 
         let year =
             if year >= 0 && year <= 69 then year + 2000
@@ -1430,7 +1448,8 @@ let private makeDateFn: Scalar =
     | _ -> VNull
 
 /// A `CONVERT_TZ` zone argument, as minutes east of UTC. Only MySQL's
-/// numeric `[+-]HH:MM` form (range ±14:00 inclusive) is understood.
+/// numeric `[+-]HH:MM` form is understood, over MySQL's asymmetric
+/// documented range '-13:59'..'+14:00' (anything outside is NULL).
 /// ponytail: named zones (`UTC`, `America/New_York`) and `SYSTEM` return
 /// NULL, which is exactly what a MySQL server with no `mysql.time_zone*`
 /// rows loaded answers — the oracle this is pinned against. Route them
@@ -1452,19 +1471,38 @@ let private tzOffsetMinutes (spec: string) : int option =
             match Int32.TryParse(h, NumberStyles.None, CultureInfo.InvariantCulture), Int32.TryParse(m, NumberStyles.None, CultureInfo.InvariantCulture) with
             | (true, hours), (true, minutes) when minutes < 60 ->
                 let total = sign * (hours * 60 + minutes)
-                if abs total <= 14 * 60 then Some total else None
+                if total >= -839 && total <= 840 then Some total else None
             | _ -> None
         | _ -> None
 
+/// MySQL converts only when the argument, read in `from_tz`, lands inside
+/// the TIMESTAMP window — 1970-01-01 00:00:01 UTC through 3001-01-18
+/// 23:59:59 UTC (8.0.28 widened the old 2038 ceiling). Outside it the input
+/// comes back *unchanged*, not NULL and not shifted, so 1970 and 9999
+/// datetimes are fixed points. Only the source instant is tested; the
+/// result may fall outside the window (`CONVERT_TZ('1970-01-01
+/// 00:00:01','+00:00','-05:00')` = '1969-12-31 19:00:01').
 let private convertTzFn: Scalar =
+    let windowStart = DateTime(1970, 1, 1, 0, 0, 1)
+    let windowEnd = DateTime(3001, 1, 18, 23, 59, 59)
+
     function
     | [ dt; f; t ] when not (anyNull [ dt; f; t ]) ->
         match asDateTime dt, tzOffsetMinutes (req f), tzOffsetMinutes (req t) with
         | Some d, Some fromMinutes, Some toMinutes ->
-            try
-                VDateTime(d.AddMinutes(float (toMinutes - fromMinutes)))
-            with _ ->
-                VNull
+            let utc =
+                try
+                    Some(d.AddMinutes(float -fromMinutes))
+                with _ ->
+                    None
+
+            match utc with
+            | Some u when u >= windowStart && u <= windowEnd ->
+                try
+                    VDateTime(d.AddMinutes(float (toMinutes - fromMinutes)))
+                with _ ->
+                    VDateTime d
+            | _ -> VDateTime d
         | _ -> VNull
     | _ -> VNull
 
@@ -1856,6 +1894,8 @@ let private fieldFn: Scalar =
 /// per bit of `bits`, **low bit first**. `number_of_bits` defaults to 64 and
 /// is read as unsigned then capped at 64, so a negative count means 64 too
 /// (MySQL-verified: `EXPORT_SET(5,'Y','n',',',-1)` yields all 64 tokens).
+/// Both numeric arguments round rather than truncate
+/// (`EXPORT_SET(5.7,'Y','N',',',4)` exports 6's bits).
 let private exportSetFn: Scalar =
     fun args ->
         match args with
@@ -1864,10 +1904,10 @@ let private exportSetFn: Scalar =
 
             let count =
                 match rest |> List.tryItem 1 with
-                | Some n -> toUInt64 n |> min 64UL |> int
+                | Some n -> toUInt64 (roundNumeric n) |> min 64UL |> int
                 | None -> 64
 
-            let value = toUInt64 bits
+            let value = toUInt64 (roundNumeric bits)
 
             [ 0 .. count - 1 ]
             |> List.map (fun i -> if (value >>> i) &&& 1UL = 1UL then req on else req off)
@@ -1876,10 +1916,11 @@ let private exportSetFn: Scalar =
         | _ -> VNull
 
 /// `BIT_COUNT`: set bits in the argument's `BIGINT UNSIGNED` pattern, so
-/// `BIT_COUNT(-1)` is 64.
+/// `BIT_COUNT(-1)` is 64. A fractional argument rounds before the count
+/// (`BIT_COUNT(3.5)` counts 4's bits, giving 1).
 let private bitCountFn: Scalar =
     function
-    | [ v ] when not (anyNull [ v ]) -> VInt(int64 (Numerics.BitOperations.PopCount(toUInt64 v)))
+    | [ v ] when not (anyNull [ v ]) -> VInt(int64 (Numerics.BitOperations.PopCount(toUInt64 (roundNumeric v))))
     | _ -> VNull
 
 let private findInSetFn: Scalar =
@@ -2182,6 +2223,14 @@ let private baseDigits = "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ"
 /// what it already read, rather than rejecting the whole string:
 /// MySQL-verified, `CONV('12abc', 10, 10)` is `12` and `CONV('xyz', 16, 10)`
 /// is `0`, not NULL.
+///
+/// A magnitude past 2^64-1 saturates rather than wrapping, and MySQL's two
+/// string-to-integer parsers disagree about the sign of the saturated
+/// value: positive always saturates to 2^64-1, negative to 0 — but only
+/// when the number's most significant digit is a decimal one. A letter
+/// there saturates to 2^64-1 as well (MySQL-verified:
+/// `CONV('-1FFFFFFFFFFFFFFFF',16,10)` is 0 where
+/// `CONV('-FFFFFFFFFFFFFFFF0',16,10)` is 18446744073709551615).
 let private parseInBase (s: string) (b: int) : uint64 option =
     let s = s.Trim().ToUpperInvariant()
     let neg, s = if s.StartsWith "-" then true, s.Substring 1 else false, s
@@ -2191,16 +2240,30 @@ let private parseInBase (s: string) (b: int) : uint64 option =
     else
         let mutable acc = 0UL
         let mutable stop = false
+        let mutable overflow = false
+        let mutable leadDigit = -1
 
         for c in s do
             let d = baseDigits.IndexOf c
 
             if stop || d < 0 || d >= b then
                 stop <- true
+            elif acc > (UInt64.MaxValue - uint64 d) / uint64 b then
+                overflow <- true
             else
+                if leadDigit < 0 && d > 0 then
+                    leadDigit <- d
+
                 acc <- acc * uint64 b + uint64 d
 
-        Some(if neg then 0UL - acc else acc)
+        Some(
+            if overflow then
+                if neg && leadDigit >= 0 && leadDigit <= 9 then 0UL else UInt64.MaxValue
+            elif neg then
+                0UL - acc
+            else
+                acc
+        )
 
 let private toBase (n: uint64) (b: int) : string =
     if n = 0UL then
@@ -2225,14 +2288,19 @@ let private convFn: Scalar =
     function
     | [ n; f; t ] when not (anyNull [ n; f; t ]) ->
         let text = req n
-        let fromBase = int (toDouble f)
-        let toBaseArg = int (toDouble t)
-        let magnitude = abs toBaseArg
+        let fromBase = int (toDouble (roundNumeric f))
+        let toBaseArg = int (toDouble (roundNumeric t))
+        // Widened before `abs`: `abs Int32.MinValue` throws, and MySQL
+        // answers NULL for that base rather than erroring.
+        let magnitude = abs (int64 toBaseArg)
+        let fromMagnitude = abs (int64 fromBase)
 
-        if text = "" || magnitude < 2 || magnitude > 36 then
+        if text = "" || magnitude < 2L || magnitude > 36L || fromMagnitude < 2L || fromMagnitude > 36L then
             VNull
         else
-            match parseInBase text (abs fromBase) with
+            let magnitude = int magnitude
+
+            match parseInBase text (int fromMagnitude) with
             | None -> VNull
             | Some v when toBaseArg > 0 -> VString(toBase v magnitude)
             | Some v ->
