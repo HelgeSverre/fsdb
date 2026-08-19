@@ -296,6 +296,53 @@ let rec private collectColRefs (expr: Expr) : string list =
     | Subquery _
     | InSubquery _ -> []
 
+/// The first column reference — bare `Col` or table-qualified
+/// `QualifiedCol` — anywhere in an expression, left to right.
+/// `collectColRefs` above deliberately skips `QualifiedCol`; JSON_TABLE's
+/// uncorrelated source needs both, because MySQL rejects each with a
+/// *different* error (1109 vs 1054 — see `resolveFromItem`'s
+/// `FromJsonTable` case). Subqueries stay opaque, same ceiling as
+/// `collectColRefs`.
+let rec private firstColumnRef (expr: Expr) : Expr option =
+    let first = List.tryPick firstColumnRef
+
+    match expr with
+    | Col _
+    | QualifiedCol _ -> Some expr
+    | MatchAgainst(cols, q, _) -> cols |> List.map Col |> List.tryHead |> Option.orElseWith (fun () -> firstColumnRef q)
+    | FuncCall(_, args) -> first args
+    | BinOp(_, a, b) -> first [ a; b ]
+    | Not e
+    | IsNull e
+    | IsNotNull e
+    | IsTrue e
+    | IsFalse e
+    | Distinct e
+    | OrderBy(e, _)
+    | Cast(e, _)
+    | Collate(e, _) -> firstColumnRef e
+    | Like(e, p, _, _) -> first [ e; p ]
+    | Regexp(e, p) -> first [ e; p ]
+    | In(e, xs) -> first (e :: xs)
+    | Between(e, lo, hi) -> first [ e; lo; hi ]
+    | Case(subject, whens, elseBranch) ->
+        first (
+            (subject |> Option.toList)
+            @ (whens |> List.collect (fun (c, r) -> [ c; r ]))
+            @ (elseBranch |> Option.toList)
+        )
+    | Lit _
+    | Placeholder _
+    | Star _
+    | Exists _
+    | Subquery _
+    | InSubquery _
+    | RowNumberOver _
+    | LagOver _
+    | RankOver _
+    | PercentRankOver _
+    | NTileOver _ -> None
+
 /// Replaces every window-function node `collectWindowFuncs` would find with
 /// the plain `Col` reference `synthetic` maps it to (structural lookup — a
 /// small association list rather than a `Map`, since `Expr` carries no
@@ -1921,14 +1968,23 @@ and private resolveFromItem (store: Store) (registry: Registry) (dbName: string)
     | FromJsonTable(source, path, columns, _alias) ->
         // The uncorrelated site (`FROM JSON_TABLE('literal', ...) jt` as the
         // base FROM): the source evaluates in a no-columns literal context,
-        // same as INSERT ... VALUES expressions, so a stray column reference
-        // is a clean 1054. The correlated/lateral form is
-        // `applyJsonTableJoin`, which re-evaluates per left row instead.
-        let literalCtx = contextFactory store registry dbName Map.empty Map.empty None [||]
+        // same as INSERT ... VALUES expressions. The correlated/lateral form
+        // is `applyJsonTableJoin`, which re-evaluates per left row instead.
+        // A column reference here can never resolve — oracle-pinned (MySQL
+        // 8.4.11): a table-qualified one is 1109 "Unknown table 't' in a
+        // table function argument" (even when `t` appears *later* in the
+        // FROM list — a forward reference is illegal, and MySQL-compatible
+        // clients match on the 1109 code), and a bare one is 1054 with the
+        // same context string, not the literal context's 'field list'.
+        match firstColumnRef source with
+        | Some(QualifiedCol(table, _)) -> Error(Err(1109, sprintf "Unknown table '%s' in a table function argument" table))
+        | Some(Col name) -> Error(Err(1054, sprintf "Unknown column '%s' in 'a table function argument'" name))
+        | _ ->
+            let literalCtx = contextFactory store registry dbName Map.empty Map.empty None [||]
 
-        match evalExpr literalCtx source with
-        | Error(code, message) -> Error(Err(code, message))
-        | Ok doc -> jsonTableRows doc path columns |> Result.map (fun rows -> jsonTableColumnDefs columns, rows)
+            match evalExpr literalCtx source with
+            | Error(code, message) -> Error(Err(code, message))
+            | Ok doc -> jsonTableRows doc path columns |> Result.map (fun rows -> jsonTableColumnDefs columns, rows)
     | FromSubquery _ ->
         // Serve a derived table from the per-statement memo if already
         // resolved (see `fromSubqueryMemo`), else compute and record it.
@@ -2144,6 +2200,16 @@ and private applyJsonTableJoin
     (alias: string)
     : Result<(string * ColumnDef list) list * Value[] seq * string list, QueryResult> =
     match join.Kind with
+    | InnerJoin
+    | CrossJoin when not (List.isEmpty join.Using) ->
+        // MySQL runs `JOIN JSON_TABLE(...) USING (col)` as the real
+        // equi-join (oracle-probed: it filters, and `SELECT *` coalesces the
+        // name). This lateral branch has no coalesce/equi wiring, and
+        // dropping `Using` on the floor returned the full cross product —
+        // exactly the silent-inner behavior the branch below refuses for
+        // outer joins. ponytail: rejected until USING is wired through the
+        // coalesce-names/equi-key machinery; spell it as JOIN ... ON.
+        Error(Err(1064, "JSON_TABLE doesn't support JOIN ... USING; spell the equi-join as JOIN ... ON"))
     | InnerJoin
     | CrossJoin ->
         let joinColumns = jsonTableColumnDefs columns

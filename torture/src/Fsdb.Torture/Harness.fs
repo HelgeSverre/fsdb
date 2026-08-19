@@ -874,7 +874,18 @@ module ScenarioProbes =
             [| "scalar_bounds",
                "SELECT COUNT(*) AS row_count, MIN(id) AS min_id, MAX(id) AS max_id FROM scalar_matrix"
                "scalar_values",
-               "SELECT id, exact_value, approximate_value, optional_text, defaulted_text FROM scalar_matrix ORDER BY id LIMIT 16" |]
+               "SELECT id, exact_value, approximate_value, optional_text, defaulted_text FROM scalar_matrix ORDER BY id LIMIT 16"
+               // JSON_TABLE's supported subset (correlated/lateral comma-join,
+               // FOR ORDINALITY, INT-path coercion): the document is built by
+               // CONCAT per left row so the expansion is deterministic and
+               // non-empty regardless of what the json_value generator emits.
+               "json_table_lateral",
+               "SELECT s.id, jt.ord, jt.n FROM scalar_matrix AS s, JSON_TABLE(CONCAT('[', s.signed_tiny, ',', s.unsigned_tiny, ']'), '$[*]' COLUMNS (ord FOR ORDINALITY, n INT PATH '$')) AS jt ORDER BY s.id, jt.ord LIMIT 16"
+               // Inner-drop semantics over real generated JSON documents: a
+               // doc with no `$[*]` match (objects, scalars) contributes zero
+               // combinations, so both engines must agree on the drop count.
+               "json_table_inner_drop",
+               "SELECT COUNT(*) AS expanded FROM scalar_matrix AS s, JSON_TABLE(s.json_value, '$[*]' COLUMNS (v VARCHAR(255) PATH '$')) AS jt" |]
         | Relational ->
             [| "project_tenant_orphans",
                "SELECT COUNT(*) AS orphan_count FROM projects AS p LEFT JOIN tenants AS t ON p.tenant_id = t.id WHERE t.id IS NULL"

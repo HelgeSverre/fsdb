@@ -4896,6 +4896,63 @@ let tests =
                     | Error _ -> ()
                     | Ok stmt -> failtestf "expected an alias-less JSON_TABLE to fail parsing, got %A" stmt
 
+                testCase "a correlated source built by CONCAT expands like MySQL (torture probe shape)"
+                <| fun _ ->
+                    // Mirrors the `json_table_lateral` torture probe
+                    // (Harness.fs `ScenarioProbes`), oracle-verified: CONCAT
+                    // over two INT columns forms the document per left row.
+                    let store = newStore ()
+                    runDefault store "CREATE TABLE s (id INT, a INT, b INT)" |> ignore
+                    runDefault store "INSERT INTO s VALUES (1, -5, 200), (2, 7, 9)" |> ignore
+
+                    match
+                        runDefault
+                            store
+                            "SELECT s.id, jt.o, jt.n FROM s, JSON_TABLE(CONCAT('[', s.a, ',', s.b, ']'), '$[*]' COLUMNS (o FOR ORDINALITY, n INT PATH '$')) jt ORDER BY s.id, jt.o"
+                    with
+                    | ResultSet(_, rows) ->
+                        Expect.equal
+                            rows
+                            [ [ Some "1"; Some "1"; Some "-5" ]
+                              [ Some "1"; Some "2"; Some "200" ]
+                              [ Some "2"; Some "1"; Some "7" ]
+                              [ Some "2"; Some "2"; Some "9" ] ]
+                            "CONCAT-built document expands per left row"
+                    | other -> failtestf "expected 4 rows, got %A" other
+
+                testCase "a forward table reference is 1109 with MySQL's wording"
+                <| fun _ ->
+                    // Oracle: `FROM JSON_TABLE(t.j, ...) jt, t` → error 1109
+                    // "Unknown table 't' in a table function argument" — the
+                    // qualifier can't reach a table listed *after* it, and
+                    // the code is 1109 (not a 1054 unknown-column), so
+                    // clients matching on it see MySQL's behavior.
+                    let store = newStore ()
+                    runDefault store "CREATE TABLE t (id INT, j JSON)" |> ignore
+
+                    match runDefault store "SELECT jt.x FROM JSON_TABLE(t.j, '$[*]' COLUMNS (x INT PATH '$')) jt, t" with
+                    | Err(1109, message) -> Expect.equal message "Unknown table 't' in a table function argument" "MySQL's 1109 wording"
+                    | other -> failtestf "expected error 1109, got %A" other
+
+                testCase "a bare column in an uncorrelated source is 1054 in 'a table function argument'"
+                <| fun _ ->
+                    // Oracle: same context string as 1109, not 'field list'.
+                    match runDefault (newStore ()) "SELECT jt.x FROM JSON_TABLE(j, '$[*]' COLUMNS (x INT PATH '$')) jt" with
+                    | Err(1054, message) -> Expect.equal message "Unknown column 'j' in 'a table function argument'" "MySQL's 1054 wording"
+                    | other -> failtestf "expected error 1054, got %A" other
+
+                testCase "JOIN ... USING against JSON_TABLE is rejected, not silently ignored"
+                <| fun _ ->
+                    // MySQL runs the equi-join here; this subset refuses
+                    // rather than returning the cross product.
+                    let store = newStore ()
+                    runDefault store "CREATE TABLE t (x INT, j JSON)" |> ignore
+                    runDefault store "INSERT INTO t VALUES (2, '[1,2,3]')" |> ignore
+
+                    match runDefault store "SELECT jt.x FROM t JOIN JSON_TABLE(t.j, '$[*]' COLUMNS (x INT PATH '$')) jt USING (x)" with
+                    | Err(1064, _) -> ()
+                    | other -> failtestf "expected 1064, got %A" other
+
                 testCase "LEFT JOIN against JSON_TABLE is rejected (inner semantics only)"
                 <| fun _ ->
                     let store = newStore ()
