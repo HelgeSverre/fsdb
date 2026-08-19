@@ -463,6 +463,11 @@ let private boolToValue (b: bool) : Value = VInt(if b then 1L else 0L)
 /// (default backslash, as the parser leaves it unresolved in the pattern)
 /// un-wildcards the character after it. `LIKE BINARY` (caseSensitive)
 /// compares characters byte-for-byte.
+/// Every backtrack is guarded by `mark < slen`: once the last `%` has been
+/// stretched over the whole subject there is nothing left to give it, and
+/// resuming past the end would advance `mark` forever without the
+/// pattern-consumed branch ever being reached (`'x' LIKE '%\%'` hung the
+/// server that way).
 /// Iterative glob matcher (two pointers with `%`-backtracking) — O(1) stack,
 /// so a pattern with thousands of `%` or a long subject can't overflow it
 /// the way a recursive matcher would. `escape` before a `%`/`_` makes it a
@@ -490,7 +495,7 @@ let private likeMatch (escape: char) (charEq: char -> char -> bool) (subject: st
             // Pattern consumed: match iff the subject is too, else backtrack
             // to the last `%` if there was one.
             if si >= slen then result <- ValueSome true
-            elif star >= 0 then
+            elif star >= 0 && mark < slen then
                 pi <- star + 1
                 mark <- mark + 1
                 si <- mark
@@ -502,7 +507,7 @@ let private likeMatch (escape: char) (charEq: char -> char -> bool) (subject: st
                 if si < slen && charEq subject.[si] lit then
                     si <- si + 1
                     pi <- pi + 2
-                elif star >= 0 then
+                elif star >= 0 && mark < slen then
                     pi <- star + 1
                     mark <- mark + 1
                     si <- mark
@@ -522,7 +527,7 @@ let private likeMatch (escape: char) (charEq: char -> char -> bool) (subject: st
                     pi <- pi + 1
                 | _ ->
                     // Mismatch (or `_`/literal past the subject): backtrack.
-                    if star >= 0 then
+                    if star >= 0 && mark < slen then
                         pi <- star + 1
                         mark <- mark + 1
                         si <- mark
@@ -2761,6 +2766,10 @@ and private rewriteNaturalSelect
             match expr with
             | Star None -> plan |> List.map (fun (name, e) -> e, Some name)
             | Star(Some _) -> [ expr, alias ]
+            // A bare `SELECT tenant_id` over a USING join is still labelled
+            // `tenant_id` by MySQL, not by the COALESCE this rewrite puts in
+            // its place — pin the original name so the label survives.
+            | Col name when alias.IsNone -> [ rewriteExpr expr, Some name ]
             | _ -> [ rewriteExpr expr, alias ])
 
     { select with

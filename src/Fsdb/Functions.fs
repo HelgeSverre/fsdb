@@ -231,13 +231,26 @@ let private absFn: Scalar =
 /// BCL's supported range in either direction; a factor of 0/∞ (digits far
 /// outside a double's meaningful exponent range) collapses to 0, matching
 /// what rounding to a vastly-larger-than-the-value power of 10 means.
+/// Approximate-value rounding is half-to-*even* (MySQL defers to the C
+/// library here — `ROUND(2.5e0)` is 2, not 3, oracle-verified), unlike the
+/// half-away-from-zero `roundDecimalAt` uses for exact values.
+/// Past `Math.Round`'s 15-digit limit, scale up and divide back rather than
+/// multiplying by the reciprocal: `5551 / 1e20` and `5551 * 1e-20` are
+/// different doubles and MySQL's answer is the former.
 let private roundDoubleAt (d: float) (digits: int) : float =
     if digits >= 0 && digits <= 15 then
-        Math.Round(d, digits, MidpointRounding.AwayFromZero)
+        Math.Round(d, digits, MidpointRounding.ToEven)
+    elif digits > 15 then
+        let factor = Math.Pow(10.0, float digits)
+
+        if Double.IsInfinity factor || Double.IsInfinity(d * factor) then
+            d
+        else
+            Math.Round(d * factor, MidpointRounding.ToEven) / factor
     else
         let factor = Math.Pow(10.0, float -digits)
         if Double.IsInfinity factor || factor = 0.0 then 0.0
-        else Math.Round(d / factor, MidpointRounding.AwayFromZero) * factor
+        else Math.Round(d / factor, MidpointRounding.ToEven) * factor
 
 let private roundDecimalAt (d: decimal) (digits: int) : decimal =
     if digits >= 0 && digits <= 28 then
@@ -250,8 +263,9 @@ let private roundDecimalAt (d: decimal) (digits: int) : decimal =
             0M
 
 /// ROUND(x) rounds to the nearest integer; ROUND(x, n) to `n` decimal
-/// places (negative `n` rounds left of the point), matching (roughly)
-/// MySQL's half-away-from-zero rounding.
+/// places (negative `n` rounds left of the point). Exact values (INT,
+/// DECIMAL) round half away from zero; approximate ones (DOUBLE) round half
+/// to even — MySQL's split, not one rule for both.
 let private roundFn: Scalar =
     function
     | [ VNull ]
@@ -260,7 +274,7 @@ let private roundFn: Scalar =
     | [ VInt i; VInt digits ] -> if digits >= 0L then VInt i else VInt(int64 (roundDecimalAt (decimal i) (int digits)))
     | [ VDecimal d ] -> VDecimal(Math.Round(d, MidpointRounding.AwayFromZero))
     | [ VDecimal d; VInt digits ] -> VDecimal(roundDecimalAt d (int digits))
-    | [ VDouble d ] -> VDouble(Math.Round(d, MidpointRounding.AwayFromZero))
+    | [ VDouble d ] -> VDouble(Math.Round(d, MidpointRounding.ToEven))
     | [ VDouble d; VInt digits ] -> VDouble(roundDoubleAt d (int digits))
     | [ v ] -> VDouble(Math.Round(toDouble v, MidpointRounding.AwayFromZero))
     | [ v; VInt digits ] -> VDouble(roundDoubleAt (toDouble v) (int digits))
@@ -443,20 +457,33 @@ let rec private navigateJson (node: JsonNode) (segs: JPath list) : JsonNode list
             | None -> []
         | _ -> []
 
+/// MySQL escapes a quote inside a JSON string as `\"` and leaves `<`, `>`,
+/// `&` alone; `System.Text.Json`'s default encoder emits `\u0022`/`\u003C`
+/// for the same characters, which is legal JSON but not MySQL's rendering.
+let private jsonRenderOptions =
+    JsonSerializerOptions(Encoder = System.Text.Encodings.Web.JavaScriptEncoder.UnsafeRelaxedJsonEscaping)
+
 /// Renders a `JsonNode` the way MySQL's JSON printer does: a space after
-/// every `:` and `,`, recursively. (`JsonNode.ToJsonString()` alone is
-/// compact with no spaces, which reads as JSON but not as *MySQL's* JSON.)
+/// every `:` and `,`, recursively, and object keys in MySQL's *stored*
+/// order — shortest first, ties broken lexicographically — not the order
+/// they were written in. (`JsonNode.ToJsonString()` alone is compact with no
+/// spaces and keeps insertion order, which reads as JSON but not as
+/// *MySQL's* JSON.)
 let rec private formatJsonNode (node: JsonNode) : string =
     match node with
     | null -> "null"
     | :? JsonObject as o ->
         "{"
         + (o
-           |> Seq.map (fun kv -> JsonSerializer.Serialize kv.Key + ": " + formatJsonNode kv.Value)
+           |> Seq.sortWith (fun a b ->
+               match Operators.compare a.Key.Length b.Key.Length with
+               | 0 -> String.CompareOrdinal(a.Key, b.Key)
+               | other -> other)
+           |> Seq.map (fun kv -> JsonSerializer.Serialize(kv.Key, jsonRenderOptions) + ": " + formatJsonNode kv.Value)
            |> String.concat ", ")
         + "}"
     | :? JsonArray as a -> "[" + (a |> Seq.map formatJsonNode |> String.concat ", ") + "]"
-    | _ -> node.ToJsonString()
+    | _ -> node.ToJsonString jsonRenderOptions
 
 // JSON_TABLE's hooks into this module's private path machinery —
 // `Executor.jsonTableRows` compiles later and can't see the private
@@ -1437,8 +1464,14 @@ let private padFn (left: bool) : Scalar =
             VString(if left then padding + str else str + padding)
     | _ -> VNull
 
+/// `LEFT`/`RIGHT` count *bytes* on a binary operand and characters on a
+/// text one, same as MySQL. Without the `VBytes` case the bytes would go
+/// through `req`'s text view first, and any non-ASCII byte comes back out
+/// as its multi-byte UTF-8 encoding — `LEFT(x, 4)` over binary data then
+/// returns six bytes of mangled prefix.
 let private leftFn: Scalar =
     function
+    | [ VBytes b; n ] when not (anyNull [ n ]) -> VBytes(Array.truncate (max 0 (int (toDouble n))) b)
     | [ s; n ] when not (anyNull [ s; n ]) ->
         let str = req s
         VString(str.Substring(0, max 0 (min str.Length (int (toDouble n)))))
@@ -1446,6 +1479,9 @@ let private leftFn: Scalar =
 
 let private rightFn: Scalar =
     function
+    | [ VBytes b; n ] when not (anyNull [ n ]) ->
+        let k = max 0 (min b.Length (int (toDouble n)))
+        VBytes(b.[b.Length - k ..])
     | [ s; n ] when not (anyNull [ s; n ]) ->
         let str = req s
         let k = max 0 (min str.Length (int (toDouble n)))
@@ -1845,15 +1881,21 @@ let private regexpReplaceFn: Scalar =
 // Math/misc.
 // ---------------------------------------------------------------------------
 
+/// FLOOR/CEILING keep the argument's *type family*, they don't collapse it:
+/// MySQL answers a DECIMAL argument with a scale-0 DECIMAL, not a BIGINT, so
+/// `FLOOR(exact_value)` comes back on the wire as NEWDECIMAL. Going through
+/// `toDouble` for a decimal would also lose digits past 2^53.
 let private ceilFn: Scalar =
     function
     | [ VInt i ] -> VInt i
+    | [ VDecimal d ] -> VDecimal(Math.Ceiling d)
     | [ v ] when not (anyNull [ v ]) -> VInt(int64 (Math.Ceiling(toDouble v)))
     | _ -> VNull
 
 let private floorFn: Scalar =
     function
     | [ VInt i ] -> VInt i
+    | [ VDecimal d ] -> VDecimal(Math.Floor d)
     | [ v ] when not (anyNull [ v ]) -> VInt(int64 (Math.Floor(toDouble v)))
     | _ -> VNull
 
@@ -1874,11 +1916,22 @@ let private signFn: Scalar =
     | [ v ] when not (anyNull [ v ]) -> VInt(int64 (sign (toDouble v)))
     | _ -> VNull
 
+/// `TRUNCATE(d, n)` on an exact value keeps scale `n` even when the kept
+/// digits are zeros — MySQL answers `68632858.00`, and .NET's `decimal`
+/// arithmetic alone would hand back a scale-0 `68632858`. Re-parsing a
+/// fixed-point rendering pads the scale back on.
 let private truncateFn: Scalar =
     function
     | [ VDecimal dec; d ] when not (anyNull [ d ]) ->
-        let factor = decimal (Math.Pow(10.0, float (int (toDouble d))))
-        VDecimal(Math.Truncate(dec * factor) / factor)
+        let digits = int (toDouble d)
+        let factor = decimal (Math.Pow(10.0, float digits))
+        let truncated = Math.Truncate(dec * factor) / factor
+
+        if digits <= 0 then
+            VDecimal truncated
+        else
+            let scale = min digits 28
+            VDecimal(Decimal.Parse(truncated.ToString("F" + string scale, CultureInfo.InvariantCulture), CultureInfo.InvariantCulture))
     | [ v; d ] when not (anyNull [ v; d ]) ->
         let factor = Math.Pow(10.0, float (int (toDouble d)))
         VDouble(Math.Truncate(toDouble v * factor) / factor)

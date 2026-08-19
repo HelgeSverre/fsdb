@@ -885,28 +885,421 @@ module ScenarioProbes =
                // doc with no `$[*]` match (objects, scalars) contributes zero
                // combinations, so both engines must agree on the drop count.
                "json_table_inner_drop",
-               "SELECT COUNT(*) AS expanded FROM scalar_matrix AS s, JSON_TABLE(s.json_value, '$[*]' COLUMNS (v VARCHAR(255) PATH '$')) AS jt" |]
+               "SELECT COUNT(*) AS expanded FROM scalar_matrix AS s, JSON_TABLE(s.json_value, '$[*]' COLUMNS (v VARCHAR(255) PATH '$')) AS jt"
+
+               // NULL semantics: three-valued logic, the null-safe operator,
+               // NULL-aware aggregates, sort placement, and propagation through
+               // scalar functions.
+               "null_three_valued_logic",
+               "SELECT (NULL AND 0) AS and_false, (NULL AND 1) AS and_unknown, (NULL OR 1) AS or_true, (NULL OR 0) AS or_unknown, (NOT NULL) AS not_unknown, (NULL XOR 1) AS xor_unknown"
+               "null_equality_vs_null_safe",
+               "SELECT (NULL = NULL) AS eq_null, (NULL <> NULL) AS ne_null, (NULL <=> NULL) AS safe_both, (1 <=> NULL) AS safe_left, (NULL <=> 0) AS safe_right, ('a' <=> 'a') AS safe_equal"
+               "null_is_null_counts",
+               "SELECT COUNT(*) AS total_rows, SUM(optional_text IS NULL) AS text_null, SUM(optional_text IS NOT NULL) AS text_not_null, SUM(blob_value IS NULL) AS blob_null, COUNT(optional_text) AS text_counted, COUNT(blob_value) AS blob_counted FROM scalar_matrix"
+               "null_coalesce_ifnull_nullif",
+               "SELECT id, COALESCE(optional_text, '<none>') AS coalesced, IFNULL(optional_text, 'fallback') AS fallback, NULLIF(defaulted_text, 'pending') AS nullified, NULLIF(signed_tiny, signed_tiny) AS always_null, COALESCE(NULL, NULL, signed_tiny) AS third_arg FROM scalar_matrix ORDER BY id LIMIT 20"
+               "null_propagates_through_expressions",
+               "SELECT id, optional_text IS NULL AS was_null, LENGTH(optional_text) AS len_null, CONCAT('x', optional_text) AS concat_null, CONCAT_WS('-', 'x', optional_text) AS concat_ws_skips, signed_tiny + NULL AS arith_null, UPPER(optional_text) AS upper_null FROM scalar_matrix ORDER BY id LIMIT 20"
+               "null_ordering_ascending_first",
+               "SELECT id, optional_text FROM scalar_matrix ORDER BY optional_text ASC, id ASC LIMIT 12"
+               "null_ordering_descending_last",
+               "SELECT id, optional_text FROM scalar_matrix ORDER BY optional_text DESC, id ASC LIMIT 12"
+               "null_in_and_not_in_lists",
+               "SELECT COUNT(*) AS in_with_null, (SELECT COUNT(*) FROM scalar_matrix WHERE signed_tiny NOT IN (1, NULL)) AS not_in_with_null, (SELECT COUNT(*) FROM scalar_matrix WHERE optional_text IN ('nope', NULL)) AS text_in_null FROM scalar_matrix WHERE signed_tiny IN (1, NULL)"
+               "null_case_and_between_semantics",
+               "SELECT id, CASE WHEN optional_text = 'never-matches' THEN 'hit' ELSE 'else' END AS case_null_falls_else, CASE optional_text WHEN NULL THEN 'null-branch' ELSE 'else' END AS case_value_null, (optional_text BETWEEN 'a' AND 'z') AS between_null, (blob_value IS NULL) XOR (optional_text IS NULL) AS xor_nulls FROM scalar_matrix ORDER BY id LIMIT 20"
+               "null_aggregate_ignores_nulls",
+               "SELECT COUNT(*) AS rows_all, COUNT(optional_text) AS non_null_text, MIN(optional_text) AS min_text, MAX(optional_text) AS max_text, ROUND(AVG(NULLIF(signed_tiny, 0)), 6) AS avg_skipping_zero, SUM(NULLIF(unsigned_tiny, 0)) AS sum_skipping_zero FROM scalar_matrix"
+
+               // Integer domains and promotion: signed/unsigned tinyint bounds,
+               // 64-bit widening, DIV/MOD sign rules, and division by zero.
+               "integer_signedness_bounds",
+               "SELECT MIN(signed_tiny) AS min_signed_tiny, MAX(signed_tiny) AS max_signed_tiny, MIN(unsigned_tiny) AS min_unsigned_tiny, MAX(unsigned_tiny) AS max_unsigned_tiny, SUM(signed_tiny) AS sum_signed_tiny, SUM(unsigned_tiny) AS sum_unsigned_tiny, MIN(signed_big) AS min_big, MAX(signed_big) AS max_big FROM scalar_matrix"
+               "unsigned_cast_wraparound",
+               "SELECT CAST(-1 AS UNSIGNED) AS neg_one_unsigned, CAST(-9223372036854775808 AS UNSIGNED) AS min_big_unsigned, CAST(CAST(18446744073709551615 AS UNSIGNED) AS SIGNED) AS round_trip_signed, CAST(255 AS UNSIGNED) + 1 AS unsigned_add"
+               "signed_unsigned_mixed_arithmetic",
+               "SELECT id, CAST(unsigned_tiny AS SIGNED) - 300 AS widened_negative, CAST(signed_tiny AS SIGNED) * 1000000 AS widened_product, unsigned_tiny + signed_tiny AS mixed_sum, ABS(signed_tiny) AS abs_tiny, -signed_tiny AS negated FROM scalar_matrix ORDER BY id LIMIT 16"
+               "bigint_boundary_arithmetic",
+               "SELECT 9223372036854775807 AS max_bigint, 9223372036854775807 - 1 AS max_minus_one, -9223372036854775807 - 1 AS min_bigint, 9223372036854775807 DIV 2 AS half_max, SUM(signed_big) AS sum_big, ROUND(AVG(signed_big), 4) AS avg_big FROM scalar_matrix"
+               "integer_division_modulo_signs",
+               "SELECT id, signed_integer DIV 7 AS int_div, signed_integer % 7 AS pct_mod, MOD(signed_integer, -7) AS mod_negative_divisor, -signed_integer DIV 7 AS neg_div, signed_integer / 7 AS decimal_div FROM scalar_matrix ORDER BY id LIMIT 16"
+               "division_by_zero_yields_null",
+               "SELECT 1 / 0 AS div_zero, 1 DIV 0 AS int_div_zero, MOD(1, 0) AS mod_zero, 1 % 0 AS pct_zero, 0.0 / 0 AS zero_over_zero, NULLIF(5, 5) / 2 AS null_numerator"
+
+               // Exact DECIMAL vs approximate DOUBLE: scale propagation,
+               // rounding mode differences, and formatting.
+               "decimal_exact_aggregation",
+               "SELECT COUNT(*) AS row_count, SUM(exact_value) AS exact_sum, MIN(exact_value) AS exact_min, MAX(exact_value) AS exact_max, ROUND(AVG(exact_value), 10) AS exact_avg FROM scalar_matrix"
+               "decimal_division_scale_increment",
+               "SELECT id, exact_value / 3 AS div_three, exact_value / 7 AS div_seven, exact_value * 3 AS mul_three, exact_value + 0.1 AS plus_tenth FROM scalar_matrix ORDER BY id LIMIT 12"
+               "decimal_round_truncate_floor",
+               "SELECT id, ROUND(exact_value, 2) AS round_two, ROUND(exact_value, 0) AS round_zero, ROUND(exact_value, -2) AS round_hundreds, TRUNCATE(exact_value, 2) AS trunc_two, FLOOR(exact_value) AS floored, CEILING(exact_value) AS ceiled, ABS(exact_value) AS absolute FROM scalar_matrix ORDER BY id LIMIT 12"
+               "decimal_vs_double_rounding_modes",
+               "SELECT ROUND(2.5) AS dec_half_up, ROUND(-2.5) AS dec_half_up_neg, ROUND(0.5) AS dec_half_up_small, ROUND(2.5e0) AS dbl_half_even, ROUND(1.5e0) AS dbl_half_even_odd, ROUND(1.005, 2) AS dec_two_places, TRUNCATE(-1.999, 2) AS trunc_negative"
+               "double_vs_decimal_comparison",
+               "SELECT (0.1 + 0.2 = 0.3) AS decimal_exact, (0.1e0 + 0.2e0 = 0.3e0) AS double_inexact, ROUND(0.1e0 + 0.2e0 - 0.3e0, 20) AS double_residue, COUNT(*) AS gt_count FROM scalar_matrix WHERE exact_value > approximate_value"
+               "double_formatting_and_scaling",
+               "SELECT id, ROUND(approximate_value, 6) AS rounded, ROUND(approximate_value * 2, 6) AS doubled, ROUND(approximate_value / 4, 8) AS quartered, FORMAT(approximate_value, 2) AS formatted, ROUND(CAST(approximate_value AS DECIMAL(20,4)), 4) AS as_decimal FROM scalar_matrix ORDER BY id LIMIT 12"
+
+               // Implicit coercion, NO PAD trailing spaces, and the
+               // case/accent-insensitive default collation.
+               "string_to_number_coercion_arithmetic",
+               "SELECT '12abc' + 0 AS prefix_digits, '  42  ' + 0 AS padded_number, '3.5' * 2 AS decimal_string, 'abc' + 0 AS no_digits, '1e3' + 0 AS exponent_string, '0x10' + 0 AS hex_looking, '-7.5xyz' + 0 AS negative_prefix, '' + 0 AS empty_string"
+               "string_number_comparison_coercion",
+               "SELECT ('10' = 10) AS numeric_equal, ('10a' = 10) AS trailing_junk_equal, (' 10' = 10) AS leading_space_equal, ('1e2' = 100) AS exponent_equal, ('abc' = 0) AS junk_equals_zero, ('10' = '10.0') AS string_vs_string, (10 > '9') AS numeric_greater, ('10' > '9') AS lexical_greater"
+               "char_trailing_space_comparison",
+               "SELECT ('a' = 'a ') AS no_pad_equal, ('a' LIKE 'a ') AS like_trailing_space, LENGTH('a ') AS literal_length, (CAST('a' AS BINARY) = CAST('a ' AS BINARY)) AS binary_compare, ('' = ' ') AS empty_vs_space, STRCMP('a', 'a ') AS strcmp_pad"
+               "char_column_padding_vs_varchar",
+               "SELECT id, fixed_code, LENGTH(fixed_code) AS char_bytes, CHAR_LENGTH(fixed_code) AS char_chars, (fixed_code = CONCAT(fixed_code, '   ')) AS eq_padded, CONCAT('[', RPAD(fixed_code, 12, '.'), ']') AS padded, LENGTH(short_text) AS var_bytes, CHAR_LENGTH(short_text) AS var_chars FROM scalar_matrix ORDER BY id LIMIT 12"
+               "collation_case_and_accent_insensitivity",
+               "SELECT ('ABC' = 'abc') AS case_insensitive, ('e' = 'é') AS accent_insensitive, ('a' < 'B') AS mixed_case_order, STRCMP('a', 'B') AS strcmp_mixed, STRCMP('B', 'a') AS strcmp_reverse, (CAST('ABC' AS BINARY) = CAST('abc' AS BINARY)) AS binary_case_sensitive, UPPER('æøå') AS uppered"
+               "collation_group_and_order_of_text",
+               "SELECT short_text, COUNT(*) AS occurrences, MIN(id) AS first_id FROM scalar_matrix GROUP BY short_text ORDER BY short_text, first_id"
+
+               // LIKE: wildcards, backslash and custom ESCAPE, collation
+               // case folding, NULL propagation.
+               "like_wildcards_and_escape",
+               """SELECT COUNT(*) AS total, SUM(short_text LIKE 'plain%') AS prefix_match, SUM(short_text LIKE '%quote%') AS contains_match, SUM(short_text LIKE '_uote%') AS underscore_match, SUM(short_text LIKE '%\\%') AS backslash_match, SUM(fixed_code LIKE '__##%' ESCAPE '#') AS escaped_hash, SUM(long_text NOT LIKE '%zzzz%') AS not_like_match FROM scalar_matrix"""
+               "like_null_and_case_folding",
+               "SELECT ('A' LIKE 'a') AS like_case_insensitive, ('a%' LIKE 'a|%' ESCAPE '|') AS escaped_percent, ('ab' LIKE 'a|%' ESCAPE '|') AS escaped_percent_no_match, (NULL LIKE '%') AS null_subject, ('x' LIKE NULL) AS null_pattern, ('' LIKE '%') AS empty_matches_percent, ('' LIKE '_') AS empty_vs_underscore"
+
+               // Temporal: part extraction, DATE_FORMAT specifiers, INTERVAL
+               // arithmetic, DATETIME/TIMESTAMP truncation and round-trip.
+               "date_part_extraction",
+               "SELECT id, YEAR(event_date) AS yr, MONTH(event_date) AS mo, DAY(event_date) AS dy, QUARTER(event_date) AS qtr, DAYOFWEEK(event_date) AS dow_sunday_one, WEEKDAY(event_date) AS weekday_monday_zero, DAYOFYEAR(event_date) AS doy, LAST_DAY(event_date) AS month_end FROM scalar_matrix ORDER BY id LIMIT 16"
+               "date_format_specifiers",
+               "SELECT id, DATE_FORMAT(event_at, '%Y-%m-%d %H:%i:%s') AS iso_like, DATE_FORMAT(event_at, '%d/%m/%y') AS short_form, DATE_FORMAT(event_at, '%W %M') AS names, DATE_FORMAT(event_at, '%j') AS day_of_year, DATE_FORMAT(event_at, '%p %h') AS twelve_hour, DATE_FORMAT(event_date, '%%Y literal %Y') AS escaped_percent FROM scalar_matrix ORDER BY id LIMIT 12"
+               "date_interval_arithmetic",
+               "SELECT id, DATE_ADD(event_date, INTERVAL 45 DAY) AS plus_days, DATE_SUB(event_date, INTERVAL 3 MONTH) AS minus_months, event_date + INTERVAL 1 YEAR AS plus_year, DATE_ADD(event_at, INTERVAL 90 MINUTE) AS plus_minutes, DATEDIFF(event_date, '2020-01-01') AS days_since, TIMESTAMPDIFF(MONTH, event_at, '2030-01-01 00:00:00') AS months_until FROM scalar_matrix ORDER BY id LIMIT 16"
+               "datetime_component_and_truncation",
+               "SELECT id, DATE(event_at) AS date_part, TIME(event_at) AS time_part, EXTRACT(HOUR FROM event_at) AS hour_part, EXTRACT(YEAR_MONTH FROM event_at) AS year_month_part, CAST(event_at AS DATE) AS cast_date, CAST(event_date AS DATETIME) AS cast_datetime, (event_date = DATE(event_at)) AS same_day FROM scalar_matrix ORDER BY id LIMIT 12"
+               "timestamp_vs_datetime_columns",
+               "SELECT id, DATE_FORMAT(recorded_at, '%Y-%m-%d %H:%i:%s') AS ts_text, DATE_FORMAT(event_at, '%Y-%m-%d %H:%i:%s') AS dt_text, YEAR(recorded_at) AS ts_year, TIMESTAMPDIFF(DAY, recorded_at, event_at) AS day_gap FROM scalar_matrix ORDER BY id LIMIT 12"
+
+               // Explicit CAST: numeric-to-text rendering, scale narrowing, and
+               // string-to-number truncation.
+               "cast_to_char_and_decimal",
+               "SELECT id, CAST(signed_big AS CHAR) AS big_text, CAST(exact_value AS DECIMAL(20,2)) AS narrowed_decimal, CAST(approximate_value AS DECIMAL(20,4)) AS double_to_decimal, CAST(signed_tiny AS CHAR(4)) AS tiny_text, CONCAT(signed_integer, '') AS implicit_text, LENGTH(CAST(signed_big AS CHAR)) AS text_len FROM scalar_matrix ORDER BY id LIMIT 12"
+               "cast_string_to_numeric",
+               "SELECT CAST('123abc' AS SIGNED) AS prefix_signed, CAST('  -45  ' AS SIGNED) AS padded_signed, CAST('abc' AS SIGNED) AS junk_signed, CAST('12.7' AS SIGNED) AS decimal_string_signed, CAST('12.7' AS DECIMAL(10,2)) AS decimal_string_decimal, CAST('2020-01-05' AS DATE) AS string_date, CAST(1 AS CHAR) AS one_text"
+
+               // BOOLEAN is TINYINT(1): 0/1 storage versus general truthiness.
+               "boolean_is_tinyint",
+               "SELECT active, COUNT(*) AS row_count, MIN(active + 0) AS as_number, MAX(CAST(active AS SIGNED)) AS cast_signed, SUM(active) AS active_sum, MIN(IF(active, 'yes', 'no')) AS if_text FROM scalar_matrix GROUP BY active ORDER BY active"
+               "truth_value_of_nonzero",
+               "SELECT (2 = TRUE) AS two_is_true, (1 = TRUE) AS one_is_true, IF(2, 'truthy', 'falsy') AS two_truthy, IF('abc', 'truthy', 'falsy') AS string_truthy, IF('1abc', 'truthy', 'falsy') AS numeric_prefix_truthy, (NOT 2) AS not_two, (TRUE AND 2) AS and_two"
+
+               // Byte-addressed VARBINARY/BLOB, HEX/UNHEX round-trip, and
+               // utf8mb4 byte length versus character length.
+               "binary_hex_and_lengths",
+               "SELECT id, HEX(binary_value) AS hex_value, LENGTH(binary_value) AS byte_len, CHAR_LENGTH(binary_value) AS char_len, HEX(LEFT(binary_value, 4)) AS hex_prefix, (binary_value = binary_value) AS self_equal FROM scalar_matrix ORDER BY id LIMIT 16"
+               "blob_null_and_length_distribution",
+               "SELECT id, blob_value IS NULL AS is_null, LENGTH(blob_value) AS byte_len, HEX(LEFT(blob_value, 8)) AS hex_prefix, COALESCE(LENGTH(blob_value), -1) AS len_or_sentinel FROM scalar_matrix ORDER BY id LIMIT 16"
+               "hex_unhex_round_trip",
+               "SELECT id, (UNHEX(HEX(binary_value)) = binary_value) AS round_trips, HEX(UNHEX('00FF10')) AS literal_round_trip, LENGTH(UNHEX(HEX(binary_value))) AS unhexed_len, HEX(CAST(255 AS CHAR)) AS number_hex, HEX('AB') AS text_hex FROM scalar_matrix ORDER BY id LIMIT 12"
+               "multibyte_length_vs_char_length",
+               "SELECT short_text, LENGTH(short_text) AS byte_len, CHAR_LENGTH(short_text) AS char_len, LENGTH(short_text) - CHAR_LENGTH(short_text) AS extra_bytes, MIN(id) AS first_id FROM scalar_matrix GROUP BY short_text ORDER BY short_text, first_id"
+
+               // JSON: type/validity/shape over the generated documents, canonical
+               // serialization, path extraction, and -> versus ->>.
+               "json_type_histogram",
+               "SELECT JSON_TYPE(json_value) AS json_type, COUNT(*) AS row_count FROM scalar_matrix GROUP BY JSON_TYPE(json_value) ORDER BY json_type"
+               "json_valid_length_totals",
+               "SELECT COUNT(*) AS row_count, SUM(JSON_VALID(json_value)) AS valid_docs, SUM(JSON_LENGTH(json_value)) AS total_length, SUM(JSON_DEPTH(json_value)) AS total_depth FROM scalar_matrix"
+               "json_extract_root_render",
+               "SELECT id, CAST(JSON_EXTRACT(json_value, '$') AS CHAR) AS doc_text, JSON_DEPTH(json_value) AS doc_depth FROM scalar_matrix ORDER BY id LIMIT 8"
+               "json_arrow_first_element",
+               "SELECT id, CAST(json_value->'$[0]' AS CHAR) AS first_json, json_value->>'$[0]' AS first_text FROM scalar_matrix ORDER BY id LIMIT 12"
+               "json_unquote_matches_arrow_unquote",
+               "SELECT COUNT(*) AS row_count, SUM(JSON_UNQUOTE(JSON_EXTRACT(json_value, '$[0]')) <=> (json_value->>'$[0]')) AS agreeing FROM scalar_matrix"
+               "json_keys_render",
+               "SELECT id, CAST(JSON_KEYS(json_value) AS CHAR) AS keys_text FROM scalar_matrix WHERE JSON_TYPE(json_value) = 'OBJECT' ORDER BY id LIMIT 8"
+               "json_keys_length_totals",
+               "SELECT COUNT(*) AS object_rows, SUM(JSON_LENGTH(JSON_KEYS(json_value))) AS total_keys FROM scalar_matrix WHERE JSON_TYPE(json_value) = 'OBJECT'"
+               "json_path_wildcards",
+               "SELECT id, CAST(JSON_EXTRACT(json_value, '$.*') AS CHAR) AS object_values, CAST(JSON_EXTRACT(json_value, '$[*]') AS CHAR) AS array_values FROM scalar_matrix ORDER BY id LIMIT 12"
+               "json_extract_missing_key_is_null",
+               "SELECT SUM(JSON_EXTRACT(json_value, '$.__absent') IS NULL) AS missing_key_nulls, SUM(JSON_TYPE(JSON_EXTRACT(json_value, '$')) = 'NULL') AS json_null_docs, SUM(JSON_EXTRACT(json_value, '$[9999]') IS NULL) AS missing_index_nulls FROM scalar_matrix"
+
+               // JSON construction and mutation: type mapping into documents, the
+               // SET/INSERT/REPLACE distinction, and left-to-right path application.
+               "json_object_array_construction",
+               "SELECT id, CAST(JSON_OBJECT('t', signed_tiny, 'd', exact_value, 'n', optional_text, 'a', JSON_ARRAY(active, fixed_code, NULL)) AS CHAR) AS built_doc FROM scalar_matrix ORDER BY id LIMIT 8"
+               "json_set_insert_replace_render",
+               "SELECT id, CAST(JSON_SET(JSON_OBJECT('a', 1, 'b', JSON_ARRAY(1, 2)), '$.a', signed_tiny, '$.b[0]', short_text, '$.c', unsigned_tiny) AS CHAR) AS set_doc, CAST(JSON_INSERT(JSON_OBJECT('a', 1), '$.a', 9, '$.z', signed_tiny) AS CHAR) AS insert_doc, CAST(JSON_REPLACE(JSON_OBJECT('a', 1), '$.a', signed_tiny, '$.missing', 5) AS CHAR) AS replace_doc FROM scalar_matrix ORDER BY id LIMIT 8"
+               "json_remove_multi_path",
+               "SELECT id, CAST(JSON_REMOVE(JSON_OBJECT('a', signed_tiny, 'b', 2, 'c', 3), '$.b') AS CHAR) AS removed_doc, JSON_LENGTH(JSON_REMOVE(JSON_ARRAY(1, 2, 3, 4), '$[1]', '$[2]')) AS remaining FROM scalar_matrix ORDER BY id LIMIT 8"
+
+               // JSON comparison: containment, SQL-to-JSON coercion, and MySQL's
+               // fixed cross-type ordering precedence.
+               "json_contains_constructed",
+               """SELECT SUM(JSON_CONTAINS(JSON_OBJECT('a', signed_tiny, 'b', 'x'), CAST('{"b":"x"}' AS JSON))) AS contains_member, SUM(JSON_CONTAINS(JSON_ARRAY(signed_tiny, unsigned_tiny), CAST(unsigned_tiny AS JSON))) AS contains_element, SUM(JSON_CONTAINS(json_value, CAST('null' AS JSON), '$')) AS contains_json_null FROM scalar_matrix"""
+               "json_scalar_coercion_compare",
+               "SELECT SUM(JSON_EXTRACT(JSON_OBJECT('n', signed_tiny), '$.n') = signed_tiny) AS int_matches, SUM(JSON_EXTRACT(JSON_OBJECT('s', fixed_code), '$.s') = fixed_code) AS string_matches, SUM(JSON_EXTRACT(JSON_OBJECT('d', exact_value), '$.d') = exact_value) AS decimal_matches FROM scalar_matrix"
+               "json_unquoted_vs_quoted_compare",
+               "SELECT SUM(JSON_UNQUOTE(JSON_EXTRACT(JSON_OBJECT('s', fixed_code), '$.s')) = fixed_code) AS unquoted_matches, SUM(JSON_EXTRACT(JSON_OBJECT('s', fixed_code), '$.s') = fixed_code) AS quoted_matches, SUM(CAST(JSON_UNQUOTE(JSON_EXTRACT(JSON_OBJECT('n', signed_tiny), '$.n')) AS SIGNED) = signed_tiny) AS cast_matches FROM scalar_matrix"
+               "json_cross_type_ordering",
+               """SELECT CAST('1' AS JSON) < CAST('"a"' AS JSON) AS int_lt_string, CAST('true' AS JSON) > CAST('1' AS JSON) AS bool_gt_int, CAST('null' AS JSON) < CAST('1' AS JSON) AS json_null_lt_int, JSON_TYPE(CAST('1' AS JSON)) AS int_type, JSON_TYPE(CAST('1.5' AS JSON)) AS decimal_type"""
+
+               // JSON_TABLE beyond the currently supported subset: typed paths,
+               // NESTED PATH, EXISTS PATH, and ON EMPTY / ON ERROR defaults.
+               "json_table_typed_path_columns",
+               """SELECT jt.ord, jt.d, jt.s, jt.dt FROM JSON_TABLE(CAST('[{"d":"12.345","s":"hello","dt":"2020-03-04"},{"d":"-1.5","s":"unicode æøå","dt":"1999-12-31"}]' AS JSON), '$[*]' COLUMNS (ord FOR ORDINALITY, d DECIMAL(10,3) PATH '$.d', s VARCHAR(32) PATH '$.s', dt DATE PATH '$.dt')) AS jt ORDER BY jt.ord"""
+               "json_table_path_miss_yields_null",
+               """SELECT jt.ord, jt.present, jt.absent FROM JSON_TABLE(CAST('[{"a":1},{"b":2}]' AS JSON), '$[*]' COLUMNS (ord FOR ORDINALITY, present INT PATH '$.a', absent INT PATH '$.zzz')) AS jt ORDER BY jt.ord"""
+               "json_table_nested_path_unsupported",
+               """SELECT jt.a, jt.k FROM JSON_TABLE(CAST('[{"a":1,"kids":[10,11]},{"a":2,"kids":[]}]' AS JSON), '$[*]' COLUMNS (a INT PATH '$.a', NESTED PATH '$.kids[*]' COLUMNS (k INT PATH '$'))) AS jt ORDER BY jt.a, jt.k"""
+               "json_table_exists_path_unsupported",
+               """SELECT jt.ord, jt.has_a FROM JSON_TABLE(CAST('[{"a":1},{"b":2}]' AS JSON), '$[*]' COLUMNS (ord FOR ORDINALITY, has_a INT EXISTS PATH '$.a')) AS jt ORDER BY jt.ord"""
+               "json_table_default_on_empty_error_unsupported",
+               """SELECT jt.ord, jt.v FROM JSON_TABLE(CAST('[{"v":1},{"x":2},{"v":"nope"}]' AS JSON), '$[*]' COLUMNS (ord FOR ORDINALITY, v INT PATH '$.v' DEFAULT '7' ON EMPTY DEFAULT '9' ON ERROR)) AS jt ORDER BY jt.ord"""
+
+               // JSON aggregate builder fsdb has not implemented yet. (The
+               // MySQL 9 VECTOR builtins are deliberately absent: the 8.4
+               // oracle errors on them, so such a probe compares nothing.)
+               "json_arrayagg_ordered_subset_unsupported",
+               "SELECT JSON_LENGTH(JSON_ARRAYAGG(v)) AS agg_length, CAST(JSON_ARRAYAGG(v) AS CHAR) AS agg_text FROM (SELECT signed_tiny AS v FROM scalar_matrix ORDER BY id LIMIT 3) AS src"
+
+               // Common table expressions, including chained and recursive forms.
+               "cte_bucket_summary",
+               "WITH bucketed AS (SELECT id, id MOD 8 AS bucket, exact_value FROM scalar_matrix WHERE id <= 200) SELECT bucket, COUNT(*) AS row_count, SUM(exact_value) AS exact_sum FROM bucketed GROUP BY bucket ORDER BY bucket"
+               "cte_chained_reference",
+               "WITH lo AS (SELECT id, signed_integer FROM scalar_matrix WHERE id <= 50), hi AS (SELECT id, signed_integer FROM lo WHERE signed_integer > 0) SELECT COUNT(*) AS positive_count, MIN(id) AS min_id, MAX(id) AS max_id FROM hi"
+               "recursive_integer_series",
+               "WITH RECURSIVE seq (n) AS (SELECT 1 UNION ALL SELECT n + 1 FROM seq WHERE n < 12) SELECT n, n * n AS square FROM seq ORDER BY n"
+
+               // Window functions: explicit ROWS/RANGE frames, named windows, the
+               // offset and distribution families, and partitioned ranking.
+               "window_rows_frame_trailing",
+               "SELECT id, signed_integer, SUM(signed_integer) OVER (ORDER BY id ROWS BETWEEN 2 PRECEDING AND CURRENT ROW) AS trailing_sum FROM scalar_matrix WHERE id <= 12 ORDER BY id"
+               "window_range_frame_symmetric",
+               "SELECT id, SUM(signed_tiny) OVER (ORDER BY id RANGE BETWEEN 3 PRECEDING AND 3 FOLLOWING) AS window_sum FROM scalar_matrix WHERE id <= 12 ORDER BY id"
+               "lag_lead_offset_defaults",
+               "SELECT id, LAG(signed_integer, 2, -1) OVER (ORDER BY id) AS lag_two, LEAD(signed_integer, 3, -1) OVER (ORDER BY id) AS lead_three FROM scalar_matrix WHERE id <= 12 ORDER BY id"
+               "first_last_nth_value_named_window",
+               "SELECT id, FIRST_VALUE(fixed_code) OVER w AS first_code, LAST_VALUE(fixed_code) OVER w AS last_code, NTH_VALUE(fixed_code, 2) OVER w AS second_code FROM scalar_matrix WHERE id <= 10 WINDOW w AS (ORDER BY id ROWS BETWEEN UNBOUNDED PRECEDING AND UNBOUNDED FOLLOWING) ORDER BY id"
+               "percent_rank_cume_dist_ntile",
+               "SELECT id, NTILE(4) OVER (ORDER BY id) AS quartile, ROUND(PERCENT_RANK() OVER (ORDER BY id), 6) AS pct_rank, ROUND(CUME_DIST() OVER (ORDER BY id), 6) AS cume FROM scalar_matrix WHERE id <= 16 ORDER BY id"
+               "partitioned_rank_family",
+               "SELECT active, id, ROW_NUMBER() OVER (PARTITION BY active ORDER BY id) AS rn, RANK() OVER (PARTITION BY active ORDER BY signed_tiny, id) AS rnk, DENSE_RANK() OVER (PARTITION BY active ORDER BY signed_tiny) AS dense_rnk FROM scalar_matrix WHERE id <= 20 ORDER BY active, id"
+
+               // VALUES ROW(...) as a table constructor.
+               "values_table_constructor",
+               "SELECT v.n, v.label FROM (VALUES ROW(1,'one'), ROW(2,'two'), ROW(3,'three')) AS v (n, label) ORDER BY v.n"
+               "values_joined_to_table",
+               "SELECT s.id, v.label, s.fixed_code FROM scalar_matrix AS s JOIN (VALUES ROW(1,'first'), ROW(2,'second'), ROW(3,'third')) AS v (n, label) ON s.id = v.n ORDER BY s.id"
+
+               // INTERSECT/EXCEPT set operations.
+               "intersect_set_operation",
+               "(SELECT id FROM scalar_matrix WHERE id <= 20) INTERSECT (SELECT id FROM scalar_matrix WHERE id >= 15) ORDER BY id"
+               "except_set_operation",
+               "(SELECT id FROM scalar_matrix WHERE id <= 20) EXCEPT (SELECT id FROM scalar_matrix WHERE id MOD 2 = 0) ORDER BY id"
+
+               // ICU regexp builtins including the match-type flag argument.
+               "regexp_replace_substr_instr",
+               "SELECT id, REGEXP_REPLACE(fixed_code, '[0-9]+', '#') AS masked, REGEXP_SUBSTR(fixed_code, '[0-9]+') AS first_digits, REGEXP_INSTR(fixed_code, '[0-9]') AS first_digit_pos FROM scalar_matrix WHERE id <= 12 ORDER BY id"
+               "regexp_like_case_insensitive_flag",
+               "SELECT COUNT(*) AS matched, SUM(REGEXP_LIKE(short_text, 'UNICODE', 'i')) AS unicode_hits FROM scalar_matrix WHERE REGEXP_LIKE(short_text, '^QUOTE', 'i')"
+
+               // Less-common string and numeric builtins.
+               "field_elt_export_set",
+               "SELECT id, FIELD(short_text, 'plain text', 'unicode æøå 🚀') AS text_rank, ELT(1 + (id MOD 3), 'alpha', 'beta', 'gamma') AS elt_value, EXPORT_SET(unsigned_tiny, 'Y', 'n', ',', 8) AS bit_display FROM scalar_matrix WHERE id <= 12 ORDER BY id"
+               "pad_truncation_and_substring_index",
+               "SELECT id, LPAD(fixed_code, 3, '*') AS truncating_lpad, RPAD(short_text, 12, 'xy') AS cycling_rpad, SUBSTRING_INDEX(long_text, ' ', 3) AS first_words, SUBSTRING_INDEX(long_text, ' ', -2) AS last_words FROM scalar_matrix WHERE id <= 12 ORDER BY id"
+               "bit_count_crc32_conv",
+               "SELECT id, BIT_COUNT(signed_big) AS set_bits, CRC32(fixed_code) AS code_crc, CONV(unsigned_tiny, 10, 16) AS hex_value, CONV(fixed_code, 36, 10) AS base36_value FROM scalar_matrix WHERE id <= 12 ORDER BY id"
+
+               // Calendar, timezone, and compound-INTERVAL builtins.
+               "calendar_week_and_makedate",
+               "SELECT id, LAST_DAY(event_date) AS month_end, MAKEDATE(YEAR(event_date), 200) AS day_two_hundred, WEEK(event_date, 0) AS week_mode0, WEEK(event_date, 3) AS week_mode3, YEARWEEK(event_date, 1) AS iso_yearweek FROM scalar_matrix WHERE id <= 12 ORDER BY id"
+               "convert_tz_numeric_offsets",
+               "SELECT id, CONVERT_TZ(event_at, '+00:00', '+05:30') AS shifted_forward, CONVERT_TZ(event_at, '-08:00', '+00:00') AS normalized FROM scalar_matrix WHERE id <= 12 ORDER BY id"
+               "interval_arithmetic_varieties",
+               "SELECT id, event_date + INTERVAL 1 MONTH AS plus_month, event_at - INTERVAL '1:30' HOUR_MINUTE AS minus_ninety_minutes, DATE_ADD(event_date, INTERVAL '2-3' YEAR_MONTH) AS plus_two_years_three_months, TIMESTAMPADD(QUARTER, 1, event_at) AS plus_quarter, TIMESTAMPDIFF(DAY, event_date, DATE '2030-01-01') AS days_to_2030 FROM scalar_matrix WHERE id <= 12 ORDER BY id"
+
+               // ORDER BY over generated-column-style expressions.
+               "expression_order_by_generated_style",
+               "SELECT id, fixed_code, exact_value FROM scalar_matrix WHERE id <= 40 ORDER BY ABS(exact_value) DESC, CHAR_LENGTH(REGEXP_REPLACE(fixed_code, '[^0-9]', '')) , id LIMIT 10" |]
         | Relational ->
             [| "project_tenant_orphans",
                "SELECT COUNT(*) AS orphan_count FROM projects AS p LEFT JOIN tenants AS t ON p.tenant_id = t.id WHERE t.id IS NULL"
                "task_assignee_orphans",
                "SELECT COUNT(*) AS orphan_count FROM tasks AS t LEFT JOIN users AS u ON t.assignee_id = u.id WHERE t.assignee_id IS NOT NULL AND u.id IS NULL"
                "membership_roles",
-               "SELECT role, COUNT(*) AS member_count FROM memberships GROUP BY role ORDER BY role" |]
+               "SELECT role, COUNT(*) AS member_count FROM memberships GROUP BY role ORDER BY role"
+
+               // Join shapes over the FK graph: inner chains, NULL extension, the
+               // ON-versus-WHERE distinction, RIGHT/CROSS/USING/NATURAL, self-join.
+               "inner_join_three_table_chain",
+               "SELECT t.id AS task_id, p.name AS project_name, te.slug AS tenant_slug FROM tasks AS t JOIN projects AS p ON t.project_id = p.id JOIN tenants AS te ON p.tenant_id = te.id ORDER BY t.id LIMIT 12"
+               "left_join_null_extended_assignee",
+               "SELECT t.id AS task_id, t.assignee_id, u.display_name, COALESCE(u.email, '<none>') AS email FROM tasks AS t LEFT JOIN users AS u ON u.id = t.assignee_id WHERE t.assignee_id IS NULL ORDER BY t.id LIMIT 10"
+               "left_join_on_clause_vs_where_filter",
+               "SELECT (SELECT COUNT(*) FROM projects AS p LEFT JOIN tasks AS t ON t.project_id = p.id AND t.status = 'done') AS on_clause_rows, (SELECT COUNT(*) FROM projects AS p LEFT JOIN tasks AS t ON t.project_id = p.id WHERE t.status = 'done') AS where_clause_rows"
+               "right_join_projects_without_tasks",
+               "SELECT COUNT(*) AS projects_without_tasks FROM tasks AS t RIGHT JOIN projects AS p ON t.project_id = p.id WHERE t.id IS NULL"
+               "cross_join_bounded",
+               "SELECT a.id AS tenant_id, b.id AS user_id FROM (SELECT id FROM tenants ORDER BY id LIMIT 3) AS a CROSS JOIN (SELECT id FROM users ORDER BY id LIMIT 4) AS b ORDER BY a.id, b.id"
+               "join_using_tenant_id",
+               "SELECT tenant_id, COUNT(*) AS pair_count FROM projects JOIN memberships USING (tenant_id) GROUP BY tenant_id ORDER BY tenant_id LIMIT 10"
+               "natural_join_shared_column",
+               "SELECT COUNT(*) AS joined_rows, COUNT(DISTINCT tenant_id) AS distinct_tenants FROM memberships NATURAL JOIN projects"
+               "self_join_tasks_same_project",
+               "SELECT COUNT(*) AS sibling_pairs FROM tasks AS a JOIN tasks AS b ON a.project_id = b.project_id AND a.id < b.id"
+
+               // Aggregation: COUNT variants, the empty group, GROUP_CONCAT
+               // ordering, HAVING, expression keys, and ORDER BY ordinal/alias.
+               "count_star_vs_count_col_vs_distinct",
+               "SELECT COUNT(*) AS all_rows, COUNT(assignee_id) AS non_null_assignees, COUNT(DISTINCT assignee_id) AS distinct_assignees, COUNT(DISTINCT status) AS distinct_statuses FROM tasks"
+               "aggregates_over_empty_set",
+               "SELECT COUNT(*) AS row_count, COUNT(budget) AS budget_count, SUM(budget) AS budget_sum, AVG(budget) AS budget_avg, MIN(budget) AS budget_min, MAX(budget) AS budget_max FROM projects WHERE id < 0"
+               "group_concat_distinct_ordered",
+               "SELECT tenant_id, COUNT(*) AS member_count, GROUP_CONCAT(DISTINCT role ORDER BY role SEPARATOR '|') AS roles FROM memberships GROUP BY tenant_id ORDER BY tenant_id LIMIT 10"
+               "group_by_having_task_counts",
+               "SELECT project_id, COUNT(*) AS task_count, COUNT(assignee_id) AS assigned_count FROM tasks GROUP BY project_id HAVING COUNT(*) >= 4 AND COUNT(assignee_id) > 0 ORDER BY task_count DESC, project_id LIMIT 20"
+               "group_by_expression_modulo",
+               "SELECT (project_id % 7) AS bucket, COUNT(*) AS task_count, MIN(id) AS min_id, MAX(id) AS max_id FROM tasks GROUP BY (project_id % 7) ORDER BY bucket"
+               "order_by_ordinal_and_alias",
+               "SELECT status AS s, COUNT(*) AS n FROM tasks GROUP BY status ORDER BY 2 DESC, s ASC"
+
+               // Subqueries: NOT IN against NULLs, correlated EXISTS as a semi-join,
+               // and scalar subqueries in the select list.
+               "not_in_subquery_with_nulls",
+               "SELECT (SELECT COUNT(*) FROM users AS u WHERE u.id NOT IN (SELECT t.assignee_id FROM tasks AS t)) AS not_in_with_nulls, (SELECT COUNT(*) FROM users AS u WHERE u.id NOT IN (SELECT t.assignee_id FROM tasks AS t WHERE t.assignee_id IS NOT NULL)) AS not_in_null_filtered"
+               "correlated_exists_negative_budget",
+               "SELECT te.id AS tenant_id, te.slug FROM tenants AS te WHERE EXISTS (SELECT 1 FROM projects AS p WHERE p.tenant_id = te.id AND p.budget < 0) ORDER BY te.id LIMIT 10"
+               "scalar_subquery_in_select_list",
+               "SELECT p.id AS project_id, (SELECT COUNT(*) FROM tasks AS t WHERE t.project_id = p.id) AS task_count, (SELECT MAX(t.id) FROM tasks AS t WHERE t.project_id = p.id AND t.status = 'done') AS max_done_task FROM projects AS p ORDER BY p.id LIMIT 12"
+
+               // Set operations, OFFSET past the tail, and partitioned ROW_NUMBER.
+               "union_all_ordered_over_branches",
+               "(SELECT id AS entity_id, 'tenant' AS source FROM tenants WHERE id <= 3) UNION ALL (SELECT id, 'user' FROM users WHERE id <= 3) ORDER BY source, entity_id"
+               "limit_offset_tail_boundary",
+               "SELECT id, slug FROM tenants ORDER BY id LIMIT 5 OFFSET 998"
+               "window_row_number_partition",
+               "SELECT t.project_id, t.id AS task_id, ROW_NUMBER() OVER (PARTITION BY t.project_id ORDER BY t.id) AS rn FROM tasks AS t WHERE t.project_id <= 4 ORDER BY t.project_id, t.id"
+
+               // JSON over a nullable column: SQL NULL versus stored JSON null, keys,
+               // correlated JSON_TABLE expansion, and the object aggregate.
+               "tenant_settings_type_histogram",
+               "SELECT JSON_TYPE(settings) AS json_type, COUNT(*) AS row_count FROM tenants GROUP BY JSON_TYPE(settings) ORDER BY json_type"
+               "tenant_settings_null_and_length_totals",
+               "SELECT SUM(settings IS NULL) AS sql_nulls, SUM(JSON_TYPE(settings) = 'NULL') AS json_nulls, SUM(JSON_VALID(settings)) AS valid_docs, SUM(JSON_LENGTH(settings)) AS total_length FROM tenants"
+               "tenant_settings_keys_sample",
+               "SELECT slug, CAST(JSON_KEYS(settings) AS CHAR) AS keys_text, settings->>'$.name' AS name_text, JSON_LENGTH(settings) AS member_count FROM tenants WHERE JSON_TYPE(settings) = 'OBJECT' ORDER BY slug LIMIT 10"
+               "project_metadata_json_table_expansion",
+               "SELECT p.id, jt.ord, jt.v FROM projects AS p, JSON_TABLE(p.metadata, '$[*]' COLUMNS (ord FOR ORDINALITY, v VARCHAR(255) PATH '$')) AS jt ORDER BY p.id, jt.ord LIMIT 20"
+               "tenant_settings_objectagg_unsupported",
+               "SELECT CAST(JSON_OBJECTAGG(slug, JSON_TYPE(settings)) AS CHAR) AS agg_text FROM (SELECT slug, settings FROM tenants ORDER BY slug LIMIT 3) AS src"
+
+               // LATERAL derived tables, WITH ROLLUP plus GROUPING(), and a CTE
+               // carrying a window function.
+               "lateral_correlated_aggregate",
+               "SELECT p.id, agg.task_count FROM projects AS p, LATERAL (SELECT COUNT(*) AS task_count FROM tasks AS t WHERE t.project_id = p.id) AS agg WHERE p.id <= 10 ORDER BY p.id"
+               "lateral_top_one_per_tenant",
+               "SELECT t.id AS tenant_id, x.id AS project_id, x.name FROM tenants AS t JOIN LATERAL (SELECT p.id, p.name FROM projects AS p WHERE p.tenant_id = t.id ORDER BY p.id LIMIT 1) AS x ON TRUE WHERE t.id <= 10 ORDER BY t.id, x.id"
+               "rollup_with_grouping_flag",
+               "SELECT status, COUNT(*) AS task_count, GROUPING(status) AS is_grand_total FROM tasks GROUP BY status WITH ROLLUP ORDER BY GROUPING(status), status"
+               "rollup_two_level_with_expression_key",
+               "SELECT role, tenant_id MOD 4 AS tenant_bucket, COUNT(*) AS member_count FROM memberships GROUP BY role, tenant_id MOD 4 WITH ROLLUP ORDER BY GROUPING(role), role, GROUPING(tenant_id MOD 4), tenant_bucket"
+               "cte_window_dense_rank_per_tenant",
+               "WITH ranked AS (SELECT p.tenant_id, p.id, p.budget, ROW_NUMBER() OVER (PARTITION BY p.tenant_id ORDER BY p.budget DESC, p.id) AS budget_rank FROM projects AS p) SELECT tenant_id, id, budget, budget_rank FROM ranked WHERE budget_rank = 1 AND tenant_id <= 10 ORDER BY tenant_id, id" |]
         | Commerce ->
             [| "order_totals",
                "SELECT status, COUNT(*) AS order_count, SUM(total) AS total_amount FROM orders GROUP BY status ORDER BY status"
                "item_order_orphans",
                "SELECT COUNT(*) AS orphan_count FROM order_items AS i LEFT JOIN orders AS o ON i.order_id = o.id WHERE o.id IS NULL"
                "extended_prices",
-               "SELECT order_id, SUM(quantity * unit_price) AS extended_amount FROM order_items GROUP BY order_id ORDER BY order_id LIMIT 16" |]
+               "SELECT order_id, SUM(quantity * unit_price) AS extended_amount FROM order_items GROUP BY order_id ORDER BY order_id LIMIT 16"
+
+               // Join shapes across the order graph, including the payments
+               // hierarchy self-join and USING() fan-out.
+               "left_join_null_product_orphans",
+               "SELECT i.id AS item_id, i.product_id, p.sku, COALESCE(p.name, '<missing>') AS product_name FROM order_items AS i LEFT JOIN products AS p ON p.id = i.product_id WHERE i.product_id IS NULL ORDER BY i.id LIMIT 10"
+               "four_table_join_chain",
+               "SELECT o.id AS order_id, c.email, p.sku, i.quantity FROM orders AS o JOIN customers AS c ON c.id = o.customer_id JOIN order_items AS i ON i.order_id = o.id JOIN products AS p ON p.id = i.product_id ORDER BY o.id, i.id LIMIT 12"
+               "payments_self_join_parent_child",
+               "SELECT c.id AS child_id, c.parent_id, c.state AS child_state, p.state AS parent_state FROM payments AS c JOIN payments AS p ON p.id = c.parent_id ORDER BY c.id LIMIT 12"
+               "join_using_order_id",
+               "SELECT order_id, COUNT(*) AS combination_count FROM order_items JOIN payments USING (order_id) GROUP BY order_id ORDER BY order_id LIMIT 10"
+
+               // Aggregation: an all-NULL group, GROUP_CONCAT ordering, HAVING and
+               // GROUP BY over select-list aliases, tuple COUNT(DISTINCT).
+               "aggregates_over_all_null_column",
+               "SELECT COUNT(*) AS row_count, COUNT(product_id) AS product_count, SUM(product_id) AS product_sum, MIN(product_id) AS product_min, MAX(product_id) AS product_max, AVG(quantity) AS avg_quantity FROM order_items WHERE product_id IS NULL"
+               "group_concat_items_ordered",
+               "SELECT order_id, GROUP_CONCAT(quantity ORDER BY id SEPARATOR ',') AS quantities FROM order_items WHERE order_id <= 6 GROUP BY order_id ORDER BY order_id"
+               "group_by_having_on_alias",
+               "SELECT customer_id, COUNT(*) AS order_count, SUM(total) AS total_amount FROM orders GROUP BY customer_id HAVING order_count >= 8 ORDER BY order_count DESC, customer_id LIMIT 20"
+               "group_by_case_bucket_alias",
+               "SELECT CASE WHEN quantity < 100 THEN 'small' WHEN quantity < 500 THEN 'medium' ELSE 'large' END AS bucket, COUNT(*) AS line_count, SUM(line_total) AS bucket_amount FROM order_items GROUP BY bucket ORDER BY bucket"
+               "count_distinct_column_pairs",
+               "SELECT COUNT(*) AS all_rows, COUNT(DISTINCT product_id) AS distinct_products, COUNT(DISTINCT order_id, product_id) AS distinct_pairs FROM order_items"
+
+               // Subqueries and derived tables: IN versus EXISTS agreement and NOT IN
+               // against a NULL-bearing subquery.
+               "in_subquery_vs_correlated_exists",
+               "SELECT (SELECT COUNT(*) FROM orders AS o WHERE o.id IN (SELECT p.order_id FROM payments AS p WHERE p.state = 'captured')) AS via_in, (SELECT COUNT(*) FROM orders AS o WHERE EXISTS (SELECT 1 FROM payments AS p WHERE p.order_id = o.id AND p.state = 'captured')) AS via_exists"
+               "not_in_with_nullable_product_ids",
+               "SELECT (SELECT COUNT(*) FROM products AS p WHERE p.id NOT IN (SELECT i.product_id FROM order_items AS i)) AS not_in_with_nulls, (SELECT COUNT(*) FROM products AS p WHERE p.id NOT IN (SELECT i.product_id FROM order_items AS i WHERE i.product_id IS NOT NULL)) AS not_in_null_filtered"
+               "derived_table_top_paid_orders",
+               "SELECT d.order_id, d.line_count, d.line_amount FROM (SELECT order_id, COUNT(*) AS line_count, SUM(line_total) AS line_amount FROM order_items GROUP BY order_id) AS d JOIN orders AS o ON o.id = d.order_id WHERE o.status = 'paid' ORDER BY d.line_amount DESC, d.order_id LIMIT 10"
+
+               // Set operations, DISTINCT tuples, tail paging, and partitioned ranking.
+               "union_dedup_vs_union_all",
+               "SELECT 'union' AS kind, COUNT(*) AS label_count FROM (SELECT state AS label FROM payments UNION SELECT status FROM orders) AS u UNION ALL SELECT 'union_all', COUNT(*) FROM (SELECT state AS label FROM payments UNION ALL SELECT status FROM orders) AS a ORDER BY kind"
+               "distinct_multi_column_projection",
+               "SELECT DISTINCT customer_id, status FROM orders ORDER BY customer_id, status LIMIT 20"
+               "limit_offset_last_page",
+               "SELECT id, reference, status FROM orders ORDER BY id LIMIT 5 OFFSET 3998"
+               "order_by_ordinal_descending_group",
+               "SELECT status AS s, COUNT(*) AS n, ROUND(AVG(total), 4) AS avg_total FROM orders GROUP BY status ORDER BY 1 DESC"
+               "window_rank_dense_rank_partition",
+               "SELECT i.order_id, i.id AS item_id, i.quantity, RANK() OVER (PARTITION BY i.order_id ORDER BY i.quantity DESC) AS quantity_rank, DENSE_RANK() OVER (PARTITION BY i.order_id ORDER BY i.quantity DESC) AS quantity_dense_rank FROM order_items AS i WHERE i.order_id <= 4 ORDER BY i.order_id, i.id"
+
+               // JSON over the commerce columns: shape histogram, rendering,
+               // containment, mutation, wildcard counts, and the array aggregate.
+               "product_attributes_type_histogram",
+               "SELECT JSON_TYPE(attributes) AS json_type, COUNT(*) AS row_count, SUM(JSON_LENGTH(attributes)) AS total_length FROM products GROUP BY JSON_TYPE(attributes) ORDER BY json_type"
+               "customer_profile_extract_sample",
+               "SELECT id, CAST(JSON_EXTRACT(profile, '$') AS CHAR) AS profile_text, profile->>'$.tier' AS tier_text, JSON_LENGTH(profile) AS profile_length FROM customers ORDER BY id LIMIT 10"
+               "shipping_address_contains_totals",
+               """SELECT SUM(JSON_CONTAINS(shipping_address, CAST('"US"' AS JSON), '$')) AS contains_us, SUM(JSON_LENGTH(shipping_address)) AS total_length, SUM(JSON_DEPTH(shipping_address)) AS total_depth FROM orders"""
+               "product_attributes_json_set_render",
+               "SELECT id, CAST(JSON_SET(attributes, '$.sku', sku, '$.price', unit_price) AS CHAR) AS enriched FROM products ORDER BY id LIMIT 8"
+               "order_item_metadata_wildcard_counts",
+               "SELECT COUNT(*) AS rows_with_metadata, SUM(JSON_LENGTH(JSON_EXTRACT(metadata, '$.*'))) AS object_member_count, SUM(JSON_LENGTH(JSON_EXTRACT(metadata, '$[*]'))) AS array_element_count FROM order_items WHERE metadata IS NOT NULL"
+               "customer_profile_arrayagg_unsupported",
+               "SELECT CAST(JSON_ARRAYAGG(JSON_OBJECT('id', id, 'email', email)) AS CHAR) AS agg_text FROM (SELECT id, email FROM customers ORDER BY id LIMIT 3) AS src"
+
+               // Recursive CTE over the payments tree, decimal running-total frames,
+               // LATERAL top-N-per-group, and the ALL multiset set operations.
+               "recursive_payment_hierarchy_depth",
+               "WITH RECURSIVE chain AS (SELECT id, parent_id, 0 AS depth FROM payments WHERE parent_id IS NULL AND id <= 50 UNION ALL SELECT p.id, p.parent_id, c.depth + 1 FROM payments AS p JOIN chain AS c ON p.parent_id = c.id) SELECT depth, COUNT(*) AS node_count FROM chain GROUP BY depth ORDER BY depth"
+               "window_running_total_decimal",
+               "SELECT i.order_id, i.id, i.line_total, SUM(i.line_total) OVER (PARTITION BY i.order_id ORDER BY i.id ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW) AS running_total FROM order_items AS i WHERE i.order_id <= 3 ORDER BY i.order_id, i.id"
+               "lateral_top_line_item_per_order",
+               "SELECT o.id AS order_id, top_item.id AS item_id, top_item.line_total FROM orders AS o JOIN LATERAL (SELECT i.id, i.line_total FROM order_items AS i WHERE i.order_id = o.id ORDER BY i.line_total DESC, i.id LIMIT 1) AS top_item ON TRUE WHERE o.id <= 10 ORDER BY o.id, top_item.id"
+               "except_all_multiset_difference",
+               "((SELECT status FROM orders WHERE id <= 100) EXCEPT ALL (SELECT status FROM orders WHERE id <= 50)) ORDER BY status"
+               "intersect_all_multiset_intersection",
+               "((SELECT state FROM payments WHERE id <= 200) INTERSECT ALL (SELECT state FROM payments WHERE id BETWEEN 100 AND 300)) ORDER BY state" |]
         | Volume ->
             [| "volume_bounds",
                "SELECT COUNT(*) AS row_count, MIN(id) AS min_id, MAX(id) AS max_id, SUM(signed_value) AS signed_sum FROM volume_rows"
                "volume_groups",
                "SELECT active, COUNT(*) AS row_count, SUM(exact_value) AS exact_sum FROM volume_rows GROUP BY active ORDER BY active"
                "volume_edges",
-               "SELECT id, bucket, signed_value, exact_value, active, payload FROM volume_rows ORDER BY id LIMIT 16" |]
+               "SELECT id, bucket, signed_value, exact_value, active, payload FROM volume_rows ORDER BY id LIMIT 16"
+
+               // Windows over aggregate output, NTILE bucket distribution, and a
+               // recursive series used for gap-filling.
+               "window_over_grouped_rows",
+               "SELECT bucket, COUNT(*) AS row_count, ROUND(AVG(signed_value), 4) AS avg_value, SUM(COUNT(*)) OVER (ORDER BY bucket ROWS UNBOUNDED PRECEDING) AS running_rows FROM volume_rows WHERE bucket < 64 GROUP BY bucket ORDER BY bucket"
+               "cte_ntile_decile_bounds",
+               "WITH ranked AS (SELECT id, signed_value, NTILE(10) OVER (ORDER BY signed_value, id) AS decile FROM volume_rows) SELECT decile, COUNT(*) AS row_count, MIN(signed_value) AS min_value, MAX(signed_value) AS max_value FROM ranked GROUP BY decile ORDER BY decile"
+               "recursive_series_joined_to_table",
+               "WITH RECURSIVE buckets (b) AS (SELECT 0 UNION ALL SELECT b + 1 FROM buckets WHERE b < 15) SELECT buckets.b, COUNT(v.id) AS row_count FROM buckets LEFT JOIN volume_rows AS v ON v.bucket = buckets.b GROUP BY buckets.b ORDER BY buckets.b" |]
 
 [<RequireQualifiedAccess>]
 module Comparison =
@@ -1282,8 +1675,14 @@ module Runner =
                         if keepRunning then
                             let probeRecords = ResizeArray<ProbeRecord>()
 
+                            // Every probe runs, even after one fails. A probe
+                            // that hangs fsdb (or leaves the connection
+                            // broken) used to hide every probe behind it in
+                            // the corpus, which is exactly the evidence a
+                            // triage pass needs. The *first* failure still
+                            // defines the case's classification and
+                            // signature, so nothing about the ledger changes.
                             for name, sql in ScenarioProbes.all options.Scenario do
-                                if keepRunning then
                                     let parserStatus, parserDetail =
                                         match Fsdb.Parser.parse sql with
                                         | Ok _ -> "ok", ""
@@ -1311,15 +1710,18 @@ module Runner =
                                           Equal = result = "pass"
                                           Detail = detail }
 
-                                    if result <> "pass" then
+                                    if result <> "pass" && failureEvidenceHash = "" then
                                         classification <- result
                                         failureEvidenceHash <- Hashing.text sql
                                         signatureDetail <- detail
                                         writeText (Path.Combine(caseDirectory, "failure.sql")) sql
-                                        keepRunning <- false
 
                             probes <- probeRecords.ToArray()
                             Json.write (Path.Combine(caseDirectory, "probes.json")) probes
+                            // A failing probe still stops the case before the
+                            // snapshot comparison, whose category would
+                            // otherwise overwrite the probe's.
+                            keepRunning <- probes |> Array.forall (fun probe -> probe.Equal)
 
                         if keepRunning then
                             let snapshotStopwatch = Stopwatch.StartNew()
@@ -1367,8 +1769,8 @@ module Runner =
             let statementHash, mysqlError, fsdbError =
                 if failureEvidenceHash <> "" then
                     let mysqlError, fsdbError =
-                        match Array.tryLast probes with
-                        | Some probe when not probe.Equal -> probe.MySql.ErrorCode, probe.Fsdb.ErrorCode
+                        match probes |> Array.tryFind (fun probe -> not probe.Equal) with
+                        | Some probe -> probe.MySql.ErrorCode, probe.Fsdb.ErrorCode
                         | _ ->
                             match Array.tryLast statements with
                             | Some statement -> statement.MySql.ErrorCode, statement.Fsdb.ErrorCode
@@ -1383,12 +1785,29 @@ module Runner =
             let subjectFailureSignature =
                 if classification = "pass" then "" else failureSignature classification statementHash mysqlError fsdbError signatureDetail
 
+            // Every failing probe's own signature, not just the first one's.
+            // The case is only "known" when the ledger covers all of them —
+            // otherwise ledgering the earliest gap in the corpus would mark
+            // the case green while silently carrying whatever fails later.
+            let probeFailureSignatures =
+                probes
+                |> Array.filter (fun probe -> not probe.Equal)
+                |> Array.map (fun probe ->
+                    failureSignature
+                        (classifyProbe probe.ParserStatus probe.MySql probe.Fsdb)
+                        probe.SqlSha256
+                        probe.MySql.ErrorCode
+                        probe.Fsdb.ErrorCode
+                        probe.Detail)
+
             let classification, finalFailureSignature, known, finalDetail =
                 match loadKnownGaps () with
                 | Ok knownGaps ->
                     classification,
                     subjectFailureSignature,
-                    subjectFailureSignature <> "" && knownGaps.Contains subjectFailureSignature,
+                    subjectFailureSignature <> ""
+                    && knownGaps.Contains subjectFailureSignature
+                    && probeFailureSignatures |> Array.forall knownGaps.Contains,
                     signatureDetail
                 | Error error ->
                     let detail = "invalid harness configuration: " + error
