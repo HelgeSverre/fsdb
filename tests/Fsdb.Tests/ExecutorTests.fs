@@ -5316,4 +5316,149 @@ let tests =
                 <| fun _ ->
                     match runDefault (newStore ()) "SELECT TRUNCATE(1.999, 2) AS t, FLOOR(1.5) AS f, CEILING(1.5) AS c" with
                     | ResultSet(_, [ [ Some "1.99"; Some "1"; Some "2" ] ]) -> ()
-                    | other -> failtestf "expected 1.99, 1, 2, got %A" other ] ]
+                    | other -> failtestf "expected 1.99, 1, 2, got %A" other ]
+
+          // Every expected value below was read off the MySQL 8.4.11 oracle
+          // before the function was written, not derived from the code.
+          testList
+              "builtins pinned to the 8.4 oracle"
+              [ let expectRow (sql: string) (expected: string option list) =
+                    match runDefault (newStore ()) sql with
+                    | ResultSet(_, [ row ]) -> Expect.equal row expected sql
+                    | other -> failtestf "expected a single row from %s, got %A" sql other
+
+                testCase "MOD is an infix keyword operator binding as tightly as %"
+                <| fun _ ->
+                    expectRow
+                        "SELECT 7 MOD 3 a, -7 MOD 3 b, 7 MOD 0 c, 1 + 2 MOD 2 d, 7 mod 3 e, MOD(7, 3) f"
+                        [ Some "1"; Some "-1"; None; Some "1"; Some "1"; Some "1" ]
+
+                testCase "a column whose name starts with MOD is not the MOD operator"
+                <| fun _ ->
+                    let store = newStore ()
+                    runDefault store "CREATE TABLE m (mode_id INT)" |> ignore
+                    runDefault store "INSERT INTO m (mode_id) VALUES (5)" |> ignore
+
+                    match runDefault store "SELECT mode_id FROM m" with
+                    | ResultSet(_, [ [ Some "5" ] ]) -> ()
+                    | other -> failtestf "expected 5, got %A" other
+
+                testCase "JSON_DEPTH counts nesting, with an empty container still depth 1"
+                <| fun _ ->
+                    expectRow
+                        "SELECT JSON_DEPTH('1') a, JSON_DEPTH('[]') b, JSON_DEPTH('{}') c, JSON_DEPTH('[1,2]') d, JSON_DEPTH('[1,[2,[3]]]') e, JSON_DEPTH('{\"a\":{\"b\":1}}') f, JSON_DEPTH(NULL) g"
+                        [ Some "1"; Some "1"; Some "1"; Some "2"; Some "4"; Some "3"; None ]
+
+                testCase "DAYOFYEAR is 1-based and leap-year aware"
+                <| fun _ ->
+                    expectRow
+                        "SELECT DAYOFYEAR('2024-03-01') a, DAYOFYEAR('2023-12-31') b, DAYOFYEAR(NULL) c"
+                        [ Some "61"; Some "365"; None ]
+
+                testCase "BIT_COUNT reads its argument as BIGINT UNSIGNED"
+                <| fun _ ->
+                    expectRow
+                        "SELECT BIT_COUNT(255) a, BIT_COUNT(-1) b, BIT_COUNT(0) c, BIT_COUNT('12') d, BIT_COUNT(NULL) e"
+                        [ Some "8"; Some "64"; Some "0"; Some "2"; None ]
+
+                testCase "CRC32 is the zlib CRC over the argument's text form"
+                <| fun _ ->
+                    expectRow
+                        "SELECT CRC32('abc') a, CRC32('') b, CRC32(123) c, CRC32(NULL) d"
+                        [ Some "891568578"; Some "0"; Some "2286445522"; None ]
+
+                testCase "CONV converts both directions across bases 2..36, truncating at the first invalid digit"
+                <| fun _ ->
+                    expectRow
+                        "SELECT CONV(255,10,16) a, CONV('ff',16,10) b, CONV('a',36,10) c, CONV(-1,10,16) d, CONV('zz',36,2) e, CONV('xyz',16,10) f, CONV('12abc',10,10) g, CONV(255,10,37) h, CONV(NULL,10,2) i"
+                        [ Some "FF"
+                          Some "255"
+                          Some "10"
+                          Some "FFFFFFFFFFFFFFFF"
+                          Some "10100001111"
+                          Some "0"
+                          Some "12"
+                          None
+                          None ]
+
+                testCase "a negative CONV to_base asks for signed output"
+                <| fun _ ->
+                    expectRow
+                        "SELECT CONV(-5,10,-16) a, CONV(-1,10,-16) b, CONV('ffffffffffffffff',16,-10) c, CONV(255,10,-16) d, CONV(1,-10,16) e"
+                        [ Some "-5"; Some "-1"; Some "-1"; Some "FF"; Some "1" ]
+
+                testCase "MAKEDATE rolls past year end and pivots two-digit years"
+                <| fun _ ->
+                    expectRow
+                        "SELECT MAKEDATE(2024,200) a, MAKEDATE(2024,0) b, MAKEDATE(2024,366) c, MAKEDATE(2024,367) d, MAKEDATE(70,1) e, MAKEDATE(0,1) f, MAKEDATE(100,1) g, MAKEDATE(NULL,1) h"
+                        [ Some "2024-07-18"
+                          None
+                          Some "2024-12-31"
+                          Some "2025-01-01"
+                          Some "1970-01-01"
+                          Some "2000-01-01"
+                          Some "0100-01-01"
+                          None ]
+
+                testCase "CONVERT_TZ shifts by numeric offsets and NULLs anything else"
+                <| fun _ ->
+                    expectRow
+                        "SELECT CONVERT_TZ('2024-01-01 12:00:00','+00:00','+05:30') a, CONVERT_TZ('2024-01-01 12:00:00','-08:00','+00:00') b, CONVERT_TZ('2024-01-01 12:00:00','+00:00','+14:00') c, CONVERT_TZ('2024-01-01 12:00:00','+00:00','+15:00') d, CONVERT_TZ('2024-01-01 12:00:00','UTC','America/New_York') e, CONVERT_TZ('2024-01-01 12:00:00','+00:00','+0530') f"
+                        [ Some "2024-01-01 17:30:00"
+                          Some "2024-01-01 20:00:00"
+                          Some "2024-01-02 02:00:00"
+                          None
+                          None
+                          None ]
+
+                testCase "FIELD, ELT, and EXPORT_SET match the oracle's index and bit ordering"
+                <| fun _ ->
+                    expectRow
+                        "SELECT FIELD('b','a','b','c') a, FIELD('z','a') b, FIELD(NULL,'a') c, ELT(1,'a','b') d, ELT(0,'a') e, ELT(3,'a','b') f, EXPORT_SET(5,'Y','n',',',8) g, EXPORT_SET(6,'1','0',',',10) h, EXPORT_SET(5,'Y','n','--',3) i"
+                        [ Some "2"
+                          Some "0"
+                          Some "0"
+                          Some "a"
+                          None
+                          None
+                          Some "Y,n,Y,n,n,n,n,n"
+                          Some "0,1,1,0,0,0,0,0,0,0"
+                          Some "Y--n--Y" ]
+
+                testCase "EXPORT_SET defaults to 64 bits, and caps an oversized or negative count there"
+                <| fun _ ->
+                    match runDefault (newStore ()) "SELECT EXPORT_SET(5,'Y','n') a, EXPORT_SET(5,'Y','n',',',100) b, EXPORT_SET(5,'Y','n',',',-1) c" with
+                    | ResultSet(_, [ [ Some a; Some b; Some c ] ]) ->
+                        let expected = "Y,n,Y" + String.replicate 61 ",n"
+                        Expect.equal a expected "default count is 64 bits"
+                        Expect.equal b expected "an oversized count caps at 64"
+                        Expect.equal c expected "a negative count reads as unsigned, so also 64"
+                    | other -> failtestf "expected a single row, got %A" other
+
+                testCase "JSON_ARRAYAGG keeps NULL rows as JSON null and is NULL over an empty group"
+                <| fun _ ->
+                    let store = newStore ()
+                    runDefault store "CREATE TABLE agg (id INT, v INT)" |> ignore
+                    runDefault store "INSERT INTO agg (id, v) VALUES (1, 1), (2, NULL)" |> ignore
+
+                    match runDefault store "SELECT CAST(JSON_ARRAYAGG(v) AS CHAR) a, JSON_LENGTH(JSON_ARRAYAGG(v)) b FROM agg" with
+                    | ResultSet(_, [ [ Some "[1, null]"; Some "2" ] ]) -> ()
+                    | other -> failtestf "expected [1, null] of length 2, got %A" other
+
+                    match runDefault store "SELECT JSON_ARRAYAGG(v) a FROM agg WHERE id = 99" with
+                    | ResultSet(_, [ [ None ] ]) -> ()
+                    | other -> failtestf "expected NULL over an empty group, got %A" other
+
+                testCase "JSON_OBJECTAGG folds two arguments per row, last duplicate key winning"
+                <| fun _ ->
+                    let store = newStore ()
+                    runDefault store "CREATE TABLE kv (id INT, k VARCHAR(10), v INT)" |> ignore
+                    runDefault store "INSERT INTO kv (id, k, v) VALUES (1, 'a', 1), (2, 'a', 2), (3, 'bb', NULL)" |> ignore
+
+                    match runDefault store "SELECT CAST(JSON_OBJECTAGG(k, v) AS CHAR) a FROM kv" with
+                    | ResultSet(_, [ [ Some "{\"a\": 2, \"bb\": null}" ] ]) -> ()
+                    | other -> failtestf "expected the last value per key, got %A" other
+
+                    match runDefault store "SELECT JSON_OBJECTAGG(k, v) a FROM kv WHERE id = 99" with
+                    | ResultSet(_, [ [ None ] ]) -> ()
+                    | other -> failtestf "expected NULL over an empty group, got %A" other ] ]

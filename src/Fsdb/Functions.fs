@@ -698,6 +698,20 @@ let private jsonLengthFn: Scalar =
         | _ -> VNull
     | _ -> VNull
 
+/// JSON_DEPTH: a scalar (and an *empty* array/object) is depth 1; a
+/// non-empty container is 1 + the deepest member. MySQL-verified:
+/// `JSON_DEPTH('[]')` = 1, `JSON_DEPTH('[1,[2,[3]]]')` = 4.
+let rec private jsonNodeDepth (node: JsonNode) : int =
+    match node with
+    | :? JsonObject as o when o.Count > 0 -> 1 + (o |> Seq.map (fun kv -> jsonNodeDepth kv.Value) |> Seq.max)
+    | :? JsonArray as a when a.Count > 0 -> 1 + (a |> Seq.map jsonNodeDepth |> Seq.max)
+    | _ -> 1
+
+let private jsonDepthFn: Scalar =
+    function
+    | [ doc ] when not (anyNull [ doc ]) -> tryParseJsonValue doc |> Option.map (jsonNodeDepth >> int64 >> VInt) |> Option.defaultValue VNull
+    | _ -> VNull
+
 let private jsonValidFn: Scalar =
     function
     | [ VNull ] -> VNull
@@ -877,6 +891,26 @@ let private jsonObjectFn: Scalar =
                 o.[req k] <- valueToJsonNode v
 
             VJson(formatJsonNode o)
+
+/// `JSON_ARRAYAGG`'s fold. Not a `registerAggregate` entry: the executor's
+/// generic aggregate path drops NULL rows before folding, but MySQL keeps
+/// them as JSON `null` (`JSON_ARRAYAGG(x)` over `1, NULL` is `[1, null]`),
+/// so `Executor.evalAggregate` calls this with the raw per-row values.
+let jsonArrayAggregate (values: Value list) : Value =
+    VJson(formatJsonNode (JsonArray(values |> List.map valueToJsonNode |> Array.ofList)))
+
+/// `JSON_OBJECTAGG`'s fold — two arguments per row, which the executor's
+/// generic single-argument aggregate path can't express either. A NULL key
+/// is MySQL error 3158; a duplicate key keeps the last row's value.
+let jsonObjectAggregate (pairs: (Value * Value) list) : Value =
+    let o = JsonObject()
+
+    for k, v in pairs do
+        match k with
+        | VNull -> raise (SqlError(3158, "JSON documents may not contain NULL member names."))
+        | _ -> o.[req k] <- valueToJsonNode v
+
+    VJson(formatJsonNode o)
 
 /// Every JSON string leaf under `node`, paired with its path — the search
 /// space for `JSON_SEARCH`.
@@ -1370,6 +1404,70 @@ let private lastDayFn: Scalar =
         |> Option.defaultValue VNull
     | _ -> VNull
 
+/// `MAKEDATE(year, dayofyear)`: January 1st of `year` plus `dayofyear - 1`
+/// days, so day 366 of a non-leap year rolls into the next year
+/// (MySQL-verified: `MAKEDATE(2024, 367)` = 2025-01-01). `dayofyear < 1`
+/// and a year outside 0..9999 are NULL, and a two-digit year follows
+/// MySQL's usual pivot (0..69 → 2000s, 70..99 → 1900s).
+let private makeDateFn: Scalar =
+    function
+    | [ y; d ] when not (anyNull [ y; d ]) ->
+        let year = int (toDouble y)
+        let day = int (toDouble d)
+
+        let year =
+            if year >= 0 && year <= 69 then year + 2000
+            elif year >= 70 && year <= 99 then year + 1900
+            else year
+
+        if day < 1 || year < 1 || year > 9999 then
+            VNull
+        else
+            try
+                VDate(DateOnly(year, 1, 1).AddDays(day - 1))
+            with _ ->
+                VNull
+    | _ -> VNull
+
+/// A `CONVERT_TZ` zone argument, as minutes east of UTC. Only MySQL's
+/// numeric `[+-]HH:MM` form (range ±14:00 inclusive) is understood.
+/// ponytail: named zones (`UTC`, `America/New_York`) and `SYSTEM` return
+/// NULL, which is exactly what a MySQL server with no `mysql.time_zone*`
+/// rows loaded answers — the oracle this is pinned against. Route them
+/// through `TimeZoneInfo` only alongside a real, loadable zone table, since
+/// a half-loaded one would answer some zones and NULL others.
+let private tzOffsetMinutes (spec: string) : int option =
+    let s = spec.Trim()
+
+    let sign, body =
+        if s.StartsWith "+" then 1, s.Substring 1
+        elif s.StartsWith "-" then -1, s.Substring 1
+        else 0, s
+
+    if sign = 0 then
+        None
+    else
+        match body.Split ':' with
+        | [| h; m |] ->
+            match Int32.TryParse(h, NumberStyles.None, CultureInfo.InvariantCulture), Int32.TryParse(m, NumberStyles.None, CultureInfo.InvariantCulture) with
+            | (true, hours), (true, minutes) when minutes < 60 ->
+                let total = sign * (hours * 60 + minutes)
+                if abs total <= 14 * 60 then Some total else None
+            | _ -> None
+        | _ -> None
+
+let private convertTzFn: Scalar =
+    function
+    | [ dt; f; t ] when not (anyNull [ dt; f; t ]) ->
+        match asDateTime dt, tzOffsetMinutes (req f), tzOffsetMinutes (req t) with
+        | Some d, Some fromMinutes, Some toMinutes ->
+            try
+                VDateTime(d.AddMinutes(float (toMinutes - fromMinutes)))
+            with _ ->
+                VNull
+        | _ -> VNull
+    | _ -> VNull
+
 /// The `STR_TO_DATE` mirror of `formatDate`'s specifier table, translated
 /// to a .NET custom format string for `DateTime.TryParseExact`.
 let private mysqlToNetFormat (fmt: string) : string =
@@ -1754,6 +1852,36 @@ let private fieldFn: Scalar =
         | None -> VInt 0L
     | _ -> VNull
 
+/// `EXPORT_SET(bits, on, off [, separator [, number_of_bits]])`: one token
+/// per bit of `bits`, **low bit first**. `number_of_bits` defaults to 64 and
+/// is read as unsigned then capped at 64, so a negative count means 64 too
+/// (MySQL-verified: `EXPORT_SET(5,'Y','n',',',-1)` yields all 64 tokens).
+let private exportSetFn: Scalar =
+    fun args ->
+        match args with
+        | bits :: on :: off :: rest when not (anyNull (bits :: on :: off :: rest)) && rest.Length <= 2 ->
+            let separator = rest |> List.tryItem 0 |> Option.map req |> Option.defaultValue ","
+
+            let count =
+                match rest |> List.tryItem 1 with
+                | Some n -> toUInt64 n |> min 64UL |> int
+                | None -> 64
+
+            let value = toUInt64 bits
+
+            [ 0 .. count - 1 ]
+            |> List.map (fun i -> if (value >>> i) &&& 1UL = 1UL then req on else req off)
+            |> String.concat separator
+            |> VString
+        | _ -> VNull
+
+/// `BIT_COUNT`: set bits in the argument's `BIGINT UNSIGNED` pattern, so
+/// `BIT_COUNT(-1)` is 64.
+let private bitCountFn: Scalar =
+    function
+    | [ v ] when not (anyNull [ v ]) -> VInt(int64 (Numerics.BitOperations.PopCount(toUInt64 v)))
+    | _ -> VNull
+
 let private findInSetFn: Scalar =
     function
     | [ s; list ] when not (anyNull [ s; list ]) ->
@@ -2049,24 +2177,30 @@ let private baseDigits = "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ"
 /// FFFFFFFFFFFFFFFF, `BIN(-1)` is 64 ones), and 18446744073709551615 has to
 /// survive rather than saturate `int64`.
 ///
-/// ponytail: MySQL's negative `to_base` (signed output, `CONV(-5, 10, -16)`
-/// = '-5') isn't supported — the digit table can't index a negative base.
-/// Branch on the sign of `to_base` if a workload needs it.
+///
+/// Parsing stops at the first character that isn't a digit in `b` and keeps
+/// what it already read, rather than rejecting the whole string:
+/// MySQL-verified, `CONV('12abc', 10, 10)` is `12` and `CONV('xyz', 16, 10)`
+/// is `0`, not NULL.
 let private parseInBase (s: string) (b: int) : uint64 option =
     let s = s.Trim().ToUpperInvariant()
     let neg, s = if s.StartsWith "-" then true, s.Substring 1 else false, s
 
-    if s = "" then
+    if b < 2 || b > 36 then
         None
     else
-        let mutable ok = true
         let mutable acc = 0UL
+        let mutable stop = false
 
         for c in s do
             let d = baseDigits.IndexOf c
-            if d < 0 || d >= b then ok <- false else acc <- acc * uint64 b + uint64 d
 
-        if ok then Some(if neg then 0UL - acc else acc) else None
+            if stop || d < 0 || d >= b then
+                stop <- true
+            else
+                acc <- acc * uint64 b + uint64 d
+
+        Some(if neg then 0UL - acc else acc)
 
 let private toBase (n: uint64) (b: int) : string =
     if n = 0UL then
@@ -2081,12 +2215,35 @@ let private toBase (n: uint64) (b: int) : string =
 
         sb.ToString()
 
+/// A negative `to_base` asks for *signed* output — the 64-bit pattern is
+/// reread as `int64` and printed with a leading `-` (MySQL-verified:
+/// `CONV(-1, 10, -16)` is `-1`, where `CONV(-1, 10, 16)` is
+/// `FFFFFFFFFFFFFFFF`). A negative `from_base` only means the input is
+/// signed, which `parseInBase` already handles, so its magnitude is what
+/// selects the digit set.
 let private convFn: Scalar =
     function
     | [ n; f; t ] when not (anyNull [ n; f; t ]) ->
-        match parseInBase (req n) (int (toDouble f)) with
-        | Some v -> VString(toBase v (int (toDouble t)))
-        | None -> VNull
+        let text = req n
+        let fromBase = int (toDouble f)
+        let toBaseArg = int (toDouble t)
+        let magnitude = abs toBaseArg
+
+        if text = "" || magnitude < 2 || magnitude > 36 then
+            VNull
+        else
+            match parseInBase text (abs fromBase) with
+            | None -> VNull
+            | Some v when toBaseArg > 0 -> VString(toBase v magnitude)
+            | Some v ->
+                let signed = int64 v
+
+                if signed < 0L then
+                    // `-Int64.MinValue` overflows; its magnitude is exactly
+                    // the same bit pattern read as unsigned.
+                    VString("-" + toBase (0UL - v) magnitude)
+                else
+                    VString(toBase v magnitude)
     | _ -> VNull
 
 let private binFn: Scalar =
@@ -2436,6 +2593,7 @@ let builtins: Registry =
     |> registerScalar "JSON_ARRAY" jsonArrayFn
     |> registerScalar "JSON_OBJECT" jsonObjectFn
     |> registerScalar "JSON_LENGTH" jsonLengthFn
+    |> registerScalar "JSON_DEPTH" jsonDepthFn
     |> registerScalar "JSON_VALID" jsonValidFn
     |> registerScalar "JSON_TYPE" jsonTypeFn
     |> registerScalar "JSON_KEYS" jsonKeysFn
@@ -2460,6 +2618,7 @@ let builtins: Registry =
     |> registerScalar "MINUTE" (datePartFn (fun d -> d.Minute))
     |> registerScalar "SECOND" (datePartFn (fun d -> d.Second))
     |> registerScalar "DAYOFWEEK" (datePartFn (fun d -> int d.DayOfWeek + 1))
+    |> registerScalar "DAYOFYEAR" (datePartFn (fun d -> d.DayOfYear))
     |> registerScalar "DAYNAME" dayNameFn
     |> registerScalar "MONTHNAME" monthNameFn
     |> registerScalar "WEEK" weekFn
@@ -2474,6 +2633,8 @@ let builtins: Registry =
     |> registerScalar "FROM_UNIXTIME" fromUnixTimeFn
     |> registerScalar "TIMESTAMPDIFF" timestampDiffFn
     |> registerScalar "LAST_DAY" lastDayFn
+    |> registerScalar "MAKEDATE" makeDateFn
+    |> registerScalar "CONVERT_TZ" convertTzFn
     |> registerScalar "STR_TO_DATE" strToDateFn
     // Strings
     |> registerScalar "SUBSTRING" substringFn
@@ -2503,6 +2664,7 @@ let builtins: Registry =
     |> registerScalar "SUBSTRING_INDEX" substringIndexFn
     |> registerScalar "CONCAT_WS" concatWsFn
     |> registerScalar "ELT" eltFn
+    |> registerScalar "EXPORT_SET" exportSetFn
     |> registerScalar "FIELD" fieldFn
     |> registerScalar "FIND_IN_SET" findInSetFn
     |> registerScalar "QUOTE" quoteFn
@@ -2527,6 +2689,7 @@ let builtins: Registry =
     |> registerScalar "ISNULL" isNullFn
     |> registerScalar "CONV" convFn
     |> registerScalar "BIN" binFn
+    |> registerScalar "BIT_COUNT" bitCountFn
     |> registerScalar "OCT" octFn
     |> registerScalar "CRC32" crc32Fn
     |> registerScalar "UUID" uuidFn

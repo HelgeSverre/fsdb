@@ -64,12 +64,12 @@ must not mark a case green while carrying an unreviewed failure later on.
   the 8.4 oracle does not have. A probe that errors on the oracle compares
   nothing; both deleted.
 
-## Ledgered gaps (43 signatures in `support/known-gaps.json`)
+## Ledgered gaps (32 signatures in `support/known-gaps.json`)
 
 fsdb refuses or errors where MySQL succeeds. No silent wrong answer in any
 of these — they are missing features, not divergences.
 
-Parser (33):
+Parser (32) — the whole ledger, now that the execution gaps are closed:
 
 - **Common table expressions** — `WITH` / `WITH RECURSIVE` do not parse at
   all: `cte_bucket_summary`, `cte_chained_reference`,
@@ -96,24 +96,14 @@ Parser (33):
 - **`EXTRACT(unit FROM ...)`, `TIMESTAMPDIFF`, typed `DATE '...'`
   literals**: `datetime_component_and_truncation`,
   `interval_arithmetic_varieties`.
-- **`FIELD` / `ELT` / `EXPORT_SET`**: `field_elt_export_set`.
 - **JSON_TABLE clauses outside the shipped subset** (`NESTED PATH`,
   `EXISTS PATH`, `DEFAULT ... ON EMPTY|ERROR`) — deliberate refusals, see
   `2026-08-19-json-table-gaps.md`: `json_table_nested_path_unsupported`,
   `json_table_exists_path_unsupported`,
   `json_table_default_on_empty_error_unsupported`.
 
-Execution (10) — builtins that parse but are not registered:
-
-- `JSON_DEPTH` (`shipping_address_contains_totals`,
-  `json_valid_length_totals`, `json_extract_root_render`)
-- `JSON_ARRAYAGG` (`customer_profile_arrayagg_unsupported`,
-  `json_arrayagg_ordered_subset_unsupported`)
-- `JSON_OBJECTAGG` (`tenant_settings_objectagg_unsupported`)
-- `DAYOFYEAR` (`date_part_extraction`)
-- `BIT_COUNT` (`bit_count_crc32_conv`)
-- `MAKEDATE` (`calendar_week_and_makedate`)
-- `CONVERT_TZ` (`convert_tz_numeric_offsets`)
+Execution (0). Every builtin listed here on 2026-08-19 now ships — see
+"Closed: the missing builtins (wave W2)" below.
 
 ## Open real divergences (NOT ledgered)
 
@@ -198,3 +188,41 @@ other C0 controls as `\u00xx`) and emits everything else — DEL, `<&>/`, and
 astral-plane characters alike — literally. `UnsafeRelaxedJsonEscaping` and
 `JavaScriptEncoder.Create UnicodeRanges.All` were both verified to escape
 surrogate pairs regardless.
+
+## Closed: the missing builtins (wave W2)
+
+`JSON_DEPTH`, `JSON_ARRAYAGG`, `JSON_OBJECTAGG`, `DAYOFYEAR`, `BIT_COUNT`,
+`MAKEDATE`, `CONVERT_TZ` and `EXPORT_SET` are implemented; `CONV` was
+already registered but answered NULL where MySQL truncates at the first
+invalid digit (`CONV('12abc', 10, 10)` is `12`, not NULL) and had no signed
+output for a negative `to_base`. Every expected value was read off the
+8.4.11 oracle before the code was written, and each has Expecto coverage in
+`ExecutorTests`' "builtins pinned to the 8.4 oracle" list.
+
+Two things beyond the builtins themselves had to move:
+
+- **`a MOD b`** — the word spelling of `%` — was not an infix operator in
+  the parser, which is what actually blocked `field_elt_export_set`
+  (`ELT(1 + (id MOD 3), ...)`); `FIELD`/`ELT`/`EXPORT_SET` were mis-filed as
+  a builtin gap. It now parses like `DIV`, with the same word-boundary guard
+  so a column named `mode_id` is still a column.
+- **Multi-argument and NULL-preserving aggregates.** `Executor.evalAggregate`
+  drops NULL rows and passes one value per row to a registered `Aggregate`.
+  `JSON_ARRAYAGG` must keep NULLs (`[1, null]`), and `JSON_OBJECTAGG` takes
+  two arguments per row, so both fold directly in `evalAggregate` the way
+  `GROUP_CONCAT` already did, via `Functions.jsonArrayAggregate` /
+  `jsonObjectAggregate`. The generic registry path is unchanged.
+
+`CONVERT_TZ` accepts numeric `[+-]HH:MM` offsets (range ±14:00) and answers
+NULL for anything else, including named zones and `SYSTEM`. That matches the
+oracle exactly as configured: it has no `mysql.time_zone*` rows loaded, so
+`CONVERT_TZ(t, 'UTC', 'America/New_York')` is NULL there too. `SYSTEM` is
+the one spelling where the oracle answers and fsdb does not — it resolves to
+the *server's* local zone, which would make the answer depend on the machine
+running the engine. No probe uses it.
+
+Ledger effect: 43 signatures down to 32. Eleven belonged to the probes above
+and are gone; the twelfth removal is `rollup_two_level_with_expression_key`,
+whose parse error moved from the `MOD` on column 28 to `WITH ROLLUP` on
+column 121 — still an unimplemented feature (ROLLUP/GROUPING), re-ledgered
+under its new signature.

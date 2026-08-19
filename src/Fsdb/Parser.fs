@@ -926,6 +926,12 @@ opp.AddOperator(InfixOperator("%", ws, 2, Associativity.Left, (fun a b -> FuncCa
 let private divKeywordBoundary: Parser<unit, unit> = nextCharSatisfiesNot isIdentChar >>. ws
 opp.AddOperator(InfixOperator("DIV", divKeywordBoundary, 2, Associativity.Left, (fun a b -> BinOp(IntDiv, a, b))))
 opp.AddOperator(InfixOperator("div", divKeywordBoundary, 2, Associativity.Left, (fun a b -> BinOp(IntDiv, a, b))))
+// `a MOD b` is the word spelling of `a % b`, with the same precedence and
+// the same word-boundary/casing caveats as `DIV` above. `MOD(a, b)` still
+// parses as a function call: the term parser consumes the `(` form before
+// the operator parser ever looks for an infix keyword.
+opp.AddOperator(InfixOperator("MOD", divKeywordBoundary, 2, Associativity.Left, (fun a b -> FuncCall("MOD", [ a; b ]))))
+opp.AddOperator(InfixOperator("mod", divKeywordBoundary, 2, Associativity.Left, (fun a b -> FuncCall("MOD", [ a; b ]))))
 /// Unary minus. On a *literal* the sign is part of the literal, the way
 /// MySQL's own lexer reads it — `-9223372036854775808` is BIGINT's signed
 /// minimum and `-18446744073709551615` an exact DECIMAL, where the general

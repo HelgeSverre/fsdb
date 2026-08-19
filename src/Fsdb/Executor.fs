@@ -105,10 +105,18 @@ let private clauseLabel =
 /// `SEPARATOR`/multi-arg evaluation lives entirely in `evalAggregate` below
 /// rather than the registry (see `Parser.groupConcatAtom`'s doc for why it's
 /// not just another `registerAggregate` entry).
+///
+/// `JSON_ARRAYAGG`/`JSON_OBJECTAGG` are recognized the same direct way, for
+/// the same reason: an `Aggregate` sees one already-NULL-filtered value per
+/// row, and neither fits — `JSON_ARRAYAGG` must keep its NULL rows as JSON
+/// `null`, and `JSON_OBJECTAGG` takes two arguments per row.
+let private directAggregateNames =
+    set [ "GROUP_CONCAT"; "JSON_ARRAYAGG"; "JSON_OBJECTAGG" ]
+
 let private isAggregateCall (registry: Registry) (expr: Expr) : bool =
     match expr with
     | FuncCall(name, _) ->
-        System.String.Equals(name, "GROUP_CONCAT", System.StringComparison.OrdinalIgnoreCase)
+        directAggregateNames.Contains(name.ToUpperInvariant())
         || Functions.lookupAggregate name registry |> Option.isSome
     | _ -> false
 
@@ -3353,6 +3361,7 @@ and private evalAggregate
     : Result<Value, EvalError> =
     let isCount = System.String.Equals(name, "COUNT", System.StringComparison.OrdinalIgnoreCase)
     let isGroupConcat = System.String.Equals(name, "GROUP_CONCAT", System.StringComparison.OrdinalIgnoreCase)
+    let upper = name.ToUpperInvariant()
 
     // `COUNT(DISTINCT x)`/`SUM(DISTINCT x)`/... all unwrap the same way:
     // dedupe the per-row values (after dropping `NULL`s) before folding,
@@ -3402,6 +3411,25 @@ and private evalAggregate
                 VNull
             else
                 deduped |> List.map (fun (v, _, _) -> v |> toText |> Option.defaultValue "") |> String.concat separator |> VString)
+    // Both JSON aggregates are NULL over an empty group but keep the NULLs
+    // *inside* a non-empty one, so neither can route through the
+    // NULL-filtered fold below.
+    | [ arg ] when upper = "JSON_ARRAYAGG" ->
+        if rows.IsEmpty then
+            Ok VNull
+        else
+            rows
+            |> traverse (fun row -> evalExpr (ctxFor row) (snd (unwrapDistinct arg)))
+            |> Result.map Functions.jsonArrayAggregate
+    | [ keyExpr; valueExpr ] when upper = "JSON_OBJECTAGG" ->
+        if rows.IsEmpty then
+            Ok VNull
+        else
+            rows
+            |> traverse (fun row ->
+                let ctx = ctxFor row
+                evalExpr ctx keyExpr |> Result.bind (fun k -> evalExpr ctx valueExpr |> Result.map (fun v -> k, v)))
+            |> Result.map Functions.jsonObjectAggregate
     | [ arg ] ->
         let distinct, innerExpr = unwrapDistinct arg
         let isMin = System.String.Equals(name, "MIN", System.StringComparison.OrdinalIgnoreCase)
