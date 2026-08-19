@@ -5894,4 +5894,101 @@ let tests =
                           "SELECT SUM(v) OVER (ORDER BY id ROWS BETWEEN -1 PRECEDING AND CURRENT ROW) FROM t" ] do
                         match Fsdb.Parser.parse sql with
                         | Result.Error _ -> ()
-                        | Result.Ok other -> failtestf "expected a parse refusal for %s, got %A" sql other ] ]
+                        | Result.Ok other -> failtestf "expected a parse refusal for %s, got %A" sql other ]
+
+          // Expectations read off the MySQL 8.4.11 oracle over
+          //   t = (1,10,1) (2,20,1) (3,30,2) (4,40,2) (5,50,2)  [id, v, g]
+          testList
+              "common table expressions"
+              [ let cteStore () =
+                    let store = newStore ()
+                    runDefault store "CREATE TABLE t (id INT, v INT, g INT)" |> ignore
+                    runDefault store "INSERT INTO t VALUES (1,10,1),(2,20,1),(3,30,2),(4,40,2),(5,50,2)" |> ignore
+                    store
+
+                let expectRows (sql: string) (expected: string option list list) =
+                    match runDefault (cteStore ()) sql with
+                    | ResultSet(_, rows) -> Expect.equal rows expected sql
+                    | other -> failtestf "expected a resultset from %s, got %A" sql other
+
+                testCase "a single CTE feeds the main query's GROUP BY"
+                <| fun _ ->
+                    expectRows
+                        "WITH b AS (SELECT id, id MOD 2 AS bucket, v FROM t) SELECT bucket, COUNT(*) AS c, SUM(v) AS s FROM b GROUP BY bucket ORDER BY bucket"
+                        [ [ Some "0"; Some "2"; Some "60" ]; [ Some "1"; Some "3"; Some "90" ] ]
+
+                testCase "a later CTE reads an earlier one"
+                <| fun _ ->
+                    expectRows
+                        "WITH lo AS (SELECT id, v FROM t WHERE id <= 3), hi AS (SELECT id, v FROM lo WHERE v > 10) SELECT COUNT(*) AS c, MIN(id) AS mn, MAX(id) AS mx FROM hi"
+                        [ [ Some "2"; Some "2"; Some "3" ] ]
+
+                testCase "a CTE referenced twice in one FROM materializes once and joins"
+                <| fun _ ->
+                    expectRows "WITH x AS (SELECT 1 AS a) SELECT * FROM x JOIN x AS y ON x.a = y.a" [ [ Some "1"; Some "1" ] ]
+
+                testCase "a CTE shadows a real table of the same name"
+                <| fun _ -> expectRows "WITH t AS (SELECT 99 AS id) SELECT * FROM t" [ [ Some "99" ] ]
+
+                testCase "a CTE carrying a window function filters on its rank"
+                <| fun _ ->
+                    expectRows
+                        ("WITH ranked AS (SELECT g, id, v, ROW_NUMBER() OVER (PARTITION BY g ORDER BY v DESC, id) AS r FROM t) "
+                         + "SELECT g, id, v FROM ranked WHERE r = 1 ORDER BY g")
+                        [ [ Some "1"; Some "2"; Some "20" ]; [ Some "2"; Some "5"; Some "50" ] ]
+
+                testCase "WITH RECURSIVE generates a series and renames its column"
+                <| fun _ ->
+                    expectRows
+                        "WITH RECURSIVE seq (n) AS (SELECT 1 UNION ALL SELECT n + 1 FROM seq WHERE n < 5) SELECT n, n * n AS sq FROM seq ORDER BY n"
+                        [ [ Some "1"; Some "1" ]
+                          [ Some "2"; Some "4" ]
+                          [ Some "3"; Some "9" ]
+                          [ Some "4"; Some "16" ]
+                          [ Some "5"; Some "25" ] ]
+
+                testCase "a recursive UNION (distinct) stops once a pass adds nothing new"
+                <| fun _ ->
+                    expectRows
+                        "WITH RECURSIVE s AS (SELECT 1 AS n UNION SELECT n + 1 FROM s WHERE n < 3) SELECT * FROM s"
+                        [ [ Some "1" ]; [ Some "2" ]; [ Some "3" ] ]
+
+                testCase "a recursive series joins a real table"
+                <| fun _ ->
+                    expectRows
+                        ("WITH RECURSIVE bk (b) AS (SELECT 0 UNION ALL SELECT b + 1 FROM bk WHERE b < 3) "
+                         + "SELECT bk.b, COUNT(v.id) AS c FROM bk LEFT JOIN t AS v ON v.g = bk.b GROUP BY bk.b ORDER BY bk.b")
+                        [ [ Some "0"; Some "0" ]
+                          [ Some "1"; Some "2" ]
+                          [ Some "2"; Some "3" ]
+                          [ Some "3"; Some "0" ] ]
+
+                testCase "the recursion ceiling is MySQL's 1000 iterations, to the row"
+                <| fun _ ->
+                    expectRows
+                        "WITH RECURSIVE s AS (SELECT 1 AS n UNION ALL SELECT n + 1 FROM s WHERE n < 1000) SELECT COUNT(*) AS c, MAX(n) AS m FROM s"
+                        [ [ Some "1000"; Some "1000" ] ]
+
+                    match runDefault (cteStore ()) "WITH RECURSIVE s AS (SELECT 1 AS n UNION ALL SELECT n + 1 FROM s WHERE n < 1001) SELECT COUNT(*) FROM s" with
+                    | Err(3636, message) ->
+                        Expect.equal
+                            message
+                            "Recursive query aborted after 1001 iterations. Try increasing @@cte_max_recursion_depth to a larger value."
+                            "the oracle's 3636 wording"
+                    | other -> failtestf "expected 3636, got %A" other
+
+                testCase "a self-referencing CTE with no UNION is MySQL's 3573"
+                <| fun _ ->
+                    match runDefault (cteStore ()) "WITH RECURSIVE s AS (SELECT n + 1 AS n FROM s) SELECT * FROM s" with
+                    | Err(3573, "Recursive Common Table Expression 's' should contain a UNION") -> ()
+                    | other -> failtestf "expected 3573, got %A" other
+
+                testCase "a column-list/SELECT-list width mismatch is MySQL's 1353"
+                <| fun _ ->
+                    match runDefault (cteStore ()) "WITH x (a, b) AS (SELECT 1) SELECT * FROM x" with
+                    | Err(1353, message) ->
+                        Expect.equal
+                            message
+                            "In definition of view, derived table or common table expression, SELECT list and column names list have different column counts"
+                            "the oracle's 1353 wording"
+                    | other -> failtestf "expected 1353, got %A" other ] ]

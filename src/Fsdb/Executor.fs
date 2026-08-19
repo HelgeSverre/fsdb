@@ -36,6 +36,20 @@ type private EvalError = int * string
 let private fromSubqueryMemo =
     System.Threading.AsyncLocal<Dictionary<FromItem, Result<ColumnDef list * Value[] list, QueryResult>>>()
 
+/// The `WITH` bindings visible to the statement currently executing, keyed
+/// by lowercased CTE name — same per-statement `AsyncLocal` shape as
+/// `fromSubqueryMemo`, because a CTE is equally visible to the statement's
+/// own FROM, its joins, and every subquery nested anywhere inside it, and
+/// threading a scope parameter through every one of those call sites would
+/// touch far more code than it explains. Pushed and popped around a
+/// statement that carries `Ctes` (see `withCteScope`).
+let private cteScope = System.Threading.AsyncLocal<Map<string, ColumnDef list * Value[] list>>()
+
+let private currentCteScope () : Map<string, ColumnDef list * Value[] list> =
+    match box cteScope.Value with
+    | null -> Map.empty
+    | _ -> cteScope.Value
+
 let private unknownColumn (name: string) : EvalError =
     1054, sprintf "Unknown column '%s' in 'field list'" name
 
@@ -1888,6 +1902,12 @@ and private evalOrderKey (ctx: EvalContext) (expr: Expr) : Result<Value * Collat
 and private resolveTableRef (store: Store) (dbName: string) (tableRef: TableRef) : Result<ColumnDef list * Value[] list, QueryResult> =
     let tableDb = tableRef.Database |> Option.defaultValue dbName
 
+    // An unqualified name resolves against the statement's `WITH` bindings
+    // first — a CTE shadows a real table of the same name, as in MySQL.
+    match (if tableRef.Database.IsSome then None else currentCteScope () |> Map.tryFind (tableRef.Table.ToLowerInvariant())) with
+    | Some materialized -> Ok materialized
+    | None ->
+
     if System.String.Equals(tableDb, "information_schema", System.StringComparison.OrdinalIgnoreCase) then
         match InformationSchema.scan store.Catalog tableRef.Table with
         | Some(columns, rows) -> Ok(columns, rows)
@@ -3016,6 +3036,152 @@ and private rewriteNaturalSelect
         Having = select.Having |> Option.map rewriteExpr
         OrderBy = select.OrderBy |> List.map (fun (e, d) -> rewriteExpr e, d) }
 
+/// Materializes every `WITH` binding in order (each one seeing the ones
+/// before it), runs `body` with them in scope, then restores the scope the
+/// caller had. Materializing up front rather than re-running the body per
+/// reference matches MySQL's own default for a CTE used more than once, and
+/// is what makes a recursive CTE expressible at all.
+and private withCteScope
+    (store: Store)
+    (registry: Registry)
+    (dbName: string)
+    (ctes: CommonTableExpr list)
+    (body: unit -> QueryResult * byte list * Value[] list)
+    : QueryResult * byte list * Value[] list =
+    if ctes.IsEmpty then
+        body ()
+    else
+
+    let saved = currentCteScope ()
+
+    try
+        let rec bind (remaining: CommonTableExpr list) =
+            match remaining with
+            | [] -> Ok()
+            | cte :: rest ->
+                materializeCte store registry dbName cte
+                |> Result.bind (fun materialized ->
+                    cteScope.Value <- currentCteScope () |> Map.add (cte.CteName.ToLowerInvariant()) materialized
+                    bind rest)
+
+        match bind ctes with
+        | Error err -> err, [], []
+        | Ok() -> body ()
+    finally
+        cteScope.Value <- saved
+
+/// One `WITH` binding's rows. A `WITH RECURSIVE` name that actually
+/// references itself iterates its `UNION` branches semi-naively (each pass
+/// sees only the previous pass's new rows) until a pass adds nothing;
+/// everything else is an ordinary derived table.
+/// ponytail: the recursion ceiling is MySQL's default 1000 as a constant —
+/// fsdb has no `cte_max_recursion_depth` session variable to read; wire one
+/// in here if a client sets it. A second, narrower gap: MySQL fixes each
+/// recursive column's *type* from the anchor row and then errors (1406) when
+/// a later pass overflows it — a literal `NULL` anchor column is
+/// `VARCHAR(0)` there and rejects everything — while these rows stay
+/// dynamically typed and just accept the wider value.
+and private materializeCte
+    (store: Store)
+    (registry: Registry)
+    (dbName: string)
+    (cte: CommonTableExpr)
+    : Result<ColumnDef list * Value[] list, QueryResult> =
+    let selfReferenced =
+        let rec inSelect (select: SelectStmt) =
+            (select.From |> Option.map inFrom |> Option.defaultValue false)
+            || select.Joins |> List.exists (fun j -> inFrom j.Table)
+
+        and inFrom (item: FromItem) =
+            match item with
+            | FromTable tref ->
+                tref.Database.IsNone
+                && System.String.Equals(tref.Table, cte.CteName, System.StringComparison.OrdinalIgnoreCase)
+            | FromSubquery(body, _)
+            | FromLateral(body, _) -> inBody body
+            | FromJsonTable _ -> false
+
+        and inBody (body: SelectOrUnion) =
+            match body with
+            | PlainSelect select -> inSelect select
+            | UnionSelect(first, rest, _, _, _) -> inSelect first || rest |> List.exists (snd >> inSelect)
+
+        cte.Recursive && inBody cte.Body
+
+    // `WITH x (a, b) AS (...)` renames the body's output columns; a count
+    // mismatch is MySQL's 1353.
+    let renamed (columns: ColumnDef list) : Result<ColumnDef list, QueryResult> =
+        if cte.CteColumns.IsEmpty then
+            Ok columns
+        elif List.length cte.CteColumns <> List.length columns then
+            Error(
+                Err(
+                    1353,
+                    "In definition of view, derived table or common table expression, SELECT list and column names list have different column counts"
+                )
+            )
+        else
+            Ok(List.map2 (fun (c: ColumnDef) name -> { c with Name = name }) columns cte.CteColumns)
+
+    if not selfReferenced then
+        resolveFromSubquery store registry dbName (FromSubquery(cte.Body, cte.CteName))
+        |> Result.bind (fun (columns, rows) -> renamed columns |> Result.map (fun columns -> columns, rows))
+    else
+
+    match cte.Body with
+    | PlainSelect _ ->
+        Error(Err(3573, sprintf "Recursive Common Table Expression '%s' should contain a UNION" cte.CteName))
+    | UnionSelect(anchor, recursiveBranches, _, _, _) ->
+        let runBranch (select: SelectStmt) =
+            match runSelectStmt store registry dbName select None with
+            | Err(code, message), _, _ -> Error(Err(code, message))
+            | _, _, typedRows -> Ok typedRows
+
+        resolveFromSubquery store registry dbName (FromSubquery(PlainSelect anchor, cte.CteName))
+        |> Result.bind (fun (anchorColumns, anchorRows) ->
+            renamed anchorColumns
+            |> Result.map (fun columns -> columns, anchorRows))
+        |> Result.bind (fun (columns, anchorRows) ->
+            let key (row: Value[]) = row |> Array.map (fun v -> Value.toText v |> Option.defaultValue "\u0000NULL") |> List.ofArray
+            let distinctUnion = recursiveBranches |> List.exists (fun (op, _) -> match op with OpUnion all -> not all | _ -> false)
+            let seen = System.Collections.Generic.HashSet<string list>(anchorRows |> List.map key)
+            let accumulated = ResizeArray<Value[]>(anchorRows)
+            let saved = currentCteScope ()
+            let mutable working = anchorRows
+            let mutable passes = 0
+            let mutable failure = None
+
+            try
+                while failure.IsNone && not working.IsEmpty do
+                    if passes >= 1000 then
+                        failure <-
+                            Some(
+                                Err(
+                                    3636,
+                                    "Recursive query aborted after 1001 iterations. Try increasing @@cte_max_recursion_depth to a larger value."
+                                )
+                            )
+                    else
+                        cteScope.Value <- saved |> Map.add (cte.CteName.ToLowerInvariant()) (columns, working)
+
+                        match recursiveBranches |> traverse (snd >> runBranch) with
+                        | Error err -> failure <- Some err
+                        | Ok branchRows ->
+                            let fresh =
+                                branchRows
+                                |> List.concat
+                                |> List.filter (fun row -> not distinctUnion || seen.Add(key row))
+
+                            accumulated.AddRange fresh
+                            working <- fresh
+                            passes <- passes + 1
+            finally
+                cteScope.Value <- saved
+
+            match failure with
+            | Some err -> Error err
+            | None -> Ok(columns, List.ofSeq accumulated))
+
 and private runSelectStmt
     (store: Store)
     (registry: Registry)
@@ -3023,6 +3189,10 @@ and private runSelectStmt
     (select: SelectStmt)
     (outer: EvalContext option)
     : QueryResult * byte list * Value[] list =
+    if not select.Ctes.IsEmpty then
+        withCteScope store registry dbName select.Ctes (fun () ->
+            runSelectStmt store registry dbName { select with Ctes = [] } outer)
+    else
     let matchNodes =
         (select.Projections |> List.collect (fst >> collectMatchAgainst))
         @ (select.Where |> Option.map collectMatchAgainst |> Option.defaultValue [])
@@ -3262,6 +3432,13 @@ and runUnionStmt
     (limit: int option)
     (offset: int option)
     : QueryResult * byte list * Value[] list =
+    // A `WITH` clause ahead of a UNION is parsed onto the first branch (see
+    // `Parser.withClause`) but scopes over every branch.
+    if not first.Ctes.IsEmpty then
+        withCteScope store registry dbName first.Ctes (fun () ->
+            runUnionStmt store registry dbName { first with Ctes = [] } rest orderBy limit offset)
+    else
+
     let runBranch (select: SelectStmt) = runSelectStmt store registry dbName select None
 
     // Each branch's text row paired with its own typed row, kept aligned
