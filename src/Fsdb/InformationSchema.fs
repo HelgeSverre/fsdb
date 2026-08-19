@@ -930,10 +930,11 @@ let private triggersColumns =
 
 /// The `mysql.triggers` rows (see `Storage.mysqlTriggersColumns` for the
 /// fixed cell order: name, schema, event_table, timing, event, statement,
-/// created), decoded once for both `information_schema.TRIGGERS` and
-/// `SHOW TRIGGERS`. Definer/sql_mode/charset cells are the server's own
-/// constants — fsdb has no per-trigger definer or sql_mode capture.
-let private triggerCatalogRows (catalog: Catalog) : (string * string * string * string * string) list =
+/// created, definer), decoded once for both `information_schema.TRIGGERS`
+/// and `SHOW TRIGGERS`. The definer is real — bodies are privilege-checked
+/// against it — while sql_mode/charset stay server constants, which fsdb
+/// doesn't capture per trigger.
+let private triggerCatalogRows (catalog: Catalog) : (string * string * string * string * string * string) list =
     catalog
     |> Map.tryFind "mysql"
     |> Option.bind (Map.tryFind "triggers")
@@ -942,25 +943,29 @@ let private triggerCatalogRows (catalog: Catalog) : (string * string * string * 
         |> Seq.map (fun r ->
             let text i = r.[i] |> Value.toText |> Option.defaultValue ""
             let created = r.[6] |> Value.toTextFsp 2 |> Option.defaultValue ""
-            text 0, text 1, text 2, text 5, created)
+            // A row written before the definer column existed is 7 cells
+            // wide; it renders empty here and refuses to fire (see
+            // `Executor`'s 1449).
+            let definer = if r.Length > 7 then text 7 else ""
+            text 0, text 1, text 2, text 5, created, definer)
         |> List.ofSeq)
     |> Option.defaultValue []
 
-// The definer/sql_mode/charset constants every trigger row renders —
-// fsdb captures none of these per trigger; values match the server's own
-// advertised defaults (charset/collation as write-probed on MySQL 8.4.11).
+// The sql_mode/charset constants every trigger row renders — fsdb doesn't
+// capture those per trigger; values match the server's own advertised
+// defaults (charset/collation as write-probed on MySQL 8.4.11). The definer
+// is per-trigger and comes from the catalog row.
 let private triggerSqlMode = "STRICT_TRANS_TABLES,NO_ENGINE_SUBSTITUTION"
-let private triggerDefiner = "root@localhost"
 
 /// `information_schema.TRIGGERS` rows off the trigger catalog — constant
 /// cells (ACTION_ORDER 1, ORIENTATION ROW, OLD/NEW row refs) exactly as
 /// write-probed on MySQL 8.4.11.
 let private triggersRows (catalog: Catalog) : Value[] list =
     triggerCatalogRows catalog
-    |> List.map (fun (name, schema, table, body, created) ->
+    |> List.map (fun (name, schema, table, body, created, definer) ->
         [| vs "def"; vs schema; vs name; vs "INSERT"; vs "def"; vs schema; vs table; VInt 1L; VNull; vs body
            vs "ROW"; vs "AFTER"; VNull; VNull; vs "OLD"; vs "NEW"; vs created; vs triggerSqlMode
-           vs triggerDefiner; vs "utf8mb4"; vs "utf8mb4_0900_ai_ci"; vs "utf8mb4_0900_ai_ci" |])
+           vs definer; vs "utf8mb4"; vs "utf8mb4_0900_ai_ci"; vs "utf8mb4_0900_ai_ci" |])
 
 let private eventsColumns =
     [ strCol "EVENT_CATALOG"
@@ -1804,10 +1809,10 @@ let showTriggers (catalog: Catalog) (dbName: string) : ShowResult =
     else
         let rows =
             triggerCatalogRows catalog
-            |> List.filter (fun (_, schema, _, _, _) -> String.Equals(schema, dbName, StringComparison.OrdinalIgnoreCase))
-            |> List.map (fun (name, _, table, body, created) ->
+            |> List.filter (fun (_, schema, _, _, _, _) -> String.Equals(schema, dbName, StringComparison.OrdinalIgnoreCase))
+            |> List.map (fun (name, _, table, body, created, definer) ->
                 [ Some name; Some "INSERT"; Some table; Some body; Some "AFTER"; Some created; Some triggerSqlMode
-                  Some triggerDefiner; Some "utf8mb4"; Some "utf8mb4_0900_ai_ci"; Some "utf8mb4_0900_ai_ci" ])
+                  Some definer; Some "utf8mb4"; Some "utf8mb4_0900_ai_ci"; Some "utf8mb4_0900_ai_ci" ])
 
         Ok(
             [ "Trigger"; "Event"; "Table"; "Statement"; "Timing"; "Created"; "sql_mode"; "Definer"

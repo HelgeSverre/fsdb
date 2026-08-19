@@ -292,6 +292,14 @@ type Store =
       /// connections. Column comparisons are unaffected — a column's own
       /// `COLLATE` always wins.
       mutable ConnectionCollation: Collation.Collation
+      /// The account whose statement is currently executing, as
+      /// `CURRENT_USER()` renders it — per-session like `StrictMode` above
+      /// (`Session.create`'s clone gives every connection its own cell), and
+      /// re-derived per statement by `QueryHandler.executeParsed`. The
+      /// executor needs it where no `Session` reaches: `CREATE TRIGGER`
+      /// stamps it as the trigger's definer, and a body then runs under that
+      /// definer's privileges rather than the inserting user's.
+      mutable SessionUser: string
       /// Host-registered read-only tables in the reserved `fsdb` schema
       /// (`Db.registerTable`) — carried on the store because the store is
       /// what already reaches every `Executor.resolveTableRef` call site.
@@ -465,6 +473,7 @@ let beginTransactionSnapshot (store: Store) : Store =
       // runs.
       StrictMode = true
       ConnectionCollation = store.ConnectionCollation
+      SessionUser = store.SessionUser
       VirtualTables = store.VirtualTables
       OnCommit = ResizeArray()
       // Allocate a buffer whenever `store` itself would ever deliver an
@@ -1441,7 +1450,13 @@ let mysqlTriggersColumns: ColumnDef list =
       sysCol "action_timing" (TChar 6) false (Some(VString "AFTER"))
       sysCol "event_manipulation" (TChar 6) false (Some(VString "INSERT"))
       sysCol "action_statement" TText false (Some(VString ""))
-      sysCol "created" (TDateTime 2) true None ]
+      sysCol "created" (TDateTime 2) true None
+      // The account a body runs as (`user@%`, MySQL's CHAR(93) width) —
+      // bodies are privilege-checked against this at fire time, not against
+      // the inserting session, so a trigger can't lend its invoker the
+      // definer's reach. Appended last so the fixed cell positions every
+      // existing reader uses stay put.
+      sysCol "definer" (TChar 93) false (Some(VString "")) ]
 
 let private mysqlSystemDatabase () : Database =
     [ "user", sysTable "user" mysqlUserColumns [ rootUserRow ]
@@ -1466,6 +1481,27 @@ let ensureMysqlSchema (store: Store) : unit =
 
     if not (Map.containsKey "triggers" dbRef.Value) then
         dbRef.Value <- Map.add "triggers" (sysTable "triggers" mysqlTriggersColumns []) dbRef.Value
+    else
+        // Column-level migration: a snapshot written before `definer`
+        // existed carries 7-cell trigger rows. Widen the table and pad them
+        // with the empty definer, which `Executor` refuses to run (1449) —
+        // failing closed, because the alternative (empty = skip the check,
+        // or empty = root) is exactly the escalation this column exists to
+        // stop, and a stale trigger that errors loudly is recreated in one
+        // DROP/CREATE.
+        let t = dbRef.Value.["triggers"]
+
+        if t.Columns.Length < mysqlTriggersColumns.Length then
+            let pad = List.skip t.Columns.Length mysqlTriggersColumns
+            let fill = pad |> List.map (fun c -> match c.Default with Some(DConst v) -> v | _ -> VNull) |> Array.ofList
+
+            dbRef.Value <-
+                Map.add
+                    "triggers"
+                    { t with
+                        Columns = t.Columns @ pad
+                        RowsArray = t.RowsArray |> Seq.map (fun r -> Array.append r fill) |> ImmutableArray.CreateRange }
+                    dbRef.Value
 
 let create () : Store =
     let databases = ConcurrentDictionary<string, Database ref>()
@@ -1476,6 +1512,7 @@ let create () : Store =
       ForeignKeyChecks = true
       StrictMode = true
       ConnectionCollation = Collation.defaultCollation
+      SessionUser = "root"
       VirtualTables = Map.empty
       OnCommit = ResizeArray()
       PendingEvents = None

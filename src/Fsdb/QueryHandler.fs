@@ -1095,6 +1095,11 @@ let private executeParsed (session: Session) (stmt: Statement) : Session * Query
         setStrictMode
             store
             (lookupVar session "sql_mode" |> Option.flatten |> Option.map isStrictSqlMode |> Option.defaultValue true)
+
+        // Same reasoning for the executing account: `CREATE TRIGGER` stamps
+        // it as the definer, and a trigger body is checked against that
+        // definer rather than whoever's INSERT fired it.
+        store.SessionUser <- session.User
         let registry = registryFor session
 
         // `SELECT`/`UNION` go through `Executor`'s type-preserving entry

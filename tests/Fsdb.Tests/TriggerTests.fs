@@ -434,4 +434,82 @@ let tests =
                       "SELECT TRIGGER_NAME, EVENT_MANIPULATION, EVENT_OBJECT_TABLE, ACTION_ORDER, ACTION_STATEMENT, ACTION_ORIENTATION, ACTION_TIMING, ACTION_REFERENCE_NEW_ROW FROM information_schema.TRIGGERS")
                   [ [ Some "trg"; Some "INSERT"; Some "t"; Some "1"; Some "INSERT INTO log(n) VALUES (1)"; Some "ROW"
                       Some "AFTER"; Some "NEW" ] ]
-                  "probed information_schema row" ]
+                  "probed information_schema row"
+
+          // ---------------------------------------------------------------
+          // DEFINER semantics. A body runs with the privileges of whoever
+          // created the trigger, never the account whose INSERT fired it —
+          // otherwise GRANT TRIGGER on one table would hand its holder write
+          // access to every table the body can name.
+          // ---------------------------------------------------------------
+
+          testCase "a body runs as its definer, so TRIGGER on one table can't write a table the definer lacks"
+          <| fun _ ->
+              let store = Fsdb.Storage.create ()
+              let session = Fsdb.Session.create 1 store
+              let sql (s: Fsdb.Session.Session) text = handle s text |> snd
+
+              expectOk (sql session "CREATE TABLE pub (id INT PRIMARY KEY)") "create pub"
+              expectOk (sql session "CREATE TABLE secret (id INT PRIMARY KEY)") "create secret"
+              expectOk (sql session "CREATE USER low") "create user"
+              expectOk (sql session "GRANT SELECT, INSERT, TRIGGER ON fsdb.pub TO low") "grant pub"
+              expectOk (sql session "GRANT SELECT ON fsdb.secret TO low") "grant secret select"
+
+              // `low` creates the trigger (allowed: they hold TRIGGER on pub)
+              // and is therefore its definer.
+              let lowSession = { Fsdb.Session.create 2 store with User = "low" }
+
+              expectOk
+                  (sql lowSession "CREATE TRIGGER esc AFTER INSERT ON pub FOR EACH ROW INSERT INTO secret VALUES (NEW.id)")
+                  "low creates trigger"
+
+              // Firing it must fail exactly like low's direct INSERT would.
+              match sql lowSession "INSERT INTO pub VALUES (1)" with
+              | Err(1142, msg) -> Expect.stringContains msg "secret" "1142 names the table the definer can't write"
+              | other -> failtestf "expected the body to be denied 1142, got %A" other
+
+              Expect.equal (rows store "SELECT COUNT(*) FROM secret") [ [ Some "0" ] ] "nothing was written to secret"
+
+          testCase "a root-created trigger still fires for an inserter who can't write the body's table"
+          <| fun _ ->
+              // The other half of DEFINER semantics: privileges follow the
+              // definer, so root's trigger works no matter who inserts.
+              let store = Fsdb.Storage.create ()
+              let session = Fsdb.Session.create 1 store
+              let sql (s: Fsdb.Session.Session) text = handle s text |> snd
+
+              expectOk (sql session "CREATE TABLE pub (id INT PRIMARY KEY)") "create pub"
+              expectOk (sql session "CREATE TABLE audit (id INT PRIMARY KEY)") "create audit"
+              expectOk (sql session "CREATE USER low2") "create user"
+              expectOk (sql session "GRANT SELECT, INSERT ON fsdb.pub TO low2") "grant pub"
+
+              expectOk
+                  (sql session "CREATE TRIGGER aud AFTER INSERT ON pub FOR EACH ROW INSERT INTO audit VALUES (NEW.id)")
+                  "root creates trigger"
+
+              let lowSession = { Fsdb.Session.create 2 store with User = "low2" }
+              expectOk (sql lowSession "INSERT INTO pub VALUES (7)") "low2 inserts"
+
+              Expect.equal (rows store "SELECT id FROM audit") [ [ Some "7" ] ] "root's trigger wrote the audit row"
+
+          testCase "SHOW TRIGGERS reports the real definer, not a constant"
+          <| fun _ ->
+              let store = Fsdb.Storage.create ()
+              let session = Fsdb.Session.create 1 store
+              let sql (s: Fsdb.Session.Session) text = handle s text |> snd
+
+              expectOk (sql session "CREATE TABLE pub (id INT PRIMARY KEY)") "create pub"
+              expectOk (sql session "CREATE TABLE log2 (id INT PRIMARY KEY)") "create log2"
+              expectOk (sql session "CREATE USER dev") "create user"
+              expectOk (sql session "GRANT ALL PRIVILEGES ON fsdb.* TO dev") "grant"
+
+              let devSession = { Fsdb.Session.create 2 store with User = "dev" }
+
+              expectOk
+                  (sql devSession "CREATE TRIGGER t_dev AFTER INSERT ON pub FOR EACH ROW INSERT INTO log2 VALUES (NEW.id)")
+                  "dev creates trigger"
+
+              // SHOW is a text probe, so it goes through `handle`, not the parser.
+              match handle session "SHOW TRIGGERS" |> snd with
+              | ResultSet(_, [ row ]) -> Expect.equal (List.item 7 row) (Some "dev@%") "Definer is the creating account"
+              | other -> failtestf "expected one SHOW TRIGGERS row, got %A" other ]

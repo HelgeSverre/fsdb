@@ -5467,10 +5467,13 @@ let private err1442 (table: string) : QueryResult =
     )
 
 /// `mysql.triggers` rows for `(db, table)`'s AFTER INSERT event, as
-/// `(name, bodyText)`. Cell positions are `Storage.mysqlTriggersColumns`'
-/// fixed order (name, schema, event_table, timing, event, statement,
-/// created).
-let private afterInsertTriggers (store: Store) (db: string) (table: string) : (string * string) list =
+/// `(name, bodyText, definer)`. Cell positions are
+/// `Storage.mysqlTriggersColumns`' fixed order (name, schema, event_table,
+/// timing, event, statement, created, definer). `definer` reads defensively:
+/// a row written before that column existed is 7 cells wide, and an absent
+/// (or empty) definer is deliberately *not* "skip the check" — see
+/// `checkDefiner`.
+let private afterInsertTriggers (store: Store) (db: string) (table: string) : (string * string * string) list =
     match scan store "mysql" "triggers" with
     | Error _ -> []
     | Ok(_, rows) ->
@@ -5483,8 +5486,16 @@ let private afterInsertTriggers (store: Store) (db: string) (table: string) : (s
             && eqI (text 2 r) (normalizeTableName table)
             && eqI (text 3 r) "AFTER"
             && eqI (text 4 r) "INSERT")
-        |> Seq.map (fun r -> text 0 r, text 5 r)
+        |> Seq.map (fun r -> text 0 r, text 5 r, (if r.Length > 7 then text 7 r else ""))
         |> List.ofSeq
+
+/// A definer account (`user@%`, as `CURRENT_USER()` renders it) reduced to
+/// the bare user name `Auth.check` keys on — fsdb accounts are name-only
+/// with host `%`.
+let private definerUser (definer: string) : string =
+    match definer.LastIndexOf '@' with
+    | -1 -> definer
+    | i -> definer.Substring(0, i)
 
 /// The one table a trigger body statement writes — what 1442's "already
 /// used by the statement which invoked this trigger" check points at.
@@ -5525,7 +5536,7 @@ let rec execute (store: Store) (registry: Registry) (dbName: string) (ids: int64
     /// (probed: `INSERT INTO a.t` from a session on db b runs the body's
     /// `INSERT INTO work_log` against a.work_log). Returns `Some err` when
     /// a body failed.
-    let fireAfterInsertTriggers (runStore: Store) (db: string) (table: string) (triggers: (string * string) list) (insertedRows: Value[] list) : QueryResult option =
+    let fireAfterInsertTriggers (runStore: Store) (db: string) (table: string) (triggers: (string * string * string) list) (insertedRows: Value[] list) : QueryResult option =
         match scan runStore db table with
         | Error _ -> None
         | Ok(columns, _) ->
@@ -5540,14 +5551,31 @@ let rec execute (store: Store) (registry: Registry) (dbName: string) (ids: int64
             // chain deeper than the cap, fires nothing at all.
             // ponytail: fixed depth cap 8 — raise it if a legitimate
             // trigger chain that deep ever exists.
-            let checkBody ((name, body): string * string) =
+            let checkBody ((name, body, definer): string * string * string) =
                 match Parser.parse body with
                 | Result.Error msg -> Result.Error(Err(1064, sprintf "Trigger '%s' body has a syntax error: %s" name msg))
                 | Result.Ok bodyStmt ->
                     match writtenTableOf db bodyStmt with
                     | Some target when List.contains target (self :: chain) -> Result.Error(err1442 (snd target))
                     | Some target when List.length chain >= 8 -> Result.Error(err1442 (snd target))
-                    | _ -> Result.Ok bodyStmt
+                    | _ ->
+                        // MySQL runs a body with the DEFINER's privileges, not
+                        // the invoking session's — otherwise granting TRIGGER
+                        // on one table would hand its holder every table the
+                        // engine can write. Checked per fire (not at CREATE)
+                        // so a revoke takes effect immediately, and per
+                        // trigger in a chain, each against its own definer.
+                        if definer = "" then
+                            // Pre-definer row (see `Storage.ensureMysqlSchema`'s
+                            // migration): fail closed rather than guess an
+                            // account to run as. MySQL's own "no definer" error.
+                            Result.Error(
+                                Err(1449, sprintf "The user specified as a definer ('') does not exist for trigger '%s'" name)
+                            )
+                        else
+                            match Auth.check runStore (definerUser definer) (Auth.requiredPrivileges db bodyStmt) with
+                            | Result.Error(code, msg) -> Result.Error(Err(code, msg))
+                            | Result.Ok() -> Result.Ok bodyStmt
 
             match triggers |> traverse checkBody with
             | Result.Error err -> Some err
@@ -5846,14 +5874,18 @@ let rec execute (store: Store) (registry: Registry) (dbName: string) (ids: int64
                                     "triggers"
                                     (Some
                                         [ "trigger_name"; "trigger_schema"; "event_table"; "action_timing"
-                                          "event_manipulation"; "action_statement"; "created" ])
+                                          "event_manipulation"; "action_statement"; "created"; "definer" ])
                                     [ [ VString name
                                         VString db
                                         VString(normalizeTableName table)
                                         VString "AFTER"
                                         VString "INSERT"
                                         VString body
-                                        VDateTime System.DateTime.Now ] ]
+                                        VDateTime System.DateTime.Now
+                                        // MySQL's DEFINER, defaulted to the
+                                        // creating account — what the body's
+                                        // privileges are checked against.
+                                        VString(store.SessionUser + "@%") ] ]
                             with
                             | Ok _ -> ids, Affected 0UL
                             | Error e -> ids, storageErr e
