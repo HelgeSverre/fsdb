@@ -958,6 +958,17 @@ let tests =
               let r = Reader(w.ToArray())
               Expect.equal (decodeValue r) original "VJson round-trips through encodeValue/decodeValue"
 
+          testCase "the Value binary codec round-trips the whole BIGINT UNSIGNED range, including the half int64 cannot hold"
+          <| fun _ ->
+              // `encodeValue`'s 0x09 tag writes the same eight bytes as
+              // `VInt`; the tag is what says to read them back unsigned, so
+              // the top of the range is exactly where a lost tag shows up.
+              for original in [ VUInt 0UL; VUInt 9223372036854775808UL; VUInt UInt64.MaxValue ] do
+                  let w = Writer()
+                  encodeValue w original
+                  let r = Reader(w.ToArray())
+                  Expect.equal (decodeValue r) original (sprintf "%A round-trips" original)
+
           testCase "DOUBLE/DECIMAL/BLOB/DATE values round-trip exactly through real columns, both via a WAL-only reload and a snapshot+reload"
           <| fun _ ->
               let dir = tempDataDir ()

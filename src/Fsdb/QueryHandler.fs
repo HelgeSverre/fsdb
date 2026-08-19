@@ -145,6 +145,7 @@ let valueToSqlLiteral (v: Value) : string =
     match v with
     | VNull -> "NULL"
     | VInt i -> string i
+    | VUInt u -> string u
     | VDouble d -> d.ToString(Globalization.CultureInfo.InvariantCulture)
     | VDecimal d -> d.ToString(Globalization.CultureInfo.InvariantCulture)
     | VBytes bytes -> "X'" + Convert.ToHexString(bytes) + "'"

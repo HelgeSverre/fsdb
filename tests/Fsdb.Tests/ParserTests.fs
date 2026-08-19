@@ -1392,8 +1392,8 @@ let tests =
                     Expect.equal
                         (parseOk "SELECT CAST(a AS UNSIGNED), CAST('1' AS SIGNED), CAST(a AS CHAR)")
                         (mkSelect(
-                            [ Cast(col "a", TInt true), None
-                              Cast(Lit(VString "1"), TInt false), None
+                            [ Cast(col "a", TBigInt true), None
+                              Cast(Lit(VString "1"), TBigInt false), None
                               Cast(col "a", TChar 1), None ],
                             None,
                             None,

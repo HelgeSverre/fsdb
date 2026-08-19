@@ -49,6 +49,12 @@ let BinaryCollation = 63
 let private BlobFlag = 0x0010
 let private BinaryFlag = 0x0080
 
+/// UNSIGNED_FLAG. A `BIGINT UNSIGNED` column is LONGLONG on the wire like
+/// any other 64-bit integer; only this flag tells the client to read the
+/// eight bytes as a `uint64`, which is what makes `CAST(-1 AS UNSIGNED)`
+/// arrive as 18446744073709551615 instead of -1.
+let private UnsignedFlag = 0x0020
+
 /// SERVER_STATUS_IN_TRANS
 let StatusInTrans = 0x0001
 
@@ -254,10 +260,18 @@ let columnDefPayload (col: ColumnDef) : byte[] =
     w.WriteLenEncString col.Name // org_name
     w.WriteLenEncInt 0x0cUL // length of fixed-length fields
     let isBinary = col.Type = TypeBlob
+    let isUnsigned = col.Type = TypeLongLongUnsigned
     w.WriteInt16LE(if isBinary then BinaryCollation else Utf8Mb4GeneralCi)
     w.WriteInt32LE 0 // column length
-    w.WriteByte col.Type
-    w.WriteInt16LE(if isBinary then BlobFlag ||| BinaryFlag else 0)
+    // The one place `TypeLongLongUnsigned` becomes real wire bytes: an
+    // ordinary LONGLONG id plus the flag that carries the signedness.
+    w.WriteByte(if isUnsigned then TypeLongLong else col.Type)
+
+    w.WriteInt16LE(
+        if isBinary then BlobFlag ||| BinaryFlag
+        elif isUnsigned then UnsignedFlag
+        else 0
+    )
     w.WriteByte col.Decimals // fsp for temporal columns, else 0
     w.WriteInt16LE 0 // filler
     w.ToArray()
@@ -273,7 +287,8 @@ let wireTypeOfColumnType (ty: Ast.ColumnType) : byte =
     | Ast.TSmallInt _ -> TypeShort
     | Ast.TMediumInt _
     | Ast.TInt _ -> TypeLong
-    | Ast.TBigInt _ -> TypeLongLong
+    | Ast.TBigInt true -> TypeLongLongUnsigned
+    | Ast.TBigInt false -> TypeLongLong
     | Ast.TDecimal _ -> TypeNewDecimal
     | Ast.TDouble -> TypeDouble
     | Ast.TFloat -> TypeFloat
@@ -396,6 +411,10 @@ let private writeBinaryTime (w: Writer) (s: string) : unit =
 let private writeBinaryValue (w: Writer) (typeId: byte) (s: string) : unit =
     if typeId = TypeLongLong then
         w.WriteInt64LE(Int64.Parse(s, Globalization.CultureInfo.InvariantCulture))
+    // Same eight bytes, parsed out of the unsigned domain — `Int64.Parse`
+    // would throw on anything past 2^63-1, the exact range this exists for.
+    elif typeId = TypeLongLongUnsigned then
+        w.WriteInt64LE(int64 (UInt64.Parse(s, Globalization.CultureInfo.InvariantCulture)))
     elif typeId = TypeDouble then
         w.WriteDoubleLE(Double.Parse(s, Globalization.CultureInfo.InvariantCulture))
     elif typeId = TypeDate then
@@ -586,7 +605,7 @@ let readBinaryValue (r: Reader) (typeId: byte) (unsigned: bool) : Value =
         let bytes = r.ReadBytes 8
 
         if unsigned then
-            VDecimal(decimal (BitConverter.ToUInt64(bytes, 0)))
+            VUInt(BitConverter.ToUInt64(bytes, 0))
         else
             VInt(BitConverter.ToInt64(bytes, 0))
     elif typeId = TypeFloat then

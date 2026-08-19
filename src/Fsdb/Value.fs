@@ -5,12 +5,20 @@ module Fsdb.Value
 
 open System
 open System.Globalization
+open System.Text.Json
+open System.Text.Json.Nodes
 open System.Text.RegularExpressions
 open Fsdb.Binary
 
 type Value =
     | VNull
     | VInt of int64
+    /// MySQL's `BIGINT UNSIGNED` domain, whose top half (2^63 .. 2^64-1)
+    /// has no `int64` representation — `CAST(-1 AS UNSIGNED)` is
+    /// 18446744073709551615, not -1. Only 64-bit unsigned needs its own
+    /// case: every narrower unsigned type (`INT UNSIGNED`'s 4294967295 and
+    /// down) fits `VInt` exactly.
+    | VUInt of uint64
     | VDouble of float
     | VDecimal of decimal
     | VString of string
@@ -46,6 +54,19 @@ let TypeBlob = 0xfcuy
 let TypeVarString = 0xfduy
 let TypeString = 0xfeuy
 
+/// An internal stand-in for "LONGLONG carrying the UNSIGNED flag", which
+/// the wire has no distinct type id for — the flag lives in the column
+/// definition's separate `flags` field, and the `byte list` channel that
+/// carries a resultset's column types from `Executor` to `Protocol` has
+/// room for the type alone. `Protocol.columnDefPayload` translates this
+/// back into `TypeLongLong` + `UNSIGNED_FLAG` at the one place the byte
+/// reaches the wire, and `Protocol.writeBinaryValue` reads it to pick
+/// `UInt64.Parse` over `Int64.Parse`. 0x88 is outside every id MySQL
+/// assigns (0x00-0x12 and 0xf5-0xff), so it can never collide with a real
+/// one. ponytail: widen the channel to (type, flags) pairs if a second
+/// flag ever needs advertising.
+let TypeLongLongUnsigned = 0x88uy
+
 /// .NET's shortest-round-trip double formatting agrees with MySQL on the
 /// mantissa but not the exponent: "1E+20" vs MySQL's "1e20" (lowercase,
 /// no '+', no zero-padding). Reshapes just the exponent part when present.
@@ -74,6 +95,7 @@ let toText (v: Value) : string option =
     match v with
     | VNull -> None
     | VInt i -> Some(string i)
+    | VUInt u -> Some(string u)
     // .NET Core's default double ToString is already the shortest
     // round-trippable representation (no "0.1000000000000001" noise); only
     // the exponent's shape needs reworking to match MySQL's rendering.
@@ -131,6 +153,7 @@ let toWire (v: Value) : string =
     match v with
     | VNull -> "N"
     | VInt i -> "I" + string i
+    | VUInt u -> "U" + string u
     | VDouble d -> "D" + d.ToString("R", CultureInfo.InvariantCulture)
     | VDecimal d -> "M" + d.ToString(CultureInfo.InvariantCulture)
     | VString s -> "S" + b64 s
@@ -152,6 +175,7 @@ let ofWire (s: string) : Value =
 
         match s.[0] with
         | 'I' -> VInt(Int64.Parse(payload, CultureInfo.InvariantCulture))
+        | 'U' -> VUInt(UInt64.Parse(payload, CultureInfo.InvariantCulture))
         | 'D' -> VDouble(Double.Parse(payload, NumberStyles.Float, CultureInfo.InvariantCulture))
         | 'M' -> VDecimal(Decimal.Parse(payload, CultureInfo.InvariantCulture))
         | 'S' -> VString(unb64 payload)
@@ -171,6 +195,12 @@ let encodeValue (w: Writer) (v: Value) : unit =
     | VInt i ->
         w.WriteByte 0x01uy
         w.WriteInt64LE i
+    // Same eight bytes as `VInt`, a distinct tag: the payload's *signedness*
+    // is what the tag carries, and reinterpreting the bit pattern on the way
+    // back is exact for the whole 64-bit range.
+    | VUInt u ->
+        w.WriteByte 0x09uy
+        w.WriteInt64LE(int64 u)
     | VDouble d ->
         w.WriteByte 0x02uy
         w.WriteDoubleLE d
@@ -202,6 +232,7 @@ let decodeValue (r: #IReader) : Value =
     match r.ReadByte() with
     | 0x00uy -> VNull
     | 0x01uy -> VInt(r.ReadInt64LE())
+    | 0x09uy -> VUInt(uint64 (r.ReadInt64LE()))
     | 0x02uy -> VDouble(BitConverter.Int64BitsToDouble(r.ReadInt64LE()))
     | 0x03uy ->
         let bits = [| for _ in 0..3 -> r.ReadInt32LE() |]
@@ -243,6 +274,7 @@ let mysqlTypeOf (v: Value) : byte =
     // VAR_STRING) is as good as anything else here.
     | VNull -> TypeVarString
     | VInt _ -> TypeLongLong
+    | VUInt _ -> TypeLongLongUnsigned
     | VDouble _ -> TypeDouble
     | VDecimal _ -> TypeNewDecimal
     | VString _
@@ -275,6 +307,7 @@ let toDouble (v: Value) : float =
     match v with
     | VNull -> 0.0
     | VInt i -> float i
+    | VUInt u -> float u
     | VDouble d -> d
     | VDecimal d -> float d
     | VString s -> parseLeadingNumeric s
@@ -324,6 +357,109 @@ let private asDateTime (v: Value) : DateTime =
     | VDateTime dt -> dt
     | _ -> invalidArg "v" "asDateTime expects VDate or VDateTime"
 
+/// MySQL's JSON comparison precedence, ascending (the manual lists it
+/// descending, highest first): JSON NULL < number < string < object <
+/// array < boolean < date < time < datetime < opaque < blob. The *type*
+/// decides the order before the content does, and comparing a JSON value
+/// against a non-JSON one converts the non-JSON side to JSON first — which
+/// is why `JSON_EXTRACT('{"n":1}','$.n') = '1'` is FALSE (JSON number vs
+/// JSON string) while `= 1` is TRUE, and why the rendered-text comparison
+/// this replaced got `'{"s":"abc"}'->'$.s' = 'abc'` wrong (it compared the
+/// quoted `"abc"` against the bare `abc`).
+/// https://dev.mysql.com/doc/refman/8.4/en/json.html#json-comparison
+///
+/// ponytail: TIME and OPAQUE have no `Value` case to reach them, and
+/// fsdb has no BIT type, so those ranks are unreachable placeholders —
+/// widen when those types land.
+let private jsonRankOfNode (node: JsonNode) : int =
+    if isNull (box node) then
+        0
+    else
+        match node.GetValueKind() with
+        | JsonValueKind.Null -> 0
+        | JsonValueKind.Number -> 1
+        | JsonValueKind.String -> 2
+        | JsonValueKind.Object -> 3
+        | JsonValueKind.Array -> 4
+        | JsonValueKind.True
+        | JsonValueKind.False -> 5
+        | _ -> 2
+
+/// A `Value` as the (rank, node) pair `compareJson` orders by. Types with
+/// no JSON scalar shape (dates, binary) keep their SQL rank and compare
+/// against their own kind through `compare`'s ordinary rules, so the node
+/// is unused for them.
+let private asJsonOperand (v: Value) : int * JsonNode =
+    let node (s: string) =
+        try
+            JsonNode.Parse s
+        with _ ->
+            JsonValue.Create s
+
+    match v with
+    | VJson j -> let n = node j in jsonRankOfNode n, n
+    | VInt i -> 1, JsonValue.Create i
+    | VUInt u -> 1, JsonValue.Create u
+    | VDouble d -> 1, JsonValue.Create d
+    | VDecimal d -> 1, JsonValue.Create d
+    | VString s -> 2, JsonValue.Create s
+    | VDate _ -> 6, null
+    | VDateTime _ -> 8, null
+    | VBytes _ -> 11, null
+    | VNull -> 0, null
+
+/// A JSON number's exact value where `decimal` can hold it (so two BIGINTs
+/// past 2^53 stay distinct), its `double` otherwise.
+let private jsonNumber (node: JsonNode) : Choice<decimal, float> =
+    let text = node.ToJsonString()
+
+    match Decimal.TryParse(text, NumberStyles.Float, CultureInfo.InvariantCulture) with
+    | true, d -> Choice1Of2 d
+    | false, _ ->
+        match Double.TryParse(text, NumberStyles.Float, CultureInfo.InvariantCulture) with
+        | true, d -> Choice2Of2 d
+        | false, _ -> Choice2Of2 0.0
+
+/// Orders two same-ranked JSON nodes. JSON strings compare by code unit
+/// (binary, NOT the ai_ci collation SQL strings use — the oracle says
+/// `CAST('"a"' AS JSON) = CAST('"A"' AS JSON)` is 0), arrays compare
+/// element-wise then by length, and objects compare by their sorted keys
+/// then the values under them.
+let rec private compareJsonNodes (x: JsonNode) (y: JsonNode) : int =
+    match jsonRankOfNode x with
+    | 0 -> 0
+    | 1 ->
+        match jsonNumber x, jsonNumber y with
+        | Choice1Of2 a, Choice1Of2 b -> Decimal.Compare(a, b)
+        | a, b ->
+            let asFloat = function
+                | Choice1Of2 (d: decimal) -> float d
+                | Choice2Of2 f -> f
+
+            Operators.compare (asFloat a) (asFloat b)
+    | 2 -> String.CompareOrdinal(x.GetValue<string>(), y.GetValue<string>()) |> sign
+    | 5 -> Operators.compare (x.GetValue<bool>()) (y.GetValue<bool>())
+    | 4 ->
+        let a = x :?> JsonArray
+        let b = y :?> JsonArray
+
+        Seq.zip a b
+        |> Seq.tryPick (fun (l, r) -> match compareJsonNodes l r with 0 -> None | c -> Some c)
+        |> Option.defaultWith (fun () -> Operators.compare a.Count b.Count)
+    | 3 ->
+        let keys (o: JsonObject) = o |> Seq.map _.Key |> Seq.sortWith (fun l r -> String.CompareOrdinal(l, r)) |> List.ofSeq
+        let a = x :?> JsonObject
+        let b = y :?> JsonObject
+        let ka, kb = keys a, keys b
+
+        match Operators.compare ka kb with
+        | 0 ->
+            ka
+            |> List.tryPick (fun k -> match compareJsonNodes a.[k] b.[k] with 0 -> None | c -> Some c)
+            |> Option.defaultValue 0
+        | c -> c
+    | _ -> 0
+
 /// Total order over values for ORDER BY: NULL sorts first, numbers compare
 /// numerically (a number vs. a string coerces the string to a double, so
 /// `'10' < '9'` numerically even though it's false as a string compare),
@@ -334,8 +470,31 @@ let rec compare (a: Value) (b: Value) : int =
     | VNull, VNull -> 0
     | VNull, _ -> -1
     | _, VNull -> 1
+    // A JSON operand pulls the whole comparison into the JSON domain (see
+    // `jsonRankOfNode`): type precedence first, content second.
+    | VJson _, _
+    | _, VJson _ ->
+        let ra, na = asJsonOperand a
+        let rb, nb = asJsonOperand b
+
+        match Operators.compare ra rb with
+        // Ranks that carry no JSON node (dates, binary) still have to order
+        // among themselves; their SQL comparison is the same order.
+        | 0 when ra >= 6 -> compareStrings (toText a |> Option.defaultValue "") (toText b |> Option.defaultValue "")
+        | 0 -> compareJsonNodes na nb
+        | c -> c
     | VDecimal x, VDecimal y -> Decimal.Compare(x, y)
     | VInt x, VInt y -> Operators.compare x y
+    // The unsigned 64-bit domain and the signed one only overlap on
+    // [0, 2^63); `decimal` holds both exactly, so promoting is the one
+    // comparison that stays right at both ends (`toDouble` would merge
+    // distinct values past 2^53, and a naive `int64`/`uint64` cast would
+    // make -1 the largest value there is).
+    | VUInt x, VUInt y -> Operators.compare x y
+    | VUInt x, VInt y -> Decimal.Compare(decimal x, decimal y)
+    | VInt x, VUInt y -> Decimal.Compare(decimal x, decimal y)
+    | VUInt x, VDecimal y -> Decimal.Compare(decimal x, y)
+    | VDecimal x, VUInt y -> Decimal.Compare(x, decimal y)
     | VString x, VString y -> compareStrings x y
     | VBytes x, VBytes y -> compareBytesLex x y
     // A binary string against a character string compares byte-for-byte
@@ -368,8 +527,8 @@ let rec compare (a: Value) (b: Value) : int =
     // keys, and unique-index lookups alike.
     | VInt x, VDecimal y -> Decimal.Compare(decimal x, y)
     | VDecimal x, VInt y -> Decimal.Compare(x, decimal y)
-    | (VInt _ | VDouble _ | VDecimal _), _
-    | _, (VInt _ | VDouble _ | VDecimal _) -> Operators.compare (toDouble a) (toDouble b)
+    | (VInt _ | VUInt _ | VDouble _ | VDecimal _), _
+    | _, (VInt _ | VUInt _ | VDouble _ | VDecimal _) -> Operators.compare (toDouble a) (toDouble b)
     | _ -> compareStrings (toText a |> Option.defaultValue "") (toText b |> Option.defaultValue "")
 
 /// The `ORDER BY` total order: `compare` first (folded — accent/case-only
@@ -443,6 +602,11 @@ let truthy (v: Value) : bool option =
 /// non-numeric coerces through `toDouble` like MySQL's implicit cast.
 type private NumKind =
     | KInt of int64
+    /// `BIGINT UNSIGNED`. Kept apart from `KInt` because MySQL's promotion
+    /// rules make an unsigned operand win over a signed one (`+`/`-`/`*`/
+    /// `MOD` on unsigned-and-signed yield unsigned), not because the
+    /// arithmetic itself differs — that runs in `decimal` either way.
+    | KUInt of uint64
     | KDecimal of decimal
     | KDouble of float
 
@@ -450,6 +614,7 @@ let private classify (v: Value) : NumKind option =
     match v with
     | VNull -> None
     | VInt i -> Some(KInt i)
+    | VUInt u -> Some(KUInt u)
     | VDecimal d -> Some(KDecimal d)
     | VDouble d -> Some(KDouble d)
     | VString _
@@ -461,14 +626,37 @@ let private classify (v: Value) : NumKind option =
 let private asDouble =
     function
     | KInt i -> float i
+    | KUInt u -> float u
     | KDecimal d -> float d
     | KDouble d -> d
 
 let private asDecimal =
     function
     | KInt i -> decimal i
+    | KUInt u -> decimal u
     | KDecimal d -> d
     | KDouble d -> decimal d
+
+/// The largest `BIGINT UNSIGNED`, as a `decimal` — the ceiling the exact
+/// integral operations narrow back through.
+let private maxUInt64 = decimal UInt64.MaxValue
+
+/// Narrows an exact `decimal` result of unsigned-domain arithmetic back to
+/// `VUInt` when it lands inside `BIGINT UNSIGNED`, keeping the operation's
+/// unsigned result type the way MySQL does (`unsigned - signed` is
+/// unsigned).
+///
+/// ponytail: MySQL raises 1690 ("BIGINT UNSIGNED value is out of range")
+/// when the result leaves [0, 2^64) — `CAST(-1 AS UNSIGNED) * 2` and
+/// `CAST(1 AS UNSIGNED) - 2` both error there. `Value`'s arithmetic has no
+/// error channel (see `arith`'s int64-overflow note, which already takes
+/// this same exit), so an out-of-domain result stays an exact `DECIMAL`
+/// instead. Route arithmetic through a `Result` if 1690 needs raising.
+let private narrowUnsigned (d: decimal) : Value =
+    if d >= 0m && d <= maxUInt64 && Decimal.Truncate d = d then
+        VUInt(uint64 d)
+    else
+        VDecimal d
 
 /// MySQL arithmetic type promotion: int op int stays int; decimal involved
 /// (with no double operand) promotes to decimal; a double operand (or a
@@ -493,6 +681,16 @@ let private arith
             VInt(opInt x y)
         with :? OverflowException ->
             VDecimal(opDec (decimal x) (decimal y))
+    // An unsigned operand against any exact integral one keeps MySQL's
+    // unsigned result type. The arithmetic itself runs in `decimal`, which
+    // covers the whole [0, 2^64) domain exactly and — unlike `uint64` —
+    // survives a negative intermediate without wrapping.
+    | Some(KUInt _ as ka), Some((KInt _ | KUInt _) as kb)
+    | Some((KInt _) as ka), Some((KUInt _) as kb) ->
+        try
+            narrowUnsigned (opDec (asDecimal ka) (asDecimal kb))
+        with :? OverflowException ->
+            VDouble(opDbl (asDouble ka) (asDouble kb))
     | Some ka, Some kb ->
         match ka, kb with
         | KDouble _, _
@@ -570,6 +768,10 @@ let modulo (a: Value) (b: Value) : Value =
     | Some ka, Some kb ->
         match ka, kb with
         | KInt x, KInt y -> if y = 0L then VNull else VInt(x % y)
+        // Unsigned wins the same way `+`/`-`/`*` promote it.
+        | (KUInt _, (KInt _ | KUInt _) | KInt _, KUInt _) ->
+            let y = asDecimal kb
+            if y = 0m then VNull else narrowUnsigned (asDecimal ka % y)
         | KDouble _, _
         | _, KDouble _ ->
             let y = asDouble kb
@@ -597,6 +799,13 @@ let intDiv (a: Value) (b: Value) : Value =
             // errors (1105/1690) here, and the domain-appropriate stand-in
             // with no error channel is NULL rather than an internal crash.
             try
-                VInt(int64 (Math.Truncate(asDecimal ka / y)))
+                let quotient = Math.Truncate(asDecimal ka / y)
+
+                // `BIGINT UNSIGNED DIV` stays unsigned, so a quotient in the
+                // top half of the range (`CAST(-1 AS UNSIGNED) DIV 1`) has
+                // to survive rather than overflow `int64` into NULL.
+                match ka, kb with
+                | (KUInt _, _ | _, KUInt _) -> narrowUnsigned quotient
+                | _ -> VInt(int64 quotient)
             with :? OverflowException ->
                 VNull

@@ -117,72 +117,70 @@ Execution (10) — builtins that parse but are not registered:
 
 ## Open real divergences (NOT ledgered)
 
-Both engines answer; the answers differ. These are correctness bugs and are
-deliberately left failing rather than hidden behind a known-gap entry.
+None. The six that were open here — the whole "wrong answer, not a refusal"
+class in this corpus — were fixed on 2026-08-19; the section below records
+what they were and what the fixes do not cover. Every probe in the corpus now
+either matches MySQL 8.4.11 exactly or fails against a ledgered signature.
 
-### 1. No unsigned 64-bit integer — `CAST(x AS UNSIGNED)` is a no-op
+## Closed: the six wrong-answer divergences
 
-```sql
-SELECT CAST(-1 AS UNSIGNED) AS neg_one_unsigned,
-       CAST(-9223372036854775808 AS UNSIGNED) AS min_big_unsigned,
-       CAST(CAST(18446744073709551615 AS UNSIGNED) AS SIGNED) AS round_trip_signed;
--- MySQL: 18446744073709551615 | 9223372036854775808 | -1
--- fsdb:                    -1 | -9223372036854775808 | 9223372036854775807
-```
+Probes `unsigned_cast_wraparound`, `json_arrow_first_element`,
+`json_set_insert_replace_render`, `json_scalar_coercion_compare`,
+`json_unquoted_vs_quoted_compare`, and `json_cross_type_ordering` all pass.
+They were the only unledgered failures in the corpus, so `known-gaps.json`
+neither shrank nor grew: it stays at 43 signatures, with none stale.
 
-`Value` has no `uint64` case and `Storage.coerceValue` ignores the `unsigned`
-flag on `TInt`/`TBigInt` entirely, so the cast silently returns the signed
-value and an out-of-range literal clamps to `Int64.MaxValue`. Fixing this is
-a new `Value` case threaded through storage, arithmetic, comparison, and the
-wire protocol — not a local patch. Probe: `unsigned_cast_wraparound`.
+### 1. Unsigned 64-bit integers — fixed
 
-### 2. A JSON scalar never compares equal to a SQL string
+`Value` gained a `VUInt of uint64` case, threaded through `toText`, the
+tagged-text (`toWire`) and binary (`encodeValue`, tag `0x09`) codecs,
+`mysqlTypeOf`, comparison, arithmetic promotion, `Storage.coerceValue`'s
+`BIGINT UNSIGNED` column branch, the unique-index key encoder, and the wire
+protocol (`Protocol` translates `Value.TypeLongLongUnsigned` into LONGLONG
+plus `UNSIGNED_FLAG` in the column definition, and parses the binary-protocol
+row value as `uint64`). `CAST(x AS UNSIGNED)` gets its own executor branch
+because a cast *wraps* into the domain where a column clamps. An integer
+literal past `BIGINT`'s signed range now parses as `VUInt` rather than
+collapsing to a double.
 
-```sql
-SELECT JSON_EXTRACT(JSON_OBJECT('s', 'abc'), '$.s') = 'abc';
--- MySQL: 1
--- fsdb:  0
-```
+Not covered, deliberately:
 
-fsdb compares the *rendered* JSON text `"abc"` (quotes included) against
-`abc`. The same bug makes one row in eight of the DECIMAL comparison miss.
-Probes: `json_scalar_coercion_compare`, `json_unquoted_vs_quoted_compare`.
+- MySQL raises 1690 when an unsigned expression leaves `[0, 2^64)`
+  (`CAST(-1 AS UNSIGNED) * 2`, `CAST(1 AS UNSIGNED) - 2`). `Value`'s
+  arithmetic has no error channel, so the result stays an exact `DECIMAL` —
+  the same exit `VInt` overflow already takes. Marked `ponytail` on
+  `Value.narrowUnsigned`.
+- No range enforcement on an out-of-domain value written to an integer
+  column (1264 in strict mode); `BIGINT UNSIGNED` clamps, matching the
+  existing "integer columns are not range-checked" ceiling for every other
+  integer type. Marked `ponytail` on `Storage.coerceValue`.
+- `CAST(<double too large> AS UNSIGNED)` clamps at the *unsigned* ceiling
+  where MySQL clamps at signed `BIGINT` max. Marked `ponytail` on the cast.
 
-### 3. JSON values compare by SQL rules, not JSON type precedence
+### 2-3. JSON comparison — fixed
 
-```sql
-SELECT CAST('1' AS JSON) < CAST('"a"' AS JSON) AS int_lt_string,
-       CAST('null' AS JSON) < CAST('1' AS JSON) AS json_null_lt_int;
--- MySQL: 1 | 1
--- fsdb:  0 | 0
-```
+`Value.compare` now pulls any comparison with a `VJson` operand into the JSON
+domain: the non-JSON side converts to JSON first, then MySQL's documented type
+precedence decides before content does (JSON NULL < number < string < object <
+array < boolean < date < time < datetime < opaque < blob). JSON strings compare
+by code unit, not the `ai_ci` collation — oracle-verified. `CAST(x AS JSON)`
+now yields a JSON-*typed* value (and normalizes the document, and raises 3141
+on non-JSON text) instead of routing through `coerceValue`'s text branch,
+which is what let the ordering rules apply to it at all.
 
-MySQL orders JSON values by type first (NULL < numbers < strings < ...);
-fsdb falls through to `Value.compare` on the rendered text. Probe:
-`json_cross_type_ordering`.
+TIME and OPAQUE ranks are unreachable placeholders — no `Value` case produces
+them, and fsdb has no BIT type.
 
-### 4. `->`/`$[0]` on a non-array document returns NULL instead of the document
+### 4. Index path on a non-array — fixed
 
-```sql
-SELECT CAST(JSON_EXTRACT(CAST('{}' AS JSON), '$[0]') AS CHAR);
--- MySQL: {}
--- fsdb:  NULL
-```
+`Functions.navigateJson` treats a non-array as a one-element array for
+`$[0]`/`$[-1]`, and misses on any other index.
 
-MySQL treats a non-array as a one-element array for an index path; fsdb's
-`navigateJson` matches nothing unless the node is a `JsonArray`. Probe:
-`json_arrow_first_element`.
+### 5. Supplementary-plane characters in JSON output — fixed
 
-### 5. Supplementary-plane characters are escaped in JSON output
-
-```sql
-SELECT CAST(JSON_ARRAY('unicode æøå 🚀') AS CHAR);
--- MySQL: ["unicode æøå 🚀"]
--- fsdb:  ["unicode æøå 🚀"]
-```
-
-`System.Text.Json`'s encoders escape astral-plane characters even under
-`UnsafeRelaxedJsonEscaping` / `UnicodeRanges.All` (both verified), so the BMP
-fix that corrected `"` → `\"` does not reach these. Needs a custom
-`TextEncoder` or a post-pass over the rendered text. Probe:
-`json_set_insert_replace_render`.
+`Functions.jsonQuote` replaces `System.Text.Json`'s encoders for JSON string
+literals: it escapes exactly what MySQL escapes (`"`, `\\`, `\b \f \n \r \t`,
+other C0 controls as `\u00xx`) and emits everything else — DEL, `<&>/`, and
+astral-plane characters alike — literally. `UnsafeRelaxedJsonEscaping` and
+`JavaScriptEncoder.Create UnicodeRanges.All` were both verified to escape
+surrogate pairs regardless.

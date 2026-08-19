@@ -4974,4 +4974,186 @@ let tests =
                         runDefault store "UPDATE t, JSON_TABLE(t.j, '$[*]' COLUMNS (x INT PATH '$')) jt SET t.id = jt.x"
                     with
                     | Err(1064, _) -> ()
-                    | other -> failtestf "expected 1064, got %A" other ] ]
+                    | other -> failtestf "expected 1064, got %A" other ]
+
+          // Every expected value below is the answer a live MySQL 8.4.11
+          // oracle gives for the same statement.
+          testList
+              "JSON comparison, indexing, and rendering against the 8.4 oracle"
+              [ testCase "a JSON scalar compares against a SQL value in the JSON domain, not as rendered text"
+                <| fun _ ->
+                    let store = newStore ()
+
+                    match
+                        runDefault
+                            store
+                            """SELECT JSON_EXTRACT(JSON_OBJECT('s','abc'), '$.s') = 'abc' AS str_match,
+                                      JSON_EXTRACT('{"n":1}', '$.n') = 1 AS num_match,
+                                      JSON_EXTRACT('{"n":1}', '$.n') = '1' AS num_vs_str,
+                                      JSON_EXTRACT('{"b":true}', '$.b') = 1 AS bool_vs_num,
+                                      JSON_EXTRACT('{"d":1.5}', '$.d') = 1.5 AS decimal_match"""
+                    with
+                    | ResultSet(_, [ row ]) ->
+                        Expect.equal
+                            row
+                            [ Some "1"; Some "1"; Some "0"; Some "0"; Some "1" ]
+                            "the SQL side converts to JSON first: 'abc' matches the JSON string, '1' does not match the JSON number, and true is not 1"
+                    | other -> failtestf "expected a single row, got %A" other
+
+                testCase "JSON values order by MySQL's type precedence: null < number < string < object < array < boolean"
+                <| fun _ ->
+                    let store = newStore ()
+
+                    match
+                        runDefault
+                            store
+                            """SELECT CAST('1' AS JSON) < CAST('"a"' AS JSON) AS num_lt_str,
+                                      CAST('null' AS JSON) < CAST('1' AS JSON) AS null_lt_num,
+                                      CAST('true' AS JSON) > CAST('1' AS JSON) AS bool_gt_num,
+                                      CAST('"a"' AS JSON) < CAST('[1]' AS JSON) AS str_lt_arr,
+                                      CAST('[1]' AS JSON) < CAST('{}' AS JSON) AS arr_lt_obj,
+                                      CAST('{}' AS JSON) < CAST('true' AS JSON) AS obj_lt_bool,
+                                      CAST('"a"' AS JSON) = CAST('"A"' AS JSON) AS str_case_sensitive,
+                                      CAST('[1,2]' AS JSON) < CAST('[1,3]' AS JSON) AS arr_elementwise,
+                                      CAST('[1]' AS JSON) < CAST('[1,0]' AS JSON) AS arr_by_length"""
+                    with
+                    | ResultSet(_, [ row ]) ->
+                        Expect.equal
+                            row
+                            [ Some "1"; Some "1"; Some "1"; Some "1"; Some "0"; Some "1"; Some "0"; Some "1"; Some "1" ]
+                            "type rank decides before content, and JSON strings compare by code unit rather than the ai_ci collation"
+                    | other -> failtestf "expected a single row, got %A" other
+
+                testCase "an array index path treats a non-array as a one-element array"
+                <| fun _ ->
+                    let store = newStore ()
+
+                    match
+                        runDefault
+                            store
+                            """SELECT JSON_EXTRACT(CAST('{}' AS JSON), '$[0]') AS obj_at_0,
+                                      JSON_EXTRACT(CAST('1' AS JSON), '$[0]') AS num_at_0,
+                                      JSON_EXTRACT(CAST('1' AS JSON), '$[1]') AS num_at_1,
+                                      JSON_EXTRACT(CAST('{"k":2}' AS JSON), '$[0].k') AS nested,
+                                      JSON_EXTRACT(CAST('{}' AS JSON), '$[0][0]') AS twice"""
+                    with
+                    | ResultSet(_, [ row ]) ->
+                        Expect.equal
+                            row
+                            [ Some "{}"; Some "1"; None; Some "2"; Some "{}" ]
+                            "$[0] on a non-array yields the value itself; any other index misses"
+                    | other -> failtestf "expected a single row, got %A" other
+
+                testCase "JSON output emits supplementary-plane characters literally, not as escaped surrogate pairs"
+                <| fun _ ->
+                    let store = newStore ()
+
+                    match runDefault store "SELECT CAST(JSON_SET('{}', '$.e', 'a🚀b') AS CHAR) AS doc" with
+                    | ResultSet(_, [ [ Some doc ] ]) ->
+                        Expect.equal doc "{\"e\": \"a🚀b\"}" "the emoji survives as itself"
+                    | other -> failtestf "expected a single row, got %A" other
+
+                testCase "CAST(x AS JSON) normalizes the document and rejects non-JSON text with 3141"
+                <| fun _ ->
+                    let store = newStore ()
+
+                    match runDefault store """SELECT CAST('{"bb":1,"a":2}' AS JSON) AS doc, CAST('  1 ' AS JSON) AS num""" with
+                    | ResultSet(_, [ row ]) ->
+                        Expect.equal row [ Some """{"a": 2, "bb": 1}"""; Some "1" ] "MySQL's stored key order and spacing"
+                    | other -> failtestf "expected a single row, got %A" other
+
+                    match runDefault store "SELECT CAST('abc' AS JSON)" with
+                    | Err(3141, _) -> ()
+                    | other -> failtestf "expected 3141, got %A" other ]
+
+          testList
+              "BIGINT UNSIGNED against the 8.4 oracle"
+              [ testCase "CAST wraps into the unsigned domain and back out again"
+                <| fun _ ->
+                    let store = newStore ()
+
+                    match
+                        runDefault
+                            store
+                            """SELECT CAST(-1 AS UNSIGNED) AS neg_one,
+                                      CAST(-9223372036854775808 AS UNSIGNED) AS min_big,
+                                      CAST(CAST(18446744073709551615 AS UNSIGNED) AS SIGNED) AS round_trip,
+                                      CAST(255 AS UNSIGNED) + 1 AS widened,
+                                      CAST(-1.9 AS UNSIGNED) AS rounded,
+                                      CAST('abc' AS UNSIGNED) AS not_a_number,
+                                      CAST(18446744073709551616 AS UNSIGNED) AS clamped,
+                                      18446744073709551615 AS literal"""
+                    with
+                    | ResultSet(_, [ row ]) ->
+                        Expect.equal
+                            row
+                            [ Some "18446744073709551615"
+                              Some "9223372036854775808"
+                              Some "-1"
+                              Some "256"
+                              Some "18446744073709551614"
+                              Some "0"
+                              Some "18446744073709551615"
+                              Some "18446744073709551615" ]
+                            "the whole [0, 2^64) domain survives, including a literal past BIGINT's signed max"
+                    | other -> failtestf "expected a single row, got %A" other
+
+                testCase "unsigned arithmetic, division, and comparison stay in the 64-bit unsigned domain"
+                <| fun _ ->
+                    let store = newStore ()
+
+                    match
+                        runDefault
+                            store
+                            """SELECT CAST(-1 AS UNSIGNED) - 1 AS minus_one,
+                                      CAST(-1 AS UNSIGNED) / 2 AS halved,
+                                      CAST(-1 AS UNSIGNED) DIV 2 AS int_halved,
+                                      CAST(-1 AS UNSIGNED) % 10 AS remainder,
+                                      CAST(-1 AS UNSIGNED) + 1.0 AS promoted,
+                                      CAST(18446744073709551615 AS UNSIGNED) > 1 AS gt_one,
+                                      -1 < CAST(1 AS UNSIGNED) AS signed_lt_unsigned"""
+                    with
+                    | ResultSet(_, [ row ]) ->
+                        Expect.equal
+                            row
+                            [ Some "18446744073709551614"
+                              Some "9223372036854775807.5000"
+                              Some "9223372036854775807"
+                              Some "5"
+                              Some "18446744073709551616.0"
+                              Some "1"
+                              Some "1" ]
+                            "an unsigned operand keeps the result unsigned; a DECIMAL operand promotes past the range"
+                    | other -> failtestf "expected a single row, got %A" other
+
+                testCase "a BIGINT UNSIGNED column stores, reads back, sorts, and aggregates values above BIGINT's signed max"
+                <| fun _ ->
+                    let store = newStore ()
+                    runDefault store "CREATE TABLE t (id INT PRIMARY KEY, u BIGINT UNSIGNED, s BIGINT)" |> ignore
+
+                    runDefault
+                        store
+                        "INSERT INTO t VALUES (1, 18446744073709551615, -1), (2, 0, 0), (3, 9223372036854775808, 5)"
+                    |> ignore
+
+                    match runDefault store "SELECT id, u, u > s, CAST(u AS SIGNED) FROM t ORDER BY u DESC" with
+                    | ResultSet(_, rows) ->
+                        Expect.equal
+                            rows
+                            [ [ Some "1"; Some "18446744073709551615"; Some "1"; Some "-1" ]
+                              [ Some "3"; Some "9223372036854775808"; Some "1"; Some "-9223372036854775808" ]
+                              [ Some "2"; Some "0"; Some "0"; Some "0" ] ]
+                            "unsigned values sort above every signed one and round-trip through CAST AS SIGNED"
+                    | other -> failtestf "expected three rows, got %A" other
+
+                    match runDefault store "SELECT SUM(u), MAX(u), MIN(u), COUNT(DISTINCT u) FROM t" with
+                    | ResultSet(_, [ row ]) ->
+                        Expect.equal
+                            row
+                            [ Some "27670116110564327423"; Some "18446744073709551615"; Some "0"; Some "3" ]
+                            "aggregates stay exact past 2^63"
+                    | other -> failtestf "expected a single row, got %A" other
+
+                    match runDefault store "SELECT id FROM t WHERE u = 18446744073709551615" with
+                    | ResultSet(_, [ [ Some "1" ] ]) -> ()
+                    | other -> failtestf "expected only row 1, got %A" other ] ]

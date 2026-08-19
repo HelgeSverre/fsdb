@@ -455,13 +455,44 @@ let rec private navigateJson (node: JsonNode) (segs: JPath list) : JsonNode list
             match normIndex a idx with
             | Some i -> navigateJson a.[i] rest
             | None -> []
-        | _ -> []
+        // MySQL treats a non-array (including a scalar and a JSON null) as a
+        // one-element array for indexing: `JSON_EXTRACT(CAST('{}' AS JSON),
+        // '$[0]')` is `{}`, not NULL. Only index 0 (or -1, the same element
+        // counted from the end) hits; anything else misses.
+        | _ -> if idx = 0 || idx = -1 then navigateJson node rest else []
 
 /// MySQL escapes a quote inside a JSON string as `\"` and leaves `<`, `>`,
 /// `&` alone; `System.Text.Json`'s default encoder emits `\u0022`/`\u003C`
 /// for the same characters, which is legal JSON but not MySQL's rendering.
 let private jsonRenderOptions =
     JsonSerializerOptions(Encoder = System.Text.Encodings.Web.JavaScriptEncoder.UnsafeRelaxedJsonEscaping)
+
+/// Quotes a JSON string literal exactly as MySQL's JSON printer does,
+/// oracle-verified: `"` and `\` backslash-escaped, `\b \f \n \r \t` in their
+/// short forms, every other C0 control as `\u00xx`, and *everything else* —
+/// DEL, `<`/`&`/`>`/`/`, and characters outside the BMP alike — emitted
+/// literally. `System.Text.Json` cannot be configured into that last part:
+/// even `UnsafeRelaxedJsonEscaping` (and `JavaScriptEncoder.Create
+/// UnicodeRanges.All`) splits a supplementary-plane character such as an
+/// emoji into an escaped UTF-16 surrogate pair, where MySQL emits the
+/// character itself.
+let internal jsonQuote (s: string) : string =
+    let sb = Text.StringBuilder(s.Length + 2)
+    sb.Append '"' |> ignore
+
+    for c in s do
+        match c with
+        | '"' -> sb.Append "\\\"" |> ignore
+        | '\\' -> sb.Append "\\\\" |> ignore
+        | '\b' -> sb.Append "\\b" |> ignore
+        | '\f' -> sb.Append "\\f" |> ignore
+        | '\n' -> sb.Append "\\n" |> ignore
+        | '\r' -> sb.Append "\\r" |> ignore
+        | '\t' -> sb.Append "\\t" |> ignore
+        | c when c < ' ' -> sb.AppendFormat(CultureInfo.InvariantCulture, "\\u{0:x4}", int c) |> ignore
+        | c -> sb.Append c |> ignore
+
+    sb.Append('"').ToString()
 
 /// Renders a `JsonNode` the way MySQL's JSON printer does: a space after
 /// every `:` and `,`, recursively, and object keys in MySQL's *stored*
@@ -479,10 +510,11 @@ let rec private formatJsonNode (node: JsonNode) : string =
                match Operators.compare a.Key.Length b.Key.Length with
                | 0 -> String.CompareOrdinal(a.Key, b.Key)
                | other -> other)
-           |> Seq.map (fun kv -> JsonSerializer.Serialize(kv.Key, jsonRenderOptions) + ": " + formatJsonNode kv.Value)
+           |> Seq.map (fun kv -> jsonQuote kv.Key + ": " + formatJsonNode kv.Value)
            |> String.concat ", ")
         + "}"
     | :? JsonArray as a -> "[" + (a |> Seq.map formatJsonNode |> String.concat ", ") + "]"
+    | _ when node.GetValueKind() = JsonValueKind.String -> jsonQuote (node.GetValue<string>())
     | _ -> node.ToJsonString jsonRenderOptions
 
 // JSON_TABLE's hooks into this module's private path machinery —
@@ -678,7 +710,7 @@ let private jsonTypeFn: Scalar =
 
 let private jsonKeysOf (node: JsonNode option) : Value =
     match node with
-    | Some(:? JsonObject as o) -> VJson("[" + (o |> Seq.map (fun kv -> JsonSerializer.Serialize kv.Key) |> String.concat ", ") + "]")
+    | Some(:? JsonObject as o) -> VJson("[" + (o |> Seq.map (fun kv -> jsonQuote kv.Key) |> String.concat ", ") + "]")
     | _ -> VNull
 
 let private jsonKeysFn: Scalar =
@@ -838,8 +870,8 @@ let private jsonSearchFn: Scalar =
 
             match matches, (toText modeV |> Option.defaultValue "one").ToUpperInvariant() with
             | [], _ -> VNull
-            | ps, "ALL" -> VJson("[" + (ps |> List.map JsonSerializer.Serialize |> String.concat ", ") + "]")
-            | p :: _, _ -> VJson(JsonSerializer.Serialize p)
+            | ps, "ALL" -> VJson("[" + (ps |> List.map jsonQuote |> String.concat ", ") + "]")
+            | p :: _, _ -> VJson(jsonQuote p)
         | _ -> VNull
     | _ -> VNull
 

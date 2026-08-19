@@ -229,6 +229,11 @@ module Invariants =
             function
             | VNull -> "N"
             | VInt value -> "I" + string value
+            // Same "I" prefix as VInt, matching Storage's own unique-key
+            // encoder: a BIGINT UNSIGNED and a BIGINT holding the same
+            // number must key alike or this invariant check disagrees with
+            // the index it is checking.
+            | VUInt value -> "I" + string (decimal value)
             | VDouble value -> "D" + (if value = 0.0 then 0.0 else value).ToString("R", CultureInfo.InvariantCulture)
             | VDecimal value -> "M" + value.ToString("G29", CultureInfo.InvariantCulture)
             | VString value -> "S" + value.TrimEnd(' ').ToUpperInvariant()

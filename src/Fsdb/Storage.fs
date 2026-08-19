@@ -949,6 +949,29 @@ let coerceValue (strict: bool) (col: ColumnDef) (v: Value) : Result<Value, Stora
     | VNull -> Ok VNull
     | _ ->
         match col.Type with
+        // `BIGINT UNSIGNED` is the one integer column whose domain `VInt`
+        // cannot hold; everything narrower (`INT UNSIGNED`'s 4294967295 and
+        // down) fits a signed 64-bit value exactly and stays `VInt`.
+        //
+        // ponytail: MySQL range-checks an out-of-domain value here (1264 in
+        // strict mode, clamped otherwise) and this clamps unconditionally —
+        // the same "no range enforcement on integer columns" ceiling every
+        // other integer type above already has. Add the 1264 path for the
+        // whole integer family at once, not just this branch.
+        | TBigInt true ->
+            let clamp (d: decimal) =
+                Ok(VUInt(uint64 (max 0m (min d (decimal UInt64.MaxValue)))))
+
+            match v with
+            | VUInt u -> Ok(VUInt u)
+            | VInt i -> Ok(VUInt(uint64 (max 0L i)))
+            | VDouble d -> clamp (Math.Truncate(decimal (max 0.0 (min d 1.8446744073709552e19))))
+            | VDecimal d -> clamp (Math.Truncate d)
+            | VString s ->
+                match parseNumeric s with
+                | Some d -> clamp (Math.Truncate(decimal d))
+                | None -> numericFallback (fun () -> VUInt 0UL)
+            | _ -> numericFallback (fun () -> VUInt 0UL)
         | TInt _
         | TBigInt _
         | TSmallInt _
@@ -957,6 +980,9 @@ let coerceValue (strict: bool) (col: ColumnDef) (v: Value) : Result<Value, Stora
         | TYear ->
             match v with
             | VInt i -> Ok(VInt i)
+            // The signed counterpart of `CAST(x AS UNSIGNED)`'s wrap:
+            // `CAST(CAST(18446744073709551615 AS UNSIGNED) AS SIGNED)` is -1.
+            | VUInt u -> Ok(VInt(int64 u))
             | VDouble d -> Ok(VInt(int64 d))
             | VDecimal d -> Ok(VInt(int64 d))
             | VString s ->
@@ -969,6 +995,7 @@ let coerceValue (strict: bool) (col: ColumnDef) (v: Value) : Result<Value, Stora
             match v with
             | VDouble d -> Ok(VDouble d)
             | VInt i -> Ok(VDouble(float i))
+            | VUInt u -> Ok(VDouble(float u))
             | VDecimal d -> Ok(VDouble(float d))
             | VString s ->
                 match parseNumeric s with
@@ -989,6 +1016,7 @@ let coerceValue (strict: bool) (col: ColumnDef) (v: Value) : Result<Value, Stora
             match v with
             | VDecimal d -> Ok(VDecimal(rescale d))
             | VInt i -> Ok(VDecimal(rescale (decimal i)))
+            | VUInt u -> Ok(VDecimal(rescale (decimal u)))
             | VDouble d -> Ok(VDecimal(rescale (decimal d)))
             | VString s ->
                 match parseNumeric s with
@@ -1214,6 +1242,10 @@ let private encodeConstraintKey (columns: ColumnDef list) (indices: int list) (r
         match row.[index] with
         | VNull -> None
         | VInt value -> Some("I" + string value)
+        // Same "I" prefix as `VInt`: a `BIGINT UNSIGNED` key and a signed
+        // one that hold the same number must land on the same key, or a
+        // unique index would let both through as distinct rows.
+        | VUInt value -> Some("I" + string (decimal value))
         | VDouble value ->
             let normalized = if value = 0.0 then 0.0 else value
             Some("D" + normalized.ToString("R", CultureInfo.InvariantCulture))

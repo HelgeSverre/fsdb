@@ -1603,6 +1603,80 @@ let rec private evalExpr (ctx: EvalContext) (expr: Expr) : Result<Value, EvalErr
     // sanctioned conversion), and quietly blob-coercing here would mint
     // wrong-dimension vectors that only fail much later, at INSERT time.
     | Cast(_, TVector _) -> Error(1064, "CAST to VECTOR is not supported; use STRING_TO_VECTOR()")
+    // `CAST(x AS UNSIGNED)` maps into the whole `BIGINT UNSIGNED` domain by
+    // *wrapping*, oracle-verified: -1 is 18446744073709551615 and
+    // -9223372036854775808 is 9223372036854775808. That is not the same rule
+    // a `BIGINT UNSIGNED` *column* applies to the same input (a column
+    // clamps/rejects), so this can't route through `Storage.coerceValue` the
+    // way the other cast targets do. Fractions round half-away-from-zero
+    // before wrapping (`CAST(-1.9 AS UNSIGNED)` is 18446744073709551614),
+    // and anything past the top of the range clamps to it.
+    | Cast(e, TBigInt true) ->
+        eval e
+        |> Result.map (fun v ->
+            let wrap (d: decimal) =
+                let n = System.Math.Round(d, System.MidpointRounding.AwayFromZero)
+
+                if n >= 0m then
+                    VUInt(uint64 (min n (decimal System.UInt64.MaxValue)))
+                else
+                    // Two's-complement wrap in exact arithmetic: `decimal`
+                    // spans 2^64 with digits to spare, so this never rounds.
+                    VUInt(uint64 (max 0m (n + decimal System.UInt64.MaxValue + 1m)))
+
+            match v with
+            | VNull -> VNull
+            | VUInt _ -> v
+            | VInt i -> VUInt(uint64 i)
+            | VDecimal d -> wrap d
+            | VString s ->
+                // MySQL reads the leading numeric prefix and treats the rest
+                // as garbage (`CAST('12abc' AS UNSIGNED)` is 12).
+                match leadingNumericPrefix leadingFloatPrefixRegex s with
+                | Some prefix ->
+                    match System.Decimal.TryParse(prefix, System.Globalization.NumberStyles.Float, System.Globalization.CultureInfo.InvariantCulture) with
+                    | true, d -> wrap d
+                    | false, _ -> VUInt 0UL
+                | None -> VUInt 0UL
+            | other ->
+                // ponytail: a DOUBLE too large for `decimal` (and MySQL's own
+                // `CAST(1e30 AS UNSIGNED)`, which clamps at *signed* BIGINT
+                // max rather than unsigned) both land on the unsigned
+                // ceiling here. Split the double path out if that edge
+                // starts mattering.
+                let d = toDouble other
+
+                if System.Double.IsNaN d then VUInt 0UL
+                elif d >= 1.8446744073709552e19 then VUInt System.UInt64.MaxValue
+                elif d <= -9.3e18 then VUInt 0UL
+                else wrap (decimal d))
+    // `CAST(x AS JSON)` yields a JSON-*typed* value, not text that happens to
+    // look like JSON — which is what makes `CAST('1' AS JSON) < CAST('"a"' AS
+    // JSON)` follow MySQL's JSON type precedence (`Value.compare`'s JSON
+    // branch) instead of a string compare. Routing it through
+    // `Storage.coerceValue`'s TJson case (shared with the text types) lost
+    // both that and the printer's normalization: unparseable text came back
+    // verbatim where MySQL raises 3141, and a valid document kept its
+    // written key order and spacing rather than MySQL's stored order.
+    | Cast(e, TJson) ->
+        eval e
+        |> Result.bind (fun v ->
+            match v with
+            | VNull -> Ok VNull
+            | VJson _ -> Ok v
+            // A non-string scalar converts to its own JSON shape: numbers to
+            // JSON numbers, temporals to the quoted string MySQL renders
+            // (`CAST(NOW() AS JSON)` is `"2026-01-01 00:00:00.000000"`).
+            | VInt _
+            | VDouble _
+            | VDecimal _ -> Ok(VJson(toText v |> Option.defaultValue "null"))
+            | VDate _
+            | VDateTime _ -> Ok(VJson(Functions.jsonQuote (toTextFsp 6 v |> Option.defaultValue "")))
+            | _ ->
+                match Functions.jsonParseDocument (toText v |> Option.defaultValue "") with
+                | Ok node -> Ok(VJson(Functions.jsonNodeText node))
+                | Error() ->
+                    Error(3141, "Invalid JSON text in argument 1 to function cast_as_json: \"Invalid value.\" at position 0."))
     | Cast(e, ty) ->
         eval e
         |> Result.bind (fun v ->

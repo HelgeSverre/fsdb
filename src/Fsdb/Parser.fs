@@ -313,7 +313,14 @@ let private numberLit: Parser<Value, unit> =
         elif nl.IsInteger then
             match Int64.TryParse(nl.String, NumberStyles.Integer, CultureInfo.InvariantCulture) with
             | true, i -> VInt i
-            | false, _ -> VDouble(float nl.String)
+            // MySQL types an integer literal past BIGINT's signed range but
+            // inside its unsigned one as BIGINT UNSIGNED, exactly:
+            // `SELECT 18446744073709551615` echoes all twenty digits back
+            // rather than the nearest double.
+            | false, _ ->
+                match UInt64.TryParse(nl.String, NumberStyles.Integer, CultureInfo.InvariantCulture) with
+                | true, u -> VUInt u
+                | false, _ -> VDouble(float nl.String)
         elif nl.HasExponent then
             VDouble(float nl.String)
         else
@@ -676,8 +683,11 @@ let private ntileOverAtom: Parser<Expr, unit> =
 /// `columnType`.
 let private castTargetType: Parser<ColumnType, unit> =
     choice
-        [ attempt (keyword "SIGNED" >>. optional (keyword "INTEGER")) >>% TInt false
-          attempt (keyword "UNSIGNED" >>. optional (keyword "INTEGER")) >>% TInt true
+        [ attempt (keyword "SIGNED" >>. optional (keyword "INTEGER")) >>% TBigInt false
+          // `UNSIGNED` names the 64-bit unsigned domain, not `INT UNSIGNED`:
+          // `CAST(-1 AS UNSIGNED)` is 18446744073709551615, and
+          // `CAST(x AS SIGNED)` likewise round-trips the full BIGINT range.
+          attempt (keyword "UNSIGNED" >>. optional (keyword "INTEGER")) >>% TBigInt true
           columnType ]
 
 /// `CAST(x AS CHAR CHARACTER SET cs)` — strings are Unicode internally, so
