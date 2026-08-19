@@ -704,7 +704,7 @@ let tests =
               | Err(1094, _) -> ()
               | other -> failtestf "expected 1094 for an unknown thread id, got %A" other
 
-          testCase "PROCESS-scoped visibility: PROCESSLIST hides other users, KILL denies with 1094, SHOW GRANTS with 1044"
+          testCase "PROCESS-scoped visibility: PROCESSLIST hides other users, KILL denies with 1094, SHOW GRANTS with 1142"
           <| fun _ ->
               let store = Fsdb.Storage.create ()
               let root = create 1 store
@@ -745,11 +745,12 @@ let tests =
                   | Err(1094, msg) -> Expect.equal msg "Unknown thread id: 777001" "MySQL's 1094 text"
                   | other -> failtestf "expected 1094 for another user's connection, got %A" other
 
-                  // Another account's grants need a mysql-schema read.
+                  // Another account's grants read `mysql.user`; without SELECT
+                  // there, MySQL denies with 1142 on that table.
                   match handle viewer "SHOW GRANTS FOR 'root'" |> snd with
-                  | Err(1044, msg) ->
-                      Expect.equal msg "Access denied for user 'pviewer'@'%' to database 'mysql'" "MySQL's 1044 text"
-                  | other -> failtestf "expected 1044 for another account's grants, got %A" other
+                  | Err(1142, msg) ->
+                      Expect.equal msg "SELECT command denied to user 'pviewer'@'localhost' for table 'user'" "MySQL's 1142 text"
+                  | other -> failtestf "expected 1142 for another account's grants, got %A" other
 
                   // Its own grants stay readable.
                   match handle viewer "SHOW GRANTS" |> snd with
