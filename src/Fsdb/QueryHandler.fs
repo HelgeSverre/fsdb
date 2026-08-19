@@ -796,7 +796,8 @@ let private targetDatabases (dbName: string) (stmt: Statement) : string list =
         |> List.choose (fun j ->
             match j.Table with
             | FromTable t -> Some(tableRefDb t)
-            | FromSubquery _ -> None)
+            | FromSubquery _
+            | FromJsonTable _ -> None)
 
     match stmt with
     | Insert(table, _, _, _, _)
@@ -1501,6 +1502,7 @@ let rec mapPlaceholders (replace: int -> Expr) (stmt: Statement) : Statement =
         match fi with
         | FromTable _ -> fi
         | FromSubquery(sou, alias) -> FromSubquery(mapSelectOrUnion sou, alias)
+        | FromJsonTable(source, path, cols, alias) -> FromJsonTable(mapExpr source, path, cols, alias)
 
     and mapJoin (j: Join) : Join = { j with On = mapExpr j.On; Table = mapFromItem j.Table }
 

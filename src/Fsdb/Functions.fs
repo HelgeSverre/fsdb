@@ -325,12 +325,18 @@ let private nowFn: Scalar =
 // without hand-rolling a second JSON tree type.
 // ---------------------------------------------------------------------------
 
-/// One step of a `$.a[2].b`-style path. `Wildcard` is the minimal `$.*`
-/// case: one level, not a recursive descent operator.
+/// One step of a `$.a[2].b`-style path. The wildcards are the minimal
+/// one-level forms, not a recursive descent operator — and they're two
+/// distinct cases because MySQL keeps them apart (oracle-verified):
+/// `$.*` fans out over an *object's* members only (`'[1,2]'` → no match)
+/// and `$[*]` over an *array's* elements only (`'{"k":1}'` → no match) —
+/// the distinction JSON_TABLE's pinned "object under `$[*]` expands to
+/// zero rows" probe depends on.
 type private JPath =
     | JKey of string
     | JIndex of int
-    | JWildcard
+    | JMemberWildcard
+    | JElementWildcard
 
 /// Parses MySQL's JSON path grammar: `$`, then any run of `.key`,
 /// `."quoted key"`, `[n]`, `.*`, or `[*]`. Returns `None` on anything it
@@ -350,7 +356,7 @@ let private parseJsonPathRaw (path: string) : JPath list option =
                 i <- i + 1
 
                 if i < s.Length && s.[i] = '*' then
-                    segs.Add JWildcard
+                    segs.Add JMemberWildcard
                     i <- i + 1
                 elif i < s.Length && s.[i] = '"' then
                     let start = i + 1
@@ -377,7 +383,7 @@ let private parseJsonPathRaw (path: string) : JPath list option =
                     let inner = s.Substring(i + 1, close - i - 1).Trim()
 
                     if inner = "*" then
-                        segs.Add JWildcard
+                        segs.Add JElementWildcard
                     else
                         match Int32.TryParse(inner, NumberStyles.Integer, CultureInfo.InvariantCulture) with
                         | true, n -> segs.Add(JIndex n)
@@ -411,15 +417,18 @@ let private normIndex (a: JsonArray) (idx: int) : int option =
     if i >= 0 && i < a.Count then Some i else None
 
 /// Walks `node` along `segs`, returning every match (more than one only
-/// when a `JWildcard` segment fans out). A found JSON `null` is a valid
+/// when a wildcard segment fans out). A found JSON `null` is a valid
 /// match — represented by a `null` `JsonNode` reference in the list — so
 /// callers distinguish "found null" (`[null]`) from "not found" (`[]`).
 let rec private navigateJson (node: JsonNode) (segs: JPath list) : JsonNode list =
     match segs with
     | [] -> [ node ]
-    | JWildcard :: rest ->
+    | JMemberWildcard :: rest ->
         match node with
         | :? JsonObject as o -> o |> Seq.collect (fun kv -> navigateJson kv.Value rest) |> List.ofSeq
+        | _ -> []
+    | JElementWildcard :: rest ->
+        match node with
         | :? JsonArray as a -> a |> Seq.collect (fun v -> navigateJson v rest) |> List.ofSeq
         | _ -> []
     | JKey k :: rest ->
@@ -448,6 +457,28 @@ let rec private formatJsonNode (node: JsonNode) : string =
         + "}"
     | :? JsonArray as a -> "[" + (a |> Seq.map formatJsonNode |> String.concat ", ") + "]"
     | _ -> node.ToJsonString()
+
+// JSON_TABLE's hooks into this module's private path machinery —
+// `Executor.jsonTableRows` compiles later and can't see the private
+// helpers directly, and re-implementing the path walker there would be a
+// second grammar to keep in sync.
+
+/// Parses a document's text as JSON. `Error` = malformed (the executor's
+/// 3141) — distinct from a legal top-level `null`, which parses to a null
+/// node inside `Ok`.
+let jsonParseDocument (text: string) : Result<JsonNode, unit> =
+    try
+        Ok(JsonNode.Parse text)
+    with _ ->
+        Error()
+
+/// Every node `path` matches under `root` (`None` = unparseable path); a
+/// `null` element is a matched JSON `null`, not a miss.
+let jsonPathNodes (root: JsonNode) (path: string) : JsonNode list option =
+    parseJsonPath path |> Option.map (navigateJson root)
+
+/// MySQL-style JSON text for a node (the `", "`-spaced printer above).
+let jsonNodeText (node: JsonNode) : string = formatJsonNode node
 
 /// Parses a `Value`'s text as a JSON document. `None` for NULL or text that
 /// isn't valid JSON — every JSON function here has no error channel (`Scalar`
@@ -664,7 +695,8 @@ let rec private atLeaf (root: JsonNode) (segs: JPath list) (act: JsonNode -> JPa
             | Some i when not (isNull a.[i]) -> atLeaf a.[i] rest act
             | _ -> ()
         | _ -> ()
-    | JWildcard :: _
+    | JMemberWildcard :: _
+    | JElementWildcard :: _
     | [] -> ()
 
 let private setJsonPath (root: JsonNode) (segs: JPath list) (value: JsonNode) (mode: JsonWriteMode) : unit =

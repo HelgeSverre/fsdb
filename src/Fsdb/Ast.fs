@@ -315,6 +315,25 @@ and SelectOrUnion =
 and FromItem =
     | FromTable of TableRef
     | FromSubquery of SelectOrUnion * alias: string
+    /// `JSON_TABLE(expr, 'path' COLUMNS (...)) alias` — the table function
+    /// that explodes a JSON document into rows, one per node the row path
+    /// matches. `source` is an arbitrary expression so the correlated form
+    /// (`FROM t, JSON_TABLE(t.doc, ...)`) carries the left table's column
+    /// reference; the alias is mandatory (MySQL's 3667 "Every table function
+    /// must have an alias"), enforced by the grammar like a derived table's.
+    /// ponytail: the scoped subset — no NESTED PATH, no EXISTS PATH, no
+    /// DEFAULT ... ON EMPTY/ERROR (fixed NULL-on-empty/error, MySQL's probed
+    /// default); add clauses here + `Parser.jsonTableColumn` +
+    /// `Executor.jsonTableRows` when the pipeline needs one.
+    | FromJsonTable of source: Expr * path: string * columns: JsonTableColumn list * alias: string
+
+/// One column of a `JSON_TABLE(...) COLUMNS (...)` clause.
+and JsonTableColumn =
+    /// `name FOR ORDINALITY` — 1-based row counter, restarting per source row.
+    | ForOrdinality of name: string
+    /// `name TYPE PATH 'path'` — extracted, unquoted, coerced; NULL on
+    /// empty/error.
+    | PathColumn of name: string * ColumnType * path: string
 
 /// `INNER`/`CROSS JOIN` require a matching row on `On` (`CROSS JOIN` has no
 /// `ON` at all — the parser gives it the always-true `Lit (VInt 1L)` so it

@@ -485,6 +485,9 @@ and private fromItemReadTables (defaultDb: string) (item: FromItem) : (string * 
     match item with
     | FromTable(r: TableRef) -> [ (defaultArg r.Database defaultDb), r.Table ]
     | FromSubquery(body, _) -> selectOrUnionReadTables defaultDb body
+    // A JSON_TABLE reads nothing itself; its source expression may (a
+    // subquery, a correlated column of a table already listed), so walk it.
+    | FromJsonTable(source, _, _, _) -> exprReadTables defaultDb source
 
 and private selectOrUnionReadTables (defaultDb: string) (body: SelectOrUnion) : (string * string) list =
     match body with

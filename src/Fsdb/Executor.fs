@@ -5,6 +5,8 @@
 module Fsdb.Executor
 
 open System.Collections.Generic
+open System.Text.Json
+open System.Text.Json.Nodes
 open System.Text.RegularExpressions
 open Fsdb.Ast
 open Fsdb.Value
@@ -1822,9 +1824,111 @@ and private selectColumnFsps
 /// `deriveColumns` column metadata, so e.g. `SELECT MAX(y.n) FROM (SELECT n
 /// FROM t) y` still compares `y.n` numerically instead of falling back to a
 /// lexicographic `VString` comparison.
+/// Synthetic column metadata for a `JSON_TABLE(...)`'s COLUMNS clause —
+/// every column nullable (empty/error yields NULL, the only mode this
+/// subset supports), `FOR ORDINALITY` an unsigned INT like MySQL's.
+and private jsonTableColumnDefs (columns: JsonTableColumn list) : ColumnDef list =
+    columns
+    |> List.map (fun c ->
+        let name, ty =
+            match c with
+            | ForOrdinality name -> name, TInt true
+            | PathColumn(name, ty, _) -> name, ty
+
+        { Name = name
+          Type = ty
+          Nullable = true
+          Default = None
+          AutoIncrement = false
+          PrimaryKey = false
+          Unique = false
+          Generated = None
+          Collation = None
+          Charset = None
+          OnUpdateCurrentTimestamp = false })
+
+/// Expands one already-evaluated JSON_TABLE source document into rows — the
+/// one expansion both eval sites (`resolveFromItem`'s uncorrelated case and
+/// `applyJsonTableJoin`'s per-left-row lateral branch) share. Oracle-pinned
+/// semantics (MySQL 8.4.11): NULL doc → no rows (the inner join then drops
+/// the left row); malformed doc → error 3141; no row-path match (including a
+/// scalar or object under `$[*]`) → no rows; a column path's empty or
+/// erroneous result → NULL (the default NULL ON EMPTY / NULL ON ERROR); FOR
+/// ORDINALITY counts 1-based per invocation, so the lateral form restarts it
+/// per left row.
+and private jsonTableRows (doc: Value) (path: string) (columns: JsonTableColumn list) : Result<Value[] list, QueryResult> =
+    // One column value: extract → unquote → coerce through a throwaway
+    // ColumnDef (the `Cast` case's `Storage.coerceValue` trick), but
+    // *strict*, so an uncoercible value ('abc' into INT) becomes the pinned
+    // NULL rather than non-strict's 0. ponytail: numeric fractions truncate
+    // toward zero like this engine's CAST (MySQL's column store rounds,
+    // 3.7 → 4); align `coerceValue` if a workload ever notices.
+    let columnValue (ty: ColumnType) (node: JsonNode) : Value =
+        match node with
+        | null -> VNull // a matched JSON null
+        | _ when ty = TJson -> VString(Functions.jsonNodeText node)
+        | _ ->
+            let raw =
+                match node.GetValueKind() with
+                // An object/array into a scalar column is a coercion error
+                // → NULL (oracle-pinned: `{"a":1}` under INT/VARCHAR → NULL).
+                | JsonValueKind.Object
+                | JsonValueKind.Array -> VNull
+                | JsonValueKind.String -> VString(node.GetValue<string>())
+                | JsonValueKind.True -> VInt 1L
+                | JsonValueKind.False -> VInt 0L
+                | _ -> VString(node.ToJsonString())
+
+            match raw with
+            | VNull -> VNull
+            | _ ->
+                match Storage.coerceValue true (jsonTableColumnDefs [ PathColumn("JSON_TABLE", ty, "") ] |> List.head) raw with
+                | Ok v -> v
+                | Error _ -> VNull
+
+    match doc with
+    | VNull -> Ok []
+    | v ->
+        let text = toText v |> Option.defaultValue ""
+
+        match Functions.jsonParseDocument text with
+        | Error() ->
+            // MySQL's inner parser detail (`"Invalid value." at position N.`)
+            // isn't reproduced — the code and prefix are the pinned part.
+            Error(Err(3141, "Invalid JSON text in argument 1 to function json_table: \"Invalid value.\" at position 0."))
+        | Ok root ->
+            match Functions.jsonPathNodes root path with
+            | None -> Error(Err(3143, "Invalid JSON path expression. The error is around character position 1."))
+            | Some matches ->
+                matches
+                |> List.mapi (fun i node ->
+                    columns
+                    |> List.map (function
+                        | ForOrdinality _ -> VInt(int64 i + 1L)
+                        | PathColumn(_, ty, colPath) ->
+                            // ponytail: an unparseable *column* path yields
+                            // NULL instead of MySQL's 3143 at prepare; a
+                            // multi-node match is the ON ERROR default NULL.
+                            match Functions.jsonPathNodes node colPath with
+                            | Some [ single ] -> columnValue ty single
+                            | _ -> VNull)
+                    |> Array.ofList)
+                |> Ok
+
 and private resolveFromItem (store: Store) (registry: Registry) (dbName: string) (item: FromItem) : Result<ColumnDef list * Value[] list, QueryResult> =
     match item with
     | FromTable tableRef -> resolveTableRef store dbName tableRef
+    | FromJsonTable(source, path, columns, _alias) ->
+        // The uncorrelated site (`FROM JSON_TABLE('literal', ...) jt` as the
+        // base FROM): the source evaluates in a no-columns literal context,
+        // same as INSERT ... VALUES expressions, so a stray column reference
+        // is a clean 1054. The correlated/lateral form is
+        // `applyJsonTableJoin`, which re-evaluates per left row instead.
+        let literalCtx = contextFactory store registry dbName Map.empty Map.empty None [||]
+
+        match evalExpr literalCtx source with
+        | Error(code, message) -> Error(Err(code, message))
+        | Ok doc -> jsonTableRows doc path columns |> Result.map (fun rows -> jsonTableColumnDefs columns, rows)
     | FromSubquery _ ->
         // Serve a derived table from the per-statement memo if already
         // resolved (see `fromSubqueryMemo`), else compute and record it.
@@ -1839,7 +1943,8 @@ and private resolveFromItem (store: Store) (registry: Registry) (dbName: string)
 
 and private resolveFromSubquery (store: Store) (registry: Registry) (dbName: string) (item: FromItem) : Result<ColumnDef list * Value[] list, QueryResult> =
     match item with
-    | FromTable _ -> resolveFromItem store registry dbName item
+    | FromTable _
+    | FromJsonTable _ -> resolveFromItem store registry dbName item
     | FromSubquery(body, _alias) ->
         let result, _, typedRows =
             match body with
@@ -1883,6 +1988,7 @@ and private fromItemQualifier (item: FromItem) : string =
     match item with
     | FromTable t -> t.Alias |> Option.defaultValue t.Table
     | FromSubquery(_, alias) -> alias
+    | FromJsonTable(_, _, _, alias) -> alias
 
 /// `EvalContext.Qualifiers` for every source (the `FROM` table, and each
 /// `JOIN` after it) already resolved into `sources`, ordered the same
@@ -1999,7 +2105,83 @@ and private joinKeyCollations
         |> Option.orElseWith (fun () -> colOf right.[ri])
         |> Option.defaultValue Collation.defaultCollation)
 
+/// Early split on the join target: `JSON_TABLE` is lateral (its source
+/// re-evaluates per left row) and takes its own branch; everything else
+/// resolves once up front in `applyResolvedJoin` — the pre-JSON_TABLE
+/// `applyJoin` body, untouched.
 and private applyJoin
+    (store: Store)
+    (registry: Registry)
+    (dbName: string)
+    (outer: EvalContext option)
+    (state: (string * ColumnDef list) list * Value[] seq)
+    (join: Join)
+    : Result<(string * ColumnDef list) list * Value[] seq * string list, QueryResult> =
+    match join.Table with
+    | FromJsonTable(source, path, columns, alias) -> applyJsonTableJoin store registry dbName outer state join source path columns alias
+    | _ -> applyResolvedJoin store registry dbName outer state join
+
+/// `applyJoin`'s JSON_TABLE branch — MySQL's lateral semantics: the source
+/// expression re-evaluates against each left row (over the columns joined
+/// so far, so `FROM t, JSON_TABLE(t.doc, ...) jt` sees `t`'s row), and each
+/// document's expansion is appended to its own left row. FOR ORDINALITY
+/// restarts per left row because each row is its own `jsonTableRows`
+/// invocation. Inner semantics only, oracle-pinned: a NULL doc, a row path
+/// with no match, and a scalar under `$[*]` all yield zero expansion rows,
+/// dropping the left row. ponytail: `LEFT JOIN JSON_TABLE(...) ON TRUE`'s
+/// keep-the-left-row outer form is rejected below — add a null-padding
+/// branch like `applyResolvedJoin`'s `leftOnly` when something needs it.
+and private applyJsonTableJoin
+    (store: Store)
+    (registry: Registry)
+    (dbName: string)
+    (outer: EvalContext option)
+    ((sourcesSoFar, rowsSoFar): (string * ColumnDef list) list * Value[] seq)
+    (join: Join)
+    (source: Expr)
+    (path: string)
+    (columns: JsonTableColumn list)
+    (alias: string)
+    : Result<(string * ColumnDef list) list * Value[] seq * string list, QueryResult> =
+    match join.Kind with
+    | InnerJoin
+    | CrossJoin ->
+        let joinColumns = jsonTableColumnDefs columns
+        let newSources = sourcesSoFar @ [ alias, joinColumns ]
+        let combinedColumnsSoFar = sourcesSoFar |> List.collect snd
+        let leftCtxFor = contextFactory store registry dbName (columnIndexOf combinedColumnsSoFar) (qualifierRanges sourcesSoFar) outer
+        let ctxFor = contextFactory store registry dbName (columnIndexOf (combinedColumnsSoFar @ joinColumns)) (qualifierRanges newSources) outer
+
+        // Per left row: evaluate the doc, expand it, keep the combinations
+        // the ON clause accepts (a comma-join/CROSS JOIN's ON is the
+        // always-true literal, so everything survives there).
+        let expandLeft (l: Value[]) : Result<Value[] list, QueryResult> =
+            match evalExpr (leftCtxFor l) source with
+            | Error(code, message) -> Error(Err(code, message))
+            | Ok doc ->
+                jsonTableRows doc path columns
+                |> Result.bind (fun jtRows ->
+                    jtRows
+                    |> traverse (fun r ->
+                        let combined = Array.append l r
+
+                        evalExpr { ctxFor combined with Clause = OnClause } join.On
+                        |> Result.map (fun v -> combined, truthy v = Some true))
+                    |> Result.mapError Err
+                    |> Result.map (List.filter snd >> List.map fst))
+
+        rowsSoFar
+        |> List.ofSeq
+        |> traverse expandLeft
+        |> Result.map (fun expanded -> newSources, (expanded |> List.concat |> Seq.ofList), [])
+    | _ ->
+        // LEFT/RIGHT/NATURAL against a table function: outer padding and
+        // common-name matching don't apply to this subset — a clean refusal
+        // beats silently running inner semantics under an outer join's
+        // spelling.
+        Error(Err(1064, "JSON_TABLE only supports comma-join, CROSS JOIN, and [INNER] JOIN ... ON"))
+
+and private applyResolvedJoin
     (store: Store)
     (registry: Registry)
     (dbName: string)
@@ -2208,6 +2390,12 @@ and private applyMutationJoin
     match join.Table with
     | FromSubquery _ ->
         Error(Err(1064, "a derived table (subquery) isn't supported as a multi-table UPDATE/DELETE JOIN source"))
+    | FromJsonTable _ ->
+        // ponytail: MySQL allows a JSON_TABLE join source in multi-table
+        // UPDATE/DELETE; the identity-tracking lateral variant isn't built
+        // until a real statement needs it — same policy as derived tables
+        // above.
+        Error(Err(1064, "JSON_TABLE isn't supported as a multi-table UPDATE/DELETE JOIN source"))
     | FromTable tableRef ->
         match resolveTableRef store dbName tableRef with
         | Error e -> Error e
@@ -4832,6 +5020,12 @@ let rec private explainJoinBlock
             let derivedId = nextId ()
             emitTableRow idx (sprintf "<derived%d>" derivedId) None "ALL"
             explainSelectBlock store dbName nextId acc derivedId "DERIVED" sub
+        | FromJsonTable(_, _, _, alias) ->
+            // A table function has no stats and no derived block — one
+            // "ALL" row under its alias, close enough to MySQL's
+            // materialized-table-function row for EXPLAIN's purposes.
+            emitTableRow idx alias None "ALL"
+            Ok()
         | FromSubquery(UnionSelect(first, rest, _, _, _), _alias) ->
             // Same "DERIVED" + "UNION" per-branch shape as a top-level
             // `Union`'s own `EXPLAIN` (see `explainStatement`'s `Union`
@@ -4967,6 +5161,7 @@ let rec private explainStatement (store: Store) (registry: Registry) (dbName: st
             match j.Table with
             | FromSubquery _ ->
                 Error(Err(1064, "a derived table (subquery) isn't supported as a multi-table UPDATE/DELETE JOIN source"))
+            | FromJsonTable _ -> Error(Err(1064, "JSON_TABLE isn't supported as a multi-table UPDATE/DELETE JOIN source"))
             | FromTable tref -> resolveTableRef store dbName tref |> Result.map (fun (cols, _) -> fromItemQualifier j.Table, cols)
 
         resolveTableRef store dbName fromRef

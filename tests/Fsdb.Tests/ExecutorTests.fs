@@ -4784,4 +4784,137 @@ let tests =
 
                     match runDefault store "INSERT INTO c VALUES (2, 999)" with
                     | Err(1452, _) -> ()
-                    | other -> failtestf "expected 1452 for a missing parent key, got %A" other ] ]
+                    | other -> failtestf "expected 1452 for a missing parent key, got %A" other ]
+
+          // Every case below mirrors a probe pinned against the MySQL 8.4.11
+          // oracle (see `Executor.jsonTableRows`' doc for the semantics).
+          testList
+              "JSON_TABLE"
+              [ testCase "uncorrelated expansion: ordinality, coercion, NULL on error"
+                <| fun _ ->
+                    // Oracle: 10 → (10,'10'); "abc" → (NULL,'abc'); null →
+                    // (NULL,NULL); {"a":1} into scalars → (NULL,NULL);
+                    // "7" → (7,'7').
+                    match
+                        runDefault
+                            (newStore ())
+                            "SELECT jt.o, jt.x, jt.s FROM JSON_TABLE('[10,\"abc\",null,{\"a\":1},\"7\"]', '$[*]' COLUMNS (o FOR ORDINALITY, x INT PATH '$', s VARCHAR(20) PATH '$')) jt"
+                    with
+                    | ResultSet([ "o"; "x"; "s" ], rows) ->
+                        Expect.equal
+                            rows
+                            [ [ Some "1"; Some "10"; Some "10" ]
+                              [ Some "2"; None; Some "abc" ]
+                              [ Some "3"; None; None ]
+                              [ Some "4"; None; None ]
+                              [ Some "5"; Some "7"; Some "7" ] ]
+                            "one row per array element, NULL where coercion fails"
+                    | other -> failtestf "expected 5 expanded rows, got %A" other
+
+                testCase "malformed document is error 3141 with MySQL's message prefix"
+                <| fun _ ->
+                    match runDefault (newStore ()) "SELECT * FROM JSON_TABLE('not json', '$[*]' COLUMNS (x INT PATH '$')) jt" with
+                    | Err(3141, message) ->
+                        Expect.stringStarts
+                            message
+                            "Invalid JSON text in argument 1 to function json_table"
+                            "MySQL's 3141 wording"
+                    | other -> failtestf "expected error 3141, got %A" other
+
+                testCase "a scalar under $[*] expands to zero rows"
+                <| fun _ ->
+                    // Oracle: `{"items":5}` under `$.items[*]` → 0 rows (no
+                    // auto-wrap of a scalar).
+                    match
+                        runDefault (newStore ()) "SELECT jt.x FROM JSON_TABLE('{\"items\":5}', '$.items[*]' COLUMNS (x INT PATH '$')) jt"
+                    with
+                    | ResultSet(_, []) -> ()
+                    | other -> failtestf "expected zero rows, got %A" other
+
+                testCase "a NULL document expands to zero rows"
+                <| fun _ ->
+                    match runDefault (newStore ()) "SELECT jt.x FROM JSON_TABLE(NULL, '$[*]' COLUMNS (x INT PATH '$')) jt" with
+                    | ResultSet(_, []) -> ()
+                    | other -> failtestf "expected zero rows, got %A" other
+
+                testCase "a missing column path yields NULL (the ON EMPTY default)"
+                <| fun _ ->
+                    match
+                        runDefault
+                            (newStore ())
+                            "SELECT jt.a, jt.m FROM JSON_TABLE('[{\"a\":5}]', '$[*]' COLUMNS (a INT PATH '$.a', m INT PATH '$.missing')) jt"
+                    with
+                    | ResultSet(_, [ [ Some "5"; None ] ]) -> ()
+                    | other -> failtestf "expected (5, NULL), got %A" other
+
+                testCase "a JSON column keeps MySQL's spaced JSON text"
+                <| fun _ ->
+                    match runDefault (newStore ()) "SELECT jt.j FROM JSON_TABLE('[{\"a\":5}]', '$[*]' COLUMNS (j JSON PATH '$')) jt" with
+                    | ResultSet(_, [ [ Some "{\"a\": 5}" ] ]) -> ()
+                    | other -> failtestf "expected the MySQL-formatted object, got %A" other
+
+                testCase "correlated comma-join: per-row expansion, ordinality restart, NULL/no-match rows dropped"
+                <| fun _ ->
+                    // Oracle: (1,'[1,2]') expands twice with o restarting at
+                    // 1 for (2,'[3]'); the NULL doc and the object-under-[*]
+                    // rows vanish entirely (inner semantics).
+                    let store = newStore ()
+                    runDefault store "CREATE TABLE t (id INT, j JSON)" |> ignore
+
+                    runDefault store "INSERT INTO t VALUES (1, '[1,2]'), (2, '[3]'), (3, NULL), (4, '{\"k\":1}')"
+                    |> ignore
+
+                    match
+                        runDefault
+                            store
+                            "SELECT t.id, jt.o, jt.x FROM t, JSON_TABLE(t.j, '$[*]' COLUMNS (o FOR ORDINALITY, x INT PATH '$')) jt ORDER BY t.id, jt.o"
+                    with
+                    | ResultSet(_, rows) ->
+                        Expect.equal
+                            rows
+                            [ [ Some "1"; Some "1"; Some "1" ]
+                              [ Some "1"; Some "2"; Some "2" ]
+                              [ Some "2"; Some "1"; Some "3" ] ]
+                            "lateral expansion with per-left-row ordinality"
+                    | other -> failtestf "expected 3 rows, got %A" other
+
+                testCase "JOIN ... ON lateral form filters the expansion"
+                <| fun _ ->
+                    let store = newStore ()
+                    runDefault store "CREATE TABLE t (id INT, j JSON)" |> ignore
+                    runDefault store "INSERT INTO t VALUES (1, '[1,2]')" |> ignore
+
+                    match
+                        runDefault store "SELECT t.id, jt.x FROM t JOIN JSON_TABLE(t.j, '$[*]' COLUMNS (x INT PATH '$')) jt ON jt.x > 1"
+                    with
+                    | ResultSet(_, [ [ Some "1"; Some "2" ] ]) -> ()
+                    | other -> failtestf "expected only the x=2 combination, got %A" other
+
+                testCase "the alias is required, like MySQL's 3667"
+                <| fun _ ->
+                    match Fsdb.Parser.parse "SELECT * FROM JSON_TABLE('[1]', '$[*]' COLUMNS (x INT PATH '$'))" with
+                    | Error _ -> ()
+                    | Ok stmt -> failtestf "expected an alias-less JSON_TABLE to fail parsing, got %A" stmt
+
+                testCase "LEFT JOIN against JSON_TABLE is rejected (inner semantics only)"
+                <| fun _ ->
+                    let store = newStore ()
+                    runDefault store "CREATE TABLE t (id INT, j JSON)" |> ignore
+
+                    match
+                        runDefault store "SELECT t.id FROM t LEFT JOIN JSON_TABLE(t.j, '$[*]' COLUMNS (x INT PATH '$')) jt ON 1"
+                    with
+                    | Err(1064, _) -> ()
+                    | other -> failtestf "expected 1064, got %A" other
+
+                testCase "JSON_TABLE as a multi-table UPDATE join source is rejected"
+                <| fun _ ->
+                    let store = newStore ()
+                    runDefault store "CREATE TABLE t (id INT, j JSON)" |> ignore
+                    runDefault store "INSERT INTO t VALUES (1, '[1]')" |> ignore
+
+                    match
+                        runDefault store "UPDATE t, JSON_TABLE(t.j, '$[*]' COLUMNS (x INT PATH '$')) jt SET t.id = jt.x"
+                    with
+                    | Err(1064, _) -> ()
+                    | other -> failtestf "expected 1064, got %A" other ] ]

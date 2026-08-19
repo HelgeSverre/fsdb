@@ -1697,7 +1697,52 @@ let private derivedTable: Parser<FromItem, unit> =
     )
     |>> fun (selectOrUnion, alias) -> FromSubquery(selectOrUnion, alias)
 
-let private fromItem: Parser<FromItem, unit> = derivedTable <|> (tableRef |>> FromTable)
+/// One `COLUMNS (...)` entry: `name FOR ORDINALITY` or `name TYPE PATH
+/// 'path'`. `columnType` is the CREATE TABLE/CAST type grammar, so every
+/// declarable type works here too. ponytail: no NESTED PATH / EXISTS PATH /
+/// DEFAULT ... ON EMPTY|ERROR — fixed NULL-on-empty/error (MySQL's probed
+/// default); grow this parser + `Ast.JsonTableColumn` when one's needed.
+let private jsonTableColumn: Parser<JsonTableColumn, unit> =
+    identifier
+    >>= fun name ->
+        (keyword "FOR" >>. keyword "ORDINALITY" >>% ForOrdinality name)
+        <|> (columnType .>> keyword "PATH" .>>. stringLit
+             |>> fun (ty, p) ->
+                 PathColumn(
+                     name,
+                     ty,
+                     (match p with
+                      | VString s -> s
+                      | _ -> "")
+                 ))
+
+/// `JSON_TABLE(expr, 'path' COLUMNS (col, ...)) [AS] alias` — the alias is
+/// required (MySQL's 3667 "Every table function must have an alias"), same
+/// grammar shape as `derivedTable`'s mandatory alias. The `attempt` only
+/// spans `JSON_TABLE (`, so a real table that happens to be named
+/// `json_table` still parses through `tableRef` when no paren follows.
+let private jsonTable: Parser<FromItem, unit> =
+    attempt (keyword "JSON_TABLE" >>. sym "(")
+    >>. expr
+    .>> sym ","
+    .>>. stringLit
+    .>> keyword "COLUMNS"
+    .>> sym "("
+    .>>. sepBy1 jsonTableColumn (sym ",")
+    .>> sym ")"
+    .>> sym ")"
+    .>>. ((keyword "AS" >>. identifier) <|> identifier)
+    |>> fun (((source, path), columns), alias) ->
+        FromJsonTable(
+            source,
+            (match path with
+             | VString s -> s
+             | _ -> ""),
+            columns,
+            alias
+        )
+
+let private fromItem: Parser<FromItem, unit> = derivedTable <|> jsonTable <|> (tableRef |>> FromTable)
 
 /// `[INNER] JOIN`, `LEFT [OUTER] JOIN`, and `RIGHT [OUTER] JOIN` all require
 /// an `ON` or a `USING (...)`; `NATURAL [INNER|LEFT [OUTER]|RIGHT [OUTER]]`
@@ -1730,12 +1775,13 @@ let private crossJoinClause: Parser<Join, unit> =
 /// says today. Desugars into the exact same `CrossJoin` shape
 /// `crossJoinClause` already produces, so every consumer that already walks
 /// an N-source join list (`Executor.applyJoin`/`runMutationJoin`) lights up
-/// for `SELECT`/`UPDATE`/`DELETE` alike with no executor change; like every
-/// other `Join`, only a real table can follow the comma, not a derived
+/// for `SELECT`/`UPDATE`/`DELETE` alike with no executor change; a real
+/// table or a `JSON_TABLE(...)` (MySQL's correlated comma-join form, `FROM
+/// t, JSON_TABLE(t.doc, ...) jt`) can follow the comma, but not a derived
 /// `(SELECT ...)`.
 let private commaJoinClause: Parser<Join, unit> =
-    attempt (sym "," >>. tableRef)
-    |>> fun table -> { Kind = CrossJoin; Table = FromTable table; On = Lit(VInt 1L); Using = [] }
+    attempt (sym "," >>. (jsonTable <|> (tableRef |>> FromTable)))
+    |>> fun table -> { Kind = CrossJoin; Table = table; On = Lit(VInt 1L); Using = [] }
 
 /// `JOIN ... USING (col, ...)`'s column list — the equi-keys are resolved by
 /// name at execution time (`Executor.applyJoin`), so the parser only carries
