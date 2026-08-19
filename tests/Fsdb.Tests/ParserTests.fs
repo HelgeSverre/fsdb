@@ -1684,7 +1684,7 @@ let tests =
                 testCase "UNION ALL keeps duplicates, plain UNION dedupes"
                 <| fun _ ->
                     match parseOk "SELECT a FROM t UNION ALL SELECT b FROM u UNION SELECT c FROM v" with
-                    | Union(_, [ (true, _); (false, _) ], _, _, _) -> ()
+                    | Union(_, [ (OpUnion true, _); (OpUnion false, _) ], _, _, _) -> ()
                     | other -> failtestf "expected a two-branch Union with ALL then DISTINCT flags, got %A" other
 
                 testCase "a single SELECT (no UNION) still parses to the plain Select case"
@@ -1702,7 +1702,7 @@ let tests =
                 testCase "(SELECT ...) UNION (SELECT ...) — each branch individually parenthesized"
                 <| fun _ ->
                     match parseOk "(SELECT a FROM t) UNION (SELECT a FROM u)" with
-                    | Union(_, [ (false, _) ], _, _, _) -> ()
+                    | Union(_, [ (OpUnion false, _) ], _, _, _) -> ()
                     | other -> failtestf "expected a two-branch Union, got %A" other
 
                 testCase "FROM ((SELECT ...) UNION (SELECT ...)) AS alias — a UNION as a derived table"
@@ -1711,7 +1711,7 @@ let tests =
                     // this shape: `SELECT COUNT(*) FROM ((SELECT ...) UNION
                     // (SELECT ...)) AS alias`.
                     match parseOk "SELECT COUNT(*) AS aggregate FROM ((SELECT a FROM t) UNION (SELECT a FROM u)) AS search_items" with
-                    | Select { From = Some(FromSubquery(UnionSelect(_, [ (false, _) ], _, _, _), "search_items")) } -> ()
+                    | Select { From = Some(FromSubquery(UnionSelect(_, [ (OpUnion false, _) ], _, _, _), "search_items")) } -> ()
                     | other -> failtestf "expected a FromSubquery wrapping a UnionSelect, got %A" other
 
                 testCase "FROM ((SELECT ...)) AS alias — redundant double parens around a plain SELECT"

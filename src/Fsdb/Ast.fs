@@ -10,6 +10,10 @@ open Fsdb.Value
 type Op =
     | And
     | Or
+    /// `XOR` — logical exclusive or, three-valued: `NULL XOR anything` is
+    /// NULL, otherwise `truthy a <> truthy b`. Binds tighter than `OR`,
+    /// looser than `AND` (MySQL's own precedence level).
+    | Xor
     | Eq
     | Neq
     | Lt
@@ -305,7 +309,21 @@ and TableRef =
 /// a bare `SelectStmt`.
 and SelectOrUnion =
     | PlainSelect of SelectStmt
-    | UnionSelect of first: SelectStmt * rest: (bool * SelectStmt) list * orderBy: OrderKey list * limit: int option * offset: int option
+    | UnionSelect of first: SelectStmt * rest: (SetOp * SelectStmt) list * orderBy: OrderKey list * limit: int option * offset: int option
+
+/// One `UNION`/`INTERSECT`/`EXCEPT` between two branches. `all` keeps
+/// duplicates (multiset semantics); without it the operator's result is
+/// distinct, which is MySQL's default for all three.
+///
+/// `INTERSECT` binds *tighter* than `UNION`/`EXCEPT` (oracle-verified:
+/// `SELECT 1 UNION SELECT 2 INTERSECT SELECT 3` is one row, `1`), so a flat
+/// list of these is not a left-to-right fold — `Executor.runUnionStmt`
+/// collapses the `INTERSECT` runs first. `UNION` and `EXCEPT` share one
+/// precedence level and associate left to right.
+and SetOp =
+    | OpUnion of all: bool
+    | OpIntersect of all: bool
+    | OpExcept of all: bool
 
 /// A `SELECT`'s `FROM` target: a real (or `information_schema` virtual)
 /// table, or a derived table — `FROM (SELECT ...) AS alias` — whose alias is
@@ -321,19 +339,26 @@ and FromItem =
     /// (`FROM t, JSON_TABLE(t.doc, ...)`) carries the left table's column
     /// reference; the alias is mandatory (MySQL's 3667 "Every table function
     /// must have an alias"), enforced by the grammar like a derived table's.
-    /// ponytail: the scoped subset — no NESTED PATH, no EXISTS PATH, no
-    /// DEFAULT ... ON EMPTY/ERROR (fixed NULL-on-empty/error, MySQL's probed
-    /// default); add clauses here + `Parser.jsonTableColumn` +
-    /// `Executor.jsonTableRows` when the pipeline needs one.
+    /// ponytail: the scoped subset — no NESTED PATH (its rows multiply the
+    /// parent's, which `Executor.jsonTableRows`' one-row-per-match shape
+    /// can't express), and no `ERROR ON EMPTY|ERROR`; add them here +
+    /// `Parser.jsonTableColumn` + `Executor.jsonTableRows` when needed.
     | FromJsonTable of source: Expr * path: string * columns: JsonTableColumn list * alias: string
 
 /// One column of a `JSON_TABLE(...) COLUMNS (...)` clause.
 and JsonTableColumn =
     /// `name FOR ORDINALITY` — 1-based row counter, restarting per source row.
     | ForOrdinality of name: string
-    /// `name TYPE PATH 'path'` — extracted, unquoted, coerced; NULL on
-    /// empty/error.
-    | PathColumn of name: string * ColumnType * path: string
+    /// `name TYPE PATH 'path' [DEFAULT lit ON EMPTY] [DEFAULT lit ON ERROR]`
+    /// — extracted, unquoted, coerced. `onEmpty`/`onError` are the literals a
+    /// `DEFAULT ... ON EMPTY` / `ON ERROR` clause names; `None` is MySQL's
+    /// own default for both, NULL. (`NULL ON EMPTY|ERROR` is spelled the same
+    /// way as the absent clause, so it needs no separate case; `ERROR ON
+    /// EMPTY|ERROR` is not supported — see `Parser.jsonTableColumn`.)
+    | PathColumn of name: string * ColumnType * path: string * onEmpty: Value option * onError: Value option
+    /// `name TYPE EXISTS PATH 'path'` — 1 when the path matches at least one
+    /// node in the row, 0 otherwise; never NULL, never an error.
+    | ExistsColumn of name: string * ColumnType * path: string
 
 /// `INNER`/`CROSS JOIN` require a matching row on `On` (`CROSS JOIN` has no
 /// `ON` at all — the parser gives it the always-true `Lit (VInt 1L)` so it
@@ -501,14 +526,14 @@ type Statement =
         onDuplicateUpdate: (string * Expr) list *
         ignoreDuplicates: bool
     | Select of SelectStmt
-    /// `select1 UNION [ALL|DISTINCT] select2 [UNION [ALL|DISTINCT] select3 ...]
-    /// [ORDER BY ...] [LIMIT ...]` — `First`/`Rest` are the branches with
-    /// each `Rest` member's own `bool` recording whether *that* `UNION` was
-    /// `ALL` (duplicates kept) or plain/`DISTINCT` (deduped against
-    /// everything combined so far); the trailing `ORDER BY`/`LIMIT` apply to
-    /// the whole combined result, so they live here rather than on any one
-    /// branch's own (unused) `SelectStmt.OrderBy`/`Limit`.
-    | Union of first: SelectStmt * rest: (bool * SelectStmt) list * orderBy: OrderKey list * limit: int option * offset: int option
+    /// A set operation over two or more `SELECT` branches — `UNION`,
+    /// `INTERSECT` or `EXCEPT`, each `[ALL|DISTINCT]`, in any mix. `first`
+    /// plus each `rest` member's own `SetOp` records which operator joined
+    /// *that* branch to what precedes it (see `SetOp` for the precedence
+    /// rule, which is not a plain left fold); the trailing `ORDER BY`/`LIMIT`
+    /// apply to the whole combined result, so they live here rather than on
+    /// any one branch's own (unused) `SelectStmt.OrderBy`/`Limit`.
+    | Union of first: SelectStmt * rest: (SetOp * SelectStmt) list * orderBy: OrderKey list * limit: int option * offset: int option
     | Update of UpdateStmt
     | Delete of DeleteStmt
     | Truncate of table: string

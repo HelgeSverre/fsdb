@@ -64,7 +64,23 @@ must not mark a case green while carrying an unreviewed failure later on.
   the 8.4 oracle does not have. A probe that errors on the oracle compares
   nothing; both deleted.
 
-## Ledgered gaps (32 signatures in `support/known-gaps.json`)
+## Ledgered gaps (20 signatures in `support/known-gaps.json`)
+
+Wave W3 closed the parser gaps listed below under INTERSECT/EXCEPT,
+VALUES ROW, XOR, EXTRACT/TIMESTAMPDIFF/typed temporal literals, and the
+JSON_TABLE EXISTS PATH / DEFAULT clauses — see "Closed: the parser
+additions (wave W3)" at the end. The ledger listing that follows is the
+pre-W3 state, kept for the record; what remains is CTEs, window frames and
+the wider window set, LATERAL, ROLLUP/GROUPING, and JSON_TABLE's NESTED
+PATH. Every one of the 20 surviving signatures is an `fsdb_probe_parser_gap`
+— a refusal, never a wrong answer.
+
+Adding INTERSECT/EXCEPT to the grammar changed FParsec's expected-token
+list, which is part of a parse gap's evidence detail and therefore part of
+its signature, so every surviving signature was regenerated from the run
+artifacts rather than edited in place.
+
+## Ledgered gaps before wave W3 (32 signatures)
 
 fsdb refuses or errors where MySQL succeeds. No silent wrong answer in any
 of these — they are missing features, not divergences.
@@ -226,3 +242,55 @@ and are gone; the twelfth removal is `rollup_two_level_with_expression_key`,
 whose parse error moved from the `MOD` on column 28 to `WITH ROLLUP` on
 column 121 — still an unimplemented feature (ROLLUP/GROUPING), re-ledgered
 under its new signature.
+
+## Closed: the parser additions (wave W3)
+
+All oracle-pinned against MySQL 8.4.11 before the code was written.
+
+- **`XOR`** — a new `Ast.Op` case, three-valued (either operand unknown
+  makes the answer unknown, unlike `OR`), sitting between `OR` and `AND` in
+  the precedence chain (`1 XOR 1 OR 1` is 1, `1 XOR 1 AND 0` is 1).
+- **`EXTRACT(unit FROM expr)`** — its own parser atom (the separator is
+  `FROM`, not a comma), plus `Functions.extractFn`. Composite units
+  concatenate their components as digits with each lower one zero-padded:
+  `DAY_SECOND` is 4050607, `DAY_MICROSECOND` 4050607123456.
+- **Typed temporal literals** `DATE '...'` / `TIME '...'` / `TIMESTAMP
+  '...'` — constant-folded in the parser, because MySQL *rejects* a
+  malformed one (1525) where `DATE('...')` answers NULL. fsdb refuses too,
+  but as a 1064 parse error: `Parser.parse` has no error-code channel.
+  `TIMESTAMP '2020-01-01'` (no time part) is rejected, matching the oracle.
+- **`VALUES ROW(...), ROW(...)` as a table** — desugared in the parser into
+  the `UNION ALL` of one-row `SELECT`s it is equivalent to, so there is no
+  new `FromItem` case and no new executor path. Without a column list the
+  columns are named `column_0`, `column_1`, ... like MySQL's.
+- **`INTERSECT` / `EXCEPT`, plain and `ALL`** — `Ast`'s union `rest` list
+  now carries a `SetOp` instead of an is-`ALL` bool. `ALL` is real multiset
+  arithmetic (INTERSECT ALL takes the lesser multiplicity, EXCEPT ALL
+  subtracts), pinned on `[1,1,2,3]` against `[1,2,2]`. INTERSECT binds
+  tighter than UNION/EXCEPT, so `runUnionStmt` collapses the INTERSECT runs
+  before folding the rest left to right. A parenthesized set-operation group
+  splices into the enclosing branch list only when nothing follows it —
+  `(A UNION B) INTERSECT C` would flatten into the wrong grouping, so the
+  grammar refuses it rather than answering wrongly.
+- **JSON_TABLE `EXISTS PATH` and `DEFAULT ... ON EMPTY|ERROR`** — a matched
+  JSON *null* is NULL and takes neither branch; a missing path takes ON
+  EMPTY; an uncoercible value ('5x' or an array into INT) takes ON ERROR.
+  `ERROR ON EMPTY|ERROR` (raise rather than substitute) is still refused.
+
+Two things the corpus caught only once the parse gaps were gone, both
+silent wrong answers rather than refusals:
+
+- **`TIMESTAMPADD` parsed but was never registered**, so it answered 1305.
+  It is now `DATE_ADD` with the arguments reordered.
+- **Composite `INTERVAL` units did not exist.** `INTERVAL '1:30'
+  HOUR_MINUTE` fell through `tryParseIntervalArg`'s single-number parse and
+  degenerated into *numeric* subtraction (`1996`), and `INTERVAL '2-3'
+  YEAR_MONTH` into NULL. All eleven composite units now normalize to a
+  single simple unit (months, seconds, or microseconds) before
+  `addInterval` sees them, with MySQL's right-aligned "a short value left
+  out the leftmost components" rule and its treatment of a trailing
+  microsecond component as a decimal *fraction* ('1.5' SECOND_MICROSECOND
+  is 1.5 s). `addInterval` also stopped returning the input unchanged for an
+  unrecognized unit — a silent no-op — and answers NULL instead.
+
+Ledger effect: 32 signatures down to 20.

@@ -258,6 +258,7 @@ let private encodeOp (w: Writer) (op: Op) : unit =
         | Div -> 0x0Cuy
         | IntDiv -> 0x0Duy
         | NullSafeEq -> 0x0Euy
+        | Xor -> 0x0Fuy
     )
 
 let private decodeOp (r: #IReader) : Op =
@@ -276,6 +277,7 @@ let private decodeOp (r: #IReader) : Op =
     | 0x0Cuy -> Div
     | 0x0Duy -> IntDiv
     | 0x0Euy -> NullSafeEq
+    | 0x0Fuy -> Xor
     | tag -> failwithf "Persistence: unknown Op tag 0x%02x in WAL/snapshot" tag
 
 let private encodeDirection (w: Writer) (d: Direction) : unit =

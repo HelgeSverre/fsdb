@@ -1033,9 +1033,60 @@ let private addInterval (dt: DateTime) (amount: float) (unit: string) : DateTime
         | "MONTH" -> monthsAmount 1 |> Option.map dt.AddMonths
         | "QUARTER" -> monthsAmount 3 |> Option.map dt.AddMonths
         | "YEAR" -> (if abs amount > 1.0e8 then None else Some(int amount)) |> Option.map dt.AddYears
-        | _ -> Some dt
+        | "MICROSECOND" -> Some(dt.AddTicks(int64 (amount * 10.0)))
+        // An unrecognized unit used to return `dt` unchanged, which is a
+        // silent wrong answer; NULL is at least an honest refusal. Every
+        // composite unit is normalized into this vocabulary before it gets
+        // here (see `compositeIntervalUnits`).
+        | _ -> None
     with :? ArgumentOutOfRangeException ->
         None
+
+/// MySQL's composite `INTERVAL` units take a *string* of several components
+/// with any punctuation between them ('2-3' YEAR_MONTH, '1:30' HOUR_MINUTE,
+/// '1 2:3:4' DAY_SECOND), and a value with fewer components than the unit
+/// names is read as its *rightmost* ones. Each entry is the per-component
+/// multiplier list plus the simple unit the total is expressed in, so
+/// `addInterval` never has to know these exist.
+let private compositeIntervalUnits =
+    dict
+        [ "YEAR_MONTH", ([ 12.0; 1.0 ], "MONTH")
+          "DAY_HOUR", ([ 86400.0; 3600.0 ], "SECOND")
+          "DAY_MINUTE", ([ 86400.0; 3600.0; 60.0 ], "SECOND")
+          "DAY_SECOND", ([ 86400.0; 3600.0; 60.0; 1.0 ], "SECOND")
+          "HOUR_MINUTE", ([ 3600.0; 60.0 ], "SECOND")
+          "HOUR_SECOND", ([ 3600.0; 60.0; 1.0 ], "SECOND")
+          "MINUTE_SECOND", ([ 60.0; 1.0 ], "SECOND")
+          "SECOND_MICROSECOND", ([ 1.0e6; 1.0 ], "MICROSECOND")
+          "MINUTE_MICROSECOND", ([ 6.0e7; 1.0e6; 1.0 ], "MICROSECOND")
+          "HOUR_MICROSECOND", ([ 3.6e9; 6.0e7; 1.0e6; 1.0 ], "MICROSECOND")
+          "DAY_MICROSECOND", ([ 8.64e10; 3.6e9; 6.0e7; 1.0e6; 1.0 ], "MICROSECOND") ]
+
+let private parseCompositeInterval (weights: float list) (simpleUnit: string) (text: string) : float option =
+    let digitRuns = Regex.Matches(text, @"\d+") |> Seq.map (fun m -> m.Value) |> List.ofSeq
+
+    if digitRuns.IsEmpty then
+        None
+    else
+        // Right-align value against unit: too few components means the
+        // leftmost ones were left out, too many means the extras are ignored.
+        let keep = min digitRuns.Length weights.Length
+        let w = weights |> List.skip (weights.Length - keep)
+
+        let p =
+            digitRuns
+            |> List.skip (digitRuns.Length - keep)
+            // The trailing microsecond component is a decimal *fraction*, not
+            // a count: '1.5' SECOND_MICROSECOND is 1.5 s (1500000 µs), not
+            // 1 s plus 5 µs — oracle-pinned, so it right-pads to six digits.
+            |> List.mapi (fun i s ->
+                if simpleUnit = "MICROSECOND" && i = keep - 1 then
+                    float (s.PadRight(6, '0').Substring(0, 6))
+                else
+                    float s)
+
+        let total = List.map2 (*) w p |> List.sum
+        Some(if text.TrimStart().StartsWith "-" then -total else total)
 
 /// `Parser.fs`'s `INTERVAL n UNIT` grammar desugars to
 /// `FuncCall("INTERVAL", [n; Lit(VString UNIT)])` (no separate `Interval`
@@ -1058,9 +1109,12 @@ let private tryParseIntervalArg (v: Value) : (float * string) option =
     | VString s when s.StartsWith intervalMarker ->
         match s.Substring(intervalMarker.Length).Split('\x01') with
         | [| n; u |] ->
-            match Double.TryParse(n, NumberStyles.Float, CultureInfo.InvariantCulture) with
-            | true, d -> Some(d, u)
-            | false, _ -> None
+            match compositeIntervalUnits.TryGetValue(u.ToUpperInvariant()) with
+            | true, (weights, simpleUnit) -> parseCompositeInterval weights simpleUnit n |> Option.map (fun total -> total, simpleUnit)
+            | _ ->
+                match Double.TryParse(n, NumberStyles.Float, CultureInfo.InvariantCulture) with
+                | true, d -> Some(d, u)
+                | false, _ -> None
         | _ -> None
     | VString s ->
         let m = Regex.Match(s.Trim(), @"^(-?\d+(?:\.\d+)?)\s+([A-Za-z]+)$")
@@ -1100,6 +1154,15 @@ let private dateAddCore (sign: float) : Scalar =
         match asDateTime dateV with
         | Some dt -> applyDateInterval sign dateV dt (toDouble amtV) unit
         | None -> VNull
+    | _ -> VNull
+
+/// `TIMESTAMPADD(unit, n, expr)` — the same arithmetic `DATE_ADD(expr,
+/// INTERVAL n unit)` does, with the arguments in the other order (the unit
+/// arrives as argument one from `Parser.timestampFuncAtom`).
+let private timestampAddFn: Scalar =
+    function
+    | [ u; n; d ] when not (anyNull [ u; n; d ]) ->
+        dateAddCore 1.0 [ d; n; VString(toText u |> Option.defaultValue "") ]
     | _ -> VNull
 
 /// `ADDDATE`/`SUBDATE` additionally accept a bare number as the second
@@ -1409,6 +1472,48 @@ let private timestampDiffFn: Scalar =
                 | _ -> span.TotalSeconds
 
             VInt(int64 (Math.Truncate result))
+        | _ -> VNull
+    | _ -> VNull
+
+/// `EXTRACT(unit FROM expr)` — the unit rides in as argument one (see
+/// `Parser.extractAtom`). A composite unit concatenates its components as
+/// decimal digits, each lower one zero-padded to its own width (2, or 6 for
+/// microseconds) and the highest one unpadded: oracle-pinned on
+/// '2020-03-04 05:06:07.123456', `DAY_SECOND` is 4050607 and
+/// `DAY_MICROSECOND` is 4050607123456. An unknown unit is NULL.
+let private extractFn: Scalar =
+    function
+    | [ u; v ] when not (anyNull [ u; v ]) ->
+        match toText u, asDateTime v with
+        | Some unit, Some d ->
+            // Components stitched together as `sum(part_i * 10^width_of_all_lower)`.
+            let compose (parts: (int * int) list) =
+                parts |> List.fold (fun acc (value, width) -> acc * pown 10L width + int64 value) 0L
+
+            let micro = int ((d.Ticks % 10_000_000L) / 10L)
+
+            match unit.ToUpperInvariant() with
+            | "MICROSECOND" -> VInt(int64 micro)
+            | "SECOND" -> VInt(int64 d.Second)
+            | "MINUTE" -> VInt(int64 d.Minute)
+            | "HOUR" -> VInt(int64 d.Hour)
+            | "DAY" -> VInt(int64 d.Day)
+            | "WEEK" -> weekFn [ v ]
+            | "MONTH" -> VInt(int64 d.Month)
+            | "QUARTER" -> VInt(int64 ((d.Month - 1) / 3 + 1))
+            | "YEAR" -> VInt(int64 d.Year)
+            | "SECOND_MICROSECOND" -> VInt(compose [ d.Second, 0; micro, 6 ])
+            | "MINUTE_MICROSECOND" -> VInt(compose [ d.Minute, 0; d.Second, 2; micro, 6 ])
+            | "MINUTE_SECOND" -> VInt(compose [ d.Minute, 0; d.Second, 2 ])
+            | "HOUR_MICROSECOND" -> VInt(compose [ d.Hour, 0; d.Minute, 2; d.Second, 2; micro, 6 ])
+            | "HOUR_SECOND" -> VInt(compose [ d.Hour, 0; d.Minute, 2; d.Second, 2 ])
+            | "HOUR_MINUTE" -> VInt(compose [ d.Hour, 0; d.Minute, 2 ])
+            | "DAY_MICROSECOND" -> VInt(compose [ d.Day, 0; d.Hour, 2; d.Minute, 2; d.Second, 2; micro, 6 ])
+            | "DAY_SECOND" -> VInt(compose [ d.Day, 0; d.Hour, 2; d.Minute, 2; d.Second, 2 ])
+            | "DAY_MINUTE" -> VInt(compose [ d.Day, 0; d.Hour, 2; d.Minute, 2 ])
+            | "DAY_HOUR" -> VInt(compose [ d.Day, 0; d.Hour, 2 ])
+            | "YEAR_MONTH" -> VInt(compose [ d.Year, 0; d.Month, 2 ])
+            | _ -> VNull
         | _ -> VNull
     | _ -> VNull
 
@@ -2668,6 +2773,7 @@ let builtins: Registry =
     |> registerScalar "JSON_SEARCH" jsonSearchFn
     // Dates
     |> registerScalar "DATE_ADD" (dateAddCore 1.0)
+    |> registerScalar "TIMESTAMPADD" timestampAddFn
     |> registerScalar "ADDDATE" (addSubDateCore 1.0)
     |> registerScalar "DATE_SUB" (dateAddCore -1.0)
     |> registerScalar "SUBDATE" (addSubDateCore -1.0)
@@ -2700,6 +2806,7 @@ let builtins: Registry =
     |> registerScalar "UNIX_TIMESTAMP" unixTimestampFn
     |> registerScalar "FROM_UNIXTIME" fromUnixTimeFn
     |> registerScalar "TIMESTAMPDIFF" timestampDiffFn
+    |> registerScalar "EXTRACT" extractFn
     |> registerScalar "LAST_DAY" lastDayFn
     |> registerScalar "MAKEDATE" makeDateFn
     |> registerScalar "CONVERT_TZ" convertTzFn

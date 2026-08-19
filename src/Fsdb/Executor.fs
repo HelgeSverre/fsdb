@@ -406,6 +406,7 @@ let private opSymbol =
     function
     | And -> "AND"
     | Or -> "OR"
+    | Xor -> "XOR"
     | Eq -> "="
     | Neq -> "<>"
     | Lt -> "<"
@@ -1470,6 +1471,13 @@ let rec private evalExpr (ctx: EvalContext) (expr: Expr) : Result<Value, EvalErr
                         | _, Some true -> VInt 1L
                         | Some false, Some false -> VInt 0L
                         | _ -> VNull
+                    // XOR has no short-circuit: either operand being unknown
+                    // makes the answer unknown (`NULL XOR 1` is NULL, unlike
+                    // `NULL OR 1`).
+                    | Xor ->
+                        match truthy va, truthy vb with
+                        | Some a, Some b -> boolToValue (a <> b)
+                        | _ -> VNull
                     // `datetime_expr +/- INTERVAL n unit` parses to a plain
                     // `BinOp`, same as `1 + 2` — `vb` here is `INTERVAL`'s own
                     // encoded marker value (see `Functions.intervalFn`), so it
@@ -1975,7 +1983,8 @@ and private jsonTableColumnDefs (columns: JsonTableColumn list) : ColumnDef list
         let name, ty =
             match c with
             | ForOrdinality name -> name, TInt true
-            | PathColumn(name, ty, _) -> name, ty
+            | PathColumn(name, ty, _, _, _) -> name, ty
+            | ExistsColumn(name, ty, _) -> name, ty
 
         { Name = name
           Type = ty
@@ -2005,10 +2014,28 @@ and private jsonTableRows (doc: Value) (path: string) (columns: JsonTableColumn 
     // NULL rather than non-strict's 0. ponytail: numeric fractions truncate
     // toward zero like this engine's CAST (MySQL's column store rounds,
     // 3.7 → 4); align `coerceValue` if a workload ever notices.
-    let columnValue (ty: ColumnType) (node: JsonNode) : Value =
+    // Strict coercion into the declared column type, shared by an extracted
+    // node and by a `DEFAULT` literal. `Error` is JSON_TABLE's "ON ERROR"
+    // condition (oracle-pinned: an array or the unconvertible string '5x'
+    // under an INT column takes the ON ERROR branch, while a matched JSON
+    // *null* is simply NULL and takes neither branch).
+    let coerce (ty: ColumnType) (raw: Value) : Result<Value, unit> =
+        match Storage.coerceValue true (jsonTableColumnDefs [ PathColumn("JSON_TABLE", ty, "", None, None) ] |> List.head) raw with
+        | Ok v -> Ok v
+        | Error _ -> Error()
+
+    /// A `DEFAULT lit ON EMPTY|ERROR` literal in the column's own type;
+    /// `None` (an absent clause, or `NULL ON ...`) is MySQL's default, NULL.
+    let defaultOf (ty: ColumnType) (lit: Value option) : Value =
+        match lit with
+        | None
+        | Some VNull -> VNull
+        | Some v -> coerce ty v |> Result.defaultValue VNull
+
+    let columnValue (ty: ColumnType) (node: JsonNode) : Result<Value, unit> =
         match node with
-        | null -> VNull // a matched JSON null
-        | _ when ty = TJson -> VJson(Functions.jsonNodeText node)
+        | null -> Ok VNull // a matched JSON null
+        | _ when ty = TJson -> Ok(VJson(Functions.jsonNodeText node))
         | _ ->
             let raw =
                 match node.GetValueKind() with
@@ -2022,11 +2049,10 @@ and private jsonTableRows (doc: Value) (path: string) (columns: JsonTableColumn 
                 | _ -> VString(node.ToJsonString())
 
             match raw with
-            | VNull -> VNull
-            | _ ->
-                match Storage.coerceValue true (jsonTableColumnDefs [ PathColumn("JSON_TABLE", ty, "") ] |> List.head) raw with
-                | Ok v -> v
-                | Error _ -> VNull
+            // An object/array under a scalar column: `raw` was already
+            // flattened to VNull above, and MySQL calls that ON ERROR.
+            | VNull -> Error()
+            | _ -> coerce ty raw
 
     match doc with
     | VNull -> Ok []
@@ -2047,13 +2073,24 @@ and private jsonTableRows (doc: Value) (path: string) (columns: JsonTableColumn 
                     columns
                     |> List.map (function
                         | ForOrdinality _ -> VInt(int64 i + 1L)
-                        | PathColumn(_, ty, colPath) ->
-                            // ponytail: an unparseable *column* path yields
-                            // NULL instead of MySQL's 3143 at prepare; a
-                            // multi-node match is the ON ERROR default NULL.
+                        | ExistsColumn(_, ty, colPath) ->
+                            // Never NULL and never an error: 1 when the path
+                            // matches at least one node, 0 otherwise, in the
+                            // column's own declared type.
+                            let hit =
+                                match Functions.jsonPathNodes node colPath with
+                                | Some(_ :: _) -> 1L
+                                | _ -> 0L
+
+                            coerce ty (VInt hit) |> Result.defaultValue (VInt hit)
+                        | PathColumn(_, ty, colPath, onEmpty, onError) ->
+                            // ponytail: an unparseable *column* path takes the
+                            // ON ERROR branch instead of MySQL's 3143 at
+                            // prepare time; a multi-node match is ON ERROR too.
                             match Functions.jsonPathNodes node colPath with
-                            | Some [ single ] -> columnValue ty single
-                            | _ -> VNull)
+                            | Some [ single ] -> columnValue ty single |> Result.defaultWith (fun () -> defaultOf ty onError)
+                            | Some [] -> defaultOf ty onEmpty
+                            | _ -> defaultOf ty onError)
                     |> Array.ofList)
                 |> Ok
 
@@ -3110,7 +3147,7 @@ and runUnionStmt
     (registry: Registry)
     (dbName: string)
     (first: SelectStmt)
-    (rest: (bool * SelectStmt) list)
+    (rest: (SetOp * SelectStmt) list)
     (orderBy: OrderKey list)
     (limit: int option)
     (offset: int option)
@@ -3127,10 +3164,10 @@ and runUnionStmt
     // first and only *then* compares for DISTINCT (`SELECT 1.0 UNION
     // SELECT 1` is one row, `1.0` — a dedup keyed on each branch's own
     // pre-reconciliation text, `"1.0"` vs `"1"`, would keep two). So this
-    // pass just concatenates every branch's raw rows plus an `(isAll,
-    // cumulative length)` boundary marker per branch, and the actual dedup
-    // runs after `reconciled`/`coerceColumn` below, replayed over those
-    // boundaries.
+    // pass just concatenates every branch's raw rows plus an `(op,
+    // cumulative length)` boundary marker per branch, and the actual set
+    // operations run after `reconciled`/`coerceColumn` below, replayed over
+    // those boundaries.
     // MySQL reconciles a temporal UNION column's fsp the same way it does
     // types/collations: the max declared fsp across branches wins, and every
     // row renders exactly that many digits (a whole-second DATETIME row
@@ -3144,8 +3181,8 @@ and runUnionStmt
         | None, None -> None
 
     let combine
-        (acc: Result<string list * ((string option list) * Value[]) list * byte list list * Collation.Collation list * int option list * (bool * int) list, QueryResult>)
-        (isAll: bool, select: SelectStmt)
+        (acc: Result<string list * ((string option list) * Value[]) list * byte list list * Collation.Collation list * int option list * (SetOp * int) list, QueryResult>)
+        (setOp: SetOp, select: SelectStmt)
         =
         acc
         |> Result.bind (fun (cols, rowsSoFar, typesSoFar, collationsSoFar, fspsSoFar, boundaries) ->
@@ -3168,7 +3205,7 @@ and runUnionStmt
                 let fsps = List.map2 unionFsp fspsSoFar branchFsps
 
                 let combined = rowsSoFar @ branchPaired
-                Ok(cols, combined, branchTypes :: typesSoFar, collations, fsps, boundaries @ [ isAll, List.length combined ]))
+                Ok(cols, combined, branchTypes :: typesSoFar, collations, fsps, boundaries @ [ setOp, List.length combined ]))
 
     match runSelectStmt store registry dbName first None with
     | Err(code, message), _, _ -> Err(code, message), [], []
@@ -3246,25 +3283,81 @@ and runUnionStmt
                         |> List.ofArray
                     text, coerced)
 
-            // Replays each branch's `isAll`/boundary from `combine` above,
-            // keyed on the reconciled text/collation rather than each
-            // branch's own pre-reconciliation one — collation-aware, so
-            // åge/age fold under the UNION's aggregated collation
-            // (strictest branch wins — bin never folds).
+            // Row identity for every set operation, keyed on the reconciled
+            // text/collation rather than each branch's own pre-reconciliation
+            // one — collation-aware, so åge/age fold under the aggregated
+            // collation (strictest branch wins — bin never folds).
             let dedupeKey (text: string option list) =
                 List.map2 (fun (col: Collation.Collation) (cell: string option) -> cell |> Option.map col.KeyOf) collations text
 
-            let coercedFirst = coercedPairedRaw |> List.truncate firstLen
+            let keyOf (row: string option list * Value[]) = dedupeKey (fst row)
 
-            let _, coercedPaired =
+            // One operator applied to two already-materialized row lists.
+            // `ALL` is multiset arithmetic (INTERSECT ALL takes the lesser of
+            // the two multiplicities, EXCEPT ALL subtracts them); without it
+            // the result is distinct. Oracle-pinned on MySQL 8.4.11 with
+            // left = [1,1,2,3], right = [1,2,2]: INTERSECT [1,2],
+            // INTERSECT ALL [1,2], EXCEPT [3], EXCEPT ALL [1,3].
+            let applySetOp (op: SetOp) (left: (string option list * Value[]) list) (right: (string option list * Value[]) list) =
+                let distinct rows = rows |> List.distinctBy keyOf
+
+                // How many times each key occurs on the right — the budget
+                // INTERSECT ALL draws down and EXCEPT ALL subtracts.
+                let counts (rows: _ list) =
+                    rows
+                    |> List.countBy keyOf
+                    |> List.fold (fun m (k, n) -> Map.add k n m) Map.empty
+
+                let takeByBudget (budget: Map<_, int>) (keep: int -> bool) rows =
+                    rows
+                    |> List.mapFold
+                        (fun (remaining: Map<_, int>) row ->
+                            let k = keyOf row
+                            let left = remaining |> Map.tryFind k |> Option.defaultValue 0
+                            (if keep left then Some row else None), Map.add k (max 0 (left - 1)) remaining)
+                        budget
+                    |> fst
+                    |> List.choose id
+
+                match op with
+                | OpUnion true -> left @ right
+                | OpUnion false -> distinct (left @ right)
+                | OpIntersect false ->
+                    let rightKeys = right |> List.map keyOf |> Set.ofList
+                    distinct left |> List.filter (fun row -> rightKeys.Contains(keyOf row))
+                | OpIntersect true -> takeByBudget (counts right) (fun remaining -> remaining > 0) left
+                | OpExcept false ->
+                    let rightKeys = right |> List.map keyOf |> Set.ofList
+                    distinct left |> List.filter (fun row -> not (rightKeys.Contains(keyOf row)))
+                | OpExcept true -> takeByBudget (counts right) (fun remaining -> remaining <= 0) left
+
+            // Each branch's own coerced row slice, recovered from the
+            // cumulative boundary offsets `combine` recorded.
+            let slices =
                 boundaries
+                |> List.mapFold
+                    (fun prevUpto (op, upto) -> (op, coercedPairedRaw |> List.skip prevUpto |> List.take (upto - prevUpto)), upto)
+                    firstLen
+                |> fst
+
+            // INTERSECT binds tighter than UNION/EXCEPT (see `Ast.SetOp`), so
+            // this is a two-pass reduction rather than a left fold: collapse
+            // every INTERSECT into the branch it attaches to first, then
+            // combine what's left strictly left to right.
+            let grouped =
+                slices
                 |> List.fold
-                    (fun (prevUpto: int, accRows: (string option list * Value[]) list) (isAll, upto) ->
-                        let newRows = coercedPairedRaw |> List.skip prevUpto |> List.take (upto - prevUpto)
-                        let extended = accRows @ newRows
-                        let result = if isAll then extended else extended |> List.distinctBy (fst >> dedupeKey)
-                        upto, result)
-                    (firstLen, coercedFirst)
+                    (fun acc (op, rows) ->
+                        match op, acc with
+                        | (OpIntersect _), ((prevOp, prevRows) :: earlier) -> (prevOp, applySetOp op prevRows rows) :: earlier
+                        | _ -> (op, rows) :: acc)
+                    [ OpUnion true, coercedPairedRaw |> List.truncate firstLen ]
+                |> List.rev
+
+            let coercedPaired =
+                match grouped with
+                | (_, head) :: tail -> tail |> List.fold (fun acc (op, rows) -> applySetOp op acc rows) head
+                | [] -> []
 
             // `ORDER BY`/`LIMIT` on the combined result — same
             // alias/positional resolution as an ordinary `SELECT`, and now

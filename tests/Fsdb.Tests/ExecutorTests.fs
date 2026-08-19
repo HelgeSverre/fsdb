@@ -5327,6 +5327,58 @@ let tests =
                     | ResultSet(_, [ row ]) -> Expect.equal row expected sql
                     | other -> failtestf "expected a single row from %s, got %A" sql other
 
+                testCase "XOR is three-valued and binds between OR and AND"
+                <| fun _ ->
+                    expectRow
+                        "SELECT (NULL XOR 1) a, (1 XOR 1) b, (1 XOR 0) c, (0 XOR 0) d, (2 XOR 3) e, (NULL XOR NULL) f, 1 XOR 1 OR 1 AS g, 1 XOR 1 AND 0 AS h, NOT 1 XOR 1 AS i"
+                        [ None; Some "0"; Some "1"; Some "0"; Some "0"; None; Some "1"; Some "1"; Some "1" ]
+
+                testCase "EXTRACT's composite units concatenate their components as digits"
+                <| fun _ ->
+                    expectRow
+                        "SELECT EXTRACT(YEAR_MONTH FROM '2020-03-04 05:06:07.123456') a, EXTRACT(DAY_SECOND FROM '2020-03-04 05:06:07.123456') b, EXTRACT(DAY_MICROSECOND FROM '2020-03-04 05:06:07.123456') c, EXTRACT(HOUR_MINUTE FROM '2020-03-04 05:06:07.123456') d, EXTRACT(MICROSECOND FROM '2020-03-04 05:06:07.123456') e, EXTRACT(WEEK FROM '2020-03-04') f, EXTRACT(HOUR FROM '2020-03-04') g, EXTRACT(YEAR FROM NULL) h, EXTRACT(NOSUCHUNIT FROM '2020-03-04') i"
+                        [ Some "202003"
+                          Some "4050607"
+                          Some "4050607123456"
+                          Some "506"
+                          Some "123456"
+                          Some "9"
+                          Some "0"
+                          None
+                          None ]
+
+                testCase "typed temporal literals carry their type, and DATE '..' feeds date arithmetic"
+                <| fun _ ->
+                    expectRow
+                        "SELECT DATE '2030-01-01' a, TIME '10:20:30' b, TIMESTAMP '2030-01-01 05:06:07' c, TIME '100:20:30' d, TIME '10:20' e, TIME '-10:20:30' f, TIMESTAMPDIFF(DAY, DATE '2020-01-01', DATE '2030-01-01') g"
+                        [ Some "2030-01-01"
+                          Some "10:20:30"
+                          Some "2030-01-01 05:06:07"
+                          Some "100:20:30"
+                          Some "10:20:00"
+                          Some "-10:20:30"
+                          Some "3653" ]
+
+                testCase "TIMESTAMPADD is DATE_ADD with the arguments in the other order"
+                <| fun _ ->
+                    expectRow
+                        "SELECT TIMESTAMPADD(QUARTER, 1, '2020-03-04 05:06:07') a, TIMESTAMPADD(MINUTE, 90, '2020-03-04 05:06:07') b, TIMESTAMPADD(DAY, 5, '2020-03-04') c"
+                        [ Some "2020-06-04 05:06:07"; Some "2020-03-04 06:36:07"; Some "2020-03-09" ]
+
+                testCase "composite INTERVAL units read their components right-aligned"
+                <| fun _ ->
+                    expectRow
+                        "SELECT '1996-02-08 00:48:46' - INTERVAL '1:30' HOUR_MINUTE a, DATE_ADD('2011-10-16', INTERVAL '2-3' YEAR_MONTH) b, DATE_ADD('2020-01-01 00:00:00', INTERVAL '1 2:3:4' DAY_SECOND) c, DATE_ADD('2020-01-01 00:00:00', INTERVAL '3:4' DAY_SECOND) d, DATE_ADD('2020-01-01 00:00:00.000000', INTERVAL '1.5' SECOND_MICROSECOND) e, DATE_SUB('2020-01-01', INTERVAL '1-2' YEAR_MONTH) f"
+                        [ Some "1996-02-07 23:18:46"
+                          Some "2014-01-16"
+                          Some "2020-01-02 02:03:04"
+                          Some "2020-01-01 00:03:04"
+                          Some "2020-01-01 00:00:01.500000"
+                          Some "2018-11-01" ]
+
+                testCase "an unrecognized INTERVAL unit is NULL, not a silently ignored no-op"
+                <| fun _ -> expectRow "SELECT DATE_ADD('2020-01-01', INTERVAL 1 NOSUCHUNIT) a" [ None ]
+
                 testCase "MOD is an infix keyword operator binding as tightly as %"
                 <| fun _ ->
                     expectRow
@@ -5514,4 +5566,73 @@ let tests =
 
                     match runDefault store "SELECT JSON_OBJECTAGG(k, v) a FROM kv WHERE id = 99" with
                     | ResultSet(_, [ [ None ] ]) -> ()
-                    | other -> failtestf "expected NULL over an empty group, got %A" other ] ]
+                    | other -> failtestf "expected NULL over an empty group, got %A" other ]
+
+          // Every expected result below was read off the MySQL 8.4.11 oracle
+          // over the same [1,2,3,1,2,2] / [1,2,1,2,2] multisets.
+          testList
+              "set operations and the VALUES table constructor, pinned to the 8.4 oracle"
+              [ let setOpStore () =
+                    let store = newStore ()
+                    runDefault store "CREATE TABLE s (id INT)" |> ignore
+                    runDefault store "INSERT INTO s (id) VALUES (1), (2), (3), (1), (2), (2)" |> ignore
+                    store
+
+                let expectIds (sql: string) (expected: string list) =
+                    match runDefault (setOpStore ()) sql with
+                    | ResultSet(_, rows) -> Expect.equal rows (expected |> List.map (fun v -> [ Some v ])) sql
+                    | other -> failtestf "expected a resultset from %s, got %A" sql other
+
+                testCase "INTERSECT and EXCEPT dedupe; their ALL forms do multiset arithmetic"
+                <| fun _ ->
+                    expectIds "((SELECT id FROM s) INTERSECT (SELECT id FROM s WHERE id <= 2)) ORDER BY id" [ "1"; "2" ]
+                    expectIds "((SELECT id FROM s) INTERSECT ALL (SELECT id FROM s WHERE id <= 2)) ORDER BY id" [ "1"; "1"; "2"; "2"; "2" ]
+                    expectIds "((SELECT id FROM s) EXCEPT (SELECT id FROM s WHERE id <= 2)) ORDER BY id" [ "3" ]
+                    expectIds "((SELECT id FROM s) EXCEPT ALL (SELECT id FROM s WHERE id <= 2)) ORDER BY id" [ "3" ]
+
+                testCase "INTERSECT binds tighter than UNION"
+                <| fun _ ->
+                    // `1 UNION (2 INTERSECT 3)` is one row; a left-to-right
+                    // fold would intersect {1,2} with {3} and answer nothing.
+                    expectIds "SELECT 1 UNION SELECT 2 INTERSECT SELECT 3" [ "1" ]
+
+                testCase "a set operator after a parenthesized group is refused, not misgrouped"
+                <| fun _ ->
+                    match Fsdb.Parser.parse "(SELECT 1 UNION SELECT 2) INTERSECT SELECT 2" with
+                    | Result.Error _ -> ()
+                    | Result.Ok other -> failtestf "expected a parse refusal, got %A" other
+
+                testCase "VALUES ROW(...) is a table, joinable, with column_N default names"
+                <| fun _ ->
+                    match runDefault (newStore ()) "SELECT v.n, v.label FROM (VALUES ROW(1,'one'), ROW(2,'two'), ROW(3,'three')) AS v (n, label) ORDER BY v.n" with
+                    | ResultSet([ "n"; "label" ], [ [ Some "1"; Some "one" ]; [ Some "2"; Some "two" ]; [ Some "3"; Some "three" ] ]) -> ()
+                    | other -> failtestf "expected the three named VALUES rows, got %A" other
+
+                    match runDefault (newStore ()) "SELECT * FROM (VALUES ROW(1,'one'), ROW(2,'two')) AS v" with
+                    | ResultSet([ "column_0"; "column_1" ], [ _; _ ]) -> ()
+                    | other -> failtestf "expected column_0/column_1, got %A" other
+
+                    match runDefault (setOpStore ()) "SELECT s.id, v.label FROM s JOIN (VALUES ROW(3,'third')) AS v (n, label) ON s.id = v.n" with
+                    | ResultSet(_, [ [ Some "3"; Some "third" ] ]) -> ()
+                    | other -> failtestf "expected the joined VALUES row, got %A" other
+
+                testCase "JSON_TABLE EXISTS PATH and DEFAULT ON EMPTY/ERROR"
+                <| fun _ ->
+                    match
+                        runDefault
+                            (newStore ())
+                            "SELECT jt.ord, jt.has_a FROM JSON_TABLE(CAST('[{\"a\":1},{\"b\":2}]' AS JSON), '$[*]' COLUMNS (ord FOR ORDINALITY, has_a INT EXISTS PATH '$.a')) AS jt ORDER BY jt.ord"
+                    with
+                    | ResultSet(_, [ [ Some "1"; Some "1" ]; [ Some "2"; Some "0" ] ]) -> ()
+                    | other -> failtestf "expected EXISTS PATH to answer 1 then 0, got %A" other
+
+                    // Row 2 has no `$.v` (ON EMPTY), row 3's 'nope' will not
+                    // coerce into INT (ON ERROR), and a matched JSON null is
+                    // neither — it is simply NULL.
+                    match
+                        runDefault
+                            (newStore ())
+                            "SELECT jt.v FROM JSON_TABLE(CAST('[{\"v\":1},{\"x\":2},{\"v\":\"nope\"},{\"v\":null}]' AS JSON), '$[*]' COLUMNS (v INT PATH '$.v' DEFAULT '7' ON EMPTY DEFAULT '9' ON ERROR)) AS jt"
+                    with
+                    | ResultSet(_, [ [ Some "1" ]; [ Some "7" ]; [ Some "9" ]; [ None ] ]) -> ()
+                    | other -> failtestf "expected 1, 7, 9, NULL, got %A" other ] ]

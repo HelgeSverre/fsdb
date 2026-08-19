@@ -243,6 +243,12 @@ let private reservedWords =
           "group"
           "having"
           "union"
+          // Reserved in MySQL 8.4 too, and the grammar needs them: an
+          // unparenthesized branch's `FROM t INTERSECT ...` would otherwise
+          // read the operator as table `t`'s alias, exactly as `union` would.
+          "intersect"
+          "except"
+          "xor"
           "all"
           "when"
           "for"
@@ -763,6 +769,60 @@ let private timestampFuncAtom: Parser<Expr, unit> =
     )
     |>> fun ((name, unit), args) -> FuncCall(name, Lit(VString(unit.ToUpperInvariant())) :: args)
 
+/// `EXTRACT(unit FROM expr)` — the unit is an unquoted keyword and the
+/// separator is `FROM`, not a comma, so the generic call grammar can't reach
+/// it; same splice-the-unit-in-as-argument-one trick as `timestampFuncAtom`.
+let private extractAtom: Parser<Expr, unit> =
+    attempt (keyword "EXTRACT" >>. sym "(" >>. (many1Satisfy2 isIdentStart isIdentChar .>> ws) .>> keyword "FROM")
+    .>>. expr
+    .>> sym ")"
+    |>> fun (unit, e) -> FuncCall("EXTRACT", [ Lit(VString(unit.ToUpperInvariant())); e ])
+
+/// `DATE 'text'` / `TIME 'text'` / `TIMESTAMP 'text'` — SQL's typed temporal
+/// literals. Folded to a `Lit` here rather than desugared to the same-named
+/// function call, because MySQL *rejects* a malformed one (1525 "Incorrect
+/// DATE value") where `DATE('...')` answers NULL with a warning; the literal
+/// has to be validated where it's written. Only a string literal follows the
+/// type word, so `DATE(x)`/`TIME(x)` calls are untouched.
+///
+/// ponytail: a malformed literal fails the *parse*, so it surfaces as 1064
+/// rather than MySQL's 1525 — an honest refusal either way. Give
+/// `Parser.parse` an error-code channel if a client ever matches on 1525.
+let private temporalLit: Parser<Expr, unit> =
+    let asText v = match v with VString s -> s | _ -> ""
+
+    attempt (
+        ((keyword "TIMESTAMP" >>% "TIMESTAMP") <|> (keyword "DATE" >>% "DATE") <|> (keyword "TIME" >>% "TIME"))
+        .>>. stringLit
+    )
+    >>= fun (kind, lit) ->
+        let text = (asText lit).Trim()
+
+        match kind with
+        | "DATE" ->
+            match DateOnly.TryParse(text, CultureInfo.InvariantCulture, DateTimeStyles.None) with
+            | true, d -> preturn (Lit(VDate d))
+            | _ -> fail (sprintf "Incorrect DATE value: '%s'" text)
+        | "TIMESTAMP" ->
+            // A date-only string is not a legal DATETIME literal in MySQL
+            // (`TIMESTAMP '2020-01-01'` is 1525), so the time part is required.
+            match DateTime.TryParse(text, CultureInfo.InvariantCulture, DateTimeStyles.None) with
+            | true, dt when text.Contains ':' -> preturn (Lit(VDateTime dt))
+            | _ -> fail (sprintf "Incorrect DATETIME value: '%s'" text)
+        | _ ->
+            // `TIME` has no `Value` case of its own (see `Functions.timeFn`),
+            // so it lands as the normalized `[-]HH:MM:SS` text MySQL renders —
+            // hours past 24 and a leading sign included, which `TimeOnly`
+            // can't hold, so the shape is checked by hand.
+            let sign, digits = if text.StartsWith "-" then "-", text.Substring 1 else "", text
+            let parts = digits.Split ':'
+            let allNumeric = parts |> Array.forall (fun p -> p.Length > 0 && p |> Seq.forall Char.IsDigit)
+
+            match parts.Length, allNumeric with
+            | 2, true -> preturn (Lit(VString(sprintf "%s%02d:%02d:00" sign (int parts.[0]) (int parts.[1]))))
+            | 3, true -> preturn (Lit(VString(sprintf "%s%02d:%02d:%02d" sign (int parts.[0]) (int parts.[1]) (int parts.[2]))))
+            | _ -> fail (sprintf "Incorrect TIME value: '%s'" text)
+
 let private caseWhenThen: Parser<Expr * Expr, unit> = (keyword "WHEN" >>. expr .>> keyword "THEN") .>>. expr
 
 /// `CASE WHEN cond THEN result ... [ELSE result] END` (searched form) and
@@ -857,6 +917,8 @@ let private atom: Parser<Expr, unit> =
           intervalAtom
           matchAgainstAtom
           timestampFuncAtom
+          extractAtom
+          temporalLit
           groupConcatAtom
           rowNumberOverAtom
           lagOverAtom
@@ -1044,8 +1106,14 @@ notExprRef.Value <- depthGuard ((keyword "NOT" >>. notExpr |>> Not) <|> comparis
 let private andExpr: Parser<Expr, unit> =
     chainl1 notExpr (keyword "AND" >>% fun a b -> BinOp(And, a, b))
 
+/// `XOR` sits between `OR` and `AND` in MySQL's precedence table, and is
+/// left-associative — oracle-verified: `1 XOR 1 OR 1` is 1 (so XOR binds
+/// tighter than OR) and `1 XOR 1 AND 0` is 1 (so AND binds tighter still).
+let private xorExpr: Parser<Expr, unit> =
+    chainl1 andExpr (keyword "XOR" >>% fun a b -> BinOp(Xor, a, b))
+
 let private orExpr: Parser<Expr, unit> =
-    chainl1 andExpr (keyword "OR" >>% fun a b -> BinOp(Or, a, b))
+    chainl1 xorExpr (keyword "OR" >>% fun a b -> BinOp(Or, a, b))
 
 do exprRef.Value <- depthGuard orExpr
 
@@ -1656,17 +1724,53 @@ let private parenSelectFlag: Parser<SelectStmt * bool, unit> =
     (attempt (sym "(" >>. parenSelect .>> sym ")") |>> fun s -> s, true)
     <|> (selectStmtRecord |>> fun s -> s, false)
 
-/// `UNION [ALL|DISTINCT]` between two `SELECT`s — `ALL` keeps duplicates,
-/// plain `UNION` (or explicit `DISTINCT`) dedupes, matching MySQL's default.
-let private unionOp: Parser<bool, unit> =
-    keyword "UNION" >>. ((keyword "ALL" >>% true) <|> (optional (keyword "DISTINCT") >>% false))
+/// `UNION`/`INTERSECT`/`EXCEPT`, each `[ALL|DISTINCT]`, between two
+/// `SELECT`s — `ALL` keeps duplicates, the bare operator (or an explicit
+/// `DISTINCT`) dedupes, matching MySQL's default for all three. Precedence
+/// isn't expressed here: the flat operator list carries it to
+/// `Executor.runUnionStmt` (see `Ast.SetOp`).
+let private unionOp: Parser<SetOp, unit> =
+    let all = (keyword "ALL" >>% true) <|> (optional (keyword "DISTINCT") >>% false)
+
+    ((keyword "UNION" >>% OpUnion) <|> (keyword "INTERSECT" >>% OpIntersect) <|> (keyword "EXCEPT" >>% OpExcept))
+    .>>. all
+    |>> fun (ctor, isAll) -> ctor isAll
 
 /// One `SELECT`, or a `UNION`-chained sequence of them — shared between a
 /// top-level statement (`selectOrUnionStmt`) and a derived table's body
 /// (`derivedTable`), since MySQL allows `UNION` in both places and each
 /// branch may be individually parenthesized (`parenSelectFlag`).
-let private selectOrUnionBranches: Parser<(SelectStmt * bool) * (bool * (SelectStmt * bool)) list, unit> =
-    parenSelectFlag .>>. many (unionOp .>>. parenSelectFlag)
+let private selectOrUnionBranches, selectOrUnionBranchesRef =
+    createParserForwardedToRef<(SelectStmt * bool) * (SetOp * (SelectStmt * bool)) list, unit> ()
+
+/// A whole set operation wrapped in one more layer of parens and standing on
+/// its own — `((SELECT ...) EXCEPT ALL (SELECT ...)) ORDER BY x`, the shape a
+/// set operation with a trailing `ORDER BY` has to be written in. The group's
+/// branches splice straight into the enclosing list, which is only sound
+/// while nothing follows the group: `(A UNION B) INTERSECT C` would flatten
+/// into `A UNION B INTERSECT C`, and INTERSECT's tighter binding (see
+/// `Ast.SetOp`) then regroups it wrongly. `notFollowedBy unionOp` is what
+/// keeps that case out — it falls through and fails the parse rather than
+/// answering the wrong grouping.
+///
+/// ponytail: a real nested set-expression tree in `Ast` is the upgrade path
+/// if a workload ever writes an operator after a parenthesized group.
+let private parenSetGroup: Parser<(SelectStmt * bool) * (SetOp * (SelectStmt * bool)) list, unit> =
+    attempt (
+        sym "("
+        >>. selectOrUnionBranches
+        >>= (fun (first, rest) ->
+            if rest.IsEmpty then
+                fail "not a parenthesized set operation"
+            else
+                preturn (first, rest))
+        .>> sym ")"
+        .>> notFollowedBy unionOp
+    )
+
+selectOrUnionBranchesRef.Value <-
+    parenSetGroup
+    <|> (parenSelectFlag .>>. many (unionOp .>>. parenSelectFlag))
 
 /// A trailing union-level `ORDER BY`/`LIMIT`, tried only once at least one
 /// `UNION` branch has parsed — what `MySqlGrammar::compileUnionOrders`/
@@ -1689,9 +1793,9 @@ let private unionTailClause: Parser<OrderKey list option * (int option * int opt
 /// only invoke this once they've confirmed at least one `UNION` branch.
 let private combineUnion
     ((first, _): SelectStmt * bool)
-    (rest: (bool * (SelectStmt * bool)) list)
+    (rest: (SetOp * (SelectStmt * bool)) list)
     ((unionOrderBy, unionLimitOffset): OrderKey list option * (int option * int option) option)
-    : SelectStmt * (bool * SelectStmt) list * OrderKey list * int option * int option =
+    : SelectStmt * (SetOp * SelectStmt) list * OrderKey list * int option * int option =
     // The bare (unparenthesized) final branch's trailing ORDER BY/LIMIT
     // belongs to the union as a whole — strip it from that branch so it
     // doesn't re-run the clause against its own columns (`... UNION SELECT
@@ -1743,24 +1847,89 @@ let private derivedTable: Parser<FromItem, unit> =
     )
     |>> fun (selectOrUnion, alias) -> FromSubquery(selectOrUnion, alias)
 
-/// One `COLUMNS (...)` entry: `name FOR ORDINALITY` or `name TYPE PATH
-/// 'path'`. `columnType` is the CREATE TABLE/CAST type grammar, so every
-/// declarable type works here too. ponytail: no NESTED PATH / EXISTS PATH /
-/// DEFAULT ... ON EMPTY|ERROR — fixed NULL-on-empty/error (MySQL's probed
-/// default); grow this parser + `Ast.JsonTableColumn` when one's needed.
+/// `(VALUES ROW(...), ROW(...)) [AS] alias [(c1, c2, ...)]` — MySQL 8's table
+/// value constructor. Desugared into the `UNION ALL` of one-row `SELECT`s it
+/// is exactly equivalent to, so it needs no `FromItem` case and no executor
+/// path of its own: the union machinery already reconciles the column types
+/// across rows the way `VALUES` does, keeps duplicates, and preserves order.
+/// Without an explicit column list MySQL names the columns `column_0`,
+/// `column_1`, ... (oracle-verified).
+let private valuesTable: Parser<FromItem, unit> =
+    let rowCtor = keyword "ROW" >>. between (sym "(") (sym ")") (sepBy1 expr (sym ","))
+
+    attempt (sym "(" >>. keyword "VALUES" >>. sepBy1 rowCtor (sym ",") .>> sym ")")
+    .>>. ((keyword "AS" >>. identifier) <|> identifier)
+    .>>. opt (between (sym "(") (sym ")") (sepBy1 identifier (sym ",")))
+    >>= fun ((rows, alias), colNames) ->
+        let width = List.length (List.head rows)
+
+        if rows |> List.exists (fun r -> List.length r <> width) then
+            fail "every ROW() of a VALUES table must have the same number of columns"
+        else
+            let names =
+                match colNames with
+                | Some ns when List.length ns <> width -> []
+                | Some ns -> ns
+                | None -> List.init width (sprintf "column_%d")
+
+            if names.IsEmpty then
+                fail "the column list of a VALUES table must match its ROW() width"
+            else
+                let branch (cells: Expr list) : SelectStmt =
+                    { Projections = List.map2 (fun name cell -> cell, Some name) names cells
+                      Distinct = false
+                      From = None
+                      Joins = []
+                      Where = None
+                      GroupBy = []
+                      Having = None
+                      OrderBy = []
+                      Limit = None
+                      Offset = None
+                      Locking = false }
+
+                match rows with
+                | [ single ] -> preturn (FromSubquery(PlainSelect(branch single), alias))
+                | head :: tail ->
+                    preturn (
+                        FromSubquery(
+                            UnionSelect(branch head, tail |> List.map (fun r -> OpUnion true, branch r), [], None, None),
+                            alias
+                        )
+                    )
+                | [] -> fail "VALUES needs at least one ROW()"
+
+/// One `COLUMNS (...)` entry: `name FOR ORDINALITY`, `name TYPE PATH 'path'`
+/// with its optional `DEFAULT ... ON EMPTY|ERROR` clauses, or `name TYPE
+/// EXISTS PATH 'path'`. `columnType` is the CREATE TABLE/CAST type grammar,
+/// so every declarable type works here too. ponytail: no NESTED PATH, and
+/// `ERROR ON EMPTY|ERROR` (raise instead of substitute) isn't accepted —
+/// grow this parser + `Ast.JsonTableColumn` when one's needed.
 let private jsonTableColumn: Parser<JsonTableColumn, unit> =
+    let asText v = match v with VString s -> s | _ -> ""
+
+    // `DEFAULT <literal> ON EMPTY|ERROR`, in MySQL's fixed ON EMPTY-then-ON
+    // ERROR order; `NULL ON EMPTY|ERROR` restates the default, so it parses
+    // to the same `None` an absent clause gives.
+    let onClause (which: string) : Parser<Value option, unit> =
+        opt (
+            attempt (
+                ((keyword "DEFAULT" >>. literalValue |>> Some) <|> (keyword "NULL" >>% None))
+                .>> keyword "ON"
+                .>> keyword which
+            )
+        )
+        |>> Option.flatten
+
     identifier
     >>= fun name ->
         (keyword "FOR" >>. keyword "ORDINALITY" >>% ForOrdinality name)
-        <|> (columnType .>> keyword "PATH" .>>. stringLit
-             |>> fun (ty, p) ->
-                 PathColumn(
-                     name,
-                     ty,
-                     (match p with
-                      | VString s -> s
-                      | _ -> "")
-                 ))
+        <|> (columnType
+             >>= fun ty ->
+                 (attempt (keyword "EXISTS" >>. keyword "PATH") >>. stringLit
+                  |>> fun p -> ExistsColumn(name, ty, asText p))
+                 <|> (keyword "PATH" >>. stringLit .>>. onClause "EMPTY" .>>. onClause "ERROR"
+                      |>> fun ((p, onEmpty), onError) -> PathColumn(name, ty, asText p, onEmpty, onError)))
 
 /// `JSON_TABLE(expr, 'path' COLUMNS (col, ...)) [AS] alias` — the alias is
 /// required (MySQL's 3667 "Every table function must have an alias"), same
@@ -1788,7 +1957,8 @@ let private jsonTable: Parser<FromItem, unit> =
             alias
         )
 
-let private fromItem: Parser<FromItem, unit> = derivedTable <|> jsonTable <|> (tableRef |>> FromTable)
+let private fromItem: Parser<FromItem, unit> =
+    derivedTable <|> valuesTable <|> jsonTable <|> (tableRef |>> FromTable)
 
 /// `[INNER] JOIN`, `LEFT [OUTER] JOIN`, and `RIGHT [OUTER] JOIN` all require
 /// an `ON` or a `USING (...)`; `NATURAL [INNER|LEFT [OUTER]|RIGHT [OUTER]]`

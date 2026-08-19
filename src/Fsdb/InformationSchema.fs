@@ -309,6 +309,7 @@ let rec private exprToSql (e: Expr) : string =
         function
         | And -> "and"
         | Or -> "or"
+        | Xor -> "xor"
         | Eq -> "="
         | Neq -> "<>"
         | Lt -> "<"
