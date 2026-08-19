@@ -1415,6 +1415,7 @@ let rec bindPlaceholders (stmt: Statement) (values: Value list) : Statement =
     let rec mapExpr (e: Expr) : Expr =
         match e with
         | Placeholder i -> lit i
+        | MatchAgainst(cols, q, mode) -> MatchAgainst(cols, mapExpr q, mode)
         | Lit _
         | Col _
         | QualifiedCol _

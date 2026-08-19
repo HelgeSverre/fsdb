@@ -41,6 +41,7 @@ type StorageError =
     /// "Data truncated" (SQLSTATE 01000), distinct from the 1366 incorrect-
     /// value error other column types raise in strict mode.
     | DataTruncatedForColumn of column: string
+    | FullTextColumnNotAllowed of column: string
     /// A value doesn't fit the column's numeric range — MySQL's 1264
     /// (SQLSTATE 22003), raised in strict mode when `ALTER ... MODIFY`
     /// narrows an integer type over existing out-of-range rows.
@@ -82,6 +83,7 @@ let toMySqlError (err: StorageError) : int * string =
     | NotNullViolation column -> 1048, sprintf "Column '%s' cannot be null" column
     | InvalidValueForColumn(column, value) -> 1366, sprintf "Incorrect value: '%s' for column '%s'" value column
     | DataTruncatedForColumn column -> 1265, sprintf "Data truncated for column '%s' at row 1" column
+    | FullTextColumnNotAllowed column -> 1283, sprintf "Column '%s' cannot be part of FULLTEXT index" column
     | OutOfRangeForColumn column -> 1264, sprintf "Out of range value for column '%s' at row 1" column
     | ExpressionError(code, message) -> code, message
     | DuplicateKey(keyName, value) -> 1062, sprintf "Duplicate entry '%s' for key '%s'" value keyName
@@ -1582,6 +1584,32 @@ let private validateColumnFsp (c: ColumnDef) : Result<unit, StorageError> =
     | TTime fsp when fsp > 6 -> Error(PrecisionTooBig(c.Name, fsp))
     | _ -> Ok()
 
+/// FULLTEXT indexes only cover text columns — CHAR/VARCHAR and the TEXT
+/// family — matching MySQL's 1283 for anything else.
+let private checkFullTextColumns (columns: ColumnDef list) (ix: IndexDef) : Result<unit, StorageError> =
+    if ix.Kind <> FullTextIndex then
+        Ok()
+    else
+        let isTextual (t: ColumnType) =
+            match t with
+            | TChar _
+            | TVarchar _
+            | TTinyText
+            | TText
+            | TMediumText
+            | TLongText -> true
+            | _ -> false
+
+        ix.Columns
+        |> List.tryFind (fun name ->
+            columns
+            |> List.tryFind (fun c -> String.Equals(c.Name, name, StringComparison.OrdinalIgnoreCase))
+            |> Option.map (fun c -> not (isTextual c.Type))
+            |> Option.defaultValue false)
+        |> function
+            | Some bad -> Error(FullTextColumnNotAllowed bad)
+            | None -> Ok()
+
 let createTableSeeded
     (store: Store)
     (dbName: string)
@@ -1606,6 +1634,10 @@ let createTableSeeded
             if Map.containsKey key db then
                 Error(TableExists tableName)
             else
+
+            match indexes |> List.tryPick (fun ix -> match checkFullTextColumns columns ix with Error e -> Some e | Ok() -> None) with
+            | Some e -> Error e
+            | None ->
                 let table =
                     { OriginalName = tableName
                       Columns = columns
@@ -1916,7 +1948,9 @@ let private applyAlterAction (strict: bool) (table: Table) (action: AlterAction)
             match firstCollision Set.empty (List.ofSeq table.RowsArray) with
             | Some e -> Error e
             | None -> Ok({ table with Indexes = table.Indexes @ [ ix ] }, None))
-    | AddIndex ix -> Ok({ table with Indexes = table.Indexes @ [ ix ] }, None)
+    | AddIndex ix ->
+        checkFullTextColumns table.Columns ix
+        |> Result.map (fun () -> { table with Indexes = table.Indexes @ [ ix ] }, None)
     | DropIndexAction name ->
         Ok(
             { table with

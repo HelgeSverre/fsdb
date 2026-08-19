@@ -108,6 +108,7 @@ let private isAggregateCall (registry: Registry) (expr: Expr) : bool =
 let rec private containsAggregate (registry: Registry) (expr: Expr) : bool =
     match expr with
     | Placeholder _ -> false
+    | MatchAgainst(_, q, _) -> containsAggregate registry q
     | FuncCall(_, args) -> isAggregateCall registry expr || args |> List.exists (containsAggregate registry)
     | BinOp(_, a, b) -> containsAggregate registry a || containsAggregate registry b
     | Not e
@@ -154,6 +155,7 @@ let rec private containsAggregate (registry: Registry) (expr: Expr) : bool =
 let rec private collectWindowFuncs (expr: Expr) : Expr list =
     match expr with
     | Placeholder _ -> []
+    | MatchAgainst(_, q, _) -> collectWindowFuncs q
     | RowNumberOver _
     | LagOver _
     | RankOver _
@@ -190,9 +192,66 @@ let rec private collectWindowFuncs (expr: Expr) : Expr list =
 /// `collectWindowFuncs`. `runWindowedSelect` uses it to spot a `HAVING`
 /// clause referencing a windowed projection's alias, which MySQL rejects
 /// with a dedicated error (3594) rather than resolving.
+/// A synthetic pre-pass column (`__fsdb_window_N__`/`__fsdb_match_N__`):
+/// the declared type is only ever read for `Nullable` — the row's actual
+/// `Value` drives the wire type downstream (see `columnTypesOf`).
+let private syntheticColumn (name: string) (ty: ColumnType) (nullable: bool) : ColumnDef =
+    { Name = name
+      Type = ty
+      Nullable = nullable
+      Default = None
+      AutoIncrement = false
+      PrimaryKey = false
+      Unique = false
+      Generated = None
+      Collation = None
+      Charset = None
+      OnUpdateCurrentTimestamp = false }
+
+/// Every `MATCH ... AGAINST` node in an expression tree — the fulltext
+/// pre-pass (`runFullTextSelect`) computes one whole-table score column per
+/// distinct node, exactly like `collectWindowFuncs` feeds
+/// `runWindowedSelect`.
+let rec private collectMatchAgainst (expr: Expr) : Expr list =
+    match expr with
+    | MatchAgainst _ -> [ expr ]
+    | FuncCall(_, args) -> args |> List.collect collectMatchAgainst
+    | BinOp(_, a, b) -> collectMatchAgainst a @ collectMatchAgainst b
+    | Not e
+    | IsNull e
+    | IsNotNull e
+    | IsTrue e
+    | IsFalse e
+    | Distinct e
+    | OrderBy(e, _)
+    | Cast(e, _)
+    | Collate(e, _) -> collectMatchAgainst e
+    | Like(e, p, _, _) -> collectMatchAgainst e @ collectMatchAgainst p
+    | Regexp(e, p) -> collectMatchAgainst e @ collectMatchAgainst p
+    | In(e, xs) -> collectMatchAgainst e @ (xs |> List.collect collectMatchAgainst)
+    | Between(e, lo, hi) -> collectMatchAgainst e @ collectMatchAgainst lo @ collectMatchAgainst hi
+    | Case(subject, whens, elseBranch) ->
+        (subject |> Option.map collectMatchAgainst |> Option.defaultValue [])
+        @ (whens |> List.collect (fun (c, r) -> collectMatchAgainst c @ collectMatchAgainst r))
+        @ (elseBranch |> Option.map collectMatchAgainst |> Option.defaultValue [])
+    | Placeholder _
+    | Lit _
+    | Col _
+    | QualifiedCol _
+    | Star _
+    | Exists _
+    | Subquery _
+    | InSubquery _
+    | RowNumberOver _
+    | LagOver _
+    | RankOver _
+    | PercentRankOver _
+    | NTileOver _ -> []
+
 let rec private collectColRefs (expr: Expr) : string list =
     match expr with
     | Col name -> [ name ]
+    | MatchAgainst(cols, q, _) -> cols @ collectColRefs q
     | RowNumberOver _
     | LagOver _
     | RankOver _
@@ -239,6 +298,7 @@ let rec private substituteWindowFuncs (synthetic: (Expr * string) list) (expr: E
 
         match expr with
         | Placeholder _ -> expr
+        | MatchAgainst(cols, q, mode) -> MatchAgainst(cols, sub q, mode)
         | FuncCall(name, args) -> FuncCall(name, args |> List.map sub)
         | BinOp(op, a, b) -> BinOp(op, sub a, sub b)
         | Not e -> Not(sub e)
@@ -299,6 +359,7 @@ let private opSymbol =
 let rec private exprLabel (expr: Expr) : string =
     match expr with
     | Lit v -> v |> toText |> Option.defaultValue "NULL"
+    | MatchAgainst(cols, q, _) -> sprintf "match (%s) against (%s)" (String.concat "," cols) (exprLabel q)
     | Placeholder _ -> "?"
     | Col name -> name
     | QualifiedCol(_, col) -> col
@@ -1175,6 +1236,10 @@ let rec private evalExpr (ctx: EvalContext) (expr: Expr) : Result<Value, EvalErr
 
     match expr with
     | Lit v -> Ok v
+    // ponytail: MATCH is only pre-passed for single-table SELECTs (see
+    // `runFullTextSelect`); anywhere else — UPDATE/DELETE WHERE, a joined or
+    // derived source — real MySQL evaluates it, this reports 1191.
+    | MatchAgainst _ -> Error(1191, "Can't find FULLTEXT index matching the column list")
     | Placeholder _ -> Error(1064, "unbound prepared-statement placeholder")
     | Star _ -> Error(1054, "Invalid use of '*'")
     // Only reachable if a `RowNumberOver`/`LagOver` ever escapes
@@ -2232,6 +2297,7 @@ and private rewriteCoalescedCols (map: Map<string, Expr>) (expr: Expr) : Expr =
 
     match expr with
     | Placeholder _ -> expr
+    | MatchAgainst(cols, q, mode) -> MatchAgainst(cols, sub q, mode)
     | Col name ->
         match Map.tryFind (name.ToLowerInvariant()) map with
         | Some repl -> repl
@@ -2360,7 +2426,16 @@ and private runSelectStmt
     (select: SelectStmt)
     (outer: EvalContext option)
     : QueryResult * byte list * Value[] list =
+    let matchNodes =
+        (select.Projections |> List.collect (fst >> collectMatchAgainst))
+        @ (select.Where |> Option.map collectMatchAgainst |> Option.defaultValue [])
+        @ (select.Having |> Option.map collectMatchAgainst |> Option.defaultValue [])
+        @ (select.OrderBy |> List.collect (fst >> collectMatchAgainst))
+        @ (select.GroupBy |> List.collect collectMatchAgainst)
+        |> List.distinct
+
     match select.From with
+    | _ when not matchNodes.IsEmpty -> runFullTextSelect store registry dbName select matchNodes outer
     | None -> runSelect store registry dbName [] Map.empty [ [||] ] select outer
     | Some fromItem ->
         // A single real table, no `JOIN`, narrows to its PK/UNIQUE index's
@@ -2955,6 +3030,7 @@ and private rewriteAggregates
 
     match expr with
     | Placeholder _ -> Ok expr
+    | MatchAgainst(cols, q, mode) -> sub q |> Result.map (fun q2 -> MatchAgainst(cols, q2, mode))
     | FuncCall(name, args) when isAggregateCall registry expr -> evalAggregate registry ctxFor rows name args |> Result.map Lit
     | FuncCall(name, args) -> args |> traverse sub |> Result.map (fun args' -> FuncCall(name, args'))
     | BinOp(op, a, b) -> sub a |> Result.bind (fun a' -> sub b |> Result.map (fun b' -> BinOp(op, a', b')))
@@ -3061,6 +3137,7 @@ and private resolveHavingRef (columnIndex: Map<string, int list>) (projections: 
 
     match expr with
     | Placeholder _ -> Ok expr
+    | MatchAgainst(cols, q, mode) -> sub q |> Result.map (fun q2 -> MatchAgainst(cols, q2, mode))
     | Col name -> resolveGroupOrHavingCol columnIndex projections name
     | FuncCall(name, args) -> args |> traverse sub |> Result.map (fun args' -> FuncCall(name, args'))
     | BinOp(op, a, b) -> sub a |> Result.bind (fun a' -> sub b |> Result.map (fun b' -> BinOp(op, a', b')))
@@ -3667,22 +3744,7 @@ and private runWindowedSelect
             let syntheticColumns =
                 synthetic
                 |> List.map (fun (wf, name) ->
-                    { Name = name
-                      // The row's actual `Value` (a real int for
-                      // `RowNumberOver`, `lagExpr`'s own runtime type for
-                      // `LagOver`) drives the wire type downstream (see
-                      // `columnTypesOf`), so this declared type is never
-                      // read for anything but `Nullable`.
-                      Type = TBigInt false
-                      Nullable = (match wf with LagOver _ -> true | _ -> false)
-                      Default = None
-                      AutoIncrement = false
-                      PrimaryKey = false
-                      Unique = false
-                      Generated = None
-                      Collation = None
-                      Charset = None
-                      OnUpdateCurrentTimestamp = false })
+                    syntheticColumn name (TBigInt false) (match wf with LagOver _ -> true | _ -> false))
 
             let extendedColumns = columns @ syntheticColumns
 
@@ -3720,6 +3782,151 @@ and private runWindowedSelect
                     OrderBy = select.OrderBy |> List.map (fun (e, dir) -> substituteWindowFuncs synthetic e, dir) }
 
             runSelect store registry dbName extendedColumns qualifiers extendedRows select' outer
+
+/// The fulltext pre-pass: like `runWindowedSelect`, each distinct
+/// `MATCH ... AGAINST` becomes a synthetic score column computed over the
+/// whole table — but ahead of WHERE, because the score both filters rows
+/// and needs corpus statistics (per-term document frequency) that only the
+/// full, unfiltered table provides (MySQL's corpus is the same).
+/// ponytail: single real table, no JOIN/derived source — real MySQL also
+/// evaluates MATCH through joins; route those through this same pre-pass
+/// keyed on the owning source if an app ever needs it.
+and private runFullTextSelect
+    (store: Store)
+    (registry: Registry)
+    (dbName: string)
+    (select: SelectStmt)
+    (matchNodes: Expr list)
+    (outer: EvalContext option)
+    : QueryResult * byte list * Value[] list =
+    let unsupported = Err(1191, "Can't find FULLTEXT index matching the column list"), [], []
+
+    match select.From, select.Joins with
+    | Some(FromTable tref), [] ->
+        let tableDb = tref.Database |> Option.defaultValue dbName
+
+        match store.Catalog |> Map.tryFind tableDb |> Option.bind (Map.tryFind (tref.Table.ToLowerInvariant())) with
+        | None ->
+            // A missing table/database reports its ordinary error, not 1191.
+            match Storage.scanList store tableDb tref.Table with
+            | Error e -> storageErr e, [], []
+            | Ok _ -> unsupported // an information_schema view has no FULLTEXT index
+        | Some table ->
+            let fulltextSets =
+                table.Indexes
+                |> List.filter (fun ix -> ix.Kind = FullTextIndex)
+                |> List.map (fun ix -> ix.Columns |> List.map (fun c -> c.ToLowerInvariant()) |> Set.ofList)
+
+            let rows = table.Rows
+
+            // The column list must equal a FULLTEXT index's set —
+            // order-insensitive, oracle-verified (a reversed list matches;
+            // a subset is 1191) — and the query must already be a constant.
+            let validateNode node =
+                match node with
+                | MatchAgainst(cols, Lit queryValue, mode) when
+                    fulltextSets |> List.contains (cols |> List.map (fun c -> c.ToLowerInvariant()) |> Set.ofList)
+                    ->
+                    match Value.toText queryValue with
+                    | Some queryText ->
+                        cols
+                        |> traverse (Storage.resolveColumn table.Columns)
+                        |> Result.mapError Storage.toMySqlError
+                        |> Result.map (fun idxs -> node, mode, queryText, idxs)
+                    | None -> Error(1210, "Incorrect arguments to AGAINST")
+                | MatchAgainst(cols, _, _) when
+                    not (fulltextSets |> List.contains (cols |> List.map (fun c -> c.ToLowerInvariant()) |> Set.ofList))
+                    ->
+                    Error(1191, "Can't find FULLTEXT index matching the column list")
+                | MatchAgainst _ -> Error(1210, "Incorrect arguments to AGAINST")
+                | _ -> Error(1105, "fulltext pre-pass collected a non-MATCH node")
+
+            let scoreNode (node, mode, queryText: string, idxs: int list) =
+                let corpus =
+                    rows
+                    |> List.map (fun (row: Value[]) ->
+                        idxs |> List.map (fun i -> Value.toText row.[i] |> Option.defaultValue "") |> String.concat " ")
+                    |> FullText.buildCorpus
+
+                let scores =
+                    match mode with
+                    | NaturalLanguage -> FullText.naturalScoresOf corpus queryText
+                    | BooleanMode -> FullText.booleanScoresOf corpus queryText
+                    | QueryExpansion -> FullText.expansionScoresOf corpus queryText
+
+                node, mode, scores
+
+            match matchNodes |> traverse validateNode |> Result.map (List.map scoreNode) with
+            | Error(code, msg) -> Err(code, msg), [], []
+            | Ok computed ->
+
+            let synthetic =
+                computed |> List.mapi (fun i (node, _, _) -> node, sprintf "__fsdb_match_%d__" i)
+
+            let syntheticColumns =
+                synthetic |> List.map (fun (_, name) -> syntheticColumn name TDouble false)
+
+            let extendedColumns = table.Columns @ syntheticColumns
+
+            let extendedRows =
+                rows
+                |> List.mapi (fun idx row ->
+                    Array.append row (computed |> List.map (fun (_, _, scores) -> VDouble scores.[idx]) |> Array.ofList))
+
+            let qualifier = fromItemQualifier (FromTable tref)
+            let qualifiers = qualifierRanges [ qualifier, extendedColumns ]
+
+            let sub = substituteWindowFuncs synthetic
+
+            let rewriteProjection (expr: Expr, aliasOpt: string option) : (Expr * string option) list =
+                match expr with
+                | Star None -> table.Columns |> List.map (fun c -> Col c.Name, None)
+                | Star(Some q) when q.ToLowerInvariant() = qualifier.ToLowerInvariant() ->
+                    table.Columns |> List.map (fun c -> Col c.Name, None)
+                | _ ->
+                    // A bare MATCH projection labels itself like MySQL's
+                    // header (`match (c) against ('q')`), never the synthetic
+                    // column name.
+                    let alias =
+                        aliasOpt
+                        |> Option.orElse (
+                            synthetic
+                            |> List.tryFind (fun (node, _) -> node = expr)
+                            |> Option.map (fun _ -> exprLabel expr)
+                        )
+
+                    [ sub expr, alias ]
+
+            // MySQL's implicit relevance order: a natural-language (or
+            // expansion) MATCH filtering the WHERE clause, with no explicit
+            // ORDER BY or grouping, returns rows relevance-descending.
+            let whereNodes =
+                select.Where |> Option.map collectMatchAgainst |> Option.defaultValue []
+
+            let implicitOrder =
+                if select.OrderBy.IsEmpty && select.GroupBy.IsEmpty && not select.Distinct then
+                    computed
+                    |> List.tryFind (fun (node, mode, _) -> mode <> BooleanMode && List.contains node whereNodes)
+                    |> Option.bind (fun (node, _, _) -> synthetic |> List.tryFind (fst >> (=) node))
+                    |> Option.map (fun (_, name) -> [ Col name, Desc ])
+                    |> Option.defaultValue []
+                else
+                    []
+
+            let select' =
+                { select with
+                    Projections = select.Projections |> List.collect rewriteProjection
+                    Where = select.Where |> Option.map sub
+                    Having = select.Having |> Option.map sub
+                    GroupBy = select.GroupBy |> List.map sub
+                    OrderBy =
+                        if implicitOrder.IsEmpty then
+                            select.OrderBy |> List.map (fun (e, dir) -> sub e, dir)
+                        else
+                            implicitOrder }
+
+            runSelect store registry dbName extendedColumns qualifiers (Seq.ofList extendedRows) select' outer
+    | _ -> unsupported
 
 and private runSelect
     (store: Store)
@@ -4153,6 +4360,7 @@ let rec private substituteValuesFunc (columnIndex: Map<string, int list>) (candi
 
     match expr with
     | Placeholder _ -> expr
+    | MatchAgainst(cols, q, mode) -> MatchAgainst(cols, sub q, mode)
     | FuncCall(name, [ Col c ]) when System.String.Equals(name, "VALUES", System.StringComparison.OrdinalIgnoreCase) ->
         // `candidate` is always the row for the one table this INSERT
         // targets, so there's no cross-table ambiguity to consider here
@@ -4229,6 +4437,7 @@ type private ExplainRow =
 let rec private collectSubqueries (expr: Expr) : SelectStmt list =
     match expr with
     | Placeholder _ -> []
+    | MatchAgainst(_, q, _) -> collectSubqueries q
     | Exists s
     | Subquery s -> [ s ]
     | InSubquery(e, s) -> collectSubqueries e @ [ s ]
@@ -4296,6 +4505,7 @@ let private isCorrelated (sub: SelectStmt) : bool =
     let rec references (expr: Expr) : bool =
         match expr with
         | Placeholder _ -> false
+        | MatchAgainst(_, q, _) -> references q
         | QualifiedCol(t, _) -> not (ownAliases.Contains(t.ToLowerInvariant()))
         | Exists _
         | Subquery _ -> false
@@ -4809,10 +5019,10 @@ let execute (store: Store) (registry: Registry) (dbName: string) (ids: int64 * i
         | Ok _ -> ids, Affected 0UL
         | Error e -> ids, storageErr e
 
-    | CreateIndex(name, table, columns, unique) ->
+    | CreateIndex(name, table, columns, unique, kind) ->
         let db, table = splitQualified dbName table
 
-        match alterTable store db table [ AddIndex { Name = name; Columns = columns; Unique = unique } ] with
+        match alterTable store db table [ AddIndex { Name = name; Columns = columns; Unique = unique; Kind = kind } ] with
         | Ok() -> ids, Affected 0UL
         | Error e -> ids, storageErr e
 

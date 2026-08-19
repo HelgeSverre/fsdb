@@ -774,6 +774,39 @@ let private placeholderAtom: Parser<Expr, unit> =
         placeholderCounterLocal.Value <- n + 1
         Placeholder n)
 
+/// `MATCH (col [, col ...]) AGAINST ('query' [modifier])` — the modifier
+/// keywords aren't expressions, so like `timestampFuncAtom` below this is
+/// its own atom rather than a `funcCallAtom` name. The default (no
+/// modifier) is natural language mode; `WITH QUERY EXPANSION` with or
+/// without the leading `IN NATURAL LANGUAGE MODE` is the same mode.
+let private matchAgainstAtom: Parser<Expr, unit> =
+    let modifier =
+        choice
+            [ attempt (
+                  keyword "IN" >>. keyword "NATURAL" >>. keyword "LANGUAGE" >>. keyword "MODE"
+                  >>. opt (keyword "WITH" >>. keyword "QUERY" >>. keyword "EXPANSION")
+              )
+              |>> fun qe -> if qe.IsSome then QueryExpansion else NaturalLanguage
+              attempt (keyword "IN" >>. keyword "BOOLEAN" >>. keyword "MODE") >>% BooleanMode
+              attempt (keyword "WITH" >>. keyword "QUERY" >>. keyword "EXPANSION") >>% QueryExpansion ]
+
+    // The argument must be a constant (a bound `?` counts; a bare column
+    // reference parses so the executor can answer 1210 like MySQL) — full
+    // `expr` would swallow the `IN NATURAL LANGUAGE MODE` modifier as an
+    // `IN (...)` comparison.
+    let againstArg =
+        choice [ stringLit |>> Lit; numberLit |>> Lit; placeholderAtom; identifier |>> Col ]
+
+    attempt (
+        keyword "MATCH" >>. sym "(" >>. sepBy1 identifier (sym ",") .>> sym ")"
+        .>> keyword "AGAINST"
+        .>> sym "("
+        .>>. againstArg
+        .>>. opt modifier
+        .>> sym ")"
+    )
+    |>> fun ((cols, query), mode) -> MatchAgainst(cols, query, mode |> Option.defaultValue NaturalLanguage)
+
 let private atom: Parser<Expr, unit> =
     choice
         [ subqueryExpr
@@ -783,6 +816,7 @@ let private atom: Parser<Expr, unit> =
           existsExpr
           caseExpr
           intervalAtom
+          matchAgainstAtom
           timestampFuncAtom
           groupConcatAtom
           rowNumberOverAtom
@@ -1092,13 +1126,12 @@ let private indexColumn: Parser<string, unit> = identifier .>> optional (between
 /// also legal MySQL, so the `KEY`/`INDEX` keyword itself is optional once
 /// `UNIQUE` has matched; without `UNIQUE`, `KEY`/`INDEX` is required so this
 /// doesn't swallow an ordinary column definition.
-let private indexPrefix: Parser<bool, unit> =
-    (keyword "UNIQUE" >>. optional (keyword "KEY" <|> keyword "INDEX") >>% true)
-    // FULLTEXT/SPATIAL land as ordinary non-unique indexes: the data and
-    // DDL restore, and a MATCH ... AGAINST query still fails loudly at
-    // parse rather than silently scanning.
-    <|> ((keyword "FULLTEXT" <|> keyword "SPATIAL") >>. optional (keyword "KEY" <|> keyword "INDEX") >>% false)
-    <|> ((keyword "KEY" <|> keyword "INDEX") >>% false)
+let private indexPrefix: Parser<bool * IndexKind, unit> =
+    (keyword "UNIQUE" >>. optional (keyword "KEY" <|> keyword "INDEX") >>% (true, BTree))
+    <|> (keyword "FULLTEXT" >>. optional (keyword "KEY" <|> keyword "INDEX") >>% (false, FullTextIndex))
+    // SPATIAL collapses to an ordinary index — no geometry types exist.
+    <|> (keyword "SPATIAL" >>. optional (keyword "KEY" <|> keyword "INDEX") >>% (false, BTree))
+    <|> ((keyword "KEY" <|> keyword "INDEX") >>% (false, BTree))
 
 let private indexItem: Parser<IndexDef, unit> =
     (indexPrefix .>>. opt identifier
@@ -1106,10 +1139,11 @@ let private indexItem: Parser<IndexDef, unit> =
      // `USING BTREE|HASH` — parsed and discarded, every index here is the
      // same structure either way.
      .>> optional (keyword "USING" >>. (keyword "BTREE" <|> keyword "HASH")))
-    |>> fun ((unique, name), cols) ->
+    |>> fun (((unique, kind), name), cols) ->
         { Name = name |> Option.defaultValue (List.head cols)
           Columns = cols
-          Unique = unique }
+          Unique = unique
+          Kind = kind }
 
 let private refAction: Parser<string, unit> =
     choice
@@ -1296,18 +1330,22 @@ let private createTable: Parser<Statement, unit> =
         let uniqueColumnIndexes =
             columns
             |> List.filter (fun c -> c.Unique)
-            |> List.map (fun c -> { Name = c.Name; Columns = [ c.Name ]; Unique = true })
+            |> List.map (fun c -> { Name = c.Name; Columns = [ c.Name ]; Unique = true; Kind = BTree })
 
         CreateTable(name, columns, explicitIndexes @ uniqueColumnIndexes, foreignKeys, ifNotExists, tableCharset, tableCollation, autoIncrementSeed)
 
 let private createIndexStmt: Parser<Statement, unit> =
-    (keyword "CREATE" >>. (opt (keyword "UNIQUE") |>> Option.isSome)
+    (keyword "CREATE"
+     >>. ((keyword "UNIQUE" >>% (true, BTree))
+          <|> (keyword "FULLTEXT" >>% (false, FullTextIndex))
+          <|> (keyword "SPATIAL" >>% (false, BTree))
+          <|> preturn (false, BTree))
      .>> keyword "INDEX"
      .>>. identifier
      .>> keyword "ON"
      .>>. qualifiedTableName
      .>>. between (sym "(") (sym ")") (sepBy1 indexColumn (sym ",")))
-    |>> fun (((unique, name), table), cols) -> CreateIndex(name, table, cols, unique)
+    |>> fun ((((unique, kind), name), table), cols) -> CreateIndex(name, table, cols, unique, kind)
 
 let private dropIndexStmt: Parser<Statement, unit> =
     (keyword "DROP" >>. keyword "INDEX"

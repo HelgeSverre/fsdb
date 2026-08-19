@@ -291,7 +291,7 @@ let tests =
                   store
                   defaultDatabase
                   "widgets"
-                  [ AddColumn(extraCol, PositionDefault); AddIndex { Name = "ix_sku"; Columns = [ "sku" ]; Unique = false } ]
+                  [ AddColumn(extraCol, PositionDefault); AddIndex { Name = "ix_sku"; Columns = [ "sku" ]; Unique = false; Kind = BTree } ]
               |> ignore
 
               renameTable store defaultDatabase "widgets" "gadgets" |> ignore

@@ -377,7 +377,8 @@ let rec private encodeExpr (w: Writer) (expr: Expr) : unit =
         List.iter (fun (e, d) -> encodeExpr w e; encodeDirection w d) orderBy
     | InSubquery _
     | Exists _
-    | Subquery _ -> failwithf "Persistence: a GENERATED column can't hold a subquery (MySQL itself rejects one there)"
+    | Subquery _
+    | MatchAgainst _ -> failwithf "Persistence: a GENERATED column can't hold a subquery or MATCH (MySQL itself rejects them there)"
 
 let rec private decodeExpr (r: #IReader) : Expr =
     let optExpr () =
@@ -503,9 +504,13 @@ let private encodeIndexDef (w: Writer) (ix: IndexDef) : unit =
     writeStr w ix.Name
     writeStrList w ix.Columns
     writeBool w ix.Unique
+    writeBool w (ix.Kind = FullTextIndex)
 
 let private decodeIndexDef (r: #IReader) : IndexDef =
-    { Name = readStr r; Columns = readStrList r; Unique = readBool r }
+    { Name = readStr r
+      Columns = readStrList r
+      Unique = readBool r
+      Kind = (if readBool r then FullTextIndex else BTree) }
 
 let private encodeForeignKeyDef (w: Writer) (fk: ForeignKeyDef) : unit =
     writeStr w fk.Name
@@ -599,7 +604,13 @@ let private encodeStatement (w: Writer) (s: Statement) : unit =
         w.WriteByte 0x06uy
         w.WriteInt32LE(List.length pairs)
         List.iter (fun (a, b) -> writeStr w a; writeStr w b) pairs
-    | CreateIndex(name, table, columns, unique) -> w.WriteByte 0x07uy; writeStr w name; writeStr w table; writeStrList w columns; writeBool w unique
+    | CreateIndex(name, table, columns, unique, kind) ->
+        w.WriteByte 0x07uy
+        writeStr w name
+        writeStr w table
+        writeStrList w columns
+        writeBool w unique
+        writeBool w (kind = FullTextIndex)
     | DropIndexStmt(name, table, ifExists) -> w.WriteByte 0x08uy; writeStr w name; writeStr w table; writeBool w ifExists
     | Truncate table -> w.WriteByte 0x09uy; writeStr w table
     | other -> failwithf "Persistence: %A isn't a DDL statement SchemaChanged should ever carry" other
@@ -621,7 +632,12 @@ let private decodeStatement (r: #IReader) : Statement =
     | 0x04uy -> DropTable(readStrList r, readBool r)
     | 0x05uy -> AlterTable(readStr r, List.init (r.ReadInt32LE()) (fun _ -> decodeAlterAction r))
     | 0x06uy -> RenameTable(List.init (r.ReadInt32LE()) (fun _ -> readStr r, readStr r))
-    | 0x07uy -> CreateIndex(readStr r, readStr r, readStrList r, readBool r)
+    | 0x07uy ->
+        let name = readStr r
+        let table = readStr r
+        let columns = readStrList r
+        let unique = readBool r
+        CreateIndex(name, table, columns, unique, (if readBool r then FullTextIndex else BTree))
     | 0x08uy -> DropIndexStmt(readStr r, readStr r, readBool r)
     | 0x09uy -> Truncate(readStr r)
     | tag -> failwithf "Persistence: unknown Statement tag 0x%02x in WAL/snapshot" tag
@@ -755,8 +771,8 @@ let private applyDdl (store: Store) (db: string) (stmt: Statement) : unit =
         warn "AlterTable" (alterTable store db table actions)
         store.StrictMode <- saved
     | RenameTable pairs -> pairs |> List.iter (fun (oldName, newName) -> warn "RenameTable" (renameTable store db oldName newName))
-    | CreateIndex(name, table, columns, unique) ->
-        warn "CreateIndex" (alterTable store db table [ AddIndex { Name = name; Columns = columns; Unique = unique } ])
+    | CreateIndex(name, table, columns, unique, kind) ->
+        warn "CreateIndex" (alterTable store db table [ AddIndex { Name = name; Columns = columns; Unique = unique; Kind = kind } ])
     | DropIndexStmt(name, table, _) -> warn "DropIndexStmt" (alterTable store db table [ DropIndexAction name ])
     | Truncate table -> warn "Truncate" (truncate store db table)
     | other -> Log.diagnostic "fsdb: WAL replay warning (SchemaChanged): unexpected statement %A" other

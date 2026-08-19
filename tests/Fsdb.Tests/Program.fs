@@ -21,6 +21,8 @@ let main argv =
               ParserTests.tests
               StorageTests.tests
               AuthTests.tests
+              FullTextTests.tests
+              FullTextExecutorTests.tests
               PersistenceTests.tests
               ExecutorTests.tests
               InformationSchemaTests.tests

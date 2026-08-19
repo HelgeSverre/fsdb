@@ -110,6 +110,10 @@ type Expr =
     /// the one window-function shape Laravel's constrained eager loading
     /// compiles a relation query's `->limit()` into (e.g. `->with(['messages'
     /// => fn ($q) => $q->orderBy('created_at', 'desc')->limit(1)])`).
+    /// `MATCH (cols) AGAINST ('query' [mode])` — relevance over the
+    /// FULLTEXT-indexed columns; computed as a whole-table pre-pass (the
+    /// IDF half needs corpus statistics), like the window functions below.
+    | MatchAgainst of columns: string list * query: Expr * mode: MatchMode
     | RowNumberOver of partitionBy: Expr list * orderBy: OrderKey list
     /// `LAG(expr[, offset]) OVER (PARTITION BY expr, ... ORDER BY expr, ...)`
     /// — the value of `expr` `offset` rows back (default 1) within the same
@@ -238,7 +242,23 @@ and ColumnDef =
 /// A named `[UNIQUE] KEY|INDEX (cols)` — from a `CREATE TABLE` trailing item,
 /// `ALTER TABLE ADD INDEX`, `CREATE INDEX`, or a column-level `UNIQUE`
 /// modifier (which synthesizes one of these named after the column).
-and IndexDef = { Name: string; Columns: string list; Unique: bool }
+and IndexKind =
+    | BTree
+    | FullTextIndex
+
+and MatchMode =
+    | NaturalLanguage
+    | BooleanMode
+    | QueryExpansion
+
+and IndexDef =
+    { Name: string
+      Columns: string list
+      Unique: bool
+      /// `FULLTEXT KEY` vs an ordinary index — drives `MATCH ... AGAINST`
+      /// eligibility and the `Index_type` introspection column. SPATIAL
+      /// still collapses to `BTree` (no geometry types exist to index).
+      Kind: IndexKind }
 
 /// A `CONSTRAINT name FOREIGN KEY (cols) REFERENCES tbl (cols) [ON DELETE
 /// ...] [ON UPDATE ...]` — enforced (insert/update-time parent check,
@@ -426,7 +446,7 @@ type Statement =
     | DropTable of names: string list * ifExists: bool
     | AlterTable of table: string * actions: AlterAction list
     | RenameTable of pairs: (string * string) list
-    | CreateIndex of name: string * table: string * columns: string list * unique: bool
+    | CreateIndex of name: string * table: string * columns: string list * unique: bool * kind: IndexKind
     /// `DROP INDEX [IF EXISTS] name ON table` — `IF EXISTS` is accepted for
     /// MySQL parity. The executor doesn't need the flag: a missing *index*
     /// already drops to a silent no-op (the one thing `IF EXISTS` suppresses
