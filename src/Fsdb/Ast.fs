@@ -350,8 +350,9 @@ and JsonTableColumn =
     /// `name FOR ORDINALITY` — 1-based row counter, restarting per source row.
     | ForOrdinality of name: string
     /// `name TYPE PATH 'path' [DEFAULT lit ON EMPTY] [DEFAULT lit ON ERROR]`
-    /// — extracted, unquoted, coerced. `onEmpty`/`onError` are the literals a
-    /// `DEFAULT ... ON EMPTY` / `ON ERROR` clause names; `None` is MySQL's
+    /// — extracted, unquoted, coerced. `onEmpty`/`onError` carry the *decoded
+    /// JSON* a `DEFAULT ... ON EMPTY` / `ON ERROR` clause names (MySQL takes
+    /// JSON text there, not a SQL literal); `None` is MySQL's
     /// own default for both, NULL. (`NULL ON EMPTY|ERROR` is spelled the same
     /// way as the absent clause, so it needs no separate case; `ERROR ON
     /// EMPTY|ERROR` is not supported — see `Parser.jsonTableColumn`.)

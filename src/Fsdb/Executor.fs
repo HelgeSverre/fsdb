@@ -2024,8 +2024,10 @@ and private jsonTableRows (doc: Value) (path: string) (columns: JsonTableColumn 
         | Ok v -> Ok v
         | Error _ -> Error()
 
-    /// A `DEFAULT lit ON EMPTY|ERROR` literal in the column's own type;
-    /// `None` (an absent clause, or `NULL ON ...`) is MySQL's default, NULL.
+    /// A `DEFAULT lit ON EMPTY|ERROR` value in the column's own type; the
+    /// parser has already decoded the clause's JSON text (`'"zz"'` arrives as
+    /// `zz`), so this only coerces. `None` (an absent clause, or `NULL ON
+    /// ...`) is MySQL's default, NULL.
     let defaultOf (ty: ColumnType) (lit: Value option) : Value =
         match lit with
         | None

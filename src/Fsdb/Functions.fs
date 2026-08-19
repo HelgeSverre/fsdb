@@ -1065,11 +1065,13 @@ let private compositeIntervalUnits =
 let private parseCompositeInterval (weights: float list) (simpleUnit: string) (text: string) : float option =
     let digitRuns = Regex.Matches(text, @"\d+") |> Seq.map (fun m -> m.Value) |> List.ofSeq
 
-    if digitRuns.IsEmpty then
+    // Right-align value against unit: too few components means the leftmost
+    // ones were left out ('3:4' DAY_SECOND is 3 minutes 4 seconds), while too
+    // many is simply malformed — oracle-pinned: '1 2:3:4' HOUR_MINUTE,
+    // '1:2:3' HOUR_MINUTE and '1-2-3' YEAR_MONTH are all NULL in 8.4.11.
+    if digitRuns.IsEmpty || digitRuns.Length > weights.Length then
         None
     else
-        // Right-align value against unit: too few components means the
-        // leftmost ones were left out, too many means the extras are ignored.
         let keep = min digitRuns.Length weights.Length
         let w = weights |> List.skip (weights.Length - keep)
 
@@ -1198,6 +1200,12 @@ let isIntervalValue (v: Value) : bool =
 let tryDateIntervalBinOp (sign: float) (dateV: Value) (intervalV: Value) : Value option =
     match tryParseIntervalArg intervalV, asDateTime dateV with
     | Some(n, unit), Some dt -> Some(applyDateInterval sign dateV dt n unit)
+    // A real `INTERVAL n unit` operand never degrades into numeric addition:
+    // MySQL answers NULL when the left side isn't a date ('abc' + INTERVAL 1
+    // DAY) or the interval value is malformed ('1:2:3' HOUR_MINUTE), whereas
+    // `Value.add` would coerce the encoded marker string to a number and
+    // return a silently wrong 2020.
+    | _ when isIntervalValue intervalV -> Some VNull
     | _ -> None
 
 let private dateDiffFn: Scalar =

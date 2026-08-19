@@ -778,6 +778,182 @@ let private extractAtom: Parser<Expr, unit> =
     .>> sym ")"
     |>> fun (unit, e) -> FuncCall("EXTRACT", [ Lit(VString(unit.ToUpperInvariant())); e ])
 
+/// MySQL's temporal-literal grammar, which is *not* .NET's date parser:
+/// year always comes first, any single punctuation character delimits
+/// (`2020.1.2`, `2020@01@02`), and a delimiter-free run of 6/8 (date) or
+/// 12/14 (datetime) digits is equally legal. Letters, spaces inside the
+/// delimiter, and a fourth component are all rejected. Oracle-pinned against
+/// 8.4.11, which answers 1525 for `'01/02/2020'` and `'Jan 5, 2020'` that
+/// `DateOnly.TryParse` would happily (and wrongly) accept.
+module private MySqlTemporal =
+    /// A two-digit year is 2000s below 70, 1900s at or above it (MySQL's
+    /// fixed pivot, not a sliding window).
+    let private expandYear (y: int) (width: int) =
+        if width > 2 then y
+        elif y < 70 then 2000 + y
+        else 1900 + y
+
+    /// Splits on single punctuation delimiters, refusing letters, spaces and
+    /// runs of two delimiters. `None` means the shape isn't delimited at all.
+    let private delimitedText (expected: int) (s: string) : string[] option =
+        let parts = ResizeArray<string>()
+        let cur = Text.StringBuilder()
+        let mutable ok = s.Length > 0 && Char.IsDigit s.[0]
+
+        for c in s do
+            if Char.IsDigit c then cur.Append c |> ignore
+            elif Char.IsLetter c || Char.IsWhiteSpace c || cur.Length = 0 then ok <- false
+            else
+                parts.Add(cur.ToString())
+                cur.Clear() |> ignore
+
+        if cur.Length = 0 then ok <- false else parts.Add(cur.ToString())
+
+        // No temporal component is wider than four digits, so a longer run is
+        // malformed rather than an overflow waiting to happen in `int`.
+        if ok && parts.Count = expected && parts |> Seq.forall (fun p -> p.Length <= 4) then
+            Some(parts.ToArray())
+        else
+            None
+
+    let private delimited (expected: int) (s: string) : int[] option =
+        delimitedText expected s |> Option.map (Array.map int)
+
+    let private allDigits (s: string) = s.Length > 0 && s |> Seq.forall Char.IsDigit
+
+    /// The `y-m-d` triple, from either the delimited or the bare-digit shape.
+    let private dateParts (s: string) : (int * int * int) option =
+        match delimitedText 3 s with
+        | Some [| y; m; d |] -> Some(expandYear (int y) y.Length, int m, int d)
+        | _ when allDigits s && (s.Length = 6 || s.Length = 8) ->
+            let w = s.Length - 4
+            Some(expandYear (int (s.Substring(0, w))) w, int (s.Substring(w, 2)), int (s.Substring(w + 2, 2)))
+        | _ -> None
+
+    let tryDate (s: string) : DateOnly option =
+        match dateParts s with
+        | Some(y, m, d) when y >= 1 && y <= 9999 && m >= 1 && m <= 12 && d >= 1 && d <= DateTime.DaysInMonth(y, m) ->
+            Some(DateOnly(y, m, d))
+        | _ -> None
+
+    /// Splits a trailing `.fraction` off, returning the microsecond count
+    /// rounded to six digits plus the declared width; a bare trailing dot
+    /// carries no fraction at all (`TIME '10:20:30.'` is `10:20:30`).
+    let private splitFraction (s: string) : (string * int64 * int) option =
+        match s.IndexOf '.' with
+        | -1 -> Some(s, 0L, 0)
+        | i ->
+            let frac = s.Substring(i + 1)
+
+            if frac = "" then Some(s.Substring(0, i), 0L, 0)
+            elif not (allDigits frac) then None
+            else
+                let width = min frac.Length 6
+                // Nine digits is more than enough to decide the sixth's rounding.
+                let scaled =
+                    Decimal.Parse("0." + frac.Substring(0, min frac.Length 9), CultureInfo.InvariantCulture) * 1000000M
+
+                Some(s.Substring(0, i), int64 (Math.Round(scaled, MidpointRounding.AwayFromZero)), width)
+
+    let tryDateTime (s: string) : DateTime option =
+        match splitFraction s with
+        | None -> None
+        | Some(body, micros, _) ->
+            let whole =
+                if allDigits body && (body.Length = 12 || body.Length = 14) then
+                    let w = body.Length - 10
+
+                    match tryDate (body.Substring(0, w + 4)) with
+                    | Some d ->
+                        Some(d, int (body.Substring(w + 4, 2)), int (body.Substring(w + 6, 2)), int (body.Substring(w + 8, 2)))
+                    | None -> None
+                else
+                    // Date and time are separated by 'T' or by one or more
+                    // spaces; anything else between them is 1525.
+                    let split = body.Split([| ' '; 'T'; 't' |], StringSplitOptions.RemoveEmptyEntries)
+
+                    match split with
+                    | [| datePart; timePart |] when body.IndexOfAny [| ' '; 'T'; 't' |] = datePart.Length ->
+                        match tryDate datePart, delimited 3 timePart with
+                        | Some d, Some [| h; mi; sec |] -> Some(d, h, mi, sec)
+                        | _ -> None
+                    | _ -> None
+
+            match whole with
+            | Some(d, h, mi, sec) when h < 24 && mi < 60 && sec < 60 ->
+                Some(d.ToDateTime(TimeOnly(0, 0)).AddHours(float h).AddMinutes(float mi).AddSeconds(float sec).AddTicks(micros * 10L))
+            | _ -> None
+
+    /// `TIME` has no `Value` case of its own (see `Functions.timeFn`), so it
+    /// lands as the `[-]HH:MM:SS[.frac]` text MySQL renders — hours past 24
+    /// (up to the 838:59:59 ceiling) and a leading sign included, neither of
+    /// which `TimeOnly` can hold. The declared fraction width is preserved,
+    /// as MySQL does.
+    let tryTime (s: string) : string option =
+        let neg = s.StartsWith "-"
+        let body = if neg || s.StartsWith "+" then s.Substring 1 else s
+
+        let hms =
+            match splitFraction body with
+            | None -> None
+            | Some(t, micros, width) ->
+                let dayPart, clock =
+                    match t.IndexOf ' ' with
+                    | -1 -> Some 0, t
+                    | i ->
+                        let d = t.Substring(0, i)
+                        let clock = t.Substring(i + 1).TrimStart()
+                        // The `D HH:MM[:SS]` form needs a real clock after the
+                        // day: `TIME '1 2'` is 1525, not 24:00:02.
+                        (if allDigits d && d.Length <= 4 && clock.Contains ":" then Some(int d) else None), clock
+
+                let comps =
+                    if clock.Contains ":" then
+                        match delimited 3 clock, delimited 2 clock with
+                        | Some [| h; mi; sec |], _ -> Some(h, mi, sec)
+                        | _, Some [| h; mi |] -> Some(h, mi, 0)
+                        | _ -> None
+                    elif allDigits clock && clock.Length <= 6 then
+                        // A delimiter-free run reads right-to-left: seconds,
+                        // then minutes, then hours (`'1005'` is 00:10:05).
+                        let pad = clock.PadLeft(6, '0')
+                        Some(int (pad.Substring(0, 2)), int (pad.Substring(2, 2)), int (pad.Substring(4, 2)))
+                    else
+                        None
+
+                match dayPart, comps with
+                | Some days, Some(h, mi, sec) when mi < 60 && sec < 60 -> Some(days * 24 + h, mi, sec, micros, width)
+                | _ -> None
+
+        match hms with
+        | Some(h, mi, sec, micros, width) ->
+            // Rounding the fraction up can carry into the seconds, and MySQL
+            // then shows the full six digits (10:20:30.999999999 →
+            // 10:20:31.000000).
+            let carry = micros / 1000000L
+            let micros, width = micros % 1000000L, (if carry > 0L then 6 else width)
+            let total = int64 h * 3600L + int64 mi * 60L + int64 sec + carry
+
+            if total > 838L * 3600L + 59L * 60L + 59L then
+                None
+            else
+                let frac =
+                    if width = 0 then
+                        ""
+                    else
+                        sprintf ".%s" ((sprintf "%06d" micros).Substring(0, width))
+
+                Some(
+                    sprintf
+                        "%s%02d:%02d:%02d%s"
+                        (if neg && total > 0L then "-" else "")
+                        (total / 3600L)
+                        (total % 3600L / 60L)
+                        (total % 60L)
+                        frac
+                )
+        | None -> None
+
 /// `DATE 'text'` / `TIME 'text'` / `TIMESTAMP 'text'` — SQL's typed temporal
 /// literals. Folded to a `Lit` here rather than desugared to the same-named
 /// function call, because MySQL *rejects* a malformed one (1525 "Incorrect
@@ -788,6 +964,12 @@ let private extractAtom: Parser<Expr, unit> =
 /// ponytail: a malformed literal fails the *parse*, so it surfaces as 1064
 /// rather than MySQL's 1525 — an honest refusal either way. Give
 /// `Parser.parse` an error-code channel if a client ever matches on 1525.
+///
+/// ponytail: a DATETIME literal's declared fraction width is lost — `VDateTime`
+/// carries no fsp, so `Value.toText` always renders six digits where MySQL
+/// renders the three of `TIMESTAMP '2020-01-01 10:00:00.123'`. The value
+/// itself is exact; fixing the width needs an fsp channel on the value (or on
+/// expression column metadata), which reaches persistence and the protocol.
 let private temporalLit: Parser<Expr, unit> =
     let asText v = match v with VString s -> s | _ -> ""
 
@@ -798,30 +980,22 @@ let private temporalLit: Parser<Expr, unit> =
     >>= fun (kind, lit) ->
         let text = (asText lit).Trim()
 
+        let refuse name =
+            fail (sprintf "Incorrect %s value: '%s'" name text)
+
         match kind with
         | "DATE" ->
-            match DateOnly.TryParse(text, CultureInfo.InvariantCulture, DateTimeStyles.None) with
-            | true, d -> preturn (Lit(VDate d))
-            | _ -> fail (sprintf "Incorrect DATE value: '%s'" text)
+            match MySqlTemporal.tryDate text with
+            | Some d -> preturn (Lit(VDate d))
+            | None -> refuse "DATE"
         | "TIMESTAMP" ->
-            // A date-only string is not a legal DATETIME literal in MySQL
-            // (`TIMESTAMP '2020-01-01'` is 1525), so the time part is required.
-            match DateTime.TryParse(text, CultureInfo.InvariantCulture, DateTimeStyles.None) with
-            | true, dt when text.Contains ':' -> preturn (Lit(VDateTime dt))
-            | _ -> fail (sprintf "Incorrect DATETIME value: '%s'" text)
+            match MySqlTemporal.tryDateTime text with
+            | Some dt -> preturn (Lit(VDateTime dt))
+            | None -> refuse "DATETIME"
         | _ ->
-            // `TIME` has no `Value` case of its own (see `Functions.timeFn`),
-            // so it lands as the normalized `[-]HH:MM:SS` text MySQL renders —
-            // hours past 24 and a leading sign included, which `TimeOnly`
-            // can't hold, so the shape is checked by hand.
-            let sign, digits = if text.StartsWith "-" then "-", text.Substring 1 else "", text
-            let parts = digits.Split ':'
-            let allNumeric = parts |> Array.forall (fun p -> p.Length > 0 && p |> Seq.forall Char.IsDigit)
-
-            match parts.Length, allNumeric with
-            | 2, true -> preturn (Lit(VString(sprintf "%s%02d:%02d:00" sign (int parts.[0]) (int parts.[1]))))
-            | 3, true -> preturn (Lit(VString(sprintf "%s%02d:%02d:%02d" sign (int parts.[0]) (int parts.[1]) (int parts.[2]))))
-            | _ -> fail (sprintf "Incorrect TIME value: '%s'" text)
+            match MySqlTemporal.tryTime text with
+            | Some t -> preturn (Lit(VString t))
+            | None -> refuse "TIME"
 
 let private caseWhenThen: Parser<Expr * Expr, unit> = (keyword "WHEN" >>. expr .>> keyword "THEN") .>>. expr
 
@@ -1908,13 +2082,35 @@ let private valuesTable: Parser<FromItem, unit> =
 let private jsonTableColumn: Parser<JsonTableColumn, unit> =
     let asText v = match v with VString s -> s | _ -> ""
 
-    // `DEFAULT <literal> ON EMPTY|ERROR`, in MySQL's fixed ON EMPTY-then-ON
+    // The DEFAULT value is a string of *JSON text*, not a SQL literal:
+    // `DEFAULT '"zz"'` substitutes `zz` (the JSON string, unquoted), while
+    // the un-JSON `'zz'` is 3141 and the bare number `7` is 1235. Only a
+    // JSON string is unquoted; anything else keeps its JSON text for the
+    // column's own coercion to consume.
+    let jsonDefault (v: Value) : Value option =
+        match v with
+        | VString s ->
+            try
+                match Text.Json.Nodes.JsonNode.Parse s with
+                | null -> Some VNull
+                | node when node.GetValueKind() = Text.Json.JsonValueKind.String -> Some(VString(node.GetValue<string>()))
+                | node -> Some(VString(node.ToJsonString()))
+            with _ ->
+                None
+        | _ -> None
+
+    // `DEFAULT <json-text> ON EMPTY|ERROR`, in MySQL's fixed ON EMPTY-then-ON
     // ERROR order; `NULL ON EMPTY|ERROR` restates the default, so it parses
     // to the same `None` an absent clause gives.
     let onClause (which: string) : Parser<Value option, unit> =
         opt (
             attempt (
-                ((keyword "DEFAULT" >>. literalValue |>> Some) <|> (keyword "NULL" >>% None))
+                ((keyword "DEFAULT" >>. literalValue
+                  >>= fun v ->
+                      match jsonDefault v with
+                      | Some d -> preturn (Some d)
+                      | None -> fail "DEFAULT for a JSON_TABLE column must be a string of valid JSON text")
+                 <|> (keyword "NULL" >>% None))
                 .>> keyword "ON"
                 .>> keyword which
             )

@@ -5359,6 +5359,41 @@ let tests =
                           Some "-10:20:30"
                           Some "3653" ]
 
+                testCase "temporal literals use MySQL's grammar, not .NET's date parser"
+                <| fun _ ->
+                    // Year-first with any punctuation delimiter, or a bare
+                    // 6/8-digit run; TIME reads a delimiter-free run
+                    // right-to-left and keeps the declared fraction width.
+                    expectRow
+                        "SELECT DATE '2020-1-1' a, DATE '20200101' b, DATE '2020.1.2' c, DATE '69-01-01' d, TIME '10' e, TIME '1005' f, TIME '10:20:30.5' g, TIME '3 10:20:30' h, TIMESTAMP '20200101100000' i"
+                        [ Some "2020-01-01"
+                          Some "2020-01-01"
+                          Some "2020-01-02"
+                          Some "2069-01-01"
+                          Some "00:00:10"
+                          Some "00:10:05"
+                          Some "10:20:30.5"
+                          Some "82:20:30"
+                          Some "2020-01-01 10:00:00" ]
+
+                testCase "a malformed temporal literal is refused, never silently reinterpreted"
+                <| fun _ ->
+                    // Each of these is 1525 on the 8.4 oracle. `DateOnly`/
+                    // `DateTime.TryParse` would accept the first three (as
+                    // 2020-01-02, 2020-01-05 and *today* 05:06:07) — the whole
+                    // reason the literal is folded and validated in the parser.
+                    for sql in
+                        [ "SELECT DATE '01/02/2020'"
+                          "SELECT DATE 'Jan 5, 2020'"
+                          "SELECT TIMESTAMP '05:06:07'"
+                          "SELECT DATE '2020-13-01'"
+                          "SELECT TIME '99999999999:00'"
+                          "SELECT TIME '839:00:00'"
+                          "SELECT TIMESTAMP '2020-01-01'" ] do
+                        match Fsdb.Parser.parse sql with
+                        | Result.Error _ -> ()
+                        | Result.Ok other -> failtestf "expected a parse refusal for %s, got %A" sql other
+
                 testCase "TIMESTAMPADD is DATE_ADD with the arguments in the other order"
                 <| fun _ ->
                     expectRow
@@ -5375,6 +5410,12 @@ let tests =
                           Some "2020-01-01 00:03:04"
                           Some "2020-01-01 00:00:01.500000"
                           Some "2018-11-01" ]
+
+                testCase "a composite INTERVAL with more components than its unit names is NULL"
+                <| fun _ ->
+                    expectRow
+                        "SELECT DATE_ADD('2020-01-01', INTERVAL '1 2:3:4' HOUR_MINUTE) a, '2020-01-01' + INTERVAL '1:2:3' HOUR_MINUTE b, DATE_ADD('2020-01-01', INTERVAL '1-2-3' YEAR_MONTH) c"
+                        [ None; None; None ]
 
                 testCase "an unrecognized INTERVAL unit is NULL, not a silently ignored no-op"
                 <| fun _ -> expectRow "SELECT DATE_ADD('2020-01-01', INTERVAL 1 NOSUCHUNIT) a" [ None ]
@@ -5588,7 +5629,14 @@ let tests =
                     expectIds "((SELECT id FROM s) INTERSECT (SELECT id FROM s WHERE id <= 2)) ORDER BY id" [ "1"; "2" ]
                     expectIds "((SELECT id FROM s) INTERSECT ALL (SELECT id FROM s WHERE id <= 2)) ORDER BY id" [ "1"; "1"; "2"; "2"; "2" ]
                     expectIds "((SELECT id FROM s) EXCEPT (SELECT id FROM s WHERE id <= 2)) ORDER BY id" [ "3" ]
-                    expectIds "((SELECT id FROM s) EXCEPT ALL (SELECT id FROM s WHERE id <= 2)) ORDER BY id" [ "3" ]
+                    // The right side deliberately has *lower* multiplicity than
+                    // the left, so ALL keeps the duplicates DISTINCT collapses:
+                    // one copy of `1` is subtracted, not every copy.
+                    expectIds "((SELECT id FROM s) EXCEPT (SELECT id FROM s WHERE id = 1 LIMIT 1)) ORDER BY id" [ "2"; "3" ]
+
+                    expectIds
+                        "((SELECT id FROM s) EXCEPT ALL (SELECT id FROM s WHERE id = 1 LIMIT 1)) ORDER BY id"
+                        [ "1"; "2"; "2"; "2"; "3" ]
 
                 testCase "INTERSECT binds tighter than UNION"
                 <| fun _ ->
@@ -5635,4 +5683,22 @@ let tests =
                             "SELECT jt.v FROM JSON_TABLE(CAST('[{\"v\":1},{\"x\":2},{\"v\":\"nope\"},{\"v\":null}]' AS JSON), '$[*]' COLUMNS (v INT PATH '$.v' DEFAULT '7' ON EMPTY DEFAULT '9' ON ERROR)) AS jt"
                     with
                     | ResultSet(_, [ [ Some "1" ]; [ Some "7" ]; [ Some "9" ]; [ None ] ]) -> ()
-                    | other -> failtestf "expected 1, 7, 9, NULL, got %A" other ] ]
+                    | other -> failtestf "expected 1, 7, 9, NULL, got %A" other
+
+                    // The DEFAULT clause takes JSON *text*, so the substituted
+                    // string arrives unquoted; the un-JSON 'zz' (oracle 3141)
+                    // and the bare number 7 (oracle 1235) are refused.
+                    match
+                        runDefault
+                            (newStore ())
+                            "SELECT jt.v FROM JSON_TABLE(CAST('[{}]' AS JSON), '$[*]' COLUMNS (v VARCHAR(10) PATH '$.v' DEFAULT '\"zz\"' ON EMPTY)) AS jt"
+                    with
+                    | ResultSet(_, [ [ Some "zz" ] ]) -> ()
+                    | other -> failtestf "expected the JSON string 'zz' unquoted, got %A" other
+
+                    for sql in
+                        [ "SELECT * FROM JSON_TABLE('[{}]', '$[*]' COLUMNS (v VARCHAR(10) PATH '$.v' DEFAULT 'zz' ON EMPTY)) AS jt"
+                          "SELECT * FROM JSON_TABLE('[{}]', '$[*]' COLUMNS (v INT PATH '$.v' DEFAULT 7 ON EMPTY)) AS jt" ] do
+                        match Fsdb.Parser.parse sql with
+                        | Result.Error _ -> ()
+                        | Result.Ok other -> failtestf "expected a parse refusal for %s, got %A" sql other ] ]

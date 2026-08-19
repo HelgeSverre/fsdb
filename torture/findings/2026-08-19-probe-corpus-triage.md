@@ -290,7 +290,9 @@ silent wrong answers rather than refusals:
   `addInterval` sees them, with MySQL's right-aligned "a short value left
   out the leftmost components" rule and its treatment of a trailing
   microsecond component as a decimal *fraction* ('1.5' SECOND_MICROSECOND
-  is 1.5 s). `addInterval` also stopped returning the input unchanged for an
+  is 1.5 s). A value with *more* components than the unit names is NULL,
+  not silently truncated — '1:2:3' HOUR_MINUTE and '1-2-3' YEAR_MONTH are
+  both NULL in 8.4.11. `addInterval` also stopped returning the input unchanged for an
   unrecognized unit — a silent no-op — and answers NULL instead.
 
 Ledger effect: 32 signatures down to 20.
