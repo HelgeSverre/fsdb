@@ -61,6 +61,43 @@ module ScalarFunction =
     let effectful (fn: ScalarFunction) : ScalarFunction =
         { fn with Deterministic = false; DirectOnly = true }
 
+/// A host-registered read-only table, living in the reserved `fsdb` schema
+/// (`SELECT * FROM fsdb.models`) — how an embedder exposes its own state
+/// (a model registry, a metrics snapshot) to SQL without inserting rows.
+/// `Rows` is pulled fresh once per statement that references the table; the
+/// engine post-filters WHERE/JOIN over the full row list.
+/// ponytail: no qual pushdown and no table-valued functions — add a
+/// narrow-scan analogue only when a big virtual table hurts.
+type VirtualTable =
+    { Name: string
+      Columns: Ast.ColumnDef list
+      Rows: unit -> Value[] list }
+
+module VirtualTable =
+    /// The 11-field `ColumnDef` an embedder should never hand-build: every
+    /// flag off, nullable, server-default collation/charset — the shape the
+    /// `text`/`int`/... shorthands below all share.
+    let private col (name: string) (ty: Ast.ColumnType) : Ast.ColumnDef =
+        { Name = name
+          Type = ty
+          Nullable = true
+          Default = None
+          AutoIncrement = false
+          PrimaryKey = false
+          Unique = false
+          OnUpdateCurrentTimestamp = false
+          Generated = None
+          Collation = None
+          Charset = None }
+
+    let text (name: string) : Ast.ColumnDef = col name Ast.TText
+    let int (name: string) : Ast.ColumnDef = col name (Ast.TInt false)
+    let bigint (name: string) : Ast.ColumnDef = col name (Ast.TBigInt false)
+    let double (name: string) : Ast.ColumnDef = col name Ast.TDouble
+
+    let create (name: string) (columns: Ast.ColumnDef list) (rows: unit -> Value[] list) : VirtualTable =
+        { Name = name; Columns = columns; Rows = rows }
+
 /// An aggregate function: the whole-row-set list of one already-evaluated,
 /// already NULL-filtered `Value` per row, folded to one `Value` out —
 /// `Executor.evalAggregate` owns evaluating the argument expression against

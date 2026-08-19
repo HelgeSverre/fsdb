@@ -352,8 +352,12 @@ let private handleShowTables (session: Session) (sql: string) : QueryResult =
     let full = m.Groups.[1].Success
     let dbName = if m.Groups.[3].Success then stripBackticks m.Groups.[3].Value else session.Database |> Option.defaultValue defaultDatabase
 
-    let result =
-        InformationSchema.showTables (Session.currentStore session).Catalog dbName full (likeSuffix sql)
+    let store = Session.currentStore session
+
+    let fsdbTables =
+        store.VirtualTables |> Map.toList |> List.map (fun (_, vt) -> vt.Name)
+
+    let result = InformationSchema.showTables store.Catalog fsdbTables dbName full (likeSuffix sql)
 
     let typeMatch = showTablesWhereTypeRe.Match sql
     let nameMatch = showTablesWhereNameRe.Match sql
@@ -374,8 +378,18 @@ let private handleShowTables (session: Session) (sql: string) : QueryResult =
         let thisDbType =
             if dbName.ToLowerInvariant() = "information_schema" then "SYSTEM VIEW" else "BASE TABLE"
 
+        // A FULL row carries its own Table_type (the `fsdb` schema mixes
+        // SYSTEM VIEW overlay tables with BASE TABLE real ones), so filter
+        // per row when it's there and fall back to the per-database type
+        // for the bare name-only shape.
         result
-        |> Result.map (fun (cols, rows) -> cols, (if List.contains thisDbType allowed then rows else []))
+        |> Result.map (fun (cols, rows) ->
+            cols,
+            rows
+            |> List.filter (fun row ->
+                match row with
+                | [ _; Some t ] -> List.contains (t.ToUpperInvariant()) allowed
+                | _ -> List.contains thisDbType allowed))
         |> showResult
     elif nameMatch.Success then
         let wanted = nameMatch.Groups.[1].Value
@@ -390,7 +404,10 @@ let private handleShowTables (session: Session) (sql: string) : QueryResult =
         result |> showResult
 
 let private handleShowDatabases (session: Session) (sql: string) : QueryResult =
-    InformationSchema.showDatabases (Session.currentStore session).Catalog (likeSuffix sql) |> ResultSet
+    let store = Session.currentStore session
+
+    InformationSchema.showDatabases store.Catalog (not (Map.isEmpty store.VirtualTables)) (likeSuffix sql)
+    |> ResultSet
 
 let private showColumnsRe =
     Regex(@"^SHOW\s+(FULL\s+)?COLUMNS\s+FROM\s+(\S+)(\s+FROM\s+(\S+))?", RegexOptions.IgnoreCase)

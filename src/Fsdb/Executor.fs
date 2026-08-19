@@ -1560,6 +1560,20 @@ and private resolveTableRef (store: Store) (dbName: string) (tableRef: TableRef)
         match InformationSchema.scan store.Catalog tableRef.Table with
         | Some(columns, rows) -> Ok(columns, rows)
         | None -> Error(storageErr (NoSuchTable tableRef.Table))
+    elif
+        System.String.Equals(tableDb, "fsdb", System.StringComparison.OrdinalIgnoreCase)
+        && store.VirtualTables.ContainsKey(tableRef.Table.ToLowerInvariant())
+    then
+        // The host-extension overlay (`Db.registerTable`) on the `fsdb`
+        // schema — which is also `Storage.defaultDatabase`, so this is an
+        // overlay, not a whole-schema shadow: a registered name wins over a
+        // same-named real table, every other real table falls through to
+        // `scanList` below unchanged.
+        // ponytail: full scan, engine post-filters — no
+        // information_schema-style narrowing analogue until a big virtual
+        // table hurts.
+        let vt = store.VirtualTables.[tableRef.Table.ToLowerInvariant()]
+        Ok(vt.Columns, vt.Rows())
     else
         match scanList store tableDb tableRef.Table with
         | Error e -> Error(storageErr e)

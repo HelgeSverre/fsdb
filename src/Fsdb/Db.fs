@@ -60,6 +60,18 @@ let registerAggregate (name: string) (fn: Aggregate) (db: Db) : Db =
 let registerFunction (fn: ScalarFunction) (db: Db) : Db =
     { db with Functions = registerExtension fn db.Functions }
 
+/// Registers a read-only virtual table into the `fsdb` schema —
+/// `db |> Db.registerTable (VirtualTable.create "models" [ VirtualTable.text "name" ] listModels)`
+/// makes `SELECT * FROM fsdb.models` work. The registry is an overlay on
+/// the real `fsdb` database (also the default one): a registered name wins
+/// over a same-named real table, other real tables resolve unchanged, and
+/// re-registering a name replaces it (names are case-insensitive). Register
+/// before serving traffic, and after `withDataDir` — that builder replaces
+/// `db.Store`, dropping tables registered before it.
+let registerTable (table: VirtualTable) (db: Db) : Db =
+    db.Store.VirtualTables <- Map.add (table.Name.ToLowerInvariant()) table db.Store.VirtualTables
+    db
+
 /// Subscribes `handler` to every committed write (the CDC feed
 /// `Persistence.attach` also rides) — multi-subscriber, so it coexists with
 /// `withDataDir`'s WAL appender and any other handlers. Called

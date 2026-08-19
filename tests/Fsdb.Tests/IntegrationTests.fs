@@ -1890,4 +1890,107 @@ let tests =
                   (fun () ->
                       use dead = new Net.Sockets.TcpClient()
                       dead.Connect(Net.IPAddress.Loopback, running.Port))
-                  "connections are refused after Stop" ]
+                  "connections are refused after Stop"
+
+          testCase "registered virtual table answers SELECT/WHERE/JOIN from the fsdb schema"
+          <| fun _ ->
+              let models =
+                  Fsdb.Functions.VirtualTable.create
+                      "models"
+                      [ Fsdb.Functions.VirtualTable.text "name"
+                        Fsdb.Functions.VirtualTable.int "dim" ]
+                      (fun () ->
+                          [ [| VString "small"; VInt 384L |]
+                            [| VString "large"; VInt 1536L |] ])
+
+              let db = Fsdb.Db.create () |> Fsdb.Db.registerTable models
+              let conn = Fsdb.Db.connect db
+
+              match conn.Query "SELECT name FROM fsdb.models WHERE dim > 1000" with
+              | ResultSet(_, [ [ Some "large" ] ]) -> ()
+              | other -> failtestf "expected WHERE to post-filter the virtual rows, got %A" other
+
+              conn.Query "CREATE TABLE test.prefs (model VARCHAR(50), fave INT)" |> ignore
+              conn.Query "INSERT INTO test.prefs VALUES ('small', 1), ('large', 0)" |> ignore
+
+              match conn.Query "SELECT m.dim FROM fsdb.models m JOIN test.prefs p ON p.model = m.name WHERE p.fave = 1" with
+              | ResultSet(_, [ [ Some "384" ] ]) -> ()
+              | other -> failtestf "expected the virtual table to join a real one, got %A" other
+
+          testCase "empty virtual-table registry adds nothing to the fsdb schema"
+          <| fun _ ->
+              let conn = Fsdb.Db.connect (Fsdb.Db.create ())
+
+              (match conn.Query "SELECT * FROM fsdb.models" with
+               | Err _ -> ()
+               | other -> failtestf "expected an error for an unregistered virtual table, got %A" other)
+
+              // With the real default `fsdb` database dropped and nothing
+              // registered, the schema is gone entirely — no SHOW DATABASES
+              // entry, and USE gets a real 1049.
+              conn.Query "DROP DATABASE fsdb" |> ignore
+
+              (match conn.Query "SHOW DATABASES" with
+               | ResultSet(_, rows) ->
+                   Expect.isFalse (rows |> List.exists (fun r -> r = [ Some "fsdb" ])) "SHOW DATABASES omits fsdb"
+               | other -> failtestf "expected a result set, got %A" other)
+
+              match conn.Query "USE fsdb" with
+              | Err(1049, _) -> ()
+              | other -> failtestf "expected 1049 for USE fsdb on an empty registry, got %A" other
+
+          testCase "registered tables keep the fsdb schema alive even without the real database"
+          <| fun _ ->
+              let t =
+                  Fsdb.Functions.VirtualTable.create "models" [ Fsdb.Functions.VirtualTable.text "name" ] (fun () ->
+                      [ [| VString "m" |] ])
+
+              let conn = Fsdb.Db.connect (Fsdb.Db.create () |> Fsdb.Db.registerTable t)
+              conn.Query "DROP DATABASE fsdb" |> ignore
+
+              (match conn.Query "SHOW DATABASES" with
+               | ResultSet(_, rows) ->
+                   Expect.isTrue (rows |> List.exists (fun r -> r = [ Some "fsdb" ])) "SHOW DATABASES lists fsdb"
+               | other -> failtestf "expected a result set, got %A" other)
+
+              (match conn.Query "SHOW TABLES FROM fsdb" with
+               | ResultSet([ "Tables_in_fsdb" ], [ [ Some "models" ] ]) -> ()
+               | other -> failtestf "expected the registered table listed, got %A" other)
+
+              (match conn.Query "USE fsdb" with
+               | Affected 0UL -> ()
+               | other -> failtestf "expected USE fsdb to work with a non-empty registry, got %A" other)
+
+              match conn.Query "SELECT name FROM models" with
+              | ResultSet(_, [ [ Some "m" ] ]) -> ()
+              | other -> failtestf "expected an unqualified select after USE fsdb, got %A" other
+
+          testCase "a registered virtual table overlays a same-named real table, others resolve unchanged"
+          <| fun _ ->
+              let t =
+                  Fsdb.Functions.VirtualTable.create "v" [ Fsdb.Functions.VirtualTable.int "n" ] (fun () ->
+                      [ [| VInt 42L |] ])
+
+              let conn = Fsdb.Db.connect (Fsdb.Db.create () |> Fsdb.Db.registerTable t)
+              conn.Query "CREATE TABLE fsdb.v (n INT)" |> ignore
+              conn.Query "INSERT INTO fsdb.v VALUES (1)" |> ignore
+              conn.Query "CREATE TABLE fsdb.real_t (n INT)" |> ignore
+              conn.Query "INSERT INTO fsdb.real_t VALUES (7)" |> ignore
+
+              (match conn.Query "SELECT n FROM fsdb.v" with
+               | ResultSet(_, [ [ Some "42" ] ]) -> ()
+               | other -> failtestf "expected the virtual table to win the name collision, got %A" other)
+
+              (match conn.Query "SELECT n FROM fsdb.real_t" with
+               | ResultSet(_, [ [ Some "7" ] ]) -> ()
+               | other -> failtestf "expected other real fsdb tables to stay reachable, got %A" other)
+
+              // SHOW FULL TABLES types the overlay SYSTEM VIEW and dedupes
+              // the shadowed same-named real table away.
+              match conn.Query "SHOW FULL TABLES FROM fsdb" with
+              | ResultSet(_, rows) ->
+                  Expect.equal
+                      rows
+                      [ [ Some "real_t"; Some "BASE TABLE" ]; [ Some "v"; Some "SYSTEM VIEW" ] ]
+                      "overlay and real tables list once each with their own types"
+              | other -> failtestf "expected a result set, got %A" other ]

@@ -1235,24 +1235,46 @@ let findTable (catalog: Catalog) (dbName: string) (tableName: string) : Result<T
         | None -> Error(1146, sprintf "Table '%s' doesn't exist" tableName)
 
 /// `SHOW [FULL] TABLES [FROM db] [LIKE 'pattern']`.
-let showTables (catalog: Catalog) (dbName: string) (full: bool) (likeOpt: string option) : ShowResult =
-    let render (names: string list) (tableType: string) =
-        let names = names |> List.filter (likeFilter likeOpt) |> List.sort
+/// `fsdbTables` is the host-extension overlay's table names (empty when
+/// nothing is registered) — for the `fsdb` schema they list as SYSTEM VIEW
+/// beside the real tables, a same-named real table deduped away because
+/// resolution prefers the virtual one.
+let showTables (catalog: Catalog) (fsdbTables: string list) (dbName: string) (full: bool) (likeOpt: string option) : ShowResult =
+    let renderTyped (entries: (string * string) list) =
+        let entries =
+            entries
+            |> List.distinctBy (fun (n, _) -> n.ToLowerInvariant())
+            |> List.filter (fst >> likeFilter likeOpt)
+            |> List.sortBy fst
+
         let col = sprintf "Tables_in_%s" dbName
 
         if full then
-            Ok([ col; "Table_type" ], names |> List.map (fun n -> [ Some n; Some tableType ]))
+            Ok([ col; "Table_type" ], entries |> List.map (fun (n, t) -> [ Some n; Some t ]))
         else
-            Ok([ col ], names |> List.map (fun n -> [ Some n ]))
+            Ok([ col ], entries |> List.map (fun (n, _) -> [ Some n ]))
+
+    let render (names: string list) (tableType: string) =
+        renderTyped (names |> List.map (fun n -> n, tableType))
+
+    let realTables () =
+        match Map.tryFind dbName catalog with
+        | None -> None
+        | Some db -> Some(db |> Map.toList |> List.map (fun (_, t) -> t.OriginalName))
 
     // The virtual database is browsable like `USE information_schema`
     // already is — its tables are the `scan` registry's, typed SYSTEM VIEW.
     if dbName.ToLowerInvariant() = "information_schema" then
         render (virtualTableDefs |> List.map fst) "SYSTEM VIEW"
+    elif dbName.ToLowerInvariant() = "fsdb" && not fsdbTables.IsEmpty then
+        renderTyped (
+            (fsdbTables |> List.map (fun n -> n, "SYSTEM VIEW"))
+            @ (realTables () |> Option.defaultValue [] |> List.map (fun n -> n, "BASE TABLE"))
+        )
     else
-        match Map.tryFind dbName catalog with
+        match realTables () with
         | None -> Error(1049, sprintf "Unknown database '%s'" dbName)
-        | Some db -> render (db |> Map.toList |> List.map (fun (_, t) -> t.OriginalName)) "BASE TABLE"
+        | Some names -> render names "BASE TABLE"
 
 /// `SHOW COLLATION [LIKE 'pattern']` — the registered collations with
 /// `SHOW`'s column labels (MySQL's `Collation/Charset/Id/...`, distinct
@@ -1334,10 +1356,12 @@ let showPrivileges () : ShowResult =
         staticRows @ dynamicRows |> List.map (fun (p, c, m) -> [ Some p; Some c; Some m ])
     )
 
-/// `SHOW DATABASES [LIKE 'pattern']`.
-let showDatabases (catalog: Catalog) (likeOpt: string option) : string list * (string option list) list =
+/// `SHOW DATABASES [LIKE 'pattern']`. `fsdbVisible` lists the reserved
+/// `fsdb` extension schema — true exactly when a host has registered
+/// virtual tables into it, so a plain server never advertises it.
+let showDatabases (catalog: Catalog) (fsdbVisible: bool) (likeOpt: string option) : string list * (string option list) list =
     let names =
-        "information_schema" :: (catalog |> Map.toList |> List.map fst)
+        "information_schema" :: (if fsdbVisible then [ "fsdb" ] else []) @ (catalog |> Map.toList |> List.map fst)
         |> List.distinct
         |> List.filter (likeFilter likeOpt)
         |> List.sort

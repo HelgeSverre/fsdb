@@ -283,6 +283,16 @@ type Store =
       /// connections. Column comparisons are unaffected — a column's own
       /// `COLLATE` always wins.
       mutable ConnectionCollation: Collation.Collation
+      /// Host-registered read-only tables in the reserved `fsdb` schema
+      /// (`Db.registerTable`) — carried on the store because the store is
+      /// what already reaches every `Executor.resolveTableRef` call site.
+      /// Mutable for registration only: register before serving traffic
+      /// (like `OnCommit` subscription, writes aren't synchronized against
+      /// in-flight queries). An *overlay* on the real `fsdb` database
+      /// (which is also `defaultDatabase`): a registered name wins over a
+      /// same-named real table, other real tables resolve unchanged.
+      /// Lower-invariant keys.
+      mutable VirtualTables: Map<string, Functions.VirtualTable>
       /// Fires once per committed write, under `Lock`, right after the
       /// catalog swap that made it visible — empty (the default) means no
       /// subscriber, so every write path's event-construction work still
@@ -446,6 +456,7 @@ let beginTransactionSnapshot (store: Store) : Store =
       // runs.
       StrictMode = true
       ConnectionCollation = store.ConnectionCollation
+      VirtualTables = store.VirtualTables
       OnCommit = ResizeArray()
       // Allocate a buffer whenever `store` itself would ever deliver an
       // event — either it has a real `OnCommit` subscriber, or `store` is
@@ -777,6 +788,11 @@ let ensureDatabase (store: Store) (dbName: string) : unit =
 /// path, not just a diagnostic.
 let databaseExists (store: Store) (dbName: string) : bool =
     String.Equals(dbName, "information_schema", StringComparison.OrdinalIgnoreCase)
+    // The reserved `fsdb` schema exists exactly while a host has registered
+    // virtual tables into it — an empty registry hides it entirely, so
+    // `USE fsdb` on a plain server still gets a real 1049.
+    || (String.Equals(dbName, "fsdb", StringComparison.OrdinalIgnoreCase)
+        && not (Map.isEmpty store.VirtualTables))
     || store.Databases.ContainsKey dbName
 
 /// Index of a column by name, case-insensitive.
@@ -1386,6 +1402,7 @@ let create () : Store =
       ForeignKeyChecks = true
       StrictMode = true
       ConnectionCollation = Collation.defaultCollation
+      VirtualTables = Map.empty
       OnCommit = ResizeArray()
       PendingEvents = None
       TransactionGates = ConcurrentDictionary<string, SemaphoreSlim>()
