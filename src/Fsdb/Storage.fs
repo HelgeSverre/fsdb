@@ -1482,13 +1482,11 @@ let ensureMysqlSchema (store: Store) : unit =
     if not (Map.containsKey "triggers" dbRef.Value) then
         dbRef.Value <- Map.add "triggers" (sysTable "triggers" mysqlTriggersColumns []) dbRef.Value
     else
-        // Column-level migration: a snapshot written before `definer`
-        // existed carries 7-cell trigger rows. Widen the table and pad them
-        // with the empty definer, which `Executor` refuses to run (1449) —
-        // failing closed, because the alternative (empty = skip the check,
-        // or empty = root) is exactly the escalation this column exists to
-        // stop, and a stale trigger that errors loudly is recreated in one
-        // DROP/CREATE.
+        // A snapshot written before `definer` existed carries 7-cell trigger
+        // rows: widen the table and pad them with the empty definer, which
+        // refuses to fire. Failing closed is the point — reading empty as
+        // "skip the check" or "run as root" is the escalation the column
+        // exists to stop, and a loud error is one DROP/CREATE from fixed.
         let t = dbRef.Value.["triggers"]
 
         if t.Columns.Length < mysqlTriggersColumns.Length then

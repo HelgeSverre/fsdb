@@ -607,12 +607,11 @@ let private encodeStatement (w: Writer) (s: Statement) : unit =
         w.WriteInt32LE(List.length pairs)
         List.iter (fun (a, b) -> writeStr w a; writeStr w b) pairs
     | Truncate table -> w.WriteByte 0x09uy; writeStr w table
-    // Tags 0x07/0x08 used to encode `CreateIndex`/`DropIndexStmt`, which
-    // nothing ever emitted: the executor routes both through `alterTable`, so
-    // they reach the WAL as `AlterTable [AddIndex ...]`/`[DropIndexAction ...]`
-    // — byte-identical payloads via `encodeAlterAction`. Two spellings of one
-    // event is one that can silently rot, so the duplicates are gone and the
-    // tags stay retired (no WAL ever contained them).
+    // Tags 0x07/0x08 (`CreateIndex`/`DropIndexStmt`) are retired: the executor
+    // routes both through `alterTable`, so they reach the WAL as
+    // `AlterTable [AddIndex ...]`/`[DropIndexAction ...]` — byte-identical
+    // payloads via `encodeAlterAction`. A second spelling of one event only
+    // rots, and no WAL ever carried these.
     | other -> failwithf "Persistence: %A isn't a DDL statement SchemaChanged should ever carry" other
 
 let private decodeStatement (r: #IReader) : Statement =
@@ -633,9 +632,7 @@ let private decodeStatement (r: #IReader) : Statement =
     | 0x05uy -> AlterTable(readStr r, List.init (r.ReadInt32LE()) (fun _ -> decodeAlterAction r))
     | 0x06uy -> RenameTable(List.init (r.ReadInt32LE()) (fun _ -> readStr r, readStr r))
     | 0x09uy -> Truncate(readStr r)
-    // 0x07/0x08 are retired — see `encodeStatement`. No WAL ever carried them,
-    // so an unknown-tag failure here is the honest answer rather than decoding
-    // into statements the replay would only re-route through `alterTable`.
+    // 0x07/0x08 are retired — see `encodeStatement`.
     | tag -> failwithf "Persistence: unknown Statement tag 0x%02x in WAL/snapshot" tag
 
 // ---------------------------------------------------------------------

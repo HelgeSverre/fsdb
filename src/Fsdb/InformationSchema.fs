@@ -931,9 +931,8 @@ let private triggersColumns =
 /// The `mysql.triggers` rows (see `Storage.mysqlTriggersColumns` for the
 /// fixed cell order: name, schema, event_table, timing, event, statement,
 /// created, definer), decoded once for both `information_schema.TRIGGERS`
-/// and `SHOW TRIGGERS`. The definer is real — bodies are privilege-checked
-/// against it — while sql_mode/charset stay server constants, which fsdb
-/// doesn't capture per trigger.
+/// and `SHOW TRIGGERS`. sql_mode/charset stay server constants; fsdb doesn't
+/// capture those per trigger.
 let private triggerCatalogRows (catalog: Catalog) : (string * string * string * string * string * string) list =
     catalog
     |> Map.tryFind "mysql"
@@ -943,9 +942,6 @@ let private triggerCatalogRows (catalog: Catalog) : (string * string * string * 
         |> Seq.map (fun r ->
             let text i = r.[i] |> Value.toText |> Option.defaultValue ""
             let created = r.[6] |> Value.toTextFsp 2 |> Option.defaultValue ""
-            // A row written before the definer column existed is 7 cells
-            // wide; it renders empty here and refuses to fire (see
-            // `Executor`'s 1449).
             let definer = if r.Length > 7 then text 7 else ""
             text 0, text 1, text 2, text 5, created, definer)
         |> List.ofSeq)

@@ -1056,12 +1056,9 @@ let tests =
 
           testCase "RENAME TABLE / CREATE INDEX / DROP INDEX replay from the WAL"
           <| fun _ ->
-              // CREATE/DROP INDEX reach the WAL as `AlterTable` actions (the
-              // executor routes both through `alterTable`), so those pin
-              // `encodeAlterAction`'s tags. RENAME TABLE has its own statement
-              // tag now — see the multi-pair test below for why — so this
-              // also pins `encodeStatement` 0x06 end to end.
-              // Mutation-checked: breaking either encoding fails this test.
+              // CREATE/DROP INDEX reach the WAL as `AlterTable` actions, so
+              // they pin `encodeAlterAction`'s tags; RENAME TABLE has its own
+              // statement tag, so it pins `encodeStatement` 0x06.
               let dir = tempDataDir ()
               let store = load dir
               attach dir store
@@ -1159,11 +1156,10 @@ let tests =
               ignore session
               let reloaded = load dir
 
-              // Insert *after* the reload, so the generated columns are
-              // recomputed from the decoded expressions rather than read back
-              // as stored values — otherwise a swapped operator tag would sail
-              // through on the row written before the restart (verified: this
-              // test only catches an encodeOp mutation because of this row).
+              // Insert *after* the reload so the generated columns are
+              // recomputed from the decoded expressions. Asserting on the
+              // pre-restart row instead would pass with any operator tag,
+              // since STORED columns replay their stored values.
               let reloadedSession = Fsdb.Session.create 2 reloaded
 
               match handle reloadedSession "INSERT INTO ops (a, b) VALUES (7, 2)" with

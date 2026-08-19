@@ -5468,11 +5468,9 @@ let private err1442 (table: string) : QueryResult =
 
 /// `mysql.triggers` rows for `(db, table)`'s AFTER INSERT event, as
 /// `(name, bodyText, definer)`. Cell positions are
-/// `Storage.mysqlTriggersColumns`' fixed order (name, schema, event_table,
-/// timing, event, statement, created, definer). `definer` reads defensively:
-/// a row written before that column existed is 7 cells wide, and an absent
-/// (or empty) definer is deliberately *not* "skip the check" — see
-/// `checkDefiner`.
+/// `Storage.mysqlTriggersColumns`' fixed order; a row predating the definer
+/// column is 7 cells wide and reads as an empty definer, which refuses to
+/// fire rather than defaulting to some account.
 let private afterInsertTriggers (store: Store) (db: string) (table: string) : (string * string * string) list =
     match scan store "mysql" "triggers" with
     | Error _ -> []
@@ -5559,16 +5557,13 @@ let rec execute (store: Store) (registry: Registry) (dbName: string) (ids: int64
                     | Some target when List.contains target (self :: chain) -> Result.Error(err1442 (snd target))
                     | Some target when List.length chain >= 8 -> Result.Error(err1442 (snd target))
                     | _ ->
-                        // MySQL runs a body with the DEFINER's privileges, not
-                        // the invoking session's — otherwise granting TRIGGER
-                        // on one table would hand its holder every table the
-                        // engine can write. Checked per fire (not at CREATE)
-                        // so a revoke takes effect immediately, and per
-                        // trigger in a chain, each against its own definer.
+                        // A body runs with the DEFINER's privileges, not the
+                        // invoking session's — otherwise GRANT TRIGGER on one
+                        // table would hand its holder every table a body can
+                        // name. Per fire rather than at CREATE, so a revoke
+                        // takes effect immediately; per trigger in a chain,
+                        // each against its own definer.
                         if definer = "" then
-                            // Pre-definer row (see `Storage.ensureMysqlSchema`'s
-                            // migration): fail closed rather than guess an
-                            // account to run as. MySQL's own "no definer" error.
                             Result.Error(
                                 Err(1449, sprintf "The user specified as a definer ('') does not exist for trigger '%s'" name)
                             )
