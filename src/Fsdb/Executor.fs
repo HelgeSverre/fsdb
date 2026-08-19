@@ -4287,6 +4287,34 @@ let private computeGeneratedRow
     if generated.IsEmpty then
         Ok row
     else
+        // The eval-time half of DIRECTONLY enforcement (`firstDirectOnlyCall`
+        // below is the DDL-time half): a definition can reach this point
+        // without ever passing the DDL check — a subquery smuggling the call
+        // past that traversal, or a table loaded from a data dir persisted
+        // before the function was registered — so every DirectOnly extension
+        // is shadowed by a raiser for the duration of this evaluation.
+        // Whatever shape the expression takes, the moment the engine would
+        // actually invoke the function it gets the same 3102 the DDL check
+        // gives, instead of the indirect invocation the flag exists to ban.
+        let registry =
+            registry.Extensions
+            |> Map.fold
+                (fun r name ext ->
+                    if ext.DirectOnly then
+                        registerScalar
+                            name
+                            (fun _ ->
+                                raise (
+                                    SqlError(
+                                        3102,
+                                        sprintf "Expression of generated column contains a disallowed function: %s" name
+                                    )
+                                ))
+                            r
+                    else
+                        r)
+                registry
+
         let row' = Array.copy row
 
         let ctx = contextFactory store registry dbName (columnIndexOf columns) (singleQualifier table columns) None row'
@@ -4958,8 +4986,13 @@ let private nextIds ((okId, generatedId): int64 * int64) ((newOkId: int64), (new
 /// `Functions.ScalarFunction`): a generated column's expression is
 /// re-evaluated by the *engine* on every later write, exactly the indirect
 /// invocation the flag exists to ban, so the definition itself is rejected
-/// rather than letting every future INSERT trip over it. Subquery-carrying
-/// cases return `None` — the generated-column grammar can't produce them.
+/// rather than letting every future INSERT trip over it. Best-effort by
+/// design: the generated-column grammar reuses the full expr grammar, so a
+/// subquery (or a window function's argument) can smuggle a call past this
+/// traversal — those shapes, and definitions that never saw this check at
+/// all (loaded from a data dir persisted before the function's
+/// registration), are caught by the eval-time backstop in
+/// `computeGeneratedRow` instead.
 let rec private firstDirectOnlyCall (registry: Registry) (expr: Expr) : string option =
     let inExprs exprs = exprs |> List.tryPick (firstDirectOnlyCall registry)
 

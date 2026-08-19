@@ -1490,6 +1490,24 @@ let tests =
               | Err(3102, _) -> ()
               | other -> failtestf "expected 3102 at ALTER time, got %A" other
 
+              // A subquery smuggles the call past the DDL traversal — the
+              // eval-time backstop must still refuse to invoke the function
+              // when the engine evaluates the generated column on INSERT.
+              let session, createResult =
+                  handle session "CREATE TABLE d3 (a VARCHAR(10), b VARCHAR(10) AS ((SELECT EMBEDDISH(a))))"
+
+              match createResult with
+              | Affected _ -> ()
+              | other -> failtestf "expected the subquery-smuggled definition to slip past DDL, got %A" other
+
+              match handle session "INSERT INTO d3 (a) VALUES ('x')" |> snd with
+              | Err(3102, msg) -> Expect.stringContains msg "EMBEDDISH" "names the offending function"
+              | other -> failtestf "expected the eval-time backstop's 3102 on INSERT, got %A" other
+
+              match handle session "SELECT EMBEDDISH('a')" |> snd with
+              | ResultSet(_, [ [ Some "x" ] ]) -> ()
+              | other -> failtestf "expected direct SELECT still fine after the backstop fired, got %A" other
+
           testCase "a rich function's QueryContext agrees with DATABASE() and CURRENT_USER()"
           <| fun _ ->
               let probe =
