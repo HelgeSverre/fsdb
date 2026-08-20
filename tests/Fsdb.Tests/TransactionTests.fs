@@ -328,6 +328,25 @@ let tests =
               | ResultSet(_, [ [ Some "1"; Some "10" ]; [ Some "2"; Some "20" ] ]) -> ()
               | result -> failtestf "expected both disjoint updates to survive, got %A" result
 
+          testCase "concurrent transaction identity uses primary-key collation"
+          <| fun _ ->
+              let store = Fsdb.Storage.create ()
+              let setup, _ = handle (create 1 store) "CREATE TABLE tx_text_key (id VARCHAR(20) PRIMARY KEY)"
+              let first, _ = handle (create 2 store) "BEGIN"
+              let second, _ = handle (create 3 store) "BEGIN"
+              let first, _ = handle first "INSERT INTO tx_text_key VALUES ('A')"
+              let second, _ = handle second "INSERT INTO tx_text_key VALUES ('a')"
+              let _, firstCommit = handle first "COMMIT"
+              Expect.equal firstCommit (Affected 0UL) "the first spelling commits"
+
+              match handle second "COMMIT" |> snd with
+              | Err(1205, _) -> ()
+              | result -> failtestf "expected the collation-equivalent key to be rejected, got %A" result
+
+              match handle setup "SELECT id FROM tx_text_key" |> snd with
+              | ResultSet(_, [ [ Some "A" ] ]) -> ()
+              | result -> failtestf "expected only the first key to remain, got %A" result
+
           testCase "ROLLBACK does not roll back an AUTO_INCREMENT counter, matching MySQL"
           <| fun _ ->
               let session = create 1 (Fsdb.Storage.create ())

@@ -1224,7 +1224,10 @@ let private mergeRows (dbName: string) (baseTable: Table) (batchTable: Table) (l
     let removeAt index = liveRows.RemoveAt index
 
     let mergeByIdentity indices =
-        let keyOf (row: Value[]) = indices |> List.map (fun index -> row.[index])
+        let keyOf (row: Value[]) =
+            encodeConstraintKey baseTable.Columns indices row
+            |> Option.defaultWith (fun () -> raise (LockWaitTimeout dbName))
+
         let baseByKey = baseRows |> List.map (fun row -> keyOf row, row) |> Map.ofList
         let batchByKey = batchRows |> List.map (fun row -> keyOf row, row) |> Map.ofList
 
