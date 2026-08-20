@@ -221,6 +221,12 @@ their code sites.
 targets macOS and Linux because disk synchronization calls POSIX `fsync`
 through libc.
 
+The data directory is a trusted input with the same authority as the server
+process. CRC-32 detects torn or accidentally corrupted records; it does not
+authenticate them. Anyone who can modify `wal.bin` or `snapshot.fsdb` can
+modify the catalog, including the `mysql.user` rows loaded at startup. Keep
+the directory writable only by the account running fsdb.
+
 **`wal.bin`** — one framed record per committed event:
 
 ```
