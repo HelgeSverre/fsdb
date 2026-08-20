@@ -828,6 +828,28 @@ let hasGlobalPriv (store: Store) (user: string) (privSql: string) : bool =
     | Result.Ok() -> true
     | Result.Error _ -> false
 
+/// Whether `SHOW DATABASES` may reveal `db` to `user`: the global SHOW
+/// DATABASES privilege sees everything; otherwise any database- or
+/// table-scoped grant reveals its containing database. `information_schema`
+/// is visible to every authenticated account, matching MySQL.
+let canSeeDatabase (store: Store) (user: string) (db: string) : bool =
+    if eqI db "information_schema" || hasGlobalPriv store user "SHOW DATABASES" then
+        true
+    elif staticPrivileges |> List.exists (fun def -> check store user [ def.Sql, OnDb db ] |> Result.isOk) then
+        true
+    else
+        match scanList store "mysql" "tables_priv" with
+        | Result.Error _ -> false
+        | Result.Ok(cols, rows) ->
+            match resolveColumn cols "User", resolveColumn cols "Db", resolveColumn cols "Table_priv" with
+            | Ok userIdx, Ok dbIdx, Ok privIdx ->
+                rows
+                |> List.exists (fun row ->
+                    row.[userIdx] = VString user
+                    && (match row.[dbIdx] with | VString value -> eqI value db | _ -> false)
+                    && row.[privIdx] <> VString "")
+            | _ -> false
+
 /// A privilege list rendered MySQL-style: every static privilege → `ALL
 /// PRIVILEGES`, none → `USAGE`, otherwise the names in column order.
 let private renderPrivList (granted: PrivDef list) (all: PrivDef list) : string =

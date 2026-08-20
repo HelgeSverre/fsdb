@@ -415,8 +415,9 @@ let private handleShowTables (session: Session) (sql: string) : QueryResult =
 let private handleShowDatabases (session: Session) (sql: string) : QueryResult =
     let store = Session.currentStore session
 
-    InformationSchema.showDatabases store.Catalog (not (Map.isEmpty store.VirtualTables)) (likeSuffix sql)
-    |> ResultSet
+    let columns, rows = InformationSchema.showDatabases store.Catalog (not (Map.isEmpty store.VirtualTables)) (likeSuffix sql)
+    let visible = rows |> List.filter (function | [ Some db ] -> Auth.canSeeDatabase store session.User db | _ -> false)
+    ResultSet(columns, visible)
 
 /// The catalog `SHOW COLUMNS`/`DESCRIBE`/`SHOW CREATE TABLE`/`SHOW INDEX`
 /// should resolve against: a registered `fsdb` virtual table isn't in the

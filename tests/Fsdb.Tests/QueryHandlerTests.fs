@@ -1460,6 +1460,12 @@ let tests =
 
               let worker = { create 2 store with User = "worker"; Database = Some "shop" }
 
+              match handle worker "SHOW DATABASES" |> snd with
+              | ResultSet(_, rows) ->
+                  let names = rows |> List.map (List.head >> Option.get)
+                  Expect.equal names [ "information_schema"; "shop" ] "only databases reachable through grants are visible"
+              | other -> failtestf "expected filtered SHOW DATABASES, got %A" other
+
               match handle worker "SELECT * FROM orders" |> snd with
               | ResultSet _ -> ()
               | other -> failtestf "expected the table grant to allow SELECT, got %A" other
