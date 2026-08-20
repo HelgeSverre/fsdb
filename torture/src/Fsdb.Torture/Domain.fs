@@ -255,6 +255,9 @@ type StatementRecord =
       AstKind: string
       MySql: TargetOutcome
       Fsdb: TargetOutcome
+      CompareAffectedRows: bool
+      Classification: string
+      Detail: string
       CommitEvents: string array
       InvariantErrors: string array }
 
@@ -263,6 +266,7 @@ type ProbeOutcome =
     { Target: string
       Status: string
       Columns: string array
+      ColumnTypes: string array
       Rows: string array
       DataSha256: string
       ErrorCode: int
@@ -276,6 +280,7 @@ module ProbeOutcome =
         { Target = target
           Status = "not_run"
           Columns = [||]
+          ColumnTypes = [||]
           Rows = [||]
           DataSha256 = ""
           ErrorCode = 0
@@ -294,6 +299,19 @@ type ProbeRecord =
       ParserDetail: string
       MySql: ProbeOutcome
       Fsdb: ProbeOutcome
+      Equal: bool
+      Detail: string }
+
+[<CLIMutable>]
+type DmlRecord =
+    { Mode: string
+      Index: int
+      Name: string
+      Sql: string
+      SqlSha256: string
+      MySql: TargetOutcome
+      Fsdb: TargetOutcome
+      Classification: string
       Equal: bool
       Detail: string }
 
@@ -386,6 +404,7 @@ type RunManifest =
       FsdbSnapshotElapsedMs: int64
       PeakWorkingSetBytes: int64
       Statements: StatementRecord array
+      Dml: DmlRecord array
       Probes: ProbeRecord array
       Comparison: ComparisonRecord
       Classification: string

@@ -814,7 +814,10 @@ let private targetDatabases (store: Store) (dbName: string) (stmt: Statement) : 
 
     match stmt with
     | Insert(table, _, _, _, _)
-    | InsertSelect(table, _, _, _, _) ->
+    | InsertSelect(table, _, _, _, _)
+    | Replace(table, _, _)
+    | ReplaceSelect(table, _, _)
+    | ReplaceSet(table, _) ->
         let targetDb, targetTable = splitQualified dbName table
         targetDb :: Executor.triggerWriteDatabases store targetDb targetTable
     | Update u -> tableRefDb u.From :: joinDbs u.Joins
@@ -1592,6 +1595,9 @@ let rec mapPlaceholders (replace: int -> Expr) (stmt: Statement) : Statement =
         Insert(table, columns, rows |> List.map (List.map mapExpr), onDup |> List.map (fun (c, e) -> c, mapExpr e), ignore)
     | InsertSelect(table, columns, select, onDup, ignore) ->
         InsertSelect(table, columns, mapSelect select, onDup |> List.map (fun (c, e) -> c, mapExpr e), ignore)
+    | Replace(table, columns, rows) -> Replace(table, columns, rows |> List.map (List.map mapExpr))
+    | ReplaceSelect(table, columns, select) -> ReplaceSelect(table, columns, mapSelect select)
+    | ReplaceSet(table, assignments) -> ReplaceSet(table, assignments |> List.map (fun (name, value) -> name, mapExpr value))
     | Update u ->
         Update
             { u with

@@ -31,6 +31,9 @@ module AstKind =
         | DropIndexStmt _ -> "drop_index"
         | Insert _ -> "insert"
         | InsertSelect _ -> "insert_select"
+        | Replace _ -> "replace"
+        | ReplaceSelect _ -> "replace_select"
+        | ReplaceSet _ -> "replace_set"
         | Select _ -> "select"
         | Union _ -> "union"
         | Update _ -> "update"
@@ -700,6 +703,7 @@ module Database =
                     { Target = target
                       Status = "success"
                       Columns = columns
+                      ColumnTypes = declaredTypes
                       Rows = resultRows
                       DataSha256 = digest
                       ErrorCode = 0
@@ -1320,6 +1324,138 @@ module ScenarioProbes =
                "WITH RECURSIVE buckets (b) AS (SELECT 0 UNION ALL SELECT b + 1 FROM buckets WHERE b < 15) SELECT buckets.b, COUNT(v.id) AS row_count FROM buckets LEFT JOIN volume_rows AS v ON v.bucket = buckets.b GROUP BY buckets.b ORDER BY buckets.b" |]
 
 [<RequireQualifiedAccess>]
+module DmlBattery =
+    let private fixtures =
+        [| "DROP TABLE IF EXISTS fsdb_replace_contract"
+           "DROP TABLE IF EXISTS fsdb_dml_contract"
+           "CREATE TABLE fsdb_dml_contract (id INT PRIMARY KEY, n INT)"
+           "CREATE TABLE fsdb_replace_contract (id INT PRIMARY KEY, u INT UNIQUE, n INT DEFAULT 7)" |]
+
+    let private cleanup = fixtures.[0..1]
+
+    let private cases =
+        [| "insert_new", "INSERT INTO fsdb_dml_contract VALUES (1, 10)"
+           "odku_changed", "INSERT INTO fsdb_dml_contract VALUES (1, 20) ON DUPLICATE KEY UPDATE n = VALUES(n)"
+           "odku_unchanged", "INSERT INTO fsdb_dml_contract VALUES (1, 20) ON DUPLICATE KEY UPDATE n = VALUES(n)"
+           "odku_mixed", "INSERT INTO fsdb_dml_contract VALUES (1, 30), (2, 40) ON DUPLICATE KEY UPDATE n = VALUES(n)"
+           "odku_same_statement_changed", "INSERT INTO fsdb_dml_contract VALUES (5, 1), (5, 2) ON DUPLICATE KEY UPDATE n = VALUES(n)"
+           "odku_same_statement_unchanged", "INSERT INTO fsdb_dml_contract VALUES (7, 1), (7, 1) ON DUPLICATE KEY UPDATE n = VALUES(n)"
+           "replace_new", "REPLACE INTO fsdb_dml_contract VALUES (3, 50)"
+           "replace_changed", "REPLACE INTO fsdb_dml_contract VALUES (3, 60)"
+           "replace_unchanged", "REPLACE INTO fsdb_dml_contract VALUES (3, 60)"
+           "replace_multi_unique_seed", "INSERT INTO fsdb_replace_contract VALUES (1, 10, 1), (2, 20, 2)"
+           "replace_multi_unique", "REPLACE INTO fsdb_replace_contract VALUES (1, 20, 3)"
+           "replace_batch_order", "REPLACE INTO fsdb_replace_contract VALUES (3, 30, 4), (3, 31, 5)"
+           "replace_select", "REPLACE INTO fsdb_dml_contract SELECT 20, 2"
+           "replace_set_default_reference", "REPLACE INTO fsdb_replace_contract SET id = 1, u = 20, n = n + 1"
+           "replace_set_default_function", "REPLACE INTO fsdb_replace_contract SET id = 4, u = 40, n = DEFAULT(n)"
+           "insert_ignore_duplicate", "INSERT IGNORE INTO fsdb_dml_contract VALUES (1, 99)"
+           "insert_multi", "INSERT INTO fsdb_dml_contract VALUES (10, 1), (11, 2), (12, 3)"
+           "update_changed", "UPDATE fsdb_dml_contract SET n = 71 WHERE id = 2"
+           "update_unchanged", "UPDATE fsdb_dml_contract SET n = 71 WHERE id = 2"
+           "update_multi", "UPDATE fsdb_dml_contract SET n = n + 1 WHERE id IN (10, 11, 12)"
+           "update_no_match", "UPDATE fsdb_dml_contract SET n = 1 WHERE id = 999"
+           "delete_match", "DELETE FROM fsdb_dml_contract WHERE id = 12"
+           "delete_no_match", "DELETE FROM fsdb_dml_contract WHERE id = 999" |]
+
+    let classify (mysql: TargetOutcome) (fsdb: TargetOutcome) =
+        if not (TargetOutcome.succeeded mysql) then
+            if mysql.Status = "timeout" then "oracle_timeout"
+            elif mysql.Status = "driver_error" then "infrastructure"
+            else "oracle_rejected"
+        elif not (TargetOutcome.succeeded fsdb) then
+            if fsdb.Status = "timeout" then "fsdb_timeout"
+            elif fsdb.Status = "driver_error" then "protocol_fault"
+            elif fsdb.ErrorCode = 1105 then "contained_internal_error"
+            else "fsdb_execution_gap"
+        elif mysql.AffectedRows <> fsdb.AffectedRows then
+            "dml_affected_rows_mismatch"
+        else
+            "pass"
+
+    let detail (mysql: TargetOutcome) (fsdb: TargetOutcome) classification =
+        match classification with
+        | "pass" -> sprintf "affected rows match at %d" mysql.AffectedRows
+        | "dml_affected_rows_mismatch" -> sprintf "affected rows differ: mysql=%d fsdb=%d" mysql.AffectedRows fsdb.AffectedRows
+        | "oracle_timeout"
+        | "oracle_rejected"
+        | "infrastructure" -> mysql.Message
+        | _ -> fsdb.Message
+
+    let private connectionString useAffectedRows (connectionString: string) =
+        let builder = MySqlConnectionStringBuilder connectionString
+        builder.Pooling <- false
+        builder.UseAffectedRows <- useAffectedRows
+        builder.ConnectionString
+
+    let run mysqlConnectionString fsdbConnectionString timeoutSeconds =
+        task {
+            let records = ResizeArray<DmlRecord>()
+
+            for mode, useAffectedRows in [ "found_rows", false; "changed_rows", true ] do
+                use! mysql = Database.openConnection (connectionString useAffectedRows mysqlConnectionString)
+                use! fsdb = Database.openConnection (connectionString useAffectedRows fsdbConnectionString)
+                let mutable fixtureReady = true
+
+                for index, sql in fixtures |> Array.indexed do
+                    if fixtureReady then
+                        let! mysqlOutcome = Database.execute "mysql" mysql timeoutSeconds sql
+
+                        let! fsdbOutcome =
+                            if TargetOutcome.succeeded mysqlOutcome then
+                                Database.execute "fsdb" fsdb timeoutSeconds sql
+                            else
+                                Task.FromResult(TargetOutcome.notRun "fsdb")
+
+                        let classification = classify mysqlOutcome fsdbOutcome
+                        fixtureReady <- classification = "pass"
+
+                        if not fixtureReady then
+                            records.Add
+                                { Mode = mode
+                                  Index = index
+                                  Name = "fixture"
+                                  Sql = sql
+                                  SqlSha256 = Hashing.text sql
+                                  MySql = mysqlOutcome
+                                  Fsdb = fsdbOutcome
+                                  Classification = classification
+                                  Equal = false
+                                  Detail = detail mysqlOutcome fsdbOutcome classification }
+
+                if fixtureReady then
+                    for index, (name, sql) in cases |> Array.indexed do
+                        let! mysqlOutcome = Database.execute "mysql" mysql timeoutSeconds sql
+
+                        let! fsdbOutcome =
+                            if TargetOutcome.succeeded mysqlOutcome then
+                                Database.execute "fsdb" fsdb timeoutSeconds sql
+                            else
+                                Task.FromResult(TargetOutcome.notRun "fsdb")
+
+                        let classification = classify mysqlOutcome fsdbOutcome
+
+                        records.Add
+                            { Mode = mode
+                              Index = index
+                              Name = name
+                              Sql = sql
+                              SqlSha256 = Hashing.text sql
+                              MySql = mysqlOutcome
+                              Fsdb = fsdbOutcome
+                              Classification = classification
+                              Equal = classification = "pass"
+                              Detail = detail mysqlOutcome fsdbOutcome classification }
+
+                for sql in cleanup do
+                    let! _ = Database.execute "mysql" mysql timeoutSeconds sql
+                    let! _ = Database.execute "fsdb" fsdb timeoutSeconds sql
+                    ()
+
+            return records.ToArray()
+        }
+
+[<RequireQualifiedAccess>]
 module Comparison =
     let empty =
         { Equal = false
@@ -1405,6 +1541,61 @@ module Runner =
     let failureSignature classification statementHash mysqlError fsdbError detail =
         Hashing.combine [ classification; statementHash; string mysqlError; string fsdbError; detail ]
 
+    let private foldResultType (typeName: string) =
+        let normalized = typeName.Trim().ToUpperInvariant()
+
+        let baseType =
+            normalized.Split([| '('; ' ' |], StringSplitOptions.RemoveEmptyEntries)
+            |> Array.tryHead
+            |> Option.defaultValue normalized
+
+        match baseType with
+        | "TINYINT"
+        | "SMALLINT"
+        | "MEDIUMINT"
+        | "INT"
+        | "INTEGER"
+        | "BIGINT" -> "integer"
+        | "CHAR"
+        | "VARCHAR"
+        | "TINYTEXT"
+        | "TEXT"
+        | "MEDIUMTEXT"
+        | "LONGTEXT"
+        | "STRING"
+        | "VAR_STRING" -> "text"
+        | other -> other
+
+    let private columnIsEntirelyNull index (outcome: ProbeOutcome) =
+        outcome.Rows.Length > 0
+        && outcome.Rows
+           |> Array.forall (fun row ->
+               use document = JsonDocument.Parse row
+               let cell = document.RootElement.[index]
+               cell.ValueKind = JsonValueKind.String && cell.GetString() = "null")
+
+    let compareProbeTypes (mysql: ProbeOutcome) (fsdb: ProbeOutcome) =
+        if not (ProbeOutcome.succeeded mysql) || not (ProbeOutcome.succeeded fsdb) then
+            None
+        elif mysql.ColumnTypes.Length <> fsdb.ColumnTypes.Length then
+            Some(
+                sprintf
+                    "column type counts differ: mysql=%d fsdb=%d"
+                    mysql.ColumnTypes.Length
+                    fsdb.ColumnTypes.Length
+            )
+        else
+            Array.zip mysql.ColumnTypes fsdb.ColumnTypes
+            |> Array.indexed
+            |> Array.tryPick (fun (index, (mysqlType, fsdbType)) ->
+                if
+                    foldResultType mysqlType = foldResultType fsdbType
+                    || (columnIsEntirelyNull index mysql && columnIsEntirelyNull index fsdb)
+                then
+                    None
+                else
+                    Some(sprintf "column %d types differ: mysql=%s fsdb=%s" index mysqlType fsdbType))
+
     let classifyProbe (parserStatus: string) (mysql: ProbeOutcome) (fsdb: ProbeOutcome) =
         if not (ProbeOutcome.succeeded mysql) then
             if mysql.Status = "timeout" then "oracle_timeout"
@@ -1419,6 +1610,8 @@ module Runner =
             else "fsdb_probe_execution_gap"
         elif mysql.Columns <> fsdb.Columns then
             "probe_schema_mismatch"
+        elif compareProbeTypes mysql fsdb |> Option.isSome then
+            "probe_type_mismatch"
         elif mysql.DataSha256 <> fsdb.DataSha256 then
             "probe_result_mismatch"
         else
@@ -1426,7 +1619,7 @@ module Runner =
 
     let private probeDetail name parserDetail (mysql: ProbeOutcome) (fsdb: ProbeOutcome) classification =
         match classification with
-        | "pass" -> sprintf "probe %s columns and ordered rows match" name
+        | "pass" -> sprintf "probe %s columns, types, and ordered rows match" name
         | "fsdb_probe_parser_gap" -> parserDetail
         | "oracle_timeout"
         | "oracle_rejected"
@@ -1436,6 +1629,7 @@ module Runner =
         | "contained_internal_error"
         | "fsdb_probe_execution_gap" -> fsdb.Message
         | "probe_schema_mismatch" -> sprintf "probe %s columns differ: mysql=%A fsdb=%A" name mysql.Columns fsdb.Columns
+        | "probe_type_mismatch" -> compareProbeTypes mysql fsdb |> Option.defaultValue (sprintf "probe %s types differ" name)
         | "probe_result_mismatch" ->
             let sharedLength = min mysql.Rows.Length fsdb.Rows.Length
 
@@ -1519,7 +1713,13 @@ module Runner =
             return result, model, output
         }
 
-    let classifyStatement (parserStatus: string) (mysql: TargetOutcome) (fsdb: TargetOutcome) (invariantErrors: string array) =
+    let classifyStatement
+        (parserStatus: string)
+        compareAffectedRows
+        (mysql: TargetOutcome)
+        (fsdb: TargetOutcome)
+        (invariantErrors: string array)
+        =
         if not (TargetOutcome.succeeded mysql) then
             if mysql.Status = "timeout" then "oracle_timeout"
             elif mysql.Status = "driver_error" then "infrastructure"
@@ -1533,8 +1733,25 @@ module Runner =
             else "fsdb_execution_gap"
         elif invariantErrors.Length > 0 then
             "invariant_failure"
+        elif compareAffectedRows && mysql.AffectedRows <> fsdb.AffectedRows then
+            "statement_affected_rows_mismatch"
         else
             "pass"
+
+    let private statementDetail parserDetail (mysql: TargetOutcome) (fsdb: TargetOutcome) invariantErrors classification =
+        match classification with
+        | "pass" -> "statement outcomes match"
+        | "fsdb_parser_gap" -> parserDetail
+        | "oracle_timeout"
+        | "oracle_rejected"
+        | "infrastructure" -> mysql.Message
+        | "fsdb_timeout"
+        | "protocol_fault"
+        | "contained_internal_error"
+        | "fsdb_execution_gap" -> fsdb.Message
+        | "invariant_failure" -> String.concat "; " invariantErrors
+        | "statement_affected_rows_mismatch" -> sprintf "affected rows differ: mysql=%d fsdb=%d" mysql.AffectedRows fsdb.AffectedRows
+        | other -> sprintf "statement failed as %s" other
 
     let fsdbConnectionString port =
         sprintf
@@ -1566,6 +1783,7 @@ module Runner =
             let mutable generatedHash = ""
             let mutable generatedBytes = 0L
             let mutable mysqlVersion = ""
+            let mutable dml = [||]
             let mutable probes = [||]
             let mutable failureEvidenceHash = ""
             let mutable mysqlLoadElapsedMs = 0L
@@ -1604,16 +1822,35 @@ module Runner =
                         use! fsdb = Database.openConnection (fsdbConnectionString subject.Port)
                         let! version = Database.scalarString mysql options.TimeoutSeconds "SELECT VERSION()"
                         mysqlVersion <- version
+
+                        if options.Scenario = Scalar then
+                            let! records = DmlBattery.run oracleConnectionString (fsdbConnectionString subject.Port) options.TimeoutSeconds
+                            dml <- records
+                            Json.write (Path.Combine(caseDirectory, "dml.json")) dml
+                            subject.DrainEvents() |> ignore
+
                         let records = ResizeArray<StatementRecord>()
                         let mutable keepRunning = true
                         let mutable lastInvariantStatement = -1
 
                         for statement in splitStatements do
                             if keepRunning then
-                                let parserStatus, astKind =
+                                let parserStatus, astKind, compareAffectedRows =
                                     match Fsdb.Parser.parse statement.Text with
-                                    | Ok ast -> "ok", AstKind.ofStatement ast
-                                    | Error error -> "error", error
+                                    | Ok ast ->
+                                        let compareAffectedRows =
+                                            match ast with
+                                            | Insert _
+                                            | InsertSelect _
+                                            | Replace _
+                                            | ReplaceSelect _
+                                            | ReplaceSet _
+                                            | Update _
+                                            | Delete _ -> true
+                                            | _ -> false
+
+                                        "ok", AstKind.ofStatement ast, compareAffectedRows
+                                    | Error error -> "error", error, false
 
                                 let! mysqlOutcome = Database.execute "mysql" mysql options.TimeoutSeconds statement.Text
                                 mysqlLoadElapsedMs <- mysqlLoadElapsedMs + mysqlOutcome.ElapsedMs
@@ -1643,6 +1880,9 @@ module Runner =
                                     else
                                         [||]
 
+                                let result = classifyStatement parserStatus compareAffectedRows mysqlOutcome fsdbOutcome invariantErrors
+                                let detail = statementDetail astKind mysqlOutcome fsdbOutcome invariantErrors result
+
                                 let record =
                                     { Index = statement.Index
                                       StartByte = statement.StartByte
@@ -1653,20 +1893,18 @@ module Runner =
                                       AstKind = astKind
                                       MySql = mysqlOutcome
                                       Fsdb = fsdbOutcome
+                                      CompareAffectedRows = compareAffectedRows
+                                      Classification = result
+                                      Detail = detail
                                       CommitEvents = commitEvents
                                       InvariantErrors = invariantErrors }
 
                                 records.Add record
-                                let result = classifyStatement parserStatus mysqlOutcome fsdbOutcome invariantErrors
 
                                 if result <> "pass" then
                                     classification <- result
                                     failureEvidenceHash <- statement.Sha256
-                                    signatureDetail <-
-                                        if parserStatus = "error" then astKind
-                                        elif not (TargetOutcome.succeeded mysqlOutcome) then mysqlOutcome.Message
-                                        elif not (TargetOutcome.succeeded fsdbOutcome) then fsdbOutcome.Message
-                                        else String.concat "; " invariantErrors
+                                    signatureDetail <- detail
 
                                     writeText (Path.Combine(caseDirectory, "failure.sql")) statement.Text
                                     keepRunning <- false
@@ -1784,15 +2022,26 @@ module Runner =
                                     classification <- comparison.Category
                                     signatureDetail <- comparison.Detail
 
+            if classification = "pass" then
+                match dml |> Array.tryFind (fun record -> not record.Equal) with
+                | Some record ->
+                    classification <- record.Classification
+                    signatureDetail <- record.Detail
+                    failureEvidenceHash <- record.SqlSha256
+                | None -> ()
+
             let statementHash, mysqlError, fsdbError =
                 if failureEvidenceHash <> "" then
                     let mysqlError, fsdbError =
-                        match probes |> Array.tryFind (fun probe -> not probe.Equal) with
-                        | Some probe -> probe.MySql.ErrorCode, probe.Fsdb.ErrorCode
+                        match dml |> Array.tryFind (fun record -> record.SqlSha256 = failureEvidenceHash && not record.Equal) with
+                        | Some record -> record.MySql.ErrorCode, record.Fsdb.ErrorCode
                         | _ ->
-                            match Array.tryLast statements with
-                            | Some statement -> statement.MySql.ErrorCode, statement.Fsdb.ErrorCode
-                            | None -> 0, 0
+                            match probes |> Array.tryFind (fun probe -> not probe.Equal) with
+                            | Some probe -> probe.MySql.ErrorCode, probe.Fsdb.ErrorCode
+                            | _ ->
+                                match Array.tryLast statements with
+                                | Some statement -> statement.MySql.ErrorCode, statement.Fsdb.ErrorCode
+                                | None -> 0, 0
 
                     failureEvidenceHash, mysqlError, fsdbError
                 else
@@ -1818,6 +2067,17 @@ module Runner =
                         probe.Fsdb.ErrorCode
                         probe.Detail)
 
+            let dmlFailureSignatures =
+                dml
+                |> Array.filter (fun record -> not record.Equal)
+                |> Array.map (fun record ->
+                    failureSignature
+                        record.Classification
+                        record.SqlSha256
+                        record.MySql.ErrorCode
+                        record.Fsdb.ErrorCode
+                        record.Detail)
+
             let classification, finalFailureSignature, known, finalDetail =
                 match loadKnownGaps () with
                 | Ok knownGaps ->
@@ -1825,6 +2085,7 @@ module Runner =
                     subjectFailureSignature,
                     subjectFailureSignature <> ""
                     && knownGaps.Contains subjectFailureSignature
+                    && dmlFailureSignatures |> Array.forall knownGaps.Contains
                     && probeFailureSignatures |> Array.forall knownGaps.Contains,
                     signatureDetail
                 | Error error ->
@@ -1836,7 +2097,7 @@ module Runner =
             currentProcess.Refresh()
 
             let manifest =
-                { SchemaVersion = 2
+                { SchemaVersion = 3
                   RunId = runId
                   CaseId = caseId
                   Scenario = ScenarioName.text options.Scenario
@@ -1868,6 +2129,7 @@ module Runner =
                   FsdbSnapshotElapsedMs = fsdbSnapshotElapsedMs
                   PeakWorkingSetBytes = max currentProcess.PeakWorkingSet64 currentProcess.WorkingSet64
                   Statements = statements
+                  Dml = dml
                   Probes = probes
                   Comparison = comparison
                   Classification = if known then "known_support_gap" else classification
@@ -1892,7 +2154,7 @@ module Runner =
 
             match original with
             | Error error -> return Error error
-            | Ok original when original.SchemaVersion <> 1 && original.SchemaVersion <> 2 ->
+            | Ok original when original.SchemaVersion <> 1 && original.SchemaVersion <> 2 && original.SchemaVersion <> 3 ->
                 return Error(sprintf "unsupported manifest schema version %d" original.SchemaVersion)
             | Ok original ->
                 match ScenarioName.parse original.Scenario with

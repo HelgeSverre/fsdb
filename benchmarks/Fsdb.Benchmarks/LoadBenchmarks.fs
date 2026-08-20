@@ -23,12 +23,14 @@ open Fsdb.Benchmarks.BenchServer
 type private Workload =
     | UpdateDistinct
     | Insert
+    | ReplaceDistinct
     | Mixed
 
     member this.Name =
         match this with
         | UpdateDistinct -> "update-distinct"
         | Insert -> "insert"
+        | ReplaceDistinct -> "replace-distinct"
         | Mixed -> "mixed"
 
 let private envFloat (name: string) (fallback: float) : float =
@@ -83,6 +85,11 @@ let private runOneWorker (target: string) (workload: Workload) (w: int) (seconds
             let i = Interlocked.Increment(&insertCounter.contents)
             exec
                 $"INSERT INTO users (name, email, age, meta, created_at) VALUES ('load_{i}', 'load_{i}@bench.test', 30, '{{\"plan\":\"free\"}}', '2024-01-01 00:00:00')"
+        | ReplaceDistinct ->
+            let id = sliceStart + rng.Next(sliceSize)
+            let seedIndex = id - 1
+            exec
+                $"REPLACE INTO users VALUES ({id}, 'user_{seedIndex}', 'user_{seedIndex}@bench.test', 30, '{{\"plan\":\"free\"}}', '2024-01-01 00:00:00')"
         | Mixed ->
             if rng.Next(2) = 0 then
                 query $"SELECT id, name FROM users WHERE id = {1 + rng.Next(Schema.userCount)}"
@@ -115,7 +122,7 @@ let run () : int =
     let bin = BenchServer.benchBin ()
 
     let results =
-        [ for workload in [ UpdateDistinct; Insert; Mixed ] do
+        [ for workload in [ UpdateDistinct; Insert; ReplaceDistinct; Mixed ] do
               for target in [ "fsdb"; "mysql" ] do
                   let opsPerSec =
                       if target = "fsdb" then

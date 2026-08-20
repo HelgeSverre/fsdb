@@ -1054,6 +1054,17 @@ let tests =
               | ResultSet(_, [ [ Some "1" ] ]) -> ()
               | other -> failtestf "expected LAST_INSERT_ID() unchanged by the update-only run, got %A" other
 
+          testCase "REPLACE reports deleted plus inserted rows in both client affected-row modes"
+          <| fun _ ->
+              let replace capabilities =
+                  let session = { create 1 (Fsdb.Storage.create ()) with Capabilities = capabilities }
+                  let session, _ = handle session "CREATE TABLE t (id INT PRIMARY KEY, n INT)"
+                  let session, _ = handle session "INSERT INTO t VALUES (1, 10)"
+                  handle session "REPLACE INTO t VALUES (1, 10)" |> snd
+
+              Expect.equal (replace 0u) (Affected 1UL) "changed-row mode"
+              Expect.equal (replace ClientFoundRows) (Affected 1UL) "found-row mode"
+
           testCase "SHOW WARNINGS LIMIT n is accepted, matching the mysql CLI's/mysqli's routine probe"
           <| fun _ ->
               let session = create 1 (Fsdb.Storage.create ())

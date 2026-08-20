@@ -45,6 +45,19 @@ let tests =
               | ResultSet(_, []) -> ()
               | result -> failtestf "expected the insert to be rolled back, got %A" result
 
+          testCase "ROLLBACK restores rows deleted and inserted by REPLACE"
+          <| fun _ ->
+              let session = create 1 (Fsdb.Storage.create ())
+              let session, _ = handle session "CREATE TABLE tx_replace (id INT PRIMARY KEY, u INT UNIQUE)"
+              let session, _ = handle session "INSERT INTO tx_replace VALUES (1, 10), (2, 20)"
+              let session, _ = handle session "BEGIN"
+              let session, _ = handle session "REPLACE INTO tx_replace VALUES (1, 20)"
+              let session, _ = handle session "ROLLBACK"
+
+              match handle session "SELECT id, u FROM tx_replace ORDER BY id" |> snd with
+              | ResultSet(_, [ [ Some "1"; Some "10" ]; [ Some "2"; Some "20" ] ]) -> ()
+              | result -> failtestf "expected both original rows after rollback, got %A" result
+
           testCase "SAVEPOINT / ROLLBACK TO SAVEPOINT undoes only the writes made after it"
           <| fun _ ->
               let session = create 1 (Fsdb.Storage.create ())

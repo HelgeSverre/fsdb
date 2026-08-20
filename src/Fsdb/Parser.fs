@@ -1877,6 +1877,27 @@ let private insertStmt: Parser<Statement, unit> =
         | Choice2Of2(select, onDup) ->
             InsertSelect(table, cols, select, onDup |> Option.defaultValue [], ignoreDuplicates)
 
+let private replaceStmt: Parser<Statement, unit> =
+    let row = optional (keyword "ROW") >>. between (sym "(") (sym ")") (sepBy1 insertValue (sym ","))
+    let assignments = sepBy1 ((identifier .>> sym "=") .>>. expr) (sym ",")
+    let columns = opt (between (sym "(") (sym ")") (sepBy1 identifier (sym ",")))
+
+    let rows =
+        columns
+        .>>. choice
+                 [ ((keyword "VALUES" <|> keyword "VALUE") >>. sepBy1 row (sym ",")) |>> Choice1Of2
+                   selectStmtRecord |>> Choice2Of2 ]
+
+    (keyword "REPLACE"
+     >>. optional (keyword "INTO")
+     >>. qualifiedTableName
+     .>>. choice [ (keyword "SET" >>. assignments) |>> Choice1Of2; rows |>> Choice2Of2 ])
+    |>> fun (table, source) ->
+        match source with
+        | Choice1Of2 assignments -> ReplaceSet(table, assignments)
+        | Choice2Of2(cols, Choice1Of2 rows) -> Replace(table, cols |> Option.defaultValue [], rows)
+        | Choice2Of2(cols, Choice2Of2 select) -> ReplaceSelect(table, cols |> Option.defaultValue [], select)
+
 /// A projection's alias — `AS name`, or real MySQL's implicit form with no
 /// `AS` at all (`SELECT 1 x FROM t`, `SELECT price * qty total FROM
 /// orders`): a bare word right after the expression that isn't the next
@@ -2621,6 +2642,7 @@ statementRef.Value <-
           dropIndexStmt
           truncateTable
           insertStmt
+          replaceStmt
           selectOrUnionStmt
           updateStmt
           deleteStmt
@@ -2654,5 +2676,3 @@ let parse (sql: string) : Result<Statement, string> =
         | Failure(msg, _, _) -> Result.Error msg
     with ex ->
         Result.Error ex.Message
-
-

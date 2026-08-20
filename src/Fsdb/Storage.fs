@@ -1243,7 +1243,7 @@ let currentTimestampForColumn (col: ColumnDef) : Value =
 /// Evaluates a column's `DEFAULT` clause into the value to insert when none
 /// was provided — `CURRENT_TIMESTAMP` evaluates fresh here (insert time),
 /// rather than being carried around as a stored marker value.
-let private evalDefault (col: ColumnDef) : Value =
+let evalDefault (col: ColumnDef) : Value =
     match col.Default with
     | None -> VNull
     | Some(DConst v) -> v
@@ -3211,6 +3211,187 @@ let private cascadeDelete
     (toDelete: Value[] list)
     : Result<Database * Map<string, Value[] list> * Map<string, (Value[] * Value[]) list>, StorageError> =
     cascadeDeleteVisited checkFks db Map.empty Map.empty tableKey toDelete
+
+/// `REPLACE` inserts each candidate after deleting every row that conflicts
+/// with it on a primary or unique key. A candidate can therefore affect more
+/// than two rows when separate unique keys point at separate stored rows.
+/// Delete-side foreign-key actions run before the insert, and commit events
+/// retain candidate order so WAL replay observes the same intermediate keys.
+let replaceRows
+    (store: Store)
+    (dbName: string)
+    (tableName: string)
+    (columns: string list option)
+    (rowsIn: Value list list)
+    (computeGenerated: Value[] -> Result<Value[], StorageError>)
+    : Result<InsertOutcome, StorageError> =
+    let key = normalizeTableName tableName
+
+    let result =
+        withDatabase store dbName (fun initialDb ->
+            virtualWriteGuard store dbName tableName
+            |> Result.bind (fun () -> tryGetTable initialDb tableName)
+            |> Result.bind (fun initialTable ->
+                resolveInsertColumns initialTable columns
+                |> Result.bind (fun idxs ->
+                    let originalNameOf tableKey =
+                        initialDb
+                        |> Map.tryFind tableKey
+                        |> Option.map (fun table -> table.OriginalName)
+                        |> Option.defaultValue tableKey
+
+                    let commitEvents
+                        (removed: Map<string, Value[] list>)
+                        (blanked: Map<string, (Value[] * Value[]) list>)
+                        (writeEvent: CommitEvent option)
+                        =
+                        let cascades =
+                            [ for KeyValue(tableKey, rows) in removed do
+                                  if not rows.IsEmpty then
+                                      RowsDeleted(dbName, originalNameOf tableKey, rows)
+
+                              for KeyValue(tableKey, changes) in blanked do
+                                  if not changes.IsEmpty then
+                                      RowsUpdated(dbName, originalNameOf tableKey, changes) ]
+
+                        cascades @ Option.toList writeEvent
+
+                    let step acc rowValues =
+                        acc
+                        |> Result.bind (fun (db,
+                                             nextAutoId,
+                                             firstAuto,
+                                             lastExplicit,
+                                             affected,
+                                             inserted,
+                                             events) ->
+                            let table = Map.find key db
+
+                            if List.length rowValues <> List.length idxs then
+                                Error(ColumnCountMismatch(List.length idxs, List.length rowValues))
+                            else
+                                let provided = List.zip idxs rowValues |> Map.ofList
+                                let rawRow = table.Columns |> List.mapi (fun i _ -> Map.tryFind i provided)
+
+                                processRow store.StrictMode nextAutoId rawRow table.Columns
+                                |> Result.bind (fun (finalValues, nextAutoId', assigned) ->
+                                    computeGenerated (Array.ofList finalValues)
+                                    |> Result.bind (fun candidate ->
+                                        let uniqueGroups = uniqueKeyGroups table
+
+                                        let conflicts =
+                                            uniqueGroups
+                                            |> List.indexed
+                                            |> List.choose (fun (groupIndex, (name, indices)) ->
+                                                encodeConstraintKey table.Columns indices candidate
+                                                |> Option.bind (fun encoded ->
+                                                    Map.tryFind encoded (Map.find name table.UniqueIndex)
+                                                    |> Option.map (fun position -> groupIndex, position, table.RowsArray.[position])))
+                                            |> List.fold
+                                                (fun (seen, matches) ((_, position, _) as matched) ->
+                                                    if Set.contains position seen then
+                                                        seen, matches
+                                                    else
+                                                        Set.add position seen, matched :: matches)
+                                                (Set.empty, [])
+                                            |> snd
+                                            |> List.rev
+
+                                        let optimizedConflict =
+                                            match List.tryLast conflicts with
+                                            | Some(groupIndex, position, existing)
+                                                when groupIndex = uniqueGroups.Length - 1
+                                                     && (referencingForeignKeys db key).IsEmpty ->
+                                                Some(position, existing)
+                                            | _ -> None
+
+                                        let deletedMatches =
+                                            match optimizedConflict with
+                                            | Some _ -> conflicts |> List.take (conflicts.Length - 1)
+                                            | None -> conflicts
+
+                                        let deletedConflicts = deletedMatches |> List.map (fun (_, _, row) -> row)
+
+                                        cascadeDelete store.ForeignKeyChecks db key deletedConflicts
+                                        |> Result.bind (fun (deletedDb, removed, blanked) ->
+                                            let target = Map.find key deletedDb
+                                            let target', writeEvent, weight =
+                                                match optimizedConflict with
+                                                | Some(position, existing) ->
+                                                    let position =
+                                                        position
+                                                        - (deletedMatches
+                                                           |> List.sumBy (fun (_, deletedPosition, _) -> if deletedPosition < position then 1 else 0))
+
+                                                    let changed = existing <> candidate
+
+                                                    { target with
+                                                        RowsArray = target.RowsArray.SetItem(position, candidate)
+                                                        NextAutoId = nextAutoId'
+                                                        UniqueIndex =
+                                                            reindexRow
+                                                                target.Columns
+                                                                (uniqueKeyGroups target)
+                                                                (Some existing)
+                                                                (Some(position, candidate))
+                                                                target.UniqueIndex },
+                                                    (if changed then Some(RowsUpdated(dbName, tableName, [ existing, candidate ])) else None),
+                                                    deletedConflicts.Length + 1 + (if changed then 1 else 0)
+                                                | None ->
+                                                    let position = target.RowsArray.Length
+
+                                                    { target with
+                                                        RowsArray = target.RowsArray.Add candidate
+                                                        NextAutoId = nextAutoId'
+                                                        UniqueIndex =
+                                                            reindexRow
+                                                                target.Columns
+                                                                (uniqueKeyGroups target)
+                                                                None
+                                                                (Some(position, candidate))
+                                                                target.UniqueIndex },
+                                                    Some(RowsInserted(dbName, tableName, [ candidate ])),
+                                                    deletedConflicts.Length + 1
+
+                                            let db' = Map.add key target' deletedDb
+
+                                            (if store.ForeignKeyChecks then
+                                                 checkFkParents db' target.Columns target.ForeignKeys candidate
+                                             else
+                                                 Ok())
+                                            |> Result.map (fun () ->
+                                                let firstAuto', lastExplicit' =
+                                                    match assigned with
+                                                    | Some(true, value) -> Option.orElse (Some value) firstAuto, lastExplicit
+                                                    | Some(false, value) -> firstAuto, Some value
+                                                    | None -> firstAuto, lastExplicit
+
+                                                db',
+                                                nextAutoId',
+                                                firstAuto',
+                                                lastExplicit',
+                                                affected + weight,
+                                                candidate :: inserted,
+                                                events @ commitEvents removed blanked writeEvent)))))
+
+                    rowsIn
+                    |> foldWithCancellation
+                        step
+                        (Ok(initialDb, initialTable.NextAutoId, None, None, 0, [], []))
+                    |> Result.map (fun (db, _, firstAuto, lastExplicit, affected, inserted, events) ->
+                        let outcome =
+                            { LastInsertId = Option.defaultValue 0L (Option.orElse lastExplicit firstAuto)
+                              GeneratedId = firstAuto
+                              Affected = affected
+                              InsertedRows = List.rev inserted }
+
+                        db, (outcome, events)))))
+
+    match result with
+    | Ok(outcome, events) ->
+        events |> List.iter (Some >> emit store)
+        Ok outcome
+    | Error error -> Error error
 
 /// Deletes every row matching `predicate`. Returns the number of rows
 /// removed. `predicate` returns a `Result` rather than a plain `bool` so a

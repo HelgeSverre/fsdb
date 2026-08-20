@@ -23,8 +23,10 @@ they are understood and minimized.
 - MySQL 8.4.11 is the semantic oracle. The Compose file pins its image digest.
 - SQL Splitter 1.21.0 is the deterministic corpus generator and preflight
   verifier. It is not treated as the database oracle.
-- Scenario-specific SELECT probes compare ordered, typed results before the
-  final schema/data snapshot.
+- Scenario-specific SELECT probes compare column names, declared result types,
+  and ordered typed results before the final schema/data snapshot.
+- An ordered DML battery compares affected-row counts in both found-row and
+  changed-row client modes.
 - Generated artifacts stay under `artifacts/`, which is ignored.
 
 ## Quick start
@@ -115,6 +117,8 @@ prefix/suffix preview; `generated.sql` remains the byte-exact authority.
 `failure.sql` is written in full for statement- or probe-local failures.
 Post-load mismatches are localized by 4,096-row typed-data chunk hashes and
 bounded first/last samples rather than embedding millions of rows in JSON.
+Probe type mismatches and DML affected-row mismatches have distinct
+classifications and signatures.
 
 Outcomes distinguish generator rejection, MySQL rejection, FSDB parser and
 execution gaps, contained internal errors, protocol faults, timeouts, schema or

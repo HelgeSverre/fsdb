@@ -6117,6 +6117,9 @@ let private bindNewRow (columnIndex: Map<string, int list>) (row: Value[]) (stmt
     | Insert(t, cols, rows, onDup, ig) ->
         Insert(t, cols, rows |> List.map (List.map sub), onDup |> List.map (fun (c, e) -> c, sub e), ig)
     | InsertSelect(t, cols, select, onDup, ig) -> InsertSelect(t, cols, select, onDup |> List.map (fun (c, e) -> c, sub e), ig)
+    | Replace(t, cols, rows) -> Replace(t, cols, rows |> List.map (List.map sub))
+    | ReplaceSelect _ -> stmt
+    | ReplaceSet(t, assignments) -> ReplaceSet(t, assignments |> List.map (fun (name, value) -> name, sub value))
     | Update u ->
         Update
             { u with
@@ -6616,12 +6619,18 @@ let rec private explainStatement (store: Store) (registry: Registry) (dbName: st
             checkMutationWhere d.From d.Joins (d.Where |> Option.toList)
             |> Result.bind (fun () -> explainJoinBlock store dbName nextId acc id "DELETE" (Some(FromTable d.From)) d.Joins d.Where extra subqueryExprs)
         )
-    | Insert(table, _, rowsExprs, _, _) ->
+    | Insert(table, _, rowsExprs, _, _)
+    | Replace(table, _, rowsExprs) ->
         let id = nextId ()
+
+        let selectType =
+            match stmt with
+            | Replace _ -> "REPLACE"
+            | _ -> "INSERT"
 
         finish (
             checkTableExists table
-            |> Result.map (fun () -> acc.Add { Id = Some id; SelectType = "INSERT"; Table = Some table; Type = None; Key = None; Rows = None; Extra = [] })
+            |> Result.map (fun () -> acc.Add { Id = Some id; SelectType = selectType; Table = Some table; Type = None; Key = None; Rows = None; Extra = [] })
             |> Result.bind (fun () ->
                 List.concat rowsExprs
                 |> List.collect collectSubqueries
@@ -6630,13 +6639,33 @@ let rec private explainStatement (store: Store) (registry: Registry) (dbName: st
                     explainSelectBlock store dbName nextId acc sid (if isCorrelated sub then "DEPENDENT SUBQUERY" else "SUBQUERY") sub)
                 |> Result.map ignore)
         )
-    | InsertSelect(table, _, select, _, _) ->
+    | ReplaceSet(table, assignments) ->
         let id = nextId ()
 
         finish (
             checkTableExists table
+            |> Result.map (fun () -> acc.Add { Id = Some id; SelectType = "REPLACE"; Table = Some table; Type = None; Key = None; Rows = None; Extra = [] })
+            |> Result.bind (fun () ->
+                assignments
+                |> List.collect (snd >> collectSubqueries)
+                |> traverse (fun sub ->
+                    let sid = nextId ()
+                    explainSelectBlock store dbName nextId acc sid (if isCorrelated sub then "DEPENDENT SUBQUERY" else "SUBQUERY") sub)
+                |> Result.map ignore)
+        )
+    | InsertSelect(table, _, select, _, _)
+    | ReplaceSelect(table, _, select) ->
+        let id = nextId ()
+
+        let selectType =
+            match stmt with
+            | ReplaceSelect _ -> "REPLACE"
+            | _ -> "INSERT"
+
+        finish (
+            checkTableExists table
             |> Result.bind (fun () -> checkSelect select)
-            |> Result.map (fun () -> acc.Add { Id = Some id; SelectType = "INSERT"; Table = Some table; Type = None; Key = None; Rows = None; Extra = [] })
+            |> Result.map (fun () -> acc.Add { Id = Some id; SelectType = selectType; Table = Some table; Type = None; Key = None; Rows = None; Extra = [] })
             |> Result.bind (fun () ->
                 let sid = nextId ()
                 explainSelectBlock store dbName nextId acc sid "SUBQUERY" select)
@@ -6784,7 +6813,10 @@ let private definerUser (definer: string) : string =
 let private writtenTableOf (dbName: string) (stmt: Statement) : (string * string) option =
     match stmt with
     | Insert(t, _, _, _, _)
-    | InsertSelect(t, _, _, _, _) ->
+    | InsertSelect(t, _, _, _, _)
+    | Replace(t, _, _)
+    | ReplaceSelect(t, _, _)
+    | ReplaceSet(t, _) ->
         let db, t = splitQualified dbName t
         Some(db, normalizeTableName t)
     | Update u -> Some(u.From.Database |> Option.defaultValue dbName, normalizeTableName u.From.Table)
@@ -6806,7 +6838,10 @@ let triggerWriteDatabases (store: Store) (dbName: string) (tableName: string) : 
 
         match statement with
         | Insert(table, _, _, _, _)
-        | InsertSelect(table, _, _, _, _) -> [ splitQualified defaultDb table |> fun (db, name) -> db, normalizeTableName name ]
+        | InsertSelect(table, _, _, _, _)
+        | Replace(table, _, _)
+        | ReplaceSelect(table, _, _)
+        | ReplaceSet(table, _) -> [ splitQualified defaultDb table |> fun (db, name) -> db, normalizeTableName name ]
         | Update update -> tableRefTarget update.From :: joinTargets update.Joins
         | Delete delete -> tableRefTarget delete.From :: joinTargets delete.Joins
         | _ -> []
@@ -6844,6 +6879,9 @@ let private triggerBodyExprs (stmt: Statement) : Expr list =
     match stmt with
     | Insert(_, _, rows, onDup, _) -> List.concat rows @ (onDup |> List.map snd)
     | InsertSelect(_, _, _, onDup, _) -> onDup |> List.map snd
+    | Replace(_, _, rows) -> List.concat rows
+    | ReplaceSelect _ -> []
+    | ReplaceSet(_, assignments) -> assignments |> List.map snd
     | Update u -> (u.Assignments |> List.map (fun a -> a.Value)) @ Option.toList u.Where
     | Delete d -> Option.toList d.Where
     | _ -> []
@@ -7031,6 +7069,19 @@ let rec execute (store: Store) (registry: Registry) (dbName: string) (ids: int64
                 upsertRows s db table cols rowsValues computeGenerated applyUpdate foundRows
                 |> withGeneratedRecomputed s registry dbName db table)
 
+    let replaceEvaluated (db: string) (table: string) (cols: string list option) (rowsValues: Value list list) =
+        match scan store db table with
+        | Error error -> ids, storageErr error
+        | Ok(tableColumns, _) ->
+            finishInsert db table (fun targetStore ->
+                replaceRows
+                    targetStore
+                    db
+                    table
+                    cols
+                    rowsValues
+                    (computeGeneratedRow targetStore registry dbName table tableColumns))
+
     match stmt with
     | CreateDatabase(name, ifNotExists) ->
         match Storage.createDatabase store name with
@@ -7163,6 +7214,9 @@ let rec execute (store: Store) (registry: Registry) (dbName: string) (ids: int64
             match bodyStmt with
             | Insert _
             | InsertSelect _
+            | Replace _
+            | ReplaceSelect _
+            | ReplaceSet _
             | Update _
             | Delete _ ->
                 match triggerBodyExprs bodyStmt |> List.tryPick (firstDirectOnlyCall registry) with
@@ -7308,6 +7362,50 @@ let rec execute (store: Store) (registry: Registry) (dbName: string) (ids: int64
                 finishInsert db table (fun s -> insert s db table cols rowsValues |> withGeneratedRecomputed s registry dbName db table)
             else
                 upsertEvaluated db table cols rowsValues onDuplicateUpdate
+
+    | Replace(table, columns, rowsExprs) ->
+        let db, table = splitQualified dbName table
+        let literalContext = contextFactory store registry dbName Map.empty Map.empty None [||]
+
+        match rowsExprs |> traverse (traverse (evalExpr literalContext)) with
+        | Error(code, message) -> ids, Err(code, message)
+        | Ok rowsValues ->
+            let cols = if columns.IsEmpty then None else Some columns
+            replaceEvaluated db table cols rowsValues
+
+    | ReplaceSelect(table, columns, select) ->
+        let db, table = splitQualified dbName table
+        let selectResult, _, _ = runSelectStmt store registry dbName select None
+
+        match selectResult with
+        | Err(code, message) -> ids, Err(code, message)
+        | Affected _ -> ids, Err(1064, "REPLACE ... SELECT source did not return a resultset")
+        | ResultSet(_, rows) ->
+            let rowsValues = rows |> List.map (List.map (function Some value -> VString value | None -> VNull))
+            let cols = if columns.IsEmpty then None else Some columns
+            replaceEvaluated db table cols rowsValues
+
+    | ReplaceSet(table, assignments) ->
+        let db, table = splitQualified dbName table
+
+        match scan store db table with
+        | Error error -> ids, storageErr error
+        | Ok(tableColumns, _) ->
+            let columnIndex = columnIndexOf tableColumns
+            let defaults = tableColumns |> List.map evalDefault |> Array.ofList
+            let context = contextFactory store registry dbName columnIndex (singleQualifier table tableColumns) None defaults
+
+            let substituteDefault =
+                rewriteExprWith (function
+                    | FuncCall(name, [ Col column ]) when System.String.Equals(name, "DEFAULT", System.StringComparison.OrdinalIgnoreCase) ->
+                        Some(Col column)
+                    | FuncCall(name, [ QualifiedCol(_, column) ]) when System.String.Equals(name, "DEFAULT", System.StringComparison.OrdinalIgnoreCase) ->
+                        Some(Col column)
+                    | _ -> None)
+
+            match assignments |> traverse (fun (name, value) -> evalExpr context (substituteDefault value) |> Result.map (fun result -> name, result)) with
+            | Error(code, message) -> ids, Err(code, message)
+            | Ok values -> replaceEvaluated db table (Some(values |> List.map fst)) [ values |> List.map snd ]
 
     | Select select ->
         let result, _, _ = runSelectStmt store registry dbName select None

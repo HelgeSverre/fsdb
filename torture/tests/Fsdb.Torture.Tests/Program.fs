@@ -24,6 +24,7 @@ let private successfulProbe target rows =
     { Target = target
       Status = "success"
       Columns = [| "value" |]
+      ColumnTypes = [| "BIGINT" |]
       Rows = rows
       DataSha256 = Hashing.text (Json.serialize rows)
       ErrorCode = 0
@@ -41,7 +42,8 @@ let private column name primary unique autoIncrement =
       Unique = unique
       Generated = None
       Collation = None
-      Charset = None }
+      Charset = None
+      OnUpdateCurrentTimestamp = false }
 
 let private emptyComparison =
     { Equal = true
@@ -201,13 +203,49 @@ let tests =
                     Expect.equal chunks.Length 25 "chunks localize mismatches without retaining every row"
                     Expect.equal samples.Length 16 "only edge samples are retained"
                     Expect.equal chunks.[0].StartRow 0L "first chunk offset"
-                    Expect.equal chunks.[24].RowCount 1696 "short final chunk" ]
+                    Expect.equal chunks.[24].RowCount 1696 "short final chunk"
+
+                testCase "result type comparison folds widths but preserves numeric families"
+                <| fun _ ->
+                    let outcome target typeName row =
+                        { successfulProbe target [| Json.serialize [| row |] |] with
+                            ColumnTypes = [| typeName |] }
+
+                    Expect.isNone
+                        (Runner.compareProbeTypes (outcome "mysql" "INT" "integer:1") (outcome "fsdb" "BIGINT" "integer:1"))
+                        "integer widths are equivalent"
+
+                    Expect.isNone
+                        (Runner.compareProbeTypes (outcome "mysql" "CHAR(8)" "text:value") (outcome "fsdb" "VARCHAR" "text:value"))
+                        "size-decorated textual types are equivalent"
+
+                    Expect.isSome
+                        (Runner.compareProbeTypes (outcome "mysql" "BIGINT" "integer:2") (outcome "fsdb" "DOUBLE" "integer:2"))
+                        "integer and floating-point metadata remain distinct"
+
+                    let missingType =
+                        { outcome "fsdb" "BIGINT" "integer:1" with
+                            ColumnTypes = [||] }
+
+                    Expect.isSome
+                        (Runner.compareProbeTypes (outcome "mysql" "BIGINT" "integer:1") missingType)
+                        "type metadata cardinality remains observable"
+
+                testCase "result type comparison ignores an entirely NULL column"
+                <| fun _ ->
+                    let outcome target typeName =
+                        { successfulProbe target [| Json.serialize [| "null" |] |] with
+                            ColumnTypes = [| typeName |] }
+
+                    Expect.isNone
+                        (Runner.compareProbeTypes (outcome "mysql" "DECIMAL") (outcome "fsdb" "VARCHAR"))
+                        "NULL-only output has no value-level type distinction" ]
 
           testList
               "Classification"
               [ testCase "parser rejection is distinct from execution rejection"
                 <| fun _ ->
-                    let result = Runner.classifyStatement "error" (successful "mysql") (TargetOutcome.notRun "fsdb") [||]
+                    let result = Runner.classifyStatement "error" false (successful "mysql") (TargetOutcome.notRun "fsdb") [||]
                     Expect.equal result "fsdb_parser_gap" "parser category"
 
                 testCase "contained 1105 is its own category"
@@ -217,7 +255,7 @@ let tests =
                             Status = "server_error"
                             ErrorCode = 1105 }
 
-                    let result = Runner.classifyStatement "ok" (successful "mysql") failed [||]
+                    let result = Runner.classifyStatement "ok" false (successful "mysql") failed [||]
                     Expect.equal result "contained_internal_error" "internal error category"
 
                 testCase "oracle and FSDB timeouts remain distinguishable"
@@ -227,12 +265,12 @@ let tests =
                             Status = "timeout" }
 
                     Expect.equal
-                        (Runner.classifyStatement "ok" (timeout "mysql") (TargetOutcome.notRun "fsdb") [||])
+                        (Runner.classifyStatement "ok" false (timeout "mysql") (TargetOutcome.notRun "fsdb") [||])
                         "oracle_timeout"
                         "oracle timeout"
 
                     Expect.equal
-                        (Runner.classifyStatement "ok" (successful "mysql") (timeout "fsdb") [||])
+                        (Runner.classifyStatement "ok" false (successful "mysql") (timeout "fsdb") [||])
                         "fsdb_timeout"
                         "subject timeout"
 
@@ -249,7 +287,26 @@ let tests =
                     let mysql = successfulProbe "mysql" [| "[1]" |]
                     let fsdb = successfulProbe "fsdb" [| "[2]" |]
                     let result = Runner.classifyProbe "ok" mysql fsdb
-                    Expect.equal result "probe_result_mismatch" "ordered query results differ" ]
+                    Expect.equal result "probe_result_mismatch" "ordered query results differ"
+
+                testCase "probe type differences have a distinct classification"
+                <| fun _ ->
+                    let mysql = { successfulProbe "mysql" [| "[1]" |] with ColumnTypes = [| "BIGINT" |] }
+                    let fsdb = { successfulProbe "fsdb" [| "[1]" |] with ColumnTypes = [| "DOUBLE" |] }
+                    Expect.equal (Runner.classifyProbe "ok" mysql fsdb) "probe_type_mismatch" "types differ despite equal values"
+
+                testCase "affected rows are compared only when requested"
+                <| fun _ ->
+                    let mysql = { successful "mysql" with AffectedRows = 2 }
+                    let fsdb = { successful "fsdb" with AffectedRows = 1 }
+
+                    Expect.equal
+                        (Runner.classifyStatement "ok" true mysql fsdb [||])
+                        "statement_affected_rows_mismatch"
+                        "generated mutations compare counts"
+
+                    Expect.equal (Runner.classifyStatement "ok" false mysql fsdb [||]) "pass" "DDL ignores count conventions"
+                    Expect.equal (DmlBattery.classify mysql fsdb) "dml_affected_rows_mismatch" "ordered DML compares counts" ]
 
           testList
               "Toolchain"
@@ -336,6 +393,7 @@ let tests =
                           ForeignKeys = []
                           TableCharset = None
                           TableCollation = None
+                          CreateTime = DateTime.UtcNow
                           UniqueIndex = Map.empty }
 
                     store.Catalog <- Map.ofList [ defaultDatabase, Map.ofList [ "items", table ] ]
@@ -353,6 +411,7 @@ let tests =
                           ForeignKeys = []
                           TableCharset = None
                           TableCollation = None
+                          CreateTime = DateTime.UtcNow
                           UniqueIndex = Map.empty }
 
                     store.Catalog <- Map.ofList [ defaultDatabase, Map.ofList [ "items", table ] ]
@@ -370,7 +429,19 @@ let tests =
                     Sha256 = "abc" }
 
               let manifest =
-                  { SchemaVersion = 2
+                  let dml =
+                      { Mode = "changed_rows"
+                        Index = 0
+                        Name = "odku_changed"
+                        Sql = "INSERT INTO t VALUES (1) ON DUPLICATE KEY UPDATE id = 2"
+                        SqlSha256 = "sql"
+                        MySql = { successful "mysql" with AffectedRows = 2 }
+                        Fsdb = { successful "fsdb" with AffectedRows = 1 }
+                        Classification = "dml_affected_rows_mismatch"
+                        Equal = false
+                        Detail = "affected rows differ" }
+
+                  { SchemaVersion = 3
                     RunId = "run"
                     CaseId = "case"
                     Scenario = "scalar"
@@ -402,6 +473,7 @@ let tests =
                     FsdbSnapshotElapsedMs = 4L
                     PeakWorkingSetBytes = 1024L
                     Statements = [||]
+                    Dml = [| dml |]
                     Probes = [||]
                     Comparison = emptyComparison
                     Classification = "pass"
@@ -412,7 +484,8 @@ let tests =
 
               let parsed = Json.deserialize<RunManifest>(Json.serialize manifest)
               Expect.equal parsed.CaseId manifest.CaseId "case id"
-              Expect.equal parsed.SqlSplitter.Version "1.21.0" "nested record" ]
+              Expect.equal parsed.SqlSplitter.Version "1.21.0" "nested record"
+              Expect.equal parsed.Dml manifest.Dml "DML evidence" ]
 
 [<EntryPoint>]
 let main argv = Tests.runTestsWithCLIArgs [] argv tests

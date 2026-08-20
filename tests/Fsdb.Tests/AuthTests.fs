@@ -100,6 +100,19 @@ let tests =
                           "the duplicate branch updates an existing target row"
                   | Error error -> failtestf "parse %s: %s" sql error
 
+          testCase "REPLACE requires INSERT and DELETE plus SELECT for its source"
+          <| fun _ ->
+              for sql, source in
+                  [ "REPLACE INTO dst VALUES (1)", None
+                    "REPLACE INTO dst SELECT id FROM src", Some(OnTable("app", "src")) ] do
+                  match Fsdb.Parser.parse sql with
+                  | Ok statement ->
+                      let privileges = requiredPrivileges "app" statement
+                      Expect.contains privileges ("INSERT", OnTable("app", "dst")) "insert privilege"
+                      Expect.contains privileges ("DELETE", OnTable("app", "dst")) "delete privilege"
+                      source |> Option.iter (fun target -> Expect.contains privileges ("SELECT", target) "source privilege")
+                  | Error error -> failtestf "parse %s: %s" sql error
+
           testCase "REVOKE GRANT OPTION, SELECT still requires SELECT on the target"
           <| fun _ ->
               // The GRANT OPTION token must not make expandPrivs error and

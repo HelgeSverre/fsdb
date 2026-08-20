@@ -1095,7 +1095,36 @@ let tests =
                         _,
                         [ "b", FuncCall("VALUES", [ Col "b" ]); "a", BinOp(Add, Col "a", Lit(VInt 1L)) ],
                         false) -> ()
-                    | other -> failtestf "expected an InsertSelect with the ODKU assignments, got %A" other ]
+                    | other -> failtestf "expected an InsertSelect with the ODKU assignments, got %A" other
+
+                testCase "REPLACE accepts optional INTO, VALUE, and ROW constructors"
+                <| fun _ ->
+                    Expect.equal
+                        (parseOk "REPLACE t (a, b) VALUE ROW(1, 2), ROW(3, 4)")
+                        (Replace(
+                            "t",
+                            [ "a"; "b" ],
+                            [ [ Lit(VInt 1L); Lit(VInt 2L) ]; [ Lit(VInt 3L); Lit(VInt 4L) ] ]
+                        ))
+                        "replace values"
+
+                testCase "REPLACE ... SELECT has a distinct statement shape"
+                <| fun _ ->
+                    match parseOk "REPLACE INTO dst (a, b) SELECT x, y FROM src" with
+                    | ReplaceSelect("dst", [ "a"; "b" ], _) -> ()
+                    | other -> failtestf "expected ReplaceSelect, got %A" other
+
+                testCase "REPLACE ... SET retains assignment expressions"
+                <| fun _ ->
+                    Expect.equal
+                        (parseOk "REPLACE INTO t SET id = 1, n = n + 1, u = DEFAULT(u)")
+                        (ReplaceSet(
+                            "t",
+                            [ "id", Lit(VInt 1L)
+                              "n", BinOp(Add, Col "n", Lit(VInt 1L))
+                              "u", FuncCall("DEFAULT", [ Col "u" ]) ]
+                        ))
+                        "replace set" ]
 
           testList
               "ROW_NUMBER() OVER (...)"

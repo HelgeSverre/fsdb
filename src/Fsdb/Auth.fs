@@ -540,6 +540,18 @@ let rec requiredPrivileges (defaultDb: string) (stmt: Statement) : (string * Pri
         onTables "INSERT" [ split table ]
         @ (if List.isEmpty onDup then [] else onTables "UPDATE" [ split table ])
         @ onTables "SELECT" ((selectTables defaultDb select @ readInExprs) |> List.distinct)
+    | Replace(table, _, rows) ->
+        onTables "INSERT" [ split table ]
+        @ onTables "DELETE" [ split table ]
+        @ onTables "SELECT" (rows |> List.collect (List.collect (exprReadTables defaultDb)) |> List.distinct)
+    | ReplaceSelect(table, _, select) ->
+        onTables "INSERT" [ split table ]
+        @ onTables "DELETE" [ split table ]
+        @ onTables "SELECT" (selectTables defaultDb select |> List.distinct)
+    | ReplaceSet(table, assignments) ->
+        onTables "INSERT" [ split table ]
+        @ onTables "DELETE" [ split table ]
+        @ onTables "SELECT" (assignments |> List.collect (snd >> exprReadTables defaultDb) |> List.distinct)
     | Update u ->
         let readInExprs =
             (u.Assignments |> List.collect (fun a -> exprReadTables defaultDb a.Value))

@@ -446,6 +446,27 @@ let tests =
 
               Expect.equal (rowsOf (load dir) defaultDatabase "reused") [ [| VInt 1L |] ] "the reused key survives recovery"
 
+          testCase "WAL replay preserves REPLACE candidate order and optimized updates"
+          <| fun _ ->
+              let dir = tempDataDir ()
+              let store = load dir
+              attach dir store
+              let session = Fsdb.Session.create 1 store
+
+              let run session sql =
+                  match handle session sql with
+                  | session', Err(code, message) -> failtestf "%s failed: %d %s" sql code message
+                  | session', _ -> session'
+
+              [ "CREATE TABLE t (id INT PRIMARY KEY, n INT)"
+                "REPLACE INTO t VALUES (1, 10), (1, 20)"
+                "REPLACE INTO t VALUES (1, 30)" ]
+              |> List.fold run session
+              |> ignore
+
+              let reloaded = load dir
+              Expect.equal (rowsOf reloaded defaultDatabase "t") [ [| VInt 1L; VInt 30L |] ] "the last candidate survives replay"
+
           testCase "WAL replay of many single-row UPDATEs against a UNIQUE-indexed table doesn't rebuild the index once per event"
           <| fun _ ->
               // Replaying RowsUpdated/RowsDeleted must not reindex — a full

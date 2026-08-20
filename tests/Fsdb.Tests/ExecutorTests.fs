@@ -1820,6 +1820,135 @@ let tests =
                     | other -> failtestf "expected 1 row affected, got %A" other ]
 
           testList
+              "REPLACE"
+              [ testCase "inserts a new key and replaces an existing key"
+                <| fun _ ->
+                    let store = newStore ()
+                    runDefault store "CREATE TABLE t (id INT PRIMARY KEY, n INT)" |> ignore
+
+                    Expect.equal (runDefault store "REPLACE INTO t VALUES (1, 10)") (Affected 1UL) "new key"
+                    Expect.equal (runDefault store "REPLACE INTO t VALUES (1, 20)") (Affected 2UL) "changed replacement"
+                    Expect.equal (runDefault store "REPLACE INTO t VALUES (1, 20)") (Affected 1UL) "unchanged optimized replacement"
+
+                    match runDefault store "SELECT id, n FROM t" with
+                    | ResultSet(_, [ [ Some "1"; Some "20" ] ]) -> ()
+                    | other -> failtestf "expected one replacement row, got %A" other
+
+                testCase "one candidate deletes every row conflicting through separate unique keys"
+                <| fun _ ->
+                    let store = newStore ()
+                    runDefault store "CREATE TABLE t (id INT PRIMARY KEY, u INT UNIQUE, label VARCHAR(20))" |> ignore
+                    runDefault store "INSERT INTO t VALUES (1, 10, 'one'), (2, 20, 'two')" |> ignore
+
+                    Expect.equal
+                        (runDefault store "REPLACE INTO t VALUES (1, 20, 'replacement')")
+                        (Affected 3UL)
+                        "two deletes plus one insert"
+
+                    match runDefault store "SELECT id, u, label FROM t" with
+                    | ResultSet(_, [ [ Some "1"; Some "20"; Some "replacement" ] ]) -> ()
+                    | other -> failtestf "expected both conflicting rows replaced by one candidate, got %A" other
+
+                testCase "later candidates observe rows inserted earlier in the same statement"
+                <| fun _ ->
+                    let store = newStore ()
+                    runDefault store "CREATE TABLE t (id INT PRIMARY KEY, n INT)" |> ignore
+
+                    Expect.equal
+                        (runDefault store "REPLACE INTO t VALUES (1, 10), (1, 20)")
+                        (Affected 3UL)
+                        "insert followed by delete and insert"
+
+                    match runDefault store "SELECT n FROM t" with
+                    | ResultSet(_, [ [ Some "20" ] ]) -> ()
+                    | other -> failtestf "expected the last candidate, got %A" other
+
+                testCase "omitted columns use defaults and a unique collision generates a fresh auto id"
+                <| fun _ ->
+                    let store = newStore ()
+                    runDefault store "CREATE TABLE t (id INT AUTO_INCREMENT PRIMARY KEY, u INT UNIQUE, n INT DEFAULT 7)" |> ignore
+                    runDefault store "INSERT INTO t (u, n) VALUES (1, 99)" |> ignore
+
+                    Expect.equal (runDefault store "REPLACE INTO t (u) VALUES (1)") (Affected 2UL) "delete and insert"
+
+                    match runDefault store "SELECT id, u, n FROM t" with
+                    | ResultSet(_, [ [ Some "2"; Some "1"; Some "7" ] ]) -> ()
+                    | other -> failtestf "expected a fresh id and defaulted n, got %A" other
+
+                testCase "REPLACE ... SELECT applies candidates in source order"
+                <| fun _ ->
+                    let store = newStore ()
+                    runDefault store "CREATE TABLE src (id INT, n INT)" |> ignore
+                    runDefault store "CREATE TABLE dst (id INT PRIMARY KEY, n INT)" |> ignore
+                    runDefault store "INSERT INTO src VALUES (1, 10), (1, 20), (2, 30)" |> ignore
+
+                    Expect.equal
+                        (runDefault store "REPLACE INTO dst SELECT id, n FROM src ORDER BY n")
+                        (Affected 4UL)
+                        "two inserts and one replacement"
+
+                    match runDefault store "SELECT id, n FROM dst ORDER BY id" with
+                    | ResultSet(_, [ [ Some "1"; Some "20" ]; [ Some "2"; Some "30" ] ]) -> ()
+                    | other -> failtestf "expected last source duplicate to win, got %A" other
+
+                testCase "REPLACE ... SET resolves column references and DEFAULT() from column defaults"
+                <| fun _ ->
+                    let store = newStore ()
+                    runDefault store "CREATE TABLE t (id INT PRIMARY KEY, u INT UNIQUE, n INT DEFAULT 7)" |> ignore
+                    runDefault store "INSERT INTO t VALUES (1, 10, 1)" |> ignore
+
+                    Expect.equal
+                        (runDefault store "REPLACE INTO t SET id = 1, u = 10, n = n + 1")
+                        (Affected 2UL)
+                        "bare n reads its default value"
+
+                    Expect.equal
+                        (runDefault store "REPLACE INTO t SET id = 2, u = 20, n = DEFAULT(n)")
+                        (Affected 1UL)
+                        "DEFAULT(n) supplies the declared default"
+
+                    match runDefault store "SELECT id, u, n FROM t ORDER BY id" with
+                    | ResultSet(_, [ [ Some "1"; Some "10"; Some "8" ]; [ Some "2"; Some "20"; Some "7" ] ]) -> ()
+                    | other -> failtestf "expected default-derived SET values, got %A" other
+
+                testCase "delete-side foreign-key actions run before the replacement insert"
+                <| fun _ ->
+                    let store = newStore ()
+                    runDefault store "CREATE TABLE parent_restrict (id INT PRIMARY KEY)" |> ignore
+                    runDefault store "CREATE TABLE child_restrict (id INT PRIMARY KEY, parent_id INT, FOREIGN KEY (parent_id) REFERENCES parent_restrict(id))" |> ignore
+                    runDefault store "INSERT INTO parent_restrict VALUES (1)" |> ignore
+                    runDefault store "INSERT INTO child_restrict VALUES (1, 1)" |> ignore
+
+                    match runDefault store "REPLACE INTO parent_restrict VALUES (1)" with
+                    | Err(1451, _) -> ()
+                    | other -> failtestf "expected the restricting child to reject the delete, got %A" other
+
+                    runDefault store "CREATE TABLE parent_cascade (id INT PRIMARY KEY)" |> ignore
+                    runDefault store "CREATE TABLE child_cascade (id INT PRIMARY KEY, parent_id INT, FOREIGN KEY (parent_id) REFERENCES parent_cascade(id) ON DELETE CASCADE)" |> ignore
+                    runDefault store "INSERT INTO parent_cascade VALUES (1)" |> ignore
+                    runDefault store "INSERT INTO child_cascade VALUES (1, 1)" |> ignore
+
+                    Expect.equal (runDefault store "REPLACE INTO parent_cascade VALUES (1)") (Affected 2UL) "target rows only"
+
+                    match runDefault store "SELECT COUNT(*) FROM child_cascade" with
+                    | ResultSet(_, [ [ Some "0" ] ]) -> ()
+                    | other -> failtestf "expected the old row's child to be cascaded away, got %A" other
+
+                testCase "a later candidate error rolls back earlier replacements"
+                <| fun _ ->
+                    let store = newStore ()
+                    runDefault store "CREATE TABLE t (id INT PRIMARY KEY, n INT NOT NULL)" |> ignore
+                    runDefault store "INSERT INTO t VALUES (1, 10)" |> ignore
+
+                    match runDefault store "REPLACE INTO t VALUES (1, 20), (2, NULL)" with
+                    | Err(1048, _) -> ()
+                    | other -> failtestf "expected the invalid second candidate to fail, got %A" other
+
+                    match runDefault store "SELECT id, n FROM t" with
+                    | ResultSet(_, [ [ Some "1"; Some "10" ] ]) -> ()
+                    | other -> failtestf "expected statement atomicity, got %A" other ]
+
+          testList
               "INSERT ... SELECT"
               [ testCase "inserts every row a SELECT (with WHERE/GROUP BY/aggregates) produces"
                 <| fun _ ->

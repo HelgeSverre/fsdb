@@ -615,6 +615,9 @@ type Statement =
         select: SelectStmt *
         onDuplicateUpdate: (string * Expr) list *
         ignoreDuplicates: bool
+    | Replace of table: string * columns: string list * rows: Expr list list
+    | ReplaceSelect of table: string * columns: string list * select: SelectStmt
+    | ReplaceSet of table: string * assignments: (string * Expr) list
     | Select of SelectStmt
     /// A set operation over two or more `SELECT` branches — `UNION`,
     /// `INTERSECT` or `EXCEPT`, each `[ALL|DISTINCT]`, in any mix. `first`

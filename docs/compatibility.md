@@ -14,6 +14,11 @@ fsdb and a MySQL 8.4 oracle, and the first divergence is classified and
 replayable (`torture/scripts/run.sh suite`; exit 0 = pass/known gaps, 2 = new
 fsdb findings).
 
+The ordered DML battery covers `REPLACE` values, `REPLACE ... SELECT`, and
+`REPLACE ... SET` in both client affected-row modes. It includes unchanged
+replacements, conflicts spanning separate unique keys, same-statement key
+reuse, defaults, and source-row ordering.
+
 ## Gauntlet
 
 | Application | Laravel | Migrations | Result |

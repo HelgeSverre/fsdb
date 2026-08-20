@@ -76,6 +76,19 @@ let tests =
 
               Expect.equal (rows store "SELECT n FROM log ORDER BY n") [ [ Some "1" ]; [ Some "2" ] ] "fired per select-derived row"
 
+          testCase "REPLACE fires AFTER INSERT for both new and replacement candidates"
+          <| fun _ ->
+              let store = Fsdb.Storage.create ()
+              setup store
+
+              expectOk
+                  (runDefault store "CREATE TRIGGER trg AFTER INSERT ON t FOR EACH ROW INSERT INTO log(n) VALUES (NEW.n)")
+                  "create trigger"
+
+              Expect.equal (runDefault store "REPLACE INTO t VALUES (1, 10)") (Affected 1UL) "insert path"
+              Expect.equal (runDefault store "REPLACE INTO t VALUES (1, 20)") (Affected 2UL) "replacement path"
+              Expect.equal (rows store "SELECT n FROM log ORDER BY id") [ [ Some "10" ]; [ Some "20" ] ] "one insert event per candidate"
+
           testCase "ON DUPLICATE KEY UPDATE fires only for rows that actually inserted"
           <| fun _ ->
               let store = Fsdb.Storage.create ()

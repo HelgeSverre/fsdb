@@ -298,6 +298,7 @@ module Program =
         let rowsPerSecond = if loadMs > 0L then float totalRows * 1000.0 / float loadMs else 0.0
         let mysqlProbeMs = report.Probes |> Array.sumBy (fun probe -> probe.MySql.ElapsedMs)
         let fsdbProbeMs = report.Probes |> Array.sumBy (fun probe -> probe.Fsdb.ElapsedMs)
+        let dmlFailures = report.Dml |> Array.filter (fun record -> not record.Equal) |> Array.length
 
         printfn
             "  rows=%d sql=%.1f MiB mysql-load=%d ms fsdb-load=%d ms (%.0f rows/s) snapshots=%d/%d ms peak=%.1f MiB"
@@ -310,7 +311,13 @@ module Program =
             report.FsdbSnapshotElapsedMs
             (float report.PeakWorkingSetBytes / 1048576.0)
 
-        printfn "  invariants=%d ms probes=%d/%d ms (mysql/fsdb)" report.InvariantElapsedMs mysqlProbeMs fsdbProbeMs
+        printfn
+            "  invariants=%d ms probes=%d/%d ms (mysql/fsdb) dml=%d cases/%d differences"
+            report.InvariantElapsedMs
+            mysqlProbeMs
+            fsdbProbeMs
+            report.Dml.Length
+            dmlFailures
 
         if report.Classification <> "pass" then
             let firstLine =

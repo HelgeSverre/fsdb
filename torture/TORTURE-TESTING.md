@@ -85,7 +85,10 @@ Every case bundle records:
   retained as the full byte-exact source and `failure.sql` retains a causal
   failing statement in full;
 - each bespoke query probe's SQL hash, parser result, target status, columns,
-  ordered canonical rows, result hash, timing, and first difference;
+  declared result types, ordered canonical rows, result hash, timing, and
+  first difference;
+- ordered DML outcomes and affected-row counts under both found-row and
+  changed-row client capability modes;
 - normalized schema, indexes, ordered FK columns, NULL-aware default metadata,
   row counts, deterministically ordered typed-data hashes, 4,096-row chunk
   hashes, bounded first/last samples, and the first differing chunk;
@@ -105,6 +108,7 @@ Passwords and the MySQL connection string are intentionally not persisted.
 | Subject execution | `fsdb_execution_gap`, `fsdb_probe_execution_gap`, `contained_internal_error` | Parsed SQL failed in FSDB; error 1105 remains separately visible |
 | Wire/deadline | `protocol_fault`, `fsdb_timeout` | Driver/protocol failure or subject deadline |
 | Internal state | `invariant_failure` | FSDB committed a structurally invalid catalog/data state |
+| Client contract | `statement_affected_rows_mismatch`, `dml_affected_rows_mismatch`, `probe_type_mismatch` | Successful mutations reported different counts, or equal values carried observably different result types |
 | Semantic query | `probe_schema_mismatch`, `probe_result_mismatch` | A bespoke query returned different columns or ordered typed rows |
 | Final state | `schema_mismatch`, `row_count_mismatch`, `data_mismatch`, `metadata_or_snapshot_failure` | Load succeeded but observable state diverged |
 

@@ -142,6 +142,24 @@ type ServerBenchmarks() =
         this.Exec("INSERT INTO users (name, email, age, meta, created_at) VALUES " + String.Join(",", rows))
 
     [<Benchmark>]
+    member this.ReplaceNewRow() =
+        let i = Interlocked.Increment(&insertCounter)
+
+        this.Exec(
+            "REPLACE INTO users (name, email, age, meta, created_at) VALUES "
+            + $"('bench_replace_{i}','bench_replace_{i}@bench.test',30,'{{\"plan\":\"free\"}}','2024-01-01 00:00:00')"
+        )
+
+    [<Benchmark>]
+    member this.ReplaceExistingByPk() =
+        let id = randomUserId ()
+        let seedIndex = id - 1
+
+        this.Exec(
+            $"REPLACE INTO users VALUES ({id},'user_{seedIndex}','user_{seedIndex}@bench.test',30,'{{\"plan\":\"free\"}}','2024-01-01 00:00:00')"
+        )
+
+    [<Benchmark>]
     member this.UpdateSingleRow() =
         this.Exec $"UPDATE users SET age = age + 1 WHERE id = {randomUserId ()}"
 
