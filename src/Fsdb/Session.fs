@@ -233,9 +233,9 @@ type Session =
       /// The next id COM_STMT_PREPARE will assign.
       NextStmtId: int
       /// Bytes buffered by COM_STMT_SEND_LONG_DATA, keyed by (statement id,
-      /// param index), appended to on each call and consumed (then cleared)
-      /// by the next COM_STMT_EXECUTE or COM_STMT_RESET for that statement.
-      LongData: Map<int * int, byte[]>
+      /// param index), newest chunk first so each arrival is constant-time.
+      /// EXECUTE reverses and concatenates once, then clears the chunks.
+      LongData: Map<int * int, byte[] list>
       /// Total bytes held in `LongData` for constant-time limit checks.
       LongDataBytes: int64
       /// (statement id, param index) pairs whose COM_STMT_SEND_LONG_DATA

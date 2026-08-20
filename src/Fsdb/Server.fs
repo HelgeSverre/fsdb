@@ -480,7 +480,7 @@ let private authenticateHandshake
     }
 
 let private accumulateLongData (key: int * int) (chunk: byte[]) (session: Session) : Session =
-    let existing = session.LongData |> Map.tryFind key |> Option.defaultValue [||]
+    let existing = session.LongData |> Map.tryFind key |> Option.defaultValue []
     let room = int64 Limits.maxAllowedPacket - session.LongDataBytes
 
     if chunk.Length = 0 then
@@ -489,12 +489,14 @@ let private accumulateLongData (key: int * int) (chunk: byte[]) (session: Sessio
         { session with LongDataOverflow = Set.add key session.LongDataOverflow }
     else
         { session with
-            LongData = Map.add key (Array.append existing chunk) session.LongData
+            LongData = Map.add key (chunk :: existing) session.LongData
             LongDataBytes = session.LongDataBytes + int64 chunk.Length }
 
 let private discardLongData (statementId: int) (session: Session) : Session =
     let retained = session.LongData |> Map.filter (fun (id, _) _ -> id <> statementId)
-    let retainedBytes = retained |> Seq.sumBy (fun (KeyValue(_, bytes)) -> int64 bytes.Length)
+    let retainedBytes =
+        retained
+        |> Seq.sumBy (fun (KeyValue(_, chunks)) -> chunks |> List.sumBy (fun bytes -> int64 bytes.Length))
 
     { session with
         LongData = retained
@@ -826,7 +828,9 @@ let private handleConnection
                                                         // force-decoding them as UTF-8 corrupts any byte
                                                         // sequence that isn't valid UTF-8 (an image, a
                                                         // compressed column, ...). Only text types decode.
-                                                        | Some bytes -> if typeId = TypeBlob then VBytes bytes else VString(Encoding.UTF8.GetString bytes)
+                                                        | Some chunks ->
+                                                            let bytes = chunks |> List.rev |> Array.concat
+                                                            if typeId = TypeBlob then VBytes bytes else VString(Encoding.UTF8.GetString bytes)
                                                         | None -> if isNull i then VNull else readBinaryValue r typeId unsigned)
 
                                                 Result.Ok(types, values)
