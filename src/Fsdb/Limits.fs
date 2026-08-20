@@ -40,16 +40,14 @@ let mutable maxConnections = 500
 /// application a connection the server closed hours earlier.
 let mutable waitTimeoutSeconds = 300
 
-/// How long a connection waits for a database's write gate before giving up
-/// with a retryable 1205 rather than blocking forever —
+/// How long a transaction waits to enter the commit/rebase section before
+/// giving up with a retryable 1205 rather than blocking forever —
 /// `innodb_lock_wait_timeout`'s MySQL default.
 let mutable lockWaitTimeoutSeconds = 50
 
-/// `WITH RECURSIVE`'s pass ceiling, MySQL's `cte_max_recursion_depth`
-/// default. ponytail: startup-scoped, not per-session — `Executor` compiles
-/// well before `Session` and can't read `@@cte_max_recursion_depth`, so a
-/// client that SETs it is ignored.
-let mutable cteMaxRecursionDepth = 1000
+/// `WITH RECURSIVE`'s default pass ceiling. A session override is threaded
+/// through the statement execution context.
+let mutable cteMaxRecursionDepth = 1000L
 
 /// Once the WAL crosses this many bytes, or this many appended entries,
 /// whichever comes first, `Persistence.attach`'s subscriber snapshots the
@@ -116,8 +114,8 @@ let private knobs =
       { Name = "cte_max_recursion_depth"
         Min = 0L
         Max = 4294967295L
-        Set = fun v -> cteMaxRecursionDepth <- int v
-        Get = fun () -> int64 cteMaxRecursionDepth
+        Set = fun v -> cteMaxRecursionDepth <- v
+        Get = fun () -> cteMaxRecursionDepth
         Reportable = true }
       { Name = "wal_rotate_bytes"
         Min = 0L

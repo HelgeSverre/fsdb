@@ -1148,6 +1148,18 @@ let private executeParsed (session: Session) (stmt: Statement) : Session * Query
         store.SessionUser <- session.User
         let registry = registryFor session
 
+        let withRecursionDepth body =
+            let limit =
+                lookupVar session "cte_max_recursion_depth"
+                |> Option.flatten
+                |> Option.bind (fun value ->
+                    match Int64.TryParse value with
+                    | true, parsed -> Some parsed
+                    | _ -> None)
+                |> Option.defaultValue Limits.cteMaxRecursionDepth
+
+            Executor.withCteRecursionDepth limit body
+
         // `SELECT`/`UNION` go through `Executor`'s type-preserving entry
         // points instead of the plain `execute` every other statement uses
         // — those are the only two statement kinds that reach the wire as
@@ -1158,16 +1170,19 @@ let private executeParsed (session: Session) (stmt: Statement) : Session * Query
         let lastInsertId, lastGeneratedId, result, columnTypes =
             match stmt with
             | Select select ->
-                let result, types = Executor.runTopLevelSelect store registry dbName select
+                let result, types = withRecursionDepth (fun () -> Executor.runTopLevelSelect store registry dbName select)
                 session.LastInsertId, session.LastGeneratedId, result, types
             | Union(first, rest, orderBy, limit, offset) ->
-                let result, types, _ = Executor.runUnionStmt store registry dbName first rest orderBy limit offset
+                let result, types, _ =
+                    withRecursionDepth (fun () -> Executor.runUnionStmt store registry dbName first rest orderBy limit offset)
+
                 session.LastInsertId, session.LastGeneratedId, result, types
             | _ ->
                 let foundRows = session.Capabilities &&& Fsdb.Protocol.ClientFoundRows <> 0u
 
                 let (lastInsertId, lastGeneratedId), result =
-                    Executor.execute store registry dbName (session.LastInsertId, session.LastGeneratedId) foundRows stmt
+                    withRecursionDepth (fun () ->
+                        Executor.execute store registry dbName (session.LastInsertId, session.LastGeneratedId) foundRows stmt)
 
                 lastInsertId, lastGeneratedId, result, []
 

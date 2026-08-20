@@ -44,6 +44,16 @@ let private fromSubqueryMemo =
 /// touch far more code than it explains. Pushed and popped around a
 /// statement that carries `Ctes` (see `withCteScope`).
 let private cteScope = System.Threading.AsyncLocal<Map<string, ColumnDef list * Value[] list>>()
+let private cteRecursionDepth = System.Threading.AsyncLocal<int64 option>()
+
+let withCteRecursionDepth (limit: int64) (body: unit -> 'a) : 'a =
+    let saved = cteRecursionDepth.Value
+
+    try
+        cteRecursionDepth.Value <- Some limit
+        body ()
+    finally
+        cteRecursionDepth.Value <- saved
 
 let private currentCteScope () : Map<string, ColumnDef list * Value[] list> =
     match box cteScope.Value with
@@ -3438,14 +3448,16 @@ and private materializeCte
 
             try
                 while failure.IsNone && not working.IsEmpty do
-                    if passes >= Limits.cteMaxRecursionDepth then
+                    let recursionLimit = cteRecursionDepth.Value |> Option.defaultValue Limits.cteMaxRecursionDepth
+
+                    if recursionLimit <> 0L && int64 passes >= recursionLimit then
                         failure <-
                             Some(
                                 Err(
                                     3636,
                                     sprintf
                                         "Recursive query aborted after %d iterations. Try increasing @@cte_max_recursion_depth to a larger value."
-                                        (Limits.cteMaxRecursionDepth + 1)
+                                        (recursionLimit + 1L)
                                 )
                             )
                     else
