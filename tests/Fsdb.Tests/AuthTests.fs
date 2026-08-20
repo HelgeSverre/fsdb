@@ -87,6 +87,19 @@ let tests =
                       "subquery in an INSERT VALUES needs SELECT on secret"
               | Error e -> failtestf "parse insert: %s" e
 
+          testCase "ON DUPLICATE KEY UPDATE requires UPDATE on the target table"
+          <| fun _ ->
+              for sql in
+                  [ "INSERT INTO dst VALUES (1) ON DUPLICATE KEY UPDATE value = VALUES(value)"
+                    "INSERT INTO dst SELECT * FROM src ON DUPLICATE KEY UPDATE value = VALUES(value)" ] do
+                  match Fsdb.Parser.parse sql with
+                  | Ok statement ->
+                      Expect.contains
+                          (requiredPrivileges "app" statement)
+                          ("UPDATE", OnTable("app", "dst"))
+                          "the duplicate branch updates an existing target row"
+                  | Error error -> failtestf "parse %s: %s" sql error
+
           testCase "REVOKE GRANT OPTION, SELECT still requires SELECT on the target"
           <| fun _ ->
               // The GRANT OPTION token must not make expandPrivs error and

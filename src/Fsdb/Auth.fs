@@ -531,11 +531,14 @@ let rec requiredPrivileges (defaultDb: string) (stmt: Statement) : (string * Pri
             @ (onDup |> List.collect (snd >> exprReadTables defaultDb))
             |> List.distinct
 
-        onTables "INSERT" [ split table ] @ onTables "SELECT" readInExprs
+        onTables "INSERT" [ split table ]
+        @ (if List.isEmpty onDup then [] else onTables "UPDATE" [ split table ])
+        @ onTables "SELECT" readInExprs
     | InsertSelect(table, _, select, onDup, _) ->
         let readInExprs = onDup |> List.collect (snd >> exprReadTables defaultDb) |> List.distinct
 
         onTables "INSERT" [ split table ]
+        @ (if List.isEmpty onDup then [] else onTables "UPDATE" [ split table ])
         @ onTables "SELECT" ((selectTables defaultDb select @ readInExprs) |> List.distinct)
     | Update u ->
         let readInExprs =
