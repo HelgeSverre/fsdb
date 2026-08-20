@@ -7,11 +7,14 @@ hotspots, not to chase parity — fsdb optimizes for readable F# first.
 ## Running
 
 ```sh
-just bench          # full latency suite (~7 min), results -> results/<git-sha>.md
-just bench-quick    # ShortRun job for fast local iteration, no results file
-just bench-load     # N-writer throughput (ops/sec), results -> results/<git-sha>-load.md
-just bench-durable  # 4-target durability-matched latency, results -> results/<git-sha>-durable.md
-just bench-scale    # latency suite at 100k/500k rows, results -> results/<git-sha>-scale.md
+just bench               # full latency suite, results -> results/<git-sha>.md
+just bench-features      # recent SQL features only, results -> results/<git-sha>-features.md
+just bench-quick         # ShortRun validation, no results file
+just bench-load          # 8-worker throughput, results -> results/<git-sha>-load.md
+just bench-load-scale    # throughput at 1/2/4/8/16 workers
+just bench-durable       # four-target durability-matched latency
+just bench-scale         # scale-sensitive cases at 100k/500k rows
+just bench-comprehensive # latency, durability, data scale, and worker scale
 ```
 
 Prerequisites and rules:
@@ -34,9 +37,9 @@ Prerequisites and rules:
   in the bench fsproj — the SDK's default portable PDBs otherwise make
   BenchmarkDotNet report DEBUG; the recipe uses `dotnet exec`, not
   `dotnet run`, which sets hot-reload env vars).
-- fsdb restarts and reseeds per benchmark case so a pathological case can't
-  poison later measurements (see the module comment in
-  `Fsdb.Benchmarks/ServerBenchmarks.fs`).
+- Both databases are reset and reseeded per benchmark case. fsdb also
+  restarts, so a pathological case cannot poison later measurements. This
+  keeps mutation benchmarks independent of BenchmarkDotNet's case order.
 - The default run measures fsdb in-memory (no `--data-dir`, so no WAL/fsync).
   `bench-durable` adds the matched configs: fsdb `--data-dir` (binary WAL,
   one plain `fsync` per commit — see `Persistence.attach`; .NET's
@@ -44,17 +47,24 @@ Prerequisites and rules:
   against durable MySQL, and in-memory fsdb against a no-fsync MySQL. A
   write-number only means something when both engines pay (or both skip) the
   same durability cost.
-- `bench-load` measures throughput, not latency: N workers over disjoint id
-  slices so MySQL sees no row contention, reporting ops/sec per workload.
-  fsdb combines disjoint writes through optimistic row-conflict merging,
-  which a single-connection latency suite structurally cannot exercise.
+- `bench-load` measures throughput, not latency. Its disjoint and hot-row
+  writes separate publication throughput from genuine contention, alongside
+  reads, inserts, upserts, REPLACE, explicit transactions, and mixed traffic.
+  `FSDB_LOAD_WORKERS` accepts a comma-separated worker-count matrix;
+  `FSDB_LOAD_TRIALS` controls repetition. Engine order alternates between
+  trials, and the report includes relative standard deviation.
 - Connection pooling is off (fsdb doesn't implement COM_RESET_CONNECTION).
 - The wire+client floor is ~200 µs/op on this machine (`SELECT 1` round
   trip ≈ 0.26 ms via MySqlConnector over loopback) — sub-millisecond rows
   are bounded by the harness as much as the engine.
-- Workloads: 10k users + 50k orders, deterministic seed (override with
-  `FSDB_BENCH_USERS`/`FSDB_BENCH_ORDERS`). One operation per invocation;
-  BenchmarkDotNet handles warmup, outliers, and statistics.
+- Workloads: 10k users + 50k orders + 10k FULLTEXT articles, deterministic
+  seed (override with `FSDB_BENCH_USERS`, `FSDB_BENCH_ORDERS`, and
+  `FSDB_BENCH_ARTICLES`). The feature matrix covers views, triggers, CHECK
+  constraints, generated columns, CTEs, windows, JSON_TABLE, FULLTEXT,
+  computed projections, transactions, and upserts. One operation runs per
+  invocation; BenchmarkDotNet handles warmup, outliers, and statistics.
+- BenchmarkDotNet's allocation column covers the benchmark client process,
+  including MySqlConnector; it does not measure allocations in either server.
 
 ## Results history
 

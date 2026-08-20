@@ -33,9 +33,8 @@ let killPort (port: int) =
     use killer = Process.Start("/bin/sh", $"-c \"lsof -ti tcp:{port} | xargs -r kill -9\"")
     killer.WaitForExit(5000) |> ignore
 
-/// Resets and reseeds `fsdb_bench` on `target`. mysql is one long-lived
-/// server and needs this at most once per run; fsdb reseeds on every start
-/// because it restarts per workload.
+/// Resets and reseeds `fsdb_bench` on `target`. MySQL keeps one server but is
+/// reset per benchmark case; fsdb reseeds after every process restart.
 let resetAndSeed (target: string) =
     printfn $"Seeding {target}: {Schema.userCount} users, {Schema.orderCount} orders..."
     Schema.resetDatabase target

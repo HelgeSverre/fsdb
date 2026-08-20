@@ -227,6 +227,16 @@ bench:
     @rm -rf BenchmarkDotNet.Artifacts
     @echo "results: benchmarks/results/$(git rev-parse --short HEAD).md"
 
+# Recent SQL features without rerunning the established core/auth matrix.
+[group('bench')]
+bench-features:
+    @FSDB_BENCH_CATEGORIES=Feature just _bench-run
+    @mkdir -p benchmarks/results
+    @just _bench-header > "benchmarks/results/$(git rev-parse --short HEAD)-features.md"
+    @cat BenchmarkDotNet.Artifacts/results/Fsdb.Benchmarks.ServerBenchmarks.ServerBenchmarks-report-github.md >> "benchmarks/results/$(git rev-parse --short HEAD)-features.md"
+    @rm -rf BenchmarkDotNet.Artifacts
+    @echo "results: benchmarks/results/$(git rev-parse --short HEAD)-features.md"
+
 # Durability-matched latency: fsdb in-memory and --data-dir (WAL) vs MySQL
 # durable and no-fsync. Reclassifies the "fsdb beats MySQL on writes" number
 # by matching what each engine actually pays for.
@@ -234,7 +244,7 @@ bench:
 bench-durable:
     @just _bench-durable-run
     @mkdir -p benchmarks/results
-    @just _bench-header > "benchmarks/results/$(git rev-parse --short HEAD)-durable.md"
+    @just _bench-header mode="fsdb in-memory/WAL; MySQL durable/no-fsync" > "benchmarks/results/$(git rev-parse --short HEAD)-durable.md"
     @cat BenchmarkDotNet.Artifacts/results/Fsdb.Benchmarks.ServerBenchmarks.ServerBenchmarks-report-github.md >> "benchmarks/results/$(git rev-parse --short HEAD)-durable.md"
     @cat BenchmarkDotNet.Artifacts/results/Fsdb.Benchmarks.ServerBenchmarks.ConnectBenchmarks-report-github.md >> "benchmarks/results/$(git rev-parse --short HEAD)-durable.md"
     @rm -rf BenchmarkDotNet.Artifacts
@@ -244,9 +254,9 @@ bench-durable:
 # hiding at the default 10k/50k (seeding per fsdb case dominates the runtime).
 [group('bench')]
 bench-scale:
-    @FSDB_BENCH_USERS=100000 FSDB_BENCH_ORDERS=500000 just _bench-run
+    @FSDB_BENCH_USERS=100000 FSDB_BENCH_ORDERS=500000 FSDB_BENCH_ARTICLES=100000 FSDB_BENCH_CATEGORIES=Scale just _bench-run
     @mkdir -p benchmarks/results
-    @just _bench-header > "benchmarks/results/$(git rev-parse --short HEAD)-scale.md"
+    @just _bench-header users=100000 orders=500000 articles=100000 > "benchmarks/results/$(git rev-parse --short HEAD)-scale.md"
     @cat BenchmarkDotNet.Artifacts/results/Fsdb.Benchmarks.ServerBenchmarks.ServerBenchmarks-report-github.md >> "benchmarks/results/$(git rev-parse --short HEAD)-scale.md"
     @rm -rf BenchmarkDotNet.Artifacts
     @echo "results: benchmarks/results/$(git rev-parse --short HEAD)-scale.md"
@@ -254,7 +264,7 @@ bench-scale:
 # Environment/provenance header prepended to each results file
 [group('bench')]
 [private]
-_bench-header:
+_bench-header mode="in-memory fsdb; durable MySQL" users="10000" orders="50000" articles="10000":
     #!/usr/bin/env bash
     set -euo pipefail
     echo "<!--"
@@ -262,7 +272,9 @@ _bench-header:
     echo "date: $(date -u +%Y-%m-%dT%H:%M:%SZ)"
     echo "os: $(uname -srm)"
     echo "dotnet: $(dotnet --version)"
-    echo "fsdb server mode: in-memory (no --data-dir, no WAL/fsync)"
+    echo "mysql: $({{ MYSQL }} --version)"
+    echo "targets: {{ mode }}"
+    echo "dataset: {{ users }} users, {{ orders }} orders, {{ articles }} articles"
     echo "-->"
     echo
 
@@ -283,3 +295,18 @@ bench-load:
     @cat benchmarks/load-report.md >> "benchmarks/results/$(git rev-parse --short HEAD)-load.md"
     @rm -f benchmarks/load-report.md
     @echo "results: benchmarks/results/$(git rev-parse --short HEAD)-load.md"
+
+# Worker-scaling throughput with longer samples than the default load check.
+[group('bench')]
+bench-load-scale:
+    @mkdir -p benchmarks/results
+    @FSDB_LOAD_WORKERS=1,2,4,8,16 FSDB_LOAD_TRIALS=3 FSDB_LOAD_WARMUP=2 FSDB_LOAD_SECONDS=10 just _bench-run --load
+    @just _bench-header > "benchmarks/results/$(git rev-parse --short HEAD)-load-scale.md"
+    @cat benchmarks/load-report.md >> "benchmarks/results/$(git rev-parse --short HEAD)-load-scale.md"
+    @rm -f benchmarks/load-report.md
+    @echo "results: benchmarks/results/$(git rev-parse --short HEAD)-load-scale.md"
+
+# The complete comparison: default and durable latency, data-size scaling,
+# and concurrent throughput scaling.
+[group('bench')]
+bench-comprehensive: bench bench-durable bench-scale bench-load-scale

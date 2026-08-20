@@ -18,6 +18,7 @@ let private envCount (name: string) (fallback: int) : int =
 // O(n) vs O(log n) scaling stops hiding at the default 10k/50k.
 let userCount = envCount "FSDB_BENCH_USERS" 10_000
 let orderCount = envCount "FSDB_BENCH_ORDERS" 50_000
+let articleCount = envCount "FSDB_BENCH_ARTICLES" userCount
 let fsdbPort = envCount "FSDB_BENCH_PORT" 3307
 
 let private plans = [| "free"; "pro"; "enterprise" |]
@@ -79,6 +80,32 @@ let createSchema (conn: MySqlConnection) =
     exec
         conn
         """
+        CREATE TABLE articles (
+            id INT PRIMARY KEY AUTO_INCREMENT,
+            title VARCHAR(200) NOT NULL,
+            body TEXT NOT NULL,
+            FULLTEXT KEY ft_articles (title, body)
+        )
+        """
+
+    exec
+        conn
+        """
+        CREATE TABLE checked_values (
+            id INT PRIMARY KEY AUTO_INCREMENT,
+            value INT NOT NULL,
+            doubled INT AS (value * 2) STORED,
+            CONSTRAINT chk_checked_value CHECK (value >= 0)
+        )
+        """
+
+    exec conn "CREATE TABLE trigger_source (id INT PRIMARY KEY AUTO_INCREMENT, value INT NOT NULL)"
+    exec conn "CREATE TABLE trigger_audit (id INT PRIMARY KEY AUTO_INCREMENT, source_id INT NOT NULL, value INT NOT NULL)"
+    exec conn "CREATE TRIGGER audit_trigger_source AFTER INSERT ON trigger_source FOR EACH ROW INSERT INTO trigger_audit (source_id, value) VALUES (NEW.id, NEW.value)"
+
+    exec
+        conn
+        """
         CREATE TABLE orders (
             id INT PRIMARY KEY AUTO_INCREMENT,
             user_id INT NOT NULL,
@@ -87,6 +114,9 @@ let createSchema (conn: MySqlConnection) =
             created_at DATETIME NOT NULL
         )
         """
+
+    exec conn "CREATE VIEW adult_users AS SELECT id, name, email, age FROM users WHERE age >= 40"
+    exec conn "CREATE VIEW order_totals AS SELECT status, COUNT(*) AS order_count, SUM(total) AS total FROM orders GROUP BY status"
 
 /// Seed `userCount` users and `orderCount` orders via batched multi-row
 /// INSERTs, drawing from a fixed seed so fsdb and MySQL see byte-identical
@@ -125,3 +155,18 @@ let seed (conn: MySqlConnection) =
                 $"({userId},{totalStr},'{status}','{randomDate ()}')" ]
 
         runBatch "orders (user_id, total, status, created_at)" (String.Join(",", rows))
+
+    for batchStart in 0 .. batchSize .. articleCount - 1 do
+        let batchEnd = min (batchStart + batchSize - 1) (articleCount - 1)
+
+        let rows =
+            [ for i in batchStart..batchEnd ->
+                let body =
+                    if i % 10 = 0 then
+                        "database concurrency benchmark"
+                    else
+                        "application storage sample"
+
+                $"('Benchmark article {i}','{body}')" ]
+
+        runBatch "articles (title, body)" (String.Join(",", rows))

@@ -3,19 +3,10 @@
 /// one table with both servers under identical data and queries.
 ///
 /// BenchmarkDotNet launches a fresh process per (Target x Benchmark method)
-/// case, so GlobalSetup/GlobalCleanup below run once per case, not once per
-/// suite. That per-case granularity is what makes the restart strategy
-/// possible: fsdb has a real bug (a timed-out JOIN keeps building its cross
-/// product server-side after the client gives up) where one case's leftover
-/// work inflates every later case's numbers 5-8x. The fix chosen here is
-/// "restart the fsdb server per case", not "reseed in place" or "run every
-/// case on its own port": a restart is the only thing that actually kills
-/// the leftover work, it needs just one well-known port (nothing else is
-/// listening on it once the case that had it exits), and BenchmarkDotNet
-/// already hands us fresh-process granularity for free. mysql has no such
-/// bug, so it keeps the cheaper "start once, seed once" lifecycle owned by
-/// the justfile — restarting a real mysqld per case would only add time
-/// for no correctness gain.
+/// case, so GlobalSetup gives both targets the same freshly seeded database.
+/// fsdb restarts because its catalog is in memory; MySQL keeps its server but
+/// drops and recreates the benchmark database. Mutation cases therefore
+/// cannot change the row count or values seen by a later case.
 module Fsdb.Benchmarks.ServerBenchmarks
 
 open System
@@ -63,6 +54,8 @@ type ServerBenchmarks() =
             let dir = BenchServer.tempDataDir ()
             dataDir <- Some dir
             fsdbProcess <- Some(BenchServer.startFsdb (BenchServer.benchBin ()) (Some dir))
+        else
+            BenchServer.resetAndSeed this.Target
 
         conn <- new MySqlConnection(Schema.connectionString this.Target)
         conn.Open()
@@ -113,15 +106,18 @@ type ServerBenchmarks() =
             ()
 
     [<Benchmark>]
+    [<BenchmarkCategory("Scale")>]
     member this.PointSelectByPk() =
         this.Query $"SELECT id, name, email, age, meta, created_at FROM users WHERE id = {randomUserId ()}"
 
     [<Benchmark>]
+    [<BenchmarkCategory("Scale")>]
     member this.FilterScanOrderLimit() =
         this.Query
             "SELECT id, name, age, created_at FROM users WHERE age > 40 ORDER BY created_at DESC LIMIT 20"
 
     [<Benchmark>]
+    [<BenchmarkCategory("Scale")>]
     member this.InsertSingle() =
         let i = Interlocked.Increment(&insertCounter)
 
@@ -151,6 +147,7 @@ type ServerBenchmarks() =
         )
 
     [<Benchmark>]
+    [<BenchmarkCategory("Scale")>]
     member this.ReplaceExistingByPk() =
         let id = randomUserId ()
         let seedIndex = id - 1
@@ -160,10 +157,12 @@ type ServerBenchmarks() =
         )
 
     [<Benchmark>]
+    [<BenchmarkCategory("Scale")>]
     member this.UpdateSingleRow() =
         this.Exec $"UPDATE users SET age = age + 1 WHERE id = {randomUserId ()}"
 
     [<Benchmark>]
+    [<BenchmarkCategory("Scale")>]
     member this.JoinUsersOrders() =
         this.Query(
             "SELECT u.id, u.name, o.id, o.total, o.status "
@@ -172,10 +171,12 @@ type ServerBenchmarks() =
         )
 
     [<Benchmark>]
+    [<BenchmarkCategory("Scale")>]
     member this.GroupByAggregate() =
         this.Query "SELECT status, COUNT(*), SUM(total) FROM orders GROUP BY status"
 
     [<Benchmark>]
+    [<BenchmarkCategory("Scale")>]
     member this.JsonExtract() =
         this.Query "SELECT id, name FROM users WHERE meta->>'$.plan' = 'pro' LIMIT 20"
 
@@ -191,11 +192,85 @@ type ServerBenchmarks() =
             ()
 
     [<Benchmark>]
+    [<BenchmarkCategory("Scale")>]
     member this.UpdateByNonIndexed() =
         // `name` has no index, so the WHERE narrows to nothing and the UPDATE
         // pays the full-table scan — the O(n) write shape the PK-narrowed
         // `UpdateSingleRow` never exercises.
         this.Exec $"UPDATE users SET age = age + 1 WHERE name = 'user_{randomUserId () - 1}'"
+
+    [<Benchmark>]
+    [<BenchmarkCategory("Feature")>]
+    member this.UpsertExistingByPk() =
+        let id = randomUserId ()
+        let seedIndex = id - 1
+
+        this.Exec(
+            $"INSERT INTO users VALUES ({id},'user_{seedIndex}','user_{seedIndex}@bench.test',30,'{{\"plan\":\"free\"}}','2024-01-01 00:00:00') "
+            + "ON DUPLICATE KEY UPDATE age = age + 1"
+        )
+
+    [<Benchmark>]
+    [<BenchmarkCategory("Feature")>]
+    member this.TransactionTwoPointUpdates() =
+        this.Exec "START TRANSACTION"
+
+        try
+            this.Exec $"UPDATE users SET age = age + 1 WHERE id = {randomUserId ()}"
+            this.Exec $"UPDATE users SET age = age + 1 WHERE id = {randomUserId ()}"
+            this.Exec "COMMIT"
+        with _ ->
+            this.Exec "ROLLBACK"
+            reraise ()
+
+    [<Benchmark>]
+    [<BenchmarkCategory("Feature")>]
+    member this.ComputedProjection() =
+        this.Query $"SELECT id, age * 2 AS doubled, CONCAT(name, '/', email) AS label FROM users WHERE id = {randomUserId ()}"
+
+    [<Benchmark>]
+    [<BenchmarkCategory("Feature")>]
+    member this.ViewFilterLimit() =
+        this.Query "SELECT id, name, email, age FROM adult_users ORDER BY id LIMIT 20"
+
+    [<Benchmark>]
+    [<BenchmarkCategory("Feature")>]
+    member this.ViewAggregate() =
+        this.Query "SELECT status, order_count, total FROM order_totals ORDER BY status"
+
+    [<Benchmark>]
+    [<BenchmarkCategory("Feature")>]
+    member this.RecursiveCte100() =
+        this.Query "WITH RECURSIVE numbers (n) AS (SELECT 1 UNION ALL SELECT n + 1 FROM numbers WHERE n < 100) SELECT COUNT(*), SUM(n) FROM numbers"
+
+    [<Benchmark>]
+    [<BenchmarkCategory("Feature")>]
+    [<BenchmarkCategory("Scale")>]
+    member this.WindowTopOrders() =
+        this.Query "SELECT id, status, total, ROW_NUMBER() OVER (PARTITION BY status ORDER BY total DESC, id) AS rn FROM orders ORDER BY status, rn LIMIT 20"
+
+    [<Benchmark>]
+    [<BenchmarkCategory("Feature")>]
+    member this.CorrelatedJsonTable() =
+        this.Query "SELECT u.id, jt.plan FROM users u JOIN JSON_TABLE(u.meta, '$' COLUMNS (plan VARCHAR(20) PATH '$.plan')) jt ON 1 WHERE u.id <= 100 ORDER BY u.id"
+
+    [<Benchmark>]
+    [<BenchmarkCategory("Feature")>]
+    [<BenchmarkCategory("Scale")>]
+    member this.FullTextBooleanSearch() =
+        this.Query "SELECT id, title FROM articles WHERE MATCH(title, body) AGAINST ('+database +concurrency' IN BOOLEAN MODE) LIMIT 20"
+
+    [<Benchmark>]
+    [<BenchmarkCategory("Feature")>]
+    member this.InsertCheckedGenerated() =
+        let i = Interlocked.Increment(&insertCounter)
+        this.Exec $"INSERT INTO checked_values (value) VALUES ({i % 1000})"
+
+    [<Benchmark>]
+    [<BenchmarkCategory("Feature")>]
+    member this.InsertWithAfterTrigger() =
+        let i = Interlocked.Increment(&insertCounter)
+        this.Exec $"INSERT INTO trigger_source (value) VALUES ({i})"
 
     // -----------------------------------------------------------------------
     // Auth / accounts / information_schema — the GUI-client and user-system
@@ -262,6 +337,7 @@ type ServerBenchmarks() =
 type ConnectBenchmarks() =
 
     let mutable fsdbProcess : Process option = None
+    let mutable dataDir : string option = None
 
     member this.Targets() : string[] =
         if BenchServer.isDurableRun () then
@@ -274,8 +350,14 @@ type ConnectBenchmarks() =
 
     [<GlobalSetup>]
     member this.Setup() =
-        if this.Target = "fsdb" || this.Target = "fsdb-wal" then
+        if this.Target = "fsdb" then
             fsdbProcess <- Some(BenchServer.startFsdb (BenchServer.benchBin ()) None)
+        elif this.Target = "fsdb-wal" then
+            let dir = BenchServer.tempDataDir ()
+            dataDir <- Some dir
+            fsdbProcess <- Some(BenchServer.startFsdb (BenchServer.benchBin ()) (Some dir))
+        else
+            BenchServer.resetAndSeed this.Target
 
         // The password-verified account the connect cycle authenticates as.
         use conn = new MySqlConnection(Schema.connectionString this.Target)
@@ -294,6 +376,14 @@ type ConnectBenchmarks() =
         if this.Target = "fsdb" || this.Target = "fsdb-wal" then
             fsdbProcess |> Option.iter BenchServer.stopFsdb
             fsdbProcess <- None
+
+            dataDir |> Option.iter (fun dir ->
+                try
+                    Directory.Delete(dir, true)
+                with _ ->
+                    ())
+
+            dataDir <- None
 
     [<Benchmark>]
     member this.ConnectAuthenticateClose() =

@@ -2,9 +2,9 @@ module Fsdb.Benchmarks.Program
 
 open System
 open BenchmarkDotNet.Configs
+open BenchmarkDotNet.Filters
 open BenchmarkDotNet.Jobs
 open BenchmarkDotNet.Running
-open Fsdb.Benchmarks.BenchServer
 open Fsdb.Benchmarks.LoadBenchmarks
 open Fsdb.Benchmarks.ServerBenchmarks
 
@@ -13,16 +13,9 @@ let main argv =
     if argv |> Array.contains "--load" then
         LoadBenchmarks.run ()
     else
-        // fsdb is seeded per benchmark case (see ServerBenchmarks) because it
-        // restarts per case; the mysql servers are long-lived for the whole
-        // run and only need seeding once each, here.
-        BenchServer.resetAndSeed "mysql"
-        if BenchServer.isDurableRun () then
-            BenchServer.resetAndSeed "mysql-nofsync"
-
         // Full run: 3 warmup + 6 measured iterations per (target x workload) —
         // fixed counts instead of BenchmarkDotNet's open-ended pilot stage, to
-        // keep the whole 2-target x 8-workload suite under ~10 minutes.
+        // bound the runtime of the full target/workload matrix.
         // `--quick` (just bench-quick) swaps in BenchmarkDotNet's built-in
         // ShortRun job for fast local iteration.
         // DefaultConfig already ships a GitHub-flavored markdown exporter,
@@ -33,7 +26,16 @@ let main argv =
             else
                 Job.Default.WithWarmupCount(3).WithIterationCount(6)
 
-        let config = DefaultConfig.Instance.AddJob(job)
+        let config =
+            let baseConfig = DefaultConfig.Instance.AddJob(job)
+
+            match Environment.GetEnvironmentVariable "FSDB_BENCH_CATEGORIES" with
+            | null -> baseConfig
+            | value ->
+                let categories =
+                    value.Split(',', StringSplitOptions.RemoveEmptyEntries ||| StringSplitOptions.TrimEntries)
+
+                baseConfig.AddFilter(AnyCategoriesFilter(categories))
 
         BenchmarkRunner.Run<ServerBenchmarks>(config) |> ignore
         // Separate class/run: the connect cycle needs its fixed small
