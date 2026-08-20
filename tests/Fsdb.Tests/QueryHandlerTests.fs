@@ -868,6 +868,46 @@ let tests =
               | Err(1044, _) -> ()
               | other -> failtestf "expected DROP information_schema to be denied, got %A" other
 
+          testCase "information_schema only reveals schemas, definitions, and grants visible to the viewer"
+          <| fun _ ->
+              let store = Fsdb.Storage.create ()
+              let root = create 1 store
+              let root, _ = handle root "CREATE DATABASE secret"
+              let root, _ = handle root "USE secret"
+              let root, _ = handle root "CREATE TABLE t (id INT)"
+              let root, _ = handle root "CREATE TABLE log (id INT)"
+              let root, _ = handle root "CREATE VIEW secret_view AS SELECT id FROM t"
+              let root, _ = handle root "CREATE TRIGGER secret_trigger AFTER INSERT ON t FOR EACH ROW INSERT INTO log VALUES (NEW.id)"
+              let root, _ = handle root "CREATE USER 'limited' IDENTIFIED BY 'pw'"
+              let root, _ = handle root "CREATE USER 'grantee' IDENTIFIED BY 'pw'"
+              let root, _ = handle root "GRANT SELECT ON secret.t TO 'grantee'"
+              let limited = { create 2 store with User = "limited" }
+
+              let expectEmpty sql =
+                  match handle limited sql |> snd with
+                  | ResultSet(_, []) -> ()
+                  | other -> failtestf "expected no visible rows for %s, got %A" sql other
+
+              expectEmpty "SELECT SCHEMA_NAME FROM information_schema.SCHEMATA WHERE SCHEMA_NAME = 'secret'"
+              expectEmpty "SELECT TABLE_NAME FROM information_schema.TABLES WHERE TABLE_SCHEMA = 'secret'"
+              expectEmpty "SELECT VIEW_DEFINITION FROM information_schema.VIEWS WHERE TABLE_SCHEMA = 'secret'"
+              expectEmpty "SELECT ACTION_STATEMENT FROM information_schema.TRIGGERS WHERE TRIGGER_SCHEMA = 'secret'"
+              expectEmpty "SELECT GRANTEE FROM information_schema.SCHEMA_PRIVILEGES WHERE GRANTEE LIKE '%grantee%'"
+              expectEmpty "SELECT GRANTEE FROM information_schema.TABLE_PRIVILEGES WHERE GRANTEE LIKE '%grantee%'"
+
+              let _, _ = handle root "GRANT SELECT ON secret.t TO 'limited'"
+
+              match handle limited "SELECT TABLE_NAME FROM information_schema.TABLES WHERE TABLE_SCHEMA = 'secret'" |> snd with
+              | ResultSet(_, [ [ Some "t" ] ]) -> ()
+              | other -> failtestf "expected the granted table to become visible, got %A" other
+
+              match handle limited "SELECT GRANTEE FROM information_schema.TABLE_PRIVILEGES WHERE GRANTEE LIKE '%limited%'" |> snd with
+              | ResultSet(_, [ [ Some grantee ] ]) -> Expect.stringContains grantee "limited" "only the viewer's grant is visible"
+              | other -> failtestf "expected the viewer's table grant, got %A" other
+
+              expectEmpty "SELECT VIEW_DEFINITION FROM information_schema.VIEWS WHERE TABLE_SCHEMA = 'secret'"
+              expectEmpty "SELECT ACTION_STATEMENT FROM information_schema.TRIGGERS WHERE TRIGGER_SCHEMA = 'secret'"
+
           testCase "DROP TRIGGER requires TRIGGER privilege on its subject table"
           <| fun _ ->
               let store = Fsdb.Storage.create ()

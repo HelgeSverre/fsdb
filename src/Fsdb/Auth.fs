@@ -874,6 +874,11 @@ let canSeeDatabase (store: Store) (user: string) (db: string) : bool =
                     && row.[privIdx] <> VString "")
             | _ -> false
 
+/// Whether any privilege at table scope or above makes a table visible in
+/// metadata views.
+let canSeeTable (store: Store) (user: string) (db: string) (table: string) : bool =
+    staticPrivileges |> List.exists (fun def -> check store user [ def.Sql, OnTable(db, table) ] |> Result.isOk)
+
 /// A privilege list rendered MySQL-style: every static privilege → `ALL
 /// PRIVILEGES`, none → `USAGE`, otherwise the names in column order.
 let private renderPrivList (granted: PrivDef list) (all: PrivDef list) : string =
