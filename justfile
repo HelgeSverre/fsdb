@@ -244,7 +244,7 @@ bench-features:
 bench-durable:
     @just _bench-durable-run
     @mkdir -p benchmarks/results
-    @just _bench-header mode="fsdb in-memory/WAL; MySQL durable/no-fsync" > "benchmarks/results/$(git rev-parse --short HEAD)-durable.md"
+    @just _bench-header "fsdb in-memory/WAL; MySQL durable/no-fsync" > "benchmarks/results/$(git rev-parse --short HEAD)-durable.md"
     @cat BenchmarkDotNet.Artifacts/results/Fsdb.Benchmarks.ServerBenchmarks.ServerBenchmarks-report-github.md >> "benchmarks/results/$(git rev-parse --short HEAD)-durable.md"
     @cat BenchmarkDotNet.Artifacts/results/Fsdb.Benchmarks.ServerBenchmarks.ConnectBenchmarks-report-github.md >> "benchmarks/results/$(git rev-parse --short HEAD)-durable.md"
     @rm -rf BenchmarkDotNet.Artifacts
@@ -256,7 +256,7 @@ bench-durable:
 bench-scale:
     @FSDB_BENCH_USERS=100000 FSDB_BENCH_ORDERS=500000 FSDB_BENCH_ARTICLES=100000 FSDB_BENCH_CATEGORIES=Scale just _bench-run
     @mkdir -p benchmarks/results
-    @just _bench-header users=100000 orders=500000 articles=100000 > "benchmarks/results/$(git rev-parse --short HEAD)-scale.md"
+    @just _bench-header "in-memory fsdb; durable MySQL" 100000 500000 100000 > "benchmarks/results/$(git rev-parse --short HEAD)-scale.md"
     @cat BenchmarkDotNet.Artifacts/results/Fsdb.Benchmarks.ServerBenchmarks.ServerBenchmarks-report-github.md >> "benchmarks/results/$(git rev-parse --short HEAD)-scale.md"
     @rm -rf BenchmarkDotNet.Artifacts
     @echo "results: benchmarks/results/$(git rev-parse --short HEAD)-scale.md"
