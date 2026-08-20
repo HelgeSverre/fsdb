@@ -207,6 +207,15 @@ type StreamReader(stream: Stream) =
         b
 
     member _.ReadBytes(n: int) : byte[] =
+        if n < 0 then
+            raise (InvalidDataException("negative byte count"))
+
+        if stream.CanSeek then
+            let available = int64 (len - pos) + stream.Length - stream.Position
+
+            if int64 n > available then
+                raise (EndOfStreamException())
+
         let result = Array.zeroCreate<byte> n
         let mutable written = 0
 
@@ -262,7 +271,11 @@ type StreamReader(stream: Stream) =
 
     member this.ReadLenEncString() : string option =
         this.ReadLenEncInt()
-        |> Option.map (fun len -> Encoding.UTF8.GetString(this.ReadBytes(int len)))
+        |> Option.map (fun len ->
+            if len > uint64 Int32.MaxValue then
+                raise (InvalidDataException("length-encoded string is too large"))
+
+            Encoding.UTF8.GetString(this.ReadBytes(int len)))
 
     interface IReader with
         member this.ReadByte() = this.ReadByte()

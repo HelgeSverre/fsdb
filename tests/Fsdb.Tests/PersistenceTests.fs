@@ -989,6 +989,22 @@ let tests =
               let r = Reader(w.ToArray())
               Expect.equal (decodeValue r) original "VJson round-trips through encodeValue/decodeValue"
 
+          testCase "the streamed binary reader rejects impossible lengths before allocating"
+          <| fun _ ->
+              let encodedLength (length: int64) =
+                  let w = Writer()
+                  w.WriteByte 0xfeuy
+                  w.WriteInt64LE length
+                  w.ToArray()
+
+              Expect.throwsT<EndOfStreamException>
+                  (fun () -> Fsdb.Binary.StreamReader(new MemoryStream(encodedLength (int64 Int32.MaxValue))).ReadLenEncString() |> ignore)
+                  "a declared length beyond the remaining stream is rejected"
+
+              Expect.throwsT<InvalidDataException>
+                  (fun () -> Fsdb.Binary.StreamReader(new MemoryStream(encodedLength 0x100000000L)).ReadLenEncString() |> ignore)
+                  "a length that cannot fit in an array never wraps through int"
+
           testCase "the Value binary codec round-trips the whole BIGINT UNSIGNED range, including the half int64 cannot hold"
           <| fun _ ->
               // `encodeValue`'s 0x09 tag writes the same eight bytes as
