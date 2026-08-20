@@ -3167,14 +3167,13 @@ let replaceRows
 
                                         let conflicts =
                                             uniqueGroups
-                                            |> List.indexed
-                                            |> List.choose (fun (groupIndex, (name, indices)) ->
+                                            |> List.choose (fun (name, indices) ->
                                                 encodeConstraintKey table.Columns indices candidate
                                                 |> Option.bind (fun encoded ->
                                                     Map.tryFind encoded (Map.find name table.UniqueIndex)
-                                                    |> Option.map (fun rowId -> groupIndex, rowId, table.RowsArray.[rowId])))
+                                                    |> Option.map (fun rowId -> rowId, table.RowsArray.[rowId])))
                                             |> List.fold
-                                                (fun (seen, matches) ((_, rowId, _) as matched) ->
+                                                (fun (seen, matches) ((rowId, _) as matched) ->
                                                     if Set.contains rowId seen then
                                                         seen, matches
                                                     else
@@ -3184,19 +3183,16 @@ let replaceRows
                                             |> List.rev
 
                                         let optimizedConflict =
-                                            match List.tryLast conflicts with
-                                            | Some(groupIndex, rowId, existing)
-                                                when groupIndex = uniqueGroups.Length - 1
-                                                     && (referencingForeignKeys db key).IsEmpty ->
-                                                Some(rowId, existing)
+                                            match conflicts with
+                                            | [ rowId, existing ] when (referencingForeignKeys db key).IsEmpty -> Some(rowId, existing)
                                             | _ -> None
 
                                         let deletedMatches =
                                             match optimizedConflict with
-                                            | Some _ -> conflicts |> List.take (conflicts.Length - 1)
+                                            | Some _ -> []
                                             | None -> conflicts
 
-                                        let deletedConflicts = deletedMatches |> List.map (fun (_, _, row) -> row)
+                                        let deletedConflicts = deletedMatches |> List.map snd
 
                                         cascadeDelete store.ForeignKeyChecks db key deletedConflicts
                                         |> Result.bind (fun (deletedDb, removed, blanked) ->

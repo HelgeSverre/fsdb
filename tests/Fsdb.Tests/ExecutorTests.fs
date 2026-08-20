@@ -1834,6 +1834,26 @@ let tests =
                     | ResultSet(_, [ [ Some "1"; Some "20" ] ]) -> ()
                     | other -> failtestf "expected one replacement row, got %A" other
 
+                testCase "retains one row identity when primary and unique keys identify it"
+                <| fun _ ->
+                    let store = newStore ()
+                    runDefault store "CREATE TABLE t (id INT PRIMARY KEY, email VARCHAR(100) UNIQUE, n INT)" |> ignore
+                    runDefault store "INSERT INTO t VALUES (1, 'alice@example.test', 10)" |> ignore
+
+                    let rowId () =
+                        match tryUniqueLookup store defaultDatabase "t" "id" (VInt 1L) with
+                        | Some(_, [ rowId, _ ]) -> rowId
+                        | other -> failtestf "expected one indexed row, got %A" other
+
+                    let before = rowId ()
+
+                    Expect.equal
+                        (runDefault store "REPLACE INTO t VALUES (1, 'alice@example.test', 20)")
+                        (Affected 2UL)
+                        "changed replacement"
+
+                    Expect.equal (rowId ()) before "the replacement stays in the existing row slot"
+
                 testCase "one candidate deletes every row conflicting through separate unique keys"
                 <| fun _ ->
                     let store = newStore ()
