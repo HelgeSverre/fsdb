@@ -432,6 +432,20 @@ let tests =
               | Error(DuplicateKey("PRIMARY", _)) -> ()
               | other -> failtestf "expected id 10 to be rejected as a duplicate after replay, got %A" other
 
+          testCase "WAL replay accepts an INSERT that reuses a deleted primary key"
+          <| fun _ ->
+              let dir = tempDataDir ()
+              let store = load dir
+              attach dir store
+              let primaryKey = { mkCol "id" (TInt false) with Nullable = false; PrimaryKey = true }
+              createTable store defaultDatabase "reused" [ primaryKey ] [] [] None None
+              |> ignore
+              insertRows store defaultDatabase "reused" None [ [ VInt 1L ] ] |> ignore
+              deleteRows store defaultDatabase "reused" (fun _ -> Ok true) |> ignore
+              insertRows store defaultDatabase "reused" None [ [ VInt 1L ] ] |> ignore
+
+              Expect.equal (rowsOf (load dir) defaultDatabase "reused") [ [| VInt 1L |] ] "the reused key survives recovery"
+
           testCase "WAL replay of many single-row UPDATEs against a UNIQUE-indexed table doesn't rebuild the index once per event"
           <| fun _ ->
               // Replaying RowsUpdated/RowsDeleted must not reindex — a full

@@ -784,7 +784,7 @@ let rec private applyEvent (store: Store) (event: CommitEvent) : unit =
     match event with
     | RowsInserted(db, table, rows) ->
         if not rows.IsEmpty then
-            warn "RowsInserted" (insertRows store db table None (rows |> List.map List.ofArray) |> Result.map ignore)
+            appendRowsForReplay store db table rows (Log.diagnostic "fsdb: WAL replay warning: %s")
     | RowsUpdated(db, table, changes) -> mapTableRows store db table (applyRowChanges changes)
     | RowsDeleted(db, table, rows) -> mapTableRows store db table (applyRowDeletes rows)
     | SchemaChanged(db, stmt) -> applyDdl store db stmt

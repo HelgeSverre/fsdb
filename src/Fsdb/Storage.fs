@@ -3490,6 +3490,36 @@ let replaceTablesForReplay (store: Store) (dbName: string) (tableName: string) (
         | None -> onMissing (sprintf "unknown table '%s.%s'" dbName tableName)
         | Some table -> slot.Value <- slot.Value |> Map.add key { table with RowsArray = table.RowsArray |> List.ofSeq |> f |> ImmutableArray.CreateRange }
 
+/// Restores committed rows while WAL indexes are stale.
+let appendRowsForReplay (store: Store) (dbName: string) (tableName: string) (rows: Value[] list) (onMissing: string -> unit) : unit =
+    let key = normalizeTableName tableName
+
+    match store.Databases.TryGetValue dbName with
+    | false, _ -> onMissing (sprintf "unknown database '%s'" dbName)
+    | true, slot ->
+        match slot.Value |> Map.tryFind key with
+        | None -> onMissing (sprintf "unknown table '%s.%s'" dbName tableName)
+        | Some table ->
+            let nextAutoId =
+                match table.Columns |> List.tryFindIndex (fun column -> column.AutoIncrement) with
+                | None -> table.NextAutoId
+                | Some index ->
+                    rows
+                    |> List.fold
+                        (fun next row ->
+                            match row.[index] with
+                            | VInt value when value < Int64.MaxValue -> max next (value + 1L)
+                            | VUInt value when value < uint64 Int64.MaxValue -> max next (int64 value + 1L)
+                            | _ -> next)
+                        table.NextAutoId
+
+            let updated =
+                { table with
+                    RowsArray = table.RowsArray.AddRange rows
+                    NextAutoId = nextAutoId }
+
+            slot.Value <- slot.Value |> Map.add key updated
+
 /// Rebuilds every table's `UniqueIndex` from its current `Rows` across the
 /// whole store, once — what `Persistence.load` calls after replaying the
 /// WAL, since `replaceTablesForReplay` (`RowsUpdated`/`RowsDeleted` replay)
