@@ -493,7 +493,8 @@ and private selectOrUnionReadTables (defaultDb: string) (body: SelectOrUnion) : 
         selectReadTables defaultDb first @ (rest |> List.collect (snd >> selectReadTables defaultDb))
 
 and private selectReadTables (defaultDb: string) (s: SelectStmt) : (string * string) list =
-    (s.From |> Option.map (fromItemReadTables defaultDb) |> Option.defaultValue [])
+    (s.Ctes |> List.collect (fun cte -> selectOrUnionReadTables defaultDb cte.Body))
+    @ (s.From |> Option.map (fromItemReadTables defaultDb) |> Option.defaultValue [])
     @ (s.Joins |> List.collect (fun j -> fromItemReadTables defaultDb j.Table @ exprReadTables defaultDb j.On))
     @ (s.Where |> Option.map (exprReadTables defaultDb) |> Option.defaultValue [])
     @ (s.Having |> Option.map (exprReadTables defaultDb) |> Option.defaultValue [])
