@@ -1543,7 +1543,7 @@ let tests =
               |> Async.RunSynchronously
 
           // `Session.defaultVariables` advertises the wire's real per-packet
-          // ceiling (`Packet.maxAccumulatedPacketSize`, 64 MiB) as
+          // ceiling (`Limits.maxAllowedPacket`, 64 MiB) as
           // max_allowed_packet — advertising MySQL's 16 MiB default made
           // MySqlConnector refuse a >16 MiB statement client-side before
           // ever sending it, even though the server would have taken it.
@@ -2014,7 +2014,7 @@ let tests =
                       // A COM_QUERY payload one byte over the cap: `writePacketAsync`
                       // splits it into `maxPacketPayload`-sized fragments; the
                       // server's reassembly raises before `parseCommand` ever runs.
-                      let hugeQuery = Array.append [| 0x03uy |] (Array.zeroCreate<byte> maxAccumulatedPacketSize)
+                      let hugeQuery = Array.append [| 0x03uy |] (Array.zeroCreate<byte> Fsdb.Limits.maxAllowedPacket)
                       let! _ = writePacketAsync stream { SeqId = 0uy; Payload = hugeQuery }
 
                       let! tooLargeErr = readPacketAsync stream

@@ -66,21 +66,6 @@ let private crc32Update (crc: uint32) (data: byte[]) (count: int) : uint32 =
 /// silently stops the shutdown snapshot from firing. See `attach`.
 let private shutdownRegistrations = ResizeArray<IDisposable>()
 
-/// Once the WAL crosses this many bytes, or this many appended entries,
-/// whichever comes first, `attach`'s subscriber snapshots the whole catalog
-/// and truncates it — keeps startup replay bounded instead of an
-/// ever-growing WAL. ponytail: fixed constants, not a knob; promote to a
-/// `Db.withDataDir` parameter if a real deployment ever needs a different
-/// rotation size.
-let private walRotateBytes = 64L * 1024L * 1024L
-let private walRotateEntries = 100_000
-
-/// Test-only override for `walRotateEntries` — lets a test force rotation
-/// deterministically (e.g. to exercise `attach`'s concurrent-write-vs-
-/// rotation path) without waiting for 100k real commits. `None` (default)
-/// keeps the fixed production threshold above; never set outside a test.
-let mutable testRotateEntriesOverride: int option = None
-
 [<DllImport("libc", SetLastError = true)>]
 extern int private fsync(int fd)
 
@@ -1123,7 +1108,7 @@ let load (dataDir: string) : Store =
 /// handle reuse; add a batching knob if write throughput ever needs it.
 ///
 /// Auto-rotates (snapshot + WAL truncate, via `snapshotNow`) once the WAL
-/// crosses `walRotateBytes`/`walRotateEntries`, and does one last rotation
+/// crosses `Limits.walRotateBytes`/`Limits.walRotateEntries`, and does one last rotation
 /// when the process gets a SIGTERM/SIGINT so a graceful shutdown always
 /// leaves a fresh snapshot behind (a `kill -9` skips this — replaying the
 /// WAL from the last snapshot is what that's for).
@@ -1205,9 +1190,7 @@ let attach (dataDir: string) (store: Store) : unit =
 
         entryCount := !entryCount + 1
 
-        let entryLimit = defaultArg testRotateEntriesOverride walRotateEntries
-
-        if walSize > walRotateBytes || !entryCount > entryLimit then
+        if walSize > Limits.walRotateBytes || !entryCount > Limits.walRotateEntries then
             rotateFromReplica ()
             entryCount := 0
 

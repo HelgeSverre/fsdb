@@ -276,20 +276,20 @@ let private isSocketDead (client: TcpClient) : bool =
 
 let private disconnectPollIntervalMs = 50
 
-/// Idle timeout for waiting on the *next* command packet — a half-open peer
-/// that opens a connection and sends nothing (or only a partial 4-byte
-/// packet header) would otherwise pin a thread-pool task and a socket
-/// forever. `Socket.ReceiveTimeout` doesn't help here: it only bounds the
-/// synchronous `Read()`, and this server exclusively awaits `ReadAsync` —
-/// which .NET does not honor it for, and which F#'s own cooperative
-/// cancellation (including `Async.StartChild`'s timeout) can't preempt
-/// either, since a `Task`-backed await only resumes when that task actually
-/// completes. Only bounds time spent waiting to *start* reading a packet,
-/// not time spent running a long query in between.
-let private socketIdleTimeoutMs = 5 * 60 * 1000
+/// Why waiting on the *next* command packet needs a timeout of its own (the
+/// value itself is `Limits.waitTimeoutSeconds`): a half-open peer that opens
+/// a connection and sends nothing (or only a partial 4-byte packet header)
+/// would otherwise pin a thread-pool task and a socket forever.
+/// `Socket.ReceiveTimeout` doesn't help here: it only bounds the synchronous
+/// `Read()`, and this server exclusively awaits `ReadAsync` — which .NET does
+/// not honor it for, and which F#'s own cooperative cancellation (including
+/// `Async.StartChild`'s timeout) can't preempt either, since a `Task`-backed
+/// await only resumes when that task actually completes. Only bounds time
+/// spent waiting to *start* reading a packet, not time spent running a long
+/// query in between.
 
 /// `readPacketAsync`, but abandoned if no complete packet arrives within
-/// `timeoutMs` — see `socketIdleTimeoutMs`'s doc for why this races the
+/// `timeoutMs` — see `readPacketWithTimeout`'s doc for why this races the
 /// read against `Task.Delay` instead of a cancellation token. When the
 /// timer wins, the stuck read has to be forced to unblock: closing
 /// `client`'s socket faults the pending `ReadAsync` with an exception,
@@ -326,14 +326,7 @@ let readPacketWithTimeoutMs (timeoutMs: int) (client: TcpClient) (stream: IO.Str
     }
 
 let private readPacketWithTimeout (client: TcpClient) (stream: IO.Stream) : Async<Packet option> =
-    readPacketWithTimeoutMs socketIdleTimeoutMs client stream
-
-/// Ceiling on concurrently handled connections — past this, `serve` stops
-/// calling `AcceptTcpClientAsync` until a slot frees, so excess connection
-/// attempts queue at the OS socket backlog (or get refused) instead of each
-/// one costing this process a thread-pool task and a 16 MiB read buffer's
-/// worth of memory pressure.
-let private maxConcurrentConnections = 500
+    readPacketWithTimeoutMs (Limits.waitTimeoutSeconds * 1000) client stream
 
 /// Polls `client`'s socket while a query runs, cancelling `queryCts` the
 /// moment the peer is gone — the only way to notice a disconnect while
@@ -457,7 +450,7 @@ let private authenticateHandshake
 
 let private accumulateLongData (key: int * int) (chunk: byte[]) (session: Session) : Session =
     let existing = session.LongData |> Map.tryFind key |> Option.defaultValue [||]
-    let room = int64 maxAccumulatedPacketSize - session.LongDataBytes
+    let room = int64 Limits.maxAllowedPacket - session.LongDataBytes
 
     if chunk.Length = 0 then
         session
@@ -948,7 +941,7 @@ let private handleConnection
         with
         | :? PacketTooLargeException ->
             // Reassembling a multi-packet payload blew past
-            // maxAccumulatedPacketSize. There's no way to resync mid-stream,
+            // Limits.maxAllowedPacket. There's no way to resync mid-stream,
             // but a best-effort ERR beats silently dropping the connection.
             do!
                 writePacketAsync
@@ -1000,7 +993,7 @@ let private tryAccept (listener: TcpListener) : Async<TcpClient option> =
 /// connection runs. A failing connection is logged, never fatal to the
 /// server.
 let serve (listener: TcpListener) (store: Storage.Store) (customFunctions: Functions.Registry) : Async<unit> =
-    // Bounds concurrent connections (see `maxConcurrentConnections`): held
+    // Bounds concurrent connections (see `Limits.maxConnections`): held
     // for the lifetime of each connection, acquired before accepting the
     // next one so the accept loop itself blocks once the cap is hit rather
     // than accepting unboundedly and queuing work behind the scenes.
@@ -1008,7 +1001,7 @@ let serve (listener: TcpListener) (store: Storage.Store) (customFunctions: Funct
     // disposing here would run at function-return time, before the loop
     // that actually needs it ever executes. Lives for the process's
     // lifetime, same as the listener it's paired with.
-    let connectionSlots = new SemaphoreSlim(maxConcurrentConnections)
+    let connectionSlots = new SemaphoreSlim(Limits.maxConnections)
 
     let rec loop () : Async<unit> =
         async {

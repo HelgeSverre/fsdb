@@ -406,13 +406,6 @@ type private TransactionGateLease(gate: SemaphoreSlim) =
             if Interlocked.Exchange(&released, 1) = 0 then
                 gate.Release() |> ignore
 
-/// How long a connection waits for `dbName`'s write gate before giving up —
-/// matches `innodb_lock_wait_timeout`'s MySQL default (50s) rather than
-/// waiting forever. `enterTransactionGate` takes this as a parameter rather
-/// than hardcoding it so a test can pass a short one instead of a real
-/// 50-second wait to exercise the timeout path.
-let defaultLockWaitTimeout = TimeSpan.FromSeconds 50.0
-
 /// Acquires `dbName`'s coarse transaction/write gate (see `Store`'s doc for
 /// why it's per-database, not store-wide). The returned lease is idempotent
 /// so normal COMMIT/ROLLBACK and connection cleanup can both dispose it

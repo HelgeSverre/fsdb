@@ -918,6 +918,8 @@ let tests =
                           Expect.equal (call "LPAD" [ VString "12345"; VInt 3L; VString "0" ]) (VString "123") "lpad truncates"
                           Expect.equal (call "LPAD" [ VString "5"; VInt(-1L); VString "0" ]) VNull "lpad negative length is null, not empty"
                           Expect.equal (call "LPAD" [ VString "5"; VInt 0L; VString "0" ]) (VString "") "lpad zero length is still empty"
+                          Expect.equal (call "LPAD" [ VString "5"; VInt 100_000_000L; VString "0" ]) VNull "lpad past max_allowed_packet is null"
+                          Expect.equal (call "RPAD" [ VString "5"; VInt 100_000_000L; VString "0" ]) VNull "rpad past max_allowed_packet is null"
 
                       testCase "LEFT/RIGHT take from either end"
                       <| fun _ ->

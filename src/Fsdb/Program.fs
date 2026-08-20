@@ -8,6 +8,7 @@ type Arguments =
     | [<AltCommandLine("-p")>] Port of port: int
     | Listen of address: string
     | Data_Dir of path: string
+    | Defaults_File of path: string
     | Version
 
     interface IArgParserTemplate with
@@ -16,6 +17,7 @@ type Arguments =
             | Port _ -> "listen port (default 3307)"
             | Listen _ -> "bind address (default 127.0.0.1)"
             | Data_Dir _ -> "persist data here (WAL + snapshots); omit for in-memory"
+            | Defaults_File _ -> "read server settings from a my.cnf-style file's [mysqld] section"
             | Version -> "print the fsdb version and exit"
 
 let private parser =
@@ -48,11 +50,24 @@ let main argv =
         printfn "fsdb %s (MySQL protocol %s)" fsdbVersion Protocol.ServerVersion
         0
     else
-        match resolveListenAddress results with
-        | None ->
+        // Before anything builds a store or a listener: every `Limits` knob
+        // is read live from then on, so applying settings first is what makes
+        // "written once, before any connection exists" true.
+        let configError =
+            results.TryGetResult Defaults_File
+            |> Option.bind (fun path ->
+                match Limits.loadDefaultsFile path with
+                | Ok() -> None
+                | Error message -> Some message)
+
+        match configError, resolveListenAddress results with
+        | Some message, _ ->
+            eprintfn "fsdb: %s" message
+            1
+        | None, None ->
             eprintfn "fsdb: --listen expects an IP address or 'localhost'"
             1
-        | Some address ->
+        | None, Some address ->
             let port = results.GetResult(Port, defaultValue = 3307)
 
             let db =

@@ -1770,6 +1770,8 @@ let private padFn (left: bool) : Scalar =
             VString(str.Substring(0, targetLen))
         elif pad = "" then
             VNull
+        elif targetLen > Limits.maxAllowedPacket then
+            VNull
         else
             let needed = targetLen - str.Length
             let padding = (String.replicate (needed / pad.Length + 1) pad).Substring(0, needed)
@@ -1800,21 +1802,13 @@ let private rightFn: Scalar =
         VString(str.Substring(str.Length - k))
     | _ -> VNull
 
-/// The server's advertised `max_allowed_packet` — `REPEAT`/`SPACE` return
-/// NULL rather than allocate past it for a runaway count, and MySQL NULLs
-/// them only past the *actual* max_allowed_packet, so this must match what
-/// `Session.defaultVariables` reports. That is
-/// `Packet.maxAccumulatedPacketSize` (64 MiB), but Functions.fs compiles
-/// before Packet.fs, so the value is duplicated here; keep the two in sync.
-let private maxAllowedPacket = 64 * 1024 * 1024
-
 let private repeatFn: Scalar =
     function
     | [ s; n ] when not (anyNull [ s; n ]) ->
         let k = int (toDouble n)
         let str = req s
         if k <= 0 then VString ""
-        elif int64 k * int64 str.Length > int64 maxAllowedPacket then VNull
+        elif int64 k * int64 str.Length > int64 Limits.maxAllowedPacket then VNull
         else VString(String.replicate k str)
     | _ -> VNull
 
@@ -1822,7 +1816,7 @@ let private spaceFn: Scalar =
     function
     | [ n ] when not (anyNull [ n ]) ->
         let k = max 0 (int (toDouble n))
-        if k > maxAllowedPacket then VNull else VString(String(' ', k))
+        if k > Limits.maxAllowedPacket then VNull else VString(String(' ', k))
     | _ -> VNull
 
 /// The first byte of the string's UTF-8 encoding, not the first UTF-16 code
@@ -2082,8 +2076,6 @@ let private strcmpFn: Scalar =
 // `jsonExtractFn`'s neighbors) rather than the operator's 1139.
 // ---------------------------------------------------------------------------
 
-let private regexpTimeout = TimeSpan.FromSeconds 5.0
-
 /// MySQL's default is case-insensitive matching; `match_type` characters
 /// flip options on top of that default, applied left to right so the last
 /// conflicting flag (e.g. "ci") wins rather than erroring on conflicts.
@@ -2103,7 +2095,7 @@ let private regexOptsOfMatchType (matchType: string option) : RegexOptions =
 
 let private tryRegex (pattern: string) (opts: RegexOptions) : Regex option =
     try
-        Some(Regex(pattern, opts, regexpTimeout))
+        Some(Regex(pattern, opts, Limits.regexpMatchTimeout))
     with :? ArgumentException ->
         None
 

@@ -10,6 +10,9 @@ open Fsdb.Storage
 
 /// Session variable defaults good enough to satisfy mysql CLI / PDO on
 /// connect. Grows as real clients ask for more `@@vars` / SHOW VARIABLES.
+/// Variables backed by a `Limits` knob are deliberately absent — see
+/// `liveDefaults`, which layers those on top so what the server reports can
+/// never drift from what it enforces.
 let defaultVariables: Map<string, string option> =
     Map.ofList
         [ "version", ServerVersion
@@ -24,11 +27,6 @@ let defaultVariables: Map<string, string option> =
           "collation_server", "utf8mb4_general_ci"
           "collation_database", "utf8mb4_general_ci"
           "autocommit", "1"
-          // The wire really accepts `Packet.maxAccumulatedPacketSize`
-          // (64 MiB) per logical packet; advertising less made clients
-          // (MySqlConnector included) refuse >16 MiB statements — e.g. a
-          // large blob inserted as a hex literal — before ever sending them.
-          "max_allowed_packet", string Fsdb.Packet.maxAccumulatedPacketSize
           "system_time_zone", "UTC"
           "time_zone", "SYSTEM"
           "auto_increment_increment", "1"
@@ -44,14 +42,23 @@ let defaultVariables: Map<string, string option> =
           "lower_case_table_names", "0"
           "have_ssl", "DISABLED"
           "init_connect", ""
-          "interactive_timeout", "28800"
-          "wait_timeout", "28800"
           "license", "GPL"
           "net_write_timeout", "60"
           "performance_schema", "0"
           "query_cache_size", "0"
           "query_cache_type", "OFF" ]
         |> Map.map (fun _ v -> Some v)
+
+/// `defaultVariables` with every `Limits` knob layered over it — the base a
+/// new session, `@@GLOBAL.x`, and SHOW GLOBAL VARIABLES all read from, so
+/// `max_allowed_packet` and `wait_timeout` report whatever the server was
+/// actually configured to enforce rather than a second copy of the number
+/// that drifts from the first. Recomputed per call rather than cached: a
+/// knob configured after this module's static initializer ran would
+/// otherwise never become visible, and folding a handful of entries onto a
+/// `Map` is not worth caching.
+let private liveDefaults () : Map<string, string option> =
+    Limits.variables () |> List.fold (fun m (name, value) -> Map.add name (Some value) m) defaultVariables
 
 /// GLOBAL-scope system variable overrides (`SET GLOBAL x = y` / `SET
 /// @@GLOBAL.x = y`), shared by every session on the same underlying
@@ -85,13 +92,13 @@ let tryGlobalVariable (store: Store) (name: string) : string option option =
 
     match (globalVariablesOf store).TryGetValue name with
     | true, v -> Some v
-    | false, _ -> defaultVariables |> Map.tryFind name
+    | false, _ -> liveDefaults () |> Map.tryFind name
 
 /// The GLOBAL variable space as a whole — compiled-in defaults with every
 /// `SET GLOBAL` override applied; `SHOW GLOBAL VARIABLES`' row source.
 let globalVariablesSnapshot (store: Store) : Map<string, string option> =
     globalVariablesOf store
-    |> Seq.fold (fun m (kv: System.Collections.Generic.KeyValuePair<string, string option>) -> Map.add kv.Key kv.Value m) defaultVariables
+    |> Seq.fold (fun m (kv: System.Collections.Generic.KeyValuePair<string, string option>) -> Map.add kv.Key kv.Value m) (liveDefaults ())
 
 /// A server-side prepared statement (COM_STMT_PREPARE / COM_STMT_EXECUTE).
 /// `Ast` is the parsed statement for everything the grammar produces —
@@ -264,7 +271,7 @@ let create (connectionId: int) (store: Store) : Session =
     // this store, matching real MySQL's "new sessions pick up the current
     // global value" semantics (see `tryGlobalVariable`/`setGlobalVariable`).
     let variables =
-        (globalVariablesOf store) |> Seq.fold (fun acc (KeyValue(k, v)) -> Map.add k v acc) defaultVariables
+        (globalVariablesOf store) |> Seq.fold (fun acc (KeyValue(k, v)) -> Map.add k v acc) (liveDefaults ())
 
     { ConnectionId = connectionId
       User = "root"

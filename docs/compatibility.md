@@ -50,6 +50,31 @@ with 1064. Object catalogs fsdb has no objects for (views, routines,
 triggers, events) are genuinely empty rather than stubbed; PROCESSLIST,
 `Threads_connected`, and `KILL` operate on the real connection registry.
 
+## Server settings
+
+The tunables an operator would plausibly change live in `Fsdb.Limits` and can
+be set from a my.cnf-style file's `[mysqld]` section via `--defaults-file`
+(`max_allowed_packet`, `max_connections`, `wait_timeout`,
+`innodb_lock_wait_timeout`, `cte_max_recursion_depth`, plus fsdb's own WAL
+rotation thresholds). Size suffixes (`64M`, `1G`) work; other sections are
+ignored, but an unrecognised line inside `[mysqld]` is a startup error rather
+than a silent no-op. No config path is auto-discovered.
+
+Two deliberate divergences from stock MySQL:
+
+- **`wait_timeout` and `interactive_timeout` report 300, not 28800.** fsdb
+  reaps a connection idle between commands after five minutes, because a
+  half-open peer otherwise pins a socket and a task for eight hours. The
+  number reported is the number enforced — a pool that sizes its idle-recycle
+  from `wait_timeout` gets the truth instead of a connection the server closed
+  hours earlier. Set `wait_timeout` in a defaults file to restore MySQL's
+  value. `interactive_timeout` mirrors it because fsdb ignores
+  `CLIENT_INTERACTIVE` at handshake.
+- **Settings are startup-scoped.** `SET GLOBAL max_connections = N` is
+  accepted and shows up in `SHOW GLOBAL VARIABLES`, but the running server
+  keeps the value it started with; likewise `max_allowed_packet` is
+  process-wide, not per session.
+
 ## Users, authentication, and privileges
 
 fsdb has a real account system backed by a stored `mysql` schema (`user`,

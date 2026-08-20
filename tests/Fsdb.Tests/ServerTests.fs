@@ -125,7 +125,7 @@ let tests =
           <| fun _ ->
               async {
                   use stream = new IO.MemoryStream()
-                  let chunkCount = maxAccumulatedPacketSize / maxPacketPayload + 2
+                  let chunkCount = Fsdb.Limits.maxAllowedPacket / maxPacketPayload + 2
                   let chunk = Array.zeroCreate<byte> maxPacketPayload
 
                   for i in 0 .. chunkCount - 1 do

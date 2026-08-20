@@ -57,17 +57,10 @@ let private readExactAsync (stream: Stream) (n: int) : Async<byte[] option> =
 let maxPacketPayload = 0xffffff
 
 /// Raised by `readPacketAsync` when a multi-packet payload would exceed
-/// `maxAccumulatedPacketSize`, so a malicious or buggy client can't make the
+/// `Limits.maxAllowedPacket`, so a malicious or buggy client can't make the
 /// server allocate unbounded memory by streaming 0xffffff-byte chunks
 /// forever.
 exception PacketTooLargeException of size: int
-
-/// Safety ceiling for a reassembled multi-packet payload — matches MySQL's
-/// common `max_allowed_packet` default. ponytail: hardcoded rather than
-/// wired to the `max_allowed_packet` session variable (Packet.fs can't
-/// depend on Session.fs — Session already depends on Protocol which depends
-/// on Packet); revisit if per-connection tuning is ever needed.
-let maxAccumulatedPacketSize = 64 * 1024 * 1024 // 64 MiB
 
 /// Reads one logical packet from a stream, or None on clean disconnect.
 /// Reassembles packets split across the wire per the MySQL protocol: a
@@ -94,7 +87,7 @@ let readPacketAsync (stream: Stream) : Async<Packet option> =
                 | Some payload ->
                     let acc = Array.append acc payload
 
-                    if acc.Length > maxAccumulatedPacketSize then
+                    if acc.Length > Limits.maxAllowedPacket then
                         raise (PacketTooLargeException acc.Length)
 
                     if len = maxPacketPayload then

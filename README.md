@@ -66,7 +66,7 @@ just install      # publishes to ~/.local/bin/fsdb, then: fsdb --help
 
 ```
 USAGE: fsdb [--help] [--port <port>] [--listen <address>] [--data-dir <path>]
-            [--version]
+            [--defaults-file <path>] [--version]
 
 OPTIONS:
 
@@ -74,9 +74,28 @@ OPTIONS:
     --listen <address>    bind address (default 127.0.0.1)
     --data-dir <path>     persist data here (WAL + snapshots); omit for
                           in-memory
+    --defaults-file <path>
+                          read server settings from a my.cnf-style file's
+                          [mysqld] section
     --version             print the fsdb version and exit
     --help                display this list of options.
 ```
+
+`--defaults-file` reads the `[mysqld]` section of a my.cnf-style file. Other
+sections are ignored, so a real my.cnf works, but an unrecognised setting
+inside `[mysqld]` is a startup error rather than a silent no-op:
+
+```ini
+[mysqld]
+max_connections          = 2000
+max_allowed_packet       = 64M
+wait_timeout             = 600
+innodb_lock_wait_timeout = 50
+cte_max_recursion_depth  = 1000
+```
+
+Settings apply at startup and are process-wide; see `docs/compatibility.md`
+for where that diverges from MySQL.
 
 ## How it works
 

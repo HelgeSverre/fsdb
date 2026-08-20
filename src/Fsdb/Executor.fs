@@ -740,8 +740,6 @@ let private likeOp (coll: Collation.Collation option) (caseSensitive: bool) (esc
 /// non-matching subject) errors out instead of pinning a core forever.
 /// No `Singleline`: MySQL's REGEXP `.` does not match a newline by default,
 /// so .NET's default (also newline-excluding) `.` is the matching behavior.
-let private regexpMatchTimeout = System.TimeSpan.FromSeconds 5.0
-
 let private regexpOp (coll: Collation.Collation option) (subject: Value) (pattern: Value) : Result<Value, EvalError> =
     match subject, pattern with
     | VNull, _
@@ -759,7 +757,7 @@ let private regexpOp (coll: Collation.Collation option) (subject: Value) (patter
             if caseSensitive then RegexOptions.None else RegexOptions.IgnoreCase
 
         try
-            Ok(boolToValue (Regex.IsMatch(text, pat, opts, regexpMatchTimeout)))
+            Ok(boolToValue (Regex.IsMatch(text, pat, opts, Limits.regexpMatchTimeout)))
         with
         | :? RegexMatchTimeoutException -> Error(1030, "Got error 'regexp match timed out' from regexp")
         | :? System.ArgumentException as ex -> Error(1139, sprintf "Got error '%s' from regexp" ex.Message)
@@ -3325,9 +3323,9 @@ and private withCteScope
 /// references itself iterates its `UNION` branches semi-naively (each pass
 /// sees only the previous pass's new rows) until a pass adds nothing;
 /// everything else is an ordinary derived table.
-/// ponytail: the recursion ceiling is MySQL's default 1000 as a constant —
-/// fsdb has no `cte_max_recursion_depth` session variable to read; wire one
-/// in here if a client sets it. A second, narrower gap: MySQL fixes each
+/// The recursion ceiling is `Limits.cteMaxRecursionDepth`, configurable at
+/// startup but not per session — see that binding's own `ponytail:` note.
+/// A second, narrower gap: MySQL fixes each
 /// recursive column's *type* from the anchor row and then errors (1406) when
 /// a later pass overflows it — a literal `NULL` anchor column is
 /// `VARCHAR(0)` there and rejects everything — while these rows stay
@@ -3404,12 +3402,14 @@ and private materializeCte
 
             try
                 while failure.IsNone && not working.IsEmpty do
-                    if passes >= 1000 then
+                    if passes >= Limits.cteMaxRecursionDepth then
                         failure <-
                             Some(
                                 Err(
                                     3636,
-                                    "Recursive query aborted after 1001 iterations. Try increasing @@cte_max_recursion_depth to a larger value."
+                                    sprintf
+                                        "Recursive query aborted after %d iterations. Try increasing @@cte_max_recursion_depth to a larger value."
+                                        (Limits.cteMaxRecursionDepth + 1)
                                 )
                             )
                     else

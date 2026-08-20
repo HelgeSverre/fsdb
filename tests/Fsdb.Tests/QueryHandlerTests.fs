@@ -622,7 +622,7 @@ let tests =
               let session, _ = handle session "SET GLOBAL wait_timeout = 123"
 
               match handle session "SHOW SESSION VARIABLES LIKE 'wait_timeout'" |> snd with
-              | ResultSet(_, [ [ Some "wait_timeout"; Some "28800" ] ]) -> ()
+              | ResultSet(_, [ [ Some "wait_timeout"; Some "300" ] ]) -> ()
               | other -> failtestf "expected the session value untouched, got %A" other
 
               match handle session "SHOW GLOBAL VARIABLES LIKE 'wait_timeout'" |> snd with
@@ -1090,15 +1090,16 @@ let tests =
           <| fun _ ->
               let store = Fsdb.Storage.create ()
               let session = create 1 store
-              let session, ok = handle session "SET GLOBAL max_connections = 500"
+              let session, ok = handle session "SET GLOBAL max_heap_table_size = 500"
               Expect.equal ok (Affected 0UL) "SET GLOBAL acks"
 
-              // `max_connections` was never in this session's own `Variables`
-              // (only in the store-wide GLOBAL map SET GLOBAL just wrote) —
-              // `@@SESSION.` scoped explicitly, it stays unknown to this
-              // session, proving the GLOBAL write never touched
-              // `session.Variables`.
-              match handle session "SELECT @@SESSION.max_connections" |> snd with
+              // `max_heap_table_size` is in neither `defaultVariables` nor
+              // the `Limits` knobs, so it was never in this session's own
+              // `Variables` — only in the store-wide GLOBAL map SET GLOBAL
+              // just wrote. Scoped explicitly with `@@SESSION.` it stays
+              // unknown to this session, proving the GLOBAL write never
+              // touched `session.Variables`.
+              match handle session "SELECT @@SESSION.max_heap_table_size" |> snd with
               | Err(1193, _) -> ()
               | other -> failtestf "SET GLOBAL must not leak into this session's own @@SESSION value, got %A" other
 

@@ -899,7 +899,7 @@ let startTransactionStatementFor (targetDbs: string list) (session: Session) : S
             |> List.distinct
             |> List.sort
             |> List.filter (fun db -> not (Map.containsKey db tx.GateLease))
-            |> List.map (fun db -> db, Storage.enterTransactionGate session.Store db defaultLockWaitTimeout)
+            |> List.map (fun db -> db, Storage.enterTransactionGate session.Store db (Limits.lockWaitTimeout ()))
 
         try
             // A write cannot merge a snapshot that predates another commit.
@@ -1196,7 +1196,7 @@ let private executeParsed (session: Session) (stmt: Statement) : Session * Query
                 targetDatabases session.Store dbName stmt
                 |> List.distinct
                 |> List.sort
-                |> List.map (fun db -> Storage.enterTransactionGate session.Store db defaultLockWaitTimeout)
+                |> List.map (fun db -> Storage.enterTransactionGate session.Store db (Limits.lockWaitTimeout ()))
 
             try
                 execute session

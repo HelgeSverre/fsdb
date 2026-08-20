@@ -11,7 +11,8 @@ let main argv =
         argv
         (testList
             "fsdb"
-            [ PacketTests.tests
+            [ LimitsTests.tests
+              PacketTests.tests
               ProtocolTests.tests
               QueryHandlerTests.tests
               PreparedStatementTests.tests

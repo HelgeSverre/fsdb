@@ -927,9 +927,7 @@ let tests =
               // appended again to the freshly-truncated WAL). Stress check:
               // the race is a narrow timing window, not reliably
               // reproducible on demand.
-              testRotateEntriesOverride <- Some 0
-
-              try
+              Fsdb.Limits.withSettings [ "wal_rotate_entries", "0" ] (fun () ->
                   attach dir store
                   createDatabase store "db_a" |> ignore
                   createDatabase store "db_b" |> ignore
@@ -954,9 +952,7 @@ let tests =
                   let countA = rowsOf reloaded "db_a" "t" |> List.length
                   let countB = rowsOf reloaded "db_b" "t" |> List.length
                   Expect.equal countA (2 * perThread) "db_a has exactly its inserted rows, no dup/loss across rotation"
-                  Expect.equal countB (2 * perThread) "db_b has exactly its inserted rows, no dup/loss across rotation"
-              finally
-                  testRotateEntriesOverride <- None
+                  Expect.equal countB (2 * perThread) "db_b has exactly its inserted rows, no dup/loss across rotation")
 
           testCase "the Value binary codec (encodeValue/decodeValue) round-trips VJson non-ASCII text exactly"
           <| fun _ ->

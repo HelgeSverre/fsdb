@@ -145,8 +145,8 @@ let tests =
               async {
                   use stream = new IO.MemoryStream()
                   // Enough maxPacketPayload-sized fragments (each declaring
-                  // "more data follows") to exceed maxAccumulatedPacketSize.
-                  let chunkCount = maxAccumulatedPacketSize / maxPacketPayload + 2
+                  // "more data follows") to exceed Limits.maxAllowedPacket.
+                  let chunkCount = Fsdb.Limits.maxAllowedPacket / maxPacketPayload + 2
                   let chunk = Array.zeroCreate<byte> maxPacketPayload
 
                   for i in 0 .. chunkCount - 1 do
