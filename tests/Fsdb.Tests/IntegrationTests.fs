@@ -267,6 +267,19 @@ let tests =
                       do! expectDenied (connStr "nobody" "" + ";Database=" + deniedDatabase) "unknown user with database"
                       Expect.isFalse (Fsdb.Storage.databaseExists store deniedDatabase) "authentication precedes catalog mutation"
 
+                      let unprivilegedDatabase = "unprivileged_" + Guid.NewGuid().ToString "N"
+                      use unprivileged = new MySqlConnector.MySqlConnection(connStr "bob" "s3cret" + ";Database=" + unprivilegedDatabase)
+                      let! unprivilegedResult = unprivileged.OpenAsync() |> Async.AwaitTask |> Async.Catch
+
+                      match unprivilegedResult with
+                      | Choice1Of2() -> failtest "expected an authenticated account without CREATE to be denied"
+                      | Choice2Of2 e ->
+                          match mysqlError e with
+                          | Some m -> Expect.equal m.Number 1044 "database creation at handshake requires CREATE"
+                          | None -> raise e
+
+                      Expect.isFalse (Fsdb.Storage.databaseExists store unprivilegedDatabase) "denied handshake did not grow the catalog"
+
                       // A passwordless account matches real MySQL: an empty
                       // offered password connects, a non-empty one is 1045.
                       do! expectDenied (connStr "root" "anything") "passwordless account, offered password"

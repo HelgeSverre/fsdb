@@ -561,17 +561,24 @@ let private handleConnection
                 match authOkSeq with
                 | None -> () // denied: the 1045 is already written, no OK
                 | Some okSeq ->
-                    // A successfully authenticated client that names a
-                    // database at connect time gets the same auto-create
-                    // convenience as an authenticated first write.
-                    resp.Database |> Option.iter (Storage.ensureDatabase store)
+                    let databaseAllowed =
+                        match resp.Database with
+                        | None -> Ok()
+                        | Some db when Storage.databaseExists store db -> Ok()
+                        | Some db -> Auth.check store resp.Username [ "CREATE", Auth.OnDb db ]
 
-                    do!
-                        writePacketAsync
-                            stream
-                            { SeqId = okSeq
-                              Payload = okPayload capabilities (statusFlagsFor session) 0UL 0UL }
-                        |> Async.Ignore
+                    match databaseAllowed with
+                    | Error(code, message) ->
+                        do! writePacketAsync stream { SeqId = okSeq; Payload = errPayload capabilities code message } |> Async.Ignore
+                    | Ok() ->
+                        resp.Database |> Option.iter (Storage.ensureDatabase store)
+
+                        do!
+                            writePacketAsync
+                                stream
+                                { SeqId = okSeq
+                                  Payload = okPayload capabilities (statusFlagsFor session) 0UL 0UL }
+                            |> Async.Ignore
 
                 // Runs a statement dispatch under `withCancellationWatch`,
                 // catching the `OperationCanceledException` a killed
