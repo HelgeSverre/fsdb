@@ -1160,11 +1160,14 @@ let reindexTable (table: Table) : Table =
     reindexCallCountLocal.Value <- reindexCallCountLocal.Value + 1
     { table with UniqueIndex = rebuildUniqueIndex table }
 
-let private tableSchema (table: Table) =
-    { table with
-        RowsArray = RowStore.empty
-        NextAutoId = 0L
-        UniqueIndex = Map.empty }
+let private sameTableSchema (left: Table) (right: Table) =
+    left.OriginalName = right.OriginalName
+    && left.Columns = right.Columns
+    && left.Indexes = right.Indexes
+    && left.ForeignKeys = right.ForeignKeys
+    && left.TableCharset = right.TableCharset
+    && left.TableCollation = right.TableCollation
+    && left.CreateTime = right.CreateTime
 
 let private mergeRows (dbName: string) (baseTable: Table) (batchTable: Table) (liveTable: Table) : Table =
     let conflict () = raise (LockWaitTimeout dbName)
@@ -1240,7 +1243,7 @@ let private mergeDatabaseSlot (dbName: string) (slot: Database ref) (baseDb: Dat
                         | Some baseTable, None, Some liveTable when liveTable = baseTable -> Map.remove tableName acc
                         | None, Some batchTable, None -> Map.add tableName batchTable acc
                         | Some baseTable, Some batchTable, Some liveTable when liveTable = baseTable -> Map.add tableName batchTable acc
-                        | Some baseTable, Some batchTable, Some liveTable when tableSchema baseTable = tableSchema batchTable ->
+                        | Some baseTable, Some batchTable, Some liveTable when sameTableSchema baseTable batchTable ->
                             Map.add tableName (mergeRows dbName baseTable batchTable liveTable) acc
                         | _ -> raise (LockWaitTimeout dbName))
                     liveDb
@@ -3329,10 +3332,15 @@ let deleteRows
 let private canMergePointUpdate tableKey rowIds (baseDb: Database) (batchDb: Database) =
     let unchangedOtherTables =
         Set.union (keysOf baseDb) (keysOf batchDb)
-        |> Set.forall (fun key -> key = tableKey || Map.tryFind key baseDb = Map.tryFind key batchDb)
+        |> Set.forall (fun key ->
+            key = tableKey
+            || match Map.tryFind key baseDb, Map.tryFind key batchDb with
+               | Some baseTable, Some batchTable -> obj.ReferenceEquals(baseTable, batchTable)
+               | None, None -> true
+               | _ -> false)
 
     match Map.tryFind tableKey baseDb, Map.tryFind tableKey batchDb with
-    | Some baseTable, Some batchTable when tableSchema baseTable = tableSchema batchTable && unchangedOtherTables ->
+    | Some baseTable, Some batchTable when sameTableSchema baseTable batchTable && unchangedOtherTables ->
         let protectedColumns =
             [ for foreignKey in baseTable.ForeignKeys do
                   yield! foreignKey.Columns
@@ -3355,7 +3363,7 @@ let private mergePointUpdate dbName tableKey rowIds (baseDb: Database) (batchDb:
     let conflict () = raise (LockWaitTimeout dbName)
 
     match Map.tryFind tableKey baseDb, Map.tryFind tableKey batchDb, Map.tryFind tableKey liveDb with
-    | Some baseTable, Some batchTable, Some liveTable when tableSchema liveTable = tableSchema baseTable ->
+    | Some baseTable, Some batchTable, Some liveTable when sameTableSchema liveTable baseTable ->
         let rows = liveTable.RowsArray.ToBuilder()
         let uniqueGroups = uniqueKeyGroups liveTable
         let mutable index = liveTable.UniqueIndex
@@ -3402,17 +3410,19 @@ let private withPointUpdateDatabase
 
         operation baseDb
         |> Result.map (fun (batchDb, result) ->
-            if not (canMergePointUpdate tableKey rowIds baseDb batchDb) then
-                mergeDatabaseSlot dbName slot baseDb batchDb
-            else
+            let published =
                 lock slot (fun () ->
-                    let liveDb = slot.Value
+                    if obj.ReferenceEquals(slot.Value, baseDb) then
+                        slot.Value <- batchDb
+                        true
+                    else
+                        false)
 
-                    slot.Value <-
-                        if obj.ReferenceEquals(liveDb, baseDb) then
-                            batchDb
-                        else
-                            mergePointUpdate dbName tableKey rowIds baseDb batchDb liveDb)
+            if not published then
+                if canMergePointUpdate tableKey rowIds baseDb batchDb then
+                    lock slot (fun () -> slot.Value <- mergePointUpdate dbName tableKey rowIds baseDb batchDb slot.Value)
+                else
+                    mergeDatabaseSlot dbName slot baseDb batchDb
 
             result)
 
