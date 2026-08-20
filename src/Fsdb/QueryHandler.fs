@@ -540,11 +540,18 @@ let private splitSetAssignments (sql: string) : string list =
     let parts = ResizeArray()
     let current = StringBuilder()
     let mutable quoteChar = None
+    let mutable escaped = false
     let mutable parenDepth = 0
     let mutable hasContent = false
 
     for c in body do
         match quoteChar with
+        | Some _ when escaped ->
+            escaped <- false
+            current.Append c |> ignore
+        | Some _ when c = '\\' ->
+            escaped <- true
+            current.Append c |> ignore
         | Some q when c = q ->
             quoteChar <- None
             current.Append c |> ignore

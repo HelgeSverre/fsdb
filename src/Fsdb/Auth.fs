@@ -32,7 +32,7 @@ let verifyNative (storedHash: string) (scramble: byte[]) (response: byte[]) : bo
             let stage2 = Convert.FromHexString(storedHash.TrimStart '*')
             let mask = sha1 (Array.append scramble stage2)
             let stage1 = Array.map2 (^^^) response mask
-            sha1 stage1 = stage2
+            CryptographicOperations.FixedTimeEquals(sha1 stage1, stage2)
         with _ ->
             false
 
@@ -57,8 +57,7 @@ let userColumnText (cols: ColumnDef list) (row: Value[]) (name: string) : string
         | v -> Value.toText v |> Option.defaultValue ""
     | Error _ -> ""
 
-/// The stored password hash for a user row — `""` means "no password set,
-/// accept anything".
+/// The stored password hash for a user row — `""` means no password is set.
 let storedPasswordHash (cols: ColumnDef list) (row: Value[]) : string = userColumnText cols row "authentication_string"
 
 // ---------------------------------------------------------------------------

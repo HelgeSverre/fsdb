@@ -501,6 +501,20 @@ let tests =
               | Affected _ -> ()
               | other -> failtestf "expected OK, got %A" other
 
+          testCase "an escaped quote keeps a comma inside one SET assignment"
+          <| fun _ ->
+              let session = create 1 (Fsdb.Storage.create ())
+
+              let session, result = handle session "SET @x='a\\\', @y=1'"
+
+              match result with
+              | Affected _ -> ()
+              | other -> failtestf "expected the escaped quote to keep the fragment intact, got %A" other
+
+              match handle session "SELECT @x, @y" |> snd with
+              | ResultSet(_, [ [ Some "a\\', @y=1"; None ] ]) -> ()
+              | other -> failtestf "expected only @x to be assigned, got %A" other
+
           testCase "a bad multi-assignment SET applies none of its assignments, not just the ones before the bad one"
           <| fun _ ->
               // Two-phase: every fragment parses before any of them apply,

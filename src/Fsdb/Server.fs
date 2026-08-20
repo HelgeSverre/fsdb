@@ -3,6 +3,7 @@
 module Fsdb.Server
 
 open System
+open System.Security.Cryptography
 open System.Net
 open System.Net.Sockets
 open System.Text
@@ -73,10 +74,9 @@ let private parseCommand (payload: byte[]) : Command option =
 
 let private randomAuthPluginData () : byte[] =
     let bytes = Array.zeroCreate<byte> 20
-    Random.Shared.NextBytes bytes
-    // Auth-plugin-data fields are null-terminated on the wire; a stray 0x00
-    // would truncate them. Harmless either way since the scramble is never
-    // checked, but keep the bytes well-formed.
+    RandomNumberGenerator.Fill bytes
+    // Auth-plugin-data fields are null-terminated on the wire, so replace
+    // zero bytes before using the same value for password verification.
     bytes |> Array.map (fun b -> if b = 0uy then 1uy else b)
 
 /// Writes each payload in turn, threading the *actual* next sequence id
@@ -976,6 +976,15 @@ let private handleConnection
                 if authOkSeq.IsSome && databaseAccepted then
                     do! loop session
         with
+        | :? SslRequestException ->
+            do!
+                writePacketAsync
+                    stream
+                    { SeqId = 2uy
+                      Payload = errPayload capabilities 1045 "SSL is not supported" }
+                |> Async.Ignore
+                |> Async.Catch
+                |> Async.Ignore
         | :? PacketTooLargeException ->
             // Reassembling a multi-packet payload blew past
             // Limits.maxAllowedPacket. There's no way to resync mid-stream,

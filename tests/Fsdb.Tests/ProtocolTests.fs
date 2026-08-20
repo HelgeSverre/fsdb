@@ -101,6 +101,18 @@ let tests =
                   (fun () -> parseHandshakeResponse (w.ToArray()) |> ignore)
                   "an oversized wire length is rejected before conversion to int"
 
+          testCase "parseHandshakeResponse recognizes an SSLRequest without reading a username"
+          <| fun _ ->
+              let w = Writer()
+              w.WriteInt32LE(int (ClientProtocol41 ||| ClientSsl))
+              w.WriteInt32LE 16777216
+              w.WriteByte 45uy
+              w.WriteBytes(Array.zeroCreate<byte> 23)
+
+              Expect.throwsT<SslRequestException>
+                  (fun () -> parseHandshakeResponse (w.ToArray()) |> ignore)
+                  "the short SSLRequest shape is rejected deliberately"
+
           testCase "typed text rows encode BLOB values as raw bytes"
           <| fun _ ->
               let bytes = [| 0x00uy; 0xffuy; 0x80uy |]
