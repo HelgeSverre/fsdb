@@ -480,7 +480,8 @@ let rec private exprReadTables (defaultDb: string) (expr: Expr) : (string * stri
 and private fromItemReadTables (defaultDb: string) (item: FromItem) : (string * string) list =
     match item with
     | FromTable(r: TableRef) -> [ (defaultArg r.Database defaultDb), r.Table ]
-    | FromSubquery(body, _) -> selectOrUnionReadTables defaultDb body
+    | FromSubquery(body, _)
+    | FromLateral(body, _) -> selectOrUnionReadTables defaultDb body
     // A JSON_TABLE reads nothing itself; its source expression may (a
     // subquery, a correlated column of a table already listed), so walk it.
     | FromJsonTable(source, _, _, _) -> exprReadTables defaultDb source

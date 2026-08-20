@@ -411,9 +411,8 @@ and FromItem =
     /// (`FROM t, JSON_TABLE(t.doc, ...)`) carries the left table's column
     /// reference; the alias is mandatory (MySQL's 3667 "Every table function
     /// must have an alias"), enforced by the grammar like a derived table's.
-    /// ponytail: the scoped subset — no NESTED PATH (its rows multiply the
-    /// parent's, which `Executor.jsonTableRows`' one-row-per-match shape
-    /// can't express), and no `ERROR ON EMPTY|ERROR`; add them here +
+    /// ponytail: no `ERROR ON EMPTY|ERROR` — both clauses fall back to their
+    /// value/NULL branch instead of raising; add it here +
     /// `Parser.jsonTableColumn` + `Executor.jsonTableRows` when needed.
     | FromJsonTable of source: Expr * path: string * columns: JsonTableColumn list * alias: string
 

@@ -41,6 +41,8 @@ module AstKind =
         | AlterUser _ -> "alter_user"
         | Grant _ -> "grant"
         | Revoke _ -> "revoke"
+        | CreateTrigger _ -> "create_trigger"
+        | DropTrigger _ -> "drop_trigger"
         | Explain statement -> "explain_" + ofStatement statement
 
 [<RequireQualifiedAccess>]
@@ -1205,6 +1207,17 @@ module ScenarioProbes =
                "SELECT t.id AS tenant_id, x.id AS project_id, x.name FROM tenants AS t JOIN LATERAL (SELECT p.id, p.name FROM projects AS p WHERE p.tenant_id = t.id ORDER BY p.id LIMIT 1) AS x ON TRUE WHERE t.id <= 10 ORDER BY t.id, x.id"
                "rollup_with_grouping_flag",
                "SELECT status, COUNT(*) AS task_count, GROUPING(status) AS is_grand_total FROM tasks GROUP BY status WITH ROLLUP ORDER BY GROUPING(status), status"
+               // An ENUM is its declaration ordinal in numeric context, but
+               // still a label everywhere else — and ROLLUP's materialized
+               // group key loses the ENUM type entirely (see the probe above,
+               // which sorts lexically where the plain GROUP BY sorts by
+               // ordinal).
+               "enum_numeric_context",
+               "SELECT status, status + 0 AS ordinal, CAST(status AS UNSIGNED) AS cast_ordinal, CAST(status AS CHAR) AS label FROM tasks ORDER BY id LIMIT 20"
+               "enum_aggregates_split_numeric_and_label",
+               "SELECT SUM(status) AS ordinal_sum, MIN(status) AS smallest_label, MAX(status) AS largest_label, COUNT(DISTINCT status) AS distinct_labels FROM tasks"
+               "enum_group_by_sorts_by_ordinal",
+               "SELECT status, COUNT(*) AS task_count FROM tasks GROUP BY status ORDER BY status"
                "rollup_two_level_with_expression_key",
                "SELECT role, tenant_id MOD 4 AS tenant_bucket, COUNT(*) AS member_count FROM memberships GROUP BY role, tenant_id MOD 4 WITH ROLLUP ORDER BY GROUPING(role), role, GROUPING(tenant_id MOD 4), tenant_bucket"
                "cte_window_dense_rank_per_tenant",

@@ -2003,6 +2003,62 @@ let tests =
                     Expect.equal (where "status IN (1, 2)") "3" "IN (numbers) matches by ordinal"
                     Expect.equal (where "status IN ('open')") "2" "IN (labels) matches by string"
 
+                testCase "ENUM in numeric context reads its declaration ordinal (arithmetic, CAST, numeric aggregates)"
+                <| fun _ ->
+                    let store = newStore ()
+                    runDefault store "CREATE TABLE t (status ENUM('open','active','done','blocked'))" |> ignore
+                    runDefault store "INSERT INTO t VALUES ('open'),('active'),('done'),('blocked'),('open')" |> ignore
+
+                    let scalar (sql: string) =
+                        match runDefault store $"SELECT {sql} FROM t LIMIT 1" with
+                        | ResultSet(_, [ [ Some v ] ]) -> v
+                        | other -> failtestf "expected one value for %s, got %A" sql other
+
+                    // MySQL 8.4-verified: `status + 0` is the ordinal, not 0.
+                    Expect.equal (scalar "status + 0") "1" "arithmetic sees the ordinal"
+                    Expect.equal (scalar "status * 1") "1" "multiplication sees the ordinal"
+                    Expect.equal (scalar "CAST(status AS SIGNED)") "1" "CAST AS SIGNED sees the ordinal"
+                    Expect.equal (scalar "CAST(status AS UNSIGNED)") "1" "CAST AS UNSIGNED sees the ordinal"
+                    Expect.equal (scalar "CAST(status AS CHAR)") "open" "CAST AS CHAR keeps the label"
+
+                    match runDefault store "SELECT SUM(status), MAX(status), MIN(status), GROUP_CONCAT(status) FROM t" with
+                    | ResultSet(_, [ [ Some total; Some biggest; Some smallest; Some joined ] ]) ->
+                        Expect.equal total "11" "SUM folds ordinals"
+                        Expect.equal biggest "open" "MAX still returns a label"
+                        Expect.equal smallest "active" "MIN still returns a label"
+                        Expect.equal joined "open,active,done,blocked,open" "GROUP_CONCAT still joins labels"
+                    | other -> failtestf "expected one aggregate row, got %A" other
+
+                testCase "WITH ROLLUP sorts an ENUM group key lexically, not by declaration ordinal"
+                <| fun _ ->
+                    let store = newStore ()
+                    runDefault store "CREATE TABLE t (status ENUM('open','active','done','blocked'))" |> ignore
+                    runDefault store "INSERT INTO t VALUES ('open'),('active'),('done'),('blocked'),('open')" |> ignore
+
+                    let statuses (sql: string) =
+                        match runDefault store sql with
+                        | ResultSet(_, rows) -> rows |> List.map List.head
+                        | other -> failtestf "expected rows for %s, got %A" sql other
+
+                    // Without ROLLUP the key keeps its ENUM type and sorts by
+                    // ordinal; ROLLUP materializes it into a nullable
+                    // temporary that loses the type, so MySQL sorts it as text.
+                    Expect.equal
+                        (statuses "SELECT status FROM t GROUP BY status ORDER BY status")
+                        [ Some "open"; Some "active"; Some "done"; Some "blocked" ]
+                        "plain GROUP BY sorts by declaration ordinal"
+
+                    Expect.equal
+                        (statuses "SELECT status FROM t GROUP BY status WITH ROLLUP ORDER BY GROUPING(status), status")
+                        [ Some "active"; Some "blocked"; Some "done"; Some "open"; None ]
+                        "ROLLUP sorts the group key lexically, super-aggregate row last"
+
+                    // No ORDER BY at all: ROLLUP keeps the grouping order.
+                    Expect.equal
+                        (statuses "SELECT status FROM t GROUP BY status WITH ROLLUP")
+                        [ Some "open"; Some "active"; Some "done"; Some "blocked"; None ]
+                        "unordered ROLLUP keeps the ordinal grouping order"
+
                 testCase "hexadecimal literals preserve arbitrary bytes in VARBINARY and BLOB columns"
                 <| fun _ ->
                     let store = newStore ()
@@ -5294,7 +5350,107 @@ let tests =
                               [ Some "\"a\""; Some "1" ]
                               [ Some "{\"k\": 1}"; Some "0" ] ]
                             "the number sorts first, the string matches the JSON literal"
-                    | other -> failtestf "expected three rows, got %A" other ]
+                    | other -> failtestf "expected three rows, got %A" other
+
+                // NESTED PATH row multiplication, all four shapes pinned to
+                // the 8.4 oracle.
+                testCase "NESTED PATH multiplies the parent row, keeping it when nothing matches"
+                <| fun _ ->
+                    match
+                        runDefault
+                            (newStore ())
+                            """SELECT jt.a, jt.k
+                               FROM JSON_TABLE('[{"a":1,"kids":[{"k":10},{"k":11}]},{"a":2,"kids":[{"k":20}]},{"a":3,"kids":[]}]',
+                                               '$[*]' COLUMNS (a INT PATH '$.a',
+                                                               NESTED PATH '$.kids[*]' COLUMNS (k INT PATH '$.k'))) AS jt
+                               ORDER BY jt.a, jt.k"""
+                    with
+                    | ResultSet(_, rows) ->
+                        Expect.equal
+                            rows
+                            [ [ Some "1"; Some "10" ]
+                              [ Some "1"; Some "11" ]
+                              [ Some "2"; Some "20" ]
+                              [ Some "3"; None ] ]
+                            "two children expand to two rows; an empty array still yields the parent with NULL (OUTER semantics)"
+                    | other -> failtestf "expected four rows, got %A" other
+
+                testCase "sibling NESTED PATHs do not cross-join"
+                <| fun _ ->
+                    match
+                        runDefault
+                            (newStore ())
+                            """SELECT jt.a, jt.v, jt.w
+                               FROM JSON_TABLE('[{"a":1,"x":[{"v":7},{"v":8}],"y":[{"w":90}]}]',
+                                               '$[*]' COLUMNS (a INT PATH '$.a',
+                                                               NESTED PATH '$.x[*]' COLUMNS (v INT PATH '$.v'),
+                                                               NESTED PATH '$.y[*]' COLUMNS (w INT PATH '$.w'))) AS jt
+                               ORDER BY jt.a, jt.v, jt.w"""
+                    with
+                    | ResultSet(_, rows) ->
+                        Expect.equal
+                            rows
+                            [ [ Some "1"; None; Some "90" ]
+                              [ Some "1"; Some "7"; None ]
+                              [ Some "1"; Some "8"; None ] ]
+                            "three rows, not the six a cross-join would give: each sibling NULLs the other's column"
+                    | other -> failtestf "expected three rows, got %A" other
+
+                testCase "NESTED PATH nests, and FOR ORDINALITY counts within the nested sequence"
+                <| fun _ ->
+                    match
+                        runDefault
+                            (newStore ())
+                            """SELECT jt.a, jt.o, jt.z
+                               FROM JSON_TABLE('[{"a":1,"k":[{"n":[{"z":5},{"z":6}]}]}]',
+                                               '$[*]' COLUMNS (a INT PATH '$.a',
+                                                               NESTED PATH '$.k[*]' COLUMNS (
+                                                                   NESTED PATH '$.n[*]' COLUMNS (o FOR ORDINALITY, z INT PATH '$.z')))) AS jt
+                               ORDER BY jt.a, jt.z"""
+                    with
+                    | ResultSet(_, rows) ->
+                        Expect.equal
+                            rows
+                            [ [ Some "1"; Some "1"; Some "5" ]; [ Some "1"; Some "2"; Some "6" ] ]
+                            "two levels deep, ordinality restarting inside the innermost sequence"
+                    | other -> failtestf "expected two rows, got %A" other
+
+                // LATERAL: the derived table re-runs per left row, so it may
+                // reference the left row's columns — the one thing a plain
+                // derived table cannot do. Both shapes pinned to the oracle.
+                testCase "a LATERAL derived table sees the left row's columns"
+                <| fun _ ->
+                    match
+                        runDefault
+                            (newStore ())
+                            """SELECT s.n, d.dbl
+                               FROM (SELECT 1 AS n UNION SELECT 2 UNION SELECT 3) s,
+                                    LATERAL (SELECT s.n * 2 AS dbl) d
+                               ORDER BY s.n"""
+                    with
+                    | ResultSet(_, rows) ->
+                        Expect.equal
+                            rows
+                            [ [ Some "1"; Some "2" ]; [ Some "2"; Some "4" ]; [ Some "3"; Some "6" ] ]
+                            "the body is re-evaluated against each left row"
+                    | other -> failtestf "expected three rows, got %A" other
+
+                testCase "LEFT JOIN LATERAL keeps a left row whose body produced nothing"
+                <| fun _ ->
+                    match
+                        runDefault
+                            (newStore ())
+                            """SELECT s.n, d.v
+                               FROM (SELECT 1 AS n UNION SELECT 2) s
+                               LEFT JOIN LATERAL (SELECT s.n AS v WHERE s.n > 1) d ON 1 = 1
+                               ORDER BY s.n"""
+                    with
+                    | ResultSet(_, rows) ->
+                        Expect.equal
+                            rows
+                            [ [ Some "1"; None ]; [ Some "2"; Some "2" ] ]
+                            "outer semantics: the empty body NULL-extends rather than dropping the row"
+                    | other -> failtestf "expected two rows, got %A" other ]
 
           testList
               "rounding and truncation rules pinned to the 8.4 oracle"

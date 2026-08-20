@@ -296,3 +296,39 @@ silent wrong answers rather than refusals:
   unrecognized unit — a silent no-op — and answers NULL instead.
 
 Ledger effect: 32 signatures down to 20.
+
+## Closed: the last 20 (wave W4)
+
+Everything the pre-W4 ledger excused now runs, so `support/known-gaps.json`
+holds an empty signature array. The suite passes at seed 1 across all four
+scenarios with nothing to excuse, which is the point of emptying it: a
+regression in any of these fails loudly instead of matching a stale
+signature.
+
+- **Common table expressions** — `WITH` and `WITH RECURSIVE`.
+- **Window frames and the wider window set** — `ROWS`/`RANGE` frames, named
+  `WINDOW`, `LAG`/`LEAD` offset and default arguments,
+  `FIRST_VALUE`/`LAST_VALUE`/`NTH_VALUE`/`CUME_DIST`, aggregates under
+  `OVER`.
+- **`WITH ROLLUP` and `GROUPING()`**.
+- **`LATERAL` derived tables**, in both the comma-join and `JOIN ... ON TRUE`
+  spellings.
+- **JSON_TABLE `NESTED PATH`** — including sibling NESTED PATHs (which do
+  *not* cross-join), two-level nesting, and `FOR ORDINALITY` inside a nested
+  block, all with MySQL's outer-join padding of the unmatched siblings.
+
+One divergence the new ROLLUP probes exposed, now fixed: `WITH ROLLUP`
+materializes each grouped column into a nullable temporary that loses its
+ENUM type, so MySQL sorts an ENUM group key *lexically* under ROLLUP where a
+plain `GROUP BY` sorts it by declaration ordinal. Chasing that turned up a
+second, unrelated one — an ENUM in numeric context (`status + 0`,
+`CAST(status AS UNSIGNED)`, `SUM`/`AVG`/`STDDEV`/`VAR`/`BIT_*`) reads its
+declaration ordinal, typed DOUBLE, where fsdb read the label as 0.
+`MIN`/`MAX`/`COUNT`/`GROUP_CONCAT` keep the label. Three probes
+(`enum_numeric_context`, `enum_aggregates_split_numeric_and_label`,
+`enum_group_by_sorts_by_ordinal`) pin all of it.
+
+Known non-gap: `suite --seed 7` classifies the scalar scenario
+`oracle_rejected` — the generator emits a `unsigned_tiny + signed_tiny` sum
+that MySQL 8.4.11 itself refuses with 1690. That is a generator bug, not an
+fsdb divergence; a rejected oracle compares nothing.

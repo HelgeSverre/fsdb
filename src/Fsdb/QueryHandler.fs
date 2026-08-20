@@ -798,6 +798,7 @@ let private targetDatabases (dbName: string) (stmt: Statement) : string list =
             match j.Table with
             | FromTable t -> Some(tableRefDb t)
             | FromSubquery _
+            | FromLateral _
             | FromJsonTable _ -> None)
 
     match stmt with

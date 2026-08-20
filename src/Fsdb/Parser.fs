@@ -2255,10 +2255,11 @@ let private crossJoinClause: Parser<Join, unit> =
 /// an N-source join list (`Executor.applyJoin`/`runMutationJoin`) lights up
 /// for `SELECT`/`UPDATE`/`DELETE` alike with no executor change; a real
 /// table or a `JSON_TABLE(...)` (MySQL's correlated comma-join form, `FROM
-/// t, JSON_TABLE(t.doc, ...) jt`) can follow the comma, but not a derived
-/// `(SELECT ...)`.
+/// t, JSON_TABLE(t.doc, ...) jt`) or a `LATERAL (SELECT ...)` (its
+/// correlated derived-table form, which is what the comma is *for* here)
+/// can follow the comma, but not a plain derived `(SELECT ...)`.
 let private commaJoinClause: Parser<Join, unit> =
-    attempt (sym "," >>. (jsonTable <|> (tableRef |>> FromTable)))
+    attempt (sym "," >>. (lateralTable <|> jsonTable <|> (tableRef |>> FromTable)))
     |>> fun table -> { Kind = CrossJoin; Table = table; On = Lit(VInt 1L); Using = [] }
 
 /// `JOIN ... USING (col, ...)`'s column list — the equi-keys are resolved by

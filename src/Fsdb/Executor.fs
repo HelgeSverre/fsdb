@@ -1494,6 +1494,15 @@ let private enumOrdinalFor (ctx: EvalContext) (expr: Expr) (v: Value) : Value op
         | _ -> None
     | _ -> None
 
+/// An ENUM operand as MySQL's arithmetic and its numeric aggregates see it:
+/// the declaration ordinal, typed DOUBLE — `status + 0` comes back over the
+/// wire as a DOUBLE, and `SUM(status)` as a DOUBLE rather than SUM's usual
+/// exact DECIMAL. Anything that isn't an ENUM column reference passes through.
+let private enumNumericOperand (ctx: EvalContext) (expr: Expr) (v: Value) : Value =
+    match enumOrdinalFor ctx expr v with
+    | Some(VInt ordinal) -> VDouble(float ordinal)
+    | _ -> v
+
 /// The numeric side of an ENUM comparison: a real integer, or a
 /// fully-numeric string (MySQL reads quoted numbers as indices too).
 let private ordinalComparand (v: Value) : Value option =
@@ -1623,6 +1632,11 @@ let rec private evalExpr (ctx: EvalContext) (expr: Expr) : Result<Value, EvalErr
                                     boolToValue (pred c)
                             | _ -> boolToValue (pred (Value.compare pa pb))
 
+                    // An ENUM is a number in numeric context: `status + 0` is
+                    // the declaration ordinal, not 0 from a non-numeric label.
+                    let arith (f: Value -> Value -> Value) =
+                        f (enumNumericOperand ctx a va) (enumNumericOperand ctx b vb)
+
                     match op with
                     | And ->
                         match truthy va, truthy vb with
@@ -1650,11 +1664,11 @@ let rec private evalExpr (ctx: EvalContext) (expr: Expr) : Result<Value, EvalErr
                     // give it rather than falling into generic numeric add/sub.
                     | Add when isIntervalValue vb -> tryDateIntervalBinOp 1.0 va vb |> Option.defaultValue (Value.add va vb)
                     | Sub when isIntervalValue vb -> tryDateIntervalBinOp -1.0 va vb |> Option.defaultValue (Value.sub va vb)
-                    | Add -> Value.add va vb
-                    | Sub -> Value.sub va vb
-                    | Mul -> Value.mul va vb
-                    | Div -> Value.div va vb
-                    | IntDiv -> Value.intDiv va vb
+                    | Add -> arith Value.add
+                    | Sub -> arith Value.sub
+                    | Mul -> arith Value.mul
+                    | Div -> arith Value.div
+                    | IntDiv -> arith Value.intDiv
                     | Eq -> compareWith Eq
                     | Neq -> compareWith Neq
                     | Lt -> compareWith Lt
@@ -1802,6 +1816,7 @@ let rec private evalExpr (ctx: EvalContext) (expr: Expr) : Result<Value, EvalErr
     // and anything past the top of the range clamps to it.
     | Cast(e, TBigInt true) ->
         eval e
+        |> Result.map (fun v -> enumOrdinalFor ctx e v |> Option.defaultValue v)
         |> Result.map (fun v ->
             let wrap (d: decimal) =
                 let n = System.Math.Round(d, System.MidpointRounding.AwayFromZero)
@@ -1868,6 +1883,13 @@ let rec private evalExpr (ctx: EvalContext) (expr: Expr) : Result<Value, EvalErr
                     Error(3141, "Invalid JSON text in argument 1 to function cast_as_json: \"Invalid value.\" at position 0."))
     | Cast(e, ty) ->
         eval e
+        // Casting an ENUM to a number reads its declaration ordinal, the same
+        // numeric context arithmetic and `=` put it in (`enumOrdinalFor`).
+        |> Result.map (fun v ->
+            match ty with
+            | TTinyInt _ | TSmallInt _ | TMediumInt _ | TInt _ | TBigInt _
+            | TDecimal _ | TDouble | TFloat -> enumOrdinalFor ctx e v |> Option.defaultValue v
+            | _ -> v)
         |> Result.bind (fun v ->
             // Reuses `Storage.coerceValue` against a throwaway column of the
             // cast's target type rather than a second coercion table, always
@@ -2151,23 +2173,28 @@ and private selectColumnFsps
 and private jsonTableColumnDefs (columns: JsonTableColumn list) : ColumnDef list =
     columns
     |> List.map (fun c ->
-        let name, ty =
-            match c with
-            | ForOrdinality name -> name, TInt true
-            | PathColumn(name, ty, _, _, _) -> name, ty
-            | ExistsColumn(name, ty, _) -> name, ty
+        let def name ty =
+            [ { Name = name
+                Type = ty
+                Nullable = true
+                Default = None
+                AutoIncrement = false
+                PrimaryKey = false
+                Unique = false
+                Generated = None
+                Collation = None
+                Charset = None
+                OnUpdateCurrentTimestamp = false } ]
 
-        { Name = name
-          Type = ty
-          Nullable = true
-          Default = None
-          AutoIncrement = false
-          PrimaryKey = false
-          Unique = false
-          Generated = None
-          Collation = None
-          Charset = None
-          OnUpdateCurrentTimestamp = false })
+        match c with
+        | ForOrdinality name -> def name (TInt true)
+        | PathColumn(name, ty, _, _, _) -> def name ty
+        | ExistsColumn(name, ty, _) -> def name ty
+        // A NESTED PATH contributes its children's columns, not one of its
+        // own, flattened in declaration order — the same order
+        // `jsonTableRows` emits cells in.
+        | NestedColumns(_, nested) -> jsonTableColumnDefs nested)
+    |> List.collect id
 
 /// Expands one already-evaluated JSON_TABLE source document into rows — the
 /// one expansion both eval sites (`resolveFromItem`'s uncorrelated case and
@@ -2241,11 +2268,11 @@ and private jsonTableRows (doc: Value) (path: string) (columns: JsonTableColumn 
             match Functions.jsonPathNodes root path with
             | None -> Error(Err(3143, "Invalid JSON path expression. The error is around character position 1."))
             | Some matches ->
-                matches
-                |> List.mapi (fun i node ->
-                    columns
+                // One node's non-nested cells, in declaration order.
+                let plainCells (node: JsonNode) (ordinal: int) (cols: JsonTableColumn list) =
+                    cols
                     |> List.map (function
-                        | ForOrdinality _ -> VInt(int64 i + 1L)
+                        | ForOrdinality _ -> VInt(int64 ordinal + 1L)
                         | ExistsColumn(_, ty, colPath) ->
                             // Never NULL and never an error: 1 when the path
                             // matches at least one node, 0 otherwise, in the
@@ -2263,13 +2290,64 @@ and private jsonTableRows (doc: Value) (path: string) (columns: JsonTableColumn 
                             match Functions.jsonPathNodes node colPath with
                             | Some [ single ] -> columnValue ty single |> Result.defaultWith (fun () -> defaultOf ty onError)
                             | Some [] -> defaultOf ty onEmpty
-                            | _ -> defaultOf ty onError)
-                    |> Array.ofList)
+                            | _ -> defaultOf ty onError
+                        | NestedColumns _ -> VNull)
+
+                // A NESTED PATH multiplies its parent's row once per node it
+                // matches, and siblings never cross-join: each sibling's rows
+                // carry NULL for the others' columns. A parent whose nested
+                // paths all match nothing still yields one row with those
+                // columns NULL (MySQL's OUTER semantics).
+                let rec expand (node: JsonNode) (ordinal: int) (cols: JsonTableColumn list) : Value list list =
+                    let plain = plainCells node ordinal cols
+                    let width = List.map (fun c -> List.length (jsonTableColumnDefs [ c ])) cols
+
+                    // Splice one sibling's expanded cells into the flattened
+                    // row, leaving every other slot as its NULL placeholder.
+                    let spliceAt (index: int) (cells: Value list) =
+                        cols
+                        |> List.mapi (fun i c ->
+                            match c with
+                            | NestedColumns _ when i = index -> cells
+                            | NestedColumns(_, nested) -> jsonTableColumnDefs nested |> List.map (fun _ -> VNull)
+                            | _ -> [ List.item i plain ])
+                        |> List.collect id
+
+                    let nestedRows =
+                        cols
+                        |> List.indexed
+                        |> List.collect (fun (i, c) ->
+                            match c with
+                            | NestedColumns(nestedPath, nested) ->
+                                match Functions.jsonPathNodes node nestedPath with
+                                | Some (_ :: _ as nodes) ->
+                                    nodes
+                                    |> List.mapi (fun j child -> expand child j nested |> List.map (spliceAt i))
+                                    |> List.collect id
+                                | _ -> []
+                            | _ -> [])
+
+                    match nestedRows with
+                    | [] when cols |> List.exists (function NestedColumns _ -> true | _ -> false) ->
+                        // Outer semantics: keep the parent, NULL the nested.
+                        [ spliceAt -1 [] ]
+                    | [] -> [ plain ]
+                    | rows -> rows
+
+                matches
+                |> List.mapi (fun i node -> expand node i columns |> List.map Array.ofList)
+                |> List.collect id
                 |> Ok
 
 and private resolveFromItem (store: Store) (registry: Registry) (dbName: string) (item: FromItem) : Result<ColumnDef list * Value[] list, QueryResult> =
     match item with
     | FromTable tableRef -> resolveTableRef store dbName tableRef
+    | FromLateral _ ->
+        // A leading `FROM LATERAL (...)` has nothing to its left, so it is
+        // just a derived table — including MySQL's own error for a column
+        // reference that would have needed a left row. The correlated form
+        // is `applyLateralJoin`, which re-runs the body per left row.
+        resolveFromSubquery store registry dbName item
     | FromJsonTable(source, path, columns, _alias) ->
         // The uncorrelated site (`FROM JSON_TABLE('literal', ...) jt` as the
         // base FROM): the source evaluates in a no-columns literal context,
@@ -2306,7 +2384,13 @@ and private resolveFromSubquery (store: Store) (registry: Registry) (dbName: str
     match item with
     | FromTable _
     | FromJsonTable _ -> resolveFromItem store registry dbName item
-    | FromSubquery(body, _alias) ->
+    | FromSubquery(body, _alias)
+    // A LATERAL body resolved *without* a left row is only ever the column
+    // metadata probe `applyLateralJoin` runs when the left side is empty
+    // (see its doc); its correlated references evaluate against the outer
+    // context there, which is `None` here, so a column that only a left row
+    // could supply resolves to NULL rather than erroring.
+    | FromLateral(body, _alias) ->
         let result, _, typedRows =
             match body with
             | PlainSelect select -> runSelectStmt store registry dbName select None
@@ -2348,7 +2432,8 @@ and private strictestUnionCollation (a: Collation.Collation) (b: Collation.Colla
 and private fromItemQualifier (item: FromItem) : string =
     match item with
     | FromTable t -> t.Alias |> Option.defaultValue t.Table
-    | FromSubquery(_, alias) -> alias
+    | FromSubquery(_, alias)
+    | FromLateral(_, alias) -> alias
     | FromJsonTable(_, _, _, alias) -> alias
 
 /// `EvalContext.Qualifiers` for every source (the `FROM` table, and each
@@ -2480,7 +2565,97 @@ and private applyJoin
     : Result<(string * ColumnDef list) list * Value[] seq * string list, QueryResult> =
     match join.Table with
     | FromJsonTable(source, path, columns, alias) -> applyJsonTableJoin store registry dbName outer state join source path columns alias
+    | FromLateral(body, alias) -> applyLateralJoin store registry dbName outer state join body alias
     | _ -> applyResolvedJoin store registry dbName outer state join
+
+/// `applyJoin`'s LATERAL branch — the derived table re-runs once per left
+/// row, with that row (over the columns joined so far) as its outer context,
+/// so its WHERE/ORDER BY/LIMIT see the left row's values. An `INNER`/comma
+/// join drops a left row whose body produced nothing; a `LEFT JOIN ... ON
+/// TRUE` pads it with NULLs instead, which is the whole point of the
+/// spelling.
+/// ponytail: `USING`/`NATURAL` and RIGHT JOIN against a LATERAL body are
+/// refused rather than silently run as something else — same policy as
+/// `applyJsonTableJoin`'s.
+and private applyLateralJoin
+    (store: Store)
+    (registry: Registry)
+    (dbName: string)
+    (outer: EvalContext option)
+    ((sourcesSoFar, rowsSoFar): (string * ColumnDef list) list * Value[] seq)
+    (join: Join)
+    (body: SelectOrUnion)
+    (alias: string)
+    : Result<(string * ColumnDef list) list * Value[] seq * string list, QueryResult> =
+    match join.Kind, join.Using with
+    | (InnerJoin | CrossJoin | LeftJoin), [] ->
+        let leftRows = rowsSoFar |> List.ofSeq
+        let combinedColumnsSoFar = sourcesSoFar |> List.collect snd
+        let leftCtxFor = contextFactory store registry dbName (columnIndexOf combinedColumnsSoFar) (qualifierRanges sourcesSoFar) outer
+
+        let runBody (leftRow: Value[] option) : Result<ColumnDef list * Value[] list, QueryResult> =
+            let bodyOuter = leftRow |> Option.map leftCtxFor |> Option.orElse outer
+
+            match body with
+            | PlainSelect select ->
+                match runSelectStmt store registry dbName select bodyOuter with
+                | Err(code, message), _, _ -> Error(Err(code, message))
+                | ResultSet(names, _), _, typedRows -> Ok(deriveColumns names (names |> List.map (fun _ -> Collation.defaultCollation)), typedRows)
+                | Affected _, _, _ -> Error(Err(1064, "a LATERAL derived table did not return a resultset"))
+            | UnionSelect(first, rest, orderBy, limit, offset) ->
+                match runUnionStmt store registry dbName first rest orderBy limit offset with
+                | Err(code, message), _, _ -> Error(Err(code, message))
+                | ResultSet(names, _), _, typedRows -> Ok(deriveColumns names (names |> List.map (fun _ -> Collation.defaultCollation)), typedRows)
+                | Affected _, _, _ -> Error(Err(1064, "a LATERAL derived table did not return a resultset"))
+
+        // The body still has to name its columns even when there is no left
+        // row to run it against — a metadata-only pass with no outer context
+        // supplies them (its correlated references read as NULL).
+        let columnsProbe () =
+            if leftRows.IsEmpty then
+                runBody None |> Result.map fst
+            else
+                Ok []
+
+        columnsProbe ()
+        |> Result.bind (fun probeColumns ->
+            leftRows
+            |> traverse (fun leftRow ->
+                runBody (Some leftRow)
+                |> Result.bind (fun (bodyColumns, bodyRows) ->
+                    let padding = bodyColumns |> List.map (fun _ -> VNull) |> Array.ofList
+
+                    let expanded =
+                        if bodyRows.IsEmpty && join.Kind = LeftJoin then
+                            [ Array.append leftRow padding ]
+                        else
+                            bodyRows |> List.map (Array.append leftRow)
+
+                    expanded
+                    |> traverse (fun combined ->
+                        let ctxFor =
+                            contextFactory
+                                store
+                                registry
+                                dbName
+                                (columnIndexOf (combinedColumnsSoFar @ bodyColumns))
+                                (qualifierRanges (sourcesSoFar @ [ alias, bodyColumns ]))
+                                outer
+
+                        evalExpr { ctxFor combined with Clause = OnClause } join.On
+                        |> Result.map (fun v -> combined, truthy v = Some true))
+                    |> Result.mapError Err
+                    |> Result.map (fun checked' -> bodyColumns, checked' |> List.filter snd |> List.map fst)))
+            |> Result.map (fun perLeftRow ->
+                let bodyColumns =
+                    perLeftRow |> List.tryPick (fun (cols, _) -> if List.isEmpty cols then None else Some cols)
+                    |> Option.defaultValue probeColumns
+
+                sourcesSoFar @ [ alias, bodyColumns ],
+                (perLeftRow |> List.collect snd |> Seq.ofList),
+                []))
+    | _ ->
+        Error(Err(1064, "LATERAL only supports comma-join, CROSS JOIN, [INNER] JOIN ... ON and LEFT JOIN ... ON"))
 
 /// `applyJoin`'s JSON_TABLE branch — MySQL's lateral semantics: the source
 /// expression re-evaluates against each left row (over the columns joined
@@ -2759,7 +2934,8 @@ and private applyMutationJoin
     (join: Join)
     : Result<(string * TableRef * ColumnDef list) list * (Value[] option list * Value[]) list, QueryResult> =
     match join.Table with
-    | FromSubquery _ ->
+    | FromSubquery _
+    | FromLateral _ ->
         Error(Err(1064, "a derived table (subquery) isn't supported as a multi-table UPDATE/DELETE JOIN source"))
     | FromJsonTable _ ->
         // ponytail: MySQL allows a JSON_TABLE join source in multi-table
@@ -3854,13 +4030,25 @@ and private evalAggregate
         let isMin = System.String.Equals(name, "MIN", System.StringComparison.OrdinalIgnoreCase)
         let isMax = System.String.Equals(name, "MAX", System.StringComparison.OrdinalIgnoreCase)
 
+        // Every aggregate but COUNT/MIN/MAX folds numerically, and an ENUM in
+        // numeric context is its declaration ordinal — `SUM(status)` adds
+        // ordinals, while `MAX(status)` still returns the label.
+        let foldsNumerically = not (isCount || isMin || isMax)
+
         match Functions.lookupAggregate name registry with
         | None -> Error(unknownFunction name)
         | Some fold ->
             rows
             |> traverse (fun row ->
-                evalExpr (ctxFor row) innerExpr
-                |> Result.map (fun v -> v, collationKeyOf (ctxFor row) innerExpr v))
+                let ctx = ctxFor row
+
+                evalExpr ctx innerExpr
+                |> Result.map (fun v ->
+                    let key = collationKeyOf ctx innerExpr v
+
+                    let v = if foldsNumerically then enumNumericOperand ctx innerExpr v else v
+
+                    v, key))
             |> Result.map (fun keyed ->
                 let nonNull = keyed |> List.filter (fst >> function VNull -> false | _ -> true)
                 // `DISTINCT` folds by the expression's own collation
@@ -4277,6 +4465,22 @@ and private runGroupedSelect
         let representative = representativeOf groupRows
         let ctx = ctxFor representative
 
+        // WITH ROLLUP materializes every grouped column into a nullable
+        // temporary that no longer carries its ENUM type, so MySQL sorts it
+        // lexically instead of by declaration ordinal (`ORDER BY status+0`
+        // still sees ordinals — that is an expression, not a column ref).
+        let orderKeyOf (keyCtx: EvalContext) (expr: Expr) (value: Value) =
+            if select.Rollup then
+                match value with
+                | VString _ -> value, Some(keyCollation keyCtx expr)
+                | _ -> value, None
+            else
+                orderValueForExpr keyCtx expr value
+
+        let evalKey (keyCtx: EvalContext) (expr: Expr) =
+            let orderCtx = { keyCtx with Clause = OrderClause }
+            evalExpr orderCtx expr |> Result.map (orderKeyOf orderCtx expr)
+
         select.OrderBy
         |> traverse (fun (expr, _) ->
             match resolveOrderPosition select.Projections expr with
@@ -4294,12 +4498,12 @@ and private runGroupedSelect
                             | [ projectionExpr ] -> projectionExpr
                             | _ -> Col name
 
-                    Ok(orderValueForExpr { ctx with Clause = OrderClause } sourceExpr v)
+                    Ok(orderKeyOf { ctx with Clause = OrderClause } sourceExpr v)
                 | _ :: _ :: _ -> Error(1052, sprintf "Column '%s' in order clause is ambiguous" name)
                 | [] ->
                     rewriteAggregates registry ctxFor groupRows (rollup (Col name))
-                    |> Result.bind (evalOrderKey ctx)
-            | e -> rewriteAggregates registry ctxFor groupRows (rollup e) |> Result.bind (evalOrderKey ctx))
+                    |> Result.bind (evalKey ctx)
+            | e -> rewriteAggregates registry ctxFor groupRows (rollup e) |> Result.bind (evalKey ctx))
 
     // Schema probe: type-checks WHERE/GROUP BY/HAVING/ORDER BY/projections
     // against an all-NULL row first, the same reasoning as `probeRow`'s
@@ -6167,7 +6371,10 @@ let rec private explainJoinBlock
             |> Result.map (fun (n, ty) ->
                 if not (tryExplainConst tref) then
                     emitTableRow idx (tref.Alias |> Option.defaultValue tref.Table) n ty)
-        | FromSubquery(PlainSelect sub, _alias) ->
+        | FromSubquery(PlainSelect sub, _alias)
+        // A LATERAL body plans like any other derived table here; only its
+        // per-left-row evaluation differs, which EXPLAIN doesn't model.
+        | FromLateral(PlainSelect sub, _alias) ->
             let derivedId = nextId ()
             emitTableRow idx (sprintf "<derived%d>" derivedId) None "ALL"
             explainSelectBlock store dbName nextId acc derivedId "DERIVED" sub
@@ -6177,7 +6384,8 @@ let rec private explainJoinBlock
             // materialized-table-function row for EXPLAIN's purposes.
             emitTableRow idx alias None "ALL"
             Ok()
-        | FromSubquery(UnionSelect(first, rest, _, _, _), _alias) ->
+        | FromSubquery(UnionSelect(first, rest, _, _, _), _alias)
+        | FromLateral(UnionSelect(first, rest, _, _, _), _alias) ->
             // Same "DERIVED" + "UNION" per-branch shape as a top-level
             // `Union`'s own `EXPLAIN` (see `explainStatement`'s `Union`
             // case) — a derived table's body can be a `UNION` too
@@ -6310,7 +6518,8 @@ let rec private explainStatement (store: Store) (registry: Registry) (dbName: st
     let checkMutationWhere (fromRef: TableRef) (joins: Join list) (exprs: Expr list) : Result<unit, QueryResult> =
         let resolveJoinSource (j: Join) =
             match j.Table with
-            | FromSubquery _ ->
+            | FromSubquery _
+            | FromLateral _ ->
                 Error(Err(1064, "a derived table (subquery) isn't supported as a multi-table UPDATE/DELETE JOIN source"))
             | FromJsonTable _ -> Error(Err(1064, "JSON_TABLE isn't supported as a multi-table UPDATE/DELETE JOIN source"))
             | FromTable tref -> resolveTableRef store dbName tref |> Result.map (fun (cols, _) -> fromItemQualifier j.Table, cols)
