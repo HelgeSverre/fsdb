@@ -1913,6 +1913,18 @@ let tests =
                     | ResultSet(_, [ [ Some "42" ] ]) -> ()
                     | other -> failtestf "expected '42', got %A" other
 
+                testCase "DECIMAL precision and scale are validated before coercion"
+                <| fun _ ->
+                    let store = newStore ()
+
+                    match runDefault store "SELECT CAST(1 AS DECIMAL(10,10000))" with
+                    | Err(1425, _) -> ()
+                    | other -> failtestf "expected 1425 for the CAST scale, got %A" other
+
+                    match runDefault store "CREATE TABLE t (n DECIMAL(10,10000))" with
+                    | Err(1425, _) -> ()
+                    | other -> failtestf "expected 1425 for the column scale, got %A" other
+
                 testCase "CAST never raises 1366, even under the session's default strict sql_mode"
                 <| fun _ ->
                     // Oracle (real MySQL 8, default sql_mode): CAST('abc' AS
@@ -4897,6 +4909,12 @@ let tests =
                     with
                     | ResultSet(_, []) -> ()
                     | other -> failtestf "expected zero rows, got %A" other
+
+                testCase "an invalid DECIMAL scale takes the column's ON ERROR path"
+                <| fun _ ->
+                    match runDefault (newStore ()) "SELECT * FROM JSON_TABLE('[1]', '$[*]' COLUMNS (x DECIMAL(1,10000) PATH '$')) jt" with
+                    | ResultSet(_, [ [ None ] ]) -> ()
+                    | other -> failtestf "expected NULL for the invalid DECIMAL column, got %A" other
 
                 testCase "a NULL document expands to zero rows"
                 <| fun _ ->

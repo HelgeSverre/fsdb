@@ -945,8 +945,14 @@ let coerceValue (strict: bool) (col: ColumnDef) (v: Value) : Result<Value, Stora
     let temporalFallback () =
         if strict || not col.Nullable then fail () else Ok VNull
 
-    match v with
-    | VNull -> Ok VNull
+    match col.Type, v with
+    | TDecimal(precision, _), _ when precision < 1 || precision > 65 ->
+        Error(ExpressionError(1426, sprintf "Too-big precision %d specified for '%s'. Maximum is 65." precision col.Name))
+    | TDecimal(_, scale), _ when scale < 0 || scale > 30 ->
+        Error(ExpressionError(1425, sprintf "Too big scale %d specified for column '%s'. Maximum is 30." scale col.Name))
+    | TDecimal(precision, scale), _ when scale > precision ->
+        Error(ExpressionError(1427, sprintf "For decimal(M,D), M must be >= D (column '%s')." col.Name))
+    | _, VNull -> Ok VNull
     | _ ->
         match col.Type with
         // `BIGINT UNSIGNED` is the one integer column whose domain `VInt`
@@ -1773,16 +1779,20 @@ let private withTable
         tryGetTable db tableName
         |> Result.bind (fun table -> f table |> Result.map (fun (table', result) -> Map.add (normalizeTableName tableName) table' db, result)))
 
-/// Rejects a temporal column whose declared fsp exceeds 6 with MySQL's 1426
-/// (the parser accepts any int; the range check lives here, at DDL time,
-/// where the column name is in scope to name in the error). Called by every
-/// path that introduces a column — `createTable` and the column-adding
-/// `alterTable` actions.
-let private validateColumnFsp (c: ColumnDef) : Result<unit, StorageError> =
+/// Validates type parameters at DDL time, where the real column name is in
+/// scope for MySQL-compatible errors. Runtime coercion repeats DECIMAL's
+/// bounds because CAST and JSON_TABLE create synthetic column definitions.
+let private validateColumnType (c: ColumnDef) : Result<unit, StorageError> =
     match c.Type with
     | TDateTime fsp
     | TTimestamp fsp
     | TTime fsp when fsp > 6 -> Error(PrecisionTooBig(c.Name, fsp))
+    | TDecimal(precision, _) when precision < 1 || precision > 65 ->
+        Error(ExpressionError(1426, sprintf "Too-big precision %d specified for '%s'. Maximum is 65." precision c.Name))
+    | TDecimal(_, scale) when scale < 0 || scale > 30 ->
+        Error(ExpressionError(1425, sprintf "Too big scale %d specified for column '%s'. Maximum is 30." scale c.Name))
+    | TDecimal(precision, scale) when scale > precision ->
+        Error(ExpressionError(1427, sprintf "For decimal(M,D), M must be >= D (column '%s')." c.Name))
     // VECTOR shares the parse-anything-validate-at-DDL discipline: the
     // parser accepts any dimension, MySQL 9's 1..16383 range is enforced
     // here with real MySQL's 1074 shape for an over-long column.
@@ -1858,7 +1868,7 @@ let createTableSeeded
         withDatabase store dbName (fun db ->
             let key = normalizeTableName tableName
 
-            match columns |> traverse validateColumnFsp with
+            match columns |> traverse validateColumnType with
             | Error e -> Error e
             | Ok _ ->
 
@@ -2069,11 +2079,11 @@ let private applyAlterAction (strict: bool) (table: Table) (action: AlterAction)
 
     // Reject a too-big fsp on any column this action introduces (1426),
     // before it can reach the table — the DDL-time counterpart to
-    // `createTable`'s own `validateColumnFsp` pass.
+    // `createTable`'s own `validateColumnType` pass.
     let fspCheck =
         match action with
         | AddColumn(col, _) ->
-            validateColumnFsp col
+            validateColumnType col
             |> Result.bind (fun () -> checkVectorKeyColumns [ col ] [])
         // Existing indexes reference the column by its pre-ALTER name, so a
         // type change into an already-indexed column must be checked under
@@ -2086,7 +2096,7 @@ let private applyAlterAction (strict: bool) (table: Table) (action: AlterAction)
                 | ChangeColumn(oldName, _, _) -> oldName
                 | _ -> col.Name
 
-            validateColumnFsp col
+            validateColumnType col
             |> Result.bind (fun () -> checkVectorKeyColumns [ { col with Name = oldName } ] table.Indexes)
         // The key-introducing actions must refuse a VECTOR column the same
         // way CREATE TABLE does — otherwise ALTER is a back door into the
