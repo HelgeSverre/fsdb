@@ -23,7 +23,8 @@ let private readAllPackets (stream: IO.Stream) : Async<Packet list> =
     loop []
 
 let tests =
-    testList
+    testSequenced
+    <| testList
         "Server"
         [ // sendQueryResult is the only sequence-id-bearing logic in the
           // server, and getting a resultset terminator wrong hangs mysql
@@ -149,4 +150,36 @@ let tests =
 
                   dummyListener.Stop()
               }
-              |> Async.RunSynchronously ]
+              |> Async.RunSynchronously
+
+          testCase "connections above max_connections receive a pre-handshake 1040 error"
+          <| fun _ ->
+              Fsdb.Limits.withSettings [ "max_connections", "1" ] (fun () ->
+                  async {
+                      let listener = Fsdb.Server.startListening Net.IPAddress.Loopback 0
+                      let store = Fsdb.Storage.create ()
+                      Fsdb.Server.serve listener store Fsdb.Functions.empty |> Async.Start
+
+                      use admitted = new Net.Sockets.TcpClient()
+                      use refused = new Net.Sockets.TcpClient()
+
+                      try
+                          do! admitted.ConnectAsync(Net.IPAddress.Loopback, Fsdb.Server.port listener) |> Async.AwaitTask
+                          let! handshake = readPacketAsync (admitted.GetStream())
+                          Expect.isSome handshake "the admitted connection receives a handshake"
+
+                          do! refused.ConnectAsync(Net.IPAddress.Loopback, Fsdb.Server.port listener) |> Async.AwaitTask
+                          let! response = readPacketAsync (refused.GetStream())
+
+                          match response with
+                          | None -> failtest "expected a 1040 packet before close"
+                          | Some packet ->
+                              Expect.equal packet.SeqId 0uy "the pre-handshake error starts a packet sequence"
+                              Expect.equal packet.Payload.[0] 0xffuy "ERR header"
+                              let reader = Reader(packet.Payload.[1..])
+                              Expect.equal (reader.ReadInt16LE()) 1040 "Too many connections code"
+                              Expect.equal (Text.Encoding.ASCII.GetString(packet.Payload, 4, 5)) "08004" "connection-rejection SQLSTATE"
+                      finally
+                          listener.Stop()
+                  }
+                  |> Async.RunSynchronously) ]

@@ -182,6 +182,7 @@ let okEndOfResultSetPayload (capabilities: uint32) (statusFlags: int) : byte[] =
 /// unmapped falls back to HY000, matching MySQL's own default.
 let sqlStateForCode (code: int) : string =
     match code with
+    | 1040 -> "08004" // ER_CON_COUNT_ERROR
     | 1064 -> "42000" // ER_PARSE_ERROR
     | 1146 -> "42S02" // ER_NO_SUCH_TABLE
     | 1054 -> "42S22" // ER_BAD_FIELD_ERROR

@@ -1006,40 +1006,44 @@ let private tryAccept (listener: TcpListener) : Async<TcpClient option> =
 /// connection runs. A failing connection is logged, never fatal to the
 /// server.
 let serve (listener: TcpListener) (store: Storage.Store) (customFunctions: Functions.Registry) : Async<unit> =
-    // Bounds concurrent connections (see `Limits.maxConnections`): held
-    // for the lifetime of each connection, acquired before accepting the
-    // next one so the accept loop itself blocks once the cap is hit rather
-    // than accepting unboundedly and queuing work behind the scenes.
-    // Deliberately not `use` — `serve` returns this `Async<unit>` unevaluated;
-    // disposing here would run at function-return time, before the loop
-    // that actually needs it ever executes. Lives for the process's
-    // lifetime, same as the listener it's paired with.
-    let connectionSlots = new SemaphoreSlim(Limits.maxConnections)
+    let mutable activeConnections = 0
+
+    let rejectAtCapacity (client: TcpClient) =
+        async {
+            use client = client
+            use stream = client.GetStream()
+            let payload = errPayload ClientProtocol41 1040 "Too many connections"
+            do! writePacketAsync stream { SeqId = 0uy; Payload = payload } |> Async.Ignore
+        }
 
     let rec loop () : Async<unit> =
         async {
-            do! connectionSlots.WaitAsync() |> Async.AwaitTask
-
             match! tryAccept listener with
-            | None -> connectionSlots.Release() |> ignore
+            | None -> ()
             | Some client ->
-                // Process-wide, not per-listener: the process registry
-                // (`InformationSchema.registerProcess`) and `KILL <id>` key
-                // on this number, so two listeners in one process (the test
-                // suite, the embedding API) must never hand out the same id.
-                let connectionId = int (Interlocked.Increment connectionCounter)
+                let active = Interlocked.Increment(&activeConnections)
 
-                Async.Start(
-                    async {
-                        try
+                if active > Limits.maxConnections then
+                    Interlocked.Decrement(&activeConnections) |> ignore
+                    Async.Start(rejectAtCapacity client)
+                else
+                    // Process-wide, not per-listener: the process registry
+                    // (`InformationSchema.registerProcess`) and `KILL <id>` key
+                    // on this number, so two listeners in one process (the test
+                    // suite, the embedding API) must never hand out the same id.
+                    let connectionId = int (Interlocked.Increment connectionCounter)
+
+                    Async.Start(
+                        async {
                             try
-                                do! handleConnection connectionId store customFunctions client
-                            with ex ->
-                                Log.diagnostic "fsdb: connection %d: %s" connectionId ex.Message
-                        finally
-                            connectionSlots.Release() |> ignore
-                    }
-                )
+                                try
+                                    do! handleConnection connectionId store customFunctions client
+                                with ex ->
+                                    Log.diagnostic "fsdb: connection %d: %s" connectionId ex.Message
+                            finally
+                                Interlocked.Decrement(&activeConnections) |> ignore
+                        }
+                    )
 
                 return! loop ()
         }
