@@ -1279,7 +1279,7 @@ type private JoinKeyComparer(collations: Collation.Collation list) =
 /// hashEligible" branch) is also the one caller with no build-side key to
 /// hash on, so it's the case most likely to run long enough for
 /// `queryCancellation` to matter (see that doc).
-let private traverseSeq (f: 'a -> Result<'b option, 'e>) (xs: 'a seq) : Result<'b list, 'e> =
+let private traverseSeqWithLimit (limit: (int * 'e) option) (f: 'a -> Result<'b option, 'e>) (xs: 'a seq) : Result<'b list, 'e> =
     let token = queryCancellation.Value
     let acc = ResizeArray()
     let mutable error = None
@@ -1287,19 +1287,29 @@ let private traverseSeq (f: 'a -> Result<'b option, 'e>) (xs: 'a seq) : Result<'
     use enumerator = xs.GetEnumerator()
 
     while error.IsNone && enumerator.MoveNext() do
-        if i % cancellationCheckInterval = 0 then
+        match limit with
+        | Some(maxItems, tooMany) when i >= maxItems -> error <- Some tooMany
+        | _ -> ()
+
+        if error.IsNone && i % cancellationCheckInterval = 0 then
             token.ThrowIfCancellationRequested()
 
-        i <- i + 1
+        if error.IsNone then
+            i <- i + 1
 
-        match f enumerator.Current with
-        | Ok(Some y) -> acc.Add y
-        | Ok None -> ()
-        | Error e -> error <- Some e
+            match f enumerator.Current with
+            | Ok(Some y) -> acc.Add y
+            | Ok None -> ()
+            | Error e -> error <- Some e
 
     match error with
     | Some e -> Error e
     | None -> Ok(List.ofSeq acc)
+
+let private traverseSeq (f: 'a -> Result<'b option, 'e>) (xs: 'a seq) : Result<'b list, 'e> =
+    traverseSeqWithLimit None f xs
+
+let private maxJoinCandidateRows = 1_000_000
 
 /// Bounded top-`capacity` selection for `ORDER BY ... LIMIT n [OFFSET m]`
 /// (`capacity` = `n + m`, already clamped to a sane `int` by the caller):
@@ -2758,13 +2768,11 @@ and private applyResolvedJoin
 
         let ctxFor = contextFactory store registry dbName (columnIndexOf (combinedColumnsSoFar @ joinColumns)) qualifiers outer
 
-        // Forces whatever `rowsSoFar` is (a previous `JOIN` in this same
-        // list may have handed back a lazy seq — see `hashPairs`' doc) up
-        // front: the hash join's build side needs random-access counting
-        // either way. Every later use of the left side reads `leftIndexed`,
-        // never `rowsSoFar` itself, so a chain of `JOIN`s only pays this
-        // force once per link, not once per read.
-        let leftIndexed = rowsSoFar |> List.ofSeq |> List.indexed
+        // Most join strategies need an indexed left side, but keep that
+        // force lazy: an always-true inner/cross join below can compose its
+        // Cartesian product as a seq, allowing a whole chain of such joins
+        // to reach runSelect's LIMIT without materializing an earlier link.
+        let leftIndexed = lazy (rowsSoFar |> List.ofSeq |> List.indexed)
         // `rightCount` (not a materialized indexed list) sizes the build
         // decision; the streaming inner-join path below probes `joinRows`
         // directly with lazy indices, so the 50k (index, row) tuples are only
@@ -2785,7 +2793,7 @@ and private applyResolvedJoin
             let matchedRight = matched |> List.map (fun (_, ri, _) -> ri) |> Set.ofList
 
             let leftOnly =
-                leftIndexed
+                leftIndexed.Value
                 |> List.filter (fst >> matchedLeft.Contains >> not)
                 |> List.map (fun (_, l) -> Array.append l rightNullPadding)
 
@@ -2848,7 +2856,7 @@ and private applyResolvedJoin
             let hashEligible =
                 not equiKeys.IsEmpty
                 && keyClasses |> List.forall Option.isSome
-                && rowsMatchKeyClasses (keyClasses |> List.map Option.get) (equiKeys |> List.map fst) (leftIndexed |> Seq.map snd)
+                && rowsMatchKeyClasses (keyClasses |> List.map Option.get) (equiKeys |> List.map fst) (leftIndexed.Value |> Seq.map snd)
                 && rowsMatchKeyClasses (keyClasses |> List.map Option.get) (equiKeys |> List.map snd) joinRows
 
             let residualHolds (combined: Value[]) : Result<bool, EvalError> =
@@ -2856,10 +2864,16 @@ and private applyResolvedJoin
                 |> traverse (fun c -> evalExpr { ctxFor combined with Clause = OnClause } c)
                 |> Result.map (List.forall (fun v -> truthy v = Some true))
 
+            let isConstantTrue =
+                function
+                | Lit value -> truthy value = Some true
+                | BinOp(Eq, Lit left, Lit right) -> Value.equals left right = Some true
+                | _ -> false
+
             if hashEligible then
                 let leftKeyIndices = equiKeys |> List.map fst |> Array.ofList
                 let rightKeyIndices = equiKeys |> List.map snd |> Array.ofList
-                let buildOnLeft = leftIndexed.Length <= rightCount
+                let buildOnLeft = leftIndexed.Value.Length <= rightCount
 
                 match join.Kind, residualConjuncts with
                 | (InnerJoin | CrossJoin | NaturalJoin), [] ->
@@ -2875,42 +2889,64 @@ and private applyResolvedJoin
                     // much of it ever actually runs.
                     let combined : Value[] seq =
                         if buildOnLeft then
-                            hashPairs keyCollations (equiKeyOf leftKeyIndices) (equiKeyOf rightKeyIndices) leftIndexed (joinRows |> Seq.indexed)
+                            hashPairs keyCollations (equiKeyOf leftKeyIndices) (equiKeyOf rightKeyIndices) leftIndexed.Value (joinRows |> Seq.indexed)
                             |> Seq.map (fun (_, l, _, r) -> Array.append l r)
                         else
-                            hashPairs keyCollations (equiKeyOf rightKeyIndices) (equiKeyOf leftKeyIndices) (joinRows |> Seq.indexed |> List.ofSeq) leftIndexed
+                            hashPairs keyCollations (equiKeyOf rightKeyIndices) (equiKeyOf leftKeyIndices) (joinRows |> Seq.indexed |> List.ofSeq) leftIndexed.Value
                             |> Seq.map (fun (_, r, _, l) -> Array.append l r)
 
                     Ok(newSources, combined, coalesceNames)
                 | _ ->
                     let rightIndexed = joinRows |> Seq.indexed |> List.ofSeq
 
-                    let candidates : (int * int * Value[]) list =
+                    let candidates : (int * int * Value[]) seq =
                         if buildOnLeft then
-                            hashPairs keyCollations (equiKeyOf leftKeyIndices) (equiKeyOf rightKeyIndices) leftIndexed rightIndexed
+                            hashPairs keyCollations (equiKeyOf leftKeyIndices) (equiKeyOf rightKeyIndices) leftIndexed.Value rightIndexed
                             |> Seq.map (fun (li, l, ri, r) -> li, ri, Array.append l r)
-                            |> List.ofSeq
                         else
-                            hashPairs keyCollations (equiKeyOf rightKeyIndices) (equiKeyOf leftKeyIndices) rightIndexed leftIndexed
+                            hashPairs keyCollations (equiKeyOf rightKeyIndices) (equiKeyOf leftKeyIndices) rightIndexed leftIndexed.Value
                             |> Seq.map (fun (ri, r, li, l) -> li, ri, Array.append l r)
-                            |> List.ofSeq
 
                     candidates
-                    |> keepMatches residualHolds id
+                    |> traverseSeqWithLimit
+                        (Some(
+                            maxJoinCandidateRows,
+                            (1105, sprintf "Join exceeds the %d-row candidate limit" maxJoinCandidateRows)
+                        ))
+                        (fun ((_, _, combined) as candidate) ->
+                            residualHolds combined
+                            |> Result.map (fun matches -> if matches then Some candidate else None))
+                    |> Result.mapError Err
                     |> Result.map (buildCombinedRows rightIndexed >> fun (s, r) -> s, r :> Value[] seq, coalesceNames)
             else
                 let rightIndexed = joinRows |> Seq.indexed |> List.ofSeq
 
-                let pairs = seq { for li, l in leftIndexed do for ri, r in rightIndexed -> li, ri, l, r }
+                match join.Kind, isConstantTrue effectiveOn with
+                | (InnerJoin | CrossJoin | NaturalJoin), true ->
+                    let combined =
+                        seq {
+                            for left in rowsSoFar do
+                                for _, right in rightIndexed do
+                                    yield Array.append left right
+                        }
 
-                pairs
-                |> traverseSeq (fun (li, ri, l, r) ->
-                    let combined = Array.append l r
+                    Ok(newSources, combined, coalesceNames)
+                | _ ->
+                    let pairs = seq { for li, l in leftIndexed.Value do for ri, r in rightIndexed -> li, ri, l, r }
 
-                    evalExpr { ctxFor combined with Clause = OnClause } effectiveOn
-                    |> Result.map (fun v -> if truthy v = Some true then Some(li, ri, combined) else None))
-                |> Result.mapError Err
-                |> Result.map (buildCombinedRows rightIndexed >> fun (s, r) -> s, r :> Value[] seq, coalesceNames)
+                    pairs
+                    |> traverseSeqWithLimit
+                        (Some(
+                            maxJoinCandidateRows,
+                            (1105, sprintf "Join exceeds the %d-row candidate limit" maxJoinCandidateRows)
+                        ))
+                        (fun (li, ri, l, r) ->
+                            let combined = Array.append l r
+
+                            evalExpr { ctxFor combined with Clause = OnClause } effectiveOn
+                            |> Result.map (fun v -> if truthy v = Some true then Some(li, ri, combined) else None))
+                    |> Result.mapError Err
+                    |> Result.map (buildCombinedRows rightIndexed >> fun (s, r) -> s, r :> Value[] seq, coalesceNames)
 
 /// Like `applyJoin`, but for a multi-table `UPDATE`/`DELETE ... JOIN`
 /// rather than a `SELECT`: alongside the flattened row `evalExpr` needs,

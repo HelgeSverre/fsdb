@@ -3049,6 +3049,28 @@ let tests =
                         10.0
                         (sprintf "a %d x %d non-equi join with only %d matches took %A — looks hung, not just slow" n n (n - 1) sw.Elapsed)
 
+                testCase "a non-equi JOIN rejects more than one million candidate pairs"
+                <| fun _ ->
+                    let store = newStore ()
+                    runDefault store "CREATE TABLE numbers (n INT)" |> ignore
+                    let values = [ 1..1_001 ] |> List.map (sprintf "(%d)") |> String.concat ","
+                    runDefault store ("INSERT INTO numbers VALUES " + values) |> ignore
+
+                    match runDefault store "SELECT a.n FROM numbers a JOIN numbers b ON a.n + b.n > 0 LIMIT 1" with
+                    | Err(1105, _) -> ()
+                    | other -> failtestf "expected 1105 for the oversized join, got %A" other
+
+                testCase "a chain of Cartesian joins streams into LIMIT"
+                <| fun _ ->
+                    let store = newStore ()
+                    runDefault store "CREATE TABLE numbers (n INT)" |> ignore
+                    let values = [ 1..100 ] |> List.map (sprintf "(%d)") |> String.concat ","
+                    runDefault store ("INSERT INTO numbers VALUES " + values) |> ignore
+
+                    match runDefault store "SELECT a.n FROM numbers a JOIN numbers b ON 1=1 JOIN numbers c ON 1=1 JOIN numbers d ON 1=1 LIMIT 1" with
+                    | ResultSet(_, [ [ Some "1" ] ]) -> ()
+                    | other -> failtestf "expected LIMIT to consume one Cartesian row, got %A" other
+
                 testCase "hash join on string keys matches case-insensitively, and trailing spaces stay distinct (NO PAD)"
                 <| fun _ ->
                     let store = newStore ()
