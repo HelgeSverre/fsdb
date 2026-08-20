@@ -1746,6 +1746,24 @@ let tests =
                     | ResultSet(_, [ [ Some "11" ] ]) -> ()
                     | other -> failtestf "expected n incremented from the existing row, not overwritten by 999, got %A" other
 
+                testCase "the duplicate update preserves NOT NULL and UNIQUE constraints"
+                <| fun _ ->
+                    let store = newStore ()
+                    runDefault store "CREATE TABLE t (id INT PRIMARY KEY, n INT NOT NULL UNIQUE)" |> ignore
+                    runDefault store "INSERT INTO t VALUES (1, 1), (2, 2)" |> ignore
+
+                    match runDefault store "INSERT INTO t VALUES (1, 3) ON DUPLICATE KEY UPDATE n = NULL" with
+                    | Err(1048, _) -> ()
+                    | other -> failtestf "expected 1048 for NULL, got %A" other
+
+                    match runDefault store "INSERT INTO t VALUES (1, 3) ON DUPLICATE KEY UPDATE n = 2" with
+                    | Err(1062, _) -> ()
+                    | other -> failtestf "expected 1062 for the UNIQUE collision, got %A" other
+
+                    match runDefault store "SELECT id, n FROM t ORDER BY id" with
+                    | ResultSet(_, [ [ Some "1"; Some "1" ]; [ Some "2"; Some "2" ] ]) -> ()
+                    | other -> failtestf "expected both failed updates to leave the rows unchanged, got %A" other
+
                 testCase "VALUES(col) inside ON DUPLICATE KEY UPDATE resolves to the incoming row's value"
                 <| fun _ ->
                     let store = newStore ()

@@ -1251,6 +1251,11 @@ let private coerceAndCheck (strict: bool) (col: ColumnDef) (v: Value) : Result<V
     | VNull when not col.Nullable -> Error(NotNullViolation col.Name)
     | _ -> coerceValue strict col v
 
+let private coerceRow (strict: bool) (columns: ColumnDef list) (row: Value[]) : Result<Value[], StorageError> =
+    List.zip columns (Array.toList row)
+    |> traverse (fun (column, value) -> coerceAndCheck strict column value)
+    |> Result.map Array.ofList
+
 /// The `(keyName, column indices)` groups that must be unique: the primary
 /// key (if any, named `"PRIMARY"` the way MySQL reports it in error 1062,
 /// and treated as one group across however many columns it spans) plus
@@ -2930,6 +2935,27 @@ and private upsertRowsInTable
                                         |> Result.bind (function
                                             | candidate, Some(pos, existing) ->
                                                 applyUpdate existing candidate
+                                                |> Result.bind (coerceRow store.StrictMode table.Columns)
+                                                |> Result.bind (fun applied ->
+                                                    let collision =
+                                                        uniqueGroups
+                                                        |> List.tryPick (fun (name, idxs) ->
+                                                            match encodeConstraintKey table.Columns idxs applied with
+                                                            | Some key ->
+                                                                match Map.tryFind key (Map.find name index) with
+                                                                | Some otherPos when otherPos <> pos ->
+                                                                    let value =
+                                                                        idxs
+                                                                        |> List.map (fun i -> applied.[i] |> toText |> Option.defaultValue "NULL")
+                                                                        |> String.concat "-"
+
+                                                                    Some(DuplicateKey(name, value))
+                                                                | _ -> None
+                                                            | None -> None)
+
+                                                    match collision with
+                                                    | Some error -> Error error
+                                                    | None -> Ok applied)
                                                 |> Result.bind (fun applied ->
                                                     // Same FK enforcement `updateRows` applies:
                                                     // `applied`'s own foreign keys need a live
@@ -3027,11 +3053,6 @@ and private upsertRowsInTable
                         Map.add key { table with RowsArray = finalRows; NextAutoId = nextAutoId'; UniqueIndex = index } cascadeDb,
                         cascaded,
                         (Option.defaultValue 0L (Option.orElse lastExplicit firstAuto), firstAuto, affected, List.rev inserted, List.rev updated)))
-
-let private coerceRow (strict: bool) (columns: ColumnDef list) (row: Value[]) : Result<Value[], StorageError> =
-    List.zip columns (Array.toList row)
-    |> traverse (fun (col, v) -> coerceAndCheck strict col v)
-    |> Result.map Array.ofList
 
 /// Deletes `toDelete` (rows already known to belong to `tableKey`, e.g. from
 /// `deleteRows`'s WHERE match) from `db`, applying every other table's
