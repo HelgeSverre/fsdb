@@ -6791,6 +6791,50 @@ let private writtenTableOf (dbName: string) (stmt: Statement) : (string * string
     | Delete d -> Some(d.From.Database |> Option.defaultValue dbName, normalizeTableName d.From.Table)
     | _ -> None
 
+/// Returns every database an INSERT trigger chain can write.
+let triggerWriteDatabases (store: Store) (dbName: string) (tableName: string) : string list =
+    let bodyTargets (defaultDb: string) (statement: Statement) =
+        let tableRefTarget (table: TableRef) =
+            table.Database |> Option.defaultValue defaultDb, normalizeTableName table.Table
+
+        let joinTargets (joins: Join list) =
+            joins
+            |> List.choose (fun (join: Join) ->
+                match join.Table with
+                | FromTable table -> Some(tableRefTarget table)
+                | _ -> None)
+
+        match statement with
+        | Insert(table, _, _, _, _)
+        | InsertSelect(table, _, _, _, _) -> [ splitQualified defaultDb table |> fun (db, name) -> db, normalizeTableName name ]
+        | Update update -> tableRefTarget update.From :: joinTargets update.Joins
+        | Delete delete -> tableRefTarget delete.From :: joinTargets delete.Joins
+        | _ -> []
+
+    let rec visit (visited: Set<string * string>) (db: string) (table: string) =
+        let key = db.ToLowerInvariant(), normalizeTableName table
+
+        if Set.contains key visited then
+            visited, []
+        else
+            let visited = Set.add key visited
+
+            afterInsertTriggers store db table
+            |> List.fold
+                (fun (seen, databases) (_, body, _) ->
+                    match Parser.parse body with
+                    | Ok statement ->
+                        bodyTargets db statement
+                        |> List.fold
+                            (fun (nestedSeen, nestedDatabases) (targetDb, targetTable) ->
+                                let nestedSeen, deeper = visit nestedSeen targetDb targetTable
+                                nestedSeen, targetDb :: deeper @ nestedDatabases)
+                            (seen, databases)
+                    | _ -> seen, databases)
+                (visited, [])
+
+    visit Set.empty dbName tableName |> snd |> List.distinct
+
 /// The exprs a trigger body evaluates at fire time, for the CREATE-time
 /// half of DIRECTONLY enforcement (`firstDirectOnlyCall` over each). An
 /// INSERT...SELECT body's SELECT isn't traversed — the fire-time

@@ -435,4 +435,55 @@ let tests =
 
               match handle session "RELEASE SAVEPOINT b" |> snd with
               | Affected 0UL -> ()
-              | other -> failtestf "expected b to survive releasing the re-established a, got %A" other ]
+              | other -> failtestf "expected b to survive releasing the re-established a, got %A" other
+
+          testCase "a transaction that has only read holds no gate, so another connection can still write"
+          <| fun _ ->
+              let store = Fsdb.Storage.create ()
+              let setup = create 1 store
+              let setup, _ = handle setup "CREATE TABLE ro_t (id INT)"
+              let setup, _ = handle setup "INSERT INTO ro_t VALUES (1)"
+
+              let reader = create 2 store
+              let reader, _ = handle reader "BEGIN"
+              let reader, _ = handle reader "SELECT id FROM ro_t"
+
+              let writer = Threading.Tasks.Task.Run(fun () -> handle (create 3 store) "INSERT INTO ro_t VALUES (2)")
+
+              Expect.isTrue
+                  (writer.Wait(TimeSpan.FromSeconds 5.0))
+                  "a write must not wait on a transaction that has only read"
+
+              match writer.GetAwaiter().GetResult() |> snd with
+              | Affected 1UL -> ()
+              | result -> failtestf "expected the concurrent insert to succeed, got %A" result
+
+              match handle reader "SELECT id FROM ro_t" |> snd with
+              | ResultSet(_, [ _ ]) -> ()
+              | result -> failtestf "expected repeatable read to hide the concurrent insert, got %A" result
+
+              handle reader "ROLLBACK" |> ignore
+              ignore setup
+
+          testCase "a read-only transaction that later writes fails retryably rather than clobbering a commit it never saw"
+          <| fun _ ->
+              let store = Fsdb.Storage.create ()
+              let setup = create 1 store
+              let setup, _ = handle setup "CREATE TABLE up_t (id INT, v INT)"
+              let setup, _ = handle setup "INSERT INTO up_t VALUES (1, 1)"
+
+              let a = create 2 store
+              let a, _ = handle a "BEGIN"
+              let a, _ = handle a "SELECT v FROM up_t"
+
+              handle (create 3 store) "UPDATE up_t SET v = 1234 WHERE id = 1" |> ignore
+
+              match handle a "UPDATE up_t SET v = 7 WHERE id = 1" |> snd with
+              | Err(1205, _) -> ()
+              | result -> failtestf "expected a retryable 1205 on the stale write, got %A" result
+
+              match handle (create 4 store) "SELECT v FROM up_t" |> snd with
+              | ResultSet(_, [ [ Some "1234" ] ]) -> ()
+              | result -> failtestf "expected the concurrent commit to survive intact, got %A" result
+
+              ignore setup ]

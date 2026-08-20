@@ -429,6 +429,18 @@ let enterTransactionGate (store: Store) (dbName: string) (timeout: TimeSpan) : I
 
     new TransactionGateLease(gate) :> IDisposable
 
+/// Tests whether a database still matches a transaction's base snapshot.
+let databaseUnchangedSince (store: Store) (baseCatalog: Catalog) (dbName: string) : bool =
+    let live =
+        match store.Databases.TryGetValue dbName with
+        | true, slot -> Some slot.Value
+        | _ -> None
+
+    match Map.tryFind dbName baseCatalog, live with
+    | None, None -> true
+    | Some baseDb, Some liveDb -> obj.ReferenceEquals(baseDb, liveDb)
+    | _ -> false
+
 /// Delivers `event` (if any): buffers it if `store` is a transaction
 /// snapshot (`PendingEvents` — private to the transaction's own thread, so
 /// no locking needed), otherwise hands it to `OnCommit` under `store.Lock`

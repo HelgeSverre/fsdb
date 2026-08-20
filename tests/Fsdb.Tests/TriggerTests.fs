@@ -1,5 +1,8 @@
 module Fsdb.Tests.TriggerTests
 
+open System
+open System.Threading
+open System.Threading.Tasks
 open Expecto
 open Fsdb.Value
 open Fsdb.Storage
@@ -131,6 +134,58 @@ let tests =
               expectOk (runOnB "INSERT INTO a.t(n) VALUES (7)") "insert from a session on b"
               Expect.equal (rows store "SELECT n FROM a.work_log") [ [ Some "7" ] ] "landed in the trigger's schema"
               Expect.equal (rows store "SELECT n FROM b.work_log") [] "the session's database was not written"
+
+          testCase "a cross-database trigger preserves a concurrent write to its target database"
+          <| fun _ ->
+              use entered = new ManualResetEventSlim(false)
+              use release = new ManualResetEventSlim(false)
+              use concurrentStarted = new ManualResetEventSlim(false)
+
+              let pause =
+                  function
+                  | [] ->
+                      entered.Set()
+
+                      if not (release.Wait(TimeSpan.FromSeconds 5.0)) then
+                          raise (TimeoutException "trigger was not released")
+
+                      VInt 10L
+                  | _ -> VNull
+
+              let db = Fsdb.Db.create () |> Fsdb.Db.registerScalar "pause_trigger" pause
+              let setup = Fsdb.Db.connect db
+              expectOk (setup.Query "CREATE DATABASE source_db") "create source_db"
+              expectOk (setup.Query "CREATE DATABASE audit_db") "create audit_db"
+              expectOk (setup.Query "CREATE TABLE source_db.items (id INT PRIMARY KEY)") "create items"
+              expectOk (setup.Query "CREATE TABLE audit_db.events (id INT PRIMARY KEY)") "create events"
+
+              expectOk
+                  (setup.Query "CREATE TRIGGER item_log AFTER INSERT ON source_db.items FOR EACH ROW INSERT INTO audit_db.events VALUES (pause_trigger())")
+                  "create trigger"
+
+              let firing = Fsdb.Db.connect db
+              let concurrent = Fsdb.Db.connect db
+              let triggerInsert = Task.Run(fun () -> firing.Query "INSERT INTO source_db.items VALUES (1)")
+
+              try
+                  Expect.isTrue (entered.Wait(TimeSpan.FromSeconds 5.0)) "the trigger body started"
+                  let concurrentInsert =
+                      Task.Run(fun () ->
+                          concurrentStarted.Set()
+                          concurrent.Query "INSERT INTO audit_db.events VALUES (20)")
+
+                  Expect.isTrue (concurrentStarted.Wait(TimeSpan.FromSeconds 5.0)) "the concurrent insert started"
+                  Expect.isFalse (concurrentInsert.Wait(TimeSpan.FromMilliseconds 50.0)) "the trigger holds the target database gate"
+                  release.Set()
+                  expectOk triggerInsert.Result "trigger insert"
+                  expectOk concurrentInsert.Result "concurrent insert"
+              finally
+                  release.Set()
+
+              Expect.equal
+                  (setup.Query "SELECT id FROM audit_db.events ORDER BY id")
+                  (ResultSet([ "id" ], [ [ Some "10" ]; [ Some "20" ] ]))
+                  "both writes survive"
 
           testCase "an INSERT ... SELECT body substitutes NEW.* in its ON DUPLICATE KEY UPDATE clause"
           <| fun _ ->

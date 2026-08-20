@@ -800,7 +800,7 @@ let private normalizeIsolationLevel (raw: string) : string =
 /// A multi-table `UPDATE`/`DELETE ... JOIN` can write through any of its
 /// joined tables (`Executor.applyMutationJoin`), so every joined table's
 /// database is included too, not just the leading one.
-let private targetDatabases (dbName: string) (stmt: Statement) : string list =
+let private targetDatabases (store: Store) (dbName: string) (stmt: Statement) : string list =
     let tableRefDb (t: TableRef) = t.Database |> Option.defaultValue dbName
 
     let joinDbs (joins: Join list) =
@@ -814,7 +814,9 @@ let private targetDatabases (dbName: string) (stmt: Statement) : string list =
 
     match stmt with
     | Insert(table, _, _, _, _)
-    | InsertSelect(table, _, _, _, _) -> [ fst (splitQualified dbName table) ]
+    | InsertSelect(table, _, _, _, _) ->
+        let targetDb, targetTable = splitQualified dbName table
+        targetDb :: Executor.triggerWriteDatabases store targetDb targetTable
     | Update u -> tableRefDb u.From :: joinDbs u.Joins
     | Delete d -> tableRefDb d.From :: joinDbs d.Joins
     | _ -> [ dbName ]
@@ -871,6 +873,7 @@ let private beginTransaction (session: Session) : Session =
                 { Snapshot = snapshot
                   BaseCatalog = baseCatalog
                   GateLease = Map.empty
+                  Seeded = false
                   Savepoints = Map.empty
                   NextSavepointSeq = 0 } }
 
@@ -879,19 +882,13 @@ let private beginTransaction (session: Session) : Session =
 /// for every database in `targetDbs` (not just `session.Database` — a
 /// qualified `INSERT/UPDATE INTO otherdb.t` needs `otherdb`'s own gate too,
 /// see `Session.Transaction.GateLease`'s doc) for the rest of the
-/// transaction's lifetime. Re-entrant per statement: a later statement that
-/// names a database this transaction hasn't held yet picks up that
-/// database's gate too, without re-seeding the snapshot (only the very
-/// first statement of the transaction does that). BEGIN itself remains
-/// non-blocking, so several clients can enter a transaction concurrently;
-/// only their first real reads/writes serialize. Re-seeding here also
-/// ensures a transaction that sat idle after BEGIN sees commits that
-/// completed before its first read, matching InnoDB's default
-/// consistent-snapshot timing.
+/// transaction's lifetime. A later write can acquire another database gate
+/// without re-seeding the snapshot. BEGIN remains non-blocking, and the first
+/// database statement observes commits completed before it began.
 let startTransactionStatementFor (targetDbs: string list) (session: Session) : Session =
     match session.Tx with
     | Some tx ->
-        let firstStatement = tx.GateLease.IsEmpty
+        let firstStatement = not tx.Seeded
 
         // Sorted so two transactions that each eventually need the same two
         // databases always acquire them in the same order, whichever one
@@ -905,6 +902,12 @@ let startTransactionStatementFor (targetDbs: string list) (session: Session) : S
             |> List.map (fun db -> db, Storage.enterTransactionGate session.Store db defaultLockWaitTimeout)
 
         try
+            // A write cannot merge a snapshot that predates another commit.
+            if not firstStatement then
+                for db, _ in newlyAcquired do
+                    if not (Storage.databaseUnchangedSince session.Store tx.BaseCatalog db) then
+                        raise (Storage.LockWaitTimeout db)
+
             let gateLease = newlyAcquired |> List.fold (fun m (db, lease) -> Map.add db lease m) tx.GateLease
 
             if firstStatement then
@@ -922,6 +925,7 @@ let startTransactionStatementFor (targetDbs: string list) (session: Session) : S
                                 Snapshot = snapshot
                                 BaseCatalog = baseCatalog
                                 GateLease = gateLease
+                                Seeded = true
                                 Savepoints = savepoints } }
             else
                 { session with Tx = Some { tx with GateLease = gateLease } }
@@ -930,11 +934,9 @@ let startTransactionStatementFor (targetDbs: string list) (session: Session) : S
             reraise ()
     | None -> session
 
-/// As `startTransactionStatementFor`, for a caller (`Server`'s
-/// COM_FIELD_LIST handler) that only ever needs the session's own current
-/// database's gate.
+/// Seeds a read-only transaction snapshot without taking a write gate.
 let startTransactionStatement (session: Session) : Session =
-    startTransactionStatementFor [ session.Database |> Option.defaultValue defaultDatabase ] session
+    startTransactionStatementFor [] session
 
 /// Rolls an abandoned connection's transaction back and, critically,
 /// releases its transaction gate. The lease is idempotent, so calling this
@@ -1166,7 +1168,14 @@ let private executeParsed (session: Session) (stmt: Statement) : Session * Query
         // `BaseCatalog`/`Snapshot` alive after its gate was released
         // mid-transaction could otherwise still reach a later COMMIT —
         // see `abortTransactionGate`'s doc.
-        let started = startTransactionStatementFor (targetDatabases dbName stmt) session
+        let gatedDbs =
+            match stmt with
+            | Select _
+            | Union _
+            | Explain _ -> []
+            | _ -> targetDatabases session.Store dbName stmt
+
+        let started = startTransactionStatementFor gatedDbs session
 
         try
             execute started
@@ -1184,7 +1193,7 @@ let private executeParsed (session: Session) (stmt: Statement) : Session * Query
             // concurrent statements that both touch databases A and B
             // always acquire them in the same order.
             let leases =
-                targetDatabases dbName stmt
+                targetDatabases session.Store dbName stmt
                 |> List.distinct
                 |> List.sort
                 |> List.map (fun db -> Storage.enterTransactionGate session.Store db defaultLockWaitTimeout)

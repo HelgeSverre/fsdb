@@ -124,11 +124,9 @@ type PreparedStmt =
 /// table-by-table, to tell "this transaction wrote table X" apart from
 /// "table X just happened to be in the snapshot", so a concurrent write to
 /// an *untouched* table survives the commit instead of being silently
-/// overwritten by a stale copy. `GateLease` currently serializes active
-/// transaction lifetimes from that first statement through COMMIT/ROLLBACK,
-/// so two same-table writers cannot reach the merger concurrently. This is
-/// correct but deliberately coarse; row-version conflict detection/MVCC is
-/// the upgrade path for parallel write throughput.
+/// overwritten by a stale copy. `GateLease` serializes writing transactions
+/// from their first write through COMMIT/ROLLBACK; read-only transactions
+/// retain repeatable-read snapshots without taking a gate.
 type Transaction =
     { Snapshot: Store
       BaseCatalog: Catalog
@@ -144,6 +142,8 @@ type Transaction =
       /// a consistent snapshot on the first statement rather than the BEGIN
       /// packet.
       GateLease: Map<string, IDisposable>
+      /// Whether the first database statement has seeded the snapshot.
+      Seeded: bool
       /// Each savepoint's establishment order (see `NextSavepointSeq`), its
       /// catalog, and how many events `Snapshot.PendingEvents` had buffered
       /// at that point — `ROLLBACK TO SAVEPOINT` truncates the buffer back
