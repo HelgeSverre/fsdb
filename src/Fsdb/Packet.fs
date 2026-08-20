@@ -110,6 +110,7 @@ let readPacketAsync (stream: Stream) : Async<Packet option> =
 /// a row don't have to assume one payload == one seq id.
 let writePacketAsync (stream: Stream) (p: Packet) : Async<byte> =
     async {
+        use timeout = new Threading.CancellationTokenSource(TimeSpan.FromSeconds(float Limits.netWriteTimeoutSeconds))
         let payload = p.Payload
         let total = payload.Length
         let mutable offset = 0
@@ -118,12 +119,12 @@ let writePacketAsync (stream: Stream) (p: Packet) : Async<byte> =
         while total - offset >= maxPacketPayload do
             let chunk = payload.[offset .. offset + maxPacketPayload - 1]
             let bytes = frame { SeqId = seqId; Payload = chunk }
-            do! stream.WriteAsync(bytes, 0, bytes.Length) |> Async.AwaitTask
+            do! stream.WriteAsync(bytes, 0, bytes.Length, timeout.Token) |> Async.AwaitTask
             seqId <- seqId + 1uy
             offset <- offset + maxPacketPayload
 
         let lastChunk = payload.[offset..]
         let bytes = frame { SeqId = seqId; Payload = lastChunk }
-        do! stream.WriteAsync(bytes, 0, bytes.Length) |> Async.AwaitTask
+        do! stream.WriteAsync(bytes, 0, bytes.Length, timeout.Token) |> Async.AwaitTask
         return seqId + 1uy
     }

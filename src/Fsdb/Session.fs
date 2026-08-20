@@ -45,7 +45,6 @@ let defaultVariables: Map<string, string option> =
           "init_connect", ""
           "license", "GPL"
           "group_concat_max_len", "1024"
-          "net_write_timeout", "60"
           "performance_schema", "0"
           "query_cache_size", "0"
           "query_cache_type", "OFF" ]

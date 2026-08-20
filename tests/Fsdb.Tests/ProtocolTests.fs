@@ -8,6 +8,22 @@ open Fsdb.Packet
 open Fsdb.Protocol
 open Fsdb.Value
 
+type private BlockingWriteStream() =
+    inherit IO.Stream()
+
+    override _.CanRead = false
+    override _.CanSeek = false
+    override _.CanWrite = true
+    override _.Length = 0L
+    override _.Position with get () = 0L and set _ = raise (NotSupportedException())
+    override _.Flush() = ()
+    override _.Read(_, _, _) = raise (NotSupportedException())
+    override _.Seek(_, _) = raise (NotSupportedException())
+    override _.SetLength _ = raise (NotSupportedException())
+    override _.Write(_, _, _) = raise (NotSupportedException())
+    override _.WriteAsync(_, _, _, cancellationToken) =
+        Threading.Tasks.Task.Delay(Threading.Timeout.Infinite, cancellationToken)
+
 let tests =
     testList
         "Protocol"
@@ -62,6 +78,15 @@ let tests =
               let payload = errPayload ClientProtocol41 9999 "whatever"
               let sqlState = Text.Encoding.ASCII.GetString(payload, 4, 5)
               Expect.equal sqlState "HY000" "sqlstate fallback"
+
+          testCase "packet writes stop after net_write_timeout"
+          <| fun _ ->
+              Fsdb.Limits.withSettings [ "net_write_timeout", "1" ] (fun () ->
+                  use stream = new BlockingWriteStream()
+
+                  Expect.throwsT<Threading.Tasks.TaskCanceledException>
+                      (fun () -> writePacketAsync stream { SeqId = 0uy; Payload = [| 1uy |] } |> Async.RunSynchronously |> ignore)
+                      "a peer that stops reading cannot retain a connection indefinitely")
 
           testCase "the resultset-terminating OK uses header 0xfe, not 0x00"
           <| fun _ ->
