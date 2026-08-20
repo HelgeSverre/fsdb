@@ -630,7 +630,14 @@ let tests =
                           Expect.equal
                               (call "JSON_SEARCH" [ VJson """{"a": "x"}"""; VString "one"; VString "zzz" ])
                               VNull
-                              "no match is NULL" ]
+                              "no match is NULL"
+
+                          let adversarial = String.replicate 20_000 "%" + "b"
+                          let timer = Diagnostics.Stopwatch.StartNew()
+                          let result = call "JSON_SEARCH" [ VJson("\"" + String.replicate 20_000 "." + "\""); VString "one"; VString adversarial ]
+                          timer.Stop()
+                          Expect.equal result VNull "a wildcard-heavy non-match stays a non-match"
+                          Expect.isLessThan timer.Elapsed (TimeSpan.FromSeconds 1.0) "wildcards are matched iteratively" ]
 
                 testList
                     "Dates"

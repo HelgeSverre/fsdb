@@ -946,7 +946,8 @@ let private jsonSearchFn: Scalar =
     | doc :: modeV :: searchV :: _ when not (anyNull [ doc; modeV; searchV ]) ->
         match tryParseJsonValue doc, toText searchV with
         | Some root, Some search ->
-            let rx = Regex(likeToRegex search, RegexOptions.IgnoreCase ||| RegexOptions.Singleline)
+            let options = RegexOptions.IgnoreCase ||| RegexOptions.Singleline ||| RegexOptions.NonBacktracking
+            let rx = Regex(likeToRegex search, options, Limits.regexpMatchTimeout)
             let matches = collectJsonStrings root "$" |> List.filter (snd >> rx.IsMatch) |> List.map fst
 
             match matches, (toText modeV |> Option.defaultValue "one").ToUpperInvariant() with
