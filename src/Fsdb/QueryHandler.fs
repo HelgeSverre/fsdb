@@ -716,8 +716,10 @@ let private applySetAction (session: Session) (action: SetAction) : Session =
         { session with Variables = Map.add name value session.Variables }
     | SetUserVarAction(name, value) -> { session with UserVariables = Map.add name value session.UserVariables }
 
-let private validateSetAction (action: SetAction) : Result<unit, QueryResult> =
+let private validateSetAction (session: Session) (action: SetAction) : Result<unit, QueryResult> =
     match action with
+    | SetVarAction(_, _, true) when not (Auth.hasGlobalPriv session.Store session.User "SUPER") ->
+        Error(Err(1227, "Access denied; you need (at least one of) the SUPER privilege(s) for this operation"))
     | SetVarAction(name, Some value, true) when Limits.isReportableSetting name ->
         Limits.validateSetting name value |> Result.mapError (fun message -> Err(1232, message))
     | SetVarAction(name, _, false) when globalOnlyLimitVariables.Contains name ->
@@ -738,7 +740,7 @@ let private handleSet (session: Session) (sql: string) : Session * QueryResult =
     match splitSetAssignments sql |> traverse (parseSetFragment sql session) with
     | Error result -> session, result
     | Ok actions ->
-        match actions |> traverse validateSetAction with
+        match actions |> traverse (validateSetAction session) with
         | Error result -> session, result
         | Ok _ -> (actions |> List.fold applySetAction session), Affected 0UL
 

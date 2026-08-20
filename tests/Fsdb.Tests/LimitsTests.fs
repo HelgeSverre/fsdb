@@ -288,6 +288,18 @@ let tests =
 
                   Expect.equal maxConnections 17 "the valid assignment was not partially applied")
 
+          testCase "SET GLOBAL requires SUPER"
+          <| fun _ ->
+              withSettings [] (fun () ->
+                  let store = Fsdb.Storage.create ()
+                  let limited = { create 2 store with User = "limited" }
+
+                  match handle limited "SET GLOBAL max_connections = 17" |> snd with
+                  | Err(1227, message) -> Expect.stringContains message "SUPER" "the missing administrative privilege is named"
+                  | other -> failtestf "expected SET GLOBAL to require SUPER, got %A" other
+
+                  Expect.notEqual maxConnections 17 "the denied assignment did not change the live cap")
+
           testCase "global-only limits reject session SET instead of advertising a local change"
           <| fun _ ->
               withSettings [] (fun () ->
