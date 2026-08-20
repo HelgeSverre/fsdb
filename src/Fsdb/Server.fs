@@ -301,28 +301,37 @@ let private disconnectPollIntervalMs = 50
 let readPacketWithTimeoutMs (timeoutMs: int) (client: TcpClient) (stream: IO.Stream) : Async<Packet option> =
     async {
         let readTask = Async.StartAsTask(readPacketAsync stream)
+        // Cancellation releases the losing delay when packet input wins.
+        let timerCts = new CancellationTokenSource()
 
-        let! winner =
-            Threading.Tasks.Task.WhenAny(readTask :> Threading.Tasks.Task, Threading.Tasks.Task.Delay timeoutMs)
-            |> Async.AwaitTask
+        try
+            let! winner =
+                Threading.Tasks.Task.WhenAny(
+                    readTask :> Threading.Tasks.Task,
+                    Threading.Tasks.Task.Delay(timeoutMs, timerCts.Token)
+                )
+                |> Async.AwaitTask
 
-        if obj.ReferenceEquals(winner, readTask) then
-            // `Async.AwaitTask` on a task that faulted synchronously inside
-            // `Async.StartAsTask` (before any real `await`, as
-            // `PacketTooLargeException` does — raised straight out of
-            // `readPacketAsync`'s loop) surfaces the fault wrapped in an
-            // `AggregateException` rather than unwrapped, unlike a task that
-            // faults after suspending on real I/O. The caller's `with` match
-            // on the specific exception type (`PacketTooLargeException`,
-            // for the best-effort 1153 reply) needs the original exception,
-            // not its wrapper.
-            try
-                return! Async.AwaitTask readTask
-            with :? AggregateException as agg when agg.InnerExceptions.Count = 1 ->
-                return raise (agg.InnerExceptions.[0])
-        else
-            client.Close()
-            return None
+            if obj.ReferenceEquals(winner, readTask) then
+                // `Async.AwaitTask` on a task that faulted synchronously inside
+                // `Async.StartAsTask` (before any real `await`, as
+                // `PacketTooLargeException` does — raised straight out of
+                // `readPacketAsync`'s loop) surfaces the fault wrapped in an
+                // `AggregateException` rather than unwrapped, unlike a task that
+                // faults after suspending on real I/O. The caller's `with` match
+                // on the specific exception type (`PacketTooLargeException`,
+                // for the best-effort 1153 reply) needs the original exception,
+                // not its wrapper.
+                try
+                    return! Async.AwaitTask readTask
+                with :? AggregateException as agg when agg.InnerExceptions.Count = 1 ->
+                    return raise (agg.InnerExceptions.[0])
+            else
+                client.Close()
+                return None
+        finally
+            timerCts.Cancel()
+            timerCts.Dispose()
     }
 
 let private readPacketWithTimeout (client: TcpClient) (stream: IO.Stream) : Async<Packet option> =
