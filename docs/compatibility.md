@@ -57,15 +57,36 @@ triggers, events) are genuinely empty rather than stubbed; PROCESSLIST,
 
 ## Server settings
 
-The tunables an operator would plausibly change live in `Fsdb.Limits` and can
-be set from a my.cnf-style file's `[mysqld]` section via `--defaults-file`
-(`max_allowed_packet`, `max_connections`, `wait_timeout`,
-`innodb_lock_wait_timeout`, `cte_max_recursion_depth`, plus fsdb's own WAL
-rotation thresholds). Size suffixes (`64M`, `1G`) work; other sections are
-ignored, but an unrecognised line inside `[mysqld]` is a startup error rather
-than a silent no-op. No config path is auto-discovered.
+The tunables an operator would plausibly change live in `Fsdb.Limits` and are
+set from a my.cnf option file via `--defaults-file`: `max_allowed_packet`,
+`max_connections`, `wait_timeout`, `innodb_lock_wait_timeout`,
+`cte_max_recursion_depth`, plus fsdb's own WAL rotation thresholds.
 
-Two deliberate divergences from stock MySQL:
+The option-file parser follows MySQL's format rather than a generic ini
+dialect: `[mysqld]` and `[server]` groups, `name = value` and the bare-name
+boolean form, `#`/`;` comments that may start mid-line, single- or
+double-quoted values with `\n`/`\t`/`\r`/`\b`/`\s`/`\\` escapes, `-` and `_`
+interchangeable in names, size suffixes (`64M`, `1G`), `loose-` to tolerate an
+option fsdb doesn't have, and `!include`/`!includedir`. Reading the real format
+is what lets `skip-name-resolve` be reported as an option fsdb lacks instead of
+as a syntax error.
+
+Groups other than `[mysqld]`/`[server]` are skipped, so a shared my.cnf is
+safe to point at. Within those groups an unrecognised option is a startup
+error naming the file and line, matching mysqld, which also refuses to start on
+an unknown option; `loose-` is the escape hatch for both. Every bad line is
+reported, not just the first.
+
+Three deliberate divergences from stock MySQL:
+
+- **No option file is auto-discovered.** `/etc/my.cnf`, `~/.my.cnf` and
+  `$MYSQL_HOME` are not read; only `--defaults-file` is. A file that applies
+  without being named on the command line is the most reliable way to make
+  production differ from a laptop.
+- **Version-suffixed groups (`[mysqld-8.4]`) are skipped, not matched.** fsdb
+  reports a MySQL version for protocol compatibility, not as a claim about
+  which server release's options it accepts, so matching on it would be
+  theatre.
 
 - **`wait_timeout` and `interactive_timeout` report 300, not 28800.** fsdb
   reaps a connection idle between commands after five minutes, because a

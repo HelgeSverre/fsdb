@@ -1,5 +1,7 @@
 module Fsdb.Tests.LimitsTests
 
+open System
+open System.IO
 open Expecto
 open Fsdb.Limits
 open Fsdb.Executor
@@ -72,7 +74,7 @@ let tests =
 
               Expect.equal maxConnections before "restored despite the exception"
 
-          testCase "only the [mysqld] section is applied; other sections a real my.cnf carries are ignored"
+          testCase "only [mysqld] and [server] are applied; other groups a real my.cnf carries are ignored"
           <| fun _ ->
               withSettings [] (fun () ->
                   let lines =
@@ -81,28 +83,131 @@ let tests =
                         "[client]"
                         "max_connections = 1"
                         ""
+                        "[mysqld-8.4]" // a version-suffixed group fsdb has no version to match
+                        "max_connections = 2"
+                        ""
                         "[mysqld]"
                         "max-connections = 9" // my.cnf accepts dashes for underscores
+                        "[server]"
                         "max_allowed_packet = 16M" ]
 
                   match applyLines "test.cnf" lines with
                   | Ok() ->
                       Expect.equal maxConnections 9 "[mysqld] applied, with the dash spelling accepted"
-                      Expect.equal maxAllowedPacket (16 * 1024 * 1024) "and the suffixed value"
+                      Expect.equal maxAllowedPacket (16 * 1024 * 1024) "[server] applied too, as mysqld reads it"
                   | Error e -> failtestf "expected the file to apply, got %s" e)
 
           testCase "a bad config reports every offending line with its number, not just the first"
           <| fun _ ->
               withSettings [] (fun () ->
-                  let lines = [ "[mysqld]"; "bogus = 1"; "max_connections = 9"; "also_bogus = 2"; "no equals sign" ]
+                  let lines = [ "[mysqld]"; "bogus = 1"; "max_connections = 9"; "also_bogus = 2"; "[unterminated" ]
 
                   match applyLines "test.cnf" lines with
                   | Ok() -> failtest "expected the bogus keys to be errors"
                   | Error message ->
                       Expect.stringContains message "test.cnf:2" "first bad line, located"
                       Expect.stringContains message "test.cnf:4" "second bad line too — not just the first"
-                      Expect.stringContains message "test.cnf:5" "and the line that isn't key = value"
+                      Expect.stringContains message "test.cnf:5" "and the unterminated group header"
                       Expect.equal maxConnections 9 "valid lines still applied")
+
+          // A bare name is MySQL's boolean form, so it has to parse as one —
+          // otherwise `skip-name-resolve` gets diagnosed as a syntax error
+          // when what it really is, to fsdb, is an option we don't have.
+          testCase "a bare option name is read as MySQL's boolean form, not as a syntax error"
+          <| fun _ ->
+              withSettings [] (fun () ->
+                  match applyLines "test.cnf" [ "[mysqld]"; "skip-name-resolve" ] with
+                  | Ok() -> failtest "fsdb has no such option, so it should still be reported"
+                  | Error message ->
+                      Expect.stringContains message "unknown setting 'skip_name_resolve'" "diagnosed as unknown, not malformed"
+                      Expect.isFalse (message.Contains "expected") "not reported as a syntax error"
+
+                  match applyLines "test.cnf" [ "[mysqld]"; "max_connections" ] with
+                  | Ok() -> failtest "a knob that needs a value should not accept the boolean form"
+                  | Error message -> Expect.stringContains message "needs a value" "says what's missing")
+
+          testCase "loose- tolerates an option fsdb doesn't have, but not a bad value for one it does"
+          <| fun _ ->
+              withSettings [] (fun () ->
+                  match applyLines "test.cnf" [ "[mysqld]"; "loose-innodb-buffer-pool-size = 2G"; "loose-skip-name-resolve" ] with
+                  | Ok() -> ()
+                  | Error e -> failtestf "loose- should skip options fsdb doesn't have, got %s" e
+
+                  match applyLines "test.cnf" [ "[mysqld]"; "loose-max_connections = banana" ] with
+                  | Ok() -> failtest "loose- must not excuse a bad value for a known option"
+                  | Error message -> Expect.stringContains message "not a number" "still validated")
+
+          testCase "comments may start mid-line, and a quoted value keeps its comment characters"
+          <| fun _ ->
+              withSettings [] (fun () ->
+                  match applyLines "test.cnf" [ "[mysqld]"; "max_connections = 9 # trailing comment"; "wait_timeout = 60 ; and this form" ] with
+                  | Ok() ->
+                      Expect.equal maxConnections 9 "the comment is not part of the value"
+                      Expect.equal waitTimeoutSeconds 60 "same for the ; form"
+                  | Error e -> failtestf "expected mid-line comments to be stripped, got %s" e
+
+                  // The value is nonsense for a numeric knob, but the point is
+                  // that the parser handed the whole quoted string over rather
+                  // than truncating it at the #.
+                  match applyLines "test.cnf" [ "[mysqld]"; "max_connections = \"9 # not a comment\"" ] with
+                  | Ok() -> failtest "expected the quoted text to reach applySetting whole"
+                  | Error message -> Expect.stringContains message "9 # not a comment" "quoted # survived")
+
+          testCase "quoted values expand MySQL's escape sequences"
+          <| fun _ ->
+              // Routed through the error message because every knob fsdb has
+              // is numeric: the reported value is the value the parser built.
+              match applyLines "test.cnf" [ "[mysqld]"; "max_connections = 'a\\tb\\sc\\\\d'" ] with
+              | Ok() -> failtest "expected a parse failure naming the unescaped value"
+              | Error message ->
+                  Expect.stringContains message "a\tb c\\d" "\\t, \\s and \\\\ expanded inside quotes"
+
+          testCase "!include and !includedir pull in other files, and a cycle terminates"
+          <| fun _ ->
+              withSettings [] (fun () ->
+                  let dir = IO.Path.Combine(IO.Path.GetTempPath(), "fsdb-cnf-" + Guid.NewGuid().ToString "N")
+                  let fragments = IO.Path.Combine(dir, "conf.d")
+                  IO.Directory.CreateDirectory fragments |> ignore
+
+                  try
+                      IO.File.WriteAllText(
+                          IO.Path.Combine(dir, "my.cnf"),
+                          "[mysqld]\nmax_connections = 9\n!include included.cnf\n!includedir conf.d\n"
+                      )
+
+                      IO.File.WriteAllText(IO.Path.Combine(dir, "included.cnf"), "[mysqld]\nwait_timeout = 60\n")
+                      IO.File.WriteAllText(IO.Path.Combine(fragments, "a.cnf"), "[mysqld]\nmax_allowed_packet = 16M\n")
+                      // Not a .cnf, so !includedir must not read it.
+                      IO.File.WriteAllText(IO.Path.Combine(fragments, "notes.txt"), "[mysqld]\nmax_connections = 1\n")
+
+                      match loadDefaultsFile (IO.Path.Combine(dir, "my.cnf")) with
+                      | Ok() ->
+                          Expect.equal maxConnections 9 "the including file applied"
+                          Expect.equal waitTimeoutSeconds 60 "!include applied"
+                          Expect.equal maxAllowedPacket (16 * 1024 * 1024) "!includedir applied the .cnf fragment"
+                      | Error e -> failtestf "expected the include tree to apply, got %s" e
+
+                      // A file that includes itself must stop, not recurse to
+                      // the depth limit reporting the same errors per level.
+                      IO.File.WriteAllText(IO.Path.Combine(dir, "loop.cnf"), "[mysqld]\n!include loop.cnf\nwait_timeout = 61\n")
+
+                      match loadDefaultsFile (IO.Path.Combine(dir, "loop.cnf")) with
+                      | Ok() -> Expect.equal waitTimeoutSeconds 61 "the self-including file still applied its own lines"
+                      | Error e -> failtestf "a self-include should be ignored, not an error: %s" e
+                  finally
+                      try
+                          IO.Directory.Delete(dir, true)
+                      with _ ->
+                          ())
+
+          testCase "a missing !include target is reported against the line that asked for it"
+          <| fun _ ->
+              withSettings [] (fun () ->
+                  match applyLines "test.cnf" [ "[mysqld]"; "!include /nonexistent/nope.cnf" ] with
+                  | Ok() -> failtest "expected the missing include to be reported"
+                  | Error message ->
+                      Expect.stringContains message "test.cnf:2" "located at the directive"
+                      Expect.stringContains message "nope.cnf" "names the file it could not read")
 
           testCase "a missing defaults file is an error carrying the path, not an unhandled exception"
           <| fun _ ->

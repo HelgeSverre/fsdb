@@ -81,9 +81,13 @@ OPTIONS:
     --help                display this list of options.
 ```
 
-`--defaults-file` reads the `[mysqld]` section of a my.cnf-style file. Other
-sections are ignored, so a real my.cnf works, but an unrecognised setting
-inside `[mysqld]` is a startup error rather than a silent no-op:
+`--defaults-file` reads a my.cnf option file — MySQL's format, not a generic
+ini dialect: `[mysqld]`/`[server]` groups, mid-line `#`/`;` comments, quoted
+values with escapes, `-` and `_` interchangeable, size suffixes,
+`!include`/`!includedir`, and `loose-` for options fsdb doesn't have. Other
+groups are skipped, so a shared my.cnf is safe to point at; an unrecognised
+option inside `[mysqld]` is a startup error naming the file and line, the same
+way mysqld refuses to start on one.
 
 ```ini
 [mysqld]
@@ -92,10 +96,11 @@ max_allowed_packet       = 64M
 wait_timeout             = 600
 innodb_lock_wait_timeout = 50
 cte_max_recursion_depth  = 1000
+loose-skip-name-resolve            # an option fsdb has no knob for
 ```
 
-Settings apply at startup and are process-wide; see `docs/compatibility.md`
-for where that diverges from MySQL.
+Settings apply at startup and are process-wide, and no option file is
+auto-discovered; see `docs/compatibility.md` for the full list of divergences.
 
 ## How it works
 
