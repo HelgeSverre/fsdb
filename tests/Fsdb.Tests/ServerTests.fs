@@ -26,7 +26,15 @@ let tests =
     testSequenced
     <| testList
         "Server"
-        [ // sendQueryResult is the only sequence-id-bearing logic in the
+        [ testCase "second-valued connection timeouts cannot overflow milliseconds"
+          <| fun _ ->
+              Expect.equal (Fsdb.Server.timeoutMilliseconds 300) 300_000 "ordinary timeout is exact"
+              Expect.equal
+                  (Fsdb.Server.timeoutMilliseconds 3_000_000)
+                  Int32.MaxValue
+                  "a configured timeout beyond Task.Delay's int range saturates instead of wrapping negative"
+
+          // sendQueryResult is the only sequence-id-bearing logic in the
           // server, and getting a resultset terminator wrong hangs mysql
           // CLI / mysqlnd forever waiting for a terminator that never
           // arrives (see the okEndOfResultSetPayload test above).

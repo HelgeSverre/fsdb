@@ -341,8 +341,15 @@ let readPacketWithTimeoutMs (timeoutMs: int) (client: TcpClient) (stream: IO.Str
             timerCts.Dispose()
     }
 
+/// Converts the MySQL seconds-valued timeout without wrapping the `int`
+/// milliseconds accepted by `Task.Delay`. Values beyond that API's range
+/// use its longest finite delay instead of breaking every connection before
+/// authentication.
+let timeoutMilliseconds (timeoutSeconds: int) : int =
+    int (min (int64 Int32.MaxValue) (max 0L (int64 timeoutSeconds * 1000L)))
+
 let private readPacketWithTimeoutSeconds (timeoutSeconds: int) (client: TcpClient) (stream: IO.Stream) : Async<Packet option> =
-    readPacketWithTimeoutMs (timeoutSeconds * 1000) client stream
+    readPacketWithTimeoutMs (timeoutMilliseconds timeoutSeconds) client stream
 
 let private sessionWaitTimeout (session: Session) =
     match session.Variables |> Map.tryFind "wait_timeout" |> Option.flatten with
