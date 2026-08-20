@@ -1,13 +1,13 @@
 /// ReceiptPipeline — receipts from PDF to relational rows with the work in
 /// SQL, not host code. The host registers two effectful scalars — `ocr`
 /// (pdftotext) and `llm_schema` (structured extraction against any
-/// OpenAI-compatible endpoint) — then drains the queue with five plain SQL
+/// OpenAI-compatible endpoint) — then drains the queue with six plain SQL
 /// statements: cancellable batch UPDATEs, an INSERT...SELECT upsert, unique
-/// keys as the dedupe, and JSON_TABLE exploding line items into rows. An
-/// AFTER INSERT trigger (cheap SQL only — DirectOnly functions are banned in
-/// trigger bodies) journals every enqueued file. `--dry-run` swaps pdftotext
-/// and the LLM for deterministic fixtures, so the whole pipeline runs
-/// offline; the capstone enqueues the same fixture twice and proves the
+/// keys as the dedupe, and JSON_TABLE exploding line items into rows. Stored
+/// views report live vendor statistics; chained AFTER INSERT triggers append
+/// audit events and maintain an insert-only audit rollup. `--dry-run` swaps
+/// pdftotext and the LLM for deterministic fixtures, so the whole pipeline
+/// runs offline; the capstone enqueues the same fixture twice and proves the
 /// second drain changes no counts.
 module ReceiptPipeline.Program
 
@@ -253,7 +253,7 @@ let llmSchema (ctx: QueryContext) (args: Value list) : Value =
     | _ -> raise (SqlError(1582, "llm_schema expects (alias, text, json_schema)"))
 
 // ---------------------------------------------------------------------------
-// Demo host: schema, trigger, five-statement drain, dedupe capstone.
+// Demo host: schema, stored view, audit triggers, drain, dedupe capstone.
 // ---------------------------------------------------------------------------
 
 /// Setup/drain statements: quiet on success, loud on failure — an ignored
@@ -280,31 +280,31 @@ let escape (s: string) = s.Replace("'", "''")
 let extractionSchema =
     """{"type":"object","properties":{"vendor":{"type":["string","null"],"description":"Legal vendor/seller name exactly as printed, not the buyer"},"date":{"type":["string","null"],"description":"Invoice date as ISO 8601 YYYY-MM-DD, e.g. 2026-01-25. Never DD/MM/YYYY or a month name."},"total":{"type":["number","null"],"description":"Grand total as a JSON number, no currency symbol or thousands separator"},"confidence":{"type":"number","description":"0-1 estimate that this extraction is correct"},"items":{"type":"array","items":{"type":"object","properties":{"description":{"type":"string"},"qty":{"type":"integer"},"unit_price":{"type":"number","description":"Per-unit price as a JSON number"}},"required":["description","qty","unit_price"],"additionalProperties":false}}},"required":["vendor","date","total","confidence","items"],"additionalProperties":false}"""
 
-/// The whole pipeline as five SQL statements — the host only sequences them.
+/// The whole pipeline as six SQL statements — the host only sequences them.
 let drain (conn: Db.Connection) =
-    // ① OCR every new file — a batch UPDATE over an effectful scalar, and
+    // OCR every new file — a batch UPDATE over an effectful scalar, and
     // cancellable mid-fold if the client kills the query.
     exec conn "UPDATE file_queue SET ocr_text = ocr(pdf), status = 'ocr' WHERE status = 'new'"
 
-    // ② Structured extraction, same shape.
+    // Structured extraction, same shape.
     exec
         conn
         (sprintf
             "UPDATE file_queue SET extraction = llm_schema('extract', ocr_text, '%s'), status = 'extracted' WHERE status = 'ocr'"
             (escape extractionSchema))
 
-    // ③ Vendor upsert: ON DUPLICATE KEY UPDATE on INSERT ... SELECT.
+    // Vendor upsert: ON DUPLICATE KEY UPDATE on INSERT ... SELECT.
     exec
         conn
         "INSERT INTO vendors (name) SELECT DISTINCT extraction->>'$.vendor' FROM file_queue WHERE status = 'extracted' ON DUPLICATE KEY UPDATE name = VALUES(name)"
 
-    // ④ Receipts: the UNIQUE(vendor_id, receipt_date, total) key IS the
+    // Receipts: the UNIQUE(vendor_id, receipt_date, total) key is the
     // dedupe — INSERT IGNORE drops re-extractions of the same receipt.
     exec
         conn
         "INSERT IGNORE INTO receipts (vendor_id, receipt_date, total, confidence) SELECT v.id, fq.extraction->>'$.date', fq.extraction->>'$.total', fq.extraction->>'$.confidence' FROM file_queue fq JOIN vendors v ON v.name = fq.extraction->>'$.vendor' WHERE fq.status = 'extracted'"
 
-    // ⑤ Line items: JSON_TABLE explodes $.items[*] laterally per queue row;
+    // Line items: JSON_TABLE explodes $.items[*] laterally per queue row;
     // FOR ORDINALITY numbers the lines so UNIQUE(receipt_id, line_no)
     // dedupes them like the receipts above.
     exec
@@ -394,24 +394,47 @@ let main argv =
 
     exec
         conn
-        "CREATE TABLE receipts (id INT AUTO_INCREMENT PRIMARY KEY, vendor_id INT, receipt_date DATE, total DECIMAL(10,2), confidence DOUBLE, UNIQUE KEY uniq_receipt (vendor_id, receipt_date, total), FOREIGN KEY (vendor_id) REFERENCES vendors(id))"
+        "CREATE TABLE receipts (id INT AUTO_INCREMENT PRIMARY KEY, vendor_id INT, receipt_date DATE, total DECIMAL(10,2), confidence DOUBLE, CONSTRAINT receipt_total_nonnegative CHECK (total >= 0), CONSTRAINT receipt_confidence_range CHECK (confidence BETWEEN 0 AND 1), UNIQUE KEY uniq_receipt (vendor_id, receipt_date, total), FOREIGN KEY (vendor_id) REFERENCES vendors(id))"
 
     exec
         conn
-        "CREATE TABLE receipt_line_items (id INT AUTO_INCREMENT PRIMARY KEY, receipt_id INT, line_no INT, description VARCHAR(200), qty INT, unit_price DECIMAL(10,2), UNIQUE KEY uniq_line (receipt_id, line_no), FOREIGN KEY (receipt_id) REFERENCES receipts(id))"
+        "CREATE TABLE receipt_line_items (id INT AUTO_INCREMENT PRIMARY KEY, receipt_id INT, line_no INT, description VARCHAR(200), qty INT CHECK (qty > 0), unit_price DECIMAL(10,2) CHECK (unit_price >= 0), UNIQUE KEY uniq_line (receipt_id, line_no), FOREIGN KEY (receipt_id) REFERENCES receipts(id))"
 
     exec
         conn
-        "CREATE TABLE file_queue (id INT PRIMARY KEY, filename VARCHAR(200), sha CHAR(64) UNIQUE, pdf LONGBLOB, status VARCHAR(20) DEFAULT 'new', ocr_text MEDIUMTEXT, extraction JSON)"
+        "CREATE TABLE file_queue (id INT PRIMARY KEY, filename VARCHAR(200), sha CHAR(64) UNIQUE, pdf LONGBLOB, status VARCHAR(20) DEFAULT 'new' CHECK (status IN ('new', 'ocr', 'extracted', 'done')), ocr_text MEDIUMTEXT, extraction JSON)"
 
-    exec conn "CREATE TABLE work_log (id INT AUTO_INCREMENT PRIMARY KEY, file_id INT, filename VARCHAR(200))"
-
-    // Cheap SQL only in the trigger body: ocr()/llm_schema() are DirectOnly,
-    // so referencing them here is rejected at CREATE time — extraction runs
-    // from the drain's batch UPDATEs, never from a write's side effect.
     exec
         conn
-        "CREATE TRIGGER queue_new AFTER INSERT ON file_queue FOR EACH ROW INSERT INTO work_log (file_id, filename) VALUES (NEW.id, NEW.filename)"
+        "CREATE TABLE audit_log (id INT AUTO_INCREMENT PRIMARY KEY, entity VARCHAR(40), entity_id INT, action VARCHAR(20))"
+
+    exec conn "CREATE TABLE audit_rollup (entity VARCHAR(40) PRIMARY KEY, insert_count INT DEFAULT 0 CHECK (insert_count >= 0))"
+
+    // The view is a stored SELECT, not a materialized table: every read sees
+    // the current receipt rows. Its GROUP BY makes it deliberately read-only.
+    exec
+        conn
+        "CREATE VIEW vendor_receipt_stats AS SELECT v.id AS vendor_id, v.name AS vendor, COUNT(r.id) AS receipt_count, SUM(r.total) AS total_spend, AVG(r.confidence) AS avg_confidence FROM vendors v LEFT JOIN receipts r ON r.vendor_id = v.id GROUP BY v.id, v.name"
+
+    // Each source table owns one AFTER INSERT audit trigger. audit_log owns a
+    // fourth trigger that upserts audit_rollup, exercising a two-level trigger
+    // chain once per inserted source row. Effectful ocr()/llm_schema() remain
+    // in the explicit drain because DirectOnly functions are banned here.
+    exec
+        conn
+        "CREATE TRIGGER queue_audit AFTER INSERT ON file_queue FOR EACH ROW INSERT INTO audit_log (entity, entity_id, action) VALUES ('file_queue', NEW.id, 'insert')"
+
+    exec
+        conn
+        "CREATE TRIGGER receipt_audit AFTER INSERT ON receipts FOR EACH ROW INSERT INTO audit_log (entity, entity_id, action) VALUES ('receipt', NEW.id, 'insert')"
+
+    exec
+        conn
+        "CREATE TRIGGER line_item_audit AFTER INSERT ON receipt_line_items FOR EACH ROW INSERT INTO audit_log (entity, entity_id, action) VALUES ('receipt_line_item', NEW.id, 'insert')"
+
+    exec
+        conn
+        "CREATE TRIGGER audit_rollup_insert AFTER INSERT ON audit_log FOR EACH ROW INSERT INTO audit_rollup (entity, insert_count) VALUES (NEW.entity, 1) ON DUPLICATE KEY UPDATE insert_count = insert_count + 1"
 
     files |> List.iteri (fun i (name, pdf) -> enqueue conn (i + 1) name pdf)
     drain conn
@@ -442,7 +465,13 @@ let main argv =
     let secondPass = counts conn
     let v2, r2, l2 = secondPass
     printfn "pass 2: %d vendors, %d receipts, %d line items" v2 r2 l2
-    printfn "work_log (trigger-written): %d rows for %d enqueued files" (scalar conn "SELECT COUNT(*) FROM work_log") (List.length files + 1)
+    dump
+        conn
+        "vendor receipt stats (live stored view)"
+        "SELECT vendor, receipt_count, total_spend, avg_confidence FROM vendor_receipt_stats ORDER BY vendor_id"
+
+    dump conn "audit rollup (chained triggers)" "SELECT entity, insert_count FROM audit_rollup ORDER BY entity"
+    printfn "audit_log: %d trigger-written rows" (scalar conn "SELECT COUNT(*) FROM audit_log")
 
     let lost = orphans conn
 

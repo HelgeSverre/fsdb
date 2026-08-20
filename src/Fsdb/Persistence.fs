@@ -508,6 +508,9 @@ let private encodeAlterAction (w: Writer) (a: AlterAction) : unit =
     | DropForeignKey name -> w.WriteByte 0x0Auy; writeStr w name
     | AddPrimaryKey columns -> w.WriteByte 0x0Buy; writeStrList w columns
     | SetAutoIncrement value -> w.WriteByte 0x0Cuy; w.WriteInt64LE value
+    | AddCheck _
+    | DropCheck _
+    | SetCheckEnforced _ -> failwith "Persistence: row-backed CHECK metadata must not reach a SchemaChanged action"
 
 let private decodeAlterAction (r: #IReader) : AlterAction =
     match r.ReadByte() with
@@ -528,7 +531,7 @@ let private encodeStatement (w: Writer) (s: Statement) : unit =
     match s with
     | CreateDatabase(name, ifNotExists) -> w.WriteByte 0x01uy; writeStr w name; writeBool w ifNotExists
     | DropDatabase(name, ifExists) -> w.WriteByte 0x02uy; writeStr w name; writeBool w ifExists
-    | CreateTable(name, columns, indexes, fks, ifNotExists, tableCharset, tableCollation, autoIncrementSeed) ->
+    | CreateTable(name, columns, indexes, fks, _checks, ifNotExists, tableCharset, tableCollation, autoIncrementSeed) ->
         w.WriteByte 0x03uy
         writeStr w name
         w.WriteInt32LE(List.length columns)
@@ -572,7 +575,7 @@ let private decodeStatement (r: #IReader) : Statement =
         let tableCharset = readOptStr r
         let tableCollation = readOptStr r
         let autoIncrementSeed = readOptStr r |> Option.map int64
-        CreateTable(name, columns, indexes, fks, ifNotExists, tableCharset, tableCollation, autoIncrementSeed)
+        CreateTable(name, columns, indexes, fks, [], ifNotExists, tableCharset, tableCollation, autoIncrementSeed)
     | 0x04uy -> DropTable(readStrList r, readBool r)
     | 0x05uy -> AlterTable(readStr r, List.init (r.ReadInt32LE()) (fun _ -> decodeAlterAction r))
     | 0x06uy -> RenameTable(List.init (r.ReadInt32LE()) (fun _ -> readStr r, readStr r))
@@ -694,7 +697,7 @@ let private applyDdl (store: Store) (db: string) (stmt: Statement) : unit =
     match stmt with
     | CreateDatabase(name, _) -> warn "CreateDatabase" (createDatabase store name)
     | DropDatabase(name, _) -> warn "DropDatabase" (dropDatabase store name)
-    | CreateTable(name, columns, indexes, fks, _, tableCharset, tableCollation, autoIncrementSeed) ->
+    | CreateTable(name, columns, indexes, fks, _checks, _, tableCharset, tableCollation, autoIncrementSeed) ->
         warn "CreateTable" (createTableSeeded store db name columns indexes fks tableCharset tableCollation autoIncrementSeed)
     | DropTable(names, _) -> names |> List.iter (fun n -> warn "DropTable" (dropTable store db n))
     | AlterTable(table, actions) ->

@@ -1356,7 +1356,7 @@ let mergeCatalogInto (store: Store) (baseCatalog: Catalog) (batchCatalog: Catalo
 // projections), so `USE mysql`, `SELECT ... FROM mysql.user`, SHOW TABLES,
 // direct DML, and WAL/snapshot persistence all ride the ordinary catalog
 // paths with zero special-casing. Column shapes follow MySQL 8.4
-// (oracle-verified); only the 5 functionally-relevant tables of MySQL's 38
+// (oracle-verified); eight functionally-relevant tables of MySQL's 38
 // exist. Bootstrapped by `create` below and re-ensured after a snapshot
 // load (`ensureMysqlSchema`) so pre-feature snapshots pick it up.
 // ponytail: no charset/collation fidelity on these columns (MySQL uses
@@ -1521,13 +1521,40 @@ let mysqlTriggersColumns: ColumnDef list =
       // existing reader uses stay put.
       sysCol "definer" (TChar 93) false (Some(VString "")) ]
 
+/// `mysql.views` — fsdb's row-backed view catalog. Definitions are stored as
+/// SQL text and resolved through the ordinary SELECT executor, so the rows
+/// ride WAL/snapshot persistence without a separate object codec.
+let mysqlViewsColumns: ColumnDef list =
+    [ keyCol "view_name" 64
+      keyCol "view_schema" 64
+      sysCol "view_definition" TText false (Some(VString ""))
+      sysCol "column_names" TText false (Some(VString ""))
+      sysCol "created" (TDateTime 2) true None
+      sysCol "definer" (TChar 93) false (Some(VString "")) ]
+
+/// Row-backed CHECK definitions. Keeping these beside views/triggers avoids
+/// changing the binary Table snapshot layout: ordinary row WAL events carry
+/// every definition, while the executor binds and evaluates the clause
+/// against the final candidate row before publication.
+let mysqlCheckConstraintsColumns: ColumnDef list =
+    [ keyCol "constraint_name" 64
+      keyCol "constraint_schema" 64
+      keyCol "table_name" 64
+      sysCol "check_clause" TText false (Some(VString ""))
+      sysCol "enforced" (TChar 3) false (Some(VString "YES"))
+      sysCol "column_name" (TVarchar 64) true None
+      sysCol "generated_name" (TChar 3) false (Some(VString "NO"))
+      sysCol "ordinal_position" (TInt true) false (Some(VInt 1L)) ]
+
 let private mysqlSystemDatabase () : Database =
     [ "user", sysTable "user" mysqlUserColumns [ rootUserRow ]
       "db", sysTable "db" mysqlDbColumns []
       "tables_priv", sysTable "tables_priv" mysqlTablesPrivColumns []
       "columns_priv", sysTable "columns_priv" mysqlColumnsPrivColumns []
       "global_grants", sysTable "global_grants" mysqlGlobalGrantsColumns []
-      "triggers", sysTable "triggers" mysqlTriggersColumns [] ]
+      "triggers", sysTable "triggers" mysqlTriggersColumns []
+      "views", sysTable "views" mysqlViewsColumns []
+      "check_constraints", sysTable "check_constraints" mysqlCheckConstraintsColumns [] ]
     |> Map.ofList
 
 /// Re-seeds the `mysql` system schema when it's absent — called after a
@@ -1535,8 +1562,8 @@ let private mysqlSystemDatabase () : Database =
 /// schema existed doesn't carry it). A no-op when `mysql` is already there,
 /// so a snapshot that *does* carry it (users/grants included) wins — except
 /// for individual system tables added after that snapshot was written
-/// (`triggers`), which are seeded empty into the existing schema so DDL and
-/// WAL replay against them can't hit `NoSuchTable`.
+/// (`triggers`/`views`), which are seeded empty into the existing schema so
+/// DDL and WAL replay against them can't hit `NoSuchTable`.
 let ensureMysqlSchema (store: Store) : unit =
     store.Databases.TryAdd("mysql", ref (mysqlSystemDatabase ())) |> ignore
 
@@ -1563,6 +1590,12 @@ let ensureMysqlSchema (store: Store) : unit =
                         Columns = t.Columns @ pad
                         RowsArray = t.RowsArray |> Seq.map (fun r -> Array.append r fill) |> ImmutableArray.CreateRange }
                     dbRef.Value
+
+    if not (Map.containsKey "views" dbRef.Value) then
+        dbRef.Value <- Map.add "views" (sysTable "views" mysqlViewsColumns []) dbRef.Value
+
+    if not (Map.containsKey "check_constraints" dbRef.Value) then
+        dbRef.Value <- Map.add "check_constraints" (sysTable "check_constraints" mysqlCheckConstraintsColumns []) dbRef.Value
 
 let create () : Store =
     let databases = ConcurrentDictionary<string, Database ref>()
@@ -1889,7 +1922,7 @@ let createTableSeeded
                 Ok(Map.add key (reindexTable table) db, ()))
 
     if result.IsOk then
-        emit store (Some(SchemaChanged(dbName, CreateTable(tableName, columns, indexes, foreignKeys, false, tableCharset, tableCollation, autoIncrementSeed))))
+        emit store (Some(SchemaChanged(dbName, CreateTable(tableName, columns, indexes, foreignKeys, [], false, tableCharset, tableCollation, autoIncrementSeed))))
 
     result
 
@@ -2253,6 +2286,9 @@ let private applyAlterAction (strict: bool) (table: Table) (action: AlterAction)
         // Forward only, like InnoDB: a value below what existing rows
         // already claimed leaves the counter where it is.
         Ok({ table with NextAutoId = max value table.NextAutoId }, None)
+    | AddCheck _
+    | DropCheck _
+    | SetCheckEnforced _ -> Ok(table, None)
 
 /// Applies `actions` in order against `tableName`, re-filing it under a new
 /// key if any action renamed it (`RENAME TO`/`RENAME [TABLE]`).
@@ -2406,9 +2442,27 @@ let private insertCore
     (tableKey: string)
     (rowsIn: Value list list)
     (idxs: int list)
+    (prepare: Value[] -> Result<Value[], StorageError>)
     : Result<Database * (int64 * int64 option * int * Value[] list), StorageError> =
     let table = Map.find tableKey db
     let uniqueGroups = uniqueKeyGroups table
+
+    let reservedAutoNext =
+        if not ignoreErrors then
+            table.NextAutoId
+        else
+            match table.Columns |> List.tryFindIndex _.AutoIncrement with
+            | None -> table.NextAutoId
+            | Some autoIndex ->
+                let generatedAttempts =
+                    rowsIn
+                    |> List.sumBy (fun values ->
+                        match idxs |> List.tryFindIndex ((=) autoIndex) with
+                        | None -> 1L
+                        | Some valueIndex when valueIndex < values.Length && values.[valueIndex] = VNull -> 1L
+                        | _ -> 0L)
+
+                table.NextAutoId + generatedAttempts
 
     // Parent keys are immutable for the duration of this INSERT (except a
     // self-FK, see below). Build one compact lookup per ordinary FK instead
@@ -2470,6 +2524,9 @@ let private insertCore
                     |> Result.bind (fun (finalValues, nextAutoId', assigned) ->
                         let candidate = Array.ofList finalValues
 
+                        prepare candidate
+                        |> Result.bind (fun candidate ->
+
                         // O(log n) per unique group via the running index
                         // (seeded from `table.UniqueIndex`, extended below as
                         // each candidate is accepted) instead of a full scan
@@ -2507,7 +2564,7 @@ let private insertCore
                                     else
                                         db
 
-                                let checkOneForeignKey foreignKey =
+                                let checkOneForeignKey (foreignKey: ForeignKeyDef) =
                                     match Map.tryFind foreignKey.Name foreignKeyLookups with
                                     | Some(childIndices, _, parentKeys) ->
                                         match encodeConstraintKey table.Columns childIndices candidate with
@@ -2520,7 +2577,7 @@ let private insertCore
                                 |> traverse checkOneForeignKey
                                 |> Result.map (fun _ -> candidate, nextAutoId', assigned)
                             else
-                                Ok(candidate, nextAutoId', assigned))
+                                Ok(candidate, nextAutoId', assigned)))
 
                 match rowResult with
                 | Ok(candidate, nextAutoId', assigned) ->
@@ -2555,7 +2612,11 @@ let private insertCore
         // not an O(existing table size) `list` rebuild — the unique/FK
         // checks above are already O(log n) per row; this was the last O(n)
         // step a single-row INSERT paid.
-        let table' = { table with RowsArray = table.RowsArray.AddRange accepted; NextAutoId = nextAutoId'; UniqueIndex = index }
+        let table' =
+            { table with
+                RowsArray = table.RowsArray.AddRange accepted
+                NextAutoId = max nextAutoId' reservedAutoNext
+                UniqueIndex = index }
         Map.add tableKey table' db, (Option.defaultValue 0L firstAssigned, firstAuto, List.length accepted, accepted))
 
 /// Inserts rows built from `columns` and matching value lists, applying
@@ -2567,7 +2628,9 @@ let private insertCore
 /// this statement actually generated an AUTO_INCREMENT id. Fails the whole
 /// statement on the first bad row — see `insertRowsIgnore` for `INSERT
 /// IGNORE`'s per-row skip semantics.
-let insertRows
+let private insertRowsPreparedCore
+    (ignoreErrors: bool)
+    (prepare: Value[] -> Result<Value[], StorageError>)
     (store: Store)
     (dbName: string)
     (tableName: string)
@@ -2582,7 +2645,8 @@ let insertRows
             |> Result.bind (fun () -> tryGetTable db tableName)
             |> Result.bind (fun table ->
                 resolveInsertColumns table columns
-                |> Result.bind (insertCore store.ForeignKeyChecks store.StrictMode false db key rowsIn)))
+                |> Result.bind (fun indices ->
+                    insertCore store.ForeignKeyChecks store.StrictMode ignoreErrors db key rowsIn indices prepare)))
 
     match result with
     | Ok(lastId, generatedId, affected, rows) ->
@@ -2591,6 +2655,25 @@ let insertRows
 
         Ok { LastInsertId = lastId; GeneratedId = generatedId; Affected = affected; InsertedRows = rows }
     | Error e -> Error e
+
+let insertRows
+    (store: Store)
+    (dbName: string)
+    (tableName: string)
+    (columns: string list option)
+    (rowsIn: Value list list)
+    : Result<InsertOutcome, StorageError> =
+    insertRowsPreparedCore false Ok store dbName tableName columns rowsIn
+
+let insertRowsPrepared
+    (store: Store)
+    (dbName: string)
+    (tableName: string)
+    (columns: string list option)
+    (rowsIn: Value list list)
+    (prepare: Value[] -> Result<Value[], StorageError>)
+    : Result<InsertOutcome, StorageError> =
+    insertRowsPreparedCore false prepare store dbName tableName columns rowsIn
 
 /// `INSERT IGNORE`: as `insertRows`, but a row that would violate NOT
 /// NULL/unique/foreign-key constraints is skipped instead of failing the
@@ -2605,23 +2688,17 @@ let insertRowsIgnore
     (columns: string list option)
     (rowsIn: Value list list)
     : Result<InsertOutcome, StorageError> =
-    let key = normalizeTableName tableName
+    insertRowsPreparedCore true Ok store dbName tableName columns rowsIn
 
-    let result =
-        withDatabase store dbName (fun db ->
-            virtualWriteGuard store dbName tableName
-            |> Result.bind (fun () -> tryGetTable db tableName)
-            |> Result.bind (fun table ->
-                resolveInsertColumns table columns
-                |> Result.bind (insertCore store.ForeignKeyChecks store.StrictMode true db key rowsIn)))
-
-    match result with
-    | Ok(lastId, generatedId, affected, rows) ->
-        if not rows.IsEmpty then
-            emit store (Some(RowsInserted(dbName, tableName, rows)))
-
-        Ok { LastInsertId = lastId; GeneratedId = generatedId; Affected = affected; InsertedRows = rows }
-    | Error e -> Error e
+let insertRowsIgnorePrepared
+    (store: Store)
+    (dbName: string)
+    (tableName: string)
+    (columns: string list option)
+    (rowsIn: Value list list)
+    (prepare: Value[] -> Result<Value[], StorageError>)
+    : Result<InsertOutcome, StorageError> =
+    insertRowsPreparedCore true prepare store dbName tableName columns rowsIn
 
 /// Every `(childTableKey, fk)` in `db` whose `fk.RefTable` is `parentKey` —
 /// every foreign key elsewhere in the database that a delete from

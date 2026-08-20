@@ -46,14 +46,100 @@ git history.
 
 The introspection surface was built from what real clients actually send:
 TablePlus 26.9.6's queries extracted verbatim from its binary, and
-phpMyAdmin 5.2.x's query builders read from source. All 22
+phpMyAdmin 5.2.x's query builders read from source. All 23
 `information_schema` tables have column sets diffed byte-for-byte against a
 live MySQL 8.4.11 (`SHOW COLUMNS` per table, both sides), and a ~70-query
 replay fixture covering both clients' connect/browse/structure flows runs
 with a single divergence: `SHOW SLAVE STATUS`, which real 8.4 also rejects
-with 1064. Object catalogs fsdb has no objects for (views, routines,
-triggers, events) are genuinely empty rather than stubbed; PROCESSLIST,
+with 1064. Stored views and triggers populate their real object catalogs;
+routines and events remain genuinely empty rather than stubbed. PROCESSLIST,
 `Threads_connected`, and `KILL` operate on the real connection registry.
+
+## Views and triggers
+
+MySQL views are stored queries, not persisted materialized results. `MERGE`
+rewrites a referencing statement against the underlying tables, while
+`TEMPTABLE` builds a temporary result for that statement; MySQL has no
+materialized-view object. See the MySQL 8.4 documentation for
+[view creation](https://dev.mysql.com/doc/refman/8.4/en/create-view.html) and
+[view processing algorithms](https://dev.mysql.com/doc/refman/8.4/en/view-algorithms.html).
+
+fsdb supports a read-only stored-query subset:
+
+- `CREATE [OR REPLACE] VIEW name [(columns)] AS SELECT ...` and
+  `DROP VIEW [IF EXISTS] name [, ...]`.
+- Nested views, joins, unions, CTEs, grouping, windows, and the rest of the
+  supported SELECT grammar inside a definition.
+- TEMPTABLE-like evaluation: one typed result is materialized and reused for
+  the referencing statement. A later statement reevaluates the definition
+  against current base rows.
+- Definitions execute under the recorded creator's privileges; revoking the
+  definer's access to an underlying table makes later reads fail.
+- Persistence through the WAL and snapshots, plus `SHOW [FULL] TABLES`,
+  `SHOW CREATE VIEW`, `information_schema.TABLES`, and
+  `information_schema.VIEWS` metadata.
+
+The view subset is deliberately read-only. `ALGORITHM`, explicit `DEFINER`,
+`SQL SECURITY`, `WITH CHECK OPTION`, `ALTER VIEW`, and DML through a view are
+not implemented. Creation validates the saved SQL grammar but defers missing
+dependency and output-shape errors until the first read; `SELECT *` follows
+the base table's current columns instead of freezing them at creation.
+`information_schema.COLUMNS`, `DESCRIBE`, and `SHOW TABLE STATUS` do not yet
+project user view metadata.
+
+Trigger execution has stronger behavioral coverage than its syntax breadth:
+
+- Exactly `AFTER INSERT ON table FOR EACH ROW` with one `INSERT`, `REPLACE`,
+  `UPDATE`, or `DELETE` body statement.
+- `NEW.column` binds the final inserted row, including generated columns.
+- Multi-row inserts fire once per inserted row; ignored duplicates and the
+  update branch of `ON DUPLICATE KEY UPDATE` do not fire an insert trigger.
+- The source write and every trigger effect are one atomic statement. A body
+  error rolls all of them back, and effects participate normally in explicit
+  transaction commit or rollback.
+- Trigger writes may fire another table's trigger. Cycles and self-writes
+  return error 1442, and the current chain-depth ceiling is eight.
+- Bodies run after a definer-privilege check, reject DirectOnly extension
+  functions, persist through the ordinary WAL/snapshot path, and appear in
+  `SHOW TRIGGERS` and `information_schema.TRIGGERS`.
+- A trigger follows its subject through `RENAME TABLE`; dropping the subject
+  table or its database removes the stored trigger definition.
+
+Missing MySQL trigger forms are `BEFORE`, `AFTER UPDATE`, `AFTER DELETE`,
+`OLD.column`, compound `BEGIN ... END` bodies, and multiple ordered triggers
+for one timing/event slot. `DROP TRIGGER` also lacks its subject-table
+privilege check. An insert-only audit or rollup is therefore sound; a general
+trigger-maintained materialized aggregate is not, because later updates and
+deletes cannot repair it. The full MySQL surface is documented under
+[CREATE TRIGGER](https://dev.mysql.com/doc/refman/8.4/en/create-trigger.html).
+
+## Check constraints
+
+`CHECK` constraints follow MySQL 8.4's row semantics: an expression that is
+true or unknown passes, while false returns error 3819. They are evaluated
+after generated columns and before a row becomes visible for `INSERT`,
+`INSERT ... SELECT`, `UPDATE`, `REPLACE`, and both branches of
+`INSERT ... ON DUPLICATE KEY UPDATE`. A failing multi-row statement is atomic;
+`INSERT IGNORE` skips only the violating candidates, and `UPDATE IGNORE`
+leaves candidates that would violate a check unchanged.
+
+Both column and table forms support explicit names, generated
+`table_chk_N` names, and `[NOT] ENFORCED`. `ALTER TABLE` supports `ADD CHECK`,
+`DROP CHECK`, and `ALTER CHECK ... [NOT] ENFORCED`; enabling a constraint
+validates existing rows before changing its state. Names are unique within a
+schema. Dropping a column removes its column-owned check, while a table check
+that depends on the column blocks drop or rename with error 3959. The MySQL
+restriction between checked columns and foreign-key `SET NULL`/`ON UPDATE`
+referential actions is enforced at DDL time.
+
+Definitions persist through the ordinary WAL and snapshot paths and appear in
+`SHOW CREATE TABLE`, `information_schema.CHECK_CONSTRAINTS`, and
+`information_schema.TABLE_CONSTRAINTS`, including enforcement state. The
+expression validator rejects subqueries, aggregates, window functions,
+nondeterministic functions, cross-table references, auto-increment references,
+and DirectOnly or nondeterministic host extensions. Warnings from skipped
+`INSERT IGNORE` rows are not yet exposed through `SHOW WARNINGS`, which is a
+server-wide diagnostics gap rather than a CHECK enforcement divergence.
 
 ## Server settings
 
@@ -124,5 +210,6 @@ Deliberate divergences (each marked `ponytail:` at its code site):
   SHOW/SET text probes and subqueries/derived tables are unchecked.
 - No roles, dynamic privileges, column-level privileges, proxy users, or
   password expiry — the columns exist in the table shapes but stay at their
-  defaults. 5 of MySQL's 38 `mysql.*` tables exist.
+  defaults. Eight of MySQL's 38 `mysql.*` tables exist, including fsdb's
+  row-backed `check_constraints`, `triggers`, and `views` catalogs.
 - `SHOW GRANTS` omits root's dynamic-privilege and PROXY lines.

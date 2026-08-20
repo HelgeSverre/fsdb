@@ -441,6 +441,7 @@ let private showColumnsRe =
 let private describeRe = Regex(@"^(?:DESCRIBE|DESC)\s+(\S+)\s*$", RegexOptions.IgnoreCase)
 
 let private showCreateTableRe = Regex(@"^SHOW\s+CREATE\s+TABLE\s+(\S+)\s*$", RegexOptions.IgnoreCase)
+let private showCreateViewRe = Regex(@"^SHOW\s+CREATE\s+VIEW\s+(\S+)\s*$", RegexOptions.IgnoreCase)
 
 let private showIndexRe =
     Regex(@"^SHOW\s+(?:INDEX|INDEXES|KEYS)\s+FROM\s+(\S+)(\s+FROM\s+(\S+))?", RegexOptions.IgnoreCase)
@@ -1189,6 +1190,7 @@ type private Probe =
     | ShowTableStatus
     | ShowTables
     | ShowCreate of name: string
+    | ShowCreateView of name: string
     | ShowColumns of full: bool * name: string * dbOverride: string option
     | Describe of name: string
     | ShowIndex of name: string * dbOverride: string option
@@ -1273,6 +1275,8 @@ let private tryProbe (sql: string) (upper: string) : Probe option =
         Some ShowCollation
     elif upper.StartsWith "SHOW TABLES" || upper.StartsWith "SHOW FULL TABLES" then
         Some ShowTables
+    elif showCreateViewRe.IsMatch sql then
+        Some(ShowCreateView((showCreateViewRe.Match sql).Groups.[1].Value))
     elif showCreateTableRe.IsMatch sql then
         Some(ShowCreate((showCreateTableRe.Match sql).Groups.[1].Value))
     elif showColumnsRe.IsMatch sql then
@@ -1301,6 +1305,7 @@ let private runProbe (session: Session) (sql: string) (probe: Probe) : Session *
         | ShowTableStatus
         | ShowTables
         | ShowCreate _
+        | ShowCreateView _
         | ShowColumns _
         | Describe _
         | ShowIndex _ -> startTransactionStatement session
@@ -1399,6 +1404,10 @@ let private runProbe (session: Session) (sql: string) (probe: Probe) : Session *
         let sessionDb = session.Database |> Option.defaultValue defaultDatabase
         let dbName, table = splitQualified sessionDb name
         session, InformationSchema.showCreateTable (catalogWithOverlay session dbName table) dbName table |> showResult
+    | ShowCreateView name ->
+        let sessionDb = session.Database |> Option.defaultValue defaultDatabase
+        let dbName, view = splitQualified sessionDb name
+        session, InformationSchema.showCreateView (Session.currentStore session).Catalog dbName view |> showResult
     | ShowColumns(full, name, dbOverride) ->
         let sessionDb = session.Database |> Option.defaultValue defaultDatabase
         let dbName, table = splitQualified sessionDb name

@@ -583,4 +583,31 @@ let tests =
               // SHOW is a text probe, so it goes through `handle`, not the parser.
               match handle session "SHOW TRIGGERS" |> snd with
               | ResultSet(_, [ row ]) -> Expect.equal (List.item 7 row) (Some "dev@%") "Definer is the creating account"
-              | other -> failtestf "expected one SHOW TRIGGERS row, got %A" other ]
+              | other -> failtestf "expected one SHOW TRIGGERS row, got %A" other
+
+          testCase "dropping a subject table removes its trigger"
+          <| fun _ ->
+              let store = Fsdb.Storage.create ()
+              setup store
+
+              expectOk
+                  (runDefault store "CREATE TRIGGER stale AFTER INSERT ON t FOR EACH ROW INSERT INTO log(n) VALUES (NEW.n)")
+                  "create trigger"
+
+              expectOk (runDefault store "DROP TABLE t") "drop subject"
+              expectOk (runDefault store "CREATE TABLE t (id INT AUTO_INCREMENT PRIMARY KEY, n INT)") "recreate subject"
+              expectOk (runDefault store "INSERT INTO t(n) VALUES (9)") "insert into recreated table"
+              Expect.equal (rows store "SELECT COUNT(*) FROM log") [ [ Some "0" ] ] "dropped trigger did not reattach"
+
+          testCase "renaming a subject table keeps its trigger attached"
+          <| fun _ ->
+              let store = Fsdb.Storage.create ()
+              setup store
+
+              expectOk
+                  (runDefault store "CREATE TRIGGER carried AFTER INSERT ON t FOR EACH ROW INSERT INTO log(n) VALUES (NEW.n)")
+                  "create trigger"
+
+              expectOk (runDefault store "RENAME TABLE t TO renamed") "rename subject"
+              expectOk (runDefault store "INSERT INTO renamed(n) VALUES (12)") "insert into renamed table"
+              Expect.equal (rows store "SELECT n FROM log") [ [ Some "12" ] ] "trigger followed its subject" ]

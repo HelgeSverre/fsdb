@@ -1360,6 +1360,7 @@ type private ColMod =
     /// A validated `CHARACTER SET name` (utf8mb4/latin1/ascii).
     | MCharset of string
     | MOnUpdateCurrentTimestamp
+    | MCheck of name: string option * expression: Expr * enforced: bool
     /// `COMMENT 'txt'` — accepted so the column definition parses, but
     /// nothing in `Ast.ColumnDef` tracks it (ponytail: add a field if a
     /// migration's assertion ever depends on it).
@@ -1410,9 +1411,21 @@ let private knownCharset: Parser<string, unit> =
         | "binary" as cs -> preturn cs
         | _ -> fail (sprintf "Unknown character set: '%s'" name)
 
+let private checkEnforcement: Parser<bool, unit> =
+    opt ((attempt (keyword "NOT" >>. keyword "ENFORCED") >>% false) <|> (keyword "ENFORCED" >>% true))
+    |>> Option.defaultValue true
+
+let private checkDefinition: Parser<string option * Expr * bool, unit> =
+    (opt (attempt (keyword "CONSTRAINT" >>. opt identifier)) |>> Option.flatten)
+    .>> keyword "CHECK"
+    .>>. between (sym "(") (sym ")") expr
+    .>>. checkEnforcement
+    |>> fun ((name, expression), enforced) -> name, expression, enforced
+
 let private colMod: Parser<ColMod, unit> =
     choice
-        [ attempt (keyword "NOT" >>. keyword "NULL") >>% MNotNull
+        [ attempt (checkDefinition |>> MCheck)
+          attempt (keyword "NOT" >>. keyword "NULL") >>% MNotNull
           keyword "NULL" >>% MNull
           keyword "DEFAULT" >>. defaultValueLit |>> MDefault
           keyword "AUTO_INCREMENT" >>% MAutoIncrement
@@ -1434,33 +1447,45 @@ let private colMod: Parser<ColMod, unit> =
               | None -> fail (sprintf "Unknown collation '%s'" name)
           attempt generatedColumn |>> MGenerated ]
 
-let private columnDef: Parser<ColumnDef, unit> =
+let private parsedColumnDef: Parser<ColumnDef * CheckConstraintDef list, unit> =
     (identifier .>>. columnType .>>. many colMod)
     |>> fun ((name, ty), mods) ->
-        { Name = name
-          Type = ty
-          Nullable = not (List.contains MNotNull mods)
-          Default = mods |> List.tryPick (function MDefault v -> Some v | _ -> None)
-          AutoIncrement = List.contains MAutoIncrement mods
-          PrimaryKey = List.contains MPrimaryKey mods
-          Unique = List.contains MUnique mods
-          OnUpdateCurrentTimestamp = List.contains MOnUpdateCurrentTimestamp mods
-          Generated = mods |> List.tryPick (function MGenerated(e, k) -> Some(e, k) | _ -> None)
-          Collation = mods |> List.tryPick (function MCollate c -> Some c | _ -> None)
-          Charset =
-              mods
-              |> List.tryPick (function
-                  | MCharset c -> Some c
-                  | _ -> None)
-              |> Option.orElseWith (fun () ->
-                  // A column-level `COLLATE` carries its charset explicitly
-                  // in MySQL — `varchar(10) COLLATE utf8mb4_bin` reports
-                  // `CHARACTER SET utf8mb4` in SHOW CREATE TABLE, unlike a
-                  // collation merely inherited from the table.
+        let column =
+            { Name = name
+              Type = ty
+              Nullable = not (List.contains MNotNull mods)
+              Default = mods |> List.tryPick (function MDefault v -> Some v | _ -> None)
+              AutoIncrement = List.contains MAutoIncrement mods
+              PrimaryKey = List.contains MPrimaryKey mods
+              Unique = List.contains MUnique mods
+              OnUpdateCurrentTimestamp = List.contains MOnUpdateCurrentTimestamp mods
+              Generated = mods |> List.tryPick (function MGenerated(e, k) -> Some(e, k) | _ -> None)
+              Collation = mods |> List.tryPick (function MCollate c -> Some c | _ -> None)
+              Charset =
                   mods
                   |> List.tryPick (function
-                      | MCollate _ -> Some "utf8mb4"
-                      | _ -> None)) }
+                      | MCharset c -> Some c
+                      | _ -> None)
+                  |> Option.orElseWith (fun () ->
+                      mods
+                      |> List.tryPick (function
+                          | MCollate _ -> Some "utf8mb4"
+                          | _ -> None)) }
+
+        let checks =
+            mods
+            |> List.choose (function
+                | MCheck(checkName, expression, enforced) ->
+                    Some
+                        { Name = checkName
+                          Expression = expression
+                          Enforced = enforced
+                          Column = Some name }
+                | _ -> None)
+
+        column, checks
+
+let private columnDef: Parser<ColumnDef, unit> = parsedColumnDef |>> fst
 
 /// `AFTER col` / `FIRST` after an `ADD`/`MODIFY`/`CHANGE COLUMN` —
 /// `PositionDefault` when neither is written.
@@ -1553,17 +1578,27 @@ let private foreignKeyItem: Parser<ForeignKeyDef, unit> =
 /// `attempt` since they can share a leading keyword (`CONSTRAINT ... FOREIGN
 /// KEY` vs. a column literally named `constraint`) before diverging.
 type private CreateItem =
-    | CColumn of ColumnDef
+    | CColumn of ColumnDef * CheckConstraintDef list
     | CPrimaryKey of string list
     | CIndex of IndexDef
     | CForeignKey of ForeignKeyDef
+    | CCheck of CheckConstraintDef
 
 let private createTableItem: Parser<CreateItem, unit> =
     choice
         [ attempt (foreignKeyItem |>> CForeignKey)
+          attempt (
+              checkDefinition
+              |>> fun (name, expression, enforced) ->
+                  CCheck
+                      { Name = name
+                        Expression = expression
+                        Enforced = enforced
+                        Column = None }
+          )
           attempt (trailingPrimaryKey |>> CPrimaryKey)
           attempt (indexItem |>> CIndex)
-          columnDef |>> CColumn ]
+          parsedColumnDef |>> CColumn ]
 
 /// `ENGINE=`, `CHARSET=`/`DEFAULT CHARSET=` table options: accepted and
 /// discarded, same treatment as column display widths. `COLLATE=` is the
@@ -1642,7 +1677,7 @@ let private createTable: Parser<Statement, unit> =
         let columns =
             items
             |> List.choose (function
-                | CColumn c ->
+                | CColumn(c, _) ->
                     // Table-level COLLATE is the default for columns that
                     // didn't name one; the explicit column COLLATE wins.
                     // String-typed columns only — MySQL doesn't attach the
@@ -1685,6 +1720,13 @@ let private createTable: Parser<Statement, unit> =
                     Some(if List.contains c.Name pkNames then { withDefaults with PrimaryKey = true } else withDefaults)
                 | _ -> None)
 
+        let checks =
+            items
+            |> List.collect (function
+                | CColumn(_, checks) -> checks
+                | CCheck check -> [ check ]
+                | _ -> [])
+
         // A column-level `UNIQUE` modifier is just sugar for a single-column
         // unique index named after the column, so it lands in the same
         // `Indexes` bucket a trailing `UNIQUE KEY` would.
@@ -1693,7 +1735,17 @@ let private createTable: Parser<Statement, unit> =
             |> List.filter (fun c -> c.Unique)
             |> List.map (fun c -> { Name = c.Name; Columns = [ c.Name ]; Unique = true; Kind = BTree })
 
-        CreateTable(name, columns, explicitIndexes @ uniqueColumnIndexes, foreignKeys, ifNotExists, tableCharset, tableCollation, autoIncrementSeed)
+        CreateTable(
+            name,
+            columns,
+            explicitIndexes @ uniqueColumnIndexes,
+            foreignKeys,
+            checks,
+            ifNotExists,
+            tableCharset,
+            tableCollation,
+            autoIncrementSeed
+        )
 
 let private createIndexStmt: Parser<Statement, unit> =
     (keyword "CREATE"
@@ -1768,8 +1820,9 @@ let private alterDatabaseStmt: Parser<Statement, unit> =
 
 let private optColumnKw: Parser<unit, unit> = optional (keyword "COLUMN")
 
-let private addColumnAction: Parser<AlterAction, unit> =
-    attempt (keyword "ADD" >>. optColumnKw >>. columnDef .>>. colPosition) |>> AddColumn
+let private addColumnAction: Parser<AlterAction list, unit> =
+    attempt (keyword "ADD" >>. optColumnKw >>. parsedColumnDef .>>. colPosition)
+    |>> fun ((column, checks), position) -> AddColumn(column, position) :: (checks |> List.map AddCheck)
 
 let private addPrimaryKeyAction: Parser<AlterAction, unit> =
     attempt (keyword "ADD" >>. trailingPrimaryKey) |>> AddPrimaryKey
@@ -1780,6 +1833,22 @@ let private addIndexAction: Parser<AlterAction, unit> =
 let private addForeignKeyAction: Parser<AlterAction, unit> =
     attempt (keyword "ADD" >>. foreignKeyItem) |>> AddForeignKey
 
+let private addCheckAction: Parser<AlterAction, unit> =
+    attempt (keyword "ADD" >>. checkDefinition)
+    |>> fun (name, expression, enforced) ->
+        AddCheck
+            { Name = name
+              Expression = expression
+              Enforced = enforced
+              Column = None }
+
+let private dropCheckAction: Parser<AlterAction, unit> =
+    attempt (keyword "DROP" >>. (keyword "CHECK" <|> keyword "CONSTRAINT") >>. identifier) |>> DropCheck
+
+let private setCheckEnforcementAction: Parser<AlterAction, unit> =
+    attempt (keyword "ALTER" >>. (keyword "CHECK" <|> keyword "CONSTRAINT") >>. identifier .>>. checkEnforcement)
+    |>> SetCheckEnforced
+
 let private dropForeignKeyAction: Parser<AlterAction, unit> =
     attempt (keyword "DROP" >>. keyword "FOREIGN" >>. keyword "KEY" >>. identifier) |>> DropForeignKey
 
@@ -1789,12 +1858,13 @@ let private dropIndexAction: Parser<AlterAction, unit> =
 let private dropColumnAction: Parser<AlterAction, unit> =
     attempt (keyword "DROP" >>. optColumnKw >>. identifier) |>> DropColumn
 
-let private modifyColumnAction: Parser<AlterAction, unit> =
-    attempt (keyword "MODIFY" >>. optColumnKw >>. columnDef .>>. colPosition) |>> ModifyColumn
+let private modifyColumnAction: Parser<AlterAction list, unit> =
+    attempt (keyword "MODIFY" >>. optColumnKw >>. parsedColumnDef .>>. colPosition)
+    |>> fun ((column, checks), position) -> ModifyColumn(column, position) :: (checks |> List.map AddCheck)
 
-let private changeColumnAction: Parser<AlterAction, unit> =
-    attempt (keyword "CHANGE" >>. optColumnKw >>. identifier .>>. columnDef .>>. colPosition)
-    |>> fun ((oldName, newDef), position) -> ChangeColumn(oldName, newDef, position)
+let private changeColumnAction: Parser<AlterAction list, unit> =
+    attempt (keyword "CHANGE" >>. optColumnKw >>. identifier .>>. parsedColumnDef .>>. colPosition)
+    |>> fun ((oldName, (newDef, checks)), position) -> ChangeColumn(oldName, newDef, position) :: (checks |> List.map AddCheck)
 
 let private renameColumnAction: Parser<AlterAction, unit> =
     attempt (keyword "RENAME" >>. keyword "COLUMN" >>. identifier .>> keyword "TO" .>>. identifier)
@@ -1806,25 +1876,28 @@ let private renameToAction: Parser<AlterAction, unit> =
 let private setAutoIncrementAction: Parser<AlterAction, unit> =
     attempt (keyword "AUTO_INCREMENT" >>. opt (sym "=")) >>. pint64 .>> ws |>> SetAutoIncrement
 
-let private alterAction: Parser<AlterAction, unit> =
+let private alterAction: Parser<AlterAction list, unit> =
     choice
-        [ addForeignKeyAction
-          addPrimaryKeyAction
-          addIndexAction
+        [ addForeignKeyAction |>> List.singleton
+          addCheckAction |>> List.singleton
+          addPrimaryKeyAction |>> List.singleton
+          addIndexAction |>> List.singleton
           addColumnAction
-          dropForeignKeyAction
-          dropIndexAction
-          dropColumnAction
+          dropForeignKeyAction |>> List.singleton
+          dropCheckAction |>> List.singleton
+          dropIndexAction |>> List.singleton
+          dropColumnAction |>> List.singleton
           modifyColumnAction
           changeColumnAction
-          renameColumnAction
-          setAutoIncrementAction
-          renameToAction ]
+          setCheckEnforcementAction |>> List.singleton
+          renameColumnAction |>> List.singleton
+          setAutoIncrementAction |>> List.singleton
+          renameToAction |>> List.singleton ]
     <?> "ALTER TABLE action"
 
 let private alterTableStmt: Parser<Statement, unit> =
     (keyword "ALTER" >>. keyword "TABLE" >>. qualifiedTableName .>>. sepBy1 alterAction (sym ","))
-    |>> AlterTable
+    |>> fun (table, actions) -> AlterTable(table, List.concat actions)
 
 let private renameTablePair: Parser<string * string, unit> =
     qualifiedTableName .>> (keyword "TO" <|> keyword "AS") .>>. qualifiedTableName
@@ -2450,12 +2523,13 @@ let private singleTableOrderLimit (joins: Join list) : Parser<OrderKey list * in
 /// `UPDATE t1 [[AS] a] [JOIN ...] SET assignments [WHERE ...] [ORDER BY ...]
 /// [LIMIT ...]`.
 let private updateStmt: Parser<Statement, unit> =
-    (keyword "UPDATE" >>. tableRef .>>. many joinClause .>> keyword "SET" .>>. sepBy1 assignment (sym ","))
-    >>= fun ((from, joins), assignments) ->
+    (keyword "UPDATE" >>. (opt (keyword "IGNORE") |>> Option.isSome) .>>. tableRef .>>. many joinClause .>> keyword "SET" .>>. sepBy1 assignment (sym ","))
+    >>= fun (((ignoreErrors, from), joins), assignments) ->
         opt (keyword "WHERE" >>. expr) .>>. singleTableOrderLimit joins
         |>> fun (where, (orderBy, limit)) ->
             Update
-                { From = from
+                { Ignore = ignoreErrors
+                  From = from
                   Joins = joins
                   Assignments = assignments
                   Where = where
@@ -2563,6 +2637,28 @@ let private dropTriggerStmt: Parser<Statement, unit> =
     |>> fun (ifExists, name) -> DropTrigger(name, ifExists)
 
 // ---------------------------------------------------------------------------
+// CREATE VIEW / DROP VIEW — a read-only stored SELECT, evaluated through the
+// same derived-table path as an inline subquery.
+// ---------------------------------------------------------------------------
+
+let private createViewStmt: Parser<Statement, unit> =
+    (keyword "CREATE"
+     >>. (opt (attempt (keyword "OR" >>. keyword "REPLACE")) |>> Option.isSome)
+     .>> keyword "VIEW"
+     .>>. qualifiedTableName
+     .>>. opt (between (sym "(") (sym ")") (sepBy1 identifier (sym ",")))
+     .>> keyword "AS"
+     .>>. manyChars anyChar)
+    |>> fun (((orReplace, name), columns), definition) ->
+        CreateView(name, columns |> Option.defaultValue [], definition.Trim().TrimEnd(';').Trim(), orReplace)
+
+let private dropViewStmt: Parser<Statement, unit> =
+    (keyword "DROP" >>. keyword "VIEW"
+     >>. (opt (attempt (keyword "IF" >>. keyword "EXISTS")) |>> Option.isSome)
+     .>>. sepBy1 qualifiedTableName (sym ","))
+    |>> fun (ifExists, names) -> DropView(names, ifExists)
+
+// ---------------------------------------------------------------------------
 // GRANT / REVOKE
 // ---------------------------------------------------------------------------
 
@@ -2644,11 +2740,13 @@ statementRef.Value <-
     choice
         [ attempt createUserStmt
           attempt createTriggerStmt
+          attempt createViewStmt
           attempt createDatabaseStmt
           attempt createTable
           attempt createIndexStmt
           attempt dropUserStmt
           attempt dropTriggerStmt
+          attempt dropViewStmt
           attempt dropDatabaseStmt
           attempt dropTable
           dropIndexStmt
@@ -2686,5 +2784,20 @@ let parse (sql: string) : Result<Statement, string> =
         match run full sql with
         | Success(stmt, _, _) -> Result.Ok stmt
         | Failure(msg, _, _) -> Result.Error msg
+    with ex ->
+        Result.Error ex.Message
+
+/// Parses one standalone expression for persisted schema objects such as
+/// CHECK constraints. It shares the statement parser's placeholder/depth
+/// guards so damaged catalog text fails as a normal schema error rather
+/// than escaping through the query worker.
+let parseExpression (sql: string) : Result<Expr, string> =
+    placeholderCounterLocal.Value <- 0
+    exprDepth.Value <- 0
+
+    try
+        match run (ws >>. expr .>> eof) sql with
+        | Success(expression, _, _) -> Result.Ok expression
+        | Failure(message, _, _) -> Result.Error message
     with ex ->
         Result.Error ex.Message

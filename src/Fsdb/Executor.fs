@@ -36,6 +36,12 @@ type private EvalError = int * string
 let private fromSubqueryMemo =
     System.Threading.AsyncLocal<Dictionary<FromItem, Result<ColumnDef list * Value[] list, QueryResult>>>()
 
+/// A stored view has TEMPTABLE-like statement semantics: resolve its saved
+/// SELECT once, then reuse the typed rows everywhere the statement (including
+/// metadata inference) references it.
+let private viewMemo =
+    System.Threading.AsyncLocal<Dictionary<string * string, Result<ColumnDef list * Value[] list, QueryResult>>>()
+
 /// The `WITH` bindings visible to the statement currently executing, keyed
 /// by lowercased CTE name — same per-statement `AsyncLocal` shape as
 /// `fromSubqueryMemo`, because a CTE is equally visible to the statement's
@@ -45,6 +51,88 @@ let private fromSubqueryMemo =
 /// statement that carries `Ctes` (see `withCteScope`).
 let private cteScope = System.Threading.AsyncLocal<Map<string, ColumnDef list * Value[] list>>()
 let private cteRecursionDepth = System.Threading.AsyncLocal<int64 option>()
+let private viewStack = System.Threading.AsyncLocal<Set<string * string>>()
+
+type private StoredView =
+    { Name: string
+      Schema: string
+      Definition: string
+      Columns: string list
+      Definer: string }
+
+type private StoredCheck =
+    { Name: string
+      Clause: string
+      Enforced: bool
+      Column: string option
+      GeneratedName: bool
+      Ordinal: int }
+
+let private currentViewStack () =
+    match box viewStack.Value with
+    | null -> Set.empty
+    | _ -> viewStack.Value
+
+let private storedObjectUser (definer: string) =
+    match definer.LastIndexOf '@' with
+    | -1 -> definer
+    | index -> definer.Substring(0, index)
+
+/// Reads one view definition from the row-backed catalog. The explicit column
+/// list is JSON so every legal quoted identifier round-trips without inventing
+/// a second escaping convention. Invalid catalog text is treated as an absent
+/// list so direct catalog damage cannot crash the query worker.
+let private tryStoredView (store: Store) (dbName: string) (viewName: string) : StoredView option =
+    let text i (row: Value[]) = toText row.[i] |> Option.defaultValue ""
+    let eqI (left: string) (right: string) = System.String.Equals(left, right, System.StringComparison.OrdinalIgnoreCase)
+    let columns (value: string) =
+        if value = "" then
+            []
+        else
+            try
+                match JsonSerializer.Deserialize<string[]>(value) with
+                | null -> []
+                | columns -> List.ofArray columns
+            with :? JsonException ->
+                []
+
+    match scan store "mysql" "views" with
+    | Error _ -> None
+    | Ok(_, rows) ->
+        rows
+        |> Seq.tryFind (fun row -> eqI (text 0 row) viewName && eqI (text 1 row) dbName)
+        |> Option.map (fun row ->
+            { Name = text 0 row
+              Schema = text 1 row
+              Definition = text 2 row
+              Columns = text 3 row |> columns
+              Definer = if row.Length > 5 then text 5 row else "" })
+
+let private storedChecks (store: Store) (dbName: string) (tableName: string) : StoredCheck list =
+    let text i (row: Value[]) = toText row.[i] |> Option.defaultValue ""
+    let eqI left right = System.String.Equals(left, right, System.StringComparison.OrdinalIgnoreCase)
+
+    match scan store "mysql" "check_constraints" with
+    | Error _ -> []
+    | Ok(_, rows) ->
+        rows
+        |> Seq.filter (fun row -> eqI (text 1 row) dbName && eqI (text 2 row) tableName)
+        |> Seq.map (fun row ->
+            { Name = text 0 row
+              Clause = text 3 row
+              Enforced = eqI (text 4 row) "YES"
+              Column = if row.Length > 5 then toText row.[5] else None
+              GeneratedName = row.Length > 6 && eqI (text 6 row) "YES"
+              Ordinal =
+                if row.Length > 7 then
+                    match row.[7] with
+                    | VInt ordinal -> int ordinal
+                    | VUInt ordinal -> int ordinal
+                    | value -> value |> toDouble |> int
+                else
+                    1 })
+        |> Seq.sortBy _.Ordinal
+        |> List.ofSeq
 
 let withCteRecursionDepth (limit: int64) (body: unit -> 'a) : 'a =
     let saved = cteRecursionDepth.Value
@@ -2146,7 +2234,12 @@ and private evalOrderKey (ctx: EvalContext) (expr: Expr) : Result<Value * Collat
 /// one) to its columns and rows — the one place both the base `FROM` and
 /// every `JOIN` target resolve through, so there's exactly one
 /// `information_schema` special case rather than one per call site.
-and private resolveTableRef (store: Store) (dbName: string) (tableRef: TableRef) : Result<ColumnDef list * Value[] list, QueryResult> =
+and private resolveTableRef
+    (store: Store)
+    (registry: Registry)
+    (dbName: string)
+    (tableRef: TableRef)
+    : Result<ColumnDef list * Value[] list, QueryResult> =
     let tableDb = tableRef.Database |> Option.defaultValue dbName
 
     // An unqualified name resolves against the statement's `WITH` bindings
@@ -2174,9 +2267,72 @@ and private resolveTableRef (store: Store) (dbName: string) (tableRef: TableRef)
         let vt = store.VirtualTables.[tableRef.Table.ToLowerInvariant()]
         Ok(vt.Columns, vt.Rows())
     else
-        match scanList store tableDb tableRef.Table with
-        | Error e -> Error(storageErr e)
-        | Ok(columns, rows) -> Ok(columns, rows)
+        match tryStoredView store tableDb tableRef.Table with
+        | Some view ->
+            let key = view.Schema.ToLowerInvariant(), view.Name.ToLowerInvariant()
+            let stack = currentViewStack ()
+            let memo = viewMemo.Value
+
+            match if isNull (box memo) then None else (match memo.TryGetValue key with | true, value -> Some value | _ -> None) with
+            | Some cached -> cached
+            | None when Set.contains key stack ->
+                Error(Err(1462, sprintf "View's SELECT contains a recursive reference to view '%s'" view.Name))
+            | None ->
+                let savedCtes = currentCteScope ()
+
+                try
+                    viewStack.Value <- Set.add key stack
+                    cteScope.Value <- Map.empty
+
+                    let resolved =
+                        match Parser.parse view.Definition with
+                        | Result.Ok((Select select) as statement) ->
+                            match Auth.check store (storedObjectUser view.Definer) (Auth.requiredPrivileges view.Schema statement) with
+                            | Result.Error(code, message) -> Error(Err(code, message))
+                            | Result.Ok() ->
+                                resolveFromSubquery store registry view.Schema (FromSubquery(PlainSelect select, view.Name))
+                        | Result.Ok((Union(first, rest, orderBy, limit, offset)) as statement) ->
+                            match Auth.check store (storedObjectUser view.Definer) (Auth.requiredPrivileges view.Schema statement) with
+                            | Result.Error(code, message) -> Error(Err(code, message))
+                            | Result.Ok() ->
+                                resolveFromSubquery
+                                    store
+                                    registry
+                                    view.Schema
+                                    (FromSubquery(UnionSelect(first, rest, orderBy, limit, offset), view.Name))
+                        | _ -> Error(Err(1356, sprintf "View '%s.%s' references invalid table(s) or column(s)" view.Schema view.Name))
+
+                    let resolved =
+                        resolved
+                        |> Result.bind (fun (columns, rows) ->
+                            let columns =
+                                if view.Columns.IsEmpty then
+                                    Ok columns
+                                elif view.Columns.Length <> columns.Length then
+                                    Error(
+                                        Err(
+                                            1353,
+                                            "In definition of view, derived table or common table expression, SELECT list and column names list have different column counts"
+                                        )
+                                    )
+                                else
+                                    Ok(List.map2 (fun column name -> { column with Name = name }) columns view.Columns)
+
+                            columns
+                            |> Result.bind (fun columns ->
+                                match columns |> List.countBy (fun column -> column.Name.ToLowerInvariant()) |> List.tryFind (fun (_, count) -> count > 1) with
+                                | Some(name, _) -> Error(Err(1060, sprintf "Duplicate column name '%s'" name))
+                                | None -> Ok(columns, rows)))
+
+                    if not (isNull (box memo)) then memo.[key] <- resolved
+                    resolved
+                finally
+                    viewStack.Value <- stack
+                    cteScope.Value <- savedCtes
+        | None ->
+            match scanList store tableDb tableRef.Table with
+            | Error e -> Error(storageErr e)
+            | Ok(columns, rows) -> Ok(columns, rows)
 
 /// Pre-filters an `information_schema` scan by the WHERE's top-level
 /// `col = 'literal'` equality conjuncts (`TABLE_SCHEMA`/`TABLE_NAME` is what
@@ -2223,7 +2379,10 @@ and private tryInformationSchemaNarrow
 
             let selfContained =
                 match tableRef.Table.ToUpperInvariant() with
-                | "TABLES" | "COLUMNS" | "STATISTICS" | "PARTITIONS" -> true
+                // TABLES also projects user views stored under mysql.views;
+                // narrowing away mysql would hide every view in the target
+                // schema before the ordinary row filter sees it.
+                | "COLUMNS" | "STATISTICS" | "PARTITIONS" -> true
                 | _ -> false
 
             let catalog =
@@ -2555,7 +2714,7 @@ and private jsonTableRows (doc: Value) (path: string) (columns: JsonTableColumn 
 
 and private resolveFromItem (store: Store) (registry: Registry) (dbName: string) (item: FromItem) : Result<ColumnDef list * Value[] list, QueryResult> =
     match item with
-    | FromTable tableRef -> resolveTableRef store dbName tableRef
+    | FromTable tableRef -> resolveTableRef store registry dbName tableRef
     | FromLateral _ ->
         // A leading `FROM LATERAL (...)` has nothing to its left, so it is
         // just a derived table — including MySQL's own error for a column
@@ -3186,7 +3345,7 @@ and private applyMutationJoin
         // above.
         Error(Err(1064, "JSON_TABLE isn't supported as a multi-table UPDATE/DELETE JOIN source"))
     | FromTable tableRef ->
-        match resolveTableRef store dbName tableRef with
+        match resolveTableRef store registry dbName tableRef with
         | Error e -> Error e
         | Ok(joinColumns, joinRows) ->
             let joinQualifier = tableRef.Alias |> Option.defaultValue tableRef.Table
@@ -3337,7 +3496,7 @@ and private runMutationJoin
     (from: TableRef)
     (joins: Join list)
     : Result<(string * TableRef * ColumnDef list) list * (Value[] option list * Value[]) list, QueryResult> =
-    match resolveTableRef store dbName from with
+    match resolveTableRef store registry dbName from with
     | Error e -> Error e
     | Ok(cols, rows) ->
         let baseQualifier = from.Alias |> Option.defaultValue from.Table
@@ -6145,12 +6304,10 @@ let private shadowDirectOnly (what: string) (registry: Registry) : Registry =
 
 /// Computes every `Generated` column of `row` (`CREATE TABLE ... col AS
 /// (expr)`) fresh from its other columns' current values, leaving every
-/// other column untouched — a no-op when `table` has no generated columns.
-/// The one place this recomputation actually happens: `recomputeGeneratedColumns`
-/// folds it over a whole table's rows after a successful `INSERT`/`UPDATE`,
-/// and `upsertRows`'s `computeGenerated` parameter needs it applied to a
-/// bare candidate row *before* that row lands, so a unique index spanning a
-/// generated column (e.g. Laravel Pulse's `key_hash BINARY(16) AS
+/// other column untouched, then validates every enforced CHECK constraint.
+/// INSERT, REPLACE, and UPDATE call this on each final candidate before it
+/// lands, so a unique index or check spanning a generated column (e.g.
+/// Laravel Pulse's `key_hash BINARY(16) AS
 /// (unhex(md5(key)))`) sees its real value at collision-detection time
 /// instead of a not-yet-computed NULL. Left-to-right column order lets one
 /// generated column reference an earlier one in the same row.
@@ -6159,6 +6316,36 @@ let private shadowDirectOnly (what: string) (registry: Registry) : Registry =
 /// aren't validated — misuse degrades to a stale/NULL value, not
 /// corruption; add a CREATE/ALTER validation pass if a real workload hits
 /// one.
+let private validateCheckRow
+    (store: Store)
+    (registry: Registry)
+    (dbName: string)
+    (table: string)
+    (columns: ColumnDef list)
+    (row: Value[])
+    : Result<Value[], StorageError> =
+    let checks = storedChecks store dbName table |> List.filter _.Enforced
+
+    if checks.IsEmpty then
+        Ok row
+    else
+        let registry = shadowDirectOnly "check constraint" registry
+        let ctx = contextFactory store registry dbName (columnIndexOf columns) (singleQualifier table columns) None row
+
+        checks
+        |> traverse (fun check ->
+            match Parser.parseExpression check.Clause with
+            | Result.Error _ -> Error(ExpressionError(3812, sprintf "Check constraint '%s' is invalid." check.Name))
+            | Result.Ok expression ->
+                evalExpr ctx expression
+                |> Result.mapError ExpressionError
+                |> Result.bind (fun value ->
+                    if truthy value = Some false then
+                        Error(ExpressionError(3819, sprintf "Check constraint '%s' is violated." check.Name))
+                    else
+                        Ok()))
+        |> Result.map (fun _ -> row)
+
 let private computeGeneratedRow
     (store: Store)
     (registry: Registry)
@@ -6170,7 +6357,7 @@ let private computeGeneratedRow
     let generated = columns |> List.choose (fun c -> c.Generated |> Option.map (fun (e, _) -> c, e))
 
     if generated.IsEmpty then
-        Ok row
+        validateCheckRow store registry dbName table columns row
     else
         // Eval-time DIRECTONLY backstop — see `shadowDirectOnly`'s doc.
         let registry = shadowDirectOnly "generated column" registry
@@ -6192,20 +6379,11 @@ let private computeGeneratedRow
                 match resolveColumn columns col.Name with
                 | Ok idx -> row'.[idx] <- v'
                 | Error _ -> ()))
-        |> Result.map (fun _ -> row')
+        |> Result.bind (fun _ -> validateCheckRow store registry dbName table columns row')
 
-/// Recomputes every `Generated` column of `table` after a successful
-/// `INSERT`/`UPDATE` — called unconditionally from those cases below, a
-/// no-op (skips the `updateRows` pass entirely, via `computeGeneratedRow`'s
-/// own no-op check) when the table has none. A generated expression is a
-/// pure function of the row's other columns, so recomputing it for rows
-/// that already have the right value is harmless; that's what buys the
-/// "just rerun it over the whole table" simplicity instead of tracking
-/// exactly which rows an `INSERT`/`UPDATE` touched.
-/// ponytail: O(table size) per write when a table has generated columns
-/// (fine for this engine's in-memory scale) — upgrade to recomputing only
-/// the affected rows if a migration's table ever gets large enough to make
-/// that the bottleneck.
+/// Backfills generated columns after ALTER adds or changes one. Ordinary
+/// writes prepare only their candidate rows through `computeGeneratedRow`;
+/// ALTER is the one operation that deliberately revisits the whole table.
 let private recomputeGeneratedColumns
     (store: Store)
     (registry: Registry)
@@ -6217,12 +6395,11 @@ let private recomputeGeneratedColumns
     if columns |> List.exists (fun c -> c.Generated.IsSome) |> not then
         Ok()
     else
-        updateRows store db table None (fun _ -> Ok true) (computeGeneratedRow store registry dbName table columns)
+        updateRows store db table None (fun _ -> Ok true) (computeGeneratedRow store registry db table columns)
         |> Result.map ignore
 
-/// Threads `recomputeGeneratedColumns` onto the tail of an `INSERT`/`UPDATE`
-/// result — re-scans `table` for its current columns (cheap: an in-memory
-/// `Map` lookup) rather than making every call site pass them down.
+/// Threads the generated-column backfill onto an ALTER result, re-scanning
+/// the table for its post-ALTER column definitions.
 let private withGeneratedRecomputed
     (store: Store)
     (registry: Registry)
@@ -6751,7 +6928,7 @@ let rec private explainStatement (store: Store) (registry: Registry) (dbName: st
     /// `INSERT` has no `FROM`), so it needs its own existence check.
     let checkTableExists (table: string) : Result<unit, QueryResult> =
         let db, tname = splitQualified dbName table
-        resolveTableRef store dbName { Database = Some db; Table = tname; Alias = None } |> Result.map ignore
+        resolveTableRef store registry dbName { Database = Some db; Table = tname; Alias = None } |> Result.map ignore
 
     let checkSelect (select: SelectStmt) : Result<unit, QueryResult> =
         match runSelectStmt store registry dbName select None with
@@ -6770,9 +6947,9 @@ let rec private explainStatement (store: Store) (registry: Registry) (dbName: st
             | FromLateral _ ->
                 Error(Err(1064, "a derived table (subquery) isn't supported as a multi-table UPDATE/DELETE JOIN source"))
             | FromJsonTable _ -> Error(Err(1064, "JSON_TABLE isn't supported as a multi-table UPDATE/DELETE JOIN source"))
-            | FromTable tref -> resolveTableRef store dbName tref |> Result.map (fun (cols, _) -> fromItemQualifier j.Table, cols)
+            | FromTable tref -> resolveTableRef store registry dbName tref |> Result.map (fun (cols, _) -> fromItemQualifier j.Table, cols)
 
-        resolveTableRef store dbName fromRef
+        resolveTableRef store registry dbName fromRef
         |> Result.bind (fun (fromCols, _) ->
             joins
             |> traverse resolveJoinSource
@@ -6965,6 +7142,277 @@ let private rejectDirectOnlyGenerated (registry: Registry) (columns: Ast.ColumnD
     |> List.tryPick (fun c -> c.Generated |> Option.bind (fun (e, _) -> firstDirectOnlyCall registry e |> Option.map (fun _ -> c.Name)))
     |> Option.map (fun col -> Err(3102, sprintf "Expression of generated column '%s' contains a disallowed function." col))
 
+let rec private checkColumnReferences (expression: Expr) : (string option * string) list =
+    let many expressions = expressions |> List.collect checkColumnReferences
+
+    match expression with
+    | Col column -> [ None, column ]
+    | QualifiedCol(table, column) -> [ Some table, column ]
+    | BinOp(_, left, right) -> many [ left; right ]
+    | Not value
+    | IsNull value
+    | IsNotNull value
+    | IsTrue value
+    | IsFalse value
+    | Distinct value
+    | OrderBy(value, _)
+    | Cast(value, _)
+    | Collate(value, _) -> checkColumnReferences value
+    | Like(value, pattern, _, _)
+    | Regexp(value, pattern) -> many [ value; pattern ]
+    | In(value, candidates) -> many (value :: candidates)
+    | Between(value, lower, upper) -> many [ value; lower; upper ]
+    | FuncCall(_, arguments) -> many arguments
+    | Case(subject, branches, otherwise) ->
+        many (Option.toList subject @ (branches |> List.collect (fun (condition, result) -> [ condition; result ])) @ Option.toList otherwise)
+    | MatchAgainst(columns, query, _) -> (columns |> List.map (fun column -> None, column)) @ checkColumnReferences query
+    | InSubquery(value, _) -> checkColumnReferences value
+    | Placeholder _
+    | WindowOver _
+    | Star _
+    | Exists _
+    | Subquery _
+    | Lit _ -> []
+
+let rec private firstDisallowedCheckFunction (registry: Registry) (expression: Expr) : string option =
+    let first expressions = expressions |> List.tryPick (firstDisallowedCheckFunction registry)
+    let nondeterministic =
+        set
+            [ "BENCHMARK"; "CONNECTION_ID"; "CURDATE"; "CURRENT_DATE"; "CURRENT_TIME"; "CURRENT_TIMESTAMP"
+              "CURRENT_USER"; "CURTIME"; "DATABASE"; "FOUND_ROWS"; "LAST_INSERT_ID"; "LOCALTIME"
+              "LOCALTIMESTAMP"; "NOW"; "RAND"; "ROW_COUNT"; "SYSDATE"; "UNIX_TIMESTAMP"
+              "USER"; "UUID"; "UUID_SHORT"; "VERSION" ]
+
+    match expression with
+    | FuncCall(name, arguments) ->
+        let key = name.ToUpperInvariant()
+
+        if nondeterministic.Contains key || isAggregateCall registry expression then
+            Some name
+        else
+            match Map.tryFind key registry.Extensions with
+            | Some extension when extension.DirectOnly || not extension.Deterministic -> Some name
+            | _ -> first arguments
+    | BinOp(_, left, right) -> first [ left; right ]
+    | Not value
+    | IsNull value
+    | IsNotNull value
+    | IsTrue value
+    | IsFalse value
+    | Distinct value
+    | OrderBy(value, _)
+    | Cast(value, _)
+    | Collate(value, _) -> firstDisallowedCheckFunction registry value
+    | Like(value, pattern, _, _)
+    | Regexp(value, pattern) -> first [ value; pattern ]
+    | In(value, candidates) -> first (value :: candidates)
+    | Between(value, lower, upper) -> first [ value; lower; upper ]
+    | Case(subject, branches, otherwise) ->
+        first (Option.toList subject @ (branches |> List.collect (fun (condition, result) -> [ condition; result ])) @ Option.toList otherwise)
+    | MatchAgainst(_, query, _) -> firstDisallowedCheckFunction registry query
+    | InSubquery(value, _) -> firstDisallowedCheckFunction registry value
+    | _ -> None
+
+let rec private firstDisallowedCheckShape (expression: Expr) : string option =
+    let first expressions = expressions |> List.tryPick firstDisallowedCheckShape
+
+    match expression with
+    | Placeholder _ -> Some "parameter"
+    | WindowOver _ -> Some "window function"
+    | Star _ -> Some "wildcard"
+    | MatchAgainst _ -> Some "full-text expression"
+    | Distinct _
+    | OrderBy _ -> Some "aggregate modifier"
+    | Exists _
+    | Subquery _
+    | InSubquery _ -> Some "subquery"
+    | BinOp(_, left, right) -> first [ left; right ]
+    | Not value
+    | IsNull value
+    | IsNotNull value
+    | IsTrue value
+    | IsFalse value
+    | Cast(value, _)
+    | Collate(value, _) -> firstDisallowedCheckShape value
+    | Like(value, pattern, _, _)
+    | Regexp(value, pattern) -> first [ value; pattern ]
+    | In(value, candidates) -> first (value :: candidates)
+    | Between(value, lower, upper) -> first [ value; lower; upper ]
+    | FuncCall(_, arguments) -> first arguments
+    | Case(subject, branches, otherwise) ->
+        first (Option.toList subject @ (branches |> List.collect (fun (condition, result) -> [ condition; result ])) @ Option.toList otherwise)
+    | Col _
+    | QualifiedCol _
+    | Lit _ -> None
+
+let private validateCheckDefinition
+    (registry: Registry)
+    (columns: ColumnDef list)
+    (definition: CheckConstraintDef)
+    : Result<unit, StorageError> =
+    let constraintName = definition.Name |> Option.defaultValue ""
+    let invalid message = Error(ExpressionError(3813, message))
+
+    match firstDisallowedCheckShape definition.Expression with
+    | Some shape -> invalid (sprintf "Check constraint '%s' contains a disallowed %s." constraintName shape)
+    | None ->
+        match firstDisallowedCheckFunction registry definition.Expression with
+        | Some functionName ->
+            Error(
+                ExpressionError(
+                    3814,
+                    sprintf "An expression of a check constraint '%s' contains disallowed function: %s." constraintName functionName
+                )
+            )
+        | None ->
+            let references = checkColumnReferences definition.Expression
+
+            match references |> List.tryFind (fun (qualifier, _) -> qualifier.IsSome) with
+            | Some _ -> invalid (sprintf "Check constraint '%s' cannot refer to another table." constraintName)
+            | None ->
+                match references |> List.tryFind (fun (_, name) -> resolveColumn columns name |> Result.isError) with
+                | Some(_, column) ->
+                    Error(UnknownColumn column)
+                | None ->
+                    let resolved =
+                        references
+                        |> List.choose (fun (_, name) -> resolveColumn columns name |> Result.toOption)
+
+                    match definition.Column with
+                    | Some owner when references |> List.exists (fun (_, name) -> not (System.String.Equals(owner, name, System.StringComparison.OrdinalIgnoreCase))) ->
+                        invalid (sprintf "Column check constraint '%s' references other column." constraintName)
+                    | _ ->
+                        match resolved |> List.tryFind (fun index -> columns.[index].AutoIncrement) with
+                        | Some _ -> Error(ExpressionError(3818, sprintf "Check constraint '%s' cannot refer to an auto-increment column." constraintName))
+                        | None -> Ok()
+
+let private allStoredCheckRows (store: Store) : Value[] list =
+    match scan store "mysql" "check_constraints" with
+    | Ok(_, rows) -> List.ofSeq rows
+    | Error _ -> []
+
+let private checkText index (row: Value[]) = toText row.[index] |> Option.defaultValue ""
+
+let private storeCheckDefinitions
+    (store: Store)
+    (registry: Registry)
+    (dbName: string)
+    (tableName: string)
+    (columns: ColumnDef list)
+    (definitions: CheckConstraintDef list)
+    : Result<unit, StorageError> =
+    let equal left right = System.String.Equals(left, right, System.StringComparison.OrdinalIgnoreCase)
+    let existing =
+        allStoredCheckRows store
+        |> List.filter (fun row -> System.String.Equals(checkText 1 row, dbName, System.StringComparison.OrdinalIgnoreCase))
+
+    let usedNames = existing |> List.map (checkText 0) |> List.map _.ToLowerInvariant() |> Set.ofList
+    let existingOrdinals = storedChecks store dbName tableName |> List.map _.Ordinal
+    let mutable nextOrdinal = (if existingOrdinals.IsEmpty then 0 else List.max existingOrdinals) + 1
+    let mutable generatedIndex = 1
+    let mutable names = usedNames
+
+    let allocateName (definition: CheckConstraintDef) =
+        match definition.Name with
+        | Some name when names.Contains(name.ToLowerInvariant()) ->
+            Error(ExpressionError(3822, sprintf "Duplicate check constraint name '%s'." name))
+        | Some name -> Ok(name, false)
+        | None ->
+            let mutable candidate = sprintf "%s_chk_%d" tableName generatedIndex
+
+            while names.Contains(candidate.ToLowerInvariant()) do
+                generatedIndex <- generatedIndex + 1
+                candidate <- sprintf "%s_chk_%d" tableName generatedIndex
+
+            generatedIndex <- generatedIndex + 1
+            Ok(candidate, true)
+
+    definitions
+    |> traverse (fun definition ->
+        allocateName definition
+        |> Result.bind (fun (name, generated) ->
+            let named = { definition with Name = Some name }
+
+            validateCheckDefinition registry columns named
+            |> Result.map (fun () ->
+                names <- names.Add(name.ToLowerInvariant())
+                let ordinal = nextOrdinal
+                nextOrdinal <- nextOrdinal + 1
+                named, generated, ordinal)))
+    |> Result.bind (fun prepared ->
+        prepared
+        |> traverse (fun (definition, generated, ordinal) ->
+            let name = definition.Name.Value
+
+            insertRows
+                store
+                "mysql"
+                "check_constraints"
+                None
+                [ [ VString name
+                    VString dbName
+                    VString tableName
+                    VString(InformationSchema.exprToSql definition.Expression)
+                    VString(if definition.Enforced then "YES" else "NO")
+                    (definition.Column |> Option.map VString |> Option.defaultValue VNull)
+                    VString(if generated then "YES" else "NO")
+                    VInt(int64 ordinal) ] ]
+            |> Result.map ignore)
+        |> Result.map ignore)
+
+let private removeStoredChecks (store: Store) (dbName: string) (tableName: string) : Result<int, StorageError> =
+    deleteRows store "mysql" "check_constraints" (fun row ->
+        Ok(
+            System.String.Equals(checkText 1 row, dbName, System.StringComparison.OrdinalIgnoreCase)
+            && System.String.Equals(checkText 2 row, tableName, System.StringComparison.OrdinalIgnoreCase)
+        ))
+
+let private validateCheckForeignKeys
+    (store: Store)
+    (dbName: string)
+    (tableName: string)
+    (foreignKeys: ForeignKeyDef list)
+    : Result<unit, StorageError> =
+    let mutatesChildColumn (foreignKey: ForeignKeyDef) =
+        let actionMutates (action: string option) =
+            match action with
+            | Some action ->
+                action.Equals("CASCADE", System.StringComparison.OrdinalIgnoreCase)
+                || action.Equals("SET NULL", System.StringComparison.OrdinalIgnoreCase)
+            | None -> false
+
+        actionMutates foreignKey.OnUpdate
+        || (foreignKey.OnDelete |> Option.exists (fun action -> action.Equals("SET NULL", System.StringComparison.OrdinalIgnoreCase)))
+
+    let checks = storedChecks store dbName tableName
+
+    foreignKeys
+    |> List.filter mutatesChildColumn
+    |> List.tryPick (fun foreignKey ->
+        checks
+        |> List.tryPick (fun check ->
+            match Parser.parseExpression check.Clause with
+            | Result.Error _ -> None
+            | Result.Ok expression ->
+                checkColumnReferences expression
+                |> List.tryPick (fun (_, column) ->
+                    foreignKey.Columns
+                    |> List.tryFind (fun fkColumn -> fkColumn.Equals(column, System.StringComparison.OrdinalIgnoreCase))
+                    |> Option.map (fun matched -> check, foreignKey, matched))))
+    |> function
+        | None -> Ok()
+        | Some(check, foreignKey, column) ->
+            Error(
+                ExpressionError(
+                    3823,
+                    sprintf
+                        "Column '%s' cannot be used in a check constraint '%s': needed in a foreign key constraint '%s' referential action."
+                        column
+                        check.Name
+                        foreignKey.Name
+                )
+            )
+
 // ---------------------------------------------------------------------------
 // Triggers — AFTER INSERT only, persisted as `mysql.triggers` rows (see
 // `Storage.mysqlTriggersColumns`); bodies fire by recursing into `execute`.
@@ -7008,14 +7456,6 @@ let private afterInsertTriggers (store: Store) (db: string) (table: string) : (s
             && eqI (text 4 r) "INSERT")
         |> Seq.map (fun r -> text 0 r, text 5 r, (if r.Length > 7 then text 7 r else ""))
         |> List.ofSeq
-
-/// A definer account (`user@%`, as `CURRENT_USER()` renders it) reduced to
-/// the bare user name `Auth.check` keys on — fsdb accounts are name-only
-/// with host `%`.
-let private definerUser (definer: string) : string =
-    match definer.LastIndexOf '@' with
-    | -1 -> definer
-    | i -> definer.Substring(0, i)
 
 /// The one table a trigger body statement writes — what 1442's "already
 /// used by the statement which invoked this trigger" check points at.
@@ -7105,6 +7545,7 @@ let private triggerBodyExprs (stmt: Statement) : Expr list =
 let rec execute (store: Store) (registry: Registry) (dbName: string) (ids: int64 * int64) (foundRows: bool) (stmt: Statement) : (int64 * int64) * QueryResult =
     // Fresh derived-table memo per statement (see `fromSubqueryMemo`).
     fromSubqueryMemo.Value <- Dictionary<FromItem, Result<ColumnDef list * Value[] list, QueryResult>>(HashIdentity.Reference)
+    viewMemo.Value <- Dictionary<string * string, Result<ColumnDef list * Value[] list, QueryResult>>()
 
     /// Fires `(db, table)`'s AFTER INSERT `triggers` once per row in
     /// `insertedRows`, against `runStore` — the private statement snapshot
@@ -7150,7 +7591,7 @@ let rec execute (store: Store) (registry: Registry) (dbName: string) (ids: int64
                                 Err(1449, sprintf "The user specified as a definer ('') does not exist for trigger '%s'" name)
                             )
                         else
-                            match Auth.check runStore (definerUser definer) (Auth.requiredPrivileges db bodyStmt) with
+                            match Auth.check runStore (storedObjectUser definer) (Auth.requiredPrivileges db bodyStmt) with
                             | Result.Error(code, msg) -> Result.Error(Err(code, msg))
                             | Result.Ok() -> Result.Ok bodyStmt
 
@@ -7173,23 +7614,9 @@ let rec execute (store: Store) (registry: Registry) (dbName: string) (ids: int64
                     with SqlError(code, msg) ->
                         Err(code, msg)
 
-                // `InsertedRows` was captured by the insert itself, *before*
-                // the post-insert generated-column recompute — so refresh
-                // each row's generated columns before binding `NEW.*`
-                // (probed: MySQL binds the computed value, `NEW.b` = 10 for
-                // `b INT AS (a*2)` after `INSERT (a) VALUES (5)`). A
-                // generated column is a pure function of the row, so this
-                // reproduces exactly what the recompute wrote back.
-                let refreshGenerated (row: Value[]) : Value[] =
-                    match computeGeneratedRow runStore registry db table columns row with
-                    | Ok r -> r
-                    | Error _ -> row // unreachable: the table-wide recompute already succeeded
-
                 try
                     insertedRows
                     |> List.tryPick (fun row ->
-                        let row = refreshGenerated row
-
                         bodies
                         |> List.tryPick (fun body ->
                             match runBody (bindNewRow columnIndex row body) with
@@ -7278,12 +7705,15 @@ let rec execute (store: Store) (registry: Registry) (dbName: string) (ids: int64
         | Error e -> ids, storageErr e
         | Ok(tableColumns, _) ->
             let columnIndex = columnIndexOf tableColumns
-            let applyUpdate = onDuplicateUpdater table tableColumns columnIndex onDuplicateUpdate
-            let computeGenerated = computeGeneratedRow store registry dbName table tableColumns
 
             finishInsert db table (fun s ->
-                upsertRows s db table cols rowsValues computeGenerated applyUpdate foundRows
-                |> withGeneratedRecomputed s registry dbName db table)
+                let computeGenerated = computeGeneratedRow s registry db table tableColumns
+
+                let applyUpdate existing candidate =
+                    onDuplicateUpdater table tableColumns columnIndex onDuplicateUpdate existing candidate
+                    |> Result.bind computeGenerated
+
+                upsertRows s db table cols rowsValues computeGenerated applyUpdate foundRows)
 
     let replaceEvaluated (db: string) (table: string) (cols: string list option) (rowsValues: Value list list) =
         match scan store db table with
@@ -7296,7 +7726,7 @@ let rec execute (store: Store) (registry: Registry) (dbName: string) (ids: int64
                     table
                     cols
                     rowsValues
-                    (computeGeneratedRow targetStore registry dbName table tableColumns))
+                    (computeGeneratedRow targetStore registry db table tableColumns))
 
     match stmt with
     | CreateDatabase(name, ifNotExists) ->
@@ -7306,8 +7736,27 @@ let rec execute (store: Store) (registry: Registry) (dbName: string) (ids: int64
         | Error e -> ids, storageErr e
 
     | DropDatabase(name, ifExists) ->
-        match Storage.dropDatabase store name with
-        | Ok() -> ids, Affected 0UL
+        let baseCatalog = store.Catalog
+        let snapshot = Storage.beginTransactionSnapshot store
+
+        match Storage.dropDatabase snapshot name with
+        | Ok() ->
+            let belongsToDatabase schemaIndex (row: Value[]) =
+                let schema = toText row.[schemaIndex] |> Option.defaultValue ""
+                Ok(System.String.Equals(schema, name, System.StringComparison.OrdinalIgnoreCase))
+
+            match
+                deleteRows snapshot "mysql" "views" (belongsToDatabase 1),
+                deleteRows snapshot "mysql" "triggers" (belongsToDatabase 1),
+                deleteRows snapshot "mysql" "check_constraints" (belongsToDatabase 1)
+            with
+            | Ok _, Ok _, Ok _ ->
+                Storage.mergeCatalogInto store baseCatalog snapshot.Catalog
+                Storage.commitTransactionEvents store snapshot
+                ids, Affected 0UL
+            | Error error, _, _
+            | _, Error error, _
+            | _, _, Error error -> ids, storageErr error
         | Error(NoSuchDatabase _) when ifExists -> ids, Affected 0UL
         | Error e -> ids, storageErr e
 
@@ -7320,29 +7769,70 @@ let rec execute (store: Store) (registry: Registry) (dbName: string) (ids: int64
         else
             ids, storageErr (NoSuchDatabase name)
 
-    | CreateTable(name, columns, indexes, foreignKeys, ifNotExists, tableCharset, tableCollation, autoIncrementSeed) ->
+    | CreateTable(name, columns, indexes, foreignKeys, checks, ifNotExists, tableCharset, tableCollation, autoIncrementSeed) ->
         let db, name = splitQualified dbName name
 
-        match rejectDirectOnlyGenerated registry columns with
-        | Some err -> ids, err
+        match tryStoredView store db name with
+        | Some _ when ifNotExists -> ids, Affected 0UL
+        | Some _ -> ids, storageErr (TableExists name)
         | None ->
+            match rejectDirectOnlyGenerated registry columns with
+            | Some err -> ids, err
+            | None ->
+                let alreadyExists = scan store db name |> Result.isOk
 
-        match createTableSeeded store db name columns indexes foreignKeys tableCharset tableCollation autoIncrementSeed with
-        | Ok() -> ids, Affected 0UL
-        | Error(TableExists _) when ifNotExists -> ids, Affected 0UL
-        | Error e -> ids, storageErr e
+                if alreadyExists && ifNotExists then
+                    ids, Affected 0UL
+                else
+                    let baseCatalog = store.Catalog
+                    let snapshot = Storage.beginTransactionSnapshot store
+                    Storage.setStrictMode snapshot store.StrictMode
+
+                    let created =
+                        createTableSeeded snapshot db name columns indexes foreignKeys tableCharset tableCollation autoIncrementSeed
+                        |> Result.bind (fun () -> storeCheckDefinitions snapshot registry db name columns checks)
+                        |> Result.bind (fun () -> validateCheckForeignKeys snapshot db name foreignKeys)
+
+                    match created with
+                    | Ok() ->
+                        Storage.mergeCatalogInto store baseCatalog snapshot.Catalog
+                        Storage.commitTransactionEvents store snapshot
+                        ids, Affected 0UL
+                    | Error(TableExists _) when ifNotExists -> ids, Affected 0UL
+                    | Error e -> ids, storageErr e
 
     | DropTable(names, ifExists) ->
+        let baseCatalog = store.Catalog
+        let snapshot = Storage.beginTransactionSnapshot store
+
         let dropOne name =
             let db, name = splitQualified dbName name
 
-            match dropTable store db name with
-            | Ok() -> Ok()
+            match dropTable snapshot db name with
+            | Ok() ->
+                let removeTriggers =
+                    deleteRows
+                        snapshot
+                        "mysql"
+                        "triggers"
+                        (fun row ->
+                            let text i = toText row.[i] |> Option.defaultValue ""
+
+                            Ok(
+                                System.String.Equals(text 1, db, System.StringComparison.OrdinalIgnoreCase)
+                                && System.String.Equals(text 2, normalizeTableName name, System.StringComparison.OrdinalIgnoreCase)
+                            ))
+
+                removeTriggers
+                |> Result.bind (fun _ -> removeStoredChecks snapshot db name |> Result.map ignore)
             | Error(NoSuchTable _) when ifExists -> Ok()
             | Error e -> Error e
 
         match names |> traverse dropOne with
-        | Ok _ -> ids, Affected 0UL
+        | Ok _ ->
+            Storage.mergeCatalogInto store baseCatalog snapshot.Catalog
+            Storage.commitTransactionEvents store snapshot
+            ids, Affected 0UL
         | Error e -> ids, storageErr e
 
     | AlterTable(table, actions) ->
@@ -7359,11 +7849,226 @@ let rec execute (store: Store) (registry: Registry) (dbName: string) (ids: int64
         match rejectDirectOnlyGenerated registry addedColumns with
         | Some err -> ids, err
         | None ->
+            let baseCatalog = store.Catalog
+            let snapshot = Storage.beginTransactionSnapshot store
+            Storage.setStrictMode snapshot store.StrictMode
 
-        // Backfills a just-added/modified generated column over existing rows.
-        match alterTable store db table actions |> withGeneratedRecomputed store registry dbName db table with
-        | Ok() -> ids, Affected 0UL
-        | Error e -> ids, storageErr e
+            let finalTable =
+                actions
+                |> List.choose (function
+                    | RenameTo name -> Some name
+                    | _ -> None)
+                |> List.tryLast
+                |> Option.defaultValue table
+
+            let physicalActions =
+                actions
+                |> List.filter (function
+                    | AddCheck _
+                    | DropCheck _
+                    | SetCheckEnforced _ -> false
+                    | _ -> true)
+
+            let equal left right = System.String.Equals(left, right, System.StringComparison.OrdinalIgnoreCase)
+
+            let originalCheckNames =
+                storedChecks snapshot db table
+                |> List.map (fun check -> check.Name.ToLowerInvariant())
+                |> Set.ofList
+
+            let explicitlyDropped =
+                actions
+                |> List.choose (function
+                    | DropCheck name -> Some(name.ToLowerInvariant())
+                    | _ -> None)
+                |> Set.ofList
+
+            let prepareColumnChanges () =
+                let activeChecks =
+                    storedChecks snapshot db table
+                    |> List.filter (fun check -> not (explicitlyDropped.Contains(check.Name.ToLowerInvariant())))
+
+                let references (column: string) (check: StoredCheck) =
+                    match Parser.parseExpression check.Clause with
+                    | Result.Error _ -> false
+                    | Result.Ok expression -> checkColumnReferences expression |> List.exists (fun (_, name) -> equal name column)
+
+                let removeAutomatic (check: StoredCheck) =
+                    deleteRows snapshot "mysql" "check_constraints" (fun row ->
+                        Ok(equal (checkText 1 row) db && equal (checkText 2 row) table && equal (checkText 0 row) check.Name))
+                    |> Result.map ignore
+
+                let checkAction action =
+                    match action with
+                    | DropColumn column ->
+                        let dependent = activeChecks |> List.filter (references column)
+                        let automatic, blocking =
+                            dependent
+                            |> List.partition (fun check -> check.Column |> Option.exists (fun owner -> equal owner column))
+
+                        match blocking with
+                        | check :: _ ->
+                            Error(
+                                ExpressionError(
+                                    3959,
+                                    sprintf "Check constraint '%s' uses column '%s', hence column cannot be dropped or renamed." check.Name column
+                                )
+                            )
+                        | [] -> automatic |> traverse removeAutomatic |> Result.map ignore
+                    | RenameColumnTo(oldName, newName)
+                    | ChangeColumn(oldName, { Name = newName }, _) when not (equal oldName newName) ->
+                        match activeChecks |> List.tryFind (references oldName) with
+                        | Some check ->
+                            Error(
+                                ExpressionError(
+                                    3959,
+                                    sprintf "Check constraint '%s' uses column '%s', hence column cannot be dropped or renamed." check.Name oldName
+                                )
+                            )
+                        | None -> Ok()
+                    | _ -> Ok()
+
+                let removeExplicit =
+                    explicitlyDropped
+                    |> Set.toList
+                    |> traverse (fun name ->
+                        deleteRows snapshot "mysql" "check_constraints" (fun row ->
+                            Ok(equal (checkText 1 row) db && equal (checkText 2 row) table && equal (checkText 0 row) name))
+                        |> Result.map ignore)
+                    |> Result.map ignore
+
+                removeExplicit
+                |> Result.bind (fun () -> actions |> List.fold (fun state action -> state |> Result.bind (fun () -> checkAction action)) (Ok()))
+
+            let alterPhysical =
+                prepareColumnChanges ()
+                |> Result.bind (fun () ->
+                    if physicalActions.IsEmpty then
+                        scan snapshot db table |> Result.map ignore
+                    else
+                        alterTable snapshot db table physicalActions
+                        |> withGeneratedRecomputed snapshot registry dbName db table)
+
+            let retargetAlterObjects () =
+                if equal table finalTable then
+                    Ok()
+                else
+                    let retargetChecks =
+                        updateRows
+                            snapshot
+                            "mysql"
+                            "check_constraints"
+                            None
+                            (fun row -> Ok(equal (checkText 1 row) db && equal (checkText 2 row) table))
+                            (fun row ->
+                                let updated = Array.copy row
+                                updated.[2] <- VString finalTable
+
+                                if equal (checkText 6 row) "YES" then
+                                    let constraintName = checkText 0 row
+                                    let oldKey = normalizeTableName table
+                                    let suffix =
+                                        if constraintName.StartsWith(oldKey + "_chk_", System.StringComparison.OrdinalIgnoreCase) then
+                                            constraintName.Substring(oldKey.Length)
+                                        else
+                                            "_chk_1"
+
+                                    updated.[0] <- VString(finalTable + suffix)
+
+                                Ok updated)
+                        |> Result.map ignore
+
+                    let retargetTriggers =
+                        updateRows
+                            snapshot
+                            "mysql"
+                            "triggers"
+                            None
+                            (fun row -> Ok(equal (checkText 1 row) db && equal (checkText 2 row) (normalizeTableName table)))
+                            (fun row ->
+                                let updated = Array.copy row
+                                updated.[2] <- VString(normalizeTableName finalTable)
+                                Ok updated)
+                        |> Result.map ignore
+
+                    retargetChecks |> Result.bind (fun () -> retargetTriggers)
+
+            let validateExistingDefinitions columns =
+                storedChecks snapshot db finalTable
+                |> traverse (fun check ->
+                    match Parser.parseExpression check.Clause with
+                    | Result.Error _ -> Error(ExpressionError(3812, sprintf "Check constraint '%s' is invalid." check.Name))
+                    | Result.Ok expression ->
+                        validateCheckDefinition
+                            registry
+                            columns
+                            { Name = Some check.Name
+                              Expression = expression
+                              Enforced = check.Enforced
+                              Column = check.Column })
+                |> Result.map ignore
+
+            let validateRows columns =
+                scan snapshot db finalTable
+                |> Result.bind (fun (_, rows) ->
+                    rows
+                    |> List.ofSeq
+                    |> traverse (validateCheckRow snapshot registry db finalTable columns)
+                    |> Result.map ignore)
+
+            let applyCheckAction columns action =
+                match action with
+                | AddCheck definition ->
+                    storeCheckDefinitions snapshot registry db finalTable columns [ definition ]
+                    |> Result.bind (fun () -> if definition.Enforced then validateRows columns else Ok())
+                | DropCheck name ->
+                    deleteRows snapshot "mysql" "check_constraints" (fun row ->
+                        Ok(equal (checkText 1 row) db && equal (checkText 2 row) finalTable && equal (checkText 0 row) name))
+                    |> Result.bind (fun removed ->
+                        if removed = 0 && not (originalCheckNames.Contains(name.ToLowerInvariant())) then
+                            Error(ExpressionError(1091, sprintf "Can't DROP '%s'; check that column/key exists" name))
+                        else
+                            Ok())
+                | SetCheckEnforced(name, enforced) ->
+                    updateRows
+                        snapshot
+                        "mysql"
+                        "check_constraints"
+                        None
+                        (fun row -> Ok(equal (checkText 1 row) db && equal (checkText 2 row) finalTable && equal (checkText 0 row) name))
+                        (fun row ->
+                            let updated = Array.copy row
+                            updated.[4] <- VString(if enforced then "YES" else "NO")
+                            Ok updated)
+                    |> Result.bind (fun changed ->
+                        if changed = 0 && not (storedChecks snapshot db finalTable |> List.exists (fun check -> equal check.Name name)) then
+                            Error(ExpressionError(1091, sprintf "Check constraint '%s' is not found." name))
+                        elif enforced then
+                            validateRows columns
+                        else
+                            Ok())
+                | _ -> Ok()
+
+            let altered =
+                alterPhysical
+                |> Result.bind (fun () -> retargetAlterObjects ())
+                |> Result.bind (fun () -> scan snapshot db finalTable |> Result.map fst)
+                |> Result.bind (fun columns ->
+                    validateExistingDefinitions columns
+                    |> Result.bind (fun () -> actions |> List.fold (fun state action -> state |> Result.bind (fun () -> applyCheckAction columns action)) (Ok()))
+                    |> Result.bind (fun () ->
+                        snapshot.Catalog
+                        |> Map.tryFind db
+                        |> Option.bind (Map.tryFind (normalizeTableName finalTable))
+                        |> Option.map (fun storedTable -> validateCheckForeignKeys snapshot db finalTable storedTable.ForeignKeys)
+                        |> Option.defaultValue (Error(NoSuchTable finalTable))))
+
+            match altered with
+            | Ok() ->
+                Storage.mergeCatalogInto store baseCatalog snapshot.Catalog
+                Storage.commitTransactionEvents store snapshot
+                ids, Affected 0UL
+            | Error e -> ids, storageErr e
 
     | RenameTable pairs ->
         // A cross-database `RENAME TABLE a.t TO b.t` only takes the target
@@ -7383,8 +8088,77 @@ let rec execute (store: Store) (registry: Registry) (dbName: string) (ids: int64
             |> List.groupBy fst
             |> List.map (fun (db, entries) -> db, entries |> List.map snd)
 
-        match groups |> traverse (fun (db, dbPairs) -> renameTables store db dbPairs) with
-        | Ok _ -> ids, Affected 0UL
+        let baseCatalog = store.Catalog
+        let snapshot = Storage.beginTransactionSnapshot store
+        Storage.setStrictMode snapshot store.StrictMode
+
+        match groups |> traverse (fun (db, dbPairs) -> renameTables snapshot db dbPairs) with
+        | Ok _ ->
+            let retargetTriggers (db, dbPairs) =
+                let renames =
+                    dbPairs
+                    |> List.map (fun (oldName, newName) -> normalizeTableName oldName, normalizeTableName newName)
+                    |> Map.ofList
+
+                let text i (row: Value[]) = toText row.[i] |> Option.defaultValue ""
+
+                updateRows
+                    snapshot
+                    "mysql"
+                    "triggers"
+                    None
+                    (fun row ->
+                        Ok(
+                            System.String.Equals(text 1 row, db, System.StringComparison.OrdinalIgnoreCase)
+                            && Map.containsKey (normalizeTableName (text 2 row)) renames
+                        ))
+                    (fun row ->
+                        let updated = Array.copy row
+                        updated.[2] <- VString(Map.find (normalizeTableName (text 2 row)) renames)
+                        Ok updated)
+                |> Result.map ignore
+
+            let retargetChecks (db, dbPairs) =
+                let renames =
+                    dbPairs
+                    |> List.map (fun (oldName, newName) -> normalizeTableName oldName, newName)
+                    |> Map.ofList
+
+                updateRows
+                    snapshot
+                    "mysql"
+                    "check_constraints"
+                    None
+                    (fun row ->
+                        Ok(
+                            System.String.Equals(checkText 1 row, db, System.StringComparison.OrdinalIgnoreCase)
+                            && Map.containsKey (normalizeTableName (checkText 2 row)) renames
+                        ))
+                    (fun row ->
+                        let updated = Array.copy row
+                        let oldName = normalizeTableName (checkText 2 row)
+                        let newName = Map.find oldName renames
+                        updated.[2] <- VString newName
+
+                        if System.String.Equals(checkText 6 row, "YES", System.StringComparison.OrdinalIgnoreCase) then
+                            let constraintName = checkText 0 row
+                            let suffix =
+                                if constraintName.StartsWith(oldName + "_chk_", System.StringComparison.OrdinalIgnoreCase) then
+                                    constraintName.Substring(oldName.Length)
+                                else
+                                    "_chk_1"
+
+                            updated.[0] <- VString(newName + suffix)
+
+                        Ok updated)
+                |> Result.map ignore
+
+            match groups |> traverse retargetTriggers |> Result.bind (fun _ -> groups |> traverse retargetChecks) with
+            | Ok _ ->
+                Storage.mergeCatalogInto store baseCatalog snapshot.Catalog
+                Storage.commitTransactionEvents store snapshot
+                ids, Affected 0UL
+            | Error error -> ids, storageErr error
         | Error e -> ids, storageErr e
 
     | CreateIndex(name, table, columns, unique, kind) ->
@@ -7410,6 +8184,93 @@ let rec execute (store: Store) (registry: Registry) (dbName: string) (ids: int64
         match truncate store db table with
         | Ok() -> ids, Affected 0UL
         | Error e -> ids, storageErr e
+
+    | CreateView(name, columns, definition, orReplace) ->
+        let db, viewName = splitQualified dbName name
+        let duplicateColumns =
+            columns
+            |> List.countBy (fun column -> column.ToLowerInvariant())
+            |> List.tryFind (fun (_, count) -> count > 1)
+
+        let baseObjectExists =
+            store.Catalog
+            |> Map.tryFind db
+            |> Option.exists (Map.containsKey (normalizeTableName viewName))
+
+        let virtualObjectExists =
+            System.String.Equals(db, defaultDatabase, System.StringComparison.OrdinalIgnoreCase)
+            && store.VirtualTables.ContainsKey(normalizeTableName viewName)
+
+        match Parser.parse definition, Map.containsKey db store.Catalog, duplicateColumns with
+        | Result.Error message, _, _ -> ids, Err(1064, sprintf "View definition has a syntax error: %s" message)
+        | _, false, _ -> ids, storageErr (NoSuchDatabase db)
+        | _, _, Some(column, _) -> ids, Err(1060, sprintf "Duplicate column name '%s'" column)
+        | Result.Ok((Select _ | Union _) as _select), true, None ->
+            let existing = tryStoredView store db viewName
+
+            if baseObjectExists || virtualObjectExists || (existing.IsSome && not orReplace) then
+                ids, Err(1050, sprintf "Table '%s' already exists" viewName)
+            else
+                let removeExisting () =
+                    match existing with
+                    | None -> Ok 0
+                    | Some _ ->
+                        deleteRows
+                            store
+                            "mysql"
+                            "views"
+                            (fun row ->
+                                let text i = toText row.[i] |> Option.defaultValue ""
+
+                                Ok(
+                                    System.String.Equals(text 0, viewName, System.StringComparison.OrdinalIgnoreCase)
+                                    && System.String.Equals(text 1, db, System.StringComparison.OrdinalIgnoreCase)
+                                ))
+
+                match removeExisting () with
+                | Error error -> ids, storageErr error
+                | Ok _ ->
+                    match
+                        insertRows
+                            store
+                            "mysql"
+                            "views"
+                            (Some [ "view_name"; "view_schema"; "view_definition"; "column_names"; "created"; "definer" ])
+                            [ [ VString viewName
+                                VString db
+                                VString definition
+                                VString(JsonSerializer.Serialize(columns |> List.toArray))
+                                VDateTime System.DateTime.Now
+                                VString(store.SessionUser + "@%") ] ]
+                    with
+                    | Ok _ -> ids, Affected 0UL
+                    | Error error -> ids, storageErr error
+        | Result.Ok _, true, None -> ids, Err(1347, sprintf "'%s.%s' is not VIEW" db viewName)
+
+    | DropView(names, ifExists) ->
+        let dropOne name =
+            let db, viewName = splitQualified dbName name
+
+            deleteRows
+                store
+                "mysql"
+                "views"
+                (fun row ->
+                    let text i = toText row.[i] |> Option.defaultValue ""
+
+                    Ok(
+                        System.String.Equals(text 0, viewName, System.StringComparison.OrdinalIgnoreCase)
+                        && System.String.Equals(text 1, db, System.StringComparison.OrdinalIgnoreCase)
+                    ))
+            |> Result.bind (fun removed ->
+                if removed = 0 && not ifExists then
+                    Error(NoSuchTable viewName)
+                else
+                    Ok())
+
+        match names |> traverse dropOne with
+        | Ok _ -> ids, Affected 0UL
+        | Error error -> ids, storageErr error
 
     | CreateTrigger(name, table, body) ->
         let db, table = splitQualified dbName table
@@ -7548,9 +8409,16 @@ let rec execute (store: Store) (registry: Registry) (dbName: string) (ids: int64
             let cols = if columns.IsEmpty then None else Some columns
 
             if onDuplicateUpdate.IsEmpty then
-                let insert = if ignoreDuplicates then insertRowsIgnore else insertRows
+                finishInsert db table (fun s ->
+                    match scan s db table with
+                    | Error error -> Error error
+                    | Ok(tableColumns, _) ->
+                        let prepare = computeGeneratedRow s registry db table tableColumns
 
-                finishInsert db table (fun s -> insert s db table cols rowsValues |> withGeneratedRecomputed s registry dbName db table)
+                        if ignoreDuplicates then
+                            insertRowsIgnorePrepared s db table cols rowsValues prepare
+                        else
+                            insertRowsPrepared s db table cols rowsValues prepare)
             else
                 upsertEvaluated db table cols rowsValues onDuplicateUpdate
 
@@ -7573,9 +8441,16 @@ let rec execute (store: Store) (registry: Registry) (dbName: string) (ids: int64
             let cols = if columns.IsEmpty then None else Some columns
 
             if onDuplicateUpdate.IsEmpty then
-                let insert = if ignoreDuplicates then insertRowsIgnore else insertRows
+                finishInsert db table (fun s ->
+                    match scan s db table with
+                    | Error error -> Error error
+                    | Ok(tableColumns, _) ->
+                        let prepare = computeGeneratedRow s registry db table tableColumns
 
-                finishInsert db table (fun s -> insert s db table cols rowsValues |> withGeneratedRecomputed s registry dbName db table)
+                        if ignoreDuplicates then
+                            insertRowsIgnorePrepared s db table cols rowsValues prepare
+                        else
+                            insertRowsPrepared s db table cols rowsValues prepare)
             else
                 upsertEvaluated db table cols rowsValues onDuplicateUpdate
 
@@ -7685,12 +8560,18 @@ let rec execute (store: Store) (registry: Registry) (dbName: string) (ids: int64
                         let assignedIdxs = indexedAssignments |> List.map fst |> Set.ofList
 
                         let updater row =
-                            applyAssignments store registry dbName columnIndex qualifiers indexedAssignments row
-                            |> Result.map (applyOnUpdateTimestamps columns assignedIdxs row)
+                            let updated =
+                                applyAssignments store registry dbName columnIndex qualifiers indexedAssignments row
+                                |> Result.map (applyOnUpdateTimestamps columns assignedIdxs row)
+                                |> Result.bind (computeGeneratedRow store registry db table columns)
+
+                            match updated with
+                            | Error(ExpressionError(3819, _)) when updateStmt.Ignore -> Ok row
+                            | result -> result
 
                         let candidates = narrowed |> Option.map snd
 
-                        match updateRows store db table candidates predicate updater |> withGeneratedRecomputed store registry dbName db table with
+                        match updateRows store db table candidates predicate updater with
                         | Ok changed ->
                             // `targetRows` is the WHERE/ORDER BY/LIMIT match
                             // set already computed above — matched rows,
@@ -7901,17 +8782,23 @@ let rec execute (store: Store) (registry: Registry) (dbName: string) (ids: int64
                                     let predicate row = Ok(pending.[i].ContainsKey row)
 
                                     let updater row =
-                                        match pending.[i].TryGetValue row with
-                                        | true, vals ->
-                                            let newRow = Array.copy row
+                                        let updated =
+                                            match pending.[i].TryGetValue row with
+                                            | true, vals ->
+                                                let newRow = Array.copy row
 
-                                            for colIdx, v in vals do
-                                                newRow.[colIdx] <- v
+                                                for colIdx, v in vals do
+                                                    newRow.[colIdx] <- v
 
-                                            Ok(applyOnUpdateTimestamps physicalColumns.[i] assignedIdxsByPhys.[i] row newRow)
-                                        | false, _ -> Ok row
+                                                Ok(applyOnUpdateTimestamps physicalColumns.[i] assignedIdxsByPhys.[i] row newRow)
+                                                |> Result.bind (computeGeneratedRow snapshot registry tdb tname physicalColumns.[i])
+                                            | false, _ -> Ok row
 
-                                    updateRows snapshot tdb tname None predicate updater |> withGeneratedRecomputed snapshot registry dbName tdb tname)
+                                        match updated with
+                                        | Error(ExpressionError(3819, _)) when updateStmt.Ignore -> Ok row
+                                        | result -> result
+
+                                    updateRows snapshot tdb tname None predicate updater)
                             |> Array.toList
                             |> traverse id
 

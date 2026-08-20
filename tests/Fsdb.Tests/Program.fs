@@ -27,6 +27,8 @@ let main argv =
               PersistenceTests.tests
               ExecutorTests.tests
               TriggerTests.tests
+              ViewTests.tests
+              CheckConstraintTests.tests
               InformationSchemaTests.tests
               TemporalPrecisionTests.tests
               IntegrationTests.tests

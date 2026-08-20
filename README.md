@@ -191,11 +191,12 @@ The grammar covers the core used by MySQL-backed applications: `SELECT` with
 joins (`NATURAL`/`USING` included), derived tables, `GROUP BY`/`HAVING`, window
 functions, `UNION [ALL]`, expression subqueries, ordinary and recursive CTEs,
 JSON paths and `JSON_TABLE`, multi-table `UPDATE`/`DELETE`, `REPLACE`,
-`EXPLAIN`, `AFTER INSERT` triggers, and user accounts with real `CREATE USER`/
+`EXPLAIN`, enforced and `NOT ENFORCED` `CHECK` constraints, read-only stored
+views, `AFTER INSERT` triggers, and user accounts with real `CREATE USER`/
 `GRANT`/`REVOKE` privilege enforcement.
 
 The introspection surface GUI clients lean on is served with real data:
-22 `information_schema` tables whose column sets are diffed against a live
+23 `information_schema` tables whose column sets are diffed against a live
 MySQL 8.4, the `SHOW` family (`STATUS`, `VARIABLES`, `ENGINES`, `GRANTS`,
 `CREATE TABLE`, ...), and a live `PROCESSLIST` with working
 `KILL QUERY|CONNECTION`.
@@ -208,8 +209,9 @@ own collation. `SET collation_connection` governs literals, so
 `SHOW CREATE TABLE` reports declared collations, and
 `information_schema.COLUMNS` carries `CHARACTER_SET_NAME`/`COLLATION_NAME`.
 
-The deliberate gaps — including views, stored routines, events, and trigger
-forms beyond `AFTER INSERT` — and every smaller divergence are documented in
+The deliberate gaps — including updatable views, stored routines, events, and
+trigger forms beyond `AFTER INSERT` — and every smaller divergence are
+documented in
 [docs/compatibility.md](docs/compatibility.md) and marked `ponytail:` at
 their code sites.
 
@@ -392,8 +394,11 @@ the work in SQL rather than host code. The host registers `ocr` (pdftotext)
 and `llm_schema` (structured extraction), then six statements do the rest —
 two cancellable batch `UPDATE`s, an `INSERT ... SELECT ... ON DUPLICATE KEY
 UPDATE` vendor upsert, `INSERT IGNORE` against a unique key as the receipt
-dedupe, and `JSON_TABLE` exploding `$.items[*]` into line-item rows. An
-`AFTER INSERT` trigger journals each enqueued file.
+dedupe, and `JSON_TABLE` exploding `$.items[*]` into line-item rows. CHECK
+constraints guard totals, confidence, quantities, prices, and queue states. A
+live aggregate view reports vendor spend. Three `AFTER INSERT` audit triggers
+feed an audit log, whose own trigger maintains an insert-only rollup and
+exercises a two-level trigger chain.
 
 ```sh
 just receipts -- --dry-run                       # offline fixtures

@@ -549,7 +549,7 @@ let tests =
               | ResultSet(_, [ [ Some "100"; Some "400"; Some "select,insert,update,references" ] ]) -> ()
               | other -> failtestf "expected varchar(100) octet metadata, got %A" other
 
-          testCase "VIEWS/ROUTINES/TRIGGERS/EVENTS/PARAMETERS are genuinely empty, not 1146"
+          testCase "stored-object catalogs are empty before any objects exist, not 1146"
           <| fun _ ->
               let store = setup ()
 

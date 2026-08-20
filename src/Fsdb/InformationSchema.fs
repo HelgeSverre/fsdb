@@ -37,6 +37,33 @@ let private allTables (catalog: Catalog) : (string * Table) list =
     |> Map.toList
     |> List.collect (fun (dbName, db) -> db |> Map.toList |> List.map (fun (_, table) -> dbName, table))
 
+type private ViewCatalogEntry =
+    { Name: string
+      Schema: string
+      Definition: string
+      Created: DateTime option
+      Definer: string }
+
+let private viewCatalogEntries (catalog: Catalog) : ViewCatalogEntry list =
+    let text i (row: Value[]) = row.[i] |> Value.toText |> Option.defaultValue ""
+
+    catalog
+    |> Map.tryFind "mysql"
+    |> Option.bind (Map.tryFind "views")
+    |> Option.map (fun table ->
+        table.RowsArray
+        |> Seq.map (fun row ->
+            { Name = text 0 row
+              Schema = text 1 row
+              Definition = text 2 row
+              Created =
+                match row.[4] with
+                | VDateTime created -> Some created
+                | _ -> None
+              Definer = if row.Length > 5 then text 5 row else "" })
+        |> List.ofSeq)
+    |> Option.defaultValue []
+
 /// MySQL's `information_schema.columns.data_type` — the bare type name,
 /// no length/unsigned/precision.
 let private dataTypeName (ty: ColumnType) : string =
@@ -227,37 +254,47 @@ let private tablesColumns =
 let private truncateToSecond (d: DateTime) = d.AddTicks(-(d.Ticks % TimeSpan.TicksPerSecond))
 
 let private tablesRows (catalog: Catalog) : Value[] list =
-    allTables catalog
-    |> List.map (fun (dbName, t) ->
-        // NULL, not 1 (`NextAutoId`'s idle starting value), for a table
-        // that never declared an AUTO_INCREMENT column at all — matching
-        // real MySQL, which only reports a next-value once a table actually
-        // has one.
-        let autoIncrement =
-            if t.Columns |> List.exists (fun c -> c.AutoIncrement) then VInt t.NextAutoId else VNull
+    let baseTables =
+        allTables catalog
+        |> List.map (fun (dbName, t) ->
+            // NULL, not 1 (`NextAutoId`'s idle starting value), for a table
+            // that never declared an AUTO_INCREMENT column at all — matching
+            // real MySQL, which only reports a next-value once a table actually
+            // has one.
+            let autoIncrement =
+                if t.Columns |> List.exists (fun c -> c.AutoIncrement) then VInt t.NextAutoId else VNull
 
-        [| vs "def"
-           vs dbName
-           vs t.OriginalName
-           vs "BASE TABLE"
-           vs "InnoDB"
-           vi 10
-           vs "Dynamic"
-           vi (t.RowsArray.Length)
-           vi 0
-           vi 16384
-           vi 0
-           vi 0
-           vi 0
-           autoIncrement
-           VDateTime(truncateToSecond t.CreateTime)
-           // NULL like real InnoDB, which doesn't maintain them either.
-           VNull
-           VNull
-           vs (t.TableCollation |> Option.defaultValue "utf8mb4_0900_ai_ci")
-           VNull
-           vs ""
-           vs "" |])
+            [| vs "def"
+               vs dbName
+               vs t.OriginalName
+               vs "BASE TABLE"
+               vs "InnoDB"
+               vi 10
+               vs "Dynamic"
+               vi (t.RowsArray.Length)
+               vi 0
+               vi 16384
+               vi 0
+               vi 0
+               vi 0
+               autoIncrement
+               VDateTime(truncateToSecond t.CreateTime)
+               // NULL like real InnoDB, which doesn't maintain them either.
+               VNull
+               VNull
+               vs (t.TableCollation |> Option.defaultValue "utf8mb4_0900_ai_ci")
+               VNull
+               vs ""
+               vs "" |])
+
+    let views =
+        viewCatalogEntries catalog
+        |> List.map (fun view ->
+            [| vs "def"; vs view.Schema; vs view.Name; vs "VIEW"; VNull; VNull; VNull; VNull; VNull; VNull; VNull
+               VNull; VNull; VNull; (view.Created |> Option.map (truncateToSecond >> VDateTime) |> Option.defaultValue VNull)
+               VNull; VNull; VNull; VNull; vs ""; vs "VIEW" |])
+
+    baseTables @ views
 
 /// MySQL 8.4's full `COLUMNS` column set, in MySQL's order — same
 /// `SELECT *` contract as `tablesColumns`.
@@ -308,7 +345,7 @@ let private charOctetLength (ty: ColumnType) : int64 option =
 /// appear in a generated expression, but must render rather than throw.
 /// ponytail: no charset introducer on string literals (MySQL prints
 /// `_latin1'x'`, this prints `'x'`) — add it if a tool ever diffs the text.
-let rec private exprToSql (e: Expr) : string =
+let rec exprToSql (e: Expr) : string =
     let opText =
         function
         | And -> "and"
@@ -606,6 +643,23 @@ let private tableConstraintsColumns =
       strCol "CONSTRAINT_TYPE"
       strCol "ENFORCED" ]
 
+let private storedCheckRows (catalog: Catalog) : Value[] list =
+    catalog
+    |> Map.tryFind "mysql"
+    |> Option.bind (Map.tryFind "check_constraints")
+    |> Option.map (fun table -> table.RowsArray |> List.ofSeq)
+    |> Option.defaultValue []
+
+let private checkConstraintsColumns =
+    [ col "CONSTRAINT_CATALOG" (TVarchar 64)
+      col "CONSTRAINT_SCHEMA" (TVarchar 64)
+      { col "CONSTRAINT_NAME" (TVarchar 64) with Nullable = false }
+      { col "CHECK_CLAUSE" TLongText with Nullable = false } ]
+
+let private checkConstraintsRows (catalog: Catalog) : Value[] list =
+    storedCheckRows catalog
+    |> List.map (fun row -> [| vs "def"; row.[1]; row.[0]; row.[3] |])
+
 /// One row per named `PRIMARY KEY`/`UNIQUE`/`FOREIGN KEY` constraint —
 /// unlike `STATISTICS` (above), a plain non-unique `INDEX` has no row here,
 /// matching real MySQL: an index and a constraint are different things,
@@ -614,8 +668,9 @@ let private tableConstraintsColumns =
 /// (e.g. after a column rename left a foreign key's autogenerated name
 /// stale) is what this exists for.
 let private tableConstraintsRows (catalog: Catalog) : Value[] list =
-    allTables catalog
-    |> List.collect (fun (dbName, t) ->
+    let structural =
+        allTables catalog
+        |> List.collect (fun (dbName, t) ->
         let pkRows =
             if t.Columns |> List.exists (fun c -> c.PrimaryKey) then
                 [ [| vs "def"; vs dbName; vs "PRIMARY"; vs dbName; vs t.OriginalName; vs "PRIMARY KEY"; vs "YES" |] ]
@@ -634,6 +689,12 @@ let private tableConstraintsRows (catalog: Catalog) : Value[] list =
                 [| vs "def"; vs dbName; vs fk.Name; vs dbName; vs t.OriginalName; vs "FOREIGN KEY"; vs "YES" |])
 
         pkRows @ uniqueRows @ fkRows)
+
+    let checks =
+        storedCheckRows catalog
+        |> List.map (fun row -> [| vs "def"; row.[1]; row.[0]; row.[1]; row.[2]; vs "CHECK"; row.[4] |])
+
+    structural @ checks
 
 let private schemataColumns =
     [ strCol "CATALOG_NAME"
@@ -839,9 +900,8 @@ let private processlistRows () : Value[] list =
            vopt ptmp.Info |])
 
 // ---------------------------------------------------------------------------
-// Object catalogs fsdb has no objects for — views, stored routines,
-// triggers, events. The columns are MySQL 8.4's exactly; the row sets are
-// genuinely empty rather than stubbed.
+// Stored-object catalogs. Views and triggers project their row-backed mysql
+// catalogs; routines and events remain genuinely empty.
 // ---------------------------------------------------------------------------
 
 let private viewsColumns =
@@ -855,6 +915,12 @@ let private viewsColumns =
       strCol "SECURITY_TYPE"
       strCol "CHARACTER_SET_CLIENT"
       strCol "COLLATION_CONNECTION" ]
+
+let private viewsRows (catalog: Catalog) : Value[] list =
+    viewCatalogEntries catalog
+    |> List.map (fun view ->
+        [| vs "def"; vs view.Schema; vs view.Name; vs view.Definition; vs "NONE"; vs "NO"; vs view.Definer
+           vs "DEFINER"; vs "utf8mb4"; vs "utf8mb4_0900_ai_ci" |])
 
 let private routinesColumns =
     [ strCol "SPECIFIC_NAME"
@@ -1175,6 +1241,7 @@ let private enginesRows: Value[] list =
 /// can't drift.
 let private virtualTableDefs : (string * ColumnDef list) list =
     [ "CHARACTER_SETS", characterSetsColumns
+      "CHECK_CONSTRAINTS", checkConstraintsColumns
       "COLLATIONS", collationsColumns
       "COLLATION_CHARACTER_SET_APPLICABILITY", collationCharacterSetApplicabilityColumns
       "COLUMNS", columnsColumns
@@ -1248,6 +1315,7 @@ let scan (catalog: Catalog) (name: string) : (ColumnDef list * Value[] list) opt
         | "STATISTICS" -> Some(statisticsRows catalog)
         | "KEY_COLUMN_USAGE" -> Some(keyColumnUsageRows catalog)
         | "REFERENTIAL_CONSTRAINTS" -> Some(referentialConstraintsRows catalog)
+        | "CHECK_CONSTRAINTS" -> Some(checkConstraintsRows catalog)
         | "TABLE_CONSTRAINTS" -> Some(tableConstraintsRows catalog)
         | "COLLATION_CHARACTER_SET_APPLICABILITY" -> Some collationCharacterSetApplicabilityRows
         | "COLLATIONS" -> Some collationsRows
@@ -1259,10 +1327,10 @@ let scan (catalog: Catalog) (name: string) : (ColumnDef list * Value[] list) opt
         | "SCHEMA_PRIVILEGES" -> Some(schemaPrivilegesRows catalog)
         | "TABLE_PRIVILEGES" -> Some(tablePrivilegesRows catalog)
         | "ENGINES" -> Some enginesRows
-        // Object catalogs fsdb has no objects for — real empty sets
-        // (COLUMN_PRIVILEGES too: no column-level grants exist).
+        // Routines/events remain real empty sets (COLUMN_PRIVILEGES too: no
+        // column-level grants exist).
         | "TRIGGERS" -> Some(triggersRows catalog)
-        | "VIEWS"
+        | "VIEWS" -> Some(viewsRows catalog)
         | "ROUTINES"
         | "PARAMETERS"
         | "EVENTS"
@@ -1339,10 +1407,18 @@ let showTables (catalog: Catalog) (fsdbTables: string list) (dbName: string) (fu
     let render (names: string list) (tableType: string) =
         renderTyped (names |> List.map (fun n -> n, tableType))
 
-    let realTables () =
+    let schemaEntries () =
         match Map.tryFind dbName catalog with
         | None -> None
-        | Some db -> Some(db |> Map.toList |> List.map (fun (_, t) -> t.OriginalName))
+        | Some db ->
+            let tables = db |> Map.toList |> List.map (fun (_, table) -> table.OriginalName, "BASE TABLE")
+
+            let views =
+                viewCatalogEntries catalog
+                |> List.filter (fun view -> System.String.Equals(view.Schema, dbName, System.StringComparison.OrdinalIgnoreCase))
+                |> List.map (fun view -> view.Name, "VIEW")
+
+            Some(tables @ views)
 
     // The virtual database is browsable like `USE information_schema`
     // already is — its tables are the `scan` registry's, typed SYSTEM VIEW.
@@ -1351,12 +1427,12 @@ let showTables (catalog: Catalog) (fsdbTables: string list) (dbName: string) (fu
     elif dbName.ToLowerInvariant() = "fsdb" && not fsdbTables.IsEmpty then
         renderTyped (
             (fsdbTables |> List.map (fun n -> n, "SYSTEM VIEW"))
-            @ (realTables () |> Option.defaultValue [] |> List.map (fun n -> n, "BASE TABLE"))
+            @ (schemaEntries () |> Option.defaultValue [])
         )
     else
-        match realTables () with
+        match schemaEntries () with
         | None -> Error(1049, sprintf "Unknown database '%s'" dbName)
-        | Some names -> render names "BASE TABLE"
+        | Some entries -> renderTyped entries
 
 /// `SHOW COLLATION [LIKE 'pattern']` — the registered collations with
 /// `SHOW`'s column labels (MySQL's `Collation/Charset/Id/...`, distinct
@@ -1498,7 +1574,7 @@ let private backtickCols = List.map backtick >> String.concat ","
 /// around), a fresh rendering of the same columns/indexes/foreign keys, the
 /// same way real MySQL's `SHOW CREATE TABLE` itself re-derives its output
 /// from the catalog rather than echoing verbatim source.
-let private showCreateTableDDL (t: Table) : string =
+let private showCreateTableDDL (catalog: Catalog) (dbName: string) (t: Table) : string =
     let columnLine (c: ColumnDef) =
         let notNull = if c.PrimaryKey || not c.Nullable then "NOT NULL" else ""
 
@@ -1602,7 +1678,20 @@ let private showCreateTableDDL (t: Table) : string =
                 onDelete
                 onUpdate)
 
-    let lines = (t.Columns |> List.map columnLine) @ pkLine @ indexLines @ fkLines
+    let checkLines =
+        storedCheckRows catalog
+        |> List.filter (fun row ->
+            System.String.Equals(Value.toText row.[1] |> Option.defaultValue "", dbName, System.StringComparison.OrdinalIgnoreCase)
+            && System.String.Equals(Value.toText row.[2] |> Option.defaultValue "", t.OriginalName, System.StringComparison.OrdinalIgnoreCase))
+        |> List.sortBy (fun row -> Value.toText row.[0] |> Option.defaultValue "" |> _.ToLowerInvariant())
+        |> List.map (fun row ->
+            let name = Value.toText row.[0] |> Option.defaultValue ""
+            let clause = Value.toText row.[3] |> Option.defaultValue ""
+            let enforced = Value.toText row.[4] |> Option.defaultValue "YES"
+            let enforcement = if enforced.Equals("NO", System.StringComparison.OrdinalIgnoreCase) then " /*!80016 NOT ENFORCED */" else ""
+            sprintf "CONSTRAINT %s CHECK (%s)%s" (backtick name) clause enforcement)
+
+    let lines = (t.Columns |> List.map columnLine) @ pkLine @ indexLines @ fkLines @ checkLines
 
     sprintf
         "CREATE TABLE %s (\n  %s\n) ENGINE=InnoDB DEFAULT CHARSET=%s COLLATE=%s"
@@ -1614,7 +1703,24 @@ let private showCreateTableDDL (t: Table) : string =
 /// `SHOW CREATE TABLE t`.
 let showCreateTable (catalog: Catalog) (dbName: string) (tableName: string) : ShowResult =
     findTable catalog dbName tableName
-    |> Result.map (fun t -> [ "Table"; "Create Table" ], [ [ Some t.OriginalName; Some(showCreateTableDDL t) ] ])
+    |> Result.map (fun t -> [ "Table"; "Create Table" ], [ [ Some t.OriginalName; Some(showCreateTableDDL catalog dbName t) ] ])
+
+/// `SHOW CREATE VIEW v` for the read-only stored-query subset.
+let showCreateView (catalog: Catalog) (dbName: string) (viewName: string) : ShowResult =
+    viewCatalogEntries catalog
+    |> List.tryFind (fun view ->
+        System.String.Equals(view.Schema, dbName, System.StringComparison.OrdinalIgnoreCase)
+        && System.String.Equals(view.Name, viewName, System.StringComparison.OrdinalIgnoreCase))
+    |> function
+        | None -> Error(1146, sprintf "Table '%s.%s' doesn't exist" dbName viewName)
+        | Some view ->
+            Ok(
+                [ "View"; "Create View"; "character_set_client"; "collation_connection" ],
+                [ [ Some view.Name
+                    Some(sprintf "CREATE VIEW `%s` AS %s" view.Name view.Definition)
+                    Some "utf8mb4"
+                    Some "utf8mb4_0900_ai_ci" ] ]
+            )
 
 /// `SHOW INDEX|INDEXES|KEYS FROM t [FROM db]` — one row per index column,
 /// same shape `STATISTICS` (above) projects, just scoped to one table and
@@ -1835,4 +1941,3 @@ let showRoutineStatus () : ShowResult =
           "character_set_client"; "collation_connection"; "Database Collation" ],
         []
     )
-

@@ -569,7 +569,7 @@ let rec requiredPrivileges (defaultDb: string) (stmt: Statement) : (string * Pri
 
         onTables "DELETE" (tableRefsOfFrom defaultDb (Some(FromTable d.From)) d.Joins)
         @ onTables "SELECT" readInExprs
-    | CreateTable(name, _, _, _, _, _, _, _) -> onTables "CREATE" [ split name ]
+    | CreateTable(name, _, _, _, _, _, _, _, _) -> onTables "CREATE" [ split name ]
     | DropTable(names, _) -> onTables "DROP" (names |> List.map split)
     | Truncate table -> onTables "DROP" [ split table ]
     | AlterTable(table, _) -> onTables "ALTER" [ split table ]
@@ -610,6 +610,14 @@ let rec requiredPrivileges (defaultDb: string) (stmt: Statement) : (string * Pri
     // store-aware lookup if trigger DDL ever needs per-table denial.
     | CreateTrigger(_, table, _) -> onTables "TRIGGER" [ split table ]
     | DropTrigger _ -> []
+    | CreateView(name, _, definition, orReplace) ->
+        let viewDb, _ = split name
+        let own = onTables "CREATE VIEW" [ split name ] @ (if orReplace then onTables "DROP" [ split name ] else [])
+
+        match Parser.parse definition with
+        | Ok select -> own @ requiredPrivileges viewDb select
+        | Error _ -> own
+    | DropView(names, _) -> onTables "DROP" (names |> List.map split)
     | Explain inner -> requiredPrivileges defaultDb inner
 
 /// Checks `user` against every required privilege, denying with MySQL's

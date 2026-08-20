@@ -347,6 +347,17 @@ and ForeignKeyDef =
       OnDelete: string option
       OnUpdate: string option }
 
+/// A table- or column-level `[CONSTRAINT name] CHECK (expr) [[NOT]
+/// ENFORCED]`. `Name = None` is resolved to MySQL's `table_chk_N` form once
+/// the target schema/table and its existing constraint names are known.
+/// `Column = Some name` preserves the stricter rule that an inline column
+/// check may only reference the column it is declared on.
+and CheckConstraintDef =
+    { Name: string option
+      Expression: Expr
+      Enforced: bool
+      Column: string option }
+
 /// A `SELECT` projection: the expression and its optional `AS alias`.
 and Projection = Expr * string option
 
@@ -559,6 +570,9 @@ type AlterAction =
     | DropIndexAction of name: string
     | AddForeignKey of ForeignKeyDef
     | DropForeignKey of name: string
+    | AddCheck of CheckConstraintDef
+    | DropCheck of name: string
+    | SetCheckEnforced of name: string * enforced: bool
     | AddPrimaryKey of columns: string list
     /// `ALTER TABLE t AUTO_INCREMENT = n` — moves the counter forward
     /// (never below what existing rows already require, like InnoDB).
@@ -577,6 +591,7 @@ type Statement =
         columns: ColumnDef list *
         indexes: IndexDef list *
         foreignKeys: ForeignKeyDef list *
+        checks: CheckConstraintDef list *
         ifNotExists: bool *
         /// The table's own declared `[DEFAULT] CHARSET`/`COLLATE` options
         /// (`None` = server default) — kept separate from the per-column
@@ -671,6 +686,16 @@ type Statement =
     /// `DROP TRIGGER [IF EXISTS] name` — resolved against the session
     /// database's triggers (error 1360 when missing, unless `ifExists`).
     | DropTrigger of name: string * ifExists: bool
+    /// A read-only stored query. The definition remains SQL text so the
+    /// row-backed `mysql.views` catalog can persist it through ordinary row
+    /// events; it is parsed when the view is read. `columns` is the optional
+    /// explicit view-column list, and `orReplace` selects CREATE OR REPLACE.
+    /// ponytail: fsdb materializes the definition once per referencing
+    /// statement and does not yet implement MERGE, updatable views, CHECK
+    /// OPTION, or configurable SQL SECURITY.
+    | CreateView of name: string * columns: string list * definition: string * orReplace: bool
+    /// `DROP VIEW [IF EXISTS] view [, ...]`.
+    | DropView of names: string list * ifExists: bool
     /// `EXPLAIN [FORMAT=TRADITIONAL] stmt` — MySQL's classic tabular
     /// `EXPLAIN` accepts `SELECT`/`UPDATE`/`DELETE`/`INSERT`, all handled by
     /// describing what `Executor` would actually do rather than running it.
@@ -690,7 +715,8 @@ and Assignment = { Table: string option; Column: string; Value: Expr }
 /// through more than one join match is still updated at most once (see
 /// `Executor`'s multi-table `UPDATE` handling).
 and UpdateStmt =
-    { From: TableRef
+    { Ignore: bool
+      From: TableRef
       Joins: Join list
       Assignments: Assignment list
       Where: Expr option
