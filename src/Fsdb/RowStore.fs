@@ -12,8 +12,8 @@ module RowId =
     let internal create value = RowId value
     let internal value (RowId value) = value
 
-[<Sealed>]
 /// Builds one immutable row-store root without publishing partial changes.
+[<Sealed>]
 type RowStoreBuilder<'T> internal (liveCount: int, slots: PagedVector<'T option>) =
     let mutable count = liveCount
     let slots = slots.ToBuilder()
@@ -57,8 +57,11 @@ type RowStoreBuilder<'T> internal (liveCount: int, slots: PagedVector<'T option>
 
     member internal _.Drain() = count, slots.DrainToImmutable()
 
-[<Sealed>]
 /// An insertion-ordered immutable row heap with stable, non-reused identities.
+/// ponytail: deleted slots remain addressable tombstones; reclaiming their
+/// directory space needs an identity-to-slot indirection so compaction cannot
+/// retarget a point lookup captured from an older root.
+[<Sealed>]
 type RowStore<'T> internal (liveCount: int, slots: PagedVector<'T option>) =
     static let empty = RowStore<'T>(0, PagedVector.empty)
 

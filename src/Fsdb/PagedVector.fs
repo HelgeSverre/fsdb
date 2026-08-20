@@ -4,9 +4,12 @@ open System
 open System.Collections
 open System.Collections.Generic
 
+module private Page =
+    [<Literal>]
+    let Size = 256
+
 [<Sealed>]
 type PagedVectorBuilder<'T> internal (initialCount: int, initialPages: Map<int, 'T array>) =
-    static let pageSize = 256
     let mutable count = initialCount
     let mutable pages = initialPages
     let mutable writablePages = Set.empty
@@ -23,7 +26,7 @@ type PagedVectorBuilder<'T> internal (initialCount: int, initialPages: Map<int, 
             let page =
                 match Map.tryFind pageIndex pages with
                 | Some existing -> Array.copy existing
-                | None -> Array.zeroCreate pageSize
+                | None -> Array.zeroCreate Page.Size
 
             pages <- Map.add pageIndex page pages
             writablePages <- Set.add pageIndex writablePages
@@ -39,19 +42,19 @@ type PagedVectorBuilder<'T> internal (initialCount: int, initialPages: Map<int, 
             if index < 0 || index >= count then
                 raise (ArgumentOutOfRangeException(nameof index))
 
-            pages.[index / pageSize].[index % pageSize]
+            pages.[index / Page.Size].[index % Page.Size]
         and set (index: int) (item: 'T) =
             ensureActive ()
 
             if index < 0 || index >= count then
                 raise (ArgumentOutOfRangeException(nameof index))
 
-            let page = ensureWritable (index / pageSize)
-            page.[index % pageSize] <- item
+            let page = ensureWritable (index / Page.Size)
+            page.[index % Page.Size] <- item
 
     member _.Add(item: 'T) : unit =
-        let page = ensureWritable (count / pageSize)
-        page.[count % pageSize] <- item
+        let page = ensureWritable (count / Page.Size)
+        page.[count % Page.Size] <- item
         count <- count + 1
 
     member this.AddRange(items: seq<'T>) : unit =
@@ -65,7 +68,6 @@ type PagedVectorBuilder<'T> internal (initialCount: int, initialPages: Map<int, 
 
 [<Sealed>]
 type PagedVector<'T> internal (count: int, pages: Map<int, 'T array>) =
-    static let pageSize = 256
     static let empty = PagedVector<'T>(0, Map.empty)
 
     member _.Count = count
@@ -77,7 +79,7 @@ type PagedVector<'T> internal (count: int, pages: Map<int, 'T array>) =
             if index < 0 || index >= count then
                 raise (ArgumentOutOfRangeException(nameof index))
 
-            pages.[index / pageSize].[index % pageSize]
+            pages.[index / Page.Size].[index % Page.Size]
 
     member this.Add(item: 'T) : PagedVector<'T> =
         let builder: PagedVectorBuilder<'T> = this.ToBuilder()
@@ -102,9 +104,9 @@ type PagedVector<'T> internal (count: int, pages: Map<int, 'T array>) =
     member private _.Items =
         seq {
             if count > 0 then
-                for pageIndex = 0 to (count - 1) / pageSize do
+                for pageIndex = 0 to (count - 1) / Page.Size do
                     let page = pages.[pageIndex]
-                    let length = min pageSize (count - pageIndex * pageSize)
+                    let length = min Page.Size (count - pageIndex * Page.Size)
 
                     for offset = 0 to length - 1 do
                         yield page.[offset]
