@@ -32,7 +32,7 @@ let verifyNative (storedHash: string) (scramble: byte[]) (response: byte[]) : bo
             let stage2 = Convert.FromHexString(storedHash.TrimStart '*')
             let mask = sha1 (Array.append scramble stage2)
             let stage1 = Array.map2 (^^^) response mask
-            sha1 stage1 = stage2
+            CryptographicOperations.FixedTimeEquals(sha1 stage1, stage2)
         with _ ->
             false
 
@@ -57,8 +57,7 @@ let userColumnText (cols: ColumnDef list) (row: Value[]) (name: string) : string
         | v -> Value.toText v |> Option.defaultValue ""
     | Error _ -> ""
 
-/// The stored password hash for a user row — `""` means "no password set,
-/// accept anything".
+/// The stored password hash for a user row — `""` means no password is set.
 let storedPasswordHash (cols: ColumnDef list) (row: Value[]) : string = userColumnText cols row "authentication_string"
 
 // ---------------------------------------------------------------------------
@@ -648,10 +647,8 @@ let rec requiredPrivileges (defaultDb: string) (stmt: Statement) : (string * Pri
             | Result.Error _ -> [] // invalid list — the executor reports it
 
         ("GRANT OPTION", target) :: privReqs
-    // CREATE TRIGGER needs TRIGGER on the subject table, like MySQL.
-    // ponytail: DROP TRIGGER should too, but the subject table lives in a
-    // mysql.triggers row this pure statement-shape pass can't see — add a
-    // store-aware lookup if trigger DDL ever needs per-table denial.
+    // CREATE TRIGGER carries its subject table in the statement. DROP's
+    // subject is resolved by `requiredPrivilegesInStore` below.
     | CreateTrigger(_, table, _) -> onTables "TRIGGER" [ split table ]
     | DropTrigger _ -> []
     | CreateView(name, _, definition, orReplace) ->
@@ -663,6 +660,25 @@ let rec requiredPrivileges (defaultDb: string) (stmt: Statement) : (string * Pri
         | Error _ -> own
     | DropView(names, _) -> onTables "DROP" (names |> List.map split)
     | Explain inner -> requiredPrivileges defaultDb inner
+
+/// Adds privilege requirements whose target can only be resolved from the
+/// live catalog rather than from the statement shape alone.
+let requiredPrivilegesInStore (store: Store) (defaultDb: string) (stmt: Statement) : (string * PrivTarget) list =
+    match stmt with
+    | DropTrigger(name, _) ->
+        match scanList store "mysql" "triggers" with
+        | Ok(_, rows) ->
+            rows
+            |> List.tryPick (fun row ->
+                let text i = row.[i] |> Value.toText |> Option.defaultValue ""
+
+                if eqI (text 0) name && eqI (text 1) defaultDb then
+                    Some [ "TRIGGER", OnTable(text 1, text 2) ]
+                else
+                    None)
+            |> Option.defaultValue []
+        | Error _ -> []
+    | _ -> requiredPrivileges defaultDb stmt
 
 /// Checks `user` against every required privilege, denying with MySQL's
 /// 1142 (table), 1044 (database), or 1227 (admin privilege) shape.
@@ -803,7 +819,7 @@ let check (store: Store) (user: string) (required: (string * PrivTarget) list) :
                     || (match target with
                         | Global -> false
                         | OnDb db
-                        | OnTable(db, _) when eqI db "information_schema" -> true
+                        | OnTable(db, _) when eqI db "information_schema" && eqI privSql "SELECT" -> true
                         | OnDb db -> hasDb def db
                         | OnTable(db, table) -> hasDb def db || hasTable def db table)
 
@@ -857,6 +873,11 @@ let canSeeDatabase (store: Store) (user: string) (db: string) : bool =
                     && (match row.[dbIdx] with | VString value -> eqI value db | _ -> false)
                     && row.[privIdx] <> VString "")
             | _ -> false
+
+/// Whether any privilege at table scope or above makes a table visible in
+/// metadata views.
+let canSeeTable (store: Store) (user: string) (db: string) (table: string) : bool =
+    staticPrivileges |> List.exists (fun def -> check store user [ def.Sql, OnTable(db, table) ] |> Result.isOk)
 
 /// A privilege list rendered MySQL-style: every static privilege → `ALL
 /// PRIVILEGES`, none → `USAGE`, otherwise the names in column order.

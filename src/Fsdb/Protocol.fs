@@ -15,6 +15,7 @@ let ClientFoundRows = 0x00000002u
 let ClientLongFlag = 0x00000004u
 let ClientConnectWithDb = 0x00000008u
 let ClientProtocol41 = 0x00000200u
+let ClientSsl = 0x00000800u
 let ClientSecureConnection = 0x00008000u
 let ClientTransactions = 0x00002000u
 let ClientMultiResults = 0x00020000u
@@ -94,11 +95,17 @@ let private boundedLen (len: uint64) : int =
     else
         int len
 
+exception SslRequestException
+
 /// Parses a HandshakeResponse41 payload: capability flags, username, auth
 /// response bytes, optional database, and the client's auth plugin name.
 let parseHandshakeResponse (payload: byte[]) : HandshakeResponse =
     let r = Reader(payload)
     let capabilities = uint32 (r.ReadInt32LE())
+
+    if payload.Length = 32 && capabilities &&& ClientSsl <> 0u then
+        raise SslRequestException
+
     r.ReadInt32LE() |> ignore // max packet size
     r.ReadByte() |> ignore // charset
     r.ReadBytes 23 |> ignore // reserved

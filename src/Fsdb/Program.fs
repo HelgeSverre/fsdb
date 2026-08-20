@@ -16,7 +16,7 @@ type Arguments =
             match this with
             | Port _ -> "listen port (default 3307)"
             | Listen _ -> "bind address (default 127.0.0.1)"
-            | Data_Dir _ -> "persist data here (WAL + snapshots); omit for in-memory"
+            | Data_Dir _ -> "persist trusted server state here (WAL + snapshots); omit for in-memory"
             | Defaults_File _ -> "read server settings from a my.cnf-style file's [mysqld] section"
             | Version -> "print the fsdb version and exit"
 

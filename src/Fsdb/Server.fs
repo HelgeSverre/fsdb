@@ -3,6 +3,7 @@
 module Fsdb.Server
 
 open System
+open System.Security.Cryptography
 open System.Net
 open System.Net.Sockets
 open System.Text
@@ -73,10 +74,9 @@ let private parseCommand (payload: byte[]) : Command option =
 
 let private randomAuthPluginData () : byte[] =
     let bytes = Array.zeroCreate<byte> 20
-    Random.Shared.NextBytes bytes
-    // Auth-plugin-data fields are null-terminated on the wire; a stray 0x00
-    // would truncate them. Harmless either way since the scramble is never
-    // checked, but keep the bytes well-formed.
+    RandomNumberGenerator.Fill bytes
+    // Auth-plugin-data fields are null-terminated on the wire, so replace
+    // zero bytes before using the same value for password verification.
     bytes |> Array.map (fun b -> if b = 0uy then 1uy else b)
 
 /// Writes each payload in turn, threading the *actual* next sequence id
@@ -480,7 +480,7 @@ let private authenticateHandshake
     }
 
 let private accumulateLongData (key: int * int) (chunk: byte[]) (session: Session) : Session =
-    let existing = session.LongData |> Map.tryFind key |> Option.defaultValue [||]
+    let existing = session.LongData |> Map.tryFind key |> Option.defaultValue []
     let room = int64 Limits.maxAllowedPacket - session.LongDataBytes
 
     if chunk.Length = 0 then
@@ -489,12 +489,14 @@ let private accumulateLongData (key: int * int) (chunk: byte[]) (session: Sessio
         { session with LongDataOverflow = Set.add key session.LongDataOverflow }
     else
         { session with
-            LongData = Map.add key (Array.append existing chunk) session.LongData
+            LongData = Map.add key (chunk :: existing) session.LongData
             LongDataBytes = session.LongDataBytes + int64 chunk.Length }
 
 let private discardLongData (statementId: int) (session: Session) : Session =
     let retained = session.LongData |> Map.filter (fun (id, _) _ -> id <> statementId)
-    let retainedBytes = retained |> Seq.sumBy (fun (KeyValue(_, bytes)) -> int64 bytes.Length)
+    let retainedBytes =
+        retained
+        |> Seq.sumBy (fun (KeyValue(_, chunks)) -> chunks |> List.sumBy (fun bytes -> int64 bytes.Length))
 
     { session with
         LongData = retained
@@ -700,6 +702,21 @@ let private handleConnection
 
                                     do! sendPayloads stream seqId payloads |> Async.Ignore
                                     return! loop session
+                            | Some(StmtPrepare _) when session.Statements.Count >= Limits.maxPreparedStmtCount ->
+                                do!
+                                    writePacketAsync
+                                        stream
+                                        { SeqId = seqId
+                                          Payload =
+                                            errPayload
+                                                capabilities
+                                                1461
+                                                (sprintf
+                                                    "Can't create more than max_prepared_stmt_count statements (current value: %d)"
+                                                    Limits.maxPreparedStmtCount) }
+                                    |> Async.Ignore
+
+                                return! loop session
                             | Some(StmtPrepare sql) ->
                                 match QueryHandler.prepareStatement sql with
                                 | Result.Error(code, message) ->
@@ -826,7 +843,9 @@ let private handleConnection
                                                         // force-decoding them as UTF-8 corrupts any byte
                                                         // sequence that isn't valid UTF-8 (an image, a
                                                         // compressed column, ...). Only text types decode.
-                                                        | Some bytes -> if typeId = TypeBlob then VBytes bytes else VString(Encoding.UTF8.GetString bytes)
+                                                        | Some chunks ->
+                                                            let bytes = chunks |> List.rev |> Array.concat
+                                                            if typeId = TypeBlob then VBytes bytes else VString(Encoding.UTF8.GetString bytes)
                                                         | None -> if isNull i then VNull else readBinaryValue r typeId unsigned)
 
                                                 Result.Ok(types, values)
@@ -976,6 +995,15 @@ let private handleConnection
                 if authOkSeq.IsSome && databaseAccepted then
                     do! loop session
         with
+        | :? SslRequestException ->
+            do!
+                writePacketAsync
+                    stream
+                    { SeqId = 2uy
+                      Payload = errPayload capabilities 1045 "SSL is not supported" }
+                |> Async.Ignore
+                |> Async.Catch
+                |> Async.Ignore
         | :? PacketTooLargeException ->
             // Reassembling a multi-packet payload blew past
             // Limits.maxAllowedPacket. There's no way to resync mid-stream,

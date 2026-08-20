@@ -8,6 +8,22 @@ open Fsdb.Packet
 open Fsdb.Protocol
 open Fsdb.Value
 
+type private BlockingWriteStream() =
+    inherit IO.Stream()
+
+    override _.CanRead = false
+    override _.CanSeek = false
+    override _.CanWrite = true
+    override _.Length = 0L
+    override _.Position with get () = 0L and set _ = raise (NotSupportedException())
+    override _.Flush() = ()
+    override _.Read(_, _, _) = raise (NotSupportedException())
+    override _.Seek(_, _) = raise (NotSupportedException())
+    override _.SetLength _ = raise (NotSupportedException())
+    override _.Write(_, _, _) = raise (NotSupportedException())
+    override _.WriteAsync(_, _, _, cancellationToken) =
+        Threading.Tasks.Task.Delay(Threading.Timeout.Infinite, cancellationToken)
+
 let tests =
     testList
         "Protocol"
@@ -63,6 +79,15 @@ let tests =
               let sqlState = Text.Encoding.ASCII.GetString(payload, 4, 5)
               Expect.equal sqlState "HY000" "sqlstate fallback"
 
+          testCase "packet writes stop after net_write_timeout"
+          <| fun _ ->
+              Fsdb.Limits.withSettings [ "net_write_timeout", "1" ] (fun () ->
+                  use stream = new BlockingWriteStream()
+
+                  Expect.throwsT<Threading.Tasks.TaskCanceledException>
+                      (fun () -> writePacketAsync stream { SeqId = 0uy; Payload = [| 1uy |] } |> Async.RunSynchronously |> ignore)
+                      "a peer that stops reading cannot retain a connection indefinitely")
+
           testCase "the resultset-terminating OK uses header 0xfe, not 0x00"
           <| fun _ ->
               // mysql CLI distinguishes this from a plain OK by the 0xfe
@@ -100,6 +125,18 @@ let tests =
               Expect.throws
                   (fun () -> parseHandshakeResponse (w.ToArray()) |> ignore)
                   "an oversized wire length is rejected before conversion to int"
+
+          testCase "parseHandshakeResponse recognizes an SSLRequest without reading a username"
+          <| fun _ ->
+              let w = Writer()
+              w.WriteInt32LE(int (ClientProtocol41 ||| ClientSsl))
+              w.WriteInt32LE 16777216
+              w.WriteByte 45uy
+              w.WriteBytes(Array.zeroCreate<byte> 23)
+
+              Expect.throwsT<SslRequestException>
+                  (fun () -> parseHandshakeResponse (w.ToArray()) |> ignore)
+                  "the short SSLRequest shape is rejected deliberately"
 
           testCase "typed text rows encode BLOB values as raw bytes"
           <| fun _ ->

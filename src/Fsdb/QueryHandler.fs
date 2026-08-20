@@ -540,11 +540,18 @@ let private splitSetAssignments (sql: string) : string list =
     let parts = ResizeArray()
     let current = StringBuilder()
     let mutable quoteChar = None
+    let mutable escaped = false
     let mutable parenDepth = 0
     let mutable hasContent = false
 
     for c in body do
         match quoteChar with
+        | Some _ when escaped ->
+            escaped <- false
+            current.Append c |> ignore
+        | Some _ when c = '\\' ->
+            escaped <- true
+            current.Append c |> ignore
         | Some q when c = q ->
             quoteChar <- None
             current.Append c |> ignore
@@ -593,7 +600,9 @@ type private SetAction =
 /// way. Grows as real clients ask for more.
 let private nullableSystemVars = Set.ofList [ "character_set_results" ]
 
-let private globalOnlyLimitVariables = Set.ofList [ "max_allowed_packet"; "max_connections" ]
+let private globalOnlyLimitVariables =
+    Set.ofList [ "max_allowed_packet"; "max_connections"; "max_prepared_stmt_count"; "net_write_timeout" ]
+let private maxUserVariables = 65536
 
 /// Parses one comma-split fragment into the variable(s) it would assign,
 /// without touching `session`/`Store` — `handleSet` only applies any of
@@ -742,9 +751,21 @@ let private handleSet (session: Session) (sql: string) : Session * QueryResult =
     match splitSetAssignments sql |> traverse (parseSetFragment sql session) with
     | Error result -> session, result
     | Ok actions ->
-        match actions |> traverse (validateSetAction session) with
-        | Error result -> session, result
-        | Ok _ -> (actions |> List.fold applySetAction session), Affected 0UL
+        let userVariableNames =
+            actions
+            |> List.choose (function SetUserVarAction(name, _) -> Some name | _ -> None)
+            |> Set.ofList
+
+        let resultingUserVariableCount =
+            userVariableNames
+            |> Set.fold (fun count name -> if Map.containsKey name session.UserVariables then count else count + 1) session.UserVariables.Count
+
+        if resultingUserVariableCount > maxUserVariables then
+            session, Err(1105, "Too many user-defined variables")
+        else
+            match actions |> traverse (validateSetAction session) with
+            | Error result -> session, result
+            | Ok _ -> (actions |> List.fold applySetAction session), Affected 0UL
 
 // ---------------------------------------------------------------------------
 // Transactions: BEGIN/COMMIT/ROLLBACK, SET autocommit, SAVEPOINT. Matched by
@@ -1070,7 +1091,7 @@ let private executeParsed (session: Session) (stmt: Statement) : Session * Query
 
         // Privilege enforcement — the one gate every parsed statement goes
         // through (probes are exempt, see `Auth.requiredPrivileges`'s doc).
-        match Auth.check store session.User (Auth.requiredPrivileges dbName stmt) with
+        match Auth.check store session.User (Auth.requiredPrivilegesInStore store dbName stmt) with
         | Error(code, msg) -> session, Err(code, msg)
         | Ok() ->
 
@@ -1111,6 +1132,15 @@ let private executeParsed (session: Session) (stmt: Statement) : Session * Query
 
             Executor.withCteRecursionDepth limit body
 
+        let withExecutionLimits body =
+            let groupConcatLimit =
+                lookupVar session "group_concat_max_len"
+                |> Option.flatten
+                |> Option.bind (fun value -> match Int32.TryParse value with | true, parsed when parsed >= 4 -> Some parsed | _ -> None)
+                |> Option.defaultValue 1024
+
+            Executor.withGroupConcatMaxLen groupConcatLimit (fun () -> withRecursionDepth body)
+
         // `SELECT`/`UNION` go through `Executor`'s type-preserving entry
         // points instead of the plain `execute` every other statement uses
         // — those are the only two statement kinds that reach the wire as
@@ -1121,18 +1151,18 @@ let private executeParsed (session: Session) (stmt: Statement) : Session * Query
         let lastInsertId, lastGeneratedId, result, columnMetadata =
             match stmt with
             | Select select ->
-                let result, types = withRecursionDepth (fun () -> Executor.runTopLevelSelect store registry dbName select)
+                let result, types = withExecutionLimits (fun () -> Executor.runTopLevelSelect store registry dbName select)
                 session.LastInsertId, session.LastGeneratedId, result, types
             | Union(first, rest, orderBy, limit, offset) ->
                 let result, types, _ =
-                    withRecursionDepth (fun () -> Executor.runUnionStmt store registry dbName first rest orderBy limit offset)
+                    withExecutionLimits (fun () -> Executor.runUnionStmt store registry dbName first rest orderBy limit offset)
 
                 session.LastInsertId, session.LastGeneratedId, result, types
             | _ ->
                 let foundRows = session.Capabilities &&& Fsdb.Protocol.ClientFoundRows <> 0u
 
                 let (lastInsertId, lastGeneratedId), result =
-                    withRecursionDepth (fun () ->
+                    withExecutionLimits (fun () ->
                         Executor.execute store registry dbName (session.LastInsertId, session.LastGeneratedId) foundRows stmt)
 
                 lastInsertId, lastGeneratedId, result, []
@@ -1380,14 +1410,17 @@ let private runProbe (session: Session) (sql: string) (probe: Probe) : Session *
     | ShowEvents db -> session, InformationSchema.showEvents (Session.currentStore session).Catalog db |> showResult
     | ShowRoutineStatus -> session, InformationSchema.showRoutineStatus () |> showResult
     | Kill(queryOnly, id) ->
-        let privileged = Auth.hasGlobalPriv session.Store session.User "PROCESS"
+        let canSeeAll = Auth.hasGlobalPriv session.Store session.User "PROCESS"
+        let canKillAll = Auth.hasGlobalPriv session.Store session.User "SUPER"
 
         match InformationSchema.tryFindProcess id with
         // A caller without PROCESS can't see another user's connection, so
         // it can neither name nor kill it — MySQL reports the id as unknown.
-        | Some target when target.User <> session.User && not privileged ->
+        | Some target when target.User <> session.User && not canSeeAll ->
             session, Err(1094, sprintf "Unknown thread id: %d" id)
         | None -> session, Err(1094, sprintf "Unknown thread id: %d" id)
+        | Some target when target.User <> session.User && not canKillAll ->
+            session, Err(1095, sprintf "You are not owner of thread %d" id)
         | Some target ->
             if queryOnly then
                 target.CancelQuery |> Option.iter (fun cancel -> cancel ())
@@ -1727,7 +1760,7 @@ let handle (session: Session) (rawSql: string) : Session * QueryResult =
         { session with Tx = None }, Err(code, msg)
     | ex ->
         Log.diagnostic "fsdb: EXN %s -- query: %s" ex.Message (Log.redactSql rawSql)
-        { session with Tx = None }, Err(1105, sprintf "Internal error: %s" ex.Message) // ER_UNKNOWN_ERROR
+        { session with Tx = None }, Err(1105, "Internal error") // ER_UNKNOWN_ERROR
 
 /// Executes a prepared statement with its bound parameter values. Parser-
 /// produced statements bind the values into the parsed AST and run it

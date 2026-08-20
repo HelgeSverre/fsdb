@@ -2008,6 +2008,33 @@ let tests =
               }
               |> Async.RunSynchronously
 
+          testCase "COM_STMT_PREPARE returns 1461 at max_prepared_stmt_count"
+          <| fun _ ->
+              Fsdb.Limits.withSettings [ "max_prepared_stmt_count", "2" ] (fun () ->
+                  async {
+                      let listener = Fsdb.Server.startListening System.Net.IPAddress.Loopback 0
+                      let port = Fsdb.Server.port listener
+                      Fsdb.Server.serve listener (Fsdb.Storage.create ()) Fsdb.Functions.empty |> Async.StartAsTask |> ignore
+
+                      try
+                          let! client, stream = connectRaw port
+                          use client = client
+                          let payload = Array.append [| 0x16uy |] (Text.Encoding.UTF8.GetBytes "SELECT 1")
+
+                          for _ in 1..2 do
+                              let! _ = writePacketAsync stream { SeqId = 0uy; Payload = payload }
+                              let! reply = readPacketAsync stream
+                              Expect.equal reply.Value.Payload.[0] 0uy "prepare below the cap succeeds"
+
+                          let! _ = writePacketAsync stream { SeqId = 0uy; Payload = payload }
+                          let! reply = readPacketAsync stream
+                          Expect.equal reply.Value.Payload.[0] 0xffuy "prepare at the cap returns ERR"
+                          Expect.equal (Reader(reply.Value.Payload.[1..]).ReadInt16LE()) 1461 "ER_MAX_PREPARED_STMT_COUNT_REACHED"
+                      finally
+                          listener.Stop()
+                  }
+                  |> Async.RunSynchronously)
+
           // A single command whose own payload (reassembled from consecutive
           // 0xffffff-length fragments) blows past the accumulation cap can't
           // even be decoded into a command — `Server`'s connection-level

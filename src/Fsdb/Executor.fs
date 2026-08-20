@@ -51,6 +51,7 @@ let private viewMemo =
 /// statement that carries `Ctes` (see `withCteScope`).
 let private cteScope = System.Threading.AsyncLocal<Map<string, ColumnDef list * Value[] list>>()
 let private cteRecursionDepth = System.Threading.AsyncLocal<int64 option>()
+let private groupConcatMaxLen = System.Threading.AsyncLocal<int option>()
 let private viewStack = System.Threading.AsyncLocal<Set<string * string>>()
 
 type private StoredView =
@@ -142,6 +143,15 @@ let withCteRecursionDepth (limit: int64) (body: unit -> 'a) : 'a =
         body ()
     finally
         cteRecursionDepth.Value <- saved
+
+let withGroupConcatMaxLen (limit: int) (body: unit -> 'a) : 'a =
+    let saved = groupConcatMaxLen.Value
+
+    try
+        groupConcatMaxLen.Value <- Some limit
+        body ()
+    finally
+        groupConcatMaxLen.Value <- saved
 
 let private currentCteScope () : Map<string, ColumnDef list * Value[] list> =
     match box cteScope.Value with
@@ -4407,7 +4417,32 @@ and private evalAggregate
             if deduped.IsEmpty then
                 VNull
             else
-                deduped |> List.map (fun (v, _, _) -> v |> toText |> Option.defaultValue "") |> String.concat separator |> VString)
+                let limit = groupConcatMaxLen.Value |> Option.defaultValue 1024
+                let result = System.Text.StringBuilder(min limit 4096)
+                let mutable remaining = limit
+
+                let appendWithinLimit (text: string) =
+                    if remaining > 0 then
+                        let bytes = System.Text.Encoding.UTF8.GetBytes text
+
+                        if bytes.Length <= remaining then
+                            result.Append text |> ignore
+                            remaining <- remaining - bytes.Length
+                        else
+                            let mutable cut = remaining
+
+                            while cut > 0 && bytes.[cut] &&& 0xc0uy = 0x80uy do
+                                cut <- cut - 1
+
+                            result.Append(System.Text.Encoding.UTF8.GetString(bytes, 0, cut)) |> ignore
+                            remaining <- 0
+
+                deduped
+                |> List.iteri (fun i (v, _, _) ->
+                    if i > 0 then appendWithinLimit separator
+                    appendWithinLimit (v |> toText |> Option.defaultValue ""))
+
+                VString(result.ToString()))
     // Both JSON aggregates are NULL over an empty group but keep the NULLs
     // *inside* a non-empty one, so neither can route through the
     // NULL-filtered fold below.

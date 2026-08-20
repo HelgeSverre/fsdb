@@ -338,47 +338,56 @@ let rec private encodeExpr (w: Writer) (expr: Expr) : unit =
     | MatchAgainst _ ->
         failwithf "Persistence: a GENERATED column can't hold a subquery, MATCH or window function (MySQL itself rejects them there)"
 
-let rec private decodeExpr (r: #IReader) : Expr =
+let private maxDecodeDepth = 1000
+
+let rec private decodeExprAt (depth: int) (r: #IReader) : Expr =
+    if depth > maxDecodeDepth then
+        failwith "Persistence: expression nesting exceeds the decode limit"
+
+    let nested () = decodeExprAt (depth + 1) r
+
     let optExpr () =
         match r.ReadByte() with
         | 0uy -> None
-        | _ -> Some(decodeExpr r)
+        | _ -> Some(nested ())
 
-    let exprList () = List.init (r.ReadInt32LE()) (fun _ -> decodeExpr r)
+    let exprList () = List.init (r.ReadInt32LE()) (fun _ -> nested ())
 
-    let orderByList () = List.init (r.ReadInt32LE()) (fun _ -> decodeExpr r, decodeDirection r)
+    let orderByList () = List.init (r.ReadInt32LE()) (fun _ -> nested (), decodeDirection r)
 
     match r.ReadByte() with
     | 0x01uy -> Lit(decodeValue r)
     | 0x02uy -> Col(readStr r)
     | 0x03uy -> QualifiedCol(readStr r, readStr r)
-    | 0x04uy -> BinOp(decodeOp r, decodeExpr r, decodeExpr r)
-    | 0x05uy -> Not(decodeExpr r)
-    | 0x06uy -> IsNull(decodeExpr r)
-    | 0x07uy -> IsNotNull(decodeExpr r)
-    | 0x08uy -> IsTrue(decodeExpr r)
-    | 0x09uy -> IsFalse(decodeExpr r)
+    | 0x04uy -> BinOp(decodeOp r, nested (), nested ())
+    | 0x05uy -> Not(nested ())
+    | 0x06uy -> IsNull(nested ())
+    | 0x07uy -> IsNotNull(nested ())
+    | 0x08uy -> IsTrue(nested ())
+    | 0x09uy -> IsFalse(nested ())
     | 0x0Auy ->
-        let e = decodeExpr r
-        let p = decodeExpr r
+        let e = nested ()
+        let p = nested ()
         let cs = readBool r
         let esc = match r.ReadByte() with 0uy -> None | _ -> Some(char (r.ReadByte()))
         Like(e, p, cs, esc)
-    | 0x0Buy -> Regexp(decodeExpr r, decodeExpr r)
-    | 0x0Cuy -> In(decodeExpr r, exprList ())
-    | 0x0Duy -> Between(decodeExpr r, decodeExpr r, decodeExpr r)
+    | 0x0Buy -> Regexp(nested (), nested ())
+    | 0x0Cuy -> In(nested (), exprList ())
+    | 0x0Duy -> Between(nested (), nested (), nested ())
     | 0x0Euy -> FuncCall(readStr r, exprList ())
-    | 0x11uy -> Distinct(decodeExpr r)
-    | 0x12uy -> OrderBy(decodeExpr r, decodeDirection r)
-    | 0x13uy -> Cast(decodeExpr r, decodeColumnType r)
-    | 0x14uy -> Collate(decodeExpr r, readStr r)
+    | 0x11uy -> Distinct(nested ())
+    | 0x12uy -> OrderBy(nested (), decodeDirection r)
+    | 0x13uy -> Cast(nested (), decodeColumnType r)
+    | 0x14uy -> Collate(nested (), readStr r)
     | 0x15uy -> Star(readOptStr r)
     | 0x16uy ->
         let subject = optExpr ()
-        let whens = List.init (r.ReadInt32LE()) (fun _ -> decodeExpr r, decodeExpr r)
+        let whens = List.init (r.ReadInt32LE()) (fun _ -> nested (), nested ())
         let elseBranch = optExpr ()
         Case(subject, whens, elseBranch)
     | tag -> failwithf "Persistence: unknown Expr tag 0x%02x in WAL/snapshot" tag
+
+let private decodeExpr (r: #IReader) : Expr = decodeExprAt 0 r
 
 // ---------------------------------------------------------------------
 // `Ast.ColumnDefault` / `ColumnDef` / `IndexDef` / `ForeignKeyDef`
@@ -640,7 +649,10 @@ let rec private encodeEvent (w: Writer) (event: CommitEvent) : unit =
         for e in events do
             encodeEvent w e
 
-let rec private decodeEvent (r: #IReader) : CommitEvent =
+let rec private decodeEventAt (depth: int) (r: #IReader) : CommitEvent =
+    if depth > maxDecodeDepth then
+        failwith "Persistence: transaction nesting exceeds the decode limit"
+
     let str () = r.ReadLenEncString() |> Option.defaultValue ""
 
     match r.ReadByte() with
@@ -663,8 +675,10 @@ let rec private decodeEvent (r: #IReader) : CommitEvent =
         let db = str ()
         SchemaChanged(db, decodeStatement r)
     | k when k = KindTransactionCommitted ->
-        TransactionCommitted(List.init (r.ReadInt32LE()) (fun _ -> decodeEvent r))
+        TransactionCommitted(List.init (r.ReadInt32LE()) (fun _ -> decodeEventAt (depth + 1) r))
     | tag -> failwithf "Persistence: unknown WAL event kind 0x%02x" tag
+
+let private decodeEvent (r: #IReader) : CommitEvent = decodeEventAt 0 r
 
 /// One framed WAL record: `[int32 payload length][uint32 crc32][payload]`.
 /// Public so the tests can hand-build WAL files (and torn tails) without
@@ -769,7 +783,10 @@ let private applyRowDeletes (targets: Value[] list) (rows: Value[] list) : Value
 let private mapTableRows (store: Store) (dbName: string) (tableName: string) (f: Value[] list -> Value[] list) : unit =
     replaceTablesForReplay store dbName tableName f (Log.diagnostic "fsdb: WAL replay warning: %s")
 
-let rec private applyEvent (store: Store) (event: CommitEvent) : unit =
+let rec private applyEventAt (depth: int) (store: Store) (event: CommitEvent) : unit =
+    if depth > maxDecodeDepth then
+        failwith "Persistence: transaction nesting exceeds the apply limit"
+
     match event with
     | RowsInserted(db, table, rows) ->
         if not rows.IsEmpty then
@@ -777,7 +794,9 @@ let rec private applyEvent (store: Store) (event: CommitEvent) : unit =
     | RowsUpdated(db, table, changes) -> mapTableRows store db table (applyRowChanges changes)
     | RowsDeleted(db, table, rows) -> mapTableRows store db table (applyRowDeletes rows)
     | SchemaChanged(db, stmt) -> applyDdl store db stmt
-    | TransactionCommitted events -> events |> List.iter (applyEvent store)
+    | TransactionCommitted events -> events |> List.iter (applyEventAt (depth + 1) store)
+
+let private applyEvent (store: Store) (event: CommitEvent) : unit = applyEventAt 0 store event
 
 /// Replays every complete record in `walPath` into `store`, returning the
 /// byte offset just past the last successfully applied record. A torn final
@@ -1063,8 +1082,8 @@ let load (dataDir: string) : Store =
                 false)
 
     if loadedFromNew then
-        File.Move(newPath, snapshotPath, true)
         File.WriteAllText(walPath, "")
+        File.Move(newPath, snapshotPath, true)
         fsyncDir dataDir
     else
         if File.Exists snapshotPath then

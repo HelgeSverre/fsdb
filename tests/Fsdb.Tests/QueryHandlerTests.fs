@@ -451,6 +451,22 @@ let tests =
               | ResultSet(_, [ [ Some "ONLY_FULL_GROUP_BY,STRICT_TRANS_TABLES"; Some "latin1" ] ]) -> ()
               | other -> failtestf "expected both variables updated, got %A" other
 
+          testCase "GROUP_CONCAT obeys the session group_concat_max_len byte limit"
+          <| fun _ ->
+              let session = create 1 (Fsdb.Storage.create ())
+              let session, _ = handle session "CREATE TABLE gc (v VARCHAR(600))"
+              let session, _ = handle session ("INSERT INTO gc VALUES ('" + String.replicate 600 "x" + "'), ('" + String.replicate 600 "y" + "')")
+
+              match handle session "SELECT LENGTH(GROUP_CONCAT(v)) FROM gc" |> snd with
+              | ResultSet(_, [ [ Some "1024" ] ]) -> ()
+              | other -> failtestf "expected the MySQL default 1024-byte cap, got %A" other
+
+              let session, _ = handle session "SET SESSION group_concat_max_len = 2048"
+
+              match handle session "SELECT LENGTH(GROUP_CONCAT(v)) FROM gc" |> snd with
+              | ResultSet(_, [ [ Some "1201" ] ]) -> ()
+              | other -> failtestf "expected the larger session limit, got %A" other
+
           testCase "sql_mode inside Laravel's real comma-joined connect-time SET turns off strict coercion"
           <| fun _ ->
               // The exact statement `strict => false` sends
@@ -500,6 +516,34 @@ let tests =
               match handle session "SET @@SESSION.sql_mode = CONCAT(@@sql_mode, ',ANSI_QUOTES')" |> snd with
               | Affected _ -> ()
               | other -> failtestf "expected OK, got %A" other
+
+          testCase "an escaped quote keeps a comma inside one SET assignment"
+          <| fun _ ->
+              let session = create 1 (Fsdb.Storage.create ())
+
+              let session, result = handle session "SET @x='a\\\', @y=1'"
+
+              match result with
+              | Affected _ -> ()
+              | other -> failtestf "expected the escaped quote to keep the fragment intact, got %A" other
+
+              match handle session "SELECT @x, @y" |> snd with
+              | ResultSet(_, [ [ Some "a\\', @y=1"; None ] ]) -> ()
+              | other -> failtestf "expected only @x to be assigned, got %A" other
+
+          testCase "a session refuses user variables beyond its fixed memory-growth cap"
+          <| fun _ ->
+              let variables = seq { for i in 1..65536 -> sprintf "v%d" i, Some "1" } |> Map.ofSeq
+              let session = { create 1 (Fsdb.Storage.create ()) with UserVariables = variables }
+
+              match handle session "SET @overflow = 1" with
+              | unchanged, Err(1105, "Too many user-defined variables") ->
+                  Expect.equal unchanged.UserVariables.Count 65536 "the rejected SET leaves the map unchanged"
+              | _, other -> failtestf "expected the user-variable cap error, got %A" other
+
+              match handle session "SET @v1 = 2" with
+              | updated, Affected _ -> Expect.equal updated.UserVariables.["v1"] (Some "2") "existing variables remain writable"
+              | _, other -> failtestf "expected an existing variable update to succeed, got %A" other
 
           testCase "a bad multi-assignment SET applies none of its assignments, not just the ones before the bad one"
           <| fun _ ->
@@ -805,6 +849,84 @@ let tests =
                   Expect.isGreaterThan rows.Length 20 "all virtual tables listed"
               | other -> failtestf "expected the virtual-table listing, got %A" other
 
+          testCase "information_schema is readable but cannot be materialized or dropped by an unprivileged user"
+          <| fun _ ->
+              let store = Fsdb.Storage.create ()
+              let root = create 1 store
+              let _, _ = handle root "CREATE USER 'limited' IDENTIFIED BY 'pw'"
+              let limited = { create 2 store with User = "limited" }
+
+              match handle limited "SELECT TABLE_NAME FROM information_schema.TABLES" |> snd with
+              | ResultSet _ -> ()
+              | other -> failtestf "expected information_schema SELECT to remain available, got %A" other
+
+              match handle limited "CREATE TABLE information_schema.evil (id INT)" |> snd with
+              | Err(1142, _) -> ()
+              | other -> failtestf "expected CREATE in information_schema to be denied, got %A" other
+
+              match handle limited "DROP DATABASE information_schema" |> snd with
+              | Err(1044, _) -> ()
+              | other -> failtestf "expected DROP information_schema to be denied, got %A" other
+
+          testCase "information_schema only reveals schemas, definitions, and grants visible to the viewer"
+          <| fun _ ->
+              let store = Fsdb.Storage.create ()
+              let root = create 1 store
+              let root, _ = handle root "CREATE DATABASE secret"
+              let root, _ = handle root "USE secret"
+              let root, _ = handle root "CREATE TABLE t (id INT)"
+              let root, _ = handle root "CREATE TABLE log (id INT)"
+              let root, _ = handle root "CREATE VIEW secret_view AS SELECT id FROM t"
+              let root, _ = handle root "CREATE TRIGGER secret_trigger AFTER INSERT ON t FOR EACH ROW INSERT INTO log VALUES (NEW.id)"
+              let root, _ = handle root "CREATE USER 'limited' IDENTIFIED BY 'pw'"
+              let root, _ = handle root "CREATE USER 'grantee' IDENTIFIED BY 'pw'"
+              let root, _ = handle root "GRANT SELECT ON secret.t TO 'grantee'"
+              let limited = { create 2 store with User = "limited" }
+
+              let expectEmpty sql =
+                  match handle limited sql |> snd with
+                  | ResultSet(_, []) -> ()
+                  | other -> failtestf "expected no visible rows for %s, got %A" sql other
+
+              expectEmpty "SELECT SCHEMA_NAME FROM information_schema.SCHEMATA WHERE SCHEMA_NAME = 'secret'"
+              expectEmpty "SELECT TABLE_NAME FROM information_schema.TABLES WHERE TABLE_SCHEMA = 'secret'"
+              expectEmpty "SELECT VIEW_DEFINITION FROM information_schema.VIEWS WHERE TABLE_SCHEMA = 'secret'"
+              expectEmpty "SELECT ACTION_STATEMENT FROM information_schema.TRIGGERS WHERE TRIGGER_SCHEMA = 'secret'"
+              expectEmpty "SELECT GRANTEE FROM information_schema.SCHEMA_PRIVILEGES WHERE GRANTEE LIKE '%grantee%'"
+              expectEmpty "SELECT GRANTEE FROM information_schema.TABLE_PRIVILEGES WHERE GRANTEE LIKE '%grantee%'"
+
+              let _, _ = handle root "GRANT SELECT ON secret.t TO 'limited'"
+
+              match handle limited "SELECT TABLE_NAME FROM information_schema.TABLES WHERE TABLE_SCHEMA = 'secret'" |> snd with
+              | ResultSet(_, [ [ Some "t" ] ]) -> ()
+              | other -> failtestf "expected the granted table to become visible, got %A" other
+
+              match handle limited "SELECT GRANTEE FROM information_schema.TABLE_PRIVILEGES WHERE GRANTEE LIKE '%limited%'" |> snd with
+              | ResultSet(_, [ [ Some grantee ] ]) -> Expect.stringContains grantee "limited" "only the viewer's grant is visible"
+              | other -> failtestf "expected the viewer's table grant, got %A" other
+
+              expectEmpty "SELECT VIEW_DEFINITION FROM information_schema.VIEWS WHERE TABLE_SCHEMA = 'secret'"
+              expectEmpty "SELECT ACTION_STATEMENT FROM information_schema.TRIGGERS WHERE TRIGGER_SCHEMA = 'secret'"
+
+          testCase "DROP TRIGGER requires TRIGGER privilege on its subject table"
+          <| fun _ ->
+              let store = Fsdb.Storage.create ()
+              let root = create 1 store
+              let root, _ = handle root "CREATE DATABASE victim"
+              let root, _ = handle root "USE victim"
+              let root, _ = handle root "CREATE TABLE t (id INT)"
+              let root, _ = handle root "CREATE TRIGGER audit_t AFTER INSERT ON t FOR EACH ROW INSERT INTO t VALUES (NEW.id)"
+              let root, _ = handle root "CREATE USER 'limited' IDENTIFIED BY 'pw'"
+              let limited = { create 2 store with User = "limited"; Database = Some "victim" }
+
+              match handle limited "DROP TRIGGER audit_t" |> snd with
+              | Err(1142, _) -> ()
+              | other -> failtestf "expected DROP TRIGGER to be denied, got %A" other
+
+              match handle root "DROP TRIGGER audit_t" |> snd with
+              | Affected _ -> ()
+              | other -> failtestf "expected the denied attempt to leave the trigger intact, got %A" other
+
           testCase "SHOW PROCESSLIST answers (empty registry outside a server); KILL of an unknown id is 1094"
           <| fun _ ->
               let session = create 1 (Fsdb.Storage.create ())
@@ -817,7 +939,7 @@ let tests =
               | Err(1094, _) -> ()
               | other -> failtestf "expected 1094 for an unknown thread id, got %A" other
 
-          testCase "PROCESS-scoped visibility: PROCESSLIST hides other users, KILL denies with 1094, SHOW GRANTS with 1142"
+          testCase "PROCESS grants visibility while SUPER grants authority to KILL another user"
           <| fun _ ->
               let store = Fsdb.Storage.create ()
               let root = create 1 store
@@ -857,6 +979,16 @@ let tests =
                   match handle viewer "KILL 777001" |> snd with
                   | Err(1094, msg) -> Expect.equal msg "Unknown thread id: 777001" "MySQL's 1094 text"
                   | other -> failtestf "expected 1094 for another user's connection, got %A" other
+
+                  let root, granted = handle root "GRANT PROCESS ON *.* TO 'pviewer'"
+
+                  match granted with
+                  | Err(code, msg) -> failtestf "grant PROCESS: %d %s" code msg
+                  | _ -> ()
+
+                  match handle viewer "KILL 777001" |> snd with
+                  | Err(1095, msg) -> Expect.equal msg "You are not owner of thread 777001" "PROCESS grants visibility, not kill authority"
+                  | other -> failtestf "expected 1095 without SUPER, got %A" other
 
                   // Another account's grants read `mysql.user`; without SELECT
                   // there, MySQL denies with 1142 on that table.
@@ -1097,7 +1229,7 @@ let tests =
               let session, _ = handle session "CREATE TABLE overflow_t (d DECIMAL(10,2))"
 
               match handle session "INSERT INTO overflow_t VALUES (1e300)" |> snd with
-              | Err(1105, _) -> ()
+              | Err(1105, "Internal error") -> ()
               | other -> failtestf "expected a 1105 internal-error Err, got %A" other
 
           testCase "LAST_INSERT_ID() stays 0 for an explicit AUTO_INCREMENT id, unlike the OK packet's last_insert_id"

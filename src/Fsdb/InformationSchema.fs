@@ -1170,7 +1170,10 @@ let private schemaPrivilegesRows (catalog: Catalog) : Value[] list =
     | Some t ->
         match colIdx t "User", colIdx t "Host", colIdx t "Db", colIdx t "Grant_priv" with
         | Some u, Some h, Some d, Some g ->
+            let ownOnly = restrictedTo "SELECT"
+
             t.Rows
+            |> List.filter (fun row -> match ownOnly with Some user -> rowText row u = user | None -> true)
             |> List.collect (fun row ->
                 let grantee = sprintf "'%s'@'%s'" (rowText row u) (rowText row h)
                 let grantable = if rowText row g = "Y" then "YES" else "NO"
@@ -1189,7 +1192,10 @@ let private tablePrivilegesRows (catalog: Catalog) : Value[] list =
     | Some t ->
         match colIdx t "User", colIdx t "Host", colIdx t "Db", colIdx t "Table_name", colIdx t "Table_priv" with
         | Some u, Some h, Some d, Some tn, Some tp ->
+            let ownOnly = restrictedTo "SELECT"
+
             t.Rows
+            |> List.filter (fun row -> match ownOnly with Some user -> rowText row u = user | None -> true)
             |> List.collect (fun row ->
                 let members = Fsdb.Auth.setMembers (rowText row tp)
                 let hasMember s = members |> List.exists (fun m -> String.Equals(m, s, StringComparison.OrdinalIgnoreCase))
@@ -1300,6 +1306,41 @@ let private selfColumnsRowsCached : Lazy<Value[] list> =
          |> List.collect (fun (name, cols) ->
              cols |> List.mapi (fun i c -> columnRowWith "select" "information_schema" name i "" c)))
 
+let private scopeRowsToViewer (tableName: string) (columns: ColumnDef list) (rows: Value[] list) : Value[] list =
+    match currentViewer.Value with
+    | None -> rows
+    | Some(store, user) ->
+        let columnIndex name =
+            columns
+            |> List.tryFindIndex (fun column -> String.Equals(column.Name, name, StringComparison.OrdinalIgnoreCase))
+
+        let schemaIndex =
+            [ "TABLE_SCHEMA"; "CONSTRAINT_SCHEMA"; "TRIGGER_SCHEMA"; "EVENT_SCHEMA"; "ROUTINE_SCHEMA"; "SCHEMA_NAME" ]
+            |> List.tryPick columnIndex
+
+        let tableIndex = [ "TABLE_NAME"; "EVENT_OBJECT_TABLE" ] |> List.tryPick columnIndex
+
+        let visibleSchema (row: Value[]) =
+            schemaIndex
+            |> Option.map (fun index -> row.[index] |> Value.toText |> Option.map (Fsdb.Auth.canSeeDatabase store user) |> Option.defaultValue false)
+            |> Option.defaultValue true
+
+        let visibleObject (row: Value[]) =
+            let visibleTable =
+                match schemaIndex, tableIndex with
+                | Some dbIndex, Some nameIndex -> Fsdb.Auth.canSeeTable store user (rowText row dbIndex) (rowText row nameIndex)
+                | _ -> true
+
+            visibleTable
+            && (match tableName with
+                | "VIEWS" ->
+                    Fsdb.Auth.check store user [ "SHOW VIEW", Fsdb.Auth.OnTable(rowText row 1, rowText row 2) ] |> Result.isOk
+                | "TRIGGERS" ->
+                    Fsdb.Auth.check store user [ "TRIGGER", Fsdb.Auth.OnTable(rowText row 1, rowText row 6) ] |> Result.isOk
+                | _ -> true)
+
+        rows |> List.filter (fun row -> visibleSchema row && visibleObject row)
+
 
 /// Resolves one `information_schema` table name (case-insensitive) to its
 /// columns and freshly-projected rows, or `None` if `name` isn't one of the
@@ -1341,7 +1382,7 @@ let scan (catalog: Catalog) (name: string) : (ColumnDef list * Value[] list) opt
     |> Option.bind (fun rows ->
         virtualTableDefs
         |> List.tryFind (fst >> (=) upper)
-        |> Option.map (fun (_, cols) -> cols, rows))
+        |> Option.map (fun (_, cols) -> cols, scopeRowsToViewer upper cols rows))
 
 // ---------------------------------------------------------------------------
 // `SHOW TABLES / DATABASES / COLUMNS / CREATE TABLE / INDEX / TABLE STATUS`,

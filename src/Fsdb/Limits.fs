@@ -30,6 +30,11 @@ let mutable maxAllowedPacket = 64 * 1024 * 1024
 /// connection without resizing a semaphore.
 let mutable maxConnections = 500
 
+/// Server-wide setting used as a per-session prepared-statement ceiling.
+/// The narrower scope still bounds every individual connection's retained
+/// ASTs without coupling otherwise independent sessions.
+let mutable maxPreparedStmtCount = 16382
+
 /// Idle timeout waiting for the *next* command packet — `wait_timeout`'s
 /// semantics. fsdb's default is 300s where MySQL's is 28800: a half-open
 /// peer that connects and then says nothing otherwise pins a socket and a
@@ -39,6 +44,10 @@ let mutable maxConnections = 500
 /// `wait_timeout` to size its idle-recycle needs the truth, or it hands the
 /// application a connection the server closed hours earlier.
 let mutable waitTimeoutSeconds = 300
+
+/// Maximum time a socket write may remain blocked by a client that stopped
+/// reading while keeping its connection open.
+let mutable netWriteTimeoutSeconds = 60
 
 /// How long a transaction waits to enter the commit/rebase section before
 /// giving up with a retryable 1205 rather than blocking forever —
@@ -99,11 +108,23 @@ let private knobs =
         Set = fun v -> maxConnections <- int v
         Get = fun () -> int64 maxConnections
         Reportable = true }
+      { Name = "max_prepared_stmt_count"
+        Min = 0L
+        Max = 1048576L
+        Set = fun v -> maxPreparedStmtCount <- int v
+        Get = fun () -> int64 maxPreparedStmtCount
+        Reportable = true }
       { Name = "wait_timeout"
         Min = 1L
         Max = 31536000L
         Set = fun v -> waitTimeoutSeconds <- int v
         Get = fun () -> int64 waitTimeoutSeconds
+        Reportable = true }
+      { Name = "net_write_timeout"
+        Min = 1L
+        Max = 31536000L
+        Set = fun v -> netWriteTimeoutSeconds <- int v
+        Get = fun () -> int64 netWriteTimeoutSeconds
         Reportable = true }
       { Name = "innodb_lock_wait_timeout"
         Min = 1L
