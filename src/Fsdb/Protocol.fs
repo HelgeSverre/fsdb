@@ -46,18 +46,6 @@ let Utf8Mb4GeneralCi = 45
 /// decode arbitrary bytes as text (and replace invalid sequences).
 let BinaryCollation = 63
 
-let private BlobFlag = 0x0010
-/// Marks a `STRING` column as an enum — the only thing that distinguishes
-/// the two on the wire, and what a client reports `ENUM` from.
-let private EnumFlag = 0x0100
-let private BinaryFlag = 0x0080
-
-/// UNSIGNED_FLAG. A `BIGINT UNSIGNED` column is LONGLONG on the wire like
-/// any other 64-bit integer; only this flag tells the client to read the
-/// eight bytes as a `uint64`, which is what makes `CAST(-1 AS UNSIGNED)`
-/// arrive as 18446744073709551615 instead of -1.
-let private UnsignedFlag = 0x0020
-
 /// SERVER_STATUS_IN_TRANS
 let StatusInTrans = 0x0001
 
@@ -225,20 +213,10 @@ let eofPayload (capabilities: uint32) (statusFlags: int) : byte[] =
 
     w.ToArray()
 
-/// A resultset column: its name and its MySQL wire type — see
-/// `Value.mysqlTypeOf` (the data-driven source for most resultsets) and
-/// `wireTypeOfColumnType` below (the declared-schema source for the
-/// COM_FIELD_LIST path, which has no row data to read a type off of).
+/// A resultset column definition ready for protocol encoding.
 type ColumnDef =
     { Name: string
-      Type: byte
-      /// The column-definition packet's `decimals` field. For a temporal
-      /// column it carries the fractional-seconds precision (fsp 0-6) — a
-      /// MySQL client reads a `DATETIME(6)`'s precision off exactly this byte
-      /// (it surfaces as `MySqlConnector`'s `NumericScale`), so an exact-second
-      /// value still reports scale 6. `0` for everything else, matching
-      /// MySQL for non-fractional columns.
-      Decimals: byte }
+      Metadata: ColumnMetadata }
 
 /// Counts the fractional-second digits a temporal value's already-rendered
 /// text carries (`... :00.000000` → 6, `... :00` → 0) — the fsp the wire
@@ -265,32 +243,12 @@ let columnDefPayload (col: ColumnDef) : byte[] =
     w.WriteLenEncString col.Name
     w.WriteLenEncString col.Name // org_name
     w.WriteLenEncInt 0x0cUL // length of fixed-length fields
-    let isBinary = col.Type = TypeBlob
-    let isUnsigned = col.Type = TypeLongLongUnsigned
-    let isEnum = col.Type = TypeEnumString
-    let isBool = col.Type = TypeTinyBool
+    let isBinary = col.Metadata.Flags &&& BinaryFlag <> 0us
     w.WriteInt16LE(if isBinary then BinaryCollation else Utf8Mb4GeneralCi)
-    // A client reads BOOLEAN off `TINY` whose declared display width is 1
-    // (`Ast.TBool`); every other column advertises no length, which clients
-    // treat as "unspecified" rather than "zero".
-    w.WriteInt32LE(if isBool then 1 else 0)
-    // The one place the stand-in type ids become real wire bytes: each is an
-    // ordinary MySQL id plus whatever separate field actually carries the
-    // distinction (see `Value.TypeLongLongUnsigned` and its neighbours).
-    w.WriteByte(
-        if isUnsigned then TypeLongLong
-        elif isEnum then TypeString
-        elif isBool then TypeTiny
-        else col.Type
-    )
-
-    w.WriteInt16LE(
-        if isBinary then BlobFlag ||| BinaryFlag
-        elif isUnsigned then UnsignedFlag
-        elif isEnum then EnumFlag
-        else 0
-    )
-    w.WriteByte col.Decimals // fsp for temporal columns, else 0
+    w.WriteInt32LE(int col.Metadata.ColumnLength)
+    w.WriteByte col.Metadata.TypeId
+    w.WriteInt16LE(int col.Metadata.Flags)
+    w.WriteByte col.Metadata.Decimals
     w.WriteInt16LE 0 // filler
     w.ToArray()
 
@@ -325,14 +283,14 @@ let textRowPayload (values: string option list) : byte[] =
 /// `Executor.QueryResult` represents VBytes losslessly as a Latin-1 string;
 /// turn that carrier back into its original bytes for binary columns rather
 /// than UTF-8-encoding it and changing every byte above 0x7f.
-let textRowPayloadTyped (columnTypes: byte list) (values: string option list) : byte[] =
+let textRowPayloadTyped (columns: ColumnMetadata list) (values: string option list) : byte[] =
     let w = Writer()
 
-    List.zip columnTypes values
-    |> List.iter (fun (typeId, value) ->
+    List.zip columns values
+    |> List.iter (fun (metadata, value) ->
         match value with
         | None -> w.WriteLenEncNull()
-        | Some s when typeId = TypeBlob -> w.WriteLenEncBytes(Encoding.Latin1.GetBytes s)
+        | Some s when metadata.Flags &&& BinaryFlag <> 0us -> w.WriteLenEncBytes(Encoding.Latin1.GetBytes s)
         | Some s -> w.WriteLenEncString s)
 
     w.ToArray()
@@ -409,13 +367,14 @@ let private parseIntOr (fallback: int64) (s: string) : int64 =
     | true, v -> v
     | _ -> fallback
 
-let private writeBinaryValue (w: Writer) (typeId: byte) (s: string) : unit =
+let private writeBinaryValue (w: Writer) (metadata: ColumnMetadata) (s: string) : unit =
+    let typeId = metadata.TypeId
+
     if typeId = TypeLongLong then
-        w.WriteInt64LE(Int64.Parse(s, Globalization.CultureInfo.InvariantCulture))
-    // Same eight bytes, parsed out of the unsigned domain — `Int64.Parse`
-    // would throw on anything past 2^63-1, the exact range this exists for.
-    elif typeId = TypeLongLongUnsigned then
-        w.WriteInt64LE(int64 (UInt64.Parse(s, Globalization.CultureInfo.InvariantCulture)))
+        if metadata.Flags &&& UnsignedFlag <> 0us then
+            w.WriteInt64LE(int64 (UInt64.Parse(s, Globalization.CultureInfo.InvariantCulture)))
+        else
+            w.WriteInt64LE(Int64.Parse(s, Globalization.CultureInfo.InvariantCulture))
     elif typeId = TypeDouble then
         w.WriteDoubleLE(Double.Parse(s, Globalization.CultureInfo.InvariantCulture))
     elif typeId = TypeDate then
@@ -451,24 +410,24 @@ let private writeBinaryValue (w: Writer) (typeId: byte) (s: string) : unit =
     // function's doc is about. Parsed defensively for the same reason
     // `writeBinaryTime` is — this runs after the handler returned, so a
     // throw would drop the connection with no ERR ever sent.
-    elif typeId = TypeTinyBool || typeId = TypeTiny then
+    elif typeId = TypeTiny then
         w.WriteByte(byte (sbyte (parseIntOr 0L s)))
     elif typeId = TypeYear || typeId = TypeShort then
         w.WriteInt16LE(int (int16 (parseIntOr 0L s)))
     elif typeId = TypeLong then
         w.WriteInt32LE(int (int32 (parseIntOr 0L s)))
-    elif typeId = TypeBlob then
+    elif metadata.Flags &&& BinaryFlag <> 0us then
         w.WriteLenEncBytes(Encoding.Latin1.GetBytes s)
     else
         w.WriteLenEncString s
 
 /// Encodes one binary-protocol resultset row
 /// (https://dev.mysql.com/doc/dev/mysql-server/latest/page_protocol_binary_resultset.html#sect_protocol_binary_resultset_row).
-/// `columnTypes` must be the same list `columnDefPayload` advertised each
+/// `columns` must be the same list `columnDefPayload` advertised each
 /// column as (see `writeBinaryValue`'s doc on why); a shorter/longer list
 /// than `values` is a caller bug, not a value this falls back for. None
 /// means SQL NULL.
-let binaryRowPayload (columnTypes: byte list) (values: string option list) : byte[] =
+let binaryRowPayload (columns: ColumnMetadata list) (values: string option list) : byte[] =
     let w = Writer()
     w.WriteByte 0uy // packet header, always 0x00 for a row
 
@@ -484,10 +443,10 @@ let binaryRowPayload (columnTypes: byte list) (values: string option list) : byt
 
     w.WriteBytes nullBitmap
 
-    List.zip columnTypes values
-    |> List.iter (fun (typeId, v) ->
+    List.zip columns values
+    |> List.iter (fun (metadata, v) ->
         match v with
-        | Some s -> writeBinaryValue w typeId s
+        | Some s -> writeBinaryValue w metadata s
         | None -> ())
 
     w.ToArray()

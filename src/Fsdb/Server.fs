@@ -104,7 +104,7 @@ let private resultHeadPayloads
     (capabilities: uint32)
     (statusFlags: int)
     (lastInsertId: uint64)
-    (columnTypes: byte list)
+    (columnMetadata: ColumnMetadata list)
     (result: Executor.QueryResult)
     : byte[] list =
     match result with
@@ -113,16 +113,16 @@ let private resultHeadPayloads
     | ResultSet(columns, rows) ->
         let deprecateEof = capabilities &&& ClientDeprecateEof <> 0u
 
-        // `columnTypes` only means anything if the caller actually had one
+        // Metadata only applies when the caller has one entry per result
         // entry per column (a mismatch means "no real info", e.g. a probe
-        // result — see `Session.LastResultColumnTypes`'s doc). The column
+        // result — see `Session.LastResultColumnMetadata`'s doc). The column
         // definition packets and `sendResult`'s row encoder reconcile to
         // this same `types`, so the two can never disagree.
-        let types =
-            if List.length columnTypes = columns.Length then
-                columnTypes
+        let metadata =
+            if List.length columnMetadata = columns.Length then
+                columnMetadata
             else
-                List.replicate columns.Length TypeVarString
+                List.replicate columns.Length (Value.columnMetadata TypeVarString)
 
         let columnCountPayload =
             let w = Writer()
@@ -134,15 +134,18 @@ let private resultHeadPayloads
         // already emitted into the rows (see `Protocol.fractionalDigitsOf`),
         // so a client learns a `DATETIME(6)`/`TIME(3)`'s precision even on an
         // exact second. Non-temporal columns advertise 0.
-        let decimalsOf (colIndex: int) (ty: byte) : byte =
-            if ty = TypeDateTime || ty = TypeTime then
-                rows |> List.map (fun r -> List.tryItem colIndex r |> Option.flatten) |> Protocol.fractionalDigitsOf
+        let withValuePrecision (colIndex: int) (metadata: ColumnMetadata) =
+            if metadata.Decimals = 0uy && (metadata.TypeId = TypeDateTime || metadata.TypeId = TypeTime) then
+                let decimals =
+                    rows |> List.map (fun r -> List.tryItem colIndex r |> Option.flatten) |> Protocol.fractionalDigitsOf
+
+                { metadata with Decimals = decimals }
             else
-                0uy
+                metadata
 
         [ columnCountPayload ]
-        @ (List.zip columns types
-           |> List.mapi (fun i (name, ty) -> columnDefPayload { Name = name; Type = ty; Decimals = decimalsOf i ty }))
+        @ (List.zip columns metadata
+           |> List.mapi (fun i (name, metadata) -> columnDefPayload { Name = name; Metadata = withValuePrecision i metadata }))
         @ (if deprecateEof then [] else [ eofPayload capabilities statusFlags ])
 
 /// Writes an OK/ERR/resultset reply. Rows are framed and written in batches —
@@ -155,20 +158,20 @@ let private sendResult
     (startSeq: byte)
     (statusFlags: int)
     (lastInsertId: uint64)
-    (columnTypes: byte list)
-    (rowEncoder: byte list -> string option list -> byte[])
+    (columnMetadata: ColumnMetadata list)
+    (rowEncoder: ColumnMetadata list -> string option list -> byte[])
     (result: Executor.QueryResult)
     : Async<unit> =
     async {
-        let! seqId = sendPayloads stream startSeq (resultHeadPayloads capabilities statusFlags lastInsertId columnTypes result)
+        let! seqId = sendPayloads stream startSeq (resultHeadPayloads capabilities statusFlags lastInsertId columnMetadata result)
 
         match result with
         | ResultSet(columns, rows) ->
-            let types =
-                if List.length columnTypes = columns.Length then
-                    columnTypes
+            let metadata =
+                if List.length columnMetadata = columns.Length then
+                    columnMetadata
                 else
-                    List.replicate columns.Length TypeVarString
+                    List.replicate columns.Length (Value.columnMetadata TypeVarString)
 
             let mutable seqId = seqId
             let buf = ResizeArray<byte>()
@@ -182,7 +185,7 @@ let private sendResult
                 }
 
             for row in rows do
-                let payload = rowEncoder types row
+                let payload = rowEncoder metadata row
 
                 if payload.Length < maxPacketPayload then
                     // 4-byte packet header (3-byte length + seq id) written
@@ -236,14 +239,14 @@ let sendQueryResult
     (startSeq: byte)
     (statusFlags: int)
     (lastInsertId: uint64)
-    (columnTypes: byte list)
+    (columnMetadata: ColumnMetadata list)
     (result: Executor.QueryResult)
     : Async<unit> =
-    sendResult stream capabilities startSeq statusFlags lastInsertId columnTypes textRowPayloadTyped result
+    sendResult stream capabilities startSeq statusFlags lastInsertId columnMetadata textRowPayloadTyped result
 
 /// As `sendQueryResult`, but encodes resultset rows in the binary protocol
 /// row format COM_STMT_EXECUTE requires (`binaryRowPayload`, which — unlike
-/// `textRowPayload` — actually reads `columnTypes` to pick each value's
+/// `textRowPayload` — reads `columnMetadata` to pick each value's
 /// wire encoding, not just what `columnDefPayload` advertises).
 let sendBinaryQueryResult
     (stream: IO.Stream)
@@ -251,10 +254,10 @@ let sendBinaryQueryResult
     (startSeq: byte)
     (statusFlags: int)
     (lastInsertId: uint64)
-    (columnTypes: byte list)
+    (columnMetadata: ColumnMetadata list)
     (result: Executor.QueryResult)
     : Async<unit> =
-    sendResult stream capabilities startSeq statusFlags lastInsertId columnTypes binaryRowPayload result
+    sendResult stream capabilities startSeq statusFlags lastInsertId columnMetadata binaryRowPayload result
 
 /// `SERVER_STATUS_AUTOCOMMIT` always, plus `SERVER_STATUS_IN_TRANS` while
 /// `session.Tx` is open — every OK/EOF packet reports this so PDO's
@@ -651,7 +654,7 @@ let private handleConnection
                                             seqId
                                             (statusFlagsFor session)
                                             (uint64 session.LastInsertId)
-                                            session.LastResultColumnTypes
+                                            session.LastResultColumnMetadata
                                             result
 
                                     return! loop session
@@ -676,7 +679,7 @@ let private handleConnection
                                 | Result.Ok(columns, _rows) ->
                                     let payloads =
                                         (columns
-                                         |> List.map (fun c -> columnDefPayload { Name = c.Name; Type = wireTypeOfColumnType c.Type; Decimals = decimalsOfColumnType c.Type }))
+                                         |> List.map (fun c -> columnDefPayload { Name = c.Name; Metadata = ColumnWire.metadataOfColumn c }))
                                         @ [ eofPayload capabilities (statusFlagsFor session) ]
 
                                     do! sendPayloads stream seqId payloads |> Async.Ignore
@@ -713,7 +716,7 @@ let private handleConnection
 
                                     let payloads =
                                         stmtPrepareOkPayload stmtId paramCount
-                                        :: List.replicate paramCount (columnDefPayload { Name = "?"; Type = TypeVarString; Decimals = 0uy })
+                                        :: List.replicate paramCount (columnDefPayload { Name = "?"; Metadata = Value.columnMetadata TypeVarString })
                                         @ paramDefEof
 
                                     do! sendPayloads stream seqId payloads |> Async.Ignore
@@ -840,7 +843,7 @@ let private handleConnection
                                                     seqId
                                                     (statusFlagsFor session)
                                                     (uint64 session.LastInsertId)
-                                                    session.LastResultColumnTypes
+                                                    session.LastResultColumnMetadata
                                                     result
 
                                             return! loop session
@@ -911,11 +914,8 @@ let private handleConnection
                                 // database — what connection pools use this
                                 // for instead of a full reconnect.
                                 //
-                                // Roll the old session back first: an open
-                                // transaction holds a per-database write gate
-                                // lease that only `closeSession`'s rollback
-                                // disposes — dropping the session record alone
-                                // would leak the gate until process restart.
+                                // Roll the old session back before discarding
+                                // its private snapshot.
                                 QueryHandler.closeSession session
 
                                 let session =

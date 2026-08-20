@@ -7,6 +7,7 @@ open System.Runtime.CompilerServices
 open Fsdb.Ast
 open Fsdb.Protocol
 open Fsdb.Storage
+open Fsdb.Value
 
 /// Session variable defaults good enough to satisfy mysql CLI / PDO on
 /// connect. Grows as real clients ask for more `@@vars` / SHOW VARIABLES.
@@ -228,7 +229,7 @@ type Session =
       /// like `LastInsertId` instead of widening `handle`'s own return
       /// type, since dozens of tests destructure `QueryHandler.handle`'s
       /// plain `Session * QueryResult` pair directly.
-      LastResultColumnTypes: byte list
+      LastResultColumnMetadata: ColumnMetadata list
       /// `Some` between BEGIN/START TRANSACTION and COMMIT/ROLLBACK.
       Tx: Transaction option
       /// Prepared statements registered by this connection's COM_STMT_PREPARE
@@ -291,12 +292,11 @@ let create (connectionId: int) (store: Store) : Session =
       // session's own variables before every statement
       // (`QueryHandler.executeParsed`); without this clone they'd be the literal
       // same fields every other connection's re-derivation also flips, and
-      // nothing serializes that across connections (a plain SELECT takes no gate
-      // at all, a write gates only its own database).
+      // nothing serializes those session-specific assignments across connections.
       Store = { store with StrictMode = store.StrictMode }
       LastInsertId = 0L
       LastGeneratedId = 0L
-      LastResultColumnTypes = []
+      LastResultColumnMetadata = []
       Tx = None
       Statements = Map.empty
       NextStmtId = 1

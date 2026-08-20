@@ -55,30 +55,30 @@ let TypeBlob = 0xfcuy
 let TypeVarString = 0xfduy
 let TypeString = 0xfeuy
 
-/// An internal stand-in for "LONGLONG carrying the UNSIGNED flag", which
-/// the wire has no distinct type id for — the flag lives in the column
-/// definition's separate `flags` field, and the `byte list` channel that
-/// carries a resultset's column types from `Executor` to `Protocol` has
-/// room for the type alone. `Protocol.columnDefPayload` translates this
-/// back into `TypeLongLong` + `UNSIGNED_FLAG` at the one place the byte
-/// reaches the wire, and `Protocol.writeBinaryValue` reads it to pick
-/// `UInt64.Parse` over `Int64.Parse`. 0x88 is outside every id MySQL
-/// assigns (0x00-0x12 and 0xf5-0xff), so it can never collide with a real
-/// one.
-let TypeLongLongUnsigned = 0x88uy
+let NotNullFlag = 0x0001us
+let PrimaryKeyFlag = 0x0002us
+let UniqueKeyFlag = 0x0004us
+let BlobFlag = 0x0010us
+let UnsignedFlag = 0x0020us
+let BinaryFlag = 0x0080us
+let EnumFlag = 0x0100us
+let AutoIncrementFlag = 0x0200us
+let SetFlag = 0x0800us
 
-/// The same stand-in trick for ENUM, which has no wire type id of its own:
-/// MySQL sends an enum column as `STRING` carrying `ENUM_FLAG`, and a client
-/// reports the column as `ENUM` only when that flag is set (it is what
-/// MySqlConnector's `GetDataTypeName` keys on). `Protocol.columnDefPayload`
-/// translates this back into `TypeString` + the flag.
-let TypeEnumString = 0x89uy
+/// The result-column metadata consumed by both the definition packet and
+/// binary-row encoder. Keeping these fields together prevents the encoder
+/// from disagreeing with the type and flags advertised to the client.
+type ColumnMetadata =
+    { TypeId: byte
+      ColumnLength: uint32
+      Flags: uint16
+      Decimals: byte }
 
-/// And for BOOLEAN, which is MySQL's own spelling of `TINYINT(1)` and has no
-/// distinct wire type either: it goes out as `TINY` whose *column length* is
-/// 1, which is what a client keys "this is a bool, not a small int" on.
-/// `Protocol.columnDefPayload` translates this into `TypeTiny` + length 1.
-let TypeTinyBool = 0x8auy
+let columnMetadata typeId =
+    { TypeId = typeId
+      ColumnLength = 0u
+      Flags = 0us
+      Decimals = 0uy }
 
 /// .NET's shortest-round-trip double formatting agrees with MySQL on the
 /// mantissa but not the exponent: "1E+20" vs MySQL's "1e20" (lowercase,
@@ -280,21 +280,23 @@ let decodeValue (r: #IReader) : Value =
 /// native-int conversion real MySQL gives it if fsdb reports the same
 /// type real MySQL would, instead of leaving every column a string for
 /// the client to coerce.
-let mysqlTypeOf (v: Value) : byte =
+let mysqlMetadataOf (v: Value) : ColumnMetadata =
     match v with
     // No data to type; NULL round-trips the same regardless of the
     // declared column type, so the caller's fallback (typically
     // VAR_STRING) is as good as anything else here.
-    | VNull -> TypeVarString
-    | VInt _ -> TypeLongLong
-    | VUInt _ -> TypeLongLongUnsigned
-    | VDouble _ -> TypeDouble
-    | VDecimal _ -> TypeNewDecimal
+    | VNull -> columnMetadata TypeVarString
+    | VInt _ -> columnMetadata TypeLongLong
+    | VUInt _ -> { columnMetadata TypeLongLong with Flags = UnsignedFlag }
+    | VDouble _ -> columnMetadata TypeDouble
+    | VDecimal _ -> columnMetadata TypeNewDecimal
     | VString _
-    | VJson _ -> TypeVarString
-    | VBytes _ -> TypeBlob
-    | VDate _ -> TypeDate
-    | VDateTime _ -> TypeDateTime
+    | VJson _ -> columnMetadata TypeVarString
+    | VBytes _ -> { columnMetadata TypeBlob with Flags = BlobFlag ||| BinaryFlag }
+    | VDate _ -> columnMetadata TypeDate
+    | VDateTime _ -> columnMetadata TypeDateTime
+
+let mysqlTypeOf (v: Value) : byte = (mysqlMetadataOf v).TypeId
 
 /// Matches the leading numeric prefix of a string the way MySQL's
 /// string-to-number cast does (`'12abc' + 0` = 12, `'abc' + 0` = 0),

@@ -38,7 +38,7 @@ type ColumnType =
     /// `BOOLEAN`/`BOOL`, and the `TINYINT(1)` they are a synonym for. Stored
     /// and range-checked exactly like `TTinyInt false`; separate only because
     /// clients decide "boolean" from the declared display width of 1, so a
-    /// resultset column has to advertise it (see `Value.TypeTinyBool`) and
+    /// resultset column has to advertise its display width and
     /// `information_schema` has to render `tinyint(1)`. A plain `TINYINT` is
     /// width 4 and stays `TTinyInt`.
     | TBool

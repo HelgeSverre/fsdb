@@ -354,7 +354,8 @@ let private mapOverExprs (f: Expr -> Expr) (over: OverClause) : OverClause =
 /// with a dedicated error (3594) rather than resolving.
 /// A synthetic pre-pass column (`__fsdb_window_N__`/`__fsdb_match_N__`):
 /// the declared type is only ever read for `Nullable` — the row's actual
-/// `Value` drives the wire type downstream (see `columnTypesOf`).
+/// `Value` drives the fallback wire metadata downstream (see
+/// `columnMetadataOf`).
 let private syntheticColumn (name: string) (ty: ColumnType) (nullable: bool) : ColumnDef =
     { Name = name
       Type = ty
@@ -934,6 +935,150 @@ let rec private fspOfExpr (ctx: EvalContext) (expr: Expr) : int option =
         | _ -> Some 0
     | _ -> tryColumnDefForExpr ctx expr |> Option.bind (fun c -> fspOfType c.Type)
 
+let rec private metadataOfExpr (ctx: EvalContext) (expr: Expr) : ColumnMetadata option =
+    let simple typeId =
+        let columnLength =
+            if typeId = TypeTiny then 4u
+            elif typeId = TypeShort then 6u
+            elif typeId = TypeLong then 11u
+            elif typeId = TypeLongLong then 20u
+            elif typeId = TypeFloat then 12u
+            elif typeId = TypeDouble then 22u
+            elif typeId = TypeNewDecimal then 67u
+            elif typeId = TypeDate then 10u
+            elif typeId = TypeDateTime then 19u
+            elif typeId = TypeTime then 10u
+            elif typeId = TypeYear then 4u
+            else 0u
+
+        Some { Value.columnMetadata typeId with ColumnLength = columnLength }
+    let typeIdOf expression = metadataOfExpr ctx expression |> Option.map _.TypeId
+
+    let numeric left right =
+        let isInteger typeId =
+            typeId = TypeTiny || typeId = TypeShort || typeId = TypeLong || typeId = TypeLongLong || typeId = TypeYear
+
+        match metadataOfExpr ctx left, metadataOfExpr ctx right with
+        | Some leftType, _ when leftType.TypeId = TypeDouble || leftType.TypeId = TypeFloat -> simple TypeDouble
+        | _, Some rightType when rightType.TypeId = TypeDouble || rightType.TypeId = TypeFloat -> simple TypeDouble
+        | Some leftType, _ when leftType.TypeId = TypeString || leftType.TypeId = TypeVarString || leftType.TypeId = TypeBlob -> simple TypeDouble
+        | _, Some rightType when rightType.TypeId = TypeString || rightType.TypeId = TypeVarString || rightType.TypeId = TypeBlob -> simple TypeDouble
+        | Some leftType, _ when leftType.TypeId = TypeNewDecimal -> simple TypeNewDecimal
+        | _, Some rightType when rightType.TypeId = TypeNewDecimal -> simple TypeNewDecimal
+        | Some leftType, Some rightType when isInteger leftType.TypeId && isInteger rightType.TypeId -> simple TypeLongLong
+        | Some leftType, None when isInteger leftType.TypeId -> simple TypeDouble
+        | None, Some rightType when isInteger rightType.TypeId -> simple TypeDouble
+        | _ -> None
+
+    let choose expressions =
+        let metadata = expressions |> List.choose (metadataOfExpr ctx)
+
+        if metadata |> List.exists (fun m -> m.TypeId = TypeDouble || m.TypeId = TypeFloat) then
+            simple TypeDouble
+        elif metadata |> List.exists (fun m -> m.TypeId = TypeNewDecimal) then
+            simple TypeNewDecimal
+        else
+            List.tryHead metadata
+
+    match expr with
+    | Lit VNull -> None
+    | Lit(VInt value) ->
+        if value >= int64 System.SByte.MinValue && value <= int64 System.SByte.MaxValue then
+            simple TypeTiny
+        elif value >= int64 System.Int16.MinValue && value <= int64 System.Int16.MaxValue then
+            simple TypeShort
+        elif value >= int64 System.Int32.MinValue && value <= int64 System.Int32.MaxValue then
+            simple TypeLong
+        else
+            simple TypeLongLong
+    | Lit(VUInt _) -> Some { Value.columnMetadata TypeLongLong with Flags = UnsignedFlag }
+    | Lit(VDouble _) -> simple TypeDouble
+    | Lit(VDecimal _) -> simple TypeNewDecimal
+    | Lit(VString text) -> Some { Value.columnMetadata TypeVarString with ColumnLength = uint32 (System.Text.Encoding.UTF8.GetByteCount text) }
+    | Lit(VBytes bytes) -> Some { Value.columnMetadata TypeBlob with ColumnLength = uint32 bytes.Length; Flags = BlobFlag ||| BinaryFlag }
+    | Lit(VDate _) -> simple TypeDate
+    | Lit(VDateTime _) -> simple TypeDateTime
+    | Lit(VJson _) -> simple TypeVarString
+    | Col _
+    | QualifiedCol _ -> tryColumnDefForExpr ctx expr |> Option.map ColumnWire.metadataOfColumn
+    | BinOp((And | Or | Xor | Eq | Neq | Lt | Lte | Gt | Gte | NullSafeEq), _, _)
+    | Not _
+    | IsNull _
+    | IsNotNull _
+    | IsTrue _
+    | IsFalse _
+    | Like _
+    | Regexp _
+    | In _
+    | InSubquery _
+    | Between _
+    | Exists _ -> simple TypeLongLong
+    | BinOp((Add | Sub | Mul), left, right) -> numeric left right
+    | BinOp(Div, left, right) ->
+        match typeIdOf left, typeIdOf right with
+        | Some leftType, _ when leftType = TypeDouble || leftType = TypeFloat -> simple TypeDouble
+        | _, Some rightType when rightType = TypeDouble || rightType = TypeFloat -> simple TypeDouble
+        | Some _, _
+        | _, Some _ -> simple TypeNewDecimal
+        | _ -> None
+    | BinOp(IntDiv, _, _) -> simple TypeLongLong
+    | Cast(_, ty) -> Some(ColumnWire.metadataOfType ty)
+    | Collate(inner, _)
+    | Distinct inner
+    | OrderBy(inner, _) -> metadataOfExpr ctx inner
+    | FuncCall(name, args) ->
+        match name.ToUpperInvariant(), args with
+        | "COUNT", _ -> simple TypeLongLong
+        | ("SUM" | "AVG"), [ arg ] ->
+            match metadataOfExpr ctx arg with
+            | Some metadata when
+                metadata.TypeId = TypeDouble
+                || metadata.TypeId = TypeFloat
+                || metadata.Flags &&& (EnumFlag ||| SetFlag) <> 0us
+                ->
+                simple TypeDouble
+            | _ -> simple TypeNewDecimal
+        | ("MIN" | "MAX"), [ arg ] ->
+            metadataOfExpr ctx arg
+            |> Option.map (fun metadata ->
+                if metadata.Flags &&& (EnumFlag ||| SetFlag) <> 0us then
+                    { metadata with Flags = metadata.Flags &&& ~~~(EnumFlag ||| SetFlag) }
+                else
+                    metadata)
+        | ("COALESCE" | "IFNULL"), values -> choose values
+        | "NULLIF", first :: _ -> metadataOfExpr ctx first
+        | "IF", [ _; whenTrue; whenFalse ] -> choose [ whenTrue; whenFalse ]
+        | ("ROUND" | "TRUNCATE" | "FLOOR" | "CEILING" | "CEIL" | "ABS"), arg :: _ -> metadataOfExpr ctx arg
+        | "MOD", _ -> simple TypeLongLong
+        | "YEAR", [ _ ] -> Some(ColumnWire.metadataOfType TYear)
+        | "TIME", [ _ ] -> Some(ColumnWire.metadataOfType(TTime 0))
+        | "DATE", [ _ ] -> Some(ColumnWire.metadataOfType TDate)
+        | ("NOW" | "CURRENT_TIMESTAMP"), _ -> Some(ColumnWire.metadataOfType(TDateTime(fspOfExpr ctx expr |> Option.defaultValue 0)))
+        | ("MONTH" | "DAY" | "DAYOFMONTH" | "DAYOFWEEK" | "DAYOFYEAR" | "HOUR" | "MINUTE" | "SECOND" | "QUARTER" | "WEEK" | "WEEKDAY"
+          | "JSON_LENGTH" | "JSON_DEPTH" | "CHAR_LENGTH" | "CHARACTER_LENGTH" | "LENGTH" | "OCTET_LENGTH" | "BIT_LENGTH" | "BIT_COUNT"), _ ->
+            simple TypeLongLong
+        | ("SQRT" | "LOG" | "LOG2" | "LOG10" | "EXP" | "POWER" | "POW" | "SIN" | "COS" | "TAN" | "ASIN" | "ACOS" | "ATAN"), _ ->
+            simple TypeDouble
+        | _ -> None
+    | MatchAgainst _ -> simple TypeDouble
+    | WindowOver(fn, _) ->
+        match fn with
+        | WinRowNumber
+        | WinRank _
+        | WinNTile _ -> simple TypeLongLong
+        | WinPercentRank
+        | WinCumeDist -> simple TypeDouble
+        | WinLagLead(_, arg, _, _)
+        | WinFirstValue arg
+        | WinLastValue arg
+        | WinNthValue(arg, _) -> metadataOfExpr ctx arg
+        | WinAggregate(name, args) -> metadataOfExpr ctx (FuncCall(name, args))
+    | Case(_, whens, elseBranch) ->
+        (whens |> List.map snd) @ Option.toList elseBranch |> choose
+    | Subquery _
+    | Placeholder _
+    | Star _ -> None
+
 /// The declared fsp for each output column a projection produces — parallel,
 /// in length and order, to the `(name, Value)` list `evalProjection` builds
 /// for the same projection (`Star None` → every table column, `t.*` → that
@@ -956,9 +1101,8 @@ let rec private outputColumnFsps (ctx: EvalContext) (columns: ColumnDef list) (p
         | Star(Some qualifier), _ -> starQualifierCols ctx qualifier |> List.map (fun c -> fspOfType c.Type)
         | expr, _ -> [ fspOfExpr ctx expr ])
 
-/// The MySQL wire type to *override* each output column with when its
-/// data-driven type (`columnTypesOf`, from the row `Value`s) disagrees with
-/// the column's declared schema type.
+/// Static result metadata for each projection, used ahead of the
+/// value-derived fallback whenever the expression determines its own type.
 ///
 /// The data-driven read can only see what a `Value` is, not what it was
 /// declared as, so it reports every integer as `LONGLONG` and every string as
@@ -968,16 +1112,15 @@ let rec private outputColumnFsps (ctx: EvalContext) (columns: ColumnDef list) (p
 /// number. Where a projection resolves back to a real base-table column, that
 /// declared type wins.
 ///
-/// `None` keeps the data-driven type — which is right for anything computed,
-/// where there's no declared column to read, and for DATE/DATETIME, whose
-/// `Value`s already carry the correct type. Mirrors `outputColumnFsps`'s
-/// projection expansion so the lists line up column-for-column.
+/// `None` keeps the value-derived metadata for expressions whose result
+/// family is not statically known. The projection expansion mirrors
+/// `outputColumnFsps` so the lists remain column-aligned.
 let private outputColumnWireOverridesFor
     (rollup: bool)
     (ctx: EvalContext)
     (columns: ColumnDef list)
     (projections: Projection list)
-    : byte option list =
+    : ColumnMetadata option list =
     let rec starQualifierCols (ctx: EvalContext) (qualifier: string) : ColumnDef list =
         match Map.tryFind (qualifier.ToLowerInvariant()) ctx.Qualifiers with
         | Some(cols, _) -> cols
@@ -990,19 +1133,8 @@ let private outputColumnWireOverridesFor
         // value set doesn't survive that — MySQL reports the column as plain
         // VARCHAR there, so claiming ENUM would claim more than the server
         // delivers. Widths and BOOLEAN survive the temporary.
-        | TEnum _ when rollup -> None
-        | ty -> ColumnWire.resultTypeOf ty
-
-    /// A function whose result MySQL types as something other than what its
-    /// returned `Value` implies. `YEAR(x)` is the one that matters in
-    /// practice: it hands back a plain integer that MySQL still declares as
-    /// `YEAR`. ponytail: a lookup for one entry rather than a general
-    /// expression-type pass, which is the real fix for computed columns —
-    /// see `columnTypesOf`.
-    let overrideOfExpr (expr: Expr) =
-        match expr with
-        | FuncCall(name, [ _ ]) when name.ToUpperInvariant() = "YEAR" -> Some Value.TypeYear
-        | _ -> None
+        | TEnum _ when rollup -> Some { ColumnWire.metadataOfColumn c with TypeId = TypeVarString; Flags = 0us }
+        | _ -> ColumnWire.resultMetadataOf c
 
     projections
     |> List.collect (fun proj ->
@@ -1012,7 +1144,7 @@ let private outputColumnWireOverridesFor
         | expr, _ ->
             [ match tryColumnDefForExpr ctx expr |> Option.bind overrideOf with
               | Some ty -> Some ty
-              | None -> overrideOfExpr expr ])
+              | None -> metadataOfExpr ctx expr ])
 
 /// Applies `outputColumnWireOverrides` on top of a data-driven wire-type list,
 /// keeping the data-driven type wherever there's no override. Falls back
@@ -1022,7 +1154,7 @@ let private outputColumnWireOverridesFor
 /// rollup temporary to degrade anything.
 let private outputColumnWireOverrides = outputColumnWireOverridesFor false
 
-let private applyWireOverrides (overrides: byte option list) (types: byte list) : byte list =
+let private applyWireOverrides (overrides: ColumnMetadata option list) (types: ColumnMetadata list) : ColumnMetadata list =
     if List.length overrides = List.length types then
         List.map2 (fun ov ty -> defaultArg ov ty) overrides types
     else
@@ -2121,19 +2253,46 @@ and private tryInformationSchemaNarrow
 
                 cols, rows |> List.filter keep)
 
-/// Synthetic, all-nullable-text `ColumnDef`s for a derived table's columns —
-/// `runSelectStmt`'s own resultset has no real per-column `ColumnType` to
-/// recover (its `byte list` is the MySQL *wire* type, not an `Ast`
-/// `ColumnType`); `TText` is close enough since every consumer (comparisons,
-/// `Value.compare`, ...) already coerces through `toText`/`toDouble` rather
-/// than trusting the declared type. The *rows* underneath these synthetic
-/// columns are still `runSelectStmt`'s real typed `Value`s, though — see
-/// `resolveFromItem` below — only the column metadata is synthesized.
-and private deriveColumns (names: string list) (collations: Collation.Collation list) : ColumnDef list =
-    List.map2
-        (fun n (col: Collation.Collation) ->
+/// Reconstructs nullable derived-table columns from result metadata so an
+/// outer query retains the source's numeric, temporal, and string families.
+and private deriveColumns
+    (names: string list)
+    (collations: Collation.Collation list)
+    (metadata: ColumnMetadata list)
+    : ColumnDef list =
+    let declaredType (column: ColumnMetadata) =
+        let unsigned = column.Flags &&& UnsignedFlag <> 0us
+        let characters = int column.ColumnLength / 4
+
+        if column.TypeId = TypeTiny && column.ColumnLength = 1u then TBool
+        elif column.TypeId = TypeTiny then TTinyInt unsigned
+        elif column.TypeId = TypeShort then TSmallInt unsigned
+        elif column.TypeId = TypeLong then TInt unsigned
+        elif column.TypeId = TypeLongLong then TBigInt unsigned
+        elif column.TypeId = TypeFloat then TFloat
+        elif column.TypeId = TypeDouble then TDouble
+        elif column.TypeId = TypeNewDecimal then TDecimal(65, int column.Decimals)
+        elif column.TypeId = TypeDate then TDate
+        elif column.TypeId = TypeDateTime then TDateTime(int column.Decimals)
+        elif column.TypeId = TypeTime then TTime(int column.Decimals)
+        elif column.TypeId = TypeYear then TYear
+        elif column.TypeId = TypeString && column.Flags &&& EnumFlag <> 0us then TEnum []
+        elif column.TypeId = TypeString && column.Flags &&& SetFlag <> 0us then TSet []
+        elif column.TypeId = TypeString && column.Flags &&& BinaryFlag <> 0us then TBinary(int column.ColumnLength)
+        elif column.TypeId = TypeString then TChar characters
+        elif column.TypeId = TypeVarString && column.Flags &&& BinaryFlag <> 0us then TVarBinary(int column.ColumnLength)
+        elif column.TypeId = TypeVarString then TVarchar characters
+        elif column.TypeId = TypeBlob && column.Flags &&& BinaryFlag <> 0us then TBlob
+        elif column.TypeId = TypeBlob then TText
+        else TText
+
+    let metadata =
+        if metadata.Length = names.Length then metadata else names |> List.map (fun _ -> columnMetadata TypeVarString)
+
+    List.map3
+        (fun n (col: Collation.Collation) columnMetadata ->
             { Name = n
-              Type = TText
+              Type = declaredType columnMetadata
               Nullable = true
               Default = None
               AutoIncrement = false
@@ -2145,6 +2304,7 @@ and private deriveColumns (names: string list) (collations: Collation.Collation 
               OnUpdateCurrentTimestamp = false })
         names
         collations
+        metadata
 
 /// One `SELECT`'s per-output-column collations, resolved the same way
 /// `runSelect`'s own DISTINCT keys are (`keyCollation` on the output column
@@ -2445,7 +2605,7 @@ and private resolveFromSubquery (store: Store) (registry: Registry) (dbName: str
     // context there, which is `None` here, so a column that only a left row
     // could supply resolves to NULL rather than erroring.
     | FromLateral(body, _alias) ->
-        let result, _, typedRows =
+        let result, metadata, typedRows =
             match body with
             | PlainSelect select -> runSelectStmt store registry dbName select None
             | UnionSelect(first, rest, orderBy, limit, offset) -> runUnionStmt store registry dbName first rest orderBy limit offset
@@ -2464,7 +2624,7 @@ and private resolveFromSubquery (store: Store) (registry: Registry) (dbName: str
                     |> List.map (fun branch -> selectColumnCollations store registry dbName branch cols)
                     |> List.reduce (List.map2 strictestUnionCollation)
 
-            Ok(deriveColumns cols collations, typedRows)
+            Ok(deriveColumns cols collations metadata, typedRows)
         | Err(code, message) -> Error(Err(code, message))
         | Affected _ -> Error(Err(1064, "derived table did not return a resultset"))
 
@@ -2654,12 +2814,14 @@ and private applyLateralJoin
             | PlainSelect select ->
                 match runSelectStmt store registry dbName select bodyOuter with
                 | Err(code, message), _, _ -> Error(Err(code, message))
-                | ResultSet(names, _), _, typedRows -> Ok(deriveColumns names (names |> List.map (fun _ -> Collation.defaultCollation)), typedRows)
+                | ResultSet(names, _), metadata, typedRows ->
+                    Ok(deriveColumns names (names |> List.map (fun _ -> Collation.defaultCollation)) metadata, typedRows)
                 | Affected _, _, _ -> Error(Err(1064, "a LATERAL derived table did not return a resultset"))
             | UnionSelect(first, rest, orderBy, limit, offset) ->
                 match runUnionStmt store registry dbName first rest orderBy limit offset with
                 | Err(code, message), _, _ -> Error(Err(code, message))
-                | ResultSet(names, _), _, typedRows -> Ok(deriveColumns names (names |> List.map (fun _ -> Collation.defaultCollation)), typedRows)
+                | ResultSet(names, _), metadata, typedRows ->
+                    Ok(deriveColumns names (names |> List.map (fun _ -> Collation.defaultCollation)) metadata, typedRows)
                 | Affected _, _, _ -> Error(Err(1064, "a LATERAL derived table did not return a resultset"))
 
         // The body still has to name its columns even when there is no left
@@ -3190,7 +3352,7 @@ and private runMutationJoin
 /// rather than each re-implementing the join-materialization logic.
 /// `outer` is `None` for a top-level statement and `Some` when this is
 /// itself a subquery — see `EvalContext.Outer`. Its per-column MySQL wire
-/// types (the `byte list`; see `columnTypesOf`) are only available here —
+/// metadata (see `columnMetadataOf`) is only available here —
 /// by the time a `SELECT`'s rows reach `execute`'s return value they're
 /// already the wire's flat `string option list` text, with no `Value`
 /// left to read a type off of — but this can't be `public` itself (`outer:
@@ -3341,8 +3503,8 @@ and private withCteScope
     (registry: Registry)
     (dbName: string)
     (ctes: CommonTableExpr list)
-    (body: unit -> QueryResult * byte list * Value[] list)
-    : QueryResult * byte list * Value[] list =
+    (body: unit -> QueryResult * ColumnMetadata list * Value[] list)
+    : QueryResult * ColumnMetadata list * Value[] list =
     if ctes.IsEmpty then
         body ()
     else
@@ -3369,8 +3531,8 @@ and private withCteScope
 /// references itself iterates its `UNION` branches semi-naively (each pass
 /// sees only the previous pass's new rows) until a pass adds nothing;
 /// everything else is an ordinary derived table.
-/// The recursion ceiling is `Limits.cteMaxRecursionDepth`, configurable at
-/// startup but not per session — see that binding's own `ponytail:` note.
+/// The recursion ceiling is the current session's effective
+/// `cte_max_recursion_depth`; zero permits unbounded expansion.
 /// A second, narrower gap: MySQL fixes each
 /// recursive column's *type* from the anchor row and then errors (1406) when
 /// a later pass overflows it — a literal `NULL` anchor column is
@@ -3487,7 +3649,7 @@ and private runSelectStmt
     (dbName: string)
     (select: SelectStmt)
     (outer: EvalContext option)
-    : QueryResult * byte list * Value[] list =
+    : QueryResult * ColumnMetadata list * Value[] list =
     if not select.Ctes.IsEmpty then
         withCteScope store registry dbName select.Ctes (fun () ->
             runSelectStmt store registry dbName { select with Ctes = [] } outer)
@@ -3609,14 +3771,14 @@ and private tryPointLookup (store: Store) (dbName: string) (tref: TableRef) (whe
 /// that's NULL in every row (or there are no rows at all) — NULL
 /// round-trips the same regardless of the declared type, so there's
 /// nothing to lose by guessing wrong there.
-and private columnTypesOf (colCount: int) (rows: (string * Value) list list) : byte list =
+and private columnMetadataOf (colCount: int) (rows: (string * Value) list list) : ColumnMetadata list =
     [ for i in 0 .. colCount - 1 ->
           rows
           |> List.tryPick (fun row ->
               match snd row.[i] with
               | VNull -> None
-              | v -> Some(Value.mysqlTypeOf v))
-          |> Option.defaultValue Value.TypeVarString ]
+              | v -> Some(Value.mysqlMetadataOf v))
+          |> Option.defaultValue (Value.columnMetadata Value.TypeVarString) ]
 
 and private applyLimitOffset (limit: int option) (offset: int option) (rows: 'a list) : 'a list =
     let afterOffset =
@@ -3667,53 +3829,50 @@ and private compareByOrderKeys (dirs: Direction list) (ka: (Value * Collation.Co
 /// VAR_STRING (verified: `UNION` of '10', '9', 2, 1.5 sorts as strings —
 /// '1.5,10,2,9', not numerically); DATE + DATETIME lands on DATETIME;
 /// anything else falls back to text.
-and private unionAggregateType (types: byte list) : byte =
+and private unionAggregateType (columns: ColumnMetadata list) : ColumnMetadata =
+    let types = columns |> List.map _.TypeId
     let isInt t =
         t = Value.TypeTiny
         || t = Value.TypeShort
         || t = Value.TypeLong
         || t = Value.TypeLongLong
-        || t = Value.TypeLongLongUnsigned
     let isDate t = t = Value.TypeDate
     let isDateTime t = t = Value.TypeDateTime || t = Value.TypeTimestamp
 
     if types |> List.exists (fun t -> t = Value.TypeVarString || t = Value.TypeString || t = Value.TypeVarchar || t = Value.TypeBlob) then
-        Value.TypeVarString
+        Value.columnMetadata Value.TypeVarString
     elif types |> List.exists (fun t -> t = Value.TypeDouble) then
-        Value.TypeDouble
+        Value.columnMetadata Value.TypeDouble
     elif types |> List.exists (fun t -> t = Value.TypeFloat) then
-        Value.TypeFloat
+        Value.columnMetadata Value.TypeFloat
     elif types |> List.exists (fun t -> t = Value.TypeNewDecimal) then
-        Value.TypeNewDecimal
+        Value.columnMetadata Value.TypeNewDecimal
     elif types |> List.forall isInt then
-        // An unsigned branch keeps the column unsigned — the aggregate has to
-        // hold 2^63..2^64-1, which LONGLONG can't.
-        if types |> List.contains Value.TypeLongLongUnsigned then
-            Value.TypeLongLongUnsigned
-        else
-            Value.TypeLongLong
+        { Value.columnMetadata Value.TypeLongLong with
+            Flags =
+                if columns |> List.exists (fun column -> column.Flags &&& Value.UnsignedFlag <> 0us) then
+                    Value.UnsignedFlag
+                else
+                    0us }
     elif types |> List.forall (fun t -> isDate t || isDateTime t) then
-        if types |> List.exists isDateTime then Value.TypeDateTime else Value.TypeDate
+        Value.columnMetadata (if types |> List.exists isDateTime then Value.TypeDateTime else Value.TypeDate)
     else
-        Value.TypeVarString
+        Value.columnMetadata Value.TypeVarString
 
 /// Coerces one combined-UNION value to the column's reconciled wire type,
 /// so `ORDER BY` (and the wire types) see what MySQL's own reconciliation
 /// produces instead of each branch's original per-branch type. Temporal and
 /// unrecognized types pass through unchanged; NULL stays NULL.
-and private coerceUnionValue (ty: byte) (v: Value) : Value =
+and private coerceUnionValue (metadata: ColumnMetadata) (v: Value) : Value =
+    let ty = metadata.TypeId
+
     match v with
     | VNull -> VNull
     | _ ->
         match ty with
         | t when t = Value.TypeTiny || t = Value.TypeShort || t = Value.TypeLong || t = Value.TypeLongLong ->
-            VInt(int64 (Value.toDouble v))
-        // An already-unsigned value passes through: `toDouble` would round it
-        // past 2^53 and `int64` would saturate. A signed branch's value stays
-        // signed (`Value.compare` promotes both to `decimal` to order them).
-        | t when t = Value.TypeLongLongUnsigned ->
             match v with
-            | VUInt _ -> v
+            | VUInt _ when metadata.Flags &&& Value.UnsignedFlag <> 0us -> v
             | _ -> VInt(int64 (Value.toDouble v))
         | t when t = Value.TypeNewDecimal -> VDecimal(decimal (Value.toDouble v))
         | t when t = Value.TypeDouble || t = Value.TypeFloat -> VDouble(Value.toDouble v)
@@ -3730,7 +3889,7 @@ and runUnionStmt
     (orderBy: OrderKey list)
     (limit: int option)
     (offset: int option)
-    : QueryResult * byte list * Value[] list =
+    : QueryResult * ColumnMetadata list * Value[] list =
     // A `WITH` clause ahead of a UNION is parsed onto the first branch (see
     // `Parser.withClause`) but scopes over every branch.
     if not first.Ctes.IsEmpty then
@@ -3767,7 +3926,7 @@ and runUnionStmt
         | None, None -> None
 
     let combine
-        (acc: Result<string list * ((string option list) * Value[]) list * byte list list * Collation.Collation list * int option list * (SetOp * int) list, QueryResult>)
+        (acc: Result<string list * ((string option list) * Value[]) list * ColumnMetadata list list * Collation.Collation list * int option list * (SetOp * int) list, QueryResult>)
         (setOp: SetOp, select: SelectStmt)
         =
         acc
@@ -3847,7 +4006,7 @@ and runUnionStmt
 
             let coerceColumn (i: int) (v: Value) : Value =
                 let coerced = coerceUnionValue reconciled.[i] v
-                if reconciled.[i] = Value.TypeNewDecimal then rescale scales.[i] coerced else coerced
+                if reconciled.[i].TypeId = Value.TypeNewDecimal then rescale scales.[i] coerced else coerced
 
             let coercedPairedRaw =
                 allPaired
@@ -3863,7 +4022,7 @@ and runUnionStmt
                             match v with
                             | VNull -> None
                             | v ->
-                                match (if reconciled.[i] = Value.TypeDateTime then fsps.[i] else None) with
+                                match (if reconciled.[i].TypeId = Value.TypeDateTime then fsps.[i] else None) with
                                 | Some fsp -> Value.toTextFsp fsp v
                                 | None -> Value.toText v)
                         |> List.ofArray
@@ -4503,7 +4662,7 @@ and private runGroupedSelect
     (rows: Value[] list)
     (select: SelectStmt)
     (outer: EvalContext option)
-    : QueryResult * byte list * Value[] list =
+    : QueryResult * ColumnMetadata list * Value[] list =
     let columnIndex = columnIndexOf columns
 
     let ctxFor = contextFactory store registry dbName columnIndex qualifiers outer
@@ -4792,7 +4951,7 @@ and private runGroupedSelect
                     let dedupedPaired = if select.Distinct then paired |> List.distinctBy fst else paired
 
                     let types =
-                        columnTypesOf (List.length colNames) (sorted |> List.map (fun (proj, _, _) -> proj))
+                        columnMetadataOf (List.length colNames) (sorted |> List.map (fun (proj, _, _) -> proj))
                         |> applyWireOverrides groupWireOverrides
                     let limited = dedupedPaired |> applyLimitOffset select.Limit select.Offset
                     ResultSet(colNames, limited |> List.map fst), types, limited |> List.map snd
@@ -4828,7 +4987,7 @@ and private runGroupedWindowSelect
     (rows: Value[] list)
     (select: SelectStmt)
     (outer: EvalContext option)
-    : QueryResult * byte list * Value[] list =
+    : QueryResult * ColumnMetadata list * Value[] list =
     let columnIndex = columnIndexOf columns
 
     match select.GroupBy |> traverse (resolveGroupByRef columnIndex select.Projections) with
@@ -4894,7 +5053,7 @@ and private runWindowedSelect
     (rows: Value[] list)
     (select: SelectStmt)
     (outer: EvalContext option)
-    : QueryResult * byte list * Value[] list =
+    : QueryResult * ColumnMetadata list * Value[] list =
     // MySQL allows a window function in `ORDER BY` even when no projection
     // carries one (`SELECT v FROM t ORDER BY LAG(v) OVER (...)`), so
     // collection spans both lists — each becomes a synthetic column either
@@ -5482,7 +5641,7 @@ and private runFullTextSelect
     (select: SelectStmt)
     (matchNodes: Expr list)
     (outer: EvalContext option)
-    : QueryResult * byte list * Value[] list =
+    : QueryResult * ColumnMetadata list * Value[] list =
     let unsupported = Err(1191, "Can't find FULLTEXT index matching the column list"), [], []
 
     match select.From, select.Joins with
@@ -5621,7 +5780,7 @@ and private runSelect
     (rows: Value[] seq)
     (select: SelectStmt)
     (outer: EvalContext option)
-    : QueryResult * byte list * Value[] list =
+    : QueryResult * ColumnMetadata list * Value[] list =
     let projections, whereExpr, orderBy, limit, offset =
         select.Projections, select.Where, select.OrderBy, select.Limit, select.Offset
 
@@ -5746,22 +5905,22 @@ and private runSelect
         match rows |> traverseSeq (fun row -> matches row |> Result.bind (fun keep -> if keep then projectRow row |> Result.map Some else Ok None)) with
         | Error(code, message) -> Err(code, message), [], []
         | Ok allProjected ->
-            ResultSet(colNames, []), applyWireOverrides outputWireOverrides (columnTypesOf (List.length colNames) allProjected), []
+            ResultSet(colNames, []), applyWireOverrides outputWireOverrides (columnMetadataOf (List.length colNames) allProjected), []
     | Ok probeProjection ->
         let colNames = probeProjection |> List.map fst
 
         // Column wire types are read off whatever rows actually cross the
         // wire (post `DISTINCT`/`LIMIT`/`OFFSET`), not the full matched set
         // — the same data-driven "first non-NULL value" approximation
-        // `columnTypesOf` always used, narrowed to the rows a client can
+        // `columnMetadataOf` always used, narrowed to the rows a client can
         // observe. ponytail: a column that's NULL in every *returned* row
         // but non-NULL further down the matched set (past `LIMIT`) now
         // reports `VAR_STRING` instead of that later type; scanning the
         // full matched set just to pick a wire type would defeat the
         // `LIMIT` short-circuit below for every query. Upgrade to schema-
         // declared (not data-driven) column types if this ever bites.
-        let typesOf (finalRows: Value[] list) : byte list =
-            columnTypesOf (List.length colNames) (finalRows |> List.map (List.zip colNames << List.ofArray))
+        let typesOf (finalRows: Value[] list) : ColumnMetadata list =
+            columnMetadataOf (List.length colNames) (finalRows |> List.map (List.zip colNames << List.ofArray))
             |> applyWireOverrides outputWireOverrides
 
         // Shared by both `ORDER BY` branches below: evaluates `WHERE`, the
@@ -6728,7 +6887,7 @@ let rec private explainStatement (store: Store) (registry: Registry) (dbName: st
 /// `runSelectStmt`, which can't be `public` itself (see the doc there).
 /// `outer` is always `None` for a top-level statement, so this needs no
 /// `EvalContext` in its own signature.
-let runTopLevelSelect (store: Store) (registry: Registry) (dbName: string) (select: SelectStmt) : QueryResult * byte list =
+let runTopLevelSelect (store: Store) (registry: Registry) (dbName: string) (select: SelectStmt) : QueryResult * ColumnMetadata list =
     let result, types, _ = runSelectStmt store registry dbName select None
     result, types
 
@@ -7548,20 +7707,8 @@ let rec execute (store: Store) (registry: Registry) (dbName: string) (ids: int64
         // it so a row reached through more than one join match is still
         // updated at most once (see `Ast.UpdateStmt`'s doc). Runs the writes
         // against a private snapshot store, merged back via
-        // `Storage.mergeCatalogInto` (see its doc) — same optimistic,
-        // per-database-serialized pattern every other write uses, so this
-        // statement doesn't block a concurrent write to an unrelated
-        // database. ponytail: a join source qualified onto a database other
-        // than the current session's isn't covered by that database's own
-        // `TransactionGates` gate (only the session's current database's
-        // is held before reaching `Executor`), so a target table living in
-        // a *different* database can still race a concurrent writer to that
-        // same table there — the same documented gap as a cross-database
-        // transaction (see `Storage.Store`'s doc); upgrade to acquiring
-        // every database a statement's join sources actually name if that
-        // ever matters (Laravel's per-worker-database test parallelism,
-        // the case this all exists for, only ever joins within one
-        // database).
+        // `Storage.mergeCatalogInto` (see its doc), so disjoint row changes
+        // can combine while overlapping changes fail with a retryable conflict.
         (
             match runMutationJoin store registry dbName updateStmt.From updateStmt.Joins with
             | Error e -> ids, e

@@ -90,13 +90,36 @@ let tests =
           <| fun _ ->
               let bytes = [| 0x00uy; 0xffuy; 0x80uy |]
               let carrier = Text.Encoding.Latin1.GetString bytes
-              let reader = Reader(textRowPayloadTyped [ TypeBlob ] [ Some carrier ])
+              let metadata = { columnMetadata TypeBlob with Flags = BlobFlag ||| BinaryFlag }
+              let reader = Reader(textRowPayloadTyped [ metadata ] [ Some carrier ])
               Expect.equal (reader.ReadLenEncInt ()) (Some(uint64 bytes.Length)) "raw byte length"
               Expect.equal (reader.ReadBytes bytes.Length) bytes "no UTF-8 expansion"
 
+          testCase "typed text rows encode textual BLOB values as UTF-8"
+          <| fun _ ->
+              let value = "blåbær"
+              let reader = Reader(textRowPayloadTyped [ columnMetadata TypeBlob ] [ Some value ])
+              let expected = Text.Encoding.UTF8.GetBytes value
+              Expect.equal (reader.ReadLenEncInt ()) (Some(uint64 expected.Length)) "UTF-8 byte length"
+              Expect.equal (reader.ReadBytes expected.Length) expected "UTF-8 payload"
+
+          testCase "binary rows encode textual BLOB values as UTF-8"
+          <| fun _ ->
+              let value = "blåbær"
+              let reader = Reader(binaryRowPayload [ columnMetadata TypeBlob ] [ Some value ])
+              reader.ReadBytes 2 |> ignore
+              let expected = Text.Encoding.UTF8.GetBytes value
+              Expect.equal (reader.ReadLenEncInt ()) (Some(uint64 expected.Length)) "UTF-8 byte length"
+              Expect.equal (reader.ReadBytes expected.Length) expected "UTF-8 payload"
+
           testCase "BLOB column definitions advertise binary collation and flags"
           <| fun _ ->
-              let reader = Reader(columnDefPayload { Name = "payload"; Type = TypeBlob; Decimals = 0uy })
+              let metadata =
+                  { columnMetadata TypeBlob with
+                      ColumnLength = 65535u
+                      Flags = BlobFlag ||| BinaryFlag }
+
+              let reader = Reader(columnDefPayload { Name = "payload"; Metadata = metadata })
               for _ in 1..6 do
                   reader.ReadLenEncString() |> ignore
               reader.ReadLenEncInt() |> ignore
@@ -127,22 +150,20 @@ let tests =
               Expect.equal (wireTypeOfColumnType TDate) TypeDate "date"
               Expect.equal (wireTypeOfColumnType (TDateTime 0)) TypeDateTime "datetime"
               Expect.equal (wireTypeOfColumnType (TTimestamp 0)) TypeDateTime "timestamp"
-              Expect.equal (wireTypeOfColumnType (TBinary 16)) TypeBlob "binary"
-              Expect.equal (wireTypeOfColumnType (TVarBinary 16)) TypeBlob "varbinary"
+              Expect.equal (wireTypeOfColumnType (TBinary 16)) TypeString "binary"
+              Expect.equal (wireTypeOfColumnType (TVarBinary 16)) TypeVarString "varbinary"
               Expect.equal (wireTypeOfColumnType TTinyBlob) TypeBlob "tinyblob"
               Expect.equal (wireTypeOfColumnType TBlob) TypeBlob "blob"
               Expect.equal (wireTypeOfColumnType TMediumBlob) TypeBlob "mediumblob"
               Expect.equal (wireTypeOfColumnType TLongBlob) TypeBlob "longblob"
-              // every other declared type falls back to VAR_STRING
+              // String families retain the distinctions carried by MySQL's protocol.
               Expect.equal (wireTypeOfColumnType (TVarchar 10)) TypeVarString "varchar"
-              Expect.equal (wireTypeOfColumnType (TChar 10)) TypeVarString "char"
-              Expect.equal (wireTypeOfColumnType TText) TypeVarString "text"
-              // ENUM has no wire id of its own; it goes out as STRING plus
-              // ENUM_FLAG, which `columnDefPayload` splits back out.
-              Expect.equal (wireTypeOfColumnType (TEnum [ "a"; "b" ])) TypeEnumString "enum"
-              Expect.equal (wireTypeOfColumnType TBool) TypeTinyBool "boolean"
+              Expect.equal (wireTypeOfColumnType (TChar 10)) TypeString "char"
+              Expect.equal (wireTypeOfColumnType TText) TypeBlob "text"
+              Expect.equal (wireTypeOfColumnType (TEnum [ "a"; "b" ])) TypeString "enum"
+              Expect.equal (wireTypeOfColumnType TBool) TypeTiny "boolean"
               Expect.equal (wireTypeOfColumnType TYear) TypeYear "year"
-              Expect.equal (wireTypeOfColumnType (TSet [ "a" ])) TypeVarString "set"
+              Expect.equal (wireTypeOfColumnType (TSet [ "a" ])) TypeString "set"
 
           testCase "textRowPayload encodes NULL and strings in one row"
           <| fun _ ->
@@ -157,7 +178,7 @@ let tests =
               // the 11-byte form, not silently collapse to the 7-byte
               // (second-precision) form. Encode a one-column binary row, skip
               // its header byte + 1-byte null bitmap, and decode the value.
-              let payload = binaryRowPayload [ TypeDateTime ] [ Some "2024-03-05 13:45:09.123456" ]
+              let payload = binaryRowPayload [ columnMetadata TypeDateTime ] [ Some "2024-03-05 13:45:09.123456" ]
               let r = Reader payload
               r.ReadByte() |> ignore // 0x00 row header
               r.ReadByte() |> ignore // null bitmap (1 column => 1 byte)
@@ -174,7 +195,7 @@ let tests =
               // length-encoded string. Covers microseconds, the >24h hour that
               // splits into a days field, and a negative duration.
               let roundTrip (s: string) =
-                  let payload = binaryRowPayload [ TypeTime ] [ Some s ]
+                  let payload = binaryRowPayload [ columnMetadata TypeTime ] [ Some s ]
                   let r = Reader payload
                   r.ReadByte() |> ignore // row header
                   r.ReadByte() |> ignore // null bitmap
@@ -245,7 +266,7 @@ let tests =
 
           testCase "binaryRowPayload writes DATETIME with length 7 when there's no sub-second part"
           <| fun _ ->
-              let payload = binaryRowPayload [ TypeDateTime ] [ Some "2024-03-05 13:45:09" ]
+              let payload = binaryRowPayload [ columnMetadata TypeDateTime ] [ Some "2024-03-05 13:45:09" ]
               let r = Reader(payload)
               r.ReadBytes 2 |> ignore // row header byte + null bitmap
               Expect.equal (r.ReadByte ()) 7uy "no microseconds: the compact 7-byte form"
@@ -255,7 +276,7 @@ let tests =
               // Non-zero microseconds require the full 11-byte form — the
               // compact 7-byte form silently drops the sub-second precision
               // of a DATETIME(6)/TIMESTAMP(6) value.
-              let payload = binaryRowPayload [ TypeDateTime ] [ Some "2024-03-05 13:45:09.123456" ]
+              let payload = binaryRowPayload [ columnMetadata TypeDateTime ] [ Some "2024-03-05 13:45:09.123456" ]
               let r = Reader(payload)
               r.ReadBytes 2 |> ignore // row header byte + null bitmap
               Expect.equal (r.ReadByte ()) 11uy "microseconds present: the full 11-byte form"

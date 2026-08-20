@@ -232,7 +232,7 @@ let tests =
                     // fsdb stores TIME as a VString, so the data-driven type
                     // would be VAR_STRING; the declared-type override restores
                     // the real TIME wire type a MySQL client expects.
-                    Expect.equal s.LastResultColumnTypes [ Fsdb.Value.TypeTime ] "TIME wire type override" ]
+                    Expect.equal (s.LastResultColumnMetadata |> List.map _.TypeId) [ Fsdb.Value.TypeTime ] "TIME wire type override" ]
 
           testList
               "UNION reconciles fsp across branches"

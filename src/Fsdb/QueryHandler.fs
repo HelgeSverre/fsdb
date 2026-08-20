@@ -1164,10 +1164,10 @@ let private executeParsed (session: Session) (stmt: Statement) : Session * Query
         // points instead of the plain `execute` every other statement uses
         // — those are the only two statement kinds that reach the wire as
         // a `ResultSet`, and only they still have the typed `Value`s
-        // (rather than already-rendered text) `columnTypes` needs. See
-        // `Session.LastResultColumnTypes`'s doc for why this rides along
+        // (rather than already-rendered text) the metadata pass needs. See
+        // `Session.LastResultColumnMetadata`'s doc for why this rides along
         // on `session` instead of widening this function's own return type.
-        let lastInsertId, lastGeneratedId, result, columnTypes =
+        let lastInsertId, lastGeneratedId, result, columnMetadata =
             match stmt with
             | Select select ->
                 let result, types = withRecursionDepth (fun () -> Executor.runTopLevelSelect store registry dbName select)
@@ -1186,11 +1186,13 @@ let private executeParsed (session: Session) (stmt: Statement) : Session * Query
 
                 lastInsertId, lastGeneratedId, result, []
 
-        { session with
-            LastInsertId = lastInsertId
-            LastGeneratedId = lastGeneratedId
-            LastResultColumnTypes = columnTypes },
-        result
+        let session =
+            { session with
+                LastInsertId = lastInsertId
+                LastGeneratedId = lastGeneratedId
+                LastResultColumnMetadata = columnMetadata }
+
+        session, result
 
     match session.Tx with
     | Some _ ->
@@ -1253,8 +1255,8 @@ let private executeStatement (session: Session) (sql: string) (upper: string) : 
     match Parser.parse sql with
     | Result.Ok stmt -> executeParsed session stmt
     | Result.Error _ when upper.StartsWith "SELECT" && upper.Contains "@" ->
-        { session with LastResultColumnTypes = [] }, handleAtVarSelect session sql
-    | Result.Error _ -> { session with LastResultColumnTypes = [] }, syntaxError sql
+        { session with LastResultColumnMetadata = [] }, handleAtVarSelect session sql
+    | Result.Error _ -> { session with LastResultColumnMetadata = [] }, syntaxError sql
 
 /// Every statement form `dispatch` recognizes purely by text probe
 /// (SET/USE/SHOW/transaction control) rather than `Parser.parse` — one DU
@@ -1753,12 +1755,12 @@ let private dispatch (session: Session) (rawSql: string) : Session * QueryResult
             // Every probe-handled form (SHOW/SET/session-variable SELECT/...)
             // is its own small synthetic `ResultSet` of plain strings — none of
             // them go through `executeStatement`'s typed path, so clear
-            // whatever `LastResultColumnTypes` a previous statement on this
+            // whatever `LastResultColumnMetadata` a previous statement on this
             // session left behind rather than risk it surviving (via `Server`'s
             // VAR_STRING-length-mismatch fallback, a same-column-count
             // coincidence is all it'd take) onto an unrelated resultset.
             let session, result = runProbe session sql probe
-            { session with LastResultColumnTypes = [] }, result
+            { session with LastResultColumnMetadata = [] }, result
         | None -> executeStatement session sql upper
 
 /// Disposes `session.Tx`'s transaction gate lease, if it holds one — called
