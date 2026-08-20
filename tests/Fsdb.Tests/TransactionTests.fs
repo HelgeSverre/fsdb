@@ -328,6 +328,28 @@ let tests =
               | ResultSet(_, [ [ Some "1"; Some "10" ]; [ Some "2"; Some "20" ] ]) -> ()
               | result -> failtestf "expected both disjoint updates to survive, got %A" result
 
+          testCase "a disjoint transaction commit maintains indexes incrementally"
+          <| fun _ ->
+              let store = Fsdb.Storage.create ()
+              let setup = create 1 store
+              let setup, _ = handle setup "CREATE TABLE tx_indexed (id INT PRIMARY KEY, email VARCHAR(64) UNIQUE, n INT)"
+              let setup, _ = handle setup "INSERT INTO tx_indexed VALUES (1, 'a@example.test', 0), (2, 'b@example.test', 0)"
+              let first, _ = handle (create 2 store) "BEGIN"
+              let second, _ = handle (create 3 store) "BEGIN"
+              let first, _ = handle first "UPDATE tx_indexed SET n = 10 WHERE id = 1"
+              let second, _ = handle second "UPDATE tx_indexed SET n = 20 WHERE id = 2"
+              let _, firstCommit = handle first "COMMIT"
+              Expect.equal firstCommit (Affected 0UL) "the first transaction commits"
+
+              let reindexesBefore = Fsdb.Storage.reindexCallCount ()
+              let _, secondCommit = handle second "COMMIT"
+              Expect.equal secondCommit (Affected 0UL) "the stale disjoint transaction commits"
+              Expect.equal (Fsdb.Storage.reindexCallCount ()) reindexesBefore "the merge preserves the incremental indexes"
+
+              match handle setup "SELECT id, email, n FROM tx_indexed ORDER BY id" |> snd with
+              | ResultSet(_, [ [ Some "1"; Some "a@example.test"; Some "10" ]; [ Some "2"; Some "b@example.test"; Some "20" ] ]) -> ()
+              | result -> failtestf "expected both indexed rows to remain queryable, got %A" result
+
           testCase "concurrent transaction identity uses primary-key collation"
           <| fun _ ->
               let store = Fsdb.Storage.create ()

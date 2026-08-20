@@ -117,6 +117,19 @@ type RowStore<'T> internal (liveCount: int, slots: PagedVector<'T option>) =
 
     member _.ToBuilder() : RowStoreBuilder<'T> = RowStoreBuilder<'T>(liveCount, slots)
 
+    member private _.Slots = slots
+
+    member internal this.ChangesFrom(baseline: RowStore<'T>) =
+        seq {
+            for index in slots.ChangedIndices baseline.Slots do
+                let rowId = RowId.create index
+                let before = baseline.TryFind rowId
+                let after = this.TryFind rowId
+
+                if not (EqualityComparer<'T option>.Default.Equals(before, after)) then
+                    yield rowId, before, after
+        }
+
     member this.Indexed =
         seq {
             for index = 0 to slots.Count - 1 do

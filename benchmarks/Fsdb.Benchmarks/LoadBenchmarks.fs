@@ -40,6 +40,12 @@ type private Workload =
         | TransactionDistinct -> "transaction-distinct"
         | Mixed -> "mixed"
 
+    static member All = [ PointRead; UpdateDistinct; UpdateHot; UpsertDistinct; Insert; ReplaceDistinct; TransactionDistinct; Mixed ]
+
+    static member TryParse(value: string) =
+        Workload.All
+        |> List.tryFind (fun workload -> String.Equals(workload.Name, value, StringComparison.OrdinalIgnoreCase))
+
 let private envFloat (name: string) (fallback: float) : float =
     match Environment.GetEnvironmentVariable name with
     | null -> fallback
@@ -70,6 +76,18 @@ let private envInt (name: string) (fallback: int) : int =
         match Int32.TryParse value with
         | true, parsed when parsed > 0 -> parsed
         | _ -> fallback
+
+let private envWorkloads () =
+    match Environment.GetEnvironmentVariable "FSDB_LOAD_WORKLOADS" with
+    | null -> Workload.All
+    | value ->
+        let workloads =
+            value.Split(',', StringSplitOptions.RemoveEmptyEntries ||| StringSplitOptions.TrimEntries)
+            |> Array.choose Workload.TryParse
+            |> Array.distinct
+            |> Array.toList
+
+        if workloads.IsEmpty then Workload.All else workloads
 
 let private workerCounts = envInts "FSDB_LOAD_WORKERS" [ 8 ]
 let private warmupSeconds = envFloat "FSDB_LOAD_WARMUP" 1.0
@@ -192,7 +210,7 @@ let private relativeStandardDeviation (samples: float list) =
 
 let run () : int =
     let bin = BenchServer.benchBin ()
-    let workloads = [ PointRead; UpdateDistinct; UpdateHot; UpsertDistinct; Insert; ReplaceDistinct; TransactionDistinct; Mixed ]
+    let workloads = envWorkloads ()
 
     let measureFsdb workload workerCount =
         let proc = BenchServer.startFsdb bin None

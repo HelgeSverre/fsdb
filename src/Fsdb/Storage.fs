@@ -1225,32 +1225,6 @@ let private validateMergedDatabase (dbName: string) (db: Database) : unit =
                                 conflict ()
                 | _ -> conflict ()
 
-let private mergeDatabaseSlot (dbName: string) (slot: Database ref) (baseDb: Database) (batchDb: Database) : unit =
-    lock slot (fun () ->
-        let liveDb = slot.Value
-
-        if obj.ReferenceEquals(liveDb, baseDb) then
-            slot.Value <- batchDb
-        else
-            let tableKeys = Set.unionMany [ keysOf baseDb; keysOf batchDb; keysOf liveDb ]
-
-            let merged =
-                tableKeys
-                |> Set.fold
-                    (fun acc tableName ->
-                        match Map.tryFind tableName baseDb, Map.tryFind tableName batchDb, Map.tryFind tableName liveDb with
-                        | Some baseTable, Some batchTable, _ when baseTable = batchTable -> acc
-                        | Some baseTable, None, Some liveTable when liveTable = baseTable -> Map.remove tableName acc
-                        | None, Some batchTable, None -> Map.add tableName batchTable acc
-                        | Some baseTable, Some batchTable, Some liveTable when liveTable = baseTable -> Map.add tableName batchTable acc
-                        | Some baseTable, Some batchTable, Some liveTable when sameTableSchema baseTable batchTable ->
-                            Map.add tableName (mergeRows dbName baseTable batchTable liveTable) acc
-                        | _ -> raise (LockWaitTimeout dbName))
-                    liveDb
-
-            validateMergedDatabase dbName merged
-            slot.Value <- merged)
-
 let private withRowLocks (store: Store) (dbName: string) (tableName: string) (rowIds: RowId list) body =
     let stripeCount = store.RowLocks.Length
 
@@ -1271,27 +1245,6 @@ let private withRowLocks (store: Store) (dbName: string) (tableName: string) (ro
         | stripe :: rest -> lock store.RowLocks.[stripe] (fun () -> acquire rest)
 
     acquire stripes
-
-/// Merges a private statement or transaction snapshot into the live catalog.
-/// Rows changed from the same base row conflict; disjoint row changes combine
-/// under the database slot lock without a transaction-wide gate.
-let mergeCatalogInto (store: Store) (baseCatalog: Catalog) (batchCatalog: Catalog) : unit =
-    let dbKeys = Set.union (keysOf baseCatalog) (keysOf batchCatalog)
-
-    for dbName in dbKeys do
-        match Map.tryFind dbName baseCatalog, Map.tryFind dbName batchCatalog with
-        | Some _, None ->
-            match store.Databases.TryGetValue dbName with
-            | true, slot when obj.ReferenceEquals(slot.Value, Map.find dbName baseCatalog) -> store.Databases.TryRemove dbName |> ignore
-            | _ -> raise (LockWaitTimeout dbName)
-        | None, Some batchDb ->
-            if not (store.Databases.TryAdd(dbName, ref batchDb)) then
-                raise (LockWaitTimeout dbName)
-        | None, None -> ()
-        | Some baseDb, Some batchDb when baseDb = batchDb -> ()
-        | Some baseDb, Some batchDb ->
-            let slot = store.Databases.GetOrAdd(dbName, (fun _ -> ref Map.empty))
-            mergeDatabaseSlot dbName slot baseDb batchDb
 
 // ---------------------------------------------------------------------------
 // The built-in `mysql` system schema: real stored tables (not virtual
@@ -3402,7 +3355,7 @@ let deleteRows
         Ok affected
     | Error e -> Error e
 
-let private canMergePointUpdate tableKey rowIds (baseDb: Database) (batchDb: Database) =
+let private canMergePointUpdate tableKey rowIds (baseDb: Database) (batchDb: Database) (liveDb: Database) =
     let unchangedOtherTables =
         Set.union (keysOf baseDb) (keysOf batchDb)
         |> Set.forall (fun key ->
@@ -3418,7 +3371,7 @@ let private canMergePointUpdate tableKey rowIds (baseDb: Database) (batchDb: Dat
             [ for foreignKey in baseTable.ForeignKeys do
                   yield! foreignKey.Columns
 
-              for _, foreignKey in referencingForeignKeys baseDb tableKey do
+              for _, foreignKey in referencingForeignKeys liveDb tableKey do
                   yield! foreignKey.RefColumns ]
             |> List.map (resolveColumn baseTable.Columns)
 
@@ -3467,6 +3420,76 @@ let private mergePointUpdate dbName tableKey rowIds (baseDb: Database) (batchDb:
         Map.add tableKey mergedTable liveDb
     | _ -> conflict ()
 
+let private tryPointUpdate (baseDb: Database) (batchDb: Database) (liveDb: Database) =
+    let changedTables =
+        Set.union (keysOf baseDb) (keysOf batchDb)
+        |> Seq.choose (fun tableKey ->
+            match Map.tryFind tableKey baseDb, Map.tryFind tableKey batchDb with
+            | Some baseTable, Some batchTable when obj.ReferenceEquals(baseTable, batchTable) -> None
+            | Some baseTable, Some batchTable when sameTableSchema baseTable batchTable ->
+                let changes = batchTable.RowsArray.ChangesFrom baseTable.RowsArray |> List.ofSeq
+
+                if changes |> List.forall (function _, Some _, Some _ -> true | _ -> false) then
+                    Some(tableKey, changes |> List.map (fun (rowId, _, _) -> rowId))
+                else
+                    Some(tableKey, [])
+            | _ -> Some(tableKey, []))
+        |> List.ofSeq
+
+    match changedTables with
+    | [ tableKey, rowIds ] when not rowIds.IsEmpty && canMergePointUpdate tableKey rowIds baseDb batchDb liveDb -> Some(tableKey, rowIds)
+    | _ -> None
+
+let private mergeDatabaseSlot (dbName: string) (slot: Database ref) (baseDb: Database) (batchDb: Database) : unit =
+    lock slot (fun () ->
+        let liveDb = slot.Value
+
+        if obj.ReferenceEquals(liveDb, baseDb) then
+            slot.Value <- batchDb
+        else
+            match tryPointUpdate baseDb batchDb liveDb with
+            | Some(tableKey, rowIds) -> slot.Value <- mergePointUpdate dbName tableKey rowIds baseDb batchDb liveDb
+            | None ->
+                let tableKeys = Set.unionMany [ keysOf baseDb; keysOf batchDb; keysOf liveDb ]
+
+                let merged =
+                    tableKeys
+                    |> Set.fold
+                        (fun acc tableName ->
+                            match Map.tryFind tableName baseDb, Map.tryFind tableName batchDb, Map.tryFind tableName liveDb with
+                            | Some baseTable, Some batchTable, _ when baseTable = batchTable -> acc
+                            | Some baseTable, None, Some liveTable when liveTable = baseTable -> Map.remove tableName acc
+                            | None, Some batchTable, None -> Map.add tableName batchTable acc
+                            | Some baseTable, Some batchTable, Some liveTable when liveTable = baseTable -> Map.add tableName batchTable acc
+                            | Some baseTable, Some batchTable, Some liveTable when sameTableSchema baseTable batchTable ->
+                                Map.add tableName (mergeRows dbName baseTable batchTable liveTable) acc
+                            | _ -> raise (LockWaitTimeout dbName))
+                        liveDb
+
+                validateMergedDatabase dbName merged
+                slot.Value <- merged)
+
+/// Merges a private statement or transaction snapshot into the live catalog.
+/// Rows changed from the same base row conflict; disjoint row changes combine
+/// under the database slot lock without a transaction-wide gate.
+let mergeCatalogInto (store: Store) (baseCatalog: Catalog) (batchCatalog: Catalog) : unit =
+    let dbKeys = Set.union (keysOf baseCatalog) (keysOf batchCatalog)
+
+    for dbName in dbKeys do
+        match Map.tryFind dbName baseCatalog, Map.tryFind dbName batchCatalog with
+        | Some _, None ->
+            match store.Databases.TryGetValue dbName with
+            | true, slot when obj.ReferenceEquals(slot.Value, Map.find dbName baseCatalog) -> store.Databases.TryRemove dbName |> ignore
+            | _ -> raise (LockWaitTimeout dbName)
+        | None, Some batchDb ->
+            if not (store.Databases.TryAdd(dbName, ref batchDb)) then
+                raise (LockWaitTimeout dbName)
+        | None, None -> ()
+        | Some baseDb, Some batchDb when baseDb = batchDb -> ()
+        | Some baseDb, Some batchDb ->
+            let slot = store.Databases.GetOrAdd(dbName, (fun _ -> ref Map.empty))
+            mergeDatabaseSlot dbName slot baseDb batchDb
+
 let private withPointUpdateDatabase
     (store: Store)
     (dbName: string)
@@ -3492,10 +3515,7 @@ let private withPointUpdateDatabase
                         false)
 
             if not published then
-                if canMergePointUpdate tableKey rowIds baseDb batchDb then
-                    lock slot (fun () -> slot.Value <- mergePointUpdate dbName tableKey rowIds baseDb batchDb slot.Value)
-                else
-                    mergeDatabaseSlot dbName slot baseDb batchDb
+                mergeDatabaseSlot dbName slot baseDb batchDb
 
             result)
 

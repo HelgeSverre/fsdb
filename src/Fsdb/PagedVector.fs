@@ -101,6 +101,24 @@ type PagedVector<'T> internal (count: int, pages: Map<int, 'T array>) =
 
     member _.ToBuilder() : PagedVectorBuilder<'T> = PagedVectorBuilder<'T>(count, pages)
 
+    member private _.TryPage(pageIndex: int) = Map.tryFind pageIndex pages
+
+    member internal _.ChangedIndices(other: PagedVector<'T>) =
+        seq {
+            let length = max count other.Count
+
+            if length > 0 then
+                for pageIndex = 0 to (length - 1) / Page.Size do
+                    match Map.tryFind pageIndex pages, other.TryPage pageIndex with
+                    | Some left, Some right when obj.ReferenceEquals(left, right) -> ()
+                    | _ ->
+                        let first = pageIndex * Page.Size
+                        let last = min length (first + Page.Size) - 1
+
+                        for index = first to last do
+                            yield index
+        }
+
     member private _.Items =
         seq {
             if count > 0 then
