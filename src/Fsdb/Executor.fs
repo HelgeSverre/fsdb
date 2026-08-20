@@ -7681,7 +7681,10 @@ let rec execute (store: Store) (registry: Registry) (dbName: string) (ids: int64
                     | Error(code, message) -> ids, Err(code, message)
                     | Ok targetRows ->
                         let targetSet = referenceSet targetRows
-                        let predicate row = Ok(targetSet.Contains row)
+                        let predicate row =
+                            match narrowed with
+                            | Some _ -> check row |> Result.mapError ExpressionError
+                            | None -> Ok(targetSet.Contains row)
                         let assignedIdxs = indexedAssignments |> List.map fst |> Set.ofList
 
                         let updater row =

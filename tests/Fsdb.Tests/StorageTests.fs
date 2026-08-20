@@ -907,9 +907,9 @@ let tests =
 
                 testCase "a no-op UPDATE that writes a row's PRIMARY KEY back to its own value never collides with itself"
                 <| fun _ ->
-                    // `UniqueIndex` now maps a key to the row's *position* in
-                    // `Rows`, and `updateRows`'s collision check excludes the
-                    // row being rewritten by that position — this guards
+                    // `UniqueIndex` maps a key to the row's stable identity,
+                    // and `updateRows`'s collision check excludes the row
+                    // being rewritten by that identity — this guards
                     // against a regression back to excluding by structural
                     // equality (`existing <> row`), which any no-op or a
                     // row-position mixup could silently break.
@@ -2358,6 +2358,94 @@ let tests =
                         | [ row ] -> Expect.equal (asInt row.[0]) (int64 (threadCount * incrementsPerThread)) "every increment landed, none lost to a race"
                         | other -> failtestf "expected exactly one row, got %A" other
                     | Error e -> failtestf "expected Ok, got %A" e ]
+
+          testList
+              "row write concurrency"
+              [ testCase "indexed updates to distinct rows execute concurrently"
+                <| fun _ ->
+                    let store = withUsersTable ()
+
+                    insertRows
+                        store
+                        defaultDatabase
+                        "users"
+                        None
+                        [ [ VNull; VString "alice"; VInt 30L ]
+                          [ VNull; VString "bob"; VInt 40L ] ]
+                    |> ignore
+
+                    let candidate id =
+                        match tryUniqueLookup store defaultDatabase "users" "id" (VInt id) with
+                        | Some(_, [ row ]) -> row
+                        | other -> failtestf "expected an indexed row, got %A" other
+
+                    use bothEntered = new System.Threading.ManualResetEventSlim(false)
+                    let mutable entered = 0
+
+                    let update indexedRow =
+                        updateRows
+                            store
+                            defaultDatabase
+                            "users"
+                            (Some [ indexedRow ])
+                            (fun _ -> Ok true)
+                            (fun row ->
+                                if System.Threading.Interlocked.Increment(&entered) = 2 then
+                                    bothEntered.Set()
+
+                                if not (bothEntered.Wait(System.TimeSpan.FromSeconds 5.0)) then
+                                    failtest "distinct row updates did not overlap"
+
+                                Ok [| row.[0]; row.[1]; VInt 99L |])
+
+                    let first = System.Threading.Tasks.Task.Run(fun () -> update (candidate 1L))
+                    let second = System.Threading.Tasks.Task.Run(fun () -> update (candidate 2L))
+                    System.Threading.Tasks.Task.WaitAll [| first :> System.Threading.Tasks.Task; second :> System.Threading.Tasks.Task |]
+                    Expect.equal first.Result (Ok 1) "the first row changed"
+                    Expect.equal second.Result (Ok 1) "the second row changed"
+
+                testCase "indexed updates to the same row observe the preceding write"
+                <| fun _ ->
+                    let store = withUsersTable ()
+
+                    insertRows store defaultDatabase "users" None [ [ VInt 1L; VString "alice"; VInt 0L ] ]
+                    |> ignore
+
+                    let candidate =
+                        match tryUniqueLookup store defaultDatabase "users" "id" (VInt 1L) with
+                        | Some(_, [ row ]) -> row
+                        | other -> failtestf "expected an indexed row, got %A" other
+
+                    use start = new System.Threading.ManualResetEventSlim(false)
+
+                    let asInt =
+                        function
+                        | VInt value -> value
+                        | value -> failtestf "expected an integer, got %A" value
+
+                    let increment () =
+                        start.Wait()
+
+                        updateRows
+                            store
+                            defaultDatabase
+                            "users"
+                            (Some [ candidate ])
+                            (fun _ -> Ok true)
+                            (fun row -> Ok [| row.[0]; row.[1]; VInt(asInt row.[2] + 1L) |])
+
+                    let first = System.Threading.Tasks.Task.Run increment
+                    let second = System.Threading.Tasks.Task.Run increment
+                    start.Set()
+                    System.Threading.Tasks.Task.WaitAll [| first :> System.Threading.Tasks.Task; second :> System.Threading.Tasks.Task |]
+                    Expect.equal first.Result (Ok 1) "the first increment changed the row"
+                    Expect.equal second.Result (Ok 1) "the second increment changed the row"
+
+                    match scan store defaultDatabase "users" with
+                    | Ok(_, rows) ->
+                        let age = rows |> Seq.exactlyOne |> fun row -> row.[2]
+                        Expect.equal age (VInt 2L) "both increments are visible"
+                    | Error error -> failtestf "expected Ok, got %A" error ]
 
           testList
               "paged vector"

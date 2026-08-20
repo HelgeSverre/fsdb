@@ -290,7 +290,11 @@ type Store =
       /// appends to one shared file and tracks rotation state in a plain
       /// `ref` — so its calls stay ordered by this lock, same as
       /// `Persistence.snapshotNow`'s own use of it.
-      Lock: obj }
+      Lock: obj
+      /// Indexed updates lock stable row identities before reading their
+      /// current values. Fixed stripes bound lock memory while disjoint rows
+      /// can still be prepared concurrently.
+      RowLocks: obj array }
 
     /// Assembles a point-in-time `Catalog` (whole-map) view across every
     /// database's independent slot — an O(number of databases) allocation,
@@ -398,7 +402,8 @@ let beginTransactionSnapshot (store: Store) : Store =
       // signal that events built here must be buffered rather than dropped
       // by `emit`'s no-buffer-no-subscriber branch.
       PendingEvents = if store.OnCommit.Count > 0 || store.PendingEvents.IsSome then Some(ResizeArray()) else None
-      Lock = obj () }
+      Lock = obj ()
+      RowLocks = store.RowLocks }
 
 /// Flushes a committed transaction's buffered events onto `store`, if it
 /// buffered any — a no-op for an empty or subscriber-less snapshot. Call
@@ -487,7 +492,6 @@ let private withDatabase
     match store.Databases.TryGetValue dbName with
     | false, _ -> Error(NoSuchDatabase dbName)
     | true, slot ->
-        // `slot` (the `Database ref` cell itself) doubles as this
         // The database cell is also its mutation lock. Different databases
         // use different cells, while writers within one database publish
         // their immutable replacement maps atomically.
@@ -1221,24 +1225,49 @@ let private validateMergedDatabase (dbName: string) (db: Database) : unit =
 let private mergeDatabaseSlot (dbName: string) (slot: Database ref) (baseDb: Database) (batchDb: Database) : unit =
     lock slot (fun () ->
         let liveDb = slot.Value
-        let tableKeys = Set.unionMany [ keysOf baseDb; keysOf batchDb; keysOf liveDb ]
 
-        let merged =
-            tableKeys
-            |> Set.fold
-                (fun acc tableName ->
-                    match Map.tryFind tableName baseDb, Map.tryFind tableName batchDb, Map.tryFind tableName liveDb with
-                    | Some baseTable, Some batchTable, _ when baseTable = batchTable -> acc
-                    | Some baseTable, None, Some liveTable when liveTable = baseTable -> Map.remove tableName acc
-                    | None, Some batchTable, None -> Map.add tableName batchTable acc
-                    | Some baseTable, Some batchTable, Some liveTable when liveTable = baseTable -> Map.add tableName batchTable acc
-                    | Some baseTable, Some batchTable, Some liveTable when tableSchema baseTable = tableSchema batchTable ->
-                        Map.add tableName (mergeRows dbName baseTable batchTable liveTable) acc
-                    | _ -> raise (LockWaitTimeout dbName))
-                liveDb
+        if obj.ReferenceEquals(liveDb, baseDb) then
+            slot.Value <- batchDb
+        else
+            let tableKeys = Set.unionMany [ keysOf baseDb; keysOf batchDb; keysOf liveDb ]
 
-        validateMergedDatabase dbName merged
-        slot.Value <- merged)
+            let merged =
+                tableKeys
+                |> Set.fold
+                    (fun acc tableName ->
+                        match Map.tryFind tableName baseDb, Map.tryFind tableName batchDb, Map.tryFind tableName liveDb with
+                        | Some baseTable, Some batchTable, _ when baseTable = batchTable -> acc
+                        | Some baseTable, None, Some liveTable when liveTable = baseTable -> Map.remove tableName acc
+                        | None, Some batchTable, None -> Map.add tableName batchTable acc
+                        | Some baseTable, Some batchTable, Some liveTable when liveTable = baseTable -> Map.add tableName batchTable acc
+                        | Some baseTable, Some batchTable, Some liveTable when tableSchema baseTable = tableSchema batchTable ->
+                            Map.add tableName (mergeRows dbName baseTable batchTable liveTable) acc
+                        | _ -> raise (LockWaitTimeout dbName))
+                    liveDb
+
+            validateMergedDatabase dbName merged
+            slot.Value <- merged)
+
+let private withRowLocks (store: Store) (dbName: string) (tableName: string) (rowIds: RowId list) body =
+    let stripeCount = store.RowLocks.Length
+
+    let stripeIndex rowId =
+        HashCode.Combine(
+            StringComparer.OrdinalIgnoreCase.GetHashCode dbName,
+            StringComparer.OrdinalIgnoreCase.GetHashCode tableName,
+            RowId.value rowId
+        )
+        &&& Int32.MaxValue
+        |> fun hash -> hash % stripeCount
+
+    let stripes = rowIds |> List.map stripeIndex |> List.distinct |> List.sort
+
+    let rec acquire remaining =
+        match remaining with
+        | [] -> body ()
+        | stripe :: rest -> lock store.RowLocks.[stripe] (fun () -> acquire rest)
+
+    acquire stripes
 
 /// Merges a private statement or transaction snapshot into the live catalog.
 /// Rows changed from the same base row conflict; disjoint row changes combine
@@ -1487,7 +1516,8 @@ let create () : Store =
       VirtualTables = Map.empty
       OnCommit = ResizeArray()
       PendingEvents = None
-      Lock = obj () }
+      Lock = obj ()
+      RowLocks = Array.init 4096 (fun _ -> obj ()) }
 
 /// Removes/adds one row's entry in every unique group's map, the
 /// incremental update every write path below makes instead of
@@ -3296,6 +3326,96 @@ let deleteRows
         Ok affected
     | Error e -> Error e
 
+let private canMergePointUpdate tableKey rowIds (baseDb: Database) (batchDb: Database) =
+    let unchangedOtherTables =
+        Set.union (keysOf baseDb) (keysOf batchDb)
+        |> Set.forall (fun key -> key = tableKey || Map.tryFind key baseDb = Map.tryFind key batchDb)
+
+    match Map.tryFind tableKey baseDb, Map.tryFind tableKey batchDb with
+    | Some baseTable, Some batchTable when tableSchema baseTable = tableSchema batchTable && unchangedOtherTables ->
+        let protectedColumns =
+            [ for foreignKey in baseTable.ForeignKeys do
+                  yield! foreignKey.Columns
+
+              for _, foreignKey in referencingForeignKeys baseDb tableKey do
+                  yield! foreignKey.RefColumns ]
+            |> List.map (resolveColumn baseTable.Columns)
+
+        match protectedColumns |> traverse id with
+        | Error _ -> false
+        | Ok indices ->
+            rowIds
+            |> List.forall (fun rowId ->
+                match baseTable.RowsArray.TryFind rowId, batchTable.RowsArray.TryFind rowId with
+                | Some before, Some after -> indices |> List.forall (fun index -> before.[index] = after.[index])
+                | _ -> false)
+    | _ -> false
+
+let private mergePointUpdate dbName tableKey rowIds (baseDb: Database) (batchDb: Database) (liveDb: Database) =
+    let conflict () = raise (LockWaitTimeout dbName)
+
+    match Map.tryFind tableKey baseDb, Map.tryFind tableKey batchDb, Map.tryFind tableKey liveDb with
+    | Some baseTable, Some batchTable, Some liveTable when tableSchema liveTable = tableSchema baseTable ->
+        let rows = liveTable.RowsArray.ToBuilder()
+        let uniqueGroups = uniqueKeyGroups liveTable
+        let mutable index = liveTable.UniqueIndex
+
+        for rowId in rowIds do
+            match baseTable.RowsArray.TryFind rowId, batchTable.RowsArray.TryFind rowId, rows.TryFind rowId with
+            | Some before, Some after, Some live when live = before ->
+                let collision =
+                    uniqueGroups
+                    |> List.exists (fun (name, columns) ->
+                        match encodeConstraintKey liveTable.Columns columns after with
+                        | Some key -> Map.tryFind key index.[name] |> Option.exists ((<>) rowId)
+                        | None -> false)
+
+                if collision then
+                    conflict ()
+
+                rows.[rowId] <- after
+                index <- reindexRow liveTable.Columns uniqueGroups (Some before) (Some(rowId, after)) index
+            | _ -> conflict ()
+
+        let mergedTable =
+            { liveTable with
+                RowsArray = rows.DrainToImmutable()
+                NextAutoId = max liveTable.NextAutoId batchTable.NextAutoId
+                UniqueIndex = index }
+
+        Map.add tableKey mergedTable liveDb
+    | _ -> conflict ()
+
+let private withPointUpdateDatabase
+    (store: Store)
+    (dbName: string)
+    (tableName: string)
+    (rowIds: RowId list)
+    (operation: Database -> Result<Database * 'a, StorageError>)
+    : Result<'a, StorageError> =
+    match store.Databases.TryGetValue dbName with
+    | false, _ -> Error(NoSuchDatabase dbName)
+    | true, slot ->
+        let tableKey = normalizeTableName tableName
+        let rowIds = List.distinct rowIds
+        let baseDb = slot.Value
+
+        operation baseDb
+        |> Result.map (fun (batchDb, result) ->
+            if not (canMergePointUpdate tableKey rowIds baseDb batchDb) then
+                mergeDatabaseSlot dbName slot baseDb batchDb
+            else
+                lock slot (fun () ->
+                    let liveDb = slot.Value
+
+                    slot.Value <-
+                        if obj.ReferenceEquals(liveDb, baseDb) then
+                            batchDb
+                        else
+                            mergePointUpdate dbName tableKey rowIds baseDb batchDb liveDb)
+
+            result)
+
 /// Replaces every row matching `predicate` with `updater row`, coercing the
 /// result back to the table's column types, then checking it against the
 /// table's unique keys (error 1062, against every *other* row — a no-op
@@ -3326,27 +3446,26 @@ let updateRows
     (predicate: Value[] -> Result<bool, StorageError>)
     (updater: Value[] -> Result<Value[], StorageError>)
     : Result<int, StorageError> =
-        let result =
-            withDatabase store dbName (fun db ->
-                let key = normalizeTableName tableName
+    let apply candidateRows db =
+        let key = normalizeTableName tableName
 
-                virtualWriteGuard store dbName tableName
-                |> Result.bind (fun () -> tryGetTable db tableName)
-                |> Result.bind (fun table ->
-                    let uniqueGroups = uniqueKeyGroups table
-                    let checkFks = store.ForeignKeyChecks
-                    // Failed statements discard the private builder, keeping
-                    // partial page rewrites outside the published catalog.
-                    let builder = table.RowsArray.ToBuilder()
+        virtualWriteGuard store dbName tableName
+        |> Result.bind (fun () -> tryGetTable db tableName)
+        |> Result.bind (fun table ->
+            let uniqueGroups = uniqueKeyGroups table
+            let checkFks = store.ForeignKeyChecks
+            // Failed statements discard the private builder, keeping
+            // partial page rewrites outside the published catalog.
+            let builder = table.RowsArray.ToBuilder()
 
-                    let step acc (rowId, row) =
-                        acc
-                        |> Result.bind
-                            (fun (changesRev: (Value[] * Value[]) list,
-                                  index: Map<string, Map<string, RowId>>,
-                                  cascadeDb: Database,
-                                  visited: Map<string, Value[] list>,
-                                  cascaded: Map<string, (Value[] * Value[]) list>) ->
+            let step acc (rowId, row) =
+                acc
+                |> Result.bind
+                    (fun (changesRev: (Value[] * Value[]) list,
+                          index: Map<string, Map<string, RowId>>,
+                          cascadeDb: Database,
+                          visited: Map<string, Value[] list>,
+                          cascaded: Map<string, (Value[] * Value[]) list>) ->
                             let rowId =
                                 match builder.TryFind rowId with
                                 | Some current when obj.ReferenceEquals(current, row) -> Some rowId
@@ -3396,30 +3515,48 @@ let updateRows
                                             builder.[rowId] <- newRow
                                             (if newRow <> row then (row, newRow) :: changesRev else changesRev), index', cascadeDb', visited', cascaded')))
 
-                    candidates
-                    |> Option.defaultWith (fun () -> table.RowsArray.Indexed |> List.ofSeq)
-                    |> foldWithCancellation step (Ok([], table.UniqueIndex, db, Map.empty, Map.empty))
-                    // `DrainToImmutable`, not `MoveToImmutable`: the latter
-                    // demands Count = Capacity, which an empty table's
-                    // builder (capacity-8, count-0) never satisfies.
-                    |> Result.map (fun (changesRev, index, cascadeDb, _visited, cascaded) ->
-                        Map.add key { table with RowsArray = builder.DrainToImmutable(); UniqueIndex = index } cascadeDb, (List.rev changesRev, cascaded, db))))
+            candidateRows
+            |> Option.defaultWith (fun () -> table.RowsArray.Indexed |> List.ofSeq)
+            |> foldWithCancellation step (Ok([], table.UniqueIndex, db, Map.empty, Map.empty))
+            |> Result.map (fun (changesRev, index, cascadeDb, _visited, cascaded) ->
+                Map.add key { table with RowsArray = builder.DrainToImmutable(); UniqueIndex = index } cascadeDb, (List.rev changesRev, cascaded, db)))
 
-        match result with
-        | Ok(changes, cascaded, db) ->
-            if not changes.IsEmpty then
-                emit store (Some(RowsUpdated(dbName, tableName, changes)))
+    let result =
+        match candidates with
+        | None -> withDatabase store dbName (apply None)
+        | Some rows ->
+            let rowIds = rows |> List.map fst
 
-            // `ON UPDATE CASCADE`/`SET NULL` child rewrites this statement
-            // triggered — same `RowsUpdated` shape a plain `UPDATE` reports
-            // (see `cascadeUpdateVisited`'s doc).
-            let originalNameOf tableKey = db |> Map.tryFind tableKey |> Option.map (fun t -> t.OriginalName) |> Option.defaultValue tableKey
+            withRowLocks store dbName tableName rowIds (fun () ->
+                let operation db =
+                    let refreshed =
+                        db
+                        |> Map.tryFind (normalizeTableName tableName)
+                        |> Option.map (fun table ->
+                            rowIds
+                            |> List.distinct
+                            |> List.choose (fun rowId -> table.RowsArray.TryFind rowId |> Option.map (fun row -> rowId, row)))
+                        |> Option.defaultValue []
 
-            cascaded
-            |> Map.iter (fun tableKey chg -> if not chg.IsEmpty then emit store (Some(RowsUpdated(dbName, originalNameOf tableKey, chg))))
+                    apply (Some refreshed) db
 
-            Ok changes.Length
-        | Error e -> Error e
+                withPointUpdateDatabase store dbName tableName rowIds operation)
+
+    match result with
+    | Ok(changes, cascaded, db) ->
+        if not changes.IsEmpty then
+            emit store (Some(RowsUpdated(dbName, tableName, changes)))
+
+        // `ON UPDATE CASCADE`/`SET NULL` child rewrites this statement
+        // triggered — same `RowsUpdated` shape a plain `UPDATE` reports
+        // (see `cascadeUpdateVisited`'s doc).
+        let originalNameOf tableKey = db |> Map.tryFind tableKey |> Option.map (fun t -> t.OriginalName) |> Option.defaultValue tableKey
+
+        cascaded
+        |> Map.iter (fun tableKey chg -> if not chg.IsEmpty then emit store (Some(RowsUpdated(dbName, originalNameOf tableKey, chg))))
+
+        Ok changes.Length
+    | Error e -> Error e
 
 /// Per-snapshot memo of `RowsArray` as a `Value[] list`, keyed by the
 /// `Table` instance itself: `Executor`'s row pipeline is list-based and
