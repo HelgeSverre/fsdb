@@ -5,8 +5,10 @@
 [![MySQL 8.4 wire protocol](https://img.shields.io/badge/MySQL-8.4%20wire%20protocol-4479A1.svg)](docs/compatibility.md)
 
 A MySQL-compatible database server in idiomatic F#. It speaks the MySQL wire
-protocol, so `mysql`, PDO, or any MySQL driver works against it unchanged —
-over an in-memory engine built as a pipeline of discriminated unions.
+protocol, so standard clients such as `mysql`, PDO, and MySqlConnector can use
+it without a custom adapter. Underneath is an in-memory engine built as a
+pipeline of discriminated unions: bytes → command → AST → logical plan →
+lazy `seq`.
 
 Readable F# is the primary goal; raw performance is not.
 
@@ -22,17 +24,21 @@ MySQL, PostgreSQL, or SQLite.
 - [Persistence format](#persistence-format)
 - [Embedding & extensibility](#embedding--extensibility)
 - [Benchmarking](#benchmarking)
+- [Development](#development)
 - [Documentation](#documentation)
 
 ## Quick start
 
-Needs the .NET 10 SDK (pinned by `global.json`) and a MySQL client; `just` is
-optional.
+Requires the .NET 10 SDK pinned by `global.json`. A MySQL client is needed for
+the CLI walkthrough below; [`just`](https://github.com/casey/just) is optional
+but provides the repository's standard commands.
 
 ```sh
 dotnet run --project src/Fsdb        # listens on 127.0.0.1:3307
-mysql --protocol=tcp -h127.0.0.1 -P3307 -e 'SELECT 1'
+mysql --protocol=tcp -h127.0.0.1 -P3307 -uroot -e 'SELECT 1'
 ```
+
+With `just`, the same two-terminal workflow is `just run` and `just client`.
 
 Port 3307 avoids a real MySQL on 3306 (`--port` overrides). A `root` account
 with all privileges and no password exists out of the box; accounts, `GRANT`s,
@@ -50,7 +56,7 @@ INSERT INTO notes (body) VALUES ('hello fsdb');
 SELECT * FROM notes;
 ```
 
-Any MySQL client works unchanged:
+Common MySQL clients connect without an fsdb-specific driver:
 
 | Client | Connect |
 |---|---|
@@ -99,8 +105,12 @@ cte_max_recursion_depth  = 1000
 loose-skip-name-resolve            # an option fsdb has no knob for
 ```
 
-Settings apply at startup and are process-wide, and no option file is
-auto-discovered; see `docs/compatibility.md` for the full list of divergences.
+Defaults-file settings apply at startup as process-wide defaults, and no option
+file is auto-discovered. `max_connections`, `max_allowed_packet`,
+`wait_timeout`, `innodb_lock_wait_timeout`, and `cte_max_recursion_depth` can
+also be changed with `SET GLOBAL`; see
+[the compatibility guide](docs/compatibility.md) for the complete behavior and
+deliberate divergences.
 
 ## How it works
 
@@ -120,7 +130,7 @@ flowchart LR
         QH["QueryHandler<br/>COM_QUERY / COM_STMT_*"]:::session
         PARSE["Parser · FParsec<br/>SQL text → AST"]:::plan
         EXEC["Executor<br/>logical plan → lazy seq"]:::plan
-        STORE["Storage<br/>catalog · snapshots"]:::data
+        STORE["Storage<br/>catalog · indexes · snapshots"]:::data
         WAL["Persistence<br/>binary WAL · snapshot"]:::data
 
         WIRE --> SESS --> QH --> PARSE --> EXEC
@@ -156,12 +166,13 @@ top-(n+offset) set instead of materializing the full sort.
 
 ### Engine
 
-Databases and tables live in a value-swapped catalog. Every write produces an
-immutable snapshot, which is what makes transactions (`BEGIN`/`COMMIT`/
-`ROLLBACK`) free: each snapshot is a consistent view. PK/UNIQUE lookups go
-through a map keyed by each column's collation-folded encoding, so
-`utf8mb4_0900_ai_ci` keys collide exactly as MySQL's do. Equi-joins
-hash-join; everything else is a scan.
+Databases and tables live in a value-swapped catalog. A transaction establishes
+a repeatable-read snapshot on its first database statement and keeps writes
+private until commit. Commit performs a row-level three-way merge: disjoint
+concurrent changes combine, while overlapping changes fail with MySQL's
+retryable 1205 error. PK/UNIQUE lookups go through maps keyed by each column's
+collation-folded encoding, so `utf8mb4_0900_ai_ci` keys collide exactly as
+MySQL's do. Equi-joins hash-join; everything else is a scan.
 
 ### Collations & charsets
 
@@ -183,11 +194,12 @@ type for every statement the grammar parses; only the text-probed `SET`/
 
 ## SQL surface
 
-The grammar covers what MySQL-backed applications use: `SELECT` with joins
-(`NATURAL`/`USING` included), derived tables, `GROUP BY`/`HAVING`, window
-functions, `UNION [ALL]`, CTE-free subqueries in expressions, JSON paths,
-multi-table `UPDATE`/`DELETE`, `EXPLAIN`, and user accounts with real
-`CREATE USER`/`GRANT`/`REVOKE` privilege enforcement.
+The grammar covers the core used by MySQL-backed applications: `SELECT` with
+joins (`NATURAL`/`USING` included), derived tables, `GROUP BY`/`HAVING`, window
+functions, `UNION [ALL]`, expression subqueries, ordinary and recursive CTEs,
+JSON paths and `JSON_TABLE`, multi-table `UPDATE`/`DELETE`, `REPLACE`,
+`EXPLAIN`, `AFTER INSERT` triggers, and user accounts with real `CREATE USER`/
+`GRANT`/`REVOKE` privilege enforcement.
 
 The introspection surface GUI clients lean on is served with real data:
 22 `information_schema` tables whose column sets are diffed against a live
@@ -203,14 +215,16 @@ own collation. `SET collation_connection` governs literals, so
 `SHOW CREATE TABLE` reports declared collations, and
 `information_schema.COLUMNS` carries `CHARACTER_SET_NAME`/`COLLATION_NAME`.
 
-The deliberate gaps — no CTEs, views, stored routines, triggers, or events —
-and every smaller divergence are documented in
+The deliberate gaps — including views, stored routines, events, and trigger
+forms beyond `AFTER INSERT` — and every smaller divergence are documented in
 [docs/compatibility.md](docs/compatibility.md) and marked `ponytail:` at
 their code sites.
 
 ## Persistence format
 
-`--data-dir` stores two files, both binary (no JSON):
+`--data-dir` stores two files, both binary (no JSON). Durable mode currently
+targets macOS and Linux because disk synchronization calls POSIX `fsync`
+through libc.
 
 **`wal.bin`** — one framed record per committed event:
 
@@ -223,17 +237,21 @@ pre-encoded statement trees; row events as physical `Value[]`s, so replay
 writes the exact committed values — `NOW()` replays to the same instant, not
 a fresh one). A crash mid-append leaves a torn final record; replay stops
 before it (length overrun or CRC mismatch), truncates the WAL back to the
-last good offset, and the next append glues onto a clean boundary. Once the
-WAL crosses 64 MiB or 100k events — or on SIGTERM/SIGINT — the whole catalog
-is snapshotted and the WAL truncates.
+last good offset, and the next append glues onto a clean boundary.
 
 **`snapshot.fsdb`** — the catalog as a self-delimiting binary tree
 (`database count` → tables → rows), same tag-byte codec and row format as the
 WAL. Written to `snapshot.fsdb.new`, fsynced via libc `fsync`, then renamed
 into place; a `.new` that parses cleanly supersedes the WAL on startup, a
-torn one falls back to the old snapshot plus full WAL replay. Nothing is
-written with `FileStream.Flush(true)` (macOS `F_FULLFSYNC` — ~5 ms per call);
-the plain `fsync` matches MySQL's own macOS durability semantics.
+torn one falls back to the old snapshot plus full WAL replay. fsdb avoids
+`FileStream.Flush(true)` because it issues the substantially stronger
+`F_FULLFSYNC` on macOS; plain `fsync` matches MySQL's default macOS flush
+semantics.
+
+By default, the catalog is snapshotted and the WAL truncated once the WAL
+crosses 64 MiB or 100,000 events, or during a graceful shutdown. The
+`wal_rotate_bytes` and `wal_rotate_entries` defaults-file settings tune those
+thresholds.
 
 ## Embedding & extensibility
 
@@ -418,10 +436,36 @@ Both servers start ad hoc (no brew services) and shut down after. fsdb
 optimizes for readable, idiomatic F# over raw speed, so expect MySQL to win
 most of these — the numbers track fsdb's hotspots, not parity.
 
+## Development
+
+Run the normal local gate before sending a change:
+
+```sh
+just check
+```
+
+That builds the root solution and runs the full Expecto suite. To iterate on
+one test, invoke the test project directly because the `just test` recipe does
+not pass arguments through:
+
+```sh
+dotnet run --project tests/Fsdb.Tests -- --filter-test-case <Substring>
+```
+
+F# source order is explicit. When adding a `.fs` file, place its
+`<Compile Include="..." />` entry in dependency order in the relevant project
+file before any file that consumes it.
+
+MySQL 8.4 is the semantic oracle. Compatibility changes should be checked
+against MySQL rather than SQLite, then captured in the Expecto suite. The
+differential harness under `torture/` is a separate solution and deliberately
+is not part of `just check`; see the
+[torture harness guide](torture/README.md) before running or changing it.
+
 ## Documentation
 
 - [Compatibility](docs/compatibility.md) — how MySQL 8.4 equivalence is validated
 - [Comment style](docs/comment-style.md) — the grading every comment survives
 - [Torture harness](torture/README.md) — differential fuzzing against a MySQL 8.4 oracle
 - [Benchmarks](benchmarks/README.md) — workloads and methodology
-
+- [Performance design](docs/performance-design.md) — optimizations that preserve the readable pipeline
