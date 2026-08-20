@@ -455,6 +455,28 @@ let private authenticateHandshake
                 | Some switchResp -> return! deny (switchResp.SeqId + 1uy) (switchResp.Payload.Length > 0)
     }
 
+let private accumulateLongData (key: int * int) (chunk: byte[]) (session: Session) : Session =
+    let existing = session.LongData |> Map.tryFind key |> Option.defaultValue [||]
+    let room = int64 maxAccumulatedPacketSize - session.LongDataBytes
+
+    if chunk.Length = 0 then
+        session
+    elif int64 chunk.Length > room then
+        { session with LongDataOverflow = Set.add key session.LongDataOverflow }
+    else
+        { session with
+            LongData = Map.add key (Array.append existing chunk) session.LongData
+            LongDataBytes = session.LongDataBytes + int64 chunk.Length }
+
+let private discardLongData (statementId: int) (session: Session) : Session =
+    let retained = session.LongData |> Map.filter (fun (id, _) _ -> id <> statementId)
+    let retainedBytes = retained |> Seq.sumBy (fun (KeyValue(_, bytes)) -> int64 bytes.Length)
+
+    { session with
+        LongData = retained
+        LongDataBytes = retainedBytes
+        LongDataOverflow = session.LongDataOverflow |> Set.filter (fun (id, _) -> id <> statementId) }
+
 let private handleConnection
     (connectionId: int)
     (store: Storage.Store)
@@ -716,10 +738,7 @@ let private handleConnection
                                     // command got no reply, so the failure surfaces here
                                     // instead, and the connection stays usable rather than
                                     // executing on silently truncated parameter data.
-                                    let session =
-                                        { session with
-                                            LongData = session.LongData |> Map.filter (fun (sid, _) _ -> sid <> stmtId)
-                                            LongDataOverflow = session.LongDataOverflow |> Set.filter (fun (sid, _) -> sid <> stmtId) }
+                                    let session = discardLongData stmtId session
 
                                     do!
                                         writePacketAsync
@@ -792,9 +811,8 @@ let private handleConnection
                                         return! loop session
                                     | Result.Ok(types, values) ->
                                         let session =
-                                            { session with
-                                                Statements = Map.add stmtId { stmt with LastParamTypes = Some types } session.Statements
-                                                LongData = session.LongData |> Map.filter (fun (sid, _) _ -> sid <> stmtId) }
+                                            { session with Statements = Map.add stmtId { stmt with LastParamTypes = Some types } session.Statements }
+                                            |> discardLongData stmtId
 
                                         match runCancellable (fun () -> QueryHandler.executePrepared session stmt values) with
                                         | None -> ()
@@ -834,40 +852,24 @@ let private handleConnection
 
                                 if session.Statements.ContainsKey stmtId then
                                     let key = stmtId, paramIndex
-                                    let existing = session.LongData |> Map.tryFind key |> Option.defaultValue [||]
-                                    // Cap accumulated long-data per param at the same ceiling
-                                    // `readPacketAsync` enforces for a reassembled packet.
+                                    // Cap accumulated long-data for the whole connection at
+                                    // the same ceiling `readPacketAsync` enforces for a
+                                    // reassembled packet.
                                     // COM_STMT_SEND_LONG_DATA never gets a reply, success or
                                     // failure, so a chunk that would blow the cap can't error
                                     // out here — it marks the param overflowed instead, and
                                     // the next COM_STMT_EXECUTE turns that into ER_NET_PACKET_
                                     // TOO_LARGE (1153) rather than silently truncating the
                                     // parameter's data and executing on short input.
-                                    let room = maxAccumulatedPacketSize - existing.Length
-
-                                    if room <= 0 || chunk.Length > room then
-                                        return!
-                                            loop
-                                                { session with
-                                                    LongDataOverflow = Set.add key session.LongDataOverflow }
-                                    else
-                                        return! loop { session with LongData = Map.add key (Array.append existing chunk) session.LongData }
+                                    return! loop (accumulateLongData key chunk session)
                                 else
                                     return! loop session
                             | Some(StmtClose stmtId) ->
                                 // No reply, per protocol.
-                                return!
-                                    loop
-                                        { session with
-                                            Statements = Map.remove stmtId session.Statements
-                                            LongData = session.LongData |> Map.filter (fun (sid, _) _ -> sid <> stmtId)
-                                            LongDataOverflow = session.LongDataOverflow |> Set.filter (fun (sid, _) -> sid <> stmtId) }
+                                return! loop ({ session with Statements = Map.remove stmtId session.Statements } |> discardLongData stmtId)
                             | Some(StmtReset stmtId) ->
                                 if session.Statements.ContainsKey stmtId then
-                                    let session =
-                                        { session with
-                                            LongData = session.LongData |> Map.filter (fun (sid, _) _ -> sid <> stmtId)
-                                            LongDataOverflow = session.LongDataOverflow |> Set.filter (fun (sid, _) -> sid <> stmtId) }
+                                    let session = discardLongData stmtId session
 
                                     do!
                                         writePacketAsync

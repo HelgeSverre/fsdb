@@ -1933,11 +1933,7 @@ let tests =
               }
               |> Async.RunSynchronously
 
-          // A long-data param whose chunks together exceed the accumulation
-          // cap can't error out of COM_STMT_SEND_LONG_DATA itself (no reply,
-          // per protocol) — the failure has to surface at the next EXECUTE
-          // instead of silently truncating the parameter and running anyway.
-          testCase "COM_STMT_SEND_LONG_DATA past the accumulation cap fails the next EXECUTE with 1153"
+          testCase "COM_STMT_SEND_LONG_DATA is capped across all prepared statements on a connection"
           <| fun _ ->
               async {
                   let listener = Fsdb.Server.startListening System.Net.IPAddress.Loopback 0
@@ -1948,34 +1944,36 @@ let tests =
                       let! client, stream = connectRaw port
                       use client = client
 
-                      let! _ = writePacketAsync stream { SeqId = 0uy; Payload = Array.append [| 0x16uy |] (Text.Encoding.UTF8.GetBytes "SELECT ?") }
-                      let! prepareOk = readPacketAsync stream
-                      let stmtId = Reader(prepareOk.Value.Payload.[1..]).ReadInt32LE()
-                      let! _ = readPacketAsync stream // param column def
-                      let! _ = readPacketAsync stream // trailing EOF
+                      let prepare () =
+                          async {
+                              let payload = Array.append [| 0x16uy |] (Text.Encoding.UTF8.GetBytes "SELECT ?")
+                              let! _ = writePacketAsync stream { SeqId = 0uy; Payload = payload }
+                              let! prepareOk = readPacketAsync stream
+                              let statementId = Reader(prepareOk.Value.Payload.[1..]).ReadInt32LE()
+                              let! _ = readPacketAsync stream
+                              let! _ = readPacketAsync stream
+                              return statementId
+                          }
 
-                      let sendChunk (bytes: byte[]) =
+                      let sendChunk statementId (bytes: byte[]) =
                           let w = Writer()
                           w.WriteByte 0x18uy
-                          w.WriteInt32LE stmtId
+                          w.WriteInt32LE statementId
                           w.WriteInt16LE 0
                           w.WriteBytes bytes
                           writePacketAsync stream { SeqId = 0uy; Payload = w.ToArray() }
 
-                      // Fill up to (not past) the cap first — the command's
-                      // own header (1 command byte + 4 stmt id + 2 param
-                      // index = 7 bytes) counts against the same
-                      // reassembly limit, so the first chunk is 7 bytes
-                      // short of the cap to land the logical command payload
-                      // exactly on it — then a second, small chunk overflows
-                      // the per-param accumulation.
-                      let! _ = sendChunk (Array.zeroCreate<byte> (maxAccumulatedPacketSize - 7))
-                      let! _ = sendChunk (Array.zeroCreate<byte> 8)
+                      let! firstStatement = prepare ()
+                      let! secondStatement = prepare ()
+                      let half = Array.zeroCreate<byte> (Fsdb.Limits.maxAllowedPacket / 2)
+                      let! _ = sendChunk firstStatement half
+                      let! _ = sendChunk secondStatement half
+                      let! _ = sendChunk secondStatement [| 1uy |]
 
                       let execPayload =
                           let w = Writer()
                           w.WriteByte 0x17uy
-                          w.WriteInt32LE stmtId
+                          w.WriteInt32LE secondStatement
                           w.WriteByte 0uy
                           w.WriteInt32LE 1
                           w.WriteByte 0uy // null bitmap

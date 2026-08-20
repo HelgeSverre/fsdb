@@ -234,8 +234,10 @@ type Session =
       /// param index), appended to on each call and consumed (then cleared)
       /// by the next COM_STMT_EXECUTE or COM_STMT_RESET for that statement.
       LongData: Map<int * int, byte[]>
+      /// Total bytes held in `LongData` for constant-time limit checks.
+      LongDataBytes: int64
       /// (statement id, param index) pairs whose COM_STMT_SEND_LONG_DATA
-      /// chunks together exceeded `Server.maxAccumulatedPacketSize` — the
+      /// chunks together exceeded `Limits.maxAllowedPacket` — the
       /// send-long-data command itself never gets a reply (per protocol),
       /// so the overflow surfaces as ER_NET_PACKET_TOO_LARGE (1153) on the
       /// next COM_STMT_EXECUTE for that statement instead of silently
@@ -288,6 +290,7 @@ let create (connectionId: int) (store: Store) : Session =
       Statements = Map.empty
       NextStmtId = 1
       LongData = Map.empty
+      LongDataBytes = 0L
       LongDataOverflow = Set.empty
       CustomFunctions = Fsdb.Functions.empty
       Capabilities = 0u }
