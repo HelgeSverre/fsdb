@@ -1756,7 +1756,7 @@ let handle (session: Session) (rawSql: string) : Session * QueryResult =
         { session with Tx = None }, Err(code, msg)
     | ex ->
         Log.diagnostic "fsdb: EXN %s -- query: %s" ex.Message (Log.redactSql rawSql)
-        { session with Tx = None }, Err(1105, sprintf "Internal error: %s" ex.Message) // ER_UNKNOWN_ERROR
+        { session with Tx = None }, Err(1105, "Internal error") // ER_UNKNOWN_ERROR
 
 /// Executes a prepared statement with its bound parameter values. Parser-
 /// produced statements bind the values into the parsed AST and run it

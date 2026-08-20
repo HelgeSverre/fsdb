@@ -1141,7 +1141,7 @@ let tests =
               let session, _ = handle session "CREATE TABLE overflow_t (d DECIMAL(10,2))"
 
               match handle session "INSERT INTO overflow_t VALUES (1e300)" |> snd with
-              | Err(1105, _) -> ()
+              | Err(1105, "Internal error") -> ()
               | other -> failtestf "expected a 1105 internal-error Err, got %A" other
 
           testCase "LAST_INSERT_ID() stays 0 for an explicit AUTO_INCREMENT id, unlike the OK packet's last_insert_id"
