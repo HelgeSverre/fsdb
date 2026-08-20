@@ -30,6 +30,11 @@ let mutable maxAllowedPacket = 64 * 1024 * 1024
 /// connection without resizing a semaphore.
 let mutable maxConnections = 500
 
+/// Server-wide setting used as a per-session prepared-statement ceiling.
+/// The narrower scope still bounds every individual connection's retained
+/// ASTs without coupling otherwise independent sessions.
+let mutable maxPreparedStmtCount = 16382
+
 /// Idle timeout waiting for the *next* command packet — `wait_timeout`'s
 /// semantics. fsdb's default is 300s where MySQL's is 28800: a half-open
 /// peer that connects and then says nothing otherwise pins a socket and a
@@ -98,6 +103,12 @@ let private knobs =
         Max = 100000L
         Set = fun v -> maxConnections <- int v
         Get = fun () -> int64 maxConnections
+        Reportable = true }
+      { Name = "max_prepared_stmt_count"
+        Min = 0L
+        Max = 1048576L
+        Set = fun v -> maxPreparedStmtCount <- int v
+        Get = fun () -> int64 maxPreparedStmtCount
         Reportable = true }
       { Name = "wait_timeout"
         Min = 1L

@@ -600,7 +600,7 @@ type private SetAction =
 /// way. Grows as real clients ask for more.
 let private nullableSystemVars = Set.ofList [ "character_set_results" ]
 
-let private globalOnlyLimitVariables = Set.ofList [ "max_allowed_packet"; "max_connections" ]
+let private globalOnlyLimitVariables = Set.ofList [ "max_allowed_packet"; "max_connections"; "max_prepared_stmt_count" ]
 let private maxUserVariables = 65536
 
 /// Parses one comma-split fragment into the variable(s) it would assign,

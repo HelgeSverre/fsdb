@@ -702,6 +702,21 @@ let private handleConnection
 
                                     do! sendPayloads stream seqId payloads |> Async.Ignore
                                     return! loop session
+                            | Some(StmtPrepare _) when session.Statements.Count >= Limits.maxPreparedStmtCount ->
+                                do!
+                                    writePacketAsync
+                                        stream
+                                        { SeqId = seqId
+                                          Payload =
+                                            errPayload
+                                                capabilities
+                                                1461
+                                                (sprintf
+                                                    "Can't create more than max_prepared_stmt_count statements (current value: %d)"
+                                                    Limits.maxPreparedStmtCount) }
+                                    |> Async.Ignore
+
+                                return! loop session
                             | Some(StmtPrepare sql) ->
                                 match QueryHandler.prepareStatement sql with
                                 | Result.Error(code, message) ->
