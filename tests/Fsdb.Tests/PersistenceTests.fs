@@ -1005,6 +1005,18 @@ let tests =
                   (fun () -> Fsdb.Binary.StreamReader(new MemoryStream(encodedLength 0x100000000L)).ReadLenEncString() |> ignore)
                   "a length that cannot fit in an array never wraps through int"
 
+          testCase "WAL transaction nesting beyond the decode limit fails without overflowing the process stack"
+          <| fun _ ->
+              let dir = tempDataDir ()
+
+              let nested =
+                  [ 1..1002 ]
+                  |> List.fold (fun event _ -> TransactionCommitted [ event ]) (RowsInserted(defaultDatabase, "t", []))
+
+              File.WriteAllBytes(walPath dir, encodeWalRecord nested)
+              load dir |> ignore
+              Expect.equal (FileInfo(walPath dir).Length) 0L "the rejected first WAL record is truncated"
+
           testCase "the Value binary codec round-trips the whole BIGINT UNSIGNED range, including the half int64 cannot hold"
           <| fun _ ->
               // `encodeValue`'s 0x09 tag writes the same eight bytes as
