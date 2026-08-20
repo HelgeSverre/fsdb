@@ -132,29 +132,18 @@ type PreparedStmt =
 /// table-by-table, to tell "this transaction wrote table X" apart from
 /// "table X just happened to be in the snapshot", so a concurrent write to
 /// an *untouched* table survives the commit instead of being silently
-/// overwritten by a stale copy. `GateLease` serializes writing transactions
-/// from their first write through COMMIT/ROLLBACK; read-only transactions
-/// retain repeatable-read snapshots without taking a gate.
+/// overwritten by a stale copy. COMMIT compares each changed base row with
+/// the live row, combining disjoint writes and rejecting overlaps.
 type Transaction =
     { Snapshot: Store
       BaseCatalog: Catalog
-      /// Every database's write gate this transaction currently holds,
-      /// keyed by database name — not just `session.Database`: a qualified
-      /// `INSERT/UPDATE INTO otherdb.t` needs `otherdb`'s own gate too, or a
-      /// concurrent writer to `otherdb` can race this transaction's merge
-      /// back at COMMIT (see `Storage.mergeDatabaseSlot`'s doc). Acquired
-      /// lazily, one database at a time as each statement in the
-      /// transaction first names it, then all held until COMMIT/ROLLBACK.
-      /// Empty immediately after BEGIN lets multiple connections begin
-      /// concurrently and matches InnoDB's default behavior of establishing
-      /// a consistent snapshot on the first statement rather than the BEGIN
-      /// packet.
-      GateLease: Map<string, IDisposable>
+      /// Successful writes in execution order. A commit that loses an
+      /// optimistic row-version race replays them against the new live
+      /// snapshot before validating again.
+      Statements: Statement list
+      ReplayStartIds: int64 * int64
       /// Set by the first database statement, which is the one that seeds
-      /// `Snapshot`/`BaseCatalog`. Not derivable from `GateLease.IsEmpty`
-      /// any more: a transaction that has only run reads holds no gate at
-      /// all and must still seed exactly once, or every read would
-      /// re-snapshot and repeatable read would be a lie.
+      /// `Snapshot`/`BaseCatalog`; later reads retain that same snapshot.
       Seeded: bool
       /// Each savepoint's establishment order (see `NextSavepointSeq`), its
       /// catalog, and how many events `Snapshot.PendingEvents` had buffered
@@ -165,7 +154,7 @@ type Transaction =
       /// *after* the named one, matching real MySQL — a plain `Map` alone
       /// has no notion of "after", since re-`SAVEPOINT`-ing an existing name
       /// moves it, not creates a second entry.
-      Savepoints: Map<string, int * Catalog * int>
+      Savepoints: Map<string, int * Catalog * int * int>
       /// Monotonically increasing counter, one `SAVEPOINT` = one tick —
       /// never reused even if the savepoint it tagged is later dropped, so
       /// two savepoints established back-to-back with no write between them
@@ -284,7 +273,7 @@ let create (connectionId: int) (store: Store) : Session =
       Variables = variables
       UserVariables = Map.empty
       // A per-connection clone of `store`, not `store` itself. `Databases`,
-      // `TransactionGates`, `Lock`, and `OnCommit` are reference-typed, so the
+      // `Lock` and `OnCommit` are reference-typed, so the
       // clone still shares the one real catalog and all of its cross-connection
       // synchronization (the shared `Lock` still serializes WAL appends) — but
       // `StrictMode`/`ForeignKeyChecks`/`ConnectionCollation` get their own

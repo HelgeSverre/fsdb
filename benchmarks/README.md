@@ -46,9 +46,8 @@ Prerequisites and rules:
   same durability cost.
 - `bench-load` measures throughput, not latency: N workers over disjoint id
   slices so MySQL sees no row contention, reporting ops/sec per workload.
-  fsdb's whole write path sits behind a per-database `SemaphoreSlim(1,1)`
-  (see `Storage.enterTransactionGate`), which a single-connection latency
-  suite structurally cannot expose.
+  fsdb combines disjoint writes through optimistic row-conflict merging,
+  which a single-connection latency suite structurally cannot exercise.
 - Connection pooling is off (fsdb doesn't implement COM_RESET_CONNECTION).
 - The wire+client floor is ~200 µs/op on this machine (`SELECT 1` round
   trip ≈ 0.26 ms via MySqlConnector over loopback) — sub-millisecond rows
@@ -110,12 +109,9 @@ streams, so what remains is engine cost: fsdb's in-memory single INSERT is
 | insert | 5,673 | 22,703 |
 | mixed read/write | 20,537 | 47,801 |
 
-fsdb's write throughput grows sublinearly with workers (its per-database
-write gate serializes writers: ~20k → ~22k → ~26k ops/sec at 4/8/16
-workers) while MySQL scales on insert and mixed read/write. The cheapest
-write (point UPDATE) is the one place fsdb's serialized-but-in-memory path
-keeps pace with fsync-bound MySQL; anything heavier, or mixed with readers,
-and MySQL pulls ahead.
+These figures predate optimistic row-conflict merging. They remain useful as
+the serialized-write baseline; use a current `just bench-load` result when
+evaluating concurrent write scaling.
 
 Add a column here per milestone snapshot; keep intermediate runs in
 `results/` without a column.

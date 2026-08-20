@@ -615,7 +615,7 @@ let tests =
               }
               |> Async.RunSynchronously
 
-          testCase "disconnect rolls back a prepared transaction and releases the transaction gate"
+          testCase "disconnect rolls back a prepared transaction without blocking later writers"
           <| fun _ ->
               async {
                   let listener = Fsdb.Server.startListening System.Net.IPAddress.Loopback 0
@@ -638,8 +638,8 @@ let tests =
                       do! seed.ExecuteNonQueryAsync() |> Async.AwaitTask |> Async.Ignore
                       do! setup.CloseAsync() |> Async.AwaitTask
 
-                      // Exercise COM_STMT_EXECUTE while holding the transaction
-                      // gate, then drop the client without COMMIT or ROLLBACK.
+                      // Exercise COM_STMT_EXECUTE, then drop the client without
+                      // COMMIT or ROLLBACK.
                       let abandoned = new MySqlConnector.MySqlConnection(connStr)
                       do! abandoned.OpenAsync() |> Async.AwaitTask
                       let! abandonedTx = abandoned.BeginTransactionAsync().AsTask() |> Async.AwaitTask
@@ -654,9 +654,8 @@ let tests =
                       abandoned.Dispose()
                       abandonedTx.Dispose()
 
-                      // If disconnect cleanup fails, this prepared update blocks
-                      // behind the leaked gate. The deadline turns that into a
-                      // bounded and diagnostic test failure instead of a hung run.
+                      // The next transaction must remain usable after disconnect
+                      // cleanup discards the abandoned snapshot.
                       use timeout = new Threading.CancellationTokenSource(TimeSpan.FromSeconds 5.0)
                       use survivor = new MySqlConnector.MySqlConnection(connStr)
                       do! survivor.OpenAsync(timeout.Token) |> Async.AwaitTask

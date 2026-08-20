@@ -188,7 +188,10 @@ let tests =
                           concurrent.Query "INSERT INTO audit_db.events VALUES (20)")
 
                   Expect.isTrue (concurrentStarted.Wait(TimeSpan.FromSeconds 5.0)) "the concurrent insert started"
-                  Expect.isFalse (concurrentInsert.Wait(TimeSpan.FromMilliseconds 50.0)) "the trigger holds the target database gate"
+                  Expect.isTrue
+                      (concurrentInsert.Wait(TimeSpan.FromSeconds 5.0))
+                      "the trigger does not serialize a disjoint target row"
+
                   release.Set()
                   expectOk triggerInsert.Result "trigger insert"
                   expectOk concurrentInsert.Result "concurrent insert"

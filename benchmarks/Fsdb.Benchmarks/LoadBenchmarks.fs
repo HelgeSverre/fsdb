@@ -1,13 +1,11 @@
 /// N-writer throughput harness (`--load`): sustained ops/sec under
 /// concurrency, which the latency suite (one connection, one op at a time)
-/// structurally cannot see. fsdb's whole write path sits behind a
-/// per-database `SemaphoreSlim(1,1)` (see `Storage.enterTransactionGate`),
-/// so this is the number that shows it buckling: fsdb's ops/sec stays flat
-/// as worker count grows, while MySQL's scales.
+/// structurally cannot see. Optimistic row-conflict merging lets disjoint
+/// workers publish changes independently until each short commit section.
 ///
 /// Writes are spread over disjoint id slices per worker, so MySQL sees no
 /// cross-worker row contention — the only material difference between the
-/// two servers is fsdb's coarse gate. Emits a markdown table to
+/// two servers is their concurrency machinery. Emits a markdown table to
 /// `benchmarks/load-report.md` for `just bench-load` and echoes it to stdout.
 module Fsdb.Benchmarks.LoadBenchmarks
 

@@ -121,16 +121,21 @@ let tests =
 
               Expect.isTrue (otherStarted.Wait(TimeSpan.FromSeconds 1.0)) "the concurrent different-table writer started"
 
-              // The current transaction gate deliberately serializes even
-              // disjoint-table writers. Commit the first transaction so the
-              // queued writer can run, then prove neither result was lost.
-              let session, _ = handle session "COMMIT"
-              ignore session
+              Expect.isTrue
+                  (otherInsert.Wait(TimeSpan.FromSeconds 5.0))
+                  "the disjoint-table write completes before the transaction commits"
+
               let other, otherResult = otherInsert.GetAwaiter().GetResult()
 
               match otherResult with
               | Affected 1UL -> ()
               | result -> failtestf "expected the concurrent insert into a different table to succeed, got %A" result
+
+              let session, commitResult = handle session "COMMIT"
+
+              match commitResult with
+              | Affected 0UL -> ()
+              | result -> failtestf "expected the disjoint transaction to commit, got %A" result
 
               match handle other "SELECT id FROM tx_other" |> snd with
               | ResultSet(_, [ [ Some "99" ] ]) -> ()
@@ -140,15 +145,8 @@ let tests =
               | ResultSet(_, [ [ Some "1" ] ]) -> ()
               | result -> failtestf "expected the transaction's own write to also be there, got %A" result
 
-          testCase "a transaction writing into a qualified other database holds THAT database's gate too, not just its own session database"
+          testCase "a qualified cross-database transaction merges a disjoint concurrent row"
           <| fun _ ->
-              // A qualified `INSERT INTO tx_db_y.t` must take tx_db_y's
-              // gate, not only the session database's (`tx_db_x`) —
-              // otherwise a concurrent autocommit writer to `tx_db_y` can
-              // land its commit between this transaction's base-catalog
-              // read and its COMMIT merge, losing one of the two rows
-              // (`Storage.mergeDatabaseSlot`'s "batch's table wins
-              // outright" rule).
               let store = Fsdb.Storage.create ()
               Fsdb.Storage.createDatabase store "tx_db_x" |> ignore
               Fsdb.Storage.createDatabase store "tx_db_y" |> ignore
@@ -170,18 +168,19 @@ let tests =
 
               Expect.isTrue (otherStarted.Wait(TimeSpan.FromSeconds 1.0)) "the concurrent writer to tx_db_y started"
 
-              Expect.isFalse
-                  (bInsert.Wait(TimeSpan.FromMilliseconds 300.0))
-                  "the concurrent write to tx_db_y must wait for the open transaction's gate on tx_db_y, not race past it"
-
-              let a, _ = handle a "COMMIT"
-              ignore a
-
-              Expect.isTrue (bInsert.Wait(TimeSpan.FromSeconds 5.0)) "the queued writer completed once the transaction released tx_db_y's gate"
+              Expect.isTrue
+                  (bInsert.Wait(TimeSpan.FromSeconds 5.0))
+                  "the disjoint row write completes while the transaction remains open"
 
               match bInsert.GetAwaiter().GetResult() |> snd with
               | Affected 1UL -> ()
-              | result -> failtestf "expected the concurrent insert to succeed once unblocked, got %A" result
+              | result -> failtestf "expected the concurrent insert to succeed, got %A" result
+
+              let _, commitResult = handle a "COMMIT"
+
+              match commitResult with
+              | Affected 0UL -> ()
+              | result -> failtestf "expected the disjoint row to merge at commit, got %A" result
 
               match handle b "SELECT id FROM t ORDER BY id" |> snd with
               | ResultSet(_, [ [ Some "1" ]; [ Some "2" ] ]) -> ()
@@ -189,11 +188,6 @@ let tests =
 
           testCase "an open transaction in one database doesn't block a write to an unrelated database"
           <| fun _ ->
-              // The transaction gate is one `SemaphoreSlim` per database — a
-              // single store-wide semaphore would serialize every
-              // connection's writes behind any one open transaction,
-              // anywhere, collapsing a parallel test suite (each worker in
-              // its own database) to fully serial.
               let store = Fsdb.Storage.create ()
               Fsdb.Storage.createDatabase store "tx_db_a" |> ignore
               Fsdb.Storage.createDatabase store "tx_db_b" |> ignore
@@ -220,36 +214,8 @@ let tests =
 
               handle a "ROLLBACK" |> ignore
 
-          testCase "a write gate that doesn't clear within its timeout raises a retryable 1205, not an indefinite hang"
+          testCase "a cancelled transaction statement leaves later transactions usable"
           <| fun _ ->
-              let store = Fsdb.Storage.create ()
-
-              use held = Fsdb.Storage.enterTransactionGate store Fsdb.Storage.defaultDatabase (TimeSpan.FromSeconds 30.0)
-
-              try
-                  Fsdb.Storage.enterTransactionGate store Fsdb.Storage.defaultDatabase (TimeSpan.FromMilliseconds 50.0)
-                  |> ignore
-
-                  failtest "expected the second waiter to time out"
-              with Fsdb.Storage.LockWaitTimeout db ->
-                  Expect.equal db Fsdb.Storage.defaultDatabase "names the database still holding the gate"
-
-          testCase "an exception mid-statement releases the transaction gate it just acquired instead of leaking it"
-          <| fun _ ->
-              // A killed client's query cancellation (`Server.watchForDisconnect`
-              // flips `Storage.queryCancellation`) can land *after*
-              // `startTransactionStatement` has already acquired this
-              // database's transaction gate but *before* `execute` returns —
-              // the only place that acquired lease is referenced. Every path
-              // that turns an exception here into a reply (`handle`'s
-              // catch-all, and its deliberate `OperationCanceledException`
-              // reraise for `Server`'s command loop) hands back the
-              // *original* pre-statement `Session`, whose `Tx.GateLease` is
-              // still `None` — so nothing downstream (a later ROLLBACK, or
-              // connection cleanup's `closeSession`) ever disposes the lease
-              // that really did decrement the semaphore. Left unhandled, the
-              // gate stays decremented forever and every future transaction
-              // against this database hangs.
               let store = Fsdb.Storage.create ()
               let session = create 1 store
               let session, _ = handle session "CREATE TABLE tx_cancel (id INT PRIMARY KEY, v INT)"
@@ -270,36 +236,22 @@ let tests =
               Fsdb.Storage.queryCancellation.Value <- Threading.CancellationToken.None
               Expect.isTrue threw "expected the cancelled statement to throw OperationCanceledException"
 
-              // The gate must not be leaked: a fresh transaction against the
-              // same (default) database has to be able to acquire it right
-              // away rather than hang.
-              use acquired =
-                  Fsdb.Storage.enterTransactionGate store Fsdb.Storage.defaultDatabase (TimeSpan.FromSeconds 5.0)
+              let fresh = create 2 store
+              let fresh, _ = handle fresh "BEGIN"
 
-              ignore acquired
+              match handle fresh "UPDATE tx_cancel SET v = v + 1 WHERE id = 1" |> snd with
+              | Affected 1UL -> ()
+              | result -> failtestf "expected a later transaction to remain usable, got %A" result
 
-          testCase "an exception on a transaction's second statement aborts the whole transaction, not just leaks its gate"
+          testCase "an exception on a transaction's second statement aborts the whole transaction"
           <| fun _ ->
-              // Merely disposing the just-acquired lease on the statement
-              // that throws isn't enough: `TransactionGates`'s whole
-              // contract is that a transaction holds its database's gate
-              // *continuously* from its first real statement through
-              // COMMIT/ROLLBACK, so `mergeCatalogInto`'s three-way merge
-              // (`baseCatalog` captured at BEGIN vs. the live catalog *right
-              // now*) never races a concurrent committer. Freeing the gate
-              // mid-transaction and then leaving `session.Tx` still `Some`
-              // — its `BaseCatalog`/`Snapshot` now stale — lets a later
-              // COMMIT on this same (zombie) transaction silently clobber
-              // whatever another transaction committed to this database in
-              // the gap, a real lost update. The whole transaction must die
-              // with the statement that broke it.
               let store = Fsdb.Storage.create ()
               let session = create 1 store
               let session, _ = handle session "CREATE TABLE tx_abort (id INT PRIMARY KEY, v DECIMAL(10,2))"
               let session, _ = handle session "INSERT INTO tx_abort VALUES (1, 1)"
               let session, _ = handle session "BEGIN"
-              // First statement: a normal write that really does acquire
-              // and hold the gate.
+              // The first write must be discarded if the next statement
+              // aborts the transaction.
               let session, firstResult = handle session "UPDATE tx_abort SET v = 2 WHERE id = 1"
 
               match firstResult with
@@ -324,12 +276,7 @@ let tests =
               let session, _ = handle session "COMMIT"
               ignore session
 
-              use acquired =
-                  Fsdb.Storage.enterTransactionGate store Fsdb.Storage.defaultDatabase (TimeSpan.FromSeconds 5.0)
-
-              ignore acquired
-
-          testCase "concurrent transactions updating the same table serialize without losing a committed increment"
+          testCase "concurrent transactions rebase updates to the same row"
           <| fun _ ->
               let store = Fsdb.Storage.create ()
               let first = create 1 store
@@ -343,27 +290,43 @@ let tests =
               | Affected 1UL -> ()
               | result -> failtestf "expected the first increment to succeed, got %A" result
 
-              use secondStarted = new Threading.ManualResetEventSlim(false)
-
-              let secondUpdate =
-                  Threading.Tasks.Task.Run(fun () ->
-                      secondStarted.Set()
-                      handle second "UPDATE tx_hot SET n = n + 1 WHERE id = 1")
-
-              Expect.isTrue (secondStarted.Wait(TimeSpan.FromSeconds 1.0)) "the second writer started"
-              let first, _ = handle first "COMMIT"
-              ignore first
-              let second, secondResult = secondUpdate.GetAwaiter().GetResult()
+              let second, secondResult = handle second "UPDATE tx_hot SET n = n + 1 WHERE id = 1"
 
               match secondResult with
               | Affected 1UL -> ()
-              | result -> failtestf "expected the queued increment to succeed, got %A" result
+              | result -> failtestf "expected the second snapshot update to succeed locally, got %A" result
 
-              let second, _ = handle second "COMMIT"
+              let _, firstCommit = handle first "COMMIT"
+              Expect.equal firstCommit (Affected 0UL) "the first writer commits"
 
-              match handle second "SELECT n FROM tx_hot WHERE id = 1" |> snd with
+              Expect.equal (handle second "COMMIT" |> snd) (Affected 0UL) "the overlapping writer rebases and commits"
+
+              match handle (create 3 store) "SELECT n FROM tx_hot WHERE id = 1" |> snd with
               | ResultSet(_, [ [ Some "2" ] ]) -> ()
-              | result -> failtestf "expected both committed increments to survive, got %A" result
+              | result -> failtestf "expected both increments to survive, got %A" result
+
+          testCase "concurrent transactions merge updates to different rows in the same table"
+          <| fun _ ->
+              let store = Fsdb.Storage.create ()
+              let setup = create 1 store
+              let setup, _ = handle setup "CREATE TABLE tx_rows (id INT PRIMARY KEY, n INT)"
+              let setup, _ = handle setup "INSERT INTO tx_rows VALUES (1, 0), (2, 0)"
+              let first, _ = handle (create 2 store) "BEGIN"
+              let second, _ = handle (create 3 store) "BEGIN"
+              let first, firstUpdate = handle first "UPDATE tx_rows SET n = 10 WHERE id = 1"
+              let second, secondUpdate = handle second "UPDATE tx_rows SET n = 20 WHERE id = 2"
+              Expect.equal firstUpdate (Affected 1UL) "first snapshot updated its row"
+              Expect.equal secondUpdate (Affected 1UL) "second snapshot updated its row"
+
+              let firstCommit = Threading.Tasks.Task.Run(fun () -> handle first "COMMIT")
+              let secondCommit = Threading.Tasks.Task.Run(fun () -> handle second "COMMIT")
+              Threading.Tasks.Task.WaitAll [| firstCommit :> Threading.Tasks.Task; secondCommit :> Threading.Tasks.Task |]
+              Expect.equal (firstCommit.Result |> snd) (Affected 0UL) "first commit succeeds"
+              Expect.equal (secondCommit.Result |> snd) (Affected 0UL) "second commit succeeds"
+
+              match handle setup "SELECT id, n FROM tx_rows ORDER BY id" |> snd with
+              | ResultSet(_, [ [ Some "1"; Some "10" ]; [ Some "2"; Some "20" ] ]) -> ()
+              | result -> failtestf "expected both disjoint updates to survive, got %A" result
 
           testCase "ROLLBACK does not roll back an AUTO_INCREMENT counter, matching MySQL"
           <| fun _ ->
@@ -450,7 +413,7 @@ let tests =
               | Affected 0UL -> ()
               | other -> failtestf "expected b to survive releasing the re-established a, got %A" other
 
-          testCase "a transaction that has only read holds no gate, so another connection can still write"
+          testCase "a read-only transaction doesn't block another connection's write"
           <| fun _ ->
               let store = Fsdb.Storage.create ()
               let setup = create 1 store
@@ -478,7 +441,7 @@ let tests =
               handle reader "ROLLBACK" |> ignore
               ignore setup
 
-          testCase "a read-only transaction that later writes fails retryably rather than clobbering a commit it never saw"
+          testCase "a read-only transaction rebases a later write over a concurrent commit"
           <| fun _ ->
               let store = Fsdb.Storage.create ()
               let setup = create 1 store
@@ -491,12 +454,13 @@ let tests =
 
               handle (create 3 store) "UPDATE up_t SET v = 1234 WHERE id = 1" |> ignore
 
-              match handle a "UPDATE up_t SET v = 7 WHERE id = 1" |> snd with
-              | Err(1205, _) -> ()
-              | result -> failtestf "expected a retryable 1205 on the stale write, got %A" result
+              let a, updateResult = handle a "UPDATE up_t SET v = 7 WHERE id = 1"
+              Expect.equal updateResult (Affected 1UL) "the snapshot update succeeds locally"
+
+              Expect.equal (handle a "COMMIT" |> snd) (Affected 0UL) "the stale writer replays on the live row"
 
               match handle (create 4 store) "SELECT v FROM up_t" |> snd with
-              | ResultSet(_, [ [ Some "1234" ] ]) -> ()
-              | result -> failtestf "expected the concurrent commit to survive intact, got %A" result
+              | ResultSet(_, [ [ Some "7" ] ]) -> ()
+              | result -> failtestf "expected the later assignment to commit, got %A" result
 
               ignore setup ]

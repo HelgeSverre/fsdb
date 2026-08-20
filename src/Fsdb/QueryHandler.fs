@@ -805,40 +805,42 @@ let private setTransactionIsolation =
 let private normalizeIsolationLevel (raw: string) : string =
     Regex.Replace(raw.Trim().ToUpperInvariant(), @"\s+", "-")
 
-/// Every database name `stmt` actually writes into, given the session's own
-/// default `dbName` — almost always just `[dbName]`, but a qualified
-/// `INSERT`/`UPDATE`/`DELETE ... otherdb.t` writes a database the session's
-/// own default-database gate doesn't cover. `executeParsed` acquires (or a
-/// transaction holds, via `startTransactionStatementFor`) every database
-/// this returns, not just `dbName`, so a concurrent writer to that other
-/// database can't slip a write in between this statement's read and its own
-/// commit (see `Storage.mergeDatabaseSlot`'s doc on why that gate matters).
-/// A multi-table `UPDATE`/`DELETE ... JOIN` can write through any of its
-/// joined tables (`Executor.applyMutationJoin`), so every joined table's
-/// database is included too, not just the leading one.
-let private targetDatabases (store: Store) (dbName: string) (stmt: Statement) : string list =
-    let tableRefDb (t: TableRef) = t.Database |> Option.defaultValue dbName
+let private registryFor (session: Session) : Functions.Registry =
+    let collapseExtension name (extension: Functions.ScalarFunction) registry =
+        let invoke args =
+            let context: Functions.QueryContext =
+                { Database = session.Database
+                  User = session.User
+                  Cancellation = Storage.queryCancellation.Value }
 
-    let joinDbs (joins: Join list) =
-        joins
-        |> List.choose (fun j ->
-            match j.Table with
-            | FromTable t -> Some(tableRefDb t)
-            | FromSubquery _
-            | FromLateral _
-            | FromJsonTable _ -> None)
+            extension.Fn context args
 
-    match stmt with
-    | Insert(table, _, _, _, _)
-    | InsertSelect(table, _, _, _, _)
-    | Replace(table, _, _)
-    | ReplaceSelect(table, _, _)
-    | ReplaceSet(table, _) ->
-        let targetDb, targetTable = splitQualified dbName table
-        targetDb :: Executor.triggerWriteDatabases store targetDb targetTable
-    | Update u -> tableRefDb u.From :: joinDbs u.Joins
-    | Delete d -> tableRefDb d.From :: joinDbs d.Joins
-    | _ -> [ dbName ]
+        Functions.registerScalar name invoke registry
+
+    let registry =
+        session.CustomFunctions.Scalars
+        |> Map.fold (fun current name fn -> Functions.registerScalar name fn current) Functions.builtins
+        |> fun current ->
+            session.CustomFunctions.Aggregates
+            |> Map.fold (fun registry name fn -> Functions.registerAggregate name fn registry) current
+        |> fun current ->
+            session.CustomFunctions.Extensions
+            |> Map.fold (fun registry name extension -> collapseExtension name extension registry) current
+        |> fun current -> { current with Extensions = session.CustomFunctions.Extensions }
+
+    let database _ = session.Database |> Option.map VString |> Option.defaultValue VNull
+
+    registry
+    |> Functions.registerScalar "DATABASE" database
+    |> Functions.registerScalar "SCHEMA" database
+    |> Functions.registerScalar "LAST_INSERT_ID" (fun _ -> VInt session.LastGeneratedId)
+    |> Functions.registerScalar
+        "VERSION"
+        (fun _ -> lookupVar session "version" |> Option.flatten |> Option.map VString |> Option.defaultValue VNull)
+    |> Functions.registerScalar "CONNECTION_ID" (fun _ -> VInt(int64 session.ConnectionId))
+    |> Functions.registerScalar "CURRENT_USER" (fun _ -> VString(session.User + "@%"))
+    |> Functions.registerScalar "USER" (fun _ -> VString(session.User + "@localhost"))
+    |> Functions.registerScalar "SESSION_USER" (fun _ -> VString(session.User + "@localhost"))
 
 /// Commits the open transaction (if any) by merging its snapshot catalog
 /// back into the shared store's (`Storage.mergeCatalogInto`, a CAS-safe
@@ -849,11 +851,49 @@ let private targetDatabases (store: Store) (dbName: string) (stmt: Statement) : 
 let private commitSession (session: Session) : Session =
     match session.Tx with
     | Some tx ->
-        try
-            Storage.mergeCatalogInto session.Store tx.BaseCatalog tx.Snapshot.Catalog
-            Storage.commitTransactionEvents session.Store tx.Snapshot
-        finally
-            tx.GateLease |> Map.iter (fun _ lease -> lease.Dispose())
+        let dbName = session.Database |> Option.defaultValue defaultDatabase
+        let registry = registryFor session
+        let foundRows = session.Capabilities &&& Fsdb.Protocol.ClientFoundRows <> 0u
+
+        let replay () =
+            let baseCatalog = session.Store.Catalog
+            let snapshot = Storage.beginTransactionSnapshot session.Store
+            setStrictMode snapshot (lookupVar session "sql_mode" |> Option.flatten |> Option.map isStrictSqlMode |> Option.defaultValue true)
+            snapshot.SessionUser <- session.User
+
+            let mutable ids = tx.ReplayStartIds
+
+            for statement in tx.Statements do
+                let nextIds, result = Executor.execute snapshot registry dbName ids foundRows statement
+
+                match result with
+                | Err _ -> raise (Storage.LockWaitTimeout dbName)
+                | _ -> ids <- nextIds
+
+            baseCatalog, snapshot
+
+        let committedSnapshot =
+            let timeout =
+                lookupVar session "innodb_lock_wait_timeout"
+                |> Option.flatten
+                |> Option.bind (fun value -> match Int32.TryParse value with | true, seconds -> Some(TimeSpan.FromSeconds(float seconds)) | _ -> None)
+                |> Option.defaultWith Limits.lockWaitTimeout
+
+            if not (Threading.Monitor.TryEnter(session.Store.Lock, timeout)) then
+                raise (Storage.LockWaitTimeout dbName)
+
+            try
+                try
+                    Storage.mergeCatalogInto session.Store tx.BaseCatalog tx.Snapshot.Catalog
+                    tx.Snapshot
+                with Storage.LockWaitTimeout _ ->
+                    let baseCatalog, snapshot = replay ()
+                    Storage.mergeCatalogInto session.Store baseCatalog snapshot.Catalog
+                    snapshot
+            finally
+                Threading.Monitor.Exit session.Store.Lock
+
+        Storage.commitTransactionEvents session.Store committedSnapshot
 
         { session with Tx = None }
     | None -> session
@@ -868,18 +908,14 @@ let private commitSession (session: Session) : Session =
 let private rollbackSession (session: Session) : Session =
     match session.Tx with
     | Some tx ->
-        try
-            Storage.bumpAutoIncrementsInto session.Store tx.Snapshot.Catalog
-        finally
-            tx.GateLease |> Map.iter (fun _ lease -> lease.Dispose())
+        Storage.bumpAutoIncrementsInto session.Store tx.Snapshot.Catalog
     | None -> ()
 
     { session with Tx = None }
 
 /// Starts a new transaction with a provisional snapshot. The real snapshot
-/// is rebound under the transaction gate by `startTransactionStatement` at
-/// the first database statement, matching InnoDB's default deferred
-/// consistent-snapshot timing. MySQL implicitly commits an already-open
+/// is rebound at the first database statement, matching InnoDB's default
+/// deferred consistent-snapshot timing. MySQL implicitly commits an already-open
 /// transaction before starting another one, so this does too.
 let private beginTransaction (session: Session) : Session =
     let session = commitSession session
@@ -891,87 +927,39 @@ let private beginTransaction (session: Session) : Session =
             Some
                 { Snapshot = snapshot
                   BaseCatalog = baseCatalog
-                  GateLease = Map.empty
+                  Statements = []
+                  ReplayStartIds = session.LastInsertId, session.LastGeneratedId
                   Seeded = false
                   Savepoints = Map.empty
                   NextSavepointSeq = 0 } }
 
-/// Establishes the transaction's actual repeatable-read snapshot at its
-/// first database statement, and holds the coarse write/transaction gate
-/// for every database in `targetDbs` (not just `session.Database` — a
-/// qualified `INSERT/UPDATE INTO otherdb.t` needs `otherdb`'s own gate too,
-/// see `Session.Transaction.GateLease`'s doc) for the rest of the
-/// transaction's lifetime. Re-entrant per statement: a later statement that
-/// names a database this transaction hasn't held yet picks up that
-/// database's gate too, without re-seeding the snapshot — only the very
-/// first database statement does that, which is why `Seeded` rather than
-/// `GateLease.IsEmpty` marks it. BEGIN itself stays non-blocking, so several
-/// clients can enter a transaction concurrently; only their first real
-/// writes serialize. Seeding here rather than at BEGIN also means a
-/// transaction that sat idle sees commits that completed before its first
-/// read, matching InnoDB's consistent-snapshot timing.
-let startTransactionStatementFor (targetDbs: string list) (session: Session) : Session =
+/// Establishes the repeatable-read snapshot at the first database statement.
+/// Writes remain private until commit, where row-level three-way merging
+/// combines disjoint changes and rejects overlapping ones.
+let startTransactionStatement (session: Session) : Session =
     match session.Tx with
-    | Some tx ->
-        let firstStatement = not tx.Seeded
+    | Some tx when not tx.Seeded ->
+        let baseCatalog = session.Store.Catalog
+        let snapshot = Storage.beginTransactionSnapshot session.Store
 
-        // Sorted so two transactions that each eventually need the same two
-        // databases always acquire them in the same order, whichever one
-        // they touch first — otherwise one could hold A waiting on B while
-        // the other holds B waiting on A.
-        let newlyAcquired =
-            targetDbs
-            |> List.distinct
-            |> List.sort
-            |> List.filter (fun db -> not (Map.containsKey db tx.GateLease))
-            |> List.map (fun db -> db, Storage.enterTransactionGate session.Store db (Limits.lockWaitTimeout ()))
+        let savepoints =
+            tx.Savepoints
+            |> Map.map (fun _ (seq, _, eventCount, statementCount) -> seq, baseCatalog, eventCount, statementCount)
 
-        try
-            // Picking up a gate for a database this transaction snapshotted
-            // *before* it held that gate — it read first and is only now
-            // writing — means someone else could have committed there in
-            // between, and this transaction's merge at COMMIT would clobber
-            // them (`Storage.mergeDatabaseSlot`). There is nothing to roll
-            // back to, so report the retryable lock error and let the client
-            // redo the transaction, exactly as it would after a deadlock.
-            if not firstStatement then
-                for db, _ in newlyAcquired do
-                    if not (Storage.databaseUnchangedSince session.Store tx.BaseCatalog db) then
-                        raise (Storage.LockWaitTimeout db)
-
-            let gateLease = newlyAcquired |> List.fold (fun m (db, lease) -> Map.add db lease m) tx.GateLease
-
-            if firstStatement then
-                let baseCatalog = session.Store.Catalog
-                let snapshot = Storage.beginTransactionSnapshot session.Store
-
-                let savepoints =
-                    tx.Savepoints
-                    |> Map.map (fun _ (seq, _, eventCount) -> seq, baseCatalog, eventCount)
-
-                { session with
-                    Tx =
-                        Some
-                            { tx with
-                                Snapshot = snapshot
-                                BaseCatalog = baseCatalog
-                                GateLease = gateLease
-                                Seeded = true
-                                Savepoints = savepoints } }
-            else
-                { session with Tx = Some { tx with GateLease = gateLease } }
-        with _ ->
-            newlyAcquired |> List.iter (fun (_, lease) -> lease.Dispose())
-            reraise ()
+        { session with
+            Tx =
+                Some
+                    { tx with
+                        Snapshot = snapshot
+                        BaseCatalog = baseCatalog
+                        Statements = []
+                        ReplayStartIds = session.LastInsertId, session.LastGeneratedId
+                        Seeded = true
+                        Savepoints = savepoints } }
+    | Some _ -> session
     | None -> session
 
-/// Seeds a read-only transaction snapshot without taking a write gate.
-let startTransactionStatement (session: Session) : Session =
-    startTransactionStatementFor [] session
-
-/// Rolls an abandoned connection's transaction back and, critically,
-/// releases its transaction gate. The lease is idempotent, so calling this
-/// with a session snapshot that was already committed is harmless.
+/// Rolls an abandoned connection's transaction back.
 let closeSession (session: Session) : unit =
     rollbackSession session |> ignore
 
@@ -998,14 +986,14 @@ let private savepoint (name: string) (session: Session) : Session * QueryResult 
             Tx =
                 Some
                     { tx with
-                        Savepoints = Map.add name (seq, tx.Snapshot.Catalog, eventCount) tx.Savepoints
+                        Savepoints = Map.add name (seq, tx.Snapshot.Catalog, eventCount, tx.Statements.Length) tx.Savepoints
                         NextSavepointSeq = seq + 1 } },
         Affected 0UL
     | None -> session, Affected 0UL // unreachable: beginTransaction always sets Tx
 
 let private rollbackToSavepoint (name: string) (session: Session) : Session * QueryResult =
     match session.Tx |> Option.bind (fun tx -> Map.tryFind name tx.Savepoints |> Option.map (fun seed -> tx, seed)) with
-    | Some(tx, (seq, catalog, eventCount)) ->
+    | Some(tx, (seq, catalog, eventCount, statementCount)) ->
         // Real MySQL never rolls back a burned AUTO_INCREMENT id — not even
         // a savepoint rollback (`bumpAutoIncrementsInto`'s doc covers the
         // full-ROLLBACK case, which is a separate code path from this one).
@@ -1023,17 +1011,23 @@ let private rollbackToSavepoint (name: string) (session: Session) : Session * Qu
         // Real MySQL also destroys every savepoint established *after* the
         // one rolled back to — the named savepoint itself survives (a
         // second `ROLLBACK TO` naming it again is legal).
-        let survivors = tx.Savepoints |> Map.filter (fun _ (s, _, _) -> s <= seq)
+        let survivors = tx.Savepoints |> Map.filter (fun _ (s, _, _, _) -> s <= seq)
 
-        { session with Tx = Some { tx with Savepoints = survivors } }, Affected 0UL
+        { session with
+            Tx =
+                Some
+                    { tx with
+                        Savepoints = survivors
+                        Statements = tx.Statements |> List.truncate statementCount } },
+        Affected 0UL
     | None -> session, savepointNotFound name
 
 /// Drops the named savepoint and, matching real MySQL, every savepoint
 /// established after it too.
 let private releaseSavepoint (name: string) (session: Session) : Session * QueryResult =
     match session.Tx |> Option.bind (fun tx -> Map.tryFind name tx.Savepoints |> Option.map (fun seed -> tx, seed)) with
-    | Some(tx, (seq, _, _)) ->
-        let survivors = tx.Savepoints |> Map.filter (fun _ (s, _, _) -> s < seq)
+    | Some(tx, (seq, _, _, _)) ->
+        let survivors = tx.Savepoints |> Map.filter (fun _ (s, _, _, _) -> s < seq)
         { session with Tx = Some { tx with Savepoints = survivors } }, Affected 0UL
     | None -> session, savepointNotFound name
 
@@ -1047,61 +1041,6 @@ let private handleSetAutocommit (value: string) (session: Session) : Session * Q
             commitSession session
 
     session, Affected 0UL
-
-/// The function registry for one statement: `Functions.builtins`, then
-/// `session.CustomFunctions` (an embedding `Db`'s `registerScalar`/
-/// `registerAggregate` calls — free to override a built-in), then the
-/// session-dependent entries that can't be plain `Value list -> Value`
-/// closures until they're given a session to close over (`DATABASE()`
-/// reads `session.Database`, `LAST_INSERT_ID()` reads `session.LastGeneratedId`
-/// — deliberately not `LastInsertId`, see that field's doc for why the two
-/// diverge — `VERSION()` just reuses the same `@@version` value `SELECT
-/// @@version` already serves) — those go last so they always win.
-let private registryFor (session: Session) : Functions.Registry =
-    // Each rich registration (`Db.registerFunction`) collapses to a plain
-    // `Scalar` here by closing over this statement's `QueryContext` — the
-    // executor never learns the rich shape exists. `Cancellation` is read
-    // inside the closure (call time, same thread as the row fold), so it's
-    // the token `Server.withCancellationWatch` armed for *this* query, not
-    // whatever thread happened to run this composition. The `Extensions`
-    // map itself is carried through so the executor's DDL path can still
-    // see each function's `DirectOnly` flag.
-    let collapseExtension name (ext: Functions.ScalarFunction) r =
-        let fn args =
-            let ctx: Functions.QueryContext =
-                { Database = session.Database
-                  User = session.User
-                  Cancellation = Storage.queryCancellation.Value }
-
-            ext.Fn ctx args
-
-        Functions.registerScalar name fn r
-
-    let withCustom =
-        session.CustomFunctions.Scalars
-        |> Map.fold (fun r name fn -> Functions.registerScalar name fn r) Functions.builtins
-        |> fun r -> session.CustomFunctions.Aggregates |> Map.fold (fun r name fn -> Functions.registerAggregate name fn r) r
-        |> fun r -> session.CustomFunctions.Extensions |> Map.fold (fun r name ext -> collapseExtension name ext r) r
-        |> fun r -> { r with Extensions = session.CustomFunctions.Extensions }
-
-    let databaseFn _ = session.Database |> Option.map VString |> Option.defaultValue VNull
-
-    withCustom
-    |> Functions.registerScalar "DATABASE" databaseFn
-    |> Functions.registerScalar "SCHEMA" databaseFn
-    |> Functions.registerScalar "LAST_INSERT_ID" (fun _ -> VInt session.LastGeneratedId)
-    |> Functions.registerScalar
-        "VERSION"
-        (fun _ -> lookupVar session "version" |> Option.flatten |> Option.map VString |> Option.defaultValue VNull)
-    |> Functions.registerScalar "CONNECTION_ID" (fun _ -> VInt(int64 session.ConnectionId))
-    // CURRENT_USER() is the matched *account* (host part `%`, the only host
-    // accounts have — see `Session.User`, threaded from the handshake and
-    // "root" for a session built off-wire); USER()/SESSION_USER() are the
-    // connecting user@client-host, which always renders `localhost` here.
-    // Same source PROCESSLIST and SHOW GRANTS report, so they can't disagree.
-    |> Functions.registerScalar "CURRENT_USER" (fun _ -> VString(session.User + "@%"))
-    |> Functions.registerScalar "USER" (fun _ -> VString(session.User + "@localhost"))
-    |> Functions.registerScalar "SESSION_USER" (fun _ -> VString(session.User + "@localhost"))
 
 /// Parses and executes anything that isn't one of the text-probe special
 /// cases above. A parse failure that also looks like a `SELECT @@...`/
@@ -1192,64 +1131,17 @@ let private executeParsed (session: Session) (stmt: Statement) : Session * Query
                 LastGeneratedId = lastGeneratedId
                 LastResultColumnMetadata = columnMetadata }
 
+        let session =
+            match session.Tx, result, stmt with
+            | Some tx, Affected _, (Select _ | Union _ | Explain _) -> session
+            | Some tx, Affected _, _ -> { session with Tx = Some { tx with Statements = tx.Statements @ [ stmt ] } }
+            | _ -> session
+
         session, result
 
     match session.Tx with
-    | Some _ ->
-        // `startTransactionStatement` acquires this database's
-        // transaction gate on a transaction's first real statement and
-        // returns it embedded in the new `Session` it hands back — the
-        // *only* place that lease is referenced until `execute` itself
-        // returns. If `execute` throws (a genuine bug, or
-        // `Storage.queryCancellation` unwinding a killed client's query
-        // — see `Server.watchForDisconnect`), that new `Session` is
-        // never returned to anyone: every catcher above this only has
-        // the *original*, pre-statement `session`, whose `Tx.GateLease`
-        // doesn't reflect a lease newly acquired by *this* call.
-        // Disposing it here — unconditionally, whether newly acquired
-        // or already held from an earlier statement in the same
-        // transaction — is safe (`TransactionGateLease.Dispose` is
-        // idempotent) and guarantees the lease is never simply lost.
-        // This alone isn't the whole fix, though: `handle`'s exception
-        // handlers still need to abort the *whole* transaction (not
-        // just free its gate), since a `Session` that keeps a stale
-        // `BaseCatalog`/`Snapshot` alive after its gate was released
-        // mid-transaction could otherwise still reach a later COMMIT —
-        // see `abortTransactionGate`'s doc.
-        let gatedDbs =
-            match stmt with
-            | Select _
-            | Union _
-            | Explain _ -> []
-            | _ -> targetDatabases session.Store dbName stmt
-
-        let started = startTransactionStatementFor gatedDbs session
-
-        try
-            execute started
-        with _ ->
-            started.Tx |> Option.iter (fun tx -> tx.GateLease |> Map.iter (fun _ lease -> lease.Dispose()))
-            reraise ()
-    | None ->
-        match stmt with
-        | Select _
-        | Union _
-        | Explain _ -> execute session
-        | _ ->
-            // Every database this statement actually writes, not just
-            // `dbName` — see `targetDatabases`'s doc. Sorted so two
-            // concurrent statements that both touch databases A and B
-            // always acquire them in the same order.
-            let leases =
-                targetDatabases session.Store dbName stmt
-                |> List.distinct
-                |> List.sort
-                |> List.map (fun db -> Storage.enterTransactionGate session.Store db (Limits.lockWaitTimeout ()))
-
-            try
-                execute session
-            finally
-                leases |> List.iter (fun lease -> lease.Dispose())
+    | Some _ -> execute (startTransactionStatement session)
+    | None -> execute session
 
 let private executeStatement (session: Session) (sql: string) (upper: string) : Session * QueryResult =
     match Parser.parse sql with
@@ -1420,8 +1312,8 @@ let private runProbe (session: Session) (sql: string) (probe: Probe) : Session *
         match normalizeIsolationLevel level with
         | "SERIALIZABLE" ->
             // ponytail: fsdb's transaction model is one fixed snapshot per
-            // transaction (~REPEATABLE READ) with a coarse per-database write
-            // gate, not the range-locking SERIALIZABLE actually needs — a
+            // transaction (~REPEATABLE READ) with optimistic row conflicts,
+            // not the range-locking SERIALIZABLE actually needs — a
             // client that asked for stronger isolation than fsdb gives must
             // see a clear error, not a silent downgrade. Upgrade path: real
             // predicate/range locking, if a client ever genuinely needs it.
@@ -1763,26 +1655,6 @@ let private dispatch (session: Session) (rawSql: string) : Session * QueryResult
             { session with LastResultColumnMetadata = [] }, result
         | None -> executeStatement session sql upper
 
-/// Disposes `session.Tx`'s transaction gate lease, if it holds one — called
-/// only when a statement failed badly enough to abort the whole transaction
-/// (see `handle`'s exception handlers below), never on a normal COMMIT/
-/// ROLLBACK (`commitSession`/`rollbackSession` already own that). Freeing
-/// the gate alone doesn't recover a failed transaction — a transaction's
-/// whole safety argument is that it holds its database's gate
-/// *continuously* from its first real statement through COMMIT/ROLLBACK, so
-/// `mergeCatalogInto`'s three-way merge (`BaseCatalog`, captured at BEGIN,
-/// against the live catalog *right now*) never races a concurrent
-/// committer. A `Session` that frees its gate mid-transaction but keeps
-/// `Tx = Some` alive — its `BaseCatalog`/`Snapshot` now stale — could still
-/// reach a later COMMIT and silently clobber whatever another transaction
-/// committed to this database in the gap: a real lost update, not just a
-/// wasted retry. `handle`'s callers always pair this with `Tx = None`, so
-/// the broken transaction can never be resumed or committed, only quietly
-/// forgotten (matching real MySQL's "current transaction has been rolled
-/// back" after a fatal statement error).
-let private abortTransactionGate (session: Session) : unit =
-    session.Tx |> Option.iter (fun tx -> tx.GateLease |> Map.iter (fun _ lease -> lease.Dispose()))
-
 /// No SQL engine failure should ever escape as a raw .NET exception — the
 /// only two paths into `dispatch` (the parser, well guarded, and
 /// `Storage.coerceValue`'s numeric casts, which are not) both funnel into
@@ -1792,13 +1664,8 @@ let private abortTransactionGate (session: Session) : unit =
 /// no ERR packet. Verified reachable: `INSERT INTO t VALUES (1e300)` into a
 /// DECIMAL column throws `OverflowException` from `decimal d`.
 ///
-/// `Storage.LockWaitTimeout` gets its own real MySQL error code (1205)
-/// rather than falling into the generic 1105 below — a stuck transaction
-/// elsewhere should look to the client like an ordinary, retryable lock
-/// wait timeout, not an internal error; the transaction itself is untouched
-/// (the gate was never acquired — `Storage.enterTransactionGate` only
-/// raises this when its `Wait` timed out), so unlike the two handlers
-/// below, this one leaves `session.Tx` exactly as it was.
+/// `Storage.LockWaitTimeout` covers both an explicit gate timeout and an
+/// optimistic commit conflict; both are retryable 1205 errors.
 let handle (session: Session) (rawSql: string) : Session * QueryResult =
     try
         match dispatch session rawSql with
@@ -1815,12 +1682,8 @@ let handle (session: Session) (rawSql: string) : Session * QueryResult =
     // back to a client that's already gone, so this re-raises rather than
     // folding into the generic `Err(1105, ...)` below: `Server`'s command
     // loop catches it, skips the now-pointless reply, and logs the one
-    // clean line itself. `abortTransactionGate` still runs first — see its
-    // doc for why freeing the gate here (not just on the newly-acquired
-    // path `executeStatement` already covers) matters even though nothing
-    // is returned.
+    // clean line itself.
     | :? OperationCanceledException ->
-        abortTransactionGate session
         reraise ()
     // Arithmetic that left the `BIGINT UNSIGNED` domain (`Value.narrowUnsigned`).
     // MySQL fails the statement but keeps the transaction, and so does this:
@@ -1841,11 +1704,9 @@ let handle (session: Session) (rawSql: string) : Session * QueryResult =
     // snapshot reachable by a later COMMIT.
     | Functions.SqlError(code, msg) ->
         Log.diagnostic "fsdb: ERR %d %s -- query: %s" code msg (Log.redactSql rawSql)
-        abortTransactionGate session
         { session with Tx = None }, Err(code, msg)
     | ex ->
         Log.diagnostic "fsdb: EXN %s -- query: %s" ex.Message (Log.redactSql rawSql)
-        abortTransactionGate session
         { session with Tx = None }, Err(1105, sprintf "Internal error: %s" ex.Message) // ER_UNKNOWN_ERROR
 
 /// Executes a prepared statement with its bound parameter values. Parser-

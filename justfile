@@ -272,7 +272,7 @@ bench-quick:
 
 # N-writer throughput under concurrency, fsdb vs MySQL (ops/sec, not latency).
 # Complements `bench`: the latency suite is single-connection and cannot see
-# fsdb's per-database write gate serialize writers.
+# fsdb's optimistic merge behavior under concurrent writers.
 [group('bench')]
 bench-load:
     @mkdir -p benchmarks/results
