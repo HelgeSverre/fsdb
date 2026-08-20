@@ -18,6 +18,7 @@ let private envCount (name: string) (fallback: int) : int =
 // O(n) vs O(log n) scaling stops hiding at the default 10k/50k.
 let userCount = envCount "FSDB_BENCH_USERS" 10_000
 let orderCount = envCount "FSDB_BENCH_ORDERS" 50_000
+let fsdbPort = envCount "FSDB_BENCH_PORT" 3307
 
 let private plans = [| "free"; "pro"; "enterprise" |]
 let private statuses = [| "pending"; "paid"; "shipped"; "cancelled" |]
@@ -25,7 +26,7 @@ let private statuses = [| "pending"; "paid"; "shipped"; "cancelled" |]
 let portFor (target: string) =
     match target with
     | "fsdb"
-    | "fsdb-wal" -> 3307
+    | "fsdb-wal" -> fsdbPort
     | "mysql" -> 3316
     | "mysql-nofsync" -> 3317
     | other -> failwith $"unknown benchmark target: {other}"
