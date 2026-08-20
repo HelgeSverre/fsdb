@@ -435,6 +435,12 @@ let private literalValue: Parser<Value, unit> =
 let private ignoredWidth: Parser<unit, unit> =
     optional (between (sym "(") (sym ")") (sepBy1 intTok (sym ",")))
 
+/// As `ignoredWidth`, but keeping the number: `TINYINT`'s display width is
+/// the one that carries meaning, since `TINYINT(1)` is `BOOLEAN` (see
+/// `Ast.TBool`).
+let private tinyIntWidth: Parser<int option, unit> =
+    opt (between (sym "(") (sym ")") intTok)
+
 /// `UNSIGNED` (and MySQL's deprecated `ZEROFILL`, which implies it) after
 /// any numeric type — carried on the int types, accepted-and-discarded on
 /// float/double/decimal since `Ast.ColumnType` doesn't track it there.
@@ -455,7 +461,13 @@ let private stringListParen: Parser<string list, unit> =
 
 let private columnType: Parser<ColumnType, unit> =
     choice
-        [ keyword "TINYINT" >>. ignoredWidth >>. unsignedFlag |>> TTinyInt
+        [ keyword "TINYINT" >>. tinyIntWidth .>>. unsignedFlag
+          |>> (fun (width, unsigned) ->
+              // `TINYINT(1)` is what `BOOLEAN` expands to, and clients read
+              // the width to tell them apart. Signed only: `TINYINT(1)
+              // UNSIGNED` keeps the integer reading, as MySQL's own clients
+              // do.
+              if width = Some 1 && not unsigned then TBool else TTinyInt unsigned)
           keyword "SMALLINT" >>. ignoredWidth >>. unsignedFlag |>> TSmallInt
           keyword "MEDIUMINT" >>. ignoredWidth >>. unsignedFlag |>> TMediumInt
           keyword "BIGINT" >>. ignoredWidth >>. unsignedFlag |>> TBigInt
@@ -506,7 +518,7 @@ let private columnType: Parser<ColumnType, unit> =
           // a syntax error there too — `attempt widthLen` backtracks off the
           // empty parens, which then fail the rest of the column grammar.
           keyword "VECTOR" >>. opt (attempt widthLen) |>> (fun n -> TVector(defaultArg n 2048))
-          (keyword "BOOLEAN" <|> keyword "BOOL") >>% TTinyInt false ]
+          (keyword "BOOLEAN" <|> keyword "BOOL") >>% TBool ]
     <?> "column type"
 
 // ---------------------------------------------------------------------------

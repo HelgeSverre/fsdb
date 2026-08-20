@@ -890,11 +890,34 @@ let tests =
                         false, _, _, _) -> ()
                     | other -> failtestf "expected every new column type to parse, got %A" other
 
-                testCase "BOOLEAN/BOOL is an alias for TINYINT"
+                // MySQL's BOOLEAN is TINYINT(1), and clients read the
+                // width of 1 as "this is a bool" — so the two spellings and
+                // the explicit width all land on the same type, while a
+                // plain TINYINT stays an integer.
+                testCase "BOOLEAN, BOOL and TINYINT(1) are one type, distinct from plain TINYINT"
                 <| fun _ ->
-                    match parseOk "CREATE TABLE t (a BOOLEAN, b BOOL)" with
-                    | CreateTable(_, [ { Type = TTinyInt false }; { Type = TTinyInt false } ], [], [], false, _, _, _) -> ()
-                    | other -> failtestf "expected TTinyInt for BOOLEAN/BOOL, got %A" other
+                    match parseOk "CREATE TABLE t (a BOOLEAN, b BOOL, c TINYINT(1), d TINYINT, e TINYINT(4))" with
+                    | CreateTable(_,
+                                  [ { Type = TBool }
+                                    { Type = TBool }
+                                    { Type = TBool }
+                                    { Type = TTinyInt false }
+                                    { Type = TTinyInt false } ],
+                                  [],
+                                  [],
+                                  false,
+                                  _,
+                                  _,
+                                  _) -> ()
+                    | other -> failtestf "expected TBool for the three boolean spellings only, got %A" other
+
+                // TINYINT(1) UNSIGNED keeps the integer reading: a client's
+                // bool mapping is for the signed form.
+                testCase "TINYINT(1) UNSIGNED stays an integer"
+                <| fun _ ->
+                    match parseOk "CREATE TABLE t (a TINYINT(1) UNSIGNED)" with
+                    | CreateTable(_, [ { Type = TTinyInt true } ], [], [], false, _, _, _) -> ()
+                    | other -> failtestf "expected TTinyInt true, got %A" other
 
                 testCase "COMMENT / CHARACTER SET / COLLATE column modifiers are accepted and ignored"
                 <| fun _ ->

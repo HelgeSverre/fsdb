@@ -41,7 +41,8 @@ let private allTables (catalog: Catalog) : (string * Table) list =
 /// no length/unsigned/precision.
 let private dataTypeName (ty: ColumnType) : string =
     match ty with
-    | TTinyInt _ -> "tinyint"
+    | TTinyInt _
+    | TBool -> "tinyint"
     | TSmallInt _ -> "smallint"
     | TMediumInt _ -> "mediumint"
     | TInt _ -> "int"
@@ -82,6 +83,8 @@ let columnTypeText (ty: ColumnType) : string =
 
     match ty with
     | TTinyInt u -> "tinyint" + unsigned u
+    // MySQL spells BOOLEAN back as the `tinyint(1)` it is a synonym for.
+    | TBool -> "tinyint(1)"
     | TSmallInt u -> "smallint" + unsigned u
     | TMediumInt u -> "mediumint" + unsigned u
     | TInt u -> "int" + unsigned u
@@ -137,7 +140,8 @@ let private charMaxLength (ty: ColumnType) : int64 option =
 /// integer width, or the declared `(p, s)` for `DECIMAL`.
 let private numericPrecisionScale (ty: ColumnType) : (int64 * int64) option =
     match ty with
-    | TTinyInt _ -> Some(3L, 0L)
+    | TTinyInt _
+    | TBool -> Some(3L, 0L)
     | TSmallInt _ -> Some(5L, 0L)
     | TMediumInt _ -> Some(7L, 0L)
     | TInt _ -> Some(10L, 0L)

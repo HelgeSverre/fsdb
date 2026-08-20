@@ -48,6 +48,7 @@ let TypeLongLong = 0x08uy
 let TypeDate = 0x0auy
 let TypeTime = 0x0buy
 let TypeDateTime = 0x0cuy
+let TypeYear = 0x0duy
 let TypeVarchar = 0x0fuy
 let TypeNewDecimal = 0xf6uy
 let TypeBlob = 0xfcuy
@@ -63,9 +64,21 @@ let TypeString = 0xfeuy
 /// reaches the wire, and `Protocol.writeBinaryValue` reads it to pick
 /// `UInt64.Parse` over `Int64.Parse`. 0x88 is outside every id MySQL
 /// assigns (0x00-0x12 and 0xf5-0xff), so it can never collide with a real
-/// one. ponytail: widen the channel to (type, flags) pairs if a second
-/// flag ever needs advertising.
+/// one.
 let TypeLongLongUnsigned = 0x88uy
+
+/// The same stand-in trick for ENUM, which has no wire type id of its own:
+/// MySQL sends an enum column as `STRING` carrying `ENUM_FLAG`, and a client
+/// reports the column as `ENUM` only when that flag is set (it is what
+/// MySqlConnector's `GetDataTypeName` keys on). `Protocol.columnDefPayload`
+/// translates this back into `TypeString` + the flag.
+let TypeEnumString = 0x89uy
+
+/// And for BOOLEAN, which is MySQL's own spelling of `TINYINT(1)` and has no
+/// distinct wire type either: it goes out as `TINY` whose *column length* is
+/// 1, which is what a client keys "this is a bool, not a small int" on.
+/// `Protocol.columnDefPayload` translates this into `TypeTiny` + length 1.
+let TypeTinyBool = 0x8auy
 
 /// .NET's shortest-round-trip double formatting agrees with MySQL on the
 /// mantissa but not the exponent: "1E+20" vs MySQL's "1e20" (lowercase,

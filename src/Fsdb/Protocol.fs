@@ -47,6 +47,9 @@ let Utf8Mb4GeneralCi = 45
 let BinaryCollation = 63
 
 let private BlobFlag = 0x0010
+/// Marks a `STRING` column as an enum — the only thing that distinguishes
+/// the two on the wire, and what a client reports `ENUM` from.
+let private EnumFlag = 0x0100
 let private BinaryFlag = 0x0080
 
 /// UNSIGNED_FLAG. A `BIGINT UNSIGNED` column is LONGLONG on the wire like
@@ -263,51 +266,38 @@ let columnDefPayload (col: ColumnDef) : byte[] =
     w.WriteLenEncInt 0x0cUL // length of fixed-length fields
     let isBinary = col.Type = TypeBlob
     let isUnsigned = col.Type = TypeLongLongUnsigned
+    let isEnum = col.Type = TypeEnumString
+    let isBool = col.Type = TypeTinyBool
     w.WriteInt16LE(if isBinary then BinaryCollation else Utf8Mb4GeneralCi)
-    w.WriteInt32LE 0 // column length
-    // The one place `TypeLongLongUnsigned` becomes real wire bytes: an
-    // ordinary LONGLONG id plus the flag that carries the signedness.
-    w.WriteByte(if isUnsigned then TypeLongLong else col.Type)
+    // A client reads BOOLEAN off `TINY` whose declared display width is 1
+    // (`Ast.TBool`); every other column advertises no length, which clients
+    // treat as "unspecified" rather than "zero".
+    w.WriteInt32LE(if isBool then 1 else 0)
+    // The one place the stand-in type ids become real wire bytes: each is an
+    // ordinary MySQL id plus whatever separate field actually carries the
+    // distinction (see `Value.TypeLongLongUnsigned` and its neighbours).
+    w.WriteByte(
+        if isUnsigned then TypeLongLong
+        elif isEnum then TypeString
+        elif isBool then TypeTiny
+        else col.Type
+    )
 
     w.WriteInt16LE(
         if isBinary then BlobFlag ||| BinaryFlag
         elif isUnsigned then UnsignedFlag
+        elif isEnum then EnumFlag
         else 0
     )
     w.WriteByte col.Decimals // fsp for temporal columns, else 0
     w.WriteInt16LE 0 // filler
     w.ToArray()
 
-/// Maps a column's *declared* SQL type to its MySQL wire type id — used
-/// only by the deprecated COM_FIELD_LIST path (`Server`'s `FieldList`
-/// handler), which reads straight off `Storage`'s schema instead of a
-/// query result's rows, so there's no `Value` for `Value.mysqlTypeOf` to
-/// read a type off of.
-let wireTypeOfColumnType (ty: Ast.ColumnType) : byte =
-    match ty with
-    | Ast.TTinyInt _ -> TypeTiny
-    | Ast.TSmallInt _ -> TypeShort
-    | Ast.TMediumInt _
-    | Ast.TInt _ -> TypeLong
-    | Ast.TBigInt true -> TypeLongLongUnsigned
-    | Ast.TBigInt false -> TypeLongLong
-    | Ast.TDecimal _ -> TypeNewDecimal
-    | Ast.TDouble -> TypeDouble
-    | Ast.TFloat -> TypeFloat
-    | Ast.TDate -> TypeDate
-    | Ast.TDateTime _
-    | Ast.TTimestamp _ -> TypeDateTime
-    | Ast.TBinary _
-    | Ast.TVarBinary _
-    | Ast.TTinyBlob
-    | Ast.TBlob
-    | Ast.TMediumBlob
-    | Ast.TLongBlob -> TypeBlob
-    // ponytail: MySQL 9's real wire type for VECTOR is 242 — blob + binary
-    // charset is what pre-9 clients (MySqlConnector, the 8.4 CLI) see and
-    // understand; move to 242 when a client that knows it shows up.
-    | Ast.TVector _ -> TypeBlob
-    | _ -> TypeVarString
+/// Maps a column's *declared* SQL type to its MySQL wire type id. The
+/// mapping itself lives in `ColumnWire`, which compiles early enough for
+/// `Executor` to share it; this alias is the name the COM_FIELD_LIST path
+/// (`Server`'s `FieldList` handler) has always called it by.
+let wireTypeOfColumnType = ColumnWire.wireTypeOf
 
 /// The `decimals` (fsp) a *declared* column type advertises — the COM_FIELD_LIST
 /// counterpart to `fractionalDigitsOf` (which recovers it from rendered rows),
@@ -410,6 +400,14 @@ let private writeBinaryTime (w: Writer) (s: string) : unit =
         if micros <> 0 then
             w.WriteInt32LE micros
 
+/// `Int64.Parse` that yields `fallback` instead of throwing — see the
+/// integer cases in `writeBinaryValue` for why a throw is not an option
+/// there.
+let private parseIntOr (fallback: int64) (s: string) : int64 =
+    match Int64.TryParse(s, Globalization.NumberStyles.Integer, Globalization.CultureInfo.InvariantCulture) with
+    | true, v -> v
+    | _ -> fallback
+
 let private writeBinaryValue (w: Writer) (typeId: byte) (s: string) : unit =
     if typeId = TypeLongLong then
         w.WriteInt64LE(Int64.Parse(s, Globalization.CultureInfo.InvariantCulture))
@@ -444,6 +442,20 @@ let private writeBinaryValue (w: Writer) (typeId: byte) (s: string) : unit =
             w.WriteInt32LE micros
     elif typeId = TypeTime then
         writeBinaryTime w s
+    // The narrower integer widths, which a resultset only advertises when
+    // the output column resolved back to a declared TINYINT/SMALLINT/INT/
+    // YEAR/BOOLEAN (see `Executor.outputColumnWireOverrides`). Each must
+    // write exactly the width its advertised type implies: a length-encoded
+    // string here instead desyncs every column after it, which is what this
+    // function's doc is about. Parsed defensively for the same reason
+    // `writeBinaryTime` is — this runs after the handler returned, so a
+    // throw would drop the connection with no ERR ever sent.
+    elif typeId = TypeTinyBool || typeId = TypeTiny then
+        w.WriteByte(byte (sbyte (parseIntOr 0L s)))
+    elif typeId = TypeYear || typeId = TypeShort then
+        w.WriteInt16LE(int (int16 (parseIntOr 0L s)))
+    elif typeId = TypeLong then
+        w.WriteInt32LE(int (int32 (parseIntOr 0L s)))
     elif typeId = TypeBlob then
         w.WriteLenEncBytes(Encoding.Latin1.GetBytes s)
     else

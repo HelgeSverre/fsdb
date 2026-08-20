@@ -150,6 +150,7 @@ let private readStrList (r: #IReader) : string list =
 let private encodeColumnType (w: Writer) (t: ColumnType) : unit =
     match t with
     | TTinyInt u -> w.WriteByte 0x01uy; writeBool w u
+    | TBool -> w.WriteByte 0x1Euy
     | TSmallInt u -> w.WriteByte 0x02uy; writeBool w u
     | TMediumInt u -> w.WriteByte 0x03uy; writeBool w u
     | TInt u -> w.WriteByte 0x04uy; writeBool w u
@@ -188,6 +189,7 @@ let private encodeColumnType (w: Writer) (t: ColumnType) : unit =
 let private decodeColumnType (r: #IReader) : ColumnType =
     match r.ReadByte() with
     | 0x01uy -> TTinyInt(readBool r)
+    | 0x1Euy -> TBool
     | 0x02uy -> TSmallInt(readBool r)
     | 0x03uy -> TMediumInt(readBool r)
     | 0x04uy -> TInt(readBool r)

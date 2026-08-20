@@ -948,14 +948,26 @@ let rec private outputColumnFsps (ctx: EvalContext) (columns: ColumnDef list) (p
 
 /// The MySQL wire type to *override* each output column with when its
 /// data-driven type (`columnTypesOf`, from the row `Value`s) disagrees with
-/// its declared schema type — currently only a declared `TIME(N)` column,
-/// which fsdb stores as a `VString` (so `mysqlTypeOf` would call it
-/// `VAR_STRING`) but MySQL sends as its own `TIME` wire type. `Some TypeTime`
-/// for a declared-`TIME` output column, `None` otherwise (keep the data-driven
-/// type). Mirrors `outputColumnFsps`'s projection expansion so the lists line
-/// up column-for-column. DATE/DATETIME already agree (their `Value`s carry the
-/// right type), so they need no override here.
-let private outputColumnWireOverrides (ctx: EvalContext) (columns: ColumnDef list) (projections: Projection list) : byte option list =
+/// the column's declared schema type.
+///
+/// The data-driven read can only see what a `Value` is, not what it was
+/// declared as, so it reports every integer as `LONGLONG` and every string as
+/// `VAR_STRING`. MySQL reports the declared type, and clients act on the
+/// difference: an `ENUM` renders as `ENUM` only when the column definition
+/// carries `ENUM_FLAG`, and `TINYINT(1)` is a `bool` to a client rather than a
+/// number. Where a projection resolves back to a real base-table column, that
+/// declared type wins.
+///
+/// `None` keeps the data-driven type — which is right for anything computed,
+/// where there's no declared column to read, and for DATE/DATETIME, whose
+/// `Value`s already carry the correct type. Mirrors `outputColumnFsps`'s
+/// projection expansion so the lists line up column-for-column.
+let private outputColumnWireOverridesFor
+    (rollup: bool)
+    (ctx: EvalContext)
+    (columns: ColumnDef list)
+    (projections: Projection list)
+    : byte option list =
     let rec starQualifierCols (ctx: EvalContext) (qualifier: string) : ColumnDef list =
         match Map.tryFind (qualifier.ToLowerInvariant()) ctx.Qualifiers with
         | Some(cols, _) -> cols
@@ -963,7 +975,23 @@ let private outputColumnWireOverrides (ctx: EvalContext) (columns: ColumnDef lis
 
     let overrideOf (c: ColumnDef) =
         match c.Type with
-        | TTime _ -> Some Value.TypeTime
+        // WITH ROLLUP materializes each grouped column into a *nullable*
+        // temporary to hold the super-aggregate row's NULL, and an enum's
+        // value set doesn't survive that — MySQL reports the column as plain
+        // VARCHAR there, so claiming ENUM would claim more than the server
+        // delivers. Widths and BOOLEAN survive the temporary.
+        | TEnum _ when rollup -> None
+        | ty -> ColumnWire.resultTypeOf ty
+
+    /// A function whose result MySQL types as something other than what its
+    /// returned `Value` implies. `YEAR(x)` is the one that matters in
+    /// practice: it hands back a plain integer that MySQL still declares as
+    /// `YEAR`. ponytail: a lookup for one entry rather than a general
+    /// expression-type pass, which is the real fix for computed columns —
+    /// see `columnTypesOf`.
+    let overrideOfExpr (expr: Expr) =
+        match expr with
+        | FuncCall(name, [ _ ]) when name.ToUpperInvariant() = "YEAR" -> Some Value.TypeYear
         | _ -> None
 
     projections
@@ -971,12 +999,19 @@ let private outputColumnWireOverrides (ctx: EvalContext) (columns: ColumnDef lis
         match proj with
         | Star None, _ -> columns |> List.map overrideOf
         | Star(Some qualifier), _ -> starQualifierCols ctx qualifier |> List.map overrideOf
-        | expr, _ -> [ tryColumnDefForExpr ctx expr |> Option.bind overrideOf ])
+        | expr, _ ->
+            [ match tryColumnDefForExpr ctx expr |> Option.bind overrideOf with
+              | Some ty -> Some ty
+              | None -> overrideOfExpr expr ])
 
 /// Applies `outputColumnWireOverrides` on top of a data-driven wire-type list,
 /// keeping the data-driven type wherever there's no override. Falls back
 /// wholesale on a length mismatch (both lists come from the same projection
 /// expansion, so they shouldn't disagree) rather than throwing from `map2`.
+/// `outputColumnWireOverridesFor` for the non-grouped paths, which have no
+/// rollup temporary to degrade anything.
+let private outputColumnWireOverrides = outputColumnWireOverridesFor false
+
 let private applyWireOverrides (overrides: byte option list) (types: byte list) : byte list =
     if List.length overrides = List.length types then
         List.map2 (fun ov ty -> defaultArg ov ty) overrides types
@@ -1139,6 +1174,7 @@ let private extractEquiKeys
 let private isJoinNumericType =
     function
     | TTinyInt _
+    | TBool
     | TSmallInt _
     | TMediumInt _
     | TInt _
@@ -1895,7 +1931,7 @@ let rec private evalExpr (ctx: EvalContext) (expr: Expr) : Result<Value, EvalErr
         // numeric context arithmetic and `=` put it in (`enumOrdinalFor`).
         |> Result.map (fun v ->
             match ty with
-            | TTinyInt _ | TSmallInt _ | TMediumInt _ | TInt _ | TBigInt _
+            | TTinyInt _ | TBool | TSmallInt _ | TMediumInt _ | TInt _ | TBigInt _
             | TDecimal _ | TDouble | TFloat -> enumOrdinalFor ctx e v |> Option.defaultValue v
             | _ -> v)
         |> Result.bind (fun v ->
@@ -1926,7 +1962,7 @@ let rec private evalExpr (ctx: EvalContext) (expr: Expr) : Result<Value, EvalErr
 
             let v =
                 match v, ty with
-                | VString s, (TTinyInt _ | TSmallInt _ | TMediumInt _ | TInt _ | TBigInt _ | TYear) ->
+                | VString s, (TTinyInt _ | TBool | TSmallInt _ | TMediumInt _ | TInt _ | TBigInt _ | TYear) ->
                     VString(leadingNumericPrefix leadingIntegerPrefixRegex s |> Option.defaultValue "")
                 | VString s, (TDouble | TFloat | TDecimal _) ->
                     VString(leadingNumericPrefix leadingFloatPrefixRegex s |> Option.defaultValue "")
@@ -4734,7 +4770,8 @@ and private runGroupedSelect
                     // back to `toText`.
                     let groupCtx = ctxFor (probeRow columns)
                     let groupFsps = outputColumnFsps groupCtx columns select.Projections
-                    let groupWireOverrides = outputColumnWireOverrides groupCtx columns select.Projections
+                    let groupWireOverrides =
+                        outputColumnWireOverridesFor select.Rollup groupCtx columns select.Projections
 
                     let paired =
                         sorted
@@ -6301,7 +6338,8 @@ let private explainTableStats (store: Store) (dbName: string) (tableRef: TableRe
 let private explainKeyLen (col: ColumnDef) : int option =
     let baseLen =
         match col.Type with
-        | TTinyInt _ -> Some 1
+        | TTinyInt _
+        | TBool -> Some 1
         | TSmallInt _ -> Some 2
         | TMediumInt _ -> Some 3
         | TInt _ -> Some 4

@@ -137,7 +137,11 @@ let tests =
               Expect.equal (wireTypeOfColumnType (TVarchar 10)) TypeVarString "varchar"
               Expect.equal (wireTypeOfColumnType (TChar 10)) TypeVarString "char"
               Expect.equal (wireTypeOfColumnType TText) TypeVarString "text"
-              Expect.equal (wireTypeOfColumnType (TEnum [ "a"; "b" ])) TypeVarString "enum"
+              // ENUM has no wire id of its own; it goes out as STRING plus
+              // ENUM_FLAG, which `columnDefPayload` splits back out.
+              Expect.equal (wireTypeOfColumnType (TEnum [ "a"; "b" ])) TypeEnumString "enum"
+              Expect.equal (wireTypeOfColumnType TBool) TypeTinyBool "boolean"
+              Expect.equal (wireTypeOfColumnType TYear) TypeYear "year"
               Expect.equal (wireTypeOfColumnType (TSet [ "a" ])) TypeVarString "set"
 
           testCase "textRowPayload encodes NULL and strings in one row"

@@ -1023,6 +1023,7 @@ let coerceValue (strict: bool) (col: ColumnDef) (v: Value) : Result<Value, Stora
         | TSmallInt _
         | TMediumInt _
         | TTinyInt _
+        | TBool
         | TYear ->
             match v with
             | VInt i -> Ok(VInt i)
@@ -2084,6 +2085,7 @@ let private applyAlterAction (strict: bool) (table: Table) (action: AlterAction)
                 let range =
                     match intType with
                     | TTinyInt unsigned -> Some(if unsigned then 0L, 255L else -128L, 127L)
+                    | TBool -> Some(-128L, 127L)
                     | TSmallInt unsigned -> Some(if unsigned then 0L, 65535L else -32768L, 32767L)
                     | TMediumInt unsigned -> Some(if unsigned then 0L, 16777215L else -8388608L, 8388607L)
                     | TInt unsigned -> Some(if unsigned then 0L, 4294967295L else -2147483648L, 2147483647L)

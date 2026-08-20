@@ -60,7 +60,7 @@ let tests =
 
               match handle session "SELECT id, name FROM t" with
               | session, ResultSet([ "id"; "name" ], [ [ Some "1"; Some "a" ] ]) ->
-                  Expect.equal session.LastResultColumnTypes [ TypeLongLong; TypeVarString ] "id is int, name is a string"
+                  Expect.equal session.LastResultColumnTypes [ TypeLong; TypeVarString ] "id reports INT's own width, name is a string"
               | _, other -> failtestf "expected a resultset, got %A" other
 
           testCase "LIMIT 0 (the getColumnMeta/\"metadata, no rows\" idiom) still reports real column wire types, not a blanket VAR_STRING"
@@ -71,8 +71,72 @@ let tests =
 
               match handle session "SELECT id, name FROM t LIMIT 0" with
               | session, ResultSet([ "id"; "name" ], []) ->
-                  Expect.equal session.LastResultColumnTypes [ TypeLongLong; TypeVarString ] "LIMIT 0 must not narrow types to the empty row set it returns"
+                  Expect.equal session.LastResultColumnTypes [ TypeLong; TypeVarString ] "LIMIT 0 must not narrow types to the empty row set it returns"
               | _, other -> failtestf "expected an empty resultset, got %A" other
+
+          // A resultset's types are read off the row `Value`s, which know
+          // nothing about how the column was declared. Where a projection
+          // resolves back to a real column, the declared type wins — clients
+          // act on the difference (an ENUM is only an ENUM when the column
+          // definition carries ENUM_FLAG; TINYINT(1) is a bool, not a number).
+          testCase "a bare column reference reports its declared type, not the one its stored Value implies"
+          <| fun _ ->
+              let session = create 1 (Fsdb.Storage.create ())
+
+              let session, _ =
+                  handle
+                      session
+                      "CREATE TABLE t (st ENUM('a','b') NOT NULL, ok BOOLEAN NOT NULL, yr YEAR NOT NULL, \
+                       tiny TINYINT NOT NULL, small SMALLINT NOT NULL, mid INT NOT NULL, big BIGINT NOT NULL)"
+
+              let session, _ = handle session "INSERT INTO t VALUES ('a', 1, 2011, 1, 2, 3, 4)"
+
+              match handle session "SELECT st, ok, yr, tiny, small, mid, big FROM t" with
+              | session, ResultSet(_, [ _ ]) ->
+                  Expect.equal
+                      session.LastResultColumnTypes
+                      [ TypeEnumString; TypeTinyBool; TypeYear; TypeTiny; TypeShort; TypeLong; TypeLongLong ]
+                      "each column reports the width and family it was declared with"
+              | _, other -> failtestf "expected one row, got %A" other
+
+          // MySQL declares YEAR()'s result as YEAR even though the value it
+          // returns is an ordinary integer.
+          testCase "YEAR() reports the YEAR type its integer result would otherwise hide"
+          <| fun _ ->
+              let session = create 1 (Fsdb.Storage.create ())
+              let session, _ = handle session "CREATE TABLE t (d DATE NOT NULL)"
+              let session, _ = handle session "INSERT INTO t VALUES ('2011-10-16')"
+
+              match handle session "SELECT YEAR(d) AS yr, MONTH(d) AS mo FROM t" with
+              | session, ResultSet(_, [ [ Some "2011"; Some "10" ] ]) ->
+                  Expect.equal
+                      session.LastResultColumnTypes
+                      [ TypeYear; TypeLongLong ]
+                      "YEAR() is YEAR; the other extractors stay plain integers"
+              | _, other -> failtestf "expected the extracted parts, got %A" other
+
+          // WITH ROLLUP materializes each grouped column into a nullable
+          // temporary to hold the super-aggregate row's NULL, and an enum's
+          // value set doesn't survive it.
+          testCase "WITH ROLLUP drops a grouped ENUM back to its data-driven type"
+          <| fun _ ->
+              let session = create 1 (Fsdb.Storage.create ())
+              let session, _ = handle session "CREATE TABLE t (st ENUM('a','b') NOT NULL, n INT NOT NULL)"
+              let session, _ = handle session "INSERT INTO t VALUES ('a', 1), ('b', 2)"
+
+              match handle session "SELECT st, COUNT(*) AS c FROM t GROUP BY st" |> fst with
+              | grouped ->
+                  Expect.equal
+                      grouped.LastResultColumnTypes
+                      [ TypeEnumString; TypeLongLong ]
+                      "a plain GROUP BY keeps the enum"
+
+              match handle session "SELECT st, COUNT(*) AS c FROM t GROUP BY st WITH ROLLUP" |> fst with
+              | rolled ->
+                  Expect.equal
+                      rolled.LastResultColumnTypes
+                      [ TypeVarString; TypeLongLong ]
+                      "the rollup temporary loses it, so claiming ENUM would overclaim"
 
           testCase "SUM over an integer column reports MySQL's DECIMAL result type"
           <| fun _ ->
@@ -91,7 +155,7 @@ let tests =
               let session, _ = handle session "CREATE TABLE t (id INT)"
               let session, _ = handle session "INSERT INTO t VALUES (1)"
               let session, _ = handle session "SELECT id FROM t"
-              Expect.equal session.LastResultColumnTypes [ TypeLongLong ] "SELECT set a real type"
+              Expect.equal session.LastResultColumnTypes [ TypeLong ] "SELECT set a real type"
 
               // `SELECT @@version` is also a single-column resultset (the
               // `handleAtVarSelect` probe path, not `executeStatement`'s
