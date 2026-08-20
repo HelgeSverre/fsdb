@@ -60,7 +60,7 @@ let tests =
 
               match handle session "SELECT id, name FROM t" with
               | session, ResultSet([ "id"; "name" ], [ [ Some "1"; Some "a" ] ]) ->
-                  Expect.equal session.LastResultColumnTypes [ TypeLong; TypeVarString ] "id reports INT's own width, name is a string"
+                  Expect.equal (session.LastResultColumnMetadata |> List.map _.TypeId) [ TypeLong; TypeVarString ] "id reports INT's own width, name is a string"
               | _, other -> failtestf "expected a resultset, got %A" other
 
           testCase "LIMIT 0 (the getColumnMeta/\"metadata, no rows\" idiom) still reports real column wire types, not a blanket VAR_STRING"
@@ -71,7 +71,7 @@ let tests =
 
               match handle session "SELECT id, name FROM t LIMIT 0" with
               | session, ResultSet([ "id"; "name" ], []) ->
-                  Expect.equal session.LastResultColumnTypes [ TypeLong; TypeVarString ] "LIMIT 0 must not narrow types to the empty row set it returns"
+                  Expect.equal (session.LastResultColumnMetadata |> List.map _.TypeId) [ TypeLong; TypeVarString ] "LIMIT 0 must not narrow types to the empty row set it returns"
               | _, other -> failtestf "expected an empty resultset, got %A" other
 
           // A resultset's types are read off the row `Value`s, which know
@@ -94,8 +94,8 @@ let tests =
               match handle session "SELECT st, ok, yr, tiny, small, mid, big FROM t" with
               | session, ResultSet(_, [ _ ]) ->
                   Expect.equal
-                      session.LastResultColumnTypes
-                      [ TypeEnumString; TypeTinyBool; TypeYear; TypeTiny; TypeShort; TypeLong; TypeLongLong ]
+                      (session.LastResultColumnMetadata |> List.map _.TypeId)
+                      [ TypeString; TypeTiny; TypeYear; TypeTiny; TypeShort; TypeLong; TypeLongLong ]
                       "each column reports the width and family it was declared with"
               | _, other -> failtestf "expected one row, got %A" other
 
@@ -110,7 +110,7 @@ let tests =
               match handle session "SELECT YEAR(d) AS yr, MONTH(d) AS mo FROM t" with
               | session, ResultSet(_, [ [ Some "2011"; Some "10" ] ]) ->
                   Expect.equal
-                      session.LastResultColumnTypes
+                      (session.LastResultColumnMetadata |> List.map _.TypeId)
                       [ TypeYear; TypeLongLong ]
                       "YEAR() is YEAR; the other extractors stay plain integers"
               | _, other -> failtestf "expected the extracted parts, got %A" other
@@ -127,14 +127,14 @@ let tests =
               match handle session "SELECT st, COUNT(*) AS c FROM t GROUP BY st" |> fst with
               | grouped ->
                   Expect.equal
-                      grouped.LastResultColumnTypes
-                      [ TypeEnumString; TypeLongLong ]
+                      (grouped.LastResultColumnMetadata |> List.map _.TypeId)
+                      [ TypeString; TypeLongLong ]
                       "a plain GROUP BY keeps the enum"
 
               match handle session "SELECT st, COUNT(*) AS c FROM t GROUP BY st WITH ROLLUP" |> fst with
               | rolled ->
                   Expect.equal
-                      rolled.LastResultColumnTypes
+                      (rolled.LastResultColumnMetadata |> List.map _.TypeId)
                       [ TypeVarString; TypeLongLong ]
                       "the rollup temporary loses it, so claiming ENUM would overclaim"
 
@@ -146,16 +146,55 @@ let tests =
 
               match handle session "SELECT SUM(n) AS total FROM t" with
               | session, ResultSet([ "total" ], [ [ Some "9223372036854775808" ] ]) ->
-                  Expect.equal session.LastResultColumnTypes [ TypeNewDecimal ] "SUM(BIGINT) is NEWDECIMAL, not LONGLONG"
+                  Expect.equal (session.LastResultColumnMetadata |> List.map _.TypeId) [ TypeNewDecimal ] "SUM(BIGINT) is NEWDECIMAL, not LONGLONG"
               | _, other -> failtestf "expected a decimal SUM resultset, got %A" other
 
-          testCase "LastResultColumnTypes doesn't leak from a real SELECT onto a later same-arity probe result"
+          testCase "computed expressions report their static result types"
+          <| fun _ ->
+              let session = create 1 (Fsdb.Storage.create ())
+
+              match handle session "SELECT 1, 256, 40000, 2147483648, 1 + 2, 1 = 1, 1 / 2, CAST('x' AS CHAR(8))" with
+              | session, ResultSet(_, [ _ ]) ->
+                  Expect.equal
+                      (session.LastResultColumnMetadata |> List.map _.TypeId)
+                      [ TypeTiny; TypeShort; TypeLong; TypeLongLong; TypeLongLong; TypeLongLong; TypeNewDecimal; TypeString ]
+                      "literal, arithmetic, predicate, division, and cast types"
+
+                  let charMetadata = List.last session.LastResultColumnMetadata
+                  Expect.equal charMetadata.ColumnLength 32u "CHAR(8) carries its utf8mb4 byte width"
+              | _, other -> failtestf "expected one computed row, got %A" other
+
+          testCase "declared result metadata carries widths and column flags"
+          <| fun _ ->
+              let session = create 1 (Fsdb.Storage.create ())
+              let session, _ = handle session "CREATE TABLE meta (id INT UNSIGNED AUTO_INCREMENT PRIMARY KEY, code CHAR(8) NOT NULL, state ENUM('new','closed') UNIQUE)"
+
+              match handle session "SELECT id, code, state FROM meta LIMIT 0" with
+              | session, ResultSet(_, []) ->
+                  let id, code, state =
+                      match session.LastResultColumnMetadata with
+                      | [ id; code; state ] -> id, code, state
+                      | metadata -> failtestf "expected three metadata records, got %A" metadata
+
+                  Expect.equal id.TypeId TypeLong "INT wire type"
+                  Expect.isTrue (id.Flags &&& UnsignedFlag <> 0us) "UNSIGNED flag"
+                  Expect.isTrue (id.Flags &&& PrimaryKeyFlag <> 0us) "PRIMARY_KEY flag"
+                  Expect.isTrue (id.Flags &&& AutoIncrementFlag <> 0us) "AUTO_INCREMENT flag"
+                  Expect.equal code.TypeId TypeString "CHAR wire type"
+                  Expect.equal code.ColumnLength 32u "CHAR utf8mb4 byte width"
+                  Expect.isTrue (code.Flags &&& NotNullFlag <> 0us) "NOT_NULL flag"
+                  Expect.equal state.TypeId TypeString "ENUM wire type"
+                  Expect.isTrue (state.Flags &&& EnumFlag <> 0us) "ENUM flag"
+                  Expect.isTrue (state.Flags &&& UniqueKeyFlag <> 0us) "UNIQUE_KEY flag"
+              | _, other -> failtestf "expected an empty typed resultset, got %A" other
+
+          testCase "result column metadata doesn't leak from a real SELECT onto a later same-arity probe result"
           <| fun _ ->
               let session = create 1 (Fsdb.Storage.create ())
               let session, _ = handle session "CREATE TABLE t (id INT)"
               let session, _ = handle session "INSERT INTO t VALUES (1)"
               let session, _ = handle session "SELECT id FROM t"
-              Expect.equal session.LastResultColumnTypes [ TypeLong ] "SELECT set a real type"
+              Expect.equal (session.LastResultColumnMetadata |> List.map _.TypeId) [ TypeLong ] "SELECT set a real type"
 
               // `SELECT @@version` is also a single-column resultset (the
               // `handleAtVarSelect` probe path, not `executeStatement`'s
@@ -163,7 +202,7 @@ let tests =
               // inherit the previous statement's LONGLONG type instead of
               // falling back to VAR_STRING for its actual string value.
               let session, _ = handle session "SELECT @@version"
-              Expect.equal session.LastResultColumnTypes [] "an unrelated probe result clears it"
+              Expect.equal session.LastResultColumnMetadata [] "an unrelated probe result clears it"
 
           testCase "RANK/DENSE_RANK/NTILE report LONGLONG and PERCENT_RANK reports DOUBLE over the wire"
           <| fun _ ->
@@ -178,7 +217,7 @@ let tests =
               with
               | session, ResultSet([ "r"; "dr"; "pr"; "nt" ], _) ->
                   Expect.equal
-                      session.LastResultColumnTypes
+                      (session.LastResultColumnMetadata |> List.map _.TypeId)
                       [ TypeLongLong; TypeLongLong; TypeDouble; TypeLongLong ]
                       "RANK/DENSE_RANK/NTILE are integers, PERCENT_RANK is a double, same as real MySQL"
               | _, other -> failtestf "expected a resultset, got %A" other
@@ -1181,23 +1220,23 @@ let tests =
           testCase "SET GLOBAL x = y is visible to SELECT @@GLOBAL.x on the same connection"
           <| fun _ ->
               let session = create 1 (Fsdb.Storage.create ())
-              let session, _ = handle session "SET GLOBAL max_connections = 500"
+              let session, _ = handle session "SET GLOBAL max_heap_table_size = 500"
 
-              match handle session "SELECT @@GLOBAL.max_connections" |> snd with
+              match handle session "SELECT @@GLOBAL.max_heap_table_size" |> snd with
               | ResultSet(_, [ [ Some "500" ] ]) -> ()
-              | other -> failtestf "expected @@GLOBAL.max_connections = 500, got %A" other
+              | other -> failtestf "expected @@GLOBAL.max_heap_table_size = 500, got %A" other
 
           testCase "a new session inherits a SET GLOBAL made before it connected"
           <| fun _ ->
               let store = Fsdb.Storage.create ()
               let setter = create 1 store
-              let setter, _ = handle setter "SET GLOBAL max_connections = 500"
+              let setter, _ = handle setter "SET GLOBAL max_heap_table_size = 500"
               ignore setter
 
               let newcomer = create 2 store
 
               Expect.equal
-                  (newcomer.Variables |> Map.tryFind "max_connections" |> Option.flatten)
+                  (newcomer.Variables |> Map.tryFind "max_heap_table_size" |> Option.flatten)
                   (Some "500")
                   "a session created after the GLOBAL write inherits it as its own session default"
 
@@ -1205,13 +1244,13 @@ let tests =
           <| fun _ ->
               let store = Fsdb.Storage.create ()
               let session = create 1 store
-              let session, _ = handle session "SET @@GLOBAL.max_connections = 777"
+              let session, _ = handle session "SET @@GLOBAL.max_heap_table_size = 777"
               ignore session
 
               let newcomer = create 2 store
 
               Expect.equal
-                  (newcomer.Variables |> Map.tryFind "max_connections" |> Option.flatten)
+                  (newcomer.Variables |> Map.tryFind "max_heap_table_size" |> Option.flatten)
                   (Some "777")
                   "the @@GLOBAL. spelling reaches the same global map as SET GLOBAL"
 
