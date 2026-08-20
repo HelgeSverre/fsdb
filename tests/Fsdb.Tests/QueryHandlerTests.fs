@@ -451,6 +451,22 @@ let tests =
               | ResultSet(_, [ [ Some "ONLY_FULL_GROUP_BY,STRICT_TRANS_TABLES"; Some "latin1" ] ]) -> ()
               | other -> failtestf "expected both variables updated, got %A" other
 
+          testCase "GROUP_CONCAT obeys the session group_concat_max_len byte limit"
+          <| fun _ ->
+              let session = create 1 (Fsdb.Storage.create ())
+              let session, _ = handle session "CREATE TABLE gc (v VARCHAR(600))"
+              let session, _ = handle session ("INSERT INTO gc VALUES ('" + String.replicate 600 "x" + "'), ('" + String.replicate 600 "y" + "')")
+
+              match handle session "SELECT LENGTH(GROUP_CONCAT(v)) FROM gc" |> snd with
+              | ResultSet(_, [ [ Some "1024" ] ]) -> ()
+              | other -> failtestf "expected the MySQL default 1024-byte cap, got %A" other
+
+              let session, _ = handle session "SET SESSION group_concat_max_len = 2048"
+
+              match handle session "SELECT LENGTH(GROUP_CONCAT(v)) FROM gc" |> snd with
+              | ResultSet(_, [ [ Some "1201" ] ]) -> ()
+              | other -> failtestf "expected the larger session limit, got %A" other
+
           testCase "sql_mode inside Laravel's real comma-joined connect-time SET turns off strict coercion"
           <| fun _ ->
               // The exact statement `strict => false` sends

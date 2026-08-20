@@ -1118,6 +1118,15 @@ let private executeParsed (session: Session) (stmt: Statement) : Session * Query
 
             Executor.withCteRecursionDepth limit body
 
+        let withExecutionLimits body =
+            let groupConcatLimit =
+                lookupVar session "group_concat_max_len"
+                |> Option.flatten
+                |> Option.bind (fun value -> match Int32.TryParse value with | true, parsed when parsed >= 4 -> Some parsed | _ -> None)
+                |> Option.defaultValue 1024
+
+            Executor.withGroupConcatMaxLen groupConcatLimit (fun () -> withRecursionDepth body)
+
         // `SELECT`/`UNION` go through `Executor`'s type-preserving entry
         // points instead of the plain `execute` every other statement uses
         // — those are the only two statement kinds that reach the wire as
@@ -1128,18 +1137,18 @@ let private executeParsed (session: Session) (stmt: Statement) : Session * Query
         let lastInsertId, lastGeneratedId, result, columnMetadata =
             match stmt with
             | Select select ->
-                let result, types = withRecursionDepth (fun () -> Executor.runTopLevelSelect store registry dbName select)
+                let result, types = withExecutionLimits (fun () -> Executor.runTopLevelSelect store registry dbName select)
                 session.LastInsertId, session.LastGeneratedId, result, types
             | Union(first, rest, orderBy, limit, offset) ->
                 let result, types, _ =
-                    withRecursionDepth (fun () -> Executor.runUnionStmt store registry dbName first rest orderBy limit offset)
+                    withExecutionLimits (fun () -> Executor.runUnionStmt store registry dbName first rest orderBy limit offset)
 
                 session.LastInsertId, session.LastGeneratedId, result, types
             | _ ->
                 let foundRows = session.Capabilities &&& Fsdb.Protocol.ClientFoundRows <> 0u
 
                 let (lastInsertId, lastGeneratedId), result =
-                    withRecursionDepth (fun () ->
+                    withExecutionLimits (fun () ->
                         Executor.execute store registry dbName (session.LastInsertId, session.LastGeneratedId) foundRows stmt)
 
                 lastInsertId, lastGeneratedId, result, []
