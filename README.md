@@ -4,17 +4,10 @@
 [![.NET 10](https://img.shields.io/badge/.NET-10-512BD4.svg)](global.json)
 [![MySQL 8.4 wire protocol](https://img.shields.io/badge/MySQL-8.4%20wire%20protocol-4479A1.svg)](docs/compatibility.md)
 
-A MySQL-compatible database server in idiomatic F#. It speaks the MySQL wire
-protocol, so standard clients such as `mysql`, PDO, and MySqlConnector can use
-it without a custom adapter. Underneath is an in-memory engine built as a
-pipeline of discriminated unions: bytes → command → AST → logical plan →
-lazy `seq`.
-
-Readable F# is the primary goal; raw performance is not.
-
-Not a production database: no TLS or replication — a single-node engine for
-learning, embedding, testing, and local tooling. For production workloads use
-MySQL, PostgreSQL, or SQLite.
+A MySQL-compatible database server in idiomatic F#, speaking the MySQL wire
+protocol so clients like `mysql`, PDO, and MySqlConnector work without a
+custom adapter. An in-memory engine built as a pipeline: bytes → command →
+AST → logical plan → lazy `seq`.
 
 ## Contents
 
