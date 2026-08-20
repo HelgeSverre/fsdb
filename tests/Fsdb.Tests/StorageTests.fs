@@ -1,6 +1,7 @@
 module Fsdb.Tests.StorageTests
 
 open Expecto
+open Fsdb
 open Fsdb.Ast
 open Fsdb.Value
 open Fsdb.Storage
@@ -2375,6 +2376,32 @@ let tests =
                         | [ row ] -> Expect.equal (asInt row.[0]) (int64 (threadCount * incrementsPerThread)) "every increment landed, none lost to a race"
                         | other -> failtestf "expected exactly one row, got %A" other
                     | Error e -> failtestf "expected Ok, got %A" e ]
+
+          testList
+              "paged vector"
+              [ testCase "updates preserve earlier snapshots across page boundaries"
+                <| fun _ ->
+                    let original = PagedVector.ofSeq [ 0 .. 599 ]
+                    let builder = original.ToBuilder()
+                    builder.[0] <- -1
+                    builder.[255] <- -2
+                    builder.[256] <- -3
+                    builder.[599] <- -4
+                    builder.Add 600
+                    let updated = builder.DrainToImmutable()
+
+                    Expect.sequenceEqual original [ 0 .. 599 ] "published pages remain unchanged"
+                    Expect.equal updated.[0] -1 "first page changed"
+                    Expect.equal updated.[255] -2 "first page boundary changed"
+                    Expect.equal updated.[256] -3 "second page changed"
+                    Expect.equal updated.[599] -4 "last existing value changed"
+                    Expect.equal updated.[600] 600 "append crosses the final page"
+                    Expect.throws (fun () -> builder.[0] <- 42) "a drained builder cannot mutate published pages"
+
+                testCase "empty vectors enumerate no values"
+                <| fun _ ->
+                    let rows = PagedVector.empty<int>
+                    Expect.isEmpty (List.ofSeq rows) "empty vector" ]
 
           testList
               "performance canary"

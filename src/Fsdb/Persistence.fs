@@ -18,7 +18,6 @@
 module Fsdb.Persistence
 
 open System
-open System.Collections.Immutable
 open System.IO
 open System.Runtime.InteropServices
 open Fsdb.Ast
@@ -906,7 +905,7 @@ let private decodeTable (r: #IReader) : Table =
           TableCharset = tableCharset
           TableCollation = tableCollation
           CreateTime = createTime
-          RowsArray = ImmutableArray.CreateRange rows
+          RowsArray = PagedVector.ofSeq rows
           NextAutoId = nextAutoId
           UniqueIndex = Map.empty }
 

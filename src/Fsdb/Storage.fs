@@ -6,7 +6,6 @@ module Fsdb.Storage
 open System
 open System.Collections.Concurrent
 open System.Collections.Generic
-open System.Collections.Immutable
 open System.Globalization
 open System.Threading
 open Fsdb.Ast
@@ -119,19 +118,9 @@ let toMySqlError (err: StorageError) : int * string =
 type Table =
     { OriginalName: string
       Columns: ColumnDef list
-      /// `ImmutableArray`, not `Value[] list`: every write path below
-      /// (`insertCore`, `updateRows`, `upsertRows`, `deleteRows`) needs to
-      /// hand out a new immutable snapshot of a table's rows without
-      /// mutating whatever `Database`/`Catalog` value still references the
-      /// old one (`Table` shares that discipline with `UniqueIndex`, see
-      /// below) — but a `list` can only grow/shrink by an O(n) rebuild of
-      /// every cons cell, while `ImmutableArray.Add`/`.SetItem` are a single
-      /// `Array.Copy` over reference-sized slots, no per-row heap traffic.
-      /// Insertion order is the scan order (index `0` is the oldest row);
-      /// deletion compacts (see `deleteRows`), so `RowsArray.Length` is
-      /// always the table's real row count, never a tombstoned/padded one.
-      /// External readers that want a plain list use the `Rows` member.
-      RowsArray: ImmutableArray<Value[]>
+      /// Published pages are immutable so captured catalog roots remain
+      /// valid while a write copies only the pages it changes.
+      RowsArray: PagedVector<Value[]>
       NextAutoId: int64
       Indexes: IndexDef list
       ForeignKeys: ForeignKeyDef list
@@ -1198,7 +1187,7 @@ let reindexTable (table: Table) : Table =
 
 let private tableSchema (table: Table) =
     { table with
-        RowsArray = ImmutableArray.Empty
+        RowsArray = PagedVector.empty
         NextAutoId = 0L
         UniqueIndex = Map.empty }
 
@@ -1269,7 +1258,7 @@ let private mergeRows (dbName: string) (baseTable: Table) (batchTable: Table) (l
     | _ -> mergeByValue ()
 
     { liveTable with
-        RowsArray = ImmutableArray.CreateRange liveRows
+        RowsArray = PagedVector.ofSeq liveRows
         NextAutoId = max liveTable.NextAutoId batchTable.NextAutoId }
     |> reindexTable
 
@@ -1478,7 +1467,7 @@ let private sysTable (name: string) (columns: ColumnDef list) (rows: Value[] lis
     let table =
         { OriginalName = name
           Columns = columns
-          RowsArray = ImmutableArray.CreateRange rows
+          RowsArray = PagedVector.ofSeq rows
           NextAutoId = 1L
           Indexes = []
           ForeignKeys = []
@@ -1561,7 +1550,7 @@ let ensureMysqlSchema (store: Store) : unit =
                     "triggers"
                     { t with
                         Columns = t.Columns @ pad
-                        RowsArray = t.RowsArray |> Seq.map (fun r -> Array.append r fill) |> ImmutableArray.CreateRange }
+                        RowsArray = t.RowsArray |> Seq.map (fun r -> Array.append r fill) |> PagedVector.ofSeq }
                     dbRef.Value
 
 let create () : Store =
@@ -1877,7 +1866,7 @@ let createTableSeeded
                 let table =
                     { OriginalName = tableName
                       Columns = columns
-                      RowsArray = ImmutableArray.Empty
+                      RowsArray = PagedVector.empty
                       NextAutoId = autoIncrementSeed |> Option.defaultValue 1L
                       Indexes = indexes
                       ForeignKeys = foreignKeys
@@ -1943,7 +1932,7 @@ let truncate (store: Store) (dbName: string) (tableName: string) : Result<unit, 
         virtualWriteGuard store dbName tableName
         |> Result.bind (fun () ->
             withTable store dbName tableName (fun table ->
-                Ok(reindexTable { table with RowsArray = ImmutableArray.Empty; NextAutoId = 1L; CreateTime = DateTime.Now }, ())))
+                Ok(reindexTable { table with RowsArray = PagedVector.empty; NextAutoId = 1L; CreateTime = DateTime.Now }, ())))
 
     if result.IsOk then
         emit store (Some(SchemaChanged(dbName, Truncate tableName)))
@@ -2141,14 +2130,14 @@ let private applyAlterAction (strict: bool) (table: Table) (action: AlterAction)
             |> Result.map (fun idx ->
                 { table with
                     Columns = table.Columns |> insertAt idx colWithDefaults
-                    RowsArray = table.RowsArray |> Seq.map (fun r -> r |> Array.toList |> insertAt idx fill |> Array.ofList) |> ImmutableArray.CreateRange },
+                    RowsArray = table.RowsArray |> Seq.map (fun r -> r |> Array.toList |> insertAt idx fill |> Array.ofList) |> PagedVector.ofSeq },
                 None))
     | DropColumn name ->
         resolveColumn table.Columns name
         |> Result.map (fun idx ->
             { table with
                 Columns = table.Columns |> List.indexed |> List.filter (fun (i, _) -> i <> idx) |> List.map snd
-                RowsArray = table.RowsArray |> Seq.map (removeColumnAt idx) |> ImmutableArray.CreateRange },
+                RowsArray = table.RowsArray |> Seq.map (removeColumnAt idx) |> PagedVector.ofSeq },
             None)
     | ModifyColumn(newDef, position)
     | ChangeColumn(_, newDef, position) ->
@@ -2172,7 +2161,7 @@ let private applyAlterAction (strict: bool) (table: Table) (action: AlterAction)
                     let candidate =
                         { table with
                             Columns = columnsExcludingSelf |> insertAt newIdx newDef
-                            RowsArray = ImmutableArray.CreateRange rows }
+                            RowsArray = PagedVector.ofSeq rows }
 
                     // A narrowing re-coercion that folds two unique-key
                     // values together must fail with 1062 (MySQL errors even
@@ -2551,10 +2540,6 @@ let private insertCore
     |> Result.map (fun (acceptedRev, nextAutoId', firstAuto, lastExplicit, index) ->
         let accepted = List.rev acceptedRev
         let firstAssigned = Option.orElse lastExplicit firstAuto
-        // A single `Array.Copy`-backed append (`ImmutableArray.AddRange`),
-        // not an O(existing table size) `list` rebuild — the unique/FK
-        // checks above are already O(log n) per row; this was the last O(n)
-        // step a single-row INSERT paid.
         let table' = { table with RowsArray = table.RowsArray.AddRange accepted; NextAutoId = nextAutoId'; UniqueIndex = index }
         Map.add tableKey table' db, (Option.defaultValue 0L firstAssigned, firstAuto, List.length accepted, accepted))
 
@@ -2744,7 +2729,7 @@ and private cascadeUpdateVisitedFrom
                                                         row :: rows, chg, index)
                                                 ([], [], childTbl.UniqueIndex)
 
-                                        let d' = Map.add childKey { childTbl with RowsArray = List.rev rewritten |> ImmutableArray.CreateRange; UniqueIndex = index } d
+                                        let d' = Map.add childKey { childTbl with RowsArray = List.rev rewritten |> PagedVector.ofSeq; UniqueIndex = index } d
                                         let changes' = changes |> Map.add childKey ((changes |> Map.tryFind childKey |> Option.defaultValue []) @ List.rev rowChanges)
 
                                         List.rev rowChanges
@@ -2773,7 +2758,7 @@ and private cascadeUpdateVisitedFrom
                                                             row :: rows, chg, index)
                                                     ([], [], childTbl.UniqueIndex)
 
-                                            let d' = Map.add childKey { childTbl with RowsArray = List.rev blanked |> ImmutableArray.CreateRange; UniqueIndex = index } d
+                                            let d' = Map.add childKey { childTbl with RowsArray = List.rev blanked |> PagedVector.ofSeq; UniqueIndex = index } d
                                             let changes' = changes |> Map.add childKey ((changes |> Map.tryFind childKey |> Option.defaultValue []) @ List.rev rowChanges)
 
                                             Ok(d', visited |> Map.add childKey (alreadyVisited @ matching), changes')
@@ -3028,14 +3013,7 @@ and private upsertRowsInTable
                     rowsIn
                     |> foldWithCancellation step (Ok(table.NextAutoId, None, None, 0, [], [], table.UniqueIndex, db, Map.empty, Map.empty))
                     |> Result.map (fun (nextAutoId', firstAuto, lastExplicit, affected, inserted, updated, index, cascadeDb, _visited, cascaded) ->
-                        let finalRows =
-                            if newRows.Count = 0 then
-                                ImmutableArray.CreateRange current
-                            else
-                                let builder = ImmutableArray.CreateBuilder(current.Length + newRows.Count)
-                                builder.AddRange current
-                                builder.AddRange newRows
-                                builder.MoveToImmutable()
+                        let finalRows = Seq.append current newRows |> PagedVector.ofSeq
 
                         Map.add key { table with RowsArray = finalRows; NextAutoId = nextAutoId'; UniqueIndex = index } cascadeDb,
                         cascaded,
@@ -3098,7 +3076,7 @@ let rec private cascadeDeleteVisited
                     | None -> row :: kept, pending)
                 ([], toDelete)
 
-        Map.add tableKey (reindexTable { t with RowsArray = List.rev kept |> ImmutableArray.CreateRange }) d
+        Map.add tableKey (reindexTable { t with RowsArray = List.rev kept |> PagedVector.ofSeq }) d
 
     if toDelete.IsEmpty then
         Ok(db, visited, blanked)
@@ -3172,7 +3150,7 @@ let rec private cascadeDeleteVisited
                                         blanked
                                         |> Map.add childKey ((blanked |> Map.tryFind childKey |> Option.defaultValue []) @ List.rev changes)
 
-                                    Ok(Map.add childKey { childTbl with RowsArray = List.rev blankedRows |> ImmutableArray.CreateRange; UniqueIndex = index } d, visited, blanked)
+                                    Ok(Map.add childKey { childTbl with RowsArray = List.rev blankedRows |> PagedVector.ofSeq; UniqueIndex = index } d, visited, blanked)
                             | _ -> Error(ForeignKeyRestrict fk.Name))
 
             referencingForeignKeys db tableKey
@@ -3584,14 +3562,9 @@ let updateRows
 
 /// Per-snapshot memo of `RowsArray` as a `Value[] list`, keyed by the
 /// `Table` instance itself: `Executor`'s row pipeline is list-based and
-/// materializes every scan with `List.ofSeq`, which is free when the seq
-/// already IS a list (FSharp.Core's fast path) but an O(row count) cons
-/// rebuild per query against a bare `ImmutableArray`. Caching the list per
-/// table version restores the free path for repeated scans of an unchanged
-/// table; a write swaps in a new `Table` instance, so its entry starts
-/// fresh and the old one dies with the old snapshot (weak keys, no
-/// lifetime management needed). Thread-safe per `ConditionalWeakTable`'s
-/// own contract.
+/// materializes every scan with `List.ofSeq`. Caching avoids rebuilding
+/// the list for repeated scans of an unchanged table. Weak keys keep the
+/// cache lifetime aligned with the immutable table root.
 let private rowsListCache = System.Runtime.CompilerServices.ConditionalWeakTable<Table, Value[] list>()
 
 let private rowsList (table: Table) : Value[] list =
@@ -3656,7 +3629,7 @@ let replaceTablesForReplay (store: Store) (dbName: string) (tableName: string) (
     | true, slot ->
         match slot.Value |> Map.tryFind key with
         | None -> onMissing (sprintf "unknown table '%s.%s'" dbName tableName)
-        | Some table -> slot.Value <- slot.Value |> Map.add key { table with RowsArray = table.RowsArray |> List.ofSeq |> f |> ImmutableArray.CreateRange }
+        | Some table -> slot.Value <- slot.Value |> Map.add key { table with RowsArray = table.RowsArray |> List.ofSeq |> f |> PagedVector.ofSeq }
 
 /// Puts already-committed rows back exactly as they were, for WAL replay.
 /// Deliberately not `insertRows`: that enforces unique keys against indexes
