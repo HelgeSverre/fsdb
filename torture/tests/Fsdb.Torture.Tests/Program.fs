@@ -1,7 +1,6 @@
 module Fsdb.Torture.Tests.Program
 
 open System
-open System.Collections.Immutable
 open System.IO
 open System.Text
 open System.Text.Json
@@ -387,7 +386,7 @@ let tests =
                     let table =
                         { OriginalName = "items"
                           Columns = [ column "id" true false true ]
-                          RowsArray = ImmutableArray.CreateRange [ [| VInt 1L |]; [| VInt 2L |] ]
+                          RowsArray = Fsdb.RowStore.ofSeq [ [| VInt 1L |]; [| VInt 2L |] ]
                           NextAutoId = 3L
                           Indexes = []
                           ForeignKeys = []
@@ -405,7 +404,7 @@ let tests =
                     let table =
                         { OriginalName = "items"
                           Columns = [ column "id" true false true ]
-                          RowsArray = ImmutableArray.CreateRange [ [| VInt 1L |]; [| VInt 1L |]; [| VInt 2L; VInt 3L |] ]
+                          RowsArray = Fsdb.RowStore.ofSeq [ [| VInt 1L |]; [| VInt 1L |]; [| VInt 2L; VInt 3L |] ]
                           NextAutoId = 1L
                           Indexes = []
                           ForeignKeys = []
