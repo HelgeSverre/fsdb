@@ -263,6 +263,10 @@ let tests =
                       do! expectDenied (connStr "bob" "wrong") "wrong password"
                       do! expectDenied (connStr "nobody" "") "unknown user"
 
+                      let deniedDatabase = "denied_" + Guid.NewGuid().ToString "N"
+                      do! expectDenied (connStr "nobody" "" + ";Database=" + deniedDatabase) "unknown user with database"
+                      Expect.isFalse (Fsdb.Storage.databaseExists store deniedDatabase) "authentication precedes catalog mutation"
+
                       // A passwordless account matches real MySQL: an empty
                       // offered password connects, a non-empty one is 1045.
                       do! expectDenied (connStr "root" "anything") "passwordless account, offered password"

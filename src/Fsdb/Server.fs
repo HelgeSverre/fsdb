@@ -489,11 +489,6 @@ let private handleConnection
                 let resp = parseHandshakeResponse handshakeResp.Payload
                 // Effective capabilities: never claim something the client didn't ask for.
                 capabilities <- resp.Capabilities &&& ServerCapabilities
-                // A client that names a database at connect time (`mysql -D
-                // foo`, PDO's DSN `dbname=foo`) gets it auto-created, same
-                // as `USE` on a fresh in-memory server with no setup step.
-                resp.Database |> Option.iter (Storage.ensureDatabase store)
-
                 // Authenticate before any session state exists; on denial the
                 // 1045 is already written and the command loop below never
                 // runs (see the guard on `do! loop session` at the bottom).
@@ -527,6 +522,11 @@ let private handleConnection
                 match authOkSeq with
                 | None -> () // denied: the 1045 is already written, no OK
                 | Some okSeq ->
+                    // A successfully authenticated client that names a
+                    // database at connect time gets the same auto-create
+                    // convenience as an authenticated first write.
+                    resp.Database |> Option.iter (Storage.ensureDatabase store)
+
                     do!
                         writePacketAsync
                             stream
