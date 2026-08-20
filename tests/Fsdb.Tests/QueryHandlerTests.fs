@@ -861,7 +861,7 @@ let tests =
               | Err(1094, _) -> ()
               | other -> failtestf "expected 1094 for an unknown thread id, got %A" other
 
-          testCase "PROCESS-scoped visibility: PROCESSLIST hides other users, KILL denies with 1094, SHOW GRANTS with 1142"
+          testCase "PROCESS grants visibility while SUPER grants authority to KILL another user"
           <| fun _ ->
               let store = Fsdb.Storage.create ()
               let root = create 1 store
@@ -901,6 +901,16 @@ let tests =
                   match handle viewer "KILL 777001" |> snd with
                   | Err(1094, msg) -> Expect.equal msg "Unknown thread id: 777001" "MySQL's 1094 text"
                   | other -> failtestf "expected 1094 for another user's connection, got %A" other
+
+                  let root, granted = handle root "GRANT PROCESS ON *.* TO 'pviewer'"
+
+                  match granted with
+                  | Err(code, msg) -> failtestf "grant PROCESS: %d %s" code msg
+                  | _ -> ()
+
+                  match handle viewer "KILL 777001" |> snd with
+                  | Err(1095, msg) -> Expect.equal msg "You are not owner of thread 777001" "PROCESS grants visibility, not kill authority"
+                  | other -> failtestf "expected 1095 without SUPER, got %A" other
 
                   // Another account's grants read `mysql.user`; without SELECT
                   // there, MySQL denies with 1142 on that table.

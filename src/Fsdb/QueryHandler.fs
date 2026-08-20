@@ -1409,14 +1409,17 @@ let private runProbe (session: Session) (sql: string) (probe: Probe) : Session *
     | ShowEvents db -> session, InformationSchema.showEvents (Session.currentStore session).Catalog db |> showResult
     | ShowRoutineStatus -> session, InformationSchema.showRoutineStatus () |> showResult
     | Kill(queryOnly, id) ->
-        let privileged = Auth.hasGlobalPriv session.Store session.User "PROCESS"
+        let canSeeAll = Auth.hasGlobalPriv session.Store session.User "PROCESS"
+        let canKillAll = Auth.hasGlobalPriv session.Store session.User "SUPER"
 
         match InformationSchema.tryFindProcess id with
         // A caller without PROCESS can't see another user's connection, so
         // it can neither name nor kill it — MySQL reports the id as unknown.
-        | Some target when target.User <> session.User && not privileged ->
+        | Some target when target.User <> session.User && not canSeeAll ->
             session, Err(1094, sprintf "Unknown thread id: %d" id)
         | None -> session, Err(1094, sprintf "Unknown thread id: %d" id)
+        | Some target when target.User <> session.User && not canKillAll ->
+            session, Err(1095, sprintf "You are not owner of thread %d" id)
         | Some target ->
             if queryOnly then
                 target.CancelQuery |> Option.iter (fun cancel -> cancel ())
