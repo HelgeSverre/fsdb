@@ -860,17 +860,23 @@ module private MySqlTemporal =
         let mutable ok = s.Length > 0 && Char.IsDigit s.[0]
 
         for c in s do
-            if Char.IsDigit c then cur.Append c |> ignore
-            elif Char.IsLetter c || Char.IsWhiteSpace c || cur.Length = 0 then ok <- false
-            else
-                parts.Add(cur.ToString())
-                cur.Clear() |> ignore
+            if ok then
+                if Char.IsDigit c then
+                    if cur.Length = 4 then ok <- false else cur.Append c |> ignore
+                elif Char.IsLetter c || Char.IsWhiteSpace c || cur.Length = 0 then
+                    ok <- false
+                elif parts.Count = expected - 1 then
+                    ok <- false
+                else
+                    parts.Add(cur.ToString())
+                    cur.Clear() |> ignore
 
-        if cur.Length = 0 then ok <- false else parts.Add(cur.ToString())
+        if ok then
+            if cur.Length = 0 then ok <- false else parts.Add(cur.ToString())
 
         // No temporal component is wider than four digits, so a longer run is
         // malformed rather than an overflow waiting to happen in `int`.
-        if ok && parts.Count = expected && parts |> Seq.forall (fun p -> p.Length <= 4) then
+        if ok && parts.Count = expected then
             Some(parts.ToArray())
         else
             None
