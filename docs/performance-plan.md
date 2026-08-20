@@ -43,14 +43,13 @@ pattern.
 | 5 — WAL group commit | **dropped** — obsolete |
 | 6 — strategic ceiling | not planned (by design) |
 
-**Phase 5 is obsolete.** Two findings invalidate it: the per-database write
-gate (`SemaphoreSlim` per database) serializes commits *before* the WAL ever
-sees them, so there is nothing to batch — and the ~5 ms per-commit fsync it
-was written against was itself an artifact (.NET's `FileStream.Flush(true)`
-issues `F_FULLFSYNC` on macOS). That is now a plain libc `fsync` (~16 µs), so
-`--data-dir` writes are already near MySQL parity on point writes. The real
-concurrency lever — lifting the write gate via row versioning/MVCC — is larger
-than everything here and lives in its own investigation, not this plan.
+**Phase 5 is obsolete.** The ~5 ms per-commit fsync it was written against was
+an artifact: .NET's `FileStream.Flush(true)` issues `F_FULLFSYNC` on macOS.
+That is now a plain libc `fsync` (~16 µs), so `--data-dir` writes are already
+near MySQL parity on point writes. Row storage now uses immutable fixed-size
+pages and stable identities; indexed updates prepare under row stripes and
+publish through a short database-slot critical section. Full-scan and
+structural writes retain the database gate.
 
 **Phase 3 is re-scoped.** Its original premise — that the join is dominated by
 `Array.append` over ~50k matched pairs — is stale: the hash join already yields
@@ -66,9 +65,11 @@ The join's remaining gap is broad per-row interpretation overhead, not a
 fixable hotspot — Phase 4 (`[<Struct>] Value`) was tried against it and
 regressed (see below), so that overhead stands as the documented floor.
 
-**Done since writing** (persistence, outside these phases): the WAL and
-snapshot are binary (no JSON) with CRC torn-tail detection, and the snapshot
-streams past the 2 GB `byte[]` ceiling.
+**Done since writing:** the WAL and snapshot are binary (no JSON) with CRC
+torn-tail detection, and the snapshot streams past the 2 GB `byte[]` ceiling.
+The row heap uses immutable pages with stable identities, making point writes
+independent of table size while preserving snapshot roots through structural
+sharing.
 
 **Next:** nothing scheduled. Phase 4 was the last planned item and it
 regressed (see below); the remaining gap is per-row interpretation overhead

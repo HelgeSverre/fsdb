@@ -347,6 +347,28 @@ let tests =
               | ResultSet(_, [ [ Some "A" ] ]) -> ()
               | result -> failtestf "expected only the first key to remain, got %A" result
 
+          testCase "concurrent transactions cannot commit the same primary key"
+          <| fun _ ->
+              let store = Fsdb.Storage.create ()
+              let setup = create 1 store
+              let setup, _ = handle setup "CREATE TABLE tx_unique (id INT PRIMARY KEY)"
+              let first, _ = handle (create 2 store) "BEGIN"
+              let second, _ = handle (create 3 store) "BEGIN"
+              let first, firstInsert = handle first "INSERT INTO tx_unique VALUES (1)"
+              let second, secondInsert = handle second "INSERT INTO tx_unique VALUES (1)"
+
+              Expect.equal firstInsert (Affected 1UL) "the first snapshot accepts the key"
+              Expect.equal secondInsert (Affected 1UL) "the second snapshot accepts the key"
+              Expect.equal (handle first "COMMIT" |> snd) (Affected 0UL) "the first transaction commits"
+
+              match handle second "COMMIT" |> snd with
+              | Err(1205, _) -> ()
+              | result -> failtestf "expected the conflicting commit to fail, got %A" result
+
+              match handle setup "SELECT id FROM tx_unique" |> snd with
+              | ResultSet(_, [ [ Some "1" ] ]) -> ()
+              | result -> failtestf "expected one committed primary key, got %A" result
+
           testCase "ROLLBACK does not roll back an AUTO_INCREMENT counter, matching MySQL"
           <| fun _ ->
               let session = create 1 (Fsdb.Storage.create ())

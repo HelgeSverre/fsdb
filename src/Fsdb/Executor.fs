@@ -3915,7 +3915,7 @@ and private pointLookupEqualities (tref: TableRef) (whereExpr: Expr option) : (s
             | BinOp(Eq, Lit v, QualifiedCol(q, n)) when System.String.Equals(q, selfQualifier, System.StringComparison.OrdinalIgnoreCase) -> Some(n, v)
             | _ -> None)
 
-and private tryPointLookup (store: Store) (dbName: string) (tref: TableRef) (whereExpr: Expr option) : (ColumnDef list * (int * Value[]) list) option =
+and private tryPointLookup (store: Store) (dbName: string) (tref: TableRef) (whereExpr: Expr option) : (ColumnDef list * (RowId * Value[]) list) option =
     let tableDb = tref.Database |> Option.defaultValue dbName
 
     pointLookupEqualities tref whereExpr
@@ -8516,7 +8516,7 @@ let rec execute (store: Store) (registry: Registry) (dbName: string) (ids: int64
         // match, so `selectMutationTargets` below still runs the complete,
         // unmodified WHERE over whatever this produces; a miss (no such
         // index, a non-literal operand, ...) falls back to the ordinary
-        // full scan, never a correctness risk. `narrowed`'s positions are
+        // full scan, never a correctness risk. `narrowed`'s row identities are
         // threaded into `Storage.updateRows` below too, so a narrowed
         // `UPDATE` never walks the rest of `table.Rows` at all — not just
         // the WHERE evaluation, but the rewrite fold itself.
@@ -8556,7 +8556,10 @@ let rec execute (store: Store) (registry: Registry) (dbName: string) (ids: int64
                     | Error(code, message) -> ids, Err(code, message)
                     | Ok targetRows ->
                         let targetSet = referenceSet targetRows
-                        let predicate row = Ok(targetSet.Contains row)
+                        let predicate row =
+                            match narrowed with
+                            | Some _ -> check row |> Result.mapError ExpressionError
+                            | None -> Ok(targetSet.Contains row)
                         let assignedIdxs = indexedAssignments |> List.map fst |> Set.ofList
 
                         let updater row =

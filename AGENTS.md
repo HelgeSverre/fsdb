@@ -61,16 +61,18 @@ build fails with "not defined".
   never emoji markers.
 - The justfile resolves `mysql`/`mysqld`/`mysqladmin` from PATH (MySQL 8.4 —
   homebrew's keg-only `/opt/homebrew/opt/mysql@8.4/bin` is the usual source).
-  Benchmarks refuse to run if anything is listening on 3307, and spin up
-  throwaway mysqld on 3316/3317 (ad hoc, no brew services).
+  Benchmarks refuse to share their fsdb port (3307 by default, override with
+  `FSDB_BENCH_PORT`), and spin up throwaway mysqld on 3316/3317 (ad hoc, no
+  brew services).
 - Persistence is opt-in via `--data-dir` (WAL + snapshot); default in-memory.
   Both halves are binary, no JSON: WAL `wal.bin` = `[len][crc32]` records over
   `CommitEvent` payloads (CRC torn-tail detection); snapshot `snapshot.fsdb` =
   self-delimiting binary tree. fsync via libc — `FileStream.Flush(true)` issues
   `F_FULLFSYNC` on macOS (~5 ms per call) and diverges from MySQL's own macOS
   durability semantics.
-- Known perf floor: writes copy `Table.RowsArray` (`ImmutableArray<Value[]>`;
-  `Table.Rows` is a plain-list copy of it) O(table) per statement — a
-  documented, deferred "Large" change; the snapshot/transaction model leans on
-  that immutability.
+- Stored rows have stable, non-reused `RowId`s in fixed-size immutable pages.
+  Point writes copy only touched pages; tombstones keep other identities
+  stable, and ordinary .NET reachability retains pages used by snapshots.
+  Indexed updates lock row stripes while full-scan writes and structural
+  changes retain the per-database publication gate.
 - Keep `.slnx` (new XML solution format), not `.sln`.

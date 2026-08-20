@@ -186,8 +186,9 @@ bench-mysql-stop-nofsync:
 _bench-run *ARGS: bench-mysql-start
     #!/usr/bin/env bash
     set -euo pipefail
-    if {{ MYSQL }} --protocol=tcp -h127.0.0.1 -P{{ PORT }} -uroot -e 'SELECT 1' &>/dev/null; then
-        echo "error: something is already listening on port {{ PORT }} — stop it first, benchmarking against a shared server would corrupt both" >&2
+    fsdb_bench_port="${FSDB_BENCH_PORT:-{{ PORT }}}"
+    if {{ MYSQL }} --protocol=tcp -h127.0.0.1 -P"$fsdb_bench_port" -uroot -e 'SELECT 1' &>/dev/null; then
+        echo "error: something is already listening on port $fsdb_bench_port — stop it first, benchmarking against a shared server would corrupt both" >&2
         exit 1
     fi
     trap 'just bench-mysql-stop' EXIT
@@ -203,8 +204,9 @@ _bench-run *ARGS: bench-mysql-start
 _bench-durable-run *ARGS: bench-mysql-start bench-mysql-start-nofsync
     #!/usr/bin/env bash
     set -euo pipefail
-    if {{ MYSQL }} --protocol=tcp -h127.0.0.1 -P{{ PORT }} -uroot -e 'SELECT 1' &>/dev/null; then
-        echo "error: something is already listening on port {{ PORT }} — stop it first, benchmarking against a shared server would corrupt both" >&2
+    fsdb_bench_port="${FSDB_BENCH_PORT:-{{ PORT }}}"
+    if {{ MYSQL }} --protocol=tcp -h127.0.0.1 -P"$fsdb_bench_port" -uroot -e 'SELECT 1' &>/dev/null; then
+        echo "error: something is already listening on port $fsdb_bench_port — stop it first, benchmarking against a shared server would corrupt both" >&2
         exit 1
     fi
     trap 'just bench-mysql-stop; just bench-mysql-stop-nofsync' EXIT

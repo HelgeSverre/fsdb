@@ -17,6 +17,8 @@
     <Compile Include="ColumnWire.fs" />
     <Compile Include="Parser.fs" />
     <Compile Include="Functions.fs" />
+    <Compile Include="PagedVector.fs" />
+    <Compile Include="RowStore.fs" />
     <Compile Include="Storage.fs" />
     <Compile Include="Auth.fs" />
     <Compile Include="Persistence.fs" />

@@ -1,6 +1,7 @@
 module Fsdb.Tests.StorageTests
 
 open Expecto
+open Fsdb
 open Fsdb.Ast
 open Fsdb.Value
 open Fsdb.Storage
@@ -801,7 +802,7 @@ let tests =
                     | Error(NotNullViolation "name") -> ()
                     | other -> failtestf "expected NotNullViolation, got %A" other
 
-                testCase "updateRows re-validates a stale candidate position instead of clobbering whatever row now sits there"
+                testCase "a point-update candidate keeps its row identity after an earlier row is deleted"
                 <| fun _ ->
                     let store = withUsersTable ()
 
@@ -814,31 +815,18 @@ let tests =
                           [ VNull; VString "bob"; VInt 25L ] ]
                     |> ignore
 
-                    // Simulate `Executor.tryPointLookup`'s lock-free read:
-                    // capture bob's `(position, row)` up front, the exact
-                    // shape `candidates` takes — `scan` hands back the
-                    // store's own row arrays, not copies, so `staleRow`
-                    // below is reference-identical to what's still sitting
-                    // in the table.
-                    let stalePos, staleRow =
-                        match scan store defaultDatabase "users" with
-                        | Ok(_, rows) ->
-                            rows |> Seq.toList |> List.indexed |> List.find (fun (_, r) -> r.[1] = VString "bob")
-                        | Error e -> failtestf "expected Ok, got %A" e
+                    let staleRowId, staleRow =
+                        match tryUniqueLookup store defaultDatabase "users" "id" (VInt 2L) with
+                        | Some(_, [ candidate ]) -> candidate
+                        | other -> failtestf "expected bob's indexed row, got %A" other
 
-                    Expect.equal stalePos 1 "bob starts at position 1"
-
-                    // A concurrent DELETE of the earlier row (alice)
-                    // compacts bob down from position 1 to position 0 —
-                    // `stalePos` still says 1, and blindly trusting it would
-                    // index past the now-1-row table.
                     deleteRows store defaultDatabase "users" (fun row -> Ok(row.[1] = VString "alice")) |> ignore
 
                     let updater (row: Value[]) = Ok [| row.[0]; row.[1]; VInt 99L |]
 
-                    match updateRows store defaultDatabase "users" (Some [ stalePos, staleRow ]) (fun _ -> Ok true) updater with
+                    match updateRows store defaultDatabase "users" (Some [ staleRowId, staleRow ]) (fun _ -> Ok true) updater with
                     | Ok affected ->
-                        Expect.equal affected 1 "bob, re-located by identity, still gets updated"
+                        Expect.equal affected 1 "bob still gets updated"
 
                         match scan store defaultDatabase "users" with
                         | Ok(_, rows) ->
@@ -919,9 +907,9 @@ let tests =
 
                 testCase "a no-op UPDATE that writes a row's PRIMARY KEY back to its own value never collides with itself"
                 <| fun _ ->
-                    // `UniqueIndex` now maps a key to the row's *position* in
-                    // `Rows`, and `updateRows`'s collision check excludes the
-                    // row being rewritten by that position — this guards
+                    // `UniqueIndex` maps a key to the row's stable identity,
+                    // and `updateRows`'s collision check excludes the row
+                    // being rewritten by that identity — this guards
                     // against a regression back to excluding by structural
                     // equality (`existing <> row`), which any no-op or a
                     // row-position mixup could silently break.
@@ -945,11 +933,6 @@ let tests =
 
                 testCase "insertion order survives an INSERT/UPDATE/DELETE/INSERT interleaving"
                 <| fun _ ->
-                    // `Rows`' scan order is its insertion order; a `DELETE`
-                    // compacts (shifting every later row down a slot) and a
-                    // later `INSERT` appends past the end — this exercises
-                    // both to guard the array-backed `Rows`' ordering
-                    // against an off-by-one in either.
                     let store = withUsersTable ()
 
                     insertRows
@@ -2375,6 +2358,138 @@ let tests =
                         | [ row ] -> Expect.equal (asInt row.[0]) (int64 (threadCount * incrementsPerThread)) "every increment landed, none lost to a race"
                         | other -> failtestf "expected exactly one row, got %A" other
                     | Error e -> failtestf "expected Ok, got %A" e ]
+
+          testList
+              "row write concurrency"
+              [ testCase "indexed updates to distinct rows execute concurrently"
+                <| fun _ ->
+                    let store = withUsersTable ()
+
+                    insertRows
+                        store
+                        defaultDatabase
+                        "users"
+                        None
+                        [ [ VNull; VString "alice"; VInt 30L ]
+                          [ VNull; VString "bob"; VInt 40L ] ]
+                    |> ignore
+
+                    let candidate id =
+                        match tryUniqueLookup store defaultDatabase "users" "id" (VInt id) with
+                        | Some(_, [ row ]) -> row
+                        | other -> failtestf "expected an indexed row, got %A" other
+
+                    use bothEntered = new System.Threading.ManualResetEventSlim(false)
+                    let mutable entered = 0
+
+                    let update indexedRow =
+                        updateRows
+                            store
+                            defaultDatabase
+                            "users"
+                            (Some [ indexedRow ])
+                            (fun _ -> Ok true)
+                            (fun row ->
+                                if System.Threading.Interlocked.Increment(&entered) = 2 then
+                                    bothEntered.Set()
+
+                                if not (bothEntered.Wait(System.TimeSpan.FromSeconds 5.0)) then
+                                    failtest "distinct row updates did not overlap"
+
+                                Ok [| row.[0]; row.[1]; VInt 99L |])
+
+                    let first = System.Threading.Tasks.Task.Run(fun () -> update (candidate 1L))
+                    let second = System.Threading.Tasks.Task.Run(fun () -> update (candidate 2L))
+                    System.Threading.Tasks.Task.WaitAll [| first :> System.Threading.Tasks.Task; second :> System.Threading.Tasks.Task |]
+                    Expect.equal first.Result (Ok 1) "the first row changed"
+                    Expect.equal second.Result (Ok 1) "the second row changed"
+
+                testCase "indexed updates to the same row observe the preceding write"
+                <| fun _ ->
+                    let store = withUsersTable ()
+
+                    insertRows store defaultDatabase "users" None [ [ VInt 1L; VString "alice"; VInt 0L ] ]
+                    |> ignore
+
+                    let candidate =
+                        match tryUniqueLookup store defaultDatabase "users" "id" (VInt 1L) with
+                        | Some(_, [ row ]) -> row
+                        | other -> failtestf "expected an indexed row, got %A" other
+
+                    use start = new System.Threading.ManualResetEventSlim(false)
+
+                    let asInt =
+                        function
+                        | VInt value -> value
+                        | value -> failtestf "expected an integer, got %A" value
+
+                    let increment () =
+                        start.Wait()
+
+                        updateRows
+                            store
+                            defaultDatabase
+                            "users"
+                            (Some [ candidate ])
+                            (fun _ -> Ok true)
+                            (fun row -> Ok [| row.[0]; row.[1]; VInt(asInt row.[2] + 1L) |])
+
+                    let first = System.Threading.Tasks.Task.Run increment
+                    let second = System.Threading.Tasks.Task.Run increment
+                    start.Set()
+                    System.Threading.Tasks.Task.WaitAll [| first :> System.Threading.Tasks.Task; second :> System.Threading.Tasks.Task |]
+                    Expect.equal first.Result (Ok 1) "the first increment changed the row"
+                    Expect.equal second.Result (Ok 1) "the second increment changed the row"
+
+                    match scan store defaultDatabase "users" with
+                    | Ok(_, rows) ->
+                        let age = rows |> Seq.exactlyOne |> fun row -> row.[2]
+                        Expect.equal age (VInt 2L) "both increments are visible"
+                    | Error error -> failtestf "expected Ok, got %A" error ]
+
+          testList
+              "paged vector"
+              [ testCase "updates preserve earlier snapshots across page boundaries"
+                <| fun _ ->
+                    let original = PagedVector.ofSeq [ 0 .. 599 ]
+                    let builder = original.ToBuilder()
+                    builder.[0] <- -1
+                    builder.[255] <- -2
+                    builder.[256] <- -3
+                    builder.[599] <- -4
+                    builder.Add 600
+                    let updated = builder.DrainToImmutable()
+
+                    Expect.sequenceEqual original [ 0 .. 599 ] "published pages remain unchanged"
+                    Expect.equal updated.[0] -1 "first page changed"
+                    Expect.equal updated.[255] -2 "first page boundary changed"
+                    Expect.equal updated.[256] -3 "second page changed"
+                    Expect.equal updated.[599] -4 "last existing value changed"
+                    Expect.equal updated.[600] 600 "append crosses the final page"
+                    Expect.throws (fun () -> builder.[0] <- 42) "a drained builder cannot mutate published pages"
+
+                testCase "empty vectors enumerate no values"
+                <| fun _ ->
+                    let rows = PagedVector.empty<int>
+                    Expect.isEmpty (List.ofSeq rows) "empty vector" ]
+
+          testList
+              "row store"
+              [ testCase "deletion preserves surviving identities and scan order"
+                <| fun _ ->
+                    let original = RowStore.ofSeq [ "a"; "b"; "c" ]
+                    let indexed = List.ofSeq original.Indexed
+                    let aId, _ = indexed.[0]
+                    let bId, _ = indexed.[1]
+                    let cId, _ = indexed.[2]
+                    let afterDelete = original.Remove bId
+                    let dId, updated = afterDelete.Append "d"
+
+                    Expect.sequenceEqual original [ "a"; "b"; "c" ] "the original snapshot remains visible"
+                    Expect.sequenceEqual updated [ "a"; "c"; "d" ] "tombstones are absent from scans"
+                    Expect.equal updated.[aId] "a" "the first row keeps its identity"
+                    Expect.equal updated.[cId] "c" "the last surviving row keeps its identity"
+                    Expect.notEqual dId bId "deleted identities are not reused" ]
 
           testList
               "performance canary"
