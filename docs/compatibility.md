@@ -96,10 +96,12 @@ Three deliberate divergences from stock MySQL:
   hours earlier. Set `wait_timeout` in a defaults file to restore MySQL's
   value. `interactive_timeout` mirrors it because fsdb ignores
   `CLIENT_INTERACTIVE` at handshake.
-- **Settings are startup-scoped.** `SET GLOBAL max_connections = N` is
-  accepted and shows up in `SHOW GLOBAL VARIABLES`, but the running server
-  keeps the value it started with; likewise `max_allowed_packet` is
-  process-wide, not per session.
+
+`SET GLOBAL` updates the live limits used by later accepts, packet reads,
+idle waits, transaction conflict waits, and recursive CTEs. Session-scoped
+`wait_timeout`, `innodb_lock_wait_timeout`, and `cte_max_recursion_depth` are
+honoured; process-wide `max_connections` and `max_allowed_packet` reject a
+session-scoped `SET`.
 
 ## Users, authentication, and privileges
 

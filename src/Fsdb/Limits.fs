@@ -10,13 +10,9 @@
 /// ceiling purely because `Functions` compiles first and couldn't see
 /// `Packet`'s.
 ///
-/// Every `mutable` here is written at most once, by `Program`'s config
-/// parsing, before the listener exists — so a reader either runs before any
-/// connection was possible or sees the final value. Nothing rewrites one
-/// mid-flight. ponytail: startup-scoped, so `SET GLOBAL max_connections`
-/// lands in the session layer's override map and shows up in SHOW GLOBAL
-/// VARIABLES while the running server keeps its startup value; making a knob
-/// live means resizing a semaphore under load for a knob nobody has needed.
+/// The mutable integer knobs may change while connections are live. Reads and
+/// writes are atomic; a command already waiting keeps the value it captured,
+/// while the next command observes the new setting.
 module Fsdb.Limits
 
 open System
@@ -29,11 +25,9 @@ open System
 /// statements — a large blob as a hex literal — before ever sending them.
 let mutable maxAllowedPacket = 64 * 1024 * 1024
 
-/// Ceiling on concurrently handled connections — past this, `Server.serve`
-/// stops calling `AcceptTcpClientAsync` until a slot frees, so excess
-/// attempts queue at the OS socket backlog (or get refused) instead of each
-/// one costing this process a thread-pool task and a read buffer's worth of
-/// memory pressure.
+/// Ceiling on concurrently handled connections. `Server.serve` reads it
+/// after every accept, so a runtime raise or reduction applies to the next
+/// connection without resizing a semaphore.
 let mutable maxConnections = 500
 
 /// Idle timeout waiting for the *next* command packet — `wait_timeout`'s
@@ -179,12 +173,11 @@ let private normalizeName (name: string) = name.Trim().Replace('-', '_').ToLower
 let private isKnownSetting (name: string) : bool =
     knobs |> List.exists (fun k -> k.Name = normalizeName name)
 
-/// Sets one knob by its MySQL system-variable name, accepting `-` for `_`
-/// the way my.cnf does. An unknown name, an unparseable value, or one
-/// outside the accepted range is an `Error` the caller is expected to
-/// surface and exit on — never a silent no-op, because a typo'd knob that
-/// quietly does nothing is a production surprise found months later.
-let applySetting (name: string) (value: string) : Result<unit, string> =
+let isReportableSetting (name: string) : bool =
+    let name = normalizeName name
+    knobs |> List.exists (fun knob -> knob.Name = name && knob.Reportable)
+
+let private validatedSetting (name: string) (value: string) : Result<Knob * int64, string> =
     let name = normalizeName name
 
     match knobs |> List.tryFind (fun k -> k.Name = name) with
@@ -200,9 +193,19 @@ let applySetting (name: string) (value: string) : Result<unit, string> =
         | None -> Error(sprintf "%s: '%s' is not a number (digits, optionally suffixed K, M or G)" name value)
         | Some n when n < knob.Min || n > knob.Max ->
             Error(sprintf "%s: %d is out of range %d..%d" name n knob.Min knob.Max)
-        | Some n ->
-            knob.Set n
-            Ok()
+        | Some n -> Ok(knob, n)
+
+let validateSetting (name: string) (value: string) : Result<unit, string> =
+    validatedSetting name value |> Result.map ignore
+
+/// Sets one knob by its MySQL system-variable name, accepting `-` for `_`
+/// the way my.cnf does. An unknown name, an unparseable value, or one
+/// outside the accepted range is an `Error` the caller is expected to
+/// surface and exit on — never a silent no-op, because a typo'd knob that
+/// quietly does nothing is a production surprise found months later.
+let applySetting (name: string) (value: string) : Result<unit, string> =
+    validatedSetting name value
+    |> Result.map (fun (knob, value) -> knob.Set value)
 
 /// Every reportable knob's live value, for SHOW VARIABLES and `SELECT @@x`.
 /// `interactive_timeout` mirrors `wait_timeout` because fsdb ignores

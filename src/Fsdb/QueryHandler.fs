@@ -591,6 +591,8 @@ type private SetAction =
 /// way. Grows as real clients ask for more.
 let private nullableSystemVars = Set.ofList [ "character_set_results" ]
 
+let private globalOnlyLimitVariables = Set.ofList [ "max_allowed_packet"; "max_connections" ]
+
 /// Parses one comma-split fragment into the variable(s) it would assign,
 /// without touching `session`/`Store` — `handleSet` only applies any of
 /// these once every fragment in the statement has parsed. Reads `session`
@@ -688,7 +690,10 @@ let private applySetAction (session: Session) (action: SetAction) : Session =
         // `foreign_key_checks`/`sql_mode`/`collation_connection` are
         // inherently per-session state, not something a GLOBAL write should
         // reach into this connection's own mutable cells to flip.
-        Session.setGlobalVariable session.Store name value
+        match value with
+        | Some value when Limits.isReportableSetting name -> Limits.applySetting name value |> ignore
+        | _ -> Session.setGlobalVariable session.Store name value
+
         session
     | SetVarAction(name, value, false) ->
         // Neither `foreign_key_checks` nor `sql_mode` is in
@@ -711,6 +716,14 @@ let private applySetAction (session: Session) (action: SetAction) : Session =
         { session with Variables = Map.add name value session.Variables }
     | SetUserVarAction(name, value) -> { session with UserVariables = Map.add name value session.UserVariables }
 
+let private validateSetAction (action: SetAction) : Result<unit, QueryResult> =
+    match action with
+    | SetVarAction(name, Some value, true) when Limits.isReportableSetting name ->
+        Limits.validateSetting name value |> Result.mapError (fun message -> Err(1232, message))
+    | SetVarAction(name, _, false) when globalOnlyLimitVariables.Contains name ->
+        Error(Err(1229, sprintf "Variable '%s' is a GLOBAL variable and should be set with SET GLOBAL" name))
+    | _ -> Ok()
+
 /// `SET NAMES x`, `SET [SESSION|@@session.]var = value`, and `SET @var =
 /// value` update `Session.Variables`/`Session.UserVariables` so a later
 /// `SELECT @@var`/`SELECT @var`/`SHOW VARIABLES` reflects them, one
@@ -724,7 +737,10 @@ let private applySetAction (session: Session) (action: SetAction) : Session =
 let private handleSet (session: Session) (sql: string) : Session * QueryResult =
     match splitSetAssignments sql |> traverse (parseSetFragment sql session) with
     | Error result -> session, result
-    | Ok actions -> (actions |> List.fold applySetAction session), Affected 0UL
+    | Ok actions ->
+        match actions |> traverse validateSetAction with
+        | Error result -> session, result
+        | Ok _ -> (actions |> List.fold applySetAction session), Affected 0UL
 
 // ---------------------------------------------------------------------------
 // Transactions: BEGIN/COMMIT/ROLLBACK, SET autocommit, SAVEPOINT. Matched by

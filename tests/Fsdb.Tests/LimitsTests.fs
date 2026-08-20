@@ -267,6 +267,38 @@ let tests =
                   | ResultSet(_, [ [ Some "77" ] ]) -> ()
                   | other -> failtestf "expected GLOBAL to still read the configured limit, got %A" other)
 
+          testCase "SET GLOBAL applies live limits and rejects an invalid batch atomically"
+          <| fun _ ->
+              withSettings [] (fun () ->
+                  let store = Fsdb.Storage.create ()
+                  let session = create 1 store
+                  let session, setResult = handle session "SET GLOBAL max_connections = 17"
+                  Expect.equal setResult (Affected 0UL) "the runtime limit is accepted"
+                  Expect.equal maxConnections 17 "the server-facing knob changed"
+
+                  match handle session "SELECT @@GLOBAL.max_connections" |> snd with
+                  | ResultSet(_, [ [ Some "17" ] ]) -> ()
+                  | other -> failtestf "expected the live global value, got %A" other
+
+                  let _, badResult = handle session "SET GLOBAL max_connections = 19, @@GLOBAL.max_allowed_packet = 512"
+
+                  match badResult with
+                  | Err(1232, _) -> ()
+                  | other -> failtestf "expected an invalid limit value to be rejected, got %A" other
+
+                  Expect.equal maxConnections 17 "the valid assignment was not partially applied")
+
+          testCase "global-only limits reject session SET instead of advertising a local change"
+          <| fun _ ->
+              withSettings [] (fun () ->
+                  let session = create 1 (Fsdb.Storage.create ())
+
+                  match handle session "SET SESSION max_connections = 17" |> snd with
+                  | Err(1229, message) -> Expect.stringContains message "GLOBAL variable" "the required scope is clear"
+                  | other -> failtestf "expected SET SESSION max_connections to fail, got %A" other
+
+                  Expect.notEqual maxConnections 17 "the rejected SET did not change the live cap")
+
           // `max_allowed_packet` is what the wire actually enforces
           // (`Packet.readPacketAsync`), so a client that reads the variable
           // and a client that gets 1153'd must see the same number. Two

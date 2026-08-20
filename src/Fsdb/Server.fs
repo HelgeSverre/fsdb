@@ -338,8 +338,16 @@ let readPacketWithTimeoutMs (timeoutMs: int) (client: TcpClient) (stream: IO.Str
             timerCts.Dispose()
     }
 
-let private readPacketWithTimeout (client: TcpClient) (stream: IO.Stream) : Async<Packet option> =
-    readPacketWithTimeoutMs (Limits.waitTimeoutSeconds * 1000) client stream
+let private readPacketWithTimeoutSeconds (timeoutSeconds: int) (client: TcpClient) (stream: IO.Stream) : Async<Packet option> =
+    readPacketWithTimeoutMs (timeoutSeconds * 1000) client stream
+
+let private sessionWaitTimeout (session: Session) =
+    match session.Variables |> Map.tryFind "wait_timeout" |> Option.flatten with
+    | Some value ->
+        match Int32.TryParse value with
+        | true, seconds -> seconds
+        | _ -> Limits.waitTimeoutSeconds
+    | None -> Limits.waitTimeoutSeconds
 
 /// Polls `client`'s socket while a query runs, cancelling `queryCts` the
 /// moment the peer is gone — the only way to notice a disconnect while
@@ -454,7 +462,7 @@ let private authenticateHandshake
                 // redo the same scramble with mysql_native_password.
                 do! writePacketAsync stream { SeqId = firstSeq; Payload = authSwitchPayload authData } |> Async.Ignore
 
-                match! readPacketWithTimeout client stream with
+                match! readPacketWithTimeoutSeconds Limits.waitTimeoutSeconds client stream with
                 | None -> return None // client gave up; nothing to reply to
                 | Some switchResp when Auth.verifyNative stored authData switchResp.Payload ->
                     return Some(switchResp.SeqId + 1uy)
@@ -511,7 +519,7 @@ let private handleConnection
                 writePacketAsync stream { SeqId = 0uy; Payload = buildHandshakeV10 connectionId authData }
                 |> Async.Ignore
 
-            match! readPacketWithTimeout client stream with
+            match! readPacketWithTimeoutSeconds Limits.waitTimeoutSeconds client stream with
             | None -> ()
             | Some handshakeResp ->
                 let resp = parseHandshakeResponse handshakeResp.Payload
@@ -583,7 +591,7 @@ let private handleConnection
                     async {
                         activeSession <- Some session
 
-                        match! readPacketWithTimeout client stream with
+                        match! readPacketWithTimeoutSeconds (sessionWaitTimeout session) client stream with
                         | None -> ()
                         | Some cmdPacket ->
                             let seqId = cmdPacket.SeqId + 1uy
