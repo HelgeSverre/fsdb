@@ -35,6 +35,32 @@ let tests =
                       | Error _ -> ()
                       | Ok() -> failtestf "expected '%s' to be rejected, but it set the knob" value)
 
+          // An unchecked suffix multiply wraps, and the wrapped result can
+          // land back inside the accepted range: 18014398509483008K is
+          // 2^64 + 1 MiB, so it wraps to exactly 1 MiB and would be applied
+          // as if that were the value asked for. The range check alone does
+          // not catch it — only the wraps-to-negative cases fail that way.
+          testCase "a size that overflows its suffix multiply is rejected, not wrapped into range"
+          <| fun _ ->
+              withSettings [] (fun () ->
+                  for value in [ "18014398509483008K"; "9999999999G"; "9223372036854775807K" ] do
+                      match applySetting "max_allowed_packet" value with
+                      | Error _ -> ()
+                      | Ok() -> failtestf "expected '%s' to overflow and be rejected, got %d" value maxAllowedPacket
+
+                  Expect.equal maxAllowedPacket (64 * 1024 * 1024) "the knob is untouched by a rejected value")
+
+          testCase "withSettings restores what it applied even when a later setting in the same call is bad"
+          <| fun _ ->
+              let before = maxConnections
+
+              try
+                  withSettings [ "max_connections", "7"; "not_a_setting", "1" ] id
+              with _ ->
+                  ()
+
+              Expect.equal maxConnections before "the first setting was rolled back, not left applied"
+
           testCase "an unknown setting names itself and lists what is known"
           <| fun _ ->
               match applySetting "max_connektions" "5" with

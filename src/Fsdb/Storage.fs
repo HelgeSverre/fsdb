@@ -422,7 +422,15 @@ let enterTransactionGate (store: Store) (dbName: string) (timeout: TimeSpan) : I
 
     new TransactionGateLease(gate) :> IDisposable
 
-/// Tests whether a database still matches a transaction's base snapshot.
+/// Whether `dbName`'s live contents are still the very object `baseCatalog`
+/// snapshotted. Every write swaps a database's slot for a brand new `Map`,
+/// so reference identity answers "has anyone committed here since" in O(1)
+/// where a structural comparison would walk every row.
+///
+/// `QueryHandler` asks when a transaction that has so far only *read* picks
+/// up a write gate: its snapshot predates that gate, so a writer could have
+/// landed in between, and merging the stale snapshot over that writer's row
+/// is a lost update (see `mergeDatabaseSlot`).
 let databaseUnchangedSince (store: Store) (baseCatalog: Catalog) (dbName: string) : bool =
     let live =
         match store.Databases.TryGetValue dbName with
@@ -3676,7 +3684,15 @@ let replaceTablesForReplay (store: Store) (dbName: string) (tableName: string) (
         | None -> onMissing (sprintf "unknown table '%s.%s'" dbName tableName)
         | Some table -> slot.Value <- slot.Value |> Map.add key { table with RowsArray = table.RowsArray |> List.ofSeq |> f |> ImmutableArray.CreateRange }
 
-/// Restores committed rows while WAL indexes are stale.
+/// Puts already-committed rows back exactly as they were, for WAL replay.
+/// Deliberately not `insertRows`: that enforces unique keys against indexes
+/// `load` leaves stale until the whole WAL has been applied, so an INSERT
+/// reusing a primary key an earlier DELETE freed replays as a duplicate-key
+/// warning and the row is lost. These rows were accepted once already;
+/// re-adjudicating them is the bug, not the safeguard.
+///
+/// Carries `NextAutoId` past anything the replayed rows used, so a later
+/// insert can't reissue an id the WAL already handed out.
 let appendRowsForReplay (store: Store) (dbName: string) (tableName: string) (rows: Value[] list) (onMissing: string -> unit) : unit =
     let key = normalizeTableName tableName
 

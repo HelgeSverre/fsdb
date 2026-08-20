@@ -160,7 +160,14 @@ let private parseSize (text: string) : int64 option =
                 text
 
         match Int64.TryParse digits with
-        | true, n -> Some(n * defaultArg multiplier 1L)
+        | true, n ->
+            // Checked: an unchecked multiply wraps, and the wrapped result
+            // can land back inside a knob's range, so `18014398509483008K`
+            // (2^64 + 1 MiB) would be accepted as 1 MiB rather than refused.
+            try
+                Some(Checked.(*) n (defaultArg multiplier 1L))
+            with :? OverflowException ->
+                None
         | _ -> None
 
 /// my.cnf treats `-` and `_` in an option name as the same character, and
@@ -169,7 +176,7 @@ let private normalizeName (name: string) = name.Trim().Replace('-', '_').ToLower
 
 /// Whether `name` is a knob at all — the question `loose-` asks, since that
 /// prefix suppresses an unknown option but not a bad value for a known one.
-let isKnownSetting (name: string) : bool =
+let private isKnownSetting (name: string) : bool =
     knobs |> List.exists (fun k -> k.Name = normalizeName name)
 
 /// Sets one knob by its MySQL system-variable name, accepting `-` for `_`
@@ -216,12 +223,15 @@ let variables () : (string * string) list =
 let withSettings (settings: (string * string) list) (f: unit -> 'a) : 'a =
     let saved = [ for knob in knobs -> knob.Name, string (knob.Get()) ]
 
-    for name, value in settings do
-        match applySetting name value with
-        | Ok() -> ()
-        | Error message -> failwith message
-
     try
+        // Inside the try: a bad setting part-way through the list would
+        // otherwise leave the ones before it applied and never restored,
+        // silently retuning every test that runs afterwards.
+        for name, value in settings do
+            match applySetting name value with
+            | Ok() -> ()
+            | Error message -> failwith message
+
         f ()
     finally
         for name, value in saved do

@@ -885,9 +885,15 @@ let private beginTransaction (session: Session) : Session =
 /// for every database in `targetDbs` (not just `session.Database` — a
 /// qualified `INSERT/UPDATE INTO otherdb.t` needs `otherdb`'s own gate too,
 /// see `Session.Transaction.GateLease`'s doc) for the rest of the
-/// transaction's lifetime. A later write can acquire another database gate
-/// without re-seeding the snapshot. BEGIN remains non-blocking, and the first
-/// database statement observes commits completed before it began.
+/// transaction's lifetime. Re-entrant per statement: a later statement that
+/// names a database this transaction hasn't held yet picks up that
+/// database's gate too, without re-seeding the snapshot — only the very
+/// first database statement does that, which is why `Seeded` rather than
+/// `GateLease.IsEmpty` marks it. BEGIN itself stays non-blocking, so several
+/// clients can enter a transaction concurrently; only their first real
+/// writes serialize. Seeding here rather than at BEGIN also means a
+/// transaction that sat idle sees commits that completed before its first
+/// read, matching InnoDB's consistent-snapshot timing.
 let startTransactionStatementFor (targetDbs: string list) (session: Session) : Session =
     match session.Tx with
     | Some tx ->
@@ -905,7 +911,13 @@ let startTransactionStatementFor (targetDbs: string list) (session: Session) : S
             |> List.map (fun db -> db, Storage.enterTransactionGate session.Store db (Limits.lockWaitTimeout ()))
 
         try
-            // A write cannot merge a snapshot that predates another commit.
+            // Picking up a gate for a database this transaction snapshotted
+            // *before* it held that gate — it read first and is only now
+            // writing — means someone else could have committed there in
+            // between, and this transaction's merge at COMMIT would clobber
+            // them (`Storage.mergeDatabaseSlot`). There is nothing to roll
+            // back to, so report the retryable lock error and let the client
+            // redo the transaction, exactly as it would after a deadlock.
             if not firstStatement then
                 for db, _ in newlyAcquired do
                     if not (Storage.databaseUnchangedSince session.Store tx.BaseCatalog db) then

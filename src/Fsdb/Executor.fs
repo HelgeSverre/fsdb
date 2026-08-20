@@ -6823,7 +6823,14 @@ let private writtenTableOf (dbName: string) (stmt: Statement) : (string * string
     | Delete d -> Some(d.From.Database |> Option.defaultValue dbName, normalizeTableName d.From.Table)
     | _ -> None
 
-/// Returns every database an INSERT trigger chain can write.
+/// Every database an INSERT into `dbName.tableName` can reach through its
+/// AFTER INSERT triggers, following the chain transitively.
+///
+/// `QueryHandler` gates all of them, not just the insert's own target: a
+/// trigger body writing into another database while nobody holds that
+/// database's gate lets a concurrent writer there interleave with it, and
+/// one of the two rows is lost when the transaction merges
+/// (`Storage.mergeDatabaseSlot`).
 let triggerWriteDatabases (store: Store) (dbName: string) (tableName: string) : string list =
     let bodyTargets (defaultDb: string) (statement: Statement) =
         let tableRefTarget (table: TableRef) =

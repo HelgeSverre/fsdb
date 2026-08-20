@@ -149,7 +149,11 @@ type Transaction =
       /// a consistent snapshot on the first statement rather than the BEGIN
       /// packet.
       GateLease: Map<string, IDisposable>
-      /// Whether the first database statement has seeded the snapshot.
+      /// Set by the first database statement, which is the one that seeds
+      /// `Snapshot`/`BaseCatalog`. Not derivable from `GateLease.IsEmpty`
+      /// any more: a transaction that has only run reads holds no gate at
+      /// all and must still seed exactly once, or every read would
+      /// re-snapshot and repeatable read would be a lie.
       Seeded: bool
       /// Each savepoint's establishment order (see `NextSavepointSeq`), its
       /// catalog, and how many events `Snapshot.PendingEvents` had buffered

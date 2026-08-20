@@ -301,7 +301,11 @@ let private disconnectPollIntervalMs = 50
 let readPacketWithTimeoutMs (timeoutMs: int) (client: TcpClient) (stream: IO.Stream) : Async<Packet option> =
     async {
         let readTask = Async.StartAsTask(readPacketAsync stream)
-        // Cancellation releases the losing delay when packet input wins.
+        // Cancelled on the way out so the loser's `Task.Delay` dies with the
+        // read that beat it. Without this, every packet read on every
+        // connection leaves a live five-minute timer behind — a busy
+        // connection accumulates one per statement until they all fire for
+        // nothing.
         let timerCts = new CancellationTokenSource()
 
         try
