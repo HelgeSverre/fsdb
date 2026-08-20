@@ -1063,8 +1063,8 @@ let load (dataDir: string) : Store =
                 false)
 
     if loadedFromNew then
-        File.Move(newPath, snapshotPath, true)
         File.WriteAllText(walPath, "")
+        File.Move(newPath, snapshotPath, true)
         fsyncDir dataDir
     else
         if File.Exists snapshotPath then
