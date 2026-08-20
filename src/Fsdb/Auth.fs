@@ -647,10 +647,8 @@ let rec requiredPrivileges (defaultDb: string) (stmt: Statement) : (string * Pri
             | Result.Error _ -> [] // invalid list — the executor reports it
 
         ("GRANT OPTION", target) :: privReqs
-    // CREATE TRIGGER needs TRIGGER on the subject table, like MySQL.
-    // ponytail: DROP TRIGGER should too, but the subject table lives in a
-    // mysql.triggers row this pure statement-shape pass can't see — add a
-    // store-aware lookup if trigger DDL ever needs per-table denial.
+    // CREATE TRIGGER carries its subject table in the statement. DROP's
+    // subject is resolved by `requiredPrivilegesInStore` below.
     | CreateTrigger(_, table, _) -> onTables "TRIGGER" [ split table ]
     | DropTrigger _ -> []
     | CreateView(name, _, definition, orReplace) ->
@@ -662,6 +660,25 @@ let rec requiredPrivileges (defaultDb: string) (stmt: Statement) : (string * Pri
         | Error _ -> own
     | DropView(names, _) -> onTables "DROP" (names |> List.map split)
     | Explain inner -> requiredPrivileges defaultDb inner
+
+/// Adds privilege requirements whose target can only be resolved from the
+/// live catalog rather than from the statement shape alone.
+let requiredPrivilegesInStore (store: Store) (defaultDb: string) (stmt: Statement) : (string * PrivTarget) list =
+    match stmt with
+    | DropTrigger(name, _) ->
+        match scanList store "mysql" "triggers" with
+        | Ok(_, rows) ->
+            rows
+            |> List.tryPick (fun row ->
+                let text i = row.[i] |> Value.toText |> Option.defaultValue ""
+
+                if eqI (text 0) name && eqI (text 1) defaultDb then
+                    Some [ "TRIGGER", OnTable(text 1, text 2) ]
+                else
+                    None)
+            |> Option.defaultValue []
+        | Error _ -> []
+    | _ -> requiredPrivileges defaultDb stmt
 
 /// Checks `user` against every required privilege, denying with MySQL's
 /// 1142 (table), 1044 (database), or 1227 (admin privilege) shape.

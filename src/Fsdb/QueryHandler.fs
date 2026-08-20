@@ -1091,7 +1091,7 @@ let private executeParsed (session: Session) (stmt: Statement) : Session * Query
 
         // Privilege enforcement — the one gate every parsed statement goes
         // through (probes are exempt, see `Auth.requiredPrivileges`'s doc).
-        match Auth.check store session.User (Auth.requiredPrivileges dbName stmt) with
+        match Auth.check store session.User (Auth.requiredPrivilegesInStore store dbName stmt) with
         | Error(code, msg) -> session, Err(code, msg)
         | Ok() ->
 

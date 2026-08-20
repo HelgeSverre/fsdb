@@ -868,6 +868,25 @@ let tests =
               | Err(1044, _) -> ()
               | other -> failtestf "expected DROP information_schema to be denied, got %A" other
 
+          testCase "DROP TRIGGER requires TRIGGER privilege on its subject table"
+          <| fun _ ->
+              let store = Fsdb.Storage.create ()
+              let root = create 1 store
+              let root, _ = handle root "CREATE DATABASE victim"
+              let root, _ = handle root "USE victim"
+              let root, _ = handle root "CREATE TABLE t (id INT)"
+              let root, _ = handle root "CREATE TRIGGER audit_t AFTER INSERT ON t FOR EACH ROW INSERT INTO t VALUES (NEW.id)"
+              let root, _ = handle root "CREATE USER 'limited' IDENTIFIED BY 'pw'"
+              let limited = { create 2 store with User = "limited"; Database = Some "victim" }
+
+              match handle limited "DROP TRIGGER audit_t" |> snd with
+              | Err(1142, _) -> ()
+              | other -> failtestf "expected DROP TRIGGER to be denied, got %A" other
+
+              match handle root "DROP TRIGGER audit_t" |> snd with
+              | Affected _ -> ()
+              | other -> failtestf "expected the denied attempt to leave the trigger intact, got %A" other
+
           testCase "SHOW PROCESSLIST answers (empty registry outside a server); KILL of an unknown id is 1094"
           <| fun _ ->
               let session = create 1 (Fsdb.Storage.create ())
