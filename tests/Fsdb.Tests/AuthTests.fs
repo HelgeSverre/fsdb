@@ -69,6 +69,10 @@ let tests =
                   (selectTablesOf "WITH public AS (SELECT * FROM secret) SELECT * FROM public")
                   [ "public"; "secret" ]
                   "CTE bodies cannot hide a table read"
+              Expect.equal
+                  (selectTablesOf "SELECT FIRST_VALUE((SELECT s FROM secret)) OVER ()")
+                  [ "secret" ]
+                  "window arguments cannot hide a table read"
 
               match Fsdb.Parser.parse "UPDATE mine SET x = (SELECT s FROM secret)" with
               | Ok stmt ->

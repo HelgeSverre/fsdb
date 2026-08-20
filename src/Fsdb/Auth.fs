@@ -466,6 +466,37 @@ let rec private exprReadTables (defaultDb: string) (expr: Expr) : (string * stri
     | Between(e, lo, hi) -> recur e @ recur lo @ recur hi
     | FuncCall(_, args) -> args |> List.collect recur
     | MatchAgainst(_, q, _) -> recur q
+    | WindowOver(fn, over) ->
+        let fnExprs =
+            match fn with
+            | WinNTile buckets -> [ buckets ]
+            | WinLagLead(_, expr, offset, deflt) -> expr :: (offset |> Option.toList) @ (deflt |> Option.toList)
+            | WinFirstValue expr
+            | WinLastValue expr -> [ expr ]
+            | WinNthValue(expr, n) -> [ expr; n ]
+            | WinAggregate(_, args) -> args
+            | WinRowNumber
+            | WinRank _
+            | WinPercentRank
+            | WinCumeDist -> []
+
+        let frameExprs frame =
+            let boundExpr = function
+                | BoundPreceding expr
+                | BoundFollowing expr -> [ expr ]
+                | _ -> []
+
+            boundExpr frame.Start @ boundExpr frame.End
+
+        let overExprs =
+            match over with
+            | OverName _ -> []
+            | OverSpec spec ->
+                spec.PartitionBy
+                @ (spec.OrderBy |> List.map fst)
+                @ (spec.Frame |> Option.map frameExprs |> Option.defaultValue [])
+
+        (fnExprs @ overExprs) |> List.collect recur
     | Case(subject, whens, elseBranch) ->
         (subject |> Option.map recur |> Option.defaultValue [])
         @ (whens |> List.collect (fun (c, r) -> recur c @ recur r))
@@ -474,8 +505,7 @@ let rec private exprReadTables (defaultDb: string) (expr: Expr) : (string * stri
     | Lit _
     | Col _
     | QualifiedCol _
-    | Star _
-    | WindowOver _ -> []
+    | Star _ -> []
 
 and private fromItemReadTables (defaultDb: string) (item: FromItem) : (string * string) list =
     match item with
@@ -500,6 +530,19 @@ and private selectReadTables (defaultDb: string) (s: SelectStmt) : (string * str
     @ (s.Having |> Option.map (exprReadTables defaultDb) |> Option.defaultValue [])
     @ (s.Projections |> List.collect (fst >> exprReadTables defaultDb))
     @ (s.GroupBy |> List.collect (exprReadTables defaultDb))
+    @ (s.Windows
+       |> List.collect (fun (_, spec) ->
+           spec.PartitionBy
+           @ (spec.OrderBy |> List.map fst)
+           @ (spec.Frame
+              |> Option.map (fun frame ->
+                  [ frame.Start; frame.End ]
+                  |> List.collect (function
+                      | BoundPreceding expr
+                      | BoundFollowing expr -> [ expr ]
+                      | _ -> []))
+              |> Option.defaultValue []))
+       |> List.collect (exprReadTables defaultDb))
     @ (s.OrderBy |> List.collect (fst >> exprReadTables defaultDb))
     |> List.distinct
 
