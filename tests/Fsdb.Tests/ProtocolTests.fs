@@ -86,6 +86,21 @@ let tests =
               Expect.equal resp.Username "root" "username"
               Expect.equal resp.Database None "no database requested"
 
+          testCase "parseHandshakeResponse rejects an auth length above Int32.MaxValue"
+          <| fun _ ->
+              let w = Writer()
+              w.WriteInt32LE(int (ClientProtocol41 ||| ClientPluginAuthLenencClientData))
+              w.WriteInt32LE 16777216
+              w.WriteByte 45uy
+              w.WriteBytes(Array.zeroCreate<byte> 23)
+              w.WriteNullTerminatedString "root"
+              w.WriteByte 0xfeuy
+              w.WriteInt64LE Int64.MaxValue
+
+              Expect.throws
+                  (fun () -> parseHandshakeResponse (w.ToArray()) |> ignore)
+                  "an oversized wire length is rejected before conversion to int"
+
           testCase "typed text rows encode BLOB values as raw bytes"
           <| fun _ ->
               let bytes = [| 0x00uy; 0xffuy; 0x80uy |]

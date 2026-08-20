@@ -5732,7 +5732,8 @@ let tests =
                           "SELECT DATE '2020-13-01'"
                           "SELECT TIME '99999999999:00'"
                           "SELECT TIME '839:00:00'"
-                          "SELECT TIMESTAMP '2020-01-01'" ] do
+                          "SELECT TIMESTAMP '2020-01-01'"
+                          "SELECT DATE '" + String.replicate 100_000 "1-" + "1'" ] do
                         match Fsdb.Parser.parse sql with
                         | Result.Error _ -> ()
                         | Result.Ok other -> failtestf "expected a parse refusal for %s, got %A" sql other

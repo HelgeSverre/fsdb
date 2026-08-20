@@ -288,6 +288,18 @@ let tests =
 
                   Expect.equal maxConnections 17 "the valid assignment was not partially applied")
 
+          testCase "SET GLOBAL requires SUPER"
+          <| fun _ ->
+              withSettings [] (fun () ->
+                  let store = Fsdb.Storage.create ()
+                  let limited = { create 2 store with User = "limited" }
+
+                  match handle limited "SET GLOBAL max_connections = 17" |> snd with
+                  | Err(1227, message) -> Expect.stringContains message "SUPER" "the missing administrative privilege is named"
+                  | other -> failtestf "expected SET GLOBAL to require SUPER, got %A" other
+
+                  Expect.notEqual maxConnections 17 "the denied assignment did not change the live cap")
+
           testCase "global-only limits reject session SET instead of advertising a local change"
           <| fun _ ->
               withSettings [] (fun () ->
@@ -301,24 +313,25 @@ let tests =
 
           testCase "cte_max_recursion_depth is scoped to the session"
           <| fun _ ->
-              let store = Fsdb.Storage.create ()
-              let limited = create 1 store
-              let limited, setResult = handle limited "SET SESSION cte_max_recursion_depth = 2"
-              Expect.equal setResult (Affected 0UL) "the session limit is accepted"
+              withSettings [ "cte_max_recursion_depth", "2" ] (fun () ->
+                  let store = Fsdb.Storage.create ()
+                  let limited = create 1 store
+                  let limited, setResult = handle limited "SET SESSION cte_max_recursion_depth = 1"
+                  Expect.equal setResult (Affected 0UL) "the lower session limit is accepted"
 
-              match handle limited "WITH RECURSIVE s AS (SELECT 1 AS n UNION ALL SELECT n + 1 FROM s WHERE n < 3) SELECT * FROM s" |> snd with
-              | Err(3636, message) -> Expect.stringContains message "after 3 iterations" "the effective limit is named"
-              | other -> failtestf "expected the limited session to stop at depth 2, got %A" other
+                  match handle limited "WITH RECURSIVE s AS (SELECT 1 AS n UNION ALL SELECT n + 1 FROM s WHERE n < 3) SELECT * FROM s" |> snd with
+                  | Err(3636, message) -> Expect.stringContains message "after 2 iterations" "the effective limit is named"
+                  | other -> failtestf "expected the lower session limit to apply, got %A" other
 
-              let unlimited, _ = handle (create 2 store) "SET SESSION cte_max_recursion_depth = 0"
+                  let unlimited, _ = handle (create 2 store) "SET SESSION cte_max_recursion_depth = 0"
 
-              match handle unlimited "WITH RECURSIVE s AS (SELECT 1 AS n UNION ALL SELECT n + 1 FROM s WHERE n < 3) SELECT * FROM s" |> snd with
-              | ResultSet(_, [ [ Some "1" ]; [ Some "2" ]; [ Some "3" ] ]) -> ()
-              | other -> failtestf "expected zero to disable the recursion limit, got %A" other
+                  match handle unlimited "WITH RECURSIVE s AS (SELECT 1 AS n UNION ALL SELECT n + 1 FROM s WHERE n < 3) SELECT * FROM s" |> snd with
+                  | Err(3636, message) -> Expect.stringContains message "after 3 iterations" "zero cannot disable the global cap"
+                  | other -> failtestf "expected the global cap to survive a session zero, got %A" other
 
-              match handle limited "SELECT @@SESSION.cte_max_recursion_depth" |> snd with
-              | ResultSet(_, [ [ Some "2" ] ]) -> ()
-              | other -> failtestf "expected the limited session to retain its own value, got %A" other
+                  match handle limited "SELECT @@SESSION.cte_max_recursion_depth" |> snd with
+                  | ResultSet(_, [ [ Some "1" ] ]) -> ()
+                  | other -> failtestf "expected the limited session to retain its own value, got %A" other)
 
           // `max_allowed_packet` is what the wire actually enforces
           // (`Packet.readPacketAsync`), so a client that reads the variable

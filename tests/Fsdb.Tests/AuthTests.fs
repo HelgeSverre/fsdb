@@ -65,6 +65,14 @@ let tests =
               Expect.equal (selectTablesOf "SELECT * FROM mine WHERE EXISTS (SELECT 1 FROM secret)") [ "mine"; "secret" ] "EXISTS in WHERE"
               Expect.equal (selectTablesOf "SELECT * FROM mine JOIN (SELECT * FROM secret) d ON 1=1") [ "mine"; "secret" ] "joined derived table"
               Expect.equal (selectTablesOf "SELECT * FROM ((SELECT * FROM a) UNION (SELECT * FROM secret)) x") [ "a"; "secret" ] "union inside a derived table"
+              Expect.equal
+                  (selectTablesOf "WITH public AS (SELECT * FROM secret) SELECT * FROM public")
+                  [ "public"; "secret" ]
+                  "CTE bodies cannot hide a table read"
+              Expect.equal
+                  (selectTablesOf "SELECT FIRST_VALUE((SELECT s FROM secret)) OVER ()")
+                  [ "secret" ]
+                  "window arguments cannot hide a table read"
 
               match Fsdb.Parser.parse "UPDATE mine SET x = (SELECT s FROM secret)" with
               | Ok stmt ->

@@ -26,7 +26,15 @@ let tests =
     testSequenced
     <| testList
         "Server"
-        [ // sendQueryResult is the only sequence-id-bearing logic in the
+        [ testCase "second-valued connection timeouts cannot overflow milliseconds"
+          <| fun _ ->
+              Expect.equal (Fsdb.Server.timeoutMilliseconds 300) 300_000 "ordinary timeout is exact"
+              Expect.equal
+                  (Fsdb.Server.timeoutMilliseconds 3_000_000)
+                  Int32.MaxValue
+                  "a configured timeout beyond Task.Delay's int range saturates instead of wrapping negative"
+
+          // sendQueryResult is the only sequence-id-bearing logic in the
           // server, and getting a resultset terminator wrong hangs mysql
           // CLI / mysqlnd forever waiting for a terminator that never
           // arrives (see the okEndOfResultSetPayload test above).
@@ -179,6 +187,23 @@ let tests =
                               let reader = Reader(packet.Payload.[1..])
                               Expect.equal (reader.ReadInt16LE()) 1040 "Too many connections code"
                               Expect.equal (Text.Encoding.ASCII.GetString(packet.Payload, 4, 5)) "08004" "connection-rejection SQLSTATE"
+
+                          // A client is allowed to disappear before the
+                          // best-effort 1040 write completes. Repeated reset
+                          // peers must not take the detached accept loop down.
+                          for _ in 1 .. 20 do
+                              use resetPeer = new Net.Sockets.TcpClient()
+                              resetPeer.Client.LingerState <- Net.Sockets.LingerOption(true, 0)
+                              do! resetPeer.ConnectAsync(Net.IPAddress.Loopback, Fsdb.Server.port listener) |> Async.AwaitTask
+                              resetPeer.Close()
+
+                          admitted.Close()
+                          do! Async.Sleep 50
+
+                          use afterResets = new Net.Sockets.TcpClient()
+                          do! afterResets.ConnectAsync(Net.IPAddress.Loopback, Fsdb.Server.port listener) |> Async.AwaitTask
+                          let! laterHandshake = readPacketAsync (afterResets.GetStream())
+                          Expect.isSome laterHandshake "the server still accepts after reset rejection writes"
                       finally
                           listener.Stop()
                   }

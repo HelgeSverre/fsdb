@@ -88,6 +88,12 @@ type HandshakeResponse =
       ClientPlugin: string option
       Database: string option }
 
+let private boundedLen (len: uint64) : int =
+    if len > uint64 Int32.MaxValue then
+        failwith "length-encoded value length out of range"
+    else
+        int len
+
 /// Parses a HandshakeResponse41 payload: capability flags, username, auth
 /// response bytes, optional database, and the client's auth plugin name.
 let parseHandshakeResponse (payload: byte[]) : HandshakeResponse =
@@ -101,7 +107,7 @@ let parseHandshakeResponse (payload: byte[]) : HandshakeResponse =
     let authResponse =
         if capabilities &&& ClientPluginAuthLenencClientData <> 0u then
             match r.ReadLenEncInt() with
-            | Some len -> r.ReadBytes(int len)
+            | Some len -> r.ReadBytes(boundedLen len)
             | None -> [||]
         elif capabilities &&& ClientSecureConnection <> 0u then
             let len = int (r.ReadByte())
@@ -550,12 +556,6 @@ let readBinaryValue (r: Reader) (typeId: byte) (unsigned: bool) : Value =
     // above Int32.MaxValue to `int` goes negative and `ReadBytes` would
     // silently yield an empty slice. Reject it so the COM_STMT_EXECUTE
     // decode loop's catch turns it into a clean 1210 instead.
-    let boundedLen (len: uint64) : int =
-        if len > uint64 System.Int32.MaxValue then
-            failwith "length-encoded parameter length out of range"
-        else
-            int len
-
     let lenEncText () =
         match r.ReadLenEncInt() with
         | None -> ""

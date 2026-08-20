@@ -415,8 +415,9 @@ let private handleShowTables (session: Session) (sql: string) : QueryResult =
 let private handleShowDatabases (session: Session) (sql: string) : QueryResult =
     let store = Session.currentStore session
 
-    InformationSchema.showDatabases store.Catalog (not (Map.isEmpty store.VirtualTables)) (likeSuffix sql)
-    |> ResultSet
+    let columns, rows = InformationSchema.showDatabases store.Catalog (not (Map.isEmpty store.VirtualTables)) (likeSuffix sql)
+    let visible = rows |> List.filter (function | [ Some db ] -> Auth.canSeeDatabase store session.User db | _ -> false)
+    ResultSet(columns, visible)
 
 /// The catalog `SHOW COLUMNS`/`DESCRIBE`/`SHOW CREATE TABLE`/`SHOW INDEX`
 /// should resolve against: a registered `fsdb` virtual table isn't in the
@@ -717,8 +718,10 @@ let private applySetAction (session: Session) (action: SetAction) : Session =
         { session with Variables = Map.add name value session.Variables }
     | SetUserVarAction(name, value) -> { session with UserVariables = Map.add name value session.UserVariables }
 
-let private validateSetAction (action: SetAction) : Result<unit, QueryResult> =
+let private validateSetAction (session: Session) (action: SetAction) : Result<unit, QueryResult> =
     match action with
+    | SetVarAction(_, _, true) when not (Auth.hasGlobalPriv session.Store session.User "SUPER") ->
+        Error(Err(1227, "Access denied; you need (at least one of) the SUPER privilege(s) for this operation"))
     | SetVarAction(name, Some value, true) when Limits.isReportableSetting name ->
         Limits.validateSetting name value |> Result.mapError (fun message -> Err(1232, message))
     | SetVarAction(name, _, false) when globalOnlyLimitVariables.Contains name ->
@@ -739,7 +742,7 @@ let private handleSet (session: Session) (sql: string) : Session * QueryResult =
     match splitSetAssignments sql |> traverse (parseSetFragment sql session) with
     | Error result -> session, result
     | Ok actions ->
-        match actions |> traverse validateSetAction with
+        match actions |> traverse (validateSetAction session) with
         | Error result -> session, result
         | Ok _ -> (actions |> List.fold applySetAction session), Affected 0UL
 
@@ -1089,7 +1092,7 @@ let private executeParsed (session: Session) (stmt: Statement) : Session * Query
         let registry = registryFor session
 
         let withRecursionDepth body =
-            let limit =
+            let sessionLimit =
                 lookupVar session "cte_max_recursion_depth"
                 |> Option.flatten
                 |> Option.bind (fun value ->
@@ -1097,6 +1100,14 @@ let private executeParsed (session: Session) (stmt: Statement) : Session * Query
                     | true, parsed -> Some parsed
                     | _ -> None)
                 |> Option.defaultValue Limits.cteMaxRecursionDepth
+
+            // A session may tighten the administrator's process-wide cap,
+            // but cannot turn it off or raise it. A global zero remains the
+            // explicit trusted-operator opt-out supported by MySQL.
+            let limit =
+                if Limits.cteMaxRecursionDepth = 0L then sessionLimit
+                elif sessionLimit = 0L then Limits.cteMaxRecursionDepth
+                else min sessionLimit Limits.cteMaxRecursionDepth
 
             Executor.withCteRecursionDepth limit body
 

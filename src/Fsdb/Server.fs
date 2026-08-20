@@ -341,8 +341,15 @@ let readPacketWithTimeoutMs (timeoutMs: int) (client: TcpClient) (stream: IO.Str
             timerCts.Dispose()
     }
 
+/// Converts the MySQL seconds-valued timeout without wrapping the `int`
+/// milliseconds accepted by `Task.Delay`. Values beyond that API's range
+/// use its longest finite delay instead of breaking every connection before
+/// authentication.
+let timeoutMilliseconds (timeoutSeconds: int) : int =
+    int (min (int64 Int32.MaxValue) (max 0L (int64 timeoutSeconds * 1000L)))
+
 let private readPacketWithTimeoutSeconds (timeoutSeconds: int) (client: TcpClient) (stream: IO.Stream) : Async<Packet option> =
-    readPacketWithTimeoutMs (timeoutSeconds * 1000) client stream
+    readPacketWithTimeoutMs (timeoutMilliseconds timeoutSeconds) client stream
 
 let private sessionWaitTimeout (session: Session) =
     match session.Variables |> Map.tryFind "wait_timeout" |> Option.flatten with
@@ -533,6 +540,7 @@ let private handleConnection
                 // runs (see the guard on `do! loop session` at the bottom).
                 let! authOkSeq =
                     authenticateHandshake client stream capabilities store authData resp (handshakeResp.SeqId + 1uy)
+                let mutable databaseAccepted = false
 
                 let session =
                     { Session.create connectionId store with
@@ -561,17 +569,25 @@ let private handleConnection
                 match authOkSeq with
                 | None -> () // denied: the 1045 is already written, no OK
                 | Some okSeq ->
-                    // A successfully authenticated client that names a
-                    // database at connect time gets the same auto-create
-                    // convenience as an authenticated first write.
-                    resp.Database |> Option.iter (Storage.ensureDatabase store)
+                    let databaseAllowed =
+                        match resp.Database with
+                        | None -> Ok()
+                        | Some db when Storage.databaseExists store db -> Ok()
+                        | Some db -> Auth.check store resp.Username [ "CREATE", Auth.OnDb db ]
 
-                    do!
-                        writePacketAsync
-                            stream
-                            { SeqId = okSeq
-                              Payload = okPayload capabilities (statusFlagsFor session) 0UL 0UL }
-                        |> Async.Ignore
+                    match databaseAllowed with
+                    | Error(code, message) ->
+                        do! writePacketAsync stream { SeqId = okSeq; Payload = errPayload capabilities code message } |> Async.Ignore
+                    | Ok() ->
+                        resp.Database |> Option.iter (Storage.ensureDatabase store)
+                        databaseAccepted <- true
+
+                        do!
+                            writePacketAsync
+                                stream
+                                { SeqId = okSeq
+                                  Payload = okPayload capabilities (statusFlagsFor session) 0UL 0UL }
+                            |> Async.Ignore
 
                 // Runs a statement dispatch under `withCancellationWatch`,
                 // catching the `OperationCanceledException` a killed
@@ -957,7 +973,7 @@ let private handleConnection
                                 return! loop session
                     }
 
-                if authOkSeq.IsSome then
+                if authOkSeq.IsSome && databaseAccepted then
                     do! loop session
         with
         | :? PacketTooLargeException ->
@@ -1018,10 +1034,16 @@ let serve (listener: TcpListener) (store: Storage.Store) (customFunctions: Funct
 
     let rejectAtCapacity (client: TcpClient) =
         async {
-            use client = client
-            use stream = client.GetStream()
-            let payload = errPayload ClientProtocol41 1040 "Too many connections"
-            do! writePacketAsync stream { SeqId = 0uy; Payload = payload } |> Async.Ignore
+            try
+                use client = client
+                use stream = client.GetStream()
+                let payload = errPayload ClientProtocol41 1040 "Too many connections"
+                do! writePacketAsync stream { SeqId = 0uy; Payload = payload } |> Async.Ignore
+            // This is a detached best-effort rejection after the server has
+            // already decided not to admit the peer. Any socket/stream fault
+            // (including Async's AggregateException wrapper) is terminal only
+            // for that disposable peer and must not escape onto the thread pool.
+            with _ -> ()
         }
 
     let rec loop () : Async<unit> =
