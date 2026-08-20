@@ -539,6 +539,7 @@ let private splitSetAssignments (sql: string) : string list =
     let current = StringBuilder()
     let mutable quoteChar = None
     let mutable parenDepth = 0
+    let mutable hasContent = false
 
     for c in body do
         match quoteChar with
@@ -550,19 +551,29 @@ let private splitSetAssignments (sql: string) : string list =
             match c with
             | '\'' | '"' ->
                 quoteChar <- Some c
+                hasContent <- true
                 current.Append c |> ignore
             | '(' ->
                 parenDepth <- parenDepth + 1
+                hasContent <- true
                 current.Append c |> ignore
             | ')' ->
                 parenDepth <- max 0 (parenDepth - 1)
+                hasContent <- true
                 current.Append c |> ignore
             | ',' when parenDepth = 0 ->
-                parts.Add(current.ToString())
-                current.Clear() |> ignore
-            | _ -> current.Append c |> ignore
+                if hasContent then
+                    parts.Add(current.ToString())
 
-    parts.Add(current.ToString())
+                current.Clear() |> ignore
+                hasContent <- false
+            | _ ->
+                hasContent <- hasContent || not (Char.IsWhiteSpace c)
+                current.Append c |> ignore
+
+    if hasContent then
+        parts.Add(current.ToString())
+
     parts |> Seq.map (fun s -> s.Trim()) |> Seq.filter (fun s -> s <> "") |> List.ofSeq
 
 /// One `SET` fragment's parsed effect, applied only once every fragment in

@@ -226,6 +226,16 @@ let tests =
               | ResultSet(_, [ [ Some "utf8mb4"; Some "NO_ENGINE_SUBSTITUTION" ] ]) -> ()
               | other -> failtestf "expected both variables updated, got %A" other
 
+          testCase "empty SET fragments do not allocate one string per separator"
+          <| fun _ ->
+              let session = create 1 (Fsdb.Storage.create ())
+              let sql = "SET " + String.replicate 500_000 " ,"
+              GC.Collect()
+              let before = GC.GetAllocatedBytesForCurrentThread()
+              handle session sql |> ignore
+              let allocated = GC.GetAllocatedBytesForCurrentThread() - before
+              Expect.isLessThan allocated 8_000_000L "separator count does not amplify allocation"
+
           testCase "SET NAMES drives collation_connection, with an explicit COLLATE winning"
           <| fun _ ->
               let store = Fsdb.Storage.create ()
