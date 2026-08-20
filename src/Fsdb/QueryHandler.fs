@@ -1091,7 +1091,7 @@ let private executeParsed (session: Session) (stmt: Statement) : Session * Query
         let registry = registryFor session
 
         let withRecursionDepth body =
-            let limit =
+            let sessionLimit =
                 lookupVar session "cte_max_recursion_depth"
                 |> Option.flatten
                 |> Option.bind (fun value ->
@@ -1099,6 +1099,14 @@ let private executeParsed (session: Session) (stmt: Statement) : Session * Query
                     | true, parsed -> Some parsed
                     | _ -> None)
                 |> Option.defaultValue Limits.cteMaxRecursionDepth
+
+            // A session may tighten the administrator's process-wide cap,
+            // but cannot turn it off or raise it. A global zero remains the
+            // explicit trusted-operator opt-out supported by MySQL.
+            let limit =
+                if Limits.cteMaxRecursionDepth = 0L then sessionLimit
+                elif sessionLimit = 0L then Limits.cteMaxRecursionDepth
+                else min sessionLimit Limits.cteMaxRecursionDepth
 
             Executor.withCteRecursionDepth limit body
 
