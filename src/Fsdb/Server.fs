@@ -533,6 +533,7 @@ let private handleConnection
                 // runs (see the guard on `do! loop session` at the bottom).
                 let! authOkSeq =
                     authenticateHandshake client stream capabilities store authData resp (handshakeResp.SeqId + 1uy)
+                let mutable databaseAccepted = false
 
                 let session =
                     { Session.create connectionId store with
@@ -572,6 +573,7 @@ let private handleConnection
                         do! writePacketAsync stream { SeqId = okSeq; Payload = errPayload capabilities code message } |> Async.Ignore
                     | Ok() ->
                         resp.Database |> Option.iter (Storage.ensureDatabase store)
+                        databaseAccepted <- true
 
                         do!
                             writePacketAsync
@@ -964,7 +966,7 @@ let private handleConnection
                                 return! loop session
                     }
 
-                if authOkSeq.IsSome then
+                if authOkSeq.IsSome && databaseAccepted then
                     do! loop session
         with
         | :? PacketTooLargeException ->
