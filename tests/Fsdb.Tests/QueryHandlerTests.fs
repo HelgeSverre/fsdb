@@ -849,6 +849,25 @@ let tests =
                   Expect.isGreaterThan rows.Length 20 "all virtual tables listed"
               | other -> failtestf "expected the virtual-table listing, got %A" other
 
+          testCase "information_schema is readable but cannot be materialized or dropped by an unprivileged user"
+          <| fun _ ->
+              let store = Fsdb.Storage.create ()
+              let root = create 1 store
+              let _, _ = handle root "CREATE USER 'limited' IDENTIFIED BY 'pw'"
+              let limited = { create 2 store with User = "limited" }
+
+              match handle limited "SELECT TABLE_NAME FROM information_schema.TABLES" |> snd with
+              | ResultSet _ -> ()
+              | other -> failtestf "expected information_schema SELECT to remain available, got %A" other
+
+              match handle limited "CREATE TABLE information_schema.evil (id INT)" |> snd with
+              | Err(1142, _) -> ()
+              | other -> failtestf "expected CREATE in information_schema to be denied, got %A" other
+
+              match handle limited "DROP DATABASE information_schema" |> snd with
+              | Err(1044, _) -> ()
+              | other -> failtestf "expected DROP information_schema to be denied, got %A" other
+
           testCase "SHOW PROCESSLIST answers (empty registry outside a server); KILL of an unknown id is 1094"
           <| fun _ ->
               let session = create 1 (Fsdb.Storage.create ())

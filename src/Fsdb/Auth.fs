@@ -802,7 +802,7 @@ let check (store: Store) (user: string) (required: (string * PrivTarget) list) :
                     || (match target with
                         | Global -> false
                         | OnDb db
-                        | OnTable(db, _) when eqI db "information_schema" -> true
+                        | OnTable(db, _) when eqI db "information_schema" && eqI privSql "SELECT" -> true
                         | OnDb db -> hasDb def db
                         | OnTable(db, table) -> hasDb def db || hasTable def db table)
 
