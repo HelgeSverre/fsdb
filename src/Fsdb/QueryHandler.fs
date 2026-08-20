@@ -601,6 +601,7 @@ type private SetAction =
 let private nullableSystemVars = Set.ofList [ "character_set_results" ]
 
 let private globalOnlyLimitVariables = Set.ofList [ "max_allowed_packet"; "max_connections" ]
+let private maxUserVariables = 65536
 
 /// Parses one comma-split fragment into the variable(s) it would assign,
 /// without touching `session`/`Store` — `handleSet` only applies any of
@@ -749,9 +750,21 @@ let private handleSet (session: Session) (sql: string) : Session * QueryResult =
     match splitSetAssignments sql |> traverse (parseSetFragment sql session) with
     | Error result -> session, result
     | Ok actions ->
-        match actions |> traverse (validateSetAction session) with
-        | Error result -> session, result
-        | Ok _ -> (actions |> List.fold applySetAction session), Affected 0UL
+        let userVariableNames =
+            actions
+            |> List.choose (function SetUserVarAction(name, _) -> Some name | _ -> None)
+            |> Set.ofList
+
+        let resultingUserVariableCount =
+            userVariableNames
+            |> Set.fold (fun count name -> if Map.containsKey name session.UserVariables then count else count + 1) session.UserVariables.Count
+
+        if resultingUserVariableCount > maxUserVariables then
+            session, Err(1105, "Too many user-defined variables")
+        else
+            match actions |> traverse (validateSetAction session) with
+            | Error result -> session, result
+            | Ok _ -> (actions |> List.fold applySetAction session), Affected 0UL
 
 // ---------------------------------------------------------------------------
 // Transactions: BEGIN/COMMIT/ROLLBACK, SET autocommit, SAVEPOINT. Matched by

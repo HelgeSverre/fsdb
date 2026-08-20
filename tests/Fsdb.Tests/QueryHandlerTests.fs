@@ -531,6 +531,20 @@ let tests =
               | ResultSet(_, [ [ Some "a\\', @y=1"; None ] ]) -> ()
               | other -> failtestf "expected only @x to be assigned, got %A" other
 
+          testCase "a session refuses user variables beyond its fixed memory-growth cap"
+          <| fun _ ->
+              let variables = seq { for i in 1..65536 -> sprintf "v%d" i, Some "1" } |> Map.ofSeq
+              let session = { create 1 (Fsdb.Storage.create ()) with UserVariables = variables }
+
+              match handle session "SET @overflow = 1" with
+              | unchanged, Err(1105, "Too many user-defined variables") ->
+                  Expect.equal unchanged.UserVariables.Count 65536 "the rejected SET leaves the map unchanged"
+              | _, other -> failtestf "expected the user-variable cap error, got %A" other
+
+              match handle session "SET @v1 = 2" with
+              | updated, Affected _ -> Expect.equal updated.UserVariables.["v1"] (Some "2") "existing variables remain writable"
+              | _, other -> failtestf "expected an existing variable update to succeed, got %A" other
+
           testCase "a bad multi-assignment SET applies none of its assignments, not just the ones before the bad one"
           <| fun _ ->
               // Two-phase: every fragment parses before any of them apply,
