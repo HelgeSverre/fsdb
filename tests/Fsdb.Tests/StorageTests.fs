@@ -802,7 +802,7 @@ let tests =
                     | Error(NotNullViolation "name") -> ()
                     | other -> failtestf "expected NotNullViolation, got %A" other
 
-                testCase "updateRows re-validates a stale candidate position instead of clobbering whatever row now sits there"
+                testCase "a point-update candidate keeps its row identity after an earlier row is deleted"
                 <| fun _ ->
                     let store = withUsersTable ()
 
@@ -815,31 +815,18 @@ let tests =
                           [ VNull; VString "bob"; VInt 25L ] ]
                     |> ignore
 
-                    // Simulate `Executor.tryPointLookup`'s lock-free read:
-                    // capture bob's `(position, row)` up front, the exact
-                    // shape `candidates` takes — `scan` hands back the
-                    // store's own row arrays, not copies, so `staleRow`
-                    // below is reference-identical to what's still sitting
-                    // in the table.
-                    let stalePos, staleRow =
-                        match scan store defaultDatabase "users" with
-                        | Ok(_, rows) ->
-                            rows |> Seq.toList |> List.indexed |> List.find (fun (_, r) -> r.[1] = VString "bob")
-                        | Error e -> failtestf "expected Ok, got %A" e
+                    let staleRowId, staleRow =
+                        match tryUniqueLookup store defaultDatabase "users" "id" (VInt 2L) with
+                        | Some(_, [ candidate ]) -> candidate
+                        | other -> failtestf "expected bob's indexed row, got %A" other
 
-                    Expect.equal stalePos 1 "bob starts at position 1"
-
-                    // A concurrent DELETE of the earlier row (alice)
-                    // compacts bob down from position 1 to position 0 —
-                    // `stalePos` still says 1, and blindly trusting it would
-                    // index past the now-1-row table.
                     deleteRows store defaultDatabase "users" (fun row -> Ok(row.[1] = VString "alice")) |> ignore
 
                     let updater (row: Value[]) = Ok [| row.[0]; row.[1]; VInt 99L |]
 
-                    match updateRows store defaultDatabase "users" (Some [ stalePos, staleRow ]) (fun _ -> Ok true) updater with
+                    match updateRows store defaultDatabase "users" (Some [ staleRowId, staleRow ]) (fun _ -> Ok true) updater with
                     | Ok affected ->
-                        Expect.equal affected 1 "bob, re-located by identity, still gets updated"
+                        Expect.equal affected 1 "bob still gets updated"
 
                         match scan store defaultDatabase "users" with
                         | Ok(_, rows) ->
@@ -946,11 +933,6 @@ let tests =
 
                 testCase "insertion order survives an INSERT/UPDATE/DELETE/INSERT interleaving"
                 <| fun _ ->
-                    // `Rows`' scan order is its insertion order; a `DELETE`
-                    // compacts (shifting every later row down a slot) and a
-                    // later `INSERT` appends past the end — this exercises
-                    // both to guard the array-backed `Rows`' ordering
-                    // against an off-by-one in either.
                     let store = withUsersTable ()
 
                     insertRows
@@ -2402,6 +2384,24 @@ let tests =
                 <| fun _ ->
                     let rows = PagedVector.empty<int>
                     Expect.isEmpty (List.ofSeq rows) "empty vector" ]
+
+          testList
+              "row store"
+              [ testCase "deletion preserves surviving identities and scan order"
+                <| fun _ ->
+                    let original = RowStore.ofSeq [ "a"; "b"; "c" ]
+                    let indexed = List.ofSeq original.Indexed
+                    let aId, _ = indexed.[0]
+                    let bId, _ = indexed.[1]
+                    let cId, _ = indexed.[2]
+                    let afterDelete = original.Remove bId
+                    let dId, updated = afterDelete.Append "d"
+
+                    Expect.sequenceEqual original [ "a"; "b"; "c" ] "the original snapshot remains visible"
+                    Expect.sequenceEqual updated [ "a"; "c"; "d" ] "tombstones are absent from scans"
+                    Expect.equal updated.[aId] "a" "the first row keeps its identity"
+                    Expect.equal updated.[cId] "c" "the last surviving row keeps its identity"
+                    Expect.notEqual dId bId "deleted identities are not reused" ]
 
           testList
               "performance canary"

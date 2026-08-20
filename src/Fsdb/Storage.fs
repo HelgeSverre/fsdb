@@ -120,7 +120,7 @@ type Table =
       Columns: ColumnDef list
       /// Published pages are immutable so captured catalog roots remain
       /// valid while a write copies only the pages it changes.
-      RowsArray: PagedVector<Value[]>
+      RowsArray: RowStore<Value[]>
       NextAutoId: int64
       Indexes: IndexDef list
       ForeignKeys: ForeignKeyDef list
@@ -135,38 +135,10 @@ type Table =
       /// CreateTable commit event carries no clock), refreshed by the next
       /// snapshot.
       CreateTime: DateTime
-      /// Hash index over every PRIMARY KEY / UNIQUE `Indexes` entry, kept in
-      /// sync with `Rows` by every write path below (`insertCore`,
-      /// `updateRows`, `upsertRows`, `deleteRows`'s `cascadeDeleteVisited`)
-      /// instead of rebuilt from a full scan on every call — that rebuild is
-      /// exactly the O(table size) tax this index exists to remove from point
-      /// SELECT, unique-collision checks, and FK parent-existence checks
-      /// (see `uniqueKeyGroups`/`encodeConstraintKey`/`tryUniqueLookup`).
-      /// Outer map keyed by the unique group's name (`"PRIMARY"` or the
-      /// index's own name, matching `uniqueKeyGroups`); inner map from
-      /// `encodeConstraintKey`'s collation-correct key to that row's
-      /// *position in `Rows`*, not a copy of the row itself — a stale
-      /// position would be a correctness bug (pointing past an UPDATE that
-      /// moved the row, or at a DELETE-compacted slot that now holds a
-      /// different row), so every write path that changes `Rows`'s length or
-      /// reorders it (`insertCore`'s append, `deleteRows`'s compaction)
-      /// rekeys every index entry whose position shifted, not just the
-      /// touched row's own. `Map`, not a `Dictionary`, on purpose: `Table` is
-      /// itself a value swapped in and out of `Catalog`'s snapshots (see
-      /// `Catalog`'s doc), so a transaction's private snapshot or a
-      /// concurrent reader's in-flight `scan` needs this index frozen at
-      /// exactly the version it read — `Map.add`/`Map.remove` share
-      /// structure with whatever earlier version still holds a reference,
-      /// the same property every other piece of `Catalog` state already
-      /// leans on, where a mutable `Dictionary` would need an explicit
-      /// clone on every write to keep it. A row with a NULL anywhere in the
-      /// group has no entry at all — MySQL never treats a NULL unique
-      /// column as a collision, so it isn't indexed (`encodeConstraintKey`
-      /// already returns `None` for one). Structural, not carried over the
-      /// wire: absent from the WAL/snapshot encoding, rebuilt instead by
-      /// `reindexTable` wherever `Rows` is written outside these checked
-      /// paths (`Persistence`'s replay/snapshot-load — see its doc).
-      UniqueIndex: Map<string, Map<string, int>> }
+      /// Primary and unique keys resolve to stable row identities. Persistent
+      /// maps preserve catalog snapshots; keys containing NULL are absent,
+      /// matching MySQL uniqueness semantics.
+      UniqueIndex: Map<string, Map<string, RowId>> }
 
     /// `RowsArray` as a plain list, in scan order — a fresh O(row count)
     /// copy on every access, for external validators/tools that walk a
@@ -1152,13 +1124,12 @@ let private constraintLookup columns indices rows =
 /// otherwise maintains the index incrementally). `Map.ofList` keeping the
 /// last entry for a repeated key is a non-issue here: a well-formed table
 /// never has two rows actually colliding on a real PK/UNIQUE group.
-let private rebuildUniqueIndex (table: Table) : Map<string, Map<string, int>> =
+let private rebuildUniqueIndex (table: Table) : Map<string, Map<string, RowId>> =
     uniqueKeyGroups table
     |> List.map (fun (name, idxs) ->
         let inner =
-            table.RowsArray
-            |> Seq.indexed
-            |> Seq.choose (fun (i, row) -> encodeConstraintKey table.Columns idxs row |> Option.map (fun k -> k, i))
+            table.RowsArray.Indexed
+            |> Seq.choose (fun (rowId, row) -> encodeConstraintKey table.Columns idxs row |> Option.map (fun key -> key, rowId))
             |> Map.ofSeq
 
         name, inner)
@@ -1187,78 +1158,31 @@ let reindexTable (table: Table) : Table =
 
 let private tableSchema (table: Table) =
     { table with
-        RowsArray = PagedVector.empty
+        RowsArray = RowStore.empty
         NextAutoId = 0L
         UniqueIndex = Map.empty }
 
-let private identityColumns (table: Table) : int list option =
-    let primary =
-        table.Columns
-        |> List.indexed
-        |> List.choose (fun (index, column) -> if column.PrimaryKey then Some index else None)
-
-    if not primary.IsEmpty then
-        Some primary
-    else
-        table.Indexes
-        |> List.tryFind (fun index -> index.Unique)
-        |> Option.bind (fun index -> index.Columns |> traverse (resolveColumn table.Columns) |> Result.toOption)
-
 let private mergeRows (dbName: string) (baseTable: Table) (batchTable: Table) (liveTable: Table) : Table =
     let conflict () = raise (LockWaitTimeout dbName)
-    let baseRows = List.ofSeq baseTable.RowsArray
-    let batchRows = List.ofSeq batchTable.RowsArray
-    let liveRows = ResizeArray<Value[]>(liveTable.RowsArray)
+    let rows = liveTable.RowsArray.ToBuilder()
 
-    let removeAt index = liveRows.RemoveAt index
+    for rowId, baseRow in baseTable.RowsArray.Indexed do
+        match batchTable.RowsArray.TryFind rowId with
+        | Some batchRow when batchRow = baseRow -> ()
+        | replacement ->
+            match rows.TryFind rowId with
+            | Some liveRow when liveRow = baseRow ->
+                match replacement with
+                | Some row -> rows.[rowId] <- row
+                | None -> rows.Remove rowId |> ignore
+            | _ -> conflict ()
 
-    let mergeByIdentity indices =
-        let keyOf (row: Value[]) = indices |> List.map (fun index -> row.[index])
-        let baseByKey = baseRows |> List.map (fun row -> keyOf row, row) |> Map.ofList
-        let batchByKey = batchRows |> List.map (fun row -> keyOf row, row) |> Map.ofList
-
-        let findLive key = liveRows |> Seq.tryFindIndex (fun row -> keyOf row = key)
-
-        for KeyValue(key, baseRow) in baseByKey do
-            match Map.tryFind key batchByKey with
-            | Some batchRow when batchRow = baseRow -> ()
-            | replacement ->
-                match findLive key with
-                | Some index when liveRows.[index] = baseRow ->
-                    match replacement with
-                    | Some row -> liveRows.[index] <- row
-                    | None -> removeAt index
-                | _ -> conflict ()
-
-        for KeyValue(key, batchRow) in batchByKey do
-            if not (Map.containsKey key baseByKey) then
-                match findLive key with
-                | Some _ -> conflict ()
-                | None -> liveRows.Add batchRow
-
-    let mergeByValue () =
-        let unmatchedBatch = ResizeArray<Value[]>(batchRows)
-        let removed = ResizeArray<Value[]>()
-
-        for baseRow in baseRows do
-            match unmatchedBatch |> Seq.tryFindIndex ((=) baseRow) with
-            | Some index -> unmatchedBatch.RemoveAt index
-            | None -> removed.Add baseRow
-
-        for row in removed do
-            match liveRows |> Seq.tryFindIndex ((=) row) with
-            | Some index -> removeAt index
-            | None -> conflict ()
-
-        liveRows.AddRange unmatchedBatch
-
-    match identityColumns baseTable with
-    | Some indices when (baseRows @ batchRows @ List.ofSeq liveRows) |> List.forall (fun row -> indices |> List.forall (fun i -> row.[i] <> VNull)) ->
-        mergeByIdentity indices
-    | _ -> mergeByValue ()
+    for rowId, batchRow in batchTable.RowsArray.Indexed do
+        if baseTable.RowsArray.TryFind(rowId).IsNone then
+            rows.Add batchRow |> ignore
 
     { liveTable with
-        RowsArray = PagedVector.ofSeq liveRows
+        RowsArray = rows.DrainToImmutable()
         NextAutoId = max liveTable.NextAutoId batchTable.NextAutoId }
     |> reindexTable
 
@@ -1266,16 +1190,13 @@ let private validateMergedDatabase (dbName: string) (db: Database) : unit =
     let conflict () = raise (LockWaitTimeout dbName)
 
     for KeyValue(_, table) in db do
-        let identity = identityColumns table
+        for _, indices in uniqueKeyGroups table do
+            let seen = Collections.Generic.HashSet<string>()
 
-        for name, indices in uniqueKeyGroups table do
-            if Some indices <> identity then
-                let seen = Collections.Generic.HashSet<string>()
-
-                for row in table.RowsArray do
-                    match encodeConstraintKey table.Columns indices row with
-                    | Some key when not (seen.Add key) -> conflict ()
-                    | _ -> ()
+            for row in table.RowsArray do
+                match encodeConstraintKey table.Columns indices row with
+                | Some key when not (seen.Add key) -> conflict ()
+                | _ -> ()
 
         for foreignKey in table.ForeignKeys do
             match Map.tryFind (normalizeTableName foreignKey.RefTable) db with
@@ -1467,7 +1388,7 @@ let private sysTable (name: string) (columns: ColumnDef list) (rows: Value[] lis
     let table =
         { OriginalName = name
           Columns = columns
-          RowsArray = PagedVector.ofSeq rows
+          RowsArray = RowStore.ofSeq rows
           NextAutoId = 1L
           Indexes = []
           ForeignKeys = []
@@ -1550,7 +1471,7 @@ let ensureMysqlSchema (store: Store) : unit =
                     "triggers"
                     { t with
                         Columns = t.Columns @ pad
-                        RowsArray = t.RowsArray |> Seq.map (fun r -> Array.append r fill) |> PagedVector.ofSeq }
+                        RowsArray = t.RowsArray |> RowStore.map (fun row -> Array.append row fill) }
                     dbRef.Value
 
 let create () : Store =
@@ -1570,19 +1491,15 @@ let create () : Store =
 
 /// Removes/adds one row's entry in every unique group's map, the
 /// incremental update every write path below makes instead of
-/// `rebuildUniqueIndex`'s full rescan. `removed` is the row's old values
-/// (only its key matters — removal doesn't touch a position); `added` is its
-/// new values paired with the `Rows` position they land at. The same logical
-/// row for an `UPDATE` (its before/after values, same position), just one
-/// side for a plain `INSERT`/`DELETE`, and both for `upsertRows`'
-/// matched-row case.
+/// `rebuildUniqueIndex`'s full rescan. Updates retain their row identity;
+/// inserts supply a new identity and deletes only remove old keys.
 let private reindexRow
     (columns: ColumnDef list)
     (uniqueGroups: (string * int list) list)
     (removed: Value[] option)
-    (added: (int * Value[]) option)
-    (index: Map<string, Map<string, int>>)
-    : Map<string, Map<string, int>> =
+    (added: (RowId * Value[]) option)
+    (index: Map<string, Map<string, RowId>>)
+    : Map<string, Map<string, RowId>> =
     uniqueGroups
     |> List.fold
         (fun accIndex (name, idxs) ->
@@ -1599,7 +1516,7 @@ let private reindexRow
 /// MySQL FK references a unique/PK constraint of the parent in matching
 /// column order, so this only misses on stale/malformed FK metadata) —
 /// `checkFkParent` falls back to a full scan in that case.
-let private parentUniqueIndex (parent: Table) (refIdxs: int list) : Map<string, int> option =
+let private parentUniqueIndex (parent: Table) (refIdxs: int list) : Map<string, RowId> option =
     uniqueKeyGroups parent |> List.tryPick (fun (name, idxs) -> if idxs = refIdxs then Map.tryFind name parent.UniqueIndex else None)
 
 /// A per-statement FK parent-key membership test, either a live `HashSet`
@@ -1608,7 +1525,7 @@ let private parentUniqueIndex (parent: Table) (refIdxs: int list) : Map<string, 
 /// `foreignKeyLookups` picks whichever fits per FK; see its doc.
 type private ParentKeySource =
     | Mutable of HashSet<string>
-    | Fixed of Map<string, int>
+    | Fixed of Map<string, RowId>
 
 let private parentKeySourceContains (key: string) (source: ParentKeySource) : bool =
     match source with
@@ -1637,10 +1554,7 @@ let private parentKeySourceAdd (key: string) (source: ParentKeySource) : unit =
 /// — an `= NULL` conjunct can never match any row) — the caller's own full
 /// scan stays correct in every one of those cases, this is a pure,
 /// optional narrowing. `Executor.tryPointLookup` is the only caller. Returns
-/// each candidate's `Rows` position alongside its values — `Executor`'s
-/// `UPDATE`/`DELETE` narrowing threads that position straight into
-/// `updateRows`/`deleteRows` so they can replace/remove it in place instead
-/// of re-deriving its position with a full scan.
+/// each candidate's stable row identity alongside its values.
 /// The `(table, unique key name, column index)` a `columnName = literal`
 /// equality would probe — the guard chain `tryUniqueLookup` (the actual row
 /// fetch) and `Executor`'s `EXPLAIN` `key`/`ref` reporting both read, so
@@ -1679,7 +1593,7 @@ let tryUniqueLookup
     (tableName: string)
     (columnName: string)
     (literal: Value)
-    : (ColumnDef list * (int * Value[]) list) option =
+    : (ColumnDef list * (RowId * Value[]) list) option =
     tryUniqueKeyProbe store dbName tableName columnName literal
     |> Option.map (fun (table, groupName, idx) ->
         // `encodeConstraintKey` indexes its row by the column's absolute
@@ -1866,7 +1780,7 @@ let createTableSeeded
                 let table =
                     { OriginalName = tableName
                       Columns = columns
-                      RowsArray = PagedVector.empty
+                      RowsArray = RowStore.empty
                       NextAutoId = autoIncrementSeed |> Option.defaultValue 1L
                       Indexes = indexes
                       ForeignKeys = foreignKeys
@@ -1932,7 +1846,7 @@ let truncate (store: Store) (dbName: string) (tableName: string) : Result<unit, 
         virtualWriteGuard store dbName tableName
         |> Result.bind (fun () ->
             withTable store dbName tableName (fun table ->
-                Ok(reindexTable { table with RowsArray = PagedVector.empty; NextAutoId = 1L; CreateTime = DateTime.Now }, ())))
+                Ok(reindexTable { table with RowsArray = RowStore.empty; NextAutoId = 1L; CreateTime = DateTime.Now }, ())))
 
     if result.IsOk then
         emit store (Some(SchemaChanged(dbName, Truncate tableName)))
@@ -2130,14 +2044,14 @@ let private applyAlterAction (strict: bool) (table: Table) (action: AlterAction)
             |> Result.map (fun idx ->
                 { table with
                     Columns = table.Columns |> insertAt idx colWithDefaults
-                    RowsArray = table.RowsArray |> Seq.map (fun r -> r |> Array.toList |> insertAt idx fill |> Array.ofList) |> PagedVector.ofSeq },
+                    RowsArray = table.RowsArray |> RowStore.map (fun row -> row |> Array.toList |> insertAt idx fill |> Array.ofList) },
                 None))
     | DropColumn name ->
         resolveColumn table.Columns name
         |> Result.map (fun idx ->
             { table with
                 Columns = table.Columns |> List.indexed |> List.filter (fun (i, _) -> i <> idx) |> List.map snd
-                RowsArray = table.RowsArray |> Seq.map (removeColumnAt idx) |> PagedVector.ofSeq },
+                RowsArray = table.RowsArray |> RowStore.map (removeColumnAt idx) },
             None)
     | ModifyColumn(newDef, position)
     | ChangeColumn(_, newDef, position) ->
@@ -2152,16 +2066,21 @@ let private applyAlterAction (strict: bool) (table: Table) (action: AlterAction)
 
             resolvePosition columnsExcludingSelf oldIdx position
             |> Result.bind (fun newIdx ->
-                table.RowsArray
+                table.RowsArray.Indexed
                 |> List.ofSeq
-                |> traverse (fun (r: Value[]) ->
+                |> traverse (fun (rowId, r: Value[]) ->
                     recoerce newDef r.[oldIdx]
-                    |> Result.map (fun v -> r |> removeColumnAt oldIdx |> Array.toList |> insertAt newIdx v |> Array.ofList))
+                    |> Result.map (fun value -> rowId, (r |> removeColumnAt oldIdx |> Array.toList |> insertAt newIdx value |> Array.ofList)))
                 |> Result.bind (fun rows ->
+                    let rowStore = table.RowsArray.ToBuilder()
+
+                    for rowId, row in rows do
+                        rowStore.[rowId] <- row
+
                     let candidate =
                         { table with
                             Columns = columnsExcludingSelf |> insertAt newIdx newDef
-                            RowsArray = PagedVector.ofSeq rows }
+                            RowsArray = rowStore.DrainToImmutable() }
 
                     // A narrowing re-coercion that folds two unique-key
                     // values together must fail with 1062 (MySQL errors even
@@ -2173,7 +2092,7 @@ let private applyAlterAction (strict: bool) (table: Table) (action: AlterAction)
                             let rec loop seen remaining =
                                 match remaining with
                                 | [] -> None
-                                | (row: Value[]) :: rest ->
+                                | (_, row: Value[]) :: rest ->
                                     match encodeConstraintKey candidate.Columns idxs row with
                                     | Some key when Set.contains key seen ->
                                         let value = idxs |> List.map (fun i -> row.[i] |> toText |> Option.defaultValue "NULL") |> String.concat "-"
@@ -2445,9 +2364,11 @@ let private insertCore
             normalizeTableName foreignKey.RefTable = tableKey
             && not (foreignKeyLookups |> Map.containsKey foreignKey.Name))
 
+    let rows = table.RowsArray.ToBuilder()
+
     let step acc (rowValues: Value list) =
         acc
-        |> Result.bind (fun (acceptedRev: Value[] list, nextAutoId, firstAuto, lastExplicit, index: Map<string, Map<string, int>>) ->
+        |> Result.bind (fun (acceptedRev: Value[] list, nextAutoId, firstAuto, lastExplicit, index: Map<string, Map<string, RowId>>) ->
             if List.length rowValues <> List.length idxs then
                 Error(ColumnCountMismatch(List.length idxs, List.length rowValues))
             else
@@ -2524,14 +2445,8 @@ let private insertCore
                         |> Option.bind (fun indices -> encodeConstraintKey table.Columns indices candidate)
                         |> Option.iter (fun key -> parentKeySourceAdd key lookup)
 
-                    // Prepending is O(1); reverse once after the fold so
-                    // externally observable insertion and commit-event
-                    // order remains unchanged. `candidate` lands at
-                    // `table.RowsArray.Length + (rows already accepted this
-                    // statement)` — every earlier row already occupies its
-                    // own slot, appended rows never shift an existing one.
-                    let position = table.RowsArray.Length + List.length acceptedRev
-                    Ok(candidate :: acceptedRev, nextAutoId', firstAuto', lastExplicit', reindexRow table.Columns uniqueGroups None (Some(position, candidate)) index)
+                    let rowId = rows.Add candidate
+                    Ok(candidate :: acceptedRev, nextAutoId', firstAuto', lastExplicit', reindexRow table.Columns uniqueGroups None (Some(rowId, candidate)) index)
                 | Error _ when ignoreErrors -> Ok(acceptedRev, nextAutoId, firstAuto, lastExplicit, index)
                 | Error e -> Error e)
 
@@ -2540,7 +2455,7 @@ let private insertCore
     |> Result.map (fun (acceptedRev, nextAutoId', firstAuto, lastExplicit, index) ->
         let accepted = List.rev acceptedRev
         let firstAssigned = Option.orElse lastExplicit firstAuto
-        let table' = { table with RowsArray = table.RowsArray.AddRange accepted; NextAutoId = nextAutoId'; UniqueIndex = index }
+        let table' = { table with RowsArray = rows.DrainToImmutable(); NextAutoId = nextAutoId'; UniqueIndex = index }
         Map.add tableKey table' db, (Option.defaultValue 0L firstAssigned, firstAuto, List.length accepted, accepted))
 
 /// Inserts rows built from `columns` and matching value lists, applying
@@ -2715,21 +2630,22 @@ and private cascadeUpdateVisitedFrom
                                     | Some "CASCADE" ->
                                         let visited' = visited |> Map.add childKey (alreadyVisited @ matching)
                                         let childGroups = uniqueKeyGroups childTbl
+                                        let rows = childTbl.RowsArray.ToBuilder()
 
-                                        let rewritten, rowChanges, index =
-                                            childTbl.RowsArray
-                                            |> Seq.indexed
+                                        let rowChanges, index =
+                                            childTbl.RowsArray.Indexed
                                             |> Seq.fold
-                                                (fun (rows, chg, index) (pos, row) ->
+                                                (fun (changes, index) (rowId, row) ->
                                                     if isChild row then
                                                         let row' = Array.copy row
                                                         List.iter2 (fun i v -> row'.[i] <- v) childIdxs newKey
-                                                        row' :: rows, (row, row') :: chg, reindexRow childTbl.Columns childGroups (Some row) (Some(pos, row')) index
+                                                        rows.[rowId] <- row'
+                                                        (row, row') :: changes, reindexRow childTbl.Columns childGroups (Some row) (Some(rowId, row')) index
                                                     else
-                                                        row :: rows, chg, index)
-                                                ([], [], childTbl.UniqueIndex)
+                                                        changes, index)
+                                                ([], childTbl.UniqueIndex)
 
-                                        let d' = Map.add childKey { childTbl with RowsArray = List.rev rewritten |> PagedVector.ofSeq; UniqueIndex = index } d
+                                        let d' = Map.add childKey { childTbl with RowsArray = rows.DrainToImmutable(); UniqueIndex = index } d
                                         let changes' = changes |> Map.add childKey ((changes |> Map.tryFind childKey |> Option.defaultValue []) @ List.rev rowChanges)
 
                                         List.rev rowChanges
@@ -2744,21 +2660,22 @@ and private cascadeUpdateVisitedFrom
                                         | Some i -> Error(NotNullViolation childTbl.Columns.[i].Name)
                                         | None ->
                                             let childGroups = uniqueKeyGroups childTbl
+                                            let rows = childTbl.RowsArray.ToBuilder()
 
-                                            let blanked, rowChanges, index =
-                                                childTbl.RowsArray
-                                                |> Seq.indexed
+                                            let rowChanges, index =
+                                                childTbl.RowsArray.Indexed
                                                 |> Seq.fold
-                                                    (fun (rows, chg, index) (pos, row) ->
+                                                    (fun (changes, index) (rowId, row) ->
                                                         if isChild row then
                                                             let row' = Array.copy row
                                                             childIdxs |> List.iter (fun i -> row'.[i] <- VNull)
-                                                            row' :: rows, (row, row') :: chg, reindexRow childTbl.Columns childGroups (Some row) (Some(pos, row')) index
+                                                            rows.[rowId] <- row'
+                                                            (row, row') :: changes, reindexRow childTbl.Columns childGroups (Some row) (Some(rowId, row')) index
                                                         else
-                                                            row :: rows, chg, index)
-                                                    ([], [], childTbl.UniqueIndex)
+                                                            changes, index)
+                                                    ([], childTbl.UniqueIndex)
 
-                                            let d' = Map.add childKey { childTbl with RowsArray = List.rev blanked |> PagedVector.ofSeq; UniqueIndex = index } d
+                                            let d' = Map.add childKey { childTbl with RowsArray = rows.DrainToImmutable(); UniqueIndex = index } d
                                             let changes' = changes |> Map.add childKey ((changes |> Map.tryFind childKey |> Option.defaultValue []) @ List.rev rowChanges)
 
                                             Ok(d', visited |> Map.add childKey (alreadyVisited @ matching), changes')
@@ -2846,32 +2763,17 @@ and private upsertRowsInTable
                 |> Result.bind (fun idxs ->
                     let uniqueGroups = uniqueKeyGroups table
 
-                    // A statement-local working copy of the table's existing
-                    // rows, rewritten in place as `ON DUPLICATE KEY UPDATE`
-                    // matches land — `current.[pos]` is then an O(1) "what
-                    // does this row hold right now" read/write instead of an
-                    // O(table size) `List.map`/`List.item` per matched
-                    // candidate. Never shared or exposed outside this
-                    // function; the fold below still reports every actual
-                    // change (`updated`/`inserted`) as pure `Result` data, so
-                    // callers see nothing of the mutation.
-                    let current : Value[][] = table.RowsArray |> Seq.toArray
-                    let newRows = ResizeArray<Value[]>()
+                    let rows = table.RowsArray.ToBuilder()
 
                     // The running index (seeded from `table.UniqueIndex`,
                     // rekeyed after every matched/inserted candidate) finds
                     // the one row (if any) sharing a key with `candidate` in
-                    // O(log n) per group instead of scanning `current`/
-                    // `newRows` — a later candidate in the same batch still
-                    // sees an earlier one's rewrite/insert, since both go
-                    // through the same rekeying. A position `>= current.Length`
-                    // is a row this same batch just inserted.
-                    let findMatch (index: Map<string, Map<string, int>>) (candidate: Value[]) : (int * Value[]) option =
+                    let findMatch (index: Map<string, Map<string, RowId>>) (candidate: Value[]) : (RowId * Value[]) option =
                         uniqueGroups
                         |> List.tryPick (fun (name, idxs) ->
                             encodeConstraintKey table.Columns idxs candidate
                             |> Option.bind (fun k -> Map.tryFind k (Map.find name index))
-                            |> Option.map (fun pos -> pos, (if pos < current.Length then current.[pos] else newRows.[pos - current.Length])))
+                            |> Option.map (fun rowId -> rowId, rows.[rowId]))
 
                     let step acc (rowValues: Value list) =
                         acc
@@ -2882,7 +2784,7 @@ and private upsertRowsInTable
                                   affected,
                                   inserted: Value[] list,
                                   updated: (Value[] * Value[]) list,
-                                  index: Map<string, Map<string, int>>,
+                                  index: Map<string, Map<string, RowId>>,
                                   cascadeDb: Database,
                                   visited: Map<string, Value[] list>,
                                   cascaded: Map<string, (Value[] * Value[]) list>) ->
@@ -2942,10 +2844,7 @@ and private upsertRowsInTable
                                                      else
                                                          Ok(cascadeDb, visited, cascaded))
                                                     |> Result.map (fun (cascadeDb', visited', cascaded') ->
-                                                        if pos < current.Length then
-                                                            current.[pos] <- applied
-                                                        else
-                                                            newRows.[pos - current.Length] <- applied
+                                                        rows.[pos] <- applied
 
                                                         // MySQL's `ON DUPLICATE KEY UPDATE`
                                                         // row-count rule: a match that actually
@@ -2996,8 +2895,7 @@ and private upsertRowsInTable
                                                         | Some(false, v) -> firstAuto, Some v
                                                         | None -> firstAuto, lastExplicit
 
-                                                    let position = current.Length + newRows.Count
-                                                    newRows.Add candidate
+                                                    let rowId = rows.Add candidate
 
                                                     nextAutoId',
                                                     firstAuto',
@@ -3005,7 +2903,7 @@ and private upsertRowsInTable
                                                     affected + 1,
                                                     candidate :: inserted,
                                                     updated,
-                                                    reindexRow table.Columns uniqueGroups None (Some(position, candidate)) index,
+                                                    reindexRow table.Columns uniqueGroups None (Some(rowId, candidate)) index,
                                                     cascadeDb,
                                                     visited,
                                                     cascaded))))
@@ -3013,7 +2911,7 @@ and private upsertRowsInTable
                     rowsIn
                     |> foldWithCancellation step (Ok(table.NextAutoId, None, None, 0, [], [], table.UniqueIndex, db, Map.empty, Map.empty))
                     |> Result.map (fun (nextAutoId', firstAuto, lastExplicit, affected, inserted, updated, index, cascadeDb, _visited, cascaded) ->
-                        let finalRows = Seq.append current newRows |> PagedVector.ofSeq
+                        let finalRows = rows.DrainToImmutable()
 
                         Map.add key { table with RowsArray = finalRows; NextAutoId = nextAutoId'; UniqueIndex = index } cascadeDb,
                         cascaded,
@@ -3055,28 +2953,22 @@ let rec private cascadeDeleteVisited
     let alreadyVisited = visited |> Map.tryFind tableKey |> Option.defaultValue []
     let toDelete = toDelete |> List.filter (fun row -> not (alreadyVisited |> List.exists ((=) row)))
 
-    // Removes one row per entry in `toDelete`, not every structurally-equal
-    // row: two identical rows are distinct rows, and a `DELETE ... LIMIT n`
-    // (or a cascaded child match) may legitimately match only one of them.
-    // Compacts rather than tombstoning — every row after a deleted one shifts
-    // down one slot, so `UniqueIndex`'s positions are rebuilt wholesale
-    // (`reindexTable`) instead of patched incrementally; `Rows.Length` stays
-    // the table's true row count for every other reader (`information_schema`,
-    // `Persistence`'s snapshot) instead of splitting into a logical vs.
-    // physical length.
     let removeFrom (d: Database) =
         let t = Map.find tableKey d
+        let rows = t.RowsArray.ToBuilder()
 
-        let kept, _ =
-            t.RowsArray
+        let index, _ =
+            t.RowsArray.Indexed
             |> Seq.fold
-                (fun (kept, pending) row ->
+                (fun (index, pending) (rowId, row) ->
                     match pending |> List.tryFindIndex ((=) row) with
-                    | Some i -> kept, List.removeAt i pending
-                    | None -> row :: kept, pending)
-                ([], toDelete)
+                    | Some pendingIndex ->
+                        rows.Remove rowId |> ignore
+                        reindexRow t.Columns (uniqueKeyGroups t) (Some row) None index, List.removeAt pendingIndex pending
+                    | None -> index, pending)
+                (t.UniqueIndex, toDelete)
 
-        Map.add tableKey (reindexTable { t with RowsArray = List.rev kept |> PagedVector.ofSeq }) d
+        Map.add tableKey { t with RowsArray = rows.DrainToImmutable(); UniqueIndex = index } d
 
     if toDelete.IsEmpty then
         Ok(db, visited, blanked)
@@ -3126,31 +3018,32 @@ let rec private cascadeDeleteVisited
                                 | None ->
                                     let childGroups = uniqueKeyGroups childTbl
 
-                                    // Blanking rewrites a row's values in place — unlike a
-                                    // delete, every row keeps its position, so the index can
-                                    // still be rekeyed incrementally instead of a full rebuild.
+                                    // Blanking retains row identities, so unique indexes can
+                                    // be rekeyed without a full rebuild.
                                     // `changes` pairs each blanked row's before/after values —
                                     // the WAL needs the exact same `RowsUpdated` shape a plain
                                     // `UPDATE` reports, or replay resurrects the pre-blank FK
                                     // value.
-                                    let blankedRows, changes, index =
-                                        childTbl.RowsArray
-                                        |> Seq.indexed
+                                    let rows = childTbl.RowsArray.ToBuilder()
+
+                                    let changes, index =
+                                        childTbl.RowsArray.Indexed
                                         |> Seq.fold
-                                            (fun (rows, changes, index) (pos, row) ->
+                                            (fun (changes, index) (rowId, row) ->
                                                 if isChild row then
                                                     let row' = Array.copy row
                                                     childIdxs |> List.iter (fun i -> row'.[i] <- VNull)
-                                                    row' :: rows, (row, row') :: changes, reindexRow childTbl.Columns childGroups (Some row) (Some(pos, row')) index
+                                                    rows.[rowId] <- row'
+                                                    (row, row') :: changes, reindexRow childTbl.Columns childGroups (Some row) (Some(rowId, row')) index
                                                 else
-                                                    row :: rows, changes, index)
-                                            ([], [], childTbl.UniqueIndex)
+                                                    changes, index)
+                                            ([], childTbl.UniqueIndex)
 
                                     let blanked =
                                         blanked
                                         |> Map.add childKey ((blanked |> Map.tryFind childKey |> Option.defaultValue []) @ List.rev changes)
 
-                                    Ok(Map.add childKey { childTbl with RowsArray = List.rev blankedRows |> PagedVector.ofSeq; UniqueIndex = index } d, visited, blanked)
+                                    Ok(Map.add childKey { childTbl with RowsArray = rows.DrainToImmutable(); UniqueIndex = index } d, visited, blanked)
                             | _ -> Error(ForeignKeyRestrict fk.Name))
 
             referencingForeignKeys db tableKey
@@ -3246,23 +3139,23 @@ let replaceRows
                                                 encodeConstraintKey table.Columns indices candidate
                                                 |> Option.bind (fun encoded ->
                                                     Map.tryFind encoded (Map.find name table.UniqueIndex)
-                                                    |> Option.map (fun position -> groupIndex, position, table.RowsArray.[position])))
+                                                    |> Option.map (fun rowId -> groupIndex, rowId, table.RowsArray.[rowId])))
                                             |> List.fold
-                                                (fun (seen, matches) ((_, position, _) as matched) ->
-                                                    if Set.contains position seen then
+                                                (fun (seen, matches) ((_, rowId, _) as matched) ->
+                                                    if Set.contains rowId seen then
                                                         seen, matches
                                                     else
-                                                        Set.add position seen, matched :: matches)
+                                                        Set.add rowId seen, matched :: matches)
                                                 (Set.empty, [])
                                             |> snd
                                             |> List.rev
 
                                         let optimizedConflict =
                                             match List.tryLast conflicts with
-                                            | Some(groupIndex, position, existing)
+                                            | Some(groupIndex, rowId, existing)
                                                 when groupIndex = uniqueGroups.Length - 1
                                                      && (referencingForeignKeys db key).IsEmpty ->
-                                                Some(position, existing)
+                                                Some(rowId, existing)
                                             | _ -> None
 
                                         let deletedMatches =
@@ -3277,38 +3170,33 @@ let replaceRows
                                             let target = Map.find key deletedDb
                                             let target', writeEvent, weight =
                                                 match optimizedConflict with
-                                                | Some(position, existing) ->
-                                                    let position =
-                                                        position
-                                                        - (deletedMatches
-                                                           |> List.sumBy (fun (_, deletedPosition, _) -> if deletedPosition < position then 1 else 0))
-
+                                                | Some(rowId, existing) ->
                                                     let changed = existing <> candidate
 
                                                     { target with
-                                                        RowsArray = target.RowsArray.SetItem(position, candidate)
+                                                        RowsArray = target.RowsArray.SetItem(rowId, candidate)
                                                         NextAutoId = nextAutoId'
                                                         UniqueIndex =
                                                             reindexRow
                                                                 target.Columns
                                                                 (uniqueKeyGroups target)
                                                                 (Some existing)
-                                                                (Some(position, candidate))
+                                                                (Some(rowId, candidate))
                                                                 target.UniqueIndex },
                                                     (if changed then Some(RowsUpdated(dbName, tableName, [ existing, candidate ])) else None),
                                                     deletedConflicts.Length + 1 + (if changed then 1 else 0)
                                                 | None ->
-                                                    let position = target.RowsArray.Length
+                                                    let rowId, rows = target.RowsArray.Append candidate
 
                                                     { target with
-                                                        RowsArray = target.RowsArray.Add candidate
+                                                        RowsArray = rows
                                                         NextAutoId = nextAutoId'
                                                         UniqueIndex =
                                                             reindexRow
                                                                 target.Columns
                                                                 (uniqueKeyGroups target)
                                                                 None
-                                                                (Some(position, candidate))
+                                                                (Some(rowId, candidate))
                                                                 target.UniqueIndex },
                                                     Some(RowsInserted(dbName, tableName, [ candidate ])),
                                                     deletedConflicts.Length + 1
@@ -3420,7 +3308,7 @@ let deleteRows
 /// element). As with `deleteRows`, `predicate` and `updater` both return
 /// `Result` rather than defaulting a failure away.
 ///
-/// `candidates`, when given, is the exact `(position, row)` set to visit —
+/// `candidates`, when given, is the exact `(RowId, row)` set to visit —
 /// `Executor`'s point-lookup narrowing (`tryPointLookup`) already resolved
 /// these via the PK/UNIQUE index, so this fold doesn't re-scan `table.RowsArray`
 /// at all to find them; `predicate` still re-checks each one for
@@ -3428,15 +3316,13 @@ let deleteRows
 /// match, same discipline `tryPointLookup` documents), so it never pays for
 /// rows that weren't candidates. `None` (a WHERE that didn't narrow, or
 /// none at all) falls back to visiting every row of `table.RowsArray`,
-/// `predicate` deciding which ones qualify — the rewrite lands in a
-/// `Builder` (`Rows.ToBuilder()`, one `Array.Copy`) touched only at the
-/// positions that actually change, instead of a full `list` rebuild
-/// threaded through the whole fold.
+/// `predicate` deciding which ones qualify. The private builder copies only
+/// pages containing changed rows.
 let updateRows
     (store: Store)
     (dbName: string)
     (tableName: string)
-    (candidates: (int * Value[]) list option)
+    (candidates: (RowId * Value[]) list option)
     (predicate: Value[] -> Result<bool, StorageError>)
     (updater: Value[] -> Result<Value[], StorageError>)
     : Result<int, StorageError> =
@@ -3449,51 +3335,26 @@ let updateRows
                 |> Result.bind (fun table ->
                     let uniqueGroups = uniqueKeyGroups table
                     let checkFks = store.ForeignKeyChecks
-                    // Statement-local; discarded (never `DrainToImmutable`d)
-                    // if the fold below ends in `Error`, so a mid-statement
-                    // failure never surfaces a partial rewrite — same
-                    // all-or-nothing guarantee the old cons-then-reverse fold
-                    // gave, just backed by a mutable builder instead of an
-                    // immutable accumulator.
+                    // Failed statements discard the private builder, keeping
+                    // partial page rewrites outside the published catalog.
                     let builder = table.RowsArray.ToBuilder()
 
-                    // `index` mirrors `table.UniqueIndex`, rekeyed one row at
-                    // a time (by its `Rows` position, stable across this
-                    // fold — only values change, not row order) as rows are
-                    // rewritten, so a later row's collision check still sees
-                    // this same statement's earlier rewrites.
-                    let step acc (rowPos, row) =
+                    let step acc (rowId, row) =
                         acc
                         |> Result.bind
                             (fun (changesRev: (Value[] * Value[]) list,
-                                  index: Map<string, Map<string, int>>,
+                                  index: Map<string, Map<string, RowId>>,
                                   cascadeDb: Database,
                                   visited: Map<string, Value[] list>,
                                   cascaded: Map<string, (Value[] * Value[]) list>) ->
-                            // `rowPos` may have been captured by a lock-free
-                            // point lookup outside any lock
-                            // (`tryUniqueLookup`, via `Executor.tryPointLookup`)
-                            // — a concurrent write since then (a DELETE
-                            // compacting an earlier row, say) can have shifted
-                            // `row` to a different slot, or removed it
-                            // entirely. Re-locate it by reference identity
-                            // under this call's lock before writing anything
-                            // at `rowPos`: still there, the fast path stands;
-                            // moved, a full-array identity scan finds where;
-                            // gone, there's nothing left to update — the same
-                            // outcome `predicate` returning false for a row it
-                            // no longer sees would give, rather than silently
-                            // clobbering whatever unrelated row now occupies
-                            // that slot.
-                            let rowPos =
-                                if rowPos < builder.Count && obj.ReferenceEquals(builder.[rowPos], row) then
-                                    Some rowPos
-                                else
-                                    seq { 0 .. builder.Count - 1 } |> Seq.tryFind (fun i -> obj.ReferenceEquals(builder.[i], row))
+                            let rowId =
+                                match builder.TryFind rowId with
+                                | Some current when obj.ReferenceEquals(current, row) -> Some rowId
+                                | _ -> None
 
-                            match rowPos with
+                            match rowId with
                             | None -> Ok(changesRev, index, cascadeDb, visited, cascaded)
-                            | Some rowPos ->
+                            | Some rowId ->
                                 predicate row
                                 |> Result.bind (fun keep ->
                                     if not keep then
@@ -3504,7 +3365,7 @@ let updateRows
                                         |> Result.bind (fun newRow ->
                                             // A group's key only collides against
                                             // some *other* row still holding it —
-                                            // `row`'s own position (about to be
+                                            // `row`'s own identity (about to be
                                             // rekeyed below) doesn't count.
                                             let collision =
                                                 uniqueGroups
@@ -3512,7 +3373,7 @@ let updateRows
                                                     match encodeConstraintKey table.Columns idxs newRow with
                                                     | Some k ->
                                                         match Map.tryFind k (Map.find name index) with
-                                                        | Some pos when pos <> rowPos ->
+                                                        | Some otherRowId when otherRowId <> rowId ->
                                                             let value = idxs |> List.map (fun i -> newRow.[i] |> toText |> Option.defaultValue "NULL") |> String.concat "-"
                                                             Some(DuplicateKey(name, value))
                                                         | _ -> None
@@ -3530,13 +3391,13 @@ let updateRows
                                                  else
                                                      Ok(cascadeDb, visited, cascaded))
                                                 |> Result.map (fun (cascadeDb', visited', cascaded') ->
-                                                    newRow, reindexRow table.Columns uniqueGroups (Some row) (Some(rowPos, newRow)) index, cascadeDb', visited', cascaded'))
+                                                    newRow, reindexRow table.Columns uniqueGroups (Some row) (Some(rowId, newRow)) index, cascadeDb', visited', cascaded'))
                                         |> Result.map (fun (newRow, index', cascadeDb', visited', cascaded') ->
-                                            builder.[rowPos] <- newRow
+                                            builder.[rowId] <- newRow
                                             (if newRow <> row then (row, newRow) :: changesRev else changesRev), index', cascadeDb', visited', cascaded')))
 
                     candidates
-                    |> Option.defaultWith (fun () -> table.RowsArray |> Seq.indexed |> List.ofSeq)
+                    |> Option.defaultWith (fun () -> table.RowsArray.Indexed |> List.ofSeq)
                     |> foldWithCancellation step (Ok([], table.UniqueIndex, db, Map.empty, Map.empty))
                     // `DrainToImmutable`, not `MoveToImmutable`: the latter
                     // demands Count = Capacity, which an empty table's
@@ -3629,7 +3490,7 @@ let replaceTablesForReplay (store: Store) (dbName: string) (tableName: string) (
     | true, slot ->
         match slot.Value |> Map.tryFind key with
         | None -> onMissing (sprintf "unknown table '%s.%s'" dbName tableName)
-        | Some table -> slot.Value <- slot.Value |> Map.add key { table with RowsArray = table.RowsArray |> List.ofSeq |> f |> PagedVector.ofSeq }
+        | Some table -> slot.Value <- slot.Value |> Map.add key { table with RowsArray = table.RowsArray |> List.ofSeq |> f |> RowStore.ofSeq }
 
 /// Puts already-committed rows back exactly as they were, for WAL replay.
 /// Deliberately not `insertRows`: that enforces unique keys against indexes

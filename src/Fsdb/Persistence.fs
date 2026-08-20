@@ -905,7 +905,7 @@ let private decodeTable (r: #IReader) : Table =
           TableCharset = tableCharset
           TableCollation = tableCollation
           CreateTime = createTime
-          RowsArray = PagedVector.ofSeq rows
+          RowsArray = RowStore.ofSeq rows
           NextAutoId = nextAutoId
           UniqueIndex = Map.empty }
 
