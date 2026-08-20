@@ -46,6 +46,8 @@ module AstKind =
         | Revoke _ -> "revoke"
         | CreateTrigger _ -> "create_trigger"
         | DropTrigger _ -> "drop_trigger"
+        | CreateView _ -> "create_view"
+        | DropView _ -> "drop_view"
         | Explain statement -> "explain_" + ofStatement statement
 
 [<RequireQualifiedAccess>]
