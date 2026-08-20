@@ -111,7 +111,10 @@ cache flush); a plain libc `fsync` — MySQL's own macOS default — drops it to
 streams, so what remains is engine cost: fsdb's in-memory single INSERT is
 276 µs and the WAL adds ~26 µs on top.
 
-### Concurrency throughput (`4897506-load.md`, 8 workers, ops/sec)
+### Concurrency throughput
+
+The broad eight-worker baseline in `4897506-load.md` predates optimistic
+row-conflict merging:
 
 | Workload | fsdb | mysql |
 |---|---:|---:|
@@ -119,9 +122,21 @@ streams, so what remains is engine cost: fsdb's in-memory single INSERT is
 | insert | 5,673 | 22,703 |
 | mixed read/write | 20,537 | 47,801 |
 
-These figures predate optimistic row-conflict merging. They remain useful as
-the serialized-write baseline; use a current `just bench-load` result when
-evaluating concurrent write scaling.
+The current
+[transaction-only scaling run](results/6a5d197-transaction-scale.md) measures
+disjoint two-row transactions after changed-page discovery and incremental
+index maintenance:
 
-Add a column here per milestone snapshot; keep intermediate runs in
+| Workers | fsdb ops/sec | MySQL ops/sec | fsdb/MySQL |
+|---:|---:|---:|---:|
+| 1 | 3,719 | 4,259 | 0.87x |
+| 2 | 3,248 | 7,204 | 0.45x |
+| 4 | 4,693 | 9,833 | 0.48x |
+| 8 | 2,672 | 11,755 | 0.23x |
+
+The multi-worker samples have high variance, recorded in the result file, so
+the table establishes scale and remaining contention rather than a stable
+regression threshold. Use `just bench-load-scale` for a fresh comparison.
+
+Add a column here for each representative snapshot; keep intermediate runs in
 `results/` without a column.

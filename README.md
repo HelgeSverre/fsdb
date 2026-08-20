@@ -163,9 +163,11 @@ Databases and tables live in a value-swapped catalog. A transaction establishes
 a repeatable-read snapshot on its first database statement and keeps writes
 private until commit. Commit performs a row-level three-way merge: disjoint
 concurrent changes combine, while overlapping changes fail with MySQL's
-retryable 1205 error. PK/UNIQUE lookups go through maps keyed by each column's
-collation-folded encoding, so `utf8mb4_0900_ai_ci` keys collide exactly as
-MySQL's do. Equi-joins hash-join; everything else is a scan.
+retryable 1205 error. Immutable row pages let the merge inspect only pages
+changed from the transaction snapshot and maintain indexes incrementally.
+PK/UNIQUE lookups go through maps keyed by each column's collation-folded
+encoding, so `utf8mb4_0900_ai_ci` keys collide exactly as MySQL's do.
+Equi-joins hash-join; everything else is a scan.
 
 ### Collations & charsets
 
@@ -429,11 +431,14 @@ as the model.
 8.4, same schema, same seeded data, same queries, via BenchmarkDotNet.
 
 ```sh
-just bench         # full latency suite, results -> benchmarks/results/<git-sha>.md
-just bench-quick   # ShortRun job for fast local iteration, no results file
-just bench-durable # durability-matched: fsdb WAL vs MySQL fsync/no-fsync
-just bench-scale   # latency suite at 100k users / 500k orders
-just bench-load    # N-writer throughput under concurrency (ops/sec)
+just bench              # full latency suite, results -> benchmarks/results/<git-sha>.md
+just bench-features     # recent SQL-feature latency subset
+just bench-quick        # ShortRun job for fast local iteration, no results file
+just bench-durable      # durability-matched: fsdb WAL vs MySQL fsync/no-fsync
+just bench-scale        # latency suite at 100k users / 500k orders
+just bench-load         # N-writer throughput under concurrency (ops/sec)
+just bench-load-scale    # throughput at 1/2/4/8/16 workers
+just bench-comprehensive # all latency, durability, scale, and load suites
 ```
 
 Both servers start ad hoc (no brew services) and shut down after. fsdb

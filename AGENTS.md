@@ -14,7 +14,9 @@ its sqlite baseline, fsdb must match real MySQL 8.4.
 - `just run [--port … --listen … --data-dir …]` — start server (default 127.0.0.1:3307)
 - `just client [port=…]` / `just smoke [port=…]` — mysql shell / liveness probe
 - `just coverage` — branch coverage (needs `dotnet tool install -g coverlet.console` once)
-- `just bench` / `bench-quick` / `bench-durable` / `bench-scale` / `bench-load` — vs MySQL 8.4
+- `just bench` / `bench-features` / `bench-quick` / `bench-durable` /
+  `bench-scale` / `bench-load` / `bench-load-scale` / `bench-comprehensive` —
+  vs MySQL 8.4
 
 Run one test (the `test` recipe passes no args through):
 
