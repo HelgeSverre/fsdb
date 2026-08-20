@@ -3457,10 +3457,10 @@ let private mergeDatabaseSlot (dbName: string) (slot: Database ref) (baseDb: Dat
                     |> Set.fold
                         (fun acc tableName ->
                             match Map.tryFind tableName baseDb, Map.tryFind tableName batchDb, Map.tryFind tableName liveDb with
-                            | Some baseTable, Some batchTable, _ when baseTable = batchTable -> acc
-                            | Some baseTable, None, Some liveTable when liveTable = baseTable -> Map.remove tableName acc
+                            | Some baseTable, Some batchTable, _ when obj.ReferenceEquals(baseTable, batchTable) -> acc
+                            | Some baseTable, None, Some liveTable when obj.ReferenceEquals(liveTable, baseTable) -> Map.remove tableName acc
                             | None, Some batchTable, None -> Map.add tableName batchTable acc
-                            | Some baseTable, Some batchTable, Some liveTable when liveTable = baseTable -> Map.add tableName batchTable acc
+                            | Some baseTable, Some batchTable, Some liveTable when obj.ReferenceEquals(liveTable, baseTable) -> Map.add tableName batchTable acc
                             | Some baseTable, Some batchTable, Some liveTable when sameTableSchema baseTable batchTable ->
                                 Map.add tableName (mergeRows dbName baseTable batchTable liveTable) acc
                             | _ -> raise (LockWaitTimeout dbName))
@@ -3485,7 +3485,7 @@ let mergeCatalogInto (store: Store) (baseCatalog: Catalog) (batchCatalog: Catalo
             if not (store.Databases.TryAdd(dbName, ref batchDb)) then
                 raise (LockWaitTimeout dbName)
         | None, None -> ()
-        | Some baseDb, Some batchDb when baseDb = batchDb -> ()
+        | Some baseDb, Some batchDb when obj.ReferenceEquals(baseDb, batchDb) -> ()
         | Some baseDb, Some batchDb ->
             let slot = store.Databases.GetOrAdd(dbName, (fun _ -> ref Map.empty))
             mergeDatabaseSlot dbName slot baseDb batchDb
