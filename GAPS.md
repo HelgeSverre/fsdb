@@ -44,7 +44,7 @@ accepted (marked `ponytail:` in source), or recorded only in
 | Wire protocol | Handshake through COM_STMT_EXECUTE solid | No TLS, compression, cursors, LOAD DATA, multi-statement |
 | Auth & privileges | Static privileges enforced incl. subqueries | Name-only host matching; no roles/dynamic/column privileges |
 | Metadata | 23 INFORMATION_SCHEMA views, 8 mysql.* tables | Storage statistics are stand-ins; many SHOW forms missing |
-| Server admin | KILL, limits, config file parsing | No replication/binlog/logging files; no SHUTDOWN statement |
+| Server admin | KILL, SHUTDOWN, limits, config file parsing | No replication/binlog/logging files |
 
 ## 1. SQL statements and parser
 
