@@ -1269,6 +1269,13 @@ let private jsonSearchFn: Scalar =
         | _ -> VNull
     | _ -> VNull
 
+let private weightStringFn: Scalar =
+    function
+    | [ value ] when not (anyNull [ value ]) ->
+        let key = Collation.defaultCollation.KeyOf(req value)
+        VBytes(Convert.FromHexString key)
+    | _ -> VNull
+
 /// `CONVERT(expr USING charset)` — MySQL's transcode form, desugared by the
 /// parser into this scalar (second argument = the charset name). Same
 /// write-time semantics as column charsets: latin1 is cp1252 (so `€`
@@ -3697,6 +3704,7 @@ let builtins: Registry =
     |> registerScalar "JSON_TYPE" jsonTypeFn
     |> registerScalar "JSON_KEYS" jsonKeysFn
     |> registerScalar "JSON_SEARCH" jsonSearchFn
+    |> registerScalar "WEIGHT_STRING" weightStringFn
     // Dates
     |> registerScalar "DATE_ADD" (dateAddCore 1.0)
     |> registerScalar "TIMESTAMPADD" timestampAddFn

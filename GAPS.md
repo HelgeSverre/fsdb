@@ -138,7 +138,7 @@ CURRENT_USER/USER/SESSION_USER.
 | Missing family | Functions | Impact |
 |---|---|---|
 | Crypto | `AES_ENCRYPT AES_DECRYPT ENCODE DECODE`, entire asymmetric family | medium |
-| Compression/weight | `WEIGHT_STRING` | low |
+| Weight-string clauses | `WEIGHT_STRING(... AS CHAR/BINARY, LEVEL ...)` | low |
 | JSON schema | `JSON_SCHEMA_VALID JSON_SCHEMA_VALIDATION_REPORT` | medium |
 | Misc | `BENCHMARK SLEEP COERCIBILITY DEFAULT()` outside REPLACE-SET | low |
 | Geometry | all `ST_*`/`GeometryCollection` functions and types | low |

@@ -661,6 +661,13 @@ let tests =
                           Expect.equal result VNull "a wildcard-heavy non-match stays a non-match"
                           Expect.isLessThan timer.Elapsed (TimeSpan.FromSeconds 1.0) "wildcards are matched iteratively" ]
 
+                testCase "WEIGHT_STRING exposes the default collation key"
+                <| fun _ ->
+                    let weight value = call "WEIGHT_STRING" [ VString value ]
+                    Expect.equal (weight "Åge") (weight "age") "default collation folds case and accents"
+                    Expect.notEqual (weight "age") (weight "axe") "different primary weights remain distinct"
+                    Expect.equal (call "WEIGHT_STRING" [ VNull ]) VNull "NULL propagates"
+
                 testList
                     "Dates"
                     [ testCase "NOW truncates to whole seconds (MySQL NOW() has precision 0)"
