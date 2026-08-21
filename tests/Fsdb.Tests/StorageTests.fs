@@ -1328,6 +1328,60 @@ let tests =
                     | Ok() -> ()
                     | Error e -> failtestf "expected Ok, got %A" e
 
+                testCase "a secondary ordered index follows inserted, updated, and deleted row identities"
+                <| fun _ ->
+                    let store = withUsersTable ()
+                    let index = { Name = "idx_age"; Columns = [ "age" ]; Unique = false; Kind = BTree }
+
+                    match alterTable store defaultDatabase "users" [ AddIndex index ] with
+                    | Ok() -> ()
+                    | Error e -> failtestf "expected Ok, got %A" e
+
+                    let reindexesBefore = reindexCallCount ()
+
+                    insertRows
+                        store
+                        defaultDatabase
+                        "users"
+                        None
+                        [ [ VInt 1L; VString "alice"; VInt 30L ]
+                          [ VInt 2L; VString "bob"; VInt 25L ]
+                          [ VInt 3L; VString "carol"; VInt 30L ] ]
+                    |> function
+                        | Ok _ -> ()
+                        | Error e -> failtestf "expected Ok, got %A" e
+
+                    updateRows
+                        store
+                        defaultDatabase
+                        "users"
+                        None
+                        (fun row -> Ok(row.[0] = VInt 2L))
+                        (fun row -> Ok [| row.[0]; row.[1]; VInt 26L |])
+                    |> function
+                        | Ok _ -> ()
+                        | Error e -> failtestf "expected Ok, got %A" e
+
+                    deleteRows store defaultDatabase "users" (fun row -> Ok(row.[0] = VInt 1L))
+                    |> function
+                        | Ok _ -> ()
+                        | Error e -> failtestf "expected Ok, got %A" e
+
+                    let table =
+                        match tableSnapshot store defaultDatabase "users" with
+                        | Ok table -> table
+                        | Error e -> failtestf "expected table snapshot, got %A" e
+
+                    let entries =
+                        table.SecondaryOrder.["idx_age"]
+                        |> Map.toList
+                        |> List.map (fun (_key, rowIds) ->
+                            (rowIds |> Seq.map (fun rowId -> table.RowsArray.[rowId].[2]) |> Seq.head),
+                            (rowIds |> Seq.map (fun rowId -> table.RowsArray.[rowId].[0]) |> List.ofSeq))
+
+                    Expect.equal entries [ VInt 26L, [ VInt 2L ]; VInt 30L, [ VInt 3L ] ] "ordered buckets reflect the live rows"
+                    Expect.equal (reindexCallCount ()) reindexesBefore "point writes preserve ordered buckets incrementally"
+
                 testCase "AddIndex with Unique = true rejects existing duplicates instead of silently dropping rows from the index"
                 <| fun _ ->
                     let store = withUsersTable ()

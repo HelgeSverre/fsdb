@@ -110,6 +110,38 @@ let toMySqlError (err: StorageError) : int * string =
     // table exists but refuses writes".
     | VirtualTableReadOnly name -> 1036, sprintf "Table '%s' is read only" name
 
+let private compareIndexedValues (collationName: string option) (left: Value) (right: Value) =
+    match left, right with
+    | VString left, VString right ->
+        collationName
+        |> Option.bind Collation.tryFind
+        |> Option.defaultValue Collation.defaultCollation
+        |> fun collation -> collation.Compare left right
+    | _ -> compareTotal left right
+
+[<CustomEquality; CustomComparison>]
+type SecondaryOrderKey =
+    { CollationName: string option
+      Value: Value }
+
+    override this.Equals other =
+        match other with
+        | :? SecondaryOrderKey as other ->
+            this.CollationName = other.CollationName
+            && compareIndexedValues this.CollationName this.Value other.Value = 0
+        | _ -> false
+
+    override this.GetHashCode() = hash this.CollationName
+
+    interface IComparable with
+        member this.CompareTo other =
+            match other with
+            | :? SecondaryOrderKey as other ->
+                match Operators.compare this.CollationName other.CollationName with
+                | 0 -> compareIndexedValues this.CollationName this.Value other.Value
+                | comparison -> comparison
+            | _ -> invalidArg "other" "SecondaryOrderKey expected"
+
 /// A table's rows, newest last. `OriginalName` keeps the as-created casing
 /// for information_schema, even though the catalog keys tables by their
 /// lowercased name. `Indexes`' `UNIQUE` entries (plus the primary key) are
@@ -142,7 +174,8 @@ type Table =
       UniqueIndex: Map<string, Map<string, RowId>>
       /// One-column non-unique B-tree keys map equality keys to stable row
       /// identities. `Set` order follows row-store scan order.
-      SecondaryIndex: Map<string, Map<string, Set<RowId>>> }
+      SecondaryIndex: Map<string, Map<string, Set<RowId>>>
+      SecondaryOrder: Map<string, Map<SecondaryOrderKey, Set<RowId>>> }
 
     /// `RowsArray` as a plain list, in scan order — a fresh O(row count)
     /// copy on every access, for external validators/tools that walk a
@@ -1478,6 +1511,21 @@ let private rebuildSecondaryIndex (table: Table) : Map<string, Map<string, Set<R
         name, buckets)
     |> Map.ofList
 
+let private rebuildSecondaryOrder (table: Table) : Map<string, Map<SecondaryOrderKey, Set<RowId>>> =
+    secondaryKeyGroups table
+    |> List.map (fun (name, index) ->
+        let buckets =
+            table.RowsArray.Indexed
+            |> Seq.fold
+                (fun buckets (rowId, row) ->
+                    let key = { CollationName = table.Columns.[index].Collation; Value = row.[index] }
+                    let rowIds = buckets |> Map.tryFind key |> Option.defaultValue Set.empty
+                    Map.add key (Set.add rowId rowIds) buckets)
+                Map.empty
+
+        name, buckets)
+    |> Map.ofList
+
 /// Bumped once per `reindexTable` call — the full-scan rebuild it wraps is
 /// the O(table size) cost a replay must pay a constant number of times, not
 /// once per replayed event. `AsyncLocal`, not a plain mutable: Expecto runs
@@ -1499,7 +1547,8 @@ let reindexTable (table: Table) : Table =
     reindexCallCountLocal.Value <- reindexCallCountLocal.Value + 1
     { table with
         UniqueIndex = rebuildUniqueIndex table
-        SecondaryIndex = rebuildSecondaryIndex table }
+        SecondaryIndex = rebuildSecondaryIndex table
+        SecondaryOrder = rebuildSecondaryOrder table }
 
 let private sameTableSchema (left: Table) (right: Table) =
     left.OriginalName = right.OriginalName
@@ -1722,14 +1771,16 @@ let private sysTable (name: string) (columns: ColumnDef list) (rows: Value[] lis
           TableCollation = None
           CreateTime = DateTime.Now
           UniqueIndex = Map.empty
-          SecondaryIndex = Map.empty }
+          SecondaryIndex = Map.empty
+          SecondaryOrder = Map.empty }
 
     // `rebuildUniqueIndex` directly, not `reindexTable`: the latter bumps the
     // replay-cost counter tests use to catch per-event reindexing, and
     // bootstrap isn't replay.
     { table with
         UniqueIndex = rebuildUniqueIndex table
-        SecondaryIndex = rebuildSecondaryIndex table }
+        SecondaryIndex = rebuildSecondaryIndex table
+        SecondaryOrder = rebuildSecondaryOrder table }
 
 /// A registered virtual table dressed up as a rowless catalog `Table`, so
 /// the `SHOW COLUMNS`/`DESCRIBE`/`SHOW CREATE TABLE`/`SHOW INDEX` renderers
@@ -1862,7 +1913,8 @@ let private reindexRow
     (added: (RowId * Value[]) option)
     (uniqueIndex: Map<string, Map<string, RowId>>)
     (secondaryIndex: Map<string, Map<string, Set<RowId>>>)
-    : Map<string, Map<string, RowId>> * Map<string, Map<string, Set<RowId>>> =
+    (secondaryOrder: Map<string, Map<SecondaryOrderKey, Set<RowId>>>)
+    : Map<string, Map<string, RowId>> * Map<string, Map<string, Set<RowId>>> * Map<string, Map<SecondaryOrderKey, Set<RowId>>> =
     let uniqueIndex =
         uniqueGroups
         |> List.fold
@@ -1896,7 +1948,35 @@ let private reindexRow
                 Map.add name group accIndex)
             secondaryIndex
 
-    uniqueIndex, secondaryIndex
+    let secondaryOrder =
+        secondaryGroups
+        |> List.fold
+            (fun indexes (name, index) ->
+                let key (row: Value[]) = { CollationName = columns.[index].Collation; Value = row.[index] }
+                let buckets = Map.find name indexes
+
+                let buckets =
+                    removed
+                    |> Option.fold
+                        (fun buckets (rowId, row) ->
+                            let orderKey = key row
+                            let rowIds = buckets |> Map.tryFind orderKey |> Option.defaultValue Set.empty |> Set.remove rowId
+                            if rowIds.IsEmpty then Map.remove orderKey buckets else Map.add orderKey rowIds buckets)
+                        buckets
+
+                let buckets =
+                    added
+                    |> Option.fold
+                        (fun buckets (rowId, row) ->
+                            let orderKey = key row
+                            let rowIds = buckets |> Map.tryFind orderKey |> Option.defaultValue Set.empty |> Set.add rowId
+                            Map.add orderKey rowIds buckets)
+                        buckets
+
+                Map.add name buckets indexes)
+            secondaryOrder
+
+    uniqueIndex, secondaryIndex, secondaryOrder
 
 /// The parent table's persistent unique-key index for exactly the column
 /// order `refIdxs` resolves to, if one of its PK/UNIQUE groups matches —
@@ -2392,7 +2472,8 @@ let createTableSeeded
                                           TableCollation = tableCollation
                                           CreateTime = createTime
                                           UniqueIndex = Map.empty
-                                          SecondaryIndex = Map.empty }
+                                          SecondaryIndex = Map.empty
+                                          SecondaryOrder = Map.empty }
 
                                     Ok(Map.add key (reindexTable table) db, (createTime, columns))))
 
@@ -3147,7 +3228,7 @@ let private insertCore
 
     let step acc (rowValues: Value list) =
         acc
-        |> Result.bind (fun ((acceptedRev: Value[] list), (ignoredErrorsRev: StorageError list), nextAutoId, firstAuto, lastExplicit, index: Map<string, Map<string, RowId>>, secondaryIndex) ->
+        |> Result.bind (fun ((acceptedRev: Value[] list), (ignoredErrorsRev: StorageError list), nextAutoId, firstAuto, lastExplicit, index: Map<string, Map<string, RowId>>, secondaryIndex, secondaryOrder) ->
             if List.length rowValues <> List.length idxs then
                 Error(ColumnCountMismatch(List.length idxs, List.length rowValues))
             else
@@ -3228,12 +3309,12 @@ let private insertCore
                         |> Option.iter (fun key -> parentKeySourceAdd key lookup)
 
                     let rowId = rows.Add candidate
-                    let index, secondaryIndex =
-                        reindexRow table.Columns uniqueGroups secondaryGroups None (Some(rowId, candidate)) index secondaryIndex
+                    let index, secondaryIndex, secondaryOrder =
+                        reindexRow table.Columns uniqueGroups secondaryGroups None (Some(rowId, candidate)) index secondaryIndex secondaryOrder
 
-                    Ok(candidate :: acceptedRev, ignoredErrorsRev, nextAutoId', firstAuto', lastExplicit', index, secondaryIndex)
+                    Ok(candidate :: acceptedRev, ignoredErrorsRev, nextAutoId', firstAuto', lastExplicit', index, secondaryIndex, secondaryOrder)
                 | Error error when ignoreErrors ->
-                    Ok(acceptedRev, error :: ignoredErrorsRev, nextAutoId, firstAuto, lastExplicit, index, secondaryIndex)
+                    Ok(acceptedRev, error :: ignoredErrorsRev, nextAutoId, firstAuto, lastExplicit, index, secondaryIndex, secondaryOrder)
                 | Error e -> Error e)
 
     rowsIn
@@ -3241,8 +3322,8 @@ let private insertCore
     |> List.fold
         (fun state (rowNumber, rowValues) ->
             Diagnostics.withRowNumber (rowNumber + 1) (fun () -> step state rowValues))
-        (Ok([], [], table.NextAutoId, None, None, table.UniqueIndex, table.SecondaryIndex))
-    |> Result.map (fun (acceptedRev, ignoredErrorsRev, nextAutoId', firstAuto, lastExplicit, index, secondaryIndex) ->
+        (Ok([], [], table.NextAutoId, None, None, table.UniqueIndex, table.SecondaryIndex, table.SecondaryOrder))
+    |> Result.map (fun (acceptedRev, ignoredErrorsRev, nextAutoId', firstAuto, lastExplicit, index, secondaryIndex, secondaryOrder) ->
         let accepted = List.rev acceptedRev
         let firstAssigned = Option.orElse lastExplicit firstAuto
         let table' =
@@ -3250,7 +3331,8 @@ let private insertCore
                 RowsArray = rows.DrainToImmutable()
                 NextAutoId = max nextAutoId' reservedAutoNext
                 UniqueIndex = index
-                SecondaryIndex = secondaryIndex }
+                SecondaryIndex = secondaryIndex
+                SecondaryOrder = secondaryOrder }
         Map.add tableKey table' db, (Option.defaultValue 0L firstAssigned, firstAuto, List.length accepted, accepted, List.rev ignoredErrorsRev))
 
 /// Inserts rows built from `columns` and matching value lists, applying
@@ -3448,21 +3530,21 @@ and private cascadeUpdateVisitedFrom
                                         let secondaryGroups = secondaryKeyGroups childTbl
                                         let rows = childTbl.RowsArray.ToBuilder()
 
-                                        let rowChanges, index, secondaryIndex =
+                                        let rowChanges, index, secondaryIndex, secondaryOrder =
                                             childTbl.RowsArray.Indexed
                                             |> Seq.fold
-                                                (fun (changes, index, secondaryIndex) (rowId, row) ->
+                                                (fun (changes, index, secondaryIndex, secondaryOrder) (rowId, row) ->
                                                     if isChild row then
                                                         let row' = Array.copy row
                                                         List.iter2 (fun i v -> row'.[i] <- v) childIdxs newKey
                                                         rows.[rowId] <- row'
-                                                        let index, secondaryIndex = reindexRow childTbl.Columns childGroups secondaryGroups (Some(rowId, row)) (Some(rowId, row')) index secondaryIndex
-                                                        (row, row') :: changes, index, secondaryIndex
+                                                        let index, secondaryIndex, secondaryOrder = reindexRow childTbl.Columns childGroups secondaryGroups (Some(rowId, row)) (Some(rowId, row')) index secondaryIndex secondaryOrder
+                                                        (row, row') :: changes, index, secondaryIndex, secondaryOrder
                                                     else
-                                                        changes, index, secondaryIndex)
-                                                ([], childTbl.UniqueIndex, childTbl.SecondaryIndex)
+                                                        changes, index, secondaryIndex, secondaryOrder)
+                                                ([], childTbl.UniqueIndex, childTbl.SecondaryIndex, childTbl.SecondaryOrder)
 
-                                        let d' = Map.add childKey { childTbl with RowsArray = rows.DrainToImmutable(); UniqueIndex = index; SecondaryIndex = secondaryIndex } d
+                                        let d' = Map.add childKey { childTbl with RowsArray = rows.DrainToImmutable(); UniqueIndex = index; SecondaryIndex = secondaryIndex; SecondaryOrder = secondaryOrder } d
                                         let changes' = changes |> Map.add childKey ((changes |> Map.tryFind childKey |> Option.defaultValue []) @ List.rev rowChanges)
 
                                         List.rev rowChanges
@@ -3480,21 +3562,21 @@ and private cascadeUpdateVisitedFrom
                                             let secondaryGroups = secondaryKeyGroups childTbl
                                             let rows = childTbl.RowsArray.ToBuilder()
 
-                                            let rowChanges, index, secondaryIndex =
+                                            let rowChanges, index, secondaryIndex, secondaryOrder =
                                                 childTbl.RowsArray.Indexed
                                                 |> Seq.fold
-                                                    (fun (changes, index, secondaryIndex) (rowId, row) ->
+                                                    (fun (changes, index, secondaryIndex, secondaryOrder) (rowId, row) ->
                                                         if isChild row then
                                                             let row' = Array.copy row
                                                             childIdxs |> List.iter (fun i -> row'.[i] <- VNull)
                                                             rows.[rowId] <- row'
-                                                            let index, secondaryIndex = reindexRow childTbl.Columns childGroups secondaryGroups (Some(rowId, row)) (Some(rowId, row')) index secondaryIndex
-                                                            (row, row') :: changes, index, secondaryIndex
+                                                            let index, secondaryIndex, secondaryOrder = reindexRow childTbl.Columns childGroups secondaryGroups (Some(rowId, row)) (Some(rowId, row')) index secondaryIndex secondaryOrder
+                                                            (row, row') :: changes, index, secondaryIndex, secondaryOrder
                                                         else
-                                                            changes, index, secondaryIndex)
-                                                    ([], childTbl.UniqueIndex, childTbl.SecondaryIndex)
+                                                            changes, index, secondaryIndex, secondaryOrder)
+                                                    ([], childTbl.UniqueIndex, childTbl.SecondaryIndex, childTbl.SecondaryOrder)
 
-                                            let d' = Map.add childKey { childTbl with RowsArray = rows.DrainToImmutable(); UniqueIndex = index; SecondaryIndex = secondaryIndex } d
+                                            let d' = Map.add childKey { childTbl with RowsArray = rows.DrainToImmutable(); UniqueIndex = index; SecondaryIndex = secondaryIndex; SecondaryOrder = secondaryOrder } d
                                             let changes' = changes |> Map.add childKey ((changes |> Map.tryFind childKey |> Option.defaultValue []) @ List.rev rowChanges)
 
                                             Ok(d', visited |> Map.add childKey (alreadyVisited @ matching), changes')
@@ -3612,6 +3694,7 @@ and private upsertRowsInTable
                                   updated: (Value[] * Value[]) list,
                                   index: Map<string, Map<string, RowId>>,
                                   secondaryIndex: Map<string, Map<string, Set<RowId>>>,
+                                  secondaryOrder: Map<string, Map<SecondaryOrderKey, Set<RowId>>>,
                                   cascadeDb: Database,
                                   visited: Map<string, Value[] list>,
                                   cascaded: Map<string, (Value[] * Value[]) list>) ->
@@ -3693,7 +3776,7 @@ and private upsertRowsInTable
                                                         // before=after RowsUpdated here would let
                                                         // an onCommit-driven pipeline whose drain
                                                         // upsert no-ops re-fire itself forever.
-                                                        let index, secondaryIndex = reindexRow table.Columns uniqueGroups secondaryGroups (Some(pos, existing)) (Some(pos, applied)) index secondaryIndex
+                                                        let index, secondaryIndex, secondaryOrder = reindexRow table.Columns uniqueGroups secondaryGroups (Some(pos, existing)) (Some(pos, applied)) index secondaryIndex secondaryOrder
 
                                                         nextAutoId',
                                                         firstAuto,
@@ -3703,6 +3786,7 @@ and private upsertRowsInTable
                                                         (if changed then (existing, applied) :: updated else updated),
                                                         index,
                                                         secondaryIndex,
+                                                        secondaryOrder,
                                                         cascadeDb',
                                                         visited',
                                                         cascaded'))
@@ -3727,7 +3811,7 @@ and private upsertRowsInTable
 
                                                     let rowId = rows.Add candidate
 
-                                                    let index, secondaryIndex = reindexRow table.Columns uniqueGroups secondaryGroups None (Some(rowId, candidate)) index secondaryIndex
+                                                    let index, secondaryIndex, secondaryOrder = reindexRow table.Columns uniqueGroups secondaryGroups None (Some(rowId, candidate)) index secondaryIndex secondaryOrder
 
                                                     nextAutoId',
                                                     firstAuto',
@@ -3737,16 +3821,17 @@ and private upsertRowsInTable
                                                     updated,
                                                     index,
                                                     secondaryIndex,
+                                                    secondaryOrder,
                                                     cascadeDb,
                                                     visited,
                                                     cascaded))))
 
                     rowsIn
-                    |> foldWithCancellation step (Ok(table.NextAutoId, None, None, 0, [], [], table.UniqueIndex, table.SecondaryIndex, db, Map.empty, Map.empty))
-                    |> Result.map (fun (nextAutoId', firstAuto, lastExplicit, affected, inserted, updated, index, secondaryIndex, cascadeDb, _visited, cascaded) ->
+                    |> foldWithCancellation step (Ok(table.NextAutoId, None, None, 0, [], [], table.UniqueIndex, table.SecondaryIndex, table.SecondaryOrder, db, Map.empty, Map.empty))
+                    |> Result.map (fun (nextAutoId', firstAuto, lastExplicit, affected, inserted, updated, index, secondaryIndex, secondaryOrder, cascadeDb, _visited, cascaded) ->
                         let finalRows = rows.DrainToImmutable()
 
-                        Map.add key { table with RowsArray = finalRows; NextAutoId = nextAutoId'; UniqueIndex = index; SecondaryIndex = secondaryIndex } cascadeDb,
+                        Map.add key { table with RowsArray = finalRows; NextAutoId = nextAutoId'; UniqueIndex = index; SecondaryIndex = secondaryIndex; SecondaryOrder = secondaryOrder } cascadeDb,
                         cascaded,
                         (Option.defaultValue 0L (Option.orElse lastExplicit firstAuto), firstAuto, affected, List.rev inserted, List.rev updated)))
 
@@ -3792,19 +3877,19 @@ let rec private cascadeDeleteVisited
         let uniqueGroups = uniqueKeyGroups t
         let secondaryGroups = secondaryKeyGroups t
 
-        let index, secondaryIndex, _ =
+        let index, secondaryIndex, secondaryOrder, _ =
             t.RowsArray.Indexed
             |> Seq.fold
-                (fun (index, secondaryIndex, pending) (rowId, row) ->
+                (fun (index, secondaryIndex, secondaryOrder, pending) (rowId, row) ->
                     match pending |> List.tryFindIndex ((=) row) with
                     | Some pendingIndex ->
                         rows.Remove rowId |> ignore
-                        let index, secondaryIndex = reindexRow t.Columns uniqueGroups secondaryGroups (Some(rowId, row)) None index secondaryIndex
-                        index, secondaryIndex, List.removeAt pendingIndex pending
-                    | None -> index, secondaryIndex, pending)
-                (t.UniqueIndex, t.SecondaryIndex, toDelete)
+                        let index, secondaryIndex, secondaryOrder = reindexRow t.Columns uniqueGroups secondaryGroups (Some(rowId, row)) None index secondaryIndex secondaryOrder
+                        index, secondaryIndex, secondaryOrder, List.removeAt pendingIndex pending
+                    | None -> index, secondaryIndex, secondaryOrder, pending)
+                (t.UniqueIndex, t.SecondaryIndex, t.SecondaryOrder, toDelete)
 
-        Map.add tableKey { t with RowsArray = rows.DrainToImmutable(); UniqueIndex = index; SecondaryIndex = secondaryIndex } d
+        Map.add tableKey { t with RowsArray = rows.DrainToImmutable(); UniqueIndex = index; SecondaryIndex = secondaryIndex; SecondaryOrder = secondaryOrder } d
 
     if toDelete.IsEmpty then
         Ok(db, visited, blanked)
@@ -3855,25 +3940,25 @@ let rec private cascadeDeleteVisited
                                     // value.
                                     let rows = childTbl.RowsArray.ToBuilder()
 
-                                    let changes, index, secondaryIndex =
+                                    let changes, index, secondaryIndex, secondaryOrder =
                                         childTbl.RowsArray.Indexed
                                         |> Seq.fold
-                                            (fun (changes, index, secondaryIndex) (rowId, row) ->
+                                            (fun (changes, index, secondaryIndex, secondaryOrder) (rowId, row) ->
                                                 if isChild row then
                                                     let row' = Array.copy row
                                                     childIdxs |> List.iter (fun i -> row'.[i] <- VNull)
                                                     rows.[rowId] <- row'
-                                                    let index, secondaryIndex = reindexRow childTbl.Columns childGroups secondaryGroups (Some(rowId, row)) (Some(rowId, row')) index secondaryIndex
-                                                    (row, row') :: changes, index, secondaryIndex
+                                                    let index, secondaryIndex, secondaryOrder = reindexRow childTbl.Columns childGroups secondaryGroups (Some(rowId, row)) (Some(rowId, row')) index secondaryIndex secondaryOrder
+                                                    (row, row') :: changes, index, secondaryIndex, secondaryOrder
                                                 else
-                                                    changes, index, secondaryIndex)
-                                            ([], childTbl.UniqueIndex, childTbl.SecondaryIndex)
+                                                    changes, index, secondaryIndex, secondaryOrder)
+                                            ([], childTbl.UniqueIndex, childTbl.SecondaryIndex, childTbl.SecondaryOrder)
 
                                     let blanked =
                                         blanked
                                         |> Map.add childKey ((blanked |> Map.tryFind childKey |> Option.defaultValue []) @ List.rev changes)
 
-                                    Ok(Map.add childKey { childTbl with RowsArray = rows.DrainToImmutable(); UniqueIndex = index; SecondaryIndex = secondaryIndex } d, visited, blanked)
+                                    Ok(Map.add childKey { childTbl with RowsArray = rows.DrainToImmutable(); UniqueIndex = index; SecondaryIndex = secondaryIndex; SecondaryOrder = secondaryOrder } d, visited, blanked)
                             | _ -> Error(ForeignKeyRestrict fk.Name))
 
             referencingForeignKeys db tableKey
@@ -3998,7 +4083,7 @@ let replaceRows
                                                 match optimizedConflict with
                                                 | Some(rowId, existing) ->
                                                     let changed = existing <> candidate
-                                                    let uniqueIndex, secondaryIndex =
+                                                    let uniqueIndex, secondaryIndex, secondaryOrder =
                                                         reindexRow
                                                             target.Columns
                                                             (uniqueKeyGroups target)
@@ -4007,17 +4092,19 @@ let replaceRows
                                                             (Some(rowId, candidate))
                                                             target.UniqueIndex
                                                             target.SecondaryIndex
+                                                            target.SecondaryOrder
 
                                                     { target with
                                                         RowsArray = target.RowsArray.SetItem(rowId, candidate)
                                                         NextAutoId = nextAutoId'
                                                         UniqueIndex = uniqueIndex
-                                                        SecondaryIndex = secondaryIndex },
+                                                        SecondaryIndex = secondaryIndex
+                                                        SecondaryOrder = secondaryOrder },
                                                     (if changed then Some(RowsUpdated(dbName, tableName, [ existing, candidate ])) else None),
                                                     deletedConflicts.Length + 1 + (if changed then 1 else 0)
                                                 | None ->
                                                     let rowId, rows = target.RowsArray.Append candidate
-                                                    let uniqueIndex, secondaryIndex =
+                                                    let uniqueIndex, secondaryIndex, secondaryOrder =
                                                         reindexRow
                                                             target.Columns
                                                             (uniqueKeyGroups target)
@@ -4026,12 +4113,14 @@ let replaceRows
                                                             (Some(rowId, candidate))
                                                             target.UniqueIndex
                                                             target.SecondaryIndex
+                                                            target.SecondaryOrder
 
                                                     { target with
                                                         RowsArray = rows
                                                         NextAutoId = nextAutoId'
                                                         UniqueIndex = uniqueIndex
-                                                        SecondaryIndex = secondaryIndex },
+                                                        SecondaryIndex = secondaryIndex
+                                                        SecondaryOrder = secondaryOrder },
                                                     Some(RowsInserted(dbName, tableName, [ candidate ])),
                                                     deletedConflicts.Length + 1
 
@@ -4199,6 +4288,7 @@ let private mergePointUpdate dbName tableKey rowIds (baseDb: Database) (batchDb:
         let secondaryGroups = secondaryKeyGroups liveTable
         let mutable index = liveTable.UniqueIndex
         let mutable secondaryIndex = liveTable.SecondaryIndex
+        let mutable secondaryOrder = liveTable.SecondaryOrder
 
         for rowId in rowIds do
             match baseTable.RowsArray.TryFind rowId, batchTable.RowsArray.TryFind rowId, rows.TryFind rowId with
@@ -4214,9 +4304,10 @@ let private mergePointUpdate dbName tableKey rowIds (baseDb: Database) (batchDb:
                     conflict ()
 
                 rows.[rowId] <- after
-                let uniqueIndex, updatedSecondaryIndex = reindexRow liveTable.Columns uniqueGroups secondaryGroups (Some(rowId, before)) (Some(rowId, after)) index secondaryIndex
+                let uniqueIndex, updatedSecondaryIndex, updatedSecondaryOrder = reindexRow liveTable.Columns uniqueGroups secondaryGroups (Some(rowId, before)) (Some(rowId, after)) index secondaryIndex secondaryOrder
                 index <- uniqueIndex
                 secondaryIndex <- updatedSecondaryIndex
+                secondaryOrder <- updatedSecondaryOrder
             | _ -> conflict ()
 
         let mergedTable =
@@ -4224,7 +4315,8 @@ let private mergePointUpdate dbName tableKey rowIds (baseDb: Database) (batchDb:
                 RowsArray = rows.DrainToImmutable()
                 NextAutoId = max liveTable.NextAutoId batchTable.NextAutoId
                 UniqueIndex = index
-                SecondaryIndex = secondaryIndex }
+                SecondaryIndex = secondaryIndex
+                SecondaryOrder = secondaryOrder }
 
         Map.add tableKey mergedTable liveDb
     | _ -> conflict ()
@@ -4377,6 +4469,7 @@ let updateRows
                     (fun (changesRev: (Value[] * Value[]) list,
                           index: Map<string, Map<string, RowId>>,
                           secondaryIndex: Map<string, Map<string, Set<RowId>>>,
+                          secondaryOrder: Map<string, Map<SecondaryOrderKey, Set<RowId>>>,
                           cascadeDb: Database,
                           visited: Map<string, Value[] list>,
                           cascaded: Map<string, (Value[] * Value[]) list>) ->
@@ -4386,12 +4479,12 @@ let updateRows
                                 | _ -> None
 
                             match rowId with
-                            | None -> Ok(changesRev, index, secondaryIndex, cascadeDb, visited, cascaded)
+                            | None -> Ok(changesRev, index, secondaryIndex, secondaryOrder, cascadeDb, visited, cascaded)
                             | Some rowId ->
                                 predicate row
                                 |> Result.bind (fun keep ->
                                     if not keep then
-                                        Ok(changesRev, index, secondaryIndex, cascadeDb, visited, cascaded)
+                                        Ok(changesRev, index, secondaryIndex, secondaryOrder, cascadeDb, visited, cascaded)
                                     else
                                         updater row
                                         |> Result.bind (coerceRow (temporalCoercionMode store) table.Columns)
@@ -4424,17 +4517,17 @@ let updateRows
                                                  else
                                                      Ok(cascadeDb, visited, cascaded))
                                                 |> Result.map (fun (cascadeDb', visited', cascaded') ->
-                                                    let index, secondaryIndex = reindexRow table.Columns uniqueGroups secondaryGroups (Some(rowId, row)) (Some(rowId, newRow)) index secondaryIndex
-                                                    newRow, index, secondaryIndex, cascadeDb', visited', cascaded'))
-                                        |> Result.map (fun (newRow, index', secondaryIndex', cascadeDb', visited', cascaded') ->
+                                                    let index, secondaryIndex, secondaryOrder = reindexRow table.Columns uniqueGroups secondaryGroups (Some(rowId, row)) (Some(rowId, newRow)) index secondaryIndex secondaryOrder
+                                                    newRow, index, secondaryIndex, secondaryOrder, cascadeDb', visited', cascaded'))
+                                        |> Result.map (fun (newRow, index', secondaryIndex', secondaryOrder', cascadeDb', visited', cascaded') ->
                                             builder.[rowId] <- newRow
-                                            (if newRow <> row then (row, newRow) :: changesRev else changesRev), index', secondaryIndex', cascadeDb', visited', cascaded')))
+                                            (if newRow <> row then (row, newRow) :: changesRev else changesRev), index', secondaryIndex', secondaryOrder', cascadeDb', visited', cascaded')))
 
             candidateRows
             |> Option.defaultWith (fun () -> table.RowsArray.Indexed |> List.ofSeq)
-            |> foldWithCancellation step (Ok([], table.UniqueIndex, table.SecondaryIndex, db, Map.empty, Map.empty))
-            |> Result.map (fun (changesRev, index, secondaryIndex, cascadeDb, _visited, cascaded) ->
-                Map.add key { table with RowsArray = builder.DrainToImmutable(); UniqueIndex = index; SecondaryIndex = secondaryIndex } cascadeDb, (List.rev changesRev, cascaded, db)))
+            |> foldWithCancellation step (Ok([], table.UniqueIndex, table.SecondaryIndex, table.SecondaryOrder, db, Map.empty, Map.empty))
+            |> Result.map (fun (changesRev, index, secondaryIndex, secondaryOrder, cascadeDb, _visited, cascaded) ->
+                Map.add key { table with RowsArray = builder.DrainToImmutable(); UniqueIndex = index; SecondaryIndex = secondaryIndex; SecondaryOrder = secondaryOrder } cascadeDb, (List.rev changesRev, cascaded, db)))
 
     let result =
         match candidates with
