@@ -5874,6 +5874,12 @@ let tests =
                         "SELECT HEX(b'0101') a, HEX(B'111111111') b, HEX(0b0101) c, LENGTH(b'0101') d, HEX(b'') e, N'héllo' f"
                         [ Some "05"; Some "01FF"; Some "05"; Some "1"; Some ""; Some "héllo" ]
 
+                testCase "SOUNDS LIKE and MEMBER OF follow MySQL comparison semantics"
+                <| fun _ ->
+                    expectRow
+                        "SELECT 'Robert' SOUNDS LIKE 'Rupert' a, 'Robert' SOUNDS LIKE 'Rubin' b, NULL SOUNDS LIKE 'x' c, 17 MEMBER OF('[17, \"17\", null]') d, '17' MEMBER OF('[17, \"17\", null]') e, NULL MEMBER OF('[17]') f, 2 MEMBER OF('[[2]]') g"
+                        [ Some "1"; Some "0"; None; Some "1"; Some "1"; None; Some "0" ]
+
                 testCase "bitwise operators use unsigned 64-bit values and MySQL precedence"
                 <| fun _ ->
                     expectRow

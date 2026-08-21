@@ -91,7 +91,6 @@ variants), USE, KILL, DESCRIBE are text-probed before the grammar
 | Quantified comparison | `= ANY/SOME/ALL (subquery)` | absent | medium | refusal |
 | Row constructors | `(a,b) = (1,2)`, `(a,b) IN ((1,2),(3,4))` | unparseable | medium | refusal |
 | User/system variables in expressions | `@x`, `@@x` anywhere an expression fits; `@x := …` | only bare `SELECT @x, @@y AS a` lists via post-parse regex fallback (`QueryHandler.fs:1188–1193`); inside larger queries → 1064 | medium | refusal |
-| `SOUNDS LIKE`, JSON `MEMBER OF` | supported | absent | low | refusal |
 | Named-window inheritance | `OVER (w ORDER BY x)` extends a named window | absent (`Ast.fs:220–221`) | low | refusal |
 
 Expression coverage that does exist: full comparison/logical/arithmetic
@@ -147,7 +146,7 @@ CURRENT_USER/USER/SESSION_USER.
 | Crypto | `AES_ENCRYPT AES_DECRYPT ENCODE DECODE RANDOM_BYTES`, entire asymmetric family | medium |
 | Compression/weight | `COMPRESS UNCOMPRESS WEIGHT_STRING` | low |
 | Time formatting tail | `GET_FORMAT` | low |
-| JSON second half | `JSON_MERGE_PATCH JSON_MERGE_PRESERVE JSON_OVERLAPS JSON_CONTAINS_PATH JSON_SCHEMA_VALID JSON_SCHEMA_VALIDATION_REPORT JSON_PRETTY JSON_QUOTE JSON_VALUE JSON_ARRAY_APPEND JSON_ARRAY_INSERT JSON_NORMALIZE JSON_STORAGE_SIZE JSON_STORAGE_FREE`; `MEMBER OF` | medium |
+| JSON second half | `JSON_MERGE_PATCH JSON_MERGE_PRESERVE JSON_OVERLAPS JSON_CONTAINS_PATH JSON_SCHEMA_VALID JSON_SCHEMA_VALIDATION_REPORT JSON_PRETTY JSON_QUOTE JSON_VALUE JSON_ARRAY_APPEND JSON_ARRAY_INSERT JSON_NORMALIZE JSON_STORAGE_SIZE JSON_STORAGE_FREE` | medium |
 | Misc | `BENCHMARK SLEEP UUID_SHORT COERCIBILITY NAME_CONST DEFAULT()` outside REPLACE-SET | low |
 | Geometry | all `ST_*`/`GeometryCollection` functions and types | low |
 

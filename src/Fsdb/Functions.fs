@@ -634,6 +634,17 @@ let private boolToInt (b: bool) : Value = VInt(if b then 1L else 0L)
 /// candidate array if every candidate element is contained *somewhere* in
 /// the target array (order-independent), and contains a candidate scalar
 /// the same way; otherwise it's scalar-vs-scalar equality by JSON kind.
+let private jsonEqual (left: JsonNode) (right: JsonNode) : bool =
+    match left, right with
+    | null, null -> true
+    | null, _
+    | _, null -> false
+    | _ ->
+        try
+            left.GetValueKind() = right.GetValueKind() && formatJsonNode left = formatJsonNode right
+        with _ ->
+            false
+
 let rec private jsonContains (target: JsonNode) (candidate: JsonNode) : bool =
     match target, candidate with
     | null, null -> true
@@ -643,11 +654,7 @@ let rec private jsonContains (target: JsonNode) (candidate: JsonNode) : bool =
         c |> Seq.forall (fun kv -> t.ContainsKey kv.Key && jsonContains t.[kv.Key] kv.Value)
     | (:? JsonArray as t), (:? JsonArray as c) -> c |> Seq.forall (fun cv -> t |> Seq.exists (fun tv -> jsonContains tv cv))
     | (:? JsonArray as t), _ -> t |> Seq.exists (fun tv -> jsonContains tv candidate)
-    | _ ->
-        try
-            target.GetValueKind() = candidate.GetValueKind() && formatJsonNode target = formatJsonNode candidate
-        with _ ->
-            false
+    | _ -> jsonEqual target candidate
 
 /// JSON_LENGTH: object/array count their members/elements; a scalar (and
 /// JSON null) counts as length 1, matching MySQL.
@@ -706,6 +713,16 @@ let private jsonContainsFn: Scalar =
             match navigateJson tn segs with
             | [] -> VNull
             | matches -> boolToInt (matches |> List.exists (fun m -> jsonContains m cn))
+        | _ -> VNull
+    | _ -> VNull
+
+let private jsonMemberOfFn: Scalar =
+    function
+    | [ value; document ] when not (anyNull [ value; document ]) ->
+        match tryParseJsonValue document with
+        | Some(:? JsonArray as array) ->
+            let candidate = valueToJsonNode value
+            array |> Seq.exists (fun element -> jsonEqual element candidate) |> boolToInt
         | _ -> VNull
     | _ -> VNull
 
@@ -3249,6 +3266,7 @@ let builtins: Registry =
     |> registerScalar "JSON_EXTRACT" jsonExtractFn
     |> registerScalar "JSON_UNQUOTE" jsonUnquoteFn
     |> registerScalar "JSON_CONTAINS" jsonContainsFn
+    |> registerScalar "JSON_MEMBER_OF" jsonMemberOfFn
     |> registerScalar "JSON_SET" (jsonWriteFn JSet)
     |> registerScalar "JSON_INSERT" (jsonWriteFn JInsert)
     |> registerScalar "JSON_REPLACE" (jsonWriteFn JReplace)

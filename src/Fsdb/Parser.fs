@@ -1397,6 +1397,10 @@ let private comparisonExpr: Parser<Expr, unit> =
               attempt (keyword "NOT" >>. keyword "BETWEEN") >>. betweenTail
               |>> fun (lo, hi) -> Not(Between(left, lo, hi))
               keyword "BETWEEN" >>. betweenTail |>> fun (lo, hi) -> Between(left, lo, hi)
+              attempt (keyword "SOUNDS" >>. keyword "LIKE") >>. arithExpr
+              |>> fun right -> BinOp(Eq, FuncCall("SOUNDEX", [ left ]), FuncCall("SOUNDEX", [ right ]))
+              attempt (keyword "MEMBER" >>. keyword "OF") >>. between (sym "(") (sym ")") arithExpr
+              |>> fun array -> FuncCall("JSON_MEMBER_OF", [ left; array ])
               compareOp .>>. arithExpr |>> fun (op, right) -> BinOp(op, left, right)
               preturn left ]
 
