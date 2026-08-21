@@ -409,24 +409,15 @@ ICU CLDR collation tailoring; SUPER required for foreign KILL; honest
 advertising of enforced limits (wal_rotate knobs unreported rather than
 fabricated); empty routine/event catalogs rather than stubs.
 
-## 17. Documentation drift found during the audit
+## 17. Historical records with resolved entries
 
-Where the docs and the code disagree, the code is authoritative:
+These dated findings remain useful as campaign records, but include behavior
+that later work changed:
 
-- `docs/compatibility.md` states DROP TRIGGER lacks its subject-table
-  privilege check; commit 1002e9e added it (`Auth.fs:667–682`). Doc is stale.
-- `docs/performance-design.md` §1.7 states COM_RESET_CONNECTION answers
-  "Unknown command"; it replies OK and clears session state
-  (`Server.fs:943–972`, pinned by IntegrationTests). Doc is stale.
-- `docs/performance-design.md` lists query cancellation on client disconnect
-  as rejected; the disconnect watcher cancels row evaluation
-  (`Server.fs:280–406`, tested). Doc is stale.
 - `torture/findings/2026-08-19-json-table-gaps.md` says NESTED PATH, EXISTS
   PATH, and DEFAULT clauses do not parse; waves W3/W4 shipped them. The
   remaining true items are ERROR ON EMPTY/ERROR, LEFT JOIN … ON TRUE, and
   JOIN…USING refusals.
-- `docs/compatibility.md` claims subqueries are unchecked by privileges;
-  `Auth.exprReadTables` walks them (`Auth.fs:438–546`). Doc is stale.
 - The client-contract campaign's four result-type signatures were resolved;
   the 2026-08-21 differential rerun passed every scenario.
 

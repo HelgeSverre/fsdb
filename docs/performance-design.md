@@ -63,9 +63,10 @@ t+15s  point select   7.320 ms/op   rss = 2,240 MB
 t+30s  point select  13.057 ms/op   rss = 2,652 MB   (still climbing)
 ```
 
-A disconnected client does not cancel the query. The server keeps building
-the product, RSS grows to gigabytes, and **unrelated queries on a different
-database slow down 4-8x and keep degrading**.
+At the time of this measurement, a disconnected client did not cancel the
+query. The server kept building the product, RSS grew to gigabytes, and
+**unrelated queries on a different database slowed down 4-8x and kept
+degrading**. The current disconnect watcher cancels row evaluation.
 
 ### 1.2 UPDATE: O(n²) row rebuild, measured in the server
 
@@ -179,13 +180,11 @@ The suite's own commentary in `benchmarks/results/f1b15ab.md` ("the
 prepare/bind path carries its own separate overhead") is wrong and should be
 corrected when the numbers are regenerated.
 
-### 1.7 Byproduct: connection-pool reset is an unimplemented command
+### 1.7 Byproduct at measurement time: connection-pool reset was unimplemented
 
-MySqlConnector's pooled `Open()` sends `COM_RESET_CONNECTION`; fsdb answers
-"Unknown command" and the client throws. Every measurement above had to run
-with `Pooling=false`. This is a compatibility bug, not a performance one,
-but it is on the path of any pooled client (Laravel/PDO included) and it is
-cheap to fix (reply OK, clear session temp state).
+MySqlConnector's pooled `Open()` sends `COM_RESET_CONNECTION`; the measured
+build answered "Unknown command" and the client threw, so every measurement
+above used `Pooling=false`. Current fsdb replies OK and clears session state.
 
 ### Ranked summary
 
@@ -422,11 +421,9 @@ correctness/security cleanup — it deletes the textual
 persistence and every JSON function. Path-literal memoization (change G) gets
 half the win for a tenth of the risk; take that first, if anything.
 
-**Query cancellation on client disconnect.** A genuine robustness gap (2.6 GB
-RSS from one abandoned query), but M9-2 removes the only query capable of
-running long enough to matter, and threading a `CancellationToken` through
-the executor touches everything. Reconsider when a *legitimately* long query
-exists.
+**Query cancellation on client disconnect.** The original design rejected
+this change because it threaded cancellation through the executor. The
+current server implements it: the disconnect watcher cancels row evaluation.
 
 **Columnar storage / removing `Result`-based `evalExpr`.** Both trade the
 project's identity for a broad-tax multiplier the index work makes moot.
