@@ -3084,17 +3084,6 @@ and private applyJsonTableJoin
     match join.Kind with
     | InnerJoin
     | CrossJoin
-    | LeftJoin when not (List.isEmpty join.Using) ->
-        // MySQL runs `JOIN JSON_TABLE(...) USING (col)` as the real
-        // equi-join (oracle-probed: it filters, and `SELECT *` coalesces the
-        // name). This lateral branch has no coalesce/equi wiring, and
-        // dropping `Using` on the floor returned the full cross product —
-        // exactly the silent-inner behavior the branch below refuses for
-        // outer joins. ponytail: rejected until USING is wired through the
-        // coalesce-names/equi-key machinery; spell it as JOIN ... ON.
-        Error(Err(1064, "JSON_TABLE doesn't support JOIN ... USING; spell the equi-join as JOIN ... ON"))
-    | InnerJoin
-    | CrossJoin
     | LeftJoin ->
         let joinColumns = jsonTableColumnDefs columns
         let newSources = sourcesSoFar @ [ alias, joinColumns ]
@@ -3102,34 +3091,48 @@ and private applyJsonTableJoin
         let leftCtxFor = contextFactory store registry dbName (columnIndexOf combinedColumnsSoFar) (qualifierRanges sourcesSoFar) outer
         let ctxFor = contextFactory store registry dbName (columnIndexOf (combinedColumnsSoFar @ joinColumns)) (qualifierRanges newSources) outer
 
-        // Per left row: evaluate the doc, expand it, keep the combinations
-        // the ON clause accepts (a comma-join/CROSS JOIN's ON is the
-        // always-true literal, so everything survives there).
-        let expandLeft (l: Value[]) : Result<Value[] list, QueryResult> =
-            match evalExpr (leftCtxFor l) source with
-            | Error(code, message) -> Error(Err(code, message))
-            | Ok doc ->
-                jsonTableRows doc path columns
-                |> Result.bind (fun jtRows ->
-                    jtRows
-                    |> traverse (fun r ->
-                        let combined = Array.append l r
+        namedEquiKeys combinedColumnsSoFar joinColumns join.Using
+        |> Result.bind (fun usingKeys ->
+            let leftKeyIndices = usingKeys |> List.map fst |> Array.ofList
+            let rightKeyIndices = usingKeys |> List.map snd |> Array.ofList
+            let keyComparer =
+                JoinKeyComparer(joinKeyCollations combinedColumnsSoFar joinColumns usingKeys)
+                :> System.Collections.Generic.IEqualityComparer<Value[]>
 
-                        evalExpr { ctxFor combined with Clause = OnClause } join.On
-                        |> Result.map (fun v -> combined, truthy v = Some true))
-                    |> Result.mapError Err
-                    |> Result.map (fun checkedRows ->
-                        let matches = checkedRows |> List.filter snd |> List.map fst
+            let usingMatches (left: Value[]) (right: Value[]) =
+                if usingKeys.IsEmpty then
+                    true
+                else
+                    match equiKeyOf leftKeyIndices left, equiKeyOf rightKeyIndices right with
+                    | Some leftKey, Some rightKey -> keyComparer.Equals(leftKey, rightKey)
+                    | _ -> false
 
-                        if matches.IsEmpty && join.Kind = LeftJoin then
-                            [ Array.append l (Array.create joinColumns.Length VNull) ]
-                        else
-                            matches))
+            let expandLeft (left: Value[]) : Result<Value[] list, QueryResult> =
+                match evalExpr (leftCtxFor left) source with
+                | Error(code, message) -> Error(Err(code, message))
+                | Ok doc ->
+                    jsonTableRows doc path columns
+                    |> Result.bind (fun jtRows ->
+                        jtRows
+                        |> List.filter (usingMatches left)
+                        |> traverse (fun right ->
+                            let combined = Array.append left right
 
-        rowsSoFar
-        |> List.ofSeq
-        |> traverse expandLeft
-        |> Result.map (fun expanded -> newSources, (expanded |> List.concat |> Seq.ofList), [])
+                            evalExpr { ctxFor combined with Clause = OnClause } join.On
+                            |> Result.map (fun value -> combined, truthy value = Some true))
+                        |> Result.mapError Err
+                        |> Result.map (fun checkedRows ->
+                            let matches = checkedRows |> List.filter snd |> List.map fst
+
+                            if matches.IsEmpty && join.Kind = LeftJoin then
+                                [ Array.append left (Array.create joinColumns.Length VNull) ]
+                            else
+                                matches))
+
+            rowsSoFar
+            |> List.ofSeq
+            |> traverse expandLeft
+            |> Result.map (fun expanded -> newSources, (expanded |> List.concat |> Seq.ofList), join.Using))
     | _ ->
         Error(Err(1064, "JSON_TABLE only supports comma-join, CROSS JOIN, [INNER] JOIN ... ON, and LEFT JOIN ... ON"))
 

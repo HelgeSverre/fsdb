@@ -5386,17 +5386,19 @@ let tests =
                     | Err(1054, message) -> Expect.equal message "Unknown column 'j' in 'a table function argument'" "MySQL's 1054 wording"
                     | other -> failtestf "expected error 1054, got %A" other
 
-                testCase "JOIN ... USING against JSON_TABLE is rejected, not silently ignored"
+                testCase "JOIN ... USING against JSON_TABLE filters and coalesces the key"
                 <| fun _ ->
-                    // MySQL runs the equi-join here; this subset refuses
-                    // rather than returning the cross product.
                     let store = newStore ()
                     runDefault store "CREATE TABLE t (x INT, j JSON)" |> ignore
                     runDefault store "INSERT INTO t VALUES (2, '[1,2,3]')" |> ignore
 
                     match runDefault store "SELECT jt.x FROM t JOIN JSON_TABLE(t.j, '$[*]' COLUMNS (x INT PATH '$')) jt USING (x)" with
-                    | Err(1064, _) -> ()
-                    | other -> failtestf "expected 1064, got %A" other
+                    | ResultSet(_, [ [ Some "2" ] ]) -> ()
+                    | other -> failtestf "expected the matching JSON row, got %A" other
+
+                    match runDefault store "SELECT * FROM t JOIN JSON_TABLE(t.j, '$[*]' COLUMNS (x INT PATH '$')) jt USING (x)" with
+                    | ResultSet([ "x"; "j" ], [ [ Some "2"; Some "[1,2,3]" ] ]) -> ()
+                    | other -> failtestf "expected one coalesced x column, got %A" other
 
                 testCase "LEFT JOIN against JSON_TABLE null-pads empty and rejected expansions"
                 <| fun _ ->

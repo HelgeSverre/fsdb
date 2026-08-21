@@ -13,12 +13,8 @@ probes (Harness.fs `ScenarioProbes`) and the Expecto `JSON_TABLE` list.
   `Parser.fs` ponytail comment names the skipped clauses.
 - **LEFT JOIN JSON_TABLE(...) ON expr** now keeps unmatched left rows and
   null-pads the JSON_TABLE columns, including empty and NULL documents.
-- **JOIN JSON_TABLE(...) USING (col)** → error 1064. MySQL runs the real
-  equi-join (probed: `... JSON_TABLE(t.j, '$[*]' COLUMNS (x INT PATH '$')) jt
-  USING (x)` filters to matching x and coalesces the name); the lateral
-  branch has no coalesce/equi wiring, and before this note's commit it
-  silently ignored USING and returned the cross product. Rejected until wired
-  through the coalesce-names/equi-key machinery.
+- **JOIN JSON_TABLE(...) USING (col)** now applies the collation-aware
+  equi-join and coalesces the named column in `SELECT *`.
 
 ## Pinned error wording (now matched)
 
