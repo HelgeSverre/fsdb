@@ -124,6 +124,18 @@ let tests =
                       Expect.equal maxAllowedPacket (16 * 1024 * 1024) "[server] applied too, as mysqld reads it"
                   | Error e -> failtestf "expected the file to apply, got %s" e)
 
+          testCase "option-file parsing returns server entries without changing Limits"
+          <| fun _ ->
+              withSettings [] (fun () ->
+                  let before = maxConnections
+                  let parsed = Fsdb.OptionFile.parseLines "test.cnf" [ "[mysqld]"; "max_connections = 9" ]
+
+                  Expect.equal parsed.Errors [] "the entry parses"
+                  Expect.equal parsed.Entries.Length 1 "one server entry is returned"
+                  Expect.equal parsed.Entries.Head.Name "max_connections" "the name is preserved for its consumer"
+                  Expect.equal parsed.Entries.Head.Value (Some "9") "the value is preserved for its consumer"
+                  Expect.equal maxConnections before "parsing has no process-wide effect")
+
           testCase "a bad config reports every offending line with its number, not just the first"
           <| fun _ ->
               withSettings [] (fun () ->

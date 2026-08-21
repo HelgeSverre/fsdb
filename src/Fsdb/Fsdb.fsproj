@@ -9,6 +9,7 @@
   <ItemGroup>
     <Compile Include="Log.fs" />
     <Compile Include="Diagnostics.fs" />
+    <Compile Include="OptionFile.fs" />
     <Compile Include="Limits.fs" />
     <Compile Include="Binary.fs" />
     <Compile Include="Collation.fs" />

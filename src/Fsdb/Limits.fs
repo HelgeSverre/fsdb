@@ -185,7 +185,7 @@ let private parseSize (text: string) : int64 option =
 
 /// my.cnf treats `-` and `_` in an option name as the same character, and
 /// option names are case-insensitive.
-let private normalizeName (name: string) = name.Trim().Replace('-', '_').ToLowerInvariant()
+let private normalizeName = OptionFile.normalizeName
 
 /// Whether `name` is a knob at all — the question `loose-` asks, since that
 /// prefix suppresses an unknown option but not a bad value for a known one.
@@ -259,78 +259,6 @@ let withSettings (settings: (string * string) list) (f: unit -> 'a) : 'a =
         for name, value in saved do
             applySetting name value |> ignore
 
-// ---------------------------------------------------------------------------
-// my.cnf parsing. The format looks like ini but isn't one: a bare option name
-// is a boolean, values may be quoted with escape sequences inside, a comment
-// can start mid-line, `loose-` downgrades an unknown option to a skip, and
-// `!include`/`!includedir` pull in other files. Reading the real format is
-// what lets an unrecognised line be diagnosed as what it actually is — an
-// unknown option — instead of as a syntax error.
-// https://dev.mysql.com/doc/refman/8.4/en/option-files.html
-// ---------------------------------------------------------------------------
-
-/// Cuts a `#` or `;` comment, which may start mid-line, without cutting one
-/// inside a quoted value — MySQL's own rule is to quote a value containing a
-/// comment character.
-let private stripComment (line: string) : string =
-    let mutable quote = '\000'
-    let mutable cut = -1
-    let mutable i = 0
-
-    while cut < 0 && i < line.Length do
-        let c = line.[i]
-
-        if quote <> '\000' then
-            if c = '\\' then i <- i + 1
-            elif c = quote then quote <- '\000'
-        elif c = '"' || c = '\'' then
-            quote <- c
-        elif c = '#' || c = ';' then
-            cut <- i
-
-        i <- i + 1
-
-    if cut < 0 then line else line.Substring(0, cut)
-
-/// Unwraps a quoted value and expands the escapes MySQL recognises inside
-/// quotes. A backslash before anything else stays literal, backslash
-/// included, which is also MySQL's behaviour.
-let private unquote (raw: string) : string =
-    let raw = raw.Trim()
-
-    if raw.Length >= 2 && (raw.[0] = '"' || raw.[0] = '\'') && raw.[raw.Length - 1] = raw.[0] then
-        let inner = raw.Substring(1, raw.Length - 2)
-        let out = Text.StringBuilder()
-        let mutable i = 0
-
-        while i < inner.Length do
-            if inner.[i] = '\\' && i + 1 < inner.Length then
-                out.Append(
-                    match inner.[i + 1] with
-                    | 'b' -> "\b"
-                    | 't' -> "\t"
-                    | 'n' -> "\n"
-                    | 'r' -> "\r"
-                    | 's' -> " "
-                    | '\\' -> "\\"
-                    | other -> "\\" + string other
-                )
-                |> ignore
-
-                i <- i + 2
-            else
-                out.Append inner.[i] |> ignore
-                i <- i + 1
-
-        out.ToString()
-    else
-        raw
-
-/// How deep `!include` may nest before it's assumed to be a mistake. The
-/// visited-path set already stops a true cycle; this catches a long chain
-/// that isn't one.
-let private maxIncludeDepth = 10
-
 /// Applies one option line's `name` / optional `value`. `loose-` (MySQL's
 /// "tolerate this if you don't know it") suppresses an *unknown option*, and
 /// only that — a bad value for a known option still fails, or a typo in a
@@ -356,155 +284,29 @@ let private applyOption (name: string) (value: string option) : Result<unit, str
             // "known: ..." list lives in exactly one place.
             applySetting bare ""
 
-let rec private applyInto
-    (errors: ResizeArray<string>)
-    (visited: Collections.Generic.HashSet<string>)
-    (depth: int)
-    (source: string)
-    (lines: string seq)
-    : unit =
-    let baseDir =
-        match IO.Path.GetDirectoryName source with
-        | null
-        | "" -> "."
-        | dir -> dir
+/// Applies options parsed from a my.cnf-style file. Every failure is
+/// attributed to its source line, while valid entries still apply.
+let private applyParsed (parsed: OptionFile.Parsed) : Result<unit, string> =
+    let errors = ResizeArray<string>(parsed.Errors)
 
-    // Group state is per file: an included file starts outside any group and
-    // cannot leak its own group back to the file that included it.
-    let mutable applies = false
+    for entry in parsed.Entries do
+        match applyOption entry.Name entry.Value with
+        | Ok() -> ()
+        | Error message -> errors.Add(sprintf "%s:%d: %s" entry.Source entry.Line message)
 
-    lines
-    |> Seq.iteri (fun i raw ->
-        let fail message = errors.Add(sprintf "%s:%d: %s" source (i + 1) message)
-        let line = (stripComment raw).Trim()
+    if errors.Count = 0 then Ok() else Error(String.concat "\n" errors)
 
-        if line = "" then
-            ()
-        elif line.StartsWith "[" then
-            if line.EndsWith "]" then
-                // `[server]` and the 8.4-specific group are read by mysqld
-                // alongside `[mysqld]`; client-only groups stay isolated.
-                let group = normalizeName (line.Substring(1, line.Length - 2))
-                applies <- group = "mysqld" || group = "mysqld_8.4" || group = "server"
-            else
-                fail (sprintf "unterminated group header '%s'" line)
-        elif line.StartsWith "!" then
-            // Include directives are file-scoped, not group-scoped, so they
-            // run wherever they appear.
-            let directive, rest =
-                match line.IndexOf ' ' with
-                | -1 -> line, ""
-                | at -> line.Substring(0, at), line.Substring(at + 1).Trim()
-
-            let resolve (p: string) =
-                if IO.Path.IsPathRooted p then p else IO.Path.Combine(baseDir, p)
-
-            match directive with
-            | "!include"
-            | "!includedir" when rest = "" -> fail (sprintf "%s needs a path" directive)
-            | "!include" -> includeFile errors visited depth fail (resolve rest)
-            | "!includedir" ->
-                let dir = resolve rest
-
-                if not (IO.Directory.Exists dir) then
-                    fail (sprintf "!includedir: no such directory '%s'" dir)
-                else
-                    // Sorted so a directory of fragments applies in a
-                    // predictable order rather than whatever the filesystem
-                    // hands back.
-                    IO.Directory.GetFiles(dir, "*.cnf")
-                    |> Array.sortWith (fun a b -> String.CompareOrdinal(a, b))
-                    |> Array.iter (includeFile errors visited depth fail)
-            | other -> fail (sprintf "unknown directive '%s'" other)
-        elif not applies then
-            ()
-        else
-            let name, value =
-                match line.IndexOf '=' with
-                | -1 -> line, None
-                | at -> line.Substring(0, at), Some(unquote (line.Substring(at + 1)))
-
-            match applyOption (name.Trim()) value with
-            | Ok() -> ()
-            | Error message -> fail message)
-
-and private includeFile
-    (errors: ResizeArray<string>)
-    (visited: Collections.Generic.HashSet<string>)
-    (depth: int)
-    (fail: string -> unit)
-    (path: string)
-    : unit =
-    if depth >= maxIncludeDepth then
-        fail (sprintf "!include nested more than %d deep at '%s'" maxIncludeDepth path)
-    else
-        let full =
-            try
-                IO.Path.GetFullPath path
-            with _ ->
-                path
-
-        // A file that includes itself, directly or around a loop, would
-        // otherwise recurse until the depth limit and report the same errors
-        // once per level.
-        if not (visited.Add full) then
-            ()
-        else
-            match (try Ok(IO.File.ReadAllLines full) with ex -> Error ex.Message) with
-            | Error message -> fail (sprintf "!include '%s': %s" path message)
-            | Ok lines -> applyInto errors visited (depth + 1) full lines
-
-/// Applies the `[mysqld]`/`[mysqld-8.4]`/`[server]` options in `lines`, attributing every
-/// failure to `source` and its line number. Split out from
-/// `loadDefaultsFile` so the parsing is testable without a file, and so an
-/// `!include` inside it resolves relative to `source`'s directory.
-/// Every failure is collected rather than stopping at the first — someone
-/// fixing a config wants the whole list, not one error per restart.
+/// Applies the server entries in `lines` as Limits settings.
 let applyLines (source: string) (lines: string seq) : Result<unit, string> =
-    let errors = ResizeArray<string>()
-    applyInto errors (Collections.Generic.HashSet<string>()) 0 source lines
+    OptionFile.parseLines source lines |> applyParsed
 
-    if errors.Count = 0 then
-        Ok()
-    else
-        Error(String.concat "\n" errors)
-
-/// Reads a my.cnf-style option file: `[mysqld]`, `[mysqld-8.4]`, and `[server]` groups,
-/// `name = value` and MySQL's bare-name boolean form, `#`/`;` comments that
-/// may start mid-line, quoted values with `\n`/`\t`/`\s`-style escapes, `-`
-/// and `_` interchangeable in names, `loose-` to tolerate an option fsdb
-/// doesn't have, and `!include`/`!includedir`.
+/// Reads and applies one my.cnf-style option file as Limits settings.
 let loadDefaultsFile (path: string) : Result<unit, string> =
-    match (try Ok(IO.File.ReadAllLines path) with ex -> Error ex.Message) with
-    | Error message -> Error(sprintf "%s: %s" path message)
-    | Ok lines ->
-        let errors = ResizeArray<string>()
-        let visited = Collections.Generic.HashSet<string>()
-        visited.Add(try IO.Path.GetFullPath path with _ -> path) |> ignore
-        applyInto errors visited 0 path lines
+    OptionFile.parseFile path |> applyParsed
 
-        if errors.Count = 0 then
-            Ok()
-        else
-            Error(String.concat "\n" errors)
+/// Server option files in MySQL's Unix precedence order.
+let defaultFilePaths () : string list = OptionFile.defaultFilePaths ()
 
-/// Server option files in MySQL's Unix precedence order. Files that do not
-/// exist are ignored by `loadDefaultsFiles`.
-let defaultFilePaths () : string list =
-    let mysqlHome = Environment.GetEnvironmentVariable "MYSQL_HOME"
-    let userHome = Environment.GetFolderPath Environment.SpecialFolder.UserProfile
-
-    [ "/etc/my.cnf"
-      "/etc/mysql/my.cnf"
-      if not (String.IsNullOrWhiteSpace mysqlHome) then
-          IO.Path.Combine(mysqlHome, "my.cnf")
-      if not (String.IsNullOrWhiteSpace userHome) then
-          IO.Path.Combine(userHome, ".my.cnf") ]
-    |> List.distinct
-
-/// Applies existing option files from least to most specific, so later files
-/// override values read earlier.
+/// Reads and applies existing option files from least to most specific.
 let loadDefaultsFiles (paths: string list) : Result<unit, string> =
-    paths
-    |> List.filter IO.File.Exists
-    |> List.fold (fun result path -> result |> Result.bind (fun () -> loadDefaultsFile path)) (Ok())
+    OptionFile.parseFiles paths |> applyParsed
