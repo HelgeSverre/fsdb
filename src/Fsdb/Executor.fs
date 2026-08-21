@@ -9256,7 +9256,7 @@ let rec execute (store: Store) (registry: Registry) (dbName: string) (ids: int64
                             with
                             | Ok _ -> ids, Affected 0UL
                             | Error e -> ids, storageErr e
-            | _ -> ids, Err(1064, "Trigger body must be a single INSERT, UPDATE, DELETE, or SET NEW statement")
+            | _ -> ids, Err(1064, "Trigger body must be a single INSERT, UPDATE, or DELETE statement, or SET NEW")
 
     | DropTrigger(name, ifExists) ->
         let matchesRow (r: Value[]) =
