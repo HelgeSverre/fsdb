@@ -1064,10 +1064,17 @@ let tests =
                           Expect.equal (call "YEAR" [ partial ]) (VInt 2020L) "year survives"
                           Expect.equal (call "MONTH" [ partial ]) (VInt 1L) "month survives"
                           Expect.equal (call "DAYOFMONTH" [ partial ]) (VInt 0L) "zero day survives"
+                          Expect.equal (call "DAY" [ partial ]) (VInt 0L) "DAY matches DAYOFMONTH"
                           Expect.equal (call "DATE_FORMAT" [ partial; VString "%Y-%m-%d" ]) (VString "2020-01-00") "format preserves components"
                           Expect.equal (call "LAST_DAY" [ partial ]) (VDate(DateOnly(2020, 1, 31))) "calendar month remains known"
                           let zeroDateTime = VZeroDateTime(tryZeroDateTime (tryZeroDate 2020 0 1 |> Option.get) 12 34 56 0 |> Option.get)
                           Expect.equal (call "DATE_FORMAT" [ zeroDateTime; VString "%Y-%m-%d %H:%i:%s" ]) (VString "2020-00-01 12:34:56") "format preserves time"
+                          Expect.equal (call "HOUR" [ zeroDateTime ]) (VInt 12L) "hour survives"
+                          Expect.equal (call "MINUTE" [ zeroDateTime ]) (VInt 34L) "minute survives"
+                          Expect.equal (call "SECOND" [ zeroDateTime ]) (VInt 56L) "second survives"
+                          Expect.equal (call "EXTRACT" [ VString "YEAR_MONTH"; partial ]) (VInt 202001L) "year and month survive extraction"
+                          Expect.equal (call "EXTRACT" [ VString "DAY"; partial ]) (VInt 0L) "zero day survives extraction"
+                          Expect.equal (call "EXTRACT" [ VString "HOUR"; zeroDateTime ]) (VInt 12L) "hour survives extraction"
                           Expect.equal (call "DATE_FORMAT" [ allZero; VString "%Y-%m-%d" ]) VNull "all-zero format is null"
 
                       testCase "NOW truncates to whole seconds (MySQL NOW() has precision 0)"

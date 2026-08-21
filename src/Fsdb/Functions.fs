@@ -2278,6 +2278,13 @@ let private zeroAwareDatePart (fromZero: ZeroDate -> int) (fromDateTime: DateTim
     | [ value ] when not (anyNull [ value ]) -> asDateTime value |> Option.map (fromDateTime >> int64 >> VInt) |> Option.defaultValue VNull
     | _ -> VNull
 
+let private zeroAwareTimePart (fromZero: ZeroDateTime -> int) (fromDateTime: DateTime -> int) : Scalar =
+    function
+    | [ VZeroDate _ ] -> VInt 0L
+    | [ VZeroDateTime dateTime ] -> VInt(int64 (fromZero dateTime))
+    | [ value ] when not (anyNull [ value ]) -> asDateTime value |> Option.map (fromDateTime >> int64 >> VInt) |> Option.defaultValue VNull
+    | _ -> VNull
+
 let private dayNameFn: Scalar =
     function
     | [ v ] when not (anyNull [ v ]) -> asDateTime v |> Option.map (fun d -> VString(d.DayOfWeek.ToString())) |> Option.defaultValue VNull
@@ -2700,36 +2707,47 @@ let private timestampDiffFn: Scalar =
 let private extractFn: Scalar =
     function
     | [ u; v ] when not (anyNull [ u; v ]) ->
-        match toText u, asDateTime v with
-        | Some unit, Some d ->
-            // Components stitched together as `sum(part_i * 10^width_of_all_lower)`.
-            let compose (parts: (int * int) list) =
-                parts |> List.fold (fun acc (value, width) -> acc * pown 10L width + int64 value) 0L
+        let compose (parts: (int * int) list) =
+            parts |> List.fold (fun acc (value, width) -> acc * pown 10L width + int64 value) 0L
 
-            let micro = int ((d.Ticks % 10_000_000L) / 10L)
-
-            match unit.ToUpperInvariant() with
-            | "MICROSECOND" -> VInt(int64 micro)
-            | "SECOND" -> VInt(int64 d.Second)
-            | "MINUTE" -> VInt(int64 d.Minute)
-            | "HOUR" -> VInt(int64 d.Hour)
-            | "DAY" -> VInt(int64 d.Day)
-            | "WEEK" -> weekFn [ v ]
-            | "MONTH" -> VInt(int64 d.Month)
-            | "QUARTER" -> VInt(int64 ((d.Month - 1) / 3 + 1))
-            | "YEAR" -> VInt(int64 d.Year)
-            | "SECOND_MICROSECOND" -> VInt(compose [ d.Second, 0; micro, 6 ])
-            | "MINUTE_MICROSECOND" -> VInt(compose [ d.Minute, 0; d.Second, 2; micro, 6 ])
-            | "MINUTE_SECOND" -> VInt(compose [ d.Minute, 0; d.Second, 2 ])
-            | "HOUR_MICROSECOND" -> VInt(compose [ d.Hour, 0; d.Minute, 2; d.Second, 2; micro, 6 ])
-            | "HOUR_SECOND" -> VInt(compose [ d.Hour, 0; d.Minute, 2; d.Second, 2 ])
-            | "HOUR_MINUTE" -> VInt(compose [ d.Hour, 0; d.Minute, 2 ])
-            | "DAY_MICROSECOND" -> VInt(compose [ d.Day, 0; d.Hour, 2; d.Minute, 2; d.Second, 2; micro, 6 ])
-            | "DAY_SECOND" -> VInt(compose [ d.Day, 0; d.Hour, 2; d.Minute, 2; d.Second, 2 ])
-            | "DAY_MINUTE" -> VInt(compose [ d.Day, 0; d.Hour, 2; d.Minute, 2 ])
-            | "DAY_HOUR" -> VInt(compose [ d.Day, 0; d.Hour, 2 ])
-            | "YEAR_MONTH" -> VInt(compose [ d.Year, 0; d.Month, 2 ])
+        let extract unit year month day hour minute second microseconds =
+            match unit with
+            | "MICROSECOND" -> VInt(int64 microseconds)
+            | "SECOND" -> VInt(int64 second)
+            | "MINUTE" -> VInt(int64 minute)
+            | "HOUR" -> VInt(int64 hour)
+            | "DAY" -> VInt(int64 day)
+            | "MONTH" -> VInt(int64 month)
+            | "QUARTER" -> VInt(int64 ((month - 1) / 3 + 1))
+            | "YEAR" -> VInt(int64 year)
+            | "SECOND_MICROSECOND" -> VInt(compose [ second, 0; microseconds, 6 ])
+            | "MINUTE_MICROSECOND" -> VInt(compose [ minute, 0; second, 2; microseconds, 6 ])
+            | "MINUTE_SECOND" -> VInt(compose [ minute, 0; second, 2 ])
+            | "HOUR_MICROSECOND" -> VInt(compose [ hour, 0; minute, 2; second, 2; microseconds, 6 ])
+            | "HOUR_SECOND" -> VInt(compose [ hour, 0; minute, 2; second, 2 ])
+            | "HOUR_MINUTE" -> VInt(compose [ hour, 0; minute, 2 ])
+            | "DAY_MICROSECOND" -> VInt(compose [ day, 0; hour, 2; minute, 2; second, 2; microseconds, 6 ])
+            | "DAY_SECOND" -> VInt(compose [ day, 0; hour, 2; minute, 2; second, 2 ])
+            | "DAY_MINUTE" -> VInt(compose [ day, 0; hour, 2; minute, 2 ])
+            | "DAY_HOUR" -> VInt(compose [ day, 0; hour, 2 ])
+            | "YEAR_MONTH" -> VInt(compose [ year, 0; month, 2 ])
             | _ -> VNull
+
+        match toText u |> Option.map (fun unit -> unit.ToUpperInvariant()), v with
+        | Some "WEEK", _ -> weekFn [ v ]
+        | Some unit, VZeroDate date ->
+            let year, month, day = zeroDateParts date
+            extract unit year month day 0 0 0 0
+        | Some unit, VZeroDateTime dateTime ->
+            let date, hour, minute, second, microseconds = zeroDateTimeParts dateTime
+            let year, month, day = zeroDateParts date
+            extract unit year month day hour minute second microseconds
+        | Some unit, value ->
+            asDateTime value
+            |> Option.map (fun dateTime ->
+                let microseconds = int ((dateTime.Ticks % 10_000_000L) / 10L)
+                extract unit dateTime.Year dateTime.Month dateTime.Day dateTime.Hour dateTime.Minute dateTime.Second microseconds)
+            |> Option.defaultValue VNull
         | _ -> VNull
     | _ -> VNull
 
@@ -4982,11 +5000,11 @@ let builtins: Registry =
     |> registerScalar "TIMESTAMP" timestampFn
     |> registerScalar "YEAR" (zeroAwareDatePart (fun date -> let year, _, _ = zeroDateParts date in year) (fun d -> d.Year))
     |> registerScalar "MONTH" (zeroAwareDatePart (fun date -> let _, month, _ = zeroDateParts date in month) (fun d -> d.Month))
-    |> registerScalar "DAY" (datePartFn (fun d -> d.Day))
+    |> registerScalar "DAY" (zeroAwareDatePart (fun date -> let _, _, day = zeroDateParts date in day) (fun d -> d.Day))
     |> registerScalar "DAYOFMONTH" (zeroAwareDatePart (fun date -> let _, _, day = zeroDateParts date in day) (fun d -> d.Day))
-    |> registerScalar "HOUR" (datePartFn (fun d -> d.Hour))
-    |> registerScalar "MINUTE" (datePartFn (fun d -> d.Minute))
-    |> registerScalar "SECOND" (datePartFn (fun d -> d.Second))
+    |> registerScalar "HOUR" (zeroAwareTimePart (fun dateTime -> let _, hour, _, _, _ = zeroDateTimeParts dateTime in hour) (fun d -> d.Hour))
+    |> registerScalar "MINUTE" (zeroAwareTimePart (fun dateTime -> let _, _, minute, _, _ = zeroDateTimeParts dateTime in minute) (fun d -> d.Minute))
+    |> registerScalar "SECOND" (zeroAwareTimePart (fun dateTime -> let _, _, _, second, _ = zeroDateTimeParts dateTime in second) (fun d -> d.Second))
     |> registerScalar "DAYOFWEEK" (datePartFn (fun d -> int d.DayOfWeek + 1))
     |> registerScalar "DAYOFYEAR" (datePartFn (fun d -> d.DayOfYear))
     |> registerScalar "DAYNAME" dayNameFn

@@ -973,8 +973,6 @@ let rec compare (a: Value) (b: Value) : int =
     | VDate y, VZeroDateTime x -> -(compareZeroDateTimeToDateTime x (y.ToDateTime TimeOnly.MinValue))
     | VZeroDateTime x, VDateTime y -> compareZeroDateTimeToDateTime x y
     | VDateTime y, VZeroDateTime x -> -(compareZeroDateTimeToDateTime x y)
-    | VZeroDate _, VString _
-    | VZeroDateTime _, VString _ -> compareStrings (toText a |> Option.defaultValue "") (toText b |> Option.defaultValue "")
     | (VDate _ | VDateTime _ | VZeroDate _ | VZeroDateTime _), VString s ->
         // A literal like a `WHERE date BETWEEN '2024-01-01 00:00:00' AND
         // ...` bound is still a bare VString here (nothing coerces it to the
@@ -985,9 +983,11 @@ let rec compare (a: Value) (b: Value) : int =
         // case here. Without this, `VDate "2024-01-01"`.`toText` ("2024-01-01",
         // no time part) sorted *before* "2024-01-01 00:00:00" as plain text —
         // a same-day BETWEEN lower bound excluded rows it should include.
-        match DateTime.TryParse(s.Trim(), CultureInfo.InvariantCulture, DateTimeStyles.None) with
-        | true, dt -> Operators.compare (asDateTime a) dt
-        | false, _ -> compareStrings (toText a |> Option.defaultValue "") s
+        match a, DateTime.TryParse(s.Trim(), CultureInfo.InvariantCulture, DateTimeStyles.None) with
+        | VZeroDate _, _
+        | VZeroDateTime _, _ -> compareStrings (toText a |> Option.defaultValue "") s
+        | _, (true, dt) -> Operators.compare (asDateTime a) dt
+        | _, (false, _) -> compareStrings (toText a |> Option.defaultValue "") s
     | VString _, (VDate _ | VDateTime _ | VZeroDate _ | VZeroDateTime _) -> -(compare b a)
     // BIGINT vs DECIMAL with neither side a DOUBLE: promote both to
     // `decimal` and compare exactly. Routing this through `toDouble`
