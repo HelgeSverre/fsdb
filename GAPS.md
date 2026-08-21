@@ -139,7 +139,7 @@ CURRENT_USER/USER/SESSION_USER.
 | Crypto | asymmetric key-management family | medium |
 | Weight-string clauses | `WEIGHT_STRING(... AS CHAR/BINARY, LEVEL ...)` | low |
 | JSON Schema recursive regular-expression references | Local reference cycles traversing `pattern` or `patternProperties` return 1235 | low |
-| Geometry topology and relations | Topological predicates, overlays, buffers, validity, and geographic SRS semantics | low |
+| Geometry topology and relations | Contains/within/touches predicates, overlays, buffers, and geographic SRS semantics | low |
 
 Divergences in existing functions: `CURTIME()`/`TIME()` return strings (no
 TIME value domain, `Functions.fs`); `CONVERT_TZ` resolves numeric offsets and
@@ -161,7 +161,7 @@ accessors).
 |---|---|---|---|---|
 | TIME value domain | typed TIME comparisons/arithmetic | stored and compared as pre-formatted strings; no `VTime` case (`Value.fs:13–30`, `Storage.fs:911–935`) | medium | divergence |
 | BIT type | `BIT(M)` with bit-literal I/O | absent | low | refusal |
-| Spatial indexes and operations | R-tree indexes, topological predicates, overlays, buffers, validity, geographic SRS axis rules | geometry values, common WKT/WKB accessors, planar `ST_Distance`, `ST_Envelope`, and MBR predicates work; spatial indexes still collapse to BTree | low | refusal |
+| Spatial indexes and operations | R-tree indexes, containment/touch predicates, overlays, buffers, geographic SRS axis rules | geometry values, common WKT/WKB accessors, planar `ST_Distance`, `ST_Envelope`, `ST_IsValid`, `ST_Intersects`, `ST_Disjoint`, and MBR predicates work; spatial indexes still collapse to BTree | low | refusal |
 | Generated columns | VIRTUAL recomputed on read, STORED materialized | both materialize at write time; no read-path recompute (`Storage.fs:3705–3713`) | low | divergence |
 | Functional defaults | `DEFAULT (expr)` | literal constants and CURRENT_TIMESTAMP only | low | refusal |
 | Column comments | tracked, shown in SHOW CREATE TABLE/I_S | accepted then dropped (`Parser.fs:1371`) | low | divergence |

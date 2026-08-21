@@ -134,14 +134,20 @@ let tests =
           testCase "planar geometry functions compose through SQL expressions"
           <| fun _ ->
               let session = create 1 (Fsdb.Storage.create ())
+              let statement =
+                  "SELECT ST_Distance(ST_GeomFromText('POINT(0 0)'), ST_GeomFromText('LINESTRING(3 0,3 4)')), "
+                  + "ST_AsText(ST_Envelope(ST_GeomFromText('MULTIPOINT(2 3,1 4)'))), "
+                  + "MBRContains(ST_GeomFromText('POLYGON((0 0,4 0,4 4,0 4,0 0))'), ST_GeomFromText('POINT(2 2)')), "
+                  + "ST_Intersects(ST_GeomFromText('POINT(0 0)'), ST_GeomFromText('LINESTRING(0 0,1 0)')), "
+                  + "ST_Disjoint(ST_GeomFromText('POINT(2 2)'), ST_GeomFromText('LINESTRING(0 0,1 0)'))"
 
               match
                   handle
                       session
-                      "SELECT ST_Distance(ST_GeomFromText('POINT(0 0)'), ST_GeomFromText('LINESTRING(3 0,3 4)')), ST_AsText(ST_Envelope(ST_GeomFromText('MULTIPOINT(2 3,1 4)'))), MBRContains(ST_GeomFromText('POLYGON((0 0,4 0,4 4,0 4,0 0))'), ST_GeomFromText('POINT(2 2)'))"
+                      statement
                   |> snd
               with
-              | ResultSet(_, [ [ Some "3"; Some "POLYGON((1 3,2 3,2 4,1 4,1 3))"; Some "1" ] ]) -> ()
+              | ResultSet(_, [ [ Some "3"; Some "POLYGON((1 3,2 3,2 4,1 4,1 3))"; Some "1"; Some "1"; Some "1" ] ]) -> ()
               | other -> failtestf "expected planar geometry result, got %A" other
 
           testCase "planar geometry functions retain result metadata without rows"
@@ -150,11 +156,13 @@ let tests =
               let statement =
                   "SELECT ST_Envelope(ST_GeomFromText('POINT(1 2)')), "
                   + "ST_Distance(ST_GeomFromText('POINT(0 0)'), ST_GeomFromText('POINT(3 4)')), "
-                  + "MBRIntersects(ST_GeomFromText('POINT(0 0)'), ST_GeomFromText('POINT(0 0)')) LIMIT 0"
+                  + "MBRIntersects(ST_GeomFromText('POINT(0 0)'), ST_GeomFromText('POINT(0 0)')), "
+                  + "ST_Intersects(ST_GeomFromText('POINT(0 0)'), ST_GeomFromText('POINT(0 0)')), "
+                  + "ST_IsValid(ST_GeomFromText('POINT(0 0)')) LIMIT 0"
 
               match handle session statement with
               | session, ResultSet(_, []) ->
-                  Expect.equal (session.LastResultColumnMetadata |> List.map _.TypeId) [ TypeGeometry; TypeDouble; TypeLongLong ] "function metadata"
+                  Expect.equal (session.LastResultColumnMetadata |> List.map _.TypeId) [ TypeGeometry; TypeDouble; TypeLongLong; TypeLongLong; TypeLongLong ] "function metadata"
               | _, other -> failtestf "expected empty resultset, got %A" other
 
           // A resultset's types are read off the row `Value`s, which know
