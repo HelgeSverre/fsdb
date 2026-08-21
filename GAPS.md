@@ -32,7 +32,7 @@ accepted (marked `ponytail:` in source), or recorded only in
 |---|---|---|
 | SQL statements | Broad core; large admin/programmatic tail missing | Stored procedures/functions, events |
 | Query execution | Correct single-table equality access | No index-based join access; subqueries re-run per outer row |
-| Built-in functions | Broad scalar, aggregate, JSON, and time coverage | AES crypto, geometry, JSON Schema regex patterns |
+| Built-in functions | Broad scalar, aggregate, JSON, and time coverage | Geometry, legacy/asymmetric crypto, JSON Schema regex patterns |
 | Data types | All common types | No TIME value domain, BIT, or geometry |
 | Constraints & indexes | PK/UNIQUE/FK/CHECK plus one-column equality indexes | No range/order/index-join access |
 | Charsets & collations | ICU-based utf8mb4 registry | Weight-table tailoring differs from MySQL's UCA tables |
@@ -128,14 +128,15 @@ STR_TO_DATE, EXTRACT, LAST_DAY, MAKEDATE, UNIX_TIMESTAMP, FROM_UNIXTIME,
 WEEK(mode)/YEARWEEK(mode)), JSON (EXTRACT/UNQUOTE/CONTAINS/SET/INSERT/
 REPLACE/REMOVE/ARRAY/OBJECT/LENGTH/DEPTH/VALID/SCHEMA_VALID/
 SCHEMA_VALIDATION_REPORT/TYPE/KEYS/SEARCH,
-ARRAYAGG/OBJECTAGG, JSON_TABLE), hashing (MD5/SHA1/SHA2), UUID family,
+ARRAYAGG/OBJECTAGG, JSON_TABLE), AES (`AES_ENCRYPT`/`AES_DECRYPT` with every
+MySQL `block_encryption_mode`, HKDF, and PBKDF2-HMAC), hashing (MD5/SHA1/SHA2), UUID family,
 IPv4/IPv6 conversion and predicates, COALESCE/IFNULL/IF/NULLIF/GREATEST/
 LEAST, plus session functions DATABASE/LAST_INSERT_ID/VERSION/CONNECTION_ID/
 CURRENT_USER/USER/SESSION_USER.
 
 | Missing family | Functions | Impact |
 |---|---|---|
-| Crypto | `AES_ENCRYPT AES_DECRYPT ENCODE DECODE`, entire asymmetric family | medium |
+| Crypto | `ENCODE DECODE`, entire asymmetric family | medium |
 | Weight-string clauses | `WEIGHT_STRING(... AS CHAR/BINARY, LEVEL ...)` | low |
 | JSON schema patterns | `pattern patternProperties` | medium |
 | Geometry | all `ST_*`/`GeometryCollection` functions and types | low |
@@ -434,7 +435,7 @@ implementation effort:
    correctness holds, but scale diverges sharply from MySQL past small data.
 2. Trigger coverage (BEFORE/UPDATE/DELETE, OLD.*, compound bodies) and
    updatable views — the two largest deliberate-subset cliffs.
-3. Missing function families (AES and geometry, plus JSON Schema regexes) —
+3. Missing function families (geometry, legacy/asymmetric crypto, and JSON Schema regexes) —
    each individually small, collectively frequent in
    report-style queries.
 4. LOAD DATA LOCAL INFILE and multi-statement packets — bulk-loading and

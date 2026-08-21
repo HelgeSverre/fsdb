@@ -2671,6 +2671,440 @@ let private unhexFn: Scalar =
             |> VBytes
     | _ -> VNull
 
+type private AesCipherMode =
+    | AesEcb
+    | AesCbc
+    | AesCfb1
+    | AesCfb8
+    | AesCfb128
+    | AesOfb
+
+type private AesConfiguration =
+    { KeyLength: int
+      CipherMode: AesCipherMode }
+
+let private aesModeNames =
+    [ for keySize in [ 128; 192; 256 ] do
+          for cipherMode in [ "ecb"; "cbc"; "cfb1"; "cfb8"; "cfb128"; "ofb" ] do
+              yield sprintf "aes-%d-%s" keySize cipherMode ]
+
+/// The canonical `block_encryption_mode` value, when MySQL supports it.
+let tryBlockEncryptionMode (value: string) : string option =
+    let canonical = value.Trim().ToLowerInvariant()
+    if List.contains canonical aesModeNames then Some canonical else None
+
+let private aesConfiguration (value: string) : AesConfiguration =
+    match tryBlockEncryptionMode value with
+    | Some canonical ->
+        let parts = canonical.Split '-'
+
+        { KeyLength = int parts.[1] / 8
+          CipherMode =
+            match parts.[2] with
+            | "ecb" -> AesEcb
+            | "cbc" -> AesCbc
+            | "cfb1" -> AesCfb1
+            | "cfb8" -> AesCfb8
+            | "cfb128" -> AesCfb128
+            | "ofb" -> AesOfb
+            | _ -> invalidArg "value" "Unsupported AES cipher mode" }
+    | None -> invalidArg "value" "Unsupported AES block encryption mode"
+
+let private aesBytes (value: Value) : byte[] =
+    match value with
+    | VBytes bytes -> bytes
+    | _ -> Encoding.UTF8.GetBytes(req value)
+
+let private aesParameterCountError (name: string) : 'a =
+    raise (SqlError(1582, sprintf "Incorrect parameter count in the call to native function '%s'" name))
+
+let private aesKdfOptionError maxLength : 'a =
+    raise (SqlError(3238, sprintf "KDF option size is invalid, please provide valid size < %d bytes and not NULL" maxLength))
+
+let private aesPbkdf2IterationError () : 'a =
+    raise (
+        SqlError(
+            3236,
+            "For KDF method pbkdf2_hmac iterations value less than 1000 or more than 65535 is not allowed due to security reasons. Please provide iterations >= 1000 and iterations < 65535"
+        )
+    )
+
+let private aesKeyWithoutKdf (keyLength: int) (keyMaterial: byte[]) : byte[] =
+    let key = Array.zeroCreate keyLength
+
+    for i in 0 .. keyMaterial.Length - 1 do
+        key.[i % key.Length] <- key.[i % key.Length] ^^^ keyMaterial.[i]
+
+    key
+
+let private aesKdfOption (maxLength: int) (value: Value) : byte[] =
+    match value with
+    | VNull -> aesKdfOptionError maxLength
+    | _ ->
+        let bytes = aesBytes value
+
+        if bytes.Length >= maxLength then
+            aesKdfOptionError maxLength
+
+        Array.copy bytes
+
+let private aesPbkdf2Iterations (value: Value) : int =
+    let bytes = aesKdfOption 6 value
+
+    try
+        let iterations = int (toDouble value)
+
+        if iterations < 1000 || iterations > 65535 then
+            aesPbkdf2IterationError ()
+
+        iterations
+    finally
+        CryptographicOperations.ZeroMemory bytes
+
+let private deriveAesKey (functionName: string) (keyLength: int) (keyMaterial: byte[]) (kdfName: Value) (options: Value list) : byte[] =
+    let kdf = aesKdfOption 256 kdfName
+
+    try
+        match Encoding.UTF8.GetString(kdf).ToLowerInvariant(), options with
+        | "hkdf", [] -> HKDF.DeriveKey(HashAlgorithmName.SHA512, keyMaterial, keyLength, Array.empty, Array.empty)
+        | "hkdf", [ salt ] ->
+            let saltBytes = aesKdfOption 256 salt
+
+            try
+                HKDF.DeriveKey(HashAlgorithmName.SHA512, keyMaterial, keyLength, saltBytes, Array.empty)
+            finally
+                CryptographicOperations.ZeroMemory saltBytes
+        | "hkdf", [ salt; info ] ->
+            let saltBytes = aesKdfOption 256 salt
+            let infoBytes = aesKdfOption 256 info
+
+            try
+                HKDF.DeriveKey(HashAlgorithmName.SHA512, keyMaterial, keyLength, saltBytes, infoBytes)
+            finally
+                CryptographicOperations.ZeroMemory saltBytes
+                CryptographicOperations.ZeroMemory infoBytes
+        | "pbkdf2_hmac", [] -> Rfc2898DeriveBytes.Pbkdf2(keyMaterial, Array.empty, 1000, HashAlgorithmName.SHA512, keyLength)
+        | "pbkdf2_hmac", [ salt ] ->
+            let saltBytes = aesKdfOption 256 salt
+
+            try
+                Rfc2898DeriveBytes.Pbkdf2(keyMaterial, saltBytes, 1000, HashAlgorithmName.SHA512, keyLength)
+            finally
+                CryptographicOperations.ZeroMemory saltBytes
+        | "pbkdf2_hmac", [ salt; iterations ] ->
+            let saltBytes = aesKdfOption 256 salt
+
+            try
+                Rfc2898DeriveBytes.Pbkdf2(keyMaterial, saltBytes, aesPbkdf2Iterations iterations, HashAlgorithmName.SHA512, keyLength)
+            finally
+                CryptographicOperations.ZeroMemory saltBytes
+        | "hkdf", _
+        | "pbkdf2_hmac", _ -> aesParameterCountError functionName
+        | _ -> raise (SqlError(3235, "KDF method name is not valid. Please use hkdf or pbkdf2_hmac method name"))
+    finally
+        CryptographicOperations.ZeroMemory kdf
+
+let private aesEncryptBlock (key: byte[]) (block: byte[]) : byte[] =
+    use aes = Aes.Create()
+    aes.Key <- key
+    aes.Mode <- CipherMode.ECB
+    aes.Padding <- PaddingMode.None
+    use transform = aes.CreateEncryptor()
+    let encrypted = Array.zeroCreate 16
+    transform.TransformBlock(block, 0, block.Length, encrypted, 0) |> ignore
+    encrypted
+
+let private aesDecryptBlock (key: byte[]) (block: byte[]) : byte[] =
+    use aes = Aes.Create()
+    aes.Key <- key
+    aes.Mode <- CipherMode.ECB
+    aes.Padding <- PaddingMode.None
+    use transform = aes.CreateDecryptor()
+    let decrypted = Array.zeroCreate 16
+    transform.TransformBlock(block, 0, block.Length, decrypted, 0) |> ignore
+    decrypted
+
+let private aesPad (input: byte[]) : byte[] =
+    let paddingLength = 16 - input.Length % 16
+    let padded = Array.zeroCreate (input.Length + paddingLength)
+    Array.Copy(input, padded, input.Length)
+    Array.Fill(padded, byte paddingLength, input.Length, paddingLength)
+    padded
+
+let private aesTryUnpad (input: byte[]) : byte[] option =
+    if input.Length = 0 || input.Length % 16 <> 0 then
+        None
+    else
+        let paddingLength = int input.[input.Length - 1]
+
+        if paddingLength < 1 || paddingLength > 16 || input.[input.Length - paddingLength ..] |> Array.exists (fun value -> int value <> paddingLength) then
+            None
+        else
+            Some input.[0 .. input.Length - paddingLength - 1]
+
+let private xorInto (target: byte[]) (left: byte[]) (right: byte[]) : unit =
+    for i in 0 .. target.Length - 1 do
+        target.[i] <- left.[i] ^^^ right.[i]
+
+let private shiftRegister (register: byte[]) (feedback: byte[]) : unit =
+    let count = feedback.Length
+    Array.Copy(register, count, register, 0, register.Length - count)
+    Array.Copy(feedback, 0, register, register.Length - count, count)
+
+let private shiftRegisterBit (register: byte[]) (feedback: byte) : unit =
+    for i in 0 .. register.Length - 2 do
+        register.[i] <- (register.[i] <<< 1) ||| (register.[i + 1] >>> 7)
+
+    register.[register.Length - 1] <- (register.[register.Length - 1] <<< 1) ||| feedback
+
+let private aesEncryptBlockMode (configuration: AesConfiguration) (key: byte[]) (initializationVector: byte[]) (input: byte[]) : byte[] =
+    match configuration.CipherMode with
+    | AesEcb
+    | AesCbc ->
+        let padded = aesPad input
+        let output = Array.zeroCreate padded.Length
+        let previous = Array.copy initializationVector
+        let block = Array.zeroCreate 16
+
+        try
+            for offset in 0 .. 16 .. padded.Length - 16 do
+                Array.Copy(padded, offset, block, 0, 16)
+
+                if configuration.CipherMode = AesCbc then
+                    xorInto block block previous
+
+                let encrypted = aesEncryptBlock key block
+                Array.Copy(encrypted, 0, output, offset, 16)
+                Array.Copy(encrypted, previous, 16)
+                CryptographicOperations.ZeroMemory encrypted
+
+            output
+        finally
+            CryptographicOperations.ZeroMemory padded
+            CryptographicOperations.ZeroMemory previous
+            CryptographicOperations.ZeroMemory block
+    | AesCfb1 ->
+        let output = Array.zeroCreate input.Length
+        let register = Array.copy initializationVector
+
+        try
+            for i in 0 .. input.Length - 1 do
+                let mutable outputByte = 0uy
+
+                for bit in 7 .. -1 .. 0 do
+                    let encrypted = aesEncryptBlock key register
+                    let sourceBit = (input.[i] >>> bit) &&& 1uy
+                    let encryptedBit = (encrypted.[0] >>> 7) &&& 1uy
+                    let cipherBit = sourceBit ^^^ encryptedBit
+                    outputByte <- outputByte ||| (cipherBit <<< bit)
+                    shiftRegisterBit register cipherBit
+                    CryptographicOperations.ZeroMemory encrypted
+
+                output.[i] <- outputByte
+
+            output
+        finally
+            CryptographicOperations.ZeroMemory register
+    | AesCfb8
+    | AesCfb128 ->
+        let output = Array.zeroCreate input.Length
+        let register = Array.copy initializationVector
+        let segmentLength = if configuration.CipherMode = AesCfb8 then 1 else 16
+
+        try
+            for offset in 0 .. segmentLength .. input.Length - 1 do
+                let length = min segmentLength (input.Length - offset)
+                let encrypted = aesEncryptBlock key register
+                let feedback = Array.zeroCreate length
+
+                for i in 0 .. length - 1 do
+                    let cipherByte = input.[offset + i] ^^^ encrypted.[i]
+                    output.[offset + i] <- cipherByte
+                    feedback.[i] <- cipherByte
+
+                shiftRegister register feedback
+                CryptographicOperations.ZeroMemory encrypted
+                CryptographicOperations.ZeroMemory feedback
+
+            output
+        finally
+            CryptographicOperations.ZeroMemory register
+    | AesOfb ->
+        let output = Array.zeroCreate input.Length
+        let register = Array.copy initializationVector
+
+        try
+            for offset in 0 .. 16 .. input.Length - 1 do
+                let length = min 16 (input.Length - offset)
+                let next = aesEncryptBlock key register
+                Array.Copy(next, register, 16)
+
+                for i in 0 .. length - 1 do
+                    output.[offset + i] <- input.[offset + i] ^^^ next.[i]
+
+                CryptographicOperations.ZeroMemory next
+
+            output
+        finally
+            CryptographicOperations.ZeroMemory register
+
+let private aesDecryptBlockMode (configuration: AesConfiguration) (key: byte[]) (initializationVector: byte[]) (input: byte[]) : byte[] option =
+    match configuration.CipherMode with
+    | AesEcb
+    | AesCbc ->
+        if input.Length = 0 || input.Length % 16 <> 0 then
+            None
+        else
+            let output = Array.zeroCreate input.Length
+            let previous = Array.copy initializationVector
+            let block = Array.zeroCreate 16
+
+            try
+                for offset in 0 .. 16 .. input.Length - 16 do
+                    Array.Copy(input, offset, block, 0, 16)
+                    let decrypted = aesDecryptBlock key block
+
+                    if configuration.CipherMode = AesCbc then
+                        xorInto decrypted decrypted previous
+
+                    Array.Copy(decrypted, 0, output, offset, 16)
+                    Array.Copy(block, previous, 16)
+                    CryptographicOperations.ZeroMemory decrypted
+
+                aesTryUnpad output
+            finally
+                CryptographicOperations.ZeroMemory output
+                CryptographicOperations.ZeroMemory previous
+                CryptographicOperations.ZeroMemory block
+    | AesCfb1 ->
+        let output = Array.zeroCreate input.Length
+        let register = Array.copy initializationVector
+
+        try
+            for i in 0 .. input.Length - 1 do
+                let mutable outputByte = 0uy
+
+                for bit in 7 .. -1 .. 0 do
+                    let encrypted = aesEncryptBlock key register
+                    let cipherBit = (input.[i] >>> bit) &&& 1uy
+                    let plainBit = cipherBit ^^^ ((encrypted.[0] >>> 7) &&& 1uy)
+                    outputByte <- outputByte ||| (plainBit <<< bit)
+                    shiftRegisterBit register cipherBit
+                    CryptographicOperations.ZeroMemory encrypted
+
+                output.[i] <- outputByte
+
+            Some output
+        finally
+            CryptographicOperations.ZeroMemory register
+    | AesCfb8
+    | AesCfb128 ->
+        let output = Array.zeroCreate input.Length
+        let register = Array.copy initializationVector
+        let segmentLength = if configuration.CipherMode = AesCfb8 then 1 else 16
+
+        try
+            for offset in 0 .. segmentLength .. input.Length - 1 do
+                let length = min segmentLength (input.Length - offset)
+                let encrypted = aesEncryptBlock key register
+                let feedback = input.[offset .. offset + length - 1]
+
+                for i in 0 .. length - 1 do
+                    output.[offset + i] <- input.[offset + i] ^^^ encrypted.[i]
+
+                shiftRegister register feedback
+                CryptographicOperations.ZeroMemory encrypted
+
+            Some output
+        finally
+            CryptographicOperations.ZeroMemory register
+    | AesOfb ->
+        let output = Array.zeroCreate input.Length
+        let register = Array.copy initializationVector
+
+        try
+            for offset in 0 .. 16 .. input.Length - 1 do
+                let length = min 16 (input.Length - offset)
+                let next = aesEncryptBlock key register
+                Array.Copy(next, register, 16)
+
+                for i in 0 .. length - 1 do
+                    output.[offset + i] <- input.[offset + i] ^^^ next.[i]
+
+                CryptographicOperations.ZeroMemory next
+
+            Some output
+        finally
+            CryptographicOperations.ZeroMemory register
+
+let private aesArguments (functionName: string) (configuration: AesConfiguration) (args: Value list) : (byte[] * byte[] * byte[]) option =
+    match args with
+    | data :: key :: rest ->
+        let requiresInitializationVector = configuration.CipherMode <> AesEcb
+        let reportedFunctionName = if requiresInitializationVector then functionName.ToLowerInvariant() else functionName
+
+        if rest.Length > 4 || (requiresInitializationVector && rest.IsEmpty) then
+            aesParameterCountError reportedFunctionName
+
+        if not requiresInitializationVector && rest.Length = 1 then
+            Diagnostics.warning 1618 "<IV> option ignored"
+
+        if data = VNull || key = VNull then
+            None
+        else
+            let initializationVector =
+                if requiresInitializationVector then
+                    let vector = aesBytes rest.Head
+
+                    if vector.Length < 16 then
+                        raise (
+                            SqlError(
+                                1882,
+                                sprintf "The initialization vector supplied to %s is too short. Must be at least 16 bytes long" (functionName.ToLowerInvariant())
+                            )
+                        )
+
+                    vector.[0..15]
+                else
+                    Array.zeroCreate 16
+
+            let keyMaterial = aesBytes key
+            let derivedKey =
+                match rest with
+                | _ :: kdfName :: options -> deriveAesKey reportedFunctionName configuration.KeyLength keyMaterial kdfName options
+                | _ -> aesKeyWithoutKdf configuration.KeyLength keyMaterial
+
+            Some(aesBytes data, derivedKey, initializationVector)
+    | _ -> aesParameterCountError functionName
+
+/// Builds an AES function bound to one session's `block_encryption_mode`.
+let aesEncrypt (blockEncryptionMode: string) : Scalar =
+    let configuration = aesConfiguration blockEncryptionMode
+
+    fun args ->
+        match aesArguments "AES_ENCRYPT" configuration args with
+        | None -> VNull
+        | Some(input, key, initializationVector) ->
+            try
+                aesEncryptBlockMode configuration key initializationVector input |> VBytes
+            finally
+                CryptographicOperations.ZeroMemory key
+                CryptographicOperations.ZeroMemory initializationVector
+
+/// Builds an AES function bound to one session's `block_encryption_mode`.
+let aesDecrypt (blockEncryptionMode: string) : Scalar =
+    let configuration = aesConfiguration blockEncryptionMode
+
+    fun args ->
+        match aesArguments "AES_DECRYPT" configuration args with
+        | None -> VNull
+        | Some(input, key, initializationVector) ->
+            try
+                aesDecryptBlockMode configuration key initializationVector input |> Option.map VBytes |> Option.defaultValue VNull
+            finally
+                CryptographicOperations.ZeroMemory key
+                CryptographicOperations.ZeroMemory initializationVector
+
 let private md5Fn: Scalar = textMap (fun s -> Convert.ToHexString(MD5.HashData(Text.Encoding.UTF8.GetBytes s)).ToLowerInvariant())
 let private sha1Fn: Scalar = textMap (fun s -> Convert.ToHexString(SHA1.HashData(Text.Encoding.UTF8.GetBytes s)).ToLowerInvariant())
 
@@ -4022,6 +4456,8 @@ let builtins: Registry =
     |> registerScalar "CHAR" charFn
     |> registerScalar "HEX" hexFn
     |> registerScalar "UNHEX" unhexFn
+    |> registerScalar "AES_ENCRYPT" (aesEncrypt "aes-128-ecb")
+    |> registerScalar "AES_DECRYPT" (aesDecrypt "aes-128-ecb")
     |> registerScalar "MD5" md5Fn
     |> registerScalar "SHA1" sha1Fn
     |> registerScalar "SHA" sha1Fn

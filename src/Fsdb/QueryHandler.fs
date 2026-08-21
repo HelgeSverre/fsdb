@@ -226,8 +226,11 @@ let private registryFor (session: Session) : Functions.Registry =
         |> fun current -> { current with Extensions = session.CustomFunctions.Extensions }
 
     let database _ = session.Database |> Option.map VString |> Option.defaultValue VNull
+    let blockEncryptionMode = lookupVar session "block_encryption_mode" |> Option.flatten |> Option.defaultValue "aes-128-ecb"
 
     registry
+    |> Functions.registerScalar "AES_ENCRYPT" (Functions.aesEncrypt blockEncryptionMode)
+    |> Functions.registerScalar "AES_DECRYPT" (Functions.aesDecrypt blockEncryptionMode)
     |> Functions.registerScalar "DATABASE" database
     |> Functions.registerScalar "SCHEMA" database
     |> Functions.registerScalar "LAST_INSERT_ID" (fun _ -> VInt session.LastGeneratedId)
@@ -683,6 +686,10 @@ let private parseSetFragment
                 else
                     match resolveSystemSetRhs session userVariables sql varMatch.Groups.[3].Value with
                     | Error result -> Error result
+                    | Ok(VString value, sideEffects) when name = "block_encryption_mode" ->
+                        match Functions.tryBlockEncryptionMode value with
+                        | Some canonical -> Ok(SetVarAction(name, Some canonical, isGlobal), sideEffects)
+                        | None -> Error(Err(1231, sprintf "Variable '%s' can't be set to the value of '%s'" name value))
                     | Ok(VString value, sideEffects) when name = "collation_connection" ->
                         match Collation.tryFind value with
                         | Some _ -> Ok(SetVarAction(name, Some value, isGlobal), sideEffects)

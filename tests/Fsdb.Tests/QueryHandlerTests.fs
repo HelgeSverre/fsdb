@@ -23,6 +23,38 @@ let tests =
                   Expect.equal rows [ [ Some "1" ] ] "row value"
               | other -> failtestf "expected a resultset, got %A" other
 
+          testCase "block_encryption_mode selects AES mode per session"
+          <| fun _ ->
+              let session = create 1 (Fsdb.Storage.create ())
+
+              let session, result = handle session "SET block_encryption_mode = 'AES-256-CBC'"
+
+              match result with
+              | Affected 0UL -> ()
+              | other -> failtestf "expected SET to succeed, got %A" other
+
+              match handle session "SELECT @@block_encryption_mode" |> snd with
+              | ResultSet(_, [ [ Some mode ] ]) -> Expect.equal mode "aes-256-cbc" "canonical mode"
+              | other -> failtestf "expected mode result, got %A" other
+
+              match handle session "SELECT HEX(AES_ENCRYPT('hello', 'secret', '1234567890123456'))" |> snd with
+              | ResultSet(_, [ [ Some ciphertext ] ]) -> Expect.equal ciphertext "2D2DA42E9EDBB5A009EB79D0594F7A92" "MySQL vector"
+              | other -> failtestf "expected AES result, got %A" other
+
+              match handle session "SET block_encryption_mode = 'aes-123-cbc'" |> snd with
+              | Err(1231, message) -> Expect.stringContains message "aes-123-cbc" "invalid value"
+              | other -> failtestf "expected 1231, got %A" other
+
+          testCase "AES reports an ignored ECB initialization vector through the diagnostics area"
+          <| fun _ ->
+              let session = create 1 (Fsdb.Storage.create ())
+              let session, _ = handle session "SELECT AES_ENCRYPT('hello', 'secret', '1234567890123456')"
+
+              match handle session "SHOW WARNINGS" |> snd with
+              | ResultSet(_, [ [ Some "Warning"; Some "1618"; Some message ] ]) ->
+                  Expect.equal message "<IV> option ignored" "warning text"
+              | other -> failtestf "expected ignored-IV warning, got %A" other
+
           testCase "a version-gated /*!NNNNN ... */ comment executes its wrapped SET, matching a mysqldump preamble"
           <| fun _ ->
               let session = create 1 (Fsdb.Storage.create ())

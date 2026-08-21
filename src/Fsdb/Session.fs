@@ -51,7 +51,8 @@ let defaultVariables: Map<string, string option> =
           "max_heap_table_size", "16777216"
           "performance_schema", "0"
           "query_cache_size", "0"
-          "query_cache_type", "OFF" ]
+          "query_cache_type", "OFF"
+          "block_encryption_mode", "aes-128-ecb" ]
         |> Map.map (fun _ v -> Some v)
 
 /// `defaultVariables` with every `Limits` knob layered over it — the base a

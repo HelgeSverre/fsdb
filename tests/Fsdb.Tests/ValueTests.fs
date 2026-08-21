@@ -1,6 +1,7 @@
 module Fsdb.Tests.ValueTests
 
 open System
+open System.Text
 open Expecto
 open Fsdb.Value
 open Fsdb.Functions
@@ -458,6 +459,93 @@ let tests =
           testList
               "Functions"
               [ testList
+                    "AES"
+                    [ testCase "AES_ENCRYPT uses MySQL's default aes-128-ecb key folding and binary output"
+                      <| fun _ ->
+                          Expect.equal
+                              (call "AES_ENCRYPT" [ VString "hello"; VString "secret" ])
+                              (VBytes(Convert.FromHexString "C290E8B6DE4EA5773414E019FE7F17A3"))
+                              "ciphertext"
+
+                          Expect.equal
+                              (call "AES_ENCRYPT" [ VString "hello"; VString "1234567890123456x" ])
+                              (VBytes(Convert.FromHexString "B91F9F7279D55B4275255DF933CEE9F6"))
+                              "wrapped key"
+
+                      testCase "AES_DECRYPT round-trips and rejects malformed or incorrectly padded ciphertext"
+                      <| fun _ ->
+                          let ciphertext = call "AES_ENCRYPT" [ VBytes [| 0uy; 255uy; 128uy |]; VString "secret" ]
+                          Expect.equal (call "AES_DECRYPT" [ ciphertext; VString "secret" ]) (VBytes [| 0uy; 255uy; 128uy |]) "round-trip"
+                          Expect.equal (call "AES_DECRYPT" [ ciphertext; VString "wrong" ]) VNull "wrong key"
+                          Expect.equal (call "AES_DECRYPT" [ VBytes [| 0uy |]; VString "secret" ]) VNull "malformed block"
+                          Expect.equal (call "AES_ENCRYPT" [ VNull; VString "secret" ]) VNull "null data"
+                          Expect.equal (call "AES_ENCRYPT" [ VString "hello"; VNull ]) VNull "null key"
+
+                      testCase "AES modes agree with MySQL's ECB, CBC, CFB, and OFB vectors"
+                      <| fun _ ->
+                          let plain, key, vector = VString "hello", VString "secret", VString "1234567890123456"
+                          let binaryPlain = VBytes(Encoding.UTF8.GetBytes "hello")
+                          let vectors =
+                              [ "aes-128-ecb", [ plain; key ], "C290E8B6DE4EA5773414E019FE7F17A3"
+                                "aes-128-cbc", [ plain; key; vector ], "E15CF4E4A472AAD6F4C09DA3FB305FE2"
+                                "aes-128-cfb1", [ plain; key; vector ], "FE00C0BBC1"
+                                "aes-128-cfb8", [ plain; key; vector ], "E5B3EACD01"
+                                "aes-128-cfb128", [ plain; key; vector ], "E5A8898691"
+                                "aes-128-ofb", [ plain; key; vector ], "E5A8898691"
+                                "aes-192-cbc", [ plain; key; vector ], "B7E5A75343B842252A844B3D2F065348"
+                                "aes-256-cbc", [ plain; key; vector ], "2D2DA42E9EDBB5A009EB79D0594F7A92" ]
+
+                          for mode, args, expected in vectors do
+                              let encrypt = Fsdb.Functions.aesEncrypt mode
+                              let decrypt = Fsdb.Functions.aesDecrypt mode
+                              let ciphertext = encrypt args
+                              Expect.equal ciphertext (VBytes(Convert.FromHexString expected)) mode
+                              Expect.equal (decrypt (ciphertext :: List.tail args)) binaryPlain mode
+
+                      testCase "AES feedback modes preserve MySQL's state across multiple blocks"
+                      <| fun _ ->
+                          let plain = VString "the quick brown fox jumps over"
+                          let key = VString "secret"
+                          let vector = VString "1234567890123456"
+                          let vectors =
+                              [ "aes-128-cfb1", "EA5E39AB8B23B3F70DC86C20E7FB81CF5B64ABD8CB5811F7FB31D4F34A4A"
+                                "aes-128-cfb8", "F9F45C432803549DDDDDC49B99C55B9651B8BB8E02999DE0168EF49F26B8"
+                                "aes-128-cfb128", "F9A580CA8FCB3EDE61FD8D2EFFD2944A2D55F08A0495AC3DBAC7FFDC2593"
+                                "aes-128-ofb", "F9A580CA8FCB3EDE61FD8D2EFFD2944A879CE7BF5D42C6EFB0D3CBAD529E" ]
+
+                          for mode, expected in vectors do
+                              Expect.equal
+                                  (Fsdb.Functions.aesEncrypt mode [ plain; key; vector ])
+                                  (VBytes(Convert.FromHexString expected))
+                                  mode
+
+                      testCase "AES KDF output agrees with MySQL's HKDF and PBKDF2-HMAC vectors"
+                      <| fun _ ->
+                          Expect.equal
+                              (call "AES_ENCRYPT" [ VString "hello"; VString "secret"; VString ""; VString "hkdf"; VString "salt"; VString "info" ])
+                              (VBytes(Convert.FromHexString "8D5A2A4C69CA7DBA564BCDFAA5C5EA35"))
+                              "hkdf"
+
+                          Expect.equal
+                              (call "AES_ENCRYPT" [ VString "hello"; VString "secret"; VString ""; VString "pbkdf2_hmac"; VString "salt"; VInt 1000L ])
+                              (VBytes(Convert.FromHexString "B02BD357E6A07064764E1EA45A9544C3"))
+                              "pbkdf2"
+
+                      testCase "AES reports MySQL's invalid KDF, IV, and arity errors"
+                      <| fun _ ->
+                          let expectError code invoke =
+                              Expect.throwsC
+                                  (invoke >> ignore)
+                                  (function
+                                  | Fsdb.Functions.SqlError(actual, _) when actual = code -> ()
+                                  | error -> failtestf "expected %d, got %A" code error)
+
+                          expectError 1582 (fun () -> call "AES_ENCRYPT" [ VString "hello" ])
+                          expectError 3235 (fun () -> call "AES_ENCRYPT" [ VString "hello"; VString "secret"; VString ""; VString "unknown" ])
+                          expectError 3236 (fun () -> call "AES_ENCRYPT" [ VString "hello"; VString "secret"; VString ""; VString "pbkdf2_hmac"; VString "salt"; VInt 999L ])
+                          expectError 1882 (fun () -> Fsdb.Functions.aesEncrypt "aes-128-cbc" [ VString "hello"; VString "secret"; VString "short" ]) ]
+
+                testList
                     "JSON"
                     [ testCase "JSON_EXTRACT walks $.a.b, $[0], and $.a[2].b"
                       <| fun _ ->
