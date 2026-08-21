@@ -34,6 +34,7 @@ let tests =
               let r = Reader(payload)
               Expect.equal (r.ReadByte ()) 10uy "protocol version"
               Expect.equal (r.ReadNullTerminatedString ()) ServerVersion "server version string"
+              Expect.stringStarts ServerVersion "8.4." "MySQL compatibility version"
               Expect.equal (r.ReadInt32LE ()) 42 "connection id"
 
           testCase "HandshakeV10 payload declares CLIENT_PLUGIN_AUTH and ends with the plugin name"

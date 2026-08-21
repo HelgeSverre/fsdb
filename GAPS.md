@@ -332,7 +332,6 @@ disconnect detection cancelling evaluation (`Server.fs:363–406`).
 | Diagnostics area | warning count in OK/EOF, SHOW WARNINGS populated | warning count hardwired 0 (`Protocol.fs:157`); SHOW WARNINGS/ERRORS always empty | medium | divergence |
 | Unimplemented COM_* | STATISTICS, PROCESS_INFO, PROCESS_KILL, DEBUG, SET_OPTION, CHANGE_USER | all → ERR 1047; `mysqladmin status` fails (`Server.fs:70, 973–981`) | low | refusal |
 | Auth plugins | caching_sha2_password fast/full auth, sha256_password, RSA exchange | mysql_native_password only; caching_sha2 clients downgraded via auth-switch (`Server.fs:469–479`) | low (works, weaker) | divergence |
-| Version string | 8.4.x | reports `8.0.36-fsdb` (`Protocol.fs:40`) — clients gating on version see 8.0 | low | divergence |
 | Column definition fidelity | schema/table/org_table names, requested charsetnr | empty strings; charset forced to 45 (utf8mb4_general_ci) or 63 binary regardless of request (`Protocol.fs:110, 253–260`) | low | divergence |
 | Column flags | MULTIPLE_KEY, ZEROFILL, NO_DEFAULT_VALUE, ON_UPDATE_NOW, NUM, PART_KEY | not composed (`Value.fs:58–66`) | low | divergence |
 | Parameter metadata | STMT_PREPARE_OK carries result columns and typed param defs | column count always 0; params generic "?" VAR_STRING (`Protocol.fs:475–483`) | low | divergence |

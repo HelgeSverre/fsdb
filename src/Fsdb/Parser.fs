@@ -36,11 +36,11 @@ let private blockComment: Parser<unit, unit> = pstring "/*" >>. skipManyTill any
 /// to think about trailing space.
 let private ws: Parser<unit, unit> = skipMany (choice [ spaces1; lineComment; blockComment ])
 
-/// The numeric form of `Protocol.ServerVersion` ("8.0.36-fsdb"), for
+/// The numeric form of `Protocol.ServerVersion` ("8.4.0-fsdb"), for
 /// `stripVersionComments` below. Duplicated rather than shared because
 /// `Protocol.fs` compiles after this file — keep the two in sync by hand if
 /// `ServerVersion` ever changes.
-let private serverVersionNumber = 80036
+let private serverVersionNumber = 80400
 
 /// mysqldump wraps version-specific SQL in `/*!NNNNN ... */` (or a bare
 /// `/*! ... */` for "any version") so one dump can target several server

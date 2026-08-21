@@ -612,6 +612,11 @@ let tests =
                 <| fun _ ->
                     Expect.equal (stripVersionComments "SELECT /*!99999 SQL_NO_CACHE */ 1") "SELECT  1" "above server version is inert"
 
+                testCase "version-gated comments use the advertised MySQL 8.4 compatibility version"
+                <| fun _ ->
+                    Expect.equal (stripVersionComments "/*!80400 SET @at_version = 1 */") " SET @at_version = 1 " "8.4.0 executes"
+                    Expect.equal (stripVersionComments "/*!80401 SET @above_version = 1 */") "" "versions above 8.4.0 are inert"
+
                 testCase "version-gated /*!NNNNN ... */ comment reads only the first 5 digits of a longer run"
                 <| fun _ ->
                     // A 6-digit run isn't "no version" -- MySQL gates on its

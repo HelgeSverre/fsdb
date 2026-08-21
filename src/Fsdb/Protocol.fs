@@ -37,7 +37,7 @@ let ServerCapabilities =
     ||| ClientPluginAuth
     ||| ClientDeprecateEof
 
-let ServerVersion = "8.0.36-fsdb"
+let ServerVersion = "8.4.0-fsdb"
 
 /// utf8mb4_general_ci, used both as the handshake charset id and column charset.
 let Utf8Mb4GeneralCi = 45
