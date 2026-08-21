@@ -298,6 +298,18 @@ let tests =
                         Expect.equal binaryCollationWeight "61" "binary collation has byte weights"
                     | other -> failtestf "expected one WEIGHT_STRING row, got %A" other
 
+                testCase "WEIGHT_STRING keeps BIT column bytes"
+                <| fun _ ->
+                    let store = newStore ()
+                    runDefault store "CREATE TABLE weight_bits (value BIT(8))" |> ignore
+                    runDefault store "INSERT INTO weight_bits VALUES (b'10000000')" |> ignore
+
+                    match runDefault store "SELECT HEX(WEIGHT_STRING(value)), HEX(WEIGHT_STRING(value AS BINARY(2))) FROM weight_bits" with
+                    | ResultSet(_, [ [ Some weight; Some paddedWeight ] ]) ->
+                        Expect.equal weight "80" "BIT weight is its stored byte"
+                        Expect.equal paddedWeight "8000" "BINARY width pads the stored byte"
+                    | other -> failtestf "expected one BIT weight row, got %A" other
+
                 testTheory
                     "a bin-collated column compares byte-for-byte in WHERE and its unique key"
                     [ "Bob", "bob", "2"
