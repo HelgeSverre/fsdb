@@ -1660,6 +1660,34 @@ let tests =
                     | Err(1146, _) -> ()
                     | other -> failtestf "expected missing table error, got %A" other
 
+                testCase "ALTER TABLE CONVERT TO CHARACTER SET updates text columns atomically"
+                <| fun _ ->
+                    let store = newStore ()
+                    runDefault store "CREATE TABLE t (id INT, name VARCHAR(20))" |> ignore
+                    runDefault store "INSERT INTO t VALUES (1, 'blå')" |> ignore
+                    Expect.equal (runDefault store "ALTER TABLE t CONVERT TO CHARACTER SET latin1") (Affected 0UL) "converted"
+
+                    let table = store.Catalog.[defaultDatabase].[normalizeTableName "t"]
+                    Expect.equal table.TableCharset (Some "latin1") "table charset"
+                    Expect.equal table.TableCollation (Some "latin1_swedish_ci") "default collation"
+                    Expect.equal table.Columns.[1].Charset (Some "latin1") "column charset"
+                    Expect.equal table.Columns.[1].Collation (Some "latin1_swedish_ci") "column collation"
+
+                    match runDefault store "ALTER TABLE t CONVERT TO CHARACTER SET ascii" with
+                    | Err(1366, _) -> ()
+                    | other -> failtestf "expected unrepresentable ASCII data to reject the ALTER, got %A" other
+
+                    let afterFailed = store.Catalog.[defaultDatabase].[normalizeTableName "t"]
+                    Expect.equal afterFailed.TableCharset (Some "latin1") "failed ALTER leaves the published table unchanged"
+
+                    match runDefault store "SELECT name FROM t" with
+                    | ResultSet(_, [ [ Some "blå" ] ]) -> ()
+                    | other -> failtestf "expected failed conversion to preserve rows, got %A" other
+
+                    match runDefault store "ALTER TABLE t CONVERT TO CHARACTER SET latin1 COLLATE utf8mb4_bin" with
+                    | Err(1253, _) -> ()
+                    | other -> failtestf "expected incompatible collation error, got %A" other
+
                 testCase "CHANGE COLUMN renames and SELECT sees the new name"
                 <| fun _ ->
                     let store = newStore ()

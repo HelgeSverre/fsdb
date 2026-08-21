@@ -1996,6 +1996,19 @@ let private setAutoIncrementAction: Parser<AlterAction, unit> =
 let private setEngineAction: Parser<AlterAction, unit> =
     attempt (keyword "ENGINE" >>. opt (sym "=") >>. identifier) |>> SetEngine
 
+let private convertCharsetAction: Parser<AlterAction, unit> =
+    attempt (
+        keyword "CONVERT"
+        >>. keyword "TO"
+        >>. (keyword "CHARACTER" >>. keyword "SET" <|> keyword "CHARSET")
+        >>. knownCharset
+        .>>. opt (keyword "COLLATE" >>. identOrString)
+    )
+    >>= fun (charset, collation) ->
+        match collation with
+        | Some name when Collation.tryFind name |> Option.isNone -> fail (sprintf "Unknown collation '%s'" name)
+        | _ -> preturn (ConvertCharset(charset, collation))
+
 let private alterAction: Parser<AlterAction list, unit> =
     choice
         [ addForeignKeyAction |>> List.singleton
@@ -2015,6 +2028,7 @@ let private alterAction: Parser<AlterAction list, unit> =
           renameColumnAction |>> List.singleton
           setAutoIncrementAction |>> List.singleton
           setEngineAction |>> List.singleton
+          convertCharsetAction |>> List.singleton
           renameToAction |>> List.singleton ]
     <?> "ALTER TABLE action"
 

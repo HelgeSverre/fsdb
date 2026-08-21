@@ -526,6 +526,7 @@ let private encodeAlterAction (w: Writer) (a: AlterAction) : unit =
             w.WriteByte 1uy
             encodeColumnDefault w defaultValue
     | RenameIndex(oldName, newName) -> w.WriteByte 0x0Euy; writeStr w oldName; writeStr w newName
+    | ConvertCharset(charset, collation) -> w.WriteByte 0x0Fuy; writeStr w charset; writeOptStr w collation
     | AddCheck _
     | DropCheck _
     | SetCheckEnforced _
@@ -549,6 +550,7 @@ let private decodeAlterAction (r: #IReader) : AlterAction =
         let value = if r.ReadByte() = 0uy then None else Some(decodeColumnDefault r)
         SetDefault(column, value)
     | 0x0Euy -> RenameIndex(readStr r, readStr r)
+    | 0x0Fuy -> ConvertCharset(readStr r, readOptStr r)
     | _ -> AddPrimaryKey(readStrList r)
 
 let private encodeStatement (w: Writer) (s: Statement) : unit =

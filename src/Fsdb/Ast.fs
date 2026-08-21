@@ -577,6 +577,7 @@ type AlterAction =
     | AddPrimaryKey of columns: string list
     | SetDefault of column: string * value: ColumnDefault option
     | SetEngine of name: string
+    | ConvertCharset of charset: string * collation: string option
     /// `ALTER TABLE t AUTO_INCREMENT = n` — moves the counter forward
     /// (never below what existing rows already require, like InnoDB).
     | SetAutoIncrement of value: int64

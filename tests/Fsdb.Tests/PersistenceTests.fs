@@ -1223,6 +1223,7 @@ let tests =
                     "ALTER TABLE acts DROP FOREIGN KEY fk_p"
                     "ALTER TABLE acts ADD PRIMARY KEY (id)"
                     "ALTER TABLE acts ALTER COLUMN extra SET DEFAULT 9"
+                    "ALTER TABLE acts CONVERT TO CHARACTER SET latin1"
                     "ALTER TABLE acts AUTO_INCREMENT = 500" ]
                   |> List.fold run session
 
@@ -1276,6 +1277,8 @@ let tests =
                       (t.Columns |> List.find (fun c -> c.Name = "extra") |> _.Default)
                       (Some(DConst(VInt 9L)))
                       "ALTER COLUMN SET DEFAULT replayed"
+                  Expect.equal t.TableCharset (Some "latin1") "charset conversion replayed"
+                  Expect.equal t.TableCollation (Some "latin1_swedish_ci") "default collation replayed"
                   Expect.equal t.NextAutoId 500L "AUTO_INCREMENT seed replayed"
               | None -> failtest "acts table missing after reload"
 

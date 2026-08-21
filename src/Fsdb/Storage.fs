@@ -2237,6 +2237,81 @@ let private applyAlterAction (strict: bool) (table: Table) (action: AlterAction)
             { table with
                 Columns = columns },
             None)
+    | ConvertCharset(charset, requestedCollation) ->
+        let charset = charset.ToLowerInvariant()
+
+        let defaultCollation =
+            match charset with
+            | "utf8mb4" -> "utf8mb4_0900_ai_ci"
+            | "utf8"
+            | "utf8mb3" -> "utf8mb3_general_ci"
+            | "latin1" -> "latin1_swedish_ci"
+            | "ascii" -> "ascii_general_ci"
+            | _ -> "binary"
+
+        let collation = requestedCollation |> Option.defaultValue defaultCollation
+
+        let compatible =
+            match charset with
+            | "utf8mb4" -> collation.StartsWith("utf8mb4_", StringComparison.OrdinalIgnoreCase)
+            | "utf8"
+            | "utf8mb3" ->
+                collation.StartsWith("utf8mb3_", StringComparison.OrdinalIgnoreCase)
+                || collation.StartsWith("utf8_", StringComparison.OrdinalIgnoreCase)
+            | "latin1" -> collation.StartsWith("latin1_", StringComparison.OrdinalIgnoreCase)
+            | "ascii" -> collation.StartsWith("ascii_", StringComparison.OrdinalIgnoreCase)
+            | "binary" -> String.Equals(collation, "binary", StringComparison.OrdinalIgnoreCase)
+            | _ -> false
+
+        if not compatible then
+            Error(ExpressionError(1253, sprintf "COLLATION '%s' is not valid for CHARACTER SET '%s'" collation charset))
+        else
+            let isTextColumn column =
+                match column.Type with
+                | TChar _
+                | TVarchar _
+                | TTinyText
+                | TText
+                | TMediumText
+                | TLongText
+                | TEnum _
+                | TSet _ -> true
+                | _ -> false
+
+            let columns =
+                table.Columns
+                |> List.map (fun column ->
+                    if isTextColumn column then
+                        { column with
+                            Charset = Some charset
+                            Collation = Some collation }
+                    else
+                        column)
+
+            let changedColumns =
+                columns
+                |> List.indexed
+                |> List.filter (snd >> isTextColumn)
+
+            let builder = table.RowsArray.ToBuilder()
+
+            table.RowsArray.Indexed
+            |> List.ofSeq
+            |> traverse (fun (rowId, row) ->
+                let updated = Array.copy row
+
+                changedColumns
+                |> traverse (fun (index, column) ->
+                    recoerce column row.[index]
+                    |> Result.map (fun value -> updated.[index] <- value))
+                |> Result.map (fun _ -> builder.[rowId] <- updated))
+            |> Result.map (fun _ ->
+                { table with
+                    Columns = columns
+                    RowsArray = builder.DrainToImmutable()
+                    TableCharset = Some charset
+                    TableCollation = Some collation },
+                None)
     | SetAutoIncrement value ->
         // Forward only, like InnoDB: a value below what existing rows
         // already claimed leaves the counter where it is.

@@ -1513,6 +1513,13 @@ let tests =
                         (AlterTable("t", [ SetEngine "InnoDB" ]))
                         "set engine"
 
+                testCase "ALTER TABLE CONVERT TO CHARACTER SET"
+                <| fun _ ->
+                    Expect.equal
+                        (parseOk "ALTER TABLE t CONVERT TO CHARACTER SET latin1 COLLATE latin1_swedish_ci")
+                        (AlterTable("t", [ ConvertCharset("latin1", Some "latin1_swedish_ci") ]))
+                        "convert charset"
+
                 testCase "RENAME TABLE a TO b, c TO d"
                 <| fun _ ->
                     Expect.equal
