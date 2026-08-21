@@ -1117,9 +1117,8 @@ let private compareBytesLex (x: byte[]) (y: byte[]) : int =
     if result <> 0 then result else Operators.compare x.Length y.Length
 
 let private compareBitBytes (value: uint64) (bytes: byte[]) =
-    match bitValue bytes with
-    | Some bytesValue -> Operators.compare (float value) (float bytesValue)
-    | None -> compareBytesLex (bitBytes 64 value) bytes
+    let bytesValue = bytes |> Array.fold (fun number byte -> number * 256.0 + float byte) 0.0
+    Operators.compare (float value) bytesValue
 
 /// `VDate`/`VDateTime` as one .NET `DateTime`, midnight for the date-only
 /// case — the shared instant `compare`'s VDate/VDateTime-vs-VString branch

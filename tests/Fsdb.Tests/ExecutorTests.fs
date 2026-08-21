@@ -6432,9 +6432,16 @@ let tests =
                     | ResultSet(_, [ [ Some "61"; Some "61"; Some "A020A0"; Some "0"; Some "0" ] ]) -> ()
                     | other -> failtestf "expected binary string semantics, got %A" other
 
-                    match runDefault store "SELECT uppercase = X'41', uppercase = X'61', uppercase < X'61', uppercase = '65', uppercase = 'A' FROM raw_bits" with
-                    | ResultSet(_, [ [ Some "1"; Some "0"; Some "1"; Some "1"; Some "0" ] ]) -> ()
+                    match runDefault store "SELECT uppercase = X'41', uppercase = X'61', uppercase < X'61', uppercase = '65', uppercase = 'A', uppercase = X'000000000000000041' FROM raw_bits" with
+                    | ResultSet(_, [ [ Some "1"; Some "0"; Some "1"; Some "1"; Some "0"; Some "1" ] ]) -> ()
                     | other -> failtestf "expected BIT comparison semantics, got %A" other
+
+                    runDefault store "CREATE TABLE one_bit (value BIT)" |> ignore
+                    runDefault store "INSERT INTO one_bit VALUES (1)" |> ignore
+
+                    match runDefault store "SELECT value = X'000000000000000001' FROM one_bit" with
+                    | ResultSet(_, [ [ Some "1" ] ]) -> ()
+                    | other -> failtestf "expected wide binary literal coercion, got %A" other
 
                 testCase "BIT predicates preserve values above double precision"
                 <| fun _ ->

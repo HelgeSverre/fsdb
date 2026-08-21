@@ -372,7 +372,9 @@ let tests =
                     Expect.equal (compare highBit (VDecimal 9223372036854775808m)) 0 "BIT value matches its exact decimal"
                     Expect.equal (compare highBit (VString "9223372036854775808")) 0 "BIT value matches its exact numeric string"
                     Expect.equal (compare highBit (VBytes [| 0x80uy; 0uy; 0uy; 0uy; 0uy; 0uy; 0uy; 1uy |])) 0 "BIT value follows MySQL binary numeric coercion"
+                    Expect.equal (compare (VBit(1, 1UL)) (VBytes [| 0uy; 0uy; 0uy; 0uy; 0uy; 0uy; 0uy; 0uy; 1uy |])) 0 "BIT value accepts a wide binary literal"
                     Expect.equal (compare (VBit(8, 0x41UL)) (VBytes [| 0x41uy |])) 0 "BIT value matches identical bytes"
+                    Expect.equal (compare (VBit(8, 0x41UL)) (VBytes [| 0uy; 0uy; 0uy; 0uy; 0uy; 0uy; 0uy; 0uy; 0x41uy |])) 0 "BIT byte coercion ignores leading zeroes"
                     Expect.isLessThan (compare (VBit(8, 0x41UL)) (VBytes [| 0x61uy |])) 0 "BIT bytes compare exactly"
 
                 testCase "dates compare chronologically"
