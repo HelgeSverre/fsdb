@@ -2056,6 +2056,25 @@ let private recordResult ((session, result): Session * QueryResult) : Session * 
 
     session, result
 
+let private recoverExecutionError (session: Session) (description: string) (error: exn) : Session * QueryResult =
+    match error with
+    | Storage.LockWaitTimeout dbName ->
+        Log.diagnostic "fsdb: ERR 1205 lock wait timeout on database %s -- %s" dbName description
+        recordResult (session, Err(1205, "Lock wait timeout exceeded; try restarting transaction"))
+    // ponytail: MySQL's 1690 message names the offending expression; fsdb
+    // needs an AST printer before it can do the same without reconstructing SQL.
+    | Value.UnsignedOutOfRange ->
+        Log.diagnostic "fsdb: ERR 1690 unsigned out of range -- %s" description
+        recordResult (session, Err(1690, "BIGINT UNSIGNED value is out of range"))
+    // Extension functions may fail after an effect, so their chosen SQL error
+    // must not leave a transaction containing partially applied state.
+    | Functions.SqlError(code, message) ->
+        Log.diagnostic "fsdb: ERR %d %s -- %s" code message description
+        recordResult ({ session with Tx = None }, Err(code, message))
+    | ex ->
+        Log.diagnostic "fsdb: EXN %s -- %s" ex.Message description
+        recordResult ({ session with Tx = None }, Err(1105, "Internal error"))
+
 let handle (session: Session) (rawSql: string) : Session * QueryResult =
     try
         match dispatch session rawSql with
@@ -2064,9 +2083,6 @@ let handle (session: Session) (rawSql: string) : Session * QueryResult =
             recordResult result
         | result -> recordResult result
     with
-    | Storage.LockWaitTimeout dbName ->
-        Log.diagnostic "fsdb: ERR 1205 lock wait timeout on database %s -- query: %s" dbName (Log.redactSql rawSql)
-        recordResult (session, Err(1205, "Lock wait timeout exceeded; try restarting transaction"))
     // A killed client mid-query (`Storage.queryCancellation`, armed by
     // `Server.withCancellationWatch`) — not an internal error to report
     // back to a client that's already gone, so this re-raises rather than
@@ -2075,29 +2091,7 @@ let handle (session: Session) (rawSql: string) : Session * QueryResult =
     // clean line itself.
     | :? OperationCanceledException ->
         reraise ()
-    // Arithmetic that left the `BIGINT UNSIGNED` domain (`Value.narrowUnsigned`).
-    // MySQL fails the statement but keeps the transaction, and so does this:
-    // `executeStatement` already released this statement's gate leases on the
-    // way out, and no rows were written (the throw happens during expression
-    // evaluation), so there is nothing to abort.
-    //
-    // ponytail: MySQL's message names the offending expression
-    // (`... out of range in '(cast(-(1) as unsigned) + 1)'`) and this doesn't —
-    // there's no AST printer to render it. Add one if a client parses the text.
-    | Value.UnsignedOutOfRange ->
-        Log.diagnostic "fsdb: ERR 1690 unsigned out of range -- query: %s" (Log.redactSql rawSql)
-        recordResult (session, Err(1690, "BIGINT UNSIGNED value is out of range"))
-    // An extension function's *chosen* error code (`Functions.SqlError`) —
-    // delivered verbatim instead of the generic 1105, but with the exact
-    // same transaction-abort semantics as any other throw: a failing
-    // effectful function mid-transaction must not leave a half-applied
-    // snapshot reachable by a later COMMIT.
-    | Functions.SqlError(code, msg) ->
-        Log.diagnostic "fsdb: ERR %d %s -- query: %s" code msg (Log.redactSql rawSql)
-        recordResult ({ session with Tx = None }, Err(code, msg))
-    | ex ->
-        Log.diagnostic "fsdb: EXN %s -- query: %s" ex.Message (Log.redactSql rawSql)
-        recordResult ({ session with Tx = None }, Err(1105, "Internal error")) // ER_UNKNOWN_ERROR
+    | ex -> recoverExecutionError session (sprintf "query: %s" (Log.redactSql rawSql)) ex
 
 /// Executes a prepared statement with its bound parameter values. Parser-
 /// produced statements bind the values into the parsed AST and run it
@@ -2117,8 +2111,5 @@ let executePrepared (session: Session) (stmt: PreparedStmt) (values: Value list)
     with
     | PlaceholderCountMismatch(expected, got) ->
         recordResult (session, Err(1210, sprintf "Incorrect arguments to EXECUTE (expected %d, got %d)" expected got))
-    | Value.UnsignedOutOfRange -> recordResult (session, Err(1690, "BIGINT UNSIGNED value is out of range"))
     | :? OperationCanceledException -> reraise ()
-    | ex ->
-        Log.diagnostic "fsdb: EXN %s -- prepared statement" ex.Message
-        recordResult (session, Err(1105, "Internal error"))
+    | ex -> recoverExecutionError session "prepared statement" ex

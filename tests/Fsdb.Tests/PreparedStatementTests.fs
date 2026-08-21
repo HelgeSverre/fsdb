@@ -143,4 +143,23 @@ let tests =
               match prepareStatement "SELECT CONVERT(?, CHAR), ? AS second" with
               | Result.Ok(Some _, 2) -> ()
               | Result.Ok(Some _, n) -> failtestf "expected ParamCount 2, got %d" n
+              | other -> failtestf "expected a parsed statement, got %A" other
+
+          testCase "prepared native functions preserve their MySQL error"
+          <| fun _ ->
+              let session = create 1 (Fsdb.Storage.create ())
+              let session, _ = handle session "START TRANSACTION"
+
+              match prepareStatement "SELECT RANDOM_BYTES(?)" with
+              | Result.Ok(Some ast, 1) ->
+                  let statement =
+                      { Ast = Some ast
+                        Sql = "SELECT RANDOM_BYTES(?)"
+                        ParamCount = 1
+                        LastParamTypes = None }
+
+                  let session, result = executePrepared session statement [ VInt 0L ]
+
+                  Expect.equal result (Err(1690, "The length of RANDOM_BYTES must be between 1 and 1024")) "error"
+                  Expect.isNone session.Tx "transaction"
               | other -> failtestf "expected a parsed statement, got %A" other ]
