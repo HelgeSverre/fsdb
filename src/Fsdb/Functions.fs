@@ -1930,8 +1930,10 @@ let private jsonSearchFn: Scalar =
 let weightString (collation: Collation.Collation) (value: Value) : Value =
     match value with
     | VNull -> VNull
-    | VBytes bytes -> VBytes bytes
-    | _ -> collation.WeightOf(req value) |> VBytes
+    | value ->
+        match tryRawBytes value with
+        | Some bytes -> VBytes bytes
+        | None -> collation.WeightOf(req value) |> VBytes
 
 let weightStringChar (collation: Collation.Collation) (length: int) (value: Value) : Value =
     match value with
@@ -1951,9 +1953,9 @@ let weightStringBinary (length: int) (value: Value) : Value =
         raise (SqlError(1153, "Result of WEIGHT_STRING() exceeds max_allowed_packet"))
 
     let bytes =
-        match value with
-        | VBytes bytes -> Some bytes
-        | VNull -> None
+        match value, tryRawBytes value with
+        | VNull, _ -> None
+        | _, Some bytes -> Some bytes
         | _ -> Some(Text.Encoding.UTF8.GetBytes(req value))
 
     match bytes with

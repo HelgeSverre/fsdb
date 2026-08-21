@@ -1194,6 +1194,8 @@ let tests =
                     Expect.notEqual (weight "a") (weight "a ") "trailing spaces retain their weight"
                     Expect.equal (call "WEIGHT_STRING" [ VNull ]) VNull "NULL propagates"
                     Expect.equal (call "WEIGHT_STRING" [ VBytes [| 0x61uy; 0x00uy |] ]) (VBytes [| 0x61uy; 0x00uy |]) "binary input stays byte-exact"
+                    Expect.equal (call "WEIGHT_STRING" [ VBit(8, 128UL) ]) (VBytes [| 0x80uy |]) "BIT input stays byte-exact"
+                    Expect.equal (weightStringBinary 2 (VBit(8, 128UL))) (VBytes [| 0x80uy; 0x00uy |]) "BINARY width pads BIT bytes"
                     Expect.equal (weightStringChar defaultCollation 3 (VString "abcdef")) (weight "abc") "character width truncates before weighting"
 
                 testList
