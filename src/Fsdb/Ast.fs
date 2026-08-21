@@ -665,6 +665,7 @@ type Statement =
     | CreateUser of users: (string * string * string option) list * ifNotExists: bool
     /// `DROP USER [IF EXISTS] 'name'@'host', ...`
     | DropUser of users: (string * string) list * ifExists: bool
+    | RenameUser of users: ((string * string) * (string * string)) list
     /// `ALTER USER [IF EXISTS] 'name'@'host' IDENTIFIED BY 'pw'` — the one
     /// supported alteration (password change).
     | AlterUser of name: string * host: string * password: string * ifExists: bool

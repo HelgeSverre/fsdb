@@ -44,6 +44,7 @@ module AstKind =
         | Truncate _ -> "truncate"
         | CreateUser _ -> "create_user"
         | DropUser _ -> "drop_user"
+        | RenameUser _ -> "rename_user"
         | AlterUser _ -> "alter_user"
         | Grant _ -> "grant"
         | Revoke _ -> "revoke"

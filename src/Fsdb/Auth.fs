@@ -166,6 +166,41 @@ let dropUser (store: Store) (name: string) (host: string) : Result<unit, int * s
         deleteWhere "tables_priv"
         Ok()
 
+let renameUser
+    (store: Store)
+    (oldName: string)
+    (oldHost: string)
+    (newName: string)
+    (newHost: string)
+    : Result<unit, int * string> =
+    if (tryUserRow store oldName).IsNone || (tryUserRow store newName).IsSome then
+        operationFailed "RENAME USER" oldName oldHost
+    else
+        let renameRows table =
+            match scanList store "mysql" table with
+            | Error error -> Error(toMySqlError error)
+            | Ok(columns, _) ->
+                match resolveColumn columns "User", resolveColumn columns "Host" with
+                | Ok userIndex, Ok hostIndex ->
+                    updateRows
+                        store
+                        "mysql"
+                        table
+                        None
+                        (fun row -> Ok(row.[userIndex] = VString oldName))
+                        (fun row ->
+                            let renamed = Array.copy row
+                            renamed.[userIndex] <- VString newName
+                            renamed.[hostIndex] <- VString newHost
+                            Ok renamed)
+                    |> Result.map ignore
+                    |> Result.mapError toMySqlError
+                | _ -> Ok()
+
+        [ "user"; "db"; "tables_priv"; "columns_priv"; "global_grants" ]
+        |> traverse renameRows
+        |> Result.map ignore
+
 /// Rewrites the columns named in `changes` on every mysql.`table` row
 /// matching `matches` — the one shared row-mutation shape grant/revoke/
 /// password changes all reduce to.
@@ -627,6 +662,7 @@ let rec requiredPrivileges (defaultDb: string) (stmt: Statement) : (string * Pri
     | AlterDatabase name -> [ "ALTER", OnDb name ]
     | CreateUser _
     | DropUser _
+    | RenameUser _
     | AlterUser _ -> [ "CREATE USER", Global ]
     | Grant(privs, level, _, _)
     | Revoke(privs, level, _) ->

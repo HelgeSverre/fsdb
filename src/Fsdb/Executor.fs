@@ -8626,6 +8626,14 @@ let rec execute (store: Store) (registry: Registry) (dbName: string) (ids: int64
         | Ok _ -> ids, Affected 0UL
         | Error(code, msg) -> ids, Err(code, msg)
 
+    | RenameUser users ->
+        let renameOne ((oldName, oldHost), (newName, newHost)) =
+            Auth.renameUser store oldName oldHost newName newHost
+
+        match users |> traverse renameOne with
+        | Ok _ -> ids, Affected 0UL
+        | Error(code, msg) -> ids, Err(code, msg)
+
     | AlterUser(name, host, password, ifExists) ->
         match Auth.setPassword store name host password with
         | Ok() -> ids, Affected 0UL

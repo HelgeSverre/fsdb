@@ -2020,7 +2020,12 @@ let tests =
                     Expect.equal
                         (parseOk "ALTER USER 'bob'@'%' IDENTIFIED BY 'newpw'")
                         (AlterUser("bob", "%", "newpw", false))
-                        "alter password" ]
+                        "alter password"
+
+                    Expect.equal
+                        (parseOk "RENAME USER 'bob'@'localhost' TO 'robert'@'%', carol TO dave")
+                        (RenameUser([ (("bob", "localhost"), ("robert", "%")); (("carol", "%"), ("dave", "%")) ]))
+                        "rename list" ]
           testCase "dump-style CREATE TABLE options parse: AUTO_INCREMENT seed, ROW_FORMAT, COMMENT, KEY USING BTREE, utf8mb3"
           <| fun _ ->
               match

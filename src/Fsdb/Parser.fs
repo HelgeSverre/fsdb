@@ -2834,6 +2834,11 @@ let private dropUserStmt: Parser<Statement, unit> =
      .>>. sepBy1 userRef (sym ","))
     |>> fun (ifExists, users) -> DropUser(users, ifExists)
 
+let private renameUserStmt: Parser<Statement, unit> =
+    keyword "RENAME" >>. keyword "USER"
+    >>. sepBy1 (userRef .>> keyword "TO" .>>. userRef) (sym ",")
+    |>> RenameUser
+
 let private alterUserStmt: Parser<Statement, unit> =
     (keyword "ALTER" >>. keyword "USER"
      >>. (opt (attempt (keyword "IF" >>. keyword "EXISTS")) |>> Option.isSome)
@@ -2971,6 +2976,7 @@ let private revokeStmt: Parser<Statement, unit> =
 statementRef.Value <-
     choice
         [ attempt createUserStmt
+          attempt renameUserStmt
           attempt createTriggerStmt
           attempt createViewStmt
           attempt createDatabaseStmt

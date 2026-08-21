@@ -1639,6 +1639,32 @@ let tests =
                   | None -> failtest "root vanished"
               | other -> failtestf "expected SET PASSWORD to succeed, got %A" other
 
+          testCase "RENAME USER moves the account and its grants"
+          <| fun _ ->
+              let store = Fsdb.Storage.create ()
+              let session = create 1 store
+              let session, _ = handle session "CREATE DATABASE shop"
+              let session, _ = handle session "CREATE USER 'alice'@'localhost' IDENTIFIED BY 'secret'"
+              let session, _ = handle session "GRANT SELECT ON shop.* TO alice"
+
+              match handle session "RENAME USER 'alice'@'localhost' TO 'bob'@'%'" |> snd with
+              | Affected 0UL ->
+                  Expect.isNone (Fsdb.Auth.tryUserRow store "alice") "old account removed"
+                  Expect.isSome (Fsdb.Auth.tryUserRow store "bob") "new account created"
+
+                  match Fsdb.Auth.check store "bob" [ "SELECT", Fsdb.Auth.OnDb "shop" ] with
+                  | Ok() -> ()
+                  | Error error -> failtestf "expected the renamed grant, got %A" error
+              | other -> failtestf "expected RENAME USER to succeed, got %A" other
+
+              let session, _ = handle session "CREATE USER carol"
+
+              match handle session "RENAME USER bob TO carol" |> snd with
+              | Err(1396, _) ->
+                  Expect.isSome (Fsdb.Auth.tryUserRow store "bob") "source survives a destination collision"
+                  Expect.isSome (Fsdb.Auth.tryUserRow store "carol") "destination survives a collision"
+              | other -> failtestf "expected a destination collision to be 1396, got %A" other
+
           testCase "SHOW CREATE USER renders the stored authentication definition"
           <| fun _ ->
               let store = Fsdb.Storage.create ()
