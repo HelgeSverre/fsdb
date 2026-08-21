@@ -1231,8 +1231,9 @@ let rec private metadataOfExpr (ctx: EvalContext) (expr: Expr) : ColumnMetadata 
                         column.Charset = Some "binary"
                         || (column.Collation |> Option.exists (fun name -> name.EndsWith("_bin", System.StringComparison.Ordinal))))
             let multiplier = if isBinaryCollation || not (charset.StartsWith("utf8", System.StringComparison.Ordinal)) then 1 else 16
-            let characters = max (characterBound source) (charLength |> Option.defaultValue 0)
-            let length = int64 characters * int64 bytesPerCharacter * int64 multiplier |> max 8L |> min (int64 System.UInt32.MaxValue)
+            let sourceLength = int64 (characterBound source) * int64 bytesPerCharacter * int64 multiplier
+            let charLength = charLength |> Option.map (fun length -> int64 length * int64 multiplier) |> Option.defaultValue 0L
+            let length = max sourceLength charLength |> max 8L |> min (int64 System.UInt32.MaxValue)
             Some { Value.columnMetadata TypeVarString with ColumnLength = uint32 length; Flags = BinaryFlag }
 
     match expr with

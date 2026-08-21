@@ -86,16 +86,19 @@ let tests =
               match
                   handle
                       session
-                      "SELECT WEIGHT_STRING(utf), WEIGHT_STRING(latin), WEIGHT_STRING('abc'), WEIGHT_STRING(utf AS BINARY(2)) FROM weight_metadata LIMIT 0"
+                      "SELECT WEIGHT_STRING(utf), WEIGHT_STRING(latin), WEIGHT_STRING('abc'), WEIGHT_STRING(utf AS BINARY(2)), WEIGHT_STRING(utf AS CHAR(40)), WEIGHT_STRING(utf AS CHAR(41)), WEIGHT_STRING('abc' AS CHAR(13)) FROM weight_metadata LIMIT 0"
               with
               | session, ResultSet(_, []) ->
                   match session.LastResultColumnMetadata with
-                  | [ utf; latin; literal; binary ] ->
+                  | [ utf; latin; literal; binary; utfChar40; utfChar41; literalChar13 ] ->
                       Expect.equal utf.ColumnLength 640u "utf8mb4 VARCHAR(10)"
                       Expect.equal latin.ColumnLength 10u "latin1 VARCHAR(10)"
                       Expect.equal literal.ColumnLength 192u "utf8mb4 literal"
                       Expect.equal binary.ColumnLength 8u "BINARY minimum"
-                  | metadata -> failtestf "expected four metadata records, got %A" metadata
+                      Expect.equal utfChar40.ColumnLength 640u "CHAR width within UTF source bound"
+                      Expect.equal utfChar41.ColumnLength 656u "CHAR width beyond UTF source bound"
+                      Expect.equal literalChar13.ColumnLength 208u "CHAR width extends a literal bound"
+                  | metadata -> failtestf "expected seven metadata records, got %A" metadata
               | _, other -> failtestf "expected an empty WEIGHT_STRING metadata result, got %A" other
 
           testCase "a version-gated /*!NNNNN ... */ comment executes its wrapped SET, matching a mysqldump preamble"
