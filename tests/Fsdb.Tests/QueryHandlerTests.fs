@@ -74,6 +74,22 @@ let tests =
                   Expect.equal (session.LastResultColumnMetadata |> List.map _.TypeId) [ TypeLong; TypeVarString ] "LIMIT 0 must not narrow types to the empty row set it returns"
               | _, other -> failtestf "expected an empty resultset, got %A" other
 
+          testCase "JSON schema functions report result types without a row"
+          <| fun _ ->
+              let session = create 1 (Fsdb.Storage.create ())
+
+              match
+                  handle
+                      session
+                      "SELECT JSON_SCHEMA_VALID('{}', '{}'), JSON_SCHEMA_VALIDATION_REPORT('{}', '{}') LIMIT 0"
+              with
+              | session, ResultSet(_, []) ->
+                  Expect.equal
+                      (session.LastResultColumnMetadata |> List.map _.TypeId)
+                      [ TypeLongLong; TypeVarString ]
+                      "function metadata"
+              | _, other -> failtestf "expected an empty resultset, got %A" other
+
           // A resultset's types are read off the row `Value`s, which know
           // nothing about how the column was declared. Where a projection
           // resolves back to a real column, the declared type wins — clients

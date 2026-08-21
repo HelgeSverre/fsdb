@@ -1188,6 +1188,9 @@ let rec private metadataOfExpr (ctx: EvalContext) (expr: Expr) : ColumnMetadata 
           | "IS_IPV6" | "IS_IPV4_COMPAT" | "IS_IPV4_MAPPED" | "JSON_MEMBER_OF" | "JSON_CONTAINS_PATH" | "JSON_OVERLAPS" | "JSON_STORAGE_SIZE"
           | "JSON_STORAGE_FREE"), _ ->
             simple TypeLongLong
+        | "JSON_SCHEMA_VALID", _ -> simple TypeLongLong
+        | "JSON_SCHEMA_VALIDATION_REPORT", _ ->
+            Some { Value.columnMetadata TypeVarString with ColumnLength = 4294967295u }
         | ("JSON_QUOTE" | "JSON_PRETTY"), _ -> Some { Value.columnMetadata TypeVarString with ColumnLength = 4294967295u }
         | ("COMPRESS" | "UNCOMPRESS" | "RANDOM_BYTES"), _ ->
             Some { Value.columnMetadata TypeBlob with ColumnLength = 4294967295u; Flags = BlobFlag ||| BinaryFlag }
