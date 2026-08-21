@@ -36,7 +36,7 @@ accepted (marked `ponytail:` in source), or recorded only in
 | Data types | Common scalar types plus OGC geometry | No TIME value domain or BIT |
 | Constraints & indexes | PK/UNIQUE/FK/CHECK plus one-column equality indexes | No range/order/index-join access |
 | Charsets & collations | ICU-based utf8mb4 registry | Weight-table tailoring differs from MySQL's UCA tables |
-| Transactions | Repeatable-read snapshots + optimistic merge | Other isolation levels refused; transaction commits serialize |
+| Transactions | Repeatable-read snapshots, nonlocking read-committed views + optimistic merge | READ UNCOMMITTED and SERIALIZABLE refused; transaction commits serialize |
 | Persistence | WAL + snapshot, crash-tested | Opt-in only; no group commit; tombstones never reclaimed |
 | Views & triggers | Read-only views; AFTER INSERT triggers | No DML through views; no BEFORE/UPDATE/DELETE triggers, no OLD.* |
 | Routines & events | Absent (catalogs honestly empty) | Everything |
@@ -215,7 +215,8 @@ updates, InnoDB-style burned AUTO_INCREMENT on rollback.
 | Gap | MySQL 8.4 | fsdb | Impact | Class |
 |---|---|---|---|---|
 | SERIALIZABLE | implemented via shared locks / auto-conversion | refused with 1235 | medium | refusal |
-| READ COMMITTED / READ UNCOMMITTED | distinct semantics | refused with 1235 | medium | refusal |
+| READ COMMITTED | a fresh nonlocking read view per statement | a fresh committed view plus the transaction's own successful writes per parsed statement; locking reads remain unsupported | medium | partial |
+| READ UNCOMMITTED | dirty reads | refused with 1235 | medium | refusal |
 | Deadlock errors | 1213 deadlock detection with victim selection | write-write conflicts surface as lock-wait timeout 1205; no deadlock classification | low | divergence |
 | Write parallelism within a database | row-lock concurrency | indexed autocommit updates use row stripes; transactions and full scans serialize at publication | high (throughput) | divergence |
 | Multi-database scaling | near-linear with connections | super-serial slowdowns (ratio up to 10.98×) demonstrated; store-wide connection ceiling produces honest 1205s (`torture/findings/2026-08-17-multidb-concurrency-campaign.md`, status open) | medium | divergence |

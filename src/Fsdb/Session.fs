@@ -148,6 +148,7 @@ type TransactionIsolation =
 type Transaction =
     { Snapshot: Store
       BaseCatalog: Catalog
+      ReadView: Catalog option
       /// Successful writes in execution order. A commit that loses an
       /// optimistic row-version race replays them against the new live
       /// snapshot before validating again.

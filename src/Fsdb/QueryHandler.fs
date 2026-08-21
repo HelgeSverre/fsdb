@@ -668,6 +668,13 @@ let private transactionIsolationName =
     | RepeatableRead -> "REPEATABLE READ"
     | Serializable -> "SERIALIZABLE"
 
+let private transactionIsolationValue =
+    function
+    | ReadUncommitted -> "READ-UNCOMMITTED"
+    | ReadCommitted -> "READ-COMMITTED"
+    | RepeatableRead -> "REPEATABLE-READ"
+    | Serializable -> "SERIALIZABLE"
+
 let private transactionIsolationScope (prefix: string) =
     match prefix.Trim().ToUpperInvariant() with
     | "@@" -> NextTransactionIsolation
@@ -809,17 +816,16 @@ let private applySetAction (session: Session) (action: SetAction) : Session =
                 | None -> ())
 
         { session with Variables = Map.add name value session.Variables }
-    | SetTransactionIsolationAction(scope, RepeatableRead) ->
+    | SetTransactionIsolationAction(scope, isolation) ->
         match scope with
         | SessionIsolation ->
             { session with
                 PendingTransactionIsolation = None
-                Variables = Map.add "transaction_isolation" (Some "REPEATABLE-READ") session.Variables }
-        | NextTransactionIsolation -> { session with PendingTransactionIsolation = Some RepeatableRead }
+                Variables = Map.add "transaction_isolation" (Some(transactionIsolationValue isolation)) session.Variables }
+        | NextTransactionIsolation -> { session with PendingTransactionIsolation = Some isolation }
         | GlobalIsolation ->
-            Session.setGlobalVariable session.Store "transaction_isolation" (Some "REPEATABLE-READ")
+            Session.setGlobalVariable session.Store "transaction_isolation" (Some(transactionIsolationValue isolation))
             session
-    | SetTransactionIsolationAction(_, _) -> session
     | SetUserVarAction(name, value) -> { session with UserVariables = Map.add name value session.UserVariables }
 
 let private validateSetAction (session: Session) (action: SetAction) : Result<unit, QueryResult> =
@@ -828,7 +834,7 @@ let private validateSetAction (session: Session) (action: SetAction) : Result<un
         Error(Err(1227, "Access denied; you need (at least one of) the SUPER privilege(s) for this operation"))
     | SetTransactionIsolationAction(NextTransactionIsolation, _) when session.Tx.IsSome ->
         Error(Err(1568, "Transaction characteristics can't be changed while a transaction is in progress"))
-    | SetTransactionIsolationAction(_, RepeatableRead) -> Ok()
+    | SetTransactionIsolationAction(_, (RepeatableRead | ReadCommitted)) -> Ok()
     | SetTransactionIsolationAction(_, isolation) ->
         Error(Err(1235, sprintf "This version of MySQL doesn't yet support '%s transaction isolation'" (transactionIsolationName isolation)))
     | SetVarAction(_, _, true) when not (Auth.hasGlobalPriv session.Store session.User "SUPER") ->
@@ -934,6 +940,30 @@ let private setTransactionAccess =
 
 let private setCharacterSet = Regex(@"^SET\s+CHARACTER\s+SET\s+'?(\w+)'?$", RegexOptions.IgnoreCase)
 
+let private replayTransactionSnapshot (session: Session) (tx: Transaction) : Catalog * Store =
+    let dbName = session.Database |> Option.defaultValue defaultDatabase
+    let registry = registryFor session
+    let foundRows = session.Capabilities &&& Fsdb.Protocol.ClientFoundRows <> 0u
+    let variables = expressionVariables session
+    let baseCatalog = session.Store.Catalog
+    let snapshot = Storage.beginTransactionSnapshot session.Store
+
+    setStrictMode snapshot (lookupVar session "sql_mode" |> Option.flatten |> Option.map isStrictSqlMode |> Option.defaultValue true)
+    snapshot.SessionUser <- session.User
+
+    let mutable ids = tx.ReplayStartIds
+
+    for statement in tx.Statements do
+        let nextIds, result =
+            Executor.withVariableContext variables (fun () ->
+                Executor.execute snapshot registry dbName ids foundRows statement)
+
+        match result with
+        | Err _ -> raise (Storage.LockWaitTimeout dbName)
+        | _ -> ids <- nextIds
+
+    baseCatalog, snapshot
+
 /// Commits the open transaction (if any) by merging its snapshot catalog
 /// back into the shared store's (`Storage.mergeCatalogInto`, a CAS-safe
 /// three-way merge against whatever the live catalog is *right now* — not a
@@ -944,28 +974,6 @@ let private commitSession (session: Session) : Session =
     match session.Tx with
     | Some tx ->
         let dbName = session.Database |> Option.defaultValue defaultDatabase
-        let registry = registryFor session
-        let foundRows = session.Capabilities &&& Fsdb.Protocol.ClientFoundRows <> 0u
-        let replayVariables = expressionVariables session
-
-        let replay () =
-            let baseCatalog = session.Store.Catalog
-            let snapshot = Storage.beginTransactionSnapshot session.Store
-            setStrictMode snapshot (lookupVar session "sql_mode" |> Option.flatten |> Option.map isStrictSqlMode |> Option.defaultValue true)
-            snapshot.SessionUser <- session.User
-
-            let mutable ids = tx.ReplayStartIds
-
-            for statement in tx.Statements do
-                let nextIds, result =
-                    Executor.withVariableContext replayVariables (fun () ->
-                        Executor.execute snapshot registry dbName ids foundRows statement)
-
-                match result with
-                | Err _ -> raise (Storage.LockWaitTimeout dbName)
-                | _ -> ids <- nextIds
-
-            baseCatalog, snapshot
 
         let committedSnapshot =
             let timeout =
@@ -982,7 +990,7 @@ let private commitSession (session: Session) : Session =
                     Storage.mergeCatalogInto session.Store tx.BaseCatalog tx.Snapshot.Catalog
                     tx.Snapshot
                 with Storage.LockWaitTimeout _ ->
-                    let baseCatalog, snapshot = replay ()
+                    let baseCatalog, snapshot = replayTransactionSnapshot session tx
                     Storage.mergeCatalogInto session.Store baseCatalog snapshot.Catalog
                     snapshot
             finally
@@ -1017,7 +1025,14 @@ let private configuredReadOnly (session: Session) =
     |> Option.defaultWith (fun () -> lookupVar session "transaction_read_only" |> Option.flatten = Some "1")
 
 let private configuredIsolation (session: Session) =
-    session.PendingTransactionIsolation |> Option.defaultValue RepeatableRead
+    session.PendingTransactionIsolation
+    |> Option.defaultWith (fun () ->
+        match lookupVar session "transaction_isolation" |> Option.flatten with
+        | Some value ->
+            match transactionIsolationOf value with
+            | Ok isolation -> isolation
+            | Error _ -> RepeatableRead
+        | None -> RepeatableRead)
 
 let private beginTransaction (readOnly: bool) (session: Session) : Session =
     let session = commitSession session
@@ -1032,6 +1047,7 @@ let private beginTransaction (readOnly: bool) (session: Session) : Session =
             Some
                 { Snapshot = snapshot
                   BaseCatalog = baseCatalog
+                  ReadView = None
                   Statements = []
                   ReplayStartIds = session.LastInsertId, session.LastGeneratedId
                   Isolation = isolation
@@ -1045,6 +1061,17 @@ let private beginTransaction (readOnly: bool) (session: Session) : Session =
 /// combines disjoint changes and rejects overlapping ones.
 let startTransactionStatement (session: Session) : Session =
     match session.Tx with
+    | Some tx when tx.Isolation = ReadCommitted ->
+        let baseCatalog, snapshot = replayTransactionSnapshot session tx
+
+        { session with
+            Tx =
+                Some
+                    { tx with
+                        Snapshot = snapshot
+                        BaseCatalog = baseCatalog
+                        ReadView = Some baseCatalog
+                        Seeded = true } }
     | Some tx when not tx.Seeded ->
         let baseCatalog = session.Store.Catalog
         let snapshot = Storage.beginTransactionSnapshot session.Store
@@ -1059,6 +1086,7 @@ let startTransactionStatement (session: Session) : Session =
                     { tx with
                         Snapshot = snapshot
                         BaseCatalog = baseCatalog
+                        ReadView = Some baseCatalog
                         Statements = []
                         ReplayStartIds = session.LastInsertId, session.LastGeneratedId
                         Seeded = true

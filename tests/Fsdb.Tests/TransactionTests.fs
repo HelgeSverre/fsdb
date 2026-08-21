@@ -33,6 +33,49 @@ let tests =
               | ResultSet(_, [ [ Some "1" ] ]) -> ()
               | result -> failtestf "expected the committed row, got %A" result
 
+          testCase "READ COMMITTED refreshes nonlocking reads and retains own writes"
+          <| fun _ ->
+              let store = Fsdb.Storage.create ()
+              let writer = create 1 store
+              let writer, _ = handle writer "CREATE TABLE tx_rc (id INT PRIMARY KEY)"
+              let writer, configured = handle writer "SET SESSION TRANSACTION ISOLATION LEVEL READ COMMITTED"
+              Expect.equal configured (Affected 0UL) "READ COMMITTED is configured"
+              let writer, started = handle writer "BEGIN"
+              Expect.equal started (Affected 0UL) "the transaction starts"
+
+              match handle writer "SELECT id FROM tx_rc ORDER BY id" |> snd with
+              | ResultSet(_, []) -> ()
+              | result -> failtestf "expected no rows at the first read, got %A" result
+
+              let other = create 2 store
+              let other, firstInsert = handle other "INSERT INTO tx_rc VALUES (1)"
+              Expect.equal firstInsert (Affected 1UL) "the concurrent row commits"
+
+              match handle writer "SELECT id FROM tx_rc ORDER BY id" |> snd with
+              | ResultSet(_, [ [ Some "1" ] ]) -> ()
+              | result -> failtestf "expected the fresh committed row, got %A" result
+
+              let writer, ownInsert = handle writer "INSERT INTO tx_rc VALUES (2)"
+              Expect.equal ownInsert (Affected 1UL) "the transaction writes privately"
+
+              match handle other "SELECT id FROM tx_rc ORDER BY id" |> snd with
+              | ResultSet(_, [ [ Some "1" ] ]) -> ()
+              | result -> failtestf "expected the private row to remain hidden, got %A" result
+
+              let other, secondInsert = handle other "INSERT INTO tx_rc VALUES (3)"
+              Expect.equal secondInsert (Affected 1UL) "the second concurrent row commits"
+
+              match handle writer "SELECT id FROM tx_rc ORDER BY id" |> snd with
+              | ResultSet(_, [ [ Some "1" ]; [ Some "2" ]; [ Some "3" ] ]) -> ()
+              | result -> failtestf "expected the committed rows and own write, got %A" result
+
+              let writer, committed = handle writer "COMMIT"
+              Expect.equal committed (Affected 0UL) "the transaction commits"
+
+              match handle other "SELECT id FROM tx_rc ORDER BY id" |> snd with
+              | ResultSet(_, [ [ Some "1" ]; [ Some "2" ]; [ Some "3" ] ]) -> ()
+              | result -> failtestf "expected every committed row, got %A" result
+
           testCase "ROLLBACK discards writes made inside the transaction"
           <| fun _ ->
               let session = create 1 (Fsdb.Storage.create ())
