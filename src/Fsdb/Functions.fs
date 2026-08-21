@@ -926,17 +926,9 @@ let rec private normalizeJsonSchema (node: JsonNode) : unit =
     | :? JsonArray as array -> array |> Seq.iter normalizeJsonSchema
     | _ -> ()
 
-let private jsonSchemaCache =
-    let cache = System.Collections.Concurrent.ConcurrentDictionary<string, JsonSchema>()
-    let maxEntries = 256
-
-    fun (text: string) ->
-        if cache.Count >= maxEntries then cache.Clear()
-        cache.GetOrAdd(text, fun source -> JsonSchema.FromJsonAsync(source).GetAwaiter().GetResult())
-
-let private compileJsonSchema functionName text =
+let private compileJsonSchema (functionName: string) (text: string) : JsonSchema =
     try
-        jsonSchemaCache text
+        JsonSchema.FromJsonAsync(text).GetAwaiter().GetResult()
     with
     | :? Newtonsoft.Json.JsonException
     | :? ArgumentException -> raise (jsonSchemaObjectError functionName)
