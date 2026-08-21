@@ -2149,4 +2149,21 @@ let tests =
                     "LOAD DATA LOCAL INFILE 'x' INTO TABLE t FIELDS ESCAPED BY 'xx'" ] do
                   match parseLocalLoad sql with
                   | Error _ -> ()
-                  | Ok load -> failtestf "expected a separator error, got %A" load ]
+                  | Ok load -> failtestf "expected a separator error, got %A" load
+
+          testCase "LOAD DATA LOCAL INFILE retains custom and empty escape settings"
+          <| fun _ ->
+              let parseEscape sql =
+                  match parseLocalLoad sql with
+                  | Ok load -> load.Escape
+                  | Error error -> failtestf "unexpected parse error: %s" error
+
+              Expect.equal
+                  (parseEscape "LOAD DATA LOCAL INFILE 'x' INTO TABLE t FIELDS ESCAPED BY '!'")
+                  (Some "!")
+                  "custom escape"
+
+              Expect.equal
+                  (parseEscape "LOAD DATA LOCAL INFILE 'x' INTO TABLE t FIELDS ESCAPED BY ''")
+                  (Some "")
+                  "empty escape" ]

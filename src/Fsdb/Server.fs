@@ -316,6 +316,7 @@ let private decodeLocalLoad (load: Parser.LocalLoad) (bytes: byte[]) : Result<Va
         let text = UTF8Encoding(false, true).GetString bytes
         let enclosedBy = load.EnclosedBy |> Option.bind (fun value -> if value.Length = 1 then Some value.[0] else None)
         let escape = load.Escape |> Option.bind (fun value -> if value.Length = 1 then Some value.[0] else None)
+        let nullMarker = escape |> Option.map (fun value -> string value + "N")
         let rows = ResizeArray<Value list>()
         let fields = ResizeArray<Value>()
         let value = StringBuilder()
@@ -328,7 +329,7 @@ let private decodeLocalLoad (load: Parser.LocalLoad) (bytes: byte[]) : Result<Va
         let endField () =
             let text = value.ToString()
             let rawText = raw.ToString()
-            fields.Add(if not fieldEnclosed && rawText = "\\N" then VNull else VString text)
+            fields.Add(if not fieldEnclosed && Some rawText = nullMarker then VNull else VString text)
             value.Clear() |> ignore
             raw.Clear() |> ignore
             fieldEnclosed <- false

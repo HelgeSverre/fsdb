@@ -246,6 +246,51 @@ let tests =
               }
               |> Async.RunSynchronously
 
+          testCase "LOAD DATA LOCAL INFILE derives NULL from the configured escape marker"
+          <| fun _ ->
+              Fsdb.Limits.withSettings [ "local_infile", "ON" ] (fun () ->
+                  async {
+                      let listener = Fsdb.Server.startListening System.Net.IPAddress.Loopback 0
+                      let store = Fsdb.Storage.create ()
+                      let port = Fsdb.Server.port listener
+                      Fsdb.Server.serve listener store Fsdb.Functions.empty |> Async.Start
+
+                      try
+                          let! client, stream = connectRawAsWithCapabilities port "root" (ClientProtocol41 ||| ClientLocalFiles)
+                          use client = client
+                          let query (sql: string) =
+                              writePacketAsync stream { SeqId = 0uy; Payload = Array.append [| 0x03uy |] (Text.Encoding.UTF8.GetBytes sql) }
+
+                          let load (table: string) (clause: string) (data: string) =
+                              async {
+                                  do! query (sprintf "CREATE TABLE %s (value VARCHAR(20))" table) |> Async.Ignore
+                                  let! _ = readPacketAsync stream
+                                  do! query (sprintf "LOAD DATA LOCAL INFILE 'null.tsv' INTO TABLE %s %s" table clause) |> Async.Ignore
+                                  let! _ = readPacketAsync stream
+                                  do! writePacketAsync stream { SeqId = 2uy; Payload = Text.Encoding.UTF8.GetBytes data } |> Async.Ignore
+                                  do! writePacketAsync stream { SeqId = 3uy; Payload = [||] } |> Async.Ignore
+                                  let! result = readPacketAsync stream
+                                  Expect.equal result.Value.Payload.[0] 0uy "LOAD result"
+                              }
+
+                          do! load "default_null" "" "\\N\n"
+                          do! load "custom_null" "FIELDS ESCAPED BY '!'" "!N\n"
+                          do! load "empty_escape" "FIELDS ESCAPED BY ''" "\\N\n"
+
+                          let value table =
+                              match Fsdb.Storage.scanList store "fsdb" table with
+                              | Ok(_, [ row ]) -> row.[0]
+                              | Ok(_, rows) -> failtestf "expected one row, got %A" rows
+                              | Error error -> failtestf "table scan failed: %A" error
+
+                          Expect.equal (value "default_null") VNull "default escape null"
+                          Expect.equal (value "custom_null") VNull "custom escape null"
+                          Expect.equal (value "empty_escape") (VString "\\N") "empty escape keeps literal text"
+                      finally
+                          listener.Stop()
+                  }
+                  |> Async.RunSynchronously)
+
           testCase "LOAD DATA LOCAL INFILE drains an oversized upload before returning 1153"
           <| fun _ ->
               Fsdb.Limits.withSettings [ "local_infile", "ON"; "max_load_data_bytes", "1024" ] (fun () ->
