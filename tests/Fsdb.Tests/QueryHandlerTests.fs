@@ -1857,6 +1857,46 @@ let tests =
               | ResultSet(_, [ [ Some "😀" ] ]) -> ()
               | other -> failtestf "expected the supplementary-plane scalar to survive ALTER, got %A" other
 
+          testCase "over-width text defaults are invalid in every sql mode"
+          <| fun _ ->
+              let session = create 1 (Fsdb.Storage.create ())
+
+              match handle session "CREATE TABLE strict_default (v VARCHAR(3) DEFAULT 'abcd')" |> snd with
+              | Err(1067, "Invalid default value for 'v'") -> ()
+              | other -> failtestf "expected MySQL's strict invalid-default error, got %A" other
+
+              let session, _ = handle session "SET SESSION sql_mode = ''"
+
+              match handle session "CREATE TABLE nonstrict_default (v VARCHAR(3) DEFAULT 'abcd')" |> snd with
+              | Err(1067, "Invalid default value for 'v'") -> ()
+              | other -> failtestf "expected MySQL's non-strict invalid-default error, got %A" other
+
+              let session, _ = handle session "CREATE TABLE alter_default (v VARCHAR(3))"
+
+              match handle session "ALTER TABLE alter_default ALTER COLUMN v SET DEFAULT 'abcd'" |> snd with
+              | Err(1067, "Invalid default value for 'v'") -> ()
+              | other -> failtestf "expected MySQL's ALTER invalid-default error, got %A" other
+
+          testCase "DECIMAL defaults retain scale-loss notes in every sql mode"
+          <| fun _ ->
+              let session = create 1 (Fsdb.Storage.create ())
+              let session, result = handle session "CREATE TABLE strict_default (d DECIMAL(5, 2) DEFAULT 1.234)"
+              Expect.equal result (Affected 0UL) "strict DECIMAL default creates"
+
+              Expect.equal
+                  (session.Diagnostics |> List.map (fun condition -> condition.Level, condition.Code, condition.Message))
+                  [ Fsdb.Diagnostics.Note, 1265, "Data truncated for column 'd' at row 1" ]
+                  "strict default reports MySQL's scale-loss note"
+
+              let session, _ = handle session "SET SESSION sql_mode = ''"
+              let session, result = handle session "CREATE TABLE nonstrict_default (d DECIMAL(5, 2) DEFAULT 1.234)"
+              Expect.equal result (Affected 0UL) "non-strict DECIMAL default creates"
+
+              Expect.equal
+                  (session.Diagnostics |> List.map (fun condition -> condition.Level, condition.Code, condition.Message))
+                  [ Fsdb.Diagnostics.Note, 1265, "Data truncated for column 'd' at row 1" ]
+                  "non-strict default reports MySQL's scale-loss note"
+
           testCase "lossy column charsets retain MySQL conversion warnings"
           <| fun _ ->
               let session = create 1 (Fsdb.Storage.create ())

@@ -1290,11 +1290,24 @@ let coerceValue (strict: bool) (col: ColumnDef) (v: Value) : Result<Value, Stora
 let private normalizeDefault (mode: TemporalCoercionMode) (col: ColumnDef) : Result<ColumnDef, StorageError> =
     match col.Default with
     | Some(DConst value) ->
-        coerceStoredValueWithMode mode col value
-        |> Result.map (fun value -> { col with Default = Some(DConst value) })
-        |> Result.mapError (function
-            | ZeroTemporalForColumn _ -> InvalidDefaultValue col.Name
-            | error -> error)
+        let text = value |> toText |> Option.defaultValue ""
+
+        let textOverflow =
+            match col.Type, value with
+            | _, VNull -> None
+            | TChar length, _ -> truncateRunes length (text.TrimEnd([| ' ' |]))
+            | TVarchar length, _ -> truncateRunes length text
+            | _ -> None
+
+        match textOverflow with
+        | Some _ -> Error(InvalidDefaultValue col.Name)
+        | None ->
+            coerceStoredValueWithMode mode col value
+            |> Result.map (fun value -> { col with Default = Some(DConst value) })
+            |> Result.mapError (function
+                | ZeroTemporalForColumn _
+                | DataTooLongForColumn _ -> InvalidDefaultValue col.Name
+                | error -> error)
     | _ -> Ok col
 
 /// `NOW()` rounded to `col`'s own declared fsp — a `TIMESTAMP(6)` column
