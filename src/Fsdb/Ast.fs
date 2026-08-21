@@ -327,7 +327,7 @@ and IndexDef =
       Unique: bool
       /// `FULLTEXT KEY` vs an ordinary index — drives `MATCH ... AGAINST`
       /// eligibility and the `Index_type` introspection column. SPATIAL
-      /// still collapses to `BTree` (no geometry types exist to index).
+      /// collapses to `BTree` until fsdb has a spatial-index implementation.
       Kind: IndexKind }
 
 /// A `CONSTRAINT name FOREIGN KEY (cols) REFERENCES tbl (cols) [ON DELETE
