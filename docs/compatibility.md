@@ -167,8 +167,8 @@ option fsdb doesn't have, and `!include`/`!includedir`. Reading the real format
 is what lets `skip-name-resolve` be reported as an option fsdb lacks instead of
 as a syntax error.
 
-Groups other than `[mysqld]`/`[server]` are skipped, so a shared my.cnf is
-safe to point at. Within those groups an unrecognised option is a startup
+Groups other than `[mysqld]`/`[mysqld-8.4]`/`[server]` are skipped, so a shared
+my.cnf is safe to point at. Within those groups an unrecognised option is a startup
 error naming the file and line, matching mysqld, which also refuses to start on
 an unknown option; `loose-` is the escape hatch for both. Every bad line is
 reported, not just the first.
@@ -179,11 +179,6 @@ Three deliberate divergences from stock MySQL:
   `$MYSQL_HOME` are not read; only `--defaults-file` is. A file that applies
   without being named on the command line is the most reliable way to make
   production differ from a laptop.
-- **Version-suffixed groups (`[mysqld-8.4]`) are skipped, not matched.** fsdb
-  reports a MySQL version for protocol compatibility, not as a claim about
-  which server release's options it accepts, so matching on it would be
-  theatre.
-
 - **`wait_timeout` and `interactive_timeout` report 300, not 28800.** fsdb
   reaps a connection idle between commands after five minutes, because a
   half-open peer otherwise pins a socket and a task for eight hours. The

@@ -100,7 +100,7 @@ let tests =
 
               Expect.equal maxConnections before "restored despite the exception"
 
-          testCase "only [mysqld] and [server] are applied; other groups a real my.cnf carries are ignored"
+          testCase "server and 8.4 groups apply while client groups stay isolated"
           <| fun _ ->
               withSettings [] (fun () ->
                   let lines =
@@ -109,8 +109,8 @@ let tests =
                         "[client]"
                         "max_connections = 1"
                         ""
-                        "[mysqld-8.4]" // a version-suffixed group fsdb has no version to match
-                        "max_connections = 2"
+                        "[mysqld-8.4]"
+                        "wait_timeout = 42"
                         ""
                         "[mysqld]"
                         "max-connections = 9" // my.cnf accepts dashes for underscores
@@ -120,6 +120,7 @@ let tests =
                   match applyLines "test.cnf" lines with
                   | Ok() ->
                       Expect.equal maxConnections 9 "[mysqld] applied, with the dash spelling accepted"
+                      Expect.equal waitTimeoutSeconds 42 "[mysqld-8.4] applied"
                       Expect.equal maxAllowedPacket (16 * 1024 * 1024) "[server] applied too, as mysqld reads it"
                   | Error e -> failtestf "expected the file to apply, got %s" e)
 

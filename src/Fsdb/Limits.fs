@@ -382,14 +382,10 @@ let rec private applyInto
             ()
         elif line.StartsWith "[" then
             if line.EndsWith "]" then
-                // `[server]` is read by mysqld alongside `[mysqld]`. Every
-                // other group — `[client]`, `[mysqldump]`, and the
-                // version-suffixed `[mysqld-8.4]` form fsdb has no version to
-                // match against — belongs to some other program and is
-                // skipped, which is what makes pointing this at a shared
-                // my.cnf safe.
+                // `[server]` and the 8.4-specific group are read by mysqld
+                // alongside `[mysqld]`; client-only groups stay isolated.
                 let group = normalizeName (line.Substring(1, line.Length - 2))
-                applies <- group = "mysqld" || group = "server"
+                applies <- group = "mysqld" || group = "mysqld_8.4" || group = "server"
             else
                 fail (sprintf "unterminated group header '%s'" line)
         elif line.StartsWith "!" then
@@ -458,7 +454,7 @@ and private includeFile
             | Error message -> fail (sprintf "!include '%s': %s" path message)
             | Ok lines -> applyInto errors visited (depth + 1) full lines
 
-/// Applies the `[mysqld]`/`[server]` options in `lines`, attributing every
+/// Applies the `[mysqld]`/`[mysqld-8.4]`/`[server]` options in `lines`, attributing every
 /// failure to `source` and its line number. Split out from
 /// `loadDefaultsFile` so the parsing is testable without a file, and so an
 /// `!include` inside it resolves relative to `source`'s directory.
@@ -473,7 +469,7 @@ let applyLines (source: string) (lines: string seq) : Result<unit, string> =
     else
         Error(String.concat "\n" errors)
 
-/// Reads a my.cnf-style option file: `[mysqld]` and `[server]` groups,
+/// Reads a my.cnf-style option file: `[mysqld]`, `[mysqld-8.4]`, and `[server]` groups,
 /// `name = value` and MySQL's bare-name boolean form, `#`/`;` comments that
 /// may start mid-line, quoted values with `\n`/`\t`/`\s`-style escapes, `-`
 /// and `_` interchangeable in names, `loose-` to tolerate an option fsdb
