@@ -65,17 +65,22 @@ just install      # publishes to ~/.local/bin/fsdb, then: fsdb --help
 
 ```
 USAGE: fsdb [--help] [--port <port>] [--listen <address>] [--data-dir <path>]
-            [--defaults-file <path>] [--version]
+            [--defaults-file <path>] [--ssl-cert <path>] [--ssl-key <path>]
+            [--require-secure-transport] [--version]
 
 OPTIONS:
 
     --port, -p <port>     listen port (default 3307)
     --listen <address>    bind address (default 127.0.0.1)
-    --data-dir <path>     persist data here (WAL + snapshots); omit for
-                          in-memory
+    --data-dir <path>     persist trusted server state here (WAL + snapshots);
+                          omit for in-memory
     --defaults-file <path>
                           read server settings from a my.cnf-style file's
                           [mysqld] section
+    --ssl-cert <path>     PEM server certificate for TLS
+    --ssl-key <path>      PEM private key for TLS
+    --require-secure-transport
+                          reject plaintext MySQL sessions
     --version             print the fsdb version and exit
     --help                display this list of options.
 ```
@@ -98,10 +103,14 @@ wait_timeout             = 600
 innodb_lock_wait_timeout = 50
 cte_max_recursion_depth  = 1000
 loose-skip-name-resolve            # an option fsdb has no knob for
+ssl-cert                 = /etc/fsdb/server-cert.pem
+ssl-key                  = /etc/fsdb/server-key.pem
+require-secure-transport = ON
 ```
 
-Defaults-file settings apply at startup as process-wide defaults, and no option
-file is auto-discovered. `max_connections`, `max_allowed_packet`,
+Defaults-file settings apply at startup as process-wide defaults. The standard
+files are auto-discovered unless `--defaults-file` selects one explicitly.
+`max_connections`, `max_allowed_packet`,
 `wait_timeout`, `innodb_lock_wait_timeout`, and `cte_max_recursion_depth` can
 also be changed with `SET GLOBAL`; see
 [the compatibility guide](docs/compatibility.md) for the complete behavior and
@@ -167,8 +176,9 @@ private until commit. Commit performs a row-level three-way merge: disjoint
 concurrent changes combine, while overlapping changes fail with MySQL's
 retryable 1205 error. Immutable row pages let the merge inspect only pages
 changed from the transaction snapshot and maintain indexes incrementally.
-PK/UNIQUE lookups go through maps keyed by each column's collation-folded
-encoding, so `utf8mb4_0900_ai_ci` keys collide exactly as MySQL's do.
+PK/UNIQUE and one-column secondary equality lookups go through maps keyed by
+each column's collation-folded encoding, so `utf8mb4_0900_ai_ci` keys collide
+exactly as MySQL's do. Composite/range/order index access remains a scan.
 Equi-joins hash-join; everything else is a scan.
 
 ### Collations & charsets
@@ -195,8 +205,9 @@ The grammar covers the core used by MySQL-backed applications: `SELECT` with
 joins (`NATURAL`/`USING` included), derived tables, `GROUP BY`/`HAVING`, window
 functions, `UNION [ALL]`, expression subqueries, ordinary and recursive CTEs,
 JSON paths and `JSON_TABLE`, multi-table `UPDATE`/`DELETE`, `REPLACE`,
-`EXPLAIN`, enforced and `NOT ENFORCED` `CHECK` constraints, read-only stored
-views, `AFTER INSERT` triggers, and user accounts with real `CREATE USER`/
+`EXPLAIN`, enforced and `NOT ENFORCED` `CHECK` constraints, typed user and
+system variables in expressions, read-only stored views, `AFTER INSERT`
+triggers, and user accounts with real `CREATE USER`/
 `GRANT`/`REVOKE` privilege enforcement.
 
 The introspection surface GUI clients lean on is served with real data:
@@ -319,6 +330,16 @@ Db.create ()
 
 ```fsharp
 Db.create () |> Db.withDataDir "./fsdb-data" |> Db.listen System.Net.IPAddress.Loopback 3307
+```
+
+Embedding hosts enable TLS with an `X509Certificate2` that already contains
+its private key:
+
+```fsharp
+Db.create ()
+|> Db.withTlsCertificate certificate
+|> Db.requireSecureTransport
+|> Db.listen System.Net.IPAddress.Any 3307
 ```
 
 `Db.withLogger` hooks a log sink in the same style. See
