@@ -1368,6 +1368,11 @@ let tests =
               | ResultSet([ "Name"; "Status"; "Type"; "Library"; "License" ], [ [ Some "mysql_native_password"; Some "ACTIVE"; Some "AUTHENTICATION"; None; Some "GPL" ] ]) -> ()
               | other -> failtestf "unexpected SHOW PLUGINS result: %A" other
 
+              for sql in [ "SHOW BINARY LOGS"; "SHOW BINARY LOG STATUS" ] do
+                  match handle session sql |> snd with
+                  | Err(1381, "You are not using binary logging") -> ()
+                  | other -> failtestf "expected binary logging disabled for %s, got %A" sql other
+
               match handle session "SHOW ENGINE INNODB STATUS" |> snd with
               | ResultSet([ "Type"; "Name"; "Status" ], [ [ Some "InnoDB"; Some ""; Some status ] ]) ->
                   Expect.stringContains status "in-memory transactional row store" "engine status describes fsdb"

@@ -296,6 +296,8 @@ let private showVariablesRe =
 let private showEnginesRe = Regex(@"^SHOW\s+(?:STORAGE\s+)?ENGINES\s*$", RegexOptions.IgnoreCase)
 let private showEngineInnodbStatusRe = Regex(@"^SHOW\s+ENGINE\s+INNODB\s+STATUS\s*$", RegexOptions.IgnoreCase)
 let private showPluginsRe = Regex(@"^SHOW\s+PLUGINS\s*$", RegexOptions.IgnoreCase)
+let private showBinaryLogsRe = Regex(@"^SHOW\s+(?:BINARY|MASTER)\s+LOGS\s*$", RegexOptions.IgnoreCase)
+let private showBinaryLogStatusRe = Regex(@"^SHOW\s+BINARY\s+LOG\s+STATUS\s*$", RegexOptions.IgnoreCase)
 let private showOpenTablesRe = Regex(@"^SHOW\s+OPEN\s+TABLES(?:\s+(?:FROM|IN)\s+(\S+))?(?:\s+LIKE\s+'([^']*)')?\s*$", RegexOptions.IgnoreCase)
 let private showCreateDatabaseRe =
     Regex(@"^SHOW\s+CREATE\s+(?:DATABASE|SCHEMA)(?:\s+IF\s+NOT\s+EXISTS)?\s+(\S+)\s*$", RegexOptions.IgnoreCase)
@@ -1250,6 +1252,8 @@ type private Probe =
     | ShowEngines
     | ShowEngineInnodbStatus
     | ShowPlugins
+    | ShowBinaryLogs
+    | ShowBinaryLogStatus
     | ShowOpenTables of db: string option * pattern: string option
     | ShowCreateDatabase of name: string
     | ShowCharset
@@ -1322,6 +1326,10 @@ let private tryProbe (sql: string) (upper: string) : Probe option =
         Some ShowEngineInnodbStatus
     elif showPluginsRe.IsMatch sql then
         Some ShowPlugins
+    elif showBinaryLogsRe.IsMatch sql then
+        Some ShowBinaryLogs
+    elif showBinaryLogStatusRe.IsMatch sql then
+        Some ShowBinaryLogStatus
     elif showOpenTablesRe.IsMatch sql then
         let m = showOpenTablesRe.Match sql
         Some(
@@ -1508,6 +1516,8 @@ let private runProbe (session: Session) (sql: string) (probe: Probe) : Session *
             [ "Name"; "Status"; "Type"; "Library"; "License" ],
             [ [ Some "mysql_native_password"; Some "ACTIVE"; Some "AUTHENTICATION"; None; Some "GPL" ] ]
         )
+    | ShowBinaryLogs
+    | ShowBinaryLogStatus -> session, Err(1381, "You are not using binary logging")
     | ShowOpenTables(db, pattern) ->
         let dbName = db |> Option.defaultValue (session.Database |> Option.defaultValue defaultDatabase)
 

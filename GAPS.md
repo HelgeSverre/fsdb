@@ -71,7 +71,7 @@ variants), USE, KILL, DESCRIBE are text-probed before the grammar
 | `LOCK TABLES…READ/WRITE`, `UNLOCK TABLES`, `HANDLER`, XA transactions | low | refusal |
 | Partitioning: `PARTITION BY`, `PARTITION (p)` selection, `ADD/DROP/COALESCE/REORGANIZE PARTITION` | medium | refusal |
 | Roles: `CREATE/DROP ROLE`, `SET ROLE`, `SET DEFAULT ROLE`, `GRANT role TO user`, dynamic privileges (`BACKUP_ADMIN`…), `GRANT PROXY` | medium | refusal |
-| Replication/admin SQL: `CHANGE REPLICATION SOURCE TO`, `PURGE BINARY LOGS`, `RESET`, `SHOW MASTER/REPLICA STATUS`, `SHOW BINARY LOGS`, `BINLOG`, `INSTALL/UNINSTALL PLUGIN|COMPONENT`, `ALTER INSTANCE`, `CREATE SERVER`, `TABLESPACE` statements | low | refusal |
+| Replication/admin SQL: `CHANGE REPLICATION SOURCE TO`, `PURGE BINARY LOGS`, `RESET`, `SHOW REPLICA STATUS`, `BINLOG`, `INSTALL/UNINSTALL PLUGIN|COMPONENT`, `ALTER INSTANCE`, `CREATE SERVER`, `TABLESPACE` statements | low | refusal |
 | `EXPLAIN ANALYZE`; `EXPLAIN FORMAT=JSON|TREE`; `DESCRIBE <statement>` | low | refusal |
 | `ALTER TABLE … COMMENT=` option tails | medium | refusal |
 | `RENAME USER`; `CREATE USER` tails: auth plugin, `REQUIRE SSL/X509`, resource limits, `ACCOUNT LOCK`, `PASSWORD EXPIRE`; `ALTER USER` beyond password change | medium | refusal |
@@ -375,7 +375,7 @@ live Limits reporting.
 | INFORMATION_SCHEMA breadth | ~60+ views incl. INNODB_*, COLUMN_STATISTICS, RESOURCE_GROUPS, ENABLED_ROLES | 23 views; EVENTS/ROUTINES/PARAMETERS/COLUMN_PRIVILEGES genuinely empty | low | divergence |
 | Table statistics | estimates refreshed by ANALYZE TABLE | ENGINE always InnoDB, DATA_LENGTH stand-in 16384, CARDINALITY 0, live row counts where MySQL keeps stale page estimates until ANALYZE (`InformationSchema.fs:267–288`); no ANALYZE statement exists | low | divergence |
 | COLUMN_COMMENT | user text | always "" (`InformationSchema.fs:323–326`) | low | divergence |
-| Missing SHOW forms | CREATE EVENT/PROCEDURE/FUNCTION, MASTER/REPLICA STATUS, BINARY LOGS | fall through to 1064 | low | refusal |
+| Missing SHOW forms | CREATE EVENT/PROCEDURE/FUNCTION, REPLICA STATUS | fall through to 1064 | low | refusal |
 | SHOW STATUS counters | Com_*, Innodb_*, Slow_queries, … | five variables only: Questions, Ssl_cipher, Ssl_version, Threads_connected, Uptime (`InformationSchema.fs`) | low | divergence |
 | wait_timeout | 28800 default | 300 (deliberate DoS posture, honestly advertised) | low | divergence |
 | Option-file discovery | /etc/my.cnf, ~/.my.cnf, $MYSQL_HOME auto-read; `[mysqld-8.4]` groups | only `--defaults-file`; version-suffixed groups skipped (documented) | low | divergence |
