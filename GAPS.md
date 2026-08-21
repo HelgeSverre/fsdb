@@ -85,7 +85,6 @@ variants), USE, KILL, DESCRIBE are text-probed before the grammar
 |---|---|---|---|---|
 | `SQL_CALC_FOUND_ROWS` | accepted and feeds `FOUND_ROWS()` | absent alongside `FOUND_ROWS()` | low | refusal |
 | Index hints | `USE/FORCE/IGNORE INDEX|KEY` | absent; `USE` consumed as a table alias then 1064 | low | refusal |
-| `FULL OUTER JOIN` | supported | absent | medium | refusal |
 | Locking detail | `FOR UPDATE/SHARE [OF tbl…] [NOWAIT|SKIP LOCKED]` | `FOR UPDATE`/`FOR SHARE`/`LOCK IN SHARE MODE` accepted and ignored; no OF/NOWAIT/SKIP LOCKED | low | divergence |
 | CTE placement | `WITH` in subqueries, derived tables, `INSERT…WITH` | top-level SELECT/UNION only (`Parser.fs:2458–2464`) | medium | refusal |
 | Quantified comparison | `= ANY/SOME/ALL (subquery)` | absent | medium | refusal |
@@ -143,10 +142,10 @@ CURRENT_USER/USER/SESSION_USER.
 
 | Missing family | Functions | Impact |
 |---|---|---|
-| Crypto | `AES_ENCRYPT AES_DECRYPT ENCODE DECODE RANDOM_BYTES`, entire asymmetric family | medium |
-| Compression/weight | `COMPRESS UNCOMPRESS WEIGHT_STRING` | low |
+| Crypto | `AES_ENCRYPT AES_DECRYPT ENCODE DECODE`, entire asymmetric family | medium |
+| Compression/weight | `WEIGHT_STRING` | low |
 | JSON second half | `JSON_SCHEMA_VALID JSON_SCHEMA_VALIDATION_REPORT JSON_VALUE` | medium |
-| Misc | `BENCHMARK SLEEP UUID_SHORT COERCIBILITY NAME_CONST DEFAULT()` outside REPLACE-SET | low |
+| Misc | `BENCHMARK SLEEP COERCIBILITY DEFAULT()` outside REPLACE-SET | low |
 | Geometry | all `ST_*`/`GeometryCollection` functions and types | low |
 
 Divergences in existing functions: `CURTIME()`/`TIME()` return strings (no

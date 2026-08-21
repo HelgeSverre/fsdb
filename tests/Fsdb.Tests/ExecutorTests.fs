@@ -5950,6 +5950,15 @@ let tests =
                           Some "24"
                           Some "0" ]
 
+                testCase "compression, random bytes, UUID_SHORT, and NAME_CONST expose MySQL-compatible values"
+                <| fun _ ->
+                    match runDefault (newStore ()) "SELECT LENGTH(COMPRESS('abc')) a, HEX(COMPRESS('abc')) b, HEX(UNCOMPRESS(COMPRESS('héllo'))) c, UNCOMPRESSED_LENGTH(COMPRESS('héllo')) d, LENGTH(COMPRESS('')) e, LENGTH(RANDOM_BYTES(4)) f, UUID_SHORT() g, UUID_SHORT() h, NAME_CONST('answer',42)" with
+                    | ResultSet(columns, [ [ Some "15"; Some compressed; Some "68C3A96C6C6F"; Some "6"; Some "0"; Some "4"; Some first; Some second; Some "42" ] ]) ->
+                        Expect.equal compressed "03000000789C4B4C4A0600024D0127" "zlib framing"
+                        Expect.equal columns.[8] "answer" "NAME_CONST supplies the column label"
+                        Expect.equal (uint64 second) (uint64 first + 1UL) "UUID_SHORT is monotonic"
+                    | other -> failtestf "unexpected result: %A" other
+
                 testCase "bitwise operators use unsigned 64-bit values and MySQL precedence"
                 <| fun _ ->
                     expectRow

@@ -5,6 +5,8 @@ module Fsdb.Functions
 
 open System
 open System.Globalization
+open System.IO
+open System.IO.Compression
 open System.Net
 open System.Net.Sockets
 open System.Security.Cryptography
@@ -2450,6 +2452,80 @@ let private fromBase64Fn: Scalar =
             VNull
     | _ -> VNull
 
+let private bytesOfValue =
+    function
+    | VBytes bytes -> bytes
+    | value -> Text.Encoding.UTF8.GetBytes(req value)
+
+let private compressFn: Scalar =
+    function
+    | [ value ] when not (anyNull [ value ]) ->
+        let input = bytesOfValue value
+
+        if input.Length = 0 then
+            VBytes [||]
+        else
+            use output = new MemoryStream()
+            let lengthBytes = BitConverter.GetBytes(uint32 input.Length)
+            output.Write(lengthBytes, 0, lengthBytes.Length)
+
+            use compressor = new ZLibStream(output, CompressionLevel.Optimal, true)
+            compressor.Write(input, 0, input.Length)
+            compressor.Close()
+            let compressed = output.ToArray()
+            VBytes(if compressed.[compressed.Length - 1] = 0x20uy then Array.append compressed [| 0x2euy |] else compressed)
+    | _ -> VNull
+
+let private uncompressFn: Scalar =
+    function
+    | [ value ] when not (anyNull [ value ]) ->
+        let input = bytesOfValue value
+
+        if input.Length = 0 then
+            VBytes [||]
+        elif input.Length < 6 then
+            VNull
+        else
+            try
+                use source = new MemoryStream(input, 4, input.Length - 4)
+                use decompressor = new ZLibStream(source, CompressionMode.Decompress)
+                use output = new MemoryStream()
+                decompressor.CopyTo output
+                VBytes(output.ToArray())
+            with _ ->
+                VNull
+    | _ -> VNull
+
+let private uncompressedLengthFn: Scalar =
+    function
+    | [ value ] when not (anyNull [ value ]) ->
+        let input = bytesOfValue value
+        if input.Length = 0 then VInt 0L elif input.Length < 4 then VNull else VUInt(uint64 (BitConverter.ToUInt32(input, 0)))
+    | _ -> VNull
+
+let private randomBytesFn: Scalar =
+    function
+    | [ count ] when not (anyNull [ count ]) ->
+        let length = int (toDouble count)
+
+        if length < 1 || length > 1024 then
+            raise (SqlError(1690, "The length of RANDOM_BYTES must be between 1 and 1024"))
+
+        VBytes(RandomNumberGenerator.GetBytes length)
+    | _ -> VNull
+
+let mutable private uuidShortSequence = DateTimeOffset.UtcNow.ToUnixTimeSeconds() <<< 24
+
+let private uuidShortFn: Scalar =
+    function
+    | [] -> Threading.Interlocked.Increment(&uuidShortSequence) |> uint64 |> VUInt
+    | _ -> VNull
+
+let private nameConstFn: Scalar =
+    function
+    | [ name; value ] when not (anyNull [ name ]) -> value
+    | _ -> VNull
+
 let private anyValueFn: Scalar =
     function
     | [ value ] -> value
@@ -3653,6 +3729,12 @@ let builtins: Registry =
     |> registerScalar "SOUNDEX" soundexFn
     |> registerScalar "TO_BASE64" toBase64Fn
     |> registerScalar "FROM_BASE64" fromBase64Fn
+    |> registerScalar "COMPRESS" compressFn
+    |> registerScalar "UNCOMPRESS" uncompressFn
+    |> registerScalar "UNCOMPRESSED_LENGTH" uncompressedLengthFn
+    |> registerScalar "RANDOM_BYTES" randomBytesFn
+    |> registerScalar "UUID_SHORT" uuidShortFn
+    |> registerScalar "NAME_CONST" nameConstFn
     |> registerScalar "REGEXP_LIKE" regexpLikeFn
     |> registerScalar "REGEXP_REPLACE" regexpReplaceFn
     |> registerScalar "REGEXP_SUBSTR" regexpSubstrFn

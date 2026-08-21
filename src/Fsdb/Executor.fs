@@ -662,6 +662,7 @@ let rec private exprLabel (expr: Expr) : string =
     | Placeholder _ -> "?"
     | Col name -> name
     | QualifiedCol(_, col) -> col
+    | FuncCall(name, [ Lit(VString label); _ ]) when name.Equals("NAME_CONST", System.StringComparison.OrdinalIgnoreCase) -> label
     | FuncCall(name, args) -> sprintf "%s(%s)" (name.ToUpperInvariant()) (args |> List.map exprLabel |> String.concat ", ")
     | BinOp(op, a, b) -> sprintf "%s %s %s" (exprLabel a) (opSymbol op) (exprLabel b)
     | Not e -> sprintf "not(%s)" (exprLabel e)
@@ -1145,6 +1146,7 @@ let rec private metadataOfExpr (ctx: EvalContext) (expr: Expr) : ColumnMetadata 
                     metadata)
         | ("COALESCE" | "IFNULL"), values -> choose values
         | "ANY_VALUE", [ value ] -> metadataOfExpr ctx value
+        | "NAME_CONST", [ _; value ] -> metadataOfExpr ctx value
         | "NULLIF", first :: _ -> metadataOfExpr ctx first
         | "IF", [ _; whenTrue; whenFalse ] -> choose [ whenTrue; whenFalse ]
         | ("ROUND" | "TRUNCATE" | "FLOOR" | "CEILING" | "CEIL" | "ABS"), arg :: _ -> metadataOfExpr ctx arg
@@ -1169,6 +1171,10 @@ let rec private metadataOfExpr (ctx: EvalContext) (expr: Expr) : ColumnMetadata 
           | "JSON_STORAGE_FREE"), _ ->
             simple TypeLongLong
         | ("JSON_QUOTE" | "JSON_PRETTY"), _ -> Some { Value.columnMetadata TypeVarString with ColumnLength = 4294967295u }
+        | ("COMPRESS" | "UNCOMPRESS" | "RANDOM_BYTES"), _ ->
+            Some { Value.columnMetadata TypeBlob with ColumnLength = 4294967295u; Flags = BlobFlag ||| BinaryFlag }
+        | ("UNCOMPRESSED_LENGTH" | "UUID_SHORT"), _ ->
+            Some { Value.columnMetadata TypeLongLong with ColumnLength = 21u; Flags = UnsignedFlag }
         | ("BIT_AND" | "BIT_OR" | "BIT_XOR" | "BITWISE_NOT" | "BITWISE_AND" | "BITWISE_OR" | "BITWISE_XOR" | "BITWISE_SHIFT_LEFT"
           | "BITWISE_SHIFT_RIGHT"), _ ->
             Some { Value.columnMetadata TypeLongLong with ColumnLength = 21u; Flags = UnsignedFlag }
