@@ -685,6 +685,19 @@ let private jsonExtractFn: Scalar =
                 | many, _ -> VJson("[" + (many |> List.map formatJsonNode |> String.concat ", ") + "]")
     | _ -> VNull
 
+let private jsonValueFn: Scalar =
+    function
+    | [ document; path ] when not (anyNull [ document; path ]) ->
+        match tryParseJsonValue document, toText path |> Option.bind parseJsonPath with
+        | Some root, Some segments ->
+            match navigateJson root segments with
+            | [ null ] -> VNull
+            | [ node ] when node.GetValueKind() = JsonValueKind.String -> VString(node.GetValue<string>())
+            | [ node ] -> VString(formatJsonNode node)
+            | _ -> VNull
+        | _ -> VNull
+    | _ -> VNull
+
 let private jsonUnquoteFn: Scalar =
     function
     | [ VNull ] -> VNull
@@ -3603,6 +3616,7 @@ let builtins: Registry =
     |> registerScalar "MOD" modFn
     // JSON
     |> registerScalar "JSON_EXTRACT" jsonExtractFn
+    |> registerScalar "JSON_VALUE" jsonValueFn
     |> registerScalar "JSON_UNQUOTE" jsonUnquoteFn
     |> registerScalar "JSON_CONTAINS" jsonContainsFn
     |> registerScalar "JSON_MEMBER_OF" jsonMemberOfFn

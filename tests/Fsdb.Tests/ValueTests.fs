@@ -487,6 +487,16 @@ let tests =
                       testCase "JSON_EXTRACT on NULL doc is NULL"
                       <| fun _ -> Expect.equal (call "JSON_EXTRACT" [ VNull; VString "$.a" ]) VNull "null doc"
 
+                      testCase "JSON_VALUE returns unquoted scalar text and NULL for a missing path"
+                      <| fun _ ->
+                          let document = VJson """{"s":"hi","n":2,"b":true,"z":null,"a":[1]}"""
+                          Expect.equal (call "JSON_VALUE" [ document; VString "$.s" ]) (VString "hi") "string"
+                          Expect.equal (call "JSON_VALUE" [ document; VString "$.n" ]) (VString "2") "number"
+                          Expect.equal (call "JSON_VALUE" [ document; VString "$.b" ]) (VString "true") "boolean"
+                          Expect.equal (call "JSON_VALUE" [ document; VString "$.z" ]) VNull "JSON null"
+                          Expect.equal (call "JSON_VALUE" [ document; VString "$.a" ]) (VString "[1]") "array"
+                          Expect.equal (call "JSON_VALUE" [ document; VString "$.missing" ]) VNull "missing"
+
                       testCase "JSON_UNQUOTE strips the quotes from a JSON string"
                       <| fun _ -> Expect.equal (call "JSON_UNQUOTE" [ VJson "\"hi\"" ]) (VString "hi") "unquote"
 

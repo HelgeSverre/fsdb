@@ -140,7 +140,7 @@ CURRENT_USER/USER/SESSION_USER.
 |---|---|---|
 | Crypto | `AES_ENCRYPT AES_DECRYPT ENCODE DECODE`, entire asymmetric family | medium |
 | Compression/weight | `WEIGHT_STRING` | low |
-| JSON second half | `JSON_SCHEMA_VALID JSON_SCHEMA_VALIDATION_REPORT JSON_VALUE` | medium |
+| JSON schema | `JSON_SCHEMA_VALID JSON_SCHEMA_VALIDATION_REPORT` | medium |
 | Misc | `BENCHMARK SLEEP COERCIBILITY DEFAULT()` outside REPLACE-SET | low |
 | Geometry | all `ST_*`/`GeometryCollection` functions and types | low |
 
