@@ -1033,7 +1033,18 @@ let tests =
 
                 testList
                     "Dates"
-                    [ testCase "NOW truncates to whole seconds (MySQL NOW() has precision 0)"
+                    [ testCase "component and calendar functions distinguish zero dates"
+                      <| fun _ ->
+                          let partial = VZeroDate(tryZeroDate 2020 1 0 |> Option.get)
+                          let allZero = VZeroDate(tryZeroDate 0 0 0 |> Option.get)
+                          Expect.equal (call "YEAR" [ partial ]) (VInt 2020L) "year survives"
+                          Expect.equal (call "MONTH" [ partial ]) (VInt 1L) "month survives"
+                          Expect.equal (call "DAYOFMONTH" [ partial ]) (VInt 0L) "zero day survives"
+                          Expect.equal (call "DATE_FORMAT" [ partial; VString "%Y-%m-%d" ]) (VString "2020-01-00") "format preserves components"
+                          Expect.equal (call "LAST_DAY" [ partial ]) (VDate(DateOnly(2020, 1, 31))) "calendar month remains known"
+                          Expect.equal (call "DATE_FORMAT" [ allZero; VString "%Y-%m-%d" ]) VNull "all-zero format is null"
+
+                      testCase "NOW truncates to whole seconds (MySQL NOW() has precision 0)"
                       <| fun _ ->
                           // `DateTime.Now` carries 100 ns ticks; MySQL's NOW()
                           // has no fractional part, so NOW() must truncate at

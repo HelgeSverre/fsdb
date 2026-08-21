@@ -17,6 +17,7 @@ open System.Text.RegularExpressions
 open NJsonSchema
 open NJsonSchema.Validation
 open Fsdb.Value
+open Fsdb.Temporal
 
 /// A scalar function: its already-evaluated arguments in, one `Value` out.
 type Scalar = Value list -> Value
@@ -2212,16 +2213,32 @@ let private formatDate (dt: DateTime) (fmt: string) : string =
 
     sb.ToString()
 
+let private formatZeroDate (date: ZeroDate) (fmt: string) =
+    let year, month, day = zeroDateParts date
+    fmt.Replace("%Y", sprintf "%04d" year)
+        .Replace("%y", sprintf "%02d" (year % 100))
+        .Replace("%m", sprintf "%02d" month)
+        .Replace("%c", string month)
+        .Replace("%d", sprintf "%02d" day)
+        .Replace("%e", string day)
+
 let private dateFormatFn: Scalar =
     function
     | [ d; f ] when not (anyNull [ d; f ]) ->
-        match asDateTime d, toText f with
-        | Some dt, Some fmt -> VString(formatDate dt fmt)
+        match d, toText f with
+        | VZeroDate date, Some fmt when not (isAllZeroDate date) ->
+            VString(formatZeroDate date fmt)
+        | VZeroDateTime dateTime, Some fmt ->
+            let date, _, _, _, _ = zeroDateTimeParts dateTime
+            if isAllZeroDate date then VNull else VString(formatZeroDate date fmt)
+        | _, Some fmt -> asDateTime d |> Option.map (fun dt -> VString(formatDate dt fmt)) |> Option.defaultValue VNull
         | _ -> VNull
     | _ -> VNull
 
 let private dateFn: Scalar =
     function
+    | [ VZeroDate date ] -> VZeroDate date
+    | [ VZeroDateTime dateTime ] -> VZeroDate(zeroDateOfDateTime dateTime)
     | [ v ] when not (anyNull [ v ]) -> asDateOnly v |> Option.map VDate |> Option.defaultValue VNull
     | _ -> VNull
 
@@ -2239,6 +2256,13 @@ let private timeFn: Scalar =
 let private datePartFn (f: DateTime -> int) : Scalar =
     function
     | [ v ] when not (anyNull [ v ]) -> asDateTime v |> Option.map (f >> int64 >> VInt) |> Option.defaultValue VNull
+    | _ -> VNull
+
+let private zeroAwareDatePart (fromZero: ZeroDate -> int) (fromDateTime: DateTime -> int) : Scalar =
+    function
+    | [ VZeroDate date ] -> VInt(int64 (fromZero date))
+    | [ VZeroDateTime dateTime ] -> VInt(int64 (fromZero (zeroDateOfDateTime dateTime)))
+    | [ value ] when not (anyNull [ value ]) -> asDateTime value |> Option.map (fromDateTime >> int64 >> VInt) |> Option.defaultValue VNull
     | _ -> VNull
 
 let private dayNameFn: Scalar =
@@ -2696,8 +2720,18 @@ let private extractFn: Scalar =
         | _ -> VNull
     | _ -> VNull
 
+let private lastDayZeroDate date =
+        let year, month, _ = zeroDateParts date
+
+        if year = 0 || month = 0 then
+            VNull
+        else
+            VDate(DateOnly(year, month, DateTime.DaysInMonth(year, month)))
+
 let private lastDayFn: Scalar =
     function
+    | [ VZeroDate date ] -> lastDayZeroDate date
+    | [ VZeroDateTime dateTime ] -> lastDayZeroDate (zeroDateOfDateTime dateTime)
     | [ v ] when not (anyNull [ v ]) ->
         asDateTime v
         |> Option.map (fun dt -> VDate(DateOnly(dt.Year, dt.Month, DateTime.DaysInMonth(dt.Year, dt.Month))))
@@ -4933,10 +4967,10 @@ let builtins: Registry =
     |> registerScalar "DATE" dateFn
     |> registerScalar "TIME" timeFn
     |> registerScalar "TIMESTAMP" timestampFn
-    |> registerScalar "YEAR" (datePartFn (fun d -> d.Year))
-    |> registerScalar "MONTH" (datePartFn (fun d -> d.Month))
+    |> registerScalar "YEAR" (zeroAwareDatePart (fun date -> let year, _, _ = zeroDateParts date in year) (fun d -> d.Year))
+    |> registerScalar "MONTH" (zeroAwareDatePart (fun date -> let _, month, _ = zeroDateParts date in month) (fun d -> d.Month))
     |> registerScalar "DAY" (datePartFn (fun d -> d.Day))
-    |> registerScalar "DAYOFMONTH" (datePartFn (fun d -> d.Day))
+    |> registerScalar "DAYOFMONTH" (zeroAwareDatePart (fun date -> let _, _, day = zeroDateParts date in day) (fun d -> d.Day))
     |> registerScalar "HOUR" (datePartFn (fun d -> d.Hour))
     |> registerScalar "MINUTE" (datePartFn (fun d -> d.Minute))
     |> registerScalar "SECOND" (datePartFn (fun d -> d.Second))
