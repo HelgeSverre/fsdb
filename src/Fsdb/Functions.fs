@@ -14,6 +14,8 @@ open System.Text
 open System.Text.Json
 open System.Text.Json.Nodes
 open System.Text.RegularExpressions
+open NJsonSchema
+open NJsonSchema.Validation
 open Fsdb.Value
 
 /// A scalar function: its already-evaluated arguments in, one `Value` out.
@@ -885,6 +887,255 @@ let private jsonValidFn: Scalar =
                 VInt 1L
             with _ ->
                 VInt 0L
+    | _ -> VNull
+
+let private jsonSchemaError functionName argument position =
+    SqlError(3141, sprintf "Invalid JSON text in argument %d to function %s: \"Invalid value.\" at position %d." argument functionName position)
+
+let private jsonSchemaObjectError functionName =
+    SqlError(3853, sprintf "Invalid JSON type in argument 1 to function %s; an object is required." functionName)
+
+let private parseJsonSchemaArgument functionName argument (value: Value) : JsonNode =
+    match toText value with
+    | None -> raise (jsonSchemaError functionName argument 0)
+    | Some text ->
+        try
+            JsonNode.Parse text
+        with :? JsonException as error ->
+            let position = if error.BytePositionInLine.HasValue then int error.BytePositionInLine.Value else 0
+            raise (jsonSchemaError functionName argument position)
+
+let private escapeJsonPointer (segment: string) =
+    segment.Replace("~", "~0").Replace("/", "~1")
+
+let rec private normalizeJsonSchema (node: JsonNode) : unit =
+    match node with
+    | :? JsonObject as obj ->
+        match obj["$ref"] with
+        | :? JsonValue as value ->
+            match value.TryGetValue<string>() with
+            | true, reference when not (reference.StartsWith "#") ->
+                raise (SqlError(1235, "This version of MySQL doesn't yet support 'references in JSON Schema'"))
+            | _ -> ()
+        | _ -> ()
+
+        match obj["pattern"] with
+        | :? JsonValue as value ->
+            match value.TryGetValue<string>() with
+            | true, pattern ->
+                try
+                    Regex pattern |> ignore
+                with :? ArgumentException -> obj.Remove "pattern" |> ignore
+            | _ -> ()
+        | _ -> ()
+
+        match obj["patternProperties"] with
+        | :? JsonObject as patterns ->
+            patterns
+            |> Seq.choose (fun entry ->
+                try
+                    Regex entry.Key |> ignore
+                    None
+                with :? ArgumentException -> Some entry.Key)
+            |> Seq.toList
+            |> List.iter (fun key -> patterns.Remove key |> ignore)
+        | _ -> ()
+
+        obj |> Seq.iter (fun entry -> normalizeJsonSchema entry.Value)
+    | :? JsonArray as array -> array |> Seq.iter normalizeJsonSchema
+    | _ -> ()
+
+let private jsonSchemaCache =
+    let cache = System.Collections.Concurrent.ConcurrentDictionary<string, JsonSchema>()
+    let maxEntries = 256
+
+    fun (text: string) ->
+        if cache.Count > maxEntries then cache.Clear()
+        cache.GetOrAdd(text, fun source -> JsonSchema.FromJsonAsync(source).GetAwaiter().GetResult())
+
+let private jsonSchemaValidatorSettings =
+    JsonSchemaValidatorSettings(FormatValidators = [||])
+
+let private schemaLocation (schema: JsonObject) (documentLocation: string) : string =
+    let segments =
+        documentLocation.TrimStart '#'
+        |> fun path -> path.Split('/', StringSplitOptions.RemoveEmptyEntries)
+        |> Array.map (fun segment -> segment.Replace("~1", "/").Replace("~0", "~"))
+
+    let rec find (location: string) (current: JsonNode) (remaining: string list) : string =
+        match current, remaining with
+        | :? JsonObject as obj, segment :: rest ->
+            match obj["properties"] with
+            | :? JsonObject as properties when properties.ContainsKey segment ->
+                find (location + "/properties/" + escapeJsonPointer segment) properties[segment] rest
+            | _ ->
+                match obj["items"] with
+                | :? JsonObject as items -> find (location + "/items") items rest
+                | :? JsonArray as items ->
+                    match Int32.TryParse segment with
+                    | true, index when index >= 0 && index < items.Count -> find (location + "/items/" + string index) items[index] rest
+                    | _ -> location
+                | _ -> location
+        | _ -> location
+
+    find "#" schema (List.ofArray segments)
+
+let private schemaKeyword =
+    function
+    | ValidationErrorKind.PropertyRequired -> "required"
+    | ValidationErrorKind.StringExpected
+    | ValidationErrorKind.NumberExpected
+    | ValidationErrorKind.IntegerExpected
+    | ValidationErrorKind.BooleanExpected
+    | ValidationErrorKind.ObjectExpected
+    | ValidationErrorKind.ArrayExpected
+    | ValidationErrorKind.NullExpected
+    | ValidationErrorKind.NoTypeValidates -> "type"
+    | ValidationErrorKind.PatternMismatch -> "pattern"
+    | ValidationErrorKind.StringTooShort -> "minLength"
+    | ValidationErrorKind.StringTooLong -> "maxLength"
+    | ValidationErrorKind.NumberTooSmall -> "minimum"
+    | ValidationErrorKind.NumberTooBig
+    | ValidationErrorKind.IntegerTooBig -> "maximum"
+    | ValidationErrorKind.TooFewItems -> "minItems"
+    | ValidationErrorKind.TooManyItems -> "maxItems"
+    | ValidationErrorKind.ItemsNotUnique -> "uniqueItems"
+    | ValidationErrorKind.NumberNotMultipleOf
+    | ValidationErrorKind.IntegerNotMultipleOf -> "multipleOf"
+    | ValidationErrorKind.NotInEnumeration -> "enum"
+    | ValidationErrorKind.NotAnyOf -> "anyOf"
+    | ValidationErrorKind.NotAllOf -> "allOf"
+    | ValidationErrorKind.NotOneOf -> "oneOf"
+    | ValidationErrorKind.ExcludedSchemaValidates -> "not"
+    | ValidationErrorKind.NoAdditionalPropertiesAllowed
+    | ValidationErrorKind.AdditionalPropertiesNotValid -> "additionalProperties"
+    | ValidationErrorKind.TooFewProperties -> "minProperties"
+    | ValidationErrorKind.TooManyProperties -> "maxProperties"
+    | ValidationErrorKind.ArrayItemNotValid -> "items"
+    | ValidationErrorKind.AdditionalItemNotValid
+    | ValidationErrorKind.TooManyItemsInTuple -> "additionalItems"
+    | other -> string other
+
+type private JsonSchemaFailure =
+    { SchemaLocation: string
+      DocumentLocation: string
+      Keyword: string }
+
+let rec private dependencyFailure (schema: JsonNode) (document: JsonNode) schemaLocation documentLocation =
+    match schema, document with
+    | (:? JsonObject as schema), (:? JsonObject as document) ->
+        let missingDependency =
+            match schema["dependencies"] with
+            | :? JsonObject as dependencies ->
+                dependencies
+                |> Seq.tryPick (fun dependency ->
+                    if document.ContainsKey dependency.Key then
+                        match dependency.Value with
+                        | :? JsonArray as required ->
+                            required
+                            |> Seq.tryPick (fun value ->
+                                match value with
+                                | :? JsonValue as name ->
+                                    match name.TryGetValue<string>() with
+                                    | true, name when not (document.ContainsKey name) ->
+                                        Some
+                                            { SchemaLocation = schemaLocation
+                                              DocumentLocation = documentLocation
+                                              Keyword = "dependencies" }
+                                    | _ -> None
+                                | _ -> None)
+                        | _ -> None
+                    else
+                        None)
+            | _ -> None
+
+        match missingDependency with
+        | Some failure -> Some failure
+        | None ->
+            match schema["properties"] with
+            | :? JsonObject as properties ->
+                properties
+                |> Seq.tryPick (fun property ->
+                    match document[property.Key] with
+                    | null -> None
+                    | value ->
+                        dependencyFailure
+                            property.Value
+                            value
+                            (schemaLocation + "/properties/" + escapeJsonPointer property.Key)
+                            (documentLocation + "/" + escapeJsonPointer property.Key))
+            | _ -> None
+    | (:? JsonObject as schema), (:? JsonArray as document) ->
+        match schema["items"] with
+        | :? JsonObject as items ->
+            document
+            |> Seq.mapi (fun index value ->
+                dependencyFailure items value (schemaLocation + "/items") (documentLocation + "/" + string index))
+            |> Seq.tryPick id
+        | _ -> None
+    | _ -> None
+
+let private jsonSchemaValidation functionName schemaValue documentValue =
+    match schemaValue, documentValue with
+    | VNull, _
+    | _, VNull -> None
+    | _ ->
+        let schemaNode = parseJsonSchemaArgument functionName 1 schemaValue
+        let documentNode = parseJsonSchemaArgument functionName 2 documentValue
+
+        match schemaNode with
+        | :? JsonObject as schema ->
+            normalizeJsonSchema schema
+            let schemaText = schema.ToJsonString jsonRenderOptions
+            let documentText = documentNode |> Option.ofObj |> Option.map (fun node -> node.ToJsonString jsonRenderOptions) |> Option.defaultValue "null"
+            let errors = jsonSchemaCache schemaText |> fun compiled -> compiled.Validate(documentText, jsonSchemaValidatorSettings)
+            let libraryFailure =
+                errors
+                |> Seq.tryHead
+                |> Option.map (fun error ->
+                    let documentLocation =
+                        if error.Kind = ValidationErrorKind.PropertyRequired then
+                            let separator = error.Path.LastIndexOf '/'
+                            if separator < 1 then "#" else error.Path.Substring(0, separator)
+                        else
+                            error.Path
+
+                    { SchemaLocation = schemaLocation schema documentLocation
+                      DocumentLocation = documentLocation
+                      Keyword = schemaKeyword error.Kind })
+
+            Some(schema, dependencyFailure schema documentNode "#" "#" |> Option.orElse libraryFailure)
+        | _ -> raise (jsonSchemaObjectError functionName)
+
+let private jsonSchemaValidFn: Scalar =
+    function
+    | [ schema; document ] ->
+        match jsonSchemaValidation "json_schema_valid" schema document with
+        | None -> VNull
+        | Some(_, None) -> VInt 1L
+        | Some(_, Some _) -> VInt 0L
+    | _ -> VNull
+
+let private jsonSchemaValidationReportFn: Scalar =
+    function
+    | [ schema; document ] ->
+        match jsonSchemaValidation "json_schema_validation_report" schema document with
+        | None -> VNull
+        | Some(_, None) -> VJson "{\"valid\": true}"
+        | Some(_, Some failure) ->
+            let reason = sprintf "The JSON document location '%s' failed requirement '%s' at JSON Schema location '%s'" failure.DocumentLocation failure.Keyword failure.SchemaLocation
+
+            VJson(
+                "{\"valid\": false, \"reason\": "
+                + jsonQuote reason
+                + ", \"schema-location\": "
+                + jsonQuote failure.SchemaLocation
+                + ", \"document-location\": "
+                + jsonQuote failure.DocumentLocation
+                + ", \"schema-failed-keyword\": "
+                + jsonQuote failure.Keyword
+                + "}"
+            )
     | _ -> VNull
 
 /// MySQL's JSON_TYPE names, collapsed to what a `JsonNode` can actually tell
@@ -3701,6 +3952,8 @@ let builtins: Registry =
     |> registerScalar "JSON_LENGTH" jsonLengthFn
     |> registerScalar "JSON_DEPTH" jsonDepthFn
     |> registerScalar "JSON_VALID" jsonValidFn
+    |> registerScalar "JSON_SCHEMA_VALID" jsonSchemaValidFn
+    |> registerScalar "JSON_SCHEMA_VALIDATION_REPORT" jsonSchemaValidationReportFn
     |> registerScalar "JSON_TYPE" jsonTypeFn
     |> registerScalar "JSON_KEYS" jsonKeysFn
     |> registerScalar "JSON_SEARCH" jsonSearchFn

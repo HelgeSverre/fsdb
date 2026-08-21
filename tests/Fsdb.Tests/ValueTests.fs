@@ -579,6 +579,95 @@ let tests =
                           Expect.equal (call "JSON_VALID" [ VString """{"a": 1}""" ]) (VInt 1L) "valid"
                           Expect.equal (call "JSON_VALID" [ VString "{not json" ]) (VInt 0L) "invalid"
 
+                      testCase "JSON_SCHEMA_VALID applies Draft 4 object, number, and required constraints"
+                      <| fun _ ->
+                          let schema =
+                              VString
+                                  """{"type":"object","properties":{"latitude":{"type":"number","minimum":-90,"maximum":90},"longitude":{"type":"number","minimum":-180,"maximum":180}},"required":["latitude","longitude"]}"""
+
+                          Expect.equal
+                              (call "JSON_SCHEMA_VALID" [ schema; VString """{"latitude":63.444697,"longitude":10.445118}""" ])
+                              (VInt 1L)
+                              "valid coordinate"
+
+                          Expect.equal
+                              (call "JSON_SCHEMA_VALID" [ schema; VString """{"latitude":91,"longitude":0}""" ])
+                              (VInt 0L)
+                              "out-of-range latitude"
+
+                          Expect.equal (call "JSON_SCHEMA_VALID" [ schema; VString "{}" ]) (VInt 0L) "missing required members"
+
+                      testCase "JSON_SCHEMA_VALIDATION_REPORT gives MySQL's first-failure shape"
+                      <| fun _ ->
+                          let schema = VString """{"type":"object","properties":{"longitude":{"maximum":180}}}"""
+
+                          Expect.equal
+                              (call "JSON_SCHEMA_VALIDATION_REPORT" [ schema; VString """{"longitude":310}""" ])
+                              (VJson
+                                  """{"valid": false, "reason": "The JSON document location '#/longitude' failed requirement 'maximum' at JSON Schema location '#/properties/longitude'", "schema-location": "#/properties/longitude", "document-location": "#/longitude", "schema-failed-keyword": "maximum"}""")
+                              "range failure"
+
+                          Expect.equal
+                              (call "JSON_SCHEMA_VALIDATION_REPORT" [ schema; VString """{"longitude":10}""" ])
+                              (VJson """{"valid": true}""")
+                              "valid report"
+
+                          let required = VString """{"type":"object","required":["latitude"]}"""
+
+                          Expect.equal
+                              (call "JSON_SCHEMA_VALIDATION_REPORT" [ required; VString "{}" ])
+                              (VJson
+                                  """{"valid": false, "reason": "The JSON document location '#' failed requirement 'required' at JSON Schema location '#'", "schema-location": "#", "document-location": "#", "schema-failed-keyword": "required"}""")
+                              "required report"
+
+                      testCase "JSON schema ignores format assertions like MySQL"
+                      <| fun _ ->
+                          Expect.equal
+                              (call "JSON_SCHEMA_VALID" [ VString """{"type":"string","format":"email"}"""; VString "\"not-an-email\"" ])
+                              (VInt 1L)
+                              "format annotations do not reject an otherwise valid string"
+
+                      testCase "JSON schema resolves local references and refuses remote references"
+                      <| fun _ ->
+                          let local = VString """{"$ref":"#/definitions/integer","definitions":{"integer":{"type":"integer"}}}"""
+                          Expect.equal (call "JSON_SCHEMA_VALID" [ local; VString "1" ]) (VInt 1L) "local reference"
+                          Expect.equal (call "JSON_SCHEMA_VALID" [ local; VString "\"x\"" ]) (VInt 0L) "local reference violation"
+
+                          Expect.throwsC
+                              (fun () -> call "JSON_SCHEMA_VALID" [ VString """{"$ref":"https://example.invalid/schema"}"""; VString "{}" ] |> ignore)
+                              (fun error ->
+                                  match error with
+                                  | Fsdb.Functions.SqlError(1235, _) -> ()
+                                  | other -> failtestf "expected 1235, got %A" other)
+
+                      testCase "JSON schema enforces property dependencies"
+                      <| fun _ ->
+                          let schema = VString """{"type":"object","dependencies":{"credit_card":["billing_address"]}}"""
+                          Expect.equal (call "JSON_SCHEMA_VALID" [ schema; VString """{"credit_card":1234}""" ]) (VInt 0L) "missing dependency"
+                          Expect.equal
+                              (call "JSON_SCHEMA_VALIDATION_REPORT" [ schema; VString """{"credit_card":1234}""" ])
+                              (VJson
+                                  """{"valid": false, "reason": "The JSON document location '#' failed requirement 'dependencies' at JSON Schema location '#'", "schema-location": "#", "document-location": "#", "schema-failed-keyword": "dependencies"}""")
+                              "dependency report"
+
+                          Expect.equal
+                              (call "JSON_SCHEMA_VALID" [ schema; VString """{"credit_card":1234,"billing_address":"x"}""" ])
+                              (VInt 1L)
+                              "dependency present"
+
+                      testCase "JSON schema functions return NULL for a SQL NULL argument and reject invalid JSON"
+                      <| fun _ ->
+                          let schema = VString """{"type":"object"}"""
+                          Expect.equal (call "JSON_SCHEMA_VALID" [ VNull; VString "{}" ]) VNull "null schema"
+                          Expect.equal (call "JSON_SCHEMA_VALIDATION_REPORT" [ schema; VNull ]) VNull "null document"
+
+                          Expect.throwsC
+                              (fun () -> call "JSON_SCHEMA_VALID" [ schema; VString "not json" ] |> ignore)
+                              (fun error ->
+                                  match error with
+                                  | Fsdb.Functions.SqlError(3141, _) -> ()
+                                  | other -> failtestf "expected 3141, got %A" other)
+
                       testCase "JSON_KEYS lists an object's top-level keys"
                       <| fun _ -> Expect.equal (call "JSON_KEYS" [ VJson """{"a": 1, "b": 2}""" ]) (VJson """["a", "b"]""") "keys"
 
