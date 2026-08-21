@@ -136,7 +136,7 @@ CURRENT_USER/USER/SESSION_USER.
 
 | Missing family | Functions | Impact |
 |---|---|---|
-| Crypto | `ENCODE DECODE`, entire asymmetric family | medium |
+| Crypto | asymmetric key-management family | medium |
 | Weight-string clauses | `WEIGHT_STRING(... AS CHAR/BINARY, LEVEL ...)` | low |
 | JSON schema patterns | `pattern patternProperties` | medium |
 | Geometry | all `ST_*`/`GeometryCollection` functions and types | low |
