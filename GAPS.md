@@ -75,7 +75,6 @@ variants), USE, KILL, DESCRIBE are text-probed before the grammar
 | `START TRANSACTION READ ONLY|READ WRITE`; `COMMIT AND CHAIN`; `SET TRANSACTION READ ONLY`; `SET CHARACTER SET` | low | refusal |
 | `CREATE TABLE … AS SELECT` and `CREATE TABLE … LIKE other` | medium | refusal |
 | `ALTER TABLE … ALTER COLUMN c SET/DROP DEFAULT`; `RENAME INDEX a TO b`; `CONVERT TO CHARACTER SET`; `ENGINE=`/`COMMENT=` option tails (only `AUTO_INCREMENT=n` works) | medium | refusal |
-| Top-level `VALUES ROW(…)` and `TABLE t` statements | low | refusal |
 | `RENAME USER`; `CREATE USER` tails: auth plugin, `REQUIRE SSL/X509`, resource limits, `ACCOUNT LOCK`, `PASSWORD EXPIRE`; `ALTER USER` beyond password change | medium | refusal |
 | Multi-statement strings (`stmt1; stmt2`) — exactly one statement per round trip | medium | refusal |
 

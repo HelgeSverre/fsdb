@@ -2606,6 +2606,55 @@ let private selectOrUnionStmt: Parser<Statement, unit> =
         | [] -> preturn (Select(fst first))
         | _ -> unionTailClause |>> fun tail -> combineUnion first rest tail |> Union
 
+let private querySelect projections from orderBy limit offset =
+    { Projections = projections
+      Distinct = false
+      From = from
+      Joins = []
+      Where = None
+      GroupBy = []
+      Rollup = false
+      Windows = []
+      Ctes = []
+      Having = None
+      OrderBy = orderBy
+      Limit = limit
+      Offset = offset
+      Locking = false }
+
+let private queryTail =
+    opt (keyword "ORDER" >>. keyword "BY" >>. sepBy1 orderKey (sym ","))
+    .>>. opt limitClause
+    |>> fun (orderBy, limitOffset) ->
+        let limit, offset = limitOffset |> Option.defaultValue (None, None)
+        orderBy |> Option.defaultValue [], limit, offset
+
+let private tableQueryStmt: Parser<Statement, unit> =
+    keyword "TABLE" >>. tableRef .>>. queryTail
+    |>> fun (table, (orderBy, limit, offset)) ->
+        Select(querySelect [ Star None, None ] (Some(FromTable table)) orderBy limit offset)
+
+let private valuesQueryStmt: Parser<Statement, unit> =
+    let row = keyword "ROW" >>. between (sym "(") (sym ")") (sepBy1 expr (sym ","))
+
+    keyword "VALUES" >>. sepBy1 row (sym ",") .>>. queryTail
+    >>= fun (rows, (orderBy, limit, offset)) ->
+        let width = rows.Head.Length
+
+        if rows |> List.exists (fun values -> values.Length <> width) then
+            fail "all VALUES rows must have the same number of columns"
+        else
+            let selectOf values =
+                values
+                |> List.mapi (fun index value -> value, Some(sprintf "column_%d" index))
+                |> fun projections -> querySelect projections None [] None None
+
+            match rows with
+            | [ values ] -> preturn (Select { selectOf values with OrderBy = orderBy; Limit = limit; Offset = offset })
+            | first :: rest ->
+                preturn (Union(selectOf first, rest |> List.map (fun values -> OpUnion true, selectOf values), orderBy, limit, offset))
+            | [] -> fail "VALUES requires at least one row"
+
 /// An assignment target, `col` or `table.col` (Laravel's `touch()` qualifies
 /// `updated_at` with the table name even in a single-table `UPDATE`) — the
 /// table part only matters once there's more than one table in scope (a
@@ -2863,6 +2912,8 @@ statementRef.Value <-
           truncateTable
           insertStmt
           replaceStmt
+          tableQueryStmt
+          valuesQueryStmt
           selectOrUnionStmt
           updateStmt
           deleteStmt

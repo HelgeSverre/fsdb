@@ -5959,6 +5959,20 @@ let tests =
                         Expect.equal (uint64 second) (uint64 first + 1UL) "UUID_SHORT is monotonic"
                     | other -> failtestf "unexpected result: %A" other
 
+                testCase "standalone TABLE and VALUES ROW queries use the ordinary query pipeline"
+                <| fun _ ->
+                    let store = newStore ()
+                    runDefault store "CREATE TABLE tq (id INT, name VARCHAR(10))" |> ignore
+                    runDefault store "INSERT INTO tq VALUES (2,'b'),(1,'a'),(3,'c')" |> ignore
+
+                    match runDefault store "TABLE tq ORDER BY id LIMIT 1 OFFSET 1" with
+                    | ResultSet([ "id"; "name" ], [ [ Some "2"; Some "b" ] ]) -> ()
+                    | other -> failtestf "unexpected TABLE result: %A" other
+
+                    match runDefault store "VALUES ROW(2,'b'), ROW(1,'a'), ROW(2,'b') ORDER BY column_0 LIMIT 2" with
+                    | ResultSet([ "column_0"; "column_1" ], [ [ Some "1"; Some "a" ]; [ Some "2"; Some "b" ] ]) -> ()
+                    | other -> failtestf "unexpected VALUES result: %A" other
+
                 testCase "bitwise operators use unsigned 64-bit values and MySQL precedence"
                 <| fun _ ->
                     expectRow
