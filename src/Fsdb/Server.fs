@@ -27,6 +27,7 @@ type private Command =
     | Statistics
     | ProcessInfo
     | ProcessKill of connectionId: int64
+    | Debug
     | Ping
     | FieldList of table: string
     | StmtPrepare of sql: string
@@ -67,6 +68,7 @@ let private parseCommand (payload: byte[]) : Command option =
                 | 0x09uy -> Statistics
                 | 0x0auy -> ProcessInfo
                 | 0x0cuy -> ProcessKill(int64 (Reader(restBytes ()).ReadInt32LE()))
+                | 0x0duy -> Debug
                 | 0x0euy -> Ping
                 | 0x16uy -> StmtPrepare(rest ())
                 | 0x17uy -> StmtExecute(restBytes ())
@@ -742,6 +744,21 @@ let private handleConnection
                                             result
 
                                     return! loop session
+                            | Some Debug ->
+                                Log.diagnostic
+                                    "fsdb: COM_DEBUG: uptime=%d threads=%d questions=%d"
+                                    (max 0L (int64 (DateTime.Now - InformationSchema.serverStartedAt).TotalSeconds))
+                                    (InformationSchema.connectedThreads ())
+                                    (InformationSchema.questions ())
+
+                                do!
+                                    writePacketAsync
+                                        stream
+                                        { SeqId = seqId
+                                          Payload = eofPayload capabilities (statusFlagsFor session) }
+                                    |> Async.Ignore
+
+                                return! loop session
                             | Some(FieldList table) ->
                                 // Deprecated in MySQL 8.0, but PDO/mysqlnd's
                                 // metadata probing can still send it —

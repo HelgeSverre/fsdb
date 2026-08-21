@@ -1839,6 +1839,30 @@ let tests =
               }
               |> Async.RunSynchronously
 
+          testCase "COM_DEBUG returns EOF and keeps the connection usable"
+          <| fun _ ->
+              async {
+                  let listener = Fsdb.Server.startListening System.Net.IPAddress.Loopback 0
+                  let port = Fsdb.Server.port listener
+                  Fsdb.Server.serve listener (Fsdb.Storage.create ()) Fsdb.Functions.empty |> Async.StartAsTask |> ignore
+
+                  try
+                      let! client, stream = connectRaw port
+                      use client = client
+
+                      let! _ = writePacketAsync stream { SeqId = 0uy; Payload = [| 0x0duy |] }
+                      let! reply = readPacketAsync stream
+                      Expect.equal reply.Value.Payload.[0] 0xfeuy "debug replies EOF"
+
+                      let query = Array.append [| 0x03uy |] (Text.Encoding.UTF8.GetBytes "SELECT 1")
+                      let! _ = writePacketAsync stream { SeqId = 0uy; Payload = query }
+                      let! next = readPacketAsync stream
+                      Expect.isSome next "connection remains usable"
+                  finally
+                      listener.Stop()
+              }
+              |> Async.RunSynchronously
+
           testCase "COM_STMT_PREPARE on invalid SQL replies ERR and the connection stays usable"
           <| fun _ ->
               async {
