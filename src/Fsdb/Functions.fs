@@ -158,11 +158,17 @@ let lookupAggregate (name: string) (registry: Registry) : Aggregate option =
 let private stringBytes (value: Value) =
     tryRawBytes value |> Option.defaultWith (fun () -> Text.Encoding.UTF8.GetBytes(toText value |> Option.defaultValue ""))
 
+let private hasRawBytes values = values |> List.exists (tryRawBytes >> Option.isSome)
+
+let private binaryText value = stringBytes value |> Text.Encoding.Latin1.GetString
+
+let private binaryValue (text: string) = text |> Text.Encoding.Latin1.GetBytes |> VBytes
+
 let private concatFn (args: Value list) : Value =
     // MySQL: CONCAT returns NULL if any argument is NULL.
     if args |> List.exists (function VNull -> true | _ -> false) then
         VNull
-    elif args |> List.exists (tryRawBytes >> Option.isSome) then
+    elif hasRawBytes args then
         args |> List.toArray |> Array.collect stringBytes |> VBytes
     else
         args |> List.map (toText >> Option.defaultValue "") |> String.concat "" |> VString
@@ -3028,22 +3034,30 @@ let private instrFn: Scalar =
 let private replaceFn: Scalar =
     function
     | [ s; f; t ] when not (anyNull [ s; f; t ]) ->
-        let str, frm = req s, req f
-        if frm = "" then VString str else VString(str.Replace(frm, req t))
+        let raw = hasRawBytes [ s; f; t ]
+        let source = if raw then binaryText s else req s
+        let from = if raw then binaryText f else req f
+        let replacement = if raw then binaryText t else req t
+        let result = if from = "" then source else source.Replace(from, replacement)
+        if raw then binaryValue result else VString result
     | _ -> VNull
 
 let private padFn (left: bool) : Scalar =
     function
     | [ s; lenV; p ] when not (anyNull [ s; lenV; p ]) ->
-        let str, pad = req s, req p
+        let raw = hasRawBytes [ s; p ]
+        let str = if raw then binaryText s else req s
+        let pad = if raw then binaryText p else req p
         let targetLen = int (toDouble lenV)
+
+        let result value = if raw then binaryValue value else VString value
 
         if targetLen < 0 then
             VNull
         elif targetLen = 0 then
-            VString ""
+            result ""
         elif targetLen <= str.Length then
-            VString(str.Substring(0, targetLen))
+            result (str.Substring(0, targetLen))
         elif pad = "" then
             VNull
         elif targetLen > Limits.maxAllowedPacket then
@@ -3051,7 +3065,7 @@ let private padFn (left: bool) : Scalar =
         else
             let needed = targetLen - str.Length
             let padding = (String.replicate (needed / pad.Length + 1) pad).Substring(0, needed)
-            VString(if left then padding + str else str + padding)
+            result (if left then padding + str else str + padding)
     | _ -> VNull
 
 /// `LEFT`/`RIGHT` count *bytes* on a binary operand and characters on a
@@ -3866,26 +3880,31 @@ let private formatFn: Scalar =
 let private substringIndexFn: Scalar =
     function
     | [ s; d; c ] when not (anyNull [ s; d; c ]) ->
-        let str, delim = req s, req d
+        let raw = hasRawBytes [ s; d ]
+        let str = if raw then binaryText s else req s
+        let delim = if raw then binaryText d else req d
         let count = int (toDouble c)
 
+        let result value = if raw then binaryValue value else VString value
+
         if delim = "" || count = 0 then
-            VString ""
+            result ""
         else
             let parts = str.Split([| delim |], StringSplitOptions.None)
 
             if count > 0 then
-                VString(String.Join(delim, parts |> Array.truncate count))
+                result (String.Join(delim, parts |> Array.truncate count))
             else
                 let take = min (-count) parts.Length
-                VString(String.Join(delim, parts |> Array.skip (parts.Length - take)))
+                result (String.Join(delim, parts |> Array.skip (parts.Length - take)))
     | _ -> VNull
 
 let private trimSubstring trimLeading trimTrailing : Scalar =
     function
     | [ removed; source ] when not (anyNull [ removed; source ]) ->
-        let removed = req removed
-        let mutable result = req source
+        let raw = hasRawBytes [ removed; source ]
+        let removed = if raw then binaryText removed else req removed
+        let mutable result = if raw then binaryText source else req source
 
         if removed <> "" then
             if trimLeading then
@@ -3896,13 +3915,18 @@ let private trimSubstring trimLeading trimTrailing : Scalar =
                 while result.EndsWith(removed, StringComparison.Ordinal) do
                     result <- result.Substring(0, result.Length - removed.Length)
 
-        VString result
+        if raw then binaryValue result else VString result
     | _ -> VNull
 
 let private concatWsFn: Scalar =
     function
     | sep :: rest when not (anyNull [ sep ]) ->
-        rest |> List.choose (function VNull -> None | v -> toText v) |> String.concat (req sep) |> VString
+        let values = rest |> List.filter ((<>) VNull)
+
+        if hasRawBytes (sep :: values) then
+            values |> List.map binaryText |> String.concat (binaryText sep) |> binaryValue
+        else
+            values |> List.map req |> String.concat (req sep) |> VString
     | _ -> VNull
 
 let private eltFn: Scalar =
