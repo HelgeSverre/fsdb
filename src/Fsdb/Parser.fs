@@ -2049,18 +2049,16 @@ let private orderKey: Parser<OrderKey, unit> =
     (expr .>>. opt ((keyword "ASC" >>% Asc) <|> (keyword "DESC" >>% Desc)))
     |>> fun (e, dir) -> (e, dir |> Option.defaultValue Asc)
 
-/// LIMIT/OFFSET accept up to 2^64-1 in MySQL (the "no limit, just an
-/// offset" idiom is `LIMIT 18446744073709551615 OFFSET n`), while
-/// `Ast.SelectStmt.Limit`/`Offset` stay plain `int` — nothing this small an
-/// in-memory engine holds needs a row count past `Int32.MaxValue`, so clamp
-/// rather than widen the AST.
-let private limitTok: Parser<int, unit> =
-    puint64 .>> ws |>> fun n -> if n > uint64 Int32.MaxValue then Int32.MaxValue else int n
+/// LIMIT/OFFSET literals and prepared-statement markers remain expressions
+/// until binding. Literal counts are clamped to the engine's in-memory row
+/// ceiling while preserving MySQL's unsigned 64-bit syntax.
+let private limitTok: Parser<Expr, unit> =
+    (puint64 .>> ws |>> fun n -> Lit(VInt(int64 (min n (uint64 Int32.MaxValue))))) <|> placeholderAtom
 
 /// `LIMIT n`, `LIMIT n OFFSET m`, and the MySQL-specific `LIMIT m, n` (which
 /// means offset `m`, count `n` — the arguments are in the opposite order
 /// from `LIMIT n OFFSET m`).
-let private limitClause: Parser<int option * int option, unit> =
+let private limitClause: Parser<Expr option * Expr option, unit> =
     keyword "LIMIT" >>. limitTok
     >>= fun a ->
         (sym "," >>. limitTok |>> fun b -> (Some b, Some a))
@@ -2151,7 +2149,7 @@ selectOrUnionBranchesRef.Value <-
 /// own trailing clause already grammatically belongs to the union as a
 /// whole, so there's nothing left here to parse in that case — see
 /// `combineUnion`'s doc). Independently optional, like a plain `SELECT`'s.
-let private unionTailClause: Parser<OrderKey list option * (int option * int option) option, unit> =
+let private unionTailClause: Parser<OrderKey list option * (Expr option * Expr option) option, unit> =
     opt (keyword "ORDER" >>. keyword "BY" >>. sepBy1 orderKey (sym ",")) .>>. opt limitClause
 
 /// Resolves one `selectOrUnionBranches` parse plus its optional
@@ -2166,8 +2164,8 @@ let private unionTailClause: Parser<OrderKey list option * (int option * int opt
 let private combineUnion
     ((first, _): SelectStmt * bool)
     (rest: (SetOp * (SelectStmt * bool)) list)
-    ((unionOrderBy, unionLimitOffset): OrderKey list option * (int option * int option) option)
-    : SelectStmt * (SetOp * SelectStmt) list * OrderKey list * int option * int option =
+    ((unionOrderBy, unionLimitOffset): OrderKey list option * (Expr option * Expr option) option)
+    : SelectStmt * (SetOp * SelectStmt) list * OrderKey list * Expr option * Expr option =
     // The bare (unparenthesized) final branch's trailing ORDER BY/LIMIT
     // belongs to the union as a whole — strip it from that branch so it
     // doesn't re-run the clause against its own columns (`... UNION SELECT
@@ -2577,7 +2575,7 @@ let private assignment: Parser<Assignment, unit> =
 /// leftover `ORDER BY`/`LIMIT` tokens after a JOIN'd `UPDATE`/`DELETE` fall
 /// through to `Parser.parse`'s top-level `eof` and surface as an ordinary
 /// syntax error — the same 1064 real MySQL gives that combination.
-let private singleTableOrderLimit (joins: Join list) : Parser<OrderKey list * int option, unit> =
+let private singleTableOrderLimit (joins: Join list) : Parser<OrderKey list * Expr option, unit> =
     if joins.IsEmpty then
         (opt (keyword "ORDER" >>. keyword "BY" >>. sepBy1 orderKey (sym ",")) |>> Option.defaultValue [])
         .>>. opt (keyword "LIMIT" >>. limitTok)

@@ -378,7 +378,7 @@ and TableRef =
 /// a bare `SelectStmt`.
 and SelectOrUnion =
     | PlainSelect of SelectStmt
-    | UnionSelect of first: SelectStmt * rest: (SetOp * SelectStmt) list * orderBy: OrderKey list * limit: int option * offset: int option
+    | UnionSelect of first: SelectStmt * rest: (SetOp * SelectStmt) list * orderBy: OrderKey list * limit: Expr option * offset: Expr option
 
 /// One `WITH` binding: `name [(col, ...)] AS (body)`. `Recursive` is the
 /// whole `WITH RECURSIVE` clause's flag (MySQL marks the clause, not the
@@ -537,8 +537,8 @@ and SelectStmt =
       /// COUNT(*) > 1`).
       Having: Expr option
       OrderBy: OrderKey list
-      Limit: int option
-      Offset: int option
+      Limit: Expr option
+      Offset: Expr option
       /// `FOR UPDATE` / `LOCK IN SHARE MODE` — accepted and ignored: this
       /// engine has no row-level locking to apply it to (no concurrent
       /// writers within one in-memory `Store`), so the clause only needs to
@@ -648,7 +648,7 @@ type Statement =
     /// rule, which is not a plain left fold); the trailing `ORDER BY`/`LIMIT`
     /// apply to the whole combined result, so they live here rather than on
     /// any one branch's own (unused) `SelectStmt.OrderBy`/`Limit`.
-    | Union of first: SelectStmt * rest: (SetOp * SelectStmt) list * orderBy: OrderKey list * limit: int option * offset: int option
+    | Union of first: SelectStmt * rest: (SetOp * SelectStmt) list * orderBy: OrderKey list * limit: Expr option * offset: Expr option
     | Update of UpdateStmt
     | Delete of DeleteStmt
     | Truncate of table: string
@@ -721,7 +721,7 @@ and UpdateStmt =
       Assignments: Assignment list
       Where: Expr option
       OrderBy: OrderKey list
-      Limit: int option }
+      Limit: Expr option }
 
 /// `DELETE FROM t1 [WHERE ...] [ORDER BY ...] [LIMIT n]` (single-table —
 /// `Targets = [t1's alias-or-name]`), `DELETE t1[, t2] FROM t1 JOIN t2 ON
@@ -736,4 +736,4 @@ and DeleteStmt =
       Joins: Join list
       Where: Expr option
       OrderBy: OrderKey list
-      Limit: int option }
+      Limit: Expr option }

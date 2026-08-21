@@ -622,6 +622,19 @@ let tests =
                       Expect.isFalse hasRow3 "only two rows"
 
                       do! reader.CloseAsync() |> Async.AwaitTask
+
+                      use limited = conn.CreateCommand()
+                      limited.CommandText <- "SELECT id FROM ps_int ORDER BY id LIMIT @count OFFSET @offset"
+                      limited.Parameters.AddWithValue("@count", 1) |> ignore
+                      limited.Parameters.AddWithValue("@offset", 1) |> ignore
+                      do! limited.PrepareAsync() |> Async.AwaitTask
+                      use! limitedReader = limited.ExecuteReaderAsync() |> Async.AwaitTask
+                      let! hasLimitedRow = limitedReader.ReadAsync() |> Async.AwaitTask
+                      Expect.isTrue hasLimitedRow "prepared LIMIT returns a row"
+                      Expect.equal (limitedReader.GetInt64 0) 2L "prepared OFFSET skips the first row"
+                      let! hasExtraRow = limitedReader.ReadAsync() |> Async.AwaitTask
+                      Expect.isFalse hasExtraRow "prepared LIMIT caps the result"
+                      do! limitedReader.CloseAsync() |> Async.AwaitTask
                       do! conn.CloseAsync() |> Async.AwaitTask
                   finally
                       listener.Stop()

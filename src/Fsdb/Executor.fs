@@ -3958,6 +3958,13 @@ and private columnMetadataOf (colCount: int) (rows: (string * Value) list list) 
               | v -> Some(Value.mysqlMetadataOf v))
           |> Option.defaultValue (Value.columnMetadata Value.TypeVarString) ]
 
+and private rowCount =
+    function
+    | Lit(VInt count) -> int (min (int64 System.Int32.MaxValue) (max 0L count))
+    | Lit(VUInt count) -> int (min (uint64 System.Int32.MaxValue) count)
+    | Lit value -> int (min (float System.Int32.MaxValue) (max 0.0 (Value.toDouble value)))
+    | _ -> raise (SqlError(1210, "Incorrect arguments to LIMIT"))
+
 and private applyLimitOffset (limit: int option) (offset: int option) (rows: 'a list) : 'a list =
     let afterOffset =
         match offset with
@@ -4065,15 +4072,18 @@ and runUnionStmt
     (first: SelectStmt)
     (rest: (SetOp * SelectStmt) list)
     (orderBy: OrderKey list)
-    (limit: int option)
-    (offset: int option)
+    (limitExpr: Expr option)
+    (offsetExpr: Expr option)
     : QueryResult * ColumnMetadata list * Value[] list =
     // A `WITH` clause ahead of a UNION is parsed onto the first branch (see
     // `Parser.withClause`) but scopes over every branch.
     if not first.Ctes.IsEmpty then
         withCteScope store registry dbName first.Ctes (fun () ->
-            runUnionStmt store registry dbName { first with Ctes = [] } rest orderBy limit offset)
+            runUnionStmt store registry dbName { first with Ctes = [] } rest orderBy limitExpr offsetExpr)
     else
+
+    let limit = Option.map rowCount limitExpr
+    let offset = Option.map rowCount offsetExpr
 
     let runBranch (select: SelectStmt) = runSelectStmt store registry dbName select None
 
@@ -5156,7 +5166,9 @@ and private runGroupedSelect
                     let types =
                         columnMetadataOf (List.length colNames) (sorted |> List.map (fun (proj, _, _) -> proj))
                         |> applyWireOverrides groupWireOverrides
-                    let limited = dedupedPaired |> applyLimitOffset select.Limit select.Offset
+                    let limited =
+                        dedupedPaired
+                        |> applyLimitOffset (Option.map rowCount select.Limit) (Option.map rowCount select.Offset)
                     ResultSet(colNames, limited |> List.map fst), types, limited |> List.map snd
 
 /// `SELECT ..., ROW_NUMBER() OVER (...) | LAG(expr) OVER (...) [AS alias],
@@ -5985,7 +5997,7 @@ and private runSelect
     (outer: EvalContext option)
     : QueryResult * ColumnMetadata list * Value[] list =
     let projections, whereExpr, orderBy, limit, offset =
-        select.Projections, select.Where, select.OrderBy, select.Limit, select.Offset
+        select.Projections, select.Where, select.OrderBy, Option.map rowCount select.Limit, Option.map rowCount select.Offset
 
     // A `SELECT` with no `FROM` at all has no columns to expand `*`/`t.*`
     // against — real MySQL rejects it as 1096 rather than emitting a
@@ -8596,7 +8608,7 @@ let rec execute (store: Store) (registry: Registry) (dbName: string) (ids: int64
                 match check (probeRow columns) |> Result.bind (fun _ -> checkAssignments (probeRow columns)) with
                 | Error(code, message) -> ids, Err(code, message)
                 | Ok _ ->
-                    match selectMutationTargets ctxFor (List.ofSeq rows) check updateStmt.OrderBy updateStmt.Limit with
+                    match selectMutationTargets ctxFor (List.ofSeq rows) check updateStmt.OrderBy (Option.map rowCount updateStmt.Limit) with
                     | Error(code, message) -> ids, Err(code, message)
                     | Ok targetRows ->
                         let targetSet = referenceSet targetRows
@@ -8879,7 +8891,7 @@ let rec execute (store: Store) (registry: Registry) (dbName: string) (ids: int64
             match check (probeRow columns) with
             | Error(code, message) -> ids, Err(code, message)
             | Ok _ ->
-                match selectMutationTargets ctxFor (List.ofSeq rows) check deleteStmt.OrderBy deleteStmt.Limit with
+                match selectMutationTargets ctxFor (List.ofSeq rows) check deleteStmt.OrderBy (Option.map rowCount deleteStmt.Limit) with
                 | Error(code, message) -> ids, Err(code, message)
                 | Ok targetRows ->
                     let targetSet = referenceSet targetRows

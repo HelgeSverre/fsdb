@@ -1567,20 +1567,34 @@ let rec mapPlaceholders (replace: int -> Expr) (stmt: Statement) : Statement =
             Windows = s.Windows |> List.map (fun (n, spec) -> n, mapWindowSpec spec)
             Ctes = s.Ctes |> List.map (fun cte -> { cte with Body = mapSelectOrUnion cte.Body })
             Having = Option.map mapExpr s.Having
-            OrderBy = List.map mapOrderKey s.OrderBy }
+            OrderBy = List.map mapOrderKey s.OrderBy
+            Limit = Option.map mapExpr s.Limit
+            Offset = Option.map mapExpr s.Offset }
 
     and mapSelectOrUnion (sou: SelectOrUnion) : SelectOrUnion =
         match sou with
         | PlainSelect s -> PlainSelect(mapSelect s)
         | UnionSelect(first, rest, orderBy, limit, offset) ->
-            UnionSelect(mapSelect first, rest |> List.map (fun (b, s) -> b, mapSelect s), List.map mapOrderKey orderBy, limit, offset)
+            UnionSelect(
+                mapSelect first,
+                rest |> List.map (fun (b, s) -> b, mapSelect s),
+                List.map mapOrderKey orderBy,
+                Option.map mapExpr limit,
+                Option.map mapExpr offset
+            )
 
     let mapAssignment (a: Assignment) = { a with Value = mapExpr a.Value }
 
     match stmt with
     | Select s -> Select(mapSelect s)
     | Union(first, rest, orderBy, limit, offset) ->
-        Union(mapSelect first, rest |> List.map (fun (b, s) -> b, mapSelect s), List.map mapOrderKey orderBy, limit, offset)
+        Union(
+            mapSelect first,
+            rest |> List.map (fun (b, s) -> b, mapSelect s),
+            List.map mapOrderKey orderBy,
+            Option.map mapExpr limit,
+            Option.map mapExpr offset
+        )
     | Insert(table, columns, rows, onDup, ignore) ->
         Insert(table, columns, rows |> List.map (List.map mapExpr), onDup |> List.map (fun (c, e) -> c, mapExpr e), ignore)
     | InsertSelect(table, columns, select, onDup, ignore) ->
@@ -1594,13 +1608,15 @@ let rec mapPlaceholders (replace: int -> Expr) (stmt: Statement) : Statement =
                 Assignments = List.map mapAssignment u.Assignments
                 Where = Option.map mapExpr u.Where
                 OrderBy = List.map mapOrderKey u.OrderBy
-                Joins = List.map mapJoin u.Joins }
+                Joins = List.map mapJoin u.Joins
+                Limit = Option.map mapExpr u.Limit }
     | Delete d ->
         Delete
             { d with
                 Where = Option.map mapExpr d.Where
                 OrderBy = List.map mapOrderKey d.OrderBy
-                Joins = List.map mapJoin d.Joins }
+                Joins = List.map mapJoin d.Joins
+                Limit = Option.map mapExpr d.Limit }
     | Explain s -> Explain(mapPlaceholders replace s)
     | _ -> stmt
 

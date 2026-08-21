@@ -33,8 +33,8 @@ let private mkSelect
           Ctes = []
           Having = None
           OrderBy = orderBy
-          Limit = limit
-          Offset = offset
+          Limit = limit |> Option.map (int64 >> VInt >> Lit)
+          Offset = offset |> Option.map (int64 >> VInt >> Lit)
           Locking = false }
 
 let tests =
@@ -1301,7 +1301,7 @@ let tests =
                               Joins = []
                               Where = Some(BinOp(Eq, col "id", Lit(VInt 5L)))
                               OrderBy = []
-                              Limit = Some 100 })
+                              Limit = Some(Lit(VInt 100L)) })
                         "delete with limit"
 
                 testCase "UPDATE with an alias, ORDER BY, and LIMIT"
@@ -1315,7 +1315,7 @@ let tests =
                               Assignments = [ { Table = None; Column = "a"; Value = Lit(VInt 1L) } ]
                               Where = Some(BinOp(Eq, col "id", Lit(VInt 5L)))
                               OrderBy = [ col "id", Asc ]
-                              Limit = Some 10 })
+                              Limit = Some(Lit(VInt 10L)) })
                         "alias parsed, order/limit real"
 
                 testCase "UPDATE with a bare alias (no AS)"
@@ -1795,7 +1795,7 @@ let tests =
                 testCase "trailing ORDER BY/LIMIT after a UNION apply to the combined result"
                 <| fun _ ->
                     match parseOk "SELECT a FROM t UNION SELECT a FROM u ORDER BY a LIMIT 5" with
-                    | Union(_, _, [ (Col "a", Asc) ], Some 5, None) -> ()
+                    | Union(_, _, [ (Col "a", Asc) ], Some(Lit(VInt 5L)), None) -> ()
                     | other -> failtestf "expected the trailing ORDER BY/LIMIT to land on the Union, got %A" other
 
                 testCase "(SELECT ...) UNION (SELECT ...) — each branch individually parenthesized"
