@@ -578,6 +578,15 @@ type AlterAction =
     /// (never below what existing rows already require, like InnoDB).
     | SetAutoIncrement of value: int64
 
+type TriggerTiming =
+    | Before
+    | After
+
+type TriggerEvent =
+    | TriggerInsert
+    | TriggerUpdate
+    | TriggerDelete
+
 type Statement =
     | CreateDatabase of name: string * ifNotExists: bool
     | DropDatabase of name: string * ifExists: bool
@@ -677,16 +686,14 @@ type Statement =
     /// `REVOKE privs ON level FROM users` — same shapes as `Grant`;
     /// `"GRANT OPTION"` may appear in `privs`.
     | Revoke of privs: string list * level: (string option * string option) * users: (string * string) list
-    /// `CREATE TRIGGER name AFTER INSERT ON table FOR EACH ROW body` —
+    /// `CREATE TRIGGER name timing event ON table FOR EACH ROW body` —
     /// `body` is the single statement after `FOR EACH ROW`, carried as the
     /// raw SQL text exactly as written: the executor validates it by
     /// parsing at CREATE time and re-parses at fire time, so there's one
     /// source of truth rather than a parsed-Statement-plus-text double
-    /// carry (statement parsing is cheap). ponytail: AFTER INSERT only —
-    /// BEFORE never (this engine has no row-image hook before the write),
-    /// UPDATE/DELETE events when `updateRows`/`deleteRows` return changed
-    /// rows; no BEGIN...END compound bodies, no OLD.*.
-    | CreateTrigger of name: string * table: string * body: string
+    /// carry (statement parsing is cheap). ponytail: no BEGIN...END compound
+    /// bodies or FOLLOWS/PRECEDES ordering.
+    | CreateTrigger of name: string * timing: TriggerTiming * event: TriggerEvent * table: string * body: string
     /// `DROP TRIGGER [IF EXISTS] name` — resolved against the session
     /// database's triggers (error 1360 when missing, unless `ifExists`).
     | DropTrigger of name: string * ifExists: bool

@@ -1014,7 +1014,7 @@ let private triggersColumns =
 /// created, definer), decoded once for both `information_schema.TRIGGERS`
 /// and `SHOW TRIGGERS`. sql_mode/charset stay server constants; fsdb doesn't
 /// capture those per trigger.
-let private triggerCatalogRows (catalog: Catalog) : (string * string * string * string * string * string) list =
+let private triggerCatalogRows (catalog: Catalog) : (string * string * string * string * string * string * string * string) list =
     catalog
     |> Map.tryFind "mysql"
     |> Option.bind (Map.tryFind "triggers")
@@ -1024,7 +1024,7 @@ let private triggerCatalogRows (catalog: Catalog) : (string * string * string * 
             let text i = r.[i] |> Value.toText |> Option.defaultValue ""
             let created = r.[6] |> Value.toTextFsp 2 |> Option.defaultValue ""
             let definer = if r.Length > 7 then text 7 else ""
-            text 0, text 1, text 2, text 5, created, definer)
+            text 0, text 1, text 2, text 3, text 4, text 5, created, definer)
         |> List.ofSeq)
     |> Option.defaultValue []
 
@@ -1039,9 +1039,12 @@ let private triggerSqlMode = "STRICT_TRANS_TABLES,NO_ENGINE_SUBSTITUTION"
 /// write-probed on MySQL 8.4.11.
 let private triggersRows (catalog: Catalog) : Value[] list =
     triggerCatalogRows catalog
-    |> List.map (fun (name, schema, table, body, created, definer) ->
-        [| vs "def"; vs schema; vs name; vs "INSERT"; vs "def"; vs schema; vs table; VInt 1L; VNull; vs body
-           vs "ROW"; vs "AFTER"; VNull; VNull; vs "OLD"; vs "NEW"; vs created; vs triggerSqlMode
+    |> List.map (fun (name, schema, table, timing, event, body, created, definer) ->
+        let oldRow = if event = "INSERT" then VNull else vs "OLD"
+        let newRow = if event = "DELETE" then VNull else vs "NEW"
+
+        [| vs "def"; vs schema; vs name; vs event; vs "def"; vs schema; vs table; VInt 1L; VNull; vs body
+           vs "ROW"; vs timing; VNull; VNull; oldRow; newRow; vs created; vs triggerSqlMode
            vs definer; vs "utf8mb4"; vs "utf8mb4_0900_ai_ci"; vs "utf8mb4_0900_ai_ci" |])
 
 let private eventsColumns =
@@ -1965,9 +1968,9 @@ let showTriggers (catalog: Catalog) (dbName: string) : ShowResult =
     else
         let rows =
             triggerCatalogRows catalog
-            |> List.filter (fun (_, schema, _, _, _, _) -> String.Equals(schema, dbName, StringComparison.OrdinalIgnoreCase))
-            |> List.map (fun (name, _, table, body, created, definer) ->
-                [ Some name; Some "INSERT"; Some table; Some body; Some "AFTER"; Some created; Some triggerSqlMode
+            |> List.filter (fun (_, schema, _, _, _, _, _, _) -> String.Equals(schema, dbName, StringComparison.OrdinalIgnoreCase))
+            |> List.map (fun (name, _, table, timing, event, body, created, definer) ->
+                [ Some name; Some event; Some table; Some body; Some timing; Some created; Some triggerSqlMode
                   Some definer; Some "utf8mb4"; Some "utf8mb4_0900_ai_ci"; Some "utf8mb4_0900_ai_ci" ])
 
         Ok(

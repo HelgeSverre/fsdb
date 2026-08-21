@@ -2953,8 +2953,7 @@ let private alterUserStmt: Parser<Statement, unit> =
     |>> fun ((ifExists, (name, host)), pw) -> AlterUser(name, host, pw, ifExists)
 
 // ---------------------------------------------------------------------------
-// CREATE TRIGGER / DROP TRIGGER — see `Ast.CreateTrigger`'s doc for the
-// deliberate subset (AFTER INSERT, FOR EACH ROW, single-statement body).
+// CREATE TRIGGER / DROP TRIGGER.
 // ---------------------------------------------------------------------------
 
 /// The trigger body: everything after `FOR EACH ROW` to end of input,
@@ -2962,16 +2961,20 @@ let private alterUserStmt: Parser<Statement, unit> =
 /// the AST carries the text once, see `Ast.CreateTrigger`). A trailing `;`
 /// belongs to the outer statement, not the body, so it's trimmed off.
 let private createTriggerStmt: Parser<Statement, unit> =
-    (keyword "CREATE" >>. keyword "TRIGGER" >>. identifier
-     .>> keyword "AFTER"
-     .>> keyword "INSERT"
+    let timing = (keyword "BEFORE" >>% Before) <|> (keyword "AFTER" >>% After)
+    let event =
+        (keyword "INSERT" >>% TriggerInsert)
+        <|> (keyword "UPDATE" >>% TriggerUpdate)
+        <|> (keyword "DELETE" >>% TriggerDelete)
+
+    (keyword "CREATE" >>. keyword "TRIGGER" >>. identifier .>>. timing .>>. event
      .>> keyword "ON"
      .>>. qualifiedTableName
      .>> keyword "FOR"
      .>> keyword "EACH"
      .>> keyword "ROW"
      .>>. manyChars anyChar)
-    |>> fun ((name, table), body) -> CreateTrigger(name, table, body.Trim().TrimEnd(';').Trim())
+    |>> fun ((((name, timing), event), table), body) -> CreateTrigger(name, timing, event, table, body.Trim().TrimEnd(';').Trim())
 
 let private dropTriggerStmt: Parser<Statement, unit> =
     (keyword "DROP" >>. keyword "TRIGGER"

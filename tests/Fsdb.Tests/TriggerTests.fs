@@ -43,7 +43,16 @@ let private text1442 (table: string) =
 let tests =
     testList
         "triggers"
-        [ testCase "AFTER INSERT fires once per row with NEW.* bound per row"
+        [ testCase "CREATE TRIGGER retains its timing and event"
+          <| fun _ ->
+              match
+                  Fsdb.Parser.parse
+                      "CREATE TRIGGER before_delete BEFORE DELETE ON t FOR EACH ROW DELETE FROM log WHERE n = OLD.n"
+              with
+              | Ok(Fsdb.Ast.CreateTrigger("before_delete", Fsdb.Ast.Before, Fsdb.Ast.TriggerDelete, "t", _)) -> ()
+              | other -> failtestf "expected BEFORE DELETE trigger AST, got %A" other
+
+          testCase "AFTER INSERT fires once per row with NEW.* bound per row"
           <| fun _ ->
               let store = Fsdb.Storage.create ()
               setup store

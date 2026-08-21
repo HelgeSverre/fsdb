@@ -9066,8 +9066,18 @@ let rec execute (store: Store) (registry: Registry) (dbName: string) (ids: int64
         | Ok _ -> ids, Affected 0UL
         | Error error -> ids, storageErr error
 
-    | CreateTrigger(name, table, body) ->
+    | CreateTrigger(name, timing, event, table, body) ->
         let db, table = splitQualified dbName table
+        let timingText =
+            match timing with
+            | Before -> "BEFORE"
+            | After -> "AFTER"
+
+        let eventText =
+            match event with
+            | TriggerInsert -> "INSERT"
+            | TriggerUpdate -> "UPDATE"
+            | TriggerDelete -> "DELETE"
 
         // Subject table must exist (MySQL's 1146), and the body — carried
         // only as raw text, see `Ast.CreateTrigger` — must parse to one of
@@ -9110,7 +9120,10 @@ let rec execute (store: Store) (registry: Registry) (dbName: string) (ids: int64
                             existing
                             |> Seq.exists (fun r ->
                                 eqI (text 1 r) db
-                                && (eqI (text 0 r) name || eqI (text 2 r) (normalizeTableName table)))
+                                && (eqI (text 0 r) name
+                                    || (eqI (text 2 r) (normalizeTableName table)
+                                        && eqI (text 3 r) timingText
+                                        && eqI (text 4 r) eventText)))
 
                         if duplicate then
                             ids, Err(1359, "Trigger already exists")
@@ -9126,8 +9139,8 @@ let rec execute (store: Store) (registry: Registry) (dbName: string) (ids: int64
                                     [ [ VString name
                                         VString db
                                         VString(normalizeTableName table)
-                                        VString "AFTER"
-                                        VString "INSERT"
+                                        VString timingText
+                                        VString eventText
                                         VString body
                                         VDateTime System.DateTime.Now
                                         // MySQL's DEFINER, defaulted to the

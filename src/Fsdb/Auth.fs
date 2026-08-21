@@ -691,7 +691,7 @@ let rec requiredPrivileges (defaultDb: string) (stmt: Statement) : (string * Pri
         ("GRANT OPTION", target) :: privReqs
     // CREATE TRIGGER carries its subject table in the statement. DROP's
     // subject is resolved by `requiredPrivilegesInStore` below.
-    | CreateTrigger(_, table, _) -> onTables "TRIGGER" [ split table ]
+    | CreateTrigger(_, _, _, table, _) -> onTables "TRIGGER" [ split table ]
     | DropTrigger _ -> []
     | CreateView(name, _, definition, orReplace) ->
         let viewDb, _ = split name
