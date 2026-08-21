@@ -1099,9 +1099,6 @@ let private uniqueKeyGroups (table: Table) : (string * int list) list =
 
     (if pk.IsEmpty then [] else [ "PRIMARY", pk ]) @ fromIndexes
 
-/// The one-column ordinary B-tree indexes whose equality access paths are
-/// materialized. Composite, FULLTEXT, and unique indexes retain their own
-/// representations and planning rules.
 let private secondaryKeyGroups (table: Table) : (string * int) list =
     table.Indexes
     |> List.choose (fun index ->
@@ -1572,8 +1569,6 @@ let create () : Store =
       Lock = obj ()
       RowLocks = Array.init 4096 (fun _ -> obj ()) }
 
-/// Updates every derived index for one row identity. Updates retain their
-/// identity; inserts supply one and deletes remove the previous entry.
 let private reindexRow
     (columns: ColumnDef list)
     (uniqueGroups: (string * int list) list)
