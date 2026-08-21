@@ -1841,7 +1841,8 @@ let rec mapPlaceholders (replace: int -> Expr) (stmt: Statement) : Statement =
             | BoundFollowing e -> BoundFollowing(mapExpr e)
             | other -> other
 
-        { PartitionBy = List.map mapExpr spec.PartitionBy
+        { Inherit = spec.Inherit
+          PartitionBy = List.map mapExpr spec.PartitionBy
           OrderBy = List.map mapOrderKey spec.OrderBy
           Frame = spec.Frame |> Option.map (fun f -> { f with Start = mapBound f.Start; End = mapBound f.End }) }
 

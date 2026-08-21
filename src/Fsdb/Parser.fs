@@ -728,22 +728,28 @@ let internal windowFrameClause: Parser<WindowFrame, unit> =
           <|> (windowFrameBound |>> fun b -> b, CurrentRow))
     |>> fun (unit', (startBound, endBound)) -> { Unit = unit'; Start = startBound; End = endBound }
 
+let private inheritedWindowName: Parser<string, unit> =
+    notFollowedBy (choice [ keyword "PARTITION"; keyword "ORDER"; keyword "ROWS"; keyword "RANGE" ])
+    >>. identifier
+
 let internal windowSpecBody: Parser<WindowSpec, unit> =
-    opt (keyword "PARTITION" >>. keyword "BY" >>. sepBy1 expr (sym ","))
+    opt (attempt inheritedWindowName)
+    .>>. opt (keyword "PARTITION" >>. keyword "BY" >>. sepBy1 expr (sym ","))
     .>>. opt (
         keyword "ORDER" >>. keyword "BY"
         >>. sepBy1 (expr .>>. opt ((keyword "ASC" >>% Asc) <|> (keyword "DESC" >>% Desc))) (sym ",")
     )
     .>>. opt windowFrameClause
-    |>> fun ((partitionBy, orderBy), frame) ->
-        { PartitionBy = partitionBy |> Option.defaultValue []
+    |>> fun (((inheritName, partitionBy), orderBy), frame) ->
+        { Inherit = inheritName
+          PartitionBy = partitionBy |> Option.defaultValue []
           OrderBy =
             orderBy
             |> Option.defaultValue []
             |> List.map (fun (e, dir) -> e, dir |> Option.defaultValue Asc)
           Frame = frame }
 
-/// `OVER (...)` or `OVER window_name` — the named form resolves at
+/// `OVER (...)` or `OVER window_name` — inherited and named forms resolve at
 /// execution time (see `Ast.OverClause`).
 let private overClause: Parser<OverClause, unit> =
     keyword "OVER"

@@ -6785,6 +6785,18 @@ let tests =
                         [ [ Some "1"; Some "10"; Some "50"; Some "10" ]
                           [ Some "2"; Some "10"; Some "50"; Some "10" ] ]
 
+                testCase "inline and named windows inherit partitioning"
+                <| fun _ ->
+                    expectRows
+                        ("SELECT id, SUM(v) OVER (partitioned ORDER BY id) AS inline_sum, SUM(v) OVER ordered AS named_sum FROM t "
+                         + "WINDOW partitioned AS (PARTITION BY g), ordered AS (partitioned ORDER BY id) ORDER BY id")
+                        [ [ Some "1"; Some "10"; Some "10" ]
+                          [ Some "2"; Some "20"; Some "20" ]
+                          [ Some "3"; Some "30"; Some "30" ]
+                          [ Some "4"; Some "30"; Some "30" ]
+                          [ Some "5"; Some "80"; Some "80" ]
+                          [ Some "6"; Some "50"; Some "50" ] ]
+
                 testCase "NTH_VALUE past the end of the frame is NULL"
                 <| fun _ ->
                     expectRows
@@ -6825,6 +6837,28 @@ let tests =
                         "SELECT SUM(v) OVER nosuch FROM t"
                         3579
                         "Window name 'nosuch' is not defined."
+
+                testCase "invalid named-window dependencies use MySQL's 3580-3583 errors"
+                <| fun _ ->
+                    expectError
+                        "SELECT SUM(v) OVER w FROM t WINDOW w AS (w)"
+                        3580
+                        "There is a circularity in the window dependency graph."
+
+                    expectError
+                        "SELECT SUM(v) OVER w2 FROM t WINDOW w AS (PARTITION BY g), w2 AS (w PARTITION BY id)"
+                        3581
+                        "A window which depends on another cannot define partitioning."
+
+                    expectError
+                        "SELECT SUM(v) OVER w2 FROM t WINDOW w AS (ORDER BY id ROWS UNBOUNDED PRECEDING), w2 AS (w)"
+                        3582
+                        "Window 'w' has a frame definition, so cannot be referenced by another window."
+
+                    expectError
+                        "SELECT SUM(v) OVER w2 FROM t WINDOW w AS (ORDER BY id), w2 AS (w ORDER BY v)"
+                        3583
+                        "Window 'w2' cannot inherit 'w' since both contain an ORDER BY clause."
 
                 testCase "frame bound rules match the oracle's 3584/3585/3586/3587"
                 <| fun _ ->

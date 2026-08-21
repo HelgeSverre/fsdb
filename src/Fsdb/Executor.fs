@@ -5467,14 +5467,40 @@ and private runWindowedSelect
         // binds to this SELECT's own `WINDOW w AS (...)` list, an inline
         // one is already a spec. MySQL's own error (3579) for an undefined
         // name.
+        let rec resolveWindow (windowName: string) (visited: Set<string>) (spec: WindowSpec) : Result<WindowSpec, EvalError> =
+            match spec.Inherit with
+            | None -> Ok spec
+            | Some name ->
+                resolveNamedWindow visited name
+                |> Result.bind (fun inherited ->
+                    if not spec.PartitionBy.IsEmpty then
+                        Error(3581, "A window which depends on another cannot define partitioning.")
+                    elif inherited.Frame.IsSome then
+                        Error(3582, sprintf "Window '%s' has a frame definition, so cannot be referenced by another window." name)
+                    elif not inherited.OrderBy.IsEmpty && not spec.OrderBy.IsEmpty then
+                        Error(3583, sprintf "Window '%s' cannot inherit '%s' since both contain an ORDER BY clause." windowName name)
+                    else
+                        Ok
+                            { Inherit = None
+                              PartitionBy = inherited.PartitionBy
+                              OrderBy = if spec.OrderBy.IsEmpty then inherited.OrderBy else spec.OrderBy
+                              Frame = spec.Frame })
+
+        and resolveNamedWindow (visited: Set<string>) (name: string) : Result<WindowSpec, EvalError> =
+            let key = name.ToLowerInvariant()
+
+            if visited.Contains key then
+                Error(3580, "There is a circularity in the window dependency graph.")
+            else
+                select.Windows
+                |> List.tryFind (fun (candidate, _) -> System.String.Equals(candidate, name, System.StringComparison.OrdinalIgnoreCase))
+                |> Option.map (fun (candidate, spec) -> resolveWindow candidate (visited.Add key) spec)
+                |> Option.defaultValue (Error(3579, sprintf "Window name '%s' is not defined." name))
+
         let resolveOver (over: OverClause) : Result<WindowSpec, EvalError> =
             match over with
-            | OverSpec spec -> Ok spec
-            | OverName name ->
-                select.Windows
-                |> List.tryFind (fun (n, _) -> System.String.Equals(n, name, System.StringComparison.OrdinalIgnoreCase))
-                |> Option.map (snd >> Ok)
-                |> Option.defaultValue (Error(3579, sprintf "Window name '%s' is not defined." name))
+            | OverSpec spec -> resolveWindow "<unnamed window>" Set.empty spec
+            | OverName name -> resolveNamedWindow Set.empty name
 
         // A frame offset (`ROWS BETWEEN <n> PRECEDING ...`) must be a
         // constant — MySQL rejects a column reference there — so it

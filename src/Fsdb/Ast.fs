@@ -209,7 +209,8 @@ and WindowFrame =
 /// BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW` when `OrderBy` is non-empty
 /// (a running total), the whole partition when it's empty.
 and WindowSpec =
-    { PartitionBy: Expr list
+    { Inherit: string option
+      PartitionBy: Expr list
       OrderBy: OrderKey list
       Frame: WindowFrame option }
 
@@ -217,8 +218,6 @@ and WindowSpec =
 /// definition — resolved against `SelectStmt.Windows` at execution time
 /// (the parser can't: the `WINDOW` clause is written *after* the
 /// projections that reference it).
-/// ponytail: no `OVER (w ORDER BY ...)` inheriting-plus-extending form —
-/// add a spec-merge in `Executor.resolveWindowSpec` if something needs it.
 and OverClause =
     | OverSpec of WindowSpec
     | OverName of string
