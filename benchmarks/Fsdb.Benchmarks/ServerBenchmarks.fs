@@ -128,6 +128,12 @@ type ServerBenchmarks() =
         this.Query $"SELECT id, name FROM users WHERE sort_key >= {lower} AND sort_key < {lower + 1}"
 
     [<Benchmark>]
+    [<BenchmarkCategory("Scale", "SecondaryOrder")>]
+    member this.OrderBySecondaryRange() =
+        let lower = rng.Next(1, max 2 (Schema.userCount - 63))
+        this.Query $"SELECT id, sort_key FROM users WHERE sort_key >= {lower} AND sort_key < {lower + 64} ORDER BY sort_key ASC LIMIT 20"
+
+    [<Benchmark>]
     [<BenchmarkCategory("Scale")>]
     member this.InsertSingle() =
         let i = Interlocked.Increment(&insertCounter)
