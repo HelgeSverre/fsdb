@@ -5932,6 +5932,24 @@ let tests =
                           Some "[1, 2, 9]"
                           Some "{\"a\": [9, 1, 2]}" ]
 
+                testCase "JSON storage size follows MySQL's binary JSON layout"
+                <| fun _ ->
+                    expectRow
+                        "SELECT JSON_STORAGE_SIZE('null') a, JSON_STORAGE_SIZE('true') b, JSON_STORAGE_SIZE('0') c, JSON_STORAGE_SIZE('32767') d, JSON_STORAGE_SIZE('32768') e, JSON_STORAGE_SIZE('1.5') f, JSON_STORAGE_SIZE('\"hello\"') g, JSON_STORAGE_SIZE('[]') h, JSON_STORAGE_SIZE('[1,2]') i, JSON_STORAGE_SIZE('{}') j, JSON_STORAGE_SIZE('{\"a\":1}') k, JSON_STORAGE_SIZE('{\"a\":1,\"bb\":\"x\"}') l, JSON_STORAGE_FREE('{\"a\":1}') m"
+                        [ Some "2"
+                          Some "2"
+                          Some "3"
+                          Some "3"
+                          Some "5"
+                          Some "9"
+                          Some "7"
+                          Some "5"
+                          Some "11"
+                          Some "5"
+                          Some "13"
+                          Some "24"
+                          Some "0" ]
+
                 testCase "bitwise operators use unsigned 64-bit values and MySQL precedence"
                 <| fun _ ->
                     expectRow

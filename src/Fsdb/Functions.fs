@@ -1042,6 +1042,75 @@ let private jsonArrayInsertFn: Scalar =
         | None -> VNull
     | _ -> VNull
 
+let private variableLengthSize (value: int) =
+    let mutable remaining = value
+    let mutable bytes = 1
+
+    while remaining >= 128 do
+        remaining <- remaining >>> 7
+        bytes <- bytes + 1
+
+    bytes
+
+let rec private jsonBinaryPayloadSize (inlineWidth: int) (node: JsonNode) : int64 =
+    if isNull node then
+        if inlineWidth >= 1 then 0L else 1L
+    else
+        match node.GetValueKind() with
+        | JsonValueKind.True
+        | JsonValueKind.False -> if inlineWidth >= 1 then 0L else 1L
+        | JsonValueKind.String ->
+            let length = Text.Encoding.UTF8.GetByteCount(node.GetValue<string>())
+            int64 (variableLengthSize length + length)
+        | JsonValueKind.Number ->
+            let text = node.ToJsonString(jsonRenderOptions)
+
+            match Int64.TryParse(text, NumberStyles.Integer, CultureInfo.InvariantCulture) with
+            | true, number when number >= int64 Int16.MinValue && number <= int64 Int16.MaxValue ->
+                if inlineWidth >= 2 then 0L else 2L
+            | true, number when inlineWidth >= 4 && number >= int64 Int32.MinValue && number <= int64 Int32.MaxValue -> 0L
+            | true, number when number >= int64 Int32.MinValue && number <= int64 Int32.MaxValue -> 4L
+            | true, _ -> 8L
+            | _ -> 8L
+        | JsonValueKind.Array -> jsonArrayBinarySize (node :?> JsonArray)
+        | JsonValueKind.Object -> jsonObjectBinarySize (node :?> JsonObject)
+        | _ -> if inlineWidth >= 1 then 0L else 1L
+
+and private jsonArrayBinarySize (array: JsonArray) : int64 =
+    let size header entry inlineWidth =
+        int64 header
+        + int64 (array.Count * entry)
+        + (array |> Seq.sumBy (jsonBinaryPayloadSize inlineWidth))
+
+    let small = size 4 3 2
+    if array.Count <= 65535 && small <= 65535L then small else size 8 5 4
+
+and private jsonObjectBinarySize (jsonObject: JsonObject) : int64 =
+    let keyBytes = jsonObject |> Seq.sumBy (fun pair -> Text.Encoding.UTF8.GetByteCount pair.Key) |> int64
+
+    let size header keyEntry valueEntry inlineWidth =
+        int64 header
+        + int64 (jsonObject.Count * (keyEntry + valueEntry))
+        + keyBytes
+        + (jsonObject |> Seq.sumBy (fun pair -> jsonBinaryPayloadSize inlineWidth pair.Value))
+
+    let small = size 4 4 3 2
+    if jsonObject.Count <= 65535 && small <= 65535L then small else size 8 6 5 4
+
+let private jsonStorageSizeFn: Scalar =
+    function
+    | [ document ] when not (anyNull [ document ]) ->
+        tryParseJsonValue document
+        |> Option.map (fun node -> VInt(1L + jsonBinaryPayloadSize 0 node))
+        |> Option.defaultValue VNull
+    | _ -> VNull
+
+let private jsonStorageFreeFn: Scalar =
+    function
+    | [ document ] when not (anyNull [ document ]) ->
+        tryParseJsonValue document |> Option.map (fun _ -> VInt 0L) |> Option.defaultValue VNull
+    | _ -> VNull
+
 let private jsonWriteFn (mode: JsonWriteMode) : Scalar =
     function
     | doc :: rest when rest.Length >= 2 && rest.Length % 2 = 0 && not (anyNull (doc :: rest)) ->
@@ -3469,6 +3538,8 @@ let builtins: Registry =
     |> registerScalar "JSON_MERGE_PRESERVE" (jsonMergeFn mergeJsonPreserve)
     |> registerScalar "JSON_ARRAY_APPEND" jsonArrayAppendFn
     |> registerScalar "JSON_ARRAY_INSERT" jsonArrayInsertFn
+    |> registerScalar "JSON_STORAGE_SIZE" jsonStorageSizeFn
+    |> registerScalar "JSON_STORAGE_FREE" jsonStorageFreeFn
     |> registerScalar "JSON_SET" (jsonWriteFn JSet)
     |> registerScalar "JSON_INSERT" (jsonWriteFn JInsert)
     |> registerScalar "JSON_REPLACE" (jsonWriteFn JReplace)
