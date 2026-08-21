@@ -877,6 +877,16 @@ let private timestampFuncAtom: Parser<Expr, unit> =
     )
     |>> fun ((name, unit), args) -> FuncCall(name, Lit(VString(unit.ToUpperInvariant())) :: args)
 
+let private getFormatAtom: Parser<Expr, unit> =
+    attempt (
+        keyword "GET_FORMAT" >>. sym "("
+        >>. ((keyword "DATE" >>% "DATE") <|> (keyword "DATETIME" >>% "DATETIME") <|> (keyword "TIME" >>% "TIME"))
+        .>> sym ","
+        .>>. expr
+        .>> sym ")"
+    )
+    |>> fun (kind, locale) -> FuncCall("GET_FORMAT", [ Lit(VString kind); locale ])
+
 /// `EXTRACT(unit FROM expr)` — the unit is an unquoted keyword and the
 /// separator is `FROM`, not a comma, so the generic call grammar can't reach
 /// it; same splice-the-unit-in-as-argument-one trick as `timestampFuncAtom`.
@@ -1218,6 +1228,7 @@ let private atom: Parser<Expr, unit> =
           intervalAtom
           matchAgainstAtom
           timestampFuncAtom
+          getFormatAtom
           extractAtom
           temporalLit
           windowCallAtom

@@ -1592,6 +1592,32 @@ let private timeFormatFn: Scalar =
             if negative then VString("-" + result.ToString()) else VString(result.ToString())
     | _ -> VNull
 
+let private getFormatFn: Scalar =
+    let formats =
+        [ ("DATE", "USA"), "%m.%d.%Y"
+          ("DATE", "JIS"), "%Y-%m-%d"
+          ("DATE", "ISO"), "%Y-%m-%d"
+          ("DATE", "EUR"), "%d.%m.%Y"
+          ("DATE", "INTERNAL"), "%Y%m%d"
+          ("DATETIME", "USA"), "%Y-%m-%d %H.%i.%s"
+          ("DATETIME", "JIS"), "%Y-%m-%d %H:%i:%s"
+          ("DATETIME", "ISO"), "%Y-%m-%d %H:%i:%s"
+          ("DATETIME", "EUR"), "%Y-%m-%d %H.%i.%s"
+          ("DATETIME", "INTERNAL"), "%Y%m%d%H%i%s"
+          ("TIME", "USA"), "%h:%i:%s %p"
+          ("TIME", "JIS"), "%H:%i:%s"
+          ("TIME", "ISO"), "%H:%i:%s"
+          ("TIME", "EUR"), "%H.%i.%s"
+          ("TIME", "INTERNAL"), "%H%i%s" ]
+        |> Map.ofList
+
+    function
+    | [ kind; locale ] when not (anyNull [ kind; locale ]) ->
+        Map.tryFind ((req kind).ToUpperInvariant(), (req locale).ToUpperInvariant()) formats
+        |> Option.map VString
+        |> Option.defaultValue VNull
+    | _ -> VNull
+
 let private periodYearMonth (value: Value) =
     let period = int64 (toDouble value)
     let month = int (period % 100L)
@@ -3324,6 +3350,7 @@ let builtins: Registry =
     |> registerScalar "SEC_TO_TIME" secToTimeFn
     |> registerScalar "MAKETIME" makeTimeFn
     |> registerScalar "TIME_FORMAT" timeFormatFn
+    |> registerScalar "GET_FORMAT" getFormatFn
     |> registerScalar "PERIOD_ADD" periodAddFn
     |> registerScalar "PERIOD_DIFF" periodDiffFn
     |> registerScalar "FROM_DAYS" fromDaysFn

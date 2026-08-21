@@ -1160,6 +1160,7 @@ let rec private metadataOfExpr (ctx: EvalContext) (expr: Expr) : ColumnMetadata 
         | ("ADDTIME" | "SUBTIME"), first :: _ -> metadataOfExpr ctx first
         | ("TIMEDIFF" | "SEC_TO_TIME" | "MAKETIME"), _ -> Some(ColumnWire.metadataOfType(TTime 6))
         | "TIME_FORMAT", _ -> Some { Value.columnMetadata TypeVarString with ColumnLength = 1024u }
+        | "GET_FORMAT", _ -> Some { Value.columnMetadata TypeVarString with ColumnLength = 64u }
         | ("PERIOD_ADD" | "PERIOD_DIFF" | "TO_DAYS"), _ -> simple TypeLongLong
         | "FROM_DAYS", _ -> Some(ColumnWire.metadataOfType TDate)
         | ("MONTH" | "DAY" | "DAYOFMONTH" | "DAYOFWEEK" | "DAYOFYEAR" | "HOUR" | "MINUTE" | "SECOND" | "QUARTER" | "WEEK" | "WEEKDAY"

@@ -5880,6 +5880,23 @@ let tests =
                         "SELECT 'Robert' SOUNDS LIKE 'Rupert' a, 'Robert' SOUNDS LIKE 'Rubin' b, NULL SOUNDS LIKE 'x' c, 17 MEMBER OF('[17, \"17\", null]') d, '17' MEMBER OF('[17, \"17\", null]') e, NULL MEMBER OF('[17]') f, 2 MEMBER OF('[[2]]') g"
                         [ Some "1"; Some "0"; None; Some "1"; Some "1"; None; Some "0" ]
 
+                testCase "GET_FORMAT returns MySQL's locale format templates"
+                <| fun _ ->
+                    expectRow
+                        "SELECT GET_FORMAT(DATE,'USA') a, GET_FORMAT(DATE,'JIS') b, GET_FORMAT(DATE,'EUR') c, GET_FORMAT(DATE,'INTERNAL') d, GET_FORMAT(DATETIME,'USA') e, GET_FORMAT(DATETIME,'ISO') f, GET_FORMAT(DATETIME,'INTERNAL') g, GET_FORMAT(TIME,'USA') h, GET_FORMAT(TIME,'ISO') i, GET_FORMAT(TIME,'INTERNAL') j, GET_FORMAT(DATE,'x') k, GET_FORMAT(DATE,NULL) l"
+                        [ Some "%m.%d.%Y"
+                          Some "%Y-%m-%d"
+                          Some "%d.%m.%Y"
+                          Some "%Y%m%d"
+                          Some "%Y-%m-%d %H.%i.%s"
+                          Some "%Y-%m-%d %H:%i:%s"
+                          Some "%Y%m%d%H%i%s"
+                          Some "%h:%i:%s %p"
+                          Some "%H:%i:%s"
+                          Some "%H%i%s"
+                          None
+                          None ]
+
                 testCase "bitwise operators use unsigned 64-bit values and MySQL precedence"
                 <| fun _ ->
                     expectRow
