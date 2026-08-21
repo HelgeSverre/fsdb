@@ -120,8 +120,9 @@ identities for bit aggregates.
 ## 3. Built-in functions
 
 Registered surface (`Functions.fs:2871–3048`): string (CONCAT family,
-SUBSTRING_INDEX, ELT/FIELD/FIND_IN_SET/EXPORT_SET, QUOTE, STRCMP, REGEXP_LIKE
-family with match_type, SOUNDEX, MAKE_SET, base64 conversion), math (ROUND with exact/approximate split, CONV,
+SUBSTRING_INDEX, ELT/FIELD/FIND_IN_SET/EXPORT_SET, QUOTE, STRCMP,
+WEIGHT_STRING with `AS CHAR(N)`/`AS BINARY(N)`, REGEXP_LIKE family with
+match_type, SOUNDEX, MAKE_SET, base64 conversion), math (ROUND with exact/approximate split, CONV,
 CRC32, BIT_COUNT, logarithms, exponentials, and trigonometry), date/time
 (DATE_ADD/SUB, TIMESTAMPADD/DIFF, DATE_FORMAT,
 STR_TO_DATE, EXTRACT, LAST_DAY, MAKEDATE, UNIX_TIMESTAMP, FROM_UNIXTIME,
@@ -136,7 +137,6 @@ CURRENT_USER/USER/SESSION_USER.
 
 | Missing family | Functions | Impact |
 |---|---|---|
-| Weight-string clauses | `WEIGHT_STRING(... AS CHAR/BINARY, LEVEL ...)` | low |
 | JSON Schema recursive regular-expression references | Local reference cycles traversing `pattern` or `patternProperties` return 1235 | low |
 | Geometry topology and relations | Contains/within/touches predicates, overlays, buffers, and geographic SRS semantics | low |
 
