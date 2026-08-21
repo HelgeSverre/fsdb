@@ -1794,6 +1794,73 @@ let private checkFullTextColumns (columns: ColumnDef list) (ix: IndexDef) : Resu
             | Some bad -> Error(FullTextColumnNotAllowed bad)
             | None -> Ok()
 
+let private validateForeignKeyDefinition
+    (checkForeignKeys: bool)
+    (db: Database)
+    (tableName: string)
+    (childColumns: ColumnDef list)
+    (childIndexes: IndexDef list)
+    (foreignKey: ForeignKeyDef)
+    : Result<unit, StorageError> =
+    let equal left right = String.Equals(left, right, StringComparison.OrdinalIgnoreCase)
+    let setNull action = action |> Option.exists (fun value -> equal value "SET NULL")
+
+    let nonNullableChild =
+        foreignKey.Columns
+        |> List.tryPick (fun name ->
+            childColumns
+            |> List.tryFind (fun column -> equal column.Name name)
+            |> Option.filter (fun column -> not column.Nullable)
+            |> Option.map _.Name)
+
+    match nonNullableChild with
+    | Some column when setNull foreignKey.OnDelete || setNull foreignKey.OnUpdate ->
+        Error(
+            ExpressionError(
+                1830,
+                sprintf
+                    "Column '%s' cannot be NOT NULL: needed in a foreign key constraint '%s' SET NULL"
+                    column
+                    foreignKey.Name
+            )
+        )
+    | _ when not checkForeignKeys ->
+        Ok()
+    | _ ->
+        let parent =
+            if equal tableName foreignKey.RefTable then
+                Some(childColumns, childIndexes)
+            else
+                Map.tryFind (normalizeTableName foreignKey.RefTable) db
+                |> Option.map (fun table -> table.Columns, table.Indexes)
+
+        match parent with
+        | None -> Error(ExpressionError(1824, sprintf "Failed to open the referenced table '%s'" foreignKey.RefTable))
+        | Some(parentColumns, parentIndexes) ->
+            let sameColumns left right =
+                List.length left = List.length right && List.forall2 equal left right
+
+            let primary =
+                parentColumns |> List.choose (fun column -> if column.PrimaryKey then Some column.Name else None)
+
+            let uniqueKeys =
+                [ if not primary.IsEmpty then primary
+                  yield! parentIndexes |> List.filter _.Unique |> List.map _.Columns
+                  yield! parentColumns |> List.filter _.Unique |> List.map (fun column -> [ column.Name ]) ]
+
+            if uniqueKeys |> List.exists (fun columns -> sameColumns columns foreignKey.RefColumns) then
+                Ok()
+            else
+                Error(
+                    ExpressionError(
+                        6125,
+                        sprintf
+                            "Failed to add the foreign key constraint. Missing unique key for constraint '%s' in the referenced table '%s'"
+                            foreignKey.Name
+                            foreignKey.RefTable
+                    )
+                )
+
 let createTableSeeded
     (store: Store)
     (dbName: string)
@@ -1822,6 +1889,10 @@ let createTableSeeded
             if Map.containsKey key db then
                 Error(TableExists tableName)
             else
+
+            match foreignKeys |> traverse (validateForeignKeyDefinition store.ForeignKeyChecks db tableName columns indexes) with
+            | Error e -> Error e
+            | Ok _ ->
 
             match indexes |> List.tryPick (fun ix -> match checkFullTextColumns columns ix with Error e -> Some e | Ok() -> None) with
             | Some e -> Error e
@@ -2334,7 +2405,14 @@ let alterTable (store: Store) (dbName: string) (tableName: string) (actions: Alt
                 let step acc action =
                     acc
                     |> Result.bind (fun (key, tbl) ->
-                        applyAlterAction store.StrictMode tbl action
+                        let validation =
+                            match action with
+                            | AddForeignKey foreignKey ->
+                                validateForeignKeyDefinition store.ForeignKeyChecks db tbl.OriginalName tbl.Columns tbl.Indexes foreignKey
+                            | _ -> Ok()
+
+                        validation
+                        |> Result.bind (fun () -> applyAlterAction store.StrictMode tbl action)
                         |> Result.map (fun (tbl', newKey) -> (newKey |> Option.defaultValue key), tbl'))
 
                 actions
@@ -2748,11 +2826,9 @@ let private referencingForeignKeys (db: Database) (parentKey: string) : (string 
 /// `CASCADE` rewrites every matching child row's FK columns to `newRow`'s key
 /// and recurses (a rewritten child row can itself be a parent of further
 /// tables); a cascade that loops back into any table already on the current
-/// cascade path fails 1451, matching MySQL. `SET NULL` blanks them, failing 1048 instead if any of
-/// the FK columns is itself `NOT NULL` (real MySQL refuses to create such a
-/// constraint at all, error 1215; this engine doesn't validate DDL that
-/// strictly, so the equivalent check happens here — same as
-/// `cascadeDeleteVisited`'s `SET NULL` branch); anything else (`RESTRICT`,
+/// cascade path fails 1451, matching MySQL. `SET NULL` blanks them, with a
+/// defensive 1048 check for invalid persisted metadata; anything else
+/// (`RESTRICT`,
 /// `NO ACTION`, `SET DEFAULT`, or no `ON UPDATE` clause) fails 1451 the
 /// moment a matching child row exists. `checkFks = false` short-circuits to
 /// a no-op, same as `cascadeDelete`.
@@ -3205,14 +3281,6 @@ let rec private cascadeDeleteVisited
                             match fk.OnDelete |> Option.map (fun s -> s.Trim().ToUpperInvariant()) with
                             | Some "CASCADE" -> cascadeDeleteVisited checkFks d visited blanked childKey matching
                             | Some "SET NULL" ->
-                                // A `NOT NULL` FK column can't actually be
-                                // blanked — real MySQL refuses to create
-                                // such a constraint at all (error 1215);
-                                // this engine doesn't validate DDL that
-                                // strictly, so the equivalent check happens
-                                // here instead, failing the delete (1048)
-                                // rather than silently writing a `NULL` no
-                                // INSERT/UPDATE could ever produce.
                                 match childIdxs |> List.tryFind (fun i -> not childTbl.Columns.[i].Nullable) with
                                 | Some i -> Error(NotNullViolation childTbl.Columns.[i].Name)
                                 | None ->

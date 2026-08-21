@@ -331,14 +331,8 @@ and IndexDef =
 /// ...] [ON UPDATE ...]` — enforced (insert/update-time parent check,
 /// `CASCADE`/`SET NULL`/`RESTRICT` on both `ON DELETE` and `ON UPDATE`) by
 /// `Storage`'s `checkFkParents`/`cascadeDeleteVisited`/`cascadeUpdateVisited`.
-/// ponytail: DDL itself isn't validated as strictly as MySQL — a `SET NULL`
-/// action over a `NOT NULL` FK column, or `RefColumns` that aren't actually a
-/// unique key on the parent, are accepted here and only surface as a runtime
-/// error (1048, or a `RESTRICT` that never finds a "still referenced" row)
-/// instead of MySQL's own DDL-time rejection (1215/1822); `RefTable` also
-/// carries no database qualifier, so a cross-database FK is invisible to the
-/// referencing-side checks. Tighten once a migration's test suite depends on
-/// catching one of these at `CREATE`/`ALTER TABLE` time rather than later.
+/// `RefTable` carries no database qualifier, so a cross-database FK remains
+/// invisible to the referencing-side checks.
 and ForeignKeyDef =
     { Name: string
       Columns: string list

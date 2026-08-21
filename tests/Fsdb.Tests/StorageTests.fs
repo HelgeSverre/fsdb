@@ -675,7 +675,15 @@ let tests =
                 <| fun _ ->
                     let store = create ()
 
-                    createTable store defaultDatabase "departments" [ col "id" (TInt false) false ] [] [] None None
+                    createTable
+                        store
+                        defaultDatabase
+                        "departments"
+                        [ { (col "id" (TInt false) false) with PrimaryKey = true } ]
+                        []
+                        []
+                        None
+                        None
                     |> ignore
 
                     let fk =
@@ -1254,6 +1262,7 @@ let tests =
                 testCase "AddForeignKey / DropForeignKey manage the table's FK metadata"
                 <| fun _ ->
                     let store = withUsersTable ()
+                    createTable store defaultDatabase "other" [ { (col "id" (TInt false) false) with PrimaryKey = true } ] [] [] None None |> ignore
 
                     let fk =
                         { Name = "fk_x"; Columns = [ "id" ]; RefTable = "other"; RefColumns = [ "id" ]; OnDelete = None; OnUpdate = None }
@@ -1419,6 +1428,69 @@ let tests =
 
                     store
 
+                testCase "CREATE rejects SET NULL on a NOT NULL child column"
+                <| fun _ ->
+                    let store = create ()
+                    createTable store defaultDatabase "parents" [ idCol ] [] [] None None |> ignore
+
+                    let foreignKey =
+                        { Name = "fk_parent"
+                          Columns = [ "parent_id" ]
+                          RefTable = "parents"
+                          RefColumns = [ "id" ]
+                          OnDelete = Some "SET NULL"
+                          OnUpdate = None }
+
+                    match
+                        createTable
+                            store
+                            defaultDatabase
+                            "children"
+                            [ idCol; col "parent_id" (TInt false) false ]
+                            []
+                            [ foreignKey ]
+                            None
+                            None
+                    with
+                    | Error error ->
+                        Expect.equal
+                            (toMySqlError error)
+                            (1830, "Column 'parent_id' cannot be NOT NULL: needed in a foreign key constraint 'fk_parent' SET NULL")
+                            "DDL error"
+                    | Ok() -> failtest "expected SET NULL over NOT NULL to fail"
+
+                testCase "CREATE rejects a foreign key that references a non-unique key"
+                <| fun _ ->
+                    let store = create ()
+                    createTable store defaultDatabase "parents" [ col "id" (TInt false) false ] [] [] None None |> ignore
+
+                    let foreignKey =
+                        { Name = "fk_parent"
+                          Columns = [ "parent_id" ]
+                          RefTable = "parents"
+                          RefColumns = [ "id" ]
+                          OnDelete = None
+                          OnUpdate = None }
+
+                    match
+                        createTable
+                            store
+                            defaultDatabase
+                            "children"
+                            [ idCol; col "parent_id" (TInt false) true ]
+                            []
+                            [ foreignKey ]
+                            None
+                            None
+                    with
+                    | Error error ->
+                        Expect.equal
+                            (toMySqlError error)
+                            (6125,
+                             "Failed to add the foreign key constraint. Missing unique key for constraint 'fk_parent' in the referenced table 'parents'")
+                            "DDL error"
+                    | Ok() -> failtest "expected a non-unique referenced key to fail"
+
                 testCase "INSERT of a child row with no matching parent returns error 1452"
                 <| fun _ ->
                     let store = withDeptEmployees None
@@ -1572,33 +1644,6 @@ let tests =
                     match updated with
                     | Some [ (_, newRow) ] -> Expect.equal newRow.[1] VNull "the row the WAL would replay already has the FK blanked"
                     | other -> failtestf "expected exactly one RowsUpdated change for employees, got %A" other
-
-                testCase "ON DELETE SET NULL against a NOT NULL foreign key column fails the delete instead of blanking it"
-                <| fun _ ->
-                    let store = create ()
-
-                    createTable store defaultDatabase "pa" [ idCol ] [] [] None None |> ignore
-
-                    let fk =
-                        { Name = "fk_ch"
-                          Columns = [ "pid" ]
-                          RefTable = "pa"
-                          RefColumns = [ "id" ]
-                          OnDelete = Some "SET NULL"
-                          OnUpdate = None }
-
-                    createTable store defaultDatabase "ch" [ idCol; col "pid" (TInt false) false ] [] [ fk ] None None
-                    |> ignore
-
-                    insertRows store defaultDatabase "pa" None [ [ VInt 1L ] ] |> ignore
-                    insertRows store defaultDatabase "ch" None [ [ VInt 5L; VInt 1L ] ] |> ignore
-
-                    match deleteRows store defaultDatabase "pa" (fun _ -> Ok true) with
-                    | Error(NotNullViolation "pid") ->
-                        match scan store defaultDatabase "ch" with
-                        | Ok(_, rows) -> Expect.equal (List.ofSeq rows) [ [| VInt 5L; VInt 1L |] ] "the child row is untouched"
-                        | Error e -> failtestf "expected Ok, got %A" e
-                    | other -> failtestf "expected NotNullViolation, got %A" other
 
                 testCase "ON DELETE CASCADE recurses through a grandchild table"
                 <| fun _ ->
@@ -1819,35 +1864,6 @@ let tests =
                             Expect.equal newRow.[1] (VInt 99L) "after value follows the parent's new key"
                         | other -> failtestf "expected a RowsUpdated for departments and a RowsUpdated for employees, got %A" other
                     | Error e -> failtestf "expected Ok, got %A" e
-
-                testCase "ON UPDATE SET NULL against a NOT NULL foreign key column fails the update instead of blanking it"
-                <| fun _ ->
-                    let store = create ()
-
-                    createTable store defaultDatabase "pa" [ idCol ] [] [] None None |> ignore
-
-                    let fk =
-                        { Name = "fk_ch"
-                          Columns = [ "pid" ]
-                          RefTable = "pa"
-                          RefColumns = [ "id" ]
-                          OnDelete = None
-                          OnUpdate = Some "SET NULL" }
-
-                    createTable store defaultDatabase "ch" [ idCol; col "pid" (TInt false) false ] [] [ fk ] None None
-                    |> ignore
-
-                    insertRows store defaultDatabase "pa" None [ [ VInt 1L ] ] |> ignore
-                    insertRows store defaultDatabase "ch" None [ [ VInt 5L; VInt 1L ] ] |> ignore
-
-                    let updater (row: Value[]) = Ok [| VInt 99L |]
-
-                    match updateRows store defaultDatabase "pa" None (fun _ -> Ok true) updater with
-                    | Error(NotNullViolation "pid") ->
-                        match scan store defaultDatabase "ch" with
-                        | Ok(_, rows) -> Expect.equal (List.ofSeq rows) [ [| VInt 5L; VInt 1L |] ] "the child row is untouched"
-                        | Error e -> failtestf "expected Ok, got %A" e
-                    | other -> failtestf "expected NotNullViolation, got %A" other
 
                 testCase "a self-referencing ON UPDATE CASCADE fails 1451 instead of silently half-applying"
                 <| fun _ ->

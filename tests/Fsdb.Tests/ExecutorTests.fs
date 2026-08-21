@@ -4824,30 +4824,26 @@ let tests =
                             | Err(1062, _) -> Expect.isTrue expectCollision (sprintf "engine rejected %A as a duplicate but the oracle found no collision in %A" key accepted)
                             | other -> failtestf "expected Affected 1 or a 1062 duplicate-key error, got %A" other
 
-                testCase "FK parent-existence checks (indexed parent PK) match an unindexed parent's full-scan fallback"
+                testCase "FK parent lookup falls back safely for unchecked legacy metadata"
                 <| fun _ ->
-                    // `child`'s FK references `parentIndexed`'s real PRIMARY
-                    // KEY, so `checkFkParent` takes `parentUniqueIndex`'s
-                    // fast path; `childUnindexed`'s FK references
-                    // `parentPlain`'s `id`, which carries no PK/UNIQUE at
-                    // all, so the identical check there can only ever fall
-                    // back to the full scan.
                     let store = newStore ()
                     runDefault store "CREATE TABLE parentIndexed (id INT PRIMARY KEY)" |> ignore
                     runDefault store "CREATE TABLE parentPlain (id INT)" |> ignore
-                    runDefault store "CREATE TABLE child (id INT PRIMARY KEY, parent_id INT, FOREIGN KEY (parent_id) REFERENCES parentIndexed(id))" |> ignore
-                    runDefault store "CREATE TABLE childUnindexed (id INT PRIMARY KEY, parent_id INT, FOREIGN KEY (parent_id) REFERENCES parentPlain(id))" |> ignore
+                    setForeignKeyChecks store false
+                    runDefault store "CREATE TABLE childIndexed (id INT PRIMARY KEY, parent_id INT, FOREIGN KEY (parent_id) REFERENCES parentIndexed(id))" |> ignore
+                    runDefault store "CREATE TABLE childPlain (id INT PRIMARY KEY, parent_id INT, FOREIGN KEY (parent_id) REFERENCES parentPlain(id))" |> ignore
+                    setForeignKeyChecks store true
                     runDefault store "INSERT INTO parentIndexed VALUES (1), (2), (3)" |> ignore
                     runDefault store "INSERT INTO parentPlain VALUES (1), (2), (3)" |> ignore
 
                     for parentId in [ 1; 2; 3; 999 ] do
-                        let indexedResult = runDefault store (sprintf "INSERT INTO child VALUES (%d, %d)" parentId parentId)
-                        let scanResult = runDefault store (sprintf "INSERT INTO childUnindexed VALUES (%d, %d)" parentId parentId)
+                        let indexed = runDefault store (sprintf "INSERT INTO childIndexed VALUES (%d, %d)" parentId parentId)
+                        let scanned = runDefault store (sprintf "INSERT INTO childPlain VALUES (%d, %d)" parentId parentId)
 
-                        match indexedResult, scanResult with
+                        match indexed, scanned with
                         | Affected 1UL, Affected 1UL -> ()
                         | Err(1452, _), Err(1452, _) -> ()
-                        | a, b -> failtestf "indexed vs unindexed parent disagreed for parent_id = %d: %A vs %A" parentId a b
+                        | _ -> failtestf "indexed and scanned lookups disagreed for %d: %A and %A" parentId indexed scanned
 
                 testCase "single-row INSERT into a child of a large PK-indexed parent stays flat, not linear in the parent's size"
                 <| fun _ ->
