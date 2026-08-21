@@ -641,6 +641,18 @@ let tests =
                               (call "JSON_SEARCH" [ VJson """{"a": "x"}"""; VString "one"; VString "zzz" ])
                               VNull
                               "no match is NULL"
+                          Expect.equal
+                              (call "JSON_SEARCH" [ VJson """{"a": "10%", "b": "100"}"""; VString "one"; VString "10\\%"; VString "\\" ])
+                              (VJson "\"$.a\"")
+                              "escape_char makes a wildcard literal"
+                          Expect.equal
+                              (call "JSON_SEARCH" [ VJson """{"a": {"x": "hit"}, "b": "hit"}"""; VString "all"; VString "hit"; VString "\\"; VString "$.a" ])
+                              (VJson "\"$.a.x\"")
+                              "path arguments restrict the search"
+                          Expect.equal
+                              (call "JSON_SEARCH" [ VJson """{"a": "hit", "b": "hit"}"""; VString "all"; VString "hit"; VString "\\"; VString "$.*" ])
+                              (VJson """["$.a", "$.b"]""")
+                              "wildcard paths retain concrete result paths"
 
                           let adversarial = String.replicate 20_000 "%" + "b"
                           let timer = Diagnostics.Stopwatch.StartNew()

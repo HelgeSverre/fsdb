@@ -1214,21 +1214,57 @@ let rec private collectJsonStrings (node: JsonNode) (path: string) : (string * s
         a |> Seq.indexed |> Seq.collect (fun (i, v) -> collectJsonStrings v (sprintf "%s[%d]" path i)) |> List.ofSeq
     | _ -> if node.GetValueKind() = JsonValueKind.String then [ path, node.GetValue<string>() ] else []
 
-/// Minimal `JSON_SEARCH(doc, 'one'|'all', search_str)` — ponytail: no
-/// `escape_char`/restricting `path` argument support, add them if a
-/// migration's search actually needs escaped wildcards or a narrowed scope.
 let private jsonSearchFn: Scalar =
     function
-    | doc :: modeV :: searchV :: _ when not (anyNull [ doc; modeV; searchV ]) ->
+    | doc :: modeV :: searchV :: optional when not (anyNull [ doc; modeV; searchV ]) ->
         match tryParseJsonValue doc, toText searchV with
         | Some root, Some search ->
+            let escape =
+                optional
+                |> List.tryHead
+                |> Option.bind toText
+                |> Option.bind (fun text -> if text.Length <= 1 then Some(if text = "" then '\u0000' else text.[0]) else None)
+                |> Option.defaultValue '\\'
+
+            let paths =
+                match optional with
+                | _escape :: (_ :: _ as pathValues) ->
+                    pathValues
+                    |> List.map (fun value ->
+                        toText value
+                        |> Option.bind (fun path -> parseJsonPath path |> Option.map (fun segments -> path, segments)))
+                | _ -> [ Some("$", []) ]
+
             let options = RegexOptions.IgnoreCase ||| RegexOptions.Singleline ||| RegexOptions.NonBacktracking
-            let rx = Regex(likeToRegex search, options, Limits.regexpMatchTimeout)
-            let matches = collectJsonStrings root "$" |> List.filter (snd >> rx.IsMatch) |> List.map fst
+            let rx = Regex(likeToRegexWith escape search, options, Limits.regexpMatchTimeout)
+
+            let rec pathPrefixMatches expected actual =
+                match expected, actual with
+                | [], _ -> true
+                | JKey left :: expectedRest, JKey right :: actualRest when left = right -> pathPrefixMatches expectedRest actualRest
+                | JIndex left :: expectedRest, JIndex right :: actualRest when left = right -> pathPrefixMatches expectedRest actualRest
+                | JMemberWildcard :: expectedRest, JKey _ :: actualRest -> pathPrefixMatches expectedRest actualRest
+                | JElementWildcard :: expectedRest, JIndex _ :: actualRest -> pathPrefixMatches expectedRest actualRest
+                | _ -> false
+
+            let matches =
+                if paths |> List.exists Option.isNone then
+                    []
+                else
+                    let restrictions = paths |> List.choose id |> List.map snd
+
+                    collectJsonStrings root "$"
+                    |> List.filter (fun (path, _) ->
+                        parseJsonPath path
+                        |> Option.exists (fun actual -> restrictions |> List.exists (fun expected -> pathPrefixMatches expected actual)))
+                    |> List.filter (snd >> rx.IsMatch)
+                    |> List.map fst
+                    |> List.distinct
 
             match matches, (toText modeV |> Option.defaultValue "one").ToUpperInvariant() with
             | [], _ -> VNull
-            | ps, "ALL" -> VJson("[" + (ps |> List.map jsonQuote |> String.concat ", ") + "]")
+            | [ path ], "ALL" -> VJson(jsonQuote path)
+            | paths, "ALL" -> VJson("[" + (paths |> List.map jsonQuote |> String.concat ", ") + "]")
             | p :: _, _ -> VJson(jsonQuote p)
         | _ -> VNull
     | _ -> VNull

@@ -145,8 +145,7 @@ CURRENT_USER/USER/SESSION_USER.
 
 Divergences in existing functions: `CURTIME()`/`TIME()` return strings (no
 TIME value domain, `Functions.fs`); `CONVERT_TZ` resolves numeric offsets and
-`SYSTEM`, but named zones return NULL without loaded time-zone tables;
-`JSON_SEARCH` lacks escape_char/path arguments (`Functions.fs`).
+`SYSTEM`, but named zones return NULL without loaded time-zone tables.
 
 ## 4. Data types and values
 
