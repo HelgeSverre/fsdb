@@ -364,6 +364,13 @@ let tests =
                 testCase "decimals compare exactly, without float rounding"
                 <| fun _ -> Expect.equal (compare (VDecimal 1.10M) (VDecimal 1.1M)) 0 "1.10 = 1.1"
 
+                testCase "BIT values compare exactly across the signed and unsigned boundary"
+                <| fun _ ->
+                    let highBit = VBit(64, 0x8000000000000000UL)
+                    Expect.isGreaterThan (compare highBit (VInt Int64.MaxValue)) 0 "BIT value exceeds signed max"
+                    Expect.isLessThan (compare highBit (VUInt 0x8000000000000001UL)) 0 "BIT value precedes the next unsigned integer"
+                    Expect.equal (compare highBit (VDecimal 9223372036854775808m)) 0 "BIT value matches its exact decimal"
+
                 testCase "dates compare chronologically"
                 <| fun _ ->
                     Expect.isLessThan

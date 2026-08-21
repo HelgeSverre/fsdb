@@ -1258,6 +1258,12 @@ let rec compare (a: Value) (b: Value) : int =
     | VInt x, VUInt y -> Decimal.Compare(decimal x, decimal y)
     | VUInt x, VDecimal y -> Decimal.Compare(decimal x, y)
     | VDecimal x, VUInt y -> Decimal.Compare(x, decimal y)
+    | VBit(_, x), VInt y -> Decimal.Compare(decimal x, decimal y)
+    | VInt x, VBit(_, y) -> Decimal.Compare(decimal x, decimal y)
+    | VBit(_, x), VUInt y -> Operators.compare x y
+    | VUInt x, VBit(_, y) -> Operators.compare x y
+    | VBit(_, x), VDecimal y -> Decimal.Compare(decimal x, y)
+    | VDecimal x, VBit(_, y) -> Decimal.Compare(x, decimal y)
     | VString x, VString y -> compareStrings x y
     | VBytes x, VBytes y -> compareBytesLex x y
     // A binary string against a character string compares byte-for-byte
@@ -1305,8 +1311,8 @@ let rec compare (a: Value) (b: Value) : int =
     // keys, and unique-index lookups alike.
     | VInt x, VDecimal y -> Decimal.Compare(decimal x, y)
     | VDecimal x, VInt y -> Decimal.Compare(x, decimal y)
-    | VBit _, (VInt _ | VUInt _ | VDouble _ | VDecimal _)
-    | (VInt _ | VUInt _ | VDouble _ | VDecimal _), VBit _ -> Operators.compare (toDouble a) (toDouble b)
+    | VBit _, VDouble _
+    | VDouble _, VBit _ -> Operators.compare (toDouble a) (toDouble b)
     | (VInt _ | VUInt _ | VDouble _ | VDecimal _), _
     | _, (VInt _ | VUInt _ | VDouble _ | VDecimal _) -> Operators.compare (toDouble a) (toDouble b)
     | _ -> compareStrings (toText a |> Option.defaultValue "") (toText b |> Option.defaultValue "")

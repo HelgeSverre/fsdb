@@ -6425,6 +6425,16 @@ let tests =
                     | ResultSet(_, [ [ Some "8000000000000000"; Some "8"; Some "64"; Some "gAAAAAAAAAA="; Some "8000000000000000"; Some "8000000000000000"; Some "80" ] ]) -> ()
                     | other -> failtestf "expected raw BIT bytes, got %A" other
 
+                testCase "BIT predicates preserve values above double precision"
+                <| fun _ ->
+                    let store = newStore ()
+                    runDefault store "CREATE TABLE bits (value BIT(64))" |> ignore
+                    runDefault store "INSERT INTO bits VALUES (0x8000000000000000)" |> ignore
+
+                    match runDefault store "SELECT value = 9223372036854775808, value = 9223372036854775809, value < 9223372036854775809, value = 9223372036854775808.0 FROM bits" with
+                    | ResultSet(_, [ [ Some "1"; Some "0"; Some "1"; Some "1" ] ]) -> ()
+                    | other -> failtestf "expected exact BIT predicates, got %A" other
+
                 testCase "SOUNDS LIKE and MEMBER OF follow MySQL comparison semantics"
                 <| fun _ ->
                     expectRow
