@@ -19,6 +19,11 @@ The ordered DML battery covers `REPLACE` values, `REPLACE ... SELECT`, and
 replacements, conflicts spanning separate unique keys, same-statement key
 reuse, defaults, and source-row ordering.
 
+The scalar-expression battery pins logarithmic, exponential, trigonometric,
+IPv4, and IPv6 functions to MySQL 8.4 values and domain behavior. It also
+covers `FROM DUAL`, multi-column subquery operand errors, and empty-group bit
+aggregate identities.
+
 ## Gauntlet
 
 | Application | Laravel | Migrations | Result |
@@ -107,10 +112,9 @@ Trigger execution has stronger behavioral coverage than its syntax breadth:
 
 Missing MySQL trigger forms are `BEFORE`, `AFTER UPDATE`, `AFTER DELETE`,
 `OLD.column`, compound `BEGIN ... END` bodies, and multiple ordered triggers
-for one timing/event slot. `DROP TRIGGER` also lacks its subject-table
-privilege check. An insert-only audit or rollup is therefore sound; a general
-trigger-maintained materialized aggregate is not, because later updates and
-deletes cannot repair it. The full MySQL surface is documented under
+for one timing/event slot. An insert-only audit or rollup is therefore sound;
+a general trigger-maintained materialized aggregate is not, because later
+updates and deletes cannot repair it. The full MySQL surface is documented under
 [CREATE TRIGGER](https://dev.mysql.com/doc/refman/8.4/en/create-trigger.html).
 
 ## Check constraints
@@ -206,8 +210,8 @@ Deliberate divergences (each marked `ponytail:` at its code site):
 
 - One host per account, matched by name only; the connecting host always
   renders as `localhost`, accounts default to `'%'`.
-- Enforcement covers parsed statements' top-level table references;
-  SHOW/SET text probes and subqueries/derived tables are unchecked.
+- Enforcement follows parsed statements through subqueries, derived tables,
+  and CTEs; SHOW/SET text probes remain outside the common privilege gate.
 - No roles, dynamic privileges, column-level privileges, proxy users, or
   password expiry — the columns exist in the table shapes but stay at their
   defaults. Eight of MySQL's 38 `mysql.*` tables exist, including fsdb's

@@ -1153,9 +1153,14 @@ let rec private metadataOfExpr (ctx: EvalContext) (expr: Expr) : ColumnMetadata 
         | "DATE", [ _ ] -> Some(ColumnWire.metadataOfType TDate)
         | ("NOW" | "CURRENT_TIMESTAMP"), _ -> Some(ColumnWire.metadataOfType(TDateTime(fspOfExpr ctx expr |> Option.defaultValue 0)))
         | ("MONTH" | "DAY" | "DAYOFMONTH" | "DAYOFWEEK" | "DAYOFYEAR" | "HOUR" | "MINUTE" | "SECOND" | "QUARTER" | "WEEK" | "WEEKDAY"
-          | "JSON_LENGTH" | "JSON_DEPTH" | "CHAR_LENGTH" | "CHARACTER_LENGTH" | "LENGTH" | "OCTET_LENGTH" | "BIT_LENGTH" | "BIT_COUNT"), _ ->
+          | "JSON_LENGTH" | "JSON_DEPTH" | "CHAR_LENGTH" | "CHARACTER_LENGTH" | "LENGTH" | "OCTET_LENGTH" | "BIT_LENGTH" | "BIT_COUNT" | "IS_IPV4"
+          | "IS_IPV6" | "IS_IPV4_COMPAT" | "IS_IPV4_MAPPED"), _ ->
             simple TypeLongLong
-        | ("SQRT" | "LOG" | "LOG2" | "LOG10" | "EXP" | "POWER" | "POW" | "SIN" | "COS" | "TAN" | "ASIN" | "ACOS" | "ATAN"), _ ->
+        | ("BIT_AND" | "BIT_OR" | "BIT_XOR"), _ -> Some { Value.columnMetadata TypeLongLong with ColumnLength = 21u; Flags = UnsignedFlag }
+        | "INET6_ATON", _ -> Some { Value.columnMetadata TypeVarString with ColumnLength = 16u; Flags = BinaryFlag; Decimals = 31uy }
+        | "INET6_NTOA", _ -> Some { Value.columnMetadata TypeVarString with ColumnLength = 156u; Decimals = 31uy }
+        | ("SQRT" | "LOG" | "LN" | "LOG2" | "LOG10" | "EXP" | "POWER" | "POW" | "PI" | "SIN" | "COS" | "TAN" | "COT" | "ASIN" | "ACOS"
+          | "ATAN" | "ATAN2" | "DEGREES" | "RADIANS"), _ ->
             simple TypeDouble
         | _ -> None
     | MatchAgainst _ -> simple TypeDouble
@@ -2011,18 +2016,8 @@ let rec private evalExpr (ctx: EvalContext) (expr: Expr) : Result<Value, EvalErr
             match runSelectStmt ctx.Store ctx.Registry ctx.DbName select (Some ctx) with
             | Err(code, message), _, _ -> Error(code, message)
             | Affected _, _, _ -> Ok VNull
+            | ResultSet(columns, _), _, _ when columns.Length <> 1 -> Error(1241, "Operand should contain 1 column(s)")
             | ResultSet(_, _), _, typedRows ->
-                // The candidate set is the subquery's first column —
-                // real MySQL requires exactly one, but ponytail: not
-                // enforced here (extra columns are just ignored) rather
-                // than adding an 1241-style check that `Subquery`
-                // already has to have for its own single-value case;
-                // add it here too if a migration's `IN (SELECT a, b
-                // ...)` ever needs the real error instead of silently
-                // matching on `a`. Reads the subquery's own typed
-                // `Value`, not its re-wrapped-as-text `VString` — see
-                // the note on `deriveRows`/`runSelectStmt`'s typed
-                // third component.
                 let candidates = typedRows |> List.map (fun row -> if row.Length > 0 then row.[0] else VNull)
 
                 match ve with
@@ -2258,7 +2253,9 @@ and private resolveTableRef
     | Some materialized -> Ok materialized
     | None ->
 
-    if System.String.Equals(tableDb, "information_schema", System.StringComparison.OrdinalIgnoreCase) then
+    if tableRef.Database.IsNone && System.String.Equals(tableRef.Table, "dual", System.StringComparison.OrdinalIgnoreCase) then
+        Ok([], [ [||] ])
+    elif System.String.Equals(tableDb, "information_schema", System.StringComparison.OrdinalIgnoreCase) then
         match InformationSchema.scan store.Catalog tableRef.Table with
         | Some(columns, rows) -> Ok(columns, rows)
         | None -> Error(storageErr (NoSuchTable tableRef.Table))
@@ -4515,7 +4512,7 @@ and private evalAggregate
                     else
                         fold deduped
                 else
-                    VNull)
+                    Functions.tryEmptyAggregate name |> Option.defaultValue VNull)
     | Distinct firstExpr :: rest when isCount ->
         // `COUNT(DISTINCT a, b)` — `distinctArg` (the call-argument parser)
         // attaches `Distinct` only to the first comma-separated argument,

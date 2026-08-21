@@ -58,6 +58,12 @@ let tests =
                     | ResultSet([ "two" ], [ [ Some "2" ] ]) -> ()
                     | other -> failtestf "expected a single computed row, got %A" other
 
+                testCase "FROM DUAL provides MySQL's single-row source"
+                <| fun _ ->
+                    match runDefault (newStore ()) "SELECT 1 + 1 AS two FROM DUAL" with
+                    | ResultSet([ "two" ], [ [ Some "2" ] ]) -> ()
+                    | other -> failtestf "expected one row from DUAL, got %A" other
+
                 testCase "ORDER BY DESC reverses the sort"
                 <| fun _ ->
                     let store = newStore ()
@@ -2444,6 +2450,15 @@ let tests =
                     | ResultSet([ "c"; "cn"; "s"; "a" ], [ [ Some "3"; Some "2"; Some "30"; Some "15.0000" ] ]) -> ()
                     | other -> failtestf "expected NULLs to drop out of COUNT(n)/SUM/AVG, got %A" other
 
+                testCase "empty bit aggregates return their MySQL identities"
+                <| fun _ ->
+                    let store = newStore ()
+                    runDefault store "CREATE TABLE t (n BIGINT)" |> ignore
+
+                    match runDefault store "SELECT BIT_AND(n), BIT_OR(n), BIT_XOR(n) FROM t" with
+                    | ResultSet(_, [ [ Some "18446744073709551615"; Some "0"; Some "0" ] ]) -> ()
+                    | other -> failtestf "expected the all-ones/all-zero bit identities, got %A" other
+
                 testCase "an aggregate nested inside an expression is detected and evaluated, not just a bare top-level call"
                 <| fun _ ->
                     let store = newStore ()
@@ -3630,6 +3645,16 @@ let tests =
                     match runDefault store "SELECT name FROM users WHERE id IN (SELECT user_id FROM posts)" with
                     | ResultSet([ "name" ], [ [ Some "alice" ] ]) -> ()
                     | other -> failtestf "expected only alice, got %A" other
+
+                testCase "IN rejects a subquery that returns more than one column"
+                <| fun _ ->
+                    let store = newStore ()
+                    runDefault store "CREATE TABLE t (a INT, b INT)" |> ignore
+                    runDefault store "INSERT INTO t VALUES (1, 2)" |> ignore
+
+                    match runDefault store "SELECT 1 IN (SELECT a, b FROM t)" with
+                    | Err(1241, "Operand should contain 1 column(s)") -> ()
+                    | other -> failtestf "expected MySQL error 1241, got %A" other
 
                 testCase "NOT IN (SELECT ...)"
                 <| fun _ ->
@@ -5852,6 +5877,60 @@ let tests =
                     expectRow
                         "SELECT CRC32('abc') a, CRC32('') b, CRC32(123) c, CRC32(NULL) d"
                         [ Some "891568578"; Some "0"; Some "2286445522"; None ]
+
+                testCase "logarithmic and exponential functions match MySQL's domains"
+                <| fun _ ->
+                    expectRow
+                        "SELECT ROUND(LOG(10),12), ROUND(LN(10),12), ROUND(LOG(10,1000),12), LOG(0), LOG(-1), ROUND(LOG2(8),12), ROUND(LOG10(1000),12), ROUND(EXP(1),12), ROUND(PI(),12)"
+                        [ Some "2.302585092994"
+                          Some "2.302585092994"
+                          Some "3"
+                          None
+                          None
+                          Some "3"
+                          Some "3"
+                          Some "2.718281828459"
+                          Some "3.14159265359" ]
+
+                testCase "trigonometric functions use radians and MySQL's null domains"
+                <| fun _ ->
+                    expectRow
+                        "SELECT ROUND(SIN(PI()/2),12), ROUND(COS(PI()),12), ROUND(TAN(0),12), ROUND(COT(PI()/4),12), ROUND(ASIN(1),12), ASIN(2), ROUND(ACOS(0),12), ACOS(2), ROUND(ATAN(1),12), ROUND(ATAN(1,1),12), ROUND(ATAN2(1,1),12), ROUND(DEGREES(PI()),12), ROUND(RADIANS(180),12)"
+                        [ Some "1"
+                          Some "-1"
+                          Some "0"
+                          Some "1"
+                          Some "1.570796326795"
+                          None
+                          Some "1.570796326795"
+                          None
+                          Some "0.785398163397"
+                          Some "0.785398163397"
+                          Some "0.785398163397"
+                          Some "180"
+                          Some "3.14159265359" ]
+
+                testCase "IPv6 conversion and address-family predicates match packed-byte semantics"
+                <| fun _ ->
+                    expectRow
+                        "SELECT HEX(INET6_ATON('2001:db8::1')), INET6_NTOA(INET6_ATON('2001:db8::1')), HEX(INET6_ATON('192.0.2.01')), INET6_NTOA(INET6_ATON('192.0.2.1')), INET6_ATON('127.1'), IS_IPV4('192.0.2.01'), IS_IPV4('127.1'), IS_IPV6('::1'), IS_IPV6('192.0.2.1'), IS_IPV4_COMPAT(INET6_ATON('::192.0.2.1')), IS_IPV4_COMPAT(INET6_ATON('::1')), IS_IPV4_MAPPED(INET6_ATON('::ffff:192.0.2.1')), IS_IPV4_MAPPED(INET6_ATON('2001:db8::1')), INET6_ATON('fe80::1%1'), INET6_ATON('[::1]'), IS_IPV6('fe80::1%1'), IS_IPV6('[::1]')"
+                        [ Some "20010DB8000000000000000000000001"
+                          Some "2001:db8::1"
+                          Some "C0000201"
+                          Some "192.0.2.1"
+                          None
+                          Some "1"
+                          Some "0"
+                          Some "1"
+                          Some "0"
+                          Some "1"
+                          Some "0"
+                          Some "1"
+                          Some "0"
+                          None
+                          None
+                          Some "0"
+                          Some "0" ]
 
                 testCase "CONV converts both directions across bases 2..36, truncating at the first invalid digit"
                 <| fun _ ->

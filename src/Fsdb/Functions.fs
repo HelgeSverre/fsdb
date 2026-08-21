@@ -2252,6 +2252,62 @@ let private sqrtFn: Scalar =
         if d < 0.0 then VNull else VDouble(Math.Sqrt d)
     | _ -> VNull
 
+let private mathResult (name: string) (value: float) =
+    if Double.IsNaN value then
+        VNull
+    elif Double.IsInfinity value then
+        raise (SqlError(1690, sprintf "DOUBLE value is out of range in '%s'" name))
+    else
+        VDouble value
+
+let private unaryMath (name: string) (f: float -> float) : Scalar =
+    function
+    | [ value ] when not (anyNull [ value ]) -> mathResult name (f (toDouble value))
+    | _ -> VNull
+
+let private logFn: Scalar =
+    function
+    | [ value ] when not (anyNull [ value ]) ->
+        let value = toDouble value
+        if value <= 0.0 then VNull else mathResult "log" (Math.Log value)
+    | [ baseValue; value ] when not (anyNull [ baseValue; value ]) ->
+        let baseValue = toDouble baseValue
+        let value = toDouble value
+
+        if baseValue <= 0.0 || baseValue = 1.0 || value <= 0.0 then
+            VNull
+        else
+            mathResult "log" (Math.Log(value, baseValue))
+    | _ -> VNull
+
+let private positiveLog (name: string) (f: float -> float) : Scalar =
+    function
+    | [ value ] when not (anyNull [ value ]) ->
+        let value = toDouble value
+        if value <= 0.0 then VNull else mathResult name (f value)
+    | _ -> VNull
+
+let private cotFn: Scalar =
+    function
+    | [ value ] when not (anyNull [ value ]) -> mathResult "cot" (1.0 / Math.Tan(toDouble value))
+    | _ -> VNull
+
+let private atanFn: Scalar =
+    function
+    | [ value ] when not (anyNull [ value ]) -> VDouble(Math.Atan(toDouble value))
+    | [ y; x ] when not (anyNull [ y; x ]) -> VDouble(Math.Atan2(toDouble y, toDouble x))
+    | _ -> VNull
+
+let private atan2Fn: Scalar =
+    function
+    | [ y; x ] when not (anyNull [ y; x ]) -> VDouble(Math.Atan2(toDouble y, toDouble x))
+    | _ -> VNull
+
+let private piFn: Scalar =
+    function
+    | [] -> VDouble Math.PI
+    | _ -> VNull
+
 let private signFn: Scalar =
     function
     | [ v ] when not (anyNull [ v ]) -> VInt(int64 (sign (toDouble v)))
@@ -2546,6 +2602,77 @@ let private inetNtoaFn: Scalar =
         VString(sprintf "%d.%d.%d.%d" ((n >>> 24) &&& 0xFFu) ((n >>> 16) &&& 0xFFu) ((n >>> 8) &&& 0xFFu) (n &&& 0xFFu))
     | _ -> VNull
 
+let private tryParseIpv4 (text: string) =
+    let parts = text.Split '.'
+
+    if parts.Length <> 4 then
+        None
+    else
+        parts
+        |> Array.choose (fun part ->
+            match Byte.TryParse(part, NumberStyles.None, CultureInfo.InvariantCulture) with
+            | true, value when part.Length > 0 -> Some value
+            | _ -> None)
+        |> fun bytes -> if bytes.Length = 4 then Some bytes else None
+
+let private tryParseIpv6 (text: string) =
+    if text.IndexOfAny [| '%'; '['; ']' |] >= 0 then
+        None
+    else
+        match IPAddress.TryParse text with
+        | true, address when address.AddressFamily = AddressFamily.InterNetworkV6 -> Some address
+        | _ -> None
+
+let private inet6AtonFn: Scalar =
+    function
+    | [ value ] when not (anyNull [ value ]) ->
+        let text = req value
+
+        match tryParseIpv4 text with
+        | Some bytes -> VBytes bytes
+        | None -> tryParseIpv6 text |> Option.map (fun address -> VBytes(address.GetAddressBytes())) |> Option.defaultValue VNull
+    | _ -> VNull
+
+let private packedAddressBytes =
+    function
+    | VBytes bytes -> bytes
+    | value -> Text.Encoding.Latin1.GetBytes(req value)
+
+let private inet6NtoaFn: Scalar =
+    function
+    | [ value ] when not (anyNull [ value ]) ->
+        let bytes = packedAddressBytes value
+
+        if bytes.Length = 4 || bytes.Length = 16 then
+            VString(IPAddress(bytes).ToString())
+        else
+            VNull
+    | _ -> VNull
+
+let private addressPredicate (predicate: Value -> bool) : Scalar =
+    function
+    | [ value ] when not (anyNull [ value ]) -> VInt(if predicate value then 1L else 0L)
+    | _ -> VNull
+
+let private isIpv4Fn = addressPredicate (req >> tryParseIpv4 >> Option.isSome)
+
+let private isIpv6Fn =
+    addressPredicate (req >> tryParseIpv6 >> Option.isSome)
+
+let private isIpv4CompatFn =
+    addressPredicate (fun value ->
+        let bytes = packedAddressBytes value
+
+        bytes.Length = 16
+        && bytes.[0..11] |> Array.forall ((=) 0uy)
+        && bytes.[12..15] <> [| 0uy; 0uy; 0uy; 0uy |]
+        && bytes.[12..15] <> [| 0uy; 0uy; 0uy; 1uy |])
+
+let private isIpv4MappedFn =
+    addressPredicate (fun value ->
+        let bytes = packedAddressBytes value
+        bytes.Length = 16 && bytes.[0..9] |> Array.forall ((=) 0uy) && bytes.[10] = 0xffuy && bytes.[11] = 0xffuy)
+
 // ---------------------------------------------------------------------------
 // Aggregates: COUNT/SUM/AVG/MIN/MAX. Each `Aggregate` here only ever sees a
 // nonempty, already NULL-filtered `Value list` — `Executor.evalAggregate`
@@ -2612,16 +2739,16 @@ let private stddevSampAgg: Aggregate = fun vs -> variance true vs |> Option.map 
 let private varPopAgg: Aggregate = fun vs -> variance false vs |> Option.get |> VDouble
 let private varSampAgg: Aggregate = fun vs -> variance true vs |> Option.map VDouble |> Option.defaultValue VNull
 
-/// `BIT_AND`/`BIT_OR`/`BIT_XOR` over a truly empty group have MySQL
-/// identities of all-ones/all-zero/all-zero respectively. ponytail:
-/// `Executor.evalAggregate` short-circuits an empty (post-NULL-filter)
-/// group to NULL before any `Aggregate` ever runs, so those identities
-/// can't surface through this registry entry as it stands; giving
-/// `evalAggregate` a registry-driven empty-group identity (instead of the
-/// hardcoded NULL) would let this fold in like any other case.
 let private bitAndAgg: Aggregate = fun vs -> VInt(vs |> List.map (toDouble >> int64) |> List.reduce (&&&))
 let private bitOrAgg: Aggregate = fun vs -> VInt(vs |> List.map (toDouble >> int64) |> List.reduce (|||))
 let private bitXorAgg: Aggregate = fun vs -> VInt(vs |> List.map (toDouble >> int64) |> List.reduce (^^^))
+
+let internal tryEmptyAggregate (name: string) =
+    match name.ToUpperInvariant() with
+    | "BIT_AND" -> Some(VUInt UInt64.MaxValue)
+    | "BIT_OR"
+    | "BIT_XOR" -> Some(VInt 0L)
+    | _ -> None
 
 // ---------------------------------------------------------------------------
 // MySQL 9 VECTOR. A vector is a `VBytes` of little-endian 4-byte floats —
@@ -2856,6 +2983,22 @@ let builtins: Registry =
     |> registerScalar "POW" powFn
     |> registerScalar "POWER" powFn
     |> registerScalar "SQRT" sqrtFn
+    |> registerScalar "LOG" logFn
+    |> registerScalar "LN" (positiveLog "ln" Math.Log)
+    |> registerScalar "LOG2" (positiveLog "log2" Math.Log2)
+    |> registerScalar "LOG10" (positiveLog "log10" Math.Log10)
+    |> registerScalar "EXP" (unaryMath "exp" Math.Exp)
+    |> registerScalar "PI" piFn
+    |> registerScalar "SIN" (unaryMath "sin" Math.Sin)
+    |> registerScalar "COS" (unaryMath "cos" Math.Cos)
+    |> registerScalar "TAN" (unaryMath "tan" Math.Tan)
+    |> registerScalar "COT" cotFn
+    |> registerScalar "ASIN" (unaryMath "asin" Math.Asin)
+    |> registerScalar "ACOS" (unaryMath "acos" Math.Acos)
+    |> registerScalar "ATAN" atanFn
+    |> registerScalar "ATAN2" atan2Fn
+    |> registerScalar "DEGREES" (unaryMath "degrees" (fun value -> value * 180.0 / Math.PI))
+    |> registerScalar "RADIANS" (unaryMath "radians" (fun value -> value * Math.PI / 180.0))
     |> registerScalar "SIGN" signFn
     |> registerScalar "TRUNCATE" truncateFn
     |> registerScalar "RAND" randFn
@@ -2874,6 +3017,12 @@ let builtins: Registry =
     |> registerScalar "IS_UUID" isUuidFn
     |> registerScalar "INET_ATON" inetAtonFn
     |> registerScalar "INET_NTOA" inetNtoaFn
+    |> registerScalar "INET6_ATON" inet6AtonFn
+    |> registerScalar "INET6_NTOA" inet6NtoaFn
+    |> registerScalar "IS_IPV4" isIpv4Fn
+    |> registerScalar "IS_IPV6" isIpv6Fn
+    |> registerScalar "IS_IPV4_COMPAT" isIpv4CompatFn
+    |> registerScalar "IS_IPV4_MAPPED" isIpv4MappedFn
     // MySQL 9 VECTOR
     |> registerScalar "STRING_TO_VECTOR" stringToVectorFn
     |> registerScalar "TO_VECTOR" stringToVectorFn
