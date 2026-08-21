@@ -66,6 +66,7 @@ type StorageError =
     /// implicitly back-filling a `NOT NULL` temporal column with no
     /// `DEFAULT` on a non-empty table.
     | ZeroTemporalForColumn of typeName: string * literal: string * column: string
+    | InvalidDefaultValue of column: string
     /// A write aimed at a registered `fsdb` virtual table — reads resolve to
     /// the host's overlay, so letting the write through would land it in an
     /// invisible shadowed real table and silently break read-your-writes.
@@ -102,6 +103,7 @@ let toMySqlError (err: StorageError) : int * string =
         3105, sprintf "The value specified for generated column '%s' in table '%s' is not allowed." column table
     | ZeroTemporalForColumn(typeName, literal, column) ->
         1292, sprintf "Incorrect %s value: '%s' for column '%s' at row 1" typeName literal column
+    | InvalidDefaultValue column -> 1067, sprintf "Invalid default value for '%s'" column
     // MySQL's ER_OPEN_AS_READONLY — the closest real vocabulary for "this
     // table exists but refuses writes".
     | VirtualTableReadOnly name -> 1036, sprintf "Table '%s' is read only" name
@@ -1204,6 +1206,9 @@ let private normalizeDefault (mode: TemporalCoercionMode) (col: ColumnDef) : Res
     | Some(DConst value) ->
         coerceValueWithMode mode col value
         |> Result.map (fun value -> { col with Default = Some(DConst value) })
+        |> Result.mapError (function
+            | ZeroTemporalForColumn _ -> InvalidDefaultValue col.Name
+            | error -> error)
     | _ -> Ok col
 
 /// `NOW()` rounded to `col`'s own declared fsp — a `TIMESTAMP(6)` column

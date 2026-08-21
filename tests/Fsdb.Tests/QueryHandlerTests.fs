@@ -604,7 +604,7 @@ let tests =
               let session = create 1 (Fsdb.Storage.create ())
 
               match handle session "CREATE TABLE t (id INT, d DATE NOT NULL DEFAULT '0000-00-00')" |> snd with
-              | Err(1292, _) -> ()
+              | Err(1067, _) -> ()
               | other -> failtestf "expected default zero-mode rejection, got %A" other
 
               let session, _ = handle session "SET SESSION sql_mode='STRICT_TRANS_TABLES'"
