@@ -247,6 +247,11 @@ let tests =
                         0
                         "jan < jun"
 
+                testCase "partial zero dates sort before complete dates"
+                <| fun _ ->
+                    let zero = VZeroDate(tryZeroDate 2020 0 1 |> Option.get)
+                    Expect.isLessThan (compare zero (VDate(DateOnly(2020, 1, 1)))) 0 "zero month precedes January"
+
                 testCase "string comparison is case-insensitive, matching utf8mb4_0900_ai_ci"
                 <| fun _ -> Expect.equal (compare (VString "a") (VString "A")) 0 "'a' = 'A'"
 

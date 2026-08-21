@@ -7,6 +7,7 @@ open System.Text
 open Fsdb.Binary
 open Fsdb.Packet
 open Fsdb.Value
+open Fsdb.Temporal
 
 // Capability flags (the subset this server negotiates).
 // https://dev.mysql.com/doc/dev/mysql-server/latest/group__group__cs__capabilities__flags.html
@@ -447,28 +448,56 @@ let private writeBinaryValue (w: Writer) (metadata: ColumnMetadata) (s: string) 
     elif typeId = TypeDouble then
         w.WriteDoubleLE(Double.Parse(s, Globalization.CultureInfo.InvariantCulture))
     elif typeId = TypeDate then
-        let d = DateOnly.Parse(s, Globalization.CultureInfo.InvariantCulture)
-        w.WriteByte 4uy
-        w.WriteInt16LE d.Year
-        w.WriteByte(byte d.Month)
-        w.WriteByte(byte d.Day)
+        match tryParseZeroDate s with
+        | Some date when isAllZeroDate date -> w.WriteByte 0uy
+        | Some date ->
+            let year, month, day = zeroDateParts date
+            w.WriteByte 4uy
+            w.WriteInt16LE year
+            w.WriteByte(byte month)
+            w.WriteByte(byte day)
+        | None ->
+            let d = DateOnly.Parse(s, Globalization.CultureInfo.InvariantCulture)
+            w.WriteByte 4uy
+            w.WriteInt16LE d.Year
+            w.WriteByte(byte d.Month)
+            w.WriteByte(byte d.Day)
     elif typeId = TypeDateTime || typeId = TypeTimestamp then
-        let dt = DateTime.Parse(s, Globalization.CultureInfo.InvariantCulture)
+        let write date hour minute second micros =
+            let year, month, day = zeroDateParts date
+            w.WriteByte(if micros = 0 then 7uy else 11uy)
+            w.WriteInt16LE year
+            w.WriteByte(byte month)
+            w.WriteByte(byte day)
+            w.WriteByte(byte hour)
+            w.WriteByte(byte minute)
+            w.WriteByte(byte second)
+
+            if micros <> 0 then
+                w.WriteInt32LE micros
+
+        match tryParseZeroDateTime s with
+        | Some dateTime when isAllZeroDateTime dateTime -> w.WriteByte 0uy
+        | Some dateTime ->
+            let date, hour, minute, second, micros = zeroDateTimeParts dateTime
+            write date hour minute second micros
+        | None ->
+            let dt = DateTime.Parse(s, Globalization.CultureInfo.InvariantCulture)
         // Sub-second precision: ticks are 100ns, so the sub-second
         // remainder divided by 10 is microseconds. A value with a non-zero
         // fractional second needs the 11-byte wire form (length 7 has no
         // room for it) or the fraction silently drops on the wire.
-        let micros = int ((dt.Ticks % TimeSpan.TicksPerSecond) / 10L)
-        w.WriteByte(if micros = 0 then 7uy else 11uy)
-        w.WriteInt16LE dt.Year
-        w.WriteByte(byte dt.Month)
-        w.WriteByte(byte dt.Day)
-        w.WriteByte(byte dt.Hour)
-        w.WriteByte(byte dt.Minute)
-        w.WriteByte(byte dt.Second)
+            let micros = int ((dt.Ticks % TimeSpan.TicksPerSecond) / 10L)
+            w.WriteByte(if micros = 0 then 7uy else 11uy)
+            w.WriteInt16LE dt.Year
+            w.WriteByte(byte dt.Month)
+            w.WriteByte(byte dt.Day)
+            w.WriteByte(byte dt.Hour)
+            w.WriteByte(byte dt.Minute)
+            w.WriteByte(byte dt.Second)
 
-        if micros <> 0 then
-            w.WriteInt32LE micros
+            if micros <> 0 then
+                w.WriteInt32LE micros
     elif typeId = TypeTime then
         writeBinaryTime w s
     // The narrower integer widths, which a resultset only advertises when
@@ -563,11 +592,14 @@ let TypeString = 0xfeuy
 /// — a shorter length just omits the trailing fields (MySQL only sends as
 /// many bytes as the value needs). Length 0 is the zero date.
 /// https://dev.mysql.com/doc/dev/mysql-server/latest/page_protocol_binary_resultset.html#sect_protocol_binary_resultset_row_value
-let private readBinaryDateTime (r: Reader) : DateTime =
+let private readBinaryDateTime (r: Reader) : Value =
     let len = int (r.ReadByte())
 
     if len = 0 then
-        DateTime.MinValue
+        tryZeroDate 0 0 0
+        |> Option.bind (fun date -> tryZeroDateTime date 0 0 0 0)
+        |> Option.map VZeroDateTime
+        |> Option.defaultWith (fun () -> failwith "invalid all-zero datetime")
     else
         let year = r.ReadInt16LE()
         let month = int (r.ReadByte())
@@ -577,13 +609,12 @@ let private readBinaryDateTime (r: Reader) : DateTime =
             if len > 4 then int (r.ReadByte()), int (r.ReadByte()), int (r.ReadByte()) else 0, 0, 0
 
         let micros = if len > 7 then r.ReadInt32LE() else 0
-        // MySqlConnector (and other clients) send year 0 for MySQL's
-        // '0000-00-00' zero-date — `DateTime` has no such value, so clamp
-        // the same way month/day already are rather than letting the
-        // constructor throw and drop the connection (see the try/with
-        // around this call site in `Server`).
-        DateTime(max year 1, max month 1, max day 1, hour, minute, second)
-            .AddTicks(int64 micros * 10L)
+        match tryZeroDate year month day with
+        | Some date ->
+            tryZeroDateTime date hour minute second micros
+            |> Option.map VZeroDateTime
+            |> Option.defaultWith (fun () -> failwith "invalid zero datetime")
+        | None -> VDateTime(DateTime(year, month, day, hour, minute, second).AddTicks(int64 micros * 10L))
 
 /// Reads a MySQL binary-protocol TIME value off `r` and renders it the way
 /// MySQL's TIME text form does (`[-][H]HH:MM:SS[.ffffff]`) — fsdb has no
@@ -665,9 +696,12 @@ let readBinaryValue (r: Reader) (typeId: byte) (unsigned: bool) : Value =
         | Some geometry -> VGeometry geometry
         | None -> raise (GeometryError "Invalid GIS data provided to binary parameter")
     elif typeId = TypeDate then
-        VDate(DateOnly.FromDateTime(readBinaryDateTime r))
+        match readBinaryDateTime r with
+        | VZeroDateTime dateTime -> VZeroDate(zeroDateOfDateTime dateTime)
+        | VDateTime dateTime -> VDate(DateOnly.FromDateTime dateTime)
+        | _ -> VNull
     elif typeId = TypeDateTime || typeId = TypeTimestamp then
-        VDateTime(readBinaryDateTime r)
+        readBinaryDateTime r
     elif typeId = TypeTime then
         VString(readBinaryTime r)
     else

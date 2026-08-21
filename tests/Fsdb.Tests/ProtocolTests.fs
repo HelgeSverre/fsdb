@@ -7,6 +7,7 @@ open Fsdb.Binary
 open Fsdb.Packet
 open Fsdb.Protocol
 open Fsdb.Value
+open Fsdb.Temporal
 
 type private BlockingWriteStream() =
     inherit IO.Stream()
@@ -315,10 +316,11 @@ let tests =
               date.WriteByte 5uy
               Expect.equal (readBinaryValue (Reader(date.ToArray())) TypeDate false) (VDate(DateOnly(2024, 3, 5))) "date"
 
-              // length 0 is the zero date — clamped, not thrown
+              // length 0 is the all-zero datetime.
               let zero = Writer()
               zero.WriteByte 0uy
-              Expect.equal (readBinaryValue (Reader(zero.ToArray())) TypeDateTime false) (VDateTime DateTime.MinValue) "zero datetime"
+              let allZero = tryZeroDate 0 0 0 |> Option.get |> fun date -> tryZeroDateTime date 0 0 0 0 |> Option.get
+              Expect.equal (readBinaryValue (Reader(zero.ToArray())) TypeDateTime false) (VZeroDateTime allZero) "zero datetime"
 
               // full DATETIME (len=11): year..second plus microseconds
               let dt = Writer()
