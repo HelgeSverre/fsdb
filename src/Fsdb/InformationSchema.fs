@@ -840,6 +840,7 @@ let mutable private questionCount = 0L
 
 let recordQuestion () = Threading.Interlocked.Increment(&questionCount) |> ignore
 let questions () = Threading.Interlocked.Read(&questionCount)
+let resetQuestions () = Threading.Interlocked.Exchange(&questionCount, 0L) |> ignore
 
 let registerProcess (id: int64) (user: string) (host: string) : ProcessEntry =
     let entry =

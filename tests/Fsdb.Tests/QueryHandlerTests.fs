@@ -1379,6 +1379,11 @@ let tests =
                       Expect.equal actual operation "operation"
                   | other -> failtestf "unexpected maintenance result for %s: %A" sql other
 
+              for sql in [ "FLUSH TABLES"; "FLUSH STATUS" ] do
+                  match handle session sql |> snd with
+                  | Affected 0UL -> ()
+                  | other -> failtestf "unexpected %s result: %A" sql other
+
               match handle session "SHOW ENGINE INNODB STATUS" |> snd with
               | ResultSet([ "Type"; "Name"; "Status" ], [ [ Some "InnoDB"; Some ""; Some status ] ]) ->
                   Expect.stringContains status "in-memory transactional row store" "engine status describes fsdb"

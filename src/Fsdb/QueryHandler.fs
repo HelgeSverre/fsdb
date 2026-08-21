@@ -820,6 +820,8 @@ let private showGrantsRe = Regex(@"^SHOW\s+GRANTS(?:\s+FOR\s+(.+?))?\s*;?$", Reg
 /// `FLUSH [LOCAL] PRIVILEGES` — a no-op OK: privilege reads always hit the
 /// live mysql.* rows, there's no cache to flush.
 let private flushPrivilegesRe = Regex(@"^FLUSH\s+(?:LOCAL\s+)?PRIVILEGES\s*;?$", RegexOptions.IgnoreCase)
+let private flushStatusRe = Regex(@"^FLUSH\s+STATUS\s*;?$", RegexOptions.IgnoreCase)
+let private flushTablesRe = Regex(@"^FLUSH\s+TABLES\s*;?$", RegexOptions.IgnoreCase)
 
 /// MySqlConnector's real `BeginTransaction[Async]` handshake explicitly
 /// selects REPEATABLE READ before it sends START TRANSACTION — the
@@ -1281,6 +1283,8 @@ type private Probe =
     | ShowCreateUser of user: string
     | ShowPrivileges
     | FlushPrivileges
+    | FlushStatus
+    | FlushTables
 
 /// The one ordered list of text-probed forms — matching `Probe`'s cases
 /// exactly (the compiler enforces `runProbe` covers every one of them), so
@@ -1357,6 +1361,10 @@ let private tryProbe (sql: string) (upper: string) : Probe option =
         Some(ShowGrants(if m.Groups.[1].Success then Some m.Groups.[1].Value else None))
     elif flushPrivilegesRe.IsMatch sql then
         Some FlushPrivileges
+    elif flushStatusRe.IsMatch sql then
+        Some FlushStatus
+    elif flushTablesRe.IsMatch sql then
+        Some FlushTables
     elif showProcesslistRe.IsMatch sql then
         Some(ShowProcesslist((showProcesslistRe.Match sql).Groups.[1].Success))
     elif showTriggersRe.IsMatch sql then
@@ -1673,6 +1681,10 @@ let private runProbe (session: Session) (sql: string) (probe: Probe) : Session *
         | Ok(header, ddl) -> session, ResultSet([ header ], [ [ Some ddl ] ])
         | Error(code, msg) -> session, Err(code, msg)
     | FlushPrivileges -> session, Affected 0UL
+    | FlushStatus ->
+        InformationSchema.resetQuestions ()
+        session, Affected 0UL
+    | FlushTables -> session, Affected 0UL
 let rec mapPlaceholders (replace: int -> Expr) (stmt: Statement) : Statement =
     let rec mapExpr (e: Expr) : Expr =
         match e with
