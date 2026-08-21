@@ -726,6 +726,60 @@ let private jsonMemberOfFn: Scalar =
         | _ -> VNull
     | _ -> VNull
 
+let private jsonContainsPathFn: Scalar =
+    function
+    | document :: mode :: (_ :: _ as paths) when not (anyNull (document :: mode :: paths)) ->
+        match tryParseJsonValue document with
+        | Some root ->
+            let matches path =
+                toText path
+                |> Option.bind parseJsonPath
+                |> Option.exists (navigateJson root >> List.isEmpty >> not)
+
+            match (req mode).ToLowerInvariant() with
+            | "one" -> paths |> List.exists matches |> boolToInt
+            | "all" -> paths |> List.forall matches |> boolToInt
+            | _ -> VNull
+        | None -> VNull
+    | _ -> VNull
+
+let private jsonOverlaps (left: JsonNode) (right: JsonNode) : bool =
+    match left, right with
+    | (:? JsonArray as a), (:? JsonArray as b) -> a |> Seq.exists (fun x -> b |> Seq.exists (jsonEqual x))
+    | (:? JsonObject as a), (:? JsonObject as b) ->
+        a |> Seq.exists (fun pair -> b.ContainsKey pair.Key && jsonEqual pair.Value b.[pair.Key])
+    | (:? JsonArray as array), scalar
+    | scalar, (:? JsonArray as array) -> array |> Seq.exists (jsonEqual scalar)
+    | _ -> jsonEqual left right
+
+let private jsonOverlapsFn: Scalar =
+    function
+    | [ left; right ] when not (anyNull [ left; right ]) ->
+        match tryParseJsonValue left, tryParseJsonValue right with
+        | Some a, Some b -> jsonOverlaps a b |> boolToInt
+        | _ -> VNull
+    | _ -> VNull
+
+let private jsonQuoteFn: Scalar =
+    function
+    | [ value ] when not (anyNull [ value ]) -> value |> req |> jsonQuote |> VString
+    | _ -> VNull
+
+let private jsonPrettyFn: Scalar =
+    let options = JsonSerializerOptions(WriteIndented = true, Encoder = System.Text.Encodings.Web.JavaScriptEncoder.UnsafeRelaxedJsonEscaping)
+
+    function
+    | [ document ] when not (anyNull [ document ]) ->
+        tryParseJsonValue document
+        |> Option.map (fun node ->
+            if isNull node then
+                "null"
+            else
+                JsonNode.Parse(formatJsonNode node).ToJsonString options)
+        |> Option.map VString
+        |> Option.defaultValue VNull
+    | _ -> VNull
+
 let private jsonLengthFn: Scalar =
     function
     | [ doc ] when not (anyNull [ doc ]) -> tryParseJsonValue doc |> Option.map (jsonNodeLength >> int64 >> VInt) |> Option.defaultValue VNull
@@ -3293,6 +3347,10 @@ let builtins: Registry =
     |> registerScalar "JSON_UNQUOTE" jsonUnquoteFn
     |> registerScalar "JSON_CONTAINS" jsonContainsFn
     |> registerScalar "JSON_MEMBER_OF" jsonMemberOfFn
+    |> registerScalar "JSON_CONTAINS_PATH" jsonContainsPathFn
+    |> registerScalar "JSON_OVERLAPS" jsonOverlapsFn
+    |> registerScalar "JSON_QUOTE" jsonQuoteFn
+    |> registerScalar "JSON_PRETTY" jsonPrettyFn
     |> registerScalar "JSON_SET" (jsonWriteFn JSet)
     |> registerScalar "JSON_INSERT" (jsonWriteFn JInsert)
     |> registerScalar "JSON_REPLACE" (jsonWriteFn JReplace)

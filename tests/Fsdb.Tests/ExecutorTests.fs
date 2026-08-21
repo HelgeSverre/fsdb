@@ -5897,6 +5897,18 @@ let tests =
                           None
                           None ]
 
+                testCase "JSON path, overlap, quote, and pretty helpers match MySQL"
+                <| fun _ ->
+                    expectRow
+                        "SELECT JSON_CONTAINS_PATH('{\"a\":1,\"b\":{\"c\":2}}','one','$.x','$.b.c') a, JSON_CONTAINS_PATH('{\"a\":1,\"b\":{\"c\":2}}','all','$.a','$.x') b, JSON_OVERLAPS('[1,2]', '[2,3]') c, JSON_OVERLAPS('{\"a\":1}', '{\"a\":2,\"b\":1}') d, JSON_OVERLAPS('2','[1,2]') e, JSON_QUOTE('a\"b\\\\c') f, JSON_PRETTY('{\"long\":1,\"a\":[1,2]}') g"
+                        [ Some "1"
+                          Some "0"
+                          Some "1"
+                          Some "0"
+                          Some "1"
+                          Some "\"a\\\"b\\\\c\""
+                          Some "{\n  \"a\": [\n    1,\n    2\n  ],\n  \"long\": 1\n}" ]
+
                 testCase "bitwise operators use unsigned 64-bit values and MySQL precedence"
                 <| fun _ ->
                     expectRow
