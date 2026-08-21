@@ -989,6 +989,55 @@ let private coerceValueWithModeAndLengths (enforceLengths: bool) (mode: Temporal
                         Ok(VUInt(if d < 0.0 then 0UL else UInt64.MaxValue))
                 | None -> numericFallback (Some "integer") (fun () -> VUInt 0UL)
             | _ -> numericFallback (Some "integer") (fun () -> VUInt 0UL)
+        | TBit width ->
+            let maxValue = if width = 64 then UInt64.MaxValue else (1UL <<< width) - 1UL
+
+            let tooLarge () =
+                if strict then
+                    Error(DataTooLongForColumn(col.Name, Diagnostics.currentRowNumber ()))
+                else
+                    warning 1264 (sprintf "Out of range value for column '%s'" col.Name)
+                    Ok(VBit(width, maxValue))
+
+            let finish value =
+                if value <= maxValue then
+                    Ok(VBit(width, value))
+                else
+                    tooLarge ()
+
+            let bytes value =
+                match bitValue value with
+                | Some value -> finish value
+                | None -> tooLarge ()
+
+            let decimalValue value =
+                if value < 0m then
+                    if strict then
+                        Error(OutOfRangeForColumn col.Name)
+                    else
+                        warning 1264 (sprintf "Out of range value for column '%s'" col.Name)
+                        Ok(VBit(width, 0UL))
+                else
+                    let rounded = Math.Round(value, 0, MidpointRounding.AwayFromZero)
+
+                    if rounded > decimal UInt64.MaxValue then
+                        tooLarge ()
+                    else
+                        finish(uint64 rounded)
+
+            match v with
+            | VBit(_, value) -> finish value
+            | VBytes value -> bytes value
+            | VString value -> value |> Text.Encoding.UTF8.GetBytes |> bytes
+            | VUInt value -> finish value
+            | VInt value -> if value < 0L then tooLarge () else finish(uint64 value)
+            | VDecimal value -> decimalValue value
+            | VDouble value ->
+                if Double.IsNaN value || value < 0.0 || value >= 1.8446744073709552e19 then
+                    if value < 0.0 && strict then Error(OutOfRangeForColumn col.Name) else tooLarge ()
+                else
+                    decimalValue(decimal value)
+            | _ -> tooLarge ()
         | (TInt _ | TBigInt false | TSmallInt _ | TMediumInt _ | TTinyInt _ | TBool) as integerType ->
             narrowInteger integerType v
         | TYear ->
@@ -1454,6 +1503,7 @@ let private encodeEqualityKey (columns: ColumnDef list) (indices: int list) (row
         // one that hold the same number must land on the same key, or a
         // unique index would let both through as distinct rows.
         | VUInt value -> "I" + string (decimal value)
+        | VBit(_, value) -> "I" + string (decimal value)
         | VDouble value ->
             let normalized = if value = 0.0 then 0.0 else value
             "D" + normalized.ToString("R", CultureInfo.InvariantCulture)
@@ -2376,6 +2426,9 @@ let private withTable
 /// bounds because CAST and JSON_TABLE create synthetic column definitions.
 let private validateColumnType (c: ColumnDef) : Result<unit, StorageError> =
     match c.Type with
+    | TBit width when width < 1 -> Error(ExpressionError(3013, sprintf "Invalid size for column '%s'." c.Name))
+    | TBit width when width > 64 ->
+        Error(ExpressionError(1439, sprintf "Display width out of range for column '%s' (max = 64)" c.Name))
     | TDateTime fsp
     | TTimestamp fsp
     | TTime fsp when fsp > 6 -> Error(PrecisionTooBig(c.Name, fsp))

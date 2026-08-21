@@ -522,6 +522,7 @@ let private columnType: Parser<ColumnType, unit> =
           keyword "MEDIUMINT" >>. ignoredWidth >>. unsignedFlag |>> TMediumInt
           keyword "BIGINT" >>. ignoredWidth >>. unsignedFlag |>> TBigInt
           (keyword "INT" <|> keyword "INTEGER") >>. ignoredWidth >>. unsignedFlag |>> TInt
+          keyword "BIT" >>. optWidthLen |>> (fun width -> TBit(defaultArg width 1))
           keyword "VARCHAR" >>. widthLen |>> TVarchar
           keyword "CHAR" >>. optWidthLen |>> (fun n -> TChar(defaultArg n 1))
           keyword "TINYTEXT" >>% TTinyText

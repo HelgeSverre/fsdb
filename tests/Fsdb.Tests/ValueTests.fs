@@ -103,6 +103,7 @@ let tests =
                           VInt -42L
                           VUInt UInt64.MaxValue
                           VUInt 0UL
+                          VBit(9, 257UL)
                           VDouble 1.5
                           VDecimal 12.50M
                           VString "hi | there\nwith \"quotes\""

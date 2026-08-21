@@ -914,6 +914,46 @@ let tests =
               }
               |> Async.RunSynchronously
 
+          testCase "MySqlConnector reads BIT columns as unsigned integers"
+          <| fun _ ->
+              async {
+                  let listener = Fsdb.Server.startListening System.Net.IPAddress.Loopback 0
+                  let port = Fsdb.Server.port listener
+                  Fsdb.Server.serve listener (Fsdb.Storage.create ()) Fsdb.Functions.empty |> Async.StartAsTask |> ignore
+
+                  try
+                      let connStr =
+                          sprintf
+                              "Server=127.0.0.1;Port=%d;User ID=root;Password=;AllowPublicKeyRetrieval=True;SslMode=None"
+                              port
+
+                      use conn = new MySqlConnector.MySqlConnection(connStr)
+                      do! conn.OpenAsync() |> Async.AwaitTask
+
+                      use create = conn.CreateCommand()
+                      create.CommandText <- "CREATE TABLE bits (one BIT, three BIT(3) DEFAULT b'101', eight BIT(8) DEFAULT 0b10101010)"
+                      do! create.ExecuteNonQueryAsync() |> Async.AwaitTask |> Async.Ignore
+
+                      use insert = conn.CreateCommand()
+                      insert.CommandText <- "INSERT INTO bits (one) VALUES (b'1')"
+                      do! insert.ExecuteNonQueryAsync() |> Async.AwaitTask |> Async.Ignore
+
+                      use select = conn.CreateCommand()
+                      select.CommandText <- "SELECT one, three, eight FROM bits"
+                      use! reader = select.ExecuteReaderAsync() |> Async.AwaitTask
+                      let! hasRow = reader.ReadAsync() |> Async.AwaitTask
+                      Expect.isTrue hasRow "bit row present"
+                      Expect.equal (reader.GetDataTypeName 0) "BIT" "one type"
+                      Expect.equal (reader.GetFieldValue<uint64> 0) 1UL "one value"
+                      Expect.equal (reader.GetFieldValue<uint64> 1) 5UL "three value"
+                      Expect.equal (reader.GetFieldValue<uint64> 2) 170UL "eight value"
+                      do! reader.CloseAsync() |> Async.AwaitTask
+                      do! conn.CloseAsync() |> Async.AwaitTask
+                  finally
+                      listener.Stop()
+              }
+              |> Async.RunSynchronously
+
           // Forces the binary COM_STMT_PREPARE/COM_STMT_EXECUTE path via
           // MySqlCommand.Prepare() (MySqlConnector otherwise inlines
           // parameters as literal text over COM_QUERY) — the only way this

@@ -46,6 +46,7 @@ type ColumnType =
     | TMediumInt of unsigned: bool
     | TInt of unsigned: bool
     | TBigInt of unsigned: bool
+    | TBit of width: int
     | TChar of length: int
     | TVarchar of length: int
     | TTinyText

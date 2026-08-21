@@ -78,6 +78,18 @@ let tests =
                         | Error e -> failtestf "expected the table to exist, got %A" e
                     | Error e -> failtestf "expected Ok, got %A" e
 
+                testCase "BIT width is constrained to MySQL's one-to-sixty-four range"
+                <| fun _ ->
+                    let store = create ()
+
+                    match createTable store defaultDatabase "zero_bits" [ col "bits" (TBit 0) true ] [] [] None None with
+                    | Error(ExpressionError(3013, _)) -> ()
+                    | other -> failtestf "expected invalid BIT size, got %A" other
+
+                    match createTable store defaultDatabase "wide_bits" [ col "bits" (TBit 65) true ] [] [] None None with
+                    | Error(ExpressionError(1439, _)) -> ()
+                    | other -> failtestf "expected oversized BIT width, got %A" other
+
                 testCase "scan on an unknown table returns NoSuchTable"
                 <| fun _ ->
                     let store = create ()
@@ -471,6 +483,26 @@ let tests =
                     match coerceValue true tagsCol (VInt 999L) with
                     | Error(DataTruncatedForColumn "tags") -> ()
                     | other -> failtestf "expected DataTruncatedForColumn, got %A" other ]
+
+          testList
+              "coerceValue BIT columns"
+              [ let bits = col "bits" (TBit 3) true
+
+                testCase "bit and numeric literals retain an exact width and numeric value"
+                <| fun _ ->
+                    Expect.equal (coerceValue true bits (VBytes [| 0b00000101uy |])) (Ok(VBit(3, 5UL))) "binary literal"
+                    Expect.equal (coerceValue true bits (VInt 2L)) (Ok(VBit(3, 2UL))) "numeric literal"
+                    Expect.equal (coerceValue true bits (VDecimal 1.5m)) (Ok(VBit(3, 2UL))) "numeric rounding"
+
+                testCase "strict mode rejects a value outside the bit width"
+                <| fun _ ->
+                    match coerceValue true bits (VInt 8L) with
+                    | Error(DataTooLongForColumn("bits", _)) -> ()
+                    | other -> failtestf "expected DataTooLongForColumn, got %A" other
+
+                testCase "non-strict mode clamps an out-of-range bit value"
+                <| fun _ ->
+                    Expect.equal (coerceValue false bits (VInt 8L)) (Ok(VBit(3, 7UL))) "max bit value" ]
 
           testList
               "coerceValue spatial columns"

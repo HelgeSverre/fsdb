@@ -1154,6 +1154,7 @@ let tests =
                     mkCol "c_mediumint" (TMediumInt true)
                     mkCol "c_int" (TInt false)
                     mkCol "c_bigint" (TBigInt true)
+                    mkCol "c_bit" (TBit 9)
                     mkCol "c_char" (TChar 10)
                     mkCol "c_varchar" (TVarchar 20)
                     mkCol "c_tinytext" TTinyText

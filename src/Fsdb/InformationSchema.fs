@@ -74,6 +74,7 @@ let private dataTypeName (ty: ColumnType) : string =
     | TMediumInt _ -> "mediumint"
     | TInt _ -> "int"
     | TBigInt _ -> "bigint"
+    | TBit _ -> "bit"
     | TChar _ -> "char"
     | TVarchar _ -> "varchar"
     | TTinyText -> "tinytext"
@@ -118,6 +119,7 @@ let columnTypeText (ty: ColumnType) : string =
     | TMediumInt u -> "mediumint" + unsigned u
     | TInt u -> "int" + unsigned u
     | TBigInt u -> "bigint" + unsigned u
+    | TBit width -> sprintf "bit(%d)" width
     | TChar n -> sprintf "char(%d)" n
     | TVarchar n -> sprintf "varchar(%d)" n
     | TTinyText -> "tinytext"
@@ -177,6 +179,7 @@ let private numericPrecisionScale (ty: ColumnType) : (int64 * int64) option =
     | TMediumInt _ -> Some(7L, 0L)
     | TInt _ -> Some(10L, 0L)
     | TBigInt _ -> Some(19L, 0L)
+    | TBit width -> Some(int64 width, 0L)
     | TDecimal(p, s) -> Some(int64 p, int64 s)
     | TFloat -> Some(10L, 0L)
     | TDouble -> Some(22L, 0L)

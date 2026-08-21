@@ -146,6 +146,7 @@ let valueToSqlLiteral (v: Value) : string =
     | VNull -> "NULL"
     | VInt i -> string i
     | VUInt u -> string u
+    | VBit(width, value) -> "X'" + Convert.ToHexString(bitBytes width value) + "'"
     | VDouble d -> d.ToString(Globalization.CultureInfo.InvariantCulture)
     | VDecimal d -> d.ToString(Globalization.CultureInfo.InvariantCulture)
     | VBytes bytes -> "X'" + Convert.ToHexString(bytes) + "'"

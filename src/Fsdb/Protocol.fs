@@ -360,7 +360,7 @@ let textRowPayloadTyped (columns: ColumnMetadata list) (values: string option li
     |> List.iter (fun (metadata, value) ->
         match value with
         | None -> w.WriteLenEncNull()
-        | Some s when metadata.Flags &&& BinaryFlag <> 0us -> w.WriteLenEncBytes(Encoding.Latin1.GetBytes s)
+        | Some s when metadata.Flags &&& BinaryFlag <> 0us || metadata.TypeId = TypeBit -> w.WriteLenEncBytes(Encoding.Latin1.GetBytes s)
         | Some s -> w.WriteLenEncString s)
 
     w.ToArray()
@@ -440,7 +440,9 @@ let private parseIntOr (fallback: int64) (s: string) : int64 =
 let private writeBinaryValue (w: Writer) (metadata: ColumnMetadata) (s: string) : unit =
     let typeId = metadata.TypeId
 
-    if typeId = TypeLongLong then
+    if typeId = TypeBit then
+        w.WriteLenEncBytes(Encoding.Latin1.GetBytes s)
+    elif typeId = TypeLongLong then
         if metadata.Flags &&& UnsignedFlag <> 0us then
             w.WriteInt64LE(int64 (UInt64.Parse(s, Globalization.CultureInfo.InvariantCulture)))
         else
@@ -704,6 +706,8 @@ let readBinaryValue (r: Reader) (typeId: byte) (unsigned: bool) : Value =
         readBinaryDateTime r
     elif typeId = TypeTime then
         VString(readBinaryTime r)
+    elif typeId = TypeBit then
+        VBytes(lenEncBytes ())
     else
         // TypeNull and anything unrecognized: NULL params never reach here
         // (the caller checks the null-bitmap first), so this is only a

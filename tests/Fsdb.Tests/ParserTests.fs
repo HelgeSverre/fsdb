@@ -805,6 +805,12 @@ let tests =
                     | CreateTable(_, [ { Type = TBigInt true } ], _, _, _, _, _, _, _) -> ()
                     | other -> failtestf "expected an unsigned bigint column, got %A" other
 
+                testCase "BIT keeps its declared width and defaults to one bit"
+                <| fun _ ->
+                    match parseOk "CREATE TABLE t (one BIT, three BIT(3), all_bits BIT(64))" with
+                    | CreateTable(_, [ { Type = TBit 1 }; { Type = TBit 3 }; { Type = TBit 64 } ], _, _, _, _, _, _, _) -> ()
+                    | other -> failtestf "expected BIT widths, got %A" other
+
                 testCase "DEFAULT CURRENT_TIMESTAMP"
                 <| fun _ ->
                     match parseOk "CREATE TABLE t (created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP)" with

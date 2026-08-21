@@ -154,6 +154,7 @@ let private encodeColumnType (w: Writer) (t: ColumnType) : unit =
     | TMediumInt u -> w.WriteByte 0x03uy; writeBool w u
     | TInt u -> w.WriteByte 0x04uy; writeBool w u
     | TBigInt u -> w.WriteByte 0x05uy; writeBool w u
+    | TBit width -> w.WriteByte 0x20uy; w.WriteInt32LE width
     | TChar l -> w.WriteByte 0x06uy; w.WriteInt32LE l
     | TVarchar l -> w.WriteByte 0x07uy; w.WriteInt32LE l
     | TTinyText -> w.WriteByte 0x08uy
@@ -205,6 +206,7 @@ let private decodeColumnType (r: #IReader) : ColumnType =
     | 0x03uy -> TMediumInt(readBool r)
     | 0x04uy -> TInt(readBool r)
     | 0x05uy -> TBigInt(readBool r)
+    | 0x20uy -> TBit(r.ReadInt32LE())
     | 0x06uy -> TChar(r.ReadInt32LE())
     | 0x07uy -> TVarchar(r.ReadInt32LE())
     | 0x08uy -> TTinyText

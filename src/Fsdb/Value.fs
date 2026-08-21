@@ -653,6 +653,7 @@ type Value =
     /// case: every narrower unsigned type (`INT UNSIGNED`'s 4294967295 and
     /// down) fits `VInt` exactly.
     | VUInt of uint64
+    | VBit of width: int * value: uint64
     | VDouble of float
     | VDecimal of decimal
     | VString of string
@@ -687,6 +688,7 @@ let TypeTime = 0x0buy
 let TypeDateTime = 0x0cuy
 let TypeYear = 0x0duy
 let TypeVarchar = 0x0fuy
+let TypeBit = 0x10uy
 let TypeNewDecimal = 0xf6uy
 let TypeBlob = 0xfcuy
 let TypeVarString = 0xfduy
@@ -718,6 +720,24 @@ let columnMetadata typeId =
       Flags = 0us
       Decimals = 0uy }
 
+let bitBytes (width: int) (value: uint64) : byte[] =
+    let byteCount = (width + 7) / 8
+    let bytes = Array.zeroCreate<byte> byteCount
+
+    for index in 0 .. byteCount - 1 do
+        let shift = (byteCount - index - 1) * 8
+        bytes.[index] <- byte (value >>> shift)
+
+    bytes
+
+let bitValue (bytes: byte[]) : uint64 option =
+    if bytes.Length > 8 then
+        None
+    else
+        bytes
+        |> Array.fold (fun value next -> (value <<< 8) ||| uint64 next) 0UL
+        |> Some
+
 /// .NET's shortest-round-trip double formatting agrees with MySQL on the
 /// mantissa but not the exponent: "1E+20" vs MySQL's "1e20" (lowercase,
 /// no '+', no zero-padding). Reshapes just the exponent part when present.
@@ -747,6 +767,7 @@ let toText (v: Value) : string option =
     | VNull -> None
     | VInt i -> Some(string i)
     | VUInt u -> Some(string u)
+    | VBit(width, value) -> Some(Text.Encoding.Latin1.GetString(bitBytes width value))
     // .NET Core's default double ToString is already the shortest
     // round-trippable representation (no "0.1000000000000001" noise); only
     // the exponent's shape needs reworking to match MySQL's rendering.
@@ -809,6 +830,7 @@ let toWire (v: Value) : string =
     | VNull -> "N"
     | VInt i -> "I" + string i
     | VUInt u -> "U" + string u
+    | VBit(width, value) -> sprintf "Q%d:%s" width (Convert.ToBase64String(bitBytes width value))
     | VDouble d -> "D" + d.ToString("R", CultureInfo.InvariantCulture)
     | VDecimal d -> "M" + d.ToString(CultureInfo.InvariantCulture)
     | VString s -> "S" + b64 s
@@ -836,6 +858,16 @@ let ofWire (s: string) : Value =
         | 'U' -> VUInt(UInt64.Parse(payload, CultureInfo.InvariantCulture))
         | 'D' -> VDouble(Double.Parse(payload, NumberStyles.Float, CultureInfo.InvariantCulture))
         | 'M' -> VDecimal(Decimal.Parse(payload, CultureInfo.InvariantCulture))
+        | 'Q' ->
+            match payload.IndexOf ':' with
+            | index when index > 0 ->
+                let width = Int32.Parse(payload.Substring(0, index), CultureInfo.InvariantCulture)
+                let bytes = Convert.FromBase64String(payload.Substring(index + 1))
+
+                match bitValue bytes with
+                | Some value -> VBit(width, value)
+                | None -> failwithf "Value.ofWire: invalid bit payload %s" payload
+            | _ -> failwithf "Value.ofWire: invalid bit payload %s" payload
         | 'S' -> VString(unb64 payload)
         | 'B' -> VBytes(Convert.FromBase64String payload)
         | 'T' -> VDate(DateOnly.Parse(payload, CultureInfo.InvariantCulture))
@@ -867,6 +899,10 @@ let encodeValue (w: Writer) (v: Value) : unit =
     | VUInt u ->
         w.WriteByte 0x09uy
         w.WriteInt64LE(int64 u)
+    | VBit(width, value) ->
+        w.WriteByte 0x0duy
+        w.WriteInt32LE width
+        w.WriteInt64LE(int64 value)
     | VDouble d ->
         w.WriteByte 0x02uy
         w.WriteDoubleLE d
@@ -919,6 +955,7 @@ let decodeValue (r: #IReader) : Value =
     | 0x00uy -> VNull
     | 0x01uy -> VInt(r.ReadInt64LE())
     | 0x09uy -> VUInt(uint64 (r.ReadInt64LE()))
+    | 0x0duy -> VBit(r.ReadInt32LE(), uint64 (r.ReadInt64LE()))
     | 0x02uy -> VDouble(BitConverter.Int64BitsToDouble(r.ReadInt64LE()))
     | 0x03uy ->
         let bits = [| for _ in 0..3 -> r.ReadInt32LE() |]
@@ -980,6 +1017,7 @@ let mysqlMetadataOf (v: Value) : ColumnMetadata =
     | VNull -> columnMetadata TypeVarString
     | VInt _ -> columnMetadata TypeLongLong
     | VUInt _ -> { columnMetadata TypeLongLong with Flags = UnsignedFlag }
+    | VBit(width, _) -> { columnMetadata TypeBit with ColumnLength = uint32 width }
     | VDouble _ -> columnMetadata TypeDouble
     | VDecimal _ -> columnMetadata TypeNewDecimal
     | VString _
@@ -1018,6 +1056,7 @@ let toDouble (v: Value) : float =
     | VNull -> 0.0
     | VInt i -> float i
     | VUInt u -> float u
+    | VBit(_, value) -> float value
     | VDouble d -> d
     | VDecimal d -> float d
     | VString s -> parseLeadingNumeric s
@@ -1113,6 +1152,7 @@ let private asJsonOperand (v: Value) : int * JsonNode =
     | VJson j -> let n = node j in jsonRankOfNode n, n
     | VInt i -> 1, JsonValue.Create i
     | VUInt u -> 1, JsonValue.Create u
+    | VBit(_, value) -> 1, JsonValue.Create value
     | VDouble d -> 1, JsonValue.Create d
     | VDecimal d -> 1, JsonValue.Create d
     | VString s -> 2, JsonValue.Create s
@@ -1207,6 +1247,7 @@ let rec compare (a: Value) (b: Value) : int =
     // distinct values past 2^53, and a naive `int64`/`uint64` cast would
     // make -1 the largest value there is).
     | VUInt x, VUInt y -> Operators.compare x y
+    | VBit(_, x), VBit(_, y) -> Operators.compare x y
     | VUInt x, VInt y -> Decimal.Compare(decimal x, decimal y)
     | VInt x, VUInt y -> Decimal.Compare(decimal x, decimal y)
     | VUInt x, VDecimal y -> Decimal.Compare(decimal x, y)
@@ -1258,6 +1299,8 @@ let rec compare (a: Value) (b: Value) : int =
     // keys, and unique-index lookups alike.
     | VInt x, VDecimal y -> Decimal.Compare(decimal x, y)
     | VDecimal x, VInt y -> Decimal.Compare(x, decimal y)
+    | VBit _, (VInt _ | VUInt _ | VDouble _ | VDecimal _)
+    | (VInt _ | VUInt _ | VDouble _ | VDecimal _), VBit _ -> Operators.compare (toDouble a) (toDouble b)
     | (VInt _ | VUInt _ | VDouble _ | VDecimal _), _
     | _, (VInt _ | VUInt _ | VDouble _ | VDecimal _) -> Operators.compare (toDouble a) (toDouble b)
     | _ -> compareStrings (toText a |> Option.defaultValue "") (toText b |> Option.defaultValue "")
@@ -1346,6 +1389,7 @@ let private classify (v: Value) : NumKind option =
     | VNull -> None
     | VInt i -> Some(KInt i)
     | VUInt u -> Some(KUInt u)
+    | VBit(_, value) -> Some(KUInt value)
     | VDecimal d -> Some(KDecimal d)
     | VDouble d -> Some(KDouble d)
     | VString _

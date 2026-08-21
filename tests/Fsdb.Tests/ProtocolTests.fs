@@ -4,6 +4,7 @@ open System
 open Expecto
 open Fsdb.Ast
 open Fsdb.Binary
+open Fsdb.ColumnWire
 open Fsdb.Packet
 open Fsdb.Protocol
 open Fsdb.Value
@@ -236,6 +237,14 @@ let tests =
                   (fun () -> readBinaryValue (Reader(writer.ToArray())) TypeGeometry false |> ignore)
                   "one-point lines are not coerced to NULL"
 
+          testCase "binary protocol BIT values use their length-encoded binary form"
+          <| fun _ ->
+              let payload = binaryRowPayload [ metadataOfType (TBit 9) ] [ Some "\000\001" ]
+              let reader = Reader payload
+              reader.ReadByte() |> ignore
+              reader.ReadByte() |> ignore
+              Expect.equal (readBinaryValue reader TypeBit false) (VBytes [| 0uy; 1uy |]) "bit bytes"
+
           testCase "wireTypeOfColumnType maps every declared-type family to its wire id"
           <| fun _ ->
               Expect.equal (wireTypeOfColumnType (TTinyInt false)) TypeTiny "tinyint"
@@ -243,6 +252,7 @@ let tests =
               Expect.equal (wireTypeOfColumnType (TMediumInt false)) TypeLong "mediumint"
               Expect.equal (wireTypeOfColumnType (TInt false)) TypeLong "int"
               Expect.equal (wireTypeOfColumnType (TBigInt false)) TypeLongLong "bigint"
+              Expect.equal (wireTypeOfColumnType (TBit 9)) TypeBit "bit"
               Expect.equal (wireTypeOfColumnType (TDecimal(10, 2))) TypeNewDecimal "decimal"
               Expect.equal (wireTypeOfColumnType TDouble) TypeDouble "double"
               Expect.equal (wireTypeOfColumnType TFloat) TypeFloat "float"
