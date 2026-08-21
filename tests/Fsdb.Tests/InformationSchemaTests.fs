@@ -124,6 +124,22 @@ let tests =
                   Expect.stringContains ddl "DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci" "the table defaults"
               | other -> failtestf "expected SHOW CREATE TABLE output, got %A" other
 
+          testCase "BIT defaults render as MySQL bit literals"
+          <| fun _ ->
+              let store = setup ()
+              run store "CREATE TABLE bits (a BIT(3) DEFAULT 1, b BIT(3) DEFAULT b'101')" |> ignore
+              let session = Fsdb.Session.create 1 store
+
+              match Fsdb.QueryHandler.handle session "SHOW CREATE TABLE bits" |> snd with
+              | ResultSet(_, [ [ Some "bits"; Some ddl ] ]) ->
+                  Expect.stringContains ddl "`a` bit(3) DEFAULT b'1'" "numeric default"
+                  Expect.stringContains ddl "`b` bit(3) DEFAULT b'101'" "binary default"
+              | other -> failtestf "expected SHOW CREATE TABLE output, got %A" other
+
+              match run store "SELECT column_name, column_default FROM information_schema.columns WHERE table_schema = 'fsdb' AND table_name = 'bits' ORDER BY ordinal_position" with
+              | ResultSet(_, rows) -> Expect.equal rows [ [ Some "a"; Some "b'1'" ]; [ Some "b"; Some "b'101'" ] ] "column defaults"
+              | other -> failtestf "expected information_schema defaults, got %A" other
+
           testCase "SHOW CREATE TABLE keeps the table-level declaration, and never attaches charset/collation to a non-string column"
           <| fun _ ->
               let store = setup ()

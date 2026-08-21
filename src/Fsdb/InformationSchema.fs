@@ -439,11 +439,27 @@ let private extraText (c: ColumnDef) : string =
               sprintf "on update CURRENT_TIMESTAMP%s" (onUpdateFspSuffix c) ]
         |> String.concat " "
 
-let defaultText (d: ColumnDefault option) : string option =
-    match d with
-    | None -> None
-    | Some(DConst v) -> v |> toText
-    | Some DCurrentTimestamp -> Some "CURRENT_TIMESTAMP"
+let private bitDefaultText (value: uint64) =
+    let width = if value = 0UL then 1 else 64 - System.Numerics.BitOperations.LeadingZeroCount value
+
+    Array.init width (fun index -> if value &&& (1UL <<< (width - index - 1)) = 0UL then '0' else '1')
+    |> String
+    |> sprintf "b'%s'"
+
+let defaultText (c: ColumnDef) : string option =
+    let bitValue =
+        function
+        | VBit(_, value)
+        | VUInt value -> Some value
+        | VInt value when value >= 0L -> Some(uint64 value)
+        | VBytes bytes -> Value.bitValue bytes
+        | _ -> None
+
+    match c.Type, c.Default with
+    | TBit _, Some(DConst value) -> value |> bitValue |> Option.map bitDefaultText
+    | _, None -> None
+    | _, Some(DConst value) -> value |> toText
+    | _, Some DCurrentTimestamp -> Some "CURRENT_TIMESTAMP"
 
 /// One `COLUMNS` row — shared by real tables (with the table's key
 /// metadata and full DML privileges) and information_schema's own
@@ -456,7 +472,7 @@ let private columnRowWith (privileges: string) (dbName: string) (tableName: stri
        vs tableName
        vs c.Name
        vi (i + 1)
-       vopt (defaultText c.Default)
+       vopt (defaultText c)
        // A primary key column is implicitly NOT NULL in MySQL even
        // without an explicit `NOT NULL` — `Ast.ColumnDef.Nullable`
        // only tracks the explicit modifier (ponytail: `Storage`
@@ -1614,7 +1630,7 @@ let showColumns (catalog: Catalog) (full: bool) (dbName: string) (tableName: str
     findTable catalog dbName tableName
     |> Result.map (fun t ->
         let isNullable (c: ColumnDef) = if c.PrimaryKey || not c.Nullable then "NO" else "YES"
-        let defaultCol (c: ColumnDef) = defaultText c.Default
+        let defaultCol (c: ColumnDef) = defaultText c
         let extra = extraText
 
         let cols = t.Columns |> List.filter (fun c -> likeFilter likeOpt c.Name)
@@ -1684,9 +1700,10 @@ let private showCreateTableDDL (catalog: Catalog) (dbName: string) (t: Table) : 
             | _ -> false
 
         let defaultPart =
-            match defaultText c.Default with
+            match defaultText c with
             | _ when c.Generated.IsSome -> ""
             | Some d when c.Default = Some DCurrentTimestamp -> sprintf "DEFAULT %s" d
+            | Some d when (match c.Type with TBit _ -> true | _ -> false) -> sprintf "DEFAULT %s" d
             | Some d -> sprintf "DEFAULT '%s'" d
             | None -> if c.PrimaryKey || not c.Nullable || defaultless then "" else "DEFAULT NULL"
 
