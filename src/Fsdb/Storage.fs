@@ -1802,19 +1802,35 @@ let private validateForeignKeyDefinition
     (childIndexes: IndexDef list)
     (foreignKey: ForeignKeyDef)
     : Result<unit, StorageError> =
-    let equal left right = String.Equals(left, right, StringComparison.OrdinalIgnoreCase)
+    let equal (left: string) (right: string) = String.Equals(left, right, StringComparison.OrdinalIgnoreCase)
     let setNull action = action |> Option.exists (fun value -> equal value "SET NULL")
+
+    let findColumn (name: string) (columns: ColumnDef list) =
+        columns |> List.tryFind (fun column -> equal column.Name name)
+
+    let invalidDefinition () =
+        Error(
+            ExpressionError(
+                1239,
+                sprintf
+                    "Incorrect foreign key definition for '%s': Key reference and table reference don't match"
+                    foreignKey.Name
+            )
+        )
 
     let nonNullableChild =
         foreignKey.Columns
         |> List.tryPick (fun name ->
-            childColumns
-            |> List.tryFind (fun column -> equal column.Name name)
+            findColumn name childColumns
             |> Option.filter (fun column -> not column.Nullable)
             |> Option.map _.Name)
 
-    match nonNullableChild with
-    | Some column when setNull foreignKey.OnDelete || setNull foreignKey.OnUpdate ->
+    let missingChild = foreignKey.Columns |> List.tryFind (fun name -> findColumn name childColumns |> Option.isNone)
+
+    match missingChild, List.length foreignKey.Columns = List.length foreignKey.RefColumns, nonNullableChild with
+    | Some column, _, _ -> Error(ExpressionError(1072, sprintf "Key column '%s' doesn't exist in table" column))
+    | None, false, _ -> invalidDefinition ()
+    | None, true, Some column when setNull foreignKey.OnDelete || setNull foreignKey.OnUpdate ->
         Error(
             ExpressionError(
                 1830,
@@ -1824,9 +1840,7 @@ let private validateForeignKeyDefinition
                     foreignKey.Name
             )
         )
-    | _ when not checkForeignKeys ->
-        Ok()
-    | _ ->
+    | None, true, _ ->
         let parent =
             if equal tableName foreignKey.RefTable then
                 Some(childColumns, childIndexes)
@@ -1835,31 +1849,46 @@ let private validateForeignKeyDefinition
                 |> Option.map (fun table -> table.Columns, table.Indexes)
 
         match parent with
+        | None when not checkForeignKeys -> Ok()
         | None -> Error(ExpressionError(1824, sprintf "Failed to open the referenced table '%s'" foreignKey.RefTable))
         | Some(parentColumns, parentIndexes) ->
-            let sameColumns left right =
-                List.length left = List.length right && List.forall2 equal left right
-
-            let primary =
-                parentColumns |> List.choose (fun column -> if column.PrimaryKey then Some column.Name else None)
-
-            let uniqueKeys =
-                [ if not primary.IsEmpty then primary
-                  yield! parentIndexes |> List.filter _.Unique |> List.map _.Columns
-                  yield! parentColumns |> List.filter _.Unique |> List.map (fun column -> [ column.Name ]) ]
-
-            if uniqueKeys |> List.exists (fun columns -> sameColumns columns foreignKey.RefColumns) then
-                Ok()
-            else
+            match foreignKey.RefColumns |> List.tryFind (fun name -> findColumn name parentColumns |> Option.isNone) with
+            | Some column ->
                 Error(
                     ExpressionError(
-                        6125,
+                        3734,
                         sprintf
-                            "Failed to add the foreign key constraint. Missing unique key for constraint '%s' in the referenced table '%s'"
+                            "Failed to add the foreign key constraint. Missing column '%s' for constraint '%s' in the referenced table '%s'"
+                            column
                             foreignKey.Name
                             foreignKey.RefTable
                     )
                 )
+            | None when not checkForeignKeys -> Ok()
+            | None ->
+                let sameColumns left right = List.forall2 equal left right
+
+                let primary =
+                    parentColumns |> List.choose (fun column -> if column.PrimaryKey then Some column.Name else None)
+
+                let uniqueKeys =
+                    [ if not primary.IsEmpty then primary
+                      yield! parentIndexes |> List.filter _.Unique |> List.map _.Columns
+                      yield! parentColumns |> List.filter _.Unique |> List.map (fun column -> [ column.Name ]) ]
+
+                if uniqueKeys
+                   |> List.exists (fun columns -> List.length columns = List.length foreignKey.RefColumns && sameColumns columns foreignKey.RefColumns) then
+                    Ok()
+                else
+                    Error(
+                        ExpressionError(
+                            6125,
+                            sprintf
+                                "Failed to add the foreign key constraint. Missing unique key for constraint '%s' in the referenced table '%s'"
+                                foreignKey.Name
+                                foreignKey.RefTable
+                        )
+                    )
 
 let createTableSeeded
     (store: Store)

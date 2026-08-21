@@ -1491,6 +1491,62 @@ let tests =
                             "DDL error"
                     | Ok() -> failtest "expected a non-unique referenced key to fail"
 
+                testCase "CREATE validates foreign key column lists when foreign key checks are disabled"
+                <| fun _ ->
+                    let store = create ()
+
+                    createTable
+                        store
+                        defaultDatabase
+                        "parents"
+                        [ idCol; col "other" (TInt false) false ]
+                        [ { Name = "uq_pair"
+                            Columns = [ "id"; "other" ]
+                            Unique = true
+                            Kind = BTree } ]
+                        []
+                        None
+                        None
+                    |> ignore
+
+                    setForeignKeyChecks store false
+
+                    let cases =
+                        [ ("missing_child",
+                           [ idCol ],
+                           { Name = "fk_child_missing"
+                             Columns = [ "missing" ]
+                             RefTable = "parents"
+                             RefColumns = [ "id" ]
+                             OnDelete = None
+                             OnUpdate = None },
+                           (1072, "Key column 'missing' doesn't exist in table"))
+                          ("missing_parent",
+                           [ idCol ],
+                           { Name = "fk_parent_missing"
+                             Columns = [ "id" ]
+                             RefTable = "parents"
+                             RefColumns = [ "missing" ]
+                             OnDelete = None
+                             OnUpdate = None },
+                           (3734,
+                            "Failed to add the foreign key constraint. Missing column 'missing' for constraint 'fk_parent_missing' in the referenced table 'parents'"))
+                          ("arity_mismatch",
+                           [ idCol ],
+                           { Name = "fk_arity"
+                             Columns = [ "id" ]
+                             RefTable = "parents"
+                             RefColumns = [ "id"; "other" ]
+                             OnDelete = None
+                             OnUpdate = None },
+                           (1239,
+                            "Incorrect foreign key definition for 'fk_arity': Key reference and table reference don't match")) ]
+
+                    for tableName, columns, foreignKey, expected in cases do
+                        match createTable store defaultDatabase tableName columns [] [ foreignKey ] None None with
+                        | Error error -> Expect.equal (toMySqlError error) expected tableName
+                        | Ok() -> failtestf "expected %s to fail" tableName
+
                 testCase "INSERT of a child row with no matching parent returns error 1452"
                 <| fun _ ->
                     let store = withDeptEmployees None
