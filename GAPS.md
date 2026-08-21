@@ -336,7 +336,6 @@ disconnect detection cancelling evaluation (`Server.fs:363–406`).
 | Column flags | MULTIPLE_KEY, ZEROFILL, NO_DEFAULT_VALUE, ON_UPDATE_NOW, NUM, PART_KEY | not composed (`Value.fs:58–66`) | low | divergence |
 | Parameter metadata | STMT_PREPARE_OK carries result columns and typed param defs | column count always 0; params generic "?" VAR_STRING (`Protocol.fs:475–483`) | low | divergence |
 | Reprepare | automatic reprepare on metadata change | frozen ASTs; stale-metadata edge cases possible | low | divergence |
-| Unknown SET targets | error 1193 | `SET <any-single-token-name> = v` accepted and stored (`QueryHandler.fs:640–653`) | low | divergence |
 | System variables | hundreds live | ~30 known; most others inert or absent; time_zone static strings with no conversion | medium | divergence |
 
 ## 13. Authentication and privileges

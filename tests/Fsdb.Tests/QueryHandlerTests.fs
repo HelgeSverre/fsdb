@@ -1364,15 +1364,20 @@ let tests =
               let session, ok = handle session "SET GLOBAL max_heap_table_size = 500"
               Expect.equal ok (Affected 0UL) "SET GLOBAL acks"
 
-              // `max_heap_table_size` is in neither `defaultVariables` nor
-              // the `Limits` knobs, so it was never in this session's own
-              // `Variables` — only in the store-wide GLOBAL map SET GLOBAL
-              // just wrote. Scoped explicitly with `@@SESSION.` it stays
-              // unknown to this session, proving the GLOBAL write never
-              // touched `session.Variables`.
+              // The session keeps the value it inherited at connection
+              // time; a GLOBAL write only changes the default for later
+              // sessions.
               match handle session "SELECT @@SESSION.max_heap_table_size" |> snd with
-              | Err(1193, _) -> ()
-              | other -> failtestf "SET GLOBAL must not leak into this session's own @@SESSION value, got %A" other
+              | ResultSet(_, [ [ Some "16777216" ] ]) -> ()
+              | other -> failtestf "SET GLOBAL must not change this session's own value, got %A" other
+
+          testCase "SET rejects a syntactically valid unknown system variable"
+          <| fun _ ->
+              let session = create 1 (Fsdb.Storage.create ())
+
+              match handle session "SET SESSION definitely_unknown = 1" |> snd with
+              | Err(1193, message) -> Expect.stringContains message "definitely_unknown" "the unknown name is reported"
+              | other -> failtestf "expected 1193, got %A" other
 
           testCase "SET GLOBAL x = y is visible to SELECT @@GLOBAL.x on the same connection"
           <| fun _ ->
