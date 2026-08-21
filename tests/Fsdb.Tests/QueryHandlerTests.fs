@@ -1836,6 +1836,21 @@ let tests =
                   Expect.equal session.PendingTransactionIsolation (Some RepeatableRead) "the @@ spelling is next-transaction scoped"
               | _, other -> failtestf "expected OK, got %A" other
 
+          testCase "SET GLOBAL TRANSACTION ISOLATION LEVEL updates future session defaults"
+          <| fun _ ->
+              let store = Fsdb.Storage.create ()
+              let session = create 1 store
+
+              match handle session "SET GLOBAL TRANSACTION ISOLATION LEVEL REPEATABLE READ" with
+              | _, Affected 0UL ->
+                  let newcomer = create 2 store
+
+                  Expect.equal
+                      (newcomer.Variables |> Map.tryFind "transaction_isolation" |> Option.flatten)
+                      (Some "REPEATABLE-READ")
+                      "a new session inherits the global isolation default"
+              | _, other -> failtestf "expected OK, got %A" other
+
           testCase "unsupported transaction isolation levels return 1235"
           <| fun _ ->
               let session = create 1 (Fsdb.Storage.create ())
@@ -1843,6 +1858,7 @@ let tests =
               for sql in
                   [ "SET TRANSACTION ISOLATION LEVEL READ COMMITTED"
                     "SET SESSION TRANSACTION ISOLATION LEVEL READ UNCOMMITTED"
+                    "SET GLOBAL TRANSACTION ISOLATION LEVEL READ COMMITTED"
                     "SET @@transaction_isolation = 'SERIALIZABLE'" ] do
                   match handle session sql |> snd with
                   | Err(1235, _) -> ()

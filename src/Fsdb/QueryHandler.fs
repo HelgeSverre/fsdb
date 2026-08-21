@@ -923,11 +923,9 @@ let private flushStatusRe = Regex(@"^FLUSH\s+STATUS\s*;?$", RegexOptions.IgnoreC
 let private flushTablesRe = Regex(@"^FLUSH\s+TABLES\s*;?$", RegexOptions.IgnoreCase)
 let private flushLogsRe = Regex(@"^FLUSH\s+LOGS\s*;?$", RegexOptions.IgnoreCase)
 
-/// The optional SESSION keyword distinguishes persistent and next-transaction
-/// transaction characteristics.
 let private setTransactionIsolation =
     Regex(
-        @"^SET\s+(SESSION\s+)?TRANSACTION\s+ISOLATION\s+LEVEL\s+(REPEATABLE\s+READ|READ\s+COMMITTED|READ\s+UNCOMMITTED|SERIALIZABLE)$",
+        @"^SET\s+(?:(SESSION|GLOBAL)\s+)?TRANSACTION\s+ISOLATION\s+LEVEL\s+(REPEATABLE\s+READ|READ\s+COMMITTED|READ\s+UNCOMMITTED|SERIALIZABLE)$",
         RegexOptions.IgnoreCase
     )
 
@@ -1294,7 +1292,7 @@ let private executeStatement (session: Session) (sql: string) (upper: string) : 
 /// production to validate it against.
 type private Probe =
     | SetAutocommit of value: string
-    | SetTransactionIsolation of sessionScope: bool * level: string
+    | SetTransactionIsolation of scope: TransactionIsolationScope * level: string
     | SetTransactionAccess of sessionScope: bool * readOnly: bool
     | SetCharacterSet of charset: string
     | SetPassword of user: string option * password: string
@@ -1354,7 +1352,14 @@ let private tryProbe (sql: string) (upper: string) : Probe option =
         Some(SetAutocommit((setAutocommit.Match sql).Groups.[1].Value))
     elif setTransactionIsolation.IsMatch sql then
         let m = setTransactionIsolation.Match sql
-        Some(SetTransactionIsolation(m.Groups.[1].Success, m.Groups.[2].Value))
+
+        let scope =
+            match m.Groups.[1].Value.ToUpperInvariant() with
+            | "SESSION" -> SessionIsolation
+            | "GLOBAL" -> GlobalIsolation
+            | _ -> NextTransactionIsolation
+
+        Some(SetTransactionIsolation(scope, m.Groups.[2].Value))
     elif setTransactionAccess.IsMatch sql then
         let m = setTransactionAccess.Match sql
         Some(SetTransactionAccess(m.Groups.[1].Success, m.Groups.[2].Value.Equals("ONLY", StringComparison.OrdinalIgnoreCase)))
@@ -1502,11 +1507,11 @@ let private runProbe (session: Session) (sql: string) (probe: Probe) : Session *
 
     match probe with
     | SetAutocommit value -> handleSetAutocommit value session
-    | SetTransactionIsolation(sessionScope, level) ->
+    | SetTransactionIsolation(scope, level) ->
         match transactionIsolationOf level with
         | Error result -> session, result
         | Ok isolation ->
-            let action = SetTransactionIsolationAction((if sessionScope then SessionIsolation else NextTransactionIsolation), isolation)
+            let action = SetTransactionIsolationAction(scope, isolation)
 
             match validateSetAction session action with
             | Error result -> session, result
