@@ -741,6 +741,48 @@ let coerceValue (strict: bool) (col: ColumnDef) (v: Value) : Result<Value, Stora
     let temporalFallback () =
         if strict || not col.Nullable then fail () else Ok VNull
 
+    let outOfRange () = Error(OutOfRangeForColumn col.Name)
+
+    let integerRange =
+        function
+        | TTinyInt unsigned -> if unsigned then 0M, 255M else -128M, 127M
+        | TBool -> -128M, 127M
+        | TSmallInt unsigned -> if unsigned then 0M, 65535M else -32768M, 32767M
+        | TMediumInt unsigned -> if unsigned then 0M, 16777215M else -8388608M, 8388607M
+        | TInt unsigned -> if unsigned then 0M, 4294967295M else -2147483648M, 2147483647M
+        | TBigInt false -> decimal Int64.MinValue, decimal Int64.MaxValue
+        | ty -> invalidArg (nameof ty) "expected a signed or narrow integer type"
+
+    let narrowInteger ty value =
+        let lo, hi = integerRange ty
+
+        let finish number =
+            if number >= lo && number <= hi then
+                Ok(VInt(int64 number))
+            elif strict then
+                outOfRange ()
+            else
+                Ok(VInt(int64 (max lo (min hi number))))
+
+        match value with
+        | VInt number -> finish (decimal number)
+        | VUInt number -> finish (decimal number)
+        | VDecimal number -> finish (Math.Truncate number)
+        | VDouble number ->
+            if Double.IsNaN number then
+                numericFallback (fun () -> VInt 0L)
+            elif number < float lo || number > float hi then
+                if strict then outOfRange () else finish (if number < 0.0 then lo else hi)
+            else
+                finish (Math.Truncate(decimal number))
+        | VString text ->
+            match parseNumeric text with
+            | Some number when number < float lo || number > float hi ->
+                if strict then outOfRange () else finish (if number < 0.0 then lo else hi)
+            | Some number -> finish (Math.Truncate(decimal number))
+            | None -> numericFallback (fun () -> VInt 0L)
+        | _ -> numericFallback (fun () -> VInt 0L)
+
     match col.Type, v with
     | TDecimal(precision, _), _ when precision < 1 || precision > 65 ->
         Error(ExpressionError(1426, sprintf "Too-big precision %d specified for '%s'. Maximum is 65." precision col.Name))
@@ -759,16 +801,10 @@ let coerceValue (strict: bool) (col: ColumnDef) (v: Value) : Result<Value, Stora
         // clamped to the domain's edge otherwise. `INSERT INTO t VALUES (-1)`
         // into a BIGINT UNSIGNED must not silently store 0.
         //
-        // ponytail: only this branch enforces its range — the signed integer
-        // types below still clamp unconditionally (inherited behaviour). Give
-        // the whole integer family one shared range check when that gap is
-        // addressed.
         | TBigInt true ->
             // 1264 ("Out of range value"), MySQL's code for a value outside
             // the column's numeric domain — not `fail`'s 1366, which is the
             // *uncoercible* case (a non-numeric string).
-            let outOfRange () = Error(OutOfRangeForColumn col.Name)
-
             let narrow (d: decimal) =
                 if d >= 0m && d <= decimal UInt64.MaxValue then
                     Ok(VUInt(uint64 d))
@@ -801,17 +837,11 @@ let coerceValue (strict: bool) (col: ColumnDef) (v: Value) : Result<Value, Stora
                         Ok(VUInt(if d < 0.0 then 0UL else UInt64.MaxValue))
                 | None -> numericFallback (fun () -> VUInt 0UL)
             | _ -> numericFallback (fun () -> VUInt 0UL)
-        | TInt _
-        | TBigInt _
-        | TSmallInt _
-        | TMediumInt _
-        | TTinyInt _
-        | TBool
+        | (TInt _ | TBigInt false | TSmallInt _ | TMediumInt _ | TTinyInt _ | TBool) as integerType ->
+            narrowInteger integerType v
         | TYear ->
             match v with
             | VInt i -> Ok(VInt i)
-            // The signed counterpart of `CAST(x AS UNSIGNED)`'s wrap:
-            // `CAST(CAST(18446744073709551615 AS UNSIGNED) AS SIGNED)` is -1.
             | VUInt u -> Ok(VInt(int64 u))
             | VDouble d -> Ok(VInt(int64 d))
             | VDecimal d -> Ok(VInt(int64 d))

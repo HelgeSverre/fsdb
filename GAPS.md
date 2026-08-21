@@ -164,7 +164,6 @@ wire-faithful column metadata (`ColumnWire.fs:17–84`).
 
 | Gap | MySQL 8.4 | fsdb | Impact | Class |
 |---|---|---|---|---|
-| Signed integer range enforcement | out-of-range → 1264 strict / clamp+warning non-strict | TINYINT–INT clamp unconditionally; only BIGINT UNSIGNED range-checks (`Storage.fs:762–803`) | medium | divergence |
 | Zero dates | `'0000-00-00'` representable; NO_ZERO_DATE mode-gated | no zero-date sentinel; rejection unconditional, non-strict NOT NULL temporal writes hard-fail (`Storage.fs:63–67, 707–711`) | low | divergence |
 | TIME value domain | typed TIME comparisons/arithmetic | stored and compared as pre-formatted strings; no `VTime` case (`Value.fs:13–30`, `Storage.fs:911–935`) | medium | divergence |
 | BIT type | `BIT(M)` with bit-literal I/O | absent | low | refusal |

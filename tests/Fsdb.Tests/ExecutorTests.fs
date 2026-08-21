@@ -5986,6 +5986,34 @@ let tests =
                     | ResultSet(_, [ [ Some "1" ]; [ Some "2" ] ]) -> ()
                     | other -> failtestf "unexpected hinted query result: %A" other
 
+                testCase "integer writes reject overflow in strict mode and clamp it otherwise"
+                <| fun _ ->
+                    let store = newStore ()
+                    runDefault store "CREATE TABLE integer_ranges (a TINYINT, b SMALLINT UNSIGNED, c INT, d BIGINT)" |> ignore
+
+                    match runDefault store "INSERT INTO integer_ranges VALUES (128, 1, 1, 1)" with
+                    | Err(1264, _) -> ()
+                    | other -> failtestf "expected strict TINYINT overflow, got %A" other
+
+                    match runDefault store "INSERT INTO integer_ranges VALUES (1, -1, 1, 1)" with
+                    | Err(1264, _) -> ()
+                    | other -> failtestf "expected strict unsigned SMALLINT overflow, got %A" other
+
+                    match runDefault store "INSERT INTO integer_ranges VALUES (1, 1, 2147483648, 1)" with
+                    | Err(1264, _) -> ()
+                    | other -> failtestf "expected strict INT overflow, got %A" other
+
+                    match runDefault store "INSERT INTO integer_ranges VALUES (1, 1, 1, 18446744073709551615)" with
+                    | Err(1264, _) -> ()
+                    | other -> failtestf "expected strict BIGINT overflow, got %A" other
+
+                    setStrictMode store false
+                    runDefault store "INSERT INTO integer_ranges VALUES (128, -1, 2147483648, 18446744073709551615)" |> ignore
+
+                    match runDefault store "SELECT a,b,c,d FROM integer_ranges" with
+                    | ResultSet(_, [ [ Some "127"; Some "0"; Some "2147483647"; Some "9223372036854775807" ] ]) -> ()
+                    | other -> failtestf "expected non-strict clamping, got %A" other
+
                 testCase "bitwise operators use unsigned 64-bit values and MySQL precedence"
                 <| fun _ ->
                     expectRow

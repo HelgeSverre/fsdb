@@ -2218,6 +2218,7 @@ let rec private evalExpr (ctx: EvalContext) (expr: Expr) : Result<Value, EvalErr
 
             let v =
                 match v, ty with
+                | VUInt u, TBigInt false -> VInt(int64 u)
                 | VString s, (TTinyInt _ | TBool | TSmallInt _ | TMediumInt _ | TInt _ | TBigInt _ | TYear) ->
                     VString(leadingNumericPrefix leadingIntegerPrefixRegex s |> Option.defaultValue "")
                 | VString s, (TDouble | TFloat | TDecimal _) ->
