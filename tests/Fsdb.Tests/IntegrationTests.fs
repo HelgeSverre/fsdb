@@ -127,6 +127,158 @@ let tests =
               }
               |> Async.RunSynchronously
 
+          testCase "CLIENT_MULTI_STATEMENTS stops after an error"
+          <| fun _ ->
+              async {
+                  let listener = Fsdb.Server.startListening System.Net.IPAddress.Loopback 0
+                  let store = Fsdb.Storage.create ()
+                  let port = Fsdb.Server.port listener
+                  Fsdb.Server.serve listener store Fsdb.Functions.empty |> Async.Start
+
+                  try
+                      let! client, stream = connectRawAsWithCapabilities port "root" (ClientProtocol41 ||| ClientMultiStatements ||| ClientMultiResults)
+                      use client = client
+                      let sql = "CREATE TABLE batch_before (id INT); INSERT INTO missing_batch VALUES (1); CREATE TABLE batch_after (id INT)"
+                      do! writePacketAsync stream { SeqId = 0uy; Payload = Array.append [| 0x03uy |] (Text.Encoding.UTF8.GetBytes sql) } |> Async.Ignore
+                      let! first = readPacketAsync stream
+                      let! second = readPacketAsync stream
+                      Expect.equal first.Value.Payload.[0] 0uy "first statement succeeds"
+                      let status = Reader(first.Value.Payload.[1..])
+                      status.ReadLenEncInt() |> ignore
+                      status.ReadLenEncInt() |> ignore
+                      Expect.isTrue (status.ReadInt16LE() &&& StatusMoreResultsExists <> 0) "first result has MORE_RESULTS"
+                      Expect.equal second.Value.Payload.[0] 0xffuy "second statement terminates the batch"
+                      Expect.equal second.Value.SeqId 2uy "error continues response packet numbering"
+                      Expect.isTrue (Fsdb.Storage.scanList store "fsdb" "batch_before" |> Result.isOk) "prior statement remains applied"
+                      Expect.isTrue (Fsdb.Storage.scanList store "fsdb" "batch_after" |> Result.isError) "later statement is skipped"
+                  finally
+                      listener.Stop()
+              }
+              |> Async.RunSynchronously
+
+          testCase "a semicolon batch without CLIENT_MULTI_STATEMENTS has no side effects"
+          <| fun _ ->
+              async {
+                  let listener = Fsdb.Server.startListening System.Net.IPAddress.Loopback 0
+                  let store = Fsdb.Storage.create ()
+                  let port = Fsdb.Server.port listener
+                  Fsdb.Server.serve listener store Fsdb.Functions.empty |> Async.Start
+
+                  try
+                      let! client, stream = connectRaw port
+                      use client = client
+                      let sql = "CREATE TABLE disallowed_batch (id INT); INSERT INTO disallowed_batch VALUES (1)"
+                      do! writePacketAsync stream { SeqId = 0uy; Payload = Array.append [| 0x03uy |] (Text.Encoding.UTF8.GetBytes sql) } |> Async.Ignore
+                      let! rejected = readPacketAsync stream
+                      Expect.equal rejected.Value.Payload.[0] 0xffuy "batch is rejected"
+                      Expect.equal (Reader(rejected.Value.Payload.[1..]).ReadInt16LE()) 1064 "batch requires CLIENT_MULTI_STATEMENTS"
+                      Expect.isTrue (Fsdb.Storage.scanList store "fsdb" "disallowed_batch" |> Result.isError) "first statement is not applied"
+                  finally
+                      listener.Stop()
+              }
+              |> Async.RunSynchronously
+
+          testCase "LOAD DATA LOCAL INFILE receives client bytes without reading a server path"
+          <| fun _ ->
+              Fsdb.Limits.withSettings [ "local_infile", "ON" ] (fun () ->
+                  async {
+                      let listener = Fsdb.Server.startListening System.Net.IPAddress.Loopback 0
+                      let store = Fsdb.Storage.create ()
+                      let port = Fsdb.Server.port listener
+                      Fsdb.Server.serve listener store Fsdb.Functions.empty |> Async.Start
+
+                      try
+                          let! client, stream = connectRawAsWithCapabilities port "root" (ClientProtocol41 ||| ClientLocalFiles)
+                          use client = client
+                          let query (sql: string) =
+                              writePacketAsync stream { SeqId = 0uy; Payload = Array.append [| 0x03uy |] (Text.Encoding.UTF8.GetBytes sql) }
+
+                          do! query "CREATE TABLE load_rows (id INT PRIMARY KEY, name VARCHAR(20))" |> Async.Ignore
+                          let! _ = readPacketAsync stream
+                          do! query "LOAD DATA LOCAL INFILE 'client-only.tsv' INTO TABLE load_rows" |> Async.Ignore
+                          let! request = readPacketAsync stream
+                          Expect.equal request.Value.SeqId 1uy "LOCAL request sequence"
+                          Expect.equal request.Value.Payload.[0] 0xfbuy "LOCAL request header"
+                          Expect.equal (Text.Encoding.UTF8.GetString(request.Value.Payload.[1..])) "client-only.tsv" "server echoes the client file name"
+                          do! writePacketAsync stream { SeqId = 2uy; Payload = Text.Encoding.UTF8.GetBytes "1\tAda\n1\tDuplicate\n2\tGrace\n" } |> Async.Ignore
+                          do! writePacketAsync stream { SeqId = 3uy; Payload = [||] } |> Async.Ignore
+                          let! result = readPacketAsync stream
+                          Expect.equal result.Value.SeqId 4uy "LOAD result sequence"
+                          Expect.equal result.Value.Payload.[0] 0uy "LOAD result is OK"
+                          let ok = Reader(result.Value.Payload.[1..])
+                          ok.ReadLenEncInt() |> ignore
+                          ok.ReadLenEncInt() |> ignore
+                          ok.ReadInt16LE() |> ignore
+                          Expect.equal (ok.ReadInt16LE()) 1 "LOCAL duplicate is a warning"
+
+                          match Fsdb.Storage.scanList store "fsdb" "load_rows" with
+                          | Ok(_, rows) ->
+                              Expect.equal (rows |> List.map (fun row -> row.[0], row.[1])) [ VInt 1L, VString "Ada"; VInt 2L, VString "Grace" ] "uploaded rows"
+                          | Error error -> failtestf "table scan failed: %A" error
+                      finally
+                          listener.Stop()
+                  }
+                  |> Async.RunSynchronously)
+
+          testCase "LOAD DATA LOCAL INFILE rejects disabled and prepared commands"
+          <| fun _ ->
+              async {
+                  let listener = Fsdb.Server.startListening System.Net.IPAddress.Loopback 0
+                  let port = Fsdb.Server.port listener
+                  Fsdb.Server.serve listener (Fsdb.Storage.create ()) Fsdb.Functions.empty |> Async.Start
+
+                  try
+                      let! client, stream = connectRaw port
+                      use client = client
+                      let query = Array.append [| 0x03uy |] (Text.Encoding.UTF8.GetBytes "LOAD DATA LOCAL INFILE 'never-read' INTO TABLE missing")
+                      do! writePacketAsync stream { SeqId = 0uy; Payload = query } |> Async.Ignore
+                      let! rejected = readPacketAsync stream
+                      Expect.equal rejected.Value.Payload.[0] 0xffuy "disabled LOCAL never sends a file request"
+                      Expect.equal (Reader(rejected.Value.Payload.[1..]).ReadInt16LE()) 3948 "disabled LOCAL error code"
+
+                      let prepare = Array.append [| 0x16uy |] (Text.Encoding.UTF8.GetBytes "LOAD DATA LOCAL INFILE 'never-read' INTO TABLE missing")
+                      do! writePacketAsync stream { SeqId = 0uy; Payload = prepare } |> Async.Ignore
+                      let! prepared = readPacketAsync stream
+                      Expect.equal prepared.Value.Payload.[0] 0xffuy "prepared LOCAL is rejected"
+                      Expect.equal (Reader(prepared.Value.Payload.[1..]).ReadInt16LE()) 1295 "prepared LOCAL error code"
+                  finally
+                      listener.Stop()
+              }
+              |> Async.RunSynchronously
+
+          testCase "LOAD DATA LOCAL INFILE drains an oversized upload before returning 1153"
+          <| fun _ ->
+              Fsdb.Limits.withSettings [ "local_infile", "ON"; "max_load_data_bytes", "1024" ] (fun () ->
+                  async {
+                      let listener = Fsdb.Server.startListening System.Net.IPAddress.Loopback 0
+                      let store = Fsdb.Storage.create ()
+                      let port = Fsdb.Server.port listener
+                      Fsdb.Server.serve listener store Fsdb.Functions.empty |> Async.Start
+
+                      try
+                          let! client, stream = connectRawAsWithCapabilities port "root" (ClientProtocol41 ||| ClientLocalFiles)
+                          use client = client
+                          let query (sql: string) =
+                              writePacketAsync stream { SeqId = 0uy; Payload = Array.append [| 0x03uy |] (Text.Encoding.UTF8.GetBytes sql) }
+
+                          do! query "CREATE TABLE limited_load (value TEXT)" |> Async.Ignore
+                          let! _ = readPacketAsync stream
+                          do! query "LOAD DATA LOCAL INFILE 'large.tsv' INTO TABLE limited_load" |> Async.Ignore
+                          let! _ = readPacketAsync stream
+                          do! writePacketAsync stream { SeqId = 2uy; Payload = Array.create 1025 120uy } |> Async.Ignore
+                          do! writePacketAsync stream { SeqId = 3uy; Payload = [||] } |> Async.Ignore
+                          let! rejected = readPacketAsync stream
+                          Expect.equal rejected.Value.SeqId 4uy "overflow result sequence"
+                          Expect.equal rejected.Value.Payload.[0] 0xffuy "overflow returns ERR"
+                          Expect.equal (Reader(rejected.Value.Payload.[1..]).ReadInt16LE()) 1153 "overflow error code"
+                          match Fsdb.Storage.scanList store "fsdb" "limited_load" with
+                          | Ok(_, rows) -> Expect.isEmpty rows "no rows are published"
+                          | Error error -> failtestf "table scan failed: %A" error
+                      finally
+                          listener.Stop()
+                  }
+                  |> Async.RunSynchronously)
+
           testCase "TLS upgrades after SSLRequest and reports negotiated session values"
           <| fun _ ->
               async {

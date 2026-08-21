@@ -15,6 +15,21 @@ open FParsec
 open Fsdb.Ast
 open Fsdb.Value
 
+/// The supported `LOAD DATA LOCAL INFILE` options, separated from `Statement`
+/// because the data stream arrives after the server has parsed the command.
+type LocalLoad =
+    { FileName: string
+      Table: string
+      Replace: bool
+      Ignore: bool
+      Charset: string option
+      FieldTerminator: string
+      EnclosedBy: string option
+      Escape: string option
+      LineTerminator: string
+      IgnoreLines: int
+      Columns: string list }
+
 // ---------------------------------------------------------------------------
 // Whitespace, comments, tokens
 // ---------------------------------------------------------------------------
@@ -2165,6 +2180,57 @@ let private replaceStmt: Parser<Statement, unit> =
         | Choice2Of2(cols, Choice1Of2 rows) -> Replace(table, cols |> Option.defaultValue [], rows)
         | Choice2Of2(cols, Choice2Of2 select) -> ReplaceSelect(table, cols |> Option.defaultValue [], select)
 
+let private localLoadString = stringLit |>> function VString value -> value | _ -> ""
+
+let private localLoadFields =
+    opt
+        ((keyword "FIELDS" <|> keyword "COLUMNS")
+         >>. opt (keyword "TERMINATED" >>. keyword "BY" >>. localLoadString)
+         .>>. opt (keyword "ENCLOSED" >>. keyword "BY" >>. localLoadString)
+         .>>. opt (keyword "ESCAPED" >>. keyword "BY" >>. localLoadString))
+    |>> function
+        | None -> "\t", None, Some "\\"
+        | Some((terminator, enclosed), escape) ->
+            (terminator |> Option.defaultValue "\t"), enclosed, (escape |> Option.defaultValue "\\" |> Some)
+
+let private localLoadLines =
+    opt
+        (keyword "LINES"
+         >>. opt (keyword "TERMINATED" >>. keyword "BY" >>. localLoadString))
+    |>> function
+        | None -> "\n"
+        | Some terminator -> terminator |> Option.defaultValue "\n"
+
+let private localLoadData: Parser<LocalLoad, unit> =
+    (keyword "LOAD"
+     >>. keyword "DATA"
+     >>. keyword "LOCAL"
+     >>. keyword "INFILE"
+     >>. localLoadString
+     .>>. opt ((keyword "REPLACE" >>% true) <|> (keyword "IGNORE" >>% false))
+     .>> keyword "INTO"
+     .>> keyword "TABLE"
+     .>>. qualifiedTableName
+     .>>. opt (keyword "CHARACTER" >>. keyword "SET" >>. identifier)
+     .>>. localLoadFields
+     .>>. localLoadLines
+     .>>. opt (keyword "IGNORE" >>. intTok .>> (keyword "LINES" <|> keyword "ROWS"))
+     .>>. opt (between (sym "(") (sym ")") (sepBy1 identifier (sym ","))))
+    |>> fun (((((((fileName, replace), table), charset), fields), lineTerminator), ignoreLines), columns) ->
+        let fieldTerminator, enclosed, escape = fields
+
+        { FileName = fileName
+          Table = table
+          Replace = replace |> Option.defaultValue false
+          Ignore = replace |> Option.defaultValue false |> not
+          Charset = charset
+          FieldTerminator = fieldTerminator
+          EnclosedBy = enclosed
+          Escape = escape
+          LineTerminator = lineTerminator
+          IgnoreLines = ignoreLines |> Option.defaultValue 0
+          Columns = columns |> Option.defaultValue [] }
+
 /// A projection's alias — `AS name`, or real MySQL's implicit form with no
 /// `AS` at all (`SELECT 1 x FROM t`, `SELECT price * qty total FROM
 /// orders`): a bare word right after the expression that isn't the next
@@ -3067,6 +3133,27 @@ let parse (sql: string) : Result<Statement, string> =
         match run full sql with
         | Success(stmt, _, _) -> Result.Ok stmt
         | Failure(msg, _, _) -> Result.Error msg
+    with ex ->
+        Result.Error ex.Message
+
+/// Parses a `LOAD DATA LOCAL INFILE` command without consuming its later
+/// client-to-server data stream.
+let parseLocalLoad (sql: string) : Result<LocalLoad, string> =
+    try
+        match run (ws >>. localLoadData .>> opt (sym ";") .>> eof) sql with
+        | Success(load, _, _) ->
+            let validSeparator value = value = "" || value.Length = 1
+
+            if
+                validSeparator load.FieldTerminator
+                && validSeparator load.LineTerminator
+                && (load.EnclosedBy |> Option.forall validSeparator)
+                && (load.Escape |> Option.forall validSeparator)
+            then
+                Result.Ok load
+            else
+                Result.Error "LOAD DATA delimiters must be empty or one character"
+        | Failure(message, _, _) -> Result.Error message
     with ex ->
         Result.Error ex.Message
 

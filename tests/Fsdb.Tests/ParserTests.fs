@@ -2122,4 +2122,31 @@ let tests =
           <| fun _ ->
               match splitStatements "SELECT 'unterminated" with
               | Error _ -> ()
-              | Ok statements -> failtestf "expected an error, got %A" statements ]
+              | Ok statements -> failtestf "expected an error, got %A" statements
+
+          testCase "LOAD DATA LOCAL INFILE parses field and line settings"
+          <| fun _ ->
+              match
+                  parseLocalLoad
+                      "LOAD DATA LOCAL INFILE 'records.tsv' IGNORE INTO TABLE people FIELDS TERMINATED BY '\\t' ENCLOSED BY '\"' ESCAPED BY '\\\\' LINES TERMINATED BY '\\n' IGNORE 1 LINES (id, name)"
+              with
+              | Ok load ->
+                  Expect.equal load.FileName "records.tsv" "file name"
+                  Expect.equal load.Table "people" "target table"
+                  Expect.isTrue load.Ignore "LOCAL input ignores row conversion errors"
+                  Expect.equal load.FieldTerminator "\t" "field terminator"
+                  Expect.equal load.EnclosedBy (Some "\"") "enclosure"
+                  Expect.equal load.Escape (Some "\\") "escape"
+                  Expect.equal load.LineTerminator "\n" "line terminator"
+                  Expect.equal load.IgnoreLines 1 "header lines"
+                  Expect.sequenceEqual load.Columns [ "id"; "name" ] "target columns"
+              | Error error -> failtestf "unexpected parse error: %s" error
+
+          testCase "LOAD DATA LOCAL INFILE rejects multi-character enclosure and escape settings"
+          <| fun _ ->
+              for sql in
+                  [ "LOAD DATA LOCAL INFILE 'x' INTO TABLE t FIELDS ENCLOSED BY 'xx'"
+                    "LOAD DATA LOCAL INFILE 'x' INTO TABLE t FIELDS ESCAPED BY 'xx'" ] do
+                  match parseLocalLoad sql with
+                  | Error _ -> ()
+                  | Ok load -> failtestf "expected a separator error, got %A" load ]

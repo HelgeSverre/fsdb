@@ -642,7 +642,7 @@ type private SetAction =
 let private nullableSystemVars = Set.ofList [ "character_set_results" ]
 
 let private globalOnlyLimitVariables =
-    Set.ofList [ "max_allowed_packet"; "max_connections"; "max_prepared_stmt_count"; "net_write_timeout" ]
+    Set.ofList [ "max_allowed_packet"; "max_connections"; "max_prepared_stmt_count"; "net_write_timeout"; "local_infile" ]
 
 /// Parses one comma-split fragment into the variable(s) it would assign,
 /// without touching `session`/`Store` — `handleSet` only applies any of
@@ -1995,7 +1995,9 @@ let prepareStatement (sql: string) : Result<Statement option * int, int * string
     let trimmed = sql.Trim().TrimEnd(';').Trim()
     let upper = trimmed.ToUpperInvariant()
 
-    if (tryProbe trimmed upper).IsSome then
+    if upper.StartsWith("LOAD DATA", StringComparison.Ordinal) then
+        Result.Error(1295, "This command is not supported in the prepared statement protocol yet")
+    elif (tryProbe trimmed upper).IsSome then
         Result.Ok(None, placeholderPositions sql |> List.length)
     else
         match Parser.parse sql with
@@ -2145,6 +2147,52 @@ let handle (session: Session) (rawSql: string) : Session * QueryResult =
         | :? OperationCanceledException ->
             reraise ()
         | ex -> recoverExecutionError session (sprintf "query: %s" (Log.redactSql rawSql)) ex)
+
+/// Parses and authorizes a LOCAL INFILE command before the server asks the
+/// client to send bytes. The file name is never resolved by the server.
+let tryPrepareLocalLoad (session: Session) (sql: string) : Result<Parser.LocalLoad option, QueryResult> =
+    let normalized = Parser.stripVersionComments sql |> fun value -> value.TrimStart()
+
+    if not (normalized.StartsWith("LOAD DATA", StringComparison.OrdinalIgnoreCase)) then
+        Result.Ok None
+    else
+        match Parser.parseLocalLoad sql with
+        | Result.Error _ -> Result.Error(syntaxError sql)
+        | Result.Ok load ->
+            let charset = load.Charset |> Option.map (fun value -> value.ToLowerInvariant())
+
+            match charset with
+            | Some value when value <> "utf8" && value <> "utf8mb4" ->
+                Result.Error(Err(1235, sprintf "LOAD DATA CHARACTER SET %s is not supported" value))
+            | _ ->
+                let statement =
+                    if load.Replace then
+                        Replace(load.Table, load.Columns, [])
+                    else
+                        Insert(load.Table, load.Columns, [], [], load.Ignore)
+
+                let dbName = session.Database |> Option.defaultValue defaultDatabase
+
+                match Auth.check (Session.currentStore session) session.User (Auth.requiredPrivilegesInStore (Session.currentStore session) dbName statement) with
+                | Ok() -> Result.Ok(Some load)
+                | Error(code, message) -> Result.Error(Err(code, message))
+
+/// Inserts already-decoded LOCAL INFILE rows through the ordinary INSERT or
+/// REPLACE execution path, retaining its coercion, trigger, and transaction
+/// behavior.
+let executeLocalLoad (session: Session) (load: Parser.LocalLoad) (rows: Value list list) : Session * QueryResult =
+    let statement =
+        if load.Replace then
+            Replace(load.Table, load.Columns, rows |> List.map (List.map Lit))
+        else
+            Insert(load.Table, load.Columns, rows |> List.map (List.map Lit), [], load.Ignore)
+
+    recordDiagnostics session false (fun () ->
+        try
+            executeParsed session statement
+        with
+        | :? OperationCanceledException -> reraise ()
+        | ex -> recoverExecutionError session "LOAD DATA LOCAL INFILE" ex)
 
 /// Executes a prepared statement with its bound parameter values. Parser-
 /// produced statements bind the values into the parsed AST and run it

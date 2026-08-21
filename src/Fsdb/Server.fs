@@ -308,6 +308,95 @@ let private statusFlagsForMore (session: Session) = statusFlagsFor session ||| S
 let private warningCountFor (session: Session) =
     min (int UInt16.MaxValue) session.Diagnostics.Length
 
+let private localInfileRequestPayload (fileName: string) =
+    Array.append [| 0xfbuy |] (Encoding.UTF8.GetBytes fileName)
+
+let private decodeLocalLoad (load: Parser.LocalLoad) (bytes: byte[]) : Result<Value list list, int * string> =
+    try
+        let text = UTF8Encoding(false, true).GetString bytes
+        let enclosedBy = load.EnclosedBy |> Option.bind (fun value -> if value.Length = 1 then Some value.[0] else None)
+        let escape = load.Escape |> Option.bind (fun value -> if value.Length = 1 then Some value.[0] else None)
+        let rows = ResizeArray<Value list>()
+        let fields = ResizeArray<Value>()
+        let value = StringBuilder()
+        let raw = StringBuilder()
+        let mutable index = 0
+        let mutable enclosed = false
+        let mutable fieldEnclosed = false
+        let mutable escaped = false
+
+        let endField () =
+            let text = value.ToString()
+            let rawText = raw.ToString()
+            fields.Add(if not fieldEnclosed && rawText = "\\N" then VNull else VString text)
+            value.Clear() |> ignore
+            raw.Clear() |> ignore
+            fieldEnclosed <- false
+
+        let endRow () =
+            endField ()
+            rows.Add(List.ofSeq fields)
+            fields.Clear()
+
+        let startsWith (value: string) =
+            value <> ""
+            && index + value.Length <= text.Length
+            && String.CompareOrdinal(text, index, value, 0, value.Length) = 0
+
+        while index < text.Length do
+            let current = text.[index]
+            raw.Append current |> ignore
+
+            if escaped then
+                value.Append(
+                    match current with
+                    | '0' -> '\u0000'
+                    | 'b' -> '\b'
+                    | 'n' -> '\n'
+                    | 'r' -> '\r'
+                    | 't' -> '\t'
+                    | value -> value
+                )
+                |> ignore
+
+                escaped <- false
+                index <- index + 1
+            elif escape = Some current then
+                escaped <- true
+                index <- index + 1
+            elif enclosed then
+                if enclosedBy = Some current then
+                    enclosed <- false
+                else
+                    value.Append current |> ignore
+
+                index <- index + 1
+            elif enclosedBy = Some current && value.Length = 0 then
+                enclosed <- true
+                fieldEnclosed <- true
+                index <- index + 1
+            elif startsWith load.LineTerminator then
+                raw.Length <- raw.Length - 1
+                endRow ()
+                index <- index + load.LineTerminator.Length
+            elif startsWith load.FieldTerminator then
+                raw.Length <- raw.Length - 1
+                endField ()
+                index <- index + load.FieldTerminator.Length
+            else
+                value.Append current |> ignore
+                index <- index + 1
+
+        if escaped || enclosed then
+            Result.Error(1300, "Invalid LOAD DATA input")
+        else
+            if value.Length > 0 || raw.Length > 0 || fields.Count > 0 then
+                endRow ()
+
+            Result.Ok(rows |> Seq.skip (min load.IgnoreLines rows.Count) |> List.ofSeq)
+    with :? DecoderFallbackException ->
+        Result.Error(1300, "Invalid utf8mb4 character string")
+
 /// A dead socket, detected without consuming any data: `Poll(SelectRead)`
 /// returns true both when the peer closed/reset the connection *and* when
 /// there's unread data waiting, so `Available = 0` is what tells the two
@@ -342,9 +431,14 @@ let private disconnectPollIntervalMs = 50
 /// already treats `None` as "stop the command loop"). Not private: the
 /// timeout itself is exercised directly by the test suite with a short
 /// `timeoutMs` rather than waiting out the real 5-minute production value.
-let readPacketWithTimeoutMs (timeoutMs: int) (client: TcpClient) (stream: IO.Stream) : Async<Packet option> =
+let private readWithTimeoutMs
+    (read: IO.Stream -> Async<Packet option>)
+    (timeoutMs: int)
+    (client: TcpClient)
+    (stream: IO.Stream)
+    : Async<Packet option> =
     async {
-        let readTask = Async.StartAsTask(readPacketAsync stream)
+        let readTask = Async.StartAsTask(read stream)
         // Cancelled on the way out so the loser's `Task.Delay` dies with the
         // read that beat it. Without this, every packet read on every
         // connection leaves a live five-minute timer behind — a busy
@@ -382,6 +476,9 @@ let readPacketWithTimeoutMs (timeoutMs: int) (client: TcpClient) (stream: IO.Str
             timerCts.Dispose()
     }
 
+let readPacketWithTimeoutMs (timeoutMs: int) (client: TcpClient) (stream: IO.Stream) : Async<Packet option> =
+    readWithTimeoutMs readPacketAsync timeoutMs client stream
+
 /// Converts the MySQL seconds-valued timeout without wrapping the `int`
 /// milliseconds accepted by `Task.Delay`. Values beyond that API's range
 /// use its longest finite delay instead of breaking every connection before
@@ -391,6 +488,44 @@ let timeoutMilliseconds (timeoutSeconds: int) : int =
 
 let private readPacketWithTimeoutSeconds (timeoutSeconds: int) (client: TcpClient) (stream: IO.Stream) : Async<Packet option> =
     readPacketWithTimeoutMs (timeoutMilliseconds timeoutSeconds) client stream
+
+let private readPhysicalPacketWithTimeoutSeconds (timeoutSeconds: int) (client: TcpClient) (stream: IO.Stream) : Async<Packet option> =
+    readWithTimeoutMs readPhysicalPacketAsync (timeoutMilliseconds timeoutSeconds) client stream
+
+let private receiveLocalData
+    (client: TcpClient)
+    (stream: IO.Stream)
+    (timeoutSeconds: int)
+    (startSeqId: byte)
+    : Async<Result<byte[] * byte, (int * string) * byte>> =
+    async {
+        use bytes = new IO.MemoryStream()
+        let mutable expectedSeqId = startSeqId
+        let mutable finished = false
+        let mutable error: (int * string) option = None
+
+        while not finished do
+            match! readPhysicalPacketWithTimeoutSeconds timeoutSeconds client stream with
+            | None ->
+                finished <- true
+                error <- Some(2013, "Lost connection to client during LOAD DATA LOCAL INFILE")
+            | Some packet when packet.SeqId <> expectedSeqId ->
+                finished <- true
+                error <- Some(1156, "Packets out of order during LOAD DATA LOCAL INFILE")
+            | Some packet ->
+                expectedSeqId <- expectedSeqId + 1uy
+
+                if packet.Payload.Length = 0 then
+                    finished <- true
+                elif error.IsNone && int64 bytes.Length + int64 packet.Payload.Length > int64 Limits.maxLoadDataBytes then
+                    error <- Some(1153, "LOAD DATA LOCAL INFILE exceeds max_load_data_bytes")
+                elif error.IsNone then
+                    bytes.Write(packet.Payload, 0, packet.Payload.Length)
+
+        match error with
+        | Some error -> return Result.Error(error, expectedSeqId)
+        | None -> return Result.Ok(bytes.ToArray(), expectedSeqId)
+    }
 
 let private sessionWaitTimeout (session: Session) =
     match session.Variables |> Map.tryFind "wait_timeout" |> Option.flatten with
@@ -839,6 +974,8 @@ let private handleConnection
                                         match dispatched with
                                         | None -> ()
                                         | Some(session, result) ->
+                                            activeSession <- Some session
+                                            processEntry.Db <- session.Database
                                             do!
                                                 sendQueryResult
                                                     stream
@@ -857,15 +994,54 @@ let private handleConnection
                                                 match statements with
                                                 | [] -> return Some session
                                                 | statement :: remaining ->
-                                                    match runCancellable (fun () -> QueryHandler.handle session statement) with
+                                                    let! dispatched =
+                                                        match QueryHandler.tryPrepareLocalLoad session statement with
+                                                        | Result.Error result -> async { return Some(session, result, seqId) }
+                                                        | Result.Ok None ->
+                                                            async {
+                                                                return
+                                                                    runCancellable (fun () -> QueryHandler.handle session statement)
+                                                                    |> Option.map (fun (nextSession, result) -> nextSession, result, seqId)
+                                                            }
+                                                        | Result.Ok(Some load) when not Limits.localInfile || capabilities &&& ClientLocalFiles = 0u ->
+                                                            async {
+                                                                return
+                                                                    Some(
+                                                                        session,
+                                                                        Err(3948, "Loading local data is disabled; this must be enabled on both the client and server sides"),
+                                                                        seqId
+                                                                    )
+                                                            }
+                                                        | Result.Ok(Some load) ->
+                                                            async {
+                                                                let! uploadSeqId =
+                                                                    writePacketAsync stream { SeqId = seqId; Payload = localInfileRequestPayload load.FileName }
+
+                                                                match! receiveLocalData client stream (sessionWaitTimeout session) uploadSeqId with
+                                                                | Result.Error((code, _), _) when code = 2013 || code = 1156 ->
+                                                                    client.Close()
+                                                                    return None
+                                                                | Result.Error((code, message), responseSeqId) -> return Some(session, Err(code, message), responseSeqId)
+                                                                | Result.Ok(bytes, responseSeqId) ->
+                                                                    match decodeLocalLoad load bytes with
+                                                                    | Result.Error(code, message) -> return Some(session, Err(code, message), responseSeqId)
+                                                                    | Result.Ok rows ->
+                                                                        return
+                                                                            runCancellable (fun () -> QueryHandler.executeLocalLoad session load rows)
+                                                                            |> Option.map (fun (nextSession, result) -> nextSession, result, responseSeqId)
+                                                            }
+
+                                                    match dispatched with
                                                     | None -> return None
-                                                    | Some(nextSession, result) ->
+                                                    | Some(nextSession, result, resultSeqId) ->
+                                                        activeSession <- Some nextSession
+                                                        processEntry.Db <- nextSession.Database
                                                         let hasMore = not remaining.IsEmpty && (match result with Err _ -> false | _ -> true)
                                                         let! nextSeqId =
                                                             sendQueryResultAndNextSeq
                                                                 stream
                                                                 capabilities
-                                                                seqId
+                                                                resultSeqId
                                                                 (if hasMore then statusFlagsForMore nextSession else statusFlagsFor nextSession)
                                                                 (uint64 nextSession.LastInsertId)
                                                                 (warningCountFor nextSession)

@@ -40,9 +40,11 @@ let ServerCapabilities =
     ||| ClientPluginAuth
     ||| ClientDeprecateEof
 
-/// Adds TLS negotiation only when a server certificate is configured.
+/// Adds capabilities enabled by the current transport and server settings.
 let serverCapabilities (tlsEnabled: bool) =
-    if tlsEnabled then ServerCapabilities ||| ClientSsl else ServerCapabilities
+    ServerCapabilities
+    ||| (if tlsEnabled then ClientSsl else 0u)
+    ||| (if Limits.localInfile then ClientLocalFiles else 0u)
 
 let ServerVersion = "8.4.0-fsdb"
 
@@ -240,6 +242,7 @@ let sqlStateForCode (code: int) : string =
     | 1690 -> "22003" // ER_DATA_OUT_OF_RANGE
     | 1426 -> "42000" // ER_TOO_BIG_PRECISION
     | 1235 -> "42000" // ER_NOT_SUPPORTED_YET
+    | 3948 -> "42000" // ER_LOAD_DATA_LOCAL_INFILE_REJECTED
     | 1451 -> "23000" // ER_ROW_IS_REFERENCED_2
     | 1452 -> "23000" // ER_NO_REFERENCED_ROW_2
     | _ -> "HY000"

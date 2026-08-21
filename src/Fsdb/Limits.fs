@@ -25,6 +25,13 @@ open System
 /// statements — a large blob as a hex literal — before ever sending them.
 let mutable maxAllowedPacket = 64 * 1024 * 1024
 
+/// LOCAL INFILE is disabled unless an operator explicitly enables it.
+let mutable localInfile = false
+
+/// Bounds a complete LOCAL INFILE upload, whose packet stream is not limited
+/// by `max_allowed_packet` as one logical command.
+let mutable maxLoadDataBytes = 64 * 1024 * 1024
+
 /// Ceiling on concurrently handled connections. `Server.serve` reads it
 /// after every accept, so a runtime raise or reduction applies to the next
 /// connection without resizing a semaphore.
@@ -102,6 +109,18 @@ let private knobs =
         Set = fun v -> maxAllowedPacket <- int v
         Get = fun () -> int64 maxAllowedPacket
         Reportable = true }
+      { Name = "local_infile"
+        Min = 0L
+        Max = 1L
+        Set = fun v -> localInfile <- v <> 0L
+        Get = fun () -> if localInfile then 1L else 0L
+        Reportable = true }
+      { Name = "max_load_data_bytes"
+        Min = 1024L
+        Max = 1073741824L
+        Set = fun v -> maxLoadDataBytes <- int v
+        Get = fun () -> int64 maxLoadDataBytes
+        Reportable = false }
       { Name = "max_connections"
         Min = 1L
         Max = 100000L
@@ -208,7 +227,20 @@ let private validatedSetting (name: string) (value: string) : Result<Knob * int6
                 (knobs |> List.map (fun k -> k.Name) |> String.concat ", ")
         )
     | Some knob ->
-        match parseSize value with
+        let parsed =
+            if name = "local_infile" then
+                match value.Trim().ToLowerInvariant() with
+                | "1"
+                | "on"
+                | "true" -> Some 1L
+                | "0"
+                | "off"
+                | "false" -> Some 0L
+                | _ -> None
+            else
+                parseSize value
+
+        match parsed with
         | None -> Error(sprintf "%s: '%s' is not a number (digits, optionally suffixed K, M or G)" name value)
         | Some n when n < knob.Min || n > knob.Max ->
             Error(sprintf "%s: %d is out of range %d..%d" name n knob.Min knob.Max)
@@ -233,7 +265,13 @@ let applySetting (name: string) (value: string) : Result<unit, string> =
 let variables () : (string * string) list =
     [ for knob in knobs do
           if knob.Reportable then
-              knob.Name, string (knob.Get()) ]
+              let value =
+                  if knob.Name = "local_infile" then
+                      if localInfile then "ON" else "OFF"
+                  else
+                      string (knob.Get())
+
+              knob.Name, value ]
     @ [ "interactive_timeout", string waitTimeoutSeconds ]
 
 /// Applies `settings` for the duration of `f`, restoring every knob
@@ -273,9 +311,9 @@ let private applyOption (name: string) (value: string option) : Result<unit, str
         | Error _ when isLoose && not (isKnownSetting bare) -> Ok()
         | result -> result
     | None ->
-        // A bare name is MySQL's boolean form. fsdb has no boolean knob, so
-        // the only useful thing to say is which of the two mistakes it is.
-        if isKnownSetting bare then
+        if normalizeName bare = "local_infile" then
+            applySetting bare "1"
+        elif isKnownSetting bare then
             Error(sprintf "%s needs a value" (normalizeName bare))
         elif isLoose then
             Ok()
