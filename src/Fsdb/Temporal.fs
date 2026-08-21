@@ -3,6 +3,80 @@ module Fsdb.Temporal
 
 open System
 open System.Globalization
+open System.Text.RegularExpressions
+
+type TimeValue =
+    private
+    | TimeValue of ticks: int64
+
+let maxTimeTicks =
+    (838L * 3600L + 59L * 60L + 59L) * TimeSpan.TicksPerSecond + 9_999_990L
+
+let timeTicks (TimeValue ticks) = ticks
+
+let tryTimeValue (ticks: int64) : TimeValue option =
+    if abs ticks <= maxTimeTicks && ticks % 10L = 0L then Some(TimeValue ticks) else None
+
+let timeValueOrClamp (ticks: int64) : TimeValue =
+    let clamped = max -maxTimeTicks (min maxTimeTicks ticks)
+    let microsecondTicks = clamped - clamped % 10L
+    TimeValue microsecondTicks
+
+let roundTimeTicksToFsp (fsp: int) (ticks: int64) : int64 =
+    let precision = max 0 (min 6 fsp)
+    let unit = pown 10L (7 - precision)
+    let magnitude = abs ticks
+    let remainder = magnitude % unit
+    let rounded = magnitude - remainder + (if remainder * 2L >= unit then unit else 0L)
+    if ticks < 0L then -rounded else rounded
+
+let private timePattern =
+    Regex(@"^([+-])?(?:(\d+)\s+)?(\d{1,3}):(\d{1,2}):(\d{1,2})(?:\.(\d{1,7}))?$", RegexOptions.CultureInvariant)
+
+let tryParseTimeTicks (text: string) : int64 option =
+    let matched = timePattern.Match(text.Trim())
+
+    if not matched.Success then
+        None
+    else
+        let number (group: Group) = if group.Success then Int64.Parse(group.Value, CultureInfo.InvariantCulture) else 0L
+        let days = number matched.Groups.[2]
+        let hours = number matched.Groups.[3]
+        let minutes = number matched.Groups.[4]
+        let seconds = number matched.Groups.[5]
+
+        if minutes > 59L || seconds > 59L then
+            None
+        else
+            let fraction = matched.Groups.[6].Value
+            let ticks =
+                (((days * 24L + hours) * 60L + minutes) * 60L + seconds) * TimeSpan.TicksPerSecond
+                + (if fraction = "" then 0L else Int64.Parse(fraction.PadRight(7, '0'), CultureInfo.InvariantCulture))
+
+            Some(if matched.Groups.[1].Value = "-" then -ticks else ticks)
+
+let tryParseTimeValue text =
+    tryParseTimeTicks text |> Option.bind tryTimeValue
+
+let formatTimeValueFsp (fsp: int) (value: TimeValue) =
+    let ticks = timeTicks value
+    let sign = if ticks < 0L then "-" else ""
+    let magnitude = abs ticks
+    let totalSeconds = magnitude / TimeSpan.TicksPerSecond
+    let hours = totalSeconds / 3600L
+    let minutes = totalSeconds % 3600L / 60L
+    let seconds = totalSeconds % 60L
+    let micros = magnitude % TimeSpan.TicksPerSecond / 10L
+    let baseText = sprintf "%s%02d:%02d:%02d" sign hours minutes seconds
+
+    if fsp <= 0 then
+        baseText
+    else
+        sprintf "%s.%s" baseText ((sprintf "%06d" micros).Substring(0, min 6 fsp))
+
+let formatTimeValue (value: TimeValue) =
+    let text = formatTimeValueFsp 6 value
+    text.TrimEnd('0').TrimEnd('.')
 
 type ZeroDate =
     private

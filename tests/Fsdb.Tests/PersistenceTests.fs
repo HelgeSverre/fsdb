@@ -1177,7 +1177,9 @@ let tests =
               let date = tryZeroDate 2020 0 1 |> Option.get
               let dateTime = tryZeroDateTime date 12 34 56 123_000 |> Option.get
 
-              for original in [ VZeroDate date; VZeroDateTime dateTime ] do
+              let time = tryParseTimeValue "-838:59:59.123456" |> Option.get
+
+              for original in [ VZeroDate date; VZeroDateTime dateTime; VTime time ] do
                   let w = Writer()
                   encodeValue w original
                   let r = Reader(w.ToArray())

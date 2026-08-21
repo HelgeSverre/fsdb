@@ -152,6 +152,7 @@ let valueToSqlLiteral (v: Value) : string =
     | VBytes bytes -> "X'" + Convert.ToHexString(bytes) + "'"
     | VDate _
     | VDateTime _
+    | VTime _
     | VZeroDate _
     | VZeroDateTime _
     | VString _

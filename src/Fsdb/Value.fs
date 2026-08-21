@@ -660,6 +660,7 @@ type Value =
     | VBytes of byte[]
     | VDate of DateOnly
     | VDateTime of DateTime
+    | VTime of TimeValue
     | VZeroDate of ZeroDate
     | VZeroDateTime of ZeroDateTime
     /// Raw JSON text — ponytail: no parsed representation yet, add one
@@ -795,6 +796,7 @@ let toText (v: Value) : string option =
         let micros = (dt.Ticks % TimeSpan.TicksPerSecond) / 10L
         let baseStr = dt.ToString("yyyy-MM-dd HH:mm:ss", CultureInfo.InvariantCulture)
         Some(if micros = 0L then baseStr else sprintf "%s.%06d" baseStr micros)
+    | VTime value -> Some(formatTimeValue value)
     | VZeroDate d -> Some(formatZeroDate d)
     | VZeroDateTime dt -> Some(formatZeroDateTime dt)
     | VJson j -> Some j
@@ -807,9 +809,7 @@ let toText (v: Value) : string option =
 /// bare `VDateTime` alone, via `toText`, can't say how many digits the column
 /// wants). The stored value is already rounded to `fsp` at coercion
 /// (`Storage.coerceValue`), so the top `fsp` micro-digits are exact — this
-/// only chooses how many to show. Any non-`VDateTime` value (a `TIME` column
-/// is stored pre-formatted as `VString`; every other type) falls through to
-/// `toText`.
+/// only chooses how many to show. Other values fall through to `toText`.
 let toTextFsp (fsp: int) (v: Value) : string option =
     match v with
     | VDateTime dt ->
@@ -821,6 +821,7 @@ let toTextFsp (fsp: int) (v: Value) : string option =
             let micros = (dt.Ticks % TimeSpan.TicksPerSecond) / 10L
             Some(sprintf "%s.%s" baseStr ((sprintf "%06d" micros).Substring(0, min fsp 6)))
     | VZeroDateTime dt -> Some(formatZeroDateTimeFsp fsp dt)
+    | VTime value -> Some(formatTimeValueFsp fsp value)
     | _ -> toText v
 
 /// A round-trippable tagged-text encoding of a `Value` — `ofWire (toWire v) = v`
@@ -845,6 +846,7 @@ let toWire (v: Value) : string =
     // "O" (round-trip) format, not `toText`'s display format — keeps
     // sub-second precision.
     | VDateTime dt -> "V" + dt.ToString("O", CultureInfo.InvariantCulture)
+    | VTime value -> "H" + string (timeTicks value)
     | VZeroDate d -> "Z" + formatZeroDate d
     | VZeroDateTime dt -> "W" + formatZeroDateTime dt
     | VJson j -> "J" + b64 j
@@ -878,6 +880,12 @@ let ofWire (s: string) : Value =
         | 'B' -> VBytes(Convert.FromBase64String payload)
         | 'T' -> VDate(DateOnly.Parse(payload, CultureInfo.InvariantCulture))
         | 'V' -> VDateTime(DateTime.Parse(payload, CultureInfo.InvariantCulture, DateTimeStyles.RoundtripKind))
+        | 'H' ->
+            payload
+            |> Int64.Parse
+            |> tryTimeValue
+            |> Option.map VTime
+            |> Option.defaultWith (fun () -> failwithf "Value.ofWire: invalid time %s" payload)
         | 'Z' -> tryParseZeroDate payload |> Option.map VZeroDate |> Option.defaultWith (fun () -> failwithf "Value.ofWire: invalid zero date %s" payload)
         | 'W' -> tryParseZeroDateTime payload |> Option.map VZeroDateTime |> Option.defaultWith (fun () -> failwithf "Value.ofWire: invalid zero datetime %s" payload)
         | 'J' -> VJson(unb64 payload)
@@ -930,6 +938,9 @@ let encodeValue (w: Writer) (v: Value) : unit =
         w.WriteByte 0x07uy
         w.WriteInt64LE dt.Ticks
         w.WriteByte(byte (int dt.Kind))
+    | VTime value ->
+        w.WriteByte 0x0euy
+        w.WriteInt64LE(timeTicks value)
     | VZeroDate d ->
         let year, month, day = zeroDateParts d
         w.WriteByte 0x0buy
@@ -984,6 +995,11 @@ let decodeValue (r: #IReader) : Value =
 
         VDateTime(new DateTime(ticks, kind))
     | 0x08uy -> VJson(r.ReadLenEncString() |> Option.defaultValue "")
+    | 0x0euy ->
+        r.ReadInt64LE()
+        |> tryTimeValue
+        |> Option.map VTime
+        |> Option.defaultWith (fun () -> failwith "Value.decodeValue: invalid time")
     | 0x0Auy ->
         let bytes =
             r.ReadLenEncInt()
@@ -1032,6 +1048,7 @@ let mysqlMetadataOf (v: Value) : ColumnMetadata =
     | VBytes _ -> { columnMetadata TypeBlob with Flags = BlobFlag ||| BinaryFlag }
     | VDate _ -> columnMetadata TypeDate
     | VDateTime _ -> columnMetadata TypeDateTime
+    | VTime _ -> columnMetadata TypeTime
     | VZeroDate _ -> columnMetadata TypeDate
     | VZeroDateTime _ -> columnMetadata TypeDateTime
 
@@ -1067,6 +1084,17 @@ let private compareBitString (value: uint64) (text: string) =
 /// MySQL's implicit numeric coercion, used by both comparison and
 /// arithmetic: numeric types convert directly, strings parse their leading
 /// numeric prefix, and anything else coerces through its text rendering.
+let private timeNumber (value: TimeValue) =
+    let ticks = timeTicks value
+    let sign = if ticks < 0L then -1.0 else 1.0
+    let magnitude = abs ticks
+    let totalSeconds = magnitude / TimeSpan.TicksPerSecond
+    let hours = totalSeconds / 3600L
+    let minutes = totalSeconds % 3600L / 60L
+    let seconds = totalSeconds % 60L
+    let micros = magnitude % TimeSpan.TicksPerSecond / 10L
+    sign * (float (hours * 10000L + minutes * 100L + seconds) + float micros / 1_000_000.0)
+
 let toDouble (v: Value) : float =
     match v with
     | VNull -> 0.0
@@ -1076,6 +1104,7 @@ let toDouble (v: Value) : float =
     | VDouble d -> d
     | VDecimal d -> float d
     | VString s -> parseLeadingNumeric s
+    | VTime value -> timeNumber value
     | VBytes _
     | VDate _
     | VDateTime _
@@ -1140,9 +1169,6 @@ let private asDateTime (v: Value) : DateTime =
 /// quoted `"abc"` against the bare `abc`).
 /// https://dev.mysql.com/doc/refman/8.4/en/json.html#json-comparison
 ///
-/// ponytail: TIME and OPAQUE have no `Value` case to reach them, and
-/// fsdb has no BIT type, so those ranks are unreachable placeholders —
-/// widen when those types land.
 let private jsonRankOfNode (node: JsonNode) : int =
     if isNull (box node) then
         0
@@ -1178,6 +1204,7 @@ let private asJsonOperand (v: Value) : int * JsonNode =
     | VString s -> 2, JsonValue.Create s
     | VDate _ -> 6, null
     | VZeroDate _ -> 6, null
+    | VTime _ -> 7, null
     | VDateTime _ -> 8, null
     | VZeroDateTime _ -> 8, null
     | VBytes _ -> 11, null
@@ -1292,6 +1319,7 @@ let rec compare (a: Value) (b: Value) : int =
     | VGeometry x, VGeometry y -> compareBytesLex (geometryToMySqlBinary x) (geometryToMySqlBinary y)
     | VDate x, VDate y -> Operators.compare x y
     | VDateTime x, VDateTime y -> Operators.compare x y
+    | VTime x, VTime y -> Operators.compare (timeTicks x) (timeTicks y)
     | VZeroDate x, VZeroDate y -> compareZeroDates x y
     | VZeroDateTime x, VZeroDateTime y -> compareZeroDateTimes x y
     | VDate x, VDateTime y -> Operators.compare (x.ToDateTime(TimeOnly.MinValue)) y
@@ -1322,6 +1350,11 @@ let rec compare (a: Value) (b: Value) : int =
         | _, (true, dt) -> Operators.compare (asDateTime a) dt
         | _, (false, _) -> compareStrings (toText a |> Option.defaultValue "") s
     | VString _, (VDate _ | VDateTime _ | VZeroDate _ | VZeroDateTime _) -> -(compare b a)
+    | VTime value, VString text ->
+        match tryParseTimeValue text with
+        | Some other -> Operators.compare (timeTicks value) (timeTicks other)
+        | None -> compareStrings (formatTimeValue value) text
+    | VString text, VTime value -> -(compare (VTime value) (VString text))
     // BIGINT vs DECIMAL with neither side a DOUBLE: promote both to
     // `decimal` and compare exactly. Routing this through `toDouble`
     // (float has only 53 bits of mantissa) silently merges distinct
@@ -1426,6 +1459,7 @@ let private classify (v: Value) : NumKind option =
     | VBytes _
     | VDate _
     | VDateTime _
+    | VTime _
     | VZeroDate _
     | VZeroDateTime _
     | VJson _

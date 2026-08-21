@@ -1529,6 +1529,7 @@ let private encodeEqualityKey (columns: ColumnDef list) (indices: int list) (row
         | VBytes value -> "B" + Convert.ToHexString value
         | VDate value -> "T" + string value.DayNumber
         | VDateTime value -> "V" + string value.Ticks
+        | VTime value -> "H" + string (timeTicks value)
         | VZeroDate _
         | VZeroDateTime _ -> toWire row.[index]
         | VJson value -> "J" + value.TrimEnd(' ').ToUpperInvariant()

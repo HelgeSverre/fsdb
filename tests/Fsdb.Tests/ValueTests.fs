@@ -81,6 +81,12 @@ let tests =
                         (Some "2024-03-05 13:45:09.000005")
                         "leading zeros are significant in the fraction"
 
+                testCase "VTime renders signed hours beyond one day"
+                <| fun _ ->
+                    let time = tryParseTimeValue "-838:59:59.123456" |> Option.get
+                    Expect.equal (toText (VTime time)) (Some "-838:59:59.123456") "time"
+                    Expect.equal (toTextFsp 2 (VTime time)) (Some "-838:59:59.12") "declared precision"
+
                 testCase "zero dates preserve zero components"
                 <| fun _ ->
                     let date = tryZeroDate 2020 0 1 |> Option.get
@@ -111,6 +117,7 @@ let tests =
                           VBytes [| 0uy; 255uy; 1uy |]
                           VDate(DateOnly(2024, 3, 5))
                           VDateTime(DateTime(2024, 3, 5, 13, 45, 9, 123))
+                          VTime(tryParseTimeValue "-838:59:59.123456" |> Option.get)
                           VZeroDate(tryZeroDate 2020 0 1 |> Option.get)
                           VZeroDateTime(tryZeroDateTime (tryZeroDate 0 0 0 |> Option.get) 0 0 0 0 |> Option.get)
                           VJson "{\"a\":1}"
@@ -335,6 +342,11 @@ let tests =
                 <| fun _ ->
                     Expect.equal (mysqlTypeOf (VDateTime(DateTime(2024, 3, 5, 13, 45, 9)))) TypeDateTime "datetime"
 
+                testCase "VTime reports TIME"
+                <| fun _ ->
+                    let time = tryParseTimeValue "01:02:03" |> Option.get
+                    Expect.equal (mysqlTypeOf (VTime time)) TypeTime "time"
+
                 testCase "VNull falls back to VAR_STRING — NULL round-trips regardless of declared type"
                 <| fun _ -> Expect.equal (mysqlTypeOf VNull) TypeVarString "null" ]
 
@@ -384,6 +396,13 @@ let tests =
                         (compare (VDate(DateOnly(2024, 1, 1))) (VDate(DateOnly(2024, 6, 1))))
                         0
                         "jan < jun"
+
+                testCase "times compare by signed duration"
+                <| fun _ ->
+                    let negative = tryParseTimeValue "-01:02:03" |> Option.get |> VTime
+                    let long = tryParseTimeValue "25:00:00" |> Option.get |> VTime
+                    Expect.isLessThan (compare negative long) 0 "negative precedes positive"
+                    Expect.isGreaterThan (compare long (VString "02:00:00")) 0 "time strings are temporal bounds"
 
                 testCase "partial zero dates sort before complete dates"
                 <| fun _ ->
