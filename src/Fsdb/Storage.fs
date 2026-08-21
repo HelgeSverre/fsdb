@@ -2193,6 +2193,23 @@ let private applyAlterAction (strict: bool) (table: Table) (action: AlterAction)
                 Indexes = table.Indexes |> List.filter (fun ix -> not (String.Equals(ix.Name, name, StringComparison.OrdinalIgnoreCase))) },
             None
         )
+    | RenameIndex(oldName, newName) ->
+        let equal left right = String.Equals(left, right, StringComparison.OrdinalIgnoreCase)
+
+        match table.Indexes |> List.tryFind (fun index -> equal index.Name oldName) with
+        | None -> Error(ExpressionError(1176, sprintf "Key '%s' doesn't exist in table '%s'" oldName table.OriginalName))
+        | Some _ when table.Indexes |> List.exists (fun index -> equal index.Name newName) ->
+            Error(ExpressionError(1061, sprintf "Duplicate key name '%s'" newName))
+        | Some _ ->
+            let indexes =
+                table.Indexes
+                |> List.map (fun index -> if equal index.Name oldName then { index with Name = newName } else index)
+
+            Ok(
+                { table with
+                    Indexes = indexes },
+                None
+            )
     | AddForeignKey fk -> Ok({ table with ForeignKeys = table.ForeignKeys @ [ fk ] }, None)
     | DropForeignKey name ->
         Ok(

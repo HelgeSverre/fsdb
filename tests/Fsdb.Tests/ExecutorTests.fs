@@ -1628,6 +1628,24 @@ let tests =
                     | ResultSet([ "id" ], [ [ Some "1" ] ]) -> ()
                     | other -> failtestf "expected only id left, got %A" other
 
+                testCase "RENAME INDEX preserves the index and reports name errors"
+                <| fun _ ->
+                    let store = newStore ()
+                    runDefault store "CREATE TABLE t (id INT, u INT, UNIQUE KEY old_ix (u), KEY occupied (id))" |> ignore
+                    Expect.equal (runDefault store "ALTER TABLE t RENAME INDEX old_ix TO new_ix") (Affected 0UL) "renamed"
+
+                    let table = store.Catalog.[defaultDatabase].[normalizeTableName "t"]
+                    Expect.isTrue (table.Indexes |> List.exists (fun index -> index.Name = "new_ix" && index.Unique)) "unique index renamed"
+                    Expect.isFalse (table.Indexes |> List.exists (fun index -> index.Name = "old_ix")) "old name removed"
+
+                    match runDefault store "ALTER TABLE t RENAME INDEX missing TO another" with
+                    | Err(1176, _) -> ()
+                    | other -> failtestf "expected missing key error, got %A" other
+
+                    match runDefault store "ALTER TABLE t RENAME INDEX new_ix TO occupied" with
+                    | Err(1061, _) -> ()
+                    | other -> failtestf "expected duplicate key name error, got %A" other
+
                 testCase "CHANGE COLUMN renames and SELECT sees the new name"
                 <| fun _ ->
                     let store = newStore ()

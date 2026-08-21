@@ -1217,6 +1217,8 @@ let tests =
                     "ALTER TABLE acts RENAME COLUMN remark TO comment"
                     "ALTER TABLE acts ADD INDEX ix_extra (extra)"
                     "ALTER TABLE acts DROP INDEX ix_extra"
+                    "ALTER TABLE acts ADD INDEX ix_old (extra)"
+                    "ALTER TABLE acts RENAME INDEX ix_old TO ix_new"
                     "ALTER TABLE acts ADD CONSTRAINT fk_p FOREIGN KEY (pid) REFERENCES parent(id)"
                     "ALTER TABLE acts DROP FOREIGN KEY fk_p"
                     "ALTER TABLE acts ADD PRIMARY KEY (id)"
@@ -1268,6 +1270,7 @@ let tests =
                   Expect.equal names [ "comment"; "extra"; "id"; "pid" ] "add/drop/change/rename column all replayed"
                   Expect.isEmpty t.ForeignKeys "the dropped foreign key stayed dropped"
                   Expect.equal (t.Indexes |> List.filter (fun ix -> ix.Name = "ix_extra")) [] "the dropped index stayed dropped"
+                  Expect.isTrue (t.Indexes |> List.exists (fun ix -> ix.Name = "ix_new")) "the renamed index replayed"
                   Expect.isTrue (t.Columns |> List.exists (fun c -> c.PrimaryKey)) "ADD PRIMARY KEY replayed"
                   Expect.equal
                       (t.Columns |> List.find (fun c -> c.Name = "extra") |> _.Default)

@@ -568,6 +568,7 @@ type AlterAction =
     | RenameColumnTo of oldName: string * newName: string
     | AddIndex of IndexDef
     | DropIndexAction of name: string
+    | RenameIndex of oldName: string * newName: string
     | AddForeignKey of ForeignKeyDef
     | DropForeignKey of name: string
     | AddCheck of CheckConstraintDef

@@ -1981,6 +1981,12 @@ let private renameColumnAction: Parser<AlterAction, unit> =
     attempt (keyword "RENAME" >>. keyword "COLUMN" >>. identifier .>> keyword "TO" .>>. identifier)
     |>> RenameColumnTo
 
+let private renameIndexAction: Parser<AlterAction, unit> =
+    attempt (
+        keyword "RENAME" >>. (keyword "INDEX" <|> keyword "KEY") >>. identifier .>> keyword "TO" .>>. identifier
+    )
+    |>> RenameIndex
+
 let private renameToAction: Parser<AlterAction, unit> =
     attempt (keyword "RENAME" >>. opt (keyword "TO" <|> keyword "AS") >>. identifier) |>> RenameTo
 
@@ -2002,6 +2008,7 @@ let private alterAction: Parser<AlterAction list, unit> =
           changeColumnAction
           setColumnDefaultAction |>> List.singleton
           setCheckEnforcementAction |>> List.singleton
+          renameIndexAction |>> List.singleton
           renameColumnAction |>> List.singleton
           setAutoIncrementAction |>> List.singleton
           renameToAction |>> List.singleton ]

@@ -1460,6 +1460,13 @@ let tests =
                         (AlterTable("t", [ RenameColumnTo("a", "b") ]))
                         "rename column"
 
+                testCase "RENAME INDEX a TO b"
+                <| fun _ ->
+                    Expect.equal
+                        (parseOk "ALTER TABLE t RENAME INDEX old_ix TO new_ix")
+                        (AlterTable("t", [ RenameIndex("old_ix", "new_ix") ]))
+                        "rename index"
+
                 testCase "ADD [UNIQUE] INDEX|KEY name (cols) and DROP INDEX|KEY name"
                 <| fun _ ->
                     Expect.equal
