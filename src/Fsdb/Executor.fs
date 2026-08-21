@@ -4407,19 +4407,7 @@ and private runSelectStmt
         // narrowing, so everything below (`applyJoin`, `runSelect`'s own
         // WHERE/ORDER BY/LIMIT/GROUP BY) runs completely unmodified over
         // whatever this produces.
-        let resolved =
-            match fromItem, select.Joins with
-            | FromTable tref, [] ->
-                tryPointLookup store dbName tref select.Where
-                |> Option.map (fun (cols, rows) -> Ok(cols, rows |> List.map snd))
-                |> Option.orElseWith (fun () -> tryRangeLookup store dbName tref select.Where |> Option.map (fun (cols, rows) -> Ok(cols, rows |> List.map snd)))
-                |> Option.orElseWith (fun () -> tryInformationSchemaNarrow store dbName tref select.Where |> Option.map Ok)
-                |> Option.defaultWith (fun () -> resolveFromItem store registry dbName fromItem)
-            | _ -> resolveFromItem store registry dbName fromItem
-
-        match resolved with
-        | Error e -> e, [], []
-        | Ok(baseColumns, baseRows) ->
+        let runResolved (baseColumns: ColumnDef list) (baseRows: Value[] seq) (select: SelectStmt) =
             let baseQualifier = fromItemQualifier fromItem
 
             let initial : Result<((string * ColumnDef list) list * Value[] seq) * string list list, QueryResult> =
@@ -4446,6 +4434,26 @@ and private runSelectStmt
                         rewriteNaturalSelect select sources select.Joins namesPerJoin
 
                 runSelect store registry dbName (sources |> List.collect snd) (qualifierRanges sources) rows select' outer
+
+        match fromItem, select.Joins with
+        | FromTable tref, [] ->
+            match tryIndexOrder store registry dbName tref select with
+            | Some(columns, rows) -> runResolved columns rows { select with OrderBy = [] }
+            | None ->
+                let resolved =
+                    tryPointLookup store dbName tref select.Where
+                    |> Option.map (fun (cols, rows) -> Ok(cols, rows |> List.map snd))
+                    |> Option.orElseWith (fun () -> tryRangeLookup store dbName tref select.Where |> Option.map (fun (cols, rows) -> Ok(cols, rows |> List.map snd)))
+                    |> Option.orElseWith (fun () -> tryInformationSchemaNarrow store dbName tref select.Where |> Option.map Ok)
+                    |> Option.defaultWith (fun () -> resolveFromItem store registry dbName fromItem)
+
+                match resolved with
+                | Error e -> e, [], []
+                | Ok(columns, rows) -> runResolved columns rows select
+        | _ ->
+            match resolveFromItem store registry dbName fromItem with
+            | Error e -> e, [], []
+            | Ok(columns, rows) -> runResolved columns rows select
 
 /// A WHERE expression's top-level `AND` chain flattened into its conjuncts
 /// — `a AND b AND c` (any nesting/associativity) yields `[a; b; c]`; any
@@ -4542,6 +4550,55 @@ and private tryRangeLookup (store: Store) (dbName: string) (tref: TableRef) (whe
     |> List.tryPick (fun (column, lower, upper) ->
         Storage.trySecondaryRangeLookup store tableDb tref.Table column lower upper
         |> Option.map (fun (_, _, columns, rows) -> columns, rows))
+
+and private directOrderColumn (tref: TableRef) (select: SelectStmt) : (string * Direction) option =
+    let selfQualifier = tref.Alias |> Option.defaultValue tref.Table
+
+    let directBareColumn name =
+        let directProjections =
+            select.Projections
+            |> List.map (function
+                | Col projection, None when System.String.Equals(projection, name, System.StringComparison.OrdinalIgnoreCase) -> 1
+                | Star None, None -> 1
+                | Col _, None -> 0
+                | _ -> 2)
+
+        if directProjections |> List.forall ((<>) 2) && List.sum directProjections <= 1 then Some name else None
+
+    match select.OrderBy with
+    | [ Col name, direction ] -> directBareColumn name |> Option.map (fun column -> column, direction)
+    | [ QualifiedCol(qualifier, name), direction ] when System.String.Equals(qualifier, selfQualifier, System.StringComparison.OrdinalIgnoreCase) ->
+        Some(name, direction)
+    | _ -> None
+
+and private tryIndexOrder (store: Store) (registry: Registry) (dbName: string) (tref: TableRef) (select: SelectStmt) : (ColumnDef list * Value[] seq) option =
+    let tableDb = tref.Database |> Option.defaultValue dbName
+
+    let canStream =
+        select.Limit.IsSome
+        && not select.Distinct
+        && select.GroupBy.IsEmpty
+        && select.Having.IsNone
+        && not (select.Projections |> List.exists (fst >> containsAggregate registry))
+        && not (select.Projections |> List.exists (fst >> collectWindowFuncs >> List.isEmpty >> not))
+
+    if not canStream then
+        None
+    else
+        directOrderColumn tref select
+        |> Option.bind (fun (column, direction) ->
+            let lower, upper =
+                rangeLookupBounds tref select.Where
+                |> List.tryFind (fun (name, _, _) -> System.String.Equals(name, column, System.StringComparison.OrdinalIgnoreCase))
+                |> Option.map (fun (_, lower, upper) -> lower, upper)
+                |> Option.defaultValue (None, None)
+
+            Storage.trySecondaryOrderedLookup store tableDb tref.Table column lower upper direction
+            |> Option.bind (fun (_, index, columns, rows) ->
+                match columns.[index].Type with
+                | TEnum _
+                | TSet _ -> None
+                | _ -> Some(columns, rows)))
 
 /// Per-column MySQL wire type for a freshly-projected resultset, read off
 /// the first non-NULL `Value` in each column across `rows` — a plain

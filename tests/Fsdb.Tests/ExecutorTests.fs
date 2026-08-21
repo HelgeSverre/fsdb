@@ -4940,6 +4940,50 @@ let tests =
 
                     Expect.equal (rows "indexed") (rows "scanned") "collated string bounds match the scan path"
 
+                testCase "a secondary B-tree streams direct ORDER BY ranges with NULLs, ties, and pagination"
+                <| fun _ ->
+                    let store = newStore ()
+                    runDefault store "CREATE TABLE indexed (id INT PRIMARY KEY, score INT, category VARCHAR(20), KEY ix_score (score))" |> ignore
+                    runDefault store "CREATE TABLE scanned (id INT PRIMARY KEY, score INT, category VARCHAR(20))" |> ignore
+
+                    for sql in
+                        [ "INSERT INTO indexed VALUES (1, 2, 'keep'), (2, NULL, 'keep'), (3, 1, 'drop'), (4, 2, 'keep'), (5, NULL, 'keep'), (6, 2, 'keep')"
+                          "INSERT INTO scanned VALUES (1, 2, 'keep'), (2, NULL, 'keep'), (3, 1, 'drop'), (4, 2, 'keep'), (5, NULL, 'keep'), (6, 2, 'keep')" ] do
+                        runDefault store sql |> ignore
+
+                    let rows tableName sql =
+                        match runDefault store (sprintf sql tableName) with
+                        | ResultSet(_, rows) -> rows
+                        | other -> failtestf "expected a resultset, got %A" other
+
+                    Expect.equal
+                        (rows "indexed" "SELECT id, score FROM %s ORDER BY score ASC LIMIT 3 OFFSET 1")
+                        (rows "scanned" "SELECT id, score FROM %s ORDER BY score ASC LIMIT 3 OFFSET 1")
+                        "ascending index order retains NULL placement and offset"
+
+                    Expect.equal
+                        (rows "indexed" "SELECT id, score FROM %s WHERE score >= 1 AND score <= 2 AND category = 'keep' ORDER BY score DESC LIMIT 2 OFFSET 1")
+                        (rows "scanned" "SELECT id, score FROM %s WHERE score >= 1 AND score <= 2 AND category = 'keep' ORDER BY score DESC LIMIT 2 OFFSET 1")
+                        "descending index order retains ties, residuals, and range pagination"
+
+                testCase "a secondary B-tree streams collated string ORDER BY ranges"
+                <| fun _ ->
+                    let store = newStore ()
+                    runDefault store "CREATE TABLE indexed (id INT PRIMARY KEY, label VARCHAR(20), KEY ix_label (label))" |> ignore
+                    runDefault store "CREATE TABLE scanned (id INT PRIMARY KEY, label VARCHAR(20))" |> ignore
+
+                    for sql in
+                        [ "INSERT INTO indexed VALUES (1, 'Álpha'), (2, 'Bravo'), (3, 'bébé'), (4, 'charlie')"
+                          "INSERT INTO scanned VALUES (1, 'Álpha'), (2, 'Bravo'), (3, 'bébé'), (4, 'charlie')" ] do
+                        runDefault store sql |> ignore
+
+                    let rows tableName =
+                        match runDefault store (sprintf "SELECT id, label FROM %s WHERE label >= 'a' AND label < 'd' ORDER BY label ASC LIMIT 2 OFFSET 1" tableName) with
+                        | ResultSet(_, rows) -> rows
+                        | other -> failtestf "expected a resultset, got %A" other
+
+                    Expect.equal (rows "indexed") (rows "scanned") "collated index order matches the scan path"
+
                 testCase "EXPLAIN reports ref only for the secondary equality access path execution uses"
                 <| fun _ ->
                     let store = newStore ()
