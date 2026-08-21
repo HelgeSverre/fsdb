@@ -2462,6 +2462,8 @@ let rec private evalExpr (ctx: EvalContext) (expr: Expr) : Result<Value, EvalErr
                 | _ -> v
 
             match Diagnostics.suppress (fun () -> Storage.coerceValue false castCol v) with
+            | Ok(VZeroDate _)
+            | Ok(VZeroDateTime _) -> Ok VNull
             | Ok v' -> Ok v'
             | Error err -> Error(Storage.toMySqlError err))
     | Exists select ->
