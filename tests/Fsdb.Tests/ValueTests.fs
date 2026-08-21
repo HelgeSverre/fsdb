@@ -86,6 +86,11 @@ let tests =
                     let time = tryParseTimeValue "-838:59:59.123456" |> Option.get
                     Expect.equal (toText (VTime time)) (Some "-838:59:59.123456") "time"
                     Expect.equal (toTextFsp 2 (VTime time)) (Some "-838:59:59.12") "declared precision"
+                    Expect.equal (toText (VTime(timeValueOrClamp (12L * TimeSpan.TicksPerHour)))) (Some "12:00:00") "whole seconds"
+
+                testCase "TIME parsing rejects oversized fields without overflowing"
+                <| fun _ ->
+                    Expect.isNone (tryParseTimeTicks "999999999999999999999999 00:00:00") "too many days"
 
                 testCase "zero dates preserve zero components"
                 <| fun _ ->

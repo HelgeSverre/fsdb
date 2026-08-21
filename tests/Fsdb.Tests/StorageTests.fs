@@ -513,6 +513,12 @@ let tests =
                     | Ok(VTime value) -> Expect.equal (formatTimeValueFsp 6 value) "01:02:03.500000" "numeric time"
                     | other -> failtestf "expected VTime, got %A" other
 
+                testCase "rounds fractions longer than six digits"
+                <| fun _ ->
+                    match coerceValue true (col "elapsed" (TTime 6) true) (VString "01:02:03.12345678") with
+                    | Ok(VTime value) -> Expect.equal (formatTimeValueFsp 6 value) "01:02:03.123457" "fraction"
+                    | other -> failtestf "expected VTime, got %A" other
+
                 testCase "strict mode rejects values beyond the TIME range"
                 <| fun _ ->
                     match coerceValue true time (VString "839:00:00") with
@@ -522,6 +528,12 @@ let tests =
                 testCase "non-strict mode clamps values beyond the TIME range"
                 <| fun _ ->
                     match coerceValue false (col "elapsed" (TTime 6) true) (VString "839:00:00") with
+                    | Ok(VTime value) -> Expect.equal (formatTimeValueFsp 6 value) "838:59:59.999999" "clamped time"
+                    | other -> failtestf "expected clamped VTime, got %A" other
+
+                testCase "non-strict mode clamps oversized hour fields"
+                <| fun _ ->
+                    match coerceValue false (col "elapsed" (TTime 6) true) (VString "1000:00:00") with
                     | Ok(VTime value) -> Expect.equal (formatTimeValueFsp 6 value) "838:59:59.999999" "clamped time"
                     | other -> failtestf "expected clamped VTime, got %A" other ]
 

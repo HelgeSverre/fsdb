@@ -31,7 +31,14 @@ let roundTimeTicksToFsp (fsp: int) (ticks: int64) : int64 =
     if ticks < 0L then -rounded else rounded
 
 let private timePattern =
-    Regex(@"^([+-])?(?:(\d+)\s+)?(\d{1,3}):(\d{1,2}):(\d{1,2})(?:\.(\d{1,7}))?$", RegexOptions.CultureInvariant)
+    Regex(@"^([+-])?(?:(\d+)\s+)?(\d+):(\d{1,2}):(\d{1,2})(?:\.(\d+))?$", RegexOptions.CultureInvariant)
+
+let private parseFractionTicks (fraction: string) =
+    if fraction = "" then
+        0L
+    else
+        fraction.Substring(0, min 7 fraction.Length).PadRight(7, '0')
+        |> fun digits -> Int64.Parse(digits, CultureInfo.InvariantCulture)
 
 let tryParseTimeTicks (text: string) : int64 option =
     let matched = timePattern.Match(text.Trim())
@@ -39,21 +46,26 @@ let tryParseTimeTicks (text: string) : int64 option =
     if not matched.Success then
         None
     else
-        let number (group: Group) = if group.Success then Int64.Parse(group.Value, CultureInfo.InvariantCulture) else 0L
-        let days = number matched.Groups.[2]
-        let hours = number matched.Groups.[3]
-        let minutes = number matched.Groups.[4]
-        let seconds = number matched.Groups.[5]
+        let number (group: Group) =
+            if group.Success then
+                match Int64.TryParse(group.Value, NumberStyles.None, CultureInfo.InvariantCulture) with
+                | true, value -> Some value
+                | _ -> None
+            else
+                Some 0L
 
-        if minutes > 59L || seconds > 59L then
-            None
-        else
+        match number matched.Groups.[2], number matched.Groups.[3], number matched.Groups.[4], number matched.Groups.[5] with
+        | Some days, Some hours, Some minutes, Some seconds when minutes <= 59L && seconds <= 59L ->
             let fraction = matched.Groups.[6].Value
-            let ticks =
-                (((days * 24L + hours) * 60L + minutes) * 60L + seconds) * TimeSpan.TicksPerSecond
-                + (if fraction = "" then 0L else Int64.Parse(fraction.PadRight(7, '0'), CultureInfo.InvariantCulture))
-
+            let fractionTicks = parseFractionTicks fraction
+            let totalHours =
+                if days > 34L || hours > 838L then
+                    839L
+                else
+                    min 839L (days * 24L + hours)
+            let ticks = if totalHours > 838L then maxTimeTicks + 10L else (totalHours * 3600L + minutes * 60L + seconds) * TimeSpan.TicksPerSecond + fractionTicks
             Some(if matched.Groups.[1].Value = "-" then -ticks else ticks)
+        | _ -> None
 
 let tryParseTimeNumberTicks (text: string) : int64 option =
     let trimmed = text.Trim()
@@ -70,7 +82,6 @@ let tryParseTimeNumberTicks (text: string) : int64 option =
         if
             whole |> Seq.forall Char.IsDigit
             && fraction |> Seq.forall Char.IsDigit
-            && fraction.Length <= 7
         then
             match Int64.TryParse(whole, NumberStyles.None, CultureInfo.InvariantCulture) with
             | true, number ->
@@ -82,8 +93,11 @@ let tryParseTimeNumberTicks (text: string) : int64 option =
                     None
                 else
                     let ticks =
-                        (hours * 3600L + minutes * 60L + seconds) * TimeSpan.TicksPerSecond
-                        + (if fraction = "" then 0L else Int64.Parse(fraction.PadRight(7, '0'), CultureInfo.InvariantCulture))
+                        if hours > 838L then
+                            maxTimeTicks + 10L
+                        else
+                            (hours * 3600L + minutes * 60L + seconds) * TimeSpan.TicksPerSecond
+                            + parseFractionTicks fraction
 
                     Some(if negative then -ticks else ticks)
             | _ -> None
@@ -95,7 +109,9 @@ let tryParseTimeInputTicks text =
     tryParseTimeTicks text |> Option.orElseWith (fun () -> tryParseTimeNumberTicks text)
 
 let tryParseTimeValue text =
-    tryParseTimeInputTicks text |> Option.bind tryTimeValue
+    tryParseTimeInputTicks text
+    |> Option.map (roundTimeTicksToFsp 6)
+    |> Option.bind tryTimeValue
 
 let formatTimeValueFsp (fsp: int) (value: TimeValue) =
     let ticks = timeTicks value
@@ -114,8 +130,10 @@ let formatTimeValueFsp (fsp: int) (value: TimeValue) =
         sprintf "%s.%s" baseText ((sprintf "%06d" micros).Substring(0, min 6 fsp))
 
 let formatTimeValue (value: TimeValue) =
-    let text = formatTimeValueFsp 6 value
-    text.TrimEnd('0').TrimEnd('.')
+    let ticks = timeTicks value
+    let micros = abs ticks % TimeSpan.TicksPerSecond / 10L
+    let baseText = formatTimeValueFsp 0 value
+    if micros = 0L then baseText else baseText + "." + micros.ToString("D6").TrimEnd('0')
 
 type ZeroDate =
     private

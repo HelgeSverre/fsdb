@@ -6851,8 +6851,22 @@ let tests =
                 testCase "TIME casts round and carry at their declared precision"
                 <| fun _ ->
                     expectRow
-                        "SELECT CAST('01:02:03.455' AS TIME(2)), CAST('-00:00:00.5' AS TIME(0))"
-                        [ Some "01:02:03.46"; Some "-00:00:01" ]
+                        "SELECT CAST('01:02:03.455' AS TIME(2)), CAST('-00:00:00.5' AS TIME(0)), TIME('01:02:03.12345678'), TIME('-00:00:00.0000005')"
+                        [ Some "01:02:03.46"; Some "-00:00:01"; Some "01:02:03.123457"; Some "-00:00:00.000001" ]
+
+                testCase "TIME values work in component and EXTRACT functions"
+                <| fun _ ->
+                    expectRow
+                        "SELECT HOUR(TIME('-25:02:03.456789')), MINUTE(TIME('-25:02:03.456789')), SECOND(TIME('-25:02:03.456789')), MICROSECOND(TIME('-25:02:03.456789')), EXTRACT(HOUR FROM TIME('-25:02:03.456789')), EXTRACT(MICROSECOND FROM TIME('-25:02:03.456789')), EXTRACT(HOUR_MICROSECOND FROM TIME('-25:02:03.456789')), EXTRACT(DAY_HOUR FROM TIME('-25:02:03.456789')), EXTRACT(DAY FROM TIME('-25:02:03.456789'))"
+                        [ Some "25"
+                          Some "2"
+                          Some "3"
+                          Some "456789"
+                          Some "-25"
+                          Some "-456789"
+                          Some "-250203456789"
+                          Some "-25"
+                          None ]
 
                 testCase "time formatting, periods, day numbers, and seeded RAND match MySQL"
                 <| fun _ ->

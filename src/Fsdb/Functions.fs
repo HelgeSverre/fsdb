@@ -2344,13 +2344,9 @@ let private timeFn: Scalar =
         let _, hour, minute, second, micros = zeroDateTimeParts value
         VTime(timeValueOrClamp ((int64 hour * 3600L + int64 minute * 60L + int64 second) * TimeSpan.TicksPerSecond + int64 micros * 10L))
     | [ v ] when not (anyNull [ v ]) ->
-        match asDateTime v with
-        | Some value -> VTime(timeValueOrClamp value.TimeOfDay.Ticks)
-        | None ->
-            toText v
-            |> Option.bind tryParseTimeInputTicks
-            |> Option.map (timeValueOrClamp >> VTime)
-            |> Option.defaultValue VNull
+        match toText v |> Option.bind tryParseTimeInputTicks with
+        | Some ticks -> VTime(timeValueOrClamp (roundTimeTicksToFsp 6 ticks))
+        | None -> asDateTime v |> Option.map (fun value -> VTime(timeValueOrClamp value.TimeOfDay.Ticks)) |> Option.defaultValue VNull
     | _ -> VNull
 
 let private datePartFn (f: DateTime -> int) : Scalar =
@@ -2365,10 +2361,36 @@ let private zeroAwareDatePart (fromZero: ZeroDate -> int) (fromDateTime: DateTim
     | [ value ] when not (anyNull [ value ]) -> asDateTime value |> Option.map (fromDateTime >> int64 >> VInt) |> Option.defaultValue VNull
     | _ -> VNull
 
-let private zeroAwareTimePart (fromZero: ZeroDateTime -> int) (fromDateTime: DateTime -> int) : Scalar =
+let private timeParts (value: TimeValue) =
+    let ticks = abs (timeTicks value)
+    let totalSeconds = ticks / TimeSpan.TicksPerSecond
+    let hour = int (totalSeconds / 3600L)
+    let minute = int (totalSeconds % 3600L / 60L)
+    let second = int (totalSeconds % 60L)
+    let microseconds = int (ticks % TimeSpan.TicksPerSecond / 10L)
+    (hour, minute, second, microseconds)
+
+let private timeHour value =
+    let hour, _, _, _ = timeParts value
+    hour
+
+let private timeMinute value =
+    let _, minute, _, _ = timeParts value
+    minute
+
+let private timeSecond value =
+    let _, _, second, _ = timeParts value
+    second
+
+let private timeMicroseconds value =
+    let _, _, _, microseconds = timeParts value
+    microseconds
+
+let private zeroAwareTimePart (fromZero: ZeroDateTime -> int) (fromTime: TimeValue -> int) (fromDateTime: DateTime -> int) : Scalar =
     function
     | [ VZeroDate _ ] -> VInt 0L
     | [ VZeroDateTime dateTime ] -> VInt(int64 (fromZero dateTime))
+    | [ VTime value ] -> VInt(int64 (fromTime value))
     | [ value ] when not (anyNull [ value ]) -> asDateTime value |> Option.map (fromDateTime >> int64 >> VInt) |> Option.defaultValue VNull
     | _ -> VNull
 
@@ -2486,7 +2508,7 @@ let private utcTimestampFn: Scalar = fun _ -> VDateTime(truncateToSecond DateTim
 let private tryTimeTicks (value: Value) =
     match value with
     | VTime time -> Some(timeTicks time)
-    | _ -> value |> toText |> Option.bind tryParseTimeInputTicks
+    | _ -> value |> toText |> Option.bind tryParseTimeInputTicks |> Option.map (roundTimeTicksToFsp 6)
 
 let private timeResult ticks = VTime(timeValueOrClamp ticks)
 
@@ -2791,6 +2813,28 @@ let private extractFn: Scalar =
             let date, hour, minute, second, microseconds = zeroDateTimeParts dateTime
             let year, month, day = zeroDateParts date
             extract unit year month day hour minute second microseconds
+        | Some unit, VTime value ->
+            let hour, minute, second, microseconds = timeParts value
+
+            match unit with
+            | "MICROSECOND"
+            | "SECOND"
+            | "MINUTE"
+            | "HOUR"
+            | "SECOND_MICROSECOND"
+            | "MINUTE_MICROSECOND"
+            | "MINUTE_SECOND"
+            | "HOUR_MICROSECOND"
+            | "HOUR_SECOND"
+            | "HOUR_MINUTE"
+            | "DAY_MICROSECOND"
+            | "DAY_SECOND"
+            | "DAY_MINUTE"
+            | "DAY_HOUR" ->
+                match extract unit 0 0 0 hour minute second microseconds with
+                | VInt result when timeTicks value < 0L -> VInt(-result)
+                | result -> result
+            | _ -> VNull
         | Some unit, value ->
             asDateTime value
             |> Option.map (fun dateTime ->
@@ -5206,9 +5250,10 @@ let builtins: Registry =
     |> registerScalar "MONTH" (zeroAwareDatePart (fun date -> let _, month, _ = zeroDateParts date in month) (fun d -> d.Month))
     |> registerScalar "DAY" (zeroAwareDatePart (fun date -> let _, _, day = zeroDateParts date in day) (fun d -> d.Day))
     |> registerScalar "DAYOFMONTH" (zeroAwareDatePart (fun date -> let _, _, day = zeroDateParts date in day) (fun d -> d.Day))
-    |> registerScalar "HOUR" (zeroAwareTimePart (fun dateTime -> let _, hour, _, _, _ = zeroDateTimeParts dateTime in hour) (fun d -> d.Hour))
-    |> registerScalar "MINUTE" (zeroAwareTimePart (fun dateTime -> let _, _, minute, _, _ = zeroDateTimeParts dateTime in minute) (fun d -> d.Minute))
-    |> registerScalar "SECOND" (zeroAwareTimePart (fun dateTime -> let _, _, _, second, _ = zeroDateTimeParts dateTime in second) (fun d -> d.Second))
+    |> registerScalar "HOUR" (zeroAwareTimePart (fun dateTime -> let _, hour, _, _, _ = zeroDateTimeParts dateTime in hour) timeHour (fun d -> d.Hour))
+    |> registerScalar "MINUTE" (zeroAwareTimePart (fun dateTime -> let _, _, minute, _, _ = zeroDateTimeParts dateTime in minute) timeMinute (fun d -> d.Minute))
+    |> registerScalar "SECOND" (zeroAwareTimePart (fun dateTime -> let _, _, _, second, _ = zeroDateTimeParts dateTime in second) timeSecond (fun d -> d.Second))
+    |> registerScalar "MICROSECOND" (zeroAwareTimePart (fun dateTime -> let _, _, _, _, microseconds = zeroDateTimeParts dateTime in microseconds) timeMicroseconds (fun d -> int (d.Ticks % TimeSpan.TicksPerSecond / 10L)))
     |> registerScalar "DAYOFWEEK" (datePartFn (fun d -> int d.DayOfWeek + 1))
     |> registerScalar "DAYOFYEAR" (datePartFn (fun d -> d.DayOfYear))
     |> registerScalar "DAYNAME" dayNameFn
