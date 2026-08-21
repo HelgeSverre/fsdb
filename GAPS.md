@@ -32,8 +32,8 @@ accepted (marked `ponytail:` in source), or recorded only in
 |---|---|---|
 | SQL statements | Broad core; large admin/programmatic tail missing | Stored procedures/functions, events |
 | Query execution | Correct but planless | No index-based join access; subqueries re-run per outer row |
-| Built-in functions | ~170 implemented | AES crypto, time arithmetic, half the JSON surface |
-| Data types | All common types | Signed-int range unenforced; no TIME value domain, BIT, or geometry |
+| Built-in functions | Broad scalar, aggregate, JSON, and time coverage | AES crypto, JSON Schema, geometry |
+| Data types | All common types | No TIME value domain, BIT, or geometry |
 | Constraints & indexes | PK/UNIQUE/FK/CHECK enforced | Non-unique secondary indexes are metadata only |
 | Charsets & collations | ICU-based utf8mb4 registry | Weight-table tailoring differs from MySQL's UCA tables |
 | Transactions | Snapshot + optimistic merge | SERIALIZABLE refused; no intra-database write parallelism |
@@ -400,7 +400,7 @@ Recorded in `torture/findings/`, not yet fixed, not enrolled in
 | Multi-database scaling | super-serial slowdowns; store-wide connection ceiling; classified `multidb_scaling_gap` (`2026-08-17-multidb-concurrency-campaign.md`) | open, reporting-only |
 | INSERT…SELECT…ODKU alias refs | bare select-column references in the UPDATE clause error where MySQL reads select-derived values; only `VALUES(col)` works (`2026-08-19-insert-select-odku-gap.md`, `Ast.fs:630–633`) | deferred by design |
 | JSON_TABLE refusals | LEFT JOIN JSON_TABLE(…) ON TRUE → 1064; JOIN…USING → 1064; ERROR ON EMPTY/ERROR raise-form unparsed; correlated unknown qualifier yields 1054 vs MySQL 1109 (`2026-08-19-json-table-gaps.md`) | partially stale — see §17 |
-| Signed-int clamping ceilings | TINYINT–INT clamp instead of 1264; CAST(double AS UNSIGNED) clamps at unsigned ceiling where MySQL uses signed max; 1690 message lacks expression text (`2026-08-19-probe-corpus-triage.md`) | ponytail ceilings |
+| Numeric error-shape ceilings | CAST(double AS UNSIGNED) clamps at unsigned ceiling where MySQL uses signed max; 1690 message lacks expression text (`2026-08-19-probe-corpus-triage.md`) | ponytail ceilings |
 | Temporal/error-shape ceilings | `DATE 'bad'` → 1064 vs MySQL 1525; CONVERT_TZ(…,'SYSTEM') → NULL; parenthesized set-op groups `(A UNION B) INTERSECT C` refused | ponytail ceilings |
 
 Uncovered torture lanes (harness scope, not product gaps): durability/restart
@@ -456,16 +456,15 @@ implementation effort:
    misread columns.
 5. Trigger coverage (BEFORE/UPDATE/DELETE, OLD.*, compound bodies) and
    updatable views — the two largest deliberate-subset cliffs.
-6. Missing function families (AES, time arithmetic, JSON second half) —
+6. Missing function families (AES, JSON Schema, geometry) —
    each individually small, collectively frequent in
    report-style queries.
 7. LOAD DATA LOCAL INFILE and multi-statement packets — bulk-loading and
    migration-tool paths.
-8. LIMIT ? placeholders and user variables in expressions — ORM patterns
-   that bind limits or pass session state.
+8. User variables in expressions — session-state patterns beyond the
+   supported bare projection form.
 9. SERIALIZABLE/READ COMMITTED semantics and intra-database write
    parallelism — transactional throughput shape.
-10. Signed-int range enforcement and zero-date handling — strict-mode
-    correctness edges.
+10. Zero-date handling — a strict-mode correctness edge.
 11. Everything in the admin/replication/metadata tail — matters only once a
     specific tool needs it (mysqladmin, monitoring agents, replica setups).
