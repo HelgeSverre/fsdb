@@ -51,6 +51,27 @@ let tests =
                   [ [ Some "Acme"; Some "2"; Some "50.00" ] ]
                   "the view reevaluates its stored SELECT"
 
+          testCase "a direct single-table view accepts UPDATE and DELETE"
+          <| fun _ ->
+              let store = setup ()
+              expectOk (run store "CREATE VIEW vendor_names AS SELECT id, name FROM vendors") "create view"
+              expectOk (run store "UPDATE vendor_names SET name = 'Updated' WHERE id = 1") "update through view"
+              expectOk (run store "DELETE FROM vendor_names WHERE id = 2") "delete through view"
+
+              Expect.equal
+                  (rows store "SELECT id, name FROM vendors ORDER BY id")
+                  [ [ Some "1"; Some "Updated" ] ]
+                  "writes reach the base table"
+
+          testCase "a grouped view rejects UPDATE"
+          <| fun _ ->
+              let store = setup ()
+              expectOk (run store "CREATE VIEW totals AS SELECT vendor_id, SUM(total) AS total FROM receipts GROUP BY vendor_id") "create view"
+
+              match run store "UPDATE totals SET total = 0" with
+              | Err(1288, _) -> ()
+              | other -> failtestf "expected non-updatable view error, got %A" other
+
           testCase "view definitions reject user and system variables"
           <| fun _ ->
               let store = setup ()

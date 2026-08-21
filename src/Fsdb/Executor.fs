@@ -6876,9 +6876,7 @@ let private withGeneratedRecomputed
 /// Bottom-up expression rewrite: `rw` gets first look at every node — a
 /// `Some` replaces the node wholesale (no further descent), a `None`
 /// recurses into its children. The shared walk under `substituteValuesFunc`
-/// (`VALUES(col)` in ON DUPLICATE KEY UPDATE) and `substituteNewRefs`
-/// (`NEW.col` in trigger bodies), which only differ in the one node they
-/// replace.
+/// (`VALUES(col)` in ON DUPLICATE KEY UPDATE).
 let rec private rewriteExprWith (rw: Expr -> Expr option) (expr: Expr) : Expr =
     let sub = rewriteExprWith rw
 
@@ -6938,42 +6936,67 @@ let private substituteValuesFunc (columnIndex: Map<string, int list>) (candidate
             | _ -> None
         | _ -> None)
 
-/// Rewrites `NEW.col` (an AFTER INSERT trigger body's reference to the
-/// just-inserted row — already parsed as an ordinary `QualifiedCol("NEW",
-/// col)`) into the literal inserted value, the same pre-evaluation rewrite
-/// shape as `substituteValuesFunc`. An unknown `NEW.x` is left in place and
-/// fails at eval time as an unknown qualifier, same as any bad column ref.
-let private substituteNewRefs (columnIndex: Map<string, int list>) (row: Value[]) : Expr -> Expr =
+type private UpdatableView =
+    { Database: string
+      Table: string
+      Columns: Map<string, string> }
+
+let private tryUpdatableView (store: Store) (dbName: string) (viewName: string) : UpdatableView option =
+    let simpleSelect (view: StoredView) (select: SelectStmt) =
+        match select.From with
+        | Some(FromTable source)
+            when select.Joins.IsEmpty
+                 && not select.Distinct
+                 && not select.CalculateFoundRows
+                 && select.Where.IsNone
+                 && select.GroupBy.IsEmpty
+                 && not select.Rollup
+                 && select.Windows.IsEmpty
+                 && select.Ctes.IsEmpty
+                 && select.Having.IsNone
+                 && select.OrderBy.IsEmpty
+                 && select.Limit.IsNone
+                 && select.Offset.IsNone
+                 && not select.Locking ->
+            let sourceNames =
+                select.Projections
+                |> List.map (fun (expression, alias) ->
+                    match expression with
+                    | Col column -> Some(alias |> Option.defaultValue column, column)
+                    | QualifiedCol(qualifier, column)
+                        when qualifier.Equals(source.Alias |> Option.defaultValue source.Table, System.StringComparison.OrdinalIgnoreCase) ->
+                        Some(alias |> Option.defaultValue column, column)
+                    | _ -> None)
+
+            if sourceNames |> List.exists Option.isNone then
+                None
+            else
+                let sourceNames = sourceNames |> List.choose id
+                let outputNames = if view.Columns.IsEmpty then sourceNames |> List.map fst else view.Columns
+
+                if outputNames.Length <> sourceNames.Length || (outputNames |> List.map (fun name -> name.ToLowerInvariant()) |> Set.ofList).Count <> outputNames.Length then
+                    None
+                else
+                    Some(
+                        { Database = source.Database |> Option.defaultValue view.Schema
+                          Table = source.Table
+                          Columns = List.zip outputNames (sourceNames |> List.map snd) |> List.map (fun (viewColumn, baseColumn) -> viewColumn.ToLowerInvariant(), baseColumn) |> Map.ofList }: UpdatableView
+                    )
+        | _ -> None
+
+    match tryStoredView store dbName viewName with
+    | None -> None
+    | Some view ->
+        match Parser.parse view.Definition with
+        | Ok(Select select) -> simpleSelect view select
+        | _ -> None
+
+let private rewriteViewExpression (columns: Map<string, string>) (qualifiers: string list) (expression: Expr) =
     rewriteExprWith (function
-        | QualifiedCol(q, c) when System.String.Equals(q, "NEW", System.StringComparison.OrdinalIgnoreCase) ->
-            match Map.tryFind (c.ToLowerInvariant()) columnIndex with
-            | Some(i :: _) -> Some(Lit row.[i])
-            | _ -> None
-        | _ -> None)
-
-/// Binds one inserted row into a trigger body: every `NEW.col` becomes that
-/// row's literal value. Only the body kinds CREATE TRIGGER accepts appear
-/// here; ponytail: `NEW.*` inside an INSERT...SELECT body's own SELECT
-/// isn't substituted (it fails at eval as an unknown table 'NEW') — add a
-/// SelectStmt walk when a real trigger needs it. The body's ON DUPLICATE
-/// KEY UPDATE clause *is* substituted, for both Insert and InsertSelect.
-let private bindNewRow (columnIndex: Map<string, int list>) (row: Value[]) (stmt: Statement) : Statement =
-    let sub = substituteNewRefs columnIndex row
-
-    match stmt with
-    | Insert(t, cols, rows, onDup, ig) ->
-        Insert(t, cols, rows |> List.map (List.map sub), onDup |> List.map (fun (c, e) -> c, sub e), ig)
-    | InsertSelect(t, cols, select, onDup, ig) -> InsertSelect(t, cols, select, onDup |> List.map (fun (c, e) -> c, sub e), ig)
-    | Replace(t, cols, rows) -> Replace(t, cols, rows |> List.map (List.map sub))
-    | ReplaceSelect _ -> stmt
-    | ReplaceSet(t, assignments) -> ReplaceSet(t, assignments |> List.map (fun (name, value) -> name, sub value))
-    | Update u ->
-        Update
-            { u with
-                Assignments = u.Assignments |> List.map (fun a -> { a with Value = sub a.Value })
-                Where = Option.map sub u.Where }
-    | Delete d -> Delete { d with Where = Option.map sub d.Where }
-    | other -> other
+        | Col name -> Map.tryFind (name.ToLowerInvariant()) columns |> Option.map Col
+        | QualifiedCol(qualifier, name) when qualifiers |> List.exists (fun candidate -> candidate.Equals(qualifier, System.StringComparison.OrdinalIgnoreCase)) ->
+            Map.tryFind (name.ToLowerInvariant()) columns |> Option.map Col
+        | _ -> None) expression
 
 // ---------------------------------------------------------------------------
 // EXPLAIN — a pure *description* of what this executor would actually do
@@ -9411,6 +9434,30 @@ let rec execute (store: Store) (registry: Registry) (dbName: string) (ids: int64
         let result, _, _ = runUnionStmt store registry dbName first rest orderBy limit offset
         ids, result
 
+    | Update updateStmt when updateStmt.Joins.IsEmpty && tryStoredView store (updateStmt.From.Database |> Option.defaultValue dbName) updateStmt.From.Table |> Option.isSome ->
+        let viewDb = updateStmt.From.Database |> Option.defaultValue dbName
+
+        match tryUpdatableView store viewDb updateStmt.From.Table with
+        | None -> ids, Err(1288, sprintf "The target table '%s' of the UPDATE is not updatable" updateStmt.From.Table)
+        | Some view ->
+            let qualifiers = [ updateStmt.From.Table; updateStmt.From.Alias |> Option.defaultValue updateStmt.From.Table ]
+            let rewrite = rewriteViewExpression view.Columns qualifiers
+            let rewritten =
+                { updateStmt with
+                    From = { updateStmt.From with Database = Some view.Database; Table = view.Table }
+                    Assignments =
+                        updateStmt.Assignments
+                        |> List.map (fun assignment ->
+                            { assignment with
+                                Table = assignment.Table |> Option.map (fun _ -> updateStmt.From.Alias |> Option.defaultValue view.Table)
+                                Column = Map.tryFind (assignment.Column.ToLowerInvariant()) view.Columns |> Option.defaultValue assignment.Column
+                                Value = rewrite assignment.Value })
+                    Where = updateStmt.Where |> Option.map rewrite
+                    OrderBy = updateStmt.OrderBy |> List.map (fun (expression, direction) -> rewrite expression, direction)
+                    Limit = updateStmt.Limit |> Option.map rewrite }
+
+            execute store registry dbName ids foundRows (Update rewritten)
+
     | Update updateStmt when updateStmt.Joins.IsEmpty ->
         let db, table = (updateStmt.From.Database |> Option.defaultValue dbName), updateStmt.From.Table
         let tableAlias = updateStmt.From.Alias |> Option.defaultValue updateStmt.From.Table
@@ -9748,6 +9795,24 @@ let rec execute (store: Store) (registry: Registry) (dbName: string) (ids: int64
                             let matched = pending |> Array.sumBy (fun d -> d.Count)
                             ids, Affected(uint64 (if foundRows then matched else List.sum counts))
                         | Error e -> ids, storageErr e)
+
+    | Delete deleteStmt when deleteStmt.Joins.IsEmpty && tryStoredView store (deleteStmt.From.Database |> Option.defaultValue dbName) deleteStmt.From.Table |> Option.isSome ->
+        let viewDb = deleteStmt.From.Database |> Option.defaultValue dbName
+
+        match tryUpdatableView store viewDb deleteStmt.From.Table with
+        | None -> ids, Err(1288, sprintf "The target table '%s' of the DELETE is not updatable" deleteStmt.From.Table)
+        | Some view ->
+            let qualifiers = [ deleteStmt.From.Table; deleteStmt.From.Alias |> Option.defaultValue deleteStmt.From.Table ]
+            let rewrite = rewriteViewExpression view.Columns qualifiers
+            let rewritten =
+                { deleteStmt with
+                    From = { deleteStmt.From with Database = Some view.Database; Table = view.Table }
+                    Targets = [ deleteStmt.From.Alias |> Option.defaultValue view.Table ]
+                    Where = deleteStmt.Where |> Option.map rewrite
+                    OrderBy = deleteStmt.OrderBy |> List.map (fun (expression, direction) -> rewrite expression, direction)
+                    Limit = deleteStmt.Limit |> Option.map rewrite }
+
+            execute store registry dbName ids foundRows (Delete rewritten)
 
     | Delete deleteStmt when deleteStmt.Joins.IsEmpty ->
         let db, table = (deleteStmt.From.Database |> Option.defaultValue dbName), deleteStmt.From.Table
