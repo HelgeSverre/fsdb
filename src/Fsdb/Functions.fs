@@ -1423,6 +1423,203 @@ let private yearWeekFn: Scalar =
 
 let private curDateFn: Scalar = fun _ -> VDate(DateOnly.FromDateTime DateTime.Now)
 let private curTimeFn: Scalar = fun _ -> VString(DateTime.Now.ToString("HH:mm:ss", CultureInfo.InvariantCulture))
+let private utcDateFn: Scalar = fun _ -> VDate(DateOnly.FromDateTime DateTime.UtcNow)
+let private utcTimeFn: Scalar = fun _ -> VString(DateTime.UtcNow.ToString("HH:mm:ss", CultureInfo.InvariantCulture))
+let private utcTimestampFn: Scalar = fun _ -> VDateTime(truncateToSecond DateTime.UtcNow)
+
+let private timePattern =
+    Regex(@"^([+-])?(?:(\d+)\s+)?(\d{1,3}):(\d{1,2}):(\d{1,2})(?:\.(\d{1,6}))?$", RegexOptions.CultureInvariant)
+
+let private tryTimeTicks (value: Value) =
+    let matched = timePattern.Match(req value)
+
+    if not matched.Success then
+        None
+    else
+        let number (group: Group) = if group.Success then Int64.Parse(group.Value, CultureInfo.InvariantCulture) else 0L
+        let days = number matched.Groups.[2]
+        let hours = number matched.Groups.[3]
+        let minutes = number matched.Groups.[4]
+        let seconds = number matched.Groups.[5]
+
+        if minutes > 59L || seconds > 59L then
+            None
+        else
+            let fraction = matched.Groups.[6].Value
+            let micros = if fraction = "" then 0L else Int64.Parse(fraction.PadRight(6, '0'), CultureInfo.InvariantCulture)
+            let ticks = (((days * 24L + hours) * 60L + minutes) * 60L + seconds) * TimeSpan.TicksPerSecond + micros * 10L
+            Some((if matched.Groups.[1].Value = "-" then -ticks else ticks), fraction.Length)
+
+let private maxTimeTicks = (838L * 3600L + 59L * 60L + 59L) * TimeSpan.TicksPerSecond + 9_999_990L
+
+let private formatTimeTicks ticks =
+    let ticks = max -maxTimeTicks (min maxTimeTicks ticks)
+    let sign = if ticks < 0L then "-" else ""
+    let magnitude = abs ticks
+    let totalSeconds = magnitude / TimeSpan.TicksPerSecond
+    let hours = totalSeconds / 3600L
+    let minutes = totalSeconds % 3600L / 60L
+    let seconds = totalSeconds % 60L
+    let micros = magnitude % TimeSpan.TicksPerSecond / 10L
+
+    let fraction =
+        if micros = 0L then
+            ""
+        else
+            "." + (micros.ToString("D6").TrimEnd '0')
+
+    sprintf "%s%02d:%02d:%02d%s" sign hours minutes seconds fraction
+
+let private addTimeFn (direction: int64) : Scalar =
+    function
+    | [ value; interval ] when not (anyNull [ value; interval ]) ->
+        match tryTimeTicks interval with
+        | None -> VNull
+        | Some(intervalTicks, _) ->
+            let text = req value
+
+            match tryTimeTicks value with
+            | Some(valueTicks, _) -> VString(formatTimeTicks (valueTicks + direction * intervalTicks))
+            | None ->
+                match asDateTime value with
+                | Some dateTime ->
+                    try
+                        VDateTime(dateTime.AddTicks(direction * intervalTicks))
+                    with :? ArgumentOutOfRangeException ->
+                        VNull
+                | None -> VNull
+    | _ -> VNull
+
+let private timeDiffFn: Scalar =
+    function
+    | [ left; right ] when not (anyNull [ left; right ]) ->
+        match tryTimeTicks left, tryTimeTicks right with
+        | Some(leftTicks, _), Some(rightTicks, _) -> VString(formatTimeTicks (leftTicks - rightTicks))
+        | None, None ->
+            match asDateTime left, asDateTime right with
+            | Some leftDate, Some rightDate -> VString(formatTimeTicks ((leftDate - rightDate).Ticks))
+            | _ -> VNull
+        | _ -> VNull
+    | _ -> VNull
+
+let private secToTimeFn: Scalar =
+    function
+    | [ value ] when not (anyNull [ value ]) ->
+        let ticks = decimal (toDouble value) * decimal TimeSpan.TicksPerSecond |> Decimal.Round |> int64
+        let text = req value
+
+        let precision =
+            match text.IndexOf '.' with
+            | -1 -> 0
+            | index -> min 6 (text.Length - index - 1)
+
+        let fractionalCeiling = if precision = 0 then 0L else TimeSpan.TicksPerSecond - pown 10L (7 - precision)
+        let ceiling = maxTimeTicks - 9_999_990L + fractionalCeiling
+        VString(formatTimeTicks (max -ceiling (min ceiling ticks)))
+    | _ -> VNull
+
+let private makeTimeFn: Scalar =
+    function
+    | [ hours; minutes; seconds ] when not (anyNull [ hours; minutes; seconds ]) ->
+        let hours = int64 (toDouble hours)
+        let minutes = int64 (toDouble minutes)
+        let seconds = toDouble seconds
+
+        if minutes < 0L || minutes > 59L || seconds < 0.0 || seconds >= 60.0 then
+            VNull
+        else
+            let sign = if hours < 0L then -1L else 1L
+            let ticks = (abs hours * 3600L + minutes * 60L) * TimeSpan.TicksPerSecond + int64 (seconds * float TimeSpan.TicksPerSecond)
+            VString(formatTimeTicks (sign * ticks))
+    | _ -> VNull
+
+let private timeFormatFn: Scalar =
+    function
+    | [ value; format ] when not (anyNull [ value; format ]) ->
+        match tryTimeTicks value with
+        | None -> VNull
+        | Some(ticks, _) ->
+            let negative = ticks < 0L
+            let magnitude = abs ticks
+            let totalSeconds = magnitude / TimeSpan.TicksPerSecond
+            let hours = totalSeconds / 3600L
+            let minutes = totalSeconds % 3600L / 60L
+            let seconds = totalSeconds % 60L
+            let micros = magnitude % TimeSpan.TicksPerSecond / 10L
+            let hour12 = let hour = hours % 24L % 12L in if hour = 0L then 12L else hour
+            let mutable index = 0
+            let result = StringBuilder()
+            let format = req format
+
+            while index < format.Length do
+                if format.[index] = '%' && index + 1 < format.Length then
+                    let piece =
+                        match format.[index + 1] with
+                        | 'H' -> hours.ToString("D2")
+                        | 'k' -> string hours
+                        | 'h' | 'I' -> hour12.ToString("D2")
+                        | 'l' -> string hour12
+                        | 'i' -> minutes.ToString("D2")
+                        | 's' | 'S' -> seconds.ToString("D2")
+                        | 'f' -> micros.ToString("D6")
+                        | 'p' -> if hours % 24L < 12L then "AM" else "PM"
+                        | '%' -> "%"
+                        | other -> string other
+
+                    result.Append piece |> ignore
+                    index <- index + 2
+                else
+                    result.Append format.[index] |> ignore
+                    index <- index + 1
+
+            if negative then VString("-" + result.ToString()) else VString(result.ToString())
+    | _ -> VNull
+
+let private periodYearMonth (value: Value) =
+    let period = int64 (toDouble value)
+    let month = int (period % 100L)
+    let shortYear = int (period / 100L)
+
+    if month < 1 || month > 12 then
+        None
+    else
+        let year = if shortYear < 70 then shortYear + 2000 elif shortYear < 100 then shortYear + 1900 else shortYear
+        Some(year, month)
+
+let private periodAddFn: Scalar =
+    function
+    | [ period; months ] when not (anyNull [ period; months ]) ->
+        match periodYearMonth period with
+        | None -> VNull
+        | Some(year, month) ->
+            let total = int64 year * 12L + int64 (month - 1) + int64 (toDouble months)
+            VInt(total / 12L * 100L + total % 12L + 1L)
+    | _ -> VNull
+
+let private periodDiffFn: Scalar =
+    function
+    | [ left; right ] when not (anyNull [ left; right ]) ->
+        match periodYearMonth left, periodYearMonth right with
+        | Some(leftYear, leftMonth), Some(rightYear, rightMonth) ->
+            VInt(int64 ((leftYear - rightYear) * 12 + leftMonth - rightMonth))
+        | _ -> VNull
+    | _ -> VNull
+
+let private toDaysFn: Scalar =
+    function
+    | [ value ] when not (anyNull [ value ]) -> asDateOnly value |> Option.map (fun date -> VInt(int64 date.DayNumber + 366L)) |> Option.defaultValue VNull
+    | _ -> VNull
+
+let private fromDaysFn: Scalar =
+    function
+    | [ value ] when not (anyNull [ value ]) ->
+        let dayNumber = int64 (toDouble value) - 366L
+
+        if dayNumber < 0L || dayNumber > int64 DateOnly.MaxValue.DayNumber then
+            VNull
+        else
+            VDate(DateOnly.FromDayNumber(int dayNumber))
+    | _ -> VNull
 
 let private unixEpoch = DateTime(1970, 1, 1, 0, 0, 0, DateTimeKind.Unspecified)
 
@@ -2457,7 +2654,21 @@ let private truncateFn: Scalar =
     | _ -> VNull
 
 let private random = Random()
-let private randFn: Scalar = fun _ -> VDouble(random.NextDouble())
+
+let private seededRandom seed =
+    let modulus = 0x3fffffffuL
+    let seed = toUInt64 (roundNumeric seed) % modulus
+    let mutable first = (seed * 0x10001uL + 55555555uL) % modulus
+    let mutable second = (seed * 0x10000001uL) % modulus
+    first <- (first * 3uL + second) % modulus
+    second <- (first + second + 33uL) % modulus
+    float first / float modulus
+
+let private randFn: Scalar =
+    function
+    | [] -> VDouble(random.NextDouble())
+    | [ seed ] when not (anyNull [ seed ]) -> VDouble(seededRandom seed)
+    | _ -> VNull
 
 let private greatestFn: Scalar =
     function
@@ -3042,6 +3253,23 @@ let builtins: Registry =
     |> registerScalar "CURDATE" curDateFn
     |> registerScalar "CURRENT_DATE" curDateFn
     |> registerScalar "CURTIME" curTimeFn
+    |> registerScalar "CURRENT_TIME" curTimeFn
+    |> registerScalar "LOCALTIME" nowFn
+    |> registerScalar "LOCALTIMESTAMP" nowFn
+    |> registerScalar "SYSDATE" nowFn
+    |> registerScalar "UTC_DATE" utcDateFn
+    |> registerScalar "UTC_TIME" utcTimeFn
+    |> registerScalar "UTC_TIMESTAMP" utcTimestampFn
+    |> registerScalar "ADDTIME" (addTimeFn 1L)
+    |> registerScalar "SUBTIME" (addTimeFn -1L)
+    |> registerScalar "TIMEDIFF" timeDiffFn
+    |> registerScalar "SEC_TO_TIME" secToTimeFn
+    |> registerScalar "MAKETIME" makeTimeFn
+    |> registerScalar "TIME_FORMAT" timeFormatFn
+    |> registerScalar "PERIOD_ADD" periodAddFn
+    |> registerScalar "PERIOD_DIFF" periodDiffFn
+    |> registerScalar "FROM_DAYS" fromDaysFn
+    |> registerScalar "TO_DAYS" toDaysFn
     |> registerScalar "UNIX_TIMESTAMP" unixTimestampFn
     |> registerScalar "FROM_UNIXTIME" fromUnixTimeFn
     |> registerScalar "TIMESTAMPDIFF" timestampDiffFn

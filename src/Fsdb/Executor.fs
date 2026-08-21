@@ -1152,7 +1152,16 @@ let rec private metadataOfExpr (ctx: EvalContext) (expr: Expr) : ColumnMetadata 
         | "YEAR", [ _ ] -> Some(ColumnWire.metadataOfType TYear)
         | "TIME", [ _ ] -> Some(ColumnWire.metadataOfType(TTime 0))
         | "DATE", [ _ ] -> Some(ColumnWire.metadataOfType TDate)
-        | ("NOW" | "CURRENT_TIMESTAMP"), _ -> Some(ColumnWire.metadataOfType(TDateTime(fspOfExpr ctx expr |> Option.defaultValue 0)))
+        | ("NOW" | "CURRENT_TIMESTAMP" | "LOCALTIME" | "LOCALTIMESTAMP" | "SYSDATE"), _ ->
+            Some(ColumnWire.metadataOfType(TDateTime(fspOfExpr ctx expr |> Option.defaultValue 0)))
+        | "UTC_TIMESTAMP", _ -> Some(ColumnWire.metadataOfType(TDateTime 0))
+        | "UTC_DATE", _ -> Some(ColumnWire.metadataOfType TDate)
+        | ("UTC_TIME" | "CURRENT_TIME" | "CURTIME"), _ -> Some(ColumnWire.metadataOfType(TTime 0))
+        | ("ADDTIME" | "SUBTIME"), first :: _ -> metadataOfExpr ctx first
+        | ("TIMEDIFF" | "SEC_TO_TIME" | "MAKETIME"), _ -> Some(ColumnWire.metadataOfType(TTime 6))
+        | "TIME_FORMAT", _ -> Some { Value.columnMetadata TypeVarString with ColumnLength = 1024u }
+        | ("PERIOD_ADD" | "PERIOD_DIFF" | "TO_DAYS"), _ -> simple TypeLongLong
+        | "FROM_DAYS", _ -> Some(ColumnWire.metadataOfType TDate)
         | ("MONTH" | "DAY" | "DAYOFMONTH" | "DAYOFWEEK" | "DAYOFYEAR" | "HOUR" | "MINUTE" | "SECOND" | "QUARTER" | "WEEK" | "WEEKDAY"
           | "JSON_LENGTH" | "JSON_DEPTH" | "CHAR_LENGTH" | "CHARACTER_LENGTH" | "LENGTH" | "OCTET_LENGTH" | "BIT_LENGTH" | "BIT_COUNT" | "IS_IPV4"
           | "IS_IPV6" | "IS_IPV4_COMPAT" | "IS_IPV4_MAPPED"), _ ->

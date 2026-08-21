@@ -22,8 +22,9 @@ reuse, defaults, and source-row ordering.
 The scalar-expression battery pins logarithmic, exponential, trigonometric,
 IPv4, and IPv6 functions to MySQL 8.4 values and domain behavior. It also
 covers phonetic, base64, ordinal, bit-selection, and common alias functions;
-`FROM DUAL`; multi-column subquery operand errors; and empty-group bit
-aggregate identities.
+signed and fractional time arithmetic, period and day-number conversion, and
+seeded randomness; `FROM DUAL`; multi-column subquery operand errors; and
+empty-group bit aggregate identities.
 
 ## Gauntlet
 

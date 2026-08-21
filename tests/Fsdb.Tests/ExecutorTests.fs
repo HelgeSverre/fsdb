@@ -5972,6 +5972,41 @@ let tests =
                           Some "FF"
                           Some "YWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFh\nYWFh" ]
 
+                testCase "time arithmetic handles datetime, signed time, fractions, and saturation"
+                <| fun _ ->
+                    expectRow
+                        "SELECT ADDTIME('2007-12-31 23:59:59.000002','1 1:1:1.000002'), SUBTIME('2008-01-01 01:01:01.000002','1:1:1.000002'), ADDTIME('10:00:00','02:30:00'), SUBTIME('10:00:00','12:00:00'), TIMEDIFF('2000-01-02 00:00:00','2000-01-01 12:00:00'), TIMEDIFF('01:00:00','02:30:00'), SEC_TO_TIME(2378), SEC_TO_TIME(-1.5), SEC_TO_TIME(9999999), MAKETIME(12,15,30), MAKETIME(-12,15,30.5), MAKETIME(1,60,0)"
+                        [ Some "2008-01-02 01:01:00.000004"
+                          Some "2008-01-01 00:00:00"
+                          Some "12:30:00"
+                          Some "-02:00:00"
+                          Some "12:00:00"
+                          Some "-01:30:00"
+                          Some "00:39:38"
+                          Some "-00:00:01.5"
+                          Some "838:59:59"
+                          Some "12:15:30"
+                          Some "-12:15:30.5"
+                          None ]
+
+                testCase "time formatting, periods, day numbers, and seeded RAND match MySQL"
+                <| fun _ ->
+                    expectRow
+                        "SELECT TIME_FORMAT('100:02:03.123456','%H|%k|%h|%I|%l|%i|%s|%f|%p'), PERIOD_ADD(202312,2), PERIOD_ADD(9912,2), PERIOD_DIFF(202402,202312), PERIOD_DIFF(7001,6912), TO_DAYS('0001-01-01'), TO_DAYS('1970-01-01'), TO_DAYS('2024-01-01'), FROM_DAYS(366), FROM_DAYS(719528), FROM_DAYS(739251), RAND(3), RAND(3)"
+                        [ Some "100|100|04|04|4|02|03|123456|AM"
+                          Some "202402"
+                          Some "200002"
+                          Some "2"
+                          Some "-1199"
+                          Some "366"
+                          Some "719528"
+                          Some "739251"
+                          Some "0001-01-01"
+                          Some "1970-01-01"
+                          Some "2024-01-01"
+                          Some "0.9057697559760601"
+                          Some "0.9057697559760601" ]
+
                 testCase "CONV converts both directions across bases 2..36, truncating at the first invalid digit"
                 <| fun _ ->
                     expectRow
