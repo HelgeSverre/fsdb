@@ -225,6 +225,9 @@ let private reservedWords =
           "alter"
           "rename"
           "index"
+          "use"
+          "force"
+          "ignore"
           "constraint"
           "foreign"
           "references"
@@ -2117,9 +2120,23 @@ let private limitClause: Parser<Expr option * Expr option, unit> =
 /// same as MySQL; `identifier` already backtracks cleanly off a reserved
 /// word (e.g. `WHERE`), so no `attempt` is needed around the bare-alias
 /// alternative.
+let private indexHint: Parser<unit, unit> =
+    ((keyword "USE" <|> keyword "FORCE" <|> keyword "IGNORE")
+     >>. (keyword "INDEX" <|> keyword "KEY")
+     >>. optional (
+         keyword "FOR"
+         >>. (keyword "JOIN" <|> attempt (keyword "ORDER" >>. keyword "BY") <|> attempt (keyword "GROUP" >>. keyword "BY"))
+     )
+     >>. between
+         (sym "(")
+         (sym ")")
+         (sepBy ((keyword "PRIMARY" >>% "PRIMARY") <|> identifier) (sym ",")))
+    >>% ()
+
 let private tableRef: Parser<TableRef, unit> =
     (identifier .>>. opt (sym "." >>. identifier))
     .>>. opt ((keyword "AS" >>. identifier) <|> identifier)
+    .>> many indexHint
     |>> fun ((first, second), alias) ->
         match second with
         | Some table -> { Database = Some first; Table = table; Alias = alias }

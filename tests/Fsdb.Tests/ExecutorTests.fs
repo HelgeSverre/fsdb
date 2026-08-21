@@ -5973,6 +5973,19 @@ let tests =
                     | ResultSet([ "column_0"; "column_1" ], [ [ Some "1"; Some "a" ]; [ Some "2"; Some "b" ] ]) -> ()
                     | other -> failtestf "unexpected VALUES result: %A" other
 
+                testCase "index hints parse on base and joined tables"
+                <| fun _ ->
+                    let store = newStore ()
+                    runDefault store "CREATE TABLE hinted (id INT PRIMARY KEY, n INT, INDEX ix_n (n))" |> ignore
+                    runDefault store "INSERT INTO hinted VALUES (1,10),(2,20)" |> ignore
+
+                    match
+                        runDefault store
+                            "SELECT a.id FROM hinted AS a USE INDEX (PRIMARY) JOIN hinted b FORCE KEY FOR JOIN (ix_n) IGNORE INDEX FOR ORDER BY (ix_n) ON b.id = a.id ORDER BY a.id"
+                    with
+                    | ResultSet(_, [ [ Some "1" ]; [ Some "2" ] ]) -> ()
+                    | other -> failtestf "unexpected hinted query result: %A" other
+
                 testCase "bitwise operators use unsigned 64-bit values and MySQL precedence"
                 <| fun _ ->
                     expectRow
