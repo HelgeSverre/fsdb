@@ -1897,6 +1897,26 @@ let tests =
                   [ Fsdb.Diagnostics.Note, 1265, "Data truncated for column 'd' at row 1" ]
                   "non-strict default reports MySQL's scale-loss note"
 
+          testCase "binary and lossy charset defaults are invalid in every sql mode"
+          <| fun _ ->
+              let session = create 1 (Fsdb.Storage.create ())
+
+              let expectInvalid session sql =
+                  match handle session sql |> snd with
+                  | Err(1067, "Invalid default value for 'v'") -> ()
+                  | other -> failtestf "expected MySQL's invalid-default error, got %A" other
+
+              expectInvalid session "CREATE TABLE strict_binary (v BINARY(3) DEFAULT X'61626364')"
+              expectInvalid session "CREATE TABLE strict_varbinary (v VARBINARY(3) DEFAULT X'61626364')"
+              expectInvalid session "CREATE TABLE strict_ascii (v VARCHAR(3) CHARACTER SET ascii DEFAULT 'å')"
+              expectInvalid session "CREATE TABLE strict_latin1 (v VARCHAR(3) CHARACTER SET latin1 DEFAULT '😀')"
+
+              let session, _ = handle session "SET SESSION sql_mode = ''"
+              expectInvalid session "CREATE TABLE nonstrict_binary (v BINARY(3) DEFAULT X'61626364')"
+              expectInvalid session "CREATE TABLE nonstrict_varbinary (v VARBINARY(3) DEFAULT X'61626364')"
+              expectInvalid session "CREATE TABLE nonstrict_ascii (v VARCHAR(3) CHARACTER SET ascii DEFAULT 'å')"
+              expectInvalid session "CREATE TABLE nonstrict_latin1 (v VARCHAR(3) CHARACTER SET latin1 DEFAULT '😀')"
+
           testCase "lossy column charsets retain MySQL conversion warnings"
           <| fun _ ->
               let session = create 1 (Fsdb.Storage.create ())

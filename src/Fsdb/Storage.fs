@@ -1292,16 +1292,34 @@ let private normalizeDefault (mode: TemporalCoercionMode) (col: ColumnDef) : Res
     | Some(DConst value) ->
         let text = value |> toText |> Option.defaultValue ""
 
-        let textOverflow =
+        let widthOverflow =
             match col.Type, value with
-            | _, VNull -> None
-            | TChar length, _ -> truncateRunes length (text.TrimEnd([| ' ' |]))
-            | TVarchar length, _ -> truncateRunes length text
-            | _ -> None
+            | _, VNull -> false
+            | TChar length, _ -> truncateRunes length (text.TrimEnd([| ' ' |])) |> Option.isSome
+            | TVarchar length, _ -> truncateRunes length text |> Option.isSome
+            | (TBinary length | TVarBinary length), _ ->
+                let bytes =
+                    match value with
+                    | VBytes bytes -> bytes
+                    | VString text -> Text.Encoding.UTF8.GetBytes text
+                    | _ -> text |> Text.Encoding.UTF8.GetBytes
 
-        match textOverflow with
-        | Some _ -> Error(InvalidDefaultValue col.Name)
-        | None ->
+                bytes.Length > length
+            | _ -> false
+
+        let charsetLoss =
+            match col.Type, col.Charset with
+            | (TChar _ | TVarchar _ | TTinyText | TText | TMediumText | TLongText | TJson), Some "ascii" ->
+                Collation.Charset.transcodeAscii text <> text
+            | (TChar _ | TVarchar _ | TTinyText | TText | TMediumText | TLongText | TJson), Some "latin1" ->
+                Collation.Charset.transcodeLatin1 text <> text
+            | _ -> false
+
+        let defaultIsInvalid = widthOverflow || charsetLoss
+
+        if defaultIsInvalid then
+            Error(InvalidDefaultValue col.Name)
+        else
             coerceStoredValueWithMode mode col value
             |> Result.map (fun value -> { col with Default = Some(DConst value) })
             |> Result.mapError (function
