@@ -4793,6 +4793,19 @@ let private geometrySrid functionName = function
     | VUInt srid when srid <= uint64 Int32.MaxValue -> int srid
     | _ -> geometryError functionName "the SRID must be a non-negative integer"
 
+let private requirePlanar (functionName: string) (geometry: Geometry) =
+    if geometry.Srid <> 0 then
+        raise (SqlError(1235, sprintf "This version of MySQL doesn't yet support '%s with nonzero SRIDs'" functionName))
+
+    geometry
+
+let private requireSamePlanarSrid (functionName: string) (first: Geometry) (second: Geometry) =
+    if first.Srid <> second.Srid then
+        raise (SqlError(3033, sprintf "Binary geometry function %s given two geometries of different SRIDs: %d and %d, which should have been identical." (functionName.ToLowerInvariant()) first.Srid second.Srid))
+
+    requirePlanar functionName first |> ignore
+    first, second
+
 let private geometryFromTextFn requiredKind functionName: Scalar =
     function
     | [ VNull ]
@@ -4900,6 +4913,58 @@ let private geometrySridFn: Scalar =
     | [ _; _ ] -> raise (SqlError(1235, "This version of MySQL doesn't yet support 'ST_SRID geometry mutation'"))
     | _ -> raise (SqlError(1582, "Incorrect parameter count in the call to native function 'st_srid'"))
 
+let private geometryDistanceFn: Scalar =
+    function
+    | [ VNull; _ ]
+    | [ _; VNull ] -> VNull
+    | [ first; second ] ->
+        let first, second = requireSamePlanarSrid "ST_DISTANCE" (geometryArgument "ST_DISTANCE" first) (geometryArgument "ST_DISTANCE" second)
+        geometryDistancePlanar first second |> Option.map VDouble |> Option.defaultValue VNull
+    | _ -> raise (SqlError(1582, "Incorrect parameter count in the call to native function 'st_distance'"))
+
+let private geometryEnvelopeFn: Scalar =
+    function
+    | [ VNull ] -> VNull
+    | [ value ] -> geometryArgument "ST_ENVELOPE" value |> requirePlanar "ST_ENVELOPE" |> geometryEnvelope |> VGeometry
+    | _ -> raise (SqlError(1582, "Incorrect parameter count in the call to native function 'st_envelope'"))
+
+let private mbrContains first second =
+    match geometryBounds first, geometryBounds second with
+    | Some outer, Some inner ->
+        let contains minimum maximum innerMinimum innerMaximum =
+            if minimum = maximum then
+                innerMinimum = innerMaximum && minimum = innerMinimum
+            elif innerMinimum = innerMaximum then
+                minimum < innerMinimum && innerMinimum < maximum
+            else
+                minimum <= innerMinimum && innerMaximum <= maximum
+
+        contains outer.MinX outer.MaxX inner.MinX inner.MaxX
+        && contains outer.MinY outer.MaxY inner.MinY inner.MaxY
+    | _ -> false
+
+let private mbrIntersects first second =
+    match geometryBounds first, geometryBounds second with
+    | Some first, Some second ->
+        first.MinX <= second.MaxX
+        && second.MinX <= first.MaxX
+        && first.MinY <= second.MaxY
+        && second.MinY <= first.MaxY
+    | _ -> false
+
+let private mbrPredicateFn functionName predicate: Scalar =
+    function
+    | [ VNull; _ ]
+    | [ _; VNull ] -> VNull
+    | [ first; second ] ->
+        let first, second = requireSamePlanarSrid functionName (geometryArgument functionName first) (geometryArgument functionName second)
+
+        match geometryBounds first, geometryBounds second with
+        | None, _
+        | _, None -> VNull
+        | Some _, Some _ -> VInt(if predicate first second then 1L else 0L)
+    | _ -> raise (SqlError(1582, sprintf "Incorrect parameter count in the call to native function '%s'" (functionName.ToLowerInvariant())))
+
 let private unsupportedGeometryFn name: Scalar =
     fun _ -> raise (SqlError(1235, sprintf "This version of MySQL doesn't yet support '%s'" name))
 
@@ -4979,12 +5044,15 @@ let builtins: Registry =
     |> registerScalar "ST_Y" (pointCoordinateFn "ST_Y" (fun _ y -> y))
     |> registerScalar "X" (pointCoordinateFn "X" (fun x _ -> x))
     |> registerScalar "Y" (pointCoordinateFn "Y" (fun _ y -> y))
-    |> registerScalar "ST_DISTANCE" (unsupportedGeometryFn "ST_DISTANCE")
+    |> registerScalar "ST_DISTANCE" geometryDistanceFn
     |> registerScalar "ST_CONTAINS" (unsupportedGeometryFn "ST_CONTAINS")
     |> registerScalar "ST_WITHIN" (unsupportedGeometryFn "ST_WITHIN")
     |> registerScalar "ST_INTERSECTS" (unsupportedGeometryFn "ST_INTERSECTS")
     |> registerScalar "ST_BUFFER" (unsupportedGeometryFn "ST_BUFFER")
-    |> registerScalar "ST_ENVELOPE" (unsupportedGeometryFn "ST_ENVELOPE")
+    |> registerScalar "ST_ENVELOPE" geometryEnvelopeFn
+    |> registerScalar "MBRCONTAINS" (mbrPredicateFn "MBRCONTAINS" mbrContains)
+    |> registerScalar "MBRWITHIN" (mbrPredicateFn "MBRWITHIN" (fun first second -> mbrContains second first))
+    |> registerScalar "MBRINTERSECTS" (mbrPredicateFn "MBRINTERSECTS" mbrIntersects)
     // Dates
     |> registerScalar "DATE_ADD" (dateAddCore 1.0)
     |> registerScalar "TIMESTAMPADD" timestampAddFn

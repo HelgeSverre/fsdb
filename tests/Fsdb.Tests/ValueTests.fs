@@ -184,7 +184,69 @@ let tests =
                     Expect.equal
                         (parse "010700000000000000" |> Option.map geometryToText)
                         (Some "GEOMETRYCOLLECTION EMPTY")
-                        "empty collection" ]
+                        "empty collection"
+
+                testCase "planar distance covers points, boundaries, holes, and collections"
+                <| fun _ ->
+                    let geometry text = call "ST_GeomFromText" [ VString text ]
+
+                    Expect.equal
+                        (call "ST_Distance" [ geometry "POINT(0 0)"; geometry "POINT(3 4)" ])
+                        (VDouble 5.0)
+                        "point distance"
+                    Expect.equal
+                        (call "ST_Distance" [ geometry "POINT(0 0)"; geometry "LINESTRING(3 0,3 4)" ])
+                        (VDouble 3.0)
+                        "point to line distance"
+                    Expect.equal
+                        (call "ST_Distance" [ geometry "POLYGON((0 0,4 0,4 4,0 4,0 0),(1 1,3 1,3 3,1 3,1 1))"; geometry "POINT(2 2)" ])
+                        (VDouble 1.0)
+                        "hole boundary distance"
+                    Expect.equal
+                        (call "ST_Distance" [ geometry "GEOMETRYCOLLECTION(POINT(0 0),LINESTRING(2 0,2 2))"; geometry "POINT(1 0)" ])
+                        (VDouble 1.0)
+                        "collection distance"
+                    Expect.equal
+                        (call "ST_Distance" [ geometry "GEOMETRYCOLLECTION EMPTY"; geometry "POINT(1 1)" ])
+                        VNull
+                        "empty distance"
+
+                testCase "envelopes and MBR predicates preserve planar bounds"
+                <| fun _ ->
+                    let geometry text = call "ST_GeomFromText" [ VString text ]
+                    let asText value = call "ST_AsText" [ value ]
+
+                    Expect.equal (asText (call "ST_Envelope" [ geometry "POINT(1 2)" ])) (VString "POINT(1 2)") "point envelope"
+                    Expect.equal (asText (call "ST_Envelope" [ geometry "LINESTRING(1 2,1 4)" ])) (VString "LINESTRING(1 2,1 4)") "line envelope"
+                    Expect.equal (asText (call "ST_Envelope" [ geometry "MULTIPOINT(2 3,1 4)" ])) (VString "POLYGON((1 3,2 3,2 4,1 4,1 3))") "area envelope"
+                    Expect.equal (asText (call "ST_Envelope" [ geometry "GEOMETRYCOLLECTION EMPTY" ])) (VString "GEOMETRYCOLLECTION EMPTY") "empty envelope"
+
+                    let rectangle = geometry "POLYGON((0 0,4 0,4 4,0 4,0 0))"
+                    let inside = geometry "POINT(2 2)"
+                    let boundary = geometry "POINT(4 4)"
+
+                    Expect.equal (call "MBRContains" [ rectangle; inside ]) (VInt 1L) "strictly inside"
+                    Expect.equal (call "MBRWithin" [ inside; rectangle ]) (VInt 1L) "inverse predicate"
+                    Expect.equal (call "MBRContains" [ rectangle; boundary ]) (VInt 0L) "boundary is excluded"
+                    Expect.equal (call "MBRIntersects" [ rectangle; boundary ]) (VInt 1L) "boundary intersects"
+                    Expect.equal (call "MBRIntersects" [ rectangle; geometry "POINT(5 4)" ]) (VInt 0L) "disjoint bounds"
+                    Expect.equal (call "MBRContains" [ rectangle; geometry "POLYGON((0 1,2 1,2 3,0 3,0 1))" ]) (VInt 1L) "area may touch a boundary"
+
+                testCase "planar geometry functions reject nonzero and mismatched SRIDs"
+                <| fun _ ->
+                    let expectError code invoke =
+                        Expect.throwsC
+                            (invoke >> ignore)
+                            (function
+                            | Fsdb.Functions.SqlError(actual, _) when actual = code -> ()
+                            | error -> failtestf "expected %d, got %A" code error)
+
+                    let planar = call "ST_GeomFromText" [ VString "POINT(0 0)" ]
+                    let geographic = call "ST_GeomFromText" [ VString "POINT(0 0)"; VInt 4326L ]
+
+                    expectError 3033 (fun () -> call "ST_Distance" [ planar; geographic ])
+                    expectError 1235 (fun () -> call "ST_Distance" [ geographic; geographic ])
+                    expectError 1235 (fun () -> call "ST_Envelope" [ geographic ]) ]
 
           testList
               "mysqlTypeOf"

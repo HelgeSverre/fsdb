@@ -382,6 +382,149 @@ let tryGeometryFromMySqlBinary (bytes: byte[]) : Geometry option =
         let srid = BinaryPrimitives.ReadInt32LittleEndian(ReadOnlySpan(bytes, 0, 4))
         tryGeometryFromWkb srid bytes.[4..]
 
+type GeometryBounds =
+    { MinX: float
+      MinY: float
+      MaxX: float
+      MaxY: float }
+
+let rec private shapeCoordinates = function
+    | GEmpty -> []
+    | GPoint(x, y) -> [ x, y ]
+    | GLineString points -> points
+    | GPolygon rings -> List.collect id rings
+    | GMultiPoint points -> points
+    | GMultiLineString lines -> List.collect id lines
+    | GMultiPolygon polygons -> polygons |> List.collect (List.collect id)
+    | GGeometryCollection geometries -> geometries |> List.collect (fun geometry -> shapeCoordinates geometry.Shape)
+
+let geometryBounds (geometry: Geometry) : GeometryBounds option =
+    match shapeCoordinates geometry.Shape with
+    | [] -> None
+    | (x, y) :: points ->
+        let minX, minY, maxX, maxY =
+            points
+            |> List.fold (fun (minX, minY, maxX, maxY) (x, y) -> min minX x, min minY y, max maxX x, max maxY y) (x, y, x, y)
+
+        Some { MinX = minX; MinY = minY; MaxX = maxX; MaxY = maxY }
+
+let geometryEnvelope (geometry: Geometry) : Geometry =
+    let shape =
+        match geometryBounds geometry with
+        | None -> GEmpty
+        | Some bounds when bounds.MinX = bounds.MaxX && bounds.MinY = bounds.MaxY -> GPoint(bounds.MinX, bounds.MinY)
+        | Some bounds when bounds.MinX = bounds.MaxX || bounds.MinY = bounds.MaxY ->
+            GLineString [ (bounds.MinX, bounds.MinY); (bounds.MaxX, bounds.MaxY) ]
+        | Some bounds ->
+            GPolygon
+                [ [ (bounds.MinX, bounds.MinY)
+                    (bounds.MaxX, bounds.MinY)
+                    (bounds.MaxX, bounds.MaxY)
+                    (bounds.MinX, bounds.MaxY)
+                    (bounds.MinX, bounds.MinY) ] ]
+
+    { geometry with Shape = shape }
+
+let private pointOnSegment (x, y) ((x1, y1), (x2, y2)) =
+    let cross = (x - x1) * (y2 - y1) - (y - y1) * (x2 - x1)
+    let within value lower upper = min lower upper <= value && value <= max lower upper
+    cross = 0.0 && within x x1 x2 && within y y1 y2
+
+let private segments points = points |> List.pairwise
+
+let private euclidean x y = sqrt (x * x + y * y)
+
+let private orientation (x1, y1) (x2, y2) (x3, y3) = (x2 - x1) * (y3 - y1) - (y2 - y1) * (x3 - x1)
+
+let private segmentsIntersect ((a, b) as first) ((c, d) as second) =
+    let abC = orientation a b c
+    let abD = orientation a b d
+    let cdA = orientation c d a
+    let cdB = orientation c d b
+
+    (abC = 0.0 && pointOnSegment c first)
+    || (abD = 0.0 && pointOnSegment d first)
+    || (cdA = 0.0 && pointOnSegment a second)
+    || (cdB = 0.0 && pointOnSegment b second)
+    || ((abC < 0.0) <> (abD < 0.0) && (cdA < 0.0) <> (cdB < 0.0))
+
+let private pointSegmentDistance (x, y) ((x1, y1), (x2, y2)) =
+    let dx = x2 - x1
+    let dy = y2 - y1
+    let lengthSquared = dx * dx + dy * dy
+
+    if lengthSquared = 0.0 then
+        euclidean (x - x1) (y - y1)
+    else
+        let t = max 0.0 (min 1.0 (((x - x1) * dx + (y - y1) * dy) / lengthSquared))
+        euclidean (x - (x1 + t * dx)) (y - (y1 + t * dy))
+
+let private ringContains point ring =
+    let edges = segments ring
+
+    if edges |> List.exists (pointOnSegment point) then
+        true
+    else
+        let x, y = point
+
+        edges
+        |> List.fold (fun inside ((x1, y1), (x2, y2)) ->
+            if (y1 > y) <> (y2 > y) && x < (x2 - x1) * (y - y1) / (y2 - y1) + x1 then
+                not inside
+            else
+                inside) false
+
+let private polygonContains point = function
+    | shell :: holes -> ringContains point shell && not (holes |> List.exists (ringContains point))
+    | [] -> false
+
+let rec private shapePolygons = function
+    | GPolygon polygon -> [ polygon ]
+    | GMultiPolygon polygons -> polygons
+    | GGeometryCollection geometries -> geometries |> List.collect (fun geometry -> shapePolygons geometry.Shape)
+    | _ -> []
+
+let rec private shapeSegments = function
+    | GLineString points -> segments points
+    | GPolygon polygon -> polygon |> List.collect segments
+    | GMultiLineString lines -> lines |> List.collect segments
+    | GMultiPolygon polygons -> polygons |> List.collect (List.collect segments)
+    | GGeometryCollection geometries -> geometries |> List.collect (fun geometry -> shapeSegments geometry.Shape)
+    | _ -> []
+
+let geometryDistancePlanar (first: Geometry) (second: Geometry) : float option =
+    let firstPoints = shapeCoordinates first.Shape
+    let secondPoints = shapeCoordinates second.Shape
+
+    if List.isEmpty firstPoints || List.isEmpty secondPoints then
+        None
+    else
+        let firstSegments = shapeSegments first.Shape
+        let secondSegments = shapeSegments second.Shape
+        let firstPolygons = shapePolygons first.Shape
+        let secondPolygons = shapePolygons second.Shape
+        let firstInsideSecond = firstPoints |> List.exists (fun point -> secondPolygons |> List.exists (polygonContains point))
+        let secondInsideFirst = secondPoints |> List.exists (fun point -> firstPolygons |> List.exists (polygonContains point))
+        let intersects =
+            firstSegments
+            |> List.exists (fun firstSegment -> secondSegments |> List.exists (segmentsIntersect firstSegment))
+
+        if firstInsideSecond || secondInsideFirst || intersects then
+            Some 0.0
+        else
+            let pointDistances =
+                [ for firstPoint in firstPoints do
+                      for secondPoint in secondPoints do
+                          euclidean (fst firstPoint - fst secondPoint) (snd firstPoint - snd secondPoint)
+                  for point in firstPoints do
+                      for segment in secondSegments do
+                          pointSegmentDistance point segment
+                  for point in secondPoints do
+                      for segment in firstSegments do
+                          pointSegmentDistance point segment ]
+
+            pointDistances |> List.min |> Some
+
 type Value =
     | VNull
     | VInt of int64

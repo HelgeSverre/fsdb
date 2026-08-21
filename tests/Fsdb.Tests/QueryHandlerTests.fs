@@ -131,6 +131,19 @@ let tests =
                       "function metadata"
               | _, other -> failtestf "expected an empty resultset, got %A" other
 
+          testCase "planar geometry functions compose through SQL expressions"
+          <| fun _ ->
+              let session = create 1 (Fsdb.Storage.create ())
+
+              match
+                  handle
+                      session
+                      "SELECT ST_Distance(ST_GeomFromText('POINT(0 0)'), ST_GeomFromText('LINESTRING(3 0,3 4)')), ST_AsText(ST_Envelope(ST_GeomFromText('MULTIPOINT(2 3,1 4)'))), MBRContains(ST_GeomFromText('POLYGON((0 0,4 0,4 4,0 4,0 0))'), ST_GeomFromText('POINT(2 2)'))"
+                  |> snd
+              with
+              | ResultSet(_, [ [ Some "3"; Some "POLYGON((1 3,2 3,2 4,1 4,1 3))"; Some "1" ] ]) -> ()
+              | other -> failtestf "expected planar geometry result, got %A" other
+
           // A resultset's types are read off the row `Value`s, which know
           // nothing about how the column was declared. Where a projection
           // resolves back to a real column, the declared type wins — clients
