@@ -178,8 +178,13 @@ retryable 1205 error. Immutable row pages let the merge inspect only pages
 changed from the transaction snapshot and maintain indexes incrementally.
 PK/UNIQUE and one-column secondary equality lookups go through maps keyed by
 each column's collation-folded encoding, so `utf8mb4_0900_ai_ci` keys collide
-exactly as MySQL's do. Composite/range/order index access remains a scan.
-Equi-joins hash-join; everything else is a scan.
+exactly as MySQL's do. A direct literal range in a single-table `SELECT` can
+seek a one-column non-unique secondary B-tree and reports `range` in
+`EXPLAIN`; unique/PK ranges, DML ranges, composite indexes, and `ORDER BY`
+index access remain scans. Equality buckets and ordered entries are separate
+derived structures, deliberately trading memory and write work for efficient
+equality buckets and bounded range seeks. Equi-joins hash-join; everything
+else is a scan.
 
 ### Collations & charsets
 
