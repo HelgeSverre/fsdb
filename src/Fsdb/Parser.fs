@@ -1950,6 +1950,16 @@ let private setCheckEnforcementAction: Parser<AlterAction, unit> =
     attempt (keyword "ALTER" >>. (keyword "CHECK" <|> keyword "CONSTRAINT") >>. identifier .>>. checkEnforcement)
     |>> SetCheckEnforced
 
+let private setColumnDefaultAction: Parser<AlterAction, unit> =
+    attempt (
+        keyword "ALTER"
+        >>. optColumnKw
+        >>. identifier
+        .>>. ((keyword "SET" >>. keyword "DEFAULT" >>. defaultValueLit |>> Some)
+              <|> (keyword "DROP" >>. keyword "DEFAULT" >>% None))
+    )
+    |>> SetDefault
+
 let private dropForeignKeyAction: Parser<AlterAction, unit> =
     attempt (keyword "DROP" >>. keyword "FOREIGN" >>. keyword "KEY" >>. identifier) |>> DropForeignKey
 
@@ -1990,6 +2000,7 @@ let private alterAction: Parser<AlterAction list, unit> =
           dropColumnAction |>> List.singleton
           modifyColumnAction
           changeColumnAction
+          setColumnDefaultAction |>> List.singleton
           setCheckEnforcementAction |>> List.singleton
           renameColumnAction |>> List.singleton
           setAutoIncrementAction |>> List.singleton

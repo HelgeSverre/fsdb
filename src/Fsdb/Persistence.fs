@@ -516,6 +516,15 @@ let private encodeAlterAction (w: Writer) (a: AlterAction) : unit =
     | DropForeignKey name -> w.WriteByte 0x0Auy; writeStr w name
     | AddPrimaryKey columns -> w.WriteByte 0x0Buy; writeStrList w columns
     | SetAutoIncrement value -> w.WriteByte 0x0Cuy; w.WriteInt64LE value
+    | SetDefault(column, value) ->
+        w.WriteByte 0x0Duy
+        writeStr w column
+
+        match value with
+        | None -> w.WriteByte 0uy
+        | Some defaultValue ->
+            w.WriteByte 1uy
+            encodeColumnDefault w defaultValue
     | AddCheck _
     | DropCheck _
     | SetCheckEnforced _ -> failwith "Persistence: row-backed CHECK metadata must not reach a SchemaChanged action"
@@ -533,6 +542,10 @@ let private decodeAlterAction (r: #IReader) : AlterAction =
     | 0x09uy -> AddForeignKey(decodeForeignKeyDef r)
     | 0x0Auy -> DropForeignKey(readStr r)
     | 0x0Cuy -> SetAutoIncrement(r.ReadInt64LE())
+    | 0x0Duy ->
+        let column = readStr r
+        let value = if r.ReadByte() = 0uy then None else Some(decodeColumnDefault r)
+        SetDefault(column, value)
     | _ -> AddPrimaryKey(readStrList r)
 
 let private encodeStatement (w: Writer) (s: Statement) : unit =

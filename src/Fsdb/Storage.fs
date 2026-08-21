@@ -2206,6 +2206,20 @@ let private applyAlterAction (strict: bool) (table: Table) (action: AlterAction)
                 Columns = table.Columns |> List.map (fun c -> if List.contains c.Name cols then { c with PrimaryKey = true } else c) },
             None
         )
+    | SetDefault(column, value) ->
+        resolveColumn table.Columns column
+        |> Result.map (fun index ->
+            let columns =
+                table.Columns
+                |> List.mapi (fun i definition ->
+                    if i = index then
+                        { definition with Default = value }
+                    else
+                        definition)
+
+            { table with
+                Columns = columns },
+            None)
     | SetAutoIncrement value ->
         // Forward only, like InnoDB: a value below what existing rows
         // already claimed leaves the counter where it is.

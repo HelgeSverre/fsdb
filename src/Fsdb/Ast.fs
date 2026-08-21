@@ -574,6 +574,7 @@ type AlterAction =
     | DropCheck of name: string
     | SetCheckEnforced of name: string * enforced: bool
     | AddPrimaryKey of columns: string list
+    | SetDefault of column: string * value: ColumnDefault option
     /// `ALTER TABLE t AUTO_INCREMENT = n` — moves the counter forward
     /// (never below what existing rows already require, like InnoDB).
     | SetAutoIncrement of value: int64

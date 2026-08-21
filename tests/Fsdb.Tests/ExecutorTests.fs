@@ -1600,6 +1600,23 @@ let tests =
                     | ResultSet([ "id"; "active" ], [ [ Some "1"; Some "1" ] ]) -> ()
                     | other -> failtestf "expected the new column filled with its default, got %A" other
 
+                testCase "ALTER COLUMN SET and DROP DEFAULT affect subsequent inserts"
+                <| fun _ ->
+                    let store = newStore ()
+                    runDefault store "CREATE TABLE t (id INT, n INT DEFAULT 1)" |> ignore
+                    runDefault store "ALTER TABLE t ALTER COLUMN n SET DEFAULT 7" |> ignore
+                    runDefault store "INSERT INTO t (id) VALUES (1)" |> ignore
+                    runDefault store "ALTER TABLE t ALTER n DROP DEFAULT" |> ignore
+                    runDefault store "INSERT INTO t (id) VALUES (2)" |> ignore
+
+                    match runDefault store "SELECT id, n FROM t ORDER BY id" with
+                    | ResultSet(_, [ [ Some "1"; Some "7" ]; [ Some "2"; None ] ]) -> ()
+                    | other -> failtestf "expected changed defaults, got %A" other
+
+                    match runDefault store "ALTER TABLE t ALTER missing SET DEFAULT 1" with
+                    | Err(1054, _) -> ()
+                    | other -> failtestf "expected unknown column error, got %A" other
+
                 testCase "DROP COLUMN then SELECT * doesn't see it"
                 <| fun _ ->
                     let store = newStore ()

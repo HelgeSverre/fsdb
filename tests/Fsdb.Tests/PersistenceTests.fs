@@ -1220,6 +1220,7 @@ let tests =
                     "ALTER TABLE acts ADD CONSTRAINT fk_p FOREIGN KEY (pid) REFERENCES parent(id)"
                     "ALTER TABLE acts DROP FOREIGN KEY fk_p"
                     "ALTER TABLE acts ADD PRIMARY KEY (id)"
+                    "ALTER TABLE acts ALTER COLUMN extra SET DEFAULT 9"
                     "ALTER TABLE acts AUTO_INCREMENT = 500" ]
                   |> List.fold run session
 
@@ -1268,6 +1269,10 @@ let tests =
                   Expect.isEmpty t.ForeignKeys "the dropped foreign key stayed dropped"
                   Expect.equal (t.Indexes |> List.filter (fun ix -> ix.Name = "ix_extra")) [] "the dropped index stayed dropped"
                   Expect.isTrue (t.Columns |> List.exists (fun c -> c.PrimaryKey)) "ADD PRIMARY KEY replayed"
+                  Expect.equal
+                      (t.Columns |> List.find (fun c -> c.Name = "extra") |> _.Default)
+                      (Some(DConst(VInt 9L)))
+                      "ALTER COLUMN SET DEFAULT replayed"
                   Expect.equal t.NextAutoId 500L "AUTO_INCREMENT seed replayed"
               | None -> failtest "acts table missing after reload"
 

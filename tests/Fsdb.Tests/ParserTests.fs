@@ -1492,6 +1492,13 @@ let tests =
                         (AlterTable("t", [ AddPrimaryKey [ "id" ] ]))
                         "add primary key"
 
+                testCase "ALTER COLUMN SET and DROP DEFAULT"
+                <| fun _ ->
+                    Expect.equal
+                        (parseOk "ALTER TABLE t ALTER COLUMN n SET DEFAULT 7, ALTER n DROP DEFAULT")
+                        (AlterTable("t", [ SetDefault("n", Some(DConst(VInt 7L))); SetDefault("n", None) ]))
+                        "alter defaults"
+
                 testCase "RENAME TABLE a TO b, c TO d"
                 <| fun _ ->
                     Expect.equal
