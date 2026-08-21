@@ -322,11 +322,19 @@ let tests =
                 testCase "WEIGHT_STRING BINARY uses the column character set"
                 <| fun _ ->
                     let store = newStore ()
-                    runDefault store "CREATE TABLE weight_charset (value VARCHAR(10) CHARACTER SET latin1)" |> ignore
+                    runDefault store "CREATE TABLE weight_charset (value VARCHAR(10) CHARACTER SET latin1 COLLATE latin1_bin)" |> ignore
                     runDefault store "INSERT INTO weight_charset VALUES ('é')" |> ignore
 
-                    match runDefault store "SELECT HEX(WEIGHT_STRING(value AS BINARY(2))) FROM weight_charset" with
-                    | ResultSet(_, [ [ Some weight ] ]) -> Expect.equal weight "E900" "latin1 bytes are padded"
+                    match
+                        runDefault
+                            store
+                            "SELECT HEX(WEIGHT_STRING(value)), HEX(WEIGHT_STRING(value AS BINARY(2))), HEX(WEIGHT_STRING('é' COLLATE utf8mb4_bin)), HEX(WEIGHT_STRING('é' COLLATE utf8mb4_0900_bin)) FROM weight_charset"
+                    with
+                    | ResultSet(_, [ [ Some latin1Weight; Some paddedWeight; Some legacyWeight; Some utf8Weight ] ]) ->
+                        Expect.equal latin1Weight "E9" "latin1_bin uses CP1252 bytes"
+                        Expect.equal paddedWeight "E900" "latin1 bytes are padded"
+                        Expect.equal legacyWeight "0000E9" "legacy utf8mb4_bin uses code-point weights"
+                        Expect.equal utf8Weight "C3A9" "utf8mb4_0900_bin uses UTF-8 bytes"
                     | other -> failtestf "expected one latin1 weight row, got %A" other
 
                 testTheory

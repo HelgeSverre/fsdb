@@ -104,6 +104,66 @@ let private countTrailingSpaces (s: string) : int =
 
     n
 
+/// CP1252's C1 bytes make `latin1` weights and stored-text transcoding agree.
+let private cp1252HighSlots : char option array =
+    [| Some '€'
+       None
+       Some '‚'
+       Some 'ƒ'
+       Some '„'
+       Some '…'
+       Some '†'
+       Some '‡'
+       Some 'ˆ'
+       Some '‰'
+       Some 'Š'
+       Some '‹'
+       Some 'Œ'
+       None
+       Some 'Ž'
+       None
+       None
+       Some '‘'
+       Some '’'
+       Some '“'
+       Some '”'
+       Some '•'
+       Some '–'
+       Some '—'
+       Some '˜'
+       Some '™'
+       Some 'š'
+       Some '›'
+       Some 'œ'
+       None
+       Some 'ž'
+       Some 'Ÿ' |]
+
+let private cp1252ByteByCode =
+    cp1252HighSlots
+    |> Array.indexed
+    |> Array.choose (fun (index, value) -> value |> Option.map (fun value -> int value, byte (index + 0x80)))
+    |> Map.ofArray
+
+let private encodeCharset (charset: string) (text: string) : byte[] =
+    let byteForRune (rune: Rune) : byte =
+        match charset with
+        | "latin1" ->
+            let code = rune.Value
+
+            if code < 0x80 || (code >= 0xA0 && code <= 0xFF) then
+                byte code
+            else
+                Map.tryFind code cp1252ByteByCode |> Option.defaultValue 0x3Fuy
+        | "ascii" ->
+            if rune.Value < 0x80 then byte rune.Value else 0x3Fuy
+        | _ -> 0uy
+
+    match charset with
+    | "latin1"
+    | "ascii" -> text.EnumerateRunes() |> Seq.map byteForRune |> Array.ofSeq
+    | _ -> Text.Encoding.UTF8.GetBytes text
+
 let private makeCollation (name: string) (spec: Spec) : Collation =
     let ci = compareInfoFor spec.Locale
     let trim (s: string) = if spec.PadSpace then s.TrimEnd(' ') else s
@@ -116,14 +176,15 @@ let private makeCollation (name: string) (spec: Spec) : Collation =
     let primaryText (s: string) = trim s |> foldText
 
     let binaryWeight (s: string) =
-        if name.StartsWith("utf8mb", StringComparison.Ordinal) then
+        if name = "utf8mb3_bin" || name = "utf8mb4_bin" then
             s.EnumerateRunes()
             |> Seq.collect (fun rune ->
                 let value = rune.Value
                 [ byte (value >>> 16); byte (value >>> 8); byte value ])
             |> Array.ofSeq
         else
-            Text.Encoding.UTF8.GetBytes s
+            let charset = name.Split('_').[0]
+            encodeCharset charset s
 
     let compareFull (a: string) (b: string) : int =
         if spec.ByteOrder then
@@ -430,52 +491,8 @@ let defaultCollation = Map.find "utf8mb4_0900_ai_ci" registry
 // strict mode at the storage layer; this mapping is the lossy fallback).
 // ---------------------------------------------------------------------------
 
-/// The Unicode code points cp1252 adds above ISO-8859-1, in 0x80–0x9F slot
-/// order (0x81/0x8D/0x8F/0x90/0x9D are undefined in cp1252 and skipped).
 module Charset =
-    /// cp1252's 0x80–0x9F slots, in slot order — the five slots cp1252
-    /// leaves undefined (0x81/0x8D/0x8F/0x90/0x9D) are `None`.
-    let private cp1252HighSlots : char option array =
-        [| Some '€' // 0x80
-           None // 0x81
-           Some '‚' // 0x82
-           Some 'ƒ' // 0x83
-           Some '„' // 0x84
-           Some '…' // 0x85
-           Some '†' // 0x86
-           Some '‡' // 0x87
-           Some 'ˆ' // 0x88
-           Some '‰' // 0x89
-           Some 'Š' // 0x8A
-           Some '‹' // 0x8B
-           Some 'Œ' // 0x8C
-           None // 0x8D
-           Some 'Ž' // 0x8E
-           None // 0x8F
-           None // 0x90
-           Some '‘' // 0x91
-           Some '’' // 0x92
-           Some '“' // 0x93
-           Some '”' // 0x94
-           Some '•' // 0x95
-           Some '–' // 0x96
-           Some '—' // 0x97
-           Some '˜' // 0x98
-           Some '™' // 0x99
-           Some 'š' // 0x9A
-           Some '›' // 0x9B
-           Some 'œ' // 0x9C
-           None // 0x9D
-           Some 'ž' // 0x9E
-           Some 'Ÿ' |] // 0x9F
-
     let private cp1252Extras = cp1252HighSlots |> Array.choose id |> Array.map int |> Set.ofArray
-
-    let private cp1252ByteByCode =
-        cp1252HighSlots
-        |> Array.indexed
-        |> Array.choose (fun (index, value) -> value |> Option.map (fun value -> int value, byte (index + 0x80)))
-        |> Map.ofArray
 
     /// Maps text to what a `latin1` (cp1252) column can hold: ASCII and
     /// 0xA0–0xFF pass through, the cp1252 extras pass through, everything
@@ -522,23 +539,7 @@ module Charset =
     /// Encodes a text value with the byte mapping MySQL applies before a
     /// binary string operation observes a column's character set.
     let encode (charset: string) (text: string) : byte[] =
-        let byteForRune (rune: Rune) : byte =
-            match charset with
-            | "latin1" ->
-                let code = rune.Value
-
-                if code < 0x80 || (code >= 0xA0 && code <= 0xFF) then
-                    byte code
-                else
-                    Map.tryFind code cp1252ByteByCode |> Option.defaultValue 0x3Fuy
-            | "ascii" ->
-                if rune.Value < 0x80 then byte rune.Value else 0x3Fuy
-            | _ -> 0uy
-
-        match charset with
-        | "latin1"
-        | "ascii" -> text.EnumerateRunes() |> Seq.map byteForRune |> Array.ofSeq
-        | _ -> Text.Encoding.UTF8.GetBytes text
+        encodeCharset charset text
 
     /// Decodes raw bytes as ASCII — the `_ascii'...'` introducer's byte
     /// labeling, where each non-7-bit byte becomes one '?' (verified:
