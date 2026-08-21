@@ -1,5 +1,6 @@
 /// TCP listener and per-connection command loop: handshake, then
-/// COM_QUERY / COM_STATISTICS / COM_PING / COM_INIT_DB / COM_QUIT.
+/// COM_QUERY / COM_STATISTICS / COM_PROCESS_INFO / COM_PING / COM_INIT_DB /
+/// COM_QUIT.
 module Fsdb.Server
 
 open System
@@ -24,6 +25,7 @@ type private Command =
     | InitDb of database: string
     | Query of sql: string
     | Statistics
+    | ProcessInfo
     | Ping
     | FieldList of table: string
     | StmtPrepare of sql: string
@@ -62,6 +64,7 @@ let private parseCommand (payload: byte[]) : Command option =
                 | 0x03uy -> Query(rest ())
                 | 0x04uy -> FieldList(Reader(restBytes ()).ReadNullTerminatedString())
                 | 0x09uy -> Statistics
+                | 0x0auy -> ProcessInfo
                 | 0x0euy -> Ping
                 | 0x16uy -> StmtPrepare(rest ())
                 | 0x17uy -> StmtExecute(restBytes ())
@@ -699,6 +702,25 @@ let private handleConnection
                                     |> Async.Ignore
 
                                 return! loop session
+                            | Some ProcessInfo ->
+                                InformationSchema.recordQuestion ()
+
+                                match runCancellable (fun () -> QueryHandler.handle session "SHOW PROCESSLIST") with
+                                | None -> ()
+                                | Some(session, result) ->
+                                    activeSession <- Some session
+
+                                    do!
+                                        sendQueryResult
+                                            stream
+                                            capabilities
+                                            seqId
+                                            (statusFlagsFor session)
+                                            (uint64 session.LastInsertId)
+                                            session.LastResultColumnMetadata
+                                            result
+
+                                    return! loop session
                             | Some(FieldList table) ->
                                 // Deprecated in MySQL 8.0, but PDO/mysqlnd's
                                 // metadata probing can still send it —
