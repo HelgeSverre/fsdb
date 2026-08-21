@@ -155,10 +155,15 @@ let lookupAggregate (name: string) (registry: Registry) : Aggregate option =
 // gets — no special-casing for the ones that ship in the box.
 // ---------------------------------------------------------------------------
 
+let private stringBytes (value: Value) =
+    tryRawBytes value |> Option.defaultWith (fun () -> Text.Encoding.UTF8.GetBytes(toText value |> Option.defaultValue ""))
+
 let private concatFn (args: Value list) : Value =
     // MySQL: CONCAT returns NULL if any argument is NULL.
     if args |> List.exists (function VNull -> true | _ -> false) then
         VNull
+    elif args |> List.exists (tryRawBytes >> Option.isSome) then
+        args |> List.collect (stringBytes >> Array.toList) |> Array.ofList |> VBytes
     else
         args |> List.map (toText >> Option.defaultValue "") |> String.concat "" |> VString
 
@@ -2938,20 +2943,34 @@ let private resolveStart (len: int) (pos: int) : int option =
 
 let private substringFn: Scalar =
     function
-    | [ s; posV ] when not (anyNull [ s; posV ]) ->
-        let str = req s
+    | [ value; posV ] when not (anyNull [ value; posV ]) ->
+        match tryRawBytes value with
+        | Some bytes ->
+            match resolveStart bytes.Length (int (toDouble posV)) with
+            | None -> VBytes [||]
+            | Some start -> VBytes(bytes.[start..])
+        | None ->
+            let text = req value
 
-        match resolveStart str.Length (int (toDouble posV)) with
-        | None -> VString ""
-        | Some start -> VString(str.Substring start)
-    | [ s; posV; lenV ] when not (anyNull [ s; posV; lenV ]) ->
-        let str = req s
+            match resolveStart text.Length (int (toDouble posV)) with
+            | None -> VString ""
+            | Some start -> VString(text.Substring start)
+    | [ value; posV; lenV ] when not (anyNull [ value; posV; lenV ]) ->
         let takeLen = int (toDouble lenV)
 
-        match resolveStart str.Length (int (toDouble posV)) with
-        | None -> VString ""
-        | Some start when takeLen <= 0 -> VString ""
-        | Some start -> VString(str.Substring(start, min takeLen (str.Length - start)))
+        match tryRawBytes value with
+        | Some bytes ->
+            match resolveStart bytes.Length (int (toDouble posV)) with
+            | None -> VBytes [||]
+            | Some start when takeLen <= 0 || start = bytes.Length -> VBytes [||]
+            | Some start -> VBytes(bytes.[start .. start + min takeLen (bytes.Length - start) - 1])
+        | None ->
+            let text = req value
+
+            match resolveStart text.Length (int (toDouble posV)) with
+            | None -> VString ""
+            | Some _ when takeLen <= 0 -> VString ""
+            | Some start -> VString(text.Substring(start, min takeLen (text.Length - start)))
     | _ -> VNull
 
 /// Character-by-character substring search using the engine's default
@@ -3062,12 +3081,19 @@ let private rightFn: Scalar =
 
 let private repeatFn: Scalar =
     function
-    | [ s; n ] when not (anyNull [ s; n ]) ->
+    | [ value; n ] when not (anyNull [ value; n ]) ->
         let k = int (toDouble n)
-        let str = req s
-        if k <= 0 then VString ""
-        elif int64 k * int64 str.Length > int64 Limits.maxAllowedPacket then VNull
-        else VString(String.replicate k str)
+
+        match tryRawBytes value with
+        | Some bytes ->
+            if k <= 0 then VBytes [||]
+            elif int64 k * int64 bytes.Length > int64 Limits.maxAllowedPacket then VNull
+            else Array.replicate k bytes |> Array.concat |> VBytes
+        | None ->
+            let text = req value
+            if k <= 0 then VString ""
+            elif int64 k * int64 text.Length > int64 Limits.maxAllowedPacket then VNull
+            else VString(String.replicate k text)
     | _ -> VNull
 
 let private spaceFn: Scalar =

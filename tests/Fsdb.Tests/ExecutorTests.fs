@@ -6421,8 +6421,8 @@ let tests =
                     runDefault store "CREATE TABLE bits (value BIT(64))" |> ignore
                     runDefault store "INSERT INTO bits VALUES (0x8000000000000000)" |> ignore
 
-                    match runDefault store "SELECT HEX(value), LENGTH(value), BIT_LENGTH(value), TO_BASE64(value) FROM bits" with
-                    | ResultSet(_, [ [ Some "8000000000000000"; Some "8"; Some "64"; Some "gAAAAAAAAAA=" ] ]) -> ()
+                    match runDefault store "SELECT HEX(value), LENGTH(value), BIT_LENGTH(value), TO_BASE64(value), HEX(CONCAT(value)), HEX(REPEAT(value, 1)), HEX(SUBSTRING(value, 1, 1)) FROM bits" with
+                    | ResultSet(_, [ [ Some "8000000000000000"; Some "8"; Some "64"; Some "gAAAAAAAAAA="; Some "8000000000000000"; Some "8000000000000000"; Some "80" ] ]) -> ()
                     | other -> failtestf "expected raw BIT bytes, got %A" other
 
                 testCase "SOUNDS LIKE and MEMBER OF follow MySQL comparison semantics"
