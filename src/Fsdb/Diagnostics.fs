@@ -32,3 +32,12 @@ let capture (body: unit -> 'a) : 'a * Condition list =
         body (), List.ofSeq conditions
     finally
         active.Value <- previous
+
+let suppress (body: unit -> 'a) : 'a =
+    let previous = active.Value
+    active.Value <- None
+
+    try
+        body ()
+    finally
+        active.Value <- previous

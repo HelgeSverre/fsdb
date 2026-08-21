@@ -6376,10 +6376,11 @@ and private runSelect
     let probe = probeRow columns
 
     match
-        withSuppressedVariableAssignments (fun () ->
-            matches probe
-            |> Result.bind (fun _ -> projectRow probe)
-            |> Result.bind (fun outputCols -> orderKeysOf probe outputCols |> Result.map (fun _ -> outputCols))) with
+        Diagnostics.suppress (fun () ->
+            withSuppressedVariableAssignments (fun () ->
+                matches probe
+                |> Result.bind (fun _ -> projectRow probe)
+                |> Result.bind (fun outputCols -> orderKeysOf probe outputCols |> Result.map (fun _ -> outputCols)))) with
     | Error(code, message) -> Err(code, message), [], []
     | Ok probeProjection when limit = Some 0 ->
         // `LIMIT 0` is the standard "column metadata, no rows" probe
