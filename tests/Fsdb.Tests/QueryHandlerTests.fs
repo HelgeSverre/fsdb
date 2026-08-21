@@ -78,6 +78,26 @@ let tests =
                   | metadata -> failtestf "expected one metadata record, got %A" metadata
               | _, other -> failtestf "expected an empty WEIGHT_STRING result, got %A" other
 
+          testCase "WEIGHT_STRING metadata follows source character bounds"
+          <| fun _ ->
+              let session = create 1 (Fsdb.Storage.create ())
+              let session, _ = handle session "CREATE TABLE weight_metadata (utf VARCHAR(10) CHARACTER SET utf8mb4, latin VARCHAR(10) CHARACTER SET latin1)"
+
+              match
+                  handle
+                      session
+                      "SELECT WEIGHT_STRING(utf), WEIGHT_STRING(latin), WEIGHT_STRING('abc'), WEIGHT_STRING(utf AS BINARY(2)) FROM weight_metadata LIMIT 0"
+              with
+              | session, ResultSet(_, []) ->
+                  match session.LastResultColumnMetadata with
+                  | [ utf; latin; literal; binary ] ->
+                      Expect.equal utf.ColumnLength 640u "utf8mb4 VARCHAR(10)"
+                      Expect.equal latin.ColumnLength 10u "latin1 VARCHAR(10)"
+                      Expect.equal literal.ColumnLength 192u "utf8mb4 literal"
+                      Expect.equal binary.ColumnLength 8u "BINARY minimum"
+                  | metadata -> failtestf "expected four metadata records, got %A" metadata
+              | _, other -> failtestf "expected an empty WEIGHT_STRING metadata result, got %A" other
+
           testCase "a version-gated /*!NNNNN ... */ comment executes its wrapped SET, matching a mysqldump preamble"
           <| fun _ ->
               let session = create 1 (Fsdb.Storage.create ())

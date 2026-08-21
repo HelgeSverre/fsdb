@@ -1128,6 +1128,17 @@ let rec private fspOfExpr (ctx: EvalContext) (expr: Expr) : int option =
         | _ -> Some 0
     | _ -> tryColumnDefForExpr ctx expr |> Option.bind (fun c -> fspOfType c.Type)
 
+let rec private sourceCharset (ctx: EvalContext) (expr: Expr) : string =
+    match expr with
+    | Collate(_, name) -> Collation.charsetOfCollation name
+    | Cast(value, _) -> sourceCharset ctx value
+    | _ ->
+        tryColumnDefForExpr ctx expr
+        |> Option.bind (fun column ->
+            column.Charset
+            |> Option.orElseWith (fun () -> column.Collation |> Option.map Collation.charsetOfCollation))
+        |> Option.defaultValue "utf8mb4"
+
 let rec private metadataOfExpr (ctx: EvalContext) (expr: Expr) : ColumnMetadata option =
     let simple typeId =
         let columnLength =
@@ -1182,6 +1193,47 @@ let rec private metadataOfExpr (ctx: EvalContext) (expr: Expr) : ColumnMetadata 
             simple TypeNewDecimal
         else
             List.tryHead metadata
+
+    let rec characterBound expression =
+        match expression with
+        | Collate(value, _) -> characterBound value
+        | Lit(VString text) -> text.EnumerateRunes() |> Seq.length
+        | Lit(VBytes bytes) -> bytes.Length
+        | Lit(VBit(width, _)) -> (width + 7) / 8
+        | Col _
+        | QualifiedCol _ ->
+            tryColumnDefForExpr ctx expression
+            |> Option.bind (fun column ->
+                match column.Type with
+                | TChar length
+                | TVarchar length -> Some length
+                | _ -> None)
+            |> Option.defaultValue 1
+        | _ -> 1
+
+    let weightStringMetadata (source: Expr) (charLength: int option) =
+        match charLength with
+        | Some length when
+            match source with
+            | Cast(_, TBinary _) -> true
+            | _ -> false
+            ->
+            Some { Value.columnMetadata TypeVarString with ColumnLength = uint32 (max 8 length); Flags = BinaryFlag }
+        | _ ->
+            let charset = sourceCharset ctx source
+            let bytesPerCharacter = if charset.StartsWith("utf8", System.StringComparison.Ordinal) then 4 else 1
+            let isBinaryCollation =
+                match source with
+                | Collate(_, name) -> name.EndsWith("_bin", System.StringComparison.Ordinal)
+                | _ ->
+                    tryColumnDefForExpr ctx source
+                    |> Option.exists (fun column ->
+                        column.Charset = Some "binary"
+                        || (column.Collation |> Option.exists (fun name -> name.EndsWith("_bin", System.StringComparison.Ordinal))))
+            let multiplier = if isBinaryCollation || not (charset.StartsWith("utf8", System.StringComparison.Ordinal)) then 1 else 16
+            let characters = max (characterBound source) (charLength |> Option.defaultValue 0)
+            let length = int64 characters * int64 bytesPerCharacter * int64 multiplier |> max 8L |> min (int64 System.UInt32.MaxValue)
+            Some { Value.columnMetadata TypeVarString with ColumnLength = uint32 length; Flags = BinaryFlag }
 
     match expr with
     | Lit VNull -> None
@@ -1252,10 +1304,12 @@ let rec private metadataOfExpr (ctx: EvalContext) (expr: Expr) : ColumnMetadata 
         simple TypeLongLong |> Option.map (fun metadata -> { metadata with Flags = NotNullFlag })
     | FuncCall(name, [ _; _ ]) when name.Equals("BENCHMARK", System.StringComparison.OrdinalIgnoreCase) ->
         simple TypeLongLong
-    | FuncCall(name, [ Cast(_, TBinary length) ]) when name.Equals("WEIGHT_STRING", System.StringComparison.OrdinalIgnoreCase) ->
-        Some { Value.columnMetadata TypeVarString with ColumnLength = uint32 length; Flags = BinaryFlag }
-    | FuncCall(name, [ _ ]) when name.Equals("WEIGHT_STRING", System.StringComparison.OrdinalIgnoreCase) ->
-        Some { Value.columnMetadata TypeVarString with ColumnLength = 4294967295u; Flags = BinaryFlag }
+    | FuncCall(name, [ Cast(source, TBinary length) ]) when name.Equals("WEIGHT_STRING", System.StringComparison.OrdinalIgnoreCase) ->
+        weightStringMetadata (Cast(source, TBinary length)) (Some length)
+    | FuncCall(name, [ Cast(source, TChar length) ]) when name.Equals("WEIGHT_STRING", System.StringComparison.OrdinalIgnoreCase) ->
+        weightStringMetadata source (Some length)
+    | FuncCall(name, [ source ]) when name.Equals("WEIGHT_STRING", System.StringComparison.OrdinalIgnoreCase) ->
+        weightStringMetadata source None
     | FuncCall(name, args) ->
         match name.ToUpperInvariant(), args with
         | "COUNT", _ -> simple TypeLongLong
@@ -1480,16 +1534,6 @@ let private resolvedCollation (ctx: EvalContext) (expr: Expr) : Collation.Collat
 /// connection collation (literals) — the same resolution comparisons use.
 let private keyCollation (ctx: EvalContext) (expr: Expr) : Collation.Collation =
     resolvedCollation ctx expr |> Option.defaultValue ctx.Store.ConnectionCollation
-
-let private sourceCharset (ctx: EvalContext) (expr: Expr) : string =
-    match expr with
-    | Collate(_, name) -> Collation.charsetOfCollation name
-    | _ ->
-        tryColumnDefForExpr ctx expr
-        |> Option.bind (fun column ->
-            column.Charset
-            |> Option.orElseWith (fun () -> column.Collation |> Option.map Collation.charsetOfCollation))
-        |> Option.defaultValue "utf8mb4"
 
 /// A group/distinct/partition key normalized to collation equality: string
 /// values become their collation's canonical key (`KeyOf` is injective per
