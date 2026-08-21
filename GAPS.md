@@ -374,7 +374,6 @@ live Limits reporting.
 | INFORMATION_SCHEMA breadth | ~60+ views incl. INNODB_*, COLUMN_STATISTICS, RESOURCE_GROUPS, ENABLED_ROLES | 23 views; EVENTS/ROUTINES/PARAMETERS/COLUMN_PRIVILEGES genuinely empty | low | divergence |
 | Table statistics | estimates refreshed by ANALYZE TABLE | ENGINE always InnoDB, DATA_LENGTH stand-in 16384, CARDINALITY 0, live row counts where MySQL keeps stale page estimates until ANALYZE (`InformationSchema.fs:267–288`); no ANALYZE statement exists | low | divergence |
 | COLUMN_COMMENT | user text | always "" (`InformationSchema.fs:323–326`) | low | divergence |
-| Missing SHOW forms | CREATE EVENT/PROCEDURE/FUNCTION | fall through to 1064 | low | refusal |
 | SHOW STATUS counters | Com_*, Innodb_*, Slow_queries, … | five variables only: Questions, Ssl_cipher, Ssl_version, Threads_connected, Uptime (`InformationSchema.fs`) | low | divergence |
 | wait_timeout | 28800 default | 300 (deliberate DoS posture, honestly advertised) | low | divergence |
 | Option-file discovery | /etc/my.cnf, ~/.my.cnf, $MYSQL_HOME auto-read; `[mysqld-8.4]` groups | only `--defaults-file`; version-suffixed groups skipped (documented) | low | divergence |

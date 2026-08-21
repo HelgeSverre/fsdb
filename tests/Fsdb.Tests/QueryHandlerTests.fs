@@ -1402,6 +1402,16 @@ let tests =
                       Expect.equal columns.[59] "Network_Namespace" "last column"
                   | other -> failtestf "unexpected replica status for %s: %A" sql other
 
+          testCase "SHOW CREATE reports missing routines and events with MySQL errors"
+          <| fun _ ->
+              let session = create 1 (Fsdb.Storage.create ())
+
+              for sql, expected in
+                  [ "SHOW CREATE PROCEDURE fsdb.missing", Err(1305, "PROCEDURE missing does not exist")
+                    "SHOW CREATE FUNCTION `fsdb`.`missing`", Err(1305, "FUNCTION missing does not exist")
+                    "SHOW CREATE EVENT missing", Err(1539, "Unknown event 'missing'") ] do
+                  Expect.equal (handle session sql |> snd) expected sql
+
           testCase "SET GLOBAL never changes the issuing session's own variable"
           <| fun _ ->
               let store = Fsdb.Storage.create ()

@@ -308,6 +308,8 @@ let private showCharsetRe = Regex(@"^SHOW\s+(?:CHARACTER\s+SET|CHARSET)(\s|$)", 
 let private showPrivilegesRe = Regex(@"^SHOW\s+PRIVILEGES\s*$", RegexOptions.IgnoreCase)
 let private showProcesslistRe = Regex(@"^SHOW\s+(FULL\s+)?PROCESSLIST\s*$", RegexOptions.IgnoreCase)
 let private showCreateUserRe = Regex(@"^SHOW\s+CREATE\s+USER\s+(.+?)\s*;?$", RegexOptions.IgnoreCase)
+let private showCreateProgramRe =
+    Regex(@"^SHOW\s+CREATE\s+(PROCEDURE|FUNCTION|EVENT)\s+(\S+)\s*;?$", RegexOptions.IgnoreCase)
 
 let private showTriggersRe =
     Regex(@"^SHOW\s+TRIGGERS(?:\s+(?:FROM|IN)\s+(\S+))?", RegexOptions.IgnoreCase)
@@ -1284,6 +1286,7 @@ type private Probe =
     | ShowCollation
     | ShowGrants of user: string option
     | ShowCreateUser of user: string
+    | ShowCreateProgram of kind: string * name: string
     | ShowPrivileges
     | FlushPrivileges
     | FlushStatus
@@ -1361,6 +1364,9 @@ let private tryProbe (sql: string) (upper: string) : Probe option =
         Some ShowPrivileges
     elif showCreateUserRe.IsMatch sql then
         Some(ShowCreateUser((showCreateUserRe.Match sql).Groups.[1].Value))
+    elif showCreateProgramRe.IsMatch sql then
+        let matched = showCreateProgramRe.Match sql
+        Some(ShowCreateProgram(matched.Groups.[1].Value.ToUpperInvariant(), matched.Groups.[2].Value))
     elif showGrantsRe.IsMatch sql then
         let m = showGrantsRe.Match sql
         Some(ShowGrants(if m.Groups.[1].Success then Some m.Groups.[1].Value else None))
@@ -1750,6 +1756,13 @@ let private runProbe (session: Session) (sql: string) (probe: Probe) : Session *
         match Auth.renderCreateUser (Session.currentStore session) name with
         | Ok(header, ddl) -> session, ResultSet([ header ], [ [ Some ddl ] ])
         | Error(code, msg) -> session, Err(code, msg)
+    | ShowCreateProgram(kind, qualifiedName) ->
+        let _, name = splitQualified (session.Database |> Option.defaultValue defaultDatabase) qualifiedName
+
+        if kind = "EVENT" then
+            session, Err(1539, sprintf "Unknown event '%s'" name)
+        else
+            session, Err(1305, sprintf "%s %s does not exist" kind name)
     | FlushPrivileges -> session, Affected 0UL
     | FlushStatus ->
         InformationSchema.resetQuestions ()
