@@ -206,9 +206,9 @@ joins (`NATURAL`/`USING` included), derived tables, `GROUP BY`/`HAVING`, window
 functions, `UNION [ALL]`, expression subqueries, ordinary and recursive CTEs,
 JSON paths and `JSON_TABLE`, multi-table `UPDATE`/`DELETE`, `REPLACE`,
 `EXPLAIN`, enforced and `NOT ENFORCED` `CHECK` constraints, typed user and
-system variables in expressions, read-only stored views, `AFTER INSERT`
-triggers, and user accounts with real `CREATE USER`/
-`GRANT`/`REVOKE` privilege enforcement.
+system variables in expressions, direct single-table updatable views,
+`BEFORE`/`AFTER` triggers for `INSERT`/`UPDATE`/`DELETE`, and user accounts
+with real `CREATE USER`/`GRANT`/`REVOKE` privilege enforcement.
 
 The introspection surface GUI clients lean on is served with real data:
 23 `information_schema` tables whose column sets are diffed against a live
@@ -224,8 +224,8 @@ own collation. `SET collation_connection` governs literals, so
 `SHOW CREATE TABLE` reports declared collations, and
 `information_schema.COLUMNS` carries `CHARACTER_SET_NAME`/`COLLATION_NAME`.
 
-The deliberate gaps — including updatable views, stored routines, events, and
-trigger forms beyond `AFTER INSERT` — and every smaller divergence are
+The deliberate gaps — including complex updatable views, compound trigger
+bodies, stored routines, events, and every smaller divergence — are
 documented in
 [docs/compatibility.md](docs/compatibility.md) and marked `ponytail:` at
 their code sites.

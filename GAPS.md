@@ -32,13 +32,13 @@ accepted (marked `ponytail:` in source), or recorded only in
 |---|---|---|
 | SQL statements | Broad core; large admin/programmatic tail missing | Stored procedures/functions, events |
 | Query execution | Equality access and stable subquery materialization | Range/order access, join reordering, and correlated subqueries still scale poorly |
-| Built-in functions | Broad scalar, aggregate, JSON, time, and geometry-core coverage | Legacy/asymmetric crypto and JSON Schema regex patterns |
+| Built-in functions | Broad scalar, aggregate, JSON, time, and planar geometry coverage | Asymmetric crypto and advanced geometry topology |
 | Data types | Common scalar types plus OGC geometry | No TIME value domain or BIT |
-| Constraints & indexes | PK/UNIQUE/FK/CHECK plus one-column equality indexes | No range/order/index-join access |
+| Constraints & indexes | PK/UNIQUE/FK/CHECK plus one-column equality and inner-join probes | No range/order/composite access |
 | Charsets & collations | ICU-based utf8mb4 registry | Weight-table tailoring differs from MySQL's UCA tables |
 | Transactions | Repeatable-read snapshots, nonlocking read-committed views + optimistic merge | READ UNCOMMITTED and SERIALIZABLE refused; transaction commits serialize |
 | Persistence | WAL + snapshot, crash-tested | Opt-in only; no group commit; tombstones never reclaimed |
-| Views & triggers | Read-only views; AFTER INSERT triggers | No DML through views; no BEFORE/UPDATE/DELETE triggers, no OLD.* |
+| Views & triggers | Direct updatable views; BEFORE/AFTER INSERT/UPDATE/DELETE triggers | Complex views, compound bodies, multiple triggers per slot |
 | Routines & events | Absent (catalogs honestly empty) | Everything |
 | Full-text | Oracle-verified scoring | No inverted index; single-table SELECT only; no CJK parser |
 | Wire protocol | Handshake through COM_STMT_EXECUTE, TLS, LOCAL INFILE, and multi-result batches | No compression or cursors |
@@ -66,7 +66,7 @@ variants), USE, KILL, DESCRIBE are text-probed before the grammar
 | `CREATE/ALTER/DROP PROCEDURE|FUNCTION`, `CALL`, compound `BEGIN…END` bodies, `DECLARE`, cursors, handlers, `SIGNAL`/`GET DIAGNOSTICS` | medium | refusal |
 | `CREATE/ALTER/DROP EVENT` (+ scheduler thread) | low | refusal |
 | `PREPARE`/`EXECUTE`/`DEALLOCATE PREPARE` as SQL text (wire-level COM_STMT_PREPARE works) | low | refusal |
-| `LOAD DATA [LOCAL] INFILE`; `SELECT … INTO OUTFILE/DUMPFILE/@vars`; `IMPORT TABLE` | medium | refusal |
+| Server-side `LOAD DATA INFILE`; `SELECT … INTO OUTFILE/DUMPFILE/@vars`; `IMPORT TABLE` | medium | refusal |
 | `CHECKSUM TABLE`; specialized FLUSH forms | low | refusal |
 | `LOCK TABLES…READ/WRITE`, `UNLOCK TABLES`, `HANDLER`, XA transactions | low | refusal |
 | Partitioning: `PARTITION BY`, `PARTITION (p)` selection, `ADD/DROP/COALESCE/REORGANIZE PARTITION` | medium | refusal |
@@ -75,7 +75,6 @@ variants), USE, KILL, DESCRIBE are text-probed before the grammar
 | `EXPLAIN ANALYZE`; `EXPLAIN FORMAT=JSON|TREE` | low | refusal |
 | `ALTER TABLE … COMMENT=` option tails | medium | refusal |
 | `CREATE USER` tails: auth plugin, `REQUIRE SSL/X509`, resource limits, `ACCOUNT LOCK`, `PASSWORD EXPIRE`; `ALTER USER` beyond password change | medium | refusal |
-| Multi-statement strings (`stmt1; stmt2`) — exactly one statement per round trip | medium | refusal |
 
 ### SELECT-level syntax gaps
 
@@ -116,7 +115,7 @@ identities for bit aggregates.
 | Multi-table UPDATE/DELETE sources | derived tables allowed as join sources | real base tables only → 1064 (`Executor.fs:3334–3339`) | low | refusal |
 | MATCH…AGAINST placement | evaluates in UPDATE/DELETE WHERE, joins, subqueries | single-table SELECT pre-pass only, else 1191 (`Executor.fs:1828–1831, 5828–5830`) | medium | refusal |
 | RANGE window frames | `RANGE BETWEEN INTERVAL n DAY PRECEDING…` | temporal offsets refused with 1235; numeric offsets only (`Executor.fs:5438–5444`) | low | refusal |
-| sql_mode | ~20 mode bits with semantic effect | only strictness (STRICT_TRANS_TABLES/STRICT_ALL_TABLES) has effect; ONLY_FULL_GROUP_BY absent (bare column picks first row of group, `Executor.fs:4768`); `@@sql_mode` echoes a constant string regardless of SET (`Session.fs:22`) | medium | divergence |
+| sql_mode | ~20 mode bits with semantic effect | strictness plus NO_ZERO_DATE/NO_ZERO_IN_DATE have effect; ONLY_FULL_GROUP_BY remains absent (a bare column picks the first row of its group) | medium | divergence |
 
 ## 3. Built-in functions
 
@@ -152,7 +151,8 @@ Working: TINYINT–BIGINT signed/unsigned, DECIMAL(p,s) with fixed-point
 round-trip, FLOAT/DOUBLE with MySQL exponent rendering, CHAR/VARCHAR,
 TINYTEXT–LONGTEXT, BINARY/VARBINARY, TINYBLOB–LONGBLOB, ENUM/SET with
 canonicalization, DATE/DATETIME(fsp)/TIMESTAMP(fsp)/TIME(fsp) with half-up
-fsp rounding and carry cases, YEAR, JSON, per-column charset/collation,
+fsp rounding and carry cases, all-zero and partial-zero dates with sql_mode
+enforcement, YEAR, JSON, per-column charset/collation,
 wire-faithful column metadata (`ColumnWire.fs:17–84`), and OGC WKB geometry
 values (`GEOMETRY`, concrete spatial types, WKT/WKB construction and common
 accessors).
@@ -246,25 +246,26 @@ generated-column expressions.
 Views working: CREATE [OR REPLACE] VIEW with explicit column lists, views
 over views, recursive-reference detection (1462), definer-privilege checking
 at read time so revokes take effect, persistence through WAL restarts,
-SHOW CREATE VIEW and I_S.VIEWS with correct shapes.
+SHOW CREATE VIEW and I_S.VIEWS with correct shapes. Direct projections over
+one unfiltered base table accept INSERT, INSERT ... SELECT, UPDATE, and DELETE
+with exposed-column enforcement and definer privilege checks.
 
-Triggers working: AFTER INSERT FOR EACH ROW with NEW.* substitution
-(including generated-column values and inside ODKU bodies), bodies limited
-to one INSERT/REPLACE/UPDATE/DELETE, statement atomicity (failing body rolls
-back originating rows), 1442 cycle/self-write detection with MySQL's exact
-message, depth cap, definer-based privilege checks per fire, DROP TABLE /
-RENAME TABLE lifecycle maintenance, SHOW TRIGGERS and I_S.TRIGGERS fidelity.
+Triggers working: BEFORE/AFTER INSERT/UPDATE/DELETE FOR EACH ROW with OLD/NEW
+row images and BEFORE SET NEW assignments, bodies limited to one DML or SET
+NEW statement, statement atomicity, 1442 cycle/self-write detection, a depth
+cap, definer-based privilege checks per fire, lifecycle maintenance, and SHOW
+TRIGGERS/I_S.TRIGGERS metadata. Generated row-image columns and illegal
+OLD/NEW images are rejected when the trigger is created.
 
 | Gap | MySQL 8.4 | fsdb | Impact | Class |
 |---|---|---|---|---|
-| Updatable views | INSERT/UPDATE/DELETE through simple views | absent; a write targeting a view behaves as table-not-found rather than 1288 (`Ast.fs:693–695`) | medium | refusal |
+| Updatable-view breadth | joins, predicates, expressions, nested views, REPLACE, and ODKU where MySQL deems the view writable | direct no-WHERE single-table projections only; view ODKU and REPLACE refuse | medium | refusal |
 | WITH CHECK OPTION | enforced on updatable views | unparseable | low | refusal |
 | ALGORITHM / SQL SECURITY INVOKER / ALTER VIEW | supported | absent; SECURITY_TYPE constant DEFINER (`InformationSchema.fs:922–923`) | low | refusal |
 | View metadata projection | views appear in I_S.COLUMNS, DESCRIBE, SHOW TABLE STATUS | absent (documented in compatibility.md) | medium | divergence |
 | VIEW_DEFINITION rendering | fully-qualified expanded form; SHOW CREATE VIEW wrapped in `/*!50001 */` | raw user text, no wrapper (`InformationSchema.fs:1749–1764`) | low | divergence |
-| Trigger timings/events | BEFORE/AFTER × INSERT/UPDATE/DELETE | AFTER INSERT only; engine has no pre-write row-image hook (`Ast.fs:681–684`) | high (for trigger users) | refusal |
-| OLD.* row access | available in UPDATE/DELETE triggers | absent everywhere | medium | refusal |
-| Compound trigger bodies | BEGIN…END with variables/handlers | single statement only (`Executor.fs:8326–8333`) | medium | refusal |
+| Trigger DML breadth | triggers fire for every applicable MySQL DML form | single-table DML is covered; REPLACE refuses when DELETE triggers exist, and multi-table UPDATE/DELETE firing remains unsupported | medium | refusal |
+| Compound trigger bodies | BEGIN…END with variables/handlers | single statement only | medium | refusal |
 | Multiple triggers per slot | yes, with FOLLOWS/PRECEDES ordering | one per (table,timing,event); second CREATE → 1359 (`Executor.fs:8343–8357`) | low | divergence |
 | Trigger recursion cap | cycle detection at runtime | hardcoded depth 8 (`Executor.fs:7608–7616`) | low | divergence |
 | Per-trigger sql_mode/charset capture | stored and applied | server constants in I_S output (`InformationSchema.fs:1019–1023`) | low | divergence |
@@ -434,15 +435,14 @@ Where the docs and the code disagree, the code is authoritative:
 Ranked by expected disruption to the primary consumers, independent of
 implementation effort:
 
-1. Planless joins/subqueries plus missing secondary range/order access —
-   correctness holds, but scale diverges sharply from MySQL past small data.
-2. Trigger coverage (BEFORE/UPDATE/DELETE, OLD.*, compound bodies) and
-   updatable views — the two largest deliberate-subset cliffs.
-3. Missing function families (legacy/asymmetric crypto and JSON Schema regexes) —
-   each individually small, collectively frequent in
-   report-style queries.
-4. SERIALIZABLE/READ COMMITTED semantics and intra-database write
-   parallelism — transactional throughput shape.
-5. Zero-date handling — a strict-mode correctness edge.
-6. Everything in the admin/replication/metadata tail — matters only once a
+1. Missing secondary range/order access, join reordering, and excluded
+   correlated subquery plans — correctness holds, but scale still diverges
+   from MySQL past small data.
+2. SERIALIZABLE/READ UNCOMMITTED semantics and intra-database transaction
+   publication — the remaining transactional throughput and isolation gap.
+3. Complex updatable views, compound trigger bodies, and multiple triggers
+   per timing/event slot.
+4. Remaining function families, chiefly asymmetric crypto and advanced
+   geometry topology/geographic SRS behavior.
+5. Everything in the admin/replication/metadata tail — matters only once a
    specific tool needs it (mysqladmin, monitoring agents, replica setups).

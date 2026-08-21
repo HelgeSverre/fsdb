@@ -106,7 +106,7 @@ materialized-view object. See the MySQL 8.4 documentation for
 [view creation](https://dev.mysql.com/doc/refman/8.4/en/create-view.html) and
 [view processing algorithms](https://dev.mysql.com/doc/refman/8.4/en/view-algorithms.html).
 
-fsdb supports a read-only stored-query subset:
+fsdb supports stored queries broadly and a narrow writable subset:
 
 - `CREATE [OR REPLACE] VIEW name [(columns)] AS SELECT ...` and
   `DROP VIEW [IF EXISTS] name [, ...]`.
@@ -121,21 +121,28 @@ fsdb supports a read-only stored-query subset:
   `SHOW CREATE VIEW`, `information_schema.TABLES`, and
   `information_schema.VIEWS` metadata.
 
-The view subset is deliberately read-only. `ALGORITHM`, explicit `DEFINER`,
-`SQL SECURITY`, `WITH CHECK OPTION`, `ALTER VIEW`, and DML through a view are
-not implemented. Creation validates the saved SQL grammar but defers missing
-dependency and output-shape errors until the first read; `SELECT *` follows
-the base table's current columns instead of freezing them at creation.
+Direct projections over one base table, without filtering, grouping, joins,
+or computed columns, accept `INSERT`, `INSERT ... SELECT`, `UPDATE`, and
+`DELETE`. Every written or referenced column must be exposed by the view, and
+base-table writes run under the view definer's privileges. `REPLACE`,
+`ON DUPLICATE KEY UPDATE`, `WITH CHECK OPTION`, `ALTER VIEW`, `ALGORITHM`,
+explicit `DEFINER`, and `SQL SECURITY` remain unsupported. Creation validates
+the saved SQL grammar but defers missing dependency and output-shape errors
+until the first read; `SELECT *` follows the base table's current columns
+instead of freezing them at creation.
 `information_schema.COLUMNS`, `DESCRIBE`, and `SHOW TABLE STATUS` do not yet
 project user view metadata.
 
 Trigger execution has stronger behavioral coverage than its syntax breadth:
 
-- Exactly `AFTER INSERT ON table FOR EACH ROW` with one `INSERT`, `REPLACE`,
-  `UPDATE`, or `DELETE` body statement.
-- `NEW.column` binds the final inserted row, including generated columns.
-- Multi-row inserts fire once per inserted row; ignored duplicates and the
-  update branch of `ON DUPLICATE KEY UPDATE` do not fire an insert trigger.
+- `BEFORE` and `AFTER` triggers run for single-table `INSERT`, `UPDATE`, and
+  `DELETE`, with one `INSERT`, `REPLACE`, `UPDATE`, `DELETE`, or `SET NEW`
+  body statement.
+- `OLD.column` and `NEW.column` bind the applicable row images. A `BEFORE`
+  trigger may assign `NEW.column`; generated columns cannot be referenced.
+- Multi-row statements fire once per affected row. Ignored candidates do not
+  fire, and the update branch of `ON DUPLICATE KEY UPDATE` uses update
+  triggers.
 - The source write and every trigger effect are one atomic statement. A body
   error rolls all of them back, and effects participate normally in explicit
   transaction commit or rollback.
@@ -147,11 +154,10 @@ Trigger execution has stronger behavioral coverage than its syntax breadth:
 - A trigger follows its subject through `RENAME TABLE`; dropping the subject
   table or its database removes the stored trigger definition.
 
-Missing MySQL trigger forms are `BEFORE`, `AFTER UPDATE`, `AFTER DELETE`,
-`OLD.column`, compound `BEGIN ... END` bodies, and multiple ordered triggers
-for one timing/event slot. An insert-only audit or rollup is therefore sound;
-a general trigger-maintained materialized aggregate is not, because later
-updates and deletes cannot repair it. The full MySQL surface is documented under
+Remaining trigger gaps are compound `BEGIN ... END` bodies, multiple ordered
+triggers for one timing/event slot, multi-table DML firing, and complete
+`REPLACE` delete-event behavior. `REPLACE` refuses when DELETE triggers exist
+instead of silently skipping them. The full MySQL surface is documented under
 [CREATE TRIGGER](https://dev.mysql.com/doc/refman/8.4/en/create-trigger.html).
 
 ## Check constraints
