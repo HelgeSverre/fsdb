@@ -1930,14 +1930,10 @@ let showProcesslist (full: bool) : ShowResult =
 
     Ok([ "Id"; "User"; "Host"; "db"; "Command"; "Time"; "State"; "Info" ], rows)
 
-/// `SHOW [SESSION|GLOBAL] STATUS [LIKE 'pattern']` — only counters fsdb
-/// really tracks (uptime, live connections) plus the always-empty SSL pair
-/// (no TLS support, so '' is the truthful value); an unmatched pattern is an
-/// empty set, never an error.
-let showStatus (likeOpt: string option) : ShowResult =
+let showStatus (sslCipher: string option) (sslVersion: string option) (likeOpt: string option) : ShowResult =
     let rows =
-        [ "Ssl_cipher", ""
-          "Ssl_version", ""
+        [ "Ssl_cipher", sslCipher |> Option.defaultValue ""
+          "Ssl_version", sslVersion |> Option.defaultValue ""
           "Questions", string (questions ())
           "Threads_connected", string (connectedThreads ())
           "Uptime", string (int (DateTime.Now - serverStartedAt).TotalSeconds) ]

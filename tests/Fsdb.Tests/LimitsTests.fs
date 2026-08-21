@@ -7,6 +7,7 @@ open Fsdb.Limits
 open Fsdb.Executor
 open Fsdb.Session
 open Fsdb.QueryHandler
+open Fsdb.ServerOptions
 
 /// Sequenced: every case here writes process-global knobs, so running them
 /// alongside anything that reads one would be a coin flip.
@@ -135,6 +136,22 @@ let tests =
                   Expect.equal parsed.Entries.Head.Name "max_connections" "the name is preserved for its consumer"
                   Expect.equal parsed.Entries.Head.Value (Some "9") "the value is preserved for its consumer"
                   Expect.equal maxConnections before "parsing has no process-wide effect")
+
+          testCase "secure transport needs a certificate and key"
+          <| fun _ ->
+              let entry name value : Fsdb.OptionFile.Entry =
+                  { Name = name
+                    Value = value
+                    Source = "test.cnf"
+                    Line = 1 }
+
+              match Fsdb.ServerOptions.fromEntries [ entry "require_secure_transport" (Some "ON") ] with
+              | Ok _ -> failtest "secure transport without a certificate is rejected"
+              | Error message -> Expect.stringContains message "ssl_cert and ssl_key" "the missing TLS material is named"
+
+              match Fsdb.ServerOptions.fromEntries [ entry "loose-require-secure-transport" (Some "OFF") ] with
+              | Ok(settings, _) -> Expect.isFalse settings.RequireSecureTransport "loose- still applies a known TLS option"
+              | Error message -> failtestf "a known loose TLS option remains valid: %s" message
 
           testCase "a bad config reports every offending line with its number, not just the first"
           <| fun _ ->

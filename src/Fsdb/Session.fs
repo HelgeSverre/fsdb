@@ -268,7 +268,9 @@ type Session =
       /// is read back out of this today, to pick matched- vs changed-row
       /// counts for UPDATE, multi-table UPDATE, and INSERT ... ON DUPLICATE
       /// KEY UPDATE (see `Executor.execute`'s `foundRows` param).
-      Capabilities: uint32 }
+      Capabilities: uint32
+      TlsVersion: string option
+      TlsCipher: string option }
 
 let create (connectionId: int) (store: Store) : Session =
     // Overlays every `SET GLOBAL`-ed override onto the compiled-in
@@ -309,7 +311,9 @@ let create (connectionId: int) (store: Store) : Session =
       LongDataBytes = 0L
       LongDataOverflow = Set.empty
       CustomFunctions = Fsdb.Functions.empty
-      Capabilities = 0u }
+      Capabilities = 0u
+      TlsVersion = None
+      TlsCipher = None }
 
 /// The catalog store all statements on this session currently execute
 /// against: the shared store outside a transaction, or the transaction's

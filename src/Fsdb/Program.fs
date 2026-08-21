@@ -9,6 +9,9 @@ type Arguments =
     | Listen of address: string
     | Data_Dir of path: string
     | Defaults_File of path: string
+    | Ssl_Cert of path: string
+    | Ssl_Key of path: string
+    | Require_Secure_Transport
     | Version
 
     interface IArgParserTemplate with
@@ -18,6 +21,9 @@ type Arguments =
             | Listen _ -> "bind address (default 127.0.0.1)"
             | Data_Dir _ -> "persist trusted server state here (WAL + snapshots); omit for in-memory"
             | Defaults_File _ -> "read server settings from a my.cnf-style file's [mysqld] section"
+            | Ssl_Cert _ -> "PEM server certificate for TLS"
+            | Ssl_Key _ -> "PEM private key for TLS"
+            | Require_Secure_Transport -> "reject plaintext MySQL sessions"
             | Version -> "print the fsdb version and exit"
 
 let private parser =
@@ -50,27 +56,44 @@ let main argv =
         printfn "fsdb %s (MySQL protocol %s)" fsdbVersion Protocol.ServerVersion
         0
     else
-        // Before anything builds a store or a listener: every `Limits` knob
-        // is read live from then on, so applying settings first is what makes
-        // "written once, before any connection exists" true.
-        let configError =
-            let loaded =
+        let serverOptions =
+            let parsed =
                 match results.TryGetResult Defaults_File with
-                | Some path -> Limits.loadDefaultsFile path
-                | None -> Limits.defaultFilePaths () |> Limits.loadDefaultsFiles
+                | Some path -> OptionFile.parseFile path
+                | None -> OptionFile.defaultFilePaths () |> OptionFile.parseFiles
 
-            match loaded with
-            | Ok() -> None
-            | Error message -> Some message
+            let commandLineEntry name value : OptionFile.Entry =
+                { Name = name
+                  Value = value
+                  Source = "command line"
+                  Line = 1 }
 
-        match configError, resolveListenAddress results with
-        | Some message, _ ->
+            let commandLineEntries =
+                [ match results.TryGetResult Ssl_Cert with
+                  | Some path -> yield commandLineEntry "ssl_cert" (Some path)
+                  | None -> ()
+                  match results.TryGetResult Ssl_Key with
+                  | Some path -> yield commandLineEntry "ssl_key" (Some path)
+                  | None -> ()
+                  if results.Contains <@ Require_Secure_Transport @> then
+                      yield commandLineEntry "require_secure_transport" None ]
+
+            match ServerOptions.fromEntries (parsed.Entries @ commandLineEntries) with
+            | Error message -> Error(String.concat "\n" (parsed.Errors @ [ message ]))
+            | Ok(options, limitEntries) ->
+                match Limits.applyEntries limitEntries with
+                | Error message -> Error(String.concat "\n" (parsed.Errors @ [ message ]))
+                | Ok() when List.isEmpty parsed.Errors -> Ok options
+                | Ok() -> Error(String.concat "\n" parsed.Errors)
+
+        match serverOptions, resolveListenAddress results with
+        | Error message, _ ->
             eprintfn "fsdb: %s" message
             1
-        | None, None ->
+        | Ok _, None ->
             eprintfn "fsdb: --listen expects an IP address or 'localhost'"
             1
-        | None, Some address ->
+        | Ok options, Some address ->
             let port = results.GetResult(Port, defaultValue = 3307)
 
             let db =
@@ -79,6 +102,17 @@ let main argv =
                     printfn "fsdb: durability on, data-dir %s" dataDir
                     Db.create () |> Db.withDataDir dataDir
                 | None -> Db.create ()
+
+            let db =
+                match options.Certificate with
+                | Some certificate -> db |> Db.withTlsCertificate certificate
+                | None -> db
+
+            let db =
+                if options.RequireSecureTransport then
+                    db |> Db.requireSecureTransport
+                else
+                    db
 
             try
                 let serve = db |> Db.listen address port

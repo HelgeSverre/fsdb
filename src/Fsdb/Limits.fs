@@ -296,6 +296,12 @@ let private applyParsed (parsed: OptionFile.Parsed) : Result<unit, string> =
 
     if errors.Count = 0 then Ok() else Error(String.concat "\n" errors)
 
+/// Applies parsed option entries as Limits settings.
+let applyEntries (entries: OptionFile.Entry list) : Result<unit, string> =
+    ({ Entries = entries
+       Errors = [] }: OptionFile.Parsed)
+    |> applyParsed
+
 /// Applies the server entries in `lines` as Limits settings.
 let applyLines (source: string) (lines: string seq) : Result<unit, string> =
     OptionFile.parseLines source lines |> applyParsed

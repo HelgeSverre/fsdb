@@ -41,7 +41,7 @@ accepted (marked `ponytail:` in source), or recorded only in
 | Views & triggers | Read-only views; AFTER INSERT triggers | No DML through views; no BEFORE/UPDATE/DELETE triggers, no OLD.* |
 | Routines & events | Absent (catalogs honestly empty) | Everything |
 | Full-text | Oracle-verified scoring | No inverted index; single-table SELECT only; no CJK parser |
-| Wire protocol | Handshake through COM_STMT_EXECUTE solid | No TLS, compression, cursors, LOAD DATA, multi-statement |
+| Wire protocol | Handshake through COM_STMT_EXECUTE solid, TLS 1.2/1.3 server transport | No compression, cursors, LOAD DATA, multi-statement |
 | Auth & privileges | Static privileges enforced incl. subqueries | Name-only host matching; no roles/dynamic/column privileges |
 | Metadata | 23 INFORMATION_SCHEMA views, 8 mysql.* tables | Storage statistics are stand-ins; many SHOW forms missing |
 | Server admin | KILL, SHUTDOWN, limits, config file parsing | No replication/binlog/logging files |
@@ -303,13 +303,14 @@ constant-time credential verification, COM_QUERY/INIT_DB/PING/FIELD_LIST/
 QUIT/RESET_CONNECTION, full COM_STMT_PREPARE/EXECUTE/CLOSE/SEND_LONG_DATA/
 RESET with type reuse and 1153-on-overflow long-data accounting, text and
 binary row encodings including µs-precision temporals and 16 MiB multi-packet
-framing, CLIENT_FOUND_ROWS honored, max_allowed_packet/max_connections/
+framing, TLS 1.2/1.3 with an optional PEM server certificate and
+require_secure_transport, CLIENT_FOUND_ROWS honored, max_allowed_packet/max_connections/
 max_prepared_stmt_count enforced with honest advertising, mid-query
 disconnect detection cancelling evaluation (`Server.fs:363–406`).
 
 | Gap | MySQL 8.4 | fsdb | Impact | Class |
 |---|---|---|---|---|
-| TLS | full SSL/TLS negotiation | SSLRequest answered ERR 1045 "SSL is not supported" (`Server.fs:998–1006`); have_ssl DISABLED | high (networked deployments) | refusal |
+| TLS client authentication | account `REQUIRE SSL`/`REQUIRE X509`, client certificates, certificate reload | server certificate authentication only; no account-level TLS requirement | medium (mutual TLS deployments) | refusal |
 | Compression | CLIENT_COMPRESS/ZSTD | never offered | low | refusal |
 | Cursors | COM_STMT_EXECUTE CURSOR_TYPE_READ_ONLY + COM_STMT_FETCH | cursor flags ignored; COM_STMT_FETCH unsupported → 1047 (`Server.fs:772`) | medium (large-result readers) | refusal |
 | LOAD DATA LOCAL INFILE | supported | absent entirely | medium | refusal |
@@ -429,15 +430,14 @@ Where the docs and the code disagree, the code is authoritative:
 Ranked by expected disruption to the primary consumers, independent of
 implementation effort:
 
-1. No TLS — blocks any non-loopback deployment with security requirements.
-2. Planless joins/subqueries plus missing secondary range/order access —
+1. Planless joins/subqueries plus missing secondary range/order access —
    correctness holds, but scale diverges sharply from MySQL past small data.
-3. Trigger coverage (BEFORE/UPDATE/DELETE, OLD.*, compound bodies) and
+2. Trigger coverage (BEFORE/UPDATE/DELETE, OLD.*, compound bodies) and
    updatable views — the two largest deliberate-subset cliffs.
-4. Missing function families (AES and geometry, plus JSON Schema regexes) —
+3. Missing function families (AES and geometry, plus JSON Schema regexes) —
    each individually small, collectively frequent in
    report-style queries.
-5. LOAD DATA LOCAL INFILE and multi-statement packets — bulk-loading and
+4. LOAD DATA LOCAL INFILE and multi-statement packets — bulk-loading and
    migration-tool paths.
 6. User variables in expressions — session-state patterns beyond the
    supported bare projection form.

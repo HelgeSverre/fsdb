@@ -37,6 +37,10 @@ let ServerCapabilities =
     ||| ClientPluginAuth
     ||| ClientDeprecateEof
 
+/// Adds TLS negotiation only when a server certificate is configured.
+let serverCapabilities (tlsEnabled: bool) =
+    if tlsEnabled then ServerCapabilities ||| ClientSsl else ServerCapabilities
+
 let ServerVersion = "8.4.0-fsdb"
 
 /// utf8mb4_general_ci, used both as the handshake charset id and column charset.
@@ -57,23 +61,27 @@ let StatusAutocommit = 2
 /// bytes — the mysql_native_password scramble `Server.authenticateHandshake`
 /// verifies the client's response against when the account has a stored
 /// password (an account with no password accepts anything, see `Auth`).
-let buildHandshakeV10 (connectionId: int) (authPluginData: byte[]) : byte[] =
+let buildHandshakeV10WithCapabilities (capabilities: uint32) (connectionId: int) (authPluginData: byte[]) : byte[] =
     let w = Writer()
     w.WriteByte 10uy // protocol version
     w.WriteNullTerminatedString ServerVersion
     w.WriteInt32LE connectionId
     w.WriteBytes authPluginData.[0..7] // auth-plugin-data-part-1
     w.WriteByte 0uy // filler
-    w.WriteInt16LE(int (ServerCapabilities &&& 0xffffu)) // capability flags, lower 2 bytes
+    w.WriteInt16LE(int (capabilities &&& 0xffffu)) // capability flags, lower 2 bytes
     w.WriteByte(byte Utf8Mb4GeneralCi)
     w.WriteInt16LE StatusAutocommit
-    w.WriteInt16LE(int ((ServerCapabilities >>> 16) &&& 0xffffu)) // capability flags, upper 2 bytes
+    w.WriteInt16LE(int ((capabilities >>> 16) &&& 0xffffu)) // capability flags, upper 2 bytes
     w.WriteByte 21uy // length of auth-plugin-data (8 + 12 + 1 null terminator)
     w.WriteBytes(Array.zeroCreate<byte> 10) // reserved
     w.WriteBytes authPluginData.[8..19] // auth-plugin-data-part-2 (12 bytes)
     w.WriteByte 0uy // null terminator for auth-plugin-data-part-2
     w.WriteNullTerminatedString "mysql_native_password"
     w.ToArray()
+
+/// Builds a HandshakeV10 payload without TLS negotiation.
+let buildHandshakeV10 (connectionId: int) (authPluginData: byte[]) : byte[] =
+    buildHandshakeV10WithCapabilities ServerCapabilities connectionId authPluginData
 
 type HandshakeResponse =
     { Capabilities: uint32
@@ -97,13 +105,29 @@ let private boundedLen (len: uint64) : int =
 
 exception SslRequestException
 
+/// The fixed-size SSLRequest packet sent before the encrypted handshake response.
+type SslRequest =
+    { Capabilities: uint32 }
+
+/// Recognizes SSLRequest without attempting to parse it as a login response.
+let tryParseSslRequest (payload: byte[]) : SslRequest option =
+    if payload.Length = 32 then
+        let capabilities = uint32 (Reader(payload).ReadInt32LE())
+
+        if capabilities &&& ClientSsl <> 0u then
+            Some { Capabilities = capabilities }
+        else
+            None
+    else
+        None
+
 /// Parses a HandshakeResponse41 payload: capability flags, username, auth
 /// response bytes, optional database, and the client's auth plugin name.
 let parseHandshakeResponse (payload: byte[]) : HandshakeResponse =
     let r = Reader(payload)
     let capabilities = uint32 (r.ReadInt32LE())
 
-    if payload.Length = 32 && capabilities &&& ClientSsl <> 0u then
+    if (tryParseSslRequest payload).IsSome then
         raise SslRequestException
 
     r.ReadInt32LE() |> ignore // max packet size

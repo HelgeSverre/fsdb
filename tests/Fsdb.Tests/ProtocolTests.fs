@@ -154,6 +154,15 @@ let tests =
                   (fun () -> parseHandshakeResponse (w.ToArray()) |> ignore)
                   "the short SSLRequest shape is rejected deliberately"
 
+              match tryParseSslRequest (w.ToArray()) with
+              | Some request -> Expect.isTrue (request.Capabilities &&& ClientSsl <> 0u) "the SSL capability is retained"
+              | None -> failtest "the fixed-size SSLRequest is recognized before login parsing"
+
+          testCase "TLS capability is advertised only when a certificate is configured"
+          <| fun _ ->
+              Expect.equal (serverCapabilities false &&& ClientSsl) 0u "plaintext servers omit CLIENT_SSL"
+              Expect.equal (serverCapabilities true &&& ClientSsl) ClientSsl "TLS servers advertise CLIENT_SSL"
+
           testCase "typed text rows encode BLOB values as raw bytes"
           <| fun _ ->
               let bytes = [| 0x00uy; 0xffuy; 0x80uy |]

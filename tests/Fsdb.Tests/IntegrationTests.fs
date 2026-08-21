@@ -1,6 +1,10 @@
 module Fsdb.Tests.IntegrationTests
 
 open System
+open System.Net.Security
+open System.Security.Authentication
+open System.Security.Cryptography
+open System.Security.Cryptography.X509Certificates
 open Expecto
 open Fsdb.Binary
 open Fsdb.Packet
@@ -11,6 +15,22 @@ open Fsdb.Session
 open Fsdb.Executor
 open Fsdb.QueryHandler
 
+let private passwordlessHandshakeResponse (capabilities: uint32) (username: string) =
+    let writer = Writer()
+    writer.WriteInt32LE(int capabilities)
+    writer.WriteInt32LE 16777216
+    writer.WriteByte 45uy
+    writer.WriteBytes(Array.zeroCreate<byte> 23)
+    writer.WriteNullTerminatedString username
+    writer.WriteByte 0uy
+    writer.ToArray()
+
+let private selfSignedCertificate () =
+    use key = RSA.Create 2048
+    let request = CertificateRequest("CN=localhost", key, HashAlgorithmName.SHA256, RSASignaturePadding.Pkcs1)
+    request.CertificateExtensions.Add(X509BasicConstraintsExtension(false, false, 0, false))
+    request.CreateSelfSigned(DateTimeOffset.UtcNow.AddDays(-1.0), DateTimeOffset.UtcNow.AddDays(1.0))
+
 let private connectRawAs (port: int) (username: string) : Async<Net.Sockets.TcpClient * IO.Stream> =
     async {
         let client = new Net.Sockets.TcpClient()
@@ -20,15 +40,7 @@ let private connectRawAs (port: int) (username: string) : Async<Net.Sockets.TcpC
         let! handshake = readPacketAsync stream
         let handshakeSeq = handshake.Value.SeqId
 
-        let helloResponse =
-            let w = Writer()
-            w.WriteInt32LE(int ClientProtocol41)
-            w.WriteInt32LE 16777216
-            w.WriteByte 45uy
-            w.WriteBytes(Array.zeroCreate<byte> 23)
-            w.WriteNullTerminatedString username
-            w.WriteByte 0uy // zero-length auth response
-            w.ToArray()
+        let helloResponse = passwordlessHandshakeResponse ClientProtocol41 username
 
         let! _ = writePacketAsync stream { SeqId = handshakeSeq + 1uy; Payload = helloResponse }
         let! _ = readPacketAsync stream // connection OK
@@ -72,6 +84,141 @@ let tests =
                       listener.Stop()
               }
               |> Async.RunSynchronously
+
+          testCase "TLS upgrades after SSLRequest and reports negotiated session values"
+          <| fun _ ->
+              async {
+                  use certificate = selfSignedCertificate ()
+                  let listener = Fsdb.Server.startListening System.Net.IPAddress.Loopback 0
+                  let port = Fsdb.Server.port listener
+                  let options = Fsdb.ServerOptions.defaults |> Fsdb.ServerOptions.withCertificate certificate
+                  Fsdb.Server.serveWithOptions options listener (Fsdb.Storage.create ()) Fsdb.Functions.empty |> Async.StartAsTask |> ignore
+
+                  try
+                      use rawClient = new Net.Sockets.TcpClient()
+                      do! rawClient.ConnectAsync(Net.IPAddress.Loopback, port) |> Async.AwaitTask
+                      let rawStream = rawClient.GetStream()
+                      let! greeting = readPacketAsync rawStream
+
+                      match greeting with
+                      | None -> failtest "the server sends its greeting"
+                      | Some greeting ->
+                          let reader = Reader(greeting.Payload)
+                          reader.ReadByte() |> ignore
+                          reader.ReadNullTerminatedString() |> ignore
+                          reader.ReadInt32LE() |> ignore
+                          reader.ReadBytes 8 |> ignore
+                          reader.ReadByte() |> ignore
+                          let low = uint32 (reader.ReadInt16LE())
+                          reader.ReadByte() |> ignore
+                          reader.ReadInt16LE() |> ignore
+                          let high = uint32 (reader.ReadInt16LE())
+                          let capabilities = low ||| (high <<< 16)
+                          Expect.isTrue (capabilities &&& ClientSsl <> 0u) "the greeting advertises CLIENT_SSL"
+
+                          let request =
+                              let writer = Writer()
+                              writer.WriteInt32LE(int (ClientProtocol41 ||| ClientSsl ||| ClientSecureConnection))
+                              writer.WriteInt32LE 16777216
+                              writer.WriteByte 45uy
+                              writer.WriteBytes(Array.zeroCreate<byte> 23)
+                              writer.ToArray()
+
+                          do! writePacketAsync rawStream { SeqId = greeting.SeqId + 1uy; Payload = request } |> Async.Ignore
+
+                          use secured = new SslStream(rawStream, false, fun _ _ _ _ -> true)
+                          let authentication = SslClientAuthenticationOptions()
+                          authentication.TargetHost <- "localhost"
+                          authentication.EnabledSslProtocols <- SslProtocols.Tls12 ||| SslProtocols.Tls13
+                          do! secured.AuthenticateAsClientAsync(authentication) |> Async.AwaitTask
+
+                          let response =
+                              passwordlessHandshakeResponse (ClientProtocol41 ||| ClientSsl ||| ClientSecureConnection) "root"
+
+                          do! writePacketAsync secured { SeqId = greeting.SeqId + 2uy; Payload = response } |> Async.Ignore
+                          let! authenticated = readPacketAsync secured
+
+                          match authenticated with
+                          | Some packet ->
+                              Expect.equal packet.SeqId (greeting.SeqId + 3uy) "the encrypted handshake response continues packet sequencing"
+                              Expect.equal packet.Payload.[0] 0uy "the encrypted handshake is accepted"
+                          | None -> failtest "the server acknowledges the encrypted handshake"
+
+                      let connectionString =
+                          sprintf "Server=127.0.0.1;Port=%d;User ID=root;Password=;SslMode=Required;Pooling=false" port
+
+                      use connection = new MySqlConnector.MySqlConnection(connectionString)
+                      do! connection.OpenAsync() |> Async.AwaitTask
+                      use status = connection.CreateCommand()
+                      status.CommandText <- "SHOW STATUS LIKE 'Ssl_%'"
+                      use! rows = status.ExecuteReaderAsync() |> Async.AwaitTask
+                      let mutable values = []
+
+                      while rows.Read() do
+                          values <- (rows.GetString(0), rows.GetString(1)) :: values
+
+                      Expect.equal values.Length 2 "both TLS session status values are present"
+                      Expect.all values (fun (_, value) -> not (String.IsNullOrWhiteSpace value)) "TLS status values are populated"
+                  finally
+                      listener.Stop()
+              }
+              |> Async.RunSynchronously
+
+          testCase "require_secure_transport rejects a plaintext handshake with 3159"
+          <| fun _ ->
+              async {
+                  use certificate = selfSignedCertificate ()
+                  let listener = Fsdb.Server.startListening System.Net.IPAddress.Loopback 0
+                  let port = Fsdb.Server.port listener
+                  let options =
+                      Fsdb.ServerOptions.defaults
+                      |> Fsdb.ServerOptions.withCertificate certificate
+                      |> Fsdb.ServerOptions.requireSecureTransport
+
+                  Fsdb.Server.serveWithOptions options listener (Fsdb.Storage.create ()) Fsdb.Functions.empty |> Async.StartAsTask |> ignore
+
+                  try
+                      use client = new Net.Sockets.TcpClient()
+                      do! client.ConnectAsync(Net.IPAddress.Loopback, port) |> Async.AwaitTask
+                      let stream = client.GetStream()
+                      let! greeting = readPacketAsync stream
+
+                      match greeting with
+                      | None -> failtest "the server sends its greeting"
+                      | Some greeting ->
+                          do!
+                              writePacketAsync
+                                  stream
+                                  { SeqId = greeting.SeqId + 1uy
+                                    Payload = passwordlessHandshakeResponse ClientProtocol41 "root" }
+                              |> Async.Ignore
+
+                          let! rejected = readPacketAsync stream
+
+                          match rejected with
+                          | Some packet ->
+                              Expect.equal packet.SeqId (greeting.SeqId + 2uy) "the plaintext rejection follows the handshake response"
+                              Expect.equal packet.Payload.[0] 0xffuy "the plaintext handshake receives ERR"
+                              Expect.equal (Reader(packet.Payload.[1..]).ReadInt16LE()) 3159 "ER_SECURE_TRANSPORT_REQUIRED"
+                          | None -> failtest "the server returns ER_SECURE_TRANSPORT_REQUIRED"
+                  finally
+                      listener.Stop()
+              }
+              |> Async.RunSynchronously
+
+          testCase "an embedding certificate needs a private key"
+          <| fun _ ->
+              use certificate = selfSignedCertificate ()
+              use publicCertificate = X509CertificateLoader.LoadCertificate(certificate.Export(X509ContentType.Cert))
+              let listener = Fsdb.Server.startListening System.Net.IPAddress.Loopback 0
+              let options = Fsdb.ServerOptions.defaults |> Fsdb.ServerOptions.withCertificate publicCertificate
+
+              try
+                  Expect.throwsT<ArgumentException>
+                      (fun () -> Fsdb.Server.serveWithOptions options listener (Fsdb.Storage.create ()) Fsdb.Functions.empty |> ignore)
+                      "a certificate without a private key cannot start TLS"
+              finally
+                  listener.Stop()
 
           testCase "PROCESSLIST shows the live connection and KILL CONNECTION tears a victim down"
           <| fun _ ->

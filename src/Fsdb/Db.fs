@@ -3,6 +3,7 @@
 module Fsdb.Db
 
 open System.Net
+open System.Security.Cryptography.X509Certificates
 open Fsdb.Functions
 
 /// An embeddable fsdb instance: its storage plus whatever custom functions
@@ -14,13 +15,15 @@ open Fsdb.Functions
 type Db =
     { Store: Storage.Store
       Functions: Registry
-      DataDir: string option }
+      DataDir: string option
+      Transport: ServerOptions.Settings }
 
 /// A fresh, empty database: no data, no custom functions, no durability.
 let create () : Db =
     { Store = Storage.create ()
       Functions = Functions.empty
-      DataDir = None }
+      DataDir = None
+      Transport = ServerOptions.defaults }
 
 /// Opts into durability under `dataDir`. Loads whatever
 /// state is already there (a snapshot plus any WAL entries after it, or
@@ -40,6 +43,14 @@ let withDataDir (dataDir: string) (db: Db) : Db =
 let withLogger (f: string -> unit) (db: Db) : Db =
     Log.useSink f
     db
+
+/// Enables TLS with a certificate whose private key has already been loaded by the host.
+let withTlsCertificate (certificate: X509Certificate2) (db: Db) : Db =
+    { db with Transport = db.Transport |> ServerOptions.withCertificate certificate }
+
+/// Refuses plaintext MySQL sessions; a TLS certificate is required before serving.
+let requireSecureTransport (db: Db) : Db =
+    { db with Transport = db.Transport |> ServerOptions.requireSecureTransport }
 
 /// Registers a scalar function under `name`, e.g.
 /// `db |> Db.registerScalar "slugify" (function ...)`. Free to override a
@@ -124,14 +135,14 @@ type RunningServer =
 /// way to stop.
 let listen (address: IPAddress) (port: int) (db: Db) : Async<unit> =
     let listener = Server.startListening address port
-    Server.serve listener db.Store db.Functions
+    Server.serveWithOptions db.Transport listener db.Store db.Functions
 
 /// Like `listen`, but starts serving on a background async and hands back
 /// a stoppable `RunningServer` — pass port 0 for an OS-assigned port and
 /// read it back off `Port`.
 let serve (address: IPAddress) (port: int) (db: Db) : RunningServer =
     let listener = Server.startListening address port
-    Async.Start(Server.serve listener db.Store db.Functions)
+    Async.Start(Server.serveWithOptions db.Transport listener db.Store db.Functions)
 
     { Port = Server.port listener
       Stop = fun () -> listener.Stop() }

@@ -66,6 +66,17 @@ with 1064. Stored views and triggers populate their real object catalogs;
 routines and events remain genuinely empty rather than stubbed. PROCESSLIST,
 `Threads_connected`, and `KILL` operate on the real connection registry.
 
+## TLS transport
+
+Supplying `--ssl-cert` and `--ssl-key` enables TLS 1.2 and 1.3 on the MySQL
+listener. The same `ssl-cert`, `ssl-key`, and `require-secure-transport`
+options work in the server sections of an option file.
+`--require-secure-transport` rejects plaintext handshakes with 3159.
+Embedding hosts supply an already-loaded `X509Certificate2` through
+`Db.withTlsCertificate`; `Db.requireSecureTransport` enables the same
+plaintext restriction. Client certificates and account-level `REQUIRE SSL` or
+`REQUIRE X509` remain unsupported.
+
 ## Views and triggers
 
 MySQL views are stored queries, not persisted materialized results. `MERGE`

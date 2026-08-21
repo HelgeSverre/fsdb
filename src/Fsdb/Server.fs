@@ -7,6 +7,8 @@ open System
 open System.Security.Cryptography
 open System.Net
 open System.Net.Sockets
+open System.Net.Security
+open System.Security.Authentication
 open System.Text
 open System.Threading
 open Fsdb.Binary
@@ -528,6 +530,7 @@ let private handleConnection
     (connectionId: int)
     (store: Storage.Store)
     (customFunctions: Functions.Registry)
+    (options: ServerOptions.Settings)
     (shutdown: unit -> unit)
     (client: TcpClient)
     : Async<unit> =
@@ -540,30 +543,119 @@ let private handleConnection
         // latency with nothing to batch. Off, matching what a real MySQL
         // server does for the same reason.
         client.NoDelay <- true
-        use stream = client.GetStream()
+        use networkStream = client.GetStream()
+        let mutable stream: IO.Stream = networkStream
+        let mutable tlsStream: SslStream option = None
+        let mutable tlsVersion: string option = None
+        let mutable tlsCipher: string option = None
+        let offeredCapabilities = serverCapabilities options.Certificate.IsSome
+
+        let closeTls () =
+            tlsStream
+            |> Option.iter (fun secured ->
+                try
+                    secured.Dispose()
+                with _ ->
+                    ())
+
+        let upgradeToTls (certificate: Security.Cryptography.X509Certificates.X509Certificate2) =
+            async {
+                let secured = new SslStream(networkStream, false)
+                let authentication = SslServerAuthenticationOptions()
+                authentication.ServerCertificate <- certificate
+                authentication.EnabledSslProtocols <- SslProtocols.Tls12 ||| SslProtocols.Tls13
+                authentication.ClientCertificateRequired <- false
+                authentication.AllowRenegotiation <- false
+
+                use timeout = new CancellationTokenSource(TimeSpan.FromSeconds(float Limits.waitTimeoutSeconds))
+
+                try
+                    do!
+                        secured.AuthenticateAsServerAsync(authentication, timeout.Token)
+                        |> Async.AwaitTask
+                with error ->
+                    secured.Dispose()
+                    return raise error
+                stream <- secured
+                tlsStream <- Some secured
+
+                tlsVersion <-
+                    match secured.SslProtocol with
+                    | SslProtocols.Tls12 -> Some "TLSv1.2"
+                    | SslProtocols.Tls13 -> Some "TLSv1.3"
+                    | protocol -> Some(string protocol)
+
+                tlsCipher <- Some(string secured.NegotiatedCipherSuite)
+            }
+
         // Negotiated once the handshake response arrives; used as a fallback
         // for the "packet too large" ERR reply if that happens beforehand.
-        let mutable capabilities = ServerCapabilities
+        let mutable capabilities = offeredCapabilities
         let mutable activeSession: Session option = None
 
         try
             let authData = randomAuthPluginData ()
 
             do!
-                writePacketAsync stream { SeqId = 0uy; Payload = buildHandshakeV10 connectionId authData }
+                writePacketAsync stream { SeqId = 0uy; Payload = buildHandshakeV10WithCapabilities offeredCapabilities connectionId authData }
                 |> Async.Ignore
 
             match! readPacketWithTimeoutSeconds Limits.waitTimeoutSeconds client stream with
             | None -> ()
-            | Some handshakeResp ->
+            | Some firstHandshakePacket ->
+                let! handshakeResp =
+                    async {
+                        match tryParseSslRequest firstHandshakePacket.Payload with
+                        | None -> return Some firstHandshakePacket
+                        | Some request ->
+                            capabilities <- request.Capabilities &&& offeredCapabilities
+
+                            match options.Certificate with
+                            | None ->
+                                do!
+                                    writePacketAsync
+                                        stream
+                                        { SeqId = firstHandshakePacket.SeqId + 1uy
+                                          Payload = errPayload capabilities 1045 "SSL is not supported" }
+                                    |> Async.Ignore
+
+                                return None
+                            | Some certificate ->
+                                do! upgradeToTls certificate
+                                return! readPacketWithTimeoutSeconds Limits.waitTimeoutSeconds client stream
+                    }
+
+                match handshakeResp with
+                | None ->
+                    closeTls ()
+                    return ()
+                | Some _ -> ()
+
+                let handshakeResp = handshakeResp.Value
                 let resp = parseHandshakeResponse handshakeResp.Payload
                 // Effective capabilities: never claim something the client didn't ask for.
-                capabilities <- resp.Capabilities &&& ServerCapabilities
+                capabilities <- resp.Capabilities &&& offeredCapabilities
                 // Authenticate before any session state exists; on denial the
                 // 1045 is already written and the command loop below never
                 // runs (see the guard on `do! loop session` at the bottom).
                 let! authOkSeq =
-                    authenticateHandshake client stream capabilities store authData resp (handshakeResp.SeqId + 1uy)
+                    if options.RequireSecureTransport && tlsVersion.IsNone then
+                        async {
+                            do!
+                                writePacketAsync
+                                    stream
+                                    { SeqId = handshakeResp.SeqId + 1uy
+                                      Payload =
+                                        errPayload
+                                            capabilities
+                                            3159
+                                            "Connections using insecure transport are prohibited while --require_secure_transport=ON." }
+                                |> Async.Ignore
+
+                            return None
+                        }
+                    else
+                        authenticateHandshake client stream capabilities store authData resp (handshakeResp.SeqId + 1uy)
                 let mutable databaseAccepted = false
 
                 let session =
@@ -571,7 +663,9 @@ let private handleConnection
                         User = resp.Username
                         Database = resp.Database
                         CustomFunctions = customFunctions
-                        Capabilities = capabilities }
+                        Capabilities = capabilities
+                        TlsVersion = tlsVersion
+                        TlsCipher = tlsCipher }
 
                 activeSession <- Some session
 
@@ -1080,7 +1174,9 @@ let private handleConnection
                                         User = session.User
                                         Database = session.Database
                                         CustomFunctions = session.CustomFunctions
-                                        Capabilities = session.Capabilities }
+                                        Capabilities = session.Capabilities
+                                        TlsVersion = session.TlsVersion
+                                        TlsCipher = session.TlsCipher }
 
                                 activeSession <- Some session
 
@@ -1117,15 +1213,6 @@ let private handleConnection
                 if authOkSeq.IsSome && databaseAccepted then
                     do! loop session
         with
-        | :? SslRequestException ->
-            do!
-                writePacketAsync
-                    stream
-                    { SeqId = 2uy
-                      Payload = errPayload capabilities 1045 "SSL is not supported" }
-                |> Async.Ignore
-                |> Async.Catch
-                |> Async.Ignore
         | :? PacketTooLargeException ->
             // Reassembling a multi-packet payload blew past
             // Limits.maxAllowedPacket. There's no way to resync mid-stream,
@@ -1139,10 +1226,12 @@ let private handleConnection
                 |> Async.Catch
                 |> Async.Ignore
         | error ->
+            closeTls ()
             InformationSchema.unregisterProcess (int64 connectionId)
             activeSession |> Option.iter QueryHandler.closeSession
             return raise error
 
+        closeTls ()
         InformationSchema.unregisterProcess (int64 connectionId)
         activeSession |> Option.iter QueryHandler.closeSession
     }
@@ -1184,7 +1273,19 @@ let private tryAccept (listener: TcpListener) : Async<TcpClient option> =
 /// aggregates — `Functions.empty` if none) available to every statement any
 /// connection runs. A failing connection is logged, never fatal to the
 /// server.
-let serve (listener: TcpListener) (store: Storage.Store) (customFunctions: Functions.Registry) : Async<unit> =
+let private validateTransportOptions (options: ServerOptions.Settings) =
+    match options.Certificate with
+    | Some certificate when not certificate.HasPrivateKey -> invalidArg "options" "TLS certificate needs a private key"
+    | None when options.RequireSecureTransport -> invalidArg "options" "require_secure_transport needs a TLS certificate"
+    | _ -> ()
+
+let serveWithOptions
+    (options: ServerOptions.Settings)
+    (listener: TcpListener)
+    (store: Storage.Store)
+    (customFunctions: Functions.Registry)
+    : Async<unit> =
+    validateTransportOptions options
     let mutable activeConnections = 0
 
     let rejectAtCapacity (client: TcpClient) =
@@ -1222,7 +1323,7 @@ let serve (listener: TcpListener) (store: Storage.Store) (customFunctions: Funct
                         async {
                             try
                                 try
-                                    do! handleConnection connectionId store customFunctions listener.Stop client
+                                    do! handleConnection connectionId store customFunctions options listener.Stop client
                                 with ex ->
                                     Log.diagnostic "fsdb: connection %d: %s" connectionId ex.Message
                             finally
@@ -1234,3 +1335,7 @@ let serve (listener: TcpListener) (store: Storage.Store) (customFunctions: Funct
         }
 
     loop ()
+
+/// Serves with plaintext transport unless an embedding host supplies TLS settings.
+let serve (listener: TcpListener) (store: Storage.Store) (customFunctions: Functions.Registry) : Async<unit> =
+    serveWithOptions ServerOptions.defaults listener store customFunctions
