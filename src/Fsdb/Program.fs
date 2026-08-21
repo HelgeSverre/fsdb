@@ -54,11 +54,14 @@ let main argv =
         // is read live from then on, so applying settings first is what makes
         // "written once, before any connection exists" true.
         let configError =
-            results.TryGetResult Defaults_File
-            |> Option.bind (fun path ->
-                match Limits.loadDefaultsFile path with
-                | Ok() -> None
-                | Error message -> Some message)
+            let loaded =
+                match results.TryGetResult Defaults_File with
+                | Some path -> Limits.loadDefaultsFile path
+                | None -> Limits.defaultFilePaths () |> Limits.loadDefaultsFiles
+
+            match loaded with
+            | Ok() -> None
+            | Error message -> Some message
 
         match configError, resolveListenAddress results with
         | Some message, _ ->

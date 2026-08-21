@@ -154,9 +154,10 @@ server-wide diagnostics gap rather than a CHECK enforcement divergence.
 ## Server settings
 
 The tunables an operator would plausibly change live in `Fsdb.Limits` and are
-set from a my.cnf option file via `--defaults-file`: `max_allowed_packet`,
-`max_connections`, `wait_timeout`, `innodb_lock_wait_timeout`,
-`cte_max_recursion_depth`, plus fsdb's own WAL rotation thresholds.
+set from the standard server option files or an explicit `--defaults-file`:
+`max_allowed_packet`, `max_connections`, `wait_timeout`,
+`innodb_lock_wait_timeout`, `cte_max_recursion_depth`, plus fsdb's own WAL
+rotation thresholds.
 
 The option-file parser follows MySQL's format rather than a generic ini
 dialect: `[mysqld]` and `[server]` groups, `name = value` and the bare-name
@@ -173,12 +174,8 @@ error naming the file and line, matching mysqld, which also refuses to start on
 an unknown option; `loose-` is the escape hatch for both. Every bad line is
 reported, not just the first.
 
-Three deliberate divergences from stock MySQL:
+Two deliberate divergences from stock MySQL:
 
-- **No option file is auto-discovered.** `/etc/my.cnf`, `~/.my.cnf` and
-  `$MYSQL_HOME` are not read; only `--defaults-file` is. A file that applies
-  without being named on the command line is the most reliable way to make
-  production differ from a laptop.
 - **`wait_timeout` and `interactive_timeout` report 300, not 28800.** fsdb
   reaps a connection idle between commands after five minutes, because a
   half-open peer otherwise pins a socket and a task for eight hours. The

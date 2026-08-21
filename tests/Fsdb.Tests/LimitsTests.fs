@@ -236,6 +236,34 @@ let tests =
                       Expect.stringContains message "test.cnf:2" "located at the directive"
                       Expect.stringContains message "nope.cnf" "names the file it could not read")
 
+          testCase "default option files apply in order and ignore missing paths"
+          <| fun _ ->
+              withSettings [] (fun () ->
+                  let dir = IO.Path.Combine(IO.Path.GetTempPath(), "fsdb-defaults-" + Guid.NewGuid().ToString "N")
+                  IO.Directory.CreateDirectory dir |> ignore
+
+                  try
+                      let systemFile = IO.Path.Combine(dir, "system.cnf")
+                      let userFile = IO.Path.Combine(dir, "user.cnf")
+                      IO.File.WriteAllText(systemFile, "[mysqld]\nwait_timeout = 41\nmax_connections = 8\n")
+                      IO.File.WriteAllText(userFile, "[mysqld]\nwait_timeout = 73\n")
+
+                      match loadDefaultsFiles [ IO.Path.Combine(dir, "missing.cnf"); systemFile; userFile ] with
+                      | Ok() ->
+                          Expect.equal waitTimeoutSeconds 73 "later file overrides earlier file"
+                          Expect.equal maxConnections 8 "unreplaced earlier setting remains"
+                      | Error error -> failtestf "expected defaults to load, got %s" error
+                  finally
+                      IO.Directory.Delete(dir, true))
+
+          testCase "default option paths include system and user files"
+          <| fun _ ->
+              let paths = defaultFilePaths ()
+              let userFile = IO.Path.Combine(Environment.GetFolderPath Environment.SpecialFolder.UserProfile, ".my.cnf")
+              Expect.contains paths "/etc/my.cnf" "primary system file"
+              Expect.contains paths "/etc/mysql/my.cnf" "secondary system file"
+              Expect.contains paths userFile "user file"
+
           testCase "a missing defaults file is an error carrying the path, not an unhandled exception"
           <| fun _ ->
               match loadDefaultsFile "/nonexistent/fsdb-does-not-exist.cnf" with

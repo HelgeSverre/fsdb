@@ -80,13 +80,15 @@ OPTIONS:
     --help                display this list of options.
 ```
 
-`--defaults-file` reads a my.cnf option file — MySQL's format, not a generic
-ini dialect: `[mysqld]`/`[server]` groups, mid-line `#`/`;` comments, quoted
-values with escapes, `-` and `_` interchangeable, size suffixes,
-`!include`/`!includedir`, and `loose-` for options fsdb doesn't have. Other
-groups are skipped, so a shared my.cnf is safe to point at; an unrecognised
-option inside `[mysqld]` is a startup error naming the file and line, the same
-way mysqld refuses to start on one.
+fsdb reads `/etc/my.cnf`, `/etc/mysql/my.cnf`, `$MYSQL_HOME/my.cnf`, and
+`~/.my.cnf` when present. `--defaults-file` reads only the named file instead.
+The parser follows MySQL's format rather than a generic ini dialect:
+`[mysqld]`/`[server]` groups, mid-line `#`/`;` comments, quoted values with
+escapes, `-` and `_` interchangeable, size suffixes, `!include`/`!includedir`,
+and `loose-` for options fsdb doesn't have. Other groups are skipped, so a
+shared my.cnf is safe to use; an unrecognised option inside `[mysqld]` is a
+startup error naming the file and line, the same way mysqld refuses to start
+on one.
 
 ```ini
 [mysqld]

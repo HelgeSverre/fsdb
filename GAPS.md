@@ -374,7 +374,6 @@ live Limits reporting.
 | COLUMN_COMMENT | user text | always "" (`InformationSchema.fs:323–326`) | low | divergence |
 | SHOW STATUS counters | Com_*, Innodb_*, Slow_queries, … | five variables only: Questions, Ssl_cipher, Ssl_version, Threads_connected, Uptime (`InformationSchema.fs`) | low | divergence |
 | wait_timeout | 28800 default | 300 (deliberate DoS posture, honestly advertised) | low | divergence |
-| Option-file discovery | /etc/my.cnf, ~/.my.cnf, $MYSQL_HOME auto-read | only `--defaults-file` | low | divergence |
 | Logging | general log, slow log, error-log file | stderr diagnostics with credential redaction only (`Log.fs`) | low | divergence |
 | Replication | binlog, GTID, source/replica channels | nothing; REPLICATION privileges are vocabulary only; internal WAL is not a binlog | architectural | refusal |
 | SHUTDOWN statement | supported | absent; shutdown via embedding API or signals | low | refusal |

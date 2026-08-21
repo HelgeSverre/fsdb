@@ -474,10 +474,6 @@ let applyLines (source: string) (lines: string seq) : Result<unit, string> =
 /// may start mid-line, quoted values with `\n`/`\t`/`\s`-style escapes, `-`
 /// and `_` interchangeable in names, `loose-` to tolerate an option fsdb
 /// doesn't have, and `!include`/`!includedir`.
-///
-/// No config path is auto-discovered — not `/etc/my.cnf`, not `~/.my.cnf`.
-/// A file that applies without being named on the command line is the most
-/// reliable way to make production differ from a laptop.
 let loadDefaultsFile (path: string) : Result<unit, string> =
     match (try Ok(IO.File.ReadAllLines path) with ex -> Error ex.Message) with
     | Error message -> Error(sprintf "%s: %s" path message)
@@ -491,3 +487,24 @@ let loadDefaultsFile (path: string) : Result<unit, string> =
             Ok()
         else
             Error(String.concat "\n" errors)
+
+/// Server option files in MySQL's Unix precedence order. Files that do not
+/// exist are ignored by `loadDefaultsFiles`.
+let defaultFilePaths () : string list =
+    let mysqlHome = Environment.GetEnvironmentVariable "MYSQL_HOME"
+    let userHome = Environment.GetFolderPath Environment.SpecialFolder.UserProfile
+
+    [ "/etc/my.cnf"
+      "/etc/mysql/my.cnf"
+      if not (String.IsNullOrWhiteSpace mysqlHome) then
+          IO.Path.Combine(mysqlHome, "my.cnf")
+      if not (String.IsNullOrWhiteSpace userHome) then
+          IO.Path.Combine(userHome, ".my.cnf") ]
+    |> List.distinct
+
+/// Applies existing option files from least to most specific, so later files
+/// override values read earlier.
+let loadDefaultsFiles (paths: string list) : Result<unit, string> =
+    paths
+    |> List.filter IO.File.Exists
+    |> List.fold (fun result path -> result |> Result.bind (fun () -> loadDefaultsFile path)) (Ok())
