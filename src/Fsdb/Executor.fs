@@ -8494,7 +8494,7 @@ let rec execute (store: Store) (registry: Registry) (dbName: string) (ids: int64
                     table
                     cols
                     rowsValues
-                    (computeGeneratedRow targetStore registry db table tableColumns))
+                    (prepareInsertRow targetStore db table tableColumns))
 
     match stmt with
     | SetTriggerNew _ -> ids, Err(1064, "SET NEW is only valid in a trigger body")
@@ -9461,6 +9461,15 @@ let rec execute (store: Store) (registry: Registry) (dbName: string) (ids: int64
                     | Error(code, message) -> ids, Err(code, message)
                     | Ok targetRows ->
                         let targetSet = referenceSet targetRows
+                        let beforeTriggers = triggersFor store db table "BEFORE" "UPDATE"
+                        let afterTriggers = triggersFor store db table "AFTER" "UPDATE"
+                        let baseCatalog = store.Catalog
+                        let useSnapshot = not (beforeTriggers.IsEmpty && afterTriggers.IsEmpty)
+                        let targetStore =
+                            if useSnapshot then Storage.beginTransactionSnapshot store else store
+
+                        let changedRows = ResizeArray<Value[] option * Value[] option>()
+
                         let predicate row =
                             match narrowed with
                             | Some _ ->
@@ -9474,23 +9483,32 @@ let rec execute (store: Store) (registry: Registry) (dbName: string) (ids: int64
                             let updated =
                                 applyAssignments store registry dbName columnIndex qualifiers indexedAssignments row
                                 |> Result.map (applyOnUpdateTimestamps columns assignedIdxs row)
-                                |> Result.bind (computeGeneratedRow store registry db table columns)
+                                |> Result.bind (computeGeneratedRow targetStore registry db table columns)
 
                             match updated with
                             | Error(ExpressionError(3819, message)) when updateStmt.Ignore ->
                                 Diagnostics.warning 3819 message
                                 Ok row
-                            | result -> result
+                            | Ok candidate ->
+                                match fireTriggers targetStore db table Before TriggerUpdate beforeTriggers [ Some row, Some candidate ] with
+                                | Some(Err(code, message)) -> Error(ExpressionError(code, message))
+                                | _ ->
+                                    changedRows.Add(Some(Array.copy row), Some candidate)
+                                    Ok candidate
+                            | Error error -> Error error
 
                         let candidates = narrowed |> Option.map snd
 
-                        match updateRows store db table candidates predicate updater with
+                        match updateRows targetStore db table candidates predicate updater with
                         | Ok changed ->
-                            // `targetRows` is the WHERE/ORDER BY/LIMIT match
-                            // set already computed above — matched rows,
-                            // unlike `changed`, needs no extra pass over the
-                            // table.
-                            ids, Affected(uint64 (if foundRows then targetRows.Length else changed))
+                            match fireTriggers targetStore db table After TriggerUpdate afterTriggers (List.ofSeq changedRows) with
+                            | Some error -> ids, error
+                            | None ->
+                                if useSnapshot then
+                                    Storage.mergeCatalogInto store baseCatalog targetStore.Catalog
+                                    Storage.commitTransactionEvents store targetStore
+
+                                ids, Affected(uint64 (if foundRows then targetRows.Length else changed))
                         | Error e -> ids, storageErr e
 
     | Update updateStmt ->
@@ -9757,6 +9775,15 @@ let rec execute (store: Store) (registry: Registry) (dbName: string) (ids: int64
                 | Error(code, message) -> ids, Err(code, message)
                 | Ok targetRows ->
                     let targetSet = referenceSet targetRows
+                    let beforeTriggers = triggersFor store db table "BEFORE" "DELETE"
+                    let afterTriggers = triggersFor store db table "AFTER" "DELETE"
+                    let baseCatalog = store.Catalog
+                    let useSnapshot = not (beforeTriggers.IsEmpty && afterTriggers.IsEmpty)
+                    let targetStore =
+                        if useSnapshot then Storage.beginTransactionSnapshot store else store
+
+                    let deletedRows = targetRows |> List.map (fun row -> Some row, None)
+
                     let predicate row =
                         match narrowed with
                         | Some _ ->
@@ -9767,13 +9794,24 @@ let rec execute (store: Store) (registry: Registry) (dbName: string) (ids: int64
 
                     let candidates = narrowed |> Option.map snd
 
-                    match
-                        candidates
-                        |> Option.map (fun rows -> deleteRowsCandidates store db table rows predicate)
-                        |> Option.defaultWith (fun () -> deleteRows store db table predicate)
-                    with
-                    | Ok affected -> ids, Affected(uint64 affected)
-                    | Error e -> ids, storageErr e
+                    match fireTriggers targetStore db table Before TriggerDelete beforeTriggers deletedRows with
+                    | Some error -> ids, error
+                    | None ->
+                        match
+                            candidates
+                            |> Option.map (fun rows -> deleteRowsCandidates targetStore db table rows predicate)
+                            |> Option.defaultWith (fun () -> deleteRows targetStore db table predicate)
+                        with
+                        | Error e -> ids, storageErr e
+                        | Ok affected ->
+                            match fireTriggers targetStore db table After TriggerDelete afterTriggers deletedRows with
+                            | Some error -> ids, error
+                            | None ->
+                                if useSnapshot then
+                                    Storage.mergeCatalogInto store baseCatalog targetStore.Catalog
+                                    Storage.commitTransactionEvents store targetStore
+
+                                ids, Affected(uint64 affected)
 
     | Delete deleteStmt ->
         // Multi-table `DELETE t1[, t2] FROM t1 JOIN t2 ON ...` / `DELETE

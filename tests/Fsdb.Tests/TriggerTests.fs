@@ -73,6 +73,36 @@ let tests =
                   (Err(1064, "SET NEW is only valid in a trigger body"))
                   "NEW has no row image outside a trigger"
 
+          testCase "UPDATE and DELETE expose their row images at each timing"
+          <| fun _ ->
+              let store = Fsdb.Storage.create ()
+              setup store
+              expectOk (runDefault store "INSERT INTO t(n) VALUES (10)") "seed t"
+
+              expectOk
+                  (runDefault store "CREATE TRIGGER increment BEFORE UPDATE ON t FOR EACH ROW SET NEW.n = NEW.n + 1")
+                  "create before update trigger"
+
+              expectOk
+                  (runDefault store "CREATE TRIGGER update_log AFTER UPDATE ON t FOR EACH ROW INSERT INTO log(n) VALUES (NEW.n - OLD.n)")
+                  "create after update trigger"
+
+              expectOk
+                  (runDefault store "CREATE TRIGGER delete_before BEFORE DELETE ON t FOR EACH ROW INSERT INTO log(n) VALUES (OLD.n)")
+                  "create before delete trigger"
+
+              expectOk
+                  (runDefault store "CREATE TRIGGER delete_after AFTER DELETE ON t FOR EACH ROW INSERT INTO log(n) VALUES (OLD.n + 1)")
+                  "create after delete trigger"
+
+              expectOk (runDefault store "UPDATE t SET n = 20") "update"
+              expectOk (runDefault store "DELETE FROM t") "delete"
+
+              Expect.equal
+                  (rows store "SELECT n FROM log ORDER BY id")
+                  [ [ Some "11" ]; [ Some "21" ]; [ Some "22" ] ]
+                  "every timing sees its corresponding old or new row image"
+
           testCase "AFTER INSERT fires once per row with NEW.* bound per row"
           <| fun _ ->
               let store = Fsdb.Storage.create ()
