@@ -81,7 +81,7 @@ variants), USE, KILL, DESCRIBE are text-probed before the grammar
 
 | Gap | MySQL 8.4 | fsdb | Impact | Class |
 |---|---|---|---|---|
-| `SQL_CALC_FOUND_ROWS` | accepted and feeds `FOUND_ROWS()` | absent alongside `FOUND_ROWS()` | low | refusal |
+| `SQL_CALC_FOUND_ROWS` | accepted and makes `FOUND_ROWS()` ignore LIMIT | modifier absent; `FOUND_ROWS()` reports returned rows | low | refusal |
 | Locking detail | `FOR UPDATE/SHARE [OF tbl…] [NOWAIT|SKIP LOCKED]` | `FOR UPDATE`/`FOR SHARE`/`LOCK IN SHARE MODE` accepted and ignored; no OF/NOWAIT/SKIP LOCKED | low | divergence |
 | CTE placement | `WITH` in subqueries, derived tables, `INSERT…WITH` | top-level SELECT/UNION only (`Parser.fs:2458–2464`) | medium | refusal |
 | Quantified comparison | `= ANY/SOME/ALL (subquery)` | absent | medium | refusal |
@@ -119,7 +119,6 @@ identities for bit aggregates.
 | GROUP_CONCAT truncation | emits warning, increments warning count | truncates silently (`Executor.fs:4424–4438`) | low | divergence |
 | RANGE window frames | `RANGE BETWEEN INTERVAL n DAY PRECEDING…` | temporal offsets refused with 1235; numeric offsets only (`Executor.fs:5438–5444`) | low | refusal |
 | sql_mode | ~20 mode bits with semantic effect | only strictness (STRICT_TRANS_TABLES/STRICT_ALL_TABLES) has effect; ONLY_FULL_GROUP_BY absent (bare column picks first row of group, `Executor.fs:4768`); `@@sql_mode` echoes a constant string regardless of SET (`Session.fs:22`) | medium | divergence |
-| FOUND_ROWS()/ROW_COUNT() | session functions | not registered (`QueryHandler.fs:833–868` has the session registry) | low | refusal |
 | Result column types | declared/schema-driven | inferred from returned row values; an all-NULL column under LIMIT reports VAR_STRING (`Executor.fs:6110`) | medium | divergence — see §15 open finding |
 
 ## 3. Built-in functions

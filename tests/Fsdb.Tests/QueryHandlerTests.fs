@@ -1232,6 +1232,22 @@ let tests =
               | Err(1105, "Internal error") -> ()
               | other -> failtestf "expected a 1105 internal-error Err, got %A" other
 
+          testCase "FOUND_ROWS() and ROW_COUNT() report the previous statement"
+          <| fun _ ->
+              let session = create 1 (Fsdb.Storage.create ())
+              let session, _ = handle session "CREATE TABLE counts (id INT, n INT)"
+              let session, _ = handle session "INSERT INTO counts VALUES (1, 0), (2, 0), (3, 0)"
+              let session, _ = handle session "SELECT id FROM counts ORDER BY id LIMIT 2"
+
+              match handle session "SELECT FOUND_ROWS(), ROW_COUNT()" with
+              | session, ResultSet(_, [ [ Some "2"; Some "-1" ] ]) ->
+                  let session, _ = handle session "UPDATE counts SET n = 1"
+
+                  match handle session "SELECT ROW_COUNT(), FOUND_ROWS()" |> snd with
+                  | ResultSet(_, [ [ Some "3"; Some "0" ] ]) -> ()
+                  | other -> failtestf "expected affected-row accounting, got %A" other
+              | _, other -> failtestf "expected result-row accounting, got %A" other
+
           testCase "LAST_INSERT_ID() stays 0 for an explicit AUTO_INCREMENT id, unlike the OK packet's last_insert_id"
           <| fun _ ->
               // Real MySQL 8.4: PDO::lastInsertId()/the OK packet reports an

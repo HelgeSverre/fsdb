@@ -213,6 +213,10 @@ type Session =
       /// none — including one that supplies its own id — leaves this
       /// unchanged rather than resetting it, matching real MySQL.
       LastGeneratedId: int64
+      /// Values exposed by `ROW_COUNT()` and `FOUND_ROWS()` for the previous
+      /// statement on this connection.
+      LastRowCount: int64
+      FoundRows: uint64
       /// Per-column MySQL wire types for the most recent statement's
       /// `ResultSet`, if any — `[]` for anything else (an `Affected`/`Err`
       /// result, or a `ResultSet` this session's dispatch path didn't
@@ -290,6 +294,8 @@ let create (connectionId: int) (store: Store) : Session =
       Store = { store with StrictMode = store.StrictMode }
       LastInsertId = 0L
       LastGeneratedId = 0L
+      LastRowCount = 0L
+      FoundRows = 0UL
       LastResultColumnMetadata = []
       Tx = None
       PendingTransactionReadOnly = None

@@ -873,6 +873,8 @@ let private registryFor (session: Session) : Functions.Registry =
     |> Functions.registerScalar "DATABASE" database
     |> Functions.registerScalar "SCHEMA" database
     |> Functions.registerScalar "LAST_INSERT_ID" (fun _ -> VInt session.LastGeneratedId)
+    |> Functions.registerScalar "ROW_COUNT" (fun _ -> VInt session.LastRowCount)
+    |> Functions.registerScalar "FOUND_ROWS" (fun _ -> VUInt session.FoundRows)
     |> Functions.registerScalar
         "VERSION"
         (fun _ -> lookupVar session "version" |> Option.flatten |> Option.map VString |> Option.defaultValue VNull)
@@ -1887,17 +1889,32 @@ let private dispatch (session: Session) (rawSql: string) : Session * QueryResult
 ///
 /// `Storage.LockWaitTimeout` covers both an explicit gate timeout and an
 /// optimistic commit conflict; both are retryable 1205 errors.
+let private recordResult ((session, result): Session * QueryResult) : Session * QueryResult =
+    let session =
+        match result with
+        | Affected count ->
+            { session with
+                LastRowCount = int64 count
+                FoundRows = 0UL }
+        | ResultSet(_, rows) ->
+            { session with
+                LastRowCount = -1L
+                FoundRows = uint64 rows.Length }
+        | Err _ -> { session with LastRowCount = -1L }
+
+    session, result
+
 let handle (session: Session) (rawSql: string) : Session * QueryResult =
     try
         match dispatch session rawSql with
         | _, Err(code, msg) as result ->
             Log.diagnostic "fsdb: ERR %d %s -- query: %s" code msg (Log.redactSql rawSql)
-            result
-        | result -> result
+            recordResult result
+        | result -> recordResult result
     with
     | Storage.LockWaitTimeout dbName ->
         Log.diagnostic "fsdb: ERR 1205 lock wait timeout on database %s -- query: %s" dbName (Log.redactSql rawSql)
-        session, Err(1205, "Lock wait timeout exceeded; try restarting transaction")
+        recordResult (session, Err(1205, "Lock wait timeout exceeded; try restarting transaction"))
     // A killed client mid-query (`Storage.queryCancellation`, armed by
     // `Server.withCancellationWatch`) — not an internal error to report
     // back to a client that's already gone, so this re-raises rather than
@@ -1917,7 +1934,7 @@ let handle (session: Session) (rawSql: string) : Session * QueryResult =
     // there's no AST printer to render it. Add one if a client parses the text.
     | Value.UnsignedOutOfRange ->
         Log.diagnostic "fsdb: ERR 1690 unsigned out of range -- query: %s" (Log.redactSql rawSql)
-        session, Err(1690, "BIGINT UNSIGNED value is out of range")
+        recordResult (session, Err(1690, "BIGINT UNSIGNED value is out of range"))
     // An extension function's *chosen* error code (`Functions.SqlError`) —
     // delivered verbatim instead of the generic 1105, but with the exact
     // same transaction-abort semantics as any other throw: a failing
@@ -1925,10 +1942,10 @@ let handle (session: Session) (rawSql: string) : Session * QueryResult =
     // snapshot reachable by a later COMMIT.
     | Functions.SqlError(code, msg) ->
         Log.diagnostic "fsdb: ERR %d %s -- query: %s" code msg (Log.redactSql rawSql)
-        { session with Tx = None }, Err(code, msg)
+        recordResult ({ session with Tx = None }, Err(code, msg))
     | ex ->
         Log.diagnostic "fsdb: EXN %s -- query: %s" ex.Message (Log.redactSql rawSql)
-        { session with Tx = None }, Err(1105, "Internal error") // ER_UNKNOWN_ERROR
+        recordResult ({ session with Tx = None }, Err(1105, "Internal error")) // ER_UNKNOWN_ERROR
 
 /// Executes a prepared statement with its bound parameter values. Parser-
 /// produced statements bind the values into the parsed AST and run it
@@ -1943,13 +1960,13 @@ let executePrepared (session: Session) (stmt: PreparedStmt) (values: Value list)
     // `handle` gives the text path.
     try
         match stmt.Ast with
-        | Some ast -> executeParsed session (bindPlaceholders ast values)
+        | Some ast -> executeParsed session (bindPlaceholders ast values) |> recordResult
         | None -> handle session (substitutePlaceholders stmt.Sql (values |> List.map valueToSqlLiteral))
     with
     | PlaceholderCountMismatch(expected, got) ->
-        session, Err(1210, sprintf "Incorrect arguments to EXECUTE (expected %d, got %d)" expected got)
-    | Value.UnsignedOutOfRange -> session, Err(1690, "BIGINT UNSIGNED value is out of range")
+        recordResult (session, Err(1210, sprintf "Incorrect arguments to EXECUTE (expected %d, got %d)" expected got))
+    | Value.UnsignedOutOfRange -> recordResult (session, Err(1690, "BIGINT UNSIGNED value is out of range"))
     | :? OperationCanceledException -> reraise ()
     | ex ->
         Log.diagnostic "fsdb: EXN %s -- prepared statement" ex.Message
-        session, Err(1105, "Internal error")
+        recordResult (session, Err(1105, "Internal error"))
