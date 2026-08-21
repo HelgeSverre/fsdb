@@ -571,7 +571,7 @@ let rec private shapeIsValid = function
         points
         |> List.forall (fun (x, y) -> Double.IsFinite x && Double.IsFinite y)
         && (match points with
-            | _ :: _ -> true
+            | _ :: _ :: _ -> true
             | _ -> false)
     | GMultiPoint points ->
         not (List.isEmpty points)

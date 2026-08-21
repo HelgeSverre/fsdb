@@ -302,6 +302,7 @@ let tests =
                 <| fun _ ->
                     let geometry shape = { Srid = 0; Shape = shape }
 
+                    Expect.isFalse (geometry (GLineString [ (0.0, 0.0) ]) |> geometryIsValidPlanar) "short line"
                     Expect.isFalse (geometry (GMultiLineString [ [ (0.0, 0.0) ] ]) |> geometryIsValidPlanar) "short line"
                     Expect.isFalse (geometry (GMultiPolygon [ [] ]) |> geometryIsValidPlanar) "missing shell" ]
 
