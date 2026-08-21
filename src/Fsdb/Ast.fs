@@ -97,6 +97,9 @@ type Expr =
     // position in the SQL text. Bound to a `Lit` by `QueryHandler.bindPlaceholders`
     // before execution — the executor never sees one.
     | Placeholder of index: int
+    | UserVariable of name: string
+    | SystemVariable of scope: string option * name: string
+    | AssignUserVariable of name: string * value: Expr
     | Col of name: string
     | QualifiedCol of table: string * column: string
     | BinOp of Op * Expr * Expr

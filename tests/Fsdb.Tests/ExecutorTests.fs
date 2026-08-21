@@ -4240,6 +4240,17 @@ let tests =
                         Expect.equal rows [ [ Some "3"; Some "6" ]; [ Some "5"; Some "10" ] ] "computed from n"
                     | other -> failtestf "expected doubled to be computed, got %A" other
 
+                testCase "generated columns reject user and system variables"
+                <| fun _ ->
+                    let store = newStore ()
+
+                    [ "CREATE TABLE user_variable (n INT, g INT AS (@value + n))"
+                      "CREATE TABLE system_variable (n INT, g INT AS (@@max_connections + n))" ]
+                    |> List.iter (fun sql ->
+                        match runDefault store sql with
+                        | Err(3772, "Default value expression of column 'g' cannot refer user or system variables.") -> ()
+                        | other -> failtestf "expected generated-column variable rejection, got %A" other)
+
                 testCase "a generated column recomputes after UPDATE of a column it depends on"
                 <| fun _ ->
                     let store = newStore ()

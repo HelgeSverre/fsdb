@@ -1195,6 +1195,19 @@ let private placeholderAtom: Parser<Expr, unit> =
         placeholderCounterLocal.Value <- n + 1
         Placeholder n)
 
+let private userVariableTarget: Parser<string, unit> =
+    pchar '@' >>. many1Satisfy isIdentChar .>> ws
+
+let private variableAtom: Parser<Expr, unit> =
+    let systemVariable =
+        pstring "@@"
+        >>. ((attempt (pstringCI "GLOBAL." >>% Some "GLOBAL")) <|> (attempt (pstringCI "SESSION." >>% Some "SESSION")) <|> preturn None)
+        .>>. (many1Satisfy isIdentChar .>> ws)
+        |>> SystemVariable
+
+    let userVariable = userVariableTarget |>> UserVariable
+    attempt systemVariable <|> userVariable
+
 /// `MATCH (col [, col ...]) AGAINST ('query' [modifier])` — the modifier
 /// keywords aren't expressions, so like `timestampFuncAtom` below this is
 /// its own atom rather than a `funcCallAtom` name. The default (no
@@ -1254,6 +1267,7 @@ let private atom: Parser<Expr, unit> =
           keyword "TRUE" >>% Lit(VInt 1L)
           keyword "FALSE" >>% Lit(VInt 0L)
           placeholderAtom
+          variableAtom
           identAtom ]
     <?> "expression"
 
@@ -1445,7 +1459,12 @@ let private xorExpr: Parser<Expr, unit> =
 let private orExpr: Parser<Expr, unit> =
     chainl1 xorExpr (keyword "OR" >>% fun a b -> BinOp(Or, a, b))
 
-do exprRef.Value <- depthGuard orExpr
+let private assignmentExpr: Parser<Expr, unit> =
+    attempt (userVariableTarget .>> sym ":=" .>>. expr)
+    |>> AssignUserVariable
+    <|> orExpr
+
+do exprRef.Value <- depthGuard assignmentExpr
 
 type private ColMod =
     | MNotNull

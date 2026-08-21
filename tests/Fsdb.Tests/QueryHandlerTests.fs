@@ -204,7 +204,7 @@ let tests =
                   Expect.isTrue (state.Flags &&& UniqueKeyFlag <> 0us) "UNIQUE_KEY flag"
               | _, other -> failtestf "expected an empty typed resultset, got %A" other
 
-          testCase "result column metadata doesn't leak from a real SELECT onto a later same-arity probe result"
+          testCase "a bare system variable reports its own result metadata"
           <| fun _ ->
               let session = create 1 (Fsdb.Storage.create ())
               let session, _ = handle session "CREATE TABLE t (id INT)"
@@ -212,13 +212,8 @@ let tests =
               let session, _ = handle session "SELECT id FROM t"
               Expect.equal (session.LastResultColumnMetadata |> List.map _.TypeId) [ TypeLong ] "SELECT set a real type"
 
-              // `SELECT @@version` is also a single-column resultset (the
-              // `handleAtVarSelect` probe path, not `executeStatement`'s
-              // typed one) — without an explicit reset this would silently
-              // inherit the previous statement's LONGLONG type instead of
-              // falling back to VAR_STRING for its actual string value.
               let session, _ = handle session "SELECT @@version"
-              Expect.equal session.LastResultColumnMetadata [] "an unrelated probe result clears it"
+              Expect.equal (session.LastResultColumnMetadata |> List.map _.TypeId) [ TypeVarString ] "system variables report text metadata"
 
           testCase "RANK/DENSE_RANK/NTILE report LONGLONG and PERCENT_RANK reports DOUBLE over the wire"
           <| fun _ ->
@@ -549,7 +544,7 @@ let tests =
 
           testCase "a session refuses user variables beyond its fixed memory-growth cap"
           <| fun _ ->
-              let variables = seq { for i in 1..65536 -> sprintf "v%d" i, Some "1" } |> Map.ofSeq
+              let variables = seq { for i in 1..65536 -> sprintf "v%d" i, VString "1" } |> Map.ofSeq
               let session = { create 1 (Fsdb.Storage.create ()) with UserVariables = variables }
 
               match handle session "SET @overflow = 1" with
@@ -558,7 +553,7 @@ let tests =
               | _, other -> failtestf "expected the user-variable cap error, got %A" other
 
               match handle session "SET @v1 = 2" with
-              | updated, Affected _ -> Expect.equal updated.UserVariables.["v1"] (Some "2") "existing variables remain writable"
+              | updated, Affected _ -> Expect.equal updated.UserVariables.["v1"] (VInt 2L) "existing variables remain writable"
               | _, other -> failtestf "expected an existing variable update to succeed, got %A" other
 
           testCase "a bad multi-assignment SET applies none of its assignments, not just the ones before the bad one"
@@ -607,6 +602,97 @@ let tests =
               match handle session "SELECT @never_set" |> snd with
               | ResultSet([ "@never_set" ], [ [ None ] ]) -> ()
               | other -> failtestf "expected a NULL row, got %A" other
+
+          testCase "user and system variables participate in ordinary expressions"
+          <| fun _ ->
+              let session = create 1 (Fsdb.Storage.create ())
+              let session, _ = handle session "SET @base = 2"
+
+              match handle session "SELECT @base + 3, @@session.autocommit + 1" |> snd with
+              | ResultSet(_, [ [ Some "5"; Some "2" ] ]) -> ()
+              | other -> failtestf "expected expression values, got %A" other
+
+          testCase "user-variable assignment evaluates and persists inside a SELECT"
+          <| fun _ ->
+              let session = create 1 (Fsdb.Storage.create ())
+              let session, _ = handle session "SET @counter = 0"
+              let session, result = handle session "SELECT @counter := @counter + 1"
+
+              match result with
+              | ResultSet([ "@counter:=@counter + 1" ], [ [ Some "1" ] ]) -> ()
+              | other -> failtestf "expected assignment result, got %A" other
+
+              match handle session "SELECT @counter" |> snd with
+              | ResultSet([ "@counter" ], [ [ Some "1" ] ]) -> ()
+              | other -> failtestf "expected persisted user variable, got %A" other
+
+          testCase "user variables retain their assigned SQL values"
+          <| fun _ ->
+              let session = create 1 (Fsdb.Storage.create ())
+              let session, _ = handle session "SET @literal = 7"
+              let session, _ = handle session "SELECT @decimal := 1.5, @payload := JSON_OBJECT('id', 7)"
+
+              Expect.equal session.UserVariables.["literal"] (VInt 7L) "SET preserves integer values"
+              Expect.equal session.UserVariables.["decimal"] (VDecimal 1.5m) "expression assignment preserves decimals"
+              Expect.equal session.UserVariables.["payload"] (VJson "{\"id\": 7}") "expression assignment preserves JSON"
+
+              match handle session "SELECT @literal + 1, @decimal + 1" with
+              | resultSession, ResultSet(_, [ [ Some "8"; Some "2.5" ] ]) ->
+                  Expect.equal (resultSession.LastResultColumnMetadata |> List.map _.TypeId) [ TypeLongLong; TypeNewDecimal ] "expression metadata follows the retained values"
+              | _, other -> failtestf "expected typed user-variable arithmetic, got %A" other
+
+          testCase "a bare typed user variable retains metadata with LIMIT 0"
+          <| fun _ ->
+              let session = create 1 (Fsdb.Storage.create ())
+              let session, _ = handle session "SET @value = 7"
+
+              match handle session "SELECT @value LIMIT 0" with
+              | resultSession, ResultSet([ "@value" ], []) ->
+                  Expect.equal (resultSession.LastResultColumnMetadata |> List.map _.TypeId) [ TypeTiny ] "metadata follows the assigned value without rows"
+              | _, other -> failtestf "expected an empty typed resultset, got %A" other
+
+          testCase "SET evaluates a user-variable arithmetic expression"
+          <| fun _ ->
+              let session = create 1 (Fsdb.Storage.create ())
+              let session, result = handle session "SET @x = 1 + 2"
+
+              match result, session.UserVariables |> Map.tryFind "x" with
+              | Affected 0UL, Some(VInt 3L) -> ()
+              | other -> failtestf "expected SET to retain the expression result, got %A" other
+
+          testCase "SET keeps nested user-variable assignments and defers its top-level targets"
+          <| fun _ ->
+              let session = create 1 (Fsdb.Storage.create ())
+              let session, _ = handle session "SET @a = (@b := 1), @c = @b + 1"
+
+              Expect.equal session.UserVariables.["a"] (VInt 1L) "outer assignment"
+              Expect.equal session.UserVariables.["b"] (VInt 1L) "nested assignment"
+              Expect.equal session.UserVariables.["c"] (VInt 2L) "later expression sees nested assignment"
+
+              match handle session "SET @d = (@e := 1), missing_variable = 1" with
+              | unchanged, Err(1193, _) -> Expect.isFalse (Map.containsKey "e" unchanged.UserVariables) "failed SET applies none of its nested assignments"
+              | _, other -> failtestf "expected the multi-assignment to fail atomically, got %A" other
+
+          testCase "user variables work in VALUES and WHERE expressions"
+          <| fun _ ->
+              let session = create 1 (Fsdb.Storage.create ())
+              let session, _ = handle session "CREATE TABLE t (id INT)"
+              let session, _ = handle session "SET @next = 0, @wanted = 2"
+              let session, inserted = handle session "INSERT INTO t VALUES (@next := @next + 1), (@next := @next + 1)"
+
+              match inserted with
+              | Affected 2UL -> ()
+              | other -> failtestf "expected two inserted rows, got %A" other
+
+              match handle session "SELECT id FROM t WHERE id = @wanted" |> snd with
+              | ResultSet([ "id" ], [ [ Some "2" ] ]) -> ()
+              | other -> failtestf "expected the user-variable predicate to select id 2, got %A" other
+
+              let session, _ = handle session "SET @ordinal = 0"
+
+              match handle session "SELECT @ordinal := @ordinal + 1 FROM t ORDER BY id" |> snd with
+              | ResultSet(_, [ [ Some "1" ]; [ Some "2" ] ]) -> ()
+              | other -> failtestf "expected one assignment per projected row, got %A" other
 
           testCase "SET @x = NULL defines a user variable holding NULL, not the string 'NULL'"
           <| fun _ ->

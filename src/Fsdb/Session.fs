@@ -181,18 +181,14 @@ type Session =
       /// `SET character_set_results = NULL`) from one holding an ordinary
       /// string — the map lookup's own `None` for a key that isn't in the
       /// map at all still means "unknown variable" (1193);
-      /// only a *present* key can hold `None`. See `UserVariables` below
-      /// for the analogous convention on user-defined variables.
+      /// only a *present* key can hold `None`.
       Variables: Map<string, string option>
       /// `SET @name = ...` user-defined variables — unlike `Variables`
       /// (real, known system variables), any `@name` is legal in real
       /// MySQL, so there's no default set and no "unknown variable" error
-      /// path for these. `string option` per value (not just `string`)
-      /// distinguishes "SET to NULL" from the map lookup itself already
-      /// telling `None` apart from `Some` — both mean "reads back as
-      /// NULL", so callers reading a value back collapse the two with
-      /// `Option.flatten` rather than needing to branch on which.
-      UserVariables: Map<string, string option>
+      /// path for these. The assigned `Value` stays typed; an absent key
+      /// and `VNull` both read as SQL NULL.
+      UserVariables: Map<string, Value>
       /// The single shared catalog every connection reads/writes through —
       /// `Session` itself stays an immutable per-connection value; `Store`
       /// is the one mutable boundary (see `Storage.Store`). Always the

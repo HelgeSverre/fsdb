@@ -485,6 +485,7 @@ let rec private exprReadTables (defaultDb: string) (expr: Expr) : (string * stri
     | Exists s -> selectReadTables defaultDb s
     | InSubquery(e, s) -> recur e @ selectReadTables defaultDb s
     | BinOp(_, a, b) -> recur a @ recur b
+    | AssignUserVariable(_, value) -> recur value
     | Not e
     | IsNull e
     | IsNotNull e
@@ -536,6 +537,8 @@ let rec private exprReadTables (defaultDb: string) (expr: Expr) : (string * stri
         @ (whens |> List.collect (fun (c, r) -> recur c @ recur r))
         @ (elseBranch |> Option.map recur |> Option.defaultValue [])
     | Placeholder _
+    | UserVariable _
+    | SystemVariable _
     | Lit _
     | Col _
     | QualifiedCol _

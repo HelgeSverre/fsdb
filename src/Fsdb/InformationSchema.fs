@@ -374,6 +374,9 @@ let rec exprToSql (e: Expr) : string =
     | Lit v -> litText v
     | MatchAgainst(cols, q, _) -> sprintf "match (%s) against (%s)" (cols |> List.map (sprintf "`%s`") |> String.concat ",") (exprToSql q)
     | Placeholder _ -> "?"
+    | UserVariable name -> "@" + name
+    | SystemVariable(scope, name) -> "@@" + (scope |> Option.map (fun value -> value.ToLowerInvariant() + ".") |> Option.defaultValue "") + name
+    | AssignUserVariable(name, value) -> sprintf "@%s := %s" name (exprToSql value)
     | Col n -> sprintf "`%s`" n
     | QualifiedCol(t, c) -> sprintf "`%s`.`%s`" t c
     | BinOp(op, a, b) -> sprintf "(%s %s %s)" (exprToSql a) (opText op) (exprToSql b)

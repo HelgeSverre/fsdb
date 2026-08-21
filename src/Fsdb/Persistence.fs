@@ -278,6 +278,9 @@ let rec private encodeExpr (w: Writer) (expr: Expr) : unit =
     match expr with
     | Lit v -> w.WriteByte 0x01uy; encodeValue w v
     | Placeholder _ -> failwith "Persistence: a prepared-statement placeholder can't reach the WAL/snapshot"
+    | UserVariable _
+    | SystemVariable _
+    | AssignUserVariable _ -> failwith "Persistence: a stored expression can't reference a session variable"
     | Col name -> w.WriteByte 0x02uy; writeStr w name
     | QualifiedCol(t, c) -> w.WriteByte 0x03uy; writeStr w t; writeStr w c
     | BinOp(op, a, b) -> w.WriteByte 0x04uy; encodeOp w op; encodeExpr w a; encodeExpr w b

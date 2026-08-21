@@ -51,6 +51,17 @@ let tests =
                   [ [ Some "Acme"; Some "2"; Some "50.00" ] ]
                   "the view reevaluates its stored SELECT"
 
+          testCase "view definitions reject user and system variables"
+          <| fun _ ->
+              let store = setup ()
+
+              [ "CREATE VIEW user_variable AS SELECT @value"
+                "CREATE VIEW system_variable AS SELECT @@max_connections" ]
+              |> List.iter (fun sql ->
+                  match run store sql with
+                  | Err(1351, "View's SELECT contains a variable or parameter") -> ()
+                  | other -> failtestf "expected view variable rejection, got %A" other)
+
           testCase "explicit view columns, nested views, replacement, and drop work"
           <| fun _ ->
               let store = setup ()

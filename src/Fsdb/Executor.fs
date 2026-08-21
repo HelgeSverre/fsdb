@@ -26,6 +26,11 @@ type QueryResult =
 /// into `Err` the same way.
 type private EvalError = int * string
 
+type VariableContext =
+    { UserVariables: Map<string, Value> ref
+      ReadSystemVariable: string -> string -> Result<string option, int * string>
+      MaxUserVariables: int }
+
 /// Per-statement memo of derived-table (`FROM (SELECT ...)`) resolutions,
 /// keyed by the AST node's identity. Within one statement the same derived
 /// table is resolved by the executor *and* by the collation/fsp metadata
@@ -53,6 +58,28 @@ let private cteScope = System.Threading.AsyncLocal<Map<string, ColumnDef list * 
 let private cteRecursionDepth = System.Threading.AsyncLocal<int64 option>()
 let private groupConcatMaxLen = System.Threading.AsyncLocal<int option>()
 let private viewStack = System.Threading.AsyncLocal<Set<string * string>>()
+let private variableContext = System.Threading.AsyncLocal<VariableContext option>()
+let private suppressVariableAssignments = System.Threading.AsyncLocal<bool>()
+
+let withVariableContext (variables: VariableContext) (body: unit -> 'a) : 'a =
+    let saved = variableContext.Value
+
+    try
+        variableContext.Value <- Some variables
+        body ()
+    finally
+        variableContext.Value <- saved
+
+let private currentVariableContext () = variableContext.Value
+
+let private withSuppressedVariableAssignments (body: unit -> 'a) : 'a =
+    let saved = suppressVariableAssignments.Value
+
+    try
+        suppressVariableAssignments.Value <- true
+        body ()
+    finally
+        suppressVariableAssignments.Value <- saved
 
 type private StoredView =
     { Name: string
@@ -253,6 +280,7 @@ let rec private containsAggregate (registry: Registry) (expr: Expr) : bool =
     | MatchAgainst(_, q, _) -> containsAggregate registry q
     | FuncCall(_, args) -> isAggregateCall registry expr || args |> List.exists (containsAggregate registry)
     | BinOp(_, a, b) -> containsAggregate registry a || containsAggregate registry b
+    | AssignUserVariable(_, value) -> containsAggregate registry value
     | Not e
     | IsNull e
     | IsNotNull e
@@ -271,6 +299,8 @@ let rec private containsAggregate (registry: Registry) (expr: Expr) : bool =
         || whens |> List.exists (fun (c, r) -> containsAggregate registry c || containsAggregate registry r)
         || (elseBranch |> Option.map (containsAggregate registry) |> Option.defaultValue false)
     | Lit _
+    | UserVariable _
+    | SystemVariable _
     | Col _
     | QualifiedCol _
     | Star _
@@ -297,6 +327,7 @@ let rec private collectWindowFuncs (expr: Expr) : Expr list =
     | WindowOver _ -> [ expr ]
     | FuncCall(_, args) -> args |> List.collect collectWindowFuncs
     | BinOp(_, a, b) -> collectWindowFuncs a @ collectWindowFuncs b
+    | AssignUserVariable(_, value) -> collectWindowFuncs value
     | Not e
     | IsNull e
     | IsNotNull e
@@ -315,6 +346,8 @@ let rec private collectWindowFuncs (expr: Expr) : Expr list =
         @ (whens |> List.collect (fun (c, r) -> collectWindowFuncs c @ collectWindowFuncs r))
         @ (elseBranch |> Option.map collectWindowFuncs |> Option.defaultValue [])
     | Lit _
+    | UserVariable _
+    | SystemVariable _
     | Col _
     | QualifiedCol _
     | Star _
@@ -337,6 +370,7 @@ let rec private collectAggregateCalls (registry: Registry) (expr: Expr) : Expr l
     | MatchAgainst(_, q, _) -> recur q
     | FuncCall(_, args) -> args |> List.collect recur
     | BinOp(_, a, b) -> recur a @ recur b
+    | AssignUserVariable(_, value) -> recur value
     | Not e
     | IsNull e
     | IsNotNull e
@@ -355,6 +389,8 @@ let rec private collectAggregateCalls (registry: Registry) (expr: Expr) : Expr l
         @ (whens |> List.collect (fun (c, r) -> recur c @ recur r))
         @ (elseBranch |> Option.map recur |> Option.defaultValue [])
     | Placeholder _
+    | UserVariable _
+    | SystemVariable _
     | Lit _
     | Col _
     | QualifiedCol _
@@ -397,6 +433,7 @@ let rec private collectCallsNamed (name: string) (expr: Expr) : Expr list =
     | MatchAgainst(_, q, _) -> recur q
     | FuncCall(_, args) -> args |> List.collect recur
     | BinOp(_, a, b) -> recur a @ recur b
+    | AssignUserVariable(_, value) -> recur value
     | Not e
     | IsNull e
     | IsNotNull e
@@ -415,6 +452,8 @@ let rec private collectCallsNamed (name: string) (expr: Expr) : Expr list =
         @ (whens |> List.collect (fun (c, r) -> recur c @ recur r))
         @ (elseBranch |> Option.map recur |> Option.defaultValue [])
     | Placeholder _
+    | UserVariable _
+    | SystemVariable _
     | Lit _
     | Col _
     | QualifiedCol _
@@ -476,6 +515,7 @@ let rec private collectMatchAgainst (expr: Expr) : Expr list =
     | MatchAgainst _ -> [ expr ]
     | FuncCall(_, args) -> args |> List.collect collectMatchAgainst
     | BinOp(_, a, b) -> collectMatchAgainst a @ collectMatchAgainst b
+    | AssignUserVariable(_, value) -> collectMatchAgainst value
     | Not e
     | IsNull e
     | IsNotNull e
@@ -494,6 +534,8 @@ let rec private collectMatchAgainst (expr: Expr) : Expr list =
         @ (whens |> List.collect (fun (c, r) -> collectMatchAgainst c @ collectMatchAgainst r))
         @ (elseBranch |> Option.map collectMatchAgainst |> Option.defaultValue [])
     | Placeholder _
+    | UserVariable _
+    | SystemVariable _
     | Lit _
     | Col _
     | QualifiedCol _
@@ -510,6 +552,7 @@ let rec private collectColRefs (expr: Expr) : string list =
     | WindowOver _ -> []
     | FuncCall(_, args) -> args |> List.collect collectColRefs
     | BinOp(_, a, b) -> collectColRefs a @ collectColRefs b
+    | AssignUserVariable(_, value) -> collectColRefs value
     | Not e
     | IsNull e
     | IsNotNull e
@@ -529,6 +572,8 @@ let rec private collectColRefs (expr: Expr) : string list =
         @ (elseBranch |> Option.map collectColRefs |> Option.defaultValue [])
     | Lit _
     | Placeholder _
+    | UserVariable _
+    | SystemVariable _
     | QualifiedCol _
     | Star _
     | Exists _
@@ -551,6 +596,7 @@ let rec private firstColumnRef (expr: Expr) : Expr option =
     | MatchAgainst(cols, q, _) -> cols |> List.map Col |> List.tryHead |> Option.orElseWith (fun () -> firstColumnRef q)
     | FuncCall(_, args) -> first args
     | BinOp(_, a, b) -> first [ a; b ]
+    | AssignUserVariable(_, value) -> firstColumnRef value
     | Not e
     | IsNull e
     | IsNotNull e
@@ -572,6 +618,8 @@ let rec private firstColumnRef (expr: Expr) : Expr option =
         )
     | Lit _
     | Placeholder _
+    | UserVariable _
+    | SystemVariable _
     | Star _
     | Exists _
     | Subquery _
@@ -592,9 +640,12 @@ let rec private substituteExprs (replacements: (Expr * Expr) list) (expr: Expr) 
 
         match expr with
         | Placeholder _ -> expr
+        | UserVariable _
+        | SystemVariable _ -> expr
         | MatchAgainst(cols, q, mode) -> MatchAgainst(cols, sub q, mode)
         | FuncCall(name, args) -> FuncCall(name, args |> List.map sub)
         | BinOp(op, a, b) -> BinOp(op, sub a, sub b)
+        | AssignUserVariable(name, value) -> AssignUserVariable(name, sub value)
         | Not e -> Not(sub e)
         | IsNull e -> IsNull(sub e)
         | IsNotNull e -> IsNotNull(sub e)
@@ -660,6 +711,9 @@ let rec private exprLabel (expr: Expr) : string =
     | Lit v -> v |> toText |> Option.defaultValue "NULL"
     | MatchAgainst(cols, q, _) -> sprintf "match (%s) against (%s)" (String.concat "," cols) (exprLabel q)
     | Placeholder _ -> "?"
+    | UserVariable variable -> "@" + variable
+    | SystemVariable(scope, variable) -> "@@" + (scope |> Option.map (fun value -> value.ToLowerInvariant() + ".") |> Option.defaultValue "") + variable
+    | AssignUserVariable(variable, value) -> "@" + variable + ":=" + exprLabel value
     | Col name -> name
     | QualifiedCol(_, col) -> col
     | FuncCall(name, [ Lit(VString label); _ ]) when name.Equals("NAME_CONST", System.StringComparison.OrdinalIgnoreCase) -> label
@@ -1108,6 +1162,13 @@ let rec private metadataOfExpr (ctx: EvalContext) (expr: Expr) : ColumnMetadata 
     | Lit(VDate _) -> simple TypeDate |> Option.map (fun metadata -> { metadata with Flags = NotNullFlag })
     | Lit(VDateTime _) -> simple TypeDateTime |> Option.map (fun metadata -> { metadata with Flags = NotNullFlag })
     | Lit(VJson _) -> simple TypeVarString |> Option.map (fun metadata -> { metadata with Flags = NotNullFlag })
+    | UserVariable name ->
+        currentVariableContext ()
+        |> Option.bind (fun bindings -> bindings.UserVariables.Value |> Map.tryFind (name.ToLowerInvariant()))
+        |> Option.bind (fun value -> metadataOfExpr ctx (Lit value))
+        |> Option.orElse (simple TypeVarString)
+    | SystemVariable _ -> simple TypeVarString
+    | AssignUserVariable(_, value) -> metadataOfExpr ctx value
     | Col _
     | QualifiedCol _ -> tryColumnDefForExpr ctx expr |> Option.map ColumnWire.metadataOfColumn
     | BinOp((And | Or | Xor | Eq | Neq | Lt | Lte | Gt | Gte | NullSafeEq), _, _)
@@ -1886,6 +1947,29 @@ let rec private evalExpr (ctx: EvalContext) (expr: Expr) : Result<Value, EvalErr
     | WindowOver _ -> Error(1054, "Invalid use of a group function")
     | Col name -> resolveCol ctx name
     | QualifiedCol(table, col) -> resolveQualifiedCol ctx table col
+    | UserVariable variable ->
+        currentVariableContext ()
+        |> Option.bind (fun bindings -> bindings.UserVariables.Value |> Map.tryFind (variable.ToLowerInvariant()))
+        |> Option.defaultValue VNull
+        |> Ok
+    | SystemVariable(scope, variable) ->
+        match currentVariableContext () with
+        | Some bindings -> bindings.ReadSystemVariable (scope |> Option.defaultValue "") variable |> Result.map (Option.map VString >> Option.defaultValue VNull)
+        | None -> Error(1193, sprintf "Unknown system variable '%s'" variable)
+    | AssignUserVariable(variable, value) ->
+        eval value
+        |> Result.bind (fun evaluated ->
+            match currentVariableContext () with
+            | None -> Error(1105, "User-defined variables require a session")
+            | Some _ when suppressVariableAssignments.Value -> Ok evaluated
+            | Some bindings ->
+                let name = variable.ToLowerInvariant()
+
+                if Map.containsKey name bindings.UserVariables.Value || bindings.UserVariables.Value.Count < bindings.MaxUserVariables then
+                    bindings.UserVariables.Value <- Map.add name evaluated bindings.UserVariables.Value
+                    Ok evaluated
+                else
+                    Error(1105, "Too many user-defined variables"))
     | Not e -> eval e |> Result.map (fun v -> truthy v |> Option.map (not >> boolToValue) |> Option.defaultValue VNull)
     | IsNull e -> eval e |> Result.map (function VNull -> VInt 1L | _ -> VInt 0L)
     | IsNotNull e -> eval e |> Result.map (function VNull -> VInt 0L | _ -> VInt 1L)
@@ -3698,11 +3782,14 @@ and private rewriteCoalescedCols (map: Map<string, Expr>) (expr: Expr) : Expr =
         | None -> expr
     | QualifiedCol _
     | Lit _
+    | UserVariable _
+    | SystemVariable _
     | Star _
     | Exists _
     | Subquery _
     | WindowOver _ -> expr
     | BinOp(op, a, b) -> BinOp(op, sub a, sub b)
+    | AssignUserVariable(name, value) -> AssignUserVariable(name, sub value)
     | Not e -> Not(sub e)
     | IsNull e -> IsNull(sub e)
     | IsNotNull e -> IsNotNull(sub e)
@@ -4738,10 +4825,13 @@ and private rewriteAggregates
 
     match expr with
     | Placeholder _ -> Ok expr
+    | UserVariable _
+    | SystemVariable _ -> Ok expr
     | MatchAgainst(cols, q, mode) -> sub q |> Result.map (fun q2 -> MatchAgainst(cols, q2, mode))
     | FuncCall(name, args) when isAggregateCall registry expr -> evalAggregate registry ctxFor rows name args |> Result.map Lit
     | FuncCall(name, args) -> args |> traverse sub |> Result.map (fun args' -> FuncCall(name, args'))
     | BinOp(op, a, b) -> sub a |> Result.bind (fun a' -> sub b |> Result.map (fun b' -> BinOp(op, a', b')))
+    | AssignUserVariable(name, value) -> sub value |> Result.map (fun value' -> AssignUserVariable(name, value'))
     | Not e -> sub e |> Result.map Not
     | IsNull e -> sub e |> Result.map IsNull
     | IsNotNull e -> sub e |> Result.map IsNotNull
@@ -4841,10 +4931,13 @@ and private resolveHavingRef (columnIndex: Map<string, int list>) (projections: 
 
     match expr with
     | Placeholder _ -> Ok expr
+    | UserVariable _
+    | SystemVariable _ -> Ok expr
     | MatchAgainst(cols, q, mode) -> sub q |> Result.map (fun q2 -> MatchAgainst(cols, q2, mode))
     | Col name -> resolveGroupOrHavingCol columnIndex projections name
     | FuncCall(name, args) -> args |> traverse sub |> Result.map (fun args' -> FuncCall(name, args'))
     | BinOp(op, a, b) -> sub a |> Result.bind (fun a' -> sub b |> Result.map (fun b' -> BinOp(op, a', b')))
+    | AssignUserVariable(name, value) -> sub value |> Result.map (fun value' -> AssignUserVariable(name, value'))
     | Not e -> sub e |> Result.map Not
     | IsNull e -> sub e |> Result.map IsNull
     | IsNotNull e -> sub e |> Result.map IsNotNull
@@ -6282,9 +6375,11 @@ and private runSelect
 
     let probe = probeRow columns
 
-    match matches probe
-          |> Result.bind (fun _ -> projectRow probe)
-          |> Result.bind (fun outputCols -> orderKeysOf probe outputCols |> Result.map (fun _ -> outputCols)) with
+    match
+        withSuppressedVariableAssignments (fun () ->
+            matches probe
+            |> Result.bind (fun _ -> projectRow probe)
+            |> Result.bind (fun outputCols -> orderKeysOf probe outputCols |> Result.map (fun _ -> outputCols))) with
     | Error(code, message) -> Err(code, message), [], []
     | Ok probeProjection when limit = Some 0 ->
         // `LIMIT 0` is the standard "column metadata, no rows" probe
@@ -6421,6 +6516,10 @@ and private runSelect
 /// assumption every other `scan`-then-mutate call site here already makes).
 let private referenceSet (rows: Value[] list) : System.Collections.Generic.HashSet<Value[]> =
     System.Collections.Generic.HashSet<Value[]>(rows, HashIdentity.Reference)
+
+let evaluateExpression (store: Store) (registry: Registry) (dbName: string) (expression: Expr) : Result<Value, QueryResult> =
+    let context = contextFactory store registry dbName Map.empty Map.empty None [||]
+    evalExpr context expression |> Result.mapError Err
 
 /// The physical rows a single-table `UPDATE`/`DELETE` actually mutates:
 /// every row `matches` (the `WHERE`, or everything when there's none),
@@ -6665,9 +6764,12 @@ let rec private rewriteExprWith (rw: Expr -> Expr option) (expr: Expr) : Expr =
 
     match expr with
     | Placeholder _ -> expr
+    | UserVariable _
+    | SystemVariable _ -> expr
     | MatchAgainst(cols, q, mode) -> MatchAgainst(cols, sub q, mode)
     | FuncCall(name, args) -> FuncCall(name, args |> List.map sub)
     | BinOp(op, a, b) -> BinOp(op, sub a, sub b)
+    | AssignUserVariable(name, value) -> AssignUserVariable(name, sub value)
     | Not e -> Not(sub e)
     | IsNull e -> IsNull(sub e)
     | IsNotNull e -> IsNotNull(sub e)
@@ -6784,11 +6886,14 @@ type private ExplainRow =
 let rec private collectSubqueries (expr: Expr) : SelectStmt list =
     match expr with
     | Placeholder _ -> []
+    | UserVariable _
+    | SystemVariable _ -> []
     | MatchAgainst(_, q, _) -> collectSubqueries q
     | Exists s
     | Subquery s -> [ s ]
     | InSubquery(e, s) -> collectSubqueries e @ [ s ]
     | BinOp(_, a, b) -> collectSubqueries a @ collectSubqueries b
+    | AssignUserVariable(_, value) -> collectSubqueries value
     | Not e
     | IsNull e
     | IsNotNull e
@@ -6808,6 +6913,8 @@ let rec private collectSubqueries (expr: Expr) : SelectStmt list =
         @ (elseBranch |> Option.map collectSubqueries |> Option.defaultValue [])
     | FuncCall(_, args) -> args |> List.collect collectSubqueries
     | Lit _
+    | UserVariable _
+    | SystemVariable _
     | Col _
     | QualifiedCol _
     | Star _
@@ -6854,6 +6961,7 @@ let private isCorrelated (sub: SelectStmt) : bool =
         | Subquery _ -> false
         | InSubquery(e, _) -> references e
         | BinOp(_, a, b) -> references a || references b
+        | AssignUserVariable(_, value) -> references value
         | Not e
         | IsNull e
         | IsNotNull e
@@ -6873,6 +6981,8 @@ let private isCorrelated (sub: SelectStmt) : bool =
             || (elseBranch |> Option.map references |> Option.defaultValue false)
         | FuncCall(_, args) -> args |> List.exists references
         | Lit _
+        | UserVariable _
+        | SystemVariable _
         | Col _
         | Star _
         | WindowOver _ -> false
@@ -7432,6 +7542,84 @@ let private rejectDirectOnlyGenerated (registry: Registry) (columns: Ast.ColumnD
     |> List.tryPick (fun c -> c.Generated |> Option.bind (fun (e, _) -> firstDirectOnlyCall registry e |> Option.map (fun _ -> c.Name)))
     |> Option.map (fun col -> Err(3102, sprintf "Expression of generated column '%s' contains a disallowed function." col))
 
+let rec private containsSessionVariable (expression: Expr) : bool =
+    let any expressions = expressions |> List.exists containsSessionVariable
+
+    match expression with
+    | UserVariable _
+    | SystemVariable _
+    | AssignUserVariable _ -> true
+    | Exists select
+    | Subquery select -> selectContainsSessionVariable select
+    | InSubquery(value, select) -> containsSessionVariable value || selectContainsSessionVariable select
+    | MatchAgainst(_, query, _) -> containsSessionVariable query
+    | WindowOver(functions, over) -> any (windowFnExprs functions @ overExprs over)
+    | BinOp(_, left, right) -> any [ left; right ]
+    | Not value
+    | IsNull value
+    | IsNotNull value
+    | IsTrue value
+    | IsFalse value
+    | Distinct value
+    | OrderBy(value, _)
+    | Cast(value, _)
+    | Collate(value, _) -> containsSessionVariable value
+    | Like(value, pattern, _, _)
+    | Regexp(value, pattern) -> any [ value; pattern ]
+    | In(value, candidates) -> any (value :: candidates)
+    | Between(value, lower, upper) -> any [ value; lower; upper ]
+    | FuncCall(_, arguments) -> any arguments
+    | Case(subject, branches, otherwise) ->
+        any (Option.toList subject @ (branches |> List.collect (fun (condition, result) -> [ condition; result ])) @ Option.toList otherwise)
+    | Placeholder _
+    | Col _
+    | QualifiedCol _
+    | Star _
+    | Lit _ -> false
+
+and private selectContainsSessionVariable (select: SelectStmt) : bool =
+    let fromContainsSessionVariable =
+        function
+        | FromTable _ -> false
+        | FromSubquery(body, _)
+        | FromLateral(body, _) -> selectOrUnionContainsSessionVariable body
+        | FromJsonTable(source, _, _, _) -> containsSessionVariable source
+
+    (select.Projections |> List.exists (fst >> containsSessionVariable))
+    || (select.From |> Option.exists fromContainsSessionVariable)
+    || (select.Joins |> List.exists (fun join -> fromContainsSessionVariable join.Table || containsSessionVariable join.On))
+    || (select.Where |> Option.exists containsSessionVariable)
+    || (select.GroupBy |> List.exists containsSessionVariable)
+    || (select.Windows
+        |> List.exists (fun (_, spec) -> overExprs (OverSpec spec) |> List.exists containsSessionVariable))
+    || (select.Ctes |> List.exists (fun cte -> selectOrUnionContainsSessionVariable cte.Body))
+    || (select.Having |> Option.exists containsSessionVariable)
+    || (select.OrderBy |> List.exists (fst >> containsSessionVariable))
+    || (select.Limit |> Option.exists containsSessionVariable)
+    || (select.Offset |> Option.exists containsSessionVariable)
+
+and private selectOrUnionContainsSessionVariable (body: SelectOrUnion) : bool =
+    match body with
+    | PlainSelect select -> selectContainsSessionVariable select
+    | UnionSelect(first, rest, orderBy, limit, offset) ->
+        selectContainsSessionVariable first
+        || (rest |> List.exists (snd >> selectContainsSessionVariable))
+        || (orderBy |> List.exists (fst >> containsSessionVariable))
+        || (limit |> Option.exists containsSessionVariable)
+        || (offset |> Option.exists containsSessionVariable)
+
+let private rejectSessionVariablesInGenerated (columns: Ast.ColumnDef list) : QueryResult option =
+    columns
+    |> List.tryPick (fun column -> column.Generated |> Option.bind (fun (expression, _) -> if containsSessionVariable expression then Some column.Name else None))
+    |> Option.map (fun column -> Err(3772, sprintf "Default value expression of column '%s' cannot refer user or system variables." column))
+
+let private viewContainsSessionVariable =
+    function
+    | Select select -> selectContainsSessionVariable select
+    | Union(first, rest, orderBy, limit, offset) ->
+        selectOrUnionContainsSessionVariable (UnionSelect(first, rest, orderBy, limit, offset))
+    | _ -> false
+
 let rec private checkColumnReferences (expression: Expr) : (string option * string) list =
     let many expressions = expressions |> List.collect checkColumnReferences
 
@@ -7439,6 +7627,7 @@ let rec private checkColumnReferences (expression: Expr) : (string option * stri
     | Col column -> [ None, column ]
     | QualifiedCol(table, column) -> [ Some table, column ]
     | BinOp(_, left, right) -> many [ left; right ]
+    | AssignUserVariable(_, value) -> checkColumnReferences value
     | Not value
     | IsNull value
     | IsNotNull value
@@ -7458,6 +7647,8 @@ let rec private checkColumnReferences (expression: Expr) : (string option * stri
     | MatchAgainst(columns, query, _) -> (columns |> List.map (fun column -> None, column)) @ checkColumnReferences query
     | InSubquery(value, _) -> checkColumnReferences value
     | Placeholder _
+    | UserVariable _
+    | SystemVariable _
     | WindowOver _
     | Star _
     | Exists _
@@ -7484,6 +7675,7 @@ let rec private firstDisallowedCheckFunction (registry: Registry) (expression: E
             | Some extension when extension.DirectOnly || not extension.Deterministic -> Some name
             | _ -> first arguments
     | BinOp(_, left, right) -> first [ left; right ]
+    | AssignUserVariable(_, value) -> firstDisallowedCheckFunction registry value
     | Not value
     | IsNull value
     | IsNotNull value
@@ -7511,6 +7703,9 @@ let rec private firstDisallowedCheckShape (expression: Expr) : string option =
     | WindowOver _ -> Some "window function"
     | Star _ -> Some "wildcard"
     | MatchAgainst _ -> Some "full-text expression"
+    | UserVariable _
+    | SystemVariable _
+    | AssignUserVariable _ -> Some "session variable"
     | Distinct _
     | OrderBy _ -> Some "aggregate modifier"
     | Exists _
@@ -8165,9 +8360,10 @@ let rec execute (store: Store) (registry: Registry) (dbName: string) (ids: int64
         | Some _ when ifNotExists -> ids, Affected 0UL
         | Some _ -> ids, storageErr (TableExists name)
         | None ->
-            match rejectDirectOnlyGenerated registry columns with
-            | Some err -> ids, err
-            | None ->
+            match rejectDirectOnlyGenerated registry columns, rejectSessionVariablesInGenerated columns with
+            | Some err, _
+            | _, Some err -> ids, err
+            | None, None ->
                 let alreadyExists = scan store db name |> Result.isOk
 
                 if alreadyExists && ifNotExists then
@@ -8241,10 +8437,11 @@ let rec execute (store: Store) (registry: Registry) (dbName: string) (ids: int64
                 | ChangeColumn(_, c, _) -> Some c
                 | _ -> None)
 
-        match unsupportedEngine, rejectDirectOnlyGenerated registry addedColumns with
-        | Some engine, _ -> ids, Err(1286, sprintf "Unknown storage engine '%s'" engine)
-        | None, Some err -> ids, err
-        | None, None ->
+        match unsupportedEngine, rejectDirectOnlyGenerated registry addedColumns, rejectSessionVariablesInGenerated addedColumns with
+        | Some engine, _, _ -> ids, Err(1286, sprintf "Unknown storage engine '%s'" engine)
+        | None, Some err, _
+        | None, _, Some err -> ids, err
+        | None, None, None ->
             let baseCatalog = store.Catalog
             let snapshot = Storage.beginTransactionSnapshot store
             Storage.setStrictMode snapshot store.StrictMode
@@ -8602,46 +8799,49 @@ let rec execute (store: Store) (registry: Registry) (dbName: string) (ids: int64
         | Result.Error message, _, _ -> ids, Err(1064, sprintf "View definition has a syntax error: %s" message)
         | _, false, _ -> ids, storageErr (NoSuchDatabase db)
         | _, _, Some(column, _) -> ids, Err(1060, sprintf "Duplicate column name '%s'" column)
-        | Result.Ok((Select _ | Union _) as _select), true, None ->
-            let existing = tryStoredView store db viewName
-
-            if baseObjectExists || virtualObjectExists || (existing.IsSome && not orReplace) then
-                ids, Err(1050, sprintf "Table '%s' already exists" viewName)
+        | Result.Ok((Select _ | Union _) as view), true, None ->
+            if viewContainsSessionVariable view then
+                ids, Err(1351, "View's SELECT contains a variable or parameter")
             else
-                let removeExisting () =
-                    match existing with
-                    | None -> Ok 0
-                    | Some _ ->
-                        deleteRows
-                            store
-                            "mysql"
-                            "views"
-                            (fun row ->
-                                let text i = toText row.[i] |> Option.defaultValue ""
+                let existing = tryStoredView store db viewName
 
-                                Ok(
-                                    System.String.Equals(text 0, viewName, System.StringComparison.OrdinalIgnoreCase)
-                                    && System.String.Equals(text 1, db, System.StringComparison.OrdinalIgnoreCase)
-                                ))
+                if baseObjectExists || virtualObjectExists || (existing.IsSome && not orReplace) then
+                    ids, Err(1050, sprintf "Table '%s' already exists" viewName)
+                else
+                    let removeExisting () =
+                        match existing with
+                        | None -> Ok 0
+                        | Some _ ->
+                            deleteRows
+                                store
+                                "mysql"
+                                "views"
+                                (fun row ->
+                                    let text i = toText row.[i] |> Option.defaultValue ""
 
-                match removeExisting () with
-                | Error error -> ids, storageErr error
-                | Ok _ ->
-                    match
-                        insertRows
-                            store
-                            "mysql"
-                            "views"
-                            (Some [ "view_name"; "view_schema"; "view_definition"; "column_names"; "created"; "definer" ])
-                            [ [ VString viewName
-                                VString db
-                                VString definition
-                                VString(JsonSerializer.Serialize(columns |> List.toArray))
-                                VDateTime System.DateTime.Now
-                                VString(store.SessionUser + "@%") ] ]
-                    with
-                    | Ok _ -> ids, Affected 0UL
+                                    Ok(
+                                        System.String.Equals(text 0, viewName, System.StringComparison.OrdinalIgnoreCase)
+                                        && System.String.Equals(text 1, db, System.StringComparison.OrdinalIgnoreCase)
+                                    ))
+
+                    match removeExisting () with
                     | Error error -> ids, storageErr error
+                    | Ok _ ->
+                        match
+                            insertRows
+                                store
+                                "mysql"
+                                "views"
+                                (Some [ "view_name"; "view_schema"; "view_definition"; "column_names"; "created"; "definer" ])
+                                [ [ VString viewName
+                                    VString db
+                                    VString definition
+                                    VString(JsonSerializer.Serialize(columns |> List.toArray))
+                                    VDateTime System.DateTime.Now
+                                    VString(store.SessionUser + "@%") ] ]
+                        with
+                        | Ok _ -> ids, Affected 0UL
+                        | Error error -> ids, storageErr error
         | Result.Ok _, true, None -> ids, Err(1347, sprintf "'%s.%s' is not VIEW" db viewName)
 
     | DropView(names, ifExists) ->

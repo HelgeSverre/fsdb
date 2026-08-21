@@ -154,19 +154,9 @@ let valueToSqlLiteral (v: Value) : string =
     | VString _
     | VJson _ -> "'" + escapeSqlString (v |> toText |> Option.defaultValue "") + "'"
 
-/// Matches `@@var` (system, optionally `session.`/`global.`-qualified) or
-/// `@var` (user-defined), optionally aliased, optionally followed by a
-/// trailing `LIMIT n` (mysql CLI probes `@@version_comment` this way at
-/// connect time). Group 1 is the sigil (`"@"` or `"@@"`); group 2 the
-/// `SESSION.`/`GLOBAL.` qualifier (empty for neither) — `resolveAtRef`
-/// below is the only place that branches on either.
-let private atVarItem =
-    Regex(@"^(@@?)(SESSION\.|GLOBAL\.)?(\w+)(?:\s+AS\s+(\S+))?(?:\s+LIMIT\s+\d+)?$", RegexOptions.IgnoreCase)
-
-/// Whether a matched scope prefix means GLOBAL — `Contains`, not
-/// `StartsWith`: `atVarItem`'s scope group is bare (`"GLOBAL."`) but
-/// `setVar`'s includes the `@@` sigil (`"@@GLOBAL."`), so the literal
-/// "GLOBAL" can start at either position 0 or 2.
+/// Whether a scope prefix means GLOBAL. The SET grammar includes the `@@`
+/// sigil while expression parsing keeps it separate, so GLOBAL can begin at
+/// either position.
 let private isGlobalScope (scope: string) : bool =
     scope.IndexOf("GLOBAL", StringComparison.OrdinalIgnoreCase) >= 0
 
@@ -188,7 +178,7 @@ let private lookupAtRef (session: Session) (sigil: string) (scope: string) (name
         else
             lookupVar session name
     else
-        Some(session.UserVariables |> Map.tryFind (name.ToLowerInvariant()) |> Option.flatten)
+        Some(session.UserVariables |> Map.tryFind name |> Option.bind toText)
 
 /// Resolves one `@@name`/`@name` reference to its current value. A system
 /// variable (`@@`) is looked up in `Session.Variables` (or the store's
@@ -199,44 +189,57 @@ let private lookupAtRef (session: Session) (sigil: string) (scope: string) (name
 let private resolveAtRef (session: Session) (sigil: string) (scope: string) (name: string) : string option =
     lookupAtRef session sigil scope name |> Option.flatten
 
-/// `SELECT @@version`, `SELECT @foo`, `SELECT @@version AS v, @foo` etc.
-/// A referenced *system* variable that isn't known is a loud 1193
-/// ER_UNKNOWN_SYSTEM_VARIABLE, matching real MySQL — but a *user* variable
-/// is never "unknown" in real MySQL (any `@name` is legal); one that was
-/// never `SET` just reads back as NULL, same as `resolveAtRef` above
-/// already gives an unset one.
-let private handleAtVarSelect (session: Session) (sql: string) : QueryResult =
-    let exprs = sql.Substring("SELECT".Length).Trim()
-    let items = exprs.Split(',') |> Array.map (fun s -> s.Trim())
-    let parsed = items |> Array.map atVarItem.Match
+let private maxUserVariables = 65536
 
-    if parsed |> Array.forall (fun m -> m.Success) then
-        let unknownSysVar =
-            parsed
-            |> Array.tryFind (fun m ->
-                m.Groups.[1].Value = "@@"
-                && lookupAtRef session m.Groups.[1].Value m.Groups.[2].Value m.Groups.[3].Value |> Option.isNone)
+let private expressionVariablesFor (session: Session) (userVariables: Map<string, Value>) : Executor.VariableContext =
+    { UserVariables = ref userVariables
+      ReadSystemVariable =
+        fun scope name ->
+            match lookupAtRef session "@@" scope name with
+            | Some value -> Ok value
+            | None -> Error(1193, sprintf "Unknown system variable '%s'" name)
+      MaxUserVariables = maxUserVariables }
 
-        match unknownSysVar with
-        | Some m -> Err(1193, sprintf "Unknown system variable '%s'" m.Groups.[3].Value)
-        | None ->
-            let cols =
-                parsed
-                |> Array.map (fun m ->
-                    if m.Groups.[4].Success then
-                        m.Groups.[4].Value
-                    else
-                        m.Groups.[1].Value + m.Groups.[2].Value + m.Groups.[3].Value)
-                |> Array.toList
+let private expressionVariables (session: Session) = expressionVariablesFor session session.UserVariables
 
-            let vals =
-                parsed
-                |> Array.map (fun m -> resolveAtRef session m.Groups.[1].Value m.Groups.[2].Value m.Groups.[3].Value)
-                |> Array.toList
+let private registryFor (session: Session) : Functions.Registry =
+    let collapseExtension name (extension: Functions.ScalarFunction) registry =
+        let invoke args =
+            let context: Functions.QueryContext =
+                { Database = session.Database
+                  User = session.User
+                  Cancellation = Storage.queryCancellation.Value }
 
-            ResultSet(cols, [ vals ])
-    else
-        syntaxError sql
+            extension.Fn context args
+
+        Functions.registerScalar name invoke registry
+
+    let registry =
+        session.CustomFunctions.Scalars
+        |> Map.fold (fun current name fn -> Functions.registerScalar name fn current) Functions.builtins
+        |> fun current ->
+            session.CustomFunctions.Aggregates
+            |> Map.fold (fun registry name fn -> Functions.registerAggregate name fn registry) current
+        |> fun current ->
+            session.CustomFunctions.Extensions
+            |> Map.fold (fun registry name extension -> collapseExtension name extension registry) current
+        |> fun current -> { current with Extensions = session.CustomFunctions.Extensions }
+
+    let database _ = session.Database |> Option.map VString |> Option.defaultValue VNull
+
+    registry
+    |> Functions.registerScalar "DATABASE" database
+    |> Functions.registerScalar "SCHEMA" database
+    |> Functions.registerScalar "LAST_INSERT_ID" (fun _ -> VInt session.LastGeneratedId)
+    |> Functions.registerScalar "ROW_COUNT" (fun _ -> VInt session.LastRowCount)
+    |> Functions.registerScalar "FOUND_ROWS" (fun _ -> VUInt session.FoundRows)
+    |> Functions.registerScalar
+        "VERSION"
+        (fun _ -> lookupVar session "version" |> Option.flatten |> Option.map VString |> Option.defaultValue VNull)
+    |> Functions.registerScalar "CONNECTION_ID" (fun _ -> VInt(int64 session.ConnectionId))
+    |> Functions.registerScalar "CURRENT_USER" (fun _ -> VString(session.User + "@%"))
+    |> Functions.registerScalar "USER" (fun _ -> VString(session.User + "@localhost"))
+    |> Functions.registerScalar "SESSION_USER" (fun _ -> VString(session.User + "@localhost"))
 
 let private likeSuffix (sql: string) : string option =
     let m = Regex.Match(sql, @"LIKE\s+'([^']*)'\s*$", RegexOptions.IgnoreCase)
@@ -496,37 +499,57 @@ let private setUserVar = Regex(@"^@(\w+)\s*=\s*(.+)$", RegexOptions.IgnoreCase)
 /// neither `setVar` nor `setUserVar` matched it" error below.
 let private setVarNameForError = Regex(@"^(?:SESSION\s+|GLOBAL\s+)?(\S+?)\s*=", RegexOptions.IgnoreCase)
 
-let private unquote (v: string) =
-    let v = v.Trim()
+let private quotedSetLiteral = Regex("^(['\"])(.*)\\1$", RegexOptions.Singleline)
+let private bareSetIdentifier = Regex("^\\w+$")
 
-    if v.Length >= 2 && (v.StartsWith "'" && v.EndsWith "'" || v.StartsWith "\"" && v.EndsWith "\"") then
-        v.Substring(1, v.Length - 2)
-    else
-        v
-
-/// Resolves a `SET` fragment's right-hand side: a bare `@@sysvar`/`@uservar`
-/// reference reads that variable's current value (via `resolveAtRef`,
-/// shared with `SELECT @@x`/`SELECT @x`), matching real MySQL's
-/// `SET x = @@y` / `SET x = @y` — the mysqldump preamble/postamble idiom of
-/// saving a setting into a user variable and restoring it later
-/// (`SET @OLD_SQL_MODE=@@SQL_MODE` ... `SET SQL_MODE=@OLD_SQL_MODE`) needs
-/// exactly this, not full expression evaluation. A literal `NULL` resolves
-/// to `None` too, same as an unset variable reference — `SET @x = NULL`
-/// must leave `@x` a real SQL NULL, not the four-character string `"NULL"`.
-/// Anything else is a literal, taken unquoted.
-let private resolveSetRhs (session: Session) (rhs: string) : string option =
+let private literalSetRhs (rhs: string) : Value option =
     let rhs = rhs.Trim()
-    let m = atVarItem.Match rhs
+    let quoted = quotedSetLiteral.Match rhs
 
-    if m.Success then
-        resolveAtRef session m.Groups.[1].Value m.Groups.[2].Value m.Groups.[3].Value
-    else if String.Equals(rhs, "NULL", StringComparison.OrdinalIgnoreCase) then
-        // Checked against the raw (still-quoted) rhs: `SET @x = 'NULL'` is
-        // the four-character string, not the NULL literal — only a bare,
-        // unquoted NULL keyword means "no value".
-        None
+    if quoted.Success then
+        // MySQL leaves the final escaped quote's preceding slash in this
+        // SET-specific spelling; Parser's generic string grammar cannot
+        // preserve it.
+        Some(VString quoted.Groups.[2].Value)
+    elif String.Equals(rhs, "NULL", StringComparison.OrdinalIgnoreCase) then
+        Some VNull
     else
-        Some(unquote rhs)
+        None
+
+/// Evaluates a `SET` user-variable right-hand side through the ordinary
+/// expression grammar. A private variable map preserves SET's all-or-
+/// nothing application when a later fragment fails.
+let private resolveUserSetRhs
+    (session: Session)
+    (userVariables: Map<string, Value>)
+    (sql: string)
+    (rhs: string)
+    : Result<Value * Map<string, Value>, QueryResult> =
+    match literalSetRhs rhs with
+    | Some value -> Ok(value, userVariables)
+    | None ->
+        match Parser.parseExpression rhs with
+        | Error _ -> Error(syntaxError sql)
+        | Ok expression ->
+            let variables = expressionVariablesFor session userVariables
+            let store = Session.currentStore session
+            let dbName = session.Database |> Option.defaultValue defaultDatabase
+
+            Executor.withVariableContext variables (fun () ->
+                Executor.evaluateExpression store (registryFor session) dbName expression
+                |> Result.map (fun value -> value, variables.UserVariables.Value))
+
+let private resolveSystemSetRhs
+    (session: Session)
+    (userVariables: Map<string, Value>)
+    (sql: string)
+    (rhs: string)
+    : Result<Value * Map<string, Value>, QueryResult> =
+    match literalSetRhs rhs with
+    | Some value -> Ok(value, userVariables)
+    | None when bareSetIdentifier.IsMatch(rhs.Trim()) -> Ok(VString(rhs.Trim()), userVariables)
+    | None ->
+        resolveUserSetRhs session userVariables sql rhs
 
 /// Whether a `sql_mode` value (comma-separated, as stored in
 /// `Session.Variables`) still contains STRICT_TRANS_TABLES/STRICT_ALL_TABLES
@@ -606,7 +629,7 @@ let private splitSetAssignments (sql: string) : string list =
 type private SetAction =
     | SetNamesAction of charset: string * collation: string option
     | SetVarAction of name: string * value: string option * isGlobal: bool
-    | SetUserVarAction of name: string * value: string option
+    | SetUserVarAction of name: string * value: Value
 
 /// System variables real MySQL accepts an explicit `NULL` for (rather than
 /// the 1231 "can't be set to the value of NULL" every other variable
@@ -616,16 +639,18 @@ let private nullableSystemVars = Set.ofList [ "character_set_results" ]
 
 let private globalOnlyLimitVariables =
     Set.ofList [ "max_allowed_packet"; "max_connections"; "max_prepared_stmt_count"; "net_write_timeout" ]
-let private maxUserVariables = 65536
 
 /// Parses one comma-split fragment into the variable(s) it would assign,
 /// without touching `session`/`Store` — `handleSet` only applies any of
-/// these once every fragment in the statement has parsed. Reads `session`
-/// only to resolve a `@@x`/`@y` right-hand side (`resolveSetRhs`) against
-/// its state *before* this `SET` statement — a later fragment in the same
-/// multi-assignment doesn't see an earlier fragment's not-yet-applied
-/// write, consistent with the whole statement being all-or-nothing below.
-let private parseSetFragment (sql: string) (session: Session) (fragment: string) : Result<SetAction, QueryResult> =
+/// these once every fragment in the statement has parsed. Top-level targets
+/// stay deferred, while nested `:=` assignments become visible to later
+/// right-hand sides.
+let private parseSetFragment
+    (sql: string)
+    (session: Session)
+    (userVariables: Map<string, Value>)
+    (fragment: string)
+    : Result<SetAction * Map<string, Value>, QueryResult> =
     let namesMatch = setNames.Match fragment
 
     if namesMatch.Success then
@@ -639,17 +664,13 @@ let private parseSetFragment (sql: string) (session: Session) (fragment: string)
         // same as the collation_connection assignment path below.
         match explicitCollation |> Option.map Collation.tryFind with
         | Some None -> Error(Err(1273, sprintf "Unknown collation: '%s'" namesMatch.Groups.[2].Value))
-        | _ -> Ok(SetNamesAction(namesMatch.Groups.[1].Value, explicitCollation))
+        | _ -> Ok(SetNamesAction(namesMatch.Groups.[1].Value, explicitCollation), userVariables)
     else
         let userVarMatch = setUserVar.Match fragment
 
         if userVarMatch.Success then
-            Ok(
-                SetUserVarAction(
-                    userVarMatch.Groups.[1].Value.ToLowerInvariant(),
-                    resolveSetRhs session userVarMatch.Groups.[2].Value
-                )
-            )
+            resolveUserSetRhs session userVariables sql userVarMatch.Groups.[2].Value
+            |> Result.map (fun (value, sideEffects) -> SetUserVarAction(userVarMatch.Groups.[1].Value.ToLowerInvariant(), value), sideEffects)
         else
             let varMatch = setVar.Match fragment
 
@@ -660,14 +681,15 @@ let private parseSetFragment (sql: string) (session: Session) (fragment: string)
                 if Session.tryGlobalVariable session.Store name |> Option.isNone then
                     Error(Err(1193, sprintf "Unknown system variable '%s'" name))
                 else
-                    match resolveSetRhs session varMatch.Groups.[3].Value with
-                    | Some value when name = "collation_connection" ->
+                    match resolveSystemSetRhs session userVariables sql varMatch.Groups.[3].Value with
+                    | Error result -> Error result
+                    | Ok(VString value, sideEffects) when name = "collation_connection" ->
                         match Collation.tryFind value with
-                        | Some _ -> Ok(SetVarAction(name, Some value, isGlobal))
+                        | Some _ -> Ok(SetVarAction(name, Some value, isGlobal), sideEffects)
                         | None -> Error(Err(1273, sprintf "Unknown collation: '%s'" value))
-                    | Some value -> Ok(SetVarAction(name, Some value, isGlobal))
-                    | None when nullableSystemVars.Contains name -> Ok(SetVarAction(name, None, isGlobal))
-                    | None -> Error(Err(1231, sprintf "Variable '%s' can't be set to the value of 'NULL'" name))
+                    | Ok(VNull, sideEffects) when nullableSystemVars.Contains name -> Ok(SetVarAction(name, None, isGlobal), sideEffects)
+                    | Ok(VNull, _) -> Error(Err(1231, sprintf "Variable '%s' can't be set to the value of 'NULL'" name))
+                    | Ok(value, sideEffects) -> Ok(SetVarAction(name, toText value, isGlobal), sideEffects)
             else
                 match setVarNameForError.Match fragment with
                 | m when m.Success -> Error(Err(1193, sprintf "Unknown system variable '%s'" m.Groups.[1].Value))
@@ -765,24 +787,33 @@ let private validateSetAction (session: Session) (action: SetAction) : Result<un
 /// effect, same as real MySQL abandoning a multi-assignment `SET` on its
 /// first bad name without acting on the assignments before it.
 let private handleSet (session: Session) (sql: string) : Session * QueryResult =
-    match splitSetAssignments sql |> traverse (parseSetFragment sql session) with
+    let parsed =
+        splitSetAssignments sql
+        |> List.fold
+            (fun state fragment ->
+                state
+                |> Result.bind (fun (actions, sideEffects) ->
+                    parseSetFragment sql session sideEffects fragment
+                    |> Result.map (fun (action, nextSideEffects) -> action :: actions, nextSideEffects)))
+            (Ok([], session.UserVariables))
+
+    match parsed with
     | Error result -> session, result
-    | Ok actions ->
-        let userVariableNames =
+    | Ok(actions, sideEffects) ->
+        let actions = List.rev actions
+
+        let userVariables =
             actions
-            |> List.choose (function SetUserVarAction(name, _) -> Some name | _ -> None)
-            |> Set.ofList
+            |> List.fold (fun variables action -> match action with SetUserVarAction(name, value) -> Map.add name value variables | _ -> variables) sideEffects
 
-        let resultingUserVariableCount =
-            userVariableNames
-            |> Set.fold (fun count name -> if Map.containsKey name session.UserVariables then count else count + 1) session.UserVariables.Count
-
-        if resultingUserVariableCount > maxUserVariables then
+        if userVariables.Count > maxUserVariables then
             session, Err(1105, "Too many user-defined variables")
         else
             match actions |> traverse (validateSetAction session) with
             | Error result -> session, result
-            | Ok _ -> (actions |> List.fold applySetAction session), Affected 0UL
+            | Ok _ ->
+                let updated = actions |> List.fold applySetAction session
+                { updated with UserVariables = userVariables }, Affected 0UL
 
 // ---------------------------------------------------------------------------
 // Transactions: BEGIN/COMMIT/ROLLBACK, SET autocommit, SAVEPOINT. Matched by
@@ -855,45 +886,6 @@ let private setCharacterSet = Regex(@"^SET\s+CHARACTER\s+SET\s+'?(\w+)'?$", Rege
 let private normalizeIsolationLevel (raw: string) : string =
     Regex.Replace(raw.Trim().ToUpperInvariant(), @"\s+", "-")
 
-let private registryFor (session: Session) : Functions.Registry =
-    let collapseExtension name (extension: Functions.ScalarFunction) registry =
-        let invoke args =
-            let context: Functions.QueryContext =
-                { Database = session.Database
-                  User = session.User
-                  Cancellation = Storage.queryCancellation.Value }
-
-            extension.Fn context args
-
-        Functions.registerScalar name invoke registry
-
-    let registry =
-        session.CustomFunctions.Scalars
-        |> Map.fold (fun current name fn -> Functions.registerScalar name fn current) Functions.builtins
-        |> fun current ->
-            session.CustomFunctions.Aggregates
-            |> Map.fold (fun registry name fn -> Functions.registerAggregate name fn registry) current
-        |> fun current ->
-            session.CustomFunctions.Extensions
-            |> Map.fold (fun registry name extension -> collapseExtension name extension registry) current
-        |> fun current -> { current with Extensions = session.CustomFunctions.Extensions }
-
-    let database _ = session.Database |> Option.map VString |> Option.defaultValue VNull
-
-    registry
-    |> Functions.registerScalar "DATABASE" database
-    |> Functions.registerScalar "SCHEMA" database
-    |> Functions.registerScalar "LAST_INSERT_ID" (fun _ -> VInt session.LastGeneratedId)
-    |> Functions.registerScalar "ROW_COUNT" (fun _ -> VInt session.LastRowCount)
-    |> Functions.registerScalar "FOUND_ROWS" (fun _ -> VUInt session.FoundRows)
-    |> Functions.registerScalar
-        "VERSION"
-        (fun _ -> lookupVar session "version" |> Option.flatten |> Option.map VString |> Option.defaultValue VNull)
-    |> Functions.registerScalar "CONNECTION_ID" (fun _ -> VInt(int64 session.ConnectionId))
-    |> Functions.registerScalar "CURRENT_USER" (fun _ -> VString(session.User + "@%"))
-    |> Functions.registerScalar "USER" (fun _ -> VString(session.User + "@localhost"))
-    |> Functions.registerScalar "SESSION_USER" (fun _ -> VString(session.User + "@localhost"))
-
 /// Commits the open transaction (if any) by merging its snapshot catalog
 /// back into the shared store's (`Storage.mergeCatalogInto`, a CAS-safe
 /// three-way merge against whatever the live catalog is *right now* — not a
@@ -906,6 +898,7 @@ let private commitSession (session: Session) : Session =
         let dbName = session.Database |> Option.defaultValue defaultDatabase
         let registry = registryFor session
         let foundRows = session.Capabilities &&& Fsdb.Protocol.ClientFoundRows <> 0u
+        let replayVariables = expressionVariables session
 
         let replay () =
             let baseCatalog = session.Store.Catalog
@@ -916,7 +909,9 @@ let private commitSession (session: Session) : Session =
             let mutable ids = tx.ReplayStartIds
 
             for statement in tx.Statements do
-                let nextIds, result = Executor.execute snapshot registry dbName ids foundRows statement
+                let nextIds, result =
+                    Executor.withVariableContext replayVariables (fun () ->
+                        Executor.execute snapshot registry dbName ids foundRows statement)
 
                 match result with
                 | Err _ -> raise (Storage.LockWaitTimeout dbName)
@@ -1101,13 +1096,7 @@ let private handleSetAutocommit (value: string) (session: Session) : Session * Q
     session, Affected 0UL
 
 /// Parses and executes anything that isn't one of the text-probe special
-/// cases above. A parse failure that also looks like a `SELECT @@...`/
-/// `SELECT @...` falls back to the `@`-probe path — tried only *after* the
-/// real parser, so a query that merely contains the text `@` somewhere
-/// (inside a string literal, e.g. `WHERE email = 'a@b.com'`) parses
-/// normally instead of being hijacked into the probe path and rejected.
-/// Anything else is a 1064 syntax error with SQLSTATE 42000 (the mapping
-/// `errPayload` already has for that code).
+/// cases above. Anything else is a 1064 syntax error with SQLSTATE 42000.
 /// Executes an already-parsed `Statement` — shared by COM_QUERY (parse then
 /// execute) and COM_STMT_EXECUTE (bind placeholders then execute), so the
 /// prepared path reuses this one execution body instead of splicing literals
@@ -1188,33 +1177,37 @@ let private executeParsed (session: Session) (stmt: Statement) : Session * Query
         // (rather than already-rendered text) the metadata pass needs. See
         // `Session.LastResultColumnMetadata`'s doc for why this rides along
         // on `session` instead of widening this function's own return type.
+        let variables = expressionVariables session
+
         let lastInsertId, lastGeneratedId, result, columnMetadata, calculatedFoundRows =
-            match stmt with
-            | Select select ->
-                let result, types, calculatedFoundRows =
-                    withExecutionLimits (fun () -> Executor.runTopLevelSelect store registry dbName select)
+            Executor.withVariableContext variables (fun () ->
+                match stmt with
+                | Select select ->
+                    let result, types, calculatedFoundRows =
+                        withExecutionLimits (fun () -> Executor.runTopLevelSelect store registry dbName select)
 
-                session.LastInsertId, session.LastGeneratedId, result, types, calculatedFoundRows
-            | Union(first, rest, orderBy, limit, offset) ->
-                let result, types, calculatedFoundRows =
-                    withExecutionLimits (fun () -> Executor.runTopLevelUnion store registry dbName first rest orderBy limit offset)
+                    session.LastInsertId, session.LastGeneratedId, result, types, calculatedFoundRows
+                | Union(first, rest, orderBy, limit, offset) ->
+                    let result, types, calculatedFoundRows =
+                        withExecutionLimits (fun () -> Executor.runTopLevelUnion store registry dbName first rest orderBy limit offset)
 
-                session.LastInsertId, session.LastGeneratedId, result, types, calculatedFoundRows
-            | _ ->
-                let foundRows = session.Capabilities &&& Fsdb.Protocol.ClientFoundRows <> 0u
+                    session.LastInsertId, session.LastGeneratedId, result, types, calculatedFoundRows
+                | _ ->
+                    let foundRows = session.Capabilities &&& Fsdb.Protocol.ClientFoundRows <> 0u
 
-                let (lastInsertId, lastGeneratedId), result =
-                    withExecutionLimits (fun () ->
-                        Executor.execute store registry dbName (session.LastInsertId, session.LastGeneratedId) foundRows stmt)
+                    let (lastInsertId, lastGeneratedId), result =
+                        withExecutionLimits (fun () ->
+                            Executor.execute store registry dbName (session.LastInsertId, session.LastGeneratedId) foundRows stmt)
 
-                lastInsertId, lastGeneratedId, result, [], None
+                    lastInsertId, lastGeneratedId, result, [], None)
 
         let session =
             { session with
                 LastInsertId = lastInsertId
                 LastGeneratedId = lastGeneratedId
                 LastResultColumnMetadata = columnMetadata
-                PendingFoundRows = calculatedFoundRows }
+                PendingFoundRows = calculatedFoundRows
+                UserVariables = variables.UserVariables.Value }
 
         let session =
             match session.Tx, result, stmt with
@@ -1231,8 +1224,6 @@ let private executeParsed (session: Session) (stmt: Statement) : Session * Query
 let private executeStatement (session: Session) (sql: string) (upper: string) : Session * QueryResult =
     match Parser.parse sql with
     | Result.Ok stmt -> executeParsed session stmt
-    | Result.Error _ when upper.StartsWith "SELECT" && upper.Contains "@" ->
-        { session with LastResultColumnMetadata = [] }, handleAtVarSelect session sql
     | Result.Error _ -> { session with LastResultColumnMetadata = [] }, syntaxError sql
 
 /// Every statement form `dispatch` recognizes purely by text probe
@@ -1821,10 +1812,13 @@ let rec mapPlaceholders (replace: int -> Expr) (stmt: Statement) : Statement =
         | Placeholder i -> replace i
         | MatchAgainst(cols, q, mode) -> MatchAgainst(cols, mapExpr q, mode)
         | Lit _
+        | UserVariable _
+        | SystemVariable _
         | Col _
         | QualifiedCol _
         | Star _ -> e
         | BinOp(op, a, b) -> BinOp(op, mapExpr a, mapExpr b)
+        | AssignUserVariable(name, value) -> AssignUserVariable(name, mapExpr value)
         | Not x -> Not(mapExpr x)
         | IsNull x -> IsNull(mapExpr x)
         | IsNotNull x -> IsNotNull(mapExpr x)

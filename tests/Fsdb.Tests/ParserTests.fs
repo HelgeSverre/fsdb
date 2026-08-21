@@ -1950,11 +1950,16 @@ let tests =
                     | Error _ -> ()
                     | Ok stmt -> failtestf "expected an error, got %A" stmt
 
-                testCase "SELECT @@version is out of scope for this parser"
+                testCase "user and system variables parse as ordinary expressions"
                 <| fun _ ->
-                    match parse "SELECT @@version" with
-                    | Error _ -> ()
-                    | Ok stmt -> failtestf "expected an error, got %A" stmt
+                    let expected =
+                        [ BinOp(Add, UserVariable "x", Lit(VInt 1L)), None
+                          SystemVariable(Some "GLOBAL", "max_connections"), None
+                          AssignUserVariable("x", Lit(VInt 3L)), None ]
+
+                    match parse "SELECT @x + 1, @@GLOBAL.max_connections, @x := 3" with
+                    | Ok(Select { Projections = projections }) -> Expect.equal projections expected "variable expressions"
+                    | other -> failtestf "expected variable expressions, got %A" other
 
                 testCase "1000 levels of nested parens is a syntax error, not a stack overflow"
                 <| fun _ ->
