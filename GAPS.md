@@ -138,6 +138,7 @@ CURRENT_USER/USER/SESSION_USER.
 |---|---|---|
 | Crypto | asymmetric key-management family | medium |
 | Weight-string clauses | `WEIGHT_STRING(... AS CHAR/BINARY, LEVEL ...)` | low |
+| JSON Schema recursive regular-expression references | Local reference cycles traversing `pattern` or `patternProperties` return 1235 | low |
 | Geometry topology and relations | `ST_Distance`, predicates, overlays, buffers, validity, MBR operations | low |
 
 Divergences in existing functions: `CURTIME()`/`TIME()` return strings (no

@@ -900,6 +900,7 @@ let private maxJsonSchemaDepth = 64
 let private maxJsonSchemaPatternLength = 16_384
 let private maxJsonSchemaRegexMatches = 1_024
 let private jsonSchemaRegexTimeout = TimeSpan.FromMilliseconds 50.0
+let private jsonSchemaRegexValidationTimeout = TimeSpan.FromMilliseconds 200.0
 
 let private jsonSchemaLimitError =
     SqlError(1235, "This version of MySQL doesn't yet support JSON Schema inputs beyond its resource limits")
@@ -982,9 +983,16 @@ let private tryResolveJsonPointer (root: JsonObject) (reference: string) =
             (Some(root :> JsonNode))
     | _ -> None
 
-type private JsonSchemaRegexBudget = { mutable Attempts: int }
+type private JsonSchemaRegexBudget =
+    { Started: System.Diagnostics.Stopwatch
+      mutable Attempts: int }
 
 let private tryMatchJsonSchemaPattern (budget: JsonSchemaRegexBudget) (pattern: string) (input: string) =
+    let remaining = jsonSchemaRegexValidationTimeout - budget.Started.Elapsed
+
+    if remaining <= TimeSpan.Zero then
+        raise jsonSchemaRegexLimitError
+
     budget.Attempts <- budget.Attempts + 1
 
     if budget.Attempts > maxJsonSchemaRegexMatches then
@@ -994,7 +1002,7 @@ let private tryMatchJsonSchemaPattern (budget: JsonSchemaRegexBudget) (pattern: 
         raise jsonSchemaRegexLimitError
 
     try
-        Some(Regex.IsMatch(input, pattern, RegexOptions.CultureInvariant, jsonSchemaRegexTimeout))
+        Some(Regex.IsMatch(input, pattern, RegexOptions.ECMAScript ||| RegexOptions.CultureInvariant, min jsonSchemaRegexTimeout remaining))
     with
     | :? ArgumentException -> None
     | :? RegexMatchTimeoutException -> raise jsonSchemaRegexLimitError
@@ -1016,6 +1024,15 @@ let rec private stripJsonSchemaRegularExpressions (node: JsonNode) : JsonNode =
         array |> Seq.iter (stripJsonSchemaRegularExpressions >> result.Add)
         result :> JsonNode
     | _ -> node.DeepClone()
+
+let rec private containsJsonSchemaRegularExpressions (node: JsonNode) =
+    match node with
+    | :? JsonObject as obj ->
+        obj.ContainsKey "pattern"
+        || obj.ContainsKey "patternProperties"
+        || (obj |> Seq.exists (fun property -> containsJsonSchemaRegularExpressions property.Value))
+    | :? JsonArray as array -> array |> Seq.exists containsJsonSchemaRegularExpressions
+    | _ -> false
 
 let private compileJsonSchema (functionName: string) (text: string) : JsonSchema =
     try
@@ -1148,25 +1165,16 @@ let rec private rewriteJsonSchemaRegularExpressions
 
     match source, target with
     | (:? JsonObject as sourceSchema), (:? JsonObject as targetSchema) ->
-        match sourceSchema["$ref"] |> tryJsonString with
-        | Some reference when reference.StartsWith "#" && not (seenReferences.Contains reference) ->
-            match tryResolveJsonPointer root reference, tryResolveJsonPointer cleanRoot reference with
-            | Some sourceReference, Some targetReference ->
-                rewriteJsonSchemaRegularExpressions
-                    root
-                    cleanRoot
-                    sourceReference
-                    targetReference
-                    document
-                    schemaLocation
-                    documentLocation
-                    (remainingDepth - 1)
-                    (seenReferences.Add reference)
-                    regexBudget
-                    patternFailures
-                    patternPropertyMatches
-            | _ -> ()
-        | _ -> ()
+        let sourceSchema, targetSchema, seenReferences =
+            match sourceSchema["$ref"] |> tryJsonString with
+            | Some reference when reference.StartsWith "#" ->
+                if seenReferences.Contains reference then
+                    raise jsonSchemaRegexLimitError
+
+                match tryResolveJsonPointer root reference |> Option.bind tryJsonObject, tryResolveJsonPointer cleanRoot reference |> Option.bind tryJsonObject with
+                | Some sourceReference, Some targetReference -> sourceReference, targetReference, seenReferences.Add reference
+                | _ -> raise jsonSchemaLimitError
+            | _ -> sourceSchema, targetSchema, seenReferences
 
         match sourceSchema["pattern"] |> tryJsonString, document |> tryJsonString with
         | Some pattern, Some value ->
@@ -1417,23 +1425,25 @@ let private jsonSchemaValidation functionName schemaValue documentValue =
         | :? JsonObject as schema ->
             normalizeJsonSchema schema
             let cleanSchema = stripJsonSchemaRegularExpressions schema :?> JsonObject
-            let regexBudget = { Attempts = 0 }
             let patternFailures = ResizeArray<JsonSchemaFailure>()
             let patternPropertyMatches = ResizeArray<JsonSchemaFailure>()
 
-            rewriteJsonSchemaRegularExpressions
-                schema
-                cleanSchema
-                schema
-                cleanSchema
-                documentNode
-                "#"
-                "#"
-                maxJsonSchemaDepth
-                Set.empty
-                regexBudget
-                patternFailures
-                patternPropertyMatches
+            if containsJsonSchemaRegularExpressions schema then
+                let regexBudget = { Started = System.Diagnostics.Stopwatch.StartNew(); Attempts = 0 }
+
+                rewriteJsonSchemaRegularExpressions
+                    schema
+                    cleanSchema
+                    schema
+                    cleanSchema
+                    documentNode
+                    "#"
+                    "#"
+                    maxJsonSchemaDepth
+                    Set.empty
+                    regexBudget
+                    patternFailures
+                    patternPropertyMatches
 
             let schemaText = cleanSchema.ToJsonString jsonRenderOptions
             let documentText = documentNode |> Option.ofObj |> Option.map (fun node -> node.ToJsonString jsonRenderOptions) |> Option.defaultValue "null"

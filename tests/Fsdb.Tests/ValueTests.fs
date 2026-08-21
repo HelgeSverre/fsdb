@@ -822,6 +822,10 @@ let tests =
                                   """{"valid": false, "reason": "The JSON document location '#' failed requirement 'pattern' at JSON Schema location '#'", "schema-location": "#", "document-location": "#", "schema-failed-keyword": "pattern"}""")
                               "pattern report"
 
+                          let digit = VString """{"type":"string","pattern":"^\\d$"}"""
+                          Expect.equal (call "JSON_SCHEMA_VALID" [ digit; VString "\"1\"" ]) (VInt 1L) "ASCII digit"
+                          Expect.equal (call "JSON_SCHEMA_VALID" [ digit; VString "\"١\"" ]) (VInt 0L) "non-ASCII digit"
+
                       testCase "JSON schema applies pattern properties to matching member values"
                       <| fun _ ->
                           let schema =
@@ -850,6 +854,46 @@ let tests =
 
                           Expect.throwsC
                               (fun () -> call "JSON_SCHEMA_VALID" [ schema; document ] |> ignore)
+                              (fun error ->
+                                  match error with
+                                  | Fsdb.Functions.SqlError(1235, _) -> ()
+                                  | other -> failtestf "expected 1235, got %A" other)
+
+                      testCase "JSON schema bounds pattern-property matching across a document"
+                      <| fun _ ->
+                          let document =
+                              [ 0 .. 1_024 ]
+                              |> List.map (fun index -> sprintf "\"p%d\":0" index)
+                              |> String.concat ","
+                              |> sprintf "{%s}"
+                              |> VString
+
+                          let schema = VString """{"type":"object","patternProperties":{"^p":{}}}"""
+
+                          Expect.throwsC
+                              (fun () -> call "JSON_SCHEMA_VALID" [ schema; document ] |> ignore)
+                              (fun error ->
+                                  match error with
+                                  | Fsdb.Functions.SqlError(1235, _) -> ()
+                                  | other -> failtestf "expected 1235, got %A" other)
+
+                      testCase "JSON schema ignores siblings of a local reference"
+                      <| fun _ ->
+                          let schema =
+                              VString
+                                  """{"$ref":"#/definitions/letters","pattern":"^b+$","definitions":{"letters":{"type":"string","pattern":"^a+$"}}}"""
+
+                          Expect.equal (call "JSON_SCHEMA_VALID" [ schema; VString "\"aaa\"" ]) (VInt 1L) "reference target"
+                          Expect.equal (call "JSON_SCHEMA_VALID" [ schema; VString "\"bbb\"" ]) (VInt 0L) "reference target violation"
+
+                      testCase "JSON schema refuses recursive local references containing patterns"
+                      <| fun _ ->
+                          let schema =
+                              VString
+                                  """{"$ref":"#/definitions/node","definitions":{"node":{"type":"object","properties":{"value":{"type":"string","pattern":"^a+$"},"next":{"$ref":"#/definitions/node"}}}}}"""
+
+                          Expect.throwsC
+                              (fun () -> call "JSON_SCHEMA_VALID" [ schema; VString """{"value":"a","next":{"value":"a"}}""" ] |> ignore)
                               (fun error ->
                                   match error with
                                   | Fsdb.Functions.SqlError(1235, _) -> ()
