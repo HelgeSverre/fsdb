@@ -234,8 +234,8 @@ NULL for anything else, including named zones and `SYSTEM`. That matches the
 oracle exactly as configured: it has no `mysql.time_zone*` rows loaded, so
 `CONVERT_TZ(t, 'UTC', 'America/New_York')` is NULL there too. `SYSTEM` is
 the one spelling where the oracle answers and fsdb does not — it resolves to
-the *server's* local zone, which would make the answer depend on the machine
-running the engine. No probe uses it.
+the *server's* local zone. The engine now resolves that spelling through the
+process-local `TimeZoneInfo`; named zones still require loaded time-zone data.
 
 Ledger effect: 43 signatures down to 32. Eleven belonged to the probes above
 and are gone; the twelfth removal is `rollup_two_level_with_expression_key`,

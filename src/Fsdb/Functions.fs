@@ -2060,33 +2060,46 @@ let private makeDateFn: Scalar =
                 VNull
     | _ -> VNull
 
-/// A `CONVERT_TZ` zone argument, as minutes east of UTC. Only MySQL's
-/// numeric `[+-]HH:MM` form is understood, over MySQL's asymmetric
-/// documented range '-13:59'..'+14:00' (anything outside is NULL).
-/// ponytail: named zones (`UTC`, `America/New_York`) and `SYSTEM` return
-/// NULL, which is exactly what a MySQL server with no `mysql.time_zone*`
-/// rows loaded answers — the oracle this is pinned against. Route them
-/// through `TimeZoneInfo` only alongside a real, loadable zone table, since
-/// a half-loaded one would answer some zones and NULL others.
-let private tzOffsetMinutes (spec: string) : int option =
+type private ConversionZone =
+    | FixedOffset of minutes: int
+    | SystemZone
+
+/// A `CONVERT_TZ` zone argument. Numeric offsets use MySQL's asymmetric
+/// documented range '-13:59'..'+14:00'; `SYSTEM` follows the server process's
+/// local time zone. Named zones need MySQL's loadable time-zone tables and
+/// remain unavailable when those tables are empty.
+let private conversionZone (spec: string) : ConversionZone option =
     let s = spec.Trim()
 
-    let sign, body =
-        if s.StartsWith "+" then 1, s.Substring 1
-        elif s.StartsWith "-" then -1, s.Substring 1
-        else 0, s
-
-    if sign = 0 then
-        None
+    if s.Equals("SYSTEM", StringComparison.OrdinalIgnoreCase) then
+        Some SystemZone
     else
-        match body.Split ':' with
-        | [| h; m |] ->
-            match Int32.TryParse(h, NumberStyles.None, CultureInfo.InvariantCulture), Int32.TryParse(m, NumberStyles.None, CultureInfo.InvariantCulture) with
-            | (true, hours), (true, minutes) when minutes < 60 ->
-                let total = sign * (hours * 60 + minutes)
-                if total >= -839 && total <= 840 then Some total else None
+        let sign, body =
+            if s.StartsWith "+" then 1, s.Substring 1
+            elif s.StartsWith "-" then -1, s.Substring 1
+            else 0, s
+
+        if sign = 0 then
+            None
+        else
+            match body.Split ':' with
+            | [| h; m |] ->
+                match Int32.TryParse(h, NumberStyles.None, CultureInfo.InvariantCulture), Int32.TryParse(m, NumberStyles.None, CultureInfo.InvariantCulture) with
+                | (true, hours), (true, minutes) when minutes < 60 ->
+                    let total = sign * (hours * 60 + minutes)
+                    if total >= -839 && total <= 840 then Some(FixedOffset total) else None
+                | _ -> None
             | _ -> None
-        | _ -> None
+
+let private toUtc (zone: ConversionZone) (value: DateTime) : DateTime =
+    match zone with
+    | FixedOffset minutes -> value.AddMinutes(float -minutes)
+    | SystemZone -> TimeZoneInfo.ConvertTimeToUtc(DateTime.SpecifyKind(value, DateTimeKind.Unspecified), TimeZoneInfo.Local)
+
+let private fromUtc (zone: ConversionZone) (value: DateTime) : DateTime =
+    match zone with
+    | FixedOffset minutes -> value.AddMinutes(float minutes)
+    | SystemZone -> TimeZoneInfo.ConvertTimeFromUtc(DateTime.SpecifyKind(value, DateTimeKind.Utc), TimeZoneInfo.Local)
 
 /// MySQL converts only when the argument, read in `from_tz`, lands inside
 /// the TIMESTAMP window — 1970-01-01 00:00:01 UTC through 3001-01-18
@@ -2101,18 +2114,18 @@ let private convertTzFn: Scalar =
 
     function
     | [ dt; f; t ] when not (anyNull [ dt; f; t ]) ->
-        match asDateTime dt, tzOffsetMinutes (req f), tzOffsetMinutes (req t) with
-        | Some d, Some fromMinutes, Some toMinutes ->
+        match asDateTime dt, conversionZone (req f), conversionZone (req t) with
+        | Some d, Some fromZone, Some toZone ->
             let utc =
                 try
-                    Some(d.AddMinutes(float -fromMinutes))
+                    Some(toUtc fromZone d)
                 with _ ->
                     None
 
             match utc with
             | Some u when u >= windowStart && u <= windowEnd ->
                 try
-                    VDateTime(d.AddMinutes(float (toMinutes - fromMinutes)))
+                    VDateTime(fromUtc toZone u)
                 with _ ->
                     VDateTime d
             | _ -> VDateTime d

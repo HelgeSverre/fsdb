@@ -6368,6 +6368,20 @@ let tests =
                           None
                           None ]
 
+                testCase "CONVERT_TZ resolves SYSTEM through the server local time zone"
+                <| fun _ ->
+                    let utc = System.DateTime(2024, 1, 15, 12, 0, 0, System.DateTimeKind.Utc)
+                    let local = System.TimeZoneInfo.ConvertTimeFromUtc(utc, System.TimeZoneInfo.Local)
+
+                    expectRow
+                        "SELECT CONVERT_TZ('2024-01-15 12:00:00','+00:00','SYSTEM') a, CONVERT_TZ('2024-01-15 12:00:00','SYSTEM','+00:00') b"
+                        [ Some(local.ToString("yyyy-MM-dd HH:mm:ss", System.Globalization.CultureInfo.InvariantCulture))
+                          Some(
+                              System.TimeZoneInfo
+                                  .ConvertTimeToUtc(System.DateTime(2024, 1, 15, 12, 0, 0), System.TimeZoneInfo.Local)
+                                  .ToString("yyyy-MM-dd HH:mm:ss", System.Globalization.CultureInfo.InvariantCulture)
+                          ) ]
+
                 testCase "MAKEDATE rounds its arguments, which decides the two-digit-year pivot"
                 <| fun _ ->
                     expectRow

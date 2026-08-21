@@ -144,8 +144,8 @@ CURRENT_USER/USER/SESSION_USER.
 | Geometry | all `ST_*`/`GeometryCollection` functions and types | low |
 
 Divergences in existing functions: `CURTIME()`/`TIME()` return strings (no
-TIME value domain, `Functions.fs:1296–1305`); `CONVERT_TZ` resolves numeric
-offsets only — named zones and `SYSTEM` return NULL (`Functions.fs:1564–1571`);
+TIME value domain, `Functions.fs`); `CONVERT_TZ` resolves numeric offsets and
+`SYSTEM`, but named zones return NULL without loaded time-zone tables;
 `TIMESTAMP()` is 1-arg only; `JSON_SEARCH` lacks escape_char/path arguments
 (`Functions.fs:941`); JSON_TABLE lacks `ERROR ON EMPTY|ERROR` raise-form
 (`Ast.fs:432–434`) and refuses `JOIN…USING`/LEFT-JOIN-ON-TRUE against it
@@ -399,7 +399,7 @@ Recorded in `torture/findings/`, not yet fixed, not enrolled in
 | INSERT…SELECT…ODKU alias refs | bare select-column references in the UPDATE clause error where MySQL reads select-derived values; only `VALUES(col)` works (`2026-08-19-insert-select-odku-gap.md`, `Ast.fs:630–633`) | deferred by design |
 | JSON_TABLE refusals | LEFT JOIN JSON_TABLE(…) ON TRUE → 1064; JOIN…USING → 1064; ERROR ON EMPTY/ERROR raise-form unparsed; correlated unknown qualifier yields 1054 vs MySQL 1109 (`2026-08-19-json-table-gaps.md`) | partially stale — see §17 |
 | Numeric error-shape ceilings | CAST(double AS UNSIGNED) clamps at unsigned ceiling where MySQL uses signed max; 1690 message lacks expression text (`2026-08-19-probe-corpus-triage.md`) | ponytail ceilings |
-| Temporal/error-shape ceilings | `DATE 'bad'` → 1064 vs MySQL 1525; CONVERT_TZ(…,'SYSTEM') → NULL; parenthesized set-op groups `(A UNION B) INTERSECT C` refused | ponytail ceilings |
+| Temporal/error-shape ceilings | `DATE 'bad'` → 1064 vs MySQL 1525; parenthesized set-op groups `(A UNION B) INTERSECT C` refused | ponytail ceilings |
 
 Uncovered torture lanes (harness scope, not product gaps): durability/restart
 during concurrent commits, matched negative-oracle campaigns, connection
