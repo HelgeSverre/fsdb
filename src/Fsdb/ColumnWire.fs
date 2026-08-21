@@ -66,6 +66,10 @@ let metadataOfType (ty: ColumnType) : ColumnMetadata =
             Decimals = byte fsp }
     | TYear -> { columnMetadata TypeYear with ColumnLength = 4u }
     | TJson -> { columnMetadata TypeVarString with ColumnLength = UInt32.MaxValue }
+    | TGeometry _ ->
+        { columnMetadata TypeGeometry with
+            ColumnLength = UInt32.MaxValue
+            Flags = BlobFlag ||| BinaryFlag }
     | TVector dim ->
         { columnMetadata TypeBlob with
             ColumnLength = uint32 dim * 4u

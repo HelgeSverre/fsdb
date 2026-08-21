@@ -214,6 +214,18 @@ let tests =
               writer.WriteLenEncBytes bytes
               Expect.equal (readBinaryValue (Reader(writer.ToArray())) TypeBlob false) (VBytes bytes) "raw BLOB parameter"
 
+          testCase "binary protocol geometry parameters retain their SRID and WKB"
+          <| fun _ ->
+              let bytes = Convert.FromHexString "E61000000101000000000000000000F83F00000000000000C0"
+              let writer = Writer()
+              writer.WriteLenEncBytes bytes
+
+              match readBinaryValue (Reader(writer.ToArray())) TypeGeometry false with
+              | VGeometry geometry ->
+                  Expect.equal geometry.Srid 4326 "SRID"
+                  Expect.equal (geometryToText geometry) "POINT(1.5 -2)" "point"
+              | other -> failtestf "expected geometry, got %A" other
+
           testCase "wireTypeOfColumnType maps every declared-type family to its wire id"
           <| fun _ ->
               Expect.equal (wireTypeOfColumnType (TTinyInt false)) TypeTiny "tinyint"
@@ -241,6 +253,7 @@ let tests =
               Expect.equal (wireTypeOfColumnType TBool) TypeTiny "boolean"
               Expect.equal (wireTypeOfColumnType TYear) TypeYear "year"
               Expect.equal (wireTypeOfColumnType (TSet [ "a" ])) TypeString "set"
+              Expect.equal (wireTypeOfColumnType (TGeometry Point)) TypeGeometry "geometry"
 
           testCase "textRowPayload encodes NULL and strings in one row"
           <| fun _ ->

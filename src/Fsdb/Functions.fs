@@ -4325,6 +4325,126 @@ let private distanceFn: Scalar =
     | [ _; _; _ ] -> raise (SqlError(1210, "Incorrect arguments to DISTANCE: arguments must be vectors"))
     | _ -> raise (SqlError(1582, "Incorrect parameter count in the call to native function 'distance'"))
 
+let private geometryError functionName detail : 'a =
+    raise (SqlError(3037, sprintf "Invalid GIS data provided to function %s: %s" functionName detail))
+
+let private geometryArgument functionName = function
+    | VGeometry geometry -> geometry
+    | _ -> geometryError functionName "a geometry argument is required"
+
+let private geometrySrid functionName = function
+    | VInt srid when srid >= 0L && srid <= int64 Int32.MaxValue -> int srid
+    | VUInt srid when srid <= uint64 Int32.MaxValue -> int srid
+    | _ -> geometryError functionName "the SRID must be a non-negative integer"
+
+let private geometryFromTextFn requiredKind functionName: Scalar =
+    function
+    | [ VNull ]
+    | [ VNull; _ ]
+    | [ _; VNull ] -> VNull
+    | [ value ]
+    | [ value; VInt 0L ] ->
+        match tryGeometryFromText 0 (req value) with
+        | Some geometry when requiredKind = Geometry || geometryKind geometry.Shape = requiredKind -> VGeometry geometry
+        | Some _ -> geometryError functionName (sprintf "%s is not a %s" (req value) (geometryTypeName requiredKind))
+        | None -> geometryError functionName (sprintf "'%s'" (req value))
+    | [ value; sridValue ] ->
+        let srid = geometrySrid functionName sridValue
+
+        match tryGeometryFromText srid (req value) with
+        | Some geometry when requiredKind = Geometry || geometryKind geometry.Shape = requiredKind -> VGeometry geometry
+        | Some _ -> geometryError functionName (sprintf "%s is not a %s" (req value) (geometryTypeName requiredKind))
+        | None -> geometryError functionName (sprintf "'%s'" (req value))
+    | _ -> raise (SqlError(1582, sprintf "Incorrect parameter count in the call to native function '%s'" functionName))
+
+let private geometryFromWkbFn requiredKind functionName: Scalar =
+    function
+    | [ VNull ]
+    | [ VNull; _ ]
+    | [ _; VNull ] -> VNull
+    | [ VBytes bytes ]
+    | [ VBytes bytes; VInt 0L ] ->
+        match tryGeometryFromWkb 0 bytes with
+        | Some geometry when requiredKind = Geometry || geometryKind geometry.Shape = requiredKind -> VGeometry geometry
+        | Some _ -> geometryError functionName "the WKB geometry has a different type"
+        | None -> geometryError functionName "invalid WKB"
+    | [ VBytes bytes; sridValue ] ->
+        let srid = geometrySrid functionName sridValue
+
+        match tryGeometryFromWkb srid bytes with
+        | Some geometry when requiredKind = Geometry || geometryKind geometry.Shape = requiredKind -> VGeometry geometry
+        | Some _ -> geometryError functionName "the WKB geometry has a different type"
+        | None -> geometryError functionName "invalid WKB"
+    | [ _ ]
+    | [ _; _ ] -> geometryError functionName "a binary WKB argument is required"
+    | _ -> raise (SqlError(1582, sprintf "Incorrect parameter count in the call to native function '%s'" functionName))
+
+let private geometryToTextFn functionName: Scalar =
+    function
+    | [ VNull ] -> VNull
+    | [ value ] -> geometryArgument functionName value |> geometryToText |> VString
+    | _ -> raise (SqlError(1582, sprintf "Incorrect parameter count in the call to native function '%s'" functionName))
+
+let private geometryToWkbFn functionName: Scalar =
+    function
+    | [ VNull ] -> VNull
+    | [ value ] -> geometryArgument functionName value |> geometryToWkb |> VBytes
+    | _ -> raise (SqlError(1582, sprintf "Incorrect parameter count in the call to native function '%s'" functionName))
+
+let private geometryTypeFn: Scalar =
+    function
+    | [ VNull ] -> VNull
+    | [ value ] ->
+        match geometryArgument "ST_GEOMETRYTYPE" value |> _.Shape |> geometryKind with
+        | GeometryCollection -> VString "GEOMCOLLECTION"
+        | kind -> VString(geometryTypeName kind)
+    | _ -> raise (SqlError(1582, "Incorrect parameter count in the call to native function 'st_geometrytype'"))
+
+let private geometryDimensionFn: Scalar =
+    let rec dimension = function
+        | GEmpty _ -> -1
+        | GPoint _
+        | GMultiPoint _ -> 0
+        | GLineString _
+        | GMultiLineString _ -> 1
+        | GPolygon _
+        | GMultiPolygon _ -> 2
+        | GGeometryCollection geometries -> geometries |> List.map (fun geometry -> dimension geometry.Shape) |> List.append [ -1 ] |> List.max
+
+    function
+    | [ VNull ] -> VNull
+    | [ value ] -> geometryArgument "ST_DIMENSION" value |> fun geometry -> VInt(int64 (dimension geometry.Shape))
+    | _ -> raise (SqlError(1582, "Incorrect parameter count in the call to native function 'st_dimension'"))
+
+let private geometryIsEmptyFn: Scalar =
+    function
+    | [ VNull ] -> VNull
+    | [ value ] ->
+        match geometryArgument "ST_ISEMPTY" value with
+        | { Shape = GEmpty _ } -> VInt 1L
+        | _ -> VInt 0L
+    | _ -> raise (SqlError(1582, "Incorrect parameter count in the call to native function 'st_isempty'"))
+
+let private pointCoordinateFn functionName select: Scalar =
+    function
+    | [ VNull ] -> VNull
+    | [ value ] ->
+        match (geometryArgument functionName value).Shape with
+        | GPoint(x, y) -> VDouble(select x y)
+        | GEmpty Point -> VNull
+        | _ -> geometryError functionName "a Point argument is required"
+    | _ -> raise (SqlError(1582, sprintf "Incorrect parameter count in the call to native function '%s'" functionName))
+
+let private geometrySridFn: Scalar =
+    function
+    | [ VNull ] -> VNull
+    | [ value ] -> geometryArgument "ST_SRID" value |> fun geometry -> VInt(int64 geometry.Srid)
+    | [ _; _ ] -> raise (SqlError(1235, "This version of MySQL doesn't yet support 'ST_SRID geometry mutation'"))
+    | _ -> raise (SqlError(1582, "Incorrect parameter count in the call to native function 'st_srid'"))
+
+let private unsupportedGeometryFn name: Scalar =
+    fun _ -> raise (SqlError(1235, sprintf "This version of MySQL doesn't yet support '%s'" name))
+
 let builtins: Registry =
     empty
     |> registerScalar "NOW" nowFn
@@ -4372,6 +4492,41 @@ let builtins: Registry =
     |> registerScalar "JSON_KEYS" jsonKeysFn
     |> registerScalar "JSON_SEARCH" jsonSearchFn
     |> registerScalar "WEIGHT_STRING" weightStringFn
+    |> registerScalar "ST_GEOMFROMTEXT" (geometryFromTextFn Geometry "ST_GeomFromText")
+    |> registerScalar "ST_GEOMETRYFROMTEXT" (geometryFromTextFn Geometry "ST_GeometryFromText")
+    |> registerScalar "GEOMFROMTEXT" (geometryFromTextFn Geometry "GeomFromText")
+    |> registerScalar "GEOMETRYFROMTEXT" (geometryFromTextFn Geometry "GeometryFromText")
+    |> registerScalar "ST_POINTFROMTEXT" (geometryFromTextFn Point "ST_PointFromText")
+    |> registerScalar "POINTFROMTEXT" (geometryFromTextFn Point "PointFromText")
+    |> registerScalar "ST_LINESTRINGFROMTEXT" (geometryFromTextFn LineString "ST_LineStringFromText")
+    |> registerScalar "ST_POLYGONFROMTEXT" (geometryFromTextFn Polygon "ST_PolygonFromText")
+    |> registerScalar "ST_GEOMFROMWKB" (geometryFromWkbFn Geometry "ST_GeomFromWKB")
+    |> registerScalar "ST_GEOMETRYFROMWKB" (geometryFromWkbFn Geometry "ST_GeometryFromWKB")
+    |> registerScalar "GEOMFROMWKB" (geometryFromWkbFn Geometry "GeomFromWKB")
+    |> registerScalar "ST_POINTFROMWKB" (geometryFromWkbFn Point "ST_PointFromWKB")
+    |> registerScalar "ST_ASTEXT" (geometryToTextFn "ST_AsText")
+    |> registerScalar "ST_ASWKT" (geometryToTextFn "ST_AsWKT")
+    |> registerScalar "ASTEXT" (geometryToTextFn "AsText")
+    |> registerScalar "ST_ASWKB" (geometryToWkbFn "ST_AsWKB")
+    |> registerScalar "ST_ASBINARY" (geometryToWkbFn "ST_AsBinary")
+    |> registerScalar "ASBINARY" (geometryToWkbFn "AsBinary")
+    |> registerScalar "ST_SRID" geometrySridFn
+    |> registerScalar "ST_GEOMETRYTYPE" geometryTypeFn
+    |> registerScalar "GEOMETRYTYPE" geometryTypeFn
+    |> registerScalar "ST_DIMENSION" geometryDimensionFn
+    |> registerScalar "DIMENSION" geometryDimensionFn
+    |> registerScalar "ST_ISEMPTY" geometryIsEmptyFn
+    |> registerScalar "ISEMPTY" geometryIsEmptyFn
+    |> registerScalar "ST_X" (pointCoordinateFn "ST_X" (fun x _ -> x))
+    |> registerScalar "ST_Y" (pointCoordinateFn "ST_Y" (fun _ y -> y))
+    |> registerScalar "X" (pointCoordinateFn "X" (fun x _ -> x))
+    |> registerScalar "Y" (pointCoordinateFn "Y" (fun _ y -> y))
+    |> registerScalar "ST_DISTANCE" (unsupportedGeometryFn "ST_DISTANCE")
+    |> registerScalar "ST_CONTAINS" (unsupportedGeometryFn "ST_CONTAINS")
+    |> registerScalar "ST_WITHIN" (unsupportedGeometryFn "ST_WITHIN")
+    |> registerScalar "ST_INTERSECTS" (unsupportedGeometryFn "ST_INTERSECTS")
+    |> registerScalar "ST_BUFFER" (unsupportedGeometryFn "ST_BUFFER")
+    |> registerScalar "ST_ENVELOPE" (unsupportedGeometryFn "ST_ENVELOPE")
     // Dates
     |> registerScalar "DATE_ADD" (dateAddCore 1.0)
     |> registerScalar "TIMESTAMPADD" timestampAddFn

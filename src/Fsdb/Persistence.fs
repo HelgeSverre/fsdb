@@ -184,6 +184,18 @@ let private encodeColumnType (w: Writer) (t: ColumnType) : unit =
     | TYear -> w.WriteByte 0x1Buy
     | TJson -> w.WriteByte 0x1Cuy
     | TVector dim -> w.WriteByte 0x1Duy; w.WriteInt32LE dim
+    | TGeometry kind ->
+        w.WriteByte 0x1Fuy
+        w.WriteByte(
+            match kind with
+            | Geometry -> 0uy
+            | Point -> 1uy
+            | LineString -> 2uy
+            | Polygon -> 3uy
+            | MultiPoint -> 4uy
+            | MultiLineString -> 5uy
+            | MultiPolygon -> 6uy
+            | GeometryCollection -> 7uy)
 
 let private decodeColumnType (r: #IReader) : ColumnType =
     match r.ReadByte() with
@@ -217,6 +229,20 @@ let private decodeColumnType (r: #IReader) : ColumnType =
     | 0x1Buy -> TYear
     | 0x1Cuy -> TJson
     | 0x1Duy -> TVector(r.ReadInt32LE())
+    | 0x1Fuy ->
+        let kind =
+            match r.ReadByte() with
+            | 1uy -> Point
+            | 2uy -> LineString
+            | 3uy -> Polygon
+            | 4uy -> MultiPoint
+            | 5uy -> MultiLineString
+            | 6uy -> MultiPolygon
+            | 7uy -> GeometryCollection
+            | 0uy -> Geometry
+            | tag -> failwithf "Persistence: unknown geometry kind 0x%02x in WAL/snapshot" tag
+
+        TGeometry kind
     | tag -> failwithf "Persistence: unknown ColumnType tag 0x%02x in WAL/snapshot" tag
 
 // ---------------------------------------------------------------------

@@ -451,6 +451,20 @@ let tests =
                     | other -> failtestf "expected DataTruncatedForColumn, got %A" other ]
 
           testList
+              "coerceValue spatial columns"
+              [ testCase "a POINT column accepts points and rejects another geometry type"
+                <| fun _ ->
+                    let point = VGeometry(tryGeometryFromText 4326 "POINT(1 2)" |> Option.get)
+                    let line = VGeometry(tryGeometryFromText 4326 "LINESTRING(0 0,1 1)" |> Option.get)
+                    let column = col "location" (TGeometry Point) true
+
+                    Expect.equal (coerceValue true column point) (Ok point) "point retained"
+
+                    match coerceValue true column line with
+                    | Error(InvalidValueForColumn("location", _)) -> ()
+                    | other -> failtestf "expected geometry type rejection, got %A" other ]
+
+          testList
               "unique constraints"
               [ let emailsTable store =
                     createTable

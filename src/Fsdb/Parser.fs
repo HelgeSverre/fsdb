@@ -548,6 +548,14 @@ let private columnType: Parser<ColumnType, unit> =
           keyword "TIME" >>. optFsp |>> TTime
           keyword "YEAR" >>. ignoredWidth >>% TYear
           keyword "JSON" >>% TJson
+          keyword "GEOMETRY" >>% TGeometry Geometry
+          keyword "POINT" >>% TGeometry Point
+          keyword "LINESTRING" >>% TGeometry LineString
+          keyword "POLYGON" >>% TGeometry Polygon
+          keyword "MULTIPOINT" >>% TGeometry MultiPoint
+          keyword "MULTILINESTRING" >>% TGeometry MultiLineString
+          keyword "MULTIPOLYGON" >>% TGeometry MultiPolygon
+          (keyword "GEOMETRYCOLLECTION" <|> keyword "GEOMCOLLECTION") >>% TGeometry GeometryCollection
           // Bare `VECTOR` is MySQL 9's default dimension 2048; `VECTOR()` is
           // a syntax error there too — `attempt widthLen` backtracks off the
           // empty parens, which then fail the rest of the column grammar.

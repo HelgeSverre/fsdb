@@ -3,6 +3,7 @@
 module Fsdb.Protocol
 
 open System
+open System.Buffers.Binary
 open System.Text
 open Fsdb.Binary
 open Fsdb.Packet
@@ -649,6 +650,17 @@ let readBinaryValue (r: Reader) (typeId: byte) (unsigned: bool) : Value =
         VString(lenEncText ())
     elif typeId = TypeBlob then
         VBytes(lenEncBytes ())
+    elif typeId = TypeGeometry then
+        let bytes = lenEncBytes ()
+
+        if bytes.Length < 5 then
+            VNull
+        else
+            let srid = BinaryPrimitives.ReadInt32LittleEndian(ReadOnlySpan(bytes, 0, 4))
+
+            match tryGeometryFromWkb srid bytes.[4..] with
+            | Some geometry -> VGeometry geometry
+            | None -> VNull
     elif typeId = TypeDate then
         VDate(DateOnly.FromDateTime(readBinaryDateTime r))
     elif typeId = TypeDateTime || typeId = TypeTimestamp then

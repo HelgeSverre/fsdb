@@ -81,6 +81,9 @@ type ColumnType =
     | TTime of fsp: int
     | TYear
     | TJson
+    /// OGC WKB geometry, constrained to `kind` for the concrete spatial
+    /// column types and unconstrained for `GEOMETRY` itself.
+    | TGeometry of kind: GeometryKind
     /// MySQL 9's `VECTOR(N)` — N little-endian 4-byte floats stored/wired as
     /// a binary string. A bare `VECTOR` declares MySQL's default dimension
     /// 2048; the 16383 ceiling (and the can't-be-a-key rule) is enforced at

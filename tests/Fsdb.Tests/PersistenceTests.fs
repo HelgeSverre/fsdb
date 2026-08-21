@@ -121,6 +121,18 @@ let tests =
               // actually carries and replay should reproduce.
               Expect.contains rows [| VInt 42L; VString "unicode héllo 🎉"; VString """{"a":1}""" |] "unicode/JSON-text round-trip"
 
+          testCase "attach + reload retains a typed spatial column"
+          <| fun _ ->
+              let dir = tempDataDir ()
+              let store = load dir
+              attach dir store
+              createTable store defaultDatabase "places" [ mkCol "shape" (TGeometry Point) ] [] [] None None |> ignore
+              let point = VGeometry(tryGeometryFromText 4326 "POINT(1.5 -2)" |> Option.get)
+              insertRows store defaultDatabase "places" None [ [ point ] ] |> ignore
+
+              let reloaded = load dir
+              Expect.equal (rowsOf reloaded defaultDatabase "places") [ [| point |] ] "geometry row survives WAL replay"
+
           testCase "WAL replay reapplies a non-strict clamping ALTER MODIFY instead of skipping it"
           <| fun _ ->
               // The replayed store starts strict (fresh-store default);

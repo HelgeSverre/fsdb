@@ -32,8 +32,8 @@ accepted (marked `ponytail:` in source), or recorded only in
 |---|---|---|
 | SQL statements | Broad core; large admin/programmatic tail missing | Stored procedures/functions, events |
 | Query execution | Correct single-table equality access | No index-based join access; subqueries re-run per outer row |
-| Built-in functions | Broad scalar, aggregate, JSON, and time coverage | Geometry, legacy/asymmetric crypto, JSON Schema regex patterns |
-| Data types | All common types | No TIME value domain, BIT, or geometry |
+| Built-in functions | Broad scalar, aggregate, JSON, time, and geometry-core coverage | Legacy/asymmetric crypto and JSON Schema regex patterns |
+| Data types | Common scalar types plus OGC geometry | No TIME value domain or BIT |
 | Constraints & indexes | PK/UNIQUE/FK/CHECK plus one-column equality indexes | No range/order/index-join access |
 | Charsets & collations | ICU-based utf8mb4 registry | Weight-table tailoring differs from MySQL's UCA tables |
 | Transactions | Snapshot + optimistic merge | SERIALIZABLE refused; no intra-database write parallelism |
@@ -139,7 +139,7 @@ CURRENT_USER/USER/SESSION_USER.
 | Crypto | asymmetric key-management family | medium |
 | Weight-string clauses | `WEIGHT_STRING(... AS CHAR/BINARY, LEVEL ...)` | low |
 | JSON schema patterns | `pattern patternProperties` | medium |
-| Geometry | all `ST_*`/`GeometryCollection` functions and types | low |
+| Geometry topology and relations | `ST_Distance`, predicates, overlays, buffers, validity, MBR operations | low |
 
 Divergences in existing functions: `CURTIME()`/`TIME()` return strings (no
 TIME value domain, `Functions.fs`); `CONVERT_TZ` resolves numeric offsets and
@@ -152,14 +152,16 @@ round-trip, FLOAT/DOUBLE with MySQL exponent rendering, CHAR/VARCHAR,
 TINYTEXT–LONGTEXT, BINARY/VARBINARY, TINYBLOB–LONGBLOB, ENUM/SET with
 canonicalization, DATE/DATETIME(fsp)/TIMESTAMP(fsp)/TIME(fsp) with half-up
 fsp rounding and carry cases, YEAR, JSON, per-column charset/collation,
-wire-faithful column metadata (`ColumnWire.fs:17–84`).
+wire-faithful column metadata (`ColumnWire.fs:17–84`), and OGC WKB geometry
+values (`GEOMETRY`, concrete spatial types, WKT/WKB construction and common
+accessors).
 
 | Gap | MySQL 8.4 | fsdb | Impact | Class |
 |---|---|---|---|---|
 | Zero dates | `'0000-00-00'` representable; NO_ZERO_DATE mode-gated | no zero-date sentinel; rejection unconditional, non-strict NOT NULL temporal writes hard-fail (`Storage.fs:63–67, 707–711`) | low | divergence |
 | TIME value domain | typed TIME comparisons/arithmetic | stored and compared as pre-formatted strings; no `VTime` case (`Value.fs:13–30`, `Storage.fs:911–935`) | medium | divergence |
 | BIT type | `BIT(M)` with bit-literal I/O | absent | low | refusal |
-| Spatial types | GEOMETRY/POINT/LINESTRING/POLYGON… | absent; SPATIAL INDEX parses and collapses to BTree (`Ast.fs:326–328`) | low | refusal |
+| Spatial indexes and operations | R-tree indexes, predicates, topology, geographic SRS axis rules | geometry values and common WKT/WKB accessors work; spatial indexes still collapse to BTree | low | refusal |
 | Generated columns | VIRTUAL recomputed on read, STORED materialized | both materialize at write time; no read-path recompute (`Storage.fs:3705–3713`) | low | divergence |
 | Functional defaults | `DEFAULT (expr)` | literal constants and CURRENT_TIMESTAMP only | low | refusal |
 | Column comments | tracked, shown in SHOW CREATE TABLE/I_S | accepted then dropped (`Parser.fs:1371`) | low | divergence |
@@ -435,7 +437,7 @@ implementation effort:
    correctness holds, but scale diverges sharply from MySQL past small data.
 2. Trigger coverage (BEFORE/UPDATE/DELETE, OLD.*, compound bodies) and
    updatable views — the two largest deliberate-subset cliffs.
-3. Missing function families (geometry, legacy/asymmetric crypto, and JSON Schema regexes) —
+3. Missing function families (legacy/asymmetric crypto and JSON Schema regexes) —
    each individually small, collectively frequent in
    report-style queries.
 4. LOAD DATA LOCAL INFILE and multi-statement packets — bulk-loading and

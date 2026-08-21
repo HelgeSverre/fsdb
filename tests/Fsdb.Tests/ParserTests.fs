@@ -915,6 +915,13 @@ let tests =
                     | CreateTable(_, [ { Type = TEnum [ "a"; "b" ] }; { Type = TSet [ "x"; "y" ] } ], [], [], [], false, _, _, _) -> ()
                     | other -> failtestf "expected enum/set types, got %A" other
 
+                testCase "spatial column types retain their concrete geometry kind"
+                <| fun _ ->
+                    match parseOk "CREATE TABLE t (g GEOMETRY, p POINT, l LINESTRING, po POLYGON, gc GEOMETRYCOLLECTION)" with
+                    | CreateTable(_, [ { Type = TGeometry Geometry }; { Type = TGeometry Point }; { Type = TGeometry LineString }
+                                       { Type = TGeometry Polygon }; { Type = TGeometry GeometryCollection } ], [], [], [], false, _, _, _) -> ()
+                    | other -> failtestf "expected spatial column types, got %A" other
+
                 testCase "CHAR/TEXT/BLOB family and TINY/MEDIUM/SMALL int variants all parse"
                 <| fun _ ->
                     match

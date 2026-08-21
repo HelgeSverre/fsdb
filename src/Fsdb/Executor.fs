@@ -1169,6 +1169,10 @@ let rec private metadataOfExpr (ctx: EvalContext) (expr: Expr) : ColumnMetadata 
         |> Option.orElse (simple TypeVarString)
     | SystemVariable _ -> simple TypeVarString
     | AssignUserVariable(_, value) -> metadataOfExpr ctx value
+    | Lit(VGeometry _) ->
+        Some { Value.columnMetadata TypeGeometry with
+                   ColumnLength = 4294967295u
+                   Flags = BlobFlag ||| BinaryFlag ||| NotNullFlag }
     | Col _
     | QualifiedCol _ -> tryColumnDefForExpr ctx expr |> Option.map ColumnWire.metadataOfColumn
     | BinOp((And | Or | Xor | Eq | Neq | Lt | Lte | Gt | Gte | NullSafeEq), _, _)
@@ -1252,6 +1256,16 @@ let rec private metadataOfExpr (ctx: EvalContext) (expr: Expr) : ColumnMetadata 
         | "JSON_SCHEMA_VALID", _ -> simple TypeLongLong
         | "JSON_SCHEMA_VALIDATION_REPORT", _ ->
             Some { Value.columnMetadata TypeVarString with ColumnLength = 4294967295u }
+        | ("ST_GEOMFROMTEXT" | "ST_GEOMETRYFROMTEXT" | "GEOMFROMTEXT" | "GEOMETRYFROMTEXT" | "ST_POINTFROMTEXT"
+          | "POINTFROMTEXT" | "ST_LINESTRINGFROMTEXT" | "ST_POLYGONFROMTEXT" | "ST_GEOMFROMWKB" | "ST_GEOMETRYFROMWKB"
+          | "GEOMFROMWKB" | "ST_POINTFROMWKB"), _ ->
+            Some { Value.columnMetadata TypeGeometry with ColumnLength = 4294967295u; Flags = BlobFlag ||| BinaryFlag }
+        | ("ST_ASTEXT" | "ST_ASWKT" | "ASTEXT" | "ST_GEOMETRYTYPE" | "GEOMETRYTYPE"), _ ->
+            Some { Value.columnMetadata TypeVarString with ColumnLength = 4294967295u }
+        | ("ST_ASWKB" | "ST_ASBINARY" | "ASBINARY"), _ ->
+            Some { Value.columnMetadata TypeBlob with ColumnLength = 4294967295u; Flags = BlobFlag ||| BinaryFlag }
+        | ("ST_SRID" | "ST_DIMENSION" | "DIMENSION" | "ST_ISEMPTY" | "ISEMPTY"), _ -> simple TypeLongLong
+        | ("ST_X" | "ST_Y" | "X" | "Y"), _ -> simple TypeDouble
         | ("JSON_QUOTE" | "JSON_PRETTY"), _ -> Some { Value.columnMetadata TypeVarString with ColumnLength = 4294967295u }
         | ("AES_ENCRYPT" | "AES_DECRYPT" | "COMPRESS" | "UNCOMPRESS" | "RANDOM_BYTES"), _ ->
             Some { Value.columnMetadata TypeBlob with ColumnLength = 4294967295u; Flags = BlobFlag ||| BinaryFlag }

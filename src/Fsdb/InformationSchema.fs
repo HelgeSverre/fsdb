@@ -99,6 +99,8 @@ let private dataTypeName (ty: ColumnType) : string =
     | TTime _ -> "time"
     | TYear -> "year"
     | TJson -> "json"
+    | TGeometry GeometryCollection -> "geomcollection"
+    | TGeometry kind -> geometryTypeName kind |> _.ToLowerInvariant()
     | TVector _ -> "vector"
 
 /// `information_schema.columns.column_type` — the full declared type text
@@ -142,6 +144,8 @@ let columnTypeText (ty: ColumnType) : string =
     | TTime fsp -> if fsp > 0 then sprintf "time(%d)" fsp else "time"
     | TYear -> "year(4)"
     | TJson -> "json"
+    | TGeometry GeometryCollection -> "geomcollection"
+    | TGeometry kind -> geometryTypeName kind |> _.ToLowerInvariant()
     // Always with the dimension — a bare `VECTOR` declaration reports its
     // implicit 2048, the way MySQL 9 echoes it back.
     | TVector dim -> sprintf "vector(%d)" dim
@@ -1647,6 +1651,7 @@ let private showCreateTableDDL (catalog: Catalog) (dbName: string) (t: Table) : 
             | TMediumBlob
             | TLongBlob
             | TJson
+            | TGeometry _
             | TVector _ -> true
             | _ -> false
 

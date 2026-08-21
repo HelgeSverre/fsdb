@@ -912,6 +912,10 @@ let coerceValue (strict: bool) (col: ColumnDef) (v: Value) : Result<Value, Stora
         // `json_col = CAST('"a"' AS JSON)` would be false and ORDER BY would
         // sort documents as text.
         | TJson -> charsetChecked (v |> toText |> Option.defaultValue "") |> Result.map VJson
+        | TGeometry requiredKind ->
+            match v with
+            | VGeometry geometry when requiredKind = Geometry || geometryKind geometry.Shape = requiredKind -> Ok(VGeometry geometry)
+            | _ -> fail ()
         | TSet values ->
             // Same 1265 "Data truncated" MySQL raises for a rejected ENUM
             // value, not TChar/TVarchar's plain string coercion — a SET only
@@ -1164,6 +1168,7 @@ let private encodeEqualityKey (columns: ColumnDef list) (indices: int list) (row
         | VDate value -> "T" + string value.DayNumber
         | VDateTime value -> "V" + string value.Ticks
         | VJson value -> "J" + value.TrimEnd(' ').ToUpperInvariant()
+        | VGeometry value -> "G" + Convert.ToHexString(geometryToMySqlBinary value)
 
     indices
         |> List.map encode
@@ -1929,6 +1934,22 @@ let private checkVectorKeyColumns (columns: ColumnDef list) (indexes: IndexDef l
             | Some name -> vectorKeyError name
             | None -> Ok()
 
+let private checkGeometryKeyColumns (columns: ColumnDef list) (indexes: IndexDef list) : Result<unit, StorageError> =
+    let isGeometry (column: ColumnDef) =
+        match column.Type with
+        | TGeometry _ -> true
+        | _ -> false
+
+    match columns |> List.tryFind (fun column -> isGeometry column && (column.PrimaryKey || column.Unique)) with
+    | Some _ -> Error(ExpressionError(3728, "Spatial indexes can't be primary or unique indexes."))
+    | None ->
+        indexes
+        |> List.collect _.Columns
+        |> List.tryFind (fun name -> columns |> List.exists (fun column -> isGeometry column && String.Equals(column.Name, name, StringComparison.OrdinalIgnoreCase)))
+        |> function
+            | Some _ -> Error(ExpressionError(1235, "This version of MySQL doesn't yet support 'SPATIAL indexes'"))
+            | None -> Ok()
+
 /// FULLTEXT indexes only cover text columns — CHAR/VARCHAR and the TEXT
 /// family — matching MySQL's 1283 for anything else.
 let private checkFullTextColumns (columns: ColumnDef list) (ix: IndexDef) : Result<unit, StorageError> =
@@ -2072,7 +2093,7 @@ let createTableSeeded
             | Error e -> Error e
             | Ok _ ->
 
-            match checkVectorKeyColumns columns indexes with
+            match checkVectorKeyColumns columns indexes |> Result.bind (fun () -> checkGeometryKeyColumns columns indexes) with
             | Error e -> Error e
             | Ok() ->
 
@@ -2210,6 +2231,7 @@ let private implicitZeroSeed (col: ColumnDef) : Result<Value, StorageError> =
     // The all-zeros vector at the column's declared dimension — the only
     // value `coerceValue`'s exact-length check would accept as a seed.
     | TVector dim -> Ok(VBytes(Array.zeroCreate (dim * 4)))
+    | TGeometry _ -> Error(ExpressionError(1364, sprintf "Field '%s' doesn't have a default value" col.Name))
     | TEnum _ -> Ok(VInt 1L)
     | TTime _ -> Ok(VString "00:00:00")
     | TDate -> Error(ZeroTemporalForColumn("date", "0000-00-00", col.Name))
@@ -2297,6 +2319,7 @@ let private applyAlterAction (strict: bool) (table: Table) (action: AlterAction)
         | AddColumn(col, _) ->
             validateColumnType col
             |> Result.bind (fun () -> checkVectorKeyColumns [ col ] [])
+            |> Result.bind (fun () -> checkGeometryKeyColumns [ col ] [])
         // Existing indexes reference the column by its pre-ALTER name, so a
         // type change into an already-indexed column must be checked under
         // the old name — otherwise MODIFY/CHANGE is a back door into a
@@ -2310,14 +2333,21 @@ let private applyAlterAction (strict: bool) (table: Table) (action: AlterAction)
 
             validateColumnType col
             |> Result.bind (fun () -> checkVectorKeyColumns [ { col with Name = oldName } ] table.Indexes)
+            |> Result.bind (fun () -> checkGeometryKeyColumns [ { col with Name = oldName } ] table.Indexes)
         // The key-introducing actions must refuse a VECTOR column the same
         // way CREATE TABLE does — otherwise ALTER is a back door into the
         // very keys `checkVectorKeyColumns` exists to forbid.
-        | AddIndex ix -> checkVectorKeyColumns table.Columns [ ix ]
+        | AddIndex ix ->
+            checkVectorKeyColumns table.Columns [ ix ]
+            |> Result.bind (fun () -> checkGeometryKeyColumns table.Columns [ ix ])
         | AddPrimaryKey cols ->
             checkVectorKeyColumns
                 (table.Columns |> List.map (fun c -> if List.contains c.Name cols then { c with PrimaryKey = true } else c))
                 []
+            |> Result.bind (fun () ->
+                checkGeometryKeyColumns
+                    (table.Columns |> List.map (fun c -> if List.contains c.Name cols then { c with PrimaryKey = true } else c))
+                    [])
         | _ -> Ok()
 
     match fspCheck with

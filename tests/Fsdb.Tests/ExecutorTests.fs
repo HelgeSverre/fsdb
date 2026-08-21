@@ -6971,6 +6971,33 @@ let tests =
                         | Result.Error _ -> ()
                         | Result.Ok other -> failtestf "expected a parse refusal for %s, got %A" sql other ]
 
+          testList
+              "spatial values"
+              [ testCase "a POINT column preserves WKT, SRID, and accessors"
+                <| fun _ ->
+                    let store = newStore ()
+                    runDefault store "CREATE TABLE places (shape POINT)" |> ignore
+                    runDefault store "INSERT INTO places VALUES (ST_GeomFromText('POINT(1.5 -2)', 4326))" |> ignore
+
+                    match runDefault store "SELECT ST_AsText(shape), ST_SRID(shape), ST_X(shape), ST_Y(shape) FROM places" with
+                    | ResultSet(_, [ [ Some "POINT(1.5 -2)"; Some "4326"; Some "1.5"; Some "-2" ] ]) -> ()
+                    | other -> failtestf "expected spatial accessors, got %A" other
+
+                testCase "a concrete spatial column rejects a geometry of another type"
+                <| fun _ ->
+                    let store = newStore ()
+                    runDefault store "CREATE TABLE places (shape POINT)" |> ignore
+
+                    match runDefault store "INSERT INTO places VALUES (ST_GeomFromText('LINESTRING(0 0,1 1)'))" with
+                    | Err(1366, _) -> ()
+                    | other -> failtestf "expected type coercion error, got %A" other
+
+                testCase "spatial columns refuse primary and secondary indexes"
+                <| fun _ ->
+                    match runDefault (newStore ()) "CREATE TABLE places (shape POINT PRIMARY KEY)" with
+                    | Err(3728, _) -> ()
+                    | other -> failtestf "expected spatial primary key refusal, got %A" other ]
+
           // Expectations read off the MySQL 8.4.11 oracle over
           //   t = (1,10,1) (2,20,1) (3,30,2) (4,40,2) (5,50,2)  [id, v, g]
           testList

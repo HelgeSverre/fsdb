@@ -97,13 +97,55 @@ let tests =
                           VBytes [| 0uy; 255uy; 1uy |]
                           VDate(DateOnly(2024, 3, 5))
                           VDateTime(DateTime(2024, 3, 5, 13, 45, 9, 123))
-                          VJson "{\"a\":1}" ]
+                          VJson "{\"a\":1}"
+                          VGeometry(tryGeometryFromText 4326 "POINT(1.5 -2)" |> Option.get) ]
 
                     for v in values do
                         Expect.equal (ofWire (toWire v)) v (sprintf "round-trip of %A" v)
 
                 testCase "ofWire throws on an unrecognized tag"
                 <| fun _ -> Expect.throws (fun () -> ofWire "?garbage" |> ignore) "bad tag" ]
+
+          testList
+              "geometry"
+              [ testCase "WKT constructors preserve type, coordinates, and SRID through WKB"
+                <| fun _ ->
+                    let geometry = call "ST_GeomFromText" [ VString "POINT(1.5 -2)"; VInt 4326L ]
+
+                    Expect.equal (call "ST_AsText" [ geometry ]) (VString "POINT(1.5 -2)") "canonical WKT"
+                    Expect.equal (call "ST_SRID" [ geometry ]) (VInt 4326L) "SRID"
+                    Expect.equal (call "ST_GeometryType" [ geometry ]) (VString "POINT") "type"
+                    Expect.equal (call "ST_X" [ geometry ]) (VDouble 1.5) "x"
+                    Expect.equal (call "ST_Y" [ geometry ]) (VDouble -2.0) "y"
+                    Expect.equal
+                        (call "ST_AsWKB" [ geometry ])
+                        (VBytes(Convert.FromHexString "0101000000000000000000F83F00000000000000C0"))
+                        "WKB excludes the SRID"
+                    Expect.equal
+                        (call "ST_AsText" [ call "ST_GeomFromWKB" [ call "ST_AsWKB" [ geometry ]; VInt 4326L ] ])
+                        (VString "POINT(1.5 -2)")
+                        "WKB round-trip"
+
+                testCase "geometry collections retain nested shapes and dimensions"
+                <| fun _ ->
+                    let geometry = call "ST_GeomFromText" [ VString "GEOMETRYCOLLECTION(POINT(1 2),LINESTRING(0 0,1 1))" ]
+
+                    Expect.equal (call "ST_GeometryType" [ geometry ]) (VString "GEOMCOLLECTION") "collection spelling"
+                    Expect.equal (call "ST_Dimension" [ geometry ]) (VInt 1L) "highest member dimension"
+                    Expect.equal (call "ST_IsEmpty" [ geometry ]) (VInt 0L) "not empty"
+
+                testCase "an empty geometry collection retains its type"
+                <| fun _ ->
+                    let geometry = call "ST_GeomFromText" [ VString "GEOMETRYCOLLECTION EMPTY" ]
+
+                    Expect.equal (call "ST_AsText" [ geometry ]) (VString "GEOMETRYCOLLECTION EMPTY") "empty WKT"
+                    Expect.equal (call "ST_Dimension" [ geometry ]) (VInt -1L) "empty dimension"
+                    Expect.equal (call "ST_IsEmpty" [ geometry ]) (VInt 1L) "empty flag"
+
+                testCase "WKT rejects incomplete lines and open polygon rings"
+                <| fun _ ->
+                    Expect.isNone (tryGeometryFromText 0 "LINESTRING(1 2)") "line needs two points"
+                    Expect.isNone (tryGeometryFromText 0 "POLYGON((0 0,0 1,1 1,2 2))") "ring must close" ]
 
           testList
               "mysqlTypeOf"

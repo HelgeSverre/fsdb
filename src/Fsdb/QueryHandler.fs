@@ -153,6 +153,7 @@ let valueToSqlLiteral (v: Value) : string =
     | VDateTime _
     | VString _
     | VJson _ -> "'" + escapeSqlString (v |> toText |> Option.defaultValue "") + "'"
+    | VGeometry geometry -> "ST_GeomFromWKB(X'" + Convert.ToHexString(geometryToWkb geometry) + "', " + string geometry.Srid + ")"
 
 /// Whether a scope prefix means GLOBAL. The SET grammar includes the `@@`
 /// sigil while expression parsing keeps it separate, so GLOBAL can begin at

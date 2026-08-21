@@ -4,11 +4,376 @@
 module Fsdb.Value
 
 open System
+open System.Buffers.Binary
 open System.Globalization
 open System.Text.Json
 open System.Text.Json.Nodes
 open System.Text.RegularExpressions
 open Fsdb.Binary
+
+type GeometryKind =
+    | Geometry
+    | Point
+    | LineString
+    | Polygon
+    | MultiPoint
+    | MultiLineString
+    | MultiPolygon
+    | GeometryCollection
+
+type GeometryShape =
+    | GEmpty of GeometryKind
+    | GPoint of float * float
+    | GLineString of (float * float) list
+    | GPolygon of (float * float) list list
+    | GMultiPoint of (float * float) list
+    | GMultiLineString of ((float * float) list) list
+    | GMultiPolygon of ((float * float) list list) list
+    | GGeometryCollection of Geometry list
+
+and Geometry =
+    { Srid: int
+      Shape: GeometryShape }
+
+let geometryKind = function
+    | GEmpty kind -> kind
+    | GPoint _ -> Point
+    | GLineString _ -> LineString
+    | GPolygon _ -> Polygon
+    | GMultiPoint _ -> MultiPoint
+    | GMultiLineString _ -> MultiLineString
+    | GMultiPolygon _ -> MultiPolygon
+    | GGeometryCollection _ -> GeometryCollection
+
+let geometryTypeCode = function
+    | Point -> 1
+    | LineString -> 2
+    | Polygon -> 3
+    | MultiPoint -> 4
+    | MultiLineString -> 5
+    | MultiPolygon -> 6
+    | GeometryCollection -> 7
+    | Geometry -> invalidArg "kind" "GEOMETRY is a column supertype, not a WKB shape"
+
+let geometryTypeName = function
+    | Geometry -> "GEOMETRY"
+    | Point -> "POINT"
+    | LineString -> "LINESTRING"
+    | Polygon -> "POLYGON"
+    | MultiPoint -> "MULTIPOINT"
+    | MultiLineString -> "MULTILINESTRING"
+    | MultiPolygon -> "MULTIPOLYGON"
+    | GeometryCollection -> "GEOMETRYCOLLECTION"
+
+let private formatCoordinate (value: float) = value.ToString("G17", CultureInfo.InvariantCulture)
+
+let rec geometryToText (geometry: Geometry) : string =
+    let pair (x, y) = formatCoordinate x + " " + formatCoordinate y
+    let pairs points = points |> List.map pair |> String.concat ","
+    let rings polygon = polygon |> List.map (fun ring -> "(" + pairs ring + ")") |> String.concat ","
+
+    match geometry.Shape with
+    | GEmpty kind -> geometryTypeName kind + " EMPTY"
+    | GPoint(x, y) -> "POINT(" + pair (x, y) + ")"
+    | GLineString points -> "LINESTRING(" + pairs points + ")"
+    | GPolygon polygon -> "POLYGON(" + rings polygon + ")"
+    | GMultiPoint points -> "MULTIPOINT(" + (points |> List.map (pair >> fun point -> "(" + point + ")") |> String.concat ",") + ")"
+    | GMultiLineString lines -> "MULTILINESTRING(" + (lines |> List.map (fun line -> "(" + pairs line + ")") |> String.concat ",") + ")"
+    | GMultiPolygon polygons -> "MULTIPOLYGON(" + (polygons |> List.map (fun polygon -> "(" + rings polygon + ")") |> String.concat ",") + ")"
+    | GGeometryCollection geometries -> "GEOMETRYCOLLECTION(" + (geometries |> List.map geometryToText |> String.concat ",") + ")"
+
+type private WktToken =
+    | WktWord of string
+    | WktNumber of float
+    | WktOpen
+    | WktClose
+    | WktComma
+
+let private tokenizeWkt (text: string) : WktToken list option =
+    let tokens = ResizeArray<WktToken>()
+    let mutable index = 0
+    let mutable valid = true
+
+    while valid && index < text.Length do
+        match text.[index] with
+        | c when Char.IsWhiteSpace c -> index <- index + 1
+        | '(' -> tokens.Add WktOpen; index <- index + 1
+        | ')' -> tokens.Add WktClose; index <- index + 1
+        | ',' -> tokens.Add WktComma; index <- index + 1
+        | c when Char.IsLetter c ->
+            let start = index
+
+            while index < text.Length && Char.IsLetter text.[index] do
+                index <- index + 1
+
+            tokens.Add(WktWord(text.Substring(start, index - start).ToUpperInvariant()))
+        | c when Char.IsDigit c || c = '+' || c = '-' || c = '.' ->
+            let start = index
+
+            while index < text.Length &&
+                  (Char.IsDigit text.[index] || text.[index] = '+' || text.[index] = '-' || text.[index] = '.' || text.[index] = 'e' || text.[index] = 'E') do
+                index <- index + 1
+
+            match Double.TryParse(text.Substring(start, index - start), NumberStyles.Float, CultureInfo.InvariantCulture) with
+            | true, value when Double.IsFinite value -> tokens.Add(WktNumber value)
+            | _ -> valid <- false
+        | _ -> valid <- false
+
+    if valid then Some(List.ofSeq tokens) else None
+
+let tryGeometryFromText (srid: int) (text: string) : Geometry option =
+    let samePoint (x1, y1) (x2, y2) = x1 = x2 && y1 = y2
+
+    let validLine points = List.length points >= 2
+    let validPolygon rings =
+        not (List.isEmpty rings)
+        && rings |> List.forall (fun ring -> List.length ring >= 4 && samePoint (List.head ring) (List.last ring))
+
+    let rec isValidWktShape = function
+        | GEmpty GeometryCollection -> true
+        | GEmpty _ -> false
+        | GPoint _ -> true
+        | GLineString points -> validLine points
+        | GPolygon rings -> validPolygon rings
+        | GMultiPoint points -> not (List.isEmpty points)
+        | GMultiLineString lines -> not (List.isEmpty lines) && lines |> List.forall validLine
+        | GMultiPolygon polygons -> not (List.isEmpty polygons) && polygons |> List.forall validPolygon
+        | GGeometryCollection geometries -> geometries |> List.forall (fun geometry -> isValidWktShape geometry.Shape)
+
+    let rec parseShape (tokens: WktToken array) depth index : (GeometryShape * int) option =
+        let readPair index =
+            if index + 1 < tokens.Length then
+                match tokens.[index], tokens.[index + 1] with
+                | WktNumber x, WktNumber y -> Some((x, y), index + 2)
+                | _ -> None
+            else
+                None
+
+        let parseDelimited parseOne index =
+            if index >= tokens.Length || tokens.[index] <> WktOpen then
+                None
+            else
+                let rec loop values cursor =
+                    if cursor >= tokens.Length then
+                        None
+                    elif tokens.[cursor] = WktClose then
+                        Some(List.rev values, cursor + 1)
+                    else
+                        match parseOne cursor with
+                        | Some(value, next) when next < tokens.Length && tokens.[next] = WktComma -> loop (value :: values) (next + 1)
+                        | Some(value, next) when next < tokens.Length && tokens.[next] = WktClose -> Some(List.rev (value :: values), next + 1)
+                        | _ -> None
+
+                loop [] (index + 1)
+
+        let parsePoint index = readPair index
+        let parseSinglePoint index =
+            parseDelimited parsePoint index
+            |> Option.bind (function
+                | [ point ], next -> Some(point, next)
+                | _ -> None)
+
+        let parseLine index = parseDelimited parsePoint index
+        let parsePolygon index = parseDelimited parseLine index
+
+        if depth > 64 || index >= tokens.Length then
+            None
+        else
+            match tokens.[index] with
+            | WktWord name when index + 1 < tokens.Length && tokens.[index + 1] = WktWord "EMPTY" ->
+                match name with
+                | "GEOMETRYCOLLECTION" -> Some(GEmpty GeometryCollection, index + 2)
+                | _ -> None
+            | WktWord "POINT" -> parseSinglePoint (index + 1) |> Option.map (fun ((x, y), next) -> GPoint(x, y), next)
+            | WktWord "LINESTRING" -> parseLine (index + 1) |> Option.map (fun (line, next) -> GLineString line, next)
+            | WktWord "POLYGON" -> parsePolygon (index + 1) |> Option.map (fun (polygon, next) -> GPolygon polygon, next)
+            | WktWord "MULTIPOINT" ->
+                parseDelimited (fun cursor ->
+                    if cursor < tokens.Length && tokens.[cursor] = WktOpen then
+                        parsePoint (cursor + 1)
+                        |> Option.bind (fun (point, next) -> if next < tokens.Length && tokens.[next] = WktClose then Some(point, next + 1) else None)
+                    else
+                        parsePoint cursor) (index + 1)
+                |> Option.map (fun (points, next) -> GMultiPoint points, next)
+            | WktWord "MULTILINESTRING" ->
+                parseDelimited parseLine (index + 1) |> Option.map (fun (lines, next) -> GMultiLineString lines, next)
+            | WktWord "MULTIPOLYGON" ->
+                parseDelimited parsePolygon (index + 1) |> Option.map (fun (polygons, next) -> GMultiPolygon polygons, next)
+            | WktWord "GEOMETRYCOLLECTION" ->
+                parseDelimited (fun cursor -> parseShape tokens (depth + 1) cursor |> Option.map (fun (shape, next) -> { Srid = srid; Shape = shape }, next)) (index + 1)
+                |> Option.map (fun (geometries, next) -> GGeometryCollection geometries, next)
+            | _ -> None
+
+    tokenizeWkt text
+    |> Option.bind (fun tokens ->
+        let tokens = List.toArray tokens
+
+        match parseShape tokens 0 0 with
+        | Some(shape, next) when next = tokens.Length && isValidWktShape shape -> Some { Srid = srid; Shape = shape }
+        | _ -> None)
+
+let geometryToWkb (geometry: Geometry) : byte[] =
+    let writer = Writer()
+
+    let rec writeGeometry shape =
+        let writePair (x, y) = writer.WriteDoubleLE x; writer.WriteDoubleLE y
+        let writePairs pairs = writer.WriteInt32LE(List.length pairs); pairs |> List.iter writePair
+        let writeHeader kind = writer.WriteByte 1uy; writer.WriteInt32LE(geometryTypeCode kind)
+
+        match shape with
+        | GEmpty Point -> writeHeader Point; writePair (Double.NaN, Double.NaN)
+        | GEmpty LineString -> writeHeader LineString; writer.WriteInt32LE 0
+        | GEmpty Polygon -> writeHeader Polygon; writer.WriteInt32LE 0
+        | GEmpty MultiPoint -> writeHeader MultiPoint; writer.WriteInt32LE 0
+        | GEmpty MultiLineString -> writeHeader MultiLineString; writer.WriteInt32LE 0
+        | GEmpty MultiPolygon -> writeHeader MultiPolygon; writer.WriteInt32LE 0
+        | GEmpty GeometryCollection -> writeHeader GeometryCollection; writer.WriteInt32LE 0
+        | GEmpty Geometry -> invalidArg "shape" "GEOMETRY is not a concrete shape"
+        | GPoint(x, y) -> writeHeader Point; writePair (x, y)
+        | GLineString points -> writeHeader LineString; writePairs points
+        | GPolygon polygon ->
+            writeHeader Polygon
+            writer.WriteInt32LE(List.length polygon)
+            polygon |> List.iter writePairs
+        | GMultiPoint points ->
+            writeHeader MultiPoint
+            writer.WriteInt32LE(List.length points)
+            points |> List.iter (fun (x, y) -> writeGeometry (GPoint(x, y)))
+        | GMultiLineString lines ->
+            writeHeader MultiLineString
+            writer.WriteInt32LE(List.length lines)
+            lines |> List.iter (fun line -> writeGeometry (GLineString line))
+        | GMultiPolygon polygons ->
+            writeHeader MultiPolygon
+            writer.WriteInt32LE(List.length polygons)
+            polygons |> List.iter (fun polygon -> writeGeometry (GPolygon polygon))
+        | GGeometryCollection geometries ->
+            writeHeader GeometryCollection
+            writer.WriteInt32LE(List.length geometries)
+            geometries |> List.iter (fun nested -> writeGeometry nested.Shape)
+
+    writeGeometry geometry.Shape
+    writer.ToArray()
+
+let geometryToMySqlBinary (geometry: Geometry) : byte[] =
+    let writer = Writer()
+    writer.WriteInt32LE geometry.Srid
+    writer.WriteBytes(geometryToWkb geometry)
+    writer.ToArray()
+
+let tryGeometryFromWkb (srid: int) (bytes: byte[]) : Geometry option =
+    let mutable position = 0
+
+    let take count =
+        if count < 0 || position + count > bytes.Length then
+            None
+        else
+            let start = position
+            position <- position + count
+            Some(start, count)
+
+    let readByte () = take 1 |> Option.map (fun (start, _) -> bytes.[start])
+
+    let readInt32 littleEndian =
+        take 4
+        |> Option.map (fun (start, _) ->
+            let span = ReadOnlySpan(bytes, start, 4)
+            if littleEndian then BinaryPrimitives.ReadInt32LittleEndian span else BinaryPrimitives.ReadInt32BigEndian span)
+
+    let readDouble littleEndian =
+        take 8
+        |> Option.map (fun (start, _) ->
+            let span = ReadOnlySpan(bytes, start, 8)
+            let bits = if littleEndian then BinaryPrimitives.ReadInt64LittleEndian span else BinaryPrimitives.ReadInt64BigEndian span
+            BitConverter.Int64BitsToDouble bits)
+
+    let finitePair (x, y) = Double.IsFinite x && Double.IsFinite y
+
+    let rec readGeometry depth : GeometryShape option =
+        match readByte () with
+        | Some 0uy
+        | Some 1uy as order ->
+            let littleEndian = order = Some 1uy
+
+            match readInt32 littleEndian with
+            | Some typeCode when typeCode >= 1 && typeCode <= 7 ->
+                let readPair () =
+                    match readDouble littleEndian, readDouble littleEndian with
+                    | Some x, Some y -> Some(x, y)
+                    | _ -> None
+
+                let readMany readOne =
+                    match readInt32 littleEndian with
+                    | Some count when count >= 0 && count <= (bytes.Length - position) ->
+                        let rec loop remaining values =
+                            if remaining = 0 then Some(List.rev values)
+                            else readOne () |> Option.bind (fun value -> loop (remaining - 1) (value :: values))
+
+                        loop count []
+                    | _ -> None
+
+                if depth > 64 then
+                    None
+                else
+                    match typeCode with
+                    | 1 ->
+                        readPair ()
+                        |> Option.bind (fun (x, y) ->
+                            if Double.IsNaN x && Double.IsNaN y then Some(GEmpty Point)
+                            elif finitePair (x, y) then Some(GPoint(x, y))
+                            else None)
+                    | 2 ->
+                        readMany readPair
+                        |> Option.bind (fun points ->
+                            if not (points |> List.forall finitePair) then None
+                            elif List.isEmpty points then Some(GEmpty LineString)
+                            else Some(GLineString points))
+                    | 3 ->
+                        readMany (fun () -> readMany readPair)
+                        |> Option.bind (fun rings ->
+                            if not (rings |> List.forall (List.forall finitePair)) then None
+                            elif List.isEmpty rings then Some(GEmpty Polygon)
+                            else Some(GPolygon rings))
+                    | 4 ->
+                        readMany (fun () -> readGeometry (depth + 1))
+                        |> Option.bind (fun shapes ->
+                            shapes
+                            |> List.fold (fun points shape ->
+                                match points, shape with
+                                | Some values, GPoint(x, y) -> Some((x, y) :: values)
+                                | _ -> None) (Some [])
+                            |> Option.map (fun points -> if List.isEmpty points then GEmpty MultiPoint else GMultiPoint(List.rev points)))
+                    | 5 ->
+                        readMany (fun () -> readGeometry (depth + 1))
+                        |> Option.bind (fun shapes ->
+                            shapes
+                            |> List.fold (fun lines shape ->
+                                match lines, shape with
+                                | Some values, GLineString line -> Some(line :: values)
+                                | Some values, GEmpty LineString -> Some([] :: values)
+                                | _ -> None) (Some [])
+                            |> Option.map (fun lines -> if List.isEmpty lines then GEmpty MultiLineString else GMultiLineString(List.rev lines)))
+                    | 6 ->
+                        readMany (fun () -> readGeometry (depth + 1))
+                        |> Option.bind (fun shapes ->
+                            shapes
+                            |> List.fold (fun polygons shape ->
+                                match polygons, shape with
+                                | Some values, GPolygon polygon -> Some(polygon :: values)
+                                | Some values, GEmpty Polygon -> Some([] :: values)
+                                | _ -> None) (Some [])
+                            |> Option.map (fun polygons -> if List.isEmpty polygons then GEmpty MultiPolygon else GMultiPolygon(List.rev polygons)))
+                    | 7 ->
+                        readMany (fun () -> readGeometry (depth + 1))
+                        |> Option.map (fun shapes ->
+                            if List.isEmpty shapes then GEmpty GeometryCollection
+                            else shapes |> List.map (fun shape -> { Srid = srid; Shape = shape }) |> GGeometryCollection)
+                    | _ -> None
+            | _ -> None
+        | _ -> None
+
+    readGeometry 0
+    |> Option.bind (fun shape -> if position = bytes.Length then Some { Srid = srid; Shape = shape } else None)
 
 type Value =
     | VNull
@@ -28,6 +393,7 @@ type Value =
     /// Raw JSON text — ponytail: no parsed representation yet, add one
     /// (JVal DU or similar) when JSON_EXTRACT-style path queries land.
     | VJson of string
+    | VGeometry of Geometry
 
 // MySQL wire protocol column type ids — shared by `Protocol`'s column
 // definition packets (a resultset's declared type) and its binary-protocol
@@ -54,6 +420,7 @@ let TypeNewDecimal = 0xf6uy
 let TypeBlob = 0xfcuy
 let TypeVarString = 0xfduy
 let TypeString = 0xfeuy
+let TypeGeometry = 0xffuy
 
 let NotNullFlag = 0x0001us
 let PrimaryKeyFlag = 0x0002us
@@ -131,6 +498,7 @@ let toText (v: Value) : string option =
         let baseStr = dt.ToString("yyyy-MM-dd HH:mm:ss", CultureInfo.InvariantCulture)
         Some(if micros = 0L then baseStr else sprintf "%s.%06d" baseStr micros)
     | VJson j -> Some j
+    | VGeometry geometry -> Some(Text.Encoding.Latin1.GetString(geometryToMySqlBinary geometry))
 
 /// Renders a value at a declared fractional-seconds precision (fsp 0-6),
 /// for a column whose schema says `DATETIME(fsp)`/`TIMESTAMP(fsp)` — exactly
@@ -176,6 +544,7 @@ let toWire (v: Value) : string =
     // sub-second precision.
     | VDateTime dt -> "V" + dt.ToString("O", CultureInfo.InvariantCulture)
     | VJson j -> "J" + b64 j
+    | VGeometry geometry -> "G" + Convert.ToBase64String(geometryToMySqlBinary geometry)
 
 /// Inverse of `toWire`. Throws on malformed input rather than coercing.
 let ofWire (s: string) : Value =
@@ -196,6 +565,17 @@ let ofWire (s: string) : Value =
         | 'T' -> VDate(DateOnly.Parse(payload, CultureInfo.InvariantCulture))
         | 'V' -> VDateTime(DateTime.Parse(payload, CultureInfo.InvariantCulture, DateTimeStyles.RoundtripKind))
         | 'J' -> VJson(unb64 payload)
+        | 'G' ->
+            let bytes = Convert.FromBase64String payload
+
+            if bytes.Length < 5 then
+                failwith "Value.ofWire: geometry payload is too short"
+
+            let srid = BinaryPrimitives.ReadInt32LittleEndian(ReadOnlySpan(bytes, 0, 4))
+
+            match tryGeometryFromWkb srid bytes.[4..] with
+            | Some geometry -> VGeometry geometry
+            | None -> failwith "Value.ofWire: invalid geometry payload"
         | tag -> failwithf "Value.ofWire: unknown tag '%c' in %s" tag s
 
 /// Binary encoding of a `Value`, mirroring `toWire`'s tag scheme but
@@ -238,6 +618,9 @@ let encodeValue (w: Writer) (v: Value) : unit =
     | VJson j ->
         w.WriteByte 0x08uy
         w.WriteLenEncString j
+    | VGeometry geometry ->
+        w.WriteByte 0x0Auy
+        w.WriteLenEncBytes(geometryToMySqlBinary geometry)
 
 /// Inverse of `encodeValue`. Throws on malformed input, same contract as
 /// `ofWire`.
@@ -268,6 +651,20 @@ let decodeValue (r: #IReader) : Value =
 
         VDateTime(new DateTime(ticks, kind))
     | 0x08uy -> VJson(r.ReadLenEncString() |> Option.defaultValue "")
+    | 0x0Auy ->
+        let bytes =
+            r.ReadLenEncInt()
+            |> Option.map (fun length -> r.ReadBytes(int length))
+            |> Option.defaultValue [||]
+
+        if bytes.Length < 5 then
+            failwith "Value.decodeValue: geometry payload is too short"
+
+        let srid = BinaryPrimitives.ReadInt32LittleEndian(ReadOnlySpan(bytes, 0, 4))
+
+        match tryGeometryFromWkb srid bytes.[4..] with
+        | Some geometry -> VGeometry geometry
+        | None -> failwith "Value.decodeValue: invalid geometry payload"
     | tag -> failwithf "Value.decodeValue: unknown tag 0x%02x" tag
 
 /// The MySQL wire type this value's runtime shape reports as, so a
@@ -292,6 +689,7 @@ let mysqlMetadataOf (v: Value) : ColumnMetadata =
     | VDecimal _ -> columnMetadata TypeNewDecimal
     | VString _
     | VJson _ -> columnMetadata TypeVarString
+    | VGeometry _ -> { columnMetadata TypeGeometry with Flags = BlobFlag ||| BinaryFlag }
     | VBytes _ -> { columnMetadata TypeBlob with Flags = BlobFlag ||| BinaryFlag }
     | VDate _ -> columnMetadata TypeDate
     | VDateTime _ -> columnMetadata TypeDateTime
@@ -329,7 +727,8 @@ let toDouble (v: Value) : float =
     | VBytes _
     | VDate _
     | VDateTime _
-    | VJson _ -> v |> toText |> Option.map parseLeadingNumeric |> Option.defaultValue 0.0
+    | VJson _
+    | VGeometry _ -> v |> toText |> Option.map parseLeadingNumeric |> Option.defaultValue 0.0
 
 /// String comparison matching MySQL 8's default collation,
 /// utf8mb4_0900_ai_ci: case-insensitive ("ai" is accent-insensitive, which
@@ -421,6 +820,7 @@ let private asJsonOperand (v: Value) : int * JsonNode =
     | VDate _ -> 6, null
     | VDateTime _ -> 8, null
     | VBytes _ -> 11, null
+    | VGeometry _ -> 11, null
     | VNull -> 0, null
 
 /// A JSON number's exact value where `decimal` can hold it (so two BIGINTs
@@ -517,6 +917,7 @@ let rec compare (a: Value) (b: Value) : int =
     // character collation the generic text fallback below would apply.
     | VBytes x, VString s -> compareBytesLex x (Text.Encoding.UTF8.GetBytes s)
     | VString s, VBytes y -> compareBytesLex (Text.Encoding.UTF8.GetBytes s) y
+    | VGeometry x, VGeometry y -> compareBytesLex (geometryToMySqlBinary x) (geometryToMySqlBinary y)
     | VDate x, VDate y -> Operators.compare x y
     | VDateTime x, VDateTime y -> Operators.compare x y
     | VDate x, VDateTime y -> Operators.compare (x.ToDateTime(TimeOnly.MinValue)) y
@@ -636,7 +1037,8 @@ let private classify (v: Value) : NumKind option =
     | VBytes _
     | VDate _
     | VDateTime _
-    | VJson _ -> Some(KDouble(toDouble v))
+    | VJson _
+    | VGeometry _ -> Some(KDouble(toDouble v))
 
 let private asDouble =
     function
