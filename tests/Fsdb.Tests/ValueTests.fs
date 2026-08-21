@@ -290,6 +290,8 @@ let tests =
                     Expect.equal (valid "POLYGON((0 0,2 2,0 2,2 0,0 0))") (VInt 0L) "self crossing ring"
                     Expect.equal (valid "POLYGON((0 0,4 0,4 4,0 4,0 0),(5 5,6 5,6 6,5 6,5 5))") (VInt 0L) "exterior hole"
                     Expect.equal (valid "POLYGON((0 0,4 0,4 4,0 4,0 0),(0 1,2 1,2 2,0 2,0 1))") (VInt 0L) "touching hole"
+                    Expect.equal (valid "MULTIPOLYGON(((0 0,4 0,4 4,0 4,0 0)),((4 4,8 4,8 8,4 8,4 4)))") (VInt 1L) "vertex-touching components"
+                    Expect.equal (valid "MULTIPOLYGON(((0 0,4 0,4 4,0 4,0 0)),((2 2,6 2,6 6,2 6,2 2)))") (VInt 0L) "overlapping components"
                     Expect.equal (valid "MULTIPOINT((0 0),(0 0))") (VInt 1L) "duplicate point" ]
 
           testList

@@ -512,6 +512,28 @@ let private ringsIntersect first second =
     |> segments
     |> List.exists (fun firstSegment -> second |> segments |> List.exists (segmentsIntersect firstSegment))
 
+let private ringsCrossOrOverlap first second =
+    let endpointIsInterior point (startPoint, endPoint) =
+        pointOnSegment point (startPoint, endPoint) && point <> startPoint && point <> endPoint
+
+    first
+    |> segments
+    |> List.exists (fun ((firstStart, firstEnd) as firstSegment) ->
+        second
+        |> segments
+        |> List.exists (fun ((secondStart, secondEnd) as secondSegment) ->
+            let sharedEndpoints =
+                [ firstStart; firstEnd ]
+                |> List.filter (fun point -> point = secondStart || point = secondEnd)
+                |> List.distinct
+
+            segmentsIntersect firstSegment secondSegment
+            && (sharedEndpoints.Length <> 1
+                || endpointIsInterior firstStart secondSegment
+                || endpointIsInterior firstEnd secondSegment
+                || endpointIsInterior secondStart firstSegment
+                || endpointIsInterior secondEnd firstSegment)))
+
 let private polygonIsValid rings =
     match rings with
     | shell :: holes ->
@@ -563,7 +585,7 @@ let rec private shapeIsValid = function
                 |> List.forall (fun second ->
                     let firstShell = first.Head
                     let secondShell = second.Head
-                    not (ringsIntersect firstShell secondShell)
+                    not (ringsCrossOrOverlap firstShell secondShell)
                     && not (pointStrictlyInRing firstShell.Head secondShell)
                     && not (pointStrictlyInRing secondShell.Head firstShell)))
 
