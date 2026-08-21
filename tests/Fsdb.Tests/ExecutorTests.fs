@@ -6415,6 +6415,16 @@ let tests =
                         "SELECT HEX(b'0101') a, HEX(B'111111111') b, HEX(0b0101) c, LENGTH(b'0101') d, HEX(b'') e, N'héllo' f"
                         [ Some "05"; Some "01FF"; Some "05"; Some "1"; Some ""; Some "héllo" ]
 
+                testCase "BIT values retain their raw bytes in byte-oriented functions"
+                <| fun _ ->
+                    let store = newStore ()
+                    runDefault store "CREATE TABLE bits (value BIT(64))" |> ignore
+                    runDefault store "INSERT INTO bits VALUES (0x8000000000000000)" |> ignore
+
+                    match runDefault store "SELECT HEX(value), LENGTH(value), BIT_LENGTH(value), TO_BASE64(value) FROM bits" with
+                    | ResultSet(_, [ [ Some "8000000000000000"; Some "8"; Some "64"; Some "gAAAAAAAAAA=" ] ]) -> ()
+                    | other -> failtestf "expected raw BIT bytes, got %A" other
+
                 testCase "SOUNDS LIKE and MEMBER OF follow MySQL comparison semantics"
                 <| fun _ ->
                     expectRow

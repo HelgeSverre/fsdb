@@ -134,6 +134,22 @@ let tests =
               let reloaded = load dir
               Expect.equal (rowsOf reloaded defaultDatabase "places") [ [| point |] ] "geometry row survives WAL replay"
 
+          testCase "attach + reload preserves BIT(64) boundary values"
+          <| fun _ ->
+              let dir = tempDataDir ()
+              let store = load dir
+              attach dir store
+              createTable store defaultDatabase "bits" [ mkCol "value" (TBit 64) ] [] [] None None |> ignore
+              insertRows store defaultDatabase "bits" None [ [ VUInt 0x8000000000000000UL ]; [ VUInt UInt64.MaxValue ] ] |> ignore
+
+              let expected = [ [| VBit(64, 0x8000000000000000UL) |]; [| VBit(64, UInt64.MaxValue) |] ]
+              let walOnly = load dir
+              Expect.equal (rowsOf walOnly defaultDatabase "bits") expected "WAL replay preserves BIT values"
+
+              snapshotNow dir store
+              let snapshotted = load dir
+              Expect.equal (rowsOf snapshotted defaultDatabase "bits") expected "snapshot replay preserves BIT values"
+
           testCase "WAL replay reapplies a non-strict clamping ALTER MODIFY instead of skipping it"
           <| fun _ ->
               // The replayed store starts strict (fresh-store default);

@@ -185,6 +185,7 @@ let private req (v: Value) : string = v |> toText |> Option.defaultValue ""
 let private toUInt64 (v: Value) : uint64 =
     match v with
     | VUInt u -> u
+    | VBit(_, value) -> value
     | VInt i -> uint64 i
     | _ ->
         let d = toDouble v
@@ -217,8 +218,10 @@ let private roundNumeric (v: Value) : Value =
 let private lengthFn: Scalar =
     function
     | [ VNull ] -> VNull
-    | [ VBytes b ] -> VInt(int64 b.Length)
-    | [ v ] -> v |> toText |> Option.defaultValue "" |> Text.Encoding.UTF8.GetByteCount |> int64 |> VInt
+    | [ value ] ->
+        match tryRawBytes value with
+        | Some bytes -> VInt(int64 bytes.Length)
+        | None -> value |> toText |> Option.defaultValue "" |> Text.Encoding.UTF8.GetByteCount |> int64 |> VInt
     | _ -> VNull
 
 /// `CHAR_LENGTH` counts Unicode code points, not UTF-16 units — a surrogate
@@ -241,8 +244,10 @@ let private charLengthFn: Scalar =
 let private bitLengthFn: Scalar =
     function
     | [ VNull ] -> VNull
-    | [ VBytes bytes ] -> VInt(int64 bytes.Length * 8L)
-    | [ value ] -> VInt(int64 (Text.Encoding.UTF8.GetByteCount(req value)) * 8L)
+    | [ value ] ->
+        match tryRawBytes value with
+        | Some bytes -> VInt(int64 bytes.Length * 8L)
+        | None -> VInt(int64 (Text.Encoding.UTF8.GetByteCount(req value)) * 8L)
     | _ -> VNull
 
 let private coalesceFn (args: Value list) : Value =
@@ -3034,21 +3039,25 @@ let private padFn (left: bool) : Scalar =
 /// returns six bytes of mangled prefix.
 let private leftFn: Scalar =
     function
-    | [ VBytes b; n ] when not (anyNull [ n ]) -> VBytes(Array.truncate (max 0 (int (toDouble n))) b)
-    | [ s; n ] when not (anyNull [ s; n ]) ->
-        let str = req s
-        VString(str.Substring(0, max 0 (min str.Length (int (toDouble n)))))
+    | [ value; n ] when not (anyNull [ value; n ]) ->
+        match tryRawBytes value with
+        | Some bytes -> VBytes(Array.truncate (max 0 (int (toDouble n))) bytes)
+        | None ->
+            let text = req value
+            VString(text.Substring(0, max 0 (min text.Length (int (toDouble n)))))
     | _ -> VNull
 
 let private rightFn: Scalar =
     function
-    | [ VBytes b; n ] when not (anyNull [ n ]) ->
-        let k = max 0 (min b.Length (int (toDouble n)))
-        VBytes(b.[b.Length - k ..])
-    | [ s; n ] when not (anyNull [ s; n ]) ->
-        let str = req s
-        let k = max 0 (min str.Length (int (toDouble n)))
-        VString(str.Substring(str.Length - k))
+    | [ value; n ] when not (anyNull [ value; n ]) ->
+        match tryRawBytes value with
+        | Some bytes ->
+            let k = max 0 (min bytes.Length (int (toDouble n)))
+            VBytes(bytes.[bytes.Length - k ..])
+        | None ->
+            let text = req value
+            let k = max 0 (min text.Length (int (toDouble n)))
+            VString(text.Substring(text.Length - k))
     | _ -> VNull
 
 let private repeatFn: Scalar =
@@ -3073,24 +3082,28 @@ let private spaceFn: Scalar =
 /// encoding) in MySQL, not é's UTF-16 value 233.
 let private asciiFn: Scalar =
     function
-    | [ VBytes b ] -> VInt(if b.Length = 0 then 0L else int64 b.[0])
-    | [ s ] when not (anyNull [ s ]) ->
-        let str = req s
-        VInt(if str = "" then 0L else int64 (Text.Encoding.UTF8.GetBytes(str).[0]))
+    | [ value ] when not (anyNull [ value ]) ->
+        match tryRawBytes value with
+        | Some bytes -> VInt(if bytes.Length = 0 then 0L else int64 bytes.[0])
+        | None ->
+            let text = req value
+            VInt(if text = "" then 0L else int64 (Text.Encoding.UTF8.GetBytes(text).[0]))
     | _ -> VNull
 
 let private ordFn: Scalar =
     function
-    | [ VBytes bytes ] -> VInt(if bytes.Length = 0 then 0L else int64 bytes.[0])
     | [ value ] when not (anyNull [ value ]) ->
-        let text = req value
+        match tryRawBytes value with
+        | Some bytes -> VInt(if bytes.Length = 0 then 0L else int64 bytes.[0])
+        | None ->
+            let text = req value
 
-        if text.Length = 0 then
-            VInt 0L
-        else
-            let scalarLength = if Char.IsSurrogatePair(text, 0) then 2 else 1
-            let bytes = Text.Encoding.UTF8.GetBytes(text.Substring(0, scalarLength))
-            VInt(bytes |> Array.fold (fun result part -> result * 256L + int64 part) 0L)
+            if text.Length = 0 then
+                VInt 0L
+            else
+                let scalarLength = if Char.IsSurrogatePair(text, 0) then 2 else 1
+                let bytes = Text.Encoding.UTF8.GetBytes(text.Substring(0, scalarLength))
+                VInt(bytes |> Array.fold (fun result part -> result * 256L + int64 part) 0L)
     | _ -> VNull
 
 /// Minimal `CHAR(n1, n2, ...)`: builds a string from Unicode code points
@@ -3108,11 +3121,15 @@ let private charFn: Scalar =
 
 let private hexFn: Scalar =
     function
-    | [ VInt i ] -> VString(i.ToString "X")
-    | [ VUInt u ] -> VString(u.ToString "X")
-    | [ VString s ] -> VString(Text.Encoding.UTF8.GetBytes s |> Array.map (fun b -> b.ToString "X2") |> String.concat "")
-    | [ VBytes b ] -> VString(b |> Array.map (fun x -> x.ToString "X2") |> String.concat "")
-    | [ v ] when not (anyNull [ v ]) -> VString((int64 (toDouble v)).ToString "X")
+    | [ value ] when not (anyNull [ value ]) ->
+        match tryRawBytes value with
+        | Some bytes -> VString(bytes |> Array.map (fun byte -> byte.ToString "X2") |> String.concat "")
+        | None ->
+            match value with
+            | VInt value -> VString(value.ToString "X")
+            | VUInt value -> VString(value.ToString "X")
+            | VString value -> VString(Text.Encoding.UTF8.GetBytes value |> Array.map (fun byte -> byte.ToString "X2") |> String.concat "")
+            | _ -> VString((int64 (toDouble value)).ToString "X")
     | _ -> VNull
 
 let private unhexFn: Scalar =
@@ -3167,9 +3184,7 @@ let private aesConfiguration (value: string) : AesConfiguration =
     | None -> invalidArg "value" "Unsupported AES block encryption mode"
 
 let private aesBytes (value: Value) : byte[] =
-    match value with
-    | VBytes bytes -> bytes
-    | _ -> Encoding.UTF8.GetBytes(req value)
+    tryRawBytes value |> Option.defaultWith (fun () -> Encoding.UTF8.GetBytes(req value))
 
 let private aesParameterCountError (name: string) : 'a =
     raise (SqlError(1582, sprintf "Incorrect parameter count in the call to native function '%s'" name))
@@ -3622,9 +3637,7 @@ let private toBase64Fn: Scalar =
     function
     | [ value ] when not (anyNull [ value ]) ->
         let bytes =
-            match value with
-            | VBytes bytes -> bytes
-            | _ -> Text.Encoding.UTF8.GetBytes(req value)
+            tryRawBytes value |> Option.defaultWith (fun () -> Text.Encoding.UTF8.GetBytes(req value))
 
         let encodedLength = (int64 bytes.Length + 2L) / 3L * 4L
         let lineBreaks = if encodedLength = 0L then 0L else (encodedLength - 1L) / 76L
@@ -3650,8 +3663,7 @@ let private fromBase64Fn: Scalar =
 
 let private bytesOfValue =
     function
-    | VBytes bytes -> bytes
-    | value -> Text.Encoding.UTF8.GetBytes(req value)
+    | value -> tryRawBytes value |> Option.defaultWith (fun () -> Text.Encoding.UTF8.GetBytes(req value))
 
 let private compressFn: Scalar =
     function
@@ -4548,8 +4560,7 @@ let private inet6AtonFn: Scalar =
 
 let private packedAddressBytes =
     function
-    | VBytes bytes -> bytes
-    | value -> Text.Encoding.Latin1.GetBytes(req value)
+    | value -> tryRawBytes value |> Option.defaultWith (fun () -> Text.Encoding.Latin1.GetBytes(req value))
 
 let private inet6NtoaFn: Scalar =
     function

@@ -738,6 +738,12 @@ let bitValue (bytes: byte[]) : uint64 option =
         |> Array.fold (fun value next -> (value <<< 8) ||| uint64 next) 0UL
         |> Some
 
+let tryRawBytes =
+    function
+    | VBit(width, value) -> Some(bitBytes width value)
+    | VBytes bytes -> Some bytes
+    | _ -> None
+
 /// .NET's shortest-round-trip double formatting agrees with MySQL on the
 /// mantissa but not the exponent: "1E+20" vs MySQL's "1e20" (lowercase,
 /// no '+', no zero-padding). Reshapes just the exponent part when present.
