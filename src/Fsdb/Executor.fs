@@ -4412,6 +4412,7 @@ and private runSelectStmt
             | FromTable tref, [] ->
                 tryPointLookup store dbName tref select.Where
                 |> Option.map (fun (cols, rows) -> Ok(cols, rows |> List.map snd))
+                |> Option.orElseWith (fun () -> tryRangeLookup store dbName tref select.Where |> Option.map (fun (cols, rows) -> Ok(cols, rows |> List.map snd)))
                 |> Option.orElseWith (fun () -> tryInformationSchemaNarrow store dbName tref select.Where |> Option.map Ok)
                 |> Option.defaultWith (fun () -> resolveFromItem store registry dbName fromItem)
             | _ -> resolveFromItem store registry dbName fromItem
@@ -4492,11 +4493,55 @@ and private pointLookupEqualities (tref: TableRef) (whereExpr: Expr option) : (s
             | BinOp(Eq, Lit v, QualifiedCol(q, n)) when System.String.Equals(q, selfQualifier, System.StringComparison.OrdinalIgnoreCase) -> Some(n, v)
             | _ -> None)
 
+and private rangeLookupBounds (tref: TableRef) (whereExpr: Expr option) : (string * (Value * bool) option * (Value * bool) option) list =
+    match whereExpr with
+    | None -> []
+    | Some whereExpr ->
+        let selfQualifier = tref.Alias |> Option.defaultValue tref.Table
+
+        let columnName = function
+            | Col name -> Some name
+            | QualifiedCol(qualifier, name) when System.String.Equals(qualifier, selfQualifier, System.StringComparison.OrdinalIgnoreCase) -> Some name
+            | _ -> None
+
+        let addBound bounds name lower upper =
+            match Map.tryFind name bounds with
+            | None -> Map.add name (lower, upper) bounds
+            | Some(existingLower, existingUpper) ->
+                Map.add name (Option.orElse existingLower lower, Option.orElse existingUpper upper) bounds
+
+        flattenAnd whereExpr
+        |> List.fold
+            (fun bounds expression ->
+                match expression with
+                | BinOp((Gt | Gte as op), column, Lit value)
+                | BinOp((Lt | Lte as op), Lit value, column) ->
+                    columnName column
+                    |> Option.map (fun name -> addBound bounds name (Some(value, op = Gte || op = Lte)) None)
+                    |> Option.defaultValue bounds
+                | BinOp((Lt | Lte as op), column, Lit value)
+                | BinOp((Gt | Gte as op), Lit value, column) ->
+                    columnName column
+                    |> Option.map (fun name -> addBound bounds name None (Some(value, op = Lte || op = Gte)))
+                    |> Option.defaultValue bounds
+                | _ -> bounds)
+            Map.empty
+        |> Map.toList
+        |> List.map (fun (name, (lower, upper)) -> name, lower, upper)
+
 and private tryPointLookup (store: Store) (dbName: string) (tref: TableRef) (whereExpr: Expr option) : (ColumnDef list * (RowId * Value[]) list) option =
     let tableDb = tref.Database |> Option.defaultValue dbName
 
     pointLookupEqualities tref whereExpr
     |> List.tryPick (fun (n, v) -> Storage.tryEqualityLookup store tableDb tref.Table n v)
+
+and private tryRangeLookup (store: Store) (dbName: string) (tref: TableRef) (whereExpr: Expr option) : (ColumnDef list * (RowId * Value[]) list) option =
+    let tableDb = tref.Database |> Option.defaultValue dbName
+
+    rangeLookupBounds tref whereExpr
+    |> List.tryPick (fun (column, lower, upper) ->
+        Storage.trySecondaryRangeLookup store tableDb tref.Table column lower upper
+        |> Option.map (fun (_, _, columns, rows) -> columns, rows))
 
 /// Per-column MySQL wire type for a freshly-projected resultset, read off
 /// the first non-NULL `Value` in each column across `rows` — a plain
@@ -7619,7 +7664,22 @@ let rec private explainJoinBlock
                       Extra = extra }
 
                 true
-            | None -> false
+            | None ->
+                rangeLookupBounds tref whereOpt
+                |> List.tryPick (fun (column, lower, upper) ->
+                    Storage.trySecondaryRangeLookup store tableDb tref.Table column lower upper
+                    |> Option.map (fun (keyName, columnIndex, columns, rows) -> keyName, columnIndex, columns, List.length rows))
+                |> Option.map (fun (keyName, columnIndex, columns, rowCount) ->
+                    acc.Add
+                        { Id = Some id
+                          SelectType = selectType
+                          Table = Some(tref.Alias |> Option.defaultValue tref.Table)
+                          Type = Some "range"
+                          Key = Some(keyName, explainKeyLen columns.[columnIndex])
+                          Ref = None
+                          Rows = Some(uint64 rowCount)
+                          Extra = extra })
+                |> Option.isSome
 
     /// One `FromItem`'s row(s): a real table's stats, or a derived table's
     /// `<derivedN>` placeholder plus its own recursive `DERIVED` block.

@@ -4884,6 +4884,54 @@ let tests =
                     Expect.equal (rows "SELECT id FROM indexed WHERE category = 'books'") [ [ Some "2" ] ] "deleted rows leave their bucket"
                     Expect.equal (rows "SELECT id FROM indexed WHERE category = NULL") [] "NULL equality has no matches"
 
+                testCase "a one-column B-tree range matches a scan twin and retains residual predicates"
+                <| fun _ ->
+                    let store = newStore ()
+                    runDefault store "CREATE TABLE indexed (id INT PRIMARY KEY, score INT, category VARCHAR(20), KEY ix_score (score))" |> ignore
+                    runDefault store "CREATE TABLE scanned (id INT PRIMARY KEY, score INT, category VARCHAR(20))" |> ignore
+
+                    for sql in
+                        [ "INSERT INTO indexed VALUES (1, 40, 'a'), (2, 20, 'a'), (3, 30, 'b'), (4, 10, 'a'), (5, NULL, 'a')"
+                          "INSERT INTO scanned VALUES (1, 40, 'a'), (2, 20, 'a'), (3, 30, 'b'), (4, 10, 'a'), (5, NULL, 'a')" ] do
+                        runDefault store sql |> ignore
+
+                    let rows tableName =
+                        match runDefault store (sprintf "SELECT id FROM %s WHERE score >= 20 AND score < 40 AND category = 'a'" tableName) with
+                        | ResultSet(_, rows) -> rows
+                        | other -> failtestf "expected a resultset, got %A" other
+
+                    Expect.equal (rows "indexed") (rows "scanned") "range candidates retain the residual filter"
+
+                    let scanOrder tableName =
+                        match runDefault store (sprintf "SELECT id FROM %s WHERE score >= 10 AND score <= 40" tableName) with
+                        | ResultSet(_, rows) -> rows
+                        | other -> failtestf "expected a resultset, got %A" other
+
+                    Expect.equal (scanOrder "indexed") (scanOrder "scanned") "range narrowing retains the row-store order without ORDER BY"
+
+                    match runDefault store "EXPLAIN SELECT id FROM indexed WHERE score >= 20 AND score < 40 AND category = 'a'" with
+                    | ResultSet(_, [ [ Some "1"; Some "SIMPLE"; Some "indexed"; None; Some "range"; Some "ix_score"; Some "ix_score"; Some "5"; None; Some "2"; Some "100.00"; Some "Using where" ] ]) ->
+                        ()
+                    | other -> failtestf "expected a secondary-index range plan, got %A" other
+
+                testCase "a secondary string range follows collation boundaries with a reversed lower comparison"
+                <| fun _ ->
+                    let store = newStore ()
+                    runDefault store "CREATE TABLE indexed (id INT PRIMARY KEY, label VARCHAR(20), KEY ix_label (label))" |> ignore
+                    runDefault store "CREATE TABLE scanned (id INT PRIMARY KEY, label VARCHAR(20))" |> ignore
+
+                    for sql in
+                        [ "INSERT INTO indexed VALUES (1, 'Álpha'), (2, 'Bravo'), (3, 'bébé'), (4, 'charlie')"
+                          "INSERT INTO scanned VALUES (1, 'Álpha'), (2, 'Bravo'), (3, 'bébé'), (4, 'charlie')" ] do
+                        runDefault store sql |> ignore
+
+                    let rows tableName =
+                        match runDefault store (sprintf "SELECT id FROM %s WHERE 'b' <= label AND label < 'c'" tableName) with
+                        | ResultSet(_, rows) -> rows
+                        | other -> failtestf "expected a resultset, got %A" other
+
+                    Expect.equal (rows "indexed") (rows "scanned") "collated string bounds match the scan path"
+
                 testCase "EXPLAIN reports ref only for the secondary equality access path execution uses"
                 <| fun _ ->
                     let store = newStore ()
