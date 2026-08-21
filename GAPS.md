@@ -67,7 +67,7 @@ variants), USE, KILL, DESCRIBE are text-probed before the grammar
 | `CREATE/ALTER/DROP EVENT` (+ scheduler thread) | low | refusal |
 | `PREPARE`/`EXECUTE`/`DEALLOCATE PREPARE` as SQL text (wire-level COM_STMT_PREPARE works) | low | refusal |
 | `LOAD DATA [LOCAL] INFILE`; `SELECT … INTO OUTFILE/DUMPFILE/@vars`; `IMPORT TABLE` | medium | refusal |
-| `CHECKSUM TABLE`; `FLUSH LOGS` and specialized FLUSH forms | low | refusal |
+| `CHECKSUM TABLE`; specialized FLUSH forms | low | refusal |
 | `LOCK TABLES…READ/WRITE`, `UNLOCK TABLES`, `HANDLER`, XA transactions | low | refusal |
 | Partitioning: `PARTITION BY`, `PARTITION (p)` selection, `ADD/DROP/COALESCE/REORGANIZE PARTITION` | medium | refusal |
 | Roles: `CREATE/DROP ROLE`, `SET ROLE`, `SET DEFAULT ROLE`, `GRANT role TO user`, dynamic privileges (`BACKUP_ADMIN`…), `GRANT PROXY` | medium | refusal |
@@ -81,6 +81,7 @@ variants), USE, KILL, DESCRIBE are text-probed before the grammar
 
 | Gap | MySQL 8.4 | fsdb | Impact | Class |
 |---|---|---|---|---|
+| `FULL OUTER JOIN` | supported | absent from `joinKind` (`Parser.fs`); live probe returns 1064 | medium | refusal |
 | Locking detail | `FOR UPDATE/SHARE [OF tbl…] [NOWAIT|SKIP LOCKED]` | `FOR UPDATE`/`FOR SHARE`/`LOCK IN SHARE MODE` accepted and ignored; no OF/NOWAIT/SKIP LOCKED | low | divergence |
 | CTE placement | `WITH` in subqueries, derived tables, `INSERT…WITH` | top-level SELECT/UNION only (`Parser.fs:2458–2464`) | medium | refusal |
 | Quantified comparison | `= ANY/SOME/ALL (subquery)` | absent | medium | refusal |

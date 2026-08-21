@@ -826,6 +826,7 @@ let private showGrantsRe = Regex(@"^SHOW\s+GRANTS(?:\s+FOR\s+(.+?))?\s*;?$", Reg
 let private flushPrivilegesRe = Regex(@"^FLUSH\s+(?:LOCAL\s+)?PRIVILEGES\s*;?$", RegexOptions.IgnoreCase)
 let private flushStatusRe = Regex(@"^FLUSH\s+STATUS\s*;?$", RegexOptions.IgnoreCase)
 let private flushTablesRe = Regex(@"^FLUSH\s+TABLES\s*;?$", RegexOptions.IgnoreCase)
+let private flushLogsRe = Regex(@"^FLUSH\s+LOGS\s*;?$", RegexOptions.IgnoreCase)
 
 /// MySqlConnector's real `BeginTransaction[Async]` handshake explicitly
 /// selects REPEATABLE READ before it sends START TRANSACTION — the
@@ -1294,6 +1295,7 @@ type private Probe =
     | FlushPrivileges
     | FlushStatus
     | FlushTables
+    | FlushLogs
 
 /// The one ordered list of text-probed forms — matching `Probe`'s cases
 /// exactly (the compiler enforces `runProbe` covers every one of them), so
@@ -1379,6 +1381,8 @@ let private tryProbe (sql: string) (upper: string) : Probe option =
         Some FlushStatus
     elif flushTablesRe.IsMatch sql then
         Some FlushTables
+    elif flushLogsRe.IsMatch sql then
+        Some FlushLogs
     elif showProcesslistRe.IsMatch sql then
         Some(ShowProcesslist((showProcesslistRe.Match sql).Groups.[1].Success))
     elif showTriggersRe.IsMatch sql then
@@ -1781,7 +1785,8 @@ let private runProbe (session: Session) (sql: string) (probe: Probe) : Session *
     | FlushStatus ->
         InformationSchema.resetQuestions ()
         session, Affected 0UL
-    | FlushTables -> session, Affected 0UL
+    | FlushTables
+    | FlushLogs -> session, Affected 0UL
 let rec mapPlaceholders (replace: int -> Expr) (stmt: Statement) : Statement =
     let rec mapExpr (e: Expr) : Expr =
         match e with

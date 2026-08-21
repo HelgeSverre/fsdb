@@ -1394,7 +1394,7 @@ let tests =
                 ) -> ()
               | other -> failtestf "unexpected REPAIR result: %A" other
 
-              for sql in [ "FLUSH TABLES"; "FLUSH STATUS" ] do
+              for sql in [ "FLUSH TABLES"; "FLUSH STATUS"; "FLUSH LOGS" ] do
                   match handle session sql |> snd with
                   | Affected 0UL -> ()
                   | other -> failtestf "unexpected %s result: %A" sql other
