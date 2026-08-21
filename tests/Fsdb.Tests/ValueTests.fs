@@ -240,6 +240,15 @@ let tests =
                         let col = Fsdb.Collation.tryFind name |> Option.get
                         Expect.equal (col.Equals "a" "a ") expectedEqual (sprintf "%s: 'a' = 'a '" name)
 
+                testCase "utf8mb4_general_ci gives sharp s one s weight"
+                <| fun _ ->
+                    let col = Fsdb.Collation.tryFind "utf8mb4_general_ci" |> Option.get
+                    Expect.isTrue (col.Equals "ß" "s") "sharp s equals s"
+                    Expect.isFalse (col.Equals "ß" "ss") "sharp s does not expand"
+                    Expect.equal (col.KeyOf "ß") (col.KeyOf "s") "index key"
+                    Expect.equal (col.HashOf "ß") (col.HashOf "s") "hash key"
+                    Expect.isTrue (col.CharEquals 'ß' 's') "LIKE character"
+
                 testTheory
                     "HashOf agrees with ComparePrimary: strings equal under the folded order hash equal"
                     [ "utf8mb4_0900_ai_ci", "åge", "age"

@@ -14,9 +14,6 @@
 ///  - the exact tie-break *order* among accent variants under ORDER BY may
 ///    differ from MySQL's own weight table, because the host ICU's CLDR
 ///    version differs (Apple ICU vs UCA 9.0/CLDR 30); equality never does.
-///  - `utf8mb4_general_ci` does no ß expansion in MySQL but ICU's folding
-///    does ('ß' = 'ss' here, ≠ in real general_ci) — the one known
-///    expansion divergence; everything else general_ci folds matches.
 ///  - `utf8mb4_unicode_520_ci`/legacy language collations use ICU's CLDR
 ///    tailoring rather than MySQL's UCA 5.2/4.0 weight tables.
 ///  - LIKE folds per character and never expands ('æ' LIKE 'ae' is false
@@ -106,6 +103,13 @@ let private countTrailingSpaces (s: string) : int =
 let private makeCollation (name: string) (spec: Spec) : Collation =
     let ci = compareInfoFor spec.Locale
     let trim (s: string) = if spec.PadSpace then s.TrimEnd(' ') else s
+    let primaryText (s: string) =
+        let value = trim s
+
+        if name = "utf8mb4_general_ci" then
+            value.Replace("ß", "s").Replace("ẞ", "s")
+        else
+            value
 
     let compareFull (a: string) (b: string) : int =
         if spec.ByteOrder then
@@ -124,7 +128,7 @@ let private makeCollation (name: string) (spec: Spec) : Collation =
         if spec.ByteOrder then
             String.Compare(trim a, trim b, StringComparison.Ordinal)
         else
-            ci.Compare(trim a, trim b, spec.Fold)
+            ci.Compare(primaryText a, primaryText b, spec.Fold)
 
     { Name = name
       Compare = compareFull
@@ -135,18 +139,18 @@ let private makeCollation (name: string) (spec: Spec) : Collation =
             if spec.ByteOrder then
                 "B" + Convert.ToHexString(System.Text.Encoding.UTF8.GetBytes(trim s))
             else
-                Convert.ToHexString(ci.GetSortKey(trim s, spec.Fold).KeyData)
+                Convert.ToHexString(ci.GetSortKey(primaryText s, spec.Fold).KeyData)
       HashOf =
         fun s ->
             if spec.ByteOrder then
                 StringComparer.Ordinal.GetHashCode(trim s)
             else
-                ci.GetHashCode(trim s, spec.Fold)
+                ci.GetHashCode(primaryText s, spec.Fold)
       CharEquals =
         if spec.ByteOrder then
             fun a b -> a = b
         else
-            fun a b -> ci.Compare(string a, string b, spec.Fold) = 0
+            fun a b -> ci.Compare(primaryText (string a), primaryText (string b), spec.Fold) = 0
       PadSpace = spec.PadSpace }
 
 // ---------------------------------------------------------------------------
