@@ -140,7 +140,7 @@ CURRENT_USER/USER/SESSION_USER.
 | Crypto | `AES_ENCRYPT AES_DECRYPT ENCODE DECODE`, entire asymmetric family | medium |
 | Weight-string clauses | `WEIGHT_STRING(... AS CHAR/BINARY, LEVEL ...)` | low |
 | JSON schema | `JSON_SCHEMA_VALID JSON_SCHEMA_VALIDATION_REPORT` | medium |
-| Misc | `BENCHMARK SLEEP COERCIBILITY DEFAULT()` outside REPLACE-SET | low |
+| Misc | `BENCHMARK SLEEP COERCIBILITY` | low |
 | Geometry | all `ST_*`/`GeometryCollection` functions and types | low |
 
 Divergences in existing functions: `CURTIME()`/`TIME()` return strings (no

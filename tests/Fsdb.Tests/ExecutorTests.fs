@@ -2048,6 +2048,20 @@ let tests =
                     | ResultSet(_, [ [ Some "1"; Some "10"; Some "8" ]; [ Some "2"; Some "20"; Some "7" ] ]) -> ()
                     | other -> failtestf "expected default-derived SET values, got %A" other
 
+                testCase "DEFAULT returns a column default in ordinary expressions"
+                <| fun _ ->
+                    let store = newStore ()
+                    runDefault store "CREATE TABLE defaults_t (a INT DEFAULT 7, b INT, c INT NOT NULL)" |> ignore
+                    runDefault store "INSERT INTO defaults_t (c) VALUES (1)" |> ignore
+
+                    match runDefault store "SELECT DEFAULT(a), DEFAULT(b) FROM defaults_t" with
+                    | ResultSet(_, [ [ Some "7"; None ] ]) -> ()
+                    | other -> failtestf "expected declared and implicit NULL defaults, got %A" other
+
+                    match runDefault store "SELECT DEFAULT(c) FROM defaults_t" with
+                    | Err(1364, "Field 'c' doesn't have a default value") -> ()
+                    | other -> failtestf "expected 1364 for a missing default, got %A" other
+
                 testCase "delete-side foreign-key actions run before the replacement insert"
                 <| fun _ ->
                     let store = newStore ()

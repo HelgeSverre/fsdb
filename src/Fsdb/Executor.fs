@@ -1135,6 +1135,8 @@ let rec private metadataOfExpr (ctx: EvalContext) (expr: Expr) : ColumnMetadata 
     | Collate(inner, _)
     | Distinct inner
     | OrderBy(inner, _) -> metadataOfExpr ctx inner
+    | FuncCall(name, [ argument ]) when name.Equals("DEFAULT", System.StringComparison.OrdinalIgnoreCase) ->
+        metadataOfExpr ctx argument
     | FuncCall(name, args) ->
         match name.ToUpperInvariant(), args with
         | "COUNT", _ -> simple TypeLongLong
@@ -2105,6 +2107,11 @@ let rec private evalExpr (ctx: EvalContext) (expr: Expr) : Result<Value, EvalErr
                             resolvedCompare ctx e ve lo vlo >= 0
                             && resolvedCompare ctx e ve hi vhi <= 0
                         ))))
+    | FuncCall(name, [ argument ]) when name.Equals("DEFAULT", System.StringComparison.OrdinalIgnoreCase) ->
+        match tryColumnDefForExpr ctx argument with
+        | Some column when column.Default.IsSome || column.Nullable -> Ok(Storage.evalDefault column)
+        | Some column -> Error(1364, sprintf "Field '%s' doesn't have a default value" column.Name)
+        | None -> Error(1054, "Unknown column in 'field list'")
     | FuncCall(name, args) ->
         match Functions.lookup name ctx.Registry with
         | None -> Error(unknownFunction name)
