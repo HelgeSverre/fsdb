@@ -115,8 +115,6 @@ uninstall dest="~/.local/bin":
 
 MYSQLD := "mysqld"
 MYSQLADMIN := "mysqladmin"
-BENCH_MYSQL_PORT := "3316"
-BENCH_MYSQL_NOFSYNC_PORT := "3317"
 # mysqld chdirs internally before resolving relative paths, so these must be absolute.
 BENCH_MYSQL_DATADIR := justfile_directory() + "/benchmarks/mysql-data"
 BENCH_MYSQL_NOFSYNC_DATADIR := justfile_directory() + "/benchmarks/mysql-data-nofsync"
@@ -126,15 +124,16 @@ BENCH_MYSQL_NOFSYNC_DATADIR := justfile_directory() + "/benchmarks/mysql-data-no
 bench-mysql-start:
     #!/usr/bin/env bash
     set -euo pipefail
+    mysql_port="${FSDB_BENCH_MYSQL_PORT:-3316}"
     if [ ! -d {{ BENCH_MYSQL_DATADIR }} ]; then
         {{ MYSQLD }} --no-defaults --initialize-insecure --datadir={{ BENCH_MYSQL_DATADIR }}
     fi
-    {{ MYSQLD }} --no-defaults --datadir={{ BENCH_MYSQL_DATADIR }} --port={{ BENCH_MYSQL_PORT }} \
+    {{ MYSQLD }} --no-defaults --datadir={{ BENCH_MYSQL_DATADIR }} --port="$mysql_port" \
         --socket={{ BENCH_MYSQL_DATADIR }}/mysql.sock --pid-file={{ BENCH_MYSQL_DATADIR }}/mysql.pid \
         > {{ BENCH_MYSQL_DATADIR }}/mysqld.log 2>&1 &
     disown
     for _ in $(seq 1 30); do
-        {{ MYSQLADMIN }} -P{{ BENCH_MYSQL_PORT }} --protocol=tcp -h127.0.0.1 -uroot ping &>/dev/null && exit 0
+        {{ MYSQLADMIN }} -P"$mysql_port" --protocol=tcp -h127.0.0.1 -uroot ping &>/dev/null && exit 0
         sleep 1
     done
     echo "mysqld did not become ready, see {{ BENCH_MYSQL_DATADIR }}/mysqld.log" >&2
@@ -143,7 +142,7 @@ bench-mysql-start:
 # Shut down the throwaway benchmark MySQL server
 [group('bench')]
 bench-mysql-stop:
-    {{ MYSQLADMIN }} -P{{ BENCH_MYSQL_PORT }} --protocol=tcp -h127.0.0.1 -uroot shutdown 2>/dev/null || true
+    {{ MYSQLADMIN }} -P"${FSDB_BENCH_MYSQL_PORT:-3316}" --protocol=tcp -h127.0.0.1 -uroot shutdown 2>/dev/null || true
 
 # Initialize (first run only) and start the no-fsync throwaway MySQL server.
 # `--skip-log-bin --innodb_flush_log_at_trx_commit=0 --sync_binlog=0` removes
@@ -153,16 +152,17 @@ bench-mysql-stop:
 bench-mysql-start-nofsync:
     #!/usr/bin/env bash
     set -euo pipefail
+    mysql_port="${FSDB_BENCH_MYSQL_NOFSYNC_PORT:-3317}"
     if [ ! -d {{ BENCH_MYSQL_NOFSYNC_DATADIR }} ]; then
         {{ MYSQLD }} --no-defaults --initialize-insecure --datadir={{ BENCH_MYSQL_NOFSYNC_DATADIR }}
     fi
-    {{ MYSQLD }} --no-defaults --datadir={{ BENCH_MYSQL_NOFSYNC_DATADIR }} --port={{ BENCH_MYSQL_NOFSYNC_PORT }} \
+    {{ MYSQLD }} --no-defaults --datadir={{ BENCH_MYSQL_NOFSYNC_DATADIR }} --port="$mysql_port" \
         --socket={{ BENCH_MYSQL_NOFSYNC_DATADIR }}/mysql.sock --pid-file={{ BENCH_MYSQL_NOFSYNC_DATADIR }}/mysql.pid \
         --skip-log-bin --innodb_flush_log_at_trx_commit=0 --sync_binlog=0 \
         > {{ BENCH_MYSQL_NOFSYNC_DATADIR }}/mysqld.log 2>&1 &
     disown
     for _ in $(seq 1 30); do
-        {{ MYSQLADMIN }} -P{{ BENCH_MYSQL_NOFSYNC_PORT }} --protocol=tcp -h127.0.0.1 -uroot ping &>/dev/null && exit 0
+        {{ MYSQLADMIN }} -P"$mysql_port" --protocol=tcp -h127.0.0.1 -uroot ping &>/dev/null && exit 0
         sleep 1
     done
     echo "mysqld (no-fsync) did not become ready, see {{ BENCH_MYSQL_NOFSYNC_DATADIR }}/mysqld.log" >&2
@@ -171,7 +171,7 @@ bench-mysql-start-nofsync:
 # Shut down the no-fsync throwaway MySQL server
 [group('bench')]
 bench-mysql-stop-nofsync:
-    {{ MYSQLADMIN }} -P{{ BENCH_MYSQL_NOFSYNC_PORT }} --protocol=tcp -h127.0.0.1 -uroot shutdown 2>/dev/null || true
+    {{ MYSQLADMIN }} -P"${FSDB_BENCH_MYSQL_NOFSYNC_PORT:-3317}" --protocol=tcp -h127.0.0.1 -uroot shutdown 2>/dev/null || true
 
 # Build fsdb (Release) and run the benchmark suite; shared by bench/bench-quick.
 # fsdb itself is no longer started here — ServerBenchmarks restarts it per

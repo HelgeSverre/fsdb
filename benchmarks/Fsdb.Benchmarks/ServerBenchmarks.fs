@@ -1,5 +1,5 @@
 /// Every workload side-by-side: BenchmarkDotNet's [<Params>] runs each
-/// [<Benchmark>] once per Target ("fsdb" @ 3307, "mysql" @ 3316), producing
+/// [<Benchmark>] once per Target (fsdb and MySQL on their configured ports), producing
 /// one table with both servers under identical data and queries.
 ///
 /// BenchmarkDotNet launches a fresh process per (Target x Benchmark method)

@@ -20,6 +20,8 @@ let userCount = envCount "FSDB_BENCH_USERS" 10_000
 let orderCount = envCount "FSDB_BENCH_ORDERS" 50_000
 let articleCount = envCount "FSDB_BENCH_ARTICLES" userCount
 let fsdbPort = envCount "FSDB_BENCH_PORT" 3307
+let mysqlPort = envCount "FSDB_BENCH_MYSQL_PORT" 3316
+let mysqlNoFsyncPort = envCount "FSDB_BENCH_MYSQL_NOFSYNC_PORT" 3317
 
 let private plans = [| "free"; "pro"; "enterprise" |]
 let private statuses = [| "pending"; "paid"; "shipped"; "cancelled" |]
@@ -28,16 +30,12 @@ let portFor (target: string) =
     match target with
     | "fsdb"
     | "fsdb-wal" -> fsdbPort
-    | "mysql" -> 3316
-    | "mysql-nofsync" -> 3317
+    | "mysql" -> mysqlPort
+    | "mysql-nofsync" -> mysqlNoFsyncPort
     | other -> failwith $"unknown benchmark target: {other}"
 
-// Pooling=false: fsdb doesn't implement COM_RESET_CONNECTION yet (a pooled
-// Open() sends it, fsdb replies "Unknown command" and the client throws).
-// The per-case server restart makes this bite even a single-connection
-// benchmark process, since GlobalSetup opens more than one connection
-// against the same connection string (the readiness probe, then the seeding
-// connection) before the benchmark proper ever runs.
+// Each case owns its connections explicitly; pooling would retain sessions
+// across the per-case server restart and mix lifecycle cost into later cases.
 let rootConnectionString (target: string) =
     $"Server=127.0.0.1;Port={portFor target};User=root;AllowPublicKeyRetrieval=true;SslMode=none;Pooling=false;"
 
