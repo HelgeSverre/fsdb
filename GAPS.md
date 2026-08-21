@@ -33,7 +33,7 @@ accepted (marked `ponytail:` in source), or recorded only in
 | SQL statements | Broad core; large admin/programmatic tail missing | Stored procedures/functions, events |
 | Query execution | Equality, one-column non-unique literal range access, and bounded single-key index ordering plus stable subquery materialization | Multi-key ORDER BY, join reordering, and correlated subqueries still scale poorly |
 | Built-in functions | Broad scalar, aggregate, JSON, time, and planar geometry coverage | Advanced geometry topology and geographic SRS semantics |
-| Data types | Common scalar types, BIT fields, and OGC geometry | No TIME value domain |
+| Data types | Common scalar types, BIT fields, signed TIME durations, and OGC geometry | Spatial indexes and operations |
 | Constraints & indexes | PK/UNIQUE/FK/CHECK plus one-column equality, inner-join, literal range, and bounded index-order probes | No multi-key/composite access; unique and DML ranges scan |
 | Charsets & collations | ICU-based utf8mb4 registry | Weight-table tailoring differs from MySQL's UCA tables |
 | Transactions | Repeatable-read snapshots, nonlocking read-committed views + optimistic merge | READ UNCOMMITTED and SERIALIZABLE refused; transaction commits serialize |
@@ -139,9 +139,8 @@ CURRENT_USER/USER/SESSION_USER.
 | JSON Schema recursive regular-expression references | Local reference cycles traversing `pattern` or `patternProperties` return 1235 | low |
 | Geometry topology and relations | Contains/within/touches predicates, overlays, buffers, and geographic SRS semantics | low |
 
-Divergences in existing functions: `CURTIME()`/`TIME()` return strings (no
-TIME value domain, `Functions.fs`); `CONVERT_TZ` resolves numeric offsets and
-`SYSTEM`, but named zones return NULL without loaded time-zone tables;
+`CONVERT_TZ` resolves numeric offsets and `SYSTEM`, but named zones return NULL
+without loaded time-zone tables;
 `WEIGHT_STRING()` returns host-ICU sort-key bytes for textual collations, not
 MySQL's UCA weight-table bytes.
 
@@ -169,7 +168,6 @@ accessors).
 
 | Gap | MySQL 8.4 | fsdb | Impact | Class |
 |---|---|---|---|---|
-| TIME value domain | typed TIME comparisons/arithmetic | stored and compared as pre-formatted strings; no `VTime` case (`Value.fs:13–30`, `Storage.fs:911–935`) | medium | divergence |
 | Spatial indexes and operations | R-tree indexes, containment/touch predicates, overlays, buffers, geographic SRS axis rules | geometry values, common WKT/WKB accessors, planar `ST_Distance`, `ST_Envelope`, `ST_IsValid`, `ST_Intersects`, `ST_Disjoint`, and MBR predicates work; spatial indexes still collapse to BTree | low | refusal |
 | Generated columns | VIRTUAL recomputed on read, STORED materialized | both materialize at write time; no read-path recompute (`Storage.fs:3705–3713`) | low | divergence |
 | Functional defaults | `DEFAULT (expr)` | literal constants and CURRENT_TIMESTAMP only | low | refusal |
