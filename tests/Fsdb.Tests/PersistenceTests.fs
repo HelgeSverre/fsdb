@@ -1072,6 +1072,30 @@ let tests =
               let snapshotted = load dir
               Expect.equal (rowsOf snapshotted defaultDatabase "codec") expected "every value round-trips through a snapshot + reload"
 
+          testCase "WAL replay preserves CREATE and TRUNCATE times"
+          <| fun _ ->
+              let dir = tempDataDir ()
+
+              try
+                  let store = load dir
+                  attach dir store
+                  createTable store defaultDatabase "stable_time" [ mkCol "id" (TInt false) ] [] [] None None |> ignore
+                  let expected = store.Catalog.[defaultDatabase].["stable_time"].CreateTime
+                  Threading.Thread.Sleep 10
+                  let reloaded = load dir
+                  let actual = reloaded.Catalog.[defaultDatabase].["stable_time"].CreateTime
+                  Expect.equal actual expected "CREATE time"
+
+                  Threading.Thread.Sleep 10
+                  truncate store defaultDatabase "stable_time" |> ignore
+                  let expected = store.Catalog.[defaultDatabase].["stable_time"].CreateTime
+                  Threading.Thread.Sleep 10
+                  let reloaded = load dir
+                  let actual = reloaded.Catalog.[defaultDatabase].["stable_time"].CreateTime
+                  Expect.equal actual expected "TRUNCATE time"
+              finally
+                  Directory.Delete(dir, true)
+
           testCase "a table with a column of every ColumnType survives a restart with byte-identical SHOW CREATE TABLE output"
           <| fun _ ->
               let dir = tempDataDir ()

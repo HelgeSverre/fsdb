@@ -238,7 +238,6 @@ generated-column expressions.
 | Group commit | binlog/redo group flush amortization | one open+fsync per committed statement (`Persistence.fs:1130`) | medium (throughput) | divergence |
 | Space reclamation | purge threads reclaim deleted rows | tombstoned slots never reclaimed; long-lived delete-heavy tables grow memory without bound (`RowStore.fs:61–63`) | medium | divergence |
 | Data-directory trust | tablespace pages authenticated by InnoDB checks | CRC detects but does not authenticate; anyone writing `wal.bin`/`snapshot.fsdb` rewrites `mysql.user` (documented in README) | low (threat-model) | divergence |
-| CREATE_TIME stability | stable across recovery | re-stamped on WAL-only replay (`Storage.fs:134–137`) | low | divergence |
 | Platform | portable | durable mode macOS/Linux only (libc fsync design) | low | divergence |
 
 ## 9. Views and triggers

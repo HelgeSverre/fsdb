@@ -130,10 +130,8 @@ type Table =
       TableCharset: string option
       TableCollation: string option
       /// When the table was created — surfaced as
-      /// `information_schema.tables.CREATE_TIME`. Survives a snapshot;
-      /// ponytail: a WAL-only replay re-stamps it at replay time (the
-      /// CreateTable commit event carries no clock), refreshed by the next
-      /// snapshot.
+      /// `information_schema.tables.CREATE_TIME` and retained by both WAL
+      /// and snapshot recovery.
       CreateTime: DateTime
       /// Primary and unique keys resolve to stable row identities. Persistent
       /// maps preserve catalog snapshots; keys containing NULL are absent,
@@ -160,9 +158,10 @@ type Catalog = Map<string, Database>
 /// written, never SQL text — `INSERT ... VALUES (NOW(), UUID())` replayed as
 /// SQL would produce different values the second time, so replay must be
 /// "write exactly this row" rather than "re-run this expression". DDL
-/// (`SchemaChanged`) is deterministic by nature (CREATE/ALTER/DROP/TRUNCATE/
-/// RENAME never depend on when they run), so it's logged logically as the
-/// parsed `Statement` instead. `TransactionCommitted` wraps every event a
+/// (`SchemaChanged`) is logged logically as the parsed `Statement` instead.
+/// `SchemaChangedAt` additionally retains clocks assigned by CREATE and
+/// TRUNCATE.
+/// `TransactionCommitted` wraps every event a
 /// multi-statement transaction buffered, emitted once at COMMIT — see
 /// `beginTransactionSnapshot`/`commitTransactionEvents`.
 type CommitEvent =
@@ -170,6 +169,7 @@ type CommitEvent =
     | RowsUpdated of db: string * table: string * changes: (Value[] * Value[]) list
     | RowsDeleted of db: string * table: string * rows: Value[] list
     | SchemaChanged of db: string * Statement
+    | SchemaChangedAt of db: string * statement: Statement * createTime: DateTime
     | TransactionCommitted of CommitEvent list
 
 let defaultDatabase = "fsdb"
@@ -1897,6 +1897,8 @@ let createTableSeeded
             match indexes |> List.tryPick (fun ix -> match checkFullTextColumns columns ix with Error e -> Some e | Ok() -> None) with
             | Some e -> Error e
             | None ->
+                let createTime = DateTime.Now
+
                 let table =
                     { OriginalName = tableName
                       Columns = columns
@@ -1906,15 +1908,17 @@ let createTableSeeded
                       ForeignKeys = foreignKeys
                       TableCharset = tableCharset
                       TableCollation = tableCollation
-                      CreateTime = DateTime.Now
+                      CreateTime = createTime
                       UniqueIndex = Map.empty }
 
-                Ok(Map.add key (reindexTable table) db, ()))
+                Ok(Map.add key (reindexTable table) db, createTime))
 
-    if result.IsOk then
-        emit store (Some(SchemaChanged(dbName, CreateTable(tableName, columns, indexes, foreignKeys, [], false, tableCharset, tableCollation, autoIncrementSeed))))
-
-    result
+    match result with
+    | Error error -> Error error
+    | Ok createTime ->
+        let statement = CreateTable(tableName, columns, indexes, foreignKeys, [], false, tableCharset, tableCollation, autoIncrementSeed)
+        emit store (Some(SchemaChangedAt(dbName, statement, createTime)))
+        Ok()
 
 
 let createTable
@@ -1966,12 +1970,14 @@ let truncate (store: Store) (dbName: string) (tableName: string) : Result<unit, 
         virtualWriteGuard store dbName tableName
         |> Result.bind (fun () ->
             withTable store dbName tableName (fun table ->
-                Ok(reindexTable { table with RowsArray = RowStore.empty; NextAutoId = 1L; CreateTime = DateTime.Now }, ())))
+                let createTime = DateTime.Now
+                Ok(reindexTable { table with RowsArray = RowStore.empty; NextAutoId = 1L; CreateTime = createTime }, createTime)))
 
-    if result.IsOk then
-        emit store (Some(SchemaChanged(dbName, Truncate tableName)))
-
-    result
+    match result with
+    | Error error -> Error error
+    | Ok createTime ->
+        emit store (Some(SchemaChangedAt(dbName, Truncate tableName, createTime)))
+        Ok()
 
 /// Removes column index `idx` from every row — used by `DropColumn`, since
 /// `Value[]` has no built-in "remove at" the way a `ResizeArray` would.
@@ -3936,6 +3942,24 @@ let replaceTablesForReplay (store: Store) (dbName: string) (tableName: string) (
         match slot.Value |> Map.tryFind key with
         | None -> onMissing (sprintf "unknown table '%s.%s'" dbName tableName)
         | Some table -> slot.Value <- slot.Value |> Map.add key { table with RowsArray = table.RowsArray |> List.ofSeq |> f |> RowStore.ofSeq }
+
+/// Restores metadata that is assigned at creation rather than derived from
+/// table contents.
+let setTableCreateTimeForReplay
+    (store: Store)
+    (dbName: string)
+    (tableName: string)
+    (createTime: DateTime)
+    (onMissing: string -> unit)
+    : unit =
+    let key = normalizeTableName tableName
+
+    match store.Databases.TryGetValue dbName with
+    | false, _ -> onMissing (sprintf "unknown database '%s'" dbName)
+    | true, slot ->
+        match slot.Value |> Map.tryFind key with
+        | None -> onMissing (sprintf "unknown table '%s.%s'" dbName tableName)
+        | Some table -> slot.Value <- slot.Value |> Map.add key { table with CreateTime = createTime }
 
 /// Puts already-committed rows back exactly as they were, for WAL replay.
 /// Deliberately not `insertRows`: that enforces unique keys against indexes

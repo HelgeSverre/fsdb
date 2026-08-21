@@ -484,8 +484,8 @@ let private decodeForeignKeyDef (r: #IReader) : ForeignKeyDef =
       OnUpdate = readOptStr r }
 
 // ---------------------------------------------------------------------
-// `Ast.AlterAction` / `Ast.Statement` — only the DDL shapes `SchemaChanged`
-// ever wraps (see `Storage`'s every `emit (Some(SchemaChanged ...)))` call);
+// `Ast.AlterAction` / `Ast.Statement` — only the DDL shapes schema events
+// carry;
 // any other `Statement` case reaching here would be a `Storage` bug, not a
 // WAL-format one, so it's a hard `failwithf` rather than a silent skip.
 // ---------------------------------------------------------------------
@@ -619,6 +619,7 @@ let private KindRowsUpdated = 0x02uy
 let private KindRowsDeleted = 0x03uy
 let private KindSchemaChanged = 0x04uy
 let private KindTransactionCommitted = 0x05uy
+let private KindSchemaChangedAt = 0x06uy
 
 let private encodeRowBin (w: Writer) (row: Value[]) : unit =
     w.WriteInt32LE row.Length
@@ -660,6 +661,11 @@ let rec private encodeEvent (w: Writer) (event: CommitEvent) : unit =
         w.WriteByte KindSchemaChanged
         w.WriteLenEncString db
         encodeStatement w stmt
+    | SchemaChangedAt(db, stmt, createTime) ->
+        w.WriteByte KindSchemaChangedAt
+        w.WriteLenEncString db
+        encodeStatement w stmt
+        w.WriteInt64LE createTime.Ticks
     | TransactionCommitted events ->
         w.WriteByte KindTransactionCommitted
         w.WriteInt32LE (List.length events)
@@ -694,6 +700,9 @@ let rec private decodeEventAt (depth: int) (r: #IReader) : CommitEvent =
         SchemaChanged(db, decodeStatement r)
     | k when k = KindTransactionCommitted ->
         TransactionCommitted(List.init (r.ReadInt32LE()) (fun _ -> decodeEventAt (depth + 1) r))
+    | k when k = KindSchemaChangedAt ->
+        let db = str ()
+        SchemaChangedAt(db, decodeStatement r, DateTime(r.ReadInt64LE()))
     | tag -> failwithf "Persistence: unknown WAL event kind 0x%02x" tag
 
 let private decodeEvent (r: #IReader) : CommitEvent = decodeEventAt 0 r
@@ -812,6 +821,14 @@ let rec private applyEventAt (depth: int) (store: Store) (event: CommitEvent) : 
     | RowsUpdated(db, table, changes) -> mapTableRows store db table (applyRowChanges changes)
     | RowsDeleted(db, table, rows) -> mapTableRows store db table (applyRowDeletes rows)
     | SchemaChanged(db, stmt) -> applyDdl store db stmt
+    | SchemaChangedAt(db, stmt, createTime) ->
+        applyDdl store db stmt
+
+        match stmt with
+        | CreateTable(name, _, _, _, _, _, _, _, _) ->
+            setTableCreateTimeForReplay store db name createTime (Log.diagnostic "fsdb: WAL replay warning: %s")
+        | Truncate name -> setTableCreateTimeForReplay store db name createTime (Log.diagnostic "fsdb: WAL replay warning: %s")
+        | _ -> Log.diagnostic "fsdb: WAL replay warning (SchemaChangedAt): unexpected statement %A" stmt
     | TransactionCommitted events -> events |> List.iter (applyEventAt (depth + 1) store)
 
 let private applyEvent (store: Store) (event: CommitEvent) : unit = applyEventAt 0 store event

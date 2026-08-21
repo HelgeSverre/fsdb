@@ -2166,7 +2166,7 @@ let tests =
 
                     Expect.equal (List.ofSeq events) [] "a no-op ODKU match commits nothing"
 
-                testCase "createTable/dropTable/alterTable/truncate/createDatabase/dropDatabase all fire SchemaChanged, logically (the DDL statement, not row data)"
+                testCase "schema changes emit logical DDL events"
                 <| fun _ ->
                     let store = create ()
                     let events = ResizeArray<CommitEvent>()
@@ -2184,7 +2184,9 @@ let tests =
                     events
                     |> Seq.iter (function
                         | SchemaChanged("shop", _) -> ()
-                        | other -> failtestf "expected a SchemaChanged in db 'shop', got %A" other)
+                        | SchemaChangedAt("shop", CreateTable _, _) -> ()
+                        | SchemaChangedAt("shop", Truncate _, _) -> ()
+                        | other -> failtestf "expected a schema event in db 'shop', got %A" other)
 
                 testCase "a failed write (e.g. duplicate key) fires nothing"
                 <| fun _ ->
