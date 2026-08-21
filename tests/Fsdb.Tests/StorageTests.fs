@@ -387,17 +387,19 @@ let tests =
                     | Error(InvalidValueForColumn("established", "")) -> ()
                     | other -> failtestf "expected InvalidValueForColumn, got %A" other
 
-                testCase "non-strict mode coerces an unparseable datetime string on a nullable column to NULL"
+                testCase "non-strict mode coerces an unparseable datetime string on a nullable column to a zero datetime"
                 <| fun _ ->
                     match coerceValue false (col "established" (TDateTime 0) true) (VString "") with
-                    | Ok VNull -> ()
-                    | other -> failtestf "expected Ok VNull, got %A" other
+                    | Ok(VZeroDateTime dateTime) ->
+                        Expect.equal (toText (VZeroDateTime dateTime)) (Some "0000-00-00 00:00:00") "zero datetime fallback"
+                    | other -> failtestf "expected a zero datetime, got %A" other
 
-                testCase "non-strict mode still rejects an unparseable datetime string on a NOT NULL column"
+                testCase "non-strict mode coerces an unparseable datetime string on a NOT NULL column to a zero datetime"
                 <| fun _ ->
                     match coerceValue false (col "established" (TDateTime 0) false) (VString "") with
-                    | Error(InvalidValueForColumn("established", "")) -> ()
-                    | other -> failtestf "expected InvalidValueForColumn, got %A" other
+                    | Ok(VZeroDateTime dateTime) ->
+                        Expect.equal (toText (VZeroDateTime dateTime)) (Some "0000-00-00 00:00:00") "zero datetime fallback"
+                    | other -> failtestf "expected a zero datetime, got %A" other
 
                 testCase "non-strict mode preserves a partial zero date"
                 <| fun _ ->

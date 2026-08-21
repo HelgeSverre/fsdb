@@ -637,6 +637,19 @@ let tests =
               | ResultSet(_, [ [ Some "0000-00-00" ]; [ Some "0000-00-00" ] ]) -> ()
               | other -> failtestf "expected all-zero fallback values, got %A" other
 
+          testCase "non-strict invalid temporal text coerces to zero values regardless of nullability"
+          <| fun _ ->
+              let session = create 1 (Fsdb.Storage.create ())
+              let session, _ = handle session "SET SESSION sql_mode='NO_ENGINE_SUBSTITUTION'"
+              let session, _ = handle session "CREATE TABLE t (dn DATE NULL, dnn DATE NOT NULL, xn DATETIME NULL, xnn DATETIME NOT NULL)"
+              let session, result = handle session "INSERT INTO t VALUES ('abc', 'abc', 'abc', 'abc')"
+              Expect.equal result (Affected 1UL) "non-strict insert succeeds"
+              Expect.equal (session.Diagnostics |> List.map _.Code) [ 1265; 1265; 1265; 1265 ] "one truncation warning per temporal column"
+
+              match handle session "SELECT dn, dnn, xn, xnn FROM t" |> snd with
+              | ResultSet(_, [ [ Some "0000-00-00"; Some "0000-00-00"; Some "0000-00-00 00:00:00"; Some "0000-00-00 00:00:00" ] ]) -> ()
+              | other -> failtestf "expected zero temporal fallbacks, got %A" other
+
           testCase "typed zero-date literals validate against the executing sql_mode"
           <| fun _ ->
               let session = create 1 (Fsdb.Storage.create ())

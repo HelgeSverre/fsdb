@@ -771,11 +771,24 @@ let coerceValueWithMode (mode: TemporalCoercionMode) (col: ColumnDef) (v: Value)
 
             Ok(zero ())
 
-    /// Non-strict's temporal fallback: MySQL's zero date, which
-    /// `VDate`/`VDateTime` can't represent (see the type's doc comment) — NULL
-    /// stands in for it on a nullable column, otherwise this still hard-fails.
     let temporalFallback () =
-        if strict || not col.Nullable then fail () else Ok VNull
+        if strict then
+            fail ()
+        else
+            warning 1265 (sprintf "Data truncated for column '%s'" col.Name)
+
+            match col.Type with
+            | TDate ->
+                tryZeroDate 0 0 0
+                |> Option.map (VZeroDate >> Ok)
+                |> Option.defaultWith fail
+            | TDateTime _
+            | TTimestamp _ ->
+                tryZeroDate 0 0 0
+                |> Option.bind (fun date -> tryZeroDateTime date 0 0 0 0)
+                |> Option.map (VZeroDateTime >> Ok)
+                |> Option.defaultWith fail
+            | _ -> fail ()
 
     let outOfRange () = Error(OutOfRangeForColumn col.Name)
 
