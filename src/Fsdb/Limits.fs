@@ -275,27 +275,24 @@ let variables () : (string * string) list =
     @ [ "interactive_timeout", string waitTimeoutSeconds ]
 
 /// Applies `settings` for the duration of `f`, restoring every knob
-/// afterwards. The whole test suite runs in one process, so an override that
-/// leaks silently changes unrelated tests. Goes through `applySetting` so a
-/// test that tunes a knob also exercises the parser that production uses.
-/// ponytail: neither thread-safe nor nestable — keep its callers in a
-/// `testSequenced` list.
+/// afterwards. The process-wide knobs need one gate so independent tests
+/// cannot observe each other's temporary settings.
+let private settingsGate = obj ()
+
 let withSettings (settings: (string * string) list) (f: unit -> 'a) : 'a =
-    let saved = [ for knob in knobs -> knob.Name, string (knob.Get()) ]
+    lock settingsGate (fun () ->
+        let saved = [ for knob in knobs -> knob.Name, string (knob.Get()) ]
 
-    try
-        // Inside the try: a bad setting part-way through the list would
-        // otherwise leave the ones before it applied and never restored,
-        // silently retuning every test that runs afterwards.
-        for name, value in settings do
-            match applySetting name value with
-            | Ok() -> ()
-            | Error message -> failwith message
+        try
+            for name, value in settings do
+                match applySetting name value with
+                | Ok() -> ()
+                | Error message -> failwith message
 
-        f ()
-    finally
-        for name, value in saved do
-            applySetting name value |> ignore
+            f ()
+        finally
+            for name, value in saved do
+                applySetting name value |> ignore)
 
 /// Applies one option line's `name` / optional `value`. `loose-` (MySQL's
 /// "tolerate this if you don't know it") suppresses an *unknown option*, and
