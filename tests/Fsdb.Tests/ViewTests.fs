@@ -63,6 +63,11 @@ let tests =
                   [ [ Some "1"; Some "Updated" ] ]
                   "writes reach the base table"
 
+              Expect.equal
+                  (rows store "SELECT IS_UPDATABLE FROM information_schema.VIEWS WHERE TABLE_SCHEMA = 'fsdb' AND TABLE_NAME = 'vendor_names'")
+                  [ [ Some "YES" ] ]
+                  "metadata reports the supported writable shape"
+
           testCase "a grouped view rejects UPDATE"
           <| fun _ ->
               let store = setup ()
@@ -71,6 +76,29 @@ let tests =
               match run store "UPDATE totals SET total = 0" with
               | Err(1288, _) -> ()
               | other -> failtestf "expected non-updatable view error, got %A" other
+
+          testCase "view writes recheck the definer's base-table privileges"
+          <| fun _ ->
+              let store = setup ()
+              let apply session sql =
+                  let session, result = Fsdb.QueryHandler.handle session sql
+                  expectOk result sql
+                  session
+
+              let root = Fsdb.Session.create 1 store
+              let root = apply root "CREATE USER owner"
+              let root = apply root "CREATE USER writer"
+              let root = apply root "GRANT SELECT, UPDATE ON fsdb.vendors TO owner"
+              let root = apply root "GRANT CREATE VIEW ON fsdb.* TO owner"
+              let owner = { Fsdb.Session.create 2 store with User = "owner" }
+              let _owner = apply owner "CREATE VIEW writable_vendors AS SELECT id, name FROM vendors"
+              let root = apply root "GRANT UPDATE ON fsdb.writable_vendors TO writer"
+              let writer = { Fsdb.Session.create 3 store with User = "writer" }
+              let _root = apply root "REVOKE UPDATE ON fsdb.vendors FROM owner"
+
+              match Fsdb.QueryHandler.handle writer "UPDATE writable_vendors SET name = 'Blocked' WHERE id = 1" |> snd with
+              | Err(1142, message) -> Expect.stringContains message "vendors" "revoked base table named"
+              | other -> failtestf "expected definer privilege failure, got %A" other
 
           testCase "view definitions reject user and system variables"
           <| fun _ ->

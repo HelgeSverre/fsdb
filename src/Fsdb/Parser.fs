@@ -2987,8 +2987,7 @@ let private setTriggerNewStmt: Parser<Statement, unit> =
     |>> SetTriggerNew
 
 // ---------------------------------------------------------------------------
-// CREATE VIEW / DROP VIEW — a read-only stored SELECT, evaluated through the
-// same derived-table path as an inline subquery.
+// CREATE VIEW / DROP VIEW.
 // ---------------------------------------------------------------------------
 
 let private createViewStmt: Parser<Statement, unit> =

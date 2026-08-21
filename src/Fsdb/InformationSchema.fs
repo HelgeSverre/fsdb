@@ -928,10 +928,32 @@ let private viewsColumns =
       strCol "CHARACTER_SET_CLIENT"
       strCol "COLLATION_CONNECTION" ]
 
+let private isDirectUpdatableView (definition: string) =
+    match Fsdb.Parser.parse definition with
+    | Ok(Select select) ->
+        match select.From with
+        | Some(FromTable _) ->
+            select.Joins.IsEmpty
+            && not select.Distinct
+            && not select.CalculateFoundRows
+            && select.Where.IsNone
+            && select.GroupBy.IsEmpty
+            && not select.Rollup
+            && select.Windows.IsEmpty
+            && select.Ctes.IsEmpty
+            && select.Having.IsNone
+            && select.OrderBy.IsEmpty
+            && select.Limit.IsNone
+            && select.Offset.IsNone
+            && not select.Locking
+            && (select.Projections |> List.forall (fun (expression, _) -> match expression with Col _ | QualifiedCol _ -> true | _ -> false))
+        | _ -> false
+    | _ -> false
+
 let private viewsRows (catalog: Catalog) : Value[] list =
     viewCatalogEntries catalog
     |> List.map (fun view ->
-        [| vs "def"; vs view.Schema; vs view.Name; vs view.Definition; vs "NONE"; vs "NO"; vs view.Definer
+        [| vs "def"; vs view.Schema; vs view.Name; vs view.Definition; vs "NONE"; vs (if isDirectUpdatableView view.Definition then "YES" else "NO"); vs view.Definer
            vs "DEFINER"; vs "utf8mb4"; vs "utf8mb4_0900_ai_ci" |])
 
 let private routinesColumns =

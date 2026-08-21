@@ -6939,7 +6939,8 @@ let private substituteValuesFunc (columnIndex: Map<string, int list>) (candidate
 type private UpdatableView =
     { Database: string
       Table: string
-      Columns: Map<string, string> }
+      Columns: Map<string, string>
+      Definer: string }
 
 let private tryUpdatableView (store: Store) (dbName: string) (viewName: string) : UpdatableView option =
     let simpleSelect (view: StoredView) (select: SelectStmt) =
@@ -6980,7 +6981,8 @@ let private tryUpdatableView (store: Store) (dbName: string) (viewName: string) 
                     Some(
                         { Database = source.Database |> Option.defaultValue view.Schema
                           Table = source.Table
-                          Columns = List.zip outputNames (sourceNames |> List.map snd) |> List.map (fun (viewColumn, baseColumn) -> viewColumn.ToLowerInvariant(), baseColumn) |> Map.ofList }: UpdatableView
+                          Columns = List.zip outputNames (sourceNames |> List.map snd) |> List.map (fun (viewColumn, baseColumn) -> viewColumn.ToLowerInvariant(), baseColumn) |> Map.ofList
+                          Definer = view.Definer }: UpdatableView
                     )
         | _ -> None
 
@@ -8295,8 +8297,7 @@ let rec execute (store: Store) (registry: Registry) (dbName: string) (ids: int64
     fromSubqueryMemo.Value <- Dictionary<FromItem, Result<ColumnDef list * Value[] list, QueryResult>>(HashIdentity.Reference)
     viewMemo.Value <- Dictionary<string * string, Result<ColumnDef list * Value[] list, QueryResult>>()
 
-    /// Fires one trigger slot once per changed row against `runStore`.
-    /// Bodies execute with the *trigger's* schema `db` as the default
+    /// Bodies execute with the trigger's schema `db` as the default
     /// database — MySQL resolves a body's unqualified table names against
     /// the schema the trigger lives in, not the session's current database
     /// (probed: `INSERT INTO a.t` from a session on db b runs the body's
@@ -9456,7 +9457,9 @@ let rec execute (store: Store) (registry: Registry) (dbName: string) (ids: int64
                     OrderBy = updateStmt.OrderBy |> List.map (fun (expression, direction) -> rewrite expression, direction)
                     Limit = updateStmt.Limit |> Option.map rewrite }
 
-            execute store registry dbName ids foundRows (Update rewritten)
+            match Auth.check store (storedObjectUser view.Definer) (Auth.requiredPrivileges view.Database (Update rewritten)) with
+            | Error(code, message) -> ids, Err(code, message)
+            | Ok() -> execute store registry dbName ids foundRows (Update rewritten)
 
     | Update updateStmt when updateStmt.Joins.IsEmpty ->
         let db, table = (updateStmt.From.Database |> Option.defaultValue dbName), updateStmt.From.Table
@@ -9812,17 +9815,24 @@ let rec execute (store: Store) (registry: Registry) (dbName: string) (ids: int64
                     OrderBy = deleteStmt.OrderBy |> List.map (fun (expression, direction) -> rewrite expression, direction)
                     Limit = deleteStmt.Limit |> Option.map rewrite }
 
-            execute store registry dbName ids foundRows (Delete rewritten)
+            match Auth.check store (storedObjectUser view.Definer) (Auth.requiredPrivileges view.Database (Delete rewritten)) with
+            | Error(code, message) -> ids, Err(code, message)
+            | Ok() -> execute store registry dbName ids foundRows (Delete rewritten)
 
     | Delete deleteStmt when deleteStmt.Joins.IsEmpty ->
         let db, table = (deleteStmt.From.Database |> Option.defaultValue dbName), deleteStmt.From.Table
         let tableAlias = deleteStmt.From.Alias |> Option.defaultValue deleteStmt.From.Table
-        let narrowed = tryPointLookup store dbName deleteStmt.From deleteStmt.Where
+        let beforeTriggers = triggersFor store db table "BEFORE" "DELETE"
+        let afterTriggers = triggersFor store db table "AFTER" "DELETE"
+        let baseCatalog = store.Catalog
+        let useSnapshot = not (beforeTriggers.IsEmpty && afterTriggers.IsEmpty)
+        let targetStore = if useSnapshot then Storage.beginTransactionSnapshot store else store
+        let narrowed = tryPointLookup targetStore dbName deleteStmt.From deleteStmt.Where
 
         let scanned =
             narrowed
             |> Option.map (fun (columns, rows) -> Ok(columns, rows |> List.map snd |> Seq.ofList))
-            |> Option.defaultWith (fun () -> scan store db table)
+            |> Option.defaultWith (fun () -> scan targetStore db table)
 
         match scanned with
         | Error e -> ids, storageErr e
@@ -9840,13 +9850,6 @@ let rec execute (store: Store) (registry: Registry) (dbName: string) (ids: int64
                 | Error(code, message) -> ids, Err(code, message)
                 | Ok targetRows ->
                     let targetSet = referenceSet targetRows
-                    let beforeTriggers = triggersFor store db table "BEFORE" "DELETE"
-                    let afterTriggers = triggersFor store db table "AFTER" "DELETE"
-                    let baseCatalog = store.Catalog
-                    let useSnapshot = not (beforeTriggers.IsEmpty && afterTriggers.IsEmpty)
-                    let targetStore =
-                        if useSnapshot then Storage.beginTransactionSnapshot store else store
-
                     let deletedRows = targetRows |> List.map (fun row -> Some row, None)
 
                     let predicate row =

@@ -700,13 +700,13 @@ type Statement =
     /// `DROP TRIGGER [IF EXISTS] name` — resolved against the session
     /// database's triggers (error 1360 when missing, unless `ifExists`).
     | DropTrigger of name: string * ifExists: bool
-    /// A read-only stored query. The definition remains SQL text so the
+    /// A stored query. The definition remains SQL text so the
     /// row-backed `mysql.views` catalog can persist it through ordinary row
     /// events; it is parsed when the view is read. `columns` is the optional
     /// explicit view-column list, and `orReplace` selects CREATE OR REPLACE.
     /// ponytail: fsdb materializes the definition once per referencing
-    /// statement and does not yet implement MERGE, updatable views, CHECK
-    /// OPTION, or configurable SQL SECURITY.
+    /// statement; UPDATE and DELETE accept only direct projections of one
+    /// table. No INSERT, MERGE, CHECK OPTION, or configurable SQL SECURITY.
     | CreateView of name: string * columns: string list * definition: string * orReplace: bool
     /// `DROP VIEW [IF EXISTS] view [, ...]`.
     | DropView of names: string list * ifExists: bool
