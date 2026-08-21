@@ -199,6 +199,10 @@ let tests =
                         (VDouble 3.0)
                         "point to line distance"
                     Expect.equal
+                        (call "ST_Distance" [ geometry "POINT(1 0)"; geometry "LINESTRING(0 0,2 0)" ])
+                        (VDouble 0.0)
+                        "point on line distance"
+                    Expect.equal
                         (call "ST_Distance" [ geometry "POLYGON((0 0,4 0,4 4,0 4,0 0),(1 1,3 1,3 3,1 3,1 1))"; geometry "POINT(2 2)" ])
                         (VDouble 1.0)
                         "hole boundary distance"
