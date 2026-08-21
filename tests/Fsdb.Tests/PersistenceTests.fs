@@ -201,6 +201,20 @@ let tests =
               let reloaded = load dir
               Expect.equal (rowsOf reloaded defaultDatabase "places") [ [| point |] ] "geometry row survives WAL replay"
 
+          testCase "WAL and snapshot recovery retain typed TIME values"
+          <| fun _ ->
+              let dir = tempDataDir ()
+              let store = load dir
+              attach dir store
+              createTable store defaultDatabase "times" [ mkCol "value" (TTime 6) ] [] [] None None |> ignore
+              let value = tryParseTimeValue "-838:59:59.123456" |> Option.get |> VTime
+              insertRows store defaultDatabase "times" None [ [ value ] ] |> ignore
+
+              Expect.equal (rowsOf (load dir) defaultDatabase "times") [ [| value |] ] "WAL replay"
+
+              snapshotNow dir store
+              Expect.equal (rowsOf (load dir) defaultDatabase "times") [ [| value |] ] "snapshot replay"
+
           testCase "attach + reload preserves BIT(64) boundary values"
           <| fun _ ->
               let dir = tempDataDir ()
