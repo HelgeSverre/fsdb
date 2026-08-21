@@ -1189,6 +1189,8 @@ let tests =
                 testCase "WEIGHT_STRING exposes the default collation key"
                 <| fun _ ->
                     let weight value = call "WEIGHT_STRING" [ VString value ]
+                    let utf8Bin = tryFind "utf8mb4_bin" |> Option.get
+                    let latin1Bin = tryFind "latin1_bin" |> Option.get
                     Expect.equal (weight "Åge") (weight "age") "default collation folds case and accents"
                     Expect.notEqual (weight "age") (weight "axe") "different primary weights remain distinct"
                     Expect.notEqual (weight "a") (weight "a ") "trailing spaces retain their weight"
@@ -1196,7 +1198,12 @@ let tests =
                     Expect.equal (call "WEIGHT_STRING" [ VBytes [| 0x61uy; 0x00uy |] ]) (VBytes [| 0x61uy; 0x00uy |]) "binary input stays byte-exact"
                     Expect.equal (call "WEIGHT_STRING" [ VBit(8, 128UL) ]) (VBytes [| 0x80uy |]) "BIT input stays byte-exact"
                     Expect.equal (weightStringBinary 2 (VBit(8, 128UL))) (VBytes [| 0x80uy; 0x00uy |]) "BINARY width pads BIT bytes"
-                    Expect.equal (weightStringChar defaultCollation 3 (VString "abcdef")) (weight "abc") "character width truncates before weighting"
+                    Expect.equal (weightString utf8Bin (VString "a")) (VBytes [| 0x00uy; 0x00uy; 0x61uy |]) "utf8mb4 binary collation uses code points"
+                    Expect.equal (weightString utf8Bin (VString "a ")) (VBytes [| 0x00uy; 0x00uy; 0x61uy; 0x00uy; 0x00uy; 0x20uy |]) "utf8mb4 binary collation retains trailing spaces"
+                    Expect.equal (weightStringChar utf8Bin 3 (VString "a")) (VBytes [| 0x00uy; 0x00uy; 0x61uy; 0x00uy; 0x00uy; 0x20uy; 0x00uy; 0x00uy; 0x20uy |]) "CHAR width pads text before weighting"
+                    Expect.equal (weightStringChar latin1Bin 3 (VString "a")) (VBytes [| 0x61uy; 0x20uy; 0x20uy |]) "latin1 CHAR width pads bytes"
+                    Expect.equal (weightStringChar utf8Bin 2 (VBytes [| 0x61uy; 0x00uy |])) (VBytes [| 0x61uy; 0x00uy |]) "CHAR preserves raw bytes"
+                    Expect.equal (weightStringChar utf8Bin 3 (VBit(8, 128UL))) (VBytes [| 0x80uy |]) "CHAR preserves BIT bytes"
 
                 testList
                     "Dates"

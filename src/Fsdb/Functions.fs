@@ -1936,15 +1936,23 @@ let weightString (collation: Collation.Collation) (value: Value) : Value =
         | None -> collation.WeightOf(req value) |> VBytes
 
 let weightStringChar (collation: Collation.Collation) (length: int) (value: Value) : Value =
-    match value with
-    | VNull -> VNull
+    match value, tryRawBytes value with
+    | VNull, _ -> VNull
+    | _, Some bytes -> VBytes(Array.truncate length bytes)
     | _ ->
         let text = req value
         let result = StringBuilder()
+        let mutable count = 0
 
         text.EnumerateRunes()
         |> Seq.truncate length
-        |> Seq.iter (fun rune -> result.Append(rune.ToString()) |> ignore)
+        |> Seq.iter (fun rune ->
+            result.Append(rune.ToString()) |> ignore
+            count <- count + 1)
+
+        while count < length do
+            result.Append ' ' |> ignore
+            count <- count + 1
 
         weightString collation (VString(result.ToString()))
 

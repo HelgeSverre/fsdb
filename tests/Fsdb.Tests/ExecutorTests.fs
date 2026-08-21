@@ -295,7 +295,7 @@ let tests =
                     | ResultSet(_, [ [ Some shortWeight; Some longWeight; Some binaryWeight; Some binaryCollationWeight ] ]) ->
                         Expect.notEqual shortWeight longWeight "CHAR width bounds characters"
                         Expect.equal binaryWeight "6162636465660000" "BINARY pads with zero bytes"
-                        Expect.equal binaryCollationWeight "61" "binary collation has byte weights"
+                        Expect.equal binaryCollationWeight "000061" "binary collation has code-point weights"
                     | other -> failtestf "expected one WEIGHT_STRING row, got %A" other
 
                 testCase "WEIGHT_STRING keeps BIT column bytes"
@@ -309,6 +309,13 @@ let tests =
                         Expect.equal weight "80" "BIT weight is its stored byte"
                         Expect.equal paddedWeight "8000" "BINARY width pads the stored byte"
                     | other -> failtestf "expected one BIT weight row, got %A" other
+
+                    match runDefault store "SELECT HEX(WEIGHT_STRING(value AS CHAR(3))), HEX(WEIGHT_STRING(X'6100' AS CHAR(1))), HEX(WEIGHT_STRING(X'6100' AS CHAR(2))) FROM weight_bits" with
+                    | ResultSet(_, [ [ Some bitWeight; Some shortBytes; Some fullBytes ] ]) ->
+                        Expect.equal bitWeight "80" "CHAR leaves BIT bytes unpadded"
+                        Expect.equal shortBytes "61" "CHAR truncates raw bytes"
+                        Expect.equal fullBytes "6100" "CHAR retains raw zero bytes"
+                    | other -> failtestf "expected one raw CHAR weight row, got %A" other
 
                 testTheory
                     "a bin-collated column compares byte-for-byte in WHERE and its unique key"

@@ -115,6 +115,16 @@ let private makeCollation (name: string) (spec: Spec) : Collation =
 
     let primaryText (s: string) = trim s |> foldText
 
+    let binaryWeight (s: string) =
+        if name.StartsWith("utf8mb", StringComparison.Ordinal) then
+            s.EnumerateRunes()
+            |> Seq.collect (fun rune ->
+                let value = rune.Value
+                [ byte (value >>> 16); byte (value >>> 8); byte value ])
+            |> Array.ofSeq
+        else
+            Text.Encoding.UTF8.GetBytes s
+
     let compareFull (a: string) (b: string) : int =
         if spec.ByteOrder then
             let c = String.Compare(trim a, trim b, StringComparison.Ordinal)
@@ -147,7 +157,7 @@ let private makeCollation (name: string) (spec: Spec) : Collation =
       WeightOf =
         fun s ->
             if spec.ByteOrder then
-                System.Text.Encoding.UTF8.GetBytes s
+                binaryWeight s
             else
                 ci.GetSortKey(foldText s, spec.Fold).KeyData
       HashOf =
