@@ -401,7 +401,14 @@ let tests =
 
                 testCase "non-strict mode preserves a partial zero date"
                 <| fun _ ->
-                    match coerceValue false (col "established" TDate false) (VString "2020-00-01") with
+                    match
+                        coerceValueWithMode
+                            { Strict = false
+                              NoZeroDate = false
+                              NoZeroInDate = false }
+                            (col "established" TDate false)
+                            (VString "2020-00-01")
+                    with
                     | Ok(VZeroDate date) -> Expect.equal (zeroDateParts date) (2020, 0, 1) "zero month survives"
                     | other -> failtestf "expected a zero date, got %A" other
 

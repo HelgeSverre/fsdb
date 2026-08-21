@@ -2222,6 +2222,19 @@ let private formatZeroDate (date: ZeroDate) (fmt: string) =
         .Replace("%d", sprintf "%02d" day)
         .Replace("%e", string day)
 
+let private formatZeroDateTime (dateTime: ZeroDateTime) (fmt: string) =
+    let date, hour, minute, second, _ = zeroDateTimeParts dateTime
+    let hour12 = if hour % 12 = 0 then 12 else hour % 12
+
+    (formatZeroDate date fmt)
+        .Replace("%H", sprintf "%02d" hour)
+        .Replace("%h", sprintf "%02d" hour12)
+        .Replace("%I", sprintf "%02d" hour12)
+        .Replace("%i", sprintf "%02d" minute)
+        .Replace("%s", sprintf "%02d" second)
+        .Replace("%S", sprintf "%02d" second)
+        .Replace("%p", (if hour < 12 then "AM" else "PM"))
+
 let private dateFormatFn: Scalar =
     function
     | [ d; f ] when not (anyNull [ d; f ]) ->
@@ -2230,7 +2243,7 @@ let private dateFormatFn: Scalar =
             VString(formatZeroDate date fmt)
         | VZeroDateTime dateTime, Some fmt ->
             let date, _, _, _, _ = zeroDateTimeParts dateTime
-            if isAllZeroDate date then VNull else VString(formatZeroDate date fmt)
+            if isAllZeroDate date then VNull else VString(formatZeroDateTime dateTime fmt)
         | _, Some fmt -> asDateTime d |> Option.map (fun dt -> VString(formatDate dt fmt)) |> Option.defaultValue VNull
         | _ -> VNull
     | _ -> VNull
