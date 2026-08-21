@@ -147,6 +147,13 @@ type SecondaryOrderEntry = private { CollationName: string option; Value: Value;
 
 type SecondaryOrder = Map<string, ImmutableSortedSet<SecondaryOrderEntry>>
 
+type private SecondaryOrderSlice =
+    { IndexName: string
+      ColumnIndex: int
+      Entries: ImmutableSortedSet<SecondaryOrderEntry>
+      First: int
+      AfterLast: int }
+
 /// A table's rows, newest last. `OriginalName` keeps the as-created casing
 /// for information_schema, even though the catalog keys tables by their
 /// lowercased name. `Indexes`' `UNIQUE` entries (plus the primary key) are
@@ -2123,13 +2130,14 @@ let trySecondaryLookup
     tableAt store dbName tableName
     |> Option.bind (fun table -> trySecondaryLookupInTable store table columnName literal)
 
-let private trySecondaryRangeLookupInTable
+let private trySecondaryOrderSliceInTable
     (store: Store)
     (table: Table)
     (columnName: string)
     (lower: (Value * bool) option)
     (upper: (Value * bool) option)
-    : (string * int * ColumnDef list * (RowId * Value[]) list) option =
+    (requireBound: bool)
+    : SecondaryOrderSlice option =
     tryEqualityIndex table columnName
     |> Option.bind (fun (indexName, index, unique) ->
         let normalizeBound = function
@@ -2138,7 +2146,7 @@ let private trySecondaryRangeLookupInTable
             | Some(value, inclusive) -> exactProbeValue store table index value |> Option.map (fun value -> Some(value, inclusive))
 
         match normalizeBound lower, normalizeBound upper with
-        | Some lower, Some upper when lower.IsSome || upper.IsSome ->
+        | Some lower, Some upper when not requireBound || lower.IsSome || upper.IsSome ->
             if unique then
                 None
             else
@@ -2158,7 +2166,7 @@ let private trySecondaryRangeLookupInTable
 
                     let first =
                         match lower with
-                        | None -> firstNonNull
+                        | None -> if lower.IsSome || upper.IsSome then firstNonNull else 0
                         | Some(value, true) -> insertionIndex (entry value (RowId.create Int32.MinValue))
                         | Some(value, false) -> insertionIndex (entry value (RowId.create Int32.MaxValue))
 
@@ -2168,17 +2176,31 @@ let private trySecondaryRangeLookupInTable
                         | Some(value, true) -> insertionIndex (entry value (RowId.create Int32.MaxValue))
                         | Some(value, false) -> insertionIndex (entry value (RowId.create Int32.MinValue))
 
-                    let rows =
-                        let first = max 0 first
-                        let count = max 0 (min entries.Count afterLast - first)
-
-                        Seq.init count (fun offset -> entries.[first + offset])
-                        |> Seq.sortBy (fun entry -> RowId.value entry.RowId)
-                        |> Seq.choose (fun entry -> table.RowsArray.TryFind entry.RowId |> Option.map (fun row -> entry.RowId, row))
-                        |> List.ofSeq
-
-                    indexName, index, table.Columns, rows)
+                    { IndexName = indexName
+                      ColumnIndex = index
+                      Entries = entries
+                      First = max 0 first
+                      AfterLast = max 0 (min entries.Count afterLast) })
         | _ -> None)
+
+let private trySecondaryRangeLookupInTable
+    (store: Store)
+    (table: Table)
+    (columnName: string)
+    (lower: (Value * bool) option)
+    (upper: (Value * bool) option)
+    : (string * int * ColumnDef list * (RowId * Value[]) list) option =
+    trySecondaryOrderSliceInTable store table columnName lower upper true
+    |> Option.map (fun slice ->
+        let count = max 0 (slice.AfterLast - slice.First)
+
+        let rows =
+            Seq.init count (fun offset -> slice.Entries.[slice.First + offset])
+            |> Seq.sortBy (fun entry -> RowId.value entry.RowId)
+            |> Seq.choose (fun entry -> table.RowsArray.TryFind entry.RowId |> Option.map (fun row -> entry.RowId, row))
+            |> List.ofSeq
+
+        slice.IndexName, slice.ColumnIndex, table.Columns, rows)
 
 let trySecondaryRangeLookup
     (store: Store)
@@ -2190,6 +2212,50 @@ let trySecondaryRangeLookup
     : (string * int * ColumnDef list * (RowId * Value[]) list) option =
     tableAt store dbName tableName
     |> Option.bind (fun table -> trySecondaryRangeLookupInTable store table columnName lower upper)
+
+let private orderedEntries (direction: Direction) (slice: SecondaryOrderSlice) : SecondaryOrderEntry seq =
+    match direction with
+    | Asc ->
+        let count = max 0 (slice.AfterLast - slice.First)
+        Seq.init count (fun offset -> slice.Entries.[slice.First + offset])
+    | Desc ->
+        seq {
+            let mutable after = slice.AfterLast
+
+            while after > slice.First do
+                let last = after - 1
+                let value = slice.Entries.[last]
+                let mutable first = last
+
+                while
+                    first > slice.First
+                    && compareIndexedValues value.CollationName slice.Entries.[first - 1].Value value.Value = 0 do
+                    first <- first - 1
+
+                for position in first .. last do
+                    yield slice.Entries.[position]
+
+                after <- first
+        }
+
+let trySecondaryOrderedLookup
+    (store: Store)
+    (dbName: string)
+    (tableName: string)
+    (columnName: string)
+    (lower: (Value * bool) option)
+    (upper: (Value * bool) option)
+    (direction: Direction)
+    : (string * int * ColumnDef list * Value[] seq) option =
+    tableAt store dbName tableName
+    |> Option.bind (fun table ->
+        trySecondaryOrderSliceInTable store table columnName lower upper false
+        |> Option.map (fun slice ->
+            let rows =
+                orderedEntries direction slice
+                |> Seq.choose (fun entry -> table.RowsArray.TryFind entry.RowId)
+
+            slice.IndexName, slice.ColumnIndex, table.Columns, rows))
 
 /// The equality-index probe in the order execution considers it: a unique
 /// key first for each WHERE equality, then an ordinary B-tree bucket.

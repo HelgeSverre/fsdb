@@ -1384,6 +1384,13 @@ let tests =
                         | None -> failtest "expected an ordered secondary range lookup"
 
                     Expect.equal entries [ VInt 26L, VInt 2L; VInt 28L, VInt 3L ] "ordered entries reflect the live rows"
+
+                    let descending =
+                        match trySecondaryOrderedLookup store defaultDatabase "users" "age" None None Desc with
+                        | Some(_, _, _, rows) -> rows |> Seq.map (fun row -> row.[2], row.[0]) |> List.ofSeq
+                        | None -> failtest "expected an ordered secondary lookup"
+
+                    Expect.equal descending [ VInt 28L, VInt 3L; VInt 26L, VInt 2L ] "descending entries retain index-key order"
                     Expect.equal (reindexCallCount ()) reindexesBefore "point writes preserve ordered buckets incrementally"
 
                 testCase "AddIndex with Unique = true rejects existing duplicates instead of silently dropping rows from the index"
