@@ -646,6 +646,7 @@ type Statement =
     | ReplaceSelect of table: string * columns: string list * select: SelectStmt
     | ReplaceSet of table: string * assignments: (string * Expr) list
     | Select of SelectStmt
+    | Do of expressions: Expr list
     /// A set operation over two or more `SELECT` branches — `UNION`,
     /// `INTERSECT` or `EXCEPT`, each `[ALL|DISTINCT]`, in any mix. `first`
     /// plus each `rest` member's own `SetOp` records which operator joined

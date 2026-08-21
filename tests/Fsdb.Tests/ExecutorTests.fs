@@ -1587,6 +1587,15 @@ let tests =
                     | Err(1366, _) -> ()
                     | other -> failtestf "expected a 1366 error, got %A" other ]
 
+          testCase "DO evaluates every expression and returns no result set"
+          <| fun _ ->
+              let store = newStore ()
+              Expect.equal (runDefault store "DO 1, ABS(2), (SELECT 3)") (Affected 0UL) "expressions evaluated"
+
+              match runDefault store "DO NO_SUCH_FUNCTION()" with
+              | Err(1305, _) -> ()
+              | other -> failtestf "expected expression error, got %A" other
+
           testList
               "ALTER TABLE / RENAME TABLE / CREATE INDEX / DROP INDEX end to end"
               [ testCase "ADD COLUMN then SELECT sees the new column with default values on old rows"

@@ -67,7 +67,7 @@ variants), USE, KILL, DESCRIBE are text-probed before the grammar
 | `PREPARE`/`EXECUTE`/`DEALLOCATE PREPARE` as SQL text (wire-level COM_STMT_PREPARE works) | low | refusal |
 | `LOAD DATA [LOCAL] INFILE`; `SELECT … INTO OUTFILE/DUMPFILE/@vars`; `IMPORT TABLE` | medium | refusal |
 | `ANALYZE/OPTIMIZE/CHECK/CHECKSUM/REPAIR TABLE`; any `FLUSH` beyond PRIVILEGES | low | refusal |
-| `LOCK TABLES…READ/WRITE`, `UNLOCK TABLES`, `DO`, `HANDLER`, XA transactions | low | refusal |
+| `LOCK TABLES…READ/WRITE`, `UNLOCK TABLES`, `HANDLER`, XA transactions | low | refusal |
 | Partitioning: `PARTITION BY`, `PARTITION (p)` selection, `ADD/DROP/COALESCE/REORGANIZE PARTITION` | medium | refusal |
 | Roles: `CREATE/DROP ROLE`, `SET ROLE`, `SET DEFAULT ROLE`, `GRANT role TO user`, dynamic privileges (`BACKUP_ADMIN`…), `GRANT PROXY` | medium | refusal |
 | Replication/admin SQL: `CHANGE REPLICATION SOURCE TO`, `PURGE BINARY LOGS`, `RESET`, `SHOW MASTER/REPLICA STATUS`, `SHOW BINARY LOGS`, `BINLOG`, `INSTALL/UNINSTALL PLUGIN|COMPONENT`, `ALTER INSTANCE`, `CREATE SERVER`, `TABLESPACE` statements | low | refusal |

@@ -7026,6 +7026,7 @@ let rec private explainStatement (store: Store) (registry: Registry) (dbName: st
             exprs |> traverse (fun e -> evalExpr ctx e |> Result.map ignore) |> Result.map ignore |> Result.mapError Err)
 
     match stmt with
+    | Do _ -> Err(1064, "EXPLAIN does not support DO")
     | Select select ->
         let id = nextId ()
 
@@ -8619,6 +8620,13 @@ let rec execute (store: Store) (registry: Registry) (dbName: string) (ids: int64
             match assignments |> traverse (fun (name, value) -> evalExpr context (substituteDefault value) |> Result.map (fun result -> name, result)) with
             | Error(code, message) -> ids, Err(code, message)
             | Ok values -> replaceEvaluated db table (Some(values |> List.map fst)) [ values |> List.map snd ]
+
+    | Do expressions ->
+        let context = contextFactory store registry dbName Map.empty Map.empty None [||]
+
+        match expressions |> traverse (evalExpr context) with
+        | Ok _ -> ids, Affected 0UL
+        | Error(code, message) -> ids, Err(code, message)
 
     | Select select ->
         let result, _, _ = runSelectStmt store registry dbName select None

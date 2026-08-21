@@ -1406,6 +1406,13 @@ let tests =
                                Joins = [ { Kind = InnerJoin; Table = FromTable { Table = "t2" } } ] } -> ()
                     | other -> failtestf "expected a USING-form multi-table DELETE, got %A" other ]
 
+          testCase "DO parses a comma-separated expression list"
+          <| fun _ ->
+              Expect.equal
+                  (parseOk "DO 1, ABS(2)")
+                  (Do [ Lit(VInt 1L); FuncCall("ABS", [ Lit(VInt 2L) ]) ])
+                  "do expressions"
+
           testList
               "ALTER TABLE / RENAME TABLE / CREATE INDEX / DROP INDEX"
               [ testCase "ADD COLUMN, with and without the COLUMN keyword, and AFTER accepted"

@@ -595,6 +595,7 @@ let rec requiredPrivileges (defaultDb: string) (stmt: Statement) : (string * Pri
         onTables "INSERT" [ split table ]
         @ onTables "DELETE" [ split table ]
         @ onTables "SELECT" (assignments |> List.collect (snd >> exprReadTables defaultDb) |> List.distinct)
+    | Do expressions -> onTables "SELECT" (expressions |> List.collect (exprReadTables defaultDb) |> List.distinct)
     | Update u ->
         let readInExprs =
             (u.Assignments |> List.collect (fun a -> exprReadTables defaultDb a.Value))

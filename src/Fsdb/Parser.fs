@@ -1878,6 +1878,9 @@ let private dropTable: Parser<Statement, unit> =
 let private truncateTable: Parser<Statement, unit> =
     keyword "TRUNCATE" >>. opt (keyword "TABLE") >>. qualifiedTableName |>> Truncate
 
+let private doStmt: Parser<Statement, unit> =
+    keyword "DO" >>. sepBy1 expr (sym ",") |>> Do
+
 /// `[DEFAULT] CHARACTER SET [=] x` / `[DEFAULT] COLLATE [=] y`, in either
 /// order, either/both/neither present — `CREATE`/`ALTER DATABASE`'s own
 /// tail, accepted and discarded like `tableOption`'s charset/collate
@@ -2972,6 +2975,7 @@ statementRef.Value <-
           attempt dropTable
           dropIndexStmt
           truncateTable
+          doStmt
           insertStmt
           replaceStmt
           tableQueryStmt
