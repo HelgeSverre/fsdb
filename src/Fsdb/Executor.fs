@@ -1296,8 +1296,11 @@ let rec private metadataOfExpr (ctx: EvalContext) (expr: Expr) : ColumnMetadata 
             Some { Value.columnMetadata TypeVarString with ColumnLength = 4294967295u }
         | ("ST_ASWKB" | "ST_ASBINARY" | "ASBINARY"), _ ->
             Some { Value.columnMetadata TypeBlob with ColumnLength = 4294967295u; Flags = BlobFlag ||| BinaryFlag }
+        | "ST_ENVELOPE", _ ->
+            Some { Value.columnMetadata TypeGeometry with ColumnLength = 4294967295u; Flags = BlobFlag ||| BinaryFlag }
         | ("ST_SRID" | "ST_DIMENSION" | "DIMENSION" | "ST_ISEMPTY" | "ISEMPTY"), _ -> simple TypeLongLong
-        | ("ST_X" | "ST_Y" | "X" | "Y"), _ -> simple TypeDouble
+        | ("MBRCONTAINS" | "MBRWITHIN" | "MBRINTERSECTS"), _ -> simple TypeLongLong
+        | ("ST_X" | "ST_Y" | "X" | "Y" | "ST_DISTANCE"), _ -> simple TypeDouble
         | ("JSON_QUOTE" | "JSON_PRETTY"), _ -> Some { Value.columnMetadata TypeVarString with ColumnLength = 4294967295u }
         | ("AES_ENCRYPT" | "AES_DECRYPT" | "COMPRESS" | "UNCOMPRESS" | "RANDOM_BYTES"), _ ->
             Some { Value.columnMetadata TypeBlob with ColumnLength = 4294967295u; Flags = BlobFlag ||| BinaryFlag }
