@@ -5,6 +5,7 @@ open Fsdb
 open Fsdb.Ast
 open Fsdb.Value
 open Fsdb.Storage
+open Fsdb.Temporal
 
 let private col name ty nullable =
     { Name = name
@@ -396,7 +397,19 @@ let tests =
                 <| fun _ ->
                     match coerceValue false (col "established" (TDateTime 0) false) (VString "") with
                     | Error(InvalidValueForColumn("established", "")) -> ()
-                    | other -> failtestf "expected InvalidValueForColumn, got %A" other ]
+                    | other -> failtestf "expected InvalidValueForColumn, got %A" other
+
+                testCase "non-strict mode preserves a partial zero date"
+                <| fun _ ->
+                    match coerceValue false (col "established" TDate false) (VString "2020-00-01") with
+                    | Ok(VZeroDate date) -> Expect.equal (zeroDateParts date) (2020, 0, 1) "zero month survives"
+                    | other -> failtestf "expected a zero date, got %A" other
+
+                testCase "strict mode rejects a zero datetime"
+                <| fun _ ->
+                    match coerceValue true (col "established" (TDateTime 0) false) (VString "0000-00-00 00:00:00") with
+                    | Error(ZeroTemporalForColumn _) -> ()
+                    | other -> failtestf "expected ZeroTemporalForColumn, got %A" other ]
 
           testList
               "coerceValue SET columns"

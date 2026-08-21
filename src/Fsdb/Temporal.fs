@@ -40,6 +40,10 @@ let tryZeroDateTime (date: ZeroDate) (hour: int) (minute: int) (second: int) (mi
 
 let zeroDateTimeParts (ZeroDateTime(date, hour, minute, second, microseconds)) = date, hour, minute, second, microseconds
 
+let zeroDateOfDateTime dateTime =
+    let date, _, _, _, _ = zeroDateTimeParts dateTime
+    date
+
 let formatZeroDateTime (dateTime: ZeroDateTime) =
     let date, hour, minute, second, microseconds = zeroDateTimeParts dateTime
     let baseText = sprintf "%s %02d:%02d:%02d" (formatZeroDate date) hour minute second

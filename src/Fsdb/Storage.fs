@@ -10,6 +10,7 @@ open System.Globalization
 open System.Threading
 open Fsdb.Ast
 open Fsdb.Value
+open Fsdb.Temporal
 
 /// Raised when an optimistic transaction merge finds a row or schema that
 /// changed after the transaction snapshot was taken. `QueryHandler` reports
@@ -1046,22 +1047,27 @@ let coerceValue (strict: bool) (col: ColumnDef) (v: Value) : Result<Value, Stora
                 warning 1265 (sprintf "Data truncated for column '%s'" col.Name)
                 Ok(VString "")
         | TDate ->
+            let zeroDateError () =
+                Error(ZeroTemporalForColumn("date", v |> toText |> Option.defaultValue "0000-00-00", col.Name))
+
             match v with
             | VDate d -> Ok(VDate d)
             | VDateTime dt -> Ok(VDate(DateOnly.FromDateTime dt))
+            | VZeroDate d -> if strict then zeroDateError () else Ok(VZeroDate d)
+            | VZeroDateTime dt -> if strict then zeroDateError () else Ok(VZeroDate(zeroDateOfDateTime dt))
             | VString s ->
-                // A plain date parses directly; a full datetime string
-                // (real MySQL accepts one into a DATE column too, keeping
-                // just the date part and silently dropping the time — e.g.
-                // Eloquent's `date` cast round-tripping a `Carbon` instance
-                // through its full `'Y-m-d H:i:s'` string form) falls back
-                // to `DateTime.TryParse` and truncates.
-                match DateOnly.TryParse(s.Trim(), CultureInfo.InvariantCulture) with
-                | true, d -> Ok(VDate d)
-                | false, _ ->
-                    match DateTime.TryParse(s.Trim(), CultureInfo.InvariantCulture, DateTimeStyles.None) with
-                    | true, dt -> Ok(VDate(DateOnly.FromDateTime dt))
-                    | false, _ -> temporalFallback ()
+                match tryParseZeroDate (s.Trim()) with
+                | Some d -> if strict then zeroDateError () else Ok(VZeroDate d)
+                | None ->
+                    match tryParseZeroDateTime (s.Trim()) with
+                    | Some dt -> if strict then zeroDateError () else Ok(VZeroDate(zeroDateOfDateTime dt))
+                    | None ->
+                        match DateOnly.TryParse(s.Trim(), CultureInfo.InvariantCulture) with
+                        | true, d -> Ok(VDate d)
+                        | false, _ ->
+                            match DateTime.TryParse(s.Trim(), CultureInfo.InvariantCulture, DateTimeStyles.None) with
+                            | true, dt -> Ok(VDate(DateOnly.FromDateTime dt))
+                            | false, _ -> temporalFallback ()
             | _ -> temporalFallback ()
         | TDateTime fsp
         | TTimestamp fsp ->
@@ -1072,14 +1078,30 @@ let coerceValue (strict: bool) (col: ColumnDef) (v: Value) : Result<Value, Stora
             // (both oracle-verified). The resultset renderer then shows
             // exactly `fsp` digits off these rounded ticks.
             let round dt = VDateTime(Functions.roundDateTimeToFsp fsp dt)
+            let zeroDateError () =
+                Error(ZeroTemporalForColumn("datetime", v |> toText |> Option.defaultValue "0000-00-00 00:00:00", col.Name))
 
             match v with
             | VDateTime dt -> Ok(round dt)
             | VDate d -> Ok(round (d.ToDateTime(TimeOnly.MinValue)))
+            | VZeroDate d ->
+                match tryZeroDateTime d 0 0 0 0 with
+                | Some dt when not strict -> Ok(VZeroDateTime dt)
+                | _ -> zeroDateError ()
+            | VZeroDateTime dt -> if strict then zeroDateError () else Ok(VZeroDateTime dt)
             | VString s ->
-                match DateTime.TryParse(s.Trim(), CultureInfo.InvariantCulture, DateTimeStyles.None) with
-                | true, dt -> Ok(round dt)
-                | false, _ -> temporalFallback ()
+                match tryParseZeroDateTime (s.Trim()) with
+                | Some dt -> if strict then zeroDateError () else Ok(VZeroDateTime dt)
+                | None ->
+                    match tryParseZeroDate (s.Trim()) with
+                    | Some d ->
+                        match tryZeroDateTime d 0 0 0 0 with
+                        | Some dt when not strict -> Ok(VZeroDateTime dt)
+                        | _ -> zeroDateError ()
+                    | None ->
+                        match DateTime.TryParse(s.Trim(), CultureInfo.InvariantCulture, DateTimeStyles.None) with
+                        | true, dt -> Ok(round dt)
+                        | false, _ -> temporalFallback ()
             | _ -> temporalFallback ()
 
 /// `NOW()` rounded to `col`'s own declared fsp — a `TIMESTAMP(6)` column

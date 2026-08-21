@@ -14,6 +14,7 @@ open System.Globalization
 open FParsec
 open Fsdb.Ast
 open Fsdb.Value
+open Fsdb.Temporal
 
 /// The supported `LOAD DATA LOCAL INFILE` options, separated from `Statement`
 /// because the data stream arrives after the server has parsed the command.
@@ -1145,11 +1146,17 @@ let private temporalLit: Parser<Expr, unit> =
         | "DATE" ->
             match MySqlTemporal.tryDate text with
             | Some d -> preturn (Lit(VDate d))
-            | None -> refuse "DATE"
+            | None ->
+                tryParseZeroDate text
+                |> Option.map (VZeroDate >> Lit >> preturn)
+                |> Option.defaultWith (fun () -> refuse "DATE")
         | "TIMESTAMP" ->
             match MySqlTemporal.tryDateTime text with
             | Some dt -> preturn (Lit(VDateTime dt))
-            | None -> refuse "DATETIME"
+            | None ->
+                tryParseZeroDateTime text
+                |> Option.map (VZeroDateTime >> Lit >> preturn)
+                |> Option.defaultWith (fun () -> refuse "DATETIME")
         | _ ->
             match MySqlTemporal.tryTime text with
             | Some t -> preturn (Lit(VString t))
