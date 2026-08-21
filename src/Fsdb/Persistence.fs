@@ -801,12 +801,9 @@ let private applyRowDeletes (targets: Value[] list) (rows: Value[] list) : Value
 /// one physical row"), and would also re-run FK/unique validation that a
 /// `SET FOREIGN_KEY_CHECKS = 0` write may have deliberately skipped.
 ///
-/// Deliberately leaves `UniqueIndex` stale rather than calling
-/// `reindexTable` here — nothing reads it mid-replay (FK checks are off,
-/// see `load`), so paying its full-table-rescan cost once per *event*
-/// would be pure waste for a table with many updates/deletes in the WAL.
-/// `replayWal`'s caller reindexes every table exactly once, after the last
-/// event has been applied.
+/// Leaves derived indexes stale rather than calling `reindexTable` here.
+/// Nothing reads them mid-replay, and the caller rebuilds every table once
+/// after the final event.
 let private mapTableRows (store: Store) (dbName: string) (tableName: string) (f: Value[] list -> Value[] list) : unit =
     replaceTablesForReplay store dbName tableName f (Log.diagnostic "fsdb: WAL replay warning: %s")
 
@@ -1138,9 +1135,7 @@ let load (dataDir: string) : Store =
         let goodOffset = replayWal store walPath
         store.ForeignKeyChecks <- true
 
-        // `mapTableRows` (RowsUpdated/RowsDeleted) left `UniqueIndex` stale
-        // per-table, not per-event — one rescan per table here instead of
-        // one per replayed row-change event.
+        // Row replay leaves derived indexes stale until this one rebuild.
         reindexAllForReplay store
 
         // A torn final line (`kill -9` mid-append) must not poison the WAL
@@ -1202,12 +1197,7 @@ let attach (dataDir: string) (store: Store) : unit =
     replica.ForeignKeyChecks <- false
 
     // Rotates from `replica`, not `store` — see `replica`'s doc above.
-    // `reindexAllForReplay` mirrors `load`'s own "reindex once, after every
-    // event up to this point has landed" — `applyEvent`'s row-update/delete
-    // path (`mapTableRows`) deliberately leaves `UniqueIndex` stale per
-    // event for the same reason `load` accepts it: rebuilding it on every
-    // single replayed event would cost a full-table rescan per WAL record;
-    // once per rotation matches `load`'s own amortization.
+    // Each rotation rebuilds the derived indexes after all replayed events.
     let rotateFromReplica () =
         reindexAllForReplay replica
         writeSnapshotAndTruncate dataDir replica.Catalog

@@ -845,6 +845,46 @@ let tests =
                         | Error e -> failtestf "expected Ok, got %A" e
                     | Error e -> failtestf "expected Ok, got %A" e
 
+                testCase "a candidate delete evaluates the current row after the row changes"
+                <| fun _ ->
+                    let store = create ()
+                    let index = { Name = "ix_category"; Columns = [ "category" ]; Unique = false; Kind = BTree }
+
+                    createTable
+                        store
+                        defaultDatabase
+                        "items"
+                        [ col "id" (TInt false) false; col "category" (TVarchar 20) false ]
+                        [ index ]
+                        []
+                        None
+                        None
+                    |> ignore
+
+                    insertRows store defaultDatabase "items" None [ [ VInt 1L; VString "books" ] ] |> ignore
+
+                    let candidates =
+                        match trySecondaryLookup store defaultDatabase "items" "category" (VString "books") with
+                        | Some(_, candidates) -> candidates
+                        | None -> failtest "expected an indexed candidate"
+
+                    updateRows
+                        store
+                        defaultDatabase
+                        "items"
+                        None
+                        (fun row -> Ok(row.[0] = VInt 1L))
+                        (fun row -> Ok [| row.[0]; VString "archived" |])
+                    |> ignore
+
+                    match deleteRowsCandidates store defaultDatabase "items" candidates (fun row -> Ok(row.[1] = VString "books")) with
+                    | Ok 0 ->
+                        match scan store defaultDatabase "items" with
+                        | Ok(_, rows) ->
+                            Expect.equal (List.ofSeq rows) [ [| VInt 1L; VString "archived" |] ] "the changed row remains"
+                        | Error e -> failtestf "expected Ok, got %A" e
+                    | other -> failtestf "expected Ok 0, got %A" other
+
                 testCase "deleteRows removes matching rows and returns the count"
                 <| fun _ ->
                     let store = withUsersTable ()

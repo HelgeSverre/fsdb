@@ -1212,8 +1212,8 @@ let reindexCallCount () = reindexCallCountLocal.Value
 
 /// Public because `Persistence`'s WAL replay (`mapTableRows`) and snapshot
 /// load (`decodeTable`) both write `Rows` directly — same reason
-/// `normalizeTableName` is public — so they need to rebuild the index
-/// themselves afterward instead of maintaining it incrementally the way
+/// `normalizeTableName` is public — so they rebuild derived indexes after
+/// direct row replacement instead of maintaining them incrementally as
 /// every write path below does.
 let reindexTable (table: Table) : Table =
     reindexCallCountLocal.Value <- reindexCallCountLocal.Value + 1
@@ -3736,8 +3736,9 @@ let replaceRows
 /// fail per row land) surfaces as an `Error` instead of silently being
 /// treated as "didn't match". When `store.ForeignKeyChecks` is set (the
 /// default), applies every referencing foreign key's `ON DELETE` action —
-/// see `cascadeDelete`. `None` candidates scan the table; a supplied set is
-/// rechecked by `predicate` before removal.
+/// see `cascadeDelete`. `None` candidates scan the table; supplied row
+/// identities are resolved from the current table root and rechecked by
+/// `predicate` before removal.
 let private deleteRowsCore
     (store: Store)
     (dbName: string)
@@ -3745,22 +3746,37 @@ let private deleteRowsCore
     (candidates: (RowId * Value[]) list option)
     (predicate: Value[] -> Result<bool, StorageError>)
     : Result<int, StorageError> =
-    let result =
+    let apply =
         withDatabase store dbName (fun db ->
             let key = normalizeTableName tableName
 
             virtualWriteGuard store dbName tableName
             |> Result.bind (fun () -> tryGetTable db tableName)
             |> Result.bind (fun table ->
-                (candidates
-                 |> Option.map (List.map snd)
-                 |> Option.defaultWith (fun () -> table.RowsArray |> List.ofSeq))
+                let rows =
+                    candidates
+                    |> Option.map (fun candidates ->
+                        candidates
+                        |> List.map fst
+                        |> List.distinct
+                        |> List.choose (fun rowId -> table.RowsArray.TryFind rowId))
+                    |> Option.defaultWith (fun () -> table.RowsArray |> List.ofSeq)
+
+                rows
                 |> traverse (fun row -> predicate row |> Result.map (fun keep -> keep, row))
                 |> Result.bind (fun flagged ->
                     let toDelete = flagged |> List.filter fst |> List.map snd
 
                     cascadeDelete store.ForeignKeyChecks db key toDelete
                     |> Result.map (fun (db', removed, blanked) -> db', (toDelete.Length, db, removed, blanked)))))
+
+    let result =
+        match candidates with
+        | None -> apply
+        | Some candidates ->
+            candidates
+            |> List.map fst
+            |> fun rowIds -> withRowLocks store dbName tableName rowIds (fun () -> apply)
 
     match result with
     | Ok(affected, db, removed, blanked) ->
@@ -4237,11 +4253,9 @@ let appendRowsForReplay (store: Store) (dbName: string) (tableName: string) (row
 
             slot.Value <- slot.Value |> Map.add key updated
 
-/// Rebuilds every table's `UniqueIndex` from its current `Rows` across the
-/// whole store, once — what `Persistence.load` calls after replaying the
-/// WAL, since `replaceTablesForReplay` (`RowsUpdated`/`RowsDeleted` replay)
-/// deliberately leaves `UniqueIndex` stale per-table rather than paying
-/// `reindexTable`'s full-table rescan once per replayed event (see its doc).
+/// Rebuilds each table's derived indexes from its current `Rows` once after
+/// WAL replay. `replaceTablesForReplay` leaves those indexes stale per-table
+/// so replay avoids a full-table rescan for every row-change event.
 /// Same single-threaded, pre-`attach` assumption as `replaceTablesForReplay`.
 let reindexAllForReplay (store: Store) : unit =
     for KeyValue(_, slot) in store.Databases do
