@@ -146,10 +146,7 @@ CURRENT_USER/USER/SESSION_USER.
 Divergences in existing functions: `CURTIME()`/`TIME()` return strings (no
 TIME value domain, `Functions.fs`); `CONVERT_TZ` resolves numeric offsets and
 `SYSTEM`, but named zones return NULL without loaded time-zone tables;
-`TIMESTAMP()` is 1-arg only; `JSON_SEARCH` lacks escape_char/path arguments
-(`Functions.fs:941`); JSON_TABLE lacks `ERROR ON EMPTY|ERROR` raise-form
-(`Ast.fs:432–434`) and refuses `JOIN…USING`/LEFT-JOIN-ON-TRUE against it
-(`Executor.fs:3069–3077, 3108–3113`).
+`JSON_SEARCH` lacks escape_char/path arguments (`Functions.fs`).
 
 ## 4. Data types and values
 

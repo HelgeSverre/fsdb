@@ -6404,6 +6404,12 @@ let tests =
                                   .ToString("yyyy-MM-dd HH:mm:ss", System.Globalization.CultureInfo.InvariantCulture)
                           ) ]
 
+                testCase "TIMESTAMP adds its second TIME argument"
+                <| fun _ ->
+                    expectRow
+                        "SELECT TIMESTAMP('2024-01-02', '03:04:05') a, TIMESTAMP('2024-01-02 23:00:00', '02:30:00') b"
+                        [ Some "2024-01-02 03:04:05"; Some "2024-01-03 01:30:00" ]
+
                 testCase "MAKEDATE rounds its arguments, which decides the two-digit-year pivot"
                 <| fun _ ->
                     expectRow

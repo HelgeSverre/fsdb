@@ -1560,15 +1560,6 @@ let private dateFn: Scalar =
     | [ v ] when not (anyNull [ v ]) -> asDateOnly v |> Option.map VDate |> Option.defaultValue VNull
     | _ -> VNull
 
-/// `TIMESTAMP(expr)` — coerces to a datetime the way MySQL does (a date
-/// gains `00:00:00`); real MySQL also parses *two* string arguments as
-/// `TIMESTAMP(expr1, expr2)` (= `expr1 + expr2` as a time), which nothing
-/// here needs yet — add it if a migration calls that form.
-let private timestampFn: Scalar =
-    function
-    | [ v ] when not (anyNull [ v ]) -> asDateTime v |> Option.map VDateTime |> Option.defaultValue VNull
-    | _ -> VNull
-
 /// No `TIME` case in `Value` (see the `VJson` comment on the same theme) —
 /// ponytail: rendered as a plain `"HH:mm:ss"` string, add a `VTime` case if
 /// a migration needs it to compare/sort as a real time value.
@@ -1720,6 +1711,21 @@ let private tryTimeTicks (value: Value) =
             Some((if matched.Groups.[1].Value = "-" then -ticks else ticks), fraction.Length)
 
 let private maxTimeTicks = (838L * 3600L + 59L * 60L + 59L) * TimeSpan.TicksPerSecond + 9_999_990L
+
+/// `TIMESTAMP(expr)` coerces to a datetime; the two-argument form adds a
+/// TIME value to that datetime.
+let private timestampFn: Scalar =
+    function
+    | [ v ] when not (anyNull [ v ]) -> asDateTime v |> Option.map VDateTime |> Option.defaultValue VNull
+    | [ date; time ] when not (anyNull [ date; time ]) ->
+        match asDateTime date, tryTimeTicks time with
+        | Some value, Some(ticks, _) ->
+            try
+                VDateTime(value.AddTicks ticks)
+            with _ ->
+                VNull
+        | _ -> VNull
+    | _ -> VNull
 
 let private formatTimeTicks ticks =
     let ticks = max -maxTimeTicks (min maxTimeTicks ticks)
