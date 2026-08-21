@@ -613,6 +613,7 @@ let rec requiredPrivileges (defaultDb: string) (stmt: Statement) : (string * Pri
         onTables "DELETE" (tableRefsOfFrom defaultDb (Some(FromTable d.From)) d.Joins)
         @ onTables "SELECT" readInExprs
     | CreateTable(name, _, _, _, _, _, _, _, _) -> onTables "CREATE" [ split name ]
+    | CreateTableLike(name, source, _) -> onTables "CREATE" [ split name ] @ onTables "SELECT" [ split source ]
     | DropTable(names, _) -> onTables "DROP" (names |> List.map split)
     | Truncate table -> onTables "DROP" [ split table ]
     | AlterTable(table, _) -> onTables "ALTER" [ split table ]

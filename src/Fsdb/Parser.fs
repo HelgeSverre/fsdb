@@ -1840,6 +1840,14 @@ let private createTable: Parser<Statement, unit> =
             autoIncrementSeed
         )
 
+let private createTableLike: Parser<Statement, unit> =
+    (keyword "CREATE" >>. keyword "TABLE"
+     >>. (opt (attempt (keyword "IF" >>. keyword "NOT" >>. keyword "EXISTS")) |>> Option.isSome)
+     .>>. qualifiedTableName
+     .>> keyword "LIKE"
+     .>>. qualifiedTableName)
+    |>> fun ((ifNotExists, name), source) -> CreateTableLike(name, source, ifNotExists)
+
 let private createIndexStmt: Parser<Statement, unit> =
     (keyword "CREATE"
      >>. ((keyword "UNIQUE" >>% (true, BTree))
@@ -2918,6 +2926,7 @@ statementRef.Value <-
           attempt createTriggerStmt
           attempt createViewStmt
           attempt createDatabaseStmt
+          attempt createTableLike
           attempt createTable
           attempt createIndexStmt
           attempt dropUserStmt

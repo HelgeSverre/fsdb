@@ -7835,6 +7835,54 @@ let rec execute (store: Store) (registry: Registry) (dbName: string) (ids: int64
         else
             ids, storageErr (NoSuchDatabase name)
 
+    | CreateTableLike(name, source, ifNotExists) ->
+        let destinationDb, destinationName = splitQualified dbName name
+        let destinationExists = scan store destinationDb destinationName |> Result.isOk
+
+        if ifNotExists && (destinationExists || tryStoredView store destinationDb destinationName |> Option.isSome) then
+            ids, Affected 0UL
+        else
+            let sourceDb, sourceName = splitQualified dbName source
+
+            let sourceTable =
+                store.Catalog
+                |> Map.tryFind (sourceDb.ToLowerInvariant())
+                |> Option.bind (Map.tryFind (normalizeTableName sourceName))
+
+            match sourceTable with
+            | None -> ids, storageErr (NoSuchTable sourceName)
+            | Some table ->
+                let decodeCheck (check: StoredCheck) =
+                    match Parser.parse ("SELECT " + check.Clause) with
+                    | Ok(Select { Projections = [ expression, _ ] }) ->
+                        Ok
+                            { Name = None
+                              Expression = expression
+                              Enforced = check.Enforced
+                              Column = check.Column }
+                    | _ -> Error(ExpressionError(1105, sprintf "Stored CHECK expression for '%s' is invalid" check.Name))
+
+                match storedChecks store sourceDb sourceName |> traverse decodeCheck with
+                | Error error -> ids, storageErr error
+                | Ok checks ->
+                    execute
+                        store
+                        registry
+                        dbName
+                        ids
+                        foundRows
+                        (CreateTable(
+                            name,
+                            table.Columns,
+                            table.Indexes,
+                            [],
+                            checks,
+                            ifNotExists,
+                            table.TableCharset,
+                            table.TableCollation,
+                            None
+                        ))
+
     | CreateTable(name, columns, indexes, foreignKeys, checks, ifNotExists, tableCharset, tableCollation, autoIncrementSeed) ->
         let db, name = splitQualified dbName name
 

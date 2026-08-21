@@ -712,6 +712,13 @@ let tests =
                         ))
                         "create table"
 
+                testCase "CREATE TABLE LIKE"
+                <| fun _ ->
+                    Expect.equal
+                        (parseOk "CREATE TABLE IF NOT EXISTS archive LIKE app.source")
+                        (CreateTableLike("archive", "app.source", true))
+                        "create table like"
+
                 testCase "IF NOT EXISTS"
                 <| fun _ ->
                     Expect.equal

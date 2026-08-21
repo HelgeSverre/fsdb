@@ -604,6 +604,7 @@ type Statement =
         /// carry it on every table so restored inserts continue at the
         /// dumped counter even before any row lands.
         autoIncrementSeed: int64 option
+    | CreateTableLike of name: string * source: string * ifNotExists: bool
     | DropTable of names: string list * ifExists: bool
     | AlterTable of table: string * actions: AlterAction list
     | RenameTable of pairs: (string * string) list

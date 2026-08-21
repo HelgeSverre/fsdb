@@ -2417,7 +2417,42 @@ let tests =
                     // matching MySQL.
                     match runDefault store "DROP INDEX IF EXISTS no_such_idx ON missing_table" with
                     | Err(1146, _) -> ()
-                    | other -> failtestf "expected 1146 for DROP INDEX IF EXISTS on a missing table, got %A" other ]
+                    | other -> failtestf "expected 1146 for DROP INDEX IF EXISTS on a missing table, got %A" other
+
+                testCase "CREATE TABLE LIKE copies the definition without rows, foreign keys, or the auto-increment counter"
+                <| fun _ ->
+                    let store = newStore ()
+                    runDefault store "CREATE TABLE parent (id INT PRIMARY KEY)" |> ignore
+
+                    runDefault
+                        store
+                        "CREATE TABLE source (id INT AUTO_INCREMENT PRIMARY KEY, u INT UNIQUE, n INT DEFAULT 7, g INT AS (n + 1), CHECK (n > 0), KEY ix_n (n), FOREIGN KEY (n) REFERENCES parent(id)) AUTO_INCREMENT=40"
+                    |> ignore
+
+                    runDefault store "INSERT INTO parent VALUES (7)" |> ignore
+                    runDefault store "INSERT INTO source (u, n) VALUES (1, 7)" |> ignore
+
+                    Expect.equal (runDefault store "CREATE TABLE clone LIKE source") (Affected 0UL) "table created"
+
+                    match scan store defaultDatabase "clone" with
+                    | Ok(_, rows) -> Expect.isEmpty (List.ofSeq rows) "rows are not copied"
+                    | Error error -> failtestf "expected cloned table, got %A" error
+
+                    let clone = store.Catalog.[defaultDatabase].[normalizeTableName "clone"]
+                    Expect.isEmpty clone.ForeignKeys "foreign keys are not copied"
+                    Expect.equal (clone.Indexes |> List.map _.Name |> Set.ofList) (Set.ofList [ "u"; "ix_n" ]) "indexes copied"
+
+                    match runDefault store "INSERT INTO clone (u, n) VALUES (2, 5)" with
+                    | Affected 1UL -> ()
+                    | other -> failtestf "expected cloned table insert, got %A" other
+
+                    match runDefault store "SELECT id, u, n, g FROM clone" with
+                    | ResultSet(_, [ [ Some "1"; Some "2"; Some "5"; Some "6" ] ]) -> ()
+                    | other -> failtestf "expected reset auto increment and generated value, got %A" other
+
+                    match runDefault store "INSERT INTO clone (u, n) VALUES (3, 0)" with
+                    | Err(3819, _) -> ()
+                    | other -> failtestf "expected copied CHECK constraint, got %A" other ]
 
           testList
               "EXISTS (subquery)"
