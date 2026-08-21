@@ -1792,7 +1792,12 @@ let private runProbe (session: Session) (sql: string) (probe: Probe) : Session *
         let rows =
             limit
             |> List.map (fun condition ->
-                let level = if condition.Level = Diagnostics.Error then "Error" else "Warning"
+                let level =
+                    match condition.Level with
+                    | Diagnostics.Warning -> "Warning"
+                    | Diagnostics.Error -> "Error"
+                    | Diagnostics.Note -> "Note"
+
                 [ Some level; Some(string condition.Code); Some condition.Message ])
 
         session, ResultSet([ "Level"; "Code"; "Message" ], rows)

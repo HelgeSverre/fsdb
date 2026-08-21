@@ -631,7 +631,7 @@ let tests =
                     | ResultSet(_, [ [ Some "1" ] ]) -> ()
                     | other -> failtestf "expected identical bytes to compare equal (1), got %A" other
 
-                testCase "latin1 columns store latin1-encodable text; ascii columns reject non-ascii with 1366"
+                testCase "legacy charset columns retain encodable text and reject unencodable text in strict mode"
                 <| fun _ ->
                     let store = newStore ()
                     runDefault store "CREATE TABLE lat (v VARCHAR(10) CHARACTER SET latin1)" |> ignore
@@ -646,18 +646,15 @@ let tests =
                     | Err(1366, _) -> ()
                     | other -> failtestf "expected 1366 for é into ascii, got %A" other
 
-                    // latin1 is cp1252: € is encodable and survives the
-                    // round-trip; a char cp1252 lacks maps to '?' — both
-                    // even in strict mode (MySQL-verified).
-                    runDefault store "INSERT INTO lat VALUES ('€'), ('☃')" |> ignore
+                    runDefault store "INSERT INTO lat VALUES ('€')" |> ignore
 
                     match runDefault store "SELECT COUNT(*) FROM lat WHERE v = '€'" with
                     | ResultSet(_, [ [ Some "1" ] ]) -> ()
                     | other -> failtestf "expected € to store as € under latin1/cp1252, got %A" other
 
-                    match runDefault store "SELECT COUNT(*) FROM lat WHERE v = '?'" with
-                    | ResultSet(_, [ [ Some "1" ] ]) -> ()
-                    | other -> failtestf "expected ☃ to store as ?, got %A" other
+                    match runDefault store "INSERT INTO lat VALUES ('☃')" with
+                    | Err(1366, _) -> ()
+                    | other -> failtestf "expected 1366 for an unencodable latin1 value, got %A" other
 
                 testCase "an unknown column in WHERE is a 1054 error"
                 <| fun _ ->

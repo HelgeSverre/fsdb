@@ -2604,7 +2604,15 @@ let rec private evalExpr (ctx: EvalContext) (expr: Expr) : Result<Value, EvalErr
                     VString(leadingNumericPrefix leadingFloatPrefixRegex s |> Option.defaultValue "")
                 | _ -> v
 
-            match Diagnostics.suppress (fun () -> Storage.coerceValue false castCol v) with
+            match
+                Diagnostics.suppress (fun () ->
+                    Storage.coerceValueWithMode
+                        { Strict = false
+                          NoZeroDate = true
+                          NoZeroInDate = true }
+                        castCol
+                        v)
+            with
             | Ok(VZeroDate _)
             | Ok(VZeroDateTime _) -> Ok VNull
             | Ok v' -> Ok v'

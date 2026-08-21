@@ -25,6 +25,7 @@ module Fsdb.Collation
 
 open System
 open System.Globalization
+open System.Text
 
 /// One collation = the behaviors the engine consumes. Everything else
 /// delegates; nothing re-derives its own rules.
@@ -458,13 +459,15 @@ module Charset =
     /// form — `€` reads back as `€`, exactly what MySQL displays.
     let transcodeLatin1 (s: string) : string =
         s
-        |> String.map (fun c ->
-            let code = int c
+        |> _.EnumerateRunes()
+        |> Seq.map (fun rune ->
+            let code = rune.Value
 
             if code < 0x80 || (code >= 0xA0 && code <= 0xFF) || cp1252Extras.Contains code then
-                c
+                rune.ToString()
             else
-                '?')
+                "?")
+        |> String.concat ""
 
     /// Decodes raw bytes as cp1252 — what a `_latin1'...'` introducer needs,
     /// since MySQL labels the literal's client-encoded bytes without
@@ -486,7 +489,10 @@ module Charset =
     /// Maps text to what an `ascii` column can hold: 7-bit passes through,
     /// everything else becomes '?'.
     let transcodeAscii (s: string) : string =
-        s |> String.map (fun c -> if int c < 0x80 then c else '?')
+        s
+        |> _.EnumerateRunes()
+        |> Seq.map (fun rune -> if rune.Value < 0x80 then rune.ToString() else "?")
+        |> String.concat ""
 
     /// Decodes raw bytes as ASCII — the `_ascii'...'` introducer's byte
     /// labeling, where each non-7-bit byte becomes one '?' (verified:

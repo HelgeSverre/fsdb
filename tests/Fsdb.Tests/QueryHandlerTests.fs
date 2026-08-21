@@ -1758,6 +1758,132 @@ let tests =
                     "Incorrect integer value: 'two' for column 'i' at row 2" ]
                   "condition rows match the VALUES source rows"
 
+          testCase "DECIMAL scale loss records MySQL note conditions"
+          <| fun _ ->
+              let session = create 1 (Fsdb.Storage.create ())
+              let session, _ = handle session "CREATE TABLE t (d DECIMAL(5, 2))"
+              let session, result = handle session "INSERT INTO t VALUES (12.345), (67.891)"
+              Expect.equal result (Affected 2UL) "rounded values insert"
+
+              Expect.equal
+                  (session.Diagnostics |> List.map (fun condition -> condition.Level, condition.Code, condition.Message))
+                  [ Fsdb.Diagnostics.Note, 1265, "Data truncated for column 'd' at row 1"
+                    Fsdb.Diagnostics.Note, 1265, "Data truncated for column 'd' at row 2" ]
+                  "one MySQL note per rounded source value"
+
+              match handle session "SHOW WARNINGS" |> snd with
+              | ResultSet(_, [ [ Some "Note"; Some "1265"; Some "Data truncated for column 'd' at row 1" ]; [ Some "Note"; Some "1265"; Some "Data truncated for column 'd' at row 2" ] ]) -> ()
+              | other -> failtestf "expected DECIMAL notes, got %A" other
+
+              match handle session "SELECT d FROM t" |> snd with
+              | ResultSet(_, [ [ Some "12.35" ]; [ Some "67.89" ] ]) -> ()
+              | other -> failtestf "expected rounded DECIMAL values, got %A" other
+
+          testCase "prepared DECIMAL inserts replace prior diagnostics with scale-loss notes"
+          <| fun _ ->
+              let session = create 1 (Fsdb.Storage.create ())
+              let session, _ = handle session "CREATE TABLE t (d DECIMAL(5, 2))"
+              let session, _ = handle session "INSERT INTO t VALUES (12.345)"
+
+              match prepareStatement "INSERT INTO t VALUES (?)" with
+              | Ok(Some ast, 1) ->
+                  let prepared =
+                      { Ast = Some ast
+                        Sql = "INSERT INTO t VALUES (?)"
+                        ParamCount = 1
+                        LastParamTypes = None }
+
+                  let session, result = executePrepared session prepared [ VDecimal 67.891M ]
+                  Expect.equal result (Affected 1UL) "prepared rounded value inserts"
+
+                  match session.Diagnostics with
+                  | [ { Level = Fsdb.Diagnostics.Note; Code = 1265; Message = "Data truncated for column 'd' at row 1" } ] -> ()
+                  | other -> failtestf "expected prepared scale-loss note, got %A" other
+              | other -> failtestf "expected one prepared parameter, got %A" other
+
+          testCase "declared text and binary widths retain non-strict truncation warnings"
+          <| fun _ ->
+              let session = create 1 (Fsdb.Storage.create ())
+              let session, _ = handle session "CREATE TABLE t (v VARCHAR(3), c CHAR(3), b BINARY(3), vb VARBINARY(3))"
+              let session, _ = handle session "SET SESSION sql_mode = ''"
+              let session, result = handle session "INSERT INTO t VALUES ('abcd', 'wxyz', 'abcd', 'wxyz')"
+              Expect.equal result (Affected 1UL) "truncated values insert"
+
+              Expect.equal
+                  (session.Diagnostics |> List.map (fun condition -> condition.Level, condition.Code, condition.Message))
+                  [ Fsdb.Diagnostics.Warning, 1265, "Data truncated for column 'v' at row 1"
+                    Fsdb.Diagnostics.Warning, 1265, "Data truncated for column 'c' at row 1"
+                    Fsdb.Diagnostics.Warning, 1265, "Data truncated for column 'b' at row 1"
+                    Fsdb.Diagnostics.Warning, 1265, "Data truncated for column 'vb' at row 1" ]
+                  "MySQL reports each shortened value"
+
+              match handle session "SELECT v, c, HEX(b), HEX(vb) FROM t" |> snd with
+              | ResultSet(_, [ [ Some "abc"; Some "wxy"; Some "616263"; Some "777879" ] ]) -> ()
+              | other -> failtestf "expected truncated text and bytes, got %A" other
+
+          testCase "strict declared text width returns MySQL's data-too-long error"
+          <| fun _ ->
+              let session = create 1 (Fsdb.Storage.create ())
+              let session, _ = handle session "CREATE TABLE t (v VARCHAR(3))"
+
+              match handle session "INSERT INTO t VALUES ('abcd')" |> snd with
+              | Err(1406, "Data too long for column 'v' at row 1") -> ()
+              | other -> failtestf "expected MySQL's data-too-long error, got %A" other
+
+              match handle session "INSERT INTO t VALUES ('ok'), ('abcd')" |> snd with
+              | Err(1406, "Data too long for column 'v' at row 2") -> ()
+              | other -> failtestf "expected a source-row error, got %A" other
+
+          testCase "CHAR removes trailing spaces while VARCHAR preserves them"
+          <| fun _ ->
+              let session = create 1 (Fsdb.Storage.create ())
+              let session, _ = handle session "CREATE TABLE t (c CHAR(3), v VARCHAR(3))"
+              let session, result = handle session "INSERT INTO t VALUES ('x  ', 'x  ')"
+              Expect.equal result (Affected 1UL) "space-padded values insert"
+
+              match handle session "SELECT c, LENGTH(c), v, LENGTH(v) FROM t" |> snd with
+              | ResultSet(_, [ [ Some "x"; Some "1"; Some "x  "; Some "3" ] ]) -> ()
+              | other -> failtestf "expected CHAR to trim and VARCHAR to retain trailing spaces, got %A" other
+
+          testCase "ALTER text widths count Unicode scalar values"
+          <| fun _ ->
+              let session = create 1 (Fsdb.Storage.create ())
+              let session, _ = handle session "CREATE TABLE t (v VARCHAR(2))"
+              let session, _ = handle session "INSERT INTO t VALUES ('😀')"
+              let session, result = handle session "ALTER TABLE t MODIFY v VARCHAR(1)"
+              Expect.equal result (Affected 0UL) "one scalar value fits VARCHAR(1)"
+
+              match handle session "SELECT v FROM t" |> snd with
+              | ResultSet(_, [ [ Some "😀" ] ]) -> ()
+              | other -> failtestf "expected the supplementary-plane scalar to survive ALTER, got %A" other
+
+          testCase "lossy column charsets retain MySQL conversion warnings"
+          <| fun _ ->
+              let session = create 1 (Fsdb.Storage.create ())
+              let session, _ = handle session "CREATE TABLE t (a VARCHAR(20) CHARACTER SET ascii, l VARCHAR(20) CHARACTER SET latin1)"
+              let session, _ = handle session "SET SESSION sql_mode = ''"
+              let session, result = handle session "INSERT INTO t VALUES ('xåy', 'x😀y')"
+              Expect.equal result (Affected 1UL) "lossy conversions insert"
+
+              Expect.equal
+                  (session.Diagnostics |> List.map (fun condition -> condition.Level, condition.Code, condition.Message))
+                  [ Fsdb.Diagnostics.Warning, 1366, "Incorrect string value: '\\xC3\\xA5y' for column 'a' at row 1"
+                    Fsdb.Diagnostics.Warning, 1366, "Incorrect string value: '\\xF0\\x9F\\x98\\x80y' for column 'l' at row 1" ]
+                  "MySQL reports the UTF-8 suffix from the first unrepresentable character"
+
+              match handle session "SELECT a, l FROM t" |> snd with
+              | ResultSet(_, [ [ Some "x?y"; Some "x?y" ] ]) -> ()
+              | other -> failtestf "expected replacement characters, got %A" other
+
+          testCase "strict column charsets return MySQL's conversion error"
+          <| fun _ ->
+              let session = create 1 (Fsdb.Storage.create ())
+              let session, _ = handle session "CREATE TABLE t (a VARCHAR(20) CHARACTER SET ascii)"
+
+              match handle session "INSERT INTO t VALUES ('å')" |> snd with
+              | Err(1366, "Incorrect string value: '\\xC3\\xA5' for column 'a' at row 1") -> ()
+              | other -> failtestf "expected MySQL's incorrect-string error, got %A" other
+
           testCase "SHOW CREATE DATABASE, OPEN TABLES, PLUGINS, and ENGINE INNODB STATUS are truthful"
           <| fun _ ->
               let session = create 1 (Fsdb.Storage.create ())

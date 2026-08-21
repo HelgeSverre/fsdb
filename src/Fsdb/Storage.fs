@@ -36,6 +36,7 @@ type StorageError =
     | ColumnCountMismatch of expected: int * actual: int
     | NotNullViolation of column: string
     | InvalidValueForColumn of column: string * value: string
+    | DataTooLongForColumn of column: string * row: int
     /// An ENUM (or SET) column rejected a value — MySQL's own 1265
     /// "Data truncated" (SQLSTATE 01000), distinct from the 1366 incorrect-
     /// value error other column types raise in strict mode.
@@ -88,6 +89,7 @@ let toMySqlError (err: StorageError) : int * string =
         1136, sprintf "Column count doesn't match value count at row 1 (expected %d, got %d)" expected actual
     | NotNullViolation column -> 1048, sprintf "Column '%s' cannot be null" column
     | InvalidValueForColumn(column, value) -> 1366, sprintf "Incorrect value: '%s' for column '%s'" value column
+    | DataTooLongForColumn(column, row) -> 1406, sprintf "Data too long for column '%s' at row %d" column row
     | DataTruncatedForColumn column -> 1265, sprintf "Data truncated for column '%s' at row 1" column
     | FullTextColumnNotAllowed column -> 1283, sprintf "Column '%s' cannot be part of FULLTEXT index" column
     | OutOfRangeForColumn column -> 1264, sprintf "Out of range value for column '%s' at row 1" column
@@ -737,27 +739,76 @@ let temporalCoercionMode (store: Store) =
       NoZeroDate = store.NoZeroDate
       NoZeroInDate = store.NoZeroInDate }
 
-let coerceValueWithMode (mode: TemporalCoercionMode) (col: ColumnDef) (v: Value) : Result<Value, StorageError> =
+let private truncateRunes (length: int) (text: string) =
+    let runes = text.EnumerateRunes() |> Seq.toArray
+
+    if runes.Length <= length then
+        None
+    else
+        runes |> Seq.truncate length |> Seq.map _.ToString() |> String.concat "" |> Some
+
+let private coerceValueWithModeAndLengths (enforceLengths: bool) (mode: TemporalCoercionMode) (col: ColumnDef) (v: Value) : Result<Value, StorageError> =
     let strict = mode.Strict
     let fail () =
         Error(InvalidValueForColumn(col.Name, v |> toText |> Option.defaultValue "NULL"))
 
-    /// Charset write-time semantics, MySQL-verified: `ascii` rejects
-    /// non-ASCII with 1366 in strict mode (lossy '?' otherwise); `latin1`
-    /// (cp1252) lossy-maps anything unencodable to '?' even in strict mode
-    /// (its all-256-slots table has no unassigned code points to reject);
-    /// the rest (utf8mb4/None) pass through unchanged.
+    let escapedUtf8Suffix (text: string) (converted: string) =
+        let firstChanged =
+            Seq.zip text converted
+            |> Seq.tryFindIndex (fun (original, replacement) -> original <> replacement)
+            |> Option.defaultValue 0
+
+        text.Substring(firstChanged)
+        |> Text.Encoding.UTF8.GetBytes
+        |> Array.map (fun b -> if b < 0x80uy then string (char b) else sprintf "\\x%02X" b)
+        |> String.concat ""
+
     let charsetChecked (text: string) : Result<string, StorageError> =
-        match col.Charset with
-        | Some "ascii" ->
-            if text |> String.forall (fun c -> int c < 0x80) then
-                Ok text
-            elif strict then
-                fail ()
+        let converted =
+            match col.Charset with
+            | Some "ascii" -> Collation.Charset.transcodeAscii text
+            | Some "latin1" -> Collation.Charset.transcodeLatin1 text
+            | _ -> text
+
+        if text = converted then
+            Ok text
+        else
+            let value = escapedUtf8Suffix text converted
+            let message = sprintf "Incorrect string value: '%s' for column '%s' at row %d" value col.Name (Diagnostics.currentRowNumber ())
+
+            if strict then
+                Error(ExpressionError(1366, message))
             else
-                Ok(Collation.Charset.transcodeAscii text)
-        | Some "latin1" -> Ok(Collation.Charset.transcodeLatin1 text)
-        | _ -> Ok text
+                Diagnostics.warning 1366 message
+                Ok converted
+
+    let truncationWarning () =
+        Diagnostics.warning 1265 (sprintf "Data truncated for column '%s' at row %d" col.Name (Diagnostics.currentRowNumber ()))
+
+    let truncateText length (text: string) =
+        match truncateRunes length text with
+        | None -> Ok text
+        | Some _ when not enforceLengths -> Ok text
+        | Some _ when strict ->
+            Error(DataTooLongForColumn(col.Name, Diagnostics.currentRowNumber ()))
+        | Some truncated ->
+            truncationWarning ()
+            Ok truncated
+
+    let truncateBytes length (bytes: byte[]) =
+        if not enforceLengths || bytes.Length <= length then
+            Ok bytes
+        elif strict then
+            Error(DataTooLongForColumn(col.Name, Diagnostics.currentRowNumber ()))
+        else
+            truncationWarning ()
+            Ok(bytes.[.. length - 1])
+
+    let padBinary length (bytes: byte[]) =
+        if bytes.Length = length then
+            bytes
+        else
+            Array.append bytes (Array.zeroCreate (length - bytes.Length))
 
     let warning code message =
         Diagnostics.warning code (sprintf "%s at row %d" message (Diagnostics.currentRowNumber ()))
@@ -926,7 +977,12 @@ let coerceValueWithMode (mode: TemporalCoercionMode) (col: ColumnDef) (v: Value)
             // `100.00`), so go through a fixed-point string format instead,
             // which both rounds and pads in one step.
             let rescale (d: decimal) =
-                Decimal.Parse(d.ToString("F" + string scale, CultureInfo.InvariantCulture), CultureInfo.InvariantCulture)
+                let scaled = Decimal.Parse(d.ToString("F" + string scale, CultureInfo.InvariantCulture), CultureInfo.InvariantCulture)
+
+                if scaled <> d then
+                    Diagnostics.note 1265 (sprintf "Data truncated for column '%s' at row %d" col.Name (Diagnostics.currentRowNumber ()))
+
+                scaled
 
             match v with
             | VDecimal d -> Ok(VDecimal(rescale d))
@@ -938,8 +994,17 @@ let coerceValueWithMode (mode: TemporalCoercionMode) (col: ColumnDef) (v: Value)
                 | Some d -> Ok(VDecimal(rescale (decimal d)))
                 | None -> numericFallback (Some "decimal") (fun () -> VDecimal(rescale 0M))
             | _ -> numericFallback (Some "decimal") (fun () -> VDecimal(rescale 0M))
-        | TChar _
-        | TVarchar _
+        | TChar length
+        | TVarchar length ->
+            charsetChecked (v |> toText |> Option.defaultValue "")
+            |> Result.bind (fun text ->
+                let text =
+                    match col.Type with
+                    | TChar _ when enforceLengths -> text.TrimEnd([| ' ' |])
+                    | _ -> text
+
+                truncateText length text)
+            |> Result.map VString
         | TTinyText
         | TText
         | TMediumText
@@ -1024,8 +1089,23 @@ let coerceValueWithMode (mode: TemporalCoercionMode) (col: ColumnDef) (v: Value)
 
                 charsetChecked text |> Result.map VString
             | false, _ -> charsetChecked raw |> Result.map VString
-        | TBinary _
-        | TVarBinary _
+        | TBinary length
+        | TVarBinary length ->
+            let bytes =
+                match v with
+                | VBytes bytes -> bytes
+                | VString text -> Text.Encoding.UTF8.GetBytes text
+                | _ -> v |> toText |> Option.defaultValue "" |> Text.Encoding.UTF8.GetBytes
+
+            truncateBytes length bytes
+            |> Result.map (fun bytes ->
+                if enforceLengths then
+                    match col.Type with
+                    | TBinary _ -> padBinary length bytes
+                    | _ -> bytes
+                else
+                    bytes)
+            |> Result.map VBytes
         | TTinyBlob
         | TBlob
         | TMediumBlob
@@ -1193,8 +1273,14 @@ let coerceValueWithMode (mode: TemporalCoercionMode) (col: ColumnDef) (v: Value)
                             | false, _ -> temporalFallback ()
             | _ -> temporalFallback ()
 
+let coerceValueWithMode (mode: TemporalCoercionMode) (col: ColumnDef) (v: Value) : Result<Value, StorageError> =
+    coerceValueWithModeAndLengths false mode col v
+
+let private coerceStoredValueWithMode (mode: TemporalCoercionMode) (col: ColumnDef) (v: Value) : Result<Value, StorageError> =
+    coerceValueWithModeAndLengths true mode col v
+
 let coerceValue (strict: bool) (col: ColumnDef) (v: Value) : Result<Value, StorageError> =
-    coerceValueWithMode
+    coerceStoredValueWithMode
         { Strict = strict
           NoZeroDate = true
           NoZeroInDate = true }
@@ -1204,7 +1290,7 @@ let coerceValue (strict: bool) (col: ColumnDef) (v: Value) : Result<Value, Stora
 let private normalizeDefault (mode: TemporalCoercionMode) (col: ColumnDef) : Result<ColumnDef, StorageError> =
     match col.Default with
     | Some(DConst value) ->
-        coerceValueWithMode mode col value
+        coerceStoredValueWithMode mode col value
         |> Result.map (fun value -> { col with Default = Some(DConst value) })
         |> Result.mapError (function
             | ZeroTemporalForColumn _ -> InvalidDefaultValue col.Name
@@ -1240,7 +1326,7 @@ let evalDefault (col: ColumnDef) : Value =
 let private coerceAndCheck (mode: TemporalCoercionMode) (col: ColumnDef) (v: Value) : Result<Value, StorageError> =
     match v with
     | VNull when not col.Nullable -> Error(NotNullViolation col.Name)
-    | _ -> coerceValueWithMode mode col v
+    | _ -> coerceStoredValueWithMode mode col v
 
 let private coerceRow (mode: TemporalCoercionMode) (columns: ColumnDef list) (row: Value[]) : Result<Value[], StorageError> =
     List.zip columns (Array.toList row)
@@ -2399,12 +2485,12 @@ let private implicitZeroSeed (col: ColumnDef) : Result<Value, StorageError> =
 /// `implicitZeroSeed`).
 let private addedColumnFill (mode: TemporalCoercionMode) (col: ColumnDef) : Result<Value, StorageError> =
     match col.Default with
-    | Some _ -> coerceValueWithMode mode col (evalDefault col)
+    | Some _ -> coerceStoredValueWithMode mode col (evalDefault col)
     | None ->
         if col.Nullable then
             Ok VNull
         else
-            implicitZeroSeed col |> Result.bind (coerceValueWithMode mode col)
+            implicitZeroSeed col |> Result.bind (coerceStoredValueWithMode mode col)
 
 /// Inserts `x` at `idx` (clamped to `xs`'s length, so `idx = List.length xs`
 /// appends) — used by `AFTER`/`FIRST` column positioning, since `Columns`
@@ -2444,11 +2530,24 @@ let private applyAlterAction (mode: TemporalCoercionMode) (table: Table) (action
     // non-strict). The first failing row aborts the whole ALTER, leaving
     // the table untouched.
     let recoerce (newDef: ColumnDef) (v: Value) : Result<Value, StorageError> =
-        coerceValueWithMode mode newDef v
+        let value =
+            match newDef.Type, v with
+            | (TChar n | TVarchar n), VString s ->
+                let text =
+                    match newDef.Type with
+                    | TChar _ -> s.TrimEnd([| ' ' |])
+                    | _ -> s
+
+                match truncateRunes n text with
+                | Some truncated when strict -> Error(DataTruncatedForColumn newDef.Name)
+                | Some truncated -> Ok(VString truncated)
+                | None -> Ok(VString text)
+            | _ -> Ok v
+
+        value
+        |> Result.bind (coerceValueWithMode mode newDef)
         |> Result.bind (fun coerced ->
             match newDef.Type, coerced with
-            | (TChar n | TVarchar n), VString s when String.length s > n ->
-                if strict then Error(DataTruncatedForColumn newDef.Name) else Ok(VString(s.Substring(0, n)))
             | intType, VInt i ->
                 let range =
                     match intType with
@@ -2873,7 +2972,7 @@ let private processRow
                 match pending with
                 | VNull -> Ok(VInt nextAutoId :: valuesRev, nextAutoId + 1L, Some(true, nextAutoId))
                 | _ ->
-                    match coerceValueWithMode mode col pending with
+                    match coerceStoredValueWithMode mode col pending with
                     | Error e -> Error e
                     | Ok(VInt i) -> Ok(VInt i :: valuesRev, max nextAutoId (i + 1L), Some(false, i))
                     | Ok _ -> Error(InvalidValueForColumn(col.Name, "auto_increment"))

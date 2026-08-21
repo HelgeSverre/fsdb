@@ -6,6 +6,7 @@ open System.Threading
 type Level =
     | Warning
     | Error
+    | Note
 
 type Condition =
     { Level: Level
@@ -23,6 +24,9 @@ let warning code message =
 
 let error code message =
     record { Level = Error; Code = code; Message = message }
+
+let note code message =
+    record { Level = Note; Code = code; Message = message }
 
 let currentRowNumber () = rowNumber.Value |> Option.defaultValue 1
 
