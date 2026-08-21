@@ -6940,6 +6940,7 @@ type private UpdatableView =
     { Database: string
       Table: string
       Columns: Map<string, string>
+      OrderedColumns: string list
       Definer: string }
 
 let private tryUpdatableView (store: Store) (dbName: string) (viewName: string) : UpdatableView option =
@@ -6982,6 +6983,7 @@ let private tryUpdatableView (store: Store) (dbName: string) (viewName: string) 
                         { Database = source.Database |> Option.defaultValue view.Schema
                           Table = source.Table
                           Columns = List.zip outputNames (sourceNames |> List.map snd) |> List.map (fun (viewColumn, baseColumn) -> viewColumn.ToLowerInvariant(), baseColumn) |> Map.ofList
+                          OrderedColumns = outputNames
                           Definer = view.Definer }: UpdatableView
                     )
         | _ -> None
@@ -8292,6 +8294,46 @@ let private triggerBodyExprs (stmt: Statement) : Expr list =
     | Delete d -> Option.toList d.Where
     | _ -> []
 
+let private triggerRowImageError (event: TriggerEvent) (columns: ColumnDef list) (statement: Statement) =
+    let rec findReference =
+        function
+        | QualifiedCol(qualifier, column) when qualifier.Equals("OLD", System.StringComparison.OrdinalIgnoreCase) || qualifier.Equals("NEW", System.StringComparison.OrdinalIgnoreCase) ->
+            Some(qualifier.ToUpperInvariant(), column)
+        | FuncCall(_, arguments) -> arguments |> List.tryPick findReference
+        | BinOp(_, left, right)
+        | Like(left, right, _, _)
+        | Regexp(left, right) -> findReference left |> Option.orElseWith (fun () -> findReference right)
+        | Not expression
+        | IsNull expression
+        | IsNotNull expression
+        | IsTrue expression
+        | IsFalse expression
+        | Distinct expression
+        | OrderBy(expression, _)
+        | Cast(expression, _)
+        | Collate(expression, _)
+        | AssignUserVariable(_, expression) -> findReference expression
+        | In(expression, candidates) -> findReference expression |> Option.orElseWith (fun () -> candidates |> List.tryPick findReference)
+        | Between(expression, lower, upper) -> findReference expression |> Option.orElseWith (fun () -> findReference lower |> Option.orElseWith (fun () -> findReference upper))
+        | Case(subject, branches, otherwise) ->
+            subject
+            |> Option.bind findReference
+            |> Option.orElseWith (fun () -> branches |> List.tryPick (fun (condition, result) -> findReference condition |> Option.orElseWith (fun () -> findReference result)))
+            |> Option.orElseWith (fun () -> otherwise |> Option.bind findReference)
+        | MatchAgainst(_, query, _) -> findReference query
+        | _ -> None
+
+    triggerBodyExprs statement
+    |> List.tryPick findReference
+    |> Option.bind (fun (image, column) ->
+        match image, event with
+        | "OLD", TriggerInsert -> Some(Err(1363, "There is no OLD row in INSERT trigger"))
+        | "NEW", TriggerDelete -> Some(Err(1363, "There is no NEW row in DELETE trigger"))
+        | _ ->
+            match resolveColumn columns column with
+            | Ok index when columns.[index].Generated.IsSome -> Some(Err(3105, sprintf "Trigger cannot reference generated column '%s'" column))
+            | _ -> None)
+
 let rec execute (store: Store) (registry: Registry) (dbName: string) (ids: int64 * int64) (foundRows: bool) (stmt: Statement) : (int64 * int64) * QueryResult =
     // Fresh derived-table memo per statement (see `fromSubqueryMemo`).
     fromSubqueryMemo.Value <- Dictionary<FromItem, Result<ColumnDef list * Value[] list, QueryResult>>(HashIdentity.Reference)
@@ -9202,6 +9244,9 @@ let rec execute (store: Store) (registry: Registry) (dbName: string) (ids: int64
             | Update _
             | Delete _
             | SetTriggerNew _ ->
+                match triggerRowImageError event columns bodyStmt with
+                | Some error -> ids, error
+                | None ->
                 match triggerBodyExprs bodyStmt |> List.tryPick (firstDirectOnlyCall registry) with
                 | Some fn -> ids, Err(3102, sprintf "Expression of trigger contains a disallowed function: %s" fn)
                 | None ->
@@ -9316,6 +9361,20 @@ let rec execute (store: Store) (registry: Registry) (dbName: string) (ids: int64
         | Ok() -> ids, Affected 0UL
         | Error(code, msg) -> ids, Err(code, msg)
 
+    | Insert(table, columns, rowsExprs, onDuplicateUpdate, ignoreDuplicates) when tryStoredView store (splitQualified dbName table |> fst) (splitQualified dbName table |> snd) |> Option.isSome ->
+        let viewDb, viewName = splitQualified dbName table
+
+        match tryUpdatableView store viewDb viewName with
+        | None -> ids, Err(1471, sprintf "The target table '%s' of the INSERT is not insertable-into" viewName)
+        | Some view ->
+            let viewColumns = if columns.IsEmpty then view.OrderedColumns else columns
+            let baseColumns = viewColumns |> List.map (fun column -> Map.tryFind (column.ToLowerInvariant()) view.Columns |> Option.defaultValue column)
+            let rewritten = Insert(view.Database + "." + view.Table, baseColumns, rowsExprs, onDuplicateUpdate, ignoreDuplicates)
+
+            match Auth.check store (storedObjectUser view.Definer) (Auth.requiredPrivileges view.Database rewritten) with
+            | Error(code, message) -> ids, Err(code, message)
+            | Ok() -> execute store registry dbName ids foundRows rewritten
+
     | Insert(table, columns, rowsExprs, onDuplicateUpdate, ignoreDuplicates) ->
         // INSERT ... VALUES expressions aren't evaluated against any row
         // (no table columns are in scope), just literals/functions — an
@@ -9343,6 +9402,20 @@ let rec execute (store: Store) (registry: Registry) (dbName: string) (ids: int64
                             insertRowsPrepared s db table cols rowsValues prepare)
             else
                 upsertEvaluated db table cols rowsValues onDuplicateUpdate
+
+    | InsertSelect(table, columns, select, onDuplicateUpdate, ignoreDuplicates) when tryStoredView store (splitQualified dbName table |> fst) (splitQualified dbName table |> snd) |> Option.isSome ->
+        let viewDb, viewName = splitQualified dbName table
+
+        match tryUpdatableView store viewDb viewName with
+        | None -> ids, Err(1471, sprintf "The target table '%s' of the INSERT is not insertable-into" viewName)
+        | Some view ->
+            let viewColumns = if columns.IsEmpty then view.OrderedColumns else columns
+            let baseColumns = viewColumns |> List.map (fun column -> Map.tryFind (column.ToLowerInvariant()) view.Columns |> Option.defaultValue column)
+            let rewritten = InsertSelect(view.Database + "." + view.Table, baseColumns, select, onDuplicateUpdate, ignoreDuplicates)
+
+            match Auth.check store (storedObjectUser view.Definer) (Auth.requiredPrivileges view.Database rewritten) with
+            | Error(code, message) -> ids, Err(code, message)
+            | Ok() -> execute store registry dbName ids foundRows rewritten
 
     | InsertSelect(table, columns, select, onDuplicateUpdate, ignoreDuplicates) ->
         let db, table = splitQualified dbName table

@@ -57,10 +57,11 @@ let tests =
               expectOk (run store "CREATE VIEW vendor_names AS SELECT id, name FROM vendors") "create view"
               expectOk (run store "UPDATE vendor_names SET name = 'Updated' WHERE id = 1") "update through view"
               expectOk (run store "DELETE FROM vendor_names WHERE id = 2") "delete through view"
+              expectOk (run store "INSERT INTO vendor_names VALUES (3, 'Inserted')") "insert through view"
 
               Expect.equal
                   (rows store "SELECT id, name FROM vendors ORDER BY id")
-                  [ [ Some "1"; Some "Updated" ] ]
+                  [ [ Some "1"; Some "Updated" ]; [ Some "3"; Some "Inserted" ] ]
                   "writes reach the base table"
 
               Expect.equal
@@ -88,15 +89,19 @@ let tests =
               let root = Fsdb.Session.create 1 store
               let root = apply root "CREATE USER owner"
               let root = apply root "CREATE USER writer"
-              let root = apply root "GRANT SELECT, UPDATE ON fsdb.vendors TO owner"
+              let root = apply root "GRANT SELECT, UPDATE, INSERT ON fsdb.vendors TO owner"
               let root = apply root "GRANT CREATE VIEW ON fsdb.* TO owner"
               let owner = { Fsdb.Session.create 2 store with User = "owner" }
               let _owner = apply owner "CREATE VIEW writable_vendors AS SELECT id, name FROM vendors"
-              let root = apply root "GRANT UPDATE ON fsdb.writable_vendors TO writer"
+              let root = apply root "GRANT UPDATE, INSERT ON fsdb.writable_vendors TO writer"
               let writer = { Fsdb.Session.create 3 store with User = "writer" }
-              let _root = apply root "REVOKE UPDATE ON fsdb.vendors FROM owner"
+              let _root = apply root "REVOKE UPDATE, INSERT ON fsdb.vendors FROM owner"
 
               match Fsdb.QueryHandler.handle writer "UPDATE writable_vendors SET name = 'Blocked' WHERE id = 1" |> snd with
+              | Err(1142, message) -> Expect.stringContains message "vendors" "revoked base table named"
+              | other -> failtestf "expected definer privilege failure, got %A" other
+
+              match Fsdb.QueryHandler.handle writer "INSERT INTO writable_vendors VALUES (3, 'Blocked')" |> snd with
               | Err(1142, message) -> Expect.stringContains message "vendors" "revoked base table named"
               | other -> failtestf "expected definer privilege failure, got %A" other
 

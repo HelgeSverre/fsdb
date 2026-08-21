@@ -167,20 +167,28 @@ let tests =
                   [ [ Some "5" ] ]
                   "only the first statement's insert path fired; the duplicate's update path didn't"
 
-          testCase "NEW.<generated column> binds the computed value, not the pre-recompute NULL"
+          testCase "generated columns are not valid OLD or NEW references"
           <| fun _ ->
               let store = Fsdb.Storage.create ()
-              // Probed on the disposable server: for `b INT AS (a*2)`,
-              // `INSERT INTO g(a) VALUES (5)` binds NEW.b = 10 in the body.
               expectOk (runDefault store "CREATE TABLE g (a INT, b INT AS (a * 2))") "create g"
               expectOk (runDefault store "CREATE TABLE log (id INT AUTO_INCREMENT PRIMARY KEY, n INT)") "create log"
 
-              expectOk
-                  (runDefault store "CREATE TRIGGER trg AFTER INSERT ON g FOR EACH ROW INSERT INTO log(n) VALUES (NEW.b)")
-                  "create trigger"
+              match runDefault store "CREATE TRIGGER trg AFTER INSERT ON g FOR EACH ROW INSERT INTO log(n) VALUES (NEW.b)" with
+              | Err(3105, message) -> Expect.stringContains message "generated" "generated column named"
+              | other -> failtestf "expected generated row-image rejection, got %A" other
 
-              expectOk (runDefault store "INSERT INTO g(a) VALUES (5)") "insert"
-              Expect.equal (rows store "SELECT n FROM log") [ [ Some "10" ] ] "NEW.b is the computed 10, not NULL"
+          testCase "INSERT has no OLD row and DELETE has no NEW row"
+          <| fun _ ->
+              let store = Fsdb.Storage.create ()
+              setup store
+
+              match runDefault store "CREATE TRIGGER bad_insert AFTER INSERT ON t FOR EACH ROW INSERT INTO log(n) VALUES (OLD.n)" with
+              | Err(1363, _) -> ()
+              | other -> failtestf "expected OLD rejection in INSERT trigger, got %A" other
+
+              match runDefault store "CREATE TRIGGER bad_delete AFTER DELETE ON t FOR EACH ROW INSERT INTO log(n) VALUES (NEW.n)" with
+              | Err(1363, _) -> ()
+              | other -> failtestf "expected NEW rejection in DELETE trigger, got %A" other
 
           testCase "the body executes in the trigger's schema, not the session's current database"
           <| fun _ ->
