@@ -895,12 +895,27 @@ let private jsonSchemaError functionName argument position =
 let private jsonSchemaObjectError functionName =
     SqlError(3853, sprintf "Invalid JSON type in argument 1 to function %s; an object is required." functionName)
 
+let private maxJsonSchemaInputLength = 1_000_000
+let private maxJsonSchemaDepth = 64
+let private maxJsonSchemaPatternLength = 16_384
+let private maxJsonSchemaRegexMatches = 1_024
+let private jsonSchemaRegexTimeout = TimeSpan.FromMilliseconds 50.0
+
+let private jsonSchemaLimitError =
+    SqlError(1235, "This version of MySQL doesn't yet support JSON Schema inputs beyond its resource limits")
+
+let private jsonSchemaRegexLimitError =
+    SqlError(1235, "This version of MySQL doesn't yet support JSON Schema regular expressions beyond its resource limits")
+
 let private parseJsonSchemaArgument functionName argument (value: Value) : JsonNode =
     match toText value with
     | None -> raise (jsonSchemaError functionName argument 0)
     | Some text ->
+        if text.Length > maxJsonSchemaInputLength then
+            raise jsonSchemaLimitError
+
         try
-            JsonNode.Parse text
+            JsonNode.Parse(text, JsonNodeOptions(), JsonDocumentOptions(MaxDepth = maxJsonSchemaDepth))
         with :? JsonException as error ->
             let position = if error.BytePositionInLine.HasValue then int error.BytePositionInLine.Value else 0
             raise (jsonSchemaError functionName argument position)
@@ -919,12 +934,88 @@ let rec private normalizeJsonSchema (node: JsonNode) : unit =
             | _ -> ()
         | _ -> ()
 
-        if obj.ContainsKey "pattern" || obj.ContainsKey "patternProperties" then
-            raise (SqlError(1235, "This version of MySQL doesn't yet support 'JSON Schema regular expressions'"))
-
         obj |> Seq.iter (fun entry -> normalizeJsonSchema entry.Value)
     | :? JsonArray as array -> array |> Seq.iter normalizeJsonSchema
     | _ -> ()
+
+let private tryJsonString (node: JsonNode) =
+    match node with
+    | :? JsonValue as value ->
+        match value.TryGetValue<string>() with
+        | true, text -> Some text
+        | _ -> None
+    | _ -> None
+
+let private tryJsonObject (node: JsonNode) =
+    match node with
+    | :? JsonObject as obj -> Some obj
+    | _ -> None
+
+let private pointerSegment (segment: string) : string =
+    segment.Replace("~1", "/").Replace("~0", "~")
+
+let private pointerAppend location segment =
+    location + "/" + escapeJsonPointer segment
+
+let private sameJsonDocumentLocation (left: string) (right: string) =
+    left.TrimEnd('/') = right.TrimEnd('/')
+
+let private tryResolveJsonPointer (root: JsonObject) (reference: string) =
+    let tryArrayIndex (array: JsonArray) (segment: string) =
+        match Int32.TryParse segment with
+        | true, index when index >= 0 && index < array.Count -> array[index] |> Option.ofObj
+        | _ -> None
+
+    match reference with
+    | "#" -> Some(root :> JsonNode)
+    | _ when reference.StartsWith "#/" ->
+        reference.Substring(2).Split('/')
+        |> Array.map pointerSegment
+        |> Array.fold
+            (fun current segment ->
+                current
+                |> Option.bind (fun node ->
+                    match node with
+                    | :? JsonObject as obj -> obj[segment] |> Option.ofObj
+                    | :? JsonArray as array -> tryArrayIndex array segment
+                    | _ -> None))
+            (Some(root :> JsonNode))
+    | _ -> None
+
+type private JsonSchemaRegexBudget = { mutable Attempts: int }
+
+let private tryMatchJsonSchemaPattern (budget: JsonSchemaRegexBudget) (pattern: string) (input: string) =
+    budget.Attempts <- budget.Attempts + 1
+
+    if budget.Attempts > maxJsonSchemaRegexMatches then
+        raise jsonSchemaRegexLimitError
+
+    if pattern.Length > maxJsonSchemaPatternLength then
+        raise jsonSchemaRegexLimitError
+
+    try
+        Some(Regex.IsMatch(input, pattern, RegexOptions.CultureInvariant, jsonSchemaRegexTimeout))
+    with
+    | :? ArgumentException -> None
+    | :? RegexMatchTimeoutException -> raise jsonSchemaRegexLimitError
+
+let rec private stripJsonSchemaRegularExpressions (node: JsonNode) : JsonNode =
+    match node with
+    | null -> null
+    | :? JsonObject as obj ->
+        let result = JsonObject()
+
+        obj
+        |> Seq.iter (fun property ->
+            if property.Key <> "pattern" && property.Key <> "patternProperties" then
+                result[property.Key] <- stripJsonSchemaRegularExpressions property.Value)
+
+        result :> JsonNode
+    | :? JsonArray as array ->
+        let result = JsonArray()
+        array |> Seq.iter (stripJsonSchemaRegularExpressions >> result.Add)
+        result :> JsonNode
+    | _ -> node.DeepClone()
 
 let private compileJsonSchema (functionName: string) (text: string) : JsonSchema =
     try
@@ -1001,6 +1092,265 @@ type private JsonSchemaFailure =
       DocumentLocation: string
       Keyword: string }
 
+let private neverValidJsonSchema () =
+    let schema = JsonObject()
+    schema["not"] <- JsonObject()
+    schema :> JsonNode
+
+let private addJsonSchemaConstraint (schema: JsonObject) (constraintSchema: JsonNode) =
+    match schema["allOf"] with
+    | null ->
+        let constraints = JsonArray()
+        constraints.Add constraintSchema
+        schema["allOf"] <- constraints
+    | :? JsonArray as constraints -> constraints.Add constraintSchema
+    | _ -> ()
+
+let private addPatternPropertyConstraint (schema: JsonObject) (propertyName: string) (constraintSchema: JsonNode) =
+    let properties =
+        match schema["properties"] with
+        | :? JsonObject as properties -> properties
+        | null ->
+            let properties = JsonObject()
+            schema["properties"] <- properties
+            properties
+        | _ -> JsonObject()
+
+    match properties[propertyName] with
+    | null -> properties[propertyName] <- constraintSchema
+    | existing ->
+        let combined = JsonObject()
+        let constraints = JsonArray()
+        constraints.Add(existing.DeepClone())
+        constraints.Add constraintSchema
+        combined["allOf"] <- constraints
+        properties[propertyName] <- combined
+
+let private isJsonSchemaPropertyPatternMatch (budget: JsonSchemaRegexBudget) (pattern: string) (propertyName: string) =
+    tryMatchJsonSchemaPattern budget pattern propertyName |> Option.defaultValue false
+
+let rec private rewriteJsonSchemaRegularExpressions
+    (root: JsonObject)
+    (cleanRoot: JsonObject)
+    (source: JsonNode)
+    (target: JsonNode)
+    (document: JsonNode)
+    schemaLocation
+    documentLocation
+    remainingDepth
+    (seenReferences: Set<string>)
+    (regexBudget: JsonSchemaRegexBudget)
+    (patternFailures: ResizeArray<JsonSchemaFailure>)
+    (patternPropertyMatches: ResizeArray<JsonSchemaFailure>)
+    =
+    if remainingDepth < 0 then
+        raise jsonSchemaLimitError
+
+    match source, target with
+    | (:? JsonObject as sourceSchema), (:? JsonObject as targetSchema) ->
+        match sourceSchema["$ref"] |> tryJsonString with
+        | Some reference when reference.StartsWith "#" && not (seenReferences.Contains reference) ->
+            match tryResolveJsonPointer root reference, tryResolveJsonPointer cleanRoot reference with
+            | Some sourceReference, Some targetReference ->
+                rewriteJsonSchemaRegularExpressions
+                    root
+                    cleanRoot
+                    sourceReference
+                    targetReference
+                    document
+                    schemaLocation
+                    documentLocation
+                    (remainingDepth - 1)
+                    (seenReferences.Add reference)
+                    regexBudget
+                    patternFailures
+                    patternPropertyMatches
+            | _ -> ()
+        | _ -> ()
+
+        match sourceSchema["pattern"] |> tryJsonString, document |> tryJsonString with
+        | Some pattern, Some value ->
+            match tryMatchJsonSchemaPattern regexBudget pattern value with
+            | Some false ->
+                patternFailures.Add
+                    { SchemaLocation = schemaLocation
+                      DocumentLocation = documentLocation
+                      Keyword = "pattern" }
+
+                addJsonSchemaConstraint targetSchema (neverValidJsonSchema ())
+            | _ -> ()
+        | _ -> ()
+
+        match document |> tryJsonObject with
+        | Some documentObject ->
+            let sourceProperties = sourceSchema["properties"] |> tryJsonObject
+            let targetProperties = targetSchema["properties"] |> tryJsonObject
+
+            match sourceProperties, targetProperties with
+            | Some sourceProperties, Some targetProperties ->
+                sourceProperties
+                |> Seq.iter (fun property ->
+                    match documentObject[property.Key] |> Option.ofObj, targetProperties[property.Key] |> Option.ofObj with
+                    | Some value, Some targetProperty ->
+                        rewriteJsonSchemaRegularExpressions
+                            root
+                            cleanRoot
+                            property.Value
+                            targetProperty
+                            value
+                            (pointerAppend (pointerAppend schemaLocation "properties") property.Key)
+                            (pointerAppend documentLocation property.Key)
+                            (remainingDepth - 1)
+                            seenReferences
+                            regexBudget
+                            patternFailures
+                            patternPropertyMatches
+                    | _ -> ())
+            | _ -> ()
+
+            match sourceSchema["patternProperties"] |> tryJsonObject with
+            | Some patternProperties ->
+                patternProperties
+                |> Seq.iter (fun patternProperty ->
+                    documentObject
+                    |> Seq.iter (fun property ->
+                        if isJsonSchemaPropertyPatternMatch regexBudget patternProperty.Key property.Key then
+                            let constraintSchema = stripJsonSchemaRegularExpressions patternProperty.Value
+
+                            rewriteJsonSchemaRegularExpressions
+                                root
+                                cleanRoot
+                                patternProperty.Value
+                                constraintSchema
+                                property.Value
+                                (pointerAppend (pointerAppend schemaLocation "patternProperties") patternProperty.Key)
+                                (pointerAppend documentLocation property.Key)
+                                (remainingDepth - 1)
+                                seenReferences
+                                regexBudget
+                                patternFailures
+                                patternPropertyMatches
+
+                            addPatternPropertyConstraint targetSchema property.Key constraintSchema
+
+                            patternPropertyMatches.Add
+                                { SchemaLocation = schemaLocation
+                                  DocumentLocation = pointerAppend documentLocation property.Key
+                                  Keyword = "patternProperties" }))
+            | _ -> ()
+
+            match sourceSchema["additionalProperties"] |> tryJsonObject, targetSchema["additionalProperties"] |> tryJsonObject with
+            | Some sourceAdditionalProperties, Some targetAdditionalProperties ->
+                documentObject
+                |> Seq.iter (fun property ->
+                    let isNamedProperty = sourceProperties |> Option.exists (fun properties -> properties.ContainsKey property.Key)
+
+                    let matchesPatternProperty =
+                        match sourceSchema["patternProperties"] |> tryJsonObject with
+                        | Some patternProperties ->
+                            patternProperties
+                            |> Seq.exists (fun patternProperty -> isJsonSchemaPropertyPatternMatch regexBudget patternProperty.Key property.Key)
+                        | None -> false
+
+                    if not isNamedProperty && not matchesPatternProperty then
+                        rewriteJsonSchemaRegularExpressions
+                            root
+                            cleanRoot
+                            sourceAdditionalProperties
+                            targetAdditionalProperties
+                            property.Value
+                            (pointerAppend schemaLocation "additionalProperties")
+                            (pointerAppend documentLocation property.Key)
+                            (remainingDepth - 1)
+                            seenReferences
+                            regexBudget
+                            patternFailures
+                            patternPropertyMatches)
+            | _ -> ()
+        | None -> ()
+
+        match document with
+        | :? JsonArray as documentArray ->
+            match sourceSchema["items"], targetSchema["items"] with
+            | (:? JsonObject as sourceItems), (:? JsonObject as targetItems) ->
+                documentArray
+                |> Seq.mapi (fun index value -> index, value)
+                |> Seq.iter (fun (index, value) ->
+                    rewriteJsonSchemaRegularExpressions
+                        root
+                        cleanRoot
+                        sourceItems
+                        targetItems
+                        value
+                        (pointerAppend schemaLocation "items")
+                        (pointerAppend documentLocation (string index))
+                        (remainingDepth - 1)
+                        seenReferences
+                        regexBudget
+                        patternFailures
+                        patternPropertyMatches)
+            | (:? JsonArray as sourceItems), (:? JsonArray as targetItems) ->
+                documentArray
+                |> Seq.mapi (fun index value -> index, value)
+                |> Seq.iter (fun (index, value) ->
+                    if index < sourceItems.Count && index < targetItems.Count then
+                        rewriteJsonSchemaRegularExpressions
+                            root
+                            cleanRoot
+                            sourceItems[index]
+                            targetItems[index]
+                            value
+                            (pointerAppend (pointerAppend schemaLocation "items") (string index))
+                            (pointerAppend documentLocation (string index))
+                            (remainingDepth - 1)
+                            seenReferences
+                            regexBudget
+                            patternFailures
+                            patternPropertyMatches)
+            | _ -> ()
+        | _ -> ()
+
+        [ "allOf"; "anyOf"; "oneOf" ]
+        |> List.iter (fun keyword ->
+            match sourceSchema[keyword], targetSchema[keyword] with
+            | (:? JsonArray as sourceSchemas), (:? JsonArray as targetSchemas) ->
+                sourceSchemas
+                |> Seq.mapi (fun index schema -> index, schema)
+                |> Seq.iter (fun (index, schema) ->
+                    if index < targetSchemas.Count then
+                        rewriteJsonSchemaRegularExpressions
+                            root
+                            cleanRoot
+                            schema
+                            targetSchemas[index]
+                            document
+                            (pointerAppend (pointerAppend schemaLocation keyword) (string index))
+                            documentLocation
+                            (remainingDepth - 1)
+                            seenReferences
+                            regexBudget
+                            patternFailures
+                            patternPropertyMatches)
+            | _ -> ())
+
+        match sourceSchema["not"], targetSchema["not"] with
+        | (:? JsonObject as sourceNot), (:? JsonObject as targetNot) ->
+            rewriteJsonSchemaRegularExpressions
+                root
+                cleanRoot
+                sourceNot
+                targetNot
+                document
+                (pointerAppend schemaLocation "not")
+                documentLocation
+                (remainingDepth - 1)
+                seenReferences
+                regexBudget
+                patternFailures
+                patternPropertyMatches
+        | _ -> ()
+    | _ -> ()
+
 let rec private dependencyFailure (schema: JsonNode) (document: JsonNode) schemaLocation documentLocation =
     match schema, document with
     | (:? JsonObject as schema), (:? JsonObject as document) ->
@@ -1066,7 +1416,26 @@ let private jsonSchemaValidation functionName schemaValue documentValue =
         match schemaNode with
         | :? JsonObject as schema ->
             normalizeJsonSchema schema
-            let schemaText = schema.ToJsonString jsonRenderOptions
+            let cleanSchema = stripJsonSchemaRegularExpressions schema :?> JsonObject
+            let regexBudget = { Attempts = 0 }
+            let patternFailures = ResizeArray<JsonSchemaFailure>()
+            let patternPropertyMatches = ResizeArray<JsonSchemaFailure>()
+
+            rewriteJsonSchemaRegularExpressions
+                schema
+                cleanSchema
+                schema
+                cleanSchema
+                documentNode
+                "#"
+                "#"
+                maxJsonSchemaDepth
+                Set.empty
+                regexBudget
+                patternFailures
+                patternPropertyMatches
+
+            let schemaText = cleanSchema.ToJsonString jsonRenderOptions
             let documentText = documentNode |> Option.ofObj |> Option.map (fun node -> node.ToJsonString jsonRenderOptions) |> Option.defaultValue "null"
             let errors = compileJsonSchema functionName schemaText |> fun compiled -> compiled.Validate(documentText, jsonSchemaValidatorSettings)
             let libraryFailure =
@@ -1084,7 +1453,19 @@ let private jsonSchemaValidation functionName schemaValue documentValue =
                       DocumentLocation = documentLocation
                       Keyword = schemaKeyword error.Kind })
 
-            Some(schema, dependencyFailure schema documentNode "#" "#" |> Option.orElse libraryFailure)
+            let regularExpressionFailure =
+                match libraryFailure with
+                | Some failure ->
+                    patternPropertyMatches
+                    |> Seq.tryFind (fun candidate ->
+                        sameJsonDocumentLocation failure.DocumentLocation candidate.DocumentLocation
+                        || failure.DocumentLocation.StartsWith(candidate.DocumentLocation + "/"))
+                    |> Option.orElseWith (fun () ->
+                        patternFailures
+                        |> Seq.tryFind (fun candidate -> sameJsonDocumentLocation failure.DocumentLocation candidate.DocumentLocation))
+                | None -> None
+
+            Some(schema, dependencyFailure schema documentNode "#" "#" |> Option.orElse regularExpressionFailure |> Option.orElse libraryFailure)
         | _ -> raise (jsonSchemaObjectError functionName)
 
 let private jsonSchemaValidFn: Scalar =

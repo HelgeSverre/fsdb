@@ -810,8 +810,41 @@ let tests =
                               (VInt 1L)
                               "dependency present"
 
-                      testCase "JSON schema rejects unbounded regular expressions"
+                      testCase "JSON schema applies bounded string patterns"
                       <| fun _ ->
+                          let schema = VString """{"type":"string","pattern":"^[A-Z]{2}-[0-9]{3}$"}"""
+                          Expect.equal (call "JSON_SCHEMA_VALID" [ schema; VString "\"NO-123\"" ]) (VInt 1L) "matching pattern"
+                          Expect.equal (call "JSON_SCHEMA_VALID" [ schema; VString "\"no-123\"" ]) (VInt 0L) "non-matching pattern"
+
+                          Expect.equal
+                              (call "JSON_SCHEMA_VALIDATION_REPORT" [ schema; VString "\"no-123\"" ])
+                              (VJson
+                                  """{"valid": false, "reason": "The JSON document location '#' failed requirement 'pattern' at JSON Schema location '#'", "schema-location": "#", "document-location": "#", "schema-failed-keyword": "pattern"}""")
+                              "pattern report"
+
+                      testCase "JSON schema applies pattern properties to matching member values"
+                      <| fun _ ->
+                          let schema =
+                              VString
+                                  """{"type":"object","patternProperties":{"^S_":{"type":"string"}},"additionalProperties":false}"""
+
+                          Expect.equal (call "JSON_SCHEMA_VALID" [ schema; VString """{"S_name":"Ada"}""" ]) (VInt 1L) "matching member"
+                          Expect.equal (call "JSON_SCHEMA_VALID" [ schema; VString """{"S_name":1}""" ]) (VInt 0L) "member constraint"
+                          Expect.equal (call "JSON_SCHEMA_VALID" [ schema; VString """{"name":"Ada"}""" ]) (VInt 0L) "additional property"
+
+                          Expect.equal
+                              (call "JSON_SCHEMA_VALIDATION_REPORT" [ schema; VString """{"S_name":1}""" ])
+                              (VJson
+                                  """{"valid": false, "reason": "The JSON document location '#/S_name' failed requirement 'patternProperties' at JSON Schema location '#'", "schema-location": "#", "document-location": "#/S_name", "schema-failed-keyword": "patternProperties"}""")
+                              "pattern property report"
+
+                      testCase "JSON schema ignores invalid patterns and bounds catastrophic ones"
+                      <| fun _ ->
+                          Expect.equal
+                              (call "JSON_SCHEMA_VALID" [ VString """{"type":"string","pattern":"["}"""; VString "\"x\"" ])
+                              (VInt 1L)
+                              "invalid pattern"
+
                           let schema = VString """{"type":"string","pattern":"(a+)+$"}"""
                           let document = VString ("\"" + String.replicate 100_000 "a" + "!\"")
 
