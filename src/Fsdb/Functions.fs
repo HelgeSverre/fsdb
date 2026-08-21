@@ -1925,8 +1925,7 @@ let private jsonSearchFn: Scalar =
         | _ -> VNull
     | _ -> VNull
 
-/// The binary collation has no character weights: MySQL returns its raw
-/// byte sequence, including `BINARY(N)`'s zero padding.
+/// Raw binary operands bypass collation weighting and retain their bytes.
 let weightString (collation: Collation.Collation) (value: Value) : Value =
     match value with
     | VNull -> VNull

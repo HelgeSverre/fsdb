@@ -290,12 +290,13 @@ let tests =
                     match
                         runDefault
                             (newStore ())
-                            "SELECT HEX(WEIGHT_STRING('abcdef' AS CHAR(3))), HEX(WEIGHT_STRING('abcdef' AS CHAR(4))), HEX(WEIGHT_STRING('abcdef' AS BINARY(8))), HEX(WEIGHT_STRING('a' COLLATE utf8mb4_bin))"
+                            "SELECT HEX(WEIGHT_STRING('abcdef' AS CHAR(3))), HEX(WEIGHT_STRING('abcdef' AS CHAR(4))), HEX(WEIGHT_STRING('abcdef' AS BINARY(8))), HEX(WEIGHT_STRING('a' COLLATE utf8mb4_bin)), HEX(WEIGHT_STRING('a' COLLATE utf8mb4_bin AS CHAR(3)) )"
                     with
-                    | ResultSet(_, [ [ Some shortWeight; Some longWeight; Some binaryWeight; Some binaryCollationWeight ] ]) ->
+                    | ResultSet(_, [ [ Some shortWeight; Some longWeight; Some binaryWeight; Some binaryCollationWeight; Some paddedCollationWeight ] ]) ->
                         Expect.notEqual shortWeight longWeight "CHAR width bounds characters"
                         Expect.equal binaryWeight "6162636465660000" "BINARY pads with zero bytes"
                         Expect.equal binaryCollationWeight "000061" "binary collation has code-point weights"
+                        Expect.equal paddedCollationWeight "000061000020000020" "CHAR pads text before binary collation weights"
                     | other -> failtestf "expected one WEIGHT_STRING row, got %A" other
 
                 testCase "WEIGHT_STRING keeps BIT column bytes"
@@ -310,11 +311,12 @@ let tests =
                         Expect.equal paddedWeight "8000" "BINARY width pads the stored byte"
                     | other -> failtestf "expected one BIT weight row, got %A" other
 
-                    match runDefault store "SELECT HEX(WEIGHT_STRING(value AS CHAR(3))), HEX(WEIGHT_STRING(X'6100' AS CHAR(1))), HEX(WEIGHT_STRING(X'6100' AS CHAR(2))) FROM weight_bits" with
-                    | ResultSet(_, [ [ Some bitWeight; Some shortBytes; Some fullBytes ] ]) ->
+                    match runDefault store "SELECT HEX(WEIGHT_STRING(value AS CHAR(3))), HEX(WEIGHT_STRING(X'6100' AS CHAR(1))), HEX(WEIGHT_STRING(X'6100' AS CHAR(2))), HEX(WEIGHT_STRING(X'6100' AS CHAR(3))) FROM weight_bits" with
+                    | ResultSet(_, [ [ Some bitWeight; Some shortBytes; Some fullBytes; Some unpaddedBytes ] ]) ->
                         Expect.equal bitWeight "80" "CHAR leaves BIT bytes unpadded"
                         Expect.equal shortBytes "61" "CHAR truncates raw bytes"
                         Expect.equal fullBytes "6100" "CHAR retains raw zero bytes"
+                        Expect.equal unpaddedBytes "6100" "CHAR does not pad raw bytes"
                     | other -> failtestf "expected one raw CHAR weight row, got %A" other
 
                 testCase "WEIGHT_STRING BINARY uses the column character set"
