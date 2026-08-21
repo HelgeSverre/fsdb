@@ -300,7 +300,7 @@ let private showBinaryLogsRe = Regex(@"^SHOW\s+(?:BINARY|MASTER)\s+LOGS\s*$", Re
 let private showBinaryLogStatusRe = Regex(@"^SHOW\s+BINARY\s+LOG\s+STATUS\s*$", RegexOptions.IgnoreCase)
 let private showReplicaStatusRe =
     Regex(@"^SHOW\s+REPLICA\s+STATUS(?:\s+FOR\s+CHANNEL\s+'[^']*')?\s*$", RegexOptions.IgnoreCase)
-let private maintenanceTableRe = Regex(@"^(ANALYZE|CHECK)\s+TABLE\s+(.+?)\s*$", RegexOptions.IgnoreCase)
+let private maintenanceTableRe = Regex(@"^(ANALYZE|CHECK|OPTIMIZE|REPAIR)\s+TABLE\s+(.+?)\s*$", RegexOptions.IgnoreCase)
 let private showOpenTablesRe = Regex(@"^SHOW\s+OPEN\s+TABLES(?:\s+(?:FROM|IN)\s+(\S+))?(?:\s+LIKE\s+'([^']*)')?\s*$", RegexOptions.IgnoreCase)
 let private showCreateDatabaseRe =
     Regex(@"^SHOW\s+CREATE\s+(?:DATABASE|SCHEMA)(?:\s+IF\s+NOT\s+EXISTS)?\s+(\S+)\s*$", RegexOptions.IgnoreCase)
@@ -1616,17 +1616,28 @@ let private runProbe (session: Session) (sql: string) (probe: Probe) : Session *
 
         let rows =
             tables
-            |> List.map (fun tableRef ->
+            |> List.collect (fun tableRef ->
                 let dbName, tableName = splitQualified sessionDb tableRef
                 let qualified = dbName + "." + tableName
 
                 match Storage.scan (Session.currentStore session) dbName tableName with
-                | Ok _ -> [ Some qualified; Some operation; Some "status"; Some "OK" ]
+                | Ok _ when operation = "optimize" ->
+                    [ [ Some qualified
+                        Some operation
+                        Some "note"
+                        Some "Table does not support optimize, doing recreate + analyze instead" ]
+                      [ Some qualified; Some operation; Some "status"; Some "OK" ] ]
+                | Ok _ when operation = "repair" ->
+                    [ [ Some qualified
+                        Some operation
+                        Some "note"
+                        Some "The storage engine for the table doesn't support repair" ] ]
+                | Ok _ -> [ [ Some qualified; Some operation; Some "status"; Some "OK" ] ]
                 | Error _ ->
-                    [ Some qualified
-                      Some operation
-                      Some "Error"
-                      Some(sprintf "Table '%s.%s' doesn't exist" dbName tableName) ])
+                    [ [ Some qualified
+                        Some operation
+                        Some "Error"
+                        Some(sprintf "Table '%s.%s' doesn't exist" dbName tableName) ] ])
 
         session, ResultSet([ "Table"; "Op"; "Msg_type"; "Msg_text" ], rows)
     | ShowOpenTables(db, pattern) ->

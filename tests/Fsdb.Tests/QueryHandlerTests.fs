@@ -1379,6 +1379,21 @@ let tests =
                       Expect.equal actual operation "operation"
                   | other -> failtestf "unexpected maintenance result for %s: %A" sql other
 
+              match handle session "OPTIMIZE TABLE visible" |> snd with
+              | ResultSet(
+                  [ "Table"; "Op"; "Msg_type"; "Msg_text" ],
+                  [ [ Some "app.visible"; Some "optimize"; Some "note"; Some "Table does not support optimize, doing recreate + analyze instead" ]
+                    [ Some "app.visible"; Some "optimize"; Some "status"; Some "OK" ] ]
+                ) -> ()
+              | other -> failtestf "unexpected OPTIMIZE result: %A" other
+
+              match handle session "REPAIR TABLE visible" |> snd with
+              | ResultSet(
+                  [ "Table"; "Op"; "Msg_type"; "Msg_text" ],
+                  [ [ Some "app.visible"; Some "repair"; Some "note"; Some "The storage engine for the table doesn't support repair" ] ]
+                ) -> ()
+              | other -> failtestf "unexpected REPAIR result: %A" other
+
               for sql in [ "FLUSH TABLES"; "FLUSH STATUS" ] do
                   match handle session sql |> snd with
                   | Affected 0UL -> ()

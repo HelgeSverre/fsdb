@@ -67,7 +67,7 @@ variants), USE, KILL, DESCRIBE are text-probed before the grammar
 | `CREATE/ALTER/DROP EVENT` (+ scheduler thread) | low | refusal |
 | `PREPARE`/`EXECUTE`/`DEALLOCATE PREPARE` as SQL text (wire-level COM_STMT_PREPARE works) | low | refusal |
 | `LOAD DATA [LOCAL] INFILE`; `SELECT … INTO OUTFILE/DUMPFILE/@vars`; `IMPORT TABLE` | medium | refusal |
-| `OPTIMIZE/CHECKSUM/REPAIR TABLE`; `FLUSH LOGS` and specialized FLUSH forms | low | refusal |
+| `CHECKSUM TABLE`; `FLUSH LOGS` and specialized FLUSH forms | low | refusal |
 | `LOCK TABLES…READ/WRITE`, `UNLOCK TABLES`, `HANDLER`, XA transactions | low | refusal |
 | Partitioning: `PARTITION BY`, `PARTITION (p)` selection, `ADD/DROP/COALESCE/REORGANIZE PARTITION` | medium | refusal |
 | Roles: `CREATE/DROP ROLE`, `SET ROLE`, `SET DEFAULT ROLE`, `GRANT role TO user`, dynamic privileges (`BACKUP_ADMIN`…), `GRANT PROXY` | medium | refusal |
@@ -371,7 +371,7 @@ live Limits reporting.
 | Gap | MySQL 8.4 | fsdb | Impact | Class |
 |---|---|---|---|---|
 | INFORMATION_SCHEMA breadth | ~60+ views incl. INNODB_*, COLUMN_STATISTICS, RESOURCE_GROUPS, ENABLED_ROLES | 23 views; EVENTS/ROUTINES/PARAMETERS/COLUMN_PRIVILEGES genuinely empty | low | divergence |
-| Table statistics | estimates refreshed by ANALYZE TABLE | ENGINE always InnoDB, DATA_LENGTH stand-in 16384, CARDINALITY 0, live row counts where MySQL keeps stale page estimates until ANALYZE (`InformationSchema.fs:267–288`); no ANALYZE statement exists | low | divergence |
+| Table statistics | estimates refreshed by ANALYZE TABLE | ENGINE always InnoDB, DATA_LENGTH stand-in 16384, CARDINALITY 0, live row counts where MySQL keeps stale page estimates until ANALYZE (`InformationSchema.fs:267–288`) | low | divergence |
 | COLUMN_COMMENT | user text | always "" (`InformationSchema.fs:323–326`) | low | divergence |
 | SHOW STATUS counters | Com_*, Innodb_*, Slow_queries, … | five variables only: Questions, Ssl_cipher, Ssl_version, Threads_connected, Uptime (`InformationSchema.fs`) | low | divergence |
 | wait_timeout | 28800 default | 300 (deliberate DoS posture, honestly advertised) | low | divergence |
