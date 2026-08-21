@@ -122,6 +122,12 @@ type ServerBenchmarks() =
         this.Query "SELECT id, name, age FROM users WHERE age = 30"
 
     [<Benchmark>]
+    [<BenchmarkCategory("Scale", "SecondaryRange")>]
+    member this.FilterBySecondaryRange() =
+        let lower = randomUserId () - 1
+        this.Query $"SELECT id, name FROM users WHERE sort_key >= {lower} AND sort_key < {lower + 1}"
+
+    [<Benchmark>]
     [<BenchmarkCategory("Scale")>]
     member this.InsertSingle() =
         let i = Interlocked.Increment(&insertCounter)

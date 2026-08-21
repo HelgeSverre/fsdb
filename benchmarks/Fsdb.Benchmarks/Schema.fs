@@ -74,7 +74,9 @@ let createSchema (conn: MySqlConnection) =
             age INT NOT NULL,
             meta JSON NOT NULL,
             created_at DATETIME NOT NULL,
-            KEY ix_users_age (age)
+            sort_key INT NOT NULL DEFAULT 0,
+            KEY ix_users_age (age),
+            KEY ix_users_sort_key (sort_key)
         )
         """
 
@@ -141,9 +143,9 @@ let seed (conn: MySqlConnection) =
             [ for i in batchStart..batchEnd ->
                 let age = 18 + rng.Next(60)
                 let plan = plans.[rng.Next(plans.Length)]
-                $"('user_{i}','user_{i}@bench.test',{age},'{{\"plan\":\"{plan}\"}}','{randomDate ()}')" ]
+                $"('user_{i}','user_{i}@bench.test',{age},'{{\"plan\":\"{plan}\"}}','{randomDate ()}',{i})" ]
 
-        runBatch "users (name, email, age, meta, created_at)" (String.Join(",", rows))
+        runBatch "users (name, email, age, meta, created_at, sort_key)" (String.Join(",", rows))
 
     for batchStart in 0 .. batchSize .. orderCount - 1 do
         let batchEnd = min (batchStart + batchSize - 1) (orderCount - 1)

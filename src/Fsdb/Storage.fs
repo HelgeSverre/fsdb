@@ -178,8 +178,9 @@ type Table =
       /// matching MySQL uniqueness semantics.
       UniqueIndex: Map<string, Map<string, RowId>>
       /// One-column non-unique B-tree keys map equality keys to stable row
-      /// identities. `Set` order follows row-store scan order.
+      /// identities. Buckets avoid per-row tree-position lookup for equality.
       SecondaryIndex: Map<string, Map<string, Set<RowId>>>
+      /// One-column non-unique B-tree entries support bounded ordered seeks.
       SecondaryOrder: SecondaryOrder }
 
     /// `RowsArray` as a plain list, in scan order — a fresh O(row count)
