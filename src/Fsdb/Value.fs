@@ -538,9 +538,12 @@ let private polygonIsValid rings =
     match rings with
     | shell :: holes ->
         let ringIsValid ring =
-            ringIsSimple ring
-            && ring
-               |> List.forall (fun (x, y) -> Double.IsFinite x && Double.IsFinite y)
+            match ring with
+            | first :: _ :: _ :: _ :: _ when List.last ring = first ->
+                ringIsSimple ring
+                && ring
+                   |> List.forall (fun (x, y) -> Double.IsFinite x && Double.IsFinite y)
+            | _ -> false
 
         let holeIsValid hole =
             ringIsValid hole
@@ -571,10 +574,19 @@ let rec private shapeIsValid = function
             | _ :: _ -> true
             | _ -> false)
     | GMultiPoint points ->
-        points
-        |> List.forall (fun (x, y) -> Double.IsFinite x && Double.IsFinite y)
+        not (List.isEmpty points)
+        && points |> List.forall (fun (x, y) -> Double.IsFinite x && Double.IsFinite y)
     | GPolygon rings -> polygonIsValid rings
-    | GMultiLineString lines -> lines |> List.forall (fun points -> points |> List.forall (fun (x, y) -> Double.IsFinite x && Double.IsFinite y))
+    | GMultiLineString lines ->
+        let lineIsValid = function
+            | _ :: _ :: _ -> true
+            | _ -> false
+
+        not (List.isEmpty lines)
+        && lines
+           |> List.forall (fun points ->
+               lineIsValid points
+               && points |> List.forall (fun (x, y) -> Double.IsFinite x && Double.IsFinite y))
     | GMultiPolygon polygons ->
         let polygonsAreSeparate =
             polygons
@@ -583,13 +595,14 @@ let rec private shapeIsValid = function
                 polygons
                 |> List.skip (firstIndex + 1)
                 |> List.forall (fun second ->
-                    let firstShell = first.Head
-                    let secondShell = second.Head
-                    not (ringsCrossOrOverlap firstShell secondShell)
-                    && not (pointStrictlyInRing firstShell.Head secondShell)
-                    && not (pointStrictlyInRing secondShell.Head firstShell)))
+                    match first, second with
+                    | firstShell :: _, secondShell :: _ ->
+                        not (ringsCrossOrOverlap firstShell secondShell)
+                        && not (pointStrictlyInRing firstShell.Head secondShell)
+                        && not (pointStrictlyInRing secondShell.Head firstShell)
+                    | _ -> false))
 
-        polygons |> List.forall polygonIsValid && polygonsAreSeparate
+        not (List.isEmpty polygons) && polygons |> List.forall polygonIsValid && polygonsAreSeparate
     | GGeometryCollection geometries -> geometries |> List.forall (fun geometry -> shapeIsValid geometry.Shape)
 
 let geometryIsValidPlanar (geometry: Geometry) = shapeIsValid geometry.Shape
