@@ -398,7 +398,7 @@ Recorded in `torture/findings/`, not yet fixed, not enrolled in
 | Multi-database scaling | super-serial slowdowns; store-wide connection ceiling; classified `multidb_scaling_gap` (`2026-08-17-multidb-concurrency-campaign.md`) | open, reporting-only |
 | INSERT…SELECT…ODKU alias refs | bare select-column references in the UPDATE clause error where MySQL reads select-derived values; only `VALUES(col)` works (`2026-08-19-insert-select-odku-gap.md`, `Ast.fs:630–633`) | deferred by design |
 | JSON_TABLE refusals | LEFT JOIN JSON_TABLE(…) ON TRUE → 1064; JOIN…USING → 1064; ERROR ON EMPTY/ERROR raise-form unparsed; correlated unknown qualifier yields 1054 vs MySQL 1109 (`2026-08-19-json-table-gaps.md`) | partially stale — see §17 |
-| Numeric error-shape ceilings | CAST(double AS UNSIGNED) clamps at unsigned ceiling where MySQL uses signed max; 1690 message lacks expression text (`2026-08-19-probe-corpus-triage.md`) | ponytail ceilings |
+| Numeric error shape | 1690 message lacks the offending expression text (`2026-08-19-probe-corpus-triage.md`) | ponytail ceiling |
 | Temporal/error-shape ceilings | `DATE 'bad'` → 1064 vs MySQL 1525; parenthesized set-op groups `(A UNION B) INTERSECT C` refused | ponytail ceilings |
 
 Uncovered torture lanes (harness scope, not product gaps): durability/restart

@@ -5527,6 +5527,7 @@ let tests =
                                       CAST(-1.9 AS UNSIGNED) AS rounded,
                                       CAST('abc' AS UNSIGNED) AS not_a_number,
                                       CAST(18446744073709551616 AS UNSIGNED) AS clamped,
+                                      CAST(1e30 AS UNSIGNED) AS double_clamped,
                                       18446744073709551615 AS literal"""
                     with
                     | ResultSet(_, [ row ]) ->
@@ -5539,6 +5540,7 @@ let tests =
                               Some "18446744073709551614"
                               Some "0"
                               Some "18446744073709551615"
+                              Some "9223372036854775807"
                               Some "18446744073709551615" ]
                             "the whole [0, 2^64) domain survives, including a literal past BIGINT's signed max"
                     | other -> failtestf "expected a single row, got %A" other

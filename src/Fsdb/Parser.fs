@@ -300,10 +300,9 @@ let private numberFormat =
 
 /// Plain integers become `VInt`, exponent notation becomes `VDouble`, and
 /// everything else with a decimal point stays exact as `VDecimal` — an
-/// integer or decimal literal outside its type's range falls back to
-/// `VDouble` (as MySQL's own DECIMAL/BIGINT overflow handling does) instead
-/// of throwing `int64`/`decimal`'s unguarded overflow exception, which would
-/// otherwise escape the parser and drop the client's connection.
+/// integers beyond BIGINT remain exact as `VDecimal` while possible; a
+/// literal beyond `decimal`'s range falls back to `VDouble` instead of
+/// throwing an unguarded overflow exception out of the parser.
 ///
 /// `0x..` hex literals become `VBytes` — MySQL treats them as binary strings
 /// by default (only numeric *context*, e.g. `0x41 + 1`, coerces to a number,
@@ -330,7 +329,10 @@ let private numberLit: Parser<Value, unit> =
             | false, _ ->
                 match UInt64.TryParse(nl.String, NumberStyles.Integer, CultureInfo.InvariantCulture) with
                 | true, u -> VUInt u
-                | false, _ -> VDouble(float nl.String)
+                | false, _ ->
+                    match Decimal.TryParse(nl.String, NumberStyles.Integer, CultureInfo.InvariantCulture) with
+                    | true, d -> VDecimal d
+                    | false, _ -> VDouble(float nl.String)
         elif nl.HasExponent then
             VDouble(float nl.String)
         else

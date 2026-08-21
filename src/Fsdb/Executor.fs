@@ -2113,7 +2113,9 @@ let rec private evalExpr (ctx: EvalContext) (expr: Expr) : Result<Value, EvalErr
     // clamps/rejects), so this can't route through `Storage.coerceValue` the
     // way the other cast targets do. Fractions round half-away-from-zero
     // before wrapping (`CAST(-1.9 AS UNSIGNED)` is 18446744073709551614),
-    // and anything past the top of the range clamps to it.
+    // Integer/DECIMAL inputs past the top clamp to it. An exponent-notation
+    // DOUBLE past signed BIGINT instead clamps at 2^63-1, matching MySQL's
+    // conversion through the approximate-number domain.
     | Cast(e, TBigInt true) ->
         eval e
         |> Result.map (fun v -> enumOrdinalFor ctx e v |> Option.defaultValue v)
@@ -2133,6 +2135,15 @@ let rec private evalExpr (ctx: EvalContext) (expr: Expr) : Result<Value, EvalErr
             | VUInt _ -> v
             | VInt i -> VUInt(uint64 i)
             | VDecimal d -> wrap d
+            | VDouble d ->
+                if System.Double.IsNaN d then
+                    VUInt 0UL
+                elif d >= float System.Int64.MaxValue then
+                    VUInt(uint64 System.Int64.MaxValue)
+                elif d < float System.Int64.MinValue then
+                    raise Value.UnsignedOutOfRange
+                else
+                    wrap (decimal d)
             | VString s ->
                 // MySQL reads the leading numeric prefix and treats the rest
                 // as garbage (`CAST('12abc' AS UNSIGNED)` is 12).
@@ -2142,18 +2153,7 @@ let rec private evalExpr (ctx: EvalContext) (expr: Expr) : Result<Value, EvalErr
                     | true, d -> wrap d
                     | false, _ -> VUInt 0UL
                 | None -> VUInt 0UL
-            | other ->
-                // ponytail: a DOUBLE too large for `decimal` (and MySQL's own
-                // `CAST(1e30 AS UNSIGNED)`, which clamps at *signed* BIGINT
-                // max rather than unsigned) both land on the unsigned
-                // ceiling here. Split the double path out if that edge
-                // starts mattering.
-                let d = toDouble other
-
-                if System.Double.IsNaN d then VUInt 0UL
-                elif d >= 1.8446744073709552e19 then VUInt System.UInt64.MaxValue
-                elif d <= -9.3e18 then VUInt 0UL
-                else wrap (decimal d))
+            | other -> wrap (decimal (toDouble other)))
     // `CAST(x AS JSON)` yields a JSON-*typed* value, not text that happens to
     // look like JSON — which is what makes `CAST('1' AS JSON) < CAST('"a"' AS
     // JSON)` follow MySQL's JSON type precedence (`Value.compare`'s JSON

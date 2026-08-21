@@ -462,11 +462,11 @@ let tests =
 
           testList
               "literals and quoting"
-              [ testCase "an out-of-range integer literal falls back to VDouble instead of throwing"
+              [ testCase "an integer beyond BIGINT remains exact while it fits DECIMAL"
                 <| fun _ ->
                     match parseOk "SELECT 99999999999999999999" with
-                    | Select { Projections = [ Lit(VDouble _), None ] } -> ()
-                    | other -> failtestf "expected a VDouble fallback, got %A" other
+                    | Select { Projections = [ Lit(VDecimal 99999999999999999999M), None ] } -> ()
+                    | other -> failtestf "expected an exact VDecimal, got %A" other
 
                 testCase "an out-of-range decimal literal falls back to VDouble instead of throwing"
                 <| fun _ ->

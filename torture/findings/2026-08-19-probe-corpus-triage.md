@@ -165,9 +165,8 @@ rather than deferred.
 - Unary minus folds into a numeric *literal* (MySQL's own lexing), so
   `-9223372036854775808` is BIGINT's signed minimum rather than `0 -` an
   unsigned literal, which the 1690 rule above would now refuse.
-- `CAST(<double too large> AS UNSIGNED)` still clamps at the *unsigned*
-  ceiling where MySQL clamps at signed `BIGINT` max. Marked `ponytail` on
-  the cast.
+- `CAST(<double too large> AS UNSIGNED)` clamps at signed `BIGINT` max like
+  MySQL; a negative value below signed `BIGINT` raises 1690.
 
 ### 2-3. JSON comparison — fixed
 
