@@ -940,27 +940,15 @@ let private setTransactionAccess =
 
 let private setCharacterSet = Regex(@"^SET\s+CHARACTER\s+SET\s+'?(\w+)'?$", RegexOptions.IgnoreCase)
 
-let private replayTransactionSnapshot (session: Session) (tx: Transaction) : Catalog * Store =
-    let dbName = session.Database |> Option.defaultValue defaultDatabase
-    let registry = registryFor session
-    let foundRows = session.Capabilities &&& Fsdb.Protocol.ClientFoundRows <> 0u
-    let variables = expressionVariables session
+let private rebaseTransactionSnapshot (session: Session) (tx: Transaction) : Catalog * Store =
     let baseCatalog = session.Store.Catalog
     let snapshot = Storage.beginTransactionSnapshot session.Store
 
-    setStrictMode snapshot (lookupVar session "sql_mode" |> Option.flatten |> Option.map isStrictSqlMode |> Option.defaultValue true)
-    snapshot.SessionUser <- session.User
+    Storage.mergeCatalogInto snapshot tx.BaseCatalog tx.Snapshot.Catalog
 
-    let mutable ids = tx.ReplayStartIds
-
-    for statement in tx.Statements do
-        let nextIds, result =
-            Executor.withVariableContext variables (fun () ->
-                Executor.execute snapshot registry dbName ids foundRows statement)
-
-        match result with
-        | Err _ -> raise (Storage.LockWaitTimeout dbName)
-        | _ -> ids <- nextIds
+    match tx.Snapshot.PendingEvents, snapshot.PendingEvents with
+    | Some source, Some target -> target.AddRange source
+    | _ -> ()
 
     baseCatalog, snapshot
 
@@ -986,13 +974,8 @@ let private commitSession (session: Session) : Session =
                 raise (Storage.LockWaitTimeout dbName)
 
             try
-                try
-                    Storage.mergeCatalogInto session.Store tx.BaseCatalog tx.Snapshot.Catalog
-                    tx.Snapshot
-                with Storage.LockWaitTimeout _ ->
-                    let baseCatalog, snapshot = replayTransactionSnapshot session tx
-                    Storage.mergeCatalogInto session.Store baseCatalog snapshot.Catalog
-                    snapshot
+                Storage.mergeCatalogInto session.Store tx.BaseCatalog tx.Snapshot.Catalog
+                tx.Snapshot
             finally
                 Threading.Monitor.Exit session.Store.Lock
 
@@ -1047,22 +1030,17 @@ let private beginTransaction (readOnly: bool) (session: Session) : Session =
             Some
                 { Snapshot = snapshot
                   BaseCatalog = baseCatalog
-                  ReadView = None
-                  Statements = []
-                  ReplayStartIds = session.LastInsertId, session.LastGeneratedId
                   Isolation = isolation
                   ReadOnly = readOnly
                   Seeded = false
                   Savepoints = Map.empty
                   NextSavepointSeq = 0 } }
 
-/// Establishes the repeatable-read snapshot at the first database statement.
-/// Writes remain private until commit, where row-level three-way merging
-/// combines disjoint changes and rejects overlapping ones.
+/// Seeds repeatable-read snapshots and refreshes read-committed views.
 let startTransactionStatement (session: Session) : Session =
     match session.Tx with
     | Some tx when tx.Isolation = ReadCommitted ->
-        let baseCatalog, snapshot = replayTransactionSnapshot session tx
+        let baseCatalog, snapshot = rebaseTransactionSnapshot session tx
 
         { session with
             Tx =
@@ -1070,7 +1048,6 @@ let startTransactionStatement (session: Session) : Session =
                     { tx with
                         Snapshot = snapshot
                         BaseCatalog = baseCatalog
-                        ReadView = Some baseCatalog
                         Seeded = true } }
     | Some tx when not tx.Seeded ->
         let baseCatalog = session.Store.Catalog
@@ -1078,7 +1055,7 @@ let startTransactionStatement (session: Session) : Session =
 
         let savepoints =
             tx.Savepoints
-            |> Map.map (fun _ (seq, _, eventCount, statementCount) -> seq, baseCatalog, eventCount, statementCount)
+            |> Map.map (fun _ (seq, _, _, eventCount) -> seq, baseCatalog, baseCatalog, eventCount)
 
         { session with
             Tx =
@@ -1086,9 +1063,6 @@ let startTransactionStatement (session: Session) : Session =
                     { tx with
                         Snapshot = snapshot
                         BaseCatalog = baseCatalog
-                        ReadView = Some baseCatalog
-                        Statements = []
-                        ReplayStartIds = session.LastInsertId, session.LastGeneratedId
                         Seeded = true
                         Savepoints = savepoints } }
     | Some _ -> session
@@ -1121,14 +1095,14 @@ let private savepoint (name: string) (session: Session) : Session * QueryResult 
             Tx =
                 Some
                     { tx with
-                        Savepoints = Map.add name (seq, tx.Snapshot.Catalog, eventCount, tx.Statements.Length) tx.Savepoints
+                        Savepoints = Map.add name (seq, tx.BaseCatalog, tx.Snapshot.Catalog, eventCount) tx.Savepoints
                         NextSavepointSeq = seq + 1 } },
         Affected 0UL
     | None -> session, Affected 0UL // unreachable: beginTransaction always sets Tx
 
 let private rollbackToSavepoint (name: string) (session: Session) : Session * QueryResult =
     match session.Tx |> Option.bind (fun tx -> Map.tryFind name tx.Savepoints |> Option.map (fun seed -> tx, seed)) with
-    | Some(tx, (seq, catalog, eventCount, statementCount)) ->
+    | Some(tx, (seq, baseCatalog, catalog, eventCount)) ->
         // Real MySQL never rolls back a burned AUTO_INCREMENT id — not even
         // a savepoint rollback (`bumpAutoIncrementsInto`'s doc covers the
         // full-ROLLBACK case, which is a separate code path from this one).
@@ -1152,8 +1126,8 @@ let private rollbackToSavepoint (name: string) (session: Session) : Session * Qu
             Tx =
                 Some
                     { tx with
-                        Savepoints = survivors
-                        Statements = tx.Statements |> List.truncate statementCount } },
+                        BaseCatalog = baseCatalog
+                        Savepoints = survivors } },
         Affected 0UL
     | None -> session, savepointNotFound name
 
@@ -1290,12 +1264,6 @@ let private executeParsed (session: Session) (stmt: Statement) : Session * Query
                 LastResultColumnMetadata = columnMetadata
                 PendingFoundRows = calculatedFoundRows
                 UserVariables = variables.UserVariables.Value }
-
-        let session =
-            match session.Tx, result, stmt with
-            | Some tx, Affected _, (Select _ | Union _ | Explain _) -> session
-            | Some tx, Affected _, _ -> { session with Tx = Some { tx with Statements = tx.Statements @ [ stmt ] } }
-            | _ -> session
 
         session, result
 

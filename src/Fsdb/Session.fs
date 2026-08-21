@@ -130,45 +130,25 @@ type TransactionIsolation =
     | RepeatableRead
     | Serializable
 
-/// One open transaction. `Snapshot` is a private `Store` — its own
-/// `Catalog`, its own lock — seeded from the shared store's catalog when the
-/// transaction executes its first real database statement; every statement
-/// inside the transaction reads/writes this
-/// snapshot instead of the shared store, so concurrent connections see
-/// nothing from it until COMMIT merges `Snapshot.Catalog` back into the
-/// shared store's (see `QueryHandler.commitSession`). That's real
-/// repeatable-read isolation for the reading side. `BaseCatalog` is that
-/// same seed, kept alongside `Snapshot` untouched by any write this
-/// transaction makes — COMMIT diffs `Snapshot.Catalog` against it,
-/// table-by-table, to tell "this transaction wrote table X" apart from
-/// "table X just happened to be in the snapshot", so a concurrent write to
-/// an *untouched* table survives the commit instead of being silently
-/// overwritten by a stale copy. COMMIT compares each changed base row with
-/// the live row, combining disjoint writes and rejecting overlaps.
+/// One open transaction. `Snapshot` is private until COMMIT. `BaseCatalog`
+/// distinguishes its concrete changes from committed rows: repeatable read
+/// retains one base, while read committed replaces both at each statement.
 type Transaction =
     { Snapshot: Store
       BaseCatalog: Catalog
-      ReadView: Catalog option
-      /// Successful writes in execution order. A commit that loses an
-      /// optimistic row-version race replays them against the new live
-      /// snapshot before validating again.
-      Statements: Statement list
-      ReplayStartIds: int64 * int64
       Isolation: TransactionIsolation
       ReadOnly: bool
-      /// Set by the first database statement, which is the one that seeds
-      /// `Snapshot`/`BaseCatalog`; later reads retain that same snapshot.
+      /// Set after the first database statement seeds a repeatable-read view.
       Seeded: bool
-      /// Each savepoint's establishment order (see `NextSavepointSeq`), its
-      /// catalog, and how many events `Snapshot.PendingEvents` had buffered
-      /// at that point — `ROLLBACK TO SAVEPOINT` truncates the buffer back
-      /// to that length too, so a physical WAL never sees events for writes
+      /// Each savepoint's establishment order (see `NextSavepointSeq`), base
+      /// catalog, private catalog, and pending-event count.
+      /// `ROLLBACK TO SAVEPOINT` truncates the buffer so WAL never sees writes
       /// the savepoint rollback just undid. The order lets `ROLLBACK TO
       /// SAVEPOINT`/`RELEASE SAVEPOINT` drop every savepoint established
       /// *after* the named one, matching real MySQL — a plain `Map` alone
       /// has no notion of "after", since re-`SAVEPOINT`-ing an existing name
       /// moves it, not creates a second entry.
-      Savepoints: Map<string, int * Catalog * int * int>
+      Savepoints: Map<string, int * Catalog * Catalog * int>
       /// Monotonically increasing counter, one `SAVEPOINT` = one tick —
       /// never reused even if the savepoint it tagged is later dropped, so
       /// two savepoints established back-to-back with no write between them

@@ -76,6 +76,122 @@ let tests =
               | ResultSet(_, [ [ Some "1" ]; [ Some "2" ]; [ Some "3" ] ]) -> ()
               | result -> failtestf "expected every committed row, got %A" result
 
+          testCase "READ COMMITTED keeps generated values and trigger effects stable across refreshes"
+          <| fun _ ->
+              let store = Fsdb.Storage.create ()
+              let writer = create 1 store
+              let writer, _ = handle writer "CREATE TABLE tx_rc_generated (id INT AUTO_INCREMENT PRIMARY KEY, token VARCHAR(36))"
+              let writer, _ = handle writer "CREATE TABLE tx_rc_generated_log (id INT AUTO_INCREMENT PRIMARY KEY, token VARCHAR(36))"
+              let writer, _ = handle writer "CREATE TABLE tx_rc_refresh (id INT PRIMARY KEY)"
+
+              let writer, _ =
+                  handle
+                      writer
+                      "CREATE TRIGGER tx_rc_generated_trigger AFTER INSERT ON tx_rc_generated FOR EACH ROW INSERT INTO tx_rc_generated_log(token) VALUES (NEW.token)"
+
+              let writer, _ = handle writer "SET SESSION TRANSACTION ISOLATION LEVEL READ COMMITTED"
+              let writer, _ = handle writer "BEGIN"
+              let writer, inserted = handle writer "INSERT INTO tx_rc_generated(token) VALUES (UUID())"
+              Expect.equal inserted (Affected 1UL) "the generated row is inserted"
+
+              let writer, sourceRows =
+                  match handle writer "SELECT id, token FROM tx_rc_generated" with
+                  | session, ResultSet(_, rows) -> session, rows
+                  | _, result -> failtestf "expected the generated source row, got %A" result
+
+              let writer, logRows =
+                  match handle writer "SELECT id, token FROM tx_rc_generated_log" with
+                  | session, ResultSet(_, rows) -> session, rows
+                  | _, result -> failtestf "expected the trigger row, got %A" result
+
+              let other = create 2 store
+              let other, refreshed = handle other "INSERT INTO tx_rc_refresh VALUES (1)"
+              Expect.equal refreshed (Affected 1UL) "the concurrent row commits"
+
+              let writer, refreshedSourceRows =
+                  match handle writer "SELECT id, token FROM tx_rc_generated" with
+                  | session, ResultSet(_, rows) -> session, rows
+                  | _, result -> failtestf "expected the generated source row after refresh, got %A" result
+
+              let writer, refreshedLogRows =
+                  match handle writer "SELECT id, token FROM tx_rc_generated_log" with
+                  | session, ResultSet(_, rows) -> session, rows
+                  | _, result -> failtestf "expected the trigger row after refresh, got %A" result
+
+              Expect.equal refreshedSourceRows sourceRows "the generated row remains byte-for-byte stable"
+              Expect.equal refreshedLogRows logRows "the trigger effect remains byte-for-byte stable"
+
+              match handle writer "SELECT id, token FROM tx_rc_generated" |> snd with
+              | ResultSet(_, rows) -> Expect.equal rows sourceRows "a second refresh keeps the generated row stable"
+              | result -> failtestf "expected the generated source row after the second refresh, got %A" result
+
+              let writer, committed = handle writer "COMMIT"
+              Expect.equal committed (Affected 0UL) "the transaction commits"
+
+              match handle other "SELECT id, token FROM tx_rc_generated" |> snd with
+              | ResultSet(_, rows) -> Expect.equal rows sourceRows "the committed generated row remains stable"
+              | result -> failtestf "expected the committed generated source row, got %A" result
+
+              match handle other "SELECT id, token FROM tx_rc_generated_log" |> snd with
+              | ResultSet(_, rows) -> Expect.equal rows logRows "the committed trigger effect remains stable"
+              | result -> failtestf "expected the committed trigger row, got %A" result
+
+          testCase "READ COMMITTED preserves an auto-increment identity across a refresh"
+          <| fun _ ->
+              let store = Fsdb.Storage.create ()
+              let writer = create 1 store
+              let writer, _ = handle writer "CREATE TABLE tx_rc_auto (id INT AUTO_INCREMENT PRIMARY KEY, note VARCHAR(20))"
+              let writer, _ = handle writer "SET SESSION TRANSACTION ISOLATION LEVEL READ COMMITTED"
+              let writer, _ = handle writer "BEGIN"
+              let writer, inserted = handle writer "INSERT INTO tx_rc_auto(note) VALUES ('private')"
+              Expect.equal inserted (Affected 1UL) "the private row is inserted"
+
+              let other = create 2 store
+              let other, external = handle other "INSERT INTO tx_rc_auto(id, note) VALUES (100, 'external')"
+              Expect.equal external (Affected 1UL) "the explicit concurrent row commits"
+
+              match handle writer "SELECT id, note FROM tx_rc_auto ORDER BY id" |> snd with
+              | ResultSet(_, [ [ Some "1"; Some "private" ]; [ Some "100"; Some "external" ] ]) -> ()
+              | result -> failtestf "expected the original private identity and external row, got %A" result
+
+              let writer, committed = handle writer "COMMIT"
+              Expect.equal committed (Affected 0UL) "the transaction commits"
+
+              match handle other "SELECT id, note FROM tx_rc_auto ORDER BY id" |> snd with
+              | ResultSet(_, [ [ Some "1"; Some "private" ]; [ Some "100"; Some "external" ] ]) -> ()
+              | result -> failtestf "expected the original private identity after commit, got %A" result
+
+          testCase "READ COMMITTED savepoint rollback retains concurrent committed rows"
+          <| fun _ ->
+              let store = Fsdb.Storage.create ()
+              let writer = create 1 store
+              let writer, _ = handle writer "CREATE TABLE tx_rc_savepoint (id INT PRIMARY KEY)"
+              let writer, _ = handle writer "SET SESSION TRANSACTION ISOLATION LEVEL READ COMMITTED"
+              let writer, _ = handle writer "BEGIN"
+              let writer, _ = handle writer "SELECT id FROM tx_rc_savepoint"
+              let writer, saved = handle writer "SAVEPOINT before_write"
+              Expect.equal saved (Affected 0UL) "the savepoint is created"
+              let writer, inserted = handle writer "INSERT INTO tx_rc_savepoint VALUES (1)"
+              Expect.equal inserted (Affected 1UL) "the private row is inserted"
+
+              let other = create 2 store
+              let other, external = handle other "INSERT INTO tx_rc_savepoint VALUES (2)"
+              Expect.equal external (Affected 1UL) "the concurrent row commits"
+
+              let writer, rolledBack = handle writer "ROLLBACK TO SAVEPOINT before_write"
+              Expect.equal rolledBack (Affected 0UL) "the private write is rolled back"
+
+              match handle writer "SELECT id FROM tx_rc_savepoint ORDER BY id" |> snd with
+              | ResultSet(_, [ [ Some "2" ] ]) -> ()
+              | result -> failtestf "expected only the concurrent committed row, got %A" result
+
+              let writer, committed = handle writer "COMMIT"
+              Expect.equal committed (Affected 0UL) "the transaction commits"
+
+              match handle other "SELECT id FROM tx_rc_savepoint ORDER BY id" |> snd with
+              | ResultSet(_, [ [ Some "2" ] ]) -> ()
+              | result -> failtestf "expected the concurrent row after commit, got %A" result
+
           testCase "ROLLBACK discards writes made inside the transaction"
           <| fun _ ->
               let session = create 1 (Fsdb.Storage.create ())
@@ -319,7 +435,7 @@ let tests =
               let session, _ = handle session "COMMIT"
               ignore session
 
-          testCase "concurrent transactions rebase updates to the same row"
+          testCase "conflicting concurrent transactions return a lock wait timeout"
           <| fun _ ->
               let store = Fsdb.Storage.create ()
               let first = create 1 store
@@ -342,11 +458,13 @@ let tests =
               let _, firstCommit = handle first "COMMIT"
               Expect.equal firstCommit (Affected 0UL) "the first writer commits"
 
-              Expect.equal (handle second "COMMIT" |> snd) (Affected 0UL) "the overlapping writer rebases and commits"
+              match handle second "COMMIT" |> snd with
+              | Err(1205, _) -> ()
+              | result -> failtestf "expected the overlapping writer to conflict, got %A" result
 
               match handle (create 3 store) "SELECT n FROM tx_hot WHERE id = 1" |> snd with
-              | ResultSet(_, [ [ Some "2" ] ]) -> ()
-              | result -> failtestf "expected both increments to survive, got %A" result
+              | ResultSet(_, [ [ Some "1" ] ]) -> ()
+              | result -> failtestf "expected only the committed increment, got %A" result
 
           testCase "concurrent transactions merge updates to different rows in the same table"
           <| fun _ ->
@@ -551,7 +669,7 @@ let tests =
               handle reader "ROLLBACK" |> ignore
               ignore setup
 
-          testCase "a read-only transaction rebases a later write over a concurrent commit"
+          testCase "a stale transaction write conflicts with a concurrent commit"
           <| fun _ ->
               let store = Fsdb.Storage.create ()
               let setup = create 1 store
@@ -567,10 +685,12 @@ let tests =
               let a, updateResult = handle a "UPDATE up_t SET v = 7 WHERE id = 1"
               Expect.equal updateResult (Affected 1UL) "the snapshot update succeeds locally"
 
-              Expect.equal (handle a "COMMIT" |> snd) (Affected 0UL) "the stale writer replays on the live row"
+              match handle a "COMMIT" |> snd with
+              | Err(1205, _) -> ()
+              | result -> failtestf "expected the stale writer to conflict, got %A" result
 
               match handle (create 4 store) "SELECT v FROM up_t" |> snd with
-              | ResultSet(_, [ [ Some "7" ] ]) -> ()
-              | result -> failtestf "expected the later assignment to commit, got %A" result
+              | ResultSet(_, [ [ Some "1234" ] ]) -> ()
+              | result -> failtestf "expected the concurrent assignment to remain, got %A" result
 
               ignore setup ]
