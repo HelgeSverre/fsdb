@@ -32,7 +32,7 @@ accepted (marked `ponytail:` in source), or recorded only in
 |---|---|---|
 | SQL statements | Broad core; large admin/programmatic tail missing | Stored procedures/functions, events |
 | Query execution | Correct single-table equality access | No index-based join access; subqueries re-run per outer row |
-| Built-in functions | Broad scalar, aggregate, JSON, and time coverage | AES crypto, JSON Schema, geometry |
+| Built-in functions | Broad scalar, aggregate, JSON, and time coverage | AES crypto, geometry, JSON Schema regex patterns |
 | Data types | All common types | No TIME value domain, BIT, or geometry |
 | Constraints & indexes | PK/UNIQUE/FK/CHECK plus one-column equality indexes | No range/order/index-join access |
 | Charsets & collations | ICU-based utf8mb4 registry | Weight-table tailoring differs from MySQL's UCA tables |
@@ -85,7 +85,7 @@ variants), USE, KILL, DESCRIBE are text-probed before the grammar
 | CTE placement | `WITH` in subqueries, derived tables, `INSERT…WITH` | top-level SELECT/UNION only (`Parser.fs:2458–2464`) | medium | refusal |
 | Quantified comparison | `= ANY/SOME/ALL (subquery)` | absent | medium | refusal |
 | Row constructors | `(a,b) = (1,2)`, `(a,b) IN ((1,2),(3,4))` | unparseable | medium | refusal |
-| User/system variables in expressions | `@x`, `@@x` anywhere an expression fits; `@x := …` | only bare `SELECT @x, @@y AS a` lists via post-parse regex fallback (`QueryHandler.fs:1188–1193`); inside larger queries → 1064 | medium | refusal |
+| Quoted user-variable names | backtick-, single-quote-, and double-quote-delimited names | ordinary unquoted identifier names only; typed variables and `@x := expr` otherwise work throughout expressions | low | refusal |
 
 Expression coverage that does exist: full comparison/logical/arithmetic
 operators incl. `<=>`, `XOR`, three-valued logic; CASE (both forms);
@@ -439,10 +439,8 @@ implementation effort:
    report-style queries.
 4. LOAD DATA LOCAL INFILE and multi-statement packets — bulk-loading and
    migration-tool paths.
-6. User variables in expressions — session-state patterns beyond the
-   supported bare projection form.
-7. SERIALIZABLE/READ COMMITTED semantics and intra-database write
+5. SERIALIZABLE/READ COMMITTED semantics and intra-database write
    parallelism — transactional throughput shape.
-8. Zero-date handling — a strict-mode correctness edge.
-9. Everything in the admin/replication/metadata tail — matters only once a
-    specific tool needs it (mysqladmin, monitoring agents, replica setups).
+6. Zero-date handling — a strict-mode correctness edge.
+7. Everything in the admin/replication/metadata tail — matters only once a
+   specific tool needs it (mysqladmin, monitoring agents, replica setups).
