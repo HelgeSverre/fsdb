@@ -252,6 +252,14 @@ let tests =
                     let zero = VZeroDate(tryZeroDate 2020 0 1 |> Option.get)
                     Expect.isLessThan (compare zero (VDate(DateOnly(2020, 1, 1)))) 0 "zero month precedes January"
 
+                testCase "zero dates compare with zero datetimes as their midnight values"
+                <| fun _ ->
+                    let date = tryZeroDate 2020 1 0 |> Option.get
+                    let midnight = tryZeroDateTime date 0 0 0 0 |> Option.get
+                    let noon = tryZeroDateTime date 12 0 0 0 |> Option.get
+                    Expect.equal (compare (VZeroDate date) (VZeroDateTime midnight)) 0 "midnight matches the date"
+                    Expect.isLessThan (compare (VZeroDate date) (VZeroDateTime noon)) 0 "date precedes noon"
+
                 testCase "zero components do not permit impossible calendar days"
                 <| fun _ ->
                     Expect.isNone (tryZeroDate 0 2 31) "zero year still has February's calendar limit"

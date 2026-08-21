@@ -965,6 +965,8 @@ let rec compare (a: Value) (b: Value) : int =
     | VDateTime x, VDate y -> Operators.compare x (y.ToDateTime(TimeOnly.MinValue))
     | VZeroDate x, VDate y -> compareZeroDateToDateTime x (y.ToDateTime TimeOnly.MinValue)
     | VDate y, VZeroDate x -> -(compareZeroDateToDateTime x (y.ToDateTime TimeOnly.MinValue))
+    | VZeroDate x, VZeroDateTime y -> compareZeroDateToZeroDateTime x y
+    | VZeroDateTime y, VZeroDate x -> -(compareZeroDateToZeroDateTime x y)
     | VZeroDate x, VDateTime y -> compareZeroDateToDateTime x y
     | VDateTime y, VZeroDate x -> -(compareZeroDateToDateTime x y)
     | VZeroDateTime x, VDate y -> compareZeroDateTimeToDateTime x (y.ToDateTime TimeOnly.MinValue)

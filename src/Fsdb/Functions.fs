@@ -2734,12 +2734,12 @@ let private extractFn: Scalar =
     | _ -> VNull
 
 let private lastDayZeroDate date =
-        let year, month, _ = zeroDateParts date
+    let year, month, _ = zeroDateParts date
 
-        if year = 0 || month = 0 then
-            VNull
-        else
-            VDate(DateOnly(year, month, DateTime.DaysInMonth(year, month)))
+    if year = 0 || month = 0 then
+        VNull
+    else
+        VDate(DateOnly(year, month, DateTime.DaysInMonth(year, month)))
 
 let private lastDayFn: Scalar =
     function

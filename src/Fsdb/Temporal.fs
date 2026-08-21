@@ -72,6 +72,10 @@ let compareZeroDateTimes left right =
     let rd, rh, rmi, rs, ru = zeroDateTimeParts right
     compare (zeroDateParts ld, lh, lmi, ls, lu) (zeroDateParts rd, rh, rmi, rs, ru)
 
+let compareZeroDateToZeroDateTime left right =
+    let rightDate, hour, minute, second, microseconds = zeroDateTimeParts right
+    compare (zeroDateParts left, 0, 0, 0, 0) (zeroDateParts rightDate, hour, minute, second, microseconds)
+
 let compareZeroDateToDateTime left (right: DateTime) =
     let year, month, day = zeroDateParts left
     compare (year, month, day, 0, 0, 0, 0) (right.Year, right.Month, right.Day, right.Hour, right.Minute, right.Second, int ((right.Ticks % TimeSpan.TicksPerSecond) / 10L))
