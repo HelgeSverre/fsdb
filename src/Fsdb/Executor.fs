@@ -6995,12 +6995,24 @@ let private tryUpdatableView (store: Store) (dbName: string) (viewName: string) 
         | Ok(Select select) -> simpleSelect view select
         | _ -> None
 
-let private rewriteViewExpression (columns: Map<string, string>) (qualifiers: string list) (expression: Expr) =
+let private rewriteViewExpression (columns: Map<string, string>) (expression: Expr) =
     rewriteExprWith (function
-        | Col name -> Map.tryFind (name.ToLowerInvariant()) columns |> Option.map Col
-        | QualifiedCol(qualifier, name) when qualifiers |> List.exists (fun candidate -> candidate.Equals(qualifier, System.StringComparison.OrdinalIgnoreCase)) ->
-            Map.tryFind (name.ToLowerInvariant()) columns |> Option.map Col
+        | Col name ->
+            match Map.tryFind (name.ToLowerInvariant()) columns with
+            | Some column -> Some(Col column)
+            | None -> Some(QualifiedCol("__fsdb_view", name))
+        | QualifiedCol(_, name) ->
+            match Map.tryFind (name.ToLowerInvariant()) columns with
+            | Some column -> Some(Col column)
+            | None -> Some(QualifiedCol("__fsdb_view", name))
         | _ -> None) expression
+
+let private resolveViewColumns (view: UpdatableView) (columns: string list) =
+    columns
+    |> traverse (fun column ->
+        match Map.tryFind (column.ToLowerInvariant()) view.Columns with
+        | Some baseColumn -> Ok baseColumn
+        | None -> Error(Err(1054, sprintf "Unknown column '%s' in field list" column)))
 
 // ---------------------------------------------------------------------------
 // EXPLAIN — a pure *description* of what this executor would actually do
@@ -8295,14 +8307,18 @@ let private triggerBodyExprs (stmt: Statement) : Expr list =
     | _ -> []
 
 let private triggerRowImageError (event: TriggerEvent) (columns: ColumnDef list) (statement: Statement) =
-    let rec findReference =
+    let rec references =
         function
         | QualifiedCol(qualifier, column) when qualifier.Equals("OLD", System.StringComparison.OrdinalIgnoreCase) || qualifier.Equals("NEW", System.StringComparison.OrdinalIgnoreCase) ->
-            Some(qualifier.ToUpperInvariant(), column)
-        | FuncCall(_, arguments) -> arguments |> List.tryPick findReference
+            [ qualifier.ToUpperInvariant(), column ]
+        | Exists select
+        | Subquery select -> selectReferences select
+        | InSubquery(value, select) -> references value @ selectReferences select
+        | WindowOver(functions, over) -> (windowFnExprs functions @ overExprs over) |> List.collect references
+        | FuncCall(_, arguments) -> arguments |> List.collect references
         | BinOp(_, left, right)
         | Like(left, right, _, _)
-        | Regexp(left, right) -> findReference left |> Option.orElseWith (fun () -> findReference right)
+        | Regexp(left, right) -> references left @ references right
         | Not expression
         | IsNull expression
         | IsNotNull expression
@@ -8312,19 +8328,60 @@ let private triggerRowImageError (event: TriggerEvent) (columns: ColumnDef list)
         | OrderBy(expression, _)
         | Cast(expression, _)
         | Collate(expression, _)
-        | AssignUserVariable(_, expression) -> findReference expression
-        | In(expression, candidates) -> findReference expression |> Option.orElseWith (fun () -> candidates |> List.tryPick findReference)
-        | Between(expression, lower, upper) -> findReference expression |> Option.orElseWith (fun () -> findReference lower |> Option.orElseWith (fun () -> findReference upper))
+        | AssignUserVariable(_, expression) -> references expression
+        | In(expression, candidates) -> references expression @ (candidates |> List.collect references)
+        | Between(expression, lower, upper) -> references expression @ references lower @ references upper
         | Case(subject, branches, otherwise) ->
-            subject
-            |> Option.bind findReference
-            |> Option.orElseWith (fun () -> branches |> List.tryPick (fun (condition, result) -> findReference condition |> Option.orElseWith (fun () -> findReference result)))
-            |> Option.orElseWith (fun () -> otherwise |> Option.bind findReference)
-        | MatchAgainst(_, query, _) -> findReference query
-        | _ -> None
+            (subject |> Option.map references |> Option.defaultValue [])
+            @ (branches |> List.collect (fun (condition, result) -> references condition @ references result))
+            @ (otherwise |> Option.map references |> Option.defaultValue [])
+        | MatchAgainst(_, query, _) -> references query
+        | _ -> []
 
-    triggerBodyExprs statement
-    |> List.tryPick findReference
+    and fromReferences =
+        function
+        | FromTable _ -> []
+        | FromSubquery(body, _)
+        | FromLateral(body, _) -> selectOrUnionReferences body
+        | FromJsonTable(source, _, _, _) -> references source
+
+    and selectReferences (select: SelectStmt) =
+        (select.Projections |> List.collect (fst >> references))
+        @ (select.From |> Option.map fromReferences |> Option.defaultValue [])
+        @ (select.Joins |> List.collect (fun join -> fromReferences join.Table @ references join.On))
+        @ (select.Where |> Option.map references |> Option.defaultValue [])
+        @ (select.GroupBy |> List.collect references)
+        @ (select.Windows |> List.collect (fun (_, spec) -> overExprs (OverSpec spec) |> List.collect references))
+        @ (select.Ctes |> List.collect (fun cte -> selectOrUnionReferences cte.Body))
+        @ (select.Having |> Option.map references |> Option.defaultValue [])
+        @ (select.OrderBy |> List.collect (fst >> references))
+        @ (select.Limit |> Option.map references |> Option.defaultValue [])
+        @ (select.Offset |> Option.map references |> Option.defaultValue [])
+
+    and selectOrUnionReferences =
+        function
+        | PlainSelect select -> selectReferences select
+        | UnionSelect(first, rest, orderBy, limit, offset) ->
+            selectReferences first
+            @ (rest |> List.collect (snd >> selectReferences))
+            @ (orderBy |> List.collect (fst >> references))
+            @ (limit |> Option.map references |> Option.defaultValue [])
+            @ (offset |> Option.map references |> Option.defaultValue [])
+
+    let statementReferences =
+        match statement with
+        | SetTriggerNew(_, expression) -> references expression
+        | Insert(_, _, rows, assignments, _) -> (rows |> List.collect (List.collect references)) @ (assignments |> List.collect (snd >> references))
+        | InsertSelect(_, _, select, assignments, _) -> selectReferences select @ (assignments |> List.collect (snd >> references))
+        | Replace(_, _, rows) -> rows |> List.collect (List.collect references)
+        | ReplaceSelect(_, _, select) -> selectReferences select
+        | ReplaceSet(_, assignments) -> assignments |> List.collect (snd >> references)
+        | Update update -> (update.Assignments |> List.collect (fun assignment -> references assignment.Value)) @ (update.Where |> Option.map references |> Option.defaultValue [])
+        | Delete delete -> delete.Where |> Option.map references |> Option.defaultValue []
+        | _ -> []
+
+    statementReferences
+    |> List.tryHead
     |> Option.bind (fun (image, column) ->
         match image, event with
         | "OLD", TriggerInsert -> Some(Err(1363, "There is no OLD row in INSERT trigger"))
@@ -9371,14 +9428,17 @@ let rec execute (store: Store) (registry: Registry) (dbName: string) (ids: int64
 
         match tryUpdatableView store viewDb viewName with
         | None -> ids, Err(1471, sprintf "The target table '%s' of the INSERT is not insertable-into" viewName)
+        | Some _ when not onDuplicateUpdate.IsEmpty -> ids, Err(1235, "INSERT through a view with ON DUPLICATE KEY UPDATE is not supported")
         | Some view ->
             let viewColumns = if columns.IsEmpty then view.OrderedColumns else columns
-            let baseColumns = viewColumns |> List.map (fun column -> Map.tryFind (column.ToLowerInvariant()) view.Columns |> Option.defaultValue column)
-            let rewritten = Insert(view.Database + "." + view.Table, baseColumns, rowsExprs, onDuplicateUpdate, ignoreDuplicates)
+            match resolveViewColumns view viewColumns with
+            | Error error -> ids, error
+            | Ok baseColumns ->
+                let rewritten = Insert(view.Database + "." + view.Table, baseColumns, rowsExprs, onDuplicateUpdate, ignoreDuplicates)
 
-            match Auth.check store (storedObjectUser view.Definer) (Auth.requiredPrivileges view.Database rewritten) with
-            | Error(code, message) -> ids, Err(code, message)
-            | Ok() -> execute store registry dbName ids foundRows rewritten
+                match Auth.check store (storedObjectUser view.Definer) (Auth.requiredPrivileges view.Database rewritten) with
+                | Error(code, message) -> ids, Err(code, message)
+                | Ok() -> execute store registry dbName ids foundRows rewritten
 
     | Insert(table, columns, rowsExprs, onDuplicateUpdate, ignoreDuplicates) ->
         // INSERT ... VALUES expressions aren't evaluated against any row
@@ -9413,14 +9473,17 @@ let rec execute (store: Store) (registry: Registry) (dbName: string) (ids: int64
 
         match tryUpdatableView store viewDb viewName with
         | None -> ids, Err(1471, sprintf "The target table '%s' of the INSERT is not insertable-into" viewName)
+        | Some _ when not onDuplicateUpdate.IsEmpty -> ids, Err(1235, "INSERT through a view with ON DUPLICATE KEY UPDATE is not supported")
         | Some view ->
             let viewColumns = if columns.IsEmpty then view.OrderedColumns else columns
-            let baseColumns = viewColumns |> List.map (fun column -> Map.tryFind (column.ToLowerInvariant()) view.Columns |> Option.defaultValue column)
-            let rewritten = InsertSelect(view.Database + "." + view.Table, baseColumns, select, onDuplicateUpdate, ignoreDuplicates)
+            match resolveViewColumns view viewColumns with
+            | Error error -> ids, error
+            | Ok baseColumns ->
+                let rewritten = InsertSelect(view.Database + "." + view.Table, baseColumns, select, onDuplicateUpdate, ignoreDuplicates)
 
-            match Auth.check store (storedObjectUser view.Definer) (Auth.requiredPrivileges view.Database rewritten) with
-            | Error(code, message) -> ids, Err(code, message)
-            | Ok() -> execute store registry dbName ids foundRows rewritten
+                match Auth.check store (storedObjectUser view.Definer) (Auth.requiredPrivileges view.Database rewritten) with
+                | Error(code, message) -> ids, Err(code, message)
+                | Ok() -> execute store registry dbName ids foundRows rewritten
 
     | InsertSelect(table, columns, select, onDuplicateUpdate, ignoreDuplicates) ->
         let db, table = splitQualified dbName table
@@ -9519,25 +9582,27 @@ let rec execute (store: Store) (registry: Registry) (dbName: string) (ids: int64
         match tryUpdatableView store viewDb updateStmt.From.Table with
         | None -> ids, Err(1288, sprintf "The target table '%s' of the UPDATE is not updatable" updateStmt.From.Table)
         | Some view ->
-            let qualifiers = [ updateStmt.From.Table; updateStmt.From.Alias |> Option.defaultValue updateStmt.From.Table ]
-            let rewrite = rewriteViewExpression view.Columns qualifiers
-            let rewritten =
-                { updateStmt with
-                    From = { updateStmt.From with Database = Some view.Database; Table = view.Table }
-                    Assignments =
-                        updateStmt.Assignments
-                        |> List.map (fun assignment ->
-                            { assignment with
-                                Table = assignment.Table |> Option.map (fun _ -> updateStmt.From.Alias |> Option.defaultValue view.Table)
-                                Column = Map.tryFind (assignment.Column.ToLowerInvariant()) view.Columns |> Option.defaultValue assignment.Column
-                                Value = rewrite assignment.Value })
-                    Where = updateStmt.Where |> Option.map rewrite
-                    OrderBy = updateStmt.OrderBy |> List.map (fun (expression, direction) -> rewrite expression, direction)
-                    Limit = updateStmt.Limit |> Option.map rewrite }
+            let rewrite = rewriteViewExpression view.Columns
+            match updateStmt.Assignments |> traverse (fun assignment -> resolveViewColumns view [ assignment.Column ] |> Result.map (fun columns -> assignment, List.head columns)) with
+            | Error error -> ids, error
+            | Ok assignments ->
+                let rewritten =
+                    { updateStmt with
+                        From = { updateStmt.From with Database = Some view.Database; Table = view.Table }
+                        Assignments =
+                            assignments
+                            |> List.map (fun (assignment, column) ->
+                                { assignment with
+                                    Table = assignment.Table |> Option.map (fun _ -> updateStmt.From.Alias |> Option.defaultValue view.Table)
+                                    Column = column
+                                    Value = rewrite assignment.Value })
+                        Where = updateStmt.Where |> Option.map rewrite
+                        OrderBy = updateStmt.OrderBy |> List.map (fun (expression, direction) -> rewrite expression, direction)
+                        Limit = updateStmt.Limit |> Option.map rewrite }
 
-            match Auth.check store (storedObjectUser view.Definer) (Auth.requiredPrivileges view.Database (Update rewritten)) with
-            | Error(code, message) -> ids, Err(code, message)
-            | Ok() -> execute store registry dbName ids foundRows (Update rewritten)
+                match Auth.check store (storedObjectUser view.Definer) (Auth.requiredPrivileges view.Database (Update rewritten)) with
+                | Error(code, message) -> ids, Err(code, message)
+                | Ok() -> execute store registry dbName ids foundRows (Update rewritten)
 
     | Update updateStmt when updateStmt.Joins.IsEmpty ->
         let db, table = (updateStmt.From.Database |> Option.defaultValue dbName), updateStmt.From.Table
@@ -9883,8 +9948,7 @@ let rec execute (store: Store) (registry: Registry) (dbName: string) (ids: int64
         match tryUpdatableView store viewDb deleteStmt.From.Table with
         | None -> ids, Err(1288, sprintf "The target table '%s' of the DELETE is not updatable" deleteStmt.From.Table)
         | Some view ->
-            let qualifiers = [ deleteStmt.From.Table; deleteStmt.From.Alias |> Option.defaultValue deleteStmt.From.Table ]
-            let rewrite = rewriteViewExpression view.Columns qualifiers
+            let rewrite = rewriteViewExpression view.Columns
             let rewritten =
                 { deleteStmt with
                     From = { deleteStmt.From with Database = Some view.Database; Table = view.Table }

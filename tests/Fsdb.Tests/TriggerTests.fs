@@ -206,6 +206,20 @@ let tests =
               | Err(1363, _) -> ()
               | other -> failtestf "expected NEW rejection in DELETE trigger, got %A" other
 
+          testCase "nested trigger queries validate row-image references"
+          <| fun _ ->
+              let store = Fsdb.Storage.create ()
+              expectOk (runDefault store "CREATE TABLE g (a INT, b INT AS (a * 2))") "create g"
+              expectOk (runDefault store "CREATE TABLE log (n INT)") "create log"
+
+              match runDefault store "CREATE TRIGGER bad_generated AFTER INSERT ON g FOR EACH ROW INSERT INTO log SELECT NEW.b" with
+              | Err(3105, _) -> ()
+              | other -> failtestf "expected nested generated reference rejection, got %A" other
+
+              match runDefault store "CREATE TRIGGER bad_old AFTER INSERT ON g FOR EACH ROW INSERT INTO log SELECT OLD.a" with
+              | Err(1363, _) -> ()
+              | other -> failtestf "expected nested OLD rejection, got %A" other
+
           testCase "the body executes in the trigger's schema, not the session's current database"
           <| fun _ ->
               let store = Fsdb.Storage.create ()

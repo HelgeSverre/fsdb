@@ -78,6 +78,29 @@ let tests =
               | Err(1288, _) -> ()
               | other -> failtestf "expected non-updatable view error, got %A" other
 
+          testCase "writable views do not expose unprojected base columns"
+          <| fun _ ->
+              let store = Fsdb.Storage.create ()
+              expectOk (run store "CREATE TABLE accounts (id INT PRIMARY KEY, name VARCHAR(20), secret INT)") "create accounts"
+              expectOk (run store "INSERT INTO accounts VALUES (1, 'Visible', 7)") "seed accounts"
+              expectOk (run store "CREATE VIEW visible_accounts AS SELECT id, name FROM accounts") "create view"
+
+              [ "UPDATE visible_accounts SET secret = 8"
+                "UPDATE visible_accounts SET name = 'Hidden' WHERE secret = 7"
+                "UPDATE visible_accounts SET name = 'Hidden' WHERE accounts.secret = 7"
+                "UPDATE visible_accounts SET name = 'Hidden' ORDER BY secret LIMIT 1"
+                "INSERT INTO visible_accounts(secret) VALUES (8)" ]
+              |> List.iter (fun sql ->
+                  match run store sql with
+                  | Err(1054, _) -> ()
+                  | other -> failtestf "expected hidden-column rejection for %s, got %A" sql other)
+
+              match run store "INSERT INTO visible_accounts VALUES (1, 'Duplicate') ON DUPLICATE KEY UPDATE name = 'Changed'" with
+              | Err(1235, _) -> ()
+              | other -> failtestf "expected view ODKU rejection, got %A" other
+
+              Expect.equal (rows store "SELECT id, name, secret FROM accounts") [ [ Some "1"; Some "Visible"; Some "7" ] ] "base row remains unchanged"
+
           testCase "view writes recheck the definer's base-table privileges"
           <| fun _ ->
               let store = setup ()

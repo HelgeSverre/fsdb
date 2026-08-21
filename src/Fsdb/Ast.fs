@@ -705,8 +705,8 @@ type Statement =
     /// events; it is parsed when the view is read. `columns` is the optional
     /// explicit view-column list, and `orReplace` selects CREATE OR REPLACE.
     /// ponytail: fsdb materializes the definition once per referencing
-    /// statement; UPDATE and DELETE accept only direct projections of one
-    /// table. No INSERT, MERGE, CHECK OPTION, or configurable SQL SECURITY.
+    /// statement; INSERT, UPDATE, and DELETE accept only direct projections
+    /// of one table. No MERGE, CHECK OPTION, or configurable SQL SECURITY.
     | CreateView of name: string * columns: string list * definition: string * orReplace: bool
     /// `DROP VIEW [IF EXISTS] view [, ...]`.
     | DropView of names: string list * ifExists: bool
