@@ -294,6 +294,11 @@ let private showVariablesRe =
     Regex(@"^SHOW\s+(SESSION\s+|GLOBAL\s+)?VARIABLES(\s|$)", RegexOptions.IgnoreCase)
 
 let private showEnginesRe = Regex(@"^SHOW\s+(?:STORAGE\s+)?ENGINES\s*$", RegexOptions.IgnoreCase)
+let private showEngineInnodbStatusRe = Regex(@"^SHOW\s+ENGINE\s+INNODB\s+STATUS\s*$", RegexOptions.IgnoreCase)
+let private showPluginsRe = Regex(@"^SHOW\s+PLUGINS\s*$", RegexOptions.IgnoreCase)
+let private showOpenTablesRe = Regex(@"^SHOW\s+OPEN\s+TABLES(?:\s+(?:FROM|IN)\s+(\S+))?(?:\s+LIKE\s+'([^']*)')?\s*$", RegexOptions.IgnoreCase)
+let private showCreateDatabaseRe =
+    Regex(@"^SHOW\s+CREATE\s+(?:DATABASE|SCHEMA)(?:\s+IF\s+NOT\s+EXISTS)?\s+(\S+)\s*$", RegexOptions.IgnoreCase)
 let private showCharsetRe = Regex(@"^SHOW\s+(?:CHARACTER\s+SET|CHARSET)(\s|$)", RegexOptions.IgnoreCase)
 let private showPrivilegesRe = Regex(@"^SHOW\s+PRIVILEGES\s*$", RegexOptions.IgnoreCase)
 let private showProcesslistRe = Regex(@"^SHOW\s+(FULL\s+)?PROCESSLIST\s*$", RegexOptions.IgnoreCase)
@@ -1217,6 +1222,10 @@ type private Probe =
     | ShowVariables of isGlobal: bool
     | ShowStatus
     | ShowEngines
+    | ShowEngineInnodbStatus
+    | ShowPlugins
+    | ShowOpenTables of db: string option * pattern: string option
+    | ShowCreateDatabase of name: string
     | ShowCharset
     | ShowProcesslist of full: bool
     | ShowTriggers of db: string option
@@ -1276,6 +1285,20 @@ let private tryProbe (sql: string) (upper: string) : Probe option =
         Some ShowStatus
     elif showEnginesRe.IsMatch sql then
         Some ShowEngines
+    elif showEngineInnodbStatusRe.IsMatch sql then
+        Some ShowEngineInnodbStatus
+    elif showPluginsRe.IsMatch sql then
+        Some ShowPlugins
+    elif showOpenTablesRe.IsMatch sql then
+        let m = showOpenTablesRe.Match sql
+        Some(
+            ShowOpenTables(
+                (if m.Groups.[1].Success then Some(stripBackticks m.Groups.[1].Value) else None),
+                (if m.Groups.[2].Success then Some m.Groups.[2].Value else None)
+            )
+        )
+    elif showCreateDatabaseRe.IsMatch sql then
+        Some(ShowCreateDatabase(stripBackticks (showCreateDatabaseRe.Match sql).Groups.[1].Value))
     elif showCharsetRe.IsMatch sql then
         Some ShowCharset
     elif showPrivilegesRe.IsMatch sql then
@@ -1345,6 +1368,8 @@ let private runProbe (session: Session) (sql: string) (probe: Probe) : Session *
         | ShowDatabases
         | ShowTableStatus
         | ShowTables
+        | ShowOpenTables _
+        | ShowCreateDatabase _
         | ShowCreate _
         | ShowCreateView _
         | ShowColumns _
@@ -1395,6 +1420,49 @@ let private runProbe (session: Session) (sql: string) (probe: Probe) : Session *
     | ShowVariables isGlobal -> session, handleShowVariables session isGlobal sql
     | ShowStatus -> session, InformationSchema.showStatus (statusFilter sql) |> showResult
     | ShowEngines -> session, InformationSchema.showEngines () |> showResult
+    | ShowEngineInnodbStatus ->
+        session,
+        ResultSet(
+            [ "Type"; "Name"; "Status" ],
+            [ [ Some "InnoDB"; Some ""; Some "fsdb uses an in-memory transactional row store" ] ]
+        )
+    | ShowPlugins ->
+        session,
+        ResultSet(
+            [ "Name"; "Status"; "Type"; "Library"; "License" ],
+            [ [ Some "mysql_native_password"; Some "ACTIVE"; Some "AUTHENTICATION"; None; Some "GPL" ] ]
+        )
+    | ShowOpenTables(db, pattern) ->
+        let dbName = db |> Option.defaultValue (session.Database |> Option.defaultValue defaultDatabase)
+
+        let matches (name: string) =
+            pattern
+            |> Option.map (fun value -> Regex.IsMatch(name, likeToRegex value, RegexOptions.IgnoreCase ||| RegexOptions.Singleline))
+            |> Option.defaultValue true
+
+        let rows =
+            (Session.currentStore session).Catalog
+            |> Map.tryFind (dbName.ToLowerInvariant())
+            |> Option.defaultValue Map.empty
+            |> Map.toList
+            |> List.map (snd >> _.OriginalName)
+            |> List.filter matches
+            |> List.sort
+            |> List.map (fun table -> [ Some dbName; Some table; Some "0"; Some "0" ])
+
+        session, ResultSet([ "Database"; "Table"; "In_use"; "Name_locked" ], rows)
+    | ShowCreateDatabase name ->
+        if Storage.databaseExists (Session.currentStore session) name then
+            let quotedName = name.Replace("`", "``")
+
+            session,
+            ResultSet(
+                [ "Database"; "Create Database" ],
+                [ [ Some name
+                    Some(sprintf "CREATE DATABASE `%s` /*!40100 DEFAULT CHARACTER SET utf8mb4 COLLATE utf8mb4_0900_ai_ci */" quotedName) ] ]
+            )
+        else
+            session, Err(1049, sprintf "Unknown database '%s'" name)
     | ShowCharset -> session, InformationSchema.showCharacterSet (likeSuffix sql) |> showResult
     | ShowPrivileges -> session, InformationSchema.showPrivileges () |> showResult
     | ShowProcesslist full ->

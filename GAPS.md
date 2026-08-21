@@ -71,7 +71,7 @@ variants), USE, KILL, DESCRIBE are text-probed before the grammar
 | Partitioning: `PARTITION BY`, `PARTITION (p)` selection, `ADD/DROP/COALESCE/REORGANIZE PARTITION` | medium | refusal |
 | Roles: `CREATE/DROP ROLE`, `SET ROLE`, `SET DEFAULT ROLE`, `GRANT role TO user`, dynamic privileges (`BACKUP_ADMIN`…), `GRANT PROXY` | medium | refusal |
 | Replication/admin SQL: `CHANGE REPLICATION SOURCE TO`, `PURGE BINARY LOGS`, `RESET`, `SHOW MASTER/REPLICA STATUS`, `SHOW BINARY LOGS`, `BINLOG`, `INSTALL/UNINSTALL PLUGIN|COMPONENT`, `ALTER INSTANCE`, `CREATE SERVER`, `TABLESPACE` statements | low | refusal |
-| `SHOW ENGINE INNODB STATUS` (plural ENGINES probe only); `EXPLAIN ANALYZE`; `EXPLAIN FORMAT=JSON|TREE`; `DESCRIBE <statement>` | low | refusal |
+| `EXPLAIN ANALYZE`; `EXPLAIN FORMAT=JSON|TREE`; `DESCRIBE <statement>` | low | refusal |
 | `START TRANSACTION READ ONLY|READ WRITE`; `COMMIT AND CHAIN`; `SET TRANSACTION READ ONLY`; `SET CHARACTER SET` | low | refusal |
 | `CREATE TABLE … AS SELECT` and `CREATE TABLE … LIKE other` | medium | refusal |
 | `ALTER TABLE … ALTER COLUMN c SET/DROP DEFAULT`; `RENAME INDEX a TO b`; `CONVERT TO CHARACTER SET`; `ENGINE=`/`COMMENT=` option tails (only `AUTO_INCREMENT=n` works) | medium | refusal |
@@ -385,7 +385,7 @@ live Limits reporting.
 | INFORMATION_SCHEMA breadth | ~60+ views incl. INNODB_*, COLUMN_STATISTICS, RESOURCE_GROUPS, ENABLED_ROLES | 23 views; EVENTS/ROUTINES/PARAMETERS/COLUMN_PRIVILEGES genuinely empty | low | divergence |
 | Table statistics | estimates refreshed by ANALYZE TABLE | ENGINE always InnoDB, DATA_LENGTH stand-in 16384, CARDINALITY 0, live row counts where MySQL keeps stale page estimates until ANALYZE (`InformationSchema.fs:267–288`); no ANALYZE statement exists | low | divergence |
 | COLUMN_COMMENT | user text | always "" (`InformationSchema.fs:323–326`) | low | divergence |
-| Missing SHOW forms | CREATE DATABASE/USER/EVENT/PROCEDURE/FUNCTION, OPEN TABLES, MASTER/REPLICA STATUS, BINARY LOGS, ENGINE INNODB STATUS, PLUGINS | fall through to 1064 | low | refusal |
+| Missing SHOW forms | CREATE USER/EVENT/PROCEDURE/FUNCTION, MASTER/REPLICA STATUS, BINARY LOGS | fall through to 1064 | low | refusal |
 | SHOW STATUS counters | Questions, Com_*, Innodb_*, Slow_queries, … | four variables only: Ssl_cipher, Ssl_version, Threads_connected, Uptime (`InformationSchema.fs:1929–1938`) | low | divergence |
 | wait_timeout | 28800 default | 300 (deliberate DoS posture, honestly advertised) | low | divergence |
 | Option-file discovery | /etc/my.cnf, ~/.my.cnf, $MYSQL_HOME auto-read; `[mysqld-8.4]` groups | only `--defaults-file`; version-suffixed groups skipped (documented) | low | divergence |

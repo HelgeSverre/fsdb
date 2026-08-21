@@ -1332,6 +1332,31 @@ let tests =
               | ResultSet([ "Level"; "Code"; "Message" ], []) -> ()
               | other -> failtestf "expected an empty errors resultset, got %A" other
 
+          testCase "SHOW CREATE DATABASE, OPEN TABLES, PLUGINS, and ENGINE INNODB STATUS are truthful"
+          <| fun _ ->
+              let session = create 1 (Fsdb.Storage.create ())
+              let session, _ = handle session "CREATE DATABASE app"
+              let session, _ = handle session "USE app"
+              let session, _ = handle session "CREATE TABLE visible (id INT)"
+
+              match handle session "SHOW CREATE DATABASE app" |> snd with
+              | ResultSet([ "Database"; "Create Database" ], [ [ Some "app"; Some ddl ] ]) ->
+                  Expect.stringContains ddl "CREATE DATABASE `app`" "database DDL"
+              | other -> failtestf "unexpected SHOW CREATE DATABASE result: %A" other
+
+              match handle session "SHOW OPEN TABLES FROM app LIKE 'vis%'" |> snd with
+              | ResultSet([ "Database"; "Table"; "In_use"; "Name_locked" ], [ [ Some "app"; Some "visible"; Some "0"; Some "0" ] ]) -> ()
+              | other -> failtestf "unexpected SHOW OPEN TABLES result: %A" other
+
+              match handle session "SHOW PLUGINS" |> snd with
+              | ResultSet([ "Name"; "Status"; "Type"; "Library"; "License" ], [ [ Some "mysql_native_password"; Some "ACTIVE"; Some "AUTHENTICATION"; None; Some "GPL" ] ]) -> ()
+              | other -> failtestf "unexpected SHOW PLUGINS result: %A" other
+
+              match handle session "SHOW ENGINE INNODB STATUS" |> snd with
+              | ResultSet([ "Type"; "Name"; "Status" ], [ [ Some "InnoDB"; Some ""; Some status ] ]) ->
+                  Expect.stringContains status "in-memory transactional row store" "engine status describes fsdb"
+              | other -> failtestf "unexpected SHOW ENGINE result: %A" other
+
           testCase "SET GLOBAL never changes the issuing session's own variable"
           <| fun _ ->
               let store = Fsdb.Storage.create ()
