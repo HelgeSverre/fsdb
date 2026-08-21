@@ -1607,6 +1607,24 @@ let tests =
                   | None -> failtest "root vanished"
               | other -> failtestf "expected SET PASSWORD to succeed, got %A" other
 
+          testCase "SHOW CREATE USER renders the stored authentication definition"
+          <| fun _ ->
+              let store = Fsdb.Storage.create ()
+              let session = create 1 store
+              let session, _ = handle session "CREATE USER 'show_user'@'%' IDENTIFIED BY 'secret'"
+
+              match handle session "SHOW CREATE USER 'show_user'@'%'" |> snd with
+              | ResultSet([ column ], [ [ Some ddl ] ]) ->
+                  Expect.equal column "CREATE USER for show_user@%" "column label"
+                  Expect.stringContains ddl "CREATE USER `show_user`@`%` IDENTIFIED WITH 'mysql_native_password'" "account and plugin"
+                  Expect.stringContains ddl (Fsdb.Auth.nativePasswordHash "secret") "stored password hash"
+                  Expect.stringContains ddl "ACCOUNT UNLOCK" "account state"
+              | other -> failtestf "expected SHOW CREATE USER row, got %A" other
+
+              match handle session "SHOW CREATE USER missing" |> snd with
+              | Err(1396, _) -> ()
+              | other -> failtestf "expected missing account error 1396, got %A" other
+
           testCase "SET PASSWORD is enforced: own password is free, someone else's needs CREATE USER"
           <| fun _ ->
               let store = Fsdb.Storage.create ()

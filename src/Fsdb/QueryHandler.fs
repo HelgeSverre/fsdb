@@ -302,6 +302,7 @@ let private showCreateDatabaseRe =
 let private showCharsetRe = Regex(@"^SHOW\s+(?:CHARACTER\s+SET|CHARSET)(\s|$)", RegexOptions.IgnoreCase)
 let private showPrivilegesRe = Regex(@"^SHOW\s+PRIVILEGES\s*$", RegexOptions.IgnoreCase)
 let private showProcesslistRe = Regex(@"^SHOW\s+(FULL\s+)?PROCESSLIST\s*$", RegexOptions.IgnoreCase)
+let private showCreateUserRe = Regex(@"^SHOW\s+CREATE\s+USER\s+(.+?)\s*;?$", RegexOptions.IgnoreCase)
 
 let private showTriggersRe =
     Regex(@"^SHOW\s+TRIGGERS(?:\s+(?:FROM|IN)\s+(\S+))?", RegexOptions.IgnoreCase)
@@ -1269,6 +1270,7 @@ type private Probe =
     | ShowIndex of name: string * dbOverride: string option
     | ShowCollation
     | ShowGrants of user: string option
+    | ShowCreateUser of user: string
     | ShowPrivileges
     | FlushPrivileges
 
@@ -1332,6 +1334,8 @@ let private tryProbe (sql: string) (upper: string) : Probe option =
         Some ShowCharset
     elif showPrivilegesRe.IsMatch sql then
         Some ShowPrivileges
+    elif showCreateUserRe.IsMatch sql then
+        Some(ShowCreateUser((showCreateUserRe.Match sql).Groups.[1].Value))
     elif showGrantsRe.IsMatch sql then
         let m = showGrantsRe.Match sql
         Some(ShowGrants(if m.Groups.[1].Success then Some m.Groups.[1].Value else None))
@@ -1622,6 +1626,16 @@ let private runProbe (session: Session) (sql: string) (probe: Probe) : Session *
             match Auth.renderGrants (Session.currentStore session) name with
             | Ok(header, lines) -> session, ResultSet([ header ], lines |> List.map (fun l -> [ Some l ]))
             | Error(code, msg) -> session, Err(code, msg)
+    | ShowCreateUser userRef ->
+        let name =
+            if Regex.IsMatch(userRef, @"^CURRENT_USER(?:\(\))?$", RegexOptions.IgnoreCase) then
+                session.User
+            else
+                userNameOf userRef
+
+        match Auth.renderCreateUser (Session.currentStore session) name with
+        | Ok(header, ddl) -> session, ResultSet([ header ], [ [ Some ddl ] ])
+        | Error(code, msg) -> session, Err(code, msg)
     | FlushPrivileges -> session, Affected 0UL
 let rec mapPlaceholders (replace: int -> Expr) (stmt: Statement) : Statement =
     let rec mapExpr (e: Expr) : Expr =

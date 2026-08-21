@@ -844,6 +844,24 @@ let check (store: Store) (user: string) (required: (string * PrivTarget) list) :
 // SHOW GRANTS rendering.
 // ---------------------------------------------------------------------------
 
+let renderCreateUser (store: Store) (name: string) : Result<string * string, int * string> =
+    match tryUserRow store name with
+    | None -> Error(1396, sprintf "Operation SHOW CREATE USER failed for '%s'@'%%'" name)
+    | Some(cols, row) ->
+        let host = userColumnText cols row "Host"
+        let plugin = userColumnText cols row "plugin"
+        let hash = userColumnText cols row "authentication_string"
+        let account = sprintf "`%s`@`%s`" (name.Replace("`", "``")) (host.Replace("`", "``"))
+
+        Ok(
+            sprintf "CREATE USER for %s@%s" name host,
+            sprintf
+                "CREATE USER %s IDENTIFIED WITH '%s' AS '%s' REQUIRE NONE PASSWORD EXPIRE DEFAULT ACCOUNT UNLOCK PASSWORD HISTORY DEFAULT PASSWORD REUSE INTERVAL DEFAULT PASSWORD REQUIRE CURRENT DEFAULT"
+                account
+                plugin
+                hash
+        )
+
 /// Whether `user` holds a global privilege — the gate for PROCESS-scoped
 /// visibility (PROCESSLIST, KILL) and mysql-schema reads. Reuses `check`'s
 /// hierarchy, so root's all-Y row and any GLOBAL grant satisfy it.
