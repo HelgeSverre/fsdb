@@ -673,6 +673,14 @@ let tests =
                     | Err(1305, msg) -> Expect.stringContains msg "NOPE" "message names the function"
                     | other -> failtestf "expected a 1305 error, got %A" other
 
+                testCase "an unavailable enterprise encryption function is a 1305 error"
+                <| fun _ ->
+                    let store = newStore ()
+
+                    match runDefault store "SELECT ASYMMETRIC_ENCRYPT('RSA', 'plain', 'key')" with
+                    | Err(1305, msg) -> Expect.stringContains msg "ASYMMETRIC_ENCRYPT" "message names the function"
+                    | other -> failtestf "expected a 1305 error, got %A" other
+
                 testCase "the binary-operator form of INTERVAL arithmetic (expr - INTERVAL n unit) does real date math, like DATE_SUB"
                 <| fun _ ->
                     let store = newStore ()
