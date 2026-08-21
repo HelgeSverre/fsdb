@@ -1787,33 +1787,66 @@ let tests =
                   (Some "777")
                   "the @@GLOBAL. spelling reaches the same global map as SET GLOBAL"
 
-          testCase "SET [SESSION] TRANSACTION ISOLATION LEVEL accepts READ COMMITTED and READ UNCOMMITTED"
+          testCase "SET TRANSACTION ISOLATION LEVEL applies REPEATABLE READ to the next transaction"
           <| fun _ ->
               let session = create 1 (Fsdb.Storage.create ())
 
-              match handle session "SET SESSION TRANSACTION ISOLATION LEVEL READ COMMITTED" with
+              match handle session "SET TRANSACTION ISOLATION LEVEL REPEATABLE READ" with
+              | session, Affected 0UL ->
+                  Expect.equal
+                      session.PendingTransactionIsolation
+                      (Some RepeatableRead)
+                      "the next transaction retains the requested isolation"
+
+                  let session, started = handle session "BEGIN"
+                  Expect.equal started (Affected 0UL) "BEGIN succeeds"
+
+                  match session.Tx with
+                  | Some transaction -> Expect.equal transaction.Isolation RepeatableRead "the transaction captures the pending isolation"
+                  | None -> failtest "BEGIN did not create a transaction"
+
+                  Expect.isNone session.PendingTransactionIsolation "BEGIN consumes the next-transaction setting"
+
+                  match handle session "SET TRANSACTION ISOLATION LEVEL REPEATABLE READ" |> snd with
+                  | Err(1568, _) -> ()
+                  | other -> failtestf "expected 1568 while a transaction is open, got %A" other
+              | _, other -> failtestf "expected OK, got %A" other
+
+          testCase "SET SESSION TRANSACTION ISOLATION LEVEL updates the session setting"
+          <| fun _ ->
+              let session = create 1 (Fsdb.Storage.create ())
+              let session, _ = handle session "SET TRANSACTION ISOLATION LEVEL REPEATABLE READ"
+
+              match handle session "SET SESSION TRANSACTION ISOLATION LEVEL REPEATABLE READ" with
               | session, Affected 0UL ->
                   Expect.equal
                       (session.Variables |> Map.tryFind "transaction_isolation" |> Option.flatten)
-                      (Some "READ-COMMITTED")
-                      "hyphenated, matching MySQL's own @@transaction_isolation spelling"
+                      (Some "REPEATABLE-READ")
+                      "the session setting uses MySQL's hyphenated spelling"
+
+                  Expect.isNone session.PendingTransactionIsolation "a session setting supersedes an earlier next-transaction setting"
               | _, other -> failtestf "expected OK, got %A" other
 
-              match handle session "SET TRANSACTION ISOLATION LEVEL READ UNCOMMITTED" with
-              | session, Affected 0UL ->
-                  Expect.equal
-                      (session.Variables |> Map.tryFind "transaction_isolation" |> Option.flatten)
-                      (Some "READ-UNCOMMITTED")
-                      "hyphenated"
-              | _, other -> failtestf "expected OK, got %A" other
-
-          testCase "SET TRANSACTION ISOLATION LEVEL SERIALIZABLE is a clear 1235, not a silent lie or a 1064"
+          testCase "SET @@transaction_isolation applies REPEATABLE READ to the next transaction"
           <| fun _ ->
               let session = create 1 (Fsdb.Storage.create ())
 
-              match handle session "SET TRANSACTION ISOLATION LEVEL SERIALIZABLE" |> snd with
-              | Err(1235, _) -> ()
-              | other -> failtestf "expected a 1235 unsupported-feature error, got %A" other
+              match handle session "SET @@transaction_isolation = 'REPEATABLE-READ'" with
+              | session, Affected 0UL ->
+                  Expect.equal session.PendingTransactionIsolation (Some RepeatableRead) "the @@ spelling is next-transaction scoped"
+              | _, other -> failtestf "expected OK, got %A" other
+
+          testCase "unsupported transaction isolation levels return 1235"
+          <| fun _ ->
+              let session = create 1 (Fsdb.Storage.create ())
+
+              for sql in
+                  [ "SET TRANSACTION ISOLATION LEVEL READ COMMITTED"
+                    "SET SESSION TRANSACTION ISOLATION LEVEL READ UNCOMMITTED"
+                    "SET @@transaction_isolation = 'SERIALIZABLE'" ] do
+                  match handle session sql |> snd with
+                  | Err(1235, _) -> ()
+                  | other -> failtestf "expected 1235 for %s, got %A" sql other
 
           testCase "transaction access modes, chaining, and SET CHARACTER SET are enforced"
           <| fun _ ->

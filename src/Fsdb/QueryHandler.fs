@@ -630,9 +630,15 @@ let private splitSetAssignments (sql: string) : string list =
 /// the statement has parsed successfully (see `handleSet`) — mirrors real
 /// MySQL executing a multi-assignment `SET` all-or-nothing rather than
 /// left-to-right with partial effect.
+type private TransactionIsolationScope =
+    | SessionIsolation
+    | NextTransactionIsolation
+    | GlobalIsolation
+
 type private SetAction =
     | SetNamesAction of charset: string * collation: string option
     | SetVarAction of name: string * value: string option * isGlobal: bool
+    | SetTransactionIsolationAction of scope: TransactionIsolationScope * isolation: TransactionIsolation
     | SetUserVarAction of name: string * value: Value
 
 /// System variables real MySQL accepts an explicit `NULL` for (rather than
@@ -643,6 +649,31 @@ let private nullableSystemVars = Set.ofList [ "character_set_results" ]
 
 let private globalOnlyLimitVariables =
     Set.ofList [ "max_allowed_packet"; "max_connections"; "max_prepared_stmt_count"; "net_write_timeout"; "local_infile" ]
+
+let private normalizeIsolationLevel (raw: string) : string =
+    Regex.Replace(raw.Trim().ToUpperInvariant(), @"\s+", "-")
+
+let private transactionIsolationOf (value: string) : Result<TransactionIsolation, QueryResult> =
+    match normalizeIsolationLevel value with
+    | "READ-UNCOMMITTED" -> Ok ReadUncommitted
+    | "READ-COMMITTED" -> Ok ReadCommitted
+    | "REPEATABLE-READ" -> Ok RepeatableRead
+    | "SERIALIZABLE" -> Ok Serializable
+    | _ -> Error(Err(1231, sprintf "Variable 'transaction_isolation' can't be set to the value of '%s'" value))
+
+let private transactionIsolationName =
+    function
+    | ReadUncommitted -> "READ UNCOMMITTED"
+    | ReadCommitted -> "READ COMMITTED"
+    | RepeatableRead -> "REPEATABLE READ"
+    | Serializable -> "SERIALIZABLE"
+
+let private transactionIsolationScope (prefix: string) =
+    match prefix.Trim().ToUpperInvariant() with
+    | "@@" -> NextTransactionIsolation
+    | "GLOBAL"
+    | "@@GLOBAL." -> GlobalIsolation
+    | _ -> SessionIsolation
 
 /// Parses one comma-split fragment into the variable(s) it would assign,
 /// without touching `session`/`Store` — `handleSet` only applies any of
@@ -691,6 +722,12 @@ let private parseSetFragment
                         match Functions.tryBlockEncryptionMode value with
                         | Some canonical -> Ok(SetVarAction(name, Some canonical, isGlobal), sideEffects)
                         | None -> Error(Err(1231, sprintf "Variable '%s' can't be set to the value of '%s'" name value))
+                    | Ok(VString value, sideEffects) when name = "transaction_isolation" ->
+                        transactionIsolationOf value
+                        |> Result.map (fun isolation ->
+                            SetTransactionIsolationAction(transactionIsolationScope varMatch.Groups.[1].Value, isolation), sideEffects)
+                    | Ok(_, _) when name = "transaction_isolation" ->
+                        Error(Err(1231, "Variable 'transaction_isolation' can't be set to the value of 'NULL'"))
                     | Ok(VString value, sideEffects) when name = "collation_connection" ->
                         match Collation.tryFind value with
                         | Some _ -> Ok(SetVarAction(name, Some value, isGlobal), sideEffects)
@@ -772,10 +809,28 @@ let private applySetAction (session: Session) (action: SetAction) : Session =
                 | None -> ())
 
         { session with Variables = Map.add name value session.Variables }
+    | SetTransactionIsolationAction(scope, RepeatableRead) ->
+        match scope with
+        | SessionIsolation ->
+            { session with
+                PendingTransactionIsolation = None
+                Variables = Map.add "transaction_isolation" (Some "REPEATABLE-READ") session.Variables }
+        | NextTransactionIsolation -> { session with PendingTransactionIsolation = Some RepeatableRead }
+        | GlobalIsolation ->
+            Session.setGlobalVariable session.Store "transaction_isolation" (Some "REPEATABLE-READ")
+            session
+    | SetTransactionIsolationAction(_, _) -> session
     | SetUserVarAction(name, value) -> { session with UserVariables = Map.add name value session.UserVariables }
 
 let private validateSetAction (session: Session) (action: SetAction) : Result<unit, QueryResult> =
     match action with
+    | SetTransactionIsolationAction(GlobalIsolation, _) when not (Auth.hasGlobalPriv session.Store session.User "SUPER") ->
+        Error(Err(1227, "Access denied; you need (at least one of) the SUPER privilege(s) for this operation"))
+    | SetTransactionIsolationAction(NextTransactionIsolation, _) when session.Tx.IsSome ->
+        Error(Err(1568, "Transaction characteristics can't be changed while a transaction is in progress"))
+    | SetTransactionIsolationAction(_, RepeatableRead) -> Ok()
+    | SetTransactionIsolationAction(_, isolation) ->
+        Error(Err(1235, sprintf "This version of MySQL doesn't yet support '%s transaction isolation'" (transactionIsolationName isolation)))
     | SetVarAction(_, _, true) when not (Auth.hasGlobalPriv session.Store session.User "SUPER") ->
         Error(Err(1227, "Access denied; you need (at least one of) the SUPER privilege(s) for this operation"))
     | SetVarAction(name, Some value, true) when Limits.isReportableSetting name ->
@@ -868,19 +923,11 @@ let private flushStatusRe = Regex(@"^FLUSH\s+STATUS\s*;?$", RegexOptions.IgnoreC
 let private flushTablesRe = Regex(@"^FLUSH\s+TABLES\s*;?$", RegexOptions.IgnoreCase)
 let private flushLogsRe = Regex(@"^FLUSH\s+LOGS\s*;?$", RegexOptions.IgnoreCase)
 
-/// MySqlConnector's real `BeginTransaction[Async]` handshake explicitly
-/// selects REPEATABLE READ before it sends START TRANSACTION — the
-/// isolation model FSDB's private transaction snapshot actually implements.
-/// READ COMMITTED/READ UNCOMMITTED are accepted too: FSDB's actual
-/// isolation (one snapshot per transaction, ~REPEATABLE READ) is *stronger*
-/// than either, so recording the level a client asked for is truthful even
-/// though every transaction still runs the same snapshot underneath.
-/// SERIALIZABLE is matched here too, but only so `runProbe` can reject it
-/// outright (see its ponytail note) instead of it falling through to the
-/// generic `SET name = value` parser and dying with a confusing 1064.
+/// The optional SESSION keyword distinguishes persistent and next-transaction
+/// transaction characteristics.
 let private setTransactionIsolation =
     Regex(
-        @"^SET\s+(?:SESSION\s+)?TRANSACTION\s+ISOLATION\s+LEVEL\s+(REPEATABLE\s+READ|READ\s+COMMITTED|READ\s+UNCOMMITTED|SERIALIZABLE)$",
+        @"^SET\s+(SESSION\s+)?TRANSACTION\s+ISOLATION\s+LEVEL\s+(REPEATABLE\s+READ|READ\s+COMMITTED|READ\s+UNCOMMITTED|SERIALIZABLE)$",
         RegexOptions.IgnoreCase
     )
 
@@ -888,11 +935,6 @@ let private setTransactionAccess =
     Regex(@"^SET\s+(SESSION\s+)?TRANSACTION\s+READ\s+(ONLY|WRITE)$", RegexOptions.IgnoreCase)
 
 let private setCharacterSet = Regex(@"^SET\s+CHARACTER\s+SET\s+'?(\w+)'?$", RegexOptions.IgnoreCase)
-
-/// MySQL's `transaction_isolation` value is the level name with spaces
-/// replaced by hyphens (`"REPEATABLE READ"` -> `"REPEATABLE-READ"`).
-let private normalizeIsolationLevel (raw: string) : string =
-    Regex.Replace(raw.Trim().ToUpperInvariant(), @"\s+", "-")
 
 /// Commits the open transaction (if any) by merging its snapshot catalog
 /// back into the shared store's (`Storage.mergeCatalogInto`, a CAS-safe
@@ -976,19 +1018,25 @@ let private configuredReadOnly (session: Session) =
     session.PendingTransactionReadOnly
     |> Option.defaultWith (fun () -> lookupVar session "transaction_read_only" |> Option.flatten = Some "1")
 
+let private configuredIsolation (session: Session) =
+    session.PendingTransactionIsolation |> Option.defaultValue RepeatableRead
+
 let private beginTransaction (readOnly: bool) (session: Session) : Session =
     let session = commitSession session
+    let isolation = configuredIsolation session
     let baseCatalog = session.Store.Catalog
     let snapshot = Storage.beginTransactionSnapshot session.Store
 
     { session with
         PendingTransactionReadOnly = None
+        PendingTransactionIsolation = None
         Tx =
             Some
                 { Snapshot = snapshot
                   BaseCatalog = baseCatalog
                   Statements = []
                   ReplayStartIds = session.LastInsertId, session.LastGeneratedId
+                  Isolation = isolation
                   ReadOnly = readOnly
                   Seeded = false
                   Savepoints = Map.empty
@@ -1246,7 +1294,7 @@ let private executeStatement (session: Session) (sql: string) (upper: string) : 
 /// production to validate it against.
 type private Probe =
     | SetAutocommit of value: string
-    | SetTransactionIsolation of level: string
+    | SetTransactionIsolation of sessionScope: bool * level: string
     | SetTransactionAccess of sessionScope: bool * readOnly: bool
     | SetCharacterSet of charset: string
     | SetPassword of user: string option * password: string
@@ -1305,7 +1353,8 @@ let private tryProbe (sql: string) (upper: string) : Probe option =
     if setAutocommit.IsMatch sql then
         Some(SetAutocommit((setAutocommit.Match sql).Groups.[1].Value))
     elif setTransactionIsolation.IsMatch sql then
-        Some(SetTransactionIsolation((setTransactionIsolation.Match sql).Groups.[1].Value))
+        let m = setTransactionIsolation.Match sql
+        Some(SetTransactionIsolation(m.Groups.[1].Success, m.Groups.[2].Value))
     elif setTransactionAccess.IsMatch sql then
         let m = setTransactionAccess.Match sql
         Some(SetTransactionAccess(m.Groups.[1].Success, m.Groups.[2].Value.Equals("ONLY", StringComparison.OrdinalIgnoreCase)))
@@ -1453,17 +1502,15 @@ let private runProbe (session: Session) (sql: string) (probe: Probe) : Session *
 
     match probe with
     | SetAutocommit value -> handleSetAutocommit value session
-    | SetTransactionIsolation level ->
-        match normalizeIsolationLevel level with
-        | "SERIALIZABLE" ->
-            // ponytail: fsdb's transaction model is one fixed snapshot per
-            // transaction (~REPEATABLE READ) with optimistic row conflicts,
-            // not the range-locking SERIALIZABLE actually needs — a
-            // client that asked for stronger isolation than fsdb gives must
-            // see a clear error, not a silent downgrade. Upgrade path: real
-            // predicate/range locking, if a client ever genuinely needs it.
-            session, Err(1235, "This version of MySQL doesn't yet support 'SERIALIZABLE transaction isolation'")
-        | normalized -> { session with Variables = Map.add "transaction_isolation" (Some normalized) session.Variables }, Affected 0UL
+    | SetTransactionIsolation(sessionScope, level) ->
+        match transactionIsolationOf level with
+        | Error result -> session, result
+        | Ok isolation ->
+            let action = SetTransactionIsolationAction((if sessionScope then SessionIsolation else NextTransactionIsolation), isolation)
+
+            match validateSetAction session action with
+            | Error result -> session, result
+            | Ok() -> applySetAction session action, Affected 0UL
     | SetTransactionAccess(sessionScope, readOnly) ->
         let value = if readOnly then "1" else "0"
 

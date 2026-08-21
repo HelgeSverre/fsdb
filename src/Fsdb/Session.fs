@@ -124,6 +124,12 @@ type PreparedStmt =
       ParamCount: int
       LastParamTypes: (byte * bool) list option }
 
+type TransactionIsolation =
+    | ReadUncommitted
+    | ReadCommitted
+    | RepeatableRead
+    | Serializable
+
 /// One open transaction. `Snapshot` is a private `Store` — its own
 /// `Catalog`, its own lock — seeded from the shared store's catalog when the
 /// transaction executes its first real database statement; every statement
@@ -147,6 +153,7 @@ type Transaction =
       /// snapshot before validating again.
       Statements: Statement list
       ReplayStartIds: int64 * int64
+      Isolation: TransactionIsolation
       ReadOnly: bool
       /// Set by the first database statement, which is the one that seeds
       /// `Snapshot`/`BaseCatalog`; later reads retain that same snapshot.
@@ -233,6 +240,7 @@ type Session =
       /// `Some` between BEGIN/START TRANSACTION and COMMIT/ROLLBACK.
       Tx: Transaction option
       PendingTransactionReadOnly: bool option
+      PendingTransactionIsolation: TransactionIsolation option
       /// Prepared statements registered by this connection's COM_STMT_PREPARE
       /// calls, by statement id. Threaded through the connection loop like
       /// the rest of `Session` rather than a mutable dict at the `Server`
@@ -306,6 +314,7 @@ let create (connectionId: int) (store: Store) : Session =
       LastResultColumnMetadata = []
       Tx = None
       PendingTransactionReadOnly = None
+      PendingTransactionIsolation = None
       Statements = Map.empty
       NextStmtId = 1
       LongData = Map.empty

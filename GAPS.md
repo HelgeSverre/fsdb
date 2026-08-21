@@ -36,7 +36,7 @@ accepted (marked `ponytail:` in source), or recorded only in
 | Data types | Common scalar types plus OGC geometry | No TIME value domain or BIT |
 | Constraints & indexes | PK/UNIQUE/FK/CHECK plus one-column equality indexes | No range/order/index-join access |
 | Charsets & collations | ICU-based utf8mb4 registry | Weight-table tailoring differs from MySQL's UCA tables |
-| Transactions | Snapshot + optimistic merge | SERIALIZABLE refused; no intra-database write parallelism |
+| Transactions | Repeatable-read snapshots + optimistic merge | Other isolation levels refused; transaction commits serialize |
 | Persistence | WAL + snapshot, crash-tested | Opt-in only; no group commit; tombstones never reclaimed |
 | Views & triggers | Read-only views; AFTER INSERT triggers | No DML through views; no BEFORE/UPDATE/DELETE triggers, no OLD.* |
 | Routines & events | Absent (catalogs honestly empty) | Everything |
@@ -214,10 +214,10 @@ updates, InnoDB-style burned AUTO_INCREMENT on rollback.
 
 | Gap | MySQL 8.4 | fsdb | Impact | Class |
 |---|---|---|---|---|
-| SERIALIZABLE | implemented via shared locks / auto-conversion | refused with 1235 (`QueryHandler.fs:1357–1367`) | medium | refusal |
-| READ COMMITTED / READ UNCOMMITTED | distinct semantics | accepted, recorded, but execute snapshot (repeatable-read) semantics like every other level | medium | divergence |
+| SERIALIZABLE | implemented via shared locks / auto-conversion | refused with 1235 | medium | refusal |
+| READ COMMITTED / READ UNCOMMITTED | distinct semantics | refused with 1235 | medium | refusal |
 | Deadlock errors | 1213 deadlock detection with victim selection | write-write conflicts surface as lock-wait timeout 1205; no deadlock classification | low | divergence |
-| Write parallelism within a database | row-lock concurrency | per-database publication gate serializes commits; measured 45 tx/s, p99 64.5 s at 128 workers on one hot database (`torture/findings/2026-08-16-concurrency-campaign.md`) | high (throughput) | divergence |
+| Write parallelism within a database | row-lock concurrency | indexed autocommit updates use row stripes; transactions and full scans serialize at publication | high (throughput) | divergence |
 | Multi-database scaling | near-linear with connections | super-serial slowdowns (ratio up to 10.98×) demonstrated; store-wide connection ceiling produces honest 1205s (`torture/findings/2026-08-17-multidb-concurrency-campaign.md`, status open) | medium | divergence |
 | Cross-database snapshots | linearizable catalog reads | catalog view explicitly not atomic across databases mid-commit (`Storage.fs:308–319`) | low | divergence |
 
