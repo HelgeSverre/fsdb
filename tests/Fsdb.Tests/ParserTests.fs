@@ -24,6 +24,7 @@ let private mkSelect
     Select
         { Projections = projections
           Distinct = false
+          CalculateFoundRows = false
           From = from |> Option.map (fun t -> FromTable { Database = None; Table = t; Alias = None })
           Joins = []
           Where = where
@@ -55,6 +56,12 @@ let tests =
                     | Select { Distinct = true; Projections = [ Col "name", None ] } -> ()
                     | other -> failtestf "expected Distinct = true, got %A" other
 
+                testCase "SELECT SQL_CALC_FOUND_ROWS carries the modifier"
+                <| fun _ ->
+                    match parseOk "SELECT SQL_CALC_FOUND_ROWS name FROM t LIMIT 2" with
+                    | Select { CalculateFoundRows = true; Limit = Some(Lit(VInt 2L)) } -> ()
+                    | other -> failtestf "expected CalculateFoundRows = true, got %A" other
+
                 testCase "FROM db.table AS alias parses a qualified, aliased TableRef"
                 <| fun _ ->
                     Expect.equal
@@ -62,6 +69,7 @@ let tests =
                         (Select
                             { Projections = [ Star None, None ]
                               Distinct = false
+                              CalculateFoundRows = false
                               From = Some(FromTable { Database = Some "information_schema"; Table = "tables"; Alias = Some "t" })
                               Joins = []
                               Where = None
@@ -83,6 +91,7 @@ let tests =
                         (Select
                             { Projections = [ Star None, None ]
                               Distinct = false
+                              CalculateFoundRows = false
                               From = Some(FromTable { Database = None; Table = "t"; Alias = Some "x" })
                               Joins = []
                               Where = None
@@ -1152,6 +1161,7 @@ let tests =
                             [ "a"; "b" ],
                             { Projections = [ col "x", None; col "y", None ]
                               Distinct = false
+                              CalculateFoundRows = false
                               From = Some(FromTable { Database = None; Table = "u"; Alias = None })
                               Joins = []
                               Where = Some(BinOp(Gt, col "x", Lit(VInt 1L)))

@@ -1186,16 +1186,18 @@ let private executeParsed (session: Session) (stmt: Statement) : Session * Query
         // (rather than already-rendered text) the metadata pass needs. See
         // `Session.LastResultColumnMetadata`'s doc for why this rides along
         // on `session` instead of widening this function's own return type.
-        let lastInsertId, lastGeneratedId, result, columnMetadata =
+        let lastInsertId, lastGeneratedId, result, columnMetadata, calculatedFoundRows =
             match stmt with
             | Select select ->
-                let result, types = withExecutionLimits (fun () -> Executor.runTopLevelSelect store registry dbName select)
-                session.LastInsertId, session.LastGeneratedId, result, types
-            | Union(first, rest, orderBy, limit, offset) ->
-                let result, types, _ =
-                    withExecutionLimits (fun () -> Executor.runUnionStmt store registry dbName first rest orderBy limit offset)
+                let result, types, calculatedFoundRows =
+                    withExecutionLimits (fun () -> Executor.runTopLevelSelect store registry dbName select)
 
-                session.LastInsertId, session.LastGeneratedId, result, types
+                session.LastInsertId, session.LastGeneratedId, result, types, calculatedFoundRows
+            | Union(first, rest, orderBy, limit, offset) ->
+                let result, types, calculatedFoundRows =
+                    withExecutionLimits (fun () -> Executor.runTopLevelUnion store registry dbName first rest orderBy limit offset)
+
+                session.LastInsertId, session.LastGeneratedId, result, types, calculatedFoundRows
             | _ ->
                 let foundRows = session.Capabilities &&& Fsdb.Protocol.ClientFoundRows <> 0u
 
@@ -1203,13 +1205,14 @@ let private executeParsed (session: Session) (stmt: Statement) : Session * Query
                     withExecutionLimits (fun () ->
                         Executor.execute store registry dbName (session.LastInsertId, session.LastGeneratedId) foundRows stmt)
 
-                lastInsertId, lastGeneratedId, result, []
+                lastInsertId, lastGeneratedId, result, [], None
 
         let session =
             { session with
                 LastInsertId = lastInsertId
                 LastGeneratedId = lastGeneratedId
-                LastResultColumnMetadata = columnMetadata }
+                LastResultColumnMetadata = columnMetadata
+                PendingFoundRows = calculatedFoundRows }
 
         let session =
             match session.Tx, result, stmt with
@@ -2025,12 +2028,14 @@ let private recordResult ((session, result): Session * QueryResult) : Session * 
         | Affected count ->
             { session with
                 LastRowCount = int64 count
-                FoundRows = 0UL }
+                FoundRows = 0UL
+                PendingFoundRows = None }
         | ResultSet(_, rows) ->
             { session with
                 LastRowCount = -1L
-                FoundRows = uint64 rows.Length }
-        | Err _ -> { session with LastRowCount = -1L }
+                FoundRows = session.PendingFoundRows |> Option.defaultValue (uint64 rows.Length)
+                PendingFoundRows = None }
+        | Err _ -> { session with LastRowCount = -1L; PendingFoundRows = None }
 
     session, result
 

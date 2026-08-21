@@ -217,6 +217,9 @@ type Session =
       /// statement on this connection.
       LastRowCount: int64
       FoundRows: uint64
+      /// Carries SQL_CALC_FOUND_ROWS across execution into `recordResult`,
+      /// which would otherwise replace it with the limited result length.
+      PendingFoundRows: uint64 option
       /// Per-column MySQL wire types for the most recent statement's
       /// `ResultSet`, if any — `[]` for anything else (an `Affected`/`Err`
       /// result, or a `ResultSet` this session's dispatch path didn't
@@ -296,6 +299,7 @@ let create (connectionId: int) (store: Store) : Session =
       LastGeneratedId = 0L
       LastRowCount = 0L
       FoundRows = 0UL
+      PendingFoundRows = None
       LastResultColumnMetadata = []
       Tx = None
       PendingTransactionReadOnly = None

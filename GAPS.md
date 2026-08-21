@@ -81,7 +81,6 @@ variants), USE, KILL, DESCRIBE are text-probed before the grammar
 
 | Gap | MySQL 8.4 | fsdb | Impact | Class |
 |---|---|---|---|---|
-| `SQL_CALC_FOUND_ROWS` | accepted and makes `FOUND_ROWS()` ignore LIMIT | modifier absent; `FOUND_ROWS()` reports returned rows | low | refusal |
 | Locking detail | `FOR UPDATE/SHARE [OF tbl…] [NOWAIT|SKIP LOCKED]` | `FOR UPDATE`/`FOR SHARE`/`LOCK IN SHARE MODE` accepted and ignored; no OF/NOWAIT/SKIP LOCKED | low | divergence |
 | CTE placement | `WITH` in subqueries, derived tables, `INSERT…WITH` | top-level SELECT/UNION only (`Parser.fs:2458–2464`) | medium | refusal |
 | Quantified comparison | `= ANY/SOME/ALL (subquery)` | absent | medium | refusal |

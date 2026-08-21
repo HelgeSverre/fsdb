@@ -7259,10 +7259,58 @@ let rec private explainStatement (store: Store) (registry: Registry) (dbName: st
 /// `QueryHandler.executeStatement`'s type-preserving entry point into
 /// `runSelectStmt`, which can't be `public` itself (see the doc there).
 /// `outer` is always `None` for a top-level statement, so this needs no
-/// `EvalContext` in its own signature.
-let runTopLevelSelect (store: Store) (registry: Registry) (dbName: string) (select: SelectStmt) : QueryResult * ColumnMetadata list =
-    let result, types, _ = runSelectStmt store registry dbName select None
-    result, types
+/// `EvalContext` in its own signature. SQL_CALC_FOUND_ROWS executes the
+/// unbounded query once and slices that result afterward, so expressions
+/// with side effects are not evaluated a second time merely to count rows.
+let runTopLevelSelect
+    (store: Store)
+    (registry: Registry)
+    (dbName: string)
+    (select: SelectStmt)
+    : QueryResult * ColumnMetadata list * uint64 option =
+    if select.CalculateFoundRows then
+        let unbounded =
+            { select with
+                CalculateFoundRows = false
+                Limit = None
+                Offset = None }
+
+        let result, types, values = runSelectStmt store registry dbName unbounded None
+        let limit = select.Limit |> Option.map rowCount
+        let offset = select.Offset |> Option.map rowCount
+
+        match result with
+        | ResultSet(columns, rows) ->
+            ResultSet(columns, applyLimitOffset limit offset rows), types, Some(uint64 values.Length)
+        | error -> error, types, None
+    else
+        let result, types, _ = runSelectStmt store registry dbName select None
+        result, types, None
+
+let runTopLevelUnion
+    (store: Store)
+    (registry: Registry)
+    (dbName: string)
+    (first: SelectStmt)
+    (rest: (SetOp * SelectStmt) list)
+    (orderBy: OrderKey list)
+    (limit: Expr option)
+    (offset: Expr option)
+    : QueryResult * ColumnMetadata list * uint64 option =
+    if first.CalculateFoundRows then
+        let result, types, values =
+            runUnionStmt store registry dbName { first with CalculateFoundRows = false } rest orderBy None None
+
+        let limit = limit |> Option.map rowCount
+        let offset = offset |> Option.map rowCount
+
+        match result with
+        | ResultSet(columns, rows) ->
+            ResultSet(columns, applyLimitOffset limit offset rows), types, Some(uint64 values.Length)
+        | error -> error, types, None
+    else
+        let result, types, _ = runUnionStmt store registry dbName first rest orderBy limit offset
+        result, types, None
 
 /// Folds one `insertRows`/`insertRowsIgnore`/`upsertRows` result's
 /// `(okPacketId, generatedId)` pair into `execute`'s own `ids` accumulator —

@@ -2371,6 +2371,7 @@ let private valuesTable: Parser<FromItem, unit> =
                 let branch (cells: Expr list) : SelectStmt =
                     { Projections = List.map2 (fun name cell -> cell, Some name) names cells
                       Distinct = false
+                      CalculateFoundRows = false
                       From = None
                       Joins = []
                       Where = None
@@ -2579,20 +2580,22 @@ let private lockClause: Parser<unit, unit> =
     (keyword "FOR" >>. (keyword "UPDATE" <|> (keyword "SHARE" >>% ())) >>% ())
     <|> (keyword "LOCK" >>. keyword "IN" >>. keyword "SHARE" >>. keyword "MODE" >>% ())
 
-let private selectModifiers: Parser<bool, unit> =
+let private selectModifiers: Parser<bool * bool, unit> =
     let duplicateMode =
         opt (choice [ keyword "DISTINCT" >>% true; keyword "DISTINCTROW" >>% true; keyword "ALL" >>% false ])
 
     let optimizerHint =
         choice
-            [ keyword "HIGH_PRIORITY"
-              keyword "STRAIGHT_JOIN"
-              keyword "SQL_SMALL_RESULT"
-              keyword "SQL_BIG_RESULT"
-              keyword "SQL_BUFFER_RESULT"
-              keyword "SQL_NO_CACHE" ]
+            [ keyword "SQL_CALC_FOUND_ROWS" >>% true
+              keyword "HIGH_PRIORITY" >>% false
+              keyword "STRAIGHT_JOIN" >>% false
+              keyword "SQL_SMALL_RESULT" >>% false
+              keyword "SQL_BIG_RESULT" >>% false
+              keyword "SQL_BUFFER_RESULT" >>% false
+              keyword "SQL_NO_CACHE" >>% false ]
 
-    duplicateMode .>> many optimizerHint |>> Option.defaultValue false
+    duplicateMode .>>. many optimizerHint
+    |>> fun (distinct, modifiers) -> Option.defaultValue false distinct, List.contains true modifiers
 
 selectStmtRecordRef.Value <-
     (keyword "SELECT" >>. selectModifiers .>>. sepBy1 projection (sym ",")
@@ -2604,13 +2607,14 @@ selectStmtRecordRef.Value <-
      .>>. opt (keyword "ORDER" >>. keyword "BY" >>. sepBy1 orderKey (sym ","))
      .>>. opt limitClause
      .>>. opt lockClause)
-    |>> fun (((((((((distinct, projs), fromAndJoins), where), groupBy), having), windows), orderBy), limitOffset), locking) ->
+    |>> fun ((((((((((distinct, calculateFoundRows), projs), fromAndJoins), where), groupBy), having), windows), orderBy), limitOffset), locking) ->
         let limit, offset = limitOffset |> Option.defaultValue (None, None)
         let from = fromAndJoins |> Option.map fst
         let joins = fromAndJoins |> Option.map snd |> Option.defaultValue []
 
         { Projections = projs
           Distinct = distinct
+          CalculateFoundRows = calculateFoundRows
           From = from
           Joins = joins
           Where = where
@@ -2682,6 +2686,7 @@ let private createTableAs: Parser<Statement, unit> =
 let private querySelect projections from orderBy limit offset =
     { Projections = projections
       Distinct = false
+      CalculateFoundRows = false
       From = from
       Joins = []
       Where = None

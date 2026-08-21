@@ -1412,6 +1412,30 @@ let tests =
                     "SHOW CREATE EVENT missing", Err(1539, "Unknown event 'missing'") ] do
                   Expect.equal (handle session sql |> snd) expected sql
 
+          testCase "SQL_CALC_FOUND_ROWS counts rows before LIMIT and OFFSET"
+          <| fun _ ->
+              let session = create 1 (Fsdb.Storage.create ())
+              let session, _ = handle session "CREATE TABLE found_rows_t (n INT)"
+              let session, _ = handle session "INSERT INTO found_rows_t VALUES (1), (2), (3), (4), (5)"
+
+              let session, result =
+                  handle session "SELECT SQL_CALC_FOUND_ROWS n FROM found_rows_t WHERE n > 1 ORDER BY n LIMIT 2 OFFSET 1"
+
+              Expect.equal result (ResultSet([ "n" ], [ [ Some "3" ]; [ Some "4" ] ])) "limited rows"
+
+              match handle session "SELECT FOUND_ROWS()" |> snd with
+              | ResultSet(_, [ [ Some "4" ] ]) -> ()
+              | other -> failtestf "expected four rows before LIMIT, got %A" other
+
+              let session, result =
+                  handle session "SELECT SQL_CALC_FOUND_ROWS 1 UNION ALL SELECT 2 UNION ALL SELECT 3 LIMIT 1"
+
+              Expect.equal result (ResultSet([ "1" ], [ [ Some "1" ] ])) "limited union rows"
+
+              match handle session "SELECT FOUND_ROWS()" |> snd with
+              | ResultSet(_, [ [ Some "3" ] ]) -> ()
+              | other -> failtestf "expected three union rows before LIMIT, got %A" other
+
           testCase "SET GLOBAL never changes the issuing session's own variable"
           <| fun _ ->
               let store = Fsdb.Storage.create ()

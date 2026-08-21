@@ -507,6 +507,7 @@ and Join =
 and SelectStmt =
     { Projections: Projection list
       Distinct: bool
+      CalculateFoundRows: bool
       From: FromItem option
       Joins: Join list
       Where: Expr option
