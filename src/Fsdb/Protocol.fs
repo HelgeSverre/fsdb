@@ -385,49 +385,26 @@ let textRowPayloadTyped (columns: ColumnMetadata list) (values: string option li
 /// way `readBinaryTime` recombines them. Length 0 for the all-zero time, 8
 /// without a fraction, 12 with microseconds.
 let private writeBinaryTime (w: Writer) (s: string) : unit =
-    let neg = s.StartsWith "-"
-    let body = if neg then s.Substring 1 else s
-
-    // A TIME column keeps raw text when TimeSpan parsing failed at insert
-    // time, so the rendered string here can be anything a client stored.
-    // Parse defensively — any malformed component collapses the whole value
-    // to a zero TIME rather than throwing in the binary send path (which
-    // runs after the handler returned and would otherwise drop the
-    // connection with no ERR).
-    let tryInt (x: string) =
-        match Int32.TryParse(x, Globalization.NumberStyles.Integer, Globalization.CultureInfo.InvariantCulture) with
-        | true, v -> Some v
-        | _ -> None
-
-    let timePart, micros =
-        match body.IndexOf '.' with
-        | -1 -> body, 0
-        | i -> body.Substring(0, i), (tryInt (body.Substring(i + 1).PadRight(6, '0').Substring(0, 6)) |> Option.defaultValue 0)
-
-    let parts = timePart.Split ':'
-
-    let totalHours, minute, second =
-        if parts.Length = 3 then
-            match tryInt parts.[0], tryInt parts.[1], tryInt parts.[2] with
-            | Some h, Some m, Some s -> h, m, s
-            | _ -> 0, 0, 0
-        else
-            0, 0, 0
-
-    let days, hour = totalHours / 24, totalHours % 24
-
-    if totalHours = 0 && minute = 0 && second = 0 && micros = 0 then
-        w.WriteByte 0uy
-    else
-        w.WriteByte(if micros = 0 then 8uy else 12uy)
-        w.WriteByte(if neg then 1uy else 0uy)
-        w.WriteInt32LE days
-        w.WriteByte(byte hour)
+    match tryParseTimeValue s with
+    | Some value when timeTicks value = 0L -> w.WriteByte 0uy
+    | Some value ->
+        let ticks = timeTicks value
+        let magnitude = abs ticks
+        let totalSeconds = magnitude / TimeSpan.TicksPerSecond
+        let totalHours = totalSeconds / 3600L
+        let minute = totalSeconds % 3600L / 60L
+        let second = totalSeconds % 60L
+        let micros = magnitude % TimeSpan.TicksPerSecond / 10L
+        w.WriteByte(if micros = 0L then 8uy else 12uy)
+        w.WriteByte(if ticks < 0L then 1uy else 0uy)
+        w.WriteInt32LE(int (totalHours / 24L))
+        w.WriteByte(byte (totalHours % 24L))
         w.WriteByte(byte minute)
         w.WriteByte(byte second)
 
-        if micros <> 0 then
-            w.WriteInt32LE micros
+        if micros <> 0L then
+            w.WriteInt32LE(int micros)
+    | None -> w.WriteByte 0uy
 
 /// `Int64.Parse` that yields `fallback` instead of throwing — see the
 /// integer cases in `writeBinaryValue` for why a throw is not an option
@@ -618,15 +595,12 @@ let private readBinaryDateTime (r: Reader) : Value =
             |> Option.defaultWith (fun () -> failwith "invalid zero datetime")
         | None -> VDateTime(DateTime(year, month, day, hour, minute, second).AddTicks(int64 micros * 10L))
 
-/// Reads a MySQL binary-protocol TIME value off `r` and renders it the way
-/// MySQL's TIME text form does (`[-][H]HH:MM:SS[.ffffff]`) — fsdb has no
-/// dedicated Value case for TIME (see `Value.Value`), so this returns
-/// already-formatted text rather than a typed value.
-let private readBinaryTime (r: Reader) : string =
+/// Reads a MySQL binary-protocol TIME value off `r`.
+let private readBinaryTime (r: Reader) : Value =
     let len = int (r.ReadByte())
 
     if len = 0 then
-        "00:00:00"
+        VTime(timeValueOrClamp 0L)
     else
         let isNegative = r.ReadByte()
         let days = r.ReadInt32LE()
@@ -637,9 +611,15 @@ let private readBinaryTime (r: Reader) : string =
         // int32 `days` can be attacker-controlled; widen so `days * 24`
         // can't wrap to a bogus hour count.
         let totalHours = int64 days * 24L + int64 hour
-        let sign = if isNegative <> 0uy then "-" else ""
-        let frac = if micros > 0 then sprintf ".%06d" micros else ""
-        sprintf "%s%02d:%02d:%02d%s" sign totalHours minute second frac
+        let ticks = ((totalHours * 3600L + int64 minute * 60L + int64 second) * TimeSpan.TicksPerSecond) + int64 micros * 10L
+        let ticks = if isNegative <> 0uy then -ticks else ticks
+
+        match tryTimeValue ticks with
+        | Some value -> VTime value
+        | None ->
+            let sign = if ticks < 0L then "-" else ""
+            let fraction = if micros = 0 then "" else sprintf ".%06d" micros
+            VString(sprintf "%s%02d:%02d:%02d%s" sign totalHours minute second fraction)
 
 /// Reads one COM_STMT_EXECUTE binary parameter value of MySQL binary type
 /// id `typeId` off `r`, decoded into an fsdb `Value`. `unsigned` only
@@ -705,7 +685,7 @@ let readBinaryValue (r: Reader) (typeId: byte) (unsigned: bool) : Value =
     elif typeId = TypeDateTime || typeId = TypeTimestamp then
         readBinaryDateTime r
     elif typeId = TypeTime then
-        VString(readBinaryTime r)
+        readBinaryTime r
     elif typeId = TypeBit then
         VBytes(lenEncBytes ())
     else

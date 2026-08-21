@@ -326,10 +326,10 @@ let tests =
                   r.ReadByte() |> ignore // null bitmap
                   readBinaryValue r TypeTime false
 
-              Expect.equal (roundTrip "10:20:30.126") (VString "10:20:30.126000") "microseconds (padded to 6 on decode)"
-              Expect.equal (roundTrip "838:59:59") (VString "838:59:59") "hours past 24 split into a days field"
-              Expect.equal (roundTrip "-01:02:03") (VString "-01:02:03") "negative duration"
-              Expect.equal (roundTrip "00:00:00") (VString "00:00:00") "zero time is the length-0 form"
+              Expect.equal (roundTrip "10:20:30.126") (VTime(tryParseTimeValue "10:20:30.126000" |> Option.get)) "microseconds"
+              Expect.equal (roundTrip "838:59:59") (VTime(tryParseTimeValue "838:59:59" |> Option.get)) "hours past 24 split into a days field"
+              Expect.equal (roundTrip "-01:02:03") (VTime(tryParseTimeValue "-01:02:03" |> Option.get)) "negative duration"
+              Expect.equal (roundTrip "00:00:00") (VTime(timeValueOrClamp 0L)) "zero time is the length-0 form"
 
           testCase "binary DATE/DATETIME/TIME decode length variants, zero values, and integer signs"
           <| fun _ ->
@@ -362,10 +362,10 @@ let tests =
                   (VDateTime(DateTime(2024, 3, 5, 13, 45, 9).AddTicks 1234560L))
                   "datetime with microseconds"
 
-              // length 0 TIME renders the zero text form
+              // length 0 TIME is zero
               let tzero = Writer()
               tzero.WriteByte 0uy
-              Expect.equal (readBinaryValue (Reader(tzero.ToArray())) TypeTime false) (VString "00:00:00") "zero time"
+              Expect.equal (readBinaryValue (Reader(tzero.ToArray())) TypeTime false) (VTime(timeValueOrClamp 0L)) "zero time"
 
               // negative TIME (len=12) with microseconds: 1 day + 10 hours
               let time = Writer()
@@ -376,7 +376,7 @@ let tests =
               time.WriteByte 20uy
               time.WriteByte 30uy
               time.WriteInt32LE 123456
-              Expect.equal (readBinaryValue (Reader(time.ToArray())) TypeTime false) (VString "-34:20:30.123456") "negative time with microseconds"
+              Expect.equal (readBinaryValue (Reader(time.ToArray())) TypeTime false) (VTime(tryParseTimeValue "-34:20:30.123456" |> Option.get)) "negative time with microseconds"
 
               // TINYINT: 0xFF is -1 signed, 255 unsigned
               let tiny = Writer()
