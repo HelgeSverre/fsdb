@@ -7138,6 +7138,7 @@ type private UpdatableView =
       Table: string
       Columns: Map<string, string>
       OrderedColumns: string list
+      Predicate: Expr option
       Definer: string }
 
 let private tryUpdatableView (store: Store) (dbName: string) (viewName: string) : UpdatableView option =
@@ -7147,7 +7148,6 @@ let private tryUpdatableView (store: Store) (dbName: string) (viewName: string) 
             when select.Joins.IsEmpty
                  && not select.Distinct
                  && not select.CalculateFoundRows
-                 && select.Where.IsNone
                  && select.GroupBy.IsEmpty
                  && not select.Rollup
                  && select.Windows.IsEmpty
@@ -7181,6 +7181,7 @@ let private tryUpdatableView (store: Store) (dbName: string) (viewName: string) 
                           Table = source.Table
                           Columns = List.zip outputNames (sourceNames |> List.map snd) |> List.map (fun (viewColumn, baseColumn) -> viewColumn.ToLowerInvariant(), baseColumn) |> Map.ofList
                           OrderedColumns = outputNames
+                          Predicate = select.Where |> Option.map (rewriteExprWith (function QualifiedCol(_, column) -> Some(Col column) | _ -> None))
                           Definer = view.Definer }: UpdatableView
                     )
         | _ -> None
@@ -7210,6 +7211,12 @@ let private resolveViewColumns (view: UpdatableView) (columns: string list) =
         match Map.tryFind (column.ToLowerInvariant()) view.Columns with
         | Some baseColumn -> Ok baseColumn
         | None -> Error(Err(1054, sprintf "Unknown column '%s' in field list" column)))
+
+let private combineViewPredicate predicate whereClause =
+    match predicate, whereClause with
+    | Some predicate, Some whereClause -> Some(BinOp(And, predicate, whereClause))
+    | Some predicate, None -> Some predicate
+    | None, whereClause -> whereClause
 
 // ---------------------------------------------------------------------------
 // EXPLAIN — a pure *description* of what this executor would actually do
@@ -9794,7 +9801,7 @@ let rec execute (store: Store) (registry: Registry) (dbName: string) (ids: int64
                                     Table = assignment.Table |> Option.map (fun _ -> updateStmt.From.Alias |> Option.defaultValue view.Table)
                                     Column = column
                                     Value = rewrite assignment.Value })
-                        Where = updateStmt.Where |> Option.map rewrite
+                        Where = combineViewPredicate view.Predicate (updateStmt.Where |> Option.map rewrite)
                         OrderBy = updateStmt.OrderBy |> List.map (fun (expression, direction) -> rewrite expression, direction)
                         Limit = updateStmt.Limit |> Option.map rewrite }
 
@@ -10151,7 +10158,7 @@ let rec execute (store: Store) (registry: Registry) (dbName: string) (ids: int64
                 { deleteStmt with
                     From = { deleteStmt.From with Database = Some view.Database; Table = view.Table }
                     Targets = [ deleteStmt.From.Alias |> Option.defaultValue view.Table ]
-                    Where = deleteStmt.Where |> Option.map rewrite
+                    Where = combineViewPredicate view.Predicate (deleteStmt.Where |> Option.map rewrite)
                     OrderBy = deleteStmt.OrderBy |> List.map (fun (expression, direction) -> rewrite expression, direction)
                     Limit = deleteStmt.Limit |> Option.map rewrite }
 
