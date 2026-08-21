@@ -81,6 +81,11 @@ let private parseCommand (payload: byte[]) : Command option =
         with _ ->
             Some(Malformed payload.[0])
 
+let private isShutdownStatement (sql: string) : bool =
+    let text = sql.Trim()
+    let text = if text.EndsWith ';' then text.[..text.Length - 2].TrimEnd() else text
+    text.Equals("SHUTDOWN", StringComparison.OrdinalIgnoreCase)
+
 let private randomAuthPluginData () : byte[] =
     let bytes = Array.zeroCreate<byte> 20
     RandomNumberGenerator.Fill bytes
@@ -516,6 +521,7 @@ let private handleConnection
     (connectionId: int)
     (store: Storage.Store)
     (customFunctions: Functions.Registry)
+    (shutdown: unit -> unit)
     (client: TcpClient)
     : Async<unit> =
     async {
@@ -658,34 +664,55 @@ let private handleConnection
                                     return! loop session
                             | Some(Query sql) ->
                                 InformationSchema.recordQuestion ()
-                                processEntry.Command <- "Query"
-                                processEntry.State <- "executing"
-                                processEntry.StateSince <- DateTime.Now
-                                processEntry.Info <- Some(Log.redactSql sql)
+                                if isShutdownStatement sql then
+                                    match Auth.check store session.User [ "SHUTDOWN", Auth.Global ] with
+                                    | Ok() ->
+                                        do!
+                                            writePacketAsync
+                                                stream
+                                                { SeqId = seqId
+                                                  Payload = okPayload capabilities (statusFlagsFor session) 0UL 0UL }
+                                            |> Async.Ignore
 
-                                let dispatched = runCancellable (fun () -> QueryHandler.handle session sql)
-                                processEntry.Command <- "Sleep"
-                                processEntry.State <- ""
-                                processEntry.StateSince <- DateTime.Now
-                                processEntry.Info <- None
+                                        shutdown ()
+                                    | Error(code, message) ->
+                                        do!
+                                            writePacketAsync
+                                                stream
+                                                { SeqId = seqId
+                                                  Payload = errPayload capabilities code message }
+                                            |> Async.Ignore
 
-                                match dispatched with
-                                | None -> ()
-                                | Some(session, result) ->
-                                    activeSession <- Some session
-                                    processEntry.Db <- session.Database
+                                        return! loop session
+                                else
+                                    processEntry.Command <- "Query"
+                                    processEntry.State <- "executing"
+                                    processEntry.StateSince <- DateTime.Now
+                                    processEntry.Info <- Some(Log.redactSql sql)
 
-                                    do!
-                                        sendQueryResult
-                                            stream
-                                            capabilities
-                                            seqId
-                                            (statusFlagsFor session)
-                                            (uint64 session.LastInsertId)
-                                            session.LastResultColumnMetadata
-                                            result
+                                    let dispatched = runCancellable (fun () -> QueryHandler.handle session sql)
+                                    processEntry.Command <- "Sleep"
+                                    processEntry.State <- ""
+                                    processEntry.StateSince <- DateTime.Now
+                                    processEntry.Info <- None
 
-                                    return! loop session
+                                    match dispatched with
+                                    | None -> ()
+                                    | Some(session, result) ->
+                                        activeSession <- Some session
+                                        processEntry.Db <- session.Database
+
+                                        do!
+                                            sendQueryResult
+                                                stream
+                                                capabilities
+                                                seqId
+                                                (statusFlagsFor session)
+                                                (uint64 session.LastInsertId)
+                                                session.LastResultColumnMetadata
+                                                result
+
+                                        return! loop session
                             | Some Statistics ->
                                 let uptime = max 0L (int64 (DateTime.Now - InformationSchema.serverStartedAt).TotalSeconds)
                                 let questions = InformationSchema.questions ()
@@ -1123,7 +1150,8 @@ let port (listener: TcpListener) : int =
 /// None once the listener has been stopped/disposed — the clean way to shut
 /// the server down from the outside. `InvalidOperationException` is what
 /// `AcceptTcpClientAsync` throws when a concurrent `Stop()` lands before the
-/// accept starts ("Not listening") — same shutdown, third spelling.
+/// accept starts ("Not listening"); some runtimes wrap socket cancellation
+/// in `AggregateException`.
 let private tryAccept (listener: TcpListener) : Async<TcpClient option> =
     async {
         try
@@ -1133,6 +1161,10 @@ let private tryAccept (listener: TcpListener) : Async<TcpClient option> =
         | :? ObjectDisposedException
         | :? InvalidOperationException
         | :? SocketException -> return None
+        | :? AggregateException as aggregate
+            when aggregate.Flatten().InnerExceptions
+                 |> Seq.forall (fun error -> error :? ObjectDisposedException || error :? InvalidOperationException || error :? SocketException) ->
+            return None
     }
 
 /// Accepts connections until the listener is stopped, handling each on its
@@ -1179,7 +1211,7 @@ let serve (listener: TcpListener) (store: Storage.Store) (customFunctions: Funct
                         async {
                             try
                                 try
-                                    do! handleConnection connectionId store customFunctions client
+                                    do! handleConnection connectionId store customFunctions listener.Stop client
                                 with ex ->
                                     Log.diagnostic "fsdb: connection %d: %s" connectionId ex.Message
                             finally

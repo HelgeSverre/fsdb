@@ -11,10 +11,7 @@ open Fsdb.Session
 open Fsdb.Executor
 open Fsdb.QueryHandler
 
-/// Connects a raw `TcpClient` to `port` and completes a minimal, no-auth
-/// HandshakeResponse41 (no database) — the same boilerplate every raw-socket
-/// wire test below needs before it can send its own command packets.
-let private connectRaw (port: int) : Async<Net.Sockets.TcpClient * IO.Stream> =
+let private connectRawAs (port: int) (username: string) : Async<Net.Sockets.TcpClient * IO.Stream> =
     async {
         let client = new Net.Sockets.TcpClient()
         do! client.ConnectAsync(Net.IPAddress.Loopback, port) |> Async.AwaitTask
@@ -29,7 +26,7 @@ let private connectRaw (port: int) : Async<Net.Sockets.TcpClient * IO.Stream> =
             w.WriteInt32LE 16777216
             w.WriteByte 45uy
             w.WriteBytes(Array.zeroCreate<byte> 23)
-            w.WriteNullTerminatedString "root"
+            w.WriteNullTerminatedString username
             w.WriteByte 0uy // zero-length auth response
             w.ToArray()
 
@@ -37,6 +34,9 @@ let private connectRaw (port: int) : Async<Net.Sockets.TcpClient * IO.Stream> =
         let! _ = readPacketAsync stream // connection OK
         return client, (stream :> IO.Stream)
     }
+
+/// Connects a raw client as the passwordless bootstrap account.
+let private connectRaw (port: int) : Async<Net.Sockets.TcpClient * IO.Stream> = connectRawAs port "root"
 
 let tests =
     testList
@@ -1860,6 +1860,45 @@ let tests =
                       Expect.isSome next "connection remains usable"
                   finally
                       listener.Stop()
+              }
+              |> Async.RunSynchronously
+
+          testCase "SHUTDOWN acknowledges before stopping the listener"
+          <| fun _ ->
+              async {
+                  let listener = Fsdb.Server.startListening System.Net.IPAddress.Loopback 0
+                  let port = Fsdb.Server.port listener
+                  let store = Fsdb.Storage.create ()
+                  Fsdb.Auth.createUser store "ordinary" "%" None |> ignore
+                  let serving = Fsdb.Server.serve listener store Fsdb.Functions.empty |> Async.StartAsTask
+
+                  let! ordinary, ordinaryStream = connectRawAs port "ordinary"
+                  use ordinary = ordinary
+                  let shutdown = Array.append [| 0x03uy |] (Text.Encoding.UTF8.GetBytes "SHUTDOWN")
+                  let! _ = writePacketAsync ordinaryStream { SeqId = 0uy; Payload = shutdown }
+                  let! denied = readPacketAsync ordinaryStream
+                  Expect.equal (Reader(denied.Value.Payload.[1..]).ReadInt16LE()) 1227 "ordinary user is denied"
+
+                  let! _ = writePacketAsync ordinaryStream { SeqId = 0uy; Payload = [| 0x0euy |] }
+                  let! ping = readPacketAsync ordinaryStream
+                  Expect.equal ping.Value.Payload.[0] 0x00uy "denied shutdown leaves listener alive"
+
+                  let! client, stream = connectRaw port
+                  use client = client
+                  let! _ = writePacketAsync stream { SeqId = 0uy; Payload = shutdown }
+                  let! reply = readPacketAsync stream
+                  Expect.equal reply.Value.Payload.[0] 0x00uy "shutdown replies OK"
+                  do! serving |> Async.AwaitTask
+
+                  use probe = new Net.Sockets.TcpClient()
+                  let refused =
+                      try
+                          probe.Connect(Net.IPAddress.Loopback, port)
+                          false
+                      with :? Net.Sockets.SocketException ->
+                          true
+
+                  Expect.isTrue refused "listener is stopped"
               }
               |> Async.RunSynchronously
 
