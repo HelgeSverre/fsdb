@@ -6,11 +6,13 @@ PATH 'path' | col FOR ORDINALITY)) alias`. Read-only oracle probes (MySQL
 exercised by the `json_table_lateral` / `json_table_inner_drop` scalar-scenario
 probes (Harness.fs `ScenarioProbes`) and the Expecto `JSON_TABLE` list.
 
-## Deliberate gaps (refusals, not silent divergence)
+## Resolved clauses and joins
 
-- **NESTED PATH / EXISTS PATH / DEFAULT ... ON EMPTY|ERROR** don't parse —
-  the subset is fixed NULL-on-empty/error (MySQL's probed default). The
-  `Parser.fs` ponytail comment names the skipped clauses.
+`ERROR ON EMPTY` and `ERROR ON ERROR` now raise MySQL's 3665 and 3156,
+respectively.
+
+- **NESTED PATH / EXISTS PATH / DEFAULT ... ON EMPTY|ERROR** are supported,
+  including nested outer semantics and JSON-decoded defaults.
 - **LEFT JOIN JSON_TABLE(...) ON expr** now keeps unmatched left rows and
   null-pads the JSON_TABLE columns, including empty and NULL documents.
 - **JOIN JSON_TABLE(...) USING (col)** now applies the collation-aware
@@ -38,6 +40,4 @@ skips.
 Per TORTURE-TESTING.md §"If deferring", `support/known-gaps.json` gains a
 signature only after a real torture run reproduces a divergence and it is
 reviewed and minimized. No such signature exists yet — the ledger stays empty;
-the refusals above error identically on every run, so they classify as
-`oracle_rejected`-vs-`fsdb` probe gaps only if someone adds a probe using the
-unsupported syntax (deliberately not done: refusal is the contract).
+the remaining error-shape divergence has no enrolled signature.

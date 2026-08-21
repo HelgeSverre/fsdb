@@ -2399,9 +2399,7 @@ let private valuesTable: Parser<FromItem, unit> =
 /// with its optional `DEFAULT ... ON EMPTY|ERROR` clauses, or `name TYPE
 /// EXISTS PATH 'path'`. `columnType` is the CREATE TABLE/CAST type grammar,
 /// so every declarable type works here too, and `NESTED [PATH] 'p' COLUMNS
-/// (...)` recurses into this same rule. ponytail: `ERROR ON EMPTY|ERROR`
-/// (raise instead of substitute) isn't accepted — grow this parser +
-/// `Ast.JsonTableColumn` when one's needed.
+/// (...)` recurses into this same rule.
 let private jsonTableColumn, jsonTableColumnRef = createParserForwardedToRef<JsonTableColumn, unit> ()
 
 let private nestedJsonTableColumn: Parser<JsonTableColumn, unit> =
@@ -2433,20 +2431,21 @@ let private flatJsonTableColumn: Parser<JsonTableColumn, unit> =
     // `DEFAULT <json-text> ON EMPTY|ERROR`, in MySQL's fixed ON EMPTY-then-ON
     // ERROR order; `NULL ON EMPTY|ERROR` restates the default, so it parses
     // to the same `None` an absent clause gives.
-    let onClause (which: string) : Parser<Value option, unit> =
+    let onClause (which: string) : Parser<JsonTableAction, unit> =
         opt (
             attempt (
                 ((keyword "DEFAULT" >>. literalValue
                   >>= fun v ->
                       match jsonDefault v with
-                      | Some d -> preturn (Some d)
+                      | Some d -> preturn (JsonDefault d)
                       | None -> fail "DEFAULT for a JSON_TABLE column must be a string of valid JSON text")
-                 <|> (keyword "NULL" >>% None))
+                 <|> (keyword "NULL" >>% JsonNull)
+                 <|> (keyword "ERROR" >>% JsonError))
                 .>> keyword "ON"
                 .>> keyword which
             )
         )
-        |>> Option.flatten
+        |>> Option.defaultValue JsonNull
 
     identifier
     >>= fun name ->

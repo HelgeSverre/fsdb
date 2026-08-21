@@ -2620,19 +2620,28 @@ and private jsonTableRows (doc: Value) (path: string) (columns: JsonTableColumn 
     // under an INT column takes the ON ERROR branch, while a matched JSON
     // *null* is simply NULL and takes neither branch).
     let coerce (ty: ColumnType) (raw: Value) : Result<Value, unit> =
-        match Storage.coerceValue true (jsonTableColumnDefs [ PathColumn("JSON_TABLE", ty, "", None, None) ] |> List.head) raw with
+        match Storage.coerceValue true (jsonTableColumnDefs [ PathColumn("JSON_TABLE", ty, "", JsonNull, JsonNull) ] |> List.head) raw with
         | Ok v -> Ok v
         | Error _ -> Error()
 
-    /// A `DEFAULT lit ON EMPTY|ERROR` value in the column's own type; the
-    /// parser has already decoded the clause's JSON text (`'"zz"'` arrives as
-    /// `zz`), so this only coerces. `None` (an absent clause, or `NULL ON
-    /// ...`) is MySQL's default, NULL.
-    let defaultOf (ty: ColumnType) (lit: Value option) : Value =
-        match lit with
-        | None
-        | Some VNull -> VNull
-        | Some v -> coerce ty v |> Result.defaultValue VNull
+    let actionValue (name: string) (ty: ColumnType) (rowNumber: int) (onError: bool) (action: JsonTableAction) : Result<Value, QueryResult> =
+        match action with
+        | JsonNull -> Ok VNull
+        | JsonDefault VNull -> Ok VNull
+        | JsonDefault value -> Ok(coerce ty value |> Result.defaultValue VNull)
+        | JsonError when onError ->
+            let targetType =
+                match ty with
+                | TTinyInt _
+                | TSmallInt _
+                | TMediumInt _
+                | TInt _
+                | TBigInt _
+                | TBool -> "INTEGER"
+                | _ -> InformationSchema.columnTypeText ty |> _.ToUpperInvariant()
+
+            Error(Err(3156, sprintf "Invalid JSON value for CAST to %s from column %s at row %d" targetType name rowNumber))
+        | JsonError -> Error(Err(3665, sprintf "Missing value for JSON_TABLE column '%s'" name))
 
     let columnValue (ty: ColumnType) (node: JsonNode) : Result<Value, unit> =
         match node with
@@ -2671,10 +2680,10 @@ and private jsonTableRows (doc: Value) (path: string) (columns: JsonTableColumn 
             | None -> Error(Err(3143, "Invalid JSON path expression. The error is around character position 1."))
             | Some matches ->
                 // One node's non-nested cells, in declaration order.
-                let plainCells (node: JsonNode) (ordinal: int) (cols: JsonTableColumn list) =
+                let plainCells (node: JsonNode) (ordinal: int) (cols: JsonTableColumn list) : Result<Value list, QueryResult> =
                     cols
-                    |> List.map (function
-                        | ForOrdinality _ -> VInt(int64 ordinal + 1L)
+                    |> traverse (function
+                        | ForOrdinality _ -> Ok(VInt(int64 ordinal + 1L))
                         | ExistsColumn(_, ty, colPath) ->
                             // Never NULL and never an error: 1 when the path
                             // matches at least one node, 0 otherwise, in the
@@ -2684,62 +2693,67 @@ and private jsonTableRows (doc: Value) (path: string) (columns: JsonTableColumn 
                                 | Some(_ :: _) -> 1L
                                 | _ -> 0L
 
-                            coerce ty (VInt hit) |> Result.defaultValue (VInt hit)
-                        | PathColumn(_, ty, colPath, onEmpty, onError) ->
+                            Ok(coerce ty (VInt hit) |> Result.defaultValue (VInt hit))
+                        | PathColumn(name, ty, colPath, onEmpty, onError) ->
                             // ponytail: an unparseable *column* path takes the
                             // ON ERROR branch instead of MySQL's 3143 at
                             // prepare time; a multi-node match is ON ERROR too.
                             match Functions.jsonPathNodes node colPath with
-                            | Some [ single ] -> columnValue ty single |> Result.defaultWith (fun () -> defaultOf ty onError)
-                            | Some [] -> defaultOf ty onEmpty
-                            | _ -> defaultOf ty onError
-                        | NestedColumns _ -> VNull)
+                            | Some [ single ] ->
+                                match columnValue ty single with
+                                | Ok value -> Ok value
+                                | Error() -> actionValue name ty (ordinal + 1) true onError
+                            | Some [] -> actionValue name ty (ordinal + 1) false onEmpty
+                            | _ -> actionValue name ty (ordinal + 1) true onError
+                        | NestedColumns _ -> Ok VNull)
 
                 // A NESTED PATH multiplies its parent's row once per node it
                 // matches, and siblings never cross-join: each sibling's rows
                 // carry NULL for the others' columns. A parent whose nested
                 // paths all match nothing still yields one row with those
                 // columns NULL (MySQL's OUTER semantics).
-                let rec expand (node: JsonNode) (ordinal: int) (cols: JsonTableColumn list) : Value list list =
-                    let plain = plainCells node ordinal cols
-                    let width = List.map (fun c -> List.length (jsonTableColumnDefs [ c ])) cols
+                let rec expand (node: JsonNode) (ordinal: int) (cols: JsonTableColumn list) : Result<Value list list, QueryResult> =
+                    plainCells node ordinal cols
+                    |> Result.bind (fun plain ->
+                        // Splice one sibling's expanded cells into the flattened
+                        // row, leaving every other slot as its NULL placeholder.
+                        let spliceAt (index: int) (cells: Value list) =
+                            cols
+                            |> List.mapi (fun i c ->
+                                match c with
+                                | NestedColumns _ when i = index -> cells
+                                | NestedColumns(_, nested) -> jsonTableColumnDefs nested |> List.map (fun _ -> VNull)
+                                | _ -> [ List.item i plain ])
+                            |> List.collect id
 
-                    // Splice one sibling's expanded cells into the flattened
-                    // row, leaving every other slot as its NULL placeholder.
-                    let spliceAt (index: int) (cells: Value list) =
-                        cols
-                        |> List.mapi (fun i c ->
-                            match c with
-                            | NestedColumns _ when i = index -> cells
-                            | NestedColumns(_, nested) -> jsonTableColumnDefs nested |> List.map (fun _ -> VNull)
-                            | _ -> [ List.item i plain ])
-                        |> List.collect id
+                        let nestedRows =
+                            cols
+                            |> List.indexed
+                            |> traverse (fun (i, c) ->
+                                match c with
+                                | NestedColumns(nestedPath, nested) ->
+                                    match Functions.jsonPathNodes node nestedPath with
+                                    | Some (_ :: _ as nodes) ->
+                                        nodes
+                                        |> List.mapi (fun j child -> expand child j nested)
+                                        |> traverse id
+                                        |> Result.map (List.collect id >> List.map (spliceAt i))
+                                    | _ -> Ok []
+                                | _ -> Ok [])
+                            |> Result.map (List.collect id)
 
-                    let nestedRows =
-                        cols
-                        |> List.indexed
-                        |> List.collect (fun (i, c) ->
-                            match c with
-                            | NestedColumns(nestedPath, nested) ->
-                                match Functions.jsonPathNodes node nestedPath with
-                                | Some (_ :: _ as nodes) ->
-                                    nodes
-                                    |> List.mapi (fun j child -> expand child j nested |> List.map (spliceAt i))
-                                    |> List.collect id
-                                | _ -> []
-                            | _ -> [])
-
-                    match nestedRows with
-                    | [] when cols |> List.exists (function NestedColumns _ -> true | _ -> false) ->
-                        // Outer semantics: keep the parent, NULL the nested.
-                        [ spliceAt -1 [] ]
-                    | [] -> [ plain ]
-                    | rows -> rows
+                        nestedRows
+                        |> Result.map (fun rows ->
+                            match rows with
+                            | [] when cols |> List.exists (function NestedColumns _ -> true | _ -> false) ->
+                                [ spliceAt -1 [] ]
+                            | [] -> [ plain ]
+                            | rows -> rows))
 
                 matches
-                |> List.mapi (fun i node -> expand node i columns |> List.map Array.ofList)
-                |> List.collect id
-                |> Ok
+                |> List.mapi (fun i node -> expand node i columns)
+                |> traverse id
+                |> Result.map (List.collect id >> List.map (List.toArray))
 
 and private resolveFromItem (store: Store) (registry: Registry) (dbName: string) (item: FromItem) : Result<ColumnDef list * Value[] list, QueryResult> =
     match item with

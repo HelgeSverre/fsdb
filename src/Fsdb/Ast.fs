@@ -429,23 +429,21 @@ and FromItem =
     /// (`FROM t, JSON_TABLE(t.doc, ...)`) carries the left table's column
     /// reference; the alias is mandatory (MySQL's 3667 "Every table function
     /// must have an alias"), enforced by the grammar like a derived table's.
-    /// ponytail: no `ERROR ON EMPTY|ERROR` — both clauses fall back to their
-    /// value/NULL branch instead of raising; add it here +
-    /// `Parser.jsonTableColumn` + `Executor.jsonTableRows` when needed.
     | FromJsonTable of source: Expr * path: string * columns: JsonTableColumn list * alias: string
+
+and JsonTableAction =
+    | JsonNull
+    | JsonDefault of Value
+    | JsonError
 
 /// One column of a `JSON_TABLE(...) COLUMNS (...)` clause.
 and JsonTableColumn =
     /// `name FOR ORDINALITY` — 1-based row counter, restarting per source row.
     | ForOrdinality of name: string
     /// `name TYPE PATH 'path' [DEFAULT lit ON EMPTY] [DEFAULT lit ON ERROR]`
-    /// — extracted, unquoted, coerced. `onEmpty`/`onError` carry the *decoded
-    /// JSON* a `DEFAULT ... ON EMPTY` / `ON ERROR` clause names (MySQL takes
-    /// JSON text there, not a SQL literal); `None` is MySQL's
-    /// own default for both, NULL. (`NULL ON EMPTY|ERROR` is spelled the same
-    /// way as the absent clause, so it needs no separate case; `ERROR ON
-    /// EMPTY|ERROR` is not supported — see `Parser.jsonTableColumn`.)
-    | PathColumn of name: string * ColumnType * path: string * onEmpty: Value option * onError: Value option
+    /// — extracted, unquoted, coerced. `onEmpty`/`onError` carry NULL,
+    /// decoded JSON defaults, or the request to raise an error.
+    | PathColumn of name: string * ColumnType * path: string * onEmpty: JsonTableAction * onError: JsonTableAction
     /// `name TYPE EXISTS PATH 'path'` — 1 when the path matches at least one
     /// node in the row, 0 otherwise; never NULL, never an error.
     | ExistsColumn of name: string * ColumnType * path: string

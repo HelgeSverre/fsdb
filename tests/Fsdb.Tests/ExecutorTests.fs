@@ -6542,6 +6542,22 @@ let tests =
                     | ResultSet(_, [ [ Some "1" ]; [ Some "7" ]; [ Some "9" ]; [ None ] ]) -> ()
                     | other -> failtestf "expected 1, 7, 9, NULL, got %A" other
 
+                    match
+                        runDefault
+                            (newStore ())
+                            "SELECT jt.v FROM JSON_TABLE('[{}]', '$[*]' COLUMNS (v INT PATH '$.v' ERROR ON EMPTY)) AS jt"
+                    with
+                    | Err(3665, "Missing value for JSON_TABLE column 'v'") -> ()
+                    | other -> failtestf "expected 3665 for ERROR ON EMPTY, got %A" other
+
+                    match
+                        runDefault
+                            (newStore ())
+                            "SELECT jt.v FROM JSON_TABLE('[{\"v\":\"x\"}]', '$[*]' COLUMNS (v INT PATH '$.v' ERROR ON ERROR)) AS jt"
+                    with
+                    | Err(3156, "Invalid JSON value for CAST to INTEGER from column v at row 1") -> ()
+                    | other -> failtestf "expected 3156 for ERROR ON ERROR, got %A" other
+
                     // The DEFAULT clause takes JSON *text*, so the substituted
                     // string arrives unquoted; the un-JSON 'zz' (oracle 3141)
                     // and the bare number 7 (oracle 1235) are refused.
