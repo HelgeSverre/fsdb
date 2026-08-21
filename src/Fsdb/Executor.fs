@@ -8550,9 +8550,14 @@ let rec execute (store: Store) (registry: Registry) (dbName: string) (ids: int64
                 upsertRows s db table cols rowsValues computeGenerated applyUpdate foundRows)
 
     let replaceEvaluated (db: string) (table: string) (cols: string list option) (rowsValues: Value list list) =
-        match scan store db table with
-        | Error error -> ids, storageErr error
-        | Ok(tableColumns, _) ->
+        let deleteTriggers =
+            triggersFor store db table "BEFORE" "DELETE"
+            @ triggersFor store db table "AFTER" "DELETE"
+
+        match deleteTriggers, scan store db table with
+        | _ :: _, _ -> ids, Err(1235, "REPLACE on a table with DELETE triggers is not supported")
+        | [], Error error -> ids, storageErr error
+        | [], Ok(tableColumns, _) ->
             finishInsert db table (fun targetStore ->
                 replaceRows
                     targetStore

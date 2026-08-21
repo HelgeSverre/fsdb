@@ -149,6 +149,22 @@ let tests =
               Expect.equal (runDefault store "REPLACE INTO t VALUES (1, 20)") (Affected 2UL) "replacement path"
               Expect.equal (rows store "SELECT n FROM log ORDER BY id") [ [ Some "10" ]; [ Some "20" ] ] "one insert event per candidate"
 
+          testCase "REPLACE refuses tables with DELETE triggers"
+          <| fun _ ->
+              let store = Fsdb.Storage.create ()
+              setup store
+              expectOk (runDefault store "INSERT INTO t VALUES (1, 10)") "seed t"
+              expectOk
+                  (runDefault store "CREATE TRIGGER delete_log AFTER DELETE ON t FOR EACH ROW INSERT INTO log(n) VALUES (OLD.n)")
+                  "create delete trigger"
+
+              Expect.equal
+                  (runDefault store "REPLACE INTO t VALUES (1, 20)")
+                  (Err(1235, "REPLACE on a table with DELETE triggers is not supported"))
+                  "REPLACE cannot silently skip DELETE triggers"
+
+              Expect.equal (rows store "SELECT n FROM t") [ [ Some "10" ] ] "refused statement changes no rows"
+
           testCase "ON DUPLICATE KEY UPDATE fires only for rows that actually inserted"
           <| fun _ ->
               let store = Fsdb.Storage.create ()
