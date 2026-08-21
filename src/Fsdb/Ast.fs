@@ -607,6 +607,7 @@ type Statement =
         /// dumped counter even before any row lands.
         autoIncrementSeed: int64 option
     | CreateTableLike of name: string * source: string * ifNotExists: bool
+    | CreateTableAs of name: string * query: Statement * ifNotExists: bool
     | DropTable of names: string list * ifExists: bool
     | AlterTable of table: string * actions: AlterAction list
     | RenameTable of pairs: (string * string) list

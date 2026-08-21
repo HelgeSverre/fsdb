@@ -719,6 +719,12 @@ let tests =
                         (CreateTableLike("archive", "app.source", true))
                         "create table like"
 
+                testCase "CREATE TABLE AS SELECT"
+                <| fun _ ->
+                    match parseOk "CREATE TABLE IF NOT EXISTS archive AS SELECT id, name FROM source" with
+                    | CreateTableAs("archive", Select { Projections = [ Col "id", None; Col "name", None ] }, true) -> ()
+                    | other -> failtestf "expected CREATE TABLE AS SELECT, got %A" other
+
                 testCase "IF NOT EXISTS"
                 <| fun _ ->
                     Expect.equal

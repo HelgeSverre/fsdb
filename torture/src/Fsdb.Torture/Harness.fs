@@ -24,6 +24,7 @@ module AstKind =
         | DropDatabase _ -> "drop_database"
         | CreateTable _ -> "create_table"
         | CreateTableLike _ -> "create_table_like"
+        | CreateTableAs _ -> "create_table_as"
         | DropTable _ -> "drop_table"
         | AlterTable _ -> "alter_table"
         | AlterDatabase _ -> "alter_database"

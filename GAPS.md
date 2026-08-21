@@ -53,7 +53,8 @@ and multi-table forms,
 ODKU, IGNORE), SELECT with joins (INNER/LEFT/RIGHT/CROSS/NATURAL/USING),
 derived/LATERAL/JSON_TABLE sources, CTEs (top-level, recursive), set
 operations, window functions with frames, GROUP BY WITH ROLLUP + GROUPING,
-DDL for databases/tables/indexes/views/triggers/users/grants, TRUNCATE,
+DDL for databases/tables/indexes/views/triggers/users/grants, CREATE TABLE AS
+SELECT, TRUNCATE,
 RENAME TABLE, EXPLAIN (TRADITIONAL). Transaction control, SET, SHOW (~25
 variants), USE, KILL, DESCRIBE are text-probed before the grammar
 (`QueryHandler.fs:1248–1334`).
@@ -72,7 +73,6 @@ variants), USE, KILL, DESCRIBE are text-probed before the grammar
 | Roles: `CREATE/DROP ROLE`, `SET ROLE`, `SET DEFAULT ROLE`, `GRANT role TO user`, dynamic privileges (`BACKUP_ADMIN`…), `GRANT PROXY` | medium | refusal |
 | Replication/admin SQL: `CHANGE REPLICATION SOURCE TO`, `PURGE BINARY LOGS`, `RESET`, `SHOW MASTER/REPLICA STATUS`, `SHOW BINARY LOGS`, `BINLOG`, `INSTALL/UNINSTALL PLUGIN|COMPONENT`, `ALTER INSTANCE`, `CREATE SERVER`, `TABLESPACE` statements | low | refusal |
 | `EXPLAIN ANALYZE`; `EXPLAIN FORMAT=JSON|TREE`; `DESCRIBE <statement>` | low | refusal |
-| `CREATE TABLE … AS SELECT` | medium | refusal |
 | `ALTER TABLE … COMMENT=` option tails | medium | refusal |
 | `RENAME USER`; `CREATE USER` tails: auth plugin, `REQUIRE SSL/X509`, resource limits, `ACCOUNT LOCK`, `PASSWORD EXPIRE`; `ALTER USER` beyond password change | medium | refusal |
 | Multi-statement strings (`stmt1; stmt2`) — exactly one statement per round trip | medium | refusal |

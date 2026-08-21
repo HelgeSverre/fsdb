@@ -2671,6 +2671,14 @@ let private selectOrUnionStmt: Parser<Statement, unit> =
         | [] -> preturn (Select(fst first))
         | _ -> unionTailClause |>> fun tail -> combineUnion first rest tail |> Union
 
+let private createTableAs: Parser<Statement, unit> =
+    (keyword "CREATE" >>. keyword "TABLE"
+     >>. (opt (attempt (keyword "IF" >>. keyword "NOT" >>. keyword "EXISTS")) |>> Option.isSome)
+     .>>. qualifiedTableName
+     .>> optional (keyword "AS")
+     .>>. selectOrUnionStmt)
+    |>> fun ((ifNotExists, name), query) -> CreateTableAs(name, query, ifNotExists)
+
 let private querySelect projections from orderBy limit offset =
     { Projections = projections
       Distinct = false
@@ -2966,6 +2974,7 @@ statementRef.Value <-
           attempt createTriggerStmt
           attempt createViewStmt
           attempt createDatabaseStmt
+          attempt createTableAs
           attempt createTableLike
           attempt createTable
           attempt createIndexStmt

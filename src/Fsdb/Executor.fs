@@ -1057,17 +1057,27 @@ let rec private metadataOfExpr (ctx: EvalContext) (expr: Expr) : ColumnMetadata 
         let isInteger typeId =
             typeId = TypeTiny || typeId = TypeShort || typeId = TypeLong || typeId = TypeLongLong || typeId = TypeYear
 
-        match metadataOfExpr ctx left, metadataOfExpr ctx right with
-        | Some leftType, _ when leftType.TypeId = TypeDouble || leftType.TypeId = TypeFloat -> simple TypeDouble
-        | _, Some rightType when rightType.TypeId = TypeDouble || rightType.TypeId = TypeFloat -> simple TypeDouble
-        | Some leftType, _ when leftType.TypeId = TypeString || leftType.TypeId = TypeVarString || leftType.TypeId = TypeBlob -> simple TypeDouble
-        | _, Some rightType when rightType.TypeId = TypeString || rightType.TypeId = TypeVarString || rightType.TypeId = TypeBlob -> simple TypeDouble
-        | Some leftType, _ when leftType.TypeId = TypeNewDecimal -> simple TypeNewDecimal
-        | _, Some rightType when rightType.TypeId = TypeNewDecimal -> simple TypeNewDecimal
-        | Some leftType, Some rightType when isInteger leftType.TypeId && isInteger rightType.TypeId -> simple TypeLongLong
-        | Some leftType, None when isInteger leftType.TypeId -> simple TypeDouble
-        | None, Some rightType when isInteger rightType.TypeId -> simple TypeDouble
-        | _ -> None
+        let leftMetadata = metadataOfExpr ctx left
+        let rightMetadata = metadataOfExpr ctx right
+
+        let inferred =
+            match leftMetadata, rightMetadata with
+            | Some leftType, _ when leftType.TypeId = TypeDouble || leftType.TypeId = TypeFloat -> simple TypeDouble
+            | _, Some rightType when rightType.TypeId = TypeDouble || rightType.TypeId = TypeFloat -> simple TypeDouble
+            | Some leftType, _ when leftType.TypeId = TypeString || leftType.TypeId = TypeVarString || leftType.TypeId = TypeBlob -> simple TypeDouble
+            | _, Some rightType when rightType.TypeId = TypeString || rightType.TypeId = TypeVarString || rightType.TypeId = TypeBlob -> simple TypeDouble
+            | Some leftType, _ when leftType.TypeId = TypeNewDecimal -> simple TypeNewDecimal
+            | _, Some rightType when rightType.TypeId = TypeNewDecimal -> simple TypeNewDecimal
+            | Some leftType, Some rightType when isInteger leftType.TypeId && isInteger rightType.TypeId -> simple TypeLongLong
+            | Some leftType, None when isInteger leftType.TypeId -> simple TypeDouble
+            | None, Some rightType when isInteger rightType.TypeId -> simple TypeDouble
+            | _ -> None
+
+        match inferred, leftMetadata, rightMetadata with
+        | Some result, Some leftType, Some rightType
+            when leftType.Flags &&& NotNullFlag <> 0us && rightType.Flags &&& NotNullFlag <> 0us ->
+            Some { result with Flags = result.Flags ||| NotNullFlag }
+        | _ -> inferred
 
     let choose expressions =
         let metadata = expressions |> List.choose (metadataOfExpr ctx)
@@ -1082,22 +1092,22 @@ let rec private metadataOfExpr (ctx: EvalContext) (expr: Expr) : ColumnMetadata 
     match expr with
     | Lit VNull -> None
     | Lit(VInt value) ->
-        if value >= int64 System.SByte.MinValue && value <= int64 System.SByte.MaxValue then
-            simple TypeTiny
-        elif value >= int64 System.Int16.MinValue && value <= int64 System.Int16.MaxValue then
-            simple TypeShort
-        elif value >= int64 System.Int32.MinValue && value <= int64 System.Int32.MaxValue then
-            simple TypeLong
-        else
-            simple TypeLongLong
-    | Lit(VUInt _) -> Some { Value.columnMetadata TypeLongLong with Flags = UnsignedFlag }
-    | Lit(VDouble _) -> simple TypeDouble
-    | Lit(VDecimal _) -> simple TypeNewDecimal
-    | Lit(VString text) -> Some { Value.columnMetadata TypeVarString with ColumnLength = uint32 (System.Text.Encoding.UTF8.GetByteCount text) }
-    | Lit(VBytes bytes) -> Some { Value.columnMetadata TypeBlob with ColumnLength = uint32 bytes.Length; Flags = BlobFlag ||| BinaryFlag }
-    | Lit(VDate _) -> simple TypeDate
-    | Lit(VDateTime _) -> simple TypeDateTime
-    | Lit(VJson _) -> simple TypeVarString
+        let typeId =
+            if value >= int64 System.SByte.MinValue && value <= int64 System.SByte.MaxValue then TypeTiny
+            elif value >= int64 System.Int16.MinValue && value <= int64 System.Int16.MaxValue then TypeShort
+            elif value >= int64 System.Int32.MinValue && value <= int64 System.Int32.MaxValue then TypeLong
+            else TypeLongLong
+
+        simple typeId |> Option.map (fun metadata -> { metadata with Flags = metadata.Flags ||| NotNullFlag })
+    | Lit(VUInt _) -> Some { Value.columnMetadata TypeLongLong with Flags = UnsignedFlag ||| NotNullFlag }
+    | Lit(VDouble _) -> simple TypeDouble |> Option.map (fun metadata -> { metadata with Flags = NotNullFlag })
+    | Lit(VDecimal _) -> simple TypeNewDecimal |> Option.map (fun metadata -> { metadata with Flags = NotNullFlag })
+    | Lit(VString text) ->
+        Some { Value.columnMetadata TypeVarString with ColumnLength = uint32 (System.Text.Encoding.UTF8.GetByteCount text); Flags = NotNullFlag }
+    | Lit(VBytes bytes) -> Some { Value.columnMetadata TypeBlob with ColumnLength = uint32 bytes.Length; Flags = BlobFlag ||| BinaryFlag ||| NotNullFlag }
+    | Lit(VDate _) -> simple TypeDate |> Option.map (fun metadata -> { metadata with Flags = NotNullFlag })
+    | Lit(VDateTime _) -> simple TypeDateTime |> Option.map (fun metadata -> { metadata with Flags = NotNullFlag })
+    | Lit(VJson _) -> simple TypeVarString |> Option.map (fun metadata -> { metadata with Flags = NotNullFlag })
     | Col _
     | QualifiedCol _ -> tryColumnDefForExpr ctx expr |> Option.map ColumnWire.metadataOfColumn
     | BinOp((And | Or | Xor | Eq | Neq | Lt | Lte | Gt | Gte | NullSafeEq), _, _)
@@ -2481,7 +2491,7 @@ and private deriveColumns
         (fun n (col: Collation.Collation) columnMetadata ->
             { Name = n
               Type = declaredType columnMetadata
-              Nullable = true
+              Nullable = columnMetadata.Flags &&& NotNullFlag = 0us
               Default = None
               AutoIncrement = false
               PrimaryKey = false
@@ -7872,6 +7882,52 @@ let rec execute (store: Store) (registry: Registry) (dbName: string) (ids: int64
             ids, Affected 0UL
         else
             ids, storageErr (NoSuchDatabase name)
+
+    | CreateTableAs(name, query, ifNotExists) ->
+        let destinationDb, destinationName = splitQualified dbName name
+        let destinationExists = scan store destinationDb destinationName |> Result.isOk
+        let viewExists = tryStoredView store destinationDb destinationName |> Option.isSome
+
+        if ifNotExists && (destinationExists || viewExists) then
+            ids, Affected 0UL
+        elif destinationExists || viewExists then
+            ids, storageErr (TableExists destinationName)
+        else
+            let selected =
+                match query with
+                | Select select ->
+                    let result, metadata, rows = runSelectStmt store registry dbName select None
+                    let names = match result with ResultSet(names, _) -> names | _ -> []
+                    result, metadata, rows, selectColumnCollations store registry dbName select names
+                | Union(first, rest, orderBy, limit, offset) ->
+                    let result, metadata, rows = runUnionStmt store registry dbName first rest orderBy limit offset
+                    let names = match result with ResultSet(names, _) -> names | _ -> []
+                    result, metadata, rows, List.replicate names.Length Collation.defaultCollation
+                | _ -> Err(1064, "CREATE TABLE ... AS requires a query"), [], [], []
+
+            match selected with
+            | Err(code, message), _, _, _ -> ids, Err(code, message)
+            | ResultSet(names, _), metadata, rows, collations ->
+                let columns = deriveColumns names collations metadata
+                let baseCatalog = store.Catalog
+                let snapshot = Storage.beginTransactionSnapshot store
+                Storage.setStrictMode snapshot store.StrictMode
+
+                let created =
+                    createTableSeeded snapshot destinationDb destinationName columns [] [] None None None
+                    |> Result.bind (fun () ->
+                        rows
+                        |> List.map Array.toList
+                        |> insertRows snapshot destinationDb destinationName None
+                        |> Result.map _.Affected)
+
+                match created with
+                | Ok affected ->
+                    Storage.mergeCatalogInto store baseCatalog snapshot.Catalog
+                    Storage.commitTransactionEvents store snapshot
+                    ids, Affected(uint64 affected)
+                | Error error -> ids, storageErr error
+            | _ -> ids, Err(1064, "CREATE TABLE ... AS requires a query")
 
     | CreateTableLike(name, source, ifNotExists) ->
         let destinationDb, destinationName = splitQualified dbName name

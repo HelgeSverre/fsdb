@@ -2505,6 +2505,34 @@ let tests =
                     | Err(1146, _) -> ()
                     | other -> failtestf "expected 1146 for DROP INDEX IF EXISTS on a missing table, got %A" other
 
+                testCase "CREATE TABLE AS SELECT infers columns and inserts atomically"
+                <| fun _ ->
+                    let store = newStore ()
+                    runDefault store "CREATE TABLE source (id INT NOT NULL, name VARCHAR(20))" |> ignore
+                    runDefault store "INSERT INTO source VALUES (1, 'one'), (2, 'two')" |> ignore
+
+                    match runDefault store "CREATE TABLE copy AS SELECT id, name, id + 1 AS next_id FROM source ORDER BY id" with
+                    | Affected 2UL -> ()
+                    | other -> failtestf "expected two copied rows, got %A" other
+
+                    match runDefault store "SELECT id, name, next_id FROM copy ORDER BY id" with
+                    | ResultSet(_, [ [ Some "1"; Some "one"; Some "2" ]; [ Some "2"; Some "two"; Some "3" ] ]) -> ()
+                    | other -> failtestf "expected copied query rows, got %A" other
+
+                    match scan store defaultDatabase "copy" with
+                    | Ok(columns, _) ->
+                        Expect.equal (columns |> List.map _.Type) [ TInt false; TVarchar 20; TBigInt false ] "inferred types"
+                        Expect.equal (columns |> List.map _.Nullable) [ false; true; false ] "inferred nullability"
+                    | Error error -> failtestf "expected created table, got %A" error
+
+                    match runDefault store "CREATE TABLE broken AS SELECT * FROM missing" with
+                    | Err(1146, _) -> Expect.isError (scan store defaultDatabase "broken") "failed query leaves no table"
+                    | other -> failtestf "expected source error, got %A" other
+
+                    match runDefault store "CREATE TABLE IF NOT EXISTS copy AS SELECT * FROM missing" with
+                    | Affected 0UL -> ()
+                    | other -> failtestf "expected existing destination to skip the query, got %A" other
+
                 testCase "CREATE TABLE LIKE copies the definition without rows, foreign keys, or the auto-increment counter"
                 <| fun _ ->
                     let store = newStore ()

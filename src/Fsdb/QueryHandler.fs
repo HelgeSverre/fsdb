@@ -1740,6 +1740,7 @@ let rec mapPlaceholders (replace: int -> Expr) (stmt: Statement) : Statement =
     let mapAssignment (a: Assignment) = { a with Value = mapExpr a.Value }
 
     match stmt with
+    | CreateTableAs(name, query, ifNotExists) -> CreateTableAs(name, mapPlaceholders replace query, ifNotExists)
     | Select s -> Select(mapSelect s)
     | Union(first, rest, orderBy, limit, offset) ->
         Union(
