@@ -492,6 +492,86 @@ let rec private shapeSegments = function
     | GGeometryCollection geometries -> geometries |> List.collect (fun geometry -> shapeSegments geometry.Shape)
     | _ -> []
 
+let private ringIsSimple ring =
+    let edges = ring |> List.pairwise |> List.indexed
+    let lastEdge = List.length edges - 1
+
+    edges
+    |> List.forall (fun (firstIndex, first) ->
+        edges
+        |> List.skip (firstIndex + 1)
+        |> List.forall (fun (secondIndex, second) ->
+            let adjacent = secondIndex = firstIndex + 1 || firstIndex = 0 && secondIndex = lastEdge
+            adjacent || not (segmentsIntersect first second)))
+
+let private pointStrictlyInRing point ring =
+    ringContains point ring && not (ring |> segments |> List.exists (pointOnSegment point))
+
+let private ringsIntersect first second =
+    first
+    |> segments
+    |> List.exists (fun firstSegment -> second |> segments |> List.exists (segmentsIntersect firstSegment))
+
+let private polygonIsValid rings =
+    match rings with
+    | shell :: holes ->
+        let ringIsValid ring =
+            ringIsSimple ring
+            && ring
+               |> List.forall (fun (x, y) -> Double.IsFinite x && Double.IsFinite y)
+
+        let holeIsValid hole =
+            ringIsValid hole
+            && hole |> List.take (List.length hole - 1) |> List.forall (fun point -> pointStrictlyInRing point shell)
+            && not (ringsIntersect shell hole)
+
+        let holesDoNotOverlap =
+            holes
+            |> List.indexed
+            |> List.forall (fun (firstIndex, first) ->
+                holes
+                |> List.skip (firstIndex + 1)
+                |> List.forall (fun second ->
+                    not (ringsIntersect first second)
+                    && not (pointStrictlyInRing first.Head second)
+                    && not (pointStrictlyInRing second.Head first)))
+
+        ringIsValid shell && holes |> List.forall holeIsValid && holesDoNotOverlap
+    | [] -> false
+
+let rec private shapeIsValid = function
+    | GEmpty -> true
+    | GPoint(x, y) -> Double.IsFinite x && Double.IsFinite y
+    | GLineString points ->
+        points
+        |> List.forall (fun (x, y) -> Double.IsFinite x && Double.IsFinite y)
+        && (match points with
+            | _ :: _ -> true
+            | _ -> false)
+    | GMultiPoint points ->
+        points
+        |> List.forall (fun (x, y) -> Double.IsFinite x && Double.IsFinite y)
+    | GPolygon rings -> polygonIsValid rings
+    | GMultiLineString lines -> lines |> List.forall (fun points -> points |> List.forall (fun (x, y) -> Double.IsFinite x && Double.IsFinite y))
+    | GMultiPolygon polygons ->
+        let polygonsAreSeparate =
+            polygons
+            |> List.indexed
+            |> List.forall (fun (firstIndex, first) ->
+                polygons
+                |> List.skip (firstIndex + 1)
+                |> List.forall (fun second ->
+                    let firstShell = first.Head
+                    let secondShell = second.Head
+                    not (ringsIntersect firstShell secondShell)
+                    && not (pointStrictlyInRing firstShell.Head secondShell)
+                    && not (pointStrictlyInRing secondShell.Head firstShell)))
+
+        polygons |> List.forall polygonIsValid && polygonsAreSeparate
+    | GGeometryCollection geometries -> geometries |> List.forall (fun geometry -> shapeIsValid geometry.Shape)
+
+let geometryIsValidPlanar (geometry: Geometry) = shapeIsValid geometry.Shape
+
 let geometryDistancePlanar (first: Geometry) (second: Geometry) : float option =
     let firstPoints = shapeCoordinates first.Shape
     let secondPoints = shapeCoordinates second.Shape
@@ -505,11 +585,14 @@ let geometryDistancePlanar (first: Geometry) (second: Geometry) : float option =
         let secondPolygons = shapePolygons second.Shape
         let firstInsideSecond = firstPoints |> List.exists (fun point -> secondPolygons |> List.exists (polygonContains point))
         let secondInsideFirst = secondPoints |> List.exists (fun point -> firstPolygons |> List.exists (polygonContains point))
+        let pointTouchesSegment =
+            (firstPoints |> List.exists (fun point -> secondSegments |> List.exists (pointOnSegment point)))
+            || (secondPoints |> List.exists (fun point -> firstSegments |> List.exists (pointOnSegment point)))
         let intersects =
             firstSegments
             |> List.exists (fun firstSegment -> secondSegments |> List.exists (segmentsIntersect firstSegment))
 
-        if firstInsideSecond || secondInsideFirst || intersects then
+        if firstInsideSecond || secondInsideFirst || pointTouchesSegment || intersects then
             Some 0.0
         else
             let pointDistances =
@@ -524,6 +607,9 @@ let geometryDistancePlanar (first: Geometry) (second: Geometry) : float option =
                           pointSegmentDistance point segment ]
 
             pointDistances |> List.min |> Some
+
+let geometryIntersectsPlanar (first: Geometry) (second: Geometry) =
+    geometryDistancePlanar first second |> Option.map ((=) 0.0)
 
 type Value =
     | VNull

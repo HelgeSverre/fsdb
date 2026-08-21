@@ -211,6 +211,36 @@ let tests =
                         VNull
                         "empty distance"
 
+                testCase "planar intersections distinguish contacts, holes, and empty shapes"
+                <| fun _ ->
+                    let geometry text = call "ST_GeomFromText" [ VString text ]
+                    let intersects first second = call "ST_Intersects" [ geometry first; geometry second ]
+                    let disjoint first second = call "ST_Disjoint" [ geometry first; geometry second ]
+                    let holedPolygon = "POLYGON((0 0,4 0,4 4,0 4,0 0),(1 1,3 1,3 3,1 3,1 1))"
+
+                    Expect.equal (intersects "POINT(1 1)" "LINESTRING(0 0,2 2)") (VInt 1L) "point on line"
+                    Expect.equal (intersects "POINT(2 2)" holedPolygon) (VInt 0L) "point in hole"
+                    Expect.equal (disjoint "POINT(2 2)" holedPolygon) (VInt 1L) "hole is disjoint"
+                    Expect.equal (intersects "LINESTRING(0 0,4 0)" "LINESTRING(4 0,5 0)") (VInt 1L) "endpoint contact"
+                    Expect.equal (disjoint "GEOMETRYCOLLECTION(POINT(0 0),LINESTRING(2 0,2 2))" "POINT(1 0)") (VInt 1L) "collection is disjoint"
+                    Expect.equal (intersects "GEOMETRYCOLLECTION EMPTY" "POINT(1 1)") VNull "empty intersection"
+                    Expect.equal (disjoint "GEOMETRYCOLLECTION EMPTY" "POINT(1 1)") VNull "empty disjoint"
+
+                testCase "planar intersections reject nonzero and mismatched SRIDs"
+                <| fun _ ->
+                    let expectError code invoke =
+                        Expect.throwsC
+                            (invoke >> ignore)
+                            (function
+                            | Fsdb.Functions.SqlError(actual, _) when actual = code -> ()
+                            | error -> failtestf "expected %d, got %A" code error)
+
+                    let planar = call "ST_GeomFromText" [ VString "POINT(0 0)" ]
+                    let geographic = call "ST_GeomFromText" [ VString "POINT(0 0)"; VInt 4326L ]
+
+                    expectError 3033 (fun () -> call "ST_Intersects" [ planar; geographic ])
+                    expectError 1235 (fun () -> call "ST_Disjoint" [ geographic; geographic ])
+
                 testCase "envelopes and MBR predicates preserve planar bounds"
                 <| fun _ ->
                     let geometry text = call "ST_GeomFromText" [ VString text ]
@@ -246,7 +276,21 @@ let tests =
 
                     expectError 3033 (fun () -> call "ST_Distance" [ planar; geographic ])
                     expectError 1235 (fun () -> call "ST_Distance" [ geographic; geographic ])
-                    expectError 1235 (fun () -> call "ST_Envelope" [ geographic ]) ]
+                    expectError 1235 (fun () -> call "ST_Envelope" [ geographic ])
+                    expectError 1235 (fun () -> call "ST_IsValid" [ geographic ])
+
+                testCase "ST_IsValid distinguishes simple planar geometry from invalid topology"
+                <| fun _ ->
+                    let geometry text = call "ST_GeomFromText" [ VString text ]
+                    let valid text = call "ST_IsValid" [ geometry text ]
+
+                    Expect.equal (valid "POINT(0 0)") (VInt 1L) "point"
+                    Expect.equal (valid "GEOMETRYCOLLECTION EMPTY") (VInt 1L) "empty collection"
+                    Expect.equal (valid "POLYGON((0 0,4 0,4 4,0 4,0 0),(1 1,3 1,3 3,1 3,1 1))") (VInt 1L) "interior hole"
+                    Expect.equal (valid "POLYGON((0 0,2 2,0 2,2 0,0 0))") (VInt 0L) "self crossing ring"
+                    Expect.equal (valid "POLYGON((0 0,4 0,4 4,0 4,0 0),(5 5,6 5,6 6,5 6,5 5))") (VInt 0L) "exterior hole"
+                    Expect.equal (valid "POLYGON((0 0,4 0,4 4,0 4,0 0),(0 1,2 1,2 2,0 2,0 1))") (VInt 0L) "touching hole"
+                    Expect.equal (valid "MULTIPOINT((0 0),(0 0))") (VInt 1L) "duplicate point" ]
 
           testList
               "mysqlTypeOf"

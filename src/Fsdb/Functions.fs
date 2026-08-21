@@ -4897,6 +4897,14 @@ let private geometryIsEmptyFn: Scalar =
         | _ -> VInt 0L
     | _ -> raise (SqlError(1582, "Incorrect parameter count in the call to native function 'st_isempty'"))
 
+let private geometryIsValidFn: Scalar =
+    function
+    | [ VNull ] -> VNull
+    | [ value ] ->
+        let geometry = geometryArgument "ST_ISVALID" value |> requirePlanar "ST_ISVALID"
+        VInt(if geometryIsValidPlanar geometry then 1L else 0L)
+    | _ -> raise (SqlError(1582, "Incorrect parameter count in the call to native function 'st_isvalid'"))
+
 let private pointCoordinateFn functionName select: Scalar =
     function
     | [ VNull ] -> VNull
@@ -4927,6 +4935,18 @@ let private geometryEnvelopeFn: Scalar =
     | [ VNull ] -> VNull
     | [ value ] -> geometryArgument "ST_ENVELOPE" value |> requirePlanar "ST_ENVELOPE" |> geometryEnvelope |> VGeometry
     | _ -> raise (SqlError(1582, "Incorrect parameter count in the call to native function 'st_envelope'"))
+
+let private geometryRelationFn functionName project: Scalar =
+    function
+    | [ VNull; _ ]
+    | [ _; VNull ] -> VNull
+    | [ first; second ] ->
+        let first, second = requireSamePlanarSrid functionName (geometryArgument functionName first) (geometryArgument functionName second)
+
+        geometryIntersectsPlanar first second
+        |> Option.map (project >> fun value -> VInt(if value then 1L else 0L))
+        |> Option.defaultValue VNull
+    | _ -> raise (SqlError(1582, sprintf "Incorrect parameter count in the call to native function '%s'" (functionName.ToLowerInvariant())))
 
 let private mbrContains first second =
     match geometryBounds first, geometryBounds second with
@@ -5039,6 +5059,7 @@ let builtins: Registry =
     |> registerScalar "ST_DIMENSION" geometryDimensionFn
     |> registerScalar "DIMENSION" geometryDimensionFn
     |> registerScalar "ST_ISEMPTY" geometryIsEmptyFn
+    |> registerScalar "ST_ISVALID" geometryIsValidFn
     |> registerScalar "ISEMPTY" geometryIsEmptyFn
     |> registerScalar "ST_X" (pointCoordinateFn "ST_X" (fun x _ -> x))
     |> registerScalar "ST_Y" (pointCoordinateFn "ST_Y" (fun _ y -> y))
@@ -5047,7 +5068,8 @@ let builtins: Registry =
     |> registerScalar "ST_DISTANCE" geometryDistanceFn
     |> registerScalar "ST_CONTAINS" (unsupportedGeometryFn "ST_CONTAINS")
     |> registerScalar "ST_WITHIN" (unsupportedGeometryFn "ST_WITHIN")
-    |> registerScalar "ST_INTERSECTS" (unsupportedGeometryFn "ST_INTERSECTS")
+    |> registerScalar "ST_INTERSECTS" (geometryRelationFn "ST_INTERSECTS" id)
+    |> registerScalar "ST_DISJOINT" (geometryRelationFn "ST_DISJOINT" not)
     |> registerScalar "ST_BUFFER" (unsupportedGeometryFn "ST_BUFFER")
     |> registerScalar "ST_ENVELOPE" geometryEnvelopeFn
     |> registerScalar "MBRCONTAINS" (mbrPredicateFn "MBRCONTAINS" mbrContains)
