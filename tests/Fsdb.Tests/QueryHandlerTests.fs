@@ -599,6 +599,44 @@ let tests =
               | ResultSet(_, [ [ Some "1" ] ]) -> ()
               | other -> failtestf "expected zero month to precede January, got %A" other
 
+          testCase "zero-date defaults validate against the executing sql_mode"
+          <| fun _ ->
+              let session = create 1 (Fsdb.Storage.create ())
+
+              match handle session "CREATE TABLE t (id INT, d DATE NOT NULL DEFAULT '0000-00-00')" |> snd with
+              | Err(1292, _) -> ()
+              | other -> failtestf "expected default zero-mode rejection, got %A" other
+
+              let session, _ = handle session "SET SESSION sql_mode='STRICT_TRANS_TABLES'"
+              let session, result = handle session "CREATE TABLE t (id INT, d DATE NOT NULL DEFAULT '0000-00-00')"
+              Expect.equal result (Affected 0UL) "strict mode without zero modes accepts the default"
+              let session, _ = handle session "INSERT INTO t (id) VALUES (1)"
+
+              match handle session "SELECT d FROM t" |> snd with
+              | ResultSet(_, [ [ Some "0000-00-00" ] ]) -> ()
+              | other -> failtestf "expected a zero-date default, got %A" other
+
+          testCase "impossible partial dates use MySQL's zero-date fallback"
+          <| fun _ ->
+              let strictSession = create 1 (Fsdb.Storage.create ())
+              let strictSession, _ = handle strictSession "SET SESSION sql_mode='STRICT_TRANS_TABLES'"
+              let strictSession, _ = handle strictSession "CREATE TABLE t (d DATE NOT NULL)"
+
+              match handle strictSession "INSERT INTO t VALUES ('0000-02-31')" |> snd with
+              | Err(1292, _) -> ()
+              | other -> failtestf "expected an impossible partial date to fail, got %A" other
+
+              let session = create 2 (Fsdb.Storage.create ())
+              let session, _ = handle session "SET SESSION sql_mode='NO_ENGINE_SUBSTITUTION'"
+              let session, _ = handle session "CREATE TABLE t (d DATE NOT NULL)"
+              let session, result = handle session "INSERT INTO t VALUES ('0000-02-31'), ('2020-00-32')"
+              Expect.equal result (Affected 2UL) "non-strict inserts succeed"
+              Expect.equal (session.Diagnostics |> List.map _.Code) [ 1264; 1265 ] "MySQL warning codes"
+
+              match handle session "SELECT d FROM t" |> snd with
+              | ResultSet(_, [ [ Some "0000-00-00" ]; [ Some "0000-00-00" ] ]) -> ()
+              | other -> failtestf "expected all-zero fallback values, got %A" other
+
           testCase "typed zero-date literals validate against the executing sql_mode"
           <| fun _ ->
               let session = create 1 (Fsdb.Storage.create ())

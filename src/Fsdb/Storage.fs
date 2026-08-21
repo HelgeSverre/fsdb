@@ -1066,6 +1066,15 @@ let coerceValueWithMode (mode: TemporalCoercionMode) (col: ColumnDef) (v: Value)
             let zeroDateError () =
                 Error(ZeroTemporalForColumn("date", v |> toText |> Option.defaultValue "0000-00-00", col.Name))
 
+            let zeroDateFallback warningCode =
+                if strict then
+                    zeroDateError ()
+                else
+                    warning warningCode (sprintf "Out of range value for column '%s'" col.Name)
+                    tryZeroDate 0 0 0
+                    |> Option.map (VZeroDate >> Ok)
+                    |> Option.defaultWith zeroDateError
+
             let zeroDateResult date =
                 let year, month, day = zeroDateParts date
                 let rejected = if year = 0 && month = 0 && day = 0 then mode.NoZeroDate else mode.NoZeroInDate
@@ -1075,10 +1084,11 @@ let coerceValueWithMode (mode: TemporalCoercionMode) (col: ColumnDef) (v: Value)
                 elif strict then
                     zeroDateError ()
                 else
-                    warning 1264 (sprintf "Out of range value for column '%s'" col.Name)
-                    tryZeroDate 0 0 0
-                    |> Option.map (VZeroDate >> Ok)
-                    |> Option.defaultWith zeroDateError
+                    zeroDateFallback 1264
+
+            let invalidZeroDateResult year month day =
+                let warningCode = if month > 12 || day > 31 then 1265 else 1264
+                zeroDateFallback warningCode
 
             match v with
             | VDate d -> Ok(VDate d)
@@ -1092,12 +1102,15 @@ let coerceValueWithMode (mode: TemporalCoercionMode) (col: ColumnDef) (v: Value)
                     match tryParseZeroDateTime (s.Trim()) with
                     | Some dt -> zeroDateResult (zeroDateOfDateTime dt)
                     | None ->
-                        match DateOnly.TryParse(s.Trim(), CultureInfo.InvariantCulture) with
-                        | true, d -> Ok(VDate d)
-                        | false, _ ->
-                            match DateTime.TryParse(s.Trim(), CultureInfo.InvariantCulture, DateTimeStyles.None) with
-                            | true, dt -> Ok(VDate(DateOnly.FromDateTime dt))
-                            | false, _ -> temporalFallback ()
+                        match tryParseDateParts (s.Trim()) with
+                        | Some(year, month, day) when year = 0 || month = 0 || day = 0 -> invalidZeroDateResult year month day
+                        | _ ->
+                            match DateOnly.TryParse(s.Trim(), CultureInfo.InvariantCulture) with
+                            | true, d -> Ok(VDate d)
+                            | false, _ ->
+                                match DateTime.TryParse(s.Trim(), CultureInfo.InvariantCulture, DateTimeStyles.None) with
+                                | true, dt -> Ok(VDate(DateOnly.FromDateTime dt))
+                                | false, _ -> temporalFallback ()
             | _ -> temporalFallback ()
         | TDateTime fsp
         | TTimestamp fsp ->
@@ -1111,6 +1124,16 @@ let coerceValueWithMode (mode: TemporalCoercionMode) (col: ColumnDef) (v: Value)
             let zeroDateError () =
                 Error(ZeroTemporalForColumn("datetime", v |> toText |> Option.defaultValue "0000-00-00 00:00:00", col.Name))
 
+            let zeroDateFallback warningCode =
+                if strict then
+                    zeroDateError ()
+                else
+                    warning warningCode (sprintf "Out of range value for column '%s'" col.Name)
+                    tryZeroDate 0 0 0
+                    |> Option.bind (fun zero -> tryZeroDateTime zero 0 0 0 0)
+                    |> Option.map (VZeroDateTime >> Ok)
+                    |> Option.defaultWith zeroDateError
+
             let zeroDateResult dateTime =
                 let date, _, _, _, _ = zeroDateTimeParts dateTime
                 let year, month, day = zeroDateParts date
@@ -1121,11 +1144,11 @@ let coerceValueWithMode (mode: TemporalCoercionMode) (col: ColumnDef) (v: Value)
                 elif strict then
                     zeroDateError ()
                 else
-                    warning 1264 (sprintf "Out of range value for column '%s'" col.Name)
-                    tryZeroDate 0 0 0
-                    |> Option.bind (fun zero -> tryZeroDateTime zero 0 0 0 0)
-                    |> Option.map (VZeroDateTime >> Ok)
-                    |> Option.defaultWith zeroDateError
+                    zeroDateFallback 1264
+
+            let invalidZeroDateResult year month day =
+                let warningCode = if month > 12 || day > 31 then 1265 else 1264
+                zeroDateFallback warningCode
 
             match v with
             | VDateTime dt -> Ok(round dt)
@@ -1145,9 +1168,14 @@ let coerceValueWithMode (mode: TemporalCoercionMode) (col: ColumnDef) (v: Value)
                         | Some dt -> zeroDateResult dt
                         | None -> zeroDateError ()
                     | None ->
-                        match DateTime.TryParse(s.Trim(), CultureInfo.InvariantCulture, DateTimeStyles.None) with
-                        | true, dt -> Ok(round dt)
-                        | false, _ -> temporalFallback ()
+                        let datePart = s.Trim().Split([| ' '; 'T' |], StringSplitOptions.RemoveEmptyEntries) |> Array.tryHead
+
+                        match datePart |> Option.bind tryParseDateParts with
+                        | Some(year, month, day) when year = 0 || month = 0 || day = 0 -> invalidZeroDateResult year month day
+                        | _ ->
+                            match DateTime.TryParse(s.Trim(), CultureInfo.InvariantCulture, DateTimeStyles.None) with
+                            | true, dt -> Ok(round dt)
+                            | false, _ -> temporalFallback ()
             | _ -> temporalFallback ()
 
 let coerceValue (strict: bool) (col: ColumnDef) (v: Value) : Result<Value, StorageError> =
@@ -1157,6 +1185,13 @@ let coerceValue (strict: bool) (col: ColumnDef) (v: Value) : Result<Value, Stora
           NoZeroInDate = true }
         col
         v
+
+let private normalizeDefault (mode: TemporalCoercionMode) (col: ColumnDef) : Result<ColumnDef, StorageError> =
+    match col.Default with
+    | Some(DConst value) ->
+        coerceValueWithMode mode col value
+        |> Result.map (fun value -> { col with Default = Some(DConst value) })
+    | _ -> Ok col
 
 /// `NOW()` rounded to `col`'s own declared fsp — a `TIMESTAMP(6)` column
 /// keeps microseconds, a bare `DATETIME`/`TIMESTAMP` truncates to whole
@@ -2187,48 +2222,48 @@ let createTableSeeded
     ensureDatabase store dbName
 
     let result =
-        withDatabase store dbName (fun db ->
-            let key = normalizeTableName tableName
+        columns
+        |> traverse (normalizeDefault (temporalCoercionMode store))
+        |> Result.bind (fun columns ->
+            withDatabase store dbName (fun db ->
+                let key = normalizeTableName tableName
 
-            match columns |> traverse validateColumnType with
-            | Error e -> Error e
-            | Ok _ ->
+                match columns |> traverse validateColumnType with
+                | Error e -> Error e
+                | Ok _ ->
+                    match checkVectorKeyColumns columns indexes, checkGeometryKeyColumns columns indexes with
+                    | Error e, _
+                    | _, Error e -> Error e
+                    | Ok(), Ok() ->
+                        if Map.containsKey key db then
+                            Error(TableExists tableName)
+                        else
+                            match foreignKeys |> traverse (validateForeignKeyDefinition store.ForeignKeyChecks db tableName columns indexes) with
+                            | Error e -> Error e
+                            | Ok _ ->
+                                match indexes |> List.tryPick (fun ix -> match checkFullTextColumns columns ix with Error e -> Some e | Ok() -> None) with
+                                | Some e -> Error e
+                                | None ->
+                                    let createTime = DateTime.Now
 
-            match checkVectorKeyColumns columns indexes |> Result.bind (fun () -> checkGeometryKeyColumns columns indexes) with
-            | Error e -> Error e
-            | Ok() ->
+                                    let table =
+                                        { OriginalName = tableName
+                                          Columns = columns
+                                          RowsArray = RowStore.empty
+                                          NextAutoId = autoIncrementSeed |> Option.defaultValue 1L
+                                          Indexes = indexes
+                                          ForeignKeys = foreignKeys
+                                          TableCharset = tableCharset
+                                          TableCollation = tableCollation
+                                          CreateTime = createTime
+                                          UniqueIndex = Map.empty
+                                          SecondaryIndex = Map.empty }
 
-            if Map.containsKey key db then
-                Error(TableExists tableName)
-            else
-
-            match foreignKeys |> traverse (validateForeignKeyDefinition store.ForeignKeyChecks db tableName columns indexes) with
-            | Error e -> Error e
-            | Ok _ ->
-
-            match indexes |> List.tryPick (fun ix -> match checkFullTextColumns columns ix with Error e -> Some e | Ok() -> None) with
-            | Some e -> Error e
-            | None ->
-                let createTime = DateTime.Now
-
-                let table =
-                    { OriginalName = tableName
-                      Columns = columns
-                      RowsArray = RowStore.empty
-                      NextAutoId = autoIncrementSeed |> Option.defaultValue 1L
-                      Indexes = indexes
-                      ForeignKeys = foreignKeys
-                      TableCharset = tableCharset
-                      TableCollation = tableCollation
-                      CreateTime = createTime
-                      UniqueIndex = Map.empty
-                      SecondaryIndex = Map.empty }
-
-                Ok(Map.add key (reindexTable table) db, createTime))
+                                    Ok(Map.add key (reindexTable table) db, (createTime, columns))))
 
     match result with
     | Error error -> Error error
-    | Ok createTime ->
+    | Ok(createTime, columns) ->
         let statement = CreateTable(tableName, columns, indexes, foreignKeys, [], false, tableCharset, tableCollation, autoIncrementSeed)
         emit store (Some(SchemaChangedAt(dbName, statement, createTime)))
         Ok()
@@ -2346,7 +2381,7 @@ let private implicitZeroSeed (col: ColumnDef) : Result<Value, StorageError> =
 /// `implicitZeroSeed`).
 let private addedColumnFill (mode: TemporalCoercionMode) (col: ColumnDef) : Result<Value, StorageError> =
     match col.Default with
-    | Some _ -> Ok(evalDefault col)
+    | Some _ -> coerceValueWithMode mode col (evalDefault col)
     | None ->
         if col.Nullable then
             Ok VNull
@@ -2451,9 +2486,20 @@ let private applyAlterAction (mode: TemporalCoercionMode) (table: Table) (action
                     [])
         | _ -> Ok()
 
-    match fspCheck with
-    | Error e -> Error e
-    | Ok() ->
+    let defaultCheck =
+        match action with
+        | AddColumn(col, _)
+        | ModifyColumn(col, _)
+        | ChangeColumn(_, col, _) -> normalizeDefault mode col |> Result.map ignore
+        | SetDefault(column, value) ->
+            resolveColumn table.Columns column
+            |> Result.bind (fun index -> normalizeDefault mode { table.Columns.[index] with Default = value } |> Result.map ignore)
+        | _ -> Ok()
+
+    match fspCheck, defaultCheck with
+    | Error error, _
+    | _, Error error -> Error error
+    | Ok(), Ok() ->
 
     match action with
     | AddColumn(col, position) ->

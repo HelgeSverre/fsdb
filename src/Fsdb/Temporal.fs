@@ -87,13 +87,16 @@ let isAllZeroDateTime dateTime =
     let date, hour, minute, second, microseconds = zeroDateTimeParts dateTime
     isAllZeroDate date && hour = 0 && minute = 0 && second = 0 && microseconds = 0
 
-let tryParseZeroDate (text: string) =
+let tryParseDateParts (text: string) =
     match text.Split '-' with
     | [| year; month; day |] ->
         match Int32.TryParse(year, NumberStyles.None, CultureInfo.InvariantCulture), Int32.TryParse(month, NumberStyles.None, CultureInfo.InvariantCulture), Int32.TryParse(day, NumberStyles.None, CultureInfo.InvariantCulture) with
-        | (true, year), (true, month), (true, day) -> tryZeroDate year month day
+        | (true, year), (true, month), (true, day) -> Some(year, month, day)
         | _ -> None
     | _ -> None
+
+let tryParseZeroDate (text: string) =
+    tryParseDateParts text |> Option.bind (fun (year, month, day) -> tryZeroDate year month day)
 
 let tryParseZeroDateTime (text: string) =
     let pieces = text.Split([| ' '; 'T' |], StringSplitOptions.RemoveEmptyEntries)
