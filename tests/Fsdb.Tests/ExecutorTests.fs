@@ -3945,6 +3945,69 @@ let tests =
                     | Err(1242, _) -> ()
                     | other -> failtestf "expected error 1242, got %A" other
 
+                testCase "statement-stable IN and scalar subqueries run once across outer rows"
+                <| fun _ ->
+                    let mutable touches = 0
+
+                    let touch (values: Value list) : Value =
+                        touches <- touches + 1
+                        List.head values
+
+                    let registry = registerScalar "TOUCH" touch builtins
+                    let store = newStore ()
+                    runDefault store "CREATE TABLE outer_rows (id INT)" |> ignore
+                    runDefault store "CREATE TABLE inner_rows (id INT)" |> ignore
+                    runDefault store "INSERT INTO outer_rows VALUES (1), (2), (3)" |> ignore
+                    runDefault store "INSERT INTO inner_rows VALUES (1), (2)" |> ignore
+
+                    touches <- 0
+
+                    match run store registry "SELECT id FROM outer_rows WHERE id IN (SELECT TOUCH(id) FROM inner_rows) ORDER BY id" with
+                    | ResultSet(_, rows) -> Expect.equal rows [ [ Some "1" ]; [ Some "2" ] ] "IN retains matching rows"
+                    | other -> failtestf "expected a resultset, got %A" other
+
+                    let inTouches = touches
+                    Expect.isLessThan inTouches 5 "the IN subquery is evaluated once, not once per outer row"
+
+                    touches <- 0
+
+                    match run store registry "SELECT id, (SELECT TOUCH(7)) AS probe FROM outer_rows ORDER BY id" with
+                    | ResultSet(_, rows) ->
+                        Expect.equal rows [ [ Some "1"; Some "7" ]; [ Some "2"; Some "7" ]; [ Some "3"; Some "7" ] ] "scalar result is shared"
+                    | other -> failtestf "expected a resultset, got %A" other
+
+                    let scalarTouches = touches
+                    Expect.isLessThan scalarTouches 3 "the scalar subquery is evaluated once, not once per outer row"
+
+                    touches <- 0
+
+                    match run store registry "SELECT id, (SELECT TOUCH(outer_rows.id)) AS probe FROM outer_rows ORDER BY id" with
+                    | ResultSet(_, rows) ->
+                        Expect.equal rows [ [ Some "1"; Some "1" ]; [ Some "2"; Some "2" ]; [ Some "3"; Some "3" ] ] "correlation stays per-row"
+                    | other -> failtestf "expected a resultset, got %A" other
+
+                    Expect.isGreaterThan touches scalarTouches "a correlated scalar subquery remains per-row"
+
+                testCase "EXISTS stops after its first matching row"
+                <| fun _ ->
+                    let mutable touches = 0
+
+                    let touch (values: Value list) : Value =
+                        touches <- touches + 1
+                        List.head values
+
+                    let registry = registerScalar "TOUCH" touch builtins
+                    let store = newStore ()
+                    runDefault store "CREATE TABLE inner_rows (id INT)" |> ignore
+                    let values = [ for id in 1 .. 100 -> sprintf "(%d)" id ] |> String.concat ", "
+                    runDefault store (sprintf "INSERT INTO inner_rows VALUES %s" values) |> ignore
+
+                    match run store registry "SELECT EXISTS (SELECT 1 FROM inner_rows WHERE TOUCH(id) > 0) AS present" with
+                    | ResultSet(_, [ [ Some "1" ] ]) -> ()
+                    | other -> failtestf "expected exists=1, got %A" other
+
+                    Expect.isLessThan touches 5 "EXISTS stops after its first matching row"
+
                 testCase "derived table: FROM (SELECT ...) AS t"
                 <| fun _ ->
                     let store = newStore ()

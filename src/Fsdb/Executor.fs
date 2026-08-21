@@ -46,6 +46,16 @@ type private TriggerRowScope =
 let private fromSubqueryMemo =
     System.Threading.AsyncLocal<Dictionary<FromItem, Result<ColumnDef list * Value[] list, QueryResult>>>()
 
+type private MemoizedSubquery =
+    | MemoizedSubquery of QueryResult * ColumnMetadata list * Value[] list
+    | UnmemoizedSubquery
+
+/// Statement-stable expression subqueries share their typed result across
+/// outer rows. The key is the parser's AST node identity, just as for
+/// derived-table memoization above.
+let private expressionSubqueryMemo =
+    System.Threading.AsyncLocal<Dictionary<SelectStmt, MemoizedSubquery>>()
+
 /// A stored view has TEMPTABLE-like statement semantics: resolve its saved
 /// SELECT once, then reuse the typed rows everywhere the statement (including
 /// metadata inference) references it.
@@ -1977,6 +1987,136 @@ let private resolvedCompare (ctx: EvalContext) (aExpr: Expr) (va: Value) (bExpr:
         | None -> ctx.Store.ConnectionCollation.Compare sa sb
     | _ -> Value.compare pa pb
 
+type private SubqueryScope =
+    { Qualifiers: Set<string>
+      Columns: Set<string> }
+
+let private emptySubqueryScope =
+    { Qualifiers = Set.empty
+      Columns = Set.empty }
+
+let private statementVariantFunctions =
+    set
+        [ "BENCHMARK"; "CONNECTION_ID"; "CURDATE"; "CURRENT_DATE"; "CURRENT_TIME"; "CURRENT_TIMESTAMP"
+          "CURRENT_USER"; "CURTIME"; "DATABASE"; "FOUND_ROWS"; "LAST_INSERT_ID"; "LOCALTIME"
+          "LOCALTIMESTAMP"; "NOW"; "RAND"; "RANDOM_BYTES"; "ROW_COUNT"; "SLEEP"; "SYSDATE"
+          "UNIX_TIMESTAMP"; "USER"; "UUID"; "UUID_SHORT"; "VERSION" ]
+
+let private tableSubqueryScope (store: Store) (dbName: string) (table: TableRef) : SubqueryScope option =
+    let tableDb = table.Database |> Option.defaultValue dbName
+    let qualifier = table.Alias |> Option.defaultValue table.Table |> fun name -> name.ToLowerInvariant()
+    let scope (columns: ColumnDef list) =
+        { Qualifiers = Set.singleton qualifier
+          Columns = columns |> List.map (_.Name >> fun name -> name.ToLowerInvariant()) |> Set.ofList }
+
+    let cteShadowsTable =
+        table.Database.IsNone
+        && currentCteScope () |> Map.containsKey (table.Table.ToLowerInvariant())
+
+    if cteShadowsTable then
+        None
+    elif table.Database.IsNone && table.Table.Equals("dual", System.StringComparison.OrdinalIgnoreCase) then
+        Some(scope [])
+    elif tableDb.Equals("information_schema", System.StringComparison.OrdinalIgnoreCase) then
+        InformationSchema.scan store.Catalog table.Table |> Option.map (fst >> scope)
+    else
+        match scan store tableDb table.Table with
+        | Ok(columns, _) -> Some(scope columns)
+        | Error _ -> None
+
+let private selectSubqueryScope (store: Store) (dbName: string) (select: SelectStmt) : SubqueryScope option =
+    let sources = (select.From |> Option.toList) @ (select.Joins |> List.map _.Table)
+
+    if not select.Ctes.IsEmpty || sources |> List.exists (function FromTable _ -> false | _ -> true) then
+        None
+    else
+        sources
+        |> List.fold
+            (fun scope source ->
+                scope
+                |> Option.bind (fun scope ->
+                    match source with
+                    | FromTable table ->
+                        tableSubqueryScope store dbName table
+                        |> Option.map (fun next ->
+                            { Qualifiers = Set.union scope.Qualifiers next.Qualifiers
+                              Columns = Set.union scope.Columns next.Columns })
+                    | _ -> None))
+            (Some emptySubqueryScope)
+
+let private isStatementStableFunction (registry: Registry) (name: string) : bool =
+    let key = name.ToUpperInvariant()
+
+    not (statementVariantFunctions.Contains key)
+    && (match Map.tryFind key registry.Extensions with
+        | Some extension -> extension.Deterministic
+        | None -> true)
+
+let rec private isStatementStableExpr (store: Store) (registry: Registry) (dbName: string) (scope: SubqueryScope) (expression: Expr) : bool =
+    let every expressions = expressions |> List.forall (isStatementStableExpr store registry dbName scope)
+
+    match expression with
+    | Lit _
+    | Star None -> true
+    | Star(Some qualifier) -> scope.Qualifiers.Contains(qualifier.ToLowerInvariant())
+    | Col name -> scope.Columns.Contains(name.ToLowerInvariant())
+    | QualifiedCol(table, _) -> scope.Qualifiers.Contains(table.ToLowerInvariant())
+    | Placeholder _
+    | UserVariable _
+    | SystemVariable _
+    | AssignUserVariable _
+    | MatchAgainst _
+    | WindowOver _ -> false
+    | FuncCall(name, arguments) -> isStatementStableFunction registry name && every arguments
+    | Exists select
+    | Subquery select -> isStatementStableSelect store registry dbName scope select
+    | InSubquery(value, select) ->
+        isStatementStableExpr store registry dbName scope value
+        && isStatementStableSelect store registry dbName scope select
+    | BinOp(_, left, right) -> every [ left; right ]
+    | Not value
+    | IsNull value
+    | IsNotNull value
+    | IsTrue value
+    | IsFalse value
+    | Distinct value
+    | OrderBy(value, _)
+    | Cast(value, _)
+    | Collate(value, _) -> isStatementStableExpr store registry dbName scope value
+    | Like(value, pattern, _, _)
+    | Regexp(value, pattern) -> every [ value; pattern ]
+    | In(value, candidates) -> every (value :: candidates)
+    | Between(value, lower, upper) -> every [ value; lower; upper ]
+    | Case(subject, branches, otherwise) ->
+        every (Option.toList subject @ (branches |> List.collect (fun (condition, result) -> [ condition; result ])) @ Option.toList otherwise)
+
+and private isStatementStableSelect
+    (store: Store)
+    (registry: Registry)
+    (dbName: string)
+    (outerScope: SubqueryScope)
+    (select: SelectStmt)
+    : bool =
+    match selectSubqueryScope store dbName select with
+    | None -> false
+    | Some ownScope when not select.Windows.IsEmpty -> false
+    | Some ownScope ->
+        let scope =
+            { Qualifiers = Set.union outerScope.Qualifiers ownScope.Qualifiers
+              Columns = Set.union outerScope.Columns ownScope.Columns }
+
+        let expressions =
+            (select.Projections |> List.map fst)
+            @ (select.Joins |> List.map _.On)
+            @ (select.Where |> Option.toList)
+            @ select.GroupBy
+            @ (select.Having |> Option.toList)
+            @ (select.OrderBy |> List.map fst)
+            @ (select.Limit |> Option.toList)
+            @ (select.Offset |> Option.toList)
+
+        expressions |> List.forall (isStatementStableExpr store registry dbName scope)
+
 let rec private evalExpr (ctx: EvalContext) (expr: Expr) : Result<Value, EvalError> =
     let eval = evalExpr ctx
 
@@ -2199,7 +2339,7 @@ let rec private evalExpr (ctx: EvalContext) (expr: Expr) : Result<Value, EvalErr
         // otherwise wrongly drop every row whose `e` is `NULL`.
         eval e
         |> Result.bind (fun ve ->
-            match runSelectStmt ctx.Store ctx.Registry ctx.DbName select (Some ctx) with
+            match runExpressionSubquery ctx select select with
             | Err(code, message), _, _ -> Error(code, message)
             | Affected _, _, _ -> Ok VNull
             | ResultSet(columns, _), _, _ when columns.Length <> 1 -> Error(1241, "Operand should contain 1 column(s)")
@@ -2470,7 +2610,7 @@ let rec private evalExpr (ctx: EvalContext) (expr: Expr) : Result<Value, EvalErr
             | Ok v' -> Ok v'
             | Error err -> Error(Storage.toMySqlError err))
     | Exists select ->
-        match runSelectStmt ctx.Store ctx.Registry ctx.DbName select (Some ctx) with
+        match runExpressionSubquery ctx select (existsEarlyExitSelect select) with
         | ResultSet(_, rows), _, _ -> Ok(boolToValue (not (List.isEmpty rows)))
         | Err(code, message), _, _ -> Error(code, message)
         // A `SELECT` under `EXISTS (...)` is never an `INSERT`/`UPDATE`/
@@ -2482,7 +2622,7 @@ let rec private evalExpr (ctx: EvalContext) (expr: Expr) : Result<Value, EvalErr
         // of its text resultset — a bare-text round trip would make e.g.
         // `(SELECT MAX(n) FROM t) > (SELECT MIN(n) FROM t)` compare
         // lexicographically instead of numerically.
-        match runSelectStmt ctx.Store ctx.Registry ctx.DbName select (Some ctx) with
+        match runExpressionSubquery ctx select select with
         | Err(code, message), _, _ -> Error(code, message)
         | Affected _, _, _ -> Ok VNull
         | ResultSet(cols, _), _, _ when List.length cols <> 1 -> Error(1241, "Operand should contain 1 column(s)")
@@ -2494,6 +2634,45 @@ let rec private evalExpr (ctx: EvalContext) (expr: Expr) : Result<Value, EvalErr
 /// sort representation. Expressions such as CAST(enum_col AS CHAR) remain
 /// ordinary lexical strings; only a direct ENUM column reference uses its
 /// declaration ordinal, matching MySQL.
+and private existsEarlyExitSelect (select: SelectStmt) : SelectStmt =
+    if select.Limit.IsNone
+       && select.Offset.IsNone
+       && select.OrderBy.IsEmpty
+       && select.GroupBy.IsEmpty
+       && select.Having.IsNone
+       && not select.Distinct
+       && not select.Rollup
+       && select.Windows.IsEmpty
+       && not select.CalculateFoundRows
+       && not select.Locking then
+        { select with Limit = Some(Lit(VInt 1L)) }
+    else
+        select
+
+and private runExpressionSubquery
+    (ctx: EvalContext)
+    (cacheKey: SelectStmt)
+    (select: SelectStmt)
+    : QueryResult * ColumnMetadata list * Value[] list =
+    let memo = expressionSubqueryMemo.Value
+    let execute outer = runSelectStmt ctx.Store ctx.Registry ctx.DbName select outer
+
+    match (if isNull (box memo) then None else (match memo.TryGetValue cacheKey with | true, cached -> Some cached | _ -> None)) with
+    | Some(MemoizedSubquery(result, metadata, rows)) -> result, metadata, rows
+    | Some UnmemoizedSubquery -> execute (Some ctx)
+    | None when isStatementStableSelect ctx.Store ctx.Registry ctx.DbName emptySubqueryScope cacheKey ->
+        let result, metadata, rows = execute None
+
+        if not (isNull (box memo)) then
+            memo.[cacheKey] <- MemoizedSubquery(result, metadata, rows)
+
+        result, metadata, rows
+    | None ->
+        if not (isNull (box memo)) then
+            memo.[cacheKey] <- UnmemoizedSubquery
+
+        execute (Some ctx)
+
 and private evalOrderKey (ctx: EvalContext) (expr: Expr) : Result<Value * Collation.Collation option, EvalError> =
     let orderCtx = { ctx with Clause = OrderClause }
     evalExpr orderCtx expr |> Result.map (orderValueForExpr orderCtx expr)
@@ -8412,6 +8591,7 @@ let private triggerRowImageError (event: TriggerEvent) (columns: ColumnDef list)
 let rec execute (store: Store) (registry: Registry) (dbName: string) (ids: int64 * int64) (foundRows: bool) (stmt: Statement) : (int64 * int64) * QueryResult =
     // Fresh derived-table memo per statement (see `fromSubqueryMemo`).
     fromSubqueryMemo.Value <- Dictionary<FromItem, Result<ColumnDef list * Value[] list, QueryResult>>(HashIdentity.Reference)
+    expressionSubqueryMemo.Value <- Dictionary<SelectStmt, MemoizedSubquery>(HashIdentity.Reference)
     viewMemo.Value <- Dictionary<string * string, Result<ColumnDef list * Value[] list, QueryResult>>()
 
     /// Bodies execute with the trigger's schema `db` as the default

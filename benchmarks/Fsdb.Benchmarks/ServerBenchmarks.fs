@@ -177,6 +177,11 @@ type ServerBenchmarks() =
 
     [<Benchmark>]
     [<BenchmarkCategory("Scale")>]
+    member this.UncorrelatedInSubquery() =
+        this.Query "SELECT u.id, u.name FROM users u WHERE u.id IN (SELECT o.user_id FROM orders o WHERE o.id <= 100)"
+
+    [<Benchmark>]
+    [<BenchmarkCategory("Scale")>]
     member this.GroupByAggregate() =
         this.Query "SELECT status, COUNT(*), SUM(total) FROM orders GROUP BY status"
 

@@ -31,7 +31,7 @@ accepted (marked `ponytail:` in source), or recorded only in
 | Area | State | Largest single gap |
 |---|---|---|
 | SQL statements | Broad core; large admin/programmatic tail missing | Stored procedures/functions, events |
-| Query execution | Correct single-table equality access | No index-based join access; subqueries re-run per outer row |
+| Query execution | Equality access and stable subquery materialization | Range/order access, join reordering, and correlated subqueries still scale poorly |
 | Built-in functions | Broad scalar, aggregate, JSON, time, and geometry-core coverage | Legacy/asymmetric crypto and JSON Schema regex patterns |
 | Data types | Common scalar types plus OGC geometry | No TIME value domain or BIT |
 | Constraints & indexes | PK/UNIQUE/FK/CHECK plus one-column equality indexes | No range/order/index-join access |
@@ -97,7 +97,8 @@ splicing `/*!NNNNN … */`; and MySQL's single-row `FROM DUAL` source.
 ## 2. Query execution
 
 Working: hash joins for equi-joins with collation-folded keys, lazy nested
-loops otherwise, correlated scalar/EXISTS/IN subqueries with correct NULL
+loops otherwise, statement-stable scalar/EXISTS/IN subqueries materialized
+once per statement, correlated scalar/EXISTS/IN subqueries with correct NULL
 semantics, bounded top-N sort for ORDER BY+LIMIT, GROUP_CONCAT byte cap,
 WITH ROLLUP expansion, window frames (ROWS/RANGE, numeric offsets),
 COUNT(DISTINCT a,b) tuples, statement-atomic multi-table DML, exact ODKU
@@ -110,7 +111,7 @@ identities for bit aggregates.
 | Secondary-index access paths | ref/eq_ref/range scans feed joins, ORDER BY, GROUP BY | single-table equality and a physical right side of a one-key `INNER JOIN ... ON` use PK/UNIQUE or one-column non-unique B-tree buckets; ranges, join reordering, composite keys, outer joins, ORDER BY, and GROUP BY scan/sort | high (scale) | divergence |
 | Optimizer | pushdown, constant folding, join reordering, cost model, statistics | none; joins fold left-to-right as written; derived tables materialize once per statement (`Functions.fs:44`, `Executor.fs:36–43`) | medium | divergence |
 | EXPLAIN fidelity | type ∈ system/const/eq_ref/ref/range/index/ALL; FORMAT=JSON/TREE; ANALYZE; optimizer_trace | `type` ∈ {system, const, eq_ref, ref, ALL}; FORMAT=JSON/TREE, ANALYZE, and optimizer_trace absent; extra flags limited to Using where/filesort/temporary | low | divergence |
-| Subquery strategies | semi-join/materialization/early-exit transformations | IN-subqueries re-execute per outer row; EXISTS materializes fully without LIMIT-1 short-circuit (`Executor.fs:2011, 2216`) | medium (scale) | divergence |
+| Subquery strategies | semi-join/materialization/early-exit transformations | statement-stable scalar/IN/EXISTS subqueries materialize once and simple EXISTS stops at one row; correlated, variable-bearing, nondeterministic, CTE, derived, lateral, and JSON_TABLE forms re-execute | medium (scale) | divergence |
 | Join size ceiling | unbounded (memory-bound) | hard cap 1,000,000 candidate rows → error 1105 (`Executor.fs:1586, 3287–3290`) | medium | divergence |
 | Multi-table UPDATE/DELETE sources | derived tables allowed as join sources | real base tables only → 1064 (`Executor.fs:3334–3339`) | low | refusal |
 | MATCH…AGAINST placement | evaluates in UPDATE/DELETE WHERE, joins, subqueries | single-table SELECT pre-pass only, else 1191 (`Executor.fs:1828–1831, 5828–5830`) | medium | refusal |
