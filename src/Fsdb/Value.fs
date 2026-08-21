@@ -10,6 +10,7 @@ open System.Text.Json
 open System.Text.Json.Nodes
 open System.Text.RegularExpressions
 open Fsdb.Binary
+open Fsdb.Temporal
 
 type GeometryKind =
     | Geometry
@@ -396,6 +397,8 @@ type Value =
     | VBytes of byte[]
     | VDate of DateOnly
     | VDateTime of DateTime
+    | VZeroDate of ZeroDate
+    | VZeroDateTime of ZeroDateTime
     /// Raw JSON text — ponytail: no parsed representation yet, add one
     /// (JVal DU or similar) when JSON_EXTRACT-style path queries land.
     | VJson of string
@@ -503,6 +506,8 @@ let toText (v: Value) : string option =
         let micros = (dt.Ticks % TimeSpan.TicksPerSecond) / 10L
         let baseStr = dt.ToString("yyyy-MM-dd HH:mm:ss", CultureInfo.InvariantCulture)
         Some(if micros = 0L then baseStr else sprintf "%s.%06d" baseStr micros)
+    | VZeroDate d -> Some(formatZeroDate d)
+    | VZeroDateTime dt -> Some(formatZeroDateTime dt)
     | VJson j -> Some j
     | VGeometry geometry -> Some(Text.Encoding.Latin1.GetString(geometryToMySqlBinary geometry))
 
@@ -526,6 +531,7 @@ let toTextFsp (fsp: int) (v: Value) : string option =
         else
             let micros = (dt.Ticks % TimeSpan.TicksPerSecond) / 10L
             Some(sprintf "%s.%s" baseStr ((sprintf "%06d" micros).Substring(0, min fsp 6)))
+    | VZeroDateTime dt -> Some(formatZeroDateTimeFsp fsp dt)
     | _ -> toText v
 
 /// A round-trippable tagged-text encoding of a `Value` — `ofWire (toWire v) = v`
@@ -549,6 +555,8 @@ let toWire (v: Value) : string =
     // "O" (round-trip) format, not `toText`'s display format — keeps
     // sub-second precision.
     | VDateTime dt -> "V" + dt.ToString("O", CultureInfo.InvariantCulture)
+    | VZeroDate d -> "Z" + formatZeroDate d
+    | VZeroDateTime dt -> "W" + formatZeroDateTime dt
     | VJson j -> "J" + b64 j
     | VGeometry geometry -> "G" + Convert.ToBase64String(geometryToMySqlBinary geometry)
 
@@ -570,6 +578,8 @@ let ofWire (s: string) : Value =
         | 'B' -> VBytes(Convert.FromBase64String payload)
         | 'T' -> VDate(DateOnly.Parse(payload, CultureInfo.InvariantCulture))
         | 'V' -> VDateTime(DateTime.Parse(payload, CultureInfo.InvariantCulture, DateTimeStyles.RoundtripKind))
+        | 'Z' -> tryParseZeroDate payload |> Option.map VZeroDate |> Option.defaultWith (fun () -> failwithf "Value.ofWire: invalid zero date %s" payload)
+        | 'W' -> tryParseZeroDateTime payload |> Option.map VZeroDateTime |> Option.defaultWith (fun () -> failwithf "Value.ofWire: invalid zero datetime %s" payload)
         | 'J' -> VJson(unb64 payload)
         | 'G' ->
             let bytes = Convert.FromBase64String payload
@@ -616,6 +626,23 @@ let encodeValue (w: Writer) (v: Value) : unit =
         w.WriteByte 0x07uy
         w.WriteInt64LE dt.Ticks
         w.WriteByte(byte (int dt.Kind))
+    | VZeroDate d ->
+        let year, month, day = zeroDateParts d
+        w.WriteByte 0x0buy
+        w.WriteInt32LE year
+        w.WriteInt32LE month
+        w.WriteInt32LE day
+    | VZeroDateTime dt ->
+        let date, hour, minute, second, microseconds = zeroDateTimeParts dt
+        let year, month, day = zeroDateParts date
+        w.WriteByte 0x0cuy
+        w.WriteInt32LE year
+        w.WriteInt32LE month
+        w.WriteInt32LE day
+        w.WriteInt32LE hour
+        w.WriteInt32LE minute
+        w.WriteInt32LE second
+        w.WriteInt32LE microseconds
     | VJson j ->
         w.WriteByte 0x08uy
         w.WriteLenEncString j
@@ -661,6 +688,16 @@ let decodeValue (r: #IReader) : Value =
         match tryGeometryFromMySqlBinary bytes with
         | Some geometry -> VGeometry geometry
         | None -> failwith "Value.decodeValue: invalid geometry payload"
+    | 0x0buy ->
+        let year, month, day = r.ReadInt32LE(), r.ReadInt32LE(), r.ReadInt32LE()
+        tryZeroDate year month day |> Option.map VZeroDate |> Option.defaultWith (fun () -> failwith "Value.decodeValue: invalid zero date")
+    | 0x0cuy ->
+        let year, month, day = r.ReadInt32LE(), r.ReadInt32LE(), r.ReadInt32LE()
+        let hour, minute, second, microseconds = r.ReadInt32LE(), r.ReadInt32LE(), r.ReadInt32LE(), r.ReadInt32LE()
+        tryZeroDate year month day
+        |> Option.bind (fun date -> tryZeroDateTime date hour minute second microseconds)
+        |> Option.map VZeroDateTime
+        |> Option.defaultWith (fun () -> failwith "Value.decodeValue: invalid zero datetime")
     | tag -> failwithf "Value.decodeValue: unknown tag 0x%02x" tag
 
 /// The MySQL wire type this value's runtime shape reports as, so a
@@ -689,6 +726,8 @@ let mysqlMetadataOf (v: Value) : ColumnMetadata =
     | VBytes _ -> { columnMetadata TypeBlob with Flags = BlobFlag ||| BinaryFlag }
     | VDate _ -> columnMetadata TypeDate
     | VDateTime _ -> columnMetadata TypeDateTime
+    | VZeroDate _ -> columnMetadata TypeDate
+    | VZeroDateTime _ -> columnMetadata TypeDateTime
 
 let mysqlTypeOf (v: Value) : byte = (mysqlMetadataOf v).TypeId
 
@@ -723,6 +762,8 @@ let toDouble (v: Value) : float =
     | VBytes _
     | VDate _
     | VDateTime _
+    | VZeroDate _
+    | VZeroDateTime _
     | VJson _
     | VGeometry _ -> v |> toText |> Option.map parseLeadingNumeric |> Option.defaultValue 0.0
 
@@ -814,7 +855,9 @@ let private asJsonOperand (v: Value) : int * JsonNode =
     | VDecimal d -> 1, JsonValue.Create d
     | VString s -> 2, JsonValue.Create s
     | VDate _ -> 6, null
+    | VZeroDate _ -> 6, null
     | VDateTime _ -> 8, null
+    | VZeroDateTime _ -> 8, null
     | VBytes _ -> 11, null
     | VGeometry _ -> 11, null
     | VNull -> 0, null
@@ -916,9 +959,19 @@ let rec compare (a: Value) (b: Value) : int =
     | VGeometry x, VGeometry y -> compareBytesLex (geometryToMySqlBinary x) (geometryToMySqlBinary y)
     | VDate x, VDate y -> Operators.compare x y
     | VDateTime x, VDateTime y -> Operators.compare x y
+    | VZeroDate x, VZeroDate y -> compareZeroDates x y
+    | VZeroDateTime x, VZeroDateTime y -> compareZeroDateTimes x y
     | VDate x, VDateTime y -> Operators.compare (x.ToDateTime(TimeOnly.MinValue)) y
     | VDateTime x, VDate y -> Operators.compare x (y.ToDateTime(TimeOnly.MinValue))
-    | (VDate _ | VDateTime _), VString s ->
+    | VZeroDate x, VDate y -> compareZeroDateToDateTime x (y.ToDateTime TimeOnly.MinValue)
+    | VDate y, VZeroDate x -> -(compareZeroDateToDateTime x (y.ToDateTime TimeOnly.MinValue))
+    | VZeroDate x, VDateTime y -> compareZeroDateToDateTime x y
+    | VDateTime y, VZeroDate x -> -(compareZeroDateToDateTime x y)
+    | VZeroDateTime x, VDate y -> compareZeroDateTimeToDateTime x (y.ToDateTime TimeOnly.MinValue)
+    | VDate y, VZeroDateTime x -> -(compareZeroDateTimeToDateTime x (y.ToDateTime TimeOnly.MinValue))
+    | VZeroDateTime x, VDateTime y -> compareZeroDateTimeToDateTime x y
+    | VDateTime y, VZeroDateTime x -> -(compareZeroDateTimeToDateTime x y)
+    | (VDate _ | VDateTime _ | VZeroDate _ | VZeroDateTime _), VString s ->
         // A literal like a `WHERE date BETWEEN '2024-01-01 00:00:00' AND
         // ...` bound is still a bare VString here (nothing coerces it to the
         // column's type ahead of the comparison) — parsed as a real instant
@@ -931,7 +984,7 @@ let rec compare (a: Value) (b: Value) : int =
         match DateTime.TryParse(s.Trim(), CultureInfo.InvariantCulture, DateTimeStyles.None) with
         | true, dt -> Operators.compare (asDateTime a) dt
         | false, _ -> compareStrings (toText a |> Option.defaultValue "") s
-    | VString _, (VDate _ | VDateTime _) -> -(compare b a)
+    | VString _, (VDate _ | VDateTime _ | VZeroDate _ | VZeroDateTime _) -> -(compare b a)
     // BIGINT vs DECIMAL with neither side a DOUBLE: promote both to
     // `decimal` and compare exactly. Routing this through `toDouble`
     // (float has only 53 bits of mantissa) silently merges distinct
@@ -1033,6 +1086,8 @@ let private classify (v: Value) : NumKind option =
     | VBytes _
     | VDate _
     | VDateTime _
+    | VZeroDate _
+    | VZeroDateTime _
     | VJson _
     | VGeometry _ -> Some(KDouble(toDouble v))
 

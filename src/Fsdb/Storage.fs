@@ -1174,6 +1174,8 @@ let private encodeEqualityKey (columns: ColumnDef list) (indices: int list) (row
         | VBytes value -> "B" + Convert.ToHexString value
         | VDate value -> "T" + string value.DayNumber
         | VDateTime value -> "V" + string value.Ticks
+        | VZeroDate _
+        | VZeroDateTime _ -> toWire row.[index]
         | VJson value -> "J" + value.TrimEnd(' ').ToUpperInvariant()
         | VGeometry value -> "G" + Convert.ToHexString(geometryToMySqlBinary value)
 

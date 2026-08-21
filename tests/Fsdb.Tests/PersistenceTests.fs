@@ -5,6 +5,7 @@ open System.IO
 open Expecto
 open Fsdb.Ast
 open Fsdb.Value
+open Fsdb.Temporal
 open Fsdb.Storage
 open Fsdb.Persistence
 open Fsdb.Binary
@@ -1018,6 +1019,17 @@ let tests =
               encodeValue w original
               let r = Reader(w.ToArray())
               Expect.equal (decodeValue r) original "VJson round-trips through encodeValue/decodeValue"
+
+          testCase "the Value binary codec round-trips zero temporal values"
+          <| fun _ ->
+              let date = tryZeroDate 2020 0 1 |> Option.get
+              let dateTime = tryZeroDateTime date 12 34 56 123_000 |> Option.get
+
+              for original in [ VZeroDate date; VZeroDateTime dateTime ] do
+                  let w = Writer()
+                  encodeValue w original
+                  let r = Reader(w.ToArray())
+                  Expect.equal (decodeValue r) original (sprintf "%A round-trips" original)
 
           testCase "the streamed binary reader rejects impossible lengths before allocating"
           <| fun _ ->

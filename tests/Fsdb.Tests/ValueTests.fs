@@ -5,6 +5,7 @@ open System.Text
 open Expecto
 open Fsdb.Value
 open Fsdb.Functions
+open Fsdb.Temporal
 
 /// Looks up a builtin by name and applies it — the same path
 /// `Executor.evalExpr`'s `FuncCall` case takes, minus the `Result` plumbing
@@ -79,6 +80,17 @@ let tests =
                         (Some "2024-03-05 13:45:09.000005")
                         "leading zeros are significant in the fraction"
 
+                testCase "zero dates preserve zero components"
+                <| fun _ ->
+                    let date = tryZeroDate 2020 0 1 |> Option.get
+                    Expect.equal (toText (VZeroDate date)) (Some "2020-00-01") "partial zero date"
+
+                testCase "zero datetimes preserve their time component"
+                <| fun _ ->
+                    let date = tryZeroDate 0 0 0 |> Option.get
+                    let dateTime = tryZeroDateTime date 12 34 56 123_000 |> Option.get
+                    Expect.equal (toText (VZeroDateTime dateTime)) (Some "0000-00-00 12:34:56.123000") "zero datetime"
+
                 testCase "VJson renders the raw text unchanged"
                 <| fun _ -> Expect.equal (toText (VJson "{\"a\":1}")) (Some "{\"a\":1}") "json" ]
 
@@ -97,6 +109,8 @@ let tests =
                           VBytes [| 0uy; 255uy; 1uy |]
                           VDate(DateOnly(2024, 3, 5))
                           VDateTime(DateTime(2024, 3, 5, 13, 45, 9, 123))
+                          VZeroDate(tryZeroDate 2020 0 1 |> Option.get)
+                          VZeroDateTime(tryZeroDateTime (tryZeroDate 0 0 0 |> Option.get) 0 0 0 0 |> Option.get)
                           VJson "{\"a\":1}"
                           VGeometry(tryGeometryFromText 4326 "POINT(1.5 -2)" |> Option.get) ]
 

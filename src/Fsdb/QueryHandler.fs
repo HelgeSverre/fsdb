@@ -151,6 +151,8 @@ let valueToSqlLiteral (v: Value) : string =
     | VBytes bytes -> "X'" + Convert.ToHexString(bytes) + "'"
     | VDate _
     | VDateTime _
+    | VZeroDate _
+    | VZeroDateTime _
     | VString _
     | VJson _ -> "'" + escapeSqlString (v |> toText |> Option.defaultValue "") + "'"
     | VGeometry geometry -> "ST_GeomFromWKB(X'" + Convert.ToHexString(geometryToWkb geometry) + "', " + string geometry.Srid + ")"
