@@ -1166,7 +1166,9 @@ let rec private metadataOfExpr (ctx: EvalContext) (expr: Expr) : ColumnMetadata 
           | "JSON_LENGTH" | "JSON_DEPTH" | "CHAR_LENGTH" | "CHARACTER_LENGTH" | "LENGTH" | "OCTET_LENGTH" | "BIT_LENGTH" | "BIT_COUNT" | "IS_IPV4"
           | "IS_IPV6" | "IS_IPV4_COMPAT" | "IS_IPV4_MAPPED"), _ ->
             simple TypeLongLong
-        | ("BIT_AND" | "BIT_OR" | "BIT_XOR"), _ -> Some { Value.columnMetadata TypeLongLong with ColumnLength = 21u; Flags = UnsignedFlag }
+        | ("BIT_AND" | "BIT_OR" | "BIT_XOR" | "BITWISE_NOT" | "BITWISE_AND" | "BITWISE_OR" | "BITWISE_XOR" | "BITWISE_SHIFT_LEFT"
+          | "BITWISE_SHIFT_RIGHT"), _ ->
+            Some { Value.columnMetadata TypeLongLong with ColumnLength = 21u; Flags = UnsignedFlag }
         | "INET6_ATON", _ -> Some { Value.columnMetadata TypeVarString with ColumnLength = 16u; Flags = BinaryFlag; Decimals = 31uy }
         | "INET6_NTOA", _ -> Some { Value.columnMetadata TypeVarString with ColumnLength = 156u; Decimals = 31uy }
         | ("SQRT" | "LOG" | "LN" | "LOG2" | "LOG10" | "EXP" | "POWER" | "POW" | "PI" | "SIN" | "COS" | "TAN" | "COT" | "ASIN" | "ACOS"

@@ -89,7 +89,6 @@ variants), USE, KILL, DESCRIBE are text-probed before the grammar
 | Locking detail | `FOR UPDATE/SHARE [OF tbl…] [NOWAIT|SKIP LOCKED]` | `FOR UPDATE`/`FOR SHARE`/`LOCK IN SHARE MODE` accepted and ignored; no OF/NOWAIT/SKIP LOCKED | low | divergence |
 | CTE placement | `WITH` in subqueries, derived tables, `INSERT…WITH` | top-level SELECT/UNION only (`Parser.fs:2458–2464`) | medium | refusal |
 | `LIMIT ?` placeholder | supported in prepared statements | limit clause accepts integer literals only (`Parser.fs:2014–2025`) | medium | refusal |
-| Bitwise operators | `& \| ^ << >> ~`, unary `~` | none (`Ast.fs:10–34` has no cases) | medium | refusal |
 | Quantified comparison | `= ANY/SOME/ALL (subquery)` | absent | medium | refusal |
 | Row constructors | `(a,b) = (1,2)`, `(a,b) IN ((1,2),(3,4))` | unparseable | medium | refusal |
 | User/system variables in expressions | `@x`, `@@x` anywhere an expression fits; `@x := …` | only bare `SELECT @x, @@y AS a` lists via post-parse regex fallback (`QueryHandler.fs:1188–1193`); inside larger queries → 1064 | medium | refusal |

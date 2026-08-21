@@ -5868,6 +5868,25 @@ let tests =
                         "SELECT BIT_COUNT(255) a, BIT_COUNT(-1) b, BIT_COUNT(0) c, BIT_COUNT('12') d, BIT_COUNT(NULL) e"
                         [ Some "8"; Some "64"; Some "0"; Some "2"; None ]
 
+                testCase "bitwise operators use unsigned 64-bit values and MySQL precedence"
+                <| fun _ ->
+                    expectRow
+                        "SELECT 5 & 3 a, 5 | 2 b, 5 ^ 1 c, 1 << 4 d, 16 >> 2 e, ~0 f, ~1 g, NULL & 1 n, 1 << 64 s64, 1 << -1 sn, 1 + 2 << 1 p1, 1 | 2 & 4 p2, 1 ^ 3 & 1 p3, 8 >> 1 + 1 p4"
+                        [ Some "1"
+                          Some "7"
+                          Some "4"
+                          Some "16"
+                          Some "4"
+                          Some "18446744073709551615"
+                          Some "18446744073709551614"
+                          None
+                          Some "0"
+                          Some "0"
+                          Some "6"
+                          Some "1"
+                          Some "0"
+                          Some "2" ]
+
                 testCase "a fractional argument rounds for BIT_COUNT/EXPORT_SET/MAKEDATE but truncates for BIN and strings"
                 <| fun _ ->
                     expectRow

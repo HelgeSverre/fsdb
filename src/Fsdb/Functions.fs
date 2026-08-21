@@ -2356,6 +2356,28 @@ let private bitCountFn: Scalar =
     | [ v ] when not (anyNull [ v ]) -> VInt(int64 (Numerics.BitOperations.PopCount(toUInt64 (roundNumeric v))))
     | _ -> VNull
 
+let private bitwiseUnary (operation: uint64 -> uint64) : Scalar =
+    function
+    | [ value ] when not (anyNull [ value ]) -> value |> roundNumeric |> toUInt64 |> operation |> VUInt
+    | _ -> VNull
+
+let private bitwiseBinary (operation: uint64 -> uint64 -> uint64) : Scalar =
+    function
+    | [ left; right ] when not (anyNull [ left; right ]) ->
+        VUInt(operation (toUInt64 (roundNumeric left)) (toUInt64 (roundNumeric right)))
+    | _ -> VNull
+
+let private bitwiseShift (operation: uint64 -> int -> uint64) : Scalar =
+    function
+    | [ value; count ] when not (anyNull [ value; count ]) ->
+        let shift = toUInt64 (roundNumeric count)
+
+        if shift >= 64UL then
+            VUInt 0UL
+        else
+            VUInt(operation (toUInt64 (roundNumeric value)) (int shift))
+    | _ -> VNull
+
 let private findInSetFn: Scalar =
     function
     | [ s; list ] when not (anyNull [ s; list ]) ->
@@ -3377,6 +3399,12 @@ let builtins: Registry =
     |> registerScalar "CONV" convFn
     |> registerScalar "BIN" binFn
     |> registerScalar "BIT_COUNT" bitCountFn
+    |> registerScalar "BITWISE_NOT" (bitwiseUnary (~~~))
+    |> registerScalar "BITWISE_AND" (bitwiseBinary (&&&))
+    |> registerScalar "BITWISE_OR" (bitwiseBinary (|||))
+    |> registerScalar "BITWISE_XOR" (bitwiseBinary (^^^))
+    |> registerScalar "BITWISE_SHIFT_LEFT" (bitwiseShift (fun value count -> value <<< count))
+    |> registerScalar "BITWISE_SHIFT_RIGHT" (bitwiseShift (fun value count -> value >>> count))
     |> registerScalar "OCT" octFn
     |> registerScalar "CRC32" crc32Fn
     |> registerScalar "UUID" uuidFn

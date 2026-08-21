@@ -1,13 +1,11 @@
 /// FParsec-based SQL parser: raw text in, `Ast.Statement` out.
 ///
 /// Grammar is built from small named parsers composed with combinators.
-/// Expression precedence is split across two layers rather than crammed
-/// into one `OperatorPrecedenceParser`: arithmetic (`+ - * / %` and unary
-/// `-`) uses an OPP since that's exactly the shape it's designed for, while
-/// the boolean layer (`OR`, `AND`, `NOT`, comparisons, `LIKE`/`IN`/`BETWEEN`)
-/// is hand-written, because those forms need extra keywords and sub-parses
-/// (`BETWEEN lo AND hi`, `IN (list)`) that don't fit the OPP's
-/// string-token-in, expression-out operator shape.
+/// Expression precedence is split across two layers. Numeric and bitwise
+/// operators use an `OperatorPrecedenceParser`; the boolean layer (`OR`,
+/// `AND`, `NOT`, comparisons, `LIKE`/`IN`/`BETWEEN`) is hand-written because
+/// those forms need extra keywords and sub-parses (`BETWEEN lo AND hi`,
+/// `IN (list)`) that do not fit the OPP's operator shape.
 module Fsdb.Parser
 
 open System
@@ -1223,10 +1221,9 @@ let private jsonArrowAtom: Parser<Expr, unit> =
         )
         |>> List.fold (fun acc f -> f acc) a
 
-/// Arithmetic: `+ -` bind loosest, `* / % DIV` tighter, unary `-` tightest.
-/// `Ast.Op` has no modulo or unary-negation case, so both desugar: `%`
-/// becomes a call to `MOD` (which is what MySQL's `%` already means) and
-/// unary `-x` becomes `0 - x`.
+/// Numeric operators share one precedence parser. Operators without an
+/// `Ast.Op` case desugar to internal scalar calls, keeping evaluation and
+/// metadata in the same paths as ordinary functions.
 let private opp = OperatorPrecedenceParser<Expr, unit, unit>()
 let private arithExpr = opp.ExpressionParser
 
@@ -1249,11 +1246,16 @@ let private collateTerm: Parser<Expr, unit> =
             | None -> fail (sprintf "Unknown collation '%s'" name)
 
 opp.TermParser <- collateTerm
-opp.AddOperator(InfixOperator("+", ws, 1, Associativity.Left, (fun a b -> BinOp(Add, a, b))))
-opp.AddOperator(InfixOperator("-", ws, 1, Associativity.Left, (fun a b -> BinOp(Sub, a, b))))
-opp.AddOperator(InfixOperator("*", ws, 2, Associativity.Left, (fun a b -> BinOp(Mul, a, b))))
-opp.AddOperator(InfixOperator("/", ws, 2, Associativity.Left, (fun a b -> BinOp(Div, a, b))))
-opp.AddOperator(InfixOperator("%", ws, 2, Associativity.Left, (fun a b -> FuncCall("MOD", [ a; b ]))))
+opp.AddOperator(InfixOperator("|", ws, 1, Associativity.Left, (fun a b -> FuncCall("BITWISE_OR", [ a; b ]))))
+opp.AddOperator(InfixOperator("^", ws, 2, Associativity.Left, (fun a b -> FuncCall("BITWISE_XOR", [ a; b ]))))
+opp.AddOperator(InfixOperator("&", ws, 3, Associativity.Left, (fun a b -> FuncCall("BITWISE_AND", [ a; b ]))))
+opp.AddOperator(InfixOperator("<<", ws, 4, Associativity.Left, (fun a b -> FuncCall("BITWISE_SHIFT_LEFT", [ a; b ]))))
+opp.AddOperator(InfixOperator(">>", ws, 4, Associativity.Left, (fun a b -> FuncCall("BITWISE_SHIFT_RIGHT", [ a; b ]))))
+opp.AddOperator(InfixOperator("+", ws, 5, Associativity.Left, (fun a b -> BinOp(Add, a, b))))
+opp.AddOperator(InfixOperator("-", ws, 5, Associativity.Left, (fun a b -> BinOp(Sub, a, b))))
+opp.AddOperator(InfixOperator("*", ws, 6, Associativity.Left, (fun a b -> BinOp(Mul, a, b))))
+opp.AddOperator(InfixOperator("/", ws, 6, Associativity.Left, (fun a b -> BinOp(Div, a, b))))
+opp.AddOperator(InfixOperator("%", ws, 6, Associativity.Left, (fun a b -> FuncCall("MOD", [ a; b ]))))
 
 // `DIV` is a keyword operator, not punctuation, so it needs the same
 // word-boundary guard `keyword` uses (`nextCharSatisfiesNot isIdentChar`) —
@@ -1265,14 +1267,14 @@ opp.AddOperator(InfixOperator("%", ws, 2, Associativity.Left, (fun a b -> FuncCa
 // case mid-keyword (`Div`) won't match; fold in real case-insensitive
 // matching if that ever shows up outside a lint test.
 let private divKeywordBoundary: Parser<unit, unit> = nextCharSatisfiesNot isIdentChar >>. ws
-opp.AddOperator(InfixOperator("DIV", divKeywordBoundary, 2, Associativity.Left, (fun a b -> BinOp(IntDiv, a, b))))
-opp.AddOperator(InfixOperator("div", divKeywordBoundary, 2, Associativity.Left, (fun a b -> BinOp(IntDiv, a, b))))
+opp.AddOperator(InfixOperator("DIV", divKeywordBoundary, 6, Associativity.Left, (fun a b -> BinOp(IntDiv, a, b))))
+opp.AddOperator(InfixOperator("div", divKeywordBoundary, 6, Associativity.Left, (fun a b -> BinOp(IntDiv, a, b))))
 // `a MOD b` is the word spelling of `a % b`, with the same precedence and
 // the same word-boundary/casing caveats as `DIV` above. `MOD(a, b)` still
 // parses as a function call: the term parser consumes the `(` form before
 // the operator parser ever looks for an infix keyword.
-opp.AddOperator(InfixOperator("MOD", divKeywordBoundary, 2, Associativity.Left, (fun a b -> FuncCall("MOD", [ a; b ]))))
-opp.AddOperator(InfixOperator("mod", divKeywordBoundary, 2, Associativity.Left, (fun a b -> FuncCall("MOD", [ a; b ]))))
+opp.AddOperator(InfixOperator("MOD", divKeywordBoundary, 6, Associativity.Left, (fun a b -> FuncCall("MOD", [ a; b ]))))
+opp.AddOperator(InfixOperator("mod", divKeywordBoundary, 6, Associativity.Left, (fun a b -> FuncCall("MOD", [ a; b ]))))
 /// Unary minus. On a *literal* the sign is part of the literal, the way
 /// MySQL's own lexer reads it — `-9223372036854775808` is BIGINT's signed
 /// minimum and `-18446744073709551615` an exact DECIMAL, where the general
@@ -1292,7 +1294,8 @@ let private negateExpr (e: Expr) : Expr =
     | Lit(VDouble d) -> Lit(VDouble(-d))
     | _ -> BinOp(Sub, Lit(VInt 0L), e)
 
-opp.AddOperator(PrefixOperator("-", ws, 3, true, negateExpr))
+opp.AddOperator(PrefixOperator("-", ws, 7, true, negateExpr))
+opp.AddOperator(PrefixOperator("~", ws, 7, true, (fun value -> FuncCall("BITWISE_NOT", [ value ]))))
 
 /// `IN (SELECT ...)` vs. `IN (expr, expr, ...)` — both start with `(`, so
 /// the subquery form is tried first (`attempt`ed since `selectStmtRecord`
