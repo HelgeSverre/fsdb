@@ -1389,6 +1389,19 @@ let tests =
                   Expect.stringContains status "in-memory transactional row store" "engine status describes fsdb"
               | other -> failtestf "unexpected SHOW ENGINE result: %A" other
 
+          testCase "SHOW REPLICA STATUS returns MySQL's empty 60-column shape"
+          <| fun _ ->
+              let session = create 1 (Fsdb.Storage.create ())
+
+              for sql in [ "SHOW REPLICA STATUS"; "SHOW REPLICA STATUS FOR CHANNEL 'analytics'" ] do
+                  match handle session sql |> snd with
+                  | ResultSet(columns, []) ->
+                      Expect.equal columns.Length 60 "column count"
+                      Expect.equal columns.Head "Replica_IO_State" "first column"
+                      Expect.equal columns.[55] "Channel_Name" "channel column"
+                      Expect.equal columns.[59] "Network_Namespace" "last column"
+                  | other -> failtestf "unexpected replica status for %s: %A" sql other
+
           testCase "SET GLOBAL never changes the issuing session's own variable"
           <| fun _ ->
               let store = Fsdb.Storage.create ()

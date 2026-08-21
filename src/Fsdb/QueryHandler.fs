@@ -298,6 +298,8 @@ let private showEngineInnodbStatusRe = Regex(@"^SHOW\s+ENGINE\s+INNODB\s+STATUS\
 let private showPluginsRe = Regex(@"^SHOW\s+PLUGINS\s*$", RegexOptions.IgnoreCase)
 let private showBinaryLogsRe = Regex(@"^SHOW\s+(?:BINARY|MASTER)\s+LOGS\s*$", RegexOptions.IgnoreCase)
 let private showBinaryLogStatusRe = Regex(@"^SHOW\s+BINARY\s+LOG\s+STATUS\s*$", RegexOptions.IgnoreCase)
+let private showReplicaStatusRe =
+    Regex(@"^SHOW\s+REPLICA\s+STATUS(?:\s+FOR\s+CHANNEL\s+'[^']*')?\s*$", RegexOptions.IgnoreCase)
 let private maintenanceTableRe = Regex(@"^(ANALYZE|CHECK)\s+TABLE\s+(.+?)\s*$", RegexOptions.IgnoreCase)
 let private showOpenTablesRe = Regex(@"^SHOW\s+OPEN\s+TABLES(?:\s+(?:FROM|IN)\s+(\S+))?(?:\s+LIKE\s+'([^']*)')?\s*$", RegexOptions.IgnoreCase)
 let private showCreateDatabaseRe =
@@ -1257,6 +1259,7 @@ type private Probe =
     | ShowPlugins
     | ShowBinaryLogs
     | ShowBinaryLogStatus
+    | ShowReplicaStatus
     | MaintainTables of operation: string * tables: string list
     | ShowOpenTables of db: string option * pattern: string option
     | ShowCreateDatabase of name: string
@@ -1336,6 +1339,8 @@ let private tryProbe (sql: string) (upper: string) : Probe option =
         Some ShowBinaryLogs
     elif showBinaryLogStatusRe.IsMatch sql then
         Some ShowBinaryLogStatus
+    elif showReplicaStatusRe.IsMatch sql then
+        Some ShowReplicaStatus
     elif maintenanceTableRe.IsMatch sql then
         let matched = maintenanceTableRe.Match sql
         let tables = matched.Groups.[2].Value.Split(',') |> Array.map (fun table -> table.Trim()) |> List.ofArray
@@ -1532,6 +1537,71 @@ let private runProbe (session: Session) (sql: string) (probe: Probe) : Session *
         )
     | ShowBinaryLogs
     | ShowBinaryLogStatus -> session, Err(1381, "You are not using binary logging")
+    | ShowReplicaStatus ->
+        session,
+        ResultSet(
+            [ "Replica_IO_State"
+              "Source_Host"
+              "Source_User"
+              "Source_Port"
+              "Connect_Retry"
+              "Source_Log_File"
+              "Read_Source_Log_Pos"
+              "Relay_Log_File"
+              "Relay_Log_Pos"
+              "Relay_Source_Log_File"
+              "Replica_IO_Running"
+              "Replica_SQL_Running"
+              "Replicate_Do_DB"
+              "Replicate_Ignore_DB"
+              "Replicate_Do_Table"
+              "Replicate_Ignore_Table"
+              "Replicate_Wild_Do_Table"
+              "Replicate_Wild_Ignore_Table"
+              "Last_Errno"
+              "Last_Error"
+              "Skip_Counter"
+              "Exec_Source_Log_Pos"
+              "Relay_Log_Space"
+              "Until_Condition"
+              "Until_Log_File"
+              "Until_Log_Pos"
+              "Source_SSL_Allowed"
+              "Source_SSL_CA_File"
+              "Source_SSL_CA_Path"
+              "Source_SSL_Cert"
+              "Source_SSL_Cipher"
+              "Source_SSL_Key"
+              "Seconds_Behind_Source"
+              "Source_SSL_Verify_Server_Cert"
+              "Last_IO_Errno"
+              "Last_IO_Error"
+              "Last_SQL_Errno"
+              "Last_SQL_Error"
+              "Replicate_Ignore_Server_Ids"
+              "Source_Server_Id"
+              "Source_UUID"
+              "Source_Info_File"
+              "SQL_Delay"
+              "SQL_Remaining_Delay"
+              "Replica_SQL_Running_State"
+              "Source_Retry_Count"
+              "Source_Bind"
+              "Last_IO_Error_Timestamp"
+              "Last_SQL_Error_Timestamp"
+              "Source_SSL_Crl"
+              "Source_SSL_Crlpath"
+              "Retrieved_Gtid_Set"
+              "Executed_Gtid_Set"
+              "Auto_Position"
+              "Replicate_Rewrite_DB"
+              "Channel_Name"
+              "Source_TLS_Version"
+              "Source_public_key_path"
+              "Get_Source_public_key"
+              "Network_Namespace" ],
+            []
+        )
     | MaintainTables(operation, tables) ->
         let sessionDb = session.Database |> Option.defaultValue defaultDatabase
 
