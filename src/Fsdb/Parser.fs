@@ -3070,6 +3070,74 @@ let parse (sql: string) : Result<Statement, string> =
     with ex ->
         Result.Error ex.Message
 
+/// Splits a COM_QUERY batch at statement delimiters outside literals and
+/// comments. The parser still validates each returned statement separately,
+/// which keeps text-probed session commands on their existing path.
+let splitStatements (sql: string) : Result<string list, string> =
+    let sql = stripVersionComments sql
+    let statements = ResizeArray<string>()
+    let mutable start = 0
+    let mutable i = 0
+    let mutable quote: char option = None
+    let mutable blockComment = false
+    let mutable lineComment = false
+
+    let addStatement stop =
+        if stop > start then
+            let statement = sql.[start .. stop - 1].Trim()
+
+            if not (isBlank statement) then
+                statements.Add statement
+
+    while i < sql.Length do
+        match quote with
+        | Some q when sql.[i] = '\\' && q <> '`' && i + 1 < sql.Length -> i <- i + 2
+        | Some q when sql.[i] = q && i + 1 < sql.Length && sql.[i + 1] = q -> i <- i + 2
+        | Some q when sql.[i] = q ->
+            quote <- None
+            i <- i + 1
+        | Some _ -> i <- i + 1
+        | None when blockComment ->
+            if sql.[i] = '*' && i + 1 < sql.Length && sql.[i + 1] = '/' then
+                blockComment <- false
+                i <- i + 2
+            else
+                i <- i + 1
+        | None when lineComment ->
+            if sql.[i] = '\n' || sql.[i] = '\r' then
+                lineComment <- false
+
+            i <- i + 1
+        | None when sql.[i] = '\'' || sql.[i] = '"' || sql.[i] = '`' ->
+            quote <- Some sql.[i]
+            i <- i + 1
+        | None when sql.[i] = '#' ->
+            lineComment <- true
+            i <- i + 1
+        | None when
+            sql.[i] = '-'
+            && i + 1 < sql.Length
+            && sql.[i + 1] = '-'
+            && (i + 2 = sql.Length || Char.IsWhiteSpace sql.[i + 2])
+            ->
+            lineComment <- true
+            i <- i + 2
+        | None when sql.[i] = '/' && i + 1 < sql.Length && sql.[i + 1] = '*' ->
+            blockComment <- true
+            i <- i + 2
+        | None when sql.[i] = ';' ->
+            addStatement i
+            start <- i + 1
+            i <- i + 1
+        | None -> i <- i + 1
+
+    match quote, blockComment with
+    | Some _, _ -> Result.Error "unterminated quoted string"
+    | None, true -> Result.Error "unterminated comment"
+    | None, false ->
+        addStatement sql.Length
+        Result.Ok(List.ofSeq statements)
+
 /// Parses one standalone expression for persisted schema objects such as
 /// CHECK constraints. It shares the statement parser's placeholder/depth
 /// guards so damaged catalog text fails as a normal schema error rather

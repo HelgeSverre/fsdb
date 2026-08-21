@@ -31,7 +31,7 @@ let private selfSignedCertificate () =
     request.CertificateExtensions.Add(X509BasicConstraintsExtension(false, false, 0, false))
     request.CreateSelfSigned(DateTimeOffset.UtcNow.AddDays(-1.0), DateTimeOffset.UtcNow.AddDays(1.0))
 
-let private connectRawAs (port: int) (username: string) : Async<Net.Sockets.TcpClient * IO.Stream> =
+let private connectRawAsWithCapabilities (port: int) (username: string) (capabilities: uint32) : Async<Net.Sockets.TcpClient * IO.Stream> =
     async {
         let client = new Net.Sockets.TcpClient()
         do! client.ConnectAsync(Net.IPAddress.Loopback, port) |> Async.AwaitTask
@@ -40,12 +40,14 @@ let private connectRawAs (port: int) (username: string) : Async<Net.Sockets.TcpC
         let! handshake = readPacketAsync stream
         let handshakeSeq = handshake.Value.SeqId
 
-        let helloResponse = passwordlessHandshakeResponse ClientProtocol41 username
+        let helloResponse = passwordlessHandshakeResponse capabilities username
 
         let! _ = writePacketAsync stream { SeqId = handshakeSeq + 1uy; Payload = helloResponse }
         let! _ = readPacketAsync stream // connection OK
         return client, (stream :> IO.Stream)
     }
+
+let private connectRawAs (port: int) (username: string) = connectRawAsWithCapabilities port username ClientProtocol41
 
 /// Connects a raw client as the passwordless bootstrap account.
 let private connectRaw (port: int) : Async<Net.Sockets.TcpClient * IO.Stream> = connectRawAs port "root"
@@ -80,6 +82,46 @@ let tests =
                       Expect.equal (string result2) ServerVersion "SELECT @@version result"
 
                       do! conn.CloseAsync() |> Async.AwaitTask
+                  finally
+                      listener.Stop()
+              }
+              |> Async.RunSynchronously
+
+          testCase "CLIENT_MULTI_STATEMENTS returns sequenced results"
+          <| fun _ ->
+              async {
+                  let listener = Fsdb.Server.startListening System.Net.IPAddress.Loopback 0
+                  let port = Fsdb.Server.port listener
+                  Fsdb.Server.serve listener (Fsdb.Storage.create ()) Fsdb.Functions.empty |> Async.Start
+
+                  try
+                      let! client, stream =
+                          connectRawAsWithCapabilities port "root" (ClientProtocol41 ||| ClientMultiStatements ||| ClientMultiResults)
+
+                      use client = client
+
+                      let payload = Array.append [| 0x03uy |] (Text.Encoding.UTF8.GetBytes "SELECT 1; SELECT 2")
+                      do! writePacketAsync stream { SeqId = 0uy; Payload = payload } |> Async.Ignore
+                      let rec receive count packets =
+                          async {
+                              if count = 0 then
+                                  return List.rev packets
+                              else
+                                  match! readPacketAsync stream with
+                                  | Some packet -> return! receive (count - 1) (packet :: packets)
+                                  | None -> return failtest "the server returned every result packet"
+                          }
+
+                      let! packets = receive 10 []
+                      Expect.sequenceEqual (packets |> List.map (fun packet -> packet.SeqId)) [ 1uy .. 10uy ] "response packets are continuous"
+                      let firstTerminator = packets.[4]
+                      let status = Reader(firstTerminator.Payload.[1..])
+                      status.ReadInt16LE() |> ignore
+                      Expect.isTrue (status.ReadInt16LE() &&& StatusMoreResultsExists <> 0) "first result has MORE_RESULTS"
+                      let finalTerminator = packets.[9]
+                      let finalStatus = Reader(finalTerminator.Payload.[1..])
+                      finalStatus.ReadInt16LE() |> ignore
+                      Expect.equal (finalStatus.ReadInt16LE() &&& StatusMoreResultsExists) 0 "last result clears MORE_RESULTS"
                   finally
                       listener.Stop()
               }

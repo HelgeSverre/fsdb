@@ -2105,4 +2105,21 @@ let tests =
                       (cols |> List.map (fun c -> c.Type))
                       [ TTinyText; TText; TMediumText; TTinyBlob; TMediumBlob ]
                       "length-directed family selection"
-              | other -> failtestf "unexpected parse: %A" other ]
+              | other -> failtestf "unexpected parse: %A" other
+          testCase "statement batches preserve semicolons inside literals and comments"
+          <| fun _ ->
+              let sql = "SELECT ';'; /* ; */ SELECT `a;b` FROM t; -- ;\n SELECT 3"
+
+              match splitStatements sql with
+              | Ok statements ->
+                  Expect.sequenceEqual
+                      statements
+                      [ "SELECT ';'"; "SELECT `a;b` FROM t"; "SELECT 3" ]
+                      "only statement delimiters split the batch"
+              | Error error -> failtestf "unexpected split error: %s" error
+
+          testCase "statement batches reject unterminated literals"
+          <| fun _ ->
+              match splitStatements "SELECT 'unterminated" with
+              | Error _ -> ()
+              | Ok statements -> failtestf "expected an error, got %A" statements ]

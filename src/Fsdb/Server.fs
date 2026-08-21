@@ -809,30 +809,80 @@ let private handleConnection
                                     processEntry.StateSince <- DateTime.Now
                                     processEntry.Info <- Some(Log.redactSql sql)
 
-                                    let dispatched = runCancellable (fun () -> QueryHandler.handle session sql)
+                                    let statements =
+                                        match Parser.splitStatements sql with
+                                        | Result.Ok statements -> Result.Ok statements
+                                        | Result.Error _ -> Result.Error(1064, "You have an error in your SQL syntax")
+
                                     processEntry.Command <- "Sleep"
                                     processEntry.State <- ""
                                     processEntry.StateSince <- DateTime.Now
                                     processEntry.Info <- None
 
-                                    match dispatched with
-                                    | None -> ()
-                                    | Some(session, result) ->
-                                        activeSession <- Some session
-                                        processEntry.Db <- session.Database
+                                    let multiStatements = capabilities &&& ClientMultiStatements <> 0u && capabilities &&& ClientMultiResults <> 0u
 
+                                    match statements with
+                                    | Result.Error(code, message) ->
+                                        do! writePacketAsync stream { SeqId = seqId; Payload = errPayload capabilities code message } |> Async.Ignore
+                                        return! loop session
+                                    | Result.Ok statements when statements.Length > 1 && not multiStatements ->
                                         do!
-                                            sendQueryResult
+                                            writePacketAsync
                                                 stream
-                                                capabilities
-                                                seqId
-                                                (statusFlagsFor session)
-                                                (uint64 session.LastInsertId)
-                                                (warningCountFor session)
-                                                session.LastResultColumnMetadata
-                                                result
+                                                { SeqId = seqId; Payload = errPayload capabilities 1064 "You have an error in your SQL syntax" }
+                                            |> Async.Ignore
 
                                         return! loop session
+                                    | Result.Ok [] ->
+                                        let dispatched = runCancellable (fun () -> QueryHandler.handle session sql)
+
+                                        match dispatched with
+                                        | None -> ()
+                                        | Some(session, result) ->
+                                            do!
+                                                sendQueryResult
+                                                    stream
+                                                    capabilities
+                                                    seqId
+                                                    (statusFlagsFor session)
+                                                    (uint64 session.LastInsertId)
+                                                    (warningCountFor session)
+                                                    session.LastResultColumnMetadata
+                                                    result
+
+                                            return! loop session
+                                    | Result.Ok statements ->
+                                        let rec sendBatch session seqId statements =
+                                            async {
+                                                match statements with
+                                                | [] -> return Some session
+                                                | statement :: remaining ->
+                                                    match runCancellable (fun () -> QueryHandler.handle session statement) with
+                                                    | None -> return None
+                                                    | Some(nextSession, result) ->
+                                                        let hasMore = not remaining.IsEmpty && (match result with Err _ -> false | _ -> true)
+                                                        let! nextSeqId =
+                                                            sendQueryResultAndNextSeq
+                                                                stream
+                                                                capabilities
+                                                                seqId
+                                                                (if hasMore then statusFlagsForMore nextSession else statusFlagsFor nextSession)
+                                                                (uint64 nextSession.LastInsertId)
+                                                                (warningCountFor nextSession)
+                                                                nextSession.LastResultColumnMetadata
+                                                                result
+
+                                                        match result with
+                                                        | Err _ -> return Some nextSession
+                                                        | _ -> return! sendBatch nextSession nextSeqId remaining
+                                            }
+
+                                        match! sendBatch session seqId statements with
+                                        | None -> ()
+                                        | Some(session) ->
+                                            activeSession <- Some session
+                                            processEntry.Db <- session.Database
+                                            return! loop session
                             | Some Statistics ->
                                 let uptime = max 0L (int64 (DateTime.Now - InformationSchema.serverStartedAt).TotalSeconds)
                                 let questions = InformationSchema.questions ()
