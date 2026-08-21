@@ -298,6 +298,7 @@ let private showEngineInnodbStatusRe = Regex(@"^SHOW\s+ENGINE\s+INNODB\s+STATUS\
 let private showPluginsRe = Regex(@"^SHOW\s+PLUGINS\s*$", RegexOptions.IgnoreCase)
 let private showBinaryLogsRe = Regex(@"^SHOW\s+(?:BINARY|MASTER)\s+LOGS\s*$", RegexOptions.IgnoreCase)
 let private showBinaryLogStatusRe = Regex(@"^SHOW\s+BINARY\s+LOG\s+STATUS\s*$", RegexOptions.IgnoreCase)
+let private maintenanceTableRe = Regex(@"^(ANALYZE|CHECK)\s+TABLE\s+(.+?)\s*$", RegexOptions.IgnoreCase)
 let private showOpenTablesRe = Regex(@"^SHOW\s+OPEN\s+TABLES(?:\s+(?:FROM|IN)\s+(\S+))?(?:\s+LIKE\s+'([^']*)')?\s*$", RegexOptions.IgnoreCase)
 let private showCreateDatabaseRe =
     Regex(@"^SHOW\s+CREATE\s+(?:DATABASE|SCHEMA)(?:\s+IF\s+NOT\s+EXISTS)?\s+(\S+)\s*$", RegexOptions.IgnoreCase)
@@ -1254,6 +1255,7 @@ type private Probe =
     | ShowPlugins
     | ShowBinaryLogs
     | ShowBinaryLogStatus
+    | MaintainTables of operation: string * tables: string list
     | ShowOpenTables of db: string option * pattern: string option
     | ShowCreateDatabase of name: string
     | ShowCharset
@@ -1330,6 +1332,10 @@ let private tryProbe (sql: string) (upper: string) : Probe option =
         Some ShowBinaryLogs
     elif showBinaryLogStatusRe.IsMatch sql then
         Some ShowBinaryLogStatus
+    elif maintenanceTableRe.IsMatch sql then
+        let matched = maintenanceTableRe.Match sql
+        let tables = matched.Groups.[2].Value.Split(',') |> Array.map (fun table -> table.Trim()) |> List.ofArray
+        Some(MaintainTables(matched.Groups.[1].Value.ToLowerInvariant(), tables))
     elif showOpenTablesRe.IsMatch sql then
         let m = showOpenTablesRe.Match sql
         Some(
@@ -1518,6 +1524,24 @@ let private runProbe (session: Session) (sql: string) (probe: Probe) : Session *
         )
     | ShowBinaryLogs
     | ShowBinaryLogStatus -> session, Err(1381, "You are not using binary logging")
+    | MaintainTables(operation, tables) ->
+        let sessionDb = session.Database |> Option.defaultValue defaultDatabase
+
+        let rows =
+            tables
+            |> List.map (fun tableRef ->
+                let dbName, tableName = splitQualified sessionDb tableRef
+                let qualified = dbName + "." + tableName
+
+                match Storage.scan (Session.currentStore session) dbName tableName with
+                | Ok _ -> [ Some qualified; Some operation; Some "status"; Some "OK" ]
+                | Error _ ->
+                    [ Some qualified
+                      Some operation
+                      Some "Error"
+                      Some(sprintf "Table '%s.%s' doesn't exist" dbName tableName) ])
+
+        session, ResultSet([ "Table"; "Op"; "Msg_type"; "Msg_text" ], rows)
     | ShowOpenTables(db, pattern) ->
         let dbName = db |> Option.defaultValue (session.Database |> Option.defaultValue defaultDatabase)
 

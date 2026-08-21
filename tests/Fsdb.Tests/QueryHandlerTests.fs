@@ -1373,6 +1373,12 @@ let tests =
                   | Err(1381, "You are not using binary logging") -> ()
                   | other -> failtestf "expected binary logging disabled for %s, got %A" sql other
 
+              for sql, operation in [ "ANALYZE TABLE visible", "analyze"; "CHECK TABLE visible", "check" ] do
+                  match handle session sql |> snd with
+                  | ResultSet([ "Table"; "Op"; "Msg_type"; "Msg_text" ], [ [ Some "app.visible"; Some actual; Some "status"; Some "OK" ] ]) ->
+                      Expect.equal actual operation "operation"
+                  | other -> failtestf "unexpected maintenance result for %s: %A" sql other
+
               match handle session "SHOW ENGINE INNODB STATUS" |> snd with
               | ResultSet([ "Type"; "Name"; "Status" ], [ [ Some "InnoDB"; Some ""; Some status ] ]) ->
                   Expect.stringContains status "in-memory transactional row store" "engine status describes fsdb"
