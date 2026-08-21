@@ -2246,7 +2246,7 @@ let trySecondaryOrderedLookup
     (lower: (Value * bool) option)
     (upper: (Value * bool) option)
     (direction: Direction)
-    : (string * int * ColumnDef list * Value[] seq) option =
+    : (string * int * ColumnDef list * int * Value[] seq) option =
     tableAt store dbName tableName
     |> Option.bind (fun table ->
         trySecondaryOrderSliceInTable store table columnName lower upper false
@@ -2255,7 +2255,7 @@ let trySecondaryOrderedLookup
                 orderedEntries direction slice
                 |> Seq.choose (fun entry -> table.RowsArray.TryFind entry.RowId)
 
-            slice.IndexName, slice.ColumnIndex, table.Columns, rows))
+            slice.IndexName, slice.ColumnIndex, table.Columns, slice.AfterLast - slice.First, rows))
 
 /// The equality-index probe in the order execution considers it: a unique
 /// key first for each WHERE equality, then an ordinary B-tree bucket.

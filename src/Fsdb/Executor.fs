@@ -4437,19 +4437,21 @@ and private runSelectStmt
 
         match fromItem, select.Joins with
         | FromTable tref, [] ->
-            match tryIndexOrder store registry dbName tref select with
-            | Some(columns, rows) -> runResolved columns rows { select with OrderBy = [] }
+            match tryPointLookup store dbName tref select.Where with
+            | Some(columns, rows) -> runResolved columns (rows |> Seq.map snd) select
             | None ->
-                let resolved =
-                    tryPointLookup store dbName tref select.Where
-                    |> Option.map (fun (cols, rows) -> Ok(cols, rows |> List.map snd))
-                    |> Option.orElseWith (fun () -> tryRangeLookup store dbName tref select.Where |> Option.map (fun (cols, rows) -> Ok(cols, rows |> List.map snd)))
-                    |> Option.orElseWith (fun () -> tryInformationSchemaNarrow store dbName tref select.Where |> Option.map Ok)
-                    |> Option.defaultWith (fun () -> resolveFromItem store registry dbName fromItem)
+                match tryIndexOrder store registry dbName tref select with
+                | Some(_, _, columns, _, rows) -> runResolved columns rows { select with OrderBy = [] }
+                | None ->
+                    let resolved =
+                        tryRangeLookup store dbName tref select.Where
+                        |> Option.map (fun (cols, rows) -> Ok(cols, rows |> List.map snd))
+                        |> Option.orElseWith (fun () -> tryInformationSchemaNarrow store dbName tref select.Where |> Option.map Ok)
+                        |> Option.defaultWith (fun () -> resolveFromItem store registry dbName fromItem)
 
-                match resolved with
-                | Error e -> e, [], []
-                | Ok(columns, rows) -> runResolved columns rows select
+                    match resolved with
+                    | Error e -> e, [], []
+                    | Ok(columns, rows) -> runResolved columns rows select
         | _ ->
             match resolveFromItem store registry dbName fromItem with
             | Error e -> e, [], []
@@ -4571,7 +4573,13 @@ and private directOrderColumn (tref: TableRef) (select: SelectStmt) : (string * 
         Some(name, direction)
     | _ -> None
 
-and private tryIndexOrder (store: Store) (registry: Registry) (dbName: string) (tref: TableRef) (select: SelectStmt) : (ColumnDef list * Value[] seq) option =
+and private tryIndexOrder
+    (store: Store)
+    (registry: Registry)
+    (dbName: string)
+    (tref: TableRef)
+    (select: SelectStmt)
+    : (string * int * ColumnDef list * int * Value[] seq) option =
     let tableDb = tref.Database |> Option.defaultValue dbName
 
     let canStream =
@@ -4594,11 +4602,11 @@ and private tryIndexOrder (store: Store) (registry: Registry) (dbName: string) (
                 |> Option.defaultValue (None, None)
 
             Storage.trySecondaryOrderedLookup store tableDb tref.Table column lower upper direction
-            |> Option.bind (fun (_, index, columns, rows) ->
+            |> Option.bind (fun (keyName, index, columns, count, rows) ->
                 match columns.[index].Type with
                 | TEnum _
                 | TSet _ -> None
-                | _ -> Some(columns, rows)))
+                | _ -> Some(keyName, index, columns, count, rows)))
 
 /// Per-column MySQL wire type for a freshly-projected resultset, read off
 /// the first non-NULL `Value` in each column across `rows` — a plain
@@ -7633,6 +7641,7 @@ let private indexedJoinExplainPlans
 
 let rec private explainJoinBlock
     (store: Store)
+    (registry: Registry)
     (dbName: string)
     (nextId: unit -> int)
     (acc: ResizeArray<ExplainRow>)
@@ -7643,6 +7652,7 @@ let rec private explainJoinBlock
     (whereOpt: Expr option)
     (extra: string list)
     (subqueryExprs: Expr list)
+    (indexOrderPlan: (string * int * ColumnDef list * int * Value[] seq) option)
     : Result<unit, QueryResult> =
     let tableCount = (from |> Option.toList |> List.length) + joins.Length
 
@@ -7722,21 +7732,39 @@ let rec private explainJoinBlock
 
                 true
             | None ->
-                rangeLookupBounds tref whereOpt
-                |> List.tryPick (fun (column, lower, upper) ->
-                    Storage.trySecondaryRangeLookup store tableDb tref.Table column lower upper
-                    |> Option.map (fun (keyName, columnIndex, columns, rows) -> keyName, columnIndex, columns, List.length rows))
-                |> Option.map (fun (keyName, columnIndex, columns, rowCount) ->
+                match indexOrderPlan with
+                | Some(keyName, columnIndex, columns, rowCount, _) ->
+                    let hasBounds =
+                        rangeLookupBounds tref whereOpt
+                        |> List.exists (fun (column, _, _) -> System.String.Equals(column, columns.[columnIndex].Name, System.StringComparison.OrdinalIgnoreCase))
+
                     acc.Add
                         { Id = Some id
                           SelectType = selectType
                           Table = Some(tref.Alias |> Option.defaultValue tref.Table)
-                          Type = Some "range"
+                          Type = Some(if hasBounds then "range" else "index")
                           Key = Some(keyName, explainKeyLen columns.[columnIndex])
                           Ref = None
                           Rows = Some(uint64 rowCount)
-                          Extra = extra })
-                |> Option.isSome
+                          Extra = extra }
+
+                    true
+                | None ->
+                    rangeLookupBounds tref whereOpt
+                    |> List.tryPick (fun (column, lower, upper) ->
+                        Storage.trySecondaryRangeLookup store tableDb tref.Table column lower upper
+                        |> Option.map (fun (keyName, columnIndex, columns, rows) -> keyName, columnIndex, columns, List.length rows))
+                    |> Option.map (fun (keyName, columnIndex, columns, rowCount) ->
+                        acc.Add
+                            { Id = Some id
+                              SelectType = selectType
+                              Table = Some(tref.Alias |> Option.defaultValue tref.Table)
+                              Type = Some "range"
+                              Key = Some(keyName, explainKeyLen columns.[columnIndex])
+                              Ref = None
+                              Rows = Some(uint64 rowCount)
+                              Extra = extra })
+                    |> Option.isSome
 
     /// One `FromItem`'s row(s): a real table's stats, or a derived table's
     /// `<derivedN>` placeholder plus its own recursive `DERIVED` block.
@@ -7768,7 +7796,7 @@ let rec private explainJoinBlock
         | FromLateral(PlainSelect sub, _alias) ->
             let derivedId = nextId ()
             emitTableRow idx (sprintf "<derived%d>" derivedId) None "ALL"
-            explainSelectBlock store dbName nextId acc derivedId "DERIVED" sub
+            explainSelectBlock store registry dbName nextId acc derivedId "DERIVED" sub
         | FromJsonTable(_, _, _, alias) ->
             // A table function has no stats and no derived block — one
             // "ALL" row under its alias, close enough to MySQL's
@@ -7785,8 +7813,8 @@ let rec private explainJoinBlock
             let derivedId = nextId ()
             emitTableRow idx (sprintf "<derived%d>" derivedId) None "ALL"
 
-            explainSelectBlock store dbName nextId acc derivedId "DERIVED" first
-            |> Result.bind (fun () -> rest |> traverse (fun (_, s) -> explainSelectBlock store dbName nextId acc (nextId ()) "UNION" s))
+            explainSelectBlock store registry dbName nextId acc derivedId "DERIVED" first
+            |> Result.bind (fun () -> rest |> traverse (fun (_, s) -> explainSelectBlock store registry dbName nextId acc (nextId ()) "UNION" s))
             |> Result.map ignore
 
 
@@ -7813,17 +7841,13 @@ let rec private explainJoinBlock
         |> traverse (fun sub ->
             let sid = nextId ()
             let stype = if isCorrelated sub then "DEPENDENT SUBQUERY" else "SUBQUERY"
-            explainSelectBlock store dbName nextId acc sid stype sub)
+            explainSelectBlock store registry dbName nextId acc sid stype sub)
         |> Result.map ignore)
 
-/// One `SELECT`'s (or `FROM (SELECT ...)` derived table's) `EXPLAIN`
-/// block — `Extra`'s three flags read straight off the clauses that make
-/// them true (`WHERE` -> `Using where`, `ORDER BY` -> `Using filesort`
-/// since there's no index to satisfy it without one, `GROUP BY`/`DISTINCT`
-/// -> `Using temporary`), then hands the table/subquery walk itself to
-/// `explainJoinBlock`.
+/// One `SELECT`'s (or `FROM (SELECT ...)` derived table's) `EXPLAIN` block.
 and private explainSelectBlock
     (store: Store)
+    (registry: Registry)
     (dbName: string)
     (nextId: unit -> int)
     (acc: ResizeArray<ExplainRow>)
@@ -7831,12 +7855,18 @@ and private explainSelectBlock
     (selectType: string)
     (select: SelectStmt)
     : Result<unit, QueryResult> =
+    let indexOrderPlan =
+        match select.From, select.Joins with
+        | Some(FromTable tref), [] when tryPointLookup store dbName tref select.Where |> Option.isNone ->
+            tryIndexOrder store registry dbName tref select
+        | _ -> None
+
     let extra =
         [ if select.Where.IsSome then "Using where"
-          if not select.OrderBy.IsEmpty then "Using filesort"
+          if not select.OrderBy.IsEmpty && indexOrderPlan.IsNone then "Using filesort"
           if not select.GroupBy.IsEmpty || select.Distinct then "Using temporary" ]
 
-    explainJoinBlock store dbName nextId acc id selectType select.From select.Joins select.Where extra (selectSubqueryExprs select)
+    explainJoinBlock store registry dbName nextId acc id selectType select.From select.Joins select.Where extra (selectSubqueryExprs select) indexOrderPlan
 
 /// Renders every collected `ExplainRow` into `EXPLAIN`'s classic 12-column
 /// resultset — `id` ascending, `None -> NULL` in every `option` cell the
@@ -7937,19 +7967,19 @@ let rec private explainStatement (store: Store) (registry: Registry) (dbName: st
             let isDerived = match select.From with Some(FromSubquery _) -> true | _ -> false
             if (selectSubqueryExprs select |> List.exists containsSubqueryExpr) || isDerived then "PRIMARY" else "SIMPLE"
 
-        finish (checkSelect select |> Result.bind (fun () -> explainSelectBlock store dbName nextId acc id selectType select))
+        finish (checkSelect select |> Result.bind (fun () -> explainSelectBlock store registry dbName nextId acc id selectType select))
     | Union(first, rest, _, _, _) ->
         let id1 = nextId ()
 
         finish (
             checkSelect first
             |> Result.bind (fun () -> rest |> traverse (fun (_, s) -> checkSelect s) |> Result.map ignore)
-            |> Result.bind (fun () -> explainSelectBlock store dbName nextId acc id1 "PRIMARY" first)
+            |> Result.bind (fun () -> explainSelectBlock store registry dbName nextId acc id1 "PRIMARY" first)
             |> Result.bind (fun () ->
                 rest
                 |> traverse (fun (_, s) ->
                     let sid = nextId ()
-                    explainSelectBlock store dbName nextId acc sid "UNION" s |> Result.map (fun () -> sid)))
+                    explainSelectBlock store registry dbName nextId acc sid "UNION" s |> Result.map (fun () -> sid)))
             |> Result.map (fun restIds ->
                 if not restIds.IsEmpty then
                     let label = sprintf "<union%s>" (id1 :: restIds |> List.map string |> String.concat ",")
@@ -7963,7 +7993,7 @@ let rec private explainStatement (store: Store) (registry: Registry) (dbName: st
 
         finish (
             checkMutationWhere u.From u.Joins ((u.Where |> Option.toList) @ (u.Assignments |> List.map (fun a -> a.Value)))
-            |> Result.bind (fun () -> explainJoinBlock store dbName nextId acc id "UPDATE" (Some(FromTable u.From)) u.Joins u.Where extra subqueryExprs)
+            |> Result.bind (fun () -> explainJoinBlock store registry dbName nextId acc id "UPDATE" (Some(FromTable u.From)) u.Joins u.Where extra subqueryExprs None)
         )
     | Delete d ->
         let id = nextId ()
@@ -7973,7 +8003,7 @@ let rec private explainStatement (store: Store) (registry: Registry) (dbName: st
 
         finish (
             checkMutationWhere d.From d.Joins (d.Where |> Option.toList)
-            |> Result.bind (fun () -> explainJoinBlock store dbName nextId acc id "DELETE" (Some(FromTable d.From)) d.Joins d.Where extra subqueryExprs)
+            |> Result.bind (fun () -> explainJoinBlock store registry dbName nextId acc id "DELETE" (Some(FromTable d.From)) d.Joins d.Where extra subqueryExprs None)
         )
     | Insert(table, _, rowsExprs, _, _)
     | Replace(table, _, rowsExprs) ->
@@ -7992,7 +8022,7 @@ let rec private explainStatement (store: Store) (registry: Registry) (dbName: st
                 |> List.collect collectSubqueries
                 |> traverse (fun sub ->
                     let sid = nextId ()
-                    explainSelectBlock store dbName nextId acc sid (if isCorrelated sub then "DEPENDENT SUBQUERY" else "SUBQUERY") sub)
+                    explainSelectBlock store registry dbName nextId acc sid (if isCorrelated sub then "DEPENDENT SUBQUERY" else "SUBQUERY") sub)
                 |> Result.map ignore)
         )
     | ReplaceSet(table, assignments) ->
@@ -8006,7 +8036,7 @@ let rec private explainStatement (store: Store) (registry: Registry) (dbName: st
                 |> List.collect (snd >> collectSubqueries)
                 |> traverse (fun sub ->
                     let sid = nextId ()
-                    explainSelectBlock store dbName nextId acc sid (if isCorrelated sub then "DEPENDENT SUBQUERY" else "SUBQUERY") sub)
+                    explainSelectBlock store registry dbName nextId acc sid (if isCorrelated sub then "DEPENDENT SUBQUERY" else "SUBQUERY") sub)
                 |> Result.map ignore)
         )
     | InsertSelect(table, _, select, _, _)
@@ -8024,7 +8054,7 @@ let rec private explainStatement (store: Store) (registry: Registry) (dbName: st
             |> Result.map (fun () -> acc.Add { Id = Some id; SelectType = selectType; Table = Some table; Type = None; Key = None; Ref = None; Rows = None; Extra = [] })
             |> Result.bind (fun () ->
                 let sid = nextId ()
-                explainSelectBlock store dbName nextId acc sid "SUBQUERY" select)
+                explainSelectBlock store registry dbName nextId acc sid "SUBQUERY" select)
         )
     | Explain inner -> explainStatement store registry dbName inner
     | _ -> Err(1064, "EXPLAIN is not supported for this statement")

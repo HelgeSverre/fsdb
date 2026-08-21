@@ -4984,6 +4984,52 @@ let tests =
 
                     Expect.equal (rows "indexed") (rows "scanned") "collated index order matches the scan path"
 
+                testCase "a point equality stays ahead of secondary index ordering"
+                <| fun _ ->
+                    let mutable calls = 0
+
+                    let registry =
+                        builtins
+                        |> registerScalar "TOUCH" (fun values ->
+                            calls <- calls + 1
+                            values |> List.head)
+
+                    let store = newStore ()
+                    runDefault store "CREATE TABLE t (id INT PRIMARY KEY, score INT, KEY ix_score (score))" |> ignore
+
+                    let values =
+                        [ for i in 1 .. 200 -> sprintf "(%d, %d)" i i ]
+                        |> String.concat ", "
+
+                    runDefault store (sprintf "INSERT INTO t VALUES %s" values) |> ignore
+
+                    match run store registry "SELECT id FROM t WHERE id = 200 AND TOUCH(id) = id ORDER BY score LIMIT 1" with
+                    | ResultSet(_, [ [ Some "200" ] ]) -> ()
+                    | other -> failtestf "expected the point row, got %A" other
+
+                    Expect.isLessThan calls 3 "the residual runs only for the point candidate"
+
+                testCase "EXPLAIN reports streamed secondary index ordering while point equality keeps its lookup plan"
+                <| fun _ ->
+                    let store = newStore ()
+                    runDefault store "CREATE TABLE t (id INT PRIMARY KEY, score INT, KEY ix_score (score))" |> ignore
+                    runDefault store "INSERT INTO t VALUES (1, 2), (2, 1), (3, 3)" |> ignore
+
+                    match runDefault store "EXPLAIN SELECT id, score FROM t ORDER BY score LIMIT 2" with
+                    | ResultSet(_, [ [ Some "1"; Some "SIMPLE"; Some "t"; None; Some "index"; Some "ix_score"; Some "ix_score"; Some "5"; None; Some "3"; Some "100.00"; None ] ]) ->
+                        ()
+                    | other -> failtestf "expected an ordered index plan, got %A" other
+
+                    match runDefault store "EXPLAIN SELECT id, score FROM t WHERE score >= 2 ORDER BY score LIMIT 2" with
+                    | ResultSet(_, [ [ Some "1"; Some "SIMPLE"; Some "t"; None; Some "range"; Some "ix_score"; Some "ix_score"; Some "5"; None; Some "2"; Some "100.00"; Some "Using where" ] ]) ->
+                        ()
+                    | other -> failtestf "expected an ordered range plan, got %A" other
+
+                    match runDefault store "EXPLAIN SELECT id, score FROM t WHERE id = 2 ORDER BY score LIMIT 1" with
+                    | ResultSet(_, [ [ Some "1"; Some "SIMPLE"; Some "t"; None; Some "const"; Some "PRIMARY"; Some "PRIMARY"; Some "4"; Some "const"; Some "1"; Some "100.00"; _ ] ]) ->
+                        ()
+                    | other -> failtestf "expected a point lookup plan, got %A" other
+
                 testCase "EXPLAIN reports ref only for the secondary equality access path execution uses"
                 <| fun _ ->
                     let store = newStore ()

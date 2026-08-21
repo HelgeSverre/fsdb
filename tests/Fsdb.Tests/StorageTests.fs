@@ -1387,7 +1387,7 @@ let tests =
 
                     let descending =
                         match trySecondaryOrderedLookup store defaultDatabase "users" "age" None None Desc with
-                        | Some(_, _, _, rows) -> rows |> Seq.map (fun row -> row.[2], row.[0]) |> List.ofSeq
+                        | Some(_, _, _, _, rows) -> rows |> Seq.map (fun row -> row.[2], row.[0]) |> List.ofSeq
                         | None -> failtest "expected an ordered secondary lookup"
 
                     Expect.equal descending [ VInt 28L, VInt 3L; VInt 26L, VInt 2L ] "descending entries retain index-key order"
