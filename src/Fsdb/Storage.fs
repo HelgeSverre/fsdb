@@ -2255,7 +2255,7 @@ let trySecondaryOrderedLookup
                 orderedEntries direction slice
                 |> Seq.choose (fun entry -> table.RowsArray.TryFind entry.RowId)
 
-            slice.IndexName, slice.ColumnIndex, table.Columns, slice.AfterLast - slice.First, rows))
+            slice.IndexName, slice.ColumnIndex, table.Columns, max 0 (slice.AfterLast - slice.First), rows))
 
 /// The equality-index probe in the order execution considers it: a unique
 /// key first for each WHERE equality, then an ordinary B-tree bucket.

@@ -5025,6 +5025,15 @@ let tests =
                         ()
                     | other -> failtestf "expected an ordered range plan, got %A" other
 
+                    match runDefault store "SELECT id, score FROM t WHERE score >= 3 AND score < 1 ORDER BY score LIMIT 2" with
+                    | ResultSet(_, []) -> ()
+                    | other -> failtestf "expected an empty contradictory range, got %A" other
+
+                    match runDefault store "EXPLAIN SELECT id, score FROM t WHERE score >= 3 AND score < 1 ORDER BY score LIMIT 2" with
+                    | ResultSet(_, [ [ Some "1"; Some "SIMPLE"; Some "t"; None; Some "range"; Some "ix_score"; Some "ix_score"; Some "5"; None; Some "0"; Some "100.00"; Some "Using where" ] ]) ->
+                        ()
+                    | other -> failtestf "expected an empty ordered range plan, got %A" other
+
                     match runDefault store "EXPLAIN SELECT id, score FROM t WHERE id = 2 ORDER BY score LIMIT 1" with
                     | ResultSet(_, [ [ Some "1"; Some "SIMPLE"; Some "t"; None; Some "const"; Some "PRIMARY"; Some "PRIMARY"; Some "4"; Some "const"; Some "1"; Some "100.00"; _ ] ]) ->
                         ()
