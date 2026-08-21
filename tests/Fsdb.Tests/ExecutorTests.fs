@@ -2062,6 +2062,20 @@ let tests =
                     | Err(1364, "Field 'c' doesn't have a default value") -> ()
                     | other -> failtestf "expected 1364 for a missing default, got %A" other
 
+                testCase "COERCIBILITY classifies explicit, column, literal, numeric, and NULL expressions"
+                <| fun _ ->
+                    let store = newStore ()
+                    runDefault store "CREATE TABLE coercibility_t (name VARCHAR(20))" |> ignore
+                    runDefault store "INSERT INTO coercibility_t VALUES ('x')" |> ignore
+
+                    match
+                        runDefault
+                            store
+                            "SELECT COERCIBILITY(name COLLATE utf8mb4_bin), COERCIBILITY(name), COERCIBILITY(USER()), COERCIBILITY('x'), COERCIBILITY(1), COERCIBILITY(NULL) FROM coercibility_t"
+                    with
+                    | ResultSet(_, [ [ Some "0"; Some "2"; Some "3"; Some "4"; Some "5"; Some "6" ] ]) -> ()
+                    | other -> failtestf "unexpected coercibility classes: %A" other
+
                 testCase "delete-side foreign-key actions run before the replacement insert"
                 <| fun _ ->
                     let store = newStore ()

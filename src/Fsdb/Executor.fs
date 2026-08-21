@@ -1137,6 +1137,8 @@ let rec private metadataOfExpr (ctx: EvalContext) (expr: Expr) : ColumnMetadata 
     | OrderBy(inner, _) -> metadataOfExpr ctx inner
     | FuncCall(name, [ argument ]) when name.Equals("DEFAULT", System.StringComparison.OrdinalIgnoreCase) ->
         metadataOfExpr ctx argument
+    | FuncCall(name, [ _ ]) when name.Equals("COERCIBILITY", System.StringComparison.OrdinalIgnoreCase) ->
+        simple TypeLongLong |> Option.map (fun metadata -> { metadata with Flags = NotNullFlag })
     | FuncCall(name, args) ->
         match name.ToUpperInvariant(), args with
         | "COUNT", _ -> simple TypeLongLong
@@ -2112,6 +2114,29 @@ let rec private evalExpr (ctx: EvalContext) (expr: Expr) : Result<Value, EvalErr
         | Some column when column.Default.IsSome || column.Nullable -> Ok(Storage.evalDefault column)
         | Some column -> Error(1364, sprintf "Field '%s' doesn't have a default value" column.Name)
         | None -> Error(1054, "Unknown column in 'field list'")
+    | FuncCall(name, [ argument ]) when name.Equals("COERCIBILITY", System.StringComparison.OrdinalIgnoreCase) ->
+        let coercibility =
+            match argument with
+            | Collate _ -> 0L
+            | Col _
+            | QualifiedCol _ -> 2L
+            | FuncCall(systemName, _) ->
+                match systemName.ToUpperInvariant() with
+                | "USER"
+                | "CURRENT_USER"
+                | "SESSION_USER"
+                | "SYSTEM_USER"
+                | "VERSION"
+                | "DATABASE" -> 3L
+                | _ -> 4L
+            | Lit(VString _)
+            | Lit(VBytes _)
+            | Lit(VJson _) -> 4L
+            | Lit VNull -> 6L
+            | Lit _ -> 5L
+            | _ -> 4L
+
+        Ok(VInt coercibility)
     | FuncCall(name, args) ->
         match Functions.lookup name ctx.Registry with
         | None -> Error(unknownFunction name)
