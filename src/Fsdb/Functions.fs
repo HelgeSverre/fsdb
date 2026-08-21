@@ -2281,6 +2281,24 @@ let private substringIndexFn: Scalar =
                 VString(String.Join(delim, parts |> Array.skip (parts.Length - take)))
     | _ -> VNull
 
+let private trimSubstring trimLeading trimTrailing : Scalar =
+    function
+    | [ removed; source ] when not (anyNull [ removed; source ]) ->
+        let removed = req removed
+        let mutable result = req source
+
+        if removed <> "" then
+            if trimLeading then
+                while result.StartsWith(removed, StringComparison.Ordinal) do
+                    result <- result.Substring removed.Length
+
+            if trimTrailing then
+                while result.EndsWith(removed, StringComparison.Ordinal) do
+                    result <- result.Substring(0, result.Length - removed.Length)
+
+        VString result
+    | _ -> VNull
+
 let private concatWsFn: Scalar =
     function
     | sep :: rest when not (anyNull [ sep ]) ->
@@ -3287,6 +3305,9 @@ let builtins: Registry =
     |> registerScalar "POSITION" locateFn
     |> registerScalar "REPLACE" replaceFn
     |> registerScalar "TRIM" (textMap (fun s -> s.Trim()))
+    |> registerScalar "TRIM_BOTH" (trimSubstring true true)
+    |> registerScalar "TRIM_LEADING" (trimSubstring true false)
+    |> registerScalar "TRIM_TRAILING" (trimSubstring false true)
     |> registerScalar "LTRIM" (textMap (fun s -> s.TrimStart()))
     |> registerScalar "RTRIM" (textMap (fun s -> s.TrimEnd()))
     |> registerScalar "LPAD" (padFn true)

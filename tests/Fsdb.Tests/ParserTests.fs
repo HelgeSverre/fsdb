@@ -1087,6 +1087,26 @@ let tests =
                         ))
                         "on duplicate key update"
 
+                testCase "INSERT SET desugars to one named VALUES row"
+                <| fun _ ->
+                    Expect.equal
+                        (parseOk "INSERT IGNORE INTO t SET a = 1, b = NOW() ON DUPLICATE KEY UPDATE b = VALUES(b)")
+                        (Insert(
+                            "t",
+                            [ "a"; "b" ],
+                            [ [ Lit(VInt 1L); FuncCall("NOW", []) ] ],
+                            [ "b", FuncCall("VALUES", [ Col "b" ]) ],
+                            true
+                        ))
+                        "insert set"
+
+                testCase "INSERT VALUE accepts optional ROW constructors"
+                <| fun _ ->
+                    Expect.equal
+                        (parseOk "INSERT INTO t (a, b) VALUE ROW(1, 2), ROW(3, 4)")
+                        (Insert("t", [ "a"; "b" ], [ [ Lit(VInt 1L); Lit(VInt 2L) ]; [ Lit(VInt 3L); Lit(VInt 4L) ] ], [], false))
+                        "insert value rows"
+
                 testCase "INSERT INTO t (cols) SELECT ... is InsertSelect, not a VALUES Insert"
                 <| fun _ ->
                     Expect.equal

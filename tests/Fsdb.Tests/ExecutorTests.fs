@@ -64,6 +64,31 @@ let tests =
                     | ResultSet([ "two" ], [ [ Some "2" ] ]) -> ()
                     | other -> failtestf "expected one row from DUAL, got %A" other
 
+                testCase "SELECT duplicate modes and optimizer hints preserve result semantics"
+                <| fun _ ->
+                    let store = newStore ()
+                    runDefault store "CREATE TABLE t (n INT)" |> ignore
+                    runDefault store "INSERT INTO t VALUES (1), (1), (2)" |> ignore
+
+                    match runDefault store "SELECT DISTINCTROW HIGH_PRIORITY SQL_NO_CACHE n FROM t ORDER BY n" with
+                    | ResultSet(_, rows) -> Expect.equal rows [ [ Some "1" ]; [ Some "2" ] ] "DISTINCTROW deduplicates"
+                    | other -> failtestf "expected the hinted DISTINCTROW query to run, got %A" other
+
+                    match runDefault store "SELECT ALL STRAIGHT_JOIN n FROM t ORDER BY n" with
+                    | ResultSet(_, rows) -> Expect.equal rows [ [ Some "1" ]; [ Some "1" ]; [ Some "2" ] ] "ALL retains duplicates"
+                    | other -> failtestf "expected the hinted ALL query to run, got %A" other
+
+                testCase "INSERT SET uses named-column insert and ODKU semantics"
+                <| fun _ ->
+                    let store = newStore ()
+                    runDefault store "CREATE TABLE t (id INT PRIMARY KEY, n INT DEFAULT 7)" |> ignore
+                    Expect.equal (runDefault store "INSERT INTO t SET id = 1") (Affected 1UL) "the row inserts"
+                    Expect.equal (runDefault store "INSERT INTO t SET id = 1, n = 9 ON DUPLICATE KEY UPDATE n = VALUES(n)") (Affected 2UL) "ODKU updates"
+
+                    match runDefault store "SELECT id, n FROM t" with
+                    | ResultSet(_, [ [ Some "1"; Some "9" ] ]) -> ()
+                    | other -> failtestf "expected the INSERT SET row, got %A" other
+
                 testCase "ORDER BY DESC reverses the sort"
                 <| fun _ ->
                     let store = newStore ()
@@ -5971,6 +5996,12 @@ let tests =
                           None
                           Some "FF"
                           Some "YWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFh\nYWFh" ]
+
+                testCase "TRIM removes repeated substrings from the requested ends"
+                <| fun _ ->
+                    expectRow
+                        "SELECT TRIM(BOTH 'xy' FROM 'xyxyhelloxyxy'), TRIM(LEADING 'xy' FROM 'xyxyhelloxy'), TRIM(TRAILING 'xy' FROM 'xyhelloxyxy'), TRIM('xy' FROM 'xyhelloxy'), TRIM(BOTH '' FROM '  x  '), TRIM(LEADING FROM '  x  '), TRIM(FROM '  x  ')"
+                        [ Some "hello"; Some "helloxy"; Some "xyhello"; Some "hello"; Some "  x  "; Some "x  "; Some "x" ]
 
                 testCase "time arithmetic handles datetime, signed time, fractions, and saturation"
                 <| fun _ ->

@@ -48,7 +48,8 @@ accepted (marked `ponytail:` in source), or recorded only in
 
 ## 1. SQL statements and parser
 
-Working core: full DML (INSERT/REPLACE/UPDATE/DELETE incl. multi-table forms,
+Working core: full DML (INSERT/REPLACE/UPDATE/DELETE incl. INSERT/REPLACE SET
+and multi-table forms,
 ODKU, IGNORE), SELECT with joins (INNER/LEFT/RIGHT/CROSS/NATURAL/USING),
 derived/LATERAL/JSON_TABLE sources, CTEs (top-level, recursive), set
 operations, window functions with frames, GROUP BY WITH ROLLUP + GROUPING,
@@ -74,7 +75,7 @@ variants), USE, KILL, DESCRIBE are text-probed before the grammar
 | `START TRANSACTION READ ONLY|READ WRITE`; `COMMIT AND CHAIN`; `SET TRANSACTION READ ONLY`; `SET CHARACTER SET` | low | refusal |
 | `CREATE TABLE … AS SELECT` and `CREATE TABLE … LIKE other` | medium | refusal |
 | `ALTER TABLE … ALTER COLUMN c SET/DROP DEFAULT`; `RENAME INDEX a TO b`; `CONVERT TO CHARACTER SET`; `ENGINE=`/`COMMENT=` option tails (only `AUTO_INCREMENT=n` works) | medium | refusal |
-| `INSERT … SET a=1` (while `REPLACE … SET` works); top-level `VALUES ROW(…)` and `TABLE t` statements | low | refusal |
+| Top-level `VALUES ROW(…)` and `TABLE t` statements | low | refusal |
 | `RENAME USER`; `CREATE USER` tails: auth plugin, `REQUIRE SSL/X509`, resource limits, `ACCOUNT LOCK`, `PASSWORD EXPIRE`; `ALTER USER` beyond password change | medium | refusal |
 | Multi-statement strings (`stmt1; stmt2`) — exactly one statement per round trip | medium | refusal |
 
@@ -82,7 +83,7 @@ variants), USE, KILL, DESCRIBE are text-probed before the grammar
 
 | Gap | MySQL 8.4 | fsdb | Impact | Class |
 |---|---|---|---|---|
-| Select modifiers | `ALL`, `DISTINCTROW`, `HIGH_PRIORITY`, `STRAIGHT_JOIN`, `SQL_CALC_FOUND_ROWS`, `SQL_NO_CACHE` | absent; the unreserved ones silently parse as column names/aliases (`Parser.fs:2000–2003`) | low | divergence |
+| `SQL_CALC_FOUND_ROWS` | accepted and feeds `FOUND_ROWS()` | absent alongside `FOUND_ROWS()` | low | refusal |
 | Index hints | `USE/FORCE/IGNORE INDEX|KEY` | absent; `USE` consumed as a table alias then 1064 | low | refusal |
 | `FULL OUTER JOIN` | supported | absent | medium | refusal |
 | Locking detail | `FOR UPDATE/SHARE [OF tbl…] [NOWAIT|SKIP LOCKED]` | `FOR UPDATE`/`FOR SHARE`/`LOCK IN SHARE MODE` accepted and ignored; no OF/NOWAIT/SKIP LOCKED | low | divergence |
@@ -95,7 +96,6 @@ variants), USE, KILL, DESCRIBE are text-probed before the grammar
 | Literals | `b'0101'`/`0b…` bit literals, `N'text'` national strings | absent | low | refusal |
 | `SOUNDS LIKE`, JSON `MEMBER OF` | supported | absent | low | refusal |
 | Named-window inheritance | `OVER (w ORDER BY x)` extends a named window | absent (`Ast.fs:220–221`) | low | refusal |
-| `TRIM([BOTH\|LEADING\|TRAILING] remstr FROM s)` | supported | plain whitespace-only `TRIM(s)` form only (`Functions.fs:2822`) | low | refusal |
 
 Expression coverage that does exist: full comparison/logical/arithmetic
 operators incl. `<=>`, `XOR`, three-valued logic; CASE (both forms);
@@ -149,7 +149,7 @@ CURRENT_USER/USER/SESSION_USER.
 |---|---|---|
 | Crypto | `AES_ENCRYPT AES_DECRYPT ENCODE DECODE RANDOM_BYTES`, entire asymmetric family | medium |
 | Compression/weight | `COMPRESS UNCOMPRESS WEIGHT_STRING` | low |
-| Time formatting tail | `GET_FORMAT`; bare `LOCALTIME`/`LOCALTIMESTAMP` keyword forms (the call forms work) | low |
+| Time formatting tail | `GET_FORMAT` | low |
 | JSON second half | `JSON_MERGE_PATCH JSON_MERGE_PRESERVE JSON_OVERLAPS JSON_CONTAINS_PATH JSON_SCHEMA_VALID JSON_SCHEMA_VALIDATION_REPORT JSON_PRETTY JSON_QUOTE JSON_VALUE JSON_ARRAY_APPEND JSON_ARRAY_INSERT JSON_NORMALIZE JSON_STORAGE_SIZE JSON_STORAGE_FREE`; `MEMBER OF` | medium |
 | Misc | `BENCHMARK SLEEP UUID_SHORT COERCIBILITY NAME_CONST DEFAULT()` outside REPLACE-SET | low |
 | Geometry | all `ST_*`/`GeometryCollection` functions and types | low |

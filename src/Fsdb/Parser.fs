@@ -617,7 +617,27 @@ let private genericFuncCall: Parser<Expr, unit> =
             |>> fun args -> FuncCall(name, args)
     )
 
-let private funcCallAtom: Parser<Expr, unit> = attempt (convertUsingAtom) <|> genericFuncCall
+let private trimAtom: Parser<Expr, unit> =
+    let mode = choice [ keyword "BOTH" >>% "TRIM_BOTH"; keyword "LEADING" >>% "TRIM_LEADING"; keyword "TRAILING" >>% "TRIM_TRAILING" ]
+
+    let specification =
+        choice
+            [ attempt (
+                  mode
+                  >>= fun selected ->
+                      ((keyword "FROM" >>% Lit(VString " ")) <|> (expr .>> keyword "FROM"))
+                      |>> fun removed -> selected, removed
+              )
+              attempt (keyword "FROM" >>% ("TRIM_BOTH", Lit(VString " ")))
+              attempt (expr .>> keyword "FROM" |>> fun removed -> "TRIM_BOTH", removed) ]
+
+    attempt (
+        keyword "TRIM"
+        >>. between (sym "(") (sym ")") (specification .>>. expr)
+        |>> fun ((mode, removed), source) -> FuncCall(mode, [ removed; source ])
+    )
+
+let private funcCallAtom: Parser<Expr, unit> = choice [ attempt convertUsingAtom; trimAtom; genericFuncCall ]
 
 /// `GROUP_CONCAT([DISTINCT] expr [ORDER BY key [ASC|DESC], ...] [SEPARATOR
 /// 'str'])` — parsed separately from `funcCallAtom` rather than folding
@@ -1084,11 +1104,24 @@ let private caseExpr: Parser<Expr, unit> =
 let private currentUserAtom: Parser<Expr, unit> =
     attempt (keyword "CURRENT_USER" .>> notFollowedBy (pstring "(")) >>% FuncCall("CURRENT_USER", [])
 
+let private niladicTimeAtom: Parser<Expr, unit> =
+    [ "CURRENT_DATE", "CURRENT_DATE"
+      "CURRENT_TIME", "CURRENT_TIME"
+      "CURRENT_TIMESTAMP", "CURRENT_TIMESTAMP"
+      "LOCALTIME", "LOCALTIME"
+      "LOCALTIMESTAMP", "LOCALTIMESTAMP"
+      "UTC_DATE", "UTC_DATE"
+      "UTC_TIME", "UTC_TIME"
+      "UTC_TIMESTAMP", "UTC_TIMESTAMP" ]
+    |> List.map (fun (keywordName, functionName) -> attempt (keyword keywordName .>> notFollowedBy (pstring "(") >>% FuncCall(functionName, [])))
+    |> choice
+
 /// A bare word: a column, a qualified `t.col` (or `t.*`, `Star(Some "t")`),
 /// or a function call if followed by `(args)` (handled by `funcCallAtom`
 /// above, tried first so a reserved-word function name still parses).
 let private identAtom: Parser<Expr, unit> =
     currentUserAtom
+    <|> niladicTimeAtom
     <|> funcCallAtom
     <|> (identifier
          >>= fun name ->
@@ -1951,22 +1984,29 @@ let private insertValue: Parser<Expr, unit> =
           expr ]
 
 let private insertStmt: Parser<Statement, unit> =
+    let assignments = sepBy1 ((identifier .>> sym "=") .>>. expr) (sym ",")
+    let row = optional (keyword "ROW") >>. between (sym "(") (sym ")") (sepBy1 insertValue (sym ","))
+
     (keyword "INSERT" >>. (opt (keyword "IGNORE") |>> Option.isSome)
      .>> keyword "INTO"
      .>>. qualifiedTableName
      .>>. opt (between (sym "(") (sym ")") (sepBy1 identifier (sym ",")))
      .>>. choice
-              [ (keyword "VALUES" >>. sepBy1 (between (sym "(") (sym ")") (sepBy1 insertValue (sym ","))) (sym ",")
+              [ ((keyword "VALUES" <|> keyword "VALUE") >>. sepBy1 row (sym ",")
                  .>>. opt onDuplicateKeyUpdate)
-                |>> Choice1Of2
-                (selectStmtRecord .>>. opt onDuplicateKeyUpdate) |>> Choice2Of2 ])
+                |>> Choice1Of3
+                (selectStmtRecord .>>. opt onDuplicateKeyUpdate) |>> Choice2Of3
+                (keyword "SET" >>. assignments .>>. opt onDuplicateKeyUpdate) |>> Choice3Of3 ])
     |>> fun (((ignoreDuplicates, table), cols), branch) ->
         let cols = cols |> Option.defaultValue []
 
         match branch with
-        | Choice1Of2(rows, onDup) -> Insert(table, cols, rows, onDup |> Option.defaultValue [], ignoreDuplicates)
-        | Choice2Of2(select, onDup) ->
+        | Choice1Of3(rows, onDup) -> Insert(table, cols, rows, onDup |> Option.defaultValue [], ignoreDuplicates)
+        | Choice2Of3(select, onDup) ->
             InsertSelect(table, cols, select, onDup |> Option.defaultValue [], ignoreDuplicates)
+        | Choice3Of3(assignments, onDup) ->
+            let columns, values = List.unzip assignments
+            Insert(table, columns, [ values ], onDup |> Option.defaultValue [], ignoreDuplicates)
 
 let private replaceStmt: Parser<Statement, unit> =
     let row = optional (keyword "ROW") >>. between (sym "(") (sym ")") (sepBy1 insertValue (sym ","))
@@ -2425,8 +2465,23 @@ let private lockClause: Parser<unit, unit> =
     (keyword "FOR" >>. (keyword "UPDATE" <|> (keyword "SHARE" >>% ())) >>% ())
     <|> (keyword "LOCK" >>. keyword "IN" >>. keyword "SHARE" >>. keyword "MODE" >>% ())
 
+let private selectModifiers: Parser<bool, unit> =
+    let duplicateMode =
+        opt (choice [ keyword "DISTINCT" >>% true; keyword "DISTINCTROW" >>% true; keyword "ALL" >>% false ])
+
+    let optimizerHint =
+        choice
+            [ keyword "HIGH_PRIORITY"
+              keyword "STRAIGHT_JOIN"
+              keyword "SQL_SMALL_RESULT"
+              keyword "SQL_BIG_RESULT"
+              keyword "SQL_BUFFER_RESULT"
+              keyword "SQL_NO_CACHE" ]
+
+    duplicateMode .>> many optimizerHint |>> Option.defaultValue false
+
 selectStmtRecordRef.Value <-
-    (keyword "SELECT" >>. opt (keyword "DISTINCT") .>>. sepBy1 projection (sym ",")
+    (keyword "SELECT" >>. selectModifiers .>>. sepBy1 projection (sym ",")
      .>>. opt (keyword "FROM" >>. fromItem .>>. many joinClause)
      .>>. opt (keyword "WHERE" >>. expr)
      .>>. opt groupByClause
@@ -2441,7 +2496,7 @@ selectStmtRecordRef.Value <-
         let joins = fromAndJoins |> Option.map snd |> Option.defaultValue []
 
         { Projections = projs
-          Distinct = distinct.IsSome
+          Distinct = distinct
           From = from
           Joins = joins
           Where = where

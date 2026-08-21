@@ -26,6 +26,10 @@ signed and fractional time arithmetic, period and day-number conversion, and
 seeded randomness; `FROM DUAL`; multi-column subquery operand errors; and
 empty-group bit aggregate identities.
 
+The parser accepts MySQL's `INSERT ... SET`, singular `VALUE` and optional
+`ROW` constructors, substring-based `TRIM` modes, `ALL`/`DISTINCTROW`, and
+the optimizer-only SELECT modifiers without changing query results.
+
 ## Gauntlet
 
 | Application | Laravel | Migrations | Result |
