@@ -13,6 +13,7 @@ type Condition =
       Message: string }
 
 let private active = AsyncLocal<ResizeArray<Condition> option>()
+let private rowNumber = AsyncLocal<int option>()
 
 let record (condition: Condition) : unit =
     active.Value |> Option.iter (fun conditions -> conditions.Add condition)
@@ -22,6 +23,17 @@ let warning code message =
 
 let error code message =
     record { Level = Error; Code = code; Message = message }
+
+let currentRowNumber () = rowNumber.Value |> Option.defaultValue 1
+
+let withRowNumber (row: int) (body: unit -> 'a) : 'a =
+    let previous = rowNumber.Value
+    rowNumber.Value <- Some row
+
+    try
+        body ()
+    finally
+        rowNumber.Value <- previous
 
 let capture (body: unit -> 'a) : 'a * Condition list =
     let previous = active.Value

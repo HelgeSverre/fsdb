@@ -733,8 +733,19 @@ let coerceValue (strict: bool) (col: ColumnDef) (v: Value) : Result<Value, Stora
         | Some "latin1" -> Ok(Collation.Charset.transcodeLatin1 text)
         | _ -> Ok text
 
+    let warning code message =
+        Diagnostics.warning code (sprintf "%s at row %d" message (Diagnostics.currentRowNumber ()))
+
     /// Non-strict's numeric fallback: 0, always representable.
-    let numericFallback (zero: unit -> Value) = if strict then fail () else Ok(zero ())
+    let numericFallback (kind: string option) (zero: unit -> Value) =
+        if strict then
+            fail ()
+        else
+            kind
+            |> Option.iter (fun kind ->
+                warning 1366 (sprintf "Incorrect %s value: '%s' for column '%s'" kind (v |> toText |> Option.defaultValue "NULL") col.Name))
+
+            Ok(zero ())
 
     /// Non-strict's temporal fallback: MySQL's zero date, which
     /// `VDate`/`VDateTime` can't represent (see the type's doc comment) — NULL
@@ -763,6 +774,7 @@ let coerceValue (strict: bool) (col: ColumnDef) (v: Value) : Result<Value, Stora
             elif strict then
                 outOfRange ()
             else
+                warning 1264 (sprintf "Out of range value for column '%s'" col.Name)
                 Ok(VInt(int64 (max lo (min hi number))))
 
         match value with
@@ -771,7 +783,7 @@ let coerceValue (strict: bool) (col: ColumnDef) (v: Value) : Result<Value, Stora
         | VDecimal number -> finish (Math.Truncate number)
         | VDouble number ->
             if Double.IsNaN number then
-                numericFallback (fun () -> VInt 0L)
+                numericFallback (Some "integer") (fun () -> VInt 0L)
             elif number < float lo || number > float hi then
                 if strict then outOfRange () else finish (if number < 0.0 then lo else hi)
             else
@@ -781,8 +793,8 @@ let coerceValue (strict: bool) (col: ColumnDef) (v: Value) : Result<Value, Stora
             | Some number when number < float lo || number > float hi ->
                 if strict then outOfRange () else finish (if number < 0.0 then lo else hi)
             | Some number -> finish (Math.Truncate(decimal number))
-            | None -> numericFallback (fun () -> VInt 0L)
-        | _ -> numericFallback (fun () -> VInt 0L)
+            | None -> numericFallback (Some "integer") (fun () -> VInt 0L)
+        | _ -> numericFallback (Some "integer") (fun () -> VInt 0L)
 
     match col.Type, v with
     | TDecimal(precision, _), _ when precision < 1 || precision > 65 ->
@@ -812,6 +824,7 @@ let coerceValue (strict: bool) (col: ColumnDef) (v: Value) : Result<Value, Stora
                 elif strict then
                     outOfRange ()
                 else
+                    warning 1264 (sprintf "Out of range value for column '%s'" col.Name)
                     Ok(VUInt(uint64 (max 0m (min d (decimal UInt64.MaxValue)))))
 
             match v with
@@ -825,6 +838,7 @@ let coerceValue (strict: bool) (col: ColumnDef) (v: Value) : Result<Value, Stora
                 elif strict then
                     outOfRange ()
                 else
+                    warning 1264 (sprintf "Out of range value for column '%s'" col.Name)
                     Ok(VUInt(if d < 0.0 then 0UL else UInt64.MaxValue))
             | VDecimal d -> narrow (Math.Truncate d)
             | VString s ->
@@ -835,9 +849,10 @@ let coerceValue (strict: bool) (col: ColumnDef) (v: Value) : Result<Value, Stora
                     elif strict then
                         outOfRange ()
                     else
+                        warning 1264 (sprintf "Out of range value for column '%s'" col.Name)
                         Ok(VUInt(if d < 0.0 then 0UL else UInt64.MaxValue))
-                | None -> numericFallback (fun () -> VUInt 0UL)
-            | _ -> numericFallback (fun () -> VUInt 0UL)
+                | None -> numericFallback (Some "integer") (fun () -> VUInt 0UL)
+            | _ -> numericFallback (Some "integer") (fun () -> VUInt 0UL)
         | (TInt _ | TBigInt false | TSmallInt _ | TMediumInt _ | TTinyInt _ | TBool) as integerType ->
             narrowInteger integerType v
         | TYear ->
@@ -849,8 +864,8 @@ let coerceValue (strict: bool) (col: ColumnDef) (v: Value) : Result<Value, Stora
             | VString s ->
                 match parseNumeric s with
                 | Some d -> Ok(VInt(int64 d))
-                | None -> numericFallback (fun () -> VInt 0L)
-            | _ -> numericFallback (fun () -> VInt 0L)
+                | None -> numericFallback None (fun () -> VInt 0L)
+            | _ -> numericFallback None (fun () -> VInt 0L)
         | TDouble
         | TFloat ->
             match v with
@@ -861,8 +876,8 @@ let coerceValue (strict: bool) (col: ColumnDef) (v: Value) : Result<Value, Stora
             | VString s ->
                 match parseNumeric s with
                 | Some d -> Ok(VDouble d)
-                | None -> numericFallback (fun () -> VDouble 0.0)
-            | _ -> numericFallback (fun () -> VDouble 0.0)
+                | None -> numericFallback None (fun () -> VDouble 0.0)
+            | _ -> numericFallback None (fun () -> VDouble 0.0)
         | TDecimal(_, scale) ->
             // MySQL pads/rounds every stored value to the column's declared
             // scale (`DECIMAL(10,2)` stores `100` as `100.00`), and later
@@ -882,8 +897,8 @@ let coerceValue (strict: bool) (col: ColumnDef) (v: Value) : Result<Value, Stora
             | VString s ->
                 match parseNumeric s with
                 | Some d -> Ok(VDecimal(rescale (decimal d)))
-                | None -> numericFallback (fun () -> VDecimal(rescale 0M))
-            | _ -> numericFallback (fun () -> VDecimal(rescale 0M))
+                | None -> numericFallback (Some "decimal") (fun () -> VDecimal(rescale 0M))
+            | _ -> numericFallback (Some "decimal") (fun () -> VDecimal(rescale 0M))
         | TChar _
         | TVarchar _
         | TTinyText
@@ -925,6 +940,7 @@ let coerceValue (strict: bool) (col: ColumnDef) (v: Value) : Result<Value, Stora
                 elif strict then
                     setFail ()
                 else
+                    warning 1265 (sprintf "Data truncated for column '%s'" col.Name)
                     Ok(VString(canonicalize (parts |> List.choose resolve |> List.map (fun m -> m.ToUpperInvariant()) |> Set.ofList)))
             | VInt i ->
                 let maxValid = (1L <<< List.length values) - 1L
@@ -935,6 +951,7 @@ let coerceValue (strict: bool) (col: ColumnDef) (v: Value) : Result<Value, Stora
                 elif strict then
                     setFail ()
                 else
+                    warning 1265 (sprintf "Data truncated for column '%s'" col.Name)
                     let masked = i &&& maxValid
                     let members = values |> List.indexed |> List.filter (fun (bit, _) -> masked &&& (1L <<< bit) <> 0L) |> List.map snd
                     Ok(VString(String.concat "," members))
@@ -1007,10 +1024,16 @@ let coerceValue (strict: bool) (col: ColumnDef) (v: Value) : Result<Value, Stora
                     // matching string in the list of enumeration members").
                     match Int64.TryParse(s.Trim(), NumberStyles.Integer, CultureInfo.InvariantCulture) with
                     | true, i when i >= 1L && i <= int64 (List.length values) -> Ok(VString values.[int i - 1])
-                    | _ -> enumFail ()
+                    | _ when strict -> enumFail ()
+                    | _ ->
+                        warning 1265 (sprintf "Data truncated for column '%s'" col.Name)
+                        Ok(VString "")
             // MySQL also accepts a 1-based index into the declared value list.
             | VInt i when i >= 1L && i <= int64 (List.length values) -> Ok(VString values.[int i - 1])
-            | _ -> enumFail ()
+            | _ when strict -> enumFail ()
+            | _ ->
+                warning 1265 (sprintf "Data truncated for column '%s'" col.Name)
+                Ok(VString "")
         | TDate ->
             match v with
             | VDate d -> Ok(VDate d)
@@ -1687,7 +1710,7 @@ let tryUniqueKeyProbe
             match uniqueKeyGroups table |> List.tryFind (fun (_, idxs) -> idxs = [ idx ]) with
             | None -> None
             | Some(groupName, _) ->
-                match coerceValue store.StrictMode table.Columns.[idx] literal with
+                match Diagnostics.suppress (fun () -> coerceValue store.StrictMode table.Columns.[idx] literal) with
                 | Ok coerced when coerced = literal -> Some(table, groupName, idx)
                 | _ -> None
 
@@ -1742,7 +1765,7 @@ let trySecondaryKeyProbe
             | None -> None
             | Some(indexName, _) when not (Map.containsKey indexName table.SecondaryIndex) -> None
             | Some(indexName, _) ->
-                match coerceValue store.StrictMode table.Columns.[index] literal with
+                match Diagnostics.suppress (fun () -> coerceValue store.StrictMode table.Columns.[index] literal) with
                 | Ok coerced when coerced = literal -> Some(table, indexName, index)
                 | _ -> None
 
@@ -2889,7 +2912,11 @@ let private insertCore
                 | Error e -> Error e)
 
     rowsIn
-    |> List.fold step (Ok([], [], table.NextAutoId, None, None, table.UniqueIndex, table.SecondaryIndex))
+    |> List.indexed
+    |> List.fold
+        (fun state (rowNumber, rowValues) ->
+            Diagnostics.withRowNumber (rowNumber + 1) (fun () -> step state rowValues))
+        (Ok([], [], table.NextAutoId, None, None, table.UniqueIndex, table.SecondaryIndex))
     |> Result.map (fun (acceptedRev, ignoredErrorsRev, nextAutoId', firstAuto, lastExplicit, index, secondaryIndex) ->
         let accepted = List.rev acceptedRev
         let firstAssigned = Option.orElse lastExplicit firstAuto

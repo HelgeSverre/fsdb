@@ -2404,7 +2404,7 @@ let rec private evalExpr (ctx: EvalContext) (expr: Expr) : Result<Value, EvalErr
                     VString(leadingNumericPrefix leadingFloatPrefixRegex s |> Option.defaultValue "")
                 | _ -> v
 
-            match Storage.coerceValue false castCol v with
+            match Diagnostics.suppress (fun () -> Storage.coerceValue false castCol v) with
             | Ok v' -> Ok v'
             | Error err -> Error(Storage.toMySqlError err))
     | Exists select ->

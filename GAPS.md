@@ -317,7 +317,7 @@ disconnect detection cancelling evaluation (`Server.fs:363–406`).
 | LOAD DATA LOCAL INFILE | supported | absent entirely | medium | refusal |
 | Multi-statement | CLIENT_MULTI_STATEMENTS batching | not advertised; one statement per packet (CLIENT_MULTI_RESULTS advertised but only one resultset ever sent, `Protocol.fs:21,36`) | medium | refusal |
 | Session state tracking | CLIENT_SESSION_TRACK info in OK packets | absent | low | refusal |
-| Diagnostics coverage | warnings from conversions, truncation, deprecated syntax, and storage engines | statement errors, ignored INSERT/CHECK rows, and GROUP_CONCAT truncation are captured; other warning producers remain silent | low | divergence |
+| Diagnostics coverage | warnings from conversions, truncation, deprecated syntax, and storage engines | statement errors, ignored INSERT/CHECK rows, non-strict integer/ENUM/SET coercions, and GROUP_CONCAT truncation are captured; other warning producers remain silent | low | divergence |
 | Unimplemented COM_* | SET_OPTION, CHANGE_USER | both → ERR 1047 (`Server.fs`) | low | refusal |
 | Auth plugins | caching_sha2_password fast/full auth, sha256_password, RSA exchange | mysql_native_password only; caching_sha2 clients downgraded via auth-switch (`Server.fs:469–479`) | low (works, weaker) | divergence |
 | Column definition fidelity | schema/table/org_table names, requested charsetnr | empty strings; charset forced to 45 (utf8mb4_general_ci) or 63 binary regardless of request (`Protocol.fs:110, 253–260`) | low | divergence |

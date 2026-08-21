@@ -1560,6 +1560,71 @@ let tests =
               | [ { Level = Fsdb.Diagnostics.Warning; Code = 3819; Message = _ } ] -> ()
               | other -> failtestf "expected one UPDATE IGNORE warning, got %A" other
 
+          testCase "non-strict inserts retain conversion and truncation conditions"
+          <| fun _ ->
+              let session = create 1 (Fsdb.Storage.create ())
+              let session, _ = handle session "CREATE TABLE t (i INT, u TINYINT UNSIGNED, e ENUM('a', 'b'), s SET('a', 'b'))"
+              let session, _ = handle session "SET SESSION sql_mode = 'NO_ENGINE_SUBSTITUTION'"
+
+              let session, result = handle session "INSERT INTO t VALUES ('abc', 300, 'x', 'a,x')"
+              Expect.equal result (Affected 1UL) "non-strict coercions retain the row"
+
+              let conditions =
+                  session.Diagnostics
+                  |> List.map (fun condition -> condition.Level, condition.Code, condition.Message)
+
+              Expect.equal
+                  conditions
+                  [ Fsdb.Diagnostics.Warning, 1366, "Incorrect integer value: 'abc' for column 'i' at row 1"
+                    Fsdb.Diagnostics.Warning, 1264, "Out of range value for column 'u' at row 1"
+                    Fsdb.Diagnostics.Warning, 1265, "Data truncated for column 'e' at row 1"
+                    Fsdb.Diagnostics.Warning, 1265, "Data truncated for column 's' at row 1" ]
+                  "MySQL condition codes and messages"
+
+              match handle session "SHOW WARNINGS LIMIT 1, 2" |> snd with
+              | ResultSet(_, [ [ Some "Warning"; Some "1264"; _ ]; [ Some "Warning"; Some "1265"; _ ] ]) -> ()
+              | other -> failtestf "expected limited conditions, got %A" other
+
+              match handle session "SELECT i, u, e, s FROM t" |> snd with
+              | ResultSet(_, [ [ Some "0"; Some "255"; Some ""; Some "a" ] ]) -> ()
+              | other -> failtestf "expected MySQL non-strict stored values, got %A" other
+
+          testCase "prepared inserts replace prior diagnostics with conversion conditions"
+          <| fun _ ->
+              let session = create 1 (Fsdb.Storage.create ())
+              let session, _ = handle session "CREATE TABLE t (i INT)"
+              let session, _ = handle session "SET SESSION sql_mode = 'NO_ENGINE_SUBSTITUTION'"
+              let session, _ = handle session "INSERT INTO t VALUES ('abc')"
+
+              match prepareStatement "INSERT INTO t VALUES (?)" with
+              | Ok(Some ast, 1) ->
+                  let prepared =
+                      { Ast = Some ast
+                        Sql = "INSERT INTO t VALUES (?)"
+                        ParamCount = 1
+                        LastParamTypes = None }
+
+                  let session, result = executePrepared session prepared [ VString "abc" ]
+                  Expect.equal result (Affected 1UL) "prepared insert succeeds"
+
+                  match session.Diagnostics with
+                  | [ { Level = Fsdb.Diagnostics.Warning; Code = 1366; Message = "Incorrect integer value: 'abc' for column 'i' at row 1" } ] -> ()
+                  | other -> failtestf "expected prepared conversion condition, got %A" other
+              | other -> failtestf "expected one prepared parameter, got %A" other
+
+          testCase "non-strict multi-row inserts retain source row numbers"
+          <| fun _ ->
+              let session = create 1 (Fsdb.Storage.create ())
+              let session, _ = handle session "CREATE TABLE t (i INT)"
+              let session, _ = handle session "SET SESSION sql_mode = 'NO_ENGINE_SUBSTITUTION'"
+              let session, _ = handle session "INSERT INTO t VALUES ('one'), ('two')"
+
+              Expect.equal
+                  (session.Diagnostics |> List.map _.Message)
+                  [ "Incorrect integer value: 'one' for column 'i' at row 1"
+                    "Incorrect integer value: 'two' for column 'i' at row 2" ]
+                  "condition rows match the VALUES source rows"
+
           testCase "SHOW CREATE DATABASE, OPEN TABLES, PLUGINS, and ENGINE INNODB STATUS are truthful"
           <| fun _ ->
               let session = create 1 (Fsdb.Storage.create ())
