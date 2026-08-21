@@ -142,7 +142,9 @@ CURRENT_USER/USER/SESSION_USER.
 
 Divergences in existing functions: `CURTIME()`/`TIME()` return strings (no
 TIME value domain, `Functions.fs`); `CONVERT_TZ` resolves numeric offsets and
-`SYSTEM`, but named zones return NULL without loaded time-zone tables.
+`SYSTEM`, but named zones return NULL without loaded time-zone tables;
+`WEIGHT_STRING()` returns host-ICU sort-key bytes for textual collations, not
+MySQL's UCA weight-table bytes.
 
 MySQL Enterprise Encryption is not a Community Server compatibility gap. Its
 asymmetric key-management functions belong to the separately installed
@@ -205,7 +207,7 @@ literal-vs-literal comparison; default utf8mb4_0900_ai_ci.
 
 | Gap | MySQL 8.4 | fsdb | Impact | Class |
 |---|---|---|---|---|
-| Weight tables | UCA 9.0/5.2/4.0 weight tables per collation | ICU CLDR tailoring for everything; tie-break order among primary-equal strings can differ (equality never does) (`Collation.fs:13–26`) | low | divergence |
+| Weight tables | UCA 9.0/5.2/4.0 weight tables per collation | ICU CLDR tailoring for everything; tie-break order among primary-equal strings and `WEIGHT_STRING()`'s textual bytes can differ (equality never does) (`Collation.fs:13–26`) | low | divergence |
 | REGEXP collation | follows collation accent/case rules | always case-sensitive per pattern flags, accent-sensitive | low | divergence |
 | Usable charsets | 40+ charsets with transcoding | utf8mb4/utf8mb3/latin1/ascii/binary only; CONVERT(expr USING x) limited to the same set (`Functions.fs:966`) | low | refusal |
 | Identifier casing | lower_case_table_names semantics | variable reported; identifiers ordinal-case-folded internally | low | divergence |
