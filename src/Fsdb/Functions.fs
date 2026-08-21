@@ -919,27 +919,8 @@ let rec private normalizeJsonSchema (node: JsonNode) : unit =
             | _ -> ()
         | _ -> ()
 
-        match obj["pattern"] with
-        | :? JsonValue as value ->
-            match value.TryGetValue<string>() with
-            | true, pattern ->
-                try
-                    Regex pattern |> ignore
-                with :? ArgumentException -> obj.Remove "pattern" |> ignore
-            | _ -> ()
-        | _ -> ()
-
-        match obj["patternProperties"] with
-        | :? JsonObject as patterns ->
-            patterns
-            |> Seq.choose (fun entry ->
-                try
-                    Regex entry.Key |> ignore
-                    None
-                with :? ArgumentException -> Some entry.Key)
-            |> Seq.toList
-            |> List.iter (fun key -> patterns.Remove key |> ignore)
-        | _ -> ()
+        if obj.ContainsKey "pattern" || obj.ContainsKey "patternProperties" then
+            raise (SqlError(1235, "This version of MySQL doesn't yet support 'JSON Schema regular expressions'"))
 
         obj |> Seq.iter (fun entry -> normalizeJsonSchema entry.Value)
     | :? JsonArray as array -> array |> Seq.iter normalizeJsonSchema
@@ -950,8 +931,15 @@ let private jsonSchemaCache =
     let maxEntries = 256
 
     fun (text: string) ->
-        if cache.Count > maxEntries then cache.Clear()
+        if cache.Count >= maxEntries then cache.Clear()
         cache.GetOrAdd(text, fun source -> JsonSchema.FromJsonAsync(source).GetAwaiter().GetResult())
+
+let private compileJsonSchema functionName text =
+    try
+        jsonSchemaCache text
+    with
+    | :? Newtonsoft.Json.JsonException
+    | :? ArgumentException -> raise (jsonSchemaObjectError functionName)
 
 let private jsonSchemaValidatorSettings =
     JsonSchemaValidatorSettings(FormatValidators = [||])
@@ -1088,7 +1076,7 @@ let private jsonSchemaValidation functionName schemaValue documentValue =
             normalizeJsonSchema schema
             let schemaText = schema.ToJsonString jsonRenderOptions
             let documentText = documentNode |> Option.ofObj |> Option.map (fun node -> node.ToJsonString jsonRenderOptions) |> Option.defaultValue "null"
-            let errors = jsonSchemaCache schemaText |> fun compiled -> compiled.Validate(documentText, jsonSchemaValidatorSettings)
+            let errors = compileJsonSchema functionName schemaText |> fun compiled -> compiled.Validate(documentText, jsonSchemaValidatorSettings)
             let libraryFailure =
                 errors
                 |> Seq.tryHead

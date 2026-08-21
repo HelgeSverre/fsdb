@@ -137,6 +137,7 @@ CURRENT_USER/USER/SESSION_USER.
 |---|---|---|
 | Crypto | `AES_ENCRYPT AES_DECRYPT ENCODE DECODE`, entire asymmetric family | medium |
 | Weight-string clauses | `WEIGHT_STRING(... AS CHAR/BINARY, LEVEL ...)` | low |
+| JSON schema patterns | `pattern patternProperties` | medium |
 | Geometry | all `ST_*`/`GeometryCollection` functions and types | low |
 
 Divergences in existing functions: `CURTIME()`/`TIME()` return strings (no

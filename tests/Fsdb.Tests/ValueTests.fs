@@ -655,6 +655,18 @@ let tests =
                               (VInt 1L)
                               "dependency present"
 
+                      testCase "JSON schema rejects unbounded regular expressions"
+                      <| fun _ ->
+                          let schema = VString """{"type":"string","pattern":"(a+)+$"}"""
+                          let document = VString ("\"" + String.replicate 100_000 "a" + "!\"")
+
+                          Expect.throwsC
+                              (fun () -> call "JSON_SCHEMA_VALID" [ schema; document ] |> ignore)
+                              (fun error ->
+                                  match error with
+                                  | Fsdb.Functions.SqlError(1235, _) -> ()
+                                  | other -> failtestf "expected 1235, got %A" other)
+
                       testCase "JSON schema functions return NULL for a SQL NULL argument and reject invalid JSON"
                       <| fun _ ->
                           let schema = VString """{"type":"object"}"""
@@ -667,6 +679,13 @@ let tests =
                                   match error with
                                   | Fsdb.Functions.SqlError(3141, _) -> ()
                                   | other -> failtestf "expected 3141, got %A" other)
+
+                          Expect.throwsC
+                              (fun () -> call "JSON_SCHEMA_VALID" [ VString """{"required":1}"""; VString "{}" ] |> ignore)
+                              (fun error ->
+                                  match error with
+                                  | Fsdb.Functions.SqlError(3853, _) -> ()
+                                  | other -> failtestf "expected 3853, got %A" other)
 
                       testCase "JSON_KEYS lists an object's top-level keys"
                       <| fun _ -> Expect.equal (call "JSON_KEYS" [ VJson """{"a": 1, "b": 2}""" ]) (VJson """["a", "b"]""") "keys"
