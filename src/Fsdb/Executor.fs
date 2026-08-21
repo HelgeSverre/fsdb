@@ -1252,8 +1252,10 @@ let rec private metadataOfExpr (ctx: EvalContext) (expr: Expr) : ColumnMetadata 
         simple TypeLongLong |> Option.map (fun metadata -> { metadata with Flags = NotNullFlag })
     | FuncCall(name, [ _; _ ]) when name.Equals("BENCHMARK", System.StringComparison.OrdinalIgnoreCase) ->
         simple TypeLongLong
+    | FuncCall(name, [ Cast(_, TBinary length) ]) when name.Equals("WEIGHT_STRING", System.StringComparison.OrdinalIgnoreCase) ->
+        Some { Value.columnMetadata TypeVarString with ColumnLength = uint32 length; Flags = BinaryFlag }
     | FuncCall(name, [ _ ]) when name.Equals("WEIGHT_STRING", System.StringComparison.OrdinalIgnoreCase) ->
-        Some { Value.columnMetadata TypeBlob with ColumnLength = 4294967295u; Flags = BlobFlag ||| BinaryFlag }
+        Some { Value.columnMetadata TypeVarString with ColumnLength = 4294967295u; Flags = BinaryFlag }
     | FuncCall(name, args) ->
         match name.ToUpperInvariant(), args with
         | "COUNT", _ -> simple TypeLongLong

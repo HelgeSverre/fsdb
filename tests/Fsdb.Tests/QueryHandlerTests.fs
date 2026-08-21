@@ -64,6 +64,20 @@ let tests =
                   Expect.equal (session.LastResultColumnMetadata |> List.map _.TypeId) [ TypeBlob ] "binary type"
               | _, other -> failtestf "expected an empty AES result, got %A" other
 
+          testCase "WEIGHT_STRING BINARY metadata preserves its bounded binary result"
+          <| fun _ ->
+              let session = create 1 (Fsdb.Storage.create ())
+
+              match handle session "SELECT WEIGHT_STRING('abc' AS BINARY(8)) LIMIT 0" with
+              | session, ResultSet(_, []) ->
+                  match session.LastResultColumnMetadata with
+                  | [ metadata ] ->
+                      Expect.equal metadata.TypeId TypeVarString "varbinary type"
+                      Expect.equal metadata.ColumnLength 8u "BINARY width"
+                      Expect.isTrue (metadata.Flags &&& BinaryFlag <> 0us) "binary flag"
+                  | metadata -> failtestf "expected one metadata record, got %A" metadata
+              | _, other -> failtestf "expected an empty WEIGHT_STRING result, got %A" other
+
           testCase "a version-gated /*!NNNNN ... */ comment executes its wrapped SET, matching a mysqldump preamble"
           <| fun _ ->
               let session = create 1 (Fsdb.Storage.create ())
