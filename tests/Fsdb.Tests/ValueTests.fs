@@ -1483,7 +1483,7 @@ let tests =
 
                       testCase "TIME extracts the clock part; WEEK counts Sunday-first weeks"
                       <| fun _ ->
-                          Expect.equal (call "TIME" [ VString "2024-03-05 13:45:09" ]) (VString "13:45:09") "time"
+                          Expect.equal (call "TIME" [ VString "2024-03-05 13:45:09" ]) (VTime(tryParseTimeValue "13:45:09" |> Option.get)) "time"
                           Expect.equal (call "WEEK" [ VDate(DateOnly(2024, 1, 7)) ]) (VInt 1L) "first sunday of 2024 starts week 1"
                           Expect.equal (call "WEEK" [ VDate(DateOnly(2024, 1, 1)) ]) (VInt 0L) "days before the first sunday are week 0"
 

@@ -6831,6 +6831,29 @@ let tests =
                           Some "-12:15:30.5"
                           None ]
 
+                testCase "TIME columns retain type, precision, ordering, and numeric coercion"
+                <| fun _ ->
+                    let store = newStore ()
+                    runDefault store "CREATE TABLE elapsed (id INT, value TIME(2) NOT NULL DEFAULT '00:00:00')" |> ignore
+                    runDefault store "INSERT INTO elapsed(id, value) VALUES (1, '25:02:03.455'), (2, '-01:02:03.455')" |> ignore
+                    runDefault store "INSERT INTO elapsed(id) VALUES (3)" |> ignore
+
+                    match runDefault store "SELECT value, value < '00:00:00', value + 0 FROM elapsed ORDER BY value" with
+                    | ResultSet(_, rows) ->
+                        Expect.equal
+                            rows
+                            [ [ Some "-01:02:03.46"; Some "1"; Some "-10203.46" ]
+                              [ Some "00:00:00.00"; Some "0"; Some "0" ]
+                              [ Some "25:02:03.46"; Some "0"; Some "250203.46" ] ]
+                            "typed time values"
+                    | other -> failtestf "expected time result set, got %A" other
+
+                testCase "TIME casts round and carry at their declared precision"
+                <| fun _ ->
+                    expectRow
+                        "SELECT CAST('01:02:03.455' AS TIME(2)), CAST('-00:00:00.5' AS TIME(0))"
+                        [ Some "01:02:03.46"; Some "-00:00:01" ]
+
                 testCase "time formatting, periods, day numbers, and seeded RAND match MySQL"
                 <| fun _ ->
                     expectRow

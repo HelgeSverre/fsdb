@@ -2337,15 +2337,20 @@ let private dateFn: Scalar =
     | [ v ] when not (anyNull [ v ]) -> asDateOnly v |> Option.map VDate |> Option.defaultValue VNull
     | _ -> VNull
 
-/// No `TIME` case in `Value` (see the `VJson` comment on the same theme) —
-/// ponytail: rendered as a plain `"HH:mm:ss"` string, add a `VTime` case if
-/// a migration needs it to compare/sort as a real time value.
 let private timeFn: Scalar =
     function
+    | [ VTime value ] -> VTime value
+    | [ VZeroDateTime value ] ->
+        let _, hour, minute, second, micros = zeroDateTimeParts value
+        VTime(timeValueOrClamp ((int64 hour * 3600L + int64 minute * 60L + int64 second) * TimeSpan.TicksPerSecond + int64 micros * 10L))
     | [ v ] when not (anyNull [ v ]) ->
-        asDateTime v
-        |> Option.map (fun dt -> VString(dt.ToString("HH:mm:ss", CultureInfo.InvariantCulture)))
-        |> Option.defaultValue VNull
+        match asDateTime v with
+        | Some value -> VTime(timeValueOrClamp value.TimeOfDay.Ticks)
+        | None ->
+            toText v
+            |> Option.bind tryParseTimeInputTicks
+            |> Option.map (timeValueOrClamp >> VTime)
+            |> Option.defaultValue VNull
     | _ -> VNull
 
 let private datePartFn (f: DateTime -> int) : Scalar =
@@ -2473,35 +2478,17 @@ let private yearWeekFn: Scalar =
     | _ -> VNull
 
 let private curDateFn: Scalar = fun _ -> VDate(DateOnly.FromDateTime DateTime.Now)
-let private curTimeFn: Scalar = fun _ -> VString(DateTime.Now.ToString("HH:mm:ss", CultureInfo.InvariantCulture))
+let private curTimeFn: Scalar = fun _ -> VTime(timeValueOrClamp (truncateToSecond DateTime.Now).TimeOfDay.Ticks)
 let private utcDateFn: Scalar = fun _ -> VDate(DateOnly.FromDateTime DateTime.UtcNow)
-let private utcTimeFn: Scalar = fun _ -> VString(DateTime.UtcNow.ToString("HH:mm:ss", CultureInfo.InvariantCulture))
+let private utcTimeFn: Scalar = fun _ -> VTime(timeValueOrClamp (truncateToSecond DateTime.UtcNow).TimeOfDay.Ticks)
 let private utcTimestampFn: Scalar = fun _ -> VDateTime(truncateToSecond DateTime.UtcNow)
 
-let private timePattern =
-    Regex(@"^([+-])?(?:(\d+)\s+)?(\d{1,3}):(\d{1,2}):(\d{1,2})(?:\.(\d{1,6}))?$", RegexOptions.CultureInvariant)
-
 let private tryTimeTicks (value: Value) =
-    let matched = timePattern.Match(req value)
+    match value with
+    | VTime time -> Some(timeTicks time)
+    | _ -> value |> toText |> Option.bind tryParseTimeInputTicks
 
-    if not matched.Success then
-        None
-    else
-        let number (group: Group) = if group.Success then Int64.Parse(group.Value, CultureInfo.InvariantCulture) else 0L
-        let days = number matched.Groups.[2]
-        let hours = number matched.Groups.[3]
-        let minutes = number matched.Groups.[4]
-        let seconds = number matched.Groups.[5]
-
-        if minutes > 59L || seconds > 59L then
-            None
-        else
-            let fraction = matched.Groups.[6].Value
-            let micros = if fraction = "" then 0L else Int64.Parse(fraction.PadRight(6, '0'), CultureInfo.InvariantCulture)
-            let ticks = (((days * 24L + hours) * 60L + minutes) * 60L + seconds) * TimeSpan.TicksPerSecond + micros * 10L
-            Some((if matched.Groups.[1].Value = "-" then -ticks else ticks), fraction.Length)
-
-let private maxTimeTicks = (838L * 3600L + 59L * 60L + 59L) * TimeSpan.TicksPerSecond + 9_999_990L
+let private timeResult ticks = VTime(timeValueOrClamp ticks)
 
 /// `TIMESTAMP(expr)` coerces to a datetime; the two-argument form adds a
 /// TIME value to that datetime.
@@ -2510,7 +2497,7 @@ let private timestampFn: Scalar =
     | [ v ] when not (anyNull [ v ]) -> asDateTime v |> Option.map VDateTime |> Option.defaultValue VNull
     | [ date; time ] when not (anyNull [ date; time ]) ->
         match asDateTime date, tryTimeTicks time with
-        | Some value, Some(ticks, _) ->
+        | Some value, Some ticks ->
             try
                 VDateTime(value.AddTicks ticks)
             with _ ->
@@ -2518,34 +2505,14 @@ let private timestampFn: Scalar =
         | _ -> VNull
     | _ -> VNull
 
-let private formatTimeTicks ticks =
-    let ticks = max -maxTimeTicks (min maxTimeTicks ticks)
-    let sign = if ticks < 0L then "-" else ""
-    let magnitude = abs ticks
-    let totalSeconds = magnitude / TimeSpan.TicksPerSecond
-    let hours = totalSeconds / 3600L
-    let minutes = totalSeconds % 3600L / 60L
-    let seconds = totalSeconds % 60L
-    let micros = magnitude % TimeSpan.TicksPerSecond / 10L
-
-    let fraction =
-        if micros = 0L then
-            ""
-        else
-            "." + (micros.ToString("D6").TrimEnd '0')
-
-    sprintf "%s%02d:%02d:%02d%s" sign hours minutes seconds fraction
-
 let private addTimeFn (direction: int64) : Scalar =
     function
     | [ value; interval ] when not (anyNull [ value; interval ]) ->
         match tryTimeTicks interval with
         | None -> VNull
-        | Some(intervalTicks, _) ->
-            let text = req value
-
+        | Some intervalTicks ->
             match tryTimeTicks value with
-            | Some(valueTicks, _) -> VString(formatTimeTicks (valueTicks + direction * intervalTicks))
+            | Some valueTicks -> timeResult (valueTicks + direction * intervalTicks)
             | None ->
                 match asDateTime value with
                 | Some dateTime ->
@@ -2560,10 +2527,10 @@ let private timeDiffFn: Scalar =
     function
     | [ left; right ] when not (anyNull [ left; right ]) ->
         match tryTimeTicks left, tryTimeTicks right with
-        | Some(leftTicks, _), Some(rightTicks, _) -> VString(formatTimeTicks (leftTicks - rightTicks))
+        | Some leftTicks, Some rightTicks -> timeResult (leftTicks - rightTicks)
         | None, None ->
             match asDateTime left, asDateTime right with
-            | Some leftDate, Some rightDate -> VString(formatTimeTicks ((leftDate - rightDate).Ticks))
+            | Some leftDate, Some rightDate -> timeResult ((leftDate - rightDate).Ticks)
             | _ -> VNull
         | _ -> VNull
     | _ -> VNull
@@ -2581,7 +2548,7 @@ let private secToTimeFn: Scalar =
 
         let fractionalCeiling = if precision = 0 then 0L else TimeSpan.TicksPerSecond - pown 10L (7 - precision)
         let ceiling = maxTimeTicks - 9_999_990L + fractionalCeiling
-        VString(formatTimeTicks (max -ceiling (min ceiling ticks)))
+        timeResult (max -ceiling (min ceiling ticks))
     | _ -> VNull
 
 let private makeTimeFn: Scalar =
@@ -2596,7 +2563,7 @@ let private makeTimeFn: Scalar =
         else
             let sign = if hours < 0L then -1L else 1L
             let ticks = (abs hours * 3600L + minutes * 60L) * TimeSpan.TicksPerSecond + int64 (seconds * float TimeSpan.TicksPerSecond)
-            VString(formatTimeTicks (sign * ticks))
+            timeResult (sign * ticks)
     | _ -> VNull
 
 let private timeFormatFn: Scalar =
@@ -2604,7 +2571,7 @@ let private timeFormatFn: Scalar =
     | [ value; format ] when not (anyNull [ value; format ]) ->
         match tryTimeTicks value with
         | None -> VNull
-        | Some(ticks, _) ->
+        | Some ticks ->
             let negative = ticks < 0L
             let magnitude = abs ticks
             let totalSeconds = magnitude / TimeSpan.TicksPerSecond
