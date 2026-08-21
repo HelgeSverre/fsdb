@@ -183,7 +183,6 @@ ADD UNIQUE over colliding data fails 1062 rather than corrupting.
 | Expression indexes | `INDEX ((expr))` | absent | low | refusal |
 | Descending/invisible indexes | `DESC`, `INVISIBLE` | absent | low | refusal |
 | Cross-database FKs | supported | referenced key carries no database qualifier; invisible/unenforceable across databases (`Ast.fs:334–341`) | low | divergence |
-| CHECK DDL-time restrictions | errors 3818/3102 for nondeterministic/foreign refs at CREATE | relaxed; caught at first write (`Executor.fs:6349`) | low | divergence |
 | AUTO_INCREMENT | counter persists across restart via redo | burned ids survive rollback (InnoDB-like) but counter rebuild after crash replays WAL events; forward-only ALTER SET (`Storage.fs:2179–2182`) | low | divergence |
 
 ## 6. Charsets and collations
