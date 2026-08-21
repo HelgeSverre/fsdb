@@ -119,7 +119,6 @@ identities for bit aggregates.
 | GROUP_CONCAT truncation | emits warning, increments warning count | truncates silently (`Executor.fs:4424–4438`) | low | divergence |
 | RANGE window frames | `RANGE BETWEEN INTERVAL n DAY PRECEDING…` | temporal offsets refused with 1235; numeric offsets only (`Executor.fs:5438–5444`) | low | refusal |
 | sql_mode | ~20 mode bits with semantic effect | only strictness (STRICT_TRANS_TABLES/STRICT_ALL_TABLES) has effect; ONLY_FULL_GROUP_BY absent (bare column picks first row of group, `Executor.fs:4768`); `@@sql_mode` echoes a constant string regardless of SET (`Session.fs:22`) | medium | divergence |
-| Result column types | declared/schema-driven | inferred from returned row values; an all-NULL column under LIMIT reports VAR_STRING (`Executor.fs:6110`) | medium | divergence — see §15 open finding |
 
 ## 3. Built-in functions
 
@@ -396,7 +395,6 @@ Recorded in `torture/findings/`, not yet fixed, not enrolled in
 
 | Finding | Detail | Status |
 |---|---|---|
-| Declared result-type mismatches | 23 probes: ENUM→VARCHAR (8), BIGINT→VARCHAR (8), BOOL→BIGINT (4), YEAR→BIGINT (2), TIME→VARCHAR (1); four stable case signatures recorded (`2026-08-20-client-contract-campaign.md`) | open |
 | Multi-database scaling | super-serial slowdowns; store-wide connection ceiling; classified `multidb_scaling_gap` (`2026-08-17-multidb-concurrency-campaign.md`) | open, reporting-only |
 | INSERT…SELECT…ODKU alias refs | bare select-column references in the UPDATE clause error where MySQL reads select-derived values; only `VALUES(col)` works (`2026-08-19-insert-select-odku-gap.md`, `Ast.fs:630–633`) | deferred by design |
 | JSON_TABLE refusals | LEFT JOIN JSON_TABLE(…) ON TRUE → 1064; JOIN…USING → 1064; ERROR ON EMPTY/ERROR raise-form unparsed; correlated unknown qualifier yields 1054 vs MySQL 1109 (`2026-08-19-json-table-gaps.md`) | partially stale — see §17 |
@@ -438,9 +436,8 @@ Where the docs and the code disagree, the code is authoritative:
   JOIN…USING refusals.
 - `docs/compatibility.md` claims subqueries are unchecked by privileges;
   `Auth.exprReadTables` walks them (`Auth.fs:438–546`). Doc is stale.
-- The open client-contract campaign holds four result-type signatures while
-  `support/known-gaps.json` is empty — consistent with the manual-enrollment
-  policy, but unreconciled.
+- The client-contract campaign's four result-type signatures were resolved;
+  the 2026-08-21 differential rerun passed every scenario.
 
 ## 18. Relative severity view
 
@@ -452,19 +449,17 @@ implementation effort:
    correctness holds, but scale diverges sharply from MySQL past small data.
 3. Diagnostics area (warnings count, SHOW WARNINGS) — clients that check
    warnings after IGNORE/bulk loads see nothing.
-4. Declared result-type mismatches (open campaign) — typed/native clients
-   misread columns.
-5. Trigger coverage (BEFORE/UPDATE/DELETE, OLD.*, compound bodies) and
+4. Trigger coverage (BEFORE/UPDATE/DELETE, OLD.*, compound bodies) and
    updatable views — the two largest deliberate-subset cliffs.
-6. Missing function families (AES, JSON Schema, geometry) —
+5. Missing function families (AES, JSON Schema, geometry) —
    each individually small, collectively frequent in
    report-style queries.
-7. LOAD DATA LOCAL INFILE and multi-statement packets — bulk-loading and
+6. LOAD DATA LOCAL INFILE and multi-statement packets — bulk-loading and
    migration-tool paths.
-8. User variables in expressions — session-state patterns beyond the
+7. User variables in expressions — session-state patterns beyond the
    supported bare projection form.
-9. SERIALIZABLE/READ COMMITTED semantics and intra-database write
+8. SERIALIZABLE/READ COMMITTED semantics and intra-database write
    parallelism — transactional throughput shape.
-10. Zero-date handling — a strict-mode correctness edge.
-11. Everything in the admin/replication/metadata tail — matters only once a
+9. Zero-date handling — a strict-mode correctness edge.
+10. Everything in the admin/replication/metadata tail — matters only once a
     specific tool needs it (mysqladmin, monitoring agents, replica setups).

@@ -1,6 +1,10 @@
 # Client-contract differential campaign — 2026-08-20
 
-Status: open
+Status: resolved
+
+The 2026-08-21 rerun after result-metadata inference and column-channel
+widening passed all four scenarios with no probe or DML differences:
+`artifacts/runs/20260821T133118052-1650`.
 
 ## Method
 
@@ -39,7 +43,7 @@ Evidence bundles:
 The complete set of failed probe records, failed DML records, and four case
 signatures is identical in all three runs.
 
-## Open result-type gaps
+## Resolved result-type gaps
 
 All 23 affected probes returned the same ordered canonical values as MySQL.
 Only the declared result metadata differed.
