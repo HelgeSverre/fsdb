@@ -173,12 +173,26 @@ let private concatFn (args: Value list) : Value =
     else
         args |> List.map (toText >> Option.defaultValue "") |> String.concat "" |> VString
 
-let private textMap (f: string -> string) : Scalar =
+let private trimRaw trimLeading trimTrailing (bytes: byte[]) =
+    let mutable first = 0
+    let mutable last = bytes.Length - 1
+
+    if trimLeading then
+        while first <= last && bytes.[first] = 0x20uy do
+            first <- first + 1
+
+    if trimTrailing then
+        while last >= first && bytes.[last] = 0x20uy do
+            last <- last - 1
+
+    if first > last then VBytes [||] else VBytes(bytes.[first..last])
+
+let private textMap rawMap (f: string -> string) : Scalar =
     function
     | [ VNull ] -> VNull
     | [ value ] ->
         match tryRawBytes value with
-        | Some bytes -> bytes |> Text.Encoding.Latin1.GetString |> f |> Text.Encoding.Latin1.GetBytes |> VBytes
+        | Some bytes -> rawMap bytes
         | None -> value |> toText |> Option.defaultValue "" |> f |> VString
     | _ -> VNull
 
@@ -3016,19 +3030,32 @@ let private locateAt (str: string) (sub: string) (startIdx: int) : Value =
     else
         VInt(int64 (collationIndexOf str sub startIdx + 1))
 
+let private binaryLocateAt (str: string) (sub: string) (startIdx: int) : Value =
+    if startIdx > str.Length || startIdx < 0 then
+        VInt 0L
+    else
+        VInt(int64 (str.IndexOf(sub, startIdx, StringComparison.Ordinal) + 1))
+
 let private locateFn: Scalar =
     function
-    | [ sub; str ] when not (anyNull [ sub; str ]) -> locateAt (req str) (req sub) 0
+    | [ sub; str ] when not (anyNull [ sub; str ]) ->
+        if hasRawBytes [ sub; str ] then binaryLocateAt (binaryText str) (binaryText sub) 0 else locateAt (req str) (req sub) 0
     // A start position below 1 is invalid and yields 0, not a search from
     // the beginning: LOCATE('l', 'Hello', 0) = 0 in MySQL.
     | [ sub; str; posV ] when not (anyNull [ sub; str; posV ]) ->
         let pos = int (toDouble posV)
-        if pos < 1 then VInt 0L else locateAt (req str) (req sub) (pos - 1)
+        if pos < 1 then
+            VInt 0L
+        elif hasRawBytes [ sub; str ] then
+            binaryLocateAt (binaryText str) (binaryText sub) (pos - 1)
+        else
+            locateAt (req str) (req sub) (pos - 1)
     | _ -> VNull
 
 let private instrFn: Scalar =
     function
-    | [ str; sub ] when not (anyNull [ str; sub ]) -> locateAt (req str) (req sub) 0
+    | [ str; sub ] when not (anyNull [ str; sub ]) ->
+        if hasRawBytes [ str; sub ] then binaryLocateAt (binaryText str) (binaryText sub) 0 else locateAt (req str) (req sub) 0
     | _ -> VNull
 
 let private replaceFn: Scalar =
@@ -5064,8 +5091,8 @@ let builtins: Registry =
     |> registerScalar "NOW" nowFn
     |> registerScalar "CURRENT_TIMESTAMP" nowFn
     |> registerScalar "CONCAT" concatFn
-    |> registerScalar "UPPER" (textMap (fun s -> s.ToUpperInvariant()))
-    |> registerScalar "LOWER" (textMap (fun s -> s.ToLowerInvariant()))
+    |> registerScalar "UPPER" (textMap VBytes (fun s -> s.ToUpperInvariant()))
+    |> registerScalar "LOWER" (textMap VBytes (fun s -> s.ToLowerInvariant()))
     |> registerScalar "LENGTH" lengthFn
     |> registerScalar "BIT_LENGTH" bitLengthFn
     |> registerScalar "CHAR_LENGTH" charLengthFn
@@ -5212,17 +5239,17 @@ let builtins: Registry =
     |> registerScalar "INSTR" instrFn
     |> registerScalar "POSITION" locateFn
     |> registerScalar "REPLACE" replaceFn
-    |> registerScalar "TRIM" (textMap (fun s -> s.Trim()))
+    |> registerScalar "TRIM" (textMap (trimRaw true true) (fun s -> s.Trim()))
     |> registerScalar "TRIM_BOTH" (trimSubstring true true)
     |> registerScalar "TRIM_LEADING" (trimSubstring true false)
     |> registerScalar "TRIM_TRAILING" (trimSubstring false true)
-    |> registerScalar "LTRIM" (textMap (fun s -> s.TrimStart()))
-    |> registerScalar "RTRIM" (textMap (fun s -> s.TrimEnd()))
+    |> registerScalar "LTRIM" (textMap (trimRaw true false) (fun s -> s.TrimStart()))
+    |> registerScalar "RTRIM" (textMap (trimRaw false true) (fun s -> s.TrimEnd()))
     |> registerScalar "LPAD" (padFn true)
     |> registerScalar "RPAD" (padFn false)
     |> registerScalar "LEFT" leftFn
     |> registerScalar "RIGHT" rightFn
-    |> registerScalar "REVERSE" (textMap (fun s -> String(Array.rev (s.ToCharArray()))))
+    |> registerScalar "REVERSE" (textMap (Array.rev >> VBytes) (fun s -> String(Array.rev (s.ToCharArray()))))
     |> registerScalar "REPEAT" repeatFn
     |> registerScalar "SPACE" spaceFn
     |> registerScalar "ASCII" asciiFn

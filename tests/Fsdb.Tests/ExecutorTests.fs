@@ -6425,6 +6425,13 @@ let tests =
                     | ResultSet(_, [ [ Some "8000000000000000"; Some "8"; Some "64"; Some "gAAAAAAAAAA="; Some "8000000000000000"; Some "8000000000000000"; Some "80"; Some "8000000000000000"; Some "0000000000000080"; Some "54409ea540dc450d53a86133d867c772"; Some "b1b0bee5378188f5250138bcce25855f2617f9c55b20b9628e13d367c47404a9" ] ]) -> ()
                     | other -> failtestf "expected raw BIT bytes, got %A" other
 
+                    runDefault store "CREATE TABLE raw_bits (lowercase BIT(8), uppercase BIT(8), padded BIT(24))" |> ignore
+                    runDefault store "INSERT INTO raw_bits VALUES (0x61, 0x41, 0xA020A0)" |> ignore
+
+                    match runDefault store "SELECT HEX(UPPER(lowercase)), HEX(LOWER(lowercase)), HEX(TRIM(padded)), LOCATE(lowercase, uppercase), INSTR(uppercase, lowercase) FROM raw_bits" with
+                    | ResultSet(_, [ [ Some "61"; Some "61"; Some "A020A0"; Some "0"; Some "0" ] ]) -> ()
+                    | other -> failtestf "expected binary string semantics, got %A" other
+
                 testCase "BIT predicates preserve values above double precision"
                 <| fun _ ->
                     let store = newStore ()
