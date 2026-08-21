@@ -1,5 +1,7 @@
 # 2026-08-19 — JSON_TABLE subset: unsupported clauses and pinned error wording
 
+Status: resolved
+
 Phase 3 ships the scoped subset `JSON_TABLE(expr, 'path' COLUMNS (col TYPE
 PATH 'path' | col FOR ORDINALITY)) alias`. Read-only oracle probes (MySQL
 8.4.11, port 3462) pinned the divergences below; the supported subset is
@@ -31,11 +33,9 @@ A forward (or plain unknown) table reference in an uncorrelated JSON_TABLE
 source is code **1109**, not a 1054 unknown-column — clients matching on the
 code see MySQL's behavior. Both wordings are asserted by Expecto cases.
 
-Remaining known divergence: the *correlated* site with an unknown qualifier
-(`FROM t, JSON_TABLE(nope.j, ...)`) still surfaces as the evaluator's 1054
-rather than MySQL's 1109 — the qualifier may legitimately resolve to an outer
-subquery scope there, so a prepare-time check needs scope plumbing the subset
-skips.
+The correlated site with an unknown qualifier (`FROM t,
+JSON_TABLE(nope.j, ...)`) now checks the current and outer qualifier scopes
+before reporting MySQL's 1109.
 
 Per TORTURE-TESTING.md §"If deferring", `support/known-gaps.json` gains a
 signature only after a real torture run reproduces a divergence and it is

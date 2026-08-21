@@ -5386,6 +5386,20 @@ let tests =
                     | Err(1054, message) -> Expect.equal message "Unknown column 'j' in 'a table function argument'" "MySQL's 1054 wording"
                     | other -> failtestf "expected error 1054, got %A" other
 
+                testCase "an unknown qualifier in a correlated source is 1109"
+                <| fun _ ->
+                    let store = newStore ()
+                    runDefault store "CREATE TABLE t (id INT, j JSON)" |> ignore
+                    runDefault store "INSERT INTO t VALUES (1, '[1]')" |> ignore
+
+                    match runDefault store "SELECT jt.x FROM t, JSON_TABLE(nope.j, '$[*]' COLUMNS (x INT PATH '$')) jt" with
+                    | Err(1109, message) -> Expect.equal message "Unknown table 'nope' in a table function argument" "MySQL's 1109 wording"
+                    | other -> failtestf "expected error 1109, got %A" other
+
+                    match runDefault store "SELECT jt.x FROM t, JSON_TABLE(COALESCE(nope.j, t.j), '$[*]' COLUMNS (x INT PATH '$')) jt" with
+                    | Err(1109, _) -> ()
+                    | other -> failtestf "expected nested qualifier error 1109, got %A" other
+
                 testCase "JOIN ... USING against JSON_TABLE filters and coalesces the key"
                 <| fun _ ->
                     let store = newStore ()

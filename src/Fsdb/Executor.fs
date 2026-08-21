@@ -3121,8 +3121,26 @@ and private applyJsonTableJoin
                     | Some leftKey, Some rightKey -> keyComparer.Equals(leftKey, rightKey)
                     | _ -> false
 
+            let rec qualifierInScope (ctx: EvalContext) (qualifier: string) =
+                ctx.Qualifiers.ContainsKey(qualifier.ToLowerInvariant())
+                || (ctx.Outer |> Option.exists (fun outerCtx -> qualifierInScope outerCtx qualifier))
+
             let expandLeft (left: Value[]) : Result<Value[] list, QueryResult> =
-                match evalExpr (leftCtxFor left) source with
+                let leftCtx = leftCtxFor left
+
+                let sourceResult =
+                    match evalExpr leftCtx source with
+                    | Error(1054, message) ->
+                        let missingQualifier = Regex.Match(message, @"^Unknown column '([^.']+)\.")
+
+                        if missingQualifier.Success && not (qualifierInScope leftCtx missingQualifier.Groups.[1].Value) then
+                            let qualifier = missingQualifier.Groups.[1].Value
+                            Error(1109, sprintf "Unknown table '%s' in a table function argument" qualifier)
+                        else
+                            Error(1054, message)
+                    | result -> result
+
+                match sourceResult with
                 | Error(code, message) -> Error(Err(code, message))
                 | Ok doc ->
                     jsonTableRows doc path columns
