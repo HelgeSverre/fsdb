@@ -317,6 +317,16 @@ let tests =
                         Expect.equal fullBytes "6100" "CHAR retains raw zero bytes"
                     | other -> failtestf "expected one raw CHAR weight row, got %A" other
 
+                testCase "WEIGHT_STRING BINARY uses the column character set"
+                <| fun _ ->
+                    let store = newStore ()
+                    runDefault store "CREATE TABLE weight_charset (value VARCHAR(10) CHARACTER SET latin1)" |> ignore
+                    runDefault store "INSERT INTO weight_charset VALUES ('é')" |> ignore
+
+                    match runDefault store "SELECT HEX(WEIGHT_STRING(value AS BINARY(2))) FROM weight_charset" with
+                    | ResultSet(_, [ [ Some weight ] ]) -> Expect.equal weight "E900" "latin1 bytes are padded"
+                    | other -> failtestf "expected one latin1 weight row, got %A" other
+
                 testTheory
                     "a bin-collated column compares byte-for-byte in WHERE and its unique key"
                     [ "Bob", "bob", "2"

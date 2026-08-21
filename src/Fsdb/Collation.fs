@@ -471,6 +471,12 @@ module Charset =
 
     let private cp1252Extras = cp1252HighSlots |> Array.choose id |> Array.map int |> Set.ofArray
 
+    let private cp1252ByteByCode =
+        cp1252HighSlots
+        |> Array.indexed
+        |> Array.choose (fun (index, value) -> value |> Option.map (fun value -> int value, byte (index + 0x80)))
+        |> Map.ofArray
+
     /// Maps text to what a `latin1` (cp1252) column can hold: ASCII and
     /// 0xA0–0xFF pass through, the cp1252 extras pass through, everything
     /// else (including the C1 range 0x80–0x9F) becomes '?'. The engine
@@ -512,6 +518,27 @@ module Charset =
         |> _.EnumerateRunes()
         |> Seq.map (fun rune -> if rune.Value < 0x80 then rune.ToString() else "?")
         |> String.concat ""
+
+    /// Encodes a text value with the byte mapping MySQL applies before a
+    /// binary string operation observes a column's character set.
+    let encode (charset: string) (text: string) : byte[] =
+        let byteForRune (rune: Rune) : byte =
+            match charset with
+            | "latin1" ->
+                let code = rune.Value
+
+                if code < 0x80 || (code >= 0xA0 && code <= 0xFF) then
+                    byte code
+                else
+                    Map.tryFind code cp1252ByteByCode |> Option.defaultValue 0x3Fuy
+            | "ascii" ->
+                if rune.Value < 0x80 then byte rune.Value else 0x3Fuy
+            | _ -> 0uy
+
+        match charset with
+        | "latin1"
+        | "ascii" -> text.EnumerateRunes() |> Seq.map byteForRune |> Array.ofSeq
+        | _ -> Text.Encoding.UTF8.GetBytes text
 
     /// Decodes raw bytes as ASCII — the `_ascii'...'` introducer's byte
     /// labeling, where each non-7-bit byte becomes one '?' (verified:

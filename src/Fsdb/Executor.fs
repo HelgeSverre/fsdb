@@ -1481,6 +1481,16 @@ let private resolvedCollation (ctx: EvalContext) (expr: Expr) : Collation.Collat
 let private keyCollation (ctx: EvalContext) (expr: Expr) : Collation.Collation =
     resolvedCollation ctx expr |> Option.defaultValue ctx.Store.ConnectionCollation
 
+let private sourceCharset (ctx: EvalContext) (expr: Expr) : string =
+    match expr with
+    | Collate(_, name) -> Collation.charsetOfCollation name
+    | _ ->
+        tryColumnDefForExpr ctx expr
+        |> Option.bind (fun column ->
+            column.Charset
+            |> Option.orElseWith (fun () -> column.Collation |> Option.map Collation.charsetOfCollation))
+        |> Option.defaultValue "utf8mb4"
+
 /// A group/distinct/partition key normalized to collation equality: string
 /// values become their collation's canonical key (`KeyOf` is injective per
 /// collation), so structural equality of the normalized keys is exactly
@@ -2483,7 +2493,8 @@ let rec private evalExpr (ctx: EvalContext) (expr: Expr) : Result<Value, EvalErr
     | FuncCall(name, [ Cast(argument, TChar length) ]) when name.Equals("WEIGHT_STRING", System.StringComparison.OrdinalIgnoreCase) ->
         eval argument |> Result.map (Functions.weightStringChar (keyCollation ctx argument) length)
     | FuncCall(name, [ Cast(argument, TBinary length) ]) when name.Equals("WEIGHT_STRING", System.StringComparison.OrdinalIgnoreCase) ->
-        eval argument |> Result.map (Functions.weightStringBinary length)
+        eval argument
+        |> Result.map (Functions.weightStringBinaryWith (Collation.Charset.encode (sourceCharset ctx argument)) length)
     | FuncCall(name, [ argument ]) when name.Equals("WEIGHT_STRING", System.StringComparison.OrdinalIgnoreCase) ->
         let source =
             match argument with

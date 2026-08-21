@@ -1956,7 +1956,7 @@ let weightStringChar (collation: Collation.Collation) (length: int) (value: Valu
 
         weightString collation (VString(result.ToString()))
 
-let weightStringBinary (length: int) (value: Value) : Value =
+let weightStringBinaryWith (encodeText: string -> byte[]) (length: int) (value: Value) : Value =
     if length > Limits.maxAllowedPacket then
         raise (SqlError(1153, "Result of WEIGHT_STRING() exceeds max_allowed_packet"))
 
@@ -1964,7 +1964,7 @@ let weightStringBinary (length: int) (value: Value) : Value =
         match value, tryRawBytes value with
         | VNull, _ -> None
         | _, Some bytes -> Some bytes
-        | _ -> Some(Text.Encoding.UTF8.GetBytes(req value))
+        | _ -> Some(encodeText (req value))
 
     match bytes with
     | None -> VNull
@@ -1972,6 +1972,9 @@ let weightStringBinary (length: int) (value: Value) : Value =
         let result = Array.zeroCreate length
         Array.Copy(bytes, result, min bytes.Length length)
         VBytes result
+
+let weightStringBinary (length: int) (value: Value) : Value =
+    weightStringBinaryWith Text.Encoding.UTF8.GetBytes length value
 
 let private weightStringFn: Scalar =
     function
