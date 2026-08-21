@@ -6432,14 +6432,18 @@ let tests =
                     | ResultSet(_, [ [ Some "61"; Some "61"; Some "A020A0"; Some "0"; Some "0" ] ]) -> ()
                     | other -> failtestf "expected binary string semantics, got %A" other
 
+                    match runDefault store "SELECT uppercase = X'41', uppercase = X'61', uppercase < X'61', uppercase = '65', uppercase = 'A' FROM raw_bits" with
+                    | ResultSet(_, [ [ Some "1"; Some "0"; Some "1"; Some "1"; Some "0" ] ]) -> ()
+                    | other -> failtestf "expected BIT comparison semantics, got %A" other
+
                 testCase "BIT predicates preserve values above double precision"
                 <| fun _ ->
                     let store = newStore ()
                     runDefault store "CREATE TABLE bits (value BIT(64))" |> ignore
                     runDefault store "INSERT INTO bits VALUES (0x8000000000000000)" |> ignore
 
-                    match runDefault store "SELECT value = 9223372036854775808, value = 9223372036854775809, value < 9223372036854775809, value = 9223372036854775808.0 FROM bits" with
-                    | ResultSet(_, [ [ Some "1"; Some "0"; Some "1"; Some "1" ] ]) -> ()
+                    match runDefault store "SELECT value = 9223372036854775808, value = 9223372036854775809, value < 9223372036854775809, value = 9223372036854775808.0, value = '9223372036854775808', value = '9223372036854775809' FROM bits" with
+                    | ResultSet(_, [ [ Some "1"; Some "0"; Some "1"; Some "1"; Some "1"; Some "0" ] ]) -> ()
                     | other -> failtestf "expected exact BIT predicates, got %A" other
 
                 testCase "SOUNDS LIKE and MEMBER OF follow MySQL comparison semantics"

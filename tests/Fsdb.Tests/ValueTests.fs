@@ -370,6 +370,9 @@ let tests =
                     Expect.isGreaterThan (compare highBit (VInt Int64.MaxValue)) 0 "BIT value exceeds signed max"
                     Expect.isLessThan (compare highBit (VUInt 0x8000000000000001UL)) 0 "BIT value precedes the next unsigned integer"
                     Expect.equal (compare highBit (VDecimal 9223372036854775808m)) 0 "BIT value matches its exact decimal"
+                    Expect.equal (compare highBit (VString "9223372036854775808")) 0 "BIT value matches its exact numeric string"
+                    Expect.equal (compare (VBit(8, 0x41UL)) (VBytes [| 0x41uy |])) 0 "BIT value matches identical bytes"
+                    Expect.isLessThan (compare (VBit(8, 0x41UL)) (VBytes [| 0x61uy |])) 0 "BIT bytes compare exactly"
 
                 testCase "dates compare chronologically"
                 <| fun _ ->

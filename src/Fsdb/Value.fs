@@ -1054,6 +1054,16 @@ let private parseLeadingNumeric (s: string) : float =
     else
         0.0
 
+let private compareBitString (value: uint64) (text: string) =
+    let matched = leadingNumeric.Match text
+
+    if not matched.Success then
+        Decimal.Compare(decimal value, 0m)
+    else
+        match Decimal.TryParse(matched.Value.Trim(), NumberStyles.Float, CultureInfo.InvariantCulture) with
+        | true, number -> Decimal.Compare(decimal value, number)
+        | false, _ -> Operators.compare (float value) (parseLeadingNumeric text)
+
 /// MySQL's implicit numeric coercion, used by both comparison and
 /// arithmetic: numeric types convert directly, strings parse their leading
 /// numeric prefix, and anything else coerces through its text rendering.
@@ -1264,6 +1274,10 @@ let rec compare (a: Value) (b: Value) : int =
     | VUInt x, VBit(_, y) -> Operators.compare x y
     | VBit(_, x), VDecimal y -> Decimal.Compare(decimal x, y)
     | VDecimal x, VBit(_, y) -> Decimal.Compare(x, decimal y)
+    | VBit(_, value), VString text -> compareBitString value text
+    | VString text, VBit(_, value) -> -(compareBitString value text)
+    | VBit(width, value), VBytes bytes -> compareBytesLex (bitBytes width value) bytes
+    | VBytes bytes, VBit(width, value) -> compareBytesLex bytes (bitBytes width value)
     | VString x, VString y -> compareStrings x y
     | VBytes x, VBytes y -> compareBytesLex x y
     // A binary string against a character string compares byte-for-byte
