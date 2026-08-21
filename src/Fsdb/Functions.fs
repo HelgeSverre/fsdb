@@ -980,6 +980,68 @@ let rec private pairsOf (args: Value list) : (Value * Value) list =
     | p :: v :: rest -> (p, v) :: pairsOf rest
     | _ -> []
 
+let private appendedJson (current: JsonNode) (value: JsonNode) : JsonNode =
+    match current with
+    | :? JsonArray as array ->
+        let result = array.DeepClone() :?> JsonArray
+        result.Add(cloneJson value)
+        result
+    | _ -> JsonArray([| cloneJson current; cloneJson value |])
+
+let private appendJsonPath (root: JsonNode) (segments: JPath list) (value: JsonNode) : JsonNode =
+    match segments with
+    | [] -> appendedJson root value
+    | _ ->
+        atLeaf root segments (fun parent leaf ->
+            match parent, leaf with
+            | (:? JsonObject as jsonObject), JKey key when jsonObject.ContainsKey key ->
+                jsonObject.[key] <- appendedJson jsonObject.[key] value
+            | (:? JsonArray as array), JIndex index ->
+                match normIndex array index with
+                | Some i -> array.[i] <- appendedJson array.[i] value
+                | None -> ()
+            | _ -> ())
+
+        root
+
+let private jsonArrayAppendFn: Scalar =
+    function
+    | document :: rest when rest.Length >= 2 && rest.Length % 2 = 0 && not (anyNull (document :: rest)) ->
+        match tryParseJsonValue document with
+        | Some rootNode ->
+            let mutable root = rootNode
+
+            for path, value in pairsOf rest do
+                match toText path |> Option.bind parseJsonPath with
+                | Some segments -> root <- appendJsonPath root segments (valueToJsonNode value)
+                | None -> ()
+
+            VJson(formatJsonNode root)
+        | None -> VNull
+    | _ -> VNull
+
+let private jsonArrayInsertFn: Scalar =
+    function
+    | document :: rest when rest.Length >= 2 && rest.Length % 2 = 0 && not (anyNull (document :: rest)) ->
+        match tryParseJsonValue document with
+        | Some root ->
+            for path, value in pairsOf rest do
+                match toText path |> Option.bind parseJsonPath with
+                | Some segments ->
+                    atLeaf root segments (fun parent leaf ->
+                        match parent, leaf with
+                        | (:? JsonArray as array), JIndex index ->
+                            let position = if index < 0 then array.Count + index else index
+
+                            if position >= 0 then
+                                array.Insert(min position array.Count, valueToJsonNode value)
+                        | _ -> ())
+                | None -> ()
+
+            VJson(formatJsonNode root)
+        | None -> VNull
+    | _ -> VNull
+
 let private jsonWriteFn (mode: JsonWriteMode) : Scalar =
     function
     | doc :: rest when rest.Length >= 2 && rest.Length % 2 = 0 && not (anyNull (doc :: rest)) ->
@@ -3405,6 +3467,8 @@ let builtins: Registry =
     |> registerScalar "JSON_PRETTY" jsonPrettyFn
     |> registerScalar "JSON_MERGE_PATCH" (jsonMergeFn mergeJsonPatch)
     |> registerScalar "JSON_MERGE_PRESERVE" (jsonMergeFn mergeJsonPreserve)
+    |> registerScalar "JSON_ARRAY_APPEND" jsonArrayAppendFn
+    |> registerScalar "JSON_ARRAY_INSERT" jsonArrayInsertFn
     |> registerScalar "JSON_SET" (jsonWriteFn JSet)
     |> registerScalar "JSON_INSERT" (jsonWriteFn JInsert)
     |> registerScalar "JSON_REPLACE" (jsonWriteFn JReplace)

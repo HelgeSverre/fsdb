@@ -5921,6 +5921,17 @@ let tests =
                           Some "[1, 2, 3]"
                           Some "{\"a\": [1, 2, 3]}" ]
 
+                testCase "JSON array append and insert apply path-value pairs sequentially"
+                <| fun _ ->
+                    expectRow
+                        "SELECT JSON_ARRAY_APPEND('[1,2]','$',3) a, JSON_ARRAY_APPEND('{\"a\":1}','$.a',2) b, JSON_ARRAY_APPEND('{\"a\":[1]}','$.a',2,'$.a',3) c, JSON_ARRAY_INSERT('[1,2]','$[1]',9) d, JSON_ARRAY_INSERT('[1,2]','$[9]',9) e, JSON_ARRAY_INSERT('{\"a\":[1,2]}','$.a[0]',9) f"
+                        [ Some "[1, 2, 3]"
+                          Some "{\"a\": [1, 2]}"
+                          Some "{\"a\": [1, 2, 3]}"
+                          Some "[1, 9, 2]"
+                          Some "[1, 2, 9]"
+                          Some "{\"a\": [9, 1, 2]}" ]
+
                 testCase "bitwise operators use unsigned 64-bit values and MySQL precedence"
                 <| fun _ ->
                     expectRow
