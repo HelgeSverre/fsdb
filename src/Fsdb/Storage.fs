@@ -1259,6 +1259,7 @@ let private coerceValueWithModeAndLengths (enforceLengths: bool) (mode: Temporal
                         Ok(VString "")
             // MySQL also accepts a 1-based index into the declared value list.
             | VInt i when i >= 1L && i <= int64 (List.length values) -> Ok(VString values.[int i - 1])
+            | VBit(_, value) when value >= 1UL && value <= uint64 (List.length values) -> Ok(VString values.[int value - 1])
             | _ when strict -> enumFail ()
             | _ ->
                 warning 1265 (sprintf "Data truncated for column '%s'" col.Name)
