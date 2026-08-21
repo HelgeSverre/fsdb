@@ -570,6 +570,14 @@ let private isStrictSqlMode (value: string) : bool =
         String.Equals(m, "STRICT_TRANS_TABLES", StringComparison.OrdinalIgnoreCase)
         || String.Equals(m, "STRICT_ALL_TABLES", StringComparison.OrdinalIgnoreCase))
 
+let private hasSqlMode (name: string) (value: string) =
+    value.Split(',')
+    |> Array.exists (fun mode -> String.Equals(mode.Trim(), name, StringComparison.OrdinalIgnoreCase))
+
+let private applySqlMode (store: Store) (value: string) =
+    setStrictMode store (isStrictSqlMode value)
+    setZeroDateModes store (hasSqlMode "NO_ZERO_DATE" value) (hasSqlMode "NO_ZERO_IN_DATE" value)
+
 /// `SET a = 1, b = 2` is one statement assigning several variables — real
 /// clients use it (Laravel's `MySqlConnector::configureConnection` sends
 /// `SET NAMES 'utf8mb4', SESSION sql_mode='...'` as one call). Splits on
@@ -808,7 +816,7 @@ let private applySetAction (session: Session) (action: SetAction) : Session =
             value |> Option.iter (fun v -> setForeignKeyChecks session.Store (v.Trim() <> "0"))
 
         if name = "sql_mode" then
-            value |> Option.iter (fun v -> setStrictMode session.Store (isStrictSqlMode v))
+            value |> Option.iter (applySqlMode session.Store)
 
         if name = "collation_connection" then
             value
@@ -1189,9 +1197,9 @@ let private executeParsed (session: Session) (stmt: Statement) : Session * Query
         // `Session.Variables`) can't leak into this one's coercion
         // behavior, and a transaction never runs on the stale StrictMode
         // its snapshot happened to be seeded with at BEGIN time.
-        setStrictMode
-            store
-            (lookupVar session "sql_mode" |> Option.flatten |> Option.map isStrictSqlMode |> Option.defaultValue true)
+        lookupVar session "sql_mode"
+        |> Option.flatten
+        |> Option.iter (applySqlMode store)
 
         // Same reasoning for the executing account: `CREATE TRIGGER` stamps
         // it as the definer, and a trigger body is checked against that

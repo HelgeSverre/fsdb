@@ -1978,6 +1978,17 @@ let rec private evalExpr (ctx: EvalContext) (expr: Expr) : Result<Value, EvalErr
     let eval = evalExpr ctx
 
     match expr with
+    | Lit(VZeroDate date) when
+        let year, month, day = Temporal.zeroDateParts date
+        (year = 0 && month = 0 && day = 0 && ctx.Store.NoZeroDate)
+        || ((year <> 0 || month <> 0 || day <> 0) && ctx.Store.NoZeroInDate) ->
+        Error(1525, sprintf "Incorrect DATE value: '%s'" (Temporal.formatZeroDate date))
+    | Lit(VZeroDateTime dateTime) when
+        let date, _, _, _, _ = Temporal.zeroDateTimeParts dateTime
+        let year, month, day = Temporal.zeroDateParts date
+        (year = 0 && month = 0 && day = 0 && ctx.Store.NoZeroDate)
+        || ((year <> 0 || month <> 0 || day <> 0) && ctx.Store.NoZeroInDate) ->
+        Error(1525, sprintf "Incorrect DATETIME value: '%s'" (Temporal.formatZeroDateTime dateTime))
     | Lit v -> Ok v
     // ponytail: MATCH is only pre-passed for single-table SELECTs (see
     // `runFullTextSelect`); anywhere else — UPDATE/DELETE WHERE, a joined or

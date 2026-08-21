@@ -237,6 +237,8 @@ type Store =
       /// `setStrictMode` directly too, so `SELECT @@sql_mode` right after a
       /// `SET` on the same connection reflects it immediately.
       mutable StrictMode: bool
+      mutable NoZeroDate: bool
+      mutable NoZeroInDate: bool
       /// The storage-level mirror of MySQL's session
       /// `collation_connection` — the collation literal-vs-literal string
       /// comparisons (and literal ORDER BY/LIKE operands) resolve under.
@@ -388,6 +390,8 @@ let beginTransactionSnapshot (store: Store) : Store =
       // always overwritten before a transaction's first real statement
       // runs.
       StrictMode = true
+      NoZeroDate = store.NoZeroDate
+      NoZeroInDate = store.NoZeroInDate
       ConnectionCollation = store.ConnectionCollation
       SessionUser = store.SessionUser
       VirtualTables = store.VirtualTables
@@ -445,6 +449,11 @@ let setConnectionCollation (store: Store) (collation: Collation.Collation) : uni
 
 let setStrictMode (store: Store) (strict: bool) : unit =
     lock store.Lock (fun () -> store.StrictMode <- strict)
+
+let setZeroDateModes (store: Store) (noZeroDate: bool) (noZeroInDate: bool) : unit =
+    lock store.Lock (fun () ->
+        store.NoZeroDate <- noZeroDate
+        store.NoZeroInDate <- noZeroInDate)
 
 /// Table names are keyed case-insensitively by their lowercased form —
 /// public because `Persistence`'s WAL replay looks tables up in `Catalog`
@@ -713,14 +722,21 @@ let private parseNumeric (s: string) : float option =
 /// `'strict' => false` connection config, which sends
 /// `SET SESSION sql_mode='NO_ENGINE_SUBSTITUTION'`), an otherwise-rejected
 /// value coerces to MySQL's non-strict fallback instead: 0 for a numeric
-/// column, NULL for a nullable temporal one. ponytail: a NOT NULL temporal
-/// column still hard-fails non-strict too — real MySQL's fallback there is
-/// the zero date `'0000-00-00'`, which `VDate`/`VDateTime` (backed by
-/// `DateOnly`/`DateTime`, no year zero) can't represent; add a zero-date
-/// sentinel if a NOT NULL date/datetime column ever needs this path.
+/// column, NULL for a nullable temporal one.
 /// NULL always passes through untouched — nullability is checked
 /// separately.
-let coerceValue (strict: bool) (col: ColumnDef) (v: Value) : Result<Value, StorageError> =
+type TemporalCoercionMode =
+    { Strict: bool
+      NoZeroDate: bool
+      NoZeroInDate: bool }
+
+let temporalCoercionMode (store: Store) =
+    { Strict = store.StrictMode
+      NoZeroDate = store.NoZeroDate
+      NoZeroInDate = store.NoZeroInDate }
+
+let coerceValueWithMode (mode: TemporalCoercionMode) (col: ColumnDef) (v: Value) : Result<Value, StorageError> =
+    let strict = mode.Strict
     let fail () =
         Error(InvalidValueForColumn(col.Name, v |> toText |> Option.defaultValue "NULL"))
 
@@ -1050,17 +1066,31 @@ let coerceValue (strict: bool) (col: ColumnDef) (v: Value) : Result<Value, Stora
             let zeroDateError () =
                 Error(ZeroTemporalForColumn("date", v |> toText |> Option.defaultValue "0000-00-00", col.Name))
 
+            let zeroDateResult date =
+                let year, month, day = zeroDateParts date
+                let rejected = if year = 0 && month = 0 && day = 0 then mode.NoZeroDate else mode.NoZeroInDate
+
+                if not rejected then
+                    Ok(VZeroDate date)
+                elif strict then
+                    zeroDateError ()
+                else
+                    warning 1264 (sprintf "Out of range value for column '%s'" col.Name)
+                    tryZeroDate 0 0 0
+                    |> Option.map (VZeroDate >> Ok)
+                    |> Option.defaultWith zeroDateError
+
             match v with
             | VDate d -> Ok(VDate d)
             | VDateTime dt -> Ok(VDate(DateOnly.FromDateTime dt))
-            | VZeroDate d -> if strict then zeroDateError () else Ok(VZeroDate d)
-            | VZeroDateTime dt -> if strict then zeroDateError () else Ok(VZeroDate(zeroDateOfDateTime dt))
+            | VZeroDate d -> zeroDateResult d
+            | VZeroDateTime dt -> zeroDateResult (zeroDateOfDateTime dt)
             | VString s ->
                 match tryParseZeroDate (s.Trim()) with
-                | Some d -> if strict then zeroDateError () else Ok(VZeroDate d)
+                | Some d -> zeroDateResult d
                 | None ->
                     match tryParseZeroDateTime (s.Trim()) with
-                    | Some dt -> if strict then zeroDateError () else Ok(VZeroDate(zeroDateOfDateTime dt))
+                    | Some dt -> zeroDateResult (zeroDateOfDateTime dt)
                     | None ->
                         match DateOnly.TryParse(s.Trim(), CultureInfo.InvariantCulture) with
                         | true, d -> Ok(VDate d)
@@ -1081,28 +1111,52 @@ let coerceValue (strict: bool) (col: ColumnDef) (v: Value) : Result<Value, Stora
             let zeroDateError () =
                 Error(ZeroTemporalForColumn("datetime", v |> toText |> Option.defaultValue "0000-00-00 00:00:00", col.Name))
 
+            let zeroDateResult dateTime =
+                let date, _, _, _, _ = zeroDateTimeParts dateTime
+                let year, month, day = zeroDateParts date
+                let rejected = if year = 0 && month = 0 && day = 0 then mode.NoZeroDate else mode.NoZeroInDate
+
+                if not rejected then
+                    Ok(VZeroDateTime dateTime)
+                elif strict then
+                    zeroDateError ()
+                else
+                    warning 1264 (sprintf "Out of range value for column '%s'" col.Name)
+                    tryZeroDate 0 0 0
+                    |> Option.bind (fun zero -> tryZeroDateTime zero 0 0 0 0)
+                    |> Option.map (VZeroDateTime >> Ok)
+                    |> Option.defaultWith zeroDateError
+
             match v with
             | VDateTime dt -> Ok(round dt)
             | VDate d -> Ok(round (d.ToDateTime(TimeOnly.MinValue)))
             | VZeroDate d ->
                 match tryZeroDateTime d 0 0 0 0 with
-                | Some dt when not strict -> Ok(VZeroDateTime dt)
-                | _ -> zeroDateError ()
-            | VZeroDateTime dt -> if strict then zeroDateError () else Ok(VZeroDateTime dt)
+                | Some dt -> zeroDateResult dt
+                | None -> zeroDateError ()
+            | VZeroDateTime dt -> zeroDateResult dt
             | VString s ->
                 match tryParseZeroDateTime (s.Trim()) with
-                | Some dt -> if strict then zeroDateError () else Ok(VZeroDateTime dt)
+                | Some dt -> zeroDateResult dt
                 | None ->
                     match tryParseZeroDate (s.Trim()) with
                     | Some d ->
                         match tryZeroDateTime d 0 0 0 0 with
-                        | Some dt when not strict -> Ok(VZeroDateTime dt)
-                        | _ -> zeroDateError ()
+                        | Some dt -> zeroDateResult dt
+                        | None -> zeroDateError ()
                     | None ->
                         match DateTime.TryParse(s.Trim(), CultureInfo.InvariantCulture, DateTimeStyles.None) with
                         | true, dt -> Ok(round dt)
                         | false, _ -> temporalFallback ()
             | _ -> temporalFallback ()
+
+let coerceValue (strict: bool) (col: ColumnDef) (v: Value) : Result<Value, StorageError> =
+    coerceValueWithMode
+        { Strict = strict
+          NoZeroDate = true
+          NoZeroInDate = true }
+        col
+        v
 
 /// `NOW()` rounded to `col`'s own declared fsp — a `TIMESTAMP(6)` column
 /// keeps microseconds, a bare `DATETIME`/`TIMESTAMP` truncates to whole
@@ -1130,14 +1184,14 @@ let evalDefault (col: ColumnDef) : Value =
 
 /// Coerces a value to its column's type and rejects NULL for a non-nullable
 /// column.
-let private coerceAndCheck (strict: bool) (col: ColumnDef) (v: Value) : Result<Value, StorageError> =
+let private coerceAndCheck (mode: TemporalCoercionMode) (col: ColumnDef) (v: Value) : Result<Value, StorageError> =
     match v with
     | VNull when not col.Nullable -> Error(NotNullViolation col.Name)
-    | _ -> coerceValue strict col v
+    | _ -> coerceValueWithMode mode col v
 
-let private coerceRow (strict: bool) (columns: ColumnDef list) (row: Value[]) : Result<Value[], StorageError> =
+let private coerceRow (mode: TemporalCoercionMode) (columns: ColumnDef list) (row: Value[]) : Result<Value[], StorageError> =
     List.zip columns (Array.toList row)
-    |> traverse (fun (column, value) -> coerceAndCheck strict column value)
+    |> traverse (fun (column, value) -> coerceAndCheck mode column value)
     |> Result.map Array.ofList
 
 /// The `(keyName, column indices)` groups that must be unique: the primary
@@ -1620,6 +1674,8 @@ let create () : Store =
     { Databases = databases
       ForeignKeyChecks = true
       StrictMode = true
+      NoZeroDate = true
+      NoZeroInDate = true
       ConnectionCollation = Collation.defaultCollation
       SessionUser = "root"
       VirtualTables = Map.empty
@@ -1717,7 +1773,7 @@ let tryEqualityIndex (table: Table) (columnName: string) : (string * int * bool)
                 if columnIndex = index && Map.containsKey name table.SecondaryIndex then Some(name, index, false) else None))
 
 let private exactProbeValue (store: Store) (table: Table) (index: int) (value: Value) : Value option =
-    match Diagnostics.suppress (fun () -> coerceValue store.StrictMode table.Columns.[index] value) with
+    match Diagnostics.suppress (fun () -> coerceValueWithMode (temporalCoercionMode store) table.Columns.[index] value) with
     | Ok coerced when coerced = value -> Some value
     | _ -> None
 
@@ -2248,15 +2304,7 @@ let private removeColumnAt (idx: int) (row: Value[]) : Value[] =
 /// Expressed as a seed fed through `coerceValue` rather than a literal
 /// `Value` per case, so DECIMAL's declared scale, ENUM's declared casing
 /// (`1` coerces to the first member), and TIME's fsp padding all come out
-/// already correct instead of being re-derived here. DATE/DATETIME/
-/// TIMESTAMP's implicit default is MySQL's zero date/datetime, which
-/// `VDate`/`VDateTime` (`DateOnly`/`DateTime`, no year zero) can't
-/// represent; that's also exactly the value NO_ZERO_DATE (on by default)
-/// rejects with 1292, which is what this reports for DATE/DATETIME — the
-/// real behavior under the default strict setup. TIMESTAMP is MySQL's own
-/// special case past NO_ZERO_DATE (it fills the zero epoch and succeeds
-/// even in strict mode); this still reports 1292 for it too, a known gap
-/// tied to the same representability limit.
+/// already correct instead of being re-derived here.
 let private implicitZeroSeed (col: ColumnDef) : Result<Value, StorageError> =
     match col.Type with
     | TChar _
@@ -2279,9 +2327,16 @@ let private implicitZeroSeed (col: ColumnDef) : Result<Value, StorageError> =
     | TGeometry _ -> Error(ExpressionError(1364, sprintf "Field '%s' doesn't have a default value" col.Name))
     | TEnum _ -> Ok(VInt 1L)
     | TTime _ -> Ok(VString "00:00:00")
-    | TDate -> Error(ZeroTemporalForColumn("date", "0000-00-00", col.Name))
+    | TDate ->
+        tryZeroDate 0 0 0
+        |> Option.map (VZeroDate >> Ok)
+        |> Option.defaultWith (fun () -> Error(ZeroTemporalForColumn("date", "0000-00-00", col.Name)))
     | TDateTime _
-    | TTimestamp _ -> Error(ZeroTemporalForColumn("datetime", "0000-00-00 00:00:00", col.Name))
+    | TTimestamp _ ->
+        tryZeroDate 0 0 0
+        |> Option.bind (fun date -> tryZeroDateTime date 0 0 0 0)
+        |> Option.map (VZeroDateTime >> Ok)
+        |> Option.defaultWith (fun () -> Error(ZeroTemporalForColumn("datetime", "0000-00-00 00:00:00", col.Name)))
     | _ -> Ok(VInt 0L)
 
 /// The value an added column gets filled in with for every row that already
@@ -2289,14 +2344,14 @@ let private implicitZeroSeed (col: ColumnDef) : Result<Value, StorageError> =
 /// none, and otherwise (`NOT NULL`, no `DEFAULT`) the type's own implicit
 /// zero value, coerced/rescaled the same way a written value would be (see
 /// `implicitZeroSeed`).
-let private addedColumnFill (strict: bool) (col: ColumnDef) : Result<Value, StorageError> =
+let private addedColumnFill (mode: TemporalCoercionMode) (col: ColumnDef) : Result<Value, StorageError> =
     match col.Default with
     | Some _ -> Ok(evalDefault col)
     | None ->
         if col.Nullable then
             Ok VNull
         else
-            implicitZeroSeed col |> Result.bind (coerceValue strict col)
+            implicitZeroSeed col |> Result.bind (coerceValueWithMode mode col)
 
 /// Inserts `x` at `idx` (clamped to `xs`'s length, so `idx = List.length xs`
 /// appends) — used by `AFTER`/`FIRST` column positioning, since `Columns`
@@ -2324,7 +2379,8 @@ let private resolvePosition (columnsExcludingSelf: ColumnDef list) (fallback: in
 /// Applies one `Ast.AlterAction` to `table`, returning its replacement and,
 /// for `RenameTo`, the new key it should be re-filed under in the database
 /// map (`None` means "same key").
-let private applyAlterAction (strict: bool) (table: Table) (action: AlterAction) : Result<Table * string option, StorageError> =
+let private applyAlterAction (mode: TemporalCoercionMode) (table: Table) (action: AlterAction) : Result<Table * string option, StorageError> =
+    let strict = mode.Strict
     // MODIFY/CHANGE re-coerce every existing row into the new definition —
     // MySQL's copy-alter semantics. `coerceValue` gives temporal fsp
     // narrowing its half-up rounding for free; on top of it, ALTER enforces
@@ -2335,7 +2391,7 @@ let private applyAlterAction (strict: bool) (table: Table) (action: AlterAction)
     // non-strict). The first failing row aborts the whole ALTER, leaving
     // the table untouched.
     let recoerce (newDef: ColumnDef) (v: Value) : Result<Value, StorageError> =
-        coerceValue strict newDef v
+        coerceValueWithMode mode newDef v
         |> Result.bind (fun coerced ->
             match newDef.Type, coerced with
             | (TChar n | TVarchar n), VString s when String.length s > n ->
@@ -2404,7 +2460,7 @@ let private applyAlterAction (strict: bool) (table: Table) (action: AlterAction)
         // Only actually needed to fill a row when there's at least one —
         // MySQL never evaluates (and so never errors on) a `NOT NULL`
         // column's implicit zero value against an empty table.
-        let fill = if table.RowsArray.IsEmpty then Ok VNull else addedColumnFill strict col
+        let fill = if table.RowsArray.IsEmpty then Ok VNull else addedColumnFill mode col
 
         // The table's declared defaults attach to the new string column the
         // same way `CREATE TABLE` bakes them — MySQL-verified: `ALTER TABLE
@@ -2684,7 +2740,7 @@ let alterTable (store: Store) (dbName: string) (tableName: string) (actions: Alt
                             | _ -> Ok()
 
                         validation
-                        |> Result.bind (fun () -> applyAlterAction store.StrictMode tbl action)
+                        |> Result.bind (fun () -> applyAlterAction (temporalCoercionMode store) tbl action)
                         |> Result.map (fun (tbl', newKey) -> (newKey |> Option.defaultValue key), tbl'))
 
                 actions
@@ -2718,7 +2774,7 @@ let renameTables (store: Store) (dbName: string) (pairs: (string * string) list)
                     virtualWriteGuard store dbName oldName
                     |> Result.bind (fun () -> tryGetTable db oldName)
                     |> Result.bind (fun table ->
-                        applyAlterAction store.StrictMode table (RenameTo newName)
+                        applyAlterAction (temporalCoercionMode store) table (RenameTo newName)
                         |> Result.map (fun (table', newKey) ->
                             let origKey = normalizeTableName oldName
                             let key = newKey |> Option.defaultValue origKey
@@ -2738,7 +2794,7 @@ let renameTables (store: Store) (dbName: string) (pairs: (string * string) list)
 /// supplied explicitly — `insertCore` needs that distinction to compute the
 /// statement's `last_insert_id` the way real MySQL does (see its doc).
 let private processRow
-    (strict: bool)
+    (mode: TemporalCoercionMode)
     (nextAutoId: int64)
     (rawRow: Value option list)
     (columns: ColumnDef list)
@@ -2753,12 +2809,12 @@ let private processRow
                 match pending with
                 | VNull -> Ok(VInt nextAutoId :: valuesRev, nextAutoId + 1L, Some(true, nextAutoId))
                 | _ ->
-                    match coerceValue strict col pending with
+                    match coerceValueWithMode mode col pending with
                     | Error e -> Error e
                     | Ok(VInt i) -> Ok(VInt i :: valuesRev, max nextAutoId (i + 1L), Some(false, i))
                     | Ok _ -> Error(InvalidValueForColumn(col.Name, "auto_increment"))
             else
-                match coerceAndCheck strict col pending with
+                match coerceAndCheck mode col pending with
                 | Ok v -> Ok(v :: valuesRev, nextAutoId, assignedId)
                 | Error e -> Error e
 
@@ -2818,7 +2874,7 @@ type InsertOutcome =
 
 let private insertCore
     (checkFks: bool)
-    (strict: bool)
+    (mode: TemporalCoercionMode)
     (ignoreErrors: bool)
     (db: Database)
     (tableKey: string)
@@ -2905,7 +2961,7 @@ let private insertCore
                 let rawRow = table.Columns |> List.mapi (fun i _ -> Map.tryFind i provided)
 
                 let rowResult =
-                    processRow strict nextAutoId rawRow table.Columns
+                    processRow mode nextAutoId rawRow table.Columns
                     |> Result.bind (fun (finalValues, nextAutoId', assigned) ->
                         let candidate = Array.ofList finalValues
 
@@ -3030,7 +3086,7 @@ let private insertRowsPreparedCore
             |> Result.bind (fun table ->
                 resolveInsertColumns table columns
                 |> Result.bind (fun indices ->
-                    insertCore store.ForeignKeyChecks store.StrictMode ignoreErrors db key rowsIn indices prepare)))
+                    insertCore store.ForeignKeyChecks (temporalCoercionMode store) ignoreErrors db key rowsIn indices prepare)))
 
     match result with
     | Ok(lastId, generatedId, affected, rows, ignoredErrors) ->
@@ -3371,7 +3427,7 @@ and private upsertRowsInTable
                                     let provided = List.zip idxs rowValues |> Map.ofList
                                     let rawRow = table.Columns |> List.mapi (fun i _ -> Map.tryFind i provided)
 
-                                    processRow store.StrictMode nextAutoId rawRow table.Columns
+                                    processRow (temporalCoercionMode store) nextAutoId rawRow table.Columns
                                     |> Result.bind (fun (finalValues, nextAutoId', assigned) ->
                                         // A unique index over a *generated* column (e.g.
                                         // Laravel Pulse's `key_hash BINARY(16) AS
@@ -3386,7 +3442,7 @@ and private upsertRowsInTable
                                         |> Result.bind (function
                                             | candidate, Some(pos, existing) ->
                                                 applyUpdate existing candidate
-                                                |> Result.bind (coerceRow store.StrictMode table.Columns)
+                                                |> Result.bind (coerceRow (temporalCoercionMode store) table.Columns)
                                                 |> Result.bind (fun applied ->
                                                     let collision =
                                                         uniqueGroups
@@ -3706,7 +3762,7 @@ let replaceRows
                                 let provided = List.zip idxs rowValues |> Map.ofList
                                 let rawRow = table.Columns |> List.mapi (fun i _ -> Map.tryFind i provided)
 
-                                processRow store.StrictMode nextAutoId rawRow table.Columns
+                                processRow (temporalCoercionMode store) nextAutoId rawRow table.Columns
                                 |> Result.bind (fun (finalValues, nextAutoId', assigned) ->
                                     computeGenerated (Array.ofList finalValues)
                                     |> Result.bind (fun candidate ->
@@ -4144,7 +4200,7 @@ let updateRows
                                         Ok(changesRev, index, secondaryIndex, cascadeDb, visited, cascaded)
                                     else
                                         updater row
-                                        |> Result.bind (coerceRow store.StrictMode table.Columns)
+                                        |> Result.bind (coerceRow (temporalCoercionMode store) table.Columns)
                                         |> Result.bind (fun newRow ->
                                             // A group's key only collides against
                                             // some *other* row still holding it —

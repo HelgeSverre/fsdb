@@ -252,6 +252,17 @@ let tests =
                     let zero = VZeroDate(tryZeroDate 2020 0 1 |> Option.get)
                     Expect.isLessThan (compare zero (VDate(DateOnly(2020, 1, 1)))) 0 "zero month precedes January"
 
+                testCase "zero components do not permit impossible calendar days"
+                <| fun _ ->
+                    Expect.isNone (tryZeroDate 0 2 31) "zero year still has February's calendar limit"
+                    Expect.isSome (tryZeroDate 2020 0 31) "zero month permits day 31"
+                    Expect.isNone (tryZeroDate 2020 0 32) "day 32 is never valid"
+
+                testCase "a partial zero date compares with text without converting through DateTime"
+                <| fun _ ->
+                    let date = VZeroDate(tryZeroDate 2020 0 1 |> Option.get)
+                    Expect.isLessThan (compare date (VString "2020-01-01")) 0 "zero month precedes January"
+
                 testCase "string comparison is case-insensitive, matching utf8mb4_0900_ai_ci"
                 <| fun _ -> Expect.equal (compare (VString "a") (VString "A")) 0 "'a' = 'A'"
 

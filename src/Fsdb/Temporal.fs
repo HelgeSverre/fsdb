@@ -13,6 +13,13 @@ type ZeroDateTime =
     | ZeroDateTime of date: ZeroDate * hour: int * minute: int * second: int * microseconds: int
 
 let tryZeroDate (year: int) (month: int) (day: int) : ZeroDate option =
+    let calendarYear = if year = 0 then 2000 else year
+
+    let validDay =
+        month = 0
+        || day = 0
+        || day <= DateTime.DaysInMonth(calendarYear, month)
+
     if
         year >= 0
         && year <= 9999
@@ -20,6 +27,7 @@ let tryZeroDate (year: int) (month: int) (day: int) : ZeroDate option =
         && month <= 12
         && day >= 0
         && day <= 31
+        && validDay
         && (year = 0 || month = 0 || day = 0)
     then
         Some(ZeroDate(year, month, day))

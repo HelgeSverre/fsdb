@@ -557,6 +557,47 @@ let tests =
 
               ignore laxSession
 
+          testCase "zero-date modes are independent of STRICT_TRANS_TABLES"
+          <| fun _ ->
+              let session = create 1 (Fsdb.Storage.create ())
+              let session, _ = handle session "CREATE TABLE t (d DATE NOT NULL)"
+
+              match handle session "INSERT INTO t VALUES ('0000-00-00')" |> snd with
+              | Err(1292, _) -> ()
+              | other -> failtestf "expected default zero-mode rejection, got %A" other
+
+              let session, _ = handle session "SET SESSION sql_mode='STRICT_TRANS_TABLES'"
+
+              match handle session "INSERT INTO t VALUES ('2020-00-01')" |> snd with
+              | Affected 1UL -> ()
+              | other -> failtestf "expected strict mode without zero modes to preserve the value, got %A" other
+
+          testCase "non-strict zero modes coerce partial dates to all-zero"
+          <| fun _ ->
+              let session = create 1 (Fsdb.Storage.create ())
+              let session, _ = handle session "SET SESSION sql_mode='NO_ENGINE_SUBSTITUTION,NO_ZERO_DATE,NO_ZERO_IN_DATE'"
+              let session, _ = handle session "CREATE TABLE t (d DATE NOT NULL)"
+              let session, result = handle session "INSERT INTO t VALUES ('2020-00-01')"
+              Expect.equal result (Affected 1UL) "non-strict insert succeeds"
+
+              match handle session "SELECT d FROM t" |> snd with
+              | ResultSet(_, [ [ Some "0000-00-00" ] ]) -> ()
+              | other -> failtestf "expected coercion to all-zero, got %A" other
+
+          testCase "typed zero-date literals validate against the executing sql_mode"
+          <| fun _ ->
+              let session = create 1 (Fsdb.Storage.create ())
+
+              match handle session "SELECT DATE '0000-00-00'" |> snd with
+              | Err(1525, _) -> ()
+              | other -> failtestf "expected default zero-mode literal rejection, got %A" other
+
+              let session, _ = handle session "SET SESSION sql_mode='STRICT_TRANS_TABLES'"
+
+              match handle session "SELECT DATE '0000-00-00'" |> snd with
+              | ResultSet(_, [ [ Some "0000-00-00" ] ]) -> ()
+              | other -> failtestf "expected a zero-date result, got %A" other
+
           testCase "SET @@SESSION.sql_mode = CONCAT(@@sql_mode, ',ANSI_QUOTES') isn't split on the CONCAT's own comma"
           <| fun _ ->
               // `splitSetAssignments` must track paren depth, not just quote

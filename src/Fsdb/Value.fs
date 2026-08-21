@@ -971,6 +971,8 @@ let rec compare (a: Value) (b: Value) : int =
     | VDate y, VZeroDateTime x -> -(compareZeroDateTimeToDateTime x (y.ToDateTime TimeOnly.MinValue))
     | VZeroDateTime x, VDateTime y -> compareZeroDateTimeToDateTime x y
     | VDateTime y, VZeroDateTime x -> -(compareZeroDateTimeToDateTime x y)
+    | VZeroDate _, VString _
+    | VZeroDateTime _, VString _ -> compareStrings (toText a |> Option.defaultValue "") (toText b |> Option.defaultValue "")
     | (VDate _ | VDateTime _ | VZeroDate _ | VZeroDateTime _), VString s ->
         // A literal like a `WHERE date BETWEEN '2024-01-01 00:00:00' AND
         // ...` bound is still a bare VString here (nothing coerces it to the
