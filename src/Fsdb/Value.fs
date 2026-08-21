@@ -534,6 +534,10 @@ let private ringsCrossOrOverlap first second =
                 || endpointIsInterior secondStart firstSegment
                 || endpointIsInterior secondEnd firstSegment)))
 
+let private hasDistinctPoints = function
+    | first :: points -> points |> List.exists ((<>) first)
+    | [] -> false
+
 let private polygonIsValid rings =
     match rings with
     | shell :: holes ->
@@ -570,22 +574,16 @@ let rec private shapeIsValid = function
     | GLineString points ->
         points
         |> List.forall (fun (x, y) -> Double.IsFinite x && Double.IsFinite y)
-        && (match points with
-            | _ :: _ :: _ -> true
-            | _ -> false)
+        && hasDistinctPoints points
     | GMultiPoint points ->
         not (List.isEmpty points)
         && points |> List.forall (fun (x, y) -> Double.IsFinite x && Double.IsFinite y)
     | GPolygon rings -> polygonIsValid rings
     | GMultiLineString lines ->
-        let lineIsValid = function
-            | _ :: _ :: _ -> true
-            | _ -> false
-
         not (List.isEmpty lines)
         && lines
            |> List.forall (fun points ->
-               lineIsValid points
+               hasDistinctPoints points
                && points |> List.forall (fun (x, y) -> Double.IsFinite x && Double.IsFinite y))
     | GMultiPolygon polygons ->
         let polygonsAreSeparate =

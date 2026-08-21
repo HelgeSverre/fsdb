@@ -297,13 +297,16 @@ let tests =
                     Expect.equal (valid "MULTIPOLYGON(((0 0,4 0,4 4,0 4,0 0)),((4 4,8 4,8 8,4 8,4 4)))") (VInt 1L) "vertex-touching components"
                     Expect.equal (valid "MULTIPOLYGON(((0 0,4 0,4 4,0 4,0 0)),((2 2,6 2,6 6,2 6,2 2)))") (VInt 0L) "overlapping components"
                     Expect.equal (valid "MULTIPOINT((0 0),(0 0))") (VInt 1L) "duplicate point"
+                    Expect.equal (valid "LINESTRING(0 0,-0.00 0,0.0 0)") (VInt 0L) "line without distinct points"
 
                 testCase "geometry validity rejects malformed in-memory component shapes"
                 <| fun _ ->
                     let geometry shape = { Srid = 0; Shape = shape }
 
                     Expect.isFalse (geometry (GLineString [ (0.0, 0.0) ]) |> geometryIsValidPlanar) "short line"
+                    Expect.isFalse (geometry (GLineString [ (0.0, 0.0); (0.0, 0.0) ]) |> geometryIsValidPlanar) "repeated line point"
                     Expect.isFalse (geometry (GMultiLineString [ [ (0.0, 0.0) ] ]) |> geometryIsValidPlanar) "short line"
+                    Expect.isFalse (geometry (GMultiLineString [ [ (0.0, 0.0); (0.0, 0.0) ] ]) |> geometryIsValidPlanar) "repeated line point"
                     Expect.isFalse (geometry (GMultiPolygon [ [] ]) |> geometryIsValidPlanar) "missing shell" ]
 
           testList
