@@ -62,6 +62,23 @@ let maxPacketPayload = 0xffffff
 /// forever.
 exception PacketTooLargeException of size: int
 
+/// Reads one physical MySQL packet without interpreting a max-sized payload
+/// as a continuation. LOCAL INFILE uses empty physical packets as its upload
+/// terminator, unlike command packets which are reassembled below.
+let readPhysicalPacketAsync (stream: Stream) : Async<Packet option> =
+    async {
+        match! readExactAsync stream 4 with
+        | None -> return None
+        | Some header ->
+            let r = Reader(header)
+            let len = r.ReadInt24LE()
+            let seqId = r.ReadByte()
+
+            match! readExactAsync stream len with
+            | None -> return None
+            | Some payload -> return Some { SeqId = seqId; Payload = payload }
+    }
+
 /// Reads one logical packet from a stream, or None on clean disconnect.
 /// Reassembles packets split across the wire per the MySQL protocol: a
 /// chunk of exactly maxPacketPayload bytes means "more packets follow"; the
@@ -75,25 +92,18 @@ exception PacketTooLargeException of size: int
 let readPacketAsync (stream: Stream) : Async<Packet option> =
     let rec loop (acc: byte[]) : Async<Packet option> =
         async {
-            match! readExactAsync stream 4 with
+            match! readPhysicalPacketAsync stream with
             | None -> return None
-            | Some header ->
-                let r = Reader(header)
-                let len = r.ReadInt24LE()
-                let seqId = r.ReadByte()
+            | Some packet ->
+                let acc = Array.append acc packet.Payload
 
-                match! readExactAsync stream len with
-                | None -> return None
-                | Some payload ->
-                    let acc = Array.append acc payload
+                if acc.Length > Limits.maxAllowedPacket then
+                    raise (PacketTooLargeException acc.Length)
 
-                    if acc.Length > Limits.maxAllowedPacket then
-                        raise (PacketTooLargeException acc.Length)
-
-                    if len = maxPacketPayload then
-                        return! loop acc
-                    else
-                        return Some { SeqId = seqId; Payload = acc }
+                if packet.Payload.Length = maxPacketPayload then
+                    return! loop acc
+                else
+                    return Some { SeqId = packet.SeqId; Payload = acc }
         }
 
     loop [||]

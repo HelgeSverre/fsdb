@@ -179,7 +179,7 @@ let private sendResult
     (columnMetadata: ColumnMetadata list)
     (rowEncoder: ColumnMetadata list -> string option list -> byte[])
     (result: Executor.QueryResult)
-    : Async<unit> =
+    : Async<byte> =
     async {
         let! seqId = sendPayloads stream startSeq (resultHeadPayloads capabilities statusFlags lastInsertId warningCount columnMetadata result)
 
@@ -234,7 +234,7 @@ let private sendResult
 
             let deprecateEof = capabilities &&& ClientDeprecateEof <> 0u
 
-            do!
+            let! nextSeqId =
                 sendPayloads
                     stream
                     seqId
@@ -242,8 +242,8 @@ let private sendResult
                            okEndOfResultSetPayloadWithWarnings capabilities statusFlags warningCount
                        else
                            eofPayloadWithWarnings capabilities statusFlags warningCount) ]
-                |> Async.Ignore
-        | _ -> ()
+            return nextSeqId
+        | _ -> return seqId
     }
 
 /// Writes a text resultset (or OK/ERR) as one or more packets, continuing
@@ -262,6 +262,21 @@ let sendQueryResult
     (result: Executor.QueryResult)
     : Async<unit> =
     sendResult stream capabilities startSeq statusFlags lastInsertId warningCount columnMetadata textRowPayloadTyped result
+    |> Async.Ignore
+
+/// As `sendQueryResult`, returning the next packet sequence id for a
+/// multi-result COM_QUERY response.
+let sendQueryResultAndNextSeq
+    (stream: IO.Stream)
+    (capabilities: uint32)
+    (startSeq: byte)
+    (statusFlags: int)
+    (lastInsertId: uint64)
+    (warningCount: int)
+    (columnMetadata: ColumnMetadata list)
+    (result: Executor.QueryResult)
+    : Async<byte> =
+    sendResult stream capabilities startSeq statusFlags lastInsertId warningCount columnMetadata textRowPayloadTyped result
 
 /// As `sendQueryResult`, but encodes resultset rows in the binary protocol
 /// row format COM_STMT_EXECUTE requires (`binaryRowPayload`, which — unlike
@@ -278,6 +293,7 @@ let sendBinaryQueryResult
     (result: Executor.QueryResult)
     : Async<unit> =
     sendResult stream capabilities startSeq statusFlags lastInsertId warningCount columnMetadata binaryRowPayload result
+    |> Async.Ignore
 
 /// `SERVER_STATUS_AUTOCOMMIT` always, plus `SERVER_STATUS_IN_TRANS` while
 /// `session.Tx` is open — every OK/EOF packet reports this so PDO's
@@ -286,6 +302,8 @@ let sendBinaryQueryResult
 /// see the real transaction state.
 let private statusFlagsFor (session: Session) : int =
     StatusAutocommit ||| (if session.Tx.IsSome then StatusInTrans else 0)
+
+let private statusFlagsForMore (session: Session) = statusFlagsFor session ||| StatusMoreResultsExists
 
 let private warningCountFor (session: Session) =
     min (int UInt16.MaxValue) session.Diagnostics.Length

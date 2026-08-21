@@ -136,6 +136,49 @@ let tests =
               }
               |> Async.RunSynchronously
 
+          testCase "physical packets preserve an empty LOCAL INFILE terminator"
+          <| fun _ ->
+              async {
+                  use stream = new IO.MemoryStream()
+                  do! writePacketAsync stream { SeqId = 2uy; Payload = [| 1uy; 2uy |] } |> Async.Ignore
+                  do! writePacketAsync stream { SeqId = 3uy; Payload = [||] } |> Async.Ignore
+                  stream.Position <- 0L
+                  let! data = readPhysicalPacketAsync stream
+                  let! terminator = readPhysicalPacketAsync stream
+                  Expect.equal data (Some { SeqId = 2uy; Payload = [| 1uy; 2uy |] }) "data packet"
+                  Expect.equal terminator (Some { SeqId = 3uy; Payload = [||] }) "empty upload terminator" }
+              |> Async.RunSynchronously
+
+          testCase "successive query results keep sequence ids and MORE_RESULTS status"
+          <| fun _ ->
+              async {
+                  use stream = new IO.MemoryStream()
+                  let caps = ClientProtocol41 ||| ClientDeprecateEof
+                  let! next =
+                      Fsdb.Server.sendQueryResultAndNextSeq
+                          stream
+                          caps
+                          1uy
+                          (StatusAutocommit ||| StatusMoreResultsExists)
+                          0UL
+                          0
+                          []
+                          (Affected 0UL)
+
+                  let! _ = Fsdb.Server.sendQueryResultAndNextSeq stream caps next StatusAutocommit 0UL 0 [] (Affected 0UL)
+                  stream.Position <- 0L
+                  let! packets = readAllPackets stream
+                  Expect.sequenceEqual (packets |> List.map (fun p -> p.SeqId)) [ 1uy; 2uy ] "reply sequence is continuous"
+                  let first = Reader(packets.Head.Payload.[1..])
+                  first.ReadLenEncInt() |> ignore
+                  first.ReadLenEncInt() |> ignore
+                  Expect.isTrue (first.ReadInt16LE() &&& StatusMoreResultsExists <> 0) "first result advertises another result"
+                  let second = Reader(packets.Tail.Head.Payload.[1..])
+                  second.ReadLenEncInt() |> ignore
+                  second.ReadLenEncInt() |> ignore
+                  Expect.equal (second.ReadInt16LE() &&& StatusMoreResultsExists) 0 "last result clears MORE_RESULTS" }
+              |> Async.RunSynchronously
+
           // `readPacketAsync` raises `PacketTooLargeException` synchronously,
           // before its `Task` (started by `Async.StartAsTask` inside
           // `readPacketWithTimeoutMs`) ever suspends on real I/O — awaiting

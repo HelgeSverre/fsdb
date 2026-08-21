@@ -14,10 +14,12 @@ let ClientLongPassword = 0x00000001u
 let ClientFoundRows = 0x00000002u
 let ClientLongFlag = 0x00000004u
 let ClientConnectWithDb = 0x00000008u
+let ClientLocalFiles = 0x00000080u
 let ClientProtocol41 = 0x00000200u
 let ClientSsl = 0x00000800u
 let ClientSecureConnection = 0x00008000u
 let ClientTransactions = 0x00002000u
+let ClientMultiStatements = 0x00010000u
 let ClientMultiResults = 0x00020000u
 let ClientPluginAuth = 0x00080000u
 let ClientPluginAuthLenencClientData = 0x00200000u
@@ -33,6 +35,7 @@ let ServerCapabilities =
     ||| ClientProtocol41
     ||| ClientSecureConnection
     ||| ClientTransactions
+    ||| ClientMultiStatements
     ||| ClientMultiResults
     ||| ClientPluginAuth
     ||| ClientDeprecateEof
@@ -56,6 +59,9 @@ let StatusInTrans = 0x0001
 
 /// SERVER_STATUS_AUTOCOMMIT
 let StatusAutocommit = 2
+
+/// SERVER_MORE_RESULTS_EXISTS
+let StatusMoreResultsExists = 0x0008
 
 /// Builds the initial HandshakeV10 payload. `authPluginData` must be 20
 /// bytes — the mysql_native_password scramble `Server.authenticateHandshake`
