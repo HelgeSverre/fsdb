@@ -1993,6 +1993,9 @@ let private renameToAction: Parser<AlterAction, unit> =
 let private setAutoIncrementAction: Parser<AlterAction, unit> =
     attempt (keyword "AUTO_INCREMENT" >>. opt (sym "=")) >>. pint64 .>> ws |>> SetAutoIncrement
 
+let private setEngineAction: Parser<AlterAction, unit> =
+    attempt (keyword "ENGINE" >>. opt (sym "=") >>. identifier) |>> SetEngine
+
 let private alterAction: Parser<AlterAction list, unit> =
     choice
         [ addForeignKeyAction |>> List.singleton
@@ -2011,6 +2014,7 @@ let private alterAction: Parser<AlterAction list, unit> =
           renameIndexAction |>> List.singleton
           renameColumnAction |>> List.singleton
           setAutoIncrementAction |>> List.singleton
+          setEngineAction |>> List.singleton
           renameToAction |>> List.singleton ]
     <?> "ALTER TABLE action"
 

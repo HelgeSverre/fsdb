@@ -528,7 +528,8 @@ let private encodeAlterAction (w: Writer) (a: AlterAction) : unit =
     | RenameIndex(oldName, newName) -> w.WriteByte 0x0Euy; writeStr w oldName; writeStr w newName
     | AddCheck _
     | DropCheck _
-    | SetCheckEnforced _ -> failwith "Persistence: row-backed CHECK metadata must not reach a SchemaChanged action"
+    | SetCheckEnforced _
+    | SetEngine _ -> failwith "Persistence: metadata-only ALTER action must not reach a SchemaChanged event"
 
 let private decodeAlterAction (r: #IReader) : AlterAction =
     match r.ReadByte() with

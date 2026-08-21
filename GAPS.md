@@ -73,7 +73,7 @@ variants), USE, KILL, DESCRIBE are text-probed before the grammar
 | Replication/admin SQL: `CHANGE REPLICATION SOURCE TO`, `PURGE BINARY LOGS`, `RESET`, `SHOW MASTER/REPLICA STATUS`, `SHOW BINARY LOGS`, `BINLOG`, `INSTALL/UNINSTALL PLUGIN|COMPONENT`, `ALTER INSTANCE`, `CREATE SERVER`, `TABLESPACE` statements | low | refusal |
 | `EXPLAIN ANALYZE`; `EXPLAIN FORMAT=JSON|TREE`; `DESCRIBE <statement>` | low | refusal |
 | `CREATE TABLE … AS SELECT` | medium | refusal |
-| `ALTER TABLE … CONVERT TO CHARACTER SET`; `ENGINE=`/`COMMENT=` option tails (only `AUTO_INCREMENT=n` works) | medium | refusal |
+| `ALTER TABLE … CONVERT TO CHARACTER SET`; `COMMENT=` option tails | medium | refusal |
 | `RENAME USER`; `CREATE USER` tails: auth plugin, `REQUIRE SSL/X509`, resource limits, `ACCOUNT LOCK`, `PASSWORD EXPIRE`; `ALTER USER` beyond password change | medium | refusal |
 | Multi-statement strings (`stmt1; stmt2`) — exactly one statement per round trip | medium | refusal |
 

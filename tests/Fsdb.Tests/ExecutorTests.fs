@@ -1646,6 +1646,20 @@ let tests =
                     | Err(1061, _) -> ()
                     | other -> failtestf "expected duplicate key name error, got %A" other
 
+                testCase "ALTER TABLE ENGINE accepts InnoDB and rejects unsupported engines"
+                <| fun _ ->
+                    let store = newStore ()
+                    runDefault store "CREATE TABLE t (id INT)" |> ignore
+                    Expect.equal (runDefault store "ALTER TABLE t ENGINE=InnoDB") (Affected 0UL) "InnoDB remains selected"
+
+                    match runDefault store "ALTER TABLE t ENGINE=MEMORY" with
+                    | Err(1286, _) -> ()
+                    | other -> failtestf "expected unknown storage engine error, got %A" other
+
+                    match runDefault store "ALTER TABLE missing ENGINE=InnoDB" with
+                    | Err(1146, _) -> ()
+                    | other -> failtestf "expected missing table error, got %A" other
+
                 testCase "CHANGE COLUMN renames and SELECT sees the new name"
                 <| fun _ ->
                     let store = newStore ()

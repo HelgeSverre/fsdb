@@ -2241,6 +2241,7 @@ let private applyAlterAction (strict: bool) (table: Table) (action: AlterAction)
         // Forward only, like InnoDB: a value below what existing rows
         // already claimed leaves the counter where it is.
         Ok({ table with NextAutoId = max value table.NextAutoId }, None)
+    | SetEngine _ -> Ok(table, None)
     | AddCheck _
     | DropCheck _
     | SetCheckEnforced _ -> Ok(table, None)

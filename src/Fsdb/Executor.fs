@@ -7952,6 +7952,12 @@ let rec execute (store: Store) (registry: Registry) (dbName: string) (ids: int64
     | AlterTable(table, actions) ->
         let db, table = splitQualified dbName table
 
+        let unsupportedEngine =
+            actions
+            |> List.tryPick (function
+                | SetEngine name when not (System.String.Equals(name, "InnoDB", System.StringComparison.OrdinalIgnoreCase)) -> Some name
+                | _ -> None)
+
         let addedColumns =
             actions
             |> List.choose (function
@@ -7960,9 +7966,10 @@ let rec execute (store: Store) (registry: Registry) (dbName: string) (ids: int64
                 | ChangeColumn(_, c, _) -> Some c
                 | _ -> None)
 
-        match rejectDirectOnlyGenerated registry addedColumns with
-        | Some err -> ids, err
-        | None ->
+        match unsupportedEngine, rejectDirectOnlyGenerated registry addedColumns with
+        | Some engine, _ -> ids, Err(1286, sprintf "Unknown storage engine '%s'" engine)
+        | None, Some err -> ids, err
+        | None, None ->
             let baseCatalog = store.Catalog
             let snapshot = Storage.beginTransactionSnapshot store
             Storage.setStrictMode snapshot store.StrictMode
@@ -7980,7 +7987,8 @@ let rec execute (store: Store) (registry: Registry) (dbName: string) (ids: int64
                 |> List.filter (function
                     | AddCheck _
                     | DropCheck _
-                    | SetCheckEnforced _ -> false
+                    | SetCheckEnforced _
+                    | SetEngine _ -> false
                     | _ -> true)
 
             let equal left right = System.String.Equals(left, right, System.StringComparison.OrdinalIgnoreCase)

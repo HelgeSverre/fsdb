@@ -1506,6 +1506,13 @@ let tests =
                         (AlterTable("t", [ SetDefault("n", Some(DConst(VInt 7L))); SetDefault("n", None) ]))
                         "alter defaults"
 
+                testCase "ALTER TABLE ENGINE"
+                <| fun _ ->
+                    Expect.equal
+                        (parseOk "ALTER TABLE t ENGINE=InnoDB")
+                        (AlterTable("t", [ SetEngine "InnoDB" ]))
+                        "set engine"
+
                 testCase "RENAME TABLE a TO b, c TO d"
                 <| fun _ ->
                     Expect.equal
