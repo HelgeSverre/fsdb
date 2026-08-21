@@ -313,7 +313,7 @@ let columnDefPayload (col: ColumnDef) : byte[] =
     w.WriteLenEncString col.Name
     w.WriteLenEncString col.Name // org_name
     w.WriteLenEncInt 0x0cUL // length of fixed-length fields
-    let isBinary = col.Metadata.Flags &&& BinaryFlag <> 0us
+    let isBinary = col.Metadata.Flags &&& BinaryFlag <> 0us || col.Metadata.TypeId = TypeBit
     w.WriteInt16LE(if isBinary then BinaryCollation else Utf8Mb4GeneralCi)
     w.WriteInt32LE(int col.Metadata.ColumnLength)
     w.WriteByte col.Metadata.TypeId

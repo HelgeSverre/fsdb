@@ -22,7 +22,7 @@ let metadataOfType (ty: ColumnType) : ColumnMetadata =
     | TMediumInt unsigned -> { columnMetadata TypeLong with ColumnLength = 9u } |> withUnsigned unsigned
     | TInt unsigned -> { columnMetadata TypeLong with ColumnLength = 11u } |> withUnsigned unsigned
     | TBigInt unsigned -> { columnMetadata TypeLongLong with ColumnLength = 20u } |> withUnsigned unsigned
-    | TBit width -> { columnMetadata TypeBit with ColumnLength = uint32 width }
+    | TBit width -> { columnMetadata TypeBit with ColumnLength = uint32 width; Flags = UnsignedFlag }
     | TChar length -> { columnMetadata TypeString with ColumnLength = utf8Length length }
     | TVarchar length -> { columnMetadata TypeVarString with ColumnLength = utf8Length length }
     | TTinyText -> { columnMetadata TypeBlob with ColumnLength = 255u; Flags = BlobFlag }

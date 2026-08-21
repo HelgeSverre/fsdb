@@ -209,6 +209,21 @@ let tests =
               Expect.isTrue (flags &&& 0x0010 <> 0) "BLOB flag"
               Expect.isTrue (flags &&& 0x0080 <> 0) "BINARY flag"
 
+          testCase "BIT column definitions advertise binary collation and unsigned metadata"
+          <| fun _ ->
+              let metadata = metadataOfType (TBit 9)
+              Expect.isTrue (metadata.Flags &&& UnsignedFlag <> 0us) "unsigned flag"
+              Expect.isFalse (metadata.Flags &&& BinaryFlag <> 0us) "binary flag"
+
+              let reader = Reader(columnDefPayload { Name = "bits"; Metadata = metadata })
+              for _ in 1..6 do
+                  reader.ReadLenEncString() |> ignore
+              reader.ReadLenEncInt() |> ignore
+              Expect.equal (reader.ReadInt16LE ()) BinaryCollation "binary collation"
+              Expect.equal (reader.ReadInt32LE ()) 9 "bit width"
+              Expect.equal (reader.ReadByte ()) TypeBit "BIT type"
+              Expect.isTrue (reader.ReadInt16LE () &&& int UnsignedFlag <> 0) "unsigned metadata"
+
           testCase "binary protocol BLOB parameters decode as raw bytes"
           <| fun _ ->
               let bytes = [| 0x00uy; 0xffuy; 0x80uy |]

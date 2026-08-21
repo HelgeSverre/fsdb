@@ -1023,7 +1023,7 @@ let mysqlMetadataOf (v: Value) : ColumnMetadata =
     | VNull -> columnMetadata TypeVarString
     | VInt _ -> columnMetadata TypeLongLong
     | VUInt _ -> { columnMetadata TypeLongLong with Flags = UnsignedFlag }
-    | VBit(width, _) -> { columnMetadata TypeBit with ColumnLength = uint32 width }
+    | VBit(width, _) -> { columnMetadata TypeBit with ColumnLength = uint32 width; Flags = UnsignedFlag }
     | VDouble _ -> columnMetadata TypeDouble
     | VDecimal _ -> columnMetadata TypeNewDecimal
     | VString _
