@@ -127,17 +127,22 @@ let tests =
           testCase "BIT defaults render as MySQL bit literals"
           <| fun _ ->
               let store = setup ()
-              run store "CREATE TABLE bits (a BIT(3) DEFAULT 1, b BIT(3) DEFAULT b'101')" |> ignore
+              run store "CREATE TABLE bits (a BIT(3) DEFAULT 1, b BIT(3) DEFAULT b'101', c BIT(3) DEFAULT 1.5)" |> ignore
               let session = Fsdb.Session.create 1 store
 
               match Fsdb.QueryHandler.handle session "SHOW CREATE TABLE bits" |> snd with
               | ResultSet(_, [ [ Some "bits"; Some ddl ] ]) ->
                   Expect.stringContains ddl "`a` bit(3) DEFAULT b'1'" "numeric default"
                   Expect.stringContains ddl "`b` bit(3) DEFAULT b'101'" "binary default"
+                  Expect.stringContains ddl "`c` bit(3) DEFAULT b'10'" "rounded default"
               | other -> failtestf "expected SHOW CREATE TABLE output, got %A" other
 
               match run store "SELECT column_name, column_default FROM information_schema.columns WHERE table_schema = 'fsdb' AND table_name = 'bits' ORDER BY ordinal_position" with
-              | ResultSet(_, rows) -> Expect.equal rows [ [ Some "a"; Some "b'1'" ]; [ Some "b"; Some "b'101'" ] ] "column defaults"
+              | ResultSet(_, rows) ->
+                  Expect.equal
+                      rows
+                      [ [ Some "a"; Some "b'1'" ]; [ Some "b"; Some "b'101'" ]; [ Some "c"; Some "b'10'" ] ]
+                      "column defaults"
               | other -> failtestf "expected information_schema defaults, got %A" other
 
           testCase "SHOW CREATE TABLE keeps the table-level declaration, and never attaches charset/collation to a non-string column"

@@ -452,6 +452,10 @@ let defaultText (c: ColumnDef) : string option =
         | VBit(_, value)
         | VUInt value -> Some value
         | VInt value when value >= 0L -> Some(uint64 value)
+        | VDecimal value when value >= 0m && value <= decimal UInt64.MaxValue ->
+            Some(uint64 (Math.Round(value, 0, MidpointRounding.AwayFromZero)))
+        | VDouble value when value >= 0.0 && value < 1.8446744073709552e19 ->
+            Some(uint64 (Math.Round(value, 0, MidpointRounding.AwayFromZero)))
         | VBytes bytes -> Value.bitValue bytes
         | _ -> None
 
