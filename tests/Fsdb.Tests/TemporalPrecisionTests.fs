@@ -8,6 +8,7 @@ open System
 open System.IO
 open Expecto
 open Fsdb.Ast
+open Fsdb.Temporal
 open Fsdb.Value
 open Fsdb.Storage
 open Fsdb.Persistence
@@ -87,10 +88,10 @@ let tests =
                     | Ok(VDateTime dt) -> Expect.equal dt (DateTime(2024, 1, 2, 0, 0, 0)) "carried to next day"
                     | other -> failtestf "got %A" other
 
-                testCase "TIME(2) of .126 rounds to .13 and stays a formatted string"
+                testCase "TIME(2) of .126 rounds to .13"
                 <| fun _ ->
                     match coerceValue true (col "a" (TTime 2)) (VString "12:00:00.126") with
-                    | Ok(VString s) -> Expect.equal s "12:00:00.13" "rounded, 2 digits"
+                    | Ok(VTime value) -> Expect.equal (formatTimeValueFsp 2 value) "12:00:00.13" "rounded, 2 digits"
                     | other -> failtestf "got %A" other ]
 
           testList
@@ -109,6 +110,11 @@ let tests =
                 <| fun _ ->
                     let row = oneRow [ "CREATE TABLE t (a DATETIME(0))"; "INSERT INTO t VALUES ('2024-01-01 00:00:00.6')"; "SELECT a FROM t" ]
                     Expect.equal row [ Some "2024-01-01 00:00:01" ] "no fraction, rounded"
+
+                testCase "TIME(6) on an exact second still shows .000000"
+                <| fun _ ->
+                    let row = oneRow [ "CREATE TABLE t (a TIME(6))"; "INSERT INTO t VALUES ('01:02:03')"; "SELECT a FROM t" ]
+                    Expect.equal row [ Some "01:02:03.000000" ] "six trailing zeros"
 
                 testCase "SELECT * threads each column's declared fsp"
                 <| fun _ ->
