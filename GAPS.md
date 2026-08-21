@@ -72,7 +72,7 @@ variants), USE, KILL, DESCRIBE are text-probed before the grammar
 | Partitioning: `PARTITION BY`, `PARTITION (p)` selection, `ADD/DROP/COALESCE/REORGANIZE PARTITION` | medium | refusal |
 | Roles: `CREATE/DROP ROLE`, `SET ROLE`, `SET DEFAULT ROLE`, `GRANT role TO user`, dynamic privileges (`BACKUP_ADMIN`…), `GRANT PROXY` | medium | refusal |
 | Replication/admin SQL: `CHANGE REPLICATION SOURCE TO`, `PURGE BINARY LOGS`, `RESET`, `BINLOG`, `INSTALL/UNINSTALL PLUGIN|COMPONENT`, `ALTER INSTANCE`, `CREATE SERVER`, `TABLESPACE` statements | low | refusal |
-| `EXPLAIN ANALYZE`; `EXPLAIN FORMAT=JSON|TREE`; `DESCRIBE <statement>` | low | refusal |
+| `EXPLAIN ANALYZE`; `EXPLAIN FORMAT=JSON|TREE` | low | refusal |
 | `ALTER TABLE … COMMENT=` option tails | medium | refusal |
 | `CREATE USER` tails: auth plugin, `REQUIRE SSL/X509`, resource limits, `ACCOUNT LOCK`, `PASSWORD EXPIRE`; `ALTER USER` beyond password change | medium | refusal |
 | Multi-statement strings (`stmt1; stmt2`) — exactly one statement per round trip | medium | refusal |

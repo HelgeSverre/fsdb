@@ -1233,6 +1233,16 @@ let tests =
                     | ResultSet(_, [ [ Some "1"; Some "SIMPLE"; Some "t"; _; _; _; _; _; _; _; _; _ ] ]) -> ()
                     | other -> failtestf "expected the same shape as bare EXPLAIN, got %A" other
 
+                testCase "DESCRIBE statement is an EXPLAIN synonym"
+                <| fun _ ->
+                    let store = newStore ()
+                    runDefault store "CREATE TABLE t (id INT PRIMARY KEY)" |> ignore
+
+                    Expect.equal
+                        (runDefault store "DESCRIBE SELECT * FROM t WHERE id = 1")
+                        (runDefault store "EXPLAIN SELECT * FROM t WHERE id = 1")
+                        "DESCRIBE uses the same plan"
+
                 testCase "EXPLAIN on a 1-row table reports type system"
                 <| fun _ ->
                     let store = newStore ()

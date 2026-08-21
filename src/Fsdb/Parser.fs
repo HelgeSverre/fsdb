@@ -2809,8 +2809,10 @@ let private deleteStmt: Parser<Statement, unit> =
 /// `DESC` as synonyms when just describing a table's columns (not a
 /// statement), out of scope here; this only covers the `EXPLAIN stmt` form.
 let private explainStmt: Parser<Statement, unit> =
-    keyword "EXPLAIN"
-    >>. optional (attempt (keyword "FORMAT" >>. sym "=" >>. keyword "TRADITIONAL"))
+    ((keyword "EXPLAIN"
+      >>. optional (attempt (keyword "FORMAT" >>. sym "=" >>. keyword "TRADITIONAL")))
+     <|> (keyword "DESCRIBE" >>% ())
+     <|> (keyword "DESC" >>% ()))
     >>. statement
     |>> Explain
 
