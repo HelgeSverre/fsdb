@@ -112,7 +112,8 @@ let createSchema (conn: MySqlConnection) =
             user_id INT NOT NULL,
             total DECIMAL(10,2) NOT NULL,
             status VARCHAR(20) NOT NULL,
-            created_at DATETIME NOT NULL
+            created_at DATETIME NOT NULL,
+            KEY ix_orders_user_id (user_id)
         )
         """
 

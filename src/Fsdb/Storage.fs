@@ -583,6 +583,13 @@ let private tryGetTable (db: Database) (tableName: string) : Result<Table, Stora
     | Some t -> Ok t
     | None -> Error(NoSuchTable tableName)
 
+/// A lock-free physical-table snapshot for access paths that must keep their
+/// scan fallback and index candidates on the same catalog root.
+let tableSnapshot (store: Store) (dbName: string) (tableName: string) : Result<Table, StorageError> =
+    match store.Databases.TryGetValue dbName with
+    | false, _ -> Error(NoSuchDatabase dbName)
+    | true, slot -> tryGetTable slot.Value tableName
+
 /// Auto-creates a database the first time a real table is written into it
 /// (`withDatabase`), and for the database a client names at connect time
 /// (`mysql -D foo`/PDO's `dbname=foo` DSN, a zero-setup convenience for a
@@ -1669,28 +1676,32 @@ let private parentKeySourceAdd (key: string) (source: ParentKeySource) : unit =
     | Mutable set -> set.Add key |> ignore
     | Fixed _ -> () // A non-self FK's parent can't change mid-statement.
 
-/// `col = literal`'s columns and candidate rows via `dbName.tableName`'s
-/// PK/UNIQUE hash index, when `columnName` names a single-column PK/UNIQUE
-/// group and `literal` already has that column's exact stored `Value`
-/// shape — checked by round-tripping it through `coerceValue` and requiring
-/// the result back unchanged, rather than hand-listing which `Value`
-/// variant goes with which `ColumnType`: a literal that survives
-/// `coerceValue` untouched is, by construction, already in the one shape
-/// `insertCore` would ever have stored for that column (every other branch
-/// of `coerceValue` changes the value's shape or its content), so
-/// `encodeConstraintKey`'s encoding of it can't help but match however the
-/// index encoded a real row's value there — no separate proof that the two
-/// encodings agree is needed. `None` for anything this can't prove safe
-/// (multi-column groups, a literal that needs real coercion, a NULL
-/// literal's own encoding is `None` too but that correctly yields `Some []`
-/// — an `= NULL` conjunct can never match any row) — the caller's own full
-/// scan stays correct in every one of those cases, this is a pure,
-/// optional narrowing. `Executor.tryPointLookup` is the only caller. Returns
-/// each candidate's stable row identity alongside its values.
-/// The `(table, unique key name, column index)` a `columnName = literal`
-/// equality would probe — the guard chain `tryUniqueLookup` (the actual row
-/// fetch) and `Executor`'s `EXPLAIN` `key`/`ref` reporting both read, so
-/// EXPLAIN reports an index exactly when execution would use it.
+let private tableAt (store: Store) (dbName: string) (tableName: string) : Table option =
+    tableSnapshot store dbName tableName |> Result.toOption
+
+/// The equality index a one-column probe can use, independent of a specific
+/// probe value. Unique keys take precedence over ordinary B-tree buckets.
+let tryEqualityIndex (table: Table) (columnName: string) : (string * int * bool) option =
+    match resolveColumn table.Columns columnName with
+    | Error _ -> None
+    | Ok index ->
+        uniqueKeyGroups table
+        |> List.tryPick (fun (name, indices) -> if indices = [ index ] then Some(name, index, true) else None)
+        |> Option.orElseWith (fun () ->
+            secondaryKeyGroups table
+            |> List.tryPick (fun (name, columnIndex) ->
+                if columnIndex = index && Map.containsKey name table.SecondaryIndex then Some(name, index, false) else None))
+
+let private exactProbeValue (store: Store) (table: Table) (index: int) (value: Value) : Value option =
+    match Diagnostics.suppress (fun () -> coerceValue store.StrictMode table.Columns.[index] value) with
+    | Ok coerced when coerced = value -> Some value
+    | _ -> None
+
+let private tryUniqueKeyProbeInTable (store: Store) (table: Table) (columnName: string) (literal: Value) : (string * int) option =
+    tryEqualityIndex table columnName
+    |> Option.bind (fun (name, index, unique) ->
+        if unique then exactProbeValue store table index literal |> Option.map (fun _ -> name, index) else None)
+
 let tryUniqueKeyProbe
     (store: Store)
     (dbName: string)
@@ -1698,26 +1709,8 @@ let tryUniqueKeyProbe
     (columnName: string)
     (literal: Value)
     : (Table * string * int) option =
-    // Reads `dbName`'s slot directly, same reason `scan` does — this is a
-    // per-row-lookup hot path, not somewhere to pay `Store.Catalog`'s
-    // whole-catalog rebuild.
-    let table =
-        match store.Databases.TryGetValue dbName with
-        | false, _ -> None
-        | true, slot -> Map.tryFind (normalizeTableName tableName) slot.Value
-
-    match table with
-    | None -> None
-    | Some table ->
-        match resolveColumn table.Columns columnName with
-        | Error _ -> None
-        | Ok idx ->
-            match uniqueKeyGroups table |> List.tryFind (fun (_, idxs) -> idxs = [ idx ]) with
-            | None -> None
-            | Some(groupName, _) ->
-                match Diagnostics.suppress (fun () -> coerceValue store.StrictMode table.Columns.[idx] literal) with
-                | Ok coerced when coerced = literal -> Some(table, groupName, idx)
-                | _ -> None
+    tableAt store dbName tableName
+    |> Option.bind (fun table -> tryUniqueKeyProbeInTable store table columnName literal |> Option.map (fun (name, index) -> table, name, index))
 
 let tryUniqueLookup
     (store: Store)
@@ -1748,6 +1741,11 @@ let tryUniqueLookup
 
 /// A one-column ordinary B-tree equality probe after the literal has passed
 /// the same exact-value coercion guard as unique probes.
+let private trySecondaryKeyProbeInTable (store: Store) (table: Table) (columnName: string) (literal: Value) : (string * int) option =
+    tryEqualityIndex table columnName
+    |> Option.bind (fun (name, index, unique) ->
+        if not unique then exactProbeValue store table index literal |> Option.map (fun _ -> name, index) else None)
+
 let trySecondaryKeyProbe
     (store: Store)
     (dbName: string)
@@ -1755,36 +1753,19 @@ let trySecondaryKeyProbe
     (columnName: string)
     (literal: Value)
     : (Table * string * int) option =
-    let table =
-        match store.Databases.TryGetValue dbName with
-        | false, _ -> None
-        | true, slot -> Map.tryFind (normalizeTableName tableName) slot.Value
-
-    match table with
-    | None -> None
-    | Some table ->
-        match resolveColumn table.Columns columnName with
-        | Error _ -> None
-        | Ok index ->
-            match secondaryKeyGroups table |> List.tryFind (fun (_, columnIndex) -> columnIndex = index) with
-            | None -> None
-            | Some(indexName, _) when not (Map.containsKey indexName table.SecondaryIndex) -> None
-            | Some(indexName, _) ->
-                match Diagnostics.suppress (fun () -> coerceValue store.StrictMode table.Columns.[index] literal) with
-                | Ok coerced when coerced = literal -> Some(table, indexName, index)
-                | _ -> None
+    tableAt store dbName tableName
+    |> Option.bind (fun table -> trySecondaryKeyProbeInTable store table columnName literal |> Option.map (fun (name, index) -> table, name, index))
 
 /// Candidate rows for a one-column ordinary B-tree equality probe, in stable
 /// row-store scan order.
-let trySecondaryLookup
+let private trySecondaryLookupInTable
     (store: Store)
-    (dbName: string)
-    (tableName: string)
+    (table: Table)
     (columnName: string)
     (literal: Value)
     : (ColumnDef list * (RowId * Value[]) list) option =
-    trySecondaryKeyProbe store dbName tableName columnName literal
-    |> Option.bind (fun (table, indexName, index) ->
+    trySecondaryKeyProbeInTable store table columnName literal
+    |> Option.bind (fun (indexName, index) ->
         match literal with
         | VNull -> Some(table.Columns, [])
         | _ ->
@@ -1804,6 +1785,16 @@ let trySecondaryLookup
 
                 table.Columns, rows))
 
+let trySecondaryLookup
+    (store: Store)
+    (dbName: string)
+    (tableName: string)
+    (columnName: string)
+    (literal: Value)
+    : (ColumnDef list * (RowId * Value[]) list) option =
+    tableAt store dbName tableName
+    |> Option.bind (fun table -> trySecondaryLookupInTable store table columnName literal)
+
 /// The equality-index probe in the order execution considers it: a unique
 /// key first for each WHERE equality, then an ordinary B-tree bucket.
 let tryEqualityKeyProbe
@@ -1813,11 +1804,41 @@ let tryEqualityKeyProbe
     (columnName: string)
     (literal: Value)
     : (Table * string * int * bool) option =
-    tryUniqueKeyProbe store dbName tableName columnName literal
-    |> Option.map (fun (table, keyName, index) -> table, keyName, index, true)
-    |> Option.orElseWith (fun () ->
-        trySecondaryKeyProbe store dbName tableName columnName literal
-        |> Option.map (fun (table, keyName, index) -> table, keyName, index, false))
+    tableAt store dbName tableName
+    |> Option.bind (fun table ->
+        tryEqualityIndex table columnName
+        |> Option.bind (fun (name, index, unique) ->
+            exactProbeValue store table index literal |> Option.map (fun _ -> table, name, index, unique)))
+
+/// Exact-value coercion keeps an index key equivalent to a stored value;
+/// callers scan when that proof is unavailable.
+let tryEqualityLookupInTable
+    (store: Store)
+    (table: Table)
+    (columnName: string)
+    (literal: Value)
+    : (ColumnDef list * (RowId * Value[]) list) option =
+    tryEqualityIndex table columnName
+    |> Option.bind (fun (_, _, unique) ->
+        if unique then
+            tryUniqueKeyProbeInTable store table columnName literal
+            |> Option.map (fun (indexName, index) ->
+                let probeRow = Array.create (List.length table.Columns) VNull
+                probeRow.[index] <- literal
+
+                let rows =
+                    match encodeConstraintKey table.Columns [ index ] probeRow with
+                    | None -> []
+                    | Some key ->
+                        table.UniqueIndex
+                        |> Map.tryFind indexName
+                        |> Option.bind (Map.tryFind key)
+                        |> Option.map (fun rowId -> rowId, table.RowsArray.[rowId])
+                        |> Option.toList
+
+                table.Columns, rows)
+        else
+            trySecondaryLookupInTable store table columnName literal)
 
 let tryEqualityLookup
     (store: Store)
@@ -1826,8 +1847,8 @@ let tryEqualityLookup
     (columnName: string)
     (literal: Value)
     : (ColumnDef list * (RowId * Value[]) list) option =
-    tryUniqueLookup store dbName tableName columnName literal
-    |> Option.orElseWith (fun () -> trySecondaryLookup store dbName tableName columnName literal)
+    tableAt store dbName tableName
+    |> Option.bind (fun table -> tryEqualityLookupInTable store table columnName literal)
 
 /// Verifies every foreign key `fks` (a child table's own `ForeignKeys`) has
 /// a matching parent row for `row`'s values, per MySQL's MATCH SIMPLE

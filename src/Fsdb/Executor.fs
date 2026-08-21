@@ -3160,6 +3160,49 @@ and private joinKeyCollations
         |> Option.orElseWith (fun () -> colOf right.[ri])
         |> Option.defaultValue Collation.defaultCollation)
 
+/// A physical table can retain one immutable root for both an equality probe
+/// and a scan fallback. Views, CTEs, and virtual relations have their own
+/// resolution rules and stay on the ordinary path.
+and private tryPhysicalTableRef (store: Store) (dbName: string) (tableRef: TableRef) : Result<Table option, QueryResult> =
+    let tableDb = tableRef.Database |> Option.defaultValue dbName
+    let cteShadows = tableRef.Database.IsNone && (currentCteScope () |> Map.containsKey (tableRef.Table.ToLowerInvariant()))
+    let isVirtual =
+        System.String.Equals(tableDb, "fsdb", System.StringComparison.OrdinalIgnoreCase)
+        && store.VirtualTables.ContainsKey(tableRef.Table.ToLowerInvariant())
+
+    if
+        cteShadows
+        || isVirtual
+        || System.String.Equals(tableRef.Table, "dual", System.StringComparison.OrdinalIgnoreCase)
+        || System.String.Equals(tableDb, "information_schema", System.StringComparison.OrdinalIgnoreCase)
+        || (tryStoredView store tableDb tableRef.Table).IsSome
+    then
+        Ok None
+    else
+        Storage.tableSnapshot store tableDb tableRef.Table
+        |> Result.map Some
+        |> Result.mapError storageErr
+
+and private sameIndexSemantics (left: ColumnDef) (right: ColumnDef) : bool =
+    left.Type = right.Type
+    &&
+        (not (InformationSchema.isStringy left.Type)
+         || (left.Charset = right.Charset && left.Collation = right.Collation && left.Collation.IsSome))
+
+and private tryIndexedInnerProbe
+    (store: Store)
+    (join: Join)
+    (leftColumns: ColumnDef list)
+    (rightColumns: ColumnDef list)
+    (physicalTable: Table option)
+    (equiKeys: (int * int) list)
+    : (Table * int * string * string * int * bool) option =
+    match join.Kind, join.Using, physicalTable, equiKeys with
+    | InnerJoin, [], Some table, [ leftIndex, rightIndex ] when sameIndexSemantics leftColumns.[leftIndex] rightColumns.[rightIndex] ->
+        Storage.tryEqualityIndex table rightColumns.[rightIndex].Name
+        |> Option.map (fun (keyName, columnIndex, unique) -> table, leftIndex, rightColumns.[rightIndex].Name, keyName, columnIndex, unique)
+    | _ -> None
+
 /// Early split on the join target: `JSON_TABLE` is lateral (its source
 /// re-evaluates per left row) and takes its own branch; everything else
 /// resolves once up front in `applyResolvedJoin` — the pre-JSON_TABLE
@@ -3369,9 +3412,22 @@ and private applyResolvedJoin
     ((sourcesSoFar, rowsSoFar): (string * ColumnDef list) list * Value[] seq)
     (join: Join)
     : Result<(string * ColumnDef list) list * Value[] seq * string list, QueryResult> =
-    match resolveFromItem store registry dbName join.Table with
+    let joinSource =
+        match join.Table with
+        | FromTable tableRef ->
+            tryPhysicalTableRef store dbName tableRef
+            |> Result.bind (function
+                | Some table -> Ok(table.Columns, table.RowsArray :> Value[] seq, Some table)
+                | None ->
+                    resolveFromItem store registry dbName join.Table
+                    |> Result.map (fun (columns, rows) -> columns, rows :> Value[] seq, None))
+        | _ ->
+            resolveFromItem store registry dbName join.Table
+            |> Result.map (fun (columns, rows) -> columns, rows :> Value[] seq, None)
+
+    match joinSource with
     | Error e -> Error e
-    | Ok(joinColumns, joinRows) ->
+    | Ok(joinColumns, joinRows, physicalTable) ->
         let joinQualifier = fromItemQualifier join.Table
         let newSources = sourcesSoFar @ [ joinQualifier, joinColumns ]
         let qualifiers = qualifierRanges newSources
@@ -3397,12 +3453,6 @@ and private applyResolvedJoin
         // Cartesian product as a seq, allowing a whole chain of such joins
         // to reach runSelect's LIMIT without materializing an earlier link.
         let leftIndexed = lazy (rowsSoFar |> List.ofSeq |> List.indexed)
-        // `rightCount` (not a materialized indexed list) sizes the build
-        // decision; the streaming inner-join path below probes `joinRows`
-        // directly with lazy indices, so the 50k (index, row) tuples are only
-        // forced where an outer join or the nested-loop fallback needs them.
-        let rightCount = joinRows |> Seq.length
-
         let resolveQualified (qualifier: string) (column: string) =
             qualifiers
             |> Map.tryFind (qualifier.ToLowerInvariant())
@@ -3488,15 +3538,44 @@ and private applyResolvedJoin
                 |> traverse (fun c -> evalExpr { ctxFor combined with Clause = OnClause } c)
                 |> Result.map (List.forall (fun v -> truthy v = Some true))
 
+            let indexedInnerProbe = tryIndexedInnerProbe store join combinedColumnsSoFar joinColumns physicalTable equiKeys
+
             let isConstantTrue =
                 function
                 | Lit value -> truthy value = Some true
                 | BinOp(Eq, Lit left, Lit right) -> Value.equals left right = Some true
                 | _ -> false
 
-            if hashEligible then
+            match indexedInnerProbe with
+            | Some(table, leftIndex, rightColumn, _, _, _) ->
+                let candidates =
+                    seq {
+                        for left in rowsSoFar do
+                            let rightRows =
+                                Storage.tryEqualityLookupInTable store table rightColumn left.[leftIndex]
+                                |> Option.map (fun (_, rows) -> rows |> List.map snd |> Seq.ofList)
+                                |> Option.defaultValue joinRows
+
+                            for right in rightRows do
+                                yield Array.append left right
+                    }
+
+                match residualConjuncts with
+                | [] -> Ok(newSources, candidates, coalesceNames)
+                | _ ->
+                    candidates
+                    |> traverseSeqWithLimit
+                        (Some(
+                            maxJoinCandidateRows,
+                            (1105, sprintf "Join exceeds the %d-row candidate limit" maxJoinCandidateRows)
+                        ))
+                        (fun combined -> residualHolds combined |> Result.map (fun matches -> if matches then Some combined else None))
+                    |> Result.mapError Err
+                    |> Result.map (fun matched -> newSources, matched :> Value[] seq, coalesceNames)
+            | None when hashEligible ->
                 let leftKeyIndices = equiKeys |> List.map fst |> Array.ofList
                 let rightKeyIndices = equiKeys |> List.map snd |> Array.ofList
+                let rightCount = joinRows |> Seq.length
                 let buildOnLeft = leftIndexed.Value.Length <= rightCount
 
                 match join.Kind, residualConjuncts with
@@ -3542,7 +3621,7 @@ and private applyResolvedJoin
                             |> Result.map (fun matches -> if matches then Some candidate else None))
                     |> Result.mapError Err
                     |> Result.map (buildCombinedRows rightIndexed >> fun (s, r) -> s, r :> Value[] seq, coalesceNames)
-            else
+            | None ->
                 let rightIndexed = joinRows |> Seq.indexed |> List.ofSeq
 
                 match join.Kind, isConstantTrue effectiveOn with
@@ -6870,11 +6949,11 @@ let private bindNewRow (columnIndex: Map<string, int list>) (row: Value[]) (stmt
 // EXPLAIN — a pure *description* of what this executor would actually do
 // (join order, subquery/derived-table/union structure, current row counts),
 // never a speculative index-planner: `type` is `ALL` (a full scan),
-// `system` for a 0/1-row table, `const` for a unique equality probe, or
-// `ref` for an ordinary equality bucket. The plan reports an index only
-// when execution genuinely uses one. `rows` is the table's actual current
-// count (an in-memory `scan`, not an estimate) since this engine can
-// afford that where real MySQL's cost-based planner can't.
+// `system` for a 0/1-row table, `const` for a literal unique probe,
+// `eq_ref` for a joined unique probe, or `ref` for an ordinary equality
+// bucket. The plan reports an index only
+// when execution genuinely uses one. `rows` is the table's current count
+// for scans and one for a per-row equality probe.
 // ---------------------------------------------------------------------------
 
 /// One row of `EXPLAIN`'s classic 12-column tabular output. `Id`/`Table` are
@@ -6887,11 +6966,10 @@ type private ExplainRow =
       SelectType: string
       Table: string option
       Type: string option
-      /// `Some(keyName, keyLen)` when this table row is a `const` unique-key
-      /// lookup — rendered into `possible_keys`/`key`/`key_len` with
-      /// `ref = const`, exactly when `execute`'s `tryPointLookup` would
-      /// take that path.
+      /// `Some(keyName, keyLen)` when execution reads this table through a
+      /// one-column equality index.
       Key: (string * int option) option
+      Ref: string option
       Rows: uint64 option
       Extra: string list }
 
@@ -7065,6 +7143,88 @@ let private explainKeyLen (col: ColumnDef) : int option =
     // for it), so only a genuinely nullable unique column pays the null flag.
     baseLen |> Option.map (fun n -> if col.Nullable && not col.PrimaryKey then n + 1 else n)
 
+let private tryExplainPhysicalSource (store: Store) (dbName: string) (item: FromItem) : Result<(string * ColumnDef list * Table) option, QueryResult> =
+    match item with
+    | FromTable tableRef ->
+        tryPhysicalTableRef store dbName tableRef
+        |> Result.map (Option.map (fun table -> fromItemQualifier item, table.Columns, table))
+    | _ -> Ok None
+
+let private leftColumnReference (sources: (string * ColumnDef list * Table) list) (index: int) : string =
+    let rec find offset =
+        function
+        | [] -> failwith "left column index out of range"
+        | (qualifier, (columns: ColumnDef list), _) :: rest ->
+            if index < offset + columns.Length then
+                qualifier + "." + columns.[index - offset].Name
+            else
+                find (offset + columns.Length) rest
+
+    find 0 sources
+
+let private indexedJoinExplainPlans
+    (store: Store)
+    (dbName: string)
+    (from: FromItem option)
+    (joins: Join list)
+    : Result<Map<int, Table * string * int * bool * string * bool>, QueryResult> =
+    let appendSource state item =
+        tryExplainPhysicalSource store dbName item
+        |> Result.map (fun source ->
+            match state, source with
+            | Some sources, Some source -> Some(sources @ [ source ])
+            | _ -> None)
+
+    let initial =
+        match from with
+        | None -> Ok(Some [])
+        | Some item -> appendSource (Some []) item
+
+    let step plans ((joinIndex, join): int * Join) =
+        plans
+        |> Result.bind (fun (sources, probes) ->
+            tryExplainPhysicalSource store dbName join.Table
+            |> Result.map (fun rightSource ->
+                let probe =
+                    match sources, rightSource with
+                    | Some leftSources, Some(rightQualifier, rightColumns, table) ->
+                        let leftColumns = leftSources |> List.collect (fun (_, columns, _) -> columns)
+                        let qualifiers =
+                            (leftSources |> List.map (fun (qualifier, columns, _) -> qualifier, columns))
+                            @ [ rightQualifier, rightColumns ]
+
+                        let resolveQualified (qualifier: string) (column: string) =
+                            qualifierRanges qualifiers
+                            |> Map.tryFind (qualifier.ToLowerInvariant())
+                            |> Option.bind (fun (columns, offset) ->
+                                columns
+                                |> List.tryFindIndex (fun definition -> System.String.Equals(definition.Name, column, System.StringComparison.OrdinalIgnoreCase))
+                                |> Option.map (fun columnIndex -> offset + columnIndex, columns.[columnIndex].Type))
+
+                        let equiKeys, residual = extractEquiKeys resolveQualified leftColumns.Length join.On
+
+                        tryIndexedInnerProbe store join leftColumns rightColumns (Some table) equiKeys
+                        |> Option.map (fun (_, leftIndex, _, keyName, keyIndex, unique) ->
+                            joinIndex + 1, table, keyName, keyIndex, unique, leftColumnReference leftSources leftIndex, not residual.IsEmpty)
+                    | _ -> None
+
+                let sources' =
+                    match sources, rightSource with
+                    | Some leftSources, Some source -> Some(leftSources @ [ source ])
+                    | _ -> None
+
+                let probes' =
+                    match probe with
+                    | Some(index, table, keyName, keyIndex, unique, reference, hasResidual) -> Map.add index (table, keyName, keyIndex, unique, reference, hasResidual) probes
+                    | None -> probes
+
+                sources', probes'))
+
+    joins
+    |> List.indexed
+    |> List.fold step (initial |> Result.map (fun sources -> sources, Map.empty))
+    |> Result.map snd
+
 let rec private explainJoinBlock
     (store: Store)
     (dbName: string)
@@ -7087,6 +7247,7 @@ let rec private explainJoinBlock
               Table = Some label
               Type = Some typeLabel
               Key = None
+              Ref = None
               Rows = rowCount
               Extra = (if idx = tableCount - 1 then extra else []) }
 
@@ -7124,6 +7285,7 @@ let rec private explainJoinBlock
                       Table = Some(tref.Alias |> Option.defaultValue tref.Table)
                       Type = Some "const"
                       Key = Some(keyName, explainKeyLen table.Columns.[columnIndex])
+                      Ref = Some "const"
                       Rows = Some 1UL
                       Extra = extra' }
 
@@ -7135,6 +7297,7 @@ let rec private explainJoinBlock
                       Table = None
                       Type = None
                       Key = None
+                      Ref = None
                       Rows = None
                       Extra = [ "no matching row in const table" ] }
 
@@ -7147,6 +7310,7 @@ let rec private explainJoinBlock
                       Table = Some(tref.Alias |> Option.defaultValue tref.Table)
                       Type = Some "ref"
                       Key = Some(keyName, explainKeyLen table.Columns.[columnIndex])
+                      Ref = Some "const"
                       Rows = Some(uint64 rowCount)
                       Extra = extra }
 
@@ -7155,13 +7319,28 @@ let rec private explainJoinBlock
 
     /// One `FromItem`'s row(s): a real table's stats, or a derived table's
     /// `<derivedN>` placeholder plus its own recursive `DERIVED` block.
-    let explainFromItem (idx: int) (item: FromItem) : Result<unit, QueryResult> =
+    let explainFromItem (joinPlans: Map<int, Table * string * int * bool * string * bool>) (idx: int) (item: FromItem) : Result<unit, QueryResult> =
         match item with
         | FromTable tref ->
             explainTableStats store dbName tref
             |> Result.map (fun (n, ty) ->
-                if not (tryExplainEqualityIndex tref) then
-                    emitTableRow idx (tref.Alias |> Option.defaultValue tref.Table) n ty)
+                match Map.tryFind idx joinPlans with
+                | Some(table, keyName, keyIndex, unique, reference, hasResidual) ->
+                    acc.Add
+                        { Id = Some id
+                          SelectType = selectType
+                          Table = Some(tref.Alias |> Option.defaultValue tref.Table)
+                          Type = Some(if unique then "eq_ref" else "ref")
+                          Key = Some(keyName, explainKeyLen table.Columns.[keyIndex])
+                          Ref = Some reference
+                          Rows = Some 1UL
+                          Extra =
+                              (if idx = tableCount - 1 then extra else [])
+                              @ (if hasResidual then [ "Using where" ] else [])
+                              |> List.distinct }
+                | None when not (tryExplainEqualityIndex tref) ->
+                    emitTableRow idx (tref.Alias |> Option.defaultValue tref.Table) n ty
+                | None -> ())
         | FromSubquery(PlainSelect sub, _alias)
         // A LATERAL body plans like any other derived table here; only its
         // per-left-row evaluation differs, which EXPLAIN doesn't model.
@@ -7190,10 +7369,12 @@ let rec private explainJoinBlock
             |> Result.map ignore
 
 
-    let fromResult = from |> Option.map (explainFromItem 0) |> Option.defaultValue (Ok())
+    indexedJoinExplainPlans store dbName from joins
+    |> Result.bind (fun joinPlans ->
+        let fromResult = from |> Option.map (explainFromItem joinPlans 0) |> Option.defaultValue (Ok())
 
-    fromResult
-    |> Result.bind (fun () -> joins |> List.indexed |> traverse (fun (i, j) -> explainFromItem (i + 1) j.Table))
+        fromResult
+        |> Result.bind (fun () -> joins |> List.indexed |> traverse (fun (i, j) -> explainFromItem joinPlans (i + 1) j.Table)))
     |> Result.map (fun _ ->
         if tableCount = 0 then
             acc.Add
@@ -7202,6 +7383,7 @@ let rec private explainJoinBlock
                   Table = None
                   Type = None
                   Key = None
+                  Ref = None
                   Rows = None
                   Extra = [ "No tables used" ] })
     |> Result.bind (fun () ->
@@ -7256,7 +7438,7 @@ let private renderExplainRows (rows: ExplainRow list) : QueryResult =
           r.Key |> Option.map fst
           r.Key |> Option.map fst
           r.Key |> Option.bind (snd >> Option.map string)
-          r.Key |> Option.map (fun _ -> "const")
+          r.Ref
           r.Rows |> Option.map string
           (r.Type |> Option.map (fun _ -> "100.00"))
           (if r.Extra.IsEmpty then None else Some(String.concat "; " r.Extra)) ]
@@ -7350,7 +7532,7 @@ let rec private explainStatement (store: Store) (registry: Registry) (dbName: st
             |> Result.map (fun restIds ->
                 if not restIds.IsEmpty then
                     let label = sprintf "<union%s>" (id1 :: restIds |> List.map string |> String.concat ",")
-                    acc.Add { Id = None; SelectType = "UNION RESULT"; Table = Some label; Type = None; Key = None; Rows = None; Extra = [] })
+                    acc.Add { Id = None; SelectType = "UNION RESULT"; Table = Some label; Type = None; Key = None; Ref = None; Rows = None; Extra = [] })
         )
     | Update u ->
         let id = nextId ()
@@ -7383,7 +7565,7 @@ let rec private explainStatement (store: Store) (registry: Registry) (dbName: st
 
         finish (
             checkTableExists table
-            |> Result.map (fun () -> acc.Add { Id = Some id; SelectType = selectType; Table = Some table; Type = None; Key = None; Rows = None; Extra = [] })
+            |> Result.map (fun () -> acc.Add { Id = Some id; SelectType = selectType; Table = Some table; Type = None; Key = None; Ref = None; Rows = None; Extra = [] })
             |> Result.bind (fun () ->
                 List.concat rowsExprs
                 |> List.collect collectSubqueries
@@ -7397,7 +7579,7 @@ let rec private explainStatement (store: Store) (registry: Registry) (dbName: st
 
         finish (
             checkTableExists table
-            |> Result.map (fun () -> acc.Add { Id = Some id; SelectType = "REPLACE"; Table = Some table; Type = None; Key = None; Rows = None; Extra = [] })
+            |> Result.map (fun () -> acc.Add { Id = Some id; SelectType = "REPLACE"; Table = Some table; Type = None; Key = None; Ref = None; Rows = None; Extra = [] })
             |> Result.bind (fun () ->
                 assignments
                 |> List.collect (snd >> collectSubqueries)
@@ -7418,7 +7600,7 @@ let rec private explainStatement (store: Store) (registry: Registry) (dbName: st
         finish (
             checkTableExists table
             |> Result.bind (fun () -> checkSelect select)
-            |> Result.map (fun () -> acc.Add { Id = Some id; SelectType = selectType; Table = Some table; Type = None; Key = None; Rows = None; Extra = [] })
+            |> Result.map (fun () -> acc.Add { Id = Some id; SelectType = selectType; Table = Some table; Type = None; Key = None; Ref = None; Rows = None; Extra = [] })
             |> Result.bind (fun () ->
                 let sid = nextId ()
                 explainSelectBlock store dbName nextId acc sid "SUBQUERY" select)
