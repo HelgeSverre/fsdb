@@ -31,10 +31,10 @@ accepted (marked `ponytail:` in source), or recorded only in
 | Area | State | Largest single gap |
 |---|---|---|
 | SQL statements | Broad core; large admin/programmatic tail missing | Stored procedures/functions, events |
-| Query execution | Equality and one-column non-unique literal range access plus stable subquery materialization | ORDER BY index access, join reordering, and correlated subqueries still scale poorly |
+| Query execution | Equality, one-column non-unique literal range access, and bounded single-key index ordering plus stable subquery materialization | Multi-key ORDER BY, join reordering, and correlated subqueries still scale poorly |
 | Built-in functions | Broad scalar, aggregate, JSON, time, and planar geometry coverage | Advanced geometry topology and geographic SRS semantics |
 | Data types | Common scalar types plus OGC geometry | No TIME value domain or BIT |
-| Constraints & indexes | PK/UNIQUE/FK/CHECK plus one-column equality, inner-join, and non-unique literal range probes | No ORDER BY or composite access; unique and DML ranges scan |
+| Constraints & indexes | PK/UNIQUE/FK/CHECK plus one-column equality, inner-join, literal range, and bounded index-order probes | No multi-key/composite access; unique and DML ranges scan |
 | Charsets & collations | ICU-based utf8mb4 registry | Weight-table tailoring differs from MySQL's UCA tables |
 | Transactions | Repeatable-read snapshots, nonlocking read-committed views + optimistic merge | READ UNCOMMITTED and SERIALIZABLE refused; transaction commits serialize |
 | Persistence | WAL + snapshot, crash-tested | Opt-in only; no group commit; tombstones never reclaimed |
@@ -107,7 +107,7 @@ identities for bit aggregates.
 
 | Gap | MySQL 8.4 | fsdb | Impact | Class |
 |---|---|---|---|---|
-| Secondary-index access paths | ref/eq_ref/range scans feed joins, ORDER BY, GROUP BY | single-table equality and a physical right side of a one-key `INNER JOIN ... ON` use PK/UNIQUE or one-column non-unique B-tree buckets; direct literal `SELECT` ranges on one-column non-unique B-trees narrow candidates and report `range` in EXPLAIN; unique/PK ranges, DML ranges, joins, composite keys, outer joins, ORDER BY, and GROUP BY scan/sort | high (scale) | divergence |
+| Secondary-index access paths | ref/eq_ref/range scans feed joins, ORDER BY, GROUP BY | single-table equality and a physical right side of a one-key `INNER JOIN ... ON` use PK/UNIQUE or one-column non-unique B-tree buckets; direct literal `SELECT` ranges on one-column non-unique B-trees narrow candidates and report `range` in EXPLAIN; one direct indexed `ORDER BY` key with `LIMIT`/`OFFSET` streams the index order and can use compatible literal bounds; unique/PK ranges, DML ranges, joins, composite keys, outer joins, multi-key ORDER BY, and GROUP BY scan/sort | high (scale) | divergence |
 | Optimizer | pushdown, constant folding, join reordering, cost model, statistics | none; joins fold left-to-right as written; derived tables materialize once per statement (`Functions.fs:44`, `Executor.fs:36–43`) | medium | divergence |
 | EXPLAIN fidelity | type ∈ system/const/eq_ref/ref/range/index/ALL; FORMAT=JSON/TREE; ANALYZE; optimizer_trace | `type` ∈ {system, const, eq_ref, ref, range, ALL}; `range` covers only direct literal `SELECT` bounds on one-column non-unique B-trees; FORMAT=JSON/TREE, ANALYZE, and optimizer_trace absent; extra flags limited to Using where/filesort/temporary | low | divergence |
 | Subquery strategies | semi-join/materialization/early-exit transformations | statement-stable scalar/IN/EXISTS subqueries materialize once and simple EXISTS stops at one row; correlated, variable-bearing, nondeterministic, CTE, derived, lateral, and JSON_TABLE forms re-execute | medium (scale) | divergence |
@@ -188,7 +188,7 @@ ADD UNIQUE over colliding data fails 1062 rather than corrupting.
 
 | Gap | MySQL 8.4 | fsdb | Impact | Class |
 |---|---|---|---|---|
-| Non-unique secondary indexes | physical structures serving lookups/ordering | separate immutable equality buckets and ordered entries serve single-table literal equality, a matching physical inner-join key, and direct literal `SELECT` ranges; duplicate derived structures deliberately trade memory and write work for equality buckets plus bounded range seeks; composite, ORDER BY, DML range, and other join access remain scans | high (scale) | divergence |
+| Non-unique secondary indexes | physical structures serving lookups/ordering | separate immutable equality buckets and ordered entries serve single-table literal equality, a matching physical inner-join key, direct literal `SELECT` ranges, and one direct indexed `ORDER BY` key with `LIMIT`/`OFFSET`; duplicate derived structures deliberately trade memory and write work for equality buckets plus bounded range seeks; composite, multi-key/DML ORDER BY, DML range, and other join access remain scans | high (scale) | divergence |
 | Prefix indexes | `INDEX (col(N))` with SUB_PART metadata | parsed prefix length discarded; SUB_PART always NULL (`InformationSchema.fs:491–495`) | low | divergence |
 | Expression indexes | `INDEX ((expr))` | absent | low | refusal |
 | Descending/invisible indexes | `DESC`, `INVISIBLE` | absent | low | refusal |
@@ -434,7 +434,7 @@ that later work changed:
 Ranked by expected disruption to the primary consumers, independent of
 implementation effort:
 
-1. Missing secondary ORDER BY/composite access, join reordering, and excluded
+1. Missing secondary multi-key ORDER BY/composite access, join reordering, and excluded
    correlated subquery plans — correctness holds, but scale still diverges
    from MySQL past small data.
 2. SERIALIZABLE/READ UNCOMMITTED semantics and intra-database transaction
