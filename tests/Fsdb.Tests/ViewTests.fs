@@ -78,6 +78,43 @@ let tests =
               | Err(1288, _) -> ()
               | other -> failtestf "expected non-updatable view error, got %A" other
 
+          testCase "a direct view predicate limits UPDATE and DELETE but not INSERT"
+          <| fun _ ->
+              let store = Fsdb.Storage.create ()
+              expectOk (run store "CREATE TABLE accounts (id INT PRIMARY KEY, name VARCHAR(20), score INT)") "create accounts"
+              expectOk (run store "INSERT INTO accounts VALUES (1, 'visible', 10), (2, 'hidden', 1)") "seed accounts"
+              expectOk (run store "CREATE VIEW visible_accounts AS SELECT id, name FROM accounts WHERE score >= 5") "create view"
+
+              match run store "UPDATE visible_accounts SET name = 'hidden' WHERE visible_accounts.score = 10" with
+              | Err(1054, _) -> ()
+              | other -> failtestf "expected hidden predicate-column rejection, got %A" other
+
+              expectOk (run store "UPDATE visible_accounts SET name = 'updated'") "update view"
+              expectOk (run store "DELETE FROM visible_accounts WHERE id = 1") "delete view"
+              expectOk (run store "INSERT INTO visible_accounts VALUES (3, 'invisible')") "insert view"
+
+              Expect.equal
+                  (rows store "SELECT id, name, score FROM accounts ORDER BY id")
+                  [ [ Some "2"; Some "hidden"; Some "1" ]; [ Some "3"; Some "invisible"; None ] ]
+                  "only rows selected by the view predicate are updateable or deletable"
+
+          testCase "WITH CHECK OPTION refuses view creation"
+          <| fun _ ->
+              let store = setup ()
+
+              match run store "CREATE VIEW guarded AS SELECT id, name FROM vendors WHERE id = 1 WITH CHECK OPTION" with
+              | Err(1235, "WITH CHECK OPTION is not supported") -> ()
+              | other -> failtestf "expected CHECK OPTION refusal, got %A" other
+
+          testCase "a view predicate with a subquery is not writable"
+          <| fun _ ->
+              let store = setup ()
+              expectOk (run store "CREATE VIEW filtered AS SELECT id, name FROM vendors WHERE id IN (SELECT vendor_id FROM receipts)") "create view"
+
+              match run store "UPDATE filtered SET name = 'blocked'" with
+              | Err(1288, _) -> ()
+              | other -> failtestf "expected complex predicate refusal, got %A" other
+
           testCase "writable views do not expose unprojected base columns"
           <| fun _ ->
               let store = Fsdb.Storage.create ()

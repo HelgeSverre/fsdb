@@ -7157,6 +7157,29 @@ let private tryUpdatableView (store: Store) (dbName: string) (viewName: string) 
                  && select.Limit.IsNone
                  && select.Offset.IsNone
                  && not select.Locking ->
+            let sourceNames = [ source.Table; source.Alias |> Option.defaultValue source.Table ]
+            let aggregateNames = set [ "COUNT"; "SUM"; "AVG"; "MIN"; "MAX"; "GROUP_CONCAT" ]
+            let rec simplePredicate =
+                function
+                | Exists _ | Subquery _ | InSubquery _ | WindowOver _ -> false
+                | QualifiedCol(qualifier, _) -> sourceNames |> List.exists (fun name -> name.Equals(qualifier, System.StringComparison.OrdinalIgnoreCase))
+                | FuncCall(name, arguments) ->
+                    not (aggregateNames.Contains(name.ToUpperInvariant()))
+                    && (arguments |> List.forall simplePredicate)
+                | BinOp(_, left, right) | Like(left, right, _, _) | Regexp(left, right) -> simplePredicate left && simplePredicate right
+                | Not value | IsNull value | IsNotNull value | IsTrue value | IsFalse value | Distinct value | OrderBy(value, _) | Cast(value, _) | Collate(value, _) | AssignUserVariable(_, value) -> simplePredicate value
+                | In(value, candidates) -> simplePredicate value && (candidates |> List.forall simplePredicate)
+                | Between(value, lower, upper) -> simplePredicate value && simplePredicate lower && simplePredicate upper
+                | Case(subject, branches, otherwise) ->
+                    (subject |> Option.forall simplePredicate)
+                    && (branches |> List.forall (fun (condition, result) -> simplePredicate condition && simplePredicate result))
+                    && (otherwise |> Option.forall simplePredicate)
+                | MatchAgainst(_, query, _) -> simplePredicate query
+                | _ -> true
+
+            if select.Where |> Option.exists (simplePredicate >> not) then
+                None
+            else
             let sourceNames =
                 select.Projections
                 |> List.map (fun (expression, alias) ->
@@ -9394,6 +9417,7 @@ let rec execute (store: Store) (registry: Registry) (dbName: string) (ids: int64
 
     | CreateView(name, columns, definition, orReplace) ->
         let db, viewName = splitQualified dbName name
+        let hasCheckOption = Regex.IsMatch(definition, @"\bWITH\s+(?:(?:CASCADED|LOCAL)\s+)?CHECK\s+OPTION\s*$", RegexOptions.IgnoreCase)
         let duplicateColumns =
             columns
             |> List.countBy (fun column -> column.ToLowerInvariant())
@@ -9409,6 +9433,7 @@ let rec execute (store: Store) (registry: Registry) (dbName: string) (ids: int64
             && store.VirtualTables.ContainsKey(normalizeTableName viewName)
 
         match Parser.parse definition, Map.containsKey db store.Catalog, duplicateColumns with
+        | _, _, _ when hasCheckOption -> ids, Err(1235, "WITH CHECK OPTION is not supported")
         | Result.Error message, _, _ -> ids, Err(1064, sprintf "View definition has a syntax error: %s" message)
         | _, false, _ -> ids, storageErr (NoSuchDatabase db)
         | _, _, Some(column, _) -> ids, Err(1060, sprintf "Duplicate column name '%s'" column)
