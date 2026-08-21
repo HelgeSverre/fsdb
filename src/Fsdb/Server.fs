@@ -118,11 +118,12 @@ let private resultHeadPayloads
     (capabilities: uint32)
     (statusFlags: int)
     (lastInsertId: uint64)
+    (warningCount: int)
     (columnMetadata: ColumnMetadata list)
     (result: Executor.QueryResult)
     : byte[] list =
     match result with
-    | Affected affectedRows -> [ okPayload capabilities statusFlags affectedRows lastInsertId ]
+    | Affected affectedRows -> [ okPayloadWithWarnings capabilities statusFlags affectedRows lastInsertId warningCount ]
     | Err(code, message) -> [ errPayload capabilities code message ]
     | ResultSet(columns, rows) ->
         let deprecateEof = capabilities &&& ClientDeprecateEof <> 0u
@@ -160,7 +161,7 @@ let private resultHeadPayloads
         [ columnCountPayload ]
         @ (List.zip columns metadata
            |> List.mapi (fun i (name, metadata) -> columnDefPayload { Name = name; Metadata = withValuePrecision i metadata }))
-        @ (if deprecateEof then [] else [ eofPayload capabilities statusFlags ])
+        @ (if deprecateEof then [] else [ eofPayloadWithWarnings capabilities statusFlags warningCount ])
 
 /// Writes an OK/ERR/resultset reply. Rows are framed and written in batches —
 /// one `WriteAsync` per ~64 KiB instead of one per row packet — so a large
@@ -172,12 +173,13 @@ let private sendResult
     (startSeq: byte)
     (statusFlags: int)
     (lastInsertId: uint64)
+    (warningCount: int)
     (columnMetadata: ColumnMetadata list)
     (rowEncoder: ColumnMetadata list -> string option list -> byte[])
     (result: Executor.QueryResult)
     : Async<unit> =
     async {
-        let! seqId = sendPayloads stream startSeq (resultHeadPayloads capabilities statusFlags lastInsertId columnMetadata result)
+        let! seqId = sendPayloads stream startSeq (resultHeadPayloads capabilities statusFlags lastInsertId warningCount columnMetadata result)
 
         match result with
         | ResultSet(columns, rows) ->
@@ -235,9 +237,9 @@ let private sendResult
                     stream
                     seqId
                     [ (if deprecateEof then
-                           okEndOfResultSetPayload capabilities statusFlags
+                           okEndOfResultSetPayloadWithWarnings capabilities statusFlags warningCount
                        else
-                           eofPayload capabilities statusFlags) ]
+                           eofPayloadWithWarnings capabilities statusFlags warningCount) ]
                 |> Async.Ignore
         | _ -> ()
     }
@@ -253,10 +255,11 @@ let sendQueryResult
     (startSeq: byte)
     (statusFlags: int)
     (lastInsertId: uint64)
+    (warningCount: int)
     (columnMetadata: ColumnMetadata list)
     (result: Executor.QueryResult)
     : Async<unit> =
-    sendResult stream capabilities startSeq statusFlags lastInsertId columnMetadata textRowPayloadTyped result
+    sendResult stream capabilities startSeq statusFlags lastInsertId warningCount columnMetadata textRowPayloadTyped result
 
 /// As `sendQueryResult`, but encodes resultset rows in the binary protocol
 /// row format COM_STMT_EXECUTE requires (`binaryRowPayload`, which — unlike
@@ -268,10 +271,11 @@ let sendBinaryQueryResult
     (startSeq: byte)
     (statusFlags: int)
     (lastInsertId: uint64)
+    (warningCount: int)
     (columnMetadata: ColumnMetadata list)
     (result: Executor.QueryResult)
     : Async<unit> =
-    sendResult stream capabilities startSeq statusFlags lastInsertId columnMetadata binaryRowPayload result
+    sendResult stream capabilities startSeq statusFlags lastInsertId warningCount columnMetadata binaryRowPayload result
 
 /// `SERVER_STATUS_AUTOCOMMIT` always, plus `SERVER_STATUS_IN_TRANS` while
 /// `session.Tx` is open — every OK/EOF packet reports this so PDO's
@@ -280,6 +284,9 @@ let sendBinaryQueryResult
 /// see the real transaction state.
 let private statusFlagsFor (session: Session) : int =
     StatusAutocommit ||| (if session.Tx.IsSome then StatusInTrans else 0)
+
+let private warningCountFor (session: Session) =
+    min (int UInt16.MaxValue) session.Diagnostics.Length
 
 /// A dead socket, detected without consuming any data: `Poll(SelectRead)`
 /// returns true both when the peer closed/reset the connection *and* when
@@ -709,6 +716,7 @@ let private handleConnection
                                                 seqId
                                                 (statusFlagsFor session)
                                                 (uint64 session.LastInsertId)
+                                                (warningCountFor session)
                                                 session.LastResultColumnMetadata
                                                 result
 
@@ -748,6 +756,7 @@ let private handleConnection
                                             seqId
                                             (statusFlagsFor session)
                                             (uint64 session.LastInsertId)
+                                            (warningCountFor session)
                                             session.LastResultColumnMetadata
                                             result
 
@@ -767,6 +776,7 @@ let private handleConnection
                                             seqId
                                             (statusFlagsFor session)
                                             (uint64 session.LastInsertId)
+                                            (warningCountFor session)
                                             session.LastResultColumnMetadata
                                             result
 
@@ -989,6 +999,7 @@ let private handleConnection
                                                     seqId
                                                     (statusFlagsFor session)
                                                     (uint64 session.LastInsertId)
+                                                    (warningCountFor session)
                                                     session.LastResultColumnMetadata
                                                     result
 

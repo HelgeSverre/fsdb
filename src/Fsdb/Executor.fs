@@ -4580,25 +4580,36 @@ and private evalAggregate
                 let mutable remaining = limit
 
                 let appendWithinLimit (text: string) =
-                    if remaining > 0 then
-                        let bytes = System.Text.Encoding.UTF8.GetBytes text
+                    let bytes = System.Text.Encoding.UTF8.GetBytes text
 
-                        if bytes.Length <= remaining then
-                            result.Append text |> ignore
-                            remaining <- remaining - bytes.Length
-                        else
-                            let mutable cut = remaining
+                    if bytes.Length <= remaining then
+                        result.Append text |> ignore
+                        remaining <- remaining - bytes.Length
+                        false
+                    elif remaining = 0 then
+                        true
+                    else
+                        let mutable cut = remaining
 
-                            while cut > 0 && bytes.[cut] &&& 0xc0uy = 0x80uy do
-                                cut <- cut - 1
+                        while cut > 0 && bytes.[cut] &&& 0xc0uy = 0x80uy do
+                            cut <- cut - 1
 
-                            result.Append(System.Text.Encoding.UTF8.GetString(bytes, 0, cut)) |> ignore
-                            remaining <- 0
+                        result.Append(System.Text.Encoding.UTF8.GetString(bytes, 0, cut)) |> ignore
+                        remaining <- 0
+                        true
+
+                let mutable truncatedAt = None
 
                 deduped
                 |> List.iteri (fun i (v, _, _) ->
-                    if i > 0 then appendWithinLimit separator
-                    appendWithinLimit (v |> toText |> Option.defaultValue ""))
+                    let cutBySeparator = i > 0 && appendWithinLimit separator
+                    let cutByValue = appendWithinLimit (v |> toText |> Option.defaultValue "")
+
+                    if truncatedAt.IsNone && (cutBySeparator || cutByValue) then
+                        truncatedAt <- Some(i + 1))
+
+                truncatedAt
+                |> Option.iter (fun row -> Diagnostics.warning 1260 (sprintf "Row %d was cut by GROUP_CONCAT()" row))
 
                 VString(result.ToString()))
     // Both JSON aggregates are NULL over an empty group but keep the NULLs
@@ -7907,6 +7918,11 @@ let rec execute (store: Store) (registry: Registry) (dbName: string) (ids: int64
     /// direct write it always was.
     let finishInsert (db: string) (table: string) (doInsert: Store -> Result<InsertOutcome, StorageError>) : (int64 * int64) * QueryResult =
         let ok (outcome: InsertOutcome) =
+            outcome.IgnoredErrors
+            |> List.iter (fun error ->
+                let code, message = toMySqlError error
+                Diagnostics.warning code message)
+
             nextIds ids (outcome.LastInsertId, outcome.GeneratedId), Affected(uint64 outcome.Affected)
 
         match afterInsertTriggers store db table with
@@ -8956,7 +8972,9 @@ let rec execute (store: Store) (registry: Registry) (dbName: string) (ids: int64
                                 |> Result.bind (computeGeneratedRow store registry db table columns)
 
                             match updated with
-                            | Error(ExpressionError(3819, _)) when updateStmt.Ignore -> Ok row
+                            | Error(ExpressionError(3819, message)) when updateStmt.Ignore ->
+                                Diagnostics.warning 3819 message
+                                Ok row
                             | result -> result
 
                         let candidates = narrowed |> Option.map snd
@@ -9185,7 +9203,9 @@ let rec execute (store: Store) (registry: Registry) (dbName: string) (ids: int64
                                             | false, _ -> Ok row
 
                                         match updated with
-                                        | Error(ExpressionError(3819, _)) when updateStmt.Ignore -> Ok row
+                                        | Error(ExpressionError(3819, message)) when updateStmt.Ignore ->
+                                            Diagnostics.warning 3819 message
+                                            Ok row
                                         | result -> result
 
                                     updateRows snapshot tdb tname None predicate updater)

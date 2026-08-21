@@ -5,6 +5,7 @@ open System
 open System.Collections.Concurrent
 open System.Runtime.CompilerServices
 open Fsdb.Ast
+open Fsdb.Diagnostics
 open Fsdb.Protocol
 open Fsdb.Storage
 open Fsdb.Value
@@ -220,6 +221,8 @@ type Session =
       /// Carries SQL_CALC_FOUND_ROWS across execution into `recordResult`,
       /// which would otherwise replace it with the limited result length.
       PendingFoundRows: uint64 option
+      /// Conditions from the most recently executed statement.
+      Diagnostics: Condition list
       /// Per-column MySQL wire types for the most recent statement's
       /// `ResultSet`, if any — `[]` for anything else (an `Affected`/`Err`
       /// result, or a `ResultSet` this session's dispatch path didn't
@@ -300,6 +303,7 @@ let create (connectionId: int) (store: Store) : Session =
       LastRowCount = 0L
       FoundRows = 0UL
       PendingFoundRows = None
+      Diagnostics = []
       LastResultColumnMetadata = []
       Tx = None
       PendingTransactionReadOnly = None

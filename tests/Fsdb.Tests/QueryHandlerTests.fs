@@ -1348,6 +1348,75 @@ let tests =
               | ResultSet([ "Level"; "Code"; "Message" ], []) -> ()
               | other -> failtestf "expected an empty errors resultset, got %A" other
 
+          testCase "INSERT IGNORE records warnings until the next ordinary statement"
+          <| fun _ ->
+              let session = create 1 (Fsdb.Storage.create ())
+              let session, _ = handle session "CREATE TABLE t (id INT PRIMARY KEY, value INT NOT NULL)"
+              let session, _ = handle session "INSERT INTO t VALUES (1, 1)"
+              let session, result = handle session "INSERT IGNORE INTO t VALUES (1, 2), (2, NULL)"
+
+              Expect.equal result (Affected 0UL) "ignored rows do not affect the count"
+              Expect.equal (session.Diagnostics |> List.map _.Code) [ 1062; 1048 ] "one condition per ignored row"
+
+              match handle session "SHOW WARNINGS" |> snd with
+              | ResultSet([ "Level"; "Code"; "Message" ], [ [ Some "Warning"; Some "1062"; _ ]; [ Some "Warning"; Some "1048"; _ ] ]) -> ()
+              | other -> failtestf "expected INSERT IGNORE warnings, got %A" other
+
+              match handle session "SELECT @@warning_count" |> snd with
+              | ResultSet(_, [ [ Some "2" ] ]) -> ()
+              | other -> failtestf "expected warning count 2, got %A" other
+
+              let session, _ = handle session "SELECT 1"
+              Expect.isEmpty session.Diagnostics "ordinary statements replace the diagnostics area"
+
+          testCase "statement errors appear in SHOW ERRORS and SHOW WARNINGS"
+          <| fun _ ->
+              let session = create 1 (Fsdb.Storage.create ())
+              let session, _ = handle session "CREATE TABLE t (id INT)"
+              let session, result = handle session "SELECT missing FROM t"
+
+              match result with
+              | Err(1054, _) -> ()
+              | other -> failtestf "expected an unknown-column error, got %A" other
+
+              match handle session "SHOW ERRORS" |> snd with
+              | ResultSet(_, [ [ Some "Error"; Some "1054"; _ ] ]) -> ()
+              | other -> failtestf "expected one error condition, got %A" other
+
+              match handle session "SHOW COUNT(*) WARNINGS" |> snd with
+              | ResultSet(_, [ [ Some "1" ] ]) -> ()
+              | other -> failtestf "expected warning count to include errors, got %A" other
+
+          testCase "GROUP_CONCAT truncation records warning 1260"
+          <| fun _ ->
+              let session = create 1 (Fsdb.Storage.create ())
+              let session, _ = handle session "CREATE TABLE t (id INT, value VARCHAR(10))"
+              let session, _ = handle session "INSERT INTO t VALUES (1, 'aa'), (2, 'bb')"
+              let session, _ = handle session "SET group_concat_max_len = 4"
+              let session, result = handle session "SELECT GROUP_CONCAT(value ORDER BY id SEPARATOR '-') FROM t"
+
+              match result with
+              | ResultSet(_, [ [ Some "aa-b" ] ]) -> ()
+              | other -> failtestf "expected truncated GROUP_CONCAT result, got %A" other
+
+              match session.Diagnostics with
+              | [ { Level = Fsdb.Diagnostics.Warning; Code = 1260; Message = message } ] ->
+                  Expect.equal message "Row 2 was cut by GROUP_CONCAT()" "MySQL warning text"
+              | other -> failtestf "expected one GROUP_CONCAT warning, got %A" other
+
+          testCase "UPDATE IGNORE records a skipped CHECK violation"
+          <| fun _ ->
+              let session = create 1 (Fsdb.Storage.create ())
+              let session, _ = handle session "CREATE TABLE t (id INT, CHECK (id > 0))"
+              let session, _ = handle session "INSERT INTO t VALUES (1)"
+              let session, result = handle session "UPDATE IGNORE t SET id = 0"
+
+              Expect.equal result (Affected 0UL) "ignored CHECK violations leave the row unchanged"
+
+              match session.Diagnostics with
+              | [ { Level = Fsdb.Diagnostics.Warning; Code = 3819; Message = _ } ] -> ()
+              | other -> failtestf "expected one UPDATE IGNORE warning, got %A" other
+
           testCase "SHOW CREATE DATABASE, OPEN TABLES, PLUGINS, and ENGINE INNODB STATUS are truthful"
           <| fun _ ->
               let session = create 1 (Fsdb.Storage.create ())

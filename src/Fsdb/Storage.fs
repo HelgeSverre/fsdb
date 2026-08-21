@@ -2576,7 +2576,8 @@ type InsertOutcome =
     { LastInsertId: int64
       GeneratedId: int64 option
       Affected: int
-      InsertedRows: Value[] list }
+      InsertedRows: Value[] list
+      IgnoredErrors: StorageError list }
 
 let private insertCore
     (checkFks: bool)
@@ -2587,7 +2588,7 @@ let private insertCore
     (rowsIn: Value list list)
     (idxs: int list)
     (prepare: Value[] -> Result<Value[], StorageError>)
-    : Result<Database * (int64 * int64 option * int * Value[] list), StorageError> =
+    : Result<Database * (int64 * int64 option * int * Value[] list * StorageError list), StorageError> =
     let table = Map.find tableKey db
     let uniqueGroups = uniqueKeyGroups table
 
@@ -2658,7 +2659,7 @@ let private insertCore
 
     let step acc (rowValues: Value list) =
         acc
-        |> Result.bind (fun (acceptedRev: Value[] list, nextAutoId, firstAuto, lastExplicit, index: Map<string, Map<string, RowId>>) ->
+        |> Result.bind (fun ((acceptedRev: Value[] list), (ignoredErrorsRev: StorageError list), nextAutoId, firstAuto, lastExplicit, index) ->
             if List.length rowValues <> List.length idxs then
                 Error(ColumnCountMismatch(List.length idxs, List.length rowValues))
             else
@@ -2739,13 +2740,13 @@ let private insertCore
                         |> Option.iter (fun key -> parentKeySourceAdd key lookup)
 
                     let rowId = rows.Add candidate
-                    Ok(candidate :: acceptedRev, nextAutoId', firstAuto', lastExplicit', reindexRow table.Columns uniqueGroups None (Some(rowId, candidate)) index)
-                | Error _ when ignoreErrors -> Ok(acceptedRev, nextAutoId, firstAuto, lastExplicit, index)
+                    Ok(candidate :: acceptedRev, ignoredErrorsRev, nextAutoId', firstAuto', lastExplicit', reindexRow table.Columns uniqueGroups None (Some(rowId, candidate)) index)
+                | Error error when ignoreErrors -> Ok(acceptedRev, error :: ignoredErrorsRev, nextAutoId, firstAuto, lastExplicit, index)
                 | Error e -> Error e)
 
     rowsIn
-    |> List.fold step (Ok([], table.NextAutoId, None, None, table.UniqueIndex))
-    |> Result.map (fun (acceptedRev, nextAutoId', firstAuto, lastExplicit, index) ->
+    |> List.fold step (Ok([], [], table.NextAutoId, None, None, table.UniqueIndex))
+    |> Result.map (fun (acceptedRev, ignoredErrorsRev, nextAutoId', firstAuto, lastExplicit, index) ->
         let accepted = List.rev acceptedRev
         let firstAssigned = Option.orElse lastExplicit firstAuto
         let table' =
@@ -2753,7 +2754,7 @@ let private insertCore
                 RowsArray = rows.DrainToImmutable()
                 NextAutoId = max nextAutoId' reservedAutoNext
                 UniqueIndex = index }
-        Map.add tableKey table' db, (Option.defaultValue 0L firstAssigned, firstAuto, List.length accepted, accepted))
+        Map.add tableKey table' db, (Option.defaultValue 0L firstAssigned, firstAuto, List.length accepted, accepted, List.rev ignoredErrorsRev))
 
 /// Inserts rows built from `columns` and matching value lists, applying
 /// defaults, AUTO_INCREMENT assignment, NOT NULL/type-coercion checks, and
@@ -2785,11 +2786,17 @@ let private insertRowsPreparedCore
                     insertCore store.ForeignKeyChecks store.StrictMode ignoreErrors db key rowsIn indices prepare)))
 
     match result with
-    | Ok(lastId, generatedId, affected, rows) ->
+    | Ok(lastId, generatedId, affected, rows, ignoredErrors) ->
         if not rows.IsEmpty then
             emit store (Some(RowsInserted(dbName, tableName, rows)))
 
-        Ok { LastInsertId = lastId; GeneratedId = generatedId; Affected = affected; InsertedRows = rows }
+        Ok {
+            LastInsertId = lastId
+            GeneratedId = generatedId
+            Affected = affected
+            InsertedRows = rows
+            IgnoredErrors = ignoredErrors
+        }
     | Error e -> Error e
 
 let insertRows
@@ -3042,7 +3049,13 @@ let rec upsertRows
             cascaded
             |> Map.iter (fun tableKey changes -> if not changes.IsEmpty then emit store (Some(RowsUpdated(dbName, originalNameOf tableKey, changes))))
 
-            Ok { LastInsertId = lastId; GeneratedId = generatedId; Affected = affected; InsertedRows = inserted }
+            Ok {
+                LastInsertId = lastId
+                GeneratedId = generatedId
+                Affected = affected
+                InsertedRows = inserted
+                IgnoredErrors = []
+            }
         | Error e -> Error e
 
 /// `upsertRows`'s per-table body, pulled out only so it can take `db` (needed
@@ -3530,7 +3543,8 @@ let replaceRows
                             { LastInsertId = Option.defaultValue 0L (Option.orElse lastExplicit firstAuto)
                               GeneratedId = firstAuto
                               Affected = affected
-                              InsertedRows = List.rev inserted }
+                              InsertedRows = List.rev inserted
+                              IgnoredErrors = [] }
 
                         db, (outcome, events)))))
 

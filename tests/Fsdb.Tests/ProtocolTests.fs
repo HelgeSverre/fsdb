@@ -59,6 +59,21 @@ let tests =
               let statusFlags = r.ReadInt16LE()
               Expect.isTrue (statusFlags &&& StatusInTrans <> 0) "SERVER_STATUS_IN_TRANS set"
 
+          testCase "OK and result terminators carry warning counts"
+          <| fun _ ->
+              let warningCount (payload: byte[]) =
+                  let r = Reader(payload.[1..])
+                  r.ReadLenEncInt() |> ignore
+                  r.ReadLenEncInt() |> ignore
+                  r.ReadInt16LE() |> ignore
+                  r.ReadInt16LE()
+
+              Expect.equal (warningCount (okPayloadWithWarnings ClientProtocol41 StatusAutocommit 0UL 0UL 3)) 3 "OK warnings"
+              Expect.equal (warningCount (okEndOfResultSetPayloadWithWarnings ClientProtocol41 StatusAutocommit 4)) 4 "deprecate-EOF warnings"
+
+              let eof = Reader((eofPayloadWithWarnings ClientProtocol41 StatusAutocommit 5).[1..])
+              Expect.equal (eof.ReadInt16LE()) 5 "legacy EOF warnings"
+
           testCase "ERR payload carries the error code and message"
           <| fun _ ->
               let payload = errPayload ClientProtocol41 1064 "bad syntax"

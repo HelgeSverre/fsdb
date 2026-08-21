@@ -146,6 +146,7 @@ let private okPayloadWithHeader
     (statusFlags: int)
     (affectedRows: uint64)
     (lastInsertId: uint64)
+    (warnings: int)
     : byte[] =
     let w = Writer()
     w.WriteByte header
@@ -154,7 +155,7 @@ let private okPayloadWithHeader
 
     if capabilities &&& ClientProtocol41 <> 0u then
         w.WriteInt16LE statusFlags
-        w.WriteInt16LE 0 // warnings
+        w.WriteInt16LE warnings
 
     w.ToArray()
 
@@ -166,14 +167,26 @@ let private okPayloadWithHeader
 /// directly off the OK packet rather than tracking transaction state
 /// themselves.
 let okPayload (capabilities: uint32) (statusFlags: int) (affectedRows: uint64) (lastInsertId: uint64) : byte[] =
-    okPayloadWithHeader 0uy capabilities statusFlags affectedRows lastInsertId
+    okPayloadWithHeader 0uy capabilities statusFlags affectedRows lastInsertId 0
+
+let okPayloadWithWarnings
+    (capabilities: uint32)
+    (statusFlags: int)
+    (affectedRows: uint64)
+    (lastInsertId: uint64)
+    (warnings: int)
+    : byte[] =
+    okPayloadWithHeader 0uy capabilities statusFlags affectedRows lastInsertId warnings
 
 /// Builds the OK packet that terminates a resultset when CLIENT_DEPRECATE_EOF
 /// is negotiated. Same shape as `okPayload`, but header 0xfe — clients tell
 /// it apart from a row by that header byte together with the packet length,
 /// so this can't just reuse okPayload's 0x00.
 let okEndOfResultSetPayload (capabilities: uint32) (statusFlags: int) : byte[] =
-    okPayloadWithHeader 0xfeuy capabilities statusFlags 0UL 0UL
+    okPayloadWithHeader 0xfeuy capabilities statusFlags 0UL 0UL 0
+
+let okEndOfResultSetPayloadWithWarnings (capabilities: uint32) (statusFlags: int) (warnings: int) : byte[] =
+    okPayloadWithHeader 0xfeuy capabilities statusFlags 0UL 0UL warnings
 
 /// Minimal MySQL error-code -> SQLSTATE mapping. Drivers/ORMs branch on
 /// SQLSTATE, not the vendor code — PDO/Doctrine map 42000 to a syntax-error
@@ -221,7 +234,17 @@ let eofPayload (capabilities: uint32) (statusFlags: int) : byte[] =
     w.WriteByte 0xfeuy
 
     if capabilities &&& ClientProtocol41 <> 0u then
-        w.WriteInt16LE 0 // warnings
+        w.WriteInt16LE 0
+        w.WriteInt16LE statusFlags
+
+    w.ToArray()
+
+let eofPayloadWithWarnings (capabilities: uint32) (statusFlags: int) (warnings: int) : byte[] =
+    let w = Writer()
+    w.WriteByte 0xfeuy
+
+    if capabilities &&& ClientProtocol41 <> 0u then
+        w.WriteInt16LE warnings
         w.WriteInt16LE statusFlags
 
     w.ToArray()

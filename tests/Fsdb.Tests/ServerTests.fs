@@ -56,6 +56,7 @@ let tests =
                               1uy
                               StatusAutocommit
                               0UL
+                              3
                               []
                               (ResultSet([ "a"; "b" ], [ [ Some "1"; None ] ]))
 
@@ -72,7 +73,19 @@ let tests =
                           (Some 2UL)
                           "first packet is the column count"
 
-                      Expect.equal (List.last packets).Payload.[0] terminator "terminator header" }
+                      Expect.equal (List.last packets).Payload.[0] terminator "terminator header"
+
+                      let terminatorWarnings =
+                          let reader = Reader((List.last packets).Payload.[1..])
+
+                          if caps &&& ClientDeprecateEof <> 0u then
+                              reader.ReadLenEncInt() |> ignore
+                              reader.ReadLenEncInt() |> ignore
+                              reader.ReadInt16LE() |> ignore
+
+                          reader.ReadInt16LE()
+
+                      Expect.equal terminatorWarnings 3 "terminator warning count" }
                   |> Async.RunSynchronously
 
           testCase "the legacy EOF path emits one more packet than CLIENT_DEPRECATE_EOF (the column-defs EOF)"
@@ -81,7 +94,7 @@ let tests =
                   let run caps =
                       async {
                           use stream = new IO.MemoryStream()
-                          do! Fsdb.Server.sendQueryResult stream caps 1uy StatusAutocommit 0UL [] (ResultSet([ "a" ], [ [ Some "1" ] ]))
+                          do! Fsdb.Server.sendQueryResult stream caps 1uy StatusAutocommit 0UL 0 [] (ResultSet([ "a" ], [ [ Some "1" ] ]))
                           stream.Position <- 0L
                           return! readAllPackets stream
                       }

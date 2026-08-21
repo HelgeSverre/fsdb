@@ -176,7 +176,13 @@ let private isGlobalScope (scope: string) : bool =
 /// raise 1193, the one case `resolveAtRef`'s flattened `string option`
 /// can't distinguish.
 let private lookupAtRef (session: Session) (sigil: string) (scope: string) (name: string) : string option option =
-    if sigil = "@@" then
+    let name = name.ToLowerInvariant()
+
+    if sigil = "@@" && not (isGlobalScope scope) && name = "warning_count" then
+        Some(Some(string session.Diagnostics.Length))
+    elif sigil = "@@" && not (isGlobalScope scope) && name = "error_count" then
+        Some(Some(string (session.Diagnostics |> List.filter (fun condition -> condition.Level = Diagnostics.Error) |> List.length)))
+    elif sigil = "@@" then
         if isGlobalScope scope then
             Session.tryGlobalVariable session.Store name
         else
@@ -352,11 +358,6 @@ let private showResult: InformationSchema.ShowResult -> QueryResult =
     | Ok(cols, rows) -> ResultSet(cols, rows)
     | Error(code, msg) -> Err(code, msg)
 
-/// `LIMIT [offset,] n` is accepted but applied trivially: fsdb never
-/// actually buffers a diagnostics area, so `SHOW WARNINGS`/`SHOW ERRORS`
-/// always answer empty regardless of the limit — real clients (mysql CLI,
-/// mysqli's `mysqli_report`) send this form routinely and only care that it
-/// doesn't 1064.
 let private showWarningsRe =
     Regex(@"^SHOW\s+WARNINGS(\s+LIMIT\s+\d+(\s*,\s*\d+)?)?$", RegexOptions.IgnoreCase)
 
@@ -1276,8 +1277,7 @@ type private Probe =
     | ShowRoutineStatus
     | Kill of queryOnly: bool * id: int64
     | AlterKeysNoop of table: string
-    | ShowWarnings
-    | ShowErrors
+    | ShowConditions of errorsOnly: bool
     | ShowMessageCount of isError: bool
     | ShowDatabases
     | ShowTableStatus
@@ -1403,9 +1403,9 @@ let private tryProbe (sql: string) (upper: string) : Probe option =
     elif showCountErrorsRe.IsMatch sql then
         Some(ShowMessageCount true)
     elif showWarningsRe.IsMatch sql then
-        Some ShowWarnings
+        Some(ShowConditions false)
     elif showErrorsRe.IsMatch sql then
-        Some ShowErrors
+        Some(ShowConditions true)
     elif upper.StartsWith "SHOW DATABASES" then
         Some ShowDatabases
     elif upper.StartsWith "SHOW TABLE STATUS" then
@@ -1715,11 +1715,39 @@ let private runProbe (session: Session) (sql: string) (probe: Probe) : Session *
         match InformationSchema.findTable (Session.currentStore session).Catalog dbName table with
         | Ok _ -> session, Affected 0UL
         | Error(code, msg) -> session, Err(code, msg)
-    | ShowWarnings
-    | ShowErrors -> session, ResultSet([ "Level"; "Code"; "Message" ], [])
+    | ShowConditions errorsOnly ->
+        let conditions =
+            session.Diagnostics
+            |> List.filter (fun condition -> not errorsOnly || condition.Level = Diagnostics.Error)
+
+        let limit =
+            let matchLimit = Regex.Match(sql, @"\s+LIMIT\s+(\d+)(?:\s*,\s*(\d+))?\s*$", RegexOptions.IgnoreCase)
+
+            if not matchLimit.Success then
+                conditions
+            else
+                let first = int matchLimit.Groups.[1].Value
+                let offset, count =
+                    if matchLimit.Groups.[2].Success then int matchLimit.Groups.[1].Value, int matchLimit.Groups.[2].Value else 0, first
+
+                conditions |> List.skip (min offset conditions.Length) |> List.truncate count
+
+        let rows =
+            limit
+            |> List.map (fun condition ->
+                let level = if condition.Level = Diagnostics.Error then "Error" else "Warning"
+                [ Some level; Some(string condition.Code); Some condition.Message ])
+
+        session, ResultSet([ "Level"; "Code"; "Message" ], rows)
     | ShowMessageCount isError ->
         let col = if isError then "@@session.error_count" else "@@session.warning_count"
-        session, ResultSet([ col ], [ [ Some "0" ] ])
+        let count =
+            if isError then
+                session.Diagnostics |> List.filter (fun condition -> condition.Level = Diagnostics.Error) |> List.length
+            else
+                session.Diagnostics.Length
+
+        session, ResultSet([ col ], [ [ Some(string count) ] ])
     | ShowDatabases -> session, handleShowDatabases session sql
     | ShowTableStatus -> session, handleShowTableStatus session sql
     | ShowCollation -> session, InformationSchema.showCollation (likeSuffix sql) |> showResult
@@ -2060,38 +2088,61 @@ let private recoverExecutionError (session: Session) (description: string) (erro
     match error with
     | Storage.LockWaitTimeout dbName ->
         Log.diagnostic "fsdb: ERR 1205 lock wait timeout on database %s -- %s" dbName description
-        recordResult (session, Err(1205, "Lock wait timeout exceeded; try restarting transaction"))
+        session, Err(1205, "Lock wait timeout exceeded; try restarting transaction")
     // ponytail: MySQL's 1690 message names the offending expression; fsdb
     // needs an AST printer before it can do the same without reconstructing SQL.
     | Value.UnsignedOutOfRange ->
         Log.diagnostic "fsdb: ERR 1690 unsigned out of range -- %s" description
-        recordResult (session, Err(1690, "BIGINT UNSIGNED value is out of range"))
+        session, Err(1690, "BIGINT UNSIGNED value is out of range")
     // Extension functions may fail after an effect, so their chosen SQL error
     // must not leave a transaction containing partially applied state.
     | Functions.SqlError(code, message) ->
         Log.diagnostic "fsdb: ERR %d %s -- %s" code message description
-        recordResult ({ session with Tx = None }, Err(code, message))
+        { session with Tx = None }, Err(code, message)
     | ex ->
         Log.diagnostic "fsdb: EXN %s -- %s" ex.Message description
-        recordResult ({ session with Tx = None }, Err(1105, "Internal error"))
+        { session with Tx = None }, Err(1105, "Internal error")
+
+let private preservesDiagnostics (sql: string) : bool =
+    let upper = sql.Trim().ToUpperInvariant()
+
+    match tryProbe sql upper with
+    | Some(ShowConditions _ | ShowMessageCount _) -> true
+    | _ ->
+        Regex.IsMatch(
+            sql,
+            @"^\s*SELECT\s+@@(?:SESSION\.)?(?:WARNING_COUNT|ERROR_COUNT)(?:\s+AS\s+\w+)?\s*$",
+            RegexOptions.IgnoreCase
+        )
+
+let private recordDiagnostics
+    (session: Session)
+    (preserve: bool)
+    (execute: unit -> Session * QueryResult)
+    : Session * QueryResult =
+    let session = if preserve then session else { session with Diagnostics = [] }
+    let (session, result), generated = Diagnostics.capture execute
+
+    let generated =
+        match result with
+        | Err(code, message) -> generated @ [ { Diagnostics.Level = Diagnostics.Error; Code = code; Message = message } ]
+        | _ -> generated
+
+    let session = if preserve then session else { session with Diagnostics = generated }
+    recordResult (session, result)
 
 let handle (session: Session) (rawSql: string) : Session * QueryResult =
-    try
-        match dispatch session rawSql with
-        | _, Err(code, msg) as result ->
-            Log.diagnostic "fsdb: ERR %d %s -- query: %s" code msg (Log.redactSql rawSql)
-            recordResult result
-        | result -> recordResult result
-    with
-    // A killed client mid-query (`Storage.queryCancellation`, armed by
-    // `Server.withCancellationWatch`) — not an internal error to report
-    // back to a client that's already gone, so this re-raises rather than
-    // folding into the generic `Err(1105, ...)` below: `Server`'s command
-    // loop catches it, skips the now-pointless reply, and logs the one
-    // clean line itself.
-    | :? OperationCanceledException ->
-        reraise ()
-    | ex -> recoverExecutionError session (sprintf "query: %s" (Log.redactSql rawSql)) ex
+    recordDiagnostics session (preservesDiagnostics rawSql) (fun () ->
+        try
+            match dispatch session rawSql with
+            | _, Err(code, msg) as result ->
+                Log.diagnostic "fsdb: ERR %d %s -- query: %s" code msg (Log.redactSql rawSql)
+                result
+            | result -> result
+        with
+        | :? OperationCanceledException ->
+            reraise ()
+        | ex -> recoverExecutionError session (sprintf "query: %s" (Log.redactSql rawSql)) ex)
 
 /// Executes a prepared statement with its bound parameter values. Parser-
 /// produced statements bind the values into the parsed AST and run it
@@ -2104,12 +2155,14 @@ let executePrepared (session: Session) (stmt: PreparedStmt) (values: Value list)
     // that overflows a temporal/numeric op (or any bug) would otherwise drop
     // the connection with no ERR packet. Give it the same 1105 safety net
     // `handle` gives the text path.
-    try
-        match stmt.Ast with
-        | Some ast -> executeParsed session (bindPlaceholders ast values) |> recordResult
-        | None -> handle session (substitutePlaceholders stmt.Sql (values |> List.map valueToSqlLiteral))
-    with
-    | PlaceholderCountMismatch(expected, got) ->
-        recordResult (session, Err(1210, sprintf "Incorrect arguments to EXECUTE (expected %d, got %d)" expected got))
-    | :? OperationCanceledException -> reraise ()
-    | ex -> recoverExecutionError session "prepared statement" ex
+    match stmt.Ast with
+    | None -> handle session (substitutePlaceholders stmt.Sql (values |> List.map valueToSqlLiteral))
+    | Some ast ->
+        recordDiagnostics session false (fun () ->
+            try
+                executeParsed session (bindPlaceholders ast values)
+            with
+            | PlaceholderCountMismatch(expected, got) ->
+                session, Err(1210, sprintf "Incorrect arguments to EXECUTE (expected %d, got %d)" expected got)
+            | :? OperationCanceledException -> reraise ()
+            | ex -> recoverExecutionError session "prepared statement" ex)
