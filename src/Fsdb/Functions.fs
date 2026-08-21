@@ -163,14 +163,17 @@ let private concatFn (args: Value list) : Value =
     if args |> List.exists (function VNull -> true | _ -> false) then
         VNull
     elif args |> List.exists (tryRawBytes >> Option.isSome) then
-        args |> List.collect (stringBytes >> Array.toList) |> Array.ofList |> VBytes
+        args |> List.toArray |> Array.collect stringBytes |> VBytes
     else
         args |> List.map (toText >> Option.defaultValue "") |> String.concat "" |> VString
 
 let private textMap (f: string -> string) : Scalar =
     function
     | [ VNull ] -> VNull
-    | [ v ] -> v |> toText |> Option.defaultValue "" |> f |> VString
+    | [ value ] ->
+        match tryRawBytes value with
+        | Some bytes -> bytes |> Text.Encoding.Latin1.GetString |> f |> Text.Encoding.Latin1.GetBytes |> VBytes
+        | None -> value |> toText |> Option.defaultValue "" |> f |> VString
     | _ -> VNull
 
 /// True if any argument is NULL — the common case for multi-arg string/math
@@ -3602,8 +3605,15 @@ let aesDecrypt (blockEncryptionMode: string) : Scalar =
                 CryptographicOperations.ZeroMemory key
                 CryptographicOperations.ZeroMemory initializationVector
 
-let private md5Fn: Scalar = textMap (fun s -> Convert.ToHexString(MD5.HashData(Text.Encoding.UTF8.GetBytes s)).ToLowerInvariant())
-let private sha1Fn: Scalar = textMap (fun s -> Convert.ToHexString(SHA1.HashData(Text.Encoding.UTF8.GetBytes s)).ToLowerInvariant())
+let private md5Fn: Scalar =
+    function
+    | [ value ] when not (anyNull [ value ]) -> VString(Convert.ToHexString(MD5.HashData(stringBytes value)).ToLowerInvariant())
+    | _ -> VNull
+
+let private sha1Fn: Scalar =
+    function
+    | [ value ] when not (anyNull [ value ]) -> VString(Convert.ToHexString(SHA1.HashData(stringBytes value)).ToLowerInvariant())
+    | _ -> VNull
 
 let private makeSetFn: Scalar =
     function
@@ -3834,7 +3844,7 @@ let private sha224 (data: byte[]) : byte[] =
 let private sha2Fn: Scalar =
     function
     | [ s; lenV ] when not (anyNull [ s; lenV ]) ->
-        let bytes = Text.Encoding.UTF8.GetBytes(req s)
+        let bytes = stringBytes s
 
         let hash =
             match int (toDouble lenV) with
@@ -4457,7 +4467,7 @@ let private crc32 (bytes: byte[]) : uint32 =
 
 let private crc32Fn: Scalar =
     function
-    | [ v ] when not (anyNull [ v ]) -> VInt(int64 (crc32 (Text.Encoding.UTF8.GetBytes(req v))))
+    | [ value ] when not (anyNull [ value ]) -> VInt(int64 (crc32 (stringBytes value)))
     | _ -> VNull
 
 let private uuidFn: Scalar = fun _ -> VString(Guid.NewGuid().ToString())

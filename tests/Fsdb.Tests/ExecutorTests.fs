@@ -6421,8 +6421,8 @@ let tests =
                     runDefault store "CREATE TABLE bits (value BIT(64))" |> ignore
                     runDefault store "INSERT INTO bits VALUES (0x8000000000000000)" |> ignore
 
-                    match runDefault store "SELECT HEX(value), LENGTH(value), BIT_LENGTH(value), TO_BASE64(value), HEX(CONCAT(value)), HEX(REPEAT(value, 1)), HEX(SUBSTRING(value, 1, 1)) FROM bits" with
-                    | ResultSet(_, [ [ Some "8000000000000000"; Some "8"; Some "64"; Some "gAAAAAAAAAA="; Some "8000000000000000"; Some "8000000000000000"; Some "80" ] ]) -> ()
+                    match runDefault store "SELECT HEX(value), LENGTH(value), BIT_LENGTH(value), TO_BASE64(value), HEX(CONCAT(value)), HEX(REPEAT(value, 1)), HEX(SUBSTRING(value, 1, 1)), HEX(UPPER(value)), HEX(REVERSE(value)), MD5(value), SHA2(value, 256) FROM bits" with
+                    | ResultSet(_, [ [ Some "8000000000000000"; Some "8"; Some "64"; Some "gAAAAAAAAAA="; Some "8000000000000000"; Some "8000000000000000"; Some "80"; Some "8000000000000000"; Some "0000000000000080"; Some "54409ea540dc450d53a86133d867c772"; Some "b1b0bee5378188f5250138bcce25855f2617f9c55b20b9628e13d367c47404a9" ] ]) -> ()
                     | other -> failtestf "expected raw BIT bytes, got %A" other
 
                 testCase "BIT predicates preserve values above double precision"
