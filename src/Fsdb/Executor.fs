@@ -4041,8 +4041,9 @@ and private flattenAnd (expr: Expr) : Expr list =
     | BinOp(And, l, r) -> flattenAnd l @ flattenAnd r
     | e -> [ e ]
 
-/// `SELECT`'s single-table, no-`JOIN` `FROM`, narrowed to its PK/UNIQUE
-/// index's candidates via `Storage.tryUniqueLookup`, when `whereExpr` ANDs
+/// `SELECT`'s single-table, no-`JOIN` `FROM`, narrowed to an equality
+/// index's candidates via `Storage.tryUniqueLookup` or
+/// `Storage.trySecondaryLookup`, when `whereExpr` ANDs
 /// in an equality against an indexed column with a directly-literal value.
 /// Only ever narrows (a superset of what the full WHERE could match) —
 /// `runSelectStmt` still runs the complete, unmodified WHERE/ORDER
@@ -4058,7 +4059,7 @@ and private flattenAnd (expr: Expr) : Expr list =
 /// users.id = 5)`), and matching it against this table's index would probe
 /// the wrong table's key space entirely. An unqualified `Col n` doesn't
 /// need this check: SQL's own scoping already resolves a bare name to the
-/// innermost table that has it, and `tryUniqueLookup` only succeeds when
+/// innermost table that has it, and the index lookup only succeeds when
 /// `tref.Table` actually has an indexed column called `n` — so a bare name
 /// that (via that same scoping) really means an outer column simply finds
 /// no matching index here and falls back, same as any other miss.
@@ -4080,7 +4081,7 @@ and private tryPointLookup (store: Store) (dbName: string) (tref: TableRef) (whe
     let tableDb = tref.Database |> Option.defaultValue dbName
 
     pointLookupEqualities tref whereExpr
-    |> List.tryPick (fun (n, v) -> Storage.tryUniqueLookup store tableDb tref.Table n v)
+    |> List.tryPick (fun (n, v) -> Storage.tryEqualityLookup store tableDb tref.Table n v)
 
 /// Per-column MySQL wire type for a freshly-projected resultset, read off
 /// the first non-NULL `Value` in each column across `rows` — a plain
@@ -6752,10 +6753,9 @@ let private bindNewRow (columnIndex: Map<string, int list>) (row: Value[]) (stmt
 // EXPLAIN — a pure *description* of what this executor would actually do
 // (join order, subquery/derived-table/union structure, current row counts),
 // never a speculative index-planner: `type` is `ALL` (a full scan),
-// `system` for a 0/1-row table, or `const` with `key`/`key_len`/`ref`
-// filled in exactly when `execute`'s own `tryPointLookup` would resolve the
-// block through a unique index — the plan reports an index only when the
-// execution genuinely uses one. `rows` is the table's *actual* current row
+// `system` for a 0/1-row table, `const` for a unique equality probe, or
+// `ref` for an ordinary equality bucket. The plan reports an index only
+// when execution genuinely uses one. `rows` is the table's actual current
 // count (an in-memory `scan`, not an estimate) since this engine can
 // afford that where real MySQL's cost-based planner can't.
 // ---------------------------------------------------------------------------
@@ -6888,9 +6888,7 @@ let private isCorrelated (sub: SelectStmt) : bool =
 
 /// `EXPLAIN`'s `type`/`rows` pair for one real (or `information_schema`
 /// virtual) table: `system` for a table with at most one row, `ALL`
-/// otherwise (this executor never does anything but a full scan), and the
-/// table's actual current row count — honest, not an estimate, since a
-/// `scan` is cheap at this engine's in-memory scale. `EXPLAIN` still
+/// otherwise, and the table's actual current row count. `EXPLAIN` still
 /// describes a real statement, so a table that doesn't exist is 1146 here
 /// too, same as it would be if the statement actually ran — not a fake
 /// plan with `rows = NULL`.
@@ -6967,14 +6965,10 @@ let rec private explainJoinBlock
               Rows = rowCount
               Extra = (if idx = tableCount - 1 then extra else []) }
 
-    /// A single-table block whose WHERE ANDs in a unique-key equality is the
-    /// exact case `execute` resolves through `tryPointLookup` — report it as
-    /// MySQL's `const` (key/key_len/ref filled in, rows = 1), or as the
-    /// `no matching row in const table` shape when the key has no such row,
-    /// instead of pretending a full scan. Shares `pointLookupEqualities`/
-    /// `Storage.tryUniqueKeyProbe` with the executor so the plan can't claim
-    /// an index the execution wouldn't use.
-    let tryExplainConst (tref: TableRef) : bool =
+    /// A single-table block whose WHERE contains an equality index probe.
+    /// Unique probes report MySQL's `const` shape; ordinary B-tree probes
+    /// report `ref`. Both share the executor's probe predicates.
+    let tryExplainEqualityIndex (tref: TableRef) : bool =
         if tableCount <> 1 then
             false
         else
@@ -6983,18 +6977,17 @@ let rec private explainJoinBlock
             let probed =
                 pointLookupEqualities tref whereOpt
                 |> List.tryPick (fun (n, v) ->
-                    Storage.tryUniqueKeyProbe store tableDb tref.Table n v
-                    |> Option.map (fun (table, keyName, colIdx) ->
-                        let found =
-                            Storage.tryUniqueLookup store tableDb tref.Table n v
-                            |> Option.map (snd >> List.isEmpty >> not)
-                            |> Option.defaultValue false
+                    Storage.tryEqualityKeyProbe store tableDb tref.Table n v
+                    |> Option.map (fun (table, keyName, columnIndex, unique) ->
+                        let rowCount =
+                            Storage.tryEqualityLookup store tableDb tref.Table n v
+                            |> Option.map (snd >> List.length)
+                            |> Option.defaultValue 0
 
-                        keyName, table.Columns.[colIdx], found))
+                        table, keyName, columnIndex, unique, rowCount))
 
             match probed with
-            | None -> false
-            | Some(keyName, keyCol, found) when found ->
+            | Some(table, keyName, columnIndex, true, rowCount) when rowCount > 0 ->
                 // MySQL shows no `Using where` on a const row — the single
                 // row is read at plan time and any leftover conditions are
                 // checked against it, not scanned for.
@@ -7005,12 +6998,12 @@ let rec private explainJoinBlock
                       SelectType = selectType
                       Table = Some(tref.Alias |> Option.defaultValue tref.Table)
                       Type = Some "const"
-                      Key = Some(keyName, explainKeyLen keyCol)
+                      Key = Some(keyName, explainKeyLen table.Columns.[columnIndex])
                       Rows = Some 1UL
                       Extra = extra' }
 
                 true
-            | Some _ ->
+            | Some(_, _, _, true, _) ->
                 acc.Add
                     { Id = Some id
                       SelectType = selectType
@@ -7022,6 +7015,19 @@ let rec private explainJoinBlock
 
                 true
 
+            | Some(table, keyName, columnIndex, false, rowCount) ->
+                acc.Add
+                    { Id = Some id
+                      SelectType = selectType
+                      Table = Some(tref.Alias |> Option.defaultValue tref.Table)
+                      Type = Some "ref"
+                      Key = Some(keyName, explainKeyLen table.Columns.[columnIndex])
+                      Rows = Some(uint64 rowCount)
+                      Extra = extra }
+
+                true
+            | None -> false
+
     /// One `FromItem`'s row(s): a real table's stats, or a derived table's
     /// `<derivedN>` placeholder plus its own recursive `DERIVED` block.
     let explainFromItem (idx: int) (item: FromItem) : Result<unit, QueryResult> =
@@ -7029,7 +7035,7 @@ let rec private explainJoinBlock
         | FromTable tref ->
             explainTableStats store dbName tref
             |> Result.map (fun (n, ty) ->
-                if not (tryExplainConst tref) then
+                if not (tryExplainEqualityIndex tref) then
                     emitTableRow idx (tref.Alias |> Option.defaultValue tref.Table) n ty)
         | FromSubquery(PlainSelect sub, _alias)
         // A LATERAL body plans like any other derived table here; only its
@@ -8964,7 +8970,10 @@ let rec execute (store: Store) (registry: Registry) (dbName: string) (ids: int64
                         let targetSet = referenceSet targetRows
                         let predicate row =
                             match narrowed with
-                            | Some _ -> check row |> Result.mapError ExpressionError
+                            | Some _ ->
+                                check row
+                                |> Result.mapError ExpressionError
+                                |> Result.map (fun matches -> matches && targetSet.Contains row)
                             | None -> Ok(targetSet.Contains row)
                         let assignedIdxs = indexedAssignments |> List.map fst |> Set.ofList
 
@@ -9232,8 +9241,14 @@ let rec execute (store: Store) (registry: Registry) (dbName: string) (ids: int64
     | Delete deleteStmt when deleteStmt.Joins.IsEmpty ->
         let db, table = (deleteStmt.From.Database |> Option.defaultValue dbName), deleteStmt.From.Table
         let tableAlias = deleteStmt.From.Alias |> Option.defaultValue deleteStmt.From.Table
+        let narrowed = tryPointLookup store dbName deleteStmt.From deleteStmt.Where
 
-        match scan store db table with
+        let scanned =
+            narrowed
+            |> Option.map (fun (columns, rows) -> Ok(columns, rows |> List.map snd |> Seq.ofList))
+            |> Option.defaultWith (fun () -> scan store db table)
+
+        match scanned with
         | Error e -> ids, storageErr e
         | Ok(columns, rows) ->
             let columnIndex = columnIndexOf columns
@@ -9249,9 +9264,21 @@ let rec execute (store: Store) (registry: Registry) (dbName: string) (ids: int64
                 | Error(code, message) -> ids, Err(code, message)
                 | Ok targetRows ->
                     let targetSet = referenceSet targetRows
-                    let predicate row = Ok(targetSet.Contains row)
+                    let predicate row =
+                        match narrowed with
+                        | Some _ ->
+                            check row
+                            |> Result.mapError ExpressionError
+                            |> Result.map (fun matches -> matches && targetSet.Contains row)
+                        | None -> Ok(targetSet.Contains row)
 
-                    match deleteRows store db table predicate with
+                    let candidates = narrowed |> Option.map snd
+
+                    match
+                        candidates
+                        |> Option.map (fun rows -> deleteRowsCandidates store db table rows predicate)
+                        |> Option.defaultWith (fun () -> deleteRows store db table predicate)
+                    with
                     | Ok affected -> ids, Affected(uint64 affected)
                     | Error e -> ids, storageErr e
 

@@ -73,7 +73,8 @@ let createSchema (conn: MySqlConnection) =
             email VARCHAR(150) NOT NULL UNIQUE,
             age INT NOT NULL,
             meta JSON NOT NULL,
-            created_at DATETIME NOT NULL
+            created_at DATETIME NOT NULL,
+            KEY ix_users_age (age)
         )
         """
 

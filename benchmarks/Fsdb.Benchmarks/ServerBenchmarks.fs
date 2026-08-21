@@ -118,6 +118,11 @@ type ServerBenchmarks() =
 
     [<Benchmark>]
     [<BenchmarkCategory("Scale")>]
+    member this.FilterBySecondaryEquality() =
+        this.Query "SELECT id, name, age FROM users WHERE age = 30"
+
+    [<Benchmark>]
+    [<BenchmarkCategory("Scale")>]
     member this.InsertSingle() =
         let i = Interlocked.Increment(&insertCounter)
 

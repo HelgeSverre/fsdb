@@ -467,6 +467,24 @@ let tests =
               let reloaded = load dir
               Expect.equal (rowsOf reloaded defaultDatabase "t") [ [| VInt 1L; VInt 30L |] ] "the last candidate survives replay"
 
+          testCase "snapshot and WAL recovery rebuild non-unique equality buckets"
+          <| fun _ ->
+              let dir = tempDataDir ()
+              let store = load dir
+              attach dir store
+              let category = { mkCol "category" (TVarchar 20) with Nullable = false }
+              let index = { Name = "ix_category"; Columns = [ "category" ]; Unique = false; Kind = BTree }
+              createTable store defaultDatabase "items" [ mkCol "id" (TInt false); category ] [ index ] [] None None |> ignore
+              insertRows store defaultDatabase "items" None [ [ VInt 1L; VString "books" ]; [ VInt 2L; VString "books" ]; [ VInt 3L; VString "music" ] ] |> ignore
+              snapshotNow dir store
+              insertRows store defaultDatabase "items" None [ [ VInt 4L; VString "books" ] ] |> ignore
+
+              let reloaded = load dir
+
+              match trySecondaryLookup reloaded defaultDatabase "items" "category" (VString "books") with
+              | Some(_, rows) -> Expect.equal (rows |> List.map (snd >> fun row -> row.[0])) [ VInt 1L; VInt 2L; VInt 4L ] "recovered buckets preserve row order"
+              | None -> failtest "expected a recovered secondary-index probe"
+
           testCase "WAL replay of many single-row UPDATEs against a UNIQUE-indexed table doesn't rebuild the index once per event"
           <| fun _ ->
               // Replaying RowsUpdated/RowsDeleted must not reindex — a full

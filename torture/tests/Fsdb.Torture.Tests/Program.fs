@@ -393,7 +393,8 @@ let tests =
                           TableCharset = None
                           TableCollation = None
                           CreateTime = DateTime.UtcNow
-                          UniqueIndex = Map.empty }
+                          UniqueIndex = Map.empty
+                          SecondaryIndex = Map.empty }
 
                     store.Catalog <- Map.ofList [ defaultDatabase, Map.ofList [ "items", table ] ]
                     Expect.isEmpty (Invariants.validate store) "valid store"
@@ -411,7 +412,8 @@ let tests =
                           TableCharset = None
                           TableCollation = None
                           CreateTime = DateTime.UtcNow
-                          UniqueIndex = Map.empty }
+                          UniqueIndex = Map.empty
+                          SecondaryIndex = Map.empty }
 
                     store.Catalog <- Map.ofList [ defaultDatabase, Map.ofList [ "items", table ] ]
                     let errors = Invariants.validate store

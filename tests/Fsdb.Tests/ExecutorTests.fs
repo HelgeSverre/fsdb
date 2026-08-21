@@ -4700,7 +4700,7 @@ let tests =
                     | other -> failtestf "expected NTILE assignment, got %A" other ]
 
           testList
-              "PK/UNIQUE point-lookup fast path (Storage.tryUniqueLookup)"
+              "Equality-index lookup paths"
               [ testCase "WHERE pk = <literal>, alone or ANDed with a residual condition, matches a forced-scan twin table over randomized data"
                 <| fun _ ->
                     // `indexed`'s `id` is PRIMARY KEY, so a point SELECT on
@@ -4778,6 +4778,56 @@ let tests =
                     match runDefault store "SELECT v FROM t WHERE email = 'q@w.e'" with
                     | ResultSet([ "v" ], [ [ Some "8" ] ]) -> ()
                     | other -> failtestf "expected the point lookup on column index 2 to find v=8, got %A" other
+
+                testCase "a non-unique one-column B-tree index narrows SELECT and UPDATE while residual predicates preserve scan semantics"
+                <| fun _ ->
+                    let store = newStore ()
+                    runDefault store "CREATE TABLE indexed (id INT PRIMARY KEY, category VARCHAR(20), score INT, KEY ix_category (category))" |> ignore
+                    runDefault store "CREATE TABLE scanned (id INT PRIMARY KEY, category VARCHAR(20), score INT)" |> ignore
+
+                    for sql in
+                        [ "INSERT INTO indexed VALUES (1, 'Books', 10), (2, 'books', 30), (3, 'music', 40), (4, 'books', 20), (5, NULL, 50)"
+                          "INSERT INTO scanned VALUES (1, 'Books', 10), (2, 'books', 30), (3, 'music', 40), (4, 'books', 20), (5, NULL, 50)" ] do
+                        runDefault store sql |> ignore
+
+                    let rows sql =
+                        match runDefault store sql with
+                        | ResultSet(_, values) -> values
+                        | other -> failtestf "expected a resultset for %s, got %A" sql other
+
+                    Expect.equal
+                        (rows "SELECT id FROM indexed WHERE category = 'books' AND score >= 20")
+                        (rows "SELECT id FROM scanned WHERE category = 'books' AND score >= 20")
+                        "residual filtering agrees with a full scan"
+
+                    Expect.equal
+                        (runDefault store "UPDATE indexed SET category = 'archived' WHERE category = 'books' AND score = 20")
+                        (Affected 1UL)
+                        "one indexed row updates"
+
+                    Expect.equal (rows "SELECT id FROM indexed WHERE category = 'books'") [ [ Some "1" ]; [ Some "2" ] ] "updated rows leave their old bucket"
+                    Expect.equal (rows "SELECT id FROM indexed WHERE category = 'archived'") [ [ Some "4" ] ] "updated rows join their new bucket"
+                    Expect.equal (runDefault store "UPDATE indexed SET score = 77 WHERE category = 'books' ORDER BY id DESC LIMIT 1") (Affected 1UL) "one indexed row updates with a limit"
+                    Expect.equal (rows "SELECT id, score FROM indexed WHERE category = 'books' ORDER BY id") [ [ Some "1"; Some "10" ]; [ Some "2"; Some "77" ] ] "the limited update keeps the other bucket row"
+                    Expect.equal (runDefault store "DELETE FROM indexed WHERE category = 'books' ORDER BY id LIMIT 1") (Affected 1UL) "one indexed row deletes with a limit"
+                    Expect.equal (rows "SELECT id FROM indexed WHERE category = 'books'") [ [ Some "2" ] ] "deleted rows leave their bucket"
+                    Expect.equal (rows "SELECT id FROM indexed WHERE category = NULL") [] "NULL equality has no matches"
+
+                testCase "EXPLAIN reports ref only for the secondary equality access path execution uses"
+                <| fun _ ->
+                    let store = newStore ()
+                    runDefault store "CREATE TABLE books (id INT PRIMARY KEY, category VARCHAR(20), KEY ix_category (category))" |> ignore
+                    runDefault store "INSERT INTO books VALUES (1, 'fiction'), (2, 'fiction'), (3, 'history')" |> ignore
+
+                    match runDefault store "EXPLAIN SELECT * FROM books WHERE category = 'fiction'" with
+                    | ResultSet(_, [ [ Some "1"; Some "SIMPLE"; Some "books"; None; Some "ref"; Some "ix_category"; Some "ix_category"; Some "83"; Some "const"; Some "2"; Some "100.00"; Some "Using where" ] ]) ->
+                        ()
+                    | other -> failtestf "expected a secondary-index ref plan, got %A" other
+
+                    match runDefault store "EXPLAIN SELECT * FROM books WHERE category = 'fiction' AND id = 2" with
+                    | ResultSet(_, [ [ Some "1"; Some "SIMPLE"; Some "books"; None; Some "ref"; Some "ix_category"; Some "ix_category"; Some "83"; Some "const"; Some "2"; Some "100.00"; Some "Using where" ] ]) ->
+                        ()
+                    | other -> failtestf "expected the plan to follow the first equality probe, got %A" other
 
                 testCase "a composite PRIMARY KEY (out of the single-column fast path's scope) still returns correct results"
                 <| fun _ ->

@@ -964,7 +964,8 @@ let private decodeTable (r: #IReader) : Table =
           CreateTime = createTime
           RowsArray = RowStore.ofSeq rows
           NextAutoId = nextAutoId
-          UniqueIndex = Map.empty }
+          UniqueIndex = Map.empty
+          SecondaryIndex = Map.empty }
 
 /// Rejects a `snapshot.fsdb`/`.new` whose magic, claimed payload length, or
 /// CRC doesn't match what's actually on disk — the guard `load` needs before

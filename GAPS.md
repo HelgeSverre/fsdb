@@ -31,10 +31,10 @@ accepted (marked `ponytail:` in source), or recorded only in
 | Area | State | Largest single gap |
 |---|---|---|
 | SQL statements | Broad core; large admin/programmatic tail missing | Stored procedures/functions, events |
-| Query execution | Correct but planless | No index-based join access; subqueries re-run per outer row |
+| Query execution | Correct single-table equality access | No index-based join access; subqueries re-run per outer row |
 | Built-in functions | Broad scalar, aggregate, JSON, and time coverage | AES crypto, JSON Schema, geometry |
 | Data types | All common types | No TIME value domain, BIT, or geometry |
-| Constraints & indexes | PK/UNIQUE/FK/CHECK enforced | Non-unique secondary indexes are metadata only |
+| Constraints & indexes | PK/UNIQUE/FK/CHECK plus one-column equality indexes | No range/order/index-join access |
 | Charsets & collations | ICU-based utf8mb4 registry | Weight-table tailoring differs from MySQL's UCA tables |
 | Transactions | Snapshot + optimistic merge | SERIALIZABLE refused; no intra-database write parallelism |
 | Persistence | WAL + snapshot, crash-tested | Opt-in only; no group commit; tombstones never reclaimed |
@@ -107,9 +107,9 @@ identities for bit aggregates.
 
 | Gap | MySQL 8.4 | fsdb | Impact | Class |
 |---|---|---|---|---|
-| Secondary-index access paths | ref/eq_ref/range scans feed joins, ORDER BY, GROUP BY | only single-table PK/UNIQUE equality point lookups (`Storage.fs:1581–1634`); join inner sides and all ORDER BYs are full scans/sorts | high (scale) | divergence |
+| Secondary-index access paths | ref/eq_ref/range scans feed joins, ORDER BY, GROUP BY | single-table PK/UNIQUE and one-column non-unique B-tree equality lookups; join inner sides, ranges, and all ORDER BYs are full scans/sorts | high (scale) | divergence |
 | Optimizer | pushdown, constant folding, join reordering, cost model, statistics | none; joins fold left-to-right as written; derived tables materialize once per statement (`Functions.fs:44`, `Executor.fs:36–43`) | medium | divergence |
-| EXPLAIN fidelity | type ∈ system/const/eq_ref/ref/range/index/ALL; FORMAT=JSON/TREE; ANALYZE; optimizer_trace | `type` ∈ {system, const, ALL} only; extra flags limited to Using where/filesort/temporary (`Executor.fs:6697–6708, 6896–6903`) | low | divergence |
+| EXPLAIN fidelity | type ∈ system/const/eq_ref/ref/range/index/ALL; FORMAT=JSON/TREE; ANALYZE; optimizer_trace | `type` ∈ {system, const, ref, ALL}; FORMAT=JSON/TREE, ANALYZE, and optimizer_trace absent; extra flags limited to Using where/filesort/temporary | low | divergence |
 | Subquery strategies | semi-join/materialization/early-exit transformations | IN-subqueries re-execute per outer row; EXISTS materializes fully without LIMIT-1 short-circuit (`Executor.fs:2011, 2216`) | medium (scale) | divergence |
 | Join size ceiling | unbounded (memory-bound) | hard cap 1,000,000 candidate rows → error 1105 (`Executor.fs:1586, 3287–3290`) | medium | divergence |
 | Multi-table UPDATE/DELETE sources | derived tables allowed as join sources | real base tables only → 1064 (`Executor.fs:3334–3339`) | low | refusal |
@@ -177,7 +177,7 @@ ADD UNIQUE over colliding data fails 1062 rather than corrupting.
 
 | Gap | MySQL 8.4 | fsdb | Impact | Class |
 |---|---|---|---|---|
-| Non-unique secondary indexes | physical structures serving lookups/ordering | catalog metadata only; every non-point-lookup WHERE is a scan (`Storage.fs:110–117`) | high (scale) | divergence |
+| Non-unique secondary indexes | physical structures serving lookups/ordering | immutable one-column B-tree equality buckets serve single-table literal equality; composite, range, ordering, and join access remain scans | high (scale) | divergence |
 | Prefix indexes | `INDEX (col(N))` with SUB_PART metadata | parsed prefix length discarded; SUB_PART always NULL (`InformationSchema.fs:491–495`) | low | divergence |
 | Expression indexes | `INDEX ((expr))` | absent | low | refusal |
 | Descending/invisible indexes | `DESC`, `INVISIBLE` | absent | low | refusal |
@@ -430,7 +430,7 @@ Ranked by expected disruption to the primary consumers, independent of
 implementation effort:
 
 1. No TLS — blocks any non-loopback deployment with security requirements.
-2. Non-unique secondary indexes as metadata plus planless joins/subqueries —
+2. Planless joins/subqueries plus missing secondary range/order access —
    correctness holds, but scale diverges sharply from MySQL past small data.
 3. Trigger coverage (BEFORE/UPDATE/DELETE, OLD.*, compound bodies) and
    updatable views — the two largest deliberate-subset cliffs.

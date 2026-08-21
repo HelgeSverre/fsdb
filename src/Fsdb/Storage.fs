@@ -111,10 +111,8 @@ let toMySqlError (err: StorageError) : int * string =
 /// enforced via `UniqueIndex` on every `INSERT`/`UPDATE`/`upsertRows`/
 /// `DELETE`; `ForeignKeys` are enforced on `INSERT`/`UPDATE`/`DELETE` (see
 /// `checkFkParents`/`cascadeDelete`, also `UniqueIndex`-accelerated on the
-/// parent side), gated by `Store.ForeignKeyChecks`. Non-`UNIQUE` plain
-/// indexes remain metadata only, and every WHERE that doesn't reduce to a
-/// single PK/UNIQUE equality (see `tryUniqueLookup`) is still a full table
-/// scan.
+/// parent side), gated by `Store.ForeignKeyChecks`. `SecondaryIndex` holds
+/// derived equality buckets for one-column, non-unique B-tree indexes.
 type Table =
     { OriginalName: string
       Columns: ColumnDef list
@@ -136,7 +134,10 @@ type Table =
       /// Primary and unique keys resolve to stable row identities. Persistent
       /// maps preserve catalog snapshots; keys containing NULL are absent,
       /// matching MySQL uniqueness semantics.
-      UniqueIndex: Map<string, Map<string, RowId>> }
+      UniqueIndex: Map<string, Map<string, RowId>>
+      /// One-column non-unique B-tree keys map equality keys to stable row
+      /// identities. `Set` order follows row-store scan order.
+      SecondaryIndex: Map<string, Map<string, Set<RowId>>> }
 
     /// `RowsArray` as a plain list, in scan order — a fresh O(row count)
     /// copy on every access, for external validators/tools that walk a
@@ -1098,12 +1099,25 @@ let private uniqueKeyGroups (table: Table) : (string * int list) list =
 
     (if pk.IsEmpty then [] else [ "PRIMARY", pk ]) @ fromIndexes
 
+/// The one-column ordinary B-tree indexes whose equality access paths are
+/// materialized. Composite, FULLTEXT, and unique indexes retain their own
+/// representations and planning rules.
+let private secondaryKeyGroups (table: Table) : (string * int) list =
+    table.Indexes
+    |> List.choose (fun index ->
+        match index.Kind, index.Unique, index.Columns with
+        | BTree, false, [ column ] ->
+            resolveColumn table.Columns column
+            |> Result.toOption
+            |> Option.map (fun columnIndex -> index.Name, columnIndex)
+        | _ -> None)
+
 /// Stable equality key for values already coerced into a table column's
 /// declared type. Strings use the same case-insensitive, PAD SPACE semantics
 /// as Value.compare; every other same-typed value uses an exact encoding.
-/// NULL is deliberately absent because a UNIQUE key containing any NULL
-/// never collides under MySQL's semantics.
-let private encodeConstraintKey (columns: ColumnDef list) (indices: int list) (row: Value[]) : string option =
+/// NULL has its own key; `encodeConstraintKey` omits it for MySQL UNIQUE
+/// semantics.
+let private encodeEqualityKey (columns: ColumnDef list) (indices: int list) (row: Value[]) : string =
     let collationOf index =
         columns.[index].Collation
         |> Option.bind Collation.tryFind
@@ -1111,36 +1125,36 @@ let private encodeConstraintKey (columns: ColumnDef list) (indices: int list) (r
 
     let encode (index: int) =
         match row.[index] with
-        | VNull -> None
-        | VInt value -> Some("I" + string value)
+        | VNull -> "N"
+        | VInt value -> "I" + string value
         // Same "I" prefix as `VInt`: a `BIGINT UNSIGNED` key and a signed
         // one that hold the same number must land on the same key, or a
         // unique index would let both through as distinct rows.
-        | VUInt value -> Some("I" + string (decimal value))
+        | VUInt value -> "I" + string (decimal value)
         | VDouble value ->
             let normalized = if value = 0.0 then 0.0 else value
-            Some("D" + normalized.ToString("R", CultureInfo.InvariantCulture))
-        | VDecimal value -> Some("M" + value.ToString("G29", CultureInfo.InvariantCulture))
+            "D" + normalized.ToString("R", CultureInfo.InvariantCulture)
+        | VDecimal value -> "M" + value.ToString("G29", CultureInfo.InvariantCulture)
         // The column's own collation key — case/accent folding per the
         // declared COLLATE (utf8mb4_bin stays byte-distinct, a PAD SPACE
         // collation trims). Same rules as WHERE equality, so the index and
         // the comparison can never disagree.
-        | VString value -> Some("S" + (collationOf index).KeyOf value)
-        | VBytes value -> Some("B" + Convert.ToHexString value)
-        | VDate value -> Some("T" + string value.DayNumber)
-        | VDateTime value -> Some("V" + string value.Ticks)
-        | VJson value -> Some("J" + value.TrimEnd(' ').ToUpperInvariant())
+        | VString value -> "S" + (collationOf index).KeyOf value
+        | VBytes value -> "B" + Convert.ToHexString value
+        | VDate value -> "T" + string value.DayNumber
+        | VDateTime value -> "V" + string value.Ticks
+        | VJson value -> "J" + value.TrimEnd(' ').ToUpperInvariant()
 
-    let encoded = indices |> List.map encode
-
-    if encoded |> List.exists Option.isNone then
-        None
-    else
-        encoded
-        |> List.choose id
+    indices
+        |> List.map encode
         |> List.map (fun value -> string value.Length + ":" + value)
         |> String.concat ""
-        |> Some
+
+let private encodeConstraintKey (columns: ColumnDef list) (indices: int list) (row: Value[]) : string option =
+    if indices |> List.exists (fun index -> row.[index] = VNull) then
+        None
+    else
+        Some(encodeEqualityKey columns indices row)
 
 let private constraintLookup columns indices rows =
     let lookup = HashSet<string>(StringComparer.Ordinal)
@@ -1169,6 +1183,21 @@ let private rebuildUniqueIndex (table: Table) : Map<string, Map<string, RowId>> 
         name, inner)
     |> Map.ofList
 
+let private rebuildSecondaryIndex (table: Table) : Map<string, Map<string, Set<RowId>>> =
+    secondaryKeyGroups table
+    |> List.map (fun (name, index) ->
+        let buckets =
+            table.RowsArray.Indexed
+            |> Seq.fold
+                (fun buckets (rowId, row) ->
+                    let key = encodeEqualityKey table.Columns [ index ] row
+                    let rows = buckets |> Map.tryFind key |> Option.defaultValue Set.empty
+                    Map.add key (Set.add rowId rows) buckets)
+                Map.empty
+
+        name, buckets)
+    |> Map.ofList
+
 /// Bumped once per `reindexTable` call — the full-scan rebuild it wraps is
 /// the O(table size) cost a replay must pay a constant number of times, not
 /// once per replayed event. `AsyncLocal`, not a plain mutable: Expecto runs
@@ -1188,7 +1217,9 @@ let reindexCallCount () = reindexCallCountLocal.Value
 /// every write path below does.
 let reindexTable (table: Table) : Table =
     reindexCallCountLocal.Value <- reindexCallCountLocal.Value + 1
-    { table with UniqueIndex = rebuildUniqueIndex table }
+    { table with
+        UniqueIndex = rebuildUniqueIndex table
+        SecondaryIndex = rebuildSecondaryIndex table }
 
 let private sameTableSchema (left: Table) (right: Table) =
     left.OriginalName = right.OriginalName
@@ -1410,12 +1441,15 @@ let private sysTable (name: string) (columns: ColumnDef list) (rows: Value[] lis
           TableCharset = None
           TableCollation = None
           CreateTime = DateTime.Now
-          UniqueIndex = Map.empty }
+          UniqueIndex = Map.empty
+          SecondaryIndex = Map.empty }
 
     // `rebuildUniqueIndex` directly, not `reindexTable`: the latter bumps the
     // replay-cost counter tests use to catch per-event reindexing, and
     // bootstrap isn't replay.
-    { table with UniqueIndex = rebuildUniqueIndex table }
+    { table with
+        UniqueIndex = rebuildUniqueIndex table
+        SecondaryIndex = rebuildSecondaryIndex table }
 
 /// A registered virtual table dressed up as a rowless catalog `Table`, so
 /// the `SHOW COLUMNS`/`DESCRIBE`/`SHOW CREATE TABLE`/`SHOW INDEX` renderers
@@ -1538,25 +1572,51 @@ let create () : Store =
       Lock = obj ()
       RowLocks = Array.init 4096 (fun _ -> obj ()) }
 
-/// Removes/adds one row's entry in every unique group's map, the
-/// incremental update every write path below makes instead of
-/// `rebuildUniqueIndex`'s full rescan. Updates retain their row identity;
-/// inserts supply a new identity and deletes only remove old keys.
+/// Updates every derived index for one row identity. Updates retain their
+/// identity; inserts supply one and deletes remove the previous entry.
 let private reindexRow
     (columns: ColumnDef list)
     (uniqueGroups: (string * int list) list)
-    (removed: Value[] option)
+    (secondaryGroups: (string * int) list)
+    (removed: (RowId * Value[]) option)
     (added: (RowId * Value[]) option)
-    (index: Map<string, Map<string, RowId>>)
-    : Map<string, Map<string, RowId>> =
-    uniqueGroups
-    |> List.fold
-        (fun accIndex (name, idxs) ->
-            let group = Map.find name accIndex
-            let group = removed |> Option.fold (fun g r -> encodeConstraintKey columns idxs r |> Option.fold (fun g' k -> Map.remove k g') g) group
-            let group = added |> Option.fold (fun g (pos, a) -> encodeConstraintKey columns idxs a |> Option.fold (fun g' k -> Map.add k pos g') g) group
-            Map.add name group accIndex)
-        index
+    (uniqueIndex: Map<string, Map<string, RowId>>)
+    (secondaryIndex: Map<string, Map<string, Set<RowId>>>)
+    : Map<string, Map<string, RowId>> * Map<string, Map<string, Set<RowId>>> =
+    let uniqueIndex =
+        uniqueGroups
+        |> List.fold
+            (fun accIndex (name, idxs) ->
+                let group = Map.find name accIndex
+                let group = removed |> Option.fold (fun g (_, row) -> encodeConstraintKey columns idxs row |> Option.fold (fun g' k -> Map.remove k g') g) group
+                let group = added |> Option.fold (fun g (rowId, row) -> encodeConstraintKey columns idxs row |> Option.fold (fun g' k -> Map.add k rowId g') g) group
+                Map.add name group accIndex)
+            uniqueIndex
+
+    let secondaryIndex =
+        secondaryGroups
+        |> List.fold
+            (fun accIndex (name, index) ->
+                let group = Map.find name accIndex
+                let group =
+                    removed
+                    |> Option.fold (fun g (rowId, row) ->
+                        let key = encodeEqualityKey columns [ index ] row
+                        match Map.tryFind key g with
+                        | None -> g
+                        | Some rows ->
+                            let remaining = Set.remove rowId rows
+                            if remaining.IsEmpty then Map.remove key g else Map.add key remaining g) group
+                let group =
+                    added
+                    |> Option.fold (fun g (rowId, row) ->
+                        let key = encodeEqualityKey columns [ index ] row
+                        let rows = g |> Map.tryFind key |> Option.defaultValue Set.empty
+                        Map.add key (Set.add rowId rows) g) group
+                Map.add name group accIndex)
+            secondaryIndex
+
+    uniqueIndex, secondaryIndex
 
 /// The parent table's persistent unique-key index for exactly the column
 /// order `refIdxs` resolves to, if one of its PK/UNIQUE groups matches —
@@ -1662,6 +1722,89 @@ let tryUniqueLookup
                 |> Option.toList
 
         table.Columns, rows)
+
+/// A one-column ordinary B-tree equality probe after the literal has passed
+/// the same exact-value coercion guard as unique probes.
+let trySecondaryKeyProbe
+    (store: Store)
+    (dbName: string)
+    (tableName: string)
+    (columnName: string)
+    (literal: Value)
+    : (Table * string * int) option =
+    let table =
+        match store.Databases.TryGetValue dbName with
+        | false, _ -> None
+        | true, slot -> Map.tryFind (normalizeTableName tableName) slot.Value
+
+    match table with
+    | None -> None
+    | Some table ->
+        match resolveColumn table.Columns columnName with
+        | Error _ -> None
+        | Ok index ->
+            match secondaryKeyGroups table |> List.tryFind (fun (_, columnIndex) -> columnIndex = index) with
+            | None -> None
+            | Some(indexName, _) when not (Map.containsKey indexName table.SecondaryIndex) -> None
+            | Some(indexName, _) ->
+                match coerceValue store.StrictMode table.Columns.[index] literal with
+                | Ok coerced when coerced = literal -> Some(table, indexName, index)
+                | _ -> None
+
+/// Candidate rows for a one-column ordinary B-tree equality probe, in stable
+/// row-store scan order.
+let trySecondaryLookup
+    (store: Store)
+    (dbName: string)
+    (tableName: string)
+    (columnName: string)
+    (literal: Value)
+    : (ColumnDef list * (RowId * Value[]) list) option =
+    trySecondaryKeyProbe store dbName tableName columnName literal
+    |> Option.bind (fun (table, indexName, index) ->
+        match literal with
+        | VNull -> Some(table.Columns, [])
+        | _ ->
+            let probeRow = Array.create (List.length table.Columns) VNull
+            probeRow.[index] <- literal
+            let key = encodeEqualityKey table.Columns [ index ] probeRow
+
+            table.SecondaryIndex
+            |> Map.tryFind indexName
+            |> Option.map (fun buckets ->
+                let rows =
+                    buckets
+                    |> Map.tryFind key
+                    |> Option.defaultValue Set.empty
+                    |> Seq.choose (fun rowId -> table.RowsArray.TryFind rowId |> Option.map (fun row -> rowId, row))
+                    |> List.ofSeq
+
+                table.Columns, rows))
+
+/// The equality-index probe in the order execution considers it: a unique
+/// key first for each WHERE equality, then an ordinary B-tree bucket.
+let tryEqualityKeyProbe
+    (store: Store)
+    (dbName: string)
+    (tableName: string)
+    (columnName: string)
+    (literal: Value)
+    : (Table * string * int * bool) option =
+    tryUniqueKeyProbe store dbName tableName columnName literal
+    |> Option.map (fun (table, keyName, index) -> table, keyName, index, true)
+    |> Option.orElseWith (fun () ->
+        trySecondaryKeyProbe store dbName tableName columnName literal
+        |> Option.map (fun (table, keyName, index) -> table, keyName, index, false))
+
+let tryEqualityLookup
+    (store: Store)
+    (dbName: string)
+    (tableName: string)
+    (columnName: string)
+    (literal: Value)
+    : (ColumnDef list * (RowId * Value[]) list) option =
+    tryUniqueLookup store dbName tableName columnName literal
+    |> Option.orElseWith (fun () -> trySecondaryLookup store dbName tableName columnName literal)
 
 /// Verifies every foreign key `fks` (a child table's own `ForeignKeys`) has
 /// a matching parent row for `row`'s values, per MySQL's MATCH SIMPLE
@@ -1938,7 +2081,8 @@ let createTableSeeded
                       TableCharset = tableCharset
                       TableCollation = tableCollation
                       CreateTime = createTime
-                      UniqueIndex = Map.empty }
+                      UniqueIndex = Map.empty
+                      SecondaryIndex = Map.empty }
 
                 Ok(Map.add key (reindexTable table) db, createTime))
 
@@ -2591,6 +2735,7 @@ let private insertCore
     : Result<Database * (int64 * int64 option * int * Value[] list * StorageError list), StorageError> =
     let table = Map.find tableKey db
     let uniqueGroups = uniqueKeyGroups table
+    let secondaryGroups = secondaryKeyGroups table
 
     let reservedAutoNext =
         if not ignoreErrors then
@@ -2659,7 +2804,7 @@ let private insertCore
 
     let step acc (rowValues: Value list) =
         acc
-        |> Result.bind (fun ((acceptedRev: Value[] list), (ignoredErrorsRev: StorageError list), nextAutoId, firstAuto, lastExplicit, index) ->
+        |> Result.bind (fun ((acceptedRev: Value[] list), (ignoredErrorsRev: StorageError list), nextAutoId, firstAuto, lastExplicit, index: Map<string, Map<string, RowId>>, secondaryIndex) ->
             if List.length rowValues <> List.length idxs then
                 Error(ColumnCountMismatch(List.length idxs, List.length rowValues))
             else
@@ -2740,20 +2885,25 @@ let private insertCore
                         |> Option.iter (fun key -> parentKeySourceAdd key lookup)
 
                     let rowId = rows.Add candidate
-                    Ok(candidate :: acceptedRev, ignoredErrorsRev, nextAutoId', firstAuto', lastExplicit', reindexRow table.Columns uniqueGroups None (Some(rowId, candidate)) index)
-                | Error error when ignoreErrors -> Ok(acceptedRev, error :: ignoredErrorsRev, nextAutoId, firstAuto, lastExplicit, index)
+                    let index, secondaryIndex =
+                        reindexRow table.Columns uniqueGroups secondaryGroups None (Some(rowId, candidate)) index secondaryIndex
+
+                    Ok(candidate :: acceptedRev, ignoredErrorsRev, nextAutoId', firstAuto', lastExplicit', index, secondaryIndex)
+                | Error error when ignoreErrors ->
+                    Ok(acceptedRev, error :: ignoredErrorsRev, nextAutoId, firstAuto, lastExplicit, index, secondaryIndex)
                 | Error e -> Error e)
 
     rowsIn
-    |> List.fold step (Ok([], [], table.NextAutoId, None, None, table.UniqueIndex))
-    |> Result.map (fun (acceptedRev, ignoredErrorsRev, nextAutoId', firstAuto, lastExplicit, index) ->
+    |> List.fold step (Ok([], [], table.NextAutoId, None, None, table.UniqueIndex, table.SecondaryIndex))
+    |> Result.map (fun (acceptedRev, ignoredErrorsRev, nextAutoId', firstAuto, lastExplicit, index, secondaryIndex) ->
         let accepted = List.rev acceptedRev
         let firstAssigned = Option.orElse lastExplicit firstAuto
         let table' =
             { table with
                 RowsArray = rows.DrainToImmutable()
                 NextAutoId = max nextAutoId' reservedAutoNext
-                UniqueIndex = index }
+                UniqueIndex = index
+                SecondaryIndex = secondaryIndex }
         Map.add tableKey table' db, (Option.defaultValue 0L firstAssigned, firstAuto, List.length accepted, accepted, List.rev ignoredErrorsRev))
 
 /// Inserts rows built from `columns` and matching value lists, applying
@@ -2948,22 +3098,24 @@ and private cascadeUpdateVisitedFrom
                                     | Some "CASCADE" ->
                                         let visited' = visited |> Map.add childKey (alreadyVisited @ matching)
                                         let childGroups = uniqueKeyGroups childTbl
+                                        let secondaryGroups = secondaryKeyGroups childTbl
                                         let rows = childTbl.RowsArray.ToBuilder()
 
-                                        let rowChanges, index =
+                                        let rowChanges, index, secondaryIndex =
                                             childTbl.RowsArray.Indexed
                                             |> Seq.fold
-                                                (fun (changes, index) (rowId, row) ->
+                                                (fun (changes, index, secondaryIndex) (rowId, row) ->
                                                     if isChild row then
                                                         let row' = Array.copy row
                                                         List.iter2 (fun i v -> row'.[i] <- v) childIdxs newKey
                                                         rows.[rowId] <- row'
-                                                        (row, row') :: changes, reindexRow childTbl.Columns childGroups (Some row) (Some(rowId, row')) index
+                                                        let index, secondaryIndex = reindexRow childTbl.Columns childGroups secondaryGroups (Some(rowId, row)) (Some(rowId, row')) index secondaryIndex
+                                                        (row, row') :: changes, index, secondaryIndex
                                                     else
-                                                        changes, index)
-                                                ([], childTbl.UniqueIndex)
+                                                        changes, index, secondaryIndex)
+                                                ([], childTbl.UniqueIndex, childTbl.SecondaryIndex)
 
-                                        let d' = Map.add childKey { childTbl with RowsArray = rows.DrainToImmutable(); UniqueIndex = index } d
+                                        let d' = Map.add childKey { childTbl with RowsArray = rows.DrainToImmutable(); UniqueIndex = index; SecondaryIndex = secondaryIndex } d
                                         let changes' = changes |> Map.add childKey ((changes |> Map.tryFind childKey |> Option.defaultValue []) @ List.rev rowChanges)
 
                                         List.rev rowChanges
@@ -2978,22 +3130,24 @@ and private cascadeUpdateVisitedFrom
                                         | Some i -> Error(NotNullViolation childTbl.Columns.[i].Name)
                                         | None ->
                                             let childGroups = uniqueKeyGroups childTbl
+                                            let secondaryGroups = secondaryKeyGroups childTbl
                                             let rows = childTbl.RowsArray.ToBuilder()
 
-                                            let rowChanges, index =
+                                            let rowChanges, index, secondaryIndex =
                                                 childTbl.RowsArray.Indexed
                                                 |> Seq.fold
-                                                    (fun (changes, index) (rowId, row) ->
+                                                    (fun (changes, index, secondaryIndex) (rowId, row) ->
                                                         if isChild row then
                                                             let row' = Array.copy row
                                                             childIdxs |> List.iter (fun i -> row'.[i] <- VNull)
                                                             rows.[rowId] <- row'
-                                                            (row, row') :: changes, reindexRow childTbl.Columns childGroups (Some row) (Some(rowId, row')) index
+                                                            let index, secondaryIndex = reindexRow childTbl.Columns childGroups secondaryGroups (Some(rowId, row)) (Some(rowId, row')) index secondaryIndex
+                                                            (row, row') :: changes, index, secondaryIndex
                                                         else
-                                                            changes, index)
-                                                    ([], childTbl.UniqueIndex)
+                                                            changes, index, secondaryIndex)
+                                                    ([], childTbl.UniqueIndex, childTbl.SecondaryIndex)
 
-                                            let d' = Map.add childKey { childTbl with RowsArray = rows.DrainToImmutable(); UniqueIndex = index } d
+                                            let d' = Map.add childKey { childTbl with RowsArray = rows.DrainToImmutable(); UniqueIndex = index; SecondaryIndex = secondaryIndex } d
                                             let changes' = changes |> Map.add childKey ((changes |> Map.tryFind childKey |> Option.defaultValue []) @ List.rev rowChanges)
 
                                             Ok(d', visited |> Map.add childKey (alreadyVisited @ matching), changes')
@@ -3086,6 +3240,7 @@ and private upsertRowsInTable
                 indices
                 |> Result.bind (fun idxs ->
                     let uniqueGroups = uniqueKeyGroups table
+                    let secondaryGroups = secondaryKeyGroups table
 
                     let rows = table.RowsArray.ToBuilder()
 
@@ -3109,6 +3264,7 @@ and private upsertRowsInTable
                                   inserted: Value[] list,
                                   updated: (Value[] * Value[]) list,
                                   index: Map<string, Map<string, RowId>>,
+                                  secondaryIndex: Map<string, Map<string, Set<RowId>>>,
                                   cascadeDb: Database,
                                   visited: Map<string, Value[] list>,
                                   cascaded: Map<string, (Value[] * Value[]) list>) ->
@@ -3190,13 +3346,16 @@ and private upsertRowsInTable
                                                         // before=after RowsUpdated here would let
                                                         // an onCommit-driven pipeline whose drain
                                                         // upsert no-ops re-fire itself forever.
+                                                        let index, secondaryIndex = reindexRow table.Columns uniqueGroups secondaryGroups (Some(pos, existing)) (Some(pos, applied)) index secondaryIndex
+
                                                         nextAutoId',
                                                         firstAuto,
                                                         lastExplicit,
                                                         affected + weight,
                                                         inserted,
                                                         (if changed then (existing, applied) :: updated else updated),
-                                                        reindexRow table.Columns uniqueGroups (Some existing) (Some(pos, applied)) index,
+                                                        index,
+                                                        secondaryIndex,
                                                         cascadeDb',
                                                         visited',
                                                         cascaded'))
@@ -3221,23 +3380,26 @@ and private upsertRowsInTable
 
                                                     let rowId = rows.Add candidate
 
+                                                    let index, secondaryIndex = reindexRow table.Columns uniqueGroups secondaryGroups None (Some(rowId, candidate)) index secondaryIndex
+
                                                     nextAutoId',
                                                     firstAuto',
                                                     lastExplicit',
                                                     affected + 1,
                                                     candidate :: inserted,
                                                     updated,
-                                                    reindexRow table.Columns uniqueGroups None (Some(rowId, candidate)) index,
+                                                    index,
+                                                    secondaryIndex,
                                                     cascadeDb,
                                                     visited,
                                                     cascaded))))
 
                     rowsIn
-                    |> foldWithCancellation step (Ok(table.NextAutoId, None, None, 0, [], [], table.UniqueIndex, db, Map.empty, Map.empty))
-                    |> Result.map (fun (nextAutoId', firstAuto, lastExplicit, affected, inserted, updated, index, cascadeDb, _visited, cascaded) ->
+                    |> foldWithCancellation step (Ok(table.NextAutoId, None, None, 0, [], [], table.UniqueIndex, table.SecondaryIndex, db, Map.empty, Map.empty))
+                    |> Result.map (fun (nextAutoId', firstAuto, lastExplicit, affected, inserted, updated, index, secondaryIndex, cascadeDb, _visited, cascaded) ->
                         let finalRows = rows.DrainToImmutable()
 
-                        Map.add key { table with RowsArray = finalRows; NextAutoId = nextAutoId'; UniqueIndex = index } cascadeDb,
+                        Map.add key { table with RowsArray = finalRows; NextAutoId = nextAutoId'; UniqueIndex = index; SecondaryIndex = secondaryIndex } cascadeDb,
                         cascaded,
                         (Option.defaultValue 0L (Option.orElse lastExplicit firstAuto), firstAuto, affected, List.rev inserted, List.rev updated)))
 
@@ -3280,19 +3442,22 @@ let rec private cascadeDeleteVisited
     let removeFrom (d: Database) =
         let t = Map.find tableKey d
         let rows = t.RowsArray.ToBuilder()
+        let uniqueGroups = uniqueKeyGroups t
+        let secondaryGroups = secondaryKeyGroups t
 
-        let index, _ =
+        let index, secondaryIndex, _ =
             t.RowsArray.Indexed
             |> Seq.fold
-                (fun (index, pending) (rowId, row) ->
+                (fun (index, secondaryIndex, pending) (rowId, row) ->
                     match pending |> List.tryFindIndex ((=) row) with
                     | Some pendingIndex ->
                         rows.Remove rowId |> ignore
-                        reindexRow t.Columns (uniqueKeyGroups t) (Some row) None index, List.removeAt pendingIndex pending
-                    | None -> index, pending)
-                (t.UniqueIndex, toDelete)
+                        let index, secondaryIndex = reindexRow t.Columns uniqueGroups secondaryGroups (Some(rowId, row)) None index secondaryIndex
+                        index, secondaryIndex, List.removeAt pendingIndex pending
+                    | None -> index, secondaryIndex, pending)
+                (t.UniqueIndex, t.SecondaryIndex, toDelete)
 
-        Map.add tableKey { t with RowsArray = rows.DrainToImmutable(); UniqueIndex = index } d
+        Map.add tableKey { t with RowsArray = rows.DrainToImmutable(); UniqueIndex = index; SecondaryIndex = secondaryIndex } d
 
     if toDelete.IsEmpty then
         Ok(db, visited, blanked)
@@ -3333,6 +3498,7 @@ let rec private cascadeDeleteVisited
                                 | Some i -> Error(NotNullViolation childTbl.Columns.[i].Name)
                                 | None ->
                                     let childGroups = uniqueKeyGroups childTbl
+                                    let secondaryGroups = secondaryKeyGroups childTbl
 
                                     // Blanking retains row identities, so unique indexes can
                                     // be rekeyed without a full rebuild.
@@ -3342,24 +3508,25 @@ let rec private cascadeDeleteVisited
                                     // value.
                                     let rows = childTbl.RowsArray.ToBuilder()
 
-                                    let changes, index =
+                                    let changes, index, secondaryIndex =
                                         childTbl.RowsArray.Indexed
                                         |> Seq.fold
-                                            (fun (changes, index) (rowId, row) ->
+                                            (fun (changes, index, secondaryIndex) (rowId, row) ->
                                                 if isChild row then
                                                     let row' = Array.copy row
                                                     childIdxs |> List.iter (fun i -> row'.[i] <- VNull)
                                                     rows.[rowId] <- row'
-                                                    (row, row') :: changes, reindexRow childTbl.Columns childGroups (Some row) (Some(rowId, row')) index
+                                                    let index, secondaryIndex = reindexRow childTbl.Columns childGroups secondaryGroups (Some(rowId, row)) (Some(rowId, row')) index secondaryIndex
+                                                    (row, row') :: changes, index, secondaryIndex
                                                 else
-                                                    changes, index)
-                                            ([], childTbl.UniqueIndex)
+                                                    changes, index, secondaryIndex)
+                                            ([], childTbl.UniqueIndex, childTbl.SecondaryIndex)
 
                                     let blanked =
                                         blanked
                                         |> Map.add childKey ((blanked |> Map.tryFind childKey |> Option.defaultValue []) @ List.rev changes)
 
-                                    Ok(Map.add childKey { childTbl with RowsArray = rows.DrainToImmutable(); UniqueIndex = index } d, visited, blanked)
+                                    Ok(Map.add childKey { childTbl with RowsArray = rows.DrainToImmutable(); UniqueIndex = index; SecondaryIndex = secondaryIndex } d, visited, blanked)
                             | _ -> Error(ForeignKeyRestrict fk.Name))
 
             referencingForeignKeys db tableKey
@@ -3484,32 +3651,40 @@ let replaceRows
                                                 match optimizedConflict with
                                                 | Some(rowId, existing) ->
                                                     let changed = existing <> candidate
+                                                    let uniqueIndex, secondaryIndex =
+                                                        reindexRow
+                                                            target.Columns
+                                                            (uniqueKeyGroups target)
+                                                            (secondaryKeyGroups target)
+                                                            (Some(rowId, existing))
+                                                            (Some(rowId, candidate))
+                                                            target.UniqueIndex
+                                                            target.SecondaryIndex
 
                                                     { target with
                                                         RowsArray = target.RowsArray.SetItem(rowId, candidate)
                                                         NextAutoId = nextAutoId'
-                                                        UniqueIndex =
-                                                            reindexRow
-                                                                target.Columns
-                                                                (uniqueKeyGroups target)
-                                                                (Some existing)
-                                                                (Some(rowId, candidate))
-                                                                target.UniqueIndex },
+                                                        UniqueIndex = uniqueIndex
+                                                        SecondaryIndex = secondaryIndex },
                                                     (if changed then Some(RowsUpdated(dbName, tableName, [ existing, candidate ])) else None),
                                                     deletedConflicts.Length + 1 + (if changed then 1 else 0)
                                                 | None ->
                                                     let rowId, rows = target.RowsArray.Append candidate
+                                                    let uniqueIndex, secondaryIndex =
+                                                        reindexRow
+                                                            target.Columns
+                                                            (uniqueKeyGroups target)
+                                                            (secondaryKeyGroups target)
+                                                            None
+                                                            (Some(rowId, candidate))
+                                                            target.UniqueIndex
+                                                            target.SecondaryIndex
 
                                                     { target with
                                                         RowsArray = rows
                                                         NextAutoId = nextAutoId'
-                                                        UniqueIndex =
-                                                            reindexRow
-                                                                target.Columns
-                                                                (uniqueKeyGroups target)
-                                                                None
-                                                                (Some(rowId, candidate))
-                                                                target.UniqueIndex },
+                                                        UniqueIndex = uniqueIndex
+                                                        SecondaryIndex = secondaryIndex },
                                                     Some(RowsInserted(dbName, tableName, [ candidate ])),
                                                     deletedConflicts.Length + 1
 
@@ -3554,26 +3729,20 @@ let replaceRows
         Ok outcome
     | Error error -> Error error
 
-/// Deletes every row matching `predicate`. Returns the number of rows
+/// Deletes every candidate matching `predicate`. Returns the number of rows
 /// removed. `predicate` returns a `Result` rather than a plain `bool` so a
 /// per-row WHERE-evaluation failure (not reachable today — every `Value`
 /// operation is total — but a real possibility once functions that can
 /// fail per row land) surfaces as an `Error` instead of silently being
 /// treated as "didn't match". When `store.ForeignKeyChecks` is set (the
 /// default), applies every referencing foreign key's `ON DELETE` action —
-/// see `cascadeDelete`.
-///
-/// ponytail: `predicate` always runs against every row of `table.RowsArray` —
-/// unlike `SELECT` (`Executor.tryPointLookup`), a `WHERE <PK/UNIQUE col> =
-/// <literal>` DELETE never narrows to `UniqueIndex`'s O(log n) candidates
-/// first, so it's still O(table) even for a single-row delete by id. Route
-/// `predicate` through `tryUniqueLookup`-style narrowing (same "pure
-/// narrowing, never a correctness risk" shape `tryPointLookup` uses) once
-/// DELETE latency on a large table actually matters.
-let deleteRows
+/// see `cascadeDelete`. `None` candidates scan the table; a supplied set is
+/// rechecked by `predicate` before removal.
+let private deleteRowsCore
     (store: Store)
     (dbName: string)
     (tableName: string)
+    (candidates: (RowId * Value[]) list option)
     (predicate: Value[] -> Result<bool, StorageError>)
     : Result<int, StorageError> =
     let result =
@@ -3583,8 +3752,9 @@ let deleteRows
             virtualWriteGuard store dbName tableName
             |> Result.bind (fun () -> tryGetTable db tableName)
             |> Result.bind (fun table ->
-                table.RowsArray
-                |> List.ofSeq
+                (candidates
+                 |> Option.map (List.map snd)
+                 |> Option.defaultWith (fun () -> table.RowsArray |> List.ofSeq))
                 |> traverse (fun row -> predicate row |> Result.map (fun keep -> keep, row))
                 |> Result.bind (fun flagged ->
                     let toDelete = flagged |> List.filter fst |> List.map snd
@@ -3608,6 +3778,23 @@ let deleteRows
 
         Ok affected
     | Error e -> Error e
+
+let deleteRows
+    (store: Store)
+    (dbName: string)
+    (tableName: string)
+    (predicate: Value[] -> Result<bool, StorageError>)
+    : Result<int, StorageError> =
+    deleteRowsCore store dbName tableName None predicate
+
+let deleteRowsCandidates
+    (store: Store)
+    (dbName: string)
+    (tableName: string)
+    (candidates: (RowId * Value[]) list)
+    (predicate: Value[] -> Result<bool, StorageError>)
+    : Result<int, StorageError> =
+    deleteRowsCore store dbName tableName (Some candidates) predicate
 
 let private canMergePointUpdate tableKey rowIds (baseDb: Database) (batchDb: Database) (liveDb: Database) =
     let unchangedOtherTables =
@@ -3646,7 +3833,9 @@ let private mergePointUpdate dbName tableKey rowIds (baseDb: Database) (batchDb:
     | Some baseTable, Some batchTable, Some liveTable when sameTableSchema liveTable baseTable ->
         let rows = liveTable.RowsArray.ToBuilder()
         let uniqueGroups = uniqueKeyGroups liveTable
+        let secondaryGroups = secondaryKeyGroups liveTable
         let mutable index = liveTable.UniqueIndex
+        let mutable secondaryIndex = liveTable.SecondaryIndex
 
         for rowId in rowIds do
             match baseTable.RowsArray.TryFind rowId, batchTable.RowsArray.TryFind rowId, rows.TryFind rowId with
@@ -3662,14 +3851,17 @@ let private mergePointUpdate dbName tableKey rowIds (baseDb: Database) (batchDb:
                     conflict ()
 
                 rows.[rowId] <- after
-                index <- reindexRow liveTable.Columns uniqueGroups (Some before) (Some(rowId, after)) index
+                let uniqueIndex, updatedSecondaryIndex = reindexRow liveTable.Columns uniqueGroups secondaryGroups (Some(rowId, before)) (Some(rowId, after)) index secondaryIndex
+                index <- uniqueIndex
+                secondaryIndex <- updatedSecondaryIndex
             | _ -> conflict ()
 
         let mergedTable =
             { liveTable with
                 RowsArray = rows.DrainToImmutable()
                 NextAutoId = max liveTable.NextAutoId batchTable.NextAutoId
-                UniqueIndex = index }
+                UniqueIndex = index
+                SecondaryIndex = secondaryIndex }
 
         Map.add tableKey mergedTable liveDb
     | _ -> conflict ()
@@ -3810,6 +4002,7 @@ let updateRows
         |> Result.bind (fun () -> tryGetTable db tableName)
         |> Result.bind (fun table ->
             let uniqueGroups = uniqueKeyGroups table
+            let secondaryGroups = secondaryKeyGroups table
             let checkFks = store.ForeignKeyChecks
             // Failed statements discard the private builder, keeping
             // partial page rewrites outside the published catalog.
@@ -3820,6 +4013,7 @@ let updateRows
                 |> Result.bind
                     (fun (changesRev: (Value[] * Value[]) list,
                           index: Map<string, Map<string, RowId>>,
+                          secondaryIndex: Map<string, Map<string, Set<RowId>>>,
                           cascadeDb: Database,
                           visited: Map<string, Value[] list>,
                           cascaded: Map<string, (Value[] * Value[]) list>) ->
@@ -3829,12 +4023,12 @@ let updateRows
                                 | _ -> None
 
                             match rowId with
-                            | None -> Ok(changesRev, index, cascadeDb, visited, cascaded)
+                            | None -> Ok(changesRev, index, secondaryIndex, cascadeDb, visited, cascaded)
                             | Some rowId ->
                                 predicate row
                                 |> Result.bind (fun keep ->
                                     if not keep then
-                                        Ok(changesRev, index, cascadeDb, visited, cascaded)
+                                        Ok(changesRev, index, secondaryIndex, cascadeDb, visited, cascaded)
                                     else
                                         updater row
                                         |> Result.bind (coerceRow store.StrictMode table.Columns)
@@ -3867,16 +4061,17 @@ let updateRows
                                                  else
                                                      Ok(cascadeDb, visited, cascaded))
                                                 |> Result.map (fun (cascadeDb', visited', cascaded') ->
-                                                    newRow, reindexRow table.Columns uniqueGroups (Some row) (Some(rowId, newRow)) index, cascadeDb', visited', cascaded'))
-                                        |> Result.map (fun (newRow, index', cascadeDb', visited', cascaded') ->
+                                                    let index, secondaryIndex = reindexRow table.Columns uniqueGroups secondaryGroups (Some(rowId, row)) (Some(rowId, newRow)) index secondaryIndex
+                                                    newRow, index, secondaryIndex, cascadeDb', visited', cascaded'))
+                                        |> Result.map (fun (newRow, index', secondaryIndex', cascadeDb', visited', cascaded') ->
                                             builder.[rowId] <- newRow
-                                            (if newRow <> row then (row, newRow) :: changesRev else changesRev), index', cascadeDb', visited', cascaded')))
+                                            (if newRow <> row then (row, newRow) :: changesRev else changesRev), index', secondaryIndex', cascadeDb', visited', cascaded')))
 
             candidateRows
             |> Option.defaultWith (fun () -> table.RowsArray.Indexed |> List.ofSeq)
-            |> foldWithCancellation step (Ok([], table.UniqueIndex, db, Map.empty, Map.empty))
-            |> Result.map (fun (changesRev, index, cascadeDb, _visited, cascaded) ->
-                Map.add key { table with RowsArray = builder.DrainToImmutable(); UniqueIndex = index } cascadeDb, (List.rev changesRev, cascaded, db)))
+            |> foldWithCancellation step (Ok([], table.UniqueIndex, table.SecondaryIndex, db, Map.empty, Map.empty))
+            |> Result.map (fun (changesRev, index, secondaryIndex, cascadeDb, _visited, cascaded) ->
+                Map.add key { table with RowsArray = builder.DrainToImmutable(); UniqueIndex = index; SecondaryIndex = secondaryIndex } cascadeDb, (List.rev changesRev, cascaded, db)))
 
     let result =
         match candidates with
