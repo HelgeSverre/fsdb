@@ -31,6 +31,11 @@ type VariableContext =
       ReadSystemVariable: string -> string -> Result<string option, int * string>
       MaxUserVariables: int }
 
+type private TriggerRowScope =
+    { Columns: ColumnDef list
+      Old: Value[] option
+      New: Value[] option }
+
 /// Per-statement memo of derived-table (`FROM (SELECT ...)`) resolutions,
 /// keyed by the AST node's identity. Within one statement the same derived
 /// table is resolved by the executor *and* by the collation/fsp metadata
@@ -60,6 +65,7 @@ let private groupConcatMaxLen = System.Threading.AsyncLocal<int option>()
 let private viewStack = System.Threading.AsyncLocal<Set<string * string>>()
 let private variableContext = System.Threading.AsyncLocal<VariableContext option>()
 let private suppressVariableAssignments = System.Threading.AsyncLocal<bool>()
+let private triggerRowScope = System.Threading.AsyncLocal<TriggerRowScope option>()
 
 let withVariableContext (variables: VariableContext) (body: unit -> 'a) : 'a =
     let saved = variableContext.Value
@@ -80,6 +86,15 @@ let private withSuppressedVariableAssignments (body: unit -> 'a) : 'a =
         body ()
     finally
         suppressVariableAssignments.Value <- saved
+
+let private withTriggerRowScope (scope: TriggerRowScope) (body: unit -> 'a) : 'a =
+    let saved = triggerRowScope.Value
+
+    try
+        triggerRowScope.Value <- Some scope
+        body ()
+    finally
+        triggerRowScope.Value <- saved
 
 type private StoredView =
     { Name: string
@@ -1017,15 +1032,30 @@ let rec private resolveCol (ctx: EvalContext) (name: string) : Result<Value, Eva
 /// The `QualifiedCol` counterpart of `resolveCol` — same outer-context
 /// fallback, checked against `ctx.Qualifiers` instead of `ctx.ColumnIndex`.
 let rec private resolveQualifiedCol (ctx: EvalContext) (table: string) (col: string) : Result<Value, EvalError> =
-    match Map.tryFind (table.ToLowerInvariant()) ctx.Qualifiers with
-    | Some(cols, offset) ->
-        match cols |> List.tryFindIndex (fun c -> System.String.Equals(c.Name, col, System.StringComparison.OrdinalIgnoreCase)) with
-        | Some idx -> Ok ctx.Row.[offset + idx]
+    let scope = triggerRowScope.Value
+    match table.ToLowerInvariant(), scope with
+    | ("old" | "new"), Some images ->
+        let row =
+            match table.ToLowerInvariant() with
+            | "old" -> images.Old
+            | _ -> images.New
+
+        match row with
+        | Some row ->
+            match images.Columns |> List.tryFindIndex (fun column -> System.String.Equals(column.Name, col, System.StringComparison.OrdinalIgnoreCase)) with
+            | Some index -> Ok row.[index]
+            | None -> Error(unknownColumn (sprintf "%s.%s" table col))
         | None -> Error(unknownColumn (sprintf "%s.%s" table col))
-    | None ->
-        match ctx.Outer with
-        | Some parent -> resolveQualifiedCol parent table col
-        | None -> Error(unknownColumn (sprintf "%s.%s" table col))
+    | _ ->
+        match Map.tryFind (table.ToLowerInvariant()) ctx.Qualifiers with
+        | Some(cols, offset) ->
+            match cols |> List.tryFindIndex (fun c -> System.String.Equals(c.Name, col, System.StringComparison.OrdinalIgnoreCase)) with
+            | Some idx -> Ok ctx.Row.[offset + idx]
+            | None -> Error(unknownColumn (sprintf "%s.%s" table col))
+        | None ->
+            match ctx.Outer with
+            | Some parent -> resolveQualifiedCol parent table col
+            | None -> Error(unknownColumn (sprintf "%s.%s" table col))
 
 /// Finds the declared column occupying one flattened row position. A JOIN
 /// can expose the same physical range under more than one qualifier, but
@@ -8118,12 +8148,18 @@ let private err1442 (table: string) : QueryResult =
             table
     )
 
-/// `mysql.triggers` rows for `(db, table)`'s AFTER INSERT event, as
-/// `(name, bodyText, definer)`. Cell positions are
+/// `mysql.triggers` rows for one table/timing/event slot, as `(name, body,
+/// definer)`. Cell positions are
 /// `Storage.mysqlTriggersColumns`' fixed order; a row predating the definer
 /// column is 7 cells wide and reads as an empty definer, which refuses to
 /// fire rather than defaulting to some account.
-let private afterInsertTriggers (store: Store) (db: string) (table: string) : (string * string * string) list =
+let private triggersFor
+    (store: Store)
+    (db: string)
+    (table: string)
+    (timing: string)
+    (event: string)
+    : (string * string * string) list =
     match scan store "mysql" "triggers" with
     | Error _ -> []
     | Ok(_, rows) ->
@@ -8134,10 +8170,16 @@ let private afterInsertTriggers (store: Store) (db: string) (table: string) : (s
         |> Seq.filter (fun r ->
             eqI (text 1 r) db
             && eqI (text 2 r) (normalizeTableName table)
-            && eqI (text 3 r) "AFTER"
-            && eqI (text 4 r) "INSERT")
+            && eqI (text 3 r) timing
+            && eqI (text 4 r) event)
         |> Seq.map (fun r -> text 0 r, text 5 r, (if r.Length > 7 then text 7 r else ""))
         |> List.ofSeq
+
+let private afterInsertTriggers (store: Store) (db: string) (table: string) =
+    triggersFor store db table "AFTER" "INSERT"
+
+let private beforeInsertTriggers (store: Store) (db: string) (table: string) =
+    triggersFor store db table "BEFORE" "INSERT"
 
 /// The one table a trigger body statement writes — what 1442's "already
 /// used by the statement which invoked this trigger" check points at.
@@ -8215,6 +8257,7 @@ let triggerWriteDatabases (store: Store) (dbName: string) (tableName: string) : 
 /// covers functions registered only after the trigger was created.
 let private triggerBodyExprs (stmt: Statement) : Expr list =
     match stmt with
+    | SetTriggerNew(_, expression) -> [ expression ]
     | Insert(_, _, rows, onDup, _) -> List.concat rows @ (onDup |> List.map snd)
     | InsertSelect(_, _, _, onDup, _) -> onDup |> List.map snd
     | Replace(_, _, rows) -> List.concat rows
@@ -8229,21 +8272,25 @@ let rec execute (store: Store) (registry: Registry) (dbName: string) (ids: int64
     fromSubqueryMemo.Value <- Dictionary<FromItem, Result<ColumnDef list * Value[] list, QueryResult>>(HashIdentity.Reference)
     viewMemo.Value <- Dictionary<string * string, Result<ColumnDef list * Value[] list, QueryResult>>()
 
-    /// Fires `(db, table)`'s AFTER INSERT `triggers` once per row in
-    /// `insertedRows`, against `runStore` — the private statement snapshot
-    /// `finishInsert` opened (see its doc), so a body's writes only land if
-    /// the whole statement does. Never fired from onCommit (lock re-entry).
+    /// Fires one trigger slot once per changed row against `runStore`.
     /// Bodies execute with the *trigger's* schema `db` as the default
     /// database — MySQL resolves a body's unqualified table names against
     /// the schema the trigger lives in, not the session's current database
     /// (probed: `INSERT INTO a.t` from a session on db b runs the body's
     /// `INSERT INTO work_log` against a.work_log). Returns `Some err` when
     /// a body failed.
-    let fireAfterInsertTriggers (runStore: Store) (db: string) (table: string) (triggers: (string * string * string) list) (insertedRows: Value[] list) : QueryResult option =
+    let fireTriggers
+        (runStore: Store)
+        (db: string)
+        (table: string)
+        (timing: TriggerTiming)
+        (event: TriggerEvent)
+        (triggers: (string * string * string) list)
+        (rows: (Value[] option * Value[] option) list)
+        : QueryResult option =
         match scan runStore db table with
         | Error _ -> None
         | Ok(columns, _) ->
-            let columnIndex = columnIndexOf columns
             let chain = triggerChain.Value
             let self = db, normalizeTableName table
 
@@ -8290,22 +8337,51 @@ let rec execute (store: Store) (registry: Registry) (dbName: string) (ids: int64
                 // error result here rather than an exception, so a
                 // failing body doesn't abort a surrounding
                 // transaction the way an escaped exception would.
-                let runBody (stmt: Statement) : QueryResult =
-                    try
-                        execute runStore shadowed db (0L, 0L) foundRows stmt |> snd
-                    with SqlError(code, msg) ->
-                        Err(code, msg)
+                let runBody (oldRow: Value[] option) (newRow: Value[] option) (stmt: Statement) : QueryResult =
+                    withTriggerRowScope
+                        { Columns = columns
+                          Old = oldRow
+                          New = newRow }
+                        (fun () ->
+                            match stmt with
+                            | SetTriggerNew(column, expression) ->
+                                match timing, event, newRow, resolveColumn columns column with
+                                | Before, (TriggerInsert | TriggerUpdate), Some row, Ok index ->
+                                    let context = contextFactory runStore shadowed db Map.empty Map.empty None [||]
+
+                                    match evalExpr context expression |> Result.mapError Err with
+                                    | Error error -> error
+                                    | Ok value ->
+                                        match coerceValue runStore.StrictMode columns.[index] value with
+                                        | Error error -> storageErr error
+                                        | Ok value ->
+                                            row.[index] <- value
+                                            Affected 0UL
+                                | _ -> Err(1362, "Updating of NEW row is not allowed in after trigger")
+                            | _ ->
+                                try
+                                    execute runStore shadowed db (0L, 0L) foundRows stmt |> snd
+                                with SqlError(code, msg) ->
+                                    Err(code, msg))
 
                 try
-                    insertedRows
-                    |> List.tryPick (fun row ->
+                    rows
+                    |> List.tryPick (fun (oldRow, newRow) ->
                         bodies
                         |> List.tryPick (fun body ->
-                            match runBody (bindNewRow columnIndex row body) with
+                            match runBody oldRow newRow body with
                             | Err _ as e -> Some e
                             | _ -> None))
                 finally
                     triggerChain.Value <- chain
+
+    let prepareInsertRow (runStore: Store) (db: string) (table: string) (columns: ColumnDef list) (candidate: Value[]) =
+        match beforeInsertTriggers runStore db table with
+        | [] -> computeGeneratedRow runStore registry db table columns candidate
+        | triggers ->
+            match fireTriggers runStore db table Before TriggerInsert triggers [ None, Some candidate ] with
+            | Some(Err(code, message)) -> Error(ExpressionError(code, message))
+            | _ -> computeGeneratedRow runStore registry db table columns candidate
 
     /// Runs an insert branch's storage write (`doInsert`, against whichever
     /// store it's handed) and fires the target's AFTER INSERT triggers with
@@ -8326,12 +8402,15 @@ let rec execute (store: Store) (registry: Registry) (dbName: string) (ids: int64
 
             nextIds ids (outcome.LastInsertId, outcome.GeneratedId), Affected(uint64 outcome.Affected)
 
-        match afterInsertTriggers store db table with
-        | [] ->
+        let before = beforeInsertTriggers store db table
+        let after = afterInsertTriggers store db table
+
+        match before, after with
+        | [], [] ->
             match doInsert store with
             | Ok outcome -> ok outcome
             | Error e -> ids, storageErr e
-        | triggers ->
+        | _, triggers ->
             let baseCatalog = store.Catalog
             let snapshot = Storage.beginTransactionSnapshot store
 
@@ -8344,7 +8423,9 @@ let rec execute (store: Store) (registry: Registry) (dbName: string) (ids: int64
                 Storage.commitTransactionEvents store snapshot
                 ok outcome
             | Ok outcome ->
-                match fireAfterInsertTriggers snapshot db table triggers outcome.InsertedRows with
+                let rows = outcome.InsertedRows |> List.map (fun row -> None, Some row)
+
+                match fireTriggers snapshot db table After TriggerInsert triggers rows with
                 | Some err -> ids, err
                 | None ->
                     Storage.mergeCatalogInto store baseCatalog snapshot.Catalog
@@ -8416,6 +8497,8 @@ let rec execute (store: Store) (registry: Registry) (dbName: string) (ids: int64
                     (computeGeneratedRow targetStore registry db table tableColumns))
 
     match stmt with
+    | SetTriggerNew _ -> ids, Err(1064, "SET NEW is only valid in a trigger body")
+
     | CreateDatabase(name, ifNotExists) ->
         match Storage.createDatabase store name with
         | Ok() -> ids, Affected 0UL
@@ -9079,15 +9162,9 @@ let rec execute (store: Store) (registry: Registry) (dbName: string) (ids: int64
             | TriggerUpdate -> "UPDATE"
             | TriggerDelete -> "DELETE"
 
-        // Subject table must exist (MySQL's 1146), and the body — carried
-        // only as raw text, see `Ast.CreateTrigger` — must parse to one of
-        // the statement kinds a body may hold, with no DirectOnly extension
-        // call anywhere in its exprs (3102-style, same policy as generated
-        // columns: ocr()/llm_schema() run from a drain or batch UPDATE,
-        // never re-invoked by the engine).
         match scan store db table with
         | Error e -> ids, storageErr e
-        | Ok _ ->
+        | Ok(columns, _) ->
             match Parser.parse body with
             | Result.Error msg -> ids, Err(1064, sprintf "Trigger body has a syntax error: %s" msg)
             | Result.Ok bodyStmt ->
@@ -9099,23 +9176,32 @@ let rec execute (store: Store) (registry: Registry) (dbName: string) (ids: int64
             | ReplaceSelect _
             | ReplaceSet _
             | Update _
-            | Delete _ ->
+            | Delete _
+            | SetTriggerNew _ ->
                 match triggerBodyExprs bodyStmt |> List.tryPick (firstDirectOnlyCall registry) with
                 | Some fn -> ids, Err(3102, sprintf "Expression of trigger contains a disallowed function: %s" fn)
                 | None ->
-                    match scan store "mysql" "triggers" with
-                    | Error e -> ids, storageErr e
-                    | Ok(_, existing) ->
+                    let validNewAssignment =
+                        match bodyStmt with
+                        | SetTriggerNew(column, _) when timing <> Before || event = TriggerDelete ->
+                            Error(Err(1362, "Updating of NEW row is not allowed in after trigger"))
+                        | SetTriggerNew(column, _) ->
+                            match resolveColumn columns column with
+                            | Error error -> Error(storageErr error)
+                            | Ok index when columns.[index].Generated.IsSome ->
+                                Error(Err(1362, sprintf "Updating of NEW row is not allowed for generated column '%s'" column))
+                            | Ok _ -> Ok()
+                        | _ -> Ok()
+
+                    match validNewAssignment with
+                    | Error result -> ids, result
+                    | Ok() ->
+                        match scan store "mysql" "triggers" with
+                        | Error e -> ids, storageErr e
+                        | Ok(_, existing) ->
                         let text i (r: Value[]) = toText r.[i] |> Option.defaultValue ""
                         let eqI (a: string) (b: string) = System.String.Equals(a, b, System.StringComparison.OrdinalIgnoreCase)
 
-                        // Duplicate name in this schema, or a second trigger
-                        // on the same table/timing/event, both refuse with
-                        // MySQL 8.4.11's exact 1359 text (write-probed).
-                        // ponytail: MySQL 8 allows multiple triggers per
-                        // table/timing/event (FOLLOWS/PRECEDES) — one per
-                        // slot here; add ACTION_ORDER when a workload
-                        // stacks them.
                         let duplicate =
                             existing
                             |> Seq.exists (fun r ->
@@ -9143,14 +9229,11 @@ let rec execute (store: Store) (registry: Registry) (dbName: string) (ids: int64
                                         VString eventText
                                         VString body
                                         VDateTime System.DateTime.Now
-                                        // MySQL's DEFINER, defaulted to the
-                                        // creating account — what the body's
-                                        // privileges are checked against.
                                         VString(store.SessionUser + "@%") ] ]
                             with
                             | Ok _ -> ids, Affected 0UL
                             | Error e -> ids, storageErr e
-            | _ -> ids, Err(1064, "Trigger body must be a single INSERT, UPDATE, or DELETE statement")
+            | _ -> ids, Err(1064, "Trigger body must be a single INSERT, UPDATE, DELETE, or SET NEW statement")
 
     | DropTrigger(name, ifExists) ->
         let matchesRow (r: Value[]) =
@@ -9228,7 +9311,7 @@ let rec execute (store: Store) (registry: Registry) (dbName: string) (ids: int64
                     match scan s db table with
                     | Error error -> Error error
                     | Ok(tableColumns, _) ->
-                        let prepare = computeGeneratedRow s registry db table tableColumns
+                        let prepare = prepareInsertRow s db table tableColumns
 
                         if ignoreDuplicates then
                             insertRowsIgnorePrepared s db table cols rowsValues prepare
@@ -9260,7 +9343,7 @@ let rec execute (store: Store) (registry: Registry) (dbName: string) (ids: int64
                     match scan s db table with
                     | Error error -> Error error
                     | Ok(tableColumns, _) ->
-                        let prepare = computeGeneratedRow s registry db table tableColumns
+                        let prepare = prepareInsertRow s db table tableColumns
 
                         if ignoreDuplicates then
                             insertRowsIgnorePrepared s db table cols rowsValues prepare

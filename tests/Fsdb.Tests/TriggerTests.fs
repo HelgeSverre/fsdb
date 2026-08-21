@@ -52,6 +52,27 @@ let tests =
               | Ok(Fsdb.Ast.CreateTrigger("before_delete", Fsdb.Ast.Before, Fsdb.Ast.TriggerDelete, "t", _)) -> ()
               | other -> failtestf "expected BEFORE DELETE trigger AST, got %A" other
 
+          testCase "BEFORE INSERT can assign NEW values"
+          <| fun _ ->
+              let store = Fsdb.Storage.create ()
+              setup store
+
+              expectOk
+                  (runDefault store "CREATE TRIGGER increment BEFORE INSERT ON t FOR EACH ROW SET NEW.n = NEW.n + 1")
+                  "create trigger"
+
+              expectOk (runDefault store "INSERT INTO t(n) VALUES (10)") "insert"
+              Expect.equal (rows store "SELECT n FROM t") [ [ Some "11" ] ] "stored row contains the value assigned by the trigger"
+
+          testCase "SET NEW is rejected outside a trigger body"
+          <| fun _ ->
+              let store = Fsdb.Storage.create ()
+
+              Expect.equal
+                  (runDefault store "SET NEW.n = 1")
+                  (Err(1064, "SET NEW is only valid in a trigger body"))
+                  "NEW has no row image outside a trigger"
+
           testCase "AFTER INSERT fires once per row with NEW.* bound per row"
           <| fun _ ->
               let store = Fsdb.Storage.create ()

@@ -2982,6 +2982,10 @@ let private dropTriggerStmt: Parser<Statement, unit> =
      .>>. identifier)
     |>> fun (ifExists, name) -> DropTrigger(name, ifExists)
 
+let private setTriggerNewStmt: Parser<Statement, unit> =
+    (keyword "SET" >>. keyword "NEW" >>. sym "." >>. identifier .>> sym "=" .>>. expr)
+    |>> SetTriggerNew
+
 // ---------------------------------------------------------------------------
 // CREATE VIEW / DROP VIEW — a read-only stored SELECT, evaluated through the
 // same derived-table path as an inline subquery.
@@ -3106,6 +3110,7 @@ statementRef.Value <-
           tableQueryStmt
           valuesQueryStmt
           selectOrUnionStmt
+          setTriggerNewStmt
           updateStmt
           deleteStmt
           attempt alterUserStmt
