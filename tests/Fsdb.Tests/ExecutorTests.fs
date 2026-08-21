@@ -5398,16 +5398,20 @@ let tests =
                     | Err(1064, _) -> ()
                     | other -> failtestf "expected 1064, got %A" other
 
-                testCase "LEFT JOIN against JSON_TABLE is rejected (inner semantics only)"
+                testCase "LEFT JOIN against JSON_TABLE null-pads empty and rejected expansions"
                 <| fun _ ->
                     let store = newStore ()
                     runDefault store "CREATE TABLE t (id INT, j JSON)" |> ignore
+                    runDefault store "INSERT INTO t VALUES (1, '[1,2]'), (2, '[]'), (3, NULL)" |> ignore
 
                     match
-                        runDefault store "SELECT t.id FROM t LEFT JOIN JSON_TABLE(t.j, '$[*]' COLUMNS (x INT PATH '$')) jt ON 1"
+                        runDefault
+                            store
+                            "SELECT t.id, jt.x FROM t LEFT JOIN JSON_TABLE(t.j, '$[*]' COLUMNS (x INT PATH '$')) jt ON jt.x = 2 ORDER BY t.id"
                     with
-                    | Err(1064, _) -> ()
-                    | other -> failtestf "expected 1064, got %A" other
+                    | ResultSet(_, rows) ->
+                        Expect.equal rows [ [ Some "1"; Some "2" ]; [ Some "2"; None ]; [ Some "3"; None ] ] "outer rows"
+                    | other -> failtestf "expected a result set, got %A" other
 
                 testCase "JSON_TABLE as a multi-table UPDATE join source is rejected"
                 <| fun _ ->

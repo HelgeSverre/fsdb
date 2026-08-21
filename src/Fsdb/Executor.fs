@@ -3066,11 +3066,9 @@ and private applyLateralJoin
 /// so far, so `FROM t, JSON_TABLE(t.doc, ...) jt` sees `t`'s row), and each
 /// document's expansion is appended to its own left row. FOR ORDINALITY
 /// restarts per left row because each row is its own `jsonTableRows`
-/// invocation. Inner semantics only, oracle-pinned: a NULL doc, a row path
-/// with no match, and a scalar under `$[*]` all yield zero expansion rows,
-/// dropping the left row. ponytail: `LEFT JOIN JSON_TABLE(...) ON TRUE`'s
-/// keep-the-left-row outer form is rejected below — add a null-padding
-/// branch like `applyResolvedJoin`'s `leftOnly` when something needs it.
+/// invocation. A NULL doc, a row path with no match, and a scalar under
+/// `$[*]` all yield zero expansion rows; inner joins drop the left row and
+/// left joins retain it with NULLs for the table-function columns.
 and private applyJsonTableJoin
     (store: Store)
     (registry: Registry)
@@ -3085,7 +3083,8 @@ and private applyJsonTableJoin
     : Result<(string * ColumnDef list) list * Value[] seq * string list, QueryResult> =
     match join.Kind with
     | InnerJoin
-    | CrossJoin when not (List.isEmpty join.Using) ->
+    | CrossJoin
+    | LeftJoin when not (List.isEmpty join.Using) ->
         // MySQL runs `JOIN JSON_TABLE(...) USING (col)` as the real
         // equi-join (oracle-probed: it filters, and `SELECT *` coalesces the
         // name). This lateral branch has no coalesce/equi wiring, and
@@ -3095,7 +3094,8 @@ and private applyJsonTableJoin
         // coalesce-names/equi-key machinery; spell it as JOIN ... ON.
         Error(Err(1064, "JSON_TABLE doesn't support JOIN ... USING; spell the equi-join as JOIN ... ON"))
     | InnerJoin
-    | CrossJoin ->
+    | CrossJoin
+    | LeftJoin ->
         let joinColumns = jsonTableColumnDefs columns
         let newSources = sourcesSoFar @ [ alias, joinColumns ]
         let combinedColumnsSoFar = sourcesSoFar |> List.collect snd
@@ -3118,18 +3118,20 @@ and private applyJsonTableJoin
                         evalExpr { ctxFor combined with Clause = OnClause } join.On
                         |> Result.map (fun v -> combined, truthy v = Some true))
                     |> Result.mapError Err
-                    |> Result.map (List.filter snd >> List.map fst))
+                    |> Result.map (fun checkedRows ->
+                        let matches = checkedRows |> List.filter snd |> List.map fst
+
+                        if matches.IsEmpty && join.Kind = LeftJoin then
+                            [ Array.append l (Array.create joinColumns.Length VNull) ]
+                        else
+                            matches))
 
         rowsSoFar
         |> List.ofSeq
         |> traverse expandLeft
         |> Result.map (fun expanded -> newSources, (expanded |> List.concat |> Seq.ofList), [])
     | _ ->
-        // LEFT/RIGHT/NATURAL against a table function: outer padding and
-        // common-name matching don't apply to this subset — a clean refusal
-        // beats silently running inner semantics under an outer join's
-        // spelling.
-        Error(Err(1064, "JSON_TABLE only supports comma-join, CROSS JOIN, and [INNER] JOIN ... ON"))
+        Error(Err(1064, "JSON_TABLE only supports comma-join, CROSS JOIN, [INNER] JOIN ... ON, and LEFT JOIN ... ON"))
 
 and private applyResolvedJoin
     (store: Store)

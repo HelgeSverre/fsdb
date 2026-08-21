@@ -11,9 +11,8 @@ probes (Harness.fs `ScenarioProbes`) and the Expecto `JSON_TABLE` list.
 - **NESTED PATH / EXISTS PATH / DEFAULT ... ON EMPTY|ERROR** don't parse —
   the subset is fixed NULL-on-empty/error (MySQL's probed default). The
   `Parser.fs` ponytail comment names the skipped clauses.
-- **LEFT JOIN JSON_TABLE(...) ON TRUE** (the keep-the-left-row outer lateral
-  form) → error 1064. MySQL null-pads the JSON_TABLE columns; this subset is
-  inner-only and refuses rather than silently running inner semantics.
+- **LEFT JOIN JSON_TABLE(...) ON expr** now keeps unmatched left rows and
+  null-pads the JSON_TABLE columns, including empty and NULL documents.
 - **JOIN JSON_TABLE(...) USING (col)** → error 1064. MySQL runs the real
   equi-join (probed: `... JSON_TABLE(t.j, '$[*]' COLUMNS (x INT PATH '$')) jt
   USING (x)` filters to matching x and coalesces the name); the lateral
