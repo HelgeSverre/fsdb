@@ -33,7 +33,7 @@ accepted (marked `ponytail:` in source), or recorded only in
 | SQL statements | Broad core; large admin/programmatic tail missing | Stored procedures/functions, events |
 | Query execution | Equality, one-column non-unique literal range access, and bounded single-key index ordering plus stable subquery materialization | Multi-key ORDER BY, join reordering, and correlated subqueries still scale poorly |
 | Built-in functions | Broad scalar, aggregate, JSON, time, and planar geometry coverage | Advanced geometry topology and geographic SRS semantics |
-| Data types | Common scalar types plus OGC geometry | No TIME value domain or BIT |
+| Data types | Common scalar types, BIT fields, and OGC geometry | No TIME value domain |
 | Constraints & indexes | PK/UNIQUE/FK/CHECK plus one-column equality, inner-join, literal range, and bounded index-order probes | No multi-key/composite access; unique and DML ranges scan |
 | Charsets & collations | ICU-based utf8mb4 registry | Weight-table tailoring differs from MySQL's UCA tables |
 | Transactions | Repeatable-read snapshots, nonlocking read-committed views + optimistic merge | READ UNCOMMITTED and SERIALIZABLE refused; transaction commits serialize |
@@ -161,14 +161,14 @@ TINYTEXT–LONGTEXT, BINARY/VARBINARY, TINYBLOB–LONGBLOB, ENUM/SET with
 canonicalization, DATE/DATETIME(fsp)/TIMESTAMP(fsp)/TIME(fsp) with half-up
 fsp rounding and carry cases, all-zero and partial-zero dates with sql_mode
 enforcement, YEAR, JSON, per-column charset/collation,
-wire-faithful column metadata (`ColumnWire.fs:17–84`), and OGC WKB geometry
-values (`GEOMETRY`, concrete spatial types, WKT/WKB construction and common
+wire-faithful column metadata (`ColumnWire.fs:17–84`), `BIT(1)`–`BIT(64)`
+fields with binary literals and defaults, and OGC WKB geometry values
+(`GEOMETRY`, concrete spatial types, WKT/WKB construction and common
 accessors).
 
 | Gap | MySQL 8.4 | fsdb | Impact | Class |
 |---|---|---|---|---|
 | TIME value domain | typed TIME comparisons/arithmetic | stored and compared as pre-formatted strings; no `VTime` case (`Value.fs:13–30`, `Storage.fs:911–935`) | medium | divergence |
-| BIT type | `BIT(M)` with bit-literal I/O | absent | low | refusal |
 | Spatial indexes and operations | R-tree indexes, containment/touch predicates, overlays, buffers, geographic SRS axis rules | geometry values, common WKT/WKB accessors, planar `ST_Distance`, `ST_Envelope`, `ST_IsValid`, `ST_Intersects`, `ST_Disjoint`, and MBR predicates work; spatial indexes still collapse to BTree | low | refusal |
 | Generated columns | VIRTUAL recomputed on read, STORED materialized | both materialize at write time; no read-path recompute (`Storage.fs:3705–3713`) | low | divergence |
 | Functional defaults | `DEFAULT (expr)` | literal constants and CURRENT_TIMESTAMP only | low | refusal |
