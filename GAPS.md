@@ -196,7 +196,6 @@ literal-vs-literal comparison; default utf8mb4_0900_ai_ci.
 | Gap | MySQL 8.4 | fsdb | Impact | Class |
 |---|---|---|---|---|
 | Weight tables | UCA 9.0/5.2/4.0 weight tables per collation | ICU CLDR tailoring for everything; tie-break order among primary-equal strings can differ (equality never does) (`Collation.fs:13–26`) | low | divergence |
-| LIKE expansions | 'æ' LIKE 'ae' true under accent-insensitive collations | per-character folding without expansions; false while 'æ' = 'ae' holds (`Collation.fs:13–26`) | low | divergence |
 | REGEXP collation | follows collation accent/case rules | always case-sensitive per pattern flags, accent-sensitive | low | divergence |
 | Usable charsets | 40+ charsets with transcoding | utf8mb4/utf8mb3/latin1/ascii/binary only; CONVERT(expr USING x) limited to the same set (`Functions.fs:966`) | low | refusal |
 | Identifier casing | lower_case_table_names semantics | variable reported; identifiers ordinal-case-folded internally | low | divergence |
