@@ -1328,7 +1328,7 @@ let tests =
                     | Ok() -> ()
                     | Error e -> failtestf "expected Ok, got %A" e
 
-                testCase "a secondary ordered index follows inserted, updated, and deleted row identities"
+                testCase "a secondary ordered index follows inserted, updated, deleted, and replaced row identities"
                 <| fun _ ->
                     let store = withUsersTable ()
                     let index = { Name = "idx_age"; Columns = [ "age" ]; Unique = false; Kind = BTree }
@@ -1367,12 +1367,23 @@ let tests =
                         | Ok _ -> ()
                         | Error e -> failtestf "expected Ok, got %A" e
 
+                    replaceRows
+                        store
+                        defaultDatabase
+                        "users"
+                        None
+                        [ [ VInt 3L; VString "carol"; VInt 28L ] ]
+                        Ok
+                    |> function
+                        | Ok _ -> ()
+                        | Error e -> failtestf "expected Ok, got %A" e
+
                     let entries =
                         match trySecondaryRangeLookup store defaultDatabase "users" "age" (Some(VInt 0L, true)) None with
                         | Some(_, _, _, rows) -> rows |> List.map (fun (_, row) -> row.[2], row.[0])
                         | None -> failtest "expected an ordered secondary range lookup"
 
-                    Expect.equal entries [ VInt 26L, VInt 2L; VInt 30L, VInt 3L ] "ordered entries reflect the live rows"
+                    Expect.equal entries [ VInt 26L, VInt 2L; VInt 28L, VInt 3L ] "ordered entries reflect the live rows"
                     Expect.equal (reindexCallCount ()) reindexesBefore "point writes preserve ordered buckets incrementally"
 
                 testCase "AddIndex with Unique = true rejects existing duplicates instead of silently dropping rows from the index"

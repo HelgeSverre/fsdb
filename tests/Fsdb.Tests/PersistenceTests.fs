@@ -480,7 +480,7 @@ let tests =
               let reloaded = load dir
               Expect.equal (rowsOf reloaded defaultDatabase "t") [ [| VInt 1L; VInt 30L |] ] "the last candidate survives replay"
 
-          testCase "snapshot and WAL recovery rebuild non-unique equality buckets"
+          testCase "snapshot and WAL recovery rebuild non-unique equality and ordered indexes"
           <| fun _ ->
               let dir = tempDataDir ()
               let store = load dir
@@ -497,6 +497,10 @@ let tests =
               match trySecondaryLookup reloaded defaultDatabase "items" "category" (VString "books") with
               | Some(_, rows) -> Expect.equal (rows |> List.map (snd >> fun row -> row.[0])) [ VInt 1L; VInt 2L; VInt 4L ] "recovered buckets preserve row order"
               | None -> failtest "expected a recovered secondary-index probe"
+
+              match trySecondaryRangeLookup reloaded defaultDatabase "items" "category" (Some(VString "books", true)) (Some(VString "music", false)) with
+              | Some(_, _, _, rows) -> Expect.equal (rows |> List.map (snd >> fun row -> row.[0])) [ VInt 1L; VInt 2L; VInt 4L ] "recovered ordered entries preserve row order"
+              | None -> failtest "expected a recovered ordered secondary-index probe"
 
           testCase "WAL replay of many single-row UPDATEs against a UNIQUE-indexed table doesn't rebuild the index once per event"
           <| fun _ ->
