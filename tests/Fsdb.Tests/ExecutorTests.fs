@@ -2076,6 +2076,29 @@ let tests =
                     | ResultSet(_, [ [ Some "0"; Some "2"; Some "3"; Some "4"; Some "5"; Some "6" ] ]) -> ()
                     | other -> failtestf "unexpected coercibility classes: %A" other
 
+                testCase "SLEEP and BENCHMARK follow MySQL argument and evaluation semantics"
+                <| fun _ ->
+                    let store = newStore ()
+                    let mutable calls = 0
+
+                    let registry =
+                        builtins
+                        |> registerScalar "TOUCH" (fun values ->
+                            calls <- calls + 1
+                            values |> List.tryHead |> Option.defaultValue VNull)
+
+                    match run store registry "DO BENCHMARK(4, TOUCH(1))" with
+                    | Affected 0UL -> Expect.equal calls 4 "BENCHMARK evaluates its body exactly count times"
+                    | other -> failtestf "unexpected BENCHMARK result: %A" other
+
+                    match run store registry "SELECT SLEEP(0), BENCHMARK(0, 1), BENCHMARK(NULL, 2), BENCHMARK(-1, 3)" with
+                    | ResultSet(_, [ [ Some "0"; Some "0"; None; None ] ]) -> ()
+                    | other -> failtestf "unexpected SLEEP/BENCHMARK values: %A" other
+
+                    match run store registry "SELECT SLEEP(NULL)" with
+                    | Err(1210, "Incorrect arguments to sleep.") -> ()
+                    | other -> failtestf "expected invalid SLEEP arguments to return 1210, got %A" other
+
                 testCase "delete-side foreign-key actions run before the replacement insert"
                 <| fun _ ->
                     let store = newStore ()

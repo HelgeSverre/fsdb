@@ -1139,6 +1139,10 @@ let rec private metadataOfExpr (ctx: EvalContext) (expr: Expr) : ColumnMetadata 
         metadataOfExpr ctx argument
     | FuncCall(name, [ _ ]) when name.Equals("COERCIBILITY", System.StringComparison.OrdinalIgnoreCase) ->
         simple TypeLongLong |> Option.map (fun metadata -> { metadata with Flags = NotNullFlag })
+    | FuncCall(name, [ _ ]) when name.Equals("SLEEP", System.StringComparison.OrdinalIgnoreCase) ->
+        simple TypeLongLong |> Option.map (fun metadata -> { metadata with Flags = NotNullFlag })
+    | FuncCall(name, [ _; _ ]) when name.Equals("BENCHMARK", System.StringComparison.OrdinalIgnoreCase) ->
+        simple TypeLongLong
     | FuncCall(name, args) ->
         match name.ToUpperInvariant(), args with
         | "COUNT", _ -> simple TypeLongLong
@@ -2137,6 +2141,52 @@ let rec private evalExpr (ctx: EvalContext) (expr: Expr) : Result<Value, EvalErr
             | _ -> 4L
 
         Ok(VInt coercibility)
+    | FuncCall(name, [ argument ]) when name.Equals("SLEEP", System.StringComparison.OrdinalIgnoreCase) ->
+        eval argument
+        |> Result.bind (fun value ->
+            let seconds = Value.toDouble value
+
+            if value = VNull || System.Double.IsNaN seconds || System.Double.IsInfinity seconds || seconds < 0.0 then
+                Error(1210, "Incorrect arguments to sleep.")
+            else
+                let cancellation = Storage.queryCancellation.Value
+                let mutable remaining = seconds
+                let mutable interrupted = false
+
+                while remaining > 0.0 && not interrupted do
+                    let interval = min remaining 0.1
+                    interrupted <- cancellation.WaitHandle.WaitOne(System.TimeSpan.FromSeconds interval)
+                    remaining <- remaining - interval
+
+                Ok(VInt(if interrupted then 1L else 0L)))
+    | FuncCall(name, [ countExpr; body ]) when name.Equals("BENCHMARK", System.StringComparison.OrdinalIgnoreCase) ->
+        eval countExpr
+        |> Result.bind (fun value ->
+            let repetitions = Value.toDouble value
+
+            if value = VNull || System.Double.IsNaN repetitions || System.Double.IsInfinity repetitions || repetitions < 0.0 then
+                Ok VNull
+            else
+                let count =
+                    if repetitions >= float System.Int64.MaxValue then
+                        System.Int64.MaxValue
+                    else
+                        int64 repetitions
+                let cancellation = Storage.queryCancellation.Value
+                let mutable iteration = 0L
+                let mutable failure = None
+
+                while iteration < count && failure.IsNone do
+                    if iteration % int64 Storage.cancellationCheckInterval = 0L then
+                        cancellation.ThrowIfCancellationRequested()
+
+                    match eval body with
+                    | Ok _ -> iteration <- iteration + 1L
+                    | Error error -> failure <- Some error
+
+                match failure with
+                | Some error -> Error error
+                | None -> Ok(VInt 0L))
     | FuncCall(name, args) ->
         match Functions.lookup name ctx.Registry with
         | None -> Error(unknownFunction name)
