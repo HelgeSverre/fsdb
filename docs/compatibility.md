@@ -77,6 +77,26 @@ Embedding hosts supply an already-loaded `X509Certificate2` through
 plaintext restriction. Client certificates and account-level `REQUIRE SSL` or
 `REQUIRE X509` remain unsupported.
 
+## Bulk wire commands
+
+`CLIENT_MULTI_STATEMENTS` and `CLIENT_MULTI_RESULTS` permit semicolon-separated
+COM_QUERY batches. Results retain one packet sequence and mark every successful
+nonfinal result with `SERVER_MORE_RESULTS_EXISTS`; an error stops the remaining
+statements.
+
+`LOAD DATA LOCAL INFILE` is disabled by default. An operator enables it with
+`local_infile=ON` in configuration or `SET GLOBAL local_infile = ON`; the
+client must also negotiate `CLIENT_LOCAL_FILES`. fsdb requests the named file
+from the client and never resolves or opens that path on the server. Uploads
+are capped by `max_load_data_bytes` (64 MiB by default), drained to their empty
+packet terminator, and then rejected with 1153 when over the cap.
+
+The supported load subset is UTF-8/utf8mb4 input with one-character
+field/line delimiters, optional enclosure and escape characters, `REPLACE` or
+`IGNORE`, header-line skipping, and target column lists. Server-side
+`LOAD DATA INFILE`, multibyte delimiters, `SET` assignments, and user-variable
+targets remain unsupported.
+
 ## Views and triggers
 
 MySQL views are stored queries, not persisted materialized results. `MERGE`

@@ -41,7 +41,7 @@ accepted (marked `ponytail:` in source), or recorded only in
 | Views & triggers | Read-only views; AFTER INSERT triggers | No DML through views; no BEFORE/UPDATE/DELETE triggers, no OLD.* |
 | Routines & events | Absent (catalogs honestly empty) | Everything |
 | Full-text | Oracle-verified scoring | No inverted index; single-table SELECT only; no CJK parser |
-| Wire protocol | Handshake through COM_STMT_EXECUTE solid, TLS 1.2/1.3 server transport | No compression, cursors, LOAD DATA, multi-statement |
+| Wire protocol | Handshake through COM_STMT_EXECUTE, TLS, LOCAL INFILE, and multi-result batches | No compression or cursors |
 | Auth & privileges | Static privileges enforced incl. subqueries | Name-only host matching; no roles/dynamic/column privileges |
 | Metadata | 23 INFORMATION_SCHEMA views, 8 mysql.* tables | Storage statistics are stand-ins; many SHOW forms missing |
 | Server admin | KILL, SHUTDOWN, limits, config file parsing | No replication/binlog/logging files |
@@ -316,8 +316,8 @@ disconnect detection cancelling evaluation (`Server.fs:363–406`).
 | TLS client authentication | account `REQUIRE SSL`/`REQUIRE X509`, client certificates, certificate reload | server certificate authentication only; no account-level TLS requirement | medium (mutual TLS deployments) | refusal |
 | Compression | CLIENT_COMPRESS/ZSTD | never offered | low | refusal |
 | Cursors | COM_STMT_EXECUTE CURSOR_TYPE_READ_ONLY + COM_STMT_FETCH | cursor flags ignored; COM_STMT_FETCH unsupported → 1047 (`Server.fs:772`) | medium (large-result readers) | refusal |
-| LOAD DATA LOCAL INFILE | supported | absent entirely | medium | refusal |
-| Multi-statement | CLIENT_MULTI_STATEMENTS batching | not advertised; one statement per packet (CLIENT_MULTI_RESULTS advertised but only one resultset ever sent, `Protocol.fs:21,36`) | medium | refusal |
+| LOAD DATA LOCAL INFILE | client-streamed file loading | opt-in `local_infile`; UTF-8/utf8mb4, one-character field/line separators, `REPLACE`/`IGNORE`, column lists, and header skipping; no server-file loading, `SET`, user variables, or multibyte separators | low | subset |
+| Multi-statement | CLIENT_MULTI_STATEMENTS batching | negotiated COM_QUERY batches and multi-result status flags; COM_SET_OPTION remains unsupported | low | subset |
 | Session state tracking | CLIENT_SESSION_TRACK info in OK packets | absent | low | refusal |
 | Diagnostics coverage | warnings from conversions, truncation, deprecated syntax, and storage engines | statement errors, ignored INSERT/CHECK rows, non-strict integer/ENUM/SET coercions, and GROUP_CONCAT truncation are captured; other warning producers remain silent | low | divergence |
 | Unimplemented COM_* | SET_OPTION, CHANGE_USER | both → ERR 1047 (`Server.fs`) | low | refusal |
@@ -440,10 +440,8 @@ implementation effort:
 3. Missing function families (legacy/asymmetric crypto and JSON Schema regexes) —
    each individually small, collectively frequent in
    report-style queries.
-4. LOAD DATA LOCAL INFILE and multi-statement packets — bulk-loading and
-   migration-tool paths.
-5. SERIALIZABLE/READ COMMITTED semantics and intra-database write
+4. SERIALIZABLE/READ COMMITTED semantics and intra-database write
    parallelism — transactional throughput shape.
-6. Zero-date handling — a strict-mode correctness edge.
-7. Everything in the admin/replication/metadata tail — matters only once a
+5. Zero-date handling — a strict-mode correctness edge.
+6. Everything in the admin/replication/metadata tail — matters only once a
    specific tool needs it (mysqladmin, monitoring agents, replica setups).
