@@ -26,6 +26,7 @@ type private Command =
     | Query of sql: string
     | Statistics
     | ProcessInfo
+    | ProcessKill of connectionId: int64
     | Ping
     | FieldList of table: string
     | StmtPrepare of sql: string
@@ -65,6 +66,7 @@ let private parseCommand (payload: byte[]) : Command option =
                 | 0x04uy -> FieldList(Reader(restBytes ()).ReadNullTerminatedString())
                 | 0x09uy -> Statistics
                 | 0x0auy -> ProcessInfo
+                | 0x0cuy -> ProcessKill(int64 (Reader(restBytes ()).ReadInt32LE()))
                 | 0x0euy -> Ping
                 | 0x16uy -> StmtPrepare(rest ())
                 | 0x17uy -> StmtExecute(restBytes ())
@@ -706,6 +708,25 @@ let private handleConnection
                                 InformationSchema.recordQuestion ()
 
                                 match runCancellable (fun () -> QueryHandler.handle session "SHOW PROCESSLIST") with
+                                | None -> ()
+                                | Some(session, result) ->
+                                    activeSession <- Some session
+
+                                    do!
+                                        sendQueryResult
+                                            stream
+                                            capabilities
+                                            seqId
+                                            (statusFlagsFor session)
+                                            (uint64 session.LastInsertId)
+                                            session.LastResultColumnMetadata
+                                            result
+
+                                    return! loop session
+                            | Some(ProcessKill connectionId) ->
+                                InformationSchema.recordQuestion ()
+
+                                match runCancellable (fun () -> QueryHandler.handle session (sprintf "KILL CONNECTION %d" connectionId)) with
                                 | None -> ()
                                 | Some(session, result) ->
                                     activeSession <- Some session

@@ -1795,6 +1795,50 @@ let tests =
               }
               |> Async.RunSynchronously
 
+          testCase "COM_PROCESS_KILL closes the target connection"
+          <| fun _ ->
+              async {
+                  let listener = Fsdb.Server.startListening System.Net.IPAddress.Loopback 0
+                  let port = Fsdb.Server.port listener
+                  Fsdb.Server.serve listener (Fsdb.Storage.create ()) Fsdb.Functions.empty |> Async.StartAsTask |> ignore
+
+                  try
+                      let connStr =
+                          sprintf
+                              "Server=127.0.0.1;Port=%d;User ID=root;Password=;AllowPublicKeyRetrieval=True;SslMode=None;Pooling=false"
+                              port
+
+                      use victim = new MySqlConnector.MySqlConnection(connStr)
+                      do! victim.OpenAsync() |> Async.AwaitTask
+
+                      let! killer, stream = connectRaw port
+                      use killer = killer
+                      let payload = Writer()
+                      payload.WriteByte 0x0cuy
+                      payload.WriteInt32LE(int victim.ServerThread)
+
+                      let! _ = writePacketAsync stream { SeqId = 0uy; Payload = payload.ToArray() }
+                      let! reply = readPacketAsync stream
+                      Expect.equal reply.Value.Payload.[0] 0x00uy "kill replies OK"
+
+                      use command = victim.CreateCommand()
+                      command.CommandText <- "SELECT 1"
+
+                      let! failed =
+                          async {
+                              try
+                                  let! _ = command.ExecuteScalarAsync() |> Async.AwaitTask
+                                  return false
+                              with _ ->
+                                  return true
+                          }
+
+                      Expect.isTrue failed "target connection is closed"
+                  finally
+                      listener.Stop()
+              }
+              |> Async.RunSynchronously
+
           testCase "COM_STMT_PREPARE on invalid SQL replies ERR and the connection stays usable"
           <| fun _ ->
               async {
