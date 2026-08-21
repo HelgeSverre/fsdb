@@ -6442,8 +6442,8 @@ let tests =
                     runDefault store "CREATE TABLE bits (value BIT(64))" |> ignore
                     runDefault store "INSERT INTO bits VALUES (0x8000000000000000)" |> ignore
 
-                    match runDefault store "SELECT value = 9223372036854775808, value = 9223372036854775809, value < 9223372036854775809, value = 9223372036854775808.0, value = '9223372036854775808', value = '9223372036854775809' FROM bits" with
-                    | ResultSet(_, [ [ Some "1"; Some "0"; Some "1"; Some "1"; Some "1"; Some "0" ] ]) -> ()
+                    match runDefault store "SELECT value = 9223372036854775808, value = 9223372036854775809, value < 9223372036854775809, value = 9223372036854775808.0, value = '9223372036854775808', value = '9223372036854775809', value = X'8000000000000000', value = X'8000000000000001' FROM bits" with
+                    | ResultSet(_, [ [ Some "1"; Some "0"; Some "1"; Some "1"; Some "1"; Some "0"; Some "1"; Some "1" ] ]) -> ()
                     | other -> failtestf "expected exact BIT predicates, got %A" other
 
                 testCase "SOUNDS LIKE and MEMBER OF follow MySQL comparison semantics"

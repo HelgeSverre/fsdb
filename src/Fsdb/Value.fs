@@ -1116,6 +1116,11 @@ let private compareBytesLex (x: byte[]) (y: byte[]) : int =
 
     if result <> 0 then result else Operators.compare x.Length y.Length
 
+let private compareBitBytes (value: uint64) (bytes: byte[]) =
+    match bitValue bytes with
+    | Some bytesValue -> Operators.compare (float value) (float bytesValue)
+    | None -> compareBytesLex (bitBytes 64 value) bytes
+
 /// `VDate`/`VDateTime` as one .NET `DateTime`, midnight for the date-only
 /// case — the shared instant `compare`'s VDate/VDateTime-vs-VString branch
 /// parses a string bound against.
@@ -1276,8 +1281,8 @@ let rec compare (a: Value) (b: Value) : int =
     | VDecimal x, VBit(_, y) -> Decimal.Compare(x, decimal y)
     | VBit(_, value), VString text -> compareBitString value text
     | VString text, VBit(_, value) -> -(compareBitString value text)
-    | VBit(width, value), VBytes bytes -> compareBytesLex (bitBytes width value) bytes
-    | VBytes bytes, VBit(width, value) -> compareBytesLex bytes (bitBytes width value)
+    | VBit(_, value), VBytes bytes -> compareBitBytes value bytes
+    | VBytes bytes, VBit(_, value) -> -(compareBitBytes value bytes)
     | VString x, VString y -> compareStrings x y
     | VBytes x, VBytes y -> compareBytesLex x y
     // A binary string against a character string compares byte-for-byte
