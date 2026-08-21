@@ -233,6 +233,13 @@ let private charLengthFn: Scalar =
         VInt(int64 n)
     | _ -> VNull
 
+let private bitLengthFn: Scalar =
+    function
+    | [ VNull ] -> VNull
+    | [ VBytes bytes ] -> VInt(int64 bytes.Length * 8L)
+    | [ value ] -> VInt(int64 (Text.Encoding.UTF8.GetByteCount(req value)) * 8L)
+    | _ -> VNull
+
 let private coalesceFn (args: Value list) : Value =
     args |> List.tryFind (function VNull -> false | _ -> true) |> Option.defaultValue VNull
 
@@ -1831,6 +1838,20 @@ let private asciiFn: Scalar =
         VInt(if str = "" then 0L else int64 (Text.Encoding.UTF8.GetBytes(str).[0]))
     | _ -> VNull
 
+let private ordFn: Scalar =
+    function
+    | [ VBytes bytes ] -> VInt(if bytes.Length = 0 then 0L else int64 bytes.[0])
+    | [ value ] when not (anyNull [ value ]) ->
+        let text = req value
+
+        if text.Length = 0 then
+            VInt 0L
+        else
+            let scalarLength = if Char.IsSurrogatePair(text, 0) then 2 else 1
+            let bytes = Text.Encoding.UTF8.GetBytes(text.Substring(0, scalarLength))
+            VInt(bytes |> Array.fold (fun result part -> result * 256L + int64 part) 0L)
+    | _ -> VNull
+
 /// Minimal `CHAR(n1, n2, ...)`: builds a string from Unicode code points
 /// rather than MySQL's charset-aware byte assembly. Per MySQL, NULL
 /// arguments are skipped rather than nulling the whole result.
@@ -1867,6 +1888,95 @@ let private unhexFn: Scalar =
 
 let private md5Fn: Scalar = textMap (fun s -> Convert.ToHexString(MD5.HashData(Text.Encoding.UTF8.GetBytes s)).ToLowerInvariant())
 let private sha1Fn: Scalar = textMap (fun s -> Convert.ToHexString(SHA1.HashData(Text.Encoding.UTF8.GetBytes s)).ToLowerInvariant())
+
+let private makeSetFn: Scalar =
+    function
+    | VNull :: _ -> VNull
+    | bits :: values ->
+        let mask = toUInt64 (roundNumeric bits)
+
+        values
+        |> List.mapi (fun index value -> index, value)
+        |> List.choose (fun (index, value) ->
+            if index < 64 && mask &&& (1UL <<< index) <> 0UL then
+                toText value
+            else
+                None)
+        |> String.concat ","
+        |> VString
+    | [] -> VNull
+
+let private soundexCode =
+    function
+    | 'B' | 'F' | 'P' | 'V' -> '1'
+    | 'C' | 'G' | 'J' | 'K' | 'Q' | 'S' | 'X' | 'Z' -> '2'
+    | 'D' | 'T' -> '3'
+    | 'L' -> '4'
+    | 'M' | 'N' -> '5'
+    | 'R' -> '6'
+    | _ -> '0'
+
+let private soundexFn: Scalar =
+    function
+    | [ value ] when not (anyNull [ value ]) ->
+        let letters = req value |> Seq.skipWhile (Char.IsLetter >> not) |> Seq.toArray
+
+        if letters.Length = 0 then
+            VString ""
+        else
+            let first = Char.ToUpperInvariant letters.[0]
+            let result = StringBuilder().Append first
+            let mutable previous = soundexCode first
+
+            for letter in letters.[1..] do
+                let code = soundexCode (Char.ToUpperInvariant letter)
+
+                if code <> '0' && code <> previous then
+                    result.Append code |> ignore
+
+                if code <> '0' then
+                    previous <- code
+
+            while result.Length < 4 do
+                result.Append '0' |> ignore
+
+            VString(result.ToString())
+    | _ -> VNull
+
+let private toBase64Fn: Scalar =
+    function
+    | [ value ] when not (anyNull [ value ]) ->
+        let bytes =
+            match value with
+            | VBytes bytes -> bytes
+            | _ -> Text.Encoding.UTF8.GetBytes(req value)
+
+        let encodedLength = (int64 bytes.Length + 2L) / 3L * 4L
+        let lineBreaks = if encodedLength = 0L then 0L else (encodedLength - 1L) / 76L
+
+        if encodedLength + lineBreaks > int64 Limits.maxAllowedPacket then
+            VNull
+        else
+            Convert.ToBase64String bytes
+            |> Seq.chunkBySize 76
+            |> Seq.map String
+            |> String.concat "\n"
+            |> VString
+    | _ -> VNull
+
+let private fromBase64Fn: Scalar =
+    function
+    | [ value ] when not (anyNull [ value ]) ->
+        try
+            Convert.FromBase64String(req value) |> VBytes
+        with :? FormatException ->
+            VNull
+    | _ -> VNull
+
+let private anyValueFn: Scalar =
+    function
+    | [ value ] -> value
+    | _ -> VNull
 
 /// SHA-224 (FIPS 180-4): SHA-256's compression function with different
 /// initial hash values, output truncated to 224 bits. The BCL has no
@@ -2876,6 +2986,7 @@ let builtins: Registry =
     |> registerScalar "UPPER" (textMap (fun s -> s.ToUpperInvariant()))
     |> registerScalar "LOWER" (textMap (fun s -> s.ToLowerInvariant()))
     |> registerScalar "LENGTH" lengthFn
+    |> registerScalar "BIT_LENGTH" bitLengthFn
     |> registerScalar "CHAR_LENGTH" charLengthFn
     |> registerScalar "COALESCE" coalesceFn
     |> registerScalar "IFNULL" ifNullFn
@@ -2942,6 +3053,7 @@ let builtins: Registry =
     // Strings
     |> registerScalar "SUBSTRING" substringFn
     |> registerScalar "SUBSTR" substringFn
+    |> registerScalar "MID" substringFn
     |> registerScalar "LOCATE" locateFn
     |> registerScalar "INSTR" instrFn
     |> registerScalar "POSITION" locateFn
@@ -2957,21 +3069,27 @@ let builtins: Registry =
     |> registerScalar "REPEAT" repeatFn
     |> registerScalar "SPACE" spaceFn
     |> registerScalar "ASCII" asciiFn
+    |> registerScalar "ORD" ordFn
     |> registerScalar "CHAR" charFn
     |> registerScalar "HEX" hexFn
     |> registerScalar "UNHEX" unhexFn
     |> registerScalar "MD5" md5Fn
     |> registerScalar "SHA1" sha1Fn
+    |> registerScalar "SHA" sha1Fn
     |> registerScalar "SHA2" sha2Fn
     |> registerScalar "FORMAT" formatFn
     |> registerScalar "SUBSTRING_INDEX" substringIndexFn
     |> registerScalar "CONCAT_WS" concatWsFn
     |> registerScalar "ELT" eltFn
     |> registerScalar "EXPORT_SET" exportSetFn
+    |> registerScalar "MAKE_SET" makeSetFn
     |> registerScalar "FIELD" fieldFn
     |> registerScalar "FIND_IN_SET" findInSetFn
     |> registerScalar "QUOTE" quoteFn
     |> registerScalar "STRCMP" strcmpFn
+    |> registerScalar "SOUNDEX" soundexFn
+    |> registerScalar "TO_BASE64" toBase64Fn
+    |> registerScalar "FROM_BASE64" fromBase64Fn
     |> registerScalar "REGEXP_LIKE" regexpLikeFn
     |> registerScalar "REGEXP_REPLACE" regexpReplaceFn
     |> registerScalar "REGEXP_SUBSTR" regexpSubstrFn
@@ -3005,6 +3123,7 @@ let builtins: Registry =
     |> registerScalar "GREATEST" greatestFn
     |> registerScalar "LEAST" leastFn
     |> registerScalar "NULLIF" nullIfFn
+    |> registerScalar "ANY_VALUE" anyValueFn
     |> registerScalar "ISNULL" isNullFn
     |> registerScalar "CONV" convFn
     |> registerScalar "BIN" binFn

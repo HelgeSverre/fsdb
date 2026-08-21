@@ -5932,6 +5932,46 @@ let tests =
                           Some "0"
                           Some "0" ]
 
+                testCase "byte length, ordinal, aliases, and bit-selected strings match MySQL"
+                <| fun _ ->
+                    expectRow
+                        "SELECT BIT_LENGTH('é'), BIT_LENGTH(X'C3A9'), BIT_LENGTH(''), ORD('é'), ORD(X'C3A9'), ORD(''), ORD('😀'), MID('abcdef',2,3), MID('abcdef',-3,2), SHA('abc'), MAKE_SET(5,'a','b','c','d'), MAKE_SET(3,'a',NULL,'c'), MAKE_SET(-1,'a','b','c'), MAKE_SET(5.7,'a','b','c','d'), MAKE_SET('5.7','a','b','c','d'), ANY_VALUE(7)"
+                        [ Some "16"
+                          Some "16"
+                          Some "0"
+                          Some "50089"
+                          Some "195"
+                          Some "0"
+                          Some "4036991104"
+                          Some "bcd"
+                          Some "de"
+                          Some "a9993e364706816aba3e25717850c26c9cd0d89d"
+                          Some "a,c"
+                          Some "a"
+                          Some "a,b,c"
+                          Some "b,c"
+                          Some "a,c"
+                          Some "7" ]
+
+                testCase "SOUNDEX and base64 preserve MySQL's extended and binary behavior"
+                <| fun _ ->
+                    expectRow
+                        "SELECT SOUNDEX('Hello'), SOUNDEX('Ashcraft'), SOUNDEX('Pfister'), SOUNDEX('Tymczak'), SOUNDEX(''), SOUNDEX('123Robert'), SOUNDEX('Émile'), TO_BASE64('abc'), TO_BASE64(''), FROM_BASE64('YWJj'), FROM_BASE64(' YW Jj\n'), FROM_BASE64('bad!'), HEX(FROM_BASE64('/w==')), TO_BASE64(REPEAT('a',60))"
+                        [ Some "H400"
+                          Some "A2613"
+                          Some "P236"
+                          Some "T520"
+                          Some ""
+                          Some "R163"
+                          Some "É540"
+                          Some "YWJj"
+                          Some ""
+                          Some "abc"
+                          Some "abc"
+                          None
+                          Some "FF"
+                          Some "YWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFh\nYWFh" ]
+
                 testCase "CONV converts both directions across bases 2..36, truncating at the first invalid digit"
                 <| fun _ ->
                     expectRow

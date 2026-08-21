@@ -1144,6 +1144,7 @@ let rec private metadataOfExpr (ctx: EvalContext) (expr: Expr) : ColumnMetadata 
                 else
                     metadata)
         | ("COALESCE" | "IFNULL"), values -> choose values
+        | "ANY_VALUE", [ value ] -> metadataOfExpr ctx value
         | "NULLIF", first :: _ -> metadataOfExpr ctx first
         | "IF", [ _; whenTrue; whenFalse ] -> choose [ whenTrue; whenFalse ]
         | ("ROUND" | "TRUNCATE" | "FLOOR" | "CEILING" | "CEIL" | "ABS"), arg :: _ -> metadataOfExpr ctx arg
