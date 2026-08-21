@@ -414,10 +414,41 @@ let private hexBytesLit: Parser<Value, unit> =
         else
             preturn (VBytes(Convert.FromHexString digits))
 
+let private bytesOfBits (digits: string) : byte[] =
+    if digits.Length = 0 then
+        [||]
+    else
+        let byteCount = (digits.Length + 7) / 8
+        let padding = byteCount * 8 - digits.Length
+        let bytes = Array.zeroCreate<byte> byteCount
+
+        digits
+        |> Seq.iteri (fun index digit ->
+            if digit = '1' then
+                let bit = index + padding
+                bytes.[bit / 8] <- bytes.[bit / 8] ||| (1uy <<< (7 - bit % 8)))
+
+        bytes
+
+let private bitBytesLit: Parser<Value, unit> =
+    let quoted =
+        attempt (pstringCI "B" .>> pchar '\'')
+        >>. manyChars (anyOf "01")
+        .>> pchar '\''
+
+    let unquoted = attempt (pstringCI "0b") >>. many1Chars (anyOf "01")
+
+    (quoted <|> unquoted) .>> ws |>> (bytesOfBits >> VBytes)
+
+let private nationalStringLit: Parser<Value, unit> =
+    attempt (pstringCI "N" .>> followedBy (pchar '\'')) >>. stringLit
+
 let private literalValue: Parser<Value, unit> =
     choice
-        [ numberLit
+        [ bitBytesLit
+          numberLit
           hexBytesLit
+          nationalStringLit
           stringLit
           keyword "NULL" >>% VNull
           keyword "TRUE" >>% VInt 1L
@@ -1191,8 +1222,10 @@ let private atom: Parser<Expr, unit> =
           temporalLit
           windowCallAtom
           groupConcatAtom
+          bitBytesLit |>> Lit
           numberLit |>> Lit
           hexBytesLit |>> Lit
+          nationalStringLit |>> Lit
           introducedStringLit
           stringLit |>> Lit
           keyword "NULL" >>% Lit VNull

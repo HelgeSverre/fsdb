@@ -530,6 +530,24 @@ let tests =
                     | Ok statement -> failtestf "expected an error, got %A" statement
                     | Error error -> Expect.stringContains error "even number" "actionable malformed-literal error"
 
+                testCase "bit and national string literals parse as MySQL literals"
+                <| fun _ ->
+                    Expect.equal
+                        (parseOk "SELECT b'0101', B'111111111', 0b0101, b'', N'héllo'")
+                        (mkSelect(
+                            [ Lit(VBytes [| 0x05uy |]), None
+                              Lit(VBytes [| 0x01uy; 0xffuy |]), None
+                              Lit(VBytes [| 0x05uy |]), None
+                              Lit(VBytes [||]), None
+                              Lit(VString "héllo"), None ],
+                            None,
+                            None,
+                            [],
+                            None,
+                            None
+                        ))
+                        "literal values"
+
                 testCase "backtick-quoted identifier, including a reserved word and a doubled backtick"
                 <| fun _ ->
                     Expect.equal

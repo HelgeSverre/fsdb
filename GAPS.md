@@ -91,7 +91,6 @@ variants), USE, KILL, DESCRIBE are text-probed before the grammar
 | Quantified comparison | `= ANY/SOME/ALL (subquery)` | absent | medium | refusal |
 | Row constructors | `(a,b) = (1,2)`, `(a,b) IN ((1,2),(3,4))` | unparseable | medium | refusal |
 | User/system variables in expressions | `@x`, `@@x` anywhere an expression fits; `@x := …` | only bare `SELECT @x, @@y AS a` lists via post-parse regex fallback (`QueryHandler.fs:1188–1193`); inside larger queries → 1064 | medium | refusal |
-| Literals | `b'0101'`/`0b…` bit literals, `N'text'` national strings | absent | low | refusal |
 | `SOUNDS LIKE`, JSON `MEMBER OF` | supported | absent | low | refusal |
 | Named-window inheritance | `OVER (w ORDER BY x)` extends a named window | absent (`Ast.fs:220–221`) | low | refusal |
 

@@ -5868,6 +5868,12 @@ let tests =
                         "SELECT BIT_COUNT(255) a, BIT_COUNT(-1) b, BIT_COUNT(0) c, BIT_COUNT('12') d, BIT_COUNT(NULL) e"
                         [ Some "8"; Some "64"; Some "0"; Some "2"; None ]
 
+                testCase "bit and national string literals preserve their bytes and text"
+                <| fun _ ->
+                    expectRow
+                        "SELECT HEX(b'0101') a, HEX(B'111111111') b, HEX(0b0101) c, LENGTH(b'0101') d, HEX(b'') e, N'héllo' f"
+                        [ Some "05"; Some "01FF"; Some "05"; Some "1"; Some ""; Some "héllo" ]
+
                 testCase "bitwise operators use unsigned 64-bit values and MySQL precedence"
                 <| fun _ ->
                     expectRow
