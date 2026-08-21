@@ -1931,12 +1931,7 @@ let weightString (collation: Collation.Collation) (value: Value) : Value =
     match value with
     | VNull -> VNull
     | VBytes bytes -> VBytes bytes
-    | _ ->
-        if collation.Name.EndsWith("_bin", StringComparison.Ordinal) then
-            VBytes(Text.Encoding.UTF8.GetBytes(req value))
-        else
-            let key = collation.KeyOf(req value)
-            VBytes(Convert.FromHexString key)
+    | _ -> collation.WeightOf(req value) |> VBytes
 
 let weightStringChar (collation: Collation.Collation) (length: int) (value: Value) : Value =
     match value with
@@ -1952,6 +1947,9 @@ let weightStringChar (collation: Collation.Collation) (length: int) (value: Valu
         weightString collation (VString(result.ToString()))
 
 let weightStringBinary (length: int) (value: Value) : Value =
+    if length > Limits.maxAllowedPacket then
+        raise (SqlError(1153, "Result of WEIGHT_STRING() exceeds max_allowed_packet"))
+
     let bytes =
         match value with
         | VBytes bytes -> Some bytes

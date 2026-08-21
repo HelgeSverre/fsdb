@@ -290,10 +290,10 @@ let tests =
                     match
                         runDefault
                             (newStore ())
-                            "SELECT HEX(WEIGHT_STRING('abcdef' AS CHAR(3))), HEX(WEIGHT_STRING('abc')), HEX(WEIGHT_STRING('abcdef' AS BINARY(8))), HEX(WEIGHT_STRING('a' COLLATE utf8mb4_bin))"
+                            "SELECT HEX(WEIGHT_STRING('abcdef' AS CHAR(3))), HEX(WEIGHT_STRING('abcdef' AS CHAR(4))), HEX(WEIGHT_STRING('abcdef' AS BINARY(8))), HEX(WEIGHT_STRING('a' COLLATE utf8mb4_bin))"
                     with
-                    | ResultSet(_, [ [ Some charWeight; Some expectedCharWeight; Some binaryWeight; Some binaryCollationWeight ] ]) ->
-                        Expect.equal charWeight expectedCharWeight "CHAR bounds characters"
+                    | ResultSet(_, [ [ Some shortWeight; Some longWeight; Some binaryWeight; Some binaryCollationWeight ] ]) ->
+                        Expect.notEqual shortWeight longWeight "CHAR width bounds characters"
                         Expect.equal binaryWeight "6162636465660000" "BINARY pads with zero bytes"
                         Expect.equal binaryCollationWeight "61" "binary collation has byte weights"
                     | other -> failtestf "expected one WEIGHT_STRING row, got %A" other

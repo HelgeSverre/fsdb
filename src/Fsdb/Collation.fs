@@ -46,6 +46,9 @@ type Collation =
       /// A canonical index key: `Equals a b` iff `KeyOf a = KeyOf b` — the
       /// unique index and its point lookups both key on this.
       KeyOf: string -> string
+      /// Sort weights without PAD SPACE normalization. `WEIGHT_STRING()`
+      /// exposes these bytes, so trailing spaces remain observable.
+      WeightOf: string -> byte[]
       /// A hash code consistent with `ComparePrimary`: strings `Equals`
       /// says are equal hash equal (the converse never needs to hold). The
       /// hash join buckets on this instead of `KeyOf` — a hash needs no
@@ -104,13 +107,13 @@ let private countTrailingSpaces (s: string) : int =
 let private makeCollation (name: string) (spec: Spec) : Collation =
     let ci = compareInfoFor spec.Locale
     let trim (s: string) = if spec.PadSpace then s.TrimEnd(' ') else s
-    let primaryText (s: string) =
-        let value = trim s
-
+    let foldText (value: string) =
         if name = "utf8mb4_general_ci" then
             value.Replace("ß", "s").Replace("ẞ", "s")
         else
             value
+
+    let primaryText (s: string) = trim s |> foldText
 
     let compareFull (a: string) (b: string) : int =
         if spec.ByteOrder then
@@ -141,6 +144,12 @@ let private makeCollation (name: string) (spec: Spec) : Collation =
                 "B" + Convert.ToHexString(System.Text.Encoding.UTF8.GetBytes(trim s))
             else
                 Convert.ToHexString(ci.GetSortKey(primaryText s, spec.Fold).KeyData)
+      WeightOf =
+        fun s ->
+            if spec.ByteOrder then
+                System.Text.Encoding.UTF8.GetBytes s
+            else
+                ci.GetSortKey(foldText s, spec.Fold).KeyData
       HashOf =
         fun s ->
             if spec.ByteOrder then

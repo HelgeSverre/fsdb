@@ -3,6 +3,7 @@ module Fsdb.Tests.ValueTests
 open System
 open System.Text
 open Expecto
+open Fsdb.Collation
 open Fsdb.Value
 open Fsdb.Functions
 open Fsdb.Temporal
@@ -1190,8 +1191,10 @@ let tests =
                     let weight value = call "WEIGHT_STRING" [ VString value ]
                     Expect.equal (weight "Åge") (weight "age") "default collation folds case and accents"
                     Expect.notEqual (weight "age") (weight "axe") "different primary weights remain distinct"
+                    Expect.notEqual (weight "a") (weight "a ") "trailing spaces retain their weight"
                     Expect.equal (call "WEIGHT_STRING" [ VNull ]) VNull "NULL propagates"
                     Expect.equal (call "WEIGHT_STRING" [ VBytes [| 0x61uy; 0x00uy |] ]) (VBytes [| 0x61uy; 0x00uy |]) "binary input stays byte-exact"
+                    Expect.equal (weightStringChar defaultCollation 3 (VString "abcdef")) (weight "abc") "character width truncates before weighting"
 
                 testList
                     "Dates"
