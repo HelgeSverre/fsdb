@@ -158,7 +158,6 @@ accessors).
 
 | Gap | MySQL 8.4 | fsdb | Impact | Class |
 |---|---|---|---|---|
-| Zero dates | full and partial zero components, SQL-mode validation, warnings | values preserve zero components through storage, persistence, and the binary protocol; strict SQL-mode behavior is covered, but non-strict coercion does not record MySQL's 1264 warnings | low | divergence |
 | TIME value domain | typed TIME comparisons/arithmetic | stored and compared as pre-formatted strings; no `VTime` case (`Value.fs:13–30`, `Storage.fs:911–935`) | medium | divergence |
 | BIT type | `BIT(M)` with bit-literal I/O | absent | low | refusal |
 | Spatial indexes and operations | R-tree indexes, predicates, topology, geographic SRS axis rules | geometry values and common WKT/WKB accessors work; spatial indexes still collapse to BTree | low | refusal |
@@ -401,7 +400,7 @@ CREATE/DROP DATABASE under traffic.
 
 Documented or ponytail-marked design decisions that differ from MySQL on
 purpose: wait_timeout 300; no option-file auto-discovery; join candidate cap
-of 1M rows; unconditional zero-date rejection; text-probe privilege bypass;
+of 1M rows; text-probe privilege bypass;
 VECTOR type and function family (a MySQL 9 forward-port, absent from 8.4 —
 purely additive); live statistics values instead of ANALYZE-stale estimates;
 ICU CLDR collation tailoring; SUPER required for foreign KILL; honest

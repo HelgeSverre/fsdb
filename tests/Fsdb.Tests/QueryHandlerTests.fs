@@ -579,10 +579,25 @@ let tests =
               let session, _ = handle session "CREATE TABLE t (d DATE NOT NULL)"
               let session, result = handle session "INSERT INTO t VALUES ('2020-00-01')"
               Expect.equal result (Affected 1UL) "non-strict insert succeeds"
+              Expect.equal
+                  (session.Diagnostics |> List.map (fun condition -> condition.Code, condition.Message))
+                  [ 1264, "Out of range value for column 'd' at row 1" ]
+                  "non-strict zero-date conversion records MySQL's warning"
 
               match handle session "SELECT d FROM t" |> snd with
               | ResultSet(_, [ [ Some "0000-00-00" ] ]) -> ()
               | other -> failtestf "expected coercion to all-zero, got %A" other
+
+          testCase "partial zero dates compare with strings"
+          <| fun _ ->
+              let session = create 1 (Fsdb.Storage.create ())
+              let session, _ = handle session "SET SESSION sql_mode='STRICT_TRANS_TABLES'"
+              let session, _ = handle session "CREATE TABLE t (d DATE NOT NULL)"
+              let session, _ = handle session "INSERT INTO t VALUES ('2020-00-01')"
+
+              match handle session "SELECT d < '2020-01-01' FROM t" |> snd with
+              | ResultSet(_, [ [ Some "1" ] ]) -> ()
+              | other -> failtestf "expected zero month to precede January, got %A" other
 
           testCase "typed zero-date literals validate against the executing sql_mode"
           <| fun _ ->

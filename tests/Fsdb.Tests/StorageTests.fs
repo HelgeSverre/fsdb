@@ -1116,6 +1116,23 @@ let tests =
                         Expect.equal code 1292 "MySQL error code"
                     | other -> failtestf "expected ZeroTemporalForColumn, got %A" other
 
+                testCase "AddColumn NOT NULL DATE with no DEFAULT preserves an implicit zero date when zero modes are absent"
+                <| fun _ ->
+                    let store = withUsersTable ()
+                    setZeroDateModes store false false
+                    insertRows store defaultDatabase "users" None [ [ VNull; VString "alice"; VInt 30L ] ] |> ignore
+
+                    match alterTable store defaultDatabase "users" [ AddColumn(col "born" TDate false, PositionDefault) ] with
+                    | Ok() ->
+                        match scan store defaultDatabase "users" with
+                        | Ok(_, rows) ->
+                            Expect.equal
+                                (List.ofSeq rows |> List.map (fun row -> row.[3]))
+                                [ VZeroDate(tryZeroDate 0 0 0 |> Option.get) ]
+                                "implicit zero date"
+                        | Error error -> failtestf "expected Ok, got %A" error
+                    | Error error -> failtestf "expected Ok, got %A" error
+
                 testCase "AddColumn NOT NULL with no DEFAULT fills empty string for a text column and the first member for an ENUM"
                 <| fun _ ->
                     let store = withUsersTable ()
