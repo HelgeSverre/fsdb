@@ -4402,7 +4402,7 @@ let private geometryTypeFn: Scalar =
 
 let private geometryDimensionFn: Scalar =
     let rec dimension = function
-        | GEmpty _ -> -1
+        | GEmpty -> -1
         | GPoint _
         | GMultiPoint _ -> 0
         | GLineString _
@@ -4413,7 +4413,10 @@ let private geometryDimensionFn: Scalar =
 
     function
     | [ VNull ] -> VNull
-    | [ value ] -> geometryArgument "ST_DIMENSION" value |> fun geometry -> VInt(int64 (dimension geometry.Shape))
+    | [ value ] ->
+        match (geometryArgument "ST_DIMENSION" value).Shape with
+        | GEmpty -> VNull
+        | shape -> VInt(int64 (dimension shape))
     | _ -> raise (SqlError(1582, "Incorrect parameter count in the call to native function 'st_dimension'"))
 
 let private geometryIsEmptyFn: Scalar =
@@ -4421,7 +4424,7 @@ let private geometryIsEmptyFn: Scalar =
     | [ VNull ] -> VNull
     | [ value ] ->
         match geometryArgument "ST_ISEMPTY" value with
-        | { Shape = GEmpty _ } -> VInt 1L
+        | { Shape = GEmpty } -> VInt 1L
         | _ -> VInt 0L
     | _ -> raise (SqlError(1582, "Incorrect parameter count in the call to native function 'st_isempty'"))
 
@@ -4431,7 +4434,6 @@ let private pointCoordinateFn functionName select: Scalar =
     | [ value ] ->
         match (geometryArgument functionName value).Shape with
         | GPoint(x, y) -> VDouble(select x y)
-        | GEmpty Point -> VNull
         | _ -> geometryError functionName "a Point argument is required"
     | _ -> raise (SqlError(1582, sprintf "Incorrect parameter count in the call to native function '%s'" functionName))
 

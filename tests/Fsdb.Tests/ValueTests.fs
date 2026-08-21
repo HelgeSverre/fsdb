@@ -139,13 +139,38 @@ let tests =
                     let geometry = call "ST_GeomFromText" [ VString "GEOMETRYCOLLECTION EMPTY" ]
 
                     Expect.equal (call "ST_AsText" [ geometry ]) (VString "GEOMETRYCOLLECTION EMPTY") "empty WKT"
-                    Expect.equal (call "ST_Dimension" [ geometry ]) (VInt -1L) "empty dimension"
+                    Expect.equal (call "ST_Dimension" [ geometry ]) VNull "empty dimension"
                     Expect.equal (call "ST_IsEmpty" [ geometry ]) (VInt 1L) "empty flag"
+                    Expect.isNone (tryGeometryFromText 0 "POINT EMPTY") "MySQL rejects empty points"
+                    Expect.isNone (tryGeometryFromText 0 "LINESTRING EMPTY") "MySQL rejects empty lines"
+                    Expect.isNone (tryGeometryFromText 0 "POLYGON EMPTY") "MySQL rejects empty polygons"
+                    Expect.isNone (tryGeometryFromText 0 "MULTIPOINT EMPTY") "MySQL rejects empty multipoints"
+                    Expect.isNone (tryGeometryFromText 0 "MULTILINESTRING EMPTY") "MySQL rejects empty multilines"
+                    Expect.isNone (tryGeometryFromText 0 "MULTIPOLYGON EMPTY") "MySQL rejects empty multipolygons"
 
                 testCase "WKT rejects incomplete lines and open polygon rings"
                 <| fun _ ->
                     Expect.isNone (tryGeometryFromText 0 "LINESTRING(1 2)") "line needs two points"
-                    Expect.isNone (tryGeometryFromText 0 "POLYGON((0 0,0 1,1 1,2 2))") "ring must close" ]
+                    Expect.isNone (tryGeometryFromText 0 "POLYGON((0 0,0 1,1 1,2 2))") "ring must close"
+
+                testCase "WKB rejects malformed concrete and empty shapes"
+                <| fun _ ->
+                    let parse (hex: string) = Convert.FromHexString hex |> tryGeometryFromWkb 0
+
+                    Expect.isNone (parse "01020000000100000000000000000000000000000000000000") "line needs two points"
+                    Expect.isNone (parse "0103000000010000000300000000000000000000000000000000000000000000000000F03F000000000000F03F00000000000000000000000000000000") "polygon ring needs four points"
+                    Expect.isNone (parse "0103000000010000000400000000000000000000000000000000000000000000000000F03F0000000000000000000000000000F03F000000000000F03F00000000000000000000000000000040") "polygon ring must close"
+                    Expect.isNone (parse "010200000000000000") "empty line"
+                    Expect.isNone (parse "010300000000000000") "empty polygon"
+                    Expect.isNone (parse "010400000000000000") "empty multipoint"
+                    Expect.isNone (parse "010500000000000000") "empty multiline"
+                    Expect.isNone (parse "010600000000000000") "empty multipolygon"
+                    Expect.isNone (parse "010500000001000000010200000000000000") "empty multiline child"
+                    Expect.isNone (parse "010600000001000000010300000000000000") "empty multipolygon child"
+                    Expect.equal
+                        (parse "010700000000000000" |> Option.map geometryToText)
+                        (Some "GEOMETRYCOLLECTION EMPTY")
+                        "empty collection" ]
 
           testList
               "mysqlTypeOf"

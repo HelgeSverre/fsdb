@@ -226,6 +226,15 @@ let tests =
                   Expect.equal (geometryToText geometry) "POINT(1.5 -2)" "point"
               | other -> failtestf "expected geometry, got %A" other
 
+          testCase "binary protocol geometry parameters reject malformed payloads"
+          <| fun _ ->
+              let writer = Writer()
+              writer.WriteLenEncBytes(Convert.FromHexString "01020000000100000000000000000000000000000000000000")
+
+              Expect.throwsT<GeometryError>
+                  (fun () -> readBinaryValue (Reader(writer.ToArray())) TypeGeometry false |> ignore)
+                  "one-point lines are not coerced to NULL"
+
           testCase "wireTypeOfColumnType maps every declared-type family to its wire id"
           <| fun _ ->
               Expect.equal (wireTypeOfColumnType (TTinyInt false)) TypeTiny "tinyint"

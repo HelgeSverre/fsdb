@@ -1041,10 +1041,10 @@ let private handleConnection
                                                 else
                                                     match stmt.LastParamTypes with
                                                     | Some types -> Result.Ok types
-                                                    | None -> Result.Error "COM_STMT_EXECUTE sent no parameter types to bind"
+                                                    | None -> Result.Error(1210, "COM_STMT_EXECUTE sent no parameter types to bind")
 
                                             match typesResult with
-                                            | Result.Error message -> Result.Error message
+                                            | Result.Error error -> Result.Error error
                                             | Result.Ok types ->
                                                 let isNull i =
                                                     (int nullBitmap.[i / 8] >>> (i % 8)) &&& 1 = 1
@@ -1060,19 +1060,27 @@ let private handleConnection
                                                         // compressed column, ...). Only text types decode.
                                                         | Some chunks ->
                                                             let bytes = chunks |> List.rev |> Array.concat
-                                                            if typeId = TypeBlob then VBytes bytes else VString(Encoding.UTF8.GetString bytes)
+                                                            if typeId = TypeBlob then
+                                                                VBytes bytes
+                                                            elif typeId = TypeGeometry then
+                                                                match tryGeometryFromMySqlBinary bytes with
+                                                                | Some geometry -> VGeometry geometry
+                                                                | None -> raise (GeometryError "Invalid GIS data provided to binary parameter")
+                                                            else
+                                                                VString(Encoding.UTF8.GetString bytes)
                                                         | None -> if isNull i then VNull else readBinaryValue r typeId unsigned)
 
                                                 Result.Ok(types, values)
-                                        with ex ->
-                                            Result.Error ex.Message
+                                        with
+                                        | GeometryError message -> Result.Error(3037, message)
+                                        | ex -> Result.Error(1210, ex.Message)
 
                                     match decoded with
-                                    | Result.Error message ->
+                                    | Result.Error(code, message) ->
                                         do!
                                             writePacketAsync
                                                 stream
-                                                { SeqId = seqId; Payload = errPayload capabilities 1210 message }
+                                                { SeqId = seqId; Payload = errPayload capabilities code message }
                                             |> Async.Ignore
 
                                         return! loop session

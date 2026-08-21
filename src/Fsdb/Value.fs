@@ -22,7 +22,7 @@ type GeometryKind =
     | GeometryCollection
 
 type GeometryShape =
-    | GEmpty of GeometryKind
+    | GEmpty
     | GPoint of float * float
     | GLineString of (float * float) list
     | GPolygon of (float * float) list list
@@ -35,8 +35,10 @@ and Geometry =
     { Srid: int
       Shape: GeometryShape }
 
+exception GeometryError of string
+
 let geometryKind = function
-    | GEmpty kind -> kind
+    | GEmpty -> GeometryCollection
     | GPoint _ -> Point
     | GLineString _ -> LineString
     | GPolygon _ -> Polygon
@@ -73,7 +75,7 @@ let rec geometryToText (geometry: Geometry) : string =
     let rings polygon = polygon |> List.map (fun ring -> "(" + pairs ring + ")") |> String.concat ","
 
     match geometry.Shape with
-    | GEmpty kind -> geometryTypeName kind + " EMPTY"
+    | GEmpty -> "GEOMETRYCOLLECTION EMPTY"
     | GPoint(x, y) -> "POINT(" + pair (x, y) + ")"
     | GLineString points -> "LINESTRING(" + pairs points + ")"
     | GPolygon polygon -> "POLYGON(" + rings polygon + ")"
@@ -130,8 +132,7 @@ let tryGeometryFromText (srid: int) (text: string) : Geometry option =
         && rings |> List.forall (fun ring -> List.length ring >= 4 && samePoint (List.head ring) (List.last ring))
 
     let rec isValidWktShape = function
-        | GEmpty GeometryCollection -> true
-        | GEmpty _ -> false
+        | GEmpty -> true
         | GPoint _ -> true
         | GLineString points -> validLine points
         | GPolygon rings -> validPolygon rings
@@ -182,7 +183,7 @@ let tryGeometryFromText (srid: int) (text: string) : Geometry option =
             match tokens.[index] with
             | WktWord name when index + 1 < tokens.Length && tokens.[index + 1] = WktWord "EMPTY" ->
                 match name with
-                | "GEOMETRYCOLLECTION" -> Some(GEmpty GeometryCollection, index + 2)
+                | "GEOMETRYCOLLECTION" -> Some(GEmpty, index + 2)
                 | _ -> None
             | WktWord "POINT" -> parseSinglePoint (index + 1) |> Option.map (fun ((x, y), next) -> GPoint(x, y), next)
             | WktWord "LINESTRING" -> parseLine (index + 1) |> Option.map (fun (line, next) -> GLineString line, next)
@@ -221,14 +222,7 @@ let geometryToWkb (geometry: Geometry) : byte[] =
         let writeHeader kind = writer.WriteByte 1uy; writer.WriteInt32LE(geometryTypeCode kind)
 
         match shape with
-        | GEmpty Point -> writeHeader Point; writePair (Double.NaN, Double.NaN)
-        | GEmpty LineString -> writeHeader LineString; writer.WriteInt32LE 0
-        | GEmpty Polygon -> writeHeader Polygon; writer.WriteInt32LE 0
-        | GEmpty MultiPoint -> writeHeader MultiPoint; writer.WriteInt32LE 0
-        | GEmpty MultiLineString -> writeHeader MultiLineString; writer.WriteInt32LE 0
-        | GEmpty MultiPolygon -> writeHeader MultiPolygon; writer.WriteInt32LE 0
-        | GEmpty GeometryCollection -> writeHeader GeometryCollection; writer.WriteInt32LE 0
-        | GEmpty Geometry -> invalidArg "shape" "GEOMETRY is not a concrete shape"
+        | GEmpty -> writeHeader GeometryCollection; writer.WriteInt32LE 0
         | GPoint(x, y) -> writeHeader Point; writePair (x, y)
         | GLineString points -> writeHeader LineString; writePairs points
         | GPolygon polygon ->
@@ -319,21 +313,22 @@ let tryGeometryFromWkb (srid: int) (bytes: byte[]) : Geometry option =
                     | 1 ->
                         readPair ()
                         |> Option.bind (fun (x, y) ->
-                            if Double.IsNaN x && Double.IsNaN y then Some(GEmpty Point)
-                            elif finitePair (x, y) then Some(GPoint(x, y))
+                            if finitePair (x, y) then Some(GPoint(x, y))
                             else None)
                     | 2 ->
                         readMany readPair
                         |> Option.bind (fun points ->
-                            if not (points |> List.forall finitePair) then None
-                            elif List.isEmpty points then Some(GEmpty LineString)
-                            else Some(GLineString points))
+                            if List.length points >= 2 && points |> List.forall finitePair then Some(GLineString points)
+                            else None)
                     | 3 ->
                         readMany (fun () -> readMany readPair)
                         |> Option.bind (fun rings ->
-                            if not (rings |> List.forall (List.forall finitePair)) then None
-                            elif List.isEmpty rings then Some(GEmpty Polygon)
-                            else Some(GPolygon rings))
+                            let closed ring = List.length ring >= 4 && List.head ring = List.last ring
+
+                            if not (List.isEmpty rings) && rings |> List.forall (fun ring -> closed ring && ring |> List.forall finitePair) then
+                                Some(GPolygon rings)
+                            else
+                                None)
                     | 4 ->
                         readMany (fun () -> readGeometry (depth + 1))
                         |> Option.bind (fun shapes ->
@@ -342,7 +337,7 @@ let tryGeometryFromWkb (srid: int) (bytes: byte[]) : Geometry option =
                                 match points, shape with
                                 | Some values, GPoint(x, y) -> Some((x, y) :: values)
                                 | _ -> None) (Some [])
-                            |> Option.map (fun points -> if List.isEmpty points then GEmpty MultiPoint else GMultiPoint(List.rev points)))
+                            |> Option.bind (fun points -> if List.isEmpty points then None else Some(GMultiPoint(List.rev points))))
                     | 5 ->
                         readMany (fun () -> readGeometry (depth + 1))
                         |> Option.bind (fun shapes ->
@@ -350,9 +345,8 @@ let tryGeometryFromWkb (srid: int) (bytes: byte[]) : Geometry option =
                             |> List.fold (fun lines shape ->
                                 match lines, shape with
                                 | Some values, GLineString line -> Some(line :: values)
-                                | Some values, GEmpty LineString -> Some([] :: values)
                                 | _ -> None) (Some [])
-                            |> Option.map (fun lines -> if List.isEmpty lines then GEmpty MultiLineString else GMultiLineString(List.rev lines)))
+                            |> Option.bind (fun lines -> if List.isEmpty lines || lines |> List.exists (fun line -> List.length line < 2) then None else Some(GMultiLineString(List.rev lines))))
                     | 6 ->
                         readMany (fun () -> readGeometry (depth + 1))
                         |> Option.bind (fun shapes ->
@@ -360,13 +354,18 @@ let tryGeometryFromWkb (srid: int) (bytes: byte[]) : Geometry option =
                             |> List.fold (fun polygons shape ->
                                 match polygons, shape with
                                 | Some values, GPolygon polygon -> Some(polygon :: values)
-                                | Some values, GEmpty Polygon -> Some([] :: values)
                                 | _ -> None) (Some [])
-                            |> Option.map (fun polygons -> if List.isEmpty polygons then GEmpty MultiPolygon else GMultiPolygon(List.rev polygons)))
+                            |> Option.bind (fun polygons ->
+                                let closed ring = List.length ring >= 4 && List.head ring = List.last ring
+
+                                if List.isEmpty polygons || polygons |> List.exists (fun polygon -> List.isEmpty polygon || polygon |> List.exists (closed >> not)) then
+                                    None
+                                else
+                                    Some(GMultiPolygon(List.rev polygons))))
                     | 7 ->
                         readMany (fun () -> readGeometry (depth + 1))
                         |> Option.map (fun shapes ->
-                            if List.isEmpty shapes then GEmpty GeometryCollection
+                            if List.isEmpty shapes then GEmpty
                             else shapes |> List.map (fun shape -> { Srid = srid; Shape = shape }) |> GGeometryCollection)
                     | _ -> None
             | _ -> None
@@ -374,6 +373,13 @@ let tryGeometryFromWkb (srid: int) (bytes: byte[]) : Geometry option =
 
     readGeometry 0
     |> Option.bind (fun shape -> if position = bytes.Length then Some { Srid = srid; Shape = shape } else None)
+
+let tryGeometryFromMySqlBinary (bytes: byte[]) : Geometry option =
+    if bytes.Length < 5 then
+        None
+    else
+        let srid = BinaryPrimitives.ReadInt32LittleEndian(ReadOnlySpan(bytes, 0, 4))
+        tryGeometryFromWkb srid bytes.[4..]
 
 type Value =
     | VNull
@@ -568,12 +574,7 @@ let ofWire (s: string) : Value =
         | 'G' ->
             let bytes = Convert.FromBase64String payload
 
-            if bytes.Length < 5 then
-                failwith "Value.ofWire: geometry payload is too short"
-
-            let srid = BinaryPrimitives.ReadInt32LittleEndian(ReadOnlySpan(bytes, 0, 4))
-
-            match tryGeometryFromWkb srid bytes.[4..] with
+            match tryGeometryFromMySqlBinary bytes with
             | Some geometry -> VGeometry geometry
             | None -> failwith "Value.ofWire: invalid geometry payload"
         | tag -> failwithf "Value.ofWire: unknown tag '%c' in %s" tag s
@@ -657,12 +658,7 @@ let decodeValue (r: #IReader) : Value =
             |> Option.map (fun length -> r.ReadBytes(int length))
             |> Option.defaultValue [||]
 
-        if bytes.Length < 5 then
-            failwith "Value.decodeValue: geometry payload is too short"
-
-        let srid = BinaryPrimitives.ReadInt32LittleEndian(ReadOnlySpan(bytes, 0, 4))
-
-        match tryGeometryFromWkb srid bytes.[4..] with
+        match tryGeometryFromMySqlBinary bytes with
         | Some geometry -> VGeometry geometry
         | None -> failwith "Value.decodeValue: invalid geometry payload"
     | tag -> failwithf "Value.decodeValue: unknown tag 0x%02x" tag
