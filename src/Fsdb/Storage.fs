@@ -916,6 +916,7 @@ let private coerceValueWithModeAndLengths (enforceLengths: bool) (mode: Temporal
         match value with
         | VInt number -> finish (decimal number)
         | VUInt number -> finish (decimal number)
+        | VBit(_, number) -> finish (decimal number)
         | VDecimal number -> finish (Math.Truncate number)
         | VDouble number ->
             if Double.IsNaN number then
@@ -965,6 +966,7 @@ let private coerceValueWithModeAndLengths (enforceLengths: bool) (mode: Temporal
 
             match v with
             | VUInt u -> Ok(VUInt u)
+            | VBit(_, value) -> Ok(VUInt value)
             | VInt i -> narrow (decimal i)
             | VDouble d ->
                 // `decimal d` itself overflows outside ±7.9e28, so the range
@@ -1044,6 +1046,7 @@ let private coerceValueWithModeAndLengths (enforceLengths: bool) (mode: Temporal
             match v with
             | VInt i -> Ok(VInt i)
             | VUInt u -> Ok(VInt(int64 u))
+            | VBit(_, value) -> Ok(VInt(int64 value))
             | VDouble d -> Ok(VInt(int64 d))
             | VDecimal d -> Ok(VInt(int64 d))
             | VString s ->
@@ -1057,6 +1060,7 @@ let private coerceValueWithModeAndLengths (enforceLengths: bool) (mode: Temporal
             | VDouble d -> Ok(VDouble d)
             | VInt i -> Ok(VDouble(float i))
             | VUInt u -> Ok(VDouble(float u))
+            | VBit(_, value) -> Ok(VDouble(float value))
             | VDecimal d -> Ok(VDouble(float d))
             | VString s ->
                 match parseNumeric s with
@@ -1083,6 +1087,7 @@ let private coerceValueWithModeAndLengths (enforceLengths: bool) (mode: Temporal
             | VDecimal d -> Ok(VDecimal(rescale d))
             | VInt i -> Ok(VDecimal(rescale (decimal i)))
             | VUInt u -> Ok(VDecimal(rescale (decimal u)))
+            | VBit(_, value) -> Ok(VDecimal(rescale (decimal value)))
             | VDouble d -> Ok(VDecimal(rescale (decimal d)))
             | VString s ->
                 match parseNumeric s with
@@ -1131,6 +1136,24 @@ let private coerceValueWithModeAndLengths (enforceLengths: bool) (mode: Temporal
             let canonicalize (matched: Set<string>) =
                 values |> List.filter (fun m -> matched.Contains(m.ToUpperInvariant())) |> String.concat ","
 
+            let maxValid = if List.length values = 64 then UInt64.MaxValue else (1UL <<< List.length values) - 1UL
+
+            let fromMask mask =
+                values
+                |> List.indexed
+                |> List.filter (fun (bit, _) -> mask &&& (1UL <<< bit) <> 0UL)
+                |> List.map snd
+                |> String.concat ","
+
+            let numericSet mask valid =
+                if valid then
+                    Ok(VString(fromMask mask))
+                elif strict then
+                    setFail ()
+                else
+                    warning 1265 (sprintf "Data truncated for column '%s'" col.Name)
+                    Ok(VString(fromMask (mask &&& maxValid)))
+
             match v with
             | VString "" -> Ok(VString "")
             | VString s ->
@@ -1145,19 +1168,8 @@ let private coerceValueWithModeAndLengths (enforceLengths: bool) (mode: Temporal
                 else
                     warning 1265 (sprintf "Data truncated for column '%s'" col.Name)
                     Ok(VString(canonicalize (parts |> List.choose resolve |> List.map (fun m -> m.ToUpperInvariant()) |> Set.ofList)))
-            | VInt i ->
-                let maxValid = (1L <<< List.length values) - 1L
-
-                if i >= 0L && i <= maxValid then
-                    let members = values |> List.indexed |> List.filter (fun (bit, _) -> i &&& (1L <<< bit) <> 0L) |> List.map snd
-                    Ok(VString(String.concat "," members))
-                elif strict then
-                    setFail ()
-                else
-                    warning 1265 (sprintf "Data truncated for column '%s'" col.Name)
-                    let masked = i &&& maxValid
-                    let members = values |> List.indexed |> List.filter (fun (bit, _) -> masked &&& (1L <<< bit) <> 0L) |> List.map snd
-                    Ok(VString(String.concat "," members))
+            | VInt value -> numericSet (uint64 value) (value >= 0L && uint64 value <= maxValid)
+            | VBit(_, value) -> numericSet value (value <= maxValid)
             | _ -> setFail ()
         | TTime fsp ->
             // TIME is stored pre-formatted as a `VString` (there's no `VTime`
@@ -1187,10 +1199,11 @@ let private coerceValueWithModeAndLengths (enforceLengths: bool) (mode: Temporal
         | TBinary length
         | TVarBinary length ->
             let bytes =
-                match v with
-                | VBytes bytes -> bytes
-                | VString text -> Text.Encoding.UTF8.GetBytes text
-                | _ -> v |> toText |> Option.defaultValue "" |> Text.Encoding.UTF8.GetBytes
+                tryRawBytes v
+                |> Option.defaultWith (fun () ->
+                    match v with
+                    | VString text -> Text.Encoding.UTF8.GetBytes text
+                    | _ -> v |> toText |> Option.defaultValue "" |> Text.Encoding.UTF8.GetBytes)
 
             truncateBytes length bytes
             |> Result.map (fun bytes ->
@@ -1205,14 +1218,12 @@ let private coerceValueWithModeAndLengths (enforceLengths: bool) (mode: Temporal
         | TBlob
         | TMediumBlob
         | TLongBlob ->
-            match v with
-            | VBytes bytes -> Ok(VBytes bytes)
-            // A character literal assigned to a binary column is encoded
-            // using the connection's effective utf8mb4 character set. Raw
-            // `X'...'` literals already arrive as VBytes and bypass this
-            // conversion, preserving every byte including invalid UTF-8.
-            | VString text -> Ok(VBytes(Text.Encoding.UTF8.GetBytes text))
-            | _ -> Ok(VBytes(v |> toText |> Option.defaultValue "" |> Text.Encoding.UTF8.GetBytes))
+            tryRawBytes v
+            |> Option.map (VBytes >> Ok)
+            |> Option.defaultWith (fun () ->
+                match v with
+                | VString text -> Ok(VBytes(Text.Encoding.UTF8.GetBytes text))
+                | _ -> Ok(VBytes(v |> toText |> Option.defaultValue "" |> Text.Encoding.UTF8.GetBytes)))
         | TVector dim ->
             // A vector column accepts exactly its dimension in little-endian
             // float32 bytes (dim × 4) — the shape STRING_TO_VECTOR (or an

@@ -502,7 +502,17 @@ let tests =
 
                 testCase "non-strict mode clamps an out-of-range bit value"
                 <| fun _ ->
-                    Expect.equal (coerceValue false bits (VInt 8L)) (Ok(VBit(3, 7UL))) "max bit value" ]
+                    Expect.equal (coerceValue false bits (VInt 8L)) (Ok(VBit(3, 7UL))) "max bit value"
+
+                testCase "BIT values coerce through numeric targets"
+                <| fun _ ->
+                    let value = VBit(3, 5UL)
+                    Expect.equal (coerceValue true (col "integer" (TInt false) true) value) (Ok(VInt 5L)) "integer"
+                    Expect.equal (coerceValue true (col "unsigned" (TBigInt true) true) value) (Ok(VUInt 5UL)) "unsigned"
+                    Expect.equal (coerceValue true (col "decimal" (TDecimal(10, 0)) true) value) (Ok(VDecimal 5m)) "decimal"
+                    Expect.equal (coerceValue true (col "double" TDouble true) value) (Ok(VDouble 5.0)) "double"
+                    Expect.equal (coerceValue true (col "year" TYear true) value) (Ok(VInt 5L)) "year"
+                    Expect.equal (coerceValue true (col "set" (TSet [ "a"; "b"; "c" ]) true) value) (Ok(VString "a,c")) "set bitmask" ]
 
           testList
               "coerceValue spatial columns"
