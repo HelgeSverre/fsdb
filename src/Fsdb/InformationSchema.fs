@@ -396,6 +396,10 @@ let rec exprToSql (e: Expr) : string =
     | Regexp(e, p) -> sprintf "(%s regexp %s)" (exprToSql e) (exprToSql p)
     | In(e, cs) -> sprintf "(%s in (%s))" (exprToSql e) (cs |> List.map exprToSql |> String.concat ",")
     | Between(e, lo, hi) -> sprintf "(%s between %s and %s)" (exprToSql e) (exprToSql lo) (exprToSql hi)
+    | FuncCall(name, [ Cast(value, TChar length) ]) when name.Equals("WEIGHT_STRING", System.StringComparison.OrdinalIgnoreCase) ->
+        sprintf "weight_string(%s as char(%d))" (exprToSql value) length
+    | FuncCall(name, [ Cast(value, TBinary length) ]) when name.Equals("WEIGHT_STRING", System.StringComparison.OrdinalIgnoreCase) ->
+        sprintf "weight_string(%s as binary(%d))" (exprToSql value) length
     | FuncCall(name, args) -> sprintf "%s(%s)" (name.ToLowerInvariant()) (args |> List.map exprToSql |> String.concat ",")
     | Distinct e -> sprintf "distinct %s" (exprToSql e)
     | OrderBy(e, _) -> exprToSql e

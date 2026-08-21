@@ -498,6 +498,7 @@ let private unsignedFlag: Parser<bool, unit> = opt (keyword "UNSIGNED") |>> Opti
 
 let private widthLen: Parser<int, unit> = between (sym "(") (sym ")") intTok
 let private optWidthLen: Parser<int option, unit> = opt widthLen
+let private positiveWidthLen: Parser<int, unit> = widthLen >>= fun n -> if n > 0 then preturn n else fail "a WEIGHT_STRING width must be positive"
 
 /// The fractional-seconds precision on a temporal type — `DATETIME(6)` →
 /// `6`, a bare `DATETIME` → `0`. Any non-negative int parses here; the
@@ -666,6 +667,27 @@ let private convertUsingAtom: Parser<Expr, unit> =
     )
     |>> fun (e, charset) -> FuncCall("CONVERT", [ e; Lit(VString charset) ])
 
+/// Carries the modifier as a cast node so stored expressions retain an
+/// ordinary AST; `Executor` applies WEIGHT_STRING's own length semantics.
+let private weightStringAtom: Parser<Expr, unit> =
+    let cast =
+        keyword "AS"
+        >>. choice
+                [ keyword "CHAR" >>. positiveWidthLen |>> TChar
+                  keyword "BINARY" >>. positiveWidthLen |>> TBinary ]
+
+    attempt (
+        keyword "WEIGHT_STRING"
+        >>. between (sym "(") (sym ")") (expr .>>. opt cast)
+    )
+    |>> fun (value, modifier) ->
+        let argument =
+            match modifier with
+            | Some target -> Cast(value, target)
+            | None -> value
+
+        FuncCall("WEIGHT_STRING", [ argument ])
+
 let private genericFuncCall: Parser<Expr, unit> =
     attempt (
         (many1Satisfy2 isIdentStart isIdentChar .>> ws)
@@ -696,7 +718,7 @@ let private trimAtom: Parser<Expr, unit> =
         |>> fun ((mode, removed), source) -> FuncCall(mode, [ removed; source ])
     )
 
-let private funcCallAtom: Parser<Expr, unit> = choice [ attempt convertUsingAtom; trimAtom; genericFuncCall ]
+let private funcCallAtom: Parser<Expr, unit> = choice [ attempt convertUsingAtom; attempt weightStringAtom; trimAtom; genericFuncCall ]
 
 /// `GROUP_CONCAT([DISTINCT] expr [ORDER BY key [ASC|DESC], ...] [SEPARATOR
 /// 'str'])` — parsed separately from `funcCallAtom` rather than folding

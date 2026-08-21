@@ -1925,11 +1925,49 @@ let private jsonSearchFn: Scalar =
         | _ -> VNull
     | _ -> VNull
 
+/// The binary collation has no character weights: MySQL returns its raw
+/// byte sequence, including `BINARY(N)`'s zero padding.
+let weightString (collation: Collation.Collation) (value: Value) : Value =
+    match value with
+    | VNull -> VNull
+    | VBytes bytes -> VBytes bytes
+    | _ ->
+        if collation.Name.EndsWith("_bin", StringComparison.Ordinal) then
+            VBytes(Text.Encoding.UTF8.GetBytes(req value))
+        else
+            let key = collation.KeyOf(req value)
+            VBytes(Convert.FromHexString key)
+
+let weightStringChar (collation: Collation.Collation) (length: int) (value: Value) : Value =
+    match value with
+    | VNull -> VNull
+    | _ ->
+        let text = req value
+        let result = StringBuilder()
+
+        text.EnumerateRunes()
+        |> Seq.truncate length
+        |> Seq.iter (fun rune -> result.Append(rune.ToString()) |> ignore)
+
+        weightString collation (VString(result.ToString()))
+
+let weightStringBinary (length: int) (value: Value) : Value =
+    let bytes =
+        match value with
+        | VBytes bytes -> Some bytes
+        | VNull -> None
+        | _ -> Some(Text.Encoding.UTF8.GetBytes(req value))
+
+    match bytes with
+    | None -> VNull
+    | Some bytes ->
+        let result = Array.zeroCreate length
+        Array.Copy(bytes, result, min bytes.Length length)
+        VBytes result
+
 let private weightStringFn: Scalar =
     function
-    | [ value ] when not (anyNull [ value ]) ->
-        let key = Collation.defaultCollation.KeyOf(req value)
-        VBytes(Convert.FromHexString key)
+    | [ value ] -> weightString Collation.defaultCollation value
     | _ -> VNull
 
 /// `CONVERT(expr USING charset)` — MySQL's transcode form, desugared by the

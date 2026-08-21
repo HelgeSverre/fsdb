@@ -1191,6 +1191,7 @@ let tests =
                     Expect.equal (weight "Åge") (weight "age") "default collation folds case and accents"
                     Expect.notEqual (weight "age") (weight "axe") "different primary weights remain distinct"
                     Expect.equal (call "WEIGHT_STRING" [ VNull ]) VNull "NULL propagates"
+                    Expect.equal (call "WEIGHT_STRING" [ VBytes [| 0x61uy; 0x00uy |] ]) (VBytes [| 0x61uy; 0x00uy |]) "binary input stays byte-exact"
 
                 testList
                     "Dates"

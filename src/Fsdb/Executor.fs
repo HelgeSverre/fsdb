@@ -1252,6 +1252,8 @@ let rec private metadataOfExpr (ctx: EvalContext) (expr: Expr) : ColumnMetadata 
         simple TypeLongLong |> Option.map (fun metadata -> { metadata with Flags = NotNullFlag })
     | FuncCall(name, [ _; _ ]) when name.Equals("BENCHMARK", System.StringComparison.OrdinalIgnoreCase) ->
         simple TypeLongLong
+    | FuncCall(name, [ _ ]) when name.Equals("WEIGHT_STRING", System.StringComparison.OrdinalIgnoreCase) ->
+        Some { Value.columnMetadata TypeBlob with ColumnLength = 4294967295u; Flags = BlobFlag ||| BinaryFlag }
     | FuncCall(name, args) ->
         match name.ToUpperInvariant(), args with
         | "COUNT", _ -> simple TypeLongLong
@@ -2476,6 +2478,18 @@ let rec private evalExpr (ctx: EvalContext) (expr: Expr) : Result<Value, EvalErr
                 match failure with
                 | Some error -> Error error
                 | None -> Ok(VInt 0L))
+    | FuncCall(name, [ Cast(argument, TChar length) ]) when name.Equals("WEIGHT_STRING", System.StringComparison.OrdinalIgnoreCase) ->
+        eval argument |> Result.map (Functions.weightStringChar (keyCollation ctx argument) length)
+    | FuncCall(name, [ Cast(argument, TBinary length) ]) when name.Equals("WEIGHT_STRING", System.StringComparison.OrdinalIgnoreCase) ->
+        eval argument |> Result.map (Functions.weightStringBinary length)
+    | FuncCall(name, [ argument ]) when name.Equals("WEIGHT_STRING", System.StringComparison.OrdinalIgnoreCase) ->
+        let source =
+            match argument with
+            | Cast(value, TChar _) -> value
+            | Cast(value, TBinary _) -> value
+            | _ -> argument
+
+        eval argument |> Result.map (Functions.weightString (keyCollation ctx source))
     | FuncCall(name, args) ->
         match Functions.lookup name ctx.Registry with
         | None -> Error(unknownFunction name)

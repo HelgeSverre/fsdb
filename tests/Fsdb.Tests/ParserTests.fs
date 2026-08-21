@@ -198,6 +198,32 @@ let tests =
                         ))
                         "func calls"
 
+                testCase "WEIGHT_STRING casts its argument before computing weights"
+                <| fun _ ->
+                    Expect.equal
+                        (parseOk "SELECT WEIGHT_STRING(name AS CHAR(3)), WEIGHT_STRING(name AS BINARY(4)) FROM t")
+                        (mkSelect(
+                            [ FuncCall("WEIGHT_STRING", [ Cast(col "name", TChar 3) ]), None
+                              FuncCall("WEIGHT_STRING", [ Cast(col "name", TBinary 4) ]), None ],
+                            Some "t",
+                            None,
+                            [],
+                            None,
+                            None
+                        ))
+                        "weight string modifiers"
+
+                testCase "WEIGHT_STRING rejects omitted and zero widths"
+                <| fun _ ->
+                    for sql in
+                        [ "SELECT WEIGHT_STRING('a' AS CHAR)"
+                          "SELECT WEIGHT_STRING('a' AS BINARY)"
+                          "SELECT WEIGHT_STRING('a' AS CHAR(0))"
+                          "SELECT WEIGHT_STRING('a' LEVEL 1)" ] do
+                        match parse sql with
+                        | Ok statement -> failtestf "expected %s to fail, got %A" sql statement
+                        | Error _ -> ()
+
                 testCase "IF(...) parses as a function call even though IF is a reserved keyword"
                 <| fun _ ->
                     Expect.equal
