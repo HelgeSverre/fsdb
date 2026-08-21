@@ -40,6 +40,8 @@ let defaultVariables: Map<string, string option> =
           "unique_checks", "1"
           "sql_notes", "1"
           "transaction_isolation", "REPEATABLE-READ"
+          "transaction_read_only", "0"
+          "tx_read_only", "0"
           "lower_case_table_names", "0"
           "have_ssl", "DISABLED"
           "init_connect", ""
@@ -142,6 +144,7 @@ type Transaction =
       /// snapshot before validating again.
       Statements: Statement list
       ReplayStartIds: int64 * int64
+      ReadOnly: bool
       /// Set by the first database statement, which is the one that seeds
       /// `Snapshot`/`BaseCatalog`; later reads retain that same snapshot.
       Seeded: bool
@@ -221,6 +224,7 @@ type Session =
       LastResultColumnMetadata: ColumnMetadata list
       /// `Some` between BEGIN/START TRANSACTION and COMMIT/ROLLBACK.
       Tx: Transaction option
+      PendingTransactionReadOnly: bool option
       /// Prepared statements registered by this connection's COM_STMT_PREPARE
       /// calls, by statement id. Threaded through the connection loop like
       /// the rest of `Session` rather than a mutable dict at the `Server`
@@ -287,6 +291,7 @@ let create (connectionId: int) (store: Store) : Session =
       LastGeneratedId = 0L
       LastResultColumnMetadata = []
       Tx = None
+      PendingTransactionReadOnly = None
       Statements = Map.empty
       NextStmtId = 1
       LongData = Map.empty

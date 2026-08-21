@@ -1439,6 +1439,33 @@ let tests =
               | Err(1235, _) -> ()
               | other -> failtestf "expected a 1235 unsupported-feature error, got %A" other
 
+          testCase "transaction access modes, chaining, and SET CHARACTER SET are enforced"
+          <| fun _ ->
+              let session = create 1 (Fsdb.Storage.create ())
+              let session, _ = handle session "CREATE TABLE tx_mode (id INT)"
+              let session, started = handle session "START TRANSACTION READ ONLY"
+              Expect.equal started (Affected 0UL) "read-only transaction starts"
+
+              match handle session "INSERT INTO tx_mode VALUES (1)" with
+              | session, Err(1792, _) ->
+                  let session, chained = handle session "COMMIT AND CHAIN"
+                  Expect.equal chained (Affected 0UL) "commit chains"
+                  Expect.isTrue (session.Tx |> Option.exists _.ReadOnly) "chained transaction retains access mode"
+
+                  let session, _ = handle session "COMMIT AND NO CHAIN"
+                  Expect.isNone session.Tx "NO CHAIN ends the transaction"
+
+                  let session, _ = handle session "SET TRANSACTION READ ONLY"
+                  let session, _ = handle session "START TRANSACTION"
+                  Expect.isTrue (session.Tx |> Option.exists _.ReadOnly) "configured access mode applies"
+              | _, other -> failtestf "expected read-only error 1792, got %A" other
+
+              match handle session "SET CHARACTER SET latin1" with
+              | session, Affected 0UL ->
+                  Expect.equal (session.Variables.["character_set_connection"]) (Some "latin1") "connection charset"
+                  Expect.equal (session.Variables.["collation_connection"]) (Some "latin1_swedish_ci") "default collation"
+              | _, other -> failtestf "expected SET CHARACTER SET to succeed, got %A" other
+
           // -----------------------------------------------------------------
           // Session user identity + the built-in `mysql` system schema
           // -----------------------------------------------------------------

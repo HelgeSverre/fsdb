@@ -781,8 +781,8 @@ let private handleSet (session: Session) (sql: string) : Session * QueryResult =
 // mutable fields.
 // ---------------------------------------------------------------------------
 
-let private beginTx = Regex(@"^(BEGIN(\s+WORK)?|START\s+TRANSACTION)$", RegexOptions.IgnoreCase)
-let private commitTx = Regex(@"^COMMIT(\s+WORK)?$", RegexOptions.IgnoreCase)
+let private beginTx = Regex(@"^(?:BEGIN(?:\s+WORK)?|START\s+TRANSACTION(?:\s+READ\s+(ONLY|WRITE))?)$", RegexOptions.IgnoreCase)
+let private commitTx = Regex(@"^COMMIT(?:\s+WORK)?(?:\s+AND\s+(NO\s+)?CHAIN)?$", RegexOptions.IgnoreCase)
 let private rollbackTx = Regex(@"^ROLLBACK(\s+WORK)?$", RegexOptions.IgnoreCase)
 let private savepointStmt = Regex(@"^SAVEPOINT\s+(\S+)$", RegexOptions.IgnoreCase)
 let private rollbackToSavepointStmt = Regex(@"^ROLLBACK(\s+WORK)?\s+TO\s+(?:SAVEPOINT\s+)?(\S+)$", RegexOptions.IgnoreCase)
@@ -829,6 +829,11 @@ let private setTransactionIsolation =
         @"^SET\s+(?:SESSION\s+)?TRANSACTION\s+ISOLATION\s+LEVEL\s+(REPEATABLE\s+READ|READ\s+COMMITTED|READ\s+UNCOMMITTED|SERIALIZABLE)$",
         RegexOptions.IgnoreCase
     )
+
+let private setTransactionAccess =
+    Regex(@"^SET\s+(SESSION\s+)?TRANSACTION\s+READ\s+(ONLY|WRITE)$", RegexOptions.IgnoreCase)
+
+let private setCharacterSet = Regex(@"^SET\s+CHARACTER\s+SET\s+'?(\w+)'?$", RegexOptions.IgnoreCase)
 
 /// MySQL's `transaction_isolation` value is the level name with spaces
 /// replaced by hyphens (`"REPEATABLE READ"` -> `"REPEATABLE-READ"`).
@@ -947,18 +952,24 @@ let private rollbackSession (session: Session) : Session =
 /// is rebound at the first database statement, matching InnoDB's default
 /// deferred consistent-snapshot timing. MySQL implicitly commits an already-open
 /// transaction before starting another one, so this does too.
-let private beginTransaction (session: Session) : Session =
+let private configuredReadOnly (session: Session) =
+    session.PendingTransactionReadOnly
+    |> Option.defaultWith (fun () -> lookupVar session "transaction_read_only" |> Option.flatten = Some "1")
+
+let private beginTransaction (readOnly: bool) (session: Session) : Session =
     let session = commitSession session
     let baseCatalog = session.Store.Catalog
     let snapshot = Storage.beginTransactionSnapshot session.Store
 
     { session with
+        PendingTransactionReadOnly = None
         Tx =
             Some
                 { Snapshot = snapshot
                   BaseCatalog = baseCatalog
                   Statements = []
                   ReplayStartIds = session.LastInsertId, session.LastGeneratedId
+                  ReadOnly = readOnly
                   Seeded = false
                   Savepoints = Map.empty
                   NextSavepointSeq = 0 } }
@@ -1005,7 +1016,7 @@ let private savepointNotFound (name: string) : QueryResult =
 /// doesn't wrongly get cascade-dropped by a later `ROLLBACK TO`/`RELEASE`
 /// naming something established before this redefinition.
 let private savepoint (name: string) (session: Session) : Session * QueryResult =
-    let session = if session.Tx.IsNone then beginTransaction session else session
+    let session = if session.Tx.IsNone then beginTransaction (configuredReadOnly session) session else session
 
     match session.Tx with
     | Some tx ->
@@ -1066,7 +1077,7 @@ let private handleSetAutocommit (value: string) (session: Session) : Session * Q
 
     let session =
         if value = "0" then
-            (if session.Tx.IsNone then beginTransaction session else session)
+            (if session.Tx.IsNone then beginTransaction (configuredReadOnly session) session else session)
         else
             commitSession session
 
@@ -1096,7 +1107,14 @@ let private executeParsed (session: Session) (stmt: Statement) : Session * Query
 
         // Privilege enforcement — the one gate every parsed statement goes
         // through (probes are exempt, see `Auth.requiredPrivileges`'s doc).
-        match Auth.check store session.User (Auth.requiredPrivilegesInStore store dbName stmt) with
+        let access =
+            match session.Tx, stmt with
+            | Some tx, (Select _ | Union _ | Explain _) when tx.ReadOnly ->
+                Auth.check store session.User (Auth.requiredPrivilegesInStore store dbName stmt)
+            | Some tx, _ when tx.ReadOnly -> Error(1792, "Cannot execute statement in a READ ONLY transaction")
+            | _ -> Auth.check store session.User (Auth.requiredPrivilegesInStore store dbName stmt)
+
+        match access with
         | Error(code, msg) -> session, Err(code, msg)
         | Ok() ->
 
@@ -1210,11 +1228,13 @@ let private executeStatement (session: Session) (sql: string) (upper: string) : 
 type private Probe =
     | SetAutocommit of value: string
     | SetTransactionIsolation of level: string
+    | SetTransactionAccess of sessionScope: bool * readOnly: bool
+    | SetCharacterSet of charset: string
     | SetPassword of user: string option * password: string
     | SetVar
     | RollbackTo of savepoint: string
-    | Begin
-    | Commit
+    | Begin of readOnly: bool option
+    | Commit of chain: bool
     | Rollback
     | Savepoint of name: string
     | Release of name: string
@@ -1259,6 +1279,11 @@ let private tryProbe (sql: string) (upper: string) : Probe option =
         Some(SetAutocommit((setAutocommit.Match sql).Groups.[1].Value))
     elif setTransactionIsolation.IsMatch sql then
         Some(SetTransactionIsolation((setTransactionIsolation.Match sql).Groups.[1].Value))
+    elif setTransactionAccess.IsMatch sql then
+        let m = setTransactionAccess.Match sql
+        Some(SetTransactionAccess(m.Groups.[1].Success, m.Groups.[2].Value.Equals("ONLY", StringComparison.OrdinalIgnoreCase)))
+    elif setCharacterSet.IsMatch sql then
+        Some(SetCharacterSet((setCharacterSet.Match sql).Groups.[1].Value))
     elif setPasswordRe.IsMatch sql then
         let m = setPasswordRe.Match sql
         Some(SetPassword((if m.Groups.[1].Success then Some m.Groups.[1].Value else None), m.Groups.[2].Value))
@@ -1267,9 +1292,10 @@ let private tryProbe (sql: string) (upper: string) : Probe option =
     elif rollbackToSavepointStmt.IsMatch sql then
         Some(RollbackTo((rollbackToSavepointStmt.Match sql).Groups.[2].Value))
     elif beginTx.IsMatch upper then
-        Some Begin
+        let mode = (beginTx.Match upper).Groups.[1]
+        Some(Begin(if mode.Success then Some(mode.Value = "ONLY") else None))
     elif commitTx.IsMatch upper then
-        Some Commit
+        Some(Commit(Regex.IsMatch(upper, @"AND\s+CHAIN$", RegexOptions.IgnoreCase)))
     elif rollbackTx.IsMatch upper then
         Some Rollback
     elif savepointStmt.IsMatch sql then
@@ -1390,6 +1416,42 @@ let private runProbe (session: Session) (sql: string) (probe: Probe) : Session *
             // predicate/range locking, if a client ever genuinely needs it.
             session, Err(1235, "This version of MySQL doesn't yet support 'SERIALIZABLE transaction isolation'")
         | normalized -> { session with Variables = Map.add "transaction_isolation" (Some normalized) session.Variables }, Affected 0UL
+    | SetTransactionAccess(sessionScope, readOnly) ->
+        let value = if readOnly then "1" else "0"
+
+        (if sessionScope then
+             { session with
+                 Variables =
+                     session.Variables
+                     |> Map.add "transaction_read_only" (Some value)
+                     |> Map.add "tx_read_only" (Some value) }
+         else
+             { session with PendingTransactionReadOnly = Some readOnly }),
+        Affected 0UL
+    | SetCharacterSet charset ->
+        let charset = charset.ToLowerInvariant()
+
+        let collation =
+            match charset with
+            | "utf8mb4" -> Some "utf8mb4_general_ci"
+            | "utf8"
+            | "utf8mb3" -> Some "utf8mb3_general_ci"
+            | "latin1" -> Some "latin1_swedish_ci"
+            | "ascii" -> Some "ascii_general_ci"
+            | "binary" -> Some "binary"
+            | _ -> None
+
+        match collation with
+        | None -> session, Err(1115, sprintf "Unknown character set: '%s'" charset)
+        | Some collation ->
+            { session with
+                Variables =
+                    session.Variables
+                    |> Map.add "character_set_client" (Some charset)
+                    |> Map.add "character_set_results" (Some charset)
+                    |> Map.add "character_set_connection" (Some charset)
+                    |> Map.add "collation_connection" (Some collation) },
+            Affected 0UL
     | SetPassword(userOpt, password) ->
         // `FOR 'name'@'host'` — only the name matters (accounts are matched
         // by name, see `Auth`); no FOR clause means the session's own user.
@@ -1406,8 +1468,13 @@ let private runProbe (session: Session) (sql: string) (probe: Probe) : Session *
         | Error(code, msg) -> session, Err(code, msg)
     | SetVar -> handleSet session sql
     | RollbackTo name -> rollbackToSavepoint name session
-    | Begin -> beginTransaction session, Affected 0UL
-    | Commit -> commitSession session, Affected 0UL
+    | Begin readOnly ->
+        let access = readOnly |> Option.defaultValue (configuredReadOnly session)
+        beginTransaction access session, Affected 0UL
+    | Commit chain ->
+        let readOnly = session.Tx |> Option.map _.ReadOnly |> Option.defaultValue false
+        let committed = commitSession session
+        (if chain then beginTransaction readOnly committed else committed), Affected 0UL
     | Rollback -> rollbackSession session, Affected 0UL
     | Savepoint name -> savepoint name session
     | Release name -> releaseSavepoint name session
