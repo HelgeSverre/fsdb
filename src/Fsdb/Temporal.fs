@@ -55,8 +55,47 @@ let tryParseTimeTicks (text: string) : int64 option =
 
             Some(if matched.Groups.[1].Value = "-" then -ticks else ticks)
 
+let tryParseTimeNumberTicks (text: string) : int64 option =
+    let trimmed = text.Trim()
+    let negative, body =
+        if trimmed.StartsWith "-" then true, trimmed.Substring 1
+        elif trimmed.StartsWith "+" then false, trimmed.Substring 1
+        else false, trimmed
+
+    match body.Split '.' with
+    | [| whole |]
+    | [| whole; _ |] when whole.Length > 0 ->
+        let fraction = if body.Contains '.' then body.Substring(body.IndexOf '.' + 1) else ""
+
+        if
+            whole |> Seq.forall Char.IsDigit
+            && fraction |> Seq.forall Char.IsDigit
+            && fraction.Length <= 7
+        then
+            match Int64.TryParse(whole, NumberStyles.None, CultureInfo.InvariantCulture) with
+            | true, number ->
+                let seconds = number % 100L
+                let minutes = number / 100L % 100L
+                let hours = number / 10000L
+
+                if minutes > 59L || seconds > 59L then
+                    None
+                else
+                    let ticks =
+                        (hours * 3600L + minutes * 60L + seconds) * TimeSpan.TicksPerSecond
+                        + (if fraction = "" then 0L else Int64.Parse(fraction.PadRight(7, '0'), CultureInfo.InvariantCulture))
+
+                    Some(if negative then -ticks else ticks)
+            | _ -> None
+        else
+            None
+    | _ -> None
+
+let tryParseTimeInputTicks text =
+    tryParseTimeTicks text |> Option.orElseWith (fun () -> tryParseTimeNumberTicks text)
+
 let tryParseTimeValue text =
-    tryParseTimeTicks text |> Option.bind tryTimeValue
+    tryParseTimeInputTicks text |> Option.bind tryTimeValue
 
 let formatTimeValueFsp (fsp: int) (value: TimeValue) =
     let ticks = timeTicks value

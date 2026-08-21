@@ -498,6 +498,34 @@ let tests =
                     | other -> failtestf "expected DataTruncatedForColumn, got %A" other ]
 
           testList
+              "coerceValue TIME columns"
+              [ let time = col "elapsed" (TTime 2) true
+
+                testCase "rounds fractions and preserves signed hours beyond one day"
+                <| fun _ ->
+                    match coerceValue true time (VString "-25:02:03.455") with
+                    | Ok(VTime value) -> Expect.equal (formatTimeValueFsp 2 value) "-25:02:03.46" "stored time"
+                    | other -> failtestf "expected VTime, got %A" other
+
+                testCase "accepts MySQL's compact numeric time form"
+                <| fun _ ->
+                    match coerceValue true (col "elapsed" (TTime 6) true) (VDecimal 10203.5m) with
+                    | Ok(VTime value) -> Expect.equal (formatTimeValueFsp 6 value) "01:02:03.500000" "numeric time"
+                    | other -> failtestf "expected VTime, got %A" other
+
+                testCase "strict mode rejects values beyond the TIME range"
+                <| fun _ ->
+                    match coerceValue true time (VString "839:00:00") with
+                    | Error(ExpressionError(1292, _)) -> ()
+                    | other -> failtestf "expected time range rejection, got %A" other
+
+                testCase "non-strict mode clamps values beyond the TIME range"
+                <| fun _ ->
+                    match coerceValue false (col "elapsed" (TTime 6) true) (VString "839:00:00") with
+                    | Ok(VTime value) -> Expect.equal (formatTimeValueFsp 6 value) "838:59:59.999999" "clamped time"
+                    | other -> failtestf "expected clamped VTime, got %A" other ]
+
+          testList
               "coerceValue BIT columns"
               [ let bits = col "bits" (TBit 3) true
 

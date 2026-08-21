@@ -1173,30 +1173,41 @@ let private coerceValueWithModeAndLengths (enforceLengths: bool) (mode: Temporal
             | VBit(_, value) -> numericSet value (value <= maxValid)
             | _ -> setFail ()
         | TTime fsp ->
-            // TIME is stored pre-formatted as a `VString` (there's no `VTime`
-            // value) — so unlike DATETIME, its fsp lives *in the string* and
-            // the resultset renderer just passes it through. Round the
-            // fraction to `fsp` digits and re-render with exactly that many
-            // (a `TIME(6)` on a whole second shows `.000000`, matching MySQL),
-            // parsing the input as a `TimeSpan`; anything unparseable keeps
-            // its raw text unchanged.
             let raw = v |> toText |> Option.defaultValue ""
 
-            match TimeSpan.TryParse(raw.Trim(), CultureInfo.InvariantCulture) with
-            | true, ts ->
-                let a = TimeSpan(Functions.roundTicksToFsp fsp (abs ts.Ticks)).Duration()
-                let sign = if ts.Ticks < 0L then "-" else ""
-                let baseStr = sprintf "%s%02d:%02d:%02d" sign (int (floor a.TotalHours)) a.Minutes a.Seconds
+            let invalid () =
+                Error(ExpressionError(1292, sprintf "Incorrect time value: '%s' for column '%s' at row %d" raw col.Name (Diagnostics.currentRowNumber ())))
 
-                let text =
-                    if fsp <= 0 then
-                        baseStr
-                    else
-                        let micros = (a.Ticks % TimeSpan.TicksPerSecond) / 10L
-                        sprintf "%s.%s" baseStr ((sprintf "%06d" micros).Substring(0, min fsp 6))
+            let fallback () =
+                if strict then
+                    invalid ()
+                else
+                    warning 1265 (sprintf "Data truncated for column '%s'" col.Name)
+                    Ok(VTime(timeValueOrClamp 0L))
 
-                charsetChecked text |> Result.map VString
-            | false, _ -> charsetChecked raw |> Result.map VString
+            let finish ticks =
+                let rounded = roundTimeTicksToFsp fsp ticks
+
+                if abs rounded <= maxTimeTicks then
+                    Ok(VTime(timeValueOrClamp rounded))
+                elif strict then
+                    invalid ()
+                else
+                    warning 1264 (sprintf "Out of range value for column '%s'" col.Name)
+                    Ok(VTime(timeValueOrClamp rounded))
+
+            let ticks =
+                match v with
+                | VTime value -> Some(timeTicks value)
+                | VDateTime value -> Some(value.TimeOfDay.Ticks)
+                | VZeroDateTime value ->
+                    let _, hour, minute, second, micros = zeroDateTimeParts value
+                    Some(((int64 hour * 3600L + int64 minute * 60L + int64 second) * TimeSpan.TicksPerSecond) + int64 micros * 10L)
+                | VDate _
+                | VZeroDate _ -> Some 0L
+                | _ -> tryParseTimeInputTicks raw
+
+            ticks |> Option.map finish |> Option.defaultWith fallback
         | TBinary length
         | TVarBinary length ->
             let bytes =
@@ -2779,7 +2790,7 @@ let private implicitZeroSeed (col: ColumnDef) : Result<Value, StorageError> =
     | TVector dim -> Ok(VBytes(Array.zeroCreate (dim * 4)))
     | TGeometry _ -> Error(ExpressionError(1364, sprintf "Field '%s' doesn't have a default value" col.Name))
     | TEnum _ -> Ok(VInt 1L)
-    | TTime _ -> Ok(VString "00:00:00")
+    | TTime _ -> Ok(VTime(timeValueOrClamp 0L))
     | TDate ->
         tryZeroDate 0 0 0
         |> Option.map (VZeroDate >> Ok)
