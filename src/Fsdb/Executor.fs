@@ -8381,15 +8381,15 @@ let private triggerRowImageError (event: TriggerEvent) (columns: ColumnDef list)
         | _ -> []
 
     statementReferences
-    |> List.tryHead
-    |> Option.bind (fun (image, column) ->
+    |> List.tryPick (fun (image, column) ->
         match image, event with
         | "OLD", TriggerInsert -> Some(Err(1363, "There is no OLD row in INSERT trigger"))
         | "NEW", TriggerDelete -> Some(Err(1363, "There is no NEW row in DELETE trigger"))
         | _ ->
             match resolveColumn columns column with
             | Ok index when columns.[index].Generated.IsSome -> Some(Err(3105, sprintf "Trigger cannot reference generated column '%s'" column))
-            | _ -> None)
+            | Ok _ -> None
+            | Error _ -> Some(Err(1054, sprintf "Unknown column '%s.%s' in trigger" image column)))
 
 let rec execute (store: Store) (registry: Registry) (dbName: string) (ids: int64 * int64) (foundRows: bool) (stmt: Statement) : (int64 * int64) * QueryResult =
     // Fresh derived-table memo per statement (see `fromSubqueryMemo`).

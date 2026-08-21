@@ -220,6 +220,20 @@ let tests =
               | Err(1363, _) -> ()
               | other -> failtestf "expected nested OLD rejection, got %A" other
 
+          testCase "later row-image references are validated at trigger creation"
+          <| fun _ ->
+              let store = Fsdb.Storage.create ()
+              expectOk (runDefault store "CREATE TABLE g (a INT, b INT AS (a * 2))") "create g"
+              expectOk (runDefault store "CREATE TABLE log (n INT)") "create log"
+
+              match runDefault store "CREATE TRIGGER later_invalid AFTER INSERT ON g FOR EACH ROW INSERT INTO log VALUES (NEW.a + (SELECT NEW.b))" with
+              | Err(3105, _) -> ()
+              | other -> failtestf "expected later generated reference rejection, got %A" other
+
+              match runDefault store "CREATE TRIGGER missing_column AFTER INSERT ON g FOR EACH ROW INSERT INTO log VALUES (NEW.missing)" with
+              | Err(1054, _) -> ()
+              | other -> failtestf "expected missing row-image column rejection, got %A" other
+
           testCase "the body executes in the trigger's schema, not the session's current database"
           <| fun _ ->
               let store = Fsdb.Storage.create ()
