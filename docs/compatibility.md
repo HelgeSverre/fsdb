@@ -147,9 +147,9 @@ Definitions persist through the ordinary WAL and snapshot paths and appear in
 `information_schema.TABLE_CONSTRAINTS`, including enforcement state. The
 expression validator rejects subqueries, aggregates, window functions,
 nondeterministic functions, cross-table references, auto-increment references,
-and DirectOnly or nondeterministic host extensions. Warnings from skipped
-`INSERT IGNORE` rows are not yet exposed through `SHOW WARNINGS`, which is a
-server-wide diagnostics gap rather than a CHECK enforcement divergence.
+and DirectOnly or nondeterministic host extensions. Skipped `INSERT IGNORE`
+rows and ignored CHECK violations appear in the session diagnostics area and
+through `SHOW WARNINGS`; the OK/EOF warning count reports the same conditions.
 
 ## Server settings
 

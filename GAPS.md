@@ -114,7 +114,6 @@ identities for bit aggregates.
 | Join size ceiling | unbounded (memory-bound) | hard cap 1,000,000 candidate rows → error 1105 (`Executor.fs:1586, 3287–3290`) | medium | divergence |
 | Multi-table UPDATE/DELETE sources | derived tables allowed as join sources | real base tables only → 1064 (`Executor.fs:3334–3339`) | low | refusal |
 | MATCH…AGAINST placement | evaluates in UPDATE/DELETE WHERE, joins, subqueries | single-table SELECT pre-pass only, else 1191 (`Executor.fs:1828–1831, 5828–5830`) | medium | refusal |
-| GROUP_CONCAT truncation | emits warning, increments warning count | truncates silently (`Executor.fs:4424–4438`) | low | divergence |
 | RANGE window frames | `RANGE BETWEEN INTERVAL n DAY PRECEDING…` | temporal offsets refused with 1235; numeric offsets only (`Executor.fs:5438–5444`) | low | refusal |
 | sql_mode | ~20 mode bits with semantic effect | only strictness (STRICT_TRANS_TABLES/STRICT_ALL_TABLES) has effect; ONLY_FULL_GROUP_BY absent (bare column picks first row of group, `Executor.fs:4768`); `@@sql_mode` echoes a constant string regardless of SET (`Session.fs:22`) | medium | divergence |
 
@@ -315,7 +314,7 @@ disconnect detection cancelling evaluation (`Server.fs:363–406`).
 | LOAD DATA LOCAL INFILE | supported | absent entirely | medium | refusal |
 | Multi-statement | CLIENT_MULTI_STATEMENTS batching | not advertised; one statement per packet (CLIENT_MULTI_RESULTS advertised but only one resultset ever sent, `Protocol.fs:21,36`) | medium | refusal |
 | Session state tracking | CLIENT_SESSION_TRACK info in OK packets | absent | low | refusal |
-| Diagnostics area | warning count in OK/EOF, SHOW WARNINGS populated | warning count hardwired 0 (`Protocol.fs:157`); SHOW WARNINGS/ERRORS always empty | medium | divergence |
+| Diagnostics coverage | warnings from conversions, truncation, deprecated syntax, and storage engines | statement errors, ignored INSERT/CHECK rows, and GROUP_CONCAT truncation are captured; other warning producers remain silent | low | divergence |
 | Unimplemented COM_* | SET_OPTION, CHANGE_USER | both → ERR 1047 (`Server.fs`) | low | refusal |
 | Auth plugins | caching_sha2_password fast/full auth, sha256_password, RSA exchange | mysql_native_password only; caching_sha2 clients downgraded via auth-switch (`Server.fs:469–479`) | low (works, weaker) | divergence |
 | Column definition fidelity | schema/table/org_table names, requested charsetnr | empty strings; charset forced to 45 (utf8mb4_general_ci) or 63 binary regardless of request (`Protocol.fs:110, 253–260`) | low | divergence |
@@ -357,7 +356,8 @@ ENGINES, COLLATIONS, CHARACTER_SETS, privilege views, …), direct
 SELECT-ability of the 8 mysql.* tables, SHOW TABLES/COLUMNS/INDEX/CREATE
 TABLE/CREATE VIEW/TABLE STATUS (real byte accounting)/ENGINES/CHARACTER SET/
 COLLATION/PRIVILEGES (73 oracle-verified rows)/PROCESSLIST/VARIABLES/STATUS/
-GRANTS/TRIGGERS/WARNINGS shells, DESCRIBE, ALTER TABLE DISABLE/ENABLE KEYS
+GRANTS/TRIGGERS/WARNINGS/ERRORS with statement condition counts, DESCRIBE,
+ALTER TABLE DISABLE/ENABLE KEYS
 no-op for mysqldump, my.cnf parsing ([mysqld]/[server], loose- prefix,
 !include with depth cap), KILL QUERY/CONNECTION with PROCESS/SUPER checks,
 live Limits reporting.
@@ -431,19 +431,17 @@ implementation effort:
 1. No TLS — blocks any non-loopback deployment with security requirements.
 2. Non-unique secondary indexes as metadata plus planless joins/subqueries —
    correctness holds, but scale diverges sharply from MySQL past small data.
-3. Diagnostics area (warnings count, SHOW WARNINGS) — clients that check
-   warnings after IGNORE/bulk loads see nothing.
-4. Trigger coverage (BEFORE/UPDATE/DELETE, OLD.*, compound bodies) and
+3. Trigger coverage (BEFORE/UPDATE/DELETE, OLD.*, compound bodies) and
    updatable views — the two largest deliberate-subset cliffs.
-5. Missing function families (AES, JSON Schema, geometry) —
+4. Missing function families (AES, JSON Schema, geometry) —
    each individually small, collectively frequent in
    report-style queries.
-6. LOAD DATA LOCAL INFILE and multi-statement packets — bulk-loading and
+5. LOAD DATA LOCAL INFILE and multi-statement packets — bulk-loading and
    migration-tool paths.
-7. User variables in expressions — session-state patterns beyond the
+6. User variables in expressions — session-state patterns beyond the
    supported bare projection form.
-8. SERIALIZABLE/READ COMMITTED semantics and intra-database write
+7. SERIALIZABLE/READ COMMITTED semantics and intra-database write
    parallelism — transactional throughput shape.
-9. Zero-date handling — a strict-mode correctness edge.
-10. Everything in the admin/replication/metadata tail — matters only once a
+8. Zero-date handling — a strict-mode correctness edge.
+9. Everything in the admin/replication/metadata tail — matters only once a
     specific tool needs it (mysqladmin, monitoring agents, replica setups).
