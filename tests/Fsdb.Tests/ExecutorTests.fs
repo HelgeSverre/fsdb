@@ -5909,6 +5909,18 @@ let tests =
                           Some "\"a\\\"b\\\\c\""
                           Some "{\n  \"a\": [\n    1,\n    2\n  ],\n  \"long\": 1\n}" ]
 
+                testCase "JSON merge patch and preserve keep their distinct MySQL semantics"
+                <| fun _ ->
+                    expectRow
+                        "SELECT JSON_MERGE_PATCH('{\"a\":1,\"b\":2}','{\"a\":null,\"c\":3}') a, JSON_MERGE_PATCH('{\"a\":{\"x\":1}}','{\"a\":{\"y\":2}}') b, JSON_MERGE_PATCH('[1,2]','{\"a\":1}') c, JSON_MERGE_PRESERVE('{\"a\":1}','{\"a\":2,\"b\":3}') d, JSON_MERGE_PRESERVE('[1,2]','[3]') e, JSON_MERGE_PRESERVE('1','[2,3]') f, JSON_MERGE_PRESERVE('{\"a\":1}','{\"a\":2}','{\"a\":3}') g"
+                        [ Some "{\"b\": 2, \"c\": 3}"
+                          Some "{\"a\": {\"x\": 1, \"y\": 2}}"
+                          Some "{\"a\": 1}"
+                          Some "{\"a\": [1, 2], \"b\": 3}"
+                          Some "[1, 2, 3]"
+                          Some "[1, 2, 3]"
+                          Some "{\"a\": [1, 2, 3]}" ]
+
                 testCase "bitwise operators use unsigned 64-bit values and MySQL precedence"
                 <| fun _ ->
                     expectRow

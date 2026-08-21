@@ -780,6 +780,58 @@ let private jsonPrettyFn: Scalar =
         |> Option.defaultValue VNull
     | _ -> VNull
 
+let private cloneJson (node: JsonNode) =
+    if isNull node then null else node.DeepClone()
+
+let rec private mergeJsonPatch (target: JsonNode) (patch: JsonNode) : JsonNode =
+    match patch with
+    | :? JsonObject as patchObject ->
+        let result =
+            match target with
+            | :? JsonObject as targetObject -> targetObject.DeepClone() :?> JsonObject
+            | _ -> JsonObject()
+
+        for pair in patchObject do
+            if isNull pair.Value then
+                result.Remove pair.Key |> ignore
+            else
+                let previous = if result.ContainsKey pair.Key then result.[pair.Key] else null
+                result.[pair.Key] <- mergeJsonPatch previous pair.Value
+
+        result
+    | _ -> cloneJson patch
+
+let rec private mergeJsonPreserve (left: JsonNode) (right: JsonNode) : JsonNode =
+    match left, right with
+    | (:? JsonObject as a), (:? JsonObject as b) ->
+        let result = a.DeepClone() :?> JsonObject
+
+        for pair in b do
+            if result.ContainsKey pair.Key then
+                result.[pair.Key] <- mergeJsonPreserve result.[pair.Key] pair.Value
+            else
+                result.[pair.Key] <- cloneJson pair.Value
+
+        result
+    | (:? JsonArray as a), (:? JsonArray as b) ->
+        JsonArray(Seq.append a b |> Seq.map cloneJson |> Array.ofSeq)
+    | (:? JsonArray as array), value ->
+        JsonArray(Seq.append array [ value ] |> Seq.map cloneJson |> Array.ofSeq)
+    | value, (:? JsonArray as array) ->
+        JsonArray(Seq.append [ value ] array |> Seq.map cloneJson |> Array.ofSeq)
+    | _ -> JsonArray([| cloneJson left; cloneJson right |])
+
+let private jsonMergeFn (merge: JsonNode -> JsonNode -> JsonNode) : Scalar =
+    function
+    | first :: (_ :: _ as rest) when not (anyNull (first :: rest)) ->
+        let documents = first :: rest |> List.map tryParseJsonValue
+
+        if documents |> List.exists Option.isNone then
+            VNull
+        else
+            documents |> List.choose id |> List.reduce merge |> formatJsonNode |> VJson
+    | _ -> VNull
+
 let private jsonLengthFn: Scalar =
     function
     | [ doc ] when not (anyNull [ doc ]) -> tryParseJsonValue doc |> Option.map (jsonNodeLength >> int64 >> VInt) |> Option.defaultValue VNull
@@ -3351,6 +3403,8 @@ let builtins: Registry =
     |> registerScalar "JSON_OVERLAPS" jsonOverlapsFn
     |> registerScalar "JSON_QUOTE" jsonQuoteFn
     |> registerScalar "JSON_PRETTY" jsonPrettyFn
+    |> registerScalar "JSON_MERGE_PATCH" (jsonMergeFn mergeJsonPatch)
+    |> registerScalar "JSON_MERGE_PRESERVE" (jsonMergeFn mergeJsonPreserve)
     |> registerScalar "JSON_SET" (jsonWriteFn JSet)
     |> registerScalar "JSON_INSERT" (jsonWriteFn JInsert)
     |> registerScalar "JSON_REPLACE" (jsonWriteFn JReplace)
