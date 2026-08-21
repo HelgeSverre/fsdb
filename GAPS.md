@@ -329,7 +329,7 @@ disconnect detection cancelling evaluation (`Server.fs:363–406`).
 | Multi-statement | CLIENT_MULTI_STATEMENTS batching | not advertised; one statement per packet (CLIENT_MULTI_RESULTS advertised but only one resultset ever sent, `Protocol.fs:21,36`) | medium | refusal |
 | Session state tracking | CLIENT_SESSION_TRACK info in OK packets | absent | low | refusal |
 | Diagnostics area | warning count in OK/EOF, SHOW WARNINGS populated | warning count hardwired 0 (`Protocol.fs:157`); SHOW WARNINGS/ERRORS always empty | medium | divergence |
-| Unimplemented COM_* | STATISTICS, PROCESS_INFO, PROCESS_KILL, DEBUG, SET_OPTION, CHANGE_USER | all → ERR 1047; `mysqladmin status` fails (`Server.fs:70, 973–981`) | low | refusal |
+| Unimplemented COM_* | PROCESS_INFO, PROCESS_KILL, DEBUG, SET_OPTION, CHANGE_USER | all → ERR 1047 (`Server.fs`) | low | refusal |
 | Auth plugins | caching_sha2_password fast/full auth, sha256_password, RSA exchange | mysql_native_password only; caching_sha2 clients downgraded via auth-switch (`Server.fs:469–479`) | low (works, weaker) | divergence |
 | Column definition fidelity | schema/table/org_table names, requested charsetnr | empty strings; charset forced to 45 (utf8mb4_general_ci) or 63 binary regardless of request (`Protocol.fs:110, 253–260`) | low | divergence |
 | Column flags | MULTIPLE_KEY, ZEROFILL, NO_DEFAULT_VALUE, ON_UPDATE_NOW, NUM, PART_KEY | not composed (`Value.fs:58–66`) | low | divergence |
@@ -381,7 +381,7 @@ live Limits reporting.
 | Table statistics | estimates refreshed by ANALYZE TABLE | ENGINE always InnoDB, DATA_LENGTH stand-in 16384, CARDINALITY 0, live row counts where MySQL keeps stale page estimates until ANALYZE (`InformationSchema.fs:267–288`); no ANALYZE statement exists | low | divergence |
 | COLUMN_COMMENT | user text | always "" (`InformationSchema.fs:323–326`) | low | divergence |
 | Missing SHOW forms | CREATE EVENT/PROCEDURE/FUNCTION, MASTER/REPLICA STATUS, BINARY LOGS | fall through to 1064 | low | refusal |
-| SHOW STATUS counters | Questions, Com_*, Innodb_*, Slow_queries, … | four variables only: Ssl_cipher, Ssl_version, Threads_connected, Uptime (`InformationSchema.fs:1929–1938`) | low | divergence |
+| SHOW STATUS counters | Com_*, Innodb_*, Slow_queries, … | five variables only: Questions, Ssl_cipher, Ssl_version, Threads_connected, Uptime (`InformationSchema.fs`) | low | divergence |
 | wait_timeout | 28800 default | 300 (deliberate DoS posture, honestly advertised) | low | divergence |
 | Option-file discovery | /etc/my.cnf, ~/.my.cnf, $MYSQL_HOME auto-read; `[mysqld-8.4]` groups | only `--defaults-file`; version-suffixed groups skipped (documented) | low | divergence |
 | Logging | general log, slow log, error-log file | stderr diagnostics with credential redaction only (`Log.fs`) | low | divergence |

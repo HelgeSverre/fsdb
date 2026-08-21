@@ -1,5 +1,5 @@
 /// TCP listener and per-connection command loop: handshake, then
-/// COM_QUERY / COM_PING / COM_INIT_DB / COM_QUIT.
+/// COM_QUERY / COM_STATISTICS / COM_PING / COM_INIT_DB / COM_QUIT.
 module Fsdb.Server
 
 open System
@@ -23,6 +23,7 @@ type private Command =
     | Quit
     | InitDb of database: string
     | Query of sql: string
+    | Statistics
     | Ping
     | FieldList of table: string
     | StmtPrepare of sql: string
@@ -60,6 +61,7 @@ let private parseCommand (payload: byte[]) : Command option =
                 | 0x02uy -> InitDb(rest ())
                 | 0x03uy -> Query(rest ())
                 | 0x04uy -> FieldList(Reader(restBytes ()).ReadNullTerminatedString())
+                | 0x09uy -> Statistics
                 | 0x0euy -> Ping
                 | 0x16uy -> StmtPrepare(rest ())
                 | 0x17uy -> StmtExecute(restBytes ())
@@ -648,6 +650,7 @@ let private handleConnection
 
                                     return! loop session
                             | Some(Query sql) ->
+                                InformationSchema.recordQuestion ()
                                 processEntry.Command <- "Query"
                                 processEntry.State <- "executing"
                                 processEntry.StateSince <- DateTime.Now
@@ -676,6 +679,26 @@ let private handleConnection
                                             result
 
                                     return! loop session
+                            | Some Statistics ->
+                                let uptime = max 0L (int64 (DateTime.Now - InformationSchema.serverStartedAt).TotalSeconds)
+                                let questions = InformationSchema.questions ()
+                                let rate = if uptime = 0L then 0.0 else float questions / float uptime
+
+                                let statistics =
+                                    String.Format(
+                                        Globalization.CultureInfo.InvariantCulture,
+                                        "Uptime: {0}  Threads: {1}  Questions: {2}  Slow queries: 0  Opens: 0  Flush tables: 0  Open tables: 0  Queries per second avg: {3:F3}",
+                                        [| box uptime; box (InformationSchema.connectedThreads ()); box questions; box rate |]
+                                    )
+
+                                do!
+                                    writePacketAsync
+                                        stream
+                                        { SeqId = seqId
+                                          Payload = Encoding.UTF8.GetBytes statistics }
+                                    |> Async.Ignore
+
+                                return! loop session
                             | Some(FieldList table) ->
                                 // Deprecated in MySQL 8.0, but PDO/mysqlnd's
                                 // metadata probing can still send it —
@@ -767,6 +790,7 @@ let private handleConnection
 
                                 return! loop session
                             | Some(StmtExecute payload) ->
+                                InformationSchema.recordQuestion ()
                                 let r = Reader(payload)
                                 let stmtId = r.ReadInt32LE()
                                 r.ReadByte() |> ignore // cursor flags — no cursor support

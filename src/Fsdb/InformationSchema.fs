@@ -836,6 +836,10 @@ let private restrictedTo (priv: string) : string option =
 
 /// Stamped by `Server.listen` — `SHOW STATUS`'s `Uptime` baseline.
 let mutable serverStartedAt = DateTime.Now
+let mutable private questionCount = 0L
+
+let recordQuestion () = Threading.Interlocked.Increment(&questionCount) |> ignore
+let questions () = Threading.Interlocked.Read(&questionCount)
 
 let registerProcess (id: int64) (user: string) (host: string) : ProcessEntry =
     let entry =
@@ -1930,6 +1934,7 @@ let showStatus (likeOpt: string option) : ShowResult =
     let rows =
         [ "Ssl_cipher", ""
           "Ssl_version", ""
+          "Questions", string (questions ())
           "Threads_connected", string (connectedThreads ())
           "Uptime", string (int (DateTime.Now - serverStartedAt).TotalSeconds) ]
         |> List.filter (fun (name, _) -> likeFilter likeOpt name)
