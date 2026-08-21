@@ -55,6 +55,15 @@ let tests =
                   Expect.equal message "<IV> option ignored" "warning text"
               | other -> failtestf "expected ignored-IV warning, got %A" other
 
+          testCase "AES result metadata remains binary when LIMIT 0 returns no rows"
+          <| fun _ ->
+              let session = create 1 (Fsdb.Storage.create ())
+
+              match handle session "SELECT AES_ENCRYPT('hello', 'secret') LIMIT 0" with
+              | session, ResultSet(_, []) ->
+                  Expect.equal (session.LastResultColumnMetadata |> List.map _.TypeId) [ TypeBlob ] "binary type"
+              | _, other -> failtestf "expected an empty AES result, got %A" other
+
           testCase "a version-gated /*!NNNNN ... */ comment executes its wrapped SET, matching a mysqldump preamble"
           <| fun _ ->
               let session = create 1 (Fsdb.Storage.create ())

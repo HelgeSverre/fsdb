@@ -1253,7 +1253,7 @@ let rec private metadataOfExpr (ctx: EvalContext) (expr: Expr) : ColumnMetadata 
         | "JSON_SCHEMA_VALIDATION_REPORT", _ ->
             Some { Value.columnMetadata TypeVarString with ColumnLength = 4294967295u }
         | ("JSON_QUOTE" | "JSON_PRETTY"), _ -> Some { Value.columnMetadata TypeVarString with ColumnLength = 4294967295u }
-        | ("COMPRESS" | "UNCOMPRESS" | "RANDOM_BYTES"), _ ->
+        | ("AES_ENCRYPT" | "AES_DECRYPT" | "COMPRESS" | "UNCOMPRESS" | "RANDOM_BYTES"), _ ->
             Some { Value.columnMetadata TypeBlob with ColumnLength = 4294967295u; Flags = BlobFlag ||| BinaryFlag }
         | ("UNCOMPRESSED_LENGTH" | "UUID_SHORT"), _ ->
             Some { Value.columnMetadata TypeLongLong with ColumnLength = 21u; Flags = UnsignedFlag }
