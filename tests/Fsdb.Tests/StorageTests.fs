@@ -1367,19 +1367,12 @@ let tests =
                         | Ok _ -> ()
                         | Error e -> failtestf "expected Ok, got %A" e
 
-                    let table =
-                        match tableSnapshot store defaultDatabase "users" with
-                        | Ok table -> table
-                        | Error e -> failtestf "expected table snapshot, got %A" e
-
                     let entries =
-                        table.SecondaryOrder.["idx_age"]
-                        |> Map.toList
-                        |> List.map (fun (_key, rowIds) ->
-                            (rowIds |> Seq.map (fun rowId -> table.RowsArray.[rowId].[2]) |> Seq.head),
-                            (rowIds |> Seq.map (fun rowId -> table.RowsArray.[rowId].[0]) |> List.ofSeq))
+                        match trySecondaryRangeLookup store defaultDatabase "users" "age" (Some(VInt 0L, true)) None with
+                        | Some(_, _, _, rows) -> rows |> List.map (fun (_, row) -> row.[2], row.[0])
+                        | None -> failtest "expected an ordered secondary range lookup"
 
-                    Expect.equal entries [ VInt 26L, [ VInt 2L ]; VInt 30L, [ VInt 3L ] ] "ordered buckets reflect the live rows"
+                    Expect.equal entries [ VInt 26L, VInt 2L; VInt 30L, VInt 3L ] "ordered entries reflect the live rows"
                     Expect.equal (reindexCallCount ()) reindexesBefore "point writes preserve ordered buckets incrementally"
 
                 testCase "AddIndex with Unique = true rejects existing duplicates instead of silently dropping rows from the index"

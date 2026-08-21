@@ -6,6 +6,7 @@ module Fsdb.Storage
 open System
 open System.Collections.Concurrent
 open System.Collections.Generic
+open System.Collections.Immutable
 open System.Globalization
 open System.Threading
 open Fsdb.Ast
@@ -120,15 +121,14 @@ let private compareIndexedValues (collationName: string option) (left: Value) (r
     | _ -> compareTotal left right
 
 [<CustomEquality; CustomComparison>]
-type SecondaryOrderKey =
-    { CollationName: string option
-      Value: Value }
+type SecondaryOrderEntry = private { CollationName: string option; Value: Value; RowId: RowId } with
 
     override this.Equals other =
         match other with
-        | :? SecondaryOrderKey as other ->
+        | :? SecondaryOrderEntry as other ->
             this.CollationName = other.CollationName
             && compareIndexedValues this.CollationName this.Value other.Value = 0
+            && this.RowId = other.RowId
         | _ -> false
 
     override this.GetHashCode() = hash this.CollationName
@@ -136,11 +136,16 @@ type SecondaryOrderKey =
     interface IComparable with
         member this.CompareTo other =
             match other with
-            | :? SecondaryOrderKey as other ->
+            | :? SecondaryOrderEntry as other ->
                 match Operators.compare this.CollationName other.CollationName with
-                | 0 -> compareIndexedValues this.CollationName this.Value other.Value
+                | 0 ->
+                    match compareIndexedValues this.CollationName this.Value other.Value with
+                    | 0 -> Operators.compare this.RowId other.RowId
+                    | comparison -> comparison
                 | comparison -> comparison
-            | _ -> invalidArg "other" "SecondaryOrderKey expected"
+            | _ -> invalidArg "other" "SecondaryOrderEntry expected"
+
+type SecondaryOrder = Map<string, ImmutableSortedSet<SecondaryOrderEntry>>
 
 /// A table's rows, newest last. `OriginalName` keeps the as-created casing
 /// for information_schema, even though the catalog keys tables by their
@@ -175,7 +180,7 @@ type Table =
       /// One-column non-unique B-tree keys map equality keys to stable row
       /// identities. `Set` order follows row-store scan order.
       SecondaryIndex: Map<string, Map<string, Set<RowId>>>
-      SecondaryOrder: Map<string, Map<SecondaryOrderKey, Set<RowId>>> }
+      SecondaryOrder: SecondaryOrder }
 
     /// `RowsArray` as a plain list, in scan order — a fresh O(row count)
     /// copy on every access, for external validators/tools that walk a
@@ -1511,19 +1516,17 @@ let private rebuildSecondaryIndex (table: Table) : Map<string, Map<string, Set<R
         name, buckets)
     |> Map.ofList
 
-let private rebuildSecondaryOrder (table: Table) : Map<string, Map<SecondaryOrderKey, Set<RowId>>> =
+let private rebuildSecondaryOrder (table: Table) : SecondaryOrder =
     secondaryKeyGroups table
     |> List.map (fun (name, index) ->
-        let buckets =
+        let entries: ImmutableSortedSet<SecondaryOrderEntry> =
             table.RowsArray.Indexed
             |> Seq.fold
-                (fun buckets (rowId, row) ->
-                    let key = { CollationName = table.Columns.[index].Collation; Value = row.[index] }
-                    let rowIds = buckets |> Map.tryFind key |> Option.defaultValue Set.empty
-                    Map.add key (Set.add rowId rowIds) buckets)
-                Map.empty
+                (fun entries (rowId, row) ->
+                    entries.Add { CollationName = table.Columns.[index].Collation; Value = row.[index]; RowId = rowId })
+                ImmutableSortedSet<SecondaryOrderEntry>.Empty
 
-        name, buckets)
+        name, entries)
     |> Map.ofList
 
 /// Bumped once per `reindexTable` call — the full-scan rebuild it wraps is
@@ -1913,8 +1916,8 @@ let private reindexRow
     (added: (RowId * Value[]) option)
     (uniqueIndex: Map<string, Map<string, RowId>>)
     (secondaryIndex: Map<string, Map<string, Set<RowId>>>)
-    (secondaryOrder: Map<string, Map<SecondaryOrderKey, Set<RowId>>>)
-    : Map<string, Map<string, RowId>> * Map<string, Map<string, Set<RowId>>> * Map<string, Map<SecondaryOrderKey, Set<RowId>>> =
+    (secondaryOrder: SecondaryOrder)
+    : Map<string, Map<string, RowId>> * Map<string, Map<string, Set<RowId>>> * SecondaryOrder =
     let uniqueIndex =
         uniqueGroups
         |> List.fold
@@ -1952,28 +1955,22 @@ let private reindexRow
         secondaryGroups
         |> List.fold
             (fun indexes (name, index) ->
-                let key (row: Value[]) = { CollationName = columns.[index].Collation; Value = row.[index] }
-                let buckets = Map.find name indexes
+                let entry rowId (row: Value[]) = { CollationName = columns.[index].Collation; Value = row.[index]; RowId = rowId }
+                let entries = Map.find name indexes
 
-                let buckets =
+                let entries =
                     removed
                     |> Option.fold
-                        (fun buckets (rowId, row) ->
-                            let orderKey = key row
-                            let rowIds = buckets |> Map.tryFind orderKey |> Option.defaultValue Set.empty |> Set.remove rowId
-                            if rowIds.IsEmpty then Map.remove orderKey buckets else Map.add orderKey rowIds buckets)
-                        buckets
+                        (fun (entries: ImmutableSortedSet<SecondaryOrderEntry>) (rowId, row) -> entries.Remove(entry rowId row))
+                        entries
 
-                let buckets =
+                let entries =
                     added
                     |> Option.fold
-                        (fun buckets (rowId, row) ->
-                            let orderKey = key row
-                            let rowIds = buckets |> Map.tryFind orderKey |> Option.defaultValue Set.empty |> Set.add rowId
-                            Map.add orderKey rowIds buckets)
-                        buckets
+                        (fun (entries: ImmutableSortedSet<SecondaryOrderEntry>) (rowId, row) -> entries.Add(entry rowId row))
+                        entries
 
-                Map.add name buckets indexes)
+                Map.add name entries indexes)
             secondaryOrder
 
     uniqueIndex, secondaryIndex, secondaryOrder
@@ -2124,6 +2121,74 @@ let trySecondaryLookup
     : (ColumnDef list * (RowId * Value[]) list) option =
     tableAt store dbName tableName
     |> Option.bind (fun table -> trySecondaryLookupInTable store table columnName literal)
+
+let private trySecondaryRangeLookupInTable
+    (store: Store)
+    (table: Table)
+    (columnName: string)
+    (lower: (Value * bool) option)
+    (upper: (Value * bool) option)
+    : (string * int * ColumnDef list * (RowId * Value[]) list) option =
+    tryEqualityIndex table columnName
+    |> Option.bind (fun (indexName, index, unique) ->
+        let normalizeBound = function
+            | None -> Some None
+            | Some(VNull, _) -> None
+            | Some(value, inclusive) -> exactProbeValue store table index value |> Option.map (fun value -> Some(value, inclusive))
+
+        match normalizeBound lower, normalizeBound upper with
+        | Some lower, Some upper when lower.IsSome || upper.IsSome ->
+            if unique then
+                None
+            else
+                table.SecondaryOrder
+                |> Map.tryFind indexName
+                |> Option.map (fun entries ->
+                    let entry value rowId =
+                        { CollationName = table.Columns.[index].Collation
+                          Value = value
+                          RowId = rowId }
+
+                    let insertionIndex entry =
+                        let position = entries.IndexOf entry
+                        if position < 0 then ~~~position else position
+
+                    let firstNonNull = insertionIndex (entry VNull (RowId.create Int32.MaxValue))
+
+                    let first =
+                        match lower with
+                        | None -> firstNonNull
+                        | Some(value, true) -> insertionIndex (entry value (RowId.create Int32.MinValue))
+                        | Some(value, false) -> insertionIndex (entry value (RowId.create Int32.MaxValue))
+
+                    let afterLast =
+                        match upper with
+                        | None -> entries.Count
+                        | Some(value, true) -> insertionIndex (entry value (RowId.create Int32.MaxValue))
+                        | Some(value, false) -> insertionIndex (entry value (RowId.create Int32.MinValue))
+
+                    let rows =
+                        let first = max 0 first
+                        let count = max 0 (min entries.Count afterLast - first)
+
+                        Seq.init count (fun offset -> entries.[first + offset])
+                        |> Seq.sortBy (fun entry -> RowId.value entry.RowId)
+                        |> Seq.choose (fun entry -> table.RowsArray.TryFind entry.RowId |> Option.map (fun row -> entry.RowId, row))
+                        |> List.ofSeq
+
+                    indexName, index, table.Columns, rows)
+        | _ -> None)
+
+let trySecondaryRangeLookup
+    (store: Store)
+    (dbName: string)
+    (tableName: string)
+    (columnName: string)
+    (lower: (Value * bool) option)
+    (upper: (Value * bool) option)
+    : (string * int * ColumnDef list * (RowId * Value[]) list) option =
+    tableAt store dbName tableName
+    |> Option.bind (fun table -> trySecondaryRangeLookupInTable store table columnName lower upper)
 
 /// The equality-index probe in the order execution considers it: a unique
 /// key first for each WHERE equality, then an ordinary B-tree bucket.
@@ -3694,7 +3759,7 @@ and private upsertRowsInTable
                                   updated: (Value[] * Value[]) list,
                                   index: Map<string, Map<string, RowId>>,
                                   secondaryIndex: Map<string, Map<string, Set<RowId>>>,
-                                  secondaryOrder: Map<string, Map<SecondaryOrderKey, Set<RowId>>>,
+                                  secondaryOrder: SecondaryOrder,
                                   cascadeDb: Database,
                                   visited: Map<string, Value[] list>,
                                   cascaded: Map<string, (Value[] * Value[]) list>) ->
@@ -4469,7 +4534,7 @@ let updateRows
                     (fun (changesRev: (Value[] * Value[]) list,
                           index: Map<string, Map<string, RowId>>,
                           secondaryIndex: Map<string, Map<string, Set<RowId>>>,
-                          secondaryOrder: Map<string, Map<SecondaryOrderKey, Set<RowId>>>,
+                          secondaryOrder: SecondaryOrder,
                           cascadeDb: Database,
                           visited: Map<string, Value[] list>,
                           cascaded: Map<string, (Value[] * Value[]) list>) ->
