@@ -434,7 +434,7 @@ implementation effort:
    correctness holds, but scale diverges sharply from MySQL past small data.
 3. Trigger coverage (BEFORE/UPDATE/DELETE, OLD.*, compound bodies) and
    updatable views — the two largest deliberate-subset cliffs.
-4. Missing function families (AES, JSON Schema, geometry) —
+4. Missing function families (AES and geometry, plus JSON Schema regexes) —
    each individually small, collectively frequent in
    report-style queries.
 5. LOAD DATA LOCAL INFILE and multi-statement packets — bulk-loading and
