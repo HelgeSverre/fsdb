@@ -128,7 +128,7 @@ let private runOneWorker (conn: MySqlConnection) (workload: Workload) (workerCou
             let seedIndex = id - 1
 
             exec
-                ($"INSERT INTO users VALUES ({id}, 'user_{seedIndex}', 'user_{seedIndex}@bench.test', 30, '{{\"plan\":\"free\"}}', '2024-01-01 00:00:00') "
+                ($"INSERT INTO users (id, name, email, age, meta, created_at) VALUES ({id}, 'user_{seedIndex}', 'user_{seedIndex}@bench.test', 30, '{{\"plan\":\"free\"}}', '2024-01-01 00:00:00') "
                  + "ON DUPLICATE KEY UPDATE age = age + 1")
         | Insert ->
             let i = Interlocked.Increment(&insertCounter.contents)
@@ -138,7 +138,7 @@ let private runOneWorker (conn: MySqlConnection) (workload: Workload) (workerCou
             let id = sliceStart + rng.Next(sliceSize)
             let seedIndex = id - 1
             exec
-                $"REPLACE INTO users VALUES ({id}, 'user_{seedIndex}', 'user_{seedIndex}@bench.test', 30, '{{\"plan\":\"free\"}}', '2024-01-01 00:00:00')"
+                $"REPLACE INTO users (id, name, email, age, meta, created_at) VALUES ({id}, 'user_{seedIndex}', 'user_{seedIndex}@bench.test', 30, '{{\"plan\":\"free\"}}', '2024-01-01 00:00:00')"
         | TransactionDistinct ->
             exec "START TRANSACTION"
 

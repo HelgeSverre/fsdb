@@ -164,7 +164,7 @@ type ServerBenchmarks() =
         let seedIndex = id - 1
 
         this.Exec(
-            $"REPLACE INTO users VALUES ({id},'user_{seedIndex}','user_{seedIndex}@bench.test',30,'{{\"plan\":\"free\"}}','2024-01-01 00:00:00')"
+            $"REPLACE INTO users (id, name, email, age, meta, created_at) VALUES ({id},'user_{seedIndex}','user_{seedIndex}@bench.test',30,'{{\"plan\":\"free\"}}','2024-01-01 00:00:00')"
         )
 
     [<Benchmark>]
@@ -222,7 +222,7 @@ type ServerBenchmarks() =
         let seedIndex = id - 1
 
         this.Exec(
-            $"INSERT INTO users VALUES ({id},'user_{seedIndex}','user_{seedIndex}@bench.test',30,'{{\"plan\":\"free\"}}','2024-01-01 00:00:00') "
+            $"INSERT INTO users (id, name, email, age, meta, created_at) VALUES ({id},'user_{seedIndex}','user_{seedIndex}@bench.test',30,'{{\"plan\":\"free\"}}','2024-01-01 00:00:00') "
             + "ON DUPLICATE KEY UPDATE age = age + 1"
         )
 
