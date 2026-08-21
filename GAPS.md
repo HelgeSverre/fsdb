@@ -260,7 +260,7 @@ OLD/NEW images are rejected when the trigger is created.
 | Gap | MySQL 8.4 | fsdb | Impact | Class |
 |---|---|---|---|---|
 | Updatable-view breadth | joins, expressions, nested views, REPLACE, and ODKU where MySQL deems the view writable | direct single-table projections with a simple base-table WHERE predicate; view ODKU and REPLACE refuse | medium | refusal |
-| WITH CHECK OPTION | enforced on updatable views | unparseable | low | refusal |
+| WITH CHECK OPTION | enforced on updatable views | CREATE VIEW refuses `WITH [CASCADED|LOCAL] CHECK OPTION` with 1235 | low | refusal |
 | ALGORITHM / SQL SECURITY INVOKER / ALTER VIEW | supported | absent; SECURITY_TYPE constant DEFINER (`InformationSchema.fs:922–923`) | low | refusal |
 | View metadata projection | views appear in I_S.COLUMNS, DESCRIBE, SHOW TABLE STATUS | absent (documented in compatibility.md) | medium | divergence |
 | VIEW_DEFINITION rendering | fully-qualified expanded form; SHOW CREATE VIEW wrapped in `/*!50001 */` | raw user text, no wrapper (`InformationSchema.fs:1749–1764`) | low | divergence |
