@@ -3362,7 +3362,7 @@ and private describeStoredViewColumns (store: Store) (registry: Registry) (schem
         let mergedType =
             match types with
             | _ when types |> List.exists (function TDecimal _ -> true | _ -> false) && types |> List.forall (fun ty -> decimalParts ty |> Option.isSome) ->
-                let precisions = types |> List.choose decimalParts
+                let precisions = types |> List.choose (function TDecimal(precision, scale) -> Some(precision, scale) | _ -> None)
                 TDecimal(precisions |> List.map fst |> List.max, precisions |> List.map snd |> List.max)
             | _ when types |> List.forall (fun ty -> stringLength ty |> Option.isSome) ->
                 types |> List.choose stringLength |> List.max |> TVarchar
