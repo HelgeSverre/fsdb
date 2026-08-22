@@ -1116,7 +1116,7 @@ module private MySqlTemporal =
             let micros, width = micros % 1000000L, (if carry > 0L then 6 else width)
             let total = int64 h * 3600L + int64 mi * 60L + int64 sec + carry
 
-            if total > 838L * 3600L + 59L * 60L + 59L then
+            if total > 838L * 3600L + 59L * 60L + 59L || (total = 838L * 3600L + 59L * 60L + 59L && micros > 0L) then
                 None
             else
                 let frac =

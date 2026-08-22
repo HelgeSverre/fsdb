@@ -6410,6 +6410,8 @@ let tests =
                           "SELECT DATE '2020-13-01'"
                           "SELECT TIME '99999999999:00'"
                           "SELECT TIME '839:00:00'"
+                          "SELECT TIME '838:59:59.000001'"
+                          "SELECT TIME '-838:59:59.000001'"
                           "SELECT TIMESTAMP '2020-01-01'"
                           "SELECT DATE '" + String.replicate 100_000 "1-" + "1'" ] do
                         match Fsdb.Parser.parse sql with
