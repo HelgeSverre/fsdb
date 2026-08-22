@@ -84,7 +84,6 @@ variants), USE, KILL, DESCRIBE are text-probed before the grammar
 | CTE placement | `WITH` in subqueries, derived tables, `INSERT…WITH` | top-level SELECT/UNION only (`Parser.fs:2458–2464`) | medium | refusal |
 | Quantified comparison | `= ANY/SOME/ALL (subquery)` | absent | medium | refusal |
 | Row constructors | `(a,b) = (1,2)`, `(a,b) IN ((1,2),(3,4))` | unparseable | medium | refusal |
-| Quoted user-variable names | backtick-, single-quote-, and double-quote-delimited names | ordinary unquoted identifier names only; typed variables and `@x := expr` otherwise work throughout expressions | low | refusal |
 
 Expression coverage that does exist: full comparison/logical/arithmetic
 operators incl. `<=>`, `XOR`, three-valued logic; CASE (both forms);
