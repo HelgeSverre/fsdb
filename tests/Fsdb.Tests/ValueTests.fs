@@ -1976,21 +1976,7 @@ let tests =
                           Expect.equal
                               (call "REGEXP_REPLACE" [ VString "a"; VString "(a)"; VString "$10" ])
                               (VString "a0")
-                              "capture one followed by a literal zero"
-
-                      testCase "REGEXP_REPLACE bounds expanded output"
-                      <| fun _ ->
-                          let limit = Fsdb.Limits.maxAllowedPacket
-                          Fsdb.Limits.maxAllowedPacket <- 3
-
-                          try
-                              Expect.throwsC
-                                  (fun () -> call "REGEXP_REPLACE" [ VString "xx"; VString "x"; VString "xx" ] |> ignore)
-                                  (function
-                                  | Fsdb.Functions.SqlError(1153, "Result of REGEXP_REPLACE() exceeds max_allowed_packet") -> ()
-                                  | other -> failtestf "expected 1153, got %A" other)
-                          finally
-                              Fsdb.Limits.maxAllowedPacket <- limit ]
+                              "capture one followed by a literal zero" ]
 
                 testList
                     "UUID_TO_BIN/BIN_TO_UUID/IS_UUID"

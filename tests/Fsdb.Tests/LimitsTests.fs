@@ -8,6 +8,8 @@ open Fsdb.Executor
 open Fsdb.Session
 open Fsdb.QueryHandler
 open Fsdb.ServerOptions
+open Fsdb.Value
+open Fsdb.Functions
 
 /// Sequenced: every case here writes process-global knobs, so running them
 /// alongside anything that reads one would be a coin flip.
@@ -27,6 +29,20 @@ let tests =
                       match applySetting "max_allowed_packet" value with
                       | Ok() -> Expect.equal maxAllowedPacket expected (sprintf "'%s' parsed" value)
                       | Error e -> failtestf "expected '%s' to parse, got %s" value e)
+
+          testCase "REGEXP_REPLACE refuses expanded output beyond max_allowed_packet"
+          <| fun _ ->
+              withSettings [ "max_allowed_packet", "1024" ] (fun () ->
+                  let input = String.replicate 513 "x"
+
+                  match lookup "REGEXP_REPLACE" builtins with
+                  | Some function_ ->
+                      Expect.throwsC
+                          (fun () -> function_ [ VString input; VString "x"; VString "xx" ] |> ignore)
+                          (function
+                          | SqlError(1153, "Result of REGEXP_REPLACE() exceeds max_allowed_packet") -> ()
+                          | other -> failtestf "expected 1153, got %A" other)
+                  | None -> failtest "REGEXP_REPLACE is registered")
 
           testCase "a value that isn't a plain number with an optional K/M/G suffix is rejected, not guessed at"
           <| fun _ ->
