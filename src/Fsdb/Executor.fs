@@ -2147,11 +2147,13 @@ type private QuantifiedOperand =
     { Expression: Expr
       Column: ColumnDef option }
 
-let private quantifiedComparisonResult
+let private comparisonResult
     (ctx: EvalContext)
     (leftExpr: Expr)
+    (leftColumn: ColumnDef option)
     (left: Value)
-    (rightOperand: QuantifiedOperand)
+    (rightExpr: Expr)
+    (rightColumn: ColumnDef option)
     (op: Op)
     (right: Value)
     : Value =
@@ -2159,17 +2161,16 @@ let private quantifiedComparisonResult
     | VNull, _
     | _, VNull -> VNull
     | _ ->
-        let leftColumn = tryColumnDefForExpr ctx leftExpr
-        let comparedLeft, comparedRight = comparisonOperands leftColumn left rightOperand.Column right
+        let comparedLeft, comparedRight = comparisonOperands leftColumn left rightColumn right
 
         let compared =
-            resolvedCompareWithColumns ctx leftExpr leftColumn left rightOperand.Expression rightOperand.Column right
+            resolvedCompareWithColumns ctx leftExpr leftColumn left rightExpr rightColumn right
 
         let equal =
             match comparedLeft, comparedRight with
             | VString leftText, VString rightText ->
                 resolvedComparisonCollation ctx leftExpr leftColumn
-                |> Option.orElseWith (fun () -> resolvedComparisonCollation ctx rightOperand.Expression rightOperand.Column)
+                |> Option.orElseWith (fun () -> resolvedComparisonCollation ctx rightExpr rightColumn)
                 |> Option.defaultValue ctx.Store.ConnectionCollation
                 |> fun collation -> collation.Equals leftText rightText
             | _ -> compared = 0
@@ -2183,62 +2184,108 @@ let private quantifiedComparisonResult
         | Gte -> boolToValue (compared >= 0)
         | _ -> VNull
 
-let private subqueryProjectionOperand (ctx: EvalContext) (select: SelectStmt) : QuantifiedOperand =
-    let tables =
+let private quantifiedComparisonResult
+    (ctx: EvalContext)
+    (leftExpr: Expr)
+    (left: Value)
+    (rightOperand: QuantifiedOperand)
+    (op: Op)
+    (right: Value)
+    : Value =
+    comparisonResult
+        ctx
+        leftExpr
+        (tryColumnDefForExpr ctx leftExpr)
+        left
+        rightOperand.Expression
+        rightOperand.Column
+        op
+        right
+
+let rec private selectProjectionColumns (store: Store) (dbName: string) (select: SelectStmt) : ColumnDef option list =
+    let rec sourceColumns = function
+        | FromTable table ->
+            let database = table.Database |> Option.defaultValue dbName
+
+            match
+                if table.Database.IsNone then
+                    currentCteScope () |> Map.tryFind (table.Table.ToLowerInvariant()) |> Option.map fst
+                else
+                    None
+            with
+            | Some columns -> columns |> List.map Some
+            | None ->
+                match tryStoredView store database table.Table with
+                | Some view ->
+                    match Parser.parse view.Definition with
+                    | Ok(Select viewSelect) ->
+                        let columns = selectProjectionColumns store view.Schema viewSelect
+
+                        if view.Columns.IsEmpty || view.Columns.Length <> columns.Length then
+                            columns
+                        else
+                            List.map2 (fun name column -> column |> Option.map (fun value -> { value with Name = name })) view.Columns columns
+                    | _ -> []
+                | None ->
+                    scan store database table.Table
+                    |> Result.toOption
+                    |> Option.map fst
+                    |> Option.defaultValue []
+                    |> List.map Some
+        | FromSubquery(PlainSelect body, _)
+        | FromLateral(PlainSelect body, _) -> selectProjectionColumns store dbName body
+        | FromSubquery _
+        | FromLateral _
+        | FromJsonTable _ -> []
+
+    let sources =
         (select.From |> Option.toList)
         @ (select.Joins |> List.map _.Table)
-        |> List.choose (function
-            | FromTable table ->
-                let database = table.Database |> Option.defaultValue ctx.DbName
+        |> List.map (fun source -> source, sourceColumns source)
 
-                scan ctx.Store database table.Table
-                |> Result.toOption
-                |> Option.map (fun (columns, _) -> table, columns)
-            | _ -> None)
+    let hasQualifier qualifier =
+        function
+        | FromTable table ->
+            table.Table.Equals(qualifier, System.StringComparison.OrdinalIgnoreCase)
+            || (table.Alias |> Option.exists (fun alias -> alias.Equals(qualifier, System.StringComparison.OrdinalIgnoreCase)))
+        | FromSubquery(_, alias)
+        | FromLateral(_, alias)
+        | FromJsonTable(_, _, _, alias) -> alias.Equals(qualifier, System.StringComparison.OrdinalIgnoreCase)
 
-    let columnFor (name: string) (candidates: (TableRef * ColumnDef list) list) =
+    let columnFor (name: string) (candidates: (FromItem * ColumnDef option list) list) =
         candidates
-        |> List.choose (fun (_, columns) -> columns |> List.tryFind (fun column -> column.Name.Equals(name, System.StringComparison.OrdinalIgnoreCase)))
+        |> List.collect snd
+        |> List.choose id
+        |> List.filter (fun column -> column.Name.Equals(name, System.StringComparison.OrdinalIgnoreCase))
         |> function
             | [ column ] -> Some column
             | _ -> None
 
-    let qualifiedColumnFor qualifier name =
-        tables
-        |> List.filter (fun (table, _) ->
-            table.Table.Equals(qualifier, System.StringComparison.OrdinalIgnoreCase)
-            || (table.Alias |> Option.exists (fun alias -> alias.Equals(qualifier, System.StringComparison.OrdinalIgnoreCase))))
-        |> columnFor name
-
-    let rec columnForProjection =
+    let rec projectionColumns =
         function
-        | Col name -> columnFor name tables
-        | QualifiedCol(qualifier, name) -> qualifiedColumnFor qualifier name
-        | Collate(value, _) -> columnForProjection value
-        | Star None ->
-            tables
-            |> List.collect snd
-            |> function
-                | [ column ] -> Some column
-                | _ -> None
-        | Star(Some qualifier) ->
-            tables
-            |> List.filter (fun (table, _) ->
-                table.Table.Equals(qualifier, System.StringComparison.OrdinalIgnoreCase)
-                || (table.Alias |> Option.exists (fun alias -> alias.Equals(qualifier, System.StringComparison.OrdinalIgnoreCase))))
-            |> List.collect snd
-            |> function
-                | [ column ] -> Some column
-                | _ -> None
-        | _ -> None
+        | Star None -> sources |> List.collect snd
+        | Star(Some qualifier) -> sources |> List.filter (fst >> hasQualifier qualifier) |> List.collect snd
+        | Col name -> [ columnFor name sources ]
+        | QualifiedCol(qualifier, name) -> sources |> List.filter (fst >> hasQualifier qualifier) |> columnFor name |> List.singleton
+        | Collate(value, _) -> projectionColumns value
+        | _ -> [ None ]
 
-    match select.Projections with
-    | [ (Collate(_, collation) as expression, _) ] ->
+    select.Projections
+    |> List.collect (fun (expression, alias) ->
+        projectionColumns expression
+        |> List.map (fun column ->
+            match column, alias with
+            | Some value, Some name -> Some { value with Name = name }
+            | _ -> column))
+
+let private subqueryProjectionOperand (ctx: EvalContext) (select: SelectStmt) : QuantifiedOperand =
+    match select.Projections, selectProjectionColumns ctx.Store ctx.DbName select with
+    | [ (Collate(_, collation), _) ], [ column ] ->
         { Expression = Collate(Lit VNull, collation)
-          Column = columnForProjection expression }
-    | [ (expression, _) ] ->
+          Column = column }
+    | [ _ ], [ column ] ->
         { Expression = Lit VNull
-          Column = columnForProjection expression }
+          Column = column }
     | _ ->
         { Expression = Lit VNull
           Column = None }
@@ -2457,60 +2504,16 @@ let rec private evalExpr (ctx: EvalContext) (expr: Expr) : Result<Value, EvalErr
             |> Result.bind (fun va ->
                 eval b
                 |> Result.map (fun vb ->
-                    let compareWith (op: Op) : Value =
-                        match va, vb with
-                        | VNull, _
-                        | _, VNull -> VNull
-                        | _ ->
-                            // ENUM columns compare by ordinal against a numeric
-                            // operand (see `enumOrdinalFor`) — either side may be
-                            // the column.
-                            let pa, pb =
-                                match enumOrdinalFor ctx a va, ordinalComparand vb with
-                                | Some oa, Some nb -> oa, nb
-                                | _ ->
-                                    match ordinalComparand va, enumOrdinalFor ctx b vb with
-                                    | Some na, Some ob -> na, ob
-                                    | _ -> va, vb
-
-                            let pred =
-                                match op with
-                                | Eq -> fun (c: int) -> c = 0
-                                | Neq -> fun c -> c <> 0
-                                | Lt -> fun c -> c < 0
-                                | Lte -> fun c -> c <= 0
-                                | Gt -> fun c -> c > 0
-                                | Gte -> fun c -> c >= 0
-                                | _ -> fun _ -> false
-
-                            match pa, pb with
-                            | VString sa, VString sb ->
-                                // A string column's COLLATE (or an explicit
-                                // `expr COLLATE name` tag) drives the compare;
-                                // two literals fall back to the server default.
-                                match resolvedCollation ctx a |> Option.orElseWith (fun () -> resolvedCollation ctx b) with
-                                | Some col ->
-                                    // Equality folds (ai_ci); the range
-                                    // operators use the full weight order.
-                                    let c =
-                                        match op with
-                                        | Eq
-                                        | Neq -> if col.Equals sa sb then 0 else 1
-                                        | _ -> col.Compare sa sb
-
-                                    boolToValue (pred c)
-                                | None ->
-                                    // Two literals (or a string against a
-                                    // non-column expression): the connection
-                                    // collation decides.
-                                    let c =
-                                        match op with
-                                        | Eq
-                                        | Neq -> if ctx.Store.ConnectionCollation.Equals sa sb then 0 else 1
-                                        | _ -> ctx.Store.ConnectionCollation.Compare sa sb
-
-                                    boolToValue (pred c)
-                            | _ -> boolToValue (pred (Value.compare pa pb))
+                    let compareWith comparison =
+                        comparisonResult
+                            ctx
+                            a
+                            (tryColumnDefForExpr ctx a)
+                            va
+                            b
+                            (tryColumnDefForExpr ctx b)
+                            comparison
+                            vb
 
                     // An ENUM is a number in numeric context: `status + 0` is
                     // the declaration ordinal, not 0 from a non-numeric label.
@@ -3566,7 +3569,26 @@ and private resolveFromSubquery (store: Store) (registry: Registry) (dbName: str
                     |> List.map (fun branch -> selectColumnCollations store registry dbName branch cols)
                     |> List.reduce (List.map2 strictestUnionCollation)
 
-            Ok(deriveColumns cols collations metadata, typedRows)
+            let derivedColumns = deriveColumns cols collations metadata
+
+            let sourceColumns =
+                match body with
+                | PlainSelect select -> selectProjectionColumns store dbName select
+                | UnionSelect _ -> []
+
+            let columns =
+                if sourceColumns.Length = derivedColumns.Length then
+                    List.map2
+                        (fun derived source ->
+                            source
+                            |> Option.map (fun source -> { derived with Type = source.Type })
+                            |> Option.defaultValue derived)
+                        derivedColumns
+                        sourceColumns
+                else
+                    derivedColumns
+
+            Ok(columns, typedRows)
         | Err(code, message) -> Error(Err(code, message))
         | Affected _ -> Error(Err(1064, "derived table did not return a resultset"))
 

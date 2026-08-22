@@ -4066,6 +4066,21 @@ let tests =
                     | ResultSet(_, [ [ Some "1" ] ]) -> ()
                     | other -> failtestf "expected an ENUM subquery result to retain its ordinal comparison, got %A" other
 
+                    match runDefault store "SELECT 'A' = ANY (SELECT s FROM (SELECT s FROM binary_text WHERE s = 'a') AS derived_binary), 1 = ANY (SELECT s FROM (SELECT s FROM enum_text) AS derived_enum)" with
+                    | ResultSet(_, [ [ Some "0"; Some "1" ] ]) -> ()
+                    | other -> failtestf "expected derived subquery columns to retain collation and ENUM metadata, got %A" other
+
+                    runDefault store "CREATE VIEW binary_view AS SELECT s FROM binary_text WHERE s = 'a'" |> ignore
+                    runDefault store "CREATE VIEW enum_view AS SELECT s FROM enum_text" |> ignore
+
+                    match runDefault store "SELECT 'A' = ANY (SELECT s FROM binary_view), 1 = ANY (SELECT s FROM enum_view)" with
+                    | ResultSet(_, [ [ Some "0"; Some "1" ] ]) -> ()
+                    | other -> failtestf "expected view subquery columns to retain collation and ENUM metadata, got %A" other
+
+                    match runDefault store "WITH binary_cte AS (SELECT s FROM binary_text WHERE s = 'a'), enum_cte AS (SELECT s FROM enum_text) SELECT 'A' = ANY (SELECT s FROM binary_cte), 1 = ANY (SELECT s FROM enum_cte)" with
+                    | ResultSet(_, [ [ Some "0"; Some "1" ] ]) -> ()
+                    | other -> failtestf "expected CTE subquery columns to retain collation and ENUM metadata, got %A" other
+
                     match runDefault store "SELECT 2 = ANY (SELECT '2')" with
                     | ResultSet(_, [ [ Some "1" ] ]) -> ()
                     | other -> failtestf "expected numeric coercion to match, got %A" other
