@@ -3596,7 +3596,13 @@ and private describeStoredViewColumns (store: Store) (registry: Registry) (schem
                     let literalColumn =
                         match expression with
                         | Lit(VInt value) ->
-                            computedColumn name (TInt false) false (Some(DConst(VInt 0L))) None
+                            let literalType =
+                                if value >= -99999999L && value <= 99999999L then
+                                    TInt false
+                                else
+                                    TBigInt false
+
+                            computedColumn name literalType false (Some(DConst(VInt 0L))) None
                             |> fun column -> describeLiteral column (VInt value)
                             |> Some
                         | Lit(VUInt value) ->

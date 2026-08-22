@@ -411,6 +411,32 @@ let tests =
                       "computed expressions keep their declared result metadata"
               | other -> failtestf "expected computed view metadata, got %A" other
 
+          testCase "integer literal widths retain MySQL view metadata"
+          <| fun _ ->
+              let store = Fsdb.Storage.create ()
+              let session = Fsdb.Session.create 1 store
+              let session, result =
+                  Fsdb.QueryHandler.handle
+                      session
+                      "CREATE VIEW literal_width AS SELECT 99999999 AS small_signed, 100000000 AS large_signed, 2147483647 AS int32_max, 2147483648 AS positive_large, -2147483649 AS negative_large, 9223372036854775807 AS max_signed, 9223372036854775808 AS unsigned_large, 18446744073709551615 AS max_unsigned"
+
+              expectOk result "CREATE VIEW literal_width"
+
+              match Fsdb.QueryHandler.handle session "SELECT column_name, column_default, is_nullable, column_type FROM information_schema.columns WHERE table_schema = 'fsdb' AND table_name = 'literal_width' ORDER BY ordinal_position" |> snd with
+              | ResultSet(_, rows) ->
+                  Expect.equal
+                      rows
+                      [ [ Some "small_signed"; Some "0"; Some "NO"; Some "int" ]
+                        [ Some "large_signed"; Some "0"; Some "NO"; Some "bigint" ]
+                        [ Some "int32_max"; Some "0"; Some "NO"; Some "bigint" ]
+                        [ Some "positive_large"; Some "0"; Some "NO"; Some "bigint" ]
+                        [ Some "negative_large"; Some "0"; Some "NO"; Some "bigint" ]
+                        [ Some "max_signed"; Some "0"; Some "NO"; Some "bigint" ]
+                        [ Some "unsigned_large"; Some "0"; Some "NO"; Some "bigint unsigned" ]
+                        [ Some "max_unsigned"; Some "0"; Some "NO"; Some "bigint unsigned" ] ]
+                      "integer literals use MySQL view metadata"
+              | other -> failtestf "expected integer literal view metadata, got %A" other
+
           testCase "recursive, union, and decimal aggregate views retain MySQL metadata"
           <| fun _ ->
               let store = Fsdb.Storage.create ()
