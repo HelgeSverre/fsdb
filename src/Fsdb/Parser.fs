@@ -608,7 +608,7 @@ let private depthGuard (p: Parser<'a, unit>) : Parser<'a, unit> =
             exprDepth.Value <- exprDepth.Value - 1
             reply
 
-// `parenExpr`, function-call arguments and `IN (...)` lists all recurse back
+// Parenthesized expressions, function-call arguments and `IN (...)` lists all recurse back
 // into the full expression grammar, which is itself built on top of them —
 // tie the knot with a forward reference.
 let private expr, exprRef = createParserForwardedToRef<Expr, unit> ()
@@ -626,12 +626,15 @@ let private selectStmtRecord, selectStmtRecordRef = createParserForwardedToRef<S
 /// `expr`/`selectStmtRecord` above.
 let private statement, statementRef = createParserForwardedToRef<Statement, unit> ()
 
-let private parenExpr: Parser<Expr, unit> = between (sym "(") (sym ")") expr
-
 /// A comma distinguishes a row constructor from ordinary grouping, so
 /// `(a)` stays the scalar expression `a` while `(a, b)` keeps both operands.
-let private rowConstructor: Parser<Expr, unit> =
-    between (sym "(") (sym ")") (pipe2 expr (many1 (sym "," >>. expr)) (fun first rest -> Row(first :: rest)))
+let private parenthesizedExpr: Parser<Expr, unit> =
+    between (sym "(") (sym ")") (
+        pipe2 expr (opt (sym "," >>. sepBy1 expr (sym ","))) (fun first rest ->
+            match rest with
+            | None -> first
+            | Some values -> Row(first :: values))
+    )
 
 let private starAtom: Parser<Expr, unit> = pstring "*" >>. ws >>% Star None
 
@@ -901,7 +904,7 @@ let private castExpr: Parser<Expr, unit> =
 let private existsExpr: Parser<Expr, unit> =
     attempt (keyword "EXISTS" >>. sym "(" >>. selectStmtRecord .>> sym ")") |>> Exists
 
-/// `(SELECT ...)` used as a value — tried with `attempt` ahead of `parenExpr`
+/// `(SELECT ...)` used as a value — tried with `attempt` ahead of parenthesized expressions
 /// since both start with `(`; a plain parenthesized expression never starts
 /// with the `SELECT` keyword, so the two never actually compete once
 /// `selectStmtRecord` commits.
@@ -1318,8 +1321,7 @@ let private matchAgainstAtom: Parser<Expr, unit> =
 let private atom: Parser<Expr, unit> =
     choice
         [ subqueryExpr
-          attempt rowConstructor
-          parenExpr
+          parenthesizedExpr
           starAtom
           castExpr
           existsExpr
