@@ -395,6 +395,29 @@ let tests =
               time.WriteInt32LE 123456
               Expect.equal (readBinaryValue (Reader(time.ToArray())) TypeTime false) (VTime(tryParseTimeValue "-34:20:30.123456" |> Option.get)) "negative time with microseconds"
 
+              let invalidTime len sign days hour minute second micros =
+                  let writer = Writer()
+                  writer.WriteByte len
+
+                  if len <> 0uy then
+                      writer.WriteByte sign
+                      writer.WriteInt32LE days
+                      writer.WriteByte hour
+                      writer.WriteByte minute
+                      writer.WriteByte second
+
+                      if len = 12uy then
+                          writer.WriteInt32LE micros
+
+                  Expect.throws (fun () -> readBinaryValue (Reader(writer.ToArray())) TypeTime false |> ignore) "invalid binary TIME is rejected"
+
+              invalidTime 7uy 0uy 0 0uy 0uy 0uy 0
+              invalidTime 8uy 2uy 0 0uy 0uy 0uy 0
+              invalidTime 8uy 0uy 0 24uy 0uy 0uy 0
+              invalidTime 12uy 0uy 0 0uy 0uy 0uy 1_000_000
+              invalidTime 8uy 0uy -1 0uy 0uy 0uy 0
+              invalidTime 12uy 0uy 34 22uy 59uy 59uy 1
+
               // TINYINT: 0xFF is -1 signed, 255 unsigned
               let tiny = Writer()
               tiny.WriteByte 0xFFuy

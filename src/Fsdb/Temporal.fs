@@ -19,8 +19,11 @@ let maxTimeTicks =
 
 let timeTicks (TimeValue ticks) = ticks
 
+let timeMagnitude (ticks: int64) : uint64 =
+    if ticks < 0L then uint64 (-(ticks + 1L)) + 1UL else uint64 ticks
+
 let tryTimeValue (ticks: int64) : TimeValue option =
-    if abs ticks <= maxTimeTicks && ticks % 10L = 0L then Some(TimeValue ticks) else None
+    if ticks >= -maxTimeTicks && ticks <= maxTimeTicks && ticks % 10L = 0L then Some(TimeValue ticks) else None
 
 let timeValueOrClamp (ticks: int64) : TimeValue =
     let clamped = max -maxTimeTicks (min maxTimeTicks ticks)
@@ -29,11 +32,15 @@ let timeValueOrClamp (ticks: int64) : TimeValue =
 
 let roundTimeTicksToFsp (fsp: int) (ticks: int64) : int64 =
     let precision = max 0 (min 6 fsp)
-    let unit = pown 10L (7 - precision)
-    let magnitude = abs ticks
+    let unit = pown 10UL (7 - precision)
+    let magnitude = timeMagnitude ticks
     let remainder = magnitude % unit
-    let rounded = magnitude - remainder + (if remainder * 2L >= unit then unit else 0L)
-    if ticks < 0L then -rounded else rounded
+    let rounded = magnitude - remainder + (if remainder * 2UL >= unit then unit else 0UL)
+
+    if ticks < 0L then
+        if rounded = 9_223_372_036_854_775_808UL then Int64.MinValue else -int64 rounded
+    else
+        int64 rounded
 
 let private timePattern =
     Regex(@"^([+-])?(?:(\d+)\s+)?(\d+):(\d{1,2}):(\d{1,2})(?:\.(\d+))?$", RegexOptions.CultureInvariant)
@@ -138,12 +145,12 @@ let tryParseTimeValue text =
 let formatTimeValueFsp (fsp: int) (value: TimeValue) =
     let ticks = timeTicks value
     let sign = if ticks < 0L then "-" else ""
-    let magnitude = abs ticks
-    let totalSeconds = magnitude / TimeSpan.TicksPerSecond
-    let hours = totalSeconds / 3600L
-    let minutes = totalSeconds % 3600L / 60L
-    let seconds = totalSeconds % 60L
-    let micros = magnitude % TimeSpan.TicksPerSecond / 10L
+    let magnitude = timeMagnitude ticks
+    let totalSeconds = magnitude / uint64 TimeSpan.TicksPerSecond
+    let hours = totalSeconds / 3600UL
+    let minutes = totalSeconds % 3600UL / 60UL
+    let seconds = totalSeconds % 60UL
+    let micros = magnitude % uint64 TimeSpan.TicksPerSecond / 10UL
     let baseText = sprintf "%s%02d:%02d:%02d" sign hours minutes seconds
 
     if fsp <= 0 then
@@ -153,9 +160,9 @@ let formatTimeValueFsp (fsp: int) (value: TimeValue) =
 
 let formatTimeValue (value: TimeValue) =
     let ticks = timeTicks value
-    let micros = abs ticks % TimeSpan.TicksPerSecond / 10L
+    let micros = timeMagnitude ticks % uint64 TimeSpan.TicksPerSecond / 10UL
     let baseText = formatTimeValueFsp 0 value
-    if micros = 0L then baseText else baseText + "." + micros.ToString("D6").TrimEnd('0')
+    if micros = 0UL then baseText else baseText + "." + micros.ToString("D6").TrimEnd('0')
 
 type ZeroDate =
     private

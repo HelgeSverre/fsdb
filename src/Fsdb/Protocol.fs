@@ -389,20 +389,20 @@ let private writeBinaryTime (w: Writer) (s: string) : unit =
     | Some value when timeTicks value = 0L -> w.WriteByte 0uy
     | Some value ->
         let ticks = timeTicks value
-        let magnitude = abs ticks
-        let totalSeconds = magnitude / TimeSpan.TicksPerSecond
-        let totalHours = totalSeconds / 3600L
-        let minute = totalSeconds % 3600L / 60L
-        let second = totalSeconds % 60L
-        let micros = magnitude % TimeSpan.TicksPerSecond / 10L
-        w.WriteByte(if micros = 0L then 8uy else 12uy)
+        let magnitude = timeMagnitude ticks
+        let totalSeconds = magnitude / uint64 TimeSpan.TicksPerSecond
+        let totalHours = totalSeconds / 3600UL
+        let minute = totalSeconds % 3600UL / 60UL
+        let second = totalSeconds % 60UL
+        let micros = magnitude % uint64 TimeSpan.TicksPerSecond / 10UL
+        w.WriteByte(if micros = 0UL then 8uy else 12uy)
         w.WriteByte(if ticks < 0L then 1uy else 0uy)
-        w.WriteInt32LE(int (totalHours / 24L))
-        w.WriteByte(byte (totalHours % 24L))
+        w.WriteInt32LE(int (totalHours / 24UL))
+        w.WriteByte(byte (totalHours % 24UL))
         w.WriteByte(byte minute)
         w.WriteByte(byte second)
 
-        if micros <> 0L then
+        if micros <> 0UL then
             w.WriteInt32LE(int micros)
     | None -> w.WriteByte 0uy
 
@@ -599,27 +599,36 @@ let private readBinaryDateTime (r: Reader) : Value =
 let private readBinaryTime (r: Reader) : Value =
     let len = int (r.ReadByte())
 
-    if len = 0 then
-        VTime(timeValueOrClamp 0L)
-    else
-        let isNegative = r.ReadByte()
-        let days = r.ReadInt32LE()
-        let hour = int (r.ReadByte())
-        let minute = int (r.ReadByte())
-        let second = int (r.ReadByte())
-        let micros = if len > 8 then r.ReadInt32LE() else 0
-        // int32 `days` can be attacker-controlled; widen so `days * 24`
-        // can't wrap to a bogus hour count.
-        let totalHours = int64 days * 24L + int64 hour
-        let ticks = ((totalHours * 3600L + int64 minute * 60L + int64 second) * TimeSpan.TicksPerSecond) + int64 micros * 10L
-        let ticks = if isNegative <> 0uy then -ticks else ticks
+    match len with
+    | 0 -> VTime(timeValueOrClamp 0L)
+    | 8
+    | 12 ->
+        let sign = r.ReadByte()
+        let days = uint32 (r.ReadInt32LE())
+        let hour = r.ReadByte()
+        let minute = r.ReadByte()
+        let second = r.ReadByte()
+        let micros = if len = 12 then r.ReadInt32LE() else 0
+        let totalHours = uint64 days * 24UL + uint64 hour
 
-        match tryTimeValue ticks with
-        | Some value -> VTime value
-        | None ->
-            let sign = if ticks < 0L then "-" else ""
-            let fraction = if micros = 0 then "" else sprintf ".%06d" micros
-            VString(sprintf "%s%02d:%02d:%02d%s" sign totalHours minute second fraction)
+        if
+            sign > 1uy
+            || hour >= 24uy
+            || minute >= 60uy
+            || second >= 60uy
+            || micros < 0
+            || micros > 999999
+            || totalHours > 838UL
+            || (totalHours = 838UL && (minute > 59uy || second > 59uy || micros <> 0))
+        then
+            invalidArg "TIME" "Invalid binary TIME value"
+        else
+            let ticks =
+                ((int64 totalHours * 3600L + int64 minute * 60L + int64 second) * TimeSpan.TicksPerSecond)
+                + int64 micros * 10L
+            let ticks = if sign = 1uy then -ticks else ticks
+            VTime(tryTimeValue ticks |> Option.defaultWith (fun () -> invalidArg "TIME" "Invalid binary TIME value"))
+    | _ -> invalidArg "TIME" "Invalid binary TIME length"
 
 /// Reads one COM_STMT_EXECUTE binary parameter value of MySQL binary type
 /// id `typeId` off `r`, decoded into an fsdb `Value`. `unsigned` only

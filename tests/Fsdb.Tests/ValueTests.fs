@@ -91,6 +91,9 @@ let tests =
                 testCase "TIME parsing rejects oversized fields without overflowing"
                 <| fun _ ->
                     Expect.isNone (tryParseTimeTicks "999999999999999999999999 00:00:00") "too many days"
+                    Expect.isNone (tryTimeValue Int64.MinValue) "minimum int64"
+                    Expect.equal (timeMagnitude Int64.MinValue) 9_223_372_036_854_775_808UL "safe magnitude"
+                    Expect.equal (timeTicks (timeValueOrClamp Int64.MinValue)) -maxTimeTicks "clamped minimum"
 
                 testCase "zero dates preserve zero components"
                 <| fun _ ->
