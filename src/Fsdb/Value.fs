@@ -762,6 +762,12 @@ let rec private pointInShape point = function
 
 let geometryPointPositionPlanar point (geometry: Geometry) = pointInShape point geometry.Shape
 
+let rec private pointInContainmentShape point = function
+    | GGeometryCollection geometries ->
+        let positions = geometries |> List.map (fun geometry -> pointInContainmentShape point geometry.Shape)
+        if positions |> List.contains Interior then Interior elif positions |> List.contains Boundary then Boundary else Exterior
+    | shape -> pointInShape point shape
+
 let private interpolate ((x1, y1), (x2, y2)) t = x1 + (x2 - x1) * t, y1 + (y2 - y1) * t
 
 let private segmentParameter point ((x1, y1), (x2, y2)) =
@@ -851,11 +857,11 @@ let private geometryContainsAllPoints (first: Geometry) (second: Geometry) =
     let boundaries = shapeSegments first.Shape
 
     shapeCoordinates second.Shape
-    |> List.forall (fun point -> geometryPointPositionPlanar point first <> Exterior)
+    |> List.forall (fun point -> pointInContainmentShape point first.Shape <> Exterior)
     && shapeSegments second.Shape
        |> List.forall (fun segment ->
            segmentSamples segment boundaries
-           |> List.forall (fun point -> geometryPointPositionPlanar point first <> Exterior))
+           |> List.forall (fun point -> pointInContainmentShape point first.Shape <> Exterior))
 
 let geometryContainsPlanar (first: Geometry) (second: Geometry) =
     if List.isEmpty (shapeCoordinates first.Shape) || List.isEmpty (shapeCoordinates second.Shape) then
@@ -864,14 +870,14 @@ let geometryContainsPlanar (first: Geometry) (second: Geometry) =
         let containsSecond = geometryContainsAllPoints first second
         let secondReachesInterior =
             shapeInteriorSamples second.Shape
-            |> List.exists (fun point -> geometryPointPositionPlanar point first = Interior)
+            |> List.exists (fun point -> pointInContainmentShape point first.Shape = Interior)
 
         let coversFirstHole =
             shapePolygons first.Shape
             |> List.collect (function
                 | _ :: holes -> holes |> List.collect (fun hole -> polygonInteriorSamples [ hole ])
                 | [] -> [])
-            |> List.exists (fun point -> geometryPointPositionPlanar point second = Interior)
+            |> List.exists (fun point -> pointInContainmentShape point second.Shape = Interior)
 
         Some(containsSecond && secondReachesInterior && not coversFirstHole)
 
@@ -911,11 +917,10 @@ let private interiorIntersects first second =
     || sampleIntersects (shapeInteriorSamples second.Shape) first
 
 let geometryTouchesPlanar first second =
-    let rec pointOnly = function
-        | GPoint _
-        | GMultiPoint _ -> true
-        | GGeometryCollection geometries -> not (List.isEmpty geometries) && (geometries |> List.forall (fun geometry -> pointOnly geometry.Shape))
-        | _ -> false
+    let pointOnly shape =
+        match atomicShapes shape with
+        | [] -> false
+        | shapes -> shapes |> List.forall (shapeDimension >> (=) 0)
 
     if pointOnly first.Shape && pointOnly second.Shape then
         None
