@@ -18,7 +18,6 @@
 ///    tailoring rather than MySQL's UCA 5.2/4.0 weight tables.
 ///  - LIKE folds per character and never expands ('æ' LIKE 'ae' is false
 ///    while 'æ' = 'ae' is true — MySQL-verified) — see `Executor.likeMatch`.
-///  - REGEXP stays accent-sensitive; documented at `Executor.regexpOp`.
 ///  - identifiers (column/table names) keep their ordinal comparison —
 ///    MySQL's identifier collation is a separate concern.
 module Fsdb.Collation

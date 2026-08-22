@@ -4574,6 +4574,37 @@ let tests =
                     | ResultSet([ "s" ], [ [ Some "Hello" ] ]) -> ()
                     | other -> failtestf "expected the case-sensitive REGEXP to match 'Hello' against '^H', got %A" other
 
+                testCase "REGEXP entry points use operand collation and match_type case policy"
+                <| fun _ ->
+                    let store = newStore ()
+
+                    runDefault
+                        store
+                        "CREATE TABLE t (ai VARCHAR(20) COLLATE utf8mb4_0900_ai_ci, ac VARCHAR(20) COLLATE utf8mb4_0900_as_ci, bin VARCHAR(20) COLLATE utf8mb4_bin)"
+                    |> ignore
+
+                    runDefault store "INSERT INTO t VALUES ('HÉllo')" |> ignore
+
+                    match
+                        runDefault
+                            store
+                            "SELECT ai REGEXP '^héllo$', ac REGEXP '^héllo$', bin REGEXP '^héllo$', REGEXP_LIKE(ai, '^héllo$'), REGEXP_LIKE(ac, '^héllo$'), REGEXP_LIKE(bin, '^héllo$'), REGEXP_LIKE(ai, '^hello$'), REGEXP_LIKE(bin, '^héllo$', 'i'), REGEXP_LIKE(ai, '^héllo$', 'c'), REGEXP_LIKE(ai, '^héllo$', 'ci'), REGEXP_LIKE(ai, '^héllo$', 'ic'), REGEXP_INSTR(ai, 'é'), REGEXP_SUBSTR(ai, 'é'), REGEXP_REPLACE(ai, 'é', 'X') FROM t"
+                    with
+                    | ResultSet(_, [ [ Some "1"; Some "1"; Some "0"; Some "1"; Some "1"; Some "0"; Some "0"; Some "1"; Some "0"; Some "1"; Some "0"; Some "2"; Some "É"; Some "HXllo" ] ]) -> ()
+                    | other -> failtestf "expected collation-aware regular expressions, got %A" other
+
+                    match runDefault store "SELECT REGEXP_LIKE('Ångström' COLLATE utf8mb4_0900_ai_ci, '^ångström$'), REGEXP_LIKE('Ångström' COLLATE utf8mb4_0900_ai_ci, '^angstrom$')" with
+                    | ResultSet(_, [ [ Some "1"; Some "0" ] ]) -> ()
+                    | other -> failtestf "expected Unicode case matching without accent folding, got %A" other
+
+                    match runDefault store "SELECT _binary'Hello' REGEXP _binary'^hello$', REGEXP_LIKE(_binary'Hello', _binary'^hello$')" with
+                    | ResultSet(_, [ [ Some "0"; Some "0" ] ]) -> ()
+                    | other -> failtestf "expected binary regular expressions to remain case-sensitive, got %A" other
+
+                    match runDefault store "SELECT REGEXP_SUBSTR('abc', '(')" with
+                    | Err(3691, _) -> ()
+                    | other -> failtestf "expected invalid regular expression error 3691, got %A" other
+
                 testCase "REGEXP on a catastrophically-backtracking pattern errors instead of hanging"
                 <| fun _ ->
                     // Every `Regex` in `regexpOp` must carry a `MatchTimeout`

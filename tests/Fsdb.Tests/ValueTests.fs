@@ -1831,8 +1831,17 @@ let tests =
                       testCase "REGEXP_LIKE propagates NULL"
                       <| fun _ -> Expect.equal (call "REGEXP_LIKE" [ VNull; VString "a" ]) VNull "null subject"
 
-                      testCase "REGEXP_LIKE returns NULL for a malformed pattern rather than erroring"
-                      <| fun _ -> Expect.equal (call "REGEXP_LIKE" [ VString "abc"; VString "(" ]) VNull "unbalanced paren"
+                      testCase "REGEXP functions report malformed patterns and match types"
+                      <| fun _ ->
+                          let expects code arguments =
+                              Expect.throwsC
+                                  (fun () -> call "REGEXP_LIKE" arguments |> ignore)
+                                  (function
+                                  | Fsdb.Functions.SqlError(actual, _) when actual = code -> ()
+                                  | other -> failtestf "expected %d, got %A" code other)
+
+                          expects 3691 [ VString "abc"; VString "(" ]
+                          expects 1210 [ VString "abc"; VString "a"; VString "z" ]
 
                       testCase "REGEXP_SUBSTR returns the matched substring, or NULL if none"
                       <| fun _ ->

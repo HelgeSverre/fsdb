@@ -974,20 +974,20 @@ let private regexpOp (coll: Collation.Collation option) (subject: Value) (patter
     | _ ->
         let text = subject |> toText |> Option.defaultValue ""
         let pat = pattern |> toText |> Option.defaultValue ""
-        let col = coll |> Option.defaultValue Collation.defaultCollation
-        // No separate "REGEXP BINARY" AST flag the way `Like` has one —
-        // case sensitivity is read straight off the collation by asking it
-        // whether 'a' and 'A' fold together.
-        let caseSensitive = not (col.CharEquals 'a' 'A')
+        let col =
+            if [ subject; pattern ] |> List.exists (tryRawBytes >> Option.isSome) then
+                Collation.tryFind "utf8mb4_bin" |> Option.defaultValue Collation.defaultCollation
+            else
+                coll |> Option.defaultValue Collation.defaultCollation
 
-        let opts =
-            if caseSensitive then RegexOptions.None else RegexOptions.IgnoreCase
-
-        try
-            Ok(boolToValue (Regex.IsMatch(text, pat, opts, Limits.regexpMatchTimeout)))
-        with
-        | :? RegexMatchTimeoutException -> Error(1030, "Got error 'regexp match timed out' from regexp")
-        | :? System.ArgumentException as ex -> Error(1139, sprintf "Got error '%s' from regexp" ex.Message)
+        match Regexp.compile col None pat with
+        | Error Regexp.InvalidPattern -> Error(3691, "Invalid regular expression.")
+        | Error Regexp.InvalidMatchType -> Error(1210, "Incorrect arguments to regexp function")
+        | Ok regex ->
+            try
+                Ok(boolToValue (regex.IsMatch text))
+            with :? RegexMatchTimeoutException ->
+                Error(1030, "Got error 'regexp match timed out' from regexp")
 
 /// The three pieces of context `evalExpr` needs to resolve a `Col`/`FuncCall`
 /// against, bundled into one record rather than three loose parameters
@@ -1615,6 +1615,14 @@ let private resolvedCollation (ctx: EvalContext) (expr: Expr) : Collation.Collat
 /// connection collation (literals) — the same resolution comparisons use.
 let private keyCollation (ctx: EvalContext) (expr: Expr) : Collation.Collation =
     resolvedCollation ctx expr |> Option.defaultValue ctx.Store.ConnectionCollation
+
+let private regexCollation (ctx: EvalContext) (subjectExpr: Expr) (subject: Value) (patternExpr: Expr) (pattern: Value) : Collation.Collation =
+    if [ subject; pattern ] |> List.exists (tryRawBytes >> Option.isSome) then
+        Collation.tryFind "utf8mb4_bin" |> Option.defaultValue Collation.defaultCollation
+    else
+        resolvedCollation ctx subjectExpr
+        |> Option.orElseWith (fun () -> resolvedCollation ctx patternExpr)
+        |> Option.defaultValue ctx.Store.ConnectionCollation
 
 /// A group/distinct/partition key normalized to collation equality: string
 /// values become their collation's canonical key (`KeyOf` is injective per
@@ -2955,6 +2963,24 @@ let rec private evalExpr (ctx: EvalContext) (expr: Expr) : Result<Value, EvalErr
             | _ -> argument
 
         eval argument |> Result.map (Functions.weightString (keyCollation ctx source))
+    | FuncCall(name, subjectExpr :: patternExpr :: rest)
+        when name.Equals("REGEXP_LIKE", System.StringComparison.OrdinalIgnoreCase)
+             || name.Equals("REGEXP_INSTR", System.StringComparison.OrdinalIgnoreCase)
+             || name.Equals("REGEXP_SUBSTR", System.StringComparison.OrdinalIgnoreCase)
+             || name.Equals("REGEXP_REPLACE", System.StringComparison.OrdinalIgnoreCase) ->
+        eval subjectExpr
+        |> Result.bind (fun subject ->
+            eval patternExpr
+            |> Result.bind (fun pattern ->
+                rest
+                |> traverse eval
+                |> Result.map (fun values ->
+                    let collation = regexCollation ctx subjectExpr subject patternExpr pattern
+                    let arguments = subject :: pattern :: values
+
+                    match Functions.regexpFunction name collation with
+                    | Some function_ -> function_ arguments
+                    | None -> VNull)))
     | FuncCall(name, args) ->
         match Functions.lookup name ctx.Registry with
         | None -> Error(unknownFunction name)

@@ -4159,37 +4159,24 @@ let private strcmpFn: Scalar =
     | _ -> VNull
 
 // ---------------------------------------------------------------------------
-// REGEXP_LIKE/REPLACE/SUBSTR/INSTR. Same timeout guard as `Executor.regexpOp`
-// (the `REGEXP`/`RLIKE` operator) against catastrophic backtracking, but
-// unlike that operator these can't thread a real MySQL error back to the
-// client — `Scalar` is a total `Value list -> Value`, no error channel —
-// so a malformed pattern degrades to NULL, the same tolerate-and-return-NULL
-// treatment this file already gives malformed JSON input (see
-// `jsonExtractFn`'s neighbors) rather than the operator's 1139.
+// REGEXP_LIKE/REPLACE/SUBSTR/INSTR share the bounded compiler used by the
+// REGEXP operator, so invalid patterns and pathological matches agree.
 // ---------------------------------------------------------------------------
 
-/// MySQL's default is case-insensitive matching; `match_type` characters
-/// flip options on top of that default, applied left to right so the last
-/// conflicting flag (e.g. "ci") wins rather than erroring on conflicts.
-/// `u` (Unix-only line endings) has no .NET equivalent and is ignored.
-let private regexOptsOfMatchType (matchType: string option) : RegexOptions =
-    let mutable opts = RegexOptions.IgnoreCase
+let private raiseRegexError = function
+    | Regexp.InvalidPattern -> raise (SqlError(3691, "Invalid regular expression."))
+    | Regexp.InvalidMatchType -> raise (SqlError(1210, "Incorrect arguments to regexp function"))
 
-    for c in matchType |> Option.defaultValue "" do
-        match c with
-        | 'c' -> opts <- opts &&& ~~~RegexOptions.IgnoreCase
-        | 'i' -> opts <- opts ||| RegexOptions.IgnoreCase
-        | 'm' -> opts <- opts ||| RegexOptions.Multiline
-        | 'n' -> opts <- opts ||| RegexOptions.Singleline
-        | _ -> ()
+let private regexResult (collation: Collation.Collation) (matchType: string option) (pattern: string) =
+    match Regexp.compile collation matchType pattern with
+    | Ok regex -> regex
+    | Error error -> raiseRegexError error
 
-    opts
-
-let private tryRegex (pattern: string) (opts: RegexOptions) : Regex option =
+let private withRegexTimeout operation =
     try
-        Some(Regex(pattern, opts, Limits.regexpMatchTimeout))
-    with :? ArgumentException ->
-        None
+        operation ()
+    with :? RegexMatchTimeoutException ->
+        raise (SqlError(1030, "Got error 'regexp match timed out' from regexp"))
 
 /// The `occurrence`-th match (1-based) at or after 1-based `pos` — MySQL's
 /// pos/occurrence pair, common to all four REGEXP_* functions. `pos`
@@ -4218,15 +4205,14 @@ let private matchTypeArg (args: Value list) (idx: int) : string option =
 let private intArgOr (dflt: int) (args: Value list) (idx: int) : int =
     args |> List.tryItem idx |> Option.filter (fun v -> v <> VNull) |> Option.map (toDouble >> int) |> Option.defaultValue dflt
 
-let private regexpLikeFn: Scalar =
+let private regexpLikeFn (collation: Collation.Collation) : Scalar =
     function
     | e :: p :: rest when not (anyNull [ e; p ]) ->
-        match tryRegex (req p) (regexOptsOfMatchType (matchTypeArg rest 0)) with
-        | Some rx -> if rx.IsMatch(req e) then VInt 1L else VInt 0L
-        | None -> VNull
+        let regex = regexResult collation (matchTypeArg rest 0) (req p)
+        withRegexTimeout (fun () -> if regex.IsMatch(req e) then VInt 1L else VInt 0L)
     | _ -> VNull
 
-let private regexpInstrFn: Scalar =
+let private regexpInstrFn (collation: Collation.Collation) : Scalar =
     function
     | e :: p :: rest when not (anyNull [ e; p ]) ->
         let text = req e
@@ -4234,27 +4220,27 @@ let private regexpInstrFn: Scalar =
         let occurrence = intArgOr 1 rest 1
         let returnEnd = intArgOr 0 rest 2 <> 0
 
-        match tryRegex (req p) (regexOptsOfMatchType (matchTypeArg rest 3)) with
-        | Some rx ->
-            match nthMatch rx text pos occurrence with
+        let regex = regexResult collation (matchTypeArg rest 3) (req p)
+
+        withRegexTimeout (fun () ->
+            match nthMatch regex text pos occurrence with
             | Some m -> VInt(int64 ((if returnEnd then m.Index + m.Length else m.Index) + 1))
-            | None -> VInt 0L
-        | None -> VNull
+            | None -> VInt 0L)
     | _ -> VNull
 
-let private regexpSubstrFn: Scalar =
+let private regexpSubstrFn (collation: Collation.Collation) : Scalar =
     function
     | e :: p :: rest when not (anyNull [ e; p ]) ->
         let text = req e
         let pos = intArgOr 1 rest 0
         let occurrence = intArgOr 1 rest 1
 
-        match tryRegex (req p) (regexOptsOfMatchType (matchTypeArg rest 2)) with
-        | Some rx ->
-            match nthMatch rx text pos occurrence with
+        let regex = regexResult collation (matchTypeArg rest 2) (req p)
+
+        withRegexTimeout (fun () ->
+            match nthMatch regex text pos occurrence with
             | Some m -> VString m.Value
-            | None -> VNull
-        | None -> VNull
+            | None -> VNull)
     | _ -> VNull
 
 /// MySQL (ICU) replacement text uses `$N` for backreferences, the same
@@ -4274,7 +4260,7 @@ let private toDotNetReplacement (repl: string) : string =
 /// `occurrence = 0` (the default) replaces every match; a positive
 /// `occurrence` replaces only that one match, leaving the rest of the
 /// string untouched either way.
-let private regexpReplaceFn: Scalar =
+let private regexpReplaceFn (collation: Collation.Collation) : Scalar =
     function
     | e :: p :: r :: rest when not (anyNull [ e; p; r ]) ->
         let text = req e
@@ -4282,8 +4268,9 @@ let private regexpReplaceFn: Scalar =
         let pos = intArgOr 1 rest 0
         let occurrence = intArgOr 0 rest 1
 
-        match tryRegex (req p) (regexOptsOfMatchType (matchTypeArg rest 2)) with
-        | Some rx ->
+        let regex = regexResult collation (matchTypeArg rest 2) (req p)
+
+        withRegexTimeout (fun () ->
             if pos < 1 || pos > text.Length + 1 then
                 VNull
             else
@@ -4292,20 +4279,27 @@ let private regexpReplaceFn: Scalar =
 
                 let replaced =
                     if occurrence <= 0 then
-                        rx.Replace(tail, repl)
+                        regex.Replace(tail, repl)
                     else
                         let mutable n = 0
 
-                        rx.Replace(
+                        regex.Replace(
                             tail,
                             (fun m ->
                                 n <- n + 1
                                 if n = occurrence then m.Result repl else m.Value)
                         )
 
-                VString(head + replaced)
-        | None -> VNull
+                VString(head + replaced))
     | _ -> VNull
+
+let regexpFunction (name: string) (collation: Collation.Collation) : Scalar option =
+    match name.ToUpperInvariant() with
+    | "REGEXP_LIKE" -> Some(regexpLikeFn collation)
+    | "REGEXP_INSTR" -> Some(regexpInstrFn collation)
+    | "REGEXP_SUBSTR" -> Some(regexpSubstrFn collation)
+    | "REGEXP_REPLACE" -> Some(regexpReplaceFn collation)
+    | _ -> None
 
 // ---------------------------------------------------------------------------
 // Math/misc.
@@ -5389,10 +5383,10 @@ let builtins: Registry =
     |> registerScalar "RANDOM_BYTES" randomBytesFn
     |> registerScalar "UUID_SHORT" uuidShortFn
     |> registerScalar "NAME_CONST" nameConstFn
-    |> registerScalar "REGEXP_LIKE" regexpLikeFn
-    |> registerScalar "REGEXP_REPLACE" regexpReplaceFn
-    |> registerScalar "REGEXP_SUBSTR" regexpSubstrFn
-    |> registerScalar "REGEXP_INSTR" regexpInstrFn
+    |> registerScalar "REGEXP_LIKE" (regexpLikeFn Collation.defaultCollation)
+    |> registerScalar "REGEXP_REPLACE" (regexpReplaceFn Collation.defaultCollation)
+    |> registerScalar "REGEXP_SUBSTR" (regexpSubstrFn Collation.defaultCollation)
+    |> registerScalar "REGEXP_INSTR" (regexpInstrFn Collation.defaultCollation)
     // Math/misc
     |> registerScalar "CEIL" ceilFn
     |> registerScalar "CEILING" ceilFn
