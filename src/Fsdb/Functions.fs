@@ -4351,9 +4351,7 @@ let private replaceMatches (regex: Regex) (input: Regexp.PreparedInput) (source:
 
     append source 0 sourceStart
 
-    while m.Success do
-        let matchStart = max current (Regexp.sourceOffset input m.Index)
-        let matchEnd = max matchStart (Regexp.sourceOffset input (m.Index + m.Length))
+    let emit m matchStart matchEnd =
         append source current (matchStart - current)
         count <- count + 1
 
@@ -4363,6 +4361,19 @@ let private replaceMatches (regex: Regex) (input: Regexp.PreparedInput) (source:
             append source matchStart (matchEnd - matchStart)
 
         current <- matchEnd
+
+    while m.Success do
+        let matchStart = max current (Regexp.sourceOffset input m.Index)
+        let matchEnd = max matchStart (Regexp.sourceOffset input (m.Index + m.Length))
+        emit m matchStart matchEnd
+
+        if m.Length = 0
+           && matchStart = Regexp.sourceOffset input m.Index
+           && m.Index + 1 < input.SourceOffsets.Length
+           && input.SourceOffsets[m.Index + 1] = matchStart + 2
+           && source[matchStart] = '\r' then
+            emit m (matchStart + 1) (matchStart + 1)
+
         m <- m.NextMatch()
 
     append source current (source.Length - current)
