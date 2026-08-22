@@ -950,6 +950,7 @@ let tests =
               attach dir store
               let columns = [ { mkCol "id" (TInt false) with Comment = "created by import" } ]
               createTable store defaultDatabase "documented" columns [] [] None None |> ignore
+              snapshotNow dir store
 
               let reloaded = load dir
 
