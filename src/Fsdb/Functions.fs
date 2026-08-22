@@ -4163,14 +4163,14 @@ let private strcmpFn: Scalar =
 // REGEXP operator, so invalid patterns and pathological matches agree.
 // ---------------------------------------------------------------------------
 
-let private raiseRegexError = function
-    | Regexp.InvalidPattern -> raise (SqlError(3691, "Invalid regular expression."))
-    | Regexp.InvalidMatchType -> raise (SqlError(1210, "Incorrect arguments to regexp function"))
+let private raiseRegexError (functionName: string) = function
+    | Regexp.InvalidPattern _ as error -> raise (SqlError(3691, Regexp.errorMessage error))
+    | Regexp.InvalidMatchType -> raise (SqlError(1210, sprintf "Incorrect arguments to %s" functionName))
 
-let private regexResult (collation: Collation.Collation) (matchType: string option) (pattern: string) =
+let private regexResult (functionName: string) (collation: Collation.Collation) (matchType: string option) (pattern: string) =
     match Regexp.compile collation matchType pattern with
     | Ok regex -> regex
-    | Error error -> raiseRegexError error
+    | Error error -> raiseRegexError functionName error
 
 let private withRegexTimeout operation =
     try
@@ -4208,7 +4208,7 @@ let private intArgOr (dflt: int) (args: Value list) (idx: int) : int =
 let private regexpLikeFn (collation: Collation.Collation) : Scalar =
     function
     | e :: p :: rest when not (anyNull [ e; p ]) ->
-        let regex = regexResult collation (matchTypeArg rest 0) (req p)
+        let regex = regexResult "regexp_like" collation (matchTypeArg rest 0) (req p)
         withRegexTimeout (fun () -> if regex.IsMatch(req e) then VInt 1L else VInt 0L)
     | _ -> VNull
 
@@ -4220,7 +4220,7 @@ let private regexpInstrFn (collation: Collation.Collation) : Scalar =
         let occurrence = intArgOr 1 rest 1
         let returnEnd = intArgOr 0 rest 2 <> 0
 
-        let regex = regexResult collation (matchTypeArg rest 3) (req p)
+        let regex = regexResult "regexp_instr" collation (matchTypeArg rest 3) (req p)
 
         withRegexTimeout (fun () ->
             match nthMatch regex text pos occurrence with
@@ -4235,7 +4235,7 @@ let private regexpSubstrFn (collation: Collation.Collation) : Scalar =
         let pos = intArgOr 1 rest 0
         let occurrence = intArgOr 1 rest 1
 
-        let regex = regexResult collation (matchTypeArg rest 2) (req p)
+        let regex = regexResult "regexp_substr" collation (matchTypeArg rest 2) (req p)
 
         withRegexTimeout (fun () ->
             match nthMatch regex text pos occurrence with
@@ -4268,7 +4268,7 @@ let private regexpReplaceFn (collation: Collation.Collation) : Scalar =
         let pos = intArgOr 1 rest 0
         let occurrence = intArgOr 0 rest 1
 
-        let regex = regexResult collation (matchTypeArg rest 2) (req p)
+        let regex = regexResult "regexp_replace" collation (matchTypeArg rest 2) (req p)
 
         withRegexTimeout (fun () ->
             if pos < 1 || pos > text.Length + 1 then

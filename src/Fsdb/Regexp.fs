@@ -7,8 +7,12 @@ open System
 open System.Text.RegularExpressions
 
 type RegexError =
-    | InvalidPattern
+    | InvalidPattern of message: string
     | InvalidMatchType
+
+let errorMessage = function
+    | InvalidPattern message -> message
+    | InvalidMatchType -> ""
 
 let private optionsFor (collation: Collation.Collation) (matchType: string option) : Result<RegexOptions, RegexError> =
     let mutable options = RegexOptions.CultureInvariant
@@ -34,5 +38,8 @@ let compile (collation: Collation.Collation) (matchType: string option) (pattern
     |> Result.bind (fun options ->
         try
             Ok(Regex(pattern, options, Limits.regexpMatchTimeout))
-        with :? ArgumentException ->
-            Error InvalidPattern)
+        with
+        | :? RegexParseException as error when error.Error = RegexParseError.InsufficientClosingParentheses ->
+            Error(InvalidPattern "Mismatched parenthesis in regular expression.")
+        | :? ArgumentException ->
+            Error(InvalidPattern "Invalid regular expression."))

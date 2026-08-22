@@ -981,7 +981,7 @@ let private regexpOp (coll: Collation.Collation option) (subject: Value) (patter
                 coll |> Option.defaultValue Collation.defaultCollation
 
         match Regexp.compile col None pat with
-        | Error Regexp.InvalidPattern -> Error(3691, "Invalid regular expression.")
+        | Error(Regexp.InvalidPattern _ as error) -> Error(3691, Regexp.errorMessage error)
         | Error Regexp.InvalidMatchType -> Error(1210, "Incorrect arguments to regexp function")
         | Ok regex ->
             try

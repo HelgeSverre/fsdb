@@ -849,7 +849,7 @@ let tests =
                               Expect.throwsC
                                   (invoke >> ignore)
                                   (function
-                                  | Fsdb.Functions.SqlError(actual, _) when actual = code -> ()
+                                  | Fsdb.Functions.SqlError(actual, message) when actual = code && (code <> 3691 || message = "Mismatched parenthesis in regular expression.") -> ()
                                   | error -> failtestf "expected %d, got %A" code error)
 
                           expectError 1582 (fun () -> call "AES_ENCRYPT" [ VString "hello" ])
