@@ -2500,9 +2500,17 @@ let private yearWeekFn: Scalar =
     | _ -> VNull
 
 let private curDateFn: Scalar = fun _ -> VDate(DateOnly.FromDateTime DateTime.Now)
-let private curTimeFn: Scalar = fun _ -> VTime(timeValueOrClamp (truncateToSecond DateTime.Now).TimeOfDay.Ticks)
+
+let private currentTimeFn (clock: unit -> DateTime) : Scalar =
+    function
+    | [ precision ] when not (anyNull [ precision ]) ->
+        let fsp = toDouble precision |> int |> max 0 |> min 6
+        VTime(timeValueOrClamp (roundTimeTicksToFsp fsp ((clock ()).TimeOfDay.Ticks)))
+    | _ -> VTime(timeValueOrClamp (truncateToSecond (clock ())).TimeOfDay.Ticks)
+
+let private curTimeFn = currentTimeFn (fun () -> DateTime.Now)
 let private utcDateFn: Scalar = fun _ -> VDate(DateOnly.FromDateTime DateTime.UtcNow)
-let private utcTimeFn: Scalar = fun _ -> VTime(timeValueOrClamp (truncateToSecond DateTime.UtcNow).TimeOfDay.Ticks)
+let private utcTimeFn = currentTimeFn (fun () -> DateTime.UtcNow)
 let private utcTimestampFn: Scalar = fun _ -> VDateTime(truncateToSecond DateTime.UtcNow)
 
 let private tryTimeTicks (value: Value) =

@@ -100,6 +100,18 @@ let tests =
               | Err(1294, _) -> ()
               | other -> failtestf "expected invalid TIME update clause, got %A" other
 
+          testCase "current TIME functions honour their requested precision"
+          <| fun _ ->
+              let session = create 1 (Fsdb.Storage.create ())
+
+              match handle session "SELECT CURTIME(3), UTC_TIME(4), CURRENT_TIME(2)" with
+              | session, ResultSet(_, [ [ Some local; Some utc; Some current ] ]) ->
+                  Expect.isTrue (Text.RegularExpressions.Regex.IsMatch(local, "^\\d{2}:\\d{2}:\\d{2}\\.\\d{3}$")) "CURTIME(3)"
+                  Expect.isTrue (Text.RegularExpressions.Regex.IsMatch(utc, "^\\d{2}:\\d{2}:\\d{2}\\.\\d{4}$")) "UTC_TIME(4)"
+                  Expect.isTrue (Text.RegularExpressions.Regex.IsMatch(current, "^\\d{2}:\\d{2}:\\d{2}\\.\\d{2}$")) "CURRENT_TIME(2)"
+                  Expect.equal (session.LastResultColumnMetadata |> List.map _.Decimals) [ 3uy; 4uy; 2uy ] "fractional precision"
+              | _, other -> failtestf "expected a resultset, got %A" other
+
           testCase "WEIGHT_STRING BINARY metadata preserves its bounded binary result"
           <| fun _ ->
               let session = create 1 (Fsdb.Storage.create ())

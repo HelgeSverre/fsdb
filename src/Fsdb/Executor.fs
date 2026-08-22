@@ -1146,6 +1146,11 @@ let rec private fspOfExpr (ctx: EvalContext) (expr: Expr) : int option =
         fspOfExpr ctx seconds |> Option.defaultValue 0 |> Some
     | FuncCall(name, [ left; right ]) when name.Equals("TIMEDIFF", System.StringComparison.OrdinalIgnoreCase) ->
         greatestFsp [ left; right ]
+    | FuncCall(name, args)
+        when (let n = name.ToUpperInvariant() in n = "CURTIME" || n = "CURRENT_TIME" || n = "UTC_TIME") ->
+        match args with
+        | [ Lit value ] -> Some(Value.toDouble value |> int |> max 0 |> min 6)
+        | _ -> Some 0
     | FuncCall(name, args) when (let n = name.ToUpperInvariant() in n = "NOW" || n = "CURRENT_TIMESTAMP") ->
         // `NOW(N)` renders exactly N digits (matching the precision `nowFn`
         // rounds the clock to); bare `NOW()` renders none (precision 0).
@@ -1371,7 +1376,7 @@ let rec private metadataOfExpr (ctx: EvalContext) (expr: Expr) : ColumnMetadata 
             Some(ColumnWire.metadataOfType(TDateTime(fspOfExpr ctx expr |> Option.defaultValue 0)))
         | "UTC_TIMESTAMP", _ -> Some(ColumnWire.metadataOfType(TDateTime 0))
         | "UTC_DATE", _ -> Some(ColumnWire.metadataOfType TDate)
-        | ("UTC_TIME" | "CURRENT_TIME" | "CURTIME"), _ -> Some(ColumnWire.metadataOfType(TTime 0))
+        | ("UTC_TIME" | "CURRENT_TIME" | "CURTIME"), _ -> Some(ColumnWire.metadataOfType(TTime(fspOfExpr ctx expr |> Option.defaultValue 0)))
         | ("ADDTIME" | "SUBTIME"), first :: second :: _ ->
             let fsp = [ first; second ] |> List.choose (fspOfExpr ctx) |> List.fold max 0
 
