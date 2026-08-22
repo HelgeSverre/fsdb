@@ -189,6 +189,9 @@ type Expr =
     /// column; zero rows evaluates to `NULL`, more than one row is MySQL
     /// error 1242, exactly one row yields that row's single column value.
     | Subquery of SelectStmt
+    /// `left operator ANY (SELECT ...)` / `SOME` / `ALL`. `SOME` is parsed
+    /// as `Any`, because MySQL defines the two spellings identically.
+    | QuantifiedComparison of left: Expr * operator: Op * quantifier: Quantifier * SelectStmt
     /// `CASE WHEN cond THEN result ... [ELSE result] END` (the "searched"
     /// form, `subject = None`, each `whens` key is a boolean condition) or
     /// `CASE subject WHEN value THEN result ... [ELSE result] END` (the
@@ -197,6 +200,10 @@ type Expr =
     /// every other `Expr`-walking function (`containsAggregate`,
     /// `rewriteAggregates`, ...) only needs one branch to recurse through.
     | Case of subject: Expr option * whens: (Expr * Expr) list * elseBranch: Expr option
+
+and Quantifier =
+    | Any
+    | All
 
 and Direction =
     | Asc

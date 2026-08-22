@@ -1472,6 +1472,28 @@ let private compareOp: Parser<Op, unit> =
           pstring ">" >>% Gt ]
     .>> ws
 
+/// `ANY` and `SOME` are aliases; keeping that normalization in the parser
+/// makes execution a two-case universal/existential fold.
+let private quantifier: Parser<Quantifier, unit> =
+    (keyword "ANY" >>% Any)
+    <|> (keyword "SOME" >>% Any)
+    <|> (keyword "ALL" >>% All)
+
+let private quantifiedComparison: Parser<Op * Quantifier * SelectStmt, unit> =
+    let comparisonOp =
+        choice
+            [ pstring "<=" >>% Lte
+              pstring ">=" >>% Gte
+              pstring "<>" >>% Neq
+              pstring "!=" >>% Neq
+              pstring "=" >>% Eq
+              pstring "<" >>% Lt
+              pstring ">" >>% Gt ]
+        .>> ws
+
+    comparisonOp .>>. quantifier .>>. between (sym "(") (sym ")") selectStmtRecord
+    |>> fun ((op, quantifier), select) -> op, quantifier, select
+
 let private comparisonExpr: Parser<Expr, unit> =
     arithExpr
     >>= fun left ->
@@ -1506,6 +1528,7 @@ let private comparisonExpr: Parser<Expr, unit> =
               |>> fun right -> BinOp(Eq, FuncCall("SOUNDEX", [ left ]), FuncCall("SOUNDEX", [ right ]))
               attempt (keyword "MEMBER" >>. keyword "OF") >>. between (sym "(") (sym ")") arithExpr
               |>> fun array -> FuncCall("JSON_MEMBER_OF", [ left; array ])
+              attempt quantifiedComparison |>> fun (op, quantifier, select) -> QuantifiedComparison(left, op, quantifier, select)
               compareOp .>>. arithExpr |>> fun (op, right) -> BinOp(op, left, right)
               preturn left ]
 

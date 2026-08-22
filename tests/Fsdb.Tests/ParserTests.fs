@@ -1774,6 +1774,19 @@ let tests =
                     | Select { Where = Some(Not(InSubquery(Col "a", _))) } -> ()
                     | other -> failtestf "expected Not(InSubquery(...)), got %A" other
 
+                testCase "ANY, SOME, and ALL comparisons parse with an explicit quantifier"
+                <| fun _ ->
+                    let parses sql expectedOp expectedQuantifier =
+                        match parseOk sql with
+                        | Select { Where = Some(QuantifiedComparison(Col "a", op, quantifier, { From = Some(FromTable { Table = "u" }) })) } ->
+                            Expect.equal op expectedOp sql
+                            Expect.equal quantifier expectedQuantifier sql
+                        | other -> failtestf "expected quantified comparison, got %A" other
+
+                    parses "SELECT a FROM t WHERE a = ANY (SELECT b FROM u)" Eq Any
+                    parses "SELECT a FROM t WHERE a = SOME (SELECT b FROM u)" Eq Any
+                    parses "SELECT a FROM t WHERE a <= ALL (SELECT b FROM u)" Lte All
+
                 testCase "NOT EXISTS desugars through the ordinary NOT/EXISTS parsers"
                 <| fun _ ->
                     match parseOk "SELECT a FROM t WHERE NOT EXISTS (SELECT 1 FROM u)" with
