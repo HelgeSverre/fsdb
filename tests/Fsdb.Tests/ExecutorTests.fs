@@ -4498,6 +4498,28 @@ let tests =
                     | ResultSet(_, [ [ Some "1" ] ]) -> ()
                     | other -> failtestf "expected multi-column scalar-subquery comparison, got %A" other
 
+                    runDefault store "CREATE TABLE binary_pairs (value VARCHAR(10))" |> ignore
+                    runDefault store "INSERT INTO binary_pairs VALUES ('A')" |> ignore
+
+                    match runDefault store "SELECT ('a', 1) IN (SELECT value COLLATE utf8mb4_bin, 1 FROM binary_pairs) AS binary_match" with
+                    | ResultSet(_, [ [ Some "0" ] ]) -> ()
+                    | other -> failtestf "expected a binary subquery field not to fold case, got %A" other
+
+                    match
+                        runDefault
+                            store
+                            "SELECT ('a', 1) IN (SELECT value, 1 FROM (SELECT value COLLATE utf8mb4_bin AS value FROM binary_pairs) AS binary_source) AS derived_binary_match"
+                    with
+                    | ResultSet(_, [ [ Some "0" ] ]) -> ()
+                    | other -> failtestf "expected a derived binary subquery field not to fold case, got %A" other
+
+                    runDefault store "CREATE TABLE enum_pairs (value ENUM('one', 'two'))" |> ignore
+                    runDefault store "INSERT INTO enum_pairs VALUES ('two')" |> ignore
+
+                    match runDefault store "SELECT (2, 1) IN (SELECT value, 1 FROM enum_pairs) AS enum_match" with
+                    | ResultSet(_, [ [ Some "1" ] ]) -> ()
+                    | other -> failtestf "expected an ENUM subquery field to compare by ordinal, got %A" other
+
                 testCase "row predicates reject mismatched arity and bare row projections"
                 <| fun _ ->
                     let store = newStore ()

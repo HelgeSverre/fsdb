@@ -2306,10 +2306,26 @@ let private subqueryProjectionOperand (ctx: EvalContext) (select: SelectStmt) : 
         { Expression = Lit VNull
           Column = None }
 
-let private subqueryRowOperand (_: EvalContext) (_: SelectStmt) (values: Value[]) : RowOperand =
+let private subqueryRowOperand (ctx: EvalContext) (select: SelectStmt) (values: Value[]) : RowOperand =
+    let columns = selectProjectionColumns ctx.Store ctx.DbName select
+
+    let expressions =
+        match select.Projections, columns with
+        | [ (Star _, _) ], columns -> List.replicate columns.Length (Lit VNull)
+        | projections, columns when projections.Length = columns.Length ->
+            projections
+            |> List.map fst
+            |> List.map (function
+                | Collate(_, collation) -> Collate(Lit VNull, collation)
+                | _ -> Lit VNull)
+        | _ -> List.replicate values.Length (Lit VNull)
+
     values
     |> Array.toList
-    |> List.map (fun value -> RowScalar(Lit VNull, None, value))
+    |> List.mapi (fun index value ->
+        let expression = expressions |> List.tryItem index |> Option.defaultValue (Lit VNull)
+        let column = columns |> List.tryItem index |> Option.defaultValue None
+        RowScalar(expression, column, value))
     |> RowValues
 
 let private rowComparisonResult
