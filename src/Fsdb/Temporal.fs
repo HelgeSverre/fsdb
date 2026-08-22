@@ -9,6 +9,11 @@ type TimeValue =
     private
     | TimeValue of ticks: int64
 
+type TimeParseResult =
+    | ParsedTime of ticks: int64
+    | TimeComponentsOutOfRange
+    | NotATime
+
 let maxTimeTicks =
     (838L * 3600L + 59L * 60L + 59L) * TimeSpan.TicksPerSecond
 
@@ -40,11 +45,11 @@ let private parseFractionTicks (fraction: string) =
         fraction.Substring(0, min 7 fraction.Length).PadRight(7, '0')
         |> fun digits -> Int64.Parse(digits, CultureInfo.InvariantCulture)
 
-let tryParseTimeTicks (text: string) : int64 option =
+let private parseTimeTicks (text: string) : TimeParseResult =
     let matched = timePattern.Match(text.Trim())
 
     if not matched.Success then
-        None
+        NotATime
     else
         let number (group: Group) =
             if group.Success then
@@ -64,10 +69,10 @@ let tryParseTimeTicks (text: string) : int64 option =
                 else
                     min 839L (days * 24L + hours)
             let ticks = if totalHours > 838L then maxTimeTicks + 10L else (totalHours * 3600L + minutes * 60L + seconds) * TimeSpan.TicksPerSecond + fractionTicks
-            Some(if matched.Groups.[1].Value = "-" then -ticks else ticks)
-        | _ -> None
+            ParsedTime(if matched.Groups.[1].Value = "-" then -ticks else ticks)
+        | _ -> TimeComponentsOutOfRange
 
-let tryParseTimeNumberTicks (text: string) : int64 option =
+let private parseTimeNumberTicks (text: string) : TimeParseResult =
     let trimmed = text.Trim()
     let negative, body =
         if trimmed.StartsWith "-" then true, trimmed.Substring 1
@@ -90,7 +95,7 @@ let tryParseTimeNumberTicks (text: string) : int64 option =
                 let hours = number / 10000L
 
                 if minutes > 59L || seconds > 59L then
-                    None
+                    TimeComponentsOutOfRange
                 else
                     let ticks =
                         if hours > 838L then
@@ -99,14 +104,31 @@ let tryParseTimeNumberTicks (text: string) : int64 option =
                             (hours * 3600L + minutes * 60L + seconds) * TimeSpan.TicksPerSecond
                             + parseFractionTicks fraction
 
-                    Some(if negative then -ticks else ticks)
-            | _ -> None
+                    ParsedTime(if negative then -ticks else ticks)
+            | _ -> TimeComponentsOutOfRange
         else
-            None
+            NotATime
+    | _ -> NotATime
+
+let parseTimeInput text =
+    match parseTimeTicks text with
+    | NotATime -> parseTimeNumberTicks text
+    | result -> result
+
+let tryParseTimeTicks (text: string) : int64 option =
+    match parseTimeTicks text with
+    | ParsedTime ticks -> Some ticks
+    | _ -> None
+
+let tryParseTimeNumberTicks (text: string) : int64 option =
+    match parseTimeNumberTicks text with
+    | ParsedTime ticks -> Some ticks
     | _ -> None
 
 let tryParseTimeInputTicks text =
-    tryParseTimeTicks text |> Option.orElseWith (fun () -> tryParseTimeNumberTicks text)
+    match parseTimeInput text with
+    | ParsedTime ticks -> Some ticks
+    | _ -> None
 
 let tryParseTimeValue text =
     tryParseTimeInputTicks text

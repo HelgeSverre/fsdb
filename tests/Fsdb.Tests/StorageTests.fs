@@ -537,7 +537,24 @@ let tests =
                 <| fun _ ->
                     match coerceValue false (col "elapsed" (TTime 6) true) (VString "1000:00:00") with
                     | Ok(VTime value) -> Expect.equal (formatTimeValueFsp 6 value) "838:59:59.000000" "clamped time"
-                    | other -> failtestf "expected clamped VTime, got %A" other ]
+                    | other -> failtestf "expected clamped VTime, got %A" other
+
+                testCase "non-strict mode distinguishes invalid TIME components from text"
+                <| fun _ ->
+                    let time = col "elapsed" (TTime 6) true
+
+                    for input, code in [ "10:60:00", 1264; "10:20:60", 1264; "not a time", 1265 ] do
+                        let expectedParse = if code = 1264 then TimeComponentsOutOfRange else NotATime
+                        Expect.equal (parseTimeInput input) expectedParse input
+                        let result, diagnostics = Diagnostics.capture (fun () -> coerceValue false time (VString input))
+                        Expect.equal result (Ok(VTime(timeValueOrClamp 0L))) input
+                        Expect.equal (diagnostics |> List.map _.Code) [ code ] input
+
+                testCase "strict mode rejects invalid TIME components"
+                <| fun _ ->
+                    match coerceValue true (col "elapsed" (TTime 6) true) (VString "10:60:00") with
+                    | Error(ExpressionError(1292, _)) -> ()
+                    | other -> failtestf "expected time component rejection, got %A" other ]
 
           testList
               "coerceValue BIT columns"

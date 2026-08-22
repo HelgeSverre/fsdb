@@ -1178,11 +1178,18 @@ let private coerceValueWithModeAndLengths (enforceLengths: bool) (mode: Temporal
             let invalid () =
                 Error(ExpressionError(1292, sprintf "Incorrect time value: '%s' for column '%s' at row %d" raw col.Name (Diagnostics.currentRowNumber ())))
 
-            let fallback () =
+            let truncated () =
                 if strict then
                     invalid ()
                 else
                     warning 1265 (sprintf "Data truncated for column '%s'" col.Name)
+                    Ok(VTime(timeValueOrClamp 0L))
+
+            let outOfRange () =
+                if strict then
+                    invalid ()
+                else
+                    warning 1264 (sprintf "Out of range value for column '%s'" col.Name)
                     Ok(VTime(timeValueOrClamp 0L))
 
             let finish ticks =
@@ -1196,18 +1203,21 @@ let private coerceValueWithModeAndLengths (enforceLengths: bool) (mode: Temporal
                     warning 1264 (sprintf "Out of range value for column '%s'" col.Name)
                     Ok(VTime(timeValueOrClamp rounded))
 
-            let ticks =
+            let parsed =
                 match v with
-                | VTime value -> Some(timeTicks value)
-                | VDateTime value -> Some(value.TimeOfDay.Ticks)
+                | VTime value -> ParsedTime(timeTicks value)
+                | VDateTime value -> ParsedTime(value.TimeOfDay.Ticks)
                 | VZeroDateTime value ->
                     let _, hour, minute, second, micros = zeroDateTimeParts value
-                    Some(((int64 hour * 3600L + int64 minute * 60L + int64 second) * TimeSpan.TicksPerSecond) + int64 micros * 10L)
+                    ParsedTime(((int64 hour * 3600L + int64 minute * 60L + int64 second) * TimeSpan.TicksPerSecond) + int64 micros * 10L)
                 | VDate _
-                | VZeroDate _ -> Some 0L
-                | _ -> tryParseTimeInputTicks raw
+                | VZeroDate _ -> ParsedTime 0L
+                | _ -> parseTimeInput raw
 
-            ticks |> Option.map finish |> Option.defaultWith fallback
+            match parsed with
+            | ParsedTime ticks -> finish ticks
+            | TimeComponentsOutOfRange -> outOfRange ()
+            | NotATime -> truncated ()
         | TBinary length
         | TVarBinary length ->
             let bytes =
