@@ -194,6 +194,8 @@ let private hostMatchRank (pattern: string) (clientHost: string) =
 /// Selects the account MySQL would authenticate for a peer address. Host
 /// specificity takes precedence; a named account breaks ties with anonymous.
 let resolveAccount (store: Store) (username: string) (clientHost: string) : (Account * ColumnDef list * Value[]) option =
+    let clientHost = canonicalHost clientHost
+
     match scanList store "mysql" "user" with
     | Error _ -> None
     | Ok(cols, rows) ->

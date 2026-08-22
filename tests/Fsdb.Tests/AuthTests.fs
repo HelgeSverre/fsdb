@@ -102,7 +102,7 @@ let tests =
 
               createUser store "ipv6" "0:0:0:0:0:0:0:1" None |> Result.mapError snd |> Result.defaultWith failtest
 
-              match resolveAccount store "ipv6" "::1" with
+              match resolveAccount store "ipv6" "0:0:0:0:0:0:0:1" with
               | Some(selected, _, _) -> Expect.equal selected.Host "::1" "canonical IPv6 account host"
               | None -> failtest "expected the IPv6 account"
 
