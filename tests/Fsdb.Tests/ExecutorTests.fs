@@ -4070,16 +4070,29 @@ let tests =
                     | ResultSet(_, [ [ Some "0"; Some "1" ] ]) -> ()
                     | other -> failtestf "expected derived subquery columns to retain collation and ENUM metadata, got %A" other
 
+                    match runDefault store "SELECT 'A' = ANY (SELECT d FROM (SELECT s COLLATE utf8mb4_0900_ai_ci AS d FROM binary_text WHERE s = 'a') AS derived_collated)" with
+                    | ResultSet(_, [ [ Some "1" ] ]) -> ()
+                    | other -> failtestf "expected a derived projected COLLATE to govern comparison, got %A" other
+
                     runDefault store "CREATE VIEW binary_view AS SELECT s FROM binary_text WHERE s = 'a'" |> ignore
                     runDefault store "CREATE VIEW enum_view AS SELECT s FROM enum_text" |> ignore
+                    runDefault store "CREATE VIEW collated_binary_view AS SELECT s COLLATE utf8mb4_0900_ai_ci AS d FROM binary_text WHERE s = 'a'" |> ignore
 
                     match runDefault store "SELECT 'A' = ANY (SELECT s FROM binary_view), 1 = ANY (SELECT s FROM enum_view)" with
                     | ResultSet(_, [ [ Some "0"; Some "1" ] ]) -> ()
                     | other -> failtestf "expected view subquery columns to retain collation and ENUM metadata, got %A" other
 
+                    match runDefault store "SELECT 'A' = ANY (SELECT d FROM collated_binary_view)" with
+                    | ResultSet(_, [ [ Some "1" ] ]) -> ()
+                    | other -> failtestf "expected a view projected COLLATE to govern comparison, got %A" other
+
                     match runDefault store "WITH binary_cte AS (SELECT s FROM binary_text WHERE s = 'a'), enum_cte AS (SELECT s FROM enum_text) SELECT 'A' = ANY (SELECT s FROM binary_cte), 1 = ANY (SELECT s FROM enum_cte)" with
                     | ResultSet(_, [ [ Some "0"; Some "1" ] ]) -> ()
                     | other -> failtestf "expected CTE subquery columns to retain collation and ENUM metadata, got %A" other
+
+                    match runDefault store "WITH collated_cte AS (SELECT s COLLATE utf8mb4_0900_ai_ci AS d FROM binary_text WHERE s = 'a') SELECT 'A' = ANY (SELECT d FROM collated_cte)" with
+                    | ResultSet(_, [ [ Some "1" ] ]) -> ()
+                    | other -> failtestf "expected a CTE projected COLLATE to govern comparison, got %A" other
 
                     match runDefault store "SELECT 2 = ANY (SELECT '2')" with
                     | ResultSet(_, [ [ Some "1" ] ]) -> ()

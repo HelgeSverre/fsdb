@@ -2267,7 +2267,9 @@ let rec private selectProjectionColumns (store: Store) (dbName: string) (select:
         | Star(Some qualifier) -> sources |> List.filter (fst >> hasQualifier qualifier) |> List.collect snd
         | Col name -> [ columnFor name sources ]
         | QualifiedCol(qualifier, name) -> sources |> List.filter (fst >> hasQualifier qualifier) |> columnFor name |> List.singleton
-        | Collate(value, _) -> projectionColumns value
+        | Collate(value, collation) ->
+            projectionColumns value
+            |> List.map (Option.map (fun column -> { column with Collation = Some collation; Charset = None }))
         | _ -> [ None ]
 
     select.Projections
@@ -3581,7 +3583,11 @@ and private resolveFromSubquery (store: Store) (registry: Registry) (dbName: str
                     List.map2
                         (fun derived source ->
                             source
-                            |> Option.map (fun source -> { derived with Type = source.Type })
+                            |> Option.map (fun source ->
+                                { derived with
+                                    Type = source.Type
+                                    Collation = source.Collation
+                                    Charset = source.Charset })
                             |> Option.defaultValue derived)
                         derivedColumns
                         sourceColumns
