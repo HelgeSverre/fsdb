@@ -64,6 +64,30 @@ let tests =
                   Expect.equal (session.LastResultColumnMetadata |> List.map _.TypeId) [ TypeBlob ] "binary type"
               | _, other -> failtestf "expected an empty AES result, got %A" other
 
+          testCase "TIME functions infer MySQL fractional precision metadata"
+          <| fun _ ->
+              let session = create 1 (Fsdb.Storage.create ())
+
+              match
+                  handle
+                      session
+                      "SELECT TIME('01:02:03.123'), TIMEDIFF(CAST('01:02:03.1' AS TIME(1)), CAST('00:00:00.1234' AS TIME(4))), SEC_TO_TIME(1.23), MAKETIME(1,2,3.1200), ADDTIME(CAST('01:02:03.1' AS TIME(1)), CAST('00:00:00.123' AS TIME(3)))"
+              with
+              | session, ResultSet(_, _) ->
+                  match session.LastResultColumnMetadata with
+                  | [ time; difference; seconds; made; added ] ->
+                      for metadata in [ time; difference; seconds; made; added ] do
+                          Expect.equal metadata.TypeId TypeTime "TIME type"
+                          Expect.isTrue (metadata.Flags &&& BinaryFlag <> 0us) "binary flag"
+
+                      Expect.equal (time.Decimals, time.ColumnLength) (3uy, 14u) "TIME"
+                      Expect.equal (difference.Decimals, difference.ColumnLength) (4uy, 15u) "TIMEDIFF"
+                      Expect.equal (seconds.Decimals, seconds.ColumnLength) (2uy, 13u) "SEC_TO_TIME"
+                      Expect.equal (made.Decimals, made.ColumnLength) (4uy, 15u) "MAKETIME"
+                      Expect.equal (added.Decimals, added.ColumnLength) (3uy, 14u) "ADDTIME"
+                  | metadata -> failtestf "expected five metadata records, got %A" metadata
+              | _, other -> failtestf "expected a resultset, got %A" other
+
           testCase "WEIGHT_STRING BINARY metadata preserves its bounded binary result"
           <| fun _ ->
               let session = create 1 (Fsdb.Storage.create ())

@@ -1118,9 +1118,34 @@ let private fspOfType (ty: ColumnType) : int option =
 /// rounded-to-fsp values unchanged). A plain column resolves through its
 /// `ColumnDef`; everything else is `None` and falls back to `Value.toText`.
 let rec private fspOfExpr (ctx: EvalContext) (expr: Expr) : int option =
+    let fspOfValue value =
+        match Value.toText value with
+        | Some text ->
+            let separator = text.LastIndexOf '.'
+
+            if separator < 0 then
+                Some 0
+            else
+                let fraction = text.Substring(separator + 1)
+                if fraction.Length > 0 && fraction |> Seq.forall System.Char.IsDigit then Some(min 6 fraction.Length) else None
+        | None -> None
+
+    let greatestFsp expressions =
+        expressions
+        |> List.choose (fspOfExpr ctx)
+        |> List.fold max 0
+        |> Some
+
     match expr with
     | Cast(_, ty) -> fspOfType ty
+    | Lit value -> fspOfValue value
     | FuncCall(name, [ arg ]) when (let n = name.ToUpperInvariant() in n = "MAX" || n = "MIN") -> fspOfExpr ctx arg
+    | FuncCall(name, [ arg ]) when (let n = name.ToUpperInvariant() in n = "TIME" || n = "SEC_TO_TIME") ->
+        fspOfExpr ctx arg |> Option.defaultValue 0 |> Some
+    | FuncCall(name, [ _; _; seconds ]) when name.Equals("MAKETIME", System.StringComparison.OrdinalIgnoreCase) ->
+        fspOfExpr ctx seconds |> Option.defaultValue 0 |> Some
+    | FuncCall(name, [ left; right ]) when name.Equals("TIMEDIFF", System.StringComparison.OrdinalIgnoreCase) ->
+        greatestFsp [ left; right ]
     | FuncCall(name, args) when (let n = name.ToUpperInvariant() in n = "NOW" || n = "CURRENT_TIMESTAMP") ->
         // `NOW(N)` renders exactly N digits (matching the precision `nowFn`
         // rounds the clock to); bare `NOW()` renders none (precision 0).
@@ -1340,15 +1365,23 @@ let rec private metadataOfExpr (ctx: EvalContext) (expr: Expr) : ColumnMetadata 
         | ("ROUND" | "TRUNCATE" | "FLOOR" | "CEILING" | "CEIL" | "ABS"), arg :: _ -> metadataOfExpr ctx arg
         | "MOD", _ -> simple TypeLongLong
         | "YEAR", [ _ ] -> Some(ColumnWire.metadataOfType TYear)
-        | "TIME", [ _ ] -> Some(ColumnWire.metadataOfType(TTime 0))
+        | "TIME", [ _ ] -> Some(ColumnWire.metadataOfType(TTime(fspOfExpr ctx expr |> Option.defaultValue 0)))
         | "DATE", [ _ ] -> Some(ColumnWire.metadataOfType TDate)
         | ("NOW" | "CURRENT_TIMESTAMP" | "LOCALTIME" | "LOCALTIMESTAMP" | "SYSDATE"), _ ->
             Some(ColumnWire.metadataOfType(TDateTime(fspOfExpr ctx expr |> Option.defaultValue 0)))
         | "UTC_TIMESTAMP", _ -> Some(ColumnWire.metadataOfType(TDateTime 0))
         | "UTC_DATE", _ -> Some(ColumnWire.metadataOfType TDate)
         | ("UTC_TIME" | "CURRENT_TIME" | "CURTIME"), _ -> Some(ColumnWire.metadataOfType(TTime 0))
-        | ("ADDTIME" | "SUBTIME"), first :: _ -> metadataOfExpr ctx first
-        | ("TIMEDIFF" | "SEC_TO_TIME" | "MAKETIME"), _ -> Some(ColumnWire.metadataOfType(TTime 6))
+        | ("ADDTIME" | "SUBTIME"), first :: second :: _ ->
+            let fsp = [ first; second ] |> List.choose (fspOfExpr ctx) |> List.fold max 0
+
+            match metadataOfExpr ctx first with
+            | Some metadata when metadata.TypeId = TypeTime -> Some(ColumnWire.metadataOfType(TTime fsp))
+            | Some metadata when metadata.TypeId = TypeDateTime || metadata.TypeId = TypeTimestamp -> Some(ColumnWire.metadataOfType(TDateTime fsp))
+            | metadata -> metadata
+        | "TIMEDIFF", [ _; _ ] -> Some(ColumnWire.metadataOfType(TTime(fspOfExpr ctx expr |> Option.defaultValue 0)))
+        | "SEC_TO_TIME", [ _ ] -> Some(ColumnWire.metadataOfType(TTime(fspOfExpr ctx expr |> Option.defaultValue 0)))
+        | "MAKETIME", [ _; _; _ ] -> Some(ColumnWire.metadataOfType(TTime(fspOfExpr ctx expr |> Option.defaultValue 0)))
         | "TIME_FORMAT", _ -> Some { Value.columnMetadata TypeVarString with ColumnLength = 1024u }
         | "GET_FORMAT", _ -> Some { Value.columnMetadata TypeVarString with ColumnLength = 64u }
         | ("PERIOD_ADD" | "PERIOD_DIFF" | "TO_DAYS"), _ -> simple TypeLongLong
