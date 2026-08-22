@@ -2561,16 +2561,7 @@ let private secToTimeFn: Scalar =
     function
     | [ value ] when not (anyNull [ value ]) ->
         let ticks = decimal (toDouble value) * decimal TimeSpan.TicksPerSecond |> Decimal.Round |> int64
-        let text = req value
-
-        let precision =
-            match text.IndexOf '.' with
-            | -1 -> 0
-            | index -> min 6 (text.Length - index - 1)
-
-        let fractionalCeiling = if precision = 0 then 0L else TimeSpan.TicksPerSecond - pown 10L (7 - precision)
-        let ceiling = maxTimeTicks - 9_999_990L + fractionalCeiling
-        timeResult (max -ceiling (min ceiling ticks))
+        timeResult ticks
     | _ -> VNull
 
 let private makeTimeFn: Scalar =

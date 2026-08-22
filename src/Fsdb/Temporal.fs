@@ -10,7 +10,7 @@ type TimeValue =
     | TimeValue of ticks: int64
 
 let maxTimeTicks =
-    (838L * 3600L + 59L * 60L + 59L) * TimeSpan.TicksPerSecond + 9_999_990L
+    (838L * 3600L + 59L * 60L + 59L) * TimeSpan.TicksPerSecond
 
 let timeTicks (TimeValue ticks) = ticks
 

@@ -521,20 +521,22 @@ let tests =
 
                 testCase "strict mode rejects values beyond the TIME range"
                 <| fun _ ->
-                    match coerceValue true time (VString "839:00:00") with
-                    | Error(ExpressionError(1292, _)) -> ()
-                    | other -> failtestf "expected time range rejection, got %A" other
+                    for value in [ "838:59:59.000001"; "-838:59:59.000001" ] do
+                        match coerceValue true time (VString value) with
+                        | Error(ExpressionError(1292, _)) -> ()
+                        | other -> failtestf "expected time range rejection for %s, got %A" value other
 
                 testCase "non-strict mode clamps values beyond the TIME range"
                 <| fun _ ->
-                    match coerceValue false (col "elapsed" (TTime 6) true) (VString "839:00:00") with
-                    | Ok(VTime value) -> Expect.equal (formatTimeValueFsp 6 value) "838:59:59.999999" "clamped time"
-                    | other -> failtestf "expected clamped VTime, got %A" other
+                    for input, expected in [ "838:59:59.000001", "838:59:59.000000"; "-838:59:59.000001", "-838:59:59.000000" ] do
+                        match coerceValue false (col "elapsed" (TTime 6) true) (VString input) with
+                        | Ok(VTime value) -> Expect.equal (formatTimeValueFsp 6 value) expected "clamped time"
+                        | other -> failtestf "expected clamped VTime, got %A" other
 
                 testCase "non-strict mode clamps oversized hour fields"
                 <| fun _ ->
                     match coerceValue false (col "elapsed" (TTime 6) true) (VString "1000:00:00") with
-                    | Ok(VTime value) -> Expect.equal (formatTimeValueFsp 6 value) "838:59:59.999999" "clamped time"
+                    | Ok(VTime value) -> Expect.equal (formatTimeValueFsp 6 value) "838:59:59.000000" "clamped time"
                     | other -> failtestf "expected clamped VTime, got %A" other ]
 
           testList

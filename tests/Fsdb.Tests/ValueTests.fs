@@ -83,9 +83,9 @@ let tests =
 
                 testCase "VTime renders signed hours beyond one day"
                 <| fun _ ->
-                    let time = tryParseTimeValue "-838:59:59.123456" |> Option.get
-                    Expect.equal (toText (VTime time)) (Some "-838:59:59.123456") "time"
-                    Expect.equal (toTextFsp 2 (VTime time)) (Some "-838:59:59.12") "declared precision"
+                    let time = tryParseTimeValue "-838:59:58.123456" |> Option.get
+                    Expect.equal (toText (VTime time)) (Some "-838:59:58.123456") "time"
+                    Expect.equal (toTextFsp 2 (VTime time)) (Some "-838:59:58.12") "declared precision"
                     Expect.equal (toText (VTime(timeValueOrClamp (12L * TimeSpan.TicksPerHour)))) (Some "12:00:00") "whole seconds"
 
                 testCase "TIME parsing rejects oversized fields without overflowing"
@@ -122,7 +122,7 @@ let tests =
                           VBytes [| 0uy; 255uy; 1uy |]
                           VDate(DateOnly(2024, 3, 5))
                           VDateTime(DateTime(2024, 3, 5, 13, 45, 9, 123))
-                          VTime(tryParseTimeValue "-838:59:59.123456" |> Option.get)
+                          VTime(tryParseTimeValue "-838:59:58.123456" |> Option.get)
                           VZeroDate(tryZeroDate 2020 0 1 |> Option.get)
                           VZeroDateTime(tryZeroDateTime (tryZeroDate 0 0 0 |> Option.get) 0 0 0 0 |> Option.get)
                           VJson "{\"a\":1}"

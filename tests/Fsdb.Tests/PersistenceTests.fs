@@ -207,7 +207,7 @@ let tests =
               let store = load dir
               attach dir store
               createTable store defaultDatabase "times" [ mkCol "value" (TTime 6) ] [] [] None None |> ignore
-              let value = tryParseTimeValue "-838:59:59.123456" |> Option.get |> VTime
+              let value = tryParseTimeValue "-838:59:58.123456" |> Option.get |> VTime
               insertRows store defaultDatabase "times" None [ [ value ] ] |> ignore
 
               Expect.equal (rowsOf (load dir) defaultDatabase "times") [ [| value |] ] "WAL replay"
@@ -1191,7 +1191,7 @@ let tests =
               let date = tryZeroDate 2020 0 1 |> Option.get
               let dateTime = tryZeroDateTime date 12 34 56 123_000 |> Option.get
 
-              let time = tryParseTimeValue "-838:59:59.123456" |> Option.get
+              let time = tryParseTimeValue "-838:59:58.123456" |> Option.get
 
               for original in [ VZeroDate date; VZeroDateTime dateTime; VTime time ] do
                   let w = Writer()
