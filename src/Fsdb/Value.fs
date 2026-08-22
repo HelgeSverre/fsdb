@@ -695,21 +695,70 @@ let private pointInLine point points =
     else
         Exterior
 
+let private pointInMultiLine point lines =
+    let positions = lines |> List.map (pointInLine point)
+
+    if positions |> List.contains Interior then
+        Interior
+    elif positions |> List.contains Boundary then
+        let endpointCount =
+            lines
+            |> List.sumBy (function
+                | (first :: _ as line) when List.last line <> first ->
+                    (if point = first then 1 else 0) + (if point = List.last line then 1 else 0)
+                | _ -> 0)
+
+        if endpointCount % 2 = 0 then Interior else Boundary
+    else
+        Exterior
+
+let rec private atomicShapes = function
+    | GEmpty -> []
+    | (GPoint _ | GLineString _ | GPolygon _) as shape -> [ shape ]
+    | GMultiPoint points -> points |> List.map GPoint
+    | GMultiLineString lines -> lines |> List.map GLineString
+    | GMultiPolygon polygons -> polygons |> List.map GPolygon
+    | GGeometryCollection geometries -> geometries |> List.collect (fun geometry -> atomicShapes geometry.Shape)
+
+let private shapeDimension = function
+    | GEmpty -> -1
+    | GPoint _ -> 0
+    | GLineString _ -> 1
+    | GPolygon _ -> 2
+    | _ -> failwith "atomic shapes have a dimension"
+
 let rec private pointInShape point = function
     | GEmpty -> Exterior
     | GPoint(x, y) -> if point = (x, y) then Interior else Exterior
     | GLineString points -> pointInLine point points
     | GPolygon rings -> pointInPolygon point rings
     | GMultiPoint points -> if List.contains point points then Interior else Exterior
-    | GMultiLineString lines ->
-        let positions = lines |> List.map (pointInLine point)
-        if positions |> List.contains Interior then Interior elif positions |> List.contains Boundary then Boundary else Exterior
+    | GMultiLineString lines -> pointInMultiLine point lines
     | GMultiPolygon polygons ->
         let positions = polygons |> List.map (pointInPolygon point)
         if positions |> List.contains Interior then Interior elif positions |> List.contains Boundary then Boundary else Exterior
     | GGeometryCollection geometries ->
-        let positions = geometries |> List.map (fun geometry -> pointInShape point geometry.Shape)
-        if positions |> List.contains Interior then Interior elif positions |> List.contains Boundary then Boundary else Exterior
+        let members =
+            geometries
+            |> List.collect (fun geometry -> atomicShapes geometry.Shape)
+            |> List.filter (fun shape -> pointInShape point shape <> Exterior)
+
+        match members |> List.map shapeDimension with
+        | [] -> Exterior
+        | dimensions when List.max dimensions = 0 -> Interior
+        | dimensions when List.max dimensions = 1 ->
+            members
+            |> List.choose (function
+                | GLineString line -> Some line
+                | _ -> None)
+            |> pointInMultiLine point
+        | _ ->
+            members
+            |> List.choose (function
+                | GPolygon polygon -> Some polygon
+                | _ -> None)
+            |> List.map (pointInPolygon point)
+            |> fun positions -> if positions |> List.contains Interior then Interior else Boundary
 
 let geometryPointPositionPlanar point (geometry: Geometry) = pointInShape point geometry.Shape
 
@@ -793,7 +842,10 @@ let rec private shapeInteriorSamples = function
     | GMultiPoint points -> points
     | GMultiLineString lines -> lines |> List.collect (segments >> List.map (fun segment -> interpolate segment 0.5))
     | GMultiPolygon polygons -> polygons |> List.collect polygonInteriorSamples
-    | GGeometryCollection geometries -> geometries |> List.collect (fun geometry -> shapeInteriorSamples geometry.Shape)
+    | GGeometryCollection geometries ->
+        geometries
+        |> List.collect (fun geometry -> shapeInteriorSamples geometry.Shape)
+        |> List.filter (fun point -> pointInShape point (GGeometryCollection geometries) = Interior)
 
 let private geometryContainsAllPoints (first: Geometry) (second: Geometry) =
     let boundaries = shapeSegments first.Shape
@@ -859,10 +911,19 @@ let private interiorIntersects first second =
     || sampleIntersects (shapeInteriorSamples second.Shape) first
 
 let geometryTouchesPlanar first second =
-    match geometryIntersectsPlanar first second with
-    | None -> None
-    | Some false -> Some false
-    | Some true -> Some(not (interiorIntersects first second))
+    let rec pointOnly = function
+        | GPoint _
+        | GMultiPoint _ -> true
+        | GGeometryCollection geometries -> not (List.isEmpty geometries) && (geometries |> List.forall (fun geometry -> pointOnly geometry.Shape))
+        | _ -> false
+
+    if pointOnly first.Shape && pointOnly second.Shape then
+        None
+    else
+        match geometryIntersectsPlanar first second with
+        | None -> None
+        | Some false -> Some false
+        | Some true -> Some(not (interiorIntersects first second))
 
 type Value =
     | VNull
