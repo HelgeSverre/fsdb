@@ -10635,7 +10635,7 @@ let rec execute (store: Store) (registry: Registry) (dbName: string) (ids: int64
                                     VString definition
                                     VString(JsonSerializer.Serialize(columns |> List.toArray))
                                     VDateTime System.DateTime.Now
-                                    VString(store.SessionUser + "@%") ] ]
+                                    VString store.SessionUser ] ]
                         with
                         | Ok _ -> ids, Affected 0UL
                         | Error error -> ids, storageErr error
@@ -10749,7 +10749,7 @@ let rec execute (store: Store) (registry: Registry) (dbName: string) (ids: int64
                                         VString eventText
                                         VString body
                                         VDateTime System.DateTime.Now
-                                        VString(store.SessionUser + "@%") ] ]
+                                        VString store.SessionUser ] ]
                             with
                             | Ok _ -> ids, Affected 0UL
                             | Error e -> ids, storageErr e

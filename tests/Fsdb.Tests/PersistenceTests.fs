@@ -719,6 +719,7 @@ let tests =
               attach dir store
 
               Fsdb.Auth.createUser store "alice" "%" (Some "pw1") |> ignore
+              Fsdb.Auth.createUser store "alice" "localhost" (Some "local") |> ignore
               Fsdb.Auth.createUser store "bob" "%" None |> ignore
               Fsdb.Auth.setPassword store "alice" "%" "pw2" |> ignore
               Fsdb.Auth.dropUser store "bob" "%" |> ignore
@@ -732,6 +733,14 @@ let tests =
                       (Fsdb.Auth.nativePasswordHash "pw2")
                       "replayed alice with her updated hash"
               | None -> failtest "expected alice to survive the reload"
+
+              match Fsdb.Auth.tryUserRowForAccount reloaded (Fsdb.Auth.account "alice" "localhost") with
+              | Some(cols, row) ->
+                  Expect.equal
+                      (Fsdb.Auth.storedPasswordHash cols row)
+                      (Fsdb.Auth.nativePasswordHash "local")
+                      "replayed localhost account separately"
+              | None -> failtest "expected localhost alice to survive the reload"
 
               Expect.isNone (Fsdb.Auth.tryUserRow reloaded "bob") "bob's replayed drop stuck"
 

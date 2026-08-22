@@ -7,6 +7,8 @@
 module Fsdb.Auth
 
 open System
+open System.Collections.Generic
+open System.Net
 open System.Security.Cryptography
 open Fsdb.Ast
 open Fsdb.Value
@@ -36,17 +38,178 @@ let verifyNative (storedHash: string) (scramble: byte[]) (response: byte[]) : bo
         with _ ->
             false
 
-/// The `mysql.user` row for `username` (host ignored — every account is
-/// `'%'`, see `Session.User`'s doc), as `(columns, row)`. Reads the live
-/// catalog every time: the tables are tiny and rows are the single source
-/// of truth, no cache to invalidate.
-let tryUserRow (store: Store) (username: string) : (ColumnDef list * Value[]) option =
+type Account =
+    { Name: string
+      Host: string }
+
+let account name host = { Name = name; Host = host }
+
+/// Whether two account names identify the same host-qualified account.
+let sameAccount left right =
+    left.Name = right.Name && String.Equals(left.Host, right.Host, StringComparison.OrdinalIgnoreCase)
+
+let private rowAccount (cols: ColumnDef list) (row: Value[]) =
+    match resolveColumn cols "User", resolveColumn cols "Host" with
+    | Ok userIndex, Ok hostIndex ->
+        match row.[userIndex], row.[hostIndex] with
+        | VString name, VString host -> Some(account name host)
+        | _ -> None
+    | _ -> None
+
+/// Reads one exact account from the live catalog.
+let tryUserRowForAccount (store: Store) (wanted: Account) : (ColumnDef list * Value[]) option =
     match scanList store "mysql" "user" with
     | Error _ -> None
     | Ok(cols, rows) ->
-        match resolveColumn cols "User" with
-        | Error _ -> None
-        | Ok userIdx -> rows |> List.tryFind (fun r -> r.[userIdx] = VString username) |> Option.map (fun r -> cols, r)
+        rows
+        |> List.tryFind (fun row -> rowAccount cols row |> Option.exists (sameAccount wanted))
+        |> Option.map (fun row -> cols, row)
+
+/// A compatibility lookup for in-process callers without an account host.
+/// It prefers the conventional `'name'@'%'` row before any same-name row.
+let tryUserRow (store: Store) (username: string) =
+    tryUserRowForAccount store (account username "%")
+    |> Option.orElseWith (fun () ->
+        match scanList store "mysql" "user" with
+        | Ok(cols, rows) ->
+            rows
+            |> List.tryFind (fun row -> rowAccount cols row |> Option.exists (fun selected -> selected.Name = username))
+            |> Option.map (fun row -> cols, row)
+        | Error _ -> None)
+
+let private isLoopbackHost (host: string) =
+    match IPAddress.TryParse host with
+    | true, address -> IPAddress.IsLoopback address
+    | _ -> false
+
+let private wildcardMatch (pattern: string) (value: string) =
+    let seen = Dictionary<int * int, bool>()
+
+    let rec matches patternIndex valueIndex =
+        match seen.TryGetValue((patternIndex, valueIndex)) with
+        | true, answer -> answer
+        | _ ->
+            let answer =
+                if patternIndex = pattern.Length then
+                    valueIndex = value.Length
+                else
+                    match pattern.[patternIndex] with
+                    | '\\' when patternIndex + 1 < pattern.Length ->
+                        valueIndex < value.Length
+                        && Char.ToUpperInvariant pattern.[patternIndex + 1] = Char.ToUpperInvariant value.[valueIndex]
+                        && matches (patternIndex + 2) (valueIndex + 1)
+                    | '_' -> valueIndex < value.Length && matches (patternIndex + 1) (valueIndex + 1)
+                    | '%' ->
+                        let next =
+                            let mutable index = patternIndex + 1
+                            while index < pattern.Length && pattern.[index] = '%' do
+                                index <- index + 1
+                            index
+
+                        matches next valueIndex || (valueIndex < value.Length && matches patternIndex (valueIndex + 1))
+                    | c ->
+                        valueIndex < value.Length
+                        && Char.ToUpperInvariant c = Char.ToUpperInvariant value.[valueIndex]
+                        && matches (patternIndex + 1) (valueIndex + 1)
+
+            seen.[(patternIndex, valueIndex)] <- answer
+            answer
+
+    matches 0 0
+
+let private networkPrefix (pattern: string) (host: string) =
+    let slash = pattern.IndexOf '/'
+
+    if slash <= 0 || slash = pattern.Length - 1 then
+        None
+    else
+        match IPAddress.TryParse(pattern[.. slash - 1]), IPAddress.TryParse host with
+        | (true, network), (true, address) when network.AddressFamily = address.AddressFamily ->
+            let bits = network.GetAddressBytes().Length * 8
+            let suffix = pattern[(slash + 1) ..]
+
+            let prefixLength =
+                match Int32.TryParse suffix with
+                | true, length when length >= 0 && length <= bits -> Some length
+                | _ ->
+                    match IPAddress.TryParse suffix with
+                    | true, mask when mask.AddressFamily = network.AddressFamily ->
+                        let maskBits = mask.GetAddressBytes()
+                        let mutable prefix = 0
+                        let mutable valid = true
+                        let mutable seenZero = false
+
+                        for b in maskBits do
+                            for shift in 7 .. -1 .. 0 do
+                                let set = (int b &&& (1 <<< shift)) <> 0
+                                if set && seenZero then valid <- false
+                                if set then prefix <- prefix + 1 else seenZero <- true
+
+                        if valid then Some prefix else None
+                    | _ -> None
+
+            prefixLength
+            |> Option.filter (fun prefix ->
+                let networkBytes = network.GetAddressBytes()
+                let addressBytes = address.GetAddressBytes()
+                let wholeBytes = prefix / 8
+                let remainder = prefix % 8
+                let sameWholeBytes =
+                    wholeBytes = 0 || networkBytes[.. wholeBytes - 1] = addressBytes[.. wholeBytes - 1]
+
+                sameWholeBytes
+                && (remainder = 0
+                    || (networkBytes.[wholeBytes] &&& byte (0xff <<< (8 - remainder)))
+                       = (addressBytes.[wholeBytes] &&& byte (0xff <<< (8 - remainder)))))
+        | _ -> None
+
+let private hostMatchRank (pattern: string) (clientHost: string) =
+    let rec specificity index literals wildcards =
+        if index = pattern.Length then
+            literals, wildcards
+        else
+            match pattern.[index] with
+            | '\\' when index + 1 < pattern.Length -> specificity (index + 2) (literals + 1) wildcards
+            | '%'
+            | '_' -> specificity (index + 1) literals (wildcards + 1)
+            | _ -> specificity (index + 1) (literals + 1) wildcards
+
+    let literalCount, wildcardCount = specificity 0 0 0
+
+    if String.Equals(pattern, clientHost, StringComparison.OrdinalIgnoreCase) then
+        Some(4, literalCount, 0, pattern.Length)
+    elif String.Equals(pattern, "localhost", StringComparison.OrdinalIgnoreCase) && isLoopbackHost clientHost then
+        Some(3, literalCount, 0, pattern.Length)
+    else
+        match networkPrefix pattern clientHost with
+        | Some prefix -> Some(2, prefix, 0, pattern.Length)
+        | None when wildcardMatch pattern clientHost -> Some(1, literalCount, -wildcardCount, pattern.Length)
+        | None -> None
+
+/// Selects the account MySQL would authenticate for a peer address. A named
+/// account always takes precedence over an anonymous fallback.
+let resolveAccount (store: Store) (username: string) (clientHost: string) : (Account * ColumnDef list * Value[]) option =
+    match scanList store "mysql" "user" with
+    | Error _ -> None
+    | Ok(cols, rows) ->
+        let candidates name =
+            rows
+            |> List.choose (fun row ->
+                match rowAccount cols row with
+                | Some selected when selected.Name = name ->
+                    hostMatchRank selected.Host clientHost
+                    |> Option.map (fun rank -> rank, selected, row)
+                | _ -> None)
+
+        let matched =
+            match candidates username with
+            | [] -> candidates ""
+            | named -> named
+
+        matched
+        |> List.sortByDescending (fun (rank, selected, _) -> rank, selected.Host)
+        |> List.tryHead
+        |> Option.map (fun (_, selected, row) -> selected, cols, row)
 
 /// A user row's column as text, `""` for NULL/absent.
 let userColumnText (cols: ColumnDef list) (row: Value[]) (name: string) : string =
@@ -121,9 +284,8 @@ let private privBySql (sql: string) : PrivDef option =
 
 // ---------------------------------------------------------------------------
 // Account mutations — all through `Storage`'s ordinary row functions so the
-// WAL/snapshot carry them like any other data change. Accounts are matched
-// by name only (host is stored as written but never matched — see the
-// module doc); every error shape matches MySQL's 1396.
+// WAL/snapshot carry them like any other data change. Every error shape
+// matches MySQL's 1396.
 // ---------------------------------------------------------------------------
 
 let private operationFailed (op: string) (name: string) (host: string) =
@@ -131,7 +293,7 @@ let private operationFailed (op: string) (name: string) (host: string) =
 
 /// `CREATE USER 'name'@'host' [IDENTIFIED BY 'pw']` — one account.
 let createUser (store: Store) (name: string) (host: string) (password: string option) : Result<unit, int * string> =
-    if (tryUserRow store name).IsSome then
+    if (tryUserRowForAccount store (account name host)).IsSome then
         operationFailed "CREATE USER" name host
     else
         let hash = password |> Option.map nativePasswordHash |> Option.defaultValue ""
@@ -154,16 +316,16 @@ let dropUser (store: Store) (name: string) (host: string) : Result<unit, int * s
         match scanList store "mysql" table with
         | Error _ -> ()
         | Ok(cols, _) ->
-            match resolveColumn cols "User" with
-            | Error _ -> ()
-            | Ok userIdx -> deleteRows store "mysql" table (fun r -> Ok(r.[userIdx] = VString name)) |> ignore
+            deleteRows store "mysql" table (fun row -> Ok(rowAccount cols row |> Option.exists (sameAccount (account name host)))) |> ignore
 
-    if (tryUserRow store name).IsNone then
+    if (tryUserRowForAccount store (account name host)).IsNone then
         operationFailed "DROP USER" name host
     else
         deleteWhere "user"
         deleteWhere "db"
         deleteWhere "tables_priv"
+        deleteWhere "columns_priv"
+        deleteWhere "global_grants"
         Ok()
 
 let renameUser
@@ -173,7 +335,7 @@ let renameUser
     (newName: string)
     (newHost: string)
     : Result<unit, int * string> =
-    if (tryUserRow store oldName).IsNone || (tryUserRow store newName).IsSome then
+    if (tryUserRowForAccount store (account oldName oldHost)).IsNone || (tryUserRowForAccount store (account newName newHost)).IsSome then
         operationFailed "RENAME USER" oldName oldHost
     else
         let renameRows table =
@@ -187,7 +349,7 @@ let renameUser
                         "mysql"
                         table
                         None
-                        (fun row -> Ok(row.[userIndex] = VString oldName))
+                        (fun row -> Ok(row.[userIndex] = VString oldName && row.[hostIndex] = VString oldHost))
                         (fun row ->
                             let renamed = Array.copy row
                             renamed.[userIndex] <- VString newName
@@ -231,23 +393,23 @@ let private updateSystemRows
         | Ok n -> Ok n
         | Error e -> Error(toMySqlError e)
 
-/// A mysql.user row-matcher for one account name — the shape both
+/// A mysql.user row-matcher for one account — the shape both
 /// `setPassword` and `applyAtLevel`'s global branch filter by.
-let private matchUserRow (name: string) (cols: ColumnDef list) (r: Value[]) =
-    match resolveColumn cols "User" with
-    | Ok i -> r.[i] = VString name
-    | Error _ -> false
+let private matchUserRow (wanted: Account) (cols: ColumnDef list) (row: Value[]) =
+    rowAccount cols row |> Option.exists (sameAccount wanted)
 
 /// `ALTER USER ... IDENTIFIED BY 'pw'` / `SET PASSWORD [FOR user] = 'pw'` —
 /// rewrites the stored hash (empty password clears it back to
 /// accept-anything).
 let setPassword (store: Store) (name: string) (host: string) (password: string) : Result<unit, int * string> =
-    if (tryUserRow store name).IsNone then
+    let wanted = account name host
+
+    if (tryUserRowForAccount store wanted).IsNone then
         operationFailed "ALTER USER" name host
     else
         let hash = if password = "" then "" else nativePasswordHash password
 
-        updateSystemRows store "user" (matchUserRow name) [ "authentication_string", VString hash ]
+        updateSystemRows store "user" (matchUserRow wanted) [ "authentication_string", VString hash ]
         |> Result.map ignore
 
 // ---------------------------------------------------------------------------
@@ -323,11 +485,11 @@ let private applyAtLevel
     match target with
     | Global ->
         let changes = (defs |> List.map (fun d -> d.UserCol, VString yn)) @ grantOptCol
-        updateSystemRows store "user" (matchUserRow name) changes |> Result.map ignore
+        updateSystemRows store "user" (matchUserRow (account name host)) changes |> Result.map ignore
     | OnDb db ->
         let matches (cols: ColumnDef list) (r: Value[]) =
-            match resolveColumn cols "User", resolveColumn cols "Db" with
-            | Result.Ok u, Result.Ok d -> r.[u] = VString name && (match r.[d] with VString s -> eqI s db | _ -> false)
+            match rowAccount cols r, resolveColumn cols "Db" with
+            | Some rowAccount, Result.Ok d -> sameAccount rowAccount (account name host) && (match r.[d] with VString s -> eqI s db | _ -> false)
             | _ -> false
 
         let changes =
@@ -378,10 +540,10 @@ let private applyAtLevel
         | Result.Error e -> Result.Error(toMySqlError e)
         | Result.Ok(cols, rows) ->
             let idx n = resolveColumn cols n |> Result.toOption
-            match idx "User", idx "Db", idx "Table_name", idx "Table_priv" with
-            | Some u, Some d, Some t, Some tp ->
+            match idx "Db", idx "Table_name", idx "Table_priv" with
+            | Some d, Some t, Some tp ->
                 let matchesRow (r: Value[]) =
-                    r.[u] = VString name
+                    rowAccount cols r |> Option.exists (sameAccount (account name host))
                     && (match r.[d] with VString s -> eqI s db | _ -> false)
                     && (match r.[t] with VString s -> eqI s table | _ -> false)
 
@@ -443,7 +605,7 @@ let grant
     |> Result.bind (fun defs ->
         users
         |> traverse (fun (name, host) ->
-            if (tryUserRow store name).IsNone then
+            if (tryUserRowForAccount store (account name host)).IsNone then
                 Result.Error(1410, "You are not allowed to create a user with GRANT")
             else
                 applyAtLevel store name host defs target withGrantOption true)
@@ -457,7 +619,7 @@ let revoke (store: Store) (privs: string list) (target: PrivTarget) (users: (str
     |> Result.bind (fun defs ->
         users
         |> traverse (fun (name, host) ->
-            if (tryUserRow store name).IsNone then
+            if (tryUserRowForAccount store (account name host)).IsNone then
                 Result.Error(1141, sprintf "There is no such grant defined for user '%s' on host '%s'" name host)
             else
                 applyAtLevel store name host defs target revokesGrantOption false)
@@ -725,13 +887,15 @@ let requiredPrivilegesInStore (store: Store) (defaultDb: string) (stmt: Statemen
         | Error _ -> []
     | _ -> requiredPrivileges defaultDb stmt
 
-/// Checks `user` against every required privilege, denying with MySQL's
+/// Checks one selected account against every required privilege, denying with
+/// MySQL's
 /// 1142 (table), 1044 (database), or 1227 (admin privilege) shape.
-let check (store: Store) (user: string) (required: (string * PrivTarget) list) : Result<unit, int * string> =
+let checkForAccount (store: Store) (wanted: Account) (required: (string * PrivTarget) list) : Result<unit, int * string> =
     match required with
     | [] -> Ok()
     | _ ->
-        let userRow = tryUserRow store user
+        let user = wanted.Name
+        let userRow = tryUserRowForAccount store wanted
 
         // Fast path: every requirement satisfied by the user's own global
         // row — root's all-Y row is the overwhelming common case, and this
@@ -800,11 +964,11 @@ let check (store: Store) (user: string) (required: (string * PrivTarget) list) :
                 | Result.Error _ -> false
                 | Result.Ok resolved -> rows |> List.exists (fun r -> resolved |> List.forall (fun (i, p) -> p r.[i]))
 
-        let mine = "User", (=) (VString user)
+        let mine = [ "User", (=) (VString user); "Host", textIs wanted.Host ]
 
         let hasDb (def: PrivDef) (db: string) =
             match def.DbCol with
-            | Some dbCol -> rowExists dbRowGrants.Value [ mine; "Db", textIs db; dbCol, isYes ]
+            | Some dbCol -> rowExists dbRowGrants.Value (mine @ [ "Db", textIs db; dbCol, isYes ])
             | None -> false
 
         let hasTable (def: PrivDef) (db: string) (table: string) =
@@ -812,7 +976,7 @@ let check (store: Store) (user: string) (required: (string * PrivTarget) list) :
             | Some setName ->
                 rowExists
                     tablePrivGrants.Value
-                    [ mine; "Db", textIs db; "Table_name", textIs table; "Table_priv", hasSetMember setName ]
+                    (mine @ [ "Db", textIs db; "Table_name", textIs table; "Table_priv", hasSetMember setName ])
             | None -> false
 
         let hasGlobalGrantOption () =
@@ -823,12 +987,12 @@ let check (store: Store) (user: string) (required: (string * PrivTarget) list) :
         // Grant option below the global level: mysql.db's `Grant_priv` for
         // (user, db), or tables_priv's `Grant` SET member for the table.
         let hasDbGrantOption (db: string) =
-            rowExists dbRowGrants.Value [ mine; "Db", textIs db; "Grant_priv", isYes ]
+            rowExists dbRowGrants.Value (mine @ [ "Db", textIs db; "Grant_priv", isYes ])
 
         let hasTableGrantOption (db: string) (table: string) =
             rowExists
                 tablePrivGrants.Value
-                [ mine; "Db", textIs db; "Table_name", textIs table; "Table_priv", hasSetMember "Grant" ]
+                (mine @ [ "Db", textIs db; "Table_name", textIs table; "Table_priv", hasSetMember "Grant" ])
 
         let checkOne (privSql: string, target: PrivTarget) : Result<unit, int * string> =
             if privSql = "GRANT OPTION" then
@@ -848,8 +1012,8 @@ let check (store: Store) (user: string) (required: (string * PrivTarget) list) :
                     Ok()
                 else
                     match target with
-                    | Global -> Error(1045, sprintf "Access denied for user '%s'@'%%' (using password: YES)" user)
-                    | OnDb db -> Error(1044, sprintf "Access denied for user '%s'@'%%' to database '%s'" user db)
+                    | Global -> Error(1045, sprintf "Access denied for user '%s'@'%s' (using password: YES)" user wanted.Host)
+                    | OnDb db -> Error(1044, sprintf "Access denied for user '%s'@'%s' to database '%s'" user wanted.Host db)
                     | OnTable(_, table) ->
                         Error(1142, sprintf "GRANT command denied to user '%s'@'localhost' for table '%s'" user table)
             else
@@ -877,22 +1041,25 @@ let check (store: Store) (user: string) (required: (string * PrivTarget) list) :
                             1227,
                             sprintf "Access denied; you need (at least one of) the %s privilege(s) for this operation" privSql
                         )
-                    // 1044 carries the *account* host, 1142 the connecting
-                    // host — mirroring real MySQL's (odd) split.
-                    | OnDb db -> Error(1044, sprintf "Access denied for user '%s'@'%%' to database '%s'" user db)
+                    | OnDb db -> Error(1044, sprintf "Access denied for user '%s'@'%s' to database '%s'" user wanted.Host db)
                     | OnTable(_, table) ->
                         Error(1142, sprintf "%s command denied to user '%s'@'localhost' for table '%s'" privSql user table)
 
         required |> traverse checkOne |> Result.map ignore
 
+/// Checks the conventional `'name'@'%'` identity used by embedded callers.
+let check (store: Store) (user: string) (required: (string * PrivTarget) list) =
+    checkForAccount store (account user "%") required
+
 // ---------------------------------------------------------------------------
 // SHOW GRANTS rendering.
 // ---------------------------------------------------------------------------
 
-let renderCreateUser (store: Store) (name: string) : Result<string * string, int * string> =
-    match tryUserRow store name with
-    | None -> Error(1396, sprintf "Operation SHOW CREATE USER failed for '%s'@'%%'" name)
+let renderCreateUserForAccount (store: Store) (wanted: Account) : Result<string * string, int * string> =
+    match tryUserRowForAccount store wanted with
+    | None -> Error(1396, sprintf "Operation SHOW CREATE USER failed for '%s'@'%s'" wanted.Name wanted.Host)
     | Some(cols, row) ->
+        let name = wanted.Name
         let host = userColumnText cols row "Host"
         let plugin = userColumnText cols row "plugin"
         let hash = userColumnText cols row "authentication_string"
@@ -907,40 +1074,48 @@ let renderCreateUser (store: Store) (name: string) : Result<string * string, int
                 hash
         )
 
+let renderCreateUser (store: Store) (name: string) = renderCreateUserForAccount store (account name "%")
+
 /// Whether `user` holds a global privilege — the gate for PROCESS-scoped
 /// visibility (PROCESSLIST, KILL) and mysql-schema reads. Reuses `check`'s
 /// hierarchy, so root's all-Y row and any GLOBAL grant satisfy it.
-let hasGlobalPriv (store: Store) (user: string) (privSql: string) : bool =
-    match check store user [ privSql, Global ] with
+let hasGlobalPrivForAccount (store: Store) (wanted: Account) (privSql: string) : bool =
+    match checkForAccount store wanted [ privSql, Global ] with
     | Result.Ok() -> true
     | Result.Error _ -> false
+
+let hasGlobalPriv (store: Store) (user: string) (privSql: string) = hasGlobalPrivForAccount store (account user "%") privSql
 
 /// Whether `SHOW DATABASES` may reveal `db` to `user`: the global SHOW
 /// DATABASES privilege sees everything; otherwise any database- or
 /// table-scoped grant reveals its containing database. `information_schema`
 /// is visible to every authenticated account, matching MySQL.
-let canSeeDatabase (store: Store) (user: string) (db: string) : bool =
-    if eqI db "information_schema" || hasGlobalPriv store user "SHOW DATABASES" then
+let canSeeDatabaseForAccount (store: Store) (wanted: Account) (db: string) : bool =
+    if eqI db "information_schema" || hasGlobalPrivForAccount store wanted "SHOW DATABASES" then
         true
-    elif staticPrivileges |> List.exists (fun def -> check store user [ def.Sql, OnDb db ] |> Result.isOk) then
+    elif staticPrivileges |> List.exists (fun def -> checkForAccount store wanted [ def.Sql, OnDb db ] |> Result.isOk) then
         true
     else
         match scanList store "mysql" "tables_priv" with
         | Result.Error _ -> false
         | Result.Ok(cols, rows) ->
-            match resolveColumn cols "User", resolveColumn cols "Db", resolveColumn cols "Table_priv" with
-            | Ok userIdx, Ok dbIdx, Ok privIdx ->
+            match resolveColumn cols "Db", resolveColumn cols "Table_priv" with
+            | Ok dbIdx, Ok privIdx ->
                 rows
                 |> List.exists (fun row ->
-                    row.[userIdx] = VString user
+                    rowAccount cols row |> Option.exists (sameAccount wanted)
                     && (match row.[dbIdx] with | VString value -> eqI value db | _ -> false)
                     && row.[privIdx] <> VString "")
             | _ -> false
 
+let canSeeDatabase (store: Store) (user: string) (db: string) = canSeeDatabaseForAccount store (account user "%") db
+
 /// Whether any privilege at table scope or above makes a table visible in
 /// metadata views.
-let canSeeTable (store: Store) (user: string) (db: string) (table: string) : bool =
-    staticPrivileges |> List.exists (fun def -> check store user [ def.Sql, OnTable(db, table) ] |> Result.isOk)
+let canSeeTableForAccount (store: Store) (wanted: Account) (db: string) (table: string) : bool =
+    staticPrivileges |> List.exists (fun def -> checkForAccount store wanted [ def.Sql, OnTable(db, table) ] |> Result.isOk)
+
+let canSeeTable (store: Store) (user: string) (db: string) (table: string) = canSeeTableForAccount store (account user "%") db table
 
 /// A privilege list rendered MySQL-style: every static privilege → `ALL
 /// PRIVILEGES`, none → `USAGE`, otherwise the names in column order.
@@ -953,10 +1128,11 @@ let private renderPrivList (granted: PrivDef list) (all: PrivDef list) : string 
 /// mysql.user row, one line per mysql.db row, one per tables_priv row —
 /// 1141 when the account doesn't exist. ponytail: no dynamic-privilege or
 /// PROXY lines (real root shows both; nothing here models either).
-let renderGrants (store: Store) (name: string) : Result<string * string list, int * string> =
-    match tryUserRow store name with
-    | None -> Error(1141, sprintf "There is no such grant defined for user '%s' on host '%%'" name)
+let renderGrantsForAccount (store: Store) (wanted: Account) : Result<string * string list, int * string> =
+    match tryUserRowForAccount store wanted with
+    | None -> Error(1141, sprintf "There is no such grant defined for user '%s' on host '%s'" wanted.Name wanted.Host)
     | Some(cols, row) ->
+        let name = wanted.Name
         let host = userColumnText cols row "Host"
         let quoted = sprintf "`%s`@`%s`" name host
 
@@ -980,7 +1156,7 @@ let renderGrants (store: Store) (name: string) : Result<string * string list, in
                 let dbLevel = staticPrivileges |> List.filter (fun d -> d.DbCol.IsSome)
 
                 rows
-                |> List.filter (fun r -> userColumnText dbCols r "User" = name)
+                |> List.filter (fun r -> rowAccount dbCols r |> Option.exists (sameAccount wanted))
                 |> List.map (fun r ->
                     let granted = dbLevel |> List.filter (fun d -> userColumnText dbCols r d.DbCol.Value = "Y")
 
@@ -996,7 +1172,7 @@ let renderGrants (store: Store) (name: string) : Result<string * string list, in
             | Result.Error _ -> []
             | Result.Ok(tCols, rows) ->
                 rows
-                |> List.filter (fun r -> userColumnText tCols r "User" = name)
+                |> List.filter (fun r -> rowAccount tCols r |> Option.exists (sameAccount wanted))
                 |> List.map (fun r ->
                     let members = setMembers (userColumnText tCols r "Table_priv")
                     let hasOption = members |> List.exists (eqI "Grant")
@@ -1023,3 +1199,5 @@ let renderGrants (store: Store) (name: string) : Result<string * string list, in
                         (if hasOption then " WITH GRANT OPTION" else ""))
 
         Ok(sprintf "Grants for %s@%s" name host, globalLine :: dbLines @ tableLines)
+
+let renderGrants (store: Store) (name: string) = renderGrantsForAccount store (account name "%")

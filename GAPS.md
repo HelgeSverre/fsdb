@@ -42,7 +42,7 @@ accepted (marked `ponytail:` in source), or recorded only in
 | Routines & events | Absent (catalogs honestly empty) | Everything |
 | Full-text | Oracle-verified scoring | No inverted index; single-table SELECT only; no CJK parser |
 | Wire protocol | Handshake through COM_STMT_EXECUTE, TLS, LOCAL INFILE, and multi-result batches | No compression or cursors |
-| Auth & privileges | Static privileges enforced incl. subqueries | Name-only host matching; no roles/dynamic/column privileges |
+| Auth & privileges | Static privileges enforced incl. subqueries and per-host accounts | No roles/dynamic/column privileges |
 | Metadata | 23 INFORMATION_SCHEMA views, 8 mysql.* tables | Storage statistics are stand-ins; many SHOW forms missing |
 | Server admin | KILL, SHUTDOWN, limits, config file parsing | No replication/binlog/logging files |
 
@@ -353,7 +353,6 @@ DROP TRIGGER resolved to its subject table for TRIGGER privilege
 
 | Gap | MySQL 8.4 | fsdb | Impact | Class |
 |---|---|---|---|---|
-| Host matching | per-host accounts, `%`/CIDR patterns | name-only; every account `'name'@'%'`, connecting host renders localhost (`Session.fs:169–171`) | medium | divergence |
 | Text-probe privilege bypass | all statements checked | SET/SHOW/KILL/USE bypass the gate (SET PASSWORD and KILL carry their own checks) — documented divergence (`docs/compatibility.md`) | low | divergence |
 | Roles | CREATE ROLE, SET ROLE, role grants, mandatory roles | absent | medium | refusal |
 | Dynamic privileges | BACKUP_ADMIN, CONNECTION_ADMIN, … | vocabulary absent from GRANT parsing | low | refusal |

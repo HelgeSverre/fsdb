@@ -2558,13 +2558,45 @@ let tests =
                   | None -> failtest "root vanished"
               | other -> failtestf "expected SET PASSWORD to succeed, got %A" other
 
+          testCase "SET PASSWORD and SHOW GRANTS keep host-qualified accounts separate"
+          <| fun _ ->
+              let store = Fsdb.Storage.create ()
+              let session = create 1 store
+              let session, _ = handle session "CREATE USER 'alice'@'%' IDENTIFIED BY 'broad'"
+              let session, _ = handle session "CREATE USER 'alice'@'localhost' IDENTIFIED BY 'local'"
+
+              match handle session "SET PASSWORD FOR alice@localhost = 'changed'" |> snd with
+              | Affected 0UL -> ()
+              | other -> failtestf "expected host-qualified SET PASSWORD to succeed, got %A" other
+
+              match Fsdb.Auth.tryUserRowForAccount store (Fsdb.Auth.account "alice" "localhost") with
+              | Some(columns, row) ->
+                  Expect.equal
+                      (Fsdb.Auth.storedPasswordHash columns row)
+                      (Fsdb.Auth.nativePasswordHash "changed")
+                      "localhost password changes"
+              | None -> failtest "localhost account exists"
+
+              match Fsdb.Auth.tryUserRowForAccount store (Fsdb.Auth.account "alice" "%") with
+              | Some(columns, row) ->
+                  Expect.equal
+                      (Fsdb.Auth.storedPasswordHash columns row)
+                      (Fsdb.Auth.nativePasswordHash "broad")
+                      "percent password remains"
+              | None -> failtest "percent account exists"
+
+              match handle session "SHOW GRANTS FOR alice@localhost" |> snd with
+              | ResultSet([ "Grants for alice@localhost" ], [ [ Some grant ] ]) ->
+                  Expect.stringContains grant "`alice`@`localhost`" "selected account renders"
+              | other -> failtestf "expected localhost grants, got %A" other
+
           testCase "RENAME USER moves the account and its grants"
           <| fun _ ->
               let store = Fsdb.Storage.create ()
               let session = create 1 store
               let session, _ = handle session "CREATE DATABASE shop"
               let session, _ = handle session "CREATE USER 'alice'@'localhost' IDENTIFIED BY 'secret'"
-              let session, _ = handle session "GRANT SELECT ON shop.* TO alice"
+              let session, _ = handle session "GRANT SELECT ON shop.* TO alice@localhost"
 
               match handle session "RENAME USER 'alice'@'localhost' TO 'bob'@'%'" |> snd with
               | Affected 0UL ->

@@ -46,6 +46,65 @@ let tests =
 
               Expect.isNone (tryUserRow store "nobody") "unknown user is None"
 
+          testCase "account lookup selects the most specific matching host"
+          <| fun _ ->
+              let store = Fsdb.Storage.create ()
+
+              for host in [ "%"; "127.0.0.%"; "localhost"; "127.0.0.1" ] do
+                  createUser store "hosted" host None |> Result.mapError snd |> Result.defaultWith failtest
+
+              let selected host =
+                  resolveAccount store "hosted" host
+                  |> Option.map (fun (account, _, _) -> account.Host)
+
+              Expect.equal (selected "127.0.0.1") (Some "127.0.0.1") "exact address wins"
+              Expect.equal (selected "127.0.0.2") (Some "localhost") "loopback localhost wins over a wildcard"
+              Expect.equal (selected "10.0.0.1") (Some "%") "percent remains the fallback"
+
+          testCase "account lookup honours wildcard escaping and subnet specificity"
+          <| fun _ ->
+              let store = Fsdb.Storage.create ()
+
+              for host in [ "%"; "127.0.0.\\%"; "10.0.0.0/8"; "10.1.0.0/16" ] do
+                  createUser store "patterned" host None |> Result.mapError snd |> Result.defaultWith failtest
+
+              let selected host =
+                  resolveAccount store "patterned" host
+                  |> Option.map (fun (account, _, _) -> account.Host)
+
+              Expect.equal (selected "127.0.0.%") (Some "127.0.0.\\%") "backslash escapes percent"
+              Expect.equal (selected "10.1.2.3") (Some "10.1.0.0/16") "the narrower subnet wins"
+              Expect.equal (selected "10.2.3.4") (Some "10.0.0.0/8") "the broader subnet still matches"
+
+          testCase "account DDL and grants keep same-name host accounts separate"
+          <| fun _ ->
+              let store = Fsdb.Storage.create ()
+              let broad = account "separate" "%"
+              let local = account "separate" "localhost"
+              createUser store broad.Name broad.Host None |> Result.mapError snd |> Result.defaultWith failtest
+              createUser store local.Name local.Host None |> Result.mapError snd |> Result.defaultWith failtest
+              grant store [ "SELECT" ] (OnDb "shop") [ local.Name, local.Host ] false |> Result.mapError snd |> Result.defaultWith failtest
+
+              Expect.isTrue (checkForAccount store local [ "SELECT", OnDb "shop" ] |> Result.isOk) "localhost grant applies locally"
+              Expect.isTrue (checkForAccount store broad [ "SELECT", OnDb "shop" ] |> Result.isError) "percent account remains ungranted"
+
+              dropUser store local.Name local.Host |> Result.mapError snd |> Result.defaultWith failtest
+              Expect.isNone (tryUserRowForAccount store local) "drop removes only its exact account"
+              Expect.isSome (tryUserRowForAccount store broad) "other host remains"
+
+          testCase "anonymous accounts are only a fallback when no named account matches"
+          <| fun _ ->
+              let store = Fsdb.Storage.create ()
+              createUser store "" "%" None |> Result.mapError snd |> Result.defaultWith failtest
+              createUser store "named" "%" None |> Result.mapError snd |> Result.defaultWith failtest
+
+              let selected user =
+                  resolveAccount store user "192.0.2.5"
+                  |> Option.map (fun (account, _, _) -> account.Name)
+
+              Expect.equal (selected "named") (Some "named") "named account wins"
+              Expect.equal (selected "missing") (Some "") "anonymous account is the fallback"
+
           testCase "requiredPrivileges reaches SELECT tables hidden in subqueries and derived tables"
           <| fun _ ->
               let selectTablesOf sql =

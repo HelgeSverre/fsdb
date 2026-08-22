@@ -547,18 +547,8 @@ let tests =
                   let port = Fsdb.Server.port listener
                   let store = Fsdb.Storage.create ()
 
-                  // The account has to exist: a passwordless `alice` row,
-                  // same shape CREATE USER will write.
-                  Fsdb.Storage.insertRows
-                      store
-                      "mysql"
-                      "user"
-                      (Some [ "Host"; "User"; "plugin"; "authentication_string" ])
-                      [ [ Fsdb.Value.VString "%"
-                          Fsdb.Value.VString "alice"
-                          Fsdb.Value.VString "mysql_native_password"
-                          Fsdb.Value.VString "" ] ]
-                  |> ignore
+                  Fsdb.Auth.createUser store "alice" "%" None |> Result.mapError snd |> Result.defaultWith failtest
+                  Fsdb.Auth.createUser store "alice" "127.0.0.1" None |> Result.mapError snd |> Result.defaultWith failtest
 
                   Fsdb.Server.serve listener store Fsdb.Functions.empty |> Async.StartAsTask |> ignore
 
@@ -579,7 +569,7 @@ let tests =
                       use cmd2 = conn.CreateCommand()
                       cmd2.CommandText <- "SELECT CURRENT_USER"
                       let! current = cmd2.ExecuteScalarAsync() |> Async.AwaitTask
-                      Expect.equal (string current) "alice@%" "paren-less CURRENT_USER works over the wire"
+                      Expect.equal (string current) "alice@127.0.0.1" "the exact peer-address account is selected"
 
                       do! conn.CloseAsync() |> Async.AwaitTask
                   finally

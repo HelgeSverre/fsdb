@@ -601,8 +601,8 @@ let private authSwitchPayload (authData: byte[]) : byte[] =
 /// empty stored hash (no password set) accepts only an *empty* offered
 /// password, exactly like real MySQL — offering one is `1045 (using
 /// password: YES)`. Writes the 1045 ERR itself on denial and returns `None`; returns
-/// `Some seqId` (the sequence id the OK packet must use) on success —
-/// `firstSeq + 1` more when an AuthSwitch round trip happened.
+/// `Some(seqId, account)` on success — `firstSeq + 1` more when an
+/// AuthSwitch round trip happened.
 let private authenticateHandshake
     (client: TcpClient)
     (stream: IO.Stream)
@@ -610,24 +610,26 @@ let private authenticateHandshake
     (store: Storage.Store)
     (authData: byte[])
     (resp: HandshakeResponse)
+    (clientHost: string)
     (firstSeq: byte)
-    : Async<byte option> =
+    : Async<(byte * Auth.Account) option> =
     async {
         let deny (seqId: byte) (usingPassword: bool) =
             async {
                 let msg =
                     sprintf
-                        "Access denied for user '%s'@'localhost' (using password: %s)"
+                        "Access denied for user '%s'@'%s' (using password: %s)"
                         resp.Username
+                        clientHost
                         (if usingPassword then "YES" else "NO")
 
                 do! writePacketAsync stream { SeqId = seqId; Payload = errPayload capabilities 1045 msg } |> Async.Ignore
                 return None
             }
 
-        match Auth.tryUserRow store resp.Username with
+        match Auth.resolveAccount store resp.Username clientHost with
         | None -> return! deny firstSeq (resp.AuthResponse.Length > 0)
-        | Some(cols, row) ->
+        | Some(selected, cols, row) ->
             let stored = Auth.storedPasswordHash cols row
 
             if stored = "" then
@@ -635,11 +637,11 @@ let private authenticateHandshake
                 // (every auth plugin sends a zero-length response for an
                 // empty password, so no AuthSwitch round trip is needed).
                 if resp.AuthResponse.Length = 0 then
-                    return Some firstSeq
+                    return Some(firstSeq, selected)
                 else
                     return! deny firstSeq true
             elif Auth.verifyNative stored authData resp.AuthResponse then
-                return Some firstSeq
+                return Some(firstSeq, selected)
             elif resp.ClientPlugin = Some "mysql_native_password" then
                 // Right plugin, wrong password — no switch will fix it.
                 return! deny firstSeq (resp.AuthResponse.Length > 0)
@@ -652,7 +654,7 @@ let private authenticateHandshake
                 match! readPacketWithTimeoutSeconds Limits.waitTimeoutSeconds client stream with
                 | None -> return None // client gave up; nothing to reply to
                 | Some switchResp when Auth.verifyNative stored authData switchResp.Payload ->
-                    return Some(switchResp.SeqId + 1uy)
+                    return Some(switchResp.SeqId + 1uy, selected)
                 | Some switchResp -> return! deny (switchResp.SeqId + 1uy) (switchResp.Payload.Length > 0)
     }
 
@@ -787,6 +789,14 @@ let private handleConnection
 
                 let handshakeResp = handshakeResp.Value
                 let resp = parseHandshakeResponse handshakeResp.Payload
+                let clientHost =
+                    match client.Client.RemoteEndPoint with
+                    | :? IPEndPoint as endpoint -> endpoint.Address.ToString()
+                    | _ -> ""
+                let displayHost =
+                    match IPAddress.TryParse clientHost with
+                    | true, address when IPAddress.IsLoopback address -> "localhost"
+                    | _ -> clientHost
                 // Effective capabilities: never claim something the client didn't ask for.
                 capabilities <- resp.Capabilities &&& offeredCapabilities
                 // Authenticate before any session state exists; on denial the
@@ -809,12 +819,16 @@ let private handleConnection
                             return None
                         }
                     else
-                        authenticateHandshake client stream capabilities store authData resp (handshakeResp.SeqId + 1uy)
+                        authenticateHandshake client stream capabilities store authData resp clientHost (handshakeResp.SeqId + 1uy)
                 let mutable databaseAccepted = false
+                let selectedAccount = authOkSeq |> Option.map snd |> Option.defaultValue (Auth.account resp.Username "%")
 
                 let session =
                     { Session.create connectionId store with
-                        User = resp.Username
+                        User = selectedAccount.Name
+                        AccountHost = selectedAccount.Host
+                        LoginUser = resp.Username
+                        ClientHost = displayHost
                         Database = resp.Database
                         CustomFunctions = customFunctions
                         Capabilities = capabilities
@@ -824,10 +838,7 @@ let private handleConnection
                 activeSession <- Some session
 
                 let remoteHost =
-                    try
-                        string client.Client.RemoteEndPoint
-                    with _ ->
-                        ""
+                    try string client.Client.RemoteEndPoint with _ -> ""
 
                 // Registered even when auth is about to deny — the command
                 // loop below never runs then, and the connection teardown's
@@ -840,12 +851,12 @@ let private handleConnection
 
                 match authOkSeq with
                 | None -> () // denied: the 1045 is already written, no OK
-                | Some okSeq ->
+                | Some(okSeq, _) ->
                     let databaseAllowed =
                         match resp.Database with
                         | None -> Ok()
                         | Some db when Storage.databaseExists store db -> Ok()
-                        | Some db -> Auth.check store resp.Username [ "CREATE", Auth.OnDb db ]
+                        | Some db -> Auth.checkForAccount store selectedAccount [ "CREATE", Auth.OnDb db ]
 
                     match databaseAllowed with
                     | Error(code, message) ->
@@ -920,7 +931,7 @@ let private handleConnection
                             | Some(Query sql) ->
                                 InformationSchema.recordQuestion ()
                                 if isShutdownStatement sql then
-                                    match Auth.check store session.User [ "SHUTDOWN", Auth.Global ] with
+                                    match Auth.checkForAccount store (Auth.account session.User session.AccountHost) [ "SHUTDOWN", Auth.Global ] with
                                     | Ok() ->
                                         do!
                                             writePacketAsync
@@ -1425,6 +1436,9 @@ let private handleConnection
                                 let session =
                                     { Session.create session.ConnectionId session.Store with
                                         User = session.User
+                                        AccountHost = session.AccountHost
+                                        LoginUser = session.LoginUser
+                                        ClientHost = session.ClientHost
                                         Database = session.Database
                                         CustomFunctions = session.CustomFunctions
                                         Capabilities = session.Capabilities

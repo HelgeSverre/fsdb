@@ -207,6 +207,8 @@ let private expressionVariablesFor (session: Session) (userVariables: Map<string
 
 let private expressionVariables (session: Session) = expressionVariablesFor session session.UserVariables
 
+let private accountOf (session: Session) = Auth.account session.User session.AccountHost
+
 let private registryFor (session: Session) : Functions.Registry =
     let collapseExtension name (extension: Functions.ScalarFunction) registry =
         let invoke args =
@@ -232,6 +234,7 @@ let private registryFor (session: Session) : Functions.Registry =
 
     let database _ = session.Database |> Option.map VString |> Option.defaultValue VNull
     let blockEncryptionMode = lookupVar session "block_encryption_mode" |> Option.flatten |> Option.defaultValue "aes-128-ecb"
+    let loginUser = if session.LoginUser = "" then session.User else session.LoginUser
 
     registry
     |> Functions.registerScalar "AES_ENCRYPT" (Functions.aesEncrypt blockEncryptionMode)
@@ -245,9 +248,9 @@ let private registryFor (session: Session) : Functions.Registry =
         "VERSION"
         (fun _ -> lookupVar session "version" |> Option.flatten |> Option.map VString |> Option.defaultValue VNull)
     |> Functions.registerScalar "CONNECTION_ID" (fun _ -> VInt(int64 session.ConnectionId))
-    |> Functions.registerScalar "CURRENT_USER" (fun _ -> VString(session.User + "@%"))
-    |> Functions.registerScalar "USER" (fun _ -> VString(session.User + "@localhost"))
-    |> Functions.registerScalar "SESSION_USER" (fun _ -> VString(session.User + "@localhost"))
+    |> Functions.registerScalar "CURRENT_USER" (fun _ -> VString(session.User + "@" + session.AccountHost))
+    |> Functions.registerScalar "USER" (fun _ -> VString(loginUser + "@" + session.ClientHost))
+    |> Functions.registerScalar "SESSION_USER" (fun _ -> VString(loginUser + "@" + session.ClientHost))
 
 let private likeSuffix (sql: string) : string option =
     let m = Regex.Match(sql, @"LIKE\s+'([^']*)'\s*$", RegexOptions.IgnoreCase)
@@ -441,7 +444,7 @@ let private handleShowDatabases (session: Session) (sql: string) : QueryResult =
     let store = Session.currentStore session
 
     let columns, rows = InformationSchema.showDatabases store.Catalog (not (Map.isEmpty store.VirtualTables)) (likeSuffix sql)
-    let visible = rows |> List.filter (function | [ Some db ] -> Auth.canSeeDatabase store session.User db | _ -> false)
+    let visible = rows |> List.filter (function | [ Some db ] -> Auth.canSeeDatabaseForAccount store (accountOf session) db | _ -> false)
     ResultSet(columns, visible)
 
 /// The catalog `SHOW COLUMNS`/`DESCRIBE`/`SHOW CREATE TABLE`/`SHOW INDEX`
@@ -856,14 +859,14 @@ let private applySetAction (session: Session) (action: SetAction) : Session =
 
 let private validateSetAction (session: Session) (action: SetAction) : Result<unit, QueryResult> =
     match action with
-    | SetTransactionIsolationAction(GlobalIsolation, _) when not (Auth.hasGlobalPriv session.Store session.User "SUPER") ->
+    | SetTransactionIsolationAction(GlobalIsolation, _) when not (Auth.hasGlobalPrivForAccount session.Store (accountOf session) "SUPER") ->
         Error(Err(1227, "Access denied; you need (at least one of) the SUPER privilege(s) for this operation"))
     | SetTransactionIsolationAction(NextTransactionIsolation, _) when session.Tx.IsSome ->
         Error(Err(1568, "Transaction characteristics can't be changed while a transaction is in progress"))
     | SetTransactionIsolationAction(_, (RepeatableRead | ReadCommitted)) -> Ok()
     | SetTransactionIsolationAction(_, isolation) ->
         Error(Err(1235, sprintf "This version of MySQL doesn't yet support '%s transaction isolation'" (transactionIsolationName isolation)))
-    | SetVarAction(_, _, true) when not (Auth.hasGlobalPriv session.Store session.User "SUPER") ->
+    | SetVarAction(_, _, true) when not (Auth.hasGlobalPrivForAccount session.Store (accountOf session) "SUPER") ->
         Error(Err(1227, "Access denied; you need (at least one of) the SUPER privilege(s) for this operation"))
     | SetVarAction(name, Some value, true) when Limits.isReportableSetting name ->
         Limits.validateSetting name value |> Result.mapError (fun message -> Err(1232, message))
@@ -936,11 +939,12 @@ let private setAutocommit =
 /// check, which would otherwise treat PASSWORD as a session variable. The
 /// optional user part captures everything before `=` (`'bob'@'%'`, `bob`);
 /// `runProbe` strips the quoting/host.
-/// The account name out of a probe-captured `'name'@'host'` / `name@host` /
-/// bare `name` reference — accounts match by name only (see `Auth`), so the
-/// host part is dropped along with any quoting.
-let private userNameOf (userRef: string) : string =
-    userRef.Split('@').[0].Trim().Trim([| '\''; '`'; '"' |])
+let private accountRefOf (userRef: string) =
+    let at = userRef.LastIndexOf '@'
+    let unquote (value: string) = value.Trim().Trim([| '\''; '`'; '"' |])
+    let name = if at < 0 then unquote userRef else unquote userRef[.. at - 1]
+    let host = if at < 0 then "%" else unquote userRef[(at + 1) ..]
+    Auth.account name host
 
 let private setPasswordRe =
     Regex(@"^SET\s+PASSWORD\s*(?:FOR\s+([^=\s]+)\s*)?=\s*'([^']*)'\s*;?$", RegexOptions.IgnoreCase)
@@ -1187,7 +1191,7 @@ let private executeParsed (session: Session) (stmt: Statement) : Session * Query
     // A SELECT into information_schema.processlist / the privilege views
     // scopes its rows to this session's user (unless it holds the revealing
     // privilege) — see `InformationSchema.currentViewer`.
-    InformationSchema.currentViewer.Value <- Some(session.Store, session.User)
+    InformationSchema.currentViewer.Value <- Some(session.Store, accountOf session)
     let dbName = session.Database |> Option.defaultValue defaultDatabase
 
     let execute session =
@@ -1198,9 +1202,9 @@ let private executeParsed (session: Session) (stmt: Statement) : Session * Query
         let access =
             match session.Tx, stmt with
             | Some tx, (Select _ | Union _ | Explain _) when tx.ReadOnly ->
-                Auth.check store session.User (Auth.requiredPrivilegesInStore store dbName stmt)
+                Auth.checkForAccount store (accountOf session) (Auth.requiredPrivilegesInStore store dbName stmt)
             | Some tx, _ when tx.ReadOnly -> Error(1792, "Cannot execute statement in a READ ONLY transaction")
-            | _ -> Auth.check store session.User (Auth.requiredPrivilegesInStore store dbName stmt)
+            | _ -> Auth.checkForAccount store (accountOf session) (Auth.requiredPrivilegesInStore store dbName stmt)
 
         match access with
         | Error(code, msg) -> session, Err(code, msg)
@@ -1220,7 +1224,7 @@ let private executeParsed (session: Session) (stmt: Statement) : Session * Query
         // Same reasoning for the executing account: `CREATE TRIGGER` stamps
         // it as the definer, and a trigger body is checked against that
         // definer rather than whoever's INSERT fired it.
-        store.SessionUser <- session.User
+        store.SessionUser <- session.User + "@" + session.AccountHost
         let registry = registryFor session
 
         let withRecursionDepth body =
@@ -1575,17 +1579,16 @@ let private runProbe (session: Session) (sql: string) (probe: Probe) : Session *
                     |> Map.add "collation_connection" (Some collation) },
             Affected 0UL
     | SetPassword(userOpt, password) ->
-        // `FOR 'name'@'host'` — only the name matters (accounts are matched
-        // by name, see `Auth`); no FOR clause means the session's own user.
-        let name = userOpt |> Option.map userNameOf |> Option.defaultValue session.User
+        // No FOR clause selects the session's authenticated account.
+        let wanted = userOpt |> Option.map accountRefOf |> Option.defaultValue (accountOf session)
         let store = Session.currentStore session
 
         // MySQL's rule: changing your own password is free, anyone else's
         // needs CREATE USER — probes bypass `executeParsed`'s enforcement
         // gate, so this one carries its own check.
-        let required = if name = session.User then [] else [ "CREATE USER", Auth.Global ]
+        let required = if Auth.sameAccount wanted (accountOf session) then [] else [ "CREATE USER", Auth.Global ]
 
-        match Auth.check store session.User required |> Result.bind (fun () -> Auth.setPassword store name "%" password) with
+        match Auth.checkForAccount store (accountOf session) required |> Result.bind (fun () -> Auth.setPassword store wanted.Name wanted.Host password) with
         | Ok() -> session, Affected 0UL
         | Error(code, msg) -> session, Err(code, msg)
     | SetVar -> handleSet session sql
@@ -1752,7 +1755,7 @@ let private runProbe (session: Session) (sql: string) (probe: Probe) : Session *
     | ShowPrivileges -> session, InformationSchema.showPrivileges () |> showResult
     | ShowProcesslist full ->
         let result =
-            InformationSchema.withViewer session.Store session.User (fun () -> InformationSchema.showProcesslist full |> showResult)
+            InformationSchema.withViewer session.Store (accountOf session) (fun () -> InformationSchema.showProcesslist full |> showResult)
 
         session, result
     | ShowTriggers db ->
@@ -1763,8 +1766,8 @@ let private runProbe (session: Session) (sql: string) (probe: Probe) : Session *
     | ShowEvents db -> session, InformationSchema.showEvents (Session.currentStore session).Catalog db |> showResult
     | ShowRoutineStatus -> session, InformationSchema.showRoutineStatus () |> showResult
     | Kill(queryOnly, id) ->
-        let canSeeAll = Auth.hasGlobalPriv session.Store session.User "PROCESS"
-        let canKillAll = Auth.hasGlobalPriv session.Store session.User "SUPER"
+        let canSeeAll = Auth.hasGlobalPrivForAccount session.Store (accountOf session) "PROCESS"
+        let canKillAll = Auth.hasGlobalPrivForAccount session.Store (accountOf session) "SUPER"
 
         match InformationSchema.tryFindProcess id with
         // A caller without PROCESS can't see another user's connection, so
@@ -1857,31 +1860,29 @@ let private runProbe (session: Session) (sql: string) (probe: Probe) : Session *
         let dbName = dbOverride |> Option.map stripBackticks |> Option.defaultValue dbName
         session, InformationSchema.showIndex (catalogWithOverlay session dbName table) dbName table |> showResult
     | ShowGrants userOpt ->
-        // `FOR 'name'@'host'` — the name is what matters (accounts match by
-        // name, see `Auth`); no FOR, or FOR CURRENT_USER[()], means the
-        // session's own user.
-        let name =
+        // No FOR clause or CURRENT_USER selects the authenticated account.
+        let wanted =
             match userOpt with
-            | None -> session.User
-            | Some u when u.Trim().ToUpperInvariant().StartsWith "CURRENT_USER" -> session.User
-            | Some u -> userNameOf u
+            | None -> accountOf session
+            | Some u when u.Trim().ToUpperInvariant().StartsWith "CURRENT_USER" -> accountOf session
+            | Some u -> accountRefOf u
 
-        if name <> session.User && not (Auth.hasGlobalPriv session.Store session.User "SELECT") then
+        if not (Auth.sameAccount wanted (accountOf session)) && not (Auth.hasGlobalPrivForAccount session.Store (accountOf session) "SELECT") then
             // Seeing another account's grants reads `mysql.user`; without
             // SELECT there, MySQL denies with 1142 on that table.
             session, Err(1142, sprintf "SELECT command denied to user '%s'@'localhost' for table 'user'" session.User)
         else
-            match Auth.renderGrants (Session.currentStore session) name with
+            match Auth.renderGrantsForAccount (Session.currentStore session) wanted with
             | Ok(header, lines) -> session, ResultSet([ header ], lines |> List.map (fun l -> [ Some l ]))
             | Error(code, msg) -> session, Err(code, msg)
     | ShowCreateUser userRef ->
-        let name =
+        let wanted =
             if Regex.IsMatch(userRef, @"^CURRENT_USER(?:\(\))?$", RegexOptions.IgnoreCase) then
-                session.User
+                accountOf session
             else
-                userNameOf userRef
+                accountRefOf userRef
 
-        match Auth.renderCreateUser (Session.currentStore session) name with
+        match Auth.renderCreateUserForAccount (Session.currentStore session) wanted with
         | Ok(header, ddl) -> session, ResultSet([ header ], [ [ Some ddl ] ])
         | Error(code, msg) -> session, Err(code, msg)
     | ShowCreateProgram(kind, qualifiedName) ->
@@ -2258,7 +2259,7 @@ let tryPrepareLocalLoad (session: Session) (sql: string) : Result<Parser.LocalLo
 
                 let dbName = session.Database |> Option.defaultValue defaultDatabase
 
-                match Auth.check (Session.currentStore session) session.User (Auth.requiredPrivilegesInStore (Session.currentStore session) dbName statement) with
+                match Auth.checkForAccount (Session.currentStore session) (accountOf session) (Auth.requiredPrivilegesInStore (Session.currentStore session) dbName statement) with
                 | Ok() -> Result.Ok(Some load)
                 | Error(code, message) -> Result.Error(Err(code, message))
 

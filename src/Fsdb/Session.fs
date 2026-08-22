@@ -157,13 +157,14 @@ type Transaction =
 
 type Session =
     { ConnectionId: int
-      /// The account name the client authenticated as at handshake —
-      /// `CURRENT_USER()`/`USER()`/`SHOW GRANTS` and privilege checks read
-      /// it. `"root"` for a session built directly (every test).
-      /// ponytail: name only, no host part — every account is `'name'@'%'`
-      /// and the connecting host renders as `localhost`; add real host
-      /// matching if remote-host account rules are ever needed.
+      /// The selected account's name. `"root"` for a session built directly.
       User: string
+      /// The Host column of the account selected during authentication.
+      AccountHost: string
+      /// The username the client supplied in its handshake.
+      LoginUser: string
+      /// The peer address used for `USER()` and `SESSION_USER()`.
+      ClientHost: string
       Database: string option
       /// Real, known system variables. `string option` per value (not just
       /// `string`) distinguishes a variable MySQL accepts NULL for (e.g.
@@ -272,6 +273,9 @@ let create (connectionId: int) (store: Store) : Session =
 
     { ConnectionId = connectionId
       User = "root"
+      AccountHost = "%"
+      LoginUser = ""
+      ClientHost = "localhost"
       Database = None
       Variables = variables
       UserVariables = Map.empty

@@ -243,10 +243,12 @@ MySQL's 1045/1142/1044/1227 error shapes. `SHOW GRANTS [FOR user]`,
 `SHOW PRIVILEGES` (8.4's 73 rows), `information_schema.USER_PRIVILEGES`, and
 `FLUSH PRIVILEGES` (no-op OK) are served; `DROP DATABASE mysql` is 3552.
 
-Deliberate divergences (each marked `ponytail:` at its code site):
+Accounts select an exact peer address before `localhost` loopback,
+CIDR/netmask, and `%`/`_` patterns; `CURRENT_USER()` reports the selected
+account while `USER()` reports the handshake name and peer host. Accounts
+without a host still default to `'%'`.
 
-- One host per account, matched by name only; the connecting host always
-  renders as `localhost`, accounts default to `'%'`.
+Deliberate divergences (each marked `ponytail:` at its code site):
 - Enforcement follows parsed statements through subqueries, derived tables,
   and CTEs; SHOW/SET text probes remain outside the common privilege gate.
 - No roles, dynamic privileges, column-level privileges, proxy users, or

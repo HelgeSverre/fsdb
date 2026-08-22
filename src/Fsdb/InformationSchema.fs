@@ -864,12 +864,12 @@ let private processes = System.Collections.Concurrent.ConcurrentDictionary<int64
 /// privilege views read it to scope rows to the caller unless the caller
 /// holds the privilege that reveals everyone (`PROCESS`, or a mysql-schema
 /// read for the grant views) — the same information hiding real MySQL does.
-let currentViewer = System.Threading.AsyncLocal<(Store * string) option>()
+let currentViewer = System.Threading.AsyncLocal<(Store * Fsdb.Auth.Account) option>()
 
 /// Runs `f` with the viewer scoped to `store`/`user`, restoring the previous
 /// value afterwards — for probe-path SHOW handlers that build their result
 /// outside the executor (which sets the viewer itself).
-let withViewer (store: Store) (user: string) (f: unit -> 'a) : 'a =
+let withViewer (store: Store) (user: Fsdb.Auth.Account) (f: unit -> 'a) : 'a =
     let previous = currentViewer.Value
     currentViewer.Value <- Some(store, user)
 
@@ -882,7 +882,7 @@ let withViewer (store: Store) (user: string) (f: unit -> 'a) : 'a =
 /// (embedded/internal, or it holds `priv`).
 let private restrictedTo (priv: string) : string option =
     match currentViewer.Value with
-    | Some(store, user) when not (Fsdb.Auth.hasGlobalPriv store user priv) -> Some user
+    | Some(store, user) when not (Fsdb.Auth.hasGlobalPrivForAccount store user priv) -> Some user.Name
     | _ -> None
 
 /// Stamped by `Server.listen` — `SHOW STATUS`'s `Uptime` baseline.
@@ -1403,21 +1403,21 @@ let private scopeRowsToViewer (tableName: string) (columns: ColumnDef list) (row
 
         let visibleSchema (row: Value[]) =
             schemaIndex
-            |> Option.map (fun index -> row.[index] |> Value.toText |> Option.map (Fsdb.Auth.canSeeDatabase store user) |> Option.defaultValue false)
+            |> Option.map (fun index -> row.[index] |> Value.toText |> Option.map (Fsdb.Auth.canSeeDatabaseForAccount store user) |> Option.defaultValue false)
             |> Option.defaultValue true
 
         let visibleObject (row: Value[]) =
             let visibleTable =
                 match schemaIndex, tableIndex with
-                | Some dbIndex, Some nameIndex -> Fsdb.Auth.canSeeTable store user (rowText row dbIndex) (rowText row nameIndex)
+                | Some dbIndex, Some nameIndex -> Fsdb.Auth.canSeeTableForAccount store user (rowText row dbIndex) (rowText row nameIndex)
                 | _ -> true
 
             visibleTable
             && (match tableName with
                 | "VIEWS" ->
-                    Fsdb.Auth.check store user [ "SHOW VIEW", Fsdb.Auth.OnTable(rowText row 1, rowText row 2) ] |> Result.isOk
+                    Fsdb.Auth.checkForAccount store user [ "SHOW VIEW", Fsdb.Auth.OnTable(rowText row 1, rowText row 2) ] |> Result.isOk
                 | "TRIGGERS" ->
-                    Fsdb.Auth.check store user [ "TRIGGER", Fsdb.Auth.OnTable(rowText row 1, rowText row 6) ] |> Result.isOk
+                    Fsdb.Auth.checkForAccount store user [ "TRIGGER", Fsdb.Auth.OnTable(rowText row 1, rowText row 6) ] |> Result.isOk
                 | _ -> true)
 
         rows |> List.filter (fun row -> visibleSchema row && visibleObject row)
