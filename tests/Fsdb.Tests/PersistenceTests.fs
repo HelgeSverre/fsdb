@@ -92,6 +92,68 @@ let private mkCol (name: string) (typ: ColumnType) : ColumnDef =
       Charset = None
       OnUpdateCurrentTimestamp = false }
 
+let private writeLegacyColumn (w: Writer) (name: string) =
+    w.WriteLenEncString name
+    w.WriteByte 0x04uy
+    w.WriteByte 0uy
+    w.WriteByte 1uy
+    w.WriteByte 0uy
+    w.WriteByte 0uy
+    w.WriteByte 0uy
+    w.WriteByte 0uy
+    w.WriteByte 0uy
+    w.WriteByte 0uy
+    w.WriteByte 0uy
+    w.WriteByte 0uy
+
+let private writeLegacyTable (w: Writer) (name: string) =
+    w.WriteLenEncString name
+    w.WriteLenEncString name
+    w.WriteInt32LE 1
+    writeLegacyColumn w "id"
+    w.WriteInt32LE 0
+    w.WriteInt32LE 0
+    w.WriteByte 0uy
+    w.WriteByte 0uy
+    w.WriteInt64LE 0L
+    w.WriteInt64LE 1L
+    w.WriteInt32LE 0
+
+let private legacySnapshot (table: string) =
+    let payload = Writer()
+    payload.WriteInt32LE 1
+    payload.WriteLenEncString defaultDatabase
+    payload.WriteInt32LE 1
+    writeLegacyTable payload table
+    let payload = payload.ToArray()
+    let snapshot = Writer()
+    snapshot.WriteBytes [| 0x46uy; 0x53uy; 0x4Euy; 0x31uy |]
+    snapshot.WriteBytes payload
+    snapshot.WriteInt64LE(int64 payload.Length)
+    snapshot.WriteUInt32LE(crc32 payload)
+    snapshot.ToArray()
+
+let private legacyCreateTableWalRecord (table: string) =
+    let payload = Writer()
+    payload.WriteByte 0x04uy
+    payload.WriteLenEncString defaultDatabase
+    payload.WriteByte 0x03uy
+    payload.WriteLenEncString table
+    payload.WriteInt32LE 1
+    writeLegacyColumn payload "id"
+    payload.WriteInt32LE 0
+    payload.WriteInt32LE 0
+    payload.WriteByte 0uy
+    payload.WriteByte 0uy
+    payload.WriteByte 0uy
+    payload.WriteByte 0uy
+    let payload = payload.ToArray()
+    let record = Writer()
+    record.WriteInt32LE payload.Length
+    record.WriteUInt32LE(crc32 payload)
+    record.WriteBytes payload
+    record.ToArray()
+
 let private rowsOf (store: Store) (dbName: string) (table: string) : Value[] list =
     match scan store dbName table with
     | Ok(_, rows) -> List.ofSeq rows
@@ -950,13 +1012,31 @@ let tests =
               attach dir store
               let columns = [ { mkCol "id" (TInt false) with Comment = "created by import" } ]
               createTable store defaultDatabase "documented" columns [] [] None None |> ignore
+
+              match scan (load dir) defaultDatabase "documented" with
+              | Ok([ column ], _) -> Expect.equal column.Comment "created by import" "the WAL comment survives"
+              | other -> failtestf "expected one WAL-reloaded column, got %A" other
+
               snapshotNow dir store
 
               let reloaded = load dir
 
               match scan reloaded defaultDatabase "documented" with
-              | Ok([ column ], _) -> Expect.equal column.Comment "created by import" "the comment survives"
+              | Ok([ column ], _) -> Expect.equal column.Comment "created by import" "the snapshot comment survives"
               | other -> failtestf "expected one reloaded column, got %A" other
+
+          testCase "pre-comment snapshots and WAL records load with empty comments"
+          <| fun _ ->
+              let dir = tempDataDir ()
+              File.WriteAllBytes(snapshotPath dir, legacySnapshot "from_snapshot")
+              File.WriteAllBytes(walPath dir, legacyCreateTableWalRecord "from_wal")
+
+              let reloaded = load dir
+
+              for table in [ "from_snapshot"; "from_wal" ] do
+                  match scan reloaded defaultDatabase table with
+                  | Ok([ column ], rows) when Seq.isEmpty rows -> Expect.equal column.Comment "" (table + " has no historical comment")
+                  | other -> failtestf "expected legacy table '%s' to load, got %A" table other
 
           testCase "a column's ON UPDATE CURRENT_TIMESTAMP flag survives a restart"
           <| fun _ ->
