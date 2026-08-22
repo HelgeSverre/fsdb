@@ -1038,6 +1038,22 @@ let tests =
                   | Ok([ column ], rows) when Seq.isEmpty rows -> Expect.equal column.Comment "" (table + " has no historical comment")
                   | other -> failtestf "expected legacy table '%s' to load, got %A" table other
 
+          testCase "a pre-comment snapshot replays a comment-aware WAL record"
+          <| fun _ ->
+              let dir = tempDataDir ()
+              File.WriteAllBytes(snapshotPath dir, legacySnapshot "from_snapshot")
+              let column = { mkCol "id" (TInt false) with Comment = "from WAL" }
+              let statement = CreateTable("from_wal", [ column ], [], [], [], false, None, None, None)
+              File.WriteAllBytes(walPath dir, encodeWalRecord (SchemaChanged(defaultDatabase, statement)))
+
+              let reloaded = load dir
+
+              match scan reloaded defaultDatabase "from_snapshot", scan reloaded defaultDatabase "from_wal" with
+              | Ok([ snapshotColumn ], _), Ok([ walColumn ], _) ->
+                  Expect.equal snapshotColumn.Comment "" "the legacy snapshot has no comment"
+                  Expect.equal walColumn.Comment "from WAL" "the new WAL comment survives"
+              | other -> failtestf "expected mixed-format recovery, got %A" other
+
           testCase "a column's ON UPDATE CURRENT_TIMESTAMP flag survives a restart"
           <| fun _ ->
               let dir = tempDataDir ()
