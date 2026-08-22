@@ -4353,7 +4353,7 @@ let private replaceMatches (regex: Regex) (input: Regexp.PreparedInput) (source:
 
     while m.Success do
         let matchStart = max current (Regexp.sourceOffset input m.Index)
-        let matchEnd = Regexp.sourceOffset input (m.Index + m.Length)
+        let matchEnd = max matchStart (Regexp.sourceOffset input (m.Index + m.Length))
         append source current (matchStart - current)
         count <- count + 1
 
