@@ -411,6 +411,34 @@ let tests =
                       "computed expressions keep their declared result metadata"
               | other -> failtestf "expected computed view metadata, got %A" other
 
+          testCase "recursive, union, and decimal aggregate views retain MySQL metadata"
+          <| fun _ ->
+              let store = Fsdb.Storage.create ()
+              let session = Fsdb.Session.create 1 store
+
+              let apply session sql =
+                  let session, result = Fsdb.QueryHandler.handle session sql
+                  expectOk result sql
+                  session
+
+              let session = apply session "CREATE TABLE source (amount DECIMAL(5,2))"
+              let session = apply session "CREATE VIEW recursive_meta AS WITH RECURSIVE seq (n) AS (SELECT 1 UNION ALL SELECT n + 1 FROM seq WHERE n < 2) SELECT n FROM seq"
+              let session = apply session "CREATE VIEW numeric_union_meta AS SELECT amount AS value FROM source UNION ALL SELECT 1234567890"
+              let session = apply session "CREATE VIEW mixed_union_meta AS SELECT amount AS value FROM source UNION ALL SELECT 1234567890 UNION ALL SELECT 'abc'"
+              let session = apply session "CREATE VIEW aggregate_meta AS SELECT SUM(amount) AS total, AVG(amount) AS average FROM source"
+
+              match Fsdb.QueryHandler.handle session "SELECT table_name, column_name, column_default, is_nullable, column_type, collation_name FROM information_schema.columns WHERE table_schema = 'fsdb' AND table_name IN ('recursive_meta', 'numeric_union_meta', 'mixed_union_meta', 'aggregate_meta') ORDER BY table_name, ordinal_position" |> snd with
+              | ResultSet(_, rows) ->
+                  Expect.equal
+                      rows
+                      [ [ Some "aggregate_meta"; Some "total"; None; Some "YES"; Some "decimal(27,2)"; None ]
+                        [ Some "aggregate_meta"; Some "average"; None; Some "YES"; Some "decimal(9,6)"; None ]
+                        [ Some "mixed_union_meta"; Some "value"; None; Some "YES"; Some "varchar(14)"; Some "utf8mb4_0900_ai_ci" ]
+                        [ Some "numeric_union_meta"; Some "value"; None; Some "YES"; Some "decimal(12,2)"; None ]
+                        [ Some "recursive_meta"; Some "n"; None; Some "YES"; Some "bigint"; None ] ]
+                      "recursive, union, and aggregate descriptors retain their MySQL shapes"
+              | other -> failtestf "expected view metadata, got %A" other
+
           testCase "a view reads with its definer privileges and observes later revokes"
           <| fun _ ->
               let store = setup ()

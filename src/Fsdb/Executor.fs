@@ -121,6 +121,10 @@ type private StoredCheck =
       GeneratedName: bool
       Ordinal: int }
 
+type private ViewColumnDescriptor =
+    { Column: ColumnDef
+      NumericParts: (int * int) option }
+
 let private currentViewStack () =
     match box viewStack.Value with
     | null -> Set.empty
@@ -3322,6 +3326,27 @@ and private describeStoredViewColumns (store: Store) (registry: Registry) (schem
             Generated = None
             Comment = "" }
 
+    let describeColumn column =
+        { Column = column
+          NumericParts = decimalParts column.Type }
+
+    let describeLiteral column value =
+        { Column = column
+          NumericParts = literalDecimalParts value |> Option.orElseWith (fun () -> decimalParts column.Type) }
+
+    let renameColumns (names: string list) (columns: ViewColumnDescriptor list) =
+        if names.IsEmpty then
+            Some columns
+        elif names.Length = columns.Length then
+            List.map2
+                (fun (descriptor: ViewColumnDescriptor) name ->
+                    { descriptor with Column = { descriptor.Column with Name = name } })
+                columns
+                names
+            |> Some
+        else
+            None
+
     let computedColumn name ty nullable defaultValue collation =
         { Name = name
           Type = ty
@@ -3346,11 +3371,12 @@ and private describeStoredViewColumns (store: Store) (registry: Registry) (schem
         | TVarBinary length -> Some length
         | _ -> None
 
-    let unionColumn (columns: ColumnDef list) =
+    let unionColumn (columns: ViewColumnDescriptor list) =
         let first = List.head columns
-        let types = columns |> List.map _.Type
+        let definitions = columns |> List.map _.Column
+        let types = definitions |> List.map _.Type
         let collations =
-            columns
+            definitions
             |> List.choose _.Collation
             |> List.choose Collation.tryFind
 
@@ -3359,17 +3385,40 @@ and private describeStoredViewColumns (store: Store) (registry: Registry) (schem
             | [] -> None
             | first :: rest -> rest |> List.fold strictestUnionCollation first |> fun value -> Some value.Name
 
+        let numericParts = columns |> List.map _.NumericParts
+        let allNumeric = numericParts |> List.forall Option.isSome
+
+        let decimalType () =
+            numericParts
+            |> List.choose id
+            |> fun parts ->
+                let scale = parts |> List.map snd |> List.max
+                let integralDigits = parts |> List.map (fun (precision, partScale) -> precision - partScale) |> List.max
+                TDecimal(min 65 (integralDigits + scale), scale)
+
+        let displayLength =
+            function
+            | Some(precision, scale) -> precision + (if scale = 0 then 1 else 2)
+            | None -> 1
+
+        let stringType =
+            let lengths =
+                List.zip definitions numericParts
+                |> List.map (fun (column, parts) -> stringLength column.Type |> Option.defaultValue (displayLength parts))
+
+            lengths |> List.max |> TVarchar
+
         let mergedType =
             match types with
-            | _ when types |> List.exists (function TDecimal _ -> true | _ -> false) && types |> List.forall (fun ty -> decimalParts ty |> Option.isSome) ->
-                let precisions = types |> List.choose (function TDecimal(precision, scale) -> Some(precision, scale) | _ -> None)
-                TDecimal(precisions |> List.map fst |> List.max, precisions |> List.map snd |> List.max)
-            | _ when types |> List.forall (fun ty -> stringLength ty |> Option.isSome) ->
-                types |> List.choose stringLength |> List.max |> TVarchar
-            | _ when types |> List.forall ((=) first.Type) -> first.Type
+            | _ when types |> List.exists (stringLength >> Option.isSome) && types |> List.exists (fun ty -> decimalParts ty |> Option.isSome) -> stringType
+            | _ when allNumeric && types |> List.exists (function TDecimal _ -> true | _ -> false) -> decimalType ()
+            | _ when allNumeric && types |> List.forall ((=) first.Column.Type) -> first.Column.Type
+            | _ when allNumeric -> TBigInt false
+            | _ when types |> List.forall (stringLength >> Option.isSome) -> stringType
+            | _ when types |> List.forall ((=) first.Column.Type) -> first.Column.Type
             | _ -> TText
 
-        let nullable = columns |> List.exists isNullable
+        let nullable = definitions |> List.exists isNullable
 
         let clearedDefault =
             if nullable then
@@ -3393,13 +3442,16 @@ and private describeStoredViewColumns (store: Store) (registry: Registry) (schem
                 | TLongText -> Some(DConst(VString ""))
                 | _ -> None
 
-        computedColumn first.Name mergedType nullable clearedDefault collation
+        describeColumn (computedColumn first.Column.Name mergedType nullable clearedDefault collation)
 
-    let unionColumns (branches: ColumnDef list list) =
+    let unionColumns (branches: ViewColumnDescriptor list list) =
         match branches with
         | [] -> None
         | first :: _ when branches |> List.exists (fun columns -> columns.Length <> first.Length) -> None
-        | _ -> branches |> List.transpose |> List.map unionColumn |> Some
+        | first :: rest ->
+            rest
+            |> List.fold (fun merged branch -> List.map2 (fun left right -> unionColumn [ left; right ]) merged branch) first
+            |> Some
 
     let rec describeBody (seen: Set<string * string>) dbName ctes =
         function
@@ -3421,7 +3473,7 @@ and private describeStoredViewColumns (store: Store) (registry: Registry) (schem
             if tableRef.Database.IsNone && Map.containsKey (tableRef.Table.ToLowerInvariant()) ctes then
                 Map.tryFind (tableRef.Table.ToLowerInvariant()) ctes
             elif System.String.Equals(tableDb, "information_schema", System.StringComparison.OrdinalIgnoreCase) then
-                InformationSchema.scan store.Catalog tableRef.Table None |> Option.map fst
+                InformationSchema.scan store.Catalog tableRef.Table None |> Option.map (fst >> List.map describeColumn)
             else
                 match tryStoredView store tableDb tableRef.Table with
                 | Some(view: StoredView) ->
@@ -3437,21 +3489,39 @@ and private describeStoredViewColumns (store: Store) (registry: Registry) (schem
                             | Union(first, rest, orderBy, limit, offset) ->
                                 describeBody (Set.add key seen) view.Schema Map.empty (UnionSelect(first, rest, orderBy, limit, offset))
                             | _ -> None)
-                        |> Option.bind (fun (columns: ColumnDef list) ->
+                        |> Option.bind (fun columns ->
                             let declaredColumns: string list = view.Columns
 
-                            if declaredColumns.IsEmpty || declaredColumns.Length = columns.Length then
-                                if declaredColumns.IsEmpty then Some columns
-                                else Some(List.map2 (fun (column: ColumnDef) columnName -> { column with Name = columnName }) columns declaredColumns)
-                            else
-                                None)
-                | None -> scan store tableDb tableRef.Table |> Result.toOption |> Option.map fst
+                            renameColumns declaredColumns columns)
+                | None -> scan store tableDb tableRef.Table |> Result.toOption |> Option.map (fst >> List.map describeColumn)
         | FromSubquery(body, _)
         | FromLateral(body, _) -> describeBody seen dbName ctes body
-        | FromJsonTable(_, _, columns, _) -> Some(jsonTableColumnDefs columns)
+        | FromJsonTable(_, _, columns, _) -> jsonTableColumnDefs columns |> List.map describeColumn |> Some
 
     and describeSelect seen dbName inheritedCtes (select: SelectStmt) =
         let sourceItems = (select.From |> Option.toList) @ (select.Joins |> List.map _.Table)
+
+        let describeCte ctes (cte: CommonTableExpr) =
+            match cte.Recursive, cte.Body with
+            | true, UnionSelect(anchor, recursiveBranches, _, _, _) ->
+                describeSelect seen dbName ctes anchor
+                |> Option.bind (renameColumns cte.CteColumns)
+                |> Option.bind (fun anchorColumns ->
+                    let scope = Map.add (cte.CteName.ToLowerInvariant()) anchorColumns ctes
+
+                    recursiveBranches
+                    |> List.map (snd >> describeSelect seen dbName scope)
+                    |> fun branches ->
+                        if branches |> List.forall Option.isSome then
+                            anchorColumns :: (branches |> List.choose id)
+                            |> unionColumns
+                            |> Option.map (List.map (fun descriptor ->
+                                { descriptor with Column = { descriptor.Column with Nullable = true; Default = None } }))
+                        else
+                            None)
+            | _ ->
+                describeBody seen dbName ctes cte.Body
+                |> Option.bind (renameColumns cte.CteColumns)
 
         let ctes =
             select.Ctes
@@ -3459,15 +3529,9 @@ and private describeStoredViewColumns (store: Store) (registry: Registry) (schem
                 (fun resolved cte ->
                     resolved
                     |> Option.bind (fun ctes ->
-                        describeBody seen dbName ctes cte.Body
+                        describeCte ctes cte
                         |> Option.bind (fun columns ->
-                            if cte.CteColumns.IsEmpty then
-                                Some(Map.add (cte.CteName.ToLowerInvariant()) columns ctes)
-                            elif cte.CteColumns.Length = columns.Length then
-                                let columns = List.map2 (fun (column: ColumnDef) name -> { column with Name = name }) columns cte.CteColumns
-                                Some(Map.add (cte.CteName.ToLowerInvariant()) columns ctes)
-                            else
-                                None)))
+                            Some(Map.add (cte.CteName.ToLowerInvariant()) columns ctes))))
                 (Some inheritedCtes)
 
         ctes
@@ -3481,13 +3545,17 @@ and private describeStoredViewColumns (store: Store) (registry: Registry) (schem
                         |> Option.map (fun columns -> sources @ [ fromItemQualifier item, columns ])))
                 (Some [])
             |> Option.map (fun sources ->
-            let columns = sources |> List.collect snd
-            let qualifiers = qualifierRanges sources
+            let descriptors = sources |> List.collect snd
+            let columns = descriptors |> List.map _.Column
+            let qualifiers =
+                sources
+                |> List.map (fun (qualifier, source) -> qualifier, source |> List.map _.Column)
+                |> qualifierRanges
             let context = contextFactory store registry dbName (columnIndexOf columns) qualifiers None (probeRow columns)
 
             let columnForExpression name expression =
                 match tryColumnDefForExpr context expression with
-                | Some column -> directProjection name column
+                | Some column -> directProjection name column |> describeColumn
                 | None ->
                     let concatColumn =
                         match expression with
@@ -3527,22 +3595,38 @@ and private describeStoredViewColumns (store: Store) (registry: Registry) (schem
 
                     let literalColumn =
                         match expression with
-                        | Lit(VInt _) -> Some(computedColumn name (TInt false) false (Some(DConst(VInt 0L))) None)
-                        | Lit(VUInt _) -> Some(computedColumn name (TBigInt true) false (Some(DConst(VInt 0L))) None)
+                        | Lit(VInt value) ->
+                            computedColumn name (TInt false) false (Some(DConst(VInt 0L))) None
+                            |> fun column -> describeLiteral column (VInt value)
+                            |> Some
+                        | Lit(VUInt value) ->
+                            computedColumn name (TBigInt true) false (Some(DConst(VInt 0L))) None
+                            |> fun column -> describeLiteral column (VUInt value)
+                            |> Some
                         | Lit(VDecimal value) ->
                             literalDecimalParts (VDecimal value)
-                            |> Option.map (fun (precision, scale) -> computedColumn name (TDecimal(precision, scale)) false (Some(decimalDefault scale)) None)
-                        | Lit(VDouble _) -> Some(computedColumn name TDouble false (Some(DConst(VInt 0L))) None)
+                            |> Option.map (fun (precision, scale) ->
+                                computedColumn name (TDecimal(precision, scale)) false (Some(decimalDefault scale)) None
+                                |> fun column -> describeLiteral column (VDecimal value))
+                        | Lit(VDouble _) -> Some(computedColumn name TDouble false (Some(DConst(VInt 0L))) None |> describeColumn)
                         | Lit(VString text) ->
-                            Some(computedColumn name (TVarchar(text.EnumerateRunes() |> Seq.length)) false (Some(DConst(VString ""))) (Some "utf8mb4_0900_ai_ci"))
-                        | Lit VNull -> Some(computedColumn name (TVarBinary 0) true None None)
+                            Some(computedColumn name (TVarchar(text.EnumerateRunes() |> Seq.length)) false (Some(DConst(VString ""))) (Some "utf8mb4_0900_ai_ci") |> describeColumn)
+                        | Lit VNull -> Some(computedColumn name (TVarBinary 0) true None None |> describeColumn)
                         | _ -> None
 
                     let arithmeticColumn =
                         match expression with
                         | BinOp((Add | Sub | Mul | Div), left, right) ->
-                            match parts left, parts right with
-                            | Some(leftPrecision, leftScale), Some(rightPrecision, rightScale) ->
+                            let isDecimal expression =
+                                match tryColumnDefForExpr context expression with
+                                | Some { Type = TDecimal _ } -> true
+                                | _ ->
+                                    match expression with
+                                    | Lit(VDecimal _) -> true
+                                    | _ -> false
+
+                            match isDecimal left || isDecimal right, parts left, parts right with
+                            | true, Some(leftPrecision, leftScale), Some(rightPrecision, rightScale) ->
                                 let precision, scale =
                                     match expression with
                                     | BinOp((Add | Sub), _, _) ->
@@ -3563,6 +3647,20 @@ and private describeStoredViewColumns (store: Store) (registry: Registry) (schem
                         match expression with
                         | FuncCall(functionName, _) when functionName.Equals("COUNT", System.StringComparison.OrdinalIgnoreCase) ->
                             Some(computedColumn name (TBigInt false) false (Some(DConst(VInt 0L))) None)
+                        | FuncCall(functionName, [ argument ])
+                            when functionName.Equals("SUM", System.StringComparison.OrdinalIgnoreCase) ->
+                            tryColumnDefForExpr context argument
+                            |> Option.bind (fun column ->
+                                decimalParts column.Type
+                                |> Option.map (fun (precision, scale) ->
+                                    computedColumn name (TDecimal(min 65 (precision + 22), scale)) true None None))
+                        | FuncCall(functionName, [ argument ])
+                            when functionName.Equals("AVG", System.StringComparison.OrdinalIgnoreCase) ->
+                            tryColumnDefForExpr context argument
+                            |> Option.bind (fun column ->
+                                decimalParts column.Type
+                                |> Option.map (fun (precision, scale) ->
+                                    computedColumn name (TDecimal(min 65 (precision + 4), min 30 (scale + 4))) true None None))
                         | FuncCall(functionName, [ argument ])
                             when functionName.Equals("MIN", System.StringComparison.OrdinalIgnoreCase)
                                  || functionName.Equals("MAX", System.StringComparison.OrdinalIgnoreCase) ->
@@ -3589,26 +3687,27 @@ and private describeStoredViewColumns (store: Store) (registry: Registry) (schem
 
                     match literalColumn, comparisonColumn, aggregateColumn, arithmeticColumn, concatColumn, metadataOfExpr context expression with
                     | Some column, _, _, _, _, _ -> column
-                    | _, Some column, _, _, _, _ -> column
-                    | _, _, Some column, _, _, _ -> column
-                    | _, _, _, Some column, _, _ -> column
-                    | _, _, _, _, Some column, _ -> column
+                    | _, Some column, _, _, _, _ -> describeColumn column
+                    | _, _, Some column, _, _, _ -> describeColumn column
+                    | _, _, _, Some column, _, _ -> describeColumn column
+                    | _, _, _, _, Some column, _ -> describeColumn column
                     | _, _, _, _, _, Some metadata ->
-                        deriveColumns [ name ] [ keyCollation context expression ] [ metadata ] |> List.head
-                    | _ -> computedColumn name TText true None (Some "utf8mb4_0900_ai_ci")
+                        deriveColumns [ name ] [ keyCollation context expression ] [ metadata ] |> List.head |> describeColumn
+                    | _ -> computedColumn name TText true None (Some "utf8mb4_0900_ai_ci") |> describeColumn
 
             select.Projections
             |> List.collect (fun (expression, alias) ->
                 match expression with
-                | Star None -> columns
+                | Star None -> descriptors
                 | Star(Some qualifier) ->
                     qualifiers
                     |> Map.tryFind (qualifier.ToLowerInvariant())
-                    |> Option.map fst
+                    |> Option.map (fst >> List.map describeColumn)
                     |> Option.defaultValue []
                 | _ -> [ columnForExpression (alias |> Option.defaultValue (exprLabel expression)) expression ])))
 
     sourceColumns Set.empty schema Map.empty (FromTable { Database = None; Table = name; Alias = None })
+    |> Option.map (List.map _.Column)
 
 and private tryInformationSchemaNarrow
     (store: Store)
