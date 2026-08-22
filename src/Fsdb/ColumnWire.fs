@@ -64,6 +64,7 @@ let metadataOfType (ty: ColumnType) : ColumnMetadata =
     | TTime fsp ->
         { columnMetadata TypeTime with
             ColumnLength = uint32 (if fsp = 0 then 10 else 11 + fsp)
+            Flags = BinaryFlag
             Decimals = byte fsp }
     | TYear -> { columnMetadata TypeYear with ColumnLength = 4u }
     | TJson -> { columnMetadata TypeVarString with ColumnLength = UInt32.MaxValue }

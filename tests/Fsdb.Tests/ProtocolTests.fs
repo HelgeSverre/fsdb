@@ -224,6 +224,23 @@ let tests =
               Expect.equal (reader.ReadByte ()) TypeBit "BIT type"
               Expect.isTrue (reader.ReadInt16LE () &&& int UnsignedFlag <> 0) "unsigned metadata"
 
+          testCase "TIME metadata advertises binary collation and flags"
+          <| fun _ ->
+              let metadata = metadataOfType (TTime 6)
+              let value = VTime(tryParseTimeValue "01:02:03.123456" |> Option.get)
+              Expect.isTrue (metadata.Flags &&& BinaryFlag <> 0us) "declared binary flag"
+              Expect.isTrue ((mysqlMetadataOf value).Flags &&& BinaryFlag <> 0us) "value binary flag"
+
+              let reader = Reader(columnDefPayload { Name = "elapsed"; Metadata = metadata })
+              for _ in 1..6 do
+                  reader.ReadLenEncString() |> ignore
+              reader.ReadLenEncInt() |> ignore
+              Expect.equal (reader.ReadInt16LE ()) BinaryCollation "binary collation"
+              Expect.equal (reader.ReadInt32LE ()) 17 "display length"
+              Expect.equal (reader.ReadByte ()) TypeTime "TIME type"
+              Expect.isTrue (reader.ReadInt16LE () &&& int BinaryFlag <> 0) "wire binary flag"
+              Expect.equal (reader.ReadByte ()) 6uy "fractional precision"
+
           testCase "binary protocol BLOB parameters decode as raw bytes"
           <| fun _ ->
               let bytes = [| 0x00uy; 0xffuy; 0x80uy |]

@@ -1048,7 +1048,7 @@ let mysqlMetadataOf (v: Value) : ColumnMetadata =
     | VBytes _ -> { columnMetadata TypeBlob with Flags = BlobFlag ||| BinaryFlag }
     | VDate _ -> columnMetadata TypeDate
     | VDateTime _ -> columnMetadata TypeDateTime
-    | VTime _ -> columnMetadata TypeTime
+    | VTime _ -> { columnMetadata TypeTime with Flags = BinaryFlag }
     | VZeroDate _ -> columnMetadata TypeDate
     | VZeroDateTime _ -> columnMetadata TypeDateTime
 
