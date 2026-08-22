@@ -4466,7 +4466,7 @@ let tests =
                     match
                         runDefault
                             store
-                            "SELECT (1, 2) = (1, 2) AS eq, (1, NULL) = (1, NULL) AS unknown_eq, (1, NULL) < (2, 0) AS first_decides, (1, NULL) < (1, 0) AS unknown_order, (NULL, 1) <=> (NULL, 1) AS null_safe, ((1, 2), 3) = ((1, 2), 3) AS nested_eq, ((1, NULL), 3) < ((2, 0), 0) AS nested_first_decides"
+                            "SELECT ROW(1, 2) = (1, 2) AS eq, (1, NULL) = ROW(1, NULL) AS unknown_eq, ROW(1, NULL) < (2, 0) AS first_decides, (1, NULL) < ROW(1, 0) AS unknown_order, ROW(NULL, 1) <=> (NULL, 1) AS null_safe, ROW((1, 2), 3) = ROW(ROW(1, 2), 3) AS nested_eq, ((1, NULL), 3) < ROW((2, 0), 0) AS nested_first_decides"
                     with
                     | ResultSet(_, [ [ Some "1"; None; Some "1"; None; Some "1"; Some "1"; Some "1" ] ]) -> ()
                     | other -> failtestf "expected row comparison results, got %A" other
@@ -4477,6 +4477,10 @@ let tests =
                     match runDefault store "SELECT a, b FROM pairs WHERE (a, b) = (1, 2) OR (a, b) > (1, 9) ORDER BY a" with
                     | ResultSet(_, [ [ Some "1"; Some "2" ]; [ Some "2"; Some "0" ]; [ Some "3"; Some "4" ] ]) -> ()
                     | other -> failtestf "expected lexicographic row filtering, got %A" other
+
+                    match runDefault store "SELECT a, b FROM pairs WHERE ROW(a, b) IN (ROW(1, 2), (3, 4)) ORDER BY a" with
+                    | ResultSet(_, [ [ Some "1"; Some "2" ]; [ Some "3"; Some "4" ] ]) -> ()
+                    | other -> failtestf "expected ROW IN matches, got %A" other
 
                 testCase "row IN supports literal candidates and multi-column subqueries"
                 <| fun _ ->

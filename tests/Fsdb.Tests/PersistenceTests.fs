@@ -1578,7 +1578,7 @@ let tests =
                   + "like_esc INT AS (name LIKE '50!%' ESCAPE '!') STORED, "
                   + "in_set INT AS (a IN (1, 2, 3)) STORED, "
                   + "betw INT AS (a BETWEEN 1 AND 10) STORED, "
-                  + "row_eq INT AS ((a, name) = (5, '50%')) STORED, "
+                  + "row_eq INT AS (ROW(a, name) = ROW(5, '50%')) STORED, "
                   + "casted VARCHAR(20) AS (CAST(a AS CHAR)) STORED, "
                   + "conc VARCHAR(30) AS (CONCAT('x-', a)) STORED)"
 

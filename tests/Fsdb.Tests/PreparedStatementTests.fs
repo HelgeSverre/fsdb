@@ -127,6 +127,24 @@ let tests =
                   | other -> failtestf "expected the bound name back, got %A" other
               | other -> failtestf "expected a parsed statement with 2 params, got %A" other
 
+          testCase "a prepared ROW predicate binds each constructor field"
+          <| fun _ ->
+              let session = create 1 (Fsdb.Storage.create ())
+              let sql = "SELECT ROW(?, ?) IN (ROW(1, 2), ROW(3, 4)) AS matches"
+
+              match prepareStatement sql with
+              | Result.Ok(Some ast, 2) ->
+                  let statement =
+                      { Ast = Some ast
+                        Sql = sql
+                        ParamCount = 2
+                        LastParamTypes = None }
+
+                  match executePrepared session statement [ VInt 3L; VInt 4L ] |> snd with
+                  | ResultSet(_, [ [ Some "1" ] ]) -> ()
+                  | other -> failtestf "expected bound ROW predicate to match, got %A" other
+              | other -> failtestf "expected a parsed ROW predicate with 2 params, got %A" other
+
           testCase "a backtracked atom does not double-count its placeholder, and renumbering binds it correctly"
           <| fun _ ->
               // CONVERT(?, x) makes `convertUsingAtom` consume the `?` then

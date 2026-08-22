@@ -486,6 +486,32 @@ let tests =
                         ))
                         "row constructor AST"
 
+                testCase "ROW constructors parse as rows, including nested and parameterized forms"
+                <| fun _ ->
+                    Expect.equal
+                        (parseOk "SELECT ROW(a, b) = (1, 2), ROW((1, 2), 3) = ROW(ROW(1, 2), 3), ROW(?, ?) IN (ROW(1, 2), (3, 4)) FROM t")
+                        (mkSelect(
+                            [ BinOp(Eq, Row [ Col "a"; Col "b" ], Row [ Lit(VInt 1L); Lit(VInt 2L) ]), None
+                              BinOp(
+                                  Eq,
+                                  Row [ Row [ Lit(VInt 1L); Lit(VInt 2L) ]; Lit(VInt 3L) ],
+                                  Row [ Row [ Lit(VInt 1L); Lit(VInt 2L) ]; Lit(VInt 3L) ]
+                              ),
+                              None
+                              In(Row [ Placeholder 0; Placeholder 1 ], [ Row [ Lit(VInt 1L); Lit(VInt 2L) ]; Row [ Lit(VInt 3L); Lit(VInt 4L) ] ]), None ],
+                            Some "t",
+                            None,
+                            [],
+                            None,
+                            None
+                        ))
+                        "ROW constructor AST"
+
+                    for sql in [ "SELECT ROW()"; "SELECT ROW(1)" ] do
+                        match parse sql with
+                        | Error _ -> ()
+                        | Ok statement -> failtestf "expected %s to be a syntax error, got %A" sql statement
+
                 testCase "BETWEEN and NOT BETWEEN"
                 <| fun _ ->
                     Expect.equal

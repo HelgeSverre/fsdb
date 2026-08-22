@@ -696,6 +696,13 @@ let private weightStringAtom: Parser<Expr, unit> =
 
         FuncCall("WEIGHT_STRING", [ argument ])
 
+let private rowConstructorAtom: Parser<Expr, unit> =
+    keyword "ROW"
+    >>. between (sym "(") (sym ")") (sepBy1 expr (sym ","))
+    >>= function
+        | _ :: _ :: _ as values -> preturn (Row values)
+        | _ -> fail "ROW requires at least two expressions"
+
 let private genericFuncCall: Parser<Expr, unit> =
     attempt (
         (many1Satisfy2 isIdentStart isIdentChar .>> ws)
@@ -726,7 +733,7 @@ let private trimAtom: Parser<Expr, unit> =
         |>> fun ((mode, removed), source) -> FuncCall(mode, [ removed; source ])
     )
 
-let private funcCallAtom: Parser<Expr, unit> = choice [ attempt convertUsingAtom; attempt weightStringAtom; trimAtom; genericFuncCall ]
+let private funcCallAtom: Parser<Expr, unit> = choice [ attempt convertUsingAtom; attempt weightStringAtom; trimAtom; rowConstructorAtom; genericFuncCall ]
 
 /// `GROUP_CONCAT([DISTINCT] expr [ORDER BY key [ASC|DESC], ...] [SEPARATOR
 /// 'str'])` — parsed separately from `funcCallAtom` rather than folding
