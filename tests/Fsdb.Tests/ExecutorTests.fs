@@ -4594,6 +4594,18 @@ let tests =
                     | ResultSet(_, [ [ Some "0"; Some "0" ] ]) -> ()
                     | other -> failtestf "expected binary regular expressions to remain case-sensitive, got %A" other
 
+                    match runDefault store "SELECT REGEXP_LIKE('Hello', '^hello$' COLLATE utf8mb4_0900_ai_ci), REGEXP_LIKE('Σ', '^ς$')" with
+                    | ResultSet(_, [ [ Some "1"; Some "1" ] ]) -> ()
+                    | other -> failtestf "expected explicit pattern collation and sigma folding, got %A" other
+
+                    match runDefault store "SELECT REGEXP_LIKE('x' COLLATE utf8mb4_0900_ai_ci, 'x' COLLATE utf8mb4_bin)" with
+                    | Err(1267, _) -> ()
+                    | other -> failtestf "expected conflicting explicit collations to fail with 1267, got %A" other
+
+                    match runDefault store "SELECT REGEXP_LIKE(_binary'x', 'x')" with
+                    | Err(3995, _) -> ()
+                    | other -> failtestf "expected mixed binary and text operands to fail with 3995, got %A" other
+
                 testCase "REGEXP on a catastrophically-backtracking pattern errors instead of hanging"
                 <| fun _ ->
                     // Every `Regex` in `regexpOp` must carry a `MatchTimeout`

@@ -4,6 +4,7 @@
 module Fsdb.Regexp
 
 open System
+open System.Text
 open System.Text.RegularExpressions
 
 type RegexError =
@@ -47,10 +48,16 @@ let private posixClasses =
 let private normalizePattern (options: RegexOptions) (pattern: string) : string =
     let posix = posixClasses |> List.fold (fun (value: string) (source, target) -> value.Replace(source, target, StringComparison.Ordinal)) pattern
 
-    if options.HasFlag RegexOptions.IgnoreCase then
-        posix.Replace("Σ", "[Σσς]", StringComparison.Ordinal).Replace("σ", "[Σσς]", StringComparison.Ordinal).Replace("ς", "[Σσς]", StringComparison.Ordinal)
+    if not (options.HasFlag RegexOptions.IgnoreCase) then posix
     else
-        posix
+        let builder = StringBuilder(posix.Length)
+
+        for character in posix do
+            match character with
+            | 'Σ' | 'σ' | 'ς' -> builder.Append "[Σσς]" |> ignore
+            | _ -> builder.Append character |> ignore
+
+        builder.ToString()
 
 let prepareInput (matchType: string option) (text: string) =
     let multiline = matchType |> Option.defaultValue "" |> String.exists ((=) 'm')

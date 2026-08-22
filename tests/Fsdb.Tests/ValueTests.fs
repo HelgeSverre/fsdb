@@ -1842,6 +1842,22 @@ let tests =
 
                           expects 3691 "Mismatched parenthesis in regular expression." [ VString "abc"; VString "(" ]
                           expects 1210 "Incorrect arguments to regexp_like" [ VString "abc"; VString "a"; VString "z" ]
+                          expects 3696 "The regular expression contains an unclosed bracket expression." [ VString "abc"; VString "[" ]
+
+                      testCase "REGEXP functions propagate every supplied optional NULL"
+                      <| fun _ ->
+                          Expect.equal (call "REGEXP_LIKE" [ VString "x"; VString "x"; VNull ]) VNull "match type"
+                          Expect.equal (call "REGEXP_INSTR" [ VString "x"; VString "x"; VNull ]) VNull "position"
+                          Expect.equal (call "REGEXP_SUBSTR" [ VString "x"; VString "x"; VInt 1L; VNull ]) VNull "occurrence"
+                          Expect.equal (call "REGEXP_REPLACE" [ VString "x"; VString "x"; VString "y"; VNull ]) VNull "position"
+
+                      testCase "REGEXP functions support ICU character classes and line modes"
+                      <| fun _ ->
+                          Expect.equal (call "REGEXP_LIKE" [ VString "A"; VString "[[:alpha:]]" ]) (VInt 1L) "alpha"
+                          Expect.equal (call "REGEXP_LIKE" [ VString "7"; VString "[[:digit:]]" ]) (VInt 1L) "digit"
+                          Expect.equal (call "REGEXP_LIKE" [ VString "_"; VString "[[:word:]]" ]) (VInt 1L) "word"
+                          Expect.equal (call "REGEXP_LIKE" [ VString "a\rb"; VString "^b$"; VString "m" ]) (VInt 1L) "CR is a line ending without u"
+                          Expect.equal (call "REGEXP_LIKE" [ VString "a\rb"; VString "^b$"; VString "mu" ]) (VInt 0L) "u keeps CR out of multiline anchors"
 
                       testCase "REGEXP_SUBSTR returns the matched substring, or NULL if none"
                       <| fun _ ->
