@@ -466,6 +466,26 @@ let tests =
                         ))
                         "in / not in"
 
+                testCase "row constructors remain expressions inside comparisons and IN"
+                <| fun _ ->
+                    Expect.equal
+                        (parseOk "SELECT (a, b) = (1, 2), (a, b) IN ((1, 2), (3, 4)) FROM t")
+                        (mkSelect(
+                            [ BinOp(Eq, Row [ col "a"; col "b" ], Row [ Lit(VInt 1L); Lit(VInt 2L) ]), None
+                              In(
+                                  Row [ col "a"; col "b" ],
+                                  [ Row [ Lit(VInt 1L); Lit(VInt 2L) ]
+                                    Row [ Lit(VInt 3L); Lit(VInt 4L) ] ]
+                              ),
+                              None ],
+                            Some "t",
+                            None,
+                            [],
+                            None,
+                            None
+                        ))
+                        "row constructor AST"
+
                 testCase "BETWEEN and NOT BETWEEN"
                 <| fun _ ->
                     Expect.equal

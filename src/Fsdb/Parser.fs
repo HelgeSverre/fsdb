@@ -628,6 +628,11 @@ let private statement, statementRef = createParserForwardedToRef<Statement, unit
 
 let private parenExpr: Parser<Expr, unit> = between (sym "(") (sym ")") expr
 
+/// A comma distinguishes a row constructor from ordinary grouping, so
+/// `(a)` stays the scalar expression `a` while `(a, b)` keeps both operands.
+let private rowConstructor: Parser<Expr, unit> =
+    between (sym "(") (sym ")") (pipe2 expr (many1 (sym "," >>. expr)) (fun first rest -> Row(first :: rest)))
+
 let private starAtom: Parser<Expr, unit> = pstring "*" >>. ws >>% Star None
 
 /// MySQL's grammar allows `DISTINCT` inside a call only for these
@@ -1313,6 +1318,7 @@ let private matchAgainstAtom: Parser<Expr, unit> =
 let private atom: Parser<Expr, unit> =
     choice
         [ subqueryExpr
+          attempt rowConstructor
           parenExpr
           starAtom
           castExpr

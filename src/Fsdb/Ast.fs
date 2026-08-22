@@ -121,6 +121,9 @@ type Expr =
     | AssignUserVariable of variable: UserVariableRef * value: Expr
     | Col of name: string
     | QualifiedCol of table: string * column: string
+    /// A parenthesized value list such as `(a, b)`. Row values only produce a
+    /// scalar result when a row-aware predicate consumes them.
+    | Row of Expr list
     | BinOp of Op * Expr * Expr
     | Not of Expr
     | IsNull of Expr
