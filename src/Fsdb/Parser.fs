@@ -1646,7 +1646,7 @@ let private parsedColumnDef: Parser<ColumnDef * CheckConstraintDef list, unit> =
               Unique = List.contains MUnique mods
               OnUpdateCurrentTimestamp = List.contains MOnUpdateCurrentTimestamp mods
               Generated = mods |> List.tryPick (function MGenerated(e, k) -> Some(e, k) | _ -> None)
-              Comment = mods |> List.tryPick (function MComment text -> Some text | _ -> None) |> Option.defaultValue ""
+              Comment = mods |> List.rev |> List.tryPick (function MComment text -> Some text | _ -> None) |> Option.defaultValue ""
               Collation = mods |> List.tryPick (function MCollate c -> Some c | _ -> None)
               Charset =
                   mods

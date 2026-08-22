@@ -152,6 +152,12 @@ let tests =
                   Expect.isFalse (ddl.Contains "`plain` int DEFAULT NULL COMMENT") "empty comments are omitted"
               | other -> failtestf "expected SHOW CREATE TABLE output, got %A" other
 
+              run store "CREATE TABLE repeated_comment (id INT COMMENT 'first' COMMENT 'last')" |> ignore
+
+              match run store "SELECT column_comment FROM information_schema.columns WHERE table_name = 'repeated_comment'" with
+              | ResultSet(_, [ [ Some "last" ] ]) -> ()
+              | other -> failtestf "expected the final repeated comment, got %A" other
+
           testCase "BIT defaults render as MySQL bit literals"
           <| fun _ ->
               let store = setup ()
