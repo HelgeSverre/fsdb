@@ -2000,6 +2000,18 @@ let tests =
                     | Ok(Select { Projections = projections }) -> Expect.equal projections expected "variable expressions"
                     | other -> failtestf "expected variable expressions, got %A" other
 
+                testCase "quoted user-variable names parse with their MySQL escapes"
+                <| fun _ ->
+                    let expected =
+                        [ UserVariable "has space", None
+                          UserVariable "single'quote", None
+                          UserVariable "double\"quote", None
+                          UserVariable "back`tick", None ]
+
+                    match parse "SELECT @`has space`, @'single''quote', @\"double\"\"quote\", @`back``tick`" with
+                    | Ok(Select { Projections = projections }) -> Expect.equal projections expected "quoted variables"
+                    | other -> failtestf "expected quoted variables, got %A" other
+
                 testCase "1000 levels of nested parens is a syntax error, not a stack overflow"
                 <| fun _ ->
                     let deep = String.replicate 1000 "(" + "1" + String.replicate 1000 ")"

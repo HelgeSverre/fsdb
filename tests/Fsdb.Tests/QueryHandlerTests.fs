@@ -814,6 +814,43 @@ let tests =
               | ResultSet([ "@user_var" ], [ [ Some "1" ] ]) -> ()
               | other -> failtestf "expected user_var to read back as 1, got %A" other
 
+          testCase "quoted user-variable names retain MySQL escaping and case-insensitivity in SET and expressions"
+          <| fun _ ->
+              let session = create 1 (Fsdb.Storage.create ())
+
+              let session, setResult =
+                  handle
+                      session
+                      "SET @`has, comma` = 1, @'sp ace' = 2, @\"double-name\" = 3, @`back``tick, name` = 4, @'single''quote' = 5"
+
+              match setResult with
+              | Affected 0UL -> ()
+              | other -> failtestf "expected quoted assignments to succeed, got %A" other
+
+              match handle session "SELECT @'HAS, COMMA', @`sp ace`, @\"DOUBLE-NAME\", @`BACK``TICK, NAME`, @'SINGLE''QUOTE'" |> snd with
+              | ResultSet(_, [ [ Some "1"; Some "2"; Some "3"; Some "4"; Some "5" ] ]) -> ()
+              | other -> failtestf "expected quoted variables to read back, got %A" other
+
+              match handle session "SELECT @'sp ace' := @`HAS, COMMA` + @\"DOUBLE-NAME\"" with
+              | updated, ResultSet(_, [ [ Some "4" ] ]) ->
+                  Expect.equal updated.UserVariables.["sp ace"] (VInt 4L) "assignment uses quoted references"
+              | _, other -> failtestf "expected quoted variables in an assignment expression, got %A" other
+
+          testCase "double-quoted user-variable names remain variables under ANSI_QUOTES"
+          <| fun _ ->
+              let session = create 1 (Fsdb.Storage.create ())
+              let session, _ = handle session "SET SESSION sql_mode = CONCAT(@@sql_mode, ',ANSI_QUOTES')"
+              let session, assigned = handle session "SET @\"ansi name\" = 6"
+
+              match assigned with
+              | Affected 0UL -> ()
+              | other -> failtestf "expected ANSI_QUOTES assignment to succeed, got %A" other
+
+              match handle session "SELECT @\"ANSI NAME\" + 1, @\"ansi name\" := @\"ansi name\" + 1" with
+              | updated, ResultSet(_, [ [ Some "7"; Some "7" ] ]) ->
+                  Expect.equal updated.UserVariables.["ansi name"] (VInt 7L) "assignment retains the value"
+              | _, other -> failtestf "expected double-quoted variables under ANSI_QUOTES, got %A" other
+
           testCase "SELECT @never_set is NULL, not an error — unlike an unknown @@system_var"
           <| fun _ ->
               let session = create 1 (Fsdb.Storage.create ())

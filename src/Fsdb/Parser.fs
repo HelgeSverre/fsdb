@@ -1248,8 +1248,24 @@ let private placeholderAtom: Parser<Expr, unit> =
         placeholderCounterLocal.Value <- n + 1
         Placeholder n)
 
+/// User-variable names are case-insensitive but otherwise opaque to the
+/// expression evaluator. MySQL permits punctuation and whitespace when the
+/// name is backtick-, single-, or double-quoted; double quotes remain a
+/// user-variable delimiter under ANSI_QUOTES.
 let private userVariableTarget: Parser<string, unit> =
-    pchar '@' >>. many1Satisfy isIdentChar .>> ws
+    let quotedName quote =
+        quoted quote
+        |>> function
+            | VString name -> name
+            | _ -> ""
+
+    pchar '@'
+    >>. choice
+            [ attempt backtickIdent
+              attempt (quotedName '\'')
+              attempt (quotedName '"')
+              many1Satisfy isIdentChar ]
+    .>> ws
 
 let private variableAtom: Parser<Expr, unit> =
     let systemVariable =
@@ -3276,3 +3292,16 @@ let parseExpression (sql: string) : Result<Expr, string> =
         | Failure(message, _, _) -> Result.Error message
     with ex ->
         Result.Error ex.Message
+
+/// Parses the user-defined-variable target at the front of a `SET`
+/// assignment. The right-hand side remains source text because `SET` has
+/// its own literal rules before ordinary expression evaluation.
+let parseUserVariableSetAssignment (sql: string) : Result<string * string, string> =
+    let assignment =
+        userVariableTarget
+        .>> (attempt (sym ":=") <|> sym "=")
+        .>>. manyChars anyChar
+
+    match run (ws >>. assignment .>> eof) sql with
+    | Success(result, _, _) -> Result.Ok result
+    | Failure(message, _, _) -> Result.Error message

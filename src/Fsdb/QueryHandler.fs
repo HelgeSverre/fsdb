@@ -496,14 +496,8 @@ let private setNames = Regex(@"^NAMES\s+'?(\w+)'?(?:\s+COLLATE\s+'?(\w+)'?)?", R
 let private setVar =
     Regex(@"^(SESSION\s+|GLOBAL\s+|@@SESSION\.|@@GLOBAL\.|@@)?(\w+)\s*=\s*(.+)$", RegexOptions.IgnoreCase)
 
-/// `SET @name = ...` — a user-defined variable assignment, distinct from
-/// `setVar`'s system-variable form (bare `\w+`, or `@@`-prefixed): real
-/// MySQL never validates a user variable's name, so this always succeeds
-/// where `setVar` would otherwise report it "unknown".
-let private setUserVar = Regex(@"^@(\w+)\s*=\s*(.+)$", RegexOptions.IgnoreCase)
-
 /// Best-effort name extraction for the "this looks like an assignment but
-/// neither `setVar` nor `setUserVar` matched it" error below.
+/// neither `setVar` nor the user-variable parser matched it" error below.
 let private setVarNameForError = Regex(@"^(?:SESSION\s+|GLOBAL\s+)?(\S+?)\s*=", RegexOptions.IgnoreCase)
 
 let private quotedSetLiteral = Regex("^(['\"])(.*)\\1$", RegexOptions.Singleline)
@@ -596,41 +590,59 @@ let private splitSetAssignments (sql: string) : string list =
     let mutable parenDepth = 0
     let mutable hasContent = false
 
-    for c in body do
+    let mutable index = 0
+
+    while index < body.Length do
+        let c = body.[index]
+
         match quoteChar with
-        | Some _ when escaped ->
+        | Some q when escaped ->
             escaped <- false
             current.Append c |> ignore
-        | Some _ when c = '\\' ->
+            index <- index + 1
+        | Some q when q <> '`' && c = '\\' ->
             escaped <- true
             current.Append c |> ignore
+            index <- index + 1
+        | Some q when c = q && index + 1 < body.Length && body.[index + 1] = q ->
+            current.Append c |> ignore
+            current.Append body.[index + 1] |> ignore
+            index <- index + 2
         | Some q when c = q ->
             quoteChar <- None
             current.Append c |> ignore
-        | Some _ -> current.Append c |> ignore
+            index <- index + 1
+        | Some _ ->
+            current.Append c |> ignore
+            index <- index + 1
         | None ->
             match c with
-            | '\'' | '"' ->
+            | '\'' | '"' | '`' ->
                 quoteChar <- Some c
                 hasContent <- true
                 current.Append c |> ignore
+                index <- index + 1
             | '(' ->
                 parenDepth <- parenDepth + 1
                 hasContent <- true
                 current.Append c |> ignore
+                index <- index + 1
             | ')' ->
                 parenDepth <- max 0 (parenDepth - 1)
                 hasContent <- true
                 current.Append c |> ignore
+                index <- index + 1
             | ',' when parenDepth = 0 ->
                 if hasContent then
                     parts.Add(current.ToString())
 
                 current.Clear() |> ignore
                 hasContent <- false
+                index <- index + 1
             | _ ->
                 hasContent <- hasContent || not (Char.IsWhiteSpace c)
                 current.Append c |> ignore
+                index <- index + 1
 
     if hasContent then
         parts.Add(current.ToString())
@@ -719,12 +731,11 @@ let private parseSetFragment
         | Some None -> Error(Err(1273, sprintf "Unknown collation: '%s'" namesMatch.Groups.[2].Value))
         | _ -> Ok(SetNamesAction(namesMatch.Groups.[1].Value, explicitCollation), userVariables)
     else
-        let userVarMatch = setUserVar.Match fragment
-
-        if userVarMatch.Success then
-            resolveUserSetRhs session userVariables sql userVarMatch.Groups.[2].Value
-            |> Result.map (fun (value, sideEffects) -> SetUserVarAction(userVarMatch.Groups.[1].Value.ToLowerInvariant(), value), sideEffects)
-        else
+        match Parser.parseUserVariableSetAssignment fragment with
+        | Ok(name, rhs) ->
+            resolveUserSetRhs session userVariables sql rhs
+            |> Result.map (fun (value, sideEffects) -> SetUserVarAction(name.ToLowerInvariant(), value), sideEffects)
+        | Error _ ->
             let varMatch = setVar.Match fragment
 
             if varMatch.Success then
