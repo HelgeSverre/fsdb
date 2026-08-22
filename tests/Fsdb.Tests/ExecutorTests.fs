@@ -4175,6 +4175,37 @@ let tests =
 
                     Expect.isGreaterThan touches scalarTouches "a correlated scalar subquery remains per-row"
 
+                    touches <- 0
+
+                    match run store registry "SELECT id FROM outer_rows WHERE id = ANY (SELECT TOUCH(id) FROM inner_rows) ORDER BY id" with
+                    | ResultSet(_, rows) -> Expect.equal rows [ [ Some "1" ]; [ Some "2" ] ] "ANY retains matching rows"
+                    | other -> failtestf "expected a resultset, got %A" other
+
+                    let anyTouches = touches
+                    Expect.isLessThan anyTouches 5 "an uncorrelated ANY subquery runs once"
+
+                    touches <- 0
+
+                    match run store registry "SELECT id FROM outer_rows WHERE id <= ALL (SELECT TOUCH(id) FROM inner_rows) ORDER BY id" with
+                    | ResultSet(_, rows) -> Expect.equal rows [ [ Some "1" ] ] "ALL retains only the universal match"
+                    | other -> failtestf "expected a resultset, got %A" other
+
+                    let allTouches = touches
+                    Expect.isLessThan allTouches 5 "an uncorrelated ALL subquery runs once"
+
+                    touches <- 0
+
+                    match
+                        run
+                            store
+                            registry
+                            "SELECT id FROM outer_rows WHERE id = ANY (SELECT TOUCH(id) FROM inner_rows WHERE outer_rows.id >= 0) ORDER BY id"
+                    with
+                    | ResultSet(_, rows) -> Expect.equal rows [ [ Some "1" ]; [ Some "2" ] ] "the correlated comparison still matches"
+                    | other -> failtestf "expected a resultset, got %A" other
+
+                    Expect.isGreaterThan touches allTouches "a correlated quantified subquery runs for every outer row"
+
                 testCase "EXISTS stops after its first matching row"
                 <| fun _ ->
                     let mutable touches = 0
