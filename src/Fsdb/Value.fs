@@ -448,6 +448,18 @@ let private segmentsIntersect ((a, b) as first) ((c, d) as second) =
     || (cdB = 0.0 && pointOnSegment b second)
     || ((abC < 0.0) <> (abD < 0.0) && (cdA < 0.0) <> (cdB < 0.0))
 
+let private segmentsProperlyCross (a, b) (c, d) =
+    let abC = orientation a b c
+    let abD = orientation a b d
+    let cdA = orientation c d a
+    let cdB = orientation c d b
+    abC <> 0.0
+    && abD <> 0.0
+    && cdA <> 0.0
+    && cdB <> 0.0
+    && (abC < 0.0) <> (abD < 0.0)
+    && (cdA < 0.0) <> (cdB < 0.0)
+
 let private pointSegmentDistance (x, y) ((x1, y1), (x2, y2)) =
     let dx = x2 - x1
     let dy = y2 - y1
@@ -643,6 +655,214 @@ let geometryDistancePlanar (first: Geometry) (second: Geometry) : float option =
 
 let geometryIntersectsPlanar (first: Geometry) (second: Geometry) =
     geometryDistancePlanar first second |> Option.map ((=) 0.0)
+
+type GeometryPointPosition =
+    | Exterior
+    | Boundary
+    | Interior
+
+let private pointInRing point ring =
+    let edges = segments ring
+
+    if edges |> List.exists (pointOnSegment point) then
+        Boundary
+    elif ringContains point ring then
+        Interior
+    else
+        Exterior
+
+let private pointInPolygon point = function
+    | shell :: holes ->
+        match pointInRing point shell with
+        | Exterior -> Exterior
+        | Boundary -> Boundary
+        | Interior ->
+            holes
+            |> List.fold (fun position hole ->
+                match position, pointInRing point hole with
+                | Exterior, _ -> Exterior
+                | _, Boundary -> Boundary
+                | _, Interior -> Exterior
+                | Interior, Exterior -> Interior
+                | Boundary, Exterior -> Boundary) Interior
+    | [] -> Exterior
+
+let private pointInLine point points =
+    if points |> segments |> List.exists (pointOnSegment point) then
+        match points with
+        | first :: _ when List.last points <> first && (point = first || point = List.last points) -> Boundary
+        | _ -> Interior
+    else
+        Exterior
+
+let rec private pointInShape point = function
+    | GEmpty -> Exterior
+    | GPoint(x, y) -> if point = (x, y) then Interior else Exterior
+    | GLineString points -> pointInLine point points
+    | GPolygon rings -> pointInPolygon point rings
+    | GMultiPoint points -> if List.contains point points then Interior else Exterior
+    | GMultiLineString lines ->
+        let positions = lines |> List.map (pointInLine point)
+        if positions |> List.contains Interior then Interior elif positions |> List.contains Boundary then Boundary else Exterior
+    | GMultiPolygon polygons ->
+        let positions = polygons |> List.map (pointInPolygon point)
+        if positions |> List.contains Interior then Interior elif positions |> List.contains Boundary then Boundary else Exterior
+    | GGeometryCollection geometries ->
+        let positions = geometries |> List.map (fun geometry -> pointInShape point geometry.Shape)
+        if positions |> List.contains Interior then Interior elif positions |> List.contains Boundary then Boundary else Exterior
+
+let geometryPointPositionPlanar point (geometry: Geometry) = pointInShape point geometry.Shape
+
+let private interpolate ((x1, y1), (x2, y2)) t = x1 + (x2 - x1) * t, y1 + (y2 - y1) * t
+
+let private segmentParameter point ((x1, y1), (x2, y2)) =
+    let dx = x2 - x1
+    let dy = y2 - y1
+    if dx = 0.0 && dy = 0.0 then 0.0
+    elif abs dx >= abs dy then (fst point - x1) / dx
+    else (snd point - y1) / dy
+
+let private segmentIntersectionParameters ((a, b) as first) ((c, d) as second) =
+    let ax, ay = a
+    let bx, by = b
+    let cx, cy = c
+    let dx, dy = d
+    let rx, ry = bx - ax, by - ay
+    let sx, sy = dx - cx, dy - cy
+    let determinant = rx * sy - ry * sx
+    let qpx, qpy = cx - ax, cy - ay
+
+    if determinant <> 0.0 then
+        let t = (qpx * sy - qpy * sx) / determinant
+        let u = (qpx * ry - qpy * rx) / determinant
+        if 0.0 <= t && t <= 1.0 && 0.0 <= u && u <= 1.0 then [ t ] else []
+    elif qpx * ry - qpy * rx = 0.0 then
+        [ c; d ]
+        |> List.filter (fun point -> pointOnSegment point first)
+        |> List.map (fun point -> segmentParameter point first)
+    else
+        []
+
+let private segmentSamples segment boundaries =
+    let parameters =
+        boundaries
+        |> List.collect (segmentIntersectionParameters segment)
+        |> List.append [ 0.0; 1.0 ]
+        |> List.distinct
+        |> List.sort
+
+    let intervals =
+        parameters
+        |> List.pairwise
+        |> List.choose (fun (first, second) -> if first < second then Some((first + second) / 2.0) else None)
+
+    (parameters @ intervals) |> List.map (interpolate segment)
+
+let rec private polygonInteriorSamples = function
+    | shell :: holes ->
+        shell
+        |> segments
+        |> List.choose (fun ((x1, y1), (x2, y2)) ->
+            let dx = x2 - x1
+            let dy = y2 - y1
+            let length = sqrt (dx * dx + dy * dy)
+
+            if length = 0.0 then
+                None
+            else
+                let midpoint = (x1 + x2) / 2.0, (y1 + y2) / 2.0
+                let distance = length * 1e-9
+                let left = fst midpoint - dy / length * distance, snd midpoint + dx / length * distance
+                let right = fst midpoint + dy / length * distance, snd midpoint - dx / length * distance
+
+                [ left; right ]
+                |> List.tryFind (fun point ->
+                    match pointInPolygon point (shell :: holes) with
+                    | Interior -> true
+                    | _ -> false))
+    | [] -> []
+
+let rec private shapeInteriorSamples = function
+    | GEmpty -> []
+    | GPoint(x, y) -> [ x, y ]
+    | GLineString points ->
+        points
+        |> segments
+        |> List.map (fun segment -> interpolate segment 0.5)
+    | GPolygon rings -> polygonInteriorSamples rings
+    | GMultiPoint points -> points
+    | GMultiLineString lines -> lines |> List.collect (segments >> List.map (fun segment -> interpolate segment 0.5))
+    | GMultiPolygon polygons -> polygons |> List.collect polygonInteriorSamples
+    | GGeometryCollection geometries -> geometries |> List.collect (fun geometry -> shapeInteriorSamples geometry.Shape)
+
+let private geometryContainsAllPoints (first: Geometry) (second: Geometry) =
+    let boundaries = shapeSegments first.Shape
+
+    shapeCoordinates second.Shape
+    |> List.forall (fun point -> geometryPointPositionPlanar point first <> Exterior)
+    && shapeSegments second.Shape
+       |> List.forall (fun segment ->
+           segmentSamples segment boundaries
+           |> List.forall (fun point -> geometryPointPositionPlanar point first <> Exterior))
+
+let geometryContainsPlanar (first: Geometry) (second: Geometry) =
+    if List.isEmpty (shapeCoordinates first.Shape) || List.isEmpty (shapeCoordinates second.Shape) then
+        None
+    else
+        let containsSecond = geometryContainsAllPoints first second
+        let secondReachesInterior =
+            shapeInteriorSamples second.Shape
+            |> List.exists (fun point -> geometryPointPositionPlanar point first = Interior)
+
+        let coversFirstHole =
+            shapePolygons first.Shape
+            |> List.collect (function
+                | _ :: holes -> holes |> List.collect (fun hole -> polygonInteriorSamples [ hole ])
+                | [] -> [])
+            |> List.exists (fun point -> geometryPointPositionPlanar point second = Interior)
+
+        Some(containsSecond && secondReachesInterior && not coversFirstHole)
+
+let private interiorIntersects first second =
+    let firstBoundaries = shapeSegments first.Shape
+    let secondBoundaries = shapeSegments second.Shape
+
+    let lineInteriorIntersects =
+        shapeSegments first.Shape
+        |> List.exists (fun segment ->
+            segmentSamples segment secondBoundaries
+            |> List.exists (fun point ->
+                geometryPointPositionPlanar point first = Interior
+                && geometryPointPositionPlanar point second = Interior))
+
+    let sampleIntersects samples geometry =
+        samples
+        |> List.exists (fun point -> geometryPointPositionPlanar point geometry = Interior)
+
+    let polygonBoundariesCross =
+        shapePolygons first.Shape
+        |> List.collect (List.collect segments)
+        |> List.exists (fun firstSegment ->
+            shapePolygons second.Shape
+            |> List.collect (List.collect segments)
+            |> List.exists (segmentsProperlyCross firstSegment))
+
+    polygonBoundariesCross
+    || lineInteriorIntersects
+    || (shapeSegments second.Shape
+        |> List.exists (fun segment ->
+            segmentSamples segment firstBoundaries
+            |> List.exists (fun point ->
+                geometryPointPositionPlanar point first = Interior
+                && geometryPointPositionPlanar point second = Interior)))
+    || sampleIntersects (shapeInteriorSamples first.Shape) second
+    || sampleIntersects (shapeInteriorSamples second.Shape) first
+
+let geometryTouchesPlanar first second =
+    match geometryIntersectsPlanar first second with
+    | None -> None
+    | Some false -> Some false
+    | Some true -> Some(not (interiorIntersects first second))
 
 type Value =
     | VNull

@@ -32,7 +32,7 @@ accepted (marked `ponytail:` in source), or recorded only in
 |---|---|---|
 | SQL statements | Broad core; large admin/programmatic tail missing | Stored procedures/functions, events |
 | Query execution | Equality, one-column non-unique literal range access, and bounded single-key index ordering plus stable subquery materialization | Multi-key ORDER BY, join reordering, and correlated subqueries still scale poorly |
-| Built-in functions | Broad scalar, aggregate, JSON, time, and planar geometry coverage | Advanced geometry topology and geographic SRS semantics |
+| Built-in functions | Broad scalar, aggregate, JSON, time, and common planar geometry coverage | Overlays, buffers, and geographic SRS semantics |
 | Data types | Common scalar types, BIT fields, signed TIME durations, and OGC geometry | Spatial indexes and operations |
 | Constraints & indexes | PK/UNIQUE/FK/CHECK plus one-column equality, inner-join, literal range, and bounded index-order probes | No multi-key/composite access; unique and DML ranges scan |
 | Charsets & collations | ICU-based utf8mb4 registry | Weight-table tailoring differs from MySQL's UCA tables |
@@ -137,7 +137,7 @@ CURRENT_USER/USER/SESSION_USER.
 | Missing family | Functions | Impact |
 |---|---|---|
 | JSON Schema recursive regular-expression references | Local reference cycles traversing `pattern` or `patternProperties` return 1235 | low |
-| Geometry topology and relations | Contains/within/touches predicates, overlays, buffers, and geographic SRS semantics | low |
+| Geometry topology and relations | overlays, buffers, and geographic SRS semantics; planar `ST_Contains`, `ST_Within`, and `ST_Touches` work | low |
 
 `CONVERT_TZ` resolves numeric offsets and `SYSTEM`, but named zones return NULL
 without loaded time-zone tables;
@@ -168,7 +168,7 @@ accessors).
 
 | Gap | MySQL 8.4 | fsdb | Impact | Class |
 |---|---|---|---|---|
-| Spatial indexes and operations | R-tree indexes, containment/touch predicates, overlays, buffers, geographic SRS axis rules | geometry values, common WKT/WKB accessors, planar `ST_Distance`, `ST_Envelope`, `ST_IsValid`, `ST_Intersects`, `ST_Disjoint`, and MBR predicates work; spatial indexes still collapse to BTree | low | refusal |
+| Spatial indexes and operations | R-tree indexes, overlays, buffers, geographic SRS axis rules | geometry values, common WKT/WKB accessors, planar `ST_Distance`, `ST_Envelope`, `ST_IsValid`, `ST_Contains`, `ST_Within`, `ST_Touches`, `ST_Intersects`, `ST_Disjoint`, and MBR predicates work; spatial indexes still collapse to BTree | low | refusal |
 | Generated columns | VIRTUAL recomputed on read, STORED materialized | both materialize at write time; no read-path recompute (`Storage.fs:3705–3713`) | low | divergence |
 | Functional defaults | `DEFAULT (expr)` | literal constants and CURRENT_TIMESTAMP only | low | refusal |
 | Column-comment character sets | converted through the table/column charset; utf8mb3 stores non-BMP text as `?` | raw .NET text, without charset conversion | low | divergence |

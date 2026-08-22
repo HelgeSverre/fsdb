@@ -247,6 +247,34 @@ let tests =
                     Expect.equal (intersects "GEOMETRYCOLLECTION EMPTY" "POINT(1 1)") VNull "empty intersection"
                     Expect.equal (disjoint "GEOMETRYCOLLECTION EMPTY" "POINT(1 1)") VNull "empty disjoint"
 
+                testCase "planar topology predicates distinguish interiors, boundaries, and holes"
+                <| fun _ ->
+                    let geometry text = call "ST_GeomFromText" [ VString text ]
+                    let contains first second = call "ST_Contains" [ geometry first; geometry second ]
+                    let within first second = call "ST_Within" [ geometry first; geometry second ]
+                    let touches first second = call "ST_Touches" [ geometry first; geometry second ]
+                    let rectangle = "POLYGON((0 0,4 0,4 4,0 4,0 0))"
+                    let donut = "POLYGON((0 0,5 0,5 5,0 5,0 0),(1 1,4 1,4 4,1 4,1 1))"
+
+                    Expect.equal (contains rectangle "POINT(2 2)") (VInt 1L) "interior point"
+                    Expect.equal (contains rectangle "POINT(0 2)") (VInt 0L) "boundary point"
+                    Expect.equal (contains rectangle "LINESTRING(0 1,2 1)") (VInt 1L) "line may begin on a boundary"
+                    Expect.equal (contains rectangle "LINESTRING(0 1,0 3)") (VInt 0L) "boundary line"
+                    Expect.equal (contains donut "POLYGON((2 2,3 2,3 3,2 3,2 2))") (VInt 0L) "polygon in hole"
+                    Expect.equal (within "POINT(2 2)" rectangle) (VInt 1L) "inverse predicate"
+                    Expect.equal (contains "LINESTRING(0 0,4 0)" "POINT(2 0)") (VInt 1L) "line interior"
+                    Expect.equal (contains "LINESTRING(0 0,4 0)" "POINT(0 0)") (VInt 0L) "line endpoint"
+                    Expect.equal (contains "MULTIPOINT((1 1),(2 2))" "POINT(1 1)") (VInt 1L) "multipoint member"
+                    Expect.equal (touches rectangle "POINT(0 2)") (VInt 1L) "point on polygon boundary"
+                    Expect.equal (touches rectangle "LINESTRING(0 1,0 3)") (VInt 1L) "line on polygon boundary"
+                    Expect.equal (touches "LINESTRING(0 0,2 0)" "LINESTRING(2 0,3 0)") (VInt 1L) "line endpoint"
+                    Expect.equal (touches "LINESTRING(0 0,2 0)" "LINESTRING(1 0,3 0)") (VInt 0L) "line overlap"
+                    Expect.equal (touches rectangle "POLYGON((4 1,6 1,6 3,4 3,4 1))") (VInt 1L) "shared edge"
+                    Expect.equal (touches rectangle "POLYGON((2 2,6 2,6 6,2 6,2 2))") (VInt 0L) "overlapping area"
+                    Expect.equal (touches "GEOMETRYCOLLECTION(POINT(0 2),POINT(5 5))" rectangle) (VInt 1L) "collection boundary contact"
+                    Expect.equal (contains "GEOMETRYCOLLECTION EMPTY" "POINT(1 1)") VNull "empty contains"
+                    Expect.equal (touches "GEOMETRYCOLLECTION EMPTY" "POINT(1 1)") VNull "empty touches"
+
                 testCase "planar intersections reject nonzero and mismatched SRIDs"
                 <| fun _ ->
                     let expectError code invoke =
@@ -261,6 +289,9 @@ let tests =
 
                     expectError 3033 (fun () -> call "ST_Intersects" [ planar; geographic ])
                     expectError 1235 (fun () -> call "ST_Disjoint" [ geographic; geographic ])
+                    expectError 3033 (fun () -> call "ST_Contains" [ planar; geographic ])
+                    expectError 1235 (fun () -> call "ST_Within" [ geographic; geographic ])
+                    expectError 1235 (fun () -> call "ST_Touches" [ geographic; geographic ])
 
                 testCase "envelopes and MBR predicates preserve planar bounds"
                 <| fun _ ->
