@@ -3336,12 +3336,83 @@ and private describeStoredViewColumns (store: Store) (registry: Registry) (schem
           Charset = collation |> Option.map Collation.charsetOfCollation
           OnUpdateCurrentTimestamp = false }
 
+    let isNullable (column: ColumnDef) = column.Nullable && not column.PrimaryKey
+
+    let stringLength =
+        function
+        | TChar length
+        | TVarchar length
+        | TBinary length
+        | TVarBinary length -> Some length
+        | _ -> None
+
+    let unionColumn (columns: ColumnDef list) =
+        let first = List.head columns
+        let types = columns |> List.map _.Type
+        let collations =
+            columns
+            |> List.choose _.Collation
+            |> List.choose Collation.tryFind
+
+        let collation =
+            match collations with
+            | [] -> None
+            | first :: rest -> rest |> List.fold strictestUnionCollation first |> fun value -> Some value.Name
+
+        let mergedType =
+            match types with
+            | _ when types |> List.exists (function TDecimal _ -> true | _ -> false) && types |> List.forall (fun ty -> decimalParts ty |> Option.isSome) ->
+                let precisions = types |> List.choose decimalParts
+                TDecimal(precisions |> List.map fst |> List.max, precisions |> List.map snd |> List.max)
+            | _ when types |> List.forall (fun ty -> stringLength ty |> Option.isSome) ->
+                types |> List.choose stringLength |> List.max |> TVarchar
+            | _ when types |> List.forall ((=) first.Type) -> first.Type
+            | _ -> TText
+
+        let nullable = columns |> List.exists isNullable
+
+        let clearedDefault =
+            if nullable then
+                None
+            else
+                match mergedType with
+                | TTinyInt _
+                | TBool
+                | TSmallInt _
+                | TMediumInt _
+                | TInt _
+                | TBigInt _ -> Some(DConst(VInt 0L))
+                | TDecimal(_, scale) ->
+                    let text = if scale = 0 then "0" else "0." + String.replicate scale "0"
+                    Some(DConst(VString text))
+                | TChar _
+                | TVarchar _
+                | TTinyText
+                | TText
+                | TMediumText
+                | TLongText -> Some(DConst(VString ""))
+                | _ -> None
+
+        computedColumn first.Name mergedType nullable collation
+        |> fun column -> { column with Default = clearedDefault }
+
+    let unionColumns (branches: ColumnDef list list) =
+        match branches with
+        | [] -> None
+        | first :: _ when branches |> List.exists (fun columns -> columns.Length <> first.Length) -> None
+        | _ -> branches |> List.transpose |> List.map unionColumn |> Some
+
     let rec describeBody (seen: Set<string * string>) dbName ctes =
         function
         | PlainSelect select -> describeSelect seen dbName ctes select
         | UnionSelect(first, rest, _, _, _) ->
-            (first :: (rest |> List.map snd))
-            |> List.tryPick (describeSelect seen dbName ctes)
+            let branches = first :: (rest |> List.map snd)
+            let described = branches |> List.map (describeSelect seen dbName ctes)
+
+            if described |> List.forall Option.isSome then
+                described |> List.choose id |> unionColumns
+            else
+                None
 
     and sourceColumns seen dbName ctes =
         function
