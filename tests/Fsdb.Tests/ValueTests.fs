@@ -849,7 +849,7 @@ let tests =
                               Expect.throwsC
                                   (invoke >> ignore)
                                   (function
-                                  | Fsdb.Functions.SqlError(actual, message) when actual = code && (code <> 3691 || message = "Mismatched parenthesis in regular expression.") -> ()
+                                  | Fsdb.Functions.SqlError(actual, _) when actual = code -> ()
                                   | error -> failtestf "expected %d, got %A" code error)
 
                           expectError 1582 (fun () -> call "AES_ENCRYPT" [ VString "hello" ])
@@ -1833,15 +1833,15 @@ let tests =
 
                       testCase "REGEXP functions report malformed patterns and match types"
                       <| fun _ ->
-                          let expects code arguments =
+                          let expects code message arguments =
                               Expect.throwsC
                                   (fun () -> call "REGEXP_LIKE" arguments |> ignore)
                                   (function
-                                  | Fsdb.Functions.SqlError(actual, _) when actual = code -> ()
+                                  | Fsdb.Functions.SqlError(actual, actualMessage) when actual = code && actualMessage = message -> ()
                                   | other -> failtestf "expected %d, got %A" code other)
 
-                          expects 3691 [ VString "abc"; VString "(" ]
-                          expects 1210 [ VString "abc"; VString "a"; VString "z" ]
+                          expects 3691 "Mismatched parenthesis in regular expression." [ VString "abc"; VString "(" ]
+                          expects 1210 "Incorrect arguments to regexp_like" [ VString "abc"; VString "a"; VString "z" ]
 
                       testCase "REGEXP_SUBSTR returns the matched substring, or NULL if none"
                       <| fun _ ->
