@@ -1856,6 +1856,8 @@ let tests =
                           Expect.equal (call "REGEXP_LIKE" [ VString "A"; VString "[[:alpha:]]" ]) (VInt 1L) "alpha"
                           Expect.equal (call "REGEXP_LIKE" [ VString "7"; VString "[[:digit:]]" ]) (VInt 1L) "digit"
                           Expect.equal (call "REGEXP_LIKE" [ VString "_"; VString "[[:word:]]" ]) (VInt 1L) "word"
+                          Expect.equal (call "REGEXP_LIKE" [ VString "["; VString "\\[" ]) (VInt 1L) "escaped bracket"
+                          Expect.equal (call "REGEXP_LIKE" [ VString "Σ"; VString "[ς]"; VString "i" ]) (VInt 1L) "sigma class"
                           Expect.equal (call "REGEXP_LIKE" [ VString "a\rb"; VString "^b$"; VString "m" ]) (VInt 1L) "CR is a line ending without u"
                           Expect.equal (call "REGEXP_LIKE" [ VString "a\rb"; VString "^b$"; VString "mu" ]) (VInt 0L) "u keeps CR out of multiline anchors"
 

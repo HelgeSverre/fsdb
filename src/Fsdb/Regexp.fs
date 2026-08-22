@@ -51,11 +51,27 @@ let private normalizePattern (options: RegexOptions) (pattern: string) : string 
     if not (options.HasFlag RegexOptions.IgnoreCase) then posix
     else
         let builder = StringBuilder(posix.Length)
+        let mutable escaped = false
+        let mutable inClass = false
 
         for character in posix do
-            match character with
-            | 'Σ' | 'σ' | 'ς' -> builder.Append "[Σσς]" |> ignore
-            | _ -> builder.Append character |> ignore
+            if escaped then
+                builder.Append character |> ignore
+                escaped <- false
+            else
+                match character with
+                | '\\' ->
+                    builder.Append character |> ignore
+                    escaped <- true
+                | '[' ->
+                    builder.Append character |> ignore
+                    inClass <- true
+                | ']' ->
+                    builder.Append character |> ignore
+                    inClass <- false
+                | ('Σ' | 'σ' | 'ς') when inClass -> builder.Append "Σσς" |> ignore
+                | 'Σ' | 'σ' | 'ς' -> builder.Append "[Σσς]" |> ignore
+                | _ -> builder.Append character |> ignore
 
         builder.ToString()
 
