@@ -120,6 +120,10 @@ fsdb supports stored queries broadly and a narrow writable subset:
 - Persistence through the WAL and snapshots, plus `SHOW [FULL] TABLES`,
   `SHOW CREATE VIEW`, `information_schema.TABLES`, and
   `information_schema.VIEWS` metadata.
+- Projection metadata in `information_schema.COLUMNS`, `DESCRIBE`, `SHOW
+  COLUMNS`, and `SHOW TABLE STATUS`. This path reads the stored definition
+  without running it, so empty and nondeterministic views have the same
+  metadata shape as populated views.
 
 Direct projections over one base table, without filtering, grouping, joins,
 or computed columns, accept `INSERT`, `INSERT ... SELECT`, `UPDATE`, and
@@ -130,8 +134,6 @@ explicit `DEFINER`, and `SQL SECURITY` remain unsupported. Creation validates
 the saved SQL grammar but defers missing dependency and output-shape errors
 until the first read; `SELECT *` follows the base table's current columns
 instead of freezing them at creation.
-`information_schema.COLUMNS`, `DESCRIBE`, and `SHOW TABLE STATUS` do not yet
-project user view metadata.
 
 Trigger execution has stronger behavioral coverage than its syntax breadth:
 

@@ -257,6 +257,88 @@ let tests =
                   Expect.stringContains (row.[1] |> Option.defaultValue "") "CREATE VIEW `totals` AS" "SHOW statement"
               | other -> failtestf "expected SHOW CREATE VIEW row, got %A" other
 
+          testCase "view projections retain introspection metadata without evaluating rows"
+          <| fun _ ->
+              let store = Fsdb.Storage.create ()
+              let session = Fsdb.Session.create 1 store
+
+              let apply session sql =
+                  let session, result = Fsdb.QueryHandler.handle session sql
+                  expectOk result sql
+                  session
+
+              let session =
+                  apply
+                      session
+                      "CREATE TABLE source (id INT AUTO_INCREMENT PRIMARY KEY, label VARCHAR(12) COLLATE utf8mb4_bin NOT NULL DEFAULT 'x', amount DECIMAL(8,2) DEFAULT 1.25)"
+
+              let session = apply session "CREATE VIEW direct_meta AS SELECT id, label, amount FROM source"
+              let session = apply session "CREATE VIEW computed_meta AS SELECT id AS item_id, label AS caption, amount + 1 AS adjusted, CONCAT(label, '!') AS tagged FROM source"
+              let session = apply session "CREATE VIEW nested_meta AS SELECT item_id, caption, adjusted, tagged FROM computed_meta"
+              let session = apply session "CREATE VIEW empty_meta AS SELECT id, label, amount + 1 AS adjusted FROM source WHERE 1 = 0"
+
+              match
+                  Fsdb.QueryHandler.handle
+                      session
+                      "SELECT table_name, column_name, column_default, is_nullable, column_type, collation_name FROM information_schema.columns WHERE table_schema = 'fsdb' AND table_name IN ('direct_meta', 'computed_meta', 'nested_meta', 'empty_meta') ORDER BY table_name, ordinal_position"
+                  |> snd
+              with
+              | ResultSet(_, rows) ->
+                  Expect.equal
+                      rows
+                      [ [ Some "computed_meta"; Some "item_id"; Some "0"; Some "NO"; Some "int"; None ]
+                        [ Some "computed_meta"; Some "caption"; Some "x"; Some "NO"; Some "varchar(12)"; Some "utf8mb4_bin" ]
+                        [ Some "computed_meta"; Some "adjusted"; None; Some "YES"; Some "decimal(9,2)"; None ]
+                        [ Some "computed_meta"; Some "tagged"; None; Some "YES"; Some "varchar(13)"; Some "utf8mb4_bin" ]
+                        [ Some "direct_meta"; Some "id"; Some "0"; Some "NO"; Some "int"; None ]
+                        [ Some "direct_meta"; Some "label"; Some "x"; Some "NO"; Some "varchar(12)"; Some "utf8mb4_bin" ]
+                        [ Some "direct_meta"; Some "amount"; Some "1.25"; Some "YES"; Some "decimal(8,2)"; None ]
+                        [ Some "empty_meta"; Some "id"; Some "0"; Some "NO"; Some "int"; None ]
+                        [ Some "empty_meta"; Some "label"; Some "x"; Some "NO"; Some "varchar(12)"; Some "utf8mb4_bin" ]
+                        [ Some "empty_meta"; Some "adjusted"; None; Some "YES"; Some "decimal(9,2)"; None ]
+                        [ Some "nested_meta"; Some "item_id"; Some "0"; Some "NO"; Some "int"; None ]
+                        [ Some "nested_meta"; Some "caption"; Some "x"; Some "NO"; Some "varchar(12)"; Some "utf8mb4_bin" ]
+                        [ Some "nested_meta"; Some "adjusted"; None; Some "YES"; Some "decimal(9,2)"; None ]
+                        [ Some "nested_meta"; Some "tagged"; None; Some "YES"; Some "varchar(13)"; Some "utf8mb4_bin" ] ]
+                      "direct, computed, nested, and empty views retain their projection shapes"
+              | other -> failtestf "expected view column metadata, got %A" other
+
+              match Fsdb.QueryHandler.handle session "SHOW COLUMNS FROM computed_meta" |> snd with
+              | ResultSet(_, rows) ->
+                  Expect.equal
+                      rows
+                      [ [ Some "item_id"; Some "int"; Some "NO"; Some ""; Some "0"; Some "" ]
+                        [ Some "caption"; Some "varchar(12)"; Some "NO"; Some ""; Some "x"; Some "" ]
+                        [ Some "adjusted"; Some "decimal(9,2)"; Some "YES"; Some ""; None; Some "" ]
+                        [ Some "tagged"; Some "varchar(13)"; Some "YES"; Some ""; None; Some "" ] ]
+                      "SHOW COLUMNS uses the same projection metadata"
+              | other -> failtestf "expected view columns, got %A" other
+
+              match Fsdb.QueryHandler.handle session "DESCRIBE computed_meta" |> snd with
+              | ResultSet(_, rows) -> Expect.equal (List.length rows) 4 "DESCRIBE uses the view projection shape"
+              | other -> failtestf "expected described view columns, got %A" other
+
+              match Fsdb.QueryHandler.handle session "SHOW TABLE STATUS LIKE 'direct_meta'" |> snd with
+              | ResultSet(columns, [ row ]) ->
+                  let value name = List.item (List.findIndex ((=) name) columns) row
+                  Expect.equal (value "Name") (Some "direct_meta") "view name"
+                  Expect.isNone (value "Engine") "views have no storage engine"
+                  Expect.equal (value "Comment") (Some "VIEW") "view marker"
+              | other -> failtestf "expected view table status, got %A" other
+
+              let root = apply session "CREATE USER metadata_reader"
+              let reader = { Fsdb.Session.create 2 store with User = "metadata_reader" }
+
+              match Fsdb.QueryHandler.handle reader "SELECT column_name FROM information_schema.columns WHERE table_schema = 'fsdb' AND table_name = 'direct_meta'" |> snd with
+              | ResultSet(_, []) -> ()
+              | other -> failtestf "expected hidden view columns, got %A" other
+
+              let _root = apply root "GRANT SELECT ON fsdb.direct_meta TO metadata_reader"
+
+              match Fsdb.QueryHandler.handle reader "SELECT column_name FROM information_schema.columns WHERE table_schema = 'fsdb' AND table_name = 'direct_meta' ORDER BY ordinal_position" |> snd with
+              | ResultSet(_, rows) -> Expect.equal rows [ [ Some "id" ]; [ Some "label" ]; [ Some "amount" ] ] "granted view columns become visible"
+              | other -> failtestf "expected visible view columns, got %A" other
+
           testCase "a view reads with its definer privileges and observes later revokes"
           <| fun _ ->
               let store = setup ()

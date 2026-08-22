@@ -2433,7 +2433,7 @@ let private tableSubqueryScope (store: Store) (dbName: string) (table: TableRef)
     elif table.Database.IsNone && table.Table.Equals("dual", System.StringComparison.OrdinalIgnoreCase) then
         Some(scope [])
     elif tableDb.Equals("information_schema", System.StringComparison.OrdinalIgnoreCase) then
-        InformationSchema.scan store.Catalog table.Table |> Option.map (fst >> scope)
+        InformationSchema.scan store.Catalog table.Table None |> Option.map (fst >> scope)
     else
         match scan store tableDb table.Table with
         | Ok(columns, _) -> Some(scope columns)
@@ -3188,7 +3188,7 @@ and private resolveTableRef
     if tableRef.Database.IsNone && System.String.Equals(tableRef.Table, "dual", System.StringComparison.OrdinalIgnoreCase) then
         Ok([], [ [||] ])
     elif System.String.Equals(tableDb, "information_schema", System.StringComparison.OrdinalIgnoreCase) then
-        match InformationSchema.scan store.Catalog tableRef.Table with
+        match InformationSchema.scan store.Catalog tableRef.Table (Some(describeStoredViewColumns store registry)) with
         | Some(columns, rows) -> Ok(columns, rows)
         | None -> Error(storageErr (NoSuchTable tableRef.Table))
     elif
@@ -3288,8 +3288,183 @@ and private resolveTableRef
 /// spelling would be over-filtered; GUI clients echo names the server gave
 /// them, so this stays until something real hits it. Joined
 /// information_schema queries take the unnarrowed path.
+and private describeStoredViewColumns (store: Store) (registry: Registry) (schema: string) (name: string) : ColumnDef list option =
+    let decimalParts =
+        function
+        | TDecimal(precision, scale) -> Some(precision, scale)
+        | TTinyInt _
+        | TBool -> Some(3, 0)
+        | TSmallInt _ -> Some(5, 0)
+        | TMediumInt _ -> Some(7, 0)
+        | TInt _ -> Some(10, 0)
+        | TBigInt _ -> Some(19, 0)
+        | _ -> None
+
+    let literalDecimalParts =
+        function
+        | VInt value -> Some(string value |> fun text -> text.TrimStart('-').Length, 0)
+        | VUInt value -> Some(string value |> fun text -> text.Length, 0)
+        | VDecimal value ->
+            let text = string value
+            let dot = text.IndexOf '.'
+            let scale = if dot < 0 then 0 else text.Length - dot - 1
+            Some(text.TrimStart('-').Replace(".", "").Length, scale)
+        | _ -> None
+
+    let directProjection name (column: ColumnDef) =
+        { column with
+            Name = name
+            Nullable = column.Nullable && not column.PrimaryKey
+            Default = if column.AutoIncrement then Some(DConst(VInt 0L)) else column.Default
+            AutoIncrement = false
+            PrimaryKey = false
+            Unique = false
+            Generated = None
+            Comment = "" }
+
+    let computedColumn name ty nullable collation =
+        { Name = name
+          Type = ty
+          Nullable = nullable
+          Default = None
+          AutoIncrement = false
+          PrimaryKey = false
+          Unique = false
+          Generated = None
+          Comment = ""
+          Collation = collation
+          Charset = collation |> Option.map Collation.charsetOfCollation
+          OnUpdateCurrentTimestamp = false }
+
+    let rec describeBody (seen: Set<string * string>) dbName =
+        function
+        | PlainSelect select -> describeSelect seen dbName select
+        | UnionSelect(first, rest, _, _, _) ->
+            (first :: (rest |> List.map snd))
+            |> List.tryPick (describeSelect seen dbName)
+
+    and sourceColumns seen dbName =
+        function
+        | FromTable tableRef ->
+            let tableDb = tableRef.Database |> Option.defaultValue dbName
+
+            if System.String.Equals(tableDb, "information_schema", System.StringComparison.OrdinalIgnoreCase) then
+                InformationSchema.scan store.Catalog tableRef.Table None |> Option.map fst
+            else
+                match tryStoredView store tableDb tableRef.Table with
+                | Some(view: StoredView) ->
+                    let key = view.Schema.ToLowerInvariant(), view.Name.ToLowerInvariant()
+
+                    if Set.contains key seen then
+                        None
+                    else
+                        Parser.parse view.Definition
+                        |> Result.toOption
+                        |> Option.bind (function
+                            | Select select -> describeSelect (Set.add key seen) view.Schema select
+                            | Union(first, rest, orderBy, limit, offset) ->
+                                describeBody (Set.add key seen) view.Schema (UnionSelect(first, rest, orderBy, limit, offset))
+                            | _ -> None)
+                        |> Option.bind (fun (columns: ColumnDef list) ->
+                            let declaredColumns: string list = view.Columns
+
+                            if declaredColumns.IsEmpty || declaredColumns.Length = columns.Length then
+                                if declaredColumns.IsEmpty then Some columns
+                                else Some(List.map2 (fun (column: ColumnDef) columnName -> { column with Name = columnName }) columns declaredColumns)
+                            else
+                                None)
+                | None -> scan store tableDb tableRef.Table |> Result.toOption |> Option.map fst
+        | FromSubquery(body, _)
+        | FromLateral(body, _) -> describeBody seen dbName body
+        | FromJsonTable(_, _, columns, _) -> Some(jsonTableColumnDefs columns)
+
+    and describeSelect seen dbName (select: SelectStmt) =
+        let sourceItems = (select.From |> Option.toList) @ (select.Joins |> List.map _.Table)
+
+        sourceItems
+        |> List.fold
+            (fun collected item ->
+                collected
+                |> Option.bind (fun sources ->
+                    sourceColumns seen dbName item
+                    |> Option.map (fun columns -> sources @ [ fromItemQualifier item, columns ])))
+            (Some [])
+        |> Option.map (fun sources ->
+            let columns = sources |> List.collect snd
+            let qualifiers = qualifierRanges sources
+            let context = contextFactory store registry dbName (columnIndexOf columns) qualifiers None (probeRow columns)
+
+            let columnForExpression name expression =
+                match tryColumnDefForExpr context expression with
+                | Some column -> directProjection name column
+                | None ->
+                    let decimalColumn =
+                        match expression with
+                        | BinOp((Add | Sub), left, right) ->
+                            let parts expression =
+                                tryColumnDefForExpr context expression
+                                |> Option.bind (fun column -> decimalParts column.Type)
+                                |> Option.orElseWith (fun () ->
+                                    match expression with
+                                    | Lit value -> literalDecimalParts value
+                                    | _ -> None)
+
+                            match parts left, parts right with
+                            | Some(leftPrecision, leftScale), Some(rightPrecision, rightScale) ->
+                                let scale = max leftScale rightScale
+                                let precision = min 65 (max (leftPrecision - leftScale) (rightPrecision - rightScale) + scale + 1)
+                                Some(computedColumn name (TDecimal(precision, scale)) true None)
+                            | _ -> None
+                        | _ -> None
+
+                    let concatColumn =
+                        match expression with
+                        | FuncCall(functionName, arguments) when functionName.Equals("CONCAT", System.StringComparison.OrdinalIgnoreCase) ->
+                            let lengthOf =
+                                function
+                                | Lit(VString text) -> Some(text.EnumerateRunes() |> Seq.length)
+                                | value ->
+                                    tryColumnDefForExpr context value
+                                    |> Option.bind (fun column ->
+                                        match column.Type with
+                                        | TChar length
+                                        | TVarchar length -> Some length
+                                        | _ -> None)
+
+                            let collation =
+                                arguments
+                                |> List.tryPick (fun argument -> tryColumnDefForExpr context argument |> Option.bind _.Collation)
+
+                            arguments
+                            |> List.map lengthOf
+                            |> List.fold (fun total length -> total + Option.defaultValue 1 length) 0
+                            |> min 65535
+                            |> fun length -> Some(computedColumn name (TVarchar length) true collation)
+                        | _ -> None
+
+                    match decimalColumn, concatColumn, metadataOfExpr context expression with
+                    | Some column, _, _ -> column
+                    | _, Some column, _ -> column
+                    | _, _, Some metadata ->
+                        deriveColumns [ name ] [ keyCollation context expression ] [ metadata ] |> List.head
+                    | _ -> computedColumn name TText true (Some "utf8mb4_0900_ai_ci")
+
+            select.Projections
+            |> List.collect (fun (expression, alias) ->
+                match expression with
+                | Star None -> columns
+                | Star(Some qualifier) ->
+                    qualifiers
+                    |> Map.tryFind (qualifier.ToLowerInvariant())
+                    |> Option.map fst
+                    |> Option.defaultValue []
+                | _ -> [ columnForExpression (alias |> Option.defaultValue (exprLabel expression)) expression ]))
+
+    sourceColumns Set.empty schema (FromTable { Database = None; Table = name; Alias = None })
+
 and private tryInformationSchemaNarrow
     (store: Store)
+    (registry: Registry)
     (dbName: string)
     (tableRef: TableRef)
     (where: Expr option)
@@ -3318,10 +3493,9 @@ and private tryInformationSchemaNarrow
 
             let selfContained =
                 match tableRef.Table.ToUpperInvariant() with
-                // TABLES also projects user views stored under mysql.views;
-                // narrowing away mysql would hide every view in the target
-                // schema before the ordinary row filter sees it.
-                | "COLUMNS" | "STATISTICS" | "PARTITIONS" -> true
+                // TABLES projects user views from mysql.views, so narrowing
+                // away mysql would hide them before the ordinary row filter.
+                | "STATISTICS" | "PARTITIONS" -> true
                 | _ -> false
 
             let catalog =
@@ -3337,7 +3511,7 @@ and private tryInformationSchemaNarrow
                 else
                     store.Catalog
 
-            InformationSchema.scan catalog tableRef.Table
+            InformationSchema.scan catalog tableRef.Table (Some(describeStoredViewColumns store registry))
             |> Option.map (fun (cols, rows) ->
                 let filters =
                     eqs |> List.choose (fun (name, v) -> resolveColumn cols name |> Result.toOption |> Option.map (fun i -> i, v))
@@ -4955,7 +5129,7 @@ and private runSelectStmt
                     let resolved =
                         tryRangeLookup store dbName tref select.Where
                         |> Option.map (fun (cols, rows) -> Ok(cols, rows |> List.map snd))
-                        |> Option.orElseWith (fun () -> tryInformationSchemaNarrow store dbName tref select.Where |> Option.map Ok)
+                        |> Option.orElseWith (fun () -> tryInformationSchemaNarrow store registry dbName tref select.Where |> Option.map Ok)
                         |> Option.defaultWith (fun () -> resolveFromItem store registry dbName fromItem)
 
                     match resolved with
@@ -8029,12 +8203,12 @@ let private isCorrelated (sub: SelectStmt) : bool =
 /// describes a real statement, so a table that doesn't exist is 1146 here
 /// too, same as it would be if the statement actually ran — not a fake
 /// plan with `rows = NULL`.
-let private explainTableStats (store: Store) (dbName: string) (tableRef: TableRef) : Result<uint64 option * string, QueryResult> =
+let private explainTableStats (store: Store) (registry: Registry) (dbName: string) (tableRef: TableRef) : Result<uint64 option * string, QueryResult> =
     let tableDb = tableRef.Database |> Option.defaultValue dbName
 
     let rowCountResult =
         if System.String.Equals(tableDb, "information_schema", System.StringComparison.OrdinalIgnoreCase) then
-            match InformationSchema.scan store.Catalog tableRef.Table with
+            match InformationSchema.scan store.Catalog tableRef.Table (Some(describeStoredViewColumns store registry)) with
             | Some(_, rows) -> Ok(uint64 (List.length rows))
             | None -> Error(storageErr (NoSuchTable tableRef.Table))
         else
@@ -8291,7 +8465,7 @@ let rec private explainJoinBlock
     let explainFromItem (joinPlans: Map<int, Table * string * int * bool * string * bool>) (idx: int) (item: FromItem) : Result<unit, QueryResult> =
         match item with
         | FromTable tref ->
-            explainTableStats store dbName tref
+            explainTableStats store registry dbName tref
             |> Result.map (fun (n, ty) ->
                 match Map.tryFind idx joinPlans with
                 | Some(table, keyName, keyIndex, unique, reference, hasResidual) ->
@@ -8635,6 +8809,10 @@ let runTopLevelUnion
     else
         let result, types, _ = runUnionStmt store registry dbName first rest orderBy limit offset
         result, types, None
+
+/// Describes a stored view without evaluating its query or its expressions.
+let viewColumns (store: Store) (registry: Registry) (schema: string) (name: string) : ColumnDef list option =
+    describeStoredViewColumns store registry schema name
 
 /// Folds one `insertRows`/`insertRowsIgnore`/`upsertRows` result's
 /// `(okPacketId, generatedId)` pair into `execute`'s own `ids` accumulator —

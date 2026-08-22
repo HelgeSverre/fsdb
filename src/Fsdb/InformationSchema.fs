@@ -45,6 +45,10 @@ type private ViewCatalogEntry =
       Created: DateTime option
       Definer: string }
 
+/// Purely resolves a stored view's output shape. The executor supplies this
+/// because it owns view-definition parsing and expression type inference.
+type ViewColumns = string -> string -> ColumnDef list option
+
 let private viewCatalogEntries (catalog: Catalog) : ViewCatalogEntry list =
     let text i (row: Value[]) = row.[i] |> Value.toText |> Option.defaultValue ""
 
@@ -506,10 +510,23 @@ let private columnRowWith (privileges: string) (dbName: string) (tableName: stri
 
 let private columnRow = columnRowWith "select,insert,update,references"
 
-let private columnsRows (catalog: Catalog) : Value[] list =
-    allTables catalog
-    |> List.collect (fun (dbName, t) ->
-        t.Columns |> List.mapi (fun i c -> columnRow dbName t.OriginalName i (columnKey t c) c))
+let private columnsRows (catalog: Catalog) (viewColumns: ViewColumns option) : Value[] list =
+    let baseRows =
+        allTables catalog
+        |> List.collect (fun (dbName, t) ->
+            t.Columns |> List.mapi (fun i c -> columnRow dbName t.OriginalName i (columnKey t c) c))
+
+    let viewRows =
+        match viewColumns with
+        | None -> []
+        | Some resolve ->
+            viewCatalogEntries catalog
+            |> List.collect (fun view ->
+                resolve view.Schema view.Name
+                |> Option.defaultValue []
+                |> List.mapi (fun i c -> columnRow view.Schema view.Name i "" c))
+
+    baseRows @ viewRows
 
 let private statisticsColumns =
     [ strCol "TABLE_CATALOG"
@@ -1410,13 +1427,13 @@ let private scopeRowsToViewer (tableName: string) (columns: ColumnDef list) (row
 /// columns and freshly-projected rows, or `None` if `name` isn't one of the
 /// virtual tables this module knows about (a real 1146 from `Executor`, same
 /// as any other unknown table).
-let scan (catalog: Catalog) (name: string) : (ColumnDef list * Value[] list) option =
+let scan (catalog: Catalog) (name: string) (viewColumns: ViewColumns option) : (ColumnDef list * Value[] list) option =
     let upper = name.ToUpperInvariant()
 
     let rows =
         match upper with
         | "TABLES" -> Some(tablesRows catalog @ selfTablesRows ())
-        | "COLUMNS" -> Some(columnsRows catalog @ selfColumnsRowsCached.Value)
+        | "COLUMNS" -> Some(columnsRows catalog viewColumns @ selfColumnsRowsCached.Value)
         | "STATISTICS" -> Some(statisticsRows catalog)
         | "KEY_COLUMN_USAGE" -> Some(keyColumnUsageRows catalog)
         | "REFERENTIAL_CONSTRAINTS" -> Some(referentialConstraintsRows catalog)
@@ -1634,19 +1651,27 @@ let showDatabases (catalog: Catalog) (fsdbVisible: bool) (likeOpt: string option
 /// `SHOW [FULL] COLUMNS FROM t [FROM db] [LIKE 'pattern']` and
 /// `DESCRIBE`/`DESC t` (which are just `SHOW COLUMNS`'s narrower 5-column
 /// form under a different name).
-let showColumns (catalog: Catalog) (full: bool) (dbName: string) (tableName: string) (likeOpt: string option) : ShowResult =
-    findTable catalog dbName tableName
-    |> Result.map (fun t ->
+let showColumns (catalog: Catalog) (viewColumns: ViewColumns option) (full: bool) (dbName: string) (tableName: string) (likeOpt: string option) : ShowResult =
+    let columns =
+        match findTable catalog dbName tableName with
+        | Ok table -> Ok(table.Columns, fun (column: ColumnDef) -> columnKey table column)
+        | Error error ->
+            match viewColumns |> Option.bind (fun resolve -> resolve dbName tableName) with
+            | Some columns -> Ok(columns, fun (_: ColumnDef) -> "")
+            | None -> Error error
+
+    columns
+    |> Result.map (fun (columns, keyOf) ->
         let isNullable (c: ColumnDef) = if c.PrimaryKey || not c.Nullable then "NO" else "YES"
         let defaultCol (c: ColumnDef) = defaultText c
         let extra = extraText
 
-        let cols = t.Columns |> List.filter (fun c -> likeFilter likeOpt c.Name)
+        let cols: ColumnDef list = columns |> List.filter (fun c -> likeFilter likeOpt c.Name)
 
         if full then
             let rows =
                 cols
-                |> List.map (fun c ->
+                |> List.map (fun (c: ColumnDef) ->
                     [ Some c.Name
                       Some(columnTypeText c.Type)
                       // The column's declared/inherited collation —
@@ -1654,7 +1679,7 @@ let showColumns (catalog: Catalog) (full: bool) (dbName: string) (tableName: str
                       // (`columnsRows` above).
                       (if isStringy c.Type then Some(c.Collation |> Option.defaultValue "utf8mb4_0900_ai_ci") else None)
                       Some(isNullable c)
-                      Some(columnKey t c)
+                      Some(keyOf c)
                       defaultCol c
                       Some(extra c)
                       Some "select,insert,update,references"
@@ -1664,8 +1689,8 @@ let showColumns (catalog: Catalog) (full: bool) (dbName: string) (tableName: str
         else
             let rows =
                 cols
-                |> List.map (fun c ->
-                    [ Some c.Name; Some(columnTypeText c.Type); Some(isNullable c); Some(columnKey t c); defaultCol c; Some(extra c) ])
+                |> List.map (fun (c: ColumnDef) ->
+                    [ Some c.Name; Some(columnTypeText c.Type); Some(isNullable c); Some(keyOf c); defaultCol c; Some(extra c) ])
 
             [ "Field"; "Type"; "Null"; "Key"; "Default"; "Extra" ], rows)
 
@@ -1897,7 +1922,7 @@ let showTableStatus (catalog: Catalog) (dbName: string) (likeOpt: string option)
         )
     | None -> Error(1049, sprintf "Unknown database '%s'" dbName)
     | Some db ->
-        let rows =
+        let tableRows =
             db
             |> Map.toList
             |> List.map snd
@@ -1931,6 +1956,32 @@ let showTableStatus (catalog: Catalog) (dbName: string) (likeOpt: string option)
                   None
                   Some ""
                   Some "" ])
+
+        let viewRows =
+            viewCatalogEntries catalog
+            |> List.filter (fun view -> String.Equals(view.Schema, dbName, StringComparison.OrdinalIgnoreCase))
+            |> List.filter (fun view -> likeFilter likeOpt view.Name)
+            |> List.map (fun view ->
+                [ Some view.Name
+                  None
+                  None
+                  None
+                  None
+                  None
+                  None
+                  None
+                  None
+                  None
+                  None
+                  (view.Created |> Option.map (truncateToSecond >> VDateTime >> Value.toText) |> Option.flatten)
+                  None
+                  None
+                  None
+                  None
+                  Some ""
+                  Some "VIEW" ])
+
+        let rows = (tableRows @ viewRows) |> List.sortBy List.head
 
         Ok(
             [ "Name"

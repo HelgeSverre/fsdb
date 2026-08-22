@@ -257,6 +257,8 @@ at read time so revokes take effect, persistence through WAL restarts,
 SHOW CREATE VIEW and I_S.VIEWS with correct shapes. Direct projections over
 one unfiltered base table accept INSERT, INSERT ... SELECT, UPDATE, and DELETE
 with exposed-column enforcement and definer privilege checks.
+View projections appear in I_S.COLUMNS, DESCRIBE, SHOW COLUMNS, and SHOW TABLE
+STATUS. Their metadata is derived from the saved query without evaluating it.
 
 Triggers working: BEFORE/AFTER INSERT/UPDATE/DELETE FOR EACH ROW with OLD/NEW
 row images and BEFORE SET NEW assignments, bodies limited to one DML or SET
@@ -270,7 +272,6 @@ OLD/NEW images are rejected when the trigger is created.
 | Updatable-view breadth | joins, expressions, nested views, REPLACE, and ODKU where MySQL deems the view writable | direct single-table projections with a simple base-table WHERE predicate; view ODKU and REPLACE refuse | medium | refusal |
 | WITH CHECK OPTION | enforced on updatable views | CREATE VIEW refuses `WITH [CASCADED|LOCAL] CHECK OPTION` with 1235 | low | refusal |
 | ALGORITHM / SQL SECURITY INVOKER / ALTER VIEW | supported | absent; SECURITY_TYPE constant DEFINER (`InformationSchema.fs:922–923`) | low | refusal |
-| View metadata projection | views appear in I_S.COLUMNS, DESCRIBE, SHOW TABLE STATUS | absent (documented in compatibility.md) | medium | divergence |
 | VIEW_DEFINITION rendering | fully-qualified expanded form; SHOW CREATE VIEW wrapped in `/*!50001 */` | raw user text, no wrapper (`InformationSchema.fs:1749–1764`) | low | divergence |
 | Trigger DML breadth | triggers fire for every applicable MySQL DML form | single-table DML is covered; REPLACE refuses when DELETE triggers exist, and multi-table UPDATE/DELETE firing remains unsupported | medium | refusal |
 | Compound trigger bodies | BEGIN…END with variables/handlers | single statement only | medium | refusal |

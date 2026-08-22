@@ -1842,11 +1842,15 @@ let private runProbe (session: Session) (sql: string) (probe: Probe) : Session *
         let sessionDb = session.Database |> Option.defaultValue defaultDatabase
         let dbName, table = splitQualified sessionDb name
         let dbName = dbOverride |> Option.map stripBackticks |> Option.defaultValue dbName
-        session, InformationSchema.showColumns (catalogWithOverlay session dbName table) full dbName table (likeSuffix sql) |> showResult
+        let store = Session.currentStore session
+        let viewColumns = Executor.viewColumns store (registryFor session)
+        session, InformationSchema.showColumns (catalogWithOverlay session dbName table) (Some viewColumns) full dbName table (likeSuffix sql) |> showResult
     | Describe name ->
         let sessionDb = session.Database |> Option.defaultValue defaultDatabase
         let dbName, table = splitQualified sessionDb name
-        session, InformationSchema.showColumns (catalogWithOverlay session dbName table) false dbName table None |> showResult
+        let store = Session.currentStore session
+        let viewColumns = Executor.viewColumns store (registryFor session)
+        session, InformationSchema.showColumns (catalogWithOverlay session dbName table) (Some viewColumns) false dbName table None |> showResult
     | ShowIndex(name, dbOverride) ->
         let sessionDb = session.Database |> Option.defaultValue defaultDatabase
         let dbName, table = splitQualified sessionDb name
