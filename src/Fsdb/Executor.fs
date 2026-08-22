@@ -2157,6 +2157,10 @@ type private QuantifiedOperand =
     { Expression: Expr
       Column: ColumnDef option }
 
+type private RowOperand =
+    | RowScalar of expression: Expr * column: ColumnDef option * value: Value
+    | RowValues of RowOperand list
+
 let private comparisonResult
     (ctx: EvalContext)
     (leftExpr: Expr)
@@ -2302,71 +2306,85 @@ let private subqueryProjectionOperand (ctx: EvalContext) (select: SelectStmt) : 
         { Expression = Lit VNull
           Column = None }
 
+let private subqueryRowOperand (_: EvalContext) (_: SelectStmt) (values: Value[]) : RowOperand =
+    values
+    |> Array.toList
+    |> List.map (fun value -> RowScalar(Lit VNull, None, value))
+    |> RowValues
+
 let private rowComparisonResult
     (ctx: EvalContext)
     (op: Op)
-    (left: (Expr * Value) list)
-    (right: (Expr * Value) list)
+    (left: RowOperand)
+    (right: RowOperand)
     : Result<Value, EvalError> =
-    let comparison (leftExpr, leftValue) (rightExpr, rightValue) comparisonOp =
-        comparisonResult
-            ctx
-            leftExpr
-            (tryColumnDefForExpr ctx leftExpr)
-            leftValue
-            rightExpr
-            (tryColumnDefForExpr ctx rightExpr)
-            comparisonOp
-            rightValue
+    let width = function
+        | RowScalar _ -> 1
+        | RowValues values -> values.Length
 
-    if left.Length <> right.Length then
-        Error(1241, sprintf "Operand should contain %d column(s)" left.Length)
-    else
-        let pairs = List.zip left right
+    let scalarComparison left right comparisonOp =
+        match left, right with
+        | RowScalar(leftExpr, leftColumn, leftValue), RowScalar(rightExpr, rightColumn, rightValue) ->
+            match comparisonOp, leftValue, rightValue with
+            | NullSafeEq, VNull, VNull -> Ok(VInt 1L)
+            | NullSafeEq, VNull, _
+            | NullSafeEq, _, VNull -> Ok(VInt 0L)
+            | NullSafeEq, _, _ -> Ok(comparisonResult ctx leftExpr leftColumn leftValue rightExpr rightColumn Eq rightValue)
+            | _ -> Ok(comparisonResult ctx leftExpr leftColumn leftValue rightExpr rightColumn comparisonOp rightValue)
+        | _ -> Error(1241, sprintf "Operand should contain %d column(s)" (width left))
 
-        let rec equal sawNull pairs =
-            match pairs with
-            | [] -> Ok(if sawNull then VNull else VInt 1L)
-            | (leftItem, rightItem) :: rest ->
-                match comparison leftItem rightItem Eq with
-                | VInt 0L -> Ok(VInt 0L)
-                | VNull -> equal true rest
-                | _ -> equal sawNull rest
+    let rec compareRows comparisonOp left right =
+        match left, right with
+        | RowScalar _, RowScalar _ -> scalarComparison left right comparisonOp
+        | RowValues leftValues, RowValues rightValues when leftValues.Length = rightValues.Length ->
+            let pairs = List.zip leftValues rightValues
 
-        let rec ordered pairs =
-            match pairs with
-            | [] -> Ok(VInt(if op = Lte || op = Gte then 1L else 0L))
-            | (leftItem, rightItem) :: rest ->
-                match comparison leftItem rightItem Eq with
-                | VInt 1L -> ordered rest
-                | VNull -> Ok VNull
-                | _ -> Ok(comparison leftItem rightItem op)
+            let rec equal sawNull pairs =
+                match pairs with
+                | [] -> Ok(if sawNull then VNull else VInt 1L)
+                | (leftItem, rightItem) :: rest ->
+                    match compareRows Eq leftItem rightItem with
+                    | Ok(VInt 0L) -> Ok(VInt 0L)
+                    | Ok VNull -> equal true rest
+                    | Ok _ -> equal sawNull rest
+                    | Error error -> Error error
 
-        let rec nullSafe pairs =
-            match pairs with
-            | [] -> Ok(VInt 1L)
-            | ((_, VNull), (_, VNull)) :: rest -> nullSafe rest
-            | ((_, VNull), _) :: _
-            | (_, (_, VNull)) :: _ -> Ok(VInt 0L)
-            | (leftItem, rightItem) :: rest ->
-                match comparison leftItem rightItem Eq with
-                | VInt 1L -> nullSafe rest
-                | _ -> Ok(VInt 0L)
+            let rec ordered pairs =
+                match pairs with
+                | [] -> Ok(VInt(if comparisonOp = Lte || comparisonOp = Gte then 1L else 0L))
+                | (leftItem, rightItem) :: rest ->
+                    match compareRows Eq leftItem rightItem with
+                    | Ok(VInt 1L) -> ordered rest
+                    | Ok VNull -> Ok VNull
+                    | Ok _ -> compareRows comparisonOp leftItem rightItem
+                    | Error error -> Error error
 
-        match op with
-        | Eq -> equal false pairs
-        | Neq ->
-            equal false pairs
-            |> Result.map (function
-                | VInt 1L -> VInt 0L
-                | VInt 0L -> VInt 1L
-                | _ -> VNull)
-        | Lt
-        | Lte
-        | Gt
-        | Gte -> ordered pairs
-        | NullSafeEq -> nullSafe pairs
-        | _ -> Error(1241, "Operand should contain 1 column(s)")
+            let rec nullSafe pairs =
+                match pairs with
+                | [] -> Ok(VInt 1L)
+                | (leftItem, rightItem) :: rest ->
+                    match compareRows NullSafeEq leftItem rightItem with
+                    | Ok(VInt 1L) -> nullSafe rest
+                    | Ok _ -> Ok(VInt 0L)
+                    | Error error -> Error error
+
+            match comparisonOp with
+            | Eq -> equal false pairs
+            | Neq ->
+                equal false pairs
+                |> Result.map (function
+                    | VInt 1L -> VInt 0L
+                    | VInt 0L -> VInt 1L
+                    | _ -> VNull)
+            | Lt
+            | Lte
+            | Gt
+            | Gte -> ordered pairs
+            | NullSafeEq -> nullSafe pairs
+            | _ -> Error(1241, "Operand should contain 1 column(s)")
+        | _ -> Error(1241, sprintf "Operand should contain %d column(s)" (width left))
+
+    compareRows op left right
 
 type private SubqueryScope =
     { Qualifiers: Set<string>
@@ -2569,8 +2587,8 @@ let rec private evalExpr (ctx: EvalContext) (expr: Expr) : Result<Value, EvalErr
     | IsFalse e -> eval e |> Result.map (fun v -> boolToValue (truthy v = Some false))
     | BinOp((Eq | Neq | Lt | Lte | Gt | Gte | NullSafeEq as op), (Row _ as a), b)
     | BinOp((Eq | Neq | Lt | Lte | Gt | Gte | NullSafeEq as op), a, (Row _ as b)) ->
-        evalRowExpr ctx a
-        |> Result.bind (fun left -> evalRowExpr ctx b |> Result.bind (rowComparisonResult ctx op left))
+        evalRowOperand ctx a
+        |> Result.bind (fun left -> evalRowOperand ctx b |> Result.bind (rowComparisonResult ctx op left))
     | BinOp(op, a, b) ->
         // Arithmetic can leave the `BIGINT UNSIGNED` domain, which MySQL
         // refuses with 1690 rather than answering in a wider type. That
@@ -2661,10 +2679,10 @@ let rec private evalExpr (ctx: EvalContext) (expr: Expr) : Result<Value, EvalErr
         |> Result.bind (fun ve -> eval p |> Result.bind (fun vp -> regexpOp (Some(keyCollation ctx e)) ve vp))
     | In((Row _ as e), xs)
     | In(e, ((Row _) :: _ as xs)) ->
-        evalRowExpr ctx e
+        evalRowOperand ctx e
         |> Result.bind (fun value ->
             xs
-            |> traverse (evalRowExpr ctx)
+            |> traverse (evalRowOperand ctx)
             |> Result.bind (fun candidates ->
                 candidates
                 |> traverse (rowComparisonResult ctx Eq value)
@@ -2698,19 +2716,15 @@ let rec private evalExpr (ctx: EvalContext) (expr: Expr) : Result<Value, EvalErr
                     else
                         VInt 0L))
     | InSubquery((Row _ as e), select) ->
-        evalRowExpr ctx e
+        evalRowOperand ctx e
         |> Result.bind (fun value ->
             match runExpressionSubquery ctx select select with
             | Err(code, message), _, _ -> Error(code, message)
             | Affected _, _, _ -> Ok VNull
-            | ResultSet(columns, _), _, _ when columns.Length <> value.Length ->
-                Error(1241, sprintf "Operand should contain %d column(s)" value.Length)
             | ResultSet(_, _), _, typedRows ->
                 typedRows
                 |> traverse (fun row ->
-                    row
-                    |> Array.toList
-                    |> List.map (fun item -> Lit item, item)
+                    subqueryRowOperand ctx select row
                     |> rowComparisonResult ctx Eq value)
                 |> Result.map (fun results ->
                     if results |> List.exists ((=) (VInt 1L)) then
@@ -3073,19 +3087,22 @@ let rec private evalExpr (ctx: EvalContext) (expr: Expr) : Result<Value, EvalErr
         | ResultSet(_, [ _ ]), _, [ row ] -> Ok row.[0]
         | ResultSet(_, _), _, _ -> Error(1242, "Subquery returns more than 1 row")
 
-and private evalRowExpr (ctx: EvalContext) (expr: Expr) : Result<(Expr * Value) list, EvalError> =
+and private evalRowOperand (ctx: EvalContext) (expr: Expr) : Result<RowOperand, EvalError> =
     match expr with
     | Row values ->
         values
-        |> traverse (fun value -> evalExpr ctx value |> Result.map (fun evaluated -> value, evaluated))
+        |> traverse (evalRowOperand ctx)
+        |> Result.map RowValues
     | Subquery select ->
         match runExpressionSubquery ctx select select with
         | Err(code, message), _, _ -> Error(code, message)
-        | Affected _, _, _ -> Ok []
-        | ResultSet(columns, _), _, [] -> Ok(List.replicate columns.Length (Lit VNull, VNull))
-        | ResultSet(_, [ _ ]), _, [ row ] -> Ok(row |> Array.toList |> List.map (fun value -> Lit value, value))
+        | Affected _, _, _ -> Ok(RowValues [])
+        | ResultSet(columns, _), _, [] -> Ok(subqueryRowOperand ctx select (Array.create columns.Length VNull))
+        | ResultSet(_, [ _ ]), _, [ row ] -> Ok(subqueryRowOperand ctx select row)
         | ResultSet(_, _), _, _ -> Error(1242, "Subquery returns more than 1 row")
-    | _ -> evalExpr ctx expr |> Result.map (fun value -> [ expr, value ])
+    | _ ->
+        evalExpr ctx expr
+        |> Result.map (fun value -> RowScalar(expr, tryColumnDefForExpr ctx expr, value))
 
 /// Evaluates an ORDER BY expression and applies the column-type-specific
 /// sort representation. Expressions such as CAST(enum_col AS CHAR) remain
