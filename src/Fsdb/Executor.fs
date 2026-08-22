@@ -3322,11 +3322,11 @@ and private describeStoredViewColumns (store: Store) (registry: Registry) (schem
             Generated = None
             Comment = "" }
 
-    let computedColumn name ty nullable collation =
+    let computedColumn name ty nullable defaultValue collation =
         { Name = name
           Type = ty
           Nullable = nullable
-          Default = None
+          Default = defaultValue
           AutoIncrement = false
           PrimaryKey = false
           Unique = false
@@ -3393,8 +3393,7 @@ and private describeStoredViewColumns (store: Store) (registry: Registry) (schem
                 | TLongText -> Some(DConst(VString ""))
                 | _ -> None
 
-        computedColumn first.Name mergedType nullable collation
-        |> fun column -> { column with Default = clearedDefault }
+        computedColumn first.Name mergedType nullable clearedDefault collation
 
     let unionColumns (branches: ColumnDef list list) =
         match branches with
@@ -3490,25 +3489,6 @@ and private describeStoredViewColumns (store: Store) (registry: Registry) (schem
                 match tryColumnDefForExpr context expression with
                 | Some column -> directProjection name column
                 | None ->
-                    let decimalColumn =
-                        match expression with
-                        | BinOp((Add | Sub), left, right) ->
-                            let parts expression =
-                                tryColumnDefForExpr context expression
-                                |> Option.bind (fun column -> decimalParts column.Type)
-                                |> Option.orElseWith (fun () ->
-                                    match expression with
-                                    | Lit value -> literalDecimalParts value
-                                    | _ -> None)
-
-                            match parts left, parts right with
-                            | Some(leftPrecision, leftScale), Some(rightPrecision, rightScale) ->
-                                let scale = max leftScale rightScale
-                                let precision = min 65 (max (leftPrecision - leftScale) (rightPrecision - rightScale) + scale + 1)
-                                Some(computedColumn name (TDecimal(precision, scale)) true None)
-                            | _ -> None
-                        | _ -> None
-
                     let concatColumn =
                         match expression with
                         | FuncCall(functionName, arguments) when functionName.Equals("CONCAT", System.StringComparison.OrdinalIgnoreCase) ->
@@ -3531,15 +3511,91 @@ and private describeStoredViewColumns (store: Store) (registry: Registry) (schem
                             |> List.map lengthOf
                             |> List.fold (fun total length -> total + Option.defaultValue 1 length) 0
                             |> min 65535
-                            |> fun length -> Some(computedColumn name (TVarchar length) true collation)
+                            |> fun length -> Some(computedColumn name (TVarchar length) true None collation)
                         | _ -> None
 
-                    match decimalColumn, concatColumn, metadataOfExpr context expression with
-                    | Some column, _, _ -> column
-                    | _, Some column, _ -> column
-                    | _, _, Some metadata ->
+                    let parts expression =
+                        tryColumnDefForExpr context expression
+                        |> Option.bind (fun column -> decimalParts column.Type)
+                        |> Option.orElseWith (fun () ->
+                            match expression with
+                            | Lit value -> literalDecimalParts value
+                            | _ -> None)
+
+                    let decimalDefault scale =
+                        if scale = 0 then DConst(VString "0") else DConst(VString("0." + String.replicate scale "0"))
+
+                    let literalColumn =
+                        match expression with
+                        | Lit(VInt _) -> Some(computedColumn name (TInt false) false (Some(DConst(VInt 0L))) None)
+                        | Lit(VUInt _) -> Some(computedColumn name (TBigInt true) false (Some(DConst(VInt 0L))) None)
+                        | Lit(VDecimal value) ->
+                            literalDecimalParts (VDecimal value)
+                            |> Option.map (fun (precision, scale) -> computedColumn name (TDecimal(precision, scale)) false (Some(decimalDefault scale)) None)
+                        | Lit(VDouble _) -> Some(computedColumn name TDouble false (Some(DConst(VInt 0L))) None)
+                        | Lit(VString text) ->
+                            Some(computedColumn name (TVarchar(text.EnumerateRunes() |> Seq.length)) false (Some(DConst(VString ""))) (Some "utf8mb4_0900_ai_ci"))
+                        | Lit VNull -> Some(computedColumn name (TVarBinary 0) true None None)
+                        | _ -> None
+
+                    let arithmeticColumn =
+                        match expression with
+                        | BinOp((Add | Sub | Mul | Div), left, right) ->
+                            match parts left, parts right with
+                            | Some(leftPrecision, leftScale), Some(rightPrecision, rightScale) ->
+                                let precision, scale =
+                                    match expression with
+                                    | BinOp((Add | Sub), _, _) ->
+                                        let scale = max leftScale rightScale
+                                        min 65 (max (leftPrecision - leftScale) (rightPrecision - rightScale) + scale + 1), scale
+                                    | BinOp(Mul, _, _) -> min 65 (leftPrecision + rightPrecision), min 30 (leftScale + rightScale)
+                                    | BinOp(Div, _, _) ->
+                                        let scale = max 6 (leftScale + rightPrecision + 1)
+                                        min 65 (leftPrecision - leftScale + rightScale + scale), scale
+                                    | _ -> 65, 30
+
+                                let nullable expression = tryColumnDefForExpr context expression |> Option.map isNullable |> Option.defaultValue false
+                                Some(computedColumn name (TDecimal(precision, scale)) (nullable left || nullable right) None None)
+                            | _ -> None
+                        | _ -> None
+
+                    let aggregateColumn =
+                        match expression with
+                        | FuncCall(functionName, _) when functionName.Equals("COUNT", System.StringComparison.OrdinalIgnoreCase) ->
+                            Some(computedColumn name (TBigInt false) false (Some(DConst(VInt 0L))) None)
+                        | FuncCall(functionName, [ argument ])
+                            when functionName.Equals("MIN", System.StringComparison.OrdinalIgnoreCase)
+                                 || functionName.Equals("MAX", System.StringComparison.OrdinalIgnoreCase) ->
+                            tryColumnDefForExpr context argument
+                            |> Option.map (fun column -> { directProjection name column with Nullable = true; Default = None })
+                        | _ -> None
+
+                    let comparisonColumn =
+                        match expression with
+                        | BinOp((And | Or | Xor | Eq | Neq | Lt | Lte | Gt | Gte | NullSafeEq), _, _)
+                        | Not _
+                        | IsNull _
+                        | IsNotNull _
+                        | IsTrue _
+                        | IsFalse _
+                        | Like _
+                        | Regexp _
+                        | In _
+                        | InSubquery _
+                        | QuantifiedComparison _
+                        | Between _
+                        | Exists _ -> Some(computedColumn name (TInt false) false (Some(DConst(VInt 0L))) None)
+                        | _ -> None
+
+                    match literalColumn, comparisonColumn, aggregateColumn, arithmeticColumn, concatColumn, metadataOfExpr context expression with
+                    | Some column, _, _, _, _, _ -> column
+                    | _, Some column, _, _, _, _ -> column
+                    | _, _, Some column, _, _, _ -> column
+                    | _, _, _, Some column, _, _ -> column
+                    | _, _, _, _, Some column, _ -> column
+                    | _, _, _, _, _, Some metadata ->
                         deriveColumns [ name ] [ keyCollation context expression ] [ metadata ] |> List.head
-                    | _ -> computedColumn name TText true (Some "utf8mb4_0900_ai_ci")
+                    | _ -> computedColumn name TText true None (Some "utf8mb4_0900_ai_ci")
 
             select.Projections
             |> List.collect (fun (expression, alias) ->

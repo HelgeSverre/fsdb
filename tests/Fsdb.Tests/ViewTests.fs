@@ -383,6 +383,34 @@ let tests =
                       "union metadata combines type, nullability, and collation without retaining source defaults"
               | other -> failtestf "expected union view metadata, got %A" other
 
+          testCase "computed view projections retain MySQL result types"
+          <| fun _ ->
+              let store = Fsdb.Storage.create ()
+              let session = Fsdb.Session.create 1 store
+
+              let apply session sql =
+                  let session, result = Fsdb.QueryHandler.handle session sql
+                  expectOk result sql
+                  session
+
+              let session = apply session "CREATE TABLE source (amount DECIMAL(8,2), label VARCHAR(12) COLLATE utf8mb4_bin NOT NULL DEFAULT 'x')"
+              let session = apply session "CREATE VIEW computed_types AS SELECT 1 AS one, 'x' AS text_value, 1 = 1 AS int_cmp, 'x' = 'x' AS text_cmp, amount * 2 AS multiplied, amount / 2 AS divided, COUNT(*) AS counted, MIN(label) AS minimum FROM source"
+
+              match Fsdb.QueryHandler.handle session "SELECT column_name, column_default, is_nullable, column_type, collation_name FROM information_schema.columns WHERE table_schema = 'fsdb' AND table_name = 'computed_types' ORDER BY ordinal_position" |> snd with
+              | ResultSet(_, rows) ->
+                  Expect.equal
+                      rows
+                      [ [ Some "one"; Some "0"; Some "NO"; Some "int"; None ]
+                        [ Some "text_value"; Some ""; Some "NO"; Some "varchar(1)"; Some "utf8mb4_0900_ai_ci" ]
+                        [ Some "int_cmp"; Some "0"; Some "NO"; Some "int"; None ]
+                        [ Some "text_cmp"; Some "0"; Some "NO"; Some "int"; None ]
+                        [ Some "multiplied"; None; Some "YES"; Some "decimal(9,2)"; None ]
+                        [ Some "divided"; None; Some "YES"; Some "decimal(12,6)"; None ]
+                        [ Some "counted"; Some "0"; Some "NO"; Some "bigint"; None ]
+                        [ Some "minimum"; None; Some "YES"; Some "varchar(12)"; Some "utf8mb4_bin" ] ]
+                      "computed expressions keep their declared result metadata"
+              | other -> failtestf "expected computed view metadata, got %A" other
+
           testCase "a view reads with its definer privileges and observes later revokes"
           <| fun _ ->
               let store = setup ()
