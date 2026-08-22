@@ -4459,6 +4459,61 @@ let tests =
                     | ResultSet([ "a"; "b"; "c"; "d" ], [ [ Some "1"; None; Some "1"; Some "0" ] ]) -> ()
                     | other -> failtestf "expected <=> to never be NULL, got %A" other
 
+                testCase "row comparisons are lexicographic and retain three-valued NULL semantics"
+                <| fun _ ->
+                    let store = newStore ()
+
+                    match
+                        runDefault
+                            store
+                            "SELECT (1, 2) = (1, 2) AS eq, (1, NULL) = (1, NULL) AS unknown_eq, (1, NULL) < (2, 0) AS first_decides, (1, NULL) < (1, 0) AS unknown_order, (NULL, 1) <=> (NULL, 1) AS null_safe"
+                    with
+                    | ResultSet(_, [ [ Some "1"; None; Some "1"; None; Some "1" ] ]) -> ()
+                    | other -> failtestf "expected row comparison results, got %A" other
+
+                    runDefault store "CREATE TABLE pairs (a INT, b INT)" |> ignore
+                    runDefault store "INSERT INTO pairs VALUES (1, 2), (1, NULL), (2, 0), (3, 4)" |> ignore
+
+                    match runDefault store "SELECT a, b FROM pairs WHERE (a, b) = (1, 2) OR (a, b) > (1, 9) ORDER BY a" with
+                    | ResultSet(_, [ [ Some "1"; Some "2" ]; [ Some "2"; Some "0" ]; [ Some "3"; Some "4" ] ]) -> ()
+                    | other -> failtestf "expected lexicographic row filtering, got %A" other
+
+                testCase "row IN supports literal candidates and multi-column subqueries"
+                <| fun _ ->
+                    let store = newStore ()
+                    runDefault store "CREATE TABLE pairs (a INT, b INT)" |> ignore
+                    runDefault store "CREATE TABLE allowed (a INT, b INT)" |> ignore
+                    runDefault store "INSERT INTO pairs VALUES (1, 2), (1, NULL), (3, 4)" |> ignore
+                    runDefault store "INSERT INTO allowed VALUES (1, 2), (3, 4)" |> ignore
+
+                    match runDefault store "SELECT a, b FROM pairs WHERE (a, b) IN ((1, 2), (3, 4)) ORDER BY a" with
+                    | ResultSet(_, [ [ Some "1"; Some "2" ]; [ Some "3"; Some "4" ] ]) -> ()
+                    | other -> failtestf "expected literal row IN matches, got %A" other
+
+                    match runDefault store "SELECT a, b FROM pairs WHERE (a, b) IN (SELECT a, b FROM allowed) ORDER BY a" with
+                    | ResultSet(_, [ [ Some "1"; Some "2" ]; [ Some "3"; Some "4" ] ]) -> ()
+                    | other -> failtestf "expected subquery row IN matches, got %A" other
+
+                    match runDefault store "SELECT (1, 2) = (SELECT a, b FROM allowed WHERE a = 1) AS matches" with
+                    | ResultSet(_, [ [ Some "1" ] ]) -> ()
+                    | other -> failtestf "expected multi-column scalar-subquery comparison, got %A" other
+
+                testCase "row predicates reject mismatched arity and bare row projections"
+                <| fun _ ->
+                    let store = newStore ()
+
+                    match runDefault store "SELECT (1, 2) = (1, 2, 3)" with
+                    | Err(1241, "Operand should contain 2 column(s)") -> ()
+                    | other -> failtestf "expected row-comparison arity error, got %A" other
+
+                    match runDefault store "SELECT (1, 2) IN ((1, 2, 3))" with
+                    | Err(1241, "Operand should contain 2 column(s)") -> ()
+                    | other -> failtestf "expected row-IN arity error, got %A" other
+
+                    match runDefault store "SELECT (1, 2)" with
+                    | Err(1241, "Operand should contain 1 column(s)") -> ()
+                    | other -> failtestf "expected scalar-context row arity error, got %A" other
+
                 testCase "IS TRUE / IS FALSE are never NULL, even for a NULL operand"
                 <| fun _ ->
                     let store = newStore ()

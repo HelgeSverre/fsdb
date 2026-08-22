@@ -304,6 +304,7 @@ let rec private containsAggregate (registry: Registry) (expr: Expr) : bool =
     | Placeholder _ -> false
     | MatchAgainst(_, q, _) -> containsAggregate registry q
     | FuncCall(_, args) -> isAggregateCall registry expr || args |> List.exists (containsAggregate registry)
+    | Row values -> values |> List.exists (containsAggregate registry)
     | BinOp(_, a, b) -> containsAggregate registry a || containsAggregate registry b
     | AssignUserVariable(_, value) -> containsAggregate registry value
     | Not e
@@ -352,6 +353,7 @@ let rec private collectWindowFuncs (expr: Expr) : Expr list =
     | MatchAgainst(_, q, _) -> collectWindowFuncs q
     | WindowOver _ -> [ expr ]
     | FuncCall(_, args) -> args |> List.collect collectWindowFuncs
+    | Row values -> values |> List.collect collectWindowFuncs
     | BinOp(_, a, b) -> collectWindowFuncs a @ collectWindowFuncs b
     | AssignUserVariable(_, value) -> collectWindowFuncs value
     | Not e
@@ -396,6 +398,7 @@ let rec private collectAggregateCalls (registry: Registry) (expr: Expr) : Expr l
     | WindowOver(fn, over) -> windowFnExprs fn @ overExprs over |> List.collect recur
     | MatchAgainst(_, q, _) -> recur q
     | FuncCall(_, args) -> args |> List.collect recur
+    | Row values -> values |> List.collect recur
     | BinOp(_, a, b) -> recur a @ recur b
     | AssignUserVariable(_, value) -> recur value
     | Not e
@@ -460,6 +463,7 @@ let rec private collectCallsNamed (name: string) (expr: Expr) : Expr list =
     | WindowOver(fn, over) -> windowFnExprs fn @ overExprs over |> List.collect recur
     | MatchAgainst(_, q, _) -> recur q
     | FuncCall(_, args) -> args |> List.collect recur
+    | Row values -> values |> List.collect recur
     | BinOp(_, a, b) -> recur a @ recur b
     | AssignUserVariable(_, value) -> recur value
     | Not e
@@ -544,6 +548,7 @@ let rec private collectMatchAgainst (expr: Expr) : Expr list =
     match expr with
     | MatchAgainst _ -> [ expr ]
     | FuncCall(_, args) -> args |> List.collect collectMatchAgainst
+    | Row values -> values |> List.collect collectMatchAgainst
     | BinOp(_, a, b) -> collectMatchAgainst a @ collectMatchAgainst b
     | AssignUserVariable(_, value) -> collectMatchAgainst value
     | Not e
@@ -582,6 +587,7 @@ let rec private collectColRefs (expr: Expr) : string list =
     | MatchAgainst(cols, q, _) -> cols @ collectColRefs q
     | WindowOver _ -> []
     | FuncCall(_, args) -> args |> List.collect collectColRefs
+    | Row values -> values |> List.collect collectColRefs
     | BinOp(_, a, b) -> collectColRefs a @ collectColRefs b
     | AssignUserVariable(_, value) -> collectColRefs value
     | Not e
@@ -627,6 +633,7 @@ let rec private firstColumnRef (expr: Expr) : Expr option =
     | QualifiedCol _ -> Some expr
     | MatchAgainst(cols, q, _) -> cols |> List.map Col |> List.tryHead |> Option.orElseWith (fun () -> firstColumnRef q)
     | FuncCall(_, args) -> first args
+    | Row values -> first values
     | BinOp(_, a, b) -> first [ a; b ]
     | AssignUserVariable(_, value) -> firstColumnRef value
     | Not e
@@ -677,6 +684,7 @@ let rec private substituteExprs (replacements: (Expr * Expr) list) (expr: Expr) 
         | SystemVariable _ -> expr
         | MatchAgainst(cols, q, mode) -> MatchAgainst(cols, sub q, mode)
         | FuncCall(name, args) -> FuncCall(name, args |> List.map sub)
+        | Row values -> Row(values |> List.map sub)
         | BinOp(op, a, b) -> BinOp(op, sub a, sub b)
         | AssignUserVariable(name, value) -> AssignUserVariable(name, sub value)
         | Not e -> Not(sub e)
@@ -752,6 +760,7 @@ let rec private exprLabel (expr: Expr) : string =
     | QualifiedCol(_, col) -> col
     | FuncCall(name, [ Lit(VString label); _ ]) when name.Equals("NAME_CONST", System.StringComparison.OrdinalIgnoreCase) -> label
     | FuncCall(name, args) -> sprintf "%s(%s)" (name.ToUpperInvariant()) (args |> List.map exprLabel |> String.concat ", ")
+    | Row values -> sprintf "(%s)" (values |> List.map exprLabel |> String.concat ", ")
     | BinOp(op, a, b) -> sprintf "%s %s %s" (exprLabel a) (opSymbol op) (exprLabel b)
     | Not e -> sprintf "not(%s)" (exprLabel e)
     | IsNull e -> sprintf "(%s is null)" (exprLabel e)
@@ -1322,6 +1331,7 @@ let rec private metadataOfExpr (ctx: EvalContext) (expr: Expr) : ColumnMetadata 
                    Flags = BlobFlag ||| BinaryFlag ||| NotNullFlag }
     | Col _
     | QualifiedCol _ -> tryColumnDefForExpr ctx expr |> Option.map ColumnWire.metadataOfColumn
+    | Row _ -> None
     | BinOp((And | Or | Xor | Eq | Neq | Lt | Lte | Gt | Gte | NullSafeEq), _, _)
     | Not _
     | IsNull _
@@ -2292,6 +2302,72 @@ let private subqueryProjectionOperand (ctx: EvalContext) (select: SelectStmt) : 
         { Expression = Lit VNull
           Column = None }
 
+let private rowComparisonResult
+    (ctx: EvalContext)
+    (op: Op)
+    (left: (Expr * Value) list)
+    (right: (Expr * Value) list)
+    : Result<Value, EvalError> =
+    let comparison (leftExpr, leftValue) (rightExpr, rightValue) comparisonOp =
+        comparisonResult
+            ctx
+            leftExpr
+            (tryColumnDefForExpr ctx leftExpr)
+            leftValue
+            rightExpr
+            (tryColumnDefForExpr ctx rightExpr)
+            comparisonOp
+            rightValue
+
+    if left.Length <> right.Length then
+        Error(1241, sprintf "Operand should contain %d column(s)" left.Length)
+    else
+        let pairs = List.zip left right
+
+        let rec equal sawNull pairs =
+            match pairs with
+            | [] -> Ok(if sawNull then VNull else VInt 1L)
+            | (leftItem, rightItem) :: rest ->
+                match comparison leftItem rightItem Eq with
+                | VInt 0L -> Ok(VInt 0L)
+                | VNull -> equal true rest
+                | _ -> equal sawNull rest
+
+        let rec ordered pairs =
+            match pairs with
+            | [] -> Ok(VInt(if op = Lte || op = Gte then 1L else 0L))
+            | (leftItem, rightItem) :: rest ->
+                match comparison leftItem rightItem Eq with
+                | VInt 1L -> ordered rest
+                | VNull -> Ok VNull
+                | _ -> Ok(comparison leftItem rightItem op)
+
+        let rec nullSafe pairs =
+            match pairs with
+            | [] -> Ok(VInt 1L)
+            | ((_, VNull), (_, VNull)) :: rest -> nullSafe rest
+            | ((_, VNull), _) :: _
+            | (_, (_, VNull)) :: _ -> Ok(VInt 0L)
+            | (leftItem, rightItem) :: rest ->
+                match comparison leftItem rightItem Eq with
+                | VInt 1L -> nullSafe rest
+                | _ -> Ok(VInt 0L)
+
+        match op with
+        | Eq -> equal false pairs
+        | Neq ->
+            equal false pairs
+            |> Result.map (function
+                | VInt 1L -> VInt 0L
+                | VInt 0L -> VInt 1L
+                | _ -> VNull)
+        | Lt
+        | Lte
+        | Gt
+        | Gte -> ordered pairs
+        | NullSafeEq -> nullSafe pairs
+        | _ -> Error(1241, "Operand should contain 1 column(s)")
+
 type private SubqueryScope =
     { Qualifiers: Set<string>
       Columns: Set<string> }
@@ -2373,6 +2449,7 @@ let rec private isStatementStableExpr (store: Store) (registry: Registry) (dbNam
     | MatchAgainst _
     | WindowOver _ -> false
     | FuncCall(name, arguments) -> isStatementStableFunction registry name && every arguments
+    | Row values -> every values
     | Exists select
     | Subquery select -> isStatementStableSelect store registry dbName scope select
     | InSubquery(value, select) ->
@@ -2441,6 +2518,7 @@ let rec private evalExpr (ctx: EvalContext) (expr: Expr) : Result<Value, EvalErr
         || ((year <> 0 || month <> 0 || day <> 0) && ctx.Store.NoZeroInDate) ->
         Error(1525, sprintf "Incorrect DATETIME value: '%s'" (Temporal.formatZeroDateTime dateTime))
     | Lit v -> Ok v
+    | Row _ -> Error(1241, "Operand should contain 1 column(s)")
     // ponytail: MATCH is only pre-passed for single-table SELECTs (see
     // `runFullTextSelect`); anywhere else — UPDATE/DELETE WHERE, a joined or
     // derived source — real MySQL evaluates it, this reports 1191.
@@ -2489,6 +2567,10 @@ let rec private evalExpr (ctx: EvalContext) (expr: Expr) : Result<Value, EvalErr
     | IsNotNull e -> eval e |> Result.map (function VNull -> VInt 0L | _ -> VInt 1L)
     | IsTrue e -> eval e |> Result.map (fun v -> boolToValue (truthy v = Some true))
     | IsFalse e -> eval e |> Result.map (fun v -> boolToValue (truthy v = Some false))
+    | BinOp((Eq | Neq | Lt | Lte | Gt | Gte | NullSafeEq as op), (Row _ as a), b)
+    | BinOp((Eq | Neq | Lt | Lte | Gt | Gte | NullSafeEq as op), a, (Row _ as b)) ->
+        evalRowExpr ctx a
+        |> Result.bind (fun left -> evalRowExpr ctx b |> Result.bind (rowComparisonResult ctx op left))
     | BinOp(op, a, b) ->
         // Arithmetic can leave the `BIGINT UNSIGNED` domain, which MySQL
         // refuses with 1690 rather than answering in a wider type. That
@@ -2577,6 +2659,22 @@ let rec private evalExpr (ctx: EvalContext) (expr: Expr) : Result<Value, EvalErr
     | Regexp(e, p) ->
         eval e
         |> Result.bind (fun ve -> eval p |> Result.bind (fun vp -> regexpOp (Some(keyCollation ctx e)) ve vp))
+    | In((Row _ as e), xs)
+    | In(e, ((Row _) :: _ as xs)) ->
+        evalRowExpr ctx e
+        |> Result.bind (fun value ->
+            xs
+            |> traverse (evalRowExpr ctx)
+            |> Result.bind (fun candidates ->
+                candidates
+                |> traverse (rowComparisonResult ctx Eq value)
+                |> Result.map (fun results ->
+                    if results |> List.exists ((=) (VInt 1L)) then
+                        VInt 1L
+                    elif results |> List.exists ((=) VNull) then
+                        VNull
+                    else
+                        VInt 0L)))
     | In(e, xs) ->
         eval e
         |> Result.bind (fun ve ->
@@ -2596,6 +2694,28 @@ let rec private evalExpr (ctx: EvalContext) (expr: Expr) : Result<Value, EvalErr
                     if vs |> List.exists (fun v -> eq v = Some true) then
                         VInt 1L
                     elif vs |> List.exists (function VNull -> true | _ -> false) then
+                        VNull
+                    else
+                        VInt 0L))
+    | InSubquery((Row _ as e), select) ->
+        evalRowExpr ctx e
+        |> Result.bind (fun value ->
+            match runExpressionSubquery ctx select select with
+            | Err(code, message), _, _ -> Error(code, message)
+            | Affected _, _, _ -> Ok VNull
+            | ResultSet(columns, _), _, _ when columns.Length <> value.Length ->
+                Error(1241, sprintf "Operand should contain %d column(s)" value.Length)
+            | ResultSet(_, _), _, typedRows ->
+                typedRows
+                |> traverse (fun row ->
+                    row
+                    |> Array.toList
+                    |> List.map (fun item -> Lit item, item)
+                    |> rowComparisonResult ctx Eq value)
+                |> Result.map (fun results ->
+                    if results |> List.exists ((=) (VInt 1L)) then
+                        VInt 1L
+                    elif results |> List.exists ((=) VNull) then
                         VNull
                     else
                         VInt 0L))
@@ -2952,6 +3072,20 @@ let rec private evalExpr (ctx: EvalContext) (expr: Expr) : Result<Value, EvalErr
         | ResultSet(_, []), _, _ -> Ok VNull
         | ResultSet(_, [ _ ]), _, [ row ] -> Ok row.[0]
         | ResultSet(_, _), _, _ -> Error(1242, "Subquery returns more than 1 row")
+
+and private evalRowExpr (ctx: EvalContext) (expr: Expr) : Result<(Expr * Value) list, EvalError> =
+    match expr with
+    | Row values ->
+        values
+        |> traverse (fun value -> evalExpr ctx value |> Result.map (fun evaluated -> value, evaluated))
+    | Subquery select ->
+        match runExpressionSubquery ctx select select with
+        | Err(code, message), _, _ -> Error(code, message)
+        | Affected _, _, _ -> Ok []
+        | ResultSet(columns, _), _, [] -> Ok(List.replicate columns.Length (Lit VNull, VNull))
+        | ResultSet(_, [ _ ]), _, [ row ] -> Ok(row |> Array.toList |> List.map (fun value -> Lit value, value))
+        | ResultSet(_, _), _, _ -> Error(1242, "Subquery returns more than 1 row")
+    | _ -> evalExpr ctx expr |> Result.map (fun value -> [ expr, value ])
 
 /// Evaluates an ORDER BY expression and applies the column-type-specific
 /// sort representation. Expressions such as CAST(enum_col AS CHAR) remain
@@ -4456,6 +4590,7 @@ and private rewriteCoalescedCols (map: Map<string, Expr>) (expr: Expr) : Expr =
     | Exists _
     | Subquery _
     | WindowOver _ -> expr
+    | Row values -> Row(values |> List.map sub)
     | BinOp(op, a, b) -> BinOp(op, sub a, sub b)
     | AssignUserVariable(name, value) -> AssignUserVariable(name, sub value)
     | Not e -> Not(sub e)
@@ -5610,6 +5745,7 @@ and private rewriteAggregates
     | MatchAgainst(cols, q, mode) -> sub q |> Result.map (fun q2 -> MatchAgainst(cols, q2, mode))
     | FuncCall(name, args) when isAggregateCall registry expr -> evalAggregate registry ctxFor rows name args |> Result.map Lit
     | FuncCall(name, args) -> args |> traverse sub |> Result.map (fun args' -> FuncCall(name, args'))
+    | Row values -> values |> traverse sub |> Result.map Row
     | BinOp(op, a, b) -> sub a |> Result.bind (fun a' -> sub b |> Result.map (fun b' -> BinOp(op, a', b')))
     | AssignUserVariable(name, value) -> sub value |> Result.map (fun value' -> AssignUserVariable(name, value'))
     | Not e -> sub e |> Result.map Not
@@ -5717,6 +5853,7 @@ and private resolveHavingRef (columnIndex: Map<string, int list>) (projections: 
     | MatchAgainst(cols, q, mode) -> sub q |> Result.map (fun q2 -> MatchAgainst(cols, q2, mode))
     | Col name -> resolveGroupOrHavingCol columnIndex projections name
     | FuncCall(name, args) -> args |> traverse sub |> Result.map (fun args' -> FuncCall(name, args'))
+    | Row values -> values |> traverse sub |> Result.map Row
     | BinOp(op, a, b) -> sub a |> Result.bind (fun a' -> sub b |> Result.map (fun b' -> BinOp(op, a', b')))
     | AssignUserVariable(name, value) -> sub value |> Result.map (fun value' -> AssignUserVariable(name, value'))
     | Not e -> sub e |> Result.map Not
@@ -7549,6 +7686,7 @@ let rec private rewriteExprWith (rw: Expr -> Expr option) (expr: Expr) : Expr =
     | SystemVariable _ -> expr
     | MatchAgainst(cols, q, mode) -> MatchAgainst(cols, sub q, mode)
     | FuncCall(name, args) -> FuncCall(name, args |> List.map sub)
+    | Row values -> Row(values |> List.map sub)
     | BinOp(op, a, b) -> BinOp(op, sub a, sub b)
     | AssignUserVariable(name, value) -> AssignUserVariable(name, sub value)
     | Not e -> Not(sub e)
@@ -7746,6 +7884,7 @@ let rec private collectSubqueries (expr: Expr) : SelectStmt list =
     | InSubquery(e, s) -> collectSubqueries e @ [ s ]
     | QuantifiedComparison(e, _, _, s) -> collectSubqueries e @ [ s ]
     | BinOp(_, a, b) -> collectSubqueries a @ collectSubqueries b
+    | Row values -> values |> List.collect collectSubqueries
     | AssignUserVariable(_, value) -> collectSubqueries value
     | Not e
     | IsNull e
@@ -7815,6 +7954,7 @@ let private isCorrelated (sub: SelectStmt) : bool =
         | InSubquery(e, _) -> references e
         | QuantifiedComparison(e, _, _, _) -> references e
         | BinOp(_, a, b) -> references a || references b
+        | Row values -> values |> List.exists references
         | AssignUserVariable(_, value) -> references value
         | Not e
         | IsNull e
@@ -8592,6 +8732,7 @@ let rec private containsSessionVariable (expression: Expr) : bool =
     | MatchAgainst(_, query, _) -> containsSessionVariable query
     | WindowOver(functions, over) -> any (windowFnExprs functions @ overExprs over)
     | BinOp(_, left, right) -> any [ left; right ]
+    | Row values -> any values
     | Not value
     | IsNull value
     | IsNotNull value
@@ -8664,6 +8805,7 @@ let rec private checkColumnReferences (expression: Expr) : (string option * stri
     | Col column -> [ None, column ]
     | QualifiedCol(table, column) -> [ Some table, column ]
     | BinOp(_, left, right) -> many [ left; right ]
+    | Row values -> many values
     | AssignUserVariable(_, value) -> checkColumnReferences value
     | Not value
     | IsNull value
@@ -8732,6 +8874,7 @@ let rec private firstDisallowedCheckFunction (registry: Registry) (expression: E
     | MatchAgainst(_, query, _) -> firstDisallowedCheckFunction registry query
     | InSubquery(value, _) -> firstDisallowedCheckFunction registry value
     | QuantifiedComparison(value, _, _, _) -> firstDisallowedCheckFunction registry value
+    | Row values -> first values
     | _ -> None
 
 let rec private firstDisallowedCheckShape (expression: Expr) : string option =
@@ -8751,6 +8894,7 @@ let rec private firstDisallowedCheckShape (expression: Expr) : string option =
     | Subquery _
     | InSubquery _
     | QuantifiedComparison _ -> Some "subquery"
+    | Row _ -> Some "row value"
     | BinOp(_, left, right) -> first [ left; right ]
     | Not value
     | IsNull value

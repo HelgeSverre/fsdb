@@ -1904,6 +1904,7 @@ let rec mapPlaceholders (replace: int -> Expr) (stmt: Statement) : Statement =
         | Col _
         | QualifiedCol _
         | Star _ -> e
+        | Row values -> Row(List.map mapExpr values)
         | BinOp(op, a, b) -> BinOp(op, mapExpr a, mapExpr b)
         | AssignUserVariable(name, value) -> AssignUserVariable(name, mapExpr value)
         | Not x -> Not(mapExpr x)

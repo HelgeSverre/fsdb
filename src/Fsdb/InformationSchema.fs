@@ -384,6 +384,7 @@ let rec exprToSql (e: Expr) : string =
     | AssignUserVariable(variable, value) -> sprintf "%s := %s" variable.Sql (exprToSql value)
     | Col n -> sprintf "`%s`" n
     | QualifiedCol(t, c) -> sprintf "`%s`.`%s`" t c
+    | Row values -> sprintf "(%s)" (values |> List.map exprToSql |> String.concat ",")
     | BinOp(op, a, b) -> sprintf "(%s %s %s)" (exprToSql a) (opText op) (exprToSql b)
     | Not e -> sprintf "(not(%s))" (exprToSql e)
     | IsNull e -> sprintf "(%s is null)" (exprToSql e)
