@@ -173,6 +173,7 @@ accessors).
 | Spatial indexes and operations | R-tree indexes, containment/touch predicates, overlays, buffers, geographic SRS axis rules | geometry values, common WKT/WKB accessors, planar `ST_Distance`, `ST_Envelope`, `ST_IsValid`, `ST_Intersects`, `ST_Disjoint`, and MBR predicates work; spatial indexes still collapse to BTree | low | refusal |
 | Generated columns | VIRTUAL recomputed on read, STORED materialized | both materialize at write time; no read-path recompute (`Storage.fs:3705–3713`) | low | divergence |
 | Functional defaults | `DEFAULT (expr)` | literal constants and CURRENT_TIMESTAMP only | low | refusal |
+| Column-comment character sets | converted through the table/column charset; utf8mb3 stores non-BMP text as `?` | raw .NET text, without charset conversion | low | divergence |
 | ZEROFILL/display width | zero-fill formatting, width in metadata | not tracked beyond static wire lengths; ZEROFILL flag never set (`ColumnWire.fs:58–84`) | low | divergence |
 | JSON representation | binary DOM, member-of/path ops on it | raw text value, re-parsed per operation (`Value.fs:28–29`) | low (perf) | divergence |
 
