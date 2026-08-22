@@ -1554,7 +1554,7 @@ let tests =
               Expect.equal (rowsOf reloaded defaultDatabase "b") [ [| VInt 1L |] ] "b kept a's row"
               Expect.equal (rowsOf reloaded defaultDatabase "d") [ [| VInt 2L |] ] "d kept c's row"
 
-          testCase "a GENERATED column using CASE/LIKE ESCAPE/IN/BETWEEN/CAST/CONCAT survives a restart and still computes correctly"
+          testCase "a GENERATED column using CASE/LIKE ESCAPE/IN/BETWEEN/row comparison/CAST/CONCAT survives a restart and still computes correctly"
           <| fun _ ->
               let dir = tempDataDir ()
               let store = load dir
@@ -1578,6 +1578,7 @@ let tests =
                   + "like_esc INT AS (name LIKE '50!%' ESCAPE '!') STORED, "
                   + "in_set INT AS (a IN (1, 2, 3)) STORED, "
                   + "betw INT AS (a BETWEEN 1 AND 10) STORED, "
+                  + "row_eq INT AS ((a, name) = (5, '50%')) STORED, "
                   + "casted VARCHAR(20) AS (CAST(a AS CHAR)) STORED, "
                   + "conc VARCHAR(30) AS (CONCAT('x-', a)) STORED)"
 
@@ -1590,11 +1591,11 @@ let tests =
               let session2 = Fsdb.Session.create 1 reloaded
               let session2 = run session2 "INSERT INTO g (a, name) VALUES (5, '50%')"
 
-              match handle session2 "SELECT case_full, case_bare, like_esc, in_set, betw, casted, conc FROM g" |> snd with
+              match handle session2 "SELECT case_full, case_bare, like_esc, in_set, betw, row_eq, casted, conc FROM g" |> snd with
               | ResultSet(_, [ row ]) ->
                   Expect.equal
                       row
-                      [ Some "small"; None; Some "1"; Some "0"; Some "1"; Some "5"; Some "x-5" ]
+                      [ Some "small"; None; Some "1"; Some "0"; Some "1"; Some "1"; Some "5"; Some "x-5" ]
                       "every generated expression computes correctly post-reload"
               | other -> failtestf "expected one row back, got %A" other
 

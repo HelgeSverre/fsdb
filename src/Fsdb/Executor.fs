@@ -8895,7 +8895,7 @@ let rec private firstDisallowedCheckShape (expression: Expr) : string option =
     | Subquery _
     | InSubquery _
     | QuantifiedComparison _ -> Some "subquery"
-    | Row _ -> Some "row value"
+    | Row values -> first values
     | BinOp(_, left, right) -> first [ left; right ]
     | Not value
     | IsNull value
