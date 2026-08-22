@@ -1901,6 +1901,15 @@ let tests =
                           Expect.equal (call "REGEXP_REPLACE" [ VString "a\r\nb"; VString "."; VString "X"; VInt 3L; VInt 0L; VString "n" ]) (VString "a\rXX") "position inside CRLF"
                           Expect.equal (call "REGEXP_INSTR" [ VString "a\r\nb"; VString "."; VInt 3L; VInt 1L; VInt 0L; VString "n" ]) (VInt 3L) "INSTR position inside CRLF"
                           Expect.equal (call "REGEXP_SUBSTR" [ VString "a\r\nb"; VString "."; VInt 3L; VInt 1L; VString "n" ]) (VString "\n") "SUBSTR position inside CRLF"
+                          Expect.equal (call "REGEXP_INSTR" [ VString "a😀b"; VString "b" ]) (VInt 3L) "INSTR returns a scalar position"
+                          Expect.equal (call "REGEXP_SUBSTR" [ VString "a😀b"; VString "."; VInt 3L ]) (VString "b") "SUBSTR accepts a scalar position"
+                          Expect.equal (call "REGEXP_REPLACE" [ VString "a😀b"; VString "."; VString "X"; VInt 4L ]) (VString "a😀b") "REPLACE accepts one position past the final scalar"
+
+                          Expect.throwsC
+                              (fun () -> call "REGEXP_INSTR" [ VString "a😀b"; VString "b"; VInt 4L ] |> ignore)
+                              (function
+                              | Fsdb.Functions.SqlError(3686, "Index out of bounds in regular expression search.") -> ()
+                              | other -> failtestf "expected 3686, got %A" other)
 
                       testCase "REGEXP_SUBSTR returns the matched substring, or NULL if none"
                       <| fun _ ->
@@ -1967,7 +1976,21 @@ let tests =
                           Expect.equal
                               (call "REGEXP_REPLACE" [ VString "a"; VString "(a)"; VString "$10" ])
                               (VString "a0")
-                              "capture one followed by a literal zero" ]
+                              "capture one followed by a literal zero"
+
+                      testCase "REGEXP_REPLACE bounds expanded output"
+                      <| fun _ ->
+                          let limit = Fsdb.Limits.maxAllowedPacket
+                          Fsdb.Limits.maxAllowedPacket <- 3
+
+                          try
+                              Expect.throwsC
+                                  (fun () -> call "REGEXP_REPLACE" [ VString "xx"; VString "x"; VString "xx" ] |> ignore)
+                                  (function
+                                  | Fsdb.Functions.SqlError(1153, "Result of REGEXP_REPLACE() exceeds max_allowed_packet") -> ()
+                                  | other -> failtestf "expected 1153, got %A" other)
+                          finally
+                              Fsdb.Limits.maxAllowedPacket <- limit ]
 
                 testList
                     "UUID_TO_BIN/BIN_TO_UUID/IS_UUID"

@@ -161,6 +161,36 @@ let prepareInput (matchType: string option) (pattern: string) (text: string) =
 
 let sourceOffset (input: PreparedInput) index = input.SourceOffsets[index]
 
+let scalarCount (text: string) =
+    let mutable offset = 0
+    let mutable count = 0
+
+    while offset < text.Length do
+        offset <- offset + if Char.IsHighSurrogate text[offset] && offset + 1 < text.Length && Char.IsLowSurrogate text[offset + 1] then 2 else 1
+        count <- count + 1
+
+    count
+
+let utf16OffsetAtScalar (text: string) scalar =
+    let mutable offset = 0
+    let mutable count = 0
+
+    while offset < text.Length && count < scalar do
+        offset <- offset + if Char.IsHighSurrogate text[offset] && offset + 1 < text.Length && Char.IsLowSurrogate text[offset + 1] then 2 else 1
+        count <- count + 1
+
+    offset
+
+let scalarAtUtf16Offset (text: string) utf16Offset =
+    let mutable offset = 0
+    let mutable count = 0
+
+    while offset < utf16Offset do
+        offset <- offset + if Char.IsHighSurrogate text[offset] && offset + 1 < text.Length && Char.IsLowSurrogate text[offset + 1] then 2 else 1
+        count <- count + 1
+
+    count
+
 let private hasInvalidPosixClass (pattern: string) =
     let mutable index = 0
     let mutable escaped = false

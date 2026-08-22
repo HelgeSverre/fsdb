@@ -4211,6 +4211,9 @@ let private normalizedOffset (input: Regexp.PreparedInput) sourceOffset =
     |> Option.map (fun index -> index - 1)
     |> Option.defaultValue input.Text.Length
 
+let private regexpPositionError () =
+    raise (SqlError(3686, "Index out of bounds in regular expression search."))
+
 let private regexpLikeFn (collation: Collation.Collation) : Scalar =
     function
     | e :: p :: rest when not (anyNull [ e; p ]) ->
@@ -4227,6 +4230,7 @@ let private regexpInstrFn (collation: Collation.Collation) : Scalar =
         if anyNull rest then VNull
         else
             let input = Regexp.prepareInput (matchTypeArg rest 3) (req p) (req e)
+            let source = req e
             let pos = intArgOr 1 rest 0
             let occurrence = intArgOr 1 rest 1
             let returnEnd = intArgOr 0 rest 2 <> 0
@@ -4234,12 +4238,17 @@ let private regexpInstrFn (collation: Collation.Collation) : Scalar =
             let regex = regexResult "regexp_instr" collation (matchTypeArg rest 3) (req p)
 
             withRegexTimeout (fun () ->
-                let start = if pos < 1 then pos else normalizedOffset input (pos - 1) + 1
+                if pos < 1 || pos > Regexp.scalarCount source then
+                    regexpPositionError ()
+
+                let sourceStart = Regexp.utf16OffsetAtScalar source (pos - 1)
+                let start = normalizedOffset input sourceStart + 1
 
                 match nthMatch regex input.Text start occurrence with
                 | Some m ->
                     let offset = if returnEnd then m.Index + m.Length else m.Index
-                    VInt(int64 (max (pos - 1) (Regexp.sourceOffset input offset) + 1))
+                    let sourceOffset = max sourceStart (Regexp.sourceOffset input offset)
+                    VInt(int64 (Regexp.scalarAtUtf16Offset source sourceOffset + 1))
                 | None -> VInt 0L)
     | _ -> VNull
 
@@ -4256,14 +4265,22 @@ let private regexpSubstrFn (collation: Collation.Collation) : Scalar =
             let regex = regexResult "regexp_substr" collation (matchTypeArg rest 2) (req p)
 
             withRegexTimeout (fun () ->
-                let start = if pos < 1 then pos else normalizedOffset input (pos - 1) + 1
+                if pos < 1 then
+                    regexpPositionError ()
 
-                match nthMatch regex input.Text start occurrence with
-                | Some m ->
-                    let start = max (pos - 1) (Regexp.sourceOffset input m.Index)
-                    let finish = Regexp.sourceOffset input (m.Index + m.Length)
-                    VString(source.Substring(start, finish - start))
-                | None -> VNull)
+                let sourceStart = Regexp.utf16OffsetAtScalar source (pos - 1)
+
+                if sourceStart = source.Length && pos > Regexp.scalarCount source then
+                    VNull
+                else
+                    let start = normalizedOffset input sourceStart + 1
+
+                    match nthMatch regex input.Text start occurrence with
+                    | Some m ->
+                        let start = max sourceStart (Regexp.sourceOffset input m.Index)
+                        let finish = Regexp.sourceOffset input (m.Index + m.Length)
+                        VString(source.Substring(start, finish - start))
+                    | None -> VNull)
     | _ -> VNull
 
 /// MySQL (ICU) replacement text uses `$N` for backreferences, the same
@@ -4317,30 +4334,38 @@ let private replacementText (source: string) (input: Regexp.PreparedInput) (repl
     )
 
 let private replaceMatches (regex: Regex) (input: Regexp.PreparedInput) (source: string) pos occurrence repl =
-    let sourceStart = pos - 1
+    let sourceStart = Regexp.utf16OffsetAtScalar source (pos - 1)
     let start = normalizedOffset input sourceStart
-    let builder = StringBuilder(source.Length)
+    let builder = StringBuilder(min source.Length Limits.maxAllowedPacket)
     let mutable current = sourceStart
     let mutable count = 0
     let mutable m = regex.Match(input.Text, start)
 
-    builder.Append(source, 0, sourceStart) |> ignore
+    let append (text: string) offset length =
+        if int64 builder.Length + int64 length > int64 Limits.maxAllowedPacket then
+            raise (SqlError(1153, "Result of REGEXP_REPLACE() exceeds max_allowed_packet"))
+
+        builder.Append(text, offset, length) |> ignore
+
+    let appendText (text: string) = append text 0 text.Length
+
+    append source 0 sourceStart
 
     while m.Success do
         let matchStart = max current (Regexp.sourceOffset input m.Index)
         let matchEnd = Regexp.sourceOffset input (m.Index + m.Length)
-        builder.Append(source, current, matchStart - current) |> ignore
+        append source current (matchStart - current)
         count <- count + 1
 
         if occurrence <= 0 || count = occurrence then
-            builder.Append(replacementText source input repl m) |> ignore
+            appendText (replacementText source input repl m)
         else
-            builder.Append(source, matchStart, matchEnd - matchStart) |> ignore
+            append source matchStart (matchEnd - matchStart)
 
         current <- matchEnd
         m <- m.NextMatch()
 
-    builder.Append(source, current, source.Length - current) |> ignore
+    append source current (source.Length - current)
     builder.ToString()
 
 /// `occurrence = 0` (the default) replaces every match; a positive
@@ -4360,7 +4385,10 @@ let private regexpReplaceFn (collation: Collation.Collation) : Scalar =
             let input = Regexp.prepareInput (matchTypeArg rest 2) (req p) source
 
             withRegexTimeout (fun () ->
-                if pos < 1 || pos > source.Length + 1 then VNull
+                if pos < 1 then
+                    regexpPositionError ()
+                elif pos > Regexp.scalarCount source + 1 then
+                    VNull
                 else
                     VString(replaceMatches regex input source pos occurrence repl))
     | _ -> VNull
