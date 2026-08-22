@@ -1904,6 +1904,7 @@ let tests =
                           Expect.equal (call "REGEXP_REPLACE" [ VString "a\r\nb"; VString "(?=.)"; VString "X"; VInt 1L; VInt 0L; VString "n" ]) (VString "XaX\rX\nXb") "zero-width CRLF boundaries"
                           Expect.equal (call "REGEXP_REPLACE" [ VString "a\r\nb"; VString "(?=.)"; VString "X"; VInt 2L; VInt 0L; VString "n" ]) (VString "aX\rX\nXb") "zero-width CRLF boundaries after CR"
                           Expect.equal (call "REGEXP_REPLACE" [ VString "a\r\nb"; VString "(?=.)"; VString "X"; VInt 3L; VInt 0L; VString "n" ]) (VString "a\rX\nXb") "zero-width CRLF boundaries after LF"
+                          Expect.equal (call "REGEXP_REPLACE" [ VString "a\r\nb"; VString "(?=(.))"; VString "$1"; VInt 1L; VInt 0L; VString "n" ]) (VString "aa\r\n\r\n\nbb") "zero-width CRLF captures"
                           Expect.equal (call "REGEXP_INSTR" [ VString "a😀b"; VString "b" ]) (VInt 3L) "INSTR returns a scalar position"
                           Expect.equal (call "REGEXP_SUBSTR" [ VString "a😀b"; VString "."; VInt 3L ]) (VString "b") "SUBSTR accepts a scalar position"
                           Expect.equal (call "REGEXP_REPLACE" [ VString "a😀b"; VString "."; VString "X"; VInt 4L ]) (VString "a😀b") "REPLACE accepts one position past the final scalar"

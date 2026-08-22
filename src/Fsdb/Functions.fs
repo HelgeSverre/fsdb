@@ -4336,6 +4336,11 @@ let private replacementText (source: string) (input: Regexp.PreparedInput) (repl
 let private replaceMatches (regex: Regex) (input: Regexp.PreparedInput) (source: string) pos occurrence repl =
     let sourceStart = Regexp.utf16OffsetAtScalar source (pos - 1)
     let start = normalizedOffset input sourceStart
+    let sourceInput: Regexp.PreparedInput =
+        { Text = source
+          SourceOffsets = [| 0 .. source.Length |] }
+
+    let sourceRegex = Regex(regex.ToString(), regex.Options, Limits.regexpMatchTimeout)
     let builder = StringBuilder(min source.Length Limits.maxAllowedPacket)
     let mutable current = sourceStart
     let mutable count = 0
@@ -4351,12 +4356,12 @@ let private replaceMatches (regex: Regex) (input: Regexp.PreparedInput) (source:
 
     append source 0 sourceStart
 
-    let emit m matchStart matchEnd =
+    let emit matchInput m matchStart matchEnd =
         append source current (matchStart - current)
         count <- count + 1
 
         if occurrence <= 0 || count = occurrence then
-            appendText (replacementText source input repl m)
+            appendText (replacementText source matchInput repl m)
         else
             append source matchStart (matchEnd - matchStart)
 
@@ -4365,14 +4370,17 @@ let private replaceMatches (regex: Regex) (input: Regexp.PreparedInput) (source:
     while m.Success do
         let matchStart = max current (Regexp.sourceOffset input m.Index)
         let matchEnd = max matchStart (Regexp.sourceOffset input (m.Index + m.Length))
-        emit m matchStart matchEnd
+        emit input m matchStart matchEnd
 
         if m.Length = 0
            && matchStart = Regexp.sourceOffset input m.Index
            && m.Index + 1 < input.SourceOffsets.Length
            && input.SourceOffsets[m.Index + 1] = matchStart + 2
            && source[matchStart] = '\r' then
-            emit m (matchStart + 1) (matchStart + 1)
+            let next = sourceRegex.Match(source, matchStart + 1)
+
+            if next.Success && next.Index = matchStart + 1 && next.Length = 0 then
+                emit sourceInput next (matchStart + 1) (matchStart + 1)
 
         m <- m.NextMatch()
 
