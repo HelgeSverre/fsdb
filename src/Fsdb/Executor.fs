@@ -3336,19 +3336,21 @@ and private describeStoredViewColumns (store: Store) (registry: Registry) (schem
           Charset = collation |> Option.map Collation.charsetOfCollation
           OnUpdateCurrentTimestamp = false }
 
-    let rec describeBody (seen: Set<string * string>) dbName =
+    let rec describeBody (seen: Set<string * string>) dbName ctes =
         function
-        | PlainSelect select -> describeSelect seen dbName select
+        | PlainSelect select -> describeSelect seen dbName ctes select
         | UnionSelect(first, rest, _, _, _) ->
             (first :: (rest |> List.map snd))
-            |> List.tryPick (describeSelect seen dbName)
+            |> List.tryPick (describeSelect seen dbName ctes)
 
-    and sourceColumns seen dbName =
+    and sourceColumns seen dbName ctes =
         function
         | FromTable tableRef ->
             let tableDb = tableRef.Database |> Option.defaultValue dbName
 
-            if System.String.Equals(tableDb, "information_schema", System.StringComparison.OrdinalIgnoreCase) then
+            if tableRef.Database.IsNone && Map.containsKey (tableRef.Table.ToLowerInvariant()) ctes then
+                Map.tryFind (tableRef.Table.ToLowerInvariant()) ctes
+            elif System.String.Equals(tableDb, "information_schema", System.StringComparison.OrdinalIgnoreCase) then
                 InformationSchema.scan store.Catalog tableRef.Table None |> Option.map fst
             else
                 match tryStoredView store tableDb tableRef.Table with
@@ -3361,9 +3363,9 @@ and private describeStoredViewColumns (store: Store) (registry: Registry) (schem
                         Parser.parse view.Definition
                         |> Result.toOption
                         |> Option.bind (function
-                            | Select select -> describeSelect (Set.add key seen) view.Schema select
+                            | Select select -> describeSelect (Set.add key seen) view.Schema Map.empty select
                             | Union(first, rest, orderBy, limit, offset) ->
-                                describeBody (Set.add key seen) view.Schema (UnionSelect(first, rest, orderBy, limit, offset))
+                                describeBody (Set.add key seen) view.Schema Map.empty (UnionSelect(first, rest, orderBy, limit, offset))
                             | _ -> None)
                         |> Option.bind (fun (columns: ColumnDef list) ->
                             let declaredColumns: string list = view.Columns
@@ -3375,21 +3377,40 @@ and private describeStoredViewColumns (store: Store) (registry: Registry) (schem
                                 None)
                 | None -> scan store tableDb tableRef.Table |> Result.toOption |> Option.map fst
         | FromSubquery(body, _)
-        | FromLateral(body, _) -> describeBody seen dbName body
+        | FromLateral(body, _) -> describeBody seen dbName ctes body
         | FromJsonTable(_, _, columns, _) -> Some(jsonTableColumnDefs columns)
 
-    and describeSelect seen dbName (select: SelectStmt) =
+    and describeSelect seen dbName inheritedCtes (select: SelectStmt) =
         let sourceItems = (select.From |> Option.toList) @ (select.Joins |> List.map _.Table)
 
-        sourceItems
-        |> List.fold
-            (fun collected item ->
-                collected
-                |> Option.bind (fun sources ->
-                    sourceColumns seen dbName item
-                    |> Option.map (fun columns -> sources @ [ fromItemQualifier item, columns ])))
-            (Some [])
-        |> Option.map (fun sources ->
+        let ctes =
+            select.Ctes
+            |> List.fold
+                (fun resolved cte ->
+                    resolved
+                    |> Option.bind (fun ctes ->
+                        describeBody seen dbName ctes cte.Body
+                        |> Option.bind (fun columns ->
+                            if cte.CteColumns.IsEmpty then
+                                Some(Map.add (cte.CteName.ToLowerInvariant()) columns ctes)
+                            elif cte.CteColumns.Length = columns.Length then
+                                let columns = List.map2 (fun (column: ColumnDef) name -> { column with Name = name }) columns cte.CteColumns
+                                Some(Map.add (cte.CteName.ToLowerInvariant()) columns ctes)
+                            else
+                                None)))
+                (Some inheritedCtes)
+
+        ctes
+        |> Option.bind (fun cteMap ->
+            sourceItems
+            |> List.fold
+                (fun collected item ->
+                    collected
+                    |> Option.bind (fun sources ->
+                        sourceColumns seen dbName cteMap item
+                        |> Option.map (fun columns -> sources @ [ fromItemQualifier item, columns ])))
+                (Some [])
+            |> Option.map (fun sources ->
             let columns = sources |> List.collect snd
             let qualifiers = qualifierRanges sources
             let context = contextFactory store registry dbName (columnIndexOf columns) qualifiers None (probeRow columns)
@@ -3458,9 +3479,9 @@ and private describeStoredViewColumns (store: Store) (registry: Registry) (schem
                     |> Map.tryFind (qualifier.ToLowerInvariant())
                     |> Option.map fst
                     |> Option.defaultValue []
-                | _ -> [ columnForExpression (alias |> Option.defaultValue (exprLabel expression)) expression ]))
+                | _ -> [ columnForExpression (alias |> Option.defaultValue (exprLabel expression)) expression ])))
 
-    sourceColumns Set.empty schema (FromTable { Database = None; Table = name; Alias = None })
+    sourceColumns Set.empty schema Map.empty (FromTable { Database = None; Table = name; Alias = None })
 
 and private tryInformationSchemaNarrow
     (store: Store)

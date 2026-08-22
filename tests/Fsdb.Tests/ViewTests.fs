@@ -339,6 +339,28 @@ let tests =
               | ResultSet(_, rows) -> Expect.equal rows [ [ Some "id" ]; [ Some "label" ]; [ Some "amount" ] ] "granted view columns become visible"
               | other -> failtestf "expected visible view columns, got %A" other
 
+          testCase "CTE-backed views retain the CTE projection shape"
+          <| fun _ ->
+              let store = Fsdb.Storage.create ()
+              let session = Fsdb.Session.create 1 store
+
+              let apply session sql =
+                  let session, result = Fsdb.QueryHandler.handle session sql
+                  expectOk result sql
+                  session
+
+              let session = apply session "CREATE TABLE source (amount DECIMAL(8,2), label VARCHAR(12) COLLATE utf8mb4_bin NOT NULL DEFAULT 'x')"
+              let session = apply session "CREATE VIEW cte_meta AS WITH shaped AS (SELECT amount, label FROM source) SELECT amount, label FROM shaped"
+
+              match Fsdb.QueryHandler.handle session "SELECT column_name, column_default, is_nullable, column_type, collation_name FROM information_schema.columns WHERE table_schema = 'fsdb' AND table_name = 'cte_meta' ORDER BY ordinal_position" |> snd with
+              | ResultSet(_, rows) ->
+                  Expect.equal
+                      rows
+                      [ [ Some "amount"; None; Some "YES"; Some "decimal(8,2)"; None ]
+                        [ Some "label"; Some "x"; Some "NO"; Some "varchar(12)"; Some "utf8mb4_bin" ] ]
+                      "CTE source columns remain declarative"
+              | other -> failtestf "expected CTE view metadata, got %A" other
+
           testCase "a view reads with its definer privileges and observes later revokes"
           <| fun _ ->
               let store = setup ()
