@@ -1221,10 +1221,6 @@ let private executeParsed (session: Session) (stmt: Statement) : Session * Query
         |> Option.flatten
         |> Option.iter (applySqlMode store)
 
-        // Same reasoning for the executing account: `CREATE TRIGGER` stamps
-        // it as the definer, and a trigger body is checked against that
-        // definer rather than whoever's INSERT fired it.
-        store.SessionUser <- session.User + "@" + session.AccountHost
         let registry = registryFor session
 
         let withRecursionDepth body =
@@ -1283,7 +1279,7 @@ let private executeParsed (session: Session) (stmt: Statement) : Session * Query
 
                     let (lastInsertId, lastGeneratedId), result =
                         withExecutionLimits (fun () ->
-                            Executor.execute store registry dbName (session.LastInsertId, session.LastGeneratedId) foundRows stmt)
+                            Executor.executeAs store registry dbName (session.LastInsertId, session.LastGeneratedId) foundRows (accountOf session) stmt)
 
                     lastInsertId, lastGeneratedId, result, [], None)
 
@@ -1772,10 +1768,10 @@ let private runProbe (session: Session) (sql: string) (probe: Probe) : Session *
         match InformationSchema.tryFindProcess id with
         // A caller without PROCESS can't see another user's connection, so
         // it can neither name nor kill it — MySQL reports the id as unknown.
-        | Some target when target.User <> session.User && not canSeeAll ->
+        | Some target when not (Auth.sameAccount target.Account (accountOf session)) && not canSeeAll ->
             session, Err(1094, sprintf "Unknown thread id: %d" id)
         | None -> session, Err(1094, sprintf "Unknown thread id: %d" id)
-        | Some target when target.User <> session.User && not canKillAll ->
+        | Some target when not (Auth.sameAccount target.Account (accountOf session)) && not canKillAll ->
             session, Err(1095, sprintf "You are not owner of thread %d" id)
         | Some target ->
             if queryOnly then

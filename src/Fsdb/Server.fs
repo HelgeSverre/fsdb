@@ -610,7 +610,7 @@ let private authenticateHandshake
     (store: Storage.Store)
     (authData: byte[])
     (resp: HandshakeResponse)
-    (clientHost: string)
+    (clientHost: string option)
     (firstSeq: byte)
     : Async<(byte * Auth.Account) option> =
     async {
@@ -620,14 +620,14 @@ let private authenticateHandshake
                     sprintf
                         "Access denied for user '%s'@'%s' (using password: %s)"
                         resp.Username
-                        clientHost
+                        (clientHost |> Option.defaultValue "unknown")
                         (if usingPassword then "YES" else "NO")
 
                 do! writePacketAsync stream { SeqId = seqId; Payload = errPayload capabilities 1045 msg } |> Async.Ignore
                 return None
             }
 
-        match Auth.resolveAccount store resp.Username clientHost with
+        match clientHost |> Option.bind (Auth.resolveAccount store resp.Username) with
         | None -> return! deny firstSeq (resp.AuthResponse.Length > 0)
         | Some(selected, cols, row) ->
             let stored = Auth.storedPasswordHash cols row
@@ -791,12 +791,19 @@ let private handleConnection
                 let resp = parseHandshakeResponse handshakeResp.Payload
                 let clientHost =
                     match client.Client.RemoteEndPoint with
-                    | :? IPEndPoint as endpoint -> endpoint.Address.ToString()
-                    | _ -> ""
+                    | :? IPEndPoint as endpoint -> Some(endpoint.Address.ToString())
+                    | _ -> None
                 let displayHost =
-                    match IPAddress.TryParse clientHost with
-                    | true, address when IPAddress.IsLoopback address -> "localhost"
-                    | _ -> clientHost
+                    let address =
+                        clientHost
+                        |> Option.bind (fun host ->
+                            match IPAddress.TryParse host with
+                            | true, parsed -> Some parsed
+                            | _ -> None)
+
+                    match address with
+                    | Some address when IPAddress.IsLoopback address -> "localhost"
+                    | _ -> clientHost |> Option.defaultValue "unknown"
                 // Effective capabilities: never claim something the client didn't ask for.
                 capabilities <- resp.Capabilities &&& offeredCapabilities
                 // Authenticate before any session state exists; on denial the
@@ -843,7 +850,7 @@ let private handleConnection
                 // Registered even when auth is about to deny — the command
                 // loop below never runs then, and the connection teardown's
                 // `unregisterProcess` removes the short-lived entry.
-                let processEntry = InformationSchema.registerProcess (int64 connectionId) resp.Username remoteHost
+                let processEntry = InformationSchema.registerProcessAs (int64 connectionId) selectedAccount resp.Username remoteHost
                 processEntry.Db <- resp.Database
                 // `KILL CONNECTION <id>`: closing the socket makes this
                 // connection's next read fail, which ends its command loop.

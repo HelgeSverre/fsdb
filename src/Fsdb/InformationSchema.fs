@@ -843,6 +843,7 @@ let private collationsRows: Value[] list =
 
 type ProcessEntry =
     { Id: int64
+      Account: Fsdb.Auth.Account
       User: string
       Host: string
       mutable Db: string option
@@ -878,11 +879,11 @@ let withViewer (store: Store) (user: Fsdb.Auth.Account) (f: unit -> 'a) : 'a =
     finally
         currentViewer.Value <- previous
 
-/// The user a viewer is limited to, or `None` when it may see all rows
+/// The account a viewer is limited to, or `None` when it may see all rows
 /// (embedded/internal, or it holds `priv`).
-let private restrictedTo (priv: string) : string option =
+let private restrictedTo (priv: string) : Fsdb.Auth.Account option =
     match currentViewer.Value with
-    | Some(store, user) when not (Fsdb.Auth.hasGlobalPrivForAccount store user priv) -> Some user.Name
+    | Some(store, user) when not (Fsdb.Auth.hasGlobalPrivForAccount store user priv) -> Some user
     | _ -> None
 
 /// Stamped by `Server.listen` — `SHOW STATUS`'s `Uptime` baseline.
@@ -893,9 +894,10 @@ let recordQuestion () = Threading.Interlocked.Increment(&questionCount) |> ignor
 let questions () = Threading.Interlocked.Read(&questionCount)
 let resetQuestions () = Threading.Interlocked.Exchange(&questionCount, 0L) |> ignore
 
-let registerProcess (id: int64) (user: string) (host: string) : ProcessEntry =
+let registerProcessAs (id: int64) (account: Fsdb.Auth.Account) (user: string) (host: string) : ProcessEntry =
     let entry =
         { Id = id
+          Account = account
           User = user
           Host = host
           Db = None
@@ -908,6 +910,9 @@ let registerProcess (id: int64) (user: string) (host: string) : ProcessEntry =
 
     processes.[id] <- entry
     entry
+
+let registerProcess (id: int64) (user: string) (host: string) =
+    registerProcessAs id (Fsdb.Auth.account user "%") user host
 
 let unregisterProcess (id: int64) = processes.TryRemove id |> ignore
 
@@ -938,7 +943,7 @@ let private visibleProcesses () : ProcessEntry list =
     let all = listProcesses ()
 
     match restrictedTo "PROCESS" with
-    | Some user -> all |> List.filter (fun p -> p.User = user)
+    | Some account -> all |> List.filter (fun p -> Fsdb.Auth.sameAccount p.Account account)
     | None -> all
 
 /// `(ID, USER, HOST, DB, COMMAND, TIME, STATE, INFO)` per visible connection —
@@ -1230,7 +1235,10 @@ let private userPrivilegesRows (catalog: Catalog) : Value[] list =
             let ownOnly = restrictedTo "SELECT"
 
             t.Rows
-            |> List.filter (fun row -> match ownOnly with Some u -> rowText row userIdx = u | None -> true)
+            |> List.filter (fun row ->
+                match ownOnly with
+                | Some account -> Fsdb.Auth.sameAccount (Fsdb.Auth.account (rowText row userIdx) (rowText row hostIdx)) account
+                | None -> true)
             |> List.collect (fun row ->
                 let grantee = sprintf "'%s'@'%s'" (rowText row userIdx) (rowText row hostIdx)
                 let grantable = if rowText row grantIdx = "Y" then "YES" else "NO"
@@ -1254,7 +1262,10 @@ let private schemaPrivilegesRows (catalog: Catalog) : Value[] list =
             let ownOnly = restrictedTo "SELECT"
 
             t.Rows
-            |> List.filter (fun row -> match ownOnly with Some user -> rowText row u = user | None -> true)
+            |> List.filter (fun row ->
+                match ownOnly with
+                | Some account -> Fsdb.Auth.sameAccount (Fsdb.Auth.account (rowText row u) (rowText row h)) account
+                | None -> true)
             |> List.collect (fun row ->
                 let grantee = sprintf "'%s'@'%s'" (rowText row u) (rowText row h)
                 let grantable = if rowText row g = "Y" then "YES" else "NO"
@@ -1276,7 +1287,10 @@ let private tablePrivilegesRows (catalog: Catalog) : Value[] list =
             let ownOnly = restrictedTo "SELECT"
 
             t.Rows
-            |> List.filter (fun row -> match ownOnly with Some user -> rowText row u = user | None -> true)
+            |> List.filter (fun row ->
+                match ownOnly with
+                | Some account -> Fsdb.Auth.sameAccount (Fsdb.Auth.account (rowText row u) (rowText row h)) account
+                | None -> true)
             |> List.collect (fun row ->
                 let members = Fsdb.Auth.setMembers (rowText row tp)
                 let hasMember s = members |> List.exists (fun m -> String.Equals(m, s, StringComparison.OrdinalIgnoreCase))

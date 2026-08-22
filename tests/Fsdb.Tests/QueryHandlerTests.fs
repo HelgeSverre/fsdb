@@ -1481,6 +1481,42 @@ let tests =
                   Fsdb.InformationSchema.unregisterProcess 777001L
                   Fsdb.InformationSchema.unregisterProcess 777002L
 
+          testCase "process and grant metadata stay scoped to the host-qualified account"
+          <| fun _ ->
+              let store = Fsdb.Storage.create ()
+              let root = create 1 store
+              let root, _ = handle root "CREATE USER 'shared'@'%'"
+              let root, _ = handle root "CREATE USER 'shared'@'localhost'"
+              let _root, _ = handle root "GRANT SELECT ON fsdb.* TO 'shared'@'localhost'"
+              let broad = { create 778001 store with User = "shared" }
+              let local = { create 778002 store with User = "shared"; AccountHost = "localhost" }
+
+              Fsdb.InformationSchema.registerProcessAs 778001L (Fsdb.Auth.account "shared" "%") "shared" "127.0.0.1" |> ignore
+              Fsdb.InformationSchema.registerProcessAs 778002L (Fsdb.Auth.account "shared" "localhost") "shared" "127.0.0.1" |> ignore
+
+              try
+                  let visibleId session =
+                      match handle session "SELECT ID FROM information_schema.processlist WHERE ID IN (778001, 778002)" |> snd with
+                      | ResultSet(_, [ [ Some id ] ]) -> id
+                      | other -> failtestf "expected one visible process, got %A" other
+
+                  Expect.equal (visibleId broad) "778001" "percent account sees only itself"
+                  Expect.equal (visibleId local) "778002" "localhost account sees only itself"
+
+                  let ownGrantee session =
+                      match handle session "SELECT GRANTEE FROM information_schema.SCHEMA_PRIVILEGES WHERE GRANTEE LIKE '%shared%'" |> snd with
+                      | ResultSet(_, [ [ Some grantee ] ]) -> grantee
+                      | other -> failtestf "expected one host-qualified grant, got %A" other
+
+                  Expect.equal (ownGrantee local) "'shared'@'localhost'" "local grant stays local"
+
+                  match handle broad "SELECT GRANTEE FROM information_schema.SCHEMA_PRIVILEGES WHERE GRANTEE LIKE '%shared%'" |> snd with
+                  | ResultSet(_, rows) -> Expect.equal rows [] "percent account cannot read localhost grants"
+                  | other -> failtestf "expected an empty grant list, got %A" other
+              finally
+                  Fsdb.InformationSchema.unregisterProcess 778001L
+                  Fsdb.InformationSchema.unregisterProcess 778002L
+
           testCase "SHOW TABLES WHERE filters on Tables_in_<db> and 1054s an unknown column"
           <| fun _ ->
               let session = create 999901 (Fsdb.Storage.create ())

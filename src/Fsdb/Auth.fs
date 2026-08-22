@@ -42,7 +42,12 @@ type Account =
     { Name: string
       Host: string }
 
-let account name host = { Name = name; Host = host }
+let private canonicalHost (host: string) =
+    match IPAddress.TryParse host with
+    | true, address -> address.ToString()
+    | _ -> host
+
+let account name host = { Name = name; Host = canonicalHost host }
 
 /// Whether two account names identify the same host-qualified account.
 let sameAccount left right =
@@ -176,40 +181,32 @@ let private hostMatchRank (pattern: string) (clientHost: string) =
 
     let literalCount, wildcardCount = specificity 0 0 0
 
-    if String.Equals(pattern, clientHost, StringComparison.OrdinalIgnoreCase) then
+    if String.Equals(canonicalHost pattern, clientHost, StringComparison.OrdinalIgnoreCase) then
         Some(4, literalCount, 0, pattern.Length)
-    elif String.Equals(pattern, "localhost", StringComparison.OrdinalIgnoreCase) && isLoopbackHost clientHost then
-        Some(3, literalCount, 0, pattern.Length)
     else
         match networkPrefix pattern clientHost with
-        | Some prefix -> Some(2, prefix, 0, pattern.Length)
+        | Some prefix -> Some(3, prefix, 0, pattern.Length)
+        | None when String.Equals(pattern, "localhost", StringComparison.OrdinalIgnoreCase) && isLoopbackHost clientHost ->
+            Some(2, literalCount, 0, pattern.Length)
         | None when wildcardMatch pattern clientHost -> Some(1, literalCount, -wildcardCount, pattern.Length)
         | None -> None
 
-/// Selects the account MySQL would authenticate for a peer address. A named
-/// account always takes precedence over an anonymous fallback.
+/// Selects the account MySQL would authenticate for a peer address. Host
+/// specificity takes precedence; a named account breaks ties with anonymous.
 let resolveAccount (store: Store) (username: string) (clientHost: string) : (Account * ColumnDef list * Value[]) option =
     match scanList store "mysql" "user" with
     | Error _ -> None
     | Ok(cols, rows) ->
-        let candidates name =
-            rows
-            |> List.choose (fun row ->
-                match rowAccount cols row with
-                | Some selected when selected.Name = name ->
-                    hostMatchRank selected.Host clientHost
-                    |> Option.map (fun rank -> rank, selected, row)
-                | _ -> None)
-
-        let matched =
-            match candidates username with
-            | [] -> candidates ""
-            | named -> named
-
-        matched
-        |> List.sortByDescending (fun (rank, selected, _) -> rank, selected.Host)
+        rows
+        |> List.choose (fun row ->
+            match rowAccount cols row with
+            | Some selected when selected.Name = username || selected.Name = "" ->
+                hostMatchRank selected.Host clientHost
+                |> Option.map (fun rank -> rank, selected.Name <> "", selected, row)
+            | _ -> None)
+        |> List.sortByDescending (fun (rank, named, selected, _) -> rank, named, selected.Host)
         |> List.tryHead
-        |> Option.map (fun (_, selected, row) -> selected, cols, row)
+        |> Option.map (fun (_, _, selected, row) -> selected, cols, row)
 
 /// A user row's column as text, `""` for NULL/absent.
 let userColumnText (cols: ColumnDef list) (row: Value[]) (name: string) : string =
@@ -293,7 +290,9 @@ let private operationFailed (op: string) (name: string) (host: string) =
 
 /// `CREATE USER 'name'@'host' [IDENTIFIED BY 'pw']` — one account.
 let createUser (store: Store) (name: string) (host: string) (password: string option) : Result<unit, int * string> =
-    if (tryUserRowForAccount store (account name host)).IsSome then
+    let wanted = account name host
+
+    if (tryUserRowForAccount store wanted).IsSome then
         operationFailed "CREATE USER" name host
     else
         let hash = password |> Option.map nativePasswordHash |> Option.defaultValue ""
@@ -304,7 +303,7 @@ let createUser (store: Store) (name: string) (host: string) (password: string op
                 "mysql"
                 "user"
                 (Some [ "Host"; "User"; "plugin"; "authentication_string" ])
-                [ [ VString host; VString name; VString "mysql_native_password"; VString hash ] ]
+                [ [ VString wanted.Host; VString name; VString "mysql_native_password"; VString hash ] ]
         with
         | Ok _ -> Ok()
         | Error e -> Error(toMySqlError e)
@@ -335,7 +334,10 @@ let renameUser
     (newName: string)
     (newHost: string)
     : Result<unit, int * string> =
-    if (tryUserRowForAccount store (account oldName oldHost)).IsNone || (tryUserRowForAccount store (account newName newHost)).IsSome then
+    let oldAccount = account oldName oldHost
+    let newAccount = account newName newHost
+
+    if (tryUserRowForAccount store oldAccount).IsNone || (tryUserRowForAccount store newAccount).IsSome then
         operationFailed "RENAME USER" oldName oldHost
     else
         let renameRows table =
@@ -349,11 +351,11 @@ let renameUser
                         "mysql"
                         table
                         None
-                        (fun row -> Ok(row.[userIndex] = VString oldName && row.[hostIndex] = VString oldHost))
+                        (fun row -> Ok(rowAccount columns row |> Option.exists (sameAccount oldAccount)))
                         (fun row ->
                             let renamed = Array.copy row
-                            renamed.[userIndex] <- VString newName
-                            renamed.[hostIndex] <- VString newHost
+                            renamed.[userIndex] <- VString newAccount.Name
+                            renamed.[hostIndex] <- VString newAccount.Host
                             Ok renamed)
                     |> Result.map ignore
                     |> Result.mapError toMySqlError
@@ -477,6 +479,7 @@ let private applyAtLevel
     (withGrantOption: bool)
     (granting: bool)
     : Result<unit, int * string> =
+    let host = (account name host).Host
     let yn = if granting then "Y" else "N"
 
     let grantOptCol =

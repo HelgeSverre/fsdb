@@ -353,6 +353,7 @@ DROP TRIGGER resolved to its subject table for TRIGGER privilege
 
 | Gap | MySQL 8.4 | fsdb | Impact | Class |
 |---|---|---|---|---|
+| Hostname accounts | forward-confirmed reverse DNS matching | numeric peer addresses plus the loopback `localhost` alias; DNS names are not trusted | low | divergence |
 | Text-probe privilege bypass | all statements checked | SET/SHOW/KILL/USE bypass the gate (SET PASSWORD and KILL carry their own checks) — documented divergence (`docs/compatibility.md`) | low | divergence |
 | Roles | CREATE ROLE, SET ROLE, role grants, mandatory roles | absent | medium | refusal |
 | Dynamic privileges | BACKUP_ADMIN, CONNECTION_ADMIN, … | vocabulary absent from GRANT parsing | low | refusal |

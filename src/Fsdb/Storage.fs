@@ -299,14 +299,6 @@ type Store =
       /// connections. Column comparisons are unaffected — a column's own
       /// `COLLATE` always wins.
       mutable ConnectionCollation: Collation.Collation
-      /// The account whose statement is currently executing, as
-      /// `CURRENT_USER()` renders it — per-session like `StrictMode` above
-      /// (`Session.create`'s clone gives every connection its own cell), and
-      /// re-derived per statement by `QueryHandler.executeParsed`. The
-      /// executor needs it where no `Session` reaches: `CREATE TRIGGER`
-      /// stamps it as the trigger's definer, and a body then runs under that
-      /// definer's privileges rather than the inserting user's.
-      mutable SessionUser: string
       /// Host-registered read-only tables in the reserved `fsdb` schema
       /// (`Db.registerTable`) — carried on the store because the store is
       /// what already reaches every `Executor.resolveTableRef` call site.
@@ -444,7 +436,6 @@ let beginTransactionSnapshot (store: Store) : Store =
       NoZeroDate = store.NoZeroDate
       NoZeroInDate = store.NoZeroInDate
       ConnectionCollation = store.ConnectionCollation
-      SessionUser = store.SessionUser
       VirtualTables = store.VirtualTables
       OnCommit = ResizeArray()
       // Allocate a buffer whenever `store` itself would ever deliver an
@@ -2001,7 +1992,6 @@ let create () : Store =
       NoZeroDate = true
       NoZeroInDate = true
       ConnectionCollation = Collation.defaultCollation
-      SessionUser = "root@%"
       VirtualTables = Map.empty
       OnCommit = ResizeArray()
       PendingEvents = None

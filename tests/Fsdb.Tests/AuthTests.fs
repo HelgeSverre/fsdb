@@ -76,6 +76,36 @@ let tests =
               Expect.equal (selected "10.1.2.3") (Some "10.1.0.0/16") "the narrower subnet wins"
               Expect.equal (selected "10.2.3.4") (Some "10.0.0.0/8") "the broader subnet still matches"
 
+          testCase "host specificity chooses anonymous accounts before broader named accounts"
+          <| fun _ ->
+              let store = Fsdb.Storage.create ()
+
+              for name, host in [ "named", "%"; "", "localhost"; "", "127.0.0.0/8" ] do
+                  createUser store name host None |> Result.mapError snd |> Result.defaultWith failtest
+
+              let selected host =
+                  resolveAccount store "named" host
+                  |> Option.map (fun (account, _, _) -> account.Name, account.Host)
+
+              Expect.equal (selected "::1") (Some("", "localhost")) "anonymous localhost beats named percent"
+              Expect.equal (selected "127.0.0.1") (Some("", "127.0.0.0/8")) "CIDR beats localhost"
+
+              createUser store "named" "127.0.0.1" None |> Result.mapError snd |> Result.defaultWith failtest
+              Expect.equal (selected "127.0.0.1") (Some("named", "127.0.0.1")) "exact beats CIDR"
+
+          testCase "account hosts compare case-insensitively and normalize IPv6 addresses"
+          <| fun _ ->
+              let store = Fsdb.Storage.create ()
+              createUser store "renamed" "LOCALHOST" None |> Result.mapError snd |> Result.defaultWith failtest
+              renameUser store "renamed" "localhost" "moved" "127.0.0.1" |> Result.mapError snd |> Result.defaultWith failtest
+              Expect.isSome (tryUserRowForAccount store (account "moved" "127.0.0.1")) "case-insensitive host matches rename"
+
+              createUser store "ipv6" "0:0:0:0:0:0:0:1" None |> Result.mapError snd |> Result.defaultWith failtest
+
+              match resolveAccount store "ipv6" "::1" with
+              | Some(selected, _, _) -> Expect.equal selected.Host "::1" "canonical IPv6 account host"
+              | None -> failtest "expected the IPv6 account"
+
           testCase "account DDL and grants keep same-name host accounts separate"
           <| fun _ ->
               let store = Fsdb.Storage.create ()

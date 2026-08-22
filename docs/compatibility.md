@@ -243,10 +243,12 @@ MySQL's 1045/1142/1044/1227 error shapes. `SHOW GRANTS [FOR user]`,
 `SHOW PRIVILEGES` (8.4's 73 rows), `information_schema.USER_PRIVILEGES`, and
 `FLUSH PRIVILEGES` (no-op OK) are served; `DROP DATABASE mysql` is 3552.
 
-Accounts select an exact peer address before `localhost` loopback,
-CIDR/netmask, and `%`/`_` patterns; `CURRENT_USER()` reports the selected
+Accounts select an exact peer address before CIDR/netmask, `localhost`
+loopback, and `%`/`_` patterns; `CURRENT_USER()` reports the selected
 account while `USER()` reports the handshake name and peer host. Accounts
-without a host still default to `'%'`.
+without a host still default to `'%'`. Hostname accounts are not resolved:
+the server accepts numeric peer addresses and the loopback `localhost`
+alias, avoiding unauthenticated reverse-DNS identity claims.
 
 Deliberate divergences (each marked `ponytail:` at its code site):
 - Enforcement follows parsed statements through subqueries, derived tables,

@@ -1,5 +1,6 @@
 module Fsdb.Tests.ViewTests
 
+open System.Threading.Tasks
 open Expecto
 open Fsdb.Executor
 
@@ -493,6 +494,79 @@ let tests =
               match Fsdb.QueryHandler.handle reader "SELECT total FROM owner_totals WHERE vendor_id = 1" |> snd with
               | Err(1142, message) -> Expect.stringContains message "receipts" "revoked table named"
               | other -> failtestf "expected definer privilege failure after revoke, got %A" other
+
+          testCase "a view retains its host-qualified definer"
+          <| fun _ ->
+              let store = Fsdb.Storage.create ()
+              let root = Fsdb.Session.create 1 store
+
+              let apply session sql =
+                  let session, result = Fsdb.QueryHandler.handle session sql
+                  expectOk result sql
+                  session
+
+              let root = apply root "CREATE TABLE source (id INT PRIMARY KEY)"
+              let root = apply root "INSERT INTO source VALUES (1)"
+              let root = apply root "CREATE USER 'owner'@'%'"
+              let root = apply root "CREATE USER 'owner'@'localhost'"
+              let root = apply root "CREATE USER reader"
+              let root = apply root "GRANT CREATE VIEW ON fsdb.* TO 'owner'@'localhost'"
+              let root = apply root "GRANT SELECT ON fsdb.source TO 'owner'@'localhost'"
+              let root = apply root "GRANT SELECT ON fsdb.hosted_view TO reader"
+              let owner = { Fsdb.Session.create 2 store with User = "owner"; AccountHost = "localhost" }
+              let _owner = apply owner "CREATE VIEW hosted_view AS SELECT id FROM source"
+              let reader = { Fsdb.Session.create 3 store with User = "reader" }
+
+              match Fsdb.QueryHandler.handle reader "SELECT id FROM hosted_view" |> snd with
+              | ResultSet(_, [ [ Some "1" ] ]) -> ()
+              | other -> failtestf "expected the localhost definer's SELECT privilege, got %A" other
+
+              Expect.equal
+                  (rows store "SELECT definer FROM mysql.views WHERE view_name = 'hosted_view'")
+                  [ [ Some "owner@localhost" ] ]
+                  "stored full definer"
+
+          testCase "concurrent view creation stamps each account's definer"
+          <| fun _ ->
+              let store = Fsdb.Storage.create ()
+              let root = Fsdb.Session.create 1 store
+
+              let apply session sql =
+                  let session, result = Fsdb.QueryHandler.handle session sql
+                  expectOk result sql
+                  session
+
+              let root = apply root "CREATE TABLE source (id INT PRIMARY KEY)"
+              let root = apply root "CREATE USER 'first'@'%'"
+              let root = apply root "CREATE USER 'second'@'localhost'"
+              let root = apply root "GRANT CREATE VIEW, SELECT ON fsdb.* TO 'first'@'%'"
+              let _root = apply root "GRANT CREATE VIEW, SELECT ON fsdb.* TO 'second'@'localhost'"
+              let first = { Fsdb.Session.create 2 store with User = "first" }
+              let second = { Fsdb.Session.create 3 store with User = "second"; AccountHost = "localhost" }
+
+              [ 1 .. 32 ]
+              |> List.map (fun index ->
+                  let session, definer = if index % 2 = 0 then first, "first@%" else second, "second@localhost"
+
+                  Task.Run(fun () ->
+                      let _, result = Fsdb.QueryHandler.handle session (sprintf "CREATE VIEW concurrent_%d AS SELECT id FROM source" index)
+                      expectOk result (sprintf "create concurrent_%d" index)
+                      index, definer))
+              |> List.toArray
+              |> Task.WaitAll
+
+              let expected =
+                  [ 1 .. 32 ]
+                  |> List.map (fun index -> sprintf "concurrent_%d" index, if index % 2 = 0 then "first@%" else "second@localhost")
+
+              let actual =
+                  rows store "SELECT view_name, definer FROM mysql.views WHERE view_name LIKE 'concurrent_%' ORDER BY view_name"
+                  |> List.map (function
+                      | [ Some name; Some definer ] -> name, definer
+                      | row -> failtestf "expected view definer row, got %A" row)
+                  |> List.sort
+
+              Expect.equal actual (expected |> List.sort) "each concurrent view retains its creator"
 
           testCase "dropping a database removes its stored-object catalog rows"
           <| fun _ ->

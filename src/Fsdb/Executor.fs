@@ -130,10 +130,19 @@ let private currentViewStack () =
     | null -> Set.empty
     | _ -> viewStack.Value
 
-let private storedObjectUser (definer: string) =
-    match definer.LastIndexOf '@' with
-    | -1 -> definer
-    | index -> definer.Substring(0, index)
+let private storedObjectAccount (definer: string) =
+    if definer = "" then
+        None
+    else
+        let at = definer.LastIndexOf '@'
+        if at < 0 then Some(Auth.account definer "%") else Some(Auth.account definer[.. at - 1] definer[(at + 1) ..])
+
+let private checkStoredDefiner (store: Store) (definer: string) (db: string) (statement: Statement) =
+    match storedObjectAccount definer with
+    | Some account when Auth.tryUserRowForAccount store account |> Option.isNone ->
+        Error(1449, sprintf "The user specified as a definer ('%s') does not exist" definer)
+    | Some account -> Auth.checkForAccount store account (Auth.requiredPrivileges db statement)
+    | None -> Error(1449, "The user specified as a definer ('') does not exist")
 
 /// Reads one view definition from the row-backed catalog. The explicit column
 /// list is JSON so every legal quoted identifier round-trips without inventing
@@ -3230,12 +3239,12 @@ and private resolveTableRef
                     let resolved =
                         match Parser.parse view.Definition with
                         | Result.Ok((Select select) as statement) ->
-                            match Auth.check store (storedObjectUser view.Definer) (Auth.requiredPrivileges view.Schema statement) with
+                            match checkStoredDefiner store view.Definer view.Schema statement with
                             | Result.Error(code, message) -> Error(Err(code, message))
                             | Result.Ok() ->
                                 resolveFromSubquery store registry view.Schema (FromSubquery(PlainSelect select, view.Name))
                         | Result.Ok((Union(first, rest, orderBy, limit, offset)) as statement) ->
-                            match Auth.check store (storedObjectUser view.Definer) (Auth.requiredPrivileges view.Schema statement) with
+                            match checkStoredDefiner store view.Definer view.Schema statement with
                             | Result.Error(code, message) -> Error(Err(code, message))
                             | Result.Ok() ->
                                 resolveFromSubquery
@@ -9775,7 +9784,15 @@ let private triggerRowImageError (event: TriggerEvent) (columns: ColumnDef list)
             | Ok _ -> None
             | Error _ -> Some(Err(1054, sprintf "Unknown column '%s.%s' in trigger" image column)))
 
-let rec execute (store: Store) (registry: Registry) (dbName: string) (ids: int64 * int64) (foundRows: bool) (stmt: Statement) : (int64 * int64) * QueryResult =
+let rec executeAs
+    (store: Store)
+    (registry: Registry)
+    (dbName: string)
+    (ids: int64 * int64)
+    (foundRows: bool)
+    (currentAccount: Auth.Account)
+    (stmt: Statement)
+    : (int64 * int64) * QueryResult =
     // Fresh derived-table memo per statement (see `fromSubqueryMemo`).
     fromSubqueryMemo.Value <- Dictionary<FromItem, Result<ColumnDef list * Value[] list, QueryResult>>(HashIdentity.Reference)
     expressionSubqueryMemo.Value <- Dictionary<SelectStmt, MemoizedSubquery>(HashIdentity.Reference)
@@ -9828,9 +9845,11 @@ let rec execute (store: Store) (registry: Registry) (dbName: string) (ids: int64
                                 Err(1449, sprintf "The user specified as a definer ('') does not exist for trigger '%s'" name)
                             )
                         else
-                            match Auth.check runStore (storedObjectUser definer) (Auth.requiredPrivileges db bodyStmt) with
-                            | Result.Error(code, msg) -> Result.Error(Err(code, msg))
-                            | Result.Ok() -> Result.Ok bodyStmt
+                            match storedObjectAccount definer, checkStoredDefiner runStore definer db bodyStmt with
+                            | Some account, Result.Ok() -> Result.Ok(bodyStmt, account)
+                            | _, Result.Error(code, msg) -> Result.Error(Err(code, msg))
+                            | None, Result.Ok() ->
+                                Result.Error(Err(1449, sprintf "The user specified as a definer ('') does not exist for trigger '%s'" name))
 
             match triggers |> traverse checkBody with
             | Result.Error err -> Some err
@@ -9845,7 +9864,7 @@ let rec execute (store: Store) (registry: Registry) (dbName: string) (ids: int64
                 // error result here rather than an exception, so a
                 // failing body doesn't abort a surrounding
                 // transaction the way an escaped exception would.
-                let runBody (oldRow: Value[] option) (newRow: Value[] option) (stmt: Statement) : QueryResult =
+                let runBody (oldRow: Value[] option) (newRow: Value[] option) (stmt: Statement, account: Auth.Account) : QueryResult =
                     withTriggerRowScope
                         { Columns = columns
                           Old = oldRow
@@ -9868,7 +9887,7 @@ let rec execute (store: Store) (registry: Registry) (dbName: string) (ids: int64
                                 | _ -> Err(1362, "Updating of NEW row is not allowed in after trigger")
                             | _ ->
                                 try
-                                    execute runStore shadowed db (0L, 0L) foundRows stmt |> snd
+                                    executeAs runStore shadowed db (0L, 0L) foundRows account stmt |> snd
                                 with SqlError(code, msg) ->
                                     Err(code, msg))
 
@@ -10128,12 +10147,13 @@ let rec execute (store: Store) (registry: Registry) (dbName: string) (ids: int64
                 match storedChecks store sourceDb sourceName |> traverse decodeCheck with
                 | Error error -> ids, storageErr error
                 | Ok checks ->
-                    execute
+                    executeAs
                         store
                         registry
                         dbName
                         ids
                         foundRows
+                        currentAccount
                         (CreateTable(
                             name,
                             table.Columns,
@@ -10635,7 +10655,7 @@ let rec execute (store: Store) (registry: Registry) (dbName: string) (ids: int64
                                     VString definition
                                     VString(JsonSerializer.Serialize(columns |> List.toArray))
                                     VDateTime System.DateTime.Now
-                                    VString store.SessionUser ] ]
+                                    VString(currentAccount.Name + "@" + currentAccount.Host) ] ]
                         with
                         | Ok _ -> ids, Affected 0UL
                         | Error error -> ids, storageErr error
@@ -10749,7 +10769,7 @@ let rec execute (store: Store) (registry: Registry) (dbName: string) (ids: int64
                                         VString eventText
                                         VString body
                                         VDateTime System.DateTime.Now
-                                        VString store.SessionUser ] ]
+                                        VString(currentAccount.Name + "@" + currentAccount.Host) ] ]
                             with
                             | Ok _ -> ids, Affected 0UL
                             | Error e -> ids, storageErr e
@@ -10825,9 +10845,9 @@ let rec execute (store: Store) (registry: Registry) (dbName: string) (ids: int64
             | Ok baseColumns ->
                 let rewritten = Insert(view.Database + "." + view.Table, baseColumns, rowsExprs, onDuplicateUpdate, ignoreDuplicates)
 
-                match Auth.check store (storedObjectUser view.Definer) (Auth.requiredPrivileges view.Database rewritten) with
+                match checkStoredDefiner store view.Definer view.Database rewritten with
                 | Error(code, message) -> ids, Err(code, message)
-                | Ok() -> execute store registry dbName ids foundRows rewritten
+                | Ok() -> executeAs store registry dbName ids foundRows currentAccount rewritten
 
     | Insert(table, columns, rowsExprs, onDuplicateUpdate, ignoreDuplicates) ->
         // INSERT ... VALUES expressions aren't evaluated against any row
@@ -10870,9 +10890,9 @@ let rec execute (store: Store) (registry: Registry) (dbName: string) (ids: int64
             | Ok baseColumns ->
                 let rewritten = InsertSelect(view.Database + "." + view.Table, baseColumns, select, onDuplicateUpdate, ignoreDuplicates)
 
-                match Auth.check store (storedObjectUser view.Definer) (Auth.requiredPrivileges view.Database rewritten) with
+                match checkStoredDefiner store view.Definer view.Database rewritten with
                 | Error(code, message) -> ids, Err(code, message)
-                | Ok() -> execute store registry dbName ids foundRows rewritten
+                | Ok() -> executeAs store registry dbName ids foundRows currentAccount rewritten
 
     | InsertSelect(table, columns, select, onDuplicateUpdate, ignoreDuplicates) ->
         let db, table = splitQualified dbName table
@@ -10989,9 +11009,9 @@ let rec execute (store: Store) (registry: Registry) (dbName: string) (ids: int64
                         OrderBy = updateStmt.OrderBy |> List.map (fun (expression, direction) -> rewrite expression, direction)
                         Limit = updateStmt.Limit |> Option.map rewrite }
 
-                match Auth.check store (storedObjectUser view.Definer) (Auth.requiredPrivileges view.Database (Update rewritten)) with
+                match checkStoredDefiner store view.Definer view.Database (Update rewritten) with
                 | Error(code, message) -> ids, Err(code, message)
-                | Ok() -> execute store registry dbName ids foundRows (Update rewritten)
+                | Ok() -> executeAs store registry dbName ids foundRows currentAccount (Update rewritten)
 
     | Update updateStmt when updateStmt.Joins.IsEmpty ->
         let db, table = (updateStmt.From.Database |> Option.defaultValue dbName), updateStmt.From.Table
@@ -11346,9 +11366,9 @@ let rec execute (store: Store) (registry: Registry) (dbName: string) (ids: int64
                     OrderBy = deleteStmt.OrderBy |> List.map (fun (expression, direction) -> rewrite expression, direction)
                     Limit = deleteStmt.Limit |> Option.map rewrite }
 
-            match Auth.check store (storedObjectUser view.Definer) (Auth.requiredPrivileges view.Database (Delete rewritten)) with
+            match checkStoredDefiner store view.Definer view.Database (Delete rewritten) with
             | Error(code, message) -> ids, Err(code, message)
-            | Ok() -> execute store registry dbName ids foundRows (Delete rewritten)
+            | Ok() -> executeAs store registry dbName ids foundRows currentAccount (Delete rewritten)
 
     | Delete deleteStmt when deleteStmt.Joins.IsEmpty ->
         let db, table = (deleteStmt.From.Database |> Option.defaultValue dbName), deleteStmt.From.Table
@@ -11467,3 +11487,6 @@ let rec execute (store: Store) (registry: Registry) (dbName: string) (ids: int64
 
     | Explain inner ->
         ids, explainStatement store registry dbName inner
+
+let execute (store: Store) (registry: Registry) (dbName: string) (ids: int64 * int64) (foundRows: bool) (stmt: Statement) =
+    executeAs store registry dbName ids foundRows (Auth.account "root" "%") stmt

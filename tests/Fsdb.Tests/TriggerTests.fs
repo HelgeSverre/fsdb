@@ -675,6 +675,35 @@ let tests =
 
               Expect.equal (rows store "SELECT id FROM audit") [ [ Some "7" ] ] "root's trigger wrote the audit row"
 
+          testCase "a trigger retains its host-qualified definer"
+          <| fun _ ->
+              let store = Fsdb.Storage.create ()
+              let root = Fsdb.Session.create 1 store
+              let sql (session: Fsdb.Session.Session) text = handle session text |> snd
+
+              expectOk (sql root "CREATE TABLE pub (id INT PRIMARY KEY)") "create pub"
+              expectOk (sql root "CREATE TABLE audit (id INT PRIMARY KEY)") "create audit"
+              expectOk (sql root "CREATE USER 'owner'@'%'") "create broad owner"
+              expectOk (sql root "CREATE USER 'owner'@'localhost'") "create local owner"
+              expectOk (sql root "CREATE USER writer") "create writer"
+              expectOk (sql root "GRANT SELECT, INSERT, TRIGGER ON fsdb.pub TO 'owner'@'localhost'") "grant local subject privileges"
+              expectOk (sql root "GRANT INSERT ON fsdb.audit TO 'owner'@'localhost'") "grant local body privilege"
+              expectOk (sql root "GRANT INSERT ON fsdb.pub TO writer") "grant writer"
+
+              let owner = { Fsdb.Session.create 2 store with User = "owner"; AccountHost = "localhost" }
+              let writer = { Fsdb.Session.create 3 store with User = "writer" }
+
+              expectOk
+                  (sql owner "CREATE TRIGGER hosted AFTER INSERT ON pub FOR EACH ROW INSERT INTO audit VALUES (NEW.id)")
+                  "create hosted trigger"
+              expectOk (sql writer "INSERT INTO pub VALUES (1)") "fire hosted trigger"
+
+              Expect.equal (rows store "SELECT id FROM audit") [ [ Some "1" ] ] "localhost definer writes the audit row"
+
+              match sql root "SHOW TRIGGERS" with
+              | ResultSet(_, [ row ]) -> Expect.equal (List.item 7 row) (Some "owner@localhost") "stored full definer"
+              | other -> failtestf "expected hosted trigger metadata, got %A" other
+
           testCase "SHOW TRIGGERS reports the real definer, not a constant"
           <| fun _ ->
               let store = Fsdb.Storage.create ()
