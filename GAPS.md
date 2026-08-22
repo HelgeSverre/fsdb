@@ -206,6 +206,7 @@ literal-vs-literal comparison; default utf8mb4_0900_ai_ci.
 |---|---|---|---|---|
 | Weight tables | UCA 9.0/5.2/4.0 weight tables per collation | ICU CLDR tailoring for everything; tie-break order among primary-equal strings and `WEIGHT_STRING()`'s textual bytes can differ (equality never does) (`Collation.fs:13–26`) | low | divergence |
 | Collation coercibility | explicit `COLLATE`, binary strings, and column collations follow MySQL's coercibility and precedence rules | direct and quantified comparisons choose the left expression's resolved collation before the right's; mixed explicit-binary and column expressions can therefore differ | medium | divergence |
+| Advanced REGEXP grammar | ICU regular expressions and Unicode properties | bounded .NET regex with the common POSIX character classes; less common ICU-only constructs can differ | low | divergence |
 | Usable charsets | 40+ charsets with transcoding | utf8mb4/utf8mb3/latin1/ascii/binary only; CONVERT(expr USING x) limited to the same set (`Functions.fs:966`) | low | refusal |
 | Identifier casing | lower_case_table_names semantics | variable reported; identifiers ordinal-case-folded internally | low | divergence |
 
