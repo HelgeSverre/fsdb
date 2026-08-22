@@ -1843,6 +1843,11 @@ let tests =
                           expects 3691 "Mismatched parenthesis in regular expression." [ VString "abc"; VString "(" ]
                           expects 1210 "Incorrect arguments to regexp_like" [ VString "abc"; VString "a"; VString "z" ]
                           expects 3696 "The regular expression contains an unclosed bracket expression." [ VString "abc"; VString "[" ]
+                          expects 3688 "Syntax error in regular expression on line 1, character 1." [ VString "abc"; VString "{" ]
+                          expects 3693 "The maximum is less than the minumum in a {min,max} interval." [ VString "abc"; VString "a{2,1}" ]
+                          expects 3697 "The regular expression contains an [x-y] character range where x comes after y." [ VString "abc"; VString "[z-a]" ]
+                          expects 3685 "Illegal argument to a regular expression." [ VString "abc"; VString "[[:bogus:]]" ]
+                          expects 3691 "Mismatched parenthesis in regular expression." [ VString "abc"; VString ")" ]
 
                       testCase "REGEXP functions propagate every supplied optional NULL"
                       <| fun _ ->
@@ -1850,6 +1855,31 @@ let tests =
                           Expect.equal (call "REGEXP_INSTR" [ VString "x"; VString "x"; VNull ]) VNull "position"
                           Expect.equal (call "REGEXP_SUBSTR" [ VString "x"; VString "x"; VInt 1L; VNull ]) VNull "occurrence"
                           Expect.equal (call "REGEXP_REPLACE" [ VString "x"; VString "x"; VString "y"; VNull ]) VNull "position"
+                          Expect.equal (call "REGEXP_INSTR" [ VString "x"; VString "x"; VInt 1L; VNull ]) VNull "occurrence"
+                          Expect.equal (call "REGEXP_INSTR" [ VString "x"; VString "x"; VInt 1L; VInt 1L; VNull ]) VNull "return option"
+                          Expect.equal (call "REGEXP_INSTR" [ VString "x"; VString "x"; VInt 1L; VInt 1L; VInt 0L; VNull ]) VNull "match type"
+                          Expect.equal (call "REGEXP_SUBSTR" [ VString "x"; VString "x"; VNull ]) VNull "position"
+                          Expect.equal (call "REGEXP_SUBSTR" [ VString "x"; VString "x"; VInt 1L; VInt 1L; VNull ]) VNull "match type"
+                          Expect.equal (call "REGEXP_REPLACE" [ VString "x"; VString "x"; VString "y"; VInt 1L; VNull ]) VNull "occurrence"
+                          Expect.equal (call "REGEXP_REPLACE" [ VString "x"; VString "x"; VString "y"; VInt 1L; VInt 0L; VNull ]) VNull "match type"
+
+                      testCase "REGEXP functions reject invalid arities before NULL propagation"
+                      <| fun _ ->
+                          let expects name arguments =
+                              Expect.throwsC
+                                  (fun () -> call name arguments |> ignore)
+                                  (function
+                                  | Fsdb.Functions.SqlError(1582, _) -> ()
+                                  | other -> failtestf "expected 1582, got %A" other)
+
+                          expects "REGEXP_LIKE" [ VNull ]
+                          expects "REGEXP_LIKE" [ VNull; VNull; VNull; VNull ]
+                          expects "REGEXP_INSTR" [ VNull ]
+                          expects "REGEXP_INSTR" [ VNull; VNull; VNull; VNull; VNull; VNull; VNull ]
+                          expects "REGEXP_SUBSTR" [ VNull ]
+                          expects "REGEXP_SUBSTR" [ VNull; VNull; VNull; VNull; VNull; VNull ]
+                          expects "REGEXP_REPLACE" [ VNull; VNull ]
+                          expects "REGEXP_REPLACE" [ VNull; VNull; VNull; VNull; VNull; VNull; VNull ]
 
                       testCase "REGEXP functions support ICU character classes and line modes"
                       <| fun _ ->
@@ -1860,6 +1890,12 @@ let tests =
                           Expect.equal (call "REGEXP_LIKE" [ VString "Σ"; VString "[ς]"; VString "i" ]) (VInt 1L) "sigma class"
                           Expect.equal (call "REGEXP_LIKE" [ VString "a\rb"; VString "^b$"; VString "m" ]) (VInt 1L) "CR is a line ending without u"
                           Expect.equal (call "REGEXP_LIKE" [ VString "a\rb"; VString "^b$"; VString "mu" ]) (VInt 0L) "u keeps CR out of multiline anchors"
+                          Expect.equal (call "REGEXP_LIKE" [ VString "a\rb"; VString "a.b" ]) (VInt 0L) "CR stops dot"
+                          Expect.equal (call "REGEXP_LIKE" [ VString "a\r\nb"; VString "a.b"; VString "n" ]) (VInt 1L) "dotall spans CRLF"
+                          Expect.equal (call "REGEXP_INSTR" [ VString "a\rb"; VString "a.b" ]) (VInt 0L) "CR stops INSTR dot"
+                          Expect.equal (call "REGEXP_SUBSTR" [ VString "a\rb"; VString "a.b" ]) VNull "CR stops SUBSTR dot"
+                          Expect.equal (call "REGEXP_REPLACE" [ VString "a\rb"; VString "a.b"; VString "x" ]) (VString "a\rb") "CR stops REPLACE dot"
+                          Expect.equal (call "REGEXP_REPLACE" [ VString "a\r\nb"; VString "a.b"; VString "x"; VInt 1L; VInt 0L; VString "n" ]) (VString "x") "dotall replaces CRLF"
 
                       testCase "REGEXP_SUBSTR returns the matched substring, or NULL if none"
                       <| fun _ ->
@@ -1900,10 +1936,6 @@ let tests =
 
                       testCase "REGEXP_REPLACE rejects .NET-only $ tokens with MySQL's 3887"
                       <| fun _ ->
-                          // A `$` not followed by a digit isn't a valid MySQL
-                          // backreference — MySQL errors 3887 rather than run
-                          // .NET's own `$``/`$&`/`$'` substitutions (which also
-                          // amplify output to O(n^2)). Oracle-verified 8.4.
                           let rejects (repl: string) =
                               Expect.throwsC
                                   (fun () -> call "REGEXP_REPLACE" [ VString "x"; VString "."; VString repl ] |> ignore)

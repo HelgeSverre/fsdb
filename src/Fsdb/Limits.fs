@@ -77,8 +77,8 @@ let mutable walRotateEntries = 100_000
 /// functions): a catastrophically-backtracking pattern (`'(a+)+$'` against a
 /// long non-matching subject) errors out instead of pinning a core forever.
 /// Not configurable — it lives here only because `Functions` and `Executor`
-/// both need it and each had grown its own copy of the same five seconds.
-let regexpMatchTimeout = TimeSpan.FromSeconds 5.0
+/// both need it and each had grown its own copy of the same deadline.
+let regexpMatchTimeout = TimeSpan.FromMilliseconds 100.0
 
 /// Timeouts are stored as `int` seconds rather than `TimeSpan`: writing a
 /// multi-field struct carries no atomicity guarantee, writing an `int` does,

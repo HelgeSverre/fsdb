@@ -75,21 +75,95 @@ let private normalizePattern (options: RegexOptions) (pattern: string) : string 
 
         builder.ToString()
 
-let prepareInput (matchType: string option) (text: string) =
+let private hasWildcardDot (pattern: string) =
+    let mutable escaped = false
+    let mutable inClass = false
+    let mutable found = false
+
+    for character in pattern do
+        if escaped then escaped <- false
+        else
+            match character with
+            | '\\' -> escaped <- true
+            | '[' -> inClass <- true
+            | ']' -> inClass <- false
+            | '.' when not inClass -> found <- true
+            | _ -> ()
+
+    found
+
+type PreparedInput =
+    { Text: string
+      SourceOffsets: int array }
+
+let private normalizeLineTerminators (text: string) =
+    let builder = StringBuilder(text.Length)
+    let offsets = ResizeArray<int>(text.Length + 1)
+    let mutable index = 0
+
+    while index < text.Length do
+        offsets.Add index
+
+        match text[index] with
+        | '\r' when index + 1 < text.Length && text[index + 1] = '\n' ->
+            builder.Append '\n' |> ignore
+            index <- index + 2
+        | '\r' ->
+            builder.Append '\n' |> ignore
+            index <- index + 1
+        | character ->
+            builder.Append character |> ignore
+            index <- index + 1
+
+    offsets.Add text.Length
+
+    { Text = builder.ToString()
+      SourceOffsets = offsets.ToArray() }
+
+let prepareInput (matchType: string option) (pattern: string) (text: string) =
     let multiline = matchType |> Option.defaultValue "" |> String.exists ((=) 'm')
     let unixLines = matchType |> Option.defaultValue "" |> String.exists ((=) 'u')
 
-    if multiline && not unixLines then text.Replace('\r', '\n') else text
+    if (hasWildcardDot pattern || multiline) && not unixLines then
+        normalizeLineTerminators text
+    else
+        { Text = text
+          SourceOffsets = [| 0 .. text.Length |] }
+
+let sourceOffset (input: PreparedInput) index = input.SourceOffsets[index]
+
+let private invalidPattern (pattern: string) =
+    let interval = Regex.Match(pattern, @"(?<!\\)\{(\d+),(\d+)\}")
+
+    if interval.Success then
+        match Int32.TryParse interval.Groups.[1].Value, Int32.TryParse interval.Groups.[2].Value with
+        | (true, minimum), (true, maximum) when maximum < minimum ->
+            Some(3693, "The maximum is less than the minumum in a {min,max} interval.")
+        | _ -> None
+    elif pattern.Contains("[[:") && not (posixClasses |> List.exists (fun (source, _) -> pattern.Contains(source, StringComparison.Ordinal))) then
+        Some(3685, "Illegal argument to a regular expression.")
+    elif pattern = "{" then
+        Some(3688, "Syntax error in regular expression on line 1, character 1.")
+    else
+        None
+
+let private parseError (error: RegexParseException) =
+    match error.Error.ToString() with
+    | "InsufficientClosingParentheses"
+    | "InsufficientOpeningParentheses" -> InvalidPattern(3691, "Mismatched parenthesis in regular expression.")
+    | "UnterminatedBracket" -> InvalidPattern(3696, "The regular expression contains an unclosed bracket expression.")
+    | "ReversedCharacterRange" -> InvalidPattern(3697, "The regular expression contains an [x-y] character range where x comes after y.")
+    | "QuantifierOrCaptureGroupOutOfRange" -> InvalidPattern(3693, "The maximum is less than the minumum in a {min,max} interval.")
+    | _ -> InvalidPattern(3691, "Invalid regular expression.")
 
 let compile (collation: Collation.Collation) (matchType: string option) (pattern: string) : Result<Regex, RegexError> =
-    optionsFor collation matchType
-    |> Result.bind (fun options ->
-        try
-            Ok(Regex(normalizePattern options pattern, options, Limits.regexpMatchTimeout))
-        with
-        | :? RegexParseException as error when error.Error = RegexParseError.InsufficientClosingParentheses ->
-            Error(InvalidPattern(3691, "Mismatched parenthesis in regular expression."))
-        | :? RegexParseException as error when error.Error.ToString() = "UnterminatedBracket" ->
-            Error(InvalidPattern(3696, "The regular expression contains an unclosed bracket expression."))
-        | :? ArgumentException ->
-            Error(InvalidPattern(3691, "Invalid regular expression.")))
+    match invalidPattern pattern with
+    | Some(code, message) -> Error(InvalidPattern(code, message))
+    | None ->
+        optionsFor collation matchType
+        |> Result.bind (fun options ->
+            try
+                Ok(Regex(normalizePattern options pattern, options, Limits.regexpMatchTimeout))
+            with
+            | :? RegexParseException as error -> Error(parseError error)
+            | :? ArgumentException -> Error(InvalidPattern(3691, "Invalid regular expression.")))

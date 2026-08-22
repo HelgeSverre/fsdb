@@ -985,9 +985,9 @@ let private regexpOp (coll: Collation.Collation option) (subject: Value) (patter
         | Error Regexp.InvalidMatchType -> Error(1210, "Incorrect arguments to regexp function")
         | Ok regex ->
             try
-                Ok(boolToValue (regex.IsMatch(Regexp.prepareInput None text)))
+                Ok(boolToValue (regex.IsMatch((Regexp.prepareInput None pat text).Text)))
             with :? RegexMatchTimeoutException ->
-                Error(1030, "Got error 'regexp match timed out' from regexp")
+                Error(3699, "Regular expression operation timed out.")
 
 /// The three pieces of context `evalExpr` needs to resolve a `Col`/`FuncCall`
 /// against, bundled into one record rather than three loose parameters
@@ -2730,7 +2730,7 @@ let rec private evalExpr (ctx: EvalContext) (expr: Expr) : Result<Value, EvalErr
         |> Result.bind (fun ve ->
             eval p
             |> Result.bind (fun vp ->
-                regexCollation ctx "regexp" e ve p vp
+                regexCollation ctx "regexp_like" e ve p vp
                 |> Result.bind (fun collation -> regexpOp (Some collation) ve vp)))
     | In((Row _ as e), xs)
     | In(e, ((Row _) :: _ as xs)) ->

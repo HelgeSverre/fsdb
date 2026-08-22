@@ -4560,8 +4560,6 @@ let tests =
 
                 testCase "REGEXP on a _bin column is case-sensitive, like =/LIKE BINARY"
                 <| fun _ ->
-                    // `regexpOp` must honor the column's collation, not
-                    // hardcode `IgnoreCase`.
                     let store = newStore ()
                     runDefault store "CREATE TABLE t (s VARCHAR(10) COLLATE utf8mb4_bin)" |> ignore
                     runDefault store "INSERT INTO t VALUES ('Hello'), ('world')" |> ignore
@@ -4599,26 +4597,23 @@ let tests =
                     | other -> failtestf "expected explicit pattern collation and sigma folding, got %A" other
 
                     match runDefault store "SELECT REGEXP_LIKE('x' COLLATE utf8mb4_0900_ai_ci, 'x' COLLATE utf8mb4_bin)" with
-                    | Err(1267, _) -> ()
+                    | Err(1267, "Illegal mix of collations (utf8mb4_0900_ai_ci,EXPLICIT) and (utf8mb4_bin,EXPLICIT) for operation 'regexp_like'") -> ()
                     | other -> failtestf "expected conflicting explicit collations to fail with 1267, got %A" other
 
                     match runDefault store "SELECT REGEXP_LIKE(_binary'x', 'x')" with
-                    | Err(3995, _) -> ()
+                    | Err(3995, "Character set 'binary' cannot be used in conjunction with 'utf8mb4_0900_ai_ci' in call to regexp_like.") -> ()
                     | other -> failtestf "expected mixed binary and text operands to fail with 3995, got %A" other
 
                 testCase "REGEXP on a catastrophically-backtracking pattern errors instead of hanging"
                 <| fun _ ->
-                    // Every `Regex` in `regexpOp` must carry a `MatchTimeout`
-                    // — `(a+)+$` against a long non-matching subject would
-                    // otherwise pin a core forever.
                     let store = newStore ()
                     runDefault store "CREATE TABLE t (s VARCHAR(200))" |> ignore
                     let pathological = String.replicate 40 "a" + "!"
                     runDefault store (sprintf "INSERT INTO t VALUES ('%s')" pathological) |> ignore
 
                     match runDefault store "SELECT s FROM t WHERE s REGEXP '(a+)+$'" with
-                    | Err(_, _) -> ()
-                    | other -> failtestf "expected a catastrophic-backtracking REGEXP to error out (timeout), got %A" other
+                    | Err(3699, "Regular expression operation timed out.") -> ()
+                    | other -> failtestf "expected a REGEXP timeout, got %A" other
 
                 testCase "LIKE BINARY is case-sensitive, unlike plain LIKE"
                 <| fun _ ->
