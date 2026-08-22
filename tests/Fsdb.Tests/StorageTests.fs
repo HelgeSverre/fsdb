@@ -521,6 +521,8 @@ let tests =
 
                 testCase "strict mode rejects values beyond the TIME range"
                 <| fun _ ->
+                    let time = col "elapsed" (TTime 6) true
+
                     for value in [ "838:59:59.000001"; "-838:59:59.000001" ] do
                         match coerceValue true time (VString value) with
                         | Error(ExpressionError(1292, _)) -> ()
