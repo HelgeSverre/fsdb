@@ -228,8 +228,9 @@ comparison, sort, group, dedup, join, and unique key folds by the column's
 own collation. `SET collation_connection` governs literals, so
 `SELECT 'åge' = 'age' COLLATE utf8mb4_bin` is 0 while
 `... COLLATE utf8mb4_0900_ai_ci` is 1. Charsets transcode on write;
-`SHOW CREATE TABLE` reports declared collations, and
-`information_schema.COLUMNS` carries `CHARACTER_SET_NAME`/`COLLATION_NAME`.
+`SHOW CREATE TABLE` reports declared collations and column comments, and
+`information_schema.COLUMNS` carries `CHARACTER_SET_NAME`, `COLLATION_NAME`,
+and `COLUMN_COMMENT`.
 
 The deliberate gaps — including complex updatable views, compound trigger
 bodies, stored routines, events, and every smaller divergence — are

@@ -173,7 +173,6 @@ accessors).
 | Spatial indexes and operations | R-tree indexes, containment/touch predicates, overlays, buffers, geographic SRS axis rules | geometry values, common WKT/WKB accessors, planar `ST_Distance`, `ST_Envelope`, `ST_IsValid`, `ST_Intersects`, `ST_Disjoint`, and MBR predicates work; spatial indexes still collapse to BTree | low | refusal |
 | Generated columns | VIRTUAL recomputed on read, STORED materialized | both materialize at write time; no read-path recompute (`Storage.fs:3705–3713`) | low | divergence |
 | Functional defaults | `DEFAULT (expr)` | literal constants and CURRENT_TIMESTAMP only | low | refusal |
-| Column comments | tracked, shown in SHOW CREATE TABLE/I_S | accepted then dropped (`Parser.fs:1371`) | low | divergence |
 | ZEROFILL/display width | zero-fill formatting, width in metadata | not tracked beyond static wire lengths; ZEROFILL flag never set (`ColumnWire.fs:58–84`) | low | divergence |
 | JSON representation | binary DOM, member-of/path ops on it | raw text value, re-parsed per operation (`Value.fs:28–29`) | low (perf) | divergence |
 
@@ -366,7 +365,7 @@ DROP TRIGGER resolved to its subject table for TRIGGER privilege
 ## 14. Metadata, server administration, logging, replication
 
 Working: 23 INFORMATION_SCHEMA views with viewer scoping (SCHEMATA, TABLES,
-COLUMNS, STATISTICS, TABLE_CONSTRAINTS, KEY_COLUMN_USAGE,
+COLUMNS (including column comments), STATISTICS, TABLE_CONSTRAINTS, KEY_COLUMN_USAGE,
 REFERENTIAL_CONSTRAINTS, CHECK_CONSTRAINTS, VIEWS, TRIGGERS, PROCESSLIST,
 ENGINES, COLLATIONS, CHARACTER_SETS, privilege views, …), direct
 SELECT-ability of the 8 mysql.* tables, SHOW TABLES/COLUMNS/INDEX/CREATE
@@ -382,7 +381,6 @@ live Limits reporting.
 |---|---|---|---|---|
 | INFORMATION_SCHEMA breadth | ~60+ views incl. INNODB_*, COLUMN_STATISTICS, RESOURCE_GROUPS, ENABLED_ROLES | 23 views; EVENTS/ROUTINES/PARAMETERS/COLUMN_PRIVILEGES genuinely empty | low | divergence |
 | Table statistics | estimates refreshed by ANALYZE TABLE | ENGINE always InnoDB, DATA_LENGTH stand-in 16384, CARDINALITY 0, live row counts where MySQL keeps stale page estimates until ANALYZE (`InformationSchema.fs:267–288`) | low | divergence |
-| COLUMN_COMMENT | user text | always "" (`InformationSchema.fs:323–326`) | low | divergence |
 | SHOW STATUS counters | Com_*, Innodb_*, Slow_queries, … | five variables only: Questions, Ssl_cipher, Ssl_version, Threads_connected, Uptime (`InformationSchema.fs`) | low | divergence |
 | wait_timeout | 28800 default | 300 (deliberate DoS posture, honestly advertised) | low | divergence |
 | Logging | general log, slow log, error-log file | stderr diagnostics with credential redaction only (`Log.fs`) | low | divergence |
