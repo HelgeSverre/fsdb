@@ -546,14 +546,14 @@ let tests =
 
               [ 1 .. 32 ]
               |> List.map (fun index ->
-                  let session, definer = if index % 2 = 0 then first, "first@%" else second, "second@localhost"
+                  let session = if index % 2 = 0 then first else second
 
                   Task.Run(fun () ->
                       let _, result = Fsdb.QueryHandler.handle session (sprintf "CREATE VIEW concurrent_%d AS SELECT id FROM source" index)
-                      expectOk result (sprintf "create concurrent_%d" index)
-                      index, definer))
+                      expectOk result (sprintf "create concurrent_%d" index)))
               |> List.toArray
-              |> Task.WaitAll
+              |> Task.WhenAll
+              |> fun task -> task.Wait()
 
               let expected =
                   [ 1 .. 32 ]
