@@ -1054,6 +1054,21 @@ let tests =
                     | ResultSet([ "years"; "id"; "name" ], [ [ Some "30"; Some "1"; Some "x" ] ]) -> ()
                     | other -> failtestf "expected years first with its value moved along, got %A" other
 
+                testCase "ALTER TABLE replaces comments on redefinitions and preserves them on RENAME COLUMN"
+                <| fun _ ->
+                    let store = newStore ()
+                    runDefault store "CREATE TABLE t (id INT COMMENT 'original', body TEXT COMMENT 'body')" |> ignore
+                    runDefault store "ALTER TABLE t MODIFY id BIGINT COMMENT 'replacement', CHANGE body content TEXT COMMENT ''" |> ignore
+                    runDefault store "ALTER TABLE t ADD COLUMN summary VARCHAR(20) COMMENT 'summary', RENAME COLUMN summary TO excerpt" |> ignore
+
+                    match
+                        runDefault
+                            store
+                            "SELECT column_name, column_comment FROM information_schema.columns WHERE table_name = 't' ORDER BY ordinal_position"
+                    with
+                    | ResultSet(_, [ [ Some "id"; Some "replacement" ]; [ Some "content"; Some "" ]; [ Some "excerpt"; Some "summary" ] ]) -> ()
+                    | other -> failtestf "expected altered column comments, got %A" other
+
                 testCase "ADD COLUMN ... FIRST updates information_schema.columns ordinal_position"
                 <| fun _ ->
                     let store = newStore ()

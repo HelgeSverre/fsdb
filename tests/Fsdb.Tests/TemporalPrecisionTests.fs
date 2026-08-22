@@ -23,6 +23,7 @@ let private col name ty : ColumnDef =
       PrimaryKey = false
       Unique = false
       Generated = None
+      Comment = ""
       Collation = None
       Charset = None
       OnUpdateCurrentTimestamp = false }

@@ -22,6 +22,7 @@ let private col (name: string) (ty: ColumnType) : ColumnDef =
       PrimaryKey = false
       Unique = false
       Generated = None
+      Comment = ""
       Collation = None
       Charset = None
       OnUpdateCurrentTimestamp = false }
@@ -327,9 +328,6 @@ let private columnsColumns =
       strCol "COLUMN_KEY"
       strCol "EXTRA"
       strCol "PRIVILEGES"
-      // `Ast.ColumnDef` doesn't track a column comment — always empty,
-      // present only so Laravel's `compileColumns` (which projects it
-      // unconditionally) doesn't 1054.
       strCol "COLUMN_COMMENT"
       strCol "GENERATION_EXPRESSION"
       intCol "SRS_ID" ]
@@ -500,7 +498,7 @@ let private columnRowWith (privileges: string) (dbName: string) (tableName: stri
        vs key
        vs (extraText c)
        vs privileges
-       vs ""
+       vs c.Comment
        vs (c.Generated |> Option.map (fst >> exprToSql) |> Option.defaultValue "")
        VNull |]
 
@@ -1658,7 +1656,7 @@ let showColumns (catalog: Catalog) (full: bool) (dbName: string) (tableName: str
                       defaultCol c
                       Some(extra c)
                       Some "select,insert,update,references"
-                      Some "" ])
+                      Some c.Comment ])
 
             [ "Field"; "Type"; "Collation"; "Null"; "Key"; "Default"; "Extra"; "Privileges"; "Comment" ], rows
         else
@@ -1670,6 +1668,10 @@ let showColumns (catalog: Catalog) (full: bool) (dbName: string) (tableName: str
             [ "Field"; "Type"; "Null"; "Key"; "Default"; "Extra" ], rows)
 
 let private backtick (s: string) = "`" + s + "`"
+
+let private showCreateString (s: string) =
+    s.Replace("\\", "\\\\").Replace("'", "''").Replace("\r", "\\r").Replace("\n", "\\n").Replace("\000", "\\0").Replace("\x1A", "\\Z")
+
 // Joined with a bare comma — byte-for-byte what MySQL's own SHOW CREATE
 // TABLE emits for multi-column key lists.
 let private backtickCols = List.map backtick >> String.concat ","
@@ -1747,7 +1749,7 @@ let private showCreateTableDDL (catalog: Catalog) (dbName: string) (t: Table) : 
 
         [ backtick c.Name; columnTypeText c.Type ]
         @ charsetCollate
-        @ [ generatedPart; notNull; defaultPart; onUpdatePart; extra ]
+        @ [ generatedPart; notNull; defaultPart; onUpdatePart; extra; if c.Comment = "" then "" else sprintf "COMMENT '%s'" (showCreateString c.Comment) ]
         |> List.filter ((<>) "")
         |> String.concat " "
 

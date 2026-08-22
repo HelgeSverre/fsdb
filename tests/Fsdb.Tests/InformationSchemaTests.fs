@@ -124,6 +124,34 @@ let tests =
                   Expect.stringContains ddl "DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci" "the table defaults"
               | other -> failtestf "expected SHOW CREATE TABLE output, got %A" other
 
+          testCase "column comments appear in introspection and SHOW CREATE TABLE"
+          <| fun _ ->
+              let store = setup ()
+              run store "CREATE TABLE documented (id INT COMMENT 'owner\\'s \\\\ path\\nsecond', plain INT)" |> ignore
+
+              match
+                  run
+                      store
+                      "SELECT column_name, column_comment FROM information_schema.columns WHERE table_schema = 'fsdb' AND table_name = 'documented' ORDER BY ordinal_position"
+              with
+              | ResultSet(_, rows) ->
+                  Expect.equal rows [ [ Some "id"; Some "owner's \\ path\nsecond" ]; [ Some "plain"; Some "" ] ] "information_schema comments"
+              | other -> failtestf "expected column comments, got %A" other
+
+              let session = Fsdb.Session.create 1 store
+
+              match Fsdb.QueryHandler.handle session "SHOW FULL COLUMNS FROM documented" |> snd with
+              | ResultSet(_, [ first; second ]) ->
+                  Expect.equal first.[8] (Some "owner's \\ path\nsecond") "SHOW FULL COLUMNS comment"
+                  Expect.equal second.[8] (Some "") "empty comment"
+              | other -> failtestf "expected SHOW FULL COLUMNS output, got %A" other
+
+              match Fsdb.QueryHandler.handle session "SHOW CREATE TABLE documented" |> snd with
+              | ResultSet(_, [ [ Some "documented"; Some ddl ] ]) ->
+                  Expect.stringContains ddl "`id` int DEFAULT NULL COMMENT 'owner''s \\\\ path\\nsecond'" "SHOW CREATE escapes the comment"
+                  Expect.isFalse (ddl.Contains "`plain` int DEFAULT NULL COMMENT") "empty comments are omitted"
+              | other -> failtestf "expected SHOW CREATE TABLE output, got %A" other
+
           testCase "BIT defaults render as MySQL bit literals"
           <| fun _ ->
               let store = setup ()

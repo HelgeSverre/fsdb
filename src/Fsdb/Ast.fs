@@ -313,6 +313,8 @@ and ColumnDef =
       /// `[GENERATED ALWAYS] AS (expr) [VIRTUAL | STORED]` — `None` for a
       /// plain column.
       Generated: (Expr * GeneratedKind) option
+      /// The column's `COMMENT` text, empty when omitted.
+      Comment: string
       /// The column's `COLLATE name` (table-level `COLLATE` baked in as the
       /// default at parse time) — `None` means the server default
       /// (`Collation.defaultCollation`, utf8mb4_0900_ai_ci). Only meaningful

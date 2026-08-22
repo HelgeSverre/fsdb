@@ -8,6 +8,7 @@ open System.Collections.Concurrent
 open System.Collections.Generic
 open System.Collections.Immutable
 open System.Globalization
+open System.Text
 open System.Threading
 open Fsdb.Ast
 open Fsdb.Value
@@ -1731,6 +1732,7 @@ let private sysCol (name: string) (ty: ColumnType) (nullable: bool) (dflt: Value
       Unique = false
       OnUpdateCurrentTimestamp = false
       Generated = None
+      Comment = ""
       Collation = None
       Charset = None }
 
@@ -2455,6 +2457,8 @@ let private validateColumnType (c: ColumnDef) : Result<unit, StorageError> =
     // here with real MySQL's 1074 shape for an over-long column.
     | TVector dim when dim < 1 || dim > 16383 ->
         Error(ExpressionError(1074, sprintf "Column length too big for column '%s' (max = 16383); use BLOB or TEXT instead" c.Name))
+    | _ when c.Comment.EnumerateRunes() |> Seq.length > 1024 ->
+        Error(ExpressionError(1629, sprintf "Comment for field '%s' is too long (max = 1024)" c.Name))
     | _ -> Ok()
 
 /// MySQL 9 forbids a VECTOR column in any key — primary, unique, or plain

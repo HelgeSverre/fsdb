@@ -527,6 +527,7 @@ let private syntheticColumn (name: string) (ty: ColumnType) (nullable: bool) : C
       PrimaryKey = false
       Unique = false
       Generated = None
+      Comment = ""
       Collation = None
       Charset = None
       OnUpdateCurrentTimestamp = false }
@@ -2671,6 +2672,7 @@ let rec private evalExpr (ctx: EvalContext) (expr: Expr) : Result<Value, EvalErr
                   PrimaryKey = false
                   Unique = false
                   Generated = None
+                  Comment = ""
                   Collation = None
                   Charset = None
                   OnUpdateCurrentTimestamp = false }
@@ -2995,6 +2997,7 @@ and private deriveColumns
               PrimaryKey = false
               Unique = false
               Generated = None
+              Comment = ""
               Collation = Some col.Name
               Charset = None
               OnUpdateCurrentTimestamp = false })
@@ -3092,6 +3095,7 @@ and private jsonTableColumnDefs (columns: JsonTableColumn list) : ColumnDef list
                 PrimaryKey = false
                 Unique = false
                 Generated = None
+                Comment = ""
                 Collation = None
                 Charset = None
                 OnUpdateCurrentTimestamp = false } ]
@@ -5066,6 +5070,7 @@ and runUnionStmt
                       PrimaryKey = false
                       Unique = false
                       Generated = None
+                      Comment = ""
                       Collation = None
                       Charset = None
                       OnUpdateCurrentTimestamp = false })

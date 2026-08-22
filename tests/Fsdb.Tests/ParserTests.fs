@@ -712,6 +712,7 @@ let tests =
                                 PrimaryKey = true
                                 Unique = false
                                 Generated = None
+                                Comment = ""
                                 Collation = None
                                 Charset = None
                                 OnUpdateCurrentTimestamp = false }
@@ -723,6 +724,7 @@ let tests =
                                 PrimaryKey = false
                                 Unique = false
                                 Generated = None
+                                Comment = ""
                                 Collation = Some "utf8mb4_0900_ai_ci"
                                 Charset = None
                                 OnUpdateCurrentTimestamp = false }
@@ -734,6 +736,7 @@ let tests =
                                 PrimaryKey = false
                                 Unique = false
                                 Generated = None
+                                Comment = ""
                                 Collation = None
                                 Charset = None
                                 OnUpdateCurrentTimestamp = false } ],
@@ -746,6 +749,16 @@ let tests =
                             None
                         ))
                         "create table"
+
+                testCase "column comments parse on CREATE and ALTER definitions"
+                <| fun _ ->
+                    match parseOk "CREATE TABLE t (id INT COMMENT 'identifier', body TEXT COMMENT 'line\\ntext')" with
+                    | CreateTable(_, [ { Name = "id"; Comment = "identifier" }; { Name = "body"; Comment = "line\ntext" } ], _, _, _, _, _, _, _) -> ()
+                    | other -> failtestf "expected CREATE TABLE column comments, got %A" other
+
+                    match parseOk "ALTER TABLE t MODIFY id BIGINT COMMENT 'replacement', CHANGE body content TEXT COMMENT ''" with
+                    | AlterTable(_, [ ModifyColumn({ Name = "id"; Comment = "replacement" }, _); ChangeColumn("body", { Name = "content"; Comment = "" }, _) ]) -> ()
+                    | other -> failtestf "expected ALTER TABLE column comments, got %A" other
 
                 testCase "CREATE TABLE LIKE"
                 <| fun _ ->
@@ -774,6 +787,7 @@ let tests =
                                 PrimaryKey = false
                                 Unique = false
                                 Generated = None
+                                Comment = ""
                                 Collation = None
                                 Charset = None
                                 OnUpdateCurrentTimestamp = false } ],
@@ -801,6 +815,7 @@ let tests =
                                 PrimaryKey = true
                                 Unique = false
                                 Generated = None
+                                Comment = ""
                                 Collation = None
                                 Charset = None
                                 OnUpdateCurrentTimestamp = false }
@@ -812,6 +827,7 @@ let tests =
                                 PrimaryKey = false
                                 Unique = false
                                 Generated = None
+                                Comment = ""
                                 Collation = Some "utf8mb4_0900_ai_ci"
                                 Charset = None
                                 OnUpdateCurrentTimestamp = false } ],
@@ -858,6 +874,7 @@ let tests =
                                 PrimaryKey = false
                                 Unique = false
                                 Generated = None
+                                Comment = ""
                                 Collation = None
                                 Charset = None
                                 OnUpdateCurrentTimestamp = false } ],

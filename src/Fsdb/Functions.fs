@@ -79,7 +79,7 @@ type VirtualTable =
       Rows: unit -> Value[] list }
 
 module VirtualTable =
-    /// The 11-field `ColumnDef` an embedder should never hand-build: every
+    /// The complete `ColumnDef` an embedder should never hand-build: every
     /// flag off, nullable, server-default collation/charset — the shape the
     /// `text`/`int`/... shorthands below all share.
     let private col (name: string) (ty: Ast.ColumnType) : Ast.ColumnDef =
@@ -92,6 +92,7 @@ module VirtualTable =
           Unique = false
           OnUpdateCurrentTimestamp = false
           Generated = None
+          Comment = ""
           Collation = None
           Charset = None }
 

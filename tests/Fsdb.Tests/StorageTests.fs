@@ -16,6 +16,7 @@ let private col name ty nullable =
       PrimaryKey = false
       Unique = false
       Generated = None
+      Comment = ""
       Collation = None
       Charset = None
       OnUpdateCurrentTimestamp = false }
@@ -89,6 +90,18 @@ let tests =
                     match createTable store defaultDatabase "wide_bits" [ col "bits" (TBit 65) true ] [] [] None None with
                     | Error(ExpressionError(1439, _)) -> ()
                     | other -> failtestf "expected oversized BIT width, got %A" other
+
+                testCase "column comments allow 1024 Unicode scalars and reject longer text"
+                <| fun _ ->
+                    let store = create ()
+                    let atLimit = { col "ok" (TInt false) true with Comment = String.replicate 1024 "😀" }
+                    let tooLong = { col "too_long" (TInt false) true with Comment = String.replicate 1025 "x" }
+
+                    Expect.equal (createTable store defaultDatabase "comment_limit" [ atLimit ] [] [] None None) (Ok()) "1024 scalars are valid"
+
+                    match createTable store defaultDatabase "comment_too_long" [ tooLong ] [] [] None None with
+                    | Error(ExpressionError(1629, "Comment for field 'too_long' is too long (max = 1024)")) -> ()
+                    | other -> failtestf "expected comment-length error, got %A" other
 
                 testCase "scan on an unknown table returns NoSuchTable"
                 <| fun _ ->

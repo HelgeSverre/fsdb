@@ -1550,10 +1550,7 @@ type private ColMod =
     | MCharset of string
     | MOnUpdateCurrentTimestamp
     | MCheck of name: string option * expression: Expr * enforced: bool
-    /// `COMMENT 'txt'` — accepted so the column definition parses, but
-    /// nothing in `Ast.ColumnDef` tracks it (ponytail: add a field if a
-    /// migration's assertion ever depends on it).
-    | MIgnored
+    | MComment of string
 
 /// `CURRENT_TIMESTAMP[(N)]` — the `(N)` is accepted and dropped: MySQL
 /// requires it to match the column's own declared fsp, and the default is
@@ -1626,7 +1623,7 @@ let private colMod: Parser<ColMod, unit> =
               >>. optional (sym "(" >>. sym ")")
           )
           >>% MOnUpdateCurrentTimestamp
-          keyword "COMMENT" >>. stringLit >>% MIgnored
+          keyword "COMMENT" >>. stringLit |>> (function VString text -> MComment text | _ -> MComment "")
           attempt (keyword "CHARACTER" >>. keyword "SET" <|> keyword "CHARSET") >>. knownCharset |>> MCharset
           keyword "COLLATE"
           >>. identOrString
@@ -1649,6 +1646,7 @@ let private parsedColumnDef: Parser<ColumnDef * CheckConstraintDef list, unit> =
               Unique = List.contains MUnique mods
               OnUpdateCurrentTimestamp = List.contains MOnUpdateCurrentTimestamp mods
               Generated = mods |> List.tryPick (function MGenerated(e, k) -> Some(e, k) | _ -> None)
+              Comment = mods |> List.tryPick (function MComment text -> Some text | _ -> None) |> Option.defaultValue ""
               Collation = mods |> List.tryPick (function MCollate c -> Some c | _ -> None)
               Charset =
                   mods
