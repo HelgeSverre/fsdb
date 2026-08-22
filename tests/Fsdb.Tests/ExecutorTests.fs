@@ -1224,6 +1224,18 @@ let tests =
                         Expect.contains selectTypes (Some "SUBQUERY") "the uncorrelated subquery is plain SUBQUERY"
                     | other -> failtestf "expected a resultset, got %A" other
 
+                testCase "EXPLAIN SELECT with a quantified comparison plans its subquery"
+                <| fun _ ->
+                    let store = newStore ()
+                    runDefault store "CREATE TABLE t1 (id INT)" |> ignore
+                    runDefault store "CREATE TABLE t2 (id INT)" |> ignore
+
+                    match runDefault store "EXPLAIN SELECT * FROM t1 WHERE id = ANY (SELECT id FROM t2)" with
+                    | ResultSet(_, rows) ->
+                        let selectTypes = rows |> List.map (fun r -> r.[1])
+                        Expect.contains selectTypes (Some "SUBQUERY") "the quantified subquery has its own plan block"
+                    | other -> failtestf "expected a resultset, got %A" other
+
                 testCase "EXPLAIN SELECT with a derived table is DERIVED"
                 <| fun _ ->
                     let store = newStore ()
@@ -4051,6 +4063,20 @@ let tests =
                     match runDefault store "CREATE TABLE generated_quantified (n INT, q INT GENERATED ALWAYS AS (n = ANY (SELECT n FROM outer_rows)))" with
                     | Err(3102, "Expression of generated column 'q' contains a disallowed function.") -> ()
                     | other -> failtestf "expected MySQL error 3102, got %A" other
+
+                testCase "quantified comparisons support every ordered comparison operator"
+                <| fun _ ->
+                    let store = newStore ()
+                    runDefault store "CREATE TABLE values_to_compare (n INT)" |> ignore
+                    runDefault store "INSERT INTO values_to_compare VALUES (1), (2), (3)" |> ignore
+
+                    match
+                        runDefault
+                            store
+                            "SELECT 2 = ANY (SELECT n FROM values_to_compare), 2 <> ALL (SELECT n FROM values_to_compare), 2 < ANY (SELECT n FROM values_to_compare), 2 <= ALL (SELECT n FROM values_to_compare WHERE n >= 2), 2 > SOME (SELECT n FROM values_to_compare), 2 >= ALL (SELECT n FROM values_to_compare WHERE n <= 2)"
+                    with
+                    | ResultSet(_, [ [ Some "1"; Some "0"; Some "1"; Some "1"; Some "1"; Some "1" ] ]) -> ()
+                    | other -> failtestf "expected every quantified comparison operator to agree with MySQL, got %A" other
 
                 testCase "scalar subquery: (SELECT ...) used as a value, zero rows is NULL, one row is that value"
                 <| fun _ ->

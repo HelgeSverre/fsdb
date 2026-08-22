@@ -62,6 +62,7 @@ let tests =
               Expect.equal (selectTablesOf "SELECT (SELECT s FROM secret)") [ "secret" ] "scalar subquery in projection"
               Expect.equal (selectTablesOf "SELECT * FROM (SELECT * FROM secret) x") [ "secret" ] "derived table"
               Expect.equal (selectTablesOf "SELECT * FROM mine WHERE id IN (SELECT id FROM secret)") [ "mine"; "secret" ] "IN subquery in WHERE"
+              Expect.equal (selectTablesOf "SELECT * FROM mine WHERE id = ANY (SELECT id FROM secret)") [ "mine"; "secret" ] "quantified subquery in WHERE"
               Expect.equal (selectTablesOf "SELECT * FROM mine WHERE EXISTS (SELECT 1 FROM secret)") [ "mine"; "secret" ] "EXISTS in WHERE"
               Expect.equal (selectTablesOf "SELECT * FROM mine JOIN (SELECT * FROM secret) d ON 1=1") [ "mine"; "secret" ] "joined derived table"
               Expect.equal (selectTablesOf "SELECT * FROM ((SELECT * FROM a) UNION (SELECT * FROM secret)) x") [ "a"; "secret" ] "union inside a derived table"
