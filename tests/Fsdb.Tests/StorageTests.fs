@@ -554,7 +554,16 @@ let tests =
                 <| fun _ ->
                     match coerceValue true (col "elapsed" (TTime 6) true) (VString "10:60:00") with
                     | Error(ExpressionError(1292, _)) -> ()
-                    | other -> failtestf "expected time component rejection, got %A" other ]
+                    | other -> failtestf "expected time component rejection, got %A" other
+
+                testCase "TIME rejects CURRENT_TIMESTAMP defaults"
+                <| fun _ ->
+                    let store = create ()
+                    let time = { (col "elapsed" (TTime 6) true) with Default = Some DCurrentTimestamp }
+
+                    match createTable store defaultDatabase "times" [ time ] [] [] None None with
+                    | Error(InvalidDefaultValue "elapsed") -> ()
+                    | other -> failtestf "expected invalid TIME default, got %A" other ]
 
           testList
               "coerceValue BIT columns"

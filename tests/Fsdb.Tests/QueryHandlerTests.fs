@@ -88,6 +88,18 @@ let tests =
                   | metadata -> failtestf "expected five metadata records, got %A" metadata
               | _, other -> failtestf "expected a resultset, got %A" other
 
+          testCase "TIME rejects CURRENT_TIMESTAMP default and update clauses"
+          <| fun _ ->
+              let session = create 1 (Fsdb.Storage.create ())
+
+              match handle session "CREATE TABLE time_default (value TIME DEFAULT CURRENT_TIMESTAMP)" |> snd with
+              | Err(1067, "Invalid default value for 'value'") -> ()
+              | other -> failtestf "expected invalid TIME default, got %A" other
+
+              match handle session "CREATE TABLE time_update (value TIME ON UPDATE CURRENT_TIMESTAMP)" |> snd with
+              | Err(1294, _) -> ()
+              | other -> failtestf "expected invalid TIME update clause, got %A" other
+
           testCase "WEIGHT_STRING BINARY metadata preserves its bounded binary result"
           <| fun _ ->
               let session = create 1 (Fsdb.Storage.create ())

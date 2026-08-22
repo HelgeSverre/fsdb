@@ -1416,8 +1416,15 @@ let coerceValue (strict: bool) (col: ColumnDef) (v: Value) : Result<Value, Stora
         col
         v
 
+let private supportsCurrentTimestamp (col: ColumnDef) =
+    match col.Type with
+    | TDateTime _
+    | TTimestamp _ -> true
+    | _ -> false
+
 let private normalizeDefault (mode: TemporalCoercionMode) (col: ColumnDef) : Result<ColumnDef, StorageError> =
     match col.Default with
+    | Some DCurrentTimestamp when not (supportsCurrentTimestamp col) -> Error(InvalidDefaultValue col.Name)
     | Some(DConst value) ->
         let text = value |> toText |> Option.defaultValue ""
 
@@ -1466,8 +1473,7 @@ let currentTimestampForColumn (col: ColumnDef) : Value =
     let fsp =
         match col.Type with
         | TDateTime fsp
-        | TTimestamp fsp
-        | TTime fsp -> fsp
+        | TTimestamp fsp -> fsp
         | _ -> 0
 
     VDateTime(Functions.roundDateTimeToFsp fsp DateTime.Now)
@@ -2461,27 +2467,30 @@ let private withTable
 /// scope for MySQL-compatible errors. Runtime coercion repeats DECIMAL's
 /// bounds because CAST and JSON_TABLE create synthetic column definitions.
 let private validateColumnType (c: ColumnDef) : Result<unit, StorageError> =
-    match c.Type with
-    | TBit width when width < 1 -> Error(ExpressionError(3013, sprintf "Invalid size for column '%s'." c.Name))
-    | TBit width when width > 64 ->
-        Error(ExpressionError(1439, sprintf "Display width out of range for column '%s' (max = 64)" c.Name))
-    | TDateTime fsp
-    | TTimestamp fsp
-    | TTime fsp when fsp > 6 -> Error(PrecisionTooBig(c.Name, fsp))
-    | TDecimal(precision, _) when precision < 1 || precision > 65 ->
-        Error(ExpressionError(1426, sprintf "Too-big precision %d specified for '%s'. Maximum is 65." precision c.Name))
-    | TDecimal(_, scale) when scale < 0 || scale > 30 ->
-        Error(ExpressionError(1425, sprintf "Too big scale %d specified for column '%s'. Maximum is 30." scale c.Name))
-    | TDecimal(precision, scale) when scale > precision ->
-        Error(ExpressionError(1427, sprintf "For decimal(M,D), M must be >= D (column '%s')." c.Name))
+    if c.OnUpdateCurrentTimestamp && not (supportsCurrentTimestamp c) then
+        Error(ExpressionError(1294, sprintf "Invalid ON UPDATE clause for '%s' column" c.Name))
+    else
+        match c.Type with
+        | TBit width when width < 1 -> Error(ExpressionError(3013, sprintf "Invalid size for column '%s'." c.Name))
+        | TBit width when width > 64 ->
+            Error(ExpressionError(1439, sprintf "Display width out of range for column '%s' (max = 64)" c.Name))
+        | TDateTime fsp
+        | TTimestamp fsp
+        | TTime fsp when fsp > 6 -> Error(PrecisionTooBig(c.Name, fsp))
+        | TDecimal(precision, _) when precision < 1 || precision > 65 ->
+            Error(ExpressionError(1426, sprintf "Too-big precision %d specified for '%s'. Maximum is 65." precision c.Name))
+        | TDecimal(_, scale) when scale < 0 || scale > 30 ->
+            Error(ExpressionError(1425, sprintf "Too big scale %d specified for column '%s'. Maximum is 30." scale c.Name))
+        | TDecimal(precision, scale) when scale > precision ->
+            Error(ExpressionError(1427, sprintf "For decimal(M,D), M must be >= D (column '%s')." c.Name))
     // VECTOR shares the parse-anything-validate-at-DDL discipline: the
     // parser accepts any dimension, MySQL 9's 1..16383 range is enforced
     // here with real MySQL's 1074 shape for an over-long column.
-    | TVector dim when dim < 1 || dim > 16383 ->
-        Error(ExpressionError(1074, sprintf "Column length too big for column '%s' (max = 16383); use BLOB or TEXT instead" c.Name))
-    | _ when c.Comment.EnumerateRunes() |> Seq.length > 1024 ->
-        Error(ExpressionError(1629, sprintf "Comment for field '%s' is too long (max = 1024)" c.Name))
-    | _ -> Ok()
+        | TVector dim when dim < 1 || dim > 16383 ->
+            Error(ExpressionError(1074, sprintf "Column length too big for column '%s' (max = 16383); use BLOB or TEXT instead" c.Name))
+        | _ when c.Comment.EnumerateRunes() |> Seq.length > 1024 ->
+            Error(ExpressionError(1629, sprintf "Comment for field '%s' is too long (max = 1024)" c.Name))
+        | _ -> Ok()
 
 /// MySQL 9 forbids a VECTOR column in any key — primary, unique, or plain
 /// index (a 16KB-per-row float blob is nothing an index can order). Same
