@@ -4343,18 +4343,26 @@ let private regexpReplaceFn (collation: Collation.Collation) : Scalar =
                     VString(replaceMatches regex input source pos occurrence repl))
     | _ -> VNull
 
-let regexpFunction (name: string) (collation: Collation.Collation) : Scalar option =
-    let withArity name minimum maximum function_ arguments =
-        if List.length arguments < minimum || List.length arguments > maximum then
-            raise (SqlError(1582, sprintf "Incorrect parameter count in the call to native function '%s'" name))
-
-        function_ arguments
-
+let private regexpArity (name: string) =
     match name.ToUpperInvariant() with
-    | "REGEXP_LIKE" -> Some(withArity "REGEXP_LIKE" 2 3 (regexpLikeFn collation))
-    | "REGEXP_INSTR" -> Some(withArity "REGEXP_INSTR" 2 6 (regexpInstrFn collation))
-    | "REGEXP_SUBSTR" -> Some(withArity "REGEXP_SUBSTR" 2 5 (regexpSubstrFn collation))
-    | "REGEXP_REPLACE" -> Some(withArity "REGEXP_REPLACE" 3 6 (regexpReplaceFn collation))
+    | "REGEXP_LIKE" -> Some(2, 3)
+    | "REGEXP_INSTR" -> Some(2, 6)
+    | "REGEXP_SUBSTR" -> Some(2, 5)
+    | "REGEXP_REPLACE" -> Some(3, 6)
+    | _ -> None
+
+let validateRegexpArity (name: string) arguments =
+    match regexpArity name with
+    | Some(minimum, maximum) when List.length arguments < minimum || List.length arguments > maximum ->
+            raise (SqlError(1582, sprintf "Incorrect parameter count in the call to native function '%s'" name))
+    | _ -> ()
+
+let regexpFunction (name: string) (collation: Collation.Collation) : Scalar option =
+    match name.ToUpperInvariant() with
+    | "REGEXP_LIKE" -> Some(fun arguments -> validateRegexpArity name arguments; regexpLikeFn collation arguments)
+    | "REGEXP_INSTR" -> Some(fun arguments -> validateRegexpArity name arguments; regexpInstrFn collation arguments)
+    | "REGEXP_SUBSTR" -> Some(fun arguments -> validateRegexpArity name arguments; regexpSubstrFn collation arguments)
+    | "REGEXP_REPLACE" -> Some(fun arguments -> validateRegexpArity name arguments; regexpReplaceFn collation arguments)
     | _ -> None
 
 // ---------------------------------------------------------------------------

@@ -76,8 +76,6 @@ let mutable walRotateEntries = 100_000
 /// user-supplied pattern (the `REGEXP`/`RLIKE` operator and the `REGEXP_*`
 /// functions): a catastrophically-backtracking pattern (`'(a+)+$'` against a
 /// long non-matching subject) errors out instead of pinning a core forever.
-/// Not configurable — it lives here only because `Functions` and `Executor`
-/// both need it and each had grown its own copy of the same deadline.
 let regexpMatchTimeout = TimeSpan.FromMilliseconds 100.0
 
 /// Timeouts are stored as `int` seconds rather than `TimeSpan`: writing a

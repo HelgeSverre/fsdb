@@ -2995,6 +2995,8 @@ let rec private evalExpr (ctx: EvalContext) (expr: Expr) : Result<Value, EvalErr
                 let subject = arguments.Head
                 let pattern = arguments.Tail.Head
 
+                Functions.validateRegexpArity name arguments
+
                 regexCollation ctx (name.ToLowerInvariant()) subjectExpr subject patternExpr pattern
                 |> Result.map (fun collation ->
                     match Functions.regexpFunction name collation with

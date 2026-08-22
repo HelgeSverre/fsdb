@@ -45,8 +45,37 @@ let private posixClasses =
       "[[:space:]]", "[\\s]"
       "[[:word:]]", "[\\p{L}\\p{Nd}_]" ]
 
+let private posixClassAt (pattern: string) (index: int) =
+    posixClasses
+    |> List.tryFind (fun (source, _) -> pattern.AsSpan(index).StartsWith(source, StringComparison.Ordinal))
+
+let private normalizePosixClasses (pattern: string) =
+    let builder = StringBuilder(pattern.Length)
+    let mutable index = 0
+    let mutable escaped = false
+
+    while index < pattern.Length do
+        if escaped then
+            builder.Append pattern[index] |> ignore
+            escaped <- false
+            index <- index + 1
+        elif pattern[index] = '\\' then
+            builder.Append '\\' |> ignore
+            escaped <- true
+            index <- index + 1
+        else
+            match posixClassAt pattern index with
+            | Some(source, target) ->
+                builder.Append target |> ignore
+                index <- index + source.Length
+            | None ->
+                builder.Append pattern[index] |> ignore
+                index <- index + 1
+
+    builder.ToString()
+
 let private normalizePattern (options: RegexOptions) (pattern: string) : string =
-    let posix = posixClasses |> List.fold (fun (value: string) (source, target) -> value.Replace(source, target, StringComparison.Ordinal)) pattern
+    let posix = normalizePosixClasses pattern
 
     if not (options.HasFlag RegexOptions.IgnoreCase) then posix
     else
@@ -132,6 +161,32 @@ let prepareInput (matchType: string option) (pattern: string) (text: string) =
 
 let sourceOffset (input: PreparedInput) index = input.SourceOffsets[index]
 
+let private hasInvalidPosixClass (pattern: string) =
+    let mutable index = 0
+    let mutable escaped = false
+    let mutable invalid = false
+
+    while index < pattern.Length && not invalid do
+        if escaped then
+            escaped <- false
+            index <- index + 1
+        elif pattern[index] = '\\' then
+            escaped <- true
+            index <- index + 1
+        elif pattern.AsSpan(index).StartsWith("[[:", StringComparison.Ordinal) then
+            let closing = pattern.IndexOf(":]]", index + 3, StringComparison.Ordinal)
+
+            if closing < 0 then
+                index <- pattern.Length
+            else
+                let source = pattern.Substring(index, closing + 3 - index)
+                invalid <- posixClasses |> List.exists (fun (known, _) -> known = source) |> not
+                index <- closing + 3
+        else
+            index <- index + 1
+
+    invalid
+
 let private invalidPattern (pattern: string) =
     let interval = Regex.Match(pattern, @"(?<!\\)\{(\d+),(\d+)\}")
 
@@ -140,7 +195,7 @@ let private invalidPattern (pattern: string) =
         | (true, minimum), (true, maximum) when maximum < minimum ->
             Some(3693, "The maximum is less than the minumum in a {min,max} interval.")
         | _ -> None
-    elif pattern.Contains("[[:") && not (posixClasses |> List.exists (fun (source, _) -> pattern.Contains(source, StringComparison.Ordinal))) then
+    elif hasInvalidPosixClass pattern then
         Some(3685, "Illegal argument to a regular expression.")
     elif pattern = "{" then
         Some(3688, "Syntax error in regular expression on line 1, character 1.")

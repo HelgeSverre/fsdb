@@ -1847,6 +1847,7 @@ let tests =
                           expects 3693 "The maximum is less than the minumum in a {min,max} interval." [ VString "abc"; VString "a{2,1}" ]
                           expects 3697 "The regular expression contains an [x-y] character range where x comes after y." [ VString "abc"; VString "[z-a]" ]
                           expects 3685 "Illegal argument to a regular expression." [ VString "abc"; VString "[[:bogus:]]" ]
+                          expects 3685 "Illegal argument to a regular expression." [ VString "abc"; VString "[[:alpha:]][[:bogus:]]" ]
                           expects 3691 "Mismatched parenthesis in regular expression." [ VString "abc"; VString ")" ]
 
                       testCase "REGEXP functions propagate every supplied optional NULL"
@@ -1884,6 +1885,7 @@ let tests =
                       testCase "REGEXP functions support ICU character classes and line modes"
                       <| fun _ ->
                           Expect.equal (call "REGEXP_LIKE" [ VString "A"; VString "[[:alpha:]]" ]) (VInt 1L) "alpha"
+                          Expect.equal (call "REGEXP_LIKE" [ VString "[[:alpha:]]"; VString "\\[\\[:alpha:]]" ]) (VInt 1L) "escaped POSIX class"
                           Expect.equal (call "REGEXP_LIKE" [ VString "7"; VString "[[:digit:]]" ]) (VInt 1L) "digit"
                           Expect.equal (call "REGEXP_LIKE" [ VString "_"; VString "[[:word:]]" ]) (VInt 1L) "word"
                           Expect.equal (call "REGEXP_LIKE" [ VString "["; VString "\\[" ]) (VInt 1L) "escaped bracket"
