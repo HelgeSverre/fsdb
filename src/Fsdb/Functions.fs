@@ -4164,7 +4164,7 @@ let private strcmpFn: Scalar =
 // ---------------------------------------------------------------------------
 
 let private raiseRegexError (functionName: string) = function
-    | Regexp.InvalidPattern _ as error -> raise (SqlError(3691, Regexp.errorMessage error))
+    | Regexp.InvalidPattern _ as error -> raise (SqlError(Regexp.errorCode error, Regexp.errorMessage error))
     | Regexp.InvalidMatchType -> raise (SqlError(1210, sprintf "Incorrect arguments to %s" functionName))
 
 let private regexResult (functionName: string) (collation: Collation.Collation) (matchType: string option) (pattern: string) =
@@ -4208,39 +4208,39 @@ let private intArgOr (dflt: int) (args: Value list) (idx: int) : int =
 let private regexpLikeFn (collation: Collation.Collation) : Scalar =
     function
     | e :: p :: rest when not (anyNull [ e; p ]) ->
-        let regex = regexResult "regexp_like" collation (matchTypeArg rest 0) (req p)
-        withRegexTimeout (fun () -> if regex.IsMatch(req e) then VInt 1L else VInt 0L)
+        if anyNull rest then VNull
+        else
+            let regex = regexResult "regexp_like" collation (matchTypeArg rest 0) (req p)
+            withRegexTimeout (fun () -> if regex.IsMatch(Regexp.prepareInput (matchTypeArg rest 0) (req e)) then VInt 1L else VInt 0L)
     | _ -> VNull
 
 let private regexpInstrFn (collation: Collation.Collation) : Scalar =
     function
     | e :: p :: rest when not (anyNull [ e; p ]) ->
-        let text = req e
-        let pos = intArgOr 1 rest 0
-        let occurrence = intArgOr 1 rest 1
-        let returnEnd = intArgOr 0 rest 2 <> 0
+        if anyNull rest then VNull
+        else
+            let text = Regexp.prepareInput (matchTypeArg rest 3) (req e)
+            let pos = intArgOr 1 rest 0
+            let occurrence = intArgOr 1 rest 1
+            let returnEnd = intArgOr 0 rest 2 <> 0
 
-        let regex = regexResult "regexp_instr" collation (matchTypeArg rest 3) (req p)
+            let regex = regexResult "regexp_instr" collation (matchTypeArg rest 3) (req p)
 
-        withRegexTimeout (fun () ->
-            match nthMatch regex text pos occurrence with
-            | Some m -> VInt(int64 ((if returnEnd then m.Index + m.Length else m.Index) + 1))
-            | None -> VInt 0L)
+            withRegexTimeout (fun () -> match nthMatch regex text pos occurrence with | Some m -> VInt(int64 ((if returnEnd then m.Index + m.Length else m.Index) + 1)) | None -> VInt 0L)
     | _ -> VNull
 
 let private regexpSubstrFn (collation: Collation.Collation) : Scalar =
     function
     | e :: p :: rest when not (anyNull [ e; p ]) ->
-        let text = req e
-        let pos = intArgOr 1 rest 0
-        let occurrence = intArgOr 1 rest 1
+        if anyNull rest then VNull
+        else
+            let text = Regexp.prepareInput (matchTypeArg rest 2) (req e)
+            let pos = intArgOr 1 rest 0
+            let occurrence = intArgOr 1 rest 1
 
-        let regex = regexResult "regexp_substr" collation (matchTypeArg rest 2) (req p)
+            let regex = regexResult "regexp_substr" collation (matchTypeArg rest 2) (req p)
 
-        withRegexTimeout (fun () ->
-            match nthMatch regex text pos occurrence with
-            | Some m -> VString m.Value
-            | None -> VNull)
+            withRegexTimeout (fun () -> match nthMatch regex text pos occurrence with | Some m -> VString m.Value | None -> VNull)
     | _ -> VNull
 
 /// MySQL (ICU) replacement text uses `$N` for backreferences, the same
@@ -4263,34 +4263,29 @@ let private toDotNetReplacement (repl: string) : string =
 let private regexpReplaceFn (collation: Collation.Collation) : Scalar =
     function
     | e :: p :: r :: rest when not (anyNull [ e; p; r ]) ->
-        let text = req e
-        let repl = toDotNetReplacement (req r)
-        let pos = intArgOr 1 rest 0
-        let occurrence = intArgOr 0 rest 1
+        if anyNull rest then VNull
+        else
+            let text = req e
+            let repl = toDotNetReplacement (req r)
+            let pos = intArgOr 1 rest 0
+            let occurrence = intArgOr 0 rest 1
 
-        let regex = regexResult "regexp_replace" collation (matchTypeArg rest 2) (req p)
+            let regex = regexResult "regexp_replace" collation (matchTypeArg rest 2) (req p)
 
-        withRegexTimeout (fun () ->
-            if pos < 1 || pos > text.Length + 1 then
-                VNull
-            else
-                let head = text.Substring(0, pos - 1)
-                let tail = text.Substring(pos - 1)
+            withRegexTimeout (fun () ->
+                if pos < 1 || pos > text.Length + 1 then VNull
+                else
+                    let head = text.Substring(0, pos - 1)
+                    let tail = text.Substring(pos - 1)
 
-                let replaced =
-                    if occurrence <= 0 then
-                        regex.Replace(tail, repl)
-                    else
-                        let mutable n = 0
+                    let replaced =
+                        if occurrence <= 0 then regex.Replace(tail, repl)
+                        else
+                            let mutable n = 0
 
-                        regex.Replace(
-                            tail,
-                            (fun m ->
-                                n <- n + 1
-                                if n = occurrence then m.Result repl else m.Value)
-                        )
+                            regex.Replace(tail, (fun m -> n <- n + 1; if n = occurrence then m.Result repl else m.Value))
 
-                VString(head + replaced))
+                    VString(head + replaced))
     | _ -> VNull
 
 let regexpFunction (name: string) (collation: Collation.Collation) : Scalar option =

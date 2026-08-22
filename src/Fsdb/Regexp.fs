@@ -7,12 +7,16 @@ open System
 open System.Text.RegularExpressions
 
 type RegexError =
-    | InvalidPattern of message: string
+    | InvalidPattern of code: int * message: string
     | InvalidMatchType
 
 let errorMessage = function
-    | InvalidPattern message -> message
+    | InvalidPattern(_, message) -> message
     | InvalidMatchType -> ""
+
+let errorCode = function
+    | InvalidPattern(code, _) -> code
+    | InvalidMatchType -> 1210
 
 let private optionsFor (collation: Collation.Collation) (matchType: string option) : Result<RegexOptions, RegexError> =
     let mutable options = RegexOptions.CultureInvariant
@@ -33,13 +37,36 @@ let private optionsFor (collation: Collation.Collation) (matchType: string optio
 
     error |> Option.map Error |> Option.defaultValue (Ok options)
 
+let private posixClasses =
+    [ "[[:alpha:]]", "[\\p{L}]"
+      "[[:digit:]]", "[\\p{Nd}]"
+      "[[:alnum:]]", "[\\p{L}\\p{Nd}]"
+      "[[:space:]]", "[\\s]"
+      "[[:word:]]", "[\\p{L}\\p{Nd}_]" ]
+
+let private normalizePattern (options: RegexOptions) (pattern: string) : string =
+    let posix = posixClasses |> List.fold (fun (value: string) (source, target) -> value.Replace(source, target, StringComparison.Ordinal)) pattern
+
+    if options.HasFlag RegexOptions.IgnoreCase then
+        posix.Replace("Σ", "[Σσς]", StringComparison.Ordinal).Replace("σ", "[Σσς]", StringComparison.Ordinal).Replace("ς", "[Σσς]", StringComparison.Ordinal)
+    else
+        posix
+
+let prepareInput (matchType: string option) (text: string) =
+    let multiline = matchType |> Option.defaultValue "" |> String.exists ((=) 'm')
+    let unixLines = matchType |> Option.defaultValue "" |> String.exists ((=) 'u')
+
+    if multiline && not unixLines then text.Replace('\r', '\n') else text
+
 let compile (collation: Collation.Collation) (matchType: string option) (pattern: string) : Result<Regex, RegexError> =
     optionsFor collation matchType
     |> Result.bind (fun options ->
         try
-            Ok(Regex(pattern, options, Limits.regexpMatchTimeout))
+            Ok(Regex(normalizePattern options pattern, options, Limits.regexpMatchTimeout))
         with
         | :? RegexParseException as error when error.Error = RegexParseError.InsufficientClosingParentheses ->
-            Error(InvalidPattern "Mismatched parenthesis in regular expression.")
+            Error(InvalidPattern(3691, "Mismatched parenthesis in regular expression."))
+        | :? RegexParseException as error when error.Error.ToString() = "UnterminatedBracket" ->
+            Error(InvalidPattern(3696, "The regular expression contains an unclosed bracket expression."))
         | :? ArgumentException ->
-            Error(InvalidPattern "Invalid regular expression."))
+            Error(InvalidPattern(3691, "Invalid regular expression.")))

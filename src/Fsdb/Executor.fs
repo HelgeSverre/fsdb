@@ -981,11 +981,11 @@ let private regexpOp (coll: Collation.Collation option) (subject: Value) (patter
                 coll |> Option.defaultValue Collation.defaultCollation
 
         match Regexp.compile col None pat with
-        | Error(Regexp.InvalidPattern _ as error) -> Error(3691, Regexp.errorMessage error)
+        | Error(Regexp.InvalidPattern _ as error) -> Error(Regexp.errorCode error, Regexp.errorMessage error)
         | Error Regexp.InvalidMatchType -> Error(1210, "Incorrect arguments to regexp function")
         | Ok regex ->
             try
-                Ok(boolToValue (regex.IsMatch text))
+                Ok(boolToValue (regex.IsMatch(Regexp.prepareInput None text)))
             with :? RegexMatchTimeoutException ->
                 Error(1030, "Got error 'regexp match timed out' from regexp")
 
@@ -1616,13 +1616,23 @@ let private resolvedCollation (ctx: EvalContext) (expr: Expr) : Collation.Collat
 let private keyCollation (ctx: EvalContext) (expr: Expr) : Collation.Collation =
     resolvedCollation ctx expr |> Option.defaultValue ctx.Store.ConnectionCollation
 
-let private regexCollation (ctx: EvalContext) (subjectExpr: Expr) (subject: Value) (patternExpr: Expr) (pattern: Value) : Collation.Collation =
-    if [ subject; pattern ] |> List.exists (tryRawBytes >> Option.isSome) then
-        Collation.tryFind "utf8mb4_bin" |> Option.defaultValue Collation.defaultCollation
-    else
-        resolvedCollation ctx subjectExpr
-        |> Option.orElseWith (fun () -> resolvedCollation ctx patternExpr)
-        |> Option.defaultValue ctx.Store.ConnectionCollation
+let private regexCollation (ctx: EvalContext) (functionName: string) (subjectExpr: Expr) (subject: Value) (patternExpr: Expr) (pattern: Value) : Result<Collation.Collation, EvalError> =
+    let subjectRaw = tryRawBytes subject |> Option.isSome
+    let patternRaw = tryRawBytes pattern |> Option.isSome
+    let subjectCollation = resolvedCollation ctx subjectExpr |> Option.defaultValue ctx.Store.ConnectionCollation
+    let patternCollation = resolvedCollation ctx patternExpr |> Option.defaultValue ctx.Store.ConnectionCollation
+
+    match subjectRaw, patternRaw with
+    | true, true -> Ok(Collation.tryFind "utf8mb4_bin" |> Option.defaultValue Collation.defaultCollation)
+    | true, false -> Error(3995, sprintf "Character set 'binary' cannot be used in conjunction with '%s' in call to %s." patternCollation.Name functionName)
+    | false, true -> Error(3995, sprintf "Character set '%s' cannot be used in conjunction with 'binary' in call to %s." subjectCollation.Name functionName)
+    | false, false ->
+        match subjectExpr, patternExpr with
+        | Collate(_, left), Collate(_, right) when not (left.Equals(right, System.StringComparison.OrdinalIgnoreCase)) ->
+            Error(1267, sprintf "Illegal mix of collations (%s,EXPLICIT) and (%s,EXPLICIT) for operation '%s'" left right functionName)
+        | Collate(_, _), _ -> Ok subjectCollation
+        | _, Collate(_, _) -> Ok patternCollation
+        | _ -> Ok subjectCollation
 
 /// A group/distinct/partition key normalized to collation equality: string
 /// values become their collation's canonical key (`KeyOf` is injective per
@@ -2717,7 +2727,11 @@ let rec private evalExpr (ctx: EvalContext) (expr: Expr) : Result<Value, EvalErr
         |> Result.bind (fun ve -> eval p |> Result.map (fun vp -> likeOp (Some(keyCollation ctx e)) caseSensitive escape ve vp))
     | Regexp(e, p) ->
         eval e
-        |> Result.bind (fun ve -> eval p |> Result.bind (fun vp -> regexpOp (Some(keyCollation ctx e)) ve vp))
+        |> Result.bind (fun ve ->
+            eval p
+            |> Result.bind (fun vp ->
+                regexCollation ctx "regexp" e ve p vp
+                |> Result.bind (fun collation -> regexpOp (Some collation) ve vp)))
     | In((Row _ as e), xs)
     | In(e, ((Row _) :: _ as xs)) ->
         evalRowOperand ctx e
@@ -2975,9 +2989,14 @@ let rec private evalExpr (ctx: EvalContext) (expr: Expr) : Result<Value, EvalErr
                 rest
                 |> traverse eval
                 |> Result.map (fun values ->
-                    let collation = regexCollation ctx subjectExpr subject patternExpr pattern
                     let arguments = subject :: pattern :: values
+                    arguments))
+            |> Result.bind (fun arguments ->
+                let subject = arguments.Head
+                let pattern = arguments.Tail.Head
 
+                regexCollation ctx (name.ToLowerInvariant()) subjectExpr subject patternExpr pattern
+                |> Result.map (fun collation ->
                     match Functions.regexpFunction name collation with
                     | Some function_ -> function_ arguments
                     | None -> VNull)))
