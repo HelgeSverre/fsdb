@@ -82,10 +82,9 @@ variants), USE, KILL, DESCRIBE are text-probed before the grammar
 |---|---|---|---|---|
 | Locking detail | `FOR UPDATE/SHARE [OF tbl…] [NOWAIT|SKIP LOCKED]` | `FOR UPDATE`/`FOR SHARE`/`LOCK IN SHARE MODE` accepted and ignored; no OF/NOWAIT/SKIP LOCKED | low | divergence |
 | CTE placement | `WITH` in subqueries, derived tables, `INSERT…WITH` | top-level SELECT/UNION only (`Parser.fs:2458–2464`) | medium | refusal |
-| Row constructors | `(a,b) = (1,2)`, `(a,b) IN ((1,2),(3,4))` | unparseable | medium | refusal |
 
 Expression coverage that does exist: full comparison/logical/arithmetic
-operators incl. `<=>`, `XOR`, three-valued logic; CASE (both forms);
+operators incl. `<=>`, row-value comparisons and `IN`, `XOR`, three-valued logic; CASE (both forms);
 CAST/CONVERT; EXISTS/IN/ANY/SOME/ALL/BETWEEN/LIKE [ESCAPE]/REGEXP; `->`/`->>` JSON
 operators; charset introducers; hex literals; typed temporal literals;
 `INTERVAL n unit`; MATCH…AGAINST; collation postfix; version-comment
@@ -100,8 +99,9 @@ subqueries with correct NULL
 semantics, bounded top-N sort for ORDER BY+LIMIT, GROUP_CONCAT byte cap,
 WITH ROLLUP expansion, window frames (ROWS/RANGE, numeric offsets),
 COUNT(DISTINCT a,b) tuples, statement-atomic multi-table DML, exact ODKU
-affected-rows semantics (changed=2/no-op=0 under default flags), MySQL's
-1241 error for multi-column scalar/IN/ANY/SOME/ALL subqueries, and the empty-group
+affected-rows semantics (changed=2/no-op=0 under default flags), row-value
+equality/order/null-safe comparisons and literal/subquery `IN`, MySQL's 1241
+error for multi-column scalar/IN/ANY/SOME/ALL subqueries, and the empty-group
 identities for bit aggregates.
 
 | Gap | MySQL 8.4 | fsdb | Impact | Class |

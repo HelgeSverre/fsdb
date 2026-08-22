@@ -23,8 +23,8 @@ The scalar-expression battery pins logarithmic, exponential, trigonometric,
 IPv4, and IPv6 functions to MySQL 8.4 values and domain behavior. It also
 covers phonetic, base64, ordinal, bit-selection, and common alias functions;
 signed and fractional time arithmetic, period and day-number conversion, and
-seeded randomness; `FROM DUAL`; multi-column subquery operand errors; and
-empty-group bit aggregate identities.
+seeded randomness; `FROM DUAL`; row-value comparison and `IN` semantics;
+multi-column subquery operand errors; and empty-group bit aggregate identities.
 
 The parser accepts MySQL's `INSERT ... SET`, singular `VALUE` and optional
 `ROW` constructors, substring-based `TRIM` modes, `ALL`/`DISTINCTROW`, and

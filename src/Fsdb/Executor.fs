@@ -8685,6 +8685,7 @@ let rec private containsQuantifiedComparison (expression: Expr) : bool =
     | MatchAgainst(_, query, _) -> containsQuantifiedComparison query
     | WindowOver(functions, over) -> any (windowFnExprs functions @ overExprs over)
     | FuncCall(_, arguments) -> any arguments
+    | Row values -> any values
     | BinOp(_, left, right)
     | Like(left, right, _, _)
     | Regexp(left, right) -> any [ left; right ]
