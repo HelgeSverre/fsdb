@@ -412,7 +412,8 @@ let rec exprToSql (e: Expr) : string =
     | Star q -> (q |> Option.map (sprintf "`%s`.") |> Option.defaultValue "") + "*"
     | Exists _ -> "exists(...)"
     | Subquery _
-    | InSubquery _ -> "(...)"
+    | InSubquery _
+    | QuantifiedComparison _ -> "(...)"
     // A window function can't appear in a generated-column expression at
     // all (MySQL rejects it at DDL time), so one spelling covers the case.
     | WindowOver _ -> "window function() over ()"

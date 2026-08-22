@@ -1915,6 +1915,7 @@ let rec mapPlaceholders (replace: int -> Expr) (stmt: Statement) : Statement =
         | Regexp(x, p) -> Regexp(mapExpr x, mapExpr p)
         | In(x, xs) -> In(mapExpr x, List.map mapExpr xs)
         | InSubquery(x, s) -> InSubquery(mapExpr x, mapSelect s)
+        | QuantifiedComparison(x, op, quantifier, s) -> QuantifiedComparison(mapExpr x, op, quantifier, mapSelect s)
         | Between(x, lo, hi) -> Between(mapExpr x, mapExpr lo, mapExpr hi)
         | FuncCall(name, args) -> FuncCall(name, List.map mapExpr args)
         | WindowOver(fn, over) -> WindowOver(mapWindowFn fn, mapOver over)

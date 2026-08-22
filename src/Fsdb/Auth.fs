@@ -484,6 +484,7 @@ let rec private exprReadTables (defaultDb: string) (expr: Expr) : (string * stri
     | Subquery s
     | Exists s -> selectReadTables defaultDb s
     | InSubquery(e, s) -> recur e @ selectReadTables defaultDb s
+    | QuantifiedComparison(e, _, _, s) -> recur e @ selectReadTables defaultDb s
     | BinOp(_, a, b) -> recur a @ recur b
     | AssignUserVariable(_, value) -> recur value
     | Not e

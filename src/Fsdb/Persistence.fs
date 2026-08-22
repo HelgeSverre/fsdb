@@ -254,7 +254,7 @@ let private decodeColumnType (r: #IReader) : ColumnType =
 // ---------------------------------------------------------------------
 // `Ast.Expr` — the only place one needs to survive the WAL/snapshot at all
 // is `ColumnDef.Generated` (`GENERATED ALWAYS AS (expr)`), and MySQL itself
-// rejects a subquery there, so `InSubquery`/`Exists`/`Subquery` fail loudly
+// rejects a subquery there, so `InSubquery`/quantified comparisons/`Exists`/`Subquery` fail loudly
 // rather than needing a `SelectStmt` encoder too — a real migration can't
 // produce one here to lose in the first place.
 // ---------------------------------------------------------------------
@@ -367,6 +367,7 @@ let rec private encodeExpr (w: Writer) (expr: Expr) : unit =
             w.WriteByte 1uy
             encodeExpr w e
     | InSubquery _
+    | QuantifiedComparison _
     | Exists _
     | Subquery _
     | WindowOver _

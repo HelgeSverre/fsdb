@@ -316,6 +316,7 @@ let rec private containsAggregate (registry: Registry) (expr: Expr) : bool =
     | Like(e, p, _, _) -> containsAggregate registry e || containsAggregate registry p
     | Regexp(e, p) -> containsAggregate registry e || containsAggregate registry p
     | In(e, xs) -> containsAggregate registry e || xs |> List.exists (containsAggregate registry)
+    | QuantifiedComparison(e, _, _, _) -> containsAggregate registry e
     | Between(e, lo, hi) -> containsAggregate registry e || containsAggregate registry lo || containsAggregate registry hi
     | Cast(e, _) -> containsAggregate registry e
     | Collate(e, _) -> containsAggregate registry e
@@ -365,6 +366,7 @@ let rec private collectWindowFuncs (expr: Expr) : Expr list =
     | Like(e, p, _, _) -> collectWindowFuncs e @ collectWindowFuncs p
     | Regexp(e, p) -> collectWindowFuncs e @ collectWindowFuncs p
     | In(e, xs) -> collectWindowFuncs e @ (xs |> List.collect collectWindowFuncs)
+    | QuantifiedComparison(e, _, _, _) -> collectWindowFuncs e
     | Between(e, lo, hi) -> collectWindowFuncs e @ collectWindowFuncs lo @ collectWindowFuncs hi
     | Case(subject, whens, elseBranch) ->
         (subject |> Option.map collectWindowFuncs |> Option.defaultValue [])
@@ -408,6 +410,7 @@ let rec private collectAggregateCalls (registry: Registry) (expr: Expr) : Expr l
     | Like(e, p, _, _)
     | Regexp(e, p) -> recur e @ recur p
     | In(e, xs) -> recur e @ (xs |> List.collect recur)
+    | QuantifiedComparison(e, _, _, _) -> recur e
     | Between(e, lo, hi) -> recur e @ recur lo @ recur hi
     | Case(subject, whens, elseBranch) ->
         (subject |> Option.map recur |> Option.defaultValue [])
@@ -471,6 +474,7 @@ let rec private collectCallsNamed (name: string) (expr: Expr) : Expr list =
     | Like(e, p, _, _)
     | Regexp(e, p) -> recur e @ recur p
     | In(e, xs) -> recur e @ (xs |> List.collect recur)
+    | QuantifiedComparison(e, _, _, _) -> recur e
     | Between(e, lo, hi) -> recur e @ recur lo @ recur hi
     | Case(subject, whens, elseBranch) ->
         (subject |> Option.map recur |> Option.defaultValue [])
@@ -554,6 +558,7 @@ let rec private collectMatchAgainst (expr: Expr) : Expr list =
     | Like(e, p, _, _) -> collectMatchAgainst e @ collectMatchAgainst p
     | Regexp(e, p) -> collectMatchAgainst e @ collectMatchAgainst p
     | In(e, xs) -> collectMatchAgainst e @ (xs |> List.collect collectMatchAgainst)
+    | QuantifiedComparison(e, _, _, _) -> collectMatchAgainst e
     | Between(e, lo, hi) -> collectMatchAgainst e @ collectMatchAgainst lo @ collectMatchAgainst hi
     | Case(subject, whens, elseBranch) ->
         (subject |> Option.map collectMatchAgainst |> Option.defaultValue [])
@@ -591,6 +596,7 @@ let rec private collectColRefs (expr: Expr) : string list =
     | Like(e, p, _, _) -> collectColRefs e @ collectColRefs p
     | Regexp(e, p) -> collectColRefs e @ collectColRefs p
     | In(e, xs) -> collectColRefs e @ (xs |> List.collect collectColRefs)
+    | QuantifiedComparison(e, _, _, _) -> collectColRefs e
     | Between(e, lo, hi) -> collectColRefs e @ collectColRefs lo @ collectColRefs hi
     | Case(subject, whens, elseBranch) ->
         (subject |> Option.map collectColRefs |> Option.defaultValue [])
@@ -635,6 +641,7 @@ let rec private firstColumnRef (expr: Expr) : Expr option =
     | Like(e, p, _, _) -> first [ e; p ]
     | Regexp(e, p) -> first [ e; p ]
     | In(e, xs) -> first (e :: xs)
+    | QuantifiedComparison(e, _, _, _) -> firstColumnRef e
     | Between(e, lo, hi) -> first [ e; lo; hi ]
     | Case(subject, whens, elseBranch) ->
         first (
@@ -684,6 +691,7 @@ let rec private substituteExprs (replacements: (Expr * Expr) list) (expr: Expr) 
         | Like(e, p, cs, esc) -> Like(sub e, sub p, cs, esc)
         | Regexp(e, p) -> Regexp(sub e, sub p)
         | In(e, xs) -> In(sub e, xs |> List.map sub)
+        | QuantifiedComparison(e, op, quantifier, select) -> QuantifiedComparison(sub e, op, quantifier, select)
         | Between(e, lo, hi) -> Between(sub e, sub lo, sub hi)
         | Case(subject, whens, elseBranch) ->
             Case(subject |> Option.map sub, whens |> List.map (fun (c, r) -> sub c, sub r), elseBranch |> Option.map sub)
@@ -754,6 +762,9 @@ let rec private exprLabel (expr: Expr) : string =
     | Regexp(e, p) -> sprintf "(%s regexp %s)" (exprLabel e) (exprLabel p)
     | In(e, xs) -> sprintf "(%s in (%s))" (exprLabel e) (xs |> List.map exprLabel |> String.concat ",")
     | InSubquery(e, _) -> sprintf "(%s in (...))" (exprLabel e)
+    | QuantifiedComparison(e, op, quantifier, _) ->
+        let quantifierName = match quantifier with Any -> "any" | All -> "all"
+        sprintf "%s %s %s (...)" (exprLabel e) (opSymbol op) quantifierName
     | Between(e, lo, hi) -> sprintf "(%s between %s and %s)" (exprLabel e) (exprLabel lo) (exprLabel hi)
     | Cast(e, _) -> sprintf "cast(%s as ...)" (exprLabel e)
     | Collate(e, _) -> exprLabel e
@@ -1321,6 +1332,7 @@ let rec private metadataOfExpr (ctx: EvalContext) (expr: Expr) : ColumnMetadata 
     | Regexp _
     | In _
     | InSubquery _
+    | QuantifiedComparison _
     | Between _
     | Exists _ -> simple TypeLongLong
     | BinOp((Add | Sub | Mul), left, right) -> numeric left right
@@ -2095,6 +2107,29 @@ let private resolvedCompare (ctx: EvalContext) (aExpr: Expr) (va: Value) (bExpr:
         | None -> ctx.Store.ConnectionCollation.Compare sa sb
     | _ -> Value.compare pa pb
 
+let private quantifiedComparisonResult (ctx: EvalContext) (leftExpr: Expr) (left: Value) (op: Op) (right: Value) : Value =
+    match left, right with
+    | VNull, _
+    | _, VNull -> VNull
+    | VString leftText, VString rightText when op = Eq || op = Neq ->
+        let equal =
+            resolvedCollation ctx leftExpr
+            |> Option.defaultValue ctx.Store.ConnectionCollation
+            |> fun collation -> collation.Equals leftText rightText
+
+        boolToValue (if op = Eq then equal else not equal)
+    | _ ->
+        let compared = resolvedCompare ctx leftExpr left (Lit right) right
+
+        match op with
+        | Eq -> boolToValue (compared = 0)
+        | Neq -> boolToValue (compared <> 0)
+        | Lt -> boolToValue (compared < 0)
+        | Lte -> boolToValue (compared <= 0)
+        | Gt -> boolToValue (compared > 0)
+        | Gte -> boolToValue (compared >= 0)
+        | _ -> VNull
+
 type private SubqueryScope =
     { Qualifiers: Set<string>
       Columns: Set<string> }
@@ -2179,6 +2214,9 @@ let rec private isStatementStableExpr (store: Store) (registry: Registry) (dbNam
     | Exists select
     | Subquery select -> isStatementStableSelect store registry dbName scope select
     | InSubquery(value, select) ->
+        isStatementStableExpr store registry dbName scope value
+        && isStatementStableSelect store registry dbName scope select
+    | QuantifiedComparison(value, _, _, select) ->
         isStatementStableExpr store registry dbName scope value
         && isStatementStableSelect store registry dbName scope select
     | BinOp(_, left, right) -> every [ left; right ]
@@ -2469,6 +2507,35 @@ let rec private evalExpr (ctx: EvalContext) (expr: Expr) : Result<Value, EvalErr
                         Ok VNull
                     else
                         Ok(VInt 0L))
+    | QuantifiedComparison(e, op, quantifier, select) ->
+        eval e
+        |> Result.bind (fun left ->
+            match runExpressionSubquery ctx select select with
+            | Err(code, message), _, _ -> Error(code, message)
+            | Affected _, _, _ -> Ok VNull
+            | ResultSet(columns, _), _, _ when columns.Length <> 1 -> Error(1241, "Operand should contain 1 column(s)")
+            | ResultSet(_, _), _, typedRows ->
+                let comparisons =
+                    typedRows
+                    |> List.map (fun row ->
+                        let right = if row.Length = 0 then VNull else row.[0]
+                        quantifiedComparisonResult ctx e left op right)
+
+                match quantifier with
+                | Any ->
+                    if comparisons |> List.exists (fun value -> value = VInt 1L) then
+                        Ok(VInt 1L)
+                    elif comparisons |> List.exists (fun value -> value = VNull) then
+                        Ok VNull
+                    else
+                        Ok(VInt 0L)
+                | All ->
+                    if comparisons |> List.exists (fun value -> value = VInt 0L) then
+                        Ok(VInt 0L)
+                    elif comparisons |> List.exists (fun value -> value = VNull) then
+                        Ok VNull
+                    else
+                        Ok(VInt 1L))
     | Distinct e
     | OrderBy(e, _) -> eval e
     | Case(subject, whens, elseBranch) ->
@@ -4210,7 +4277,7 @@ and private runMutationJoin
 /// virtual one, a derived table, or none) plus every `JOIN` after it, and
 /// runs `select` against the combined result — the `Statement` case's
 /// `Select` branch and every subquery form (`Exists`/`Subquery`/
-/// `InSubquery`/a derived table's own `FROM`) all fund into this one place
+/// `InSubquery`/quantified comparisons/a derived table's own `FROM`) all fund into this one place
 /// rather than each re-implementing the join-materialization logic.
 /// `outer` is `None` for a top-level statement and `Some` when this is
 /// itself a subquery — see `EvalContext.Outer`. Its per-column MySQL wire
@@ -4257,6 +4324,7 @@ and private rewriteCoalescedCols (map: Map<string, Expr>) (expr: Expr) : Expr =
     | Regexp(e, p) -> Regexp(sub e, sub p)
     | In(e, xs) -> In(sub e, xs |> List.map sub)
     | InSubquery(e, s) -> InSubquery(sub e, s)
+    | QuantifiedComparison(e, op, quantifier, s) -> QuantifiedComparison(sub e, op, quantifier, s)
     | Between(e, lo, hi) -> Between(sub e, sub lo, sub hi)
     | FuncCall(name, args) -> FuncCall(name, args |> List.map sub)
     | Distinct e -> Distinct(sub e)
@@ -5411,6 +5479,7 @@ and private rewriteAggregates
     | Like(e, p, cs, esc) -> sub e |> Result.bind (fun e' -> sub p |> Result.map (fun p' -> Like(e', p', cs, esc)))
     | Regexp(e, p) -> sub e |> Result.bind (fun e' -> sub p |> Result.map (fun p' -> Regexp(e', p')))
     | In(e, xs) -> sub e |> Result.bind (fun e' -> xs |> traverse sub |> Result.map (fun xs' -> In(e', xs')))
+    | QuantifiedComparison(e, op, quantifier, select) -> sub e |> Result.map (fun e' -> QuantifiedComparison(e', op, quantifier, select))
     | Between(e, lo, hi) ->
         sub e |> Result.bind (fun e' -> sub lo |> Result.bind (fun lo' -> sub hi |> Result.map (fun hi' -> Between(e', lo', hi'))))
     | Cast(e, ty) -> sub e |> Result.map (fun e' -> Cast(e', ty))
@@ -5517,6 +5586,7 @@ and private resolveHavingRef (columnIndex: Map<string, int list>) (projections: 
     | Like(e, p, cs, esc) -> sub e |> Result.bind (fun e' -> sub p |> Result.map (fun p' -> Like(e', p', cs, esc)))
     | Regexp(e, p) -> sub e |> Result.bind (fun e' -> sub p |> Result.map (fun p' -> Regexp(e', p')))
     | In(e, xs) -> sub e |> Result.bind (fun e' -> xs |> traverse sub |> Result.map (fun xs' -> In(e', xs')))
+    | QuantifiedComparison(e, op, quantifier, select) -> sub e |> Result.map (fun e' -> QuantifiedComparison(e', op, quantifier, select))
     | Between(e, lo, hi) ->
         sub e |> Result.bind (fun e' -> sub lo |> Result.bind (fun lo' -> sub hi |> Result.map (fun hi' -> Between(e', lo', hi'))))
     | Cast(e, ty) -> sub e |> Result.map (fun e' -> Cast(e', ty))
@@ -7348,6 +7418,7 @@ let rec private rewriteExprWith (rw: Expr -> Expr option) (expr: Expr) : Expr =
     | Like(e, p, cs, esc) -> Like(sub e, sub p, cs, esc)
     | Regexp(e, p) -> Regexp(sub e, sub p)
     | In(e, xs) -> In(sub e, xs |> List.map sub)
+    | QuantifiedComparison(e, op, quantifier, select) -> QuantifiedComparison(sub e, op, quantifier, select)
     | Between(e, lo, hi) -> Between(sub e, sub lo, sub hi)
     | Cast(e, ty) -> Cast(sub e, ty)
     | Collate(e, name) -> Collate(sub e, name)
@@ -7410,7 +7481,7 @@ let private tryUpdatableView (store: Store) (dbName: string) (viewName: string) 
             let aggregateNames = set [ "COUNT"; "SUM"; "AVG"; "MIN"; "MAX"; "GROUP_CONCAT" ]
             let rec simplePredicate =
                 function
-                | Exists _ | Subquery _ | InSubquery _ | WindowOver _ -> false
+                | Exists _ | Subquery _ | InSubquery _ | QuantifiedComparison _ | WindowOver _ -> false
                 | QualifiedCol(qualifier, _) -> sourceNames |> List.exists (fun name -> name.Equals(qualifier, System.StringComparison.OrdinalIgnoreCase))
                 | FuncCall(name, arguments) ->
                     not (aggregateNames.Contains(name.ToUpperInvariant()))
@@ -7530,6 +7601,7 @@ let rec private collectSubqueries (expr: Expr) : SelectStmt list =
     | Exists s
     | Subquery s -> [ s ]
     | InSubquery(e, s) -> collectSubqueries e @ [ s ]
+    | QuantifiedComparison(e, _, _, s) -> collectSubqueries e @ [ s ]
     | BinOp(_, a, b) -> collectSubqueries a @ collectSubqueries b
     | AssignUserVariable(_, value) -> collectSubqueries value
     | Not e
@@ -7598,6 +7670,7 @@ let private isCorrelated (sub: SelectStmt) : bool =
         | Exists _
         | Subquery _ -> false
         | InSubquery(e, _) -> references e
+        | QuantifiedComparison(e, _, _, _) -> references e
         | BinOp(_, a, b) -> references a || references b
         | AssignUserVariable(_, value) -> references value
         | Not e
@@ -8321,6 +8394,47 @@ let private rejectDirectOnlyGenerated (registry: Registry) (columns: Ast.ColumnD
     |> List.tryPick (fun c -> c.Generated |> Option.bind (fun (e, _) -> firstDirectOnlyCall registry e |> Option.map (fun _ -> c.Name)))
     |> Option.map (fun col -> Err(3102, sprintf "Expression of generated column '%s' contains a disallowed function." col))
 
+let rec private containsSubquery (expression: Expr) : bool =
+    let any expressions = expressions |> List.exists containsSubquery
+
+    match expression with
+    | Exists _
+    | Subquery _
+    | InSubquery _
+    | QuantifiedComparison _ -> true
+    | MatchAgainst(_, query, _) -> containsSubquery query
+    | WindowOver(functions, over) -> any (windowFnExprs functions @ overExprs over)
+    | FuncCall(_, arguments) -> any arguments
+    | BinOp(_, left, right)
+    | Like(left, right, _, _)
+    | Regexp(left, right) -> any [ left; right ]
+    | AssignUserVariable(_, value)
+    | Not value
+    | IsNull value
+    | IsNotNull value
+    | IsTrue value
+    | IsFalse value
+    | Distinct value
+    | OrderBy(value, _)
+    | Cast(value, _)
+    | Collate(value, _) -> containsSubquery value
+    | In(value, candidates) -> any (value :: candidates)
+    | Between(value, lower, upper) -> any [ value; lower; upper ]
+    | Case(subject, branches, otherwise) ->
+        any (Option.toList subject @ (branches |> List.collect (fun (condition, result) -> [ condition; result ])) @ Option.toList otherwise)
+    | Placeholder _
+    | UserVariable _
+    | SystemVariable _
+    | Col _
+    | QualifiedCol _
+    | Star _
+    | Lit _ -> false
+
+let private rejectSubqueriesInGenerated (columns: Ast.ColumnDef list) : QueryResult option =
+    columns
+    |> List.tryPick (fun column -> column.Generated |> Option.bind (fun (expression, _) -> if containsSubquery expression then Some column.Name else None))
+    |> Option.map (fun column -> Err(3102, sprintf "Expression of generated column '%s' contains a disallowed function." column))
+
 let rec private containsSessionVariable (expression: Expr) : bool =
     let any expressions = expressions |> List.exists containsSessionVariable
 
@@ -8331,6 +8445,7 @@ let rec private containsSessionVariable (expression: Expr) : bool =
     | Exists select
     | Subquery select -> selectContainsSessionVariable select
     | InSubquery(value, select) -> containsSessionVariable value || selectContainsSessionVariable select
+    | QuantifiedComparison(value, _, _, select) -> containsSessionVariable value || selectContainsSessionVariable select
     | MatchAgainst(_, query, _) -> containsSessionVariable query
     | WindowOver(functions, over) -> any (windowFnExprs functions @ overExprs over)
     | BinOp(_, left, right) -> any [ left; right ]
@@ -8425,6 +8540,7 @@ let rec private checkColumnReferences (expression: Expr) : (string option * stri
         many (Option.toList subject @ (branches |> List.collect (fun (condition, result) -> [ condition; result ])) @ Option.toList otherwise)
     | MatchAgainst(columns, query, _) -> (columns |> List.map (fun column -> None, column)) @ checkColumnReferences query
     | InSubquery(value, _) -> checkColumnReferences value
+    | QuantifiedComparison(value, _, _, _) -> checkColumnReferences value
     | Placeholder _
     | UserVariable _
     | SystemVariable _
@@ -8472,6 +8588,7 @@ let rec private firstDisallowedCheckFunction (registry: Registry) (expression: E
         first (Option.toList subject @ (branches |> List.collect (fun (condition, result) -> [ condition; result ])) @ Option.toList otherwise)
     | MatchAgainst(_, query, _) -> firstDisallowedCheckFunction registry query
     | InSubquery(value, _) -> firstDisallowedCheckFunction registry value
+    | QuantifiedComparison(value, _, _, _) -> firstDisallowedCheckFunction registry value
     | _ -> None
 
 let rec private firstDisallowedCheckShape (expression: Expr) : string option =
@@ -8489,7 +8606,8 @@ let rec private firstDisallowedCheckShape (expression: Expr) : string option =
     | OrderBy _ -> Some "aggregate modifier"
     | Exists _
     | Subquery _
-    | InSubquery _ -> Some "subquery"
+    | InSubquery _
+    | QuantifiedComparison _ -> Some "subquery"
     | BinOp(_, left, right) -> first [ left; right ]
     | Not value
     | IsNull value
@@ -8827,6 +8945,7 @@ let private triggerRowImageError (event: TriggerEvent) (columns: ColumnDef list)
         | Exists select
         | Subquery select -> selectReferences select
         | InSubquery(value, select) -> references value @ selectReferences select
+        | QuantifiedComparison(value, _, _, select) -> references value @ selectReferences select
         | WindowOver(functions, over) -> (windowFnExprs functions @ overExprs over) |> List.collect references
         | FuncCall(_, arguments) -> arguments |> List.collect references
         | BinOp(_, left, right)
@@ -9282,10 +9401,11 @@ let rec execute (store: Store) (registry: Registry) (dbName: string) (ids: int64
         | Some _ when ifNotExists -> ids, Affected 0UL
         | Some _ -> ids, storageErr (TableExists name)
         | None ->
-            match rejectDirectOnlyGenerated registry columns, rejectSessionVariablesInGenerated columns with
-            | Some err, _
-            | _, Some err -> ids, err
-            | None, None ->
+            match rejectDirectOnlyGenerated registry columns, rejectSubqueriesInGenerated columns, rejectSessionVariablesInGenerated columns with
+            | Some err, _, _
+            | _, Some err, _
+            | _, _, Some err -> ids, err
+            | None, None, None ->
                 let alreadyExists = scan store db name |> Result.isOk
 
                 if alreadyExists && ifNotExists then
@@ -9359,11 +9479,12 @@ let rec execute (store: Store) (registry: Registry) (dbName: string) (ids: int64
                 | ChangeColumn(_, c, _) -> Some c
                 | _ -> None)
 
-        match unsupportedEngine, rejectDirectOnlyGenerated registry addedColumns, rejectSessionVariablesInGenerated addedColumns with
-        | Some engine, _, _ -> ids, Err(1286, sprintf "Unknown storage engine '%s'" engine)
-        | None, Some err, _
-        | None, _, Some err -> ids, err
-        | None, None, None ->
+        match unsupportedEngine, rejectDirectOnlyGenerated registry addedColumns, rejectSubqueriesInGenerated addedColumns, rejectSessionVariablesInGenerated addedColumns with
+        | Some engine, _, _, _ -> ids, Err(1286, sprintf "Unknown storage engine '%s'" engine)
+        | None, Some err, _, _
+        | None, _, Some err, _
+        | None, _, _, Some err -> ids, err
+        | None, None, None, None ->
             let baseCatalog = store.Catalog
             let snapshot = Storage.beginTransactionSnapshot store
             Storage.setStrictMode snapshot store.StrictMode

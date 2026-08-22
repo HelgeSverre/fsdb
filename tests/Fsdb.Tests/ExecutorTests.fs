@@ -3992,6 +3992,66 @@ let tests =
                     | ResultSet([ "id" ], rows) -> Expect.equal rows [ [ Some "1" ]; [ Some "2" ] ] "both rows survive against an empty candidate set"
                     | other -> failtestf "expected both rows to survive NOT IN against an empty subquery, got %A" other
 
+                testCase "quantified comparisons fold empty inputs and NULLs with MySQL's three-valued logic"
+                <| fun _ ->
+                    let store = newStore ()
+                    runDefault store "CREATE TABLE empty_values (n INT)" |> ignore
+                    runDefault store "CREATE TABLE values_with_null (n INT)" |> ignore
+                    runDefault store "INSERT INTO values_with_null VALUES (NULL), (5)" |> ignore
+
+                    match
+                        runDefault
+                            store
+                            "SELECT 5 = ANY (SELECT n FROM empty_values), 5 = ALL (SELECT n FROM empty_values), NULL = ANY (SELECT n FROM empty_values), NULL = ALL (SELECT n FROM empty_values)"
+                    with
+                    | ResultSet(_, [ [ Some "0"; Some "1"; Some "0"; Some "1" ] ]) -> ()
+                    | other -> failtestf "expected quantified empty-set identities, got %A" other
+
+                    match
+                        runDefault
+                            store
+                            "SELECT 5 = SOME (SELECT n FROM values_with_null), 5 = ALL (SELECT n FROM values_with_null), 5 <> ANY (SELECT n FROM values_with_null), 5 <> ALL (SELECT n FROM values_with_null)"
+                    with
+                    | ResultSet(_, [ [ Some "1"; None; None; Some "0" ] ]) -> ()
+                    | other -> failtestf "expected quantified NULL propagation, got %A" other
+
+                testCase "quantified comparisons preserve correlation, coercion, collation, and the one-column requirement"
+                <| fun _ ->
+                    let store = newStore ()
+                    runDefault store "CREATE TABLE outer_rows (id INT)" |> ignore
+                    runDefault store "CREATE TABLE inner_rows (owner_id INT, value INT)" |> ignore
+                    runDefault store "INSERT INTO outer_rows VALUES (1), (2), (3)" |> ignore
+                    runDefault store "INSERT INTO inner_rows VALUES (1, 1), (1, 2), (2, NULL), (2, 3)" |> ignore
+                    runDefault store "CREATE TABLE binary_text (s VARCHAR(10) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin)" |> ignore
+                    runDefault store "INSERT INTO binary_text VALUES ('A'), ('a')" |> ignore
+                    runDefault store "CREATE TABLE pairs (a INT, b INT)" |> ignore
+                    runDefault store "INSERT INTO pairs VALUES (1, 2)" |> ignore
+
+                    match
+                        runDefault
+                            store
+                            "SELECT id, id = ANY (SELECT value FROM inner_rows WHERE owner_id = outer_rows.id), id < ALL (SELECT value FROM inner_rows WHERE owner_id = outer_rows.id) FROM outer_rows ORDER BY id"
+                    with
+                    | ResultSet(_, rows) ->
+                        Expect.equal rows [ [ Some "1"; Some "1"; Some "0" ]; [ Some "2"; None; None ]; [ Some "3"; Some "0"; Some "1" ] ] "each outer row evaluates its own candidate set"
+                    | other -> failtestf "expected correlated quantified results, got %A" other
+
+                    match runDefault store "SELECT s, s = ANY (SELECT 'a') FROM binary_text ORDER BY s" with
+                    | ResultSet(_, [ [ Some "A"; Some "0" ]; [ Some "a"; Some "1" ] ]) -> ()
+                    | other -> failtestf "expected the left column collation to govern equality, got %A" other
+
+                    match runDefault store "SELECT 2 = ANY (SELECT '2')" with
+                    | ResultSet(_, [ [ Some "1" ] ]) -> ()
+                    | other -> failtestf "expected numeric coercion to match, got %A" other
+
+                    match runDefault store "SELECT 1 = ANY (SELECT a, b FROM pairs)" with
+                    | Err(1241, "Operand should contain 1 column(s)") -> ()
+                    | other -> failtestf "expected MySQL error 1241, got %A" other
+
+                    match runDefault store "CREATE TABLE generated_quantified (n INT, q INT GENERATED ALWAYS AS (n = ANY (SELECT n FROM outer_rows)))" with
+                    | Err(3102, "Expression of generated column 'q' contains a disallowed function.") -> ()
+                    | other -> failtestf "expected MySQL error 3102, got %A" other
+
                 testCase "scalar subquery: (SELECT ...) used as a value, zero rows is NULL, one row is that value"
                 <| fun _ ->
                     let store = newStore ()
