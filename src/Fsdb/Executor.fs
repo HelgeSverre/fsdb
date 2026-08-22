@@ -1557,6 +1557,23 @@ let private renderOutputCols (fsps: int option list) (outputCols: (string * Valu
     else
         outputCols |> List.map (snd >> toText)
 
+let private collationOfColumn (ctx: EvalContext) (column: ColumnDef) : Collation.Collation option =
+    match column.Type with
+    | TChar _ | TVarchar _ | TTinyText | TText | TMediumText | TLongText | TEnum _ | TSet _ | TJson ->
+        match column.Charset with
+        // `CHARACTER SET binary` compares byte-for-byte; ascii/latin1
+        // columns use their charset's default collation, approximated by
+        // the server default ai_ci (latin1_swedish_ci/ascii_general_ci
+        // fold case and most accents the same way for the common cases).
+        | Some "binary" -> Collation.tryFind "utf8mb4_bin"
+        | _ ->
+            // A real column always carries a baked-in collation; a stringy
+            // synthetic derived column falls back to the connection default.
+            column.Collation
+            |> Option.bind Collation.tryFind
+            |> Option.orElseWith (fun () -> Some ctx.Store.ConnectionCollation)
+    | _ -> None
+
 /// The collation a comparison involving `expr` resolves under: an
 /// explicit `expr COLLATE name` tag wins, then a string-typed column's
 /// declared `COLLATE`, then `None` (the caller falls back to the server
@@ -1564,30 +1581,7 @@ let private renderOutputCols (fsps: int option list) (outputCols: (string * Valu
 let private resolvedCollation (ctx: EvalContext) (expr: Expr) : Collation.Collation option =
     match expr with
     | Collate(_, name) -> Collation.tryFind name
-    | _ ->
-        match tryColumnDefForExpr ctx expr with
-        | Some def when
-            match def.Type with
-            | TChar _ | TVarchar _ | TTinyText | TText | TMediumText | TLongText | TEnum _ | TSet _ | TJson -> true
-            | _ -> false
-            ->
-            match def.Charset with
-            // `CHARACTER SET binary` compares byte-for-byte; ascii/latin1
-            // columns use their charset's default collation, approximated
-            // by the server default ai_ci (latin1_swedish_ci/ascii_general_ci
-            // fold case and most accents the same way for the common cases).
-            | Some "binary" -> Collation.tryFind "utf8mb4_bin"
-            | _ ->
-                // A real column always carries a baked-in collation; a
-                // stringy def with neither charset nor collation is a
-                // synthetic derived-table column (`deriveColumns`), whose
-                // value is whatever its source expression produced — so the
-                // connection collation is the closest resolution, and for
-                // literals the exact one.
-                def.Collation
-                |> Option.bind Collation.tryFind
-                |> Option.orElseWith (fun () -> Some ctx.Store.ConnectionCollation)
-        | _ -> None
+    | _ -> tryColumnDefForExpr ctx expr |> Option.bind (collationOfColumn ctx)
 
 /// The collation an equality-classified key resolves under: an explicit
 /// `expr COLLATE`, then a string column's own collation, then the
@@ -2054,16 +2048,19 @@ let private keepMatches
 /// `Some` is that label's 1-based ordinal when `expr` resolves to an
 /// ENUM-typed column and `v` is its stored label; `None` lets the caller
 /// fall back to the plain comparison.
-let private enumOrdinalFor (ctx: EvalContext) (expr: Expr) (v: Value) : Value option =
-    match tryColumnDefForExpr ctx expr with
+let private enumOrdinalForColumn (column: ColumnDef option) (value: Value) : Value option =
+    match column with
     | Some { Type = TEnum declared } ->
-        match v with
+        match value with
         | VString label ->
             declared
             |> List.tryFindIndex (fun item -> System.String.Equals(item, label, System.StringComparison.OrdinalIgnoreCase))
             |> Option.map (fun idx -> VInt(int64 (idx + 1)))
         | _ -> None
     | _ -> None
+
+let private enumOrdinalFor (ctx: EvalContext) (expr: Expr) (value: Value) : Value option =
+    enumOrdinalForColumn (tryColumnDefForExpr ctx expr) value
 
 /// An ENUM operand as MySQL's arithmetic and its numeric aggregates see it:
 /// the declaration ordinal, typed DOUBLE — `status + 0` comes back over the
@@ -2091,44 +2088,160 @@ let private ordinalComparand (v: Value) : Value option =
 /// operand's own `COLLATE`/column collation rather than a raw ordinal
 /// `Value.compare`. Shared so `Between` (two `AND`ed range checks) gets
 /// the same resolution as BinOp/`IN`.
-let private resolvedCompare (ctx: EvalContext) (aExpr: Expr) (va: Value) (bExpr: Expr) (vb: Value) : int =
+let private comparisonOperands
+    (leftColumn: ColumnDef option)
+    (left: Value)
+    (rightColumn: ColumnDef option)
+    (right: Value)
+    : Value * Value =
     let pa, pb =
-        match enumOrdinalFor ctx aExpr va, ordinalComparand vb with
+        match enumOrdinalForColumn leftColumn left, ordinalComparand right with
         | Some oa, Some nb -> oa, nb
         | _ ->
-            match ordinalComparand va, enumOrdinalFor ctx bExpr vb with
+            match ordinalComparand left, enumOrdinalForColumn rightColumn right with
             | Some na, Some ob -> na, ob
-            | _ -> va, vb
+            | _ -> left, right
+
+    pa, pb
+
+let private resolvedComparisonCollation
+    (ctx: EvalContext)
+    (expression: Expr)
+    (column: ColumnDef option)
+    : Collation.Collation option =
+    resolvedCollation ctx expression
+    |> Option.orElseWith (fun () -> column |> Option.bind (collationOfColumn ctx))
+
+let private resolvedCompareWithColumns
+    (ctx: EvalContext)
+    (leftExpr: Expr)
+    (leftColumn: ColumnDef option)
+    (left: Value)
+    (rightExpr: Expr)
+    (rightColumn: ColumnDef option)
+    (right: Value)
+    : int =
+    let pa, pb = comparisonOperands leftColumn left rightColumn right
 
     match pa, pb with
     | VString sa, VString sb ->
-        match resolvedCollation ctx aExpr |> Option.orElseWith (fun () -> resolvedCollation ctx bExpr) with
+        match
+            resolvedComparisonCollation ctx leftExpr leftColumn
+            |> Option.orElseWith (fun () -> resolvedComparisonCollation ctx rightExpr rightColumn)
+        with
         | Some col -> col.Compare sa sb
         | None -> ctx.Store.ConnectionCollation.Compare sa sb
     | _ -> Value.compare pa pb
 
-let private quantifiedComparisonResult (ctx: EvalContext) (leftExpr: Expr) (left: Value) (op: Op) (right: Value) : Value =
+let private resolvedCompare (ctx: EvalContext) (leftExpr: Expr) (left: Value) (rightExpr: Expr) (right: Value) : int =
+    resolvedCompareWithColumns
+        ctx
+        leftExpr
+        (tryColumnDefForExpr ctx leftExpr)
+        left
+        rightExpr
+        (tryColumnDefForExpr ctx rightExpr)
+        right
+
+type private QuantifiedOperand =
+    { Expression: Expr
+      Column: ColumnDef option }
+
+let private quantifiedComparisonResult
+    (ctx: EvalContext)
+    (leftExpr: Expr)
+    (left: Value)
+    (rightOperand: QuantifiedOperand)
+    (op: Op)
+    (right: Value)
+    : Value =
     match left, right with
     | VNull, _
     | _, VNull -> VNull
-    | VString leftText, VString rightText when op = Eq || op = Neq ->
-        let equal =
-            resolvedCollation ctx leftExpr
-            |> Option.defaultValue ctx.Store.ConnectionCollation
-            |> fun collation -> collation.Equals leftText rightText
-
-        boolToValue (if op = Eq then equal else not equal)
     | _ ->
-        let compared = resolvedCompare ctx leftExpr left (Lit right) right
+        let leftColumn = tryColumnDefForExpr ctx leftExpr
+        let comparedLeft, comparedRight = comparisonOperands leftColumn left rightOperand.Column right
+
+        let compared =
+            resolvedCompareWithColumns ctx leftExpr leftColumn left rightOperand.Expression rightOperand.Column right
+
+        let equal =
+            match comparedLeft, comparedRight with
+            | VString leftText, VString rightText ->
+                resolvedComparisonCollation ctx leftExpr leftColumn
+                |> Option.orElseWith (fun () -> resolvedComparisonCollation ctx rightOperand.Expression rightOperand.Column)
+                |> Option.defaultValue ctx.Store.ConnectionCollation
+                |> fun collation -> collation.Equals leftText rightText
+            | _ -> compared = 0
 
         match op with
-        | Eq -> boolToValue (compared = 0)
-        | Neq -> boolToValue (compared <> 0)
+        | Eq -> boolToValue equal
+        | Neq -> boolToValue (not equal)
         | Lt -> boolToValue (compared < 0)
         | Lte -> boolToValue (compared <= 0)
         | Gt -> boolToValue (compared > 0)
         | Gte -> boolToValue (compared >= 0)
         | _ -> VNull
+
+let private subqueryProjectionOperand (ctx: EvalContext) (select: SelectStmt) : QuantifiedOperand =
+    let tables =
+        (select.From |> Option.toList)
+        @ (select.Joins |> List.map _.Table)
+        |> List.choose (function
+            | FromTable table ->
+                let database = table.Database |> Option.defaultValue ctx.DbName
+
+                scan ctx.Store database table.Table
+                |> Result.toOption
+                |> Option.map (fun (columns, _) -> table, columns)
+            | _ -> None)
+
+    let columnFor (name: string) (candidates: (TableRef * ColumnDef list) list) =
+        candidates
+        |> List.choose (fun (_, columns) -> columns |> List.tryFind (fun column -> column.Name.Equals(name, System.StringComparison.OrdinalIgnoreCase)))
+        |> function
+            | [ column ] -> Some column
+            | _ -> None
+
+    let qualifiedColumnFor qualifier name =
+        tables
+        |> List.filter (fun (table, _) ->
+            table.Table.Equals(qualifier, System.StringComparison.OrdinalIgnoreCase)
+            || (table.Alias |> Option.exists (fun alias -> alias.Equals(qualifier, System.StringComparison.OrdinalIgnoreCase))))
+        |> columnFor name
+
+    let rec columnForProjection =
+        function
+        | Col name -> columnFor name tables
+        | QualifiedCol(qualifier, name) -> qualifiedColumnFor qualifier name
+        | Collate(value, _) -> columnForProjection value
+        | Star None ->
+            tables
+            |> List.collect snd
+            |> function
+                | [ column ] -> Some column
+                | _ -> None
+        | Star(Some qualifier) ->
+            tables
+            |> List.filter (fun (table, _) ->
+                table.Table.Equals(qualifier, System.StringComparison.OrdinalIgnoreCase)
+                || (table.Alias |> Option.exists (fun alias -> alias.Equals(qualifier, System.StringComparison.OrdinalIgnoreCase))))
+            |> List.collect snd
+            |> function
+                | [ column ] -> Some column
+                | _ -> None
+        | _ -> None
+
+    match select.Projections with
+    | [ (Collate(_, collation) as expression, _) ] ->
+        { Expression = Collate(Lit VNull, collation)
+          Column = columnForProjection expression }
+    | [ (expression, _) ] ->
+        { Expression = Lit VNull
+          Column = columnForProjection expression }
+    | _ ->
+        { Expression = Lit VNull
+          Column = None }
 
 type private SubqueryScope =
     { Qualifiers: Set<string>
@@ -2515,11 +2628,13 @@ let rec private evalExpr (ctx: EvalContext) (expr: Expr) : Result<Value, EvalErr
             | Affected _, _, _ -> Ok VNull
             | ResultSet(columns, _), _, _ when columns.Length <> 1 -> Error(1241, "Operand should contain 1 column(s)")
             | ResultSet(_, _), _, typedRows ->
+                let rightOperand = subqueryProjectionOperand ctx select
+
                 let comparisons =
                     typedRows
                     |> List.map (fun row ->
                         let right = if row.Length = 0 then VNull else row.[0]
-                        quantifiedComparisonResult ctx e left op right)
+                        quantifiedComparisonResult ctx e left rightOperand op right)
 
                 match quantifier with
                 | Any ->
@@ -8394,6 +8509,47 @@ let private rejectDirectOnlyGenerated (registry: Registry) (columns: Ast.ColumnD
     |> List.tryPick (fun c -> c.Generated |> Option.bind (fun (e, _) -> firstDirectOnlyCall registry e |> Option.map (fun _ -> c.Name)))
     |> Option.map (fun col -> Err(3102, sprintf "Expression of generated column '%s' contains a disallowed function." col))
 
+let rec private containsQuantifiedComparison (expression: Expr) : bool =
+    let any expressions = expressions |> List.exists containsQuantifiedComparison
+
+    match expression with
+    | QuantifiedComparison _ -> true
+    | MatchAgainst(_, query, _) -> containsQuantifiedComparison query
+    | WindowOver(functions, over) -> any (windowFnExprs functions @ overExprs over)
+    | FuncCall(_, arguments) -> any arguments
+    | BinOp(_, left, right)
+    | Like(left, right, _, _)
+    | Regexp(left, right) -> any [ left; right ]
+    | AssignUserVariable(_, value)
+    | Not value
+    | IsNull value
+    | IsNotNull value
+    | IsTrue value
+    | IsFalse value
+    | Distinct value
+    | OrderBy(value, _)
+    | Cast(value, _)
+    | Collate(value, _) -> containsQuantifiedComparison value
+    | In(value, candidates) -> any (value :: candidates)
+    | Between(value, lower, upper) -> any [ value; lower; upper ]
+    | Case(subject, branches, otherwise) ->
+        any (Option.toList subject @ (branches |> List.collect (fun (condition, result) -> [ condition; result ])) @ Option.toList otherwise)
+    | Placeholder _
+    | UserVariable _
+    | SystemVariable _
+    | Col _
+    | QualifiedCol _
+    | Star _
+    | Lit _
+    | Exists _
+    | Subquery _
+    | InSubquery _ -> false
+
+let private rejectQuantifiedComparisonsInGenerated (columns: Ast.ColumnDef list) : QueryResult option =
+    columns
+    |> List.tryPick (fun column -> column.Generated |> Option.bind (fun (expression, _) -> if containsQuantifiedComparison expression then Some column.Name else None))
+    |> Option.map (fun column -> Err(3102, sprintf "Expression of generated column '%s' contains a disallowed function." column))
+
 let rec private containsSessionVariable (expression: Expr) : bool =
     let any expressions = expressions |> List.exists containsSessionVariable
 
@@ -9360,10 +9516,11 @@ let rec execute (store: Store) (registry: Registry) (dbName: string) (ids: int64
         | Some _ when ifNotExists -> ids, Affected 0UL
         | Some _ -> ids, storageErr (TableExists name)
         | None ->
-            match rejectDirectOnlyGenerated registry columns, rejectSessionVariablesInGenerated columns with
-            | Some err, _
-            | _, Some err -> ids, err
-            | None, None ->
+            match rejectDirectOnlyGenerated registry columns, rejectQuantifiedComparisonsInGenerated columns, rejectSessionVariablesInGenerated columns with
+            | Some err, _, _
+            | _, Some err, _
+            | _, _, Some err -> ids, err
+            | None, None, None ->
                 let alreadyExists = scan store db name |> Result.isOk
 
                 if alreadyExists && ifNotExists then
@@ -9437,11 +9594,12 @@ let rec execute (store: Store) (registry: Registry) (dbName: string) (ids: int64
                 | ChangeColumn(_, c, _) -> Some c
                 | _ -> None)
 
-        match unsupportedEngine, rejectDirectOnlyGenerated registry addedColumns, rejectSessionVariablesInGenerated addedColumns with
-        | Some engine, _, _ -> ids, Err(1286, sprintf "Unknown storage engine '%s'" engine)
-        | None, Some err, _
-        | None, _, Some err -> ids, err
-        | None, None, None ->
+        match unsupportedEngine, rejectDirectOnlyGenerated registry addedColumns, rejectQuantifiedComparisonsInGenerated addedColumns, rejectSessionVariablesInGenerated addedColumns with
+        | Some engine, _, _, _ -> ids, Err(1286, sprintf "Unknown storage engine '%s'" engine)
+        | None, Some err, _, _
+        | None, _, Some err, _
+        | None, _, _, Some err -> ids, err
+        | None, None, None, None ->
             let baseCatalog = store.Catalog
             let snapshot = Storage.beginTransactionSnapshot store
             Storage.setStrictMode snapshot store.StrictMode

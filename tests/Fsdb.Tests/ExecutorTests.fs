@@ -4036,6 +4036,8 @@ let tests =
                     runDefault store "INSERT INTO inner_rows VALUES (1, 1), (1, 2), (2, NULL), (2, 3)" |> ignore
                     runDefault store "CREATE TABLE binary_text (s VARCHAR(10) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin)" |> ignore
                     runDefault store "INSERT INTO binary_text VALUES ('A'), ('a')" |> ignore
+                    runDefault store "CREATE TABLE enum_text (s ENUM('red', 'blue'))" |> ignore
+                    runDefault store "INSERT INTO enum_text VALUES ('red')" |> ignore
                     runDefault store "CREATE TABLE pairs (a INT, b INT)" |> ignore
                     runDefault store "INSERT INTO pairs VALUES (1, 2)" |> ignore
 
@@ -4052,6 +4054,18 @@ let tests =
                     | ResultSet(_, [ [ Some "A"; Some "0" ]; [ Some "a"; Some "1" ] ]) -> ()
                     | other -> failtestf "expected the left column collation to govern equality, got %A" other
 
+                    match runDefault store "SELECT 'A' = ANY (SELECT s FROM binary_text WHERE s = 'a'), 'A' < ANY (SELECT s FROM binary_text WHERE s = 'a')" with
+                    | ResultSet(_, [ [ Some "0"; Some "1" ] ]) -> ()
+                    | other -> failtestf "expected the subquery column collation to govern comparison, got %A" other
+
+                    match runDefault store "SELECT 'A' = ANY (SELECT s COLLATE utf8mb4_0900_ai_ci FROM binary_text WHERE s = 'a')" with
+                    | ResultSet(_, [ [ Some "1" ] ]) -> ()
+                    | other -> failtestf "expected the projected COLLATE to override the subquery column collation, got %A" other
+
+                    match runDefault store "SELECT 1 = ANY (SELECT s FROM enum_text)" with
+                    | ResultSet(_, [ [ Some "1" ] ]) -> ()
+                    | other -> failtestf "expected an ENUM subquery result to retain its ordinal comparison, got %A" other
+
                     match runDefault store "SELECT 2 = ANY (SELECT '2')" with
                     | ResultSet(_, [ [ Some "1" ] ]) -> ()
                     | other -> failtestf "expected numeric coercion to match, got %A" other
@@ -4059,6 +4073,10 @@ let tests =
                     match runDefault store "SELECT 1 = ANY (SELECT a, b FROM pairs)" with
                     | Err(1241, "Operand should contain 1 column(s)") -> ()
                     | other -> failtestf "expected MySQL error 1241, got %A" other
+
+                    match runDefault store "CREATE TABLE generated_quantified (n INT, q INT GENERATED ALWAYS AS (n = ANY (SELECT n FROM outer_rows)))" with
+                    | Err(3102, "Expression of generated column 'q' contains a disallowed function.") -> ()
+                    | other -> failtestf "expected MySQL error 3102, got %A" other
 
                 testCase "quantified comparisons support every ordered comparison operator"
                 <| fun _ ->
