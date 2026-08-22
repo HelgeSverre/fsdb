@@ -82,12 +82,11 @@ variants), USE, KILL, DESCRIBE are text-probed before the grammar
 |---|---|---|---|---|
 | Locking detail | `FOR UPDATE/SHARE [OF tbl…] [NOWAIT|SKIP LOCKED]` | `FOR UPDATE`/`FOR SHARE`/`LOCK IN SHARE MODE` accepted and ignored; no OF/NOWAIT/SKIP LOCKED | low | divergence |
 | CTE placement | `WITH` in subqueries, derived tables, `INSERT…WITH` | top-level SELECT/UNION only (`Parser.fs:2458–2464`) | medium | refusal |
-| Quantified comparison | `= ANY/SOME/ALL (subquery)` | absent | medium | refusal |
 | Row constructors | `(a,b) = (1,2)`, `(a,b) IN ((1,2),(3,4))` | unparseable | medium | refusal |
 
 Expression coverage that does exist: full comparison/logical/arithmetic
 operators incl. `<=>`, `XOR`, three-valued logic; CASE (both forms);
-CAST/CONVERT; EXISTS/IN/BETWEEN/LIKE [ESCAPE]/REGEXP; `->`/`->>` JSON
+CAST/CONVERT; EXISTS/IN/ANY/SOME/ALL/BETWEEN/LIKE [ESCAPE]/REGEXP; `->`/`->>` JSON
 operators; charset introducers; hex literals; typed temporal literals;
 `INTERVAL n unit`; MATCH…AGAINST; collation postfix; version-comment
 splicing `/*!NNNNN … */`; and MySQL's single-row `FROM DUAL` source.
@@ -95,13 +94,14 @@ splicing `/*!NNNNN … */`; and MySQL's single-row `FROM DUAL` source.
 ## 2. Query execution
 
 Working: hash joins for equi-joins with collation-folded keys, lazy nested
-loops otherwise, statement-stable scalar/EXISTS/IN subqueries materialized
-once per statement, correlated scalar/EXISTS/IN subqueries with correct NULL
+loops otherwise, statement-stable scalar/EXISTS/IN/ANY/SOME/ALL subqueries
+materialized once per statement, correlated scalar/EXISTS/IN/ANY/SOME/ALL
+subqueries with correct NULL
 semantics, bounded top-N sort for ORDER BY+LIMIT, GROUP_CONCAT byte cap,
 WITH ROLLUP expansion, window frames (ROWS/RANGE, numeric offsets),
 COUNT(DISTINCT a,b) tuples, statement-atomic multi-table DML, exact ODKU
 affected-rows semantics (changed=2/no-op=0 under default flags), MySQL's
-1241 error for multi-column scalar/IN subqueries, and the empty-group
+1241 error for multi-column scalar/IN/ANY/SOME/ALL subqueries, and the empty-group
 identities for bit aggregates.
 
 | Gap | MySQL 8.4 | fsdb | Impact | Class |
@@ -109,7 +109,7 @@ identities for bit aggregates.
 | Secondary-index access paths | ref/eq_ref/range scans feed joins, ORDER BY, GROUP BY | single-table equality and a physical right side of a one-key `INNER JOIN ... ON` use PK/UNIQUE or one-column non-unique B-tree buckets; direct literal `SELECT` ranges on one-column non-unique B-trees narrow candidates and report `range` in EXPLAIN; one direct indexed `ORDER BY` key with `LIMIT`/`OFFSET` streams the index order and can use compatible literal bounds; unique/PK ranges, DML ranges, joins, composite keys, outer joins, multi-key ORDER BY, and GROUP BY scan/sort | high (scale) | divergence |
 | Optimizer | pushdown, constant folding, join reordering, cost model, statistics | none; joins fold left-to-right as written; derived tables materialize once per statement (`Functions.fs:44`, `Executor.fs:36–43`) | medium | divergence |
 | EXPLAIN fidelity | type ∈ system/const/eq_ref/ref/range/index/ALL; FORMAT=JSON/TREE; ANALYZE; optimizer_trace | `type` ∈ {system, const, eq_ref, ref, range, index, ALL}; `range` covers direct literal `SELECT` bounds on one-column non-unique B-trees, `index` covers bounded direct one-key ordering; FORMAT=JSON/TREE, ANALYZE, and optimizer_trace absent; extra flags limited to Using where/filesort/temporary | low | divergence |
-| Subquery strategies | semi-join/materialization/early-exit transformations | statement-stable scalar/IN/EXISTS subqueries materialize once and simple EXISTS stops at one row; correlated, variable-bearing, nondeterministic, CTE, derived, lateral, and JSON_TABLE forms re-execute | medium (scale) | divergence |
+| Subquery strategies | semi-join/materialization/early-exit transformations | statement-stable scalar/IN/ANY/SOME/ALL/EXISTS subqueries materialize once and simple EXISTS stops at one row; correlated, variable-bearing, nondeterministic, CTE, derived, lateral, and JSON_TABLE forms re-execute | medium (scale) | divergence |
 | Join size ceiling | unbounded (memory-bound) | hard cap 1,000,000 candidate rows → error 1105 (`Executor.fs:1586, 3287–3290`) | medium | divergence |
 | Multi-table UPDATE/DELETE sources | derived tables allowed as join sources | real base tables only → 1064 (`Executor.fs:3334–3339`) | low | refusal |
 | MATCH…AGAINST placement | evaluates in UPDATE/DELETE WHERE, joins, subqueries | single-table SELECT pre-pass only, else 1191 (`Executor.fs:1828–1831, 5828–5830`) | medium | refusal |
