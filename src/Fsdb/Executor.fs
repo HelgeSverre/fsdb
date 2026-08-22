@@ -144,6 +144,10 @@ let private checkStoredDefiner (store: Store) (definer: string) (db: string) (st
     | Some account -> Auth.checkForAccount store account (Auth.requiredPrivileges db statement)
     | None -> Error(1449, "The user specified as a definer ('') does not exist")
 
+let private registryForDefiner (account: Auth.Account) (registry: Registry) =
+    registry
+    |> Functions.registerScalar "CURRENT_USER" (fun _ -> VString(account.Name + "@" + account.Host))
+
 /// Reads one view definition from the row-backed catalog. The explicit column
 /// list is JSON so every legal quoted identifier round-trips without inventing
 /// a second escaping convention. Invalid catalog text is treated as an absent
@@ -3242,16 +3246,26 @@ and private resolveTableRef
                             match checkStoredDefiner store view.Definer view.Schema statement with
                             | Result.Error(code, message) -> Error(Err(code, message))
                             | Result.Ok() ->
-                                resolveFromSubquery store registry view.Schema (FromSubquery(PlainSelect select, view.Name))
+                                match storedObjectAccount view.Definer with
+                                | Some account ->
+                                    resolveFromSubquery
+                                        store
+                                        (registryForDefiner account registry)
+                                        view.Schema
+                                        (FromSubquery(PlainSelect select, view.Name))
+                                | None -> Error(Err(1449, "The user specified as a definer ('') does not exist"))
                         | Result.Ok((Union(first, rest, orderBy, limit, offset)) as statement) ->
                             match checkStoredDefiner store view.Definer view.Schema statement with
                             | Result.Error(code, message) -> Error(Err(code, message))
                             | Result.Ok() ->
-                                resolveFromSubquery
-                                    store
-                                    registry
-                                    view.Schema
-                                    (FromSubquery(UnionSelect(first, rest, orderBy, limit, offset), view.Name))
+                                match storedObjectAccount view.Definer with
+                                | Some account ->
+                                    resolveFromSubquery
+                                        store
+                                        (registryForDefiner account registry)
+                                        view.Schema
+                                        (FromSubquery(UnionSelect(first, rest, orderBy, limit, offset), view.Name))
+                                | None -> Error(Err(1449, "The user specified as a definer ('') does not exist"))
                         | _ -> Error(Err(1356, sprintf "View '%s.%s' references invalid table(s) or column(s)" view.Schema view.Name))
 
                     let resolved =
@@ -9865,6 +9879,8 @@ let rec executeAs
                 // failing body doesn't abort a surrounding
                 // transaction the way an escaped exception would.
                 let runBody (oldRow: Value[] option) (newRow: Value[] option) (stmt: Statement, account: Auth.Account) : QueryResult =
+                    let definerRegistry = registryForDefiner account shadowed
+
                     withTriggerRowScope
                         { Columns = columns
                           Old = oldRow
@@ -9874,7 +9890,7 @@ let rec executeAs
                             | SetTriggerNew(column, expression) ->
                                 match timing, event, newRow, resolveColumn columns column with
                                 | Before, (TriggerInsert | TriggerUpdate), Some row, Ok index ->
-                                    let context = contextFactory runStore shadowed db Map.empty Map.empty None [||]
+                                    let context = contextFactory runStore definerRegistry db Map.empty Map.empty None [||]
 
                                     match evalExpr context expression |> Result.mapError Err with
                                     | Error error -> error
@@ -9887,7 +9903,7 @@ let rec executeAs
                                 | _ -> Err(1362, "Updating of NEW row is not allowed in after trigger")
                             | _ ->
                                 try
-                                    executeAs runStore shadowed db (0L, 0L) foundRows account stmt |> snd
+                                    executeAs runStore definerRegistry db (0L, 0L) foundRows account stmt |> snd
                                 with SqlError(code, msg) ->
                                     Err(code, msg))
 

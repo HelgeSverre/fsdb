@@ -1,5 +1,6 @@
 module Fsdb.Tests.ViewTests
 
+open System.Threading
 open System.Threading.Tasks
 open Expecto
 open Fsdb.Executor
@@ -526,6 +527,33 @@ let tests =
                   [ [ Some "owner@localhost" ] ]
                   "stored full definer"
 
+          testCase "a view evaluates CURRENT_USER as its definer"
+          <| fun _ ->
+              let store = Fsdb.Storage.create ()
+              let root = Fsdb.Session.create 1 store
+
+              let apply session sql =
+                  let session, result = Fsdb.QueryHandler.handle session sql
+                  expectOk result sql
+                  session
+
+              let root = apply root "CREATE USER owner"
+              let root = apply root "CREATE USER writer"
+              let root = apply root "GRANT CREATE VIEW ON fsdb.* TO owner"
+              let root = apply root "GRANT SELECT ON fsdb.identity_view TO writer"
+              let owner = { Fsdb.Session.create 2 store with User = "owner" }
+              let writer = { Fsdb.Session.create 3 store with User = "writer" }
+              let _owner =
+                  apply
+                      owner
+                      "CREATE VIEW identity_view AS SELECT CURRENT_USER() AS definer_identity, USER() AS invoker_identity"
+
+              match Fsdb.QueryHandler.handle writer "SELECT definer_identity, invoker_identity FROM identity_view" |> snd with
+              | ResultSet(_, [ [ Some currentUser; Some invokingUser ] ]) ->
+                  Expect.equal currentUser "owner@%" "definer identity"
+                  Expect.equal invokingUser "writer@localhost" "invoker identity"
+              | other -> failtestf "expected view identity row, got %A" other
+
           testCase "concurrent view creation stamps each account's definer"
           <| fun _ ->
               let store = Fsdb.Storage.create ()
@@ -543,17 +571,26 @@ let tests =
               let _root = apply root "GRANT CREATE VIEW, SELECT ON fsdb.* TO 'second'@'localhost'"
               let first = { Fsdb.Session.create 2 store with User = "first" }
               let second = { Fsdb.Session.create 3 store with User = "second"; AccountHost = "localhost" }
+              use ready = new CountdownEvent 32
+              use start = new ManualResetEventSlim false
 
               [ 1 .. 32 ]
               |> List.map (fun index ->
                   let session = if index % 2 = 0 then first else second
 
-                  Task.Run(fun () ->
-                      let _, result = Fsdb.QueryHandler.handle session (sprintf "CREATE VIEW concurrent_%d AS SELECT id FROM source" index)
-                      expectOk result (sprintf "create concurrent_%d" index)))
+                  Task.Factory.StartNew(
+                      (fun () ->
+                          ready.Signal() |> ignore
+                          start.Wait()
+                          let _, result = Fsdb.QueryHandler.handle session (sprintf "CREATE VIEW concurrent_%d AS SELECT id FROM source" index)
+                          expectOk result (sprintf "create concurrent_%d" index)),
+                      TaskCreationOptions.LongRunning
+                  ))
               |> List.toArray
-              |> Task.WhenAll
-              |> fun task -> task.Wait()
+              |> fun tasks ->
+                  ready.Wait()
+                  start.Set()
+                  Task.WaitAll tasks
 
               let expected =
                   [ 1 .. 32 ]
