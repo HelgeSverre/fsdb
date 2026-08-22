@@ -88,6 +88,20 @@ let tests =
                   | metadata -> failtestf "expected five metadata records, got %A" metadata
               | _, other -> failtestf "expected a resultset, got %A" other
 
+          testCase "TIME functions retain scale through DECIMAL and CHAR casts"
+          <| fun _ ->
+              let session = create 1 (Fsdb.Storage.create ())
+
+              match
+                  handle
+                      session
+                      "SELECT SEC_TO_TIME(CAST(1.2 AS DECIMAL(10,5))), MAKETIME(1,2,CAST(3.12 AS DECIMAL(10,4))), TIME(CAST('01:02:03.1200' AS CHAR))"
+              with
+              | session, ResultSet(_, [ [ Some seconds; Some made; Some time ] ]) ->
+                  Expect.equal (seconds, made, time) ("00:00:01.20000", "01:02:03.1200", "01:02:03.1200") "text precision"
+                  Expect.equal (session.LastResultColumnMetadata |> List.map _.Decimals) [ 5uy; 4uy; 4uy ] "metadata precision"
+              | _, other -> failtestf "expected a resultset, got %A" other
+
           testCase "TIME rejects CURRENT_TIMESTAMP default and update clauses"
           <| fun _ ->
               let session = create 1 (Fsdb.Storage.create ())

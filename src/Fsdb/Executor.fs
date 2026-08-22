@@ -1109,6 +1109,7 @@ let private fspOfType (ty: ColumnType) : int option =
     | TDateTime fsp
     | TTimestamp fsp
     | TTime fsp -> Some fsp
+    | TDecimal(_, scale) -> Some scale
     | _ -> None
 
 /// The fsp an output *expression* renders at, so an explicit precision request
@@ -1137,6 +1138,9 @@ let rec private fspOfExpr (ctx: EvalContext) (expr: Expr) : int option =
         |> Some
 
     match expr with
+    | Cast(_, TDecimal(_, scale)) -> Some scale
+    | Cast(source, TChar _)
+    | Cast(source, TVarchar _) -> fspOfExpr ctx source
     | Cast(_, ty) -> fspOfType ty
     | Lit value -> fspOfValue value
     | FuncCall(name, [ arg ]) when (let n = name.ToUpperInvariant() in n = "MAX" || n = "MIN") -> fspOfExpr ctx arg
