@@ -4284,7 +4284,12 @@ let private replacementText (source: string) (input: Regexp.PreparedInput) (repl
         repl,
         @"\$(\d+)",
         fun token ->
-            let group = m.Groups[int token.Groups.[1].Value]
+            let index =
+                match Int32.TryParse token.Groups.[1].Value with
+                | true, value when value < m.Groups.Count -> value
+                | _ -> raise (SqlError(3686, "Index out of bounds in regular expression search."))
+
+            let group = m.Groups[index]
 
             if group.Success then
                 let start = Regexp.sourceOffset input group.Index

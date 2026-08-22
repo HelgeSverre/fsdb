@@ -1949,7 +1949,15 @@ let tests =
                           rejects "$`"
                           rejects "$&"
                           rejects "$'"
-                          rejects "a$" ]
+                          rejects "a$"
+
+                      testCase "REGEXP_REPLACE reports an invalid capture index"
+                      <| fun _ ->
+                          Expect.throwsC
+                              (fun () -> call "REGEXP_REPLACE" [ VString "x"; VString "x"; VString "$99" ] |> ignore)
+                              (function
+                              | Fsdb.Functions.SqlError(3686, "Index out of bounds in regular expression search.") -> ()
+                              | other -> failtestf "expected 3686, got %A" other) ]
 
                 testList
                     "UUID_TO_BIN/BIN_TO_UUID/IS_UUID"
