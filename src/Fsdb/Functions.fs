@@ -2568,22 +2568,56 @@ let private timeDiffFn: Scalar =
 let private secToTimeFn: Scalar =
     function
     | [ value ] when not (anyNull [ value ]) ->
-        let ticks = decimal (toDouble value) * decimal TimeSpan.TicksPerSecond |> Decimal.Round |> int64
+        let seconds = toDouble value
+        let maximumSeconds = float maxTimeTicks / float TimeSpan.TicksPerSecond
+
+        let ticks =
+            if seconds >= maximumSeconds then
+                if seconds > maximumSeconds then
+                    Diagnostics.warning 1292 "Truncated incorrect time value"
+
+                maxTimeTicks
+            elif seconds <= -maximumSeconds then
+                if seconds < -maximumSeconds then
+                    Diagnostics.warning 1292 "Truncated incorrect time value"
+
+                -maxTimeTicks
+            else
+                decimal seconds * decimal TimeSpan.TicksPerSecond |> Decimal.Round |> int64
+
         timeResult ticks
     | _ -> VNull
 
 let private makeTimeFn: Scalar =
     function
     | [ hours; minutes; seconds ] when not (anyNull [ hours; minutes; seconds ]) ->
-        let hours = int64 (toDouble hours)
+        let hours =
+            match hours with
+            | VInt value -> value
+            | VUInt value when value > uint64 Int64.MaxValue -> Int64.MaxValue
+            | VUInt value -> int64 value
+            | value ->
+                let number = toDouble value
+
+                if number >= float Int64.MaxValue then
+                    Int64.MaxValue
+                elif number <= float Int64.MinValue then
+                    Int64.MinValue
+                else
+                    int64 number
+
         let minutes = int64 (toDouble minutes)
         let seconds = toDouble seconds
 
         if minutes < 0L || minutes > 59L || seconds < 0.0 || seconds >= 60.0 then
             VNull
+        elif hours < -838L || hours > 838L then
+            Diagnostics.warning 1292 "Truncated incorrect time value"
+            timeResult (if hours < 0L then -maxTimeTicks else maxTimeTicks)
         else
             let sign = if hours < 0L then -1L else 1L
-            let ticks = (abs hours * 3600L + minutes * 60L) * TimeSpan.TicksPerSecond + int64 (seconds * float TimeSpan.TicksPerSecond)
+            let magnitude = if hours < 0L then -hours else hours
+            let ticks = (magnitude * 3600L + minutes * 60L) * TimeSpan.TicksPerSecond + int64 (seconds * float TimeSpan.TicksPerSecond)
             timeResult (sign * ticks)
     | _ -> VNull
 

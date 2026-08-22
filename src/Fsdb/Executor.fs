@@ -1139,9 +1139,12 @@ let rec private fspOfExpr (ctx: EvalContext) (expr: Expr) : int option =
 
     match expr with
     | Cast(_, TDecimal(_, scale)) -> Some scale
+    | Cast(_, TDouble)
+    | Cast(_, TFloat) -> Some 6
     | Cast(source, TChar _)
     | Cast(source, TVarchar _) -> fspOfExpr ctx source
     | Cast(_, ty) -> fspOfType ty
+    | Lit(VDouble _) -> Some 6
     | Lit value -> fspOfValue value
     | FuncCall(name, [ arg ]) when (let n = name.ToUpperInvariant() in n = "MAX" || n = "MIN") -> fspOfExpr ctx arg
     | FuncCall(name, [ arg ]) when (let n = name.ToUpperInvariant() in n = "TIME" || n = "SEC_TO_TIME") ->

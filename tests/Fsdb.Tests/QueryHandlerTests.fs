@@ -102,6 +102,20 @@ let tests =
                   Expect.equal (session.LastResultColumnMetadata |> List.map _.Decimals) [ 5uy; 4uy; 4uy ] "metadata precision"
               | _, other -> failtestf "expected a resultset, got %A" other
 
+          testCase "TIME constructors clamp oversized numeric inputs"
+          <| fun _ ->
+              let session = create 1 (Fsdb.Storage.create ())
+
+              match
+                  handle
+                      session
+                      "SELECT MAKETIME(-9223372036854775808,0,0), SEC_TO_TIME(1e100), SEC_TO_TIME(-3020399.9)"
+              with
+              | session, ResultSet(_, [ [ Some made; Some huge; Some clipped ] ]) ->
+                  Expect.equal (made, huge, clipped) ("-838:59:59", "838:59:59.000000", "-838:59:59.0") "clamped values"
+                  Expect.equal (session.Diagnostics |> List.map _.Code) [ 1292; 1292; 1292 ] "truncation warnings"
+              | _, other -> failtestf "expected a resultset, got %A" other
+
           testCase "TIME rejects CURRENT_TIMESTAMP default and update clauses"
           <| fun _ ->
               let session = create 1 (Fsdb.Storage.create ())
