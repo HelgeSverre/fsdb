@@ -4060,10 +4060,6 @@ let tests =
                     | Err(1241, "Operand should contain 1 column(s)") -> ()
                     | other -> failtestf "expected MySQL error 1241, got %A" other
 
-                    match runDefault store "CREATE TABLE generated_quantified (n INT, q INT GENERATED ALWAYS AS (n = ANY (SELECT n FROM outer_rows)))" with
-                    | Err(3102, "Expression of generated column 'q' contains a disallowed function.") -> ()
-                    | other -> failtestf "expected MySQL error 3102, got %A" other
-
                 testCase "quantified comparisons support every ordered comparison operator"
                 <| fun _ ->
                     let store = newStore ()

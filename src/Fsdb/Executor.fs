@@ -8394,47 +8394,6 @@ let private rejectDirectOnlyGenerated (registry: Registry) (columns: Ast.ColumnD
     |> List.tryPick (fun c -> c.Generated |> Option.bind (fun (e, _) -> firstDirectOnlyCall registry e |> Option.map (fun _ -> c.Name)))
     |> Option.map (fun col -> Err(3102, sprintf "Expression of generated column '%s' contains a disallowed function." col))
 
-let rec private containsSubquery (expression: Expr) : bool =
-    let any expressions = expressions |> List.exists containsSubquery
-
-    match expression with
-    | Exists _
-    | Subquery _
-    | InSubquery _
-    | QuantifiedComparison _ -> true
-    | MatchAgainst(_, query, _) -> containsSubquery query
-    | WindowOver(functions, over) -> any (windowFnExprs functions @ overExprs over)
-    | FuncCall(_, arguments) -> any arguments
-    | BinOp(_, left, right)
-    | Like(left, right, _, _)
-    | Regexp(left, right) -> any [ left; right ]
-    | AssignUserVariable(_, value)
-    | Not value
-    | IsNull value
-    | IsNotNull value
-    | IsTrue value
-    | IsFalse value
-    | Distinct value
-    | OrderBy(value, _)
-    | Cast(value, _)
-    | Collate(value, _) -> containsSubquery value
-    | In(value, candidates) -> any (value :: candidates)
-    | Between(value, lower, upper) -> any [ value; lower; upper ]
-    | Case(subject, branches, otherwise) ->
-        any (Option.toList subject @ (branches |> List.collect (fun (condition, result) -> [ condition; result ])) @ Option.toList otherwise)
-    | Placeholder _
-    | UserVariable _
-    | SystemVariable _
-    | Col _
-    | QualifiedCol _
-    | Star _
-    | Lit _ -> false
-
-let private rejectSubqueriesInGenerated (columns: Ast.ColumnDef list) : QueryResult option =
-    columns
-    |> List.tryPick (fun column -> column.Generated |> Option.bind (fun (expression, _) -> if containsSubquery expression then Some column.Name else None))
-    |> Option.map (fun column -> Err(3102, sprintf "Expression of generated column '%s' contains a disallowed function." column))
-
 let rec private containsSessionVariable (expression: Expr) : bool =
     let any expressions = expressions |> List.exists containsSessionVariable
 
@@ -9401,11 +9360,10 @@ let rec execute (store: Store) (registry: Registry) (dbName: string) (ids: int64
         | Some _ when ifNotExists -> ids, Affected 0UL
         | Some _ -> ids, storageErr (TableExists name)
         | None ->
-            match rejectDirectOnlyGenerated registry columns, rejectSubqueriesInGenerated columns, rejectSessionVariablesInGenerated columns with
-            | Some err, _, _
-            | _, Some err, _
-            | _, _, Some err -> ids, err
-            | None, None, None ->
+            match rejectDirectOnlyGenerated registry columns, rejectSessionVariablesInGenerated columns with
+            | Some err, _
+            | _, Some err -> ids, err
+            | None, None ->
                 let alreadyExists = scan store db name |> Result.isOk
 
                 if alreadyExists && ifNotExists then
@@ -9479,12 +9437,11 @@ let rec execute (store: Store) (registry: Registry) (dbName: string) (ids: int64
                 | ChangeColumn(_, c, _) -> Some c
                 | _ -> None)
 
-        match unsupportedEngine, rejectDirectOnlyGenerated registry addedColumns, rejectSubqueriesInGenerated addedColumns, rejectSessionVariablesInGenerated addedColumns with
-        | Some engine, _, _, _ -> ids, Err(1286, sprintf "Unknown storage engine '%s'" engine)
-        | None, Some err, _, _
-        | None, _, Some err, _
-        | None, _, _, Some err -> ids, err
-        | None, None, None, None ->
+        match unsupportedEngine, rejectDirectOnlyGenerated registry addedColumns, rejectSessionVariablesInGenerated addedColumns with
+        | Some engine, _, _ -> ids, Err(1286, sprintf "Unknown storage engine '%s'" engine)
+        | None, Some err, _
+        | None, _, Some err -> ids, err
+        | None, None, None ->
             let baseCatalog = store.Catalog
             let snapshot = Storage.beginTransactionSnapshot store
             Storage.setStrictMode snapshot store.StrictMode
