@@ -732,9 +732,12 @@ let private parseSetFragment
         | _ -> Ok(SetNamesAction(namesMatch.Groups.[1].Value, explicitCollation), userVariables)
     else
         match Parser.parseUserVariableSetAssignment fragment with
-        | Ok(name, rhs) ->
-            resolveUserSetRhs session userVariables sql rhs
-            |> Result.map (fun (value, sideEffects) -> SetUserVarAction(name.ToLowerInvariant(), value), sideEffects)
+        | Ok(variable, rhs) ->
+            match UserVariableRef.validationError variable with
+            | Some message -> Error(Err(3061, message))
+            | None ->
+                resolveUserSetRhs session userVariables sql rhs
+                |> Result.map (fun (value, sideEffects) -> SetUserVarAction(variable.Name, value), sideEffects)
         | Error _ ->
             let varMatch = setVar.Match fragment
 

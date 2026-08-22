@@ -736,9 +736,9 @@ let rec private exprLabel (expr: Expr) : string =
     | Lit v -> v |> toText |> Option.defaultValue "NULL"
     | MatchAgainst(cols, q, _) -> sprintf "match (%s) against (%s)" (String.concat "," cols) (exprLabel q)
     | Placeholder _ -> "?"
-    | UserVariable variable -> "@" + variable
+    | UserVariable variable -> variable.Sql
     | SystemVariable(scope, variable) -> "@@" + (scope |> Option.map (fun value -> value.ToLowerInvariant() + ".") |> Option.defaultValue "") + variable
-    | AssignUserVariable(variable, value) -> "@" + variable + ":=" + exprLabel value
+    | AssignUserVariable(variable, value) -> variable.Sql + ":=" + exprLabel value
     | Col name -> name
     | QualifiedCol(_, col) -> col
     | FuncCall(name, [ Lit(VString label); _ ]) when name.Equals("NAME_CONST", System.StringComparison.OrdinalIgnoreCase) -> label
@@ -1259,9 +1259,9 @@ let rec private metadataOfExpr (ctx: EvalContext) (expr: Expr) : ColumnMetadata 
     | Lit(VZeroDate _) -> simple TypeDate |> Option.map (fun metadata -> { metadata with Flags = NotNullFlag })
     | Lit(VZeroDateTime _) -> simple TypeDateTime |> Option.map (fun metadata -> { metadata with Flags = NotNullFlag })
     | Lit(VJson _) -> simple TypeVarString |> Option.map (fun metadata -> { metadata with Flags = NotNullFlag })
-    | UserVariable name ->
+    | UserVariable variable ->
         currentVariableContext ()
-        |> Option.bind (fun bindings -> bindings.UserVariables.Value |> Map.tryFind (name.ToLowerInvariant()))
+        |> Option.bind (fun bindings -> bindings.UserVariables.Value |> Map.tryFind variable.Name)
         |> Option.bind (fun value -> metadataOfExpr ctx (Lit value))
         |> Option.orElse (simple TypeVarString)
     | SystemVariable _ -> simple TypeVarString
@@ -2209,28 +2209,34 @@ let rec private evalExpr (ctx: EvalContext) (expr: Expr) : Result<Value, EvalErr
     | Col name -> resolveCol ctx name
     | QualifiedCol(table, col) -> resolveQualifiedCol ctx table col
     | UserVariable variable ->
-        currentVariableContext ()
-        |> Option.bind (fun bindings -> bindings.UserVariables.Value |> Map.tryFind (variable.ToLowerInvariant()))
-        |> Option.defaultValue VNull
-        |> Ok
+        match UserVariableRef.validationError variable with
+        | Some message -> Error(3061, message)
+        | None ->
+            currentVariableContext ()
+            |> Option.bind (fun bindings -> bindings.UserVariables.Value |> Map.tryFind variable.Name)
+            |> Option.defaultValue VNull
+            |> Ok
     | SystemVariable(scope, variable) ->
         match currentVariableContext () with
         | Some bindings -> bindings.ReadSystemVariable (scope |> Option.defaultValue "") variable |> Result.map (Option.map VString >> Option.defaultValue VNull)
         | None -> Error(1193, sprintf "Unknown system variable '%s'" variable)
     | AssignUserVariable(variable, value) ->
-        eval value
-        |> Result.bind (fun evaluated ->
-            match currentVariableContext () with
-            | None -> Error(1105, "User-defined variables require a session")
-            | Some _ when suppressVariableAssignments.Value -> Ok evaluated
-            | Some bindings ->
-                let name = variable.ToLowerInvariant()
+        match UserVariableRef.validationError variable with
+        | Some message -> Error(3061, message)
+        | None ->
+            eval value
+            |> Result.bind (fun evaluated ->
+                match currentVariableContext () with
+                | None -> Error(1105, "User-defined variables require a session")
+                | Some _ when suppressVariableAssignments.Value -> Ok evaluated
+                | Some bindings ->
+                    let name = variable.Name
 
-                if Map.containsKey name bindings.UserVariables.Value || bindings.UserVariables.Value.Count < bindings.MaxUserVariables then
-                    bindings.UserVariables.Value <- Map.add name evaluated bindings.UserVariables.Value
-                    Ok evaluated
-                else
-                    Error(1105, "Too many user-defined variables"))
+                    if Map.containsKey name bindings.UserVariables.Value || bindings.UserVariables.Value.Count < bindings.MaxUserVariables then
+                        bindings.UserVariables.Value <- Map.add name evaluated bindings.UserVariables.Value
+                        Ok evaluated
+                    else
+                        Error(1105, "Too many user-defined variables"))
     | Not e -> eval e |> Result.map (fun v -> truthy v |> Option.map (not >> boolToValue) |> Option.defaultValue VNull)
     | IsNull e -> eval e |> Result.map (function VNull -> VInt 1L | _ -> VInt 0L)
     | IsNotNull e -> eval e |> Result.map (function VNull -> VInt 0L | _ -> VInt 1L)

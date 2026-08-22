@@ -1991,10 +1991,12 @@ let tests =
 
                 testCase "user and system variables parse as ordinary expressions"
                 <| fun _ ->
+                    let variable name = { Name = name; Sql = "@" + name }
+
                     let expected =
-                        [ BinOp(Add, UserVariable "x", Lit(VInt 1L)), None
+                        [ BinOp(Add, UserVariable(variable "x"), Lit(VInt 1L)), None
                           SystemVariable(Some "GLOBAL", "max_connections"), None
-                          AssignUserVariable("x", Lit(VInt 3L)), None ]
+                          AssignUserVariable(variable "x", Lit(VInt 3L)), None ]
 
                     match parse "SELECT @x + 1, @@GLOBAL.max_connections, @x := 3" with
                     | Ok(Select { Projections = projections }) -> Expect.equal projections expected "variable expressions"
@@ -2003,10 +2005,10 @@ let tests =
                 testCase "quoted user-variable names parse with their MySQL escapes"
                 <| fun _ ->
                     let expected =
-                        [ UserVariable "has space", None
-                          UserVariable "single'quote", None
-                          UserVariable "double\"quote", None
-                          UserVariable "back`tick", None ]
+                        [ UserVariable { Name = "has space"; Sql = "@`has space`" }, None
+                          UserVariable { Name = "single'quote"; Sql = "@'single''quote'" }, None
+                          UserVariable { Name = "double\"quote"; Sql = "@\"double\"\"quote\"" }, None
+                          UserVariable { Name = "back`tick"; Sql = "@`back``tick`" }, None ]
 
                     match parse "SELECT @`has space`, @'single''quote', @\"double\"\"quote\", @`back``tick`" with
                     | Ok(Select { Projections = projections }) -> Expect.equal projections expected "quoted variables"

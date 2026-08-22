@@ -2,6 +2,7 @@
 /// consumes. Types only, no behavior — every case here is data.
 module Fsdb.Ast
 
+open System.Text
 open Fsdb.Value
 
 /// A comparison/logical/arithmetic binary operator, shared by every
@@ -89,6 +90,22 @@ type ColumnType =
     /// DDL time in `Storage`, where the column name is in scope to report.
     | TVector of dim: int
 
+/// A user-variable reference's case-folded lookup key and exact SQL token.
+type UserVariableRef =
+    { Name: string
+      Sql: string }
+
+module UserVariableRef =
+    let validationError (variable: UserVariableRef) =
+        let length = variable.Name.EnumerateRunes() |> Seq.length
+
+        if length = 0 then
+            Some "User variable name is empty"
+        elif length > 64 then
+            Some(sprintf "User variable name '%s' is too long" variable.Name)
+        else
+            None
+
 // `Expr` and `SelectStmt` are mutually recursive: `Exists`/a scalar subquery
 // carries a nested `SelectStmt`, whose projections/`WHERE` are themselves
 // built from `Expr`. Every type in between (`Projection`, `TableRef`, ...)
@@ -99,9 +116,9 @@ type Expr =
     // position in the SQL text. Bound to a `Lit` by `QueryHandler.bindPlaceholders`
     // before execution — the executor never sees one.
     | Placeholder of index: int
-    | UserVariable of name: string
+    | UserVariable of variable: UserVariableRef
     | SystemVariable of scope: string option * name: string
-    | AssignUserVariable of name: string * value: Expr
+    | AssignUserVariable of variable: UserVariableRef * value: Expr
     | Col of name: string
     | QualifiedCol of table: string * column: string
     | BinOp of Op * Expr * Expr

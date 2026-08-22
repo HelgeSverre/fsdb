@@ -1252,19 +1252,19 @@ let private placeholderAtom: Parser<Expr, unit> =
 /// expression evaluator. MySQL permits punctuation and whitespace when the
 /// name is backtick-, single-, or double-quoted; double quotes remain a
 /// user-variable delimiter under ANSI_QUOTES.
-let private userVariableTarget: Parser<string, unit> =
+let private userVariableTarget: Parser<UserVariableRef, unit> =
     let quotedName quote =
-        quoted quote
-        |>> function
-            | VString name -> name
-            | _ -> ""
+        pchar quote >>. manyStrings (quotedStringChar quote) .>> pchar quote
 
-    pchar '@'
-    >>. choice
-            [ attempt backtickIdent
-              attempt (quotedName '\'')
-              attempt (quotedName '"')
-              many1Satisfy isIdentChar ]
+    ((pchar '@'
+      >>. choice
+              [ attempt backtickIdent
+                attempt (quotedName '\'')
+                attempt (quotedName '"')
+                many1Satisfy (fun c -> isIdentChar c || c = '.' || c = '$') ])
+     |> withSkippedString (fun sql name ->
+         { Name = name.ToLowerInvariant()
+           Sql = sql }))
     .>> ws
 
 let private variableAtom: Parser<Expr, unit> =
@@ -3296,7 +3296,7 @@ let parseExpression (sql: string) : Result<Expr, string> =
 /// Parses the user-defined-variable target at the front of a `SET`
 /// assignment. The right-hand side remains source text because `SET` has
 /// its own literal rules before ordinary expression evaluation.
-let parseUserVariableSetAssignment (sql: string) : Result<string * string, string> =
+let parseUserVariableSetAssignment (sql: string) : Result<UserVariableRef * string, string> =
     let assignment =
         userVariableTarget
         .>> (attempt (sym ":=") <|> sym "=")

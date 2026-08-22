@@ -828,11 +828,14 @@ let tests =
               | other -> failtestf "expected quoted assignments to succeed, got %A" other
 
               match handle session "SELECT @'HAS, COMMA', @`sp ace`, @\"DOUBLE-NAME\", @`BACK``TICK, NAME`, @'SINGLE''QUOTE'" |> snd with
-              | ResultSet(_, [ [ Some "1"; Some "2"; Some "3"; Some "4"; Some "5" ] ]) -> ()
+              | ResultSet(
+                    [ "@'HAS, COMMA'"; "@`sp ace`"; "@\"DOUBLE-NAME\""; "@`BACK``TICK, NAME`"; "@'SINGLE''QUOTE'" ],
+                    [ [ Some "1"; Some "2"; Some "3"; Some "4"; Some "5" ] ]
+                ) -> ()
               | other -> failtestf "expected quoted variables to read back, got %A" other
 
               match handle session "SELECT @'sp ace' := @`HAS, COMMA` + @\"DOUBLE-NAME\"" with
-              | updated, ResultSet(_, [ [ Some "4" ] ]) ->
+              | updated, ResultSet([ "@'sp ace':=@`HAS, COMMA` + @\"DOUBLE-NAME\"" ], [ [ Some "4" ] ]) ->
                   Expect.equal updated.UserVariables.["sp ace"] (VInt 4L) "assignment uses quoted references"
               | _, other -> failtestf "expected quoted variables in an assignment expression, got %A" other
 
@@ -850,6 +853,42 @@ let tests =
               | updated, ResultSet(_, [ [ Some "7"; Some "7" ] ]) ->
                   Expect.equal updated.UserVariables.["ansi name"] (VInt 7L) "assignment retains the value"
               | _, other -> failtestf "expected double-quoted variables under ANSI_QUOTES, got %A" other
+
+          testCase "user-variable names allow dots and dollars and reject empty or overlong decoded names"
+          <| fun _ ->
+              let session = create 1 (Fsdb.Storage.create ())
+              let session, assigned = handle session "SET @a.b = 1, @a$b = 2"
+
+              match assigned with
+              | Affected 0UL -> ()
+              | other -> failtestf "expected dotted and dollar names to assign, got %A" other
+
+              match handle session "SELECT @A.B, @A$B" |> snd with
+              | ResultSet([ "@A.B"; "@A$B" ], [ [ Some "1"; Some "2" ] ]) -> ()
+              | other -> failtestf "expected dotted and dollar names to read back, got %A" other
+
+              let valid = String.replicate 64 "😀"
+              let invalid = String.replicate 65 "😀"
+              let session, assigned = handle session ("SET @'" + valid + "' = 3")
+
+              match assigned with
+              | Affected 0UL -> ()
+              | other -> failtestf "expected a 64-rune name to assign, got %A" other
+
+              let session, _ = handle session "CREATE TABLE variable_names (id INT)"
+
+              for sql in
+                  [ "SELECT @'" + invalid + "'"
+                    "SELECT @'" + invalid + "' LIMIT 0"
+                    "SELECT @'" + invalid + "' FROM variable_names"
+                    "SELECT @'" + invalid + "' := 1"
+                    "SET @" + String.replicate 65 "a" + " = 1"
+                    "SELECT @``"
+                    "SET @'' = 1"
+                    "SELECT @\"\"" ] do
+                  match handle session sql with
+                  | _, Err(3061, _) -> ()
+                  | _, other -> failtestf "expected 3061 for %s, got %A" sql other
 
           testCase "SELECT @never_set is NULL, not an error — unlike an unknown @@system_var"
           <| fun _ ->
