@@ -1898,6 +1898,9 @@ let tests =
                           Expect.equal (call "REGEXP_SUBSTR" [ VString "a\rb"; VString "a.b" ]) VNull "CR stops SUBSTR dot"
                           Expect.equal (call "REGEXP_REPLACE" [ VString "a\rb"; VString "a.b"; VString "x" ]) (VString "a\rb") "CR stops REPLACE dot"
                           Expect.equal (call "REGEXP_REPLACE" [ VString "a\r\nb"; VString "a.b"; VString "x"; VInt 1L; VInt 0L; VString "n" ]) (VString "x") "dotall replaces CRLF"
+                          Expect.equal (call "REGEXP_REPLACE" [ VString "a\r\nb"; VString "."; VString "X"; VInt 3L; VInt 0L; VString "n" ]) (VString "a\rXX") "position inside CRLF"
+                          Expect.equal (call "REGEXP_INSTR" [ VString "a\r\nb"; VString "."; VInt 3L; VInt 1L; VInt 0L; VString "n" ]) (VInt 3L) "INSTR position inside CRLF"
+                          Expect.equal (call "REGEXP_SUBSTR" [ VString "a\r\nb"; VString "."; VInt 3L; VInt 1L; VString "n" ]) (VString "\n") "SUBSTR position inside CRLF"
 
                       testCase "REGEXP_SUBSTR returns the matched substring, or NULL if none"
                       <| fun _ ->
@@ -1957,7 +1960,14 @@ let tests =
                               (fun () -> call "REGEXP_REPLACE" [ VString "x"; VString "x"; VString "$99" ] |> ignore)
                               (function
                               | Fsdb.Functions.SqlError(3686, "Index out of bounds in regular expression search.") -> ()
-                              | other -> failtestf "expected 3686, got %A" other) ]
+                              | other -> failtestf "expected 3686, got %A" other)
+
+                      testCase "REGEXP_REPLACE uses the longest valid capture prefix"
+                      <| fun _ ->
+                          Expect.equal
+                              (call "REGEXP_REPLACE" [ VString "a"; VString "(a)"; VString "$10" ])
+                              (VString "a0")
+                              "capture one followed by a literal zero" ]
 
                 testList
                     "UUID_TO_BIN/BIN_TO_UUID/IS_UUID"

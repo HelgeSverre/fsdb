@@ -4207,7 +4207,8 @@ let private intArgOr (dflt: int) (args: Value list) (idx: int) : int =
 
 let private normalizedOffset (input: Regexp.PreparedInput) sourceOffset =
     input.SourceOffsets
-    |> Array.tryFindIndex (fun offset -> offset >= sourceOffset)
+    |> Array.tryFindIndex (fun offset -> offset > sourceOffset)
+    |> Option.map (fun index -> index - 1)
     |> Option.defaultValue input.Text.Length
 
 let private regexpLikeFn (collation: Collation.Collation) : Scalar =
@@ -4238,7 +4239,7 @@ let private regexpInstrFn (collation: Collation.Collation) : Scalar =
                 match nthMatch regex input.Text start occurrence with
                 | Some m ->
                     let offset = if returnEnd then m.Index + m.Length else m.Index
-                    VInt(int64 (Regexp.sourceOffset input offset + 1))
+                    VInt(int64 (max (pos - 1) (Regexp.sourceOffset input offset) + 1))
                 | None -> VInt 0L)
     | _ -> VNull
 
@@ -4259,7 +4260,7 @@ let private regexpSubstrFn (collation: Collation.Collation) : Scalar =
 
                 match nthMatch regex input.Text start occurrence with
                 | Some m ->
-                    let start = Regexp.sourceOffset input m.Index
+                    let start = max (pos - 1) (Regexp.sourceOffset input m.Index)
                     let finish = Regexp.sourceOffset input (m.Index + m.Length)
                     VString(source.Substring(start, finish - start))
                 | None -> VNull)
@@ -4284,19 +4285,35 @@ let private replacementText (source: string) (input: Regexp.PreparedInput) (repl
         repl,
         @"\$(\d+)",
         fun token ->
-            let index =
-                match Int32.TryParse token.Groups.[1].Value with
-                | true, value when value < m.Groups.Count -> value
-                | _ -> raise (SqlError(3686, "Index out of bounds in regular expression search."))
+            let digits = token.Groups.[1].Value
+            let mutable index = 0
+            let mutable consumed = 0
+            let mutable group = None
+
+            while consumed < digits.Length do
+                let digit = int digits[consumed] - int '0'
+
+                if index <= (m.Groups.Count - 1 - digit) / 10 then
+                    index <- index * 10 + digit
+
+                    if index < m.Groups.Count then
+                        group <- Some(index, consumed + 1)
+
+                consumed <- consumed + 1
+
+            let index, suffix =
+                match group with
+                | Some(index, length) -> index, digits.Substring length
+                | None -> raise (SqlError(3686, "Index out of bounds in regular expression search."))
 
             let group = m.Groups[index]
 
             if group.Success then
                 let start = Regexp.sourceOffset input group.Index
                 let finish = Regexp.sourceOffset input (group.Index + group.Length)
-                source.Substring(start, finish - start)
+                source.Substring(start, finish - start) + suffix
             else
-                ""
+                suffix
     )
 
 let private replaceMatches (regex: Regex) (input: Regexp.PreparedInput) (source: string) pos occurrence repl =
@@ -4310,7 +4327,7 @@ let private replaceMatches (regex: Regex) (input: Regexp.PreparedInput) (source:
     builder.Append(source, 0, sourceStart) |> ignore
 
     while m.Success do
-        let matchStart = Regexp.sourceOffset input m.Index
+        let matchStart = max current (Regexp.sourceOffset input m.Index)
         let matchEnd = Regexp.sourceOffset input (m.Index + m.Length)
         builder.Append(source, current, matchStart - current) |> ignore
         count <- count + 1
