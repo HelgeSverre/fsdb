@@ -4612,7 +4612,7 @@ let tests =
                     runDefault store (sprintf "INSERT INTO t VALUES ('%s')" pathological) |> ignore
 
                     match runDefault store "SELECT s FROM t WHERE s REGEXP '(a+)+$'" with
-                    | Err(3699, "Regular expression operation timed out.") -> ()
+                    | Err(3699, "Timeout exceeded in regular expression match.") -> ()
                     | other -> failtestf "expected a REGEXP timeout, got %A" other
 
                 testCase "LIKE BINARY is case-sensitive, unlike plain LIKE"

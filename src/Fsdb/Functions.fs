@@ -4176,7 +4176,7 @@ let private withRegexTimeout operation =
     try
         operation ()
     with :? RegexMatchTimeoutException ->
-        raise (SqlError(3699, "Regular expression operation timed out."))
+        raise (SqlError(3699, "Timeout exceeded in regular expression match."))
 
 /// The `occurrence`-th match (1-based) at or after 1-based `pos` — MySQL's
 /// pos/occurrence pair, common to all four REGEXP_* functions. `pos`

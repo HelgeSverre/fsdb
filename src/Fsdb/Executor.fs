@@ -987,7 +987,7 @@ let private regexpOp (coll: Collation.Collation option) (subject: Value) (patter
             try
                 Ok(boolToValue (regex.IsMatch((Regexp.prepareInput None pat text).Text)))
             with :? RegexMatchTimeoutException ->
-                Error(3699, "Regular expression operation timed out.")
+                Error(3699, "Timeout exceeded in regular expression match.")
 
 /// The three pieces of context `evalExpr` needs to resolve a `Col`/`FuncCall`
 /// against, bundled into one record rather than three loose parameters
