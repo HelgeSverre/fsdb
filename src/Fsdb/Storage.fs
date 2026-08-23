@@ -121,26 +121,31 @@ let private compareIndexedValues (collationName: string option) (left: Value) (r
         |> fun collation -> collation.Compare left right
     | _ -> compareTotal left right
 
+let private compareIndexedKeys (collations: string option list) (left: Value list) (right: Value list) =
+    List.zip3 collations left right
+    |> List.fold (fun comparison (collation, left, right) ->
+        if comparison = 0 then compareIndexedValues collation left right else comparison) 0
+
 [<CustomEquality; CustomComparison>]
-type SecondaryOrderEntry = private { CollationName: string option; Value: Value; RowId: RowId } with
+type SecondaryOrderEntry = private { CollationNames: string option list; Values: Value list; RowId: RowId } with
 
     override this.Equals other =
         match other with
         | :? SecondaryOrderEntry as other ->
-            this.CollationName = other.CollationName
-            && compareIndexedValues this.CollationName this.Value other.Value = 0
+            this.CollationNames = other.CollationNames
+            && compareIndexedKeys this.CollationNames this.Values other.Values = 0
             && this.RowId = other.RowId
         | _ -> false
 
-    override this.GetHashCode() = hash this.CollationName
+    override this.GetHashCode() = hash this.CollationNames
 
     interface IComparable with
         member this.CompareTo other =
             match other with
             | :? SecondaryOrderEntry as other ->
-                match Operators.compare this.CollationName other.CollationName with
+                match Operators.compare this.CollationNames other.CollationNames with
                 | 0 ->
-                    match compareIndexedValues this.CollationName this.Value other.Value with
+                    match compareIndexedKeys this.CollationNames this.Values other.Values with
                     | 0 -> Operators.compare this.RowId other.RowId
                     | comparison -> comparison
                 | comparison -> comparison
@@ -150,7 +155,7 @@ type SecondaryOrder = Map<string, ImmutableSortedSet<SecondaryOrderEntry>>
 
 type private SecondaryOrderSlice =
     { IndexName: string
-      ColumnIndex: int
+      ColumnIndices: int list
       Entries: ImmutableSortedSet<SecondaryOrderEntry>
       First: int
       AfterLast: int }
@@ -161,8 +166,7 @@ type private SecondaryOrderSlice =
 /// enforced via `UniqueIndex` on every `INSERT`/`UPDATE`/`upsertRows`/
 /// `DELETE`; `ForeignKeys` are enforced on `INSERT`/`UPDATE`/`DELETE` (see
 /// `checkFkParents`/`cascadeDelete`, also `UniqueIndex`-accelerated on the
-/// parent side), gated by `Store.ForeignKeyChecks`. `SecondaryIndex` holds
-/// derived equality buckets for one-column, non-unique B-tree indexes.
+/// parent side), gated by `Store.ForeignKeyChecks`.
 type Table =
     { OriginalName: string
       Columns: ColumnDef list
@@ -185,10 +189,10 @@ type Table =
       /// maps preserve catalog snapshots; keys containing NULL are absent,
       /// matching MySQL uniqueness semantics.
       UniqueIndex: Map<string, Map<string, RowId>>
-      /// One-column non-unique B-tree keys map equality keys to stable row
+      /// Non-unique B-tree keys map equality keys to stable row
       /// identities. Buckets avoid per-row tree-position lookup for equality.
       SecondaryIndex: Map<string, Map<string, Set<RowId>>>
-      /// One-column non-unique B-tree entries support bounded ordered seeks.
+      /// Lexicographic B-tree entries support bounded ordered seeks.
       SecondaryOrder: SecondaryOrder }
 
     /// `RowsArray` as a plain list, in scan order — a fresh O(row count)
@@ -1507,8 +1511,7 @@ let private uniqueKeyGroups (table: Table) : (string * int list) list =
 
 type private SecondaryKeyGroup =
     { Name: string
-      Indices: int list
-      OrderIndex: int option }
+      Indices: int list }
 
 let private secondaryKeyGroups (table: Table) : SecondaryKeyGroup list =
     table.Indexes
@@ -1524,8 +1527,7 @@ let private secondaryKeyGroups (table: Table) : SecondaryKeyGroup list =
                 else
                     Some
                         { Name = index.Name
-                          Indices = indices
-                          OrderIndex = if indices.Length = 1 then Some indices.Head else None })
+                          Indices = indices })
         | _ -> None)
 
 /// Stable equality key for values already coerced into a table column's
@@ -1621,17 +1623,18 @@ let private rebuildSecondaryIndex (table: Table) : Map<string, Map<string, Set<R
 
 let private rebuildSecondaryOrder (table: Table) : SecondaryOrder =
     secondaryKeyGroups table
-    |> List.choose (fun group ->
-        group.OrderIndex
-        |> Option.map (fun index ->
-            let entries: ImmutableSortedSet<SecondaryOrderEntry> =
-                table.RowsArray.Indexed
-                |> Seq.fold
-                    (fun entries (rowId, row) ->
-                        entries.Add { CollationName = table.Columns.[index].Collation; Value = row.[index]; RowId = rowId })
-                    ImmutableSortedSet<SecondaryOrderEntry>.Empty
+    |> List.map (fun group ->
+        let entries: ImmutableSortedSet<SecondaryOrderEntry> =
+            table.RowsArray.Indexed
+            |> Seq.fold
+                (fun entries (rowId, row) ->
+                    entries.Add
+                        { CollationNames = group.Indices |> List.map (fun index -> table.Columns.[index].Collation)
+                          Values = group.Indices |> List.map (fun index -> row.[index])
+                          RowId = rowId })
+                ImmutableSortedSet<SecondaryOrderEntry>.Empty
 
-            group.Name, entries))
+        group.Name, entries)
     |> Map.ofList
 
 /// Bumped once per `reindexTable` call — the full-scan rebuild it wraps is
@@ -2060,25 +2063,26 @@ let private reindexRow
         secondaryGroups
         |> List.fold
             (fun indexes keyGroup ->
-                match keyGroup.OrderIndex with
-                | None -> indexes
-                | Some index ->
-                    let entry rowId (row: Value[]) = { CollationName = columns.[index].Collation; Value = row.[index]; RowId = rowId }
-                    let entries = Map.find keyGroup.Name indexes
+                let entry rowId (row: Value[]) =
+                    { CollationNames = keyGroup.Indices |> List.map (fun index -> columns.[index].Collation)
+                      Values = keyGroup.Indices |> List.map (fun index -> row.[index])
+                      RowId = rowId }
 
-                    let entries =
-                        removed
-                        |> Option.fold
-                            (fun (entries: ImmutableSortedSet<SecondaryOrderEntry>) (rowId, row) -> entries.Remove(entry rowId row))
-                            entries
+                let entries = Map.find keyGroup.Name indexes
 
-                    let entries =
-                        added
-                        |> Option.fold
-                            (fun (entries: ImmutableSortedSet<SecondaryOrderEntry>) (rowId, row) -> entries.Add(entry rowId row))
-                            entries
+                let entries =
+                    removed
+                    |> Option.fold
+                        (fun (entries: ImmutableSortedSet<SecondaryOrderEntry>) (rowId, row) -> entries.Remove(entry rowId row))
+                        entries
 
-                    Map.add keyGroup.Name entries indexes)
+                let entries =
+                    added
+                    |> Option.fold
+                        (fun (entries: ImmutableSortedSet<SecondaryOrderEntry>) (rowId, row) -> entries.Add(entry rowId row))
+                        entries
+
+                Map.add keyGroup.Name entries indexes)
             secondaryOrder
 
     uniqueIndex, secondaryIndex, secondaryOrder
@@ -2328,8 +2332,8 @@ let private trySecondaryOrderSliceInTable
                 |> Map.tryFind indexName
                 |> Option.map (fun entries ->
                     let entry value rowId =
-                        { CollationName = table.Columns.[index].Collation
-                          Value = value
+                        { CollationNames = [ table.Columns.[index].Collation ]
+                          Values = [ value ]
                           RowId = rowId }
 
                     let insertionIndex entry =
@@ -2351,7 +2355,7 @@ let private trySecondaryOrderSliceInTable
                         | Some(value, false) -> insertionIndex (entry value (RowId.create Int32.MinValue))
 
                     { IndexName = indexName
-                      ColumnIndex = index
+                      ColumnIndices = [ index ]
                       Entries = entries
                       First = max 0 first
                       AfterLast = max 0 (min entries.Count afterLast) })
@@ -2374,7 +2378,7 @@ let private trySecondaryRangeLookupInTable
             |> Seq.choose (fun entry -> table.RowsArray.TryFind entry.RowId |> Option.map (fun row -> entry.RowId, row))
             |> List.ofSeq
 
-        slice.IndexName, slice.ColumnIndex, table.Columns, rows)
+        slice.IndexName, slice.ColumnIndices.Head, table.Columns, rows)
 
 let trySecondaryRangeLookup
     (store: Store)
@@ -2403,7 +2407,7 @@ let private orderedEntries (direction: Direction) (slice: SecondaryOrderSlice) :
 
                 while
                     first > slice.First
-                    && compareIndexedValues value.CollationName slice.Entries.[first - 1].Value value.Value = 0 do
+                    && compareIndexedKeys value.CollationNames slice.Entries.[first - 1].Values value.Values = 0 do
                     first <- first - 1
 
                 for position in first .. last do
@@ -2429,7 +2433,7 @@ let trySecondaryOrderedLookup
                 orderedEntries direction slice
                 |> Seq.choose (fun entry -> table.RowsArray.TryFind entry.RowId)
 
-            slice.IndexName, slice.ColumnIndex, table.Columns, max 0 (slice.AfterLast - slice.First), rows))
+            slice.IndexName, slice.ColumnIndices.Head, table.Columns, max 0 (slice.AfterLast - slice.First), rows))
 
 /// The equality-index probe in the order execution considers it: a unique
 /// key first for each WHERE equality, then an ordinary B-tree bucket.
