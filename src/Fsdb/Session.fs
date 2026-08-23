@@ -130,6 +130,12 @@ type TransactionIsolation =
     | RepeatableRead
     | Serializable
 
+type Savepoint =
+    { Sequence: int
+      BaseCatalog: Catalog
+      Catalog: Catalog
+      PendingEventCount: int }
+
 /// One open transaction. `Snapshot` is private until COMMIT. `BaseCatalog`
 /// distinguishes its concrete changes from committed rows: repeatable read
 /// retains one base, while read committed replaces both at each statement.
@@ -140,15 +146,14 @@ type Transaction =
       ReadOnly: bool
       /// Set after the first database statement seeds a repeatable-read view.
       Seeded: bool
-      /// Each savepoint's establishment order (see `NextSavepointSeq`), base
-      /// catalog, private catalog, and pending-event count.
+      /// Savepoint state includes both catalog roots and the event-buffer cut.
       /// `ROLLBACK TO SAVEPOINT` truncates the buffer so WAL never sees writes
       /// the savepoint rollback just undid. The order lets `ROLLBACK TO
       /// SAVEPOINT`/`RELEASE SAVEPOINT` drop every savepoint established
       /// *after* the named one, matching real MySQL — a plain `Map` alone
       /// has no notion of "after", since re-`SAVEPOINT`-ing an existing name
       /// moves it, not creates a second entry.
-      Savepoints: Map<string, int * Catalog * Catalog * int>
+      Savepoints: Map<string, Savepoint>
       /// Monotonically increasing counter, one `SAVEPOINT` = one tick —
       /// never reused even if the savepoint it tagged is later dropped, so
       /// two savepoints established back-to-back with no write between them

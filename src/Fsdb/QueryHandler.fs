@@ -1085,7 +1085,10 @@ let startTransactionStatement (session: Session) : Session =
 
         let savepoints =
             tx.Savepoints
-            |> Map.map (fun _ (seq, _, _, eventCount) -> seq, baseCatalog, baseCatalog, eventCount)
+            |> Map.map (fun _ savepoint ->
+                { savepoint with
+                    BaseCatalog = baseCatalog
+                    Catalog = baseCatalog })
 
         { session with
             Tx =
@@ -1125,38 +1128,47 @@ let private savepoint (name: string) (session: Session) : Session * QueryResult 
             Tx =
                 Some
                     { tx with
-                        Savepoints = Map.add name (seq, tx.BaseCatalog, tx.Snapshot.Catalog, eventCount) tx.Savepoints
+                        Savepoints =
+                            Map.add
+                                name
+                                { Sequence = seq
+                                  BaseCatalog = tx.BaseCatalog
+                                  Catalog = tx.Snapshot.Catalog
+                                  PendingEventCount = eventCount }
+                                tx.Savepoints
                         NextSavepointSeq = seq + 1 } },
         Affected 0UL
     | None -> session, Affected 0UL // unreachable: beginTransaction always sets Tx
 
 let private rollbackToSavepoint (name: string) (session: Session) : Session * QueryResult =
     match session.Tx |> Option.bind (fun tx -> Map.tryFind name tx.Savepoints |> Option.map (fun seed -> tx, seed)) with
-    | Some(tx, (seq, baseCatalog, catalog, eventCount)) ->
+    | Some(tx, savepoint) ->
         // Real MySQL never rolls back a burned AUTO_INCREMENT id — not even
         // a savepoint rollback (`bumpAutoIncrementsInto`'s doc covers the
         // full-ROLLBACK case, which is a separate code path from this one).
         // `catalog` is the savepoint's own stale copy of every `NextAutoId`,
         // so bump it back up to whatever this transaction ran ahead to
         // since, before wholesale-replacing the snapshot's catalog with it.
-        let catalog = Storage.bumpAutoIncrements tx.Snapshot.Catalog catalog
+        let catalog = Storage.bumpAutoIncrements tx.Snapshot.Catalog savepoint.Catalog
         Storage.setCatalog tx.Snapshot catalog
         // Drop every event this transaction buffered after the savepoint —
         // otherwise a WAL replay would apply writes the savepoint rollback
         // just undid.
         tx.Snapshot.PendingEvents
-        |> Option.iter (fun buffer -> if buffer.Count > eventCount then buffer.RemoveRange(eventCount, buffer.Count - eventCount))
+        |> Option.iter (fun buffer ->
+            if buffer.Count > savepoint.PendingEventCount then
+                buffer.RemoveRange(savepoint.PendingEventCount, buffer.Count - savepoint.PendingEventCount))
 
         // Real MySQL also destroys every savepoint established *after* the
         // one rolled back to — the named savepoint itself survives (a
         // second `ROLLBACK TO` naming it again is legal).
-        let survivors = tx.Savepoints |> Map.filter (fun _ (s, _, _, _) -> s <= seq)
+        let survivors = tx.Savepoints |> Map.filter (fun _ candidate -> candidate.Sequence <= savepoint.Sequence)
 
         { session with
             Tx =
                 Some
                     { tx with
-                        BaseCatalog = baseCatalog
+                        BaseCatalog = savepoint.BaseCatalog
                         Savepoints = survivors } },
         Affected 0UL
     | None -> session, savepointNotFound name
@@ -1165,8 +1177,8 @@ let private rollbackToSavepoint (name: string) (session: Session) : Session * Qu
 /// established after it too.
 let private releaseSavepoint (name: string) (session: Session) : Session * QueryResult =
     match session.Tx |> Option.bind (fun tx -> Map.tryFind name tx.Savepoints |> Option.map (fun seed -> tx, seed)) with
-    | Some(tx, (seq, _, _, _)) ->
-        let survivors = tx.Savepoints |> Map.filter (fun _ (s, _, _, _) -> s < seq)
+    | Some(tx, savepoint) ->
+        let survivors = tx.Savepoints |> Map.filter (fun _ candidate -> candidate.Sequence < savepoint.Sequence)
         { session with Tx = Some { tx with Savepoints = survivors } }, Affected 0UL
     | None -> session, savepointNotFound name
 
