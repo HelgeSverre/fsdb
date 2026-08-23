@@ -1961,7 +1961,8 @@ let mysqlViewsColumns: ColumnDef list =
       sysCol "view_definition" TText false (Some(VString ""))
       sysCol "column_names" TText false (Some(VString ""))
       sysCol "created" (TDateTime 2) true None
-      sysCol "definer" (TChar 93) false (Some(VString "")) ]
+      sysCol "definer" (TChar 93) false (Some(VString ""))
+      sysCol "check_option" (TChar 8) false (Some(VString "NONE")) ]
 
 /// Row-backed CHECK definitions. Keeping these beside views/triggers avoids
 /// changing the binary Table snapshot layout: ordinary row WAL events carry
@@ -2024,6 +2025,20 @@ let ensureMysqlSchema (store: Store) : unit =
 
     if not (Map.containsKey "views" dbRef.Value) then
         dbRef.Value <- Map.add "views" (sysTable "views" mysqlViewsColumns []) dbRef.Value
+    else
+        let views = dbRef.Value.["views"]
+
+        if views.Columns.Length < mysqlViewsColumns.Length then
+            let pad = List.skip views.Columns.Length mysqlViewsColumns
+            let fill = pad |> List.map (fun column -> match column.Default with Some(DConst value) -> value | _ -> VNull) |> Array.ofList
+
+            dbRef.Value <-
+                Map.add
+                    "views"
+                    { views with
+                        Columns = views.Columns @ pad
+                        RowsArray = views.RowsArray |> RowStore.map (fun row -> Array.append row fill) }
+                    dbRef.Value
 
     if not (Map.containsKey "check_constraints" dbRef.Value) then
         dbRef.Value <- Map.add "check_constraints" (sysTable "check_constraints" mysqlCheckConstraintsColumns []) dbRef.Value

@@ -100,13 +100,44 @@ let tests =
                   [ [ Some "2"; Some "hidden"; Some "1" ]; [ Some "3"; Some "invisible"; None ] ]
                   "only rows selected by the view predicate are updateable or deletable"
 
-          testCase "WITH CHECK OPTION refuses view creation"
+          testCase "WITH CHECK OPTION validates direct view writes"
           <| fun _ ->
-              let store = setup ()
+              let store = Fsdb.Storage.create ()
+              expectOk (run store "CREATE TABLE guarded_rows (id INT PRIMARY KEY, n INT)") "create table"
+              expectOk
+                  (run store "CREATE VIEW guarded AS SELECT id, n FROM guarded_rows WHERE n > 0 WITH CHECK OPTION")
+                  "create guarded view"
 
-              match run store "CREATE VIEW guarded AS SELECT id, name FROM vendors WHERE id = 1 WITH CHECK OPTION" with
-              | Err(1235, "WITH CHECK OPTION is not supported") -> ()
-              | other -> failtestf "expected CHECK OPTION refusal, got %A" other
+              expectOk (run store "INSERT INTO guarded VALUES (1, 1)") "insert visible row"
+
+              [ "INSERT INTO guarded VALUES (2, 0)"
+                "UPDATE guarded SET n = 0 WHERE id = 1"
+                "REPLACE INTO guarded VALUES (2, 0)"
+                "INSERT INTO guarded VALUES (1, 2) ON DUPLICATE KEY UPDATE n = 0" ]
+              |> List.iter (fun sql ->
+                  match run store sql with
+                  | Err(1369, "CHECK OPTION failed 'fsdb.guarded'") -> ()
+                  | other -> failtestf "expected CHECK OPTION failure for %s, got %A" sql other)
+
+              expectOk (run store "UPDATE IGNORE guarded SET n = 0 WHERE id = 1") "ignore guarded update"
+
+              Expect.equal (rows store "SELECT * FROM guarded_rows") [ [ Some "1"; Some "1" ] ] "failed writes are atomic"
+
+              match run store "SELECT CHECK_OPTION, IS_UPDATABLE FROM information_schema.views WHERE table_name = 'guarded'" with
+              | ResultSet(_, [ [ Some "CASCADED"; Some "YES" ] ]) -> ()
+              | other -> failtestf "expected guarded view metadata, got %A" other
+
+              match Fsdb.InformationSchema.showCreateView store.Catalog "fsdb" "guarded" with
+              | Ok(_, [ [ _; Some ddl; _; _ ] ]) ->
+                  Expect.stringContains ddl "WITH CASCADED CHECK OPTION" "SHOW CREATE retains the option"
+              | other -> failtestf "expected SHOW CREATE VIEW, got %A" other
+
+              match run store "CREATE VIEW grouped AS SELECT n, COUNT(*) AS c FROM guarded_rows GROUP BY n WITH CHECK OPTION" with
+              | Err(1368, "CHECK OPTION on non-updatable view 'fsdb.grouped'") -> ()
+              | other -> failtestf "expected non-updatable CHECK OPTION failure, got %A" other
+
+              expectOk (run store "CREATE VIEW check_text AS SELECT 'WITH CHECK OPTION' AS phrase") "create literal view"
+              Expect.equal (rows store "SELECT * FROM check_text") [ [ Some "WITH CHECK OPTION" ] ] "literal tail is not a view clause"
 
           testCase "a view predicate with a subquery is not writable"
           <| fun _ ->
@@ -229,12 +260,17 @@ let tests =
                   expectOk (run store "CREATE TABLE t (id INT PRIMARY KEY)") "create table"
                   expectOk (run store "INSERT INTO t VALUES (1), (2)") "seed"
                   expectOk (run store "CREATE VIEW doubled AS SELECT id, id * 2 AS n FROM t") "create view"
+                  expectOk (run store "CREATE VIEW positive AS SELECT id FROM t WHERE id > 0 WITH LOCAL CHECK OPTION") "create guarded view"
 
                   let reloaded = Fsdb.Persistence.load dir
                   Expect.equal
                       (rows reloaded "SELECT * FROM doubled ORDER BY id")
                       [ [ Some "1"; Some "2" ]; [ Some "2"; Some "4" ] ]
                       "reloaded view"
+
+                  match run reloaded "INSERT INTO positive VALUES (0)" with
+                  | Err(1369, "CHECK OPTION failed 'fsdb.positive'") -> ()
+                  | other -> failtestf "expected persisted CHECK OPTION, got %A" other
               finally
                   System.IO.Directory.Delete(dir, true)
 

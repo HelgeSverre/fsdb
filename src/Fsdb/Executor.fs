@@ -36,6 +36,12 @@ type private TriggerRowScope =
       Old: Value[] option
       New: Value[] option }
 
+type private ViewCheckScope =
+    { Database: string
+      Table: string
+      View: string
+      Predicate: Expr option }
+
 type private RangeLookupBounds =
     { Column: string
       Lower: (Value * bool) option
@@ -103,6 +109,7 @@ let private viewStack = System.Threading.AsyncLocal<Set<string * string>>()
 let private variableContext = System.Threading.AsyncLocal<VariableContext option>()
 let private suppressVariableAssignments = System.Threading.AsyncLocal<bool>()
 let private triggerRowScope = System.Threading.AsyncLocal<TriggerRowScope option>()
+let private viewCheckScope = System.Threading.AsyncLocal<ViewCheckScope option>()
 
 let private withAsyncLocalValue (slot: System.Threading.AsyncLocal<'a>) (value: 'a) (body: unit -> 'b) : 'b =
     let saved = slot.Value
@@ -129,7 +136,8 @@ type private StoredView =
       Schema: string
       Definition: string
       Columns: string list
-      Definer: string }
+      Definer: string
+      CheckOption: string }
 
 type private StoredTrigger =
     { Name: string
@@ -200,7 +208,8 @@ let private tryStoredView (store: Store) (dbName: string) (viewName: string) : S
               Schema = text 1 row
               Definition = text 2 row
               Columns = text 3 row |> columns
-              Definer = if row.Length > 5 then text 5 row else "" })
+              Definer = if row.Length > 5 then text 5 row else ""
+              CheckOption = if row.Length > 6 then text 6 row else "NONE" })
 
 let private storedChecks (store: Store) (dbName: string) (tableName: string) : StoredCheck list =
     let text i (row: Value[]) = toText row.[i] |> Option.defaultValue ""
@@ -8349,29 +8358,31 @@ let private substituteValuesFunc (columnIndex: Map<string, int list>) (candidate
         | _ -> None)
 
 type private UpdatableView =
-    { Database: string
+    { ViewDatabase: string
+      ViewName: string
+      Database: string
       Table: string
       Columns: Map<string, string>
       OrderedColumns: string list
       Predicate: Expr option
-      Definer: string }
+      Definer: string
+      CheckOption: bool }
 
-let private tryUpdatableView (store: Store) (dbName: string) (viewName: string) : UpdatableView option =
-    let simpleSelect (view: StoredView) (select: SelectStmt) =
-        match select.From with
-        | Some(FromTable source)
-            when select.Joins.IsEmpty
-                 && not select.Distinct
-                 && not select.CalculateFoundRows
-                 && select.GroupBy.IsEmpty
-                 && not select.Rollup
-                 && select.Windows.IsEmpty
-                 && select.Ctes.IsEmpty
-                 && select.Having.IsNone
-                 && select.OrderBy.IsEmpty
-                 && select.Limit.IsNone
-                 && select.Offset.IsNone
-                 && not select.Locking ->
+let private updatableViewOfSelect (view: StoredView) (select: SelectStmt) : UpdatableView option =
+    match select.From with
+    | Some(FromTable source)
+        when select.Joins.IsEmpty
+             && not select.Distinct
+             && not select.CalculateFoundRows
+             && select.GroupBy.IsEmpty
+             && not select.Rollup
+             && select.Windows.IsEmpty
+             && select.Ctes.IsEmpty
+             && select.Having.IsNone
+             && select.OrderBy.IsEmpty
+             && select.Limit.IsNone
+             && select.Offset.IsNone
+             && not select.Locking ->
             let sourceNames = [ source.Table; source.Alias |> Option.defaultValue source.Table ]
             let aggregateNames = set [ "COUNT"; "SUM"; "AVG"; "MIN"; "MAX"; "GROUP_CONCAT" ]
             let rec simplePredicate =
@@ -8415,20 +8426,24 @@ let private tryUpdatableView (store: Store) (dbName: string) (viewName: string) 
                     None
                 else
                     Some(
-                        { Database = source.Database |> Option.defaultValue view.Schema
+                        { ViewDatabase = view.Schema
+                          ViewName = view.Name
+                          Database = source.Database |> Option.defaultValue view.Schema
                           Table = source.Table
                           Columns = List.zip outputNames (sourceNames |> List.map snd) |> List.map (fun (viewColumn, baseColumn) -> viewColumn.ToLowerInvariant(), baseColumn) |> Map.ofList
                           OrderedColumns = outputNames
                           Predicate = select.Where |> Option.map (rewriteExprWith (function QualifiedCol(_, column) -> Some(Col column) | _ -> None))
-                          Definer = view.Definer }: UpdatableView
+                          Definer = view.Definer
+                          CheckOption = not (view.CheckOption.Equals("NONE", System.StringComparison.OrdinalIgnoreCase)) }: UpdatableView
                     )
-        | _ -> None
+    | _ -> None
 
+let private tryUpdatableView (store: Store) (dbName: string) (viewName: string) : UpdatableView option =
     match tryStoredView store dbName viewName with
     | None -> None
     | Some view ->
         match Parser.parse view.Definition with
-        | Ok(Select select) -> simpleSelect view select
+        | Ok(Select select) -> updatableViewOfSelect view select
         | _ -> None
 
 let private rewriteViewExpression (columns: Map<string, string>) (expression: Expr) =
@@ -10258,13 +10273,41 @@ let rec executeAs
                 finally
                     triggerChain.Value <- chain
 
+    let validateViewCandidate (runStore: Store) (db: string) (table: string) (columns: ColumnDef list) (candidate: Value[]) =
+        match viewCheckScope.Value with
+        | Some scope
+            when scope.Database.Equals(db, System.StringComparison.OrdinalIgnoreCase)
+                 && scope.Table.Equals(table, System.StringComparison.OrdinalIgnoreCase) ->
+            match scope.Predicate with
+            | None -> Ok candidate
+            | Some predicate ->
+                let context =
+                    contextFactory
+                        runStore
+                        registry
+                        db
+                        (columnIndexOf columns)
+                        (singleQualifier table columns)
+                        None
+                        candidate
+
+                match evalExpr { context with Clause = WhereClause } predicate with
+                | Ok value when truthy value = Some true -> Ok candidate
+                | Ok _ -> Error(ExpressionError(1369, sprintf "CHECK OPTION failed '%s'" scope.View))
+                | Error error -> Error(ExpressionError error)
+        | _ -> Ok candidate
+
     let prepareInsertRow (runStore: Store) (db: string) (table: string) (columns: ColumnDef list) (candidate: Value[]) =
+        let finish candidate =
+            computeGeneratedRow runStore registry db table columns candidate
+            |> Result.bind (validateViewCandidate runStore db table columns)
+
         match beforeInsertTriggers runStore db table with
-        | [] -> computeGeneratedRow runStore registry db table columns candidate
+        | [] -> finish candidate
         | triggers ->
             match fireTriggers runStore db table Before TriggerInsert triggers [ None, Some candidate ] with
             | Some(Err(code, message)) -> Error(ExpressionError(code, message))
-            | _ -> computeGeneratedRow runStore registry db table columns candidate
+            | _ -> finish candidate
 
     /// Runs an insert branch's storage write and fires AFTER INSERT triggers with
     /// MySQL's statement atomicity: when triggers exist, the insert and
@@ -10356,7 +10399,9 @@ let rec executeAs
             let columnIndex = columnIndexOf tableColumns
 
             finishInsert db table (fun s ->
-                let computeGenerated = computeGeneratedRow s registry db table tableColumns
+                let computeGenerated candidate =
+                    computeGeneratedRow s registry db table tableColumns candidate
+                    |> Result.bind (validateViewCandidate s db table tableColumns)
 
                 let applyUpdate existing candidate =
                     onDuplicateUpdater table tableColumns columnIndex onDuplicateUpdate existing candidate
@@ -10381,6 +10426,24 @@ let rec executeAs
                     cols
                     rowsValues
                     (prepareInsertRow targetStore db table tableColumns))
+
+    let executeViewWrite (view: UpdatableView) statement =
+        match checkStoredDefiner store view.Definer view.Database statement with
+        | Error(code, message) -> ids, Err(code, message)
+        | Ok() ->
+            let execute () = executeAs store registry dbName ids foundRows currentAccount statement
+
+            if view.CheckOption then
+                withAsyncLocalValue
+                    viewCheckScope
+                    (Some
+                        { Database = view.Database
+                          Table = view.Table
+                          View = view.ViewDatabase + "." + view.ViewName
+                          Predicate = view.Predicate })
+                    execute
+            else
+                execute ()
 
     match stmt with
     | SetTriggerNew _ -> ids, Err(1064, "SET NEW is only valid in a trigger body")
@@ -10950,7 +11013,32 @@ let rec executeAs
 
     | CreateView(name, columns, definition, orReplace) ->
         let db, viewName = splitQualified dbName name
-        let hasCheckOption = Regex.IsMatch(definition, @"\bWITH\s+(?:(?:CASCADED|LOCAL)\s+)?CHECK\s+OPTION\s*$", RegexOptions.IgnoreCase)
+        let parsedDefinition = Parser.parse definition
+        let trailingCheckOption =
+            Regex.Match(definition, @"\bWITH\s+(?:(CASCADED|LOCAL)\s+)?CHECK\s+OPTION\s*$", RegexOptions.IgnoreCase)
+
+        let checkOptionMatch =
+            match parsedDefinition with
+            | Result.Ok _ -> None
+            | Result.Error _ when trailingCheckOption.Success -> Some trailingCheckOption
+            | Result.Error _ -> None
+
+        let checkOption =
+            match checkOptionMatch with
+            | None -> "NONE"
+            | Some checkOption when checkOption.Groups.[1].Value = "" -> "CASCADED"
+            | Some checkOption -> checkOption.Groups.[1].Value.ToUpperInvariant()
+
+        let viewDefinition =
+            match checkOptionMatch with
+            | Some checkOption -> definition.Substring(0, checkOption.Index).TrimEnd()
+            | None -> definition
+
+        let parsedView =
+            match checkOptionMatch with
+            | Some _ -> Parser.parse viewDefinition
+            | None -> parsedDefinition
+
         let duplicateColumns =
             columns
             |> List.countBy (fun column -> column.ToLowerInvariant())
@@ -10965,14 +11053,28 @@ let rec executeAs
             System.String.Equals(db, defaultDatabase, System.StringComparison.OrdinalIgnoreCase)
             && store.VirtualTables.ContainsKey(normalizeTableName viewName)
 
-        match Parser.parse definition, Map.containsKey db store.Catalog, duplicateColumns with
-        | _, _, _ when hasCheckOption -> ids, Err(1235, "WITH CHECK OPTION is not supported")
+        let supportsCheckOption = function
+            | Select select ->
+                updatableViewOfSelect
+                    { Name = viewName
+                      Schema = db
+                      Definition = viewDefinition
+                      Columns = columns
+                      Definer = currentAccount.Name + "@" + currentAccount.Host
+                      CheckOption = checkOption }
+                    select
+                |> Option.isSome
+            | _ -> false
+
+        match parsedView, Map.containsKey db store.Catalog, duplicateColumns with
         | Result.Error message, _, _ -> ids, Err(1064, sprintf "View definition has a syntax error: %s" message)
         | _, false, _ -> ids, storageErr (NoSuchDatabase db)
         | _, _, Some(column, _) -> ids, Err(1060, sprintf "Duplicate column name '%s'" column)
         | Result.Ok((Select _ | Union _) as view), true, None ->
             if viewContainsSessionVariable view then
                 ids, Err(1351, "View's SELECT contains a variable or parameter")
+            elif checkOption <> "NONE" && not (supportsCheckOption view) then
+                ids, Err(1368, sprintf "CHECK OPTION on non-updatable view '%s.%s'" db viewName)
             else
                 let existing = tryStoredView store db viewName
 
@@ -11003,13 +11105,14 @@ let rec executeAs
                                 store
                                 "mysql"
                                 "views"
-                                (Some [ "view_name"; "view_schema"; "view_definition"; "column_names"; "created"; "definer" ])
+                                (Some [ "view_name"; "view_schema"; "view_definition"; "column_names"; "created"; "definer"; "check_option" ])
                                 [ [ VString viewName
                                     VString db
-                                    VString definition
+                                    VString viewDefinition
                                     VString(JsonSerializer.Serialize(columns |> List.toArray))
                                     VDateTime System.DateTime.Now
-                                    VString(currentAccount.Name + "@" + currentAccount.Host) ] ]
+                                    VString(currentAccount.Name + "@" + currentAccount.Host)
+                                    VString checkOption ] ]
                         with
                         | Ok _ -> ids, Affected 0UL
                         | Error error -> ids, storageErr error
@@ -11160,9 +11263,7 @@ let rec executeAs
             | Ok baseColumns, Ok assignments ->
                 let rewritten = Insert(view.Database + "." + view.Table, baseColumns, rowsExprs, assignments, ignoreDuplicates)
 
-                match checkStoredDefiner store view.Definer view.Database rewritten with
-                | Error(code, message) -> ids, Err(code, message)
-                | Ok() -> executeAs store registry dbName ids foundRows currentAccount rewritten
+                executeViewWrite view rewritten
 
     | Insert(table, columns, rowsExprs, onDuplicateUpdate, ignoreDuplicates) ->
         // INSERT ... VALUES expressions aren't evaluated against any row
@@ -11205,9 +11306,7 @@ let rec executeAs
             | Ok baseColumns, Ok assignments ->
                 let rewritten = InsertSelect(view.Database + "." + view.Table, baseColumns, select, assignments, ignoreDuplicates)
 
-                match checkStoredDefiner store view.Definer view.Database rewritten with
-                | Error(code, message) -> ids, Err(code, message)
-                | Ok() -> executeAs store registry dbName ids foundRows currentAccount rewritten
+                executeViewWrite view rewritten
 
     | InsertSelect(table, columns, select, onDuplicateUpdate, ignoreDuplicates) ->
         let db, table = splitQualified dbName table
@@ -11254,9 +11353,7 @@ let rec executeAs
             | Ok baseColumns ->
                 let rewritten = Replace(view.Database + "." + view.Table, baseColumns, rowsExprs)
 
-                match checkStoredDefiner store view.Definer view.Database rewritten with
-                | Error(code, message) -> ids, Err(code, message)
-                | Ok() -> executeAs store registry dbName ids foundRows currentAccount rewritten
+                executeViewWrite view rewritten
 
     | Replace(table, columns, rowsExprs) ->
         let db, table = splitQualified dbName table
@@ -11281,9 +11378,7 @@ let rec executeAs
             | Ok baseColumns ->
                 let rewritten = ReplaceSelect(view.Database + "." + view.Table, baseColumns, select)
 
-                match checkStoredDefiner store view.Definer view.Database rewritten with
-                | Error(code, message) -> ids, Err(code, message)
-                | Ok() -> executeAs store registry dbName ids foundRows currentAccount rewritten
+                executeViewWrite view rewritten
 
     | ReplaceSelect(table, columns, select) ->
         let db, table = splitQualified dbName table
@@ -11308,9 +11403,7 @@ let rec executeAs
             | Ok rewrittenAssignments ->
                 let rewritten = ReplaceSet(view.Database + "." + view.Table, rewrittenAssignments)
 
-                match checkStoredDefiner store view.Definer view.Database rewritten with
-                | Error(code, message) -> ids, Err(code, message)
-                | Ok() -> executeAs store registry dbName ids foundRows currentAccount rewritten
+                executeViewWrite view rewritten
 
     | ReplaceSet(table, assignments) ->
         let db, table = splitQualified dbName table
@@ -11373,9 +11466,7 @@ let rec executeAs
                         OrderBy = updateStmt.OrderBy |> List.map (fun (expression, direction) -> rewrite expression, direction)
                         Limit = updateStmt.Limit |> Option.map rewrite }
 
-                match checkStoredDefiner store view.Definer view.Database (Update rewritten) with
-                | Error(code, message) -> ids, Err(code, message)
-                | Ok() -> executeAs store registry dbName ids foundRows currentAccount (Update rewritten)
+                executeViewWrite view (Update rewritten)
 
     | Update updateStmt when updateStmt.Joins.IsEmpty ->
         let db, table = (updateStmt.From.Database |> Option.defaultValue dbName), updateStmt.From.Table
@@ -11451,8 +11542,14 @@ let rec executeAs
                                 match fireTriggers targetStore db table Before TriggerUpdate beforeTriggers [ Some row, Some candidate ] with
                                 | Some(Err(code, message)) -> Error(ExpressionError(code, message))
                                 | _ ->
-                                    changedRows.Add(Some(Array.copy row), Some candidate)
-                                    Ok candidate
+                                    match validateViewCandidate targetStore db table columns candidate with
+                                    | Error(ExpressionError(1369, message)) when updateStmt.Ignore ->
+                                        Diagnostics.warning 1369 message
+                                        Ok row
+                                    | Error error -> Error error
+                                    | Ok candidate ->
+                                        changedRows.Add(Some(Array.copy row), Some candidate)
+                                        Ok candidate
                             | Error error -> Error error
 
                         let candidates = narrowed |> Option.map snd

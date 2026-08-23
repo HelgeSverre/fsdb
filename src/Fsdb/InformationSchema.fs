@@ -43,7 +43,8 @@ type private ViewCatalogEntry =
       Schema: string
       Definition: string
       Created: DateTime option
-      Definer: string }
+      Definer: string
+      CheckOption: string }
 
 /// Purely resolves a stored view's output shape. The executor supplies this
 /// because it owns view-definition parsing and expression type inference.
@@ -65,7 +66,8 @@ let private viewCatalogEntries (catalog: Catalog) : ViewCatalogEntry list =
                 match row.[4] with
                 | VDateTime created -> Some created
                 | _ -> None
-              Definer = if row.Length > 5 then text 5 row else "" })
+              Definer = if row.Length > 5 then text 5 row else ""
+              CheckOption = if row.Length > 6 then text 6 row else "NONE" })
         |> List.ofSeq)
     |> Option.defaultValue []
 
@@ -1015,7 +1017,6 @@ let private isDirectUpdatableView (definition: string) =
             select.Joins.IsEmpty
             && not select.Distinct
             && not select.CalculateFoundRows
-            && select.Where.IsNone
             && select.GroupBy.IsEmpty
             && not select.Rollup
             && select.Windows.IsEmpty
@@ -1032,7 +1033,7 @@ let private isDirectUpdatableView (definition: string) =
 let private viewsRows (catalog: Catalog) : Value[] list =
     viewCatalogEntries catalog
     |> List.map (fun view ->
-        [| vs "def"; vs view.Schema; vs view.Name; vs view.Definition; vs "NONE"; vs (if isDirectUpdatableView view.Definition then "YES" else "NO"); vs view.Definer
+        [| vs "def"; vs view.Schema; vs view.Name; vs view.Definition; vs view.CheckOption; vs (if isDirectUpdatableView view.Definition then "YES" else "NO"); vs view.Definer
            vs "DEFINER"; vs "utf8mb4"; vs "utf8mb4_0900_ai_ci" |])
 
 let private routinesColumns =
@@ -1914,10 +1915,16 @@ let showCreateView (catalog: Catalog) (dbName: string) (viewName: string) : Show
     |> function
         | None -> Error(1146, sprintf "Table '%s.%s' doesn't exist" dbName viewName)
         | Some view ->
+            let checkOption =
+                if view.CheckOption.Equals("NONE", System.StringComparison.OrdinalIgnoreCase) then
+                    ""
+                else
+                    sprintf " WITH %s CHECK OPTION" view.CheckOption
+
             Ok(
                 [ "View"; "Create View"; "character_set_client"; "collation_connection" ],
                 [ [ Some view.Name
-                    Some(sprintf "CREATE VIEW `%s` AS %s" view.Name view.Definition)
+                    Some(sprintf "CREATE VIEW `%s` AS %s%s" view.Name view.Definition checkOption)
                     Some "utf8mb4"
                     Some "utf8mb4_0900_ai_ci" ] ]
             )
