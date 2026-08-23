@@ -51,10 +51,17 @@ type private IndexOrderPlan =
 type private IndexedJoinPlan =
     { Table: Table
       KeyName: string
-      ColumnIndex: int
+      ColumnIndices: int list
       Unique: bool
-      Reference: string
+      References: string list
       HasResidual: bool }
+
+type private IndexedJoinProbe =
+    { Table: Table
+      KeyName: string
+      LeftIndices: int list
+      RightIndices: int list
+      Unique: bool }
 
 /// Per-statement memo of derived-table (`FROM (SELECT ...)`) resolutions,
 /// keyed by the AST node's identity. Within one statement the same derived
@@ -4439,11 +4446,26 @@ and private tryIndexedInnerProbe
     (rightColumns: ColumnDef list)
     (physicalTable: Table option)
     (equiKeys: (int * int) list)
-    : (Table * int * string * string * int * bool) option =
+    : IndexedJoinProbe option =
     match join.Kind, join.Using, physicalTable, equiKeys with
-    | InnerJoin, [], Some table, [ leftIndex, rightIndex ] when sameIndexSemantics leftColumns.[leftIndex] rightColumns.[rightIndex] ->
-        Storage.tryEqualityIndex table rightColumns.[rightIndex].Name
-        |> Option.map (fun (keyName, columnIndex, unique) -> table, leftIndex, rightColumns.[rightIndex].Name, keyName, columnIndex, unique)
+    | InnerJoin, [], Some table, _ :: _
+        when equiKeys |> List.forall (fun (leftIndex, rightIndex) -> sameIndexSemantics leftColumns.[leftIndex] rightColumns.[rightIndex]) ->
+        let rightNames = equiKeys |> List.map (fun (_, rightIndex) -> rightColumns.[rightIndex].Name)
+
+        Storage.tryEqualityIndexForColumns table rightNames
+        |> Option.bind (fun (keyName, rightIndices, unique) ->
+            rightIndices
+            |> traverse (fun rightIndex ->
+                equiKeys
+                |> List.tryPick (fun (leftIndex, candidate) -> if candidate = rightIndex then Some leftIndex else None)
+                |> function Some leftIndex -> Ok leftIndex | None -> Error())
+            |> Result.toOption
+            |> Option.map (fun leftIndices ->
+                { Table = table
+                  KeyName = keyName
+                  LeftIndices = leftIndices
+                  RightIndices = rightIndices
+                  Unique = unique }))
     | _ -> None
 
 /// Early split on the join target: `JSON_TABLE` is lateral (its source
@@ -4790,14 +4812,24 @@ and private applyResolvedJoin
                 | _ -> false
 
             match indexedInnerProbe with
-            | Some(table, leftIndex, rightColumn, _, _, _) ->
+            | Some probe ->
                 let candidates =
                     seq {
                         for left in rowsSoFar do
                             let rightRows =
-                                Storage.tryEqualityLookupInTable store table rightColumn left.[leftIndex]
-                                |> Option.map (fun (_, rows) -> rows |> List.map snd |> Seq.ofList)
-                                |> Option.defaultValue joinRows
+                                match probe.LeftIndices, probe.RightIndices with
+                                | [ leftIndex ], [ rightIndex ] ->
+                                    Storage.tryEqualityLookupInTable store probe.Table joinColumns.[rightIndex].Name left.[leftIndex]
+                                    |> Option.map (fun (_, rows) -> rows |> List.map snd |> Seq.ofList)
+                                    |> Option.defaultValue joinRows
+                                | leftIndices, rightIndices ->
+                                    let equalities =
+                                        List.zip leftIndices rightIndices
+                                        |> List.map (fun (leftIndex, rightIndex) -> joinColumns.[rightIndex].Name, left.[leftIndex])
+
+                                    Storage.tryCompositeEqualityLookupInTable store probe.Table equalities
+                                    |> Option.map (fun lookup -> lookup.LookupRows |> List.map snd |> Seq.ofList)
+                                    |> Option.defaultValue joinRows
 
                             for right in rightRows do
                                 yield Array.append left right
@@ -8694,13 +8726,13 @@ let private indexedJoinExplainPlans
                         let equiKeys, residual = extractEquiKeys resolveQualified leftColumns.Length join.On
 
                         tryIndexedInnerProbe store join leftColumns rightColumns (Some table) equiKeys
-                        |> Option.map (fun (_, leftIndex, _, keyName, keyIndex, unique) ->
+                        |> Option.map (fun probe ->
                             joinIndex + 1,
-                            { Table = table
-                              KeyName = keyName
-                              ColumnIndex = keyIndex
-                              Unique = unique
-                              Reference = leftColumnReference leftSources leftIndex
+                            { Table = probe.Table
+                              KeyName = probe.KeyName
+                              ColumnIndices = probe.RightIndices
+                              Unique = probe.Unique
+                              References = probe.LeftIndices |> List.map (leftColumnReference leftSources)
                               HasResidual = not residual.IsEmpty })
                     | _ -> None
 
@@ -8895,8 +8927,8 @@ let rec private explainJoinBlock
                           SelectType = selectType
                           Table = Some(tref.Alias |> Option.defaultValue tref.Table)
                           Type = Some(if plan.Unique then "eq_ref" else "ref")
-                          Key = Some(plan.KeyName, explainKeyLen plan.Table.Columns.[plan.ColumnIndex])
-                          Ref = Some plan.Reference
+                          Key = Some(plan.KeyName, explainCompositeKeyLen plan.Table.Columns plan.ColumnIndices)
+                          Ref = Some(String.concat "," plan.References)
                           Rows = Some 1UL
                           Extra =
                               (if idx = tableCount - 1 then extra else [])

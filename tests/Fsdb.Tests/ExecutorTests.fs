@@ -5512,6 +5512,28 @@ let tests =
                         ()
                     | other -> failtestf "expected the unique right side to report eq_ref, got %A" other
 
+                testCase "an indexed INNER JOIN probes a composite equality key"
+                <| fun _ ->
+                    let store = newStore ()
+                    runDefault store "CREATE TABLE parent (tenant_id INT, code INT, PRIMARY KEY (tenant_id, code))" |> ignore
+                    runDefault store "CREATE TABLE child (id INT PRIMARY KEY, tenant_id INT, code INT, active INT, KEY ix_tenant_code (tenant_id, code))" |> ignore
+                    runDefault store "INSERT INTO parent VALUES (1, 10), (1, 20), (2, 10)" |> ignore
+                    runDefault store "INSERT INTO child VALUES (1, 1, 10, 1), (2, 1, 10, 0), (3, 1, 20, 1), (4, 2, 10, 1), (5, 2, 20, 1), (6, NULL, 10, 1)" |> ignore
+
+                    match
+                        runDefault
+                            store
+                            "SELECT p.tenant_id, p.code, c.id FROM parent p INNER JOIN child c ON p.code = c.code AND p.tenant_id = c.tenant_id AND c.active = 1 ORDER BY c.id"
+                    with
+                    | ResultSet(_, [ [ Some "1"; Some "10"; Some "1" ]; [ Some "1"; Some "20"; Some "3" ]; [ Some "2"; Some "10"; Some "4" ] ]) ->
+                        ()
+                    | other -> failtestf "expected composite join rows, got %A" other
+
+                    match runDefault store "EXPLAIN SELECT * FROM parent p INNER JOIN child c ON p.code = c.code AND p.tenant_id = c.tenant_id AND c.active = 1" with
+                    | ResultSet(_, [ _; [ Some "1"; Some "SIMPLE"; Some "c"; None; Some "ref"; Some "ix_tenant_code"; Some "ix_tenant_code"; Some "10"; Some "p.tenant_id,p.code"; Some "1"; Some "100.00"; Some "Using where" ] ]) ->
+                        ()
+                    | other -> failtestf "expected a composite indexed join plan, got %A" other
+
                 testCase "a composite PRIMARY KEY (out of the single-column fast path's scope) still returns correct results"
                 <| fun _ ->
                     let store = newStore ()

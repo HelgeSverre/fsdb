@@ -2246,6 +2246,65 @@ type EqualityLookup =
 
 /// Uses a fully-bound composite key. Residual predicate evaluation remains
 /// responsible for contradictory or repeated equalities.
+let tryCompositeEqualityLookupInTable
+    (store: Store)
+    (table: Table)
+    (equalities: (string * Value) list)
+    : EqualityLookup option =
+    let literalFor index =
+        equalities
+        |> List.tryPick (fun (name, value) ->
+            if System.String.Equals(name, table.Columns.[index].Name, System.StringComparison.OrdinalIgnoreCase) then
+                exactProbeValue store table index value
+            else
+                None)
+
+    let probe (name: string, indices: int list, unique: bool) =
+        if List.length indices < 2 then
+            None
+        else
+            indices
+            |> traverse (fun index ->
+                match literalFor index with
+                | Some value -> Ok value
+                | None -> Error())
+            |> Result.toOption
+            |> Option.map (fun values ->
+                let row = Array.create table.Columns.Length VNull
+                List.zip indices values |> List.iter (fun (index, value) -> row.[index] <- value)
+
+                let rows =
+                    if values |> List.contains VNull then
+                        []
+                    elif unique then
+                        encodeConstraintKey table.Columns indices row
+                        |> Option.bind (fun key -> Map.tryFind name table.UniqueIndex |> Option.bind (Map.tryFind key))
+                        |> Option.bind (fun rowId -> table.RowsArray.TryFind rowId |> Option.map (fun value -> rowId, value))
+                        |> Option.toList
+                    else
+                        let key = encodeEqualityKey table.Columns indices row
+
+                        table.SecondaryIndex
+                        |> Map.tryFind name
+                        |> Option.bind (Map.tryFind key)
+                        |> Option.defaultValue Set.empty
+                        |> Seq.choose (fun rowId -> table.RowsArray.TryFind rowId |> Option.map (fun value -> rowId, value))
+                        |> List.ofSeq
+
+                { IndexName = name
+                  ColumnIndices = indices
+                  Unique = unique
+                  LookupColumns = table.Columns
+                  LookupRows = rows })
+
+    let unique = uniqueKeyGroups table |> List.map (fun (name, indices) -> name, indices, true)
+
+    let secondary =
+        secondaryKeyGroups table
+        |> List.map (fun group -> group.Name, group.Indices, false)
+
+    unique @ secondary |> List.tryPick probe
+
 let tryCompositeEqualityLookup
     (store: Store)
     (dbName: string)
@@ -2253,60 +2312,19 @@ let tryCompositeEqualityLookup
     (equalities: (string * Value) list)
     : EqualityLookup option =
     tableAt store dbName tableName
-    |> Option.bind (fun table ->
-        let literalFor index =
-            equalities
-            |> List.tryPick (fun (name, value) ->
-                if System.String.Equals(name, table.Columns.[index].Name, System.StringComparison.OrdinalIgnoreCase) then
-                    exactProbeValue store table index value
-                else
-                    None)
+    |> Option.bind (fun table -> tryCompositeEqualityLookupInTable store table equalities)
 
-        let probe (name: string, indices: int list, unique: bool) =
-            if List.length indices < 2 then
-                None
-            else
-                indices
-                |> traverse (fun index ->
-                    match literalFor index with
-                    | Some value -> Ok value
-                    | None -> Error())
-                |> Result.toOption
-                |> Option.map (fun values ->
-                    let row = Array.create table.Columns.Length VNull
-                    List.zip indices values |> List.iter (fun (index, value) -> row.[index] <- value)
-
-                    let rows =
-                        if values |> List.contains VNull then
-                            []
-                        elif unique then
-                            encodeConstraintKey table.Columns indices row
-                            |> Option.bind (fun key -> Map.tryFind name table.UniqueIndex |> Option.bind (Map.tryFind key))
-                            |> Option.bind (fun rowId -> table.RowsArray.TryFind rowId |> Option.map (fun value -> rowId, value))
-                            |> Option.toList
-                        else
-                            let key = encodeEqualityKey table.Columns indices row
-
-                            table.SecondaryIndex
-                            |> Map.tryFind name
-                            |> Option.bind (Map.tryFind key)
-                            |> Option.defaultValue Set.empty
-                            |> Seq.choose (fun rowId -> table.RowsArray.TryFind rowId |> Option.map (fun value -> rowId, value))
-                            |> List.ofSeq
-
-                    { IndexName = name
-                      ColumnIndices = indices
-                      Unique = unique
-                      LookupColumns = table.Columns
-                      LookupRows = rows })
+let tryEqualityIndexForColumns (table: Table) (columnNames: string list) : (string * int list * bool) option =
+    columnNames
+    |> traverse (resolveColumn table.Columns)
+    |> Result.toOption
+    |> Option.bind (fun requested ->
+        let matches (_, (indices: int list), _) =
+            indices.Length = requested.Length && Set.ofList indices = Set.ofList requested
 
         let unique = uniqueKeyGroups table |> List.map (fun (name, indices) -> name, indices, true)
-
-        let secondary =
-            secondaryKeyGroups table
-            |> List.map (fun group -> group.Name, group.Indices, false)
-
-        unique @ secondary |> List.tryPick probe)
+        let secondary = secondaryKeyGroups table |> List.map (fun group -> group.Name, group.Indices, false)
+        unique @ secondary |> List.tryFind matches)
 
 let private trySecondaryOrderSliceInTable
     (store: Store)
