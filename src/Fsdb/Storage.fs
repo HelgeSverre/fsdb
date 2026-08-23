@@ -332,10 +332,10 @@ type Store =
       /// buffer as one `TransactionCommitted` on the real store — a ROLLBACK
       /// just discards the snapshot, buffer and all.
       mutable PendingEvents: ResizeArray<CommitEvent> option
-      /// Serializes `OnCommit`'s dispatch only (see `emit`) — every other
-      /// write locks only its own database's `Database ref` cell (see
-      /// `withDatabase`), so writers to different databases never wait on
-      /// each other here either. `OnCommit`'s one subscriber
+      /// Coordinates `OnCommit` dispatch, catalog membership changes, and
+      /// explicit transaction publication. Ordinary row writes lock only
+      /// their database's `Database ref` cell (see `withDatabase`), so writers
+      /// to different databases do not wait here. `OnCommit`'s one subscriber
       /// (`Persistence.attach`'s WAL appender) isn't safe to call
       /// concurrently from two databases' writer threads at once — it
       /// appends to one shared file and tracks rotation state in a plain
@@ -507,33 +507,28 @@ let setZeroDateModes (store: Store) (noZeroDate: bool) (noZeroInDate: bool) : un
 /// the note on `Persistence.applyEvent`), so it needs the same key.
 let normalizeTableName (name: string) = name.ToLowerInvariant()
 
-/// `CREATE DATABASE name` — unlike `ensureDatabase` (silent no-op used by
-/// handshake auto-create/first-write auto-vivify), this errors 1007 if it
-/// already exists; `Executor` swallows that error for `IF NOT EXISTS`, same
-/// pattern as `createTable`. `ConcurrentDictionary.TryAdd` is itself atomic,
-/// so two concurrent `CREATE DATABASE`s racing for the same name always
-/// leave exactly one winner and one honest `DatabaseExists` — no CAS/retry
-/// loop needed here at all, and (unlike the whole-catalog CAS this replaced)
-/// touching one database's dictionary entry can never be invalidated by an
-/// unrelated database's concurrent row writer.
+/// `CREATE DATABASE name` errors 1007 when the name exists. The store lock
+/// coordinates catalog membership with SERIALIZABLE snapshot validation;
+/// row writes remain sharded by database.
 let createDatabase (store: Store) (dbName: string) : Result<unit, StorageError> =
-    if store.Databases.TryAdd(dbName, ref Map.empty) then
-        emit store (Some(SchemaChanged(dbName, CreateDatabase(dbName, false))))
-        Ok()
-    else
-        Error(DatabaseExists dbName)
+    lock store.Lock (fun () ->
+        if store.Databases.TryAdd(dbName, ref Map.empty) then
+            emit store (Some(SchemaChanged(dbName, CreateDatabase(dbName, false))))
+            Ok()
+        else
+            Error(DatabaseExists dbName))
 
-/// `DROP DATABASE name` — same atomicity argument as `createDatabase`, via
-/// `ConcurrentDictionary.TryRemove`.
+/// `DROP DATABASE name` uses the same catalog-membership lock as creation.
 let dropDatabase (store: Store) (dbName: string) : Result<unit, StorageError> =
     if dbName.ToLowerInvariant() = "mysql" then
         Error(SystemSchemaAccess "mysql")
     else
-        match store.Databases.TryRemove dbName with
-        | true, _ ->
-            emit store (Some(SchemaChanged(dbName, DropDatabase(dbName, false))))
-            Ok()
-        | false, _ -> Error(NoSuchDatabase dbName)
+        lock store.Lock (fun () ->
+            match store.Databases.TryRemove dbName with
+            | true, _ ->
+                emit store (Some(SchemaChanged(dbName, DropDatabase(dbName, false))))
+                Ok()
+            | false, _ -> Error(NoSuchDatabase dbName))
 
 /// Applies `f` to `dbName`'s current table map and swaps the result into
 /// that database's own `Database ref` cell, under that cell's own lock (see
@@ -4767,6 +4762,57 @@ let mergeCatalogInto (store: Store) (baseCatalog: Catalog) (batchCatalog: Catalo
         | Some baseDb, Some batchDb ->
             let slot = store.Databases.GetOrAdd(dbName, (fun _ -> ref Map.empty))
             mergeDatabaseSlot dbName slot baseDb batchDb
+
+type private SerializableDatabase =
+    { Name: string
+      Base: Database
+      Slot: Database ref }
+
+/// Publishes a writing SERIALIZABLE transaction only when its entire read
+/// snapshot is still current. Whole-catalog validation prevents write skew
+/// without maintaining predicate read sets.
+let mergeSerializableCatalogInto (store: Store) (baseCatalog: Catalog) (batchCatalog: Catalog) : unit =
+    let changedKeys =
+        Set.union (keysOf baseCatalog) (keysOf batchCatalog)
+        |> Set.filter (fun dbName ->
+            match Map.tryFind dbName baseCatalog, Map.tryFind dbName batchCatalog with
+            | Some baseDb, Some batchDb -> not (obj.ReferenceEquals(baseDb, batchDb))
+            | None, None -> false
+            | _ -> true)
+
+    if not changedKeys.IsEmpty then
+        lock store.Lock (fun () ->
+            let slots =
+                baseCatalog
+                |> Map.toList
+                |> List.map (fun (dbName, baseDb) ->
+                    match store.Databases.TryGetValue dbName with
+                    | true, slot ->
+                        { Name = dbName
+                          Base = baseDb
+                          Slot = slot }
+                    | false, _ -> raise (LockWaitTimeout dbName))
+
+            let rec withSlots remaining publish =
+                match remaining with
+                | [] -> publish ()
+                | database :: tail -> lock database.Slot (fun () -> withSlots tail publish)
+
+            withSlots slots (fun () ->
+                for database in slots do
+                    if not (obj.ReferenceEquals(database.Slot.Value, database.Base)) then
+                        raise (LockWaitTimeout database.Name)
+
+                for dbName in changedKeys do
+                    match Map.tryFind dbName baseCatalog, Map.tryFind dbName batchCatalog with
+                    | Some _, None -> store.Databases.TryRemove dbName |> ignore
+                    | None, Some batchDb ->
+                        if not (store.Databases.TryAdd(dbName, ref batchDb)) then
+                            raise (LockWaitTimeout dbName)
+                    | Some _, Some batchDb ->
+                        let database = slots |> List.find (fun database -> database.Name = dbName)
+                        database.Slot.Value <- batchDb
+                    | None, None -> ()))
 
 let private withPointUpdateDatabase
     (store: Store)

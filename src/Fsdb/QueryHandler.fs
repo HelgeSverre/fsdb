@@ -863,7 +863,7 @@ let private validateSetAction (session: Session) (action: SetAction) : Result<un
         Error(Err(1227, "Access denied; you need (at least one of) the SUPER privilege(s) for this operation"))
     | SetTransactionIsolationAction(NextTransactionIsolation, _) when session.Tx.IsSome ->
         Error(Err(1568, "Transaction characteristics can't be changed while a transaction is in progress"))
-    | SetTransactionIsolationAction(_, (RepeatableRead | ReadCommitted)) -> Ok()
+    | SetTransactionIsolationAction(_, (RepeatableRead | ReadCommitted | Serializable)) -> Ok()
     | SetTransactionIsolationAction(_, isolation) ->
         Error(Err(1235, sprintf "This version of MySQL doesn't yet support '%s transaction isolation'" (transactionIsolationName isolation)))
     | SetVarAction(_, _, true) when not (Auth.hasGlobalPrivForAccount session.Store (accountOf session) "SUPER") ->
@@ -982,12 +982,10 @@ let private rebaseTransactionSnapshot (session: Session) (tx: Transaction) : Cat
 
     baseCatalog, snapshot
 
-/// Commits the open transaction (if any) by merging its snapshot catalog
-/// back into the shared store's (`Storage.mergeCatalogInto`, a CAS-safe
-/// three-way merge against whatever the live catalog is *right now* — not a
-/// stale copy from BEGIN — so a concurrent write to another database, or an
-/// untouched table in this one, during the transaction's lifetime survives)
-/// — a no-op, matching real MySQL, if there isn't one open.
+/// Commits the open transaction by publishing its private catalog. Ordinary
+/// isolation levels merge disjoint row changes; SERIALIZABLE validates the
+/// transaction's read snapshot before publication. No open transaction is a
+/// no-op, matching MySQL.
 let private commitSession (session: Session) : Session =
     match session.Tx with
     | Some tx ->
@@ -1004,7 +1002,10 @@ let private commitSession (session: Session) : Session =
                 raise (Storage.LockWaitTimeout dbName)
 
             try
-                Storage.mergeCatalogInto session.Store tx.BaseCatalog tx.Snapshot.Catalog
+                match tx.Isolation with
+                | Serializable -> Storage.mergeSerializableCatalogInto session.Store tx.BaseCatalog tx.Snapshot.Catalog
+                | _ -> Storage.mergeCatalogInto session.Store tx.BaseCatalog tx.Snapshot.Catalog
+
                 tx.Snapshot
             finally
                 Threading.Monitor.Exit session.Store.Lock

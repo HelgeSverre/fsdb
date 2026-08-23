@@ -2420,16 +2420,21 @@ let tests =
                       "a new session inherits the global isolation default"
               | _, other -> failtestf "expected OK, got %A" other
 
-          testCase "unsupported transaction isolation levels return 1235"
+          testCase "SERIALIZABLE is accepted and READ UNCOMMITTED remains explicit"
           <| fun _ ->
               let session = create 1 (Fsdb.Storage.create ())
 
-              for sql in
-                  [ "SET SESSION TRANSACTION ISOLATION LEVEL READ UNCOMMITTED"
-                    "SET @@transaction_isolation = 'SERIALIZABLE'" ] do
-                  match handle session sql |> snd with
-                  | Err(1235, _) -> ()
-                  | other -> failtestf "expected 1235 for %s, got %A" sql other
+              match handle session "SET @@transaction_isolation = 'SERIALIZABLE'" with
+              | configured, Affected 0UL ->
+                  match handle configured "BEGIN" |> fst with
+                  | { Tx = Some transaction } ->
+                      Expect.equal transaction.Isolation Serializable "the next transaction is serializable"
+                  | _ -> failtest "BEGIN did not create a transaction"
+              | _, other -> failtestf "expected SERIALIZABLE to be accepted, got %A" other
+
+              match handle session "SET SESSION TRANSACTION ISOLATION LEVEL READ UNCOMMITTED" |> snd with
+              | Err(1235, _) -> ()
+              | other -> failtestf "expected READ UNCOMMITTED to remain explicit, got %A" other
 
           testCase "transaction access modes, chaining, and SET CHARACTER SET are enforced"
           <| fun _ ->

@@ -192,6 +192,53 @@ let tests =
               | ResultSet(_, [ [ Some "2" ] ]) -> ()
               | result -> failtestf "expected the concurrent row after commit, got %A" result
 
+          testCase "SERIALIZABLE rejects write skew after a concurrent commit"
+          <| fun _ ->
+              let store = Fsdb.Storage.create ()
+              let first = create 1 store
+              let first, _ = handle first "CREATE TABLE tx_serial (id INT PRIMARY KEY)"
+              let first, _ = handle first "SET SESSION TRANSACTION ISOLATION LEVEL SERIALIZABLE"
+              let second = create 2 store
+              let second, _ = handle second "SET SESSION TRANSACTION ISOLATION LEVEL SERIALIZABLE"
+              let first, _ = handle first "BEGIN"
+              let second, _ = handle second "BEGIN"
+              let first, _ = handle first "SELECT COUNT(*) FROM tx_serial"
+              let second, _ = handle second "SELECT COUNT(*) FROM tx_serial"
+              let first, _ = handle first "INSERT INTO tx_serial VALUES (1)"
+              let second, _ = handle second "INSERT INTO tx_serial VALUES (2)"
+              let _, committed = handle first "COMMIT"
+              Expect.equal committed (Affected 0UL) "the first transaction commits"
+
+              match handle second "COMMIT" |> snd with
+              | Err(1205, _) -> ()
+              | result -> failtestf "expected the stale serializable transaction to fail, got %A" result
+
+              let observer = create 3 store
+
+              match handle observer "SELECT id FROM tx_serial ORDER BY id" |> snd with
+              | ResultSet(_, [ [ Some "1" ] ]) -> ()
+              | result -> failtestf "expected only the serialized commit, got %A" result
+
+          testCase "SERIALIZABLE read-only snapshots do not conflict with later writes"
+          <| fun _ ->
+              let store = Fsdb.Storage.create ()
+              let reader = create 1 store
+              let reader, _ = handle reader "CREATE TABLE tx_serial_read (id INT PRIMARY KEY)"
+              let reader, _ = handle reader "SET SESSION TRANSACTION ISOLATION LEVEL SERIALIZABLE"
+              let reader, _ = handle reader "BEGIN"
+              let reader, _ = handle reader "SELECT id FROM tx_serial_read"
+              let writer = create 2 store
+              let _, inserted = handle writer "INSERT INTO tx_serial_read VALUES (1)"
+              Expect.equal inserted (Affected 1UL) "the concurrent write commits"
+
+              match handle reader "SELECT id FROM tx_serial_read" |> snd with
+              | ResultSet(_, []) -> ()
+              | result -> failtestf "expected the repeatable serializable snapshot, got %A" result
+
+              match handle reader "COMMIT" |> snd with
+              | Affected 0UL -> ()
+              | result -> failtestf "expected the read-only transaction to commit, got %A" result
+
           testCase "ROLLBACK discards writes made inside the transaction"
           <| fun _ ->
               let session = create 1 (Fsdb.Storage.create ())
