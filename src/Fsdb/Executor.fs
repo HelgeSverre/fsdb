@@ -36,6 +36,26 @@ type private TriggerRowScope =
       Old: Value[] option
       New: Value[] option }
 
+type private RangeLookupBounds =
+    { Column: string
+      Lower: (Value * bool) option
+      Upper: (Value * bool) option }
+
+type private IndexOrderPlan =
+    { KeyName: string
+      ColumnIndex: int
+      Columns: ColumnDef list
+      EstimatedRows: int
+      Rows: Value[] seq }
+
+type private IndexedJoinPlan =
+    { Table: Table
+      KeyName: string
+      ColumnIndex: int
+      Unique: bool
+      Reference: string
+      HasResidual: bool }
+
 /// Per-statement memo of derived-table (`FROM (SELECT ...)`) resolutions,
 /// keyed by the AST node's identity. Within one statement the same derived
 /// table is resolved by the executor *and* by the collation/fsp metadata
@@ -5447,7 +5467,7 @@ and private runSelectStmt
             | Some(columns, rows) -> runResolved columns (rows |> Seq.map snd) select
             | None ->
                 match tryIndexOrder store registry dbName tref select with
-                | Some(_, _, columns, _, rows) -> runResolved columns rows { select with OrderBy = [] }
+                | Some plan -> runResolved plan.Columns plan.Rows { select with OrderBy = [] }
                 | None ->
                     let resolved =
                         tryRangeLookup store dbName tref select.Where
@@ -5509,7 +5529,7 @@ and private pointLookupEqualities (tref: TableRef) (whereExpr: Expr option) : (s
             | BinOp(Eq, Lit v, QualifiedCol(q, n)) when System.String.Equals(q, selfQualifier, System.StringComparison.OrdinalIgnoreCase) -> Some(n, v)
             | _ -> None)
 
-and private rangeLookupBounds (tref: TableRef) (whereExpr: Expr option) : (string * (Value * bool) option * (Value * bool) option) list =
+and private rangeLookupBounds (tref: TableRef) (whereExpr: Expr option) : RangeLookupBounds list =
     match whereExpr with
     | None -> []
     | Some whereExpr ->
@@ -5543,7 +5563,10 @@ and private rangeLookupBounds (tref: TableRef) (whereExpr: Expr option) : (strin
                 | _ -> bounds)
             Map.empty
         |> Map.toList
-        |> List.map (fun (name, (lower, upper)) -> name, lower, upper)
+        |> List.map (fun (name, (lower, upper)) ->
+            { Column = name
+              Lower = lower
+              Upper = upper })
 
 and private tryPointLookup (store: Store) (dbName: string) (tref: TableRef) (whereExpr: Expr option) : (ColumnDef list * (RowId * Value[]) list) option =
     let tableDb = tref.Database |> Option.defaultValue dbName
@@ -5555,8 +5578,8 @@ and private tryRangeLookup (store: Store) (dbName: string) (tref: TableRef) (whe
     let tableDb = tref.Database |> Option.defaultValue dbName
 
     rangeLookupBounds tref whereExpr
-    |> List.tryPick (fun (column, lower, upper) ->
-        Storage.trySecondaryRangeLookup store tableDb tref.Table column lower upper
+    |> List.tryPick (fun bounds ->
+        Storage.trySecondaryRangeLookup store tableDb tref.Table bounds.Column bounds.Lower bounds.Upper
         |> Option.map (fun (_, _, columns, rows) -> columns, rows))
 
 and private directOrderColumn (tref: TableRef) (select: SelectStmt) : (string * Direction) option =
@@ -5585,7 +5608,7 @@ and private tryIndexOrder
     (dbName: string)
     (tref: TableRef)
     (select: SelectStmt)
-    : (string * int * ColumnDef list * int * Value[] seq) option =
+    : IndexOrderPlan option =
     let tableDb = tref.Database |> Option.defaultValue dbName
 
     let canStream =
@@ -5603,8 +5626,8 @@ and private tryIndexOrder
         |> Option.bind (fun (column, direction) ->
             let lower, upper =
                 rangeLookupBounds tref select.Where
-                |> List.tryFind (fun (name, _, _) -> System.String.Equals(name, column, System.StringComparison.OrdinalIgnoreCase))
-                |> Option.map (fun (_, lower, upper) -> lower, upper)
+                |> List.tryFind (fun bounds -> System.String.Equals(bounds.Column, column, System.StringComparison.OrdinalIgnoreCase))
+                |> Option.map (fun bounds -> bounds.Lower, bounds.Upper)
                 |> Option.defaultValue (None, None)
 
             Storage.trySecondaryOrderedLookup store tableDb tref.Table column lower upper direction
@@ -5612,7 +5635,13 @@ and private tryIndexOrder
                 match columns.[index].Type with
                 | TEnum _
                 | TSet _ -> None
-                | _ -> Some(keyName, index, columns, count, rows)))
+                | _ ->
+                    Some
+                        { KeyName = keyName
+                          ColumnIndex = index
+                          Columns = columns
+                          EstimatedRows = count
+                          Rows = rows }))
 
 /// Per-column MySQL wire type for a freshly-projected resultset, read off
 /// the first non-NULL `Value` in each column across `rows` — a plain
@@ -8598,7 +8627,7 @@ let private indexedJoinExplainPlans
     (dbName: string)
     (from: FromItem option)
     (joins: Join list)
-    : Result<Map<int, Table * string * int * bool * string * bool>, QueryResult> =
+    : Result<Map<int, IndexedJoinPlan>, QueryResult> =
     let appendSource state item =
         tryExplainPhysicalSource store dbName item
         |> Result.map (fun source ->
@@ -8636,7 +8665,13 @@ let private indexedJoinExplainPlans
 
                         tryIndexedInnerProbe store join leftColumns rightColumns (Some table) equiKeys
                         |> Option.map (fun (_, leftIndex, _, keyName, keyIndex, unique) ->
-                            joinIndex + 1, table, keyName, keyIndex, unique, leftColumnReference leftSources leftIndex, not residual.IsEmpty)
+                            joinIndex + 1,
+                            { Table = table
+                              KeyName = keyName
+                              ColumnIndex = keyIndex
+                              Unique = unique
+                              Reference = leftColumnReference leftSources leftIndex
+                              HasResidual = not residual.IsEmpty })
                     | _ -> None
 
                 let sources' =
@@ -8646,7 +8681,7 @@ let private indexedJoinExplainPlans
 
                 let probes' =
                     match probe with
-                    | Some(index, table, keyName, keyIndex, unique, reference, hasResidual) -> Map.add index (table, keyName, keyIndex, unique, reference, hasResidual) probes
+                    | Some(index, plan) -> Map.add index plan probes
                     | None -> probes
 
                 sources', probes'))
@@ -8669,7 +8704,7 @@ let rec private explainJoinBlock
     (whereOpt: Expr option)
     (extra: string list)
     (subqueryExprs: Expr list)
-    (indexOrderPlan: (string * int * ColumnDef list * int * Value[] seq) option)
+    (indexOrderPlan: IndexOrderPlan option)
     : Result<unit, QueryResult> =
     let tableCount = (from |> Option.toList |> List.length) + joins.Length
 
@@ -8750,26 +8785,27 @@ let rec private explainJoinBlock
                 true
             | None ->
                 match indexOrderPlan with
-                | Some(keyName, columnIndex, columns, rowCount, _) ->
+                | Some plan ->
                     let hasBounds =
                         rangeLookupBounds tref whereOpt
-                        |> List.exists (fun (column, _, _) -> System.String.Equals(column, columns.[columnIndex].Name, System.StringComparison.OrdinalIgnoreCase))
+                        |> List.exists (fun bounds ->
+                            System.String.Equals(bounds.Column, plan.Columns.[plan.ColumnIndex].Name, System.StringComparison.OrdinalIgnoreCase))
 
                     acc.Add
                         { Id = Some id
                           SelectType = selectType
                           Table = Some(tref.Alias |> Option.defaultValue tref.Table)
                           Type = Some(if hasBounds then "range" else "index")
-                          Key = Some(keyName, explainKeyLen columns.[columnIndex])
+                          Key = Some(plan.KeyName, explainKeyLen plan.Columns.[plan.ColumnIndex])
                           Ref = None
-                          Rows = Some(uint64 rowCount)
+                          Rows = Some(uint64 plan.EstimatedRows)
                           Extra = extra }
 
                     true
                 | None ->
                     rangeLookupBounds tref whereOpt
-                    |> List.tryPick (fun (column, lower, upper) ->
-                        Storage.trySecondaryRangeLookup store tableDb tref.Table column lower upper
+                    |> List.tryPick (fun bounds ->
+                        Storage.trySecondaryRangeLookup store tableDb tref.Table bounds.Column bounds.Lower bounds.Upper
                         |> Option.map (fun (keyName, columnIndex, columns, rows) -> keyName, columnIndex, columns, List.length rows))
                     |> Option.map (fun (keyName, columnIndex, columns, rowCount) ->
                         acc.Add
@@ -8785,24 +8821,24 @@ let rec private explainJoinBlock
 
     /// One `FromItem`'s row(s): a real table's stats, or a derived table's
     /// `<derivedN>` placeholder plus its own recursive `DERIVED` block.
-    let explainFromItem (joinPlans: Map<int, Table * string * int * bool * string * bool>) (idx: int) (item: FromItem) : Result<unit, QueryResult> =
+    let explainFromItem (joinPlans: Map<int, IndexedJoinPlan>) (idx: int) (item: FromItem) : Result<unit, QueryResult> =
         match item with
         | FromTable tref ->
             explainTableStats store registry dbName tref
             |> Result.map (fun (n, ty) ->
                 match Map.tryFind idx joinPlans with
-                | Some(table, keyName, keyIndex, unique, reference, hasResidual) ->
+                | Some plan ->
                     acc.Add
                         { Id = Some id
                           SelectType = selectType
                           Table = Some(tref.Alias |> Option.defaultValue tref.Table)
-                          Type = Some(if unique then "eq_ref" else "ref")
-                          Key = Some(keyName, explainKeyLen table.Columns.[keyIndex])
-                          Ref = Some reference
+                          Type = Some(if plan.Unique then "eq_ref" else "ref")
+                          Key = Some(plan.KeyName, explainKeyLen plan.Table.Columns.[plan.ColumnIndex])
+                          Ref = Some plan.Reference
                           Rows = Some 1UL
                           Extra =
                               (if idx = tableCount - 1 then extra else [])
-                              @ (if hasResidual then [ "Using where" ] else [])
+                              @ (if plan.HasResidual then [ "Using where" ] else [])
                               |> List.distinct }
                 | None when not (tryExplainEqualityIndex tref) ->
                     emitTableRow idx (tref.Alias |> Option.defaultValue tref.Table) n ty
