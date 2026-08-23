@@ -134,7 +134,8 @@ type private StoredView =
 type private StoredTrigger =
     { Name: string
       Body: string
-      Definer: string }
+      Definer: string
+      Order: int64 }
 
 type private StoredCheck =
     { Name: string
@@ -9769,8 +9770,18 @@ let private err1442 (table: string) : QueryResult =
             table
     )
 
-/// A row predating the definer column refuses to fire rather than inheriting
-/// the invoking account.
+/// Trigger catalog rows may predate the appended definer and order fields.
+/// An absent definer stays empty so execution fails closed.
+let private triggerText index (row: Value[]) = toText row.[index] |> Option.defaultValue ""
+
+let private sameTriggerSlot (db: string) (table: string) (timing: string) (event: string) (row: Value[]) =
+    let equals left right = System.String.Equals(left, right, System.StringComparison.OrdinalIgnoreCase)
+
+    equals (triggerText 1 row) db
+    && equals (triggerText 2 row) (normalizeTableName table)
+    && equals (triggerText 3 row) timing
+    && equals (triggerText 4 row) event
+
 let private triggersFor
     (store: Store)
     (db: string)
@@ -9781,19 +9792,14 @@ let private triggersFor
     match scan store "mysql" "triggers" with
     | Error _ -> []
     | Ok(_, rows) ->
-        let text i (r: Value[]) = toText r.[i] |> Option.defaultValue ""
-        let eqI (a: string) (b: string) = System.String.Equals(a, b, System.StringComparison.OrdinalIgnoreCase)
-
         rows
-        |> Seq.filter (fun r ->
-            eqI (text 1 r) db
-            && eqI (text 2 r) (normalizeTableName table)
-            && eqI (text 3 r) timing
-            && eqI (text 4 r) event)
+        |> Seq.filter (sameTriggerSlot db table timing event)
         |> Seq.map (fun r ->
-            { Name = text 0 r
-              Body = text 5 r
-              Definer = if r.Length > 7 then text 7 r else "" })
+            { Name = triggerText 0 r
+              Body = triggerText 5 r
+              Definer = if r.Length > 7 then triggerText 7 r else ""
+              Order = Storage.triggerActionOrder r })
+        |> Seq.sortBy (fun trigger -> trigger.Order)
         |> List.ofSeq
 
 let private afterInsertTriggers (store: Store) (db: string) (table: string) =
@@ -10876,7 +10882,7 @@ let rec executeAs
         | Ok _ -> ids, Affected 0UL
         | Error error -> ids, storageErr error
 
-    | CreateTrigger(name, timing, event, table, body) ->
+    | CreateTrigger(name, timing, event, table, order, body) ->
         let db, table = splitQualified dbName table
         let timingText =
             match timing with
@@ -10929,54 +10935,130 @@ let rec executeAs
                         match scan store "mysql" "triggers" with
                         | Error e -> ids, storageErr e
                         | Ok(_, existing) ->
-                        let text i (r: Value[]) = toText r.[i] |> Option.defaultValue ""
                         let eqI (a: string) (b: string) = System.String.Equals(a, b, System.StringComparison.OrdinalIgnoreCase)
 
-                        let duplicate =
+                        let duplicateName =
                             existing
                             |> Seq.exists (fun r ->
-                                eqI (text 1 r) db
-                                && (eqI (text 0 r) name
-                                    || (eqI (text 2 r) (normalizeTableName table)
-                                        && eqI (text 3 r) timingText
-                                        && eqI (text 4 r) eventText)))
+                                eqI (triggerText 1 r) db
+                                && eqI (triggerText 0 r) name)
 
-                        if duplicate then
+                        let sameSlot = sameTriggerSlot db table timingText eventText
+                        let peers = existing |> Seq.filter sameSlot |> List.ofSeq
+
+                        let insertionOrder =
+                            match order with
+                            | None ->
+                                let lastOrder = peers |> List.map Storage.triggerActionOrder |> List.fold max 0L
+                                Ok(lastOrder + 1L)
+                            | Some requested ->
+                                let reference =
+                                    match requested with
+                                    | Follows trigger
+                                    | Precedes trigger -> trigger
+
+                                match peers |> List.tryFind (fun row -> eqI (triggerText 0 row) reference) with
+                                | None ->
+                                    Error(
+                                        Err(
+                                            3011,
+                                            sprintf
+                                                "Referenced trigger '%s' for the given action time and event type does not exist."
+                                                reference
+                                        )
+                                    )
+                                | Some row ->
+                                    let referenceOrder = Storage.triggerActionOrder row
+
+                                    match requested with
+                                    | Follows _ -> Ok(referenceOrder + 1L)
+                                    | Precedes _ -> Ok referenceOrder
+
+                        if duplicateName then
                             ids, Err(1359, "Trigger already exists")
                         else
-                            match
-                                insertRows
-                                    store
-                                    "mysql"
-                                    "triggers"
-                                    (Some
-                                        [ "trigger_name"; "trigger_schema"; "event_table"; "action_timing"
-                                          "event_manipulation"; "action_statement"; "created"; "definer" ])
-                                    [ [ VString name
-                                        VString db
-                                        VString(normalizeTableName table)
-                                        VString timingText
-                                        VString eventText
-                                        VString body
-                                        VDateTime System.DateTime.Now
-                                        VString(currentAccount.Name + "@" + currentAccount.Host) ] ]
-                            with
-                            | Ok _ -> ids, Affected 0UL
-                            | Error e -> ids, storageErr e
+                            match insertionOrder with
+                            | Error error -> ids, error
+                            | Ok insertionOrder ->
+                                let baseCatalog = store.Catalog
+                                let snapshot = Storage.beginTransactionSnapshot store
+
+                                let shifted =
+                                    updateRows
+                                        snapshot
+                                        "mysql"
+                                        "triggers"
+                                        None
+                                        (fun row -> Ok(sameSlot row && Storage.triggerActionOrder row >= insertionOrder))
+                                        (fun row ->
+                                            let updated = Array.copy row
+                                            updated.[8] <- VInt(Storage.triggerActionOrder row + 1L)
+                                            Ok updated)
+
+                                let inserted =
+                                    shifted
+                                    |> Result.bind (fun _ ->
+                                        insertRows
+                                            snapshot
+                                            "mysql"
+                                            "triggers"
+                                            (Some
+                                                [ "trigger_name"; "trigger_schema"; "event_table"; "action_timing"
+                                                  "event_manipulation"; "action_statement"; "created"; "definer"; "action_order" ])
+                                            [ [ VString name
+                                                VString db
+                                                VString(normalizeTableName table)
+                                                VString timingText
+                                                VString eventText
+                                                VString body
+                                                VDateTime System.DateTime.Now
+                                                VString(currentAccount.Name + "@" + currentAccount.Host)
+                                                VInt insertionOrder ] ])
+
+                                match inserted with
+                                | Error error -> ids, storageErr error
+                                | Ok _ ->
+                                    Storage.mergeCatalogInto store baseCatalog snapshot.Catalog
+                                    Storage.commitTransactionEvents store snapshot
+                                    ids, Affected 0UL
             | _ -> ids, Err(1064, "Trigger body must be a single INSERT, UPDATE, or DELETE statement, or SET NEW")
 
     | DropTrigger(name, ifExists) ->
-        let matchesRow (r: Value[]) =
-            Ok(
-                System.String.Equals(toText r.[0] |> Option.defaultValue "", name, System.StringComparison.OrdinalIgnoreCase)
-                && System.String.Equals(toText r.[1] |> Option.defaultValue "", dbName, System.StringComparison.OrdinalIgnoreCase)
-            )
+        let equals left right = System.String.Equals(left, right, System.StringComparison.OrdinalIgnoreCase)
+        let matchesRow row = equals (triggerText 0 row) name && equals (triggerText 1 row) dbName
 
-        match deleteRows store "mysql" "triggers" matchesRow with
-        // MySQL 8.4.11's exact 1360 text (write-probed).
-        | Ok 0 when not ifExists -> ids, Err(1360, "Trigger does not exist")
-        | Ok _ -> ids, Affected 0UL
-        | Error e -> ids, storageErr e
+        match scan store "mysql" "triggers" with
+        | Error error -> ids, storageErr error
+        | Ok(_, rows) ->
+            match rows |> Seq.tryFind matchesRow with
+            | None when ifExists -> ids, Affected 0UL
+            | None -> ids, Err(1360, "Trigger does not exist")
+            | Some target ->
+                let targetOrder = Storage.triggerActionOrder target
+                let sameSlot = sameTriggerSlot dbName (triggerText 2 target) (triggerText 3 target) (triggerText 4 target)
+                let baseCatalog = store.Catalog
+                let snapshot = Storage.beginTransactionSnapshot store
+
+                let changed =
+                    deleteRows snapshot "mysql" "triggers" (matchesRow >> Ok)
+                    |> Result.bind (fun _ ->
+                        updateRows
+                            snapshot
+                            "mysql"
+                            "triggers"
+                            None
+                            (fun row -> Ok(sameSlot row && Storage.triggerActionOrder row > targetOrder))
+                            (fun row ->
+                                let updated = Array.copy row
+                                updated.[8] <- VInt(Storage.triggerActionOrder row - 1L)
+                                Ok updated))
+
+                match changed with
+                | Error error -> ids, storageErr error
+                | Ok _ ->
+                    Storage.mergeCatalogInto store baseCatalog snapshot.Catalog
+                    Storage.commitTransactionEvents store snapshot
+                    ids, Affected 0UL
 
     | CreateUser(users, ifNotExists) ->
         let createOne (name, host, password) =

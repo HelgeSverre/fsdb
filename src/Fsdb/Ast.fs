@@ -617,6 +617,10 @@ type TriggerEvent =
     | TriggerUpdate
     | TriggerDelete
 
+type TriggerOrder =
+    | Follows of trigger: string
+    | Precedes of trigger: string
+
 type Statement =
     | CreateDatabase of name: string * ifNotExists: bool
     | DropDatabase of name: string * ifExists: bool
@@ -721,9 +725,15 @@ type Statement =
     /// raw SQL text exactly as written: the executor validates it by
     /// parsing at CREATE time and re-parses at fire time, so there's one
     /// source of truth rather than a parsed-Statement-plus-text double
-    /// carry (statement parsing is cheap). ponytail: one trigger per
-    /// timing/event slot; no BEGIN...END bodies or FOLLOWS/PRECEDES ordering.
-    | CreateTrigger of name: string * timing: TriggerTiming * event: TriggerEvent * table: string * body: string
+    /// carry (statement parsing is cheap). `order` places the trigger within
+    /// its timing/event slot. Compound BEGIN...END bodies remain unsupported.
+    | CreateTrigger of
+        name: string *
+        timing: TriggerTiming *
+        event: TriggerEvent *
+        table: string *
+        order: TriggerOrder option *
+        body: string
     /// `SET NEW.column = expression` is valid only as a BEFORE INSERT or
     /// BEFORE UPDATE trigger body.
     | SetTriggerNew of column: string * value: Expr

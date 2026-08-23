@@ -1916,7 +1916,17 @@ let mysqlTriggersColumns: ColumnDef list =
       // the inserting session, so a trigger can't lend its invoker the
       // definer's reach. Appended last so the fixed cell positions every
       // existing reader uses stay put.
-      sysCol "definer" (TChar 93) false (Some(VString "")) ]
+      sysCol "definer" (TChar 93) false (Some(VString ""))
+      sysCol "action_order" (TInt false) false (Some(VInt 1L)) ]
+
+let triggerActionOrder (row: Value[]) =
+    if row.Length > 8 then
+        match row.[8] with
+        | VInt value -> value
+        | VUInt value when value <= uint64 System.Int64.MaxValue -> int64 value
+        | _ -> 1L
+    else
+        1L
 
 /// `mysql.views` — fsdb's row-backed view catalog. Definitions are stored as
 /// SQL text and resolved through the ordinary SELECT executor, so the rows

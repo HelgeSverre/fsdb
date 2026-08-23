@@ -49,7 +49,7 @@ let tests =
                   Fsdb.Parser.parse
                       "CREATE TRIGGER before_delete BEFORE DELETE ON t FOR EACH ROW DELETE FROM log WHERE n = OLD.n"
               with
-              | Ok(Fsdb.Ast.CreateTrigger("before_delete", Fsdb.Ast.Before, Fsdb.Ast.TriggerDelete, "t", _)) -> ()
+              | Ok(Fsdb.Ast.CreateTrigger("before_delete", Fsdb.Ast.Before, Fsdb.Ast.TriggerDelete, "t", None, _)) -> ()
               | other -> failtestf "expected BEFORE DELETE trigger AST, got %A" other
 
           testCase "BEFORE INSERT can assign NEW values"
@@ -423,7 +423,40 @@ let tests =
               | Err(1442, _) -> ()
               | other -> failtestf "expected the depth cap's 1442, got %A" other
 
-          testCase "duplicate trigger name and second trigger on the same table both refuse with 1359"
+          testCase "multiple triggers honor creation and explicit action order"
+          <| fun _ ->
+              let store = Fsdb.Storage.create ()
+              setup store
+
+              expectOk
+                  (runDefault store "CREATE TRIGGER middle AFTER INSERT ON t FOR EACH ROW INSERT INTO log(n) VALUES (2)")
+                  "middle trigger"
+
+              expectOk
+                  (runDefault store "CREATE TRIGGER last AFTER INSERT ON t FOR EACH ROW FOLLOWS middle INSERT INTO log(n) VALUES (3)")
+                  "following trigger"
+
+              expectOk
+                  (runDefault store "CREATE TRIGGER first AFTER INSERT ON t FOR EACH ROW PRECEDES middle INSERT INTO log(n) VALUES (1)")
+                  "preceding trigger"
+
+              expectOk (runDefault store "INSERT INTO t(n) VALUES (10)") "fire ordered triggers"
+
+              Expect.equal (rows store "SELECT n FROM log") [ [ Some "1" ]; [ Some "2" ]; [ Some "3" ] ] "triggers fire by action order"
+
+              Expect.equal
+                  (rows store "SELECT TRIGGER_NAME, ACTION_ORDER FROM information_schema.TRIGGERS ORDER BY ACTION_ORDER")
+                  [ [ Some "first"; Some "1" ]; [ Some "middle"; Some "2" ]; [ Some "last"; Some "3" ] ]
+                  "metadata exposes the same action order"
+
+              expectOk (runDefault store "DROP TRIGGER middle") "drop middle trigger"
+
+              Expect.equal
+                  (rows store "SELECT TRIGGER_NAME, ACTION_ORDER FROM information_schema.TRIGGERS ORDER BY ACTION_ORDER")
+                  [ [ Some "first"; Some "1" ]; [ Some "last"; Some "2" ] ]
+                  "dropping a trigger closes the action-order gap"
+
+          testCase "trigger names stay unique and ordering references share the same slot"
           <| fun _ ->
               let store = Fsdb.Storage.create ()
               setup store
@@ -436,11 +469,9 @@ let tests =
               | Err(1359, "Trigger already exists") -> ()
               | other -> failtestf "expected 1359 for the duplicate name, got %A" other
 
-              // ponytail divergence (MySQL 8 allows multiple triggers per
-              // table/timing/event): fsdb pins one per slot.
-              match runDefault store "CREATE TRIGGER other AFTER INSERT ON t FOR EACH ROW INSERT INTO log(n) VALUES (2)" with
-              | Err(1359, "Trigger already exists") -> ()
-              | other -> failtestf "expected 1359 for a second trigger on the same table, got %A" other
+              match runDefault store "CREATE TRIGGER other AFTER INSERT ON t FOR EACH ROW FOLLOWS absent INSERT INTO log(n) VALUES (2)" with
+              | Err(3011, _) -> ()
+              | other -> failtestf "expected 3011 for a missing ordering reference, got %A" other
 
           testCase "DROP TRIGGER removes it; a missing name is 1360 unless IF EXISTS"
           <| fun _ ->

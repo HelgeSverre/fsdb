@@ -3049,14 +3049,22 @@ let private createTriggerStmt: Parser<Statement, unit> =
         <|> (keyword "UPDATE" >>% TriggerUpdate)
         <|> (keyword "DELETE" >>% TriggerDelete)
 
+    let order =
+        opt (
+            attempt (keyword "FOLLOWS" >>. identifier |>> Follows)
+            <|> (keyword "PRECEDES" >>. identifier |>> Precedes)
+        )
+
     (keyword "CREATE" >>. keyword "TRIGGER" >>. identifier .>>. timing .>>. event
      .>> keyword "ON"
      .>>. qualifiedTableName
      .>> keyword "FOR"
      .>> keyword "EACH"
      .>> keyword "ROW"
+     .>>. order
      .>>. manyChars anyChar)
-    |>> fun ((((name, timing), event), table), body) -> CreateTrigger(name, timing, event, table, body.Trim().TrimEnd(';').Trim())
+    |>> fun (((((name, timing), event), table), order), body) ->
+        CreateTrigger(name, timing, event, table, order, body.Trim().TrimEnd(';').Trim())
 
 let private dropTriggerStmt: Parser<Statement, unit> =
     (keyword "DROP" >>. keyword "TRIGGER"
