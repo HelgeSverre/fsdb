@@ -2435,6 +2435,47 @@ let trySecondaryOrderedLookup
 
             slice.IndexName, slice.ColumnIndices.Head, table.Columns, max 0 (slice.AfterLast - slice.First), rows))
 
+type OrderedLookup =
+    { OrderedIndexName: string
+      OrderedColumnIndices: int list
+      OrderedColumns: ColumnDef list
+      OrderedRowCount: int
+      OrderedRows: Value[] seq }
+
+let tryCompositeOrderedLookup
+    (store: Store)
+    (dbName: string)
+    (tableName: string)
+    (columnNames: string list)
+    (direction: Direction)
+    : OrderedLookup option =
+    tableAt store dbName tableName
+    |> Option.bind (fun table ->
+        columnNames
+        |> traverse (resolveColumn table.Columns)
+        |> Result.toOption
+        |> Option.bind (fun indices ->
+            secondaryKeyGroups table
+            |> List.tryFind (fun group -> group.Indices = indices && indices.Length > 1)
+            |> Option.bind (fun group ->
+                table.SecondaryOrder
+                |> Map.tryFind group.Name
+                |> Option.map (fun entries ->
+                    let slice =
+                        { IndexName = group.Name
+                          ColumnIndices = indices
+                          Entries = entries
+                          First = 0
+                          AfterLast = entries.Count }
+
+                    { OrderedIndexName = group.Name
+                      OrderedColumnIndices = indices
+                      OrderedColumns = table.Columns
+                      OrderedRowCount = entries.Count
+                      OrderedRows =
+                        orderedEntries direction slice
+                        |> Seq.choose (fun entry -> table.RowsArray.TryFind entry.RowId) }))))
+
 /// The equality-index probe in the order execution considers it: a unique
 /// key first for each WHERE equality, then an ordinary B-tree bucket.
 let tryEqualityKeyProbe

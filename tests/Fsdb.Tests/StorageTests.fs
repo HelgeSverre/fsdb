@@ -1556,6 +1556,13 @@ let tests =
                     Expect.equal (ids "alice" 30L) [] "updated rows leave the old composite bucket"
                     Expect.equal (ids "alice" 31L) [ VInt 1L ] "updated rows enter the new composite bucket"
 
+                    let ordered =
+                        match tryCompositeOrderedLookup store defaultDatabase "users" [ "name"; "age" ] Asc with
+                        | Some lookup -> lookup.OrderedRows |> Seq.map (fun row -> row.[1], row.[2]) |> List.ofSeq
+                        | None -> failtest "expected composite ordered rows"
+
+                    Expect.equal ordered [ VString "alice", VInt 31L; VString "bob", VInt 25L ] "composite ordering reflects the update"
+
                     deleteRows store defaultDatabase "users" (fun row -> Ok(row.[0] = VInt 1L))
                     |> Result.defaultWith (failtestf "delete failed: %A")
                     |> ignore

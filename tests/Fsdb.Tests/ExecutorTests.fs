@@ -5372,6 +5372,40 @@ let tests =
 
                     Expect.equal (rows "indexed") (rows "scanned") "collated index order matches the scan path"
 
+                testCase "a composite B-tree streams matching ORDER BY keys"
+                <| fun _ ->
+                    let store = newStore ()
+                    runDefault store "CREATE TABLE indexed (id INT PRIMARY KEY, priority INT, created_at INT, keep_row INT, KEY ix_priority_created (priority, created_at))" |> ignore
+                    runDefault store "CREATE TABLE scanned (id INT PRIMARY KEY, priority INT, created_at INT, keep_row INT)" |> ignore
+
+                    for table in [ "indexed"; "scanned" ] do
+                        runDefault store (sprintf "INSERT INTO %s VALUES (1, 2, 30, 1), (2, 1, 40, 1), (3, 2, 10, 0), (4, 1, 20, 1), (5, 2, 10, 1), (6, NULL, 50, 1)" table) |> ignore
+
+                    let rows table order =
+                        match runDefault store (sprintf "SELECT id, priority, created_at FROM %s WHERE keep_row = 1 ORDER BY %s LIMIT 3 OFFSET 1" table order) with
+                        | ResultSet(_, values) -> values
+                        | other -> failtestf "expected ordered rows, got %A" other
+
+                    Expect.equal
+                        (rows "indexed" "priority, created_at")
+                        (rows "scanned" "priority, created_at")
+                        "ascending composite order matches a scan"
+
+                    Expect.equal
+                        (rows "indexed" "priority DESC, created_at DESC")
+                        (rows "scanned" "priority DESC, created_at DESC")
+                        "descending composite order matches a scan"
+
+                    Expect.equal
+                        (rows "indexed" "priority ASC, created_at DESC")
+                        (rows "scanned" "priority ASC, created_at DESC")
+                        "mixed directions fall back without changing results"
+
+                    match runDefault store "EXPLAIN SELECT id FROM indexed ORDER BY priority, created_at LIMIT 3" with
+                    | ResultSet(_, [ [ Some "1"; Some "SIMPLE"; Some "indexed"; None; Some "index"; Some "ix_priority_created"; Some "ix_priority_created"; Some "10"; None; Some "6"; Some "100.00"; None ] ]) ->
+                        ()
+                    | other -> failtestf "expected a composite ordered-index plan, got %A" other
+
                 testCase "a point equality stays ahead of secondary index ordering"
                 <| fun _ ->
                     let mutable calls = 0

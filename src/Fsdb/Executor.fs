@@ -43,7 +43,7 @@ type private RangeLookupBounds =
 
 type private IndexOrderPlan =
     { KeyName: string
-      ColumnIndex: int
+      ColumnIndices: int list
       Columns: ColumnDef list
       EstimatedRows: int
       Rows: Value[] seq }
@@ -5576,7 +5576,7 @@ and private tryRangeLookup (store: Store) (dbName: string) (tref: TableRef) (whe
         Storage.trySecondaryRangeLookup store tableDb tref.Table bounds.Column bounds.Lower bounds.Upper
         |> Option.map (fun (_, _, columns, rows) -> columns, rows))
 
-and private directOrderColumn (tref: TableRef) (select: SelectStmt) : (string * Direction) option =
+and private directOrderColumns (tref: TableRef) (select: SelectStmt) : (string list * Direction) option =
     let selfQualifier = tref.Alias |> Option.defaultValue tref.Table
 
     let directBareColumn name =
@@ -5590,11 +5590,23 @@ and private directOrderColumn (tref: TableRef) (select: SelectStmt) : (string * 
 
         if directProjections |> List.forall ((<>) 2) && List.sum directProjections <= 1 then Some name else None
 
+    let directColumn = function
+        | Col name -> directBareColumn name
+        | QualifiedCol(qualifier, name) when System.String.Equals(qualifier, selfQualifier, System.StringComparison.OrdinalIgnoreCase) -> Some name
+        | _ -> None
+
     match select.OrderBy with
-    | [ Col name, direction ] -> directBareColumn name |> Option.map (fun column -> column, direction)
-    | [ QualifiedCol(qualifier, name), direction ] when System.String.Equals(qualifier, selfQualifier, System.StringComparison.OrdinalIgnoreCase) ->
-        Some(name, direction)
-    | _ -> None
+    | [] -> None
+    | orderBy ->
+        let directions = orderBy |> List.map snd |> List.distinct
+
+        if directions.Length <> 1 then
+            None
+        else
+            orderBy
+            |> traverse (fst >> directColumn >> function Some column -> Ok column | None -> Error())
+            |> Result.toOption
+            |> Option.map (fun columns -> columns, directions.Head)
 
 and private tryIndexOrder
     (store: Store)
@@ -5616,26 +5628,41 @@ and private tryIndexOrder
     if not canStream then
         None
     else
-        directOrderColumn tref select
-        |> Option.bind (fun (column, direction) ->
-            let lower, upper =
-                rangeLookupBounds tref select.Where
-                |> List.tryFind (fun bounds -> System.String.Equals(bounds.Column, column, System.StringComparison.OrdinalIgnoreCase))
-                |> Option.map (fun bounds -> bounds.Lower, bounds.Upper)
-                |> Option.defaultValue (None, None)
+        directOrderColumns tref select
+        |> Option.bind (fun (orderedColumns, direction) ->
+            let plan (keyName: string) (indices: int list) (columns: ColumnDef list) (count: int) (rows: Value[] seq) =
+                let unsupported =
+                    indices
+                    |> List.exists (fun index ->
+                        match columns.[index].Type with
+                        | TEnum _
+                        | TSet _ -> true
+                        | _ -> false)
 
-            Storage.trySecondaryOrderedLookup store tableDb tref.Table column lower upper direction
-            |> Option.bind (fun (keyName, index, columns, count, rows) ->
-                match columns.[index].Type with
-                | TEnum _
-                | TSet _ -> None
-                | _ ->
+                if unsupported then
+                    None
+                else
                     Some
                         { KeyName = keyName
-                          ColumnIndex = index
+                          ColumnIndices = indices
                           Columns = columns
                           EstimatedRows = count
-                          Rows = rows }))
+                          Rows = rows }
+
+            match orderedColumns with
+            | [ column ] ->
+                let lower, upper =
+                    rangeLookupBounds tref select.Where
+                    |> List.tryFind (fun bounds -> System.String.Equals(bounds.Column, column, System.StringComparison.OrdinalIgnoreCase))
+                    |> Option.map (fun bounds -> bounds.Lower, bounds.Upper)
+                    |> Option.defaultValue (None, None)
+
+                Storage.trySecondaryOrderedLookup store tableDb tref.Table column lower upper direction
+                |> Option.bind (fun (keyName, index, columns, count, rows) -> plan keyName [ index ] columns count rows)
+            | columns ->
+                Storage.tryCompositeOrderedLookup store tableDb tref.Table columns direction
+                |> Option.bind (fun lookup ->
+                    plan lookup.OrderedIndexName lookup.OrderedColumnIndices lookup.OrderedColumns lookup.OrderedRowCount lookup.OrderedRows))
 
 /// Per-column MySQL wire type for a freshly-projected resultset, read off
 /// the first non-NULL `Value` in each column across `rows` — a plain
@@ -8819,16 +8846,19 @@ let rec private explainJoinBlock
                 match indexOrderPlan with
                 | Some plan ->
                     let hasBounds =
-                        rangeLookupBounds tref whereOpt
-                        |> List.exists (fun bounds ->
-                            System.String.Equals(bounds.Column, plan.Columns.[plan.ColumnIndex].Name, System.StringComparison.OrdinalIgnoreCase))
+                        match plan.ColumnIndices with
+                        | [ index ] ->
+                            rangeLookupBounds tref whereOpt
+                            |> List.exists (fun bounds ->
+                                System.String.Equals(bounds.Column, plan.Columns.[index].Name, System.StringComparison.OrdinalIgnoreCase))
+                        | _ -> false
 
                     acc.Add
                         { Id = Some id
                           SelectType = selectType
                           Table = Some(tref.Alias |> Option.defaultValue tref.Table)
                           Type = Some(if hasBounds then "range" else "index")
-                          Key = Some(plan.KeyName, explainKeyLen plan.Columns.[plan.ColumnIndex])
+                          Key = Some(plan.KeyName, explainCompositeKeyLen plan.Columns plan.ColumnIndices)
                           Ref = None
                           Rows = Some(uint64 plan.EstimatedRows)
                           Extra = extra }
