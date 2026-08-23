@@ -146,7 +146,6 @@ type Transaction =
       ReadOnly: bool
       /// Set after the first database statement seeds a repeatable-read view.
       Seeded: bool
-      /// Savepoint state includes both catalog roots and the event-buffer cut.
       /// `ROLLBACK TO SAVEPOINT` truncates the buffer so WAL never sees writes
       /// the savepoint rollback just undid. The order lets `ROLLBACK TO
       /// SAVEPOINT`/`RELEASE SAVEPOINT` drop every savepoint established
