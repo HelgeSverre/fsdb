@@ -5254,6 +5254,12 @@ let private geometryEnvelopeFn: Scalar =
     | [ value ] -> geometryArgument "ST_ENVELOPE" value |> requirePlanar "ST_ENVELOPE" |> geometryEnvelope |> VGeometry
     | _ -> raise (SqlError(1582, "Incorrect parameter count in the call to native function 'st_envelope'"))
 
+let private geometryConvexHullFn: Scalar =
+    function
+    | [ VNull ] -> VNull
+    | [ value ] -> geometryArgument "ST_CONVEXHULL" value |> requirePlanar "ST_CONVEXHULL" |> geometryConvexHullPlanar |> VGeometry
+    | _ -> raise (SqlError(1582, "Incorrect parameter count in the call to native function 'st_convexhull'"))
+
 let private geometryRelationFn functionName project: Scalar =
     function
     | [ VNull; _ ]
@@ -5396,12 +5402,14 @@ let builtins: Registry =
     |> registerScalar "X" (pointCoordinateFn "X" (fun x _ -> x))
     |> registerScalar "Y" (pointCoordinateFn "Y" (fun _ y -> y))
     |> registerScalar "ST_DISTANCE" geometryDistanceFn
+    |> registerScalar "ST_EQUALS" (geometryPredicateFn "ST_EQUALS" geometryEqualsPlanar)
     |> registerScalar "ST_CONTAINS" (geometryPredicateFn "ST_CONTAINS" geometryContainsPlanar)
     |> registerScalar "ST_WITHIN" (geometryPredicateFn "ST_WITHIN" (fun first second -> geometryContainsPlanar second first))
     |> registerScalar "ST_INTERSECTS" (geometryRelationFn "ST_INTERSECTS" id)
     |> registerScalar "ST_DISJOINT" (geometryRelationFn "ST_DISJOINT" not)
     |> registerScalar "ST_TOUCHES" (geometryPredicateFn "ST_TOUCHES" geometryTouchesPlanar)
     |> registerScalar "ST_BUFFER" (unsupportedGeometryFn "ST_BUFFER")
+    |> registerScalar "ST_CONVEXHULL" geometryConvexHullFn
     |> registerScalar "ST_ENVELOPE" geometryEnvelopeFn
     |> registerScalar "MBRCONTAINS" (mbrPredicateFn "MBRCONTAINS" mbrContains)
     |> registerScalar "MBRWITHIN" (mbrPredicateFn "MBRWITHIN" (fun first second -> mbrContains second first))

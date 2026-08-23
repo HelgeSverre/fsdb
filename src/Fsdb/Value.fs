@@ -398,6 +398,40 @@ let rec private shapeCoordinates = function
     | GMultiPolygon polygons -> polygons |> List.collect (List.collect id)
     | GGeometryCollection geometries -> geometries |> List.collect (fun geometry -> shapeCoordinates geometry.Shape)
 
+let geometryConvexHullPlanar (geometry: Geometry) : Geometry =
+    let cross (ax, ay) (bx, by) (cx, cy) = (bx - ax) * (cy - ay) - (by - ay) * (cx - ax)
+
+    let half points =
+        points
+        |> List.fold
+            (fun hull point ->
+                let rec trim =
+                    function
+                    | latest :: previous :: rest when cross previous latest point <= 0.0 -> trim (previous :: rest)
+                    | kept -> point :: kept
+
+                trim hull)
+            []
+        |> List.rev
+
+    let points = shapeCoordinates geometry.Shape |> List.distinct |> List.sort
+
+    let shape =
+        match points with
+        | [] -> GEmpty
+        | [ point ] -> GPoint point
+        | _ ->
+            let lower = half points
+            let upper = half (List.rev points)
+            let boundary = List.take (lower.Length - 1) lower @ List.take (upper.Length - 1) upper
+
+            match boundary with
+            | [ first; second ] -> GLineString [ first; second ]
+            | first :: _ -> GPolygon [ boundary @ [ first ] ]
+            | [] -> GEmpty
+
+    { geometry with Shape = shape }
+
 let geometryBounds (geometry: Geometry) : GeometryBounds option =
     match shapeCoordinates geometry.Shape with
     | [] -> None
@@ -880,6 +914,11 @@ let geometryContainsPlanar (first: Geometry) (second: Geometry) =
             |> List.exists (fun point -> pointInContainmentShape point second.Shape = Interior)
 
         Some(containsSecond && secondReachesInterior && not coversFirstHole)
+
+let geometryEqualsPlanar first second =
+    match geometryContainsPlanar first second, geometryContainsPlanar second first with
+    | Some firstContains, Some secondContains -> Some(firstContains && secondContains)
+    | _ -> None
 
 let private interiorIntersects first second =
     let firstBoundaries = shapeSegments first.Shape

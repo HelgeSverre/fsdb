@@ -253,6 +253,7 @@ let tests =
                   + "MBRContains(ST_GeomFromText('POLYGON((0 0,4 0,4 4,0 4,0 0))'), ST_GeomFromText('POINT(2 2)')), "
                   + "ST_Intersects(ST_GeomFromText('POINT(0 0)'), ST_GeomFromText('LINESTRING(0 0,1 0)')), "
                   + "ST_Disjoint(ST_GeomFromText('POINT(2 2)'), ST_GeomFromText('LINESTRING(0 0,1 0)')), "
+                  + "ST_Equals(ST_GeomFromText('LINESTRING(0 0,1 1)'), ST_GeomFromText('LINESTRING(1 1,0 0)')), "
                   + "ST_Contains(ST_GeomFromText('POLYGON((0 0,4 0,4 4,0 4,0 0))'), ST_GeomFromText('POINT(2 2)')), "
                   + "ST_Within(ST_GeomFromText('POINT(2 2)'), ST_GeomFromText('POLYGON((0 0,4 0,4 4,0 4,0 0))')), "
                   + "ST_Touches(ST_GeomFromText('POINT(0 2)'), ST_GeomFromText('POLYGON((0 0,4 0,4 4,0 4,0 0))'))"
@@ -263,7 +264,7 @@ let tests =
                       statement
                   |> snd
               with
-              | ResultSet(_, [ [ Some "3"; Some "POLYGON((1 3,2 3,2 4,1 4,1 3))"; Some "1"; Some "1"; Some "1"; Some "1"; Some "1"; Some "1" ] ]) -> ()
+              | ResultSet(_, [ [ Some "3"; Some "POLYGON((1 3,2 3,2 4,1 4,1 3))"; Some "1"; Some "1"; Some "1"; Some "1"; Some "1"; Some "1"; Some "1" ] ]) -> ()
               | other -> failtestf "expected planar geometry result, got %A" other
 
           testCase "planar geometry functions retain result metadata without rows"
@@ -274,11 +275,16 @@ let tests =
                   + "ST_Distance(ST_GeomFromText('POINT(0 0)'), ST_GeomFromText('POINT(3 4)')), "
                   + "MBRIntersects(ST_GeomFromText('POINT(0 0)'), ST_GeomFromText('POINT(0 0)')), "
                   + "ST_Intersects(ST_GeomFromText('POINT(0 0)'), ST_GeomFromText('POINT(0 0)')), "
+                  + "ST_Equals(ST_GeomFromText('POINT(0 0)'), ST_GeomFromText('POINT(0 0)')), "
+                  + "ST_ConvexHull(ST_GeomFromText('MULTIPOINT((0 0),(1 0),(0 1))')), "
                   + "ST_IsValid(ST_GeomFromText('POINT(0 0)')) LIMIT 0"
 
               match handle session statement with
               | session, ResultSet(_, []) ->
-                  Expect.equal (session.LastResultColumnMetadata |> List.map _.TypeId) [ TypeGeometry; TypeDouble; TypeLongLong; TypeLongLong; TypeLongLong ] "function metadata"
+                  Expect.equal
+                      (session.LastResultColumnMetadata |> List.map _.TypeId)
+                      [ TypeGeometry; TypeDouble; TypeLongLong; TypeLongLong; TypeLongLong; TypeGeometry; TypeLongLong ]
+                      "function metadata"
               | _, other -> failtestf "expected empty resultset, got %A" other
 
           // A resultset's types are read off the row `Value`s, which know

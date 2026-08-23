@@ -286,6 +286,41 @@ let tests =
                     Expect.equal (contains "GEOMETRYCOLLECTION EMPTY" "POINT(1 1)") VNull "empty contains"
                     Expect.equal (touches "GEOMETRYCOLLECTION EMPTY" "POINT(1 1)") VNull "empty touches"
 
+                testCase "planar equality and convex hull follow topology rather than encoding"
+                <| fun _ ->
+                    let geometry text = call "ST_GeomFromText" [ VString text ]
+                    let asText value = call "ST_AsText" [ value ]
+
+                    Expect.equal
+                        (call
+                            "ST_Equals"
+                            [ geometry "LINESTRING(0 0,1 1)"
+                              geometry "LINESTRING(1 1,0 0)" ])
+                        (VInt 1L)
+                        "reversed lines are topologically equal"
+
+                    Expect.equal
+                        (call
+                            "ST_Equals"
+                            [ geometry "POLYGON((0 0,2 0,2 2,0 2,0 0))"
+                              geometry "POLYGON((2 2,2 0,0 0,0 2,2 2))" ])
+                        (VInt 1L)
+                        "rotated polygon rings are topologically equal"
+
+                    Expect.equal
+                        (asText (
+                            call
+                                "ST_ConvexHull"
+                                [ geometry "MULTIPOINT((0 0),(1 0),(1 1),(0 1),(0.5 0.5))" ]
+                        ))
+                        (VString "POLYGON((0 0,1 0,1 1,0 1,0 0))")
+                        "interior points are removed from the hull"
+
+                    Expect.equal
+                        (asText (call "ST_ConvexHull" [ geometry "LINESTRING(2 0,0 0,1 0)" ]))
+                        (VString "LINESTRING(0 0,2 0)")
+                        "collinear hulls retain their endpoints"
+
                 testCase "planar intersections reject nonzero and mismatched SRIDs"
                 <| fun _ ->
                     let expectError code invoke =
@@ -303,6 +338,9 @@ let tests =
                     expectError 3033 (fun () -> call "ST_Contains" [ planar; geographic ])
                     expectError 1235 (fun () -> call "ST_Within" [ geographic; geographic ])
                     expectError 1235 (fun () -> call "ST_Touches" [ geographic; geographic ])
+                    expectError 3033 (fun () -> call "ST_Equals" [ planar; geographic ])
+                    expectError 1235 (fun () -> call "ST_Equals" [ geographic; geographic ])
+                    expectError 1235 (fun () -> call "ST_ConvexHull" [ geographic ])
 
                 testCase "envelopes and MBR predicates preserve planar bounds"
                 <| fun _ ->
