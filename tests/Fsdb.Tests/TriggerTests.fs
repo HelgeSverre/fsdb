@@ -78,6 +78,21 @@ let tests =
               expectOk (runDefault store "INSERT INTO t(n) VALUES (10)") "fire compound trigger"
               Expect.equal (rows store "SELECT n FROM t") [ [ Some "22" ] ] "later assignments observe the updated NEW row"
 
+          testCase "BEFORE INSERT preserves body writes in the subject database"
+          <| fun _ ->
+              let store = Fsdb.Storage.create ()
+              setup store
+
+              expectOk
+                  (runDefault
+                      store
+                      "CREATE TRIGGER preserve_write BEFORE INSERT ON t FOR EACH ROW BEGIN INSERT INTO log(n) VALUES (NEW.n); SET NEW.n = NEW.n + 1; END")
+                  "create compound trigger"
+
+              expectOk (runDefault store "INSERT INTO t(n) VALUES (10)") "fire compound trigger"
+              Expect.equal (rows store "SELECT n FROM t") [ [ Some "11" ] ] "subject row persists"
+              Expect.equal (rows store "SELECT n FROM log") [ [ Some "10" ] ] "body row persists"
+
           testCase "a failing compound body rolls back earlier statements"
           <| fun _ ->
               let store = Fsdb.Storage.create ()

@@ -548,10 +548,34 @@ let private withDatabase
         // use different cells, while writers within one database publish
         // their immutable replacement maps atomically.
         lock slot (fun () ->
-            match f slot.Value with
+            let original = slot.Value
+
+            match f original with
             | Error e -> Error e
             | Ok(db', result) ->
-                slot.Value <- db'
+                let current = slot.Value
+
+                slot.Value <-
+                    if LanguagePrimitives.PhysicalEquality original current then
+                        db'
+                    else
+                        // Trigger bodies may re-enter this slot while the outer
+                        // statement still owns its immutable starting root.
+                        let keys =
+                            Set.union
+                                (original |> Map.toSeq |> Seq.map fst |> Set.ofSeq)
+                                (db' |> Map.toSeq |> Seq.map fst |> Set.ofSeq)
+
+                        keys
+                        |> Set.fold
+                            (fun published key ->
+                                match Map.tryFind key original, Map.tryFind key db' with
+                                | Some before, Some after when LanguagePrimitives.PhysicalEquality before after -> published
+                                | _, Some after -> Map.add key after published
+                                | Some _, None -> Map.remove key published
+                                | None, None -> published)
+                            current
+
                 Ok result)
 
 /// Every database name appearing as a key in `m` — the shared set-of-keys
