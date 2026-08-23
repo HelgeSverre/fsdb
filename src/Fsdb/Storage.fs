@@ -1505,14 +1505,27 @@ let private uniqueKeyGroups (table: Table) : (string * int list) list =
 
     (if pk.IsEmpty then [] else [ "PRIMARY", pk ]) @ fromIndexes
 
-let private secondaryKeyGroups (table: Table) : (string * int) list =
+type private SecondaryKeyGroup =
+    { Name: string
+      Indices: int list
+      OrderIndex: int option }
+
+let private secondaryKeyGroups (table: Table) : SecondaryKeyGroup list =
     table.Indexes
     |> List.choose (fun index ->
-        match index.Kind, index.Unique, index.Columns with
-        | BTree, false, [ column ] ->
-            resolveColumn table.Columns column
+        match index.Kind, index.Unique with
+        | BTree, false ->
+            index.Columns
+            |> traverse (resolveColumn table.Columns)
             |> Result.toOption
-            |> Option.map (fun columnIndex -> index.Name, columnIndex)
+            |> Option.bind (fun indices ->
+                if indices.IsEmpty then
+                    None
+                else
+                    Some
+                        { Name = index.Name
+                          Indices = indices
+                          OrderIndex = if indices.Length = 1 then Some indices.Head else None })
         | _ -> None)
 
 /// Stable equality key for values already coerced into a table column's
@@ -1593,30 +1606,32 @@ let private rebuildUniqueIndex (table: Table) : Map<string, Map<string, RowId>> 
 
 let private rebuildSecondaryIndex (table: Table) : Map<string, Map<string, Set<RowId>>> =
     secondaryKeyGroups table
-    |> List.map (fun (name, index) ->
+    |> List.map (fun group ->
         let buckets =
             table.RowsArray.Indexed
             |> Seq.fold
                 (fun buckets (rowId, row) ->
-                    let key = encodeEqualityKey table.Columns [ index ] row
+                    let key = encodeEqualityKey table.Columns group.Indices row
                     let rows = buckets |> Map.tryFind key |> Option.defaultValue Set.empty
                     Map.add key (Set.add rowId rows) buckets)
                 Map.empty
 
-        name, buckets)
+        group.Name, buckets)
     |> Map.ofList
 
 let private rebuildSecondaryOrder (table: Table) : SecondaryOrder =
     secondaryKeyGroups table
-    |> List.map (fun (name, index) ->
-        let entries: ImmutableSortedSet<SecondaryOrderEntry> =
-            table.RowsArray.Indexed
-            |> Seq.fold
-                (fun entries (rowId, row) ->
-                    entries.Add { CollationName = table.Columns.[index].Collation; Value = row.[index]; RowId = rowId })
-                ImmutableSortedSet<SecondaryOrderEntry>.Empty
+    |> List.choose (fun group ->
+        group.OrderIndex
+        |> Option.map (fun index ->
+            let entries: ImmutableSortedSet<SecondaryOrderEntry> =
+                table.RowsArray.Indexed
+                |> Seq.fold
+                    (fun entries (rowId, row) ->
+                        entries.Add { CollationName = table.Columns.[index].Collation; Value = row.[index]; RowId = rowId })
+                    ImmutableSortedSet<SecondaryOrderEntry>.Empty
 
-        name, entries)
+            group.Name, entries))
     |> Map.ofList
 
 /// Bumped once per `reindexTable` call — the full-scan rebuild it wraps is
@@ -2001,7 +2016,7 @@ let create () : Store =
 let private reindexRow
     (columns: ColumnDef list)
     (uniqueGroups: (string * int list) list)
-    (secondaryGroups: (string * int) list)
+    (secondaryGroups: SecondaryKeyGroup list)
     (removed: (RowId * Value[]) option)
     (added: (RowId * Value[]) option)
     (uniqueIndex: Map<string, Map<string, RowId>>)
@@ -2021,12 +2036,12 @@ let private reindexRow
     let secondaryIndex =
         secondaryGroups
         |> List.fold
-            (fun accIndex (name, index) ->
-                let group = Map.find name accIndex
+            (fun accIndex keyGroup ->
+                let group = Map.find keyGroup.Name accIndex
                 let group =
                     removed
                     |> Option.fold (fun g (rowId, row) ->
-                        let key = encodeEqualityKey columns [ index ] row
+                        let key = encodeEqualityKey columns keyGroup.Indices row
                         match Map.tryFind key g with
                         | None -> g
                         | Some rows ->
@@ -2035,32 +2050,35 @@ let private reindexRow
                 let group =
                     added
                     |> Option.fold (fun g (rowId, row) ->
-                        let key = encodeEqualityKey columns [ index ] row
+                        let key = encodeEqualityKey columns keyGroup.Indices row
                         let rows = g |> Map.tryFind key |> Option.defaultValue Set.empty
                         Map.add key (Set.add rowId rows) g) group
-                Map.add name group accIndex)
+                Map.add keyGroup.Name group accIndex)
             secondaryIndex
 
     let secondaryOrder =
         secondaryGroups
         |> List.fold
-            (fun indexes (name, index) ->
-                let entry rowId (row: Value[]) = { CollationName = columns.[index].Collation; Value = row.[index]; RowId = rowId }
-                let entries = Map.find name indexes
+            (fun indexes keyGroup ->
+                match keyGroup.OrderIndex with
+                | None -> indexes
+                | Some index ->
+                    let entry rowId (row: Value[]) = { CollationName = columns.[index].Collation; Value = row.[index]; RowId = rowId }
+                    let entries = Map.find keyGroup.Name indexes
 
-                let entries =
-                    removed
-                    |> Option.fold
-                        (fun (entries: ImmutableSortedSet<SecondaryOrderEntry>) (rowId, row) -> entries.Remove(entry rowId row))
-                        entries
+                    let entries =
+                        removed
+                        |> Option.fold
+                            (fun (entries: ImmutableSortedSet<SecondaryOrderEntry>) (rowId, row) -> entries.Remove(entry rowId row))
+                            entries
 
-                let entries =
-                    added
-                    |> Option.fold
-                        (fun (entries: ImmutableSortedSet<SecondaryOrderEntry>) (rowId, row) -> entries.Add(entry rowId row))
-                        entries
+                    let entries =
+                        added
+                        |> Option.fold
+                            (fun (entries: ImmutableSortedSet<SecondaryOrderEntry>) (rowId, row) -> entries.Add(entry rowId row))
+                            entries
 
-                Map.add name entries indexes)
+                    Map.add keyGroup.Name entries indexes)
             secondaryOrder
 
     uniqueIndex, secondaryIndex, secondaryOrder
@@ -2106,8 +2124,11 @@ let tryEqualityIndex (table: Table) (columnName: string) : (string * int * bool)
         |> List.tryPick (fun (name, indices) -> if indices = [ index ] then Some(name, index, true) else None)
         |> Option.orElseWith (fun () ->
             secondaryKeyGroups table
-            |> List.tryPick (fun (name, columnIndex) ->
-                if columnIndex = index && Map.containsKey name table.SecondaryIndex then Some(name, index, false) else None))
+            |> List.tryPick (fun group ->
+                if group.Indices = [ index ] && Map.containsKey group.Name table.SecondaryIndex then
+                    Some(group.Name, index, false)
+                else
+                    None))
 
 let private exactProbeValue (store: Store) (table: Table) (index: int) (value: Value) : Value option =
     match Diagnostics.suppress (fun () -> coerceValueWithMode (temporalCoercionMode store) table.Columns.[index] value) with
@@ -2211,6 +2232,77 @@ let trySecondaryLookup
     : (ColumnDef list * (RowId * Value[]) list) option =
     tableAt store dbName tableName
     |> Option.bind (fun table -> trySecondaryLookupInTable store table columnName literal)
+
+type EqualityLookup =
+    { IndexName: string
+      ColumnIndices: int list
+      Unique: bool
+      LookupColumns: ColumnDef list
+      LookupRows: (RowId * Value[]) list }
+
+/// Uses a fully-bound composite key. Residual predicate evaluation remains
+/// responsible for contradictory or repeated equalities.
+let tryCompositeEqualityLookup
+    (store: Store)
+    (dbName: string)
+    (tableName: string)
+    (equalities: (string * Value) list)
+    : EqualityLookup option =
+    tableAt store dbName tableName
+    |> Option.bind (fun table ->
+        let literalFor index =
+            equalities
+            |> List.tryPick (fun (name, value) ->
+                if System.String.Equals(name, table.Columns.[index].Name, System.StringComparison.OrdinalIgnoreCase) then
+                    exactProbeValue store table index value
+                else
+                    None)
+
+        let probe (name: string, indices: int list, unique: bool) =
+            if List.length indices < 2 then
+                None
+            else
+                indices
+                |> traverse (fun index ->
+                    match literalFor index with
+                    | Some value -> Ok value
+                    | None -> Error())
+                |> Result.toOption
+                |> Option.map (fun values ->
+                    let row = Array.create table.Columns.Length VNull
+                    List.zip indices values |> List.iter (fun (index, value) -> row.[index] <- value)
+
+                    let rows =
+                        if values |> List.contains VNull then
+                            []
+                        elif unique then
+                            encodeConstraintKey table.Columns indices row
+                            |> Option.bind (fun key -> Map.tryFind name table.UniqueIndex |> Option.bind (Map.tryFind key))
+                            |> Option.bind (fun rowId -> table.RowsArray.TryFind rowId |> Option.map (fun value -> rowId, value))
+                            |> Option.toList
+                        else
+                            let key = encodeEqualityKey table.Columns indices row
+
+                            table.SecondaryIndex
+                            |> Map.tryFind name
+                            |> Option.bind (Map.tryFind key)
+                            |> Option.defaultValue Set.empty
+                            |> Seq.choose (fun rowId -> table.RowsArray.TryFind rowId |> Option.map (fun value -> rowId, value))
+                            |> List.ofSeq
+
+                    { IndexName = name
+                      ColumnIndices = indices
+                      Unique = unique
+                      LookupColumns = table.Columns
+                      LookupRows = rows })
+
+        let unique = uniqueKeyGroups table |> List.map (fun (name, indices) -> name, indices, true)
+
+        let secondary =
+            secondaryKeyGroups table
+            |> List.map (fun group -> group.Name, group.Indices, false)
+
+        unique @ secondary |> List.tryPick probe)
 
 let private trySecondaryOrderSliceInTable
     (store: Store)

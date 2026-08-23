@@ -1519,6 +1519,50 @@ let tests =
                     Expect.equal descending [ VInt 28L, VInt 3L; VInt 26L, VInt 2L ] "descending entries retain index-key order"
                     Expect.equal (reindexCallCount ()) reindexesBefore "point writes preserve ordered buckets incrementally"
 
+                testCase "a composite secondary index follows row mutations incrementally"
+                <| fun _ ->
+                    let store = withUsersTable ()
+                    let index = { Name = "idx_name_age"; Columns = [ "name"; "age" ]; Unique = false; Kind = BTree }
+                    alterTable store defaultDatabase "users" [ AddIndex index ] |> Result.defaultWith (failtestf "add index failed: %A")
+                    let reindexesBefore = reindexCallCount ()
+
+                    insertRows
+                        store
+                        defaultDatabase
+                        "users"
+                        None
+                        [ [ VInt 1L; VString "alice"; VInt 30L ]
+                          [ VInt 2L; VString "bob"; VInt 25L ] ]
+                    |> Result.defaultWith (failtestf "insert failed: %A")
+                    |> ignore
+
+                    let ids name age =
+                        match tryCompositeEqualityLookup store defaultDatabase "users" [ "name", VString name; "age", VInt age ] with
+                        | Some lookup -> lookup.LookupRows |> List.map (fun (_, row) -> row.[0])
+                        | None -> failtest "expected a composite lookup"
+
+                    Expect.equal (ids "alice" 30L) [ VInt 1L ] "inserted rows enter the composite bucket"
+
+                    updateRows
+                        store
+                        defaultDatabase
+                        "users"
+                        None
+                        (fun row -> Ok(row.[0] = VInt 1L))
+                        (fun row -> Ok [| row.[0]; row.[1]; VInt 31L |])
+                    |> Result.defaultWith (failtestf "update failed: %A")
+                    |> ignore
+
+                    Expect.equal (ids "alice" 30L) [] "updated rows leave the old composite bucket"
+                    Expect.equal (ids "alice" 31L) [ VInt 1L ] "updated rows enter the new composite bucket"
+
+                    deleteRows store defaultDatabase "users" (fun row -> Ok(row.[0] = VInt 1L))
+                    |> Result.defaultWith (failtestf "delete failed: %A")
+                    |> ignore
+
+                    Expect.equal (ids "alice" 31L) [] "deleted rows leave the composite bucket"
+                    Expect.equal (reindexCallCount ()) reindexesBefore "row mutations avoid a full index rebuild"
+
                 testCase "AddIndex with Unique = true rejects existing duplicates instead of silently dropping rows from the index"
                 <| fun _ ->
                     let store = withUsersTable ()

@@ -5226,6 +5226,60 @@ let tests =
                     Expect.equal (rows "SELECT id FROM indexed WHERE category = 'books'") [ [ Some "2" ] ] "deleted rows leave their bucket"
                     Expect.equal (rows "SELECT id FROM indexed WHERE category = NULL") [] "NULL equality has no matches"
 
+                testCase "a composite B-tree narrows fully-bound equality predicates"
+                <| fun _ ->
+                    let mutable calls = 0
+
+                    let registry =
+                        builtins
+                        |> registerScalar "TOUCH" (fun values ->
+                            calls <- calls + 1
+                            values.Head)
+
+                    let store = newStore ()
+                    runDefault store "CREATE TABLE tasks (id INT PRIMARY KEY, tenant_id INT, status VARCHAR(20), KEY ix_tenant_status (tenant_id, status))" |> ignore
+                    runDefault store "INSERT INTO tasks VALUES (1, 1, 'open'), (2, 1, 'done'), (3, 2, 'open'), (4, 2, 'done'), (5, 2, 'open')" |> ignore
+
+                    match run store registry "SELECT id FROM tasks WHERE tenant_id = 2 AND status = 'open' AND TOUCH(id) = id ORDER BY id" with
+                    | ResultSet(_, [ [ Some "3" ]; [ Some "5" ] ]) -> ()
+                    | other -> failtestf "expected the composite-key rows, got %A" other
+
+                    Expect.equal calls 3 "the residual runs for the metadata probe and composite-key candidates"
+
+                    match runDefault store "EXPLAIN SELECT id FROM tasks WHERE tenant_id = 2 AND status = 'open'" with
+                    | ResultSet(_, [ [ Some "1"; Some "SIMPLE"; Some "tasks"; None; Some "ref"; Some "ix_tenant_status"; Some "ix_tenant_status"; Some "88"; Some "const,const"; Some "2"; Some "100.00"; Some "Using where" ] ]) ->
+                        ()
+                    | other -> failtestf "expected a composite ref plan, got %A" other
+
+                    Expect.equal
+                        (runDefault store "UPDATE tasks SET status = 'queued' WHERE tenant_id = 2 AND status = 'open' AND id = 3")
+                        (Affected 1UL)
+                        "UPDATE consumes composite candidates"
+
+                    match runDefault store "SELECT id FROM tasks WHERE tenant_id = 2 AND status = 'open'" with
+                    | ResultSet(_, [ [ Some "5" ] ]) -> ()
+                    | other -> failtestf "expected the remaining open row, got %A" other
+
+                    Expect.equal
+                        (runDefault store "DELETE FROM tasks WHERE tenant_id = 2 AND status = 'queued'")
+                        (Affected 1UL)
+                        "DELETE consumes composite candidates"
+
+                testCase "a composite unique key produces a const lookup"
+                <| fun _ ->
+                    let store = newStore ()
+                    runDefault store "CREATE TABLE assignments (id INT PRIMARY KEY, team_id INT, slot_id INT, UNIQUE KEY uq_team_slot (team_id, slot_id))" |> ignore
+                    runDefault store "INSERT INTO assignments VALUES (1, 4, 7), (2, 4, 8)" |> ignore
+
+                    match runDefault store "SELECT id FROM assignments WHERE team_id = 4 AND slot_id = 8" with
+                    | ResultSet(_, [ [ Some "2" ] ]) -> ()
+                    | other -> failtestf "expected the composite unique row, got %A" other
+
+                    match runDefault store "EXPLAIN SELECT id FROM assignments WHERE team_id = 4 AND slot_id = 8" with
+                    | ResultSet(_, [ [ Some "1"; Some "SIMPLE"; Some "assignments"; None; Some "const"; Some "uq_team_slot"; Some "uq_team_slot"; Some "10"; Some "const,const"; Some "1"; Some "100.00"; None ] ]) ->
+                        ()
+                    | other -> failtestf "expected a composite const plan, got %A" other
+
                 testCase "a one-column B-tree range matches a scan twin and retains residual predicates"
                 <| fun _ ->
                     let store = newStore ()

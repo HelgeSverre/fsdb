@@ -5447,7 +5447,7 @@ and private runSelectStmt
 
         match fromItem, select.Joins with
         | FromTable tref, [] ->
-            match tryPointLookup store dbName tref select.Where with
+            match tryEqualityLookup store dbName tref select.Where with
             | Some(columns, rows) -> runResolved columns (rows |> Seq.map snd) select
             | None ->
                 match tryIndexOrder store registry dbName tref select with
@@ -5557,6 +5557,16 @@ and private tryPointLookup (store: Store) (dbName: string) (tref: TableRef) (whe
 
     pointLookupEqualities tref whereExpr
     |> List.tryPick (fun (n, v) -> Storage.tryEqualityLookup store tableDb tref.Table n v)
+
+and private tryCompositeLookup (store: Store) (dbName: string) (tref: TableRef) (whereExpr: Expr option) : (ColumnDef list * (RowId * Value[]) list) option =
+    let tableDb = tref.Database |> Option.defaultValue dbName
+
+    Storage.tryCompositeEqualityLookup store tableDb tref.Table (pointLookupEqualities tref whereExpr)
+    |> Option.map (fun lookup -> lookup.LookupColumns, lookup.LookupRows)
+
+and private tryEqualityLookup (store: Store) (dbName: string) (tref: TableRef) (whereExpr: Expr option) =
+    tryCompositeLookup store dbName tref whereExpr
+    |> Option.orElseWith (fun () -> tryPointLookup store dbName tref whereExpr)
 
 and private tryRangeLookup (store: Store) (dbName: string) (tref: TableRef) (whereExpr: Expr option) : (ColumnDef list * (RowId * Value[]) list) option =
     let tableDb = tref.Database |> Option.defaultValue dbName
@@ -8587,6 +8597,15 @@ let private explainKeyLen (col: ColumnDef) : int option =
     // for it), so only a genuinely nullable unique column pays the null flag.
     baseLen |> Option.map (fun n -> if col.Nullable && not col.PrimaryKey then n + 1 else n)
 
+let private explainCompositeKeyLen (columns: ColumnDef list) (indices: int list) : int option =
+    indices
+    |> traverse (fun index ->
+        match explainKeyLen columns.[index] with
+        | Some length -> Ok length
+        | None -> Error())
+    |> Result.toOption
+    |> Option.map List.sum
+
 let private tryExplainPhysicalSource (store: Store) (dbName: string) (item: FromItem) : Result<(string * ColumnDef list * Table) option, QueryResult> =
     match item with
     | FromTable tableRef ->
@@ -8712,8 +8731,13 @@ let rec private explainJoinBlock
         else
             let tableDb = tref.Database |> Option.defaultValue dbName
 
+            let equalities = pointLookupEqualities tref whereOpt
+
+            let composite =
+                Storage.tryCompositeEqualityLookup store tableDb tref.Table equalities
+
             let probed =
-                pointLookupEqualities tref whereOpt
+                equalities
                 |> List.tryPick (fun (n, v) ->
                     Storage.tryEqualityKeyProbe store tableDb tref.Table n v
                     |> Option.map (fun (table, keyName, columnIndex, unique) ->
@@ -8724,8 +8748,32 @@ let rec private explainJoinBlock
 
                         table, keyName, columnIndex, unique, rowCount))
 
-            match probed with
-            | Some(table, keyName, columnIndex, true, rowCount) when rowCount > 0 ->
+            match composite, probed with
+            | Some lookup, _ when lookup.Unique && lookup.LookupRows.IsEmpty ->
+                acc.Add
+                    { Id = Some id
+                      SelectType = selectType
+                      Table = None
+                      Type = None
+                      Key = None
+                      Ref = None
+                      Rows = None
+                      Extra = [ "no matching row in const table" ] }
+
+                true
+            | Some lookup, _ ->
+                acc.Add
+                    { Id = Some id
+                      SelectType = selectType
+                      Table = Some(tref.Alias |> Option.defaultValue tref.Table)
+                      Type = Some(if lookup.Unique then "const" else "ref")
+                      Key = Some(lookup.IndexName, explainCompositeKeyLen lookup.LookupColumns lookup.ColumnIndices)
+                      Ref = Some(String.concat "," (List.replicate lookup.ColumnIndices.Length "const"))
+                      Rows = Some(uint64 lookup.LookupRows.Length)
+                      Extra = if lookup.Unique then extra |> List.filter ((<>) "Using where") else extra }
+
+                true
+            | None, Some(table, keyName, columnIndex, true, rowCount) when rowCount > 0 ->
                 // MySQL shows no `Using where` on a const row — the single
                 // row is read at plan time and any leftover conditions are
                 // checked against it, not scanned for.
@@ -8742,7 +8790,7 @@ let rec private explainJoinBlock
                       Extra = extra' }
 
                 true
-            | Some(_, _, _, true, _) ->
+            | None, Some(_, _, _, true, _) ->
                 acc.Add
                     { Id = Some id
                       SelectType = selectType
@@ -8755,7 +8803,7 @@ let rec private explainJoinBlock
 
                 true
 
-            | Some(table, keyName, columnIndex, false, rowCount) ->
+            | None, Some(table, keyName, columnIndex, false, rowCount) ->
                 acc.Add
                     { Id = Some id
                       SelectType = selectType
@@ -8767,7 +8815,7 @@ let rec private explainJoinBlock
                       Extra = extra }
 
                 true
-            | None ->
+            | None, None ->
                 match indexOrderPlan with
                 | Some plan ->
                     let hasBounds =
@@ -8894,7 +8942,7 @@ and private explainSelectBlock
     : Result<unit, QueryResult> =
     let indexOrderPlan =
         match select.From, select.Joins with
-        | Some(FromTable tref), [] when tryPointLookup store dbName tref select.Where |> Option.isNone ->
+        | Some(FromTable tref), [] when tryEqualityLookup store dbName tref select.Where |> Option.isNone ->
             tryIndexOrder store registry dbName tref select
         | _ -> None
 
@@ -11097,17 +11145,9 @@ let rec executeAs
         let db, table = (updateStmt.From.Database |> Option.defaultValue dbName), updateStmt.From.Table
         let tableAlias = updateStmt.From.Alias |> Option.defaultValue updateStmt.From.Table
 
-        // `WHERE <PK/UNIQUE col> = <literal>` narrows to its O(log n) index
-        // candidate the same way `tryPointLookup` already does for `SELECT`
-        // (see its doc) — pure narrowing to a superset of the real WHERE
-        // match, so `selectMutationTargets` below still runs the complete,
-        // unmodified WHERE over whatever this produces; a miss (no such
-        // index, a non-literal operand, ...) falls back to the ordinary
-        // full scan, never a correctness risk. `narrowed`'s row identities are
-        // threaded into `Storage.updateRows` below too, so a narrowed
-        // `UPDATE` never walks the rest of `table.Rows` at all — not just
-        // the WHERE evaluation, but the rewrite fold itself.
-        let narrowed = tryPointLookup store dbName updateStmt.From updateStmt.Where
+        // Candidate narrowing is a superset; mutation target selection still
+        // evaluates the complete WHERE. Stable RowIds also bound the rewrite.
+        let narrowed = tryEqualityLookup store dbName updateStmt.From updateStmt.Where
 
         let scanned =
             narrowed
@@ -11458,7 +11498,7 @@ let rec executeAs
         let baseCatalog = store.Catalog
         let useSnapshot = not (beforeTriggers.IsEmpty && afterTriggers.IsEmpty)
         let targetStore = if useSnapshot then Storage.beginTransactionSnapshot store else store
-        let narrowed = tryPointLookup targetStore dbName deleteStmt.From deleteStmt.Where
+        let narrowed = tryEqualityLookup targetStore dbName deleteStmt.From deleteStmt.Where
 
         let scanned =
             narrowed
