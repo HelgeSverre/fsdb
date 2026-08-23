@@ -9831,6 +9831,18 @@ let private writtenTableOf (dbName: string) (stmt: Statement) : (string * string
     | Delete d -> Some(d.From.Database |> Option.defaultValue dbName, normalizeTableName d.From.Table)
     | _ -> None
 
+let private parseTriggerBody (body: string) : Result<Statement list, string> =
+    let compound = Regex.Match(body, @"^\s*BEGIN\b(?<body>[\s\S]*)\bEND\s*$", RegexOptions.IgnoreCase)
+
+    if compound.Success then
+        Parser.splitStatements compound.Groups.["body"].Value
+        |> Result.bind (fun statements ->
+            match statements with
+            | [] -> Error "Trigger body cannot be empty"
+            | statements -> statements |> traverse Parser.parse)
+    else
+        Parser.parse body |> Result.map List.singleton
+
 /// Every database an INSERT into `dbName.tableName` can reach through its
 /// AFTER INSERT triggers, following the chain transitively.
 ///
@@ -9872,9 +9884,10 @@ let triggerWriteDatabases (store: Store) (dbName: string) (tableName: string) : 
             afterInsertTriggers store db table
             |> List.fold
                 (fun (seen, databases) trigger ->
-                    match Parser.parse trigger.Body with
-                    | Ok statement ->
-                        bodyTargets db statement
+                    match parseTriggerBody trigger.Body with
+                    | Ok statements ->
+                        statements
+                        |> List.collect (bodyTargets db)
                         |> List.fold
                             (fun (nestedSeen, nestedDatabases) (targetDb, targetTable) ->
                                 let nestedSeen, deeper = visit nestedSeen targetDb targetTable
@@ -9988,6 +10001,129 @@ let private triggerRowImageError (event: TriggerEvent) (columns: ColumnDef list)
             | Ok _ -> None
             | Error _ -> Some(Err(1054, sprintf "Unknown column '%s.%s' in trigger" image column)))
 
+let private validateTriggerStatement
+    (registry: Registry)
+    (timing: TriggerTiming)
+    (event: TriggerEvent)
+    (columns: ColumnDef list)
+    (statement: Statement)
+    : Result<unit, QueryResult> =
+    match statement with
+    | Insert _
+    | InsertSelect _
+    | Replace _
+    | ReplaceSelect _
+    | ReplaceSet _
+    | Update _
+    | Delete _
+    | SetTriggerNew _ ->
+        match triggerRowImageError event columns statement with
+        | Some error -> Error error
+        | None ->
+            match triggerBodyExprs statement |> List.tryPick (firstDirectOnlyCall registry) with
+            | Some fn -> Error(Err(3102, sprintf "Expression of trigger contains a disallowed function: %s" fn))
+            | None ->
+                match statement with
+                | SetTriggerNew(_, _) when timing <> Before || event = TriggerDelete ->
+                    Error(Err(1362, "Updating of NEW row is not allowed in after trigger"))
+                | SetTriggerNew(column, _) ->
+                    match resolveColumn columns column with
+                    | Error error -> Error(storageErr error)
+                    | Ok index when columns.[index].Generated.IsSome ->
+                        Error(Err(1362, sprintf "Updating of NEW row is not allowed for generated column '%s'" column))
+                    | Ok _ -> Ok()
+                | _ -> Ok()
+    | _ -> Error(Err(1064, "Trigger body accepts INSERT, UPDATE, DELETE, REPLACE, or SET NEW statements"))
+
+let private storeTriggerDefinition
+    (store: Store)
+    (account: Auth.Account)
+    (db: string)
+    (table: string)
+    (name: string)
+    (timing: string)
+    (event: string)
+    (order: TriggerOrder option)
+    (body: string)
+    : Result<unit, QueryResult> =
+    match scan store "mysql" "triggers" with
+    | Error error -> Error(storageErr error)
+    | Ok(_, existing) ->
+        let equals left right = System.String.Equals(left, right, System.StringComparison.OrdinalIgnoreCase)
+
+        let duplicateName =
+            existing
+            |> Seq.exists (fun row -> equals (triggerText 1 row) db && equals (triggerText 0 row) name)
+
+        let sameSlot = sameTriggerSlot db table timing event
+        let peers = existing |> Seq.filter sameSlot |> List.ofSeq
+
+        let insertionOrder =
+            match order with
+            | None ->
+                let lastOrder = peers |> List.map Storage.triggerActionOrder |> List.fold max 0L
+                Ok(lastOrder + 1L)
+            | Some requested ->
+                let reference =
+                    match requested with
+                    | Follows trigger
+                    | Precedes trigger -> trigger
+
+                match peers |> List.tryFind (fun row -> equals (triggerText 0 row) reference) with
+                | None ->
+                    Error(
+                        Err(
+                            3011,
+                            sprintf "Referenced trigger '%s' for the given action time and event type does not exist." reference
+                        )
+                    )
+                | Some row ->
+                    let referenceOrder = Storage.triggerActionOrder row
+
+                    match requested with
+                    | Follows _ -> Ok(referenceOrder + 1L)
+                    | Precedes _ -> Ok referenceOrder
+
+        if duplicateName then
+            Error(Err(1359, "Trigger already exists"))
+        else
+            insertionOrder
+            |> Result.bind (fun insertionOrder ->
+                let baseCatalog = store.Catalog
+                let snapshot = Storage.beginTransactionSnapshot store
+
+                updateRows
+                    snapshot
+                    "mysql"
+                    "triggers"
+                    None
+                    (fun row -> Ok(sameSlot row && Storage.triggerActionOrder row >= insertionOrder))
+                    (fun row ->
+                        let updated = Array.copy row
+                        updated.[8] <- VInt(Storage.triggerActionOrder row + 1L)
+                        Ok updated)
+                |> Result.bind (fun _ ->
+                    insertRows
+                        snapshot
+                        "mysql"
+                        "triggers"
+                        (Some
+                            [ "trigger_name"; "trigger_schema"; "event_table"; "action_timing"; "event_manipulation"
+                              "action_statement"; "created"; "definer"; "action_order" ])
+                        [ [ VString name
+                            VString db
+                            VString(normalizeTableName table)
+                            VString timing
+                            VString event
+                            VString body
+                            VDateTime System.DateTime.Now
+                            VString(account.Name + "@" + account.Host)
+                            VInt insertionOrder ] ])
+                |> Result.mapError storageErr
+                |> Result.map (fun _ ->
+                    Storage.mergeCatalogInto store baseCatalog snapshot.Catalog
+                    Storage.commitTransactionEvents store snapshot))
+
 let rec executeAs
     (store: Store)
     (registry: Registry)
@@ -10031,12 +10167,14 @@ let rec executeAs
             // ponytail: fixed depth cap 8 — raise it if a legitimate
             // trigger chain that deep ever exists.
             let checkBody trigger =
-                match Parser.parse trigger.Body with
+                match parseTriggerBody trigger.Body with
                 | Result.Error msg -> Result.Error(Err(1064, sprintf "Trigger '%s' body has a syntax error: %s" trigger.Name msg))
-                | Result.Ok bodyStmt ->
-                    match writtenTableOf db bodyStmt with
-                    | Some target when List.contains target (self :: chain) -> Result.Error(err1442 (snd target))
-                    | Some target when List.length chain >= 8 -> Result.Error(err1442 (snd target))
+                | Result.Ok bodyStatements ->
+                    let targets = bodyStatements |> List.choose (writtenTableOf db)
+
+                    match targets |> List.tryFind (fun target -> List.contains target (self :: chain)) with
+                    | Some target -> Result.Error(err1442 (snd target))
+                    | None when not targets.IsEmpty && List.length chain >= 8 -> Result.Error(err1442 (snd targets.Head))
                     | _ ->
                         // A body runs with the DEFINER's privileges, not the
                         // invoking session's — otherwise GRANT TRIGGER on one
@@ -10049,10 +10187,12 @@ let rec executeAs
                                 Err(1449, sprintf "The user specified as a definer ('') does not exist for trigger '%s'" trigger.Name)
                             )
                         else
-                            match storedObjectAccount trigger.Definer, checkStoredDefiner runStore trigger.Definer db bodyStmt with
-                            | Some account, Result.Ok() -> Result.Ok(bodyStmt, account)
+                            let privileges = bodyStatements |> traverse (checkStoredDefiner runStore trigger.Definer db)
+
+                            match storedObjectAccount trigger.Definer, privileges with
+                            | Some account, Result.Ok _ -> Result.Ok(bodyStatements, account)
                             | _, Result.Error(code, msg) -> Result.Error(Err(code, msg))
-                            | None, Result.Ok() ->
+                            | None, Result.Ok _ ->
                                 Result.Error(Err(1449, sprintf "The user specified as a definer ('') does not exist for trigger '%s'" trigger.Name))
 
             match triggers |> traverse checkBody with
@@ -10068,7 +10208,7 @@ let rec executeAs
                 // error result here rather than an exception, so a
                 // failing body doesn't abort a surrounding
                 // transaction the way an escaped exception would.
-                let runBody (oldRow: Value[] option) (newRow: Value[] option) (stmt: Statement, account: Auth.Account) : QueryResult =
+                let runBody (oldRow: Value[] option) (newRow: Value[] option) (statements: Statement list, account: Auth.Account) : QueryResult =
                     let definerRegistry = registryForDefiner account shadowed
 
                     withTriggerRowScope
@@ -10076,26 +10216,35 @@ let rec executeAs
                           Old = oldRow
                           New = newRow }
                         (fun () ->
-                            match stmt with
-                            | SetTriggerNew(column, expression) ->
-                                match timing, event, newRow, resolveColumn columns column with
-                                | Before, (TriggerInsert | TriggerUpdate), Some row, Ok index ->
-                                    let context = contextFactory runStore definerRegistry db Map.empty Map.empty None [||]
+                            let runStatement statement =
+                                match statement with
+                                | SetTriggerNew(column, expression) ->
+                                    match timing, event, newRow, resolveColumn columns column with
+                                    | Before, (TriggerInsert | TriggerUpdate), Some row, Ok index ->
+                                        let context = contextFactory runStore definerRegistry db Map.empty Map.empty None [||]
 
-                                    match evalExpr context expression |> Result.mapError Err with
-                                    | Error error -> error
-                                    | Ok value ->
-                                        match coerceValue runStore.StrictMode columns.[index] value with
-                                        | Error error -> storageErr error
+                                        match evalExpr context expression |> Result.mapError Err with
+                                        | Error error -> error
                                         | Ok value ->
-                                            row.[index] <- value
-                                            Affected 0UL
-                                | _ -> Err(1362, "Updating of NEW row is not allowed in after trigger")
-                            | _ ->
-                                try
-                                    executeAs runStore definerRegistry db (0L, 0L) foundRows account stmt |> snd
-                                with SqlError(code, msg) ->
-                                    Err(code, msg))
+                                            match coerceValue runStore.StrictMode columns.[index] value with
+                                            | Error error -> storageErr error
+                                            | Ok value ->
+                                                row.[index] <- value
+                                                Affected 0UL
+                                    | _ -> Err(1362, "Updating of NEW row is not allowed in after trigger")
+                                | _ ->
+                                    try
+                                        executeAs runStore definerRegistry db (0L, 0L) foundRows account statement |> snd
+                                    with SqlError(code, msg) ->
+                                        Err(code, msg)
+
+                            statements
+                            |> List.fold
+                                (fun result statement ->
+                                    match result with
+                                    | Err _ -> result
+                                    | _ -> runStatement statement)
+                                (Affected 0UL))
 
                 try
                     rows
@@ -10906,130 +11055,15 @@ let rec executeAs
         match scan store db table with
         | Error e -> ids, storageErr e
         | Ok(columns, _) ->
-            match Parser.parse body with
+            match parseTriggerBody body with
             | Result.Error msg -> ids, Err(1064, sprintf "Trigger body has a syntax error: %s" msg)
-            | Result.Ok bodyStmt ->
-
-            match bodyStmt with
-            | Insert _
-            | InsertSelect _
-            | Replace _
-            | ReplaceSelect _
-            | ReplaceSet _
-            | Update _
-            | Delete _
-            | SetTriggerNew _ ->
-                match triggerRowImageError event columns bodyStmt with
-                | Some error -> ids, error
-                | None ->
-                match triggerBodyExprs bodyStmt |> List.tryPick (firstDirectOnlyCall registry) with
-                | Some fn -> ids, Err(3102, sprintf "Expression of trigger contains a disallowed function: %s" fn)
-                | None ->
-                    let validNewAssignment =
-                        match bodyStmt with
-                        | SetTriggerNew(column, _) when timing <> Before || event = TriggerDelete ->
-                            Error(Err(1362, "Updating of NEW row is not allowed in after trigger"))
-                        | SetTriggerNew(column, _) ->
-                            match resolveColumn columns column with
-                            | Error error -> Error(storageErr error)
-                            | Ok index when columns.[index].Generated.IsSome ->
-                                Error(Err(1362, sprintf "Updating of NEW row is not allowed for generated column '%s'" column))
-                            | Ok _ -> Ok()
-                        | _ -> Ok()
-
-                    match validNewAssignment with
+            | Result.Ok bodyStatements ->
+                match bodyStatements |> traverse (validateTriggerStatement registry timing event columns) with
+                | Error result -> ids, result
+                | Ok _ ->
+                    match storeTriggerDefinition store currentAccount db table name timingText eventText order body with
                     | Error result -> ids, result
-                    | Ok() ->
-                        match scan store "mysql" "triggers" with
-                        | Error e -> ids, storageErr e
-                        | Ok(_, existing) ->
-                        let eqI (a: string) (b: string) = System.String.Equals(a, b, System.StringComparison.OrdinalIgnoreCase)
-
-                        let duplicateName =
-                            existing
-                            |> Seq.exists (fun r ->
-                                eqI (triggerText 1 r) db
-                                && eqI (triggerText 0 r) name)
-
-                        let sameSlot = sameTriggerSlot db table timingText eventText
-                        let peers = existing |> Seq.filter sameSlot |> List.ofSeq
-
-                        let insertionOrder =
-                            match order with
-                            | None ->
-                                let lastOrder = peers |> List.map Storage.triggerActionOrder |> List.fold max 0L
-                                Ok(lastOrder + 1L)
-                            | Some requested ->
-                                let reference =
-                                    match requested with
-                                    | Follows trigger
-                                    | Precedes trigger -> trigger
-
-                                match peers |> List.tryFind (fun row -> eqI (triggerText 0 row) reference) with
-                                | None ->
-                                    Error(
-                                        Err(
-                                            3011,
-                                            sprintf
-                                                "Referenced trigger '%s' for the given action time and event type does not exist."
-                                                reference
-                                        )
-                                    )
-                                | Some row ->
-                                    let referenceOrder = Storage.triggerActionOrder row
-
-                                    match requested with
-                                    | Follows _ -> Ok(referenceOrder + 1L)
-                                    | Precedes _ -> Ok referenceOrder
-
-                        if duplicateName then
-                            ids, Err(1359, "Trigger already exists")
-                        else
-                            match insertionOrder with
-                            | Error error -> ids, error
-                            | Ok insertionOrder ->
-                                let baseCatalog = store.Catalog
-                                let snapshot = Storage.beginTransactionSnapshot store
-
-                                let shifted =
-                                    updateRows
-                                        snapshot
-                                        "mysql"
-                                        "triggers"
-                                        None
-                                        (fun row -> Ok(sameSlot row && Storage.triggerActionOrder row >= insertionOrder))
-                                        (fun row ->
-                                            let updated = Array.copy row
-                                            updated.[8] <- VInt(Storage.triggerActionOrder row + 1L)
-                                            Ok updated)
-
-                                let inserted =
-                                    shifted
-                                    |> Result.bind (fun _ ->
-                                        insertRows
-                                            snapshot
-                                            "mysql"
-                                            "triggers"
-                                            (Some
-                                                [ "trigger_name"; "trigger_schema"; "event_table"; "action_timing"
-                                                  "event_manipulation"; "action_statement"; "created"; "definer"; "action_order" ])
-                                            [ [ VString name
-                                                VString db
-                                                VString(normalizeTableName table)
-                                                VString timingText
-                                                VString eventText
-                                                VString body
-                                                VDateTime System.DateTime.Now
-                                                VString(currentAccount.Name + "@" + currentAccount.Host)
-                                                VInt insertionOrder ] ])
-
-                                match inserted with
-                                | Error error -> ids, storageErr error
-                                | Ok _ ->
-                                    Storage.mergeCatalogInto store baseCatalog snapshot.Catalog
-                                    Storage.commitTransactionEvents store snapshot
-                                    ids, Affected 0UL
-            | _ -> ids, Err(1064, "Trigger body must be a single INSERT, UPDATE, or DELETE statement, or SET NEW")
+                    | Ok() -> ids, Affected 0UL
 
     | DropTrigger(name, ifExists) ->
         let equals left right = System.String.Equals(left, right, System.StringComparison.OrdinalIgnoreCase)

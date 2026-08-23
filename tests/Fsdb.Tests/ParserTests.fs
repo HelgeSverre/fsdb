@@ -2240,6 +2240,20 @@ let tests =
                       "only statement delimiters split the batch"
               | Error error -> failtestf "unexpected split error: %s" error
 
+          testCase "statement batches preserve compound trigger bodies"
+          <| fun _ ->
+              let sql =
+                  "CREATE TRIGGER trg BEFORE INSERT ON t FOR EACH ROW BEGIN SET NEW.n = CASE WHEN NEW.n > 0 THEN NEW.n ELSE 0 END; INSERT INTO log VALUES (NEW.n); END; SELECT 1"
+
+              match splitStatements sql with
+              | Ok statements ->
+                  Expect.sequenceEqual
+                      statements
+                      [ "CREATE TRIGGER trg BEFORE INSERT ON t FOR EACH ROW BEGIN SET NEW.n = CASE WHEN NEW.n > 0 THEN NEW.n ELSE 0 END; INSERT INTO log VALUES (NEW.n); END"
+                        "SELECT 1" ]
+                      "the outer END closes the trigger statement"
+              | Error error -> failtestf "unexpected split error: %s" error
+
           testCase "statement batches reject unterminated literals"
           <| fun _ ->
               match splitStatements "SELECT 'unterminated" with

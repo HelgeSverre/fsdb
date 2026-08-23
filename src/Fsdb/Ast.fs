@@ -726,7 +726,8 @@ type Statement =
     /// parsing at CREATE time and re-parses at fire time, so there's one
     /// source of truth rather than a parsed-Statement-plus-text double
     /// carry (statement parsing is cheap). `order` places the trigger within
-    /// its timing/event slot. Compound BEGIN...END bodies remain unsupported.
+    /// its timing/event slot. BEGIN...END bodies retain the same raw form and
+    /// are split into their supported statements at validation and fire time.
     | CreateTrigger of
         name: string *
         timing: TriggerTiming *

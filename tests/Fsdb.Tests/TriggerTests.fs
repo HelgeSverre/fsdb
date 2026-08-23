@@ -64,6 +64,40 @@ let tests =
               expectOk (runDefault store "INSERT INTO t(n) VALUES (10)") "insert"
               Expect.equal (rows store "SELECT n FROM t") [ [ Some "11" ] ] "stored row contains the value assigned by the trigger"
 
+          testCase "compound trigger bodies execute statements in order"
+          <| fun _ ->
+              let store = Fsdb.Storage.create ()
+              setup store
+
+              expectOk
+                  (runDefault
+                      store
+                      "CREATE TRIGGER compound BEFORE INSERT ON t FOR EACH ROW BEGIN SET NEW.n = NEW.n + 1; SET NEW.n = NEW.n * 2; END")
+                  "create compound trigger"
+
+              expectOk (runDefault store "INSERT INTO t(n) VALUES (10)") "fire compound trigger"
+              Expect.equal (rows store "SELECT n FROM t") [ [ Some "22" ] ] "later assignments observe the updated NEW row"
+
+          testCase "a failing compound body rolls back earlier statements"
+          <| fun _ ->
+              let store = Fsdb.Storage.create ()
+              setup store
+              expectOk (runDefault store "CREATE TABLE unique_log (n INT UNIQUE)") "create unique log"
+              expectOk (runDefault store "INSERT INTO unique_log VALUES (1)") "seed unique log"
+
+              expectOk
+                  (runDefault
+                      store
+                      "CREATE TRIGGER compound_failure AFTER INSERT ON t FOR EACH ROW BEGIN INSERT INTO log(n) VALUES (NEW.n); INSERT INTO unique_log VALUES (1); END")
+                  "create failing compound trigger"
+
+              match runDefault store "INSERT INTO t(n) VALUES (10)" with
+              | Err(1062, _) -> ()
+              | result -> failtestf "expected duplicate-key failure, got %A" result
+
+              Expect.equal (rows store "SELECT n FROM t") [] "the originating insert rolls back"
+              Expect.equal (rows store "SELECT n FROM log") [] "earlier body statements roll back"
+
           testCase "SET NEW is rejected outside a trigger body"
           <| fun _ ->
               let store = Fsdb.Storage.create ()
@@ -506,7 +540,7 @@ let tests =
               | other -> failtestf "expected 1064 for an unparseable body, got %A" other
 
               match runDefault store "CREATE TRIGGER bad AFTER INSERT ON t FOR EACH ROW SELECT 1" with
-              | Err(1064, msg) -> Expect.stringContains msg "single INSERT, UPDATE, or DELETE" "kind restriction named"
+              | Err(1064, msg) -> Expect.stringContains msg "accepts INSERT, UPDATE, DELETE, REPLACE, or SET NEW" "kind restriction named"
               | other -> failtestf "expected 1064 for a SELECT body, got %A" other
 
               match runDefault store "CREATE TRIGGER bad AFTER INSERT ON nosuch FOR EACH ROW INSERT INTO log(n) VALUES (1)" with

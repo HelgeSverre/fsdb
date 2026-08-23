@@ -3254,9 +3254,9 @@ let parseLocalLoad (sql: string) : Result<LocalLoad, string> =
     with ex ->
         Result.Error ex.Message
 
-/// Splits a COM_QUERY batch at statement delimiters outside literals and
-/// comments. The parser still validates each returned statement separately,
-/// which keeps text-probed session commands on their existing path.
+/// Splits a COM_QUERY batch at statement delimiters outside literals,
+/// comments, and compound trigger bodies. The parser still validates each
+/// returned statement separately.
 let splitStatements (sql: string) : Result<string list, string> =
     let sql = stripVersionComments sql
     let statements = ResizeArray<string>()
@@ -3265,6 +3265,19 @@ let splitStatements (sql: string) : Result<string list, string> =
     let mutable quote: char option = None
     let mutable blockComment = false
     let mutable lineComment = false
+    let mutable triggerCompoundDepth = 0
+
+    let isWordStart c = Char.IsLetter c || c = '_'
+    let isWordPart c = Char.IsLetterOrDigit c || c = '_'
+
+    let startsTriggerCompound at =
+        let prefix = sql.[start .. at - 1]
+
+        System.Text.RegularExpressions.Regex.IsMatch(
+            prefix,
+            @"^\s*CREATE\s+TRIGGER\b[\s\S]*\bFOR\s+EACH\s+ROW\s*$",
+            System.Text.RegularExpressions.RegexOptions.IgnoreCase
+        )
 
     let addStatement stop =
         if stop > start then
@@ -3309,7 +3322,24 @@ let splitStatements (sql: string) : Result<string list, string> =
         | None when sql.[i] = '/' && i + 1 < sql.Length && sql.[i + 1] = '*' ->
             blockComment <- true
             i <- i + 2
-        | None when sql.[i] = ';' ->
+        | None when isWordStart sql.[i] ->
+            let mutable stop = i + 1
+
+            while stop < sql.Length && isWordPart sql.[stop] do
+                stop <- stop + 1
+
+            let word = sql.[i .. stop - 1]
+
+            if word.Equals("BEGIN", StringComparison.OrdinalIgnoreCase) then
+                if triggerCompoundDepth > 0 || startsTriggerCompound i then
+                    triggerCompoundDepth <- triggerCompoundDepth + 1
+            elif triggerCompoundDepth > 0 && word.Equals("CASE", StringComparison.OrdinalIgnoreCase) then
+                triggerCompoundDepth <- triggerCompoundDepth + 1
+            elif triggerCompoundDepth > 0 && word.Equals("END", StringComparison.OrdinalIgnoreCase) then
+                triggerCompoundDepth <- triggerCompoundDepth - 1
+
+            i <- stop
+        | None when sql.[i] = ';' && triggerCompoundDepth = 0 ->
             addStatement i
             start <- i + 1
             i <- i + 1
