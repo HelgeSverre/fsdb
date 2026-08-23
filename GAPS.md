@@ -1,7 +1,7 @@
 # MySQL 8.4 feature gaps
 
 A map of where fsdb diverges from or lacks MySQL 8.4 functionality. Oracle for
-every row is real MySQL 8.4 (never sqlite). Audit date: 2026-08-21, based on a
+every row is real MySQL 8.4 (never sqlite). Audit date: 2026-08-23, based on a
 full static exploration of `src/Fsdb/` plus the documented records
 (`docs/compatibility.md`, `torture/findings/`, `torture/support/known-gaps.json`,
 `docs/performance-*.md`). Line references are evidence anchors and drift as the
@@ -31,19 +31,19 @@ accepted (marked `ponytail:` in source), or recorded only in
 | Area | State | Largest single gap |
 |---|---|---|
 | SQL statements | Broad core; large admin/programmatic tail missing | Stored procedures/functions, events |
-| Query execution | Equality, one-column non-unique literal range access, and bounded single-key index ordering plus stable subquery materialization | Multi-key ORDER BY, join reordering, and correlated subqueries still scale poorly |
+| Query execution | Composite equality, literal range, bounded index ordering, indexed inner joins, and stable subquery materialization | Join reordering and correlated subqueries still scale poorly |
 | Built-in functions | Broad scalar, aggregate, JSON, time, and common planar geometry coverage | Overlays, buffers, and geographic SRS semantics |
 | Data types | Common scalar types, BIT fields, signed TIME durations, and OGC geometry | Spatial indexes and operations |
-| Constraints & indexes | PK/UNIQUE/FK/CHECK plus one-column equality, inner-join, literal range, and bounded index-order probes | No multi-key/composite access; unique and DML ranges scan |
+| Constraints & indexes | PK/UNIQUE/FK/CHECK plus composite equality, inner-join, literal range, grouping, and bounded index-order probes | Unique and DML ranges still scan |
 | Charsets & collations | ICU-based utf8mb4 registry | Weight-table tailoring differs from MySQL's UCA tables |
-| Transactions | Repeatable-read snapshots, nonlocking read-committed views + optimistic merge | READ UNCOMMITTED and SERIALIZABLE refused; transaction commits serialize |
+| Transactions | Repeatable-read snapshots, nonlocking read-committed views, conservative serializable validation, and optimistic merge | READ UNCOMMITTED is refused; transaction commits serialize |
 | Persistence | WAL + snapshot, crash-tested | Opt-in only; no group commit; tombstones never reclaimed |
-| Views & triggers | Direct updatable views; BEFORE/AFTER INSERT/UPDATE/DELETE triggers | Complex views, compound bodies, multiple triggers per slot |
+| Views & triggers | Direct updatable views with all insert/replace forms; ordered BEFORE/AFTER INSERT/UPDATE/DELETE triggers and compound DML bodies | Complex views and the stored-program control language |
 | Routines & events | Absent (catalogs honestly empty) | Everything |
 | Full-text | Oracle-verified scoring | No inverted index; single-table SELECT only; no CJK parser |
 | Wire protocol | Handshake through COM_STMT_EXECUTE, TLS, LOCAL INFILE, and multi-result batches | No compression or cursors |
 | Auth & privileges | Static privileges enforced incl. subqueries and per-host accounts | No roles/dynamic/column privileges |
-| Metadata | 23 INFORMATION_SCHEMA views, 8 mysql.* tables | Storage statistics are stand-ins; many SHOW forms missing |
+| Metadata | 23 INFORMATION_SCHEMA views, 8 mysql.* tables, and core live command counters | Storage statistics are stand-ins; many SHOW forms missing |
 | Server admin | KILL, SHUTDOWN, limits, config file parsing | No replication/binlog/logging files |
 
 ## 1. SQL statements and parser
@@ -106,9 +106,9 @@ identities for bit aggregates.
 
 | Gap | MySQL 8.4 | fsdb | Impact | Class |
 |---|---|---|---|---|
-| Secondary-index access paths | ref/eq_ref/range scans feed joins, ORDER BY, GROUP BY | single-table equality and a physical right side of a one-key `INNER JOIN ... ON` use PK/UNIQUE or one-column non-unique B-tree buckets; direct literal `SELECT` ranges on one-column non-unique B-trees narrow candidates and report `range` in EXPLAIN; one direct indexed `ORDER BY` key with `LIMIT`/`OFFSET` streams the index order and can use compatible literal bounds; unique/PK ranges, DML ranges, joins, composite keys, outer joins, multi-key ORDER BY, and GROUP BY scan/sort | high (scale) | divergence |
+| Secondary-index access paths | ref/eq_ref/range scans feed joins, ORDER BY, GROUP BY | fully-bound composite equality probes and matching physical inner joins use B-tree buckets; direct literal `SELECT` ranges and bounded `ORDER BY`/`GROUP BY` can stream a matching composite index when preceding keys are fixed; unique/PK ranges, DML ranges, outer joins, unconstrained multi-key ordering, and broader grouping still scan/sort | high (scale) | divergence |
 | Optimizer | pushdown, constant folding, join reordering, cost model, statistics | none; joins fold left-to-right as written; derived tables materialize once per statement (`Functions.fs:44`, `Executor.fs:36–43`) | medium | divergence |
-| EXPLAIN fidelity | type ∈ system/const/eq_ref/ref/range/index/ALL; FORMAT=JSON/TREE; ANALYZE; optimizer_trace | `type` ∈ {system, const, eq_ref, ref, range, index, ALL}; `range` covers direct literal `SELECT` bounds on one-column non-unique B-trees, `index` covers bounded direct one-key ordering; FORMAT=JSON/TREE, ANALYZE, and optimizer_trace absent; extra flags limited to Using where/filesort/temporary | low | divergence |
+| EXPLAIN fidelity | type ∈ system/const/eq_ref/ref/range/index/ALL; FORMAT=JSON/TREE; ANALYZE; optimizer_trace | `type` ∈ {system, const, eq_ref, ref, range, index, ALL}; `range` and `index` cover compatible direct composite bounds/orderings; FORMAT=JSON/TREE, ANALYZE, and optimizer_trace absent; extra flags limited to Using where/filesort/temporary | low | divergence |
 | Subquery strategies | semi-join/materialization/early-exit transformations | statement-stable scalar/IN/ANY/SOME/ALL/EXISTS subqueries materialize once and simple EXISTS stops at one row; correlated, variable-bearing, nondeterministic, CTE, derived, lateral, and JSON_TABLE forms re-execute | medium (scale) | divergence |
 | Join size ceiling | unbounded (memory-bound) | hard cap 1,000,000 candidate rows → error 1105 (`Executor.fs:1586, 3287–3290`) | medium | divergence |
 | Multi-table UPDATE/DELETE sources | derived tables allowed as join sources | real base tables only → 1064 (`Executor.fs:3334–3339`) | low | refusal |
@@ -137,7 +137,7 @@ CURRENT_USER/USER/SESSION_USER.
 | Missing family | Functions | Impact |
 |---|---|---|
 | JSON Schema recursive regular-expression references | Local reference cycles traversing `pattern` or `patternProperties` return 1235 | low |
-| Geometry topology and relations | overlays, buffers, and geographic SRS semantics; planar `ST_Contains`, `ST_Within`, and `ST_Touches` work | low |
+| Geometry topology and relations | overlays, buffers, and geographic SRS semantics; planar `ST_Contains`, `ST_Within`, `ST_Touches`, `ST_Equals`, and `ST_ConvexHull` work | low |
 
 `CONVERT_TZ` resolves numeric offsets and `SYSTEM`, but named zones return NULL
 without loaded time-zone tables;
@@ -168,7 +168,7 @@ accessors).
 
 | Gap | MySQL 8.4 | fsdb | Impact | Class |
 |---|---|---|---|---|
-| Spatial indexes and operations | R-tree indexes, overlays, buffers, geographic SRS axis rules | geometry values, common WKT/WKB accessors, planar `ST_Distance`, `ST_Envelope`, `ST_IsValid`, `ST_Contains`, `ST_Within`, `ST_Touches`, `ST_Intersects`, `ST_Disjoint`, and MBR predicates work; spatial indexes still collapse to BTree | low | refusal |
+| Spatial indexes and operations | R-tree indexes, overlays, buffers, geographic SRS axis rules | geometry values, common WKT/WKB accessors, planar `ST_Distance`, `ST_Envelope`, `ST_IsValid`, `ST_Contains`, `ST_Within`, `ST_Touches`, `ST_Equals`, `ST_ConvexHull`, `ST_Intersects`, `ST_Disjoint`, and MBR predicates work; spatial indexes still collapse to BTree | low | refusal |
 | Generated columns | VIRTUAL recomputed on read, STORED materialized | both materialize at write time; no read-path recompute (`Storage.fs:3705–3713`) | low | divergence |
 | Functional defaults | `DEFAULT (expr)` | literal constants and CURRENT_TIMESTAMP only | low | refusal |
 | Column-comment character sets | converted through the table/column charset; utf8mb3 stores non-BMP text as `?` | raw .NET text, without charset conversion | low | divergence |
@@ -187,7 +187,7 @@ ADD UNIQUE over colliding data fails 1062 rather than corrupting.
 
 | Gap | MySQL 8.4 | fsdb | Impact | Class |
 |---|---|---|---|---|
-| Non-unique secondary indexes | physical structures serving lookups/ordering | separate immutable equality buckets and ordered entries serve single-table literal equality, a matching physical inner-join key, direct literal `SELECT` ranges, and one direct indexed `ORDER BY` key with `LIMIT`/`OFFSET`; duplicate derived structures deliberately trade memory and write work for equality buckets plus bounded range seeks; composite, multi-key/DML ORDER BY, DML range, and other join access remain scans | high (scale) | divergence |
+| Non-unique secondary indexes | physical structures serving lookups/ordering | separate immutable equality buckets and ordered entries serve fully-bound composite equality, matching physical inner-join keys, direct literal `SELECT` ranges, compatible grouping, and bounded composite index ordering; duplicate structures deliberately trade memory and write work for point probes plus bounded seeks; unique/PK ranges, DML ranges, outer joins, and unconstrained ordering remain scans | high (scale) | divergence |
 | Prefix indexes | `INDEX (col(N))` with SUB_PART metadata | parsed prefix length discarded; SUB_PART always NULL (`InformationSchema.fs:491–495`) | low | divergence |
 | Expression indexes | `INDEX ((expr))` | absent | low | refusal |
 | Descending/invisible indexes | `DESC`, `INVISIBLE` | absent | low | refusal |
@@ -219,10 +219,13 @@ with MySQL establishment-order semantics, autocommit implicit transactions,
 read-only transactions never blocking writers, per-database sharding so
 cross-database writers never contend, 4096-stripe row locks for indexed
 updates, InnoDB-style burned AUTO_INCREMENT on rollback.
+`SERIALIZABLE` uses conservative whole-catalog validation for writing
+transactions, preventing write skew while keeping read-only transactions
+lock-free.
 
 | Gap | MySQL 8.4 | fsdb | Impact | Class |
 |---|---|---|---|---|
-| SERIALIZABLE | implemented via shared locks / auto-conversion | refused with 1235 | medium | refusal |
+| SERIALIZABLE locking behavior | predicate/gap locks and blocking reads | conservative snapshot validation rejects any intervening catalog change with 1205 when the transaction writes; read-only transactions retain snapshot semantics | low | divergence |
 | READ COMMITTED | a fresh nonlocking read view per statement | a fresh committed view plus the transaction's own successful writes per parsed statement; locking reads remain unsupported | medium | partial |
 | READ UNCOMMITTED | dirty reads | refused with 1235 | medium | refusal |
 | Deadlock errors | 1213 deadlock detection with victim selection | write-write conflicts surface as lock-wait timeout 1205; no deadlock classification | low | divergence |
@@ -255,27 +258,28 @@ Views working: CREATE [OR REPLACE] VIEW with explicit column lists, views
 over views, recursive-reference detection (1462), definer-privilege checking
 at read time so revokes take effect, persistence through WAL restarts,
 SHOW CREATE VIEW and I_S.VIEWS with correct shapes. Direct projections over
-one unfiltered base table accept INSERT, INSERT ... SELECT, UPDATE, and DELETE
+one filtered or unfiltered base table accept INSERT, INSERT ... SELECT,
+REPLACE VALUES/SET/SELECT, ODKU, UPDATE, and DELETE
 with exposed-column enforcement and definer privilege checks.
 View projections appear in I_S.COLUMNS, DESCRIBE, SHOW COLUMNS, and SHOW TABLE
 STATUS. Their metadata is derived from the saved query without evaluating it.
 
-Triggers working: BEFORE/AFTER INSERT/UPDATE/DELETE FOR EACH ROW with OLD/NEW
-row images and BEFORE SET NEW assignments, bodies limited to one DML or SET
-NEW statement, statement atomicity, 1442 cycle/self-write detection, a depth
-cap, definer-based privilege checks per fire, lifecycle maintenance, and SHOW
+Triggers working: ordered multiple BEFORE/AFTER INSERT/UPDATE/DELETE FOR EACH
+ROW triggers with OLD/NEW row images, BEFORE SET NEW assignments,
+FOLLOWS/PRECEDES, and `BEGIN ... END` sequences of DML and SET NEW statements;
+statement atomicity, 1442 cycle/self-write detection, a depth cap,
+definer-based privilege checks per fire, lifecycle maintenance, and SHOW
 TRIGGERS/I_S.TRIGGERS metadata. Generated row-image columns and illegal
 OLD/NEW images are rejected when the trigger is created.
 
 | Gap | MySQL 8.4 | fsdb | Impact | Class |
 |---|---|---|---|---|
-| Updatable-view breadth | joins, expressions, nested views, REPLACE, and ODKU where MySQL deems the view writable | direct single-table projections with a simple base-table WHERE predicate; view ODKU and REPLACE refuse | medium | refusal |
+| Updatable-view breadth | joins, expressions, and nested views where MySQL deems the view writable | direct single-table projections with a simple base-table WHERE predicate; insert, ODKU, replace, update, and delete forms map through it | medium | refusal |
 | WITH CHECK OPTION | enforced on updatable views | CREATE VIEW refuses `WITH [CASCADED|LOCAL] CHECK OPTION` with 1235 | low | refusal |
 | ALGORITHM / SQL SECURITY INVOKER / ALTER VIEW | supported | absent; SECURITY_TYPE constant DEFINER (`InformationSchema.fs:922–923`) | low | refusal |
 | VIEW_DEFINITION rendering | fully-qualified expanded form; SHOW CREATE VIEW wrapped in `/*!50001 */` | raw user text, no wrapper (`InformationSchema.fs:1749–1764`) | low | divergence |
 | Trigger DML breadth | triggers fire for every applicable MySQL DML form | single-table DML is covered; REPLACE refuses when DELETE triggers exist, and multi-table UPDATE/DELETE firing remains unsupported | medium | refusal |
-| Compound trigger bodies | BEGIN…END with variables/handlers | single statement only | medium | refusal |
-| Multiple triggers per slot | yes, with FOLLOWS/PRECEDES ordering | one per (table,timing,event); second CREATE → 1359 (`Executor.fs:8343–8357`) | low | divergence |
+| Compound trigger language | BEGIN…END with variables, conditions, handlers, and control flow | ordered DML and SET NEW statement sequences; DECLARE, handlers, IF/CASE/loops, SIGNAL, and dynamic SQL remain absent | medium | refusal |
 | Trigger recursion cap | cycle detection at runtime | hardcoded depth 8 (`Executor.fs:7608–7616`) | low | divergence |
 | Per-trigger sql_mode/charset capture | stored and applied | server constants in I_S output (`InformationSchema.fs:1019–1023`) | low | divergence |
 
@@ -382,7 +386,7 @@ live Limits reporting.
 |---|---|---|---|---|
 | INFORMATION_SCHEMA breadth | ~60+ views incl. INNODB_*, COLUMN_STATISTICS, RESOURCE_GROUPS, ENABLED_ROLES | 23 views; EVENTS/ROUTINES/PARAMETERS/COLUMN_PRIVILEGES genuinely empty | low | divergence |
 | Table statistics | estimates refreshed by ANALYZE TABLE | ENGINE always InnoDB, DATA_LENGTH stand-in 16384, CARDINALITY 0, live row counts where MySQL keeps stale page estimates until ANALYZE (`InformationSchema.fs:267–288`) | low | divergence |
-| SHOW STATUS counters | Com_*, Innodb_*, Slow_queries, … | five variables only: Questions, Ssl_cipher, Ssl_version, Threads_connected, Uptime (`InformationSchema.fs`) | low | divergence |
+| SHOW STATUS counters | Com_*, Innodb_*, Slow_queries, … | live Questions, TLS, connection, uptime, and Com_select/insert/update/delete/replace counters; engine and latency families remain absent (`InformationSchema.fs`) | low | divergence |
 | wait_timeout | 28800 default | 300 (deliberate DoS posture, honestly advertised) | low | divergence |
 | Logging | general log, slow log, error-log file | stderr diagnostics with credential redaction only (`Log.fs`) | low | divergence |
 | Replication | binlog, GTID, source/replica channels | nothing; REPLICATION privileges are vocabulary only; internal WAL is not a binlog | architectural | refusal |
@@ -434,14 +438,15 @@ that later work changed:
 Ranked by expected disruption to the primary consumers, independent of
 implementation effort:
 
-1. Missing secondary multi-key ORDER BY/composite access, join reordering, and excluded
-   correlated subquery plans — correctness holds, but scale still diverges
+1. Join reordering, correlated-subquery planning, and access paths outside the
+   fully-bound composite cases — correctness holds, but scale still diverges
    from MySQL past small data.
-2. SERIALIZABLE/READ UNCOMMITTED semantics and intra-database transaction
-   publication — the remaining transactional throughput and isolation gap.
-3. Complex updatable views, compound trigger bodies, and multiple triggers
-   per timing/event slot.
-4. Remaining function families, chiefly advanced geometry topology and
-   geographic SRS behavior.
-5. Everything in the admin/replication/metadata tail — matters only once a
-   specific tool needs it (mysqladmin, monitoring agents, replica setups).
+2. READ UNCOMMITTED and intra-database transaction publication. Serializable
+   correctness is covered conservatively, without InnoDB's locking behavior.
+3. Complex/nested updatable views and the stored-program control language
+   inside trigger bodies. Ordered multi-trigger slots and sequential compound
+   DML bodies are covered.
+4. Spatial indexes, overlay/buffer operations, and geographic SRS behavior.
+   The common planar topology family includes equality and convex hull.
+5. Replication, logging, broad engine counters, and the remaining metadata
+   tail. Core command counters are live; replication remains architectural.

@@ -125,21 +125,24 @@ fsdb supports stored queries broadly and a narrow writable subset:
   without running it, so empty and nondeterministic views have the same
   metadata shape as populated views.
 
-Direct projections over one base table, without filtering, grouping, joins,
-or computed columns, accept `INSERT`, `INSERT ... SELECT`, `UPDATE`, and
-`DELETE`. Every written or referenced column must be exposed by the view, and
-base-table writes run under the view definer's privileges. `REPLACE`,
-`ON DUPLICATE KEY UPDATE`, `WITH CHECK OPTION`, `ALTER VIEW`, `ALGORITHM`,
-explicit `DEFINER`, and `SQL SECURITY` remain unsupported. Creation validates
+Direct projections over one base table, with an optional simple predicate but
+without grouping, joins, or computed columns, accept `INSERT`, `INSERT ...
+SELECT`, `REPLACE` in each supported source form, `ON DUPLICATE KEY UPDATE`,
+`UPDATE`, and `DELETE`. Every written or referenced column must be exposed by
+the view, and base-table writes run under the view definer's privileges. `WITH
+CHECK OPTION`, `ALTER VIEW`, `ALGORITHM`, explicit `DEFINER`, and `SQL
+SECURITY` remain unsupported. Creation validates
 the saved SQL grammar but defers missing dependency and output-shape errors
 until the first read; `SELECT *` follows the base table's current columns
 instead of freezing them at creation.
 
 Trigger execution has stronger behavioral coverage than its syntax breadth:
 
-- `BEFORE` and `AFTER` triggers run for single-table `INSERT`, `UPDATE`, and
-  `DELETE`, with one `INSERT`, `REPLACE`, `UPDATE`, `DELETE`, or `SET NEW`
-  body statement.
+- Ordered `BEFORE` and `AFTER` triggers run for single-table `INSERT`,
+  `UPDATE`, and `DELETE`. `FOLLOWS` and `PRECEDES` determine order within a
+  timing/event slot.
+- Bodies accept one statement or a `BEGIN ... END` sequence of `INSERT`,
+  `REPLACE`, `UPDATE`, `DELETE`, and `SET NEW` statements.
 - `OLD.column` and `NEW.column` bind the applicable row images. A `BEFORE`
   trigger may assign `NEW.column`; generated columns cannot be referenced.
 - Multi-row statements fire once per affected row. Ignored candidates do not
@@ -156,10 +159,10 @@ Trigger execution has stronger behavioral coverage than its syntax breadth:
 - A trigger follows its subject through `RENAME TABLE`; dropping the subject
   table or its database removes the stored trigger definition.
 
-Remaining trigger gaps are compound `BEGIN ... END` bodies, multiple ordered
-triggers for one timing/event slot, multi-table DML firing, and complete
-`REPLACE` delete-event behavior. `REPLACE` refuses when DELETE triggers exist
-instead of silently skipping them. The full MySQL surface is documented under
+Remaining trigger gaps are local variables, conditions, handlers, control
+flow, multi-table DML firing, and complete `REPLACE` delete-event behavior.
+`REPLACE` refuses when DELETE triggers exist instead of silently skipping
+them. The full MySQL surface is documented under
 [CREATE TRIGGER](https://dev.mysql.com/doc/refman/8.4/en/create-trigger.html).
 
 ## Check constraints

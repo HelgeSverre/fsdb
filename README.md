@@ -176,17 +176,18 @@ private until commit. Commit performs a row-level three-way merge: disjoint
 concurrent changes combine, while overlapping changes fail with MySQL's
 retryable 1205 error. Immutable row pages let the merge inspect only pages
 changed from the transaction snapshot and maintain indexes incrementally.
-PK/UNIQUE and one-column secondary equality lookups go through maps keyed by
-each column's collation-folded encoding, so `utf8mb4_0900_ai_ci` keys collide
-exactly as MySQL's do. A direct literal range in a single-table `SELECT` can
-seek a one-column non-unique secondary B-tree and reports `range` in
-`EXPLAIN`. A direct single-key `ORDER BY` over that index streams in key order
-when `LIMIT` is present, including `OFFSET` and compatible literal bounds;
-unique/PK ranges, DML ranges, composite indexes, and multi-key/DML `ORDER BY`
-remain scans. Equality buckets and ordered entries are separate derived
+PK/UNIQUE and composite secondary equality lookups go through maps keyed by
+the columns' collation-folded encodings, so `utf8mb4_0900_ai_ci` keys collide
+exactly as MySQL's do. Direct literal ranges in a single-table `SELECT` can
+seek a matching non-unique secondary B-tree and report `range` in `EXPLAIN`.
+Compatible composite `ORDER BY` and `GROUP BY` operations can stream that
+index when preceding keys are fixed, including `LIMIT`, `OFFSET`, and literal
+bounds; unique/PK ranges, DML ranges, outer joins, and unconstrained multi-key
+ordering remain scans. Equality buckets and ordered entries are separate derived
 structures, deliberately trading memory and write work for efficient equality
 buckets and bounded range seeks. Equi-joins hash-join; everything else is a
-scan.
+scan, except a physical inner side whose complete indexed key is bound by the
+outer row.
 
 ### Collations & charsets
 
@@ -232,8 +233,8 @@ own collation. `SET collation_connection` governs literals, so
 `information_schema.COLUMNS` carries `CHARACTER_SET_NAME`, `COLLATION_NAME`,
 and `COLUMN_COMMENT`.
 
-The deliberate gaps — including complex updatable views, compound trigger
-bodies, stored routines, events, and every smaller divergence — are
+The deliberate gaps — including complex updatable views, the full stored
+program language, stored routines, events, and every smaller divergence — are
 documented in
 [docs/compatibility.md](docs/compatibility.md) and marked `ponytail:` at
 their code sites.
