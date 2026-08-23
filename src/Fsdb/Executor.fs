@@ -8442,12 +8442,20 @@ let private rewriteViewExpression (columns: Map<string, string>) (expression: Ex
             | None -> Some(QualifiedCol("__fsdb_view", name))
         | _ -> None) expression
 
-let private resolveViewColumns (view: UpdatableView) (columns: string list) =
-    columns
-    |> traverse (fun column ->
-        match Map.tryFind (column.ToLowerInvariant()) view.Columns with
-        | Some baseColumn -> Ok baseColumn
-        | None -> Error(Err(1054, sprintf "Unknown column '%s' in field list" column)))
+let private resolveViewColumn (view: UpdatableView) (column: string) =
+    match Map.tryFind (column.ToLowerInvariant()) view.Columns with
+    | Some baseColumn -> Ok baseColumn
+    | None -> Error(Err(1054, sprintf "Unknown column '%s' in field list" column))
+
+let private resolveViewColumns (view: UpdatableView) (columns: string list) = columns |> traverse (resolveViewColumn view)
+
+let private rewriteViewAssignments (view: UpdatableView) (assignments: (string * Expr) list) =
+    let rewrite = rewriteViewExpression view.Columns
+
+    assignments
+    |> traverse (fun (column, value) ->
+        resolveViewColumn view column
+        |> Result.map (fun baseColumn -> baseColumn, rewrite value))
 
 let private combineViewPredicate predicate whereClause =
     match predicate, whereClause with
@@ -11109,13 +11117,13 @@ let rec executeAs
 
         match tryUpdatableView store viewDb viewName with
         | None -> ids, Err(1471, sprintf "The target table '%s' of the INSERT is not insertable-into" viewName)
-        | Some _ when not onDuplicateUpdate.IsEmpty -> ids, Err(1235, "INSERT through a view with ON DUPLICATE KEY UPDATE is not supported")
         | Some view ->
             let viewColumns = if columns.IsEmpty then view.OrderedColumns else columns
-            match resolveViewColumns view viewColumns with
-            | Error error -> ids, error
-            | Ok baseColumns ->
-                let rewritten = Insert(view.Database + "." + view.Table, baseColumns, rowsExprs, onDuplicateUpdate, ignoreDuplicates)
+            match resolveViewColumns view viewColumns, rewriteViewAssignments view onDuplicateUpdate with
+            | Error error, _
+            | _, Error error -> ids, error
+            | Ok baseColumns, Ok assignments ->
+                let rewritten = Insert(view.Database + "." + view.Table, baseColumns, rowsExprs, assignments, ignoreDuplicates)
 
                 match checkStoredDefiner store view.Definer view.Database rewritten with
                 | Error(code, message) -> ids, Err(code, message)
@@ -11154,13 +11162,13 @@ let rec executeAs
 
         match tryUpdatableView store viewDb viewName with
         | None -> ids, Err(1471, sprintf "The target table '%s' of the INSERT is not insertable-into" viewName)
-        | Some _ when not onDuplicateUpdate.IsEmpty -> ids, Err(1235, "INSERT through a view with ON DUPLICATE KEY UPDATE is not supported")
         | Some view ->
             let viewColumns = if columns.IsEmpty then view.OrderedColumns else columns
-            match resolveViewColumns view viewColumns with
-            | Error error -> ids, error
-            | Ok baseColumns ->
-                let rewritten = InsertSelect(view.Database + "." + view.Table, baseColumns, select, onDuplicateUpdate, ignoreDuplicates)
+            match resolveViewColumns view viewColumns, rewriteViewAssignments view onDuplicateUpdate with
+            | Error error, _
+            | _, Error error -> ids, error
+            | Ok baseColumns, Ok assignments ->
+                let rewritten = InsertSelect(view.Database + "." + view.Table, baseColumns, select, assignments, ignoreDuplicates)
 
                 match checkStoredDefiner store view.Definer view.Database rewritten with
                 | Error(code, message) -> ids, Err(code, message)
@@ -11198,6 +11206,23 @@ let rec executeAs
             else
                 upsertEvaluated db table cols rowsValues onDuplicateUpdate
 
+    | Replace(table, columns, rowsExprs) when tryStoredView store (splitQualified dbName table |> fst) (splitQualified dbName table |> snd) |> Option.isSome ->
+        let viewDb, viewName = splitQualified dbName table
+
+        match tryUpdatableView store viewDb viewName with
+        | None -> ids, Err(1471, sprintf "The target table '%s' of the REPLACE is not insertable-into" viewName)
+        | Some view ->
+            let viewColumns = if columns.IsEmpty then view.OrderedColumns else columns
+
+            match resolveViewColumns view viewColumns with
+            | Error error -> ids, error
+            | Ok baseColumns ->
+                let rewritten = Replace(view.Database + "." + view.Table, baseColumns, rowsExprs)
+
+                match checkStoredDefiner store view.Definer view.Database rewritten with
+                | Error(code, message) -> ids, Err(code, message)
+                | Ok() -> executeAs store registry dbName ids foundRows currentAccount rewritten
+
     | Replace(table, columns, rowsExprs) ->
         let db, table = splitQualified dbName table
         let literalContext = contextFactory store registry dbName Map.empty Map.empty None [||]
@@ -11207,6 +11232,23 @@ let rec executeAs
         | Ok rowsValues ->
             let cols = if columns.IsEmpty then None else Some columns
             replaceEvaluated db table cols rowsValues
+
+    | ReplaceSelect(table, columns, select) when tryStoredView store (splitQualified dbName table |> fst) (splitQualified dbName table |> snd) |> Option.isSome ->
+        let viewDb, viewName = splitQualified dbName table
+
+        match tryUpdatableView store viewDb viewName with
+        | None -> ids, Err(1471, sprintf "The target table '%s' of the REPLACE is not insertable-into" viewName)
+        | Some view ->
+            let viewColumns = if columns.IsEmpty then view.OrderedColumns else columns
+
+            match resolveViewColumns view viewColumns with
+            | Error error -> ids, error
+            | Ok baseColumns ->
+                let rewritten = ReplaceSelect(view.Database + "." + view.Table, baseColumns, select)
+
+                match checkStoredDefiner store view.Definer view.Database rewritten with
+                | Error(code, message) -> ids, Err(code, message)
+                | Ok() -> executeAs store registry dbName ids foundRows currentAccount rewritten
 
     | ReplaceSelect(table, columns, select) ->
         let db, table = splitQualified dbName table
@@ -11219,6 +11261,21 @@ let rec executeAs
             let rowsValues = rows |> List.map (List.map (function Some value -> VString value | None -> VNull))
             let cols = if columns.IsEmpty then None else Some columns
             replaceEvaluated db table cols rowsValues
+
+    | ReplaceSet(table, assignments) when tryStoredView store (splitQualified dbName table |> fst) (splitQualified dbName table |> snd) |> Option.isSome ->
+        let viewDb, viewName = splitQualified dbName table
+
+        match tryUpdatableView store viewDb viewName with
+        | None -> ids, Err(1471, sprintf "The target table '%s' of the REPLACE is not insertable-into" viewName)
+        | Some view ->
+            match rewriteViewAssignments view assignments with
+            | Error error -> ids, error
+            | Ok rewrittenAssignments ->
+                let rewritten = ReplaceSet(view.Database + "." + view.Table, rewrittenAssignments)
+
+                match checkStoredDefiner store view.Definer view.Database rewritten with
+                | Error(code, message) -> ids, Err(code, message)
+                | Ok() -> executeAs store registry dbName ids foundRows currentAccount rewritten
 
     | ReplaceSet(table, assignments) ->
         let db, table = splitQualified dbName table

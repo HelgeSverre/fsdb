@@ -134,11 +134,20 @@ let tests =
                   | Err(1054, _) -> ()
                   | other -> failtestf "expected hidden-column rejection for %s, got %A" sql other)
 
-              match run store "INSERT INTO visible_accounts VALUES (1, 'Duplicate') ON DUPLICATE KEY UPDATE name = 'Changed'" with
-              | Err(1235, _) -> ()
-              | other -> failtestf "expected view ODKU rejection, got %A" other
+              expectOk
+                  (run store "INSERT INTO visible_accounts VALUES (1, 'Duplicate') ON DUPLICATE KEY UPDATE name = VALUES(name)")
+                  "upsert through view"
 
-              Expect.equal (rows store "SELECT id, name, secret FROM accounts") [ [ Some "1"; Some "Visible"; Some "7" ] ] "base row remains unchanged"
+              expectOk (run store "REPLACE INTO visible_accounts VALUES (1, 'Replaced')") "replace values through view"
+              expectOk (run store "REPLACE INTO visible_accounts SET id = 2, name = 'Set'") "replace set through view"
+              expectOk (run store "CREATE TABLE incoming (id INT, name VARCHAR(20))") "create replace source"
+              expectOk (run store "INSERT INTO incoming VALUES (3, 'Selected')") "seed replace source"
+              expectOk (run store "REPLACE INTO visible_accounts SELECT id, name FROM incoming") "replace select through view"
+
+              Expect.equal
+                  (rows store "SELECT id, name, secret FROM accounts ORDER BY id")
+                  [ [ Some "1"; Some "Replaced"; None ]; [ Some "2"; Some "Set"; None ]; [ Some "3"; Some "Selected"; None ] ]
+                  "view upserts and replace forms map only exposed columns"
 
           testCase "view writes recheck the definer's base-table privileges"
           <| fun _ ->
