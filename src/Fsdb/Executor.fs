@@ -124,6 +124,11 @@ type private StoredView =
       Columns: string list
       Definer: string }
 
+type private StoredTrigger =
+    { Name: string
+      Body: string
+      Definer: string }
+
 type private StoredCheck =
     { Name: string
       Clause: string
@@ -9633,8 +9638,7 @@ let private validateCheckForeignKeys
             )
 
 // ---------------------------------------------------------------------------
-// Triggers — AFTER INSERT only, persisted as `mysql.triggers` rows (see
-// `Storage.mysqlTriggersColumns`); bodies fire by recursing into `execute`.
+// Triggers
 // ---------------------------------------------------------------------------
 
 /// The `(db, normalized table)` tables whose INSERTs are currently firing
@@ -9655,18 +9659,15 @@ let private err1442 (table: string) : QueryResult =
             table
     )
 
-/// `mysql.triggers` rows for one table/timing/event slot, as `(name, body,
-/// definer)`. Cell positions are
-/// `Storage.mysqlTriggersColumns`' fixed order; a row predating the definer
-/// column is 7 cells wide and reads as an empty definer, which refuses to
-/// fire rather than defaulting to some account.
+/// A row predating the definer column refuses to fire rather than inheriting
+/// the invoking account.
 let private triggersFor
     (store: Store)
     (db: string)
     (table: string)
     (timing: string)
     (event: string)
-    : (string * string * string) list =
+    : StoredTrigger list =
     match scan store "mysql" "triggers" with
     | Error _ -> []
     | Ok(_, rows) ->
@@ -9679,7 +9680,10 @@ let private triggersFor
             && eqI (text 2 r) (normalizeTableName table)
             && eqI (text 3 r) timing
             && eqI (text 4 r) event)
-        |> Seq.map (fun r -> text 0 r, text 5 r, (if r.Length > 7 then text 7 r else ""))
+        |> Seq.map (fun r ->
+            { Name = text 0 r
+              Body = text 5 r
+              Definer = if r.Length > 7 then text 7 r else "" })
         |> List.ofSeq
 
 let private afterInsertTriggers (store: Store) (db: string) (table: string) =
@@ -9743,8 +9747,8 @@ let triggerWriteDatabases (store: Store) (dbName: string) (tableName: string) : 
 
             afterInsertTriggers store db table
             |> List.fold
-                (fun (seen, databases) (_, body, _) ->
-                    match Parser.parse body with
+                (fun (seen, databases) trigger ->
+                    match Parser.parse trigger.Body with
                     | Ok statement ->
                         bodyTargets db statement
                         |> List.fold
@@ -9886,7 +9890,7 @@ let rec executeAs
         (table: string)
         (timing: TriggerTiming)
         (event: TriggerEvent)
-        (triggers: (string * string * string) list)
+        (triggers: StoredTrigger list)
         (rows: (Value[] option * Value[] option) list)
         : QueryResult option =
         match scan runStore db table with
@@ -9902,9 +9906,9 @@ let rec executeAs
             // chain deeper than the cap, fires nothing at all.
             // ponytail: fixed depth cap 8 — raise it if a legitimate
             // trigger chain that deep ever exists.
-            let checkBody ((name, body, definer): string * string * string) =
-                match Parser.parse body with
-                | Result.Error msg -> Result.Error(Err(1064, sprintf "Trigger '%s' body has a syntax error: %s" name msg))
+            let checkBody trigger =
+                match Parser.parse trigger.Body with
+                | Result.Error msg -> Result.Error(Err(1064, sprintf "Trigger '%s' body has a syntax error: %s" trigger.Name msg))
                 | Result.Ok bodyStmt ->
                     match writtenTableOf db bodyStmt with
                     | Some target when List.contains target (self :: chain) -> Result.Error(err1442 (snd target))
@@ -9916,16 +9920,16 @@ let rec executeAs
                         // name. Per fire rather than at CREATE, so a revoke
                         // takes effect immediately; per trigger in a chain,
                         // each against its own definer.
-                        if definer = "" then
+                        if trigger.Definer = "" then
                             Result.Error(
-                                Err(1449, sprintf "The user specified as a definer ('') does not exist for trigger '%s'" name)
+                                Err(1449, sprintf "The user specified as a definer ('') does not exist for trigger '%s'" trigger.Name)
                             )
                         else
-                            match storedObjectAccount definer, checkStoredDefiner runStore definer db bodyStmt with
+                            match storedObjectAccount trigger.Definer, checkStoredDefiner runStore trigger.Definer db bodyStmt with
                             | Some account, Result.Ok() -> Result.Ok(bodyStmt, account)
                             | _, Result.Error(code, msg) -> Result.Error(Err(code, msg))
                             | None, Result.Ok() ->
-                                Result.Error(Err(1449, sprintf "The user specified as a definer ('') does not exist for trigger '%s'" name))
+                                Result.Error(Err(1449, sprintf "The user specified as a definer ('') does not exist for trigger '%s'" trigger.Name))
 
             match triggers |> traverse checkBody with
             | Result.Error err -> Some err
@@ -9988,16 +9992,14 @@ let rec executeAs
             | Some(Err(code, message)) -> Error(ExpressionError(code, message))
             | _ -> computeGeneratedRow runStore registry db table columns candidate
 
-    /// Runs an insert branch's storage write (`doInsert`, against whichever
-    /// store it's handed) and fires the target's AFTER INSERT triggers with
+    /// Runs an insert branch's storage write and fires AFTER INSERT triggers with
     /// MySQL's statement atomicity: when triggers exist, the insert and
     /// every body's effects land in a private `beginTransactionSnapshot`
     /// (the multi-table UPDATE precedent), merged back — one commit, WAL
     /// events ordered after the originating statement's — only when every
     /// body succeeded. A body error discards the snapshot, so the
     /// originating rows roll back with it (probed MySQL semantics) and the
-    /// OK-packet ids don't advance. With no triggers this is the plain
-    /// direct write it always was.
+    /// OK-packet ids don't advance. Trigger-free inserts write directly.
     let finishInsert (db: string) (table: string) (doInsert: Store -> Result<InsertOutcome, StorageError>) : (int64 * int64) * QueryResult =
         let ok (outcome: InsertOutcome) =
             outcome.IgnoredErrors
