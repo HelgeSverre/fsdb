@@ -215,6 +215,7 @@ functions, `UNION [ALL]`, expression subqueries, ordinary and recursive CTEs,
 JSON paths and `JSON_TABLE`, multi-table `UPDATE`/`DELETE`, `REPLACE`,
 `EXPLAIN`, enforced and `NOT ENFORCED` `CHECK` constraints, typed user and
 system variables in expressions, direct single-table updatable views,
+view `WITH CHECK OPTION`,
 `BEFORE`/`AFTER` triggers for `INSERT`/`UPDATE`/`DELETE`, and user accounts
 with real `CREATE USER`/`GRANT`/`REVOKE` privilege enforcement.
 

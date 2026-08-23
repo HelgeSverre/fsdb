@@ -261,6 +261,8 @@ SHOW CREATE VIEW and I_S.VIEWS with correct shapes. Direct projections over
 one filtered or unfiltered base table accept INSERT, INSERT ... SELECT,
 REPLACE VALUES/SET/SELECT, ODKU, UPDATE, and DELETE
 with exposed-column enforcement and definer privilege checks.
+`LOCAL` and `CASCADED` CHECK OPTION values are persisted, exposed through
+metadata, and enforced on the direct writable subset.
 View projections appear in I_S.COLUMNS, DESCRIBE, SHOW COLUMNS, and SHOW TABLE
 STATUS. Their metadata is derived from the saved query without evaluating it.
 
@@ -275,7 +277,6 @@ OLD/NEW images are rejected when the trigger is created.
 | Gap | MySQL 8.4 | fsdb | Impact | Class |
 |---|---|---|---|---|
 | Updatable-view breadth | joins, expressions, and nested views where MySQL deems the view writable | direct single-table projections with a simple base-table WHERE predicate; insert, ODKU, replace, update, and delete forms map through it | medium | refusal |
-| WITH CHECK OPTION | enforced on updatable views | CREATE VIEW refuses `WITH [CASCADED|LOCAL] CHECK OPTION` with 1235 | low | refusal |
 | ALGORITHM / SQL SECURITY INVOKER / ALTER VIEW | supported | absent; SECURITY_TYPE constant DEFINER (`InformationSchema.fs:922–923`) | low | refusal |
 | VIEW_DEFINITION rendering | fully-qualified expanded form; SHOW CREATE VIEW wrapped in `/*!50001 */` | raw user text, no wrapper (`InformationSchema.fs:1749–1764`) | low | divergence |
 | Trigger DML breadth | triggers fire for every applicable MySQL DML form | single-table DML is covered; REPLACE refuses when DELETE triggers exist, and multi-table UPDATE/DELETE firing remains unsupported | medium | refusal |

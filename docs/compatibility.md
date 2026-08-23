@@ -130,8 +130,9 @@ without grouping, joins, or computed columns, accept `INSERT`, `INSERT ...
 SELECT`, `REPLACE` in each supported source form, `ON DUPLICATE KEY UPDATE`,
 `UPDATE`, and `DELETE`. Every written or referenced column must be exposed by
 the view, and base-table writes run under the view definer's privileges. `WITH
-CHECK OPTION`, `ALTER VIEW`, `ALGORITHM`, explicit `DEFINER`, and `SQL
-SECURITY` remain unsupported. Creation validates
+CHECK OPTION` is enforced on this direct subset and reported by `SHOW CREATE
+VIEW` and `information_schema.VIEWS`. `ALTER VIEW`, `ALGORITHM`, explicit
+`DEFINER`, and `SQL SECURITY` remain unsupported. Creation validates
 the saved SQL grammar but defers missing dependency and output-shape errors
 until the first read; `SELECT *` follows the base table's current columns
 instead of freezing them at creation.
