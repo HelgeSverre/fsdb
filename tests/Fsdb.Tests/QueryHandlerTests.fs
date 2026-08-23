@@ -1245,6 +1245,21 @@ let tests =
               | ResultSet(_, []) -> ()
               | other -> failtestf "expected an empty set, got %A" other
 
+          testCase "SHOW STATUS reports core command counters"
+          <| fun _ ->
+              let session = create 1 (Fsdb.Storage.create ())
+              let session, _ = handle session "CREATE TABLE command_counts (id INT PRIMARY KEY, n INT)"
+              let session, _ = handle session "INSERT INTO command_counts VALUES (1, 1)"
+              let session, _ = handle session "UPDATE command_counts SET n = 2 WHERE id = 1"
+              let session, _ = handle session "REPLACE INTO command_counts VALUES (1, 3)"
+              let session, _ = handle session "DELETE FROM command_counts WHERE id = 1"
+              let _, _ = handle session "SELECT * FROM command_counts"
+
+              for name in [ "Com_insert"; "Com_update"; "Com_replace"; "Com_delete"; "Com_select" ] do
+                  match handle session (sprintf "SHOW STATUS LIKE '%s'" name) |> snd with
+                  | ResultSet(_, [ [ Some actual; Some value ] ]) when actual = name && int64 value > 0L -> ()
+                  | other -> failtestf "expected a positive %s counter, got %A" name other
+
           testCase "SHOW SESSION/GLOBAL VARIABLES match like the bare form; GLOBAL reads the store scope"
           <| fun _ ->
               let session = create 1 (Fsdb.Storage.create ())

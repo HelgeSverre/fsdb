@@ -889,10 +889,40 @@ let private restrictedTo (priv: string) : Fsdb.Auth.Account option =
 /// Stamped by `Server.listen` — `SHOW STATUS`'s `Uptime` baseline.
 let mutable serverStartedAt = DateTime.Now
 let mutable private questionCount = 0L
+let private commandCounts =
+    Collections.Concurrent.ConcurrentDictionary<string, int64>(StringComparer.OrdinalIgnoreCase)
+
+type StatusCommand =
+    | DeleteCommand
+    | InsertCommand
+    | ReplaceCommand
+    | SelectCommand
+    | UpdateCommand
+
+let private commandName = function
+    | DeleteCommand -> "Com_delete"
+    | InsertCommand -> "Com_insert"
+    | ReplaceCommand -> "Com_replace"
+    | SelectCommand -> "Com_select"
+    | UpdateCommand -> "Com_update"
+
+let private reportedCommands =
+    [ DeleteCommand; InsertCommand; ReplaceCommand; SelectCommand; UpdateCommand ]
 
 let recordQuestion () = Threading.Interlocked.Increment(&questionCount) |> ignore
 let questions () = Threading.Interlocked.Read(&questionCount)
 let resetQuestions () = Threading.Interlocked.Exchange(&questionCount, 0L) |> ignore
+
+let recordCommand command =
+    let name = commandName command
+    commandCounts.AddOrUpdate(name, 1L, fun _ count -> count + 1L) |> ignore
+
+let resetCommandCounts () = commandCounts.Clear()
+
+let private commandCount name =
+    match commandCounts.TryGetValue name with
+    | true, count -> count
+    | false, _ -> 0L
 
 let registerProcessAs (id: int64) (account: Fsdb.Auth.Account) (user: string) (host: string) : ProcessEntry =
     let entry =
@@ -2083,7 +2113,10 @@ let showStatus (sslCipher: string option) (sslVersion: string option) (likeOpt: 
           "Ssl_version", sslVersion |> Option.defaultValue ""
           "Questions", string (questions ())
           "Threads_connected", string (connectedThreads ())
-          "Uptime", string (int (DateTime.Now - serverStartedAt).TotalSeconds) ]
+          "Uptime", string (int (DateTime.Now - serverStartedAt).TotalSeconds)
+          for command in reportedCommands do
+              let name = commandName command
+              name, string (commandCount name) ]
         |> List.filter (fun (name, _) -> likeFilter likeOpt name)
         |> List.map (fun (name, value) -> [ Some name; Some value ])
 

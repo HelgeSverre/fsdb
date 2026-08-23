@@ -1201,6 +1201,18 @@ let private handleSetAutocommit (value: string) (session: Session) : Session * Q
 /// prepared path reuses this one execution body instead of splicing literals
 /// back into SQL text and re-parsing.
 let private executeParsed (session: Session) (stmt: Statement) : Session * QueryResult =
+    match stmt with
+    | Select _
+    | Union _ -> InformationSchema.recordCommand InformationSchema.SelectCommand
+    | Insert _
+    | InsertSelect _ -> InformationSchema.recordCommand InformationSchema.InsertCommand
+    | Replace _
+    | ReplaceSelect _
+    | ReplaceSet _ -> InformationSchema.recordCommand InformationSchema.ReplaceCommand
+    | Update _ -> InformationSchema.recordCommand InformationSchema.UpdateCommand
+    | Delete _ -> InformationSchema.recordCommand InformationSchema.DeleteCommand
+    | _ -> ()
+
     // A SELECT into information_schema.processlist / the privilege views
     // scopes its rows to this session's user (unless it holds the revealing
     // privilege) — see `InformationSchema.currentViewer`.
@@ -1904,6 +1916,7 @@ let private runProbe (session: Session) (sql: string) (probe: Probe) : Session *
     | FlushPrivileges -> session, Affected 0UL
     | FlushStatus ->
         InformationSchema.resetQuestions ()
+        InformationSchema.resetCommandCounts ()
         session, Affected 0UL
     | FlushTables
     | FlushLogs -> session, Affected 0UL
