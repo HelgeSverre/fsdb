@@ -97,34 +97,25 @@ let private variableContext = System.Threading.AsyncLocal<VariableContext option
 let private suppressVariableAssignments = System.Threading.AsyncLocal<bool>()
 let private triggerRowScope = System.Threading.AsyncLocal<TriggerRowScope option>()
 
-let withVariableContext (variables: VariableContext) (body: unit -> 'a) : 'a =
-    let saved = variableContext.Value
+let private withAsyncLocalValue (slot: System.Threading.AsyncLocal<'a>) (value: 'a) (body: unit -> 'b) : 'b =
+    let saved = slot.Value
 
     try
-        variableContext.Value <- Some variables
+        slot.Value <- value
         body ()
     finally
-        variableContext.Value <- saved
+        slot.Value <- saved
+
+let withVariableContext (variables: VariableContext) (body: unit -> 'a) : 'a =
+    withAsyncLocalValue variableContext (Some variables) body
 
 let private currentVariableContext () = variableContext.Value
 
 let private withSuppressedVariableAssignments (body: unit -> 'a) : 'a =
-    let saved = suppressVariableAssignments.Value
-
-    try
-        suppressVariableAssignments.Value <- true
-        body ()
-    finally
-        suppressVariableAssignments.Value <- saved
+    withAsyncLocalValue suppressVariableAssignments true body
 
 let private withTriggerRowScope (scope: TriggerRowScope) (body: unit -> 'a) : 'a =
-    let saved = triggerRowScope.Value
-
-    try
-        triggerRowScope.Value <- Some scope
-        body ()
-    finally
-        triggerRowScope.Value <- saved
+    withAsyncLocalValue triggerRowScope (Some scope) body
 
 type private StoredView =
     { Name: string
@@ -225,22 +216,10 @@ let private storedChecks (store: Store) (dbName: string) (tableName: string) : S
         |> List.ofSeq
 
 let withCteRecursionDepth (limit: int64) (body: unit -> 'a) : 'a =
-    let saved = cteRecursionDepth.Value
-
-    try
-        cteRecursionDepth.Value <- Some limit
-        body ()
-    finally
-        cteRecursionDepth.Value <- saved
+    withAsyncLocalValue cteRecursionDepth (Some limit) body
 
 let withGroupConcatMaxLen (limit: int) (body: unit -> 'a) : 'a =
-    let saved = groupConcatMaxLen.Value
-
-    try
-        groupConcatMaxLen.Value <- Some limit
-        body ()
-    finally
-        groupConcatMaxLen.Value <- saved
+    withAsyncLocalValue groupConcatMaxLen (Some limit) body
 
 let private currentCteScope () : Map<string, ColumnDef list * Value[] list> =
     match box cteScope.Value with
