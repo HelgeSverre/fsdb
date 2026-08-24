@@ -49,6 +49,13 @@ type private RangeLookupBounds =
       Lower: (Value * bool) option
       Upper: (Value * bool) option }
 
+type private EqualityAccessPlan =
+    { KeyName: string
+      ColumnIndices: int list
+      Columns: ColumnDef list
+      Unique: bool
+      Rows: (RowId * Value[]) list }
+
 type private IndexOrderPlan =
     { KeyName: string
       ColumnIndices: int list
@@ -5486,21 +5493,39 @@ and private rangeLookupBounds (tref: TableRef) (whereExpr: Expr option) : RangeL
               Lower = lower
               Upper = upper })
 
-and private tryPointLookup (store: Store) (dbName: string) (tref: TableRef) (whereExpr: Expr option) : (ColumnDef list * (RowId * Value[]) list) option =
+and private tryEqualityAccess (store: Store) (dbName: string) (tref: TableRef) (whereExpr: Expr option) : EqualityAccessPlan option =
     let tableDb = tref.Database |> Option.defaultValue dbName
+    let equalities = pointLookupEqualities tref whereExpr
 
-    pointLookupEqualities tref whereExpr
-    |> List.tryPick (fun (n, v) -> Storage.tryEqualityLookup store tableDb tref.Table n v)
+    let composite =
+        Storage.tryCompositeEqualityLookup store tableDb tref.Table equalities
+        |> Option.map (fun lookup ->
+            { KeyName = lookup.IndexName
+              ColumnIndices = lookup.ColumnIndices
+              Columns = lookup.LookupColumns
+              Unique = lookup.Unique
+              Rows = lookup.LookupRows })
 
-and private tryCompositeLookup (store: Store) (dbName: string) (tref: TableRef) (whereExpr: Expr option) : (ColumnDef list * (RowId * Value[]) list) option =
-    let tableDb = tref.Database |> Option.defaultValue dbName
-
-    Storage.tryCompositeEqualityLookup store tableDb tref.Table (pointLookupEqualities tref whereExpr)
-    |> Option.map (fun lookup -> lookup.LookupColumns, lookup.LookupRows)
+    composite
+    |> Option.orElseWith (fun () ->
+        equalities
+        |> List.tryPick (fun (name, value) ->
+            match
+                Storage.tryEqualityKeyProbe store tableDb tref.Table name value,
+                Storage.tryEqualityLookup store tableDb tref.Table name value
+            with
+            | Some(_, keyName, columnIndex, unique), Some(columns, rows) ->
+                Some
+                    { KeyName = keyName
+                      ColumnIndices = [ columnIndex ]
+                      Columns = columns
+                      Unique = unique
+                      Rows = rows }
+            | _ -> None))
 
 and private tryEqualityLookup (store: Store) (dbName: string) (tref: TableRef) (whereExpr: Expr option) =
-    tryCompositeLookup store dbName tref whereExpr
-    |> Option.orElseWith (fun () -> tryPointLookup store dbName tref whereExpr)
+    tryEqualityAccess store dbName tref whereExpr
+    |> Option.map (fun plan -> plan.Columns, plan.Rows)
 
 and private tryRangeLookup (store: Store) (dbName: string) (tref: TableRef) (whereExpr: Expr option) : (ColumnDef list * (RowId * Value[]) list) option =
     let tableDb = tref.Database |> Option.defaultValue dbName
@@ -8830,25 +8855,8 @@ let rec private explainJoinBlock
         else
             let tableDb = tref.Database |> Option.defaultValue dbName
 
-            let equalities = pointLookupEqualities tref whereOpt
-
-            let composite =
-                Storage.tryCompositeEqualityLookup store tableDb tref.Table equalities
-
-            let probed =
-                equalities
-                |> List.tryPick (fun (n, v) ->
-                    Storage.tryEqualityKeyProbe store tableDb tref.Table n v
-                    |> Option.map (fun (table, keyName, columnIndex, unique) ->
-                        let rowCount =
-                            Storage.tryEqualityLookup store tableDb tref.Table n v
-                            |> Option.map (snd >> List.length)
-                            |> Option.defaultValue 0
-
-                        table, keyName, columnIndex, unique, rowCount))
-
-            match composite, probed with
-            | Some lookup, _ when lookup.Unique && lookup.LookupRows.IsEmpty ->
+            match tryEqualityAccess store dbName tref whereOpt with
+            | Some plan when plan.Unique && plan.Rows.IsEmpty ->
                 acc.Add
                     { Id = Some id
                       SelectType = selectType
@@ -8860,61 +8868,19 @@ let rec private explainJoinBlock
                       Extra = [ "no matching row in const table" ] }
 
                 true
-            | Some lookup, _ ->
+            | Some plan ->
                 acc.Add
                     { Id = Some id
                       SelectType = selectType
                       Table = Some(tref.Alias |> Option.defaultValue tref.Table)
-                      Type = Some(if lookup.Unique then "const" else "ref")
-                      Key = Some(lookup.IndexName, explainCompositeKeyLen lookup.LookupColumns lookup.ColumnIndices)
-                      Ref = Some(String.concat "," (List.replicate lookup.ColumnIndices.Length "const"))
-                      Rows = Some(uint64 lookup.LookupRows.Length)
-                      Extra = if lookup.Unique then extra |> List.filter ((<>) "Using where") else extra }
+                      Type = Some(if plan.Unique then "const" else "ref")
+                      Key = Some(plan.KeyName, explainCompositeKeyLen plan.Columns plan.ColumnIndices)
+                      Ref = Some(String.concat "," (List.replicate plan.ColumnIndices.Length "const"))
+                      Rows = Some(uint64 plan.Rows.Length)
+                      Extra = if plan.Unique then extra |> List.filter ((<>) "Using where") else extra }
 
                 true
-            | None, Some(table, keyName, columnIndex, true, rowCount) when rowCount > 0 ->
-                // MySQL shows no `Using where` on a const row — the single
-                // row is read at plan time and any leftover conditions are
-                // checked against it, not scanned for.
-                let extra' = extra |> List.filter ((<>) "Using where")
-
-                acc.Add
-                    { Id = Some id
-                      SelectType = selectType
-                      Table = Some(tref.Alias |> Option.defaultValue tref.Table)
-                      Type = Some "const"
-                      Key = Some(keyName, explainKeyLen table.Columns.[columnIndex])
-                      Ref = Some "const"
-                      Rows = Some 1UL
-                      Extra = extra' }
-
-                true
-            | None, Some(_, _, _, true, _) ->
-                acc.Add
-                    { Id = Some id
-                      SelectType = selectType
-                      Table = None
-                      Type = None
-                      Key = None
-                      Ref = None
-                      Rows = None
-                      Extra = [ "no matching row in const table" ] }
-
-                true
-
-            | None, Some(table, keyName, columnIndex, false, rowCount) ->
-                acc.Add
-                    { Id = Some id
-                      SelectType = selectType
-                      Table = Some(tref.Alias |> Option.defaultValue tref.Table)
-                      Type = Some "ref"
-                      Key = Some(keyName, explainKeyLen table.Columns.[columnIndex])
-                      Ref = Some "const"
-                      Rows = Some(uint64 rowCount)
-                      Extra = extra }
-
-                true
-            | None, None ->
+            | None ->
                 match indexOrderPlan with
                 | Some plan ->
                     let hasBounds =
