@@ -89,6 +89,14 @@ let private envWorkloads () =
 
         if workloads.IsEmpty then Workload.All else workloads
 
+type private OperationCounts =
+    { Completed: int64
+      Retried: int64 }
+
+type private Measurement =
+    { OperationsPerSecond: float
+      RetryRate: float }
+
 let private workerCounts = envInts "FSDB_LOAD_WORKERS" [ 8 ]
 let private warmupSeconds = envFloat "FSDB_LOAD_WARMUP" 1.0
 let private measureSeconds = envFloat "FSDB_LOAD_SECONDS" 5.0
@@ -98,7 +106,7 @@ let private trialCount = envInt "FSDB_LOAD_TRIALS" 1
 /// `insertCounter` is process-wide so warmup and measure phases (and every
 /// worker) mint distinct emails across the whole run — the `email` column is
 /// UNIQUE.
-let private runOneWorker (conn: MySqlConnection) (workload: Workload) (workerCount: int) (w: int) (seconds: float) (insertCounter: int64 ref) : int64 =
+let private runOneWorker (conn: MySqlConnection) (workload: Workload) (workerCount: int) (w: int) (seconds: float) (insertCounter: int64 ref) : OperationCounts =
     let rng = Random(1234 + w)
     let sliceSize = max 1 (Schema.userCount / workerCount)
     let sliceStart = 1 + w * sliceSize
@@ -156,14 +164,20 @@ let private runOneWorker (conn: MySqlConnection) (workload: Workload) (workerCou
                 exec $"UPDATE users SET age = age + 1 WHERE id = {sliceStart + rng.Next(sliceSize)}"
 
     let sw = Stopwatch.StartNew()
-    let mutable ops = 0L
+    let mutable completed = 0L
+    let mutable retried = 0L
+
     while sw.Elapsed.TotalSeconds < seconds do
-        oneOp ()
-        ops <- ops + 1L
+        try
+            oneOp ()
+            completed <- completed + 1L
+        with :? MySqlException as ex when ex.Number = 1205 || ex.Number = 1213 ->
+            retried <- retried + 1L
 
-    ops
+    { Completed = completed
+      Retried = retried }
 
-let private runWorkers (target: string) (workload: Workload) (workerCount: int) (seconds: float) (insertCounter: int64 ref) : int64 * TimeSpan =
+let private runWorkers (target: string) (workload: Workload) (workerCount: int) (seconds: float) (insertCounter: int64 ref) : OperationCounts * TimeSpan =
     let connections =
         Array.init workerCount (fun _ ->
             let conn = new MySqlConnection(Schema.connectionString target)
@@ -177,24 +191,33 @@ let private runWorkers (target: string) (workload: Workload) (workerCount: int) 
         let tasks =
             connections
             |> Array.mapi (fun w conn ->
-                Task.Run<int64>(fun () ->
-                    start.Wait()
-                    runOneWorker conn workload workerCount w seconds insertCounter))
+                Task.Run(
+                    Func<OperationCounts>(fun () ->
+                        start.Wait()
+                        runOneWorker conn workload workerCount w seconds insertCounter)))
 
         stopwatch.Start()
         start.Set()
         Task.WaitAll(tasks |> Array.map (fun task -> task :> Task))
         stopwatch.Stop()
-        tasks |> Array.sumBy _.Result, stopwatch.Elapsed
+
+        let counts: OperationCounts array = tasks |> Array.map _.Result
+
+        { Completed = counts |> Array.sumBy _.Completed
+          Retried = counts |> Array.sumBy _.Retried },
+        stopwatch.Elapsed
     finally
         connections |> Array.iter _.Dispose()
 
-/// Warmup then measure; returns measured ops/sec.
-let private measure (target: string) (workload: Workload) (workerCount: int) : float =
+/// Warmup then measure completed operations and contention retries.
+let private measure (target: string) (workload: Workload) (workerCount: int) : Measurement =
     let insertCounter = ref 0L
     runWorkers target workload workerCount warmupSeconds insertCounter |> ignore
-    let operations, elapsed = runWorkers target workload workerCount measureSeconds insertCounter
-    float operations / elapsed.TotalSeconds
+    let counts, elapsed = runWorkers target workload workerCount measureSeconds insertCounter
+    let attempts = counts.Completed + counts.Retried
+
+    { OperationsPerSecond = float counts.Completed / elapsed.TotalSeconds
+      RetryRate = if attempts = 0L then 0.0 else float counts.Retried / float attempts }
 
 let private average (samples: float list) =
     List.average samples
@@ -235,16 +258,20 @@ let run () : int =
                                 let mysqlOps = measureMysql workload workerCount
                                 yield measureFsdb workload workerCount, mysqlOps ]
 
-                  let fsdbSamples = samples |> List.map fst
-                  let mysqlSamples = samples |> List.map snd
+                  let fsdbSamples = samples |> List.map (fst >> _.OperationsPerSecond)
+                  let mysqlSamples = samples |> List.map (snd >> _.OperationsPerSecond)
+                  let fsdbRetries = samples |> List.averageBy (fst >> _.RetryRate)
+                  let mysqlRetries = samples |> List.averageBy (snd >> _.RetryRate)
 
                   yield
                       workerCount,
                       workload.Name,
                       average fsdbSamples,
                       relativeStandardDeviation fsdbSamples,
+                      fsdbRetries,
                       average mysqlSamples,
-                      relativeStandardDeviation mysqlSamples ]
+                      relativeStandardDeviation mysqlSamples,
+                      mysqlRetries ]
 
     let formatFloat (fmt: string) (v: float) =
         v.ToString(fmt, Globalization.CultureInfo.InvariantCulture)
@@ -256,16 +283,18 @@ let run () : int =
     let table =
         [ yield $"Workers: {workersLabel}. {trialCount} trial(s), {measureLabel}s measured after {warmupLabel}s warmup."
           yield ""
-          yield "| Workers | Workload | fsdb ops/sec | fsdb RSD | MySQL ops/sec | MySQL RSD | fsdb/MySQL |"
-          yield "|---:|---|---:|---:|---:|---:|---:|"
-          for workers, name, fsdbOps, fsdbRsd, mysqlOps, mysqlRsd in results do
+          yield "| Workers | Workload | fsdb ops/sec | fsdb RSD | fsdb retry | MySQL ops/sec | MySQL RSD | MySQL retry | fsdb/MySQL |"
+          yield "|---:|---|---:|---:|---:|---:|---:|---:|---:|"
+          for workers, name, fsdbOps, fsdbRsd, fsdbRetries, mysqlOps, mysqlRsd, mysqlRetries in results do
               let ratio = if mysqlOps = 0.0 then 0.0 else fsdbOps / mysqlOps
               let fsdbLabel = formatFloat "0" fsdbOps
               let mysqlLabel = formatFloat "0" mysqlOps
               let fsdbRsdLabel = formatFloat "0.0%" fsdbRsd
               let mysqlRsdLabel = formatFloat "0.0%" mysqlRsd
+              let fsdbRetryLabel = formatFloat "0.0%" fsdbRetries
+              let mysqlRetryLabel = formatFloat "0.0%" mysqlRetries
               let ratioLabel = formatFloat "0.00" ratio
-              yield $"| {workers} | {name} | {fsdbLabel} | {fsdbRsdLabel} | {mysqlLabel} | {mysqlRsdLabel} | {ratioLabel}x |" ]
+              yield $"| {workers} | {name} | {fsdbLabel} | {fsdbRsdLabel} | {fsdbRetryLabel} | {mysqlLabel} | {mysqlRsdLabel} | {mysqlRetryLabel} | {ratioLabel}x |" ]
         |> String.concat "\n"
 
     let report = Path.Combine("benchmarks", "load-report.md")

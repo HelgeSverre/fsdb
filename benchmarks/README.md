@@ -52,7 +52,9 @@ Prerequisites and rules:
   reads, inserts, upserts, REPLACE, explicit transactions, and mixed traffic.
   `FSDB_LOAD_WORKERS` accepts a comma-separated worker-count matrix;
   `FSDB_LOAD_TRIALS` controls repetition. Engine order alternates between
-  trials, and the report includes relative standard deviation.
+  trials. The report includes relative standard deviation and the share of
+  attempts retried after lock-timeout or deadlock errors; throughput counts
+  completed operations only.
 - Connection pooling is off (fsdb doesn't implement COM_RESET_CONNECTION).
 - The wire+client floor is ~200 µs/op on this machine (`SELECT 1` round
   trip ≈ 0.26 ms via MySqlConnector over loopback) — sub-millisecond rows
