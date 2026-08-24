@@ -159,6 +159,8 @@ module SyntaxFuzz =
         expand depth [] sql
 
     let candidates seed depth count =
+        let depth = depth |> max 1 |> min 3
+        let count = count |> max 0 |> min 10000
         let seedStatements = seeds "baseline"
 
         let baselines =
