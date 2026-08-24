@@ -281,6 +281,17 @@ let tests =
               Expect.equal (ids intersected) [ "37" ] "multiple MATCH conjuncts intersect their candidates"
               Expect.equal calls 2 "only the metadata probe and intersected candidate enter the residual pipeline"
 
+              calls <- 0
+
+              let unioned =
+                  TestSupport.Sql.execute
+                      store
+                      registry
+                      "SELECT id FROM docs WHERE (MATCH(body) AGAINST('alpha') OR MATCH(body) AGAINST('beta')) AND TOUCH(id) = id ORDER BY id"
+
+              Expect.equal (ids unioned) [ "37"; "82" ] "bounded MATCH alternatives union their candidates"
+              Expect.equal calls 3 "only the metadata probe and unioned candidates enter the residual pipeline"
+
           testCase "captured table roots retain their full-text snapshot"
           <| fun _ ->
               let store = create ()

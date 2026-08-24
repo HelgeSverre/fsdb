@@ -7638,26 +7638,35 @@ and private runFullTextSelect
 
             let extendedColumns = table.Columns @ syntheticColumns
 
-            let scoreMapsForConjuncts =
-                select.Where
-                |> Option.map flattenAnd
-                |> Option.defaultValue []
-                |> List.choose (fun conjunct ->
-                    computed
-                    |> List.tryFind (fun (node, _, _) -> node = conjunct)
-                    |> Option.map (fun (_, _, scores) -> scores))
+            let scoreMap node =
+                computed
+                |> List.tryFind (fun (candidate, _, _) -> candidate = node)
+                |> Option.map (fun (_, _, scores) -> scores |> Map.keys |> Set.ofSeq)
+
+            let rec candidateIds expression =
+                match scoreMap expression with
+                | Some candidates -> Some candidates
+                | None ->
+                    match expression with
+                    | BinOp(And, left, right) ->
+                        match candidateIds left, candidateIds right with
+                        | Some left, Some right -> Some(Set.intersect left right)
+                        | Some candidates, None
+                        | None, Some candidates -> Some candidates
+                        | None, None -> None
+                    | BinOp(Or, left, right) ->
+                        match candidateIds left, candidateIds right with
+                        | Some left, Some right -> Some(Set.union left right)
+                        | _ -> None
+                    | _ -> None
 
             let rowsForExecution =
-                match scoreMapsForConjuncts |> List.sortBy _.Count with
-                | [] -> indexedRows
-                | smallest :: others ->
-                    smallest
-                    |> Map.toList
-                    |> List.choose (fun (rowId, _) ->
-                        if others |> List.forall (Map.containsKey rowId) then
-                            table.RowsArray.TryFind rowId |> Option.map (fun row -> rowId, row)
-                        else
-                            None)
+                match select.Where |> Option.bind candidateIds with
+                | None -> indexedRows
+                | Some candidates ->
+                    candidates
+                    |> Set.toList
+                    |> List.choose (fun rowId -> table.RowsArray.TryFind rowId |> Option.map (fun row -> rowId, row))
 
             let extendedRows =
                 rowsForExecution

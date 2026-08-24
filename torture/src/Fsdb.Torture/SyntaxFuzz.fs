@@ -32,6 +32,8 @@ module SyntaxFuzz =
            "SELECT id, MATCH(title, body) AGAINST ('+database +security' IN BOOLEAN MODE) AS relevance FROM syntax_fulltext WHERE MATCH(body, title) AGAINST ('database') ORDER BY relevance DESC, id"
            "fulltext_conjuncts",
            "SELECT id FROM syntax_fulltext WHERE MATCH(title, body) AGAINST ('database') AND MATCH(body, title) AGAINST ('+security' IN BOOLEAN MODE) AND id > 0 ORDER BY id"
+           "fulltext_alternatives",
+           "SELECT id FROM syntax_fulltext WHERE (MATCH(title, body) AGAINST ('database') OR MATCH(body, title) AGAINST ('+security' IN BOOLEAN MODE)) AND id > 0 ORDER BY id"
            "collation_symmetric", "SELECT ci = bin, bin = ci, ci < bin, bin > ci, ci LIKE bin FROM syntax_collation"
            "collation_row", "SELECT (ci, 1) = (bin, 1), (bin, 1) IN ((ci, 1), ('z', 2)) FROM syntax_collation"
            "collation_quantified",
