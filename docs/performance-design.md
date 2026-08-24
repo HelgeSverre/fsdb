@@ -434,15 +434,15 @@ Not proposed, not scheduled.
 ## 5. Sources
 
 **Repo (read directly):**
-`src/Fsdb/Storage.fs` (`updateRows` 1239-1308, `insertCore` 802-853, `Table`
-doc 58-66), `src/Fsdb/Executor.fs` (`applyJoin` 728-781, `applyMutationJoin`
+`src/Fsdb/Engine/Storage.fs` (`updateRows` 1239-1308, `insertCore` 802-853, `Table`
+doc 58-66), `src/Fsdb/Engine/Executor.fs` (`applyJoin` 728-781, `applyMutationJoin`
 796-854, `runSelect` 1727-1813, `applyLimitOffset` 927),
-`src/Fsdb/Functions.fs` (JSON section 139-258),
-`src/Fsdb/QueryHandler.fs` (`prepareStatement` 871-881, placeholder
-substitution 59-121), `src/Fsdb/Server.fs` (STMT_PREPARE 287-322,
+`src/Fsdb/Sql/Functions.fs` (JSON section 139-258),
+`src/Fsdb/Wire/QueryHandler.fs` (`prepareStatement` 871-881, placeholder
+substitution 59-121), `src/Fsdb/Wire/Server.fs` (STMT_PREPARE 287-322,
 STMT_EXECUTE 323-418, `sendPayloads`/`resultPayloads` 66-169, `TcpClient`
-setup 183-190), `src/Fsdb/Packet.fs` 214-241, `src/Fsdb/Value.fs` (DU 10-21,
-`compareStrings` 174), `src/Fsdb/Persistence.fs` 677-781,
+setup 183-190), `src/Fsdb/Wire/Packet.fs` 214-241, `src/Fsdb/Sql/Value.fs` (DU 10-21,
+`compareStrings` 174), `src/Fsdb/Engine/Persistence.fs` 677-781,
 `benchmarks/Fsdb.Benchmarks/{Schema,ServerBenchmarks,Program}.fs`,
 `benchmarks/results/{f1b15ab,66894b2}.md`.
 

@@ -34,13 +34,13 @@ build fails with "not defined".
 
 ## Layout
 
-- `src/Fsdb/` — library + executable in one project (`OutputType` Exe). Compile
-  order is the module dependency order: `Log`/`Binary`/`Collation` → `Value`/
-  `Ast` → `Sql`/`Engine` primitives → `Parser` → `Functions` → `Storage` → `Auth`/`Persistence` →
-  `InformationSchema` → `Executor` → `Packet`/`Protocol`/`Session`/
-  `QueryHandler` → `Server` → `Db` (public embedding facade) → `Program`.
-  `Sql/` owns reusable AST operations; `Engine/` owns typed representations
-  shared by storage, execution, authorization, and introspection.
+- `src/Fsdb/` — library + executable in one project (`OutputType` Exe).
+  `Foundation/` contains configuration and low-level utilities; `Sql/` owns
+  SQL values, syntax, parsing, and functions; `Engine/` owns storage,
+  catalogs, authorization, persistence, and execution; `Wire/` owns the MySQL
+  protocol and connection lifecycle. `Db.fs` is the public embedding facade
+  and `Program.fs` is the executable entry point. The project file preserves
+  dependency order across these groups.
 - `tests/Fsdb.Tests/` — Expecto unit + wire-level integration tests.
 - `benchmarks/Fsdb.Benchmarks/` — BenchmarkDotNet, fsdb vs MySQL 8.4.
 - `torture/` — **separate solution** (`torture/Fsdb.Torture.slnx`), deliberately
