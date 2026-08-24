@@ -83,6 +83,18 @@ type private FullTextPredicatePlan =
       PredicateFor: RowId -> Expr
       ProbePredicate: Expr }
 
+type private FullTextPhysicalSource =
+    { Qualifier: string
+      Item: FromItem
+      Table: Table }
+
+type private FullTextSourcePlan =
+    { Source: FullTextPhysicalSource
+      Scores: (Expr * MatchMode * Map<RowId, float>) list
+      Synthetic: (Expr * string) list
+      Columns: ColumnDef list
+      Rows: Value[] seq }
+
 let private insertSelectSourceAliasPrefix = "\u0000fsdb_odku_source_"
 
 type private MemoizedSubquery =
@@ -534,7 +546,7 @@ let rec private exprLabel (expr: Expr) : string =
     match expr with
     | Lit v -> v |> toText |> Option.defaultValue "NULL"
     | MatchAgainst(cols, q, _) ->
-        let columnLabel column =
+        let columnLabel (column: MatchColumn) =
             column.Qualifier
             |> Option.map (fun qualifier -> qualifier + "." + column.Name)
             |> Option.defaultValue column.Name
@@ -7695,7 +7707,12 @@ and private runFullTextSelect
             match item with
             | FromTable tableRef ->
                 tryPhysicalTableRef store dbName tableRef
-                |> Result.map (Option.map (fun table -> fromItemQualifier item, item, table))
+                |> Result.map (
+                    Option.map (fun table ->
+                        { Qualifier = fromItemQualifier item
+                          Item = item
+                          Table = table })
+                )
             | _ -> Ok None)
         |> Result.map (List.choose id)
 
@@ -7717,12 +7734,12 @@ and private runFullTextSelect
 
             let candidates =
                 match qualifiers with
-                | [] -> sources |> List.filter (fun (_, _, table) -> indexMatches table columns)
+                | [] -> sources |> List.filter (fun source -> indexMatches source.Table columns)
                 | [ qualifier ] ->
                     sources
-                    |> List.filter (fun (sourceQualifier, _, table) ->
-                        System.String.Equals(sourceQualifier, qualifier, System.StringComparison.OrdinalIgnoreCase)
-                        && indexMatches table columns)
+                    |> List.filter (fun source ->
+                        System.String.Equals(source.Qualifier, qualifier, System.StringComparison.OrdinalIgnoreCase)
+                        && indexMatches source.Table columns)
                 | _ -> []
 
             match candidates with
@@ -7739,16 +7756,21 @@ and private runFullTextSelect
         | Ok ownedNodes ->
             let prepared =
                 sources
-                |> traverse (fun (qualifier, item, table) ->
+                |> traverse (fun source ->
                     let nodes =
                         ownedNodes
-                        |> List.choose (fun ((ownerQualifier, _, _), node) ->
-                            if System.String.Equals(ownerQualifier, qualifier, System.StringComparison.OrdinalIgnoreCase) then Some node else None)
+                        |> List.choose (fun (owner, node) ->
+                            if System.String.Equals(owner.Qualifier, source.Qualifier, System.StringComparison.OrdinalIgnoreCase) then Some node else None)
 
                     if nodes.IsEmpty then
-                        Ok(qualifier, item, table, [], [], table.Columns, table.RowsArray :> Value[] seq)
+                        Ok
+                            { Source = source
+                              Scores = []
+                              Synthetic = []
+                              Columns = source.Table.Columns
+                              Rows = source.Table.RowsArray :> Value[] seq }
                     else
-                        fullTextScoresForTable table nodes
+                        fullTextScoresForTable source.Table nodes
                         |> Result.mapError (fun (code, message) -> Err(code, message))
                         |> Result.map (fun computed ->
                             let synthetic =
@@ -7762,16 +7784,16 @@ and private runFullTextSelect
                                 | Some candidates ->
                                     candidates
                                     |> Set.toList
-                                    |> List.choose (fun rowId -> table.RowsArray.TryFind rowId |> Option.map (fun row -> rowId, row))
+                                    |> List.choose (fun rowId -> source.Table.RowsArray.TryFind rowId |> Option.map (fun row -> rowId, row))
                                 | None ->
-                                    match item with
+                                    match source.Item with
                                     | FromTable tableRef when select.Joins.IsEmpty ->
                                         tryEqualityLookup store dbName tableRef select.Where
                                         |> Option.map snd
-                                        |> Option.defaultWith (fun () -> table.RowsArray.Indexed |> List.ofSeq)
-                                    | _ -> table.RowsArray.Indexed |> List.ofSeq
+                                        |> Option.defaultWith (fun () -> source.Table.RowsArray.Indexed |> List.ofSeq)
+                                    | _ -> source.Table.RowsArray.Indexed |> List.ofSeq
 
-                            let columns = table.Columns @ (synthetic |> List.map (fun (_, name) -> syntheticColumn name TDouble false))
+                            let columns = source.Table.Columns @ (synthetic |> List.map (fun (_, name) -> syntheticColumn name TDouble false))
                             let rows =
                                 rowsForExecution
                                 |> Seq.map (fun (rowId, row) ->
@@ -7781,29 +7803,34 @@ and private runFullTextSelect
                                          |> List.map (fun (_, _, scores) -> VDouble(scores |> Map.tryFind rowId |> Option.defaultValue 0.0))
                                          |> Array.ofList))
 
-                            qualifier, item, table, computed, synthetic, columns, rows))
+                            { Source = source
+                              Scores = computed
+                              Synthetic = synthetic
+                              Columns = columns
+                              Rows = rows }))
 
             match prepared with
             | Error error -> error, [], []
             | Ok preparedSources ->
                 let replacements =
                     preparedSources
-                    |> List.collect (fun (qualifier, _, _, _, synthetic, _, _) ->
-                        synthetic |> List.map (fun (node, name) -> node, QualifiedCol(qualifier, name)))
+                    |> List.collect (fun plan ->
+                        plan.Synthetic
+                        |> List.map (fun (node, name) -> node, QualifiedCol(plan.Source.Qualifier, name)))
 
                 let sub expression = substituteExprs replacements expression
                 let originals =
                     preparedSources
-                    |> List.map (fun (qualifier, _, table, _, _, _, _) -> qualifier.ToLowerInvariant(), table.Columns)
+                    |> List.map (fun plan -> plan.Source.Qualifier.ToLowerInvariant(), plan.Source.Table.Columns)
                     |> Map.ofList
 
                 let overrides =
                     preparedSources
-                    |> List.map (fun (qualifier, _, table, _, _, columns, rows) ->
-                        qualifier.ToLowerInvariant(),
-                        { Columns = columns
-                          Rows = rows
-                          PhysicalTable = Some table })
+                    |> List.map (fun plan ->
+                        plan.Source.Qualifier.ToLowerInvariant(),
+                        { Columns = plan.Columns
+                          Rows = plan.Rows
+                          PhysicalTable = Some plan.Source.Table })
                     |> Map.ofList
 
                 let resolveBase =
@@ -7864,8 +7891,8 @@ and private runFullTextSelect
                                 [ sub expression, label ]
 
                         let whereNodes = select.Where |> Option.map collectMatchAgainst |> Option.defaultValue []
-                        let computed = preparedSources |> List.collect (fun (_, _, _, scores, _, _, _) -> scores)
-                        let synthetic = preparedSources |> List.collect (fun (_, _, _, _, values, _, _) -> values)
+                        let computed = preparedSources |> List.collect _.Scores
+                        let synthetic = preparedSources |> List.collect _.Synthetic
 
                         let implicitOrder =
                             if select.OrderBy.IsEmpty && select.GroupBy.IsEmpty && not select.Distinct then
@@ -11697,10 +11724,12 @@ let rec executeAs
         let tableAlias = updateStmt.From.Alias |> Option.defaultValue updateStmt.From.Table
 
         let tableRoot = tableSnapshot store db table |> Result.toOption
-        let fullTextPlan =
+        let fullTextPlanResult =
             match tableRoot, updateStmt.Where with
-            | Some table, Some predicate -> fullTextPredicatePlan table predicate |> Result.toOption |> Option.flatten
-            | _ -> None
+            | Some table, Some predicate -> fullTextPredicatePlan table predicate
+            | _ -> Ok None
+
+        let fullTextPlan = fullTextPlanResult |> Result.defaultValue None
 
         // Candidate narrowing is a superset; mutation target selection still
         // evaluates the complete WHERE. Stable RowIds also bound the rewrite.
@@ -11714,9 +11743,10 @@ let rec executeAs
             |> Option.map (fun (cols, rows) -> Ok(cols, rows |> List.map snd |> Seq.ofList))
             |> Option.defaultWith (fun () -> scan store db table)
 
-        match scanned with
-        | Error e -> ids, storageErr e
-        | Ok(columns, rows) ->
+        match fullTextPlanResult, scanned with
+        | Error(code, message), _ -> ids, Err(code, message)
+        | Ok _, Error e -> ids, storageErr e
+        | Ok _, Ok(columns, rows) ->
             let columnIndex = columnIndexOf columns
 
             match updateStmt.Assignments |> traverse (fun a -> resolveAssignableColumn columns table a.Column |> Result.map (fun i -> i, a.Value)) with
@@ -12084,10 +12114,12 @@ let rec executeAs
         let useSnapshot = not (beforeTriggers.IsEmpty && afterTriggers.IsEmpty)
         let targetStore = if useSnapshot then Storage.beginTransactionSnapshot store else store
         let tableRoot = tableSnapshot targetStore db table |> Result.toOption
-        let fullTextPlan =
+        let fullTextPlanResult =
             match tableRoot, deleteStmt.Where with
-            | Some table, Some predicate -> fullTextPredicatePlan table predicate |> Result.toOption |> Option.flatten
-            | _ -> None
+            | Some table, Some predicate -> fullTextPredicatePlan table predicate
+            | _ -> Ok None
+
+        let fullTextPlan = fullTextPlanResult |> Result.defaultValue None
 
         let narrowed =
             fullTextPlan
@@ -12099,9 +12131,10 @@ let rec executeAs
             |> Option.map (fun (columns, rows) -> Ok(columns, rows |> List.map snd |> Seq.ofList))
             |> Option.defaultWith (fun () -> scan targetStore db table)
 
-        match scanned with
-        | Error e -> ids, storageErr e
-        | Ok(columns, rows) ->
+        match fullTextPlanResult, scanned with
+        | Error(code, message), _ -> ids, Err(code, message)
+        | Ok _, Error e -> ids, storageErr e
+        | Ok _, Ok(columns, rows) ->
             let columnIndex = columnIndexOf columns
 
             let ctxFor = contextFactory store registry dbName columnIndex (singleQualifier tableAlias columns) None

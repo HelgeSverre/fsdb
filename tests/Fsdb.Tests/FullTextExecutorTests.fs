@@ -353,6 +353,10 @@ let tests =
               | Err(1191, _) -> ()
               | other -> failtestf "expected an unmatched UPDATE index to remain 1191, got %A" other
 
+              match run store "DELETE FROM docs WHERE MATCH(body) AGAINST(body)" with
+              | Err(1210, _) -> ()
+              | other -> failtestf "expected an invalid DELETE query argument to remain 1210, got %A" other
+
           testCase "MATCH scores physical sources before joining"
           <| fun _ ->
               let store = create ()
