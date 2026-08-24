@@ -7951,6 +7951,14 @@ let tests =
                         "SELECT id, (WITH c AS (SELECT t.id + 1 AS n) SELECT n FROM c) FROM t WHERE id <= 2 ORDER BY id"
                         [ [ Some "1"; Some "2" ]; [ Some "2"; Some "3" ] ]
 
+                testCase "a correlated recursive CTE keeps its row context across iterations"
+                <| fun _ ->
+                    expectRows
+                        ("SELECT id, (WITH RECURSIVE c(n) AS ("
+                         + "SELECT t.id UNION ALL SELECT n + 1 FROM c WHERE n < t.id + 1"
+                         + ") SELECT MAX(n) FROM c) FROM t WHERE id <= 2 ORDER BY id")
+                        [ [ Some "1"; Some "2" ]; [ Some "2"; Some "3" ] ]
+
                 testCase "a CTE body may contain its own WITH clause"
                 <| fun _ ->
                     expectRows

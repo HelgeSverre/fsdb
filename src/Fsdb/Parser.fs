@@ -291,14 +291,26 @@ let private reservedWords =
           // Reserved in MySQL 8 too: without it, `FROM t WINDOW w AS (...)`
           // reads `WINDOW` as `t`'s alias and dies on the window name.
           "window"
-          "lock" ],
+          "lock"
+          "with"
+          "recursive" ],
+        StringComparer.OrdinalIgnoreCase
+    )
+
+let private charsetIntroducerNames =
+    System.Collections.Generic.HashSet<string>(
+        [ "_armscii8"; "_ascii"; "_big5"; "_binary"; "_cp1250"; "_cp1251"; "_cp1256"; "_cp1257"
+          "_cp850"; "_cp852"; "_cp866"; "_cp932"; "_dec8"; "_eucjpms"; "_euckr"; "_gb18030"; "_gb2312"
+          "_gbk"; "_geostd8"; "_greek"; "_hebrew"; "_hp8"; "_keybcs2"; "_koi8r"; "_koi8u"; "_latin1"
+          "_latin2"; "_latin5"; "_latin7"; "_macce"; "_macroman"; "_sjis"; "_swe7"; "_tis620"; "_ucs2"
+          "_ujis"; "_utf16"; "_utf16le"; "_utf32"; "_utf8"; "_utf8mb3"; "_utf8mb4" ],
         StringComparer.OrdinalIgnoreCase
     )
 
 let private bareIdent: Parser<string, unit> =
     many1Satisfy2 isIdentStart isIdentChar
     >>= fun w ->
-        if reservedWords.Contains w then
+        if reservedWords.Contains w || charsetIntroducerNames.Contains w then
             fail (sprintf "'%s' is a reserved keyword" w)
         else
             preturn w
@@ -311,6 +323,9 @@ let private backtickIdent: Parser<string, unit> = pchar '`' >>. manyChars backti
 let private identifier: Parser<string, unit> =
     (backtickIdent <|> attempt bareIdent) .>> ws <?> "identifier"
 
+let private qualifiedIdentifier: Parser<string, unit> =
+    (backtickIdent <|> many1Satisfy2 isIdentStart isIdentChar) .>> ws
+
 /// `[db.]table` — like `tableRef` below but with no alias, for statements
 /// that target exactly one table rather than projecting columns (DDL,
 /// INSERT/UPDATE/DELETE/TRUNCATE). Encoded as a single "db.table" string
@@ -319,7 +334,7 @@ let private identifier: Parser<string, unit> =
 /// against `Storage`, which already takes database and table name as two
 /// separate arguments everywhere.
 let private qualifiedTableName: Parser<string, unit> =
-    (identifier .>>. opt (sym "." >>. identifier))
+    (identifier .>>. opt (sym "." >>. qualifiedIdentifier))
     |>> function
         | first, Some second -> first + "." + second
         | first, None -> first
@@ -1279,7 +1294,7 @@ let private identAtom: Parser<Expr, unit> =
              choice
                  [ sym "."
                    >>. ((pstring "*" >>. ws >>% Star(Some name))
-                        <|> (identifier |>> fun col -> QualifiedCol(name, col)))
+                        <|> (qualifiedIdentifier |>> fun col -> QualifiedCol(name, col)))
                    preturn (Col name) ])
 
 /// `?` parameter placeholder, numbered by SQL-text position via an
@@ -1309,7 +1324,8 @@ let private userVariableTarget: Parser<UserVariableRef, unit> =
               [ attempt backtickIdent
                 attempt (quotedName '\'')
                 attempt (quotedName '"')
-                many1Satisfy (fun c -> isIdentChar c || c = '.' || c = '$') ])
+                many1Satisfy (fun c -> isIdentChar c || c = '.' || c = '$')
+                notFollowedBy (pchar '@') >>% "" ])
      |> withSkippedString (fun sql name ->
          { Name = name.ToLowerInvariant()
            Sql = sql }))
@@ -2398,7 +2414,7 @@ let private indexHint: Parser<unit, unit> =
     >>% ()
 
 let private tableRef: Parser<TableRef, unit> =
-    (identifier .>>. opt (sym "." >>. identifier))
+    (identifier .>>. opt (sym "." >>. qualifiedIdentifier))
     .>>. opt ((keyword "AS" >>. identifier) <|> identifier)
     .>> many indexHint
     |>> fun ((first, second), alias) ->
@@ -2949,7 +2965,7 @@ let private valuesQueryStmt: Parser<Statement, unit> =
 /// multi-table `UPDATE ... JOIN`); a single-table `UPDATE` still parses one
 /// the same way it always could, `Executor` just never needs it there.
 let private assignment: Parser<Assignment, unit> =
-    ((identifier .>>. opt (sym "." >>. identifier)) .>> sym "=") .>>. expr
+    ((identifier .>>. opt (sym "." >>. qualifiedIdentifier)) .>> sym "=") .>>. expr
     |>> function
         | (first, None), value -> { Table = None; Column = first; Value = value }
         | (first, Some col), value -> { Table = Some first; Column = col; Value = value }

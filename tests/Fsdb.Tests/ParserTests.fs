@@ -611,6 +611,17 @@ let tests =
                     | Ok statement -> failtestf "expected an error, got %A" statement
                     | Error error -> Expect.stringContains error "even number" "actionable malformed-literal error"
 
+                testCase "charset introducers require a literal unless qualified or quoted"
+                <| fun _ ->
+                    [ "_utf8mb4"; "_utf8mb3"; "_sjis"; "_binary" ]
+                    |> List.iter (fun introducer -> Expect.isError (parse ("SELECT " + introducer)) introducer)
+
+                    Expect.isError (parse "SELECT ROW(1, 'A') = (SELECT 1, _utf8mb4)") "subquery introducer"
+
+                    match parseOk "SELECT t._sjis, `_utf8mb4` FROM t" with
+                    | Select { Projections = [ (QualifiedCol("t", "_sjis"), None); (Col "_utf8mb4", None) ] } -> ()
+                    | other -> failtestf "expected qualified and quoted identifiers, got %A" other
+
                 testCase "bit and national string literals parse as MySQL literals"
                 <| fun _ ->
                     Expect.equal
@@ -1830,6 +1841,19 @@ let tests =
                         Expect.equal (exists.Ctes |> List.map _.CteName) [ "d" ] "EXISTS CTE"
                     | other -> failtestf "expected CTE-bearing expression subqueries, got %A" other
 
+                testCase "WITH and RECURSIVE are reserved outside CTE grammar"
+                <| fun _ ->
+                    Expect.isError (parse "SELECT d.n FROM WITH c") "WITH cannot become a table name"
+                    Expect.isError (parse "SELECT recursive FROM t") "RECURSIVE cannot become a column name"
+
+                    match parseOk "SELECT t.with, t.recursive FROM t" with
+                    | Select { Projections = [ (QualifiedCol("t", "with"), None); (QualifiedCol("t", "recursive"), None) ] } -> ()
+                    | other -> failtestf "expected reserved words after a qualifier, got %A" other
+
+                    match parseOk "SELECT * FROM db.with" with
+                    | Select { From = Some(FromTable { Database = Some "db"; Table = "with" }) } -> ()
+                    | other -> failtestf "expected a reserved qualified table name, got %A" other
+
                 testCase "IN (SELECT ...) parses as InSubquery"
                 <| fun _ ->
                     match parseOk "SELECT a FROM t WHERE a IN (SELECT b FROM u)" with
@@ -2099,6 +2123,14 @@ let tests =
                     match parse "SELECT @x + 1, @@GLOBAL.max_connections, @x := 3" with
                     | Ok(Select { Projections = projections }) -> Expect.equal projections expected "variable expressions"
                     | other -> failtestf "expected variable expressions, got %A" other
+
+                testCase "a bare at sign is MySQL's anonymous NULL variable reference"
+                <| fun _ ->
+                    match parse "SELECT @, @ + 1" with
+                    | Ok(Select { Projections = [ (UserVariable first, None); (BinOp(Add, UserVariable second, Lit(VInt 1L)), None) ] }) ->
+                        Expect.equal first { Name = ""; Sql = "@" } "bare reference"
+                        Expect.equal second first "nested bare reference"
+                    | other -> failtestf "expected bare user-variable references, got %A" other
 
                 testCase "quoted user-variable names parse with their MySQL escapes"
                 <| fun _ ->

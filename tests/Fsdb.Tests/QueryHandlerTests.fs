@@ -924,6 +924,22 @@ let tests =
                   Expect.equal updated.UserVariables.["sp ace"] (VInt 4L) "assignment uses quoted references"
               | _, other -> failtestf "expected quoted variables in an assignment expression, got %A" other
 
+          testCase "a bare at sign reads as NULL but remains an illegal assignment target"
+          <| fun _ ->
+              let session = create 1 (Fsdb.Storage.create ())
+
+              match handle session "SELECT @, @ + 1" |> snd with
+              | ResultSet([ "@"; "@ + 1" ], [ [ None; None ] ]) -> ()
+              | other -> failtestf "expected anonymous NULL variable reads, got %A" other
+
+              match handle session "SET @x := @" with
+              | updated, Affected 0UL -> Expect.equal updated.UserVariables.["x"] VNull "bare reference assignment"
+              | _, other -> failtestf "expected assignment from a bare reference, got %A" other
+
+              match handle session "SET @ := 1" |> snd with
+              | Err(3061, _) -> ()
+              | other -> failtestf "expected illegal empty assignment target, got %A" other
+
           testCase "double-quoted user-variable names remain variables under ANSI_QUOTES"
           <| fun _ ->
               let session = create 1 (Fsdb.Storage.create ())

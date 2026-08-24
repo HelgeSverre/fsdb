@@ -1358,6 +1358,7 @@ let rec private metadataOfExpr (ctx: EvalContext) (expr: Expr) : ColumnMetadata 
     | Lit(VZeroDate _) -> simple TypeDate |> Option.map (fun metadata -> { metadata with Flags = NotNullFlag })
     | Lit(VZeroDateTime _) -> simple TypeDateTime |> Option.map (fun metadata -> { metadata with Flags = NotNullFlag })
     | Lit(VJson _) -> simple TypeVarString |> Option.map (fun metadata -> { metadata with Flags = NotNullFlag })
+    | UserVariable variable when variable.Sql = "@" -> simple TypeVarString
     | UserVariable variable ->
         currentVariableContext ()
         |> Option.bind (fun bindings -> bindings.UserVariables.Value |> Map.tryFind variable.Name)
@@ -2626,6 +2627,7 @@ let rec private evalExpr (ctx: EvalContext) (expr: Expr) : Result<Value, EvalErr
     | WindowOver _ -> Error(1054, "Invalid use of a group function")
     | Col name -> resolveCol ctx name
     | QualifiedCol(table, col) -> resolveQualifiedCol ctx table col
+    | UserVariable variable when variable.Sql = "@" -> Ok VNull
     | UserVariable variable ->
         match UserVariableRef.validationError variable with
         | Some message -> Error(3061, message)
