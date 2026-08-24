@@ -95,24 +95,44 @@ O(n²) list-append in the UPDATE path, PK/unique hash indexes, a hash
 equi-join, and `TcpClient.NoDelay` (Nagle's algorithm had been taxing every
 round trip from the start).
 
-### Durability-matched (single-connection latency, `e8b848f-durable.md`)
+### Current latency and scale
+
+The current [10k/50k latency](results/ebc3fca.md) and
+[100k/500k scale](results/ebc3fca-scale.md) runs separate indexed paths from
+work that still scans or replans its input:
+
+| Workload | fsdb at 10k | MySQL at 10k | fsdb at 100k | MySQL at 100k |
+|---|---:|---:|---:|---:|
+| Single INSERT | 80 µs | 107 µs | 91 µs | 108 µs |
+| Single-row UPDATE | 133 µs | 107 µs | 130 µs | 122 µs |
+| REPLACE by PK | 96 µs | 132 µs | 109 µs | 146 µs |
+| Secondary range | 126 µs | 44 µs | 151 µs | 61 µs |
+| Indexed join | 4.49 ms | 177 µs | 124 ms | 194 µs |
+| Uncorrelated IN subquery | 103 ms | 149 µs | 1.09 s | 160 µs |
+| GROUP BY aggregate | 87.5 ms | 20.2 ms | 1.17 s | 198 ms |
+| Window query | 343 ms | 46.7 ms | 5.04 s | 715 ms |
+| Natural FULLTEXT | 53.7 ms | 393 µs | 708 ms | 3.72 ms |
+
+The point-write and secondary-range slopes are flat. The join, subquery,
+aggregate, window, and FULLTEXT slopes identify planning and persistent-index
+work as the highest-leverage performance area.
+
+### Durability-matched (single-connection latency, `ebc3fca-durable.md`)
 
 fsdb in-memory vs fsdb `--data-dir` (binary WAL) vs MySQL durable vs MySQL no-fsync:
 
 | Workload | fsdb | fsdb-wal | mysql | mysql-nofsync |
 |---|---:|---:|---:|---:|
-| Point SELECT by PK | 114 µs | 108 µs | 41 µs | 41 µs |
-| Single INSERT | 276 µs | 302 µs | 116 µs | 33 µs |
-| Batch-100 INSERT | 4.84 ms | 4.97 ms | 1.05 ms | 796 µs |
-| Single-row UPDATE | 82 µs | 122 µs | 117 µs | 40 µs |
+| Single INSERT | 85 µs | 142 µs | 114 µs | 38 µs |
+| Batch-100 INSERT | 2.07 ms | 2.23 ms | 1.22 ms | 967 µs |
+| REPLACE by PK | 100 µs | 1.13 ms | 122 µs | 52 µs |
+| Single-row UPDATE | 128 µs | 1.49 ms | 116 µs | 44 µs |
+| Two-row transaction | 339 µs | 3.01 ms | 216 µs | 136 µs |
 
-Durable fsdb's UPDATE is at MySQL parity (122 vs 117 µs) and INSERT within
-~2.6×. The original ~5–7 ms durable writes were an artifact of .NET's
-`FileStream.Flush(true)` issuing `F_FULLFSYNC` on macOS (a full drive-write-
-cache flush); a plain libc `fsync` — MySQL's own macOS default — drops it to
-~16 µs per commit. The WAL is a binary `[len][crc32]` log and the snapshot
-streams, so what remains is engine cost: fsdb's in-memory single INSERT is
-276 µs and the WAL adds ~26 µs on top.
+The WAL adds little to batched INSERT, but UPDATE, REPLACE, UPSERT, and
+explicit transactions remain roughly 9–14× slower than durable MySQL. This
+is a persistence/publication-path gap rather than the in-memory row-mutation
+cost.
 
 ### Concurrency throughput
 
@@ -125,21 +145,25 @@ row-conflict merging:
 | insert | 5,673 | 22,703 |
 | mixed read/write | 20,537 | 47,801 |
 
-The current
-[transaction-only scaling run](results/6a5d197-transaction-scale.md) measures
-disjoint two-row transactions after changed-page discovery and incremental
-index maintenance:
+The current [worker-scaling run](results/7be1d91-load-scale.md) records both
+completed throughput and retryable lock/deadlock errors:
 
-| Workers | fsdb ops/sec | MySQL ops/sec | fsdb/MySQL |
-|---:|---:|---:|---:|
-| 1 | 3,719 | 4,259 | 0.87x |
-| 2 | 3,248 | 7,204 | 0.45x |
-| 4 | 4,693 | 9,833 | 0.48x |
-| 8 | 2,672 | 11,755 | 0.23x |
+| Workload | fsdb/MySQL at 1 worker | fsdb/MySQL at 16 workers |
+|---|---:|---:|
+| Point read | 0.28x | 0.11x |
+| Distinct UPDATE | 0.97x | 0.23x |
+| Distinct UPSERT | 0.93x | 0.38x |
+| INSERT | 1.35x | 0.61x |
+| Distinct REPLACE | 1.25x | 0.57x |
+| Two-row transaction | 0.64x | 0.18x |
+| Mixed read/write | 0.68x | 0.19x |
 
-The multi-worker samples have high variance, recorded in the result file, so
-the table establishes scale and remaining contention rather than a stable
-regression threshold. Use `just bench-load-scale` for a fresh comparison.
+Single-worker writes are near parity or faster. The falling ratios at higher
+worker counts expose publication/locking contention; 16-worker hot-row UPDATE
+falls to 31 ops/sec despite negligible reported retries, indicating lock
+convoying rather than optimistic abort churn. Multi-worker samples have high
+variance, retained in the raw report, so use the table as scaling evidence
+rather than a narrow regression threshold.
 
 ### Full-text search
 
