@@ -1579,6 +1579,13 @@ let tests =
                         | None -> failtest "expected an ordered secondary lookup"
 
                     Expect.equal descending [ VInt 28L, VInt 3L; VInt 26L, VInt 2L ] "descending entries retain index-key order"
+
+                    let primaryRange =
+                        match trySecondaryRangeLookup store defaultDatabase "users" "id" (Some(VInt 2L, true)) None with
+                        | Some(name, _, _, rows) -> name, rows |> List.map (fun (_, row) -> row.[0])
+                        | None -> failtest "expected an ordered primary-key range lookup"
+
+                    Expect.equal primaryRange ("PRIMARY", [ VInt 2L; VInt 3L ]) "primary keys share the ordered access path"
                     Expect.equal (reindexCallCount ()) reindexesBefore "point writes preserve ordered buckets incrementally"
 
                 testCase "a composite secondary index follows row mutations incrementally"

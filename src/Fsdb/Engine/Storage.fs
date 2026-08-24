@@ -193,7 +193,8 @@ type Table =
       /// Non-unique B-tree keys map equality keys to stable row
       /// identities. Buckets avoid per-row tree-position lookup for equality.
       SecondaryIndex: Map<string, Map<string, Set<RowId>>>
-      /// Lexicographic B-tree entries support bounded ordered seeks.
+      /// Lexicographic B-tree entries support bounded ordered seeks across
+      /// primary, unique, and non-unique keys.
       SecondaryOrder: SecondaryOrder
       /// FULLTEXT indexes retain token postings and row-local positions.
       /// They are derived from rows and rebuilt after persistence recovery.
@@ -1553,6 +1554,15 @@ let private secondaryKeyGroups (table: Table) : SecondaryKeyGroup list =
                           Indices = indices })
         | _ -> None)
 
+let private orderedKeyGroups (table: Table) : SecondaryKeyGroup list =
+    let unique =
+        uniqueKeyGroups table
+        |> List.map (fun (name, indices) ->
+            { Name = name
+              Indices = indices })
+
+    unique @ secondaryKeyGroups table
+
 type private FullTextKeyGroup =
     { Name: string
       Indices: int list
@@ -1675,7 +1685,7 @@ let private rebuildSecondaryIndex (table: Table) : Map<string, Map<string, Set<R
     |> Map.ofList
 
 let private rebuildSecondaryOrder (table: Table) : SecondaryOrder =
-    secondaryKeyGroups table
+    orderedKeyGroups table
     |> List.map (fun group ->
         let entries: ImmutableSortedSet<SecondaryOrderEntry> =
             table.RowsArray.Indexed
@@ -2141,7 +2151,14 @@ let private reindexRow
             secondaryIndex
 
     let secondaryOrder =
-        secondaryGroups
+        let orderedGroups =
+            (uniqueGroups
+             |> List.map (fun (name, indices) ->
+                 { Name = name
+                   Indices = indices }))
+            @ secondaryGroups
+
+        orderedGroups
         |> List.fold
             (fun indexes keyGroup ->
                 let entry rowId (row: Value[]) =
@@ -2448,7 +2465,7 @@ let private trySecondaryOrderSliceInTable
     (requireBound: bool)
     : SecondaryOrderSlice option =
     tryEqualityIndex table columnName
-    |> Option.bind (fun (indexName, index, unique) ->
+    |> Option.bind (fun (indexName, index, _) ->
         let normalizeBound = function
             | None -> Some None
             | Some(VNull, _) -> None
@@ -2456,12 +2473,9 @@ let private trySecondaryOrderSliceInTable
 
         match normalizeBound lower, normalizeBound upper with
         | Some lower, Some upper when not requireBound || lower.IsSome || upper.IsSome ->
-            if unique then
-                None
-            else
-                table.SecondaryOrder
-                |> Map.tryFind indexName
-                |> Option.map (fun entries ->
+            table.SecondaryOrder
+            |> Map.tryFind indexName
+            |> Option.map (fun entries ->
                     let entry value rowId =
                         { CollationNames = [ table.Columns.[index].Collation ]
                           Values = [ value ]
@@ -2592,7 +2606,7 @@ let tryCompositeOrderedLookup
         |> traverse (resolveColumn table.Columns)
         |> Result.toOption
         |> Option.bind (fun indices ->
-            secondaryKeyGroups table
+            orderedKeyGroups table
             |> List.tryFind (fun group -> group.Indices = indices && indices.Length > 1)
             |> Option.bind (fun group ->
                 table.SecondaryOrder

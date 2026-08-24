@@ -11752,6 +11752,7 @@ let rec executeAs
             fullTextPlan
             |> Option.bind (fun plan -> tableRoot |> Option.map (fun table -> table.Columns, plan.Rows))
             |> Option.orElseWith (fun () -> tryEqualityLookup store dbName updateStmt.From updateStmt.Where)
+            |> Option.orElseWith (fun () -> tryRangeLookup store dbName updateStmt.From updateStmt.Where)
 
         let scanned =
             narrowed
@@ -12140,6 +12141,7 @@ let rec executeAs
             fullTextPlan
             |> Option.bind (fun plan -> tableRoot |> Option.map (fun table -> table.Columns, plan.Rows))
             |> Option.orElseWith (fun () -> tryEqualityLookup targetStore dbName deleteStmt.From deleteStmt.Where)
+            |> Option.orElseWith (fun () -> tryRangeLookup targetStore dbName deleteStmt.From deleteStmt.Where)
 
         let scanned =
             narrowed

@@ -134,6 +134,12 @@ type ServerBenchmarks() =
         this.Query $"SELECT id, sort_key FROM users WHERE sort_key >= {lower} AND sort_key < {lower + 64} ORDER BY sort_key ASC LIMIT 20"
 
     [<Benchmark>]
+    [<BenchmarkCategory("Scale", "SecondaryRange")>]
+    member this.UpdateBySecondaryRange() =
+        let key = randomUserId () - 1
+        this.Exec $"UPDATE users SET age = IF(age = 30, 31, 30) WHERE sort_key >= {key} AND sort_key < {key + 1}"
+
+    [<Benchmark>]
     [<BenchmarkCategory("Scale")>]
     member this.InsertSingle() =
         let i = Interlocked.Increment(&insertCounter)

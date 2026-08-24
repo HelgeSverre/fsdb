@@ -4254,6 +4254,56 @@ let tests =
                         ()
                     | other -> failtestf "expected a point lookup plan, got %A" other
 
+                testCase "primary and unique ranges narrow SELECT UPDATE and DELETE"
+                <| fun _ ->
+                    let mutable calls = 0
+
+                    let registry =
+                        builtins
+                        |> registerScalar "TOUCH" (fun values ->
+                            calls <- calls + 1
+                            values |> List.head)
+
+                    let store = newStore ()
+                    runDefault store "CREATE TABLE t (id INT PRIMARY KEY, serial INT UNIQUE, score INT, KEY ix_score (score))" |> ignore
+
+                    let values =
+                        [ for i in 1 .. 1000 -> sprintf "(%d, %d, %d)" i (2000 + i) i ]
+                        |> String.concat ", "
+
+                    runDefault store (sprintf "INSERT INTO t VALUES %s" values) |> ignore
+
+                    match run store registry "SELECT id FROM t WHERE id >= 995 AND TOUCH(id) = id ORDER BY id" with
+                    | ResultSet(_, rows) -> Expect.equal rows.Length 6 "the primary range returns its suffix"
+                    | other -> failtestf "expected primary range rows, got %A" other
+
+                    Expect.isLessThan calls 10 "SELECT evaluates the residual only for primary candidates"
+                    calls <- 0
+
+                    match run store registry "UPDATE t SET score = score + 10 WHERE serial >= 2995 AND TOUCH(id) = id ORDER BY serial LIMIT 3" with
+                    | Affected 3UL -> ()
+                    | other -> failtestf "expected three unique-range updates, got %A" other
+
+                    Expect.isLessThan calls 20 "UPDATE evaluates the residual only for unique candidates"
+                    calls <- 0
+
+                    match run store registry "DELETE FROM t WHERE score >= 1005 AND TOUCH(id) = id ORDER BY score LIMIT 2" with
+                    | Affected 2UL -> ()
+                    | other -> failtestf "expected two secondary-range deletes, got %A" other
+
+                    Expect.isLessThan calls 20 "DELETE evaluates the residual only for secondary candidates"
+
+                    match runDefault store "SELECT id, score FROM t WHERE id >= 995 ORDER BY id" with
+                    | ResultSet(_, rows) ->
+                        Expect.equal
+                            rows
+                            [ [ Some "997"; Some "1007" ]
+                              [ Some "998"; Some "998" ]
+                              [ Some "999"; Some "999" ]
+                              [ Some "1000"; Some "1000" ] ]
+                            "range mutations retain ORDER BY and LIMIT semantics"
+                    | other -> failtestf "expected surviving rows, got %A" other
+
                 testCase "EXPLAIN reports ref only for the secondary equality access path execution uses"
                 <| fun _ ->
                     let store = newStore ()
