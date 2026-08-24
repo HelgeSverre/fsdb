@@ -78,6 +78,11 @@ type private IndexedJoinProbe =
       RightIndices: int list
       Unique: bool }
 
+type private FullTextPredicatePlan =
+    { Rows: (RowId * Value[]) list
+      PredicateFor: RowId -> Expr
+      ProbePredicate: Expr }
+
 let private insertSelectSourceAliasPrefix = "\u0000fsdb_odku_source_"
 
 type private MemoizedSubquery =
@@ -7618,6 +7623,31 @@ and private fullTextCandidateIds (computed: (Expr * MatchMode * Map<RowId, float
 
     candidates expression
 
+and private fullTextPredicatePlan (table: Table) (predicate: Expr) =
+    let matchNodes = collectMatchAgainst predicate |> List.distinct
+
+    if matchNodes.IsEmpty then
+        Ok None
+    else
+        fullTextScoresForTable table matchNodes
+        |> Result.map (fun computed ->
+            let rewrite scoreFor =
+                computed
+                |> List.map (fun (node, _, scores) -> node, Lit(VDouble(scoreFor scores)))
+                |> fun replacements -> substituteExprs replacements predicate
+
+            let rowIds =
+                fullTextCandidateIds computed predicate
+                |> Option.defaultWith (fun () -> table.RowsArray.Indexed |> Seq.map fst |> Set.ofSeq)
+
+            Some
+                { Rows =
+                    rowIds
+                    |> Set.toList
+                    |> List.choose (fun rowId -> table.RowsArray.TryFind rowId |> Option.map (fun row -> rowId, row))
+                  PredicateFor = fun rowId -> rewrite (fun scores -> scores |> Map.tryFind rowId |> Option.defaultValue 0.0)
+                  ProbePredicate = rewrite (fun _ -> 0.0) })
+
 /// The fulltext pre-pass: like `runWindowedSelect`, each distinct
 /// `MATCH ... AGAINST` becomes a synthetic score column computed over the
 /// whole table — but ahead of WHERE, because the score both filters rows
@@ -11531,9 +11561,18 @@ let rec executeAs
         let db, table = (updateStmt.From.Database |> Option.defaultValue dbName), updateStmt.From.Table
         let tableAlias = updateStmt.From.Alias |> Option.defaultValue updateStmt.From.Table
 
+        let tableRoot = tableSnapshot store db table |> Result.toOption
+        let fullTextPlan =
+            match tableRoot, updateStmt.Where with
+            | Some table, Some predicate -> fullTextPredicatePlan table predicate |> Result.toOption |> Option.flatten
+            | _ -> None
+
         // Candidate narrowing is a superset; mutation target selection still
         // evaluates the complete WHERE. Stable RowIds also bound the rewrite.
-        let narrowed = tryEqualityLookup store dbName updateStmt.From updateStmt.Where
+        let narrowed =
+            fullTextPlan
+            |> Option.bind (fun plan -> tableRoot |> Option.map (fun table -> table.Columns, plan.Rows))
+            |> Option.orElseWith (fun () -> tryEqualityLookup store dbName updateStmt.From updateStmt.Where)
 
         let scanned =
             narrowed
@@ -11552,7 +11591,25 @@ let rec executeAs
 
                 let ctxFor = contextFactory store registry dbName columnIndex qualifiers None
 
-                let check = whereMatches ctxFor updateStmt.Where
+                let fullTextRowIds = Dictionary<Value[], RowId>(HashIdentity.Reference)
+
+                fullTextPlan
+                |> Option.iter (fun plan ->
+                    for rowId, row in plan.Rows do
+                        fullTextRowIds.[row] <- rowId)
+
+                let check row =
+                    match fullTextPlan with
+                    | Some plan ->
+                        match fullTextRowIds.TryGetValue row with
+                        | true, rowId -> whereMatches ctxFor (Some(plan.PredicateFor rowId)) row
+                        | false, _ -> Ok false
+                    | None -> whereMatches ctxFor updateStmt.Where row
+
+                let probePredicate =
+                    fullTextPlan
+                    |> Option.map _.ProbePredicate
+                    |> Option.orElse updateStmt.Where
 
                 let checkAssignments row =
                     indexedAssignments |> traverse (fun (_, expr) -> evalExpr (ctxFor row) expr)
@@ -11562,7 +11619,7 @@ let rec executeAs
                 // unknown column/function is a schema error, not a data
                 // one, and shouldn't depend on whether any row happens to
                 // match (or exist at all).
-                match check (probeRow columns) |> Result.bind (fun _ -> checkAssignments (probeRow columns)) with
+                match whereMatches ctxFor probePredicate (probeRow columns) |> Result.bind (fun _ -> checkAssignments (probeRow columns)) with
                 | Error(code, message) -> ids, Err(code, message)
                 | Ok _ ->
                     match selectMutationTargets ctxFor (List.ofSeq rows) check updateStmt.OrderBy (Option.map rowCount updateStmt.Limit) with
@@ -11579,12 +11636,13 @@ let rec executeAs
                         let changedRows = ResizeArray<Value[] option * Value[] option>()
 
                         let predicate row =
-                            match narrowed with
-                            | Some _ ->
+                            match fullTextPlan, narrowed with
+                            | Some _, _ -> Ok(targetSet.Contains row)
+                            | None, Some _ ->
                                 check row
                                 |> Result.mapError ExpressionError
                                 |> Result.map (fun matches -> matches && targetSet.Contains row)
-                            | None -> Ok(targetSet.Contains row)
+                            | None, None -> Ok(targetSet.Contains row)
                         let assignedIdxs = indexedAssignments |> List.map fst |> Set.ofList
 
                         let updater row =
@@ -11890,7 +11948,16 @@ let rec executeAs
         let baseCatalog = store.Catalog
         let useSnapshot = not (beforeTriggers.IsEmpty && afterTriggers.IsEmpty)
         let targetStore = if useSnapshot then Storage.beginTransactionSnapshot store else store
-        let narrowed = tryEqualityLookup targetStore dbName deleteStmt.From deleteStmt.Where
+        let tableRoot = tableSnapshot targetStore db table |> Result.toOption
+        let fullTextPlan =
+            match tableRoot, deleteStmt.Where with
+            | Some table, Some predicate -> fullTextPredicatePlan table predicate |> Result.toOption |> Option.flatten
+            | _ -> None
+
+        let narrowed =
+            fullTextPlan
+            |> Option.bind (fun plan -> tableRoot |> Option.map (fun table -> table.Columns, plan.Rows))
+            |> Option.orElseWith (fun () -> tryEqualityLookup targetStore dbName deleteStmt.From deleteStmt.Where)
 
         let scanned =
             narrowed
@@ -11904,9 +11971,27 @@ let rec executeAs
 
             let ctxFor = contextFactory store registry dbName columnIndex (singleQualifier tableAlias columns) None
 
-            let check = whereMatches ctxFor deleteStmt.Where
+            let fullTextRowIds = Dictionary<Value[], RowId>(HashIdentity.Reference)
 
-            match check (probeRow columns) with
+            fullTextPlan
+            |> Option.iter (fun plan ->
+                for rowId, row in plan.Rows do
+                    fullTextRowIds.[row] <- rowId)
+
+            let check row =
+                match fullTextPlan with
+                | Some plan ->
+                    match fullTextRowIds.TryGetValue row with
+                    | true, rowId -> whereMatches ctxFor (Some(plan.PredicateFor rowId)) row
+                    | false, _ -> Ok false
+                | None -> whereMatches ctxFor deleteStmt.Where row
+
+            let probePredicate =
+                fullTextPlan
+                |> Option.map _.ProbePredicate
+                |> Option.orElse deleteStmt.Where
+
+            match whereMatches ctxFor probePredicate (probeRow columns) with
             | Error(code, message) -> ids, Err(code, message)
             | Ok _ ->
                 match selectMutationTargets ctxFor (List.ofSeq rows) check deleteStmt.OrderBy (Option.map rowCount deleteStmt.Limit) with
@@ -11916,12 +12001,13 @@ let rec executeAs
                     let deletedRows = targetRows |> List.map (fun row -> Some row, None)
 
                     let predicate row =
-                        match narrowed with
-                        | Some _ ->
+                        match fullTextPlan, narrowed with
+                        | Some _, _ -> Ok(targetSet.Contains row)
+                        | None, Some _ ->
                             check row
                             |> Result.mapError ExpressionError
                             |> Result.map (fun matches -> matches && targetSet.Contains row)
-                        | None -> Ok(targetSet.Contains row)
+                        | None, None -> Ok(targetSet.Contains row)
 
                     let candidates = narrowed |> Option.map snd
 

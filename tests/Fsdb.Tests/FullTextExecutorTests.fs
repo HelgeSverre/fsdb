@@ -321,6 +321,38 @@ let tests =
               Expect.equal (naturalScores (index after) "alpha").Count 0 "the published root removes the old posting"
               Expect.equal (naturalScores (index after) "gamma").Count 1 "the published root adds the new posting"
 
+          testCase "single-table UPDATE and DELETE consume full-text candidates"
+          <| fun _ ->
+              let store = create ()
+
+              [ "CREATE TABLE docs (id INT PRIMARY KEY, body TEXT, FULLTEXT(body))"
+                "INSERT INTO docs VALUES (1, 'needle alpha'), (2, 'needle beta'), (3, 'ordinary')" ]
+              |> List.iter (run store >> ignore)
+
+              Expect.equal
+                  (run store "UPDATE docs SET body = 'archived alpha' WHERE MATCH(body) AGAINST('needle') AND id = 1")
+                  (Affected 1UL)
+                  "UPDATE applies its residual predicate to MATCH candidates"
+
+              Expect.equal
+                  (ids (run store "SELECT id FROM docs WHERE MATCH(body) AGAINST('needle')"))
+                  [ "2" ]
+                  "the updated document leaves its old posting"
+
+              Expect.equal
+                  (run store "DELETE FROM docs WHERE MATCH(body) AGAINST('needle') OR MATCH(body) AGAINST('ordinary')")
+                  (Affected 2UL)
+                  "DELETE unions bounded MATCH alternatives"
+
+              Expect.equal
+                  (ids (run store "SELECT id FROM docs ORDER BY id"))
+                  [ "1" ]
+                  "only documents selected by the full-text predicate are deleted"
+
+              match run store "UPDATE docs SET body = 'x' WHERE MATCH(id) AGAINST('1')" with
+              | Err(1191, _) -> ()
+              | other -> failtestf "expected an unmatched UPDATE index to remain 1191, got %A" other
+
           testCase "SHOW CREATE TABLE renders FULLTEXT KEY in MySQL's format"
           <| fun _ ->
               let store = setup ()
