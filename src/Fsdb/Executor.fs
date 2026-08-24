@@ -2254,6 +2254,15 @@ let private resolveOperandCollation
         Ok right.Collation
     elif left.Collation.Name.Equals(right.Collation.Name, System.StringComparison.OrdinalIgnoreCase) then
         Ok left.Collation
+    elif left.Coercibility = 0 then
+        Error(
+            1267,
+            sprintf
+                "Illegal mix of collations (%s,EXPLICIT) and (%s,EXPLICIT) for operation '%s'"
+                left.Collation.Name
+                right.Collation.Name
+                operation
+        )
     elif left.Charset = right.Charset && isBinaryCollation left.Collation then
         Ok left.Collation
     elif left.Charset = right.Charset && isBinaryCollation right.Collation then
@@ -2286,8 +2295,8 @@ let private comparisonCollation
         (collationOperand ctx rightExpr rightColumn)
 
 let private comparisonName = function
-    | Eq
-    | NullSafeEq -> "="
+    | Eq -> "="
+    | NullSafeEq -> "<=>"
     | Neq -> "<>"
     | Lt -> "<"
     | Lte -> "<="
@@ -2351,7 +2360,8 @@ let private comparisonResult
 
         let finish compared equal =
             match op with
-            | Eq -> boolToValue equal
+            | Eq
+            | NullSafeEq -> boolToValue equal
             | Neq -> boolToValue (not equal)
             | Lt -> boolToValue (compared < 0)
             | Lte -> boolToValue (compared <= 0)
@@ -2517,7 +2527,7 @@ let private rowComparisonResult
             | NullSafeEq, VNull, VNull -> Ok(VInt 1L)
             | NullSafeEq, VNull, _
             | NullSafeEq, _, VNull -> Ok(VInt 0L)
-            | NullSafeEq, _, _ -> comparisonResult ctx leftExpr leftColumn leftValue rightExpr rightColumn Eq rightValue
+            | NullSafeEq, _, _ -> comparisonResult ctx leftExpr leftColumn leftValue rightExpr rightColumn NullSafeEq rightValue
             | _ -> comparisonResult ctx leftExpr leftColumn leftValue rightExpr rightColumn comparisonOp rightValue
         | _ -> Error(1241, sprintf "Operand should contain %d column(s)" (width left))
 
@@ -2851,13 +2861,13 @@ let rec private evalExpr (ctx: EvalContext) (expr: Expr) : Result<Value, EvalErr
                     | Gte -> compareWith Gte
                     // Never unknown, unlike every other comparison here: both
                     // sides `NULL` is true, either side (but not both) `NULL` is
-                    // false, otherwise it's a plain `Eq`.
+                    // false, otherwise it uses the same equality resolver.
                     | NullSafeEq ->
                         match va, vb with
                         | VNull, VNull -> Ok(VInt 1L)
                         | VNull, _
                         | _, VNull -> Ok(VInt 0L)
-                        | _ -> compareWith Eq))
+                        | _ -> compareWith NullSafeEq))
         with Value.UnsignedOutOfRange ->
             Error(1690, "BIGINT UNSIGNED value is out of range")
     | Like(e, p, caseSensitive, escape) ->
