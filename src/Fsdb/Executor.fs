@@ -80,35 +80,35 @@ type private IndexedJoinProbe =
 
 let private insertSelectSourceAliasPrefix = "\u0000fsdb_odku_source_"
 
-/// Per-statement memo of derived-table (`FROM (SELECT ...)`) resolutions,
-/// keyed by the AST node's identity. Within one statement the same derived
-/// table is resolved by the executor *and* by the collation/fsp metadata
-/// helpers, and a nested derived table would otherwise run once per level
-/// per caller — 3^depth executions. Derived tables are uncorrelated, so the
-/// result is stable across those calls; reset per `execute` so it never
-/// carries across statements (the store changes between them).
-let private fromSubqueryMemo =
-    System.Threading.AsyncLocal<Dictionary<FromItem, Result<ColumnDef list * Value[] list, QueryResult>>>()
-
 type private MemoizedSubquery =
     | MemoizedSubquery of QueryResult * ColumnMetadata list * Value[] list
     | UnmemoizedSubquery
 
-/// Statement-stable expression subqueries share their typed result across
-/// outer rows. The key is the parser's AST node identity, just as for
-/// derived-table memoization above.
-let private expressionSubqueryMemo =
-    System.Threading.AsyncLocal<Dictionary<SelectStmt, MemoizedSubquery>>()
+type private StatementMemo =
+    { FromSubqueries: Dictionary<FromItem, Result<ColumnDef list * Value[] list, QueryResult>>
+      ExpressionSubqueries: Dictionary<SelectStmt, MemoizedSubquery>
+      Views: Dictionary<string * string, Result<ColumnDef list * Value[] list, QueryResult>> }
 
-/// A stored view has TEMPTABLE-like statement semantics: resolve its saved
-/// SELECT once, then reuse the typed rows everywhere the statement (including
-/// metadata inference) references it.
-let private viewMemo =
-    System.Threading.AsyncLocal<Dictionary<string * string, Result<ColumnDef list * Value[] list, QueryResult>>>()
+let private statementMemo = System.Threading.AsyncLocal<StatementMemo>()
+
+let private freshStatementMemo () =
+    { FromSubqueries = Dictionary<FromItem, Result<ColumnDef list * Value[] list, QueryResult>>(HashIdentity.Reference)
+      ExpressionSubqueries = Dictionary<SelectStmt, MemoizedSubquery>(HashIdentity.Reference)
+      Views = Dictionary<string * string, Result<ColumnDef list * Value[] list, QueryResult>>() }
+
+let private resetStatementMemo () = statementMemo.Value <- freshStatementMemo ()
+
+let private currentStatementMemo () =
+    match box statementMemo.Value with
+    | null ->
+        let memo = freshStatementMemo ()
+        statementMemo.Value <- memo
+        memo
+    | _ -> statementMemo.Value
 
 /// The `WITH` bindings visible to the statement currently executing, keyed
-/// by lowercased CTE name — same per-statement `AsyncLocal` shape as
-/// `fromSubqueryMemo`, because a CTE is equally visible to the statement's
+/// by lowercased CTE name — the same dynamic scope as `statementMemo`,
+/// because a CTE is equally visible to the statement's
 /// own FROM, its joins, and every subquery nested anywhere inside it, and
 /// threading a scope parameter through every one of those call sites would
 /// touch far more code than it explains. Pushed and popped around a
@@ -3088,23 +3088,18 @@ and private runExpressionSubquery
     (cacheKey: SelectStmt)
     (select: SelectStmt)
     : QueryResult * ColumnMetadata list * Value[] list =
-    let memo = expressionSubqueryMemo.Value
+    let memo = (currentStatementMemo ()).ExpressionSubqueries
     let execute outer = runSelectStmt ctx.Store ctx.Registry ctx.DbName select outer
 
-    match (if isNull (box memo) then None else (match memo.TryGetValue cacheKey with | true, cached -> Some cached | _ -> None)) with
-    | Some(MemoizedSubquery(result, metadata, rows)) -> result, metadata, rows
-    | Some UnmemoizedSubquery -> execute (Some ctx)
-    | None when isStatementStableSelect ctx.Store ctx.Registry ctx.DbName emptySubqueryScope cacheKey ->
+    match memo.TryGetValue cacheKey with
+    | true, MemoizedSubquery(result, metadata, rows) -> result, metadata, rows
+    | true, UnmemoizedSubquery -> execute (Some ctx)
+    | _ when isStatementStableSelect ctx.Store ctx.Registry ctx.DbName emptySubqueryScope cacheKey ->
         let result, metadata, rows = execute None
-
-        if not (isNull (box memo)) then
-            memo.[cacheKey] <- MemoizedSubquery(result, metadata, rows)
-
+        memo.[cacheKey] <- MemoizedSubquery(result, metadata, rows)
         result, metadata, rows
-    | None ->
-        if not (isNull (box memo)) then
-            memo.[cacheKey] <- UnmemoizedSubquery
-
+    | _ ->
+        memo.[cacheKey] <- UnmemoizedSubquery
         execute (Some ctx)
 
 and private evalOrderKey (ctx: EvalContext) (expr: Expr) : Result<Value * Collation.Collation option, EvalError> =
@@ -3154,13 +3149,13 @@ and private resolveTableRef
         | Some view ->
             let key = view.Schema.ToLowerInvariant(), view.Name.ToLowerInvariant()
             let stack = currentViewStack ()
-            let memo = viewMemo.Value
+            let memo = (currentStatementMemo ()).Views
 
-            match if isNull (box memo) then None else (match memo.TryGetValue key with | true, value -> Some value | _ -> None) with
-            | Some cached -> cached
-            | None when Set.contains key stack ->
+            match memo.TryGetValue key with
+            | true, cached -> cached
+            | _ when Set.contains key stack ->
                 Error(Err(1462, sprintf "View's SELECT contains a recursive reference to view '%s'" view.Name))
-            | None ->
+            | _ ->
                 let savedCtes = currentCteScope ()
 
                 try
@@ -4077,14 +4072,14 @@ and private resolveFromItem (store: Store) (registry: Registry) (dbName: string)
             | Ok doc -> jsonTableRows doc path columns |> Result.map (fun rows -> jsonTableColumnDefs columns, rows)
     | FromSubquery _ ->
         // Serve a derived table from the per-statement memo if already
-        // resolved (see `fromSubqueryMemo`), else compute and record it.
-        let memo = fromSubqueryMemo.Value
+        // resolved through the statement memo, else compute and record it.
+        let memo = (currentStatementMemo ()).FromSubqueries
 
-        match (if isNull (box memo) then None else (match memo.TryGetValue item with | true, v -> Some v | _ -> None)) with
-        | Some cached -> cached
-        | None ->
+        match memo.TryGetValue item with
+        | true, cached -> cached
+        | _ ->
             let computed = resolveFromSubquery store registry dbName item None
-            if not (isNull (box memo)) then memo.[item] <- computed
+            memo.[item] <- computed
             computed
 
 and private resolveFromSubquery
@@ -9225,6 +9220,8 @@ let runTopLevelSelect
     (dbName: string)
     (select: SelectStmt)
     : QueryResult * ColumnMetadata list * uint64 option =
+    resetStatementMemo ()
+
     if select.CalculateFoundRows then
         let unbounded =
             { select with
@@ -9254,6 +9251,8 @@ let runTopLevelUnion
     (limit: Expr option)
     (offset: Expr option)
     : QueryResult * ColumnMetadata list * uint64 option =
+    resetStatementMemo ()
+
     if first.CalculateFoundRows then
         let result, types, values =
             runUnionStmtWithOuter store registry dbName { first with CalculateFoundRows = false } rest orderBy None None None
@@ -10152,10 +10151,8 @@ let rec executeAs
     (currentAccount: Auth.Account)
     (stmt: Statement)
     : (int64 * int64) * QueryResult =
-    // Fresh derived-table memo per statement (see `fromSubqueryMemo`).
-    fromSubqueryMemo.Value <- Dictionary<FromItem, Result<ColumnDef list * Value[] list, QueryResult>>(HashIdentity.Reference)
-    expressionSubqueryMemo.Value <- Dictionary<SelectStmt, MemoizedSubquery>(HashIdentity.Reference)
-    viewMemo.Value <- Dictionary<string * string, Result<ColumnDef list * Value[] list, QueryResult>>()
+    // Query results are stable only for the statement that produced them.
+    resetStatementMemo ()
 
     /// Bodies execute with the trigger's schema `db` as the default
     /// database — MySQL resolves a body's unqualified table names against
