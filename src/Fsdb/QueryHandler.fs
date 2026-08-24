@@ -376,16 +376,25 @@ let private tableAccessDenied (session: Session) (table: string) =
     Err(1142, sprintf "SELECT command denied to user '%s'@'localhost' for table '%s'" session.User table)
 
 let private showTableResult (session: Session) (dbName: string) (table: string) (result: InformationSchema.ShowResult) =
+    let canSee = Auth.canSeeTableForAccount (Session.currentStore session) (accountOf session) dbName table
+
     match result with
     | Error _ -> showResult result
-    | Ok _ when Auth.canSeeTableForAccount (Session.currentStore session) (accountOf session) dbName table -> showResult result
+    | Ok _ when canSee -> showResult result
     | Ok _ -> tableAccessDenied session table
 
 let private visibleTableRows (session: Session) (dbName: string) (rows: string option list list) =
-    rows
-    |> List.filter (function
-        | Some table :: _ -> Auth.canSeeTableForAccount (Session.currentStore session) (accountOf session) dbName table
-        | _ -> false)
+    let canSee = Auth.canSeeTableForAccount (Session.currentStore session) (accountOf session) dbName
+
+    rows |> List.filter (function Some table :: _ -> canSee table | _ -> false)
+
+let private inspectAccount (session: Session) (wanted: Auth.Account) (render: unit -> QueryResult) =
+    let viewer = accountOf session
+
+    if Auth.sameAccount wanted viewer || Auth.hasGlobalPrivForAccount session.Store viewer "SELECT" then
+        session, render ()
+    else
+        session, Err(1142, sprintf "SELECT command denied to user '%s'@'localhost' for table 'user'" session.User)
 
 let private showWarningsRe =
     Regex(@"^SHOW\s+WARNINGS(\s+LIMIT\s+\d+(\s*,\s*\d+)?)?$", RegexOptions.IgnoreCase)
@@ -1918,14 +1927,10 @@ let private runProbe (session: Session) (sql: string) (probe: Probe) : Session *
             | Some u when u.Trim().ToUpperInvariant().StartsWith "CURRENT_USER" -> accountOf session
             | Some u -> accountRefOf u
 
-        if not (Auth.sameAccount wanted (accountOf session)) && not (Auth.hasGlobalPrivForAccount session.Store (accountOf session) "SELECT") then
-            // Seeing another account's grants reads `mysql.user`; without
-            // SELECT there, MySQL denies with 1142 on that table.
-            session, Err(1142, sprintf "SELECT command denied to user '%s'@'localhost' for table 'user'" session.User)
-        else
+        inspectAccount session wanted (fun () ->
             match Auth.renderGrantsForAccount (Session.currentStore session) wanted with
-            | Ok(header, lines) -> session, ResultSet([ header ], lines |> List.map (fun l -> [ Some l ]))
-            | Error(code, msg) -> session, Err(code, msg)
+            | Ok(header, lines) -> ResultSet([ header ], lines |> List.map (fun line -> [ Some line ]))
+            | Error(code, msg) -> Err(code, msg))
     | ShowCreateUser userRef ->
         let wanted =
             if Regex.IsMatch(userRef, @"^CURRENT_USER(?:\(\))?$", RegexOptions.IgnoreCase) then
@@ -1933,12 +1938,10 @@ let private runProbe (session: Session) (sql: string) (probe: Probe) : Session *
             else
                 accountRefOf userRef
 
-        if not (Auth.sameAccount wanted (accountOf session)) && not (Auth.hasGlobalPrivForAccount session.Store (accountOf session) "SELECT") then
-            session, Err(1142, sprintf "SELECT command denied to user '%s'@'localhost' for table 'user'" session.User)
-        else
+        inspectAccount session wanted (fun () ->
             match Auth.renderCreateUserForAccount (Session.currentStore session) wanted with
-            | Ok(header, ddl) -> session, ResultSet([ header ], [ [ Some ddl ] ])
-            | Error(code, msg) -> session, Err(code, msg)
+            | Ok(header, ddl) -> ResultSet([ header ], [ [ Some ddl ] ])
+            | Error(code, msg) -> Err(code, msg))
     | ShowCreateProgram(kind, qualifiedName) ->
         let _, name = splitQualified (session.Database |> Option.defaultValue defaultDatabase) qualifiedName
 

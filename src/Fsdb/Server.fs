@@ -49,6 +49,9 @@ type private Command =
     /// connection.
     | Malformed of code: byte
 
+let private stmtExecuteHeaderLength = 9
+let private stmtLongDataHeaderLength = 6
+
 /// None means a completely empty command packet — treat as disconnect (real
 /// clients never send one). A non-empty payload always decodes to `Some`,
 /// falling back to `Malformed` if the command byte's own payload is too
@@ -1231,7 +1234,7 @@ let private handleConnection
 
                                     do! sendPayloads stream seqId payloads |> Async.Ignore
                                     return! loop session
-                            | Some(StmtExecute payload) when payload.Length < 9 ->
+                            | Some(StmtExecute payload) when payload.Length < stmtExecuteHeaderLength ->
                                 // Header is stmt-id(4) + flags(1) + iteration(4);
                                 // a shorter payload can't be decoded — ERR
                                 // rather than let the reader throw and drop
@@ -1369,7 +1372,7 @@ let private handleConnection
                                                     result
 
                                             return! loop session
-                            | Some(StmtSendLongData payload) when payload.Length < 6 ->
+                            | Some(StmtSendLongData payload) when payload.Length < stmtLongDataHeaderLength ->
                                 // stmt-id(4) + param-index(2); a shorter payload
                                 // is malformed. COM_STMT_SEND_LONG_DATA takes
                                 // no reply, so just skip it (never throw).

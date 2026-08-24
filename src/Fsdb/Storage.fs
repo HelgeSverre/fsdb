@@ -705,8 +705,10 @@ let resolveColumn (columns: ColumnDef list) (name: string) : Result<int, Storage
 let resolveAssignableColumn (columns: ColumnDef list) (tableName: string) (name: string) : Result<int, StorageError> =
     resolveColumn columns name
     |> Result.bind (fun i ->
-        if (List.item i columns).Generated.IsSome then
-            Error(GeneratedColumnAssignment ((List.item i columns).Name, tableName))
+        let column = List.item i columns
+
+        if column.Generated.IsSome then
+            Error(GeneratedColumnAssignment(column.Name, tableName))
         else
             Ok i)
 
@@ -2431,16 +2433,19 @@ let private trySecondaryRangeLookupInTable
     (upper: (Value * bool) option)
     : (string * int * ColumnDef list * (RowId * Value[]) list) option =
     trySecondaryOrderSliceInTable store table columnName lower upper true
-    |> Option.map (fun slice ->
-        let count = max 0 (slice.AfterLast - slice.First)
+    |> Option.bind (fun slice ->
+        slice.ColumnIndices
+        |> List.tryExactlyOne
+        |> Option.map (fun columnIndex ->
+            let count = max 0 (slice.AfterLast - slice.First)
 
-        let rows =
-            Seq.init count (fun offset -> slice.Entries.[slice.First + offset])
-            |> Seq.sortBy (fun entry -> RowId.value entry.RowId)
-            |> Seq.choose (fun entry -> table.RowsArray.TryFind entry.RowId |> Option.map (fun row -> entry.RowId, row))
-            |> List.ofSeq
+            let rows =
+                Seq.init count (fun offset -> slice.Entries.[slice.First + offset])
+                |> Seq.sortBy (fun entry -> RowId.value entry.RowId)
+                |> Seq.choose (fun entry -> table.RowsArray.TryFind entry.RowId |> Option.map (fun row -> entry.RowId, row))
+                |> List.ofSeq
 
-        slice.IndexName, slice.ColumnIndices.Head, table.Columns, rows)
+            slice.IndexName, columnIndex, table.Columns, rows))
 
 let trySecondaryRangeLookup
     (store: Store)
@@ -2490,12 +2495,15 @@ let trySecondaryOrderedLookup
     tableAt store dbName tableName
     |> Option.bind (fun table ->
         trySecondaryOrderSliceInTable store table columnName lower upper false
-        |> Option.map (fun slice ->
-            let rows =
-                orderedEntries direction slice
-                |> Seq.choose (fun entry -> table.RowsArray.TryFind entry.RowId)
+        |> Option.bind (fun slice ->
+            slice.ColumnIndices
+            |> List.tryExactlyOne
+            |> Option.map (fun columnIndex ->
+                let rows =
+                    orderedEntries direction slice
+                    |> Seq.choose (fun entry -> table.RowsArray.TryFind entry.RowId)
 
-            slice.IndexName, slice.ColumnIndices.Head, table.Columns, max 0 (slice.AfterLast - slice.First), rows))
+                slice.IndexName, columnIndex, table.Columns, max 0 (slice.AfterLast - slice.First), rows)))
 
 type OrderedLookup =
     { OrderedIndexName: string

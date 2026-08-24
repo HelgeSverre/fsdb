@@ -2829,7 +2829,7 @@ let rec private evalExpr (ctx: EvalContext) (expr: Expr) : Result<Value, EvalErr
             | Affected _, _, _ -> Ok VNull
             | ResultSet(columns, _), _, _ when columns.Length <> 1 -> Error(1241, "Operand should contain 1 column(s)")
             | ResultSet(_, _), _, typedRows ->
-                let candidates = typedRows |> List.map (fun row -> if row.Length > 0 then row.[0] else VNull)
+                let candidates = typedRows |> List.map (Array.tryHead >> Option.defaultValue VNull)
 
                 match ve with
                 | VNull -> if candidates.IsEmpty then Ok(VInt 0L) else Ok VNull
@@ -2853,7 +2853,7 @@ let rec private evalExpr (ctx: EvalContext) (expr: Expr) : Result<Value, EvalErr
                 let comparisons =
                     typedRows
                     |> List.map (fun row ->
-                        let right = if row.Length = 0 then VNull else row.[0]
+                        let right = row |> Array.tryHead |> Option.defaultValue VNull
                         quantifiedComparisonResult ctx e left rightOperand op right)
 
                 match quantifier with
@@ -3014,20 +3014,16 @@ let rec private evalExpr (ctx: EvalContext) (expr: Expr) : Result<Value, EvalErr
             |> Result.bind (fun pattern ->
                 rest
                 |> traverse eval
-                |> Result.map (fun values ->
+                |> Result.bind (fun values ->
                     let arguments = subject :: pattern :: values
-                    arguments))
-            |> Result.bind (fun arguments ->
-                let subject = arguments.Head
-                let pattern = arguments.Tail.Head
 
-                Functions.validateRegexpArity name arguments
+                    Functions.validateRegexpArity name arguments
 
-                regexCollation ctx (name.ToLowerInvariant()) subjectExpr subject patternExpr pattern
-                |> Result.map (fun collation ->
-                    match Functions.regexpFunction name collation with
-                    | Some function_ -> function_ arguments
-                    | None -> VNull)))
+                    regexCollation ctx (name.ToLowerInvariant()) subjectExpr subject patternExpr pattern
+                    |> Result.map (fun collation ->
+                        match Functions.regexpFunction name collation with
+                        | Some function_ -> function_ arguments
+                        | None -> VNull))))
     | FuncCall(name, args) ->
         match Functions.lookup name ctx.Registry with
         | None -> Error(unknownFunction name)
@@ -3190,7 +3186,7 @@ let rec private evalExpr (ctx: EvalContext) (expr: Expr) : Result<Value, EvalErr
         | Affected _, _, _ -> Ok VNull
         | ResultSet(cols, _), _, _ when List.length cols <> 1 -> Error(1241, "Operand should contain 1 column(s)")
         | ResultSet(_, []), _, _ -> Ok VNull
-        | ResultSet(_, [ _ ]), _, [ row ] -> Ok row.[0]
+        | ResultSet(_, [ _ ]), _, [ row ] -> Ok(row |> Array.tryHead |> Option.defaultValue VNull)
         | ResultSet(_, _), _, _ -> Error(1242, "Subquery returns more than 1 row")
 
 and private evalRowOperand (ctx: EvalContext) (expr: Expr) : Result<RowOperand, EvalError> =
@@ -5659,18 +5655,13 @@ and private directOrderColumns (tref: TableRef) (select: SelectStmt) : (string l
         | QualifiedCol(qualifier, name) when System.String.Equals(qualifier, selfQualifier, System.StringComparison.OrdinalIgnoreCase) -> Some name
         | _ -> None
 
-    match select.OrderBy with
-    | [] -> None
-    | orderBy ->
-        let directions = orderBy |> List.map snd |> List.distinct
-
-        if directions.Length <> 1 then
-            None
-        else
-            orderBy
-            |> traverse (fst >> directColumn >> function Some column -> Ok column | None -> Error())
-            |> Result.toOption
-            |> Option.map (fun columns -> columns, directions.Head)
+    match select.OrderBy |> List.map snd |> List.distinct with
+    | [ direction ] ->
+        select.OrderBy
+        |> traverse (fst >> directColumn >> function Some column -> Ok column | None -> Error())
+        |> Result.toOption
+        |> Option.map (fun columns -> columns, direction)
+    | _ -> None
 
 and private tryIndexOrder
     (store: Store)
