@@ -400,12 +400,12 @@ let private phraseCount (doc: Token[]) (words: Token[]) (proximity: int option) 
                         fits 1 p0 p0)
                 if found then 1 else 0
 
-/// `(matched, TF×IDF²)` per doc from raw per-doc frequencies — for terms
+/// `TF×IDF²` per doc from raw per-doc frequencies — for terms
 /// with no single index token to count (prefix wildcards, phrases), whose
 /// df falls out of the frequencies themselves.
-let private scoresFromTfs (index: Index<'id>) (tfs: Map<'id, int>) : Map<'id, bool * float> =
+let private scoresFromTfs (index: Index<'id>) (tfs: Map<'id, int>) : Map<'id, float> =
     let weight = idf index tfs.Count
-    tfs |> Map.map (fun _ tf -> true, float tf * weight * weight)
+    tfs |> Map.map (fun _ tf -> float tf * weight * weight)
 
 let private phraseCandidates (index: Index<'id>) (words: Token[]) =
     words
@@ -419,8 +419,8 @@ let private phraseCandidates (index: Index<'id>) (words: Token[]) =
         | [||] -> Set.empty
         | sets -> sets |> Array.tail |> Array.fold Set.intersect sets.[0]
 
-/// Per-doc (matched, contribution) for one boolean term.
-let rec private evalTerm (index: Index<'id>) (term: BoolTerm) : Map<'id, bool * float> =
+/// Per-document contribution for one boolean term.
+let rec private evalTerm (index: Index<'id>) (term: BoolTerm) : Map<'id, float> =
     match term with
     | BWord(term, false) when not (isSearchable term) ->
         // Stopwords and sub-minimum tokens are never in InnoDB's index, so
@@ -430,7 +430,6 @@ let rec private evalTerm (index: Index<'id>) (term: BoolTerm) : Map<'id, bool * 
         Map.empty
     | BWord(term, false) ->
         termScores index term.Key
-        |> Map.map (fun _ score -> true, score)
     | BWord(term, true) ->
         // Prefix wildcards bypass stopword and minimum-length rules.
         index.PrefixPostings
@@ -447,11 +446,11 @@ let rec private evalTerm (index: Index<'id>) (term: BoolTerm) : Map<'id, bool * 
     | BGroup nodes ->
         evalNodes index nodes
 
-/// Per-doc (matched, score) over a node list — the boolean combination:
-/// a doc is excluded (matched=false) when a `+` term misses or a `-` term
+/// Per-document score over a node list — the boolean combination:
+/// a document is absent when a `+` term misses or a `-` term
 /// hits; otherwise matched when anything matched, scoring the sum of the
 /// modifier-adjusted contributions.
-and private evalNodes (index: Index<'id>) (nodes: (BoolOp * BoolTerm) list) : Map<'id, bool * float> =
+and private evalNodes (index: Index<'id>) (nodes: (BoolOp * BoolTerm) list) : Map<'id, float> =
     let results = nodes |> List.map (fun (op, term) -> op, evalTerm index term)
 
     let candidates =
@@ -468,39 +467,38 @@ and private evalNodes (index: Index<'id>) (nodes: (BoolOp * BoolTerm) list) : Ma
         let mutable score = 0.0
 
         for op, r in results do
-            let matched, s = r |> Map.tryFind id |> Option.defaultValue (false, 0.0)
+            let contribution = Map.tryFind id r
+            let matched = contribution.IsSome
+            let contribution = Option.defaultValue 0.0 contribution
 
             match op with
             | Must ->
                 if matched then
                     anyMatch <- true
-                    score <- score + s
+                    score <- score + contribution
                 else
                     excluded <- true
             | MustNot -> if matched then excluded <- true
             | Optional ->
                 if matched then
                     anyMatch <- true
-                    score <- score + s
+                    score <- score + contribution
             | Raise ->
                 if matched then
                     anyMatch <- true
-                    score <- score + s + 1.0
+                    score <- score + contribution + 1.0
             | Lower ->
                 if matched then
                     anyMatch <- true
-                    score <- score + s - 1.0
+                    score <- score + contribution - 1.0
             | Soft -> if matched then anyMatch <- true
 
-        if anyMatch && not excluded then Some(id, (true, score)) else None)
+        if anyMatch && not excluded then Some(id, score) else None)
     |> Map.ofSeq
 
 let booleanScores (index: Index<'id>) (query: string) : Map<'id, float> =
     evalNodes index (parseBooleanQuery index.Collation query)
-    |> Map.fold
-        (fun scores id (matched, score) ->
-            if matched then Map.add id (if score = 0.0 then idfFloor * idfFloor else score) scores else scores)
-        Map.empty
+    |> Map.map (fun _ score -> if score = 0.0 then idfFloor * idfFloor else score)
 
 let booleanScoresOf (corpus: Corpus) (query: string) : float[] =
     // A matched row whose contributions all cancelled (only `~` terms hit,
