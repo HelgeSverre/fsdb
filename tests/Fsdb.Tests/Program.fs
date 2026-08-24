@@ -35,6 +35,7 @@ let main argv =
                   InformationSchemaTests.tests
                   TemporalPrecisionTests.tests
                   IntegrationTests.tests
+                  EmbeddingIntegrationTests.tests
                   VectorTests.tests ])
     finally
         TestSupport.cleanup ()
