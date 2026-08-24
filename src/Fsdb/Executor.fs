@@ -1635,6 +1635,26 @@ let private resolvedCollation (ctx: EvalContext) (expr: Expr) : Collation.Collat
     | Collate(_, name) -> Collation.tryFind name
     | _ -> tryColumnDefForExpr ctx expr |> Option.bind (collationOfColumn ctx)
 
+let private coercibilityOfExpr = function
+    | Collate _ -> 0
+    | Col _
+    | QualifiedCol _ -> 2
+    | FuncCall(name, _) ->
+        match name.ToUpperInvariant() with
+        | "USER"
+        | "CURRENT_USER"
+        | "SESSION_USER"
+        | "SYSTEM_USER"
+        | "VERSION"
+        | "DATABASE" -> 3
+        | _ -> 4
+    | Lit(VString _)
+    | Lit(VBytes _)
+    | Lit(VJson _) -> 4
+    | Lit VNull -> 6
+    | Lit _ -> 5
+    | _ -> 4
+
 /// The collation an equality-classified key resolves under: an explicit
 /// `expr COLLATE`, then a string column's own collation, then the
 /// connection collation (literals) — the same resolution comparisons use.
@@ -1837,7 +1857,7 @@ let private equiKeyOf (keyIndices: int[]) (row: Value[]) : Value[] option =
 
 /// `Dictionary<Value[], _>` key comparer for the hash join's build/probe
 /// keys — must agree with the equality the nested-loop fallback's `ON`
-/// evaluation uses (each key column's own collation for strings, `Value.
+/// evaluation uses (the resolved key-pair collation for strings, `Value.
 /// compare`'s numeric cross-type coercion otherwise), not .NET's ordinal/
 /// exact default, or matches the nested loop keeps (`'Alice' = 'alice'` on
 /// an ai_ci column, `1 = 1.0`) would silently vanish from the hash path.
@@ -1868,10 +1888,7 @@ type private JoinKeyComparer(collations: Collation.Collation list) =
                 let y = b.[i]
 
                 match x, y with
-                // The key column's own collation decides string equality —
-                // a bin column matches byte-for-byte, an ai_ci one folds
-                // åge/age — the same rule the nested-loop path's `BinOp Eq`
-                // applies, so the two join paths can never disagree.
+                // The resolved key-pair collation decides string equality.
                 | VString sx, VString sy -> (collations.[i]).Equals sx sy
                 | _ -> Value.compare x y = 0)
             |> Array.forall id
@@ -2182,6 +2199,102 @@ let private resolvedComparisonCollation
     resolvedCollation ctx expression
     |> Option.orElseWith (fun () -> column |> Option.bind (collationOfColumn ctx))
 
+type private CollationOperand =
+    { Collation: Collation.Collation
+      Coercibility: int
+      Charset: string }
+
+let private charsetOfCollation (collation: Collation.Collation) =
+    match collation.Name.IndexOf('_') with
+    | -1 -> collation.Name.ToLowerInvariant()
+    | index -> collation.Name[..index - 1].ToLowerInvariant()
+
+let private isUnicodeCharset charset =
+    charset = "utf8mb4" || charset = "utf8mb3" || charset = "utf8"
+
+let private isBinaryCollation (collation: Collation.Collation) =
+    collation.Name.EndsWith("_bin", System.StringComparison.OrdinalIgnoreCase)
+
+let private coercibilityName = function
+    | 0 -> "EXPLICIT"
+    | 1 -> "NONE"
+    | 2 -> "IMPLICIT"
+    | 3 -> "SYSCONST"
+    | 4 -> "COERCIBLE"
+    | 5 -> "NUMERIC"
+    | _ -> "IGNORABLE"
+
+let private collationOperand
+    (ctx: EvalContext)
+    (expression: Expr)
+    (column: ColumnDef option)
+    : CollationOperand =
+    let collation =
+        resolvedComparisonCollation ctx expression column
+        |> Option.defaultValue ctx.Store.ConnectionCollation
+
+    let coercibility =
+        match expression, column with
+        | Collate _, _ -> 0
+        | _, Some column when collationOfColumn ctx column |> Option.isSome -> 2
+        | _ -> coercibilityOfExpr expression
+
+    { Collation = collation
+      Coercibility = coercibility
+      Charset = charsetOfCollation collation }
+
+let private resolveOperandCollation
+    (operation: string)
+    (left: CollationOperand)
+    (right: CollationOperand)
+    : Result<Collation.Collation, EvalError> =
+    if left.Coercibility < right.Coercibility then
+        Ok left.Collation
+    elif right.Coercibility < left.Coercibility then
+        Ok right.Collation
+    elif left.Collation.Name.Equals(right.Collation.Name, System.StringComparison.OrdinalIgnoreCase) then
+        Ok left.Collation
+    elif left.Charset = right.Charset && isBinaryCollation left.Collation then
+        Ok left.Collation
+    elif left.Charset = right.Charset && isBinaryCollation right.Collation then
+        Ok right.Collation
+    elif isUnicodeCharset left.Charset <> isUnicodeCharset right.Charset then
+        Ok(if isUnicodeCharset left.Charset then left.Collation else right.Collation)
+    else
+        Error(
+            1267,
+            sprintf
+                "Illegal mix of collations (%s,%s) and (%s,%s) for operation '%s'"
+                left.Collation.Name
+                (coercibilityName left.Coercibility)
+                right.Collation.Name
+                (coercibilityName right.Coercibility)
+                operation
+        )
+
+let private comparisonCollation
+    (ctx: EvalContext)
+    (operation: string)
+    (leftExpr: Expr)
+    (leftColumn: ColumnDef option)
+    (rightExpr: Expr)
+    (rightColumn: ColumnDef option)
+    : Result<Collation.Collation, EvalError> =
+    resolveOperandCollation
+        operation
+        (collationOperand ctx leftExpr leftColumn)
+        (collationOperand ctx rightExpr rightColumn)
+
+let private comparisonName = function
+    | Eq
+    | NullSafeEq -> "="
+    | Neq -> "<>"
+    | Lt -> "<"
+    | Lte -> "<="
+    | Gt -> ">"
+    | Gte -> ">="
+    | _ -> "="
+
 let private resolvedCompareWithColumns
     (ctx: EvalContext)
     (leftExpr: Expr)
@@ -2190,20 +2303,17 @@ let private resolvedCompareWithColumns
     (rightExpr: Expr)
     (rightColumn: ColumnDef option)
     (right: Value)
-    : int =
+    (operation: string)
+    : Result<int, EvalError> =
     let pa, pb = comparisonOperands leftColumn left rightColumn right
 
     match pa, pb with
     | VString sa, VString sb ->
-        match
-            resolvedComparisonCollation ctx leftExpr leftColumn
-            |> Option.orElseWith (fun () -> resolvedComparisonCollation ctx rightExpr rightColumn)
-        with
-        | Some col -> col.Compare sa sb
-        | None -> ctx.Store.ConnectionCollation.Compare sa sb
-    | _ -> Value.compare pa pb
+        comparisonCollation ctx operation leftExpr leftColumn rightExpr rightColumn
+        |> Result.map (fun collation -> collation.ComparePrimary sa sb)
+    | _ -> Ok(Value.compare pa pb)
 
-let private resolvedCompare (ctx: EvalContext) (leftExpr: Expr) (left: Value) (rightExpr: Expr) (right: Value) : int =
+let private resolvedCompare (ctx: EvalContext) (operation: string) (leftExpr: Expr) (left: Value) (rightExpr: Expr) (right: Value) : Result<int, EvalError> =
     resolvedCompareWithColumns
         ctx
         leftExpr
@@ -2212,6 +2322,7 @@ let private resolvedCompare (ctx: EvalContext) (leftExpr: Expr) (left: Value) (r
         rightExpr
         (tryColumnDefForExpr ctx rightExpr)
         right
+        operation
 
 type private QuantifiedOperand =
     { Expression: Expr
@@ -2230,33 +2341,34 @@ let private comparisonResult
     (rightColumn: ColumnDef option)
     (op: Op)
     (right: Value)
-    : Value =
+    : Result<Value, EvalError> =
     match left, right with
     | VNull, _
-    | _, VNull -> VNull
+    | _, VNull -> Ok VNull
     | _ ->
         let comparedLeft, comparedRight = comparisonOperands leftColumn left rightColumn right
+        let operation = comparisonName op
 
-        let compared =
-            resolvedCompareWithColumns ctx leftExpr leftColumn left rightExpr rightColumn right
+        let finish compared equal =
+            match op with
+            | Eq -> boolToValue equal
+            | Neq -> boolToValue (not equal)
+            | Lt -> boolToValue (compared < 0)
+            | Lte -> boolToValue (compared <= 0)
+            | Gt -> boolToValue (compared > 0)
+            | Gte -> boolToValue (compared >= 0)
+            | _ -> VNull
 
-        let equal =
-            match comparedLeft, comparedRight with
-            | VString leftText, VString rightText ->
-                resolvedComparisonCollation ctx leftExpr leftColumn
-                |> Option.orElseWith (fun () -> resolvedComparisonCollation ctx rightExpr rightColumn)
-                |> Option.defaultValue ctx.Store.ConnectionCollation
-                |> fun collation -> collation.Equals leftText rightText
-            | _ -> compared = 0
-
-        match op with
-        | Eq -> boolToValue equal
-        | Neq -> boolToValue (not equal)
-        | Lt -> boolToValue (compared < 0)
-        | Lte -> boolToValue (compared <= 0)
-        | Gt -> boolToValue (compared > 0)
-        | Gte -> boolToValue (compared >= 0)
-        | _ -> VNull
+        match comparedLeft, comparedRight with
+        | VString leftText, VString rightText ->
+            comparisonCollation ctx operation leftExpr leftColumn rightExpr rightColumn
+            |> Result.map (fun collation ->
+                finish
+                    (collation.ComparePrimary leftText rightText)
+                    (collation.Equals leftText rightText))
+        | _ ->
+            let compared = Value.compare comparedLeft comparedRight
+            Ok(finish compared (compared = 0))
 
 let private quantifiedComparisonResult
     (ctx: EvalContext)
@@ -2265,7 +2377,7 @@ let private quantifiedComparisonResult
     (rightOperand: QuantifiedOperand)
     (op: Op)
     (right: Value)
-    : Value =
+    : Result<Value, EvalError> =
     comparisonResult
         ctx
         leftExpr
@@ -2405,8 +2517,8 @@ let private rowComparisonResult
             | NullSafeEq, VNull, VNull -> Ok(VInt 1L)
             | NullSafeEq, VNull, _
             | NullSafeEq, _, VNull -> Ok(VInt 0L)
-            | NullSafeEq, _, _ -> Ok(comparisonResult ctx leftExpr leftColumn leftValue rightExpr rightColumn Eq rightValue)
-            | _ -> Ok(comparisonResult ctx leftExpr leftColumn leftValue rightExpr rightColumn comparisonOp rightValue)
+            | NullSafeEq, _, _ -> comparisonResult ctx leftExpr leftColumn leftValue rightExpr rightColumn Eq rightValue
+            | _ -> comparisonResult ctx leftExpr leftColumn leftValue rightExpr rightColumn comparisonOp rightValue
         | _ -> Error(1241, sprintf "Operand should contain %d column(s)" (width left))
 
     let rec compareRows comparisonOp left right =
@@ -2682,7 +2794,7 @@ let rec private evalExpr (ctx: EvalContext) (expr: Expr) : Result<Value, EvalErr
             eval a
             |> Result.bind (fun va ->
                 eval b
-                |> Result.map (fun vb ->
+                |> Result.bind (fun vb ->
                     let compareWith comparison =
                         comparisonResult
                             ctx
@@ -2703,34 +2815,34 @@ let rec private evalExpr (ctx: EvalContext) (expr: Expr) : Result<Value, EvalErr
                     | And ->
                         match truthy va, truthy vb with
                         | Some false, _
-                        | _, Some false -> VInt 0L
-                        | Some true, Some true -> VInt 1L
-                        | _ -> VNull
+                        | _, Some false -> Ok(VInt 0L)
+                        | Some true, Some true -> Ok(VInt 1L)
+                        | _ -> Ok VNull
                     | Or ->
                         match truthy va, truthy vb with
                         | Some true, _
-                        | _, Some true -> VInt 1L
-                        | Some false, Some false -> VInt 0L
-                        | _ -> VNull
+                        | _, Some true -> Ok(VInt 1L)
+                        | Some false, Some false -> Ok(VInt 0L)
+                        | _ -> Ok VNull
                     // XOR has no short-circuit: either operand being unknown
                     // makes the answer unknown (`NULL XOR 1` is NULL, unlike
                     // `NULL OR 1`).
                     | Xor ->
                         match truthy va, truthy vb with
-                        | Some a, Some b -> boolToValue (a <> b)
-                        | _ -> VNull
+                        | Some a, Some b -> Ok(boolToValue (a <> b))
+                        | _ -> Ok VNull
                     // `datetime_expr +/- INTERVAL n unit` parses to a plain
                     // `BinOp`, same as `1 + 2` — `vb` here is `INTERVAL`'s own
                     // encoded marker value (see `Functions.intervalFn`), so it
                     // needs the same real date arithmetic `DATE_ADD`/`DATE_SUB`
                     // give it rather than falling into generic numeric add/sub.
-                    | Add when isIntervalValue vb -> tryDateIntervalBinOp 1.0 va vb |> Option.defaultValue (Value.add va vb)
-                    | Sub when isIntervalValue vb -> tryDateIntervalBinOp -1.0 va vb |> Option.defaultValue (Value.sub va vb)
-                    | Add -> arith Value.add
-                    | Sub -> arith Value.sub
-                    | Mul -> arith Value.mul
-                    | Div -> arith Value.div
-                    | IntDiv -> arith Value.intDiv
+                    | Add when isIntervalValue vb -> tryDateIntervalBinOp 1.0 va vb |> Option.defaultValue (Value.add va vb) |> Ok
+                    | Sub when isIntervalValue vb -> tryDateIntervalBinOp -1.0 va vb |> Option.defaultValue (Value.sub va vb) |> Ok
+                    | Add -> Ok(arith Value.add)
+                    | Sub -> Ok(arith Value.sub)
+                    | Mul -> Ok(arith Value.mul)
+                    | Div -> Ok(arith Value.div)
+                    | IntDiv -> Ok(arith Value.intDiv)
                     | Eq -> compareWith Eq
                     | Neq -> compareWith Neq
                     | Lt -> compareWith Lt
@@ -2742,15 +2854,29 @@ let rec private evalExpr (ctx: EvalContext) (expr: Expr) : Result<Value, EvalErr
                     // false, otherwise it's a plain `Eq`.
                     | NullSafeEq ->
                         match va, vb with
-                        | VNull, VNull -> VInt 1L
+                        | VNull, VNull -> Ok(VInt 1L)
                         | VNull, _
-                        | _, VNull -> VInt 0L
-                        | _ -> boolToValue (Value.compare va vb = 0)))
+                        | _, VNull -> Ok(VInt 0L)
+                        | _ -> compareWith Eq))
         with Value.UnsignedOutOfRange ->
             Error(1690, "BIGINT UNSIGNED value is out of range")
     | Like(e, p, caseSensitive, escape) ->
         eval e
-        |> Result.bind (fun ve -> eval p |> Result.map (fun vp -> likeOp (Some(keyCollation ctx e)) caseSensitive escape ve vp))
+        |> Result.bind (fun ve ->
+            eval p
+            |> Result.bind (fun vp ->
+                match tryRawBytes ve, tryRawBytes vp with
+                | Some _, _
+                | _, Some _ -> Ok(Collation.tryFind "utf8mb4_bin" |> Option.defaultValue Collation.defaultCollation)
+                | _ ->
+                    comparisonCollation
+                        ctx
+                        "like"
+                        e
+                        (tryColumnDefForExpr ctx e)
+                        p
+                        (tryColumnDefForExpr ctx p)
+                |> Result.map (fun collation -> likeOp (Some collation) caseSensitive escape ve vp)))
     | Regexp(e, p) ->
         eval e
         |> Result.bind (fun ve ->
@@ -2782,20 +2908,22 @@ let rec private evalExpr (ctx: EvalContext) (expr: Expr) : Result<Value, EvalErr
             | _ ->
                 xs
                 |> traverse eval
-                |> Result.map (fun vs ->
-                    // `status IN (1, 2)` matches by declaration ordinal,
-                    // same as the BinOp comparisons above.
-                    let eq (v: Value) =
-                        match enumOrdinalFor ctx e ve, ordinalComparand v with
-                        | Some oe, Some nv -> Value.equals oe nv
-                        | _ -> Value.equals ve v
-
-                    if vs |> List.exists (fun v -> eq v = Some true) then
-                        VInt 1L
-                    elif vs |> List.exists (function VNull -> true | _ -> false) then
-                        VNull
-                    else
-                        VInt 0L))
+                |> Result.bind (fun values ->
+                    List.zip xs values
+                    |> traverse (fun (candidateExpr, candidate) ->
+                        comparisonResult
+                            ctx
+                            e
+                            (tryColumnDefForExpr ctx e)
+                            ve
+                            candidateExpr
+                            (tryColumnDefForExpr ctx candidateExpr)
+                            Eq
+                            candidate)
+                    |> Result.map (fun comparisons ->
+                        if comparisons |> List.exists ((=) (VInt 1L)) then VInt 1L
+                        elif comparisons |> List.exists ((=) VNull) then VNull
+                        else VInt 0L)))
     | InSubquery((Row _ as e), select) ->
         evalRowOperand ctx e
         |> Result.bind (fun value ->
@@ -2830,16 +2958,17 @@ let rec private evalExpr (ctx: EvalContext) (expr: Expr) : Result<Value, EvalErr
             | ResultSet(columns, _), _, _ when columns.Length <> 1 -> Error(1241, "Operand should contain 1 column(s)")
             | ResultSet(_, _), _, typedRows ->
                 let candidates = typedRows |> List.map (Array.tryHead >> Option.defaultValue VNull)
+                let rightOperand = subqueryProjectionOperand ctx select
 
                 match ve with
                 | VNull -> if candidates.IsEmpty then Ok(VInt 0L) else Ok VNull
                 | _ ->
-                    if candidates |> List.exists (fun v -> Value.equals ve v = Some true) then
-                        Ok(VInt 1L)
-                    elif candidates |> List.exists (function VNull -> true | _ -> false) then
-                        Ok VNull
-                    else
-                        Ok(VInt 0L))
+                    candidates
+                    |> traverse (quantifiedComparisonResult ctx e ve rightOperand Eq)
+                    |> Result.map (fun comparisons ->
+                        if comparisons |> List.exists ((=) (VInt 1L)) then VInt 1L
+                        elif comparisons |> List.exists ((=) VNull) then VNull
+                        else VInt 0L))
     | QuantifiedComparison(e, op, quantifier, select) ->
         eval e
         |> Result.bind (fun left ->
@@ -2852,25 +2981,21 @@ let rec private evalExpr (ctx: EvalContext) (expr: Expr) : Result<Value, EvalErr
 
                 let comparisons =
                     typedRows
-                    |> List.map (fun row ->
+                    |> traverse (fun row ->
                         let right = row |> Array.tryHead |> Option.defaultValue VNull
                         quantifiedComparisonResult ctx e left rightOperand op right)
 
-                match quantifier with
-                | Any ->
-                    if comparisons |> List.exists (fun value -> value = VInt 1L) then
-                        Ok(VInt 1L)
-                    elif comparisons |> List.exists (fun value -> value = VNull) then
-                        Ok VNull
-                    else
-                        Ok(VInt 0L)
-                | All ->
-                    if comparisons |> List.exists (fun value -> value = VInt 0L) then
-                        Ok(VInt 0L)
-                    elif comparisons |> List.exists (fun value -> value = VNull) then
-                        Ok VNull
-                    else
-                        Ok(VInt 1L))
+                comparisons
+                |> Result.map (fun values ->
+                    match quantifier with
+                    | Any ->
+                        if values |> List.exists (fun value -> value = VInt 1L) then VInt 1L
+                        elif values |> List.exists (fun value -> value = VNull) then VNull
+                        else VInt 0L
+                    | All ->
+                        if values |> List.exists (fun value -> value = VInt 0L) then VInt 0L
+                        elif values |> List.exists (fun value -> value = VNull) then VNull
+                        else VInt 1L))
     | Distinct e
     | OrderBy(e, _) -> eval e
     | Case(subject, whens, elseBranch) ->
@@ -2888,7 +3013,19 @@ let rec private evalExpr (ctx: EvalContext) (expr: Expr) : Result<Value, EvalErr
                     | [] -> fallback ()
                     | (whenExpr, resExpr) :: rest ->
                         eval whenExpr
-                        |> Result.bind (fun wv -> if Value.equals sv wv = Some true then eval resExpr else tryWhens rest)
+                        |> Result.bind (fun wv ->
+                            comparisonResult
+                                ctx
+                                se
+                                (tryColumnDefForExpr ctx se)
+                                sv
+                                whenExpr
+                                (tryColumnDefForExpr ctx whenExpr)
+                                Eq
+                                wv
+                            |> Result.bind (function
+                                | VInt 1L -> eval resExpr
+                                | _ -> tryWhens rest))
 
                 tryWhens whens)
         | None ->
@@ -2906,44 +3043,23 @@ let rec private evalExpr (ctx: EvalContext) (expr: Expr) : Result<Value, EvalErr
             eval lo
             |> Result.bind (fun vlo ->
                 eval hi
-                |> Result.map (fun vhi ->
+                |> Result.bind (fun vhi ->
                     match ve, vlo, vhi with
                     | VNull, _, _
                     | _, VNull, _
-                    | _, _, VNull -> VNull
+                    | _, _, VNull -> Ok VNull
                     | _ ->
-                        boolToValue (
-                            resolvedCompare ctx e ve lo vlo >= 0
-                            && resolvedCompare ctx e ve hi vhi <= 0
-                        ))))
+                        resolvedCompare ctx ">=" e ve lo vlo
+                        |> Result.bind (fun lower ->
+                            resolvedCompare ctx "<=" e ve hi vhi
+                            |> Result.map (fun upper -> boolToValue (lower >= 0 && upper <= 0))))))
     | FuncCall(name, [ argument ]) when name.Equals("DEFAULT", System.StringComparison.OrdinalIgnoreCase) ->
         match tryColumnDefForExpr ctx argument with
         | Some column when column.Default.IsSome || column.Nullable -> Ok(Storage.evalDefault column)
         | Some column -> Error(1364, sprintf "Field '%s' doesn't have a default value" column.Name)
         | None -> Error(1054, "Unknown column in 'field list'")
     | FuncCall(name, [ argument ]) when name.Equals("COERCIBILITY", System.StringComparison.OrdinalIgnoreCase) ->
-        let coercibility =
-            match argument with
-            | Collate _ -> 0L
-            | Col _
-            | QualifiedCol _ -> 2L
-            | FuncCall(systemName, _) ->
-                match systemName.ToUpperInvariant() with
-                | "USER"
-                | "CURRENT_USER"
-                | "SESSION_USER"
-                | "SYSTEM_USER"
-                | "VERSION"
-                | "DATABASE" -> 3L
-                | _ -> 4L
-            | Lit(VString _)
-            | Lit(VBytes _)
-            | Lit(VJson _) -> 4L
-            | Lit VNull -> 6L
-            | Lit _ -> 5L
-            | _ -> 4L
-
-        Ok(VInt coercibility)
+        Ok(VInt(int64 (coercibilityOfExpr argument)))
     | FuncCall(name, [ argument ]) when name.Equals("SLEEP", System.StringComparison.OrdinalIgnoreCase) ->
         eval argument
         |> Result.bind (fun value ->
@@ -4405,30 +4521,51 @@ and private namedJoinOn
 /// than a materialized cross-product `list`, which is what lets a
 /// non-equi join at real table sizes actually finish instead of exhausting
 /// memory.
-/// The per-key-column collations `JoinKeyComparer` folds under — each key
-/// column's own collation (the left side's when it declares one, else the
-/// right's), the same resolution the nested-loop path's `ON` equality
-/// applies, so the two join paths can never disagree. Non-string key
-/// columns fall back to the default (unused for them — the comparer's
-/// numeric branch hashes a `double`).
+/// The per-key-column collations `JoinKeyComparer` folds under. Non-string
+/// keys use the default only as an unused placeholder.
+and private joinKeyCollation
+    (left: ColumnDef)
+    (right: ColumnDef)
+    : Result<Collation.Collation, EvalError> =
+    let colOf (column: ColumnDef) =
+        if InformationSchema.isStringy column.Type then
+            match column.Charset with
+            | Some "binary" -> Collation.tryFind "utf8mb4_bin"
+            | _ -> column.Collation |> Option.bind Collation.tryFind
+        else
+            None
+
+    match colOf left, colOf right with
+    | Some leftCollation, Some rightCollation ->
+        resolveOperandCollation
+            "="
+            { Collation = leftCollation
+              Coercibility = 2
+              Charset = charsetOfCollation leftCollation }
+            { Collation = rightCollation
+              Coercibility = 2
+              Charset = charsetOfCollation rightCollation }
+    | Some collation, None
+    | None, Some collation -> Ok collation
+    | None, None -> Ok Collation.defaultCollation
+
 and private joinKeyCollations
     (left: ColumnDef list)
     (right: ColumnDef list)
     (equiKeys: (int * int) list)
     : Collation.Collation list =
-    let colOf (c: ColumnDef) =
-        if InformationSchema.isStringy c.Type then
-            match c.Charset with
-            | Some "binary" -> Collation.tryFind "utf8mb4_bin"
-            | _ -> c.Collation |> Option.bind Collation.tryFind
-        else
-            None
-
     equiKeys
     |> List.map (fun (li, ri) ->
-        colOf left.[li]
-        |> Option.orElseWith (fun () -> colOf right.[ri])
-        |> Option.defaultValue Collation.defaultCollation)
+        joinKeyCollation left.[li] right.[ri]
+        |> Result.defaultValue Collation.defaultCollation)
+
+and private joinKeyCollationsCompatible
+    (left: ColumnDef list)
+    (right: ColumnDef list)
+    (equiKeys: (int * int) list)
+    : bool =
+    equiKeys
+    |> List.forall (fun (li, ri) -> joinKeyCollation left.[li] right.[ri] |> Result.isOk)
 
 /// A physical table can retain one immutable root for both an equality probe
 /// and a scan fallback. Views, CTEs, and virtual relations have their own
@@ -4814,6 +4951,7 @@ and private applyResolvedJoin
 
             let hashEligible =
                 not equiKeys.IsEmpty
+                && joinKeyCollationsCompatible combinedColumnsSoFar joinColumns equiKeys
                 && keyClasses |> List.forall Option.isSome
                 && rowsMatchKeyClasses (keyClasses |> List.map Option.get) (equiKeys |> List.map fst) (leftIndexed.Value |> Seq.map snd)
                 && rowsMatchKeyClasses (keyClasses |> List.map Option.get) (equiKeys |> List.map snd) joinRows
@@ -5073,6 +5211,7 @@ and private applyMutationJoin
 
                 let hashEligible =
                     not equiKeys.IsEmpty
+                    && joinKeyCollationsCompatible combinedColumnsSoFar joinColumns equiKeys
                     && keyClasses |> List.forall Option.isSome
                     && rowsMatchKeyClasses (keyClasses |> List.map Option.get) (equiKeys |> List.map fst) leftFlatRows
                     && rowsMatchKeyClasses (keyClasses |> List.map Option.get) (equiKeys |> List.map snd) joinRows

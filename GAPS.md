@@ -202,12 +202,14 @@ Working: ICU-backed registry covering the utf8mb4 0900 attribute matrix,
 legacy unicode/general collations, ~21 language collations, ja_0900_as_cs_ks,
 utf8mb3/latin1(cp1252)/ascii/binary; real MySQL collation ids and SORTLENs
 for SHOW COLLATION/I_S; PAD SPACE semantics; connection collation for
-literal-vs-literal comparison; default utf8mb4_0900_ai_ci.
+literal-vs-literal comparison; symmetric MySQL coercibility precedence for
+scalar, row, `IN`, subquery, quantified, `CASE`, `BETWEEN`, `LIKE`, and join
+comparisons; default utf8mb4_0900_ai_ci.
 
 | Gap | MySQL 8.4 | fsdb | Impact | Class |
 |---|---|---|---|---|
 | Weight tables | UCA 9.0/5.2/4.0 weight tables per collation | `Collation` uses ICU CLDR tailoring; tie-break order among primary-equal strings and `WEIGHT_STRING()` textual bytes can differ (equality never does) | low | divergence |
-| Collation coercibility | explicit `COLLATE`, binary strings, and column collations follow MySQL's coercibility and precedence rules | direct and quantified comparisons choose the left expression's resolved collation before the right's; mixed explicit-binary and column expressions can therefore differ | medium | divergence |
+| Compound-expression collation | string functions derive result collation and coercibility from every argument | comparison operands follow MySQL precedence, but the reported coercibility and result collation of compound strings such as mixed-collation `CONCAT()` remain approximate | low | divergence |
 | Advanced REGEXP grammar | ICU regular expressions and Unicode properties | bounded .NET regex with common POSIX character classes and mapped malformed patterns; remaining ICU-only grammar and error-code distinctions can differ | low | divergence |
 | Usable charsets | 40+ charsets with transcoding | `Collation.Charset` supports utf8mb4/utf8mb3/latin1/ascii/binary only; CONVERT(expr USING x) has the same ceiling | low | refusal |
 | Identifier casing | lower_case_table_names semantics | variable reported; identifiers ordinal-case-folded internally | low | divergence |

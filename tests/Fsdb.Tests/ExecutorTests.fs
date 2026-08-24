@@ -2172,6 +2172,68 @@ let tests =
                     | ResultSet(_, [ [ Some "0"; Some "2"; Some "3"; Some "4"; Some "5"; Some "6" ] ]) -> ()
                     | other -> failtestf "unexpected coercibility classes: %A" other
 
+                testCase "equal-rank collations resolve symmetrically"
+                <| fun _ ->
+                    let store = newStore ()
+
+                    runDefault
+                        store
+                        "CREATE TABLE coercion_t (ci VARCHAR(10) COLLATE utf8mb4_0900_ai_ci, bin VARCHAR(10) COLLATE utf8mb4_bin, cs VARCHAR(10) COLLATE utf8mb4_0900_as_cs, latin VARCHAR(10) CHARACTER SET latin1 COLLATE latin1_swedish_ci)"
+                    |> ignore
+
+                    runDefault store "INSERT INTO coercion_t VALUES ('A', 'a', 'a', 'a')" |> ignore
+
+                    match
+                        runDefault
+                            store
+                            "SELECT ci = bin, bin = ci, ci < bin, bin > ci, ci IN (bin), CASE ci WHEN bin THEN 1 ELSE 0 END, ci LIKE bin, ci < 'a', ci > 'a', ci <= 'a' FROM coercion_t"
+                    with
+                    | ResultSet(_, [ [ Some "0"; Some "0"; Some "1"; Some "1"; Some "0"; Some "0"; Some "0"; Some "0"; Some "0"; Some "1" ] ]) -> ()
+                    | other -> failtestf "expected _bin to win equal-rank comparisons, got %A" other
+
+                    match runDefault store "SELECT latin = ci, ci = latin FROM coercion_t" with
+                    | ResultSet(_, [ [ Some "1"; Some "1" ] ]) -> ()
+                    | other -> failtestf "expected the Unicode operand to win in either order, got %A" other
+
+                    match runDefault store "SELECT ci = ('a' COLLATE utf8mb4_bin), ('a' COLLATE utf8mb4_bin) = ci FROM coercion_t" with
+                    | ResultSet(_, [ [ Some "0"; Some "0" ] ]) -> ()
+                    | other -> failtestf "expected explicit COLLATE to win in either order, got %A" other
+
+                    match
+                        runDefault
+                            store
+                            "SELECT (ci, 1) = (bin, 1), ci IN (SELECT bin FROM coercion_t), ci = ANY (SELECT bin FROM coercion_t), bin = ANY (SELECT ci FROM coercion_t) FROM coercion_t"
+                    with
+                    | ResultSet(_, [ [ Some "0"; Some "0"; Some "0"; Some "0" ] ]) -> ()
+                    | other -> failtestf "expected row and subquery comparisons to share coercibility rules, got %A" other
+
+                    match runDefault store "SELECT COUNT(*) FROM coercion_t a JOIN coercion_t b ON a.ci = b.bin" with
+                    | ResultSet(_, [ [ Some "0" ] ]) -> ()
+                    | other -> failtestf "expected hash joins to resolve both key collations, got %A" other
+
+                testCase "incompatible equal-rank collations return 1267"
+                <| fun _ ->
+                    let store = newStore ()
+
+                    runDefault
+                        store
+                        "CREATE TABLE incompatible_t (ci VARCHAR(10) COLLATE utf8mb4_0900_ai_ci, cs VARCHAR(10) COLLATE utf8mb4_0900_as_cs)"
+                    |> ignore
+
+                    runDefault store "INSERT INTO incompatible_t VALUES ('a', 'a')" |> ignore
+
+                    match runDefault store "SELECT ci = cs FROM incompatible_t" with
+                    | Err(1267, "Illegal mix of collations (utf8mb4_0900_ai_ci,IMPLICIT) and (utf8mb4_0900_as_cs,IMPLICIT) for operation '='") -> ()
+                    | other -> failtestf "expected an incompatible comparison error, got %A" other
+
+                    match runDefault store "SELECT ci LIKE cs FROM incompatible_t" with
+                    | Err(1267, "Illegal mix of collations (utf8mb4_0900_ai_ci,IMPLICIT) and (utf8mb4_0900_as_cs,IMPLICIT) for operation 'like'") -> ()
+                    | other -> failtestf "expected an incompatible LIKE error, got %A" other
+
+                    match runDefault store "SELECT COUNT(*) FROM incompatible_t a JOIN incompatible_t b ON a.ci = b.cs" with
+                    | Err(1267, "Illegal mix of collations (utf8mb4_0900_ai_ci,IMPLICIT) and (utf8mb4_0900_as_cs,IMPLICIT) for operation '='") -> ()
+                    | other -> failtestf "expected an incompatible join error, got %A" other
+
                 testCase "SLEEP and BENCHMARK follow MySQL argument and evaluation semantics"
                 <| fun _ ->
                     let store = newStore ()
