@@ -139,5 +139,13 @@ The multi-worker samples have high variance, recorded in the result file, so
 the table establishes scale and remaining contention rather than a stable
 regression threshold. Use `just bench-load-scale` for a fresh comparison.
 
+### Full-text search
+
+The focused [10k-article comparison](results/f4865b1-fulltext.md) covers
+natural, boolean, accent-aware, and boolean-prefix queries. fsdb measured
+49–54 ms versus MySQL's 0.22–1.09 ms. Accent-aware collation matching adds no
+visible penalty relative to fsdb's other modes; the gap is the full-corpus
+tokenize/score pass versus MySQL's persistent inverted index.
+
 Add a column here for each representative snapshot; keep intermediate runs in
 `results/` without a column.
