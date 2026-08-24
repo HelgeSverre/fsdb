@@ -5539,18 +5539,21 @@ and private runSelectStmt
             match tryEqualityLookup store dbName tref select.Where with
             | Some(columns, rows) -> runResolved columns (rows |> Seq.map snd) select
             | None ->
-                match tryIndexOrder store registry dbName tref select with
-                | Some plan -> runResolved plan.Columns plan.Rows { select with OrderBy = [] }
+                match tryCorrelatedEqualityLookup store dbName tref select.Where outer with
+                | Some(columns, rows) -> runResolved columns (rows |> Seq.map snd) select
                 | None ->
-                    let resolved =
-                        tryRangeLookup store dbName tref select.Where
-                        |> Option.map (fun (cols, rows) -> Ok(cols, rows |> List.map snd))
-                        |> Option.orElseWith (fun () -> tryInformationSchemaNarrow store registry dbName tref select.Where |> Option.map Ok)
-                        |> Option.defaultWith (fun () -> resolveFromItem store registry dbName fromItem)
+                    match tryIndexOrder store registry dbName tref select with
+                    | Some plan -> runResolved plan.Columns plan.Rows { select with OrderBy = [] }
+                    | None ->
+                        let resolved =
+                            tryRangeLookup store dbName tref select.Where
+                            |> Option.map (fun (cols, rows) -> Ok(cols, rows |> List.map snd))
+                            |> Option.orElseWith (fun () -> tryInformationSchemaNarrow store registry dbName tref select.Where |> Option.map Ok)
+                            |> Option.defaultWith (fun () -> resolveFromItem store registry dbName fromItem)
 
-                    match resolved with
-                    | Error e -> e, [], []
-                    | Ok(columns, rows) -> runResolved columns rows select
+                        match resolved with
+                        | Error e -> e, [], []
+                        | Ok(columns, rows) -> runResolved columns rows select
         | _ ->
             match resolveFromItem store registry dbName fromItem with
             | Error e -> e, [], []
@@ -5674,6 +5677,48 @@ and private tryEqualityAccess (store: Store) (dbName: string) (tref: TableRef) (
 and private tryEqualityLookup (store: Store) (dbName: string) (tref: TableRef) (whereExpr: Expr option) =
     tryEqualityAccess store dbName tref whereExpr
     |> Option.map (fun plan -> plan.Columns, plan.Rows)
+
+and private tryCorrelatedEqualityLookup
+    (store: Store)
+    (dbName: string)
+    (tref: TableRef)
+    (whereExpr: Expr option)
+    (outer: EvalContext option)
+    : (ColumnDef list * (RowId * Value[]) list) option =
+    let selfQualifier = tref.Alias |> Option.defaultValue tref.Table
+
+    let innerColumn = function
+        | Col name -> Some name
+        | QualifiedCol(qualifier, name) when qualifier.Equals(selfQualifier, System.StringComparison.OrdinalIgnoreCase) -> Some name
+        | _ -> None
+
+    let outerValue context = function
+        | QualifiedCol(qualifier, _) as expression when not (qualifier.Equals(selfQualifier, System.StringComparison.OrdinalIgnoreCase)) ->
+            evalExpr context expression |> Result.toOption
+        | _ -> None
+
+    outer
+    |> Option.bind (fun context ->
+        whereExpr
+        |> Option.toList
+        |> List.collect flattenAnd
+        |> List.choose (function
+            | BinOp(Eq, left, right) ->
+                match innerColumn left, outerValue context right with
+                | Some column, Some value -> Some(column, value)
+                | _ ->
+                    match innerColumn right, outerValue context left with
+                    | Some column, Some value -> Some(column, value)
+                    | _ -> None
+            | _ -> None)
+        |> fun equalities ->
+            let tableDb = tref.Database |> Option.defaultValue dbName
+
+            Storage.tryCompositeEqualityLookup store tableDb tref.Table equalities
+            |> Option.map (fun lookup -> lookup.LookupColumns, lookup.LookupRows)
+            |> Option.orElseWith (fun () ->
+                equalities
+                |> List.tryPick (fun (column, value) -> Storage.tryEqualityLookup store tableDb tref.Table column value)))
 
 and private tryRangeLookup (store: Store) (dbName: string) (tref: TableRef) (whereExpr: Expr option) : (ColumnDef list * (RowId * Value[]) list) option =
     let tableDb = tref.Database |> Option.defaultValue dbName

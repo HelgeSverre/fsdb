@@ -4601,7 +4601,41 @@ let tests =
 
                     match scalarIndexed with
                     | ResultSet([ "id"; "c" ], rows) -> Expect.equal rows [ [ Some "1"; Some "0" ]; [ Some "5"; Some "1" ] ] "user 5 has exactly one matching post, user 1 has none"
-                    | other -> failtestf "expected a resultset, got %A" other ]
+                    | other -> failtestf "expected a resultset, got %A" other
+
+                testCase "a correlated equality probes the inner secondary index"
+                <| fun _ ->
+                    let mutable calls = 0
+
+                    let registry =
+                        builtins
+                        |> registerScalar "TOUCH" (fun values ->
+                            calls <- calls + 1
+                            values.Head)
+
+                    let store = newStore ()
+                    runDefault store "CREATE TABLE users (id INT PRIMARY KEY)" |> ignore
+                    runDefault store "CREATE TABLE orders (id INT PRIMARY KEY, user_id INT, KEY ix_orders_user (user_id))" |> ignore
+                    runDefault store ("INSERT INTO users VALUES " + ([ 1..50 ] |> List.map (sprintf "(%d)") |> String.concat ",")) |> ignore
+
+                    [ 1..1000 ]
+                    |> List.map (fun id -> sprintf "(%d,%d)" id (((id - 1) % 50) + 1))
+                    |> String.concat ","
+                    |> fun rows -> runDefault store ("INSERT INTO orders VALUES " + rows)
+                    |> ignore
+
+                    match
+                        run
+                            store
+                            registry
+                            "SELECT users.id, (SELECT COUNT(*) FROM orders WHERE orders.user_id = users.id AND TOUCH(orders.id) = orders.id) AS c FROM users ORDER BY users.id"
+                    with
+                    | ResultSet(_, rows) ->
+                        Expect.equal rows.Length 50 "every outer row is retained"
+                        Expect.isTrue (rows |> List.forall (fun row -> row.[1] = Some "20")) "each user has twenty orders"
+                    | other -> failtestf "expected correlated counts, got %A" other
+
+                    Expect.isLessThan calls 2000 "the residual evaluates only indexed candidates, not the inner table for every outer row" ]
 
           testList
               "streaming SELECT pipeline"
