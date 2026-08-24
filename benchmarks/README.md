@@ -60,7 +60,8 @@ Prerequisites and rules:
 - Workloads: 10k users + 50k orders + 10k FULLTEXT articles, deterministic
   seed (override with `FSDB_BENCH_USERS`, `FSDB_BENCH_ORDERS`, and
   `FSDB_BENCH_ARTICLES`). The feature matrix covers views, triggers, CHECK
-  constraints, generated columns, CTEs, windows, JSON_TABLE, FULLTEXT,
+  constraints, generated columns, CTEs, windows, JSON_TABLE, natural,
+  boolean, prefix, and accent-aware FULLTEXT,
   computed projections, transactions, and upserts. One operation runs per
   invocation; BenchmarkDotNet handles warmup, outliers, and statistics.
 - BenchmarkDotNet's allocation column covers the benchmark client process,

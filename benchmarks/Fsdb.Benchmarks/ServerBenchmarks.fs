@@ -277,10 +277,24 @@ type ServerBenchmarks() =
         this.Query "SELECT u.id, jt.plan FROM users u JOIN JSON_TABLE(u.meta, '$' COLUMNS (plan VARCHAR(20) PATH '$.plan')) jt ON 1 WHERE u.id <= 100 ORDER BY u.id"
 
     [<Benchmark>]
-    [<BenchmarkCategory("Feature")>]
-    [<BenchmarkCategory("Scale")>]
+    [<BenchmarkCategory("Feature", "Scale", "FullText")>]
+    member this.FullTextNaturalSearch() =
+        this.Query "SELECT id, title FROM articles WHERE MATCH(title, body) AGAINST ('database') LIMIT 20"
+
+    [<Benchmark>]
+    [<BenchmarkCategory("Feature", "Scale", "FullText")>]
     member this.FullTextBooleanSearch() =
         this.Query "SELECT id, title FROM articles WHERE MATCH(title, body) AGAINST ('+database +concurrency' IN BOOLEAN MODE) LIMIT 20"
+
+    [<Benchmark>]
+    [<BenchmarkCategory("Feature", "Scale", "FullText")>]
+    member this.FullTextAccentSearch() =
+        this.Query "SELECT id, title FROM articles WHERE MATCH(title, body) AGAINST ('resume') LIMIT 20"
+
+    [<Benchmark>]
+    [<BenchmarkCategory("Feature", "Scale", "FullText")>]
+    member this.FullTextBooleanPrefixSearch() =
+        this.Query "SELECT id, title FROM articles WHERE MATCH(title, body) AGAINST ('+resu*' IN BOOLEAN MODE) LIMIT 20"
 
     [<Benchmark>]
     [<BenchmarkCategory("Feature")>]

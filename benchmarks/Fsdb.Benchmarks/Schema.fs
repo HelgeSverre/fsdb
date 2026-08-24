@@ -164,7 +164,9 @@ let seed (conn: MySqlConnection) =
         let rows =
             [ for i in batchStart..batchEnd ->
                 let body =
-                    if i % 10 = 0 then
+                    if i % 20 = 0 then
+                        "résumé dátábáse concurrency benchmark"
+                    elif i % 10 = 0 then
                         "database concurrency benchmark"
                     else
                         "application storage sample"
