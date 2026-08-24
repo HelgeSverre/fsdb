@@ -11,6 +11,7 @@
     <Compile Include="ProtocolTests.fs" />
     <Compile Include="ValueTests.fs" />
     <Compile Include="ParserTests.fs" />
+    <Compile Include="ParserCommentFuzzTests.fs" />
     <Compile Include="StorageTests.fs" />
     <Compile Include="FullTextTests.fs" />
     <Compile Include="FullTextExecutorTests.fs" />

@@ -1621,6 +1621,13 @@ let tests =
               | Affected 0UL -> ()
               | other -> failtestf "expected the trailing comment to be stripped, got %A" other
 
+              match handle session "SET-- boundary\n@commented = 2" with
+              | session, Affected 0UL ->
+                  match handle session "SELECT @commented" |> snd with
+                  | ResultSet(_, [ [ Some "2" ] ]) -> ()
+                  | other -> failtestf "expected the commented SET value, got %A" other
+              | _, other -> failtestf "expected the token-boundary comment to preserve whitespace, got %A" other
+
               // `--` without following whitespace is arithmetic, not a comment.
               match handle session "SELECT 5--3" |> snd with
               | ResultSet(_, [ [ Some "8" ] ]) -> ()

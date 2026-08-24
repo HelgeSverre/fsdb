@@ -2274,6 +2274,27 @@ let tests =
               | Error _ -> ()
               | Ok statements -> failtestf "expected an error, got %A" statements
 
+          testCase "statements reject unterminated block comments"
+          <| fun _ ->
+              for sql in [ "SELECT 1 /*"; "SELECT 1 /*!80000" ] do
+                  match Fsdb.Parser.parse sql with
+                  | Error _ -> ()
+                  | Ok statement -> failtestf "expected %s to fail, got %A" sql statement
+
+          testCase "select projections accept quoted aliases"
+          <| fun _ ->
+              for sql in [ "SELECT 1 'one'"; "SELECT 1 AS 'one'" ] do
+                  match Fsdb.Parser.parse sql with
+                  | Ok(Select { Projections = [ Lit(VInt 1L), Some "one" ] }) -> ()
+                  | other -> failtestf "unexpected parse for %s: %A" sql other
+
+          testCase "REGEXP, ANY, and SOME are reserved in expression position"
+          <| fun _ ->
+              for sql in [ "SELECT REGEXP"; "SELECT 1 = ANY (SELE)"; "SELECT SOME(1)" ] do
+                  match Fsdb.Parser.parse sql with
+                  | Error _ -> ()
+                  | Ok statement -> failtestf "expected %s to fail, got %A" sql statement
+
           testCase "LOAD DATA LOCAL INFILE parses field and line settings"
           <| fun _ ->
               match

@@ -105,6 +105,7 @@ let stripVersionComments (sql: string) : string =
         | None when sql.[i] = '#' ->
             // `# ...` comment: to end of line.
             let eol = sql.IndexOf('\n', i)
+            sb.Append ' ' |> ignore
             i <- (if eol = -1 then sql.Length else eol)
         | None when
             sql.[i] = '-'
@@ -114,6 +115,7 @@ let stripVersionComments (sql: string) : string =
             ->
             // `-- ` comment: to end of line.
             let eol = sql.IndexOf('\n', i)
+            sb.Append ' ' |> ignore
             i <- (if eol = -1 then sql.Length else eol)
         | None when
             i + 2 < sql.Length
@@ -124,32 +126,46 @@ let stripVersionComments (sql: string) : string =
             // Plain `/* ... */` comment: replaced by one space so it can't
             // glue two tokens together.
             let closeAt = sql.IndexOf("*/", i + 2)
-            sb.Append ' ' |> ignore
-            i <- (if closeAt = -1 then sql.Length else closeAt + 2)
+
+            if closeAt = -1 then
+                sb.Append(sql.Substring i) |> ignore
+                i <- sql.Length
+            else
+                sb.Append ' ' |> ignore
+                i <- closeAt + 2
         | None when i + 2 < sql.Length && sql.[i] = '/' && sql.[i + 1] = '*' && sql.[i + 2] = '!' ->
-            let closeAt =
-                match sql.IndexOf("*/", i + 3) with
-                | -1 -> sql.Length
-                | idx -> idx
+            match sql.IndexOf("*/", i + 3) with
+            | -1 ->
+                sb.Append(sql.Substring i) |> ignore
+                i <- sql.Length
+            | closeAt ->
+                let inner = sql.Substring(i + 3, closeAt - (i + 3))
+                let leadingDigits = inner |> Seq.takeWhile Char.IsDigit |> Seq.length
 
-            let inner = sql.Substring(i + 3, closeAt - (i + 3))
-            // MySQL reads the *first 5 digits* of the leading digit run as
-            // the version, not "exactly 5 digits or none" -- a run longer
-            // than 5 (mysqldump's own `/*!999999\- enable the sandbox mode
-            // */` preamble) still gates on its first 5, with the rest
-            // spliced back into the body; a run shorter than 5 still counts
-            // as a version (`/*!9999 body */` runs `body`). Only an empty
-            // run means "any version".
-            let digits = String(inner |> Seq.truncate 5 |> Seq.takeWhile Char.IsDigit |> Seq.toArray)
+                let versionLength =
+                    if
+                        leadingDigits >= 6
+                        && (inner.Length = 6 || Char.IsWhiteSpace inner.[6])
+                    then
+                        6
+                    elif leadingDigits >= 5 then
+                        5
+                    else
+                        0
 
-            let version, body =
-                if digits.Length > 0 then int digits, inner.Substring(digits.Length)
-                else 0, inner
+                if leadingDigits = 0 then
+                    sb.Append(inner: string) |> ignore
+                elif versionLength > 0 then
+                    let version = Int32.Parse(inner.Substring(0, versionLength), Globalization.CultureInfo.InvariantCulture)
 
-            if version <= serverVersionNumber then
-                sb.Append(body: string) |> ignore
+                    if version <= serverVersionNumber then
+                        sb.Append(inner.Substring(versionLength): string) |> ignore
+                    else
+                        sb.Append ' ' |> ignore
+                else
+                    sb.Append ' ' |> ignore
 
-            i <- (if closeAt = sql.Length then closeAt else closeAt + 2)
+                i <- closeAt + 2
         | None ->
             sb.Append(sql.[i]) |> ignore
             i <- i + 1
@@ -247,6 +263,7 @@ let private reservedWords =
           "constraint"
           "foreign"
           "references"
+          "regexp"
           "cast"
           "join"
           "inner"
@@ -267,6 +284,8 @@ let private reservedWords =
           "except"
           "xor"
           "all"
+          "any"
+          "some"
           "when"
           "for"
           // Reserved in MySQL 8 too: without it, `FROM t WINDOW w AS (...)`
@@ -704,13 +723,18 @@ let private rowConstructorAtom: Parser<Expr, unit> =
         | _ -> fail "ROW requires at least two expressions"
 
 let private genericFuncCall: Parser<Expr, unit> =
+    let reservedNames = set [ "any"; "some"; "regexp" ]
+
     attempt (
         (many1Satisfy2 isIdentStart isIdentChar .>> ws)
         .>> sym "("
         >>= fun name ->
-            sepBy (if distinctAggregates.Contains name then distinctArg else expr) (sym ",")
-            .>> sym ")"
-            |>> fun args -> FuncCall(name, args)
+            if reservedNames.Contains(name.ToLowerInvariant()) then
+                fail "reserved function name"
+            else
+                sepBy (if distinctAggregates.Contains name then distinctArg else expr) (sym ",")
+                .>> sym ")"
+                |>> fun args -> FuncCall(name, args)
     )
 
 let private trimAtom: Parser<Expr, unit> =
@@ -2316,13 +2340,14 @@ let private localLoadData: Parser<LocalLoad, unit> =
 /// A projection's alias — `AS name`, or real MySQL's implicit form with no
 /// `AS` at all (`SELECT 1 x FROM t`, `SELECT price * qty total FROM
 /// orders`): a bare word right after the expression that isn't the next
-/// clause's keyword. `identifier` already rejects every word in
-/// `reservedWords` (`FROM`/`WHERE`/`GROUP`/`ORDER`/`HAVING`/`LIMIT`/...), so
-/// this only fires on an actual alias, not the start of the next clause;
-/// `attempt`ed so a comma or clause keyword right after the expression
-/// cleanly falls through to `None` instead of failing the whole projection.
+/// clause's keyword. MySQL also accepts a quoted string in this alias-only
+/// position. `identifier` rejects every word in `reservedWords`
+/// (`FROM`/`WHERE`/`GROUP`/`ORDER`/`HAVING`/`LIMIT`/...), so this only fires
+/// on an actual alias, not the start of the next clause; `attempt`ed so a
+/// comma or clause keyword cleanly falls through to `None`.
 let private projectionAlias: Parser<string option, unit> =
-    (attempt (keyword "AS" >>. identifier) |>> Some) <|> (attempt identifier |>> Some) <|> preturn None
+    let name = identifier <|> (stringLit |>> function VString value -> value | _ -> "")
+    (attempt (keyword "AS" >>. name) |>> Some) <|> (attempt name |>> Some) <|> preturn None
 
 let private projection: Parser<Projection, unit> = expr .>>. projectionAlias
 
@@ -3217,6 +3242,7 @@ statementRef.Value <-
 let parse (sql: string) : Result<Statement, string> =
     placeholderCounterLocal.Value <- 0
     exprDepth.Value <- 0
+    let sql = stripVersionComments sql
     let full = ws >>. statement .>> opt (sym ";") .>> eof
 
     // `open FParsec` brings its own `Ok`/`Error` (from `Reply`'s status) into
@@ -3359,6 +3385,7 @@ let splitStatements (sql: string) : Result<string list, string> =
 let parseExpression (sql: string) : Result<Expr, string> =
     placeholderCounterLocal.Value <- 0
     exprDepth.Value <- 0
+    let sql = stripVersionComments sql
 
     try
         match run (ws >>. expr .>> eof) sql with
