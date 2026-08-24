@@ -235,6 +235,34 @@ let tests =
               Expect.equal (matching "epsilon") [ "1" ] "REPLACE publishes the replacement document"
               Expect.equal (matching "zeta") [ "3" ] "INSERT publishes the new document"
 
+          testCase "a MATCH conjunct narrows the residual predicate to posting candidates"
+          <| fun _ ->
+              let store = create ()
+              run store "CREATE TABLE docs (id INT PRIMARY KEY, body TEXT, FULLTEXT(body))" |> ignore
+
+              [ 1..100 ]
+              |> List.map (fun id -> sprintf "(%d, '%s')" id (if id = 37 || id = 82 then "needle" else "ordinary"))
+              |> String.concat ","
+              |> sprintf "INSERT INTO docs VALUES %s"
+              |> run store
+              |> ignore
+
+              let mutable calls = 0
+              let registry =
+                  builtins
+                  |> registerScalar "TOUCH" (fun values ->
+                      calls <- calls + 1
+                      values |> List.tryHead |> Option.defaultValue VNull)
+
+              let result =
+                  TestSupport.Sql.execute
+                      store
+                      registry
+                      "SELECT id FROM docs WHERE MATCH(body) AGAINST('needle') AND TOUCH(id) = id ORDER BY id"
+
+              Expect.equal (ids result) [ "37"; "82" ] "the residual predicate retains the matching rows"
+              Expect.equal calls 3 "only the metadata probe and posting candidates enter the residual pipeline"
+
           testCase "captured table roots retain their full-text snapshot"
           <| fun _ ->
               let store = create ()

@@ -7638,14 +7638,26 @@ and private runFullTextSelect
 
             let extendedColumns = table.Columns @ syntheticColumns
 
-            let rowsForExecution =
+            let scoreMapsForConjuncts =
                 select.Where
-                |> Option.bind (fun where -> computed |> List.tryFind (fun (node, _, _) -> node = where))
-                |> Option.map (fun (_, _, scores) ->
-                    scores
+                |> Option.map flattenAnd
+                |> Option.defaultValue []
+                |> List.choose (fun conjunct ->
+                    computed
+                    |> List.tryFind (fun (node, _, _) -> node = conjunct)
+                    |> Option.map (fun (_, _, scores) -> scores))
+
+            let rowsForExecution =
+                match scoreMapsForConjuncts |> List.sortBy _.Count with
+                | [] -> indexedRows
+                | smallest :: others ->
+                    smallest
                     |> Map.toList
-                    |> List.choose (fun (rowId, _) -> table.RowsArray.TryFind rowId |> Option.map (fun row -> rowId, row)))
-                |> Option.defaultValue indexedRows
+                    |> List.choose (fun (rowId, _) ->
+                        if others |> List.forall (Map.containsKey rowId) then
+                            table.RowsArray.TryFind rowId |> Option.map (fun row -> rowId, row)
+                        else
+                            None)
 
             let extendedRows =
                 rowsForExecution
