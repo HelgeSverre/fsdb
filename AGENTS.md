@@ -36,9 +36,11 @@ build fails with "not defined".
 
 - `src/Fsdb/` — library + executable in one project (`OutputType` Exe). Compile
   order is the module dependency order: `Log`/`Binary`/`Collation` → `Value`/
-  `Ast` → `Parser` → `Functions` → `Storage` → `Auth`/`Persistence` →
+  `Ast` → `Sql`/`Engine` primitives → `Parser` → `Functions` → `Storage` → `Auth`/`Persistence` →
   `InformationSchema` → `Executor` → `Packet`/`Protocol`/`Session`/
   `QueryHandler` → `Server` → `Db` (public embedding facade) → `Program`.
+  `Sql/` owns reusable AST operations; `Engine/` owns typed representations
+  shared by storage, execution, authorization, and introspection.
 - `tests/Fsdb.Tests/` — Expecto unit + wire-level integration tests.
 - `benchmarks/Fsdb.Benchmarks/` — BenchmarkDotNet, fsdb vs MySQL 8.4.
 - `torture/` — **separate solution** (`torture/Fsdb.Torture.slnx`), deliberately
