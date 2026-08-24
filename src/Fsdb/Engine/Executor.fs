@@ -7765,7 +7765,7 @@ and private runFullTextSelect
                                     |> List.choose (fun rowId -> table.RowsArray.TryFind rowId |> Option.map (fun row -> rowId, row))
                                 | None ->
                                     match item with
-                                    | FromTable tableRef ->
+                                    | FromTable tableRef when select.Joins.IsEmpty ->
                                         tryEqualityLookup store dbName tableRef select.Where
                                         |> Option.map snd
                                         |> Option.defaultWith (fun () -> table.RowsArray.Indexed |> List.ofSeq)
