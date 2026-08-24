@@ -7563,6 +7563,61 @@ and private runWindowedSelect
 
             runSelect store registry dbName extendedColumns qualifiers extendedRows select' outer
 
+and private fullTextScoresForTable (table: Table) (matchNodes: Expr list) =
+    let indexColumns =
+        table.Indexes
+        |> List.filter (fun index -> index.Kind = FullTextIndex)
+        |> List.map (fun index ->
+            index,
+            (index.Columns |> List.map (fun column -> column.ToLowerInvariant()) |> Set.ofList))
+
+    let scoreNode node =
+        match node with
+        | MatchAgainst(columns, Lit queryValue, mode) ->
+            let columns = columns |> List.map (fun column -> column.ToLowerInvariant()) |> Set.ofList
+
+            match indexColumns |> List.tryFind (snd >> (=) columns), Value.toText queryValue with
+            | Some(index, _), Some queryText ->
+                let fullTextIndex = Map.find index.Name table.FullTextIndexes
+                let scores =
+                    match mode with
+                    | NaturalLanguage -> FullText.naturalScores fullTextIndex queryText
+                    | BooleanMode -> FullText.booleanScores fullTextIndex queryText
+                    | QueryExpansion -> FullText.expansionScores fullTextIndex queryText
+
+                Ok(node, mode, scores)
+            | None, _ -> Error(1191, "Can't find FULLTEXT index matching the column list")
+            | _, None -> Error(1210, "Incorrect arguments to AGAINST")
+        | MatchAgainst _ -> Error(1210, "Incorrect arguments to AGAINST")
+        | _ -> Error(1105, "fulltext pre-pass collected a non-MATCH node")
+
+    matchNodes |> traverse scoreNode
+
+and private fullTextCandidateIds (computed: (Expr * MatchMode * Map<RowId, float>) list) expression =
+    let scoreMap node =
+        computed
+        |> List.tryFind (fun (candidate, _, _) -> candidate = node)
+        |> Option.map (fun (_, _, scores) -> scores |> Map.keys |> Set.ofSeq)
+
+    let rec candidates expression =
+        match scoreMap expression with
+        | Some candidates -> Some candidates
+        | None ->
+            match expression with
+            | BinOp(And, left, right) ->
+                match candidates left, candidates right with
+                | Some left, Some right -> Some(Set.intersect left right)
+                | Some candidates, None
+                | None, Some candidates -> Some candidates
+                | None, None -> None
+            | BinOp(Or, left, right) ->
+                match candidates left, candidates right with
+                | Some left, Some right -> Some(Set.union left right)
+                | _ -> None
+            | _ -> None
+
+    candidates expression
+
 /// The fulltext pre-pass: like `runWindowedSelect`, each distinct
 /// `MATCH ... AGAINST` becomes a synthetic score column computed over the
 /// whole table — but ahead of WHERE, because the score both filters rows
@@ -7592,41 +7647,10 @@ and private runFullTextSelect
             | Error e -> storageErr e, [], []
             | Ok _ -> unsupported // an information_schema view has no FULLTEXT index
         | Some table ->
-            let fulltextIndexes =
-                table.Indexes
-                |> List.filter (fun ix -> ix.Kind = FullTextIndex)
-                |> List.map (fun ix -> ix, (ix.Columns |> List.map (fun c -> c.ToLowerInvariant()) |> Set.ofList))
-
             let indexedRows = table.RowsArray.Indexed |> List.ofSeq
             let rows = indexedRows |> List.map snd
 
-            // The column list must equal a FULLTEXT index's set —
-            // order-insensitive, oracle-verified (a reversed list matches;
-            // a subset is 1191) — and the query must already be a constant.
-            let validateNode node =
-                match node with
-                | MatchAgainst(cols, Lit queryValue, mode) ->
-                    let columns = cols |> List.map (fun c -> c.ToLowerInvariant()) |> Set.ofList
-
-                    match fulltextIndexes |> List.tryFind (snd >> (=) columns), Value.toText queryValue with
-                    | Some(index, _), Some queryText -> Ok(node, mode, queryText, index.Name)
-                    | None, _ -> Error(1191, "Can't find FULLTEXT index matching the column list")
-                    | _, None -> Error(1210, "Incorrect arguments to AGAINST")
-                | MatchAgainst _ -> Error(1210, "Incorrect arguments to AGAINST")
-                | _ -> Error(1105, "fulltext pre-pass collected a non-MATCH node")
-
-            let scoreNode (node, mode, queryText: string, indexName: string) =
-                let index = Map.find indexName table.FullTextIndexes
-
-                let scores =
-                    match mode with
-                    | NaturalLanguage -> FullText.naturalScores index queryText
-                    | BooleanMode -> FullText.booleanScores index queryText
-                    | QueryExpansion -> FullText.expansionScores index queryText
-
-                node, mode, scores
-
-            match matchNodes |> traverse validateNode |> Result.map (List.map scoreNode) with
+            match fullTextScoresForTable table matchNodes with
             | Error(code, msg) -> Err(code, msg), [], []
             | Ok computed ->
 
@@ -7638,30 +7662,8 @@ and private runFullTextSelect
 
             let extendedColumns = table.Columns @ syntheticColumns
 
-            let scoreMap node =
-                computed
-                |> List.tryFind (fun (candidate, _, _) -> candidate = node)
-                |> Option.map (fun (_, _, scores) -> scores |> Map.keys |> Set.ofSeq)
-
-            let rec candidateIds expression =
-                match scoreMap expression with
-                | Some candidates -> Some candidates
-                | None ->
-                    match expression with
-                    | BinOp(And, left, right) ->
-                        match candidateIds left, candidateIds right with
-                        | Some left, Some right -> Some(Set.intersect left right)
-                        | Some candidates, None
-                        | None, Some candidates -> Some candidates
-                        | None, None -> None
-                    | BinOp(Or, left, right) ->
-                        match candidateIds left, candidateIds right with
-                        | Some left, Some right -> Some(Set.union left right)
-                        | _ -> None
-                    | _ -> None
-
             let rowsForExecution =
-                match select.Where |> Option.bind candidateIds with
+                match select.Where |> Option.bind (fullTextCandidateIds computed) with
                 | None ->
                     tryEqualityLookup store dbName tref select.Where
                     |> Option.map snd
