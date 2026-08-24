@@ -5,6 +5,7 @@ open Fsdb.Value
 open Fsdb.Storage
 open Fsdb.Functions
 open Fsdb.Executor
+open Fsdb.FullText
 
 let private run = TestSupport.Sql.executeDefault
 
@@ -234,6 +235,21 @@ let tests =
               Expect.equal (matching "epsilon") [ "1" ] "REPLACE publishes the replacement document"
               Expect.equal (matching "zeta") [ "3" ] "INSERT publishes the new document"
 
+          testCase "captured table roots retain their full-text snapshot"
+          <| fun _ ->
+              let store = create ()
+              run store "CREATE TABLE docs (id INT PRIMARY KEY, body TEXT, FULLTEXT(body))" |> ignore
+              run store "INSERT INTO docs VALUES (1, 'alpha original')" |> ignore
+
+              let before = tableSnapshot store defaultDatabase "docs" |> Result.toOption |> Option.get
+              run store "UPDATE docs SET body = 'gamma revised' WHERE id = 1" |> ignore
+              let after = tableSnapshot store defaultDatabase "docs" |> Result.toOption |> Option.get
+              let index table = table.FullTextIndexes |> Map.toSeq |> Seq.head |> snd
+
+              Expect.equal (naturalScores (index before) "alpha").Count 1 "the captured root keeps its posting"
+              Expect.equal (naturalScores (index after) "alpha").Count 0 "the published root removes the old posting"
+              Expect.equal (naturalScores (index after) "gamma").Count 1 "the published root adds the new posting"
+
           testCase "SHOW CREATE TABLE renders FULLTEXT KEY in MySQL's format"
           <| fun _ ->
               let store = setup ()
@@ -252,9 +268,12 @@ let tests =
 
                   run store "CREATE TABLE docs (id INT PRIMARY KEY, body TEXT, FULLTEXT KEY ft_body (body))" |> ignore
                   run store "INSERT INTO docs VALUES (1, 'database tutorial'), (2, 'nothing here')" |> ignore
+                  Fsdb.Persistence.snapshotNow dir store
+                  run store "UPDATE docs SET body = 'revised tutorial' WHERE id = 1" |> ignore
+                  run store "INSERT INTO docs VALUES (3, 'database security')" |> ignore
 
                   let reloaded = Fsdb.Persistence.load dir
 
                   match run reloaded "SELECT id FROM docs WHERE MATCH (body) AGAINST ('database')" with
-                  | ResultSet(_, [ [ Some "1" ] ]) -> ()
-                  | other -> failtestf "expected the fulltext index to survive reload, got %A" other) ]
+                  | ResultSet(_, [ [ Some "3" ] ]) -> ()
+                  | other -> failtestf "expected the rebuilt fulltext index to include the WAL tail, got %A" other) ]

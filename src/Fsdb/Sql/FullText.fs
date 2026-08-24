@@ -69,7 +69,7 @@ let private rawTokens (text: string) : string[] =
 let tokenize (text: string) : string[] = rawTokens text |> Array.map _.ToLowerInvariant()
 
 // ---------------------------------------------------------------------------
-// Corpus: rows tokenized once per MATCH evaluation.
+// Corpus compatibility wrapper over the immutable index.
 // ---------------------------------------------------------------------------
 
 type private Token =
@@ -204,7 +204,10 @@ let private sumTermScores (index: Index<'id>) (terms: string[]) : Map<'id, float
     |> Array.fold
         (fun scores term ->
             termScores index term
-            |> Map.fold (fun scores id score -> Map.change id (Some << ((+) score) << Option.defaultValue 0.0) scores) scores)
+            |> Map.fold
+                (fun scores id score ->
+                    Map.change id (fun current -> Some(score + Option.defaultValue 0.0 current)) scores)
+                scores)
         Map.empty
 
 let naturalScores (index: Index<'id>) (query: string) : Map<'id, float> =
