@@ -406,7 +406,7 @@ Recorded in `torture/findings/`, not yet fixed, not enrolled in
 | Temporal/error-shape ceilings | `DATE 'bad'` → 1064 vs MySQL 1525; parenthesized set-op groups `(A UNION B) INTERSECT C` refused | ponytail ceilings |
 
 Uncovered torture lanes (harness scope, not product gaps): durability/restart
-during concurrent commits, matched negative-oracle campaigns, connection
+during concurrent commits, matched negative semantic-oracle campaigns, connection
 churn mid-transaction, cancellation while queued, savepoints under
 concurrency, isolation levels other than REPEATABLE READ, concurrent
 CREATE/DROP DATABASE under traffic.

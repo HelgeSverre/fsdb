@@ -8,6 +8,7 @@ type private Command =
     | Suite
     | Concurrency
     | MultiDb
+    | Syntax
     | Replay
     | CheckTools
     | Help
@@ -28,6 +29,7 @@ type private Cli =
       RollbackEvery: int
       Databases: int
       ScalingFactor: float
+      SyntaxCases: int
       Artifacts: string
       MySql: string
       SqlSplitter: string
@@ -43,6 +45,7 @@ Usage:
   fsdb-torture suite [options]
   fsdb-torture concurrency [options]
   fsdb-torture multidb [options]
+  fsdb-torture syntax [options]
   fsdb-torture replay --case <artifact-directory> [options]
   fsdb-torture check-tools [--sql-splitter <path>]
 
@@ -60,6 +63,7 @@ Options:
   --rollback-every <n>       Roll back every Nth operation; 0 disables (default 5)
   --databases <n>            multidb: databases run concurrently (default 4)
   --scaling-factor <n>       multidb: multi-db wall-clock must be <= this fraction of the serial-projected cost (default 0.65)
+  --syntax-cases <n>          syntax: deterministic mutations to execute (default 64)
   --artifacts <directory>    Artifact root (default torture/artifacts/runs)
   --mysql <connection>       MySQL admin connection string
   --sql-splitter <path>      SQL Splitter executable
@@ -92,6 +96,7 @@ Options:
             | Some "suite" -> Suite, 1
             | Some "concurrency" -> Concurrency, 1
             | Some "multidb" -> MultiDb, 1
+            | Some "syntax" -> Syntax, 1
             | Some "replay" -> Replay, 1
             | Some "check-tools" -> CheckTools, 1
             | Some "--help"
@@ -113,6 +118,7 @@ Options:
         let mutable rollbackEvery = 5
         let mutable databases = 4
         let mutable scalingFactor = 0.65
+        let mutable syntaxCases = 64
         let mutable artifacts = Paths.defaultArtifactRoot ()
         let mutable mysql = ""
         let mutable sqlSplitter = ""
@@ -191,6 +197,10 @@ Options:
                 match parsePositiveFloat flag (nextValue flag) with
                 | Ok value -> scalingFactor <- value
                 | Error error -> failure <- Some error
+            | "--syntax-cases" ->
+                match parseInt flag (nextValue flag) with
+                | Ok value -> syntaxCases <- value
+                | Error error -> failure <- Some error
             | "--artifacts" -> artifacts <- nextValue flag |> Path.GetFullPath
             | "--mysql" -> mysql <- nextValue flag
             | "--sql-splitter" -> sqlSplitter <- nextValue flag
@@ -208,8 +218,8 @@ Options:
         | None when (command = Concurrency || command = MultiDb) && hotAccounts < 2 -> Error "concurrency/multidb requires --hot-accounts of at least 2"
         | None when (command = Concurrency || command = MultiDb) && hotAccounts > accounts -> Error "--hot-accounts cannot exceed --accounts"
         | None when command = MultiDb && databases < 1 -> Error "multidb requires --databases of at least 1"
-        | None when (command = Run || command = Suite || command = Replay || command = Concurrency || command = MultiDb) && String.IsNullOrWhiteSpace mysql ->
-            Error "run, suite, concurrency, multidb, and replay require --mysql (torture/scripts/run.sh supplies it automatically)"
+        | None when (command = Run || command = Suite || command = Replay || command = Concurrency || command = MultiDb || command = Syntax) && String.IsNullOrWhiteSpace mysql ->
+            Error "run, suite, concurrency, multidb, syntax, and replay require --mysql (torture/scripts/run.sh supplies it automatically)"
         | None ->
             Ok
                 { Command = command
@@ -227,6 +237,7 @@ Options:
                   RollbackEvery = rollbackEvery
                   Databases = databases
                   ScalingFactor = scalingFactor
+                  SyntaxCases = syntaxCases
                   Artifacts = artifacts
                   MySql = mysql
                   SqlSplitter = sqlSplitter
@@ -264,6 +275,13 @@ Options:
           HotAccounts = cli.HotAccounts
           RollbackEvery = cli.RollbackEvery
           ScalingFactor = cli.ScalingFactor
+          TimeoutSeconds = cli.TimeoutSeconds
+          ArtifactRoot = cli.Artifacts
+          MySqlConnection = cli.MySql }
+
+    let syntaxOptions cli : SyntaxOptions =
+        { Seed = cli.Seed
+          Cases = cli.SyntaxCases
           TimeoutSeconds = cli.TimeoutSeconds
           ArtifactRoot = cli.Artifacts
           MySqlConnection = cli.MySql }
@@ -387,6 +405,20 @@ module Program =
         if not report.Passed then
             printfn "  signature: %s" report.FailureSignature
 
+    let private printSyntax (report: SyntaxManifest) directory =
+        let baselines = report.Cases |> Array.filter (fun record -> record.Mutation = "baseline")
+        let mutations = report.Cases.Length - baselines.Length
+        let rejected = report.Cases |> Array.filter (fun record -> record.Classification = "matched_syntax_error") |> Array.length
+        let accepted = report.Cases |> Array.filter (fun record -> record.Classification = "accepted_mutation") |> Array.length
+        let differences = report.Cases |> Array.filter (fun record -> not record.Passed) |> Array.length
+
+        printfn "%s: %s — %s" report.CaseId report.Classification directory
+        printfn "  baselines=%d mutations=%d matched-errors=%d accepted-mutations=%d differences=%d" baselines.Length mutations rejected accepted differences
+
+        if not report.Passed then
+            printfn "  detail: %s" report.ClassificationDetail
+            printfn "  signature: %s" report.FailureSignature
+
     let execute argv =
         task {
             let parsed =
@@ -437,6 +469,24 @@ module Program =
                             return 2
                 with error ->
                     eprintfn "multidb infrastructure exception: %O" error
+                    return 1
+            | Ok cli when cli.Command = Syntax ->
+                try
+                    match! SyntaxFuzz.run (Cli.syntaxOptions cli) with
+                    | Error error ->
+                        eprintfn "syntax infrastructure failure: %s" error
+                        return 1
+                    | Ok(report, directory) ->
+                        printSyntax report directory
+
+                        if report.Passed then
+                            return 0
+                        elif report.Classification = "infrastructure" || report.Classification = "oracle_baseline_rejected" then
+                            return 1
+                        else
+                            return 2
+                with error ->
+                    eprintfn "syntax infrastructure exception: %O" error
                     return 1
             | Ok cli ->
                 match! inspectTool cli.SqlSplitter with

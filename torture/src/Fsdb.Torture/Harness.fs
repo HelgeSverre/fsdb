@@ -52,6 +52,7 @@ module AstKind =
         | DropTrigger _ -> "drop_trigger"
         | CreateView _ -> "create_view"
         | DropView _ -> "drop_view"
+        | SetTriggerNew _ -> "set_trigger_new"
         | Explain statement -> "explain_" + ofStatement statement
 
 [<RequireQualifiedAccess>]
@@ -187,6 +188,8 @@ module CommitEvents =
         | RowsDeleted(db, table, rows) ->
             sprintf "rows_deleted db=%s table=%s count=%d hash=%s" db table rows.Length (rows |> Seq.map rowHash |> Hashing.combine)
         | SchemaChanged(db, statement) -> sprintf "schema_changed db=%s statement=%s" db (AstKind.ofStatement statement)
+        | SchemaChangedAt(db, statement, createTime) ->
+            sprintf "schema_changed db=%s statement=%s create_time=%s" db (AstKind.ofStatement statement) (createTime.ToString("O", CultureInfo.InvariantCulture))
         | TransactionCommitted events ->
             sprintf "transaction_committed count=%d hash=%s" events.Length (events |> Seq.map summarize |> Hashing.combine)
 
@@ -245,13 +248,18 @@ module Invariants =
             // number must key alike or this invariant check disagrees with
             // the index it is checking.
             | VUInt value -> "I" + string (decimal value)
+            | VBit(_, value) -> "I" + string (decimal value)
             | VDouble value -> "D" + (if value = 0.0 then 0.0 else value).ToString("R", CultureInfo.InvariantCulture)
             | VDecimal value -> "M" + value.ToString("G29", CultureInfo.InvariantCulture)
             | VString value -> "S" + value.TrimEnd(' ').ToUpperInvariant()
             | VBytes value -> "B" + Convert.ToHexString value
             | VDate value -> "T" + string value.DayNumber
             | VDateTime value -> "V" + string value.Ticks
+            | VTime value -> "H" + string (Fsdb.Temporal.timeTicks value)
+            | VZeroDate value -> "Z" + Fsdb.Temporal.formatZeroDate value
+            | VZeroDateTime value -> "W" + Fsdb.Temporal.formatZeroDateTime value
             | VJson value -> "J" + value.TrimEnd(' ').ToUpperInvariant()
+            | VGeometry value -> "G" + Convert.ToBase64String(Fsdb.Value.geometryToMySqlBinary value)
 
         indices |> Array.map (fun index -> canonical row.[index]) |> Json.serialize
 
@@ -1331,13 +1339,22 @@ module ScenarioProbes =
 
 [<RequireQualifiedAccess>]
 module DmlBattery =
-    let private fixtures =
-        [| "DROP TABLE IF EXISTS fsdb_replace_contract"
-           "DROP TABLE IF EXISTS fsdb_dml_contract"
-           "CREATE TABLE fsdb_dml_contract (id INT PRIMARY KEY, n INT)"
-           "CREATE TABLE fsdb_replace_contract (id INT PRIMARY KEY, u INT UNIQUE, n INT DEFAULT 7)" |]
+    let private cleanup =
+        [| "DROP VIEW IF EXISTS fsdb_dml_view"
+           "DROP TABLE IF EXISTS fsdb_trigger_contract"
+           "DROP TABLE IF EXISTS fsdb_trigger_log"
+           "DROP TABLE IF EXISTS fsdb_replace_contract"
+           "DROP TABLE IF EXISTS fsdb_dml_contract" |]
 
-    let private cleanup = fixtures.[0..1]
+    let private fixtures =
+        [| yield! cleanup
+           "CREATE TABLE fsdb_dml_contract (id INT PRIMARY KEY, n INT)"
+           "CREATE TABLE fsdb_replace_contract (id INT PRIMARY KEY, u INT UNIQUE, n INT DEFAULT 7, INDEX ix_n_u (n, u))"
+           "CREATE TABLE fsdb_trigger_contract (id INT PRIMARY KEY, n INT)"
+           "CREATE TABLE fsdb_trigger_log (n INT)"
+           "CREATE VIEW fsdb_dml_view AS SELECT id, n FROM fsdb_dml_contract WHERE n > 0 WITH CHECK OPTION"
+           "CREATE TRIGGER fsdb_trigger_first BEFORE INSERT ON fsdb_trigger_contract FOR EACH ROW SET NEW.n = NEW.n + 1"
+           "CREATE TRIGGER fsdb_trigger_second BEFORE INSERT ON fsdb_trigger_contract FOR EACH ROW FOLLOWS fsdb_trigger_first BEGIN INSERT INTO fsdb_trigger_log VALUES (NEW.n); SET NEW.n = NEW.n + 1; END" |]
 
     let private cases =
         [| "insert_new", "INSERT INTO fsdb_dml_contract VALUES (1, 10)"
@@ -1355,6 +1372,10 @@ module DmlBattery =
            "replace_select", "REPLACE INTO fsdb_dml_contract SELECT 20, 2"
            "replace_set_default_reference", "REPLACE INTO fsdb_replace_contract SET id = 1, u = 20, n = n + 1"
            "replace_set_default_function", "REPLACE INTO fsdb_replace_contract SET id = 4, u = 40, n = DEFAULT(n)"
+           "composite_index_update", "UPDATE fsdb_replace_contract SET n = 8 WHERE n = 3 AND u = 20"
+           "view_insert", "INSERT INTO fsdb_dml_view VALUES (30, 3)"
+           "ordered_compound_trigger", "INSERT INTO fsdb_trigger_contract VALUES (1, 10)"
+           "trigger_side_effect", "UPDATE fsdb_trigger_log SET n = n + 1 WHERE n = 11"
            "insert_ignore_duplicate", "INSERT IGNORE INTO fsdb_dml_contract VALUES (1, 99)"
            "insert_multi", "INSERT INTO fsdb_dml_contract VALUES (10, 1), (11, 2), (12, 3)"
            "update_changed", "UPDATE fsdb_dml_contract SET n = 71 WHERE id = 2"

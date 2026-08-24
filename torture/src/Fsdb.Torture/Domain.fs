@@ -53,6 +53,14 @@ type RunOptions =
       SqlSplitter: string }
 
 [<CLIMutable>]
+type SyntaxOptions =
+    { Seed: uint64
+      Cases: int
+      TimeoutSeconds: int
+      ArtifactRoot: string
+      MySqlConnection: string }
+
+[<CLIMutable>]
 type ConcurrencyOptions =
     { Seed: uint64
       Workers: int
@@ -314,6 +322,40 @@ type DmlRecord =
       Classification: string
       Equal: bool
       Detail: string }
+
+[<CLIMutable>]
+type SyntaxCaseRecord =
+    { Index: int
+      Feature: string
+      Mutation: string
+      Sql: string
+      SqlSha256: string
+      ParserStatus: string
+      AstKind: string
+      MySql: TargetOutcome
+      Fsdb: TargetOutcome
+      Classification: string
+      Detail: string
+      Passed: bool }
+
+[<CLIMutable>]
+type SyntaxManifest =
+    { SchemaVersion: int
+      RunId: string
+      CaseId: string
+      Seed: uint64
+      RequestedMutations: int
+      StartedUtc: string
+      FinishedUtc: string
+      FsdbRevision: string
+      FsdbDirty: bool
+      FsdbAssemblySha256: string
+      MySqlVersion: string
+      Cases: SyntaxCaseRecord array
+      Classification: string
+      ClassificationDetail: string
+      FailureSignature: string
+      Passed: bool }
 
 [<CLIMutable>]
 type ColumnSnapshot =

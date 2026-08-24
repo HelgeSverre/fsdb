@@ -19,6 +19,13 @@ let private successful target =
       Message = ""
       ElapsedMs = 1L }
 
+let private rejected target errorCode sqlState =
+    { successful target with
+        Status = "server_error"
+        AffectedRows = 0
+        ErrorCode = errorCode
+        SqlState = sqlState }
+
 let private successfulProbe target rows =
     { Target = target
       Status = "success"
@@ -42,7 +49,8 @@ let private column name primary unique autoIncrement =
       Generated = None
       Collation = None
       Charset = None
-      OnUpdateCurrentTimestamp = false }
+      OnUpdateCurrentTimestamp = false
+      Comment = "" }
 
 let private emptyComparison =
     { Equal = true
@@ -379,6 +387,43 @@ let tests =
                     Expect.equal (Array.sum versions) (int64 committed * 2L) "each committed transfer updates exactly two versions" ]
 
           testList
+              "Syntax fuzzing"
+              [ testCase "generates a deterministic bounded corpus"
+                <| fun _ ->
+                    let first = SyntaxFuzz.candidates 42UL 24
+                    let repeated = SyntaxFuzz.candidates 42UL 24
+                    let changed = SyntaxFuzz.candidates 43UL 24
+                    Expect.equal first repeated "same seed produces the same candidates"
+                    Expect.equal first.Length 35 "all feature baselines precede the requested mutations"
+                    Expect.notEqual (first |> Array.skip 11) (changed |> Array.skip 11) "seed changes mutation order"
+                    Expect.equal (first |> Array.distinctBy (fun candidate -> candidate.Feature, candidate.Mutation, candidate.Sql) |> Array.length) first.Length "candidate identities are unique"
+
+                testCase "classifies syntax error contracts by code and SQLSTATE"
+                <| fun _ ->
+                    let mysql = rejected "mysql" 1064 "42000"
+                    let matching = rejected "fsdb" 1064 "42000"
+                    let wrong = rejected "fsdb" 1235 "42000"
+                    Expect.equal (SyntaxFuzz.classify false mysql matching) "matched_syntax_error" "matching syntax errors pass"
+                    Expect.equal (SyntaxFuzz.classify false mysql wrong) "syntax_error_contract_mismatch" "different errors remain evidence"
+                    Expect.equal (SyntaxFuzz.classify false mysql (successful "fsdb")) "fsdb_syntax_acceptance_gap" "over-acceptance is a finding"
+
+                testCase "distinguishes accepted mutations and semantic rejection"
+                <| fun _ ->
+                    Expect.equal (SyntaxFuzz.classify false (successful "mysql") (successful "fsdb")) "accepted_mutation" "valid mutations pass"
+                    Expect.equal
+                        (SyntaxFuzz.classify false (rejected "mysql" 1054 "42S22") (rejected "fsdb" 1054 "42S22"))
+                        "oracle_semantic_rejection"
+                        "non-syntax oracle errors do not claim syntax parity"
+                    Expect.equal
+                        (SyntaxFuzz.classify false (rejected "mysql" 1054 "42S22") { rejected "fsdb" 0 "" with Status = "timeout" })
+                        "fsdb_timeout"
+                        "semantic rejection cannot hide a subject timeout"
+                    Expect.equal
+                        (SyntaxFuzz.classify true (successful "mysql") (rejected "fsdb" 1064 "42000"))
+                        "fsdb_feature_gap"
+                        "a rejected baseline is a feature gap" ]
+
+          testList
               "Catalog invariants"
               [ testCase "accepts a valid primary key and auto-id"
                 <| fun _ ->
@@ -394,7 +439,8 @@ let tests =
                           TableCollation = None
                           CreateTime = DateTime.UtcNow
                           UniqueIndex = Map.empty
-                          SecondaryIndex = Map.empty }
+                          SecondaryIndex = Map.empty
+                          SecondaryOrder = Map.empty }
 
                     store.Catalog <- Map.ofList [ defaultDatabase, Map.ofList [ "items", table ] ]
                     Expect.isEmpty (Invariants.validate store) "valid store"
@@ -413,7 +459,8 @@ let tests =
                           TableCollation = None
                           CreateTime = DateTime.UtcNow
                           UniqueIndex = Map.empty
-                          SecondaryIndex = Map.empty }
+                          SecondaryIndex = Map.empty
+                          SecondaryOrder = Map.empty }
 
                     store.Catalog <- Map.ofList [ defaultDatabase, Map.ofList [ "items", table ] ]
                     let errors = Invariants.validate store

@@ -14,10 +14,15 @@ fsdb and a MySQL 8.4 oracle, and the first divergence is classified and
 replayable (`torture/scripts/run.sh suite`; exit 0 = pass/known gaps, 2 = new
 fsdb findings).
 
+The separate syntax lane starts from valid statements for recent features,
+applies deterministic bounded mutations, and compares MySQL and fsdb error
+codes and SQLSTATEs (`torture/scripts/run.sh syntax --syntax-cases 64`).
+
 The ordered DML battery covers `REPLACE` values, `REPLACE ... SELECT`, and
 `REPLACE ... SET` in both client affected-row modes. It includes unchanged
 replacements, conflicts spanning separate unique keys, same-statement key
-reuse, defaults, and source-row ordering.
+reuse, defaults, source-row ordering, composite-index updates, checked-view
+inserts, and ordered compound-trigger side effects.
 
 The scalar-expression battery pins logarithmic, exponential, trigonometric,
 IPv4, and IPv6 functions to MySQL 8.4 values and domain behavior. It also

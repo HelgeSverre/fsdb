@@ -8,6 +8,7 @@
     <Compile Include="Domain.fs" />
     <Compile Include="SqlScript.fs" />
     <Compile Include="Harness.fs" />
+    <Compile Include="SyntaxFuzz.fs" />
     <Compile Include="Concurrency.fs" />
     <Compile Include="MultiDb.fs" />
     <Compile Include="Program.fs" />

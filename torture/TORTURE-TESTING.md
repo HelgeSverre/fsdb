@@ -64,6 +64,13 @@ version counts, committed operation IDs, rollback absence, and total
 conservation have one exact answer regardless of scheduling. MySQL must satisfy
 that answer before FSDB is judged.
 
+The syntax lane starts from known-valid statements spanning recently added
+grammar and execution surfaces. It executes each baseline on both servers,
+then applies a seed-ordered, bounded set of structural mutations. MySQL `1064`
+responses are compared by error code and SQLSTATE rather than location text.
+MySQL-valid mutations exercise FSDB acceptance; mutations that reach other
+semantic errors remain visible without being mislabeled as syntax evidence.
+
 After each successful FSDB mutation, the harness records compact commit-event
 hashes and validates row arity, primary/unique keys, foreign-key references,
 and auto-increment state directly against `Store.Catalog`. This catches damage
@@ -105,6 +112,7 @@ Passwords and the MySQL connection string are intentionally not persisted.
 | Oracle | `oracle_rejected`, `oracle_timeout` | MySQL did not accept or complete the supposedly valid input |
 | Concurrency | `oracle_concurrency_failure`, `fsdb_concurrency_execution_gap`, `fsdb_transaction_atomicity_gap` | The reference run failed, FSDB returned a protocol/execution error, or successful transaction replies produced the wrong committed state |
 | Parser | `fsdb_parser_gap`, `fsdb_probe_parser_gap` | MySQL accepted SQL that FSDB cannot parse |
+| Syntax mutation | `matched_syntax_error`, `accepted_mutation`, `fsdb_syntax_acceptance_gap`, `fsdb_syntax_rejection_gap`, `syntax_error_contract_mismatch` | Mutated syntax matched, remained valid, or exposed an acceptance/error-contract difference |
 | Subject execution | `fsdb_execution_gap`, `fsdb_probe_execution_gap`, `contained_internal_error` | Parsed SQL failed in FSDB; error 1105 remains separately visible |
 | Wire/deadline | `protocol_fault`, `fsdb_timeout` | Driver/protocol failure or subject deadline |
 | Internal state | `invariant_failure` | FSDB committed a structurally invalid catalog/data state |
@@ -222,7 +230,7 @@ streamed or FSDB is isolated in a measured child process.
 4. Stream generated-SQL hashing/scanning and sample resident memory over time,
    ideally with FSDB in a separate process so harness and engine allocations
    are distinguishable.
-5. Add matched negative-oracle, UPDATE/DELETE/upsert, connection churn,
+5. Expand matched negative-oracle coverage beyond syntax, plus connection churn,
    cancellation, and restart campaigns. The first prepared-transaction and
    concurrent-session lane is implemented and recorded in
    [`findings/2026-08-16-concurrency-campaign.md`](findings/2026-08-16-concurrency-campaign.md),
