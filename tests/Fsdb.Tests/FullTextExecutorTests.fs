@@ -6,10 +6,7 @@ open Fsdb.Storage
 open Fsdb.Functions
 open Fsdb.Executor
 
-let private run (store: Store) (sql: string) : QueryResult =
-    match Fsdb.Parser.parse sql with
-    | Error msg -> failtestf "expected %s to parse, got error: %s" sql msg
-    | Ok stmt -> execute store builtins defaultDatabase (0L, 0L) false stmt |> snd
+let private run = TestSupport.Sql.executeDefault
 
 /// The manual's `articles` corpus behind a `(title, body)` FULLTEXT index —
 /// expected row sets and orderings all read off a live MySQL 8.4.11.
@@ -168,9 +165,7 @@ let tests =
 
           testCase "a FULLTEXT index survives the persistence round-trip"
           <| fun _ ->
-              let dir = TestSupport.directory "fulltext"
-
-              try
+              TestSupport.withDirectory "fulltext" (fun dir ->
                   let store = Fsdb.Persistence.load dir
                   Fsdb.Persistence.attach dir store
 
@@ -181,6 +176,4 @@ let tests =
 
                   match run reloaded "SELECT id FROM docs WHERE MATCH (body) AGAINST ('database')" with
                   | ResultSet(_, [ [ Some "1" ] ]) -> ()
-                  | other -> failtestf "expected the fulltext index to survive reload, got %A" other
-              finally
-                  if System.IO.Directory.Exists dir then System.IO.Directory.Delete(dir, true) ]
+                  | other -> failtestf "expected the fulltext index to survive reload, got %A" other) ]

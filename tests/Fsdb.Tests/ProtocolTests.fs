@@ -10,9 +10,6 @@ open Fsdb.Protocol
 open Fsdb.Value
 open Fsdb.Temporal
 
-let private sequencedCase name body =
-    testCase name body |> testSequenced
-
 type private BlockingWriteStream() =
     inherit IO.Stream()
 
@@ -100,7 +97,7 @@ let tests =
               let sqlState = Text.Encoding.ASCII.GetString(payload, 4, 5)
               Expect.equal sqlState "HY000" "sqlstate fallback"
 
-          sequencedCase "packet writes stop after net_write_timeout"
+          TestSupport.processGlobalCase "packet writes stop after net_write_timeout"
           <| fun _ ->
               Fsdb.Limits.withSettings [ "net_write_timeout", "1" ] (fun () ->
                   use stream = new BlockingWriteStream()

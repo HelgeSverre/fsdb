@@ -1,8 +1,6 @@
 module Fsdb.Tests.TemporalPrecisionTests
 
-// DATETIME(N)/TIMESTAMP(N)/TIME(N) fractional-second precision (fsp 0-6).
-// Every expected value here was verified against a real MySQL 8.0.33 oracle
-// (see the feature's differential checks).
+// DATETIME(N), TIMESTAMP(N), and TIME(N) follow MySQL 8.4 fractional-second precision for fsp 0..6.
 
 open System
 open System.IO
@@ -32,15 +30,11 @@ let private col name ty : ColumnDef =
 /// Runs `sql` on a fresh in-memory session, threading each statement's
 /// session forward, and returns the last statement's `QueryResult`.
 let private runSql (statements: string list) : Fsdb.Executor.QueryResult =
-    let mutable session = create 1 (Fsdb.Storage.create ())
-    let mutable result = Fsdb.Executor.Affected 0UL
+    let initial = create 1 (Fsdb.Storage.create ()), Fsdb.Executor.Affected 0UL
 
-    for sql in statements do
-        let s, r = handle session sql
-        session <- s
-        result <- r
-
-    result
+    ((initial, statements)
+     ||> List.fold (fun (session, _) sql -> handle session sql))
+    |> snd
 
 let private oneRow (statements: string list) : string option list =
     match runSql statements with

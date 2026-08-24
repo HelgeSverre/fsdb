@@ -6,14 +6,7 @@ open Fsdb.Storage
 open Fsdb.Functions
 open Fsdb.Executor
 
-/// Parses `sql` and runs it against `store`, failing the test with the
-/// parse error if the SQL itself doesn't parse — same helper shape as
-/// `ExecutorTests.run`, kept local since this file only ever runs SELECTs
-/// against `information_schema`.
-let private run (store: Store) (sql: string) : QueryResult =
-    match Fsdb.Parser.parse sql with
-    | Error msg -> failtestf "expected %s to parse, got error: %s" sql msg
-    | Ok stmt -> execute store builtins defaultDatabase (0L, 0L) false stmt |> snd
+let private run = TestSupport.Sql.executeDefault
 
 let private setup () : Store =
     let store = create ()

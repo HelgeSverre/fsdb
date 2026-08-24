@@ -5,20 +5,9 @@ open System.Threading.Tasks
 open Expecto
 open Fsdb.Executor
 
-let private run store sql =
-    match Fsdb.Parser.parse sql with
-    | Ok statement -> execute store Fsdb.Functions.builtins Fsdb.Storage.defaultDatabase (0L, 0L) false statement |> snd
-    | Error message -> failtestf "parse failed for %s: %s" sql message
-
-let private expectOk result context =
-    match result with
-    | Err(code, message) -> failtestf "%s failed (%d): %s" context code message
-    | _ -> ()
-
-let private rows store sql =
-    match run store sql with
-    | ResultSet(_, rows) -> rows
-    | other -> failtestf "expected rows from %s, got %A" sql other
+let private run = TestSupport.Sql.executeDefault
+let private expectOk = TestSupport.Sql.expectOk
+let private rows = TestSupport.Sql.rows
 
 let private setup () =
     let store = Fsdb.Storage.create ()
@@ -245,9 +234,7 @@ let tests =
 
           testCase "view definitions persist through the WAL"
           <| fun _ ->
-              let dir = TestSupport.directory "view"
-
-              try
+              TestSupport.withDirectory "view" (fun dir ->
                   let store = Fsdb.Storage.create ()
                   Fsdb.Persistence.attach dir store
                   expectOk (run store "CREATE TABLE t (id INT PRIMARY KEY)") "create table"
@@ -263,9 +250,7 @@ let tests =
 
                   match run reloaded "INSERT INTO positive VALUES (0)" with
                   | Err(1369, "CHECK OPTION failed 'fsdb.positive'") -> ()
-                  | other -> failtestf "expected persisted CHECK OPTION, got %A" other
-              finally
-                  System.IO.Directory.Delete(dir, true)
+                  | other -> failtestf "expected persisted CHECK OPTION, got %A" other)
 
           testCase "SHOW and information_schema expose stored views"
           <| fun _ ->

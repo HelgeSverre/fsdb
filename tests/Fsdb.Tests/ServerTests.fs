@@ -220,47 +220,43 @@ let tests =
           <| fun _ ->
               Fsdb.Limits.withSettings [ "max_connections", "1" ] (fun () ->
                   async {
-                      let listener = Fsdb.Server.startListening Net.IPAddress.Loopback 0
                       let store = Fsdb.Storage.create ()
-                      Fsdb.Server.serve listener store Fsdb.Functions.empty |> Async.Start
+                      use server = TestSupport.ServerFixture.start store Fsdb.Functions.empty
 
                       use admitted = new Net.Sockets.TcpClient()
                       use refused = new Net.Sockets.TcpClient()
 
-                      try
-                          do! admitted.ConnectAsync(Net.IPAddress.Loopback, Fsdb.Server.port listener) |> Async.AwaitTask
-                          let! handshake = readPacketAsync (admitted.GetStream())
-                          Expect.isSome handshake "the admitted connection receives a handshake"
+                      do! admitted.ConnectAsync(Net.IPAddress.Loopback, server.Port) |> Async.AwaitTask
+                      let! handshake = readPacketAsync (admitted.GetStream())
+                      Expect.isSome handshake "the admitted connection receives a handshake"
 
-                          do! refused.ConnectAsync(Net.IPAddress.Loopback, Fsdb.Server.port listener) |> Async.AwaitTask
-                          let! response = readPacketAsync (refused.GetStream())
+                      do! refused.ConnectAsync(Net.IPAddress.Loopback, server.Port) |> Async.AwaitTask
+                      let! response = readPacketAsync (refused.GetStream())
 
-                          match response with
-                          | None -> failtest "expected a 1040 packet before close"
-                          | Some packet ->
-                              Expect.equal packet.SeqId 0uy "the pre-handshake error starts a packet sequence"
-                              Expect.equal packet.Payload.[0] 0xffuy "ERR header"
-                              let reader = Reader(packet.Payload.[1..])
-                              Expect.equal (reader.ReadInt16LE()) 1040 "Too many connections code"
-                              Expect.equal (Text.Encoding.ASCII.GetString(packet.Payload, 4, 5)) "08004" "connection-rejection SQLSTATE"
+                      match response with
+                      | None -> failtest "expected a 1040 packet before close"
+                      | Some packet ->
+                          Expect.equal packet.SeqId 0uy "the pre-handshake error starts a packet sequence"
+                          Expect.equal packet.Payload.[0] 0xffuy "ERR header"
+                          let reader = Reader(packet.Payload.[1..])
+                          Expect.equal (reader.ReadInt16LE()) 1040 "Too many connections code"
+                          Expect.equal (Text.Encoding.ASCII.GetString(packet.Payload, 4, 5)) "08004" "connection-rejection SQLSTATE"
 
-                          // A client is allowed to disappear before the
-                          // best-effort 1040 write completes. Repeated reset
-                          // peers must not take the detached accept loop down.
-                          for _ in 1 .. 20 do
-                              use resetPeer = new Net.Sockets.TcpClient()
-                              resetPeer.Client.LingerState <- Net.Sockets.LingerOption(true, 0)
-                              do! resetPeer.ConnectAsync(Net.IPAddress.Loopback, Fsdb.Server.port listener) |> Async.AwaitTask
-                              resetPeer.Close()
+                      // A client is allowed to disappear before the
+                      // best-effort 1040 write completes. Repeated reset
+                      // peers must not take the detached accept loop down.
+                      for _ in 1 .. 20 do
+                          use resetPeer = new Net.Sockets.TcpClient()
+                          resetPeer.Client.LingerState <- Net.Sockets.LingerOption(true, 0)
+                          do! resetPeer.ConnectAsync(Net.IPAddress.Loopback, server.Port) |> Async.AwaitTask
+                          resetPeer.Close()
 
-                          admitted.Close()
-                          do! Async.Sleep 50
+                      admitted.Close()
+                      do! Async.Sleep 50
 
-                          use afterResets = new Net.Sockets.TcpClient()
-                          do! afterResets.ConnectAsync(Net.IPAddress.Loopback, Fsdb.Server.port listener) |> Async.AwaitTask
-                          let! laterHandshake = readPacketAsync (afterResets.GetStream())
-                          Expect.isSome laterHandshake "the server still accepts after reset rejection writes"
-                      finally
-                          listener.Stop()
+                      use afterResets = new Net.Sockets.TcpClient()
+                      do! afterResets.ConnectAsync(Net.IPAddress.Loopback, server.Port) |> Async.AwaitTask
+                      let! laterHandshake = readPacketAsync (afterResets.GetStream())
+                      Expect.isSome laterHandshake "the server still accepts after reset rejection writes"
                   }
                   |> Async.RunSynchronously) ]

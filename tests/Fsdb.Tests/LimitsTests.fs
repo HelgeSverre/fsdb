@@ -237,11 +237,9 @@ let tests =
           testCase "!include and !includedir pull in other files, and a cycle terminates"
           <| fun _ ->
               withSettings [] (fun () ->
-                  let dir = TestSupport.directory "limits"
-                  let fragments = IO.Path.Combine(dir, "conf.d")
-                  IO.Directory.CreateDirectory fragments |> ignore
-
-                  try
+                  TestSupport.withDirectory "limits" (fun dir ->
+                      let fragments = IO.Path.Combine(dir, "conf.d")
+                      IO.Directory.CreateDirectory fragments |> ignore
                       IO.File.WriteAllText(
                           IO.Path.Combine(dir, "my.cnf"),
                           "[mysqld]\nmax_connections = 9\n!include included.cnf\n!includedir conf.d\n"
@@ -265,12 +263,7 @@ let tests =
 
                       match loadDefaultsFile (IO.Path.Combine(dir, "loop.cnf")) with
                       | Ok() -> Expect.equal waitTimeoutSeconds 61 "the self-including file still applied its own lines"
-                      | Error e -> failtestf "a self-include should be ignored, not an error: %s" e
-                  finally
-                      try
-                          IO.Directory.Delete(dir, true)
-                      with _ ->
-                          ())
+                      | Error e -> failtestf "a self-include should be ignored, not an error: %s" e))
 
           testCase "a missing !include target is reported against the line that asked for it"
           <| fun _ ->
@@ -284,9 +277,7 @@ let tests =
           testCase "default option files apply in order and ignore missing paths"
           <| fun _ ->
               withSettings [] (fun () ->
-                  let dir = TestSupport.directory "limits"
-
-                  try
+                  TestSupport.withDirectory "limits" (fun dir ->
                       let systemFile = IO.Path.Combine(dir, "system.cnf")
                       let userFile = IO.Path.Combine(dir, "user.cnf")
                       IO.File.WriteAllText(systemFile, "[mysqld]\nwait_timeout = 41\nmax_connections = 8\n")
@@ -296,9 +287,7 @@ let tests =
                       | Ok() ->
                           Expect.equal waitTimeoutSeconds 73 "later file overrides earlier file"
                           Expect.equal maxConnections 8 "unreplaced earlier setting remains"
-                      | Error error -> failtestf "expected defaults to load, got %s" error
-                  finally
-                      IO.Directory.Delete(dir, true))
+                      | Error error -> failtestf "expected defaults to load, got %s" error))
 
           testCase "default option paths include system and user files"
           <| fun _ ->

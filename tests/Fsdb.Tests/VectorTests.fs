@@ -190,38 +190,33 @@ let tests =
           testCase "MySqlConnector reads a VECTOR column as byte[] (blob + binary charset on the wire)"
           <| fun _ ->
               async {
-                  let listener = Fsdb.Server.startListening System.Net.IPAddress.Loopback 0
-                  let port = Fsdb.Server.port listener
-                  Fsdb.Server.serve listener (Fsdb.Storage.create ()) Fsdb.Functions.builtins |> Async.StartAsTask |> ignore
+                  use server = TestSupport.ServerFixture.start (Fsdb.Storage.create ()) Fsdb.Functions.builtins
 
-                  try
-                      let connStr =
-                          sprintf
-                              "Server=127.0.0.1;Port=%d;User ID=root;Password=;AllowPublicKeyRetrieval=True;SslMode=None"
-                              port
+                  let connStr =
+                      sprintf
+                          "Server=127.0.0.1;Port=%d;User ID=root;Password=;AllowPublicKeyRetrieval=True;SslMode=None"
+                          server.Port
 
-                      use conn = new MySqlConnector.MySqlConnection(connStr)
-                      do! conn.OpenAsync() |> Async.AwaitTask
+                  use conn = new MySqlConnector.MySqlConnection(connStr)
+                  do! conn.OpenAsync() |> Async.AwaitTask
 
-                      use create = conn.CreateCommand()
-                      create.CommandText <- "CREATE TABLE docs (id INT, embedding VECTOR(2))"
-                      do! create.ExecuteNonQueryAsync() |> Async.AwaitTask |> Async.Ignore
+                  use create = conn.CreateCommand()
+                  create.CommandText <- "CREATE TABLE docs (id INT, embedding VECTOR(2))"
+                  do! create.ExecuteNonQueryAsync() |> Async.AwaitTask |> Async.Ignore
 
-                      use insert = conn.CreateCommand()
-                      insert.CommandText <- "INSERT INTO docs VALUES (1, STRING_TO_VECTOR('[1.5, -2.5]'))"
-                      do! insert.ExecuteNonQueryAsync() |> Async.AwaitTask |> Async.Ignore
+                  use insert = conn.CreateCommand()
+                  insert.CommandText <- "INSERT INTO docs VALUES (1, STRING_TO_VECTOR('[1.5, -2.5]'))"
+                  do! insert.ExecuteNonQueryAsync() |> Async.AwaitTask |> Async.Ignore
 
-                      use select = conn.CreateCommand()
-                      select.CommandText <- "SELECT embedding FROM docs"
-                      use! reader = select.ExecuteReaderAsync() |> Async.AwaitTask
-                      let! hasRow = reader.ReadAsync() |> Async.AwaitTask
-                      Expect.isTrue hasRow "vector row present"
+                  use select = conn.CreateCommand()
+                  select.CommandText <- "SELECT embedding FROM docs"
+                  use! reader = select.ExecuteReaderAsync() |> Async.AwaitTask
+                  let! hasRow = reader.ReadAsync() |> Async.AwaitTask
+                  Expect.isTrue hasRow "vector row present"
 
-                      let expected = Array.append (BitConverter.GetBytes 1.5f) (BitConverter.GetBytes -2.5f)
-                      Expect.equal (reader.GetFieldValue<byte[]> 0) expected "little-endian float32 bytes"
-                      do! reader.CloseAsync() |> Async.AwaitTask
-                      do! conn.CloseAsync() |> Async.AwaitTask
-                  finally
-                      listener.Stop()
+                  let expected = Array.append (BitConverter.GetBytes 1.5f) (BitConverter.GetBytes -2.5f)
+                  Expect.equal (reader.GetFieldValue<byte[]> 0) expected "little-endian float32 bytes"
+                  do! reader.CloseAsync() |> Async.AwaitTask
+                  do! conn.CloseAsync() |> Async.AwaitTask
               }
               |> Async.RunSynchronously ]

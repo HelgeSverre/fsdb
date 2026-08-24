@@ -10,24 +10,10 @@ open Fsdb.Functions
 open Fsdb.Executor
 open Fsdb.QueryHandler
 
-/// Same shape as `ExecutorTests.run`: parse + execute one statement against
-/// `store`, failing the test on a parse error so cases read as plain SQL.
-let private run (store: Store) (registry: Registry) (sql: string) : QueryResult =
-    match Fsdb.Parser.parse sql with
-    | Error msg -> failtestf "expected %s to parse, got error: %s" sql msg
-    | Ok stmt -> execute store registry defaultDatabase (0L, 0L) false stmt |> snd
-
-let private runDefault (store: Store) (sql: string) : QueryResult = run store builtins sql
-
-let private expectOk (result: QueryResult) (label: string) =
-    match result with
-    | Err(code, msg) -> failtestf "%s: unexpected error %d: %s" label code msg
-    | _ -> ()
-
-let private rows (store: Store) (sql: string) : string option list list =
-    match runDefault store sql with
-    | ResultSet(_, rows) -> rows
-    | other -> failtestf "expected a resultset from %s, got %A" sql other
+let private run = TestSupport.Sql.execute
+let private runDefault = TestSupport.Sql.executeDefault
+let private expectOk = TestSupport.Sql.expectOk
+let private rows = TestSupport.Sql.rows
 
 /// t (the trigger's subject) + log (what the body writes into).
 let private setup (store: Store) =

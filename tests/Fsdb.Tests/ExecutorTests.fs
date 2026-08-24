@@ -7,15 +7,8 @@ open Fsdb.Storage
 open Fsdb.Functions
 open Fsdb.Executor
 
-/// Parses `sql` and runs it against a fresh in-memory store, failing the
-/// test with the parse error if the SQL itself doesn't parse — end-to-end
-/// statement tests read as plain "run this SQL, check this QueryResult".
-let private run (store: Store) (registry: Registry) (sql: string) : QueryResult =
-    match Fsdb.Parser.parse sql with
-    | Error msg -> failtestf "expected %s to parse, got error: %s" sql msg
-    | Ok stmt -> execute store registry defaultDatabase (0L, 0L) false stmt |> snd
-
-let private runDefault (store: Store) (sql: string) : QueryResult = run store builtins sql
+let private run = TestSupport.Sql.execute
+let private runDefault = TestSupport.Sql.executeDefault
 
 let private newStore () = create ()
 

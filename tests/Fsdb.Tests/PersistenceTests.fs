@@ -12,13 +12,9 @@ open Fsdb.Binary
 open Fsdb.Executor
 open Fsdb.QueryHandler
 
-/// A fresh, empty scratch directory under the OS temp dir — one per test, so
-/// tests never trip over each other's `wal.jsonl`/`snapshot.fsdb`.
+/// A fresh scratch directory keeps each test's `wal.bin` and `snapshot.fsdb` isolated.
 let private tempDataDir () =
     TestSupport.directory "persistence"
-
-let private sequencedCase name body =
-    testCase name body |> testSequenced
 
 let private usersColumns =
     [ { Name = "id"
@@ -1141,7 +1137,7 @@ let tests =
               Expect.containsAll names [ VString "keep-me" ] "the real snapshot survives a torn .new instead of being wiped"
               Expect.isTrue (File.Exists(snapshotPath dir + ".new")) "the rejected .new is left alone, not promoted"
 
-          sequencedCase "concurrent writes to two databases across a forced WAL rotation replay with no duplicated/lost rows"
+          TestSupport.processGlobalCase "concurrent writes to two databases across a forced WAL rotation replay with no duplicated/lost rows"
           <| fun _ ->
               let dir = tempDataDir ()
               let store = load dir
@@ -1294,9 +1290,7 @@ let tests =
 
           testCase "WAL replay preserves CREATE and TRUNCATE times"
           <| fun _ ->
-              let dir = tempDataDir ()
-
-              try
+              TestSupport.withDirectory "persistence" (fun dir ->
                   let store = load dir
                   attach dir store
                   createTable store defaultDatabase "stable_time" [ mkCol "id" (TInt false) ] [] [] None None |> ignore
@@ -1312,9 +1306,7 @@ let tests =
                   Threading.Thread.Sleep 10
                   let reloaded = load dir
                   let actual = reloaded.Catalog.[defaultDatabase].["stable_time"].CreateTime
-                  Expect.equal actual expected "TRUNCATE time"
-              finally
-                  Directory.Delete(dir, true)
+                  Expect.equal actual expected "TRUNCATE time")
 
           testCase "a table with a column of every ColumnType survives a restart with byte-identical SHOW CREATE TABLE output"
           <| fun _ ->
