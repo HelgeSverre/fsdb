@@ -51,7 +51,7 @@ accepted (marked `ponytail:` in source), or recorded only in
 Working core: full DML (INSERT/REPLACE/UPDATE/DELETE incl. INSERT/REPLACE SET
 and multi-table forms,
 ODKU, IGNORE), SELECT with joins (INNER/LEFT/RIGHT/CROSS/NATURAL/USING),
-derived/LATERAL/JSON_TABLE sources, CTEs (top-level, recursive), set
+derived/LATERAL/JSON_TABLE sources, query-scoped CTEs (ordinary and recursive), set
 operations, window functions with frames, GROUP BY WITH ROLLUP + GROUPING,
 DDL for databases/tables/indexes/views/triggers/users/grants, CREATE TABLE AS
 SELECT, TRUNCATE,
@@ -81,7 +81,6 @@ variants), USE, KILL, DESCRIBE are text-probed before the grammar
 | Gap | MySQL 8.4 | fsdb | Impact | Class |
 |---|---|---|---|---|
 | Locking detail | `FOR UPDATE/SHARE [OF tbl…] [NOWAIT|SKIP LOCKED]` | `FOR UPDATE`/`FOR SHARE`/`LOCK IN SHARE MODE` accepted and ignored; no OF/NOWAIT/SKIP LOCKED | low | divergence |
-| CTE placement | `WITH` in subqueries, derived tables, `INSERT…WITH` | top-level SELECT/UNION only (`Parser.fs:2458–2464`) | medium | refusal |
 
 Expression coverage that does exist: full comparison/logical/arithmetic
 operators incl. `<=>`, row-value comparisons and `IN`, `XOR`, three-valued logic; CASE (both forms);

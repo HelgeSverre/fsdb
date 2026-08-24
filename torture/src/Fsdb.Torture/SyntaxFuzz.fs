@@ -32,6 +32,10 @@ module SyntaxFuzz =
            "weight_string", "SELECT HEX(WEIGHT_STRING(_utf8mb4'a' COLLATE utf8mb4_bin AS CHAR(3)))"
            "quoted_user_variable", "SET @`syntax.name` := (@'second' := 2) + 1"
            "recursive_cte", "WITH RECURSIVE c(n) AS (SELECT 1 UNION ALL SELECT n + 1 FROM c WHERE n < 3) SELECT SUM(n) FROM c"
+           "nested_cte", "WITH outer_c AS (WITH inner_c AS (SELECT 42 AS n) SELECT n FROM inner_c) SELECT n FROM outer_c"
+           "cte_subqueries",
+           "SELECT (WITH scalar_c AS (SELECT 2 AS n) SELECT n FROM scalar_c), EXISTS (WITH exists_c AS (SELECT 1 AS n) SELECT n FROM exists_c), 2 IN (WITH in_c AS (SELECT 1 AS n UNION ALL SELECT 2) SELECT n FROM in_c)"
+           "cte_derived", "SELECT d.n FROM (WITH c AS (SELECT 1 AS n) SELECT n FROM c UNION ALL SELECT 2) AS d ORDER BY d.n"
            "composite_index", sprintf "CREATE INDEX ix_syntax_%s ON syntax_target (n, label)" suffix
            "view_check_option", sprintf "CREATE VIEW syntax_view_%s AS SELECT id, n FROM syntax_target WHERE n > 0 WITH CHECK OPTION" suffix
            "ordered_compound_trigger",
@@ -40,6 +44,8 @@ module SyntaxFuzz =
                suffix
            "odku", "INSERT INTO syntax_target VALUES (1, 11, 'changed') ON DUPLICATE KEY UPDATE n = VALUES(n), label = VALUES(label)"
            "odku_select_source", "INSERT INTO syntax_target (id, n, label) SELECT id, n, label FROM syntax_source AS s ON DUPLICATE KEY UPDATE n = VALUES(n), label = s.update_label"
+           "cte_insert_source",
+           "INSERT INTO syntax_target (id, n, label) WITH c AS (SELECT id, n, label FROM syntax_source) SELECT id, n, label FROM c ON DUPLICATE KEY UPDATE n = VALUES(n), label = VALUES(label)"
            "replace_select", "REPLACE INTO syntax_target SELECT 2, 20, 'replacement'"
            "serializable", "SET TRANSACTION ISOLATION LEVEL SERIALIZABLE"
            "column_comment", sprintf "CREATE TABLE syntax_comment_%s (id INT COMMENT 'syntax corpus')" suffix

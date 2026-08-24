@@ -7926,6 +7926,74 @@ let tests =
                          + "SELECT g, id, v FROM ranked WHERE r = 1 ORDER BY g")
                         [ [ Some "1"; Some "2"; Some "20" ]; [ Some "2"; Some "5"; Some "50" ] ]
 
+                testCase "CTEs compose inside expression and derived-table subqueries"
+                <| fun _ ->
+                    expectRows
+                        ("WITH outer_c AS (SELECT 5 AS n) "
+                         + "SELECT "
+                         + "(WITH inner_c AS (SELECT n + 1 AS n FROM outer_c) SELECT n FROM inner_c), "
+                         + "EXISTS (WITH present AS (SELECT 1 AS n) SELECT n FROM present), "
+                         + "2 IN (WITH values_c AS (SELECT 1 AS n UNION ALL SELECT 2) SELECT n FROM values_c), "
+                         + "2 = ANY (WITH quantified_c AS (SELECT 1 AS n UNION ALL SELECT 2) SELECT n FROM quantified_c), "
+                         + "d.n "
+                         + "FROM (WITH derived_c AS (SELECT 42 AS n) SELECT n FROM derived_c UNION ALL SELECT 43 LIMIT 1) AS d")
+                        [ [ Some "6"; Some "1"; Some "1"; Some "1"; Some "42" ] ]
+
+                testCase "an inner CTE shadows its outer scope without leaking"
+                <| fun _ ->
+                    expectRows
+                        "WITH c AS (SELECT 1 AS n) SELECT (WITH c AS (SELECT 2 AS n) SELECT n FROM c), (SELECT n FROM c)"
+                        [ [ Some "2"; Some "1" ] ]
+
+                testCase "a nested CTE may reference its enclosing query row"
+                <| fun _ ->
+                    expectRows
+                        "SELECT id, (WITH c AS (SELECT t.id + 1 AS n) SELECT n FROM c) FROM t WHERE id <= 2 ORDER BY id"
+                        [ [ Some "1"; Some "2" ]; [ Some "2"; Some "3" ] ]
+
+                testCase "a CTE body may contain its own WITH clause"
+                <| fun _ ->
+                    expectRows
+                        "WITH outer_c AS (WITH inner_c AS (SELECT 42 AS n) SELECT n FROM inner_c) SELECT n FROM outer_c"
+                        [ [ Some "42" ] ]
+
+                testCase "duplicate CTE names are rejected before execution"
+                <| fun _ ->
+                    match runDefault (cteStore ()) "WITH c AS (SELECT 1 AS n), c AS (SELECT 2 AS n) SELECT n FROM c" with
+                    | Err(1066, "Not unique table/alias: 'c'") -> ()
+                    | other -> failtestf "expected duplicate CTE error 1066, got %A" other
+
+                testCase "INSERT SELECT accepts a CTE source"
+                <| fun _ ->
+                    let store = cteStore ()
+                    runDefault store "CREATE TABLE inserted (id INT PRIMARY KEY)" |> ignore
+
+                    match
+                        runDefault
+                            store
+                            "INSERT INTO inserted (id) WITH c AS (SELECT 1 AS n UNION ALL SELECT 2) SELECT n FROM c"
+                    with
+                    | Affected 2UL -> ()
+                    | other -> failtestf "expected two inserted rows, got %A" other
+
+                    match runDefault store "SELECT id FROM inserted ORDER BY id" with
+                    | ResultSet(_, [ [ Some "1" ]; [ Some "2" ] ]) -> ()
+                    | other -> failtestf "expected CTE rows in the target table, got %A" other
+
+                testCase "REPLACE SELECT accepts a CTE source"
+                <| fun _ ->
+                    let store = cteStore ()
+                    runDefault store "CREATE TABLE replaced (id INT PRIMARY KEY, n INT)" |> ignore
+                    runDefault store "INSERT INTO replaced VALUES (1, 10)" |> ignore
+
+                    match runDefault store "REPLACE INTO replaced WITH c AS (SELECT 1 AS id, 20 AS n) SELECT id, n FROM c" with
+                    | Affected 2UL -> ()
+                    | other -> failtestf "expected one replaced row, got %A" other
+
+                    match runDefault store "SELECT id, n FROM replaced" with
+                    | ResultSet(_, [ [ Some "1"; Some "20" ] ]) -> ()
+                    | other -> failtestf "expected the CTE replacement, got %A" other
+
                 testCase "WITH RECURSIVE generates a series and renames its column"
                 <| fun _ ->
                     expectRows

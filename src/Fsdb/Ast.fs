@@ -427,7 +427,7 @@ and CommonTableExpr =
 ///
 /// `INTERSECT` binds *tighter* than `UNION`/`EXCEPT` (oracle-verified:
 /// `SELECT 1 UNION SELECT 2 INTERSECT SELECT 3` is one row, `1`), so a flat
-/// list of these is not a left-to-right fold — `Executor.runUnionStmt`
+/// list of these is not a left-to-right fold — `Executor.runTopLevelUnion`
 /// collapses the `INTERSECT` runs first. `UNION` and `EXCEPT` share one
 /// precedence level and associate left to right.
 and SetOp =

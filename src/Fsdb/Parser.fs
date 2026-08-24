@@ -643,6 +643,10 @@ let private expr, exprRef = createParserForwardedToRef<Expr, unit> ()
 /// by `selectStmt` once `tableRef`/`projection`/etc. exist.
 let private selectStmtRecord, selectStmtRecordRef = createParserForwardedToRef<SelectStmt, unit> ()
 
+let private selectWithCtes, selectWithCtesRef = createParserForwardedToRef<SelectStmt, unit> ()
+
+let private selectQuery, selectQueryRef = createParserForwardedToRef<SelectOrUnion, unit> ()
+
 /// `EXPLAIN stmt` wraps any other statement, including (in principle)
 /// another `EXPLAIN` — tie the same forward-reference knot so `explainStmt`
 /// (defined well before the full `statement` choice exists) can recurse into
@@ -938,14 +942,14 @@ let private castExpr: Parser<Expr, unit> =
         | _ -> cast
 
 let private existsExpr: Parser<Expr, unit> =
-    attempt (keyword "EXISTS" >>. sym "(" >>. selectStmtRecord .>> sym ")") |>> Exists
+    attempt (keyword "EXISTS" >>. sym "(" >>. selectWithCtes .>> sym ")") |>> Exists
 
 /// `(SELECT ...)` used as a value — tried with `attempt` ahead of parenthesized expressions
 /// since both start with `(`; a plain parenthesized expression never starts
-/// with the `SELECT` keyword, so the two never actually compete once
-/// `selectStmtRecord` commits.
+/// with `SELECT` or `WITH`, so the two never compete once `selectWithCtes`
+/// commits.
 let private subqueryExpr: Parser<Expr, unit> =
-    attempt (sym "(" >>. selectStmtRecord .>> sym ")") |>> Subquery
+    attempt (sym "(" >>. selectWithCtes .>> sym ")") |>> Subquery
 
 /// `INTERVAL n UNIT` — only ever valid as a date-arithmetic function's
 /// argument (`DATE_ADD(x, INTERVAL 1 DAY)`), but parsed here as a general
@@ -1480,11 +1484,11 @@ opp.AddOperator(PrefixOperator("-", ws, 7, true, negateExpr))
 opp.AddOperator(PrefixOperator("~", ws, 7, true, (fun value -> FuncCall("BITWISE_NOT", [ value ]))))
 
 /// `IN (SELECT ...)` vs. `IN (expr, expr, ...)` — both start with `(`, so
-/// the subquery form is tried first (`attempt`ed since `selectStmtRecord`
+/// the subquery form is tried first (`attempt`ed since `selectWithCtes`
 /// commits on its leading `SELECT` keyword the same way `subqueryExpr`
 /// does) before falling back to the literal candidate list.
 let private inCandidates: Parser<Choice<SelectStmt, Expr list>, unit> =
-    sym "(" >>. (attempt (selectStmtRecord |>> Choice1Of2) <|> (sepBy1 expr (sym ",") |>> Choice2Of2)) .>> sym ")"
+    sym "(" >>. (attempt (selectWithCtes |>> Choice1Of2) <|> (sepBy1 expr (sym ",") |>> Choice2Of2)) .>> sym ")"
 
 let private betweenTail: Parser<Expr * Expr, unit> = (arithExpr .>> keyword "AND") .>>. arithExpr
 
@@ -1535,7 +1539,7 @@ let private quantifiedComparison: Parser<Op * Quantifier * SelectStmt, unit> =
               pstring ">" >>% Gt ]
         .>> ws
 
-    comparisonOp .>>. quantifier .>>. between (sym "(") (sym ")") selectStmtRecord
+    comparisonOp .>>. quantifier .>>. between (sym "(") (sym ")") selectWithCtes
     |>> fun ((op, quantifier), select) -> op, quantifier, select
 
 let private comparisonExpr: Parser<Expr, unit> =
@@ -2257,7 +2261,7 @@ let private insertStmt: Parser<Statement, unit> =
               [ ((keyword "VALUES" <|> keyword "VALUE") >>. sepBy1 row (sym ",")
                  .>>. opt onDuplicateKeyUpdate)
                 |>> Choice1Of3
-                (selectStmtRecord .>>. opt onDuplicateKeyUpdate) |>> Choice2Of3
+                (selectWithCtes .>>. opt onDuplicateKeyUpdate) |>> Choice2Of3
                 (keyword "SET" >>. assignments .>>. opt onDuplicateKeyUpdate) |>> Choice3Of3 ])
     |>> fun (((ignoreDuplicates, table), cols), branch) ->
         let cols = cols |> Option.defaultValue []
@@ -2279,7 +2283,7 @@ let private replaceStmt: Parser<Statement, unit> =
         columns
         .>>. choice
                  [ ((keyword "VALUES" <|> keyword "VALUE") >>. sepBy1 row (sym ",")) |>> Choice1Of2
-                   selectStmtRecord |>> Choice2Of2 ]
+                   selectWithCtes |>> Choice2Of2 ]
 
     (keyword "REPLACE"
      >>. optional (keyword "INTO")
@@ -2423,7 +2427,7 @@ let private parenSelectFlag: Parser<SelectStmt * bool, unit> =
 /// `SELECT`s — `ALL` keeps duplicates, the bare operator (or an explicit
 /// `DISTINCT`) dedupes, matching MySQL's default for all three. Precedence
 /// isn't expressed here: the flat operator list carries it to
-/// `Executor.runUnionStmt` (see `Ast.SetOp`).
+/// `Executor.runTopLevelUnion` (see `Ast.SetOp`).
 let private unionOp: Parser<SetOp, unit> =
     let all = (keyword "ALL" >>% true) <|> (optional (keyword "DISTINCT") >>% false)
 
@@ -2524,19 +2528,13 @@ let private combineUnion
 /// ahead of `tableRef |>> FromTable` since both start by looking for `(` vs.
 /// a bare identifier — no ambiguity in practice (a real table name is never
 /// `(`), but `attempt` keeps the two alternatives cleanly independent. The
-/// body may itself be a `UNION` (Laravel's `unionAll(...)->paginate()`
+/// body may itself carry a `WITH` clause or `UNION` (Laravel's `unionAll(...)->paginate()`
 /// compiles to `SELECT COUNT(*) FROM ((SELECT ...) UNION (SELECT ...)) AS
-/// alias`), hence `selectOrUnionBranches` rather than a bare `selectStmtRecord`
-/// — and `unionTailClause` lets a union-level `ORDER BY`/`LIMIT` sit inside
-/// the derived table's own parens, ahead of its closing `)`.
+/// alias`), hence `selectQuery` rather than a bare `selectStmtRecord`.
 let private derivedTable: Parser<FromItem, unit> =
     attempt (
         sym "("
-        >>. (selectOrUnionBranches
-             >>= fun (first, rest) ->
-                 match rest with
-                 | [] -> preturn (PlainSelect(fst first))
-                 | _ -> unionTailClause |>> fun tail -> combineUnion first rest tail |> UnionSelect)
+        >>. selectQuery
         .>> sym ")"
         .>>. ((keyword "AS" >>. identifier) <|> identifier)
     )
@@ -2840,12 +2838,8 @@ selectStmtRecordRef.Value <-
           Locking = locking.IsSome }
 
 /// `WITH [RECURSIVE] name [(col, ...)] AS (body), ...` — the CTE list that
-/// may precede a `SELECT`/`UNION`. Attached to the statement's *first*
-/// `SelectStmt` (`Ctes`), which is where the executor pushes the scope from
-/// for a union too (`Ast.Statement.Union` carries no clause list of its
-/// own). ponytail: CTEs only lead a top-level `SELECT`/`UNION` — not
-/// `INSERT ... WITH ...`, not a derived table's own body; both are a
-/// `withClause` call away if a client sends one.
+/// may precede a query expression. Attached to the first `SelectStmt`, which
+/// is where the executor establishes scope for both plain and set queries.
 let private withClause: Parser<CommonTableExpr list, unit> =
     keyword "WITH" >>. opt (keyword "RECURSIVE")
     >>= fun recursive ->
@@ -2853,14 +2847,7 @@ let private withClause: Parser<CommonTableExpr list, unit> =
             (identifier
              .>>. opt (between (sym "(") (sym ")") (sepBy1 identifier (sym ",")))
              .>> keyword "AS"
-             .>>. between
-                 (sym "(")
-                 (sym ")")
-                 (selectOrUnionBranches
-                  >>= fun (first, rest) ->
-                      match rest with
-                      | [] -> preturn (PlainSelect(fst first))
-                      | _ -> unionTailClause |>> fun tail -> combineUnion first rest tail |> UnionSelect)
+             .>>. between (sym "(") (sym ")") selectQuery
              |>> fun ((name, cols), body) ->
                  { CteName = name
                    CteColumns = cols |> Option.defaultValue []
@@ -2868,13 +2855,7 @@ let private withClause: Parser<CommonTableExpr list, unit> =
                    Body = body })
             (sym ",")
 
-/// A single `SELECT`, or a `UNION`-chained sequence of them
-/// (`selectOrUnionBranches`, shared with `derivedTable` — see its doc). Each
-/// branch is a full `selectStmtRecord` (so it can itself carry a trailing
-/// `ORDER BY`/`LIMIT`/lock clause), and a genuine union-level clause
-/// (`unionTailClause`) is tried once at least one `UNION` branch parsed —
-/// `combineUnion` picks between the two per branch/clause.
-let private selectOrUnionStmt: Parser<Statement, unit> =
+selectQueryRef.Value <-
     opt withClause .>>. selectOrUnionBranches
     >>= fun (ctes, (first, rest)) ->
         let first =
@@ -2883,8 +2864,26 @@ let private selectOrUnionStmt: Parser<Statement, unit> =
             | None -> first
 
         match rest with
-        | [] -> preturn (Select(fst first))
-        | _ -> unionTailClause |>> fun tail -> combineUnion first rest tail |> Union
+        | [] -> preturn (PlainSelect(fst first))
+        | _ -> unionTailClause |>> fun tail -> combineUnion first rest tail |> UnionSelect
+
+selectWithCtesRef.Value <-
+    selectQuery
+    >>= function
+        | PlainSelect select -> preturn select
+        | UnionSelect _ -> fail "set operation is not valid in this subquery position"
+
+/// A single `SELECT`, or a `UNION`-chained sequence of them
+/// (`selectOrUnionBranches`, shared with `derivedTable` — see its doc). Each
+/// branch is a full `selectStmtRecord` (so it can itself carry a trailing
+/// `ORDER BY`/`LIMIT`/lock clause), and a genuine union-level clause
+/// (`unionTailClause`) is tried once at least one `UNION` branch parsed —
+/// `combineUnion` picks between the two per branch/clause.
+let private selectOrUnionStmt: Parser<Statement, unit> =
+    selectQuery
+    |>> function
+        | PlainSelect select -> Select select
+        | UnionSelect(first, rest, orderBy, limit, offset) -> Union(first, rest, orderBy, limit, offset)
 
 let private createTableAs: Parser<Statement, unit> =
     (keyword "CREATE" >>. keyword "TABLE"

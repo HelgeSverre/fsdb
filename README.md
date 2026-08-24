@@ -211,7 +211,8 @@ type for every statement the grammar parses; only the text-probed `SET`/
 
 The grammar covers the core used by MySQL-backed applications: `SELECT` with
 joins (`NATURAL`/`USING` included), derived tables, `GROUP BY`/`HAVING`, window
-functions, `UNION [ALL]`, expression subqueries, ordinary and recursive CTEs,
+functions, `UNION [ALL]`, expression subqueries, ordinary and recursive CTEs
+at top level and inside subqueries, derived tables, and INSERT/REPLACE sources,
 JSON paths and `JSON_TABLE`, multi-table `UPDATE`/`DELETE`, `REPLACE`,
 `EXPLAIN`, enforced and `NOT ENFORCED` `CHECK` constraints, typed user and
 system variables in expressions, direct single-table updatable views,

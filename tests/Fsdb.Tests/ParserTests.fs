@@ -1294,6 +1294,18 @@ let tests =
                         false) -> ()
                     | other -> failtestf "expected an InsertSelect with the ODKU assignments, got %A" other
 
+                testCase "INSERT accepts a WITH clause on its SELECT source"
+                <| fun _ ->
+                    match parseOk "INSERT INTO t (a) WITH c AS (SELECT 1 AS n) SELECT n FROM c" with
+                    | InsertSelect("t", [ "a" ], { Ctes = [ { CteName = "c" } ] }, [], false) -> ()
+                    | other -> failtestf "expected an InsertSelect with a CTE source, got %A" other
+
+                testCase "a WITH clause cannot precede INSERT"
+                <| fun _ ->
+                    Expect.isError
+                        (parse "WITH c AS (SELECT 1 AS n) INSERT INTO t (a) SELECT n FROM c")
+                        "MySQL requires WITH after the INSERT target"
+
                 testCase "REPLACE accepts optional INTO, VALUE, and ROW constructors"
                 <| fun _ ->
                     Expect.equal
@@ -1310,6 +1322,12 @@ let tests =
                     match parseOk "REPLACE INTO dst (a, b) SELECT x, y FROM src" with
                     | ReplaceSelect("dst", [ "a"; "b" ], _) -> ()
                     | other -> failtestf "expected ReplaceSelect, got %A" other
+
+                testCase "REPLACE accepts a WITH clause on its SELECT source"
+                <| fun _ ->
+                    match parseOk "REPLACE INTO dst (a) WITH c AS (SELECT 1 AS n) SELECT n FROM c" with
+                    | ReplaceSelect("dst", [ "a" ], { Ctes = [ { CteName = "c" } ] }) -> ()
+                    | other -> failtestf "expected ReplaceSelect with a CTE source, got %A" other
 
                 testCase "REPLACE ... SET retains assignment expressions"
                 <| fun _ ->
@@ -1803,6 +1821,14 @@ let tests =
                     match parseOk "SELECT (SELECT COUNT(*) FROM t) AS c" with
                     | Select { Projections = [ Subquery { From = Some(FromTable { Table = "t" }) }, Some "c" ] } -> ()
                     | other -> failtestf "expected a Subquery projection, got %A" other
+
+                testCase "WITH clauses parse inside scalar and EXISTS subqueries"
+                <| fun _ ->
+                    match parseOk "SELECT (WITH c AS (SELECT 1 AS n) SELECT n FROM c), EXISTS (WITH d AS (SELECT 2 AS n) SELECT n FROM d)" with
+                    | Select { Projections = [ (Subquery scalar, None); (Exists exists, None) ] } ->
+                        Expect.equal (scalar.Ctes |> List.map _.CteName) [ "c" ] "scalar CTE"
+                        Expect.equal (exists.Ctes |> List.map _.CteName) [ "d" ] "EXISTS CTE"
+                    | other -> failtestf "expected CTE-bearing expression subqueries, got %A" other
 
                 testCase "IN (SELECT ...) parses as InSubquery"
                 <| fun _ ->

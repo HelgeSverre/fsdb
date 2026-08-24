@@ -3324,6 +3324,7 @@ and private resolveTableRef
                                         (registryForDefiner account registry)
                                         view.Schema
                                         (FromSubquery(PlainSelect select, view.Name))
+                                        None
                                 | None -> Error(Err(1449, "The user specified as a definer ('') does not exist"))
                         | Result.Ok((Union(first, rest, orderBy, limit, offset)) as statement) ->
                             match checkStoredDefiner store view.Definer view.Schema statement with
@@ -3336,6 +3337,7 @@ and private resolveTableRef
                                         (registryForDefiner account registry)
                                         view.Schema
                                         (FromSubquery(UnionSelect(first, rest, orderBy, limit, offset), view.Name))
+                                        None
                                 | None -> Error(Err(1449, "The user specified as a definer ('') does not exist"))
                         | _ -> Error(Err(1356, sprintf "View '%s.%s' references invalid table(s) or column(s)" view.Schema view.Name))
 
@@ -4196,7 +4198,7 @@ and private resolveFromItem (store: Store) (registry: Registry) (dbName: string)
         // just a derived table — including MySQL's own error for a column
         // reference that would have needed a left row. The correlated form
         // is `applyLateralJoin`, which re-runs the body per left row.
-        resolveFromSubquery store registry dbName item
+        resolveFromSubquery store registry dbName item None
     | FromJsonTable(source, path, columns, _alias) ->
         // The uncorrelated site (`FROM JSON_TABLE('literal', ...) jt` as the
         // base FROM): the source evaluates in a no-columns literal context,
@@ -4225,11 +4227,17 @@ and private resolveFromItem (store: Store) (registry: Registry) (dbName: string)
         match (if isNull (box memo) then None else (match memo.TryGetValue item with | true, v -> Some v | _ -> None)) with
         | Some cached -> cached
         | None ->
-            let computed = resolveFromSubquery store registry dbName item
+            let computed = resolveFromSubquery store registry dbName item None
             if not (isNull (box memo)) then memo.[item] <- computed
             computed
 
-and private resolveFromSubquery (store: Store) (registry: Registry) (dbName: string) (item: FromItem) : Result<ColumnDef list * Value[] list, QueryResult> =
+and private resolveFromSubquery
+    (store: Store)
+    (registry: Registry)
+    (dbName: string)
+    (item: FromItem)
+    (outer: EvalContext option)
+    : Result<ColumnDef list * Value[] list, QueryResult> =
     match item with
     | FromTable _
     | FromJsonTable _ -> resolveFromItem store registry dbName item
@@ -4242,8 +4250,9 @@ and private resolveFromSubquery (store: Store) (registry: Registry) (dbName: str
     | FromLateral(body, _alias) ->
         let result, metadata, typedRows =
             match body with
-            | PlainSelect select -> runSelectStmt store registry dbName select None
-            | UnionSelect(first, rest, orderBy, limit, offset) -> runUnionStmt store registry dbName first rest orderBy limit offset
+            | PlainSelect select -> runSelectStmt store registry dbName select outer
+            | UnionSelect(first, rest, orderBy, limit, offset) ->
+                runUnionStmtWithOuter store registry dbName first rest orderBy limit offset outer
 
         match result with
         | ResultSet(cols, _) ->
@@ -4534,7 +4543,7 @@ and private applyLateralJoin
                     Ok(deriveColumns names (names |> List.map (fun _ -> Collation.defaultCollation)) metadata, typedRows)
                 | Affected _, _, _ -> Error(Err(1064, "a LATERAL derived table did not return a resultset"))
             | UnionSelect(first, rest, orderBy, limit, offset) ->
-                match runUnionStmt store registry dbName first rest orderBy limit offset with
+                match runUnionStmtWithOuter store registry dbName first rest orderBy limit offset bodyOuter with
                 | Err(code, message), _, _ -> Error(Err(code, message))
                 | ResultSet(names, _), metadata, typedRows ->
                     Ok(deriveColumns names (names |> List.map (fun _ -> Collation.defaultCollation)) metadata, typedRows)
@@ -5293,29 +5302,36 @@ and private withCteScope
     (registry: Registry)
     (dbName: string)
     (ctes: CommonTableExpr list)
+    (outer: EvalContext option)
     (body: unit -> QueryResult * ColumnMetadata list * Value[] list)
     : QueryResult * ColumnMetadata list * Value[] list =
     if ctes.IsEmpty then
         body ()
     else
 
-    let saved = currentCteScope ()
+    let names = System.Collections.Generic.HashSet<string>(System.StringComparer.OrdinalIgnoreCase)
 
-    try
-        let rec bind (remaining: CommonTableExpr list) =
-            match remaining with
-            | [] -> Ok()
-            | cte :: rest ->
-                materializeCte store registry dbName cte
-                |> Result.bind (fun materialized ->
-                    cteScope.Value <- currentCteScope () |> Map.add (cte.CteName.ToLowerInvariant()) materialized
-                    bind rest)
+    match ctes |> List.tryFind (fun cte -> not (names.Add cte.CteName)) with
+    | Some duplicate -> Err(1066, sprintf "Not unique table/alias: '%s'" duplicate.CteName), [], []
+    | None ->
 
-        match bind ctes with
-        | Error err -> err, [], []
-        | Ok() -> body ()
-    finally
-        cteScope.Value <- saved
+        let saved = currentCteScope ()
+
+        try
+            let rec bind (remaining: CommonTableExpr list) =
+                match remaining with
+                | [] -> Ok()
+                | cte :: rest ->
+                    materializeCte store registry dbName cte outer
+                    |> Result.bind (fun materialized ->
+                        cteScope.Value <- currentCteScope () |> Map.add (cte.CteName.ToLowerInvariant()) materialized
+                        bind rest)
+
+            match bind ctes with
+            | Error err -> err, [], []
+            | Ok() -> body ()
+        finally
+            cteScope.Value <- saved
 
 /// One `WITH` binding's rows. A `WITH RECURSIVE` name that actually
 /// references itself iterates its `UNION` branches semi-naively (each pass
@@ -5333,6 +5349,7 @@ and private materializeCte
     (registry: Registry)
     (dbName: string)
     (cte: CommonTableExpr)
+    (outer: EvalContext option)
     : Result<ColumnDef list * Value[] list, QueryResult> =
     let selfReferenced =
         let rec inSelect (select: SelectStmt) =
@@ -5371,7 +5388,7 @@ and private materializeCte
             Ok(List.map2 (fun (c: ColumnDef) name -> { c with Name = name }) columns cte.CteColumns)
 
     if not selfReferenced then
-        resolveFromSubquery store registry dbName (FromSubquery(cte.Body, cte.CteName))
+        resolveFromSubquery store registry dbName (FromSubquery(cte.Body, cte.CteName)) outer
         |> Result.bind (fun (columns, rows) -> renamed columns |> Result.map (fun columns -> columns, rows))
     else
 
@@ -5380,11 +5397,11 @@ and private materializeCte
         Error(Err(3573, sprintf "Recursive Common Table Expression '%s' should contain a UNION" cte.CteName))
     | UnionSelect(anchor, recursiveBranches, _, _, _) ->
         let runBranch (select: SelectStmt) =
-            match runSelectStmt store registry dbName select None with
+            match runSelectStmt store registry dbName select outer with
             | Err(code, message), _, _ -> Error(Err(code, message))
             | _, _, typedRows -> Ok typedRows
 
-        resolveFromSubquery store registry dbName (FromSubquery(PlainSelect anchor, cte.CteName))
+        resolveFromSubquery store registry dbName (FromSubquery(PlainSelect anchor, cte.CteName)) outer
         |> Result.bind (fun (anchorColumns, anchorRows) ->
             renamed anchorColumns
             |> Result.map (fun columns -> columns, anchorRows))
@@ -5441,7 +5458,7 @@ and private runSelectStmt
     (outer: EvalContext option)
     : QueryResult * ColumnMetadata list * Value[] list =
     if not select.Ctes.IsEmpty then
-        withCteScope store registry dbName select.Ctes (fun () ->
+        withCteScope store registry dbName select.Ctes outer (fun () ->
             runSelectStmt store registry dbName { select with Ctes = [] } outer)
     else
     let matchNodes =
@@ -5834,7 +5851,7 @@ and private coerceUnionValue (metadata: ColumnMetadata) (v: Value) : Value =
             VString(Value.toText v |> Option.defaultValue "")
         | _ -> v
 
-and runUnionStmt
+and private runUnionStmtWithOuter
     (store: Store)
     (registry: Registry)
     (dbName: string)
@@ -5843,18 +5860,19 @@ and runUnionStmt
     (orderBy: OrderKey list)
     (limitExpr: Expr option)
     (offsetExpr: Expr option)
+    (outer: EvalContext option)
     : QueryResult * ColumnMetadata list * Value[] list =
     // A `WITH` clause ahead of a UNION is parsed onto the first branch (see
     // `Parser.withClause`) but scopes over every branch.
     if not first.Ctes.IsEmpty then
-        withCteScope store registry dbName first.Ctes (fun () ->
-            runUnionStmt store registry dbName { first with Ctes = [] } rest orderBy limitExpr offsetExpr)
+        withCteScope store registry dbName first.Ctes outer (fun () ->
+            runUnionStmtWithOuter store registry dbName { first with Ctes = [] } rest orderBy limitExpr offsetExpr outer)
     else
 
     let limit = Option.map rowCount limitExpr
     let offset = Option.map rowCount offsetExpr
 
-    let runBranch (select: SelectStmt) = runSelectStmt store registry dbName select None
+    let runBranch (select: SelectStmt) = runSelectStmt store registry dbName select outer
 
     // Each branch's text row paired with its own typed row, kept aligned
     // through combining so the `ORDER BY` below can compare typed values
@@ -9451,7 +9469,7 @@ let runTopLevelUnion
     : QueryResult * ColumnMetadata list * uint64 option =
     if first.CalculateFoundRows then
         let result, types, values =
-            runUnionStmt store registry dbName { first with CalculateFoundRows = false } rest orderBy None None
+            runUnionStmtWithOuter store registry dbName { first with CalculateFoundRows = false } rest orderBy None None None
 
         let limit = limit |> Option.map rowCount
         let offset = offset |> Option.map rowCount
@@ -9461,7 +9479,7 @@ let runTopLevelUnion
             ResultSet(columns, applyLimitOffset limit offset rows), types, Some(uint64 values.Length)
         | error -> error, types, None
     else
-        let result, types, _ = runUnionStmt store registry dbName first rest orderBy limit offset
+        let result, types, _ = runUnionStmtWithOuter store registry dbName first rest orderBy limit offset None
         result, types, None
 
 /// Describes a stored view without evaluating its query or its expressions.
@@ -10683,7 +10701,7 @@ let rec executeAs
                     let names = match result with ResultSet(names, _) -> names | _ -> []
                     result, metadata, rows, selectColumnCollations store registry dbName select names
                 | Union(first, rest, orderBy, limit, offset) ->
-                    let result, metadata, rows = runUnionStmt store registry dbName first rest orderBy limit offset
+                    let result, metadata, rows = runUnionStmtWithOuter store registry dbName first rest orderBy limit offset None
                     let names = match result with ResultSet(names, _) -> names | _ -> []
                     result, metadata, rows, List.replicate names.Length Collation.defaultCollation
                 | _ -> Err(1064, "CREATE TABLE ... AS requires a query"), [], [], []
@@ -11632,7 +11650,7 @@ let rec executeAs
         ids, result
 
     | Union(first, rest, orderBy, limit, offset) ->
-        let result, _, _ = runUnionStmt store registry dbName first rest orderBy limit offset
+        let result, _, _ = runUnionStmtWithOuter store registry dbName first rest orderBy limit offset None
         ids, result
 
     | Update updateStmt when updateStmt.Joins.IsEmpty && tryStoredView store (updateStmt.From.Database |> Option.defaultValue dbName) updateStmt.From.Table |> Option.isSome ->
