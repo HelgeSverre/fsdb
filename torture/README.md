@@ -81,7 +81,9 @@ Run the bounded syntax-mutation lane:
 
 Every feature seed is first executed unchanged on both servers. Deterministic
 token deletion, truncation, duplication, delimiter, parenthesis, whitespace,
-comment, and case mutations then exercise parser and server error boundaries.
+comment, punctuation-boundary comment, and case mutations then exercise parser
+and server error boundaries. Collation seeds reverse operands and cross scalar,
+row, quantified, CTE, CASE, BETWEEN, LIKE, and join comparison paths.
 Mutation depth one tests isolated edits; depths two and three sample unique
 chained edits, with a hard ceiling of 10,000 executed mutations per run. MySQL
 error `1064` is matched by numeric code and SQLSTATE; message text is retained

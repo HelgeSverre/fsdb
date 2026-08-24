@@ -28,6 +28,15 @@ module SyntaxFuzz =
            "geometry_relation", "SELECT ST_Contains(ST_GeomFromText('POLYGON((0 0,4 0,4 4,0 4,0 0))'), ST_PointFromText('POINT(2 2)'))"
            "regexp_collation", "SELECT REGEXP_LIKE(_utf8mb4'Ångström' COLLATE utf8mb4_0900_as_ci, '^ångström$')"
            "regexp_replace", "SELECT REGEXP_REPLACE('a😀b', '(?=(.))', '$1', 1, 0, 'n')"
+           "collation_symmetric", "SELECT ci = bin, bin = ci, ci < bin, bin > ci, ci LIKE bin FROM syntax_collation"
+           "collation_row", "SELECT (ci, 1) = (bin, 1), (bin, 1) IN ((ci, 1), ('z', 2)) FROM syntax_collation"
+           "collation_quantified",
+           "SELECT ci = ANY (SELECT bin FROM syntax_collation), bin = ANY (SELECT ci FROM syntax_collation) FROM syntax_collation"
+           "collation_cte",
+           "WITH c AS (SELECT bin COLLATE utf8mb4_0900_ai_ci AS value FROM syntax_collation) SELECT 'A' = ANY (SELECT value FROM c)"
+           "collation_case_between", "SELECT CASE ci WHEN bin THEN 1 ELSE 0 END, ci BETWEEN bin AND 'z' FROM syntax_collation"
+           "collation_join",
+           "SELECT COUNT(*) FROM syntax_collation AS left_side JOIN syntax_collation AS right_side ON left_side.ci = right_side.bin"
            "typed_time", "SELECT MAKETIME(34, 20, 30.123456), SEC_TO_TIME(3661.25), TIME('-34:20:30.123456')"
            "weight_string", "SELECT HEX(WEIGHT_STRING(_utf8mb4'a' COLLATE utf8mb4_bin AS CHAR(3)))"
            "quoted_user_variable", "SET @`syntax.name` := (@'second' := 2) + 1"
@@ -56,6 +65,8 @@ module SyntaxFuzz =
            "INSERT INTO syntax_target VALUES (1, 10, 'seed')"
            "CREATE TABLE syntax_source (id INT, n INT, label VARCHAR(40), update_label VARCHAR(40))"
            "INSERT INTO syntax_source VALUES (1, 11, 'candidate', 'source')"
+           "CREATE TABLE syntax_collation (id INT PRIMARY KEY, ci VARCHAR(20) CHARACTER SET utf8mb4 COLLATE utf8mb4_0900_ai_ci, bin VARCHAR(20) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin, cs VARCHAR(20) CHARACTER SET utf8mb4 COLLATE utf8mb4_0900_as_cs, latin VARCHAR(20) CHARACTER SET latin1 COLLATE latin1_swedish_ci)"
+           "INSERT INTO syntax_collation VALUES (1, 'A', 'a', 'A', 'a')"
            "CREATE TABLE syntax_trigger_target (id INT PRIMARY KEY, n INT)"
            "CREATE TABLE syntax_log (n INT)"
            "CREATE TRIGGER syntax_first BEFORE INSERT ON syntax_trigger_target FOR EACH ROW SET NEW.n = NEW.n + 1" |]
@@ -76,10 +87,15 @@ module SyntaxFuzz =
         let index = text.IndexOf(value, StringComparison.Ordinal)
         if index < 0 then None else Some index
 
-    let private whitespaceRuns (sql: string) =
-        let runs = ResizeArray<int * int>()
+    let private codeSpans (sql: string) =
+        let spans = ResizeArray<int * int>()
         let mutable mode = Code
         let mutable index = 0
+        let mutable codeStart = 0
+
+        let endCode () =
+            if index > codeStart then
+                spans.Add(codeStart, index - codeStart)
 
         while index < sql.Length do
             match mode with
@@ -88,22 +104,28 @@ module SyntaxFuzz =
             | Quoted current when sql.[index] = current ->
                 mode <- Code
                 index <- index + 1
+                codeStart <- index
             | Quoted _ -> index <- index + 1
             | BlockComment when index + 1 < sql.Length && sql.[index] = '*' && sql.[index + 1] = '/' ->
                 mode <- Code
                 index <- index + 2
+                codeStart <- index
             | BlockComment -> index <- index + 1
             | LineComment when sql.[index] = '\n' || sql.[index] = '\r' ->
                 mode <- Code
                 index <- index + 1
+                codeStart <- index
             | LineComment -> index <- index + 1
             | Code when sql.[index] = '\'' || sql.[index] = '"' || sql.[index] = '`' ->
+                endCode ()
                 mode <- Quoted sql.[index]
                 index <- index + 1
             | Code when index + 1 < sql.Length && sql.[index] = '/' && sql.[index + 1] = '*' ->
+                endCode ()
                 mode <- BlockComment
                 index <- index + 2
             | Code when sql.[index] = '#' ->
+                endCode ()
                 mode <- LineComment
                 index <- index + 1
             | Code when
@@ -112,23 +134,60 @@ module SyntaxFuzz =
                 && sql.[index + 1] = '-'
                 && (index + 2 = sql.Length || Char.IsWhiteSpace sql.[index + 2])
                 ->
+                endCode ()
                 mode <- LineComment
                 index <- index + 2
-            | Code when Char.IsWhiteSpace sql.[index] ->
-                let start = index
-
-                while index < sql.Length && Char.IsWhiteSpace sql.[index] do
-                    index <- index + 1
-
-                runs.Add(start, index - start)
             | Code -> index <- index + 1
 
-        runs.ToArray()
+        if mode = Code then
+            endCode ()
+
+        spans.ToArray()
+
+    let private whitespaceRuns (sql: string) =
+        codeSpans sql
+        |> Array.collect (fun (start, length) ->
+            let runs = ResizeArray<int * int>()
+            let finish = start + length
+            let mutable index = start
+
+            while index < finish do
+                if Char.IsWhiteSpace sql.[index] then
+                    let runStart = index
+
+                    while index < finish && Char.IsWhiteSpace sql.[index] do
+                        index <- index + 1
+
+                    runs.Add(runStart, index - runStart)
+                else
+                    index <- index + 1
+
+            runs.ToArray())
 
     let private replaceWhitespace comment (sql: string) =
         whitespaceRuns sql
         |> Array.rev
         |> Array.fold (fun current (start, length) -> replaceAt start length comment current) sql
+
+    let private punctuationPositions (sql: string) =
+        codeSpans sql
+        |> Array.collect (fun (start, length) ->
+            [| for index in start .. start + length - 1 do
+                   if sql.[index] = '(' || sql.[index] = ')' || sql.[index] = ',' then
+                       yield index, sql.[index] |])
+
+    let private surroundPunctuation comment (sql: string) =
+        punctuationPositions sql
+        |> Array.rev
+        |> Array.fold (fun current (index, punctuation) ->
+            let replacement =
+                match punctuation with
+                | '(' -> comment + "("
+                | ')' -> ")" + comment
+                | ',' -> comment + "," + comment
+                | _ -> string punctuation
+
+            replaceAt index 1 replacement current) sql
 
     let private mutationOperators =
         [| "drop_last", fun (sql: string) -> if sql.Length > 1 then Some(sql.Substring(0, sql.Length - 1)) else None
@@ -150,7 +209,10 @@ module SyntaxFuzz =
            "dense_hash_comments", replaceWhitespace "# fuzz\n" >> Some
            "dense_dash_comments", replaceWhitespace "-- fuzz\n" >> Some
            "dense_version_comments", replaceWhitespace "/*!080400 */" >> Some
-           "dense_future_comments", replaceWhitespace "/*!99999 ignored_tokens */" >> Some |]
+           "dense_future_comments", replaceWhitespace "/*!99999 ignored_tokens */" >> Some
+           "punctuation_block_comments", surroundPunctuation "/**/" >> Some
+           "punctuation_version_comments", surroundPunctuation "/*!080400 */" >> Some
+           "punctuation_future_comments", surroundPunctuation "/*!99999 ignored_tokens */" >> Some |]
 
     let private mutationTrees depth sql =
         let rec expand remaining (path: string list) current =

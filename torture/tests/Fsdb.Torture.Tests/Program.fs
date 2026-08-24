@@ -420,7 +420,10 @@ let tests =
                           "dense_hash_comments"
                           "dense_dash_comments"
                           "dense_version_comments"
-                          "dense_future_comments" ] do
+                          "dense_future_comments"
+                          "punctuation_block_comments"
+                          "punctuation_version_comments"
+                          "punctuation_future_comments" ] do
                         Expect.isTrue (mutations |> Array.exists (fun candidate -> candidate.Mutation = name)) name
 
                     for feature in [ "composite_index"; "view_check_option"; "ordered_compound_trigger"; "column_comment"; "bit_type" ] do
@@ -429,6 +432,30 @@ let tests =
                              |> Array.filter (fun candidate -> candidate.Feature = feature)
                              |> Array.forall (fun candidate -> candidate.CleanupSql.IsSome))
                             feature
+
+                testCase "covers symmetric collation paths and keeps comments outside literals"
+                <| fun _ ->
+                    let candidates = SyntaxFuzz.candidates 42UL 1 10000
+                    let features = candidates |> Array.filter _.Baseline |> Array.map _.Feature |> Set.ofArray
+
+                    for feature in
+                        [ "collation_symmetric"
+                          "collation_row"
+                          "collation_quantified"
+                          "collation_cte"
+                          "collation_case_between"
+                          "collation_join" ] do
+                        Expect.contains features feature feature
+
+                    let commentedReplace =
+                        candidates
+                        |> Array.find (fun candidate ->
+                            candidate.Feature = "regexp_replace"
+                            && candidate.Mutation = "punctuation_block_comments")
+
+                    Expect.stringContains commentedReplace.Sql "'$1'" "replacement literal is untouched"
+                    Expect.stringContains commentedReplace.Sql "'(?=(.))'" "pattern punctuation is untouched"
+                    Expect.stringContains commentedReplace.Sql "/**/(" "comments reach punctuation boundaries"
 
                 testCase "classifies syntax error contracts by code and SQLSTATE"
                 <| fun _ ->
