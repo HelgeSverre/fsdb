@@ -9,15 +9,29 @@ type SyntaxCandidate =
     { Feature: string
       Mutation: string
       Sql: string
+      CleanupSql: string option
       Baseline: bool }
 
 [<RequireQualifiedAccess>]
 module SyntaxFuzz =
+    type private ScanMode =
+        | Code
+        | Quoted of char
+        | BlockComment
+        | LineComment
+
     let private seeds suffix =
         [| "row_constructor", "SELECT ROW(1, 2) = ROW(1, 2)"
+           "row_subquery", "SELECT ROW(1, 'A') = (SELECT 1, _utf8mb4'A' COLLATE utf8mb4_bin)"
            "quantified_comparison", "SELECT 1 = ANY (SELECT n FROM syntax_target)"
            "geometry_topology", "SELECT ST_AsText(ST_ConvexHull(ST_GeomFromText('MULTIPOINT((0 0),(2 0),(0 2))')))"
+           "geometry_relation", "SELECT ST_Contains(ST_GeomFromText('POLYGON((0 0,4 0,4 4,0 4,0 0))'), ST_PointFromText('POINT(2 2)'))"
            "regexp_collation", "SELECT REGEXP_LIKE(_utf8mb4'Ångström' COLLATE utf8mb4_0900_as_ci, '^ångström$')"
+           "regexp_replace", "SELECT REGEXP_REPLACE('a😀b', '(?=(.))', '$1', 1, 0, 'n')"
+           "typed_time", "SELECT MAKETIME(34, 20, 30.123456), SEC_TO_TIME(3661.25), TIME('-34:20:30.123456')"
+           "weight_string", "SELECT HEX(WEIGHT_STRING(_utf8mb4'a' COLLATE utf8mb4_bin AS CHAR(3)))"
+           "quoted_user_variable", "SET @`syntax.name` := (@'second' := 2) + 1"
+           "recursive_cte", "WITH RECURSIVE c(n) AS (SELECT 1 UNION ALL SELECT n + 1 FROM c WHERE n < 3) SELECT SUM(n) FROM c"
            "composite_index", sprintf "CREATE INDEX ix_syntax_%s ON syntax_target (n, label)" suffix
            "view_check_option", sprintf "CREATE VIEW syntax_view_%s AS SELECT id, n FROM syntax_target WHERE n > 0 WITH CHECK OPTION" suffix
            "ordered_compound_trigger",
@@ -27,7 +41,8 @@ module SyntaxFuzz =
            "odku", "INSERT INTO syntax_target VALUES (1, 11, 'changed') ON DUPLICATE KEY UPDATE n = VALUES(n), label = VALUES(label)"
            "replace_select", "REPLACE INTO syntax_target SELECT 2, 20, 'replacement'"
            "serializable", "SET TRANSACTION ISOLATION LEVEL SERIALIZABLE"
-           "column_comment", sprintf "CREATE TABLE syntax_comment_%s (id INT COMMENT 'syntax corpus')" suffix |]
+           "column_comment", sprintf "CREATE TABLE syntax_comment_%s (id INT COMMENT 'syntax corpus')" suffix
+           "bit_type", sprintf "CREATE TABLE syntax_bit_%s (b BIT(64) DEFAULT b'1')" suffix |]
 
     let private fixtures =
         [| "CREATE TABLE syntax_target (id INT PRIMARY KEY, n INT, label VARCHAR(40), INDEX ix_n_label (n, label))"
@@ -36,12 +51,75 @@ module SyntaxFuzz =
            "CREATE TABLE syntax_log (n INT)"
            "CREATE TRIGGER syntax_first BEFORE INSERT ON syntax_trigger_target FOR EACH ROW SET NEW.n = NEW.n + 1" |]
 
+    let private cleanupStatement feature suffix =
+        match feature with
+        | "composite_index" -> Some(sprintf "DROP INDEX ix_syntax_%s ON syntax_target" suffix)
+        | "view_check_option" -> Some(sprintf "DROP VIEW syntax_view_%s" suffix)
+        | "ordered_compound_trigger" -> Some(sprintf "DROP TRIGGER syntax_after_%s" suffix)
+        | "column_comment" -> Some(sprintf "DROP TABLE syntax_comment_%s" suffix)
+        | "bit_type" -> Some(sprintf "DROP TABLE syntax_bit_%s" suffix)
+        | _ -> None
+
     let private replaceAt index length replacement (value: string) =
         value.Substring(0, index) + replacement + value.Substring(index + length)
 
     let private firstIndexOf (value: string) (text: string) =
         let index = text.IndexOf(value, StringComparison.Ordinal)
         if index < 0 then None else Some index
+
+    let private whitespaceRuns (sql: string) =
+        let runs = ResizeArray<int * int>()
+        let mutable mode = Code
+        let mutable index = 0
+
+        while index < sql.Length do
+            match mode with
+            | Quoted current when current <> '`' && sql.[index] = '\\' && index + 1 < sql.Length -> index <- index + 2
+            | Quoted current when sql.[index] = current && index + 1 < sql.Length && sql.[index + 1] = current -> index <- index + 2
+            | Quoted current when sql.[index] = current ->
+                mode <- Code
+                index <- index + 1
+            | Quoted _ -> index <- index + 1
+            | BlockComment when index + 1 < sql.Length && sql.[index] = '*' && sql.[index + 1] = '/' ->
+                mode <- Code
+                index <- index + 2
+            | BlockComment -> index <- index + 1
+            | LineComment when sql.[index] = '\n' || sql.[index] = '\r' ->
+                mode <- Code
+                index <- index + 1
+            | LineComment -> index <- index + 1
+            | Code when sql.[index] = '\'' || sql.[index] = '"' || sql.[index] = '`' ->
+                mode <- Quoted sql.[index]
+                index <- index + 1
+            | Code when index + 1 < sql.Length && sql.[index] = '/' && sql.[index + 1] = '*' ->
+                mode <- BlockComment
+                index <- index + 2
+            | Code when sql.[index] = '#' ->
+                mode <- LineComment
+                index <- index + 1
+            | Code when
+                index + 1 < sql.Length
+                && sql.[index] = '-'
+                && sql.[index + 1] = '-'
+                && (index + 2 = sql.Length || Char.IsWhiteSpace sql.[index + 2])
+                ->
+                mode <- LineComment
+                index <- index + 2
+            | Code when Char.IsWhiteSpace sql.[index] ->
+                let start = index
+
+                while index < sql.Length && Char.IsWhiteSpace sql.[index] do
+                    index <- index + 1
+
+                runs.Add(start, index - start)
+            | Code -> index <- index + 1
+
+        runs.ToArray()
+
+    let private replaceWhitespace comment (sql: string) =
+        whitespaceRuns sql
+        |> Array.rev
+        |> Array.fold (fun current (start, length) -> replaceAt start length comment current) sql
 
     let private mutationOperators =
         [| "drop_last", fun (sql: string) -> if sql.Length > 1 then Some(sql.Substring(0, sql.Length - 1)) else None
@@ -53,9 +131,34 @@ module SyntaxFuzz =
            "remove_from", fun sql -> firstIndexOf " FROM " sql |> Option.map (fun index -> replaceAt index 6 " " sql)
            "remove_equals", fun sql -> firstIndexOf "=" sql |> Option.map (fun index -> replaceAt index 1 "" sql)
            "prepend_close_paren", fun sql -> Some(")" + sql)
-           "append_identifier", fun sql -> Some(sql + " unexpected_token") |]
+           "append_identifier", fun sql -> Some(sql + " unexpected_token")
+           "unterminated_quote", fun sql -> Some(sql + " '")
+           "unterminated_comment", fun sql -> Some(sql + " /*")
+           "surround_whitespace", fun sql -> Some("\n\t" + sql + " \n")
+           "lowercase", fun (sql: string) -> Some(sql.ToLowerInvariant())
+           "inline_select_comment", fun sql -> firstIndexOf "SELECT" sql |> Option.map (fun index -> replaceAt index 6 "SELECT/**/" sql)
+           "dense_block_comments", replaceWhitespace "/* fuzz */" >> Some
+           "dense_hash_comments", replaceWhitespace "# fuzz\n" >> Some
+           "dense_dash_comments", replaceWhitespace "-- fuzz\n" >> Some
+           "dense_version_comments", replaceWhitespace "/*!080400 */" >> Some
+           "dense_future_comments", replaceWhitespace "/*!99999 ignored_tokens */" >> Some |]
 
-    let candidates seed count =
+    let private mutationTrees depth sql =
+        let rec expand remaining (path: string list) current =
+            seq {
+                if not (List.isEmpty path) then
+                    yield List.rev path, current
+
+                if remaining > 0 then
+                    for name, mutate in mutationOperators do
+                        match mutate current with
+                        | Some mutated when mutated <> current -> yield! expand (remaining - 1) (name :: path) mutated
+                        | _ -> ()
+            }
+
+        expand depth [] sql
+
+    let candidates seed depth count =
         let seedStatements = seeds "baseline"
 
         let baselines =
@@ -64,25 +167,25 @@ module SyntaxFuzz =
                 { Feature = feature
                   Mutation = "baseline"
                   Sql = sql
+                  CleanupSql = cleanupStatement feature "baseline"
                   Baseline = true })
 
         let mutations =
             seedStatements
-            |> Array.indexed
-            |> Array.collect (fun (seedIndex, (feature, sql)) ->
-                mutationOperators
-                |> Array.indexed
-                |> Array.choose (fun (mutationIndex, (name, mutate)) ->
-                    let isolatedSql = sql.Replace("baseline", sprintf "m%d_%d" seedIndex mutationIndex)
+            |> Array.collect (fun (feature, sql) ->
+                mutationTrees depth sql
+                |> Seq.distinctBy snd
+                |> Seq.map (fun (path, mutated) ->
+                    let mutation = String.concat "+" path
+                    let suffix = Hashing.text (sprintf "%d\n%s\n%s\n%s" seed feature mutation mutated) |> fun hash -> hash.Substring(0, 12)
 
-                    mutate isolatedSql
-                    |> Option.filter ((<>) isolatedSql)
-                    |> Option.map (fun mutated ->
-                        { Feature = feature
-                          Mutation = name
-                          Sql = mutated
-                          Baseline = false })))
-            |> Array.distinctBy (fun candidate -> candidate.Feature, candidate.Mutation, candidate.Sql)
+                    { Feature = feature
+                      Mutation = mutation
+                      Sql = mutated.Replace("baseline", "m" + suffix)
+                      CleanupSql = cleanupStatement feature ("m" + suffix)
+                      Baseline = false })
+                |> Seq.toArray)
+            |> Array.distinctBy (fun candidate -> candidate.Feature, candidate.Sql)
             |> Array.sortBy (fun candidate -> Hashing.text (sprintf "%d\n%s\n%s\n%s" seed candidate.Feature candidate.Mutation candidate.Sql))
             |> Array.truncate count
 
@@ -152,6 +255,11 @@ module SyntaxFuzz =
             return failure
         }
 
+    let private allowUserVariables (connectionString: string) =
+        let builder = MySqlConnector.MySqlConnectionStringBuilder connectionString
+        builder.AllowUserVariables <- true
+        builder.ConnectionString
+
     let run (options: SyntaxOptions) : Task<Result<SyntaxManifest * string, string>> =
         task {
             let started = DateTimeOffset.UtcNow
@@ -166,9 +274,10 @@ module SyntaxFuzz =
             match! Database.createOracleDatabase options.MySqlConnection databaseName options.TimeoutSeconds with
             | Error outcome -> return Error outcome.Message
             | Ok oracleConnectionString ->
+                Fsdb.Log.silence ()
                 use subject = new FsdbSubject()
-                use! mysql = Database.openConnection oracleConnectionString
-                use! fsdb = Database.openConnection (Runner.fsdbConnectionString subject.Port)
+                use! mysql = Database.openConnection (allowUserVariables oracleConnectionString)
+                use! fsdb = Database.openConnection (Runner.fsdbConnectionString subject.Port |> allowUserVariables)
                 let! mysqlVersion = Database.scalarString mysql options.TimeoutSeconds "SELECT VERSION()"
 
                 match! executeFixtures options.TimeoutSeconds mysql fsdb with
@@ -177,10 +286,27 @@ module SyntaxFuzz =
                 | None ->
                     let records = ResizeArray<SyntaxCaseRecord>()
 
-                    for index, candidate in candidates options.Seed options.Cases |> Array.indexed do
+                    for index, candidate in candidates options.Seed options.Depth options.Cases |> Array.indexed do
                         let parserStatus, astKind = parserOutcome candidate.Sql
                         let! mysqlOutcome = Database.execute "mysql" mysql options.TimeoutSeconds candidate.Sql
                         let! fsdbOutcome = Database.execute "fsdb" fsdb options.TimeoutSeconds candidate.Sql
+
+                        match candidate.CleanupSql with
+                        | Some cleanup when TargetOutcome.succeeded mysqlOutcome ->
+                            let! outcome = Database.execute "mysql" mysql options.TimeoutSeconds cleanup
+
+                            if not (TargetOutcome.succeeded outcome) then
+                                failwithf "MySQL syntax cleanup failed for %s: %s" cleanup outcome.Message
+                        | _ -> ()
+
+                        match candidate.CleanupSql with
+                        | Some cleanup when TargetOutcome.succeeded fsdbOutcome ->
+                            let! outcome = Database.execute "fsdb" fsdb options.TimeoutSeconds cleanup
+
+                            if not (TargetOutcome.succeeded outcome) then
+                                failwithf "fsdb syntax cleanup failed for %s: %s" cleanup outcome.Message
+                        | _ -> ()
+
                         let classification = classify candidate.Baseline mysqlOutcome fsdbOutcome
 
                         records.Add
@@ -221,11 +347,12 @@ module SyntaxFuzz =
                         |> Option.defaultValue ""
 
                     let manifest =
-                        { SchemaVersion = 1
+                        { SchemaVersion = 2
                           RunId = runId
                           CaseId = caseId
                           Seed = options.Seed
                           RequestedMutations = options.Cases
+                          MutationDepth = options.Depth
                           StartedUtc = started.ToString("O")
                           FinishedUtc = DateTimeOffset.UtcNow.ToString("O")
                           FsdbRevision = revision

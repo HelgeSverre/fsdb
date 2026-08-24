@@ -66,7 +66,13 @@ that answer before FSDB is judged.
 
 The syntax lane starts from known-valid statements spanning recently added
 grammar and execution surfaces. It executes each baseline on both servers,
-then applies a seed-ordered, bounded set of structural mutations. MySQL `1064`
+then applies a seed-ordered, bounded set of structural mutations. A run may
+chain up to three edits while deduplicating equivalent SQL before sampling.
+Comment mutations replace natural token boundaries with MySQL block, hash,
+dash, executable-version, or future-version comments and never recurse into an
+existing comment. Successful DDL mutations are removed before the next case so
+stored objects cannot contaminate later parser results.
+MySQL `1064`
 responses are compared by error code and SQLSTATE rather than location text.
 MySQL-valid mutations exercise FSDB acceptance; mutations that reach other
 semantic errors remain visible without being mislabeled as syntax evidence.

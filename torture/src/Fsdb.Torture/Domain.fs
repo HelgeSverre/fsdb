@@ -56,6 +56,7 @@ type RunOptions =
 type SyntaxOptions =
     { Seed: uint64
       Cases: int
+      Depth: int
       TimeoutSeconds: int
       ArtifactRoot: string
       MySqlConnection: string }
@@ -345,6 +346,7 @@ type SyntaxManifest =
       CaseId: string
       Seed: uint64
       RequestedMutations: int
+      MutationDepth: int
       StartedUtc: string
       FinishedUtc: string
       FsdbRevision: string

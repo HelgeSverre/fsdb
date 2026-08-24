@@ -76,12 +76,14 @@ starvation at high connection counts.
 Run the bounded syntax-mutation lane:
 
 ```bash
-./scripts/run.sh syntax --seed 101 --syntax-cases 64
+./scripts/run.sh syntax --seed 101 --syntax-cases 2000 --syntax-depth 3
 ```
 
 Every feature seed is first executed unchanged on both servers. Deterministic
-token deletion, truncation, duplication, delimiter, and parenthesis mutations
-then exercise parser and server error boundaries. MySQL error `1064` is matched
+token deletion, truncation, duplication, delimiter, parenthesis, whitespace,
+comment, and case mutations then exercise parser and server error boundaries.
+Mutation depth one tests isolated edits; depths two and three sample unique
+chained edits, with a hard ceiling of 10,000 executed mutations per run. MySQL error `1064` is matched
 by numeric code and SQLSTATE; message text is retained as evidence but excluded
 from parity because its location prose is not a stable interface. Mutations
 that remain valid on MySQL must remain valid on FSDB. Mutations that reach a
@@ -138,7 +140,7 @@ bounded first/last samples rather than embedding millions of rows in JSON.
 Probe type mismatches and DML affected-row mismatches have distinct
 classifications and signatures.
 
-Syntax runs write their complete bounded corpus to `mutations.sql` and a
+Syntax runs write their complete bounded corpus and mutation chains to `mutations.sql` and a
 schema-versioned `manifest.json` containing the parser result, both server
 outcomes, classification, and failure signature for every case.
 

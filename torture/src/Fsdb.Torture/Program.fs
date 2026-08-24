@@ -30,6 +30,7 @@ type private Cli =
       Databases: int
       ScalingFactor: float
       SyntaxCases: int
+      SyntaxDepth: int
       Artifacts: string
       MySql: string
       SqlSplitter: string
@@ -64,6 +65,7 @@ Options:
   --databases <n>            multidb: databases run concurrently (default 4)
   --scaling-factor <n>       multidb: multi-db wall-clock must be <= this fraction of the serial-projected cost (default 0.65)
   --syntax-cases <n>          syntax: deterministic mutations to execute (default 64)
+  --syntax-depth <1..3>       syntax: maximum chained mutations per statement (default 1)
   --artifacts <directory>    Artifact root (default torture/artifacts/runs)
   --mysql <connection>       MySQL admin connection string
   --sql-splitter <path>      SQL Splitter executable
@@ -78,6 +80,11 @@ Options:
         match Int32.TryParse value with
         | true, parsed when parsed > 0 -> Ok parsed
         | _ -> Error(sprintf "%s expects a positive integer, got '%s'" flag value)
+
+    let private parseRange (flag: string) minimum maximum (value: string) =
+        match Int32.TryParse value with
+        | true, parsed when parsed >= minimum && parsed <= maximum -> Ok parsed
+        | _ -> Error(sprintf "%s expects an integer from %d through %d, got '%s'" flag minimum maximum value)
 
     let private parseNonNegativeInt (flag: string) (value: string) =
         match Int32.TryParse value with
@@ -119,6 +126,7 @@ Options:
         let mutable databases = 4
         let mutable scalingFactor = 0.65
         let mutable syntaxCases = 64
+        let mutable syntaxDepth = 1
         let mutable artifacts = Paths.defaultArtifactRoot ()
         let mutable mysql = ""
         let mutable sqlSplitter = ""
@@ -198,8 +206,12 @@ Options:
                 | Ok value -> scalingFactor <- value
                 | Error error -> failure <- Some error
             | "--syntax-cases" ->
-                match parseInt flag (nextValue flag) with
+                match parseRange flag 1 10000 (nextValue flag) with
                 | Ok value -> syntaxCases <- value
+                | Error error -> failure <- Some error
+            | "--syntax-depth" ->
+                match parseRange flag 1 3 (nextValue flag) with
+                | Ok value -> syntaxDepth <- value
                 | Error error -> failure <- Some error
             | "--artifacts" -> artifacts <- nextValue flag |> Path.GetFullPath
             | "--mysql" -> mysql <- nextValue flag
@@ -238,6 +250,7 @@ Options:
                   Databases = databases
                   ScalingFactor = scalingFactor
                   SyntaxCases = syntaxCases
+                  SyntaxDepth = syntaxDepth
                   Artifacts = artifacts
                   MySql = mysql
                   SqlSplitter = sqlSplitter
@@ -282,6 +295,7 @@ Options:
     let syntaxOptions cli : SyntaxOptions =
         { Seed = cli.Seed
           Cases = cli.SyntaxCases
+          Depth = cli.SyntaxDepth
           TimeoutSeconds = cli.TimeoutSeconds
           ArtifactRoot = cli.Artifacts
           MySqlConnection = cli.MySql }
@@ -413,7 +427,14 @@ module Program =
         let differences = report.Cases |> Array.filter (fun record -> not record.Passed) |> Array.length
 
         printfn "%s: %s — %s" report.CaseId report.Classification directory
-        printfn "  baselines=%d mutations=%d matched-errors=%d accepted-mutations=%d differences=%d" baselines.Length mutations rejected accepted differences
+        printfn
+            "  baselines=%d mutations=%d depth=%d matched-errors=%d accepted-mutations=%d differences=%d"
+            baselines.Length
+            mutations
+            report.MutationDepth
+            rejected
+            accepted
+            differences
 
         if not report.Passed then
             printfn "  detail: %s" report.ClassificationDetail

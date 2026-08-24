@@ -390,13 +390,45 @@ let tests =
               "Syntax fuzzing"
               [ testCase "generates a deterministic bounded corpus"
                 <| fun _ ->
-                    let first = SyntaxFuzz.candidates 42UL 24
-                    let repeated = SyntaxFuzz.candidates 42UL 24
-                    let changed = SyntaxFuzz.candidates 43UL 24
+                    let first = SyntaxFuzz.candidates 42UL 1 24
+                    let repeated = SyntaxFuzz.candidates 42UL 1 24
+                    let changed = SyntaxFuzz.candidates 43UL 1 24
+                    let baselineCount = first |> Array.filter _.Baseline |> Array.length
                     Expect.equal first repeated "same seed produces the same candidates"
-                    Expect.equal first.Length 35 "all feature baselines precede the requested mutations"
-                    Expect.notEqual (first |> Array.skip 11) (changed |> Array.skip 11) "seed changes mutation order"
+                    Expect.equal (first.Length - baselineCount) 24 "all feature baselines precede the requested mutations"
+                    Expect.notEqual (first |> Array.skip baselineCount) (changed |> Array.skip baselineCount) "seed changes mutation order"
                     Expect.equal (first |> Array.distinctBy (fun candidate -> candidate.Feature, candidate.Mutation, candidate.Sql) |> Array.length) first.Length "candidate identities are unique"
+
+                testCase "chains mutations without exceeding the requested depth"
+                <| fun _ ->
+                    let candidates = SyntaxFuzz.candidates 42UL 3 500
+                    let mutations = candidates |> Array.filter (fun candidate -> not candidate.Baseline)
+                    Expect.equal mutations.Length 500 "the requested bounded sample is filled"
+                    Expect.isTrue (mutations |> Array.exists (fun candidate -> candidate.Mutation.Contains '+')) "the sample contains chained mutations"
+                    Expect.isTrue
+                        (mutations
+                         |> Array.forall (fun candidate -> candidate.Mutation.Split('+').Length <= 3))
+                        "no chain exceeds the depth ceiling"
+
+                testCase "covers dense comment forms and cleans up successful DDL"
+                <| fun _ ->
+                    let candidates = SyntaxFuzz.candidates 42UL 1 10000
+                    let mutations = candidates |> Array.filter (fun candidate -> not candidate.Baseline)
+
+                    for name in
+                        [ "dense_block_comments"
+                          "dense_hash_comments"
+                          "dense_dash_comments"
+                          "dense_version_comments"
+                          "dense_future_comments" ] do
+                        Expect.isTrue (mutations |> Array.exists (fun candidate -> candidate.Mutation = name)) name
+
+                    for feature in [ "composite_index"; "view_check_option"; "ordered_compound_trigger"; "column_comment"; "bit_type" ] do
+                        Expect.isTrue
+                            (candidates
+                             |> Array.filter (fun candidate -> candidate.Feature = feature)
+                             |> Array.forall (fun candidate -> candidate.CleanupSql.IsSome))
+                            feature
 
                 testCase "classifies syntax error contracts by code and SQLSTATE"
                 <| fun _ ->

@@ -15,8 +15,11 @@ replayable (`torture/scripts/run.sh suite`; exit 0 = pass/known gaps, 2 = new
 fsdb findings).
 
 The separate syntax lane starts from valid statements for recent features,
-applies deterministic bounded mutations, and compares MySQL and fsdb error
-codes and SQLSTATEs (`torture/scripts/run.sh syntax --syntax-cases 64`).
+applies up to three deterministic bounded mutations, and compares MySQL and
+fsdb error codes and SQLSTATEs
+(`torture/scripts/run.sh syntax --syntax-cases 2000 --syntax-depth 3`). Its
+comment operators cover block, hash, dash, executable-version, and
+future-version comments while avoiding unsupported nested comments.
 
 The ordered DML battery covers `REPLACE` values, `REPLACE ... SELECT`, and
 `REPLACE ... SET` in both client affected-row modes. It includes unchanged
