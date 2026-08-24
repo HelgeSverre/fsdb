@@ -114,7 +114,7 @@ identities for bit aggregates.
 | Subquery strategies | semi-join/materialization/early-exit transformations | statement-stable scalar/IN/ANY/SOME/ALL/EXISTS subqueries materialize once and simple EXISTS stops at one row; correlated, variable-bearing, nondeterministic, CTE, derived, lateral, and JSON_TABLE forms re-execute | medium (scale) | divergence |
 | Join size ceiling | unbounded (memory-bound) | `Executor.maxJoinCandidateRows` caps candidate rows at 1,000,000 → error 1105 | medium | divergence |
 | Multi-table UPDATE/DELETE sources | derived tables allowed as join sources | `Executor.applyMutationJoin` accepts real base tables only → 1064 | low | refusal |
-| MATCH…AGAINST placement | evaluates in UPDATE/DELETE WHERE, joins, subqueries | the `Executor` full-text pre-pass supports single-table SELECT only; other placements return 1191 | medium | refusal |
+| MATCH…AGAINST placement | evaluates in UPDATE/DELETE WHERE, joins, subqueries | physical SELECT/JOIN sources and single-table UPDATE/DELETE are supported; multi-table UPDATE/DELETE with MATCH remains unsupported | low | refusal |
 | RANGE window frames | `RANGE BETWEEN INTERVAL n DAY PRECEDING…` | `Executor.validateFrame` refuses temporal offsets with 1235; numeric offsets only | low | refusal |
 | sql_mode | ~20 mode bits with semantic effect | strictness plus NO_ZERO_DATE/NO_ZERO_IN_DATE have effect; ONLY_FULL_GROUP_BY remains absent (a bare column picks the first row of its group), and IGNORE_SPACE does not relax whitespace-sensitive function calls | medium | divergence |
 
@@ -311,13 +311,15 @@ accents, and binary text; immutable term-frequency postings and row-local
 token positions maintained with DML and rebuilt once after snapshot/WAL
 recovery; direct WHERE-MATCH candidate streaming by stable row identity.
 Boolean evaluation unions only touched postings, prefix terms have maintained
-prefix postings, and top-level AND predicates intersect MATCH candidates
-before residual evaluation.
+prefix postings, and bounded AND/OR predicate trees intersect or union MATCH
+candidates before residual evaluation. Projection-only MATCH retains ordinary
+point lookup plans; physical joins score each owning corpus before joining;
+single-table UPDATE/DELETE consume the same candidate algebra.
 
 | Gap | MySQL 8.4 | fsdb | Impact | Class |
 |---|---|---|---|---|
-| MATCH planning | candidate-driven execution through arbitrary predicates and projections | bare and top-level AND-conjunct MATCH predicates stream posting candidates; OR predicates and projection-only MATCH still pass through the general table pipeline | high (scale) | divergence |
-| MATCH scope | any SELECT/UPDATE/DELETE context, joins included | single-table SELECT pre-pass only; elsewhere 1191 | medium | refusal |
+| MATCH planning | optimizer can combine FULLTEXT access with every other access path | bounded AND/OR MATCH predicates stream posting candidates and projection-only MATCH preserves point probes; other projection-only shapes scan their owning corpus | medium (scale) | divergence |
+| MATCH scope | any SELECT/UPDATE/DELETE context, joins included | physical SELECT/JOIN sources and single-table UPDATE/DELETE are supported; multi-table UPDATE/DELETE with MATCH remains unsupported | low | refusal |
 | Tunables | innodb_ft_min_token_size, innodb_ft_max_token_size, ft_query_expansion_limit, stopword tables, enable/disable | constants in `FullText` fix these at 3 / 84 / 20 / the built-in list | low | divergence |
 | CJK | ngram and mecab parsers, WITH PARSER clause | absent; no CJK tokenization | medium (for CJK) | refusal |
 | Proximity/prefix details | manual leaves distance semantics open; phrase-prefix via `"word*"`-adjacent forms | `FullText` interprets @N as an N-token window; prefix wildcard attaches to single words only | low | divergence |

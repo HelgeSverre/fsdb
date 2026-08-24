@@ -1345,6 +1345,7 @@ module DmlBattery =
            "DROP TABLE IF EXISTS fsdb_trigger_log"
            "DROP TABLE IF EXISTS fsdb_replace_contract"
            "DROP TABLE IF EXISTS fsdb_odku_source"
+           "DROP TABLE IF EXISTS fsdb_fulltext_contract"
            "DROP TABLE IF EXISTS fsdb_dml_contract" |]
 
     let private fixtures =
@@ -1355,6 +1356,8 @@ module DmlBattery =
            "CREATE TABLE fsdb_replace_contract (id INT PRIMARY KEY, u INT UNIQUE, n INT DEFAULT 7, INDEX ix_n_u (n, u))"
            "CREATE TABLE fsdb_trigger_contract (id INT PRIMARY KEY, n INT)"
            "CREATE TABLE fsdb_trigger_log (n INT)"
+           "CREATE TABLE fsdb_fulltext_contract (id INT PRIMARY KEY, body TEXT, FULLTEXT(body))"
+           "INSERT INTO fsdb_fulltext_contract VALUES (1, 'needle alpha'), (2, 'needle beta'), (3, 'ordinary')"
            "CREATE VIEW fsdb_dml_view AS SELECT id, n FROM fsdb_dml_contract WHERE n > 0 WITH CHECK OPTION"
            "CREATE TRIGGER fsdb_trigger_first BEFORE INSERT ON fsdb_trigger_contract FOR EACH ROW SET NEW.n = NEW.n + 1"
            "CREATE TRIGGER fsdb_trigger_second BEFORE INSERT ON fsdb_trigger_contract FOR EACH ROW FOLLOWS fsdb_trigger_first BEGIN INSERT INTO fsdb_trigger_log VALUES (NEW.n); SET NEW.n = NEW.n + 1; END" |]
@@ -1386,6 +1389,8 @@ module DmlBattery =
            "update_unchanged", "UPDATE fsdb_dml_contract SET n = 71 WHERE id = 2"
            "update_multi", "UPDATE fsdb_dml_contract SET n = n + 1 WHERE id IN (10, 11, 12)"
            "update_no_match", "UPDATE fsdb_dml_contract SET n = 1 WHERE id = 999"
+           "fulltext_update", "UPDATE fsdb_fulltext_contract SET body = 'archived alpha' WHERE MATCH(body) AGAINST('needle') AND id = 1"
+           "fulltext_delete", "DELETE FROM fsdb_fulltext_contract WHERE MATCH(body) AGAINST('needle') OR MATCH(body) AGAINST('ordinary')"
            "delete_match", "DELETE FROM fsdb_dml_contract WHERE id = 12"
            "delete_no_match", "DELETE FROM fsdb_dml_contract WHERE id = 999" |]
 

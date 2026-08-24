@@ -436,7 +436,7 @@ let private syntheticColumn (name: string) (ty: ColumnType) (nullable: bool) : C
       OnUpdateCurrentTimestamp = false }
 
 /// Every `MATCH ... AGAINST` node in an expression tree — the fulltext
-/// pre-pass (`runFullTextSelect`) computes one whole-table score column per
+/// pre-pass (`runFullTextSelect`) computes one owning-table score column per
 /// distinct node, exactly like `collectWindowFuncs` feeds
 /// `runWindowedSelect`.
 let private collectMatchAgainst (expr: Expr) : Expr list =
@@ -2490,9 +2490,8 @@ let rec private evalExpr (ctx: EvalContext) (expr: Expr) : Result<Value, EvalErr
         Error(1525, sprintf "Incorrect DATETIME value: '%s'" (Temporal.formatZeroDateTime dateTime))
     | Lit v -> Ok v
     | Row _ -> Error(1241, "Operand should contain 1 column(s)")
-    // ponytail: MATCH is only pre-passed for single-table SELECTs (see
-    // `runFullTextSelect`); anywhere else — UPDATE/DELETE WHERE, a joined or
-    // derived source — real MySQL evaluates it, this reports 1191.
+    // MATCH reaches scalar evaluation only when its statement shape has no
+    // physical FULLTEXT source for the score pre-pass.
     | MatchAgainst _ -> Error(1191, "Can't find FULLTEXT index matching the column list")
     | Placeholder _ -> Error(1064, "unbound prepared-statement placeholder")
     | Star _ -> Error(1054, "Invalid use of '*'")

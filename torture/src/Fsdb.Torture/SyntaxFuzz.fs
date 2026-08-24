@@ -34,6 +34,8 @@ module SyntaxFuzz =
            "SELECT id FROM syntax_fulltext WHERE MATCH(title, body) AGAINST ('database') AND MATCH(body, title) AGAINST ('+security' IN BOOLEAN MODE) AND id > 0 ORDER BY id"
            "fulltext_alternatives",
            "SELECT id FROM syntax_fulltext WHERE (MATCH(title, body) AGAINST ('database') OR MATCH(body, title) AGAINST ('+security' IN BOOLEAN MODE)) AND id > 0 ORDER BY id"
+           "fulltext_join",
+           "SELECT f.id, MATCH(n.body) AGAINST ('security') AS relevance FROM syntax_fulltext AS f JOIN syntax_fulltext_notes AS n ON n.article_id = f.id AND MATCH(n.body) AGAINST ('notes') WHERE MATCH(f.title, f.body) AGAINST ('database') ORDER BY f.id"
            "collation_symmetric", "SELECT ci = bin, bin = ci, ci < bin, bin > ci, ci LIKE bin FROM syntax_collation"
            "collation_row", "SELECT (ci, 1) = (bin, 1), (bin, 1) IN ((ci, 1), ('z', 2)) FROM syntax_collation"
            "collation_quantified",
@@ -77,6 +79,8 @@ module SyntaxFuzz =
            "CREATE TABLE syntax_log (n INT)"
            "CREATE TABLE syntax_fulltext (id INT PRIMARY KEY, title VARCHAR(100), body TEXT, FULLTEXT(title, body))"
            "INSERT INTO syntax_fulltext VALUES (1, 'Database tutorial', 'Database security guide'), (2, 'Other notes', 'Unrelated material')"
+           "CREATE TABLE syntax_fulltext_notes (article_id INT, body TEXT, FULLTEXT(body))"
+           "INSERT INTO syntax_fulltext_notes VALUES (1, 'Security notes'), (2, 'Other notes')"
            "CREATE TRIGGER syntax_first BEFORE INSERT ON syntax_trigger_target FOR EACH ROW SET NEW.n = NEW.n + 1" |]
 
     let private cleanupStatement feature suffix =
