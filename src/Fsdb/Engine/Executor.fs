@@ -4598,6 +4598,101 @@ and private applyJsonTableJoin
     | _ ->
         Error(Err(1064, "JSON_TABLE only supports comma-join, CROSS JOIN, [INNER] JOIN ... ON, and LEFT JOIN ... ON"))
 
+and private planJoinOrder (store: Store) (dbName: string) (select: SelectStmt) : Join list =
+    let qualifier (source: FromItem) = fromItemQualifier source |> _.ToLowerInvariant()
+
+    let references expression =
+        Expression.collect
+            (function
+            | QualifiedCol(name, _) -> Some(name.ToLowerInvariant())
+            | _ -> None)
+            expression
+        |> Set.ofList
+
+    let hasUnqualifiedReference expression =
+        Expression.exists
+            (function
+            | Col _
+            | Star None -> true
+            | _ -> false)
+            expression
+
+    let expressions =
+        (select.Projections |> List.map fst)
+        @ (select.Where |> Option.toList)
+        @ select.GroupBy
+        @ (select.Having |> Option.toList)
+        @ (select.OrderBy |> List.map fst)
+        @ (select.Joins |> List.map _.On)
+
+    let eligible =
+        not select.StraightJoin
+        && expressions |> List.forall (hasUnqualifiedReference >> not)
+        && select.Joins
+           |> List.forall (fun join ->
+               join.Kind = InnerJoin
+               && join.Using.IsEmpty
+               && match join.Table with FromTable _ -> true | _ -> false)
+
+    match select.From, eligible with
+    | Some(FromTable baseTable), true ->
+        let baseQualifier = baseTable.Alias |> Option.defaultValue baseTable.Table |> _.ToLowerInvariant()
+
+        let tableFor (join: Join) =
+            match join.Table with
+            | FromTable tableRef ->
+                tryPhysicalTableRef store dbName tableRef
+                |> Result.toOption
+                |> Option.flatten
+            | _ -> None
+
+        let indexedByBoundColumn bound (join: Join) =
+            let candidate = qualifier join.Table
+
+            conjuncts join.On
+            |> List.exists (function
+                | BinOp(Eq, QualifiedCol(leftQualifier, leftColumn), QualifiedCol(rightQualifier, rightColumn)) ->
+                    let leftQualifier = leftQualifier.ToLowerInvariant()
+                    let rightQualifier = rightQualifier.ToLowerInvariant()
+
+                    let candidateColumn =
+                        if leftQualifier = candidate && bound |> Set.contains rightQualifier then Some leftColumn
+                        elif rightQualifier = candidate && bound |> Set.contains leftQualifier then Some rightColumn
+                        else None
+
+                    candidateColumn
+                    |> Option.bind (fun column ->
+                        tableFor join
+                        |> Option.bind (fun table -> Storage.tryEqualityIndexForColumns table [ column ]))
+                    |> Option.isSome
+                | _ -> false)
+
+        let rec choose bound (planned: Join list) (remaining: Join list) =
+            match remaining with
+            | [] -> List.rev planned
+            | _ ->
+                let ready =
+                    remaining
+                    |> List.indexed
+                    |> List.filter (fun (_, join) ->
+                        references join.On
+                        |> Set.forall (fun name -> name = qualifier join.Table || bound |> Set.contains name))
+
+                match ready with
+                | [] -> select.Joins
+                | _ ->
+                    let index, next =
+                        ready
+                        |> List.minBy (fun (originalIndex, join) ->
+                            let rowCount = tableFor join |> Option.map (_.RowsArray.Count) |> Option.defaultValue System.Int32.MaxValue
+                            (if indexedByBoundColumn bound join then 0 else 1), rowCount, originalIndex)
+
+                    let remaining = remaining |> List.mapi (fun i join -> i, join) |> List.choose (fun (i, join) -> if i = index then None else Some join)
+                    choose (Set.add (qualifier next.Table) bound) (next :: planned) remaining
+
+        choose (Set.singleton baseQualifier) [] select.Joins
+    | _ -> select.Joins
+
 and private applyResolvedJoin
     (store: Store)
     (registry: Registry)
@@ -5418,7 +5513,7 @@ and private runSelectStmt
                 Ok(([ baseQualifier, baseColumns ], baseRows), [])
 
             match
-                select.Joins
+                planJoinOrder store dbName select
                 |> List.fold
                     (fun acc join ->
                         acc
@@ -9254,8 +9349,10 @@ and private explainSelectBlock
     (selectType: string)
     (select: SelectStmt)
     : Result<unit, QueryResult> =
+    let joins = planJoinOrder store dbName select
+
     let indexOrderPlan =
-        match select.From, select.Joins with
+        match select.From, joins with
         | Some(FromTable tref), [] when tryEqualityLookup store dbName tref select.Where |> Option.isNone ->
             tryIndexOrder store registry dbName tref select
         | _ -> None
@@ -9265,7 +9362,7 @@ and private explainSelectBlock
           if not select.OrderBy.IsEmpty && indexOrderPlan.IsNone then "Using filesort"
           if not select.GroupBy.IsEmpty || select.Distinct then "Using temporary" ]
 
-    explainJoinBlock store registry dbName nextId acc id selectType select.From select.Joins select.Where extra (selectSubqueryExprs select) indexOrderPlan
+    explainJoinBlock store registry dbName nextId acc id selectType select.From joins select.Where extra (selectSubqueryExprs select) indexOrderPlan
 
 /// Renders every collected `ExplainRow` into `EXPLAIN`'s classic 12-column
 /// resultset — `id` ascending, `None -> NULL` in every `option` cell the

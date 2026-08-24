@@ -195,6 +195,16 @@ type ServerBenchmarks() =
 
     [<Benchmark>]
     [<BenchmarkCategory("Scale")>]
+    member this.ReorderedIndexedJoin() =
+        this.Query(
+            "SELECT u.id, o.total, a.title "
+            + "FROM users u JOIN orders o ON o.user_id = u.id "
+            + "JOIN articles a ON a.id = u.id "
+            + "WHERE u.id <= 100 LIMIT 50"
+        )
+
+    [<Benchmark>]
+    [<BenchmarkCategory("Scale")>]
     member this.UncorrelatedInSubquery() =
         this.Query "SELECT u.id, u.name FROM users u WHERE u.id IN (SELECT o.user_id FROM orders o WHERE o.id <= 100)"
 

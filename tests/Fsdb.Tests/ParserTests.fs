@@ -26,6 +26,7 @@ let private mkSelect
         { Projections = projections
           Distinct = false
           CalculateFoundRows = false
+          StraightJoin = false
           From = from |> Option.map (fun t -> FromTable { Database = None; Table = t; Alias = None })
           Joins = []
           Where = where
@@ -116,6 +117,12 @@ let tests =
                     | Select { CalculateFoundRows = true; Limit = Some(Lit(VInt 2L)) } -> ()
                     | other -> failtestf "expected CalculateFoundRows = true, got %A" other
 
+                testCase "SELECT STRAIGHT_JOIN carries the join-order constraint"
+                <| fun _ ->
+                    match parseOk "SELECT STRAIGHT_JOIN t.id FROM t JOIN u ON u.id = t.id" with
+                    | Select { StraightJoin = true; Joins = [ _ ] } -> ()
+                    | other -> failtestf "expected StraightJoin = true, got %A" other
+
                 testCase "FROM db.table AS alias parses a qualified, aliased TableRef"
                 <| fun _ ->
                     Expect.equal
@@ -124,6 +131,7 @@ let tests =
                             { Projections = [ Star None, None ]
                               Distinct = false
                               CalculateFoundRows = false
+                              StraightJoin = false
                               From = Some(FromTable { Database = Some "information_schema"; Table = "tables"; Alias = Some "t" })
                               Joins = []
                               Where = None
@@ -146,6 +154,7 @@ let tests =
                             { Projections = [ Star None, None ]
                               Distinct = false
                               CalculateFoundRows = false
+                              StraightJoin = false
                               From = Some(FromTable { Database = None; Table = "t"; Alias = Some "x" })
                               Joins = []
                               Where = None
@@ -1350,6 +1359,7 @@ let tests =
                             { Projections = [ col "x", None; col "y", None ]
                               Distinct = false
                               CalculateFoundRows = false
+                              StraightJoin = false
                               From = Some(FromTable { Database = None; Table = "u"; Alias = None })
                               Joins = []
                               Where = Some(BinOp(Gt, col "x", Lit(VInt 1L)))
