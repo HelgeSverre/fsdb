@@ -41,7 +41,7 @@ accepted (marked `ponytail:` in source), or recorded only in
 | Persistence | WAL + snapshot, crash-tested | Opt-in only; no group commit; tombstones never reclaimed |
 | Views & triggers | Direct updatable views with all insert/replace forms; ordered BEFORE/AFTER INSERT/UPDATE/DELETE triggers and compound DML bodies | Complex views and the stored-program control language |
 | Routines & events | Absent (catalogs honestly empty) | Everything |
-| Full-text | Oracle-verified scoring | No inverted index; single-table SELECT only; no CJK parser |
+| Full-text | Oracle-verified scoring over maintained inverted indexes | Single-table SELECT only; no CJK parser |
 | Wire protocol | Handshake through COM_STMT_EXECUTE, TLS, LOCAL INFILE, and multi-result batches | No compression or cursors |
 | Auth & privileges | Static privileges enforced incl. subqueries and per-host accounts | No roles/dynamic/column privileges |
 | Metadata | 23 INFORMATION_SCHEMA views, 8 mysql.* tables, and core live command counters | Storage statistics are stand-ins; many SHOW forms missing |
@@ -307,11 +307,13 @@ exact scoring (TF × IDF² with epsilon floor, oracle-verified against
 relevance-feedback expansion (top 20 docs); implicit relevance ordering for
 bare WHERE-MATCH queries; FULLTEXT index DDL, introspection, and
 column-set validation; indexed-column collation sensitivity for case,
-accents, and binary text.
+accents, and binary text; immutable term-frequency postings and row-local
+token positions maintained with DML and rebuilt once after snapshot/WAL
+recovery; direct WHERE-MATCH candidate streaming by stable row identity.
 
 | Gap | MySQL 8.4 | fsdb | Impact | Class |
 |---|---|---|---|---|
-| Inverted index | persistent inverted index, sublinear queries | none; `FullText` re-tokenizes and scores the whole table per statement | high (scale) | divergence |
+| MATCH planning | candidate-driven execution through arbitrary predicates and projections | a bare WHERE-MATCH streams posting candidates; compound predicates and projection-only MATCH still pass through the general table pipeline | high (scale) | divergence |
 | MATCH scope | any SELECT/UPDATE/DELETE context, joins included | single-table SELECT pre-pass only; elsewhere 1191 | medium | refusal |
 | Tunables | innodb_ft_min_token_size, ft_query_expansion_limit, stopword tables, enable/disable | constants in `FullText` fix these at 3 / 20 / the built-in list | low | divergence |
 | CJK | ngram and mecab parsers, WITH PARSER clause | absent; no CJK tokenization | medium (for CJK) | refusal |

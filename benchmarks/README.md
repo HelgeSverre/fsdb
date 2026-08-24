@@ -111,11 +111,12 @@ work that still scans or replans its input:
 | Uncorrelated IN subquery | 103 ms | 149 µs | 1.09 s | 160 µs |
 | GROUP BY aggregate | 87.5 ms | 20.2 ms | 1.17 s | 198 ms |
 | Window query | 343 ms | 46.7 ms | 5.04 s | 715 ms |
-| Natural FULLTEXT | 53.7 ms | 393 µs | 708 ms | 3.72 ms |
+| Natural FULLTEXT | 2.76 ms | 408 µs | 48.5 ms | 3.72 ms |
 
 The point-write and secondary-range slopes are flat. The join, subquery,
-aggregate, window, and FULLTEXT slopes identify planning and persistent-index
-work as the highest-leverage performance area.
+aggregate and window slopes identify planning as the highest-leverage
+performance area. FULLTEXT now uses maintained postings, although its general
+SELECT integration still leaves a visible scale gap.
 
 ### Durability-matched (single-connection latency, `ebc3fca-durable.md`)
 
@@ -167,11 +168,16 @@ rather than a narrow regression threshold.
 
 ### Full-text search
 
-The focused [10k-article comparison](results/f4865b1-fulltext.md) covers
-natural, boolean, accent-aware, and boolean-prefix queries. fsdb measured
-49–54 ms versus MySQL's 0.22–1.09 ms. Accent-aware collation matching adds no
-visible penalty relative to fsdb's other modes; the gap is the full-corpus
-tokenize/score pass versus MySQL's persistent inverted index.
+The post-index [10k-article](results/8e904fd-fulltext-index.md) and
+[100k-article](results/8e904fd-fulltext-index-scale.md) comparisons cover
+natural, boolean, accent-aware, and boolean-prefix queries. Against the
+pre-index 10k baseline, natural search fell from 53.7 ms to 2.76 ms,
+accent-aware search from 51.2 ms to 1.62 ms, boolean search from 50.7 ms to
+17.3 ms, and prefix search from 49.5 ms to 9.73 ms. MySQL remains 6.8–32×
+faster at 10k and 13–60× at 100k. Boolean combination still visits every
+document, prefix search scans the vocabulary, and compound MATCH expressions
+still enter the general table pipeline; those are the remaining scale seams,
+not document re-tokenization.
 
 Add a column here for each representative snapshot; keep intermediate runs in
 `results/` without a column.
