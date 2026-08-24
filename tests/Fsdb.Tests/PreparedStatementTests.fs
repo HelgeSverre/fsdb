@@ -127,6 +127,30 @@ let tests =
                   | other -> failtestf "expected the bound name back, got %A" other
               | other -> failtestf "expected a parsed statement with 2 params, got %A" other
 
+          testCase "a prepared CTE update binds source and assignment parameters"
+          <| fun _ ->
+              let session = create 1 (Fsdb.Storage.create ())
+              let session, _ = handle session "CREATE TABLE cte_update (id INT PRIMARY KEY, n INT)"
+              let session, _ = handle session "INSERT INTO cte_update VALUES (1, 10), (2, 20)"
+              let sql = "WITH chosen AS (SELECT id FROM cte_update WHERE id = ?) UPDATE cte_update SET n = ? WHERE id IN (SELECT id FROM chosen)"
+
+              match prepareStatement sql with
+              | Result.Ok(Some ast, 2) ->
+                  let statement =
+                      { Ast = Some ast
+                        Sql = sql
+                        ParamCount = 2
+                        LastParamTypes = None }
+
+                  let session, result = executePrepared session statement [ VInt 2L; VInt 99L ]
+                  Expect.equal result (Affected 1UL) "the selected row updates"
+
+                  match handle session "SELECT id, n FROM cte_update ORDER BY id" |> snd with
+                  | ResultSet(_, rows) ->
+                      Expect.equal rows [ [ Some "1"; Some "10" ]; [ Some "2"; Some "99" ] ] "both placeholders bind"
+                  | other -> failtestf "expected updated rows, got %A" other
+              | other -> failtestf "expected a parsed CTE update with two params, got %A" other
+
           testCase "a prepared ROW predicate binds each constructor field"
           <| fun _ ->
               let session = create 1 (Fsdb.Storage.create ())

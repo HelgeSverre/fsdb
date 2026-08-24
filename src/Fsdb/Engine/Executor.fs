@@ -5248,6 +5248,22 @@ and private withCteScope
         finally
             cteScope.Value <- saved
 
+and private withCteQueryResult
+    (store: Store)
+    (registry: Registry)
+    (dbName: string)
+    (ctes: CommonTableExpr list)
+    (body: unit -> QueryResult)
+    : QueryResult =
+    let mutable bodyResult = None
+
+    let scopeResult, _, _ =
+        withCteScope store registry dbName ctes None (fun () ->
+            bodyResult <- Some(body ())
+            Affected 0UL, [], [])
+
+    bodyResult |> Option.defaultValue scopeResult
+
 /// One `WITH` binding's rows. A `WITH RECURSIVE` name that actually
 /// references itself iterates its `UNION` branches semi-naively (each pass
 /// sees only the previous pass's new rows) until a pass adds nothing;
@@ -9368,6 +9384,8 @@ let rec private explainStatement (store: Store) (registry: Registry) (dbName: st
                     let label = sprintf "<union%s>" (id1 :: restIds |> List.map string |> String.concat ",")
                     acc.Add { Id = None; SelectType = "UNION RESULT"; Table = Some label; Type = None; Key = None; Ref = None; Rows = None; Extra = [] })
         )
+    | Update u when not u.Ctes.IsEmpty ->
+        withCteQueryResult store registry dbName u.Ctes (fun () -> explainStatement store registry dbName (Update { u with Ctes = [] }))
     | Update u ->
         let id = nextId ()
         let extra = [ if u.Where.IsSome then "Using where"
@@ -9378,6 +9396,8 @@ let rec private explainStatement (store: Store) (registry: Registry) (dbName: st
             checkMutationWhere u.From u.Joins ((u.Where |> Option.toList) @ (u.Assignments |> List.map (fun a -> a.Value)))
             |> Result.bind (fun () -> explainJoinBlock store registry dbName nextId acc id "UPDATE" (Some(FromTable u.From)) u.Joins u.Where extra subqueryExprs None)
         )
+    | Delete d when not d.Ctes.IsEmpty ->
+        withCteQueryResult store registry dbName d.Ctes (fun () -> explainStatement store registry dbName (Delete { d with Ctes = [] }))
     | Delete d ->
         let id = nextId ()
         let extra = [ if d.Where.IsSome then "Using where"
@@ -10230,8 +10250,13 @@ let private triggerRowImageError (event: TriggerEvent) (columns: ColumnDef list)
         | Replace(_, _, rows) -> rows |> List.collect (List.collect references)
         | ReplaceSelect(_, _, select) -> selectReferences select
         | ReplaceSet(_, assignments) -> assignments |> List.collect (snd >> references)
-        | Update update -> (update.Assignments |> List.collect (fun assignment -> references assignment.Value)) @ (update.Where |> Option.map references |> Option.defaultValue [])
-        | Delete delete -> delete.Where |> Option.map references |> Option.defaultValue []
+        | Update update ->
+            (update.Ctes |> List.collect (fun cte -> selectOrUnionReferences cte.Body))
+            @ (update.Assignments |> List.collect (fun assignment -> references assignment.Value))
+            @ (update.Where |> Option.map references |> Option.defaultValue [])
+        | Delete delete ->
+            (delete.Ctes |> List.collect (fun cte -> selectOrUnionReferences cte.Body))
+            @ (delete.Where |> Option.map references |> Option.defaultValue [])
         | _ -> []
 
     statementReferences
@@ -10684,6 +10709,26 @@ let rec executeAs
                 execute ()
 
     match stmt with
+    | Update update when not update.Ctes.IsEmpty ->
+        let mutable nextIds = ids
+
+        let result =
+            withCteQueryResult store registry dbName update.Ctes (fun () ->
+                let ids, result = executeAs store registry dbName ids foundRows currentAccount (Update { update with Ctes = [] })
+                nextIds <- ids
+                result)
+
+        nextIds, result
+    | Delete delete when not delete.Ctes.IsEmpty ->
+        let mutable nextIds = ids
+
+        let result =
+            withCteQueryResult store registry dbName delete.Ctes (fun () ->
+                let ids, result = executeAs store registry dbName ids foundRows currentAccount (Delete { delete with Ctes = [] })
+                nextIds <- ids
+                result)
+
+        nextIds, result
     | SetTriggerNew _ -> ids, Err(1064, "SET NEW is only valid in a trigger body")
 
     | CreateDatabase(name, ifNotExists) ->

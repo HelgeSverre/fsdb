@@ -1220,7 +1220,8 @@ let tests =
                     Expect.equal
                         (parseOk "DELETE FROM app.t")
                         (Delete
-                            { Targets = [ "t" ]
+                            { Ctes = []
+                              Targets = [ "t" ]
                               From = { Database = Some "app"; Table = "t"; Alias = None }
                               Joins = []
                               Where = None
@@ -1491,7 +1492,8 @@ let tests =
                     Expect.equal
                         (parseOk "UPDATE t SET a = 1, b = a + 1 WHERE id = 5")
                         (Update
-                            { Ignore = false
+                            { Ctes = []
+                              Ignore = false
                               From = { Database = None; Table = "t"; Alias = None }
                               Joins = []
                               Assignments =
@@ -1507,7 +1509,8 @@ let tests =
                     Expect.equal
                         (parseOk "UPDATE t SET a = 1")
                         (Update
-                            { Ignore = false
+                            { Ctes = []
+                              Ignore = false
                               From = { Database = None; Table = "t"; Alias = None }
                               Joins = []
                               Assignments = [ { Table = None; Column = "a"; Value = Lit(VInt 1L) } ]
@@ -1521,7 +1524,8 @@ let tests =
                     Expect.equal
                         (parseOk "DELETE FROM t WHERE id = 5")
                         (Delete
-                            { Targets = [ "t" ]
+                            { Ctes = []
+                              Targets = [ "t" ]
                               From = { Database = None; Table = "t"; Alias = None }
                               Joins = []
                               Where = Some(BinOp(Eq, col "id", Lit(VInt 5L)))
@@ -1534,7 +1538,8 @@ let tests =
                     Expect.equal
                         (parseOk "DELETE FROM t")
                         (Delete
-                            { Targets = [ "t" ]
+                            { Ctes = []
+                              Targets = [ "t" ]
                               From = { Database = None; Table = "t"; Alias = None }
                               Joins = []
                               Where = None
@@ -1547,7 +1552,8 @@ let tests =
                     Expect.equal
                         (parseOk "DELETE FROM t WHERE id = 5 LIMIT 100")
                         (Delete
-                            { Targets = [ "t" ]
+                            { Ctes = []
+                              Targets = [ "t" ]
                               From = { Database = None; Table = "t"; Alias = None }
                               Joins = []
                               Where = Some(BinOp(Eq, col "id", Lit(VInt 5L)))
@@ -1560,7 +1566,8 @@ let tests =
                     Expect.equal
                         (parseOk "UPDATE t AS x SET a = 1 WHERE id = 5 ORDER BY id LIMIT 10")
                         (Update
-                            { Ignore = false
+                            { Ctes = []
+                              Ignore = false
                               From = { Database = None; Table = "t"; Alias = Some "x" }
                               Joins = []
                               Assignments = [ { Table = None; Column = "a"; Value = Lit(VInt 1L) } ]
@@ -1574,7 +1581,8 @@ let tests =
                     Expect.equal
                         (parseOk "UPDATE t x SET a = 1")
                         (Update
-                            { Ignore = false
+                            { Ctes = []
+                              Ignore = false
                               From = { Database = None; Table = "t"; Alias = Some "x" }
                               Joins = []
                               Assignments = [ { Table = None; Column = "a"; Value = Lit(VInt 1L) } ]
@@ -1588,7 +1596,8 @@ let tests =
                     Expect.equal
                         (parseOk "UPDATE chatbots SET restrict_allowed_origins = 1, `chatbots`.`updated_at` = '2024-01-01'")
                         (Update
-                            { Ignore = false
+                            { Ctes = []
+                              Ignore = false
                               From = { Database = None; Table = "chatbots"; Alias = None }
                               Joins = []
                               Assignments =
@@ -1918,6 +1927,21 @@ let tests =
                         Expect.equal (scalar.Ctes |> List.map _.CteName) [ "c" ] "scalar CTE"
                         Expect.equal (exists.Ctes |> List.map _.CteName) [ "d" ] "EXISTS CTE"
                     | other -> failtestf "expected CTE-bearing expression subqueries, got %A" other
+
+                testCase "WITH clauses attach to UPDATE and DELETE"
+                <| fun _ ->
+                    match
+                        parseOk "WITH changed AS (SELECT id FROM src) UPDATE dst SET n = n + 1 WHERE id IN (SELECT id FROM changed)",
+                        parseOk "WITH removed AS (SELECT id FROM src) DELETE FROM dst WHERE id IN (SELECT id FROM removed)"
+                    with
+                    | Update { Ctes = [ { CteName = "changed" } ] }, Delete { Ctes = [ { CteName = "removed" } ] } -> ()
+                    | other -> failtestf "expected CTE-bearing mutations, got %A" other
+
+                testCase "a parenthesized set branch may begin with WITH"
+                <| fun _ ->
+                    match parseOk "(WITH c AS (SELECT 1 AS n) SELECT n FROM c) UNION ALL (SELECT 2)" with
+                    | Union({ Ctes = [ { CteName = "c" } ] }, [ OpUnion true, _ ], _, _, _) -> ()
+                    | other -> failtestf "expected a branch-local CTE, got %A" other
 
                 testCase "WITH and RECURSIVE are reserved outside CTE grammar"
                 <| fun _ ->

@@ -2448,6 +2448,21 @@ let private tableRef: Parser<TableRef, unit> =
         | Some table -> { Database = Some first; Table = table; Alias = alias }
         | None -> { Database = None; Table = first; Alias = alias }
 
+let private withClause: Parser<CommonTableExpr list, unit> =
+    keyword "WITH" >>. opt (keyword "RECURSIVE")
+    >>= fun recursive ->
+        sepBy1
+            (identifier
+             .>>. opt (between (sym "(") (sym ")") (sepBy1 identifier (sym ",")))
+             .>> keyword "AS"
+             .>>. between (sym "(") (sym ")") selectQuery
+             |>> fun ((name, cols), body) ->
+                 { CteName = name
+                   CteColumns = cols |> Option.defaultValue []
+                   Recursive = recursive.IsSome
+                   Body = body })
+            (sym ",")
+
 /// A single `SELECT`, redundantly wrapped in one or more parens —
 /// `(SELECT ...)` and `((SELECT ...))` both reduce to the same `SelectStmt`.
 /// This is what lets a `UNION` branch (`selectOrUnionBranches` below, shared
@@ -2456,7 +2471,10 @@ let private tableRef: Parser<TableRef, unit> =
 /// parenthesized, rather than just the bare `SELECT ...` this engine already
 /// handled.
 let private parenSelect, parenSelectRef = createParserForwardedToRef<SelectStmt, unit> ()
-parenSelectRef.Value <- attempt (sym "(" >>. parenSelect .>> sym ")") <|> selectStmtRecord
+parenSelectRef.Value <-
+    attempt (sym "(" >>. parenSelect .>> sym ")")
+    <|> (withClause .>>. selectStmtRecord |>> fun (ctes, select) -> { select with Ctes = ctes })
+    <|> selectStmtRecord
 
 /// `parenSelect`, paired with whether this particular branch was actually
 /// wrapped in parens — `selectOrUnionBranches` needs that to decide whose
@@ -2879,24 +2897,6 @@ selectStmtRecordRef.Value <-
           Offset = offset
           Locking = locking.IsSome }
 
-/// `WITH [RECURSIVE] name [(col, ...)] AS (body), ...` — the CTE list that
-/// may precede a query expression. Attached to the first `SelectStmt`, which
-/// is where the executor establishes scope for both plain and set queries.
-let private withClause: Parser<CommonTableExpr list, unit> =
-    keyword "WITH" >>. opt (keyword "RECURSIVE")
-    >>= fun recursive ->
-        sepBy1
-            (identifier
-             .>>. opt (between (sym "(") (sym ")") (sepBy1 identifier (sym ",")))
-             .>> keyword "AS"
-             .>>. between (sym "(") (sym ")") selectQuery
-             |>> fun ((name, cols), body) ->
-                 { CteName = name
-                   CteColumns = cols |> Option.defaultValue []
-                   Recursive = recursive.IsSome
-                   Body = body })
-            (sym ",")
-
 selectQueryRef.Value <-
     opt withClause .>>. selectOrUnionBranches
     >>= fun (ctes, (first, rest)) ->
@@ -3017,7 +3017,8 @@ let private updateStmt: Parser<Statement, unit> =
         opt (keyword "WHERE" >>. expr) .>>. singleTableOrderLimit joins
         |>> fun (where, (orderBy, limit)) ->
             Update
-                { Ignore = ignoreErrors
+                { Ctes = []
+                  Ignore = ignoreErrors
                   From = from
                   Joins = joins
                   Assignments = assignments
@@ -3050,12 +3051,21 @@ let private deleteStmt: Parser<Statement, unit> =
         opt (keyword "WHERE" >>. expr) .>>. singleTableOrderLimit joins
         |>> fun (where, (orderBy, limit)) ->
             Delete
-                { Targets = targets
+                { Ctes = []
+                  Targets = targets
                   From = from
                   Joins = joins
                   Where = where
                   OrderBy = orderBy
                   Limit = limit }
+
+let private withDmlStmt: Parser<Statement, unit> =
+    withClause .>>. (updateStmt <|> deleteStmt)
+    |>> fun (ctes, statement) ->
+        match statement with
+        | Update update -> Update { update with Ctes = ctes }
+        | Delete delete -> Delete { delete with Ctes = ctes }
+        | _ -> statement
 
 /// `EXPLAIN [FORMAT=TRADITIONAL] stmt` — MySQL also accepts `DESCRIBE`/
 /// `DESC` as synonyms when just describing a table's columns (not a
@@ -3269,6 +3279,7 @@ statementRef.Value <-
           replaceStmt
           tableQueryStmt
           valuesQueryStmt
+          attempt withDmlStmt
           selectOrUnionStmt
           setTriggerNewStmt
           updateStmt

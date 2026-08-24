@@ -82,7 +82,6 @@ variants), USE, KILL, DESCRIBE are text-probed before the grammar
 | Gap | MySQL 8.4 | fsdb | Impact | Class |
 |---|---|---|---|---|
 | Locking detail | `FOR UPDATE/SHARE [OF tbl…] [NOWAIT|SKIP LOCKED]` | `FOR UPDATE`/`FOR SHARE`/`LOCK IN SHARE MODE` accepted and ignored; no OF/NOWAIT/SKIP LOCKED | low | divergence |
-| CTE placement ceilings | `WITH … UPDATE`/`DELETE`; a parenthesized set-operation branch may begin with `WITH` | CTEs scope query expressions and INSERT/REPLACE/CTAS sources; DML-leading and branch-local forms are refused | medium | refusal |
 | Set-operation expression subqueries | scalar/EXISTS/IN/ANY/SOME/ALL subqueries may be a UNION/INTERSECT/EXCEPT query expression | expression-subquery AST carries one SELECT; set operations work at top level and in derived/CTE bodies | medium | refusal |
 
 Expression coverage that does exist: full comparison/logical/arithmetic

@@ -2083,6 +2083,7 @@ let rec mapPlaceholders (replace: int -> Expr) (stmt: Statement) : Statement =
     | Update u ->
         Update
             { u with
+                Ctes = u.Ctes |> List.map (fun cte -> { cte with Body = mapSelectOrUnion cte.Body })
                 Assignments = List.map mapAssignment u.Assignments
                 Where = Option.map mapExpr u.Where
                 OrderBy = List.map mapOrderKey u.OrderBy
@@ -2091,6 +2092,7 @@ let rec mapPlaceholders (replace: int -> Expr) (stmt: Statement) : Statement =
     | Delete d ->
         Delete
             { d with
+                Ctes = d.Ctes |> List.map (fun cte -> { cte with Body = mapSelectOrUnion cte.Body })
                 Where = Option.map mapExpr d.Where
                 OrderBy = List.map mapOrderKey d.OrderBy
                 Joins = List.map mapJoin d.Joins

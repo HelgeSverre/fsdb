@@ -6695,6 +6695,12 @@ let tests =
                         "WITH outer_c AS (WITH inner_c AS (SELECT 42 AS n) SELECT n FROM inner_c) SELECT n FROM outer_c"
                         [ [ Some "42" ] ]
 
+                testCase "a parenthesized set branch keeps its own CTE scope"
+                <| fun _ ->
+                    expectRows
+                        "(WITH c AS (SELECT 2 AS n) SELECT n FROM c) UNION ALL (SELECT 1) ORDER BY n"
+                        [ [ Some "1" ]; [ Some "2" ] ]
+
                 testCase "duplicate CTE names are rejected before execution"
                 <| fun _ ->
                     match runDefault (cteStore ()) "WITH c AS (SELECT 1 AS n), c AS (SELECT 2 AS n) SELECT n FROM c" with
@@ -6717,6 +6723,34 @@ let tests =
                     match runDefault store "SELECT id FROM inserted ORDER BY id" with
                     | ResultSet(_, [ [ Some "1" ]; [ Some "2" ] ]) -> ()
                     | other -> failtestf "expected CTE rows in the target table, got %A" other
+
+                testCase "UPDATE and DELETE consume leading CTEs"
+                <| fun _ ->
+                    let store = cteStore ()
+
+                    match
+                        runDefault
+                            store
+                            "WITH changed AS (SELECT id FROM t WHERE g = 2) UPDATE t SET v = v + 1 WHERE id IN (SELECT id FROM changed)"
+                    with
+                    | Affected 3UL -> ()
+                    | other -> failtestf "expected three CTE updates, got %A" other
+
+                    match
+                        runDefault
+                            store
+                            "WITH RECURSIVE removed (id) AS (SELECT 1 UNION ALL SELECT id + 1 FROM removed WHERE id < 2) DELETE FROM t WHERE id IN (SELECT id FROM removed)"
+                    with
+                    | Affected 2UL -> ()
+                    | other -> failtestf "expected two CTE deletes, got %A" other
+
+                    match runDefault store "SELECT id, v FROM t ORDER BY id" with
+                    | ResultSet(_, rows) ->
+                        Expect.equal
+                            rows
+                            [ [ Some "3"; Some "31" ]; [ Some "4"; Some "41" ]; [ Some "5"; Some "51" ] ]
+                            "both mutations retain their CTE scope"
+                    | other -> failtestf "expected the remaining rows, got %A" other
 
                 testCase "REPLACE SELECT accepts a CTE source"
                 <| fun _ ->

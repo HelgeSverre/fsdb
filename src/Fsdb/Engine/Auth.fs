@@ -649,14 +649,14 @@ let revoke (store: Store) (privs: string list) (target: PrivTarget) (users: (str
 /// check can't be dodged by burying the reference below the top level.
 /// Mirrors `Executor.collectSubqueries`' traversal; kept local since
 /// `Auth` compiles before `Executor`.
-let rec private exprReadTables (defaultDb: string) (expr: Expr) : (string * string) list =
-    let recur = exprReadTables defaultDb
+let rec private exprReadTablesIn (boundCtes: Set<string>) (defaultDb: string) (expr: Expr) : (string * string) list =
+    let recur = exprReadTablesIn boundCtes defaultDb
 
     match expr with
     | Subquery s
-    | Exists s -> selectReadTables defaultDb s
-    | InSubquery(e, s) -> recur e @ selectReadTables defaultDb s
-    | QuantifiedComparison(e, _, _, s) -> recur e @ selectReadTables defaultDb s
+    | Exists s -> selectReadTablesIn boundCtes defaultDb s
+    | InSubquery(e, s) -> recur e @ selectReadTablesIn boundCtes defaultDb s
+    | QuantifiedComparison(e, _, _, s) -> recur e @ selectReadTablesIn boundCtes defaultDb s
     | BinOp(_, a, b) -> recur a @ recur b
     | Row values -> values |> List.collect recur
     | AssignUserVariable(_, value) -> recur value
@@ -718,29 +718,33 @@ let rec private exprReadTables (defaultDb: string) (expr: Expr) : (string * stri
     | QualifiedCol _
     | Star _ -> []
 
-and private fromItemReadTables (defaultDb: string) (item: FromItem) : (string * string) list =
+and private fromItemReadTablesIn (boundCtes: Set<string>) (defaultDb: string) (item: FromItem) : (string * string) list =
     match item with
+    | FromTable(r: TableRef) when r.Database.IsNone && Set.contains (r.Table.ToLowerInvariant()) boundCtes -> []
     | FromTable(r: TableRef) -> [ (defaultArg r.Database defaultDb), r.Table ]
     | FromSubquery(body, _)
-    | FromLateral(body, _) -> selectOrUnionReadTables defaultDb body
+    | FromLateral(body, _) -> selectOrUnionReadTablesIn boundCtes defaultDb body
     // A JSON_TABLE reads nothing itself; its source expression may (a
     // subquery, a correlated column of a table already listed), so walk it.
-    | FromJsonTable(source, _, _, _) -> exprReadTables defaultDb source
+    | FromJsonTable(source, _, _, _) -> exprReadTablesIn boundCtes defaultDb source
 
-and private selectOrUnionReadTables (defaultDb: string) (body: SelectOrUnion) : (string * string) list =
+and private selectOrUnionReadTablesIn (boundCtes: Set<string>) (defaultDb: string) (body: SelectOrUnion) : (string * string) list =
     match body with
-    | PlainSelect s -> selectReadTables defaultDb s
+    | PlainSelect s -> selectReadTablesIn boundCtes defaultDb s
     | UnionSelect(first, rest, _, _, _) ->
-        selectReadTables defaultDb first @ (rest |> List.collect (snd >> selectReadTables defaultDb))
+        selectReadTablesIn boundCtes defaultDb first
+        @ (rest |> List.collect (snd >> selectReadTablesIn boundCtes defaultDb))
 
-and private selectReadTables (defaultDb: string) (s: SelectStmt) : (string * string) list =
-    (s.Ctes |> List.collect (fun cte -> selectOrUnionReadTables defaultDb cte.Body))
-    @ (s.From |> Option.map (fromItemReadTables defaultDb) |> Option.defaultValue [])
-    @ (s.Joins |> List.collect (fun j -> fromItemReadTables defaultDb j.Table @ exprReadTables defaultDb j.On))
-    @ (s.Where |> Option.map (exprReadTables defaultDb) |> Option.defaultValue [])
-    @ (s.Having |> Option.map (exprReadTables defaultDb) |> Option.defaultValue [])
-    @ (s.Projections |> List.collect (fst >> exprReadTables defaultDb))
-    @ (s.GroupBy |> List.collect (exprReadTables defaultDb))
+and private selectReadTablesIn (boundCtes: Set<string>) (defaultDb: string) (s: SelectStmt) : (string * string) list =
+    let cteReads, localCtes = cteReadTablesIn boundCtes defaultDb s.Ctes
+
+    cteReads
+    @ (s.From |> Option.map (fromItemReadTablesIn localCtes defaultDb) |> Option.defaultValue [])
+    @ (s.Joins |> List.collect (fun j -> fromItemReadTablesIn localCtes defaultDb j.Table @ exprReadTablesIn localCtes defaultDb j.On))
+    @ (s.Where |> Option.map (exprReadTablesIn localCtes defaultDb) |> Option.defaultValue [])
+    @ (s.Having |> Option.map (exprReadTablesIn localCtes defaultDb) |> Option.defaultValue [])
+    @ (s.Projections |> List.collect (fst >> exprReadTablesIn localCtes defaultDb))
+    @ (s.GroupBy |> List.collect (exprReadTablesIn localCtes defaultDb))
     @ (s.Windows
        |> List.collect (fun (_, spec) ->
            spec.PartitionBy
@@ -753,9 +757,28 @@ and private selectReadTables (defaultDb: string) (s: SelectStmt) : (string * str
                       | BoundFollowing expr -> [ expr ]
                       | _ -> []))
               |> Option.defaultValue []))
-       |> List.collect (exprReadTables defaultDb))
-    @ (s.OrderBy |> List.collect (fst >> exprReadTables defaultDb))
+       |> List.collect (exprReadTablesIn localCtes defaultDb))
+    @ (s.OrderBy |> List.collect (fst >> exprReadTablesIn localCtes defaultDb))
     |> List.distinct
+
+and private cteReadTablesIn
+    (boundCtes: Set<string>)
+    (defaultDb: string)
+    (ctes: CommonTableExpr list)
+    : (string * string) list * Set<string> =
+    ctes
+    |> List.fold
+        (fun (reads, names) cte ->
+            let name = cte.CteName.ToLowerInvariant()
+            let visible = if cte.Recursive then Set.add name names else names
+            let reads = selectOrUnionReadTablesIn visible defaultDb cte.Body @ reads
+            reads, Set.add name names)
+        ([], boundCtes)
+
+let private exprReadTables defaultDb expression = exprReadTablesIn Set.empty defaultDb expression
+let private fromItemReadTables defaultDb item = fromItemReadTablesIn Set.empty defaultDb item
+let private selectOrUnionReadTables defaultDb body = selectOrUnionReadTablesIn Set.empty defaultDb body
+let private selectReadTables defaultDb select = selectReadTablesIn Set.empty defaultDb select
 
 /// Kept for callers that still want the top-level `From`/`Joins` set with a
 /// per-item transform; `selectReadTables` is the recursive whole-statement
@@ -809,22 +832,44 @@ let rec requiredPrivileges (defaultDb: string) (stmt: Statement) : (string * Pri
         @ onTables "SELECT" (assignments |> List.collect (snd >> exprReadTables defaultDb) |> List.distinct)
     | Do expressions -> onTables "SELECT" (expressions |> List.collect (exprReadTables defaultDb) |> List.distinct)
     | Update u ->
+        let cteTables, boundCtes = cteReadTablesIn Set.empty defaultDb u.Ctes
+
         let readInExprs =
-            (u.Assignments |> List.collect (fun a -> exprReadTables defaultDb a.Value))
-            @ (u.Where |> Option.map (exprReadTables defaultDb) |> Option.defaultValue [])
-            @ (u.Joins |> List.collect (fun j -> exprReadTables defaultDb j.On))
+            (u.Assignments |> List.collect (fun a -> exprReadTablesIn boundCtes defaultDb a.Value))
+            @ (u.Where |> Option.map (exprReadTablesIn boundCtes defaultDb) |> Option.defaultValue [])
+            @ (u.Joins |> List.collect (fun j -> exprReadTablesIn boundCtes defaultDb j.On))
             |> List.distinct
 
-        onTables "UPDATE" (tableRefsOfFrom defaultDb (Some(FromTable u.From)) u.Joins)
-        @ onTables "SELECT" readInExprs
+        let updatedTables =
+            (u.From.Database |> Option.defaultValue defaultDb, u.From.Table)
+            :: (u.Joins
+                |> List.choose (fun join ->
+                    match join.Table with
+                    | FromTable table when table.Database.IsNone && Set.contains (table.Table.ToLowerInvariant()) boundCtes -> None
+                    | FromTable table -> Some(table.Database |> Option.defaultValue defaultDb, table.Table)
+                    | _ -> None))
+
+        onTables "UPDATE" updatedTables
+        @ onTables "SELECT" ((cteTables @ readInExprs) |> List.distinct)
     | Delete d ->
+        let cteTables, boundCtes = cteReadTablesIn Set.empty defaultDb d.Ctes
+
         let readInExprs =
-            (d.Where |> Option.map (exprReadTables defaultDb) |> Option.defaultValue [])
-            @ (d.Joins |> List.collect (fun j -> exprReadTables defaultDb j.On))
+            (d.Where |> Option.map (exprReadTablesIn boundCtes defaultDb) |> Option.defaultValue [])
+            @ (d.Joins |> List.collect (fun j -> exprReadTablesIn boundCtes defaultDb j.On))
             |> List.distinct
 
-        onTables "DELETE" (tableRefsOfFrom defaultDb (Some(FromTable d.From)) d.Joins)
-        @ onTables "SELECT" readInExprs
+        let deletedTables =
+            (d.From.Database |> Option.defaultValue defaultDb, d.From.Table)
+            :: (d.Joins
+                |> List.choose (fun join ->
+                    match join.Table with
+                    | FromTable table when table.Database.IsNone && Set.contains (table.Table.ToLowerInvariant()) boundCtes -> None
+                    | FromTable table -> Some(table.Database |> Option.defaultValue defaultDb, table.Table)
+                    | _ -> None))
+
+        onTables "DELETE" deletedTables
+        @ onTables "SELECT" ((cteTables @ readInExprs) |> List.distinct)
     | CreateTable(name, _, _, _, _, _, _, _, _) -> onTables "CREATE" [ split name ]
     | CreateTableLike(name, source, _) -> onTables "CREATE" [ split name ] @ onTables "SELECT" [ split source ]
     | CreateTableAs(name, query, _) -> onTables "CREATE" [ split name ] @ requiredPrivileges defaultDb query

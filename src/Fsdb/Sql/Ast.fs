@@ -768,7 +768,8 @@ and Assignment = { Table: string option; Column: string; Value: Expr }
 /// through more than one join match is still updated at most once (see
 /// `Executor`'s multi-table `UPDATE` handling).
 and UpdateStmt =
-    { Ignore: bool
+    { Ctes: CommonTableExpr list
+      Ignore: bool
       From: TableRef
       Joins: Join list
       Assignments: Assignment list
@@ -784,7 +785,8 @@ and UpdateStmt =
 /// `From`/`Joins` at execution time; `OrderBy`/`Limit` are only legal
 /// (single-table) the same way `UpdateStmt`'s are.
 and DeleteStmt =
-    { Targets: string list
+    { Ctes: CommonTableExpr list
+      Targets: string list
       From: TableRef
       Joins: Join list
       Where: Expr option

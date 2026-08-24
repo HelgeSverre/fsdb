@@ -157,8 +157,16 @@ let tests =
               Expect.equal (selectTablesOf "SELECT * FROM ((SELECT * FROM a) UNION (SELECT * FROM secret)) x") [ "a"; "secret" ] "union inside a derived table"
               Expect.equal
                   (selectTablesOf "WITH public AS (SELECT * FROM secret) SELECT * FROM public")
-                  [ "public"; "secret" ]
-                  "CTE bodies cannot hide a table read"
+                  [ "secret" ]
+                  "CTE bodies expose the physical read without treating the binding as a table"
+              Expect.equal
+                  (selectTablesOf "WITH first AS (SELECT * FROM later), later AS (SELECT 1 AS id) SELECT * FROM first")
+                  [ "later" ]
+                  "a forward CTE name still resolves as a physical table"
+              Expect.equal
+                  (selectTablesOf "WITH RECURSIVE seq (n) AS (SELECT 1 UNION ALL SELECT n + 1 FROM seq WHERE n < 2) SELECT * FROM seq")
+                  []
+                  "a recursive self-reference is not a physical table"
               Expect.equal
                   (selectTablesOf "SELECT FIRST_VALUE((SELECT s FROM secret)) OVER ()")
                   [ "secret" ]
@@ -177,6 +185,19 @@ let tests =
                       (requiredPrivileges "app" stmt |> List.contains ("SELECT", OnTable("app", "secret")))
                       "EXISTS in a DELETE WHERE needs SELECT on secret"
               | Error e -> failtestf "parse delete: %s" e
+
+              for sql, privilege in
+                  [ "WITH chosen AS (SELECT id FROM secret) UPDATE mine SET x = 1 WHERE id IN (SELECT id FROM chosen)", "UPDATE"
+                    "WITH chosen AS (SELECT id FROM secret) DELETE FROM mine WHERE id IN (SELECT id FROM chosen)", "DELETE" ] do
+                  match Fsdb.Parser.parse sql with
+                  | Ok statement ->
+                      let privileges = requiredPrivileges "app" statement
+                      Expect.contains privileges (privilege, OnTable("app", "mine")) "the mutation target is protected"
+                      Expect.contains privileges ("SELECT", OnTable("app", "secret")) "the CTE source is protected"
+                      Expect.isFalse
+                          (privileges |> List.exists (function _, OnTable(_, "chosen") -> true | _ -> false))
+                          "the CTE binding is not a physical privilege target"
+                  | Error error -> failtestf "parse CTE mutation: %s" error
 
               match Fsdb.Parser.parse "INSERT INTO mine VALUES ((SELECT s FROM secret))" with
               | Ok stmt ->
