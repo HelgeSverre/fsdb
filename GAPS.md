@@ -310,12 +310,15 @@ column-set validation; indexed-column collation sensitivity for case,
 accents, and binary text; immutable term-frequency postings and row-local
 token positions maintained with DML and rebuilt once after snapshot/WAL
 recovery; direct WHERE-MATCH candidate streaming by stable row identity.
+Boolean evaluation unions only touched postings, prefix terms have maintained
+prefix postings, and top-level AND predicates intersect MATCH candidates
+before residual evaluation.
 
 | Gap | MySQL 8.4 | fsdb | Impact | Class |
 |---|---|---|---|---|
-| MATCH planning | candidate-driven execution through arbitrary predicates and projections | a bare WHERE-MATCH streams posting candidates; compound predicates and projection-only MATCH still pass through the general table pipeline | high (scale) | divergence |
+| MATCH planning | candidate-driven execution through arbitrary predicates and projections | bare and top-level AND-conjunct MATCH predicates stream posting candidates; OR predicates and projection-only MATCH still pass through the general table pipeline | high (scale) | divergence |
 | MATCH scope | any SELECT/UPDATE/DELETE context, joins included | single-table SELECT pre-pass only; elsewhere 1191 | medium | refusal |
-| Tunables | innodb_ft_min_token_size, ft_query_expansion_limit, stopword tables, enable/disable | constants in `FullText` fix these at 3 / 20 / the built-in list | low | divergence |
+| Tunables | innodb_ft_min_token_size, innodb_ft_max_token_size, ft_query_expansion_limit, stopword tables, enable/disable | constants in `FullText` fix these at 3 / 84 / 20 / the built-in list | low | divergence |
 | CJK | ngram and mecab parsers, WITH PARSER clause | absent; no CJK tokenization | medium (for CJK) | refusal |
 | Proximity/prefix details | manual leaves distance semantics open; phrase-prefix via `"word*"`-adjacent forms | `FullText` interprets @N as an N-token window; prefix wildcard attaches to single words only | low | divergence |
 

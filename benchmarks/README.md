@@ -111,7 +111,7 @@ work that still scans or replans its input:
 | Uncorrelated IN subquery | 103 ms | 149 µs | 1.09 s | 160 µs |
 | GROUP BY aggregate | 87.5 ms | 20.2 ms | 1.17 s | 198 ms |
 | Window query | 343 ms | 46.7 ms | 5.04 s | 715 ms |
-| Natural FULLTEXT | 2.76 ms | 408 µs | 48.5 ms | 3.72 ms |
+| Natural FULLTEXT | 2.67 ms | 412 µs | 54.7 ms | 3.83 ms |
 
 The point-write and secondary-range slopes are flat. The join, subquery,
 aggregate and window slopes identify planning as the highest-leverage
@@ -168,16 +168,17 @@ rather than a narrow regression threshold.
 
 ### Full-text search
 
-The post-index [10k-article](results/8e904fd-fulltext-index.md) and
-[100k-article](results/8e904fd-fulltext-index-scale.md) comparisons cover
+The initial post-index [10k-article](results/8e904fd-fulltext-index.md) and
+[100k-article](results/8e904fd-fulltext-index-scale.md) comparisons, followed
+by the [posting-candidate comparison](results/ef4b4ab-fulltext-postings.md), cover
 natural, boolean, accent-aware, and boolean-prefix queries. Against the
 pre-index 10k baseline, natural search fell from 53.7 ms to 2.76 ms,
 accent-aware search from 51.2 ms to 1.62 ms, boolean search from 50.7 ms to
-17.3 ms, and prefix search from 49.5 ms to 9.73 ms. MySQL remains 6.8–32×
-faster at 10k and 13–60× at 100k. Boolean combination still visits every
-document, prefix search scans the vocabulary, and compound MATCH expressions
-still enter the general table pipeline; those are the remaining scale seams,
-not document re-tokenization.
+3.19 ms, and prefix search from 49.5 ms to 1.44 ms. At 100k, posting-driven
+boolean evaluation is 56.0 ms versus MySQL's 10.7 ms, while maintained prefix
+postings are 33.9 ms versus 2.62 ms. OR predicates, projection-only MATCH,
+and the general result pipeline are the remaining scale seams, not document
+re-tokenization or vocabulary scans.
 
 Add a column here for each representative snapshot; keep intermediate runs in
 `results/` without a column.
