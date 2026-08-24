@@ -297,6 +297,11 @@ type ServerBenchmarks() =
         this.Query "SELECT id, title FROM articles WHERE MATCH(title, body) AGAINST ('+resu*' IN BOOLEAN MODE) LIMIT 20"
 
     [<Benchmark>]
+    [<BenchmarkCategory("Feature", "Scale", "FullText")>]
+    member this.FullTextJoinUsers() =
+        this.Query "SELECT a.id, a.title, u.email FROM articles a JOIN users u ON u.id = a.id WHERE MATCH(a.title, a.body) AGAINST ('database') LIMIT 20"
+
+    [<Benchmark>]
     [<BenchmarkCategory("Feature")>]
     member this.InsertCheckedGenerated() =
         let i = Interlocked.Increment(&insertCounter)
