@@ -487,12 +487,23 @@ Run the normal local gate before sending a change:
 just check
 ```
 
-That builds the root solution and runs the full Expecto suite. To iterate on
-one test, invoke the test project directly because the `just test` recipe does
-not pass arguments through:
+That builds the root solution and runs the full Expecto suite. The `test`
+recipe passes additional arguments through to Expecto, so one case can be run
+by name:
 
 ```sh
-dotnet run --project tests/Fsdb.Tests -- --filter-test-case <Substring>
+just test --filter-test-case <Substring>
+```
+
+`just test-report` writes JUnit timings to `test-results/fsdb.xml`, and
+`just stress [minutes]` runs Expecto's randomized stress mode with memory
+headroom for the deliberate large-packet cases.
+
+Coverage uses the repository-pinned Coverlet tool and fails if total branch
+coverage falls below 65%:
+
+```sh
+just coverage
 ```
 
 F# source order is explicit. When adding a `.fs` file, place its

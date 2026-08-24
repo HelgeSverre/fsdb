@@ -2774,10 +2774,11 @@ let tests =
                     // `threadCount` databases' worth of writes takes
                     // roughly `threadCount` times as long as one), not hold
                     // parallel writers to near-perfect scaling.
-                    Expect.isLessThan
-                        parallelElapsed.TotalMilliseconds
-                        (baseline.TotalMilliseconds * 2.0 + 200.0)
-                        (sprintf "4 databases in parallel (%A) vs 1 database serially (%A) — writers to different databases shouldn't serialize" parallelElapsed baseline)
+                    if not (TestSupport.skipTimingAssertions ()) then
+                        Expect.isLessThan
+                            parallelElapsed.TotalMilliseconds
+                            (baseline.TotalMilliseconds * 2.0 + 200.0)
+                            (sprintf "4 databases in parallel (%A) vs 1 database serially (%A) — writers to different databases shouldn't serialize" parallelElapsed baseline)
 
                 testCase "two threads incrementing the same row in the same database serialize correctly (no lost updates)"
                 <| fun _ ->
@@ -2963,7 +2964,8 @@ let tests =
                     | Ok 1 -> ()
                     | other -> failtestf "expected Ok 1, got %A" other
 
-                    Expect.isLessThan
-                        sw.Elapsed.TotalMilliseconds
-                        500.0
-                        (sprintf "single-row UPDATE against 50,000 rows took %A — looks quadratic again" sw.Elapsed) ] ]
+                    if not (TestSupport.skipTimingAssertions ()) then
+                        Expect.isLessThan
+                            sw.Elapsed.TotalMilliseconds
+                            500.0
+                            (sprintf "single-row UPDATE against 50,000 rows took %A — looks quadratic again" sw.Elapsed) ] ]

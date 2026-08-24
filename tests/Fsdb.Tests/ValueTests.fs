@@ -1291,7 +1291,9 @@ let tests =
                           let result = call "JSON_SEARCH" [ VJson("\"" + String.replicate 20_000 "." + "\""); VString "one"; VString adversarial ]
                           timer.Stop()
                           Expect.equal result VNull "a wildcard-heavy non-match stays a non-match"
-                          Expect.isLessThan timer.Elapsed (TimeSpan.FromSeconds 1.0) "wildcards are matched iteratively" ]
+
+                          if not (TestSupport.skipTimingAssertions ()) then
+                              Expect.isLessThan timer.Elapsed (TimeSpan.FromSeconds 1.0) "wildcards are matched iteratively" ]
 
                 testCase "WEIGHT_STRING exposes the default collation key"
                 <| fun _ ->

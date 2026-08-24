@@ -1,5 +1,7 @@
 # fsdb — MySQL-compatible database server in F#
 
+set positional-arguments
+
 # MySQL 8.4 client/server tools — resolved from PATH (e.g. homebrew's
 # `/opt/homebrew/opt/mysql@8.4/bin`), not hardcoded machine paths.
 MYSQL := "mysql"
@@ -39,29 +41,50 @@ smoke port=PORT:
 
 # === QA ===
 
-# Run the Expecto test suite
+# Run the Expecto test suite, passing any arguments through to Expecto
 [group('qa')]
-test:
-    dotnet run --project tests/Fsdb.Tests
+test *ARGS:
+    #!/usr/bin/env bash
+    dotnet run --project tests/Fsdb.Tests -- "$@"
 
 # Build + tests
 [group('qa')]
 check: build test
 
+# Run the suite without the interactive spinner and retain per-test timings.
+[group('qa')]
+test-report *ARGS:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    mkdir -p test-results
+    dotnet run --project tests/Fsdb.Tests -- \
+        --no-spinner \
+        --junit-summary test-results/fsdb.xml \
+        "$@"
+
+# Exercise random ordering and repetition with enough headroom for the
+# deliberate multi-packet integration cases.
+[group('qa')]
+stress minutes="1" *ARGS:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    minutes="$1"
+    shift
+    dotnet run --project tests/Fsdb.Tests -- \
+        --stress "$minutes" \
+        --stress-memory-limit 1024 \
+        --no-spinner \
+        "$@"
+
 # Branch coverage over the full suite. Expecto has no built-in coverage, so
 # this instruments the built Fsdb.dll the test assembly loads, via the
-# coverlet.console global tool (install once with
-# `dotnet tool install -g coverlet.console`). Report lands in
+# repository-pinned coverlet.console tool. Report lands in
 # coverage/coverage.cobertura.xml (cobertura carries the branch data).
 [group('qa')]
 coverage:
     #!/usr/bin/env bash
     set -euo pipefail
-    export PATH="$PATH:$HOME/.dotnet/tools"
-    if ! command -v coverlet >/dev/null 2>&1; then
-        echo "error: coverlet.console isn't installed — run: dotnet tool install -g coverlet.console" >&2
-        exit 1
-    fi
+    dotnet tool restore
     dotnet_bin="$(command -v dotnet)"
     # Homebrew's dotnet lives outside the global-tool apphost's default
     # search path (it needs DOTNET_ROOT); derive it from the resolved
@@ -74,12 +97,16 @@ coverage:
         fi
     fi
     dotnet build tests/Fsdb.Tests -c Debug -v q
-    coverlet "tests/Fsdb.Tests/bin/Debug/net10.0/Fsdb.Tests.dll" \
+    export FSDB_COVERAGE=1
+    dotnet tool run coverlet "tests/Fsdb.Tests/bin/Debug/net10.0/Fsdb.Tests.dll" \
         -t "$dotnet_bin" \
         -a "tests/Fsdb.Tests/bin/Debug/net10.0/Fsdb.Tests.dll" \
         --include "[Fsdb]*" \
         -f cobertura \
-        -o coverage/coverage
+        -o coverage/coverage \
+        --threshold 65 \
+        --threshold-type branch \
+        --threshold-stat total
 
 # === Build ===
 

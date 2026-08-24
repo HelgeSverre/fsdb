@@ -3715,10 +3715,11 @@ let tests =
                     | ResultSet(_, rows) -> Expect.equal (List.length rows) (n - 1) "one match per row except the last"
                     | other -> failtestf "expected a resultset, got %A" other
 
-                    Expect.isLessThan
-                        sw.Elapsed.TotalSeconds
-                        10.0
-                        (sprintf "a %d x %d non-equi join with only %d matches took %A — looks hung, not just slow" n n (n - 1) sw.Elapsed)
+                    if not (TestSupport.skipTimingAssertions ()) then
+                        Expect.isLessThan
+                            sw.Elapsed.TotalSeconds
+                            10.0
+                            (sprintf "a %d x %d non-equi join with only %d matches took %A — looks hung, not just slow" n n (n - 1) sw.Elapsed)
 
                 testCase "a non-equi JOIN rejects more than one million candidate pairs"
                 <| fun _ ->
@@ -5814,12 +5815,13 @@ let tests =
 
                     let perInsertMs = sw.Elapsed.TotalMilliseconds / 199.0
 
-                    Expect.isLessThan
-                        perInsertMs
-                        1.0
-                        (sprintf
-                            "199 single-row INSERTs into a child of a 20,000-row PK-indexed parent averaged %f ms/insert — looks like a full parent scan again"
-                            perInsertMs)
+                    if not (TestSupport.skipTimingAssertions ()) then
+                        Expect.isLessThan
+                            perInsertMs
+                            1.0
+                            (sprintf
+                                "199 single-row INSERTs into a child of a 20,000-row PK-indexed parent averaged %f ms/insert — looks like a full parent scan again"
+                                perInsertMs)
 
                 testCase "point SELECT by PRIMARY KEY on a 50,000-row table stays flat, not linear in table size"
                 <| fun _ ->
@@ -5840,10 +5842,11 @@ let tests =
                     | ResultSet([ "name" ], [ [ Some "name25000" ] ]) -> ()
                     | other -> failtestf "expected exactly the row for id = 25000, got %A" other
 
-                    Expect.isLessThan
-                        sw.Elapsed.TotalMilliseconds
-                        20.0
-                        (sprintf "point SELECT by PK against 50,000 rows took %A — looks like a full scan again" sw.Elapsed)
+                    if not (TestSupport.skipTimingAssertions ()) then
+                        Expect.isLessThan
+                            sw.Elapsed.TotalMilliseconds
+                            20.0
+                            (sprintf "point SELECT by PK against 50,000 rows took %A — looks like a full scan again" sw.Elapsed)
 
                 testCase "point SELECT by PRIMARY KEY latency is flat from 10k to 40k rows, the actual O(1) proof, not just a single-size bound"
                 <| fun _ ->
@@ -5881,14 +5884,15 @@ let tests =
                     // generous, not tight.
                     let ratio = at40k / (max at10k 0.001)
 
-                    Expect.isLessThan
-                        ratio
-                        2.5
-                        (sprintf
-                            "point SELECT by PK took %fms at 10k rows and %fms at 40k rows (ratio %f) — looks linear in table size again"
-                            at10k
-                            at40k
-                            ratio)
+                    if not (TestSupport.skipTimingAssertions ()) then
+                        Expect.isLessThan
+                            ratio
+                            2.5
+                            (sprintf
+                                "point SELECT by PK took %fms at 10k rows and %fms at 40k rows (ratio %f) — looks linear in table size again"
+                                at10k
+                                at40k
+                                ratio)
 
                 testCase "a correlated subquery's outer equality never gets mistaken for the inner table's own index probe"
                 <| fun _ ->

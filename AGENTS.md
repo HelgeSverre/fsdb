@@ -9,7 +9,7 @@ its sqlite baseline, fsdb must match real MySQL 8.4.
 
 ## Commands (run via `just`, see justfile)
 
-- `just test` — full Expecto suite
+- `just test [Expecto args...]` — full Expecto suite, or a filtered/configured run
 - `just check` — build + test
 - `just run [--port … --listen … --data-dir …]` — start server (default 127.0.0.1:3307)
 - `just client [port=…]` / `just smoke [port=…]` — mysql shell / liveness probe
@@ -18,10 +18,10 @@ its sqlite baseline, fsdb must match real MySQL 8.4.
   `bench-scale` / `bench-load` / `bench-load-scale` / `bench-comprehensive` —
   vs MySQL 8.4
 
-Run one test (the `test` recipe passes no args through):
+Run one test:
 
 ```sh
-dotnet run --project tests/Fsdb.Tests -- --filter-test-case <Substring>
+just test --filter-test-case <Substring>
 # or a full path: --filter "fsdb/<list>/<case>" ; or --run "<full test name>"
 ```
 

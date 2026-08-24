@@ -168,7 +168,7 @@ let tests =
 
           testCase "a FULLTEXT index survives the persistence round-trip"
           <| fun _ ->
-              let dir = System.IO.Path.Combine(System.IO.Path.GetTempPath(), "fsdb-ft-" + string (System.Guid.NewGuid()))
+              let dir = TestSupport.directory "fulltext"
 
               try
                   let store = Fsdb.Persistence.load dir

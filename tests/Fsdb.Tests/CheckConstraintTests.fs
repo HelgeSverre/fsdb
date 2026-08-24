@@ -154,10 +154,7 @@ let tests =
 
           testCase "ALTER column checks parse and constraints survive WAL reload"
           <| fun _ ->
-              let directory =
-                  System.IO.Path.Combine(System.IO.Path.GetTempPath(), "fsdb-check-tests", System.Guid.NewGuid().ToString "N")
-
-              System.IO.Directory.CreateDirectory directory |> ignore
+              let directory = TestSupport.directory "check-constraint"
 
               try
                   let store = Fsdb.Storage.create ()

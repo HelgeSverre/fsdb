@@ -52,6 +52,9 @@ let private connectRawAs (port: int) (username: string) = connectRawAsWithCapabi
 /// Connects a raw client as the passwordless bootstrap account.
 let private connectRaw (port: int) : Async<Net.Sockets.TcpClient * IO.Stream> = connectRawAs port "root"
 
+let private sequencedCase name body =
+    testCase name body |> testSequenced
+
 let tests =
     testList
         "Integration"
@@ -178,7 +181,7 @@ let tests =
               }
               |> Async.RunSynchronously
 
-          testCase "LOAD DATA LOCAL INFILE receives client bytes without reading a server path"
+          sequencedCase "LOAD DATA LOCAL INFILE receives client bytes without reading a server path"
           <| fun _ ->
               Fsdb.Limits.withSettings [ "local_infile", "ON" ] (fun () ->
                   async {
@@ -246,7 +249,7 @@ let tests =
               }
               |> Async.RunSynchronously
 
-          testCase "LOAD DATA LOCAL INFILE derives NULL from the configured escape marker"
+          sequencedCase "LOAD DATA LOCAL INFILE derives NULL from the configured escape marker"
           <| fun _ ->
               Fsdb.Limits.withSettings [ "local_infile", "ON" ] (fun () ->
                   async {
@@ -291,7 +294,7 @@ let tests =
                   }
                   |> Async.RunSynchronously)
 
-          testCase "LOAD DATA LOCAL INFILE drains an oversized upload before returning 1153"
+          sequencedCase "LOAD DATA LOCAL INFILE drains an oversized upload before returning 1153"
           <| fun _ ->
               Fsdb.Limits.withSettings [ "local_infile", "ON"; "max_load_data_bytes", "1024" ] (fun () ->
                   async {
@@ -2587,7 +2590,7 @@ let tests =
               }
               |> Async.RunSynchronously
 
-          testCase "COM_STMT_PREPARE returns 1461 at max_prepared_stmt_count"
+          sequencedCase "COM_STMT_PREPARE returns 1461 at max_prepared_stmt_count"
           <| fun _ ->
               Fsdb.Limits.withSettings [ "max_prepared_stmt_count", "2" ] (fun () ->
                   async {

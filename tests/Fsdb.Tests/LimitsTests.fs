@@ -237,7 +237,7 @@ let tests =
           testCase "!include and !includedir pull in other files, and a cycle terminates"
           <| fun _ ->
               withSettings [] (fun () ->
-                  let dir = IO.Path.Combine(IO.Path.GetTempPath(), "fsdb-cnf-" + Guid.NewGuid().ToString "N")
+                  let dir = TestSupport.directory "limits"
                   let fragments = IO.Path.Combine(dir, "conf.d")
                   IO.Directory.CreateDirectory fragments |> ignore
 
@@ -284,8 +284,7 @@ let tests =
           testCase "default option files apply in order and ignore missing paths"
           <| fun _ ->
               withSettings [] (fun () ->
-                  let dir = IO.Path.Combine(IO.Path.GetTempPath(), "fsdb-defaults-" + Guid.NewGuid().ToString "N")
-                  IO.Directory.CreateDirectory dir |> ignore
+                  let dir = TestSupport.directory "limits"
 
                   try
                       let systemFile = IO.Path.Combine(dir, "system.cnf")

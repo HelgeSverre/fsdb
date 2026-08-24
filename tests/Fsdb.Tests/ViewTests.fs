@@ -245,14 +245,7 @@ let tests =
 
           testCase "view definitions persist through the WAL"
           <| fun _ ->
-              let dir =
-                  System.IO.Path.Combine(
-                      System.IO.Path.GetTempPath(),
-                      "fsdb-view-tests",
-                      System.Guid.NewGuid().ToString "N"
-                  )
-
-              System.IO.Directory.CreateDirectory dir |> ignore
+              let dir = TestSupport.directory "view"
 
               try
                   let store = Fsdb.Storage.create ()

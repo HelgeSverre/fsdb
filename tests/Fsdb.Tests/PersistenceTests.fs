@@ -15,9 +15,10 @@ open Fsdb.QueryHandler
 /// A fresh, empty scratch directory under the OS temp dir — one per test, so
 /// tests never trip over each other's `wal.jsonl`/`snapshot.fsdb`.
 let private tempDataDir () =
-    let dir = Path.Combine(Path.GetTempPath(), "fsdb-persistence-tests", Guid.NewGuid().ToString "N")
-    Directory.CreateDirectory dir |> ignore
-    dir
+    TestSupport.directory "persistence"
+
+let private sequencedCase name body =
+    testCase name body |> testSequenced
 
 let private usersColumns =
     [ { Name = "id"
@@ -1140,7 +1141,7 @@ let tests =
               Expect.containsAll names [ VString "keep-me" ] "the real snapshot survives a torn .new instead of being wiped"
               Expect.isTrue (File.Exists(snapshotPath dir + ".new")) "the rejected .new is left alone, not promoted"
 
-          testCase "concurrent writes to two databases across a forced WAL rotation replay with no duplicated/lost rows"
+          sequencedCase "concurrent writes to two databases across a forced WAL rotation replay with no duplicated/lost rows"
           <| fun _ ->
               let dir = tempDataDir ()
               let store = load dir

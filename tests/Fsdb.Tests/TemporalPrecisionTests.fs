@@ -53,9 +53,7 @@ let private allRows (statements: string list) : string option list list =
     | other -> failtestf "expected a resultset, got %A" other
 
 let private tempDataDir () =
-    let dir = Path.Combine(Path.GetTempPath(), "fsdb-fsp-tests", Guid.NewGuid().ToString "N")
-    Directory.CreateDirectory dir |> ignore
-    dir
+    TestSupport.directory "temporal-precision"
 
 let tests =
     testList

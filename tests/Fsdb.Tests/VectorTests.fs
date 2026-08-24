@@ -164,8 +164,7 @@ let tests =
 
           testCase "a VECTOR column and its rows survive a WAL/snapshot round-trip"
           <| fun _ ->
-              let dir = Path.Combine(Path.GetTempPath(), "fsdb-vector-tests", Guid.NewGuid().ToString "N")
-              Directory.CreateDirectory dir |> ignore
+              let dir = TestSupport.directory "vector"
 
               let store = Fsdb.Storage.create ()
               Fsdb.Persistence.attach dir store

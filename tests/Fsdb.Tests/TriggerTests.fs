@@ -623,14 +623,7 @@ let tests =
 
           testCase "triggers survive a WAL restart and keep firing"
           <| fun _ ->
-              let dir =
-                  System.IO.Path.Combine(
-                      System.IO.Path.GetTempPath(),
-                      "fsdb-trigger-tests",
-                      System.Guid.NewGuid().ToString "N"
-                  )
-
-              System.IO.Directory.CreateDirectory dir |> ignore
+              let dir = TestSupport.directory "trigger"
 
               let store = Fsdb.Storage.create ()
               Fsdb.Persistence.attach dir store
