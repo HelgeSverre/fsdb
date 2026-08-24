@@ -12,6 +12,7 @@ open Fsdb.Ast
 open Fsdb.Value
 open Fsdb.Storage
 open Fsdb.Functions
+open Fsdb.Sql
 
 /// Mirrors the wire layer's text-resultset shape (columns as names, rows as
 /// text-protocol option strings) so `QueryHandler` can hand a parsed
@@ -339,47 +340,17 @@ let private isAggregateCall (registry: Registry) (expr: Expr) : bool =
 /// nesting one inside a `HAVING`-shaped expression both need this to switch
 /// `runSelect` onto `runGroupedSelect`'s path, the same walk
 /// `substituteValuesFunc` already does for `VALUES(col)` rewriting.
-let rec private containsAggregate (registry: Registry) (expr: Expr) : bool =
-    match expr with
-    | Placeholder _ -> false
-    | MatchAgainst(_, q, _) -> containsAggregate registry q
-    | FuncCall(_, args) -> isAggregateCall registry expr || args |> List.exists (containsAggregate registry)
-    | Row values -> values |> List.exists (containsAggregate registry)
-    | BinOp(_, a, b) -> containsAggregate registry a || containsAggregate registry b
-    | AssignUserVariable(_, value) -> containsAggregate registry value
-    | Not e
-    | IsNull e
-    | IsNotNull e
-    | IsTrue e
-    | IsFalse e
-    | Distinct e
-    | OrderBy(e, _) -> containsAggregate registry e
-    | Like(e, p, _, _) -> containsAggregate registry e || containsAggregate registry p
-    | Regexp(e, p) -> containsAggregate registry e || containsAggregate registry p
-    | In(e, xs) -> containsAggregate registry e || xs |> List.exists (containsAggregate registry)
-    | QuantifiedComparison(e, _, _, _) -> containsAggregate registry e
-    | Between(e, lo, hi) -> containsAggregate registry e || containsAggregate registry lo || containsAggregate registry hi
-    | Cast(e, _) -> containsAggregate registry e
-    | Collate(e, _) -> containsAggregate registry e
-    | Case(subject, whens, elseBranch) ->
-        (subject |> Option.map (containsAggregate registry) |> Option.defaultValue false)
-        || whens |> List.exists (fun (c, r) -> containsAggregate registry c || containsAggregate registry r)
-        || (elseBranch |> Option.map (containsAggregate registry) |> Option.defaultValue false)
-    | Lit _
-    | UserVariable _
-    | SystemVariable _
-    | Col _
-    | QualifiedCol _
-    | Star _
-    | WindowOver _
-    // A subquery's own aggregates belong to *its* grouping, not the query
-    // this expression sits in — `containsAggregate` only asks whether
-    // `runSelect` needs to switch itself onto the grouped path, so these
-    // three never contribute regardless of what their nested `SelectStmt`
-    // contains.
-    | Exists _
-    | Subquery _
-    | InSubquery _ -> false
+let private containsAggregate (registry: Registry) (expr: Expr) : bool =
+    Expression.fold
+        (fun found node ->
+            if found || isAggregateCall registry node then
+                Expression.Prune true
+            else
+                match node with
+                | WindowOver _ -> Expression.Prune false
+                | _ -> Expression.Descend false)
+        false
+        expr
 
 /// Every `RowNumberOver`/`LagOver` node inside `expr`, in encounter order —
 /// pre-order, same walk shape as the later `collectSubqueries` for the
@@ -387,42 +358,15 @@ let rec private containsAggregate (registry: Registry) (expr: Expr) : bool =
 /// expression tree (`value - LAG(value) OVER (...)`), not just bare at the
 /// top level, so both `runSelect`'s dispatch and `runWindowedSelect`'s
 /// rewrite need every occurrence rather than only a top-level one.
-let rec private collectWindowFuncs (expr: Expr) : Expr list =
-    match expr with
-    | Placeholder _ -> []
-    | MatchAgainst(_, q, _) -> collectWindowFuncs q
-    | WindowOver _ -> [ expr ]
-    | FuncCall(_, args) -> args |> List.collect collectWindowFuncs
-    | Row values -> values |> List.collect collectWindowFuncs
-    | BinOp(_, a, b) -> collectWindowFuncs a @ collectWindowFuncs b
-    | AssignUserVariable(_, value) -> collectWindowFuncs value
-    | Not e
-    | IsNull e
-    | IsNotNull e
-    | IsTrue e
-    | IsFalse e
-    | Distinct e
-    | OrderBy(e, _)
-    | Cast(e, _) -> collectWindowFuncs e
-    | Collate(e, _) -> collectWindowFuncs e
-    | Like(e, p, _, _) -> collectWindowFuncs e @ collectWindowFuncs p
-    | Regexp(e, p) -> collectWindowFuncs e @ collectWindowFuncs p
-    | In(e, xs) -> collectWindowFuncs e @ (xs |> List.collect collectWindowFuncs)
-    | QuantifiedComparison(e, _, _, _) -> collectWindowFuncs e
-    | Between(e, lo, hi) -> collectWindowFuncs e @ collectWindowFuncs lo @ collectWindowFuncs hi
-    | Case(subject, whens, elseBranch) ->
-        (subject |> Option.map collectWindowFuncs |> Option.defaultValue [])
-        @ (whens |> List.collect (fun (c, r) -> collectWindowFuncs c @ collectWindowFuncs r))
-        @ (elseBranch |> Option.map collectWindowFuncs |> Option.defaultValue [])
-    | Lit _
-    | UserVariable _
-    | SystemVariable _
-    | Col _
-    | QualifiedCol _
-    | Star _
-    | Exists _
-    | Subquery _
-    | InSubquery _ -> []
+let private collectWindowFuncs (expr: Expr) : Expr list =
+    Expression.fold
+        (fun found node ->
+            match node with
+            | WindowOver _ -> Expression.Prune(node :: found)
+            | _ -> Expression.Descend found)
+        []
+        expr
+    |> List.rev
 
 /// Every topmost aggregate call inside `expr` (an aggregate nested in
 /// another aggregate's arguments is never reached — MySQL rejects that
@@ -430,50 +374,21 @@ let rec private collectWindowFuncs (expr: Expr) : Expr list =
 /// arguments, which is where `SUM(COUNT(*)) OVER (...)` keeps its grouped
 /// half. `runGroupedWindowSelect` projects each one from the grouped pass
 /// so the window pass can read it back as a plain column.
-let rec private collectAggregateCalls (registry: Registry) (expr: Expr) : Expr list =
-    let recur = collectAggregateCalls registry
-
-    match expr with
-    | _ when isAggregateCall registry expr -> [ expr ]
-    | WindowOver(fn, over) -> windowFnExprs fn @ overExprs over |> List.collect recur
-    | MatchAgainst(_, q, _) -> recur q
-    | FuncCall(_, args) -> args |> List.collect recur
-    | Row values -> values |> List.collect recur
-    | BinOp(_, a, b) -> recur a @ recur b
-    | AssignUserVariable(_, value) -> recur value
-    | Not e
-    | IsNull e
-    | IsNotNull e
-    | IsTrue e
-    | IsFalse e
-    | Distinct e
-    | OrderBy(e, _)
-    | Cast(e, _)
-    | Collate(e, _) -> recur e
-    | Like(e, p, _, _)
-    | Regexp(e, p) -> recur e @ recur p
-    | In(e, xs) -> recur e @ (xs |> List.collect recur)
-    | QuantifiedComparison(e, _, _, _) -> recur e
-    | Between(e, lo, hi) -> recur e @ recur lo @ recur hi
-    | Case(subject, whens, elseBranch) ->
-        (subject |> Option.map recur |> Option.defaultValue [])
-        @ (whens |> List.collect (fun (c, r) -> recur c @ recur r))
-        @ (elseBranch |> Option.map recur |> Option.defaultValue [])
-    | Placeholder _
-    | UserVariable _
-    | SystemVariable _
-    | Lit _
-    | Col _
-    | QualifiedCol _
-    | Star _
-    | Exists _
-    | Subquery _
-    | InSubquery _ -> []
+let private collectAggregateCalls (registry: Registry) (expr: Expr) : Expr list =
+    Expression.fold
+        (fun found node ->
+            if isAggregateCall registry node then
+                Expression.Prune(node :: found)
+            else
+                Expression.Descend found)
+        []
+        expr
+    |> List.rev
 
 /// The sub-expressions a window function and its `OVER` clause carry —
 /// used both by the collector above and by the grouped-window rewrite,
 /// which has to substitute inside them too.
-and private windowFnExprs (fn: WindowFn) : Expr list =
+let private windowFnExprs (fn: WindowFn) : Expr list =
     match fn with
     | WinRowNumber
     | WinRank _
@@ -486,7 +401,7 @@ and private windowFnExprs (fn: WindowFn) : Expr list =
     | WinNthValue(e, n) -> [ e; n ]
     | WinAggregate(_, args) -> args
 
-and private overExprs (over: OverClause) : Expr list =
+let private overExprs (over: OverClause) : Expr list =
     match over with
     | OverName _ -> []
     | OverSpec spec -> spec.PartitionBy @ (spec.OrderBy |> List.map fst)
@@ -494,69 +409,16 @@ and private overExprs (over: OverClause) : Expr list =
 /// Every call to the named function inside `expr` — one walker, since the
 /// only caller (`GROUPING`, whose value depends on the ROLLUP level rather
 /// than on any row) needs the nodes themselves to substitute, not a boolean.
-let rec private collectCallsNamed (name: string) (expr: Expr) : Expr list =
-    let recur = collectCallsNamed name
-
-    match expr with
-    | FuncCall(called, args) when System.String.Equals(called, name, System.StringComparison.OrdinalIgnoreCase) ->
-        [ expr ] @ (args |> List.collect recur)
-    | WindowOver(fn, over) -> windowFnExprs fn @ overExprs over |> List.collect recur
-    | MatchAgainst(_, q, _) -> recur q
-    | FuncCall(_, args) -> args |> List.collect recur
-    | Row values -> values |> List.collect recur
-    | BinOp(_, a, b) -> recur a @ recur b
-    | AssignUserVariable(_, value) -> recur value
-    | Not e
-    | IsNull e
-    | IsNotNull e
-    | IsTrue e
-    | IsFalse e
-    | Distinct e
-    | OrderBy(e, _)
-    | Cast(e, _)
-    | Collate(e, _) -> recur e
-    | Like(e, p, _, _)
-    | Regexp(e, p) -> recur e @ recur p
-    | In(e, xs) -> recur e @ (xs |> List.collect recur)
-    | QuantifiedComparison(e, _, _, _) -> recur e
-    | Between(e, lo, hi) -> recur e @ recur lo @ recur hi
-    | Case(subject, whens, elseBranch) ->
-        (subject |> Option.map recur |> Option.defaultValue [])
-        @ (whens |> List.collect (fun (c, r) -> recur c @ recur r))
-        @ (elseBranch |> Option.map recur |> Option.defaultValue [])
-    | Placeholder _
-    | UserVariable _
-    | SystemVariable _
-    | Lit _
-    | Col _
-    | QualifiedCol _
-    | Star _
-    | Exists _
-    | Subquery _
-    | InSubquery _ -> []
-
-/// Rebuilds a window function with each carried sub-expression mapped.
-let private mapWindowFnExprs (f: Expr -> Expr) (fn: WindowFn) : WindowFn =
-    match fn with
-    | WinRowNumber
-    | WinRank _
-    | WinPercentRank
-    | WinCumeDist -> fn
-    | WinNTile n -> WinNTile(f n)
-    | WinLagLead(lead, e, offset, deflt) -> WinLagLead(lead, f e, Option.map f offset, Option.map f deflt)
-    | WinFirstValue e -> WinFirstValue(f e)
-    | WinLastValue e -> WinLastValue(f e)
-    | WinNthValue(e, n) -> WinNthValue(f e, f n)
-    | WinAggregate(name, args) -> WinAggregate(name, List.map f args)
-
-let private mapOverExprs (f: Expr -> Expr) (over: OverClause) : OverClause =
-    match over with
-    | OverName _ -> over
-    | OverSpec spec ->
-        OverSpec
-            { spec with
-                PartitionBy = spec.PartitionBy |> List.map f
-                OrderBy = spec.OrderBy |> List.map (fun (e, d) -> f e, d) }
+let private collectCallsNamed (name: string) (expr: Expr) : Expr list =
+    Expression.fold
+        (fun found node ->
+            match node with
+            | FuncCall(called, _) when System.String.Equals(called, name, System.StringComparison.OrdinalIgnoreCase) ->
+                Expression.Descend(node :: found)
+            | _ -> Expression.Descend found)
+        []
+        expr
+    |> List.rev
 
 /// Every bare `Col` name inside `expr` — same walk shape as
 /// `collectWindowFuncs`. `runWindowedSelect` uses it to spot a `HAVING`
@@ -584,79 +446,31 @@ let private syntheticColumn (name: string) (ty: ColumnType) (nullable: bool) : C
 /// pre-pass (`runFullTextSelect`) computes one whole-table score column per
 /// distinct node, exactly like `collectWindowFuncs` feeds
 /// `runWindowedSelect`.
-let rec private collectMatchAgainst (expr: Expr) : Expr list =
-    match expr with
-    | MatchAgainst _ -> [ expr ]
-    | FuncCall(_, args) -> args |> List.collect collectMatchAgainst
-    | Row values -> values |> List.collect collectMatchAgainst
-    | BinOp(_, a, b) -> collectMatchAgainst a @ collectMatchAgainst b
-    | AssignUserVariable(_, value) -> collectMatchAgainst value
-    | Not e
-    | IsNull e
-    | IsNotNull e
-    | IsTrue e
-    | IsFalse e
-    | Distinct e
-    | OrderBy(e, _)
-    | Cast(e, _)
-    | Collate(e, _) -> collectMatchAgainst e
-    | Like(e, p, _, _) -> collectMatchAgainst e @ collectMatchAgainst p
-    | Regexp(e, p) -> collectMatchAgainst e @ collectMatchAgainst p
-    | In(e, xs) -> collectMatchAgainst e @ (xs |> List.collect collectMatchAgainst)
-    | QuantifiedComparison(e, _, _, _) -> collectMatchAgainst e
-    | Between(e, lo, hi) -> collectMatchAgainst e @ collectMatchAgainst lo @ collectMatchAgainst hi
-    | Case(subject, whens, elseBranch) ->
-        (subject |> Option.map collectMatchAgainst |> Option.defaultValue [])
-        @ (whens |> List.collect (fun (c, r) -> collectMatchAgainst c @ collectMatchAgainst r))
-        @ (elseBranch |> Option.map collectMatchAgainst |> Option.defaultValue [])
-    | Placeholder _
-    | UserVariable _
-    | SystemVariable _
-    | Lit _
-    | Col _
-    | QualifiedCol _
-    | Star _
-    | Exists _
-    | Subquery _
-    | InSubquery _
-    | WindowOver _ -> []
+let private collectMatchAgainst (expr: Expr) : Expr list =
+    Expression.fold
+        (fun found node ->
+            match node with
+            | MatchAgainst _ -> Expression.Prune(node :: found)
+            | WindowOver _ -> Expression.Prune found
+            | _ -> Expression.Descend found)
+        []
+        expr
+    |> List.rev
 
-let rec private collectColRefs (expr: Expr) : string list =
-    match expr with
-    | Col name -> [ name ]
-    | MatchAgainst(cols, q, _) -> cols @ collectColRefs q
-    | WindowOver _ -> []
-    | FuncCall(_, args) -> args |> List.collect collectColRefs
-    | Row values -> values |> List.collect collectColRefs
-    | BinOp(_, a, b) -> collectColRefs a @ collectColRefs b
-    | AssignUserVariable(_, value) -> collectColRefs value
-    | Not e
-    | IsNull e
-    | IsNotNull e
-    | IsTrue e
-    | IsFalse e
-    | Distinct e
-    | OrderBy(e, _)
-    | Cast(e, _) -> collectColRefs e
-    | Collate(e, _) -> collectColRefs e
-    | Like(e, p, _, _) -> collectColRefs e @ collectColRefs p
-    | Regexp(e, p) -> collectColRefs e @ collectColRefs p
-    | In(e, xs) -> collectColRefs e @ (xs |> List.collect collectColRefs)
-    | QuantifiedComparison(e, _, _, _) -> collectColRefs e
-    | Between(e, lo, hi) -> collectColRefs e @ collectColRefs lo @ collectColRefs hi
-    | Case(subject, whens, elseBranch) ->
-        (subject |> Option.map collectColRefs |> Option.defaultValue [])
-        @ (whens |> List.collect (fun (c, r) -> collectColRefs c @ collectColRefs r))
-        @ (elseBranch |> Option.map collectColRefs |> Option.defaultValue [])
-    | Lit _
-    | Placeholder _
-    | UserVariable _
-    | SystemVariable _
-    | QualifiedCol _
-    | Star _
-    | Exists _
-    | Subquery _
-    | InSubquery _ -> []
+let private collectColRefs (expr: Expr) : string list =
+    Expression.fold
+        (fun found node ->
+            match node with
+            | Col name -> Expression.Descend(name :: found)
+            | MatchAgainst(columns, _, _) ->
+                columns
+                |> List.fold (fun names name -> name :: names) found
+                |> Expression.Descend
+            | WindowOver _ -> Expression.Prune found
+            | _ -> Expression.Descend found)
+        []
+        expr
+    |> List.rev
 
 /// The first column reference — bare `Col` or table-qualified
 /// `QualifiedCol` — anywhere in an expression, left to right.
@@ -665,46 +479,17 @@ let rec private collectColRefs (expr: Expr) : string list =
 /// *different* error (1109 vs 1054 — see `resolveFromItem`'s
 /// `FromJsonTable` case). Subqueries stay opaque, same ceiling as
 /// `collectColRefs`.
-let rec private firstColumnRef (expr: Expr) : Expr option =
-    let first = List.tryPick firstColumnRef
-
-    match expr with
-    | Col _
-    | QualifiedCol _ -> Some expr
-    | MatchAgainst(cols, q, _) -> cols |> List.map Col |> List.tryHead |> Option.orElseWith (fun () -> firstColumnRef q)
-    | FuncCall(_, args) -> first args
-    | Row values -> first values
-    | BinOp(_, a, b) -> first [ a; b ]
-    | AssignUserVariable(_, value) -> firstColumnRef value
-    | Not e
-    | IsNull e
-    | IsNotNull e
-    | IsTrue e
-    | IsFalse e
-    | Distinct e
-    | OrderBy(e, _)
-    | Cast(e, _)
-    | Collate(e, _) -> firstColumnRef e
-    | Like(e, p, _, _) -> first [ e; p ]
-    | Regexp(e, p) -> first [ e; p ]
-    | In(e, xs) -> first (e :: xs)
-    | QuantifiedComparison(e, _, _, _) -> firstColumnRef e
-    | Between(e, lo, hi) -> first [ e; lo; hi ]
-    | Case(subject, whens, elseBranch) ->
-        first (
-            (subject |> Option.toList)
-            @ (whens |> List.collect (fun (c, r) -> [ c; r ]))
-            @ (elseBranch |> Option.toList)
-        )
-    | Lit _
-    | Placeholder _
-    | UserVariable _
-    | SystemVariable _
-    | Star _
-    | Exists _
-    | Subquery _
-    | InSubquery _
-    | WindowOver _ -> None
+let private firstColumnRef (expr: Expr) : Expr option =
+    Expression.fold
+        (fun found node ->
+            match found, node with
+            | Some _, _ -> Expression.Prune found
+            | None, (Col _ | QualifiedCol _) -> Expression.Prune(Some node)
+            | None, MatchAgainst(column :: _, _, _) -> Expression.Prune(Some(Col column))
+            | None, WindowOver _ -> Expression.Prune None
+            | None, _ -> Expression.Descend None)
+        None
+        expr
 
 /// Replaces every window-function node `collectWindowFuncs` would find with
 /// the plain `Col` reference `synthetic` maps it to (structural lookup — a
@@ -712,58 +497,17 @@ let rec private firstColumnRef (expr: Expr) : Expr option =
 /// `Comparison` instance for a `Map` key to lean on). `runWindowedSelect`'s
 /// rewrite step, generalized to substitute a window function nested inside
 /// arithmetic/`CASE`/... in place, not just a bare top-level projection.
-let rec private substituteExprs (replacements: (Expr * Expr) list) (expr: Expr) : Expr =
-    match replacements |> List.tryFind (fun (e, _) -> e = expr) with
-    | Some(_, replacement) -> replacement
-    | None ->
-        let sub = substituteExprs replacements
-
-        match expr with
-        | Placeholder _ -> expr
-        | UserVariable _
-        | SystemVariable _ -> expr
-        | MatchAgainst(cols, q, mode) -> MatchAgainst(cols, sub q, mode)
-        | FuncCall(name, args) -> FuncCall(name, args |> List.map sub)
-        | Row values -> Row(values |> List.map sub)
-        | BinOp(op, a, b) -> BinOp(op, sub a, sub b)
-        | AssignUserVariable(name, value) -> AssignUserVariable(name, sub value)
-        | Not e -> Not(sub e)
-        | IsNull e -> IsNull(sub e)
-        | IsNotNull e -> IsNotNull(sub e)
-        | IsTrue e -> IsTrue(sub e)
-        | IsFalse e -> IsFalse(sub e)
-        | Distinct e -> Distinct(sub e)
-        | OrderBy(e, dir) -> OrderBy(sub e, dir)
-        | Cast(e, ty) -> Cast(sub e, ty)
-        | Collate(e, name) -> Collate(sub e, name)
-        | Like(e, p, cs, esc) -> Like(sub e, sub p, cs, esc)
-        | Regexp(e, p) -> Regexp(sub e, sub p)
-        | In(e, xs) -> In(sub e, xs |> List.map sub)
-        | QuantifiedComparison(e, op, quantifier, select) -> QuantifiedComparison(sub e, op, quantifier, select)
-        | Between(e, lo, hi) -> Between(sub e, sub lo, sub hi)
-        | Case(subject, whens, elseBranch) ->
-            Case(subject |> Option.map sub, whens |> List.map (fun (c, r) -> sub c, sub r), elseBranch |> Option.map sub)
-        // Every occurrence of a `RowNumberOver`/`LagOver` structurally equal
-        // to one `collectWindowFuncs` found is already handled by the
-        // lookup above; the only way one reaches here is if it isn't one of
-        // them, which can't happen given `runWindowedSelect` always builds
-        // `synthetic` from `collectWindowFuncs`'s own result — a leaf
-        // passthrough is the safe default regardless.
-        // A window node that isn't itself one of the replacements still
-        // carries sub-expressions the grouped-window rewrite has to reach
-        // (`SUM(COUNT(*)) OVER (ORDER BY bucket)`).
-        | WindowOver(fn, over) -> WindowOver(mapWindowFnExprs sub fn, mapOverExprs sub over)
-        | Lit _
-        | Col _
-        | QualifiedCol _
-        | Star _
-        | Exists _
-        | Subquery _
-        | InSubquery _ -> expr
+let private substituteExprs (replacements: (Expr * Expr) list) (expr: Expr) : Expr =
+    Expression.rewrite
+        (fun node ->
+            replacements
+            |> List.tryPick (fun (candidate, replacement) ->
+                if candidate = node then Some replacement else None))
+        expr
 
 /// `substituteExprs` specialized to the window pre-pass: every window node
 /// becomes the synthetic column that now holds its computed value.
-and private substituteWindowFuncs (synthetic: (Expr * string) list) (expr: Expr) : Expr =
+let private substituteWindowFuncs (synthetic: (Expr * string) list) (expr: Expr) : Expr =
     substituteExprs (synthetic |> List.map (fun (e, name) -> e, Col name)) expr
 
 let private opSymbol =
@@ -8455,53 +8199,7 @@ let private withGeneratedRecomputed
         | Ok(cols, _) -> recomputeGeneratedColumns store registry dbName db table cols |> Result.map (fun () -> r)
         | Error _ -> Ok r)
 
-/// Bottom-up expression rewrite: `rw` gets first look at every node — a
-/// `Some` replaces the node wholesale (no further descent), a `None`
-/// recurses into its children. The shared walk under `substituteValuesFunc`
-/// (`VALUES(col)` in ON DUPLICATE KEY UPDATE).
-let rec private rewriteExprWith (rw: Expr -> Expr option) (expr: Expr) : Expr =
-    let sub = rewriteExprWith rw
-
-    match rw expr with
-    | Some replaced -> replaced
-    | None ->
-
-    match expr with
-    | Placeholder _ -> expr
-    | UserVariable _
-    | SystemVariable _ -> expr
-    | MatchAgainst(cols, q, mode) -> MatchAgainst(cols, sub q, mode)
-    | FuncCall(name, args) -> FuncCall(name, args |> List.map sub)
-    | Row values -> Row(values |> List.map sub)
-    | BinOp(op, a, b) -> BinOp(op, sub a, sub b)
-    | AssignUserVariable(name, value) -> AssignUserVariable(name, sub value)
-    | Not e -> Not(sub e)
-    | IsNull e -> IsNull(sub e)
-    | IsNotNull e -> IsNotNull(sub e)
-    | IsTrue e -> IsTrue(sub e)
-    | IsFalse e -> IsFalse(sub e)
-    | Distinct e -> Distinct(sub e)
-    | OrderBy(e, dir) -> OrderBy(sub e, dir)
-    | Like(e, p, cs, esc) -> Like(sub e, sub p, cs, esc)
-    | Regexp(e, p) -> Regexp(sub e, sub p)
-    | In(e, xs) -> In(sub e, xs |> List.map sub)
-    | QuantifiedComparison(e, op, quantifier, select) -> QuantifiedComparison(sub e, op, quantifier, select)
-    | Between(e, lo, hi) -> Between(sub e, sub lo, sub hi)
-    | Cast(e, ty) -> Cast(sub e, ty)
-    | Collate(e, name) -> Collate(sub e, name)
-    | Case(subject, whens, elseBranch) ->
-        Case(subject |> Option.map sub, whens |> List.map (fun (c, r) -> sub c, sub r), elseBranch |> Option.map sub)
-    | Lit _
-    | Col _
-    | QualifiedCol _
-    | Star _
-    | WindowOver _
-    // `VALUES(col)`/`NEW.col` only ever occur directly in their statement's
-    // own assignments/values, never inside a subquery's own text — nothing
-    // to substitute inside one, so it's left as-is like `Exists` always was.
-    | Exists _
-    | Subquery _
-    | InSubquery _ -> expr
+let private rewriteExprWith = Expression.rewrite
 
 /// Rewrites `VALUES(col)` calls (MySQL's way of referring, inside an
 /// `INSERT ... ON DUPLICATE KEY UPDATE` assignment, to the value that row

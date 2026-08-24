@@ -4,6 +4,7 @@ open Expecto
 open Fsdb.Ast
 open Fsdb.Value
 open Fsdb.Parser
+open Fsdb.Sql
 
 /// Parses `sql` and fails the test with the parse error if it doesn't
 /// succeed, so every happy-path test reads as a plain AST comparison.
@@ -42,6 +43,59 @@ let tests =
     testList
         "parser"
         [ testList
+              "expression traversal"
+              [ testCase "walks window arguments, ordering, and frame bounds in encounter order"
+                <| fun _ ->
+                    let expression =
+                        WindowOver(
+                            WinLagLead(false, Col "value", Some(Col "offset"), Some(Col "fallback")),
+                            OverSpec
+                                { Inherit = None
+                                  PartitionBy = [ Col "partition" ]
+                                  OrderBy = [ Col "order", Asc ]
+                                  Frame =
+                                    Some
+                                        { Unit = FrameRows
+                                          Start = BoundPreceding(Col "start")
+                                          End = BoundFollowing(Col "finish") } }
+                        )
+
+                    let columns =
+                        expression
+                        |> Expression.collect (function Col name -> Some name | _ -> None)
+
+                    Expect.equal columns [ "value"; "offset"; "fallback"; "partition"; "order"; "start"; "finish" ] "columns"
+
+                testCase "keeps nested selects behind an explicit boundary"
+                <| fun _ ->
+                    let nested =
+                        match parseOk "SELECT hidden FROM t" with
+                        | Select select -> select
+                        | statement -> failtestf "expected SELECT, got %A" statement
+
+                    let expression = BinOp(Eq, Col "visible", Subquery nested)
+
+                    Expect.equal
+                        (expression |> Expression.collect (function Col name -> Some name | _ -> None))
+                        [ "visible" ]
+                        "expression children"
+
+                    Expect.equal (Expression.subqueries expression) [] "root subqueries"
+                    Expect.equal (Expression.subqueries (Subquery nested)) [ nested ] "nested select"
+
+                testCase "replacement prunes the replaced subtree"
+                <| fun _ ->
+                    let expression = FuncCall("OUTER", [ FuncCall("TARGET", [ Col "hidden" ]); Col "visible" ])
+
+                    let rewritten =
+                        expression
+                        |> Expression.rewrite (function
+                            | FuncCall("TARGET", _) -> Some(Lit(VInt 7L))
+                            | _ -> None)
+
+                    Expect.equal rewritten (FuncCall("OUTER", [ Lit(VInt 7L); Col "visible" ])) "rewritten expression" ]
+
+          testList
               "SELECT"
               [ testCase "SELECT * FROM t"
                 <| fun _ ->

@@ -19,6 +19,7 @@
     <Compile Include="Value.fs" />
     <Compile Include="FullText.fs" />
     <Compile Include="Ast.fs" />
+    <Compile Include="Sql/Expression.fs" />
     <Compile Include="ColumnWire.fs" />
     <Compile Include="Parser.fs" />
     <Compile Include="Functions.fs" />
