@@ -270,7 +270,9 @@ alias, avoiding unauthenticated reverse-DNS identity claims.
 
 Deliberate divergences (each marked `ponytail:` at its code site):
 - Enforcement follows parsed statements through subqueries, derived tables,
-  and CTEs; SHOW/SET text probes remain outside the common privilege gate.
+  and CTEs. Text-probed account, process, database, and table metadata forms
+  carry scoped checks; SET, USE, and server-wide SHOW forms remain outside
+  the common privilege gate.
 - No roles, dynamic privileges, column-level privileges, proxy users, or
   password expiry — the columns exist in the table shapes but stay at their
   defaults. Eight of MySQL's 38 `mysql.*` tables exist, including fsdb's

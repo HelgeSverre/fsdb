@@ -634,7 +634,7 @@ let private columnType: Parser<ColumnType, unit> =
 /// expression, subquery, `CASE`, and `NOT` chain recurses back through one of
 /// the two.
 let private exprDepth = System.Threading.AsyncLocal<int>()
-let private maxExprDepth = 150
+let private maxExprDepth = 32
 
 let private depthGuard (p: Parser<'a, unit>) : Parser<'a, unit> =
     fun stream ->

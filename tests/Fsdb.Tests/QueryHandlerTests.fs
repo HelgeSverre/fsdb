@@ -2940,6 +2940,63 @@ let tests =
               | Affected 0UL -> ()
               | other -> failtestf "expected FLUSH PRIVILEGES to be an OK no-op, got %A" other
 
+          testCase "table metadata probes require a privilege and listings hide inaccessible tables"
+          <| fun _ ->
+              let store = Fsdb.Storage.create ()
+              let root = create 1 store
+              let root, _ = handle root "CREATE DATABASE secrets"
+              let root, _ = handle root "CREATE TABLE secrets.vault (id INT PRIMARY KEY, treasure TEXT)"
+              let root, _ = handle root "CREATE USER snoop"
+
+              let snoop =
+                  { create 2 store with
+                      User = "snoop"
+                      AccountHost = "%"
+                      Database = Some "secrets" }
+
+              [ "SHOW CREATE TABLE secrets.vault"
+                "SHOW COLUMNS FROM secrets.vault"
+                "DESCRIBE secrets.vault"
+                "SHOW INDEX FROM secrets.vault" ]
+              |> List.iter (fun sql ->
+                  match handle snoop sql |> snd with
+                  | Err(1142, _) -> ()
+                  | other -> failtestf "expected metadata denial for %s, got %A" sql other)
+
+              match handle snoop "SHOW TABLES FROM secrets" |> snd with
+              | ResultSet(_, []) -> ()
+              | other -> failtestf "expected an empty table listing, got %A" other
+
+              match handle snoop "SHOW CREATE USER root" |> snd with
+              | Err(1142, _) -> ()
+              | other -> failtestf "expected another account definition to be hidden, got %A" other
+
+              match handle snoop "SHOW CREATE USER snoop" |> snd with
+              | ResultSet(_, [ _ ]) -> ()
+              | other -> failtestf "expected the current account definition to remain visible, got %A" other
+
+              let _, grantResult = handle root "GRANT INSERT ON secrets.vault TO snoop"
+              Expect.equal grantResult (Affected 0UL) "grant succeeds"
+
+              match handle snoop "SHOW CREATE TABLE secrets.vault" |> snd with
+              | ResultSet(_, [ _ ]) -> ()
+              | other -> failtestf "expected metadata visibility from any table privilege, got %A" other
+
+              match handle snoop "SHOW TABLES FROM secrets" |> snd with
+              | ResultSet(_, [ [ Some "vault" ] ]) -> ()
+              | other -> failtestf "expected the granted table in the listing, got %A" other
+
+          testCase "repeated database grants update the existing privilege row"
+          <| fun _ ->
+              let store = Fsdb.Storage.create ()
+              let root = create 1 store
+              let root, _ = handle root "CREATE USER repeatable"
+              let root, _ = handle root "GRANT SELECT ON shop.* TO repeatable"
+
+              match handle root "GRANT SELECT ON shop.* TO repeatable" |> snd with
+              | Affected 0UL -> ()
+              | other -> failtestf "expected an idempotent repeated grant, got %A" other
+
           testCase "mysql.user has MySQL 8.4's exact 51-column shape and mysql.db its 22"
           <| fun _ ->
               let store = Fsdb.Storage.create ()
@@ -3086,4 +3143,9 @@ let tests =
               Expect.equal
                   (Fsdb.Log.redactSql "SELECT `id_1` FROM `t2`")
                   "SELECT `id_1` FROM `t2`"
-                  "backticked identifiers and their digits are kept" ]
+                  "backticked identifiers and their digits are kept"
+
+              let bounded = Fsdb.Log.redactSql ("SELECT " + String.replicate 4096 "x" + "\nforged")
+              Expect.equal bounded.Length 1024 "logged SQL is bounded"
+              Expect.stringEnds bounded "..." "truncation is visible"
+              Expect.equal (Fsdb.Log.redactSql "SELECT raw\nforged") "SELECT raw?forged" "control characters cannot forge log lines" ]

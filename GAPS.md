@@ -360,7 +360,7 @@ DROP TRIGGER resolved to its subject table for TRIGGER privilege
 | Gap | MySQL 8.4 | fsdb | Impact | Class |
 |---|---|---|---|---|
 | Hostname accounts | forward-confirmed reverse DNS matching | numeric peer addresses plus the loopback `localhost` alias; DNS names are not trusted | low | divergence |
-| Text-probe privilege bypass | all statements checked | SET/SHOW/KILL/USE bypass the gate (SET PASSWORD and KILL carry their own checks) — documented divergence (`docs/compatibility.md`) | low | divergence |
+| Text-probe privilege bypass | all statements checked | SET/USE and server-wide SHOW probes bypass the general AST gate; account, process, database, and table metadata probes carry scoped checks | low | divergence |
 | Roles | CREATE ROLE, SET ROLE, role grants, mandatory roles | absent | medium | refusal |
 | Dynamic privileges | BACKUP_ADMIN, CONNECTION_ADMIN, … | vocabulary absent from GRANT parsing | low | refusal |
 | Column-level privileges | mysql.columns_priv enforced | table exists, never consulted | low | divergence |
@@ -415,7 +415,7 @@ CREATE/DROP DATABASE under traffic.
 
 Documented or ponytail-marked design decisions that differ from MySQL on
 purpose: wait_timeout 300; no option-file auto-discovery; join candidate cap
-of 1M rows; text-probe privilege bypass;
+of 1M rows; residual SET/USE/server-wide SHOW text-probe privilege bypass;
 VECTOR type and function family (a MySQL 9 forward-port, absent from 8.4 —
 purely additive); live statistics values instead of ANALYZE-stale estimates;
 ICU CLDR collation tailoring; SUPER required for foreign KILL; honest

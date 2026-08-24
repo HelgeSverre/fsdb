@@ -503,17 +503,21 @@ let private applyAtLevel
         match updateSystemRows store "db" matches changes with
         | Result.Error e -> Result.Error e
         | Result.Ok 0 when granting ->
-            let grantedCols = changes |> List.map fst
-            match
-                insertRows
-                    store
-                    "mysql"
-                    "db"
-                    (Some([ "Host"; "Db"; "User" ] @ grantedCols))
-                    [ [ VString host; VString db; VString name ] @ (grantedCols |> List.map (fun _ -> VString "Y")) ]
-            with
-            | Result.Ok _ -> Result.Ok()
+            match scanList store "mysql" "db" with
+            | Result.Ok(cols, rows) when rows |> List.exists (matches cols) -> Result.Ok()
             | Result.Error e -> Result.Error(toMySqlError e)
+            | Result.Ok _ ->
+                let grantedCols = changes |> List.map fst
+                match
+                    insertRows
+                        store
+                        "mysql"
+                        "db"
+                        (Some([ "Host"; "Db"; "User" ] @ grantedCols))
+                        [ [ VString host; VString db; VString name ] @ (grantedCols |> List.map (fun _ -> VString "Y")) ]
+                with
+                | Result.Ok _ -> Result.Ok()
+                | Result.Error e -> Result.Error(toMySqlError e)
         | Result.Ok 0 -> Result.Error(1141, sprintf "There is no such grant defined for user '%s' on host '%s'" name host)
         | Result.Ok _ ->
             if not granting then

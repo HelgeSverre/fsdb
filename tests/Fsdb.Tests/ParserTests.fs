@@ -2158,6 +2158,14 @@ let tests =
 
                     match parse (sprintf "SELECT %s" deep) with
                     | Error _ -> ()
+                    | Ok stmt -> failtestf "expected a depth-limit error, got %A" stmt
+
+                testCase "compact scalar-subquery nesting is rejected before parser amplification"
+                <| fun _ ->
+                    let deep = String.replicate 50 "(SELECT " + "1" + String.replicate 50 ")"
+
+                    match parse ("SELECT " + deep) with
+                    | Error _ -> ()
                     | Ok stmt -> failtestf "expected a depth-limit error, got %A" stmt ]
 
           testList

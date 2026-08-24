@@ -16,6 +16,8 @@ let silence () : unit = sink <- ignore
 /// Formats and routes one diagnostic line through the current sink.
 let diagnostic fmt = Printf.kprintf sink fmt
 
+let private maxSqlLogLength = 1024
+
 /// Removes secrets before SQL text crosses an observability boundary — the
 /// diagnostic log and the PROCESSLIST `INFO` column. A statement that sets a
 /// credential collapses whole (the password is a bare token, not a quotable
@@ -23,23 +25,33 @@ let diagnostic fmt = Printf.kprintf sink fmt
 /// replaced by `?`. Quote-aware so a `#`/`--` or a keyword inside a literal
 /// isn't mistaken for structure.
 let redactSql (sql: string) : string =
-    let upper = sql.TrimStart().ToUpperInvariant()
+    let mutable start = 0
+
+    while start < sql.Length && System.Char.IsWhiteSpace sql.[start] do
+        start <- start + 1
 
     let isCredential =
-        upper.StartsWith "CREATE USER"
-        || upper.StartsWith "ALTER USER"
-        || upper.StartsWith "SET PASSWORD"
-        || upper.Contains "IDENTIFIED BY"
-        || upper.Contains "IDENTIFIED WITH"
+        sql.IndexOf("CREATE USER", start, System.StringComparison.OrdinalIgnoreCase) = start
+        || sql.IndexOf("ALTER USER", start, System.StringComparison.OrdinalIgnoreCase) = start
+        || sql.IndexOf("SET PASSWORD", start, System.StringComparison.OrdinalIgnoreCase) = start
+        || sql.IndexOf("IDENTIFIED BY", System.StringComparison.OrdinalIgnoreCase) >= 0
+        || sql.IndexOf("IDENTIFIED WITH", System.StringComparison.OrdinalIgnoreCase) >= 0
 
     if isCredential then
         "[REDACTED CREDENTIAL STATEMENT]"
     else
-        let sb = System.Text.StringBuilder(sql.Length)
+        let sb = System.Text.StringBuilder(min sql.Length maxSqlLogLength)
         let n = sql.Length
         let mutable i = 0
+        let mutable truncated = false
 
-        while i < n do
+        let append (c: char) =
+            if sb.Length < maxSqlLogLength then
+                sb.Append(if System.Char.IsControl c then '?' else c) |> ignore
+            else
+                truncated <- true
+
+        while i < n && not truncated do
             let c = sql.[i]
 
             if c = '\'' || c = '"' then
@@ -57,27 +69,31 @@ let redactSql (sql: string) : string =
                     else
                         i <- i + 1
 
-                sb.Append '?' |> ignore
+                append '?'
             elif c = '`' then
                 // Backticked identifier — structure, keep it verbatim.
-                sb.Append c |> ignore
+                append c
                 i <- i + 1
 
-                while i < n && sql.[i] <> '`' do
-                    sb.Append sql.[i] |> ignore
+                while i < n && sql.[i] <> '`' && not truncated do
+                    append sql.[i]
                     i <- i + 1
 
-                if i < n then
-                    sb.Append '`' |> ignore
+                if i < n && not truncated then
+                    append '`'
                     i <- i + 1
             elif System.Char.IsDigit c && (i = 0 || not (System.Char.IsLetterOrDigit sql.[i - 1] || sql.[i - 1] = '_')) then
                 // A numeric literal (not an identifier's trailing digits).
                 while i < n && (System.Char.IsDigit sql.[i] || sql.[i] = '.') do
                     i <- i + 1
 
-                sb.Append '?' |> ignore
+                append '?'
             else
-                sb.Append c |> ignore
+                append c
                 i <- i + 1
+
+        if truncated then
+            sb.Length <- maxSqlLogLength - 3
+            sb.Append("...") |> ignore
 
         sb.ToString()

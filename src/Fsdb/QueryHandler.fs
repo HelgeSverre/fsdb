@@ -372,6 +372,21 @@ let private showResult: InformationSchema.ShowResult -> QueryResult =
     | Ok(cols, rows) -> ResultSet(cols, rows)
     | Error(code, msg) -> Err(code, msg)
 
+let private tableAccessDenied (session: Session) (table: string) =
+    Err(1142, sprintf "SELECT command denied to user '%s'@'localhost' for table '%s'" session.User table)
+
+let private showTableResult (session: Session) (dbName: string) (table: string) (result: InformationSchema.ShowResult) =
+    match result with
+    | Error _ -> showResult result
+    | Ok _ when Auth.canSeeTableForAccount (Session.currentStore session) (accountOf session) dbName table -> showResult result
+    | Ok _ -> tableAccessDenied session table
+
+let private visibleTableRows (session: Session) (dbName: string) (rows: string option list list) =
+    rows
+    |> List.filter (function
+        | Some table :: _ -> Auth.canSeeTableForAccount (Session.currentStore session) (accountOf session) dbName table
+        | _ -> false)
+
 let private showWarningsRe =
     Regex(@"^SHOW\s+WARNINGS(\s+LIMIT\s+\d+(\s*,\s*\d+)?)?$", RegexOptions.IgnoreCase)
 
@@ -394,7 +409,9 @@ let private handleShowTables (session: Session) (sql: string) : QueryResult =
     let fsdbTables =
         store.VirtualTables |> Map.toList |> List.map (fun (_, vt) -> vt.Name)
 
-    let result = InformationSchema.showTables store.Catalog fsdbTables dbName full (likeSuffix sql)
+    let result =
+        InformationSchema.showTables store.Catalog fsdbTables dbName full (likeSuffix sql)
+        |> Result.map (fun (columns, rows) -> columns, visibleTableRows session dbName rows)
 
     let typeMatch = showTablesWhereTypeRe.Match sql
     let nameMatch = showTablesWhereNameRe.Match sql
@@ -481,7 +498,9 @@ let private handleShowTableStatus (session: Session) (sql: string) : QueryResult
     let m = showTableStatusRe.Match sql
     let dbName = if m.Groups.[2].Success then stripBackticks m.Groups.[2].Value else session.Database |> Option.defaultValue defaultDatabase
 
-    InformationSchema.showTableStatus (Session.currentStore session).Catalog dbName (likeSuffix sql) |> showResult
+    InformationSchema.showTableStatus (Session.currentStore session).Catalog dbName (likeSuffix sql)
+    |> Result.map (fun (columns, rows) -> columns, visibleTableRows session dbName rows)
+    |> showResult
 
 /// Returns the (possibly updated) session alongside the result: statements
 /// like USE and SET change session state, and threading it through the
@@ -1756,6 +1775,7 @@ let private runProbe (session: Session) (sql: string) (probe: Probe) : Session *
             |> Map.toList
             |> List.map (snd >> _.OriginalName)
             |> List.filter matches
+            |> List.filter (Auth.canSeeTableForAccount (Session.currentStore session) (accountOf session) dbName)
             |> List.sort
             |> List.map (fun table -> [ Some dbName; Some table; Some "0"; Some "0" ])
 
@@ -1857,29 +1877,39 @@ let private runProbe (session: Session) (sql: string) (probe: Probe) : Session *
     | ShowCreate name ->
         let sessionDb = session.Database |> Option.defaultValue defaultDatabase
         let dbName, table = splitQualified sessionDb name
-        session, InformationSchema.showCreateTable (catalogWithOverlay session dbName table) dbName table |> showResult
+        session,
+        InformationSchema.showCreateTable (catalogWithOverlay session dbName table) dbName table
+        |> showTableResult session dbName table
     | ShowCreateView name ->
         let sessionDb = session.Database |> Option.defaultValue defaultDatabase
         let dbName, view = splitQualified sessionDb name
-        session, InformationSchema.showCreateView (Session.currentStore session).Catalog dbName view |> showResult
+        session,
+        InformationSchema.showCreateView (Session.currentStore session).Catalog dbName view
+        |> showTableResult session dbName view
     | ShowColumns(full, name, dbOverride) ->
         let sessionDb = session.Database |> Option.defaultValue defaultDatabase
         let dbName, table = splitQualified sessionDb name
         let dbName = dbOverride |> Option.map stripBackticks |> Option.defaultValue dbName
         let store = Session.currentStore session
         let viewColumns = Executor.viewColumns store (registryFor session)
-        session, InformationSchema.showColumns (catalogWithOverlay session dbName table) (Some viewColumns) full dbName table (likeSuffix sql) |> showResult
+        session,
+        InformationSchema.showColumns (catalogWithOverlay session dbName table) (Some viewColumns) full dbName table (likeSuffix sql)
+        |> showTableResult session dbName table
     | Describe name ->
         let sessionDb = session.Database |> Option.defaultValue defaultDatabase
         let dbName, table = splitQualified sessionDb name
         let store = Session.currentStore session
         let viewColumns = Executor.viewColumns store (registryFor session)
-        session, InformationSchema.showColumns (catalogWithOverlay session dbName table) (Some viewColumns) false dbName table None |> showResult
+        session,
+        InformationSchema.showColumns (catalogWithOverlay session dbName table) (Some viewColumns) false dbName table None
+        |> showTableResult session dbName table
     | ShowIndex(name, dbOverride) ->
         let sessionDb = session.Database |> Option.defaultValue defaultDatabase
         let dbName, table = splitQualified sessionDb name
         let dbName = dbOverride |> Option.map stripBackticks |> Option.defaultValue dbName
-        session, InformationSchema.showIndex (catalogWithOverlay session dbName table) dbName table |> showResult
+        session,
+        InformationSchema.showIndex (catalogWithOverlay session dbName table) dbName table
+        |> showTableResult session dbName table
     | ShowGrants userOpt ->
         // No FOR clause or CURRENT_USER selects the authenticated account.
         let wanted =
@@ -1903,9 +1933,12 @@ let private runProbe (session: Session) (sql: string) (probe: Probe) : Session *
             else
                 accountRefOf userRef
 
-        match Auth.renderCreateUserForAccount (Session.currentStore session) wanted with
-        | Ok(header, ddl) -> session, ResultSet([ header ], [ [ Some ddl ] ])
-        | Error(code, msg) -> session, Err(code, msg)
+        if not (Auth.sameAccount wanted (accountOf session)) && not (Auth.hasGlobalPrivForAccount session.Store (accountOf session) "SELECT") then
+            session, Err(1142, sprintf "SELECT command denied to user '%s'@'localhost' for table 'user'" session.User)
+        else
+            match Auth.renderCreateUserForAccount (Session.currentStore session) wanted with
+            | Ok(header, ddl) -> session, ResultSet([ header ], [ [ Some ddl ] ])
+            | Error(code, msg) -> session, Err(code, msg)
     | ShowCreateProgram(kind, qualifiedName) ->
         let _, name = splitQualified (session.Database |> Option.defaultValue defaultDatabase) qualifiedName
 
