@@ -1789,7 +1789,8 @@ let private indexColumn: Parser<string, unit> = identifier .>> optional (between
 let private indexPrefix: Parser<bool * IndexKind, unit> =
     (keyword "UNIQUE" >>. optional (keyword "KEY" <|> keyword "INDEX") >>% (true, BTree))
     <|> (keyword "FULLTEXT" >>. optional (keyword "KEY" <|> keyword "INDEX") >>% (false, FullTextIndex))
-    // SPATIAL collapses to an ordinary index — no geometry types exist.
+    // SPATIAL collapses to an ordinary index; the storage layer has no
+    // spatial access path.
     <|> (keyword "SPATIAL" >>. optional (keyword "KEY" <|> keyword "INDEX") >>% (false, BTree))
     <|> ((keyword "KEY" <|> keyword "INDEX") >>% (false, BTree))
 

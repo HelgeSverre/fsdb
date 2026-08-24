@@ -1,11 +1,12 @@
 # MySQL 8.4 feature gaps
 
 A map of where fsdb diverges from or lacks MySQL 8.4 functionality. Oracle for
-every row is real MySQL 8.4 (never sqlite). Audit date: 2026-08-23, based on a
+every row is real MySQL 8.4 (never sqlite). Audit date: 2026-08-24, based on a
 full static exploration of `src/Fsdb/` plus the documented records
 (`docs/compatibility.md`, `torture/findings/`, `torture/support/known-gaps.json`,
-`docs/performance-*.md`). Line references are evidence anchors and drift as the
-code moves.
+`docs/performance-*.md`) and the adversarial parser, wire, privilege, logging,
+and persistence review. Evidence anchors name files and definitions instead
+of line numbers so routine refactors do not silently make them misleading.
 
 ## How to read this document
 
@@ -57,7 +58,7 @@ DDL for databases/tables/indexes/views/triggers/users/grants, CREATE TABLE AS
 SELECT, TRUNCATE,
 RENAME TABLE, EXPLAIN (TRADITIONAL). Transaction control, SET, SHOW (~25
 variants), USE, KILL, DESCRIBE are text-probed before the grammar
-(`QueryHandler.fs:1248–1334`).
+(`QueryHandler.dispatch`).
 
 ### Statements MySQL 8.4 parses that fsdb refuses (no grammar, no probe)
 
@@ -108,18 +109,18 @@ identities for bit aggregates.
 | Gap | MySQL 8.4 | fsdb | Impact | Class |
 |---|---|---|---|---|
 | Secondary-index access paths | ref/eq_ref/range scans feed joins, ORDER BY, GROUP BY | fully-bound composite equality probes and matching physical inner joins use B-tree buckets; direct literal `SELECT` ranges and bounded `ORDER BY`/`GROUP BY` can stream a matching composite index when preceding keys are fixed; unique/PK ranges, DML ranges, outer joins, unconstrained multi-key ordering, and broader grouping still scan/sort | high (scale) | divergence |
-| Optimizer | pushdown, constant folding, join reordering, cost model, statistics | none; joins fold left-to-right as written; derived tables materialize once per statement (`Functions.fs:44`, `Executor.fs:36–43`) | medium | divergence |
+| Optimizer | pushdown, constant folding, join reordering, cost model, statistics | none; `Executor.applyJoin` folds joins left-to-right as written and derived sources materialize once per statement | medium | divergence |
 | EXPLAIN fidelity | type ∈ system/const/eq_ref/ref/range/index/ALL; FORMAT=JSON/TREE; ANALYZE; optimizer_trace | `type` ∈ {system, const, eq_ref, ref, range, index, ALL}; `range` and `index` cover compatible direct composite bounds/orderings; FORMAT=JSON/TREE, ANALYZE, and optimizer_trace absent; extra flags limited to Using where/filesort/temporary | low | divergence |
 | Subquery strategies | semi-join/materialization/early-exit transformations | statement-stable scalar/IN/ANY/SOME/ALL/EXISTS subqueries materialize once and simple EXISTS stops at one row; correlated, variable-bearing, nondeterministic, CTE, derived, lateral, and JSON_TABLE forms re-execute | medium (scale) | divergence |
-| Join size ceiling | unbounded (memory-bound) | hard cap 1,000,000 candidate rows → error 1105 (`Executor.fs:1586, 3287–3290`) | medium | divergence |
-| Multi-table UPDATE/DELETE sources | derived tables allowed as join sources | real base tables only → 1064 (`Executor.fs:3334–3339`) | low | refusal |
-| MATCH…AGAINST placement | evaluates in UPDATE/DELETE WHERE, joins, subqueries | single-table SELECT pre-pass only, else 1191 (`Executor.fs:1828–1831, 5828–5830`) | medium | refusal |
-| RANGE window frames | `RANGE BETWEEN INTERVAL n DAY PRECEDING…` | temporal offsets refused with 1235; numeric offsets only (`Executor.fs:5438–5444`) | low | refusal |
+| Join size ceiling | unbounded (memory-bound) | `Executor.maxJoinCandidateRows` caps candidate rows at 1,000,000 → error 1105 | medium | divergence |
+| Multi-table UPDATE/DELETE sources | derived tables allowed as join sources | `Executor.applyMutationJoin` accepts real base tables only → 1064 | low | refusal |
+| MATCH…AGAINST placement | evaluates in UPDATE/DELETE WHERE, joins, subqueries | the `Executor` full-text pre-pass supports single-table SELECT only; other placements return 1191 | medium | refusal |
+| RANGE window frames | `RANGE BETWEEN INTERVAL n DAY PRECEDING…` | `Executor.validateFrame` refuses temporal offsets with 1235; numeric offsets only | low | refusal |
 | sql_mode | ~20 mode bits with semantic effect | strictness plus NO_ZERO_DATE/NO_ZERO_IN_DATE have effect; ONLY_FULL_GROUP_BY remains absent (a bare column picks the first row of its group) | medium | divergence |
 
 ## 3. Built-in functions
 
-Registered surface (`Functions.fs:2871–3048`): string (CONCAT family,
+Registered surface (`Functions.builtins`): string (CONCAT family,
 SUBSTRING_INDEX, ELT/FIELD/FIND_IN_SET/EXPORT_SET, QUOTE, STRCMP,
 WEIGHT_STRING with `AS CHAR(N)`/`AS BINARY(N)`, REGEXP_LIKE family with
 match_type, SOUNDEX, MAKE_SET, base64 conversion), math (ROUND with exact/approximate split, CONV,
@@ -162,7 +163,7 @@ TINYTEXT–LONGTEXT, BINARY/VARBINARY, TINYBLOB–LONGBLOB, ENUM/SET with
 canonicalization, DATE/DATETIME(fsp)/TIMESTAMP(fsp)/TIME(fsp) with half-up
 fsp rounding and carry cases, all-zero and partial-zero dates with sql_mode
 enforcement, YEAR, JSON, per-column charset/collation,
-wire-faithful column metadata (`ColumnWire.fs:17–84`), `BIT(1)`–`BIT(64)`
+wire-faithful column metadata (`ColumnWire.metadataOfType`), `BIT(1)`–`BIT(64)`
 fields with binary literals and defaults, and OGC WKB geometry values
 (`GEOMETRY`, concrete spatial types, WKT/WKB construction and common
 accessors).
@@ -170,11 +171,11 @@ accessors).
 | Gap | MySQL 8.4 | fsdb | Impact | Class |
 |---|---|---|---|---|
 | Spatial indexes and operations | R-tree indexes, overlays, buffers, geographic SRS axis rules | geometry values, common WKT/WKB accessors, planar `ST_Distance`, `ST_Envelope`, `ST_IsValid`, `ST_Contains`, `ST_Within`, `ST_Touches`, `ST_Equals`, `ST_ConvexHull`, `ST_Intersects`, `ST_Disjoint`, and MBR predicates work; spatial indexes still collapse to BTree | low | refusal |
-| Generated columns | VIRTUAL recomputed on read, STORED materialized | both materialize at write time; no read-path recompute (`Storage.fs:3705–3713`) | low | divergence |
+| Generated columns | VIRTUAL recomputed on read, STORED materialized | `Executor.recomputeGeneratedColumns` materializes both at write time; no read-path recompute | low | divergence |
 | Functional defaults | `DEFAULT (expr)` | literal constants and CURRENT_TIMESTAMP only | low | refusal |
 | Column-comment character sets | converted through the table/column charset; utf8mb3 stores non-BMP text as `?` | raw .NET text, without charset conversion | low | divergence |
-| ZEROFILL/display width | zero-fill formatting, width in metadata | not tracked beyond static wire lengths; ZEROFILL flag never set (`ColumnWire.fs:58–84`) | low | divergence |
-| JSON representation | binary DOM, member-of/path ops on it | raw text value, re-parsed per operation (`Value.fs:28–29`) | low (perf) | divergence |
+| ZEROFILL/display width | zero-fill formatting, width in metadata | not tracked beyond static wire lengths; `ColumnWire.metadataOfType` never sets ZEROFILL | low | divergence |
+| JSON representation | binary DOM, member-of/path ops on it | `Value.VJson` stores raw text, re-parsed per operation | low (perf) | divergence |
 
 ## 5. Constraints and indexes
 
@@ -189,11 +190,11 @@ ADD UNIQUE over colliding data fails 1062 rather than corrupting.
 | Gap | MySQL 8.4 | fsdb | Impact | Class |
 |---|---|---|---|---|
 | Non-unique secondary indexes | physical structures serving lookups/ordering | separate immutable equality buckets and ordered entries serve fully-bound composite equality, matching physical inner-join keys, direct literal `SELECT` ranges, compatible grouping, and bounded composite index ordering; duplicate structures deliberately trade memory and write work for point probes plus bounded seeks; unique/PK ranges, DML ranges, outer joins, and unconstrained ordering remain scans | high (scale) | divergence |
-| Prefix indexes | `INDEX (col(N))` with SUB_PART metadata | parsed prefix length discarded; SUB_PART always NULL (`InformationSchema.fs:491–495`) | low | divergence |
+| Prefix indexes | `INDEX (col(N))` with SUB_PART metadata | `Parser.indexColumn` discards the prefix length; INFORMATION_SCHEMA.STATISTICS reports SUB_PART as NULL | low | divergence |
 | Expression indexes | `INDEX ((expr))` | absent | low | refusal |
 | Descending/invisible indexes | `DESC`, `INVISIBLE` | absent | low | refusal |
-| Cross-database FKs | supported | referenced key carries no database qualifier; invisible/unenforceable across databases (`Ast.fs:334–341`) | low | divergence |
-| AUTO_INCREMENT | counter persists across restart via redo | burned ids survive rollback (InnoDB-like) but counter rebuild after crash replays WAL events; forward-only ALTER SET (`Storage.fs:2179–2182`) | low | divergence |
+| Cross-database FKs | supported | `Ast.ForeignKeyDef.RefTable` carries no database qualifier; cross-database references are invisible/unenforceable | low | divergence |
+| AUTO_INCREMENT | counter persists across restart via redo | burned ids survive rollback (InnoDB-like), but the counter rebuild after crash depends on replayed row events; ALTER can only move it forward | low | divergence |
 
 ## 6. Charsets and collations
 
@@ -205,10 +206,10 @@ literal-vs-literal comparison; default utf8mb4_0900_ai_ci.
 
 | Gap | MySQL 8.4 | fsdb | Impact | Class |
 |---|---|---|---|---|
-| Weight tables | UCA 9.0/5.2/4.0 weight tables per collation | ICU CLDR tailoring for everything; tie-break order among primary-equal strings and `WEIGHT_STRING()`'s textual bytes can differ (equality never does) (`Collation.fs:13–26`) | low | divergence |
+| Weight tables | UCA 9.0/5.2/4.0 weight tables per collation | `Collation` uses ICU CLDR tailoring; tie-break order among primary-equal strings and `WEIGHT_STRING()` textual bytes can differ (equality never does) | low | divergence |
 | Collation coercibility | explicit `COLLATE`, binary strings, and column collations follow MySQL's coercibility and precedence rules | direct and quantified comparisons choose the left expression's resolved collation before the right's; mixed explicit-binary and column expressions can therefore differ | medium | divergence |
 | Advanced REGEXP grammar | ICU regular expressions and Unicode properties | bounded .NET regex with common POSIX character classes and mapped malformed patterns; remaining ICU-only grammar and error-code distinctions can differ | low | divergence |
-| Usable charsets | 40+ charsets with transcoding | utf8mb4/utf8mb3/latin1/ascii/binary only; CONVERT(expr USING x) limited to the same set (`Functions.fs:966`) | low | refusal |
+| Usable charsets | 40+ charsets with transcoding | `Collation.Charset` supports utf8mb4/utf8mb3/latin1/ascii/binary only; CONVERT(expr USING x) has the same ceiling | low | refusal |
 | Identifier casing | lower_case_table_names semantics | variable reported; identifiers ordinal-case-folded internally | low | divergence |
 
 ## 7. Transactions and concurrency
@@ -231,8 +232,8 @@ lock-free.
 | READ UNCOMMITTED | dirty reads | refused with 1235 | medium | refusal |
 | Deadlock errors | 1213 deadlock detection with victim selection | write-write conflicts surface as lock-wait timeout 1205; no deadlock classification | low | divergence |
 | Write parallelism within a database | row-lock concurrency | indexed autocommit updates use row stripes; transactions and full scans serialize at publication | high (throughput) | divergence |
-| Multi-database scaling | near-linear with connections | super-serial slowdowns (ratio up to 10.98×) demonstrated; store-wide connection ceiling produces honest 1205s (`torture/findings/2026-08-17-multidb-concurrency-campaign.md`, status open) | medium | divergence |
-| Cross-database snapshots | linearizable catalog reads | catalog view explicitly not atomic across databases mid-commit (`Storage.fs:308–319`) | low | divergence |
+| Multi-database scaling | near-linear with connections | the 2026-08-17 campaign predates sharded `Store.Databases` and row-striped updates; rerun it before classifying current scaling | medium | unverified |
+| Cross-database snapshots | linearizable catalog reads | the `Store.Catalog` projection is explicitly not atomic across databases mid-commit | low | divergence |
 
 ## 8. Persistence and durability
 
@@ -248,9 +249,8 @@ generated-column expressions.
 | Gap | MySQL 8.4 | fsdb | Impact | Class |
 |---|---|---|---|---|
 | Durability default | durable unless configured otherwise | in-memory unless `--data-dir` passed; process death loses everything | medium (deployment) | divergence |
-| Group commit | binlog/redo group flush amortization | one open+fsync per committed statement (`Persistence.fs:1130`) | medium (throughput) | divergence |
-| Space reclamation | purge threads reclaim deleted rows | tombstoned slots never reclaimed; long-lived delete-heavy tables grow memory without bound (`RowStore.fs:61–63`) | medium | divergence |
-| Data-directory trust | tablespace pages authenticated by InnoDB checks | CRC detects but does not authenticate; anyone writing `wal.bin`/`snapshot.fsdb` rewrites `mysql.user` (documented in README) | low (threat-model) | divergence |
+| Group commit | binlog/redo group flush amortization | `Persistence.attach` performs one open+fsync per committed statement | medium (throughput) | divergence |
+| Space reclamation | purge threads reclaim deleted rows | `RowStore` leaves deleted slots as tombstones; long-lived delete-heavy tables grow memory without bound | medium | divergence |
 | Platform | portable | durable mode macOS/Linux only (libc fsync design) | low | divergence |
 
 ## 9. Views and triggers
@@ -278,12 +278,12 @@ OLD/NEW images are rejected when the trigger is created.
 | Gap | MySQL 8.4 | fsdb | Impact | Class |
 |---|---|---|---|---|
 | Updatable-view breadth | joins, expressions, and nested views where MySQL deems the view writable | direct single-table projections with a simple base-table WHERE predicate; insert, ODKU, replace, update, and delete forms map through it | medium | refusal |
-| ALGORITHM / SQL SECURITY INVOKER / ALTER VIEW | supported | absent; SECURITY_TYPE constant DEFINER (`InformationSchema.fs:922–923`) | low | refusal |
-| VIEW_DEFINITION rendering | fully-qualified expanded form; SHOW CREATE VIEW wrapped in `/*!50001 */` | raw user text, no wrapper (`InformationSchema.fs:1749–1764`) | low | divergence |
+| ALGORITHM / SQL SECURITY INVOKER / ALTER VIEW | supported | absent; `InformationSchema.viewsRows` reports SECURITY_TYPE as DEFINER | low | refusal |
+| VIEW_DEFINITION rendering | fully-qualified expanded form; SHOW CREATE VIEW wrapped in `/*!50001 */` | `InformationSchema.showCreateView` returns raw user text without the wrapper | low | divergence |
 | Trigger DML breadth | triggers fire for every applicable MySQL DML form | single-table DML is covered; REPLACE refuses when DELETE triggers exist, and multi-table UPDATE/DELETE firing remains unsupported | medium | refusal |
 | Compound trigger language | BEGIN…END with variables, conditions, handlers, and control flow | ordered DML and SET NEW statement sequences; DECLARE, handlers, IF/CASE/loops, SIGNAL, and dynamic SQL remain absent | medium | refusal |
-| Trigger recursion cap | cycle detection at runtime | hardcoded depth 8 (`Executor.fs:7608–7616`) | low | divergence |
-| Per-trigger sql_mode/charset capture | stored and applied | server constants in I_S output (`InformationSchema.fs:1019–1023`) | low | divergence |
+| Trigger recursion cap | cycle detection at runtime | `Executor.fireTriggers` uses a hardcoded depth of 8 | low | divergence |
+| Per-trigger sql_mode/charset capture | stored and applied | `InformationSchema.triggerSqlMode` and the charset fields are server constants | low | divergence |
 
 ## 10. Stored routines, events, schedulers
 
@@ -291,7 +291,7 @@ Total absence, honestly surfaced: no CREATE/ALTER/DROP PROCEDURE or FUNCTION,
 no CALL, no compound-statement language, no event DDL, no scheduler thread.
 `information_schema.ROUTINES/PARAMETERS/EVENTS` and `SHOW PROCEDURE|FUNCTION
 STATUS`/`SHOW EVENTS` return correctly-shaped empty results
-(`InformationSchema.fs:902–905, 1969–1984`). Execute_priv/Event_priv/
+(`InformationSchema.virtualTableDefs` and the SHOW-status handlers). Execute_priv/Event_priv/
 Create_routine_priv columns exist in grant tables but guard nothing.
 Impact: medium for applications that install logic server-side (common in
 legacy schemas and some migration toolchains); irrelevant to pure ORM clients.
@@ -308,12 +308,12 @@ column-set validation.
 
 | Gap | MySQL 8.4 | fsdb | Impact | Class |
 |---|---|---|---|---|
-| Inverted index | persistent inverted index, sublinear queries | none; every MATCH re-tokenizes and scores the whole table per statement (`FullText.fs:2–5`) | high (scale) | divergence |
+| Inverted index | persistent inverted index, sublinear queries | none; `FullText` re-tokenizes and scores the whole table per statement | high (scale) | divergence |
 | MATCH scope | any SELECT/UPDATE/DELETE context, joins included | single-table SELECT pre-pass only; elsewhere 1191 | medium | refusal |
-| Tunables | innodb_ft_min_token_size, ft_query_expansion_limit, stopword tables, enable/disable | fixed at 3 / 20 / built-in list (`FullText.fs:17–24`) | low | divergence |
+| Tunables | innodb_ft_min_token_size, ft_query_expansion_limit, stopword tables, enable/disable | constants in `FullText` fix these at 3 / 20 / the built-in list | low | divergence |
 | CJK | ngram and mecab parsers, WITH PARSER clause | absent; no CJK tokenization | medium (for CJK) | refusal |
-| Accent folding | ai_collation-aware matching | none; é ≠ e in search (`FullText.fs:45–47`) | low | divergence |
-| Proximity/prefix details | manual leaves distance semantics open; phrase-prefix via `"word*"`-adjacent forms | @N interpreted as N-token window; prefix wildcard attaches to single words only (`FullText.fs:138–140, 227–231`) | low | divergence |
+| Accent folding | ai_collation-aware matching | `FullText.tokenize` does not fold accents; é ≠ e in search | low | divergence |
+| Proximity/prefix details | manual leaves distance semantics open; phrase-prefix via `"word*"`-adjacent forms | `FullText` interprets @N as an N-token window; prefix wildcard attaches to single words only | low | divergence |
 
 ## 12. Wire protocol and prepared statements
 
@@ -326,22 +326,22 @@ binary row encodings including µs-precision temporals and 16 MiB multi-packet
 framing, TLS 1.2/1.3 with an optional PEM server certificate and
 require_secure_transport, CLIENT_FOUND_ROWS honored, max_allowed_packet/max_connections/
 max_prepared_stmt_count enforced with honest advertising, mid-query
-disconnect detection cancelling evaluation (`Server.fs:363–406`).
+disconnect detection cancelling evaluation (`Server.watchForDisconnect`).
 
 | Gap | MySQL 8.4 | fsdb | Impact | Class |
 |---|---|---|---|---|
 | TLS client authentication | account `REQUIRE SSL`/`REQUIRE X509`, client certificates, certificate reload | server certificate authentication only; no account-level TLS requirement | medium (mutual TLS deployments) | refusal |
 | Compression | CLIENT_COMPRESS/ZSTD | never offered | low | refusal |
-| Cursors | COM_STMT_EXECUTE CURSOR_TYPE_READ_ONLY + COM_STMT_FETCH | cursor flags ignored; COM_STMT_FETCH unsupported → 1047 (`Server.fs:772`) | medium (large-result readers) | refusal |
+| Cursors | COM_STMT_EXECUTE CURSOR_TYPE_READ_ONLY + COM_STMT_FETCH | cursor flags are ignored; `Server.handleConnection` returns 1047 for COM_STMT_FETCH | medium (large-result readers) | refusal |
 | LOAD DATA LOCAL INFILE | client-streamed file loading | opt-in `local_infile`; UTF-8/utf8mb4, one-character field/line separators, `REPLACE`/`IGNORE`, column lists, and header skipping; no server-file loading, `SET`, user variables, or multibyte separators | low | subset |
 | Multi-statement | CLIENT_MULTI_STATEMENTS batching | negotiated COM_QUERY batches and multi-result status flags; COM_SET_OPTION remains unsupported | low | subset |
 | Session state tracking | CLIENT_SESSION_TRACK info in OK packets | absent | low | refusal |
 | Diagnostics coverage | warnings from conversions, truncation, deprecated syntax, and storage engines | statement errors, ignored INSERT/CHECK rows, non-strict integer/ENUM/SET/charset coercions, DECIMAL scale-loss notes, declared text/binary truncation, and GROUP_CONCAT truncation are captured; other warning producers remain silent | low | divergence |
 | Unimplemented COM_* | SET_OPTION, CHANGE_USER | both → ERR 1047 (`Server.fs`) | low | refusal |
-| Auth plugins | caching_sha2_password fast/full auth, sha256_password, RSA exchange | mysql_native_password only; caching_sha2 clients downgraded via auth-switch (`Server.fs:469–479`) | low (works, weaker) | divergence |
-| Column definition fidelity | schema/table/org_table names, requested charsetnr | empty strings; charset forced to 45 (utf8mb4_general_ci) or 63 binary regardless of request (`Protocol.fs:110, 253–260`) | low | divergence |
-| Column flags | MULTIPLE_KEY, ZEROFILL, NO_DEFAULT_VALUE, ON_UPDATE_NOW, NUM, PART_KEY | not composed (`Value.fs:58–66`) | low | divergence |
-| Parameter metadata | STMT_PREPARE_OK carries result columns and typed param defs | column count always 0; params generic "?" VAR_STRING (`Protocol.fs:475–483`) | low | divergence |
+| Auth plugins | caching_sha2_password fast/full auth, sha256_password, RSA exchange | mysql_native_password only; `Server.authenticateHandshake` downgrades caching_sha2 clients via auth-switch | low (works, weaker) | divergence |
+| Column definition fidelity | schema/table/org_table names, requested charsetnr | `Protocol.columnDefPayload` leaves source names empty and reports collation 45 for text or 63 for binary regardless of the declared collation | low | divergence |
+| Column flags | MULTIPLE_KEY, ZEROFILL, NO_DEFAULT_VALUE, ON_UPDATE_NOW, NUM, PART_KEY | `ColumnWire.metadataOfColumn` does not compose them | low | divergence |
+| Parameter metadata | STMT_PREPARE_OK carries result columns and typed param defs | `Protocol.stmtPrepareOkPayload` reports zero result columns and generic VAR_STRING `?` parameters | low | divergence |
 | Reprepare | automatic reprepare on metadata change | frozen ASTs; stale-metadata edge cases possible | low | divergence |
 | System variables | hundreds live | ~30 known; most others inert or absent; time_zone static strings with no conversion | medium | divergence |
 
@@ -355,7 +355,7 @@ fail-closed unknown privileges, DROP USER cleanup across grant tables,
 privilege collection recursing through subqueries/derived tables/CTEs,
 SHOW DATABASES/TABLES visibility filtering, PROCESS-scoped PROCESSLIST/KILL,
 DROP TRIGGER resolved to its subject table for TRIGGER privilege
-(`Auth.fs:667–682`), persistence through ordinary row operations.
+(`Auth.requiredPrivileges`), persistence through ordinary row operations.
 
 | Gap | MySQL 8.4 | fsdb | Impact | Class |
 |---|---|---|---|---|
@@ -364,10 +364,10 @@ DROP TRIGGER resolved to its subject table for TRIGGER privilege
 | Roles | CREATE ROLE, SET ROLE, role grants, mandatory roles | absent | medium | refusal |
 | Dynamic privileges | BACKUP_ADMIN, CONNECTION_ADMIN, … | vocabulary absent from GRANT parsing | low | refusal |
 | Column-level privileges | mysql.columns_priv enforced | table exists, never consulted | low | divergence |
-| Account lock/expiry/resource limits | enforced | columns present in mysql.user, zero readers (`Auth.fs:69–71, 221–223`) | low | divergence |
+| Account lock/expiry/resource limits | enforced | columns are present in mysql.user but `Auth` does not consult them | low | divergence |
 | Proxy users | supported | absent | low | refusal |
-| SHOW GRANTS completeness | includes dynamic-privilege and PROXY lines | omits them (`Auth.fs:891–892`) | low | divergence |
-| System-table coverage | ~38 mysql.* tables | 8 (user, db, tables_priv, columns_priv, global_grants, triggers, views, check_constraints) (`Storage.fs:1444–1453`) | low | divergence |
+| SHOW GRANTS completeness | includes dynamic-privilege and PROXY lines | `Auth.renderGrantsForAccount` omits them | low | divergence |
+| System-table coverage | ~38 mysql.* tables | `Storage.mysqlSystemDatabase` provides 8: user, db, tables_priv, columns_priv, global_grants, triggers, views, check_constraints | low | divergence |
 
 ## 14. Metadata, server administration, logging, replication
 
@@ -387,21 +387,22 @@ live Limits reporting.
 | Gap | MySQL 8.4 | fsdb | Impact | Class |
 |---|---|---|---|---|
 | INFORMATION_SCHEMA breadth | ~60+ views incl. INNODB_*, COLUMN_STATISTICS, RESOURCE_GROUPS, ENABLED_ROLES | 23 views; EVENTS/ROUTINES/PARAMETERS/COLUMN_PRIVILEGES genuinely empty | low | divergence |
-| Table statistics | estimates refreshed by ANALYZE TABLE | ENGINE always InnoDB, DATA_LENGTH stand-in 16384, CARDINALITY 0, live row counts where MySQL keeps stale page estimates until ANALYZE (`InformationSchema.fs:267–288`) | low | divergence |
+| Table statistics | estimates refreshed by ANALYZE TABLE | `InformationSchema.tablesRows` reports InnoDB, a 16384 DATA_LENGTH stand-in, CARDINALITY 0, and live row counts where MySQL keeps stale page estimates until ANALYZE | low | divergence |
 | SHOW STATUS counters | Com_*, Innodb_*, Slow_queries, … | live Questions, TLS, connection, uptime, and Com_select/insert/update/delete/replace counters; engine and latency families remain absent (`InformationSchema.fs`) | low | divergence |
 | wait_timeout | 28800 default | 300 (deliberate DoS posture, honestly advertised) | low | divergence |
 | Logging | general log, slow log, error-log file | stderr diagnostics with credential redaction only (`Log.fs`) | low | divergence |
 | Replication | binlog, GTID, source/replica channels | nothing; REPLICATION privileges are vocabulary only; internal WAL is not a binlog | architectural | refusal |
 | net_read_timeout | configurable | does not exist | low | divergence |
 
-## 15. Open differential-testing findings (torture harness)
+## 15. Differential-testing findings and reruns (torture harness)
 
-Recorded in `torture/findings/`, not yet fixed, not enrolled in
-`support/known-gaps.json`:
+Recorded in `torture/findings/` and not enrolled in
+`support/known-gaps.json`; status distinguishes current ceilings from evidence
+that predates the implementation it measured:
 
 | Finding | Detail | Status |
 |---|---|---|
-| Multi-database scaling | super-serial slowdowns; store-wide connection ceiling; classified `multidb_scaling_gap` (`2026-08-17-multidb-concurrency-campaign.md`) | open, reporting-only |
+| Multi-database scaling | the historical campaign found super-serial slowdowns and 1205s before the storage-concurrency rewrite (`2026-08-17-multidb-concurrency-campaign.md`) | stale evidence; rerun required |
 | Numeric error shape | 1690 message lacks the offending expression text (`2026-08-19-probe-corpus-triage.md`) | ponytail ceiling |
 | Temporal/error-shape ceilings | `DATE 'bad'` → 1064 vs MySQL 1525; parenthesized set-op groups `(A UNION B) INTERSECT C` refused | ponytail ceilings |
 
@@ -420,7 +421,9 @@ VECTOR type and function family (a MySQL 9 forward-port, absent from 8.4 —
 purely additive); live statistics values instead of ANALYZE-stale estimates;
 ICU CLDR collation tailoring; SUPER required for foreign KILL; honest
 advertising of enforced limits (wal_rotate knobs unreported rather than
-fabricated); empty routine/event catalogs rather than stubs.
+fabricated); empty routine/event catalogs rather than stubs; and an explicitly
+trusted data directory whose CRCs detect corruption rather than authenticate a
+hostile local writer.
 
 ## 17. Historical records with resolved entries
 
@@ -433,6 +436,17 @@ that later work changed:
   JOIN…USING refusals.
 - The client-contract campaign's four result-type signatures were resolved;
   the 2026-08-21 differential rerun passed every scenario.
+- The 2026-08-17 multi-database campaign predates the sharded database cells,
+  paged row store, and row-striped point updates. Its correctness evidence is
+  retained, but its scaling classification needs a fresh run.
+- The 2026-08-24 adversarial security report was retired after parser-depth,
+  oversized-packet, metadata-privilege, bounded-logging, and idempotent-GRANT
+  fixes landed. Data-directory write access remains the explicit trust boundary
+  recorded in README and section 16.
+- The constraints audit found PRIMARY KEY columns were rendered as implicitly
+  NOT NULL but remained nullable in storage. New schemas normalize the flag,
+  old persisted schemas are guarded at coercion, and ADD PRIMARY KEY validates
+  both NULL and duplicate existing values.
 
 ## 18. Relative severity view
 
