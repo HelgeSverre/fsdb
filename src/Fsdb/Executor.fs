@@ -187,7 +187,6 @@ let private registryForDefiner (account: Auth.Account) (registry: Registry) =
 /// a second escaping convention. Invalid catalog text is treated as an absent
 /// list so direct catalog damage cannot crash the query worker.
 let private tryStoredView (store: Store) (dbName: string) (viewName: string) : StoredView option =
-    let text i (row: Value[]) = toText row.[i] |> Option.defaultValue ""
     let eqI (left: string) (right: string) = System.String.Equals(left, right, System.StringComparison.OrdinalIgnoreCase)
     let columns (value: string) =
         if value = "" then
@@ -204,14 +203,15 @@ let private tryStoredView (store: Store) (dbName: string) (viewName: string) : S
     | Error _ -> None
     | Ok(_, rows) ->
         rows
-        |> Seq.tryFind (fun row -> eqI (text 0 row) viewName && eqI (text 1 row) dbName)
-        |> Option.map (fun row ->
-            { Name = text 0 row
-              Schema = text 1 row
-              Definition = text 2 row
-              Columns = text 3 row |> columns
-              Definer = if row.Length > 5 then text 5 row else ""
-              CheckOption = if row.Length > 6 then text 6 row else "NONE" })
+        |> Seq.choose Storage.tryViewCatalogEntry
+        |> Seq.tryFind (fun view -> eqI view.Name viewName && eqI view.Schema dbName)
+        |> Option.map (fun view ->
+            { Name = view.Name
+              Schema = view.Schema
+              Definition = view.Definition
+              Columns = view.ColumnNames |> columns
+              Definer = view.Definer
+              CheckOption = view.CheckOption })
 
 let private storedChecks (store: Store) (dbName: string) (tableName: string) : StoredCheck list =
     let text i (row: Value[]) = toText row.[i] |> Option.defaultValue ""
@@ -9981,17 +9981,18 @@ let private err1442 (table: string) : QueryResult =
             table
     )
 
-/// Trigger catalog rows may predate the appended definer and order fields.
-/// An absent definer stays empty so execution fails closed.
-let private triggerText index (row: Value[]) = toText row.[index] |> Option.defaultValue ""
-
-let private sameTriggerSlot (db: string) (table: string) (timing: string) (event: string) (row: Value[]) =
+let private isTriggerSlot (db: string) (table: string) (timing: string) (event: string) (trigger: TriggerCatalogEntry) =
     let equals left right = System.String.Equals(left, right, System.StringComparison.OrdinalIgnoreCase)
 
-    equals (triggerText 1 row) db
-    && equals (triggerText 2 row) (normalizeTableName table)
-    && equals (triggerText 3 row) timing
-    && equals (triggerText 4 row) event
+    equals trigger.Schema db
+    && equals trigger.Table (normalizeTableName table)
+    && equals trigger.Timing timing
+    && equals trigger.Event event
+
+let private sameTriggerSlot db table timing event row =
+    row
+    |> Storage.tryTriggerCatalogEntry
+    |> Option.exists (isTriggerSlot db table timing event)
 
 let private triggersFor
     (store: Store)
@@ -10004,12 +10005,13 @@ let private triggersFor
     | Error _ -> []
     | Ok(_, rows) ->
         rows
-        |> Seq.filter (sameTriggerSlot db table timing event)
-        |> Seq.map (fun r ->
-            { Name = triggerText 0 r
-              Body = triggerText 5 r
-              Definer = if r.Length > 7 then triggerText 7 r else ""
-              Order = Storage.triggerActionOrder r })
+        |> Seq.choose Storage.tryTriggerCatalogEntry
+        |> Seq.filter (isTriggerSlot db table timing event)
+        |> Seq.map (fun trigger ->
+            { Name = trigger.Name
+              Body = trigger.Body
+              Definer = trigger.Definer
+              Order = trigger.Order })
         |> Seq.sortBy (fun trigger -> trigger.Order)
         |> List.ofSeq
 
@@ -10256,15 +10258,22 @@ let private storeTriggerDefinition
 
         let duplicateName =
             existing
-            |> Seq.exists (fun row -> equals (triggerText 1 row) db && equals (triggerText 0 row) name)
+            |> Seq.choose Storage.tryTriggerCatalogEntry
+            |> Seq.exists (fun trigger -> equals trigger.Schema db && equals trigger.Name name)
 
-        let sameSlot = sameTriggerSlot db table timing event
-        let peers = existing |> Seq.filter sameSlot |> List.ofSeq
+        let sameSlot = isTriggerSlot db table timing event
+        let sameSlotRow row = row |> Storage.tryTriggerCatalogEntry |> Option.exists sameSlot
+
+        let peers =
+            existing
+            |> Seq.choose (fun row -> Storage.tryTriggerCatalogEntry row |> Option.map (fun trigger -> row, trigger))
+            |> Seq.filter (snd >> sameSlot)
+            |> List.ofSeq
 
         let insertionOrder =
             match order with
             | None ->
-                let lastOrder = peers |> List.map Storage.triggerActionOrder |> List.fold max 0L
+                let lastOrder = peers |> List.map (fun (_, trigger) -> trigger.Order) |> List.fold max 0L
                 Ok(lastOrder + 1L)
             | Some requested ->
                 let reference =
@@ -10272,7 +10281,10 @@ let private storeTriggerDefinition
                     | Follows trigger
                     | Precedes trigger -> trigger
 
-                match peers |> List.tryFind (fun row -> equals (triggerText 0 row) reference) with
+                match
+                    peers
+                    |> List.tryFind (fun (_, trigger) -> equals trigger.Name reference)
+                with
                 | None ->
                     Error(
                         Err(
@@ -10280,8 +10292,8 @@ let private storeTriggerDefinition
                             sprintf "Referenced trigger '%s' for the given action time and event type does not exist." reference
                         )
                     )
-                | Some row ->
-                    let referenceOrder = Storage.triggerActionOrder row
+                | Some(_, trigger) ->
+                    let referenceOrder = trigger.Order
 
                     match requested with
                     | Follows _ -> Ok(referenceOrder + 1L)
@@ -10300,7 +10312,7 @@ let private storeTriggerDefinition
                     "mysql"
                     "triggers"
                     None
-                    (fun row -> Ok(sameSlot row && Storage.triggerActionOrder row >= insertionOrder))
+                    (fun row -> Ok(sameSlotRow row && Storage.triggerActionOrder row >= insertionOrder))
                     (fun row ->
                         let updated = Array.copy row
                         updated.[8] <- VInt(Storage.triggerActionOrder row + 1L)
@@ -11360,17 +11372,22 @@ let rec executeAs
 
     | DropTrigger(name, ifExists) ->
         let equals left right = System.String.Equals(left, right, System.StringComparison.OrdinalIgnoreCase)
-        let matchesRow row = equals (triggerText 0 row) name && equals (triggerText 1 row) dbName
+        let matchesTrigger (trigger: TriggerCatalogEntry) = equals trigger.Name name && equals trigger.Schema dbName
+        let matchesRow row = row |> Storage.tryTriggerCatalogEntry |> Option.exists matchesTrigger
 
         match scan store "mysql" "triggers" with
         | Error error -> ids, storageErr error
         | Ok(_, rows) ->
-            match rows |> Seq.tryFind matchesRow with
+            match
+                rows
+                |> Seq.choose (fun row -> Storage.tryTriggerCatalogEntry row |> Option.map (fun trigger -> row, trigger))
+                |> Seq.tryFind (snd >> matchesTrigger)
+            with
             | None when ifExists -> ids, Affected 0UL
             | None -> ids, Err(1360, "Trigger does not exist")
-            | Some target ->
-                let targetOrder = Storage.triggerActionOrder target
-                let sameSlot = sameTriggerSlot dbName (triggerText 2 target) (triggerText 3 target) (triggerText 4 target)
+            | Some(target, trigger) ->
+                let targetOrder = trigger.Order
+                let sameSlot = sameTriggerSlot dbName trigger.Table trigger.Timing trigger.Event
                 let baseCatalog = store.Catalog
                 let snapshot = Storage.beginTransactionSnapshot store
 

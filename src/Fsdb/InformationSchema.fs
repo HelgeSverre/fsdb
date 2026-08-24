@@ -38,36 +38,17 @@ let private allTables (catalog: Catalog) : (string * Table) list =
     |> Map.toList
     |> List.collect (fun (dbName, db) -> db |> Map.toList |> List.map (fun (_, table) -> dbName, table))
 
-type private ViewCatalogEntry =
-    { Name: string
-      Schema: string
-      Definition: string
-      Created: DateTime option
-      Definer: string
-      CheckOption: string }
-
 /// Purely resolves a stored view's output shape. The executor supplies this
 /// because it owns view-definition parsing and expression type inference.
 type ViewColumns = string -> string -> ColumnDef list option
 
 let private viewCatalogEntries (catalog: Catalog) : ViewCatalogEntry list =
-    let text i (row: Value[]) = row.[i] |> Value.toText |> Option.defaultValue ""
-
     catalog
     |> Map.tryFind "mysql"
     |> Option.bind (Map.tryFind "views")
     |> Option.map (fun table ->
         table.RowsArray
-        |> Seq.map (fun row ->
-            { Name = text 0 row
-              Schema = text 1 row
-              Definition = text 2 row
-              Created =
-                match row.[4] with
-                | VDateTime created -> Some created
-                | _ -> None
-              Definer = if row.Length > 5 then text 5 row else ""
-              CheckOption = if row.Length > 6 then text 6 row else "NONE" })
+        |> Seq.choose tryViewCatalogEntry
         |> List.ofSeq)
     |> Option.defaultValue []
 
@@ -1111,41 +1092,13 @@ let private triggersColumns =
       strCol "COLLATION_CONNECTION"
       strCol "DATABASE_COLLATION" ]
 
-/// The `mysql.triggers` rows (see `Storage.mysqlTriggersColumns` for the
-/// fixed cell order: name, schema, event_table, timing, event, statement,
-/// created, definer, action_order), decoded once for both `information_schema.TRIGGERS`
-/// and `SHOW TRIGGERS`. sql_mode/charset stay server constants; fsdb doesn't
-/// capture those per trigger.
-type private TriggerCatalogRow =
-    { Name: string
-      Schema: string
-      Table: string
-      Timing: string
-      Event: string
-      Body: string
-      Created: string
-      Definer: string
-      Order: int64 }
-
-let private triggerCatalogRows (catalog: Catalog) : TriggerCatalogRow list =
+let private triggerCatalogRows (catalog: Catalog) : TriggerCatalogEntry list =
     catalog
     |> Map.tryFind "mysql"
     |> Option.bind (Map.tryFind "triggers")
     |> Option.map (fun t ->
         t.RowsArray
-        |> Seq.map (fun r ->
-            let text i = r.[i] |> Value.toText |> Option.defaultValue ""
-            let created = r.[6] |> Value.toTextFsp 2 |> Option.defaultValue ""
-            let definer = if r.Length > 7 then text 7 else ""
-            { Name = text 0
-              Schema = text 1
-              Table = text 2
-              Timing = text 3
-              Event = text 4
-              Body = text 5
-              Created = created
-              Definer = definer
-              Order = Storage.triggerActionOrder r })
+        |> Seq.choose tryTriggerCatalogEntry
         |> List.ofSeq)
     |> Option.defaultValue []
 
@@ -1154,6 +1107,13 @@ let private triggerCatalogRows (catalog: Catalog) : TriggerCatalogRow list =
 // defaults (charset/collation as write-probed on MySQL 8.4.11). The definer
 // is per-trigger and comes from the catalog row.
 let private triggerSqlMode = "STRICT_TRANS_TABLES,NO_ENGINE_SUBSTITUTION"
+
+let private triggerCreatedText (trigger: TriggerCatalogEntry) =
+    trigger.Created
+    |> Option.bind (VDateTime >> Value.toTextFsp 2)
+    |> Option.defaultValue ""
+
+let private triggerCreatedValue trigger = triggerCreatedText trigger |> VString
 
 /// `information_schema.TRIGGERS` rows off the trigger catalog — constant
 /// cells (ORIENTATION ROW and OLD/NEW row refs) exactly as
@@ -1166,7 +1126,7 @@ let private triggersRows (catalog: Catalog) : Value[] list =
 
         [| vs "def"; vs trigger.Schema; vs trigger.Name; vs trigger.Event; vs "def"; vs trigger.Schema; vs trigger.Table
            VInt trigger.Order; VNull; vs trigger.Body; vs "ROW"; vs trigger.Timing; VNull; VNull; oldRow; newRow
-           vs trigger.Created; vs triggerSqlMode; vs trigger.Definer; vs "utf8mb4"; vs "utf8mb4_0900_ai_ci"
+           triggerCreatedValue trigger; vs triggerSqlMode; vs trigger.Definer; vs "utf8mb4"; vs "utf8mb4_0900_ai_ci"
            vs "utf8mb4_0900_ai_ci" |])
 
 let private eventsColumns =
@@ -2150,7 +2110,7 @@ let showTriggers (catalog: Catalog) (dbName: string) : ShowResult =
             |> List.filter (fun trigger -> String.Equals(trigger.Schema, dbName, StringComparison.OrdinalIgnoreCase))
             |> List.map (fun trigger ->
                 [ Some trigger.Name; Some trigger.Event; Some trigger.Table; Some trigger.Body; Some trigger.Timing
-                  Some trigger.Created; Some triggerSqlMode; Some trigger.Definer; Some "utf8mb4"; Some "utf8mb4_0900_ai_ci"
+                  Some(triggerCreatedText trigger); Some triggerSqlMode; Some trigger.Definer; Some "utf8mb4"; Some "utf8mb4_0900_ai_ci"
                   Some "utf8mb4_0900_ai_ci" ])
 
         Ok(
