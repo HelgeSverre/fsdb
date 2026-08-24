@@ -7638,8 +7638,17 @@ and private runFullTextSelect
 
             let extendedColumns = table.Columns @ syntheticColumns
 
+            let rowsForExecution =
+                select.Where
+                |> Option.bind (fun where -> computed |> List.tryFind (fun (node, _, _) -> node = where))
+                |> Option.map (fun (_, _, scores) ->
+                    scores
+                    |> Map.toList
+                    |> List.choose (fun (rowId, _) -> table.RowsArray.TryFind rowId |> Option.map (fun row -> rowId, row)))
+                |> Option.defaultValue indexedRows
+
             let extendedRows =
-                indexedRows
+                rowsForExecution
                 |> List.map (fun (rowId, row) ->
                     Array.append
                         row
