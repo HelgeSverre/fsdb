@@ -70,6 +70,10 @@ let tests =
               Expect.equal (naturalScoresOf corpus "the in to a") (Array.zeroCreate 6) "all stopwords"
               Expect.equal (naturalScoresOf corpus "we") (Array.zeroCreate 6) "below min token length"
 
+              let longWord = String.replicate 85 "x"
+              let longCorpus = buildCorpus [ longWord ]
+              Expect.equal (naturalScoresOf longCorpus longWord) [| 0.0 |] "tokens over the InnoDB maximum are omitted"
+
           testCase "boolean: + requires and - excludes"
           <| fun _ ->
               let s = booleanScoresOf corpus "+MySQL -YourSQL"
@@ -92,6 +96,9 @@ let tests =
 
               let prefix = booleanScoresOf corpus "data*"
               Expect.equal (prefix |> Array.mapi (fun i v -> i + 1, v > 0.0) |> Array.filter snd |> Array.map fst) [| 1; 5 |] "prefix match"
+
+              let shortPrefix = booleanScoresOf corpus "tu*"
+              Expect.equal (shortPrefix |> Array.mapi (fun i v -> i + 1, v > 0.0) |> Array.filter snd |> Array.map fst) [| 1; 3 |] "short prefixes use indexed words"
 
               let near = booleanScoresOf corpus "\"stands database\" @5"
               Expect.equal (near |> Array.mapi (fun i v -> i + 1, v > 0.0) |> Array.filter snd |> Array.map fst) [| 1 |] "proximity window"

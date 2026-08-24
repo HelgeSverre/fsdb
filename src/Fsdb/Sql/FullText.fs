@@ -18,6 +18,9 @@ open Fsdb.Collation
 /// `innodb_ft_*` tunables this module hardcodes).
 let minTokenLength = 3
 
+/// `@@innodb_ft_max_token_size`'s default.
+let maxTokenLength = 84
+
 /// `@@ft_query_expansion_limit`'s default: how many top-ranked documents
 /// seed the second pass of WITH QUERY EXPANSION.
 let private queryExpansionLimit = 20
@@ -80,7 +83,7 @@ type Index<'id when 'id: comparison> =
     private
         { Documents: Map<'id, Token[]>
           Postings: Map<string, Map<'id, int>>
-          Vocabulary: Map<string, string>
+          PrefixPostings: Map<string, Map<'id, int>>
           Collation: Collation }
 
 type Corpus =
@@ -95,10 +98,28 @@ let private tokensWith (collation: Collation) (text: string) =
 
     rawTokens text |> Array.map token
 
+/// A token that survives the configured length and stopword rules.
+let private isSearchable (token: Token) =
+    token.Text.Length >= minTokenLength
+    && token.Text.Length <= maxTokenLength
+    && not (Set.contains (token.Text.ToLowerInvariant()) stopwords)
+
+let private prefixKeys (collation: Collation) (token: Token) =
+    [| 1..token.Text.Length |]
+    |> Array.map (fun length -> collation.KeyOf(token.Text.Substring(0, length)))
+    |> Array.distinct
+
+let private removePosting id key postings =
+    match Map.tryFind key postings with
+    | None -> postings
+    | Some rows ->
+        let remaining = Map.remove id rows
+        if remaining.IsEmpty then Map.remove key postings else Map.add key remaining postings
+
 let emptyIndex (collation: Collation) : Index<'id> =
     { Documents = Map.empty
       Postings = Map.empty
-      Vocabulary = Map.empty
+      PrefixPostings = Map.empty
       Collation = collation }
 
 let removeDocument (id: 'id) (index: Index<'id>) : Index<'id> =
@@ -106,48 +127,53 @@ let removeDocument (id: 'id) (index: Index<'id>) : Index<'id> =
     | None -> index
     | Some tokens ->
         let frequencies = tokens |> Array.countBy _.Key
+        let prefixes =
+            tokens
+            |> Array.filter isSearchable
+            |> Array.collect (prefixKeys index.Collation)
+            |> Array.countBy (fun key -> key)
 
         let postings =
             frequencies
-            |> Array.fold
-                (fun postings (key, _) ->
-                    match Map.tryFind key postings with
-                    | None -> postings
-                    | Some rows ->
-                        let remaining = Map.remove id rows
-                        if remaining.IsEmpty then Map.remove key postings else Map.add key remaining postings)
-                index.Postings
+            |> Array.fold (fun postings (key, _) -> removePosting id key postings) index.Postings
 
-        let vocabulary =
-            frequencies
-            |> Array.fold
-                (fun vocabulary (key, _) ->
-                    if Map.containsKey key postings then vocabulary else Map.remove key vocabulary)
-                index.Vocabulary
+        let prefixPostings =
+            prefixes
+            |> Array.fold (fun postings (key, _) -> removePosting id key postings) index.PrefixPostings
 
         { index with
             Documents = Map.remove id index.Documents
             Postings = postings
-            Vocabulary = vocabulary }
+            PrefixPostings = prefixPostings }
 
 let addDocument (id: 'id) (text: string) (index: Index<'id>) : Index<'id> =
     let index = removeDocument id index
     let tokens = tokensWith index.Collation text
 
-    let postings, vocabulary =
+    let postings =
         tokens
         |> Array.groupBy _.Key
         |> Array.fold
-            (fun (postings, vocabulary) (key, tokens) ->
+            (fun postings (key, tokens) ->
                 let rows = postings |> Map.tryFind key |> Option.defaultValue Map.empty
-                Map.add key (Map.add id tokens.Length rows) postings,
-                Map.add key tokens.[0].Text vocabulary)
-            (index.Postings, index.Vocabulary)
+                Map.add key (Map.add id tokens.Length rows) postings)
+            index.Postings
+
+    let prefixPostings =
+        tokens
+        |> Array.filter isSearchable
+        |> Array.collect (prefixKeys index.Collation)
+        |> Array.countBy (fun key -> key)
+        |> Array.fold
+            (fun postings (key, frequency) ->
+                let rows = postings |> Map.tryFind key |> Option.defaultValue Map.empty
+                Map.add key (Map.add id frequency rows) postings)
+            index.PrefixPostings
 
     { index with
         Documents = Map.add id tokens index.Documents
         Postings = postings
-        Vocabulary = vocabulary }
+        PrefixPostings = prefixPostings }
 
 let buildIndexWith (collation: Collation) (documents: ('id * string) seq) : Index<'id> =
     documents |> Seq.fold (fun index (id, text) -> addDocument id text index) (emptyIndex collation)
@@ -159,12 +185,6 @@ let buildCorpusWith (collation: Collation) (docs: string seq) : Corpus =
 
 let buildCorpus (docs: string seq) : Corpus =
     buildCorpusWith defaultCollation docs
-
-/// A token that survives the min-length and stopword rules — what both the
-/// index side and a query's plain terms are reduced to.
-let private isSearchable (token: Token) =
-    token.Text.Length >= minTokenLength
-    && not (Set.contains (token.Text.ToLowerInvariant()) stopwords)
 
 let private idf (index: Index<'id>) (df: int) : float =
     if df = 0 then 0.0
@@ -413,17 +433,9 @@ let rec private evalTerm (index: Index<'id>) (term: BoolTerm) : Map<'id, bool * 
         |> Map.map (fun _ score -> true, score)
     | BWord(term, true) ->
         // Prefix wildcards bypass stopword and minimum-length rules.
-        index.Vocabulary
-        |> Map.toSeq
-        |> Seq.choose (fun (key, text) -> if index.Collation.IsPrefix text term.Text then Map.tryFind key index.Postings else None)
-        |> Seq.fold
-            (fun frequencies posting ->
-                posting
-                |> Map.fold
-                    (fun frequencies id frequency ->
-                        Map.change id (fun current -> Some(frequency + Option.defaultValue 0 current)) frequencies)
-                    frequencies)
-            Map.empty
+        index.PrefixPostings
+        |> Map.tryFind term.Key
+        |> Option.defaultValue Map.empty
         |> scoresFromTfs index
     | BPhrase(words, proximity) ->
         phraseCandidates index words
