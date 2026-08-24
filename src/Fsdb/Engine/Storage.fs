@@ -1,6 +1,6 @@
-/// In-memory multi-database catalog: snapshot reads, serialized writes.
-/// A `Catalog` is an immutable `Map`, so every read is a lock-free snapshot
-/// and every write swaps in a brand new `Catalog` under a lock.
+/// In-memory multi-database catalog with lock-free immutable read snapshots.
+/// Writers prepare private roots concurrently and publish through the owning
+/// database slot; indexed point updates additionally coordinate stable rows.
 module Fsdb.Storage
 
 open System
@@ -337,8 +337,8 @@ type Store =
       /// buffer as one `TransactionCommitted` on the real store — a ROLLBACK
       /// just discards the snapshot, buffer and all.
       mutable PendingEvents: ResizeArray<CommitEvent> option
-      /// Coordinates `OnCommit` dispatch, catalog membership changes, and
-      /// explicit transaction publication. Ordinary row writes lock only
+      /// Coordinates `OnCommit` dispatch and catalog membership changes.
+      /// Ordinary row and transaction writes lock only
       /// their database's `Database ref` cell (see `withDatabase`), so writers
       /// to different databases do not wait here. `OnCommit`'s one subscriber
       /// (`Persistence.attach`'s WAL appender) isn't safe to call
@@ -4922,8 +4922,11 @@ let private tryPointUpdate (baseDb: Database) (batchDb: Database) (liveDb: Datab
     | [ tableKey, rowIds ] when not rowIds.IsEmpty && canMergePointUpdate tableKey rowIds baseDb batchDb liveDb -> Some(tableKey, rowIds)
     | _ -> None
 
-let private mergeDatabaseSlot (dbName: string) (slot: Database ref) (baseDb: Database) (batchDb: Database) : unit =
-    lock slot (fun () ->
+let private mergeDatabaseSlot (timeout: TimeSpan) (dbName: string) (slot: Database ref) (baseDb: Database) (batchDb: Database) : unit =
+    if not (Monitor.TryEnter(slot, timeout)) then
+        raise (LockWaitTimeout dbName)
+
+    try
         let liveDb = slot.Value
 
         if obj.ReferenceEquals(liveDb, baseDb) then
@@ -4949,12 +4952,14 @@ let private mergeDatabaseSlot (dbName: string) (slot: Database ref) (baseDb: Dat
                         liveDb
 
                 validateMergedDatabase dbName merged
-                slot.Value <- merged)
+                slot.Value <- merged
+    finally
+        Monitor.Exit slot
 
 /// Merges a private statement or transaction snapshot into the live catalog.
 /// Rows changed from the same base row conflict; disjoint row changes combine
 /// under the database slot lock without a transaction-wide gate.
-let mergeCatalogInto (store: Store) (baseCatalog: Catalog) (batchCatalog: Catalog) : unit =
+let mergeCatalogIntoWithTimeout (timeout: TimeSpan) (store: Store) (baseCatalog: Catalog) (batchCatalog: Catalog) : unit =
     let dbKeys = Set.union (keysOf baseCatalog) (keysOf batchCatalog)
 
     for dbName in dbKeys do
@@ -4970,7 +4975,10 @@ let mergeCatalogInto (store: Store) (baseCatalog: Catalog) (batchCatalog: Catalo
         | Some baseDb, Some batchDb when obj.ReferenceEquals(baseDb, batchDb) -> ()
         | Some baseDb, Some batchDb ->
             let slot = store.Databases.GetOrAdd(dbName, (fun _ -> ref Map.empty))
-            mergeDatabaseSlot dbName slot baseDb batchDb
+            mergeDatabaseSlot timeout dbName slot baseDb batchDb
+
+let mergeCatalogInto (store: Store) (baseCatalog: Catalog) (batchCatalog: Catalog) : unit =
+    mergeCatalogIntoWithTimeout (Fsdb.Limits.lockWaitTimeout ()) store baseCatalog batchCatalog
 
 type private SerializableDatabase =
     { Name: string
@@ -5048,7 +5056,7 @@ let private withPointUpdateDatabase
                         false)
 
             if not published then
-                mergeDatabaseSlot dbName slot baseDb batchDb
+                mergeDatabaseSlot (Fsdb.Limits.lockWaitTimeout ()) dbName slot baseDb batchDb
 
             result)
 

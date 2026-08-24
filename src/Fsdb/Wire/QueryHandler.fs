@@ -1019,24 +1019,25 @@ let private commitSession (session: Session) : Session =
     | Some tx ->
         let dbName = session.Database |> Option.defaultValue defaultDatabase
 
+        let timeout =
+            lookupVar session "innodb_lock_wait_timeout"
+            |> Option.flatten
+            |> Option.bind (fun value -> match Int32.TryParse value with | true, seconds -> Some(TimeSpan.FromSeconds(float seconds)) | _ -> None)
+            |> Option.defaultWith Limits.lockWaitTimeout
+
         let committedSnapshot =
-            let timeout =
-                lookupVar session "innodb_lock_wait_timeout"
-                |> Option.flatten
-                |> Option.bind (fun value -> match Int32.TryParse value with | true, seconds -> Some(TimeSpan.FromSeconds(float seconds)) | _ -> None)
-                |> Option.defaultWith Limits.lockWaitTimeout
+            match tx.Isolation with
+            | Serializable ->
+                if not (Threading.Monitor.TryEnter(session.Store.Lock, timeout)) then
+                    raise (Storage.LockWaitTimeout dbName)
 
-            if not (Threading.Monitor.TryEnter(session.Store.Lock, timeout)) then
-                raise (Storage.LockWaitTimeout dbName)
+                try
+                    Storage.mergeSerializableCatalogInto session.Store tx.BaseCatalog tx.Snapshot.Catalog
+                finally
+                    Threading.Monitor.Exit session.Store.Lock
+            | _ -> Storage.mergeCatalogIntoWithTimeout timeout session.Store tx.BaseCatalog tx.Snapshot.Catalog
 
-            try
-                match tx.Isolation with
-                | Serializable -> Storage.mergeSerializableCatalogInto session.Store tx.BaseCatalog tx.Snapshot.Catalog
-                | _ -> Storage.mergeCatalogInto session.Store tx.BaseCatalog tx.Snapshot.Catalog
-
-                tx.Snapshot
-            finally
-                Threading.Monitor.Exit session.Store.Lock
+            tx.Snapshot
 
         Storage.commitTransactionEvents session.Store committedSnapshot
 

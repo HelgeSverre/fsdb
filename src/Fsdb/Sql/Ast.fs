@@ -571,9 +571,8 @@ and SelectStmt =
       Limit: Expr option
       Offset: Expr option
       /// `FOR UPDATE` / `LOCK IN SHARE MODE` — accepted and ignored: this
-      /// engine has no row-level locking to apply it to (no concurrent
-      /// writers within one in-memory `Store`), so the clause only needs to
-      /// parse rather than change execution.
+      /// engine has no transaction-held record or gap locks to apply, so the
+      /// clause only parses rather than changing snapshot visibility.
       Locking: bool }
 
 /// Where `ADD`/`MODIFY`/`CHANGE COLUMN` places a column: `PositionDefault`

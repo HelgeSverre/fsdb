@@ -37,7 +37,7 @@ accepted (marked `ponytail:` in source), or recorded only in
 | Data types | Common scalar types, BIT fields, signed TIME durations, and OGC geometry | Spatial indexes and operations |
 | Constraints & indexes | PK/UNIQUE/FK/CHECK plus composite equality, inner-join, literal range, grouping, and bounded index-order probes | Unique and DML ranges still scan |
 | Charsets & collations | ICU-based utf8mb4 registry | Weight-table tailoring differs from MySQL's UCA tables |
-| Transactions | Repeatable-read snapshots, nonlocking read-committed views, conservative serializable validation, and optimistic merge | READ UNCOMMITTED is refused; transaction commits serialize |
+| Transactions | Repeatable-read snapshots, nonlocking read-committed views, conservative serializable validation, and optimistic row-version merge | READ UNCOMMITTED is refused; durable commit delivery has no group commit |
 | Persistence | WAL + snapshot, crash-tested | Opt-in only; no group commit; tombstones never reclaimed |
 | Views & triggers | Direct updatable views with all insert/replace forms; ordered BEFORE/AFTER INSERT/UPDATE/DELETE triggers and compound DML bodies | Complex views and the stored-program control language |
 | Routines & events | Absent (catalogs honestly empty) | Everything |
@@ -188,7 +188,7 @@ ADD UNIQUE over colliding data fails 1062 rather than corrupting.
 
 | Gap | MySQL 8.4 | fsdb | Impact | Class |
 |---|---|---|---|---|
-| Non-unique secondary indexes | physical structures serving lookups/ordering | separate immutable equality buckets and ordered entries serve fully-bound composite equality, matching physical inner-join keys, direct literal `SELECT` ranges, compatible grouping, and bounded composite index ordering; duplicate structures deliberately trade memory and write work for point probes plus bounded seeks; unique/PK ranges, DML ranges, outer joins, and unconstrained ordering remain scans | high (scale) | divergence |
+| Non-unique secondary indexes | physical structures serving lookups/ordering | separate immutable equality buckets and ordered entries serve fully-bound composite equality, matching physical inner-join keys, direct literal SELECT/UPDATE/DELETE ranges, compatible grouping, and bounded composite index ordering; duplicate structures deliberately trade memory and write work for point probes plus bounded seeks; outer joins and unconstrained ordering remain scans | high (scale) | divergence |
 | Prefix indexes | `INDEX (col(N))` with SUB_PART metadata | `Parser.indexColumn` discards the prefix length; INFORMATION_SCHEMA.STATISTICS reports SUB_PART as NULL | low | divergence |
 | Expression indexes | `INDEX ((expr))` | absent | low | refusal |
 | Descending/invisible indexes | `DESC`, `INVISIBLE` | absent | low | refusal |
@@ -232,7 +232,7 @@ lock-free.
 | READ COMMITTED | a fresh nonlocking read view per statement | a fresh committed view plus the transaction's own successful writes per parsed statement; locking reads remain unsupported | medium | partial |
 | READ UNCOMMITTED | dirty reads | refused with 1235 | medium | refusal |
 | Deadlock errors | 1213 deadlock detection with victim selection | write-write conflicts surface as lock-wait timeout 1205; no deadlock classification | low | divergence |
-| Write parallelism within a database | row-lock concurrency | indexed autocommit updates use row stripes; transactions and full scans serialize at publication | high (throughput) | divergence |
+| Write parallelism within a database | row-lock concurrency | indexed autocommit updates use row stripes; private transactions execute concurrently and disjoint row versions merge optimistically; publishing a new immutable database root remains one brief per-database critical section, and durable commit events are sequenced | medium (throughput) | partial |
 | Multi-database scaling | near-linear with connections | the 2026-08-17 campaign predates sharded `Store.Databases` and row-striped updates; rerun it before classifying current scaling | medium | unverified |
 | Cross-database snapshots | linearizable catalog reads | the `Store.Catalog` projection is explicitly not atomic across databases mid-commit | low | divergence |
 

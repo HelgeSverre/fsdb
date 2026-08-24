@@ -1852,6 +1852,73 @@ let tests =
               | Err(1235, _) -> ()
               | other -> failtestf "expected READ UNCOMMITTED to remain explicit, got %A" other
 
+          testCase "ordinary transaction commits do not wait on the store-wide coordination lock"
+          <| fun _ ->
+              let store = Fsdb.Storage.create ()
+              let session = create 1 store
+              let session, _ = handle session "CREATE TABLE tx_rows (id INT PRIMARY KEY, n INT)"
+              let session, _ = handle session "INSERT INTO tx_rows VALUES (1, 0)"
+              let session, _ = handle session "SET innodb_lock_wait_timeout = 1"
+              let session, _ = handle session "BEGIN"
+              let session, _ = handle session "UPDATE tx_rows SET n = 1 WHERE id = 1"
+              use entered = new Threading.ManualResetEventSlim(false)
+              use release = new Threading.ManualResetEventSlim(false)
+
+              let holder =
+                  System.Threading.Tasks.Task.Factory.StartNew(
+                      (fun () ->
+                          lock store.Lock (fun () ->
+                              entered.Set()
+                              release.Wait())),
+                      System.Threading.Tasks.TaskCreationOptions.LongRunning
+                  )
+
+              Expect.isTrue (entered.Wait(TimeSpan.FromSeconds 2.0)) "the coordination lock is held"
+              let commit = System.Threading.Tasks.Task.Run(fun () -> handle session "COMMIT")
+
+              try
+                  Expect.isTrue (commit.Wait(TimeSpan.FromSeconds 3.0)) "an ordinary row-version commit bypasses unrelated global coordination"
+              finally
+                  release.Set()
+                  holder.Wait()
+
+              match commit.Result |> snd with
+              | Affected 0UL -> ()
+              | other -> failtestf "expected COMMIT to succeed, got %A" other
+
+          testCase "disjoint transactions in one database merge without lost writes"
+          <| fun _ ->
+              let store = Fsdb.Storage.create ()
+              let setup = create 1 store
+              let setup, _ = handle setup "CREATE TABLE tx_rows (id INT PRIMARY KEY, n INT)"
+              let _, _ = handle setup "INSERT INTO tx_rows VALUES (1, 0), (2, 0)"
+
+              let prepare id value connectionId =
+                  let session = create connectionId store
+                  let session, _ = handle session "BEGIN"
+                  handle session (sprintf "UPDATE tx_rows SET n = %d WHERE id = %d" value id) |> fst
+
+              let first = prepare 1 10 2
+              let second = prepare 2 20 3
+              use ready = new Threading.CountdownEvent(2)
+              use start = new Threading.ManualResetEventSlim(false)
+
+              let commit session =
+                  System.Threading.Tasks.Task.Run(fun () ->
+                      ready.Signal() |> ignore
+                      start.Wait()
+                      handle session "COMMIT" |> snd)
+
+              let commits = [| commit first; commit second |]
+              Expect.isTrue (ready.Wait(TimeSpan.FromSeconds 2.0)) "both transactions are ready to publish"
+              start.Set()
+              commits |> Array.map (fun task -> task :> System.Threading.Tasks.Task) |> System.Threading.Tasks.Task.WaitAll
+              Expect.equal (commits |> Array.map _.Result |> Array.toList) [ Affected 0UL; Affected 0UL ] "both commits succeed"
+
+              match handle (create 4 store) "SELECT id, n FROM tx_rows ORDER BY id" |> snd with
+              | ResultSet(_, rows) -> Expect.equal rows [ [ Some "1"; Some "10" ]; [ Some "2"; Some "20" ] ] "both row versions are retained"
+              | other -> failtestf "expected committed rows, got %A" other
+
           testCase "transaction access modes, chaining, and SET CHARACTER SET are enforced"
           <| fun _ ->
               let session = create 1 (Fsdb.Storage.create ())
