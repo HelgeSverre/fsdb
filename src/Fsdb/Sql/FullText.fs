@@ -13,6 +13,7 @@
 module Fsdb.FullText
 
 open System
+open Fsdb.Collation
 
 /// `@@innodb_ft_min_token_size`'s default — shorter tokens are never
 /// indexed or searched (fixed, not a knob; same stance as the other
@@ -38,21 +39,25 @@ let private stopwords =
 /// reports (1.885928302414186e-9).
 let private idfFloor = 4.3427276e-5
 
-let private isWordChar (c: char) = Char.IsLetterOrDigit c || c = '_'
+let private isWordChar (c: char) =
+    Char.IsLetterOrDigit c
+    || c = '_'
+    || (match Globalization.CharUnicodeInfo.GetUnicodeCategory c with
+        | Globalization.UnicodeCategory.NonSpacingMark
+        | Globalization.UnicodeCategory.SpacingCombiningMark
+        | Globalization.UnicodeCategory.EnclosingMark -> true
+        | _ -> false)
 
 /// MySQL's word characters are alphanumerics plus `_` and an *in-word*
 /// apostrophe (`O'Brien` is one token, a trailing `'` is punctuation).
-/// Tokens are folded lowercase for the default ci collation semantics
-/// (ponytail: no accent folding — an `é`/`e` query-document mismatch that
-/// utf8mb4_0900_ai_ci would tolerate stays a mismatch here).
-let tokenize (text: string) : string[] =
+let private rawTokens (text: string) : string[] =
     let tokens = ResizeArray<string>()
     let current = Text.StringBuilder()
 
     let flush () =
         // Strip apostrophes that ended up at the token edge.
         let t = current.ToString().Trim('\'')
-        if t.Length > 0 then tokens.Add(t.ToLowerInvariant())
+        if t.Length > 0 then tokens.Add t
         current.Clear() |> ignore
 
     for c in text do
@@ -63,31 +68,49 @@ let tokenize (text: string) : string[] =
     flush ()
     tokens.ToArray()
 
-/// A token that survives the min-length and stopword rules — what both the
-/// index side and a query's plain terms are reduced to.
-let private isSearchable (token: string) =
-    token.Length >= minTokenLength && not (Set.contains token stopwords)
+let tokenize (text: string) : string[] = rawTokens text |> Array.map _.ToLowerInvariant()
 
 // ---------------------------------------------------------------------------
 // Corpus: rows tokenized once per MATCH evaluation.
 // ---------------------------------------------------------------------------
 
+type private Token =
+    { Text: string
+      Key: string }
+
 type Corpus =
-    { Docs: string[][]
-      /// Distinct-token sets per doc, for df counting.
-      DocSets: Set<string>[] }
+    private
+        { Docs: Token[][]
+          /// Distinct-token sets per doc, for df counting.
+          DocSets: Set<string>[]
+          Collation: Collation }
+
+let buildCorpusWith (collation: Collation) (docs: string seq) : Corpus =
+    let token text =
+        { Text = text
+          Key = collation.KeyOf text }
+
+    let tokenized = docs |> Seq.map (rawTokens >> Array.map token) |> Array.ofSeq
+    { Docs = tokenized
+      DocSets = tokenized |> Array.map (Array.map _.Key >> Set.ofArray)
+      Collation = collation }
 
 let buildCorpus (docs: string seq) : Corpus =
-    let tokenized = docs |> Seq.map tokenize |> Array.ofSeq
-    { Docs = tokenized; DocSets = tokenized |> Array.map Set.ofArray }
+    buildCorpusWith defaultCollation docs
+
+/// A token that survives the min-length and stopword rules — what both the
+/// index side and a query's plain terms are reduced to.
+let private isSearchable (token: Token) =
+    token.Text.Length >= minTokenLength
+    && not (Set.contains (token.Text.ToLowerInvariant()) stopwords)
 
 let private idf (corpus: Corpus) (df: int) : float =
     if df = 0 then 0.0
     else max (log10 (float corpus.Docs.Length / float df)) idfFloor
 
 /// TF of a plain term in one doc.
-let private termFrequency (doc: string[]) (term: string) : int =
-    doc |> Array.sumBy (fun t -> if t = term then 1 else 0)
+let private termFrequency (doc: Token[]) (term: string) : int =
+    doc |> Array.sumBy (fun token -> if token.Key = term then 1 else 0)
 
 let private documentFrequency (corpus: Corpus) (term: string) : int =
     corpus.DocSets |> Array.sumBy (fun s -> if Set.contains term s then 1 else 0)
@@ -104,8 +127,17 @@ let private termScores (corpus: Corpus) (term: string) : float[] =
 // ---------------------------------------------------------------------------
 
 /// Distinct searchable terms of a natural-language query.
-let private naturalTerms (query: string) : string[] =
-    tokenize query |> Array.filter isSearchable |> Array.distinct
+let private queryTokens (corpus: Corpus) (query: string) =
+    rawTokens query
+    |> Array.map (fun text ->
+        { Text = text
+          Key = corpus.Collation.KeyOf text })
+
+let private naturalTerms (corpus: Corpus) (query: string) : string[] =
+    queryTokens corpus query
+    |> Array.filter isSearchable
+    |> Array.map _.Key
+    |> Array.distinct
 
 /// Element-wise sum of every term's per-doc contribution — the natural and
 /// query-expansion modes are both exactly this over different term sets.
@@ -124,7 +156,7 @@ let private sumTermScores (corpus: Corpus) (terms: string[]) : float[] =
     scores
 
 let naturalScoresOf (corpus: Corpus) (query: string) : float[] =
-    sumTermScores corpus (naturalTerms query)
+    sumTermScores corpus (naturalTerms corpus query)
 
 // ---------------------------------------------------------------------------
 // Boolean mode. Query grammar (recursive descent):
@@ -149,11 +181,11 @@ type private BoolOp =
     | Soft
 
 type private BoolTerm =
-    | BWord of term: string * prefix: bool
-    | BPhrase of words: string[] * proximity: int option
+    | BWord of term: Token * prefix: bool
+    | BPhrase of words: Token[] * proximity: int option
     | BGroup of (BoolOp * BoolTerm) list
 
-let private parseBooleanQuery (query: string) : (BoolOp * BoolTerm) list =
+let private parseBooleanQuery (collation: Collation) (query: string) : (BoolOp * BoolTerm) list =
     let mutable i = 0
     let len = query.Length
 
@@ -166,7 +198,9 @@ let private parseBooleanQuery (query: string) : (BoolOp * BoolTerm) list =
         let start = i
         while i < len && (isWordChar query.[i] || (query.[i] = '\'' && i > start)) do
             i <- i + 1
-        query.Substring(start, i - start).Trim('\'').ToLowerInvariant()
+        let text = query.Substring(start, i - start).Trim('\'')
+        { Text = text
+          Key = collation.KeyOf text }
 
     // Cap parenthesis nesting so a query like "((((...))))" with thousands
     // of groups can't overflow the recursive-descent stack (a
@@ -223,12 +257,18 @@ let private parseBooleanQuery (query: string) : (BoolOp * BoolTerm) list =
                         else
                             None
 
-                    acc.Add(op, BPhrase(tokenize phrase, proximity))
+                    let words =
+                        rawTokens phrase
+                        |> Array.map (fun text ->
+                            { Text = text
+                              Key = collation.KeyOf text })
+
+                    acc.Add(op, BPhrase(words, proximity))
                 elif isWordChar query.[i] then
                     let w = readWord ()
                     let prefix = i < len && query.[i] = '*'
                     if prefix then i <- i + 1
-                    if w.Length > 0 then acc.Add(op, BWord(w, prefix))
+                    if w.Text.Length > 0 then acc.Add(op, BWord(w, prefix))
                 else
                     // Punctuation MySQL's parser ignores.
                     i <- i + 1
@@ -240,7 +280,7 @@ let private parseBooleanQuery (query: string) : (BoolOp * BoolTerm) list =
 /// Whether `doc` contains the quoted words as adjacent tokens in order
 /// (`proximity = None`) or all within an (N+1)-token window (`Some N`).
 /// Returns the occurrence count (phrase TF).
-let private phraseCount (doc: string[]) (words: string[]) (proximity: int option) : int =
+let private phraseCount (doc: Token[]) (words: Token[]) (proximity: int option) : int =
     if words.Length = 0 then
         0
     else
@@ -250,7 +290,7 @@ let private phraseCount (doc: string[]) (words: string[]) (proximity: int option
             for start in 0 .. doc.Length - words.Length do
                 let mutable ok = true
                 for j in 0 .. words.Length - 1 do
-                    if doc.[start + j] <> words.[j] then ok <- false
+                    if doc.[start + j].Key <> words.[j].Key then ok <- false
                 if ok then count <- count + 1
             count
         | Some dist ->
@@ -259,7 +299,13 @@ let private phraseCount (doc: string[]) (words: string[]) (proximity: int option
             // word count over each word's occurrence list — fine for the
             // short quoted phrases proximity is used with; make it a sliding
             // window if anyone feeds it a paragraph.
-            let positions = words |> Array.map (fun w -> doc |> Array.mapi (fun i t -> i, t) |> Array.filter (snd >> (=) w) |> Array.map fst)
+            let positions =
+                words
+                |> Array.map (fun word ->
+                    doc
+                    |> Array.mapi (fun i token -> i, token.Key)
+                    |> Array.filter (snd >> (=) word.Key)
+                    |> Array.map fst)
             if positions |> Array.exists Array.isEmpty then
                 0
             else
@@ -283,20 +329,22 @@ let private scoresFromTfs (corpus: Corpus) (tfs: int[]) : (bool * float)[] =
 /// Per-doc (matched, contribution) for one boolean term.
 let rec private evalTerm (corpus: Corpus) (term: BoolTerm) : (bool * float)[] =
     match term with
-    | BWord(w, false) when not (isSearchable w) ->
+    | BWord(term, false) when not (isSearchable term) ->
         // Stopwords and sub-minimum tokens are never in InnoDB's index, so
         // a plain boolean term for one can't match anything — `+was`
         // excludes every row (oracle-verified). Phrases and proximity below
         // still see them: position data counts every token.
         Array.create corpus.Docs.Length (false, 0.0)
-    | BWord(w, false) ->
-        let ts = termScores corpus w
+    | BWord(term, false) ->
+        let ts = termScores corpus term.Key
         ts |> Array.map (fun s -> s > 0.0, s)
-    | BWord(w, true) ->
-        // Prefix wildcard: TF counts every token with the prefix (ordinal —
-        // tokens are already case-folded). Bypasses stopword/min-length.
+    | BWord(term, true) ->
+        // Prefix wildcards bypass stopword and minimum-length rules.
         corpus.Docs
-        |> Array.map (fun doc -> doc |> Array.sumBy (fun t -> if t.StartsWith(w, StringComparison.Ordinal) then 1 else 0))
+        |> Array.map (fun doc ->
+            doc
+            |> Array.sumBy (fun token ->
+                if corpus.Collation.IsPrefix token.Text term.Text then 1 else 0))
         |> scoresFromTfs corpus
     | BPhrase(words, proximity) ->
         corpus.Docs |> Array.map (fun doc -> phraseCount doc words proximity) |> scoresFromTfs corpus
@@ -347,7 +395,7 @@ let booleanScoresOf (corpus: Corpus) (query: string) : float[] =
     // A matched row whose contributions all cancelled (only `~` terms hit,
     // or everywhere-present words at the floor) still has to read as a
     // match in a WHERE clause — the same epsilon rank the floor gives.
-    evalNodes corpus (parseBooleanQuery query)
+    evalNodes corpus (parseBooleanQuery corpus.Collation query)
     |> Array.map (fun (matched, score) -> if matched then (if score = 0.0 then idfFloor * idfFloor else score) else 0.0)
 
 // ---------------------------------------------------------------------------
@@ -366,7 +414,8 @@ let expansionScoresOf (corpus: Corpus) (query: string) : float[] =
         |> Array.truncate queryExpansionLimit
         |> Array.collect (fun (i, _) -> corpus.Docs.[i])
         |> Array.filter isSearchable
+        |> Array.map _.Key
 
-    Array.append (naturalTerms query) seedTerms
+    Array.append (naturalTerms corpus query) seedTerms
     |> Array.distinct
     |> sumTermScores corpus

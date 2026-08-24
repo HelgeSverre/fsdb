@@ -7612,7 +7612,16 @@ and private runFullTextSelect
                         cols
                         |> traverse (Storage.resolveColumn table.Columns)
                         |> Result.mapError Storage.toMySqlError
-                        |> Result.map (fun idxs -> node, mode, queryText, idxs)
+                        |> Result.map (fun idxs ->
+                            let collation =
+                                idxs
+                                |> List.tryHead
+                                |> Option.map (fun index -> table.Columns.[index])
+                                |> Option.bind _.Collation
+                                |> Option.bind Collation.tryFind
+                                |> Option.defaultValue Collation.defaultCollation
+
+                            node, mode, queryText, idxs, collation)
                     | None -> Error(1210, "Incorrect arguments to AGAINST")
                 | MatchAgainst(cols, _, _) when
                     not (fulltextSets |> List.contains (cols |> List.map (fun c -> c.ToLowerInvariant()) |> Set.ofList))
@@ -7621,12 +7630,12 @@ and private runFullTextSelect
                 | MatchAgainst _ -> Error(1210, "Incorrect arguments to AGAINST")
                 | _ -> Error(1105, "fulltext pre-pass collected a non-MATCH node")
 
-            let scoreNode (node, mode, queryText: string, idxs: int list) =
+            let scoreNode (node, mode, queryText: string, idxs: int list, collation: Collation.Collation) =
                 let corpus =
                     rows
                     |> List.map (fun (row: Value[]) ->
                         idxs |> List.map (fun i -> Value.toText row.[i] |> Option.defaultValue "") |> String.concat " ")
-                    |> FullText.buildCorpus
+                    |> FullText.buildCorpusWith collation
 
                 let scores =
                     match mode with

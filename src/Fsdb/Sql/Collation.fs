@@ -56,6 +56,10 @@ type Collation =
       HashOf: string -> int
       /// Per-character LIKE folding, explicitly without expansions.
       CharEquals: char -> char -> bool
+      /// Prefix matching under the same case, accent, and locale rules as
+      /// equality. Full-text wildcard terms use this because canonical sort
+      /// keys do not preserve textual prefix boundaries.
+      IsPrefix: string -> string -> bool
       /// PAD SPACE: trailing spaces are insignificant — `Equals` trims,
       /// and LIKE trims both subject and pattern ends before matching.
       PadSpace: bool }
@@ -231,6 +235,11 @@ let private makeCollation (name: string) (spec: Spec) : Collation =
             fun a b -> a = b
         else
             fun a b -> ci.Compare(primaryText (string a), primaryText (string b), spec.Fold) = 0
+      IsPrefix =
+        if spec.ByteOrder then
+            fun value prefix -> value.StartsWith(prefix, StringComparison.Ordinal)
+        else
+            fun value prefix -> ci.IsPrefix(foldText value, foldText prefix, spec.Fold)
       PadSpace = spec.PadSpace }
 
 // ---------------------------------------------------------------------------

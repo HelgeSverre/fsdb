@@ -2735,15 +2735,29 @@ let private checkFullTextColumns (columns: ColumnDef list) (ix: IndexDef) : Resu
             | TLongText -> true
             | _ -> false
 
-        ix.Columns
-        |> List.tryFind (fun name ->
-            columns
-            |> List.tryFind (fun c -> String.Equals(c.Name, name, StringComparison.OrdinalIgnoreCase))
-            |> Option.map (fun c -> not (isTextual c.Type))
-            |> Option.defaultValue false)
-        |> function
-            | Some bad -> Error(FullTextColumnNotAllowed bad)
-            | None -> Ok()
+        let indexedColumns =
+            ix.Columns
+            |> List.choose (fun name ->
+                columns
+                |> List.tryFind (fun column -> String.Equals(column.Name, name, StringComparison.OrdinalIgnoreCase)))
+
+        match indexedColumns |> List.tryFind (fun column -> not (isTextual column.Type)) with
+        | Some bad -> Error(FullTextColumnNotAllowed bad.Name)
+        | None ->
+            match indexedColumns with
+            | []
+            | [ _ ] -> Ok()
+            | first :: rest ->
+                let collationName column =
+                    column.Collation |> Option.defaultValue Collation.defaultCollation.Name
+
+                match
+                    rest
+                    |> List.tryFind (fun column ->
+                        not (String.Equals(collationName first, collationName column, StringComparison.OrdinalIgnoreCase)))
+                with
+                | Some bad -> Error(FullTextColumnNotAllowed bad.Name)
+                | None -> Ok()
 
 let private validateForeignKeyDefinition
     (checkForeignKeys: bool)

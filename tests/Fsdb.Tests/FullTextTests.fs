@@ -2,6 +2,7 @@ module Fsdb.Tests.FullTextTests
 
 open Expecto
 open Fsdb.FullText
+open Fsdb.Collation
 
 /// The manual's own `articles` corpus (title and body concatenated per
 /// row, the way a `(title,body)` FULLTEXT index scores) — every expected
@@ -27,6 +28,25 @@ let tests =
               Expect.equal (tokenize "Never run mysqld as root!") [| "never"; "run"; "mysqld"; "as"; "root" |] "plain words"
               Expect.equal (tokenize "O'Brien's DB_2, 'quoted'") [| "o'brien's"; "db_2"; "quoted" |] "apostrophes and underscore"
               Expect.equal (tokenize "") [||] "empty"
+
+          testCase "full-text terms follow collation case and accent sensitivity"
+          <| fun _ ->
+              let aiCi = tryFind "utf8mb4_0900_ai_ci" |> Option.get
+              let asCi = tryFind "utf8mb4_0900_as_ci" |> Option.get
+              let binary = tryFind "utf8mb4_bin" |> Option.get
+
+              let aiCorpus = buildCorpusWith aiCi [ "résumé writing"; "smørrebrød" ]
+              let asCorpus = buildCorpusWith asCi [ "résumé writing"; "smørrebrød" ]
+              let binaryCorpus = buildCorpusWith binary [ "Résumé writing"; "The uncommonword" ]
+
+              Expect.isGreaterThan (naturalScoresOf aiCorpus "resume").[0] 0.0 "ai_ci folds accents"
+              Expect.isGreaterThan (naturalScoresOf aiCorpus "smorrebrod").[1] 0.0 "ICU folding covers non-combining letters"
+              Expect.equal (naturalScoresOf asCorpus "resume").[0] 0.0 "as_ci preserves accents"
+              Expect.isGreaterThan (naturalScoresOf asCorpus "RÉSUMÉ").[0] 0.0 "as_ci folds case"
+              Expect.equal (naturalScoresOf binaryCorpus "résumé").[0] 0.0 "binary preserves case"
+              Expect.equal (naturalScoresOf binaryCorpus "The").[1] 0.0 "stopwords remain case-insensitive"
+              Expect.isGreaterThan (booleanScoresOf aiCorpus "+resu*").[0] 0.0 "boolean prefixes use the same folding"
+              Expect.isGreaterThan (naturalScoresOf asCorpus "re\u0301sume\u0301").[0] 0.0 "canonical combining forms share a key"
 
           testCase "natural language: TF×IDF² matches the oracle's scores"
           <| fun _ ->
@@ -113,5 +133,4 @@ let tests =
               // ignorable punctuation.
               let deep = String.replicate 5000 "(" + "mysql" + String.replicate 5000 ")"
               let scores = booleanScoresOf corpus deep
-              Expect.equal scores.Length corpus.Docs.Length "returns a score per doc without crashing" ]
-
+              Expect.equal scores.Length articles.Length "returns a score per doc without crashing" ]

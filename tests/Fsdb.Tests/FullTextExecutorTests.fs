@@ -124,6 +124,65 @@ let tests =
               | Err(1210, _) -> ()
               | other -> failtestf "expected 1210, got %A" other
 
+          testCase "FULLTEXT matching follows the indexed column collation"
+          <| fun _ ->
+              let store = create ()
+
+              [ "CREATE TABLE ft_ai (id INT, body VARCHAR(100) COLLATE utf8mb4_0900_ai_ci, FULLTEXT(body))"
+                "CREATE TABLE ft_as (id INT, body VARCHAR(100) COLLATE utf8mb4_0900_as_ci, FULLTEXT(body))"
+                "CREATE TABLE ft_bin (id INT, body VARCHAR(100) COLLATE utf8mb4_bin, FULLTEXT(body))"
+                "INSERT INTO ft_ai VALUES (1, 'résumé'), (2, 'Resume'), (3, 'CAFÉ')"
+                "INSERT INTO ft_as VALUES (1, 'résumé'), (2, 'Resume'), (3, 'CAFÉ')"
+                "INSERT INTO ft_bin VALUES (1, 'résumé'), (2, 'Resume'), (3, 'CAFÉ')" ]
+              |> List.iter (run store >> ignore)
+
+              Expect.equal
+                  (ids (run store "SELECT id FROM ft_ai WHERE MATCH(body) AGAINST('resume') ORDER BY id"))
+                  [ "1"; "2" ]
+                  "ai_ci folds accents"
+
+              Expect.equal
+                  (ids (run store "SELECT id FROM ft_ai WHERE MATCH(body) AGAINST('cafe')"))
+                  [ "3" ]
+                  "ai_ci folds accents and case"
+
+              Expect.equal
+                  (ids (run store "SELECT id FROM ft_as WHERE MATCH(body) AGAINST('resume')"))
+                  [ "2" ]
+                  "as_ci preserves accents"
+
+              Expect.equal
+                  (ids (run store "SELECT id FROM ft_as WHERE MATCH(body) AGAINST('cafe')"))
+                  []
+                  "as_ci rejects accent differences"
+
+              Expect.equal
+                  (ids (run store "SELECT id FROM ft_bin WHERE MATCH(body) AGAINST('Resume')"))
+                  [ "2" ]
+                  "binary exact match"
+
+              Expect.equal
+                  (ids (run store "SELECT id FROM ft_bin WHERE MATCH(body) AGAINST('resume')"))
+                  []
+                  "binary preserves case"
+
+              match
+                  run
+                      store
+                      "CREATE TABLE mixed_ft (a VARCHAR(100) COLLATE utf8mb4_0900_ai_ci, b VARCHAR(100) COLLATE utf8mb4_bin, FULLTEXT(a,b))"
+              with
+              | Err(1283, "Column 'b' cannot be part of FULLTEXT index") -> ()
+              | other -> failtestf "expected mixed-collation FULLTEXT rejection, got %A" other
+
+              run
+                  store
+                  "CREATE TABLE mixed_ft_alter (a VARCHAR(100) COLLATE utf8mb4_0900_ai_ci, b VARCHAR(100) COLLATE utf8mb4_0900_as_ci)"
+              |> ignore
+
+              match run store "ALTER TABLE mixed_ft_alter ADD FULLTEXT(a,b)" with
+              | Err(1283, "Column 'b' cannot be part of FULLTEXT index") -> ()
+              | other -> failtestf "expected mixed-collation ALTER rejection, got %A" other
+
           testCase "FULLTEXT over a non-text column is 1283, at CREATE and at ALTER"
           <| fun _ ->
               let store = setup ()
