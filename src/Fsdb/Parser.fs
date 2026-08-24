@@ -194,6 +194,9 @@ let private isIdentChar c = Char.IsLetterOrDigit c || c = '_'
 let private keyword (s: string) : Parser<unit, unit> =
     attempt (pstringCI s >>. nextCharSatisfiesNot isIdentChar) .>> ws <?> s
 
+let private functionKeyword (s: string) : Parser<unit, unit> =
+    attempt (pstringCI s >>. nextCharSatisfiesNot isIdentChar >>. pchar '(') >>. ws <?> s
+
 let private intTok: Parser<int, unit> = pint32 .>> ws
 
 // ---------------------------------------------------------------------------
@@ -748,14 +751,30 @@ let private rowConstructorAtom: Parser<Expr, unit> =
 
 let private genericFuncCall: Parser<Expr, unit> =
     let reservedNames = set [ "any"; "select"; "some"; "regexp" ]
+    let whitespaceSensitiveNames =
+        set
+            [ "adddate"; "bit_and"; "bit_or"; "bit_xor"; "cast"; "count"; "curdate"; "curtime"
+              "date_add"; "date_sub"; "extract"; "group_concat"; "max"; "mid"; "min"; "now"
+              "position"; "session_user"; "std"; "stddev"; "stddev_pop"; "stddev_samp"; "subdate"
+              "substr"; "substring"; "sum"; "sysdate"; "system_user"; "trim"; "variance"; "var_pop"
+              "var_samp" ]
 
     attempt (
-        (many1Satisfy2 isIdentStart isIdentChar .>> pchar '(' .>> ws)
+        many1Satisfy2 isIdentStart isIdentChar
         >>= fun name ->
-            if reservedNames.Contains(name.ToLowerInvariant()) then
+            let normalizedName = name.ToLowerInvariant()
+
+            if reservedNames.Contains normalizedName then
                 fail "reserved function name"
             else
-                sepBy (if distinctAggregates.Contains name then distinctArg else expr) (sym ",")
+                let openParen =
+                    if whitespaceSensitiveNames.Contains normalizedName then
+                        pchar '(' >>. ws
+                    else
+                        ws >>. pchar '(' >>. ws
+
+                openParen
+                >>. sepBy (if distinctAggregates.Contains name then distinctArg else expr) (sym ",")
                 .>> sym ")"
                 |>> fun args -> FuncCall(name, args)
     )
@@ -775,8 +794,9 @@ let private trimAtom: Parser<Expr, unit> =
               attempt (expr .>> keyword "FROM" |>> fun removed -> "TRIM_BOTH", removed) ]
 
     attempt (
-        keyword "TRIM"
-        >>. between (sym "(") (sym ")") (specification .>>. expr)
+        functionKeyword "TRIM"
+        >>. (specification .>>. expr)
+        .>> sym ")"
         |>> fun ((mode, removed), source) -> FuncCall(mode, [ removed; source ])
     )
 
@@ -791,7 +811,7 @@ let private funcCallAtom: Parser<Expr, unit> = choice [ attempt convertUsingAtom
 /// own order-key vocabulary just for this one call; `Executor.evalAggregate`
 /// picks the markers back out.
 let private groupConcatAtom: Parser<Expr, unit> =
-    attempt (keyword "GROUP_CONCAT" >>. sym "(")
+    attempt (functionKeyword "GROUP_CONCAT")
     >>. (opt (keyword "DISTINCT") .>>. expr)
     .>>. opt (
         keyword "ORDER" >>. keyword "BY"
@@ -944,7 +964,7 @@ let private castCharsetClause: Parser<string, unit> =
 
 let private castExpr: Parser<Expr, unit> =
     attempt (
-        keyword "CAST" >>. sym "(" >>. expr .>> keyword "AS" .>>. castTargetType
+        functionKeyword "CAST" >>. expr .>> keyword "AS" .>>. castTargetType
         .>>. opt castCharsetClause
         .>> sym ")"
     )
@@ -1011,7 +1031,7 @@ let private getFormatAtom: Parser<Expr, unit> =
 /// separator is `FROM`, not a comma, so the generic call grammar can't reach
 /// it; same splice-the-unit-in-as-argument-one trick as `timestampFuncAtom`.
 let private extractAtom: Parser<Expr, unit> =
-    attempt (keyword "EXTRACT" >>. sym "(" >>. (many1Satisfy2 isIdentStart isIdentChar .>> ws) .>> keyword "FROM")
+    attempt (functionKeyword "EXTRACT" >>. (many1Satisfy2 isIdentStart isIdentChar .>> ws) .>> keyword "FROM")
     .>>. expr
     .>> sym ")"
     |>> fun (unit, e) -> FuncCall("EXTRACT", [ Lit(VString(unit.ToUpperInvariant())); e ])

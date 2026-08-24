@@ -186,10 +186,21 @@ let tests =
 
                 testCase "function names require an adjacent opening parenthesis"
                 <| fun _ ->
-                    for sql in [ "SELECT COUNT (*) FROM t"; "SELECT COUNT/**/(*) FROM t" ] do
+                    for sql in
+                        [ "SELECT COUNT (*) FROM t"
+                          "SELECT COUNT/**/(*) FROM t"
+                          "SELECT CAST (1 AS SIGNED)"
+                          "SELECT EXTRACT (YEAR FROM created_at) FROM t" ] do
                         match parse sql with
                         | Ok statement -> failtestf "expected %s to fail, got %A" sql statement
                         | Error _ -> ()
+
+                testCase "ordinary function names permit whitespace before arguments"
+                <| fun _ ->
+                    Expect.equal
+                        (parseOk "SELECT HEX /**/ ('a')")
+                        (mkSelect([ FuncCall("HEX", [ Lit(VString "a") ]), None ], None, None, [], None, None))
+                        "hex call"
 
                 testCase "SELECT cannot be parsed as a function name"
                 <| fun _ ->
