@@ -241,7 +241,14 @@ let tests =
               run store "CREATE TABLE docs (id INT PRIMARY KEY, body TEXT, FULLTEXT(body))" |> ignore
 
               [ 1..100 ]
-              |> List.map (fun id -> sprintf "(%d, '%s')" id (if id = 37 || id = 82 then "needle" else "ordinary"))
+              |> List.map (fun id ->
+                  let body =
+                      match id with
+                      | 37 -> "needle alpha"
+                      | 82 -> "needle beta"
+                      | _ -> "ordinary"
+
+                  sprintf "(%d, '%s')" id body)
               |> String.concat ","
               |> sprintf "INSERT INTO docs VALUES %s"
               |> run store
@@ -262,6 +269,17 @@ let tests =
 
               Expect.equal (ids result) [ "37"; "82" ] "the residual predicate retains the matching rows"
               Expect.equal calls 3 "only the metadata probe and posting candidates enter the residual pipeline"
+
+              calls <- 0
+
+              let intersected =
+                  TestSupport.Sql.execute
+                      store
+                      registry
+                      "SELECT id FROM docs WHERE MATCH(body) AGAINST('needle') AND MATCH(body) AGAINST('alpha') AND TOUCH(id) = id"
+
+              Expect.equal (ids intersected) [ "37" ] "multiple MATCH conjuncts intersect their candidates"
+              Expect.equal calls 2 "only the metadata probe and intersected candidate enter the residual pipeline"
 
           testCase "captured table roots retain their full-text snapshot"
           <| fun _ ->
