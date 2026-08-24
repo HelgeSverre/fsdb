@@ -212,6 +212,28 @@ let tests =
               | ResultSet(_, [ [ Some "ft_title"; Some "FULLTEXT"; None ] ]) -> ()
               | other -> failtestf "expected the FULLTEXT statistics row, got %A" other
 
+          testCase "FULLTEXT postings follow inserts, updates, deletes, upserts, and replacements"
+          <| fun _ ->
+              let store = create ()
+
+              [ "CREATE TABLE docs (id INT PRIMARY KEY, body TEXT, FULLTEXT(body))"
+                "INSERT INTO docs VALUES (1, 'alpha original'), (2, 'beta original')"
+                "UPDATE docs SET body = 'gamma revised' WHERE id = 1"
+                "DELETE FROM docs WHERE id = 2"
+                "INSERT INTO docs VALUES (1, 'delta upserted') ON DUPLICATE KEY UPDATE body = VALUES(body)"
+                "REPLACE INTO docs VALUES (1, 'epsilon replaced')"
+                "INSERT INTO docs VALUES (3, 'zeta inserted')" ]
+              |> List.iter (run store >> ignore)
+
+              let matching term =
+                  ids (run store (sprintf "SELECT id FROM docs WHERE MATCH(body) AGAINST('%s') ORDER BY id" term))
+
+              for removed in [ "alpha"; "beta"; "gamma"; "delta" ] do
+                  Expect.isEmpty (matching removed) (sprintf "%s was removed from the postings" removed)
+
+              Expect.equal (matching "epsilon") [ "1" ] "REPLACE publishes the replacement document"
+              Expect.equal (matching "zeta") [ "3" ] "INSERT publishes the new document"
+
           testCase "SHOW CREATE TABLE renders FULLTEXT KEY in MySQL's format"
           <| fun _ ->
               let store = setup ()

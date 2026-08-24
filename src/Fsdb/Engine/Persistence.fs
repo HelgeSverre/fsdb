@@ -1012,7 +1012,8 @@ let private decodeTable (includeComment: bool) (r: #IReader) : Table =
           NextAutoId = nextAutoId
           UniqueIndex = Map.empty
           SecondaryIndex = Map.empty
-          SecondaryOrder = Map.empty }
+          SecondaryOrder = Map.empty
+          FullTextIndexes = Map.empty }
 
 /// Rejects a `snapshot.fsdb`/`.new` whose magic, claimed payload length, or
 /// CRC doesn't match what's actually on disk — the guard `load` needs before

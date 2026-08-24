@@ -7592,56 +7592,37 @@ and private runFullTextSelect
             | Error e -> storageErr e, [], []
             | Ok _ -> unsupported // an information_schema view has no FULLTEXT index
         | Some table ->
-            let fulltextSets =
+            let fulltextIndexes =
                 table.Indexes
                 |> List.filter (fun ix -> ix.Kind = FullTextIndex)
-                |> List.map (fun ix -> ix.Columns |> List.map (fun c -> c.ToLowerInvariant()) |> Set.ofList)
+                |> List.map (fun ix -> ix, (ix.Columns |> List.map (fun c -> c.ToLowerInvariant()) |> Set.ofList))
 
-            let rows = table.Rows
+            let indexedRows = table.RowsArray.Indexed |> List.ofSeq
+            let rows = indexedRows |> List.map snd
 
             // The column list must equal a FULLTEXT index's set —
             // order-insensitive, oracle-verified (a reversed list matches;
             // a subset is 1191) — and the query must already be a constant.
             let validateNode node =
                 match node with
-                | MatchAgainst(cols, Lit queryValue, mode) when
-                    fulltextSets |> List.contains (cols |> List.map (fun c -> c.ToLowerInvariant()) |> Set.ofList)
-                    ->
-                    match Value.toText queryValue with
-                    | Some queryText ->
-                        cols
-                        |> traverse (Storage.resolveColumn table.Columns)
-                        |> Result.mapError Storage.toMySqlError
-                        |> Result.map (fun idxs ->
-                            let collation =
-                                idxs
-                                |> List.tryHead
-                                |> Option.map (fun index -> table.Columns.[index])
-                                |> Option.bind _.Collation
-                                |> Option.bind Collation.tryFind
-                                |> Option.defaultValue Collation.defaultCollation
+                | MatchAgainst(cols, Lit queryValue, mode) ->
+                    let columns = cols |> List.map (fun c -> c.ToLowerInvariant()) |> Set.ofList
 
-                            node, mode, queryText, idxs, collation)
-                    | None -> Error(1210, "Incorrect arguments to AGAINST")
-                | MatchAgainst(cols, _, _) when
-                    not (fulltextSets |> List.contains (cols |> List.map (fun c -> c.ToLowerInvariant()) |> Set.ofList))
-                    ->
-                    Error(1191, "Can't find FULLTEXT index matching the column list")
+                    match fulltextIndexes |> List.tryFind (snd >> (=) columns), Value.toText queryValue with
+                    | Some(index, _), Some queryText -> Ok(node, mode, queryText, index.Name)
+                    | None, _ -> Error(1191, "Can't find FULLTEXT index matching the column list")
+                    | _, None -> Error(1210, "Incorrect arguments to AGAINST")
                 | MatchAgainst _ -> Error(1210, "Incorrect arguments to AGAINST")
                 | _ -> Error(1105, "fulltext pre-pass collected a non-MATCH node")
 
-            let scoreNode (node, mode, queryText: string, idxs: int list, collation: Collation.Collation) =
-                let corpus =
-                    rows
-                    |> List.map (fun (row: Value[]) ->
-                        idxs |> List.map (fun i -> Value.toText row.[i] |> Option.defaultValue "") |> String.concat " ")
-                    |> FullText.buildCorpusWith collation
+            let scoreNode (node, mode, queryText: string, indexName: string) =
+                let index = Map.find indexName table.FullTextIndexes
 
                 let scores =
                     match mode with
-                    | NaturalLanguage -> FullText.naturalScoresOf corpus queryText
-                    | BooleanMode -> FullText.booleanScoresOf corpus queryText
-                    | QueryExpansion -> FullText.expansionScoresOf corpus queryText
+                    | NaturalLanguage -> FullText.naturalScores index queryText
+                    | BooleanMode -> FullText.booleanScores index queryText
+                    | QueryExpansion -> FullText.expansionScores index queryText
 
                 node, mode, scores
 
@@ -7658,9 +7639,13 @@ and private runFullTextSelect
             let extendedColumns = table.Columns @ syntheticColumns
 
             let extendedRows =
-                rows
-                |> List.mapi (fun idx row ->
-                    Array.append row (computed |> List.map (fun (_, _, scores) -> VDouble scores.[idx]) |> Array.ofList))
+                indexedRows
+                |> List.map (fun (rowId, row) ->
+                    Array.append
+                        row
+                        (computed
+                         |> List.map (fun (_, _, scores) -> VDouble(scores |> Map.tryFind rowId |> Option.defaultValue 0.0))
+                         |> Array.ofList))
 
             let qualifier = fromItemQualifier (FromTable tref)
             let qualifiers = qualifierRanges [ qualifier, extendedColumns ]
