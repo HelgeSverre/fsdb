@@ -95,6 +95,10 @@ type UserVariableRef =
     { Name: string
       Sql: string }
 
+type MatchColumn =
+    { Qualifier: string option
+      Name: string }
+
 module UserVariableRef =
     let validationError (variable: UserVariableRef) =
         let length = variable.Name.EnumerateRunes() |> Seq.length
@@ -150,7 +154,7 @@ type Expr =
     /// `MATCH (cols) AGAINST ('query' [mode])` — relevance over the
     /// FULLTEXT-indexed columns; computed as a whole-table pre-pass (the
     /// IDF half needs corpus statistics), like the window functions below.
-    | MatchAgainst of columns: string list * query: Expr * mode: MatchMode
+    | MatchAgainst of columns: MatchColumn list * query: Expr * mode: MatchMode
     /// `fn(...) OVER (spec)` / `fn(...) OVER window_name` — every window
     /// function in one case (see `WindowFn`), since the executor's pre-pass
     /// treats them all the same way: partition, order, frame, then one

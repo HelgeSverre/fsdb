@@ -365,7 +365,13 @@ let rec exprToSql (e: Expr) : string =
 
     match e with
     | Lit v -> litText v
-    | MatchAgainst(cols, q, _) -> sprintf "match (%s) against (%s)" (cols |> List.map (sprintf "`%s`") |> String.concat ",") (exprToSql q)
+    | MatchAgainst(cols, q, _) ->
+        let columnSql column =
+            column.Qualifier
+            |> Option.map (fun qualifier -> sprintf "`%s`.`%s`" qualifier column.Name)
+            |> Option.defaultWith (fun () -> sprintf "`%s`" column.Name)
+
+        sprintf "match (%s) against (%s)" (cols |> List.map columnSql |> String.concat ",") (exprToSql q)
     | Placeholder _ -> "?"
     | UserVariable variable -> variable.Sql
     | SystemVariable(scope, name) -> "@@" + (scope |> Option.map (fun value -> value.ToLowerInvariant() + ".") |> Option.defaultValue "") + name

@@ -353,6 +353,53 @@ let tests =
               | Err(1191, _) -> ()
               | other -> failtestf "expected an unmatched UPDATE index to remain 1191, got %A" other
 
+          testCase "MATCH scores physical sources before joining"
+          <| fun _ ->
+              let store = create ()
+
+              [ "CREATE TABLE articles (id INT PRIMARY KEY, body TEXT, FULLTEXT(body))"
+                "CREATE TABLE notes (article_id INT, body TEXT, FULLTEXT(body))"
+                "INSERT INTO articles VALUES (1, 'database security'), (2, 'ordinary article'), (3, 'database tutorial')"
+                "INSERT INTO notes VALUES (1, 'release note'), (2, 'security note'), (3, 'ordinary note')" ]
+              |> List.iter (run store >> ignore)
+
+              Expect.equal
+                  (ids (
+                      run
+                          store
+                          "SELECT a.id FROM articles a JOIN notes n ON n.article_id = a.id WHERE MATCH(a.body) AGAINST('database') AND MATCH(n.body) AGAINST('note') ORDER BY a.id"
+                  ))
+                  [ "1"; "3" ]
+                  "each MATCH reads the corpus and row identity of its owning source"
+
+              match
+                  run
+                      store
+                      "SELECT a.id, MATCH(n.body) AGAINST('security') AS score FROM articles a JOIN notes n ON n.article_id = a.id WHERE MATCH(n.body) AGAINST('security')"
+              with
+              | ResultSet([ "id"; "score" ], [ [ Some "2"; Some score ] ]) ->
+                  Expect.isGreaterThan (float score) 0.0 "a joined-source score projects"
+              | other -> failtestf "expected one scored join row, got %A" other
+
+              match
+                  run
+                      store
+                      "SELECT a.*, n.* FROM articles a JOIN notes n ON n.article_id = a.id WHERE MATCH(a.body) AGAINST('database') ORDER BY a.id"
+              with
+              | ResultSet(columns, rows) ->
+                  Expect.equal columns [ "id"; "body"; "article_id"; "body" ] "synthetic score columns remain private"
+                  Expect.equal rows.Length 2 "the joined rows remain intact"
+              | other -> failtestf "expected joined rows, got %A" other
+
+              Expect.equal
+                  (ids (
+                      run
+                          store
+                          "SELECT a.id FROM articles a JOIN notes n ON n.article_id = a.id AND MATCH(n.body) AGAINST('security') ORDER BY a.id"
+                  ))
+                  [ "2" ]
+                  "MATCH is valid in a join condition"
+
           testCase "SHOW CREATE TABLE renders FULLTEXT KEY in MySQL's format"
           <| fun _ ->
               let store = setup ()

@@ -457,7 +457,7 @@ let private collectColRefs (expr: Expr) : string list =
             | Col name -> Expression.Descend(name :: found)
             | MatchAgainst(columns, _, _) ->
                 columns
-                |> List.fold (fun names name -> name :: names) found
+                |> List.fold (fun names column -> column.Name :: names) found
                 |> Expression.Descend
             | WindowOver _ -> Expression.Prune found
             | _ -> Expression.Descend found)
@@ -478,7 +478,12 @@ let private firstColumnRef (expr: Expr) : Expr option =
             match found, node with
             | Some _, _ -> Expression.Prune found
             | None, (Col _ | QualifiedCol _) -> Expression.Prune(Some node)
-            | None, MatchAgainst(column :: _, _, _) -> Expression.Prune(Some(Col column))
+            | None, MatchAgainst(column :: _, _, _) ->
+                column.Qualifier
+                |> Option.map (fun qualifier -> QualifiedCol(qualifier, column.Name))
+                |> Option.defaultWith (fun () -> Col column.Name)
+                |> Some
+                |> Expression.Prune
             | None, WindowOver _ -> Expression.Prune None
             | None, _ -> Expression.Descend None)
         None
@@ -528,7 +533,13 @@ let private opSymbol =
 let rec private exprLabel (expr: Expr) : string =
     match expr with
     | Lit v -> v |> toText |> Option.defaultValue "NULL"
-    | MatchAgainst(cols, q, _) -> sprintf "match (%s) against (%s)" (String.concat "," cols) (exprLabel q)
+    | MatchAgainst(cols, q, _) ->
+        let columnLabel column =
+            column.Qualifier
+            |> Option.map (fun qualifier -> qualifier + "." + column.Name)
+            |> Option.defaultValue column.Name
+
+        sprintf "match (%s) against (%s)" (cols |> List.map columnLabel |> String.concat ",") (exprLabel q)
     | Placeholder _ -> "?"
     | UserVariable variable -> variable.Sql
     | SystemVariable(scope, variable) -> "@@" + (scope |> Option.map (fun value -> value.ToLowerInvariant() + ".") |> Option.defaultValue "") + variable
@@ -796,6 +807,13 @@ type private EvalContext =
       /// that resolve a `WHERE`/`ON`/`ORDER BY`/`GROUP BY` expression
       /// instead of a projection.
       Clause: Clause }
+
+type private ResolvedJoinSource =
+    { Columns: ColumnDef list
+      Rows: Value[] seq
+      PhysicalTable: Table option }
+
+type private JoinSourceOverrides = Map<string, ResolvedJoinSource>
 
 /// `EvalContext.Qualifiers` for a single unaliased/aliased table in scope —
 /// every non-JOIN statement (`UPDATE`, `DELETE`, `INSERT ... ON DUPLICATE
@@ -4376,13 +4394,14 @@ and private applyJoin
     (registry: Registry)
     (dbName: string)
     (outer: EvalContext option)
+    (sourceOverrides: JoinSourceOverrides)
     (state: (string * ColumnDef list) list * Value[] seq)
     (join: Join)
     : Result<(string * ColumnDef list) list * Value[] seq * string list, QueryResult> =
     match join.Table with
     | FromJsonTable(source, path, columns, alias) -> applyJsonTableJoin store registry dbName outer state join source path columns alias
     | FromLateral(body, alias) -> applyLateralJoin store registry dbName outer state join body alias
-    | _ -> applyResolvedJoin store registry dbName outer state join
+    | _ -> applyResolvedJoin store registry dbName outer sourceOverrides state join
 
 /// `applyJoin`'s LATERAL branch — the derived table re-runs once per left
 /// row, with that row (over the columns joined so far) as its outer context,
@@ -4573,21 +4592,27 @@ and private applyResolvedJoin
     (registry: Registry)
     (dbName: string)
     (outer: EvalContext option)
+    (sourceOverrides: JoinSourceOverrides)
     ((sourcesSoFar, rowsSoFar): (string * ColumnDef list) list * Value[] seq)
     (join: Join)
     : Result<(string * ColumnDef list) list * Value[] seq * string list, QueryResult> =
     let joinSource =
-        match join.Table with
-        | FromTable tableRef ->
-            tryPhysicalTableRef store dbName tableRef
-            |> Result.bind (function
-                | Some table -> Ok(table.Columns, table.RowsArray :> Value[] seq, Some table)
-                | None ->
-                    resolveFromItem store registry dbName join.Table
-                    |> Result.map (fun (columns, rows) -> columns, rows :> Value[] seq, None))
-        | _ ->
-            resolveFromItem store registry dbName join.Table
-            |> Result.map (fun (columns, rows) -> columns, rows :> Value[] seq, None)
+        let qualifier = (fromItemQualifier join.Table).ToLowerInvariant()
+
+        match Map.tryFind qualifier sourceOverrides with
+        | Some source -> Ok(source.Columns, source.Rows, source.PhysicalTable)
+        | None ->
+            match join.Table with
+            | FromTable tableRef ->
+                tryPhysicalTableRef store dbName tableRef
+                |> Result.bind (function
+                    | Some table -> Ok(table.Columns, table.RowsArray :> Value[] seq, Some table)
+                    | None ->
+                        resolveFromItem store registry dbName join.Table
+                        |> Result.map (fun (columns, rows) -> columns, rows :> Value[] seq, None))
+            | _ ->
+                resolveFromItem store registry dbName join.Table
+                |> Result.map (fun (columns, rows) -> columns, rows :> Value[] seq, None)
 
     match joinSource with
     | Error e -> Error e
@@ -5346,6 +5371,7 @@ and private runSelectStmt
         @ (select.Having |> Option.map collectMatchAgainst |> Option.defaultValue [])
         @ (select.OrderBy |> List.collect (fst >> collectMatchAgainst))
         @ (select.GroupBy |> List.collect collectMatchAgainst)
+        @ (select.Joins |> List.collect (_.On >> collectMatchAgainst))
         |> List.distinct
 
     match select.From with
@@ -5370,7 +5396,7 @@ and private runSelectStmt
                     (fun acc join ->
                         acc
                         |> Result.bind (fun ((sources, rows), namesPerJoin) ->
-                            applyJoin store registry dbName outer (sources, rows) join
+                            applyJoin store registry dbName outer Map.empty (sources, rows) join
                             |> Result.map (fun (sources', rows', names) -> (sources', rows'), names :: namesPerJoin)))
                     initial
             with
@@ -7579,7 +7605,7 @@ and private fullTextScoresForTable (table: Table) (matchNodes: Expr list) =
     let scoreNode node =
         match node with
         | MatchAgainst(columns, Lit queryValue, mode) ->
-            let columns = columns |> List.map (fun column -> column.ToLowerInvariant()) |> Set.ofList
+            let columns = columns |> List.map (fun column -> column.Name.ToLowerInvariant()) |> Set.ofList
 
             match indexColumns |> List.tryFind (snd >> (=) columns), Value.toText queryValue with
             | Some(index, _), Some queryText ->
@@ -7649,13 +7675,10 @@ and private fullTextPredicatePlan (table: Table) (predicate: Expr) =
                   ProbePredicate = rewrite (fun _ -> 0.0) })
 
 /// The fulltext pre-pass: like `runWindowedSelect`, each distinct
-/// `MATCH ... AGAINST` becomes a synthetic score column computed over the
-/// whole table — but ahead of WHERE, because the score both filters rows
-/// and needs corpus statistics (per-term document frequency) that only the
-/// full, unfiltered table provides (MySQL's corpus is the same).
-/// ponytail: single real table, no JOIN/derived source — real MySQL also
-/// evaluates MATCH through joins; route those through this same pre-pass
-/// keyed on the owning source if an app ever needs it.
+/// `MATCH ... AGAINST` becomes a synthetic score column computed over its
+/// owning physical table ahead of WHERE. The augmented sources then enter
+/// the ordinary join and select pipeline, so score evaluation does not
+/// duplicate SQL execution semantics.
 and private runFullTextSelect
     (store: Store)
     (registry: Registry)
@@ -7664,108 +7687,220 @@ and private runFullTextSelect
     (matchNodes: Expr list)
     (outer: EvalContext option)
     : QueryResult * ColumnMetadata list * Value[] list =
-    let unsupported = Err(1191, "Can't find FULLTEXT index matching the column list"), [], []
+    let unsupported () = Err(1191, "Can't find FULLTEXT index matching the column list"), [], []
+    let sourceItems = (select.From |> Option.toList) @ (select.Joins |> List.map _.Table)
 
-    match select.From, select.Joins with
-    | Some(FromTable tref), [] ->
-        let tableDb = tref.Database |> Option.defaultValue dbName
+    let physicalSources =
+        sourceItems
+        |> traverse (fun item ->
+            match item with
+            | FromTable tableRef ->
+                tryPhysicalTableRef store dbName tableRef
+                |> Result.map (Option.map (fun table -> fromItemQualifier item, item, table))
+            | _ -> Ok None)
+        |> Result.map (List.choose id)
 
-        match store.Catalog |> Map.tryFind tableDb |> Option.bind (Map.tryFind (tref.Table.ToLowerInvariant())) with
-        | None ->
-            // A missing table/database reports its ordinary error, not 1191.
-            match Storage.scanList store tableDb tref.Table with
-            | Error e -> storageErr e, [], []
-            | Ok _ -> unsupported // an information_schema view has no FULLTEXT index
-        | Some table ->
-            let indexedRows = table.RowsArray.Indexed |> List.ofSeq
-            let rows = indexedRows |> List.map snd
+    let indexMatches (table: Table) (columns: MatchColumn list) =
+        let names = columns |> List.map (fun column -> column.Name.ToLowerInvariant()) |> Set.ofList
 
-            match fullTextScoresForTable table matchNodes with
-            | Error(code, msg) -> Err(code, msg), [], []
-            | Ok computed ->
+        table.Indexes
+        |> List.exists (fun index ->
+            index.Kind = FullTextIndex
+            && (index.Columns |> List.map (fun column -> column.ToLowerInvariant()) |> Set.ofList) = names)
 
-            let synthetic =
-                computed |> List.mapi (fun i (node, _, _) -> node, sprintf "__fsdb_match_%d__" i)
+    let ownerOf sources node =
+        match node with
+        | MatchAgainst(columns, _, _) ->
+            let qualifiers =
+                columns
+                |> List.choose _.Qualifier
+                |> List.distinctBy (fun qualifier -> qualifier.ToLowerInvariant())
 
-            let syntheticColumns =
-                synthetic |> List.map (fun (_, name) -> syntheticColumn name TDouble false)
+            let candidates =
+                match qualifiers with
+                | [] -> sources |> List.filter (fun (_, _, table) -> indexMatches table columns)
+                | [ qualifier ] ->
+                    sources
+                    |> List.filter (fun (sourceQualifier, _, table) ->
+                        System.String.Equals(sourceQualifier, qualifier, System.StringComparison.OrdinalIgnoreCase)
+                        && indexMatches table columns)
+                | _ -> []
 
-            let extendedColumns = table.Columns @ syntheticColumns
+            match candidates with
+            | [ source ] -> Ok source
+            | _ -> Error(Err(1191, "Can't find FULLTEXT index matching the column list"))
+        | _ -> Error(Err(1105, "fulltext pre-pass collected a non-MATCH node"))
 
-            let rowsForExecution =
-                match select.Where |> Option.bind (fullTextCandidateIds computed) with
-                | None ->
-                    tryEqualityLookup store dbName tref select.Where
-                    |> Option.map snd
-                    |> Option.defaultValue indexedRows
-                | Some candidates ->
-                    candidates
-                    |> Set.toList
-                    |> List.choose (fun rowId -> table.RowsArray.TryFind rowId |> Option.map (fun row -> rowId, row))
+    match select.From, physicalSources with
+    | None, _ -> unsupported ()
+    | _, Error error -> error, [], []
+    | Some fromItem, Ok sources ->
+        match matchNodes |> traverse (fun node -> ownerOf sources node |> Result.map (fun owner -> owner, node)) with
+        | Error error -> error, [], []
+        | Ok ownedNodes ->
+            let prepared =
+                sources
+                |> traverse (fun (qualifier, item, table) ->
+                    let nodes =
+                        ownedNodes
+                        |> List.choose (fun ((ownerQualifier, _, _), node) ->
+                            if System.String.Equals(ownerQualifier, qualifier, System.StringComparison.OrdinalIgnoreCase) then Some node else None)
 
-            let extendedRows =
-                rowsForExecution
-                |> List.map (fun (rowId, row) ->
-                    Array.append
-                        row
-                        (computed
-                         |> List.map (fun (_, _, scores) -> VDouble(scores |> Map.tryFind rowId |> Option.defaultValue 0.0))
-                         |> Array.ofList))
+                    if nodes.IsEmpty then
+                        Ok(qualifier, item, table, [], [], table.Columns, table.RowsArray :> Value[] seq)
+                    else
+                        fullTextScoresForTable table nodes
+                        |> Result.mapError (fun (code, message) -> Err(code, message))
+                        |> Result.map (fun computed ->
+                            let synthetic =
+                                computed
+                                |> List.map (fun (node, _, _) ->
+                                    let index = matchNodes |> List.findIndex ((=) node)
+                                    node, sprintf "__fsdb_match_%d__" index)
 
-            let qualifier = fromItemQualifier (FromTable tref)
-            let qualifiers = qualifierRanges [ qualifier, extendedColumns ]
+                            let rowsForExecution =
+                                match select.Where |> Option.bind (fullTextCandidateIds computed) with
+                                | Some candidates ->
+                                    candidates
+                                    |> Set.toList
+                                    |> List.choose (fun rowId -> table.RowsArray.TryFind rowId |> Option.map (fun row -> rowId, row))
+                                | None ->
+                                    match item with
+                                    | FromTable tableRef ->
+                                        tryEqualityLookup store dbName tableRef select.Where
+                                        |> Option.map snd
+                                        |> Option.defaultWith (fun () -> table.RowsArray.Indexed |> List.ofSeq)
+                                    | _ -> table.RowsArray.Indexed |> List.ofSeq
 
-            let sub = substituteWindowFuncs synthetic
+                            let columns = table.Columns @ (synthetic |> List.map (fun (_, name) -> syntheticColumn name TDouble false))
+                            let rows =
+                                rowsForExecution
+                                |> Seq.map (fun (rowId, row) ->
+                                    Array.append
+                                        row
+                                        (computed
+                                         |> List.map (fun (_, _, scores) -> VDouble(scores |> Map.tryFind rowId |> Option.defaultValue 0.0))
+                                         |> Array.ofList))
 
-            let rewriteProjection (expr: Expr, aliasOpt: string option) : (Expr * string option) list =
-                match expr with
-                | Star None -> table.Columns |> List.map (fun c -> Col c.Name, None)
-                | Star(Some q) when q.ToLowerInvariant() = qualifier.ToLowerInvariant() ->
-                    table.Columns |> List.map (fun c -> Col c.Name, None)
-                | _ ->
-                    // A bare MATCH projection labels itself like MySQL's
-                    // header (`match (c) against ('q')`), never the synthetic
-                    // column name.
-                    let alias =
-                        aliasOpt
-                        |> Option.orElse (
-                            synthetic
-                            |> List.tryFind (fun (node, _) -> node = expr)
-                            |> Option.map (fun _ -> exprLabel expr)
-                        )
+                            qualifier, item, table, computed, synthetic, columns, rows))
 
-                    [ sub expr, alias ]
+            match prepared with
+            | Error error -> error, [], []
+            | Ok preparedSources ->
+                let replacements =
+                    preparedSources
+                    |> List.collect (fun (qualifier, _, _, _, synthetic, _, _) ->
+                        synthetic |> List.map (fun (node, name) -> node, QualifiedCol(qualifier, name)))
 
-            // MySQL's implicit relevance order: a natural-language (or
-            // expansion) MATCH filtering the WHERE clause, with no explicit
-            // ORDER BY or grouping, returns rows relevance-descending.
-            let whereNodes =
-                select.Where |> Option.map collectMatchAgainst |> Option.defaultValue []
+                let sub expression = substituteExprs replacements expression
+                let originals =
+                    preparedSources
+                    |> List.map (fun (qualifier, _, table, _, _, _, _) -> qualifier.ToLowerInvariant(), table.Columns)
+                    |> Map.ofList
 
-            let implicitOrder =
-                if select.OrderBy.IsEmpty && select.GroupBy.IsEmpty && not select.Distinct then
-                    computed
-                    |> List.tryFind (fun (node, mode, _) -> mode <> BooleanMode && List.contains node whereNodes)
-                    |> Option.bind (fun (node, _, _) -> synthetic |> List.tryFind (fst >> (=) node))
-                    |> Option.map (fun (_, name) -> [ Col name, Desc ])
-                    |> Option.defaultValue []
-                else
-                    []
+                let overrides =
+                    preparedSources
+                    |> List.map (fun (qualifier, _, table, _, _, columns, rows) ->
+                        qualifier.ToLowerInvariant(),
+                        { Columns = columns
+                          Rows = rows
+                          PhysicalTable = Some table })
+                    |> Map.ofList
 
-            let select' =
-                { select with
-                    Projections = select.Projections |> List.collect rewriteProjection
-                    Where = select.Where |> Option.map sub
-                    Having = select.Having |> Option.map sub
-                    GroupBy = select.GroupBy |> List.map sub
-                    OrderBy =
-                        if implicitOrder.IsEmpty then
-                            select.OrderBy |> List.map (fun (e, dir) -> sub e, dir)
-                        else
-                            implicitOrder }
+                let resolveBase =
+                    match Map.tryFind ((fromItemQualifier fromItem).ToLowerInvariant()) overrides with
+                    | Some source -> Ok(source.Columns, source.Rows)
+                    | None -> resolveFromItem store registry dbName fromItem |> Result.map (fun (columns, rows) -> columns, rows :> Value[] seq)
 
-            runSelect store registry dbName extendedColumns qualifiers (Seq.ofList extendedRows) select' outer
-    | _ -> unsupported
+                match resolveBase with
+                | Error error -> error, [], []
+                | Ok(baseColumns, baseRows) ->
+                    let initial = Ok(([ fromItemQualifier fromItem, baseColumns ], baseRows), [])
+
+                    let joined =
+                        select.Joins
+                        |> List.fold
+                            (fun state join ->
+                                state
+                                |> Result.bind (fun ((resolved, rows), namesPerJoin) ->
+                                    let rewrittenJoin = { join with On = sub join.On }
+
+                                    applyJoin store registry dbName outer overrides (resolved, rows) rewrittenJoin
+                                    |> Result.map (fun (sources, rows, names) -> (sources, rows), names :: namesPerJoin)))
+                            initial
+
+                    match joined with
+                    | Error error -> error, [], []
+                    | Ok((resolvedSources, rows), namesPerJoinRev) ->
+                        let originalSources =
+                            resolvedSources
+                            |> List.map (fun (qualifier, columns) ->
+                                qualifier,
+                                (Map.tryFind (qualifier.ToLowerInvariant()) originals |> Option.defaultValue columns))
+
+                        let namesPerJoin = List.rev namesPerJoinRev
+                        let select =
+                            if namesPerJoin |> List.forall List.isEmpty then select
+                            else rewriteNaturalSelect select originalSources select.Joins namesPerJoin
+
+                        let rewriteProjection (expression, alias) =
+                            match expression with
+                            | Star None ->
+                                originalSources
+                                |> List.collect (fun (qualifier, columns) ->
+                                    columns |> List.map (fun column -> QualifiedCol(qualifier, column.Name), None))
+                            | Star(Some qualifier) ->
+                                originalSources
+                                |> List.tryFind (fst >> fun source -> System.String.Equals(source, qualifier, System.StringComparison.OrdinalIgnoreCase))
+                                |> Option.map (fun (_, columns) -> columns |> List.map (fun column -> QualifiedCol(qualifier, column.Name), None))
+                                |> Option.defaultValue [ expression, alias ]
+                            | _ ->
+                                let label =
+                                    alias
+                                    |> Option.orElse (
+                                        matchNodes
+                                        |> List.tryFind ((=) expression)
+                                        |> Option.map exprLabel)
+
+                                [ sub expression, label ]
+
+                        let whereNodes = select.Where |> Option.map collectMatchAgainst |> Option.defaultValue []
+                        let computed = preparedSources |> List.collect (fun (_, _, _, scores, _, _, _) -> scores)
+                        let synthetic = preparedSources |> List.collect (fun (_, _, _, _, values, _, _) -> values)
+
+                        let implicitOrder =
+                            if select.OrderBy.IsEmpty && select.GroupBy.IsEmpty && not select.Distinct then
+                                computed
+                                |> List.tryFind (fun (node, mode, _) -> mode <> BooleanMode && List.contains node whereNodes)
+                                |> Option.bind (fun (node, _, _) -> synthetic |> List.tryFind (fst >> (=) node))
+                                |> Option.bind (fun (node, name) ->
+                                    replacements
+                                    |> List.tryFind (fst >> (=) node)
+                                    |> Option.map (fun (_, replacement) -> [ replacement, Desc ]))
+                                |> Option.defaultValue []
+                            else
+                                []
+
+                        let rewritten =
+                            { select with
+                                Projections = select.Projections |> List.collect rewriteProjection
+                                Joins = select.Joins |> List.map (fun join -> { join with On = sub join.On })
+                                Where = select.Where |> Option.map sub
+                                Having = select.Having |> Option.map sub
+                                GroupBy = select.GroupBy |> List.map sub
+                                OrderBy =
+                                    if implicitOrder.IsEmpty then select.OrderBy |> List.map (fun (expression, direction) -> sub expression, direction)
+                                    else implicitOrder }
+
+                        runSelect
+                            store
+                            registry
+                            dbName
+                            (resolvedSources |> List.collect snd)
+                            (qualifierRanges resolvedSources)
+                            rows
+                            rewritten
+                            outer
 
 and private runSelect
     (store: Store)
@@ -9552,7 +9687,8 @@ let rec private checkColumnReferences (expression: Expr) : (string option * stri
     | FuncCall(_, arguments) -> many arguments
     | Case(subject, branches, otherwise) ->
         many (Option.toList subject @ (branches |> List.collect (fun (condition, result) -> [ condition; result ])) @ Option.toList otherwise)
-    | MatchAgainst(columns, query, _) -> (columns |> List.map (fun column -> None, column)) @ checkColumnReferences query
+    | MatchAgainst(columns, query, _) ->
+        (columns |> List.map (fun column -> column.Qualifier, column.Name)) @ checkColumnReferences query
     | InSubquery(value, _) -> checkColumnReferences value
     | QuantifiedComparison(value, _, _, _) -> checkColumnReferences value
     | Placeholder _

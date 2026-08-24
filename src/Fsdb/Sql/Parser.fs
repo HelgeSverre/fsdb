@@ -1366,6 +1366,12 @@ let private variableAtom: Parser<Expr, unit> =
 /// modifier) is natural language mode; `WITH QUERY EXPANSION` with or
 /// without the leading `IN NATURAL LANGUAGE MODE` is the same mode.
 let private matchAgainstAtom: Parser<Expr, unit> =
+    let matchColumn =
+        identifier .>>. opt (sym "." >>. qualifiedIdentifier)
+        |>> function
+            | qualifier, Some name -> { Qualifier = Some qualifier; Name = name }
+            | name, None -> { Qualifier = None; Name = name }
+
     let modifier =
         choice
             [ attempt (
@@ -1384,7 +1390,7 @@ let private matchAgainstAtom: Parser<Expr, unit> =
         choice [ stringLit |>> Lit; numberLit |>> Lit; placeholderAtom; identifier |>> Col ]
 
     attempt (
-        keyword "MATCH" >>. sym "(" >>. sepBy1 identifier (sym ",") .>> sym ")"
+        keyword "MATCH" >>. sym "(" >>. sepBy1 matchColumn (sym ",") .>> sym ")"
         .>> keyword "AGAINST"
         .>> sym "("
         .>>. againstArg

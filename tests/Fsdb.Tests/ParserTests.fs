@@ -2337,15 +2337,22 @@ let tests =
                   | Ok(Select { Where = Some(MatchAgainst(cols, Lit(VString "q"), mode)) }) -> cols, mode
                   | other -> failtestf "unexpected parse of %s: %A" sql other
 
-              Expect.equal (modeOf "SELECT 1 FROM t WHERE MATCH (a,b) AGAINST ('q')") ([ "a"; "b" ], NaturalLanguage) "default mode"
-              Expect.equal (modeOf "SELECT 1 FROM t WHERE MATCH (a) AGAINST ('q' IN NATURAL LANGUAGE MODE)") ([ "a" ], NaturalLanguage) "explicit NL"
-              Expect.equal (modeOf "SELECT 1 FROM t WHERE MATCH (a) AGAINST ('q' IN BOOLEAN MODE)") ([ "a" ], BooleanMode) "boolean"
-              Expect.equal (modeOf "SELECT 1 FROM t WHERE MATCH (a) AGAINST ('q' WITH QUERY EXPANSION)") ([ "a" ], QueryExpansion) "expansion"
+              let columns names = names |> List.map (fun name -> { Qualifier = None; Name = name })
+
+              Expect.equal (modeOf "SELECT 1 FROM t WHERE MATCH (a,b) AGAINST ('q')") (columns [ "a"; "b" ], NaturalLanguage) "default mode"
+              Expect.equal (modeOf "SELECT 1 FROM t WHERE MATCH (a) AGAINST ('q' IN NATURAL LANGUAGE MODE)") (columns [ "a" ], NaturalLanguage) "explicit NL"
+              Expect.equal (modeOf "SELECT 1 FROM t WHERE MATCH (a) AGAINST ('q' IN BOOLEAN MODE)") (columns [ "a" ], BooleanMode) "boolean"
+              Expect.equal (modeOf "SELECT 1 FROM t WHERE MATCH (a) AGAINST ('q' WITH QUERY EXPANSION)") (columns [ "a" ], QueryExpansion) "expansion"
 
               Expect.equal
                   (modeOf "SELECT 1 FROM t WHERE MATCH (a) AGAINST ('q' IN NATURAL LANGUAGE MODE WITH QUERY EXPANSION)")
-                  ([ "a" ], QueryExpansion)
+                  (columns [ "a" ], QueryExpansion)
                   "NL with expansion is expansion"
+
+              Expect.equal
+                  (modeOf "SELECT 1 FROM t x WHERE MATCH (x.a, x.b) AGAINST ('q')")
+                  ([ { Qualifier = Some "x"; Name = "a" }; { Qualifier = Some "x"; Name = "b" } ], NaturalLanguage)
+                  "qualified MATCH columns retain their source"
 
               match Fsdb.Parser.parse "CREATE TABLE t (a TEXT, FULLTEXT KEY ft (a), KEY plain (a))" with
               | Ok(CreateTable(_, _, [ ft; plain ], _, _, _, _, _, _)) ->
