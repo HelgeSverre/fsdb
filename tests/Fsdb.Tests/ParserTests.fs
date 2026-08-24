@@ -2254,6 +2254,20 @@ let tests =
                       "the outer END closes the trigger statement"
               | Error error -> failtestf "unexpected split error: %s" error
 
+          testCase "statement batches preserve ordered compound trigger bodies"
+          <| fun _ ->
+              let sql =
+                  "CREATE TRIGGER trg BEFORE INSERT ON t FOR EACH ROW FOLLOWS first BEGIN INSERT INTO log VALUES (NEW.n); SET NEW.n = NEW.n + 1; END; SELECT 1"
+
+              match splitStatements sql with
+              | Ok statements ->
+                  Expect.sequenceEqual
+                      statements
+                      [ "CREATE TRIGGER trg BEFORE INSERT ON t FOR EACH ROW FOLLOWS first BEGIN INSERT INTO log VALUES (NEW.n); SET NEW.n = NEW.n + 1; END"
+                        "SELECT 1" ]
+                      "trigger order does not expose body delimiters"
+              | Error error -> failtestf "unexpected split error: %s" error
+
           testCase "statement batches reject unterminated literals"
           <| fun _ ->
               match splitStatements "SELECT 'unterminated" with

@@ -3275,7 +3275,7 @@ let splitStatements (sql: string) : Result<string list, string> =
 
         System.Text.RegularExpressions.Regex.IsMatch(
             prefix,
-            @"^\s*CREATE\s+TRIGGER\b[\s\S]*\bFOR\s+EACH\s+ROW\s*$",
+            @"^\s*CREATE\s+TRIGGER\b[\s\S]*\bFOR\s+EACH\s+ROW(?:\s+(?:FOLLOWS|PRECEDES)\s+(?:`(?:``|[^`])+`|[A-Za-z_][A-Za-z0-9_$]*))?\s*$",
             System.Text.RegularExpressions.RegexOptions.IgnoreCase
         )
 
