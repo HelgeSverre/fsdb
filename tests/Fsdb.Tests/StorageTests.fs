@@ -365,6 +365,25 @@ let tests =
                     | Error(NotNullViolation "name") -> ()
                     | other -> failtestf "expected NotNullViolation on 'name', got %A" other
 
+                testCase "a PRIMARY KEY is implicitly NOT NULL"
+                <| fun _ ->
+                    let store = create ()
+                    let primary = { (col "id" (TInt false) true) with PrimaryKey = true }
+                    Expect.isOk (createTable store defaultDatabase "primary_values" [ primary ] [] [] None None) "table created"
+
+                    match scan store defaultDatabase "primary_values" with
+                    | Ok([ column ], _) -> Expect.isFalse column.Nullable "stored primary-key metadata is non-nullable"
+                    | other -> failtestf "expected one primary-key column, got %A" other
+
+                    let catalog = store.Catalog
+                    let database = catalog.[defaultDatabase]
+                    let legacyTable = { database.["primary_values"] with Columns = [ primary ] }
+                    setCatalog store (Map.add defaultDatabase (Map.add "primary_values" legacyTable database) catalog)
+
+                    match insertRows store defaultDatabase "primary_values" None [ [ VNull ] ] with
+                    | Error(NotNullViolation "id") -> ()
+                    | other -> failtestf "expected implicit primary-key NOT NULL enforcement, got %A" other
+
                 testCase "a numeric string coerces into an INT column"
                 <| fun _ ->
                     let store = withUsersTable ()
@@ -1618,9 +1637,31 @@ let tests =
                     match alterTable store defaultDatabase "t" [ AddPrimaryKey [ "a"; "b" ] ] with
                     | Ok() ->
                         match scan store defaultDatabase "t" with
-                        | Ok(columns, _) -> Expect.isTrue (columns |> List.forall (fun c -> c.PrimaryKey)) "both columns are PK"
+                        | Ok(columns, _) ->
+                            Expect.isTrue (columns |> List.forall (fun c -> c.PrimaryKey)) "both columns are PK"
+                            Expect.isTrue (columns |> List.forall (fun c -> not c.Nullable)) "primary-key columns become non-nullable"
                         | Error e -> failtestf "expected Ok, got %A" e
                     | Error e -> failtestf "expected Ok, got %A" e
+
+                testCase "AddPrimaryKey rejects NULL and duplicate existing values"
+                <| fun _ ->
+                    let withValues name values =
+                        let store = create ()
+                        Expect.isOk (createTable store defaultDatabase name [ col "id" (TInt false) true ] [] [] None None) "table created"
+                        Expect.isOk (insertRows store defaultDatabase name None (values |> List.map List.singleton)) "rows inserted"
+                        store
+
+                    let withNull = withValues "nullable_key" [ VNull; VInt 1L ]
+
+                    match alterTable withNull defaultDatabase "nullable_key" [ AddPrimaryKey [ "id" ] ] with
+                    | Error(ExpressionError(1138, "Invalid use of NULL value")) -> ()
+                    | other -> failtestf "expected 1138 for a NULL primary-key candidate, got %A" other
+
+                    let withDuplicate = withValues "duplicate_key" [ VInt 1L; VInt 1L ]
+
+                    match alterTable withDuplicate defaultDatabase "duplicate_key" [ AddPrimaryKey [ "id" ] ] with
+                    | Error(DuplicateKey("PRIMARY", "1")) -> ()
+                    | other -> failtestf "expected a duplicate PRIMARY rejection, got %A" other
 
                 testCase "multiple actions in one call apply in order"
                 <| fun _ ->

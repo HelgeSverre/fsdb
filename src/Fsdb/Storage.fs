@@ -1503,11 +1503,9 @@ let evalDefault (col: ColumnDef) : Value =
     | Some(DConst v) -> v
     | Some DCurrentTimestamp -> currentTimestampForColumn col
 
-/// Coerces a value to its column's type and rejects NULL for a non-nullable
-/// column.
 let private coerceAndCheck (mode: TemporalCoercionMode) (col: ColumnDef) (v: Value) : Result<Value, StorageError> =
     match v with
-    | VNull when not col.Nullable -> Error(NotNullViolation col.Name)
+    | VNull when not col.Nullable || col.PrimaryKey -> Error(NotNullViolation col.Name)
     | _ -> coerceStoredValueWithMode mode col v
 
 let private coerceRow (mode: TemporalCoercionMode) (columns: ColumnDef list) (row: Value[]) : Result<Value[], StorageError> =
@@ -2903,6 +2901,14 @@ let private validateForeignKeyDefinition
                         )
                     )
 
+let private normalizePrimaryKeyNullability (columns: ColumnDef list) =
+    columns
+    |> List.map (fun column ->
+        if column.PrimaryKey then
+            { column with Nullable = false }
+        else
+            column)
+
 let createTableSeeded
     (store: Store)
     (dbName: string)
@@ -2915,6 +2921,7 @@ let createTableSeeded
     (autoIncrementSeed: int64 option)
     : Result<unit, StorageError> =
     ensureDatabase store dbName
+    let columns = normalizePrimaryKeyNullability columns
 
     let result =
         columns
@@ -3107,6 +3114,22 @@ let private resolvePosition (columnsExcludingSelf: ColumnDef list) (fallback: in
     | PositionFirst -> Ok 0
     | PositionAfter col -> resolveColumn columnsExcludingSelf col |> Result.map (fun idx -> idx + 1)
 
+let private tryDuplicateConstraintValue (columns: ColumnDef list) (indices: int list) (rows: Value[] seq) =
+    let rec loop seen remaining =
+        match remaining with
+        | [] -> None
+        | row :: rest ->
+            match encodeConstraintKey columns indices row with
+            | Some key when Set.contains key seen ->
+                indices
+                |> List.map (fun index -> row.[index] |> toText |> Option.defaultValue "NULL")
+                |> String.concat "-"
+                |> Some
+            | Some key -> loop (Set.add key seen) rest
+            | None -> loop seen rest
+
+    rows |> List.ofSeq |> loop Set.empty
+
 /// Applies one `Ast.AlterAction` to `table`, returning its replacement and,
 /// for `RenameTo`, the new key it should be re-filed under in the database
 /// map (`None` means "same key").
@@ -3292,18 +3315,10 @@ let private applyAlterAction (mode: TemporalCoercionMode) (table: Table) (action
                     let collision =
                         uniqueKeyGroups candidate
                         |> List.tryPick (fun (name, idxs) ->
-                            let rec loop seen remaining =
-                                match remaining with
-                                | [] -> None
-                                | (_, row: Value[]) :: rest ->
-                                    match encodeConstraintKey candidate.Columns idxs row with
-                                    | Some key when Set.contains key seen ->
-                                        let value = idxs |> List.map (fun i -> row.[i] |> toText |> Option.defaultValue "NULL") |> String.concat "-"
-                                        Some(DuplicateKey(name, value))
-                                    | Some key -> loop (Set.add key seen) rest
-                                    | None -> loop seen rest
-
-                            loop Set.empty rows)
+                            rows
+                            |> Seq.map snd
+                            |> tryDuplicateConstraintValue candidate.Columns idxs
+                            |> Option.map (fun value -> DuplicateKey(name, value)))
 
                     match collision with
                     | Some e -> Error e
@@ -3324,19 +3339,8 @@ let private applyAlterAction (mode: TemporalCoercionMode) (table: Table) (action
         ix.Columns
         |> traverse (resolveColumn table.Columns)
         |> Result.bind (fun idxs ->
-            let rec firstCollision seen rows =
-                match rows with
-                | [] -> None
-                | (row: Value[]) :: rest ->
-                    match encodeConstraintKey table.Columns idxs row with
-                    | Some key when Set.contains key seen ->
-                        let value = idxs |> List.map (fun i -> row.[i] |> toText |> Option.defaultValue "NULL") |> String.concat "-"
-                        Some(DuplicateKey(ix.Name, value))
-                    | Some key -> firstCollision (Set.add key seen) rest
-                    | None -> firstCollision seen rest
-
-            match firstCollision Set.empty (List.ofSeq table.RowsArray) with
-            | Some e -> Error e
+            match tryDuplicateConstraintValue table.Columns idxs table.RowsArray with
+            | Some value -> Error(DuplicateKey(ix.Name, value))
             | None -> Ok({ table with Indexes = table.Indexes @ [ ix ] }, None))
     | AddIndex ix ->
         checkFullTextColumns table.Columns ix
@@ -3372,11 +3376,31 @@ let private applyAlterAction (mode: TemporalCoercionMode) (table: Table) (action
             None
         )
     | AddPrimaryKey cols ->
-        Ok(
-            { table with
-                Columns = table.Columns |> List.map (fun c -> if List.contains c.Name cols then { c with PrimaryKey = true } else c) },
-            None
-        )
+        if table.Columns |> List.exists _.PrimaryKey then
+            Error(ExpressionError(1068, "Multiple primary key defined"))
+        else
+            cols
+            |> traverse (resolveColumn table.Columns)
+            |> Result.bind (fun indices ->
+                let rows = table.RowsArray :> Value[] seq
+
+                if rows |> Seq.exists (fun row -> indices |> List.exists (fun index -> row.[index] = VNull)) then
+                    Error(ExpressionError(1138, "Invalid use of NULL value"))
+                else
+                    match tryDuplicateConstraintValue table.Columns indices rows with
+                    | Some value -> Error(DuplicateKey("PRIMARY", value))
+                    | None ->
+                        let primaryIndices = Set.ofList indices
+
+                        let columns =
+                            table.Columns
+                            |> List.mapi (fun index column ->
+                                if Set.contains index primaryIndices then
+                                    { column with PrimaryKey = true; Nullable = false }
+                                else
+                                    column)
+
+                        Ok({ table with Columns = columns }, None))
     | SetDefault(column, value) ->
         resolveColumn table.Columns column
         |> Result.map (fun index ->
