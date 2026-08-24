@@ -126,6 +126,20 @@ let tests =
               Expect.equal order.[0] 1 "the direct match ranks first"
               Expect.equal order.[1] 5 "the other direct match second"
 
+          testCase "inverted index updates documents without rebuilding the corpus"
+          <| fun _ ->
+              let index =
+                  buildIndexWith defaultCollation [ 10, "database tutorial"; 20, "security handbook" ]
+                  |> addDocument 30 "database comparison"
+                  |> addDocument 20 "database security"
+                  |> removeDocument 10
+
+              let natural = naturalScores index "database"
+              let prefix = booleanScores index "+secur*"
+
+              Expect.equal (natural |> Map.keys |> Set.ofSeq) (set [ 20; 30 ]) "replacement and insert are searchable"
+              Expect.equal (prefix |> Map.keys |> Set.ofSeq) (set [ 20 ]) "prefix postings follow replacement"
+
           testCase "a deeply nested boolean query is bounded, not a stack overflow"
           <| fun _ ->
               // Thousands of open parens must not overflow the recursive

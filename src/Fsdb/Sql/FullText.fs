@@ -1,8 +1,6 @@
 /// Full-text scoring for `MATCH (cols) AGAINST (...)` — natural language,
-/// boolean, and query-expansion modes over an in-memory corpus (one
-/// concatenated text per row). No inverted index: every MATCH tokenizes and
-/// scores the table's rows for that query (ponytail: O(rows × terms) per
-/// statement; build a real inverted index if search volume ever matters).
+/// boolean, and query-expansion modes over an immutable inverted index (one
+/// concatenated document per row).
 ///
 /// Relevance follows InnoDB's documented formula, oracle-verified against
 /// MySQL 8.4.11: `rank = Σ_term TF × IDF²` with `IDF = log10(N / df)`.
@@ -78,22 +76,86 @@ type private Token =
     { Text: string
       Key: string }
 
-type Corpus =
+type Index<'id when 'id: comparison> =
     private
-        { Docs: Token[][]
-          /// Distinct-token sets per doc, for df counting.
-          DocSets: Set<string>[]
+        { Documents: Map<'id, Token[]>
+          Postings: Map<string, Map<'id, int>>
+          Vocabulary: Map<string, string>
           Collation: Collation }
 
-let buildCorpusWith (collation: Collation) (docs: string seq) : Corpus =
+type Corpus =
+    private
+        { Order: int[]
+          Index: Index<int> }
+
+let private tokensWith (collation: Collation) (text: string) =
     let token text =
         { Text = text
           Key = collation.KeyOf text }
 
-    let tokenized = docs |> Seq.map (rawTokens >> Array.map token) |> Array.ofSeq
-    { Docs = tokenized
-      DocSets = tokenized |> Array.map (Array.map _.Key >> Set.ofArray)
+    rawTokens text |> Array.map token
+
+let emptyIndex (collation: Collation) : Index<'id> =
+    { Documents = Map.empty
+      Postings = Map.empty
+      Vocabulary = Map.empty
       Collation = collation }
+
+let removeDocument (id: 'id) (index: Index<'id>) : Index<'id> =
+    match Map.tryFind id index.Documents with
+    | None -> index
+    | Some tokens ->
+        let frequencies = tokens |> Array.countBy _.Key
+
+        let postings =
+            frequencies
+            |> Array.fold
+                (fun postings (key, _) ->
+                    match Map.tryFind key postings with
+                    | None -> postings
+                    | Some rows ->
+                        let remaining = Map.remove id rows
+                        if remaining.IsEmpty then Map.remove key postings else Map.add key remaining postings)
+                index.Postings
+
+        let vocabulary =
+            frequencies
+            |> Array.fold
+                (fun vocabulary (key, _) ->
+                    if Map.containsKey key postings then vocabulary else Map.remove key vocabulary)
+                index.Vocabulary
+
+        { index with
+            Documents = Map.remove id index.Documents
+            Postings = postings
+            Vocabulary = vocabulary }
+
+let addDocument (id: 'id) (text: string) (index: Index<'id>) : Index<'id> =
+    let index = removeDocument id index
+    let tokens = tokensWith index.Collation text
+
+    let postings, vocabulary =
+        tokens
+        |> Array.groupBy _.Key
+        |> Array.fold
+            (fun (postings, vocabulary) (key, tokens) ->
+                let rows = postings |> Map.tryFind key |> Option.defaultValue Map.empty
+                Map.add key (Map.add id tokens.Length rows) postings,
+                Map.add key tokens.[0].Text vocabulary)
+            (index.Postings, index.Vocabulary)
+
+    { index with
+        Documents = Map.add id tokens index.Documents
+        Postings = postings
+        Vocabulary = vocabulary }
+
+let buildIndexWith (collation: Collation) (documents: ('id * string) seq) : Index<'id> =
+    documents |> Seq.fold (fun index (id, text) -> addDocument id text index) (emptyIndex collation)
+
+let buildCorpusWith (collation: Collation) (docs: string seq) : Corpus =
+    let documents = docs |> Seq.indexed |> Array.ofSeq
+    { Order = documents |> Array.map fst
+      Index = buildIndexWith collation documents }
 
 let buildCorpus (docs: string seq) : Corpus =
     buildCorpusWith defaultCollation docs
@@ -104,37 +166,30 @@ let private isSearchable (token: Token) =
     token.Text.Length >= minTokenLength
     && not (Set.contains (token.Text.ToLowerInvariant()) stopwords)
 
-let private idf (corpus: Corpus) (df: int) : float =
+let private idf (index: Index<'id>) (df: int) : float =
     if df = 0 then 0.0
-    else max (log10 (float corpus.Docs.Length / float df)) idfFloor
+    else max (log10 (float index.Documents.Count / float df)) idfFloor
 
-/// TF of a plain term in one doc.
-let private termFrequency (doc: Token[]) (term: string) : int =
-    doc |> Array.sumBy (fun token -> if token.Key = term then 1 else 0)
-
-let private documentFrequency (corpus: Corpus) (term: string) : int =
-    corpus.DocSets |> Array.sumBy (fun s -> if Set.contains term s then 1 else 0)
-
-/// A term's TF×IDF² contribution per doc, as one pass: returns the score
-/// array so IDF is computed once.
-let private termScores (corpus: Corpus) (term: string) : float[] =
-    let df = documentFrequency corpus term
-    let w = idf corpus df
-    corpus.Docs |> Array.map (fun doc -> float (termFrequency doc term) * w * w)
+let private termScores (index: Index<'id>) (term: string) : Map<'id, float> =
+    match Map.tryFind term index.Postings with
+    | None -> Map.empty
+    | Some rows ->
+        let weight = idf index rows.Count
+        rows |> Map.map (fun _ frequency -> float frequency * weight * weight)
 
 // ---------------------------------------------------------------------------
 // Natural language mode.
 // ---------------------------------------------------------------------------
 
 /// Distinct searchable terms of a natural-language query.
-let private queryTokens (corpus: Corpus) (query: string) =
+let private queryTokens (index: Index<'id>) (query: string) =
     rawTokens query
     |> Array.map (fun text ->
         { Text = text
-          Key = corpus.Collation.KeyOf text })
+          Key = index.Collation.KeyOf text })
 
-let private naturalTerms (corpus: Corpus) (query: string) : string[] =
-    queryTokens corpus query
+let private naturalTerms (index: Index<'id>) (query: string) : string[] =
+    queryTokens index query
     |> Array.filter isSearchable
     |> Array.map _.Key
     |> Array.distinct
@@ -144,19 +199,22 @@ let private naturalTerms (corpus: Corpus) (query: string) : string[] =
 /// Accumulates into one result array in place rather than mapping every term
 /// to its own row array first, so peak memory stays O(rows), not
 /// O(terms × rows) for a query with many distinct terms.
-let private sumTermScores (corpus: Corpus) (terms: string[]) : float[] =
-    let scores = Array.zeroCreate corpus.Docs.Length
+let private sumTermScores (index: Index<'id>) (terms: string[]) : Map<'id, float> =
+    terms
+    |> Array.fold
+        (fun scores term ->
+            termScores index term
+            |> Map.fold (fun scores id score -> Map.change id (Some << ((+) score) << Option.defaultValue 0.0) scores) scores)
+        Map.empty
 
-    for term in terms do
-        let ts = termScores corpus term
+let naturalScores (index: Index<'id>) (query: string) : Map<'id, float> =
+    sumTermScores index (naturalTerms index query)
 
-        for i in 0 .. scores.Length - 1 do
-            scores.[i] <- scores.[i] + ts.[i]
-
-    scores
+let private scoresInCorpusOrder (corpus: Corpus) (scores: Map<int, float>) =
+    corpus.Order |> Array.map (fun id -> scores |> Map.tryFind id |> Option.defaultValue 0.0)
 
 let naturalScoresOf (corpus: Corpus) (query: string) : float[] =
-    sumTermScores corpus (naturalTerms corpus query)
+    naturalScores corpus.Index query |> scoresInCorpusOrder corpus
 
 // ---------------------------------------------------------------------------
 // Boolean mode. Query grammar (recursive descent):
@@ -322,50 +380,80 @@ let private phraseCount (doc: Token[]) (words: Token[]) (proximity: int option) 
 /// `(matched, TF×IDF²)` per doc from raw per-doc frequencies — for terms
 /// with no single index token to count (prefix wildcards, phrases), whose
 /// df falls out of the frequencies themselves.
-let private scoresFromTfs (corpus: Corpus) (tfs: int[]) : (bool * float)[] =
-    let weight = idf corpus (tfs |> Array.sumBy (fun tf -> if tf > 0 then 1 else 0))
-    tfs |> Array.map (fun tf -> tf > 0, float tf * weight * weight)
+let private scoresFromTfs (index: Index<'id>) (tfs: Map<'id, int>) : Map<'id, bool * float> =
+    let weight = idf index tfs.Count
+    tfs |> Map.map (fun _ tf -> true, float tf * weight * weight)
+
+let private allDocuments (index: Index<'id>) (scores: Map<'id, bool * float>) =
+    index.Documents
+    |> Map.map (fun id _ -> scores |> Map.tryFind id |> Option.defaultValue (false, 0.0))
+
+let private phraseCandidates (index: Index<'id>) (words: Token[]) =
+    words
+    |> Array.map (fun word ->
+        index.Postings
+        |> Map.tryFind word.Key
+        |> Option.map (Map.keys >> Set.ofSeq)
+        |> Option.defaultValue Set.empty)
+    |> Array.sortBy _.Count
+    |> function
+        | [||] -> Set.empty
+        | sets -> sets |> Array.tail |> Array.fold Set.intersect sets.[0]
 
 /// Per-doc (matched, contribution) for one boolean term.
-let rec private evalTerm (corpus: Corpus) (term: BoolTerm) : (bool * float)[] =
+let rec private evalTerm (index: Index<'id>) (term: BoolTerm) : Map<'id, bool * float> =
     match term with
     | BWord(term, false) when not (isSearchable term) ->
         // Stopwords and sub-minimum tokens are never in InnoDB's index, so
         // a plain boolean term for one can't match anything — `+was`
         // excludes every row (oracle-verified). Phrases and proximity below
         // still see them: position data counts every token.
-        Array.create corpus.Docs.Length (false, 0.0)
+        Map.empty |> allDocuments index
     | BWord(term, false) ->
-        let ts = termScores corpus term.Key
-        ts |> Array.map (fun s -> s > 0.0, s)
+        termScores index term.Key
+        |> Map.map (fun _ score -> true, score)
+        |> allDocuments index
     | BWord(term, true) ->
         // Prefix wildcards bypass stopword and minimum-length rules.
-        corpus.Docs
-        |> Array.map (fun doc ->
-            doc
-            |> Array.sumBy (fun token ->
-                if corpus.Collation.IsPrefix token.Text term.Text then 1 else 0))
-        |> scoresFromTfs corpus
+        index.Vocabulary
+        |> Map.toSeq
+        |> Seq.choose (fun (key, text) -> if index.Collation.IsPrefix text term.Text then Map.tryFind key index.Postings else None)
+        |> Seq.fold
+            (fun frequencies posting ->
+                posting
+                |> Map.fold
+                    (fun frequencies id frequency ->
+                        Map.change id (fun current -> Some(frequency + Option.defaultValue 0 current)) frequencies)
+                    frequencies)
+            Map.empty
+        |> scoresFromTfs index
+        |> allDocuments index
     | BPhrase(words, proximity) ->
-        corpus.Docs |> Array.map (fun doc -> phraseCount doc words proximity) |> scoresFromTfs corpus
+        phraseCandidates index words
+        |> Seq.choose (fun id ->
+            let count = phraseCount index.Documents.[id] words proximity
+            if count = 0 then None else Some(id, count))
+        |> Map.ofSeq
+        |> scoresFromTfs index
+        |> allDocuments index
     | BGroup nodes ->
-        evalNodes corpus nodes
+        evalNodes index nodes
 
 /// Per-doc (matched, score) over a node list — the boolean combination:
 /// a doc is excluded (matched=false) when a `+` term misses or a `-` term
 /// hits; otherwise matched when anything matched, scoring the sum of the
 /// modifier-adjusted contributions.
-and private evalNodes (corpus: Corpus) (nodes: (BoolOp * BoolTerm) list) : (bool * float)[] =
-    let n = corpus.Docs.Length
-    let results = nodes |> List.map (fun (op, t) -> op, evalTerm corpus t)
+and private evalNodes (index: Index<'id>) (nodes: (BoolOp * BoolTerm) list) : Map<'id, bool * float> =
+    let results = nodes |> List.map (fun (op, term) -> op, evalTerm index term)
 
-    Array.init n (fun i ->
+    index.Documents
+    |> Map.map (fun id _ ->
         let mutable excluded = false
         let mutable anyMatch = false
         let mutable score = 0.0
 
         for op, r in results do
-            let matched, s = r.[i]
+            let matched, s = r.[id]
 
             match op with
             | Must ->
@@ -391,31 +479,39 @@ and private evalNodes (corpus: Corpus) (nodes: (BoolOp * BoolTerm) list) : (bool
 
         (anyMatch && not excluded), (if excluded then 0.0 else score))
 
+let booleanScores (index: Index<'id>) (query: string) : Map<'id, float> =
+    evalNodes index (parseBooleanQuery index.Collation query)
+    |> Map.fold
+        (fun scores id (matched, score) ->
+            if matched then Map.add id (if score = 0.0 then idfFloor * idfFloor else score) scores else scores)
+        Map.empty
+
 let booleanScoresOf (corpus: Corpus) (query: string) : float[] =
     // A matched row whose contributions all cancelled (only `~` terms hit,
     // or everywhere-present words at the floor) still has to read as a
     // match in a WHERE clause — the same epsilon rank the floor gives.
-    evalNodes corpus (parseBooleanQuery corpus.Collation query)
-    |> Array.map (fun (matched, score) -> if matched then (if score = 0.0 then idfFloor * idfFloor else score) else 0.0)
+    booleanScores corpus.Index query |> scoresInCorpusOrder corpus
 
 // ---------------------------------------------------------------------------
 // Query expansion: NL pass, expand the query with every searchable token of
 // the top-ranked docs, NL pass again (blind relevance feedback).
 // ---------------------------------------------------------------------------
 
-let expansionScoresOf (corpus: Corpus) (query: string) : float[] =
-    let firstPass = naturalScoresOf corpus query
+let expansionScores (index: Index<'id>) (query: string) : Map<'id, float> =
+    let firstPass = naturalScores index query
 
     let seedTerms =
         firstPass
-        |> Array.mapi (fun i s -> i, s)
-        |> Array.filter (fun (_, s) -> s > 0.0)
+        |> Map.toArray
         |> Array.sortByDescending snd
         |> Array.truncate queryExpansionLimit
-        |> Array.collect (fun (i, _) -> corpus.Docs.[i])
+        |> Array.collect (fun (id, _) -> index.Documents.[id])
         |> Array.filter isSearchable
         |> Array.map _.Key
 
-    Array.append (naturalTerms corpus query) seedTerms
+    Array.append (naturalTerms index query) seedTerms
     |> Array.distinct
-    |> sumTermScores corpus
+    |> sumTermScores index
+
+let expansionScoresOf (corpus: Corpus) (query: string) : float[] =
+    expansionScores corpus.Index query |> scoresInCorpusOrder corpus
