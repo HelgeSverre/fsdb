@@ -12,6 +12,7 @@ open System.Text.RegularExpressions
 open Fsdb.Ast
 open Fsdb.Value
 open Fsdb.Storage
+open Fsdb.Engine
 
 let private col (name: string) (ty: ColumnType) : ColumnDef =
     { Name = name
@@ -42,13 +43,13 @@ let private allTables (catalog: Catalog) : (string * Table) list =
 /// because it owns view-definition parsing and expression type inference.
 type ViewColumns = string -> string -> ColumnDef list option
 
-let private viewCatalogEntries (catalog: Catalog) : ViewCatalogEntry list =
+let private viewCatalogEntries (catalog: Catalog) : SystemCatalog.View.Entry list =
     catalog
     |> Map.tryFind "mysql"
     |> Option.bind (Map.tryFind "views")
     |> Option.map (fun table ->
         table.RowsArray
-        |> Seq.choose tryViewCatalogEntry
+        |> Seq.choose SystemCatalog.View.tryRead
         |> List.ofSeq)
     |> Option.defaultValue []
 
@@ -1092,13 +1093,13 @@ let private triggersColumns =
       strCol "COLLATION_CONNECTION"
       strCol "DATABASE_COLLATION" ]
 
-let private triggerCatalogRows (catalog: Catalog) : TriggerCatalogEntry list =
+let private triggerCatalogRows (catalog: Catalog) : SystemCatalog.Trigger.Entry list =
     catalog
     |> Map.tryFind "mysql"
     |> Option.bind (Map.tryFind "triggers")
     |> Option.map (fun t ->
         t.RowsArray
-        |> Seq.choose tryTriggerCatalogEntry
+        |> Seq.choose SystemCatalog.Trigger.tryRead
         |> List.ofSeq)
     |> Option.defaultValue []
 
@@ -1108,7 +1109,7 @@ let private triggerCatalogRows (catalog: Catalog) : TriggerCatalogEntry list =
 // is per-trigger and comes from the catalog row.
 let private triggerSqlMode = "STRICT_TRANS_TABLES,NO_ENGINE_SUBSTITUTION"
 
-let private triggerCreatedText (trigger: TriggerCatalogEntry) =
+let private triggerCreatedText (trigger: SystemCatalog.Trigger.Entry) =
     trigger.Created
     |> Option.bind (VDateTime >> Value.toTextFsp 2)
     |> Option.defaultValue ""

@@ -6,6 +6,7 @@ open Fsdb.Ast
 open Fsdb.Value
 open Fsdb.Storage
 open Fsdb.Temporal
+open Fsdb.Engine
 
 let private col name ty nullable =
     { Name = name
@@ -41,6 +42,48 @@ let tests =
     testList
         "storage"
         [ testList
+              "system catalog rows"
+              [ testCase "typed trigger updates preserve legacy rows"
+                <| fun _ ->
+                    let legacy =
+                        [| VString "audit"
+                           VString "app"
+                           VString "users"
+                           VString "AFTER"
+                           VString "INSERT"
+                           VString "SET @seen = 1" |]
+
+                    let updated = legacy |> SystemCatalog.Trigger.withActionOrder 4L
+
+                    match SystemCatalog.Trigger.tryRead updated with
+                    | Some trigger ->
+                        Expect.equal trigger.Name "audit" "name"
+                        Expect.equal trigger.Table "users" "table"
+                        Expect.equal trigger.Order 4L "order"
+                    | None -> failtest "expected trigger row"
+
+                testCase "typed check rows reject missing required fields"
+                <| fun _ ->
+                    Expect.isNone (SystemCatalog.Check.tryRead [| VString "incomplete" |]) "incomplete row"
+
+                    let row =
+                        [| VString "positive"
+                           VString "app"
+                           VString "items"
+                           VString "amount > 0"
+                           VString "YES"
+                           VNull
+                           VString "NO"
+                           VInt 2L |]
+
+                    match SystemCatalog.Check.tryRead row with
+                    | Some check ->
+                        Expect.equal check.Name "positive" "name"
+                        Expect.isTrue check.Enforced "enforced"
+                        Expect.equal check.Ordinal 2 "ordinal"
+                    | None -> failtest "expected check row" ]
+
+          testList
               "createTable / dropTable / truncate"
               [ testCase "createTable then scan sees the table with no rows"
                 <| fun _ ->

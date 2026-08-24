@@ -13,6 +13,7 @@ open Fsdb.Value
 open Fsdb.Storage
 open Fsdb.Functions
 open Fsdb.Sql
+open Fsdb.Engine
 
 /// Mirrors the wire layer's text-resultset shape (columns as names, rows as
 /// text-protocol option strings) so `QueryHandler` can hand a parsed
@@ -148,13 +149,7 @@ type private StoredTrigger =
       Definer: string
       Order: int64 }
 
-type private StoredCheck =
-    { Name: string
-      Clause: string
-      Enforced: bool
-      Column: string option
-      GeneratedName: bool
-      Ordinal: int }
+type private StoredCheck = SystemCatalog.Check.Entry
 
 type private ViewColumnDescriptor =
     { Column: ColumnDef
@@ -204,7 +199,7 @@ let private tryStoredView (store: Store) (dbName: string) (viewName: string) : S
     | Error _ -> None
     | Ok(_, rows) ->
         rows
-        |> Seq.choose Storage.tryViewCatalogEntry
+        |> Seq.choose SystemCatalog.View.tryRead
         |> Seq.tryFind (fun view -> eqI view.Name viewName && eqI view.Schema dbName)
         |> Option.map (fun view ->
             { Name = view.Name
@@ -215,28 +210,14 @@ let private tryStoredView (store: Store) (dbName: string) (viewName: string) : S
               CheckOption = view.CheckOption })
 
 let private storedChecks (store: Store) (dbName: string) (tableName: string) : StoredCheck list =
-    let text i (row: Value[]) = toText row.[i] |> Option.defaultValue ""
     let eqI left right = System.String.Equals(left, right, System.StringComparison.OrdinalIgnoreCase)
 
     match scan store "mysql" "check_constraints" with
     | Error _ -> []
     | Ok(_, rows) ->
         rows
-        |> Seq.filter (fun row -> eqI (text 1 row) dbName && eqI (text 2 row) tableName)
-        |> Seq.map (fun row ->
-            { Name = text 0 row
-              Clause = text 3 row
-              Enforced = eqI (text 4 row) "YES"
-              Column = if row.Length > 5 then toText row.[5] else None
-              GeneratedName = row.Length > 6 && eqI (text 6 row) "YES"
-              Ordinal =
-                if row.Length > 7 then
-                    match row.[7] with
-                    | VInt ordinal -> int ordinal
-                    | VUInt ordinal -> int ordinal
-                    | value -> value |> toDouble |> int
-                else
-                    1 })
+        |> Seq.choose SystemCatalog.Check.tryRead
+        |> Seq.filter (fun check -> eqI check.Schema dbName && eqI check.Table tableName)
         |> Seq.sortBy _.Ordinal
         |> List.ofSeq
 
@@ -9684,7 +9665,8 @@ let private allStoredCheckRows (store: Store) : Value[] list =
     | Ok(_, rows) -> List.ofSeq rows
     | Error _ -> []
 
-let private checkText index (row: Value[]) = toText row.[index] |> Option.defaultValue ""
+let private checkRowSatisfies predicate row =
+    row |> SystemCatalog.Check.tryRead |> Option.exists predicate
 
 let private storeCheckDefinitions
     (store: Store)
@@ -9697,9 +9679,10 @@ let private storeCheckDefinitions
     let equal left right = System.String.Equals(left, right, System.StringComparison.OrdinalIgnoreCase)
     let existing =
         allStoredCheckRows store
-        |> List.filter (fun row -> System.String.Equals(checkText 1 row, dbName, System.StringComparison.OrdinalIgnoreCase))
+        |> List.choose SystemCatalog.Check.tryRead
+        |> List.filter (fun check -> equal check.Schema dbName)
 
-    let usedNames = existing |> List.map (checkText 0) |> List.map _.ToLowerInvariant() |> Set.ofList
+    let usedNames = existing |> List.map _.Name |> List.map _.ToLowerInvariant() |> Set.ofList
     let existingOrdinals = storedChecks store dbName tableName |> List.map _.Ordinal
     let mutable nextOrdinal = (if existingOrdinals.IsEmpty then 0 else List.max existingOrdinals) + 1
     let mutable generatedIndex = 1
@@ -9755,10 +9738,12 @@ let private storeCheckDefinitions
 
 let private removeStoredChecks (store: Store) (dbName: string) (tableName: string) : Result<int, StorageError> =
     deleteRows store "mysql" "check_constraints" (fun row ->
-        Ok(
-            System.String.Equals(checkText 1 row, dbName, System.StringComparison.OrdinalIgnoreCase)
-            && System.String.Equals(checkText 2 row, tableName, System.StringComparison.OrdinalIgnoreCase)
-        ))
+        row
+        |> SystemCatalog.Check.tryRead
+        |> Option.exists (fun check ->
+            System.String.Equals(check.Schema, dbName, System.StringComparison.OrdinalIgnoreCase)
+            && System.String.Equals(check.Table, tableName, System.StringComparison.OrdinalIgnoreCase))
+        |> Ok)
 
 let private validateCheckForeignKeys
     (store: Store)
@@ -9828,7 +9813,13 @@ let private err1442 (table: string) : QueryResult =
             table
     )
 
-let private isTriggerSlot (db: string) (table: string) (timing: string) (event: string) (trigger: TriggerCatalogEntry) =
+let private isTriggerSlot
+    (db: string)
+    (table: string)
+    (timing: string)
+    (event: string)
+    (trigger: SystemCatalog.Trigger.Entry)
+    =
     let equals left right = System.String.Equals(left, right, System.StringComparison.OrdinalIgnoreCase)
 
     equals trigger.Schema db
@@ -9838,7 +9829,7 @@ let private isTriggerSlot (db: string) (table: string) (timing: string) (event: 
 
 let private sameTriggerSlot db table timing event row =
     row
-    |> Storage.tryTriggerCatalogEntry
+    |> SystemCatalog.Trigger.tryRead
     |> Option.exists (isTriggerSlot db table timing event)
 
 let private triggersFor
@@ -9852,7 +9843,7 @@ let private triggersFor
     | Error _ -> []
     | Ok(_, rows) ->
         rows
-        |> Seq.choose Storage.tryTriggerCatalogEntry
+        |> Seq.choose SystemCatalog.Trigger.tryRead
         |> Seq.filter (isTriggerSlot db table timing event)
         |> Seq.map (fun trigger ->
             { Name = trigger.Name
@@ -10105,15 +10096,15 @@ let private storeTriggerDefinition
 
         let duplicateName =
             existing
-            |> Seq.choose Storage.tryTriggerCatalogEntry
+            |> Seq.choose SystemCatalog.Trigger.tryRead
             |> Seq.exists (fun trigger -> equals trigger.Schema db && equals trigger.Name name)
 
         let sameSlot = isTriggerSlot db table timing event
-        let sameSlotRow row = row |> Storage.tryTriggerCatalogEntry |> Option.exists sameSlot
+        let sameSlotRow row = row |> SystemCatalog.Trigger.tryRead |> Option.exists sameSlot
 
         let peers =
             existing
-            |> Seq.choose (fun row -> Storage.tryTriggerCatalogEntry row |> Option.map (fun trigger -> row, trigger))
+            |> Seq.choose (fun row -> SystemCatalog.Trigger.tryRead row |> Option.map (fun trigger -> row, trigger))
             |> Seq.filter (snd >> sameSlot)
             |> List.ofSeq
 
@@ -10159,11 +10150,11 @@ let private storeTriggerDefinition
                     "mysql"
                     "triggers"
                     None
-                    (fun row -> Ok(sameSlotRow row && Storage.triggerActionOrder row >= insertionOrder))
+                    (fun row -> Ok(sameSlotRow row && SystemCatalog.Trigger.actionOrder row >= insertionOrder))
                     (fun row ->
-                        let updated = Array.copy row
-                        updated.[8] <- VInt(Storage.triggerActionOrder row + 1L)
-                        Ok updated)
+                        row
+                        |> SystemCatalog.Trigger.withActionOrder (SystemCatalog.Trigger.actionOrder row + 1L)
+                        |> Ok)
                 |> Result.bind (fun _ ->
                     insertRows
                         snapshot
@@ -10769,7 +10760,7 @@ let rec executeAs
 
                 let removeAutomatic (check: StoredCheck) =
                     deleteRows snapshot "mysql" "check_constraints" (fun row ->
-                        Ok(equal (checkText 1 row) db && equal (checkText 2 row) table && equal (checkText 0 row) check.Name))
+                        Ok(checkRowSatisfies (fun entry -> equal entry.Schema db && equal entry.Table table && equal entry.Name check.Name) row))
                     |> Result.map ignore
 
                 let checkAction action =
@@ -10807,7 +10798,7 @@ let rec executeAs
                     |> Set.toList
                     |> traverse (fun name ->
                         deleteRows snapshot "mysql" "check_constraints" (fun row ->
-                            Ok(equal (checkText 1 row) db && equal (checkText 2 row) table && equal (checkText 0 row) name))
+                            Ok(checkRowSatisfies (fun entry -> equal entry.Schema db && equal entry.Table table && equal entry.Name name) row))
                         |> Result.map ignore)
                     |> Result.map ignore
 
@@ -10833,23 +10824,21 @@ let rec executeAs
                             "mysql"
                             "check_constraints"
                             None
-                            (fun row -> Ok(equal (checkText 1 row) db && equal (checkText 2 row) table))
+                            (fun row -> Ok(checkRowSatisfies (fun entry -> equal entry.Schema db && equal entry.Table table) row))
                             (fun row ->
-                                let updated = Array.copy row
-                                updated.[2] <- VString finalTable
+                                let updated = SystemCatalog.Check.withTable finalTable row
 
-                                if equal (checkText 6 row) "YES" then
-                                    let constraintName = checkText 0 row
+                                match SystemCatalog.Check.tryRead row with
+                                | Some check when check.GeneratedName ->
                                     let oldKey = normalizeTableName table
                                     let suffix =
-                                        if constraintName.StartsWith(oldKey + "_chk_", System.StringComparison.OrdinalIgnoreCase) then
-                                            constraintName.Substring(oldKey.Length)
+                                        if check.Name.StartsWith(oldKey + "_chk_", System.StringComparison.OrdinalIgnoreCase) then
+                                            check.Name.Substring(oldKey.Length)
                                         else
                                             "_chk_1"
 
-                                    updated.[0] <- VString(finalTable + suffix)
-
-                                Ok updated)
+                                    updated |> SystemCatalog.Check.withName (finalTable + suffix) |> Ok
+                                | _ -> Ok updated)
                         |> Result.map ignore
 
                     let retargetTriggers =
@@ -10858,11 +10847,16 @@ let rec executeAs
                             "mysql"
                             "triggers"
                             None
-                            (fun row -> Ok(equal (checkText 1 row) db && equal (checkText 2 row) (normalizeTableName table)))
                             (fun row ->
-                                let updated = Array.copy row
-                                updated.[2] <- VString(normalizeTableName finalTable)
-                                Ok updated)
+                                row
+                                |> SystemCatalog.Trigger.tryRead
+                                |> Option.exists (fun trigger ->
+                                    equal trigger.Schema db && equal trigger.Table (normalizeTableName table))
+                                |> Ok)
+                            (fun row ->
+                                row
+                                |> SystemCatalog.Trigger.withTable (normalizeTableName finalTable)
+                                |> Ok)
                         |> Result.map ignore
 
                     retargetChecks |> Result.bind (fun () -> retargetTriggers)
@@ -10897,7 +10891,7 @@ let rec executeAs
                     |> Result.bind (fun () -> if definition.Enforced then validateRows columns else Ok())
                 | DropCheck name ->
                     deleteRows snapshot "mysql" "check_constraints" (fun row ->
-                        Ok(equal (checkText 1 row) db && equal (checkText 2 row) finalTable && equal (checkText 0 row) name))
+                        Ok(checkRowSatisfies (fun entry -> equal entry.Schema db && equal entry.Table finalTable && equal entry.Name name) row))
                     |> Result.bind (fun removed ->
                         if removed = 0 && not (originalCheckNames.Contains(name.ToLowerInvariant())) then
                             Error(ExpressionError(1091, sprintf "Can't DROP '%s'; check that column/key exists" name))
@@ -10909,11 +10903,9 @@ let rec executeAs
                         "mysql"
                         "check_constraints"
                         None
-                        (fun row -> Ok(equal (checkText 1 row) db && equal (checkText 2 row) finalTable && equal (checkText 0 row) name))
                         (fun row ->
-                            let updated = Array.copy row
-                            updated.[4] <- VString(if enforced then "YES" else "NO")
-                            Ok updated)
+                            Ok(checkRowSatisfies (fun entry -> equal entry.Schema db && equal entry.Table finalTable && equal entry.Name name) row))
+                        (SystemCatalog.Check.withEnforced enforced >> Ok)
                     |> Result.bind (fun changed ->
                         if changed = 0 && not (storedChecks snapshot db finalTable |> List.exists (fun check -> equal check.Name name)) then
                             Error(ExpressionError(1091, sprintf "Check constraint '%s' is not found." name))
@@ -10974,22 +10966,25 @@ let rec executeAs
                     |> List.map (fun (oldName, newName) -> normalizeTableName oldName, normalizeTableName newName)
                     |> Map.ofList
 
-                let text i (row: Value[]) = toText row.[i] |> Option.defaultValue ""
-
                 updateRows
                     snapshot
                     "mysql"
                     "triggers"
                     None
                     (fun row ->
-                        Ok(
-                            System.String.Equals(text 1 row, db, System.StringComparison.OrdinalIgnoreCase)
-                            && Map.containsKey (normalizeTableName (text 2 row)) renames
-                        ))
+                        row
+                        |> SystemCatalog.Trigger.tryRead
+                        |> Option.exists (fun trigger ->
+                            System.String.Equals(trigger.Schema, db, System.StringComparison.OrdinalIgnoreCase)
+                            && Map.containsKey (normalizeTableName trigger.Table) renames)
+                        |> Ok)
                     (fun row ->
-                        let updated = Array.copy row
-                        updated.[2] <- VString(Map.find (normalizeTableName (text 2 row)) renames)
-                        Ok updated)
+                        match SystemCatalog.Trigger.tryRead row with
+                        | Some trigger ->
+                            row
+                            |> SystemCatalog.Trigger.withTable (Map.find (normalizeTableName trigger.Table) renames)
+                            |> Ok
+                        | None -> Ok row)
                 |> Result.map ignore
 
             let retargetChecks (db, dbPairs) =
@@ -11005,26 +11000,30 @@ let rec executeAs
                     None
                     (fun row ->
                         Ok(
-                            System.String.Equals(checkText 1 row, db, System.StringComparison.OrdinalIgnoreCase)
-                            && Map.containsKey (normalizeTableName (checkText 2 row)) renames
+                            checkRowSatisfies
+                                (fun check ->
+                                    System.String.Equals(check.Schema, db, System.StringComparison.OrdinalIgnoreCase)
+                                    && Map.containsKey (normalizeTableName check.Table) renames)
+                                row
                         ))
                     (fun row ->
-                        let updated = Array.copy row
-                        let oldName = normalizeTableName (checkText 2 row)
-                        let newName = Map.find oldName renames
-                        updated.[2] <- VString newName
+                        match SystemCatalog.Check.tryRead row with
+                        | Some check ->
+                            let oldName = normalizeTableName check.Table
+                            let newName = Map.find oldName renames
+                            let updated = SystemCatalog.Check.withTable newName row
 
-                        if System.String.Equals(checkText 6 row, "YES", System.StringComparison.OrdinalIgnoreCase) then
-                            let constraintName = checkText 0 row
-                            let suffix =
-                                if constraintName.StartsWith(oldName + "_chk_", System.StringComparison.OrdinalIgnoreCase) then
-                                    constraintName.Substring(oldName.Length)
-                                else
-                                    "_chk_1"
+                            if check.GeneratedName then
+                                let suffix =
+                                    if check.Name.StartsWith(oldName + "_chk_", System.StringComparison.OrdinalIgnoreCase) then
+                                        check.Name.Substring(oldName.Length)
+                                    else
+                                        "_chk_1"
 
-                            updated.[0] <- VString(newName + suffix)
-
-                        Ok updated)
+                                updated |> SystemCatalog.Check.withName (newName + suffix) |> Ok
+                            else
+                                Ok updated
+                        | None -> Ok row)
                 |> Result.map ignore
 
             match groups |> traverse retargetTriggers |> Result.bind (fun _ -> groups |> traverse retargetChecks) with
@@ -11219,15 +11218,15 @@ let rec executeAs
 
     | DropTrigger(name, ifExists) ->
         let equals left right = System.String.Equals(left, right, System.StringComparison.OrdinalIgnoreCase)
-        let matchesTrigger (trigger: TriggerCatalogEntry) = equals trigger.Name name && equals trigger.Schema dbName
-        let matchesRow row = row |> Storage.tryTriggerCatalogEntry |> Option.exists matchesTrigger
+        let matchesTrigger (trigger: SystemCatalog.Trigger.Entry) = equals trigger.Name name && equals trigger.Schema dbName
+        let matchesRow row = row |> SystemCatalog.Trigger.tryRead |> Option.exists matchesTrigger
 
         match scan store "mysql" "triggers" with
         | Error error -> ids, storageErr error
         | Ok(_, rows) ->
             match
                 rows
-                |> Seq.choose (fun row -> Storage.tryTriggerCatalogEntry row |> Option.map (fun trigger -> row, trigger))
+                |> Seq.choose (fun row -> SystemCatalog.Trigger.tryRead row |> Option.map (fun trigger -> row, trigger))
                 |> Seq.tryFind (snd >> matchesTrigger)
             with
             | None when ifExists -> ids, Affected 0UL
@@ -11246,11 +11245,11 @@ let rec executeAs
                             "mysql"
                             "triggers"
                             None
-                            (fun row -> Ok(sameSlot row && Storage.triggerActionOrder row > targetOrder))
+                            (fun row -> Ok(sameSlot row && SystemCatalog.Trigger.actionOrder row > targetOrder))
                             (fun row ->
-                                let updated = Array.copy row
-                                updated.[8] <- VInt(Storage.triggerActionOrder row - 1L)
-                                Ok updated))
+                                row
+                                |> SystemCatalog.Trigger.withActionOrder (SystemCatalog.Trigger.actionOrder row - 1L)
+                                |> Ok))
 
                 match changed with
                 | Error error -> ids, storageErr error

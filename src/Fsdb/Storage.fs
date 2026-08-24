@@ -1943,44 +1943,6 @@ let mysqlTriggersColumns: ColumnDef list =
       sysCol "definer" (TChar 93) false (Some(VString ""))
       sysCol "action_order" (TInt false) false (Some(VInt 1L)) ]
 
-type internal TriggerCatalogEntry =
-    { Name: string
-      Schema: string
-      Table: string
-      Timing: string
-      Event: string
-      Body: string
-      Created: DateTime option
-      Definer: string
-      Order: int64 }
-
-let private catalogTextAt index (row: Value[]) =
-    row |> Array.tryItem index |> Option.bind Value.toText |> Option.defaultValue ""
-
-let private catalogDateTimeAt index (row: Value[]) =
-    row |> Array.tryItem index |> Option.bind (function VDateTime value -> Some value | _ -> None)
-
-let triggerActionOrder (row: Value[]) =
-    match row |> Array.tryItem 8 with
-    | Some(VInt value) -> value
-    | Some(VUInt value) when value <= uint64 System.Int64.MaxValue -> int64 value
-    | _ -> 1L
-
-let internal tryTriggerCatalogEntry (row: Value[]) : TriggerCatalogEntry option =
-    if row.Length < 6 then
-        None
-    else
-        Some
-            { Name = catalogTextAt 0 row
-              Schema = catalogTextAt 1 row
-              Table = catalogTextAt 2 row
-              Timing = catalogTextAt 3 row
-              Event = catalogTextAt 4 row
-              Body = catalogTextAt 5 row
-              Created = catalogDateTimeAt 6 row
-              Definer = catalogTextAt 7 row
-              Order = triggerActionOrder row }
-
 /// `mysql.views` — fsdb's row-backed view catalog. Definitions are stored as
 /// SQL text and resolved through the ordinary SELECT executor, so the rows
 /// ride WAL/snapshot persistence without a separate object codec.
@@ -1992,28 +1954,6 @@ let mysqlViewsColumns: ColumnDef list =
       sysCol "created" (TDateTime 2) true None
       sysCol "definer" (TChar 93) false (Some(VString ""))
       sysCol "check_option" (TChar 8) false (Some(VString "NONE")) ]
-
-type internal ViewCatalogEntry =
-    { Name: string
-      Schema: string
-      Definition: string
-      ColumnNames: string
-      Created: DateTime option
-      Definer: string
-      CheckOption: string }
-
-let internal tryViewCatalogEntry (row: Value[]) : ViewCatalogEntry option =
-    if row.Length < 5 then
-        None
-    else
-        Some
-            { Name = catalogTextAt 0 row
-              Schema = catalogTextAt 1 row
-              Definition = catalogTextAt 2 row
-              ColumnNames = catalogTextAt 3 row
-              Created = catalogDateTimeAt 4 row
-              Definer = catalogTextAt 5 row
-              CheckOption = row |> Array.tryItem 6 |> Option.bind Value.toText |> Option.defaultValue "NONE" }
 
 /// Row-backed CHECK definitions. Keeping these beside views/triggers avoids
 /// changing the binary Table snapshot layout: ordinary row WAL events carry

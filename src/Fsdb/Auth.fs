@@ -13,6 +13,7 @@ open System.Security.Cryptography
 open Fsdb.Ast
 open Fsdb.Value
 open Fsdb.Storage
+open Fsdb.Engine
 
 let private sha1 (bytes: byte[]) : byte[] = SHA1.HashData bytes
 
@@ -886,12 +887,13 @@ let requiredPrivilegesInStore (store: Store) (defaultDb: string) (stmt: Statemen
         | Ok(_, rows) ->
             rows
             |> List.tryPick (fun row ->
-                let text i = row.[i] |> Value.toText |> Option.defaultValue ""
-
-                if eqI (text 0) name && eqI (text 1) defaultDb then
-                    Some [ "TRIGGER", OnTable(text 1, text 2) ]
-                else
-                    None)
+                row
+                |> SystemCatalog.Trigger.tryRead
+                |> Option.bind (fun trigger ->
+                    if eqI trigger.Name name && eqI trigger.Schema defaultDb then
+                        Some [ "TRIGGER", OnTable(trigger.Schema, trigger.Table) ]
+                    else
+                        None))
             |> Option.defaultValue []
         | Error _ -> []
     | _ -> requiredPrivileges defaultDb stmt
