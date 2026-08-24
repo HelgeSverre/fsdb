@@ -76,6 +76,9 @@ let tests =
               let matched = s |> Array.mapi (fun i v -> i + 1, v > 0.0) |> Array.filter snd |> Array.map fst
               Expect.equal matched [| 1; 2; 3; 4; 6 |] "YourSQL row excluded"
 
+              let excludedOnly = booleanScoresOf corpus "-YourSQL"
+              Expect.isTrue (excludedOnly |> Array.forall ((=) 0.0)) "an exclusion without a positive term matches nothing"
+
           testCase "boolean: > adds 1.0 and < subtracts 1.0 from a matched term's contribution"
           <| fun _ ->
               let s = booleanScoresOf corpus ">tutorial <security MySQL"

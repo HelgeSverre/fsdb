@@ -387,10 +387,6 @@ let private scoresFromTfs (index: Index<'id>) (tfs: Map<'id, int>) : Map<'id, bo
     let weight = idf index tfs.Count
     tfs |> Map.map (fun _ tf -> true, float tf * weight * weight)
 
-let private allDocuments (index: Index<'id>) (scores: Map<'id, bool * float>) =
-    index.Documents
-    |> Map.map (fun id _ -> scores |> Map.tryFind id |> Option.defaultValue (false, 0.0))
-
 let private phraseCandidates (index: Index<'id>) (words: Token[]) =
     words
     |> Array.map (fun word ->
@@ -411,11 +407,10 @@ let rec private evalTerm (index: Index<'id>) (term: BoolTerm) : Map<'id, bool * 
         // a plain boolean term for one can't match anything — `+was`
         // excludes every row (oracle-verified). Phrases and proximity below
         // still see them: position data counts every token.
-        Map.empty |> allDocuments index
+        Map.empty
     | BWord(term, false) ->
         termScores index term.Key
         |> Map.map (fun _ score -> true, score)
-        |> allDocuments index
     | BWord(term, true) ->
         // Prefix wildcards bypass stopword and minimum-length rules.
         index.Vocabulary
@@ -430,7 +425,6 @@ let rec private evalTerm (index: Index<'id>) (term: BoolTerm) : Map<'id, bool * 
                     frequencies)
             Map.empty
         |> scoresFromTfs index
-        |> allDocuments index
     | BPhrase(words, proximity) ->
         phraseCandidates index words
         |> Seq.choose (fun id ->
@@ -438,7 +432,6 @@ let rec private evalTerm (index: Index<'id>) (term: BoolTerm) : Map<'id, bool * 
             if count = 0 then None else Some(id, count))
         |> Map.ofSeq
         |> scoresFromTfs index
-        |> allDocuments index
     | BGroup nodes ->
         evalNodes index nodes
 
@@ -449,14 +442,21 @@ let rec private evalTerm (index: Index<'id>) (term: BoolTerm) : Map<'id, bool * 
 and private evalNodes (index: Index<'id>) (nodes: (BoolOp * BoolTerm) list) : Map<'id, bool * float> =
     let results = nodes |> List.map (fun (op, term) -> op, evalTerm index term)
 
-    index.Documents
-    |> Map.map (fun id _ ->
+    let candidates =
+        results
+        |> List.fold
+            (fun candidates (_, scores) ->
+                scores |> Map.fold (fun candidates id _ -> Set.add id candidates) candidates)
+            Set.empty
+
+    candidates
+    |> Seq.choose (fun id ->
         let mutable excluded = false
         let mutable anyMatch = false
         let mutable score = 0.0
 
         for op, r in results do
-            let matched, s = r.[id]
+            let matched, s = r |> Map.tryFind id |> Option.defaultValue (false, 0.0)
 
             match op with
             | Must ->
@@ -480,7 +480,8 @@ and private evalNodes (index: Index<'id>) (nodes: (BoolOp * BoolTerm) list) : Ma
                     score <- score + s - 1.0
             | Soft -> if matched then anyMatch <- true
 
-        (anyMatch && not excluded), (if excluded then 0.0 else score))
+        if anyMatch && not excluded then Some(id, (true, score)) else None)
+    |> Map.ofSeq
 
 let booleanScores (index: Index<'id>) (query: string) : Map<'id, float> =
     evalNodes index (parseBooleanQuery index.Collation query)
