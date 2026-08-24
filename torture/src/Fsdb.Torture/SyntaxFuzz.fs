@@ -28,6 +28,8 @@ module SyntaxFuzz =
            "geometry_relation", "SELECT ST_Contains(ST_GeomFromText('POLYGON((0 0,4 0,4 4,0 4,0 0))'), ST_PointFromText('POINT(2 2)'))"
            "regexp_collation", "SELECT REGEXP_LIKE(_utf8mb4'Ångström' COLLATE utf8mb4_0900_as_ci, '^ångström$')"
            "regexp_replace", "SELECT REGEXP_REPLACE('a😀b', '(?=(.))', '$1', 1, 0, 'n')"
+           "fulltext_match",
+           "SELECT id, MATCH(title, body) AGAINST ('+database +security' IN BOOLEAN MODE) AS relevance FROM syntax_fulltext WHERE MATCH(body, title) AGAINST ('database') ORDER BY relevance DESC, id"
            "collation_symmetric", "SELECT ci = bin, bin = ci, ci < bin, bin > ci, ci LIKE bin FROM syntax_collation"
            "collation_row", "SELECT (ci, 1) = (bin, 1), (bin, 1) IN ((ci, 1), ('z', 2)) FROM syntax_collation"
            "collation_quantified",
@@ -69,6 +71,8 @@ module SyntaxFuzz =
            "INSERT INTO syntax_collation VALUES (1, 'A', 'a', 'A', 'a')"
            "CREATE TABLE syntax_trigger_target (id INT PRIMARY KEY, n INT)"
            "CREATE TABLE syntax_log (n INT)"
+           "CREATE TABLE syntax_fulltext (id INT PRIMARY KEY, title VARCHAR(100), body TEXT, FULLTEXT(title, body))"
+           "INSERT INTO syntax_fulltext VALUES (1, 'Database tutorial', 'Database security guide'), (2, 'Other notes', 'Unrelated material')"
            "CREATE TRIGGER syntax_first BEFORE INSERT ON syntax_trigger_target FOR EACH ROW SET NEW.n = NEW.n + 1" |]
 
     let private cleanupStatement feature suffix =

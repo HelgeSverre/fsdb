@@ -499,7 +499,8 @@ let tests =
                           CreateTime = DateTime.UtcNow
                           UniqueIndex = Map.empty
                           SecondaryIndex = Map.empty
-                          SecondaryOrder = Map.empty }
+                          SecondaryOrder = Map.empty
+                          FullTextIndexes = Map.empty }
 
                     store.Catalog <- Map.ofList [ defaultDatabase, Map.ofList [ "items", table ] ]
                     Expect.isEmpty (Invariants.validate store) "valid store"
@@ -519,7 +520,8 @@ let tests =
                           CreateTime = DateTime.UtcNow
                           UniqueIndex = Map.empty
                           SecondaryIndex = Map.empty
-                          SecondaryOrder = Map.empty }
+                          SecondaryOrder = Map.empty
+                          FullTextIndexes = Map.empty }
 
                     store.Catalog <- Map.ofList [ defaultDatabase, Map.ofList [ "items", table ] ]
                     let errors = Invariants.validate store
