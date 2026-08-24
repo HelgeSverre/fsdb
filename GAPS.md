@@ -116,7 +116,7 @@ identities for bit aggregates.
 | Multi-table UPDATE/DELETE sources | derived tables allowed as join sources | `Executor.applyMutationJoin` accepts real base tables only → 1064 | low | refusal |
 | MATCH…AGAINST placement | evaluates in UPDATE/DELETE WHERE, joins, subqueries | the `Executor` full-text pre-pass supports single-table SELECT only; other placements return 1191 | medium | refusal |
 | RANGE window frames | `RANGE BETWEEN INTERVAL n DAY PRECEDING…` | `Executor.validateFrame` refuses temporal offsets with 1235; numeric offsets only | low | refusal |
-| sql_mode | ~20 mode bits with semantic effect | strictness plus NO_ZERO_DATE/NO_ZERO_IN_DATE have effect; ONLY_FULL_GROUP_BY remains absent (a bare column picks the first row of its group) | medium | divergence |
+| sql_mode | ~20 mode bits with semantic effect | strictness plus NO_ZERO_DATE/NO_ZERO_IN_DATE have effect; ONLY_FULL_GROUP_BY remains absent (a bare column picks the first row of its group), and IGNORE_SPACE does not relax whitespace-sensitive function calls | medium | divergence |
 
 ## 3. Built-in functions
 
