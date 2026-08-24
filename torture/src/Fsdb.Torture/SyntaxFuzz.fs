@@ -198,7 +198,14 @@ module SyntaxFuzz =
                               Passed = passed classification }
 
                     let cases = records.ToArray()
-                    let firstFailure = cases |> Array.tryFind (fun record -> not record.Passed)
+
+                    let firstFailure =
+                        cases
+                        |> Array.tryFind (fun record ->
+                            record.Classification = "infrastructure"
+                            || record.Classification = "oracle_baseline_rejected")
+                        |> Option.orElseWith (fun () -> cases |> Array.tryFind (fun record -> not record.Passed))
+
                     let classification = firstFailure |> Option.map _.Classification |> Option.defaultValue "pass"
                     let classificationDetail = firstFailure |> Option.map _.Detail |> Option.defaultValue "all syntax outcomes match"
 
