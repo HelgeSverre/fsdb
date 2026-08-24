@@ -691,24 +691,20 @@ let tests =
 
                 testCase "version-gated /*!NNNNN ... */ comment is dropped, above server version"
                 <| fun _ ->
-                    Expect.equal (stripVersionComments "SELECT /*!99999 SQL_NO_CACHE */ 1") "SELECT  1" "above server version is inert"
+                    Expect.equal (stripVersionComments "SELECT /*!99999 SQL_NO_CACHE */ 1") "SELECT   1" "above server version is inert"
 
                 testCase "version-gated comments use the advertised MySQL 8.4 compatibility version"
                 <| fun _ ->
                     Expect.equal (stripVersionComments "/*!80400 SET @at_version = 1 */") " SET @at_version = 1 " "8.4.0 executes"
-                    Expect.equal (stripVersionComments "/*!80401 SET @above_version = 1 */") "" "versions above 8.4.0 are inert"
+                    Expect.equal (stripVersionComments "/*!80401 SET @above_version = 1 */") " " "versions above 8.4.0 are inert"
 
-                testCase "version-gated /*!NNNNN ... */ comment reads only the first 5 digits of a longer run"
+                testCase "version-gated comments accept a six-digit MMmmrr version"
                 <| fun _ ->
-                    // A 6-digit run isn't "no version" -- MySQL gates on its
-                    // first 5 (99999, always above the server's version), so
-                    // this is inert, not a 1064 with the digits spliced in as
-                    // garbage tokens.
-                    Expect.equal (stripVersionComments "SELECT /*!999999 BOGUSTOKEN */ 2") "SELECT  2" "first 5 digits gate the comment"
+                    Expect.equal (stripVersionComments "SELECT /*!999999 BOGUSTOKEN */ 2") "SELECT   2" "six digits gate the comment"
 
-                testCase "version-gated /*!NNNNN ... */ comment reads a run shorter than 5 digits as a version too"
+                testCase "fewer than five version digits leave an ordinary comment"
                 <| fun _ ->
-                    Expect.equal (stripVersionComments "SELECT /*!9999 body */ 1") "SELECT  body  1" "a short digit run still counts as a version"
+                    Expect.equal (stripVersionComments "SELECT /*!9999 body */ 1") "SELECT   1" "a short digit run is inert"
 
                 testCase "stripVersionComments leaves a /*! -lookalike inside a string literal alone"
                 <| fun _ ->

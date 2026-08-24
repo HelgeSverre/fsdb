@@ -417,26 +417,31 @@ let private stringLit: Parser<Value, unit> = quoted '\'' <|> quoted '"'
 /// time into the final `Lit` — the common ASCII-subset cases are identical
 /// to a real conversion.
 let private introducedStringLit: Parser<Expr, unit> =
-    attempt (
-        pchar '_'
-        >>. many1Chars (satisfy isIdentChar)
-        .>> ws
-        .>>. stringLit
-        >>= fun (charset, v) ->
-            let text =
-                match v with
-                | VString s -> s
-                | _ -> ""
+    let introducer =
+        attempt (
+            pchar '_'
+            >>. many1Chars (satisfy isIdentChar)
+            .>> ws
+            .>> followedBy (anyOf "'\"")
+        )
 
-            let bytes = Text.Encoding.UTF8.GetBytes text
+    introducer
+    .>>. stringLit
+    >>= fun (charset, v) ->
+        let text =
+            match v with
+            | VString s -> s
+            | _ -> ""
 
-            match charset.ToLowerInvariant() with
-            | "utf8mb4"
-            | "utf8" -> preturn (Lit(VString text))
-            | "binary" -> preturn (Lit(VBytes bytes))
-            | "latin1" -> preturn (Lit(VString(Collation.Charset.decodeLatin1Bytes bytes)))
-            | "ascii" -> preturn (Lit(VString(Collation.Charset.decodeAsciiBytes bytes)))
-            | _ -> fail (sprintf "Unknown character set: '%s'" charset))
+        let bytes = Text.Encoding.UTF8.GetBytes text
+
+        match charset.ToLowerInvariant() with
+        | "utf8mb4"
+        | "utf8" -> preturn (Lit(VString text))
+        | "binary" -> preturn (Lit(VBytes bytes))
+        | "latin1" -> preturn (Lit(VString(Collation.Charset.decodeLatin1Bytes bytes)))
+        | "ascii" -> preturn (Lit(VString(Collation.Charset.decodeAsciiBytes bytes)))
+        | _ -> fail (sprintf "Unknown character set: '%s'" charset)
 
 /// MySQL's quoted hexadecimal binary literal (`X'00ff'`, case-insensitive
 /// on the introducer). The introducer and opening quote are attempted as a
