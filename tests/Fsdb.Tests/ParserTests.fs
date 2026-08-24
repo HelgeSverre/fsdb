@@ -184,6 +184,19 @@ let tests =
                         (mkSelect([ FuncCall("COUNT", [ Star None ]), None ], Some "t", None, [], None, None))
                         "count star"
 
+                testCase "function names require an adjacent opening parenthesis"
+                <| fun _ ->
+                    for sql in [ "SELECT COUNT (*) FROM t"; "SELECT COUNT/**/(*) FROM t" ] do
+                        match parse sql with
+                        | Ok statement -> failtestf "expected %s to fail, got %A" sql statement
+                        | Error _ -> ()
+
+                testCase "SELECT cannot be parsed as a function name"
+                <| fun _ ->
+                    match parse "SELECT SELECT(1)" with
+                    | Ok statement -> failtestf "expected syntax error, got %A" statement
+                    | Error _ -> ()
+
                 testCase "function call with multiple args and no args"
                 <| fun _ ->
                     Expect.equal

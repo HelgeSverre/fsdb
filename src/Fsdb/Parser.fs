@@ -747,11 +747,10 @@ let private rowConstructorAtom: Parser<Expr, unit> =
         | _ -> fail "ROW requires at least two expressions"
 
 let private genericFuncCall: Parser<Expr, unit> =
-    let reservedNames = set [ "any"; "some"; "regexp" ]
+    let reservedNames = set [ "any"; "select"; "some"; "regexp" ]
 
     attempt (
-        (many1Satisfy2 isIdentStart isIdentChar .>> ws)
-        .>> sym "("
+        (many1Satisfy2 isIdentStart isIdentChar .>> pchar '(' .>> ws)
         >>= fun name ->
             if reservedNames.Contains(name.ToLowerInvariant()) then
                 fail "reserved function name"
