@@ -39,6 +39,7 @@ module SyntaxFuzz =
                "CREATE TRIGGER syntax_after_%s BEFORE INSERT ON syntax_trigger_target FOR EACH ROW FOLLOWS syntax_first BEGIN INSERT INTO syntax_log VALUES (NEW.n); SET NEW.n = NEW.n + 1; END"
                suffix
            "odku", "INSERT INTO syntax_target VALUES (1, 11, 'changed') ON DUPLICATE KEY UPDATE n = VALUES(n), label = VALUES(label)"
+           "odku_select_source", "INSERT INTO syntax_target (id, n, label) SELECT id, n, label FROM syntax_source AS s ON DUPLICATE KEY UPDATE n = VALUES(n), label = s.update_label"
            "replace_select", "REPLACE INTO syntax_target SELECT 2, 20, 'replacement'"
            "serializable", "SET TRANSACTION ISOLATION LEVEL SERIALIZABLE"
            "column_comment", sprintf "CREATE TABLE syntax_comment_%s (id INT COMMENT 'syntax corpus')" suffix
@@ -47,6 +48,8 @@ module SyntaxFuzz =
     let private fixtures =
         [| "CREATE TABLE syntax_target (id INT PRIMARY KEY, n INT, label VARCHAR(40), INDEX ix_n_label (n, label))"
            "INSERT INTO syntax_target VALUES (1, 10, 'seed')"
+           "CREATE TABLE syntax_source (id INT, n INT, label VARCHAR(40), update_label VARCHAR(40))"
+           "INSERT INTO syntax_source VALUES (1, 11, 'candidate', 'source')"
            "CREATE TABLE syntax_trigger_target (id INT PRIMARY KEY, n INT)"
            "CREATE TABLE syntax_log (n INT)"
            "CREATE TRIGGER syntax_first BEFORE INSERT ON syntax_trigger_target FOR EACH ROW SET NEW.n = NEW.n + 1" |]

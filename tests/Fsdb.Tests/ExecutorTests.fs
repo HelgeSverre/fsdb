@@ -2324,7 +2324,123 @@ let tests =
 
                     match runDefault store "SELECT v FROM dst WHERE k = 1" with
                     | ResultSet(_, [ [ Some "1998" ] ]) -> ()
-                    | other -> failtestf "expected v replaced with the select's computed 1998, got %A" other ]
+                    | other -> failtestf "expected v replaced with the select's computed 1998, got %A" other
+
+                testCase "ODKU reads qualified projected and unprojected source columns per input row"
+                <| fun _ ->
+                    let store = newStore ()
+                    runDefault store "CREATE TABLE src (k INT, v INT, extra INT)" |> ignore
+                    runDefault store "INSERT INTO src VALUES (1, 10, 99), (1, 10, 100), (2, 20, 200)" |> ignore
+                    runDefault store "CREATE TABLE dst (k INT PRIMARY KEY, v INT, extra INT)" |> ignore
+                    runDefault store "INSERT INTO dst VALUES (1, 1, 1)" |> ignore
+
+                    match
+                        runDefault
+                            store
+                            "INSERT INTO dst (k, v) SELECT k, v FROM src AS s ON DUPLICATE KEY UPDATE v = VALUES(v), extra = s.extra + s.v"
+                    with
+                    | Affected 5UL -> ()
+                    | other -> failtestf "expected two updates and one insert, got %A" other
+
+                    match runDefault store "SELECT k, v, extra FROM dst ORDER BY k" with
+                    | ResultSet(_, [ [ Some "1"; Some "10"; Some "110" ]; [ Some "2"; Some "20"; None ] ]) -> ()
+                    | other -> failtestf "expected each duplicate to see its own source row, got %A" other
+
+                testCase "hidden ODKU source bindings do not change DISTINCT or derived-table semantics"
+                <| fun _ ->
+                    let store = newStore ()
+                    runDefault store "CREATE TABLE src (k INT, v INT, extra INT)" |> ignore
+                    runDefault store "INSERT INTO src VALUES (1, 10, 99), (1, 10, 100)" |> ignore
+                    runDefault store "CREATE TABLE dst (k INT PRIMARY KEY, v INT, extra INT)" |> ignore
+                    runDefault store "INSERT INTO dst VALUES (1, 1, 1)" |> ignore
+
+                    match
+                        runDefault
+                            store
+                            "INSERT INTO dst (k, v) SELECT DISTINCT k, v FROM src AS s ON DUPLICATE KEY UPDATE extra = s.extra"
+                    with
+                    | Affected 2UL -> ()
+                    | other -> failtestf "expected DISTINCT to retain one source row, got %A" other
+
+                    match runDefault store "SELECT extra FROM dst" with
+                    | ResultSet(_, [ [ Some "99" ] ]) -> ()
+                    | other -> failtestf "expected the first distinct source binding, got %A" other
+
+                    runDefault store "UPDATE dst SET extra = 1" |> ignore
+
+                    runDefault
+                        store
+                        "INSERT INTO dst (k, v) SELECT d.k, d.v FROM (SELECT k, v, extra + 1 AS computed_extra FROM src LIMIT 1) AS d ON DUPLICATE KEY UPDATE extra = d.computed_extra"
+                    |> ignore
+
+                    match runDefault store "SELECT extra FROM dst" with
+                    | ResultSet(_, [ [ Some "100" ] ]) -> ()
+                    | other -> failtestf "expected the derived expression to remain visible, got %A" other
+
+                    runDefault store "CREATE TABLE source_extra (k INT, replacement INT)" |> ignore
+                    runDefault store "INSERT INTO source_extra VALUES (1, 123)" |> ignore
+
+                    runDefault
+                        store
+                        "INSERT INTO dst (k, v) SELECT s.k, s.v FROM src AS s JOIN source_extra AS x ON x.k = s.k LIMIT 1 ON DUPLICATE KEY UPDATE extra = x.replacement"
+                    |> ignore
+
+                    match runDefault store "SELECT extra FROM dst" with
+                    | ResultSet(_, [ [ Some "123" ] ]) -> ()
+                    | other -> failtestf "expected the joined source column to remain visible, got %A" other
+
+                    runDefault store "UPDATE dst SET extra = 1" |> ignore
+
+                    runDefault
+                        store
+                        "INSERT INTO dst (k, v) SELECT k, v FROM src AS s LIMIT 1 ON DUPLICATE KEY UPDATE extra = (SELECT s.extra)"
+                    |> ignore
+
+                    match runDefault store "SELECT extra FROM dst" with
+                    | ResultSet(_, [ [ Some "99" ] ]) -> ()
+                    | other -> failtestf "expected the correlated subquery to see the source row, got %A" other
+
+                testCase "ODKU source references preserve MySQL ambiguity and grouping errors"
+                <| fun _ ->
+                    let store = newStore ()
+                    runDefault store "CREATE TABLE src (k INT, v INT, extra INT)" |> ignore
+                    runDefault store "INSERT INTO src VALUES (1, 10, 99)" |> ignore
+                    runDefault store "CREATE TABLE dst (k INT PRIMARY KEY, v INT, extra INT)" |> ignore
+                    runDefault store "INSERT INTO dst VALUES (1, 1, 1)" |> ignore
+
+                    match runDefault store "INSERT INTO dst (k, v) SELECT k, v FROM src AS s ON DUPLICATE KEY UPDATE extra = v" with
+                    | Err(1052, _) -> ()
+                    | other -> failtestf "expected ambiguous source/target column error 1052, got %A" other
+
+                    match runDefault store "INSERT INTO dst (k, v) SELECT k, v AS incoming FROM src AS s ON DUPLICATE KEY UPDATE extra = incoming" with
+                    | Err(1054, _) -> ()
+                    | other -> failtestf "expected projection aliases to remain unavailable, got %A" other
+
+                    match runDefault store "INSERT INTO dst (k, v) SELECT k, MAX(v) FROM src AS s GROUP BY k ON DUPLICATE KEY UPDATE extra = s.extra" with
+                    | Err(1054, _) -> ()
+                    | other -> failtestf "expected grouped source references to fail with 1054, got %A" other
+
+                testCase "ODKU source bindings retain collation and ENUM metadata"
+                <| fun _ ->
+                    let store = newStore ()
+
+                    runDefault
+                        store
+                        "CREATE TABLE src (k INT, b VARCHAR(10) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin, e ENUM('red', 'blue'))"
+                    |> ignore
+
+                    runDefault store "INSERT INTO src VALUES (1, 'a', 'red')" |> ignore
+                    runDefault store "CREATE TABLE dst (k INT PRIMARY KEY, comparison INT)" |> ignore
+                    runDefault store "INSERT INTO dst VALUES (1, 9)" |> ignore
+
+                    runDefault
+                        store
+                        "INSERT INTO dst (k, comparison) SELECT k, 0 FROM src AS s ON DUPLICATE KEY UPDATE comparison = (s.b = 'A') + (s.e = 1) * 2"
+                    |> ignore
+
+                    match runDefault store "SELECT comparison FROM dst" with
+                    | ResultSet(_, [ [ Some "2" ] ]) -> ()
+                    | other -> failtestf "expected binary comparison 0 plus ENUM ordinal comparison 2, got %A" other ]
 
           testList
               "CAST and new column types"

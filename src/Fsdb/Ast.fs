@@ -667,15 +667,9 @@ type Statement =
         rows: Expr list list *
         onDuplicateUpdate: (string * Expr) list *
         ignoreDuplicates: bool
-    /// `INSERT INTO t (cols) SELECT ... [ON DUPLICATE KEY UPDATE ...]` — a
-    /// separate case rather than folding a `SelectStmt` into `Insert`'s
-    /// `rows` shape, since the row sources don't otherwise share anything.
-    /// `onDuplicateUpdate` mirrors `Insert`'s: `VALUES(col)` resolves
-    /// against the select-derived candidate row, bare column refs against
-    /// the stored row (ponytail: MySQL also allows `alias.col` refs into
-    /// the SELECT's own columns here — deferred, see
-    /// torture/findings/2026-08-19-insert-select-odku-gap.md; add if a
-    /// migration needs them).
+    /// `INSERT INTO t (cols) SELECT ... [ON DUPLICATE KEY UPDATE ...]` keeps
+    /// the SELECT source separate from literal `VALUES` rows so its source
+    /// columns remain available while duplicate assignments are evaluated.
     | InsertSelect of
         table: string *
         columns: string list *

@@ -1344,11 +1344,14 @@ module DmlBattery =
            "DROP TABLE IF EXISTS fsdb_trigger_contract"
            "DROP TABLE IF EXISTS fsdb_trigger_log"
            "DROP TABLE IF EXISTS fsdb_replace_contract"
+           "DROP TABLE IF EXISTS fsdb_odku_source"
            "DROP TABLE IF EXISTS fsdb_dml_contract" |]
 
     let private fixtures =
         [| yield! cleanup
            "CREATE TABLE fsdb_dml_contract (id INT PRIMARY KEY, n INT)"
+           "CREATE TABLE fsdb_odku_source (id INT, selected_n INT, update_n INT)"
+           "INSERT INTO fsdb_odku_source VALUES (1, 70, 80), (1, 70, 90)"
            "CREATE TABLE fsdb_replace_contract (id INT PRIMARY KEY, u INT UNIQUE, n INT DEFAULT 7, INDEX ix_n_u (n, u))"
            "CREATE TABLE fsdb_trigger_contract (id INT PRIMARY KEY, n INT)"
            "CREATE TABLE fsdb_trigger_log (n INT)"
@@ -1363,6 +1366,7 @@ module DmlBattery =
            "odku_mixed", "INSERT INTO fsdb_dml_contract VALUES (1, 30), (2, 40) ON DUPLICATE KEY UPDATE n = VALUES(n)"
            "odku_same_statement_changed", "INSERT INTO fsdb_dml_contract VALUES (5, 1), (5, 2) ON DUPLICATE KEY UPDATE n = VALUES(n)"
            "odku_same_statement_unchanged", "INSERT INTO fsdb_dml_contract VALUES (7, 1), (7, 1) ON DUPLICATE KEY UPDATE n = VALUES(n)"
+           "odku_select_source", "INSERT INTO fsdb_dml_contract (id, n) SELECT id, selected_n FROM fsdb_odku_source AS s ON DUPLICATE KEY UPDATE n = s.update_n"
            "replace_new", "REPLACE INTO fsdb_dml_contract VALUES (3, 50)"
            "replace_changed", "REPLACE INTO fsdb_dml_contract VALUES (3, 60)"
            "replace_unchanged", "REPLACE INTO fsdb_dml_contract VALUES (3, 60)"

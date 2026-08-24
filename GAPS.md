@@ -401,7 +401,6 @@ Recorded in `torture/findings/`, not yet fixed, not enrolled in
 | Finding | Detail | Status |
 |---|---|---|
 | Multi-database scaling | super-serial slowdowns; store-wide connection ceiling; classified `multidb_scaling_gap` (`2026-08-17-multidb-concurrency-campaign.md`) | open, reporting-only |
-| INSERT…SELECT…ODKU alias refs | bare select-column references in the UPDATE clause error where MySQL reads select-derived values; only `VALUES(col)` works (`2026-08-19-insert-select-odku-gap.md`, `Ast.fs:630–633`) | deferred by design |
 | Numeric error shape | 1690 message lacks the offending expression text (`2026-08-19-probe-corpus-triage.md`) | ponytail ceiling |
 | Temporal/error-shape ceilings | `DATE 'bad'` → 1064 vs MySQL 1525; parenthesized set-op groups `(A UNION B) INTERSECT C` refused | ponytail ceilings |
 

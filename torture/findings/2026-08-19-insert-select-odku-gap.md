@@ -1,5 +1,7 @@
 # 2026-08-19 — INSERT ... SELECT ON DUPLICATE KEY UPDATE: bare select-column refs
 
+Status: resolved on 2026-08-24.
+
 Phase 2 write probe (disposable MySQL 8.4.11, port 3316, scratch db `p2probe`):
 
 ```sql
@@ -7,18 +9,17 @@ INSERT INTO dst2 (k, v) SELECT k, v FROM src AS s
 ON DUPLICATE KEY UPDATE v = s.v;          -- accepted by MySQL 8.4.11
 ```
 
-MySQL allows the ODKU clause on `INSERT ... SELECT` to reference the SELECT's
-own columns by alias (`s.v` above) in addition to `VALUES(col)`. FSDB's
-implementation deliberately supports only the `VALUES(col)` form — a bare
-`s.v` in FSDB resolves as an (unknown) target-table column and errors, where
-MySQL reads the select-derived value.
+MySQL allows the ODKU clause on `INSERT ... SELECT` to reference columns from
+the SELECT source (`s.v` above) in addition to `VALUES(col)`. fsdb now carries
+those typed source values through duplicate handling without rerunning the
+SELECT. Qualified projected and unprojected columns work through direct,
+derived, and joined sources, including correlated assignment subqueries.
+Internal source bindings do not participate in `DISTINCT`, so they do not
+change source cardinality.
 
-Deferred by design (Ast.fs `InsertSelect` ponytail comment names the ceiling):
-`VALUES(col)` reaches every select-derived value, so alias refs add surface
-without capability. If a torture run ever produces this divergence, minimize
-it, review, and only then add its exact failure signature to
-`support/known-gaps.json` per TORTURE-TESTING.md §"If deferring". No signature
-exists yet — the ledger stays empty until a real run yields one.
+Source/target ambiguity returns 1052. Projection aliases and grouped source
+references return 1054, matching the pinned MySQL 8.4.11 results. No known-gap
+signature was enrolled for the original divergence.
 
 Remaining pinned probe results (recorded in the Phase 2 Expecto tests):
 

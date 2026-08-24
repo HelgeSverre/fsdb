@@ -1285,12 +1285,12 @@ let tests =
 
                 testCase "INSERT ... SELECT carries a trailing ON DUPLICATE KEY UPDATE"
                 <| fun _ ->
-                    match parseOk "INSERT INTO t (a, b) SELECT x, y FROM u ON DUPLICATE KEY UPDATE b = VALUES(b), a = a + 1" with
+                    match parseOk "INSERT INTO t (a, b) SELECT x, y FROM u AS s ON DUPLICATE KEY UPDATE b = s.y, a = a + 1" with
                     | InsertSelect(
                         "t",
                         [ "a"; "b" ],
                         _,
-                        [ "b", FuncCall("VALUES", [ Col "b" ]); "a", BinOp(Add, Col "a", Lit(VInt 1L)) ],
+                        [ "b", QualifiedCol("s", "y"); "a", BinOp(Add, Col "a", Lit(VInt 1L)) ],
                         false) -> ()
                     | other -> failtestf "expected an InsertSelect with the ODKU assignments, got %A" other
 

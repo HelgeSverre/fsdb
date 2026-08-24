@@ -4028,6 +4028,26 @@ let rec upsertRows
     (applyUpdate: Value[] -> Value[] -> Result<Value[], StorageError>)
     (foundRows: bool)
     : Result<InsertOutcome, StorageError> =
+    upsertRowsWithOrdinal
+        store
+        dbName
+        tableName
+        columns
+        rowsIn
+        computeGenerated
+        (fun _ existing candidate -> applyUpdate existing candidate)
+        foundRows
+
+and upsertRowsWithOrdinal
+    (store: Store)
+    (dbName: string)
+    (tableName: string)
+    (columns: string list option)
+    (rowsIn: Value list list)
+    (computeGenerated: Value[] -> Result<Value[], StorageError>)
+    (applyUpdate: int -> Value[] -> Value[] -> Result<Value[], StorageError>)
+    (foundRows: bool)
+    : Result<InsertOutcome, StorageError> =
         let key = normalizeTableName tableName
 
         let result =
@@ -4077,7 +4097,7 @@ and private upsertRowsInTable
     (columns: string list option)
     (rowsIn: Value list list)
     (computeGenerated: Value[] -> Result<Value[], StorageError>)
-    (applyUpdate: Value[] -> Value[] -> Result<Value[], StorageError>)
+    (applyUpdate: int -> Value[] -> Value[] -> Result<Value[], StorageError>)
     (foundRows: bool)
     : Result<Database * Map<string, (Value[] * Value[]) list> * (int64 * int64 option * int * Value[] list * (Value[] * Value[]) list), StorageError> =
                 let checkFks = store.ForeignKeyChecks
@@ -4104,7 +4124,7 @@ and private upsertRowsInTable
                             |> Option.bind (fun k -> Map.tryFind k (Map.find name index))
                             |> Option.map (fun rowId -> rowId, rows.[rowId]))
 
-                    let step acc (rowValues: Value list) =
+                    let step acc (ordinal, rowValues: Value list) =
                         acc
                         |> Result.bind
                             (fun (nextAutoId,
@@ -4139,7 +4159,7 @@ and private upsertRowsInTable
                                         |> Result.map (fun candidate -> candidate, findMatch index candidate)
                                         |> Result.bind (function
                                             | candidate, Some(pos, existing) ->
-                                                applyUpdate existing candidate
+                                                applyUpdate ordinal existing candidate
                                                 |> Result.bind (coerceRow (temporalCoercionMode store) table.Columns)
                                                 |> Result.bind (fun applied ->
                                                     let collision =
@@ -4248,6 +4268,7 @@ and private upsertRowsInTable
                                                     cascaded))))
 
                     rowsIn
+                    |> List.indexed
                     |> foldWithCancellation step (Ok(table.NextAutoId, None, None, 0, [], [], table.UniqueIndex, table.SecondaryIndex, table.SecondaryOrder, db, Map.empty, Map.empty))
                     |> Result.map (fun (nextAutoId', firstAuto, lastExplicit, affected, inserted, updated, index, secondaryIndex, secondaryOrder, cascadeDb, _visited, cascaded) ->
                         let finalRows = rows.DrainToImmutable()

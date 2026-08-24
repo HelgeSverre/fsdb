@@ -27,6 +27,12 @@ replacements, conflicts spanning separate unique keys, same-statement key
 reuse, defaults, source-row ordering, composite-index updates, checked-view
 inserts, and ordered compound-trigger side effects.
 
+For `INSERT ... SELECT ... ON DUPLICATE KEY UPDATE`, assignments may read
+qualified columns from direct, derived, and joined SELECT sources, including
+source columns omitted from the inserted projection and qualified correlations
+inside assignment subqueries. `VALUES(column)` remains available for the
+candidate value.
+
 The scalar-expression battery pins logarithmic, exponential, trigonometric,
 IPv4, and IPv6 functions to MySQL 8.4 values and domain behavior. It also
 covers phonetic, base64, ordinal, bit-selection, and common alias functions;

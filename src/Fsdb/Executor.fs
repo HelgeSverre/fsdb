@@ -69,6 +69,8 @@ type private IndexedJoinProbe =
       RightIndices: int list
       Unique: bool }
 
+let private insertSelectSourceAliasPrefix = "\u0000fsdb_odku_source_"
+
 /// Per-statement memo of derived-table (`FROM (SELECT ...)`) resolutions,
 /// keyed by the AST node's identity. Within one statement the same derived
 /// table is resolved by the executor *and* by the collation/fsp metadata
@@ -2273,55 +2275,55 @@ let private quantifiedComparisonResult
         op
         right
 
-let rec private selectProjectionColumns (store: Store) (dbName: string) (select: SelectStmt) : ColumnDef option list =
-    let rec sourceColumns = function
-        | FromTable table ->
-            let database = table.Database |> Option.defaultValue dbName
+let private sourceHasQualifier (qualifier: string) = function
+    | FromTable table ->
+        table.Table.Equals(qualifier, System.StringComparison.OrdinalIgnoreCase)
+        || (table.Alias |> Option.exists (fun alias -> alias.Equals(qualifier, System.StringComparison.OrdinalIgnoreCase)))
+    | FromSubquery(_, alias)
+    | FromLateral(_, alias)
+    | FromJsonTable(_, _, _, alias) -> alias.Equals(qualifier, System.StringComparison.OrdinalIgnoreCase)
 
-            match
-                if table.Database.IsNone then
-                    currentCteScope () |> Map.tryFind (table.Table.ToLowerInvariant()) |> Option.map fst
-                else
-                    None
-            with
-            | Some columns -> columns |> List.map Some
+let rec private selectSourceColumns (store: Store) (dbName: string) = function
+    | FromTable table ->
+        let database = table.Database |> Option.defaultValue dbName
+
+        match
+            if table.Database.IsNone then
+                currentCteScope () |> Map.tryFind (table.Table.ToLowerInvariant()) |> Option.map fst
+            else
+                None
+        with
+        | Some columns -> columns |> List.map Some
+        | None ->
+            match tryStoredView store database table.Table with
+            | Some view ->
+                match Parser.parse view.Definition with
+                | Ok(Select viewSelect) ->
+                    let columns = selectProjectionColumns store view.Schema viewSelect
+
+                    if view.Columns.IsEmpty || view.Columns.Length <> columns.Length then
+                        columns
+                    else
+                        List.map2 (fun name column -> column |> Option.map (fun value -> { value with Name = name })) view.Columns columns
+                | _ -> []
             | None ->
-                match tryStoredView store database table.Table with
-                | Some view ->
-                    match Parser.parse view.Definition with
-                    | Ok(Select viewSelect) ->
-                        let columns = selectProjectionColumns store view.Schema viewSelect
+                scan store database table.Table
+                |> Result.toOption
+                |> Option.map fst
+                |> Option.defaultValue []
+                |> List.map Some
+    | FromSubquery(PlainSelect body, _)
+    | FromLateral(PlainSelect body, _) -> selectProjectionColumns store dbName body
+    | FromSubquery _
+    | FromLateral _ -> []
+    | FromJsonTable _ -> []
 
-                        if view.Columns.IsEmpty || view.Columns.Length <> columns.Length then
-                            columns
-                        else
-                            List.map2 (fun name column -> column |> Option.map (fun value -> { value with Name = name })) view.Columns columns
-                    | _ -> []
-                | None ->
-                    scan store database table.Table
-                    |> Result.toOption
-                    |> Option.map fst
-                    |> Option.defaultValue []
-                    |> List.map Some
-        | FromSubquery(PlainSelect body, _)
-        | FromLateral(PlainSelect body, _) -> selectProjectionColumns store dbName body
-        | FromSubquery _
-        | FromLateral _
-        | FromJsonTable _ -> []
+and private selectProjectionColumns (store: Store) (dbName: string) (select: SelectStmt) : ColumnDef option list =
 
     let sources =
         (select.From |> Option.toList)
         @ (select.Joins |> List.map _.Table)
-        |> List.map (fun source -> source, sourceColumns source)
-
-    let hasQualifier qualifier =
-        function
-        | FromTable table ->
-            table.Table.Equals(qualifier, System.StringComparison.OrdinalIgnoreCase)
-            || (table.Alias |> Option.exists (fun alias -> alias.Equals(qualifier, System.StringComparison.OrdinalIgnoreCase)))
-        | FromSubquery(_, alias)
-        | FromLateral(_, alias)
-        | FromJsonTable(_, _, _, alias) -> alias.Equals(qualifier, System.StringComparison.OrdinalIgnoreCase)
+        |> List.map (fun source -> source, selectSourceColumns store dbName source)
 
     let columnFor (name: string) (candidates: (FromItem * ColumnDef option list) list) =
         candidates
@@ -2335,9 +2337,9 @@ let rec private selectProjectionColumns (store: Store) (dbName: string) (select:
     let rec projectionColumns =
         function
         | Star None -> sources |> List.collect snd
-        | Star(Some qualifier) -> sources |> List.filter (fst >> hasQualifier qualifier) |> List.collect snd
+        | Star(Some qualifier) -> sources |> List.filter (fst >> sourceHasQualifier qualifier) |> List.collect snd
         | Col name -> [ columnFor name sources ]
-        | QualifiedCol(qualifier, name) -> sources |> List.filter (fst >> hasQualifier qualifier) |> columnFor name |> List.singleton
+        | QualifiedCol(qualifier, name) -> sources |> List.filter (fst >> sourceHasQualifier qualifier) |> columnFor name |> List.singleton
         | Collate(value, collation) ->
             projectionColumns value
             |> List.map (Option.map (fun column -> { column with Collation = Some collation; Charset = None }))
@@ -7966,6 +7968,7 @@ and private runSelect
             let ctx = ctxFor row
 
             outputCols
+            |> List.filter (fun (name, _) -> not (name.StartsWith(insertSelectSourceAliasPrefix, System.StringComparison.Ordinal)))
             |> List.map (fun (name, v) ->
                 match v with
                 | VString text -> Some((keyCollation ctx (Col name)).KeyOf text)
@@ -8356,6 +8359,179 @@ let private substituteValuesFunc (columnIndex: Map<string, int list>) (candidate
             | Some(i :: _) -> Some(Lit candidate.[i])
             | _ -> None
         | _ -> None)
+
+let private insertSelectSourceReferences (assignments: (string * Expr) list) : Expr list =
+    let references = ResizeArray<Expr>()
+
+    let qualifierOf = function
+        | FromTable table -> table.Alias |> Option.defaultValue table.Table
+        | FromSubquery(_, alias)
+        | FromLateral(_, alias)
+        | FromJsonTable(_, _, _, alias) -> alias
+
+    let rec collect shadowed expression =
+        expression
+        |> rewriteExprWith (function
+            | FuncCall(name, [ Col _ ]) as values
+                when name.Equals("VALUES", System.StringComparison.OrdinalIgnoreCase) ->
+                Some values
+            | Col _ as reference when shadowed |> Set.isEmpty ->
+                references.Add reference
+                Some reference
+            | Col _ as reference -> Some reference
+            | QualifiedCol(qualifier, _) as reference when not (shadowed |> Set.contains (qualifier.ToLowerInvariant())) ->
+                references.Add reference
+                Some reference
+            | QualifiedCol _ as reference -> Some reference
+            | (Exists select | Subquery select) as subquery ->
+                collectSelect shadowed select
+                Some subquery
+            | InSubquery(value, select) as subquery ->
+                collect shadowed value
+                collectSelect shadowed select
+                Some subquery
+            | QuantifiedComparison(value, _, _, select) as subquery ->
+                collect shadowed value
+                collectSelect shadowed select
+                Some subquery
+            | WindowOver(windowFunction, over) as window ->
+                windowFnExprs windowFunction @ overExprs over |> List.iter (collect shadowed)
+                Some window
+            | _ -> None)
+        |> ignore
+
+    and collectSelect inherited select =
+        let local =
+            (select.From |> Option.toList) @ (select.Joins |> List.map _.Table)
+            |> List.map (fun source -> (qualifierOf source).ToLowerInvariant())
+            |> Set.ofList
+
+        let shadowed = Set.union inherited local
+        select.Projections |> List.iter (fst >> collect shadowed)
+        select.Joins |> List.iter (fun join -> collect shadowed join.On)
+        select.Where |> Option.iter (collect shadowed)
+        select.GroupBy |> List.iter (collect shadowed)
+        select.Windows |> List.iter (fun (_, spec) -> overExprs (OverSpec spec) |> List.iter (collect shadowed))
+        select.Ctes |> List.iter (fun cte -> collectSelectOrUnion shadowed cte.Body)
+        select.Having |> Option.iter (collect shadowed)
+        select.OrderBy |> List.iter (fst >> collect shadowed)
+        select.Limit |> Option.iter (collect shadowed)
+        select.Offset |> Option.iter (collect shadowed)
+
+    and collectSelectOrUnion shadowed = function
+        | PlainSelect select -> collectSelect shadowed select
+        | UnionSelect(first, rest, orderBy, limit, offset) ->
+            collectSelect shadowed first
+            rest |> List.iter (snd >> collectSelect shadowed)
+            orderBy |> List.iter (fst >> collect shadowed)
+            limit |> Option.iter (collect shadowed)
+            offset |> Option.iter (collect shadowed)
+
+    assignments |> List.iter (snd >> collect Set.empty)
+
+    references |> Seq.distinct |> List.ofSeq
+
+let private prepareInsertSelectSourceBindings
+    (store: Store)
+    (registry: Registry)
+    (dbName: string)
+    (targetColumns: ColumnDef list)
+    (select: SelectStmt)
+    (assignments: (string * Expr) list)
+    : Result<SelectStmt * (Expr * ColumnDef option) list, EvalError> =
+    let sources =
+        (select.From |> Option.toList) @ (select.Joins |> List.map _.Table)
+        |> List.map (fun source -> source, selectSourceColumns store dbName source)
+
+    let matchingColumns reference =
+        let candidates, name =
+            match reference with
+            | Col name -> sources, name
+            | QualifiedCol(qualifier, name) -> sources |> List.filter (fst >> sourceHasQualifier qualifier), name
+            | _ -> [], ""
+
+        candidates
+        |> List.collect snd
+        |> List.choose id
+        |> List.filter (fun column -> column.Name.Equals(name, System.StringComparison.OrdinalIgnoreCase))
+
+    let targetHas name =
+        targetColumns |> List.exists (fun column -> column.Name.Equals(name, System.StringComparison.OrdinalIgnoreCase))
+
+    let references = insertSelectSourceReferences assignments
+
+    let bindings =
+        references
+        |> List.choose (fun reference ->
+            let matches =
+                match reference with
+                | QualifiedCol(qualifier, _) -> sources |> List.filter (fst >> sourceHasQualifier qualifier) |> List.length
+                | _ -> matchingColumns reference |> List.length
+
+            match reference, matches with
+            | Col name, count when count > 0 && targetHas name -> Some(Error(1052, sprintf "Column '%s' in field list is ambiguous" name))
+            | _, 1 -> Some(Ok(reference, matchingColumns reference |> List.tryExactlyOne))
+            | _, count when count > 1 -> Some(Error(1052, sprintf "Column '%s' in field list is ambiguous" (exprLabel reference)))
+            | _ -> None)
+
+    match bindings |> List.tryPick (function Error error -> Some error | Ok _ -> None) with
+    | Some error -> Error error
+    | None ->
+        let sourceBindings = bindings |> List.choose (function Ok binding -> Some binding | Error _ -> None)
+
+        let grouped =
+            not select.GroupBy.IsEmpty
+            || (select.Projections |> List.exists (fst >> containsAggregate registry))
+            || (select.Having |> Option.exists (containsAggregate registry))
+            || (select.OrderBy |> List.exists (fst >> containsAggregate registry))
+
+        match sourceBindings with
+        | (first, _) :: _ when grouped -> Error(1054, sprintf "Unknown column '%s' in 'field list'" (exprLabel first))
+        | _ ->
+            let hidden =
+                sourceBindings
+                |> List.mapi (fun index (reference, _) -> reference, Some(insertSelectSourceAliasPrefix + string index))
+
+            Ok({ select with Projections = select.Projections @ hidden }, sourceBindings)
+
+let private withInsertSelectSources
+    (target: EvalContext)
+    (bindings: (Expr * ColumnDef option * Value) list)
+    : EvalContext =
+    let boundColumn reference column =
+        let name =
+            match reference with
+            | Col name
+            | QualifiedCol(_, name) -> name
+            | _ -> insertSelectSourceAliasPrefix
+
+        column |> Option.defaultValue (syntheticColumn name (TVarchar 255) true)
+
+    let known = bindings |> List.map (fun (reference, column, value) -> reference, boundColumn reference column, value)
+
+    let groupKey = function
+        | QualifiedCol(qualifier, _) -> qualifier.ToLowerInvariant()
+        | _ -> insertSelectSourceAliasPrefix
+
+    let groups = known |> List.groupBy (fun (reference, _, _) -> groupKey reference)
+
+    let columns, values, qualifiers, _ =
+        groups
+        |> List.fold
+            (fun (allColumns, allValues, qualifiers, offset) (qualifier, entries) ->
+                let columns = entries |> List.map (fun (_, column, _) -> column)
+                let values = entries |> List.map (fun (_, _, value) -> value)
+
+                allColumns @ columns,
+                allValues @ values,
+                qualifiers |> Map.add qualifier (columns, offset),
+                offset + columns.Length)
+            ([], [], Map.empty, 0)
+
+    if columns.IsEmpty then
+        target
+    else
+        contextFactory target.Store target.Registry target.DbName (columnIndexOf columns) qualifiers (Some target) (Array.ofList values)
 
 type private UpdatableView =
     { ViewDatabase: string
@@ -10356,30 +10532,28 @@ let rec executeAs
                     Storage.commitTransactionEvents store snapshot
                     ok outcome
 
-    /// The `ON DUPLICATE KEY UPDATE` evaluator shared by the `Insert` and
-    /// `InsertSelect` branches — builds `upsertRows`' update callback.
-    /// `existing` is the stored row that collided (bare column refs read
-    /// from it: `n = n + 1` increments the stored value, MySQL's probed
-    /// semantics), `candidate` is the row that would have been inserted,
-    /// which `VALUES(col)` rewrites resolve against — for `InsertSelect`
-    /// that's the select-derived row, so `VALUES(col)` is how the update
-    /// reaches the SELECT's values.
     let onDuplicateUpdater
         (table: string)
         (tableColumns: ColumnDef list)
         (columnIndex: Map<string, int list>)
         (onDuplicateUpdate: (string * Expr) list)
+        (sourceBindings: (Expr * ColumnDef option * Value) list)
         (existing: Value[])
         (candidate: Value[])
         : Result<Value[], StorageError> =
-        let ctx = contextFactory store registry dbName columnIndex (singleQualifier table tableColumns) None existing
+        let targetContext = contextFactory store registry dbName columnIndex (singleQualifier table tableColumns) None existing
+        let ctx = withInsertSelectSources targetContext sourceBindings
 
         onDuplicateUpdate
         |> traverse (fun (name, expr) ->
             match resolveAssignableColumn tableColumns table name with
             | Error e -> Error e
             | Ok idx ->
-                match evalExpr ctx (substituteValuesFunc columnIndex candidate expr) with
+                let expression =
+                    expr
+                    |> substituteValuesFunc columnIndex candidate
+
+                match evalExpr ctx expression with
                 | Ok v -> Ok(idx, v)
                 | Error err -> Error(ExpressionError err))
         |> Result.map (fun idxVals ->
@@ -10389,10 +10563,14 @@ let rec executeAs
             let assignedIdxs = idxVals |> List.map fst |> Set.ofList
             applyOnUpdateTimestamps tableColumns assignedIdxs existing newRow)
 
-    /// `INSERT ... ON DUPLICATE KEY UPDATE` for an already-evaluated batch
-    /// of rows — the tail both `Insert` and `InsertSelect` share once their
-    /// row sources have produced `rowsValues`.
-    let upsertEvaluated (db: string) (table: string) (cols: string list option) (rowsValues: Value list list) (onDuplicateUpdate: (string * Expr) list) =
+    let upsertEvaluated
+        (db: string)
+        (table: string)
+        (cols: string list option)
+        (rowsValues: Value list list)
+        (sourceBindings: (Expr * ColumnDef option * Value) list array)
+        (onDuplicateUpdate: (string * Expr) list)
+        =
         match scan store db table with
         | Error e -> ids, storageErr e
         | Ok(tableColumns, _) ->
@@ -10403,11 +10581,11 @@ let rec executeAs
                     computeGeneratedRow s registry db table tableColumns candidate
                     |> Result.bind (validateViewCandidate s db table tableColumns)
 
-                let applyUpdate existing candidate =
-                    onDuplicateUpdater table tableColumns columnIndex onDuplicateUpdate existing candidate
+                let applyUpdate ordinal existing candidate =
+                    onDuplicateUpdater table tableColumns columnIndex onDuplicateUpdate sourceBindings.[ordinal] existing candidate
                     |> Result.bind computeGenerated
 
-                upsertRows s db table cols rowsValues computeGenerated applyUpdate foundRows)
+                upsertRowsWithOrdinal s db table cols rowsValues computeGenerated applyUpdate foundRows)
 
     let replaceEvaluated (db: string) (table: string) (cols: string list option) (rowsValues: Value list list) =
         let deleteTriggers =
@@ -11291,7 +11469,7 @@ let rec executeAs
                         else
                             insertRowsPrepared s db table cols rowsValues prepare)
             else
-                upsertEvaluated db table cols rowsValues onDuplicateUpdate
+                upsertEvaluated db table cols rowsValues (Array.create rowsValues.Length []) onDuplicateUpdate
 
     | InsertSelect(table, columns, select, onDuplicateUpdate, ignoreDuplicates) when tryStoredView store (splitQualified dbName table |> fst) (splitQualified dbName table |> snd) |> Option.isSome ->
         let viewDb, viewName = splitQualified dbName table
@@ -11311,34 +11489,49 @@ let rec executeAs
     | InsertSelect(table, columns, select, onDuplicateUpdate, ignoreDuplicates) ->
         let db, table = splitQualified dbName table
 
-        let selectResult, _, _ = runSelectStmt store registry dbName select None
+        match scan store db table with
+        | Error error -> ids, storageErr error
+        | Ok(targetColumns, _) ->
+            match prepareInsertSelectSourceBindings store registry dbName targetColumns select onDuplicateUpdate with
+            | Error(code, message) -> ids, Err(code, message)
+            | Ok(boundSelect, sourceReferences) ->
+                let selectResult, _, typedRows = runSelectStmt store registry dbName boundSelect None
 
-        match selectResult with
-        | Err(code, message) -> ids, Err(code, message)
-        | Affected _ -> ids, Err(1064, "INSERT ... SELECT source did not return a resultset")
-        | ResultSet(_, rows) ->
-            // The source rows are already the wire's flat `string option`
-            // text (see `Value.mysqlTypeOf`'s callers) rather than the
-            // original typed `Value`s — fine here, since `insertRows`/
-            // `insertRowsIgnore` coerce every value through the target
-            // column's type anyway, the same as a literal `VALUES` row's
-            // `Lit(VString ...)` would.
-            let rowsValues = rows |> List.map (List.map (function Some s -> VString s | None -> VNull))
-            let cols = if columns.IsEmpty then None else Some columns
+                match selectResult with
+                | Err(code, message) -> ids, Err(code, message)
+                | Affected _ -> ids, Err(1064, "INSERT ... SELECT source did not return a resultset")
+                | ResultSet _ ->
+                    let hiddenCount = sourceReferences.Length
 
-            if onDuplicateUpdate.IsEmpty then
-                finishInsert db table (fun s ->
-                    match scan s db table with
-                    | Error error -> Error error
-                    | Ok(tableColumns, _) ->
-                        let prepare = prepareInsertRow s db table tableColumns
+                    let rowsValues, sourceBindings =
+                        typedRows
+                        |> List.map (fun row ->
+                            let visibleCount = row.Length - hiddenCount
+                            let values = row |> Array.take visibleCount |> Array.toList
 
-                        if ignoreDuplicates then
-                            insertRowsIgnorePrepared s db table cols rowsValues prepare
-                        else
-                            insertRowsPrepared s db table cols rowsValues prepare)
-            else
-                upsertEvaluated db table cols rowsValues onDuplicateUpdate
+                            let bindings =
+                                sourceReferences
+                                |> List.mapi (fun index (reference, column) -> reference, column, row.[visibleCount + index])
+
+                            values, bindings)
+                        |> List.unzip
+                        |> fun (values, bindings) -> values, List.toArray bindings
+
+                    let cols = if columns.IsEmpty then None else Some columns
+
+                    if onDuplicateUpdate.IsEmpty then
+                        finishInsert db table (fun s ->
+                            match scan s db table with
+                            | Error error -> Error error
+                            | Ok(currentColumns, _) ->
+                                let prepare = prepareInsertRow s db table currentColumns
+
+                                if ignoreDuplicates then
+                                    insertRowsIgnorePrepared s db table cols rowsValues prepare
+                                else
+                                    insertRowsPrepared s db table cols rowsValues prepare)
+                    else
+                        upsertEvaluated db table cols rowsValues sourceBindings onDuplicateUpdate
 
     | Replace(table, columns, rowsExprs) when tryStoredView store (splitQualified dbName table |> fst) (splitQualified dbName table |> snd) |> Option.isSome ->
         let viewDb, viewName = splitQualified dbName table
