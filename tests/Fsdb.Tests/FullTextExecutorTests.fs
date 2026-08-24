@@ -404,6 +404,10 @@ let tests =
                   [ "2" ]
                   "MATCH is valid in a join condition"
 
+              match run store "SELECT a.id FROM articles a JOIN notes n ON n.article_id = a.id WHERE MATCH(body) AGAINST('security')" with
+              | Err(1052, _) -> ()
+              | other -> failtestf "expected an unqualified joined MATCH column to remain ambiguous, got %A" other
+
           testCase "SHOW CREATE TABLE renders FULLTEXT KEY in MySQL's format"
           <| fun _ ->
               let store = setup ()

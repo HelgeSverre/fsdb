@@ -7727,24 +7727,39 @@ and private runFullTextSelect
     let ownerOf sources node =
         match node with
         | MatchAgainst(columns, _, _) ->
+            let unqualified = columns |> List.filter (_.Qualifier.IsNone)
             let qualifiers =
                 columns
                 |> List.choose _.Qualifier
                 |> List.distinctBy (fun qualifier -> qualifier.ToLowerInvariant())
 
-            let candidates =
-                match qualifiers with
-                | [] -> sources |> List.filter (fun source -> indexMatches source.Table columns)
-                | [ qualifier ] ->
+            let ambiguous =
+                unqualified
+                |> List.tryFind (fun column ->
                     sources
                     |> List.filter (fun source ->
-                        System.String.Equals(source.Qualifier, qualifier, System.StringComparison.OrdinalIgnoreCase)
-                        && indexMatches source.Table columns)
-                | _ -> []
+                        source.Table.Columns
+                        |> List.exists (fun definition ->
+                            System.String.Equals(definition.Name, column.Name, System.StringComparison.OrdinalIgnoreCase)))
+                    |> List.length
+                    |> fun ownerCount -> ownerCount > 1)
 
-            match candidates with
-            | [ source ] -> Ok source
-            | _ -> Error(Err(1191, "Can't find FULLTEXT index matching the column list"))
+            match ambiguous with
+            | Some column -> Error(Err(1052, sprintf "Column '%s' in field list is ambiguous" column.Name))
+            | None ->
+                let candidates =
+                    match qualifiers with
+                    | [] -> sources |> List.filter (fun source -> indexMatches source.Table columns)
+                    | [ qualifier ] ->
+                        sources
+                        |> List.filter (fun source ->
+                            System.String.Equals(source.Qualifier, qualifier, System.StringComparison.OrdinalIgnoreCase)
+                            && indexMatches source.Table columns)
+                    | _ -> []
+
+                match candidates with
+                | [ source ] -> Ok source
+                | _ -> Error(Err(1191, "Can't find FULLTEXT index matching the column list"))
         | _ -> Error(Err(1105, "fulltext pre-pass collected a non-MATCH node"))
 
     match select.From, physicalSources with
