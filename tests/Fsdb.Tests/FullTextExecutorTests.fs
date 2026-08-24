@@ -292,6 +292,20 @@ let tests =
               Expect.equal (ids unioned) [ "37"; "82" ] "bounded MATCH alternatives union their candidates"
               Expect.equal calls 3 "only the metadata probe and unioned candidates enter the residual pipeline"
 
+              calls <- 0
+
+              let projected =
+                  TestSupport.Sql.execute
+                      store
+                      registry
+                      "SELECT MATCH(body) AGAINST('needle') FROM docs WHERE id = 37 AND TOUCH(id) = id"
+
+              match projected with
+              | ResultSet(_, [ [ Some score ] ]) -> Expect.isGreaterThan (float score) 0.0 "the projected score is retained"
+              | other -> failtestf "expected one projected score, got %A" other
+
+              Expect.equal calls 2 "projection-only MATCH retains ordinary point narrowing"
+
           testCase "captured table roots retain their full-text snapshot"
           <| fun _ ->
               let store = create ()

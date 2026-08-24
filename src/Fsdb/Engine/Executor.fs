@@ -7662,7 +7662,10 @@ and private runFullTextSelect
 
             let rowsForExecution =
                 match select.Where |> Option.bind candidateIds with
-                | None -> indexedRows
+                | None ->
+                    tryEqualityLookup store dbName tref select.Where
+                    |> Option.map snd
+                    |> Option.defaultValue indexedRows
                 | Some candidates ->
                     candidates
                     |> Set.toList
