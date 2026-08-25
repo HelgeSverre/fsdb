@@ -96,7 +96,7 @@ Mutations that reach a different MySQL semantic error are recorded separately
 and do not claim syntax parity.
 
 The baseline corpus includes implemented features and declared gaps. The latter
-cover set-operation subqueries, temporal window ranges, derived-table DML,
+cover set-operation subqueries, derived-table DML,
 functional defaults, partitioning, administration statements, stored programs,
 roles, account options, textual prepared statements, and missing spatial
 operations. A baseline-only run therefore acts as an executable gap inventory;

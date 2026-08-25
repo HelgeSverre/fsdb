@@ -6467,6 +6467,66 @@ let tests =
                           [ Some "5"; Some "100" ]
                           [ Some "6"; Some "100" ] ]
 
+                testCase "temporal RANGE offsets use calendar interval arithmetic"
+                <| fun _ ->
+                    let store = newStore ()
+                    runDefault store "CREATE TABLE temporal_range (dt DATETIME, n INT)" |> ignore
+
+                    runDefault
+                        store
+                        "INSERT INTO temporal_range VALUES ('2026-01-01',1),('2026-01-02',2),('2026-01-04',4),(NULL,8)"
+                    |> ignore
+
+                    match
+                        runDefault
+                            store
+                            ("SELECT dt, SUM(n) OVER (ORDER BY dt RANGE BETWEEN INTERVAL 1 DAY PRECEDING AND CURRENT ROW), "
+                             + "SUM(n) OVER (ORDER BY dt DESC RANGE BETWEEN INTERVAL 1 DAY PRECEDING AND CURRENT ROW) "
+                             + "FROM temporal_range ORDER BY dt")
+                    with
+                    | ResultSet(_, rows) ->
+                        Expect.equal
+                            rows
+                            [ [ None; Some "8"; Some "8" ]
+                              [ Some "2026-01-01 00:00:00"; Some "1"; Some "3" ]
+                              [ Some "2026-01-02 00:00:00"; Some "3"; Some "2" ]
+                              [ Some "2026-01-04 00:00:00"; Some "4"; Some "4" ] ]
+                            "DAY offsets follow the window direction and keep NULL peers"
+                    | other -> failtestf "expected a temporal RANGE resultset, got %A" other
+
+                    runDefault store "TRUNCATE temporal_range" |> ignore
+                    runDefault store "INSERT INTO temporal_range VALUES ('2026-01-31',1),('2026-02-28',2),('2026-03-01',4)" |> ignore
+
+                    match
+                        runDefault
+                            store
+                            "SELECT dt, SUM(n) OVER (ORDER BY dt RANGE BETWEEN INTERVAL 1 MONTH PRECEDING AND CURRENT ROW) FROM temporal_range ORDER BY dt"
+                    with
+                    | ResultSet(_, rows) ->
+                        Expect.equal
+                            rows
+                            [ [ Some "2026-01-31 00:00:00"; Some "1" ]
+                              [ Some "2026-02-28 00:00:00"; Some "3" ]
+                              [ Some "2026-03-01 00:00:00"; Some "6" ] ]
+                            "MONTH offsets retain calendar month behavior"
+                    | other -> failtestf "expected a calendar RANGE resultset, got %A" other
+
+                    runDefault store "DROP TABLE temporal_range" |> ignore
+                    runDefault store "CREATE TABLE temporal_range (tm TIME, n INT)" |> ignore
+                    runDefault store "INSERT INTO temporal_range VALUES ('01:00:00',1),('01:30:00',2),('03:00:00',4)" |> ignore
+
+                    match
+                        runDefault
+                            store
+                            "SELECT tm, SUM(n) OVER (ORDER BY tm RANGE BETWEEN INTERVAL 1 HOUR PRECEDING AND CURRENT ROW) FROM temporal_range ORDER BY tm"
+                    with
+                    | ResultSet(_, rows) ->
+                        Expect.equal
+                            rows
+                            [ [ Some "01:00:00"; Some "1" ]; [ Some "01:30:00"; Some "3" ]; [ Some "03:00:00"; Some "4" ] ]
+                            "TIME values accept fixed-duration interval frames"
+                    | other -> failtestf "expected a TIME RANGE resultset, got %A" other
+
                 testCase "the default frame with an ORDER BY is a running total, without one the whole partition"
                 <| fun _ ->
                     expectRows

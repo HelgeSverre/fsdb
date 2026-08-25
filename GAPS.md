@@ -55,7 +55,7 @@ ODKU, IGNORE), SELECT with joins (INNER/LEFT/RIGHT/CROSS/NATURAL/USING),
 derived/LATERAL/JSON_TABLE sources, expression subqueries over set operations,
 query-scoped CTEs (ordinary and recursive,
 including leading UPDATE/DELETE and branch-local WITH), set
-operations, window functions with frames, GROUP BY WITH ROLLUP + GROUPING,
+operations, window functions with numeric and temporal interval frames, GROUP BY WITH ROLLUP + GROUPING,
 DDL for databases/tables/indexes/views/triggers/users/grants, CREATE TABLE AS
 SELECT, TRUNCATE,
 RENAME TABLE, EXPLAIN (TRADITIONAL). Transaction control, SET, SHOW (~25
@@ -116,7 +116,6 @@ identities for bit aggregates.
 | Join size ceiling | unbounded (memory-bound) | `Executor.maxJoinCandidateRows` caps candidate rows at 1,000,000 → error 1105 | medium | divergence |
 | Multi-table UPDATE/DELETE sources | derived tables allowed as join sources | `Executor.applyMutationJoin` accepts real base tables only → 1064 | low | refusal |
 | MATCH…AGAINST placement | evaluates in UPDATE/DELETE WHERE, joins, subqueries | physical SELECT/JOIN sources and single-table UPDATE/DELETE are supported; multi-table UPDATE/DELETE with MATCH remains unsupported | low | refusal |
-| RANGE window frames | `RANGE BETWEEN INTERVAL n DAY PRECEDING…` | `Executor.validateFrame` refuses temporal offsets with 1235; numeric offsets only | low | refusal |
 | sql_mode | ~20 mode bits with semantic effect | strictness plus NO_ZERO_DATE/NO_ZERO_IN_DATE have effect; ONLY_FULL_GROUP_BY remains absent (a bare column picks the first row of its group), and IGNORE_SPACE does not relax whitespace-sensitive function calls | medium | divergence |
 
 ## 3. Built-in functions
@@ -413,7 +412,7 @@ that predates the implementation it measured:
 | Finding | Detail | Status |
 |---|---|---|
 | Planner/CTE syntax | two deterministic depth-three campaigns (2,000 and 10,000 mutations) exposed unconditional INNER JOIN, eager unused-CTE, and incomplete MATCH grammar differences; fixed campaigns now pass with zero differences | resolved 2026-08-25 |
-| Executable gap baselines | 62 MySQL-accepted feature baselines initially exposed 20 declared missing surfaces across set-operation subqueries, window ranges, DML sources, DDL/admin, stored programs, accounts, and spatial functions; set-operation expression subqueries now pass, leaving 17 baseline differences. `--syntax-cases 0` runs this inventory without mutations | active gap driver |
+| Executable gap baselines | 62 MySQL-accepted feature baselines initially exposed 20 declared missing surfaces across set-operation subqueries, window ranges, DML sources, DDL/admin, stored programs, accounts, and spatial functions; set-operation expression subqueries and temporal window ranges now pass, leaving 16 baseline differences. `--syntax-cases 0` runs this inventory without mutations | active gap driver |
 | Same-row transaction contention | the original 32-worker/16-hot-account campaign produced 2,541 fsdb 1205 conflicts; the 2026-08-25 wait-and-rebase rerun committed all 1,455 non-rollback transactions with exact state parity and zero failures. Throughput remained 86 fsdb tx/s versus 5,246 MySQL tx/s, with p99 9,839 ms versus 13 ms | correctness resolved; performance open |
 | Multi-database scaling | the historical campaign predates sharded database roots; the 2026-08-25 rerun failed during concurrent setup with 1205 before a trustworthy scaling ratio could be measured (`2026-08-17-multidb-concurrency-campaign.md`) | unverified |
 | Numeric error shape | 1690 message lacks the offending expression text (`2026-08-19-probe-corpus-triage.md`) | ponytail ceiling |

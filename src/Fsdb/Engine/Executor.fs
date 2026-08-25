@@ -2121,6 +2121,10 @@ type private RowOperand =
     | RowScalar of expression: Expr * column: ColumnDef option * value: Value
     | RowValues of RowOperand list
 
+type private RangeOffset =
+    | NumericRangeOffset of decimal
+    | TemporalRangeOffset of Value
+
 let private comparisonResult
     (ctx: EvalContext)
     (leftExpr: Expr)
@@ -7538,10 +7542,7 @@ and private runWindowedSelect
                 | VUInt n -> Ok(int64 n)
                 | _ -> Error(1210, sprintf "Incorrect arguments to %s" funcName))
 
-        // The numeric position a RANGE frame measures distances along —
-        // only numbers, since a RANGE offset is arithmetic on the ORDER BY
-        // value. ponytail: no `INTERVAL ... ` temporal RANGE offsets; add a
-        // date-arithmetic branch here (and in `rangeBounds`) when needed.
+        // The numeric position a RANGE frame measures distances along.
         let rangeKeyOf (v: Value) : decimal option =
             match v with
             | VInt i -> Some(decimal i)
@@ -7584,6 +7585,14 @@ and private runWindowedSelect
                     sprintf "Window '%s': frame start or end is negative, NULL or of non-integral type" windowName
                 )
 
+            let badRangeOrderType () : Result<'a, EvalError> =
+                Error(
+                    3587,
+                    sprintf
+                        "Window '%s' with RANGE N PRECEDING/FOLLOWING frame requires exactly one ORDER BY expression, of numeric or temporal type"
+                        windowName
+                )
+
             // A `ROWS` offset counts rows: a non-negative integer only.
             let rowsOffset (e: Expr) : Result<int64, EvalError> =
                 evalExpr literalCtx e
@@ -7592,13 +7601,12 @@ and private runWindowedSelect
                     | VUInt n -> Ok(int64 n)
                     | _ -> badOffset ())
 
-            // A `RANGE` offset is a distance along the ORDER BY value, so
-            // MySQL takes any non-negative number, `1.5 PRECEDING` included.
-            let rangeDelta (e: Expr) : Result<decimal, EvalError> =
+            let rangeOffset (e: Expr) : Result<RangeOffset, EvalError> =
                 evalExpr literalCtx e
                 |> Result.bind (fun v ->
-                    match rangeKeyOf v with
-                    | Some d when d >= 0M -> Ok d
+                    match rangeKeyOf v, tryIntervalArgument v with
+                    | Some distance, _ when distance >= 0M -> Ok(NumericRangeOffset distance)
+                    | _, Some(amount, _) when amount >= 0.0 -> Ok(TemporalRangeOffset v)
                     | _ -> badOffset ())
 
             let hasRangeOffset =
@@ -7629,33 +7637,30 @@ and private runWindowedSelect
                     )
                 | _ -> Ok()
 
-            // The RANGE-offset ORDER BY type check MySQL makes statically,
-            // made here off the first non-NULL key instead: a string key is
-            // its 3587, a temporal one is an honest refusal (this engine has
-            // no INTERVAL frame arithmetic).
             let validateRangeOrderType () : Result<unit, EvalError> =
                 if not hasRangeOffset then
                     Ok()
                 else
-                    matched
-                    |> traverse (fun row -> windowOrderBy |> List.map fst |> traverse (evalExpr (ctxFor row)))
-                    |> Result.bind (fun keys ->
-                        match keys |> List.collect id |> List.tryFind (fun v -> v <> VNull) with
-                        | Some((VDate _ | VDateTime _) as v) ->
-                            Error(
-                                1235,
-                                sprintf
-                                    "This version of MySQL doesn't yet support 'RANGE frame over a %s ORDER BY expression'"
-                                    (match v with VDate _ -> "DATE" | _ -> "DATETIME")
-                            )
-                        | Some v when (rangeKeyOf v).IsNone ->
-                            Error(
-                                3587,
-                                sprintf
-                                    "Window '%s' with RANGE N PRECEDING/FOLLOWING frame requires exactly one ORDER BY expression, of numeric or temporal type"
-                                    windowName
-                            )
-                        | _ -> Ok())
+                    let offsets =
+                        [ frame.Start; frame.End ]
+                        |> List.choose (function BoundPreceding expression | BoundFollowing expression -> Some expression | _ -> None)
+                        |> traverse rangeOffset
+
+                    offsets
+                    |> Result.bind (fun resolvedOffsets ->
+                        matched
+                        |> traverse (fun row -> windowOrderBy |> List.map fst |> traverse (evalExpr (ctxFor row)))
+                        |> Result.bind (fun keys ->
+                            match keys |> List.collect id |> List.tryFind (fun value -> value <> VNull) with
+                            | Some(VDate _ | VDateTime _ | VTime _)
+                                when resolvedOffsets |> List.forall (function TemporalRangeOffset _ -> true | _ -> false) ->
+                                Ok()
+                            | Some value
+                                when rangeKeyOf value |> Option.isSome
+                                     && resolvedOffsets |> List.forall (function NumericRangeOffset _ -> true | _ -> false) ->
+                                Ok()
+                            | None -> Ok()
+                            | _ -> badRangeOrderType ()))
 
             let keyOf (exprs: Expr list) (row: Value[]) : Result<Value list, EvalError> =
                 exprs
@@ -7732,44 +7737,102 @@ and private runWindowedSelect
                         i <- i + 1
                     i
 
-                // A RANGE offset bound over the (single) ORDER BY key: rows
-                // whose key sits within `delta` of the current row's, in
-                // whichever direction the ORDER BY sorts. A NULL key (or a
-                // non-numeric one) frames only its own peers, matching
-                // MySQL's treatment of NULLs as a peer group of their own.
-                let rangeBounds group pos (lowDelta: decimal option) (highDelta: decimal option) =
+                let rangeBounds group pos startBound endBound =
                     let selfKey = ordKeyAt group pos |> List.tryHead |> Option.map fst
 
-                    match selfKey |> Option.bind rangeKeyOf with
+                    match selfKey with
                     | None -> Ok(peerLow group pos, peerHigh group pos)
-                    | Some v ->
+                    | Some VNull -> Ok(peerLow group pos, peerHigh group pos)
+                    | Some current ->
                         let descending = dirs |> List.tryHead |> Option.map ((=) Desc) |> Option.defaultValue false
 
-                        let within (other: Value) =
-                            match rangeKeyOf other with
-                            | None -> false
-                            | Some o ->
-                                let low = lowDelta |> Option.map (fun d -> if descending then v + d else v - d)
-                                let high = highDelta |> Option.map (fun d -> if descending then v - d else v + d)
+                        let fixedIntervalTicks interval =
+                            tryIntervalArgument interval
+                            |> Option.bind (fun (amount, unit) ->
+                                let multiplier =
+                                    match unit.ToUpperInvariant() with
+                                    | "MICROSECOND" -> Some 10.0
+                                    | "SECOND" -> Some(float System.TimeSpan.TicksPerSecond)
+                                    | "MINUTE" -> Some(float System.TimeSpan.TicksPerMinute)
+                                    | "HOUR" -> Some(float System.TimeSpan.TicksPerHour)
+                                    | "DAY" -> Some(float System.TimeSpan.TicksPerDay)
+                                    | "WEEK" -> Some(float (System.TimeSpan.TicksPerDay * 7L))
+                                    | _ -> None
 
-                                let lowOk =
-                                    match low with
-                                    | Some l -> if descending then o <= l else o >= l
-                                    | None -> true
+                                multiplier |> Option.map (fun ticks -> decimal (amount * ticks)))
 
-                                let highOk =
-                                    match high with
-                                    | Some h -> if descending then o >= h else o <= h
-                                    | None -> true
+                        let compareRangeValues left right =
+                            match left, right with
+                            | VTime value, VDecimal ticks -> System.Decimal.Compare(decimal (Fsdb.Temporal.timeTicks value), ticks)
+                            | VDecimal ticks, VTime value -> System.Decimal.Compare(ticks, decimal (Fsdb.Temporal.timeTicks value))
+                            | _ -> Value.compare left right
 
-                                lowOk && highOk
+                        let boundary bound =
+                            let applyOffset preceding expression =
+                                rangeOffset expression
+                                |> Result.bind (function
+                                    | NumericRangeOffset distance ->
+                                        match rangeKeyOf current with
+                                        | None -> badRangeOrderType ()
+                                        | Some value ->
+                                            let direction =
+                                                if preceding <> descending then -1M else 1M
 
-                        let keys = group |> Array.map (fun _ -> ()) |> Array.mapi (fun i () -> ordKeyAt group i |> List.tryHead |> Option.map fst)
-                        let inFrame = keys |> Array.map (function Some k -> within k | None -> false)
+                                            Ok(Some(VDecimal(value + direction * distance)))
+                                    | TemporalRangeOffset interval ->
+                                        let direction = if preceding <> descending then -1.0 else 1.0
 
-                        match inFrame |> Array.tryFindIndex id, inFrame |> Array.tryFindIndexBack id with
-                        | Some lo, Some hi -> Ok(lo, hi)
-                        | _ -> Ok(pos, pos - 1)
+                                        match current with
+                                        | VTime value ->
+                                            fixedIntervalTicks interval
+                                            |> Option.map (fun ticks ->
+                                                VDecimal(decimal (Fsdb.Temporal.timeTicks value) + decimal direction * ticks)
+                                                |> Some
+                                                |> Ok)
+                                            |> Option.defaultWith badOffset
+                                        | _ ->
+                                            match tryDateIntervalBinOp direction current interval with
+                                            | Some VNull
+                                            | None -> badOffset ()
+                                            | Some value -> Ok(Some value))
+
+                            match bound with
+                            | UnboundedPreceding
+                            | UnboundedFollowing -> Ok None
+                            | CurrentRow -> Ok(Some current)
+                            | BoundPreceding expression -> applyOffset true expression
+                            | BoundFollowing expression -> applyOffset false expression
+
+                        boundary startBound
+                        |> Result.bind (fun startValue ->
+                            boundary endBound
+                            |> Result.map (fun endValue ->
+                                let within other =
+                                    let startsAfter =
+                                        startValue
+                                        |> Option.forall (fun start ->
+                                            let compared = compareRangeValues other start
+                                            if descending then compared <= 0 else compared >= 0)
+
+                                    let endsBefore =
+                                        endValue
+                                        |> Option.forall (fun finish ->
+                                            let compared = compareRangeValues other finish
+                                            if descending then compared >= 0 else compared <= 0)
+
+                                    startsAfter && endsBefore
+
+                                let inFrame =
+                                    group
+                                    |> Array.map (fun (_, (_, key, _)) ->
+                                        key
+                                        |> List.tryHead
+                                        |> Option.map fst
+                                        |> Option.exists (function VNull -> false | value -> within value))
+
+                                match inFrame |> Array.tryFindIndex id, inFrame |> Array.tryFindIndexBack id with
+                                | Some low, Some high -> low, high
+                                | _ -> pos, pos - 1))
 
                 // [lo, hi] row indexes (inclusive; `hi < lo` means an empty
                 // frame) this row's frame covers within its partition.
@@ -7794,17 +7857,7 @@ and private runWindowedSelect
                     match frame.Unit, frame.Start, frame.End with
                     | FrameRange, (BoundPreceding _ | BoundFollowing _), _
                     | FrameRange, _, (BoundPreceding _ | BoundFollowing _) ->
-                        let deltaOf bound sign =
-                            match bound with
-                            | BoundPreceding e -> rangeDelta e |> Result.map (fun n -> Some(sign * n))
-                            | BoundFollowing e -> rangeDelta e |> Result.map (fun n -> Some(-(sign * n)))
-                            | CurrentRow -> Ok(Some 0M)
-                            | UnboundedPreceding
-                            | UnboundedFollowing -> Ok None
-
-                        deltaOf frame.Start 1M
-                        |> Result.bind (fun low -> deltaOf frame.End -1M |> Result.map (fun high -> low, high))
-                        |> Result.bind (fun (low, high) -> rangeBounds group pos low high)
+                        rangeBounds group pos frame.Start frame.End
                     | _ ->
                         boundIndex frame.Start true
                         |> Result.bind (fun lo ->

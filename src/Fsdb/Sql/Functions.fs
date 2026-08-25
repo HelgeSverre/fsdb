@@ -2131,7 +2131,7 @@ let private intervalFn: Scalar =
 
 /// Reads the `INTERVAL` encoding above, or tolerates a plain `"N UNIT"`
 /// string (e.g. `DATE_ADD(d, '1 DAY')`) as a fallback shape.
-let private tryParseIntervalArg (v: Value) : (float * string) option =
+let tryIntervalArgument (v: Value) : (float * string) option =
     match v with
     | VString s when s.StartsWith intervalMarker ->
         match s.Substring(intervalMarker.Length).Split('\x01') with
@@ -2174,7 +2174,7 @@ let private applyDateInterval (sign: float) (dateV: Value) (dt: DateTime) (amoun
 let private dateAddCore (sign: float) : Scalar =
     function
     | [ dateV; intervalV ] when not (anyNull [ dateV; intervalV ]) ->
-        match asDateTime dateV, tryParseIntervalArg intervalV with
+        match asDateTime dateV, tryIntervalArgument intervalV with
         | Some dt, Some(n, unit) -> applyDateInterval sign dateV dt n unit
         | _ -> VNull
     | [ dateV; amtV; VString unit ] when not (anyNull [ dateV; amtV ]) ->
@@ -2202,7 +2202,7 @@ let private addSubDateCore (sign: float) : Scalar =
         match asDateTime dateV with
         | None -> VNull
         | Some dt ->
-            match tryParseIntervalArg amtV with
+            match tryIntervalArgument amtV with
             | Some(n, unit) -> applyDateInterval sign dateV dt n unit
             | None -> applyDateInterval sign dateV dt (toDouble amtV) "DAY"
     | args -> dateAddCore sign args
@@ -2223,7 +2223,7 @@ let isIntervalValue (v: Value) : bool =
 /// when `dateV` isn't a recognizable date/time, so the caller can fall back
 /// to `Value.add`/`Value.sub` and get MySQL's usual type-error/NULL there.
 let tryDateIntervalBinOp (sign: float) (dateV: Value) (intervalV: Value) : Value option =
-    match tryParseIntervalArg intervalV, asDateTime dateV with
+    match tryIntervalArgument intervalV, asDateTime dateV with
     | Some(n, unit), Some dt -> Some(applyDateInterval sign dateV dt n unit)
     // A real `INTERVAL n unit` operand never degrades into numeric addition:
     // MySQL answers NULL when the left side isn't a date ('abc' + INTERVAL 1
