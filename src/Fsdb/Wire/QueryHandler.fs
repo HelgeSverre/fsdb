@@ -56,6 +56,21 @@ let private parserError (sql: string) (detail: string) =
 let private lookupVar (session: Session) (name: string) : string option option =
     session.Variables |> Map.tryFind (name.ToLowerInvariant())
 
+let private completeResultMetadata (session: Session) (result: QueryResult) (metadata: ColumnMetadata list) =
+    match result with
+    | ResultSet(columns, _) when metadata.Length <> columns.Length ->
+        let collationId =
+            lookupVar session "collation_connection"
+            |> Option.flatten
+            |> Option.bind (fun name -> Collation.idAndSortlen |> Map.tryFind (name.ToLowerInvariant()))
+            |> Option.map (fst >> uint16)
+
+        List.replicate
+            columns.Length
+            { Value.columnMetadata TypeVarString with
+                CollationId = collationId }
+    | _ -> metadata
+
 /// Finds every top-level `?` placeholder in `sql` — one that isn't inside a
 /// `'...'`/`"..."` string literal, a `` `...` `` backtick identifier, or a
 /// `-- `/`#`/`/* ... */` comment — and returns its char offset, in order.
@@ -1407,6 +1422,8 @@ let private executeParsed (session: Session) (stmt: Statement) : Session * Query
 
                     lastInsertId, lastGeneratedId, result, [], None)
 
+        let columnMetadata = completeResultMetadata session result columnMetadata
+
         let session =
             { session with
                 LastInsertId = lastInsertId
@@ -2639,15 +2656,11 @@ let rec private dispatch (session: Session) (rawSql: string) : Session * QueryRe
 
               match tryProbe sql upper with
               | Some probe ->
-            // Every probe-handled form (SHOW/SET/session-variable SELECT/...)
-            // is its own small synthetic `ResultSet` of plain strings — none of
-            // them go through `executeStatement`'s typed path, so clear
-            // whatever `LastResultColumnMetadata` a previous statement on this
-            // session left behind rather than risk it surviving (via `Server`'s
-            // VAR_STRING-length-mismatch fallback, a same-column-count
-            // coincidence is all it'd take) onto an unrelated resultset.
+            // Probe-handled resultsets contain rendered strings rather than
+            // typed values, so rebuild their descriptors instead of retaining
+            // metadata from the previous statement.
                   let session, result = runProbe session sql probe
-                  { session with LastResultColumnMetadata = [] }, result
+                  { session with LastResultColumnMetadata = completeResultMetadata session result [] }, result
               | None -> executeStatement session sql upper
 
 /// No SQL engine failure should ever escape as a raw .NET exception — the

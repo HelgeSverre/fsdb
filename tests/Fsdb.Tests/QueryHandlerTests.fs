@@ -197,6 +197,19 @@ let tests =
                       "wire charset numbers follow each result expression"
               | _, other -> failtestf "expected empty collation metadata, got %A" other
 
+          testCase "text-probed result metadata uses the connection collation"
+          <| fun _ ->
+              let session = create 1 (Fsdb.Storage.create ())
+              let session, _ = handle session "SET NAMES latin1 COLLATE latin1_swedish_ci"
+
+              match handle session "SHOW DATABASES" with
+              | session, ResultSet([ "Database" ], _) ->
+                  Expect.equal
+                      (session.LastResultColumnMetadata |> List.map _.CollationId)
+                      [ Some 8us ]
+                      "SHOW metadata follows the requested result charset"
+              | _, other -> failtestf "expected SHOW DATABASES metadata, got %A" other
+
           testCase "result metadata preserves physical column origins"
           <| fun _ ->
               let session = create 1 (Fsdb.Storage.create ())
