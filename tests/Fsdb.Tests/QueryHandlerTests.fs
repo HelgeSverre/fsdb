@@ -941,6 +941,43 @@ let tests =
                   | other -> failtestf "expected missing procedure, got %A" other
               | _, other -> failtestf "expected procedure result, got %A" other
 
+          testCase "scheduled event declarations persist without executing"
+          <| fun _ ->
+              let session = create 1 (Fsdb.Storage.create ())
+              let session, _ = handle session "CREATE TABLE event_log (value INT)"
+              let session, result =
+                  handle
+                      session
+                      "CREATE EVENT tomorrow ON SCHEDULE AT CURRENT_TIMESTAMP + INTERVAL 1 DAY DO INSERT INTO event_log VALUES (1)"
+              Expect.equal result (Affected 0UL) "created"
+
+              match handle session "SHOW EVENTS" |> snd with
+              | ResultSet(_, [ row ]) ->
+                  Expect.equal row.[0] (Some "fsdb") "event schema"
+                  Expect.equal row.[1] (Some "tomorrow") "event name"
+                  Expect.equal row.[10] (Some "ENABLED") "event status"
+              | other -> failtestf "expected event status, got %A" other
+
+              match handle session "SHOW CREATE EVENT tomorrow" |> snd with
+              | ResultSet(_, [ [ Some "tomorrow"; _; _; Some ddl; _; _; _ ] ]) ->
+                  Expect.stringContains ddl "ON SCHEDULE AT CURRENT_TIMESTAMP + INTERVAL 1 DAY" "stored schedule"
+              | other -> failtestf "expected create event, got %A" other
+
+              match handle session "SELECT event_name FROM information_schema.events WHERE event_schema = 'fsdb'" |> snd with
+              | ResultSet(_, [ [ Some "tomorrow" ] ]) -> ()
+              | other -> failtestf "expected information_schema event, got %A" other
+
+              match handle session "SELECT COUNT(*) FROM event_log" |> snd with
+              | ResultSet(_, [ [ Some "0" ] ]) -> ()
+              | other -> failtestf "event declaration must not run eagerly, got %A" other
+
+              let session, result = handle session "DROP EVENT tomorrow"
+              Expect.equal result (Affected 0UL) "dropped"
+
+              match handle session "SHOW EVENTS" |> snd with
+              | ResultSet(_, []) -> ()
+              | other -> failtestf "expected no events after drop, got %A" other
+
           testCase "SQL PREPARE accepts user-variable source text and text-probed statements"
           <| fun _ ->
               let session = create 1 (Fsdb.Storage.create ())

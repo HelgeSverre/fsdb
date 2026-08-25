@@ -2121,6 +2121,15 @@ let mysqlRoutinesColumns: ColumnDef list =
       sysCol "created" (TDateTime 2) false None
       sysCol "definer" (TChar 93) false (Some(VString "")) ]
 
+let mysqlEventsColumns: ColumnDef list =
+    [ keyCol "event_schema" 64
+      keyCol "event_name" 64
+      sysCol "schedule_definition" TText false (Some(VString ""))
+      sysCol "event_definition" TText false (Some(VString ""))
+      sysCol "created" (TDateTime 2) false None
+      sysCol "definer" (TChar 93) false (Some(VString ""))
+      sysCol "status" (TChar 8) false (Some(VString "ENABLED")) ]
+
 /// Row-backed CHECK definitions. Keeping these beside views/triggers avoids
 /// changing the binary Table snapshot layout: ordinary row WAL events carry
 /// every definition, while the executor binds and evaluates the clause
@@ -2144,6 +2153,7 @@ let private mysqlSystemDatabase () : Database =
       "triggers", sysTable "triggers" mysqlTriggersColumns []
       "views", sysTable "views" mysqlViewsColumns []
       "routines", sysTable "routines" mysqlRoutinesColumns []
+      "events", sysTable "events" mysqlEventsColumns []
       "check_constraints", sysTable "check_constraints" mysqlCheckConstraintsColumns [] ]
     |> Map.ofList
 
@@ -2200,6 +2210,9 @@ let ensureMysqlSchema (store: Store) : unit =
 
     if not (Map.containsKey "routines" dbRef.Value) then
         dbRef.Value <- Map.add "routines" (sysTable "routines" mysqlRoutinesColumns []) dbRef.Value
+
+    if not (Map.containsKey "events" dbRef.Value) then
+        dbRef.Value <- Map.add "events" (sysTable "events" mysqlEventsColumns []) dbRef.Value
 
     if not (Map.containsKey "check_constraints" dbRef.Value) then
         dbRef.Value <- Map.add "check_constraints" (sysTable "check_constraints" mysqlCheckConstraintsColumns []) dbRef.Value

@@ -2026,7 +2026,32 @@ let private runProbe (session: Session) (sql: string) (probe: Probe) : Session *
         let database, name = splitQualified (session.Database |> Option.defaultValue defaultDatabase) qualifiedName
 
         if kind = "EVENT" then
-            session, Err(1539, sprintf "Unknown event '%s'" name)
+            let event =
+                match Storage.scanList (Session.currentStore session) "mysql" "events" with
+                | Error _ -> None
+                | Ok(_, rows) ->
+                    rows
+                    |> List.tryFind (fun row ->
+                        row.Length >= 7
+                        && String.Equals(toText row.[0] |> Option.defaultValue "", database, StringComparison.OrdinalIgnoreCase)
+                        && String.Equals(toText row.[1] |> Option.defaultValue "", name, StringComparison.OrdinalIgnoreCase))
+
+            match event with
+            | None -> session, Err(1539, sprintf "Unknown event '%s'" name)
+            | Some row ->
+                let ddl =
+                    sprintf
+                        "CREATE EVENT `%s` ON SCHEDULE %s DO %s"
+                        name
+                        (toText row.[2] |> Option.defaultValue "")
+                        (toText row.[3] |> Option.defaultValue "")
+
+                session,
+                ResultSet(
+                    [ "Event"; "sql_mode"; "time_zone"; "Create Event"; "character_set_client"; "collation_connection"; "Database Collation" ],
+                    [ [ Some name; Some ""; Some "SYSTEM"; Some ddl; Some "utf8mb4"; Some "utf8mb4_0900_ai_ci"
+                        Some "utf8mb4_0900_ai_ci" ] ]
+                )
         elif kind = "PROCEDURE" then
             let routine =
                 match Storage.scanList (Session.currentStore session) "mysql" "routines" with
@@ -2357,6 +2382,30 @@ let private tryTextRoutineCommand (sql: string) =
     else
         None
 
+type private TextEventCommand =
+    | CreateEvent of name: string * schedule: string * body: string
+    | DropEvent of name: string * ifExists: bool
+
+let private createEventRe =
+    Regex(
+        @"^\s*CREATE\s+EVENT\s+(?<name>\S+)\s+ON\s+SCHEDULE\s+(?<schedule>.+?)\s+DO\s+(?<body>.+)$",
+        RegexOptions.IgnoreCase
+    )
+
+let private dropEventRe =
+    Regex(@"^\s*DROP\s+EVENT\s+(?<ifExists>IF\s+EXISTS\s+)?(?<name>\S+)\s*$", RegexOptions.IgnoreCase)
+
+let private tryTextEventCommand (sql: string) =
+    let create = createEventRe.Match(sql)
+    let drop = dropEventRe.Match(sql)
+
+    if create.Success then
+        Some(CreateEvent(create.Groups.["name"].Value, create.Groups.["schedule"].Value, create.Groups.["body"].Value))
+    elif drop.Success then
+        Some(DropEvent(drop.Groups.["name"].Value, drop.Groups.["ifExists"].Success))
+    else
+        None
+
 /// Binds prepared-statement parameter `Value`s into a parsed `Statement`,
 /// replacing every `Placeholder i` with `Lit values.[i]`. Total — after this
 /// no `Placeholder` survives and the statement executes through the ordinary
@@ -2492,12 +2541,70 @@ let rec private dispatch (session: Session) (rawSql: string) : Session * QueryRe
                     let code, message = Storage.toMySqlError error
                     session, Err(code, message)
 
+    let eventRows () =
+        match Storage.scanList session.Store "mysql" "events" with
+        | Ok(_, rows) -> rows
+        | Error _ -> []
+
+    let eventMatches schema name (row: Value[]) =
+        row.Length >= 2
+        && String.Equals(toText row.[0] |> Option.defaultValue "", schema, StringComparison.OrdinalIgnoreCase)
+        && String.Equals(toText row.[1] |> Option.defaultValue "", name, StringComparison.OrdinalIgnoreCase)
+
+    let runTextEvent command =
+        match command with
+        | CreateEvent(qualifiedName, schedule, body) ->
+            let database, name = splitQualified (session.Database |> Option.defaultValue defaultDatabase) qualifiedName
+
+            match Auth.checkForAccount session.Store (accountOf session) [ "EVENT", Auth.OnDb database ] with
+            | Error(code, message) -> session, Err(code, message)
+            | Ok() when eventRows () |> List.exists (eventMatches database name) ->
+                session, Err(1537, sprintf "Event '%s' already exists" name)
+            | Ok() ->
+                let upper = body.Trim().ToUpperInvariant()
+
+                if Parser.parse body |> Result.isError && tryProbe body upper |> Option.isNone then
+                    session, syntaxError body
+                else
+                    let definer = session.User + "@" + session.AccountHost
+
+                    match
+                        Storage.insertRows
+                            session.Store
+                            "mysql"
+                            "events"
+                            None
+                            [ [ VString database; VString name; VString schedule; VString body; VDateTime DateTime.Now
+                                VString definer; VString "ENABLED" ] ]
+                    with
+                    | Ok _ -> session, Affected 0UL
+                    | Error error ->
+                        let code, message = Storage.toMySqlError error
+                        session, Err(code, message)
+        | DropEvent(qualifiedName, ifExists) ->
+            let database, name = splitQualified (session.Database |> Option.defaultValue defaultDatabase) qualifiedName
+            let exists = eventRows () |> List.exists (eventMatches database name)
+
+            match Auth.checkForAccount session.Store (accountOf session) [ "EVENT", Auth.OnDb database ] with
+            | Error(code, message) -> session, Err(code, message)
+            | Ok() when not exists && not ifExists -> session, Err(1539, sprintf "Unknown event '%s'" name)
+            | Ok() when not exists -> session, Affected 0UL
+            | Ok() ->
+                match Storage.deleteRows session.Store "mysql" "events" (eventMatches database name >> Ok) with
+                | Ok _ -> session, Affected 0UL
+                | Error error ->
+                    let code, message = Storage.toMySqlError error
+                    session, Err(code, message)
+
     if Parser.isBlank sql then
         session, Affected 0UL
     else
-        match tryTextRoutineCommand sql with
-        | Some command -> runTextRoutine command
+        match tryTextEventCommand sql with
+        | Some command -> runTextEvent command
         | None ->
+          match tryTextRoutineCommand sql with
+          | Some command -> runTextRoutine command
+          | None ->
           match tryTextPreparedCommand sql with
           | Error result -> session, result
           | Ok(Some command) -> runTextPrepared command

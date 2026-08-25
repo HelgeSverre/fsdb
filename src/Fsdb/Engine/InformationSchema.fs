@@ -1185,6 +1185,24 @@ let private eventsColumns =
       strCol "COLLATION_CONNECTION"
       strCol "DATABASE_COLLATION" ]
 
+let private eventsRows (catalog: Catalog) =
+    let rows =
+        catalog
+        |> Map.tryFind "mysql"
+        |> Option.bind (Map.tryFind "events")
+        |> Option.map (_.RowsArray >> List.ofSeq)
+        |> Option.defaultValue []
+
+    rows
+    |> List.choose (fun row ->
+        if row.Length < 7 then
+            None
+        else
+            Some
+                [| vs "def"; row.[0]; row.[1]; row.[5]; vs "SYSTEM"; vs "SQL"; row.[3]; vs "ONE TIME"; VNull
+                   row.[2]; VNull; vs ""; VNull; VNull; row.[6]; vs "NOT PRESERVE"; row.[4]; row.[4]; VNull
+                   vs ""; VInt 1L; vs "utf8mb4"; vs "utf8mb4_0900_ai_ci"; vs "utf8mb4_0900_ai_ci" |])
+
 /// One row per user table with NULL partition fields — what real MySQL
 /// emits for every unpartitioned table.
 let private partitionsColumns =
@@ -1510,8 +1528,8 @@ let scan (catalog: Catalog) (name: string) (viewColumns: ViewColumns option) : (
         | "VIEWS" -> Some(viewsRows catalog)
         | "ROUTINES" -> Some(routinesRows catalog)
         | "PARAMETERS"
-        | "EVENTS"
         | "COLUMN_PRIVILEGES" -> Some []
+        | "EVENTS" -> Some(eventsRows catalog)
         | _ -> None
 
     rows
@@ -2151,12 +2169,20 @@ let showTriggers (catalog: Catalog) (dbName: string) : ShowResult =
         )
 
 let showEvents (catalog: Catalog) (dbName: string option) : ShowResult =
-    showEmptyOf
-        catalog
-        dbName
+    let rows =
+        eventsRows catalog
+        |> List.filter (fun row -> dbName |> Option.forall (fun db -> String.Equals(toText row.[1] |> Option.defaultValue "", db, StringComparison.OrdinalIgnoreCase)))
+        |> List.map (fun row ->
+            [ toText row.[1]; toText row.[2]; toText row.[3]; toText row.[4]; toText row.[7]; toText row.[8]
+              toText row.[9]; toText row.[10]; toText row.[12]; toText row.[13]; toText row.[14]; toText row.[20]
+              toText row.[21]; toText row.[22]; toText row.[23] ])
+
+    Ok(
         [ "Db"; "Name"; "Definer"; "Time zone"; "Type"; "Execute at"; "Interval value"; "Interval field"
           "Starts"; "Ends"; "Status"; "Originator"; "character_set_client"; "collation_connection"
-          "Database Collation" ]
+          "Database Collation" ],
+        rows
+    )
 
 /// `SHOW PROCEDURE STATUS` / `SHOW FUNCTION STATUS [LIKE|WHERE ...]`.
 let showRoutineStatus (catalog: Catalog) : ShowResult =
