@@ -77,10 +77,8 @@ type private IndexedJoinPlan =
 
 type private IndexedJoinProbe =
     { Table: Table
-      KeyName: string
-      LeftIndices: int list
-      RightIndices: int list
-      Unique: bool }
+      Index: EqualityIndex
+      LeftIndices: int list }
 
 type private FullTextPredicatePlan =
     { Rows: (RowId * Value[]) list
@@ -4458,8 +4456,8 @@ and private tryIndexedInnerProbe
         let rightNames = equiKeys |> List.map (fun (_, rightIndex) -> rightColumns.[rightIndex].Name)
 
         Storage.tryEqualityIndexForColumns table rightNames
-        |> Option.bind (fun (keyName, rightIndices, unique) ->
-            rightIndices
+        |> Option.bind (fun index ->
+            index.ColumnIndices
             |> traverse (fun rightIndex ->
                 equiKeys
                 |> List.tryPick (fun (leftIndex, candidate) -> if candidate = rightIndex then Some leftIndex else None)
@@ -4467,10 +4465,8 @@ and private tryIndexedInnerProbe
             |> Result.toOption
             |> Option.map (fun leftIndices ->
                 { Table = table
-                  KeyName = keyName
-                  LeftIndices = leftIndices
-                  RightIndices = rightIndices
-                  Unique = unique }))
+                  Index = index
+                  LeftIndices = leftIndices }))
     | _ -> None
 
 /// Early split on the join target: `JSON_TABLE` is lateral (its source
@@ -4925,19 +4921,11 @@ and private applyResolvedJoin
                     seq {
                         for left in rowsSoFar do
                             let rightRows =
-                                match probe.LeftIndices, probe.RightIndices with
-                                | [ leftIndex ], [ rightIndex ] ->
-                                    Storage.tryEqualityLookupInTable store probe.Table joinColumns.[rightIndex].Name left.[leftIndex]
-                                    |> Option.map (fun (_, rows) -> rows |> List.map snd |> Seq.ofList)
-                                    |> Option.defaultValue joinRows
-                                | leftIndices, rightIndices ->
-                                    let equalities =
-                                        List.zip leftIndices rightIndices
-                                        |> List.map (fun (leftIndex, rightIndex) -> joinColumns.[rightIndex].Name, left.[leftIndex])
-
-                                    Storage.tryCompositeEqualityLookupInTable store probe.Table equalities
-                                    |> Option.map (fun lookup -> lookup.LookupRows |> List.map snd |> Seq.ofList)
-                                    |> Option.defaultValue joinRows
+                                probe.LeftIndices
+                                |> List.map (fun leftIndex -> left.[leftIndex])
+                                |> Storage.tryEqualityLookupForIndex store probe.Table probe.Index
+                                |> Option.map (Seq.map snd)
+                                |> Option.defaultValue joinRows
 
                             for right in rightRows do
                                 yield Array.append left right
@@ -9510,9 +9498,9 @@ let private indexedJoinExplainPlans
                         |> Option.map (fun probe ->
                             joinIndex + 1,
                             { Table = probe.Table
-                              KeyName = probe.KeyName
-                              ColumnIndices = probe.RightIndices
-                              Unique = probe.Unique
+                              KeyName = probe.Index.Name
+                              ColumnIndices = probe.Index.ColumnIndices
+                              Unique = probe.Index.Unique
                               References = probe.LeftIndices |> List.map (leftColumnReference leftSources)
                               HasResidual = not residual.IsEmpty })
                     | _ -> None

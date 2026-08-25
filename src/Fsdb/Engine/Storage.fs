@@ -2508,6 +2508,11 @@ type EqualityLookup =
       LookupColumns: ColumnDef list
       LookupRows: (RowId * Value[]) list }
 
+type EqualityIndex =
+    { Name: string
+      ColumnIndices: int list
+      Unique: bool }
+
 /// Uses a fully-bound composite key. Residual predicate evaluation remains
 /// responsible for contradictory or repeated equalities.
 let tryCompositeEqualityLookupInTable
@@ -2578,7 +2583,7 @@ let tryCompositeEqualityLookup
     tableAt store dbName tableName
     |> Option.bind (fun table -> tryCompositeEqualityLookupInTable store table equalities)
 
-let tryEqualityIndexForColumns (table: Table) (columnNames: string list) : (string * int list * bool) option =
+let tryEqualityIndexForColumns (table: Table) (columnNames: string list) : EqualityIndex option =
     columnNames
     |> traverse (resolveColumn table.Columns)
     |> Result.toOption
@@ -2588,7 +2593,48 @@ let tryEqualityIndexForColumns (table: Table) (columnNames: string list) : (stri
 
         let unique = uniqueKeyGroups table |> List.map (fun (name, indices) -> name, indices, true)
         let secondary = secondaryKeyGroups table |> List.map (fun group -> group.Name, group.Indices, false)
-        unique @ secondary |> List.tryFind matches)
+        unique @ secondary
+        |> List.tryFind matches
+        |> Option.map (fun (name, indices, unique) ->
+            { Name = name
+              ColumnIndices = indices
+              Unique = unique }))
+
+let tryEqualityLookupForIndex
+    (store: Store)
+    (table: Table)
+    (index: EqualityIndex)
+    (values: Value list)
+    : (RowId * Value[]) list option =
+    if index.ColumnIndices.Length <> values.Length then
+        None
+    else
+        List.zip index.ColumnIndices values
+        |> traverse (fun (columnIndex, value) ->
+            match exactProbeValue store table columnIndex value with
+            | Some exact -> Ok(columnIndex, exact)
+            | None -> Error())
+        |> Result.toOption
+        |> Option.map (fun exactValues ->
+            let probeRow = Array.create table.Columns.Length VNull
+            exactValues |> List.iter (fun (columnIndex, value) -> probeRow.[columnIndex] <- value)
+
+            if exactValues |> List.exists (snd >> (=) VNull) then
+                []
+            elif index.Unique then
+                encodeConstraintKey table.Columns index.ColumnIndices probeRow
+                |> Option.bind (fun key -> table.UniqueIndex |> Map.tryFind index.Name |> Option.bind (Map.tryFind key))
+                |> Option.bind (fun rowId -> table.RowsArray.TryFind rowId |> Option.map (fun row -> rowId, row))
+                |> Option.toList
+            else
+                let key = encodeEqualityKey table.Columns index.ColumnIndices probeRow
+
+                table.SecondaryIndex
+                |> Map.tryFind index.Name
+                |> Option.bind (Map.tryFind key)
+                |> Option.defaultValue Set.empty
+                |> Seq.choose (fun rowId -> table.RowsArray.TryFind rowId |> Option.map (fun row -> rowId, row))
+                |> List.ofSeq)
 
 let private trySecondaryOrderSliceInTable
     (store: Store)
