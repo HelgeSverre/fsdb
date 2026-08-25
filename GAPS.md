@@ -82,6 +82,7 @@ variants), USE, KILL, DESCRIBE are text-probed before the grammar
 | Gap | MySQL 8.4 | fsdb | Impact | Class |
 |---|---|---|---|---|
 | Locking detail | `FOR UPDATE/SHARE [OF tbl…] [NOWAIT|SKIP LOCKED]` | accepted and ignored, including `LOCK IN SHARE MODE`; no transaction-held read locks | low | divergence |
+| Executable-comment edge cases | versioned comment bodies follow the server grammar at each token boundary | ordinary `/*!NNNNN … */` splicing works; empty and densely adjacent executable comments can still be accepted or rejected differently | low | divergence |
 Expression coverage that does exist: full comparison/logical/arithmetic
 operators incl. `<=>`, row-value comparisons and `IN`, `XOR`, three-valued logic; CASE (both forms);
 CAST/CONVERT; EXISTS/IN/ANY/SOME/ALL/BETWEEN/LIKE [ESCAPE]/REGEXP; `->`/`->>` JSON
@@ -231,7 +232,7 @@ lock-free.
 | READ UNCOMMITTED | dirty reads | refused with 1235 | medium | refusal |
 | Deadlock errors | 1213 deadlock detection with victim selection | waits honor `innodb_lock_wait_timeout` and return 1205; cycles are not detected or assigned a 1213 victim | low | divergence |
 | Write parallelism within a database | row-lock concurrency | indexed autocommit and transaction UPDATE/DELETE paths coordinate row stripes; full-scan, CTE, multi-table, and insert/upsert transaction writes still rely on optimistic merge; publishing a new immutable database root remains one brief per-database critical section, and durable commit events are sequenced | medium (throughput) | partial |
-| Multi-database scaling | near-linear with connections | database roots and row-lock stripes are sharded; a 4-database/8-worker campaign completed in 0.49x its serial projection, while an 8-database/16-worker CPU-saturated campaign reached 0.96x | medium | partial |
+| Multi-database scaling | near-linear with connections | database roots and row-lock stripes are sharded; a 4-database/8-worker campaign completed in 0.49x its serial projection, while an 8-database/16-worker CPU-saturated campaign reached 1.06x | medium | partial |
 | Cross-database snapshots | linearizable catalog reads | the `Store.Catalog` projection is explicitly not atomic across databases mid-commit | low | divergence |
 
 ## 8. Persistence and durability
@@ -417,8 +418,9 @@ that predates the implementation it measured:
 |---|---|---|
 | Planner/CTE syntax | two deterministic depth-three campaigns (2,000 and 10,000 mutations) exposed unconditional INNER JOIN, eager unused-CTE, and incomplete MATCH grammar differences; fixed campaigns now pass with zero differences | resolved 2026-08-25 |
 | Executable gap baselines | The corpus grew from 62 to 70 MySQL-accepted baselines. A native MySQL 8.4.11 rerun passed 64 and reproduced exactly the six intentional findings: procedure parameters/bodies, account requirements, READ UNCOMMITTED, and partition selection/maintenance. `--syntax-cases 0` runs this inventory without mutations | oracle-verified 2026-08-25 |
-| Same-row transaction contention | the original 32-worker/16-hot-account campaign produced 2,541 fsdb 1205 conflicts; the 2026-08-25 wait-and-rebase rerun committed all 1,455 non-rollback transactions with exact state parity and zero failures. Throughput remained 86 fsdb tx/s versus 5,246 MySQL tx/s, with p99 9,839 ms versus 13 ms | correctness resolved; performance open |
-| Multi-database scaling | single-capture transaction snapshots removed cross-database 1205 conflicts; per-database lock namespaces and connection-aware worker provisioning reduced the 4x8 campaign from 10.0s with failures to 0.55s with exact parity (0.49x serial projection). The 8x16 shape also had zero failures but saturated at 0.96x | correctness resolved; high-fan-out performance open |
+| Depth-three syntax stress | 10,000 deterministic mutations plus 70 baselines produced no crash, timeout, protocol fault, or invariant failure. The 133 differences cluster in the six declared feature gaps and executable-comment/error-contract edges; account cleanup covers both default and empty-host identities | compatibility differences retained; harness cleanup fixed 2026-08-25 |
+| Same-row transaction contention | the original 32-worker/16-hot-account campaign produced 2,541 fsdb 1205 conflicts; a 64-worker/16-hot-account run completed all 12,800 prepared transactions with exact state parity and zero failures. Throughput was 37 fsdb tx/s versus 3,627 MySQL tx/s, with p99 4,770 ms versus 36 ms | correctness resolved; performance open |
+| Multi-database scaling | single-capture transaction snapshots removed cross-database 1205 conflicts; per-database lock namespaces and connection-aware worker provisioning reduced the 4x8 campaign from 10.0s with failures to 0.55s with exact parity (0.49x serial projection). An 8x16 run preserved all 12,800 transaction outcomes but took 1.06x its serial projection | correctness resolved; high-fan-out performance open |
 | Numeric error shape | 1690 message lacks the offending expression text (`2026-08-19-probe-corpus-triage.md`) | ponytail ceiling |
 | Temporal/error-shape ceilings | `DATE 'bad'` → 1064 vs MySQL 1525; parenthesized set-op groups `(A UNION B) INTERSECT C` refused | ponytail ceilings |
 
