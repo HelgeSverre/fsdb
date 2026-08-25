@@ -487,6 +487,18 @@ let beginTransactionSnapshotWithBase (store: Store) : Catalog * Store =
     let catalog = store.Catalog
     catalog, transactionSnapshotFromCatalog store catalog
 
+let beginTransactionContext (store: Store) : Store =
+    let owner = Threading.Interlocked.Increment(&store.RowLockSequence.[0])
+
+    { store with
+        OnCommit = ResizeArray()
+        PendingEvents = if store.OnCommit.Count > 0 || store.PendingEvents.IsSome then Some(ResizeArray()) else None
+        Lock = obj ()
+        TransactionLocks =
+            Some
+                { Owner = owner
+                  HeldStripes = Collections.Generic.HashSet<RowLockStripe>(HashIdentity.Reference) } }
+
 let beginTransactionWithBase (store: Store) : Catalog * Store =
     let catalog, snapshot = beginTransactionSnapshotWithBase store
     let owner = Threading.Interlocked.Increment(&store.RowLockSequence.[0])
@@ -2440,24 +2452,24 @@ let tryBuildTransientEqualityLookup (store: Store) (dbName: string) (tableName: 
         resolveColumn table.Columns columnName
         |> Result.toOption
         |> Option.map (fun index ->
-            let rowsByKey =
-                table.RowsArray.Indexed
-                |> Seq.fold
-                    (fun buckets (rowId, row) ->
-                        let key = encodeEqualityKey table.Columns [ index ] row
-                        let rows = buckets |> Map.tryFind key |> Option.defaultValue []
-                        Map.add key ((rowId, row) :: rows) buckets)
-                    Map.empty
+            let rowsByKey = Collections.Generic.Dictionary<string, ResizeArray<RowId * Value[]>>(StringComparer.Ordinal)
+
+            for rowId, row in table.RowsArray.Indexed do
+                let key = encodeEqualityKey table.Columns [ index ] row
+
+                match rowsByKey.TryGetValue key with
+                | true, rows -> rows.Add(rowId, row)
+                | _ -> rowsByKey.[key] <- ResizeArray [ rowId, row ]
 
             let rowsFor value =
                 exactProbeValue store table index value
                 |> Option.map (fun value ->
                     let probe = Array.create table.Columns.Length VNull
                     probe.[index] <- value
-                    rowsByKey
-                    |> Map.tryFind (encodeEqualityKey table.Columns [ index ] probe)
-                    |> Option.defaultValue []
-                    |> List.rev)
+
+                    match rowsByKey.TryGetValue(encodeEqualityKey table.Columns [ index ] probe) with
+                    | true, rows -> List.ofSeq rows
+                    | _ -> [])
 
             { TableColumns = table.Columns
               FindRows = rowsFor }))

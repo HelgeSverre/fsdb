@@ -13,7 +13,33 @@ open Fsdb.QueryHandler
 let tests =
     testList
         "Transactions"
-        [ testCase "a write inside BEGIN...COMMIT is invisible to another connection until commit"
+        [ testCase "BEGIN defers the private catalog until the first database statement"
+          <| fun _ ->
+              let store = Fsdb.Storage.create ()
+              let setup = create 1 store
+              let setup, _ = handle setup "CREATE TABLE deferred_view (id INT PRIMARY KEY)"
+              let reader, _ = handle (create 2 store) "BEGIN"
+
+              match reader.Tx with
+              | Some transaction ->
+                  Expect.isFalse transaction.Seeded "the consistent view is still deferred"
+                  Expect.isTrue (obj.ReferenceEquals(transaction.Snapshot.Databases, reader.Store.Databases)) "the provisional context shares the live catalog"
+              | None -> failtest "expected an open transaction"
+
+              handle setup "INSERT INTO deferred_view VALUES (1)" |> ignore
+              let reader, result = handle reader "SELECT id FROM deferred_view"
+
+              match result with
+              | ResultSet(_, [ [ Some "1" ] ]) -> ()
+              | other -> failtestf "expected the first read to capture the committed row, got %A" other
+
+              match reader.Tx with
+              | Some transaction ->
+                  Expect.isTrue transaction.Seeded "the first database statement seeds the view"
+                  Expect.isFalse (obj.ReferenceEquals(transaction.Snapshot.Databases, reader.Store.Databases)) "the seeded view owns private database cells"
+              | None -> failtest "expected the transaction to remain open"
+
+          testCase "a write inside BEGIN...COMMIT is invisible to another connection until commit"
           <| fun _ ->
               let store = Fsdb.Storage.create ()
               let session = create 1 store

@@ -1035,6 +1035,9 @@ let private lockWaitTimeout (session: Session) =
 /// no-op, matching MySQL.
 let private commitSession (session: Session) : Session =
     match session.Tx with
+    | Some tx when not tx.Seeded ->
+        Storage.releaseTransactionLocks tx.Snapshot
+        { session with Tx = None }
     | Some tx ->
         let dbName = session.Database |> Option.defaultValue defaultDatabase
 
@@ -1069,6 +1072,7 @@ let private commitSession (session: Session) : Session =
 /// schema) alone.
 let private rollbackSession (session: Session) : Session =
     match session.Tx with
+    | Some tx when not tx.Seeded -> Storage.releaseTransactionLocks tx.Snapshot
     | Some tx ->
         Storage.bumpAutoIncrementsInto session.Store tx.Snapshot.Catalog
         Storage.releaseTransactionLocks tx.Snapshot
@@ -1097,7 +1101,7 @@ let private configuredIsolation (session: Session) =
 let private beginTransaction (readOnly: bool) (session: Session) : Session =
     let session = commitSession session
     let isolation = configuredIsolation session
-    let baseCatalog, snapshot = Storage.beginTransactionWithBase session.Store
+    let snapshot = Storage.beginTransactionContext session.Store
 
     { session with
         PendingTransactionReadOnly = None
@@ -1105,7 +1109,7 @@ let private beginTransaction (readOnly: bool) (session: Session) : Session =
         Tx =
             Some
                 { Snapshot = snapshot
-                  BaseCatalog = baseCatalog
+                  BaseCatalog = Map.empty
                   Isolation = isolation
                   ReadOnly = readOnly
                   Seeded = false
@@ -1115,16 +1119,6 @@ let private beginTransaction (readOnly: bool) (session: Session) : Session =
 /// Seeds repeatable-read snapshots and refreshes read-committed views.
 let startTransactionStatement (session: Session) : Session =
     match session.Tx with
-    | Some tx when tx.Isolation = ReadCommitted ->
-        let baseCatalog, snapshot = rebaseTransactionSnapshot session tx
-
-        { session with
-            Tx =
-                Some
-                    { tx with
-                        Snapshot = snapshot
-                        BaseCatalog = baseCatalog
-                        Seeded = true } }
     | Some tx when not tx.Seeded ->
         let baseCatalog, transactionSnapshot = Storage.beginTransactionSnapshotWithBase session.Store
         let snapshot =
@@ -1146,6 +1140,16 @@ let startTransactionStatement (session: Session) : Session =
                         BaseCatalog = baseCatalog
                         Seeded = true
                         Savepoints = savepoints } }
+    | Some tx when tx.Isolation = ReadCommitted ->
+        let baseCatalog, snapshot = rebaseTransactionSnapshot session tx
+
+        { session with
+            Tx =
+                Some
+                    { tx with
+                        Snapshot = snapshot
+                        BaseCatalog = baseCatalog
+                        Seeded = true } }
     | Some _ -> session
     | None -> session
 
