@@ -113,6 +113,18 @@ type ServerBenchmarks() =
         while reader.Read() do
             ()
 
+    member private _.ConcurrentExec(commandText: int -> string) =
+        concurrentConnections
+        |> Array.mapi (fun index connection ->
+            task {
+                use command = connection.CreateCommand()
+                command.CommandText <- commandText index
+                let! _ = command.ExecuteNonQueryAsync()
+                return ()
+            })
+        |> System.Threading.Tasks.Task.WhenAll
+        |> _.GetAwaiter().GetResult()
+
     [<Benchmark>]
     [<BenchmarkCategory("Scale")>]
     member this.PointSelectByPk() =
@@ -160,16 +172,16 @@ type ServerBenchmarks() =
     [<Benchmark>]
     [<BenchmarkCategory("Durability")>]
     member this.ConcurrentPointUpdateBurst() =
-        concurrentConnections
-        |> Array.mapi (fun index connection ->
-            task {
-                use command = connection.CreateCommand()
-                command.CommandText <- $"UPDATE users SET age = IF(age = 30, 31, 30) WHERE id = {index + 1}"
-                let! _ = command.ExecuteNonQueryAsync()
-                return ()
-            })
-        |> System.Threading.Tasks.Task.WhenAll
-        |> _.GetAwaiter().GetResult()
+        this.ConcurrentExec(fun index -> $"UPDATE users SET age = IF(age = 30, 31, 30) WHERE id = {index + 1}")
+
+    [<Benchmark>]
+    [<BenchmarkCategory("Durability")>]
+    member this.ConcurrentInsertBurst() =
+        this.ConcurrentExec(fun _ ->
+            let id = Interlocked.Increment(&insertCounter)
+
+            "INSERT INTO users (name, email, age, meta, created_at) VALUES "
+            + $"('burst_{id}','burst_{id}@bench.test',30,'{{\"plan\":\"free\"}}','2024-01-01 00:00:00')")
 
     [<Benchmark>]
     member this.InsertBatch100() =

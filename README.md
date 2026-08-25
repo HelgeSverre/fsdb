@@ -268,6 +268,14 @@ a fresh one). A crash mid-append leaves a torn final record; replay stops
 before it (length overrun or CRC mismatch), truncates the WAL back to the
 last good offset, and the next append glues onto a clean boundary.
 
+Concurrent commits use a bounded group-commit queue. Commits that arrive
+while a flush is in progress share the next append and `fsync`, while each
+client is acknowledged only after that batch is durable. Snapshot rotation
+passes through the same queue as a checkpoint barrier, so truncation cannot
+overtake a published WAL event. The defaults-file setting
+`wal_group_commit_queue_capacity` controls producer backpressure (default
+1024).
+
 **`snapshot.fsdb`** — the catalog as a self-delimiting binary tree
 (`database count` → tables → rows), same tag-byte codec and row format as the
 WAL. Written to `snapshot.fsdb.new`, fsynced via libc `fsync`, then renamed

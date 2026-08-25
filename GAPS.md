@@ -37,8 +37,8 @@ accepted (marked `ponytail:` in source), or recorded only in
 | Data types | Common scalar types, BIT fields, signed TIME durations, and OGC geometry | Spatial indexes and operations |
 | Constraints & indexes | PK/UNIQUE/FK/CHECK plus composite equality, inner-join, PK/unique/secondary range, grouping, and bounded index-order probes | Outer-join, unconstrained composite ordering, and broader grouping paths still scan |
 | Charsets & collations | ICU-based utf8mb4 registry | Weight-table tailoring differs from MySQL's UCA tables |
-| Transactions | Repeatable-read snapshots, nonlocking read-committed views, conservative serializable validation, and optimistic row-version merge | READ UNCOMMITTED is refused; durable commit delivery has no group commit |
-| Persistence | WAL + snapshot, crash-tested | Opt-in only; no group commit; tombstones never reclaimed |
+| Transactions | Repeatable-read snapshots, nonlocking read-committed views, conservative serializable validation, and optimistic row-version merge | READ UNCOMMITTED is refused |
+| Persistence | WAL + snapshot, crash-tested, with bounded group commit | Opt-in only; tombstones never reclaimed |
 | Views & triggers | Direct updatable views with all insert/replace forms; ordered BEFORE/AFTER INSERT/UPDATE/DELETE triggers and compound DML bodies | Complex views and the stored-program control language |
 | Routines & events | Zero-parameter, single-statement procedures and one-time event declarations | Compound stored programs and event scheduling |
 | Full-text | Oracle-verified scoring over maintained inverted indexes | Single-table SELECT only; no CJK parser |
@@ -243,14 +243,15 @@ over CommitEvent payloads, torn-tail truncation), self-delimiting CRC'd
 snapshots, libc fsync-before-ack with FailFast on failure, directory fsync
 after rename, `.new` snapshot verification before preference, replay that
 bypasses checked write paths with ordered change application, deferred
-unique-index rebuild, rotation via a lock-step replica store, signal-driven
-final rotation, decode-depth caps, codecs for every column type including
-generated-column expressions.
+unique-index rebuild, bounded group commit, ordered checkpoint barriers,
+rotation via a lock-step replica store, signal-driven final rotation,
+decode-depth caps, codecs for every column type including generated-column
+expressions.
 
 | Gap | MySQL 8.4 | fsdb | Impact | Class |
 |---|---|---|---|---|
 | Durability default | durable unless configured otherwise | in-memory unless `--data-dir` passed; process death loses everything | medium (deployment) | divergence |
-| Group commit | binlog/redo group flush amortization | `Persistence.attach` performs one open+fsync per committed statement | medium (throughput) | divergence |
+| Durable update replay cost | redo applies page/record changes | the snapshot mirror locates before/after row images by scanning the table for each update; a 16-connection point-update burst is therefore much slower than an append-only burst | medium (throughput) | divergence |
 | Space reclamation | purge threads reclaim deleted rows | `RowStore` leaves deleted slots as tombstones; long-lived delete-heavy tables grow memory without bound | medium | divergence |
 | Platform | portable | durable mode macOS/Linux only (libc fsync design) | low | divergence |
 
