@@ -1389,14 +1389,12 @@ let private matchAgainstAtom: Parser<Expr, unit> =
     let againstArg =
         choice [ stringLit |>> Lit; numberLit |>> Lit; placeholderAtom; identifier |>> Col ]
 
-    attempt (
-        keyword "MATCH" >>. sym "(" >>. sepBy1 matchColumn (sym ",") .>> sym ")"
-        .>> keyword "AGAINST"
-        .>> sym "("
-        .>>. againstArg
-        .>>. opt modifier
-        .>> sym ")"
-    )
+    (keyword "MATCH" >>. sym "(" >>. sepBy1 matchColumn (sym ",") .>> sym ")"
+     .>> keyword "AGAINST"
+     .>> sym "("
+     .>>. againstArg
+     .>>. opt modifier
+     .>> sym ")")
     |>> fun ((cols, query), mode) -> MatchAgainst(cols, query, mode |> Option.defaultValue NaturalLanguage)
 
 let private atom: Parser<Expr, unit> =

@@ -5311,6 +5311,107 @@ and private rewriteNaturalSelect
 /// caller had. Materializing up front rather than re-running the body per
 /// reference matches MySQL's own default for a CTE used more than once, and
 /// is what makes a recursive CTE expressible at all.
+and private selectOrUnionTableNames (body: SelectOrUnion) : Set<string> =
+    let rec expressionNames expression =
+        Expression.fold
+            (fun names node ->
+                let nested =
+                    Expression.subqueries node
+                    |> List.fold (fun found query -> Set.union found (selectNames query)) Set.empty
+
+                Expression.Descend(Set.union names nested))
+            Set.empty
+            expression
+
+    and fromNames =
+        function
+        | FromTable table when table.Database.IsNone -> Set.singleton (table.Table.ToLowerInvariant())
+        | FromTable _ -> Set.empty
+        | FromSubquery(query, _)
+        | FromLateral(query, _) -> bodyNames query
+        | FromJsonTable(source, _, _, _) -> expressionNames source
+
+    and selectNames (select: SelectStmt) =
+        let expressions =
+            (select.Projections |> List.map fst)
+            @ (select.Joins |> List.map _.On)
+            @ Option.toList select.Where
+            @ select.GroupBy
+            @ Option.toList select.Having
+            @ (select.OrderBy |> List.map fst)
+            @ Option.toList select.Limit
+            @ Option.toList select.Offset
+
+        let sourceNames =
+            Option.toList select.From @ (select.Joins |> List.map _.Table)
+            |> List.fold (fun names source -> Set.union names (fromNames source)) Set.empty
+
+        let nestedCteNames =
+            select.Ctes
+            |> List.fold (fun names cte -> Set.union names (bodyNames cte.Body)) Set.empty
+
+        expressions
+        |> List.fold (fun names expression -> Set.union names (expressionNames expression)) sourceNames
+        |> Set.union nestedCteNames
+
+    and bodyNames (query: SelectOrUnion) =
+        match query with
+        | PlainSelect select -> selectNames select
+        | UnionSelect(first, rest, orderBy, limit, offset) ->
+            let branchNames =
+                first :: (rest |> List.map snd)
+                |> List.fold (fun names select -> Set.union names (selectNames select)) Set.empty
+
+            (orderBy |> List.map fst) @ Option.toList limit @ Option.toList offset
+            |> List.fold (fun names expression -> Set.union names (expressionNames expression)) branchNames
+
+    bodyNames body
+
+and private referencedCtes (ctes: CommonTableExpr list) (tableNames: Set<string>) =
+    let names = System.Collections.Generic.HashSet<string>(System.StringComparer.OrdinalIgnoreCase)
+
+    if ctes |> List.exists (fun cte -> not (names.Add cte.CteName)) then
+        ctes
+    else
+        let byName = ctes |> List.map (fun cte -> cte.CteName.ToLowerInvariant(), cte) |> Map.ofList
+
+        let rec close required pending =
+            match Set.toList pending with
+            | [] -> required
+            | name :: _ ->
+                let pending = Set.remove name pending
+
+                match Map.tryFind name byName with
+                | None -> close required pending
+                | Some cte when Set.contains name required -> close required pending
+                | Some cte ->
+                    let dependencies = selectOrUnionTableNames cte.Body
+                    close (Set.add name required) (Set.union pending dependencies)
+
+        let required = close Set.empty tableNames
+        ctes |> List.filter (fun cte -> Set.contains (cte.CteName.ToLowerInvariant()) required)
+
+and private referencedMutationCtes (ctes: CommonTableExpr list) (joins: Join list) (expressions: Expr list) =
+    let query: SelectStmt =
+        { Projections = expressions |> List.map (fun expression -> expression, None)
+          Distinct = false
+          CalculateFoundRows = false
+          StraightJoin = false
+          From = None
+          Joins = joins
+          Where = None
+          GroupBy = []
+          Rollup = false
+          Windows = []
+          Ctes = []
+          Having = None
+          OrderBy = []
+          Limit = None
+          Offset = None
+          Locking = false }
+
+    referencedCtes ctes (selectOrUnionTableNames (PlainSelect query))
+
 and private withCteScope
     (store: Store)
     (registry: Registry)
@@ -5488,8 +5589,9 @@ and private runSelectStmt
     (outer: EvalContext option)
     : QueryResult * ColumnMetadata list * Value[] list =
     if not select.Ctes.IsEmpty then
-        withCteScope store registry dbName select.Ctes outer (fun () ->
-            runSelectStmt store registry dbName { select with Ctes = [] } outer)
+        let body = { select with Ctes = [] }
+        let ctes = referencedCtes select.Ctes (selectOrUnionTableNames (PlainSelect body))
+        withCteScope store registry dbName ctes outer (fun () -> runSelectStmt store registry dbName body outer)
     else
     let matchNodes =
         (select.Projections |> List.collect (fst >> collectMatchAgainst))
@@ -5969,7 +6071,9 @@ and private runUnionStmtWithOuter
     // A `WITH` clause ahead of a UNION is parsed onto the first branch (see
     // `Parser.withClause`) but scopes over every branch.
     if not first.Ctes.IsEmpty then
-        withCteScope store registry dbName first.Ctes outer (fun () ->
+        let body = UnionSelect({ first with Ctes = [] }, rest, orderBy, limitExpr, offsetExpr)
+        let ctes = referencedCtes first.Ctes (selectOrUnionTableNames body)
+        withCteScope store registry dbName ctes outer (fun () ->
             runUnionStmtWithOuter store registry dbName { first with Ctes = [] } rest orderBy limitExpr offsetExpr outer)
     else
 
@@ -10872,9 +10976,15 @@ let rec executeAs
     match stmt with
     | Update update when not update.Ctes.IsEmpty ->
         let mutable nextIds = ids
+        let expressions =
+            (update.Assignments |> List.map _.Value)
+            @ Option.toList update.Where
+            @ (update.OrderBy |> List.map fst)
+            @ Option.toList update.Limit
+        let ctes = referencedMutationCtes update.Ctes update.Joins expressions
 
         let result =
-            withCteQueryResult store registry dbName update.Ctes (fun () ->
+            withCteQueryResult store registry dbName ctes (fun () ->
                 let ids, result = executeAs store registry dbName ids foundRows currentAccount (Update { update with Ctes = [] })
                 nextIds <- ids
                 result)
@@ -10882,9 +10992,14 @@ let rec executeAs
         nextIds, result
     | Delete delete when not delete.Ctes.IsEmpty ->
         let mutable nextIds = ids
+        let expressions =
+            Option.toList delete.Where
+            @ (delete.OrderBy |> List.map fst)
+            @ Option.toList delete.Limit
+        let ctes = referencedMutationCtes delete.Ctes delete.Joins expressions
 
         let result =
-            withCteQueryResult store registry dbName delete.Ctes (fun () ->
+            withCteQueryResult store registry dbName ctes (fun () ->
                 let ids, result = executeAs store registry dbName ids foundRows currentAccount (Delete { delete with Ctes = [] })
                 nextIds <- ids
                 result)

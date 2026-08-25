@@ -6676,6 +6676,15 @@ let tests =
                         "WITH lo AS (SELECT id, v FROM t WHERE id <= 3), hi AS (SELECT id, v FROM lo WHERE v > 10) SELECT COUNT(*) AS c, MIN(id) AS mn, MAX(id) AS mx FROM hi"
                         [ [ Some "2"; Some "2"; Some "3" ] ]
 
+                testCase "unused CTEs are not evaluated"
+                <| fun _ ->
+                    expectRows "WITH unused AS (SELECT missing) SELECT 1" [ [ Some "1" ] ]
+
+                    let store = cteStore ()
+                    match runDefault store "WITH unused AS (SELECT missing) UPDATE t SET v = v + 1" with
+                    | Affected 5UL -> ()
+                    | other -> failtestf "expected the update to ignore its unused CTE, got %A" other
+
                 testCase "a CTE referenced twice in one FROM materializes once and joins"
                 <| fun _ ->
                     expectRows "WITH x AS (SELECT 1 AS a) SELECT * FROM x JOIN x AS y ON x.a = y.a" [ [ Some "1"; Some "1" ] ]

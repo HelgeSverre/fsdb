@@ -2403,6 +2403,8 @@ let tests =
               match Fsdb.Parser.parse "CREATE FULLTEXT INDEX ft ON t (a)" with
               | Ok(CreateIndex("ft", "t", [ "a" ], false, FullTextIndex)) -> ()
               | other -> failtestf "unexpected parse: %A" other
+
+              Expect.isError (Fsdb.Parser.parse "SELECT MATCH(body) partial") "MATCH requires AGAINST"
           testCase "TEXT(n)/BLOB(n) map to the smallest family member that fits, like MySQL"
           <| fun _ ->
               // TEXT(n) counts characters (×4 bytes under utf8mb4), BLOB(n)
