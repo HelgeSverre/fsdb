@@ -524,4 +524,3 @@ is not part of `just check`; see the
 - [Comment style](docs/comment-style.md) — the grading every comment survives
 - [Torture harness](torture/README.md) — differential fuzzing against a MySQL 8.4 oracle
 - [Benchmarks](benchmarks/README.md) — workloads and methodology
-- [Performance design](docs/performance-design.md) — optimizations that preserve the readable pipeline

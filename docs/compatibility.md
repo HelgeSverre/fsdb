@@ -57,15 +57,13 @@ the optimizer-only SELECT modifiers without changing query results.
 The applications are private codebases, identified here only by framework
 version and size.
 
-## Milestones
+## Implemented surface
 
-All ten original milestones are done — wire protocol, PDO/mysql-CLI
+The implemented surface covers the wire protocol, PDO/mysql-CLI
 compatibility, the SQL engine core, Laravel migrations, test-suite parity,
-the embedding API, opt-in persistence, EXPLAIN + multi-table DML,
-performance-without-ugliness, and the streaming pipeline. Each shipped
-against a runnable acceptance gate (a real external client, the reference
-app's suite, or a benchmark threshold); the per-milestone evidence lives in
-git history.
+the embedding API, opt-in persistence, EXPLAIN, multi-table DML, and the
+streaming pipeline. Each area has a runnable acceptance gate: a real external
+client, a reference application suite, or a benchmark threshold.
 
 ## GUI clients and introspection
 

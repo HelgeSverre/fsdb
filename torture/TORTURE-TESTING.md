@@ -5,7 +5,7 @@
 Keep the complete torture system under `torture/`. It has its own solution,
 projects, corpus, scripts, support ledger, findings, and ignored artifacts. It
 must not be added to the root solution, root task runner, or ordinary CI until
-we deliberately choose a stable subset to promote.
+the harness deliberately chooses a stable subset to promote.
 
 The harness is bespoke F# for FSDB. SQL Splitter supplies deterministic MySQL
 DDL and data; it does not decide whether FSDB is correct. MySQL 8.4 is the

@@ -72,9 +72,9 @@ Prerequisites and rules:
 ## Results history
 
 Each run lands in `results/<git-sha>.md` with a provenance header
-(sha, date, OS, .NET, server mode). Milestone snapshots, medians:
+(sha, date, OS, .NET, server mode). Representative snapshots, medians:
 
-| Workload | f1b15ab (pre-M9) | a90dfae (M9) | f4ba12a (M10) | MySQL 8.4 |
+| Workload | f1b15ab (initial) | a90dfae (indexed) | f4ba12a (streaming) | MySQL 8.4 |
 |---|---:|---:|---:|---:|
 | Point SELECT by PK | 1.32 ms | 103 µs | 111 µs | 38 µs |
 | Prepared point SELECT | 22.9 ms* | 90 µs | 101 µs | 32 µs |

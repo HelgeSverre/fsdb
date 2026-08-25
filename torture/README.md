@@ -5,7 +5,7 @@ for FSDB. It uses SQL Splitter to generate deterministic MySQL dumps, executes
 the same statements through MySqlConnector against MySQL and FSDB, and records
 enough evidence to classify and replay the first divergence.
 
-The durable strategy and scale-up roadmap live in
+The durable strategy and scale-up guidance live in
 [`TORTURE-TESTING.md`](TORTURE-TESTING.md). Dated, reviewed discovery notes
 live under `findings/`; raw run bundles remain ignored under `artifacts/`.
 

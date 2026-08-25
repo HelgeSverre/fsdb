@@ -4,8 +4,8 @@ A map of where fsdb diverges from or lacks MySQL 8.4 functionality. Oracle for
 every row is real MySQL 8.4 (never sqlite). Audit date: 2026-08-25, based on a
 full static exploration of `src/Fsdb/` plus the documented records
 (`docs/compatibility.md`, `torture/findings/`, `torture/support/known-gaps.json`,
-`docs/performance-*.md`) and the adversarial parser, wire, privilege, logging,
-and persistence review. Evidence anchors name files and definitions instead
+`benchmarks/results/`) and the adversarial parser, wire, privilege, logging,
+and persistence paths. Evidence anchors name files and definitions instead
 of line numbers so routine refactors do not silently make them misleading.
 
 ## How to read this document

@@ -21,14 +21,14 @@ a closer look:
   lookup. `PreparedPointSelect` (23ms) is ~17x slower than the unprepared
   `PointSelectByPk` (1.3ms) on fsdb specifically, suggesting the
   prepare/bind path carries its own separate overhead on top of the scan.
-  **Stale, corrected in `docs/performance-design.md` section 1.6/M9-4: this
-  is not a prepared-statement defect.** `JoinUsersOrders` (above) times out
+  **Stale: this is not a prepared-statement defect.** `JoinUsersOrders`
+  (above) times out
   and leaves fsdb building a 500M-pair cross product in the background;
   every method that ran after it in this suite, including
   `PreparedPointSelect`, was measured while that leftover work was still
   consuming the server, inflating its numbers 5-8x. A direct measurement of
-  the prepared path in isolation is within noise of the text path. Fixed at
-  the harness level in M9-4 by restarting fsdb between benchmark methods.
+  the prepared path in isolation is within noise of the text path. The
+  harness now restarts fsdb between benchmark methods.
 - No workload "won" implausibly for fsdb; every row is a genuine MySQL
   advantage or an fsdb error, nothing was dropped.
 
