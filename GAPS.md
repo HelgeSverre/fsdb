@@ -1,7 +1,7 @@
 # MySQL 8.4 feature gaps
 
 A map of where fsdb diverges from or lacks MySQL 8.4 functionality. Oracle for
-every row is real MySQL 8.4 (never sqlite). Audit date: 2026-08-24, based on a
+every row is real MySQL 8.4 (never sqlite). Audit date: 2026-08-25, based on a
 full static exploration of `src/Fsdb/` plus the documented records
 (`docs/compatibility.md`, `torture/findings/`, `torture/support/known-gaps.json`,
 `docs/performance-*.md`) and the adversarial parser, wire, privilege, logging,
@@ -32,10 +32,10 @@ accepted (marked `ponytail:` in source), or recorded only in
 | Area | State | Largest single gap |
 |---|---|---|
 | SQL statements | Broad core; large admin/programmatic tail missing | Stored procedures/functions, events |
-| Query execution | Composite equality, literal range, bounded index ordering, indexed inner joins, and stable subquery materialization | Join reordering and correlated subqueries still scale poorly |
+| Query execution | Composite equality/range access, bounded index ordering, restricted join reordering, and stable/correlated index probes | General cost-based planning and broader correlated forms |
 | Built-in functions | Broad scalar, aggregate, JSON, time, and common planar geometry coverage | Overlays, buffers, and geographic SRS semantics |
 | Data types | Common scalar types, BIT fields, signed TIME durations, and OGC geometry | Spatial indexes and operations |
-| Constraints & indexes | PK/UNIQUE/FK/CHECK plus composite equality, inner-join, literal range, grouping, and bounded index-order probes | Unique and DML ranges still scan |
+| Constraints & indexes | PK/UNIQUE/FK/CHECK plus composite equality, inner-join, PK/unique/secondary range, grouping, and bounded index-order probes | Outer-join, unconstrained composite ordering, and broader grouping paths still scan |
 | Charsets & collations | ICU-based utf8mb4 registry | Weight-table tailoring differs from MySQL's UCA tables |
 | Transactions | Repeatable-read snapshots, nonlocking read-committed views, conservative serializable validation, and optimistic row-version merge | READ UNCOMMITTED is refused; durable commit delivery has no group commit |
 | Persistence | WAL + snapshot, crash-tested | Opt-in only; no group commit; tombstones never reclaimed |
@@ -52,7 +52,8 @@ accepted (marked `ponytail:` in source), or recorded only in
 Working core: full DML (INSERT/REPLACE/UPDATE/DELETE incl. INSERT/REPLACE SET
 and multi-table forms,
 ODKU, IGNORE), SELECT with joins (INNER/LEFT/RIGHT/CROSS/NATURAL/USING),
-derived/LATERAL/JSON_TABLE sources, query-scoped CTEs (ordinary and recursive), set
+derived/LATERAL/JSON_TABLE sources, query-scoped CTEs (ordinary and recursive,
+including leading UPDATE/DELETE and branch-local WITH), set
 operations, window functions with frames, GROUP BY WITH ROLLUP + GROUPING,
 DDL for databases/tables/indexes/views/triggers/users/grants, CREATE TABLE AS
 SELECT, TRUNCATE,
@@ -233,7 +234,7 @@ lock-free.
 | READ UNCOMMITTED | dirty reads | refused with 1235 | medium | refusal |
 | Deadlock errors | 1213 deadlock detection with victim selection | write-write conflicts surface as lock-wait timeout 1205; no deadlock classification | low | divergence |
 | Write parallelism within a database | row-lock concurrency | indexed autocommit updates use row stripes; private transactions execute concurrently and disjoint row versions merge optimistically; publishing a new immutable database root remains one brief per-database critical section, and durable commit events are sequenced | medium (throughput) | partial |
-| Multi-database scaling | near-linear with connections | the 2026-08-17 campaign predates sharded `Store.Databases` and row-striped updates; rerun it before classifying current scaling | medium | unverified |
+| Multi-database scaling | near-linear with connections | database roots are sharded, but the 2026-08-25 rerun exposed transaction-conflict failures during the concurrent setup phase before it could produce a valid scaling measurement | medium | unverified |
 | Cross-database snapshots | linearizable catalog reads | the `Store.Catalog` projection is explicitly not atomic across databases mid-commit | low | divergence |
 
 ## 8. Persistence and durability
@@ -410,7 +411,9 @@ that predates the implementation it measured:
 
 | Finding | Detail | Status |
 |---|---|---|
-| Multi-database scaling | the historical campaign found super-serial slowdowns and 1205s before the storage-concurrency rewrite (`2026-08-17-multidb-concurrency-campaign.md`) | stale evidence; rerun required |
+| Planner/CTE syntax | two deterministic depth-three campaigns (2,000 and 10,000 mutations) exposed unconditional INNER JOIN, eager unused-CTE, and incomplete MATCH grammar differences; fixed campaigns now pass with zero differences | resolved 2026-08-25 |
+| Same-row transaction contention | 32 workers over 16 hot accounts produced 2,541 fsdb 1205 conflicts where MySQL committed all 2,910 non-rollback transactions; a 4,096-account run reduced this to 9/1,455, confirming disjoint merge while retaining the same-row wait-policy gap | current limitation |
+| Multi-database scaling | the historical campaign predates sharded database roots; the 2026-08-25 rerun failed during concurrent setup with 1205 before a trustworthy scaling ratio could be measured (`2026-08-17-multidb-concurrency-campaign.md`) | unverified |
 | Numeric error shape | 1690 message lacks the offending expression text (`2026-08-19-probe-corpus-triage.md`) | ponytail ceiling |
 | Temporal/error-shape ceilings | `DATE 'bad'` → 1064 vs MySQL 1525; parenthesized set-op groups `(A UNION B) INTERSECT C` refused | ponytail ceilings |
 
@@ -461,11 +464,12 @@ that later work changed:
 Ranked by expected disruption to the primary consumers, independent of
 implementation effort:
 
-1. Join reordering, correlated-subquery planning, and access paths outside the
-   fully-bound composite cases — correctness holds, but scale still diverges
-   from MySQL past small data.
-2. READ UNCOMMITTED and intra-database transaction publication. Serializable
-   correctness is covered conservatively, without InnoDB's locking behavior.
+1. General cost-based planning beyond qualified physical inner joins, plus
+   correlated forms that cannot use a direct equality probe. Correctness holds,
+   but scale still diverges from MySQL past small data.
+2. Same-row transaction waiting/deadlock behavior and READ UNCOMMITTED.
+   Disjoint transactions publish concurrently; overlapping versions return
+   1205 instead of waiting and selecting a 1213 deadlock victim.
 3. Complex/nested updatable views and the stored-program control language
    inside trigger bodies. Ordered multi-trigger slots and sequential compound
    DML bodies are covered.
