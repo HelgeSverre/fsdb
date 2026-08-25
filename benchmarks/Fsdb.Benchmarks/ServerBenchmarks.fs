@@ -294,6 +294,12 @@ type ServerBenchmarks() =
 
     [<Benchmark>]
     [<BenchmarkCategory("Feature")>]
+    [<BenchmarkCategory("Scale")>]
+    member this.WindowCumeDistPeers() =
+        this.Query "SELECT status, CUME_DIST() OVER (ORDER BY status) FROM orders LIMIT 20"
+
+    [<Benchmark>]
+    [<BenchmarkCategory("Feature")>]
     member this.CorrelatedJsonTable() =
         this.Query "SELECT u.id, jt.plan FROM users u JOIN JSON_TABLE(u.meta, '$' COLUMNS (plan VARCHAR(20) PATH '$.plan')) jt ON 1 WHERE u.id <= 100 ORDER BY u.id"
 

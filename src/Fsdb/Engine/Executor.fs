@@ -532,6 +532,8 @@ let private windowFnExprs (fn: WindowFn) : Expr list =
     | WinNthValue(e, n) -> [ e; n ]
     | WinAggregate(_, args) -> args
 
+type private WindowRow = int * (Value list * (Value * Collation.Collation option) list * Value[])
+
 let private overExprs (over: OverClause) : Expr list =
     match over with
     | OverName _ -> []
@@ -8017,7 +8019,7 @@ and private runWindowedSelect
                 // ORDER BY ties every row in the partition together, same as
                 // MySQL. `PERCENT_RANK`/`CUME_DIST` reuse this (always
                 // non-dense) rather than a separate walk.
-                let ranksOf (group: (int * (Value list * (Value * Collation.Collation option) list * Value[])) []) : int[] =
+                let ranksOf (group: WindowRow[]) : int[] =
                     group
                     |> Array.mapi (fun pos (_, (_, ordKey, _)) -> pos, ordKey)
                     |> Array.mapFold
@@ -8032,32 +8034,48 @@ and private runWindowedSelect
                         (None, 0)
                     |> fst
 
-                let ordKeyAt (group: (int * (Value list * (Value * Collation.Collation option) list * Value[])) []) (pos: int) =
+                let ordKeyAt (group: WindowRow[]) (pos: int) =
                     let (_, (_, ordKey, _)) = group.[pos]
                     ordKey
 
-                let rowAt (group: (int * (Value list * (Value * Collation.Collation option) list * Value[])) []) (pos: int) =
+                let rowAt (group: WindowRow[]) (pos: int) =
                     let (_, (_, _, row)) = group.[pos]
                     row
 
-                // The current row's peer group under the window ORDER BY —
-                // the rows a RANGE frame's CURRENT ROW bound covers.
-                // ponytail: linear scan per row (O(n²) per partition); swap
-                // in a precomputed peer-boundary array if a wide partition
-                // ever shows up hot.
-                let peerLow group pos =
-                    let key = ordKeyAt group pos
-                    let mutable i = pos
-                    while i > 0 && compareByOrderKeys dirs (ordKeyAt group (i - 1)) key = 0 do
-                        i <- i - 1
-                    i
+                let peerBounds =
+                    System.Collections.Generic.Dictionary<WindowRow[], int[] * int[]>(HashIdentity.Reference)
 
-                let peerHigh group (pos: int) =
-                    let key = ordKeyAt group pos
-                    let mutable i = pos
-                    while i < Array.length group - 1 && compareByOrderKeys dirs (ordKeyAt group (i + 1)) key = 0 do
-                        i <- i + 1
-                    i
+                let boundsFor group =
+                    match peerBounds.TryGetValue group with
+                    | true, bounds -> bounds
+                    | false, _ ->
+                        let lows = Array.zeroCreate group.Length
+                        let highs = Array.zeroCreate group.Length
+                        let mutable runStart = 0
+
+                        for afterRun in 1 .. group.Length do
+                            let runEnded =
+                                afterRun = group.Length
+                                || compareByOrderKeys dirs (ordKeyAt group (afterRun - 1)) (ordKeyAt group afterRun) <> 0
+
+                            if runEnded then
+                                for peer in runStart .. afterRun - 1 do
+                                    lows.[peer] <- runStart
+                                    highs.[peer] <- afterRun - 1
+
+                                runStart <- afterRun
+
+                        let bounds = lows, highs
+                        peerBounds.Add(group, bounds)
+                        bounds
+
+                let peerLow group pos =
+                    let lows, _ = boundsFor group
+                    lows.[pos]
+
+                let peerHigh group pos =
+                    let _, highs = boundsFor group
+                    highs.[pos]
 
                 let rangeBounds group pos startBound endBound =
                     let selfKey = ordKeyAt group pos |> List.tryHead |> Option.map fst
@@ -8195,7 +8213,7 @@ and private runWindowedSelect
                     frameRange group pos
                     |> Result.map (fun (lo, hi) -> pick lo hi |> Option.filter (fun i -> i >= lo && i <= hi) |> Option.map (rowAt group))
 
-                let perRow (compute: (int * (Value list * (Value * Collation.Collation option) list * Value[])) [] -> int -> Result<Value, EvalError>) =
+                let perRow (compute: WindowRow[] -> int -> Result<Value, EvalError>) =
                     partitions
                     |> traverse (fun group ->
                         group
