@@ -659,10 +659,8 @@ let tests =
 
           testCase "the reloaded store's PRIMARY KEY index reflects a replayed UPDATE's new values, not the pre-update ones"
           <| fun _ ->
-              // `RowsUpdated` replay goes through `mapTableRows`, which
-              // rewrites `Rows` directly (bypassing `Storage.updateRows`'
-              // checked, index-maintaining path — see its doc) — this
-              // proves `reindexTable` picks the slack back up afterward.
+              // Replayed updates must move unique keys before the final
+              // compatibility rebuild so the live snapshot mirror stays usable.
               let dir = tempDataDir ()
               let store = load dir
               attach dir store
