@@ -654,6 +654,9 @@ let tests =
               insertRows setupStore defaultDatabase "hot" None [ for i in 1 .. rowCount -> [ VInt(int64 i); VInt 0L ] ]
               |> ignore
 
+              let catalogTableCount =
+                  setupStore.Catalog |> Map.toSeq |> Seq.sumBy (snd >> Map.count)
+
               snapshotNow dir setupStore
 
               let records =
@@ -670,15 +673,9 @@ let tests =
               let values = rowsOf reloaded defaultDatabase "hot" |> List.map (fun r -> r.[1])
               Expect.isTrue (values |> List.forall (fun v -> v = VInt 1L)) "every row's replayed update landed"
 
-              // `load` reindexes each table a small constant number of times
-              // (once decoding the snapshot, once after replay) no matter
-              // how many WAL events touch it — a per-event reindex would
-              // make this scale with `rowCount` (2500) instead. The catalog
-              // always carries the 5 built-in `mysql` system tables besides
-              // "hot", hence the bound of ~2 × 6 tables with headroom.
               Expect.isLessThan
                   reindexesDuringLoad
-                  20
+                  (2 * catalogTableCount + 4)
                   (sprintf
                       "loading a snapshot + %d single-row UPDATEs against a %d-row UNIQUE-indexed table triggered %d reindexes — looks like a per-event reindex again"
                       rowCount

@@ -910,6 +910,37 @@ let tests =
               Expect.equal result (Affected 0UL) "lock list accepted"
               Expect.equal (handle session "UNLOCK TABLES" |> snd) (Affected 0UL) "unlock accepted"
 
+          testCase "single-statement stored procedures persist and execute"
+          <| fun _ ->
+              let session = create 1 (Fsdb.Storage.create ())
+              let session, result = handle session "CREATE PROCEDURE answer() SELECT 42 AS value"
+              Expect.equal result (Affected 0UL) "created"
+
+              match handle session "CALL answer()" with
+              | session, ResultSet([ "value" ], [ [ Some "42" ] ]) ->
+                  match handle session "SHOW PROCEDURE STATUS" |> snd with
+                  | ResultSet(_, [ row ]) ->
+                      Expect.equal row.[0] (Some "fsdb") "routine schema"
+                      Expect.equal row.[1] (Some "answer") "routine name"
+                  | other -> failtestf "expected routine status, got %A" other
+
+                  match handle session "SHOW CREATE PROCEDURE answer" |> snd with
+                  | ResultSet(_, [ [ Some "answer"; _; Some ddl; _; _; _ ] ]) ->
+                      Expect.stringContains ddl "PROCEDURE `answer`() SELECT 42 AS value" "stored definition"
+                  | other -> failtestf "expected create procedure, got %A" other
+
+                  match handle session "SELECT routine_name FROM information_schema.routines WHERE routine_schema = 'fsdb'" |> snd with
+                  | ResultSet(_, [ [ Some "answer" ] ]) -> ()
+                  | other -> failtestf "expected information_schema routine, got %A" other
+
+                  let session, result = handle session "DROP PROCEDURE answer"
+                  Expect.equal result (Affected 0UL) "dropped"
+
+                  match handle session "CALL answer()" |> snd with
+                  | Err(1305, _) -> ()
+                  | other -> failtestf "expected missing procedure, got %A" other
+              | _, other -> failtestf "expected procedure result, got %A" other
+
           testCase "SQL PREPARE accepts user-variable source text and text-probed statements"
           <| fun _ ->
               let session = create 1 (Fsdb.Storage.create ())

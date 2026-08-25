@@ -1894,7 +1894,7 @@ let private runProbe (session: Session) (sql: string) (probe: Probe) : Session *
         let dbName = db |> Option.defaultValue (session.Database |> Option.defaultValue defaultDatabase)
         session, InformationSchema.showTriggers (Session.currentStore session).Catalog dbName |> showResult
     | ShowEvents db -> session, InformationSchema.showEvents (Session.currentStore session).Catalog db |> showResult
-    | ShowRoutineStatus -> session, InformationSchema.showRoutineStatus () |> showResult
+    | ShowRoutineStatus -> session, InformationSchema.showRoutineStatus (Session.currentStore session).Catalog |> showResult
     | Kill(queryOnly, id) ->
         let canSeeAll = Auth.hasGlobalPrivForAccount session.Store (accountOf session) "PROCESS"
         let canKillAll = Auth.hasGlobalPrivForAccount session.Store (accountOf session) "SUPER"
@@ -2023,10 +2023,36 @@ let private runProbe (session: Session) (sql: string) (probe: Probe) : Session *
             | Ok(header, ddl) -> ResultSet([ header ], [ [ Some ddl ] ])
             | Error(code, msg) -> Err(code, msg))
     | ShowCreateProgram(kind, qualifiedName) ->
-        let _, name = splitQualified (session.Database |> Option.defaultValue defaultDatabase) qualifiedName
+        let database, name = splitQualified (session.Database |> Option.defaultValue defaultDatabase) qualifiedName
 
         if kind = "EVENT" then
             session, Err(1539, sprintf "Unknown event '%s'" name)
+        elif kind = "PROCEDURE" then
+            let routine =
+                match Storage.scanList (Session.currentStore session) "mysql" "routines" with
+                | Error _ -> None
+                | Ok(_, rows) ->
+                    rows
+                    |> List.tryFind (fun row ->
+                        row.Length >= 3
+                        && String.Equals(toText row.[0] |> Option.defaultValue "", database, StringComparison.OrdinalIgnoreCase)
+                        && String.Equals(toText row.[1] |> Option.defaultValue "", name, StringComparison.OrdinalIgnoreCase))
+
+            match routine with
+            | None -> session, Err(1305, sprintf "%s %s does not exist" kind name)
+            | Some row ->
+                let body = toText row.[2] |> Option.defaultValue ""
+                let definer = toText row.[4] |> Option.defaultValue "@%"
+                let separator = definer.LastIndexOf('@')
+                let user = if separator < 0 then definer else definer.Substring(0, separator)
+                let host = if separator < 0 then "%" else definer.Substring(separator + 1)
+                let ddl = sprintf "CREATE DEFINER=`%s`@`%s` PROCEDURE `%s`() %s" user host name body
+
+                session,
+                ResultSet(
+                    [ "Procedure"; "sql_mode"; "Create Procedure"; "character_set_client"; "collation_connection"; "Database Collation" ],
+                    [ [ Some name; Some ""; Some ddl; Some "utf8mb4"; Some "utf8mb4_0900_ai_ci"; Some "utf8mb4_0900_ai_ci" ] ]
+                )
         else
             session, Err(1305, sprintf "%s %s does not exist" kind name)
     | FlushPrivileges -> session, Affected 0UL
@@ -2304,6 +2330,33 @@ let private tryTextPreparedCommand (sql: string) : Result<TextPreparedCommand op
     else
         Ok None
 
+type private TextRoutineCommand =
+    | CreateProcedure of name: string * body: string
+    | CallProcedure of name: string
+    | DropProcedure of name: string * ifExists: bool
+
+let private createProcedureRe =
+    Regex(@"^\s*CREATE\s+PROCEDURE\s+(?<name>\S+)\s*\(\s*\)\s+(?<body>.+)$", RegexOptions.IgnoreCase)
+
+let private callProcedureRe = Regex(@"^\s*CALL\s+(?<name>\S+)\s*\(\s*\)\s*$", RegexOptions.IgnoreCase)
+
+let private dropProcedureRe =
+    Regex(@"^\s*DROP\s+PROCEDURE\s+(?<ifExists>IF\s+EXISTS\s+)?(?<name>\S+)\s*$", RegexOptions.IgnoreCase)
+
+let private tryTextRoutineCommand (sql: string) =
+    let create = createProcedureRe.Match(sql)
+    let call = callProcedureRe.Match(sql)
+    let drop = dropProcedureRe.Match(sql)
+
+    if create.Success then
+        Some(CreateProcedure(create.Groups.["name"].Value, create.Groups.["body"].Value))
+    elif call.Success then
+        Some(CallProcedure call.Groups.["name"].Value)
+    elif drop.Success then
+        Some(DropProcedure(drop.Groups.["name"].Value, drop.Groups.["ifExists"].Success))
+    else
+        None
+
 /// Binds prepared-statement parameter `Value`s into a parsed `Statement`,
 /// replacing every `Placeholder i` with `Lit values.[i]`. Total — after this
 /// no `Placeholder` survives and the statement executes through the ordinary
@@ -2373,24 +2426,93 @@ let rec private dispatch (session: Session) (rawSql: string) : Session * QueryRe
             else
                 session, Err(1243, sprintf "Unknown prepared statement handler (%s) given to DEALLOCATE PREPARE" name)
 
+    let routineRows () =
+        match Storage.scanList session.Store "mysql" "routines" with
+        | Ok(_, rows) -> rows
+        | Error _ -> []
+
+    let routineMatches schema name (row: Value[]) =
+        row.Length >= 2
+        && String.Equals(toText row.[0] |> Option.defaultValue "", schema, StringComparison.OrdinalIgnoreCase)
+        && String.Equals(toText row.[1] |> Option.defaultValue "", name, StringComparison.OrdinalIgnoreCase)
+
+    let runTextRoutine command =
+        let authorize privilege database =
+            Auth.checkForAccount session.Store (accountOf session) [ privilege, Auth.OnDb database ]
+
+        match command with
+        | CreateProcedure(qualifiedName, body) ->
+            let database, name = splitQualified (session.Database |> Option.defaultValue defaultDatabase) qualifiedName
+
+            match authorize "CREATE ROUTINE" database with
+            | Error(code, message) -> session, Err(code, message)
+            | Ok() when routineRows () |> List.exists (routineMatches database name) ->
+                session, Err(1304, sprintf "PROCEDURE %s already exists" name)
+            | Ok() ->
+                let upper = body.Trim().ToUpperInvariant()
+
+                if Parser.parse body |> Result.isError && tryProbe body upper |> Option.isNone then
+                    session, syntaxError body
+                else
+                    let definer = session.User + "@" + session.AccountHost
+
+                    match
+                        Storage.insertRows
+                            session.Store
+                            "mysql"
+                            "routines"
+                            None
+                            [ [ VString database; VString name; VString body; VDateTime DateTime.Now; VString definer ] ]
+                    with
+                    | Ok _ -> session, Affected 0UL
+                    | Error error ->
+                        let code, message = Storage.toMySqlError error
+                        session, Err(code, message)
+        | CallProcedure qualifiedName ->
+            let database, name = splitQualified (session.Database |> Option.defaultValue defaultDatabase) qualifiedName
+
+            match routineRows () |> List.tryFind (routineMatches database name) with
+            | None -> session, Err(1305, sprintf "PROCEDURE %s does not exist" name)
+            | Some row ->
+                match authorize "EXECUTE" database with
+                | Error(code, message) -> session, Err(code, message)
+                | Ok() -> dispatch session (toText row.[2] |> Option.defaultValue "")
+        | DropProcedure(qualifiedName, ifExists) ->
+            let database, name = splitQualified (session.Database |> Option.defaultValue defaultDatabase) qualifiedName
+            let exists = routineRows () |> List.exists (routineMatches database name)
+
+            match authorize "ALTER ROUTINE" database with
+            | Error(code, message) -> session, Err(code, message)
+            | Ok() when not exists && not ifExists -> session, Err(1305, sprintf "PROCEDURE %s does not exist" name)
+            | Ok() when not exists -> session, Affected 0UL
+            | Ok() ->
+                match Storage.deleteRows session.Store "mysql" "routines" (routineMatches database name >> Ok) with
+                | Ok _ -> session, Affected 0UL
+                | Error error ->
+                    let code, message = Storage.toMySqlError error
+                    session, Err(code, message)
+
     if Parser.isBlank sql then
         session, Affected 0UL
     else
-        match tryTextPreparedCommand sql with
-        | Error result -> session, result
-        | Ok(Some command) -> runTextPrepared command
-        | Ok None when not (placeholderPositions sql |> List.isEmpty) ->
+        match tryTextRoutineCommand sql with
+        | Some command -> runTextRoutine command
+        | None ->
+          match tryTextPreparedCommand sql with
+          | Error result -> session, result
+          | Ok(Some command) -> runTextPrepared command
+          | Ok None when not (placeholderPositions sql |> List.isEmpty) ->
         // A `?` outside a string/comment is a bind parameter, only legal via
         // COM_STMT_PREPARE — over COM_QUERY it's a 1064 in MySQL. Rejecting
         // here also stops a `?` in a spot the prepared binder never reaches
         // (a generated-column DDL expression) from surviving unbound into
         // Storage/Persistence, where it would `FailFast` a --data-dir server.
-            session, syntaxError sql
-        | Ok None ->
-            let upper = sql.ToUpperInvariant()
+              session, syntaxError sql
+          | Ok None ->
+              let upper = sql.ToUpperInvariant()
 
-            match tryProbe sql upper with
-            | Some probe ->
+              match tryProbe sql upper with
+              | Some probe ->
             // Every probe-handled form (SHOW/SET/session-variable SELECT/...)
             // is its own small synthetic `ResultSet` of plain strings — none of
             // them go through `executeStatement`'s typed path, so clear
@@ -2398,9 +2520,9 @@ let rec private dispatch (session: Session) (rawSql: string) : Session * QueryRe
             // session left behind rather than risk it surviving (via `Server`'s
             // VAR_STRING-length-mismatch fallback, a same-column-count
             // coincidence is all it'd take) onto an unrelated resultset.
-                let session, result = runProbe session sql probe
-                { session with LastResultColumnMetadata = [] }, result
-            | None -> executeStatement session sql upper
+                  let session, result = runProbe session sql probe
+                  { session with LastResultColumnMetadata = [] }, result
+              | None -> executeStatement session sql upper
 
 /// No SQL engine failure should ever escape as a raw .NET exception — the
 /// only two paths into `dispatch` (the parser, well guarded, and

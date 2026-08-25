@@ -1928,7 +1928,7 @@ let acquireTransactionRows
 // projections), so `USE mysql`, `SELECT ... FROM mysql.user`, SHOW TABLES,
 // direct DML, and WAL/snapshot persistence all ride the ordinary catalog
 // paths with zero special-casing. Column shapes follow MySQL 8.4
-// (oracle-verified); eight functionally-relevant tables of MySQL's 38
+// (oracle-verified); the functionally-relevant subset of MySQL's 38 tables
 // exist. Bootstrapped by `create` below and re-ensured after a snapshot
 // load (`ensureMysqlSchema`) so pre-feature snapshots pick it up.
 // ponytail: no charset/collation fidelity on these columns (MySQL uses
@@ -2114,6 +2114,13 @@ let mysqlViewsColumns: ColumnDef list =
       sysCol "definer" (TChar 93) false (Some(VString ""))
       sysCol "check_option" (TChar 8) false (Some(VString "NONE")) ]
 
+let mysqlRoutinesColumns: ColumnDef list =
+    [ keyCol "routine_schema" 64
+      keyCol "routine_name" 64
+      sysCol "routine_definition" TText false (Some(VString ""))
+      sysCol "created" (TDateTime 2) false None
+      sysCol "definer" (TChar 93) false (Some(VString "")) ]
+
 /// Row-backed CHECK definitions. Keeping these beside views/triggers avoids
 /// changing the binary Table snapshot layout: ordinary row WAL events carry
 /// every definition, while the executor binds and evaluates the clause
@@ -2136,6 +2143,7 @@ let private mysqlSystemDatabase () : Database =
       "global_grants", sysTable "global_grants" mysqlGlobalGrantsColumns []
       "triggers", sysTable "triggers" mysqlTriggersColumns []
       "views", sysTable "views" mysqlViewsColumns []
+      "routines", sysTable "routines" mysqlRoutinesColumns []
       "check_constraints", sysTable "check_constraints" mysqlCheckConstraintsColumns [] ]
     |> Map.ofList
 
@@ -2189,6 +2197,9 @@ let ensureMysqlSchema (store: Store) : unit =
                         Columns = views.Columns @ pad
                         RowsArray = views.RowsArray |> RowStore.map (fun row -> Array.append row fill) }
                     dbRef.Value
+
+    if not (Map.containsKey "routines" dbRef.Value) then
+        dbRef.Value <- Map.add "routines" (sysTable "routines" mysqlRoutinesColumns []) dbRef.Value
 
     if not (Map.containsKey "check_constraints" dbRef.Value) then
         dbRef.Value <- Map.add "check_constraints" (sysTable "check_constraints" mysqlCheckConstraintsColumns []) dbRef.Value

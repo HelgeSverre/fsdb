@@ -1059,6 +1059,27 @@ let private routinesColumns =
       strCol "COLLATION_CONNECTION"
       strCol "DATABASE_COLLATION" ]
 
+let private routinesRows (catalog: Catalog) =
+    let rows =
+        catalog
+        |> Map.tryFind "mysql"
+        |> Option.bind (Map.tryFind "routines")
+        |> Option.map (_.RowsArray >> List.ofSeq)
+        |> Option.defaultValue []
+
+    rows
+    |> List.choose (fun row ->
+        if row.Length < 5 then
+            None
+        else
+            let schema, name, definition, created, definer = row.[0], row.[1], row.[2], row.[3], row.[4]
+
+            Some
+                [| name; vs "def"; schema; name; vs "PROCEDURE"; vs ""; VNull; VNull; VNull; VNull; VNull; VNull
+                   VNull; VNull; vs "SQL"; definition; VNull; vs "SQL"; vs "SQL"; vs "NO"; vs "CONTAINS SQL"; VNull
+                   vs "DEFINER"; created; created; vs "STRICT_TRANS_TABLES,NO_ZERO_IN_DATE,NO_ZERO_DATE,ERROR_FOR_DIVISION_BY_ZERO,NO_ENGINE_SUBSTITUTION"
+                   vs ""; definer; vs "utf8mb4"; vs "utf8mb4_0900_ai_ci"; vs "utf8mb4_0900_ai_ci" |])
+
 let private parametersColumns =
     [ strCol "SPECIFIC_CATALOG"
       strCol "SPECIFIC_SCHEMA"
@@ -1483,11 +1504,11 @@ let scan (catalog: Catalog) (name: string) (viewColumns: ViewColumns option) : (
         | "SCHEMA_PRIVILEGES" -> Some(schemaPrivilegesRows catalog)
         | "TABLE_PRIVILEGES" -> Some(tablePrivilegesRows catalog)
         | "ENGINES" -> Some enginesRows
-        // Routines/events remain real empty sets (COLUMN_PRIVILEGES too: no
+        // Events remain a real empty set (COLUMN_PRIVILEGES too: no
         // column-level grants exist).
         | "TRIGGERS" -> Some(triggersRows catalog)
         | "VIEWS" -> Some(viewsRows catalog)
-        | "ROUTINES"
+        | "ROUTINES" -> Some(routinesRows catalog)
         | "PARAMETERS"
         | "EVENTS"
         | "COLUMN_PRIVILEGES" -> Some []
@@ -2137,11 +2158,17 @@ let showEvents (catalog: Catalog) (dbName: string option) : ShowResult =
           "Starts"; "Ends"; "Status"; "Originator"; "character_set_client"; "collation_connection"
           "Database Collation" ]
 
-/// `SHOW PROCEDURE STATUS` / `SHOW FUNCTION STATUS [LIKE|WHERE ...]` — the
-/// trailing filter never matters against zero routines.
-let showRoutineStatus () : ShowResult =
+/// `SHOW PROCEDURE STATUS` / `SHOW FUNCTION STATUS [LIKE|WHERE ...]`.
+let showRoutineStatus (catalog: Catalog) : ShowResult =
+    let rows =
+        routinesRows catalog
+        |> List.map (fun row ->
+            [ toText row.[2]; toText row.[3]; Some "PROCEDURE"; Some "SQL"; toText row.[27]; toText row.[24]
+              toText row.[23]; Some "DEFINER"; Some ""; Some "utf8mb4"; Some "utf8mb4_0900_ai_ci"
+              Some "utf8mb4_0900_ai_ci" ])
+
     Ok(
         [ "Db"; "Name"; "Type"; "Language"; "Definer"; "Modified"; "Created"; "Security_type"; "Comment"
           "character_set_client"; "collation_connection"; "Database Collation" ],
-        []
+        rows
     )
