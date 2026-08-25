@@ -393,6 +393,8 @@ let rec exprToSql (e: Expr) : string =
     | FuncCall(name, args) -> sprintf "%s(%s)" (name.ToLowerInvariant()) (args |> List.map exprToSql |> String.concat ",")
     | Distinct e -> sprintf "distinct %s" (exprToSql e)
     | OrderBy(e, _) -> exprToSql e
+    | Cast(e, TBigInt true) -> sprintf "cast(%s as unsigned)" (exprToSql e)
+    | Cast(e, TBigInt false) -> sprintf "cast(%s as signed)" (exprToSql e)
     | Cast(e, ty) -> sprintf "cast(%s as %s)" (exprToSql e) (columnTypeText ty)
     | Collate(e, c) -> sprintf "(%s collate %s)" (exprToSql e) c
     | Case(subject, whens, elseBranch) ->

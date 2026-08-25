@@ -5592,7 +5592,11 @@ let tests =
                     | other -> failtestf "expected 1690, got %A" other
 
                     match runDefault (newStore ()) "SELECT CAST(1 AS UNSIGNED) - 2" with
-                    | Err(1690, _) -> ()
+                    | Err(1690, message) ->
+                        Expect.equal
+                            message
+                            "BIGINT UNSIGNED value is out of range in '(cast(1 as unsigned) - 2)'"
+                            "offending expression"
                     | other -> failtestf "expected 1690, got %A" other
 
                     // Unary minus is part of the literal, not `0 - x`, so

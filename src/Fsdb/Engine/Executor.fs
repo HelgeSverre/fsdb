@@ -2796,7 +2796,8 @@ let rec private evalExpr (ctx: EvalContext) (expr: Expr) : Result<Value, EvalErr
                         | _, VNull -> Ok(VInt 0L)
                         | _ -> compareWith NullSafeEq))
         with Value.UnsignedOutOfRange ->
-            Error(1690, "BIGINT UNSIGNED value is out of range")
+            let expression = InformationSchema.exprToSql (BinOp(op, a, b))
+            Error(1690, sprintf "BIGINT UNSIGNED value is out of range in '%s'" expression)
     | Like(e, p, caseSensitive, escape) ->
         eval e
         |> Result.bind (fun ve ->
