@@ -901,6 +901,15 @@ let tests =
                   | other -> failtestf "expected unknown statement error, got %A" other
               | _, other -> failtestf "expected prepared result, got %A" other
 
+          testCase "LOCK TABLES accepts MySQL lock-list syntax"
+          <| fun _ ->
+              let session = create 1 (Fsdb.Storage.create ())
+              let session, _ = handle session "CREATE TABLE t (id INT)"
+              let session, _ = handle session "CREATE TABLE u (id INT)"
+              let session, result = handle session "LOCK TABLES t READ, u AS writer WRITE"
+              Expect.equal result (Affected 0UL) "lock list accepted"
+              Expect.equal (handle session "UNLOCK TABLES" |> snd) (Affected 0UL) "unlock accepted"
+
           testCase "SQL PREPARE accepts user-variable source text and text-probed statements"
           <| fun _ ->
               let session = create 1 (Fsdb.Storage.create ())

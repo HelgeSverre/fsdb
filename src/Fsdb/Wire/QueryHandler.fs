@@ -986,6 +986,12 @@ let private flushPrivilegesRe = Regex(@"^FLUSH\s+(?:LOCAL\s+)?PRIVILEGES\s*;?$",
 let private flushStatusRe = Regex(@"^FLUSH\s+STATUS\s*;?$", RegexOptions.IgnoreCase)
 let private flushTablesRe = Regex(@"^FLUSH\s+TABLES\s*;?$", RegexOptions.IgnoreCase)
 let private flushLogsRe = Regex(@"^FLUSH\s+LOGS\s*;?$", RegexOptions.IgnoreCase)
+let private lockTablesRe =
+    Regex(
+        @"^LOCK\s+TABLES\s+\S+(?:\s+(?:AS\s+)?[A-Za-z_][A-Za-z0-9_$]*)?\s+(?:READ(?:\s+LOCAL)?|WRITE)(?:\s*,\s*\S+(?:\s+(?:AS\s+)?[A-Za-z_][A-Za-z0-9_$]*)?\s+(?:READ(?:\s+LOCAL)?|WRITE))*\s*$",
+        RegexOptions.IgnoreCase
+    )
+let private unlockTablesRe = Regex(@"^UNLOCK\s+TABLES\s*$", RegexOptions.IgnoreCase)
 
 let private setTransactionIsolation =
     Regex(
@@ -1484,6 +1490,8 @@ type private Probe =
     | FlushStatus
     | FlushTables
     | FlushLogs
+    | LockTables
+    | UnlockTables
 
 /// The one ordered list of text-probed forms — matching `Probe`'s cases
 /// exactly (the compiler enforces `runProbe` covers every one of them), so
@@ -1579,6 +1587,10 @@ let private tryProbe (sql: string) (upper: string) : Probe option =
         Some FlushTables
     elif flushLogsRe.IsMatch sql then
         Some FlushLogs
+    elif lockTablesRe.IsMatch sql then
+        Some LockTables
+    elif unlockTablesRe.IsMatch sql then
+        Some UnlockTables
     elif showProcesslistRe.IsMatch sql then
         Some(ShowProcesslist((showProcesslistRe.Match sql).Groups.[1].Success))
     elif showTriggersRe.IsMatch sql then
@@ -2024,6 +2036,8 @@ let private runProbe (session: Session) (sql: string) (probe: Probe) : Session *
         session, Affected 0UL
     | FlushTables
     | FlushLogs -> session, Affected 0UL
+    | LockTables
+    | UnlockTables -> session, Affected 0UL
 let rec mapPlaceholders (replace: int -> Expr) (stmt: Statement) : Statement =
     let rec mapExpr (e: Expr) : Expr =
         match e with
