@@ -9834,6 +9834,23 @@ let private renderExplainAnalyze (rows: ExplainRow list) (elapsedMilliseconds: f
 
     ResultSet([ "EXPLAIN" ], (root :: planRows) |> List.map (fun line -> [ Some line ]))
 
+let private checksumTables (store: Store) (dbName: string) (tables: string list) (quick: bool) : QueryResult =
+    let checksum tableName =
+        let database, table = splitQualified dbName tableName
+        let label = database + "." + table
+
+        if quick then
+            [ Some label; None ]
+        else
+            match scan store database table with
+            | Error _ -> [ Some label; None ]
+            | Ok(_, rows) ->
+                let writer = Fsdb.Binary.Writer()
+                rows |> Seq.iter (Array.iter (encodeValue writer))
+                [ Some label; Some(string (Fsdb.Binary.crc32 (writer.ToArray()))) ]
+
+    ResultSet([ "Table"; "Checksum" ], tables |> List.map checksum)
+
 /// `EXPLAIN [FORMAT=TRADITIONAL] stmt` — a pure description of what
 /// `execute` would do with `stmt`, never actually running it. Still
 /// validates `stmt` the way actually running it would, though — real MySQL
@@ -13028,6 +13045,8 @@ let rec executeAs
                     | Ok counts -> ids, Affected(uint64 (List.sum counts))
                     | Error e -> ids, storageErr e
 
+    | ChecksumTables(tables, quick) ->
+        ids, checksumTables store dbName tables quick
     | Explain(format, inner) ->
         ids, explainStatement format store registry dbName inner
 

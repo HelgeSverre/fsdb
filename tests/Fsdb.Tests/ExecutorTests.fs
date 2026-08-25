@@ -804,6 +804,30 @@ let tests =
                     | other -> failtestf "expected flag/id/name ordinal order, got %A" other ]
 
           testList
+              "CHECKSUM TABLE"
+              [ testCase "checksums are deterministic and reflect row contents"
+                <| fun _ ->
+                    let store = newStore ()
+                    runDefault store "CREATE TABLE t (id INT, value VARCHAR(10))" |> ignore
+
+                    Expect.equal
+                        (runDefault store "CHECKSUM TABLE t")
+                        (ResultSet([ "Table"; "Checksum" ], [ [ Some "fsdb.t"; Some "0" ] ]))
+                        "empty checksum"
+
+                    runDefault store "INSERT INTO t VALUES (1, 'a')" |> ignore
+
+                    match runDefault store "CHECKSUM TABLE t, missing" with
+                    | ResultSet([ "Table"; "Checksum" ], [ [ Some "fsdb.t"; Some checksum ]; [ Some "fsdb.missing"; None ] ]) ->
+                        Expect.notEqual checksum "0" "row data changes the checksum"
+                    | other -> failtestf "expected table and missing-table checksum rows, got %A" other
+
+                    Expect.equal
+                        (runDefault store "CHECKSUM TABLE t QUICK")
+                        (ResultSet([ "Table"; "Checksum" ], [ [ Some "fsdb.t"; None ] ]))
+                        "InnoDB-style QUICK result" ]
+
+          testList
               "EXPLAIN"
               [ testCase "EXPLAIN SELECT with a WHERE and JOIN describes both tables in FROM order"
                 <| fun _ ->

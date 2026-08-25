@@ -53,6 +53,7 @@ module AstKind =
         | CreateView _ -> "create_view"
         | DropView _ -> "drop_view"
         | SetTriggerNew _ -> "set_trigger_new"
+        | ChecksumTables _ -> "checksum_table"
         | Explain(_, statement) -> "explain_" + ofStatement statement
 
 [<RequireQualifiedAccess>]

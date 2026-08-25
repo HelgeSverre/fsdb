@@ -1287,7 +1287,7 @@ let private executeParsed (session: Session) (stmt: Statement) : Session * Query
         // through (probes are exempt, see `Auth.requiredPrivileges`'s doc).
         let access =
             match session.Tx, stmt with
-            | Some tx, (Select _ | Union _ | Explain _) when tx.ReadOnly ->
+            | Some tx, (Select _ | Union _ | Explain _ | ChecksumTables _) when tx.ReadOnly ->
                 Auth.checkForAccount store (accountOf session) (Auth.requiredPrivilegesInStore store dbName stmt)
             | Some tx, _ when tx.ReadOnly -> Error(1792, "Cannot execute statement in a READ ONLY transaction")
             | _ -> Auth.checkForAccount store (accountOf session) (Auth.requiredPrivilegesInStore store dbName stmt)

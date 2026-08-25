@@ -931,6 +931,7 @@ let rec requiredPrivileges (defaultDb: string) (stmt: Statement) : (string * Pri
         | Ok select -> own @ requiredPrivileges viewDb select
         | Error _ -> own
     | DropView(names, _) -> onTables "DROP" (names |> List.map split)
+    | ChecksumTables(tables, _) -> onTables "SELECT" (tables |> List.map split)
     | Explain(_, inner) -> requiredPrivileges defaultDb inner
 
 /// Adds privilege requirements whose target can only be resolved from the

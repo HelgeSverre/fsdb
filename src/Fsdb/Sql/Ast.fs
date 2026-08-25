@@ -754,6 +754,7 @@ type Statement =
     | CreateView of name: string * columns: string list * definition: string * orReplace: bool
     /// `DROP VIEW [IF EXISTS] view [, ...]`.
     | DropView of names: string list * ifExists: bool
+    | ChecksumTables of tables: string list * quick: bool
     /// `EXPLAIN [FORMAT=TRADITIONAL|JSON] stmt` describes an access plan;
     /// `EXPLAIN ANALYZE SELECT` also evaluates the query.
     | Explain of format: ExplainFormat * statement: Statement

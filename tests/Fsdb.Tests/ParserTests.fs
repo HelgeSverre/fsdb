@@ -1788,6 +1788,18 @@ let tests =
                         (AlterTable("t", [ SetTableComment "application data" ]))
                         "table comment"
 
+                testCase "CHECKSUM TABLE"
+                <| fun _ ->
+                    Expect.equal
+                        (parseOk "CHECKSUM TABLE t, archive.t EXTENDED")
+                        (ChecksumTables([ "t"; "archive.t" ], false))
+                        "extended checksum"
+
+                    Expect.equal
+                        (parseOk "CHECKSUM TABLE t QUICK")
+                        (ChecksumTables([ "t" ], true))
+                        "quick checksum"
+
                 testCase "ALTER TABLE CONVERT TO CHARACTER SET"
                 <| fun _ ->
                     Expect.equal
