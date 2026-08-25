@@ -39,8 +39,13 @@ let private syntaxError (sql: string) =
     )
 
 let private parserError (sql: string) (detail: string) =
-    let temporal = Regex.Match(detail, @"Incorrect (?:DATE|DATETIME|TIME) value: '[^\r\n]*'")
-    if temporal.Success then Err(1525, temporal.Value) else syntaxError sql
+    let temporal =
+        Regex.Match(
+            detail,
+            @"(?:^|\r?\n)\s*(?<message>Incorrect (?:DATE|DATETIME|TIME) value: '[^\r\n]*')\s*$"
+        )
+
+    if temporal.Success then Err(1525, temporal.Groups.["message"].Value) else syntaxError sql
 
 /// Raw map lookup: the outer `option` is "is `name` even a known variable"
 /// (unchanged since `Session.Variables` grew NULL-capable values) — `None`

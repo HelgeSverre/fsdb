@@ -832,6 +832,10 @@ let tests =
                     "SELECT TIME '839:00:00'", "Incorrect TIME value: '839:00:00'" ] do
                   Expect.equal (handle session sql |> snd) (Err(1525, expected)) sql
 
+              match handle session "SELECT 'Incorrect DATE value: \\'x\\'' nonsense garbage" |> snd with
+              | Err(1064, _) -> ()
+              | other -> failtestf "ordinary syntax text must remain 1064, got %A" other
+
           testCase "SET @@SESSION.sql_mode = CONCAT(@@sql_mode, ',ANSI_QUOTES') isn't split on the CONCAT's own comma"
           <| fun _ ->
               // `splitSetAssignments` must track paren depth, not just quote
