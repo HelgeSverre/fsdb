@@ -49,6 +49,10 @@ type private RangeLookupBounds =
       Lower: (Value * bool) option
       Upper: (Value * bool) option }
 
+type private RangeColumnScope =
+    | BareOrQualifiedRange
+    | QualifiedRange
+
 type private EqualityAccessPlan =
     { KeyName: string
       ColumnIndices: int list
@@ -5554,6 +5558,13 @@ and private runSelectStmt
                         match resolved with
                         | Error e -> e, [], []
                         | Ok(columns, rows) -> runResolved columns rows select
+        | FromTable tref, _ ->
+            match tryQualifiedRangeLookup store dbName tref select.Where with
+            | Some(columns, rows) -> runResolved columns (rows |> Seq.map snd) select
+            | None ->
+                match resolveFromItem store registry dbName fromItem with
+                | Error e -> e, [], []
+                | Ok(columns, rows) -> runResolved columns rows select
         | _ ->
             match resolveFromItem store registry dbName fromItem with
             | Error e -> e, [], []
@@ -5605,14 +5616,14 @@ and private pointLookupEqualities (tref: TableRef) (whereExpr: Expr option) : (s
             | BinOp(Eq, Lit v, QualifiedCol(q, n)) when System.String.Equals(q, selfQualifier, System.StringComparison.OrdinalIgnoreCase) -> Some(n, v)
             | _ -> None)
 
-and private rangeLookupBounds (tref: TableRef) (whereExpr: Expr option) : RangeLookupBounds list =
+and private rangeLookupBounds (scope: RangeColumnScope) (tref: TableRef) (whereExpr: Expr option) : RangeLookupBounds list =
     match whereExpr with
     | None -> []
     | Some whereExpr ->
         let selfQualifier = tref.Alias |> Option.defaultValue tref.Table
 
         let columnName = function
-            | Col name -> Some name
+            | Col name when scope = BareOrQualifiedRange -> Some name
             | QualifiedCol(qualifier, name) when System.String.Equals(qualifier, selfQualifier, System.StringComparison.OrdinalIgnoreCase) -> Some name
             | _ -> None
 
@@ -5723,7 +5734,15 @@ and private tryCorrelatedEqualityLookup
 and private tryRangeLookup (store: Store) (dbName: string) (tref: TableRef) (whereExpr: Expr option) : (ColumnDef list * (RowId * Value[]) list) option =
     let tableDb = tref.Database |> Option.defaultValue dbName
 
-    rangeLookupBounds tref whereExpr
+    rangeLookupBounds BareOrQualifiedRange tref whereExpr
+    |> List.tryPick (fun bounds ->
+        Storage.trySecondaryRangeLookup store tableDb tref.Table bounds.Column bounds.Lower bounds.Upper
+        |> Option.map (fun (_, _, columns, rows) -> columns, rows))
+
+and private tryQualifiedRangeLookup (store: Store) (dbName: string) (tref: TableRef) (whereExpr: Expr option) : (ColumnDef list * (RowId * Value[]) list) option =
+    let tableDb = tref.Database |> Option.defaultValue dbName
+
+    rangeLookupBounds QualifiedRange tref whereExpr
     |> List.tryPick (fun bounds ->
         Storage.trySecondaryRangeLookup store tableDb tref.Table bounds.Column bounds.Lower bounds.Upper
         |> Option.map (fun (_, _, columns, rows) -> columns, rows))
@@ -5799,7 +5818,7 @@ and private tryIndexOrder
             match orderedColumns with
             | [ column ] ->
                 let lower, upper =
-                    rangeLookupBounds tref select.Where
+                    rangeLookupBounds BareOrQualifiedRange tref select.Where
                     |> List.tryFind (fun bounds -> System.String.Equals(bounds.Column, column, System.StringComparison.OrdinalIgnoreCase))
                     |> Option.map (fun bounds -> bounds.Lower, bounds.Upper)
                     |> Option.defaultValue (None, None)
@@ -9272,7 +9291,7 @@ let rec private explainJoinBlock
                     let hasBounds =
                         match plan.ColumnIndices with
                         | [ index ] ->
-                            rangeLookupBounds tref whereOpt
+                            rangeLookupBounds BareOrQualifiedRange tref whereOpt
                             |> List.exists (fun bounds ->
                                 System.String.Equals(bounds.Column, plan.Columns.[index].Name, System.StringComparison.OrdinalIgnoreCase))
                         | _ -> false
@@ -9289,7 +9308,7 @@ let rec private explainJoinBlock
 
                     true
                 | None ->
-                    rangeLookupBounds tref whereOpt
+                    rangeLookupBounds BareOrQualifiedRange tref whereOpt
                     |> List.tryPick (fun bounds ->
                         Storage.trySecondaryRangeLookup store tableDb tref.Table bounds.Column bounds.Lower bounds.Upper
                         |> Option.map (fun (keyName, columnIndex, columns, rows) -> keyName, columnIndex, columns, List.length rows))

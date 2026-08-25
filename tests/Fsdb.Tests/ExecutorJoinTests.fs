@@ -66,6 +66,33 @@ let tests =
               | ResultSet(_, rows) -> Expect.equal rows [ [ Some "1" ] ] "reordering preserves join results"
               | other -> failtestf "expected joined rows, got %A" other
 
+          testCase "a qualified base-table range narrows before joining"
+          <| fun _ ->
+              let mutable calls = 0
+
+              let registry =
+                  builtins
+                  |> registerScalar "TOUCH" (fun values ->
+                      calls <- calls + 1
+                      values.Head)
+
+              let store = newStore ()
+              runDefault store "CREATE TABLE base_rows (id INT PRIMARY KEY)" |> ignore
+              runDefault store "CREATE TABLE singleton (id INT PRIMARY KEY)" |> ignore
+              runDefault store ("INSERT INTO base_rows VALUES " + ([ 1..1000 ] |> List.map (sprintf "(%d)") |> String.concat ",")) |> ignore
+              runDefault store "INSERT INTO singleton VALUES (1)" |> ignore
+
+              match
+                  run
+                      store
+                      registry
+                      "SELECT base_rows.id FROM base_rows JOIN singleton ON singleton.id = singleton.id WHERE base_rows.id >= 995 AND TOUCH(base_rows.id) = base_rows.id ORDER BY base_rows.id"
+              with
+              | ResultSet(_, rows) -> Expect.equal rows.Length 6 "the range returns the final six rows"
+              | other -> failtestf "expected joined rows, got %A" other
+
+              Expect.isLessThan calls 20 "the residual sees the qualified range candidates, not the full base table"
+
           testCase "INNER JOIN between two different tables, and it drops unmatched rows"
           <| fun _ ->
               let store = newStore ()

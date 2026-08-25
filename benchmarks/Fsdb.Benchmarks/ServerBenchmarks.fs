@@ -194,7 +194,7 @@ type ServerBenchmarks() =
         )
 
     [<Benchmark>]
-    [<BenchmarkCategory("Scale")>]
+    [<BenchmarkCategory("Scale", "Planner")>]
     member this.ReorderedIndexedJoin() =
         this.Query(
             "SELECT u.id, o.total, a.title "
@@ -209,7 +209,7 @@ type ServerBenchmarks() =
         this.Query "SELECT u.id, u.name FROM users u WHERE u.id IN (SELECT o.user_id FROM orders o WHERE o.id <= 100)"
 
     [<Benchmark>]
-    [<BenchmarkCategory("Scale")>]
+    [<BenchmarkCategory("Scale", "Planner")>]
     member this.CorrelatedOrderCount() =
         this.Query "SELECT u.id, (SELECT COUNT(*) FROM orders o WHERE o.user_id = u.id) FROM users u WHERE u.id <= 100"
 
