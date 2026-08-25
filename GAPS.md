@@ -75,7 +75,7 @@ variants), USE, KILL, DESCRIBE are text-probed before the grammar
 | `CREATE/DROP ROLE` are backed by locked `mysql.user` accounts; `SET ROLE`, `SET DEFAULT ROLE`, role grants/inheritance, dynamic privileges (`BACKUP_ADMIN`…), and `GRANT PROXY` remain absent | medium | divergence/refusal |
 | Replication/admin SQL: `CHANGE REPLICATION SOURCE TO`, `PURGE BINARY LOGS`, `RESET`, `BINLOG`, `INSTALL/UNINSTALL PLUGIN|COMPONENT`, `ALTER INSTANCE`, `CREATE SERVER`, `TABLESPACE` statements | low | refusal |
 | `EXPLAIN FORMAT=JSON/TREE` report the logical access plan without MySQL's cost model; `EXPLAIN ANALYZE` reports aggregate runtime/cardinality rather than per-iterator observations | low | divergence |
-| `ALTER TABLE … COMMENT=` is accepted, but the value is not retained or exposed through `TABLE_COMMENT` | medium | divergence |
+| `ALTER TABLE … COMMENT=` is retained and exposed; the `CREATE TABLE … COMMENT` option is still accepted without retaining its value | low | divergence |
 | `CREATE USER … ACCOUNT LOCK/UNLOCK` is enforced; auth-plugin selection, `REQUIRE SSL/X509`, resource limits, `PASSWORD EXPIRE`, and `ALTER USER` beyond password change remain absent | medium | refusal |
 
 ### SELECT-level syntax gaps

@@ -34,7 +34,14 @@ let private snapshotFileName = "snapshot.fsdb"
 /// `decodeCatalog` alone happily parses as `dbCount = 0`). Paired with the
 /// trailing length+CRC below for the rest of the file.
 let private legacySnapshotMagic = [| 0x46uy; 0x53uy; 0x4Euy; 0x31uy |] // "FSN1"
-let private snapshotMagic = [| 0x46uy; 0x53uy; 0x4Euy; 0x32uy |] // "FSN2"
+let private columnCommentSnapshotMagic = [| 0x46uy; 0x53uy; 0x4Euy; 0x32uy |] // "FSN2"
+let private snapshotMagic = [| 0x46uy; 0x53uy; 0x4Euy; 0x33uy |] // "FSN3"
+
+type private SnapshotFormat =
+    { ColumnComments: bool
+      TableComments: bool }
+
+let private currentSnapshotFormat = { ColumnComments = true; TableComments = true }
 
 /// Trailer written right after the catalog payload: `[int64 payload
 /// length][uint32 crc32]`. Same incremental IEEE-802.3 CRC as
@@ -43,8 +50,15 @@ let private snapshotMagic = [| 0x46uy; 0x53uy; 0x4Euy; 0x32uy |] // "FSN2"
 /// payload as one `byte[]` — see `writeCatalog`).
 let private snapshotTrailerSize = 12
 
-let private snapshotHasComments (header: byte[]) : bool option =
-    if header = snapshotMagic then Some true elif header = legacySnapshotMagic then Some false else None
+let private snapshotFormat (header: byte[]) : SnapshotFormat option =
+    if header = snapshotMagic then
+        Some currentSnapshotFormat
+    elif header = columnCommentSnapshotMagic then
+        Some { ColumnComments = true; TableComments = false }
+    elif header = legacySnapshotMagic then
+        Some { ColumnComments = false; TableComments = false }
+    else
+        None
 
 let private crcTable =
     [| for n in 0..255 ->
@@ -375,7 +389,7 @@ let rec private encodeExpr (w: Writer) (expr: Expr) : unit =
     | MatchAgainst _ ->
         failwithf "Persistence: a GENERATED column can't hold a subquery, MATCH or window function (MySQL itself rejects them there)"
 
-let private maxDecodeDepth = 1000
+let private maxDecodeDepth = 256
 
 let rec private decodeExprAt (depth: int) (r: #IReader) : Expr =
     if depth > maxDecodeDepth then
@@ -546,12 +560,12 @@ let private decodeColumnPosition (r: #IReader) : ColumnPosition =
     | 0x02uy -> PositionFirst
     | _ -> PositionAfter(readStr r)
 
-let private encodeAlterAction (includeComment: bool) (w: Writer) (a: AlterAction) : unit =
+let private encodeAlterAction (format: SnapshotFormat) (w: Writer) (a: AlterAction) : unit =
     match a with
-    | AddColumn(c, position) -> w.WriteByte 0x01uy; encodeColumnDef includeComment w c; encodeColumnPosition w position
+    | AddColumn(c, position) -> w.WriteByte 0x01uy; encodeColumnDef format.ColumnComments w c; encodeColumnPosition w position
     | DropColumn name -> w.WriteByte 0x02uy; writeStr w name
-    | ModifyColumn(c, position) -> w.WriteByte 0x03uy; encodeColumnDef includeComment w c; encodeColumnPosition w position
-    | ChangeColumn(oldName, c, position) -> w.WriteByte 0x04uy; writeStr w oldName; encodeColumnDef includeComment w c; encodeColumnPosition w position
+    | ModifyColumn(c, position) -> w.WriteByte 0x03uy; encodeColumnDef format.ColumnComments w c; encodeColumnPosition w position
+    | ChangeColumn(oldName, c, position) -> w.WriteByte 0x04uy; writeStr w oldName; encodeColumnDef format.ColumnComments w c; encodeColumnPosition w position
     | RenameTo name -> w.WriteByte 0x05uy; writeStr w name
     | RenameColumnTo(oldName, newName) -> w.WriteByte 0x06uy; writeStr w oldName; writeStr w newName
     | AddIndex ix -> w.WriteByte 0x07uy; encodeIndexDef w ix
@@ -571,18 +585,19 @@ let private encodeAlterAction (includeComment: bool) (w: Writer) (a: AlterAction
             encodeColumnDefault w defaultValue
     | RenameIndex(oldName, newName) -> w.WriteByte 0x0Euy; writeStr w oldName; writeStr w newName
     | ConvertCharset(charset, collation) -> w.WriteByte 0x0Fuy; writeStr w charset; writeOptStr w collation
+    | SetTableComment comment when format.TableComments -> w.WriteByte 0x10uy; writeStr w comment
     | AddCheck _
     | DropCheck _
     | SetCheckEnforced _
     | SetEngine _
-    | SetTableComment _ -> failwith "Persistence: metadata-only ALTER action must not reach a SchemaChanged event"
+    | SetTableComment _ -> failwith "Persistence: unsupported ALTER action reached a SchemaChanged event"
 
-let private decodeAlterAction (includeComment: bool) (r: #IReader) : AlterAction =
+let private decodeAlterAction (format: SnapshotFormat) (r: #IReader) : AlterAction =
     match r.ReadByte() with
-    | 0x01uy -> AddColumn(decodeColumnDef includeComment r, decodeColumnPosition r)
+    | 0x01uy -> AddColumn(decodeColumnDef format.ColumnComments r, decodeColumnPosition r)
     | 0x02uy -> DropColumn(readStr r)
-    | 0x03uy -> ModifyColumn(decodeColumnDef includeComment r, decodeColumnPosition r)
-    | 0x04uy -> ChangeColumn(readStr r, decodeColumnDef includeComment r, decodeColumnPosition r)
+    | 0x03uy -> ModifyColumn(decodeColumnDef format.ColumnComments r, decodeColumnPosition r)
+    | 0x04uy -> ChangeColumn(readStr r, decodeColumnDef format.ColumnComments r, decodeColumnPosition r)
     | 0x05uy -> RenameTo(readStr r)
     | 0x06uy -> RenameColumnTo(readStr r, readStr r)
     | 0x07uy -> AddIndex(decodeIndexDef r)
@@ -596,9 +611,10 @@ let private decodeAlterAction (includeComment: bool) (r: #IReader) : AlterAction
         SetDefault(column, value)
     | 0x0Euy -> RenameIndex(readStr r, readStr r)
     | 0x0Fuy -> ConvertCharset(readStr r, readOptStr r)
+    | 0x10uy when format.TableComments -> SetTableComment(readStr r)
     | _ -> AddPrimaryKey(readStrList r)
 
-let private encodeStatement (includeComment: bool) (w: Writer) (s: Statement) : unit =
+let private encodeStatement (format: SnapshotFormat) (w: Writer) (s: Statement) : unit =
     match s with
     | CreateDatabase(name, ifNotExists) -> w.WriteByte 0x01uy; writeStr w name; writeBool w ifNotExists
     | DropDatabase(name, ifExists) -> w.WriteByte 0x02uy; writeStr w name; writeBool w ifExists
@@ -606,7 +622,7 @@ let private encodeStatement (includeComment: bool) (w: Writer) (s: Statement) : 
         w.WriteByte 0x03uy
         writeStr w name
         w.WriteInt32LE(List.length columns)
-        List.iter (encodeColumnDef includeComment w) columns
+        List.iter (encodeColumnDef format.ColumnComments w) columns
         w.WriteInt32LE(List.length indexes)
         List.iter (encodeIndexDef w) indexes
         w.WriteInt32LE(List.length fks)
@@ -620,7 +636,7 @@ let private encodeStatement (includeComment: bool) (w: Writer) (s: Statement) : 
         w.WriteByte 0x05uy
         writeStr w table
         w.WriteInt32LE(List.length actions)
-        List.iter (encodeAlterAction includeComment w) actions
+        List.iter (encodeAlterAction format w) actions
     | RenameTable pairs ->
         w.WriteByte 0x06uy
         w.WriteInt32LE(List.length pairs)
@@ -633,13 +649,13 @@ let private encodeStatement (includeComment: bool) (w: Writer) (s: Statement) : 
     // rots, and no WAL ever carried these.
     | other -> failwithf "Persistence: %A isn't a DDL statement SchemaChanged should ever carry" other
 
-let private decodeStatement (includeComment: bool) (r: #IReader) : Statement =
+let private decodeStatement (format: SnapshotFormat) (r: #IReader) : Statement =
     match r.ReadByte() with
     | 0x01uy -> CreateDatabase(readStr r, readBool r)
     | 0x02uy -> DropDatabase(readStr r, readBool r)
     | 0x03uy ->
         let name = readStr r
-        let columns = List.init (r.ReadInt32LE()) (fun _ -> decodeColumnDef includeComment r)
+        let columns = List.init (r.ReadInt32LE()) (fun _ -> decodeColumnDef format.ColumnComments r)
         let indexes = List.init (r.ReadInt32LE()) (fun _ -> decodeIndexDef r)
         let fks = List.init (r.ReadInt32LE()) (fun _ -> decodeForeignKeyDef r)
         let ifNotExists = readBool r
@@ -648,7 +664,7 @@ let private decodeStatement (includeComment: bool) (r: #IReader) : Statement =
         let autoIncrementSeed = readOptStr r |> Option.map int64
         CreateTable(name, columns, indexes, fks, [], ifNotExists, tableCharset, tableCollation, autoIncrementSeed)
     | 0x04uy -> DropTable(readStrList r, readBool r)
-    | 0x05uy -> AlterTable(readStr r, List.init (r.ReadInt32LE()) (fun _ -> decodeAlterAction includeComment r))
+    | 0x05uy -> AlterTable(readStr r, List.init (r.ReadInt32LE()) (fun _ -> decodeAlterAction format r))
     | 0x06uy -> RenameTable(List.init (r.ReadInt32LE()) (fun _ -> readStr r, readStr r))
     | 0x09uy -> Truncate(readStr r)
     // 0x07/0x08 are retired — see `encodeStatement`.
@@ -667,6 +683,8 @@ let private KindTransactionCommitted = 0x05uy
 let private KindSchemaChangedAt = 0x06uy
 let private KindSchemaChangedV2 = 0x07uy
 let private KindSchemaChangedAtV2 = 0x08uy
+let private KindSchemaChangedV3 = 0x09uy
+let private KindSchemaChangedAtV3 = 0x0Auy
 
 let private encodeRowBin (w: Writer) (row: Value[]) : unit =
     w.WriteInt32LE row.Length
@@ -705,13 +723,13 @@ let rec private encodeEvent (w: Writer) (event: CommitEvent) : unit =
         for row in rows do
             encodeRowBin w row
     | SchemaChanged(db, stmt) ->
-        w.WriteByte KindSchemaChangedV2
+        w.WriteByte KindSchemaChangedV3
         w.WriteLenEncString db
-        encodeStatement true w stmt
+        encodeStatement currentSnapshotFormat w stmt
     | SchemaChangedAt(db, stmt, createTime) ->
-        w.WriteByte KindSchemaChangedAtV2
+        w.WriteByte KindSchemaChangedAtV3
         w.WriteLenEncString db
-        encodeStatement true w stmt
+        encodeStatement currentSnapshotFormat w stmt
         w.WriteInt64LE createTime.Ticks
     | TransactionCommitted events ->
         w.WriteByte KindTransactionCommitted
@@ -744,18 +762,24 @@ let rec private decodeEventAt (depth: int) (r: #IReader) : CommitEvent =
         RowsDeleted(db, table, rows)
     | k when k = KindSchemaChanged ->
         let db = str ()
-        SchemaChanged(db, decodeStatement false r)
+        SchemaChanged(db, decodeStatement { ColumnComments = false; TableComments = false } r)
     | k when k = KindTransactionCommitted ->
         TransactionCommitted(List.init (r.ReadInt32LE()) (fun _ -> decodeEventAt (depth + 1) r))
     | k when k = KindSchemaChangedAt ->
         let db = str ()
-        SchemaChangedAt(db, decodeStatement false r, DateTime(r.ReadInt64LE()))
+        SchemaChangedAt(db, decodeStatement { ColumnComments = false; TableComments = false } r, DateTime(r.ReadInt64LE()))
     | k when k = KindSchemaChangedV2 ->
         let db = str ()
-        SchemaChanged(db, decodeStatement true r)
+        SchemaChanged(db, decodeStatement { ColumnComments = true; TableComments = false } r)
     | k when k = KindSchemaChangedAtV2 ->
         let db = str ()
-        SchemaChangedAt(db, decodeStatement true r, DateTime(r.ReadInt64LE()))
+        SchemaChangedAt(db, decodeStatement { ColumnComments = true; TableComments = false } r, DateTime(r.ReadInt64LE()))
+    | k when k = KindSchemaChangedV3 ->
+        let db = str ()
+        SchemaChanged(db, decodeStatement currentSnapshotFormat r)
+    | k when k = KindSchemaChangedAtV3 ->
+        let db = str ()
+        SchemaChangedAt(db, decodeStatement currentSnapshotFormat r, DateTime(r.ReadInt64LE()))
     | tag -> failwithf "Persistence: unknown WAL event kind 0x%02x" tag
 
 let private decodeEvent (r: #IReader) : CommitEvent = decodeEventAt 0 r
@@ -939,6 +963,7 @@ let private encodeTableMeta (w: Writer) (t: Table) : unit =
     List.iter (encodeForeignKeyDef w) t.ForeignKeys
     writeOptStr w t.TableCharset
     writeOptStr w t.TableCollation
+    writeStr w t.TableComment
     w.WriteInt64LE t.CreateTime.Ticks
     w.WriteInt64LE t.NextAutoId
     w.WriteInt32LE t.RowsArray.Length
@@ -993,13 +1018,14 @@ let private writeCatalog (s: FileStream) (catalog: Catalog) : unit =
     let trailerBytes = trailer.ToArray()
     s.Write(trailerBytes, 0, trailerBytes.Length)
 
-let private decodeTable (includeComment: bool) (r: #IReader) : Table =
+let private decodeTable (format: SnapshotFormat) (r: #IReader) : Table =
     let originalName = readStr r
-    let columns = List.init (r.ReadInt32LE()) (fun _ -> decodeColumnDef includeComment r)
+    let columns = List.init (r.ReadInt32LE()) (fun _ -> decodeColumnDef format.ColumnComments r)
     let indexes = List.init (r.ReadInt32LE()) (fun _ -> decodeIndexDef r)
     let fks = List.init (r.ReadInt32LE()) (fun _ -> decodeForeignKeyDef r)
     let tableCharset = readOptStr r
     let tableCollation = readOptStr r
+    let tableComment = if format.TableComments then readStr r else ""
     let createTime = DateTime(r.ReadInt64LE())
     let nextAutoId = r.ReadInt64LE()
     let rows = List.init (r.ReadInt32LE()) (fun _ -> decodeRowBin r)
@@ -1011,6 +1037,7 @@ let private decodeTable (includeComment: bool) (r: #IReader) : Table =
           ForeignKeys = fks
           TableCharset = tableCharset
           TableCollation = tableCollation
+          TableComment = tableComment
           CreateTime = createTime
           RowsArray = RowStore.ofSeq rows
           NextAutoId = nextAutoId
@@ -1037,7 +1064,7 @@ let private verifySnapshotIntegrity (path: string) : bool =
         else
             let header = Array.zeroCreate<byte> snapshotMagic.Length
 
-            if s.Read(header, 0, header.Length) <> header.Length || snapshotHasComments header |> Option.isNone then
+            if s.Read(header, 0, header.Length) <> header.Length || snapshotFormat header |> Option.isNone then
                 false
             else
                 let payloadLen = total - int64 snapshotMagic.Length - int64 snapshotTrailerSize
@@ -1074,13 +1101,13 @@ let private verifySnapshotIntegrity (path: string) : bool =
     with _ ->
         false
 
-let private decodeCatalog (includeComment: bool) (r: #IReader) : Catalog =
+let private decodeCatalog (format: SnapshotFormat) (r: #IReader) : Catalog =
     let dbCount = r.ReadInt32LE()
 
     [ for _ in 1..dbCount ->
           let dbName = readStr r
           let tableCount = r.ReadInt32LE()
-          let tables = [ for _ in 1..tableCount -> readStr r, decodeTable includeComment r ] |> Map.ofList
+          let tables = [ for _ in 1..tableCount -> readStr r, decodeTable format r ] |> Map.ofList
           dbName, tables ]
     |> Map.ofList
 
@@ -1142,7 +1169,7 @@ let load (dataDir: string) : Store =
     // A streamed reader, not `File.ReadAllBytes`: a multi-GB snapshot would
     // exceed the `byte[]` size limit if slurped whole. `StreamReader` decodes
     // it a buffer at a time.
-    // Skip an `FSN1`/`FSN2` magic only when it's actually there. A committed
+    // Skip an `FSN1`/`FSN2`/`FSN3` magic only when it's actually there. A committed
     // `snapshot.fsdb` written before magic/CRC framing existed is pure
     // payload from offset 0 — seeking +4 unconditionally would drop its
     // first 4 bytes and crash-loop the server on every start after an
@@ -1152,12 +1179,15 @@ let load (dataDir: string) : Store =
         use s = new FileStream(path, FileMode.Open, FileAccess.Read)
         let header = Array.zeroCreate<byte> snapshotMagic.Length
         let read = s.Read(header, 0, header.Length)
-        let hasComments =
-            if read = snapshotMagic.Length then snapshotHasComments header |> Option.defaultValue false else false
+        let format =
+            if read = snapshotMagic.Length then
+                snapshotFormat header |> Option.defaultValue { ColumnComments = false; TableComments = false }
+            else
+                { ColumnComments = false; TableComments = false }
 
-        let start = if read = snapshotMagic.Length && snapshotHasComments header |> Option.isSome then int64 snapshotMagic.Length else 0L
+        let start = if read = snapshotMagic.Length && snapshotFormat header |> Option.isSome then int64 snapshotMagic.Length else 0L
         s.Seek(start, SeekOrigin.Begin) |> ignore
-        decodeCatalog hasComments (StreamReader(s))
+        decodeCatalog format (StreamReader(s))
 
     // `verifySnapshotIntegrity` first: a `.new` that fails its magic/length/
     // CRC check is a torn write from a crash mid-`writeCatalog`, not

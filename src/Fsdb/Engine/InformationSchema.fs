@@ -281,7 +281,7 @@ let private tablesRows (catalog: Catalog) : Value[] list =
                vs (t.TableCollation |> Option.defaultValue "utf8mb4_0900_ai_ci")
                VNull
                vs ""
-               vs "" |])
+               vs t.TableComment |])
 
     let views =
         viewCatalogEntries catalog
@@ -1902,13 +1902,16 @@ let private showCreateTableDDL (catalog: Catalog) (dbName: string) (t: Table) : 
             sprintf "CONSTRAINT %s CHECK (%s)%s" (backtick name) clause enforcement)
 
     let lines = (t.Columns |> List.map columnLine) @ pkLine @ indexLines @ fkLines @ checkLines
+    let tableComment =
+        if t.TableComment = "" then "" else sprintf " COMMENT='%s'" (showCreateString t.TableComment)
 
     sprintf
-        "CREATE TABLE %s (\n  %s\n) ENGINE=InnoDB DEFAULT CHARSET=%s COLLATE=%s"
+        "CREATE TABLE %s (\n  %s\n) ENGINE=InnoDB DEFAULT CHARSET=%s COLLATE=%s%s"
         (backtick t.OriginalName)
         (String.concat ",\n  " lines)
         tableCharset
         tableCollation
+        tableComment
 
 /// `SHOW CREATE TABLE t`.
 let showCreateTable (catalog: Catalog) (dbName: string) (tableName: string) : ShowResult =
@@ -2035,7 +2038,7 @@ let showTableStatus (catalog: Catalog) (dbName: string) (likeOpt: string option)
                   Some(t.TableCollation |> Option.defaultValue "utf8mb4_0900_ai_ci")
                   None
                   Some ""
-                  Some "" ])
+                  Some t.TableComment ])
 
         let viewRows =
             viewCatalogEntries catalog

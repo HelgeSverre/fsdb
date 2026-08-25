@@ -11684,8 +11684,7 @@ let rec executeAs
                     | AddCheck _
                     | DropCheck _
                     | SetCheckEnforced _
-                    | SetEngine _
-                    | SetTableComment _ -> false
+                    | SetEngine _ -> false
                     | _ -> true)
 
             let equal left right = System.String.Equals(left, right, System.StringComparison.OrdinalIgnoreCase)

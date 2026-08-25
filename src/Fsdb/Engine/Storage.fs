@@ -182,6 +182,7 @@ type Table =
       /// distinct from the baked-in per-column defaults.
       TableCharset: string option
       TableCollation: string option
+      TableComment: string
       /// When the table was created — surfaced as
       /// `information_schema.tables.CREATE_TIME` and retained by both WAL
       /// and snapshot recovery.
@@ -2057,6 +2058,7 @@ let private sysTable (name: string) (columns: ColumnDef list) (rows: Value[] lis
           ForeignKeys = []
           TableCharset = None
           TableCollation = None
+          TableComment = ""
           CreateTime = DateTime.Now
           UniqueIndex = Map.empty
           SecondaryIndex = Map.empty
@@ -3135,6 +3137,7 @@ let createTableSeeded
                                           ForeignKeys = foreignKeys
                                           TableCharset = tableCharset
                                           TableCollation = tableCollation
+                                          TableComment = ""
                                           CreateTime = createTime
                                           UniqueIndex = Map.empty
                                           SecondaryIndex = Map.empty
@@ -3673,8 +3676,10 @@ let private applyAlterAction (mode: TemporalCoercionMode) (table: Table) (action
         // Forward only, like InnoDB: a value below what existing rows
         // already claimed leaves the counter where it is.
         Ok({ table with NextAutoId = max value table.NextAutoId }, None)
-    | SetEngine _
-    | SetTableComment _ -> Ok(table, None)
+    | SetTableComment comment when comment.EnumerateRunes() |> Seq.length > 2048 ->
+        Error(ExpressionError(1628, sprintf "Comment for table '%s' is too long (max = 2048)" table.OriginalName))
+    | SetTableComment comment -> Ok({ table with TableComment = comment }, None)
+    | SetEngine _ -> Ok(table, None)
     | AddCheck _
     | DropCheck _
     | SetCheckEnforced _ -> Ok(table, None)

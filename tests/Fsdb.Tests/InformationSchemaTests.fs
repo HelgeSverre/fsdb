@@ -151,6 +151,29 @@ let tests =
               | ResultSet(_, [ [ Some "last" ] ]) -> ()
               | other -> failtestf "expected the final repeated comment, got %A" other
 
+          testCase "table comments appear in introspection and SHOW output"
+          <| fun _ ->
+              let store = setup ()
+              run store "CREATE TABLE documented (id INT)" |> ignore
+              run store "ALTER TABLE documented COMMENT = 'owner\\'s \\\\ path\\nsecond'" |> ignore
+
+              match run store "SELECT table_comment FROM information_schema.tables WHERE table_schema = 'fsdb' AND table_name = 'documented'" with
+              | ResultSet(_, [ [ Some "owner's \\ path\nsecond" ] ]) -> ()
+              | other -> failtestf "expected the table comment in information_schema, got %A" other
+
+              let session = Fsdb.Session.create 1 store
+
+              match Fsdb.QueryHandler.handle session "SHOW TABLE STATUS LIKE 'documented'" |> snd with
+              | ResultSet(columns, [ row ]) ->
+                  let comment = List.item (List.findIndex ((=) "Comment") columns) row
+                  Expect.equal comment (Some "owner's \\ path\nsecond") "SHOW TABLE STATUS comment"
+              | other -> failtestf "expected SHOW TABLE STATUS output, got %A" other
+
+              match Fsdb.QueryHandler.handle session "SHOW CREATE TABLE documented" |> snd with
+              | ResultSet(_, [ [ Some "documented"; Some ddl ] ]) ->
+                  Expect.stringContains ddl "COMMENT='owner''s \\\\ path\\nsecond'" "SHOW CREATE TABLE comment"
+              | other -> failtestf "expected SHOW CREATE TABLE output, got %A" other
+
           testCase "BIT defaults render as MySQL bit literals"
           <| fun _ ->
               let store = setup ()

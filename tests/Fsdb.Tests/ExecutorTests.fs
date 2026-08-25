@@ -1622,11 +1622,19 @@ let tests =
                     | Err(1146, _) -> ()
                     | other -> failtestf "expected missing table error, got %A" other
 
-                testCase "ALTER TABLE COMMENT accepts metadata-only table comments"
+                testCase "ALTER TABLE COMMENT retains bounded table comments"
                 <| fun _ ->
                     let store = newStore ()
                     runDefault store "CREATE TABLE t (id INT)" |> ignore
                     Expect.equal (runDefault store "ALTER TABLE t COMMENT = 'application data'") (Affected 0UL) "comment accepted"
+                    Expect.equal store.Catalog.[defaultDatabase].[normalizeTableName "t"].TableComment "application data" "comment retained"
+
+                    let atLimit = String.replicate 2048 "x"
+                    Expect.equal (runDefault store (sprintf "ALTER TABLE t COMMENT = '%s'" atLimit)) (Affected 0UL) "2048 characters accepted"
+
+                    match runDefault store (sprintf "ALTER TABLE t COMMENT = '%s'" (atLimit + "x")) with
+                    | Err(1628, _) -> ()
+                    | other -> failtestf "expected an oversized table comment error, got %A" other
 
                     match runDefault store "ALTER TABLE missing COMMENT = 'application data'" with
                     | Err(1146, _) -> ()

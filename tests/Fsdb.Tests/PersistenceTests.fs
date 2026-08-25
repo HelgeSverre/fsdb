@@ -130,6 +130,31 @@ let private legacySnapshot (table: string) =
     snapshot.WriteUInt32LE(crc32 payload)
     snapshot.ToArray()
 
+let private columnCommentSnapshot (table: string) (comment: string) =
+    let payload = Writer()
+    payload.WriteInt32LE 1
+    payload.WriteLenEncString defaultDatabase
+    payload.WriteInt32LE 1
+    payload.WriteLenEncString table
+    payload.WriteLenEncString table
+    payload.WriteInt32LE 1
+    writeLegacyColumn payload "id"
+    payload.WriteLenEncString comment
+    payload.WriteInt32LE 0
+    payload.WriteInt32LE 0
+    payload.WriteByte 0uy
+    payload.WriteByte 0uy
+    payload.WriteInt64LE 0L
+    payload.WriteInt64LE 1L
+    payload.WriteInt32LE 0
+    let payload = payload.ToArray()
+    let snapshot = Writer()
+    snapshot.WriteBytes [| 0x46uy; 0x53uy; 0x4Euy; 0x32uy |]
+    snapshot.WriteBytes payload
+    snapshot.WriteInt64LE(int64 payload.Length)
+    snapshot.WriteUInt32LE(crc32 payload)
+    snapshot.ToArray()
+
 let private legacyCreateTableWalRecord (table: string) =
     let payload = Writer()
     payload.WriteByte 0x04uy
@@ -1042,6 +1067,20 @@ let tests =
               | Ok([ column ], _) -> Expect.equal column.Comment "created by import" "the snapshot comment survives"
               | other -> failtestf "expected one reloaded column, got %A" other
 
+          testCase "a table comment survives WAL and snapshot recovery"
+          <| fun _ ->
+              let dir = tempDataDir ()
+              let store = load dir
+              attach dir store
+              createTable store defaultDatabase "documented" [ mkCol "id" (TInt false) ] [] [] None None |> ignore
+              alterTable store defaultDatabase "documented" [ SetTableComment "created by import" ] |> ignore
+
+              let tableOf (recovered: Store) = recovered.Catalog.[defaultDatabase].[normalizeTableName "documented"]
+              Expect.equal (tableOf (load dir)).TableComment "created by import" "the WAL comment survives"
+
+              snapshotNow dir store
+              Expect.equal (tableOf (load dir)).TableComment "created by import" "the snapshot comment survives"
+
           testCase "pre-comment snapshots and WAL records load with empty comments"
           <| fun _ ->
               let dir = tempDataDir ()
@@ -1052,8 +1091,20 @@ let tests =
 
               for table in [ "from_snapshot"; "from_wal" ] do
                   match scan reloaded defaultDatabase table with
-                  | Ok([ column ], rows) when Seq.isEmpty rows -> Expect.equal column.Comment "" (table + " has no historical comment")
+                  | Ok([ column ], rows) when Seq.isEmpty rows ->
+                      Expect.equal column.Comment "" (table + " has no historical column comment")
+                      Expect.equal reloaded.Catalog.[defaultDatabase].[normalizeTableName table].TableComment "" (table + " has no historical table comment")
                   | other -> failtestf "expected legacy table '%s' to load, got %A" table other
+
+          testCase "column-comment snapshots load with an empty table comment"
+          <| fun _ ->
+              let dir = tempDataDir ()
+              File.WriteAllBytes(snapshotPath dir, columnCommentSnapshot "documented" "legacy column")
+
+              let reloaded = load dir
+              let table = reloaded.Catalog.[defaultDatabase].[normalizeTableName "documented"]
+              Expect.equal table.Columns.Head.Comment "legacy column" "the FSN2 column comment survives"
+              Expect.equal table.TableComment "" "FSN2 predates table comments"
 
           testCase "a pre-comment snapshot replays a comment-aware WAL record"
           <| fun _ ->
@@ -1240,7 +1291,7 @@ let tests =
               let dir = tempDataDir ()
 
               let nested =
-                  [ 1..1002 ]
+                  [ 1..258 ]
                   |> List.fold (fun event _ -> TransactionCommitted [ event ]) (RowsInserted(defaultDatabase, "t", []))
 
               File.WriteAllBytes(walPath dir, encodeWalRecord nested)
