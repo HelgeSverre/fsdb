@@ -639,6 +639,58 @@ let private columnType: Parser<ColumnType, unit> =
 let private exprDepth = System.Threading.AsyncLocal<int>()
 let private maxExprDepth = 32
 
+let private exceedsParenthesisDepthLimit (sql: string) =
+    let mutable index = 0
+    let mutable depth = 0
+    let mutable quote: char option = None
+    let mutable blockComment = false
+    let mutable lineComment = false
+    let mutable exceeded = false
+
+    while index < sql.Length && not exceeded do
+        match quote with
+        | Some q when sql.[index] = '\\' && q <> '`' && index + 1 < sql.Length -> index <- index + 2
+        | Some q when sql.[index] = q && index + 1 < sql.Length && sql.[index + 1] = q -> index <- index + 2
+        | Some q when sql.[index] = q ->
+            quote <- None
+            index <- index + 1
+        | Some _ -> index <- index + 1
+        | None when blockComment && sql.[index] = '*' && index + 1 < sql.Length && sql.[index + 1] = '/' ->
+            blockComment <- false
+            index <- index + 2
+        | None when blockComment -> index <- index + 1
+        | None when lineComment && (sql.[index] = '\n' || sql.[index] = '\r') ->
+            lineComment <- false
+            index <- index + 1
+        | None when lineComment -> index <- index + 1
+        | None when sql.[index] = '\'' || sql.[index] = '"' || sql.[index] = '`' ->
+            quote <- Some sql.[index]
+            index <- index + 1
+        | None when sql.[index] = '#' ->
+            lineComment <- true
+            index <- index + 1
+        | None when
+            sql.[index] = '-'
+            && index + 1 < sql.Length
+            && sql.[index + 1] = '-'
+            && (index + 2 = sql.Length || Char.IsWhiteSpace sql.[index + 2])
+            ->
+            lineComment <- true
+            index <- index + 2
+        | None when sql.[index] = '/' && index + 1 < sql.Length && sql.[index + 1] = '*' ->
+            blockComment <- true
+            index <- index + 2
+        | None when sql.[index] = '(' ->
+            depth <- depth + 1
+            exceeded <- depth > maxExprDepth
+            index <- index + 1
+        | None when sql.[index] = ')' ->
+            depth <- max 0 (depth - 1)
+            index <- index + 1
+        | None -> index <- index + 1
+
+    exceeded
+
 let private depthGuard (p: Parser<'a, unit>) : Parser<'a, unit> =
     fun stream ->
         if exprDepth.Value >= maxExprDepth then
@@ -3400,9 +3452,12 @@ let parse (sql: string) : Result<Statement, string> =
     // drop the caller's connection — a syntax error is always a clean
     // `Result.Error`, however it originates.
     try
-        match run full sql with
-        | Success(stmt, _, _) -> Result.Ok stmt
-        | Failure(msg, _, _) -> Result.Error msg
+        if exceedsParenthesisDepthLimit sql then
+            Result.Error "expression nested too deeply"
+        else
+            match run full sql with
+            | Success(stmt, _, _) -> Result.Ok stmt
+            | Failure(msg, _, _) -> Result.Error msg
     with ex ->
         Result.Error ex.Message
 
@@ -3535,9 +3590,12 @@ let parseExpression (sql: string) : Result<Expr, string> =
     let sql = stripVersionComments sql
 
     try
-        match run (ws >>. expr .>> eof) sql with
-        | Success(expression, _, _) -> Result.Ok expression
-        | Failure(message, _, _) -> Result.Error message
+        if exceedsParenthesisDepthLimit sql then
+            Result.Error "expression nested too deeply"
+        else
+            match run (ws >>. expr .>> eof) sql with
+            | Success(expression, _, _) -> Result.Ok expression
+            | Failure(message, _, _) -> Result.Error message
     with ex ->
         Result.Error ex.Message
 
