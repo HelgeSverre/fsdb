@@ -403,16 +403,38 @@ let tests =
                   Expect.equal rows [ [ Some "alice"; Some "15" ]; [ Some "bob"; None ] ] "bob has no orders, padded with NULL"
               | other -> failtestf "expected a joined-against-subquery resultset, got %A" other
 
-          testCase "UPDATE t1 JOIN (SELECT ...) dt ON ... is a 1064 error, not a crash"
+          testCase "derived joins filter multi-table UPDATE and DELETE targets"
           <| fun _ ->
-              // `Executor.applyMutationJoin`'s documented real-tables-only
-              // simplification — a clean error, not a wrong result.
               let store = newStore ()
               runDefault store "CREATE TABLE t1 (id INT, n INT)" |> ignore
+              runDefault store "CREATE TABLE source (id INT, n INT)" |> ignore
+              runDefault store "INSERT INTO t1 VALUES (1, 10), (2, 20), (3, 30)" |> ignore
+              runDefault store "INSERT INTO source VALUES (1, 5), (2, 0), (3, 7)" |> ignore
 
-              match runDefault store "UPDATE t1 JOIN (SELECT 1 AS id) dt ON t1.id = dt.id SET t1.n = 1" with
-              | Err(1064, _) -> ()
-              | other -> failtestf "expected a 1064 error, got %A" other
+              match runDefault store "UPDATE t1 JOIN (SELECT id, n FROM source WHERE n > 0) dt ON t1.id = dt.id SET t1.n = dt.n" with
+              | Affected 2UL -> ()
+              | other -> failtestf "expected two updated rows, got %A" other
+
+              match runDefault store "SELECT id, n FROM t1 ORDER BY id" with
+              | ResultSet(_, rows) ->
+                  Expect.equal rows [ [ Some "1"; Some "5" ]; [ Some "2"; Some "20" ]; [ Some "3"; Some "7" ] ] "the derived rows supply update values"
+              | other -> failtestf "expected updated rows, got %A" other
+
+              match runDefault store "DELETE t1 FROM t1 JOIN (SELECT id FROM source WHERE n = 0) dt ON t1.id = dt.id" with
+              | Affected 1UL -> ()
+              | other -> failtestf "expected one deleted row, got %A" other
+
+              match runDefault store "SELECT id FROM t1 ORDER BY id" with
+              | ResultSet(_, rows) -> Expect.equal rows [ [ Some "1" ]; [ Some "3" ] ] "only the physical target is deleted"
+              | other -> failtestf "expected surviving rows, got %A" other
+
+              match runDefault store "UPDATE t1 JOIN (SELECT id FROM source) dt ON t1.id = dt.id SET dt.id = 9" with
+              | Err(1288, _) -> ()
+              | other -> failtestf "expected a non-updatable derived target error, got %A" other
+
+              match runDefault store "EXPLAIN UPDATE t1 JOIN (SELECT id FROM source) dt ON t1.id = dt.id SET t1.n = 1" with
+              | ResultSet _ -> ()
+              | other -> failtestf "expected a derived UPDATE plan, got %A" other
 
           testCase "a scalar subquery's comparison is numeric, not lexicographic text"
           <| fun _ ->

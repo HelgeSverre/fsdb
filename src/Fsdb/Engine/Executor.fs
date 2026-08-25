@@ -99,6 +99,11 @@ type private FullTextSourcePlan =
       Columns: ColumnDef list
       Rows: Value[] seq }
 
+type private MutationSource =
+    { Qualifier: string
+      PhysicalTable: TableRef option
+      Columns: ColumnDef list }
+
 let private insertSelectSourceAliasPrefix = "\u0000fsdb_odku_source_"
 
 type private Int64Membership =
@@ -5034,39 +5039,42 @@ and private applyResolvedJoin
 /// (`None` on an outer-join side that matched nothing — there's no real row
 /// there to update/delete). A separate, smaller near-duplicate of
 /// `applyJoin`'s equi-key hash-join/lazy-nested-loop split (see its doc)
-/// rather than threading identity through the shared `SELECT` path — that
-/// path is the hot, heavily-tested read path; duplicating the join loop
-/// here keeps it untouched. ponytail: real tables only (no derived-table
-/// join source) — MySQL itself doesn't allow a derived table as a
-/// multi-table `UPDATE`/`DELETE` target anyway; a derived-table join
-/// *source* (`UPDATE t1 JOIN (SELECT ...) dt ON ...`) is real MySQL syntax
-/// this rejects with 1064 rather than silently mishandling, add it if a
-/// migration's `UPDATE`/`DELETE` actually needs one.
+/// rather than threading identity through the shared `SELECT` path. A
+/// derived source contributes columns and values but no physical row
+/// identity, so it can filter target rows without becoming writable.
 and private applyMutationJoin
     (store: Store)
     (registry: Registry)
     (dbName: string)
-    ((sourcesSoFar, rowsSoFar): (string * TableRef * ColumnDef list) list * (Value[] option list * Value[]) list)
+    ((sourcesSoFar, rowsSoFar): MutationSource list * (Value[] option list * Value[]) list)
     (join: Join)
-    : Result<(string * TableRef * ColumnDef list) list * (Value[] option list * Value[]) list, QueryResult> =
+    : Result<MutationSource list * (Value[] option list * Value[]) list, QueryResult> =
     match join.Table with
-    | FromSubquery _
     | FromLateral _ ->
-        Error(Err(1064, "a derived table (subquery) isn't supported as a multi-table UPDATE/DELETE JOIN source"))
+        Error(Err(1064, "a lateral derived table isn't supported as a multi-table UPDATE/DELETE JOIN source"))
     | FromJsonTable _ ->
         // ponytail: MySQL allows a JSON_TABLE join source in multi-table
-        // UPDATE/DELETE; the identity-tracking lateral variant isn't built
-        // until a real statement needs it — same policy as derived tables
-        // above.
+        // UPDATE/DELETE; its lateral row expansion does not yet preserve the
+        // source identity list used by physical mutation targets.
         Error(Err(1064, "JSON_TABLE isn't supported as a multi-table UPDATE/DELETE JOIN source"))
-    | FromTable tableRef ->
-        match resolveTableRef store registry dbName tableRef with
+    | source ->
+        let resolved =
+            match source with
+            | FromTable tableRef ->
+                resolveTableRef store registry dbName tableRef
+                |> Result.map (fun (columns, rows) -> fromItemQualifier source, Some tableRef, columns, rows)
+            | FromSubquery _ ->
+                resolveFromSubquery store registry dbName source None
+                |> Result.map (fun (columns, rows) -> fromItemQualifier source, None, columns, rows)
+            | FromLateral _
+            | FromJsonTable _ -> failwith "applyMutationJoin: source handled above"
+
+        match resolved with
         | Error e -> Error e
-        | Ok(joinColumns, joinRows) ->
-            let joinQualifier = tableRef.Alias |> Option.defaultValue tableRef.Table
-            let newSources = sourcesSoFar @ [ joinQualifier, tableRef, joinColumns ]
-            let qualifiers = qualifierRanges (newSources |> List.map (fun (q, _, c) -> q, c))
-            let combinedColumnsSoFar = sourcesSoFar |> List.map (fun (_, _, c) -> c) |> List.collect id
+        | Ok(joinQualifier, tableRef, joinColumns, joinRows) ->
+            let newSources = sourcesSoFar @ [ { Qualifier = joinQualifier; PhysicalTable = tableRef; Columns = joinColumns } ]
+            let qualifiers = qualifierRanges (newSources |> List.map (fun source -> source.Qualifier, source.Columns))
+            let combinedColumnsSoFar = sourcesSoFar |> List.collect _.Columns
             let leftFlatPadding = combinedColumnsSoFar |> List.map (fun _ -> VNull) |> Array.ofList
             let rightFlatPadding = joinColumns |> List.map (fun _ -> VNull) |> Array.ofList
             let leftIdentityPadding = sourcesSoFar |> List.map (fun _ -> None)
@@ -5098,7 +5106,7 @@ and private applyMutationJoin
                 let rightOnly =
                     rightIndexed
                     |> List.filter (fst >> matchedRight.Contains >> not)
-                    |> List.map (fun (_, r) -> leftIdentityPadding @ [ Some r ], Array.append leftFlatPadding r)
+                    |> List.map (fun (_, r) -> leftIdentityPadding @ [ tableRef |> Option.map (fun _ -> r) ], Array.append leftFlatPadding r)
 
                 let rows =
                     match join.Kind with
@@ -5140,9 +5148,9 @@ and private applyMutationJoin
                             let rec find offset =
                                 function
                                 | [] -> failwith "applyMutationJoin: left column index out of range"
-                                | (q, _, cols) :: rest ->
-                                    if idx < offset + List.length cols then q
-                                    else find (offset + List.length cols) rest
+                                | (source: MutationSource) :: rest ->
+                                    if idx < offset + List.length source.Columns then source.Qualifier
+                                    else find (offset + List.length source.Columns) rest
 
                             find 0 sourcesSoFar
 
@@ -5170,23 +5178,19 @@ and private applyMutationJoin
                     let rightKeyIndices = equiKeys |> List.map snd |> Array.ofList
                     let buildOnLeft = rowsSoFar.Length <= joinRows.Length
 
-                    // Left rows carry their identity list alongside the flat
-                    // row `equiKeyOf` needs; right rows (always a real scanned
-                    // table — see the ponytail note above) are the flat row
-                    // itself. `hashPairs` is generic over both shapes at once —
-                    // each side just supplies its own key extractor — so
-                    // neither side pays to wrap/unwrap the other's.
+                    let rightIdentity row = tableRef |> Option.map (fun _ -> row)
+
                     let leftKeyOf (lIdent: Value[] option list, lFlat: Value[]) = equiKeyOf leftKeyIndices lFlat
                     let rightKeyOf (r: Value[]) = equiKeyOf rightKeyIndices r
 
                     let candidates : (int * int * (Value[] option list * Value[])) list =
                         if buildOnLeft then
                             hashPairs keyCollations leftKeyOf rightKeyOf leftIndexed rightIndexed
-                            |> Seq.map (fun (li, (lIdent, lFlat), ri, r) -> li, ri, (lIdent @ [ Some r ], Array.append lFlat r))
+                            |> Seq.map (fun (li, (lIdent, lFlat), ri, r) -> li, ri, (lIdent @ [ rightIdentity r ], Array.append lFlat r))
                             |> List.ofSeq
                         else
                             hashPairs keyCollations rightKeyOf leftKeyOf rightIndexed leftIndexed
-                            |> Seq.map (fun (ri, r, li, (lIdent, lFlat)) -> li, ri, (lIdent @ [ Some r ], Array.append lFlat r))
+                            |> Seq.map (fun (ri, r, li, (lIdent, lFlat)) -> li, ri, (lIdent @ [ rightIdentity r ], Array.append lFlat r))
                             |> List.ofSeq
 
                     candidates |> keepMatches residualHolds snd |> Result.map buildCombinedRows
@@ -5198,7 +5202,7 @@ and private applyMutationJoin
                         let combinedFlat = Array.append lFlat r
 
                         evalExpr { ctxFor combinedFlat with Clause = OnClause } effectiveOn
-                        |> Result.map (fun v -> if truthy v = Some true then Some(li, ri, (lIdent @ [ Some r ], combinedFlat)) else None))
+                        |> Result.map (fun v -> if truthy v = Some true then Some(li, ri, (lIdent @ [ tableRef |> Option.map (fun _ -> r) ], combinedFlat)) else None))
                     |> Result.mapError Err
                     |> Result.map buildCombinedRows
 
@@ -5211,12 +5215,16 @@ and private runMutationJoin
     (dbName: string)
     (from: TableRef)
     (joins: Join list)
-    : Result<(string * TableRef * ColumnDef list) list * (Value[] option list * Value[]) list, QueryResult> =
+    : Result<MutationSource list * (Value[] option list * Value[]) list, QueryResult> =
     match resolveTableRef store registry dbName from with
     | Error e -> Error e
     | Ok(cols, rows) ->
         let baseQualifier = from.Alias |> Option.defaultValue from.Table
-        let initial = [ baseQualifier, from, cols ], (rows |> List.map (fun r -> [ Some r ], r))
+        let initial =
+            [ { Qualifier = baseQualifier
+                PhysicalTable = Some from
+                Columns = cols } ],
+            (rows |> List.map (fun row -> [ Some row ], row))
         joins |> List.fold (fun acc j -> acc |> Result.bind (fun st -> applyMutationJoin store registry dbName st j)) (Ok initial)
 
 /// Resolves a `SELECT`'s `FROM` (a real table, `information_schema`'s
@@ -9801,9 +9809,10 @@ let rec private explainStatement (store: Store) (registry: Registry) (dbName: st
     let checkMutationWhere (fromRef: TableRef) (joins: Join list) (exprs: Expr list) : Result<unit, QueryResult> =
         let resolveJoinSource (j: Join) =
             match j.Table with
-            | FromSubquery _
-            | FromLateral _ ->
-                Error(Err(1064, "a derived table (subquery) isn't supported as a multi-table UPDATE/DELETE JOIN source"))
+            | FromSubquery _ ->
+                resolveFromSubquery store registry dbName j.Table None
+                |> Result.map (fun (cols, _) -> fromItemQualifier j.Table, cols)
+            | FromLateral _ -> Error(Err(1064, "a lateral derived table isn't supported as a multi-table UPDATE/DELETE JOIN source"))
             | FromJsonTable _ -> Error(Err(1064, "JSON_TABLE isn't supported as a multi-table UPDATE/DELETE JOIN source"))
             | FromTable tref -> resolveTableRef store registry dbName tref |> Result.map (fun (cols, _) -> fromItemQualifier j.Table, cols)
 
@@ -12405,8 +12414,8 @@ let rec executeAs
             match runMutationJoin store registry dbName updateStmt.From updateStmt.Joins with
             | Error e -> ids, e
             | Ok(sources, joinedRows) ->
-                let sourceIndex = sources |> List.mapi (fun i (q, _, _) -> q.ToLowerInvariant(), i) |> Map.ofList
-                let combinedColumns = sources |> List.map (fun (q, _, c) -> q, c)
+                let sourceIndex = sources |> List.mapi (fun i source -> source.Qualifier.ToLowerInvariant(), i) |> Map.ofList
+                let combinedColumns = sources |> List.map (fun source -> source.Qualifier, source.Columns)
                 let ctxFor = contextFactory store registry dbName (columnIndexOf (combinedColumns |> List.collect snd)) (qualifierRanges combinedColumns) None
 
                 // Byte offset of each source's columns within the flat
@@ -12422,7 +12431,7 @@ let rec executeAs
                         match Map.tryFind (q.ToLowerInvariant()) sourceIndex with
                         | None -> Error(unknownColumn (sprintf "%s.%s" q a.Column))
                         | Some srcIdx ->
-                            let _, _, cols = sources.[srcIdx]
+                            let cols = sources.[srcIdx].Columns
 
                             resolveColumn cols a.Column
                             |> Result.mapError (fun _ -> unknownColumn (sprintf "%s.%s" q a.Column))
@@ -12431,7 +12440,7 @@ let rec executeAs
                         match
                             sources
                             |> List.indexed
-                            |> List.choose (fun (i, (_, _, cols)) -> resolveColumn cols a.Column |> function Ok idx -> Some(i, idx) | Error _ -> None)
+                            |> List.choose (fun (i, source) -> resolveColumn source.Columns a.Column |> function Ok idx -> Some(i, idx) | Error _ -> None)
                         with
                         | [ (srcIdx, colIdx) ] -> Ok(srcIdx, colIdx, a.Value)
                         | [] -> Error(unknownColumn a.Column)
@@ -12439,13 +12448,13 @@ let rec executeAs
 
                 // A generated column can't be a SET target (MySQL 3105).
                 let guardAssignable ((srcIdx, colIdx, v): int * int * Expr) : Result<int * int * Expr, EvalError> =
-                    let _, tableRef, cols = sources.[srcIdx]
-                    let col = List.item colIdx cols
+                    let source = sources.[srcIdx]
+                    let col = List.item colIdx source.Columns
 
-                    if col.Generated.IsSome then
-                        Error(toMySqlError (GeneratedColumnAssignment(col.Name, tableRef.Table)))
-                    else
-                        Ok(srcIdx, colIdx, v)
+                    match source.PhysicalTable with
+                    | None -> Error(1288, sprintf "The target table '%s' of the UPDATE is not updatable" source.Qualifier)
+                    | Some tableRef when col.Generated.IsSome -> Error(toMySqlError (GeneratedColumnAssignment(col.Name, tableRef.Table)))
+                    | Some _ -> Ok(srcIdx, colIdx, v)
 
                 match updateStmt.Assignments |> traverse (resolveAssignment >> Result.bind guardAssignable) with
                 | Error(code, message) -> ids, Err(code, message)
@@ -12466,13 +12475,13 @@ let rec executeAs
 
                     let physicalGroups =
                         sources
-                        |> List.map (fun (_, tableRef, _) -> tableRef)
+                        |> List.choose _.PhysicalTable
                         |> List.fold (fun acc t -> if acc |> List.exists (fun t' -> physicalKey t' = physicalKey t) then acc else acc @ [ t ]) []
                         |> Array.ofList
 
                     let sourcePhys =
                         sources
-                        |> List.map (fun (_, tableRef, _) -> physicalGroups |> Array.findIndex (fun t -> physicalKey t = physicalKey tableRef))
+                        |> List.map (fun source -> source.PhysicalTable |> Option.map (fun tableRef -> physicalGroups |> Array.findIndex (fun t -> physicalKey t = physicalKey tableRef)))
                         |> Array.ofList
 
                     // `claims` stays keyed by *source* (one set per alias,
@@ -12539,11 +12548,11 @@ let rec executeAs
                                             match List.item srcIdx identities with
                                             | None -> ()
                                             | Some physRow ->
-                                                let physIdx = sourcePhys.[srcIdx]
-
-                                                if claimedThisRow.[srcIdx] then
+                                                match sourcePhys.[srcIdx] with
+                                                | Some physIdx when claimedThisRow.[srcIdx] ->
                                                     let existing = match pending.[physIdx].TryGetValue physRow with true, vs -> vs | false, _ -> []
                                                     pending.[physIdx].[physRow] <- existing @ [ colIdx, v ]
+                                                | _ -> ()
 
                                             go rest)
 
@@ -12572,15 +12581,15 @@ let rec executeAs
                         let physicalColumns =
                             physicalGroups
                             |> Array.mapi (fun i _ ->
-                                let srcIdx = sourcePhys |> Array.findIndex ((=) i)
-                                let _, _, cols = sources.[srcIdx]
-                                cols)
+                                sources
+                                |> List.find (fun source -> source.PhysicalTable |> Option.exists (fun tableRef -> physicalKey tableRef = physicalKey physicalGroups.[i]))
+                                |> _.Columns)
 
                         let assignedIdxsByPhys =
                             physicalGroups
                             |> Array.mapi (fun i _ ->
                                 resolvedAssignments
-                                |> List.choose (fun (srcIdx, colIdx, _) -> if sourcePhys.[srcIdx] = i then Some colIdx else None)
+                                |> List.choose (fun (srcIdx, colIdx, _) -> if sourcePhys.[srcIdx] = Some i then Some colIdx else None)
                                 |> Set.ofList)
 
                         let apply =
@@ -12753,15 +12762,16 @@ let rec executeAs
         match runMutationJoin store registry dbName deleteStmt.From deleteStmt.Joins with
         | Error e -> ids, e
         | Ok(sources, joinedRows) ->
-            let sourceIndex = sources |> List.mapi (fun i (q, _, _) -> q.ToLowerInvariant(), i) |> Map.ofList
-            let combinedColumns = sources |> List.map (fun (q, _, c) -> q, c)
+            let sourceIndex = sources |> List.mapi (fun i source -> source.Qualifier.ToLowerInvariant(), i) |> Map.ofList
+            let combinedColumns = sources |> List.map (fun source -> source.Qualifier, source.Columns)
             let ctxFor = contextFactory store registry dbName (columnIndexOf (combinedColumns |> List.collect snd)) (qualifierRanges combinedColumns) None
 
             match
                 deleteStmt.Targets
                 |> traverse (fun t ->
                     match Map.tryFind (t.ToLowerInvariant()) sourceIndex with
-                    | Some i -> Ok i
+                    | Some i when sources.[i].PhysicalTable.IsSome -> Ok i
+                    | Some _ -> Error(1288, sprintf "The target table '%s' of the DELETE is not updatable" t)
                     | None -> Error(1109, sprintf "Unknown table '%s' in MULTI DELETE" t))
             with
             | Error(code, message) -> ids, Err(code, message)
@@ -12786,10 +12796,12 @@ let rec executeAs
                         targetIndices
                         |> List.distinct
                         |> traverse (fun i ->
-                            let _, tableRef, _ = sources.[i]
-                            let tdb, tname = (tableRef.Database |> Option.defaultValue dbName), tableRef.Table
-                            let set = claimedByTarget.[i]
-                            deleteRows store tdb tname (fun row -> Ok(set.Contains row)))
+                            match sources.[i].PhysicalTable with
+                            | None -> Error(NoSuchTable sources.[i].Qualifier)
+                            | Some tableRef ->
+                                let tdb, tname = (tableRef.Database |> Option.defaultValue dbName), tableRef.Table
+                                let set = claimedByTarget.[i]
+                                deleteRows store tdb tname (fun row -> Ok(set.Contains row)))
 
                     match apply with
                     | Ok counts -> ids, Affected(uint64 (List.sum counts))

@@ -186,6 +186,17 @@ let tests =
                       "EXISTS in a DELETE WHERE needs SELECT on secret"
               | Error e -> failtestf "parse delete: %s" e
 
+              for sql in
+                  [ "UPDATE mine JOIN (SELECT id FROM secret) chosen ON mine.id = chosen.id SET mine.x = 1"
+                    "DELETE mine FROM mine JOIN (SELECT id FROM secret) chosen ON mine.id = chosen.id" ] do
+                  match Fsdb.Parser.parse sql with
+                  | Ok statement ->
+                      Expect.contains
+                          (requiredPrivileges "app" statement)
+                          ("SELECT", OnTable("app", "secret"))
+                          "a derived mutation source requires SELECT"
+                  | Error error -> failtestf "parse derived mutation: %s" error
+
               for sql, privilege in
                   [ "WITH chosen AS (SELECT id FROM secret) UPDATE mine SET x = 1 WHERE id IN (SELECT id FROM chosen)", "UPDATE"
                     "WITH chosen AS (SELECT id FROM secret) DELETE FROM mine WHERE id IN (SELECT id FROM chosen)", "DELETE" ] do

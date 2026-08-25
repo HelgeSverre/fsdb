@@ -837,7 +837,12 @@ let rec requiredPrivileges (defaultDb: string) (stmt: Statement) : (string * Pri
         let readInExprs =
             (u.Assignments |> List.collect (fun a -> exprReadTablesIn boundCtes defaultDb a.Value))
             @ (u.Where |> Option.map (exprReadTablesIn boundCtes defaultDb) |> Option.defaultValue [])
-            @ (u.Joins |> List.collect (fun j -> exprReadTablesIn boundCtes defaultDb j.On))
+            @ (u.Joins
+               |> List.collect (fun j ->
+                   exprReadTablesIn boundCtes defaultDb j.On
+                   @ (match j.Table with
+                      | FromTable _ -> []
+                      | source -> fromItemReadTablesIn boundCtes defaultDb source)))
             |> List.distinct
 
         let updatedTables =
@@ -856,7 +861,12 @@ let rec requiredPrivileges (defaultDb: string) (stmt: Statement) : (string * Pri
 
         let readInExprs =
             (d.Where |> Option.map (exprReadTablesIn boundCtes defaultDb) |> Option.defaultValue [])
-            @ (d.Joins |> List.collect (fun j -> exprReadTablesIn boundCtes defaultDb j.On))
+            @ (d.Joins
+               |> List.collect (fun j ->
+                   exprReadTablesIn boundCtes defaultDb j.On
+                   @ (match j.Table with
+                      | FromTable _ -> []
+                      | source -> fromItemReadTablesIn boundCtes defaultDb source)))
             |> List.distinct
 
         let deletedTables =
