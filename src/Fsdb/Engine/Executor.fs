@@ -5729,6 +5729,74 @@ and private tryIntegerSemiJoin
                             Ok(Some(table.Columns, rows, { select with Where = None })))
     | _ -> Ok None
 
+and private pushBasePredicates
+    (store: Store)
+    (registry: Registry)
+    (dbName: string)
+    (qualifier: string)
+    (columns: ColumnDef list)
+    (rows: Value[] seq)
+    (select: SelectStmt)
+    : Result<Value[] seq * SelectStmt, QueryResult> =
+    let innerOnly =
+        select.Joins
+        |> List.forall (fun join ->
+            match join.Kind with
+            | InnerJoin
+            | CrossJoin
+            | NaturalJoin -> true
+            | _ -> false)
+
+    let qualifierKey = qualifier.ToLowerInvariant()
+    let isBaseColumn (owner: string) = owner.ToLowerInvariant() = qualifierKey
+
+    let belongsToBase =
+        function
+        | BinOp((Eq | Neq | Lt | Lte | Gt | Gte), QualifiedCol(owner, _), Lit _)
+        | BinOp((Eq | Neq | Lt | Lte | Gt | Gte), Lit _, QualifiedCol(owner, _)) -> isBaseColumn owner
+        | Between(QualifiedCol(owner, _), Lit _, Lit _)
+        | IsNull(QualifiedCol(owner, _))
+        | IsNotNull(QualifiedCol(owner, _)) -> isBaseColumn owner
+        | _ -> false
+
+    let conjunction = function
+        | [] -> None
+        | first :: rest -> Some(List.fold (fun left right -> BinOp(And, left, right)) first rest)
+
+    let candidates, residual =
+        if innerOnly then
+            select.Where
+            |> Option.map conjuncts
+            |> Option.defaultValue []
+            |> List.partition belongsToBase
+        else
+            [], []
+
+    match candidates with
+    | [] -> Ok(rows, select)
+    | _ ->
+        let ctxFor =
+            contextFactory
+                store
+                registry
+                dbName
+                (columnIndexOf columns)
+                (qualifierRanges [ qualifier, columns ])
+                None
+
+        let matches row =
+            candidates
+            |> traverse (evalExpr (ctxFor row))
+            |> Result.map (List.forall (truthy >> (=) (Some true)))
+
+        match matches (probeRow columns) with
+        | Error(code, message) -> Error(Err(code, message))
+        | Ok _ ->
+            rows
+            |> traverseSeq (fun row -> matches row |> Result.map (fun keep -> if keep then Some row else None))
+            |> Result.mapError (fun (code, message) -> Err(code, message))
+            |> Result.map (fun filtered -> filtered :> Value[] seq, { select with Where = conjunction residual })
+
 and private runSelectStmt
     (store: Store)
     (registry: Registry)
@@ -5765,30 +5833,33 @@ and private runSelectStmt
         let runResolved (baseColumns: ColumnDef list) (baseRows: Value[] seq) (select: SelectStmt) =
             let baseQualifier = fromItemQualifier fromItem
 
-            let initial : Result<((string * ColumnDef list) list * Value[] seq) * string list list, QueryResult> =
-                Ok(([ baseQualifier, baseColumns ], baseRows), [])
+            match pushBasePredicates store registry dbName baseQualifier baseColumns baseRows select with
+            | Error error -> error, [], []
+            | Ok(baseRows, select) ->
+                let initial : Result<((string * ColumnDef list) list * Value[] seq) * string list list, QueryResult> =
+                    Ok(([ baseQualifier, baseColumns ], baseRows), [])
 
-            match
-                planJoinOrder store dbName select
-                |> List.fold
-                    (fun acc join ->
-                        acc
-                        |> Result.bind (fun ((sources, rows), namesPerJoin) ->
-                            applyJoin store registry dbName outer Map.empty (sources, rows) join
-                            |> Result.map (fun (sources', rows', names) -> (sources', rows'), names :: namesPerJoin)))
-                    initial
-            with
-            | Error e -> e, [], []
-            | Ok((sources, rows), namesPerJoinRev) ->
-                let namesPerJoin = List.rev namesPerJoinRev
+                match
+                    planJoinOrder store dbName select
+                    |> List.fold
+                        (fun acc join ->
+                            acc
+                            |> Result.bind (fun ((sources, rows), namesPerJoin) ->
+                                applyJoin store registry dbName outer Map.empty (sources, rows) join
+                                |> Result.map (fun (sources', rows', names) -> (sources', rows'), names :: namesPerJoin)))
+                        initial
+                with
+                | Error e -> e, [], []
+                | Ok((sources, rows), namesPerJoinRev) ->
+                    let namesPerJoin = List.rev namesPerJoinRev
 
-                let select' =
-                    if namesPerJoin |> List.forall List.isEmpty then
-                        select
-                    else
-                        rewriteNaturalSelect select sources select.Joins namesPerJoin
+                    let select' =
+                        if namesPerJoin |> List.forall List.isEmpty then
+                            select
+                        else
+                            rewriteNaturalSelect select sources select.Joins namesPerJoin
 
-                runSelect store registry dbName (sources |> List.collect snd) (qualifierRanges sources) rows select' outer
+                    runSelect store registry dbName (sources |> List.collect snd) (qualifierRanges sources) rows select' outer
 
         match fromItem, select.Joins with
         | FromTable tref, [] ->

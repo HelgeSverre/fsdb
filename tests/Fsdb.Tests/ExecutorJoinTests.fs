@@ -93,6 +93,40 @@ let tests =
 
               Expect.isLessThan calls 20 "the residual sees the qualified range candidates, not the full base table"
 
+          testCase "a deterministic base predicate filters rows before indexed inner joins"
+          <| fun _ ->
+              let mutable calls = 0
+
+              let registry =
+                  builtins
+                  |> registerScalar "TOUCH" (fun values ->
+                      calls <- calls + 1
+                      values.Head)
+
+              let store = newStore ()
+              runDefault store "CREATE TABLE users (id INT PRIMARY KEY, active INT)" |> ignore
+              runDefault store "CREATE TABLE orders (id INT PRIMARY KEY, user_id INT, INDEX ix_orders_user (user_id))" |> ignore
+
+              let users =
+                  [ 1..1000 ]
+                  |> List.map (fun id -> sprintf "(%d,%d)" id (if id > 990 then 1 else 0))
+                  |> String.concat ","
+
+              let orders = [ 1..1000 ] |> List.map (fun id -> sprintf "(%d,%d)" id id) |> String.concat ","
+              runDefault store ("INSERT INTO users VALUES " + users) |> ignore
+              runDefault store ("INSERT INTO orders VALUES " + orders) |> ignore
+
+              match
+                  run
+                      store
+                      registry
+                      "SELECT users.id FROM users JOIN orders ON orders.user_id = users.id AND TOUCH(orders.id) > 0 WHERE users.active = 1 ORDER BY users.id"
+              with
+              | ResultSet(_, rows) -> Expect.equal rows.Length 10 "the active users retain their matching orders"
+              | other -> failtestf "expected joined rows, got %A" other
+
+              Expect.equal calls 10 "the join residual runs only for base rows that passed the pushed predicate"
+
           testCase "INNER JOIN between two different tables, and it drops unmatched rows"
           <| fun _ ->
               let store = newStore ()
