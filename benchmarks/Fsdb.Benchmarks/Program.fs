@@ -13,6 +13,13 @@ let main argv =
     if argv |> Array.contains "--load" then
         LoadBenchmarks.run ()
     else
+        let environmentList name =
+            match Environment.GetEnvironmentVariable name with
+            | null -> [||]
+            | value -> value.Split(',', StringSplitOptions.RemoveEmptyEntries ||| StringSplitOptions.TrimEntries)
+
+        let selectedMethods = environmentList "FSDB_BENCH_METHODS"
+
         // Full run: 3 warmup + 6 measured iterations per (target x workload) —
         // fixed counts instead of BenchmarkDotNet's open-ended pilot stage, to
         // bound the runtime of the full target/workload matrix.
@@ -27,18 +34,30 @@ let main argv =
                 Job.Default.WithWarmupCount(3).WithIterationCount(6)
 
         let config =
-            let baseConfig = DefaultConfig.Instance.AddJob(job)
+            let withCategoryFilter =
+                let baseConfig = DefaultConfig.Instance.AddJob(job)
 
-            match Environment.GetEnvironmentVariable "FSDB_BENCH_CATEGORIES" with
-            | null -> baseConfig
-            | value ->
-                let categories =
-                    value.Split(',', StringSplitOptions.RemoveEmptyEntries ||| StringSplitOptions.TrimEntries)
+                match environmentList "FSDB_BENCH_CATEGORIES" with
+                | [||] -> baseConfig
+                | categories -> baseConfig.AddFilter(AnyCategoriesFilter(categories))
 
-                baseConfig.AddFilter(AnyCategoriesFilter(categories))
+            match selectedMethods with
+            | [||] -> withCategoryFilter
+            | methods ->
+                withCategoryFilter.AddFilter(
+                    SimpleFilter(fun benchmark ->
+                        methods
+                        |> Array.exists (fun methodName ->
+                            String.Equals(methodName, benchmark.Descriptor.WorkloadMethod.Name, StringComparison.OrdinalIgnoreCase)))
+                )
 
         BenchmarkRunner.Run<ServerBenchmarks>(config) |> ignore
         // Separate class/run: the connect cycle needs its fixed small
         // invocation count (see its doc) which the shared job must not have.
-        BenchmarkRunner.Run<ConnectBenchmarks>(config) |> ignore
+        if
+            Array.isEmpty selectedMethods
+            || selectedMethods |> Array.exists (fun methodName -> methodName.Equals("Connect", StringComparison.OrdinalIgnoreCase))
+        then
+            BenchmarkRunner.Run<ConnectBenchmarks>(config) |> ignore
+
         0
