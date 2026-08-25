@@ -31,7 +31,7 @@ accepted (marked `ponytail:` in source), or recorded only in
 
 | Area | State | Largest single gap |
 |---|---|---|
-| SQL statements | Broad core; large admin/programmatic tail missing | Stored procedures/functions, events |
+| SQL statements | Broad core; large admin/programmatic tail missing | Compound stored programs and replication/admin SQL |
 | Query execution | Composite equality/range access, bounded index ordering, restricted join reordering, and stable/correlated index probes | General cost-based planning and broader correlated forms |
 | Built-in functions | Broad scalar, aggregate, JSON, time, and common planar geometry coverage | Overlays, non-point buffers, and geographic SRS semantics |
 | Data types | Common scalar types, BIT fields, signed TIME durations, and OGC geometry | Spatial indexes and operations |
@@ -58,7 +58,7 @@ including leading UPDATE/DELETE and branch-local WITH), set
 operations, window functions with numeric and temporal interval frames, GROUP BY WITH ROLLUP + GROUPING,
 DDL for databases/tables/indexes/views/triggers/users/grants, CREATE TABLE AS
 SELECT, TRUNCATE,
-RENAME TABLE, EXPLAIN (TRADITIONAL). Transaction control, SET, SHOW (~25
+RENAME TABLE, EXPLAIN (TRADITIONAL/JSON/ANALYZE). Transaction control, SET, SHOW (~25
 variants), USE, KILL, DESCRIBE are text-probed before the grammar
 (`QueryHandler.dispatch`).
 
@@ -110,7 +110,7 @@ identities for bit aggregates.
 |---|---|---|---|---|
 | Secondary-index access paths | ref/eq_ref/range scans feed joins, DML, ORDER BY, GROUP BY | fully-bound composite equality probes and matching physical inner joins use B-tree buckets; direct literal ranges feed single-table SELECT/UPDATE/DELETE through primary, unique, and secondary indexes; bounded `ORDER BY`/`GROUP BY` can stream a matching composite index when preceding keys are fixed; outer joins, unconstrained multi-key ordering, and broader grouping still scan/sort | high (scale) | divergence |
 | Optimizer | pushdown, constant folding, join reordering, cost model, statistics | qualified physical inner-join stars choose ready indexed sources by cardinality and push qualified base-table ranges into the initial scan, while `STRAIGHT_JOIN` preserves written order; outer/lateral/derived joins and statements with name-resolution-sensitive unqualified references retain source order; broader pushdown, statistics, and a general cost model remain absent | medium | divergence |
-| EXPLAIN fidelity | type ∈ system/const/eq_ref/ref/range/index/ALL; FORMAT=JSON/TREE; ANALYZE; optimizer_trace | `type` ∈ {system, const, eq_ref, ref, range, index, ALL}; `range` and `index` cover compatible direct composite bounds/orderings; FORMAT=JSON/TREE, ANALYZE, and optimizer_trace absent; extra flags limited to Using where/filesort/temporary | low | divergence |
+| EXPLAIN fidelity | type ∈ system/const/eq_ref/ref/range/index/ALL; FORMAT=JSON/TREE; ANALYZE; optimizer_trace | access types cover compatible direct bounds/orderings; FORMAT=JSON and aggregate ANALYZE observations work, while FORMAT=TREE, per-iterator timing/costs, and optimizer_trace remain absent | low | divergence |
 | Subquery strategies | semi-join/materialization/early-exit transformations | statement-stable scalar/IN/ANY/SOME/ALL/EXISTS subqueries materialize once; exact-integer `IN` reuses an ordered membership set and narrows a direct indexed physical outer table; simple EXISTS stops at one row; direct correlated equalities probe inner primary/unique/secondary indexes; string/decimal and compound semi-joins remain scans, while other correlated, variable-bearing, nondeterministic, CTE, derived, lateral, and JSON_TABLE forms re-execute | medium (scale) | divergence |
 | Join size ceiling | unbounded (memory-bound) | `Executor.maxJoinCandidateRows` caps candidate rows at 1,000,000 → error 1105 | medium | divergence |
 | MATCH…AGAINST placement | evaluates in UPDATE/DELETE WHERE, joins, subqueries | physical SELECT/JOIN sources and single-table UPDATE/DELETE are supported; multi-table UPDATE/DELETE with MATCH remains unsupported | low | refusal |
@@ -287,14 +287,18 @@ OLD/NEW images are rejected when the trigger is created.
 
 ## 10. Stored routines, events, schedulers
 
-Total absence, honestly surfaced: no CREATE/ALTER/DROP PROCEDURE or FUNCTION,
-no CALL, no compound-statement language, no event DDL, no scheduler thread.
-`information_schema.ROUTINES/PARAMETERS/EVENTS` and `SHOW PROCEDURE|FUNCTION
-STATUS`/`SHOW EVENTS` return correctly-shaped empty results
-(`InformationSchema.virtualTableDefs` and the SHOW-status handlers). Execute_priv/Event_priv/
-Create_routine_priv columns exist in grant tables but guard nothing.
-Impact: medium for applications that install logic server-side (common in
-legacy schemas and some migration toolchains); irrelevant to pure ORM clients.
+Working: zero-parameter procedures with one parsed statement body support
+CREATE/DROP/CALL, SHOW CREATE PROCEDURE, SHOW PROCEDURE STATUS, and persisted
+ROUTINES metadata. One-time event declarations support CREATE/DROP, SHOW
+CREATE EVENT, SHOW EVENTS, and persisted EVENTS metadata. CREATE ROUTINE,
+ALTER ROUTINE, EXECUTE, and EVENT privileges guard their corresponding paths.
+
+| Gap | MySQL 8.4 | fsdb | Impact | Class |
+|---|---|---|---|---|
+| Routine language | parameters, functions, compound bodies, local variables, handlers, cursors, control flow, dynamic SQL | zero-parameter procedures with one statement body | medium | refusal |
+| Routine execution context | SQL SECURITY DEFINER/INVOKER and stored sql_mode/charset | procedure body executes with the caller's session context | medium | divergence |
+| Event scheduler | recurring and one-time schedules execute in a scheduler thread | declarations and metadata persist, but no event is scheduled or executed | medium | refusal |
+| Event alteration | ALTER EVENT schedule/status/body/rename | absent | low | refusal |
 
 ## 11. Full-text search
 
@@ -382,7 +386,7 @@ Working: 23 INFORMATION_SCHEMA views with viewer scoping (SCHEMATA, TABLES,
 COLUMNS (including column comments), STATISTICS, TABLE_CONSTRAINTS, KEY_COLUMN_USAGE,
 REFERENTIAL_CONSTRAINTS, CHECK_CONSTRAINTS, VIEWS, TRIGGERS, PROCESSLIST,
 ENGINES, COLLATIONS, CHARACTER_SETS, privilege views, …), direct
-SELECT-ability of the 8 mysql.* tables, SHOW TABLES/COLUMNS/INDEX/CREATE
+SELECT-ability of the 10 mysql.* tables, SHOW TABLES/COLUMNS/INDEX/CREATE
 TABLE/CREATE VIEW/TABLE STATUS (real byte accounting)/ENGINES/CHARACTER SET/
 COLLATION/PRIVILEGES (73 oracle-verified rows)/PROCESSLIST/VARIABLES/STATUS/
 GRANTS/TRIGGERS/WARNINGS/ERRORS with statement condition counts, DESCRIBE,
@@ -393,7 +397,7 @@ live Limits reporting.
 
 | Gap | MySQL 8.4 | fsdb | Impact | Class |
 |---|---|---|---|---|
-| INFORMATION_SCHEMA breadth | ~60+ views incl. INNODB_*, COLUMN_STATISTICS, RESOURCE_GROUPS, ENABLED_ROLES | 23 views; EVENTS/ROUTINES/PARAMETERS/COLUMN_PRIVILEGES genuinely empty | low | divergence |
+| INFORMATION_SCHEMA breadth | ~60+ views incl. INNODB_*, COLUMN_STATISTICS, RESOURCE_GROUPS, ENABLED_ROLES | 23 views; ROUTINES and EVENTS expose supported declarations, while PARAMETERS and COLUMN_PRIVILEGES remain empty | low | divergence |
 | Table statistics | estimates refreshed by ANALYZE TABLE | `InformationSchema.tablesRows` reports InnoDB, a 16384 DATA_LENGTH stand-in, CARDINALITY 0, and live row counts where MySQL keeps stale page estimates until ANALYZE | low | divergence |
 | SHOW STATUS counters | Com_*, Innodb_*, Slow_queries, … | live Questions, TLS, connection, uptime, and Com_select/insert/update/delete/replace counters; engine and latency families remain absent (`InformationSchema.fs`) | low | divergence |
 | wait_timeout | 28800 default | 300 (deliberate DoS posture, honestly advertised) | low | divergence |
@@ -431,7 +435,7 @@ VECTOR type and function family (a MySQL 9 forward-port, absent from 8.4 —
 purely additive); live statistics values instead of ANALYZE-stale estimates;
 ICU CLDR collation tailoring; SUPER required for foreign KILL; honest
 advertising of enforced limits (wal_rotate knobs unreported rather than
-fabricated); empty routine/event catalogs rather than stubs; and an explicitly
+fabricated); declaration-only events rather than a scheduler; and an explicitly
 trusted data directory whose CRCs detect corruption rather than authenticate a
 hostile local writer.
 
