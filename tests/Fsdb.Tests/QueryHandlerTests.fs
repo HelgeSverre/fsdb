@@ -2088,6 +2088,34 @@ let tests =
               | ResultSet(_, rows) -> Expect.equal rows [ [ Some "1"; Some "10" ]; [ Some "2"; Some "20" ] ] "both row versions are retained"
               | other -> failtestf "expected committed rows, got %A" other
 
+          testCase "transactions merge updates and appends without rebuilding table indexes"
+          <| fun _ ->
+              let store = Fsdb.Storage.create ()
+              let setup = create 1 store
+              let setup, _ = handle setup "CREATE TABLE accounts (id INT PRIMARY KEY, balance INT)"
+              let setup, _ = handle setup "CREATE TABLE ledger (operation_id VARCHAR(32) PRIMARY KEY, account_id INT, amount INT)"
+              let _, _ = handle setup "INSERT INTO accounts VALUES (1, 0), (2, 0)"
+
+              let prepare accountId operationId connectionId =
+                  let session, _ = handle (create connectionId store) "BEGIN"
+                  let session, _ = handle session (sprintf "UPDATE accounts SET balance = balance + 1 WHERE id = %d" accountId)
+                  handle session (sprintf "INSERT INTO ledger VALUES ('%s', %d, 1)" operationId accountId) |> fst
+
+              let first = prepare 1 "first" 2
+              let second = prepare 2 "second" 3
+              let before = Fsdb.Storage.reindexCallCount ()
+
+              match handle first "COMMIT" |> snd, handle second "COMMIT" |> snd with
+              | Affected 0UL, Affected 0UL -> ()
+              | results -> failtestf "expected both commits to succeed, got %A" results
+
+              Expect.equal (Fsdb.Storage.reindexCallCount ()) before "commit maintains derived indexes incrementally"
+
+              match handle (create 4 store) "SELECT operation_id, account_id FROM ledger ORDER BY operation_id" |> snd with
+              | ResultSet(_, rows) ->
+                  Expect.equal rows [ [ Some "first"; Some "1" ]; [ Some "second"; Some "2" ] ] "both appends survive row-id rebasing"
+              | other -> failtestf "expected committed ledger rows, got %A" other
+
           testCase "same-row transactions wait and update the committed value"
           <| fun _ ->
               let store = Fsdb.Storage.create ()

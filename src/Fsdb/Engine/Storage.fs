@@ -1799,42 +1799,172 @@ let private sameTableSchema (left: Table) (right: Table) =
     && left.TableCollation = right.TableCollation
     && left.CreateTime = right.CreateTime
 
+let private reindexRow
+    (columns: ColumnDef list)
+    (uniqueGroups: (string * int list) list)
+    (secondaryGroups: SecondaryKeyGroup list)
+    (removed: (RowId * Value[]) option)
+    (added: (RowId * Value[]) option)
+    (uniqueIndex: Map<string, Map<string, RowId>>)
+    (secondaryIndex: Map<string, Map<string, Set<RowId>>>)
+    (secondaryOrder: SecondaryOrder)
+    : Map<string, Map<string, RowId>> * Map<string, Map<string, Set<RowId>>> * SecondaryOrder =
+    let uniqueIndex =
+        uniqueGroups
+        |> List.fold
+            (fun accIndex (name, idxs) ->
+                let group = Map.find name accIndex
+                let group = removed |> Option.fold (fun g (_, row) -> encodeConstraintKey columns idxs row |> Option.fold (fun g' k -> Map.remove k g') g) group
+                let group = added |> Option.fold (fun g (rowId, row) -> encodeConstraintKey columns idxs row |> Option.fold (fun g' k -> Map.add k rowId g') g) group
+                Map.add name group accIndex)
+            uniqueIndex
+
+    let secondaryIndex =
+        secondaryGroups
+        |> List.fold
+            (fun accIndex keyGroup ->
+                let group = Map.find keyGroup.Name accIndex
+                let group =
+                    removed
+                    |> Option.fold (fun g (rowId, row) ->
+                        let key = encodeEqualityKey columns keyGroup.Indices row
+                        match Map.tryFind key g with
+                        | None -> g
+                        | Some rows ->
+                            let remaining = Set.remove rowId rows
+                            if remaining.IsEmpty then Map.remove key g else Map.add key remaining g) group
+                let group =
+                    added
+                    |> Option.fold (fun g (rowId, row) ->
+                        let key = encodeEqualityKey columns keyGroup.Indices row
+                        let rows = g |> Map.tryFind key |> Option.defaultValue Set.empty
+                        Map.add key (Set.add rowId rows) g) group
+                Map.add keyGroup.Name group accIndex)
+            secondaryIndex
+
+    let secondaryOrder =
+        let orderedGroups =
+            (uniqueGroups
+             |> List.map (fun (name, indices) ->
+                 { Name = name
+                   Indices = indices }))
+            @ secondaryGroups
+
+        orderedGroups
+        |> List.fold
+            (fun indexes keyGroup ->
+                let entry rowId (row: Value[]) =
+                    { CollationNames = keyGroup.Indices |> List.map (fun index -> columns.[index].Collation)
+                      Values = keyGroup.Indices |> List.map (fun index -> row.[index])
+                      RowId = rowId }
+
+                let entries = Map.find keyGroup.Name indexes
+
+                let entries =
+                    removed
+                    |> Option.fold
+                        (fun (entries: ImmutableSortedSet<SecondaryOrderEntry>) (rowId, row) -> entries.Remove(entry rowId row))
+                        entries
+
+                let entries =
+                    added
+                    |> Option.fold
+                        (fun (entries: ImmutableSortedSet<SecondaryOrderEntry>) (rowId, row) -> entries.Add(entry rowId row))
+                        entries
+
+                Map.add keyGroup.Name entries indexes)
+            secondaryOrder
+
+    uniqueIndex, secondaryIndex, secondaryOrder
+
+let private publishRows (before: Table) (after: Table) : Table =
+    if before.Indexes <> after.Indexes || before.Columns <> after.Columns then
+        { after with FullTextIndexes = rebuildFullTextIndexes after }
+    else
+        let changes = after.RowsArray.ChangesFrom before.RowsArray |> Array.ofSeq
+
+        let indexes =
+            fullTextKeyGroups after
+            |> List.fold
+                (fun indexes group ->
+                    let update index (rowId, removed: Value[] option, added: Value[] option) =
+                        let changed =
+                            match removed, added with
+                            | Some left, Some right -> group.Indices |> List.exists (fun column -> left.[column] <> right.[column])
+                            | _ -> true
+
+                        if not changed then
+                            index
+                        else
+                            index
+                            |> fun current -> removed |> Option.fold (fun current _ -> FullText.removeDocument rowId current) current
+                            |> fun current -> added |> Option.fold (fun current row -> FullText.addDocument rowId (fullTextDocument group.Indices row) current) current
+
+                    let index = changes |> Array.fold update (Map.find group.Name indexes)
+                    Map.add group.Name index indexes)
+                before.FullTextIndexes
+
+        { after with FullTextIndexes = indexes }
+
 let private mergeRows (dbName: string) (baseTable: Table) (batchTable: Table) (liveTable: Table) : Table =
     let conflict () = raise (LockWaitTimeout dbName)
     let rows = liveTable.RowsArray.ToBuilder()
+    let uniqueGroups = uniqueKeyGroups liveTable
+    let secondaryGroups = secondaryKeyGroups liveTable
+    let mutable uniqueIndex = liveTable.UniqueIndex
+    let mutable secondaryIndex = liveTable.SecondaryIndex
+    let mutable secondaryOrder = liveTable.SecondaryOrder
 
-    for rowId, baseRow in baseTable.RowsArray.Indexed do
-        match batchTable.RowsArray.TryFind rowId with
-        | Some batchRow when batchRow = baseRow -> ()
-        | replacement ->
+    let collides rowId row =
+        uniqueGroups
+        |> List.exists (fun (name, columns) ->
+            match encodeConstraintKey liveTable.Columns columns row with
+            | Some key -> Map.tryFind key uniqueIndex.[name] |> Option.exists ((<>) rowId)
+            | None -> false)
+
+    let publish removed added =
+        let updatedUnique, updatedSecondary, updatedOrder =
+            reindexRow liveTable.Columns uniqueGroups secondaryGroups removed added uniqueIndex secondaryIndex secondaryOrder
+
+        uniqueIndex <- updatedUnique
+        secondaryIndex <- updatedSecondary
+        secondaryOrder <- updatedOrder
+
+    for rowId, before, after in batchTable.RowsArray.ChangesFrom baseTable.RowsArray do
+        match before, after with
+        | Some baseRow, replacement ->
             match rows.TryFind rowId with
             | Some liveRow when liveRow = baseRow ->
                 match replacement with
-                | Some row -> rows.[rowId] <- row
-                | None -> rows.Remove rowId |> ignore
+                | Some row when not (collides rowId row) ->
+                    rows.[rowId] <- row
+                    publish (Some(rowId, baseRow)) (Some(rowId, row))
+                | Some _ -> conflict ()
+                | None ->
+                    rows.Remove rowId |> ignore
+                    publish (Some(rowId, baseRow)) None
             | _ -> conflict ()
+        | None, Some row ->
+            let rowId = rows.Add row
 
-    for rowId, batchRow in batchTable.RowsArray.Indexed do
-        if baseTable.RowsArray.TryFind(rowId).IsNone then
-            rows.Add batchRow |> ignore
+            if collides rowId row then
+                conflict ()
 
-    { liveTable with
-        RowsArray = rows.DrainToImmutable()
-        NextAutoId = max liveTable.NextAutoId batchTable.NextAutoId }
-    |> reindexTable
+            publish None (Some(rowId, row))
+        | None, None -> ()
 
-let private validateMergedDatabase (dbName: string) (db: Database) : unit =
+    publishRows liveTable
+        { liveTable with
+            RowsArray = rows.DrainToImmutable()
+            NextAutoId = max liveTable.NextAutoId batchTable.NextAutoId
+            UniqueIndex = uniqueIndex
+            SecondaryIndex = secondaryIndex
+            SecondaryOrder = secondaryOrder }
+
+let private validateMergedForeignKeys (dbName: string) (db: Database) : unit =
     let conflict () = raise (LockWaitTimeout dbName)
 
     for KeyValue(_, table) in db do
-        for _, indices in uniqueKeyGroups table do
-            let seen = Collections.Generic.HashSet<string>()
-
-            for row in table.RowsArray do
-                match encodeConstraintKey table.Columns indices row with
-                | Some key when not (seen.Add key) -> conflict ()
-                | _ -> ()
-
         for foreignKey in table.ForeignKeys do
             match Map.tryFind (normalizeTableName foreignKey.RefTable) db with
             | None -> conflict ()
@@ -2247,116 +2377,6 @@ let create () : Store =
       RowLocks = ConcurrentDictionary(StringComparer.OrdinalIgnoreCase)
       RowLockSequence = [| 0L |]
       TransactionLocks = None }
-
-let private reindexRow
-    (columns: ColumnDef list)
-    (uniqueGroups: (string * int list) list)
-    (secondaryGroups: SecondaryKeyGroup list)
-    (removed: (RowId * Value[]) option)
-    (added: (RowId * Value[]) option)
-    (uniqueIndex: Map<string, Map<string, RowId>>)
-    (secondaryIndex: Map<string, Map<string, Set<RowId>>>)
-    (secondaryOrder: SecondaryOrder)
-    : Map<string, Map<string, RowId>> * Map<string, Map<string, Set<RowId>>> * SecondaryOrder =
-    let uniqueIndex =
-        uniqueGroups
-        |> List.fold
-            (fun accIndex (name, idxs) ->
-                let group = Map.find name accIndex
-                let group = removed |> Option.fold (fun g (_, row) -> encodeConstraintKey columns idxs row |> Option.fold (fun g' k -> Map.remove k g') g) group
-                let group = added |> Option.fold (fun g (rowId, row) -> encodeConstraintKey columns idxs row |> Option.fold (fun g' k -> Map.add k rowId g') g) group
-                Map.add name group accIndex)
-            uniqueIndex
-
-    let secondaryIndex =
-        secondaryGroups
-        |> List.fold
-            (fun accIndex keyGroup ->
-                let group = Map.find keyGroup.Name accIndex
-                let group =
-                    removed
-                    |> Option.fold (fun g (rowId, row) ->
-                        let key = encodeEqualityKey columns keyGroup.Indices row
-                        match Map.tryFind key g with
-                        | None -> g
-                        | Some rows ->
-                            let remaining = Set.remove rowId rows
-                            if remaining.IsEmpty then Map.remove key g else Map.add key remaining g) group
-                let group =
-                    added
-                    |> Option.fold (fun g (rowId, row) ->
-                        let key = encodeEqualityKey columns keyGroup.Indices row
-                        let rows = g |> Map.tryFind key |> Option.defaultValue Set.empty
-                        Map.add key (Set.add rowId rows) g) group
-                Map.add keyGroup.Name group accIndex)
-            secondaryIndex
-
-    let secondaryOrder =
-        let orderedGroups =
-            (uniqueGroups
-             |> List.map (fun (name, indices) ->
-                 { Name = name
-                   Indices = indices }))
-            @ secondaryGroups
-
-        orderedGroups
-        |> List.fold
-            (fun indexes keyGroup ->
-                let entry rowId (row: Value[]) =
-                    { CollationNames = keyGroup.Indices |> List.map (fun index -> columns.[index].Collation)
-                      Values = keyGroup.Indices |> List.map (fun index -> row.[index])
-                      RowId = rowId }
-
-                let entries = Map.find keyGroup.Name indexes
-
-                let entries =
-                    removed
-                    |> Option.fold
-                        (fun (entries: ImmutableSortedSet<SecondaryOrderEntry>) (rowId, row) -> entries.Remove(entry rowId row))
-                        entries
-
-                let entries =
-                    added
-                    |> Option.fold
-                        (fun (entries: ImmutableSortedSet<SecondaryOrderEntry>) (rowId, row) -> entries.Add(entry rowId row))
-                        entries
-
-                Map.add keyGroup.Name entries indexes)
-            secondaryOrder
-
-    uniqueIndex, secondaryIndex, secondaryOrder
-
-let private publishRows (before: Table) (after: Table) : Table =
-    if before.Indexes <> after.Indexes || before.Columns <> after.Columns then
-        { after with FullTextIndexes = rebuildFullTextIndexes after }
-    else
-        let changes = after.RowsArray.ChangesFrom before.RowsArray |> Array.ofSeq
-
-        let indexes =
-            fullTextKeyGroups after
-            |> List.fold
-                (fun indexes group ->
-                    let update index (rowId, removed: Value[] option, added: Value[] option) =
-                        let changed =
-                            match removed, added with
-                            | Some left, Some right -> group.Indices |> List.exists (fun column -> left.[column] <> right.[column])
-                            | _ -> true
-
-                        if not changed then
-                            index
-                        else
-                            index
-                            |> fun current -> removed |> Option.fold (fun current _ -> FullText.removeDocument rowId current) current
-                            |> fun current -> added |> Option.fold (fun current row -> FullText.addDocument rowId (fullTextDocument group.Indices row) current) current
-
-                    let index =
-                        changes
-                        |> Array.fold update (Map.find group.Name indexes)
-
-                    Map.add group.Name index indexes)
-                before.FullTextIndexes
-
-        { after with FullTextIndexes = indexes }
 
 /// The parent table's persistent unique-key index for exactly the column
 /// order `refIdxs` resolves to, if one of its PK/UNIQUE groups matches —
@@ -5168,7 +5188,7 @@ let private mergeDatabaseSlot (timeout: TimeSpan) (dbName: string) (slot: Databa
                             | _ -> raise (LockWaitTimeout dbName))
                         liveDb
 
-                validateMergedDatabase dbName merged
+                validateMergedForeignKeys dbName merged
                 slot.Value <- merged
     finally
         Monitor.Exit slot
