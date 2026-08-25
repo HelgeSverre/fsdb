@@ -777,55 +777,6 @@ let private applyDdl (store: Store) (db: string) (stmt: Statement) : unit =
     | Truncate table -> warn "Truncate" (truncate store db table)
     | other -> Log.diagnostic "fsdb: WAL replay warning (SchemaChanged): unexpected statement %A" other
 
-/// Applies `changes` — `(before, after)` pairs in the same ascending
-/// original-row order `Storage.updateRows` emitted them, one entry per
-/// physically distinct row it touched — to `rows` in a single forward pass:
-/// walk both lists together, consuming the next change only once it's due
-/// (its `before` matches the row in hand). Never re-scans from the top of
-/// `rows` per change, so a change's `after` value can't be picked back up
-/// as a later change's `before` — the cascade a naive "find any row equal
-/// to `before`, replace it" replay hits on `UPDATE t SET n = n + 1` (every
-/// row's `after` equals the next row's `before`). Any two rows the pass
-/// can't tell apart are byte-identical, so it never matters which one
-/// consumes which change.
-let private applyRowChanges (changes: (Value[] * Value[]) list) (rows: Value[] list) : Value[] list =
-    let rec loop acc rows changes =
-        match rows, changes with
-        | [], _ -> List.rev acc
-        | row :: restRows, (before, after) :: restChanges when row = before -> loop (after :: acc) restRows restChanges
-        | row :: restRows, _ -> loop (row :: acc) restRows changes
-
-    loop [] rows changes
-
-/// As `applyRowChanges`, for `RowsDeleted`'s logged rows: drops the next
-/// not-yet-consumed match for each logged row, in order — fixes replaying a
-/// partial delete over duplicate-valued rows (`DELETE ... LIMIT 1` over two
-/// identical rows) wiping every row equal to the target instead of just the
-/// one that was actually removed.
-let private applyRowDeletes (targets: Value[] list) (rows: Value[] list) : Value[] list =
-    let rec loop acc rows targets =
-        match rows, targets with
-        | [], _ -> List.rev acc
-        | row :: restRows, target :: restTargets when row = target -> loop acc restRows restTargets
-        | row :: restRows, _ -> loop (row :: acc) restRows targets
-
-    loop [] rows targets
-
-/// Rewrites `dbName.tableName`'s `Rows` in `store.Catalog` directly with
-/// `f`, bypassing `Storage.updateRows`/`deleteRows` entirely. Replay is a
-/// physical log of rows that already passed every check once, at commit
-/// time — routing it back through those checked write paths is what causes
-/// the cascade/over-delete bugs `applyRowChanges`/`applyRowDeletes` fix (a
-/// value-equality predicate scanning the *whole* table can't express "this
-/// one physical row"), and would also re-run FK/unique validation that a
-/// `SET FOREIGN_KEY_CHECKS = 0` write may have deliberately skipped.
-///
-/// Leaves derived indexes stale rather than calling `reindexTable` here.
-/// Nothing reads them mid-replay, and the caller rebuilds every table once
-/// after the final event.
-let private mapTableRows (store: Store) (dbName: string) (tableName: string) (f: Value[] list -> Value[] list) : unit =
-    replaceTablesForReplay store dbName tableName f (Log.diagnostic "fsdb: WAL replay warning: %s")
-
 let rec private applyEventAt (depth: int) (store: Store) (event: CommitEvent) : unit =
     if depth > maxDecodeDepth then
         failwith "Persistence: transaction nesting exceeds the apply limit"
@@ -834,8 +785,8 @@ let rec private applyEventAt (depth: int) (store: Store) (event: CommitEvent) : 
     | RowsInserted(db, table, rows) ->
         if not rows.IsEmpty then
             appendRowsForReplay store db table rows (Log.diagnostic "fsdb: WAL replay warning: %s")
-    | RowsUpdated(db, table, changes) -> mapTableRows store db table (applyRowChanges changes)
-    | RowsDeleted(db, table, rows) -> mapTableRows store db table (applyRowDeletes rows)
+    | RowsUpdated(db, table, changes) -> updateRowsForReplay store db table changes (Log.diagnostic "fsdb: WAL replay warning: %s")
+    | RowsDeleted(db, table, rows) -> deleteRowsForReplay store db table rows (Log.diagnostic "fsdb: WAL replay warning: %s")
     | SchemaChanged(db, stmt) -> applyDdl store db stmt
     | SchemaChangedAt(db, stmt, createTime) ->
         applyDdl store db stmt

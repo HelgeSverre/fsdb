@@ -1704,11 +1704,9 @@ let private reindexCallCountLocal = System.Threading.AsyncLocal<int>()
 
 let reindexCallCount () = reindexCallCountLocal.Value
 
-/// Public because `Persistence`'s WAL replay (`mapTableRows`) and snapshot
-/// load (`decodeTable`) both write `Rows` directly — same reason
-/// `normalizeTableName` is public — so they rebuild derived indexes after
-/// direct row replacement instead of maintaining them incrementally as
-/// every write path below does.
+/// Public because snapshot loading restores stored rows without persisting
+/// derived indexes. WAL replay maintains them incrementally, then performs
+/// one final rebuild so older snapshot formats remain compatible.
 let reindexTable (table: Table) : Table =
     reindexCallCountLocal.Value <- reindexCallCountLocal.Value + 1
     { table with
@@ -5552,17 +5550,15 @@ let scanList (store: Store) (dbName: string) (tableName: string) : Result<Column
 /// `Rows` the same way, since this engine has no separate "recompute on
 /// every read" path.
 
-/// `Persistence`'s WAL replay rewrites one table's `Rows` directly with `f`,
-/// bypassing every checked write path in this module on purpose (replay
-/// re-applies rows that already passed every check once, at commit time —
-/// see `Persistence.applyEvent`'s doc). A plain slot mutation, not a CAS:
-/// replay only ever runs single-threaded, before `Persistence.attach`
-/// subscribes the store to live traffic, so nothing else can be racing this
-/// write. A no-op (via `onMissing`) if `dbName`/`tableName` no longer
-/// exist — the WAL can reference a table a later, not-yet-replayed DROP
-/// TABLE event will remove, so replay tolerates a stale reference here
-/// instead of crashing startup over it.
-let replaceTablesForReplay (store: Store) (dbName: string) (tableName: string) (f: Value[] list -> Value[] list) (onMissing: string -> unit) : unit =
+/// WAL replay runs before live traffic can observe the store, so replay can
+/// publish directly without the checked write paths or their synchronization.
+let private changeTableForReplay
+    (store: Store)
+    (dbName: string)
+    (tableName: string)
+    (change: Table -> Table)
+    (onMissing: string -> unit)
+    : unit =
     let key = normalizeTableName tableName
 
     match store.Databases.TryGetValue dbName with
@@ -5570,7 +5566,121 @@ let replaceTablesForReplay (store: Store) (dbName: string) (tableName: string) (
     | true, slot ->
         match slot.Value |> Map.tryFind key with
         | None -> onMissing (sprintf "unknown table '%s.%s'" dbName tableName)
-        | Some table -> slot.Value <- slot.Value |> Map.add key { table with RowsArray = table.RowsArray |> List.ofSeq |> f |> RowStore.ofSeq }
+        | Some table -> slot.Value <- slot.Value |> Map.add key (change table)
+
+let private replayRowIds (table: Table) (targets: Value[] list) : RowId option list =
+    let uniqueGroups = uniqueKeyGroups table
+
+    let tryIndexed target =
+        uniqueGroups
+        |> List.tryPick (fun (name, indices) ->
+            encodeConstraintKey table.Columns indices target
+            |> Option.bind (fun key -> table.UniqueIndex |> Map.tryFind name |> Option.bind (Map.tryFind key)))
+        |> Option.filter (fun rowId -> table.RowsArray.TryFind rowId = Some target)
+
+    let indexed = targets |> List.map tryIndexed
+
+    if indexed |> List.forall Option.isSome then
+        indexed
+    else
+        let rec locate found rows targets =
+            match rows, targets with
+            | _, [] -> List.rev found
+            | [], remaining -> List.rev found @ List.replicate remaining.Length None
+            | (rowId, row) :: remainingRows, target :: remainingTargets when row = target ->
+                locate (Some rowId :: found) remainingRows remainingTargets
+            | _ :: remainingRows, _ -> locate found remainingRows targets
+
+        locate [] (List.ofSeq table.RowsArray.Indexed) targets
+
+let private reindexReplayRow table uniqueGroups secondaryGroups removed added uniqueIndex secondaryIndex secondaryOrder =
+    reindexRow
+        table.Columns
+        uniqueGroups
+        secondaryGroups
+        removed
+        added
+        uniqueIndex
+        secondaryIndex
+        secondaryOrder
+
+/// Applies already-validated WAL updates while preserving stable row ids.
+let updateRowsForReplay
+    (store: Store)
+    (dbName: string)
+    (tableName: string)
+    (changes: (Value[] * Value[]) list)
+    (onMissing: string -> unit)
+    : unit =
+    let update (table: Table) =
+        let located = replayRowIds table (changes |> List.map fst)
+        let rows = table.RowsArray.ToBuilder()
+        let uniqueGroups = uniqueKeyGroups table
+        let secondaryGroups = secondaryKeyGroups table
+        let mutable uniqueIndex = table.UniqueIndex
+        let mutable secondaryIndex = table.SecondaryIndex
+        let mutable secondaryOrder = table.SecondaryOrder
+
+        for rowId, (before, after) in List.zip located changes do
+            match rowId with
+            | None -> ()
+            | Some rowId ->
+                rows.[rowId] <- after
+
+                let nextUnique, nextSecondary, nextOrder =
+                    reindexReplayRow table uniqueGroups secondaryGroups (Some(rowId, before)) (Some(rowId, after)) uniqueIndex secondaryIndex secondaryOrder
+
+                uniqueIndex <- nextUnique
+                secondaryIndex <- nextSecondary
+                secondaryOrder <- nextOrder
+
+        publishRows table
+            { table with
+                RowsArray = rows.DrainToImmutable()
+                UniqueIndex = uniqueIndex
+                SecondaryIndex = secondaryIndex
+                SecondaryOrder = secondaryOrder }
+
+    changeTableForReplay store dbName tableName update onMissing
+
+/// Applies already-validated WAL deletes while preserving stable row ids.
+let deleteRowsForReplay
+    (store: Store)
+    (dbName: string)
+    (tableName: string)
+    (targets: Value[] list)
+    (onMissing: string -> unit)
+    : unit =
+    let delete (table: Table) =
+        let located = replayRowIds table targets
+        let rows = table.RowsArray.ToBuilder()
+        let uniqueGroups = uniqueKeyGroups table
+        let secondaryGroups = secondaryKeyGroups table
+        let mutable uniqueIndex = table.UniqueIndex
+        let mutable secondaryIndex = table.SecondaryIndex
+        let mutable secondaryOrder = table.SecondaryOrder
+
+        for rowId, row in List.zip located targets do
+            match rowId with
+            | None -> ()
+            | Some rowId ->
+                rows.Remove rowId |> ignore
+
+                let nextUnique, nextSecondary, nextOrder =
+                    reindexReplayRow table uniqueGroups secondaryGroups (Some(rowId, row)) None uniqueIndex secondaryIndex secondaryOrder
+
+                uniqueIndex <- nextUnique
+                secondaryIndex <- nextSecondary
+                secondaryOrder <- nextOrder
+
+        publishRows table
+            { table with
+                RowsArray = rows.DrainToImmutable()
+                UniqueIndex = uniqueIndex
+                SecondaryIndex = secondaryIndex
+                SecondaryOrder = secondaryOrder }
+
+    changeTableForReplay store dbName tableName delete onMissing
 
 /// Restores metadata that is assigned at creation rather than derived from
 /// table contents.
@@ -5591,47 +5701,56 @@ let setTableCreateTimeForReplay
         | Some table -> slot.Value <- slot.Value |> Map.add key { table with CreateTime = createTime }
 
 /// Puts already-committed rows back exactly as they were, for WAL replay.
-/// Deliberately not `insertRows`: that enforces unique keys against indexes
-/// `load` leaves stale until the whole WAL has been applied, so an INSERT
-/// reusing a primary key an earlier DELETE freed replays as a duplicate-key
-/// warning and the row is lost. These rows were accepted once already;
-/// re-adjudicating them is the bug, not the safeguard.
+/// Deliberately not `insertRows`: these rows passed validation when committed,
+/// and replay must not reject writes made with relaxed constraint settings.
 ///
 /// Carries `NextAutoId` past anything the replayed rows used, so a later
 /// insert can't reissue an id the WAL already handed out.
 let appendRowsForReplay (store: Store) (dbName: string) (tableName: string) (rows: Value[] list) (onMissing: string -> unit) : unit =
-    let key = normalizeTableName tableName
+    let append (table: Table) =
+        let nextAutoId =
+            match table.Columns |> List.tryFindIndex (fun column -> column.AutoIncrement) with
+            | None -> table.NextAutoId
+            | Some index ->
+                rows
+                |> List.fold
+                    (fun next row ->
+                        match row.[index] with
+                        | VInt value when value < Int64.MaxValue -> max next (value + 1L)
+                        | VUInt value when value < uint64 Int64.MaxValue -> max next (int64 value + 1L)
+                        | _ -> next)
+                    table.NextAutoId
 
-    match store.Databases.TryGetValue dbName with
-    | false, _ -> onMissing (sprintf "unknown database '%s'" dbName)
-    | true, slot ->
-        match slot.Value |> Map.tryFind key with
-        | None -> onMissing (sprintf "unknown table '%s.%s'" dbName tableName)
-        | Some table ->
-            let nextAutoId =
-                match table.Columns |> List.tryFindIndex (fun column -> column.AutoIncrement) with
-                | None -> table.NextAutoId
-                | Some index ->
-                    rows
-                    |> List.fold
-                        (fun next row ->
-                            match row.[index] with
-                            | VInt value when value < Int64.MaxValue -> max next (value + 1L)
-                            | VUInt value when value < uint64 Int64.MaxValue -> max next (int64 value + 1L)
-                            | _ -> next)
-                        table.NextAutoId
+        let builder = table.RowsArray.ToBuilder()
+        let uniqueGroups = uniqueKeyGroups table
+        let secondaryGroups = secondaryKeyGroups table
+        let mutable uniqueIndex = table.UniqueIndex
+        let mutable secondaryIndex = table.SecondaryIndex
+        let mutable secondaryOrder = table.SecondaryOrder
 
-            let updated =
-                { table with
-                    RowsArray = table.RowsArray.AddRange rows
-                    NextAutoId = nextAutoId }
+        for row in rows do
+            let rowId = builder.Add row
 
-            slot.Value <- slot.Value |> Map.add key updated
+            let nextUnique, nextSecondary, nextOrder =
+                reindexReplayRow table uniqueGroups secondaryGroups None (Some(rowId, row)) uniqueIndex secondaryIndex secondaryOrder
 
-/// Rebuilds each table's derived indexes from its current `Rows` once after
-/// WAL replay. `replaceTablesForReplay` leaves those indexes stale per-table
-/// so replay avoids a full-table rescan for every row-change event.
-/// Same single-threaded, pre-`attach` assumption as `replaceTablesForReplay`.
+            uniqueIndex <- nextUnique
+            secondaryIndex <- nextSecondary
+            secondaryOrder <- nextOrder
+
+        publishRows table
+            { table with
+                RowsArray = builder.DrainToImmutable()
+                NextAutoId = nextAutoId
+                UniqueIndex = uniqueIndex
+                SecondaryIndex = secondaryIndex
+                SecondaryOrder = secondaryOrder }
+
+    changeTableForReplay store dbName tableName append onMissing
+
+/// Rebuilds derived indexes once after loading a snapshot and its WAL tail.
+/// This also repairs snapshots written by older versions whose index formats
+/// are not persisted.
 let reindexAllForReplay (store: Store) : unit =
     for KeyValue(_, slot) in store.Databases do
         slot.Value <- slot.Value |> Map.map (fun _ table -> reindexTable table)
