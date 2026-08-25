@@ -1910,6 +1910,17 @@ type private TableOption =
     | TableAutoIncrement of int64
     | TableOptionIgnored
 
+let private hashPartitionOption: Parser<TableOption, unit> =
+    keyword "PARTITION"
+    >>. keyword "BY"
+    >>. optional (keyword "LINEAR")
+    >>. keyword "HASH"
+    >>. between (sym "(") (sym ")") expr
+    >>. opt (keyword "PARTITIONS" >>. (puint64 .>> ws))
+    >>= function
+        | Some 0UL -> fail "the number of partitions must be positive"
+        | _ -> preturn TableOptionIgnored
+
 /// One table-option tail entry. Options fsdb has no behavior for
 /// (ROW_FORMAT, COMMENT, KEY_BLOCK_SIZE, the STATS_* family) are accepted
 /// and discarded so a dump's `) ENGINE=... ROW_FORMAT=DYNAMIC COMMENT='x'`
@@ -1946,7 +1957,8 @@ let private tableOption: Parser<TableOption, unit> =
           >>= fun name ->
               match Collation.tryFind name with
               | Some _ -> preturn (TableCollate name)
-              | None -> fail (sprintf "Unknown collation '%s'" name) ]
+              | None -> fail (sprintf "Unknown collation '%s'" name)
+          attempt hashPartitionOption ]
 
 let private tableOptions: Parser<string option * string option * int64 option, unit> =
     many tableOption

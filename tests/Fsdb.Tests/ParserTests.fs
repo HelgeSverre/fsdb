@@ -1035,6 +1035,20 @@ let tests =
                         ))
                         "table defaults kept on the table; an INT column inherits nothing"
 
+                testCase "HASH partition declarations are accepted"
+                <| fun _ ->
+                    [ "CREATE TABLE p (id INT) PARTITION BY HASH(id) PARTITIONS 4"
+                      "CREATE TABLE p (id INT) PARTITION BY HASH(id)"
+                      "CREATE TABLE p (id INT) PARTITION BY LINEAR HASH(id) PARTITIONS 4" ]
+                    |> List.iter (fun sql ->
+                        match parseOk sql with
+                        | CreateTable("p", [ { Name = "id" } ], _, _, _, _, _, _, _) -> ()
+                        | other -> failtestf "expected a HASH-partitioned table declaration, got %A" other)
+
+                    match parse "CREATE TABLE p (id INT) PARTITION BY HASH(id) PARTITIONS 0" with
+                    | Error _ -> ()
+                    | Ok statement -> failtestf "expected zero partitions to be rejected, got %A" statement
+
                 testCase "a column-level COLLATE wins over the table-level default, and an unknown collation is a parse error"
                 <| fun _ ->
                     match
