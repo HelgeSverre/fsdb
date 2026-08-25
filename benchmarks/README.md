@@ -118,6 +118,14 @@ aggregate and window slopes identify planning as the highest-leverage
 performance area. FULLTEXT now uses maintained postings, although its general
 SELECT integration still leaves a visible scale gap.
 
+A focused 10k/50k ShortRun after indexed join reordering and subquery
+materialization measured the formerly steep join at 371 µs versus MySQL's
+178 µs, and uncorrelated `IN` at 534 µs versus 155 µs. The remaining
+wide-input costs in that run were `GROUP BY` at 98.2 ms versus 19.9 ms and the
+50k-row window query at 354 ms versus 49.3 ms. These three-iteration numbers
+are diagnostic rather than release-grade, but distinguish the closed planner
+cliffs from the remaining aggregate/window execution gap.
+
 ### Durability-matched (single-connection latency, `ebc3fca-durable.md`)
 
 fsdb in-memory vs fsdb `--data-dir` (binary WAL) vs MySQL durable vs MySQL no-fsync:
