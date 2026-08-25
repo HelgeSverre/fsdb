@@ -426,7 +426,20 @@ let tests =
                           "punctuation_future_comments" ] do
                         Expect.isTrue (mutations |> Array.exists (fun candidate -> candidate.Mutation = name)) name
 
-                    for feature in [ "composite_index"; "view_check_option"; "ordered_compound_trigger"; "column_comment"; "bit_type" ] do
+                    for feature in
+                        [ "composite_index"
+                          "view_check_option"
+                          "ordered_compound_trigger"
+                          "column_comment"
+                          "bit_type"
+                          "functional_default"
+                          "partitioned_table"
+                          "text_prepared_statement"
+                          "table_lock"
+                          "stored_procedure"
+                          "scheduled_event"
+                          "role_account"
+                          "locked_user" ] do
                         Expect.isTrue
                             (candidates
                              |> Array.filter (fun candidate -> candidate.Feature = feature)
@@ -456,6 +469,37 @@ let tests =
                     Expect.stringContains commentedReplace.Sql "'$1'" "replacement literal is untouched"
                     Expect.stringContains commentedReplace.Sql "'(?=(.))'" "pattern punctuation is untouched"
                     Expect.stringContains commentedReplace.Sql "/**/(" "comments reach punctuation boundaries"
+
+                testCase "covers declared product gaps with executable baselines"
+                <| fun _ ->
+                    let features =
+                        SyntaxFuzz.candidates 42UL 1 0
+                        |> Array.filter _.Baseline
+                        |> Array.map _.Feature
+                        |> Set.ofArray
+
+                    for feature in
+                        [ "set_scalar_subquery"
+                          "set_exists_subquery"
+                          "set_in_subquery"
+                          "temporal_range_frame"
+                          "derived_table_update"
+                          "functional_default"
+                          "partitioned_table"
+                          "table_comment"
+                          "explain_json"
+                          "explain_analyze"
+                          "checksum_table"
+                          "locking_nowait"
+                          "select_into_variable"
+                          "text_prepared_statement"
+                          "table_lock"
+                          "stored_procedure"
+                          "scheduled_event"
+                          "role_account"
+                          "locked_user"
+                          "spatial_buffer" ] do
+                        Expect.contains features feature feature
 
                 testCase "classifies syntax error contracts by code and SQLSTATE"
                 <| fun _ ->

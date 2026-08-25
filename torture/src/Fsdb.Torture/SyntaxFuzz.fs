@@ -56,6 +56,9 @@ module SyntaxFuzz =
            "cte_update", "WITH c AS (SELECT id FROM syntax_target WHERE id < 0) UPDATE syntax_target SET n = n + 1 WHERE id IN (SELECT id FROM c)"
            "cte_delete", "WITH c AS (SELECT id FROM syntax_target WHERE id < 0) DELETE FROM syntax_target WHERE id IN (SELECT id FROM c)"
            "cte_union_branch", "SELECT 1 AS n UNION ALL (WITH c AS (SELECT 2 AS n) SELECT n FROM c)"
+           "set_scalar_subquery", "SELECT (SELECT 1 UNION SELECT 1)"
+           "set_exists_subquery", "SELECT EXISTS (SELECT 1 UNION ALL SELECT 2)"
+           "set_in_subquery", "SELECT 2 IN (SELECT 1 UNION ALL SELECT 2)"
            "planned_join",
            "SELECT t.id FROM syntax_target AS t JOIN syntax_source AS s ON s.id = t.id JOIN syntax_collation AS c ON c.id = t.id WHERE t.id >= 1 ORDER BY t.id"
            "straight_join",
@@ -75,6 +78,26 @@ module SyntaxFuzz =
            "INSERT INTO syntax_target (id, n, label) WITH c AS (SELECT id, n, label FROM syntax_source) SELECT id, n, label FROM c ON DUPLICATE KEY UPDATE n = VALUES(n), label = VALUES(label)"
            "replace_select", "REPLACE INTO syntax_target SELECT 2, 20, 'replacement'"
            "serializable", "SET TRANSACTION ISOLATION LEVEL SERIALIZABLE"
+           "temporal_range_frame",
+           "SELECT dt, SUM(n) OVER (ORDER BY dt RANGE BETWEEN INTERVAL 1 DAY PRECEDING AND CURRENT ROW) FROM syntax_temporal ORDER BY dt"
+           "derived_table_update",
+           "UPDATE syntax_target AS t JOIN (SELECT id FROM syntax_source) AS s ON s.id = t.id SET t.n = t.n"
+           "functional_default", sprintf "CREATE TABLE syntax_default_%s (id INT DEFAULT (ABS(-2)))" suffix
+           "partitioned_table", sprintf "CREATE TABLE syntax_partition_%s (id INT) PARTITION BY HASH(id) PARTITIONS 2" suffix
+           "table_comment", "ALTER TABLE syntax_target COMMENT = 'syntax corpus'"
+           "explain_json", "EXPLAIN FORMAT=JSON SELECT id FROM syntax_target WHERE id = 1"
+           "explain_analyze", "EXPLAIN ANALYZE SELECT id FROM syntax_target WHERE id = 1"
+           "checksum_table", "CHECKSUM TABLE syntax_target"
+           "locking_nowait", "SELECT id FROM syntax_target WHERE id = 1 FOR UPDATE NOWAIT"
+           "select_into_variable", "SELECT COUNT(*) INTO @syntax_count FROM syntax_target"
+           "text_prepared_statement", sprintf "PREPARE syntax_stmt_%s FROM 'SELECT 1'" suffix
+           "table_lock", "LOCK TABLES syntax_target READ"
+           "stored_procedure", sprintf "CREATE PROCEDURE syntax_proc_%s() SELECT 1" suffix
+           "scheduled_event",
+           sprintf "CREATE EVENT syntax_event_%s ON SCHEDULE AT CURRENT_TIMESTAMP + INTERVAL 1 DAY DO INSERT INTO syntax_log VALUES (999)" suffix
+           "role_account", sprintf "CREATE ROLE 'syntax_role_%s'@'%%'" suffix
+           "locked_user", sprintf "CREATE USER 'syntax_user_%s'@'%%' ACCOUNT LOCK" suffix
+           "spatial_buffer", "SELECT ST_AsText(ST_Buffer(ST_PointFromText('POINT(0 0)'), 1))"
            "column_comment", sprintf "CREATE TABLE syntax_comment_%s (id INT COMMENT 'syntax corpus')" suffix
            "bit_type", sprintf "CREATE TABLE syntax_bit_%s (b BIT(64) DEFAULT b'1')" suffix |]
 
@@ -87,6 +110,8 @@ module SyntaxFuzz =
            "INSERT INTO syntax_collation VALUES (1, 'A', 'a', 'A', 'a')"
            "CREATE TABLE syntax_trigger_target (id INT PRIMARY KEY, n INT)"
            "CREATE TABLE syntax_log (n INT)"
+           "CREATE TABLE syntax_temporal (dt DATETIME, n INT)"
+           "INSERT INTO syntax_temporal VALUES ('2026-01-01', 1), ('2026-01-02', 2)"
            "CREATE TABLE syntax_fulltext (id INT PRIMARY KEY, title VARCHAR(100), body TEXT, FULLTEXT(title, body))"
            "INSERT INTO syntax_fulltext VALUES (1, 'Database tutorial', 'Database security guide'), (2, 'Other notes', 'Unrelated material')"
            "CREATE TABLE syntax_fulltext_notes (article_id INT, body TEXT, FULLTEXT(body))"
@@ -100,6 +125,14 @@ module SyntaxFuzz =
         | "ordered_compound_trigger" -> Some(sprintf "DROP TRIGGER syntax_after_%s" suffix)
         | "column_comment" -> Some(sprintf "DROP TABLE syntax_comment_%s" suffix)
         | "bit_type" -> Some(sprintf "DROP TABLE syntax_bit_%s" suffix)
+        | "functional_default" -> Some(sprintf "DROP TABLE syntax_default_%s" suffix)
+        | "partitioned_table" -> Some(sprintf "DROP TABLE syntax_partition_%s" suffix)
+        | "text_prepared_statement" -> Some(sprintf "DEALLOCATE PREPARE syntax_stmt_%s" suffix)
+        | "table_lock" -> Some "UNLOCK TABLES"
+        | "stored_procedure" -> Some(sprintf "DROP PROCEDURE syntax_proc_%s" suffix)
+        | "scheduled_event" -> Some(sprintf "DROP EVENT syntax_event_%s" suffix)
+        | "role_account" -> Some(sprintf "DROP ROLE 'syntax_role_%s'@'%%'" suffix)
+        | "locked_user" -> Some(sprintf "DROP USER 'syntax_user_%s'@'%%'" suffix)
         | _ -> None
 
     let private replaceAt index length replacement (value: string) =

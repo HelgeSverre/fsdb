@@ -64,7 +64,7 @@ Options:
   --rollback-every <n>       Roll back every Nth operation; 0 disables (default 5)
   --databases <n>            multidb: databases run concurrently (default 4)
   --scaling-factor <n>       multidb: multi-db wall-clock must be <= this fraction of the serial-projected cost (default 0.65)
-  --syntax-cases <n>          syntax: deterministic mutations to execute (default 64)
+  --syntax-cases <n>          syntax: deterministic mutations; 0 runs baselines only (default 64)
   --syntax-depth <1..3>       syntax: maximum chained mutations per statement (default 1)
   --artifacts <directory>    Artifact root (default torture/artifacts/runs)
   --mysql <connection>       MySQL admin connection string
@@ -206,7 +206,7 @@ Options:
                 | Ok value -> scalingFactor <- value
                 | Error error -> failure <- Some error
             | "--syntax-cases" ->
-                match parseRange flag 1 10000 (nextValue flag) with
+                match parseRange flag 0 10000 (nextValue flag) with
                 | Ok value -> syntaxCases <- value
                 | Error error -> failure <- Some error
             | "--syntax-depth" ->

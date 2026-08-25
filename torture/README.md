@@ -77,6 +77,9 @@ Run the bounded syntax-mutation lane:
 
 ```bash
 ./scripts/run.sh syntax --seed 101 --syntax-cases 2000 --syntax-depth 3
+
+# Execute only the MySQL-accepted feature and gap baselines.
+./scripts/run.sh syntax --seed 101 --syntax-cases 0
 ```
 
 Every feature seed is first executed unchanged on both servers. Deterministic
@@ -91,6 +94,13 @@ as evidence but excluded from parity because its location prose is not a stable
 interface. Mutations that remain valid on MySQL must remain valid on FSDB.
 Mutations that reach a different MySQL semantic error are recorded separately
 and do not claim syntax parity.
+
+The baseline corpus includes implemented features and declared gaps. The latter
+cover set-operation subqueries, temporal window ranges, derived-table DML,
+functional defaults, partitioning, administration statements, stored programs,
+roles, account options, textual prepared statements, and missing spatial
+operations. A baseline-only run therefore acts as an executable gap inventory;
+it is expected to exit with findings until those features land.
 
 `--scale` multiplies the declared model row counts before `--max-rows` applies.
 `--invariant-every 0` runs catalog invariants once after the load; use it for
