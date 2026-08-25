@@ -2177,6 +2177,14 @@ let private sourceHasQualifier (qualifier: string) = function
     | FromLateral(_, alias)
     | FromJsonTable(_, _, _, alias) -> alias.Equals(qualifier, System.StringComparison.OrdinalIgnoreCase)
 
+/// MySQL promotes a binary UNION branch for equality and ordering. Other
+/// collation combinations retain the first branch's ordering in this engine.
+let private strictestUnionCollation (left: Collation.Collation) (right: Collation.Collation) =
+    if left.Name = "utf8mb4_bin" || right.Name = "utf8mb4_bin" then
+        Collation.tryFind "utf8mb4_bin" |> Option.defaultValue left
+    else
+        left
+
 let rec private selectSourceColumns (store: Store) (dbName: string) = function
     | FromTable table ->
         let database = table.Database |> Option.defaultValue dbName
@@ -2208,8 +2216,31 @@ let rec private selectSourceColumns (store: Store) (dbName: string) = function
                 |> List.map Some
     | FromSubquery(PlainSelect body, _)
     | FromLateral(PlainSelect body, _) -> selectProjectionColumns store dbName body
-    | FromSubquery _
-    | FromLateral _ -> []
+    | FromSubquery(UnionSelect(first, rest, _, _, _), _)
+    | FromLateral(UnionSelect(first, rest, _, _, _), _) ->
+        let branches = first :: (rest |> List.map snd)
+        let columns = branches |> List.map (selectProjectionColumns store dbName)
+
+        if columns |> List.forall (fun branch -> branch.Length = columns.Head.Length) then
+            columns
+            |> List.transpose
+            |> List.map (fun candidates ->
+                let present = candidates |> List.choose id
+
+                match present with
+                | [] -> None
+                | first :: rest ->
+                    let collation =
+                        (first :: rest)
+                        |> List.choose _.Collation
+                        |> List.choose Collation.tryFind
+                        |> function
+                            | [] -> None
+                            | first :: rest -> Some((rest |> List.fold strictestUnionCollation first).Name)
+
+                    Some { first with Collation = collation })
+        else
+            []
     | FromJsonTable _ -> []
 
 and private selectProjectionColumns (store: Store) (dbName: string) (select: SelectStmt) : ColumnDef option list =
@@ -4184,18 +4215,6 @@ and private resolveFromSubquery
         | Err(code, message) -> Error(Err(code, message))
         | Affected _ -> Error(Err(1064, "derived table did not return a resultset"))
 
-/// MySQL's UNION result column collation aggregates across branches — the
-/// strictest wins, so a bin column on any branch makes the combined column
-/// byte-wise (verified: `SELECT a_ci ... UNION SELECT b_bin ...` keeps
-/// 'åge'/'age' apart in both orders). Among non-bin collations the first
-/// operand's stands (ponytail: MySQL's full UCA-level aggregation rules
-/// aren't modeled).
-and private strictestUnionCollation (a: Collation.Collation) (b: Collation.Collation) : Collation.Collation =
-    if a.Name = "utf8mb4_bin" || b.Name = "utf8mb4_bin" then
-        Collation.tryFind "utf8mb4_bin" |> Option.defaultValue a
-    else
-        a
-
 /// The qualifier a `FROM`/`JOIN` source's columns resolve `qualifier.col`
 /// against: a real table's alias (or its own name), or a derived table's
 /// mandatory alias.
@@ -5668,6 +5687,10 @@ and private runSelectStmt
                 match resolveFromItem store registry dbName fromItem with
                 | Error e -> e, [], []
                 | Ok(columns, rows) -> runResolved columns rows select
+        | FromLateral _, _ ->
+            match resolveFromSubquery store registry dbName fromItem outer with
+            | Error e -> e, [], []
+            | Ok(columns, rows) -> runResolved columns rows select
         | _ ->
             match resolveFromItem store registry dbName fromItem with
             | Error e -> e, [], []

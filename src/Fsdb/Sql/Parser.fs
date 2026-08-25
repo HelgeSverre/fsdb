@@ -2914,11 +2914,29 @@ selectQueryRef.Value <-
         | [] -> preturn (PlainSelect(fst first))
         | _ -> unionTailClause |>> fun tail -> combineUnion first rest tail |> UnionSelect
 
+let private expressionSelect =
+    function
+    | PlainSelect select -> select
+    | (UnionSelect _ as body) ->
+        { Projections = [ Star None, None ]
+          Distinct = false
+          CalculateFoundRows = false
+          StraightJoin = false
+          From = Some(FromLateral(body, "__fsdb_set_expression"))
+          Joins = []
+          Where = None
+          GroupBy = []
+          Rollup = false
+          Windows = []
+          Ctes = []
+          Having = None
+          OrderBy = []
+          Limit = None
+          Offset = None
+          Locking = false }
+
 selectWithCtesRef.Value <-
-    selectQuery
-    >>= function
-        | PlainSelect select -> preturn select
-        | UnionSelect _ -> fail "set operation is not valid in this subquery position"
+    selectQuery |>> expressionSelect
 
 /// A single `SELECT`, or a `UNION`-chained sequence of them
 /// (`selectOrUnionBranches`, shared with `derivedTable` — see its doc). Each

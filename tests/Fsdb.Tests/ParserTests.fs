@@ -1938,6 +1938,29 @@ let tests =
                         Expect.equal (exists.Ctes |> List.map _.CteName) [ "d" ] "EXISTS CTE"
                     | other -> failtestf "expected CTE-bearing expression subqueries, got %A" other
 
+                testCase "set operations parse in every expression subquery shape"
+                <| fun _ ->
+                    match
+                        parseOk
+                            "SELECT (SELECT 1 UNION SELECT 1), EXISTS (SELECT 1 UNION ALL SELECT 2), 2 IN (SELECT 1 UNION ALL SELECT 2), 2 = ANY (SELECT 1 UNION ALL SELECT 2)"
+                    with
+                    | Select select ->
+                        let isSetExpression (select: SelectStmt) =
+                            match select.From with
+                            | Some(FromLateral(UnionSelect _, _)) -> true
+                            | _ -> false
+
+                        match select.Projections with
+                        | [ Subquery scalar, None
+                            Exists exists, None
+                            InSubquery(_, inSelect), None
+                            QuantifiedComparison(_, _, _, quantified), None ] ->
+                            Expect.isTrue
+                                ([ scalar; exists; inSelect; quantified ] |> List.forall isSetExpression)
+                                "all four subqueries wrap a set expression"
+                        | projections -> failtestf "expected four expression subqueries, got %A" projections
+                    | other -> failtestf "expected derived set-expression subqueries, got %A" other
+
                 testCase "WITH clauses attach to UPDATE and DELETE"
                 <| fun _ ->
                     match

@@ -6716,6 +6716,40 @@ let tests =
                          + "FROM (WITH derived_c AS (SELECT 42 AS n) SELECT n FROM derived_c UNION ALL SELECT 43 LIMIT 1) AS d")
                         [ [ Some "6"; Some "1"; Some "1"; Some "1"; Some "42" ] ]
 
+                testCase "set operations compose inside expression subqueries"
+                <| fun _ ->
+                    expectRows
+                        ("SELECT "
+                         + "(SELECT 1 UNION SELECT 1), "
+                         + "EXISTS (SELECT 1 WHERE FALSE UNION ALL SELECT 2), "
+                         + "2 IN (SELECT 1 UNION ALL SELECT 2), "
+                         + "2 = ANY (SELECT 1 UNION ALL SELECT 2), "
+                         + "2 < ALL (SELECT 3 UNION ALL SELECT 4)")
+                        [ [ Some "1"; Some "1"; Some "1"; Some "1"; Some "1" ] ]
+
+                    match runDefault (newStore ()) "SELECT (SELECT 1 UNION ALL SELECT 2)" with
+                    | Err(1242, _) -> ()
+                    | other -> failtestf "expected scalar set-expression cardinality error 1242, got %A" other
+
+                testCase "set-operation subqueries retain correlation and collation"
+                <| fun _ ->
+                    let store = cteStore ()
+                    runDefault store "CREATE TABLE set_bin (value VARCHAR(10) COLLATE utf8mb4_bin)" |> ignore
+                    runDefault store "INSERT INTO set_bin VALUES ('a'), ('z')" |> ignore
+
+                    match runDefault store "SELECT id, id IN (SELECT 0 UNION ALL SELECT t.id) FROM t WHERE id <= 2 ORDER BY id" with
+                    | ResultSet(_, rows) ->
+                        Expect.equal rows [ [ Some "1"; Some "1" ]; [ Some "2"; Some "1" ] ] "correlated union"
+                    | other -> failtestf "expected a correlated set-operation result, got %A" other
+
+                    match
+                        runDefault
+                            store
+                            "SELECT _utf8mb4'A' = ANY (SELECT value FROM set_bin UNION ALL SELECT value FROM set_bin)"
+                    with
+                    | ResultSet(_, rows) -> Expect.equal rows [ [ Some "0" ] ] "binary union collation"
+                    | other -> failtestf "expected a collation-aware set-operation result, got %A" other
+
                 testCase "an inner CTE shadows its outer scope without leaking"
                 <| fun _ ->
                     expectRows
