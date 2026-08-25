@@ -136,6 +136,25 @@ let tests =
               }
               |> Async.RunSynchronously
 
+          testCase "MySqlConnector can negotiate zlib compression"
+          <| fun _ ->
+              async {
+                  use server = TestSupport.ServerFixture.start (Fsdb.Storage.create ()) Fsdb.Functions.empty
+
+                  let connStr =
+                      sprintf
+                          "Server=127.0.0.1;Port=%d;User ID=root;Password=;AllowPublicKeyRetrieval=True;SslMode=None;UseCompression=True"
+                          server.Port
+
+                  use conn = new MySqlConnector.MySqlConnection(connStr)
+                  do! conn.OpenAsync() |> Async.AwaitTask
+                  use command = conn.CreateCommand()
+                  command.CommandText <- "SELECT REPEAT('compressible-', 512)"
+                  let! value = command.ExecuteScalarAsync() |> Async.AwaitTask
+                  Expect.equal (string value).Length (13 * 512) "a compressed result round-trips"
+              }
+              |> Async.RunSynchronously
+
           testCase "CLIENT_MULTI_STATEMENTS returns sequenced results"
           <| fun _ ->
               async {
@@ -441,7 +460,7 @@ let tests =
                       | None -> failtest "the server acknowledges the encrypted handshake"
 
                   let connectionString =
-                      sprintf "Server=127.0.0.1;Port=%d;User ID=root;Password=;SslMode=Required;Pooling=false" port
+                      sprintf "Server=127.0.0.1;Port=%d;User ID=root;Password=;SslMode=Required;Pooling=false;UseCompression=True" port
 
                   use connection = new MySqlConnector.MySqlConnection(connectionString)
                   do! connection.OpenAsync() |> Async.AwaitTask

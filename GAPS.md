@@ -42,7 +42,7 @@ accepted (marked `ponytail:` in source), or recorded only in
 | Views & triggers | Direct updatable views with all insert/replace forms; ordered BEFORE/AFTER INSERT/UPDATE/DELETE triggers and compound DML bodies | Complex views and the stored-program control language |
 | Routines & events | Zero-parameter, single-statement procedures and one-time event declarations | Compound stored programs and event scheduling |
 | Full-text | Oracle-verified scoring over maintained inverted indexes | Single-table SELECT only; no CJK parser |
-| Wire protocol | Handshake through COM_STMT_FETCH, TLS, LOCAL INFILE, and multi-result batches | No compression or session-state tracking |
+| Wire protocol | Handshake through COM_STMT_FETCH, TLS, zlib compression, LOCAL INFILE, and multi-result batches | No session-state tracking |
 | Auth & privileges | Static privileges enforced incl. subqueries, per-host accounts, account locks, and role accounts | No role activation/inheritance or dynamic/column privileges |
 | Metadata | 23 INFORMATION_SCHEMA views, 10 mysql.* tables, and core live command counters | Storage statistics are stand-ins; many SHOW forms missing |
 | Server admin | KILL, SHUTDOWN, limits, config file parsing | No replication/binlog/logging files |
@@ -339,7 +339,7 @@ constant-time credential verification, COM_QUERY/INIT_DB/PING/FIELD_LIST/
 QUIT/RESET_CONNECTION, full COM_STMT_PREPARE/EXECUTE/FETCH/CLOSE/SEND_LONG_DATA/
 RESET with read-only cursors, type reuse, and 1153-on-overflow long-data accounting, text and
 binary row encodings including µs-precision temporals and 16 MiB multi-packet
-framing, TLS 1.2/1.3 with an optional PEM server certificate and
+framing, zlib CLIENT_COMPRESS transport, TLS 1.2/1.3 with an optional PEM server certificate and
 require_secure_transport, CLIENT_FOUND_ROWS honored, max_allowed_packet/max_connections/
 max_prepared_stmt_count enforced with honest advertising, mid-query
 disconnect detection cancelling evaluation (`Server.watchForDisconnect`).
@@ -347,7 +347,7 @@ disconnect detection cancelling evaluation (`Server.watchForDisconnect`).
 | Gap | MySQL 8.4 | fsdb | Impact | Class |
 |---|---|---|---|---|
 | TLS client authentication | account `REQUIRE SSL`/`REQUIRE X509`, client certificates, certificate reload | server certificate authentication only; no account-level TLS requirement | medium (mutual TLS deployments) | refusal |
-| Compression | CLIENT_COMPRESS/ZSTD | never offered | low | refusal |
+| Compression | CLIENT_COMPRESS/ZSTD | CLIENT_COMPRESS zlib framing is negotiated; Zstandard is not offered | low | subset |
 | Cursor storage | materialized temporary tables spill from memory to disk | read-only, forward-only cursors retain their materialized rows in session memory until exhaustion, reset, close, or commit | low (large concurrent cursors) | divergence |
 | LOAD DATA LOCAL INFILE | client-streamed file loading | opt-in `local_infile`; UTF-8/utf8mb4, one-character field/line separators, `REPLACE`/`IGNORE`, column lists, and header skipping; no server-file loading, `SET`, user variables, or multibyte separators | low | subset |
 | Multi-statement | CLIENT_MULTI_STATEMENTS batching | negotiated COM_QUERY batches, multi-result status flags, and COM_SET_OPTION toggling | low | covered |

@@ -3,6 +3,7 @@ module Fsdb.Tests.PacketTests
 open System
 open Expecto
 open Fsdb.Binary
+open Fsdb.Compression
 open Fsdb.Packet
 
 let tests =
@@ -62,6 +63,70 @@ let tests =
                       Expect.equal p.SeqId original.SeqId "seq id"
                       Expect.equal p.Payload original.Payload "payload"
                   | None -> failtest "expected a packet"
+              }
+              |> Async.RunSynchronously
+
+          testCase "compressed transport round-trips compressible and raw frames"
+          <| fun _ ->
+              async {
+                  for payload in [ Array.create 4096 0x61uy; [| 1uy .. 20uy |] ] do
+                      use wire = new IO.MemoryStream()
+
+                      let writer = new CompressedStream(wire, true)
+                      writer.BeginCommand()
+                      do! writer.WriteAsync(payload, 0, payload.Length) |> Async.AwaitTask
+                      writer.Dispose()
+
+                      wire.Position <- 0L
+                      use reader = new CompressedStream(wire, true)
+                      reader.BeginCommand()
+                      let actual = Array.zeroCreate<byte> payload.Length
+                      let mutable offset = 0
+
+                      while offset < actual.Length do
+                          let! read = reader.ReadAsync(actual, offset, actual.Length - offset) |> Async.AwaitTask
+                          offset <- offset + read
+
+                      Expect.equal actual payload "the compressed layer preserves the ordinary packet stream"
+              }
+              |> Async.RunSynchronously
+
+          testCase "compressed transport rejects expansion and sequence mismatches"
+          <| fun _ ->
+              async {
+                  use encoded = new IO.MemoryStream()
+                  let writer = new CompressedStream(encoded, true)
+                  writer.BeginCommand()
+                  let source = Array.create 4096 0x61uy
+                  do! writer.WriteAsync(source, 0, source.Length) |> Async.AwaitTask
+                  writer.Dispose()
+
+                  let oversized = encoded.ToArray()
+                  oversized.[4] <- 1uy
+                  oversized.[5] <- 0uy
+                  oversized.[6] <- 0uy
+                  use oversizedWire = new IO.MemoryStream(oversized)
+                  use oversizedReader = new CompressedStream(oversizedWire, true)
+                  oversizedReader.BeginCommand()
+                  let! oversizedResult = Async.Catch(oversizedReader.ReadAsync(Array.zeroCreate 1, 0, 1) |> Async.AwaitTask)
+                  match oversizedResult with
+                  | Choice2Of2 _ -> ()
+                  | outcome -> failtestf "inflation must stay within the declared buffer: %A" outcome
+
+                  let wrongSequence = [| 1uy; 0uy; 0uy; 1uy; 0uy; 0uy; 0uy; 42uy |]
+                  use wrongSequenceWire = new IO.MemoryStream(wrongSequence)
+                  use wrongSequenceReader = new CompressedStream(wrongSequenceWire, true)
+                  wrongSequenceReader.BeginCommand()
+                  let! sequenceResult = Async.Catch(wrongSequenceReader.ReadAsync(Array.zeroCreate 1, 0, 1) |> Async.AwaitTask)
+                  match sequenceResult with
+                  | Choice2Of2 _ -> ()
+                  | outcome -> failtestf "compressed sequence ids must be validated: %A" outcome
+
+                  use emptyWire = new IO.MemoryStream()
+                  use emptyReader = new CompressedStream(emptyWire, true)
+                  emptyReader.BeginCommand()
+                  let! read = emptyReader.ReadAsync(Array.zeroCreate 1, 0, 1) |> Async.AwaitTask
+                  Expect.equal read 0 "a clean compressed disconnect is ordinary EOF"
               }
               |> Async.RunSynchronously
 

@@ -15,6 +15,7 @@ let ClientLongPassword = 0x00000001u
 let ClientFoundRows = 0x00000002u
 let ClientLongFlag = 0x00000004u
 let ClientConnectWithDb = 0x00000008u
+let ClientCompress = 0x00000020u
 let ClientLocalFiles = 0x00000080u
 let ClientProtocol41 = 0x00000200u
 let ClientSsl = 0x00000800u
@@ -33,6 +34,7 @@ let ServerCapabilities =
     ||| ClientFoundRows
     ||| ClientLongFlag
     ||| ClientConnectWithDb
+    ||| ClientCompress
     ||| ClientProtocol41
     ||| ClientSecureConnection
     ||| ClientTransactions

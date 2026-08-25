@@ -12,6 +12,7 @@ open System.Security.Authentication
 open System.Text
 open System.Threading
 open Fsdb.Binary
+open Fsdb.Compression
 open Fsdb.Functions
 open Fsdb.Packet
 open Fsdb.Protocol
@@ -736,6 +737,7 @@ let private handleConnection
         use networkStream = client.GetStream()
         let mutable stream: IO.Stream = networkStream
         let mutable tlsStream: SslStream option = None
+        let mutable compressedStream: CompressedStream option = None
         let mutable tlsVersion: string option = None
         let mutable tlsCipher: string option = None
         let offeredCapabilities = serverCapabilities options.Certificate.IsSome
@@ -914,6 +916,11 @@ let private handleConnection
                                   Payload = okPayload capabilities (statusFlagsFor session) 0UL 0UL }
                             |> Async.Ignore
 
+                        if capabilities &&& ClientCompress <> 0u then
+                            let compressed = new CompressedStream(stream, true)
+                            compressedStream <- Some compressed
+                            stream <- compressed
+
                 // Runs a statement dispatch under `withCancellationWatch`,
                 // catching the `OperationCanceledException` a killed
                 // client's abandoned query unwinds with (see
@@ -934,6 +941,7 @@ let private handleConnection
                 let rec loop (session: Session) : Async<unit> =
                     async {
                         activeSession <- Some session
+                        compressedStream |> Option.iter (fun compressed -> compressed.BeginCommand())
 
                         match! readPacketWithTimeoutSeconds (sessionWaitTimeout session) client stream with
                         | None -> ()

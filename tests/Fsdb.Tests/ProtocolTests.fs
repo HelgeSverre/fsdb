@@ -175,6 +175,10 @@ let tests =
               Expect.equal (serverCapabilities false &&& ClientSsl) 0u "plaintext servers omit CLIENT_SSL"
               Expect.equal (serverCapabilities true &&& ClientSsl) ClientSsl "TLS servers advertise CLIENT_SSL"
 
+          testCase "zlib compression is advertised"
+          <| fun _ ->
+              Expect.equal (serverCapabilities false &&& ClientCompress) ClientCompress "clients can negotiate CLIENT_COMPRESS"
+
           testCase "typed text rows encode BLOB values as raw bytes"
           <| fun _ ->
               let bytes = [| 0x00uy; 0xffuy; 0x80uy |]

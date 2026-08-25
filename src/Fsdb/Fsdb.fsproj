@@ -33,6 +33,7 @@
     <Compile Include="Engine/Persistence.fs" />
     <Compile Include="Engine/InformationSchema.fs" />
     <Compile Include="Engine/Executor.fs" />
+    <Compile Include="Wire/Compression.fs" />
     <Compile Include="Wire/Packet.fs" />
     <Compile Include="Wire/Protocol.fs" />
     <Compile Include="Wire/Session.fs" />
