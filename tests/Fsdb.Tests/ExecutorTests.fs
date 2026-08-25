@@ -891,10 +891,8 @@ let tests =
 
                 testCase "EXPLAIN by a nullable VARCHAR(50) UNIQUE key reports key_len 203 (50*4+2+1 for the null flag)"
                 <| fun _ ->
-                    // The UNIQUE column sits at index 1, not 0 — a point
-                    // lookup on a non-first key column must work (regression:
-                    // `Storage.tryUniqueLookup` once indexed its one-element
-                    // probe array by the column's absolute table index).
+                    // Probe values are key-relative even when the key column
+                    // is not the table's first column.
                     let store = newStore ()
                     runDefault store "CREATE TABLE users (id INT, name VARCHAR(50) UNIQUE)" |> ignore
                     runDefault store "INSERT INTO users VALUES (1, 'a')" |> ignore
@@ -4141,10 +4139,6 @@ let tests =
 
                 testCase "point lookup by a UNIQUE column that isn't the table's first returns the row"
                 <| fun _ ->
-                    // Regression: `Storage.tryUniqueLookup` indexed its
-                    // one-element probe array by the column's absolute table
-                    // index, so any point lookup on a key column past
-                    // position 0 threw IndexOutOfRangeException.
                     let store = newStore ()
                     runDefault store "CREATE TABLE t (a INT, b INT, email VARCHAR(100) UNIQUE, v INT)" |> ignore
                     runDefault store "INSERT INTO t VALUES (1, 2, 'x@y.z', 9), (3, 4, 'q@w.e', 8)" |> ignore
@@ -4649,9 +4643,8 @@ let tests =
 
                 testCase "point SELECT by PRIMARY KEY on a 50,000-row table stays flat, not linear in table size"
                 <| fun _ ->
-                    // Only catches a regression back to a full table scan —
-                    // the 20ms bound is generous, not a tight perf target
-                    // (the network round-trip floor is ~250µs).
+                    // The generous bound separates indexed access from a full
+                    // scan; it is not a latency target.
                     let store = newStore ()
                     runDefault store "CREATE TABLE points (id INT PRIMARY KEY, name VARCHAR(20))" |> ignore
 
@@ -5096,9 +5089,8 @@ let tests =
                     | ResultSet(_, [ [ Some "1" ] ]) -> ()
                     | other -> failtestf "expected a match without crashing, got %A" other
 
-                // A pattern ending in an escape character used to spin
-                // forever (the escape consumed no input and the matcher
-                // never advanced) — a remote DoS from one client string.
+                // A trailing escape must terminate even though it consumes no
+                // subject input; otherwise one client pattern can spin.
                 testCase "a pattern ending in a trailing escape terminates"
                 <| fun _ ->
                     let store = newStore ()
@@ -5800,8 +5792,7 @@ let tests =
                     | ResultSet(_, [ [ Some "1.99"; Some "1"; Some "2" ] ]) -> ()
                     | other -> failtestf "expected 1.99, 1, 2, got %A" other ]
 
-          // Every expected value below was read off the MySQL 8.4.11 oracle
-          // before the function was written, not derived from the code.
+          // Expected values are captured from the MySQL 8.4.11 oracle.
           testList
               "builtins pinned to the 8.4 oracle"
               [ let expectRow (sql: string) (expected: string option list) =

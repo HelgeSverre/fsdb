@@ -1066,12 +1066,8 @@ let tests =
                   do! selectCmd.PrepareAsync() |> Async.AwaitTask
                   use! reader = selectCmd.ExecuteReaderAsync() |> Async.AwaitTask
 
-                  // `id`/`score`/`active` now come back column-typed
-                  // (LONGLONG/DOUBLE) rather than a blanket VAR_STRING
-                  // — see `Value.mysqlTypeOf` — so a real ADO.NET
-                  // reader hands back native `Int64`/`Double` for them,
-                  // the same as it would against real MySQL; only
-                  // `name` (VARCHAR) is still a string.
+                  // Native numeric descriptors make ADO.NET return numeric
+                  // values while VARCHAR remains a string.
                   let! hasRow1 = reader.ReadAsync() |> Async.AwaitTask
                   Expect.isTrue hasRow1 "first row present"
                   Expect.equal (reader.GetInt64 0) 1L "row 1 id"
@@ -1739,12 +1735,8 @@ let tests =
                   use server = TestSupport.ServerFixture.start (Fsdb.Storage.create ()) registry
                   let port = server.Port
 
-                  // `Pooling=false`: this test opens two separate
-                  // connections against the same connection string
-                  // (setup, then a follow-up health check), and a
-                  // pooled `Open()` sends `COM_RESET_CONNECTION` —
-                  // unimplemented, unrelated to what this test is
-                  // actually checking.
+                  // Pooling would let the health check reuse the setup socket
+                  // instead of proving that a fresh connection is accepted.
                   let connStr =
                       sprintf
                           "Server=127.0.0.1;Port=%d;User ID=root;Password=;AllowPublicKeyRetrieval=True;SslMode=None;Pooling=false"

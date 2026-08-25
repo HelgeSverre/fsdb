@@ -424,10 +424,8 @@ let tests =
                       Charset = None
                       OnUpdateCurrentTimestamp = false }
                     { Name = "created_at"
-                      // fsp 6 so the sub-second stand-in below survives
-                      // coercion (a bare DATETIME is fsp 0 and would round
-                      // the fraction away) — the point of this test is that
-                      // the WAL replays the stored physical value verbatim.
+                      // fsp 6 preserves the stand-in's fraction so replay is
+                      // compared against the complete physical value.
                       Type = TDateTime 6
                       Nullable = false
                       Default = None
@@ -704,13 +702,10 @@ let tests =
 
               let reloaded = load dir
 
-              // id 1 is free again after the replayed update moved that row to id 10.
               match insertRows reloaded defaultDatabase "pk" (Some [ "id"; "name" ]) [ [ VInt 1L; VString "d" ] ] with
               | Ok { LastInsertId = 1L; Affected = 1 } -> ()
               | other -> failtestf "expected id 1 to be free again after replay, got %A" other
 
-              // id 10 is now occupied — a stale (pre-update) index would
-              // wrongly accept this as if id 10 never existed.
               match insertRows reloaded defaultDatabase "pk" (Some [ "id"; "name" ]) [ [ VInt 10L; VString "e" ] ] with
               | Error(DuplicateKey("PRIMARY", _)) -> ()
               | other -> failtestf "expected id 10 to be rejected as a duplicate after replay, got %A" other
@@ -1882,9 +1877,6 @@ let tests =
 
           testCase "withDataDir durability and Db.onCommit CDC coexist on one store"
           <| fun _ ->
-              // Regression guard for the old single-slot `Store.OnCommit`:
-              // `Persistence.attach` used to *claim* the slot, so durability
-              // and a host's CDC handler were mutually exclusive.
               let dir = tempDataDir ()
               let events = ResizeArray<CommitEvent>()
 

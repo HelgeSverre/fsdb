@@ -1010,13 +1010,8 @@ type Value =
     | VJson of string
     | VGeometry of Geometry
 
-// MySQL wire protocol column type ids — shared by `Protocol`'s column
-// definition packets (a resultset's declared type) and its binary-protocol
-// parameter decoding (COM_STMT_EXECUTE's per-param type array). Kept here,
-// ahead of both `Executor` and `Protocol` in build order, so `mysqlTypeOf`
-// below (used by `Executor` to type a resultset's columns) and `Protocol`
-// (used to read/write them on the wire) share one definition instead of
-// two copies of the same numeric constants drifting apart.
+// Result definitions and COM_STMT_EXECUTE parameters share these ids. Their
+// build-order position keeps the encoder and decoder on one definition.
 // https://dev.mysql.com/doc/dev/mysql-server/latest/page_protocol_basic_dt_types.html
 let TypeTiny = 0x01uy
 let TypeShort = 0x02uy

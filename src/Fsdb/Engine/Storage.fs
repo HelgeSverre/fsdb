@@ -657,8 +657,8 @@ let tableSnapshot (store: Store) (dbName: string) (tableName: string) : Result<T
 /// fresh in-memory server); a no-op if it already exists. Deliberately
 /// *not* used by mid-session `USE`/`COM_INIT_DB` — those check
 /// `databaseExists` and report a real 1049 instead, matching MySQL (see
-/// `QueryHandler`'s `Use` probe). `ConcurrentDictionary.TryAdd` is already
-/// atomic, so unlike the old whole-catalog CAS this needs no retry loop.
+/// `QueryHandler`'s `Use` probe). `ConcurrentDictionary.TryAdd` publishes
+/// the database atomically without a retry loop.
 let ensureDatabase (store: Store) (dbName: string) : unit =
     store.Databases.TryAdd(dbName, ref Map.empty) |> ignore
 

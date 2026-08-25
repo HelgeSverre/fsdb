@@ -1200,12 +1200,8 @@ let tests =
 
                 testCase "a no-op UPDATE that writes a row's PRIMARY KEY back to its own value never collides with itself"
                 <| fun _ ->
-                    // `UniqueIndex` maps a key to the row's stable identity,
-                    // and `updateRows`'s collision check excludes the row
-                    // being rewritten by that identity — this guards
-                    // against a regression back to excluding by structural
-                    // equality (`existing <> row`), which any no-op or a
-                    // row-position mixup could silently break.
+                    // Collision checks exclude the row by stable identity;
+                    // structural equality cannot distinguish every rewrite.
                     let store = withUsersTable ()
 
                     insertRows
@@ -1750,12 +1746,8 @@ let tests =
                     let store = withUsersTable ()
                     insertRows store defaultDatabase "users" None [ [ VInt 1L; VString "alice"; VInt 30L ] ] |> ignore
 
-                    // `id` (the PRIMARY KEY) moves from column 0 to column 1
-                    // — if `UniqueIndex` weren't rebuilt against the new
-                    // layout, a duplicate-id INSERT would either wrongly
-                    // succeed (checked against the old position, now
-                    // holding the flag's value) or a distinct id could
-                    // wrongly collide.
+                    // Moving a key column must rebuild its index against the
+                    // new row layout before later uniqueness checks.
                     match alterTable store defaultDatabase "users" [ AddColumn(col "flag" (TInt false) true, PositionFirst) ] with
                     | Error e -> failtestf "expected Ok, got %A" e
                     | Ok() ->
@@ -2227,8 +2219,6 @@ let tests =
                     | Ok affected -> Expect.equal affected 1 "delete goes through with checks disabled"
                     | Error e -> failtestf "expected Ok, got %A" e
 
-                    // employees.dept_id = 1 is now dangling; also verify a
-                    // fresh insert to a non-existent parent is allowed too.
                     match insertRows store defaultDatabase "employees" None [ [ VInt 2L; VInt 12345L; VString "bob" ] ] with
                     | Ok _ -> ()
                     | Error e -> failtestf "expected Ok with checks disabled, got %A" e
@@ -2431,9 +2421,8 @@ let tests =
                      | Ok _ -> ()
                      | Error e -> failtestf "alterTable b: %A" e)
 
-                    // Both FKs are now live, so seed with the FK checks disabled — plain
-                    // insertion order can't satisfy `a.bid -> b.id` and `b.id -> a.id`
-                    // simultaneously, same as MySQL needs `FOREIGN_KEY_CHECKS=0` here.
+                    // Cyclic foreign keys require disabled checks while the
+                    // mutually dependent seed rows are incomplete.
                     store.ForeignKeyChecks <- false
 
                     (match insertRows store defaultDatabase "b" None [ [ VInt 1L ] ] with
@@ -2874,7 +2863,7 @@ let tests =
                     Expect.isSome txSnapshot.PendingEvents "the transaction's own snapshot must buffer — the real store has a subscriber"
 
                     let nestedBase, nested = beginTransactionSnapshotWithBase txSnapshot
-                    Expect.isSome nested.PendingEvents "regression guard: the nested snapshot must buffer too, even though its own source (txSnapshot) has no OnCommit of its own — only PendingEvents"
+                    Expect.isSome nested.PendingEvents "nested snapshots inherit commit buffering from their parent"
 
                     insertRows nested defaultDatabase "users" None [ [ VInt 1L; VString "alice"; VInt 30L ] ]
                     |> ignore
@@ -3198,9 +3187,8 @@ let tests =
               "performance canary"
               [ testCase "a single-row UPDATE against a 50,000-row table stays roughly linear, not quadratic"
                 <| fun _ ->
-                    // Only catches a quadratic regression (updateRows used
-                    // to fold with `doneRows @ [ row ]`, ~8.5s at this size) — the
-                    // 500ms bound is generous, not a tight perf target.
+                    // The generous bound distinguishes quadratic growth from
+                    // ordinary machine variance; it is not a latency target.
                     let store = withUsersTable ()
 
                     let rows = [ for i in 1 .. 50_000 -> [ VString(sprintf "name%d" i); VInt(int64 (i % 100)) ] ]

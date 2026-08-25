@@ -1972,13 +1972,9 @@ module Runner =
                         if keepRunning then
                             let probeRecords = ResizeArray<ProbeRecord>()
 
-                            // Every probe runs, even after one fails. A probe
-                            // that hangs fsdb (or leaves the connection
-                            // broken) used to hide every probe behind it in
-                            // the corpus, which is exactly the evidence a
-                            // triage pass needs. The *first* failure still
-                            // defines the case's classification and
-                            // signature, so nothing about the ledger changes.
+                            // Independent probes preserve the full evidence
+                            // set; the first failure alone defines the case
+                            // classification and signature.
                             for name, sql in ScenarioProbes.all options.Scenario do
                                     let parserStatus, parserDetail =
                                         match Fsdb.Parser.parse sql with

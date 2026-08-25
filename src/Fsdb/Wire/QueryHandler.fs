@@ -2638,30 +2638,27 @@ let rec private dispatch (session: Session) (rawSql: string) : Session * QueryRe
         match tryTextEventCommand sql with
         | Some command -> runTextEvent command
         | None ->
-          match tryTextRoutineCommand sql with
-          | Some command -> runTextRoutine command
-          | None ->
-          match tryTextPreparedCommand sql with
-          | Error result -> session, result
-          | Ok(Some command) -> runTextPrepared command
-          | Ok None when not (placeholderPositions sql |> List.isEmpty) ->
-        // A `?` outside a string/comment is a bind parameter, only legal via
-        // COM_STMT_PREPARE — over COM_QUERY it's a 1064 in MySQL. Rejecting
-        // here also stops a `?` in a spot the prepared binder never reaches
-        // (a generated-column DDL expression) from surviving unbound into
-        // Storage/Persistence, where it would `FailFast` a --data-dir server.
-              session, syntaxError sql
-          | Ok None ->
-              let upper = sql.ToUpperInvariant()
+            match tryTextRoutineCommand sql with
+            | Some command -> runTextRoutine command
+            | None ->
+                match tryTextPreparedCommand sql with
+                | Error result -> session, result
+                | Ok(Some command) -> runTextPrepared command
+                | Ok None when not (placeholderPositions sql |> List.isEmpty) ->
+                    // A `?` outside a string/comment is a bind parameter, only
+                    // legal via COM_STMT_PREPARE. Rejecting it here also keeps
+                    // unreachable placeholders out of persisted expressions.
+                    session, syntaxError sql
+                | Ok None ->
+                    let upper = sql.ToUpperInvariant()
 
-              match tryProbe sql upper with
-              | Some probe ->
-            // Probe-handled resultsets contain rendered strings rather than
-            // typed values, so rebuild their descriptors instead of retaining
-            // metadata from the previous statement.
-                  let session, result = runProbe session sql probe
-                  { session with LastResultColumnMetadata = completeResultMetadata session result [] }, result
-              | None -> executeStatement session sql upper
+                    match tryProbe sql upper with
+                    | Some probe ->
+                        // Probe results contain rendered strings rather than
+                        // values from which descriptors can be inferred.
+                        let session, result = runProbe session sql probe
+                        { session with LastResultColumnMetadata = completeResultMetadata session result [] }, result
+                    | None -> executeStatement session sql upper
 
 /// No SQL engine failure should ever escape as a raw .NET exception — the
 /// only two paths into `dispatch` (the parser, well guarded, and

@@ -367,11 +367,14 @@ let private warningCountFor (session: Session) =
 let private localInfileRequestPayload (fileName: string) =
     Array.append [| 0xfbuy |] (Encoding.UTF8.GetBytes fileName)
 
+let private singleCharacter (value: string) =
+    if value.Length = 1 then Some value.[0] else None
+
 let private decodeLocalLoad (load: Parser.LocalLoad) (bytes: byte[]) : Result<Value list list, int * string> =
     try
         let text = UTF8Encoding(false, true).GetString bytes
-        let enclosedBy = load.EnclosedBy |> Option.bind (fun value -> if value.Length = 1 then Some value.[0] else None)
-        let escape = load.Escape |> Option.bind (fun value -> if value.Length = 1 then Some value.[0] else None)
+        let enclosedBy = load.EnclosedBy |> Option.bind singleCharacter
+        let escape = load.Escape |> Option.bind singleCharacter
         let nullMarker = escape |> Option.map (fun value -> string value + "N")
         let rows = ResizeArray<Value list>()
         let fields = ResizeArray<Value>()

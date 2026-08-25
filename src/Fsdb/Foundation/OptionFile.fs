@@ -175,6 +175,12 @@ let private parsed (errors: ResizeArray<string>) (entries: ResizeArray<Entry>) =
     { Entries = List.ofSeq entries
       Errors = List.ofSeq errors }
 
+let private asResult (parsed: Parsed) =
+    if List.isEmpty parsed.Errors then
+        Ok parsed.Entries
+    else
+        Error(String.concat "\n" parsed.Errors)
+
 /// Reads server options from `lines` without applying them.
 let parseLines (source: string) (lines: string seq) : Parsed =
     let errors = ResizeArray<string>()
@@ -184,8 +190,7 @@ let parseLines (source: string) (lines: string seq) : Parsed =
 
 /// Reads server options from `lines` without applying them.
 let readLines (source: string) (lines: string seq) : Result<Entry list, string> =
-    let result = parseLines source lines
-    if List.isEmpty result.Errors then Ok result.Entries else Error(String.concat "\n" result.Errors)
+    parseLines source lines |> asResult
 
 /// Reads one my.cnf-style file without applying its server options.
 let parseFile (path: string) : Parsed =
@@ -203,8 +208,7 @@ let parseFile (path: string) : Parsed =
 
 /// Reads one my.cnf-style file without applying its server options.
 let readFile (path: string) : Result<Entry list, string> =
-    let result = parseFile path
-    if List.isEmpty result.Errors then Ok result.Entries else Error(String.concat "\n" result.Errors)
+    parseFile path |> asResult
 
 /// Server option files in MySQL's Unix precedence order.
 let defaultFilePaths () : string list =
@@ -234,5 +238,4 @@ let parseFiles (paths: string list) : Parsed =
 
 /// Reads existing option files from least to most specific.
 let readFiles (paths: string list) : Result<Entry list, string> =
-    let result = parseFiles paths
-    if List.isEmpty result.Errors then Ok result.Entries else Error(String.concat "\n" result.Errors)
+    parseFiles paths |> asResult

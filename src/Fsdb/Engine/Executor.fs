@@ -1428,26 +1428,19 @@ let rec private metadataOfExpr (ctx: EvalContext) (expr: Expr) : ColumnMetadata 
     | Placeholder _
     | Star _ -> None
 
-/// The declared fsp for each output column a projection produces — parallel,
-/// in length and order, to the `(name, Value)` list `evalProjection` builds
-/// for the same projection (`Star None` → every table column, `t.*` → that
-/// qualifier's columns, a bare/qualified column → its own declared type, and
-/// `None` for a literal/function/arithmetic that has no schema type). Threaded
-/// into the resultset renderer so a `DATETIME(6)` column shows exactly six
-/// digits where the bare `VDateTime` alone can't say how many. Mirrors
-/// `evalProjection`/`resolveStarQualifier`'s own expansion so the two lists
-/// line up column-for-column.
-let rec private outputColumnFsps (ctx: EvalContext) (columns: ColumnDef list) (projections: Projection list) : int option list =
-    let rec starQualifierCols (ctx: EvalContext) (qualifier: string) : ColumnDef list =
-        match Map.tryFind (qualifier.ToLowerInvariant()) ctx.Qualifiers with
-        | Some(cols, _) -> cols
-        | None -> ctx.Outer |> Option.map (fun o -> starQualifierCols o qualifier) |> Option.defaultValue []
+let rec private columnsForQualifier (ctx: EvalContext) (qualifier: string) : ColumnDef list =
+    match Map.tryFind (qualifier.ToLowerInvariant()) ctx.Qualifiers with
+    | Some(columns, _) -> columns
+    | None -> ctx.Outer |> Option.map (fun outer -> columnsForQualifier outer qualifier) |> Option.defaultValue []
 
+/// The declared fsp list must mirror projection expansion because `VDateTime`
+/// alone does not retain its declared display precision.
+let rec private outputColumnFsps (ctx: EvalContext) (columns: ColumnDef list) (projections: Projection list) : int option list =
     projections
     |> List.collect (fun proj ->
         match proj with
         | Star None, _ -> columns |> List.map (fun c -> fspOfType c.Type)
-        | Star(Some qualifier), _ -> starQualifierCols ctx qualifier |> List.map (fun c -> fspOfType c.Type)
+        | Star(Some qualifier), _ -> columnsForQualifier ctx qualifier |> List.map (fun c -> fspOfType c.Type)
         | expr, _ -> [ fspOfExpr ctx expr ])
 
 type private OutputColumnSource =
@@ -1574,11 +1567,6 @@ let private outputColumnWireOverridesFor
     : ColumnMetadata option list =
     let projections = select.Projections
 
-    let rec starQualifierCols (ctx: EvalContext) (qualifier: string) : ColumnDef list =
-        match Map.tryFind (qualifier.ToLowerInvariant()) ctx.Qualifiers with
-        | Some(cols, _) -> cols
-        | None -> ctx.Outer |> Option.map (fun o -> starQualifierCols o qualifier) |> Option.defaultValue []
-
     let overrideOf (c: ColumnDef) =
         match c.Type with
         // WITH ROLLUP materializes each grouped column into a *nullable*
@@ -1594,7 +1582,7 @@ let private outputColumnWireOverridesFor
         |> List.collect (fun proj ->
             match proj with
             | Star None, _ -> columns |> List.map overrideOf
-            | Star(Some qualifier), _ -> starQualifierCols ctx qualifier |> List.map overrideOf
+            | Star(Some qualifier), _ -> columnsForQualifier ctx qualifier |> List.map overrideOf
             | expr, _ ->
                 [ match tryColumnDefForExpr ctx expr |> Option.bind overrideOf with
                   | Some ty -> Some ty

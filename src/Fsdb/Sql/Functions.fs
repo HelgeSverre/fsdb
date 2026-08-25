@@ -2059,10 +2059,7 @@ let private addInterval (dt: DateTime) (amount: float) (unit: string) : DateTime
         | "QUARTER" -> monthsAmount 3 |> Option.map dt.AddMonths
         | "YEAR" -> (if abs amount > 1.0e8 then None else Some(int amount)) |> Option.map dt.AddYears
         | "MICROSECOND" -> Some(dt.AddTicks(int64 (amount * 10.0)))
-        // An unrecognized unit used to return `dt` unchanged, which is a
-        // silent wrong answer; NULL is at least an honest refusal. Every
-        // composite unit is normalized into this vocabulary before it gets
-        // here (see `compositeIntervalUnits`).
+        // Composite units are normalized into this vocabulary before use.
         | _ -> None
     with :? ArgumentOutOfRangeException ->
         None
