@@ -59,8 +59,9 @@ version and size.
 
 ## Implemented surface
 
-The implemented surface covers the wire protocol, PDO/mysql-CLI
-compatibility, the SQL engine core, Laravel migrations, test-suite parity,
+The implemented surface covers the wire protocol, including forward-only
+prepared cursors, PDO/mysql-CLI compatibility, the SQL engine core, Laravel
+migrations, test-suite parity,
 the embedding API, opt-in persistence, EXPLAIN, multi-table DML, and the
 streaming pipeline. Each area has a runnable acceptance gate: a real external
 client, a reference application suite, or a benchmark threshold.

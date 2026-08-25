@@ -2528,6 +2528,148 @@ let tests =
               }
               |> Async.RunSynchronously
 
+          testCase "prepared read-only cursors fetch binary rows in bounded batches"
+          <| fun _ ->
+              async {
+                  use server = TestSupport.ServerFixture.start (Fsdb.Storage.create ()) Fsdb.Functions.empty
+                  let! client, stream = connectRaw server.Port
+                  use client = client
+
+                  let query (sql: string) =
+                      async {
+                          let payload = Array.append [| 0x03uy |] (Text.Encoding.UTF8.GetBytes sql)
+                          do! writePacketAsync stream { SeqId = 0uy; Payload = payload } |> Async.Ignore
+                          let! response = readPacketAsync stream
+                          Expect.notEqual response.Value.Payload.[0] 0xffuy "setup query succeeds"
+                      }
+
+                  let statusOfEof (packet: Packet) =
+                      let reader = Reader(packet.Payload.[1..])
+                      reader.ReadInt16LE() |> ignore
+                      reader.ReadInt16LE()
+
+                  let readIntRow (packet: Packet) =
+                      let reader = Reader(packet.Payload)
+                      Expect.equal (reader.ReadByte()) 0uy "binary row header"
+                      reader.ReadByte() |> ignore
+                      reader.ReadInt32LE()
+
+                  let executeCursor statementId =
+                      let writer = Writer()
+                      writer.WriteByte 0x17uy
+                      writer.WriteInt32LE statementId
+                      writer.WriteByte 1uy
+                      writer.WriteInt32LE 1
+                      writePacketAsync stream { SeqId = 0uy; Payload = writer.ToArray() } |> Async.Ignore
+
+                  let fetch statementId count =
+                      let writer = Writer()
+                      writer.WriteByte 0x1cuy
+                      writer.WriteInt32LE statementId
+                      writer.WriteInt32LE count
+                      writePacketAsync stream { SeqId = 0uy; Payload = writer.ToArray() } |> Async.Ignore
+
+                  do! query "CREATE TABLE cursor_rows (n INT PRIMARY KEY)"
+                  do! query "INSERT INTO cursor_rows VALUES (1),(2),(3)"
+
+                  let prepare = Array.append [| 0x16uy |] (Text.Encoding.UTF8.GetBytes "SELECT n FROM cursor_rows ORDER BY n")
+                  do! writePacketAsync stream { SeqId = 0uy; Payload = prepare } |> Async.Ignore
+                  let! statementId, _, _ = readPreparedReply stream
+
+                  do! executeCursor statementId
+                  let! columnCount = readPacketAsync stream
+                  let! _ = readPacketAsync stream
+                  let! cursorOpened = readPacketAsync stream
+                  Expect.equal columnCount.Value.Payload.[0] 1uy "execute returns metadata"
+                  Expect.isTrue (statusOfEof cursorOpened.Value &&& StatusCursorExists <> 0) "execute opens a cursor"
+
+                  do! fetch statementId 2
+                  let! first = readPacketAsync stream
+                  let! second = readPacketAsync stream
+                  let! more = readPacketAsync stream
+                  Expect.sequenceEqual [ readIntRow first.Value; readIntRow second.Value ] [ 1; 2 ] "the first fetch is bounded"
+                  Expect.isTrue (statusOfEof more.Value &&& StatusCursorExists <> 0) "more rows remain"
+
+                  do! fetch statementId 2
+                  let! third = readPacketAsync stream
+                  let! exhausted = readPacketAsync stream
+                  Expect.equal (readIntRow third.Value) 3 "the final fetch returns the remaining row"
+                  Expect.equal (statusOfEof exhausted.Value &&& StatusCursorExists) 0 "the exhausted cursor closes"
+                  Expect.isTrue (statusOfEof exhausted.Value &&& StatusLastRowSent <> 0) "the final fetch is marked"
+
+                  do! fetch statementId 1
+                  let! closed = readPacketAsync stream
+                  Expect.equal (Reader(closed.Value.Payload.[1..]).ReadInt16LE()) 1421 "a closed cursor cannot be fetched"
+
+                  do! executeCursor statementId
+                  let! _ = readPacketAsync stream
+                  let! _ = readPacketAsync stream
+                  let! _ = readPacketAsync stream
+                  let reset = Writer()
+                  reset.WriteByte 0x1auy
+                  reset.WriteInt32LE statementId
+                  do! writePacketAsync stream { SeqId = 0uy; Payload = reset.ToArray() } |> Async.Ignore
+                  let! resetOk = readPacketAsync stream
+                  Expect.equal resetOk.Value.Payload.[0] 0uy "reset succeeds"
+                  do! fetch statementId 1
+                  let! resetCursor = readPacketAsync stream
+                  Expect.equal (Reader(resetCursor.Value.Payload.[1..]).ReadInt16LE()) 1421 "reset closes the cursor"
+
+                  do! executeCursor statementId
+                  let! _ = readPacketAsync stream
+                  let! _ = readPacketAsync stream
+                  let! _ = readPacketAsync stream
+                  do! query "COMMIT"
+                  do! fetch statementId 1
+                  let! committedCursor = readPacketAsync stream
+                  Expect.equal (Reader(committedCursor.Value.Payload.[1..]).ReadInt16LE()) 1421 "commit closes the cursor"
+              }
+              |> Async.RunSynchronously
+
+          testCase "prepared cursors terminate metadata and empty fetches with deprecated EOF"
+          <| fun _ ->
+              async {
+                  use server = TestSupport.ServerFixture.start (Fsdb.Storage.create ()) Fsdb.Functions.empty
+                  let! client, stream = connectRawAsWithCapabilities server.Port "root" (ClientProtocol41 ||| ClientDeprecateEof)
+                  use client = client
+
+                  let prepare = Array.append [| 0x16uy |] (Text.Encoding.UTF8.GetBytes "SELECT 1 WHERE 0")
+                  do! writePacketAsync stream { SeqId = 0uy; Payload = prepare } |> Async.Ignore
+                  let! prepared = readPacketAsync stream
+                  let preparedReader = Reader(prepared.Value.Payload.[1..])
+                  let statementId = preparedReader.ReadInt32LE()
+                  let columnCount = preparedReader.ReadInt16LE()
+                  preparedReader.ReadInt16LE() |> ignore
+                  Expect.equal columnCount 1 "the statement has one result column"
+                  let! _ = readPacketAsync stream
+
+                  let execute = Writer()
+                  execute.WriteByte 0x17uy
+                  execute.WriteInt32LE statementId
+                  execute.WriteByte 1uy
+                  execute.WriteInt32LE 1
+                  do! writePacketAsync stream { SeqId = 0uy; Payload = execute.ToArray() } |> Async.Ignore
+                  let! _ = readPacketAsync stream
+                  let! _ = readPacketAsync stream
+                  let! opened = readPacketAsync stream
+                  let openedStatus = Reader(opened.Value.Payload.[1..])
+                  openedStatus.ReadLenEncInt() |> ignore
+                  openedStatus.ReadLenEncInt() |> ignore
+                  Expect.isTrue (openedStatus.ReadInt16LE() &&& StatusCursorExists <> 0) "metadata OK advertises the cursor"
+
+                  let fetch = Writer()
+                  fetch.WriteByte 0x1cuy
+                  fetch.WriteInt32LE statementId
+                  fetch.WriteInt32LE 1
+                  do! writePacketAsync stream { SeqId = 0uy; Payload = fetch.ToArray() } |> Async.Ignore
+                  let! exhausted = readPacketAsync stream
+                  let exhaustedStatus = Reader(exhausted.Value.Payload.[1..])
+                  exhaustedStatus.ReadLenEncInt() |> ignore
+                  exhaustedStatus.ReadLenEncInt() |> ignore
+                  Expect.isTrue (exhaustedStatus.ReadInt16LE() &&& StatusLastRowSent <> 0) "empty fetch marks the last row"
+              }
+              |> Async.RunSynchronously
+
           testCase "COM_STMT_CLOSE gets no reply and the connection stays usable"
           <| fun _ ->
               async {

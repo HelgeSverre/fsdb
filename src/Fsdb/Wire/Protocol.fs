@@ -66,6 +66,12 @@ let StatusAutocommit = 2
 /// SERVER_MORE_RESULTS_EXISTS
 let StatusMoreResultsExists = 0x0008
 
+/// SERVER_STATUS_CURSOR_EXISTS
+let StatusCursorExists = 0x0040
+
+/// SERVER_STATUS_LAST_ROW_SENT
+let StatusLastRowSent = 0x0080
+
 /// Builds the initial HandshakeV10 payload. `authPluginData` must be 20
 /// bytes — the mysql_native_password scramble `Server.authenticateHandshake`
 /// verifies the client's response against when the account has a stored

@@ -83,6 +83,12 @@ type PreparedStmt =
       ParamCount: int
       LastParamTypes: (byte * bool) list option }
 
+/// A materialized read-only result retained between COM_STMT_FETCH calls.
+type PreparedCursor =
+    { Metadata: ColumnMetadata list
+      Rows: string option list array
+      Offset: int }
+
 type TransactionIsolation =
     | ReadUncommitted
     | ReadCommitted
@@ -148,6 +154,8 @@ type Session =
       PendingTransactionIsolation: TransactionIsolation option
       /// Binary-protocol statements by connection-local id.
       Statements: Map<int, PreparedStmt>
+      /// At most one forward-only cursor per prepared statement.
+      Cursors: Map<int, PreparedCursor>
       /// SQL PREPARE names are connection-local strings rather than the
       /// integer ids assigned by COM_STMT_PREPARE.
       TextStatements: Map<string, PreparedStmt>
@@ -195,6 +203,7 @@ let create (connectionId: int) (store: Store) : Session =
       PendingTransactionReadOnly = None
       PendingTransactionIsolation = None
       Statements = Map.empty
+      Cursors = Map.empty
       TextStatements = Map.empty
       NextStmtId = 1
       LongData = Map.empty

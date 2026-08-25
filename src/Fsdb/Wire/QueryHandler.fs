@@ -1046,7 +1046,7 @@ let private commitSession (session: Session) : Session =
     match session.Tx with
     | Some tx when not tx.Seeded ->
         Storage.releaseTransactionLocks tx.Snapshot
-        { session with Tx = None }
+        { session with Tx = None; Cursors = Map.empty }
     | Some tx ->
         let timeout = lockWaitTimeout session
 
@@ -1056,8 +1056,8 @@ let private commitSession (session: Session) : Session =
 
         Storage.releaseTransactionLocks tx.Snapshot
 
-        { session with Tx = None }
-    | None -> session
+        { session with Tx = None; Cursors = Map.empty }
+    | None -> { session with Cursors = Map.empty }
 
 /// Discards the open transaction's snapshot — a no-op, matching real MySQL,
 /// if there isn't one open — except for each table's AUTO_INCREMENT
@@ -1074,7 +1074,7 @@ let private rollbackSession (session: Session) : Session =
         Storage.releaseTransactionLocks tx.Snapshot
     | None -> ()
 
-    { session with Tx = None }
+    { session with Tx = None; Cursors = Map.empty }
 
 /// Starts a new transaction with a provisional snapshot. The real snapshot
 /// is rebound at the first database statement, matching InnoDB's default

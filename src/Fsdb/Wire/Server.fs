@@ -37,6 +37,7 @@ type private Command =
     /// decoding needs a `Reader` positioned right after it, easier built at
     /// the call site than threaded through this DU field by field.
     | StmtExecute of payload: byte[]
+    | StmtFetch of stmtId: int * rowCount: uint32
     | StmtSendLongData of payload: byte[]
     | StmtClose of stmtId: int
     | StmtReset of stmtId: int
@@ -50,9 +51,18 @@ type private Command =
     /// connection.
     | Malformed of code: byte
 
+type private CursorRequest =
+    | ImmediateResult
+    | ReadOnlyCursor
+    | UnsupportedCursor
+
+let private cursorRequest = function
+    | 0uy -> ImmediateResult
+    | 1uy -> ReadOnlyCursor
+    | _ -> UnsupportedCursor
+
 let private stmtExecuteHeaderLength = 9
 let private stmtLongDataHeaderLength = 6
-
 /// None means a completely empty command packet — treat as disconnect (real
 /// clients never send one). A non-empty payload always decodes to `Some`,
 /// falling back to `Malformed` if the command byte's own payload is too
@@ -82,6 +92,9 @@ let private parseCommand (payload: byte[]) : Command option =
                 | 0x19uy -> StmtClose(Reader(restBytes ()).ReadInt32LE())
                 | 0x1auy -> StmtReset(Reader(restBytes ()).ReadInt32LE())
                 | 0x1buy -> SetOption(Reader(restBytes ()).ReadInt16LE())
+                | 0x1cuy ->
+                    let reader = Reader(restBytes ())
+                    StmtFetch(reader.ReadInt32LE(), reader.ReadUInt32LE())
                 | 0x1fuy -> ResetConnection
                 | b -> Unsupported b
             )
@@ -140,6 +153,47 @@ let private resultMetadata columns rows metadata =
 
     List.mapi withValuePrecision metadata
 
+let private sendRows
+    (stream: IO.Stream)
+    (startSeq: byte)
+    (metadata: ColumnMetadata list)
+    (rowEncoder: ColumnMetadata list -> string option list -> byte[])
+    (rows: string option list seq)
+    : Async<byte> =
+    async {
+        let mutable seqId = startSeq
+        let buf = ResizeArray<byte>()
+
+        let flush () =
+            async {
+                if buf.Count > 0 then
+                    let bytes = buf.ToArray()
+                    do! stream.WriteAsync(bytes, 0, bytes.Length) |> Async.AwaitTask
+                    buf.Clear()
+            }
+
+        for row in rows do
+            let payload = rowEncoder metadata row
+
+            if payload.Length < maxPacketPayload then
+                buf.Add(byte (payload.Length &&& 0xff))
+                buf.Add(byte ((payload.Length >>> 8) &&& 0xff))
+                buf.Add(byte ((payload.Length >>> 16) &&& 0xff))
+                buf.Add seqId
+                buf.AddRange payload
+                seqId <- seqId + 1uy
+            else
+                do! flush ()
+                let! nextSeqId = writePacketAsync stream { SeqId = seqId; Payload = payload }
+                seqId <- nextSeqId
+
+            if buf.Count >= (1 <<< 16) then
+                do! flush ()
+
+        do! flush ()
+        return seqId
+    }
+
 /// Builds the column definitions and pre-row terminator without row packets.
 let private resultHeadPayloads
     (capabilities: uint32)
@@ -189,46 +243,7 @@ let private sendResult
 
         match result with
         | ResultSet(_, rows) ->
-            let mutable seqId = seqId
-            let buf = ResizeArray<byte>()
-
-            let flush () =
-                async {
-                    if buf.Count > 0 then
-                        let bytes = buf.ToArray()
-                        do! stream.WriteAsync(bytes, 0, bytes.Length) |> Async.AwaitTask
-                        buf.Clear()
-                }
-
-            for row in rows do
-                let payload = rowEncoder metadata row
-
-                if payload.Length < maxPacketPayload then
-                    // 4-byte packet header (3-byte length + seq id) written
-                    // straight into the batch buffer — the common case, a
-                    // row safely under the 16 MiB single-packet ceiling, so
-                    // inlining skips `frame`'s intermediate `byte[]` per row.
-                    buf.Add(byte (payload.Length &&& 0xff))
-                    buf.Add(byte ((payload.Length >>> 8) &&& 0xff))
-                    buf.Add(byte ((payload.Length >>> 16) &&& 0xff))
-                    buf.Add seqId
-                    buf.AddRange payload
-                    seqId <- seqId + 1uy
-                else
-                    // A row >= 16 MiB (an uncapped REPEAT, a large BLOB/TEXT
-                    // selected back, ...) can't fit the inlined 3-byte
-                    // length header — the length would wrap mod 2^24 and
-                    // desync the connection. Flush whatever's batched so far
-                    // to keep ordering, then route this one row through the
-                    // real multi-packet framing.
-                    do! flush ()
-                    let! nextSeqId = writePacketAsync stream { SeqId = seqId; Payload = payload }
-                    seqId <- nextSeqId
-
-                if buf.Count >= (1 <<< 16) then
-                    do! flush ()
-
-            do! flush ()
+            let! seqId = sendRows stream seqId metadata rowEncoder rows
 
             let deprecateEof = capabilities &&& ClientDeprecateEof <> 0u
 
@@ -242,6 +257,48 @@ let private sendResult
                            eofPayloadWithWarnings capabilities statusFlags warningCount) ]
             return nextSeqId
         | _ -> return seqId
+    }
+
+let private sendCursorHead
+    (stream: IO.Stream)
+    (capabilities: uint32)
+    (startSeq: byte)
+    (statusFlags: int)
+    (warningCount: int)
+    (columns: string list)
+    (metadata: ColumnMetadata list)
+    : Async<unit> =
+    let columnCount = Writer()
+    columnCount.WriteLenEncInt(uint64 columns.Length)
+    let terminator =
+        if capabilities &&& ClientDeprecateEof <> 0u then
+            okEndOfResultSetPayloadWithWarnings capabilities statusFlags warningCount
+        else
+            eofPayloadWithWarnings capabilities statusFlags warningCount
+
+    [ columnCount.ToArray() ]
+    @ List.map2 (fun name descriptor -> columnDefPayload { Name = name; Metadata = descriptor }) columns metadata
+    @ [ terminator ]
+    |> sendPayloads stream startSeq
+    |> Async.Ignore
+
+let private sendCursorRows
+    (stream: IO.Stream)
+    (capabilities: uint32)
+    (startSeq: byte)
+    (statusFlags: int)
+    (warningCount: int)
+    (metadata: ColumnMetadata list)
+    (rows: string option list seq)
+    : Async<unit> =
+    async {
+        let! seqId = sendRows stream startSeq metadata binaryRowPayload rows
+        let terminator =
+            if capabilities &&& ClientDeprecateEof <> 0u then
+                okEndOfResultSetPayloadWithWarnings capabilities statusFlags warningCount
+            else
+                eofPayloadWithWarnings capabilities statusFlags warningCount
+        do! sendPayloads stream seqId [ terminator ] |> Async.Ignore
     }
 
 /// Writes a text resultset (or OK/ERR) as one or more packets, continuing
@@ -1240,8 +1297,9 @@ let private handleConnection
                                 InformationSchema.recordQuestion ()
                                 let r = Reader(payload)
                                 let stmtId = r.ReadInt32LE()
-                                r.ReadByte() |> ignore // cursor flags — no cursor support
+                                let cursor = r.ReadByte() |> cursorRequest
                                 r.ReadInt32LE() |> ignore // iteration count, always 1
+                                let session = { session with Cursors = Map.remove stmtId session.Cursors }
 
                                 match Map.tryFind stmtId session.Statements with
                                 | None ->
@@ -1266,6 +1324,15 @@ let private handleConnection
                                             stream
                                             { SeqId = seqId
                                               Payload = errPayload capabilities 1153 "Got a packet bigger than 'max_allowed_packet' bytes" }
+                                        |> Async.Ignore
+
+                                    return! loop session
+                                | Some _ when cursor = UnsupportedCursor ->
+                                    do!
+                                        writePacketAsync
+                                            stream
+                                            { SeqId = seqId
+                                              Payload = errPayload capabilities 1235 "This version of fsdb doesn't yet support updatable or scrollable cursors" }
                                         |> Async.Ignore
 
                                     return! loop session
@@ -1348,20 +1415,90 @@ let private handleConnection
                                         match runCancellable (fun () -> QueryHandler.executePrepared session stmt values) with
                                         | None -> ()
                                         | Some(session, result) ->
-                                            activeSession <- Some session
+                                            match cursor, result with
+                                            | ReadOnlyCursor, ResultSet(columns, rows) ->
+                                                let metadata = resultMetadata columns rows session.LastResultColumnMetadata
+                                                let cursor =
+                                                    { Metadata = metadata
+                                                      Rows = List.toArray rows
+                                                      Offset = 0 }
+                                                let session = { session with Cursors = Map.add stmtId cursor session.Cursors }
+                                                activeSession <- Some session
 
-                                            do!
-                                                sendBinaryQueryResult
-                                                    stream
-                                                    capabilities
-                                                    seqId
-                                                    (statusFlagsFor session)
-                                                    (uint64 session.LastInsertId)
-                                                    (warningCountFor session)
-                                                    session.LastResultColumnMetadata
-                                                    result
+                                                do!
+                                                    sendCursorHead
+                                                        stream
+                                                        capabilities
+                                                        seqId
+                                                        (statusFlagsFor session ||| StatusCursorExists)
+                                                        (warningCountFor session)
+                                                        columns
+                                                        metadata
 
-                                            return! loop session
+                                                return! loop session
+                                            | _ ->
+                                                activeSession <- Some session
+
+                                                do!
+                                                    sendBinaryQueryResult
+                                                        stream
+                                                        capabilities
+                                                        seqId
+                                                        (statusFlagsFor session)
+                                                        (uint64 session.LastInsertId)
+                                                        (warningCountFor session)
+                                                        session.LastResultColumnMetadata
+                                                        result
+
+                                                return! loop session
+                            | Some(StmtFetch(stmtId, rowCount)) ->
+                                match Map.tryFind stmtId session.Statements, Map.tryFind stmtId session.Cursors with
+                                | None, _ ->
+                                    do!
+                                        writePacketAsync
+                                            stream
+                                            { SeqId = seqId
+                                              Payload = errPayload capabilities 1243 "Unknown prepared statement handler" }
+                                        |> Async.Ignore
+
+                                    return! loop session
+                                | Some _, None ->
+                                    do!
+                                        writePacketAsync
+                                            stream
+                                            { SeqId = seqId
+                                              Payload = errPayload capabilities 1421 (sprintf "The statement (%d) has no open cursor." stmtId) }
+                                        |> Async.Ignore
+
+                                    return! loop session
+                                | Some _, Some cursor ->
+                                    let available = cursor.Rows.Length - cursor.Offset
+                                    let requested = min (uint64 rowCount) (uint64 available) |> int
+                                    let nextOffset = cursor.Offset + requested
+                                    let exhausted = nextOffset = cursor.Rows.Length
+                                    let rows = cursor.Rows |> Seq.skip cursor.Offset |> Seq.truncate requested
+                                    let status =
+                                        statusFlagsFor session
+                                        ||| (if exhausted then StatusLastRowSent else StatusCursorExists)
+                                    let session =
+                                        if exhausted then
+                                            { session with Cursors = Map.remove stmtId session.Cursors }
+                                        else
+                                            { session with
+                                                Cursors = Map.add stmtId { cursor with Offset = nextOffset } session.Cursors }
+                                    activeSession <- Some session
+
+                                    do!
+                                        sendCursorRows
+                                            stream
+                                            capabilities
+                                            seqId
+                                            status
+                                            (warningCountFor session)
+                                            cursor.Metadata
+                                            rows
+
+                                    return! loop session
                             | Some(StmtSendLongData payload) when payload.Length < stmtLongDataHeaderLength ->
                                 // stmt-id(4) + param-index(2); a shorter payload
                                 // is malformed. COM_STMT_SEND_LONG_DATA takes
@@ -1398,10 +1535,17 @@ let private handleConnection
                                     return! loop session
                             | Some(StmtClose stmtId) ->
                                 // No reply, per protocol.
-                                return! loop ({ session with Statements = Map.remove stmtId session.Statements } |> discardLongData stmtId)
+                                return!
+                                    loop
+                                        ({ session with
+                                            Statements = Map.remove stmtId session.Statements
+                                            Cursors = Map.remove stmtId session.Cursors }
+                                         |> discardLongData stmtId)
                             | Some(StmtReset stmtId) ->
                                 if session.Statements.ContainsKey stmtId then
-                                    let session = discardLongData stmtId session
+                                    let session =
+                                        { session with Cursors = Map.remove stmtId session.Cursors }
+                                        |> discardLongData stmtId
 
                                     do!
                                         writePacketAsync
