@@ -222,8 +222,8 @@ module DurabilityRunner =
 
                            let mutable connected = connection.State = System.Data.ConnectionState.Open
 
-                           for iteration in 0 .. options.OperationsPerWorker - 1 do
-                               if connected && iteration % options.Restarts = cycle then
+                           for iteration in cycle .. options.Restarts .. options.OperationsPerWorker - 1 do
+                               if connected then
                                    let operationId = int64 worker * 1_000_000L + int64 iteration
                                    attempted.TryAdd(operationId, 0uy) |> ignore
 
