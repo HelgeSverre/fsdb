@@ -267,6 +267,9 @@ writes the exact committed values — `NOW()` replays to the same instant, not
 a fresh one). A crash mid-append leaves a torn final record; replay stops
 before it (length overrun or CRC mismatch), truncates the WAL back to the
 last good offset, and the next append glues onto a clean boundary.
+Replay locates keyed row changes through the table's unique indexes and
+maintains derived indexes incrementally; keyless row-image events use one
+ordered table pass.
 
 Concurrent commits use a bounded group-commit queue. Commits that arrive
 while a flush is in progress share the next append and `fsync`, while each

@@ -242,8 +242,8 @@ Working: opt-in `--data-dir` mode with CRC-framed WAL ([len][crc32] records
 over CommitEvent payloads, torn-tail truncation), self-delimiting CRC'd
 snapshots, libc fsync-before-ack with FailFast on failure, directory fsync
 after rename, `.new` snapshot verification before preference, replay that
-bypasses checked write paths with ordered change application, deferred
-unique-index rebuild, bounded group commit, ordered checkpoint barriers,
+bypasses checked write paths with ordered change application and incremental
+derived-index maintenance, bounded group commit, ordered checkpoint barriers,
 rotation via a lock-step replica store, signal-driven final rotation,
 decode-depth caps, codecs for every column type including generated-column
 expressions.
@@ -251,7 +251,7 @@ expressions.
 | Gap | MySQL 8.4 | fsdb | Impact | Class |
 |---|---|---|---|---|
 | Durability default | durable unless configured otherwise | in-memory unless `--data-dir` passed; process death loses everything | medium (deployment) | divergence |
-| Durable update replay cost | redo applies page/record changes | the snapshot mirror locates before/after row images by scanning the table for each update; a 16-connection point-update burst is therefore much slower than an append-only burst | medium (throughput) | divergence |
+| Keyless WAL row lookup | redo addresses physical records directly | replay resolves rows through unique indexes when possible; events on tables without a usable unique key use one ordered table pass because the WAL stores row images rather than row ids | low (recovery and durable keyless-write throughput) | divergence |
 | Space reclamation | purge threads reclaim deleted rows | `RowStore` leaves deleted slots as tombstones; long-lived delete-heavy tables grow memory without bound | medium | divergence |
 | Platform | portable | durable mode macOS/Linux only (libc fsync design) | low | divergence |
 
