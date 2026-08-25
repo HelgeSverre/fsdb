@@ -2102,6 +2102,56 @@ let tests =
               }
               |> Async.RunSynchronously
 
+          testCase "prepared statements resolve schema changes when executed"
+          <| fun _ ->
+              async {
+                  use server = TestSupport.ServerFixture.start (Fsdb.Storage.create ()) Fsdb.Functions.empty
+                  let! client, stream = connectRaw server.Port
+                  use client = client
+
+                  let query (sql: string) =
+                      async {
+                          let payload = Array.append [| 0x03uy |] (Text.Encoding.UTF8.GetBytes sql)
+                          do! writePacketAsync stream { SeqId = 0uy; Payload = payload } |> Async.Ignore
+                          let! response = readPacketAsync stream
+                          Expect.notEqual response.Value.Payload.[0] 0xffuy "schema change succeeds"
+                      }
+
+                  do! query "CREATE TABLE evolving (i INT)"
+                  do! query "INSERT INTO evolving VALUES (1)"
+
+                  let preparePayload =
+                      Array.append [| 0x16uy |] (Text.Encoding.UTF8.GetBytes "SELECT * FROM evolving")
+
+                  do! writePacketAsync stream { SeqId = 0uy; Payload = preparePayload } |> Async.Ignore
+                  let! statementId, _, preparedColumns = readPreparedReply stream
+                  Expect.hasLength preparedColumns 1 "the original schema has one column"
+
+                  do! query "ALTER TABLE evolving ADD COLUMN s VARCHAR(10) DEFAULT 'x'"
+
+                  let executePayload =
+                      let writer = Writer()
+                      writer.WriteByte 0x17uy
+                      writer.WriteInt32LE statementId
+                      writer.WriteByte 0uy
+                      writer.WriteInt32LE 1
+                      writer.ToArray()
+
+                  do! writePacketAsync stream { SeqId = 0uy; Payload = executePayload } |> Async.Ignore
+                  let! columnCount = readPacketAsync stream
+                  Expect.equal columnCount.Value.Payload.[0] 2uy "execution sees both live columns"
+
+                  let! firstDefinition = readPacketAsync stream
+                  let! secondDefinition = readPacketAsync stream
+                  let! _ = readPacketAsync stream
+                  let! _ = readPacketAsync stream
+                  let! _ = readPacketAsync stream
+
+                  Expect.equal (readWireDefinition firstDefinition.Value).Metadata.TypeId TypeLong "the existing column keeps its type"
+                  Expect.equal (readWireDefinition secondDefinition.Value).Metadata.TypeId TypeVarString "the new column is described at execution"
+              }
+              |> Async.RunSynchronously
+
           // A DATETIME(6) value round-tripped through COM_STMT_PREPARE +
           // COM_STMT_EXECUTE must use the binary protocol's 11-byte datetime
           // form (microseconds present) and advertise `decimals = 6` on the

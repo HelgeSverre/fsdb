@@ -357,7 +357,7 @@ disconnect detection cancelling evaluation (`Server.watchForDisconnect`).
 | Column definition fidelity | schema/table/org_table names, requested charsetnr | `Protocol.columnDefPayload` leaves source names empty and reports collation 45 for text or 63 for binary regardless of the declared collation | low | divergence |
 | Column flags | MULTIPLE_KEY, ZEROFILL, NO_DEFAULT_VALUE, ON_UPDATE_NOW, NUM, PART_KEY | numeric, temporal, required-default, primary/unique key-part, and implicit YEAR ZEROFILL flags are reported; non-unique secondary membership and an explicit ZEROFILL declaration are not represented in `ColumnDef` | low | divergence |
 | Prepared metadata | STMT_PREPARE_OK carries result columns and typed parameter definitions | result columns and common parameter contexts are derived statically without evaluating the statement; function-specific argument inference still defaults to VAR_STRING when no surrounding type determines it | low | divergence |
-| Reprepare | automatic reprepare on metadata change | frozen ASTs; stale-metadata edge cases possible | low | divergence |
+| Reprepare | automatic reprepare on metadata change | prepared ASTs resolve tables, columns, views, and result metadata from the live schema on each execution, yielding the same observable schema-change behavior without recompiling SQL text | low | aligned for supported syntax |
 | System variables | hundreds live | ~30 known; most others inert or absent; time_zone static strings with no conversion | medium | divergence |
 
 ## 13. Authentication and privileges
