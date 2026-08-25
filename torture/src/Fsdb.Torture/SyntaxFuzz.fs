@@ -53,6 +53,16 @@ module SyntaxFuzz =
            "cte_subqueries",
            "SELECT (WITH scalar_c AS (SELECT 2 AS n) SELECT n FROM scalar_c), EXISTS (WITH exists_c AS (SELECT 1 AS n) SELECT n FROM exists_c), 2 IN (WITH in_c AS (SELECT 1 AS n UNION ALL SELECT 2) SELECT n FROM in_c)"
            "cte_derived", "SELECT d.n FROM (WITH c AS (SELECT 1 AS n) SELECT n FROM c UNION ALL SELECT 2) AS d ORDER BY d.n"
+           "cte_update", "WITH c AS (SELECT id FROM syntax_target WHERE id < 0) UPDATE syntax_target SET n = n + 1 WHERE id IN (SELECT id FROM c)"
+           "cte_delete", "WITH c AS (SELECT id FROM syntax_target WHERE id < 0) DELETE FROM syntax_target WHERE id IN (SELECT id FROM c)"
+           "cte_union_branch", "SELECT 1 AS n UNION ALL (WITH c AS (SELECT 2 AS n) SELECT n FROM c)"
+           "planned_join",
+           "SELECT t.id FROM syntax_target AS t JOIN syntax_source AS s ON s.id = t.id JOIN syntax_collation AS c ON c.id = t.id WHERE t.id >= 1 ORDER BY t.id"
+           "straight_join",
+           "SELECT STRAIGHT_JOIN t.id FROM syntax_target AS t JOIN syntax_source AS s ON s.id = t.id JOIN syntax_collation AS c ON c.id = t.id WHERE t.id >= 1"
+           "correlated_index", "SELECT t.id, (SELECT COUNT(*) FROM syntax_source AS s WHERE s.n = t.n) FROM syntax_target AS t"
+           "range_update", "UPDATE syntax_target SET n = n WHERE id >= 999"
+           "range_delete", "DELETE FROM syntax_target WHERE id >= 999"
            "composite_index", sprintf "CREATE INDEX ix_syntax_%s ON syntax_target (n, label)" suffix
            "view_check_option", sprintf "CREATE VIEW syntax_view_%s AS SELECT id, n FROM syntax_target WHERE n > 0 WITH CHECK OPTION" suffix
            "ordered_compound_trigger",
@@ -71,7 +81,7 @@ module SyntaxFuzz =
     let private fixtures =
         [| "CREATE TABLE syntax_target (id INT PRIMARY KEY, n INT, label VARCHAR(40), INDEX ix_n_label (n, label))"
            "INSERT INTO syntax_target VALUES (1, 10, 'seed')"
-           "CREATE TABLE syntax_source (id INT, n INT, label VARCHAR(40), update_label VARCHAR(40))"
+           "CREATE TABLE syntax_source (id INT, n INT, label VARCHAR(40), update_label VARCHAR(40), INDEX ix_syntax_source_n (n))"
            "INSERT INTO syntax_source VALUES (1, 11, 'candidate', 'source')"
            "CREATE TABLE syntax_collation (id INT PRIMARY KEY, ci VARCHAR(20) CHARACTER SET utf8mb4 COLLATE utf8mb4_0900_ai_ci, bin VARCHAR(20) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin, cs VARCHAR(20) CHARACTER SET utf8mb4 COLLATE utf8mb4_0900_as_cs, latin VARCHAR(20) CHARACTER SET latin1 COLLATE latin1_swedish_ci)"
            "INSERT INTO syntax_collation VALUES (1, 'A', 'a', 'A', 'a')"
