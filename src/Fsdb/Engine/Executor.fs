@@ -183,6 +183,17 @@ type private StoredView =
       Definer: string
       CheckOption: string }
 
+type private UpdatableView =
+    { ViewDatabase: string
+      ViewName: string
+      Database: string
+      Table: string
+      Columns: Map<string, string>
+      OrderedColumns: string list
+      Predicate: Expr option
+      Definer: string
+      CheckOption: bool }
+
 type private StoredTrigger =
     { Name: string
       Body: string
@@ -248,6 +259,103 @@ let private tryStoredView (store: Store) (dbName: string) (viewName: string) : S
               Columns = view.ColumnNames |> columns
               Definer = view.Definer
               CheckOption = view.CheckOption })
+
+let private updatableViewOfSelect (view: StoredView) (select: SelectStmt) : UpdatableView option =
+    match select.From with
+    | Some(FromTable source)
+        when select.Joins.IsEmpty
+             && not select.Distinct
+             && not select.CalculateFoundRows
+             && select.GroupBy.IsEmpty
+             && not select.Rollup
+             && select.Windows.IsEmpty
+             && select.Ctes.IsEmpty
+             && select.Having.IsNone
+             && select.OrderBy.IsEmpty
+             && select.Limit.IsNone
+             && select.Offset.IsNone
+             && not select.Locking ->
+        let sourceNames = [ source.Table; source.Alias |> Option.defaultValue source.Table ]
+        let aggregateNames = set [ "COUNT"; "SUM"; "AVG"; "MIN"; "MAX"; "GROUP_CONCAT" ]
+        let rec simplePredicate =
+            function
+            | Exists _ | Subquery _ | InSubquery _ | QuantifiedComparison _ | WindowOver _ -> false
+            | QualifiedCol(qualifier, _) ->
+                sourceNames
+                |> List.exists (fun name -> name.Equals(qualifier, System.StringComparison.OrdinalIgnoreCase))
+            | FuncCall(name, arguments) ->
+                not (aggregateNames.Contains(name.ToUpperInvariant()))
+                && arguments |> List.forall simplePredicate
+            | BinOp(_, left, right)
+            | Like(left, right, _, _)
+            | Regexp(left, right) -> simplePredicate left && simplePredicate right
+            | Not value
+            | IsNull value
+            | IsNotNull value
+            | IsTrue value
+            | IsFalse value
+            | Distinct value
+            | OrderBy(value, _)
+            | Cast(value, _)
+            | Collate(value, _)
+            | AssignUserVariable(_, value) -> simplePredicate value
+            | In(value, candidates) -> simplePredicate value && candidates |> List.forall simplePredicate
+            | Between(value, lower, upper) ->
+                simplePredicate value && simplePredicate lower && simplePredicate upper
+            | Case(subject, branches, otherwise) ->
+                subject |> Option.forall simplePredicate
+                && branches
+                   |> List.forall (fun (condition, result) ->
+                       simplePredicate condition && simplePredicate result)
+                && otherwise |> Option.forall simplePredicate
+            | MatchAgainst(_, query, _) -> simplePredicate query
+            | _ -> true
+
+        if select.Where |> Option.exists (simplePredicate >> not) then
+            None
+        else
+            let sourceColumns =
+                select.Projections
+                |> List.map (fun (expression, alias) ->
+                    match expression with
+                    | Col column -> Some(alias |> Option.defaultValue column, column)
+                    | QualifiedCol(qualifier, column)
+                        when qualifier.Equals(source.Alias |> Option.defaultValue source.Table, System.StringComparison.OrdinalIgnoreCase) ->
+                        Some(alias |> Option.defaultValue column, column)
+                    | _ -> None)
+
+            if sourceColumns |> List.exists Option.isNone then
+                None
+            else
+                let sourceColumns = sourceColumns |> List.choose id
+                let outputNames = if view.Columns.IsEmpty then sourceColumns |> List.map fst else view.Columns
+
+                if
+                    outputNames.Length <> sourceColumns.Length
+                    || (outputNames |> List.map (fun name -> name.ToLowerInvariant()) |> Set.ofList).Count <> outputNames.Length
+                then
+                    None
+                else
+                    Some
+                        { ViewDatabase = view.Schema
+                          ViewName = view.Name
+                          Database = source.Database |> Option.defaultValue view.Schema
+                          Table = source.Table
+                          Columns =
+                            List.zip outputNames (sourceColumns |> List.map snd)
+                            |> List.map (fun (viewColumn, baseColumn) -> viewColumn.ToLowerInvariant(), baseColumn)
+                            |> Map.ofList
+                          OrderedColumns = outputNames
+                          Predicate =
+                            select.Where
+                            |> Option.map (
+                                Expression.rewrite (function
+                                    | QualifiedCol(_, column) -> Some(Col column)
+                                    | _ -> None)
+                            )
+                          Definer = view.Definer
+                          CheckOption = not (view.CheckOption.Equals("NONE", System.StringComparison.OrdinalIgnoreCase)) }
+    | _ -> None
 
 let private storedChecks (store: Store) (dbName: string) (tableName: string) : StoredCheck list =
     let eqI left right = System.String.Equals(left, right, System.StringComparison.OrdinalIgnoreCase)
@@ -5478,6 +5586,134 @@ and private referencedMutationCtes (ctes: CommonTableExpr list) (joins: Join lis
 
     referencedCtes ctes (selectOrUnionTableNames (PlainSelect query))
 
+and private tryMergeDirectView
+    (store: Store)
+    (dbName: string)
+    (select: SelectStmt)
+    : Result<SelectStmt option, QueryResult> =
+    let rec mergeablePredicate =
+        function
+        | Col _
+        | Lit _ -> true
+        | BinOp(_, left, right)
+        | Like(left, right, _, _)
+        | Regexp(left, right) -> mergeablePredicate left && mergeablePredicate right
+        | Not value
+        | IsNull value
+        | IsNotNull value
+        | IsTrue value
+        | IsFalse value
+        | Distinct value
+        | OrderBy(value, _)
+        | Cast(value, _)
+        | Collate(value, _) -> mergeablePredicate value
+        | In(value, candidates) -> mergeablePredicate value && candidates |> List.forall mergeablePredicate
+        | Between(value, lower, upper) ->
+            mergeablePredicate value && mergeablePredicate lower && mergeablePredicate upper
+        | Case(subject, branches, otherwise) ->
+            subject |> Option.forall mergeablePredicate
+            && branches |> List.forall (fun (condition, result) -> mergeablePredicate condition && mergeablePredicate result)
+            && otherwise |> Option.forall mergeablePredicate
+        | _ -> false
+
+    match select.From, select.Joins with
+    | Some(FromTable viewRef), [] ->
+        let viewDb = viewRef.Database |> Option.defaultValue dbName
+
+        match tryStoredView store viewDb viewRef.Table with
+        | None -> Ok None
+        | Some view ->
+            match Parser.parse view.Definition with
+            | Ok((Select definition) as statement) ->
+                match updatableViewOfSelect view definition with
+                | Some direct when direct.Predicate |> Option.forall mergeablePredicate ->
+                    let source =
+                        { Database = Some direct.Database
+                          Table = direct.Table
+                          Alias = None }
+
+                    match tryPhysicalTableRef store direct.Database source with
+                    | Error _
+                    | Ok None -> Ok None
+                    | Ok(Some _) ->
+                        match checkStoredDefiner store direct.Definer direct.ViewDatabase statement with
+                        | Error(code, message) -> Error(Err(code, message))
+                        | Ok() ->
+                            let viewQualifier = viewRef.Alias |> Option.defaultValue viewRef.Table
+                            let mergedSource = { source with Alias = Some viewQualifier }
+                            let outputColumns =
+                                direct.OrderedColumns
+                                |> List.map (fun output -> output, direct.Columns.[output.ToLowerInvariant()])
+
+                            let rewriteOuter expression =
+                                Expression.rewrite
+                                    (function
+                                    | Col name ->
+                                        direct.Columns
+                                        |> Map.tryFind (name.ToLowerInvariant())
+                                        |> Option.map (fun column -> QualifiedCol(viewQualifier, column))
+                                        |> Option.orElseWith (fun () -> Some(QualifiedCol("__fsdb_view", name)))
+                                    | QualifiedCol(qualifier, name)
+                                        when qualifier.Equals(viewQualifier, System.StringComparison.OrdinalIgnoreCase) ->
+                                        direct.Columns
+                                        |> Map.tryFind (name.ToLowerInvariant())
+                                        |> Option.map (fun column -> QualifiedCol(viewQualifier, column))
+                                        |> Option.orElseWith (fun () -> Some(QualifiedCol("__fsdb_view", name)))
+                                    | _ -> None)
+                                    expression
+
+                            let projections =
+                                select.Projections
+                                |> List.collect (fun (expression, alias) ->
+                                    let directProjection name =
+                                        let rewritten = rewriteOuter expression
+                                        let inferredAlias =
+                                            match rewritten with
+                                            | QualifiedCol(_, column)
+                                                when not (column.Equals(name, System.StringComparison.OrdinalIgnoreCase)) -> Some name
+                                            | _ -> None
+                                        rewritten, alias |> Option.orElse inferredAlias
+
+                                    match expression with
+                                    | Star None ->
+                                        outputColumns
+                                        |> List.map (fun (output, column) ->
+                                            Col column,
+                                            if output.Equals(column, System.StringComparison.OrdinalIgnoreCase) then None else Some output)
+                                    | Star(Some qualifier)
+                                        when qualifier.Equals(viewQualifier, System.StringComparison.OrdinalIgnoreCase) ->
+                                        outputColumns
+                                        |> List.map (fun (output, column) ->
+                                            Col column,
+                                            if output.Equals(column, System.StringComparison.OrdinalIgnoreCase) then None else Some output)
+                                    | Col name -> [ directProjection name ]
+                                    | QualifiedCol(qualifier, name)
+                                        when qualifier.Equals(viewQualifier, System.StringComparison.OrdinalIgnoreCase) ->
+                                        [ directProjection name ]
+                                    | _ -> [ rewriteOuter expression, alias ])
+
+                            let outerPredicate = select.Where |> Option.map rewriteOuter
+                            let predicate =
+                                match direct.Predicate, outerPredicate with
+                                | Some viewPredicate, Some outerPredicate -> Some(BinOp(And, viewPredicate, outerPredicate))
+                                | Some predicate, None
+                                | None, Some predicate -> Some predicate
+                                | None, None -> None
+
+                            Ok(
+                                Some
+                                    { select with
+                                        From = Some(FromTable mergedSource)
+                                        Projections = projections
+                                        Where = predicate
+                                        GroupBy = select.GroupBy |> List.map rewriteOuter
+                                        Having = select.Having |> Option.map rewriteOuter
+                                        OrderBy = select.OrderBy |> List.map (fun (expression, direction) -> rewriteOuter expression, direction) }
+                            )
+                | _ -> Ok None
+            | _ -> Ok None
+    | _ -> Ok None
+
 and private withCteScope
     (store: Store)
     (registry: Registry)
@@ -5730,7 +5966,21 @@ and private runSelectStmt
         let body = { select with Ctes = [] }
         let ctes = referencedCtes select.Ctes (selectOrUnionTableNames (PlainSelect body))
         withCteScope store registry dbName ctes outer (fun () -> runSelectStmt store registry dbName body outer)
+    elif outer.IsSome then
+        runUnmergedSelectStmt store registry dbName select outer
     else
+    match tryMergeDirectView store dbName select with
+    | Error error -> error, [], []
+    | Ok(Some merged) -> runSelectStmt store registry dbName merged outer
+    | Ok None -> runUnmergedSelectStmt store registry dbName select outer
+
+and private runUnmergedSelectStmt
+    (store: Store)
+    (registry: Registry)
+    (dbName: string)
+    (select: SelectStmt)
+    (outer: EvalContext option)
+    : QueryResult * ColumnMetadata list * Value[] list =
     let matchNodes =
         (select.Projections |> List.collect (fst >> collectMatchAgainst))
         @ (select.Where |> Option.map collectMatchAgainst |> Option.defaultValue [])
@@ -8175,7 +8425,7 @@ and private runFullTextSelect
     let unsupported () = Err(1191, "Can't find FULLTEXT index matching the column list"), [], []
     let sourceItems = (select.From |> Option.toList) @ (select.Joins |> List.map _.Table)
 
-    let physicalSources =
+    let physicalSources : Result<FullTextPhysicalSource list, QueryResult> =
         sourceItems
         |> traverse (fun item ->
             match item with
@@ -8198,7 +8448,7 @@ and private runFullTextSelect
             index.Kind = FullTextIndex
             && (index.Columns |> List.map (fun column -> column.ToLowerInvariant()) |> Set.ofList) = names)
 
-    let ownerOf sources node =
+    let ownerOf (sources: FullTextPhysicalSource list) node =
         match node with
         | MatchAgainst(columns, _, _) ->
             let unqualified = columns |> List.filter (_.Qualifier.IsNone)
@@ -8245,7 +8495,7 @@ and private runFullTextSelect
         | Ok ownedNodes ->
             let prepared =
                 sources
-                |> traverse (fun source ->
+                |> traverse (fun (source: FullTextPhysicalSource) ->
                     let nodes =
                         ownedNodes
                         |> List.choose (fun (owner, node) ->
@@ -9100,87 +9350,6 @@ let private withInsertSelectSources
         target
     else
         contextFactory target.Store target.Registry target.DbName (columnIndexOf columns) qualifiers (Some target) (Array.ofList values)
-
-type private UpdatableView =
-    { ViewDatabase: string
-      ViewName: string
-      Database: string
-      Table: string
-      Columns: Map<string, string>
-      OrderedColumns: string list
-      Predicate: Expr option
-      Definer: string
-      CheckOption: bool }
-
-let private updatableViewOfSelect (view: StoredView) (select: SelectStmt) : UpdatableView option =
-    match select.From with
-    | Some(FromTable source)
-        when select.Joins.IsEmpty
-             && not select.Distinct
-             && not select.CalculateFoundRows
-             && select.GroupBy.IsEmpty
-             && not select.Rollup
-             && select.Windows.IsEmpty
-             && select.Ctes.IsEmpty
-             && select.Having.IsNone
-             && select.OrderBy.IsEmpty
-             && select.Limit.IsNone
-             && select.Offset.IsNone
-             && not select.Locking ->
-            let sourceNames = [ source.Table; source.Alias |> Option.defaultValue source.Table ]
-            let aggregateNames = set [ "COUNT"; "SUM"; "AVG"; "MIN"; "MAX"; "GROUP_CONCAT" ]
-            let rec simplePredicate =
-                function
-                | Exists _ | Subquery _ | InSubquery _ | QuantifiedComparison _ | WindowOver _ -> false
-                | QualifiedCol(qualifier, _) -> sourceNames |> List.exists (fun name -> name.Equals(qualifier, System.StringComparison.OrdinalIgnoreCase))
-                | FuncCall(name, arguments) ->
-                    not (aggregateNames.Contains(name.ToUpperInvariant()))
-                    && (arguments |> List.forall simplePredicate)
-                | BinOp(_, left, right) | Like(left, right, _, _) | Regexp(left, right) -> simplePredicate left && simplePredicate right
-                | Not value | IsNull value | IsNotNull value | IsTrue value | IsFalse value | Distinct value | OrderBy(value, _) | Cast(value, _) | Collate(value, _) | AssignUserVariable(_, value) -> simplePredicate value
-                | In(value, candidates) -> simplePredicate value && (candidates |> List.forall simplePredicate)
-                | Between(value, lower, upper) -> simplePredicate value && simplePredicate lower && simplePredicate upper
-                | Case(subject, branches, otherwise) ->
-                    (subject |> Option.forall simplePredicate)
-                    && (branches |> List.forall (fun (condition, result) -> simplePredicate condition && simplePredicate result))
-                    && (otherwise |> Option.forall simplePredicate)
-                | MatchAgainst(_, query, _) -> simplePredicate query
-                | _ -> true
-
-            if select.Where |> Option.exists (simplePredicate >> not) then
-                None
-            else
-            let sourceNames =
-                select.Projections
-                |> List.map (fun (expression, alias) ->
-                    match expression with
-                    | Col column -> Some(alias |> Option.defaultValue column, column)
-                    | QualifiedCol(qualifier, column)
-                        when qualifier.Equals(source.Alias |> Option.defaultValue source.Table, System.StringComparison.OrdinalIgnoreCase) ->
-                        Some(alias |> Option.defaultValue column, column)
-                    | _ -> None)
-
-            if sourceNames |> List.exists Option.isNone then
-                None
-            else
-                let sourceNames = sourceNames |> List.choose id
-                let outputNames = if view.Columns.IsEmpty then sourceNames |> List.map fst else view.Columns
-
-                if outputNames.Length <> sourceNames.Length || (outputNames |> List.map (fun name -> name.ToLowerInvariant()) |> Set.ofList).Count <> outputNames.Length then
-                    None
-                else
-                    Some(
-                        { ViewDatabase = view.Schema
-                          ViewName = view.Name
-                          Database = source.Database |> Option.defaultValue view.Schema
-                          Table = source.Table
-                          Columns = List.zip outputNames (sourceNames |> List.map snd) |> List.map (fun (viewColumn, baseColumn) -> viewColumn.ToLowerInvariant(), baseColumn) |> Map.ofList
-                          OrderedColumns = outputNames
-                          Predicate = select.Where |> Option.map (rewriteExprWith (function QualifiedCol(_, column) -> Some(Col column) | _ -> None))
-                          Definer = view.Definer
-                          CheckOption = not (view.CheckOption.Equals("NONE", System.StringComparison.OrdinalIgnoreCase)) }: UpdatableView
-                    )
-    | _ -> None
 
 let private tryUpdatableView (store: Store) (dbName: string) (viewName: string) : UpdatableView option =
     match tryStoredView store dbName viewName with

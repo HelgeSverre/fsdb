@@ -265,6 +265,9 @@ with exposed-column enforcement and definer privilege checks.
 metadata, and enforced on the direct writable subset.
 View projections appear in I_S.COLUMNS, DESCRIBE, SHOW COLUMNS, and SHOW TABLE
 STATUS. Their metadata is derived from the saved query without evaluating it.
+Direct single-table projections with a static predicate merge into the outer
+SELECT so physical equality, range, and ordered-limit paths remain available;
+other view shapes materialize once per statement.
 
 Triggers working: ordered multiple BEFORE/AFTER INSERT/UPDATE/DELETE FOR EACH
 ROW triggers with OLD/NEW row images, BEFORE SET NEW assignments,

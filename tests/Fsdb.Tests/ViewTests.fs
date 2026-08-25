@@ -60,6 +60,43 @@ let tests =
                   [ [ Some "YES" ] ]
                   "metadata reports the supported writable shape"
 
+          testCase "a direct view streams an ordered limit from its base table"
+          <| fun _ ->
+              let store = Fsdb.Storage.create ()
+              expectOk (run store "CREATE TABLE source (id INT PRIMARY KEY, visible INT, hidden INT)") "create source"
+
+              let values =
+                  [ 1 .. 100 ]
+                  |> List.map (fun id -> sprintf "(%d,%d,%d)" id (id % 2) (id * 10))
+                  |> String.concat ","
+
+              expectOk (run store ("INSERT INTO source VALUES " + values)) "seed source"
+              expectOk (run store "CREATE VIEW visible_rows AS SELECT id, visible FROM source WHERE visible = 1") "create view"
+
+              let mutable touches = 0
+              let registry =
+                  Fsdb.Functions.builtins
+                  |> Fsdb.Functions.registerScalar "TOUCH" (fun _ ->
+                      touches <- touches + 1
+                      Fsdb.Value.VInt 1L)
+
+              match TestSupport.Sql.execute store registry "SELECT id FROM visible_rows WHERE TOUCH(id) ORDER BY id LIMIT 3" with
+              | ResultSet(_, result) ->
+                  Expect.equal result [ [ Some "1" ]; [ Some "3" ]; [ Some "5" ] ] "ordered rows"
+                  Expect.isLessThanOrEqual touches 6 "the base index stops after enough visible rows"
+              | other -> failtestf "expected streamed view rows, got %A" other
+
+              expectOk (run store "CREATE VIEW renamed_rows AS SELECT id AS public_id, visible AS score FROM source") "create renamed view"
+
+              Expect.equal
+                  (rows store "SELECT public_id, score FROM renamed_rows ORDER BY public_id LIMIT 1")
+                  [ [ Some "1"; Some "1" ] ]
+                  "view aliases survive merging"
+
+              match run store "SELECT hidden FROM visible_rows" with
+              | Err(1054, _) -> ()
+              | other -> failtestf "expected hidden-column rejection, got %A" other
+
           testCase "a grouped view rejects UPDATE"
           <| fun _ ->
               let store = setup ()

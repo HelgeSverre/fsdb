@@ -126,9 +126,11 @@ fsdb supports stored queries broadly and a narrow writable subset:
   `DROP VIEW [IF EXISTS] name [, ...]`.
 - Nested views, joins, unions, CTEs, grouping, windows, and the rest of the
   supported SELECT grammar inside a definition.
-- TEMPTABLE-like evaluation: one typed result is materialized and reused for
-  the referencing statement. A later statement reevaluates the definition
-  against current base rows.
+- Direct single-table projections with a static predicate use MERGE-like
+  evaluation, allowing the base table's indexes and streaming `LIMIT` path to
+  serve reads. Other shapes use one typed TEMPTABLE-like result per statement.
+  A later statement always reevaluates the definition against current base
+  rows.
 - Definitions execute under the recorded creator's privileges; revoking the
   definer's access to an underlying table makes later reads fail.
 - Persistence through the WAL and snapshots, plus `SHOW [FULL] TABLES`,
