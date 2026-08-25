@@ -93,10 +93,23 @@ module SyntaxFuzz =
            "text_prepared_statement", sprintf "PREPARE syntax_stmt_%s FROM 'SELECT 1'" suffix
            "table_lock", "LOCK TABLES syntax_target READ"
            "stored_procedure", sprintf "CREATE PROCEDURE syntax_proc_%s() SELECT 1" suffix
+           "procedure_parameter", sprintf "CREATE PROCEDURE syntax_proc_param_%s(IN value INT) SELECT value" suffix
+           "procedure_compound",
+           sprintf "CREATE PROCEDURE syntax_proc_body_%s() BEGIN SET @syntax_first = 1; SET @syntax_second = 2; END" suffix
            "scheduled_event",
            sprintf "CREATE EVENT syntax_event_%s ON SCHEDULE AT CURRENT_TIMESTAMP + INTERVAL 1 DAY DO INSERT INTO syntax_log VALUES (999)" suffix
+           "recurring_event",
+           sprintf "CREATE EVENT syntax_recurring_%s ON SCHEDULE EVERY 1 DAY DO INSERT INTO syntax_log VALUES (998)" suffix
            "role_account", sprintf "CREATE ROLE 'syntax_role_%s'@'%%'" suffix
+           "role_activation", "SET ROLE NONE"
            "locked_user", sprintf "CREATE USER 'syntax_user_%s'@'%%' ACCOUNT LOCK" suffix
+           "account_requirements",
+           sprintf
+               "CREATE USER 'syntax_secure_%s'@'%%' REQUIRE SSL WITH MAX_QUERIES_PER_HOUR 60 PASSWORD EXPIRE INTERVAL 180 DAY"
+               suffix
+           "read_uncommitted", "SET TRANSACTION ISOLATION LEVEL READ UNCOMMITTED"
+           "partition_selection", "SELECT id FROM syntax_partitioned PARTITION (p0) ORDER BY id"
+           "partition_growth", "ALTER TABLE syntax_partitioned ADD PARTITION PARTITIONS 1"
            "spatial_buffer", "SELECT ST_AsText(ST_Buffer(ST_PointFromText('POINT(0 0)'), 1))"
            "column_comment", sprintf "CREATE TABLE syntax_comment_%s (id INT COMMENT 'syntax corpus')" suffix
            "bit_type", sprintf "CREATE TABLE syntax_bit_%s (b BIT(64) DEFAULT b'1')" suffix |]
@@ -116,6 +129,8 @@ module SyntaxFuzz =
            "INSERT INTO syntax_fulltext VALUES (1, 'Database tutorial', 'Database security guide'), (2, 'Other notes', 'Unrelated material')"
            "CREATE TABLE syntax_fulltext_notes (article_id INT, body TEXT, FULLTEXT(body))"
            "INSERT INTO syntax_fulltext_notes VALUES (1, 'Security notes'), (2, 'Other notes')"
+           "CREATE TABLE syntax_partitioned (id INT) PARTITION BY HASH(id) PARTITIONS 2"
+           "INSERT INTO syntax_partitioned VALUES (1), (2), (3)"
            "CREATE TRIGGER syntax_first BEFORE INSERT ON syntax_trigger_target FOR EACH ROW SET NEW.n = NEW.n + 1" |]
 
     let private cleanupStatement feature suffix =
@@ -130,9 +145,13 @@ module SyntaxFuzz =
         | "text_prepared_statement" -> Some(sprintf "DEALLOCATE PREPARE syntax_stmt_%s" suffix)
         | "table_lock" -> Some "UNLOCK TABLES"
         | "stored_procedure" -> Some(sprintf "DROP PROCEDURE syntax_proc_%s" suffix)
+        | "procedure_parameter" -> Some(sprintf "DROP PROCEDURE syntax_proc_param_%s" suffix)
+        | "procedure_compound" -> Some(sprintf "DROP PROCEDURE syntax_proc_body_%s" suffix)
         | "scheduled_event" -> Some(sprintf "DROP EVENT syntax_event_%s" suffix)
+        | "recurring_event" -> Some(sprintf "DROP EVENT syntax_recurring_%s" suffix)
         | "role_account" -> Some(sprintf "DROP ROLE 'syntax_role_%s'@'%%'" suffix)
         | "locked_user" -> Some(sprintf "DROP USER 'syntax_user_%s'@'%%'" suffix)
+        | "account_requirements" -> Some(sprintf "DROP USER 'syntax_secure_%s'@'%%'" suffix)
         | _ -> None
 
     let private replaceAt index length replacement (value: string) =

@@ -46,6 +46,8 @@ module AstKind =
         | DropUser _ -> "drop_user"
         | RenameUser _ -> "rename_user"
         | AlterUser _ -> "alter_user"
+        | CreateRole _ -> "create_role"
+        | DropRole _ -> "drop_role"
         | Grant _ -> "grant"
         | Revoke _ -> "revoke"
         | CreateTrigger _ -> "create_trigger"

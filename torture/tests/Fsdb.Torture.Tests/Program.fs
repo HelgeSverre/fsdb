@@ -437,9 +437,13 @@ let tests =
                           "text_prepared_statement"
                           "table_lock"
                           "stored_procedure"
+                          "procedure_parameter"
+                          "procedure_compound"
                           "scheduled_event"
+                          "recurring_event"
                           "role_account"
-                          "locked_user" ] do
+                          "locked_user"
+                          "account_requirements" ] do
                         Expect.isTrue
                             (candidates
                              |> Array.filter (fun candidate -> candidate.Feature = feature)
@@ -495,9 +499,17 @@ let tests =
                           "text_prepared_statement"
                           "table_lock"
                           "stored_procedure"
+                          "procedure_parameter"
+                          "procedure_compound"
                           "scheduled_event"
+                          "recurring_event"
                           "role_account"
+                          "role_activation"
                           "locked_user"
+                          "account_requirements"
+                          "read_uncommitted"
+                          "partition_selection"
+                          "partition_growth"
                           "spatial_buffer" ] do
                         Expect.contains features feature feature
 
@@ -540,6 +552,7 @@ let tests =
                           ForeignKeys = []
                           TableCharset = None
                           TableCollation = None
+                          TableComment = ""
                           CreateTime = DateTime.UtcNow
                           UniqueIndex = Map.empty
                           SecondaryIndex = Map.empty
@@ -561,6 +574,7 @@ let tests =
                           ForeignKeys = []
                           TableCharset = None
                           TableCollation = None
+                          TableComment = ""
                           CreateTime = DateTime.UtcNow
                           UniqueIndex = Map.empty
                           SecondaryIndex = Map.empty
