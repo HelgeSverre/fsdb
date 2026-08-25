@@ -891,7 +891,7 @@ let rec requiredPrivileges (defaultDb: string) (stmt: Statement) : (string * Pri
 
         onTables "DELETE" deletedTables
         @ onTables "SELECT" ((cteTables @ readInExprs) |> List.distinct)
-    | CreateTable(name, _, _, _, _, _, _, _, _) -> onTables "CREATE" [ split name ]
+    | CreateTable(name, _, _, _, _, _, _, _, _, _) -> onTables "CREATE" [ split name ]
     | CreateTableLike(name, source, _) -> onTables "CREATE" [ split name ] @ onTables "SELECT" [ split source ]
     | CreateTableAs(name, query, _) -> onTables "CREATE" [ split name ] @ requiredPrivileges defaultDb query
     | DropTable(names, _) -> onTables "DROP" (names |> List.map split)

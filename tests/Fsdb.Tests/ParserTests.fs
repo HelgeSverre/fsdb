@@ -889,6 +889,7 @@ let tests =
                             false,
                             None,
                             None,
+                            None,
                             None
                         ))
                         "create table"
@@ -896,7 +897,7 @@ let tests =
                 testCase "column comments parse on CREATE and ALTER definitions"
                 <| fun _ ->
                     match parseOk "CREATE TABLE t (id INT COMMENT 'identifier', body TEXT COMMENT 'line\\ntext')" with
-                    | CreateTable(_, [ { Name = "id"; Comment = "identifier" }; { Name = "body"; Comment = "line\ntext" } ], _, _, _, _, _, _, _) -> ()
+                    | CreateTable(_, [ { Name = "id"; Comment = "identifier" }; { Name = "body"; Comment = "line\ntext" } ], _, _, _, _, _, _, _, _) -> ()
                     | other -> failtestf "expected CREATE TABLE column comments, got %A" other
 
                     match parseOk "ALTER TABLE t MODIFY id BIGINT COMMENT 'replacement', CHANGE body content TEXT COMMENT ''" with
@@ -940,6 +941,7 @@ let tests =
                             true,
                             None,
                             None,
+                            None,
                             None
                         ))
                         "if not exists"
@@ -980,6 +982,7 @@ let tests =
                             false,
                             None,
                             None,
+                            None,
                             None
                         ))
                         "trailing primary key"
@@ -987,25 +990,25 @@ let tests =
                 testCase "BIGINT UNSIGNED"
                 <| fun _ ->
                     match parseOk "CREATE TABLE t (id BIGINT UNSIGNED)" with
-                    | CreateTable(_, [ { Type = TBigInt true } ], _, _, _, _, _, _, _) -> ()
+                    | CreateTable(_, [ { Type = TBigInt true } ], _, _, _, _, _, _, _, _) -> ()
                     | other -> failtestf "expected an unsigned bigint column, got %A" other
 
                 testCase "BIT keeps its declared width and defaults to one bit"
                 <| fun _ ->
                     match parseOk "CREATE TABLE t (one BIT, three BIT(3), all_bits BIT(64))" with
-                    | CreateTable(_, [ { Type = TBit 1 }; { Type = TBit 3 }; { Type = TBit 64 } ], _, _, _, _, _, _, _) -> ()
+                    | CreateTable(_, [ { Type = TBit 1 }; { Type = TBit 3 }; { Type = TBit 64 } ], _, _, _, _, _, _, _, _) -> ()
                     | other -> failtestf "expected BIT widths, got %A" other
 
                 testCase "DEFAULT CURRENT_TIMESTAMP"
                 <| fun _ ->
                     match parseOk "CREATE TABLE t (created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP)" with
-                    | CreateTable(_, [ { Type = TTimestamp 0; Default = Some DCurrentTimestamp } ], _, _, _, _, _, _, _) -> ()
+                    | CreateTable(_, [ { Type = TTimestamp 0; Default = Some DCurrentTimestamp } ], _, _, _, _, _, _, _, _) -> ()
                     | other -> failtestf "expected a CURRENT_TIMESTAMP default, got %A" other
 
                 testCase "functional default expression"
                 <| fun _ ->
                     match parseOk "CREATE TABLE t (n INT DEFAULT (ABS(-2)))" with
-                    | CreateTable(_, [ { Default = Some(DExpression(FuncCall(name, _))) } ], _, _, _, _, _, _, _)
+                    | CreateTable(_, [ { Default = Some(DExpression(FuncCall(name, _))) } ], _, _, _, _, _, _, _, _)
                         when name.Equals("ABS", System.StringComparison.OrdinalIgnoreCase) -> ()
                     | other -> failtestf "expected a functional default, got %A" other
 
@@ -1034,6 +1037,7 @@ let tests =
                             false,
                             Some "utf8mb4",
                             Some "utf8mb4_unicode_ci",
+                            None,
                             None
                         ))
                         "table defaults kept on the table; an INT column inherits nothing"
@@ -1045,7 +1049,7 @@ let tests =
                       "CREATE TABLE p (id INT) PARTITION BY LINEAR HASH(id) PARTITIONS 4" ]
                     |> List.iter (fun sql ->
                         match parseOk sql with
-                        | CreateTable("p", [ { Name = "id" } ], _, _, _, _, _, _, _) -> ()
+                        | CreateTable("p", [ { Name = "id" } ], _, _, _, _, _, _, _, _) -> ()
                         | other -> failtestf "expected a HASH-partitioned table declaration, got %A" other)
 
                     match parse "CREATE TABLE p (id INT) PARTITION BY HASH(id) PARTITIONS 0" with
@@ -1057,7 +1061,7 @@ let tests =
                     match
                         parseOk "CREATE TABLE t (a VARCHAR(10) COLLATE utf8mb4_bin, b VARCHAR(10)) COLLATE=utf8mb4_unicode_ci"
                     with
-                    | CreateTable(_, [ { Name = "a"; Collation = Some "utf8mb4_bin" }; { Name = "b"; Collation = Some "utf8mb4_unicode_ci" } ], [], [], [], false, _, _, _) ->
+                    | CreateTable(_, [ { Name = "a"; Collation = Some "utf8mb4_bin" }; { Name = "b"; Collation = Some "utf8mb4_unicode_ci" } ], [], [], [], false, _, _, _, _) ->
                         ()
                     | other -> failtestf "expected column-over-table COLLATE resolution, got %A" other
 
@@ -1068,13 +1072,13 @@ let tests =
                 testCase "COLLATE with a quoted value, as Laravel's MySQL grammar emits it"
                 <| fun _ ->
                     match parseOk "CREATE TABLE t (id INT) DEFAULT CHARACTER SET utf8mb4 COLLATE 'utf8mb4_unicode_ci'" with
-                    | CreateTable("t", [ { Name = "id" } ], [], [], [], false, _, _, _) -> ()
+                    | CreateTable("t", [ { Name = "id" } ], [], [], [], false, _, _, _, _) -> ()
                     | other -> failtestf "expected the quoted collation to parse, got %A" other
 
                 testCase "column-level UNIQUE synthesizes a unique index named after the column"
                 <| fun _ ->
                     match parseOk "CREATE TABLE t (email VARCHAR(255) UNIQUE)" with
-                    | CreateTable(_, [ { Unique = true } ], [ { Name = "email"; Columns = [ "email" ]; Unique = true; Kind = BTree } ], [], [], false, _, _, _) -> ()
+                    | CreateTable(_, [ { Unique = true } ], [ { Name = "email"; Columns = [ "email" ]; Unique = true; Kind = BTree } ], [], [], false, _, _, _, _) -> ()
                     | other -> failtestf "expected a synthesized unique index, got %A" other
 
                 testCase "trailing UNIQUE KEY / KEY / INDEX with an explicit name"
@@ -1087,7 +1091,7 @@ let tests =
                           { Name = "idx_b"; Columns = [ "b" ]; Unique = false; Kind = BTree } ],
                         [],
                         [],
-                        false, _, _, _) -> ()
+                        false, _, _, _, _) -> ()
                     | other -> failtestf "expected two indexes, got %A" other
 
                 testCase "trailing CONSTRAINT ... FOREIGN KEY with ON DELETE/ON UPDATE"
@@ -1107,32 +1111,32 @@ let tests =
                             OnDelete = Some "CASCADE"
                             OnUpdate = Some "RESTRICT" } ],
                         [],
-                        false, _, _, _) -> ()
+                        false, _, _, _, _) -> ()
                     | other -> failtestf "expected a foreign key, got %A" other
 
                 testCase "unnamed trailing FOREIGN KEY gets a synthesized name"
                 <| fun _ ->
                     match parseOk "CREATE TABLE posts (user_id INT, FOREIGN KEY (user_id) REFERENCES users (id))" with
-                    | CreateTable(_, _, [], [ { Name = "users_user_id_foreign" } ], [], false, _, _, _) -> ()
+                    | CreateTable(_, _, [], [ { Name = "users_user_id_foreign" } ], [], false, _, _, _, _) -> ()
                     | other -> failtestf "expected a synthesized FK name, got %A" other
 
                 testCase "a bare CONSTRAINT with no symbol name before FOREIGN KEY still parses"
                 <| fun _ ->
                     match parseOk "CREATE TABLE posts (user_id INT, CONSTRAINT FOREIGN KEY (user_id) REFERENCES users (id))" with
-                    | CreateTable(_, _, [], [ { Name = "users_user_id_foreign" } ], [], false, _, _, _) -> ()
+                    | CreateTable(_, _, [], [ { Name = "users_user_id_foreign" } ], [], false, _, _, _, _) -> ()
                     | other -> failtestf "expected an unnamed CONSTRAINT to still synthesize a name, got %A" other
 
                 testCase "ENUM and SET column types carry their declared values"
                 <| fun _ ->
                     match parseOk "CREATE TABLE t (status ENUM('a', 'b'), flags SET('x', 'y'))" with
-                    | CreateTable(_, [ { Type = TEnum [ "a"; "b" ] }; { Type = TSet [ "x"; "y" ] } ], [], [], [], false, _, _, _) -> ()
+                    | CreateTable(_, [ { Type = TEnum [ "a"; "b" ] }; { Type = TSet [ "x"; "y" ] } ], [], [], [], false, _, _, _, _) -> ()
                     | other -> failtestf "expected enum/set types, got %A" other
 
                 testCase "spatial column types retain their concrete geometry kind"
                 <| fun _ ->
                     match parseOk "CREATE TABLE t (g GEOMETRY, p POINT, l LINESTRING, po POLYGON, gc GEOMETRYCOLLECTION)" with
                     | CreateTable(_, [ { Type = TGeometry Geometry }; { Type = TGeometry Point }; { Type = TGeometry LineString }
-                                       { Type = TGeometry Polygon }; { Type = TGeometry GeometryCollection } ], [], [], [], false, _, _, _) -> ()
+                                       { Type = TGeometry Polygon }; { Type = TGeometry GeometryCollection } ], [], [], [], false, _, _, _, _) -> ()
                     | other -> failtestf "expected spatial column types, got %A" other
 
                 testCase "CHAR/TEXT/BLOB family and TINY/MEDIUM/SMALL int variants all parse"
@@ -1159,7 +1163,7 @@ let tests =
                         [],
                         [],
                         [],
-                        false, _, _, _) -> ()
+                        false, _, _, _, _) -> ()
                     | other -> failtestf "expected every new column type to parse, got %A" other
 
                 // MySQL's BOOLEAN is TINYINT(1), and clients read the
@@ -1181,7 +1185,7 @@ let tests =
                                   false,
                                   _,
                                   _,
-                                  _) -> ()
+                                  _, _) -> ()
                     | other -> failtestf "expected TBool for the three boolean spellings only, got %A" other
 
                 // TINYINT(1) UNSIGNED keeps the integer reading: a client's
@@ -1189,7 +1193,7 @@ let tests =
                 testCase "TINYINT(1) UNSIGNED stays an integer"
                 <| fun _ ->
                     match parseOk "CREATE TABLE t (a TINYINT(1) UNSIGNED)" with
-                    | CreateTable(_, [ { Type = TTinyInt true } ], [], [], [], false, _, _, _) -> ()
+                    | CreateTable(_, [ { Type = TTinyInt true } ], [], [], [], false, _, _, _, _) -> ()
                     | other -> failtestf "expected TTinyInt true, got %A" other
 
                 testCase "COMMENT / CHARACTER SET / COLLATE column modifiers are accepted and ignored"
@@ -1198,7 +1202,7 @@ let tests =
                         parseOk
                             "CREATE TABLE t (name VARCHAR(255) CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci COMMENT 'a name')"
                     with
-                    | CreateTable(_, [ { Name = "name" } ], [], [], [], false, _, _, _) -> ()
+                    | CreateTable(_, [ { Name = "name" } ], [], [], [], false, _, _, _, _) -> ()
                     | other -> failtestf "expected the comment/charset/collate to be ignored, got %A" other
 
                 testCase "a generated column's AS (expr) [VIRTUAL|STORED] is captured on ColumnDef.Generated (Laravel Pulse's key_hash)"
@@ -1213,7 +1217,7 @@ let tests =
                                   [],
                                   [],
                                   [],
-                                  false, _, _, _) -> ()
+                                  false, _, _, _, _) -> ()
                     | other -> failtestf "expected the generated column's AS (...) to be captured, got %A" other
 
                 testCase "VIRTUAL/STORED is captured on the generated column, defaulting to VIRTUAL like MySQL"
@@ -1227,7 +1231,7 @@ let tests =
                                   [],
                                   [],
                                   [],
-                                  false, _, _, _) -> ()
+                                  false, _, _, _, _) -> ()
                     | other -> failtestf "expected STORED/VIRTUAL/default-VIRTUAL kinds captured, got %A" other ]
 
           testList
@@ -2461,15 +2465,16 @@ let tests =
                   Fsdb.Parser.parse
                       "CREATE TABLE t (id INT NOT NULL AUTO_INCREMENT, a VARCHAR(10), KEY k1 (a) USING BTREE, PRIMARY KEY (id)) ENGINE=InnoDB AUTO_INCREMENT=13 DEFAULT CHARSET=utf8mb3 COLLATE=utf8mb3_general_ci ROW_FORMAT=DYNAMIC COMMENT='imported'"
               with
-              | Ok(CreateTable(_, _, _, _, _, _, charset, _, autoIncrementSeed)) ->
+              | Ok(CreateTable(_, _, _, _, _, _, charset, _, autoIncrementSeed, tableComment)) ->
                   Expect.equal charset (Some "utf8mb3") "utf8mb3 accepted as a table charset"
                   Expect.equal autoIncrementSeed (Some 13L) "AUTO_INCREMENT table option carried"
+                  Expect.equal tableComment (Some "imported") "COMMENT table option carried"
               | Ok other -> failtestf "expected CreateTable, got %A" other
               | Error e -> failtestf "expected the dump-style CREATE to parse, got %s" e
           testCase "MariaDB dump forms: current_timestamp(), column CHARACTER SET utf8mb3, ALTER AUTO_INCREMENT"
           <| fun _ ->
               match Fsdb.Parser.parse "CREATE TABLE t (c timestamp NOT NULL DEFAULT current_timestamp(), n varchar(10) CHARACTER SET utf8mb3 COLLATE utf8mb3_general_ci)" with
-              | Ok(CreateTable(_, [ { Default = Some DCurrentTimestamp }; { Charset = Some "utf8mb3" } ], _, _, _, _, _, _, _)) -> ()
+              | Ok(CreateTable(_, [ { Default = Some DCurrentTimestamp }; { Charset = Some "utf8mb3" } ], _, _, _, _, _, _, _, _)) -> ()
               | other -> failtestf "expected the MariaDB column forms to parse, got %A" other
 
               match Fsdb.Parser.parse "ALTER TABLE t MODIFY id INT NOT NULL AUTO_INCREMENT, AUTO_INCREMENT=5" with
@@ -2500,7 +2505,7 @@ let tests =
                   "qualified MATCH columns retain their source"
 
               match Fsdb.Parser.parse "CREATE TABLE t (a TEXT, FULLTEXT KEY ft (a), KEY plain (a))" with
-              | Ok(CreateTable(_, _, [ ft; plain ], _, _, _, _, _, _)) ->
+              | Ok(CreateTable(_, _, [ ft; plain ], _, _, _, _, _, _, _)) ->
                   Expect.equal ft.Kind FullTextIndex "FULLTEXT KEY kind"
                   Expect.equal plain.Kind BTree "plain KEY kind"
               | other -> failtestf "unexpected parse: %A" other
@@ -2516,7 +2521,7 @@ let tests =
               // bytes — boundaries read off a live 8.4: TEXT(63) is the last
               // tinytext, TEXT(16384) the first mediumtext.
               match Fsdb.Parser.parse "CREATE TABLE t (a TEXT(63), b TEXT(500), c TEXT(16384), d BLOB(100), e BLOB(90000))" with
-              | Ok(CreateTable(_, cols, _, _, _, _, _, _, _)) ->
+              | Ok(CreateTable(_, cols, _, _, _, _, _, _, _, _)) ->
                   Expect.equal
                       (cols |> List.map (fun c -> c.Type))
                       [ TTinyText; TText; TMediumText; TTinyBlob; TMediumBlob ]

@@ -174,6 +174,12 @@ let tests =
                   Expect.stringContains ddl "COMMENT='owner''s \\\\ path\\nsecond'" "SHOW CREATE TABLE comment"
               | other -> failtestf "expected SHOW CREATE TABLE output, got %A" other
 
+              run store "CREATE TABLE created_with_comment (id INT) COMMENT='created metadata'" |> ignore
+
+              match run store "SELECT table_comment FROM information_schema.tables WHERE table_name = 'created_with_comment'" with
+              | ResultSet(_, [ [ Some "created metadata" ] ]) -> ()
+              | other -> failtestf "expected the CREATE TABLE comment, got %A" other
+
           testCase "BIT defaults render as MySQL bit literals"
           <| fun _ ->
               let store = setup ()

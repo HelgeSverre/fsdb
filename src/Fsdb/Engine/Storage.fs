@@ -3089,6 +3089,12 @@ let private normalizePrimaryKeyNullability (columns: ColumnDef list) =
         else
             column)
 
+let private validateTableComment (tableName: string) (comment: string) =
+    if comment.EnumerateRunes() |> Seq.length > 2048 then
+        Error(ExpressionError(1628, sprintf "Comment for table '%s' is too long (max = 2048)" tableName))
+    else
+        Ok comment
+
 let createTableSeeded
     (store: Store)
     (dbName: string)
@@ -3099,57 +3105,62 @@ let createTableSeeded
     (tableCharset: string option)
     (tableCollation: string option)
     (autoIncrementSeed: int64 option)
+    (tableComment: string option)
     : Result<unit, StorageError> =
     ensureDatabase store dbName
     let columns = normalizePrimaryKeyNullability columns
 
     let result =
-        columns
-        |> traverse (normalizeDefault (temporalCoercionMode store))
-        |> Result.bind (fun columns ->
-            withDatabase store dbName (fun db ->
-                let key = normalizeTableName tableName
+        tableComment
+        |> Option.defaultValue ""
+        |> validateTableComment tableName
+        |> Result.bind (fun tableComment ->
+            columns
+            |> traverse (normalizeDefault (temporalCoercionMode store))
+            |> Result.bind (fun columns ->
+                withDatabase store dbName (fun db ->
+                    let key = normalizeTableName tableName
 
-                match columns |> traverse validateColumnType with
-                | Error e -> Error e
-                | Ok _ ->
-                    match checkVectorKeyColumns columns indexes, checkGeometryKeyColumns columns indexes with
-                    | Error e, _
-                    | _, Error e -> Error e
-                    | Ok(), Ok() ->
-                        if Map.containsKey key db then
-                            Error(TableExists tableName)
-                        else
-                            match foreignKeys |> traverse (validateForeignKeyDefinition store.ForeignKeyChecks db tableName columns indexes) with
-                            | Error e -> Error e
-                            | Ok _ ->
-                                match indexes |> List.tryPick (fun ix -> match checkFullTextColumns columns ix with Error e -> Some e | Ok() -> None) with
-                                | Some e -> Error e
-                                | None ->
-                                    let createTime = DateTime.Now
+                    match columns |> traverse validateColumnType with
+                    | Error e -> Error e
+                    | Ok _ ->
+                        match checkVectorKeyColumns columns indexes, checkGeometryKeyColumns columns indexes with
+                        | Error e, _
+                        | _, Error e -> Error e
+                        | Ok(), Ok() ->
+                            if Map.containsKey key db then
+                                Error(TableExists tableName)
+                            else
+                                match foreignKeys |> traverse (validateForeignKeyDefinition store.ForeignKeyChecks db tableName columns indexes) with
+                                | Error e -> Error e
+                                | Ok _ ->
+                                    match indexes |> List.tryPick (fun ix -> match checkFullTextColumns columns ix with Error e -> Some e | Ok() -> None) with
+                                    | Some e -> Error e
+                                    | None ->
+                                        let createTime = DateTime.Now
 
-                                    let table =
-                                        { OriginalName = tableName
-                                          Columns = columns
-                                          RowsArray = RowStore.empty
-                                          NextAutoId = autoIncrementSeed |> Option.defaultValue 1L
-                                          Indexes = indexes
-                                          ForeignKeys = foreignKeys
-                                          TableCharset = tableCharset
-                                          TableCollation = tableCollation
-                                          TableComment = ""
-                                          CreateTime = createTime
-                                          UniqueIndex = Map.empty
-                                          SecondaryIndex = Map.empty
-                                          SecondaryOrder = Map.empty
-                                          FullTextIndexes = Map.empty }
+                                        let table =
+                                            { OriginalName = tableName
+                                              Columns = columns
+                                              RowsArray = RowStore.empty
+                                              NextAutoId = autoIncrementSeed |> Option.defaultValue 1L
+                                              Indexes = indexes
+                                              ForeignKeys = foreignKeys
+                                              TableCharset = tableCharset
+                                              TableCollation = tableCollation
+                                              TableComment = tableComment
+                                              CreateTime = createTime
+                                              UniqueIndex = Map.empty
+                                              SecondaryIndex = Map.empty
+                                              SecondaryOrder = Map.empty
+                                              FullTextIndexes = Map.empty }
 
-                                    Ok(Map.add key (reindexTable table) db, (createTime, columns))))
+                                        Ok(Map.add key (reindexTable table) db, (createTime, columns)))))
 
     match result with
     | Error error -> Error error
     | Ok(createTime, columns) ->
-        let statement = CreateTable(tableName, columns, indexes, foreignKeys, [], false, tableCharset, tableCollation, autoIncrementSeed)
+        let statement = CreateTable(tableName, columns, indexes, foreignKeys, [], false, tableCharset, tableCollation, autoIncrementSeed, tableComment)
         emit store (Some(SchemaChangedAt(dbName, statement, createTime)))
         Ok()
 
@@ -3164,7 +3175,7 @@ let createTable
     (tableCharset: string option)
     (tableCollation: string option)
     : Result<unit, StorageError> =
-    createTableSeeded store dbName tableName columns indexes foreignKeys tableCharset tableCollation None
+    createTableSeeded store dbName tableName columns indexes foreignKeys tableCharset tableCollation None None
 
 /// The docs promise the `fsdb` overlay is read-only, so the engine has to
 /// keep that promise too: without this, a write to a registered name lands
@@ -3676,9 +3687,9 @@ let private applyAlterAction (mode: TemporalCoercionMode) (table: Table) (action
         // Forward only, like InnoDB: a value below what existing rows
         // already claimed leaves the counter where it is.
         Ok({ table with NextAutoId = max value table.NextAutoId }, None)
-    | SetTableComment comment when comment.EnumerateRunes() |> Seq.length > 2048 ->
-        Error(ExpressionError(1628, sprintf "Comment for table '%s' is too long (max = 2048)" table.OriginalName))
-    | SetTableComment comment -> Ok({ table with TableComment = comment }, None)
+    | SetTableComment comment ->
+        validateTableComment table.OriginalName comment
+        |> Result.map (fun valid -> { table with TableComment = valid }, None)
     | SetEngine _ -> Ok(table, None)
     | AddCheck _
     | DropCheck _

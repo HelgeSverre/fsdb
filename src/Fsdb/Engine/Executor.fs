@@ -11510,7 +11510,7 @@ let rec executeAs
                 Storage.setStrictMode snapshot store.StrictMode
 
                 let created =
-                    createTableSeeded snapshot destinationDb destinationName columns [] [] None None None
+                    createTableSeeded snapshot destinationDb destinationName columns [] [] None None None None
                     |> Result.bind (fun () ->
                         rows
                         |> List.map Array.toList
@@ -11571,10 +11571,11 @@ let rec executeAs
                             ifNotExists,
                             table.TableCharset,
                             table.TableCollation,
-                            None
+                            None,
+                            (if table.TableComment = "" then None else Some table.TableComment)
                         ))
 
-    | CreateTable(name, columns, indexes, foreignKeys, checks, ifNotExists, tableCharset, tableCollation, autoIncrementSeed) ->
+    | CreateTable(name, columns, indexes, foreignKeys, checks, ifNotExists, tableCharset, tableCollation, autoIncrementSeed, tableComment) ->
         let db, name = splitQualified dbName name
 
         match tryStoredView store db name with
@@ -11597,7 +11598,7 @@ let rec executeAs
                     Storage.setStrictMode snapshot store.StrictMode
 
                     let created =
-                        createTableSeeded snapshot db name columns indexes foreignKeys tableCharset tableCollation autoIncrementSeed
+                        createTableSeeded snapshot db name columns indexes foreignKeys tableCharset tableCollation autoIncrementSeed tableComment
                         |> Result.bind (fun () -> storeCheckDefinitions snapshot registry db name columns checks)
                         |> Result.bind (fun () -> validateCheckForeignKeys snapshot db name foreignKeys)
 

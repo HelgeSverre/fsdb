@@ -1960,6 +1960,7 @@ type private TableOption =
     | TableCharset of string
     | TableCollate of string
     | TableAutoIncrement of int64
+    | TableComment of string
     | TableOptionIgnored
 
 let private hashPartitionOption: Parser<TableOption, unit> =
@@ -1974,14 +1975,14 @@ let private hashPartitionOption: Parser<TableOption, unit> =
         | _ -> preturn TableOptionIgnored
 
 /// One table-option tail entry. Options fsdb has no behavior for
-/// (ROW_FORMAT, COMMENT, KEY_BLOCK_SIZE, the STATS_* family) are accepted
-/// and discarded so a dump's `) ENGINE=... ROW_FORMAT=DYNAMIC COMMENT='x'`
-/// tail restores; only charset/collation/AUTO_INCREMENT change anything.
+/// (ROW_FORMAT, KEY_BLOCK_SIZE, the STATS_* family) are accepted and
+/// discarded so their dump-file tails restore.
 let private tableOption: Parser<TableOption, unit> =
     choice
         [ keyword "ENGINE" >>. opt (sym "=") >>. identOrString >>% TableOptionIgnored
           attempt (keyword "AUTO_INCREMENT" >>. opt (sym "=")) >>. pint64 .>> ws |>> TableAutoIncrement
-          keyword "COMMENT" >>. opt (sym "=") >>. stringLit >>% TableOptionIgnored
+          keyword "COMMENT" >>. opt (sym "=") >>. stringLit
+          |>> (function VString value -> TableComment value | value -> TableComment(toText value |> Option.defaultValue ""))
           (keyword "ROW_FORMAT" <|> keyword "CHECKSUM" <|> keyword "DELAY_KEY_WRITE" <|> keyword "PACK_KEYS")
           >>. opt (sym "=")
           >>. identOrString
@@ -2012,19 +2013,20 @@ let private tableOption: Parser<TableOption, unit> =
               | None -> fail (sprintf "Unknown collation '%s'" name)
           attempt hashPartitionOption ]
 
-let private tableOptions: Parser<string option * string option * int64 option, unit> =
+let private tableOptions: Parser<string option * string option * int64 option * string option, unit> =
     many tableOption
     |>> fun opts ->
         opts
         |> List.fold
             // A repeated option's last occurrence wins, same as MySQL.
-            (fun (cs, col, seed) opt ->
+            (fun (cs, col, seed, comment) opt ->
                 match opt with
-                | TableCharset c -> Some c, col, seed
-                | TableCollate l -> cs, Some l, seed
-                | TableAutoIncrement n -> cs, col, Some n
-                | TableOptionIgnored -> cs, col, seed)
-            (None, None, None)
+                | TableCharset c -> Some c, col, seed, comment
+                | TableCollate l -> cs, Some l, seed, comment
+                | TableAutoIncrement n -> cs, col, Some n, comment
+                | TableComment value -> cs, col, seed, Some value
+                | TableOptionIgnored -> cs, col, seed, comment)
+            (None, None, None, None)
 
 let private createTable: Parser<Statement, unit> =
     (keyword "CREATE" >>. keyword "TABLE"
@@ -2032,7 +2034,7 @@ let private createTable: Parser<Statement, unit> =
      .>>. qualifiedTableName
      .>>. between (sym "(") (sym ")") (sepBy1 createTableItem (sym ","))
      .>>. tableOptions)
-    |>> fun (((ifNotExists, name), items), (tableCharset, tableCollation, autoIncrementSeed)) ->
+    |>> fun (((ifNotExists, name), items), (tableCharset, tableCollation, autoIncrementSeed, tableComment)) ->
         let pkNames = items |> List.collect (function CPrimaryKey names -> names | _ -> [])
         let explicitIndexes = items |> List.choose (function CIndex ix -> Some ix | _ -> None)
         let foreignKeys = items |> List.choose (function CForeignKey fk -> Some fk | _ -> None)
@@ -2107,7 +2109,8 @@ let private createTable: Parser<Statement, unit> =
             ifNotExists,
             tableCharset,
             tableCollation,
-            autoIncrementSeed
+            autoIncrementSeed,
+            tableComment
         )
 
 let private createTableLike: Parser<Statement, unit> =

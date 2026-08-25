@@ -1111,7 +1111,7 @@ let tests =
               let dir = tempDataDir ()
               File.WriteAllBytes(snapshotPath dir, legacySnapshot "from_snapshot")
               let column = { mkCol "id" (TInt false) with Comment = "from WAL" }
-              let statement = CreateTable("from_wal", [ column ], [], [], [], false, None, None, None)
+              let statement = CreateTable("from_wal", [ column ], [], [], [], false, None, None, None, None)
               File.WriteAllBytes(walPath dir, encodeWalRecord (SchemaChanged(defaultDatabase, statement)))
 
               let reloaded = load dir

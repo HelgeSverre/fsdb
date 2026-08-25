@@ -657,7 +657,8 @@ type Statement =
         /// `AUTO_INCREMENT = n` from the table-options tail — dump files
         /// carry it on every table so restored inserts continue at the
         /// dumped counter even before any row lands.
-        autoIncrementSeed: int64 option
+        autoIncrementSeed: int64 option *
+        tableComment: string option
     | CreateTableLike of name: string * source: string * ifNotExists: bool
     | CreateTableAs of name: string * query: Statement * ifNotExists: bool
     | DropTable of names: string list * ifExists: bool
