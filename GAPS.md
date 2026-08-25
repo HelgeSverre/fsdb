@@ -98,7 +98,8 @@ materialized once per statement, exact-integer `IN` materializations with a
 reusable membership set and direct indexed outer-table narrowing, correlated
 scalar/EXISTS/IN/ANY/SOME/ALL
 subqueries with correct NULL
-semantics, bounded top-N sort for ORDER BY+LIMIT, GROUP_CONCAT byte cap,
+semantics, statement-local equality buckets for direct physical inner tables,
+bounded top-N sort for ORDER BY+LIMIT, GROUP_CONCAT byte cap,
 WITH ROLLUP expansion, window frames (ROWS/RANGE, numeric and temporal interval offsets),
 COUNT(DISTINCT a,b) tuples, statement-atomic multi-table DML, exact ODKU
 affected-rows semantics (changed=2/no-op=0 under default flags), row-value
@@ -111,7 +112,7 @@ identities for bit aggregates.
 | Secondary-index access paths | ref/eq_ref/range scans feed joins, DML, ORDER BY, GROUP BY | fully-bound composite equality probes and matching physical inner joins use B-tree buckets; direct literal ranges feed single-table SELECT/UPDATE/DELETE through primary, unique, and secondary indexes; bounded `ORDER BY`/`GROUP BY` can stream a matching composite index when preceding keys are fixed; outer joins, unconstrained multi-key ordering, and broader grouping still scan/sort | high (scale) | divergence |
 | Optimizer | pushdown, constant folding, join reordering, cost model, statistics | qualified physical inner-join stars choose ready indexed sources by cardinality and push qualified base-table ranges into the initial scan, while `STRAIGHT_JOIN` preserves written order; outer/lateral/derived joins and statements with name-resolution-sensitive unqualified references retain source order; broader pushdown, statistics, and a general cost model remain absent | medium | divergence |
 | EXPLAIN fidelity | type ∈ system/const/eq_ref/ref/range/index/ALL; FORMAT=JSON/TREE; ANALYZE; optimizer_trace | access types cover compatible direct bounds/orderings; JSON/TREE plans and aggregate ANALYZE observations work, while per-iterator timing/costs and optimizer_trace remain absent | low | divergence |
-| Subquery strategies | semi-join/materialization/early-exit transformations | statement-stable scalar/IN/ANY/SOME/ALL/EXISTS subqueries materialize once; exact-integer `IN` reuses an ordered membership set and narrows a direct indexed physical outer table; simple EXISTS stops at one row; direct correlated equalities probe inner primary/unique/secondary indexes; string/decimal and compound semi-joins remain scans, while other correlated, variable-bearing, nondeterministic, CTE, derived, lateral, and JSON_TABLE forms re-execute | medium (scale) | divergence |
+| Subquery strategies | semi-join/materialization/early-exit transformations | statement-stable scalar/IN/ANY/SOME/ALL/EXISTS subqueries materialize once; exact-integer `IN` reuses an ordered membership set and narrows a direct indexed physical outer table; simple EXISTS stops at one row; direct correlated equalities use persistent indexes or a statement-local canonical-key lookup over a physical inner table; string/decimal and compound semi-joins remain scans, while other correlated, variable-bearing, nondeterministic, CTE, derived, lateral, and JSON_TABLE forms re-execute | medium (scale) | divergence |
 | Join size ceiling | unbounded (memory-bound) | `Executor.maxJoinCandidateRows` caps candidate rows at 1,000,000 → error 1105 | medium | divergence |
 | MATCH…AGAINST placement | evaluates in UPDATE/DELETE WHERE, joins, subqueries | physical SELECT/JOIN sources and single-table UPDATE/DELETE are supported; multi-table UPDATE/DELETE with MATCH remains unsupported | low | refusal |
 | sql_mode | ~20 mode bits with semantic effect | strictness plus NO_ZERO_DATE/NO_ZERO_IN_DATE have effect; ONLY_FULL_GROUP_BY remains absent (a bare column picks the first row of its group), and IGNORE_SPACE does not relax whitespace-sensitive function calls | medium | divergence |
@@ -216,8 +217,8 @@ comparisons; default utf8mb4_0900_ai_ci.
 
 Working: private-snapshot transactions with three-way optimistic merge and a
 point-update fast path for disjoint writes, wait-and-rebase coordination for
-indexed point/range UPDATE and DELETE statements, merged-result revalidation
-of unique keys and FKs, savepoints with MySQL establishment-order semantics,
+indexed point/range UPDATE and DELETE statements, incremental unique-index
+validation and merged-result FK revalidation, savepoints with MySQL establishment-order semantics,
 autocommit implicit transactions, read-only transactions never blocking
 writers, per-database sharding so cross-database writers never contend,
 4,096-stripe row ownership, and InnoDB-style burned AUTO_INCREMENT on rollback.
@@ -419,8 +420,8 @@ that predates the implementation it measured:
 | Planner/CTE syntax | two deterministic depth-three campaigns (2,000 and 10,000 mutations) exposed unconditional INNER JOIN, eager unused-CTE, and incomplete MATCH grammar differences; fixed campaigns now pass with zero differences | resolved 2026-08-25 |
 | Executable gap baselines | The corpus grew from 62 to 70 MySQL-accepted baselines. A native MySQL 8.4.11 rerun passed 64 and reproduced exactly the six intentional findings: procedure parameters/bodies, account requirements, READ UNCOMMITTED, and partition selection/maintenance. `--syntax-cases 0` runs this inventory without mutations | oracle-verified 2026-08-25 |
 | Depth-three syntax stress | 10,000 deterministic mutations plus 70 baselines produced no crash, timeout, protocol fault, or invariant failure. The 133 differences cluster in the six declared feature gaps and executable-comment/error-contract edges; account cleanup covers both default and empty-host identities | compatibility differences retained; harness cleanup fixed 2026-08-25 |
-| Same-row transaction contention | the original 32-worker/16-hot-account campaign produced 2,541 fsdb 1205 conflicts; a 64-worker/16-hot-account run completed all 12,800 prepared transactions with exact state parity and zero failures. Throughput was 37 fsdb tx/s versus 3,627 MySQL tx/s, with p99 4,770 ms versus 36 ms | correctness resolved; performance open |
-| Multi-database scaling | single-capture transaction snapshots removed cross-database 1205 conflicts; per-database lock namespaces and connection-aware worker provisioning reduced the 4x8 campaign from 10.0s with failures to 0.55s with exact parity (0.49x serial projection). An 8x16 run preserved all 12,800 transaction outcomes but took 1.06x its serial projection | correctness resolved; high-fan-out performance open |
+| Same-row transaction contention | the original 32-worker/16-hot-account campaign produced 2,541 fsdb 1205 conflicts. Row-delta publication removed whole-table copy/reindex work: a 32x100 rerun completed all 3,200 prepared transactions with exact parity and zero failures at 1,116 fsdb tx/s versus 2,805 MySQL tx/s, with p99 85 ms versus 38 ms. At one worker fsdb reached 1,067 tx/s versus 2,299; at eight workers, 1,643 versus 5,115 | correctness resolved; constant-factor and high-contention performance open |
+| Multi-database scaling | single-capture snapshots and per-database lock namespaces prevent cross-database conflicts. After row-delta publication, an 8x16 campaign fell from 38.8s to 9.1s and preserved all 12,800 outcomes, but remained 0.97x its serial projection instead of the harness target ≤0.75; allocation, GC, and 128-session scheduling now dominate rather than a shared database gate | correctness resolved; high-fan-out performance open |
 | Numeric error shape | 1690 message lacks the offending expression text (`2026-08-19-probe-corpus-triage.md`) | ponytail ceiling |
 | Temporal/error-shape ceilings | `DATE 'bad'` → 1064 vs MySQL 1525; parenthesized set-op groups `(A UNION B) INTERSECT C` refused | ponytail ceilings |
 
@@ -472,7 +473,7 @@ Ranked by expected disruption to the primary consumers, independent of
 implementation effort:
 
 1. General cost-based planning beyond qualified physical inner joins, plus
-   correlated forms that cannot use a direct equality probe. Correctness holds,
+   correlated forms that cannot use a direct physical-table equality lookup. Correctness holds,
    but scale still diverges from MySQL past small data.
 2. Transaction scheduling and READ UNCOMMITTED. Indexed point/range UPDATE and
    DELETE statements wait and rebase, but deadlock victim selection, dirty
