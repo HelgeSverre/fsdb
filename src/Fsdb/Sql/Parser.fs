@@ -2759,12 +2759,8 @@ let private jsonTable: Parser<FromItem, unit> =
 let private fromItem: Parser<FromItem, unit> =
     lateralTable <|> derivedTable <|> valuesTable <|> jsonTable <|> (tableRef |>> FromTable)
 
-/// `[INNER] JOIN`, `LEFT [OUTER] JOIN`, and `RIGHT [OUTER] JOIN` all require
-/// an `ON` or a `USING (...)`; `NATURAL [INNER|LEFT [OUTER]|RIGHT [OUTER]]`
-/// JOIN` requires neither (an `ON` after `NATURAL` is a MySQL syntax error,
-/// which the grammar rejects naturally by not consuming it); `CROSS JOIN`
-/// (parsed separately by `crossJoinClause` below) never takes one. A bare
-/// `JOIN` (no `INNER`) means the same as `INNER JOIN`, matching MySQL.
+/// `LEFT` and `RIGHT JOIN` require `ON` or `USING`. MySQL treats an
+/// unqualified `[INNER] JOIN` without either clause as a Cartesian product.
 let private joinKind: Parser<JoinKind, unit> =
     attempt (keyword "NATURAL" >>. keyword "LEFT" >>. optional (keyword "OUTER") >>. keyword "JOIN" >>% NaturalLeftJoin)
     <|> attempt (keyword "NATURAL" >>. keyword "RIGHT" >>. optional (keyword "OUTER") >>. keyword "JOIN" >>% NaturalRightJoin)
@@ -2824,9 +2820,15 @@ let private joinClause: Parser<Join, unit> =
              | NaturalJoin
              | NaturalLeftJoin
              | NaturalRightJoin -> preturn { Kind = kind; Table = table; On = Lit(VInt 1L); Using = [] }
-             | _ ->
+             | InnerJoin ->
                  (keyword "ON" >>. expr |>> fun onExpr -> { Kind = kind; Table = table; On = onExpr; Using = [] })
-                 <|> (usingClause |>> fun cols -> { Kind = kind; Table = table; On = Lit(VInt 1L); Using = cols }))
+                 <|> (usingClause |>> fun cols -> { Kind = kind; Table = table; On = Lit(VInt 1L); Using = cols })
+                 <|> preturn { Kind = kind; Table = table; On = Lit(VInt 1L); Using = [] }
+             | LeftJoin
+             | RightJoin ->
+                 (keyword "ON" >>. expr |>> fun onExpr -> { Kind = kind; Table = table; On = onExpr; Using = [] })
+                 <|> (usingClause |>> fun cols -> { Kind = kind; Table = table; On = Lit(VInt 1L); Using = cols })
+             | CrossJoin -> fail "CROSS JOIN is parsed separately")
 
 /// `GROUP BY expr, ... [WITH ROLLUP]` — the flag rides along with the keys
 /// since it only ever qualifies them.

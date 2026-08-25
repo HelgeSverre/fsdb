@@ -166,6 +166,18 @@ let tests =
                       "every combination"
               | other -> failtestf "expected a 2x2 Cartesian product, got %A" other
 
+          testCase "INNER JOIN without a condition produces the full Cartesian product"
+          <| fun _ ->
+              let store = newStore ()
+              runDefault store "CREATE TABLE a (x INT)" |> ignore
+              runDefault store "CREATE TABLE b (y INT)" |> ignore
+              runDefault store "INSERT INTO a VALUES (1), (2)" |> ignore
+              runDefault store "INSERT INTO b VALUES (10), (20)" |> ignore
+
+              match runDefault store "SELECT x, y FROM a JOIN b ORDER BY x, y" with
+              | ResultSet([ "x"; "y" ], rows) -> Expect.equal rows.Length 4 "every combination"
+              | other -> failtestf "expected a 2x2 Cartesian product, got %A" other
+
           testCase "FROM t1, t2 (comma/implicit join) works the same as an explicit CROSS JOIN"
           <| fun _ ->
               let store = newStore ()

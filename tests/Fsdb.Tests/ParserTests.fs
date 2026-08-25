@@ -2071,6 +2071,12 @@ let tests =
                     | Select { Joins = [ { Kind = CrossJoin; On = Lit(VInt 1L) } ] } -> ()
                     | other -> failtestf "expected a CrossJoin, got %A" other
 
+                testCase "INNER JOIN may omit its condition"
+                <| fun _ ->
+                    match parseOk "SELECT * FROM a INNER JOIN b" with
+                    | Select { Joins = [ { Kind = InnerJoin; On = Lit(VInt 1L) } ] } -> ()
+                    | other -> failtestf "expected an unconditional InnerJoin, got %A" other
+
                 testCase "CROSS JOIN (SELECT ...) AS t is a derived table join source"
                 <| fun _ ->
                     match parseOk "SELECT * FROM a CROSS JOIN (SELECT id FROM t) AS derived" with
