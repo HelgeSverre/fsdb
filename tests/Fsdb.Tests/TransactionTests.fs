@@ -482,36 +482,63 @@ let tests =
               let session, _ = handle session "COMMIT"
               ignore session
 
-          testCase "conflicting concurrent transactions return a lock wait timeout"
+          testCase "a transaction can retry after its row wait times out"
           <| fun _ ->
               let store = Fsdb.Storage.create ()
               let first = create 1 store
               let first, _ = handle first "CREATE TABLE tx_hot (id INT PRIMARY KEY, n INT)"
               let first, _ = handle first "INSERT INTO tx_hot VALUES (1, 0)"
               let first, _ = handle first "BEGIN"
-              let second, _ = handle (create 2 store) "BEGIN"
+              let second, _ = handle (create 2 store) "SET innodb_lock_wait_timeout = 1"
+              let second, _ = handle second "BEGIN"
               let first, firstUpdate = handle first "UPDATE tx_hot SET n = n + 1 WHERE id = 1"
 
               match firstUpdate with
               | Affected 1UL -> ()
               | result -> failtestf "expected the first increment to succeed, got %A" result
 
-              let second, secondResult = handle second "UPDATE tx_hot SET n = n + 1 WHERE id = 1"
+              let second, timedOut = handle second "UPDATE tx_hot SET n = n + 1 WHERE id = 1"
 
-              match secondResult with
-              | Affected 1UL -> ()
-              | result -> failtestf "expected the second snapshot update to succeed locally, got %A" result
+              match timedOut with
+              | Err(1205, _) -> ()
+              | result -> failtestf "expected the row wait to time out, got %A" result
 
               let _, firstCommit = handle first "COMMIT"
               Expect.equal firstCommit (Affected 0UL) "the first writer commits"
 
-              match handle second "COMMIT" |> snd with
-              | Err(1205, _) -> ()
-              | result -> failtestf "expected the overlapping writer to conflict, got %A" result
+              let second, secondUpdate = handle second "UPDATE tx_hot SET n = n + 1 WHERE id = 1"
+              Expect.equal secondUpdate (Affected 1UL) "the timed-out transaction can retry"
+              Expect.equal (handle second "COMMIT" |> snd) (Affected 0UL) "the retry commits"
 
               match handle (create 3 store) "SELECT n FROM tx_hot WHERE id = 1" |> snd with
-              | ResultSet(_, [ [ Some "1" ] ]) -> ()
-              | result -> failtestf "expected only the committed increment, got %A" result
+              | ResultSet(_, [ [ Some "2" ] ]) -> ()
+              | result -> failtestf "expected both serialized increments, got %A" result
+
+          testCase "a timed-out multi-row wait releases its partial claims"
+          <| fun _ ->
+              let store = Fsdb.Storage.create ()
+              let setup = create 1 store
+              let setup, _ = handle setup "CREATE TABLE tx_hot (id INT PRIMARY KEY, n INT)"
+              let _, _ = handle setup "INSERT INTO tx_hot VALUES (1, 0), (2, 0)"
+
+              let owner, _ = handle (create 2 store) "BEGIN"
+              let owner, _ = handle owner "UPDATE tx_hot SET n = n + 1 WHERE id = 2"
+              let waiter, _ = handle (create 3 store) "SET innodb_lock_wait_timeout = 1"
+              let waiter, _ = handle waiter "BEGIN"
+
+              match handle waiter "UPDATE tx_hot SET n = n + 1 WHERE id >= 1 AND id <= 2" |> snd with
+              | Err(1205, _) -> ()
+              | result -> failtestf "expected the second row claim to time out, got %A" result
+
+              let independent, _ = handle (create 4 store) "BEGIN"
+
+              match handle independent "UPDATE tx_hot SET n = n + 1 WHERE id = 1" with
+              | independent, Affected 1UL ->
+                  Expect.equal (handle independent "COMMIT" |> snd) (Affected 0UL) "the released row claim commits"
+              | _, result -> failtestf "expected the partial claim on row one to be released, got %A" result
+
+              handle waiter "ROLLBACK" |> ignore
+              handle owner "ROLLBACK" |> ignore
 
           testCase "concurrent transactions merge updates to different rows in the same table"
           <| fun _ ->

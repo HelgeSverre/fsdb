@@ -1919,6 +1919,65 @@ let tests =
               | ResultSet(_, rows) -> Expect.equal rows [ [ Some "1"; Some "10" ]; [ Some "2"; Some "20" ] ] "both row versions are retained"
               | other -> failtestf "expected committed rows, got %A" other
 
+          testCase "same-row transactions wait and update the committed value"
+          <| fun _ ->
+              let store = Fsdb.Storage.create ()
+              let setup = create 1 store
+              let setup, _ = handle setup "CREATE TABLE tx_rows (id INT PRIMARY KEY, n INT)"
+              let _, _ = handle setup "INSERT INTO tx_rows VALUES (1, 0)"
+
+              let first, _ = handle (create 2 store) "BEGIN"
+              let first, firstUpdate = handle first "UPDATE tx_rows SET n = n + 1 WHERE id = 1"
+              Expect.equal firstUpdate (Affected 1UL) "the first transaction owns the row"
+
+              let second, _ = handle (create 3 store) "BEGIN"
+              let waiting = System.Threading.Tasks.Task.Run(fun () -> handle second "UPDATE tx_rows SET n = n + 1 WHERE id = 1")
+              Expect.isFalse (waiting.Wait(TimeSpan.FromMilliseconds 150.0)) "the second transaction waits for the row"
+
+              match handle first "COMMIT" |> snd with
+              | Affected 0UL -> ()
+              | other -> failtestf "expected the first commit to succeed, got %A" other
+
+              Expect.isTrue (waiting.Wait(TimeSpan.FromSeconds 3.0)) "the waiting update resumes after commit"
+              let second, secondUpdate = waiting.Result
+              Expect.equal secondUpdate (Affected 1UL) "the second transaction updates the committed row"
+
+              match handle second "COMMIT" |> snd with
+              | Affected 0UL -> ()
+              | other -> failtestf "expected the second commit to succeed, got %A" other
+
+              match handle (create 4 store) "SELECT n FROM tx_rows WHERE id = 1" |> snd with
+              | ResultSet(_, [ [ Some "2" ] ]) -> ()
+              | other -> failtestf "expected both increments, got %A" other
+
+          testCase "rolling back releases transactional row ownership"
+          <| fun _ ->
+              let store = Fsdb.Storage.create ()
+              let setup = create 1 store
+              let setup, _ = handle setup "CREATE TABLE tx_rows (id INT PRIMARY KEY, n INT)"
+              let _, _ = handle setup "INSERT INTO tx_rows VALUES (1, 0)"
+
+              let first, _ = handle (create 2 store) "BEGIN"
+              let first, firstUpdate = handle first "UPDATE tx_rows SET n = n + 10 WHERE id = 1"
+              Expect.equal firstUpdate (Affected 1UL) "the first transaction owns the row"
+
+              let second, _ = handle (create 3 store) "BEGIN"
+              let waiting = System.Threading.Tasks.Task.Run(fun () -> handle second "UPDATE tx_rows SET n = n + 1 WHERE id = 1")
+              Expect.isFalse (waiting.Wait(TimeSpan.FromMilliseconds 150.0)) "the second transaction waits for the row"
+
+              match handle first "ROLLBACK" |> snd with
+              | Affected 0UL -> ()
+              | other -> failtestf "expected rollback to succeed, got %A" other
+
+              Expect.isTrue (waiting.Wait(TimeSpan.FromSeconds 3.0)) "the waiting update resumes after rollback"
+              let second, secondUpdate = waiting.Result
+              Expect.equal secondUpdate (Affected 1UL) "the second transaction updates the original row"
+              handle second "COMMIT" |> snd |> Expect.equal <| Affected 0UL <| "the waiting transaction commits"
+
+              match handle (create 4 store) "SELECT n FROM tx_rows WHERE id = 1" |> snd with
+              | ResultSet(_, [ [ Some "1" ] ]) -> ()
+              | other -> failtestf "expected the rolled-back increment to be absent, got %A" other
+
           testCase "transaction access modes, chaining, and SET CHARACTER SET are enforced"
           <| fun _ ->
               let session = create 1 (Fsdb.Storage.create ())

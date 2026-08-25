@@ -173,9 +173,11 @@ top-(n+offset) set instead of materializing the full sort.
 Databases and tables live in a value-swapped catalog. A transaction establishes
 a repeatable-read snapshot on its first database statement and keeps writes
 private until commit. Commit performs a row-level three-way merge: disjoint
-concurrent changes combine, while overlapping changes fail with MySQL's
-retryable 1205 error. Immutable row pages let the merge inspect only pages
-changed from the transaction snapshot and maintain indexes incrementally.
+concurrent changes combine, while indexed point/range UPDATE and DELETE
+statements wait for an existing row owner and rebase before applying their
+change. Remaining overlapping write shapes fail with MySQL's retryable 1205
+error. Immutable row pages let the merge inspect only pages changed from the
+transaction snapshot and maintain indexes incrementally.
 PK/UNIQUE and composite secondary equality lookups go through maps keyed by
 the columns' collation-folded encodings, so `utf8mb4_0900_ai_ci` keys collide
 exactly as MySQL's do. Direct literal ranges in a single-table `SELECT` can

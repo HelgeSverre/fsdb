@@ -12604,5 +12604,18 @@ let rec executeAs
     | Explain inner ->
         ids, explainStatement store registry dbName inner
 
+let transactionRowTargets (store: Store) (dbName: string) (statement: Statement) : (string * string * RowId list) option =
+    let targets (tableRef: TableRef) predicate =
+        let database = tableRef.Database |> Option.defaultValue dbName
+
+        tryEqualityLookup store dbName tableRef predicate
+        |> Option.orElseWith (fun () -> tryRangeLookup store dbName tableRef predicate)
+        |> Option.map (fun (_, rows) -> database, tableRef.Table, rows |> List.map fst)
+
+    match statement with
+    | Update update when update.Ctes.IsEmpty && update.Joins.IsEmpty -> targets update.From update.Where
+    | Delete delete when delete.Ctes.IsEmpty && delete.Joins.IsEmpty -> targets delete.From delete.Where
+    | _ -> None
+
 let execute (store: Store) (registry: Registry) (dbName: string) (ids: int64 * int64) (foundRows: bool) (stmt: Statement) =
     executeAs store registry dbName ids foundRows (Auth.account "root" "%") stmt

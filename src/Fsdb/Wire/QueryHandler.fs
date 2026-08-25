@@ -1000,7 +1000,9 @@ let private setCharacterSet = Regex(@"^SET\s+CHARACTER\s+SET\s+'?(\w+)'?$", Rege
 
 let private rebaseTransactionSnapshot (session: Session) (tx: Transaction) : Catalog * Store =
     let baseCatalog = session.Store.Catalog
-    let snapshot = Storage.beginTransactionSnapshot session.Store
+    let snapshot =
+        Storage.beginTransactionSnapshot session.Store
+        |> Storage.carryTransactionLocks tx.Snapshot
 
     Storage.mergeCatalogInto snapshot tx.BaseCatalog tx.Snapshot.Catalog
 
@@ -1009,6 +1011,15 @@ let private rebaseTransactionSnapshot (session: Session) (tx: Transaction) : Cat
     | _ -> ()
 
     baseCatalog, snapshot
+
+let private lockWaitTimeout (session: Session) =
+    lookupVar session "innodb_lock_wait_timeout"
+    |> Option.flatten
+    |> Option.bind (fun value ->
+        match Int32.TryParse value with
+        | true, seconds -> Some(TimeSpan.FromSeconds(float seconds))
+        | _ -> None)
+    |> Option.defaultWith Limits.lockWaitTimeout
 
 /// Commits the open transaction by publishing its private catalog. Ordinary
 /// isolation levels merge disjoint row changes; SERIALIZABLE validates the
@@ -1019,11 +1030,7 @@ let private commitSession (session: Session) : Session =
     | Some tx ->
         let dbName = session.Database |> Option.defaultValue defaultDatabase
 
-        let timeout =
-            lookupVar session "innodb_lock_wait_timeout"
-            |> Option.flatten
-            |> Option.bind (fun value -> match Int32.TryParse value with | true, seconds -> Some(TimeSpan.FromSeconds(float seconds)) | _ -> None)
-            |> Option.defaultWith Limits.lockWaitTimeout
+        let timeout = lockWaitTimeout session
 
         let committedSnapshot =
             match tx.Isolation with
@@ -1040,6 +1047,7 @@ let private commitSession (session: Session) : Session =
             tx.Snapshot
 
         Storage.commitTransactionEvents session.Store committedSnapshot
+        Storage.releaseTransactionLocks tx.Snapshot
 
         { session with Tx = None }
     | None -> session
@@ -1055,6 +1063,7 @@ let private rollbackSession (session: Session) : Session =
     match session.Tx with
     | Some tx ->
         Storage.bumpAutoIncrementsInto session.Store tx.Snapshot.Catalog
+        Storage.releaseTransactionLocks tx.Snapshot
     | None -> ()
 
     { session with Tx = None }
@@ -1081,7 +1090,7 @@ let private beginTransaction (readOnly: bool) (session: Session) : Session =
     let session = commitSession session
     let isolation = configuredIsolation session
     let baseCatalog = session.Store.Catalog
-    let snapshot = Storage.beginTransactionSnapshot session.Store
+    let snapshot = Storage.beginTransaction session.Store
 
     { session with
         PendingTransactionReadOnly = None
@@ -1111,7 +1120,9 @@ let startTransactionStatement (session: Session) : Session =
                         Seeded = true } }
     | Some tx when not tx.Seeded ->
         let baseCatalog = session.Store.Catalog
-        let snapshot = Storage.beginTransactionSnapshot session.Store
+        let snapshot =
+            Storage.beginTransactionSnapshot session.Store
+            |> Storage.carryTransactionLocks tx.Snapshot
 
         let savepoints =
             tx.Savepoints
@@ -1130,6 +1141,27 @@ let startTransactionStatement (session: Session) : Session =
                         Savepoints = savepoints } }
     | Some _ -> session
     | None -> session
+
+let private prepareTransactionWrite (statement: Statement) (session: Session) : Session =
+    match session.Tx with
+    | None -> session
+    | Some transaction ->
+        let dbName = session.Database |> Option.defaultValue defaultDatabase
+
+        match Executor.transactionRowTargets transaction.Snapshot dbName statement with
+        | None -> session
+        | Some(database, table, rowIds) when rowIds.IsEmpty -> session
+        | Some(database, table, rowIds) ->
+            Storage.acquireTransactionRows (lockWaitTimeout session) transaction.Snapshot database table rowIds
+            let baseCatalog, snapshot = rebaseTransactionSnapshot session transaction
+
+            { session with
+                Tx =
+                    Some
+                        { transaction with
+                            Snapshot = snapshot
+                            BaseCatalog = baseCatalog
+                            Seeded = true } }
 
 /// Rolls an abandoned connection's transaction back.
 let closeSession (session: Session) : unit =
@@ -1348,7 +1380,11 @@ let private executeParsed (session: Session) (stmt: Statement) : Session * Query
         session, result
 
     match session.Tx with
-    | Some _ -> execute (startTransactionStatement session)
+    | Some _ ->
+        session
+        |> startTransactionStatement
+        |> prepareTransactionWrite stmt
+        |> execute
     | None -> execute session
 
 let private executeStatement (session: Session) (sql: string) (upper: string) : Session * QueryResult =
@@ -2235,6 +2271,10 @@ let private recordResult ((session, result): Session * QueryResult) : Session * 
 
     session, result
 
+let private abortTransaction (session: Session) =
+    session.Tx |> Option.iter (fun transaction -> Storage.releaseTransactionLocks transaction.Snapshot)
+    { session with Tx = None }
+
 let private recoverExecutionError (session: Session) (description: string) (error: exn) : Session * QueryResult =
     match error with
     | Storage.LockWaitTimeout dbName ->
@@ -2249,10 +2289,10 @@ let private recoverExecutionError (session: Session) (description: string) (erro
     // must not leave a transaction containing partially applied state.
     | Functions.SqlError(code, message) ->
         Log.diagnostic "fsdb: ERR %d %s -- %s" code message description
-        { session with Tx = None }, Err(code, message)
+        abortTransaction session, Err(code, message)
     | ex ->
         Log.diagnostic "fsdb: EXN %s -- %s" ex.Message description
-        { session with Tx = None }, Err(1105, "Internal error")
+        abortTransaction session, Err(1105, "Internal error")
 
 let private preservesDiagnostics (sql: string) : bool =
     let upper = sql.Trim().ToUpperInvariant()
@@ -2292,6 +2332,7 @@ let handle (session: Session) (rawSql: string) : Session * QueryResult =
             | result -> result
         with
         | :? OperationCanceledException ->
+            abortTransaction session |> ignore
             reraise ()
         | ex -> recoverExecutionError session (sprintf "query: %s" (Log.redactSql rawSql)) ex)
 

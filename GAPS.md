@@ -217,12 +217,12 @@ comparisons; default utf8mb4_0900_ai_ci.
 ## 7. Transactions and concurrency
 
 Working: private-snapshot transactions with three-way optimistic merge and a
-point-update fast path for disjoint writes, retryable 1205 on same-row
-conflicts, merged-result revalidation of unique keys and FKs, savepoints
-with MySQL establishment-order semantics, autocommit implicit transactions,
-read-only transactions never blocking writers, per-database sharding so
-cross-database writers never contend, 4096-stripe row locks for indexed
-updates, InnoDB-style burned AUTO_INCREMENT on rollback.
+point-update fast path for disjoint writes, wait-and-rebase coordination for
+indexed point/range UPDATE and DELETE statements, merged-result revalidation
+of unique keys and FKs, savepoints with MySQL establishment-order semantics,
+autocommit implicit transactions, read-only transactions never blocking
+writers, per-database sharding so cross-database writers never contend,
+4,096-stripe row ownership, and InnoDB-style burned AUTO_INCREMENT on rollback.
 `SERIALIZABLE` uses conservative whole-catalog validation for writing
 transactions, preventing write skew while keeping read-only transactions
 lock-free.
@@ -232,8 +232,8 @@ lock-free.
 | SERIALIZABLE locking behavior | predicate/gap locks and blocking reads | conservative snapshot validation rejects any intervening catalog change with 1205 when the transaction writes; read-only transactions retain snapshot semantics | low | divergence |
 | READ COMMITTED | a fresh nonlocking read view per statement | a fresh committed view plus the transaction's own successful writes per parsed statement; locking reads remain unsupported | medium | partial |
 | READ UNCOMMITTED | dirty reads | refused with 1235 | medium | refusal |
-| Deadlock errors | 1213 deadlock detection with victim selection | write-write conflicts surface as lock-wait timeout 1205; no deadlock classification | low | divergence |
-| Write parallelism within a database | row-lock concurrency | indexed autocommit updates use row stripes; private transactions execute concurrently and disjoint row versions merge optimistically; publishing a new immutable database root remains one brief per-database critical section, and durable commit events are sequenced | medium (throughput) | partial |
+| Deadlock errors | 1213 deadlock detection with victim selection | waits honor `innodb_lock_wait_timeout` and return 1205; cycles are not detected or assigned a 1213 victim | low | divergence |
+| Write parallelism within a database | row-lock concurrency | indexed autocommit and transaction UPDATE/DELETE paths coordinate row stripes; full-scan, CTE, multi-table, and insert/upsert transaction writes still rely on optimistic merge; publishing a new immutable database root remains one brief per-database critical section, and durable commit events are sequenced | medium (throughput) | partial |
 | Multi-database scaling | near-linear with connections | database roots are sharded, but the 2026-08-25 rerun exposed transaction-conflict failures during the concurrent setup phase before it could produce a valid scaling measurement | medium | unverified |
 | Cross-database snapshots | linearizable catalog reads | the `Store.Catalog` projection is explicitly not atomic across databases mid-commit | low | divergence |
 
@@ -412,7 +412,7 @@ that predates the implementation it measured:
 | Finding | Detail | Status |
 |---|---|---|
 | Planner/CTE syntax | two deterministic depth-three campaigns (2,000 and 10,000 mutations) exposed unconditional INNER JOIN, eager unused-CTE, and incomplete MATCH grammar differences; fixed campaigns now pass with zero differences | resolved 2026-08-25 |
-| Same-row transaction contention | 32 workers over 16 hot accounts produced 2,541 fsdb 1205 conflicts where MySQL committed all 2,910 non-rollback transactions; a 4,096-account run reduced this to 9/1,455, confirming disjoint merge while retaining the same-row wait-policy gap | current limitation |
+| Same-row transaction contention | the original 32-worker/16-hot-account campaign produced 2,541 fsdb 1205 conflicts; the 2026-08-25 wait-and-rebase rerun committed all 1,455 non-rollback transactions with exact state parity and zero failures. Throughput remained 86 fsdb tx/s versus 5,246 MySQL tx/s, with p99 9,839 ms versus 13 ms | correctness resolved; performance open |
 | Multi-database scaling | the historical campaign predates sharded database roots; the 2026-08-25 rerun failed during concurrent setup with 1205 before a trustworthy scaling ratio could be measured (`2026-08-17-multidb-concurrency-campaign.md`) | unverified |
 | Numeric error shape | 1690 message lacks the offending expression text (`2026-08-19-probe-corpus-triage.md`) | ponytail ceiling |
 | Temporal/error-shape ceilings | `DATE 'bad'` → 1064 vs MySQL 1525; parenthesized set-op groups `(A UNION B) INTERSECT C` refused | ponytail ceilings |
@@ -467,9 +467,9 @@ implementation effort:
 1. General cost-based planning beyond qualified physical inner joins, plus
    correlated forms that cannot use a direct equality probe. Correctness holds,
    but scale still diverges from MySQL past small data.
-2. Same-row transaction waiting/deadlock behavior and READ UNCOMMITTED.
-   Disjoint transactions publish concurrently; overlapping versions return
-   1205 instead of waiting and selecting a 1213 deadlock victim.
+2. Transaction scheduling and READ UNCOMMITTED. Indexed point/range UPDATE and
+   DELETE statements wait and rebase, but deadlock victim selection, dirty
+   reads, and the remaining transaction write shapes are not implemented.
 3. Complex/nested updatable views and the stored-program control language
    inside trigger bodies. Ordered multi-trigger slots and sequential compound
    DML bodies are covered.

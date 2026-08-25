@@ -251,6 +251,14 @@ let splitQualified (defaultDb: string) (name: string) : string * string =
     | [| db; tbl |] -> stripBackticks db, stripBackticks tbl
     | _ -> defaultDb, stripBackticks name
 
+type RowLockStripe =
+    { SyncRoot: obj
+      mutable Owner: int64 option }
+
+type TransactionLockContext =
+    { Owner: int64
+      HeldStripes: Collections.Generic.HashSet<int> }
+
 /// `ForeignKeyChecks` gates every FK enforcement in this module (cascading
 /// deletes, `RESTRICT`, parent-existence checks on insert/update) — the
 /// storage-level mirror of MySQL's session `FOREIGN_KEY_CHECKS` variable.
@@ -347,10 +355,12 @@ type Store =
       /// `ref` — so its calls stay ordered by this lock, same as
       /// `Persistence.snapshotNow`'s own use of it.
       Lock: obj
-      /// Indexed updates lock stable row identities before reading their
-      /// current values. Fixed stripes bound lock memory while disjoint rows
-      /// can still be prepared concurrently.
-      RowLocks: obj array }
+      /// Indexed updates coordinate stable row identities before reading
+      /// their current values. Logical ownership may span transaction
+      /// statements without depending on managed thread affinity.
+      RowLocks: RowLockStripe array
+      RowLockSequence: int64 array
+      TransactionLocks: TransactionLockContext option }
 
     /// Assembles a point-in-time `Catalog` (whole-map) view across every
     /// database's independent slot — an O(number of databases) allocation,
@@ -460,7 +470,39 @@ let beginTransactionSnapshot (store: Store) : Store =
       // by `emit`'s no-buffer-no-subscriber branch.
       PendingEvents = if store.OnCommit.Count > 0 || store.PendingEvents.IsSome then Some(ResizeArray()) else None
       Lock = obj ()
-      RowLocks = store.RowLocks }
+      RowLocks = store.RowLocks
+      RowLockSequence = store.RowLockSequence
+      TransactionLocks = store.TransactionLocks }
+
+let beginTransaction (store: Store) : Store =
+    let snapshot = beginTransactionSnapshot store
+    let owner = Threading.Interlocked.Increment(&store.RowLockSequence.[0])
+
+    { snapshot with
+        TransactionLocks =
+            Some
+                { Owner = owner
+                  HeldStripes = Collections.Generic.HashSet<int>() } }
+
+let carryTransactionLocks (source: Store) (snapshot: Store) : Store =
+    { snapshot with TransactionLocks = source.TransactionLocks }
+
+let private releaseLockStripes (store: Store) (context: TransactionLockContext) (indices: seq<int>) =
+    for index in indices do
+        let stripe = store.RowLocks.[index]
+
+        lock stripe.SyncRoot (fun () ->
+            if stripe.Owner = Some context.Owner then
+                stripe.Owner <- None
+                lock context.HeldStripes (fun () -> context.HeldStripes.Remove index |> ignore)
+                Threading.Monitor.PulseAll stripe.SyncRoot)
+
+let releaseTransactionLocks (store: Store) : unit =
+    match store.TransactionLocks with
+    | None -> ()
+    | Some context ->
+        let stripes = lock context.HeldStripes (fun () -> context.HeldStripes |> Seq.toArray)
+        releaseLockStripes store context stripes
 
 /// Flushes a committed transaction's buffered events onto `store`, if it
 /// buffered any — a no-op for an empty or subscriber-less snapshot. Call
@@ -1799,26 +1841,85 @@ let private validateMergedDatabase (dbName: string) (db: Database) : unit =
                                 conflict ()
                 | _ -> conflict ()
 
-let private withRowLocks (store: Store) (dbName: string) (tableName: string) (rowIds: RowId list) body =
+let private withRowLocksFor
+    (timeout: TimeSpan)
+    (store: Store)
+    (dbName: string)
+    (tableName: string)
+    (rowIds: RowId list)
+    body
+    =
     let stripeCount = store.RowLocks.Length
-
-    let stripeIndex rowId =
+    let tableOffset =
         HashCode.Combine(
             StringComparer.OrdinalIgnoreCase.GetHashCode dbName,
-            StringComparer.OrdinalIgnoreCase.GetHashCode tableName,
-            RowId.value rowId
+            StringComparer.OrdinalIgnoreCase.GetHashCode tableName
         )
         &&& Int32.MaxValue
-        |> fun hash -> hash % stripeCount
+
+    let stripeIndex rowId =
+        (int64 tableOffset + int64 (RowId.value rowId)) % int64 stripeCount |> int
 
     let stripes = rowIds |> List.map stripeIndex |> List.distinct |> List.sort
+    let context, releaseAfter =
+        match store.TransactionLocks with
+        | Some context -> context, false
+        | None ->
+            { Owner = Threading.Interlocked.Increment(&store.RowLockSequence.[0])
+              HeldStripes = Collections.Generic.HashSet<int>() },
+            true
 
-    let rec acquire remaining =
-        match remaining with
-        | [] -> body ()
-        | stripe :: rest -> lock store.RowLocks.[stripe] (fun () -> acquire rest)
+    let deadline = DateTime.UtcNow + timeout
+    let claimed = ResizeArray<int>()
 
-    acquire stripes
+    let acquire index =
+        let stripe = store.RowLocks.[index]
+
+        lock stripe.SyncRoot (fun () ->
+            let rec waitForOwner () =
+                match stripe.Owner with
+                | None ->
+                    stripe.Owner <- Some context.Owner
+                    lock context.HeldStripes (fun () -> context.HeldStripes.Add index |> ignore)
+                    claimed.Add index
+                | Some owner when owner = context.Owner -> ()
+                | Some _ ->
+                    let remaining = deadline - DateTime.UtcNow
+
+                    if remaining <= TimeSpan.Zero || not (Threading.Monitor.Wait(stripe.SyncRoot, remaining)) then
+                        raise (LockWaitTimeout dbName)
+
+                    waitForOwner ()
+
+            waitForOwner ())
+
+    try
+        try
+            stripes |> List.iter acquire
+            body ()
+        with _ ->
+            if not releaseAfter then
+                releaseLockStripes store context claimed
+
+            reraise ()
+    finally
+        if releaseAfter then
+            let temporary = { store with TransactionLocks = Some context }
+            releaseTransactionLocks temporary
+
+let private withRowLocks store dbName tableName rowIds body =
+    withRowLocksFor (Fsdb.Limits.lockWaitTimeout ()) store dbName tableName rowIds body
+
+let acquireTransactionRows
+    (timeout: TimeSpan)
+    (store: Store)
+    (dbName: string)
+    (tableName: string)
+    (rowIds: RowId list)
+    : unit =
+    match store.TransactionLocks with
+    | Some _ -> withRowLocksFor timeout store dbName tableName rowIds ignore
+    | None -> invalidArg (nameof store) "transaction row claims require a transaction snapshot"
 
 // ---------------------------------------------------------------------------
 // The built-in `mysql` system schema: real stored tables (not virtual
@@ -2105,7 +2206,12 @@ let create () : Store =
       OnCommit = ResizeArray()
       PendingEvents = None
       Lock = obj ()
-      RowLocks = Array.init 4096 (fun _ -> obj ()) }
+      RowLocks =
+        Array.init 4096 (fun _ ->
+            { SyncRoot = obj ()
+              Owner = None })
+      RowLockSequence = [| 0L |]
+      TransactionLocks = None }
 
 let private reindexRow
     (columns: ColumnDef list)
