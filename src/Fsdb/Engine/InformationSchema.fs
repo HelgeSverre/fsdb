@@ -1,10 +1,6 @@
-/// `information_schema` as virtual tables projected from `Storage.Catalog`
-/// at query time — nothing here is ever materialized into the catalog
-/// itself; `scan` below builds a table's columns/rows fresh from whatever
-/// the catalog looks like right now. Wired into `Executor.execute`'s
-/// `Select` case: a `FROM information_schema.<table>` (case-insensitive,
-/// qualified or via `USE information_schema`) resolves here instead of
-/// `Storage.scan`.
+/// `information_schema` virtual tables projected from `Storage.Catalog` at
+/// query time. `FROM information_schema.<table>` resolves here instead of
+/// materializing metadata in the catalog.
 module Fsdb.InformationSchema
 
 open System
@@ -39,14 +35,15 @@ let private allTables (catalog: Catalog) : (string * Table) list =
     |> Map.toList
     |> List.collect (fun (dbName, db) -> db |> Map.toList |> List.map (fun (_, table) -> dbName, table))
 
+let private mysqlTable (catalog: Catalog) table =
+    catalog |> Map.tryFind "mysql" |> Option.bind (Map.tryFind table)
+
 /// Purely resolves a stored view's output shape. The executor supplies this
 /// because it owns view-definition parsing and expression type inference.
 type ViewColumns = string -> string -> ColumnDef list option
 
 let private viewCatalogEntries (catalog: Catalog) : SystemCatalog.View.Entry list =
-    catalog
-    |> Map.tryFind "mysql"
-    |> Option.bind (Map.tryFind "views")
+    mysqlTable catalog "views"
     |> Option.map (fun table ->
         table.RowsArray
         |> Seq.choose SystemCatalog.View.tryRead
@@ -687,9 +684,7 @@ let private tableConstraintsColumns =
       strCol "ENFORCED" ]
 
 let private storedCheckRows (catalog: Catalog) : Value[] list =
-    catalog
-    |> Map.tryFind "mysql"
-    |> Option.bind (Map.tryFind "check_constraints")
+    mysqlTable catalog "check_constraints"
     |> Option.map (fun table -> table.RowsArray |> List.ofSeq)
     |> Option.defaultValue []
 
@@ -1060,25 +1055,20 @@ let private routinesColumns =
       strCol "DATABASE_COLLATION" ]
 
 let private routinesRows (catalog: Catalog) =
-    let rows =
-        catalog
-        |> Map.tryFind "mysql"
-        |> Option.bind (Map.tryFind "routines")
-        |> Option.map (_.RowsArray >> List.ofSeq)
-        |> Option.defaultValue []
+    mysqlTable catalog "routines"
+    |> Option.map (fun table ->
+        table.RowsArray
+        |> Seq.choose SystemCatalog.Routine.tryRead
+        |> Seq.map (fun routine ->
+            let created = routine.Created |> Option.map VDateTime |> Option.defaultValue VNull
 
-    rows
-    |> List.choose (fun row ->
-        if row.Length < 5 then
-            None
-        else
-            let schema, name, definition, created, definer = row.[0], row.[1], row.[2], row.[3], row.[4]
-
-            Some
-                [| name; vs "def"; schema; name; vs "PROCEDURE"; vs ""; VNull; VNull; VNull; VNull; VNull; VNull
-                   VNull; VNull; vs "SQL"; definition; VNull; vs "SQL"; vs "SQL"; vs "NO"; vs "CONTAINS SQL"; VNull
-                   vs "DEFINER"; created; created; vs "STRICT_TRANS_TABLES,NO_ZERO_IN_DATE,NO_ZERO_DATE,ERROR_FOR_DIVISION_BY_ZERO,NO_ENGINE_SUBSTITUTION"
-                   vs ""; definer; vs "utf8mb4"; vs "utf8mb4_0900_ai_ci"; vs "utf8mb4_0900_ai_ci" |])
+            [| vs routine.Name; vs "def"; vs routine.Schema; vs routine.Name; vs "PROCEDURE"; vs ""; VNull; VNull
+               VNull; VNull; VNull; VNull; VNull; VNull; vs "SQL"; vs routine.Definition; VNull; vs "SQL"; vs "SQL"
+               vs "NO"; vs "CONTAINS SQL"; VNull; vs "DEFINER"; created; created
+               vs "STRICT_TRANS_TABLES,NO_ZERO_IN_DATE,NO_ZERO_DATE,ERROR_FOR_DIVISION_BY_ZERO,NO_ENGINE_SUBSTITUTION"
+               vs ""; vs routine.Definer; vs "utf8mb4"; vs "utf8mb4_0900_ai_ci"; vs "utf8mb4_0900_ai_ci" |])
+        |> List.ofSeq)
+    |> Option.defaultValue []
 
 let private parametersColumns =
     [ strCol "SPECIFIC_CATALOG"
@@ -1123,9 +1113,7 @@ let private triggersColumns =
       strCol "DATABASE_COLLATION" ]
 
 let private triggerCatalogRows (catalog: Catalog) : SystemCatalog.Trigger.Entry list =
-    catalog
-    |> Map.tryFind "mysql"
-    |> Option.bind (Map.tryFind "triggers")
+    mysqlTable catalog "triggers"
     |> Option.map (fun t ->
         t.RowsArray
         |> Seq.choose SystemCatalog.Trigger.tryRead
@@ -1192,30 +1180,25 @@ let private eventsRows (catalog: Catalog) =
             RegexOptions.IgnoreCase
         )
 
-    let rows =
-        catalog
-        |> Map.tryFind "mysql"
-        |> Option.bind (Map.tryFind "events")
-        |> Option.map (_.RowsArray >> List.ofSeq)
-        |> Option.defaultValue []
-
-    rows
-    |> List.choose (fun row ->
-        if row.Length < 7 then
-            None
-        else
-            let schedule = toText row.[2] |> Option.defaultValue ""
-            let recurring = recurringSchedule.Match schedule
+    mysqlTable catalog "events"
+    |> Option.map (fun table ->
+        table.RowsArray
+        |> Seq.choose SystemCatalog.Event.tryRead
+        |> Seq.map (fun event ->
+            let recurring = recurringSchedule.Match event.Schedule
             let eventType, intervalValue, intervalField =
                 if recurring.Success then
                     vs "RECURRING", vs recurring.Groups.["value"].Value, vs (recurring.Groups.["field"].Value.ToUpperInvariant())
                 else
                     vs "ONE TIME", VNull, VNull
 
-            Some
-                [| vs "def"; row.[0]; row.[1]; row.[5]; vs "SYSTEM"; vs "SQL"; row.[3]; eventType; VNull
-                   intervalValue; intervalField; vs ""; VNull; VNull; row.[6]; vs "NOT PRESERVE"; row.[4]; row.[4]; VNull
-                   vs ""; VInt 1L; vs "utf8mb4"; vs "utf8mb4_0900_ai_ci"; vs "utf8mb4_0900_ai_ci" |])
+            let created = event.Created |> Option.map VDateTime |> Option.defaultValue VNull
+
+            [| vs "def"; vs event.Schema; vs event.Name; vs event.Definer; vs "SYSTEM"; vs "SQL"; vs event.Definition
+               eventType; VNull; intervalValue; intervalField; vs ""; VNull; VNull; vs event.Status; vs "NOT PRESERVE"
+               created; created; VNull; vs ""; VInt 1L; vs "utf8mb4"; vs "utf8mb4_0900_ai_ci"; vs "utf8mb4_0900_ai_ci" |])
+        |> List.ofSeq)
+    |> Option.defaultValue []
 
 /// One row per user table with NULL partition fields — what real MySQL
 /// emits for every unpartitioned table.
@@ -1282,9 +1265,6 @@ let private partitionsRows (catalog: Catalog) : Value[] list =
 // can't disagree. COLUMN_PRIVILEGES stays genuinely empty: fsdb has no
 // column-level grants.
 // ---------------------------------------------------------------------------
-
-let private mysqlTable (catalog: Catalog) (table: string) : Table option =
-    Map.tryFind "mysql" catalog |> Option.bind (Map.tryFind table)
 
 let private colIdx (t: Table) (name: string) : int option =
     resolveColumn t.Columns name |> Result.toOption

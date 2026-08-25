@@ -10,6 +10,7 @@ module Fsdb.QueryHandler
 open System
 open System.Text
 open System.Text.RegularExpressions
+open Fsdb.Engine
 open Fsdb.Value
 open Fsdb.Ast
 open Fsdb.Session
@@ -2035,20 +2036,13 @@ let private runProbe (session: Session) (sql: string) (probe: Probe) : Session *
                 | Error _ -> None
                 | Ok(_, rows) ->
                     rows
-                    |> List.tryFind (fun row ->
-                        row.Length >= 7
-                        && String.Equals(toText row.[0] |> Option.defaultValue "", database, StringComparison.OrdinalIgnoreCase)
-                        && String.Equals(toText row.[1] |> Option.defaultValue "", name, StringComparison.OrdinalIgnoreCase))
+                    |> List.choose SystemCatalog.Event.tryRead
+                    |> List.tryFind (SystemCatalog.Event.matches database name)
 
             match event with
             | None -> session, Err(1539, sprintf "Unknown event '%s'" name)
-            | Some row ->
-                let ddl =
-                    sprintf
-                        "CREATE EVENT `%s` ON SCHEDULE %s DO %s"
-                        name
-                        (toText row.[2] |> Option.defaultValue "")
-                        (toText row.[3] |> Option.defaultValue "")
+            | Some event ->
+                let ddl = sprintf "CREATE EVENT `%s` ON SCHEDULE %s DO %s" name event.Schedule event.Definition
 
                 session,
                 ResultSet(
@@ -2062,20 +2056,14 @@ let private runProbe (session: Session) (sql: string) (probe: Probe) : Session *
                 | Error _ -> None
                 | Ok(_, rows) ->
                     rows
-                    |> List.tryFind (fun row ->
-                        row.Length >= 3
-                        && String.Equals(toText row.[0] |> Option.defaultValue "", database, StringComparison.OrdinalIgnoreCase)
-                        && String.Equals(toText row.[1] |> Option.defaultValue "", name, StringComparison.OrdinalIgnoreCase))
+                    |> List.choose SystemCatalog.Routine.tryRead
+                    |> List.tryFind (SystemCatalog.Routine.matches database name)
 
             match routine with
             | None -> session, Err(1305, sprintf "%s %s does not exist" kind name)
-            | Some row ->
-                let body = toText row.[2] |> Option.defaultValue ""
-                let definer = toText row.[4] |> Option.defaultValue "@%"
-                let separator = definer.LastIndexOf('@')
-                let user = if separator < 0 then definer else definer.Substring(0, separator)
-                let host = if separator < 0 then "%" else definer.Substring(separator + 1)
-                let ddl = sprintf "CREATE DEFINER=`%s`@`%s` PROCEDURE `%s`() %s" user host name body
+            | Some routine ->
+                let definer = accountRefOf routine.Definer
+                let ddl = sprintf "CREATE DEFINER=`%s`@`%s` PROCEDURE `%s`() %s" definer.Name definer.Host name routine.Definition
 
                 session,
                 ResultSet(
@@ -2479,15 +2467,10 @@ let rec private dispatch (session: Session) (rawSql: string) : Session * QueryRe
             else
                 session, Err(1243, sprintf "Unknown prepared statement handler (%s) given to DEALLOCATE PREPARE" name)
 
-    let routineRows () =
+    let routineEntries () =
         match Storage.scanList session.Store "mysql" "routines" with
-        | Ok(_, rows) -> rows
+        | Ok(_, rows) -> rows |> List.choose SystemCatalog.Routine.tryRead
         | Error _ -> []
-
-    let routineMatches schema name (row: Value[]) =
-        row.Length >= 2
-        && String.Equals(toText row.[0] |> Option.defaultValue "", schema, StringComparison.OrdinalIgnoreCase)
-        && String.Equals(toText row.[1] |> Option.defaultValue "", name, StringComparison.OrdinalIgnoreCase)
 
     let runTextRoutine command =
         let authorize privilege database =
@@ -2499,7 +2482,7 @@ let rec private dispatch (session: Session) (rawSql: string) : Session * QueryRe
 
             match authorize "CREATE ROUTINE" database with
             | Error(code, message) -> session, Err(code, message)
-            | Ok() when routineRows () |> List.exists (routineMatches database name) ->
+            | Ok() when routineEntries () |> List.exists (SystemCatalog.Routine.matches database name) ->
                 session, Err(1304, sprintf "PROCEDURE %s already exists" name)
             | Ok() ->
                 let upper = body.Trim().ToUpperInvariant()
@@ -2524,36 +2507,31 @@ let rec private dispatch (session: Session) (rawSql: string) : Session * QueryRe
         | CallProcedure qualifiedName ->
             let database, name = splitQualified (session.Database |> Option.defaultValue defaultDatabase) qualifiedName
 
-            match routineRows () |> List.tryFind (routineMatches database name) with
+            match routineEntries () |> List.tryFind (SystemCatalog.Routine.matches database name) with
             | None -> session, Err(1305, sprintf "PROCEDURE %s does not exist" name)
-            | Some row ->
+            | Some routine ->
                 match authorize "EXECUTE" database with
                 | Error(code, message) -> session, Err(code, message)
-                | Ok() -> dispatch session (toText row.[2] |> Option.defaultValue "")
+                | Ok() -> dispatch session routine.Definition
         | DropProcedure(qualifiedName, ifExists) ->
             let database, name = splitQualified (session.Database |> Option.defaultValue defaultDatabase) qualifiedName
-            let exists = routineRows () |> List.exists (routineMatches database name)
+            let exists = routineEntries () |> List.exists (SystemCatalog.Routine.matches database name)
 
             match authorize "ALTER ROUTINE" database with
             | Error(code, message) -> session, Err(code, message)
             | Ok() when not exists && not ifExists -> session, Err(1305, sprintf "PROCEDURE %s does not exist" name)
             | Ok() when not exists -> session, Affected 0UL
             | Ok() ->
-                match Storage.deleteRows session.Store "mysql" "routines" (routineMatches database name >> Ok) with
+                match Storage.deleteRows session.Store "mysql" "routines" (SystemCatalog.Routine.rowMatches database name >> Ok) with
                 | Ok _ -> session, Affected 0UL
                 | Error error ->
                     let code, message = Storage.toMySqlError error
                     session, Err(code, message)
 
-    let eventRows () =
+    let eventEntries () =
         match Storage.scanList session.Store "mysql" "events" with
-        | Ok(_, rows) -> rows
+        | Ok(_, rows) -> rows |> List.choose SystemCatalog.Event.tryRead
         | Error _ -> []
-
-    let eventMatches schema name (row: Value[]) =
-        row.Length >= 2
-        && String.Equals(toText row.[0] |> Option.defaultValue "", schema, StringComparison.OrdinalIgnoreCase)
-        && String.Equals(toText row.[1] |> Option.defaultValue "", name, StringComparison.OrdinalIgnoreCase)
 
     let runTextEvent command =
         match command with
@@ -2562,7 +2540,7 @@ let rec private dispatch (session: Session) (rawSql: string) : Session * QueryRe
 
             match Auth.checkForAccount session.Store (accountOf session) [ "EVENT", Auth.OnDb database ] with
             | Error(code, message) -> session, Err(code, message)
-            | Ok() when eventRows () |> List.exists (eventMatches database name) ->
+            | Ok() when eventEntries () |> List.exists (SystemCatalog.Event.matches database name) ->
                 session, Err(1537, sprintf "Event '%s' already exists" name)
             | Ok() ->
                 let upper = body.Trim().ToUpperInvariant()
@@ -2587,14 +2565,14 @@ let rec private dispatch (session: Session) (rawSql: string) : Session * QueryRe
                         session, Err(code, message)
         | DropEvent(qualifiedName, ifExists) ->
             let database, name = splitQualified (session.Database |> Option.defaultValue defaultDatabase) qualifiedName
-            let exists = eventRows () |> List.exists (eventMatches database name)
+            let exists = eventEntries () |> List.exists (SystemCatalog.Event.matches database name)
 
             match Auth.checkForAccount session.Store (accountOf session) [ "EVENT", Auth.OnDb database ] with
             | Error(code, message) -> session, Err(code, message)
             | Ok() when not exists && not ifExists -> session, Err(1539, sprintf "Unknown event '%s'" name)
             | Ok() when not exists -> session, Affected 0UL
             | Ok() ->
-                match Storage.deleteRows session.Store "mysql" "events" (eventMatches database name >> Ok) with
+                match Storage.deleteRows session.Store "mysql" "events" (SystemCatalog.Event.rowMatches database name >> Ok) with
                 | Ok _ -> session, Affected 0UL
                 | Error error ->
                     let code, message = Storage.toMySqlError error

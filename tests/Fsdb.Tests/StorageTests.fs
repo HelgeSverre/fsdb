@@ -83,7 +83,26 @@ let tests =
                         Expect.equal check.Name "positive" "name"
                         Expect.isTrue check.Enforced "enforced"
                         Expect.equal check.Ordinal 2 "ordinal"
-                    | None -> failtest "expected check row" ]
+                    | None -> failtest "expected check row"
+
+                testCase "typed routine and event rows expose named fields"
+                <| fun _ ->
+                    let created = System.DateTime(2026, 8, 25, 10, 0, 0)
+
+                    let routineRow =
+                        [| VString "app"; VString "refresh"; VString "SELECT 1"; VDateTime created; VString "owner@%" |]
+
+                    let eventRow =
+                        [| VString "app"; VString "nightly"; VString "EVERY 1 DAY"; VString "CALL refresh()"
+                           VDateTime created; VString "owner@%"; VString "ENABLED" |]
+
+                    match SystemCatalog.Routine.tryRead routineRow, SystemCatalog.Event.tryRead eventRow with
+                    | Some routine, Some event ->
+                        Expect.equal routine.Definition "SELECT 1" "routine definition"
+                        Expect.equal event.Schedule "EVERY 1 DAY" "event schedule"
+                        Expect.isTrue (SystemCatalog.Routine.matches "APP" "REFRESH" routine) "routine identity"
+                        Expect.isTrue (SystemCatalog.Event.rowMatches "APP" "NIGHTLY" eventRow) "event row identity"
+                    | _ -> failtest "expected routine and event rows" ]
 
           testList
               "createTable / dropTable / truncate"

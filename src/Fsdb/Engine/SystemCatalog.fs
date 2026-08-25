@@ -29,6 +29,10 @@ let private withValue index value (row: Value[]) =
     updated.[index] <- value
     updated
 
+let private sameIdentity schema name actualSchema actualName =
+    String.Equals(actualSchema, schema, StringComparison.OrdinalIgnoreCase)
+    && String.Equals(actualName, name, StringComparison.OrdinalIgnoreCase)
+
 module Trigger =
     type Entry =
         { Name: string
@@ -83,6 +87,58 @@ module View =
                   Created = dateTimeAt 4 row
                   Definer = textAt 5 row
                   CheckOption = row |> Array.tryItem 6 |> Option.bind toText |> Option.defaultValue "NONE" }
+
+module Routine =
+    type Entry =
+        { Schema: string
+          Name: string
+          Definition: string
+          Created: DateTime option
+          Definer: string }
+
+    let tryRead (row: Value[]) : Entry option =
+        if row.Length < 5 then
+            None
+        else
+            Some
+                { Schema = textAt 0 row
+                  Name = textAt 1 row
+                  Definition = textAt 2 row
+                  Created = dateTimeAt 3 row
+                  Definer = textAt 4 row }
+
+    let matches schema name (entry: Entry) =
+        sameIdentity schema name entry.Schema entry.Name
+
+    let rowMatches schema name row = tryRead row |> Option.exists (matches schema name)
+
+module Event =
+    type Entry =
+        { Schema: string
+          Name: string
+          Schedule: string
+          Definition: string
+          Created: DateTime option
+          Definer: string
+          Status: string }
+
+    let tryRead (row: Value[]) : Entry option =
+        if row.Length < 7 then
+            None
+        else
+            Some
+                { Schema = textAt 0 row
+                  Name = textAt 1 row
+                  Schedule = textAt 2 row
+                  Definition = textAt 3 row
+                  Created = dateTimeAt 4 row
+                  Definer = textAt 5 row
+                  Status = textAt 6 row }
+
+    let matches schema name (entry: Entry) =
+        sameIdentity schema name entry.Schema entry.Name
+
+    let rowMatches schema name row = tryRead row |> Option.exists (matches schema name)
 
 module Check =
     type Entry =
