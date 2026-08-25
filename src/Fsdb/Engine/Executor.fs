@@ -6393,21 +6393,28 @@ and private applyLimitOffset (limit: int option) (offset: int option) (rows: 'a 
 /// `SELECT`, grouped, windowed, `UNION`) shares, instead of each carrying
 /// its own copy of the same fold.
 and private compareByOrderKeys (dirs: Direction list) (ka: (Value * Collation.Collation option) list) (kb: (Value * Collation.Collation option) list) : int =
-    List.zip3 dirs ka kb
-    |> List.fold
-        (fun acc (dir, (va, ca), (vb, _)) ->
-            if acc <> 0 then
-                acc
-            else
-                let c =
-                    match va, vb, ca with
-                    | VString sa, VString sb, Some col -> col.Compare sa sb
-                    | _ -> Value.compareTotal va vb
+    let rec compare
+        (dirs: Direction list)
+        (left: (Value * Collation.Collation option) list)
+        (right: (Value * Collation.Collation option) list)
+        =
+        match dirs, left, right with
+        | [], [], [] -> 0
+        | dir :: remainingDirs, (leftValue, collation) :: remainingLeft, (rightValue, _) :: remainingRight ->
+            let result =
+                match leftValue, rightValue, collation with
+                | VString leftText, VString rightText, Some collation -> collation.Compare leftText rightText
+                | _ -> Value.compareTotal leftValue rightValue
 
-                match dir with
-                | Asc -> c
-                | Desc -> -c)
-        0
+            let directed = if dir = Asc then result else -result
+
+            if directed = 0 then
+                compare remainingDirs remainingLeft remainingRight
+            else
+                directed
+        | _ -> invalidArg "keys" "ORDER BY keys and directions must have equal lengths"
+
+    compare dirs ka kb
 
 /// A `UNION` statement's combined resultset, plus its column types —
 /// pulled out of `execute`'s `Union` arm (which just calls this and
