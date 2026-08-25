@@ -231,7 +231,7 @@ lock-free.
 | READ UNCOMMITTED | dirty reads | refused with 1235 | medium | refusal |
 | Deadlock errors | 1213 deadlock detection with victim selection | waits honor `innodb_lock_wait_timeout` and return 1205; cycles are not detected or assigned a 1213 victim | low | divergence |
 | Write parallelism within a database | row-lock concurrency | indexed autocommit and transaction UPDATE/DELETE paths coordinate row stripes; full-scan, CTE, multi-table, and insert/upsert transaction writes still rely on optimistic merge; publishing a new immutable database root remains one brief per-database critical section, and durable commit events are sequenced | medium (throughput) | partial |
-| Multi-database scaling | near-linear with connections | database roots are sharded, but the 2026-08-25 rerun exposed transaction-conflict failures during the concurrent setup phase before it could produce a valid scaling measurement | medium | unverified |
+| Multi-database scaling | near-linear with connections | database roots and row-lock stripes are sharded; a 4-database/8-worker campaign completed in 0.49x its serial projection, while an 8-database/16-worker CPU-saturated campaign reached 0.96x | medium | partial |
 | Cross-database snapshots | linearizable catalog reads | the `Store.Catalog` projection is explicitly not atomic across databases mid-commit | low | divergence |
 
 ## 8. Persistence and durability
@@ -413,9 +413,9 @@ that predates the implementation it measured:
 | Finding | Detail | Status |
 |---|---|---|
 | Planner/CTE syntax | two deterministic depth-three campaigns (2,000 and 10,000 mutations) exposed unconditional INNER JOIN, eager unused-CTE, and incomplete MATCH grammar differences; fixed campaigns now pass with zero differences | resolved 2026-08-25 |
-| Executable gap baselines | The corpus grew from 62 to 70 MySQL-accepted baselines. Recurring-event metadata and `SET ROLE NONE` now pass locally; procedure parameters/bodies, account requirements, READ UNCOMMITTED, and partition selection/maintenance remain intentional findings. `--syntax-cases 0` runs this inventory without mutations | harness tests pass; differential rerun requires the Docker oracle |
+| Executable gap baselines | The corpus grew from 62 to 70 MySQL-accepted baselines. A native MySQL 8.4.11 rerun passed 64 and reproduced exactly the six intentional findings: procedure parameters/bodies, account requirements, READ UNCOMMITTED, and partition selection/maintenance. `--syntax-cases 0` runs this inventory without mutations | oracle-verified 2026-08-25 |
 | Same-row transaction contention | the original 32-worker/16-hot-account campaign produced 2,541 fsdb 1205 conflicts; the 2026-08-25 wait-and-rebase rerun committed all 1,455 non-rollback transactions with exact state parity and zero failures. Throughput remained 86 fsdb tx/s versus 5,246 MySQL tx/s, with p99 9,839 ms versus 13 ms | correctness resolved; performance open |
-| Multi-database scaling | the historical campaign predates sharded database roots; the 2026-08-25 rerun failed during concurrent setup with 1205 before a trustworthy scaling ratio could be measured (`2026-08-17-multidb-concurrency-campaign.md`) | unverified |
+| Multi-database scaling | single-capture transaction snapshots removed cross-database 1205 conflicts; per-database lock namespaces and connection-aware worker provisioning reduced the 4x8 campaign from 10.0s with failures to 0.55s with exact parity (0.49x serial projection). The 8x16 shape also had zero failures but saturated at 0.96x | correctness resolved; high-fan-out performance open |
 | Numeric error shape | 1690 message lacks the offending expression text (`2026-08-19-probe-corpus-triage.md`) | ponytail ceiling |
 | Temporal/error-shape ceilings | `DATE 'bad'` → 1064 vs MySQL 1525; parenthesized set-op groups `(A UNION B) INTERSECT C` refused | ponytail ceilings |
 

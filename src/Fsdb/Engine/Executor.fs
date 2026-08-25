@@ -11019,8 +11019,7 @@ let private storeTriggerDefinition
         else
             insertionOrder
             |> Result.bind (fun insertionOrder ->
-                let baseCatalog = store.Catalog
-                let snapshot = Storage.beginTransactionSnapshot store
+                let baseCatalog, snapshot = Storage.beginTransactionSnapshotWithBase store
 
                 updateRows
                     snapshot
@@ -11276,8 +11275,7 @@ let rec executeAs
             | Ok outcome -> ok outcome
             | Error e -> ids, storageErr e
         | _, triggers ->
-            let baseCatalog = store.Catalog
-            let snapshot = Storage.beginTransactionSnapshot store
+            let baseCatalog, snapshot = Storage.beginTransactionSnapshotWithBase store
 
             match doInsert snapshot with
             | Error e -> ids, storageErr e
@@ -11434,8 +11432,7 @@ let rec executeAs
         | Error e -> ids, storageErr e
 
     | DropDatabase(name, ifExists) ->
-        let baseCatalog = store.Catalog
-        let snapshot = Storage.beginTransactionSnapshot store
+        let baseCatalog, snapshot = Storage.beginTransactionSnapshotWithBase store
 
         match Storage.dropDatabase snapshot name with
         | Ok() ->
@@ -11493,8 +11490,7 @@ let rec executeAs
             | Err(code, message), _, _, _ -> ids, Err(code, message)
             | ResultSet(names, _), metadata, rows, collations ->
                 let columns = deriveColumns names collations metadata
-                let baseCatalog = store.Catalog
-                let snapshot = Storage.beginTransactionSnapshot store
+                let baseCatalog, snapshot = Storage.beginTransactionSnapshotWithBase store
                 Storage.setStrictMode snapshot store.StrictMode
 
                 let created =
@@ -11585,8 +11581,7 @@ let rec executeAs
                 if alreadyExists && table.IfNotExists then
                     ids, Affected 0UL
                 else
-                    let baseCatalog = store.Catalog
-                    let snapshot = Storage.beginTransactionSnapshot store
+                    let baseCatalog, snapshot = Storage.beginTransactionSnapshotWithBase store
                     Storage.setStrictMode snapshot store.StrictMode
 
                     let created =
@@ -11613,8 +11608,7 @@ let rec executeAs
                     | Error e -> ids, storageErr e
 
     | DropTable(names, ifExists) ->
-        let baseCatalog = store.Catalog
-        let snapshot = Storage.beginTransactionSnapshot store
+        let baseCatalog, snapshot = Storage.beginTransactionSnapshotWithBase store
 
         let dropOne name =
             let db, name = splitQualified dbName name
@@ -11669,8 +11663,7 @@ let rec executeAs
         | None, _, Some err, _
         | None, _, _, Some err -> ids, err
         | None, None, None, None ->
-            let baseCatalog = store.Catalog
-            let snapshot = Storage.beginTransactionSnapshot store
+            let baseCatalog, snapshot = Storage.beginTransactionSnapshotWithBase store
             Storage.setStrictMode snapshot store.StrictMode
 
             let finalTable =
@@ -11939,8 +11932,7 @@ let rec executeAs
             |> List.groupBy fst
             |> List.map (fun (db, entries) -> db, entries |> List.map snd)
 
-        let baseCatalog = store.Catalog
-        let snapshot = Storage.beginTransactionSnapshot store
+        let baseCatalog, snapshot = Storage.beginTransactionSnapshotWithBase store
         Storage.setStrictMode snapshot store.StrictMode
 
         match groups |> traverse (fun (db, dbPairs) -> renameTables snapshot db dbPairs) with
@@ -12219,8 +12211,7 @@ let rec executeAs
             | Some(target, trigger) ->
                 let targetOrder = trigger.Order
                 let sameSlot = sameTriggerSlot dbName trigger.Table trigger.Timing trigger.Event
-                let baseCatalog = store.Catalog
-                let snapshot = Storage.beginTransactionSnapshot store
+                let baseCatalog, snapshot = Storage.beginTransactionSnapshotWithBase store
 
                 let changed =
                     deleteRows snapshot "mysql" "triggers" (matchesRow >> Ok)
@@ -12628,10 +12619,9 @@ let rec executeAs
                         let targetSet = referenceSet targetRows
                         let beforeTriggers = triggersFor store db table "BEFORE" "UPDATE"
                         let afterTriggers = triggersFor store db table "AFTER" "UPDATE"
-                        let baseCatalog = store.Catalog
                         let useSnapshot = not (beforeTriggers.IsEmpty && afterTriggers.IsEmpty)
-                        let targetStore =
-                            if useSnapshot then Storage.beginTransactionSnapshot store else store
+                        let baseCatalog, targetStore =
+                            if useSnapshot then Storage.beginTransactionSnapshotWithBase store else store.Catalog, store
 
                         let changedRows = ResizeArray<Value[] option * Value[] option>()
 
@@ -12854,8 +12844,7 @@ let rec executeAs
                         // (as one `TransactionCommitted` WAL entry, not N
                         // separate ones) once every batch has actually
                         // succeeded.
-                        let baseCatalog = store.Catalog
-                        let snapshot = Storage.beginTransactionSnapshot store
+                        let baseCatalog, snapshot = Storage.beginTransactionSnapshotWithBase store
 
                         // Any source alias resolving to a given physical
                         // table shares its column list (same physical
@@ -12945,9 +12934,9 @@ let rec executeAs
         let tableAlias = deleteStmt.From.Alias |> Option.defaultValue deleteStmt.From.Table
         let beforeTriggers = triggersFor store db table "BEFORE" "DELETE"
         let afterTriggers = triggersFor store db table "AFTER" "DELETE"
-        let baseCatalog = store.Catalog
         let useSnapshot = not (beforeTriggers.IsEmpty && afterTriggers.IsEmpty)
-        let targetStore = if useSnapshot then Storage.beginTransactionSnapshot store else store
+        let baseCatalog, targetStore =
+            if useSnapshot then Storage.beginTransactionSnapshotWithBase store else store.Catalog, store
         let tableRoot = tableSnapshot targetStore db table |> Result.toOption
         let fullTextPlanResult =
             match tableRoot, deleteStmt.Where with

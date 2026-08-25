@@ -68,7 +68,7 @@ module MultiDbRunner =
             let assemblyPath = typeof<Fsdb.Storage.Store>.Assembly.Location
             let runTag = (Hashing.text runId).Substring(0, 12)
 
-            use subject = new FsdbSubject()
+            use subject = new FsdbSubject(captureEvents = false)
             use! versionAdmin = Database.openConnection (fsdbConnectionStringFor subject.Port Fsdb.Storage.defaultDatabase)
             let! mysqlVersionConnection = Database.openConnection options.MySqlConnection
             let! mysqlVersion = Database.scalarString mysqlVersionConnection options.TimeoutSeconds "SELECT VERSION()"

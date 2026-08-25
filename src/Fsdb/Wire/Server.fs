@@ -588,6 +588,7 @@ let private withCancellationWatch (client: TcpClient) (entry: InformationSchema.
         Storage.queryCancellation.Value <- CancellationToken.None
 
 let private connectionCounter = ref 0L
+let private activeConnectionCounter = ref 0
 
 /// The AuthSwitchRequest packet payload: asks the client to answer the same
 /// 20-byte scramble with mysql_native_password (sent when it responded with
@@ -1593,6 +1594,18 @@ let private validateTransportOptions (options: ServerOptions.Settings) =
     | None when options.RequireSecureTransport -> invalidArg "options" "require_secure_transport needs a TLS certificate"
     | _ -> ()
 
+/// Row-lock waits and statement execution are synchronous. Reserving only the
+/// runtime default lets waiting sessions occupy every worker that could run
+/// the lock holder, so worker capacity follows admitted connection pressure.
+let private reserveConnectionWorkers activeConnections =
+    let mutable workerThreads = 0
+    let mutable completionThreads = 0
+    ThreadPool.GetMinThreads(&workerThreads, &completionThreads) |> ignore
+    let required = min Limits.maxConnections (activeConnections * 2)
+
+    if required > workerThreads then
+        ThreadPool.SetMinThreads(required, completionThreads) |> ignore
+
 let serveWithOptions
     (options: ServerOptions.Settings)
     (listener: TcpListener)
@@ -1600,7 +1613,6 @@ let serveWithOptions
     (customFunctions: Functions.Registry)
     : Async<unit> =
     validateTransportOptions options
-    let mutable activeConnections = 0
 
     let rejectAtCapacity (client: TcpClient) =
         async {
@@ -1621,12 +1633,14 @@ let serveWithOptions
             match! tryAccept listener with
             | None -> ()
             | Some client ->
-                let active = Interlocked.Increment(&activeConnections)
+                let active = Interlocked.Increment activeConnectionCounter
 
                 if active > Limits.maxConnections then
-                    Interlocked.Decrement(&activeConnections) |> ignore
+                    Interlocked.Decrement activeConnectionCounter |> ignore
                     Async.Start(rejectAtCapacity client)
                 else
+                    reserveConnectionWorkers active
+
                     // Process-wide, not per-listener: the process registry
                     // (`InformationSchema.registerProcess`) and `KILL <id>` key
                     // on this number, so two listeners in one process (the test
@@ -1641,7 +1655,7 @@ let serveWithOptions
                                 with ex ->
                                     Log.diagnostic "fsdb: connection %d: %s" connectionId ex.Message
                             finally
-                                Interlocked.Decrement(&activeConnections) |> ignore
+                                Interlocked.Decrement activeConnectionCounter |> ignore
                         }
                     )
 

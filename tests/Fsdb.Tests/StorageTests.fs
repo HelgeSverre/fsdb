@@ -2712,6 +2712,22 @@ let tests =
                             "both buffered inserts, in order"
                     | other -> failtestf "expected exactly one TransactionCommitted, got %A" other
 
+                testCase "a transaction snapshot and its merge base share one catalog capture"
+                <| fun _ ->
+                    let store = withUsersTable ()
+                    createDatabase store "other" |> ignore
+                    createTable store "other" "users" usersColumns [] [] None None |> ignore
+
+                    let baseCatalog, snapshot = beginTransactionSnapshotWithBase store
+                    let snapshotCatalog = snapshot.Catalog
+
+                    Expect.equal (Map.keys snapshotCatalog |> Set.ofSeq) (Map.keys baseCatalog |> Set.ofSeq) "both views contain the same databases"
+
+                    for KeyValue(databaseName, database) in baseCatalog do
+                        Expect.isTrue
+                            (obj.ReferenceEquals(database, Map.find databaseName snapshotCatalog))
+                            $"{databaseName} starts from the exact merge-base root"
+
                 testCase "a rolled-back transaction snapshot's buffered events are simply discarded"
                 <| fun _ ->
                     let store = withUsersTable ()

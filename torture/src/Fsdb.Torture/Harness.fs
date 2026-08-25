@@ -196,11 +196,13 @@ module CommitEvents =
         | TransactionCommitted events ->
             sprintf "transaction_committed count=%d hash=%s" events.Length (events |> Seq.map summarize |> Hashing.combine)
 
-type FsdbSubject() =
+type FsdbSubject(?captureEvents: bool) =
     let store = Fsdb.Storage.create ()
     let events = ConcurrentQueue<string>()
 
-    do store.OnCommit.Add(CommitEvents.summarize >> events.Enqueue)
+    do
+        if defaultArg captureEvents true then
+            store.OnCommit.Add(CommitEvents.summarize >> events.Enqueue)
 
     let listener = Fsdb.Server.startListening IPAddress.Loopback 0
     let port = Fsdb.Server.port listener

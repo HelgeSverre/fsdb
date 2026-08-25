@@ -258,7 +258,13 @@ type RowLockStripe =
 
 type TransactionLockContext =
     { Owner: int64
-      HeldStripes: Collections.Generic.HashSet<int> }
+      HeldStripes: Collections.Generic.HashSet<RowLockStripe> }
+
+let private rowLockStripeCount = 4096
+
+let private createRowLockStripe () =
+    { SyncRoot = obj ()
+      Owner = None }
 
 /// `ForeignKeyChecks` gates every FK enforcement in this module (cascading
 /// deletes, `RESTRICT`, parent-existence checks on insert/update) — the
@@ -359,7 +365,7 @@ type Store =
       /// Indexed updates coordinate stable row identities before reading
       /// their current values. Logical ownership may span transaction
       /// statements without depending on managed thread affinity.
-      RowLocks: RowLockStripe array
+      RowLocks: ConcurrentDictionary<string, ConcurrentDictionary<int, RowLockStripe>>
       RowLockSequence: int64 array
       TransactionLocks: TransactionLockContext option }
 
@@ -433,7 +439,7 @@ let private emit (store: Store) (event: CommitEvent option) : unit =
 /// otherwise every write during the transaction skips straight past
 /// `emit`'s buffer check, same zero-overhead-when-nobody's-listening
 /// property as the non-transactional path.
-let beginTransactionSnapshot (store: Store) : Store =
+let private transactionSnapshotFromCatalog (store: Store) (catalog: Catalog) : Store =
     // A fresh `Database ref` cell per database, each wrapping the *value*
     // `store`'s cell holds right now — sharing the immutable `Database` Map
     // (cheap, structural sharing) but never the mutable cell itself, so a
@@ -442,8 +448,8 @@ let beginTransactionSnapshot (store: Store) : Store =
     // database.
     let databases = ConcurrentDictionary<string, Database ref>()
 
-    for KeyValue(dbName, slot) in store.Databases do
-        databases.[dbName] <- ref slot.Value
+    for KeyValue(dbName, database) in catalog do
+        databases.[dbName] <- ref database
 
     { Databases = databases
       ForeignKeyChecks = store.ForeignKeyChecks
@@ -475,27 +481,33 @@ let beginTransactionSnapshot (store: Store) : Store =
       RowLockSequence = store.RowLockSequence
       TransactionLocks = store.TransactionLocks }
 
-let beginTransaction (store: Store) : Store =
-    let snapshot = beginTransactionSnapshot store
+let beginTransactionSnapshot (store: Store) : Store =
+    transactionSnapshotFromCatalog store store.Catalog
+
+let beginTransactionSnapshotWithBase (store: Store) : Catalog * Store =
+    let catalog = store.Catalog
+    catalog, transactionSnapshotFromCatalog store catalog
+
+let beginTransactionWithBase (store: Store) : Catalog * Store =
+    let catalog, snapshot = beginTransactionSnapshotWithBase store
     let owner = Threading.Interlocked.Increment(&store.RowLockSequence.[0])
 
+    catalog,
     { snapshot with
         TransactionLocks =
             Some
                 { Owner = owner
-                  HeldStripes = Collections.Generic.HashSet<int>() } }
+                  HeldStripes = Collections.Generic.HashSet<RowLockStripe>(HashIdentity.Reference) } }
 
 let carryTransactionLocks (source: Store) (snapshot: Store) : Store =
     { snapshot with TransactionLocks = source.TransactionLocks }
 
-let private releaseLockStripes (store: Store) (context: TransactionLockContext) (indices: seq<int>) =
-    for index in indices do
-        let stripe = store.RowLocks.[index]
-
+let private releaseLockStripes (context: TransactionLockContext) (stripes: seq<RowLockStripe>) =
+    for stripe in stripes do
         lock stripe.SyncRoot (fun () ->
             if stripe.Owner = Some context.Owner then
                 stripe.Owner <- None
-                lock context.HeldStripes (fun () -> context.HeldStripes.Remove index |> ignore)
+                lock context.HeldStripes (fun () -> context.HeldStripes.Remove stripe |> ignore)
                 Threading.Monitor.PulseAll stripe.SyncRoot)
 
 let releaseTransactionLocks (store: Store) : unit =
@@ -503,7 +515,7 @@ let releaseTransactionLocks (store: Store) : unit =
     | None -> ()
     | Some context ->
         let stripes = lock context.HeldStripes (fun () -> context.HeldStripes |> Seq.toArray)
-        releaseLockStripes store context stripes
+        releaseLockStripes context stripes
 
 /// Flushes a committed transaction's buffered events onto `store`, if it
 /// buffered any — a no-op for an empty or subscriber-less snapshot. Call
@@ -1852,39 +1864,38 @@ let private withRowLocksFor
     (rowIds: RowId list)
     body
     =
-    let stripeCount = store.RowLocks.Length
+    let rowLocks = store.RowLocks.GetOrAdd(normalizeTableName dbName, (fun _ -> ConcurrentDictionary()))
     let tableOffset =
-        HashCode.Combine(
-            StringComparer.OrdinalIgnoreCase.GetHashCode dbName,
-            StringComparer.OrdinalIgnoreCase.GetHashCode tableName
-        )
-        &&& Int32.MaxValue
+        StringComparer.OrdinalIgnoreCase.GetHashCode(tableName) &&& Int32.MaxValue
 
     let stripeIndex rowId =
-        (int64 tableOffset + int64 (RowId.value rowId)) % int64 stripeCount |> int
+        (int64 tableOffset + int64 (RowId.value rowId)) % int64 rowLockStripeCount |> int
 
-    let stripes = rowIds |> List.map stripeIndex |> List.distinct |> List.sort
+    let stripes =
+        rowIds
+        |> List.map stripeIndex
+        |> List.distinct
+        |> List.sort
+        |> List.map (fun index -> rowLocks.GetOrAdd(index, (fun _ -> createRowLockStripe ())))
     let context, releaseAfter =
         match store.TransactionLocks with
         | Some context -> context, false
         | None ->
             { Owner = Threading.Interlocked.Increment(&store.RowLockSequence.[0])
-              HeldStripes = Collections.Generic.HashSet<int>() },
+              HeldStripes = Collections.Generic.HashSet<RowLockStripe>(HashIdentity.Reference) },
             true
 
     let deadline = DateTime.UtcNow + timeout
-    let claimed = ResizeArray<int>()
+    let claimed = ResizeArray<RowLockStripe>()
 
-    let acquire index =
-        let stripe = store.RowLocks.[index]
-
+    let acquire stripe =
         lock stripe.SyncRoot (fun () ->
             let rec waitForOwner () =
                 match stripe.Owner with
                 | None ->
                     stripe.Owner <- Some context.Owner
-                    lock context.HeldStripes (fun () -> context.HeldStripes.Add index |> ignore)
-                    claimed.Add index
+                    lock context.HeldStripes (fun () -> context.HeldStripes.Add stripe |> ignore)
+                    claimed.Add stripe
                 | Some owner when owner = context.Owner -> ()
                 | Some _ ->
                     let remaining = deadline - DateTime.UtcNow
@@ -1902,7 +1913,7 @@ let private withRowLocksFor
             body ()
         with _ ->
             if not releaseAfter then
-                releaseLockStripes store context claimed
+                releaseLockStripes context claimed
 
             reraise ()
     finally
@@ -2234,10 +2245,7 @@ let create () : Store =
       OnCommit = ResizeArray()
       PendingEvents = None
       Lock = obj ()
-      RowLocks =
-        Array.init 4096 (fun _ ->
-            { SyncRoot = obj ()
-              Owner = None })
+      RowLocks = ConcurrentDictionary(StringComparer.OrdinalIgnoreCase)
       RowLockSequence = [| 0L |]
       TransactionLocks = None }
 

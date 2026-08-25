@@ -1006,9 +1006,9 @@ let private setCharacterSet = Regex(@"^SET\s+CHARACTER\s+SET\s+'?(\w+)'?$", Rege
 let private setRoleNone = Regex(@"^SET\s+ROLE\s+NONE$", RegexOptions.IgnoreCase)
 
 let private rebaseTransactionSnapshot (session: Session) (tx: Transaction) : Catalog * Store =
-    let baseCatalog = session.Store.Catalog
+    let baseCatalog, transactionSnapshot = Storage.beginTransactionSnapshotWithBase session.Store
     let snapshot =
-        Storage.beginTransactionSnapshot session.Store
+        transactionSnapshot
         |> Storage.carryTransactionLocks tx.Snapshot
 
     Storage.mergeCatalogInto snapshot tx.BaseCatalog tx.Snapshot.Catalog
@@ -1096,8 +1096,7 @@ let private configuredIsolation (session: Session) =
 let private beginTransaction (readOnly: bool) (session: Session) : Session =
     let session = commitSession session
     let isolation = configuredIsolation session
-    let baseCatalog = session.Store.Catalog
-    let snapshot = Storage.beginTransaction session.Store
+    let baseCatalog, snapshot = Storage.beginTransactionWithBase session.Store
 
     { session with
         PendingTransactionReadOnly = None
@@ -1126,9 +1125,9 @@ let startTransactionStatement (session: Session) : Session =
                         BaseCatalog = baseCatalog
                         Seeded = true } }
     | Some tx when not tx.Seeded ->
-        let baseCatalog = session.Store.Catalog
+        let baseCatalog, transactionSnapshot = Storage.beginTransactionSnapshotWithBase session.Store
         let snapshot =
-            Storage.beginTransactionSnapshot session.Store
+            transactionSnapshot
             |> Storage.carryTransactionLocks tx.Snapshot
 
         let savepoints =

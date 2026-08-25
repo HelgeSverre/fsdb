@@ -480,7 +480,7 @@ module ConcurrencyRunner =
             match oracle with
             | Error error -> return Error(sprintf "could not create concurrency oracle database: %s" error.Message)
             | Ok oracleConnectionString ->
-                use subject = new FsdbSubject()
+                use subject = new FsdbSubject(captureEvents = false)
                 use! mysqlVersionConnection = Database.openConnection oracleConnectionString
                 let! mysqlVersion = Database.scalarString mysqlVersionConnection options.TimeoutSeconds "SELECT VERSION()"
                 let! mysql = runTarget "mysql" oracleConnectionString options

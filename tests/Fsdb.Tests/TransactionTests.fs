@@ -420,6 +420,52 @@ let tests =
 
               handle a "ROLLBACK" |> ignore
 
+          testCase "row locks in separate databases use separate namespaces"
+          <| fun _ ->
+              let store = Fsdb.Storage.create ()
+              let tableName = "t"
+
+              let legacyStripe databaseName =
+                  HashCode.Combine(
+                      StringComparer.OrdinalIgnoreCase.GetHashCode databaseName,
+                      StringComparer.OrdinalIgnoreCase.GetHashCode tableName
+                  )
+                  &&& Int32.MaxValue
+                  |> fun value -> value % 4096
+
+              let firstDatabase, secondDatabase =
+                  seq { 0 .. 10000 }
+                  |> Seq.map (sprintf "tx_lock_db_%d")
+                  |> Seq.groupBy legacyStripe
+                  |> Seq.map (snd >> Seq.truncate 2 >> Seq.toList)
+                  |> Seq.find (fun names -> names.Length = 2)
+                  |> function
+                      | [ first; second ] -> first, second
+                      | _ -> failwith "expected a pair of database names"
+
+              for databaseName in [ firstDatabase; secondDatabase ] do
+                  Fsdb.Storage.createDatabase store databaseName |> ignore
+                  let setup = create 1 store
+                  let setup, _ = handle setup $"USE {databaseName}"
+                  let setup, _ = handle setup "CREATE TABLE t (id INT PRIMARY KEY, n INT)"
+                  handle setup "INSERT INTO t VALUES (1, 0)" |> ignore
+
+              let first = create 2 store
+              let first, _ = handle first $"USE {firstDatabase}"
+              let first, _ = handle first "BEGIN"
+              let first, firstUpdate = handle first "UPDATE t SET n = n + 1 WHERE id = 1"
+              Expect.equal firstUpdate (Affected 1UL) "the first database claims its row"
+
+              let second = create 3 store
+              let second, _ = handle second $"USE {secondDatabase}"
+              let second, _ = handle second "SET innodb_lock_wait_timeout = 1"
+              let second, _ = handle second "BEGIN"
+              let second, secondUpdate = handle second "UPDATE t SET n = n + 1 WHERE id = 1"
+              Expect.equal secondUpdate (Affected 1UL) "an unrelated database does not share the first database's row lock"
+
+              handle second "ROLLBACK" |> ignore
+              handle first "ROLLBACK" |> ignore
+
           testCase "a cancelled transaction statement leaves later transactions usable"
           <| fun _ ->
               let store = Fsdb.Storage.create ()

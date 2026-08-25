@@ -54,6 +54,21 @@ container; the previous default (151) is far below what this lane needs
 | 8 | 16 | 128 | fail (1205 lock-wait timeouts on 1 of 8 databases) | 4,057 ms | 57,179 ms | 32,456 ms | 1.76 | **fail** |
 | 8 | 32 | 256 | fail (1205 lock-wait timeouts / connection resets on all 8 databases) | 19,483 ms | 129,986 ms | 155,864 ms | 0.83 | **fail** |
 
+## 2026-08-25 rerun
+
+Transaction snapshots now derive their merge base and private catalog from one
+capture, row-lock stripes are namespaced per database, and the server reserves
+workers as synchronous connection pressure rises.
+
+| Databases | Workers/db | Operations/worker | Correctness | Baseline (1 db) | Multi-db wall-clock | Serial-projected | Ratio | Scaling |
+|---:|---:|---:|---|---:|---:|---:|---:|---|
+| 4 | 8 | 40 | pass | 280 ms | 549 ms | 1,120 ms | 0.49 | pass |
+| 8 | 16 | 30 | pass | 512 ms | 3,929 ms | 4,096 ms | 0.96 | high-fan-out ceiling |
+
+Both reruns completed every intended commit and rollback with exact account,
+ledger, and conservation parity and no 1205 errors. The 8x16 result leaves a
+CPU-saturated throughput ceiling, not the earlier correctness failure.
+
 Evidence bundles:
 
 - 4x4 (clean, scaling passes): `artifacts/runs/20260817T111136760-91350/multidb-seed202-dbs4-workers4-ops50-hot8-rollback7`
@@ -68,9 +83,11 @@ individual operations failed with an honest 1205 error — no silent data
 loss, no cross-database bleed, no lost update anywhere in this campaign. That
 part of the per-database design holds.
 
-## What this surfaces (not fixed — reporting only per task scope)
+## Original diagnosis
 
-The parallelism claim does not hold at the tested shapes:
+The original campaign produced the following diagnosis. The 2026-08-25 rerun
+above supersedes its current-status conclusions while retaining the evidence
+that led to the fix.
 
 - **No shape in this campaign showed multi-database wall-clock meaningfully
   beating D times the single-database baseline.** The one shape that
@@ -100,14 +117,9 @@ The parallelism claim does not hold at the tested shapes:
   lane — the ceiling is evidently a store/server-wide resource, not a
   per-database one.
 
-Net: correctness (conservation, no lost updates, no cross-database bleed)
-held at every tested shape, including the ones with real 1205 failures — the
-failures were honest and didn't corrupt state. But the *parallelism* that
-per-database gates are supposed to buy has not been demonstrated at any
-tested shape, and the aggregate numbers look like the opposite of
-parallelism (super-serial slowdowns at 4x8 and 4x16). This is worth the
-concurrent fsdb-side agent's attention before the per-database design is
-relied on for throughput, independent of this task's correctness-only scope.
+At that point correctness conservation held, but parallelism had not been
+demonstrated and the aggregate numbers showed super-serial slowdowns at 4x8
+and 4x16.
 
 ## Coverage still missing
 
