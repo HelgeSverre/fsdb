@@ -528,19 +528,13 @@ let binaryRowPayload (columns: ColumnMetadata list) (values: string option list)
 
     w.ToArray()
 
-/// Builds the COM_STMT_PREPARE_OK payload: status byte, statement id,
-/// column count (always 0 — this server never advertises a prepared
-/// statement's result columns ahead of EXECUTE, so no column-definition
-/// packets follow this one; see the ponytail note on `Server`'s
-/// COM_STMT_PREPARE handler), param count, a reserved byte, and warning
-/// count. The `numParams` per-param Column Definition packets (and their
-/// trailing EOF, unless CLIENT_DEPRECATE_EOF) are separate packets the
-/// caller sends after this one.
-let stmtPrepareOkPayload (stmtId: int) (numParams: int) : byte[] =
+/// Builds the fixed COM_STMT_PREPARE_OK header. Parameter and result-column
+/// definitions follow as separate packets.
+let stmtPrepareOkPayload (stmtId: int) (numColumns: int) (numParams: int) : byte[] =
     let w = Writer()
     w.WriteByte 0uy
     w.WriteInt32LE stmtId
-    w.WriteInt16LE 0 // column count
+    w.WriteInt16LE numColumns
     w.WriteInt16LE numParams
     w.WriteByte 0uy // reserved
     w.WriteInt16LE 0 // warning count

@@ -52,6 +52,34 @@ let private connectRawAs (port: int) (username: string) = connectRawAsWithCapabi
 /// Connects a raw client as the passwordless bootstrap account.
 let private connectRaw (port: int) : Async<Net.Sockets.TcpClient * IO.Stream> = connectRawAs port "root"
 
+let private readPreparedReply (stream: IO.Stream) =
+    async {
+        let! prepareOk = readPacketAsync stream
+        let reader = Reader(prepareOk.Value.Payload.[1..])
+        let statementId = reader.ReadInt32LE()
+        let columnCount = reader.ReadInt16LE()
+        let parameterCount = reader.ReadInt16LE()
+
+        let readDefinitions count =
+            async {
+                let definitions = ResizeArray<Packet>()
+
+                for _ in 1 .. count do
+                    let! definition = readPacketAsync stream
+                    definitions.Add definition.Value
+
+                if count > 0 then
+                    let! _ = readPacketAsync stream
+                    ()
+
+                return List.ofSeq definitions
+            }
+
+        let! parameterDefinitions = readDefinitions parameterCount
+        let! columnDefinitions = readDefinitions columnCount
+        return statementId, parameterDefinitions, columnDefinitions
+    }
+
 let tests =
     testList
         "Integration"
@@ -1214,10 +1242,7 @@ let tests =
                   // COM_STMT_PREPARE "SELECT ?"
                   let prepPayload = Array.append [| 0x16uy |] (Text.Encoding.UTF8.GetBytes "SELECT ?")
                   let! _ = writePacketAsync stream { SeqId = 0uy; Payload = prepPayload }
-                  let! prepareOk = readPacketAsync stream
-                  let stmtId = Reader(prepareOk.Value.Payload.[1..]).ReadInt32LE()
-                  let! _ = readPacketAsync stream // the one param's column-def packet
-                  let! _ = readPacketAsync stream // its trailing EOF
+                  let! stmtId, _, _ = readPreparedReply stream
 
                   // COM_STMT_EXECUTE: stmtId, cursor flags, iteration
                   // count, null bitmap (1 byte, param count 1), new-
@@ -1314,10 +1339,7 @@ let tests =
 
                   // Prepare "SELECT ?".
                   let! _ = writePacketAsync stream { SeqId = 0uy; Payload = Array.append [| 0x16uy |] (Text.Encoding.UTF8.GetBytes "SELECT ?") }
-                  let! prepareOk = readPacketAsync stream
-                  let stmtId = Reader(prepareOk.Value.Payload.[1..]).ReadInt32LE()
-                  let! _ = readPacketAsync stream // param column def
-                  let! _ = readPacketAsync stream // trailing EOF
+                  let! stmtId, _, _ = readPreparedReply stream
 
                   // Long data for an unknown statement is silently
                   // ignored (no reply, per protocol); for the real one it
@@ -1508,10 +1530,7 @@ let tests =
                   let! _ = readPacketAsync stream
 
                   let! _ = writePacketAsync stream { SeqId = 0uy; Payload = Array.append [| 0x16uy |] (Text.Encoding.UTF8.GetBytes "INSERT INTO blobs VALUES (?)") }
-                  let! prepareOk = readPacketAsync stream
-                  let stmtId = Reader(prepareOk.Value.Payload.[1..]).ReadInt32LE()
-                  let! _ = readPacketAsync stream // param column def
-                  let! _ = readPacketAsync stream // trailing EOF
+                  let! stmtId, _, _ = readPreparedReply stream
 
                   // Invalid UTF-8: a lone continuation byte and a byte
                   // that's never valid in UTF-8 at all — decoding this
@@ -2015,12 +2034,21 @@ let tests =
                   let! _ = query "INSERT INTO t VALUES ('2024-03-05 13:45:09.123456')"
                   let! _ = readPacketAsync stream
 
-                  // COM_STMT_PREPARE "SELECT d FROM t" — no `?` params,
-                  // so PREPARE_OK is the only packet (no per-param
-                  // column-def/EOF pair).
+                  // COM_STMT_PREPARE "SELECT d FROM t".
                   let! _ = writePacketAsync stream { SeqId = 0uy; Payload = Array.append [| 0x16uy |] (Text.Encoding.UTF8.GetBytes "SELECT d FROM t") }
-                  let! prepareOk = readPacketAsync stream
-                  let stmtId = Reader(prepareOk.Value.Payload.[1..]).ReadInt32LE()
+                  let! stmtId, _, preparedColumns = readPreparedReply stream
+                  Expect.hasLength preparedColumns 1 "PREPARE advertises the SELECT result column"
+
+                  let preparedColumn = Reader(preparedColumns.Head.Payload)
+                  for _ in 1..6 do
+                      preparedColumn.ReadLenEncString() |> ignore
+
+                  preparedColumn.ReadLenEncInt() |> ignore
+                  preparedColumn.ReadInt16LE() |> ignore
+                  preparedColumn.ReadInt32LE() |> ignore
+                  Expect.equal (preparedColumn.ReadByte()) TypeDateTime "PREPARE advertises DATETIME"
+                  preparedColumn.ReadInt16LE() |> ignore
+                  Expect.equal (preparedColumn.ReadByte()) 6uy "PREPARE advertises fsp 6"
 
                   // COM_STMT_EXECUTE with zero params: stmtId, cursor
                   // flags, iteration count — no null bitmap/type array
@@ -2282,8 +2310,7 @@ let tests =
                   use client = client
 
                   let! _ = writePacketAsync stream { SeqId = 0uy; Payload = Array.append [| 0x16uy |] (Text.Encoding.UTF8.GetBytes "SELECT 1") }
-                  let! prepareOk = readPacketAsync stream
-                  let stmtId = Reader(prepareOk.Value.Payload.[1..]).ReadInt32LE()
+                  let! stmtId, _, _ = readPreparedReply stream
 
                   let closePayload =
                       let w = Writer()
@@ -2326,10 +2353,7 @@ let tests =
                   use client = client
 
                   let! _ = writePacketAsync stream { SeqId = 0uy; Payload = Array.append [| 0x16uy |] (Text.Encoding.UTF8.GetBytes "SELECT ?") }
-                  let! prepareOk = readPacketAsync stream
-                  let stmtId = Reader(prepareOk.Value.Payload.[1..]).ReadInt32LE()
-                  let! _ = readPacketAsync stream // param column def
-                  let! _ = readPacketAsync stream // trailing EOF
+                  let! stmtId, _, _ = readPreparedReply stream
 
                   // Buffer long data for the one param, then reset — the
                   // reset must drop it, not leave it to be picked up by a
@@ -2424,10 +2448,7 @@ let tests =
                       async {
                           let payload = Array.append [| 0x16uy |] (Text.Encoding.UTF8.GetBytes "SELECT ?")
                           let! _ = writePacketAsync stream { SeqId = 0uy; Payload = payload }
-                          let! prepareOk = readPacketAsync stream
-                          let statementId = Reader(prepareOk.Value.Payload.[1..]).ReadInt32LE()
-                          let! _ = readPacketAsync stream
-                          let! _ = readPacketAsync stream
+                          let! statementId, _, _ = readPreparedReply stream
                           return statementId
                       }
 
@@ -2483,8 +2504,8 @@ let tests =
 
                       for _ in 1..2 do
                           let! _ = writePacketAsync stream { SeqId = 0uy; Payload = payload }
-                          let! reply = readPacketAsync stream
-                          Expect.equal reply.Value.Payload.[0] 0uy "prepare below the cap succeeds"
+                          let! _, _, columns = readPreparedReply stream
+                          Expect.hasLength columns 1 "prepare below the cap succeeds with one result column"
 
                       let! _ = writePacketAsync stream { SeqId = 0uy; Payload = payload }
                       let! reply = readPacketAsync stream

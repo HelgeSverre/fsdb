@@ -50,6 +50,16 @@ let tests =
               let payload = okPayload ClientProtocol41 StatusAutocommit 0UL 0UL
               Expect.equal payload.[0] 0uy "OK header byte"
 
+          testCase "COM_STMT_PREPARE_OK advertises result and parameter counts"
+          <| fun _ ->
+              let reader = Reader(stmtPrepareOkPayload 17 2 3)
+              Expect.equal (reader.ReadByte()) 0uy "status"
+              Expect.equal (reader.ReadInt32LE()) 17 "statement id"
+              Expect.equal (reader.ReadInt16LE()) 2 "result columns"
+              Expect.equal (reader.ReadInt16LE()) 3 "parameters"
+              Expect.equal (reader.ReadByte()) 0uy "reserved"
+              Expect.equal (reader.ReadInt16LE()) 0 "warnings"
+
           testCase "OK payload status flags carry SERVER_STATUS_IN_TRANS while a transaction is open"
           <| fun _ ->
               // PDO's inTransaction() reads SERVER_STATUS_IN_TRANS directly

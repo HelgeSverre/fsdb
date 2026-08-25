@@ -356,7 +356,7 @@ disconnect detection cancelling evaluation (`Server.watchForDisconnect`).
 | Auth plugins | caching_sha2_password fast/full auth, sha256_password, RSA exchange | mysql_native_password only; `Server.authenticateHandshake` downgrades caching_sha2 clients via auth-switch | low (works, weaker) | divergence |
 | Column definition fidelity | schema/table/org_table names, requested charsetnr | `Protocol.columnDefPayload` leaves source names empty and reports collation 45 for text or 63 for binary regardless of the declared collation | low | divergence |
 | Column flags | MULTIPLE_KEY, ZEROFILL, NO_DEFAULT_VALUE, ON_UPDATE_NOW, NUM, PART_KEY | numeric, temporal, required-default, primary/unique key-part, and implicit YEAR ZEROFILL flags are reported; non-unique secondary membership and an explicit ZEROFILL declaration are not represented in `ColumnDef` | low | divergence |
-| Parameter metadata | STMT_PREPARE_OK carries result columns and typed param defs | `Protocol.stmtPrepareOkPayload` reports zero result columns and generic VAR_STRING `?` parameters | low | divergence |
+| Prepared metadata | STMT_PREPARE_OK carries result columns and typed param defs | result columns are derived statically from the current schema without evaluating the query; `?` parameter definitions remain generic VAR_STRING | low | divergence |
 | Reprepare | automatic reprepare on metadata change | frozen ASTs; stale-metadata edge cases possible | low | divergence |
 | System variables | hundreds live | ~30 known; most others inert or absent; time_zone static strings with no conversion | medium | divergence |
 

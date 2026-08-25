@@ -1221,6 +1221,7 @@ let private handleConnection
                                     return! loop session
                                 | Result.Ok(ast, paramCount) ->
                                     let stmtId = session.NextStmtId
+                                    let resultColumns = QueryHandler.preparedResultColumns session ast
 
                                     let stmt: PreparedStmt =
                                         { Ast = ast
@@ -1241,10 +1242,22 @@ let private handleConnection
                                         else
                                             []
 
+                                    let resultDefEof =
+                                        if not resultColumns.IsEmpty && not deprecateEof then
+                                            [ eofPayload capabilities (statusFlagsFor session) ]
+                                        else
+                                            []
+
                                     let payloads =
-                                        stmtPrepareOkPayload stmtId paramCount
+                                        stmtPrepareOkPayload stmtId resultColumns.Length paramCount
                                         :: List.replicate paramCount (columnDefPayload { Name = "?"; Metadata = Value.columnMetadata TypeVarString })
                                         @ paramDefEof
+                                        @ (resultColumns
+                                           |> List.map (fun column ->
+                                               columnDefPayload
+                                                   { Name = column.Name
+                                                     Metadata = ColumnWire.metadataOfColumn column }))
+                                        @ resultDefEof
 
                                     do! sendPayloads stream seqId payloads |> Async.Ignore
                                     return! loop session

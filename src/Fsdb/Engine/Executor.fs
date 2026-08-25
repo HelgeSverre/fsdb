@@ -208,6 +208,10 @@ type private ViewColumnDescriptor =
     { Column: ColumnDef
       NumericParts: (int * int) option }
 
+type private ColumnDescriptionSource =
+    | StoredRelation of string
+    | QueryBody of SelectOrUnion
+
 let private currentViewStack () =
     match box viewStack.Value with
     | null -> Set.empty
@@ -3458,22 +3462,14 @@ and private resolveTableRef
             | Error e -> Error(storageErr e)
             | Ok(columns, rows) -> Ok(columns, rows)
 
-/// Pre-filters an `information_schema` scan by the WHERE's top-level
-/// `col = 'literal'` equality conjuncts (`TABLE_SCHEMA`/`TABLE_NAME` is what
-/// GUI clients send) — building every catalog row only for the executor to
-/// discard all but one table's was the `COLUMNS` hotspot. Conjuncts come
-/// from the same `pointLookupEqualities` the PK fast path uses (inheriting
-/// its correlated-qualifier guard); for the self-contained per-table views
-/// the catalog itself is narrowed before row construction, and every view's
-/// rows are post-filtered. Pure narrowing: the full WHERE still runs over
-/// the result. `None` when the FROM isn't information_schema or the WHERE
-/// has no usable conjunct (plain scan then).
-/// ponytail: the pre-filter compares OrdinalIgnoreCase where the WHERE
-/// proper compares ai_ci — an accented table name queried by its unaccented
-/// spelling would be over-filtered; GUI clients echo names the server gave
-/// them, so this stays until something real hits it. Joined
-/// information_schema queries take the unnarrowed path.
-and private describeStoredViewColumns (store: Store) (registry: Registry) (schema: string) (name: string) : ColumnDef list option =
+/// Derives query columns from schema and expression metadata without reading
+/// rows or evaluating user expressions.
+and private describeQueryColumns
+    (store: Store)
+    (registry: Registry)
+    (schema: string)
+    (source: ColumnDescriptionSource)
+    : ColumnDef list option =
     let decimalParts =
         function
         | TDecimal(precision, scale) -> Some(precision, scale)
@@ -3893,9 +3889,29 @@ and private describeStoredViewColumns (store: Store) (registry: Registry) (schem
                     |> Option.defaultValue []
                 | _ -> [ columnForExpression (alias |> Option.defaultValue (exprLabel expression)) expression ])))
 
-    sourceColumns Set.empty schema Map.empty (FromTable { Database = None; Table = name; Alias = None })
+    (match source with
+     | StoredRelation name -> sourceColumns Set.empty schema Map.empty (FromTable { Database = None; Table = name; Alias = None })
+     | QueryBody body -> describeBody Set.empty schema Map.empty body)
     |> Option.map (List.map _.Column)
 
+and private describeStoredViewColumns (store: Store) (registry: Registry) (schema: string) (name: string) : ColumnDef list option =
+    describeQueryColumns store registry schema (StoredRelation name)
+
+/// Pre-filters an `information_schema` scan by the WHERE's top-level
+/// `col = 'literal'` equality conjuncts (`TABLE_SCHEMA`/`TABLE_NAME` is what
+/// GUI clients send) — building every catalog row only for the executor to
+/// discard all but one table's was the `COLUMNS` hotspot. Conjuncts come
+/// from the same `pointLookupEqualities` the PK fast path uses (inheriting
+/// its correlated-qualifier guard); for the self-contained per-table views
+/// the catalog itself is narrowed before row construction, and every view's
+/// rows are post-filtered. Pure narrowing: the full WHERE still runs over
+/// the result. `None` when the FROM isn't information_schema or the WHERE
+/// has no usable conjunct (plain scan then).
+/// ponytail: the pre-filter compares OrdinalIgnoreCase where the WHERE
+/// proper compares ai_ci — an accented table name queried by its unaccented
+/// spelling would be over-filtered; GUI clients echo names the server gave
+/// them, so this stays until something real hits it. Joined
+/// information_schema queries take the unnarrowed path.
 and private tryInformationSchemaNarrow
     (store: Store)
     (registry: Registry)
@@ -10383,6 +10399,16 @@ let runTopLevelUnion
 /// Describes a stored view without evaluating its query or its expressions.
 let viewColumns (store: Store) (registry: Registry) (schema: string) (name: string) : ColumnDef list option =
     describeStoredViewColumns store registry schema name
+
+/// Describes the result columns a statement fixes at prepare time without
+/// evaluating its expressions or reading its rows.
+let statementColumns (store: Store) (registry: Registry) (schema: string) (statement: Statement) : ColumnDef list option =
+    match statement with
+    | Select select when select.IntoVariables.IsEmpty ->
+        describeQueryColumns store registry schema (QueryBody(PlainSelect select))
+    | Union(first, rest, orderBy, limit, offset) ->
+        describeQueryColumns store registry schema (QueryBody(UnionSelect(first, rest, orderBy, limit, offset)))
+    | _ -> None
 
 /// Folds one `insertRows`/`insertRowsIgnore`/`upsertRows` result's
 /// `(okPacketId, generatedId)` pair into `execute`'s own `ids` accumulator —

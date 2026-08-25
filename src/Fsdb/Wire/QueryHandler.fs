@@ -2305,6 +2305,17 @@ let prepareStatement (sql: string) : Result<Statement option * int, int * string
             | Err(code, msg) -> Result.Error(code, msg)
             | _ -> Result.Error(1064, "syntax error")
 
+let preparedResultColumns (session: Session) (statement: Statement option) : Fsdb.Ast.ColumnDef list =
+    match statement with
+    | None -> []
+    | Some statement ->
+        let store = Session.currentStore session
+        let schema = session.Database |> Option.defaultValue defaultDatabase
+
+        match Auth.checkForAccount store (accountOf session) (Auth.requiredPrivilegesInStore store schema statement) with
+        | Error _ -> []
+        | Ok() -> Executor.statementColumns store (registryFor session) schema statement |> Option.defaultValue []
+
 type private TextPreparedCommand =
     | PrepareText of name: string * source: string
     | ExecuteText of name: string * variables: UserVariableRef list
