@@ -9837,6 +9837,19 @@ let private renderExplainAnalyze (rows: ExplainRow list) (elapsedMilliseconds: f
 
     ResultSet([ "EXPLAIN" ], (root :: planRows) |> List.map (fun line -> [ Some line ]))
 
+let private renderExplainTree (rows: ExplainRow list) : QueryResult =
+    let lines =
+        rows
+        |> List.sortBy (fun row -> row.Id |> Option.defaultValue System.Int32.MaxValue)
+        |> List.map (fun row ->
+            let source = row.Table |> Option.defaultValue "no tables used"
+            let access = row.Type |> Option.defaultValue row.SelectType
+            let estimate = row.Rows |> Option.map string |> Option.defaultValue "unknown"
+            let details = if row.Extra.IsEmpty then "" else sprintf " (%s)" (String.concat "; " row.Extra)
+            sprintf "-> %s on %s  (rows=%s)%s" access source estimate details)
+
+    ResultSet([ "EXPLAIN" ], lines |> List.map (fun line -> [ Some line ]))
+
 let private checksumTables (store: Store) (dbName: string) (tables: string list) (quick: bool) : QueryResult =
     let checksum tableName =
         let database, table = splitQualified dbName tableName
@@ -9887,6 +9900,7 @@ let rec private explainStatement (format: ExplainFormat) (store: Store) (registr
             match format with
             | ExplainTraditional -> renderExplainRows rows
             | ExplainJson -> renderExplainJson rows
+            | ExplainTree -> renderExplainTree rows
             | ExplainAnalyze when analyzedStatements = 1 -> renderExplainAnalyze rows analyzedMilliseconds analyzedRows
             | ExplainAnalyze -> Err(1235, "EXPLAIN ANALYZE currently supports one SELECT")
         | Error e -> e

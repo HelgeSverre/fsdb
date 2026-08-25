@@ -3139,7 +3139,9 @@ let private explainStmt: Parser<Statement, unit> =
     let format =
         keyword "FORMAT"
         >>. sym "="
-        >>. ((keyword "TRADITIONAL" >>% ExplainTraditional) <|> (keyword "JSON" >>% ExplainJson))
+        >>. ((keyword "TRADITIONAL" >>% ExplainTraditional)
+             <|> (keyword "JSON" >>% ExplainJson)
+             <|> (keyword "TREE" >>% ExplainTree))
 
     (((keyword "EXPLAIN"
        >>. ((keyword "ANALYZE" >>% Some ExplainAnalyze) <|> opt (attempt format)))

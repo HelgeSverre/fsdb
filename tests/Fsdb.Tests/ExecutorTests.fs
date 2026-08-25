@@ -1080,6 +1080,18 @@ let tests =
                         Expect.equal (table.GetProperty("key").GetString()) "PRIMARY" "selected key"
                     | other -> failtestf "expected one JSON plan document, got %A" other
 
+                testCase "EXPLAIN FORMAT=TREE returns the shared access plan"
+                <| fun _ ->
+                    let store = newStore ()
+                    runDefault store "CREATE TABLE t (id INT PRIMARY KEY, value INT)" |> ignore
+                    runDefault store "INSERT INTO t VALUES (1, 10), (2, 20)" |> ignore
+
+                    match runDefault store "EXPLAIN FORMAT=TREE SELECT id FROM t WHERE id = 1" with
+                    | ResultSet([ "EXPLAIN" ], [ [ Some plan ] ]) ->
+                        Expect.stringContains plan "const on t" "access path"
+                        Expect.stringContains plan "rows=1" "estimate"
+                    | other -> failtestf "expected one tree plan, got %A" other
+
                 testCase "EXPLAIN ANALYZE executes a SELECT and reports observations"
                 <| fun _ ->
                     let store = newStore ()

@@ -629,6 +629,7 @@ type TriggerOrder =
 type ExplainFormat =
     | ExplainTraditional
     | ExplainJson
+    | ExplainTree
     | ExplainAnalyze
 
 type Statement =
