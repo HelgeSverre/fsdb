@@ -2664,6 +2664,7 @@ let private valuesTable: Parser<FromItem, unit> =
             else
                 let branch (cells: Expr list) : SelectStmt =
                     { Projections = List.map2 (fun name cell -> cell, Some name) names cells
+                      IntoVariables = []
                       Distinct = false
                       CalculateFoundRows = false
                       StraightJoin = false
@@ -2900,8 +2901,15 @@ let private selectModifiers: Parser<bool * bool * bool, unit> =
         (modifiers |> List.exists fst),
         (modifiers |> List.exists snd)
 
+let private selectHead =
+    selectModifiers
+    .>>. sepBy1 projection (sym ",")
+    .>>. opt (keyword "INTO" >>. sepBy1 userVariableTarget (sym ","))
+    |>> fun (((distinct, calculateFoundRows, straightJoin), projections), intoVariables) ->
+        distinct, calculateFoundRows, straightJoin, projections, (intoVariables |> Option.defaultValue [])
+
 selectStmtRecordRef.Value <-
-    (keyword "SELECT" >>. selectModifiers .>>. sepBy1 projection (sym ",")
+    (keyword "SELECT" >>. selectHead
      .>>. opt (keyword "FROM" >>. fromItem .>>. many joinClause)
      .>>. opt (keyword "WHERE" >>. expr)
      .>>. opt groupByClause
@@ -2910,12 +2918,13 @@ selectStmtRecordRef.Value <-
      .>>. opt (keyword "ORDER" >>. keyword "BY" >>. sepBy1 orderKey (sym ","))
      .>>. opt limitClause
      .>>. opt lockClause)
-    |>> fun ((((((((((distinct, calculateFoundRows, straightJoin), projs), fromAndJoins), where), groupBy), having), windows), orderBy), limitOffset), locking) ->
+    |>> fun (((((((((distinct, calculateFoundRows, straightJoin, projs, intoVariables), fromAndJoins), where), groupBy), having), windows), orderBy), limitOffset), locking) ->
         let limit, offset = limitOffset |> Option.defaultValue (None, None)
         let from = fromAndJoins |> Option.map fst
         let joins = fromAndJoins |> Option.map snd |> Option.defaultValue []
 
         { Projections = projs
+          IntoVariables = intoVariables
           Distinct = distinct
           CalculateFoundRows = calculateFoundRows
           StraightJoin = straightJoin
@@ -2949,6 +2958,7 @@ let private expressionSelect =
     | PlainSelect select -> select
     | (UnionSelect _ as body) ->
         { Projections = [ Star None, None ]
+          IntoVariables = []
           Distinct = false
           CalculateFoundRows = false
           StraightJoin = false
@@ -2990,6 +3000,7 @@ let private createTableAs: Parser<Statement, unit> =
 
 let private querySelect projections from orderBy limit offset =
     { Projections = projections
+      IntoVariables = []
       Distinct = false
       CalculateFoundRows = false
       StraightJoin = false

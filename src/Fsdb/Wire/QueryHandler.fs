@@ -1351,8 +1351,39 @@ let private executeParsed (session: Session) (stmt: Statement) : Session * Query
             Executor.withVariableContext variables (fun () ->
                 match stmt with
                 | Select select ->
-                    let result, types, calculatedFoundRows =
+                    let result, types, calculatedFoundRows, rows =
                         withExecutionLimits (fun () -> Executor.runTopLevelSelect store registry dbName select)
+
+                    let result, types =
+                        if select.IntoVariables.IsEmpty then
+                            result, types
+                        elif select.IntoVariables.Length <> select.Projections.Length then
+                            Err(1222, "The used SELECT statements have a different number of columns"), []
+                        else
+                            match rows with
+                            | [] ->
+                                Diagnostics.warning 1329 "No data - zero rows fetched, selected, or processed"
+                                Affected 0UL, []
+                            | [ row ] ->
+                                let assigned =
+                                    List.zip select.IntoVariables (Array.toList row)
+                                    |> List.fold
+                                        (fun state (variable, value) ->
+                                            state
+                                            |> Result.bind (fun variables ->
+                                                match UserVariableRef.validationError variable with
+                                                | Some message -> Error(3061, message)
+                                                | None when Map.containsKey variable.Name variables || variables.Count < maxUserVariables ->
+                                                    Ok(Map.add variable.Name value variables)
+                                                | None -> Error(1105, "Too many user-defined variables")))
+                                        (Ok variables.UserVariables.Value)
+
+                                match assigned with
+                                | Ok assigned ->
+                                    variables.UserVariables.Value <- assigned
+                                    Affected 0UL, []
+                                | Error(code, message) -> Err(code, message), []
+                            | _ -> Err(1172, "Result consisted of more than one row"), []
 
                     session.LastInsertId, session.LastGeneratedId, result, types, calculatedFoundRows
                 | Union(first, rest, orderBy, limit, offset) ->

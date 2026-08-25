@@ -5471,6 +5471,7 @@ and private referencedCtes (ctes: CommonTableExpr list) (tableNames: Set<string>
 and private referencedMutationCtes (ctes: CommonTableExpr list) (joins: Join list) (expressions: Expr list) =
     let query: SelectStmt =
         { Projections = expressions |> List.map (fun expression -> expression, None)
+          IntoVariables = []
           Distinct = false
           CalculateFoundRows = false
           StraightJoin = false
@@ -5735,7 +5736,9 @@ and private runSelectStmt
     (select: SelectStmt)
     (outer: EvalContext option)
     : QueryResult * ColumnMetadata list * Value[] list =
-    if not select.Ctes.IsEmpty then
+    if not select.IntoVariables.IsEmpty then
+        Err(1064, "SELECT INTO is only valid as a top-level statement"), [], []
+    elif not select.Ctes.IsEmpty then
         let body = { select with Ctes = [] }
         let ctes = referencedCtes select.Ctes (selectOrUnionTableNames (PlainSelect body))
         withCteScope store registry dbName ctes outer (fun () -> runSelectStmt store registry dbName body outer)
@@ -10061,12 +10064,13 @@ let runTopLevelSelect
     (registry: Registry)
     (dbName: string)
     (select: SelectStmt)
-    : QueryResult * ColumnMetadata list * uint64 option =
+    : QueryResult * ColumnMetadata list * uint64 option * Value[] list =
     resetStatementMemo ()
+    let executable = { select with IntoVariables = [] }
 
     if select.CalculateFoundRows then
         let unbounded =
-            { select with
+            { executable with
                 CalculateFoundRows = false
                 Limit = None
                 Offset = None }
@@ -10077,11 +10081,12 @@ let runTopLevelSelect
 
         match result with
         | ResultSet(columns, rows) ->
-            ResultSet(columns, applyLimitOffset limit offset rows), types, Some(uint64 values.Length)
-        | error -> error, types, None
+            let limitedValues = applyLimitOffset limit offset values
+            ResultSet(columns, applyLimitOffset limit offset rows), types, Some(uint64 values.Length), limitedValues
+        | error -> error, types, None, []
     else
-        let result, types, _ = runSelectStmt store registry dbName select None
-        result, types, None
+        let result, types, values = runSelectStmt store registry dbName executable None
+        result, types, None, values
 
 let runTopLevelUnion
     (store: Store)

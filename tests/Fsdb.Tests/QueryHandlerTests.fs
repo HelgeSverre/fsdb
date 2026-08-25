@@ -860,6 +860,30 @@ let tests =
               | updated, Affected _ -> Expect.equal updated.UserVariables.["v1"] (VInt 2L) "existing variables remain writable"
               | _, other -> failtestf "expected an existing variable update to succeed, got %A" other
 
+          testCase "SELECT INTO assigns one typed row atomically"
+          <| fun _ ->
+              let session = create 1 (Fsdb.Storage.create ())
+              let session, _ = handle session "CREATE TABLE t (id INT, name VARCHAR(10))"
+              let session, _ = handle session "INSERT INTO t VALUES (1, 'one')"
+              let session, result = handle session "SELECT id, name INTO @chosen_id, @chosen_name FROM t"
+              Expect.equal result (Affected 0UL) "SELECT INTO has no resultset"
+              Expect.equal session.UserVariables.["chosen_id"] (VInt 1L) "integer type retained"
+              Expect.equal session.UserVariables.["chosen_name"] (VString "one") "string type retained"
+
+              let session, result = handle session "SELECT id INTO @chosen_id FROM t WHERE id = 99"
+              Expect.equal result (Affected 0UL) "zero rows is successful"
+              Expect.equal session.UserVariables.["chosen_id"] (VInt 1L) "zero rows leaves the target unchanged"
+              Expect.equal (session.Diagnostics |> List.map _.Code) [ 1329 ] "zero-row warning"
+
+              let session, _ = handle session "INSERT INTO t VALUES (2, 'two')"
+              let unchanged, result = handle session "SELECT id INTO @chosen_id FROM t ORDER BY id"
+              Expect.equal result (Err(1172, "Result consisted of more than one row")) "multiple rows rejected"
+              Expect.equal unchanged.UserVariables.["chosen_id"] (VInt 1L) "failed assignment is atomic"
+
+              match handle unchanged "SELECT id, name INTO @chosen_id FROM t WHERE id = 1" |> snd with
+              | Err(1222, _) -> ()
+              | other -> failtestf "expected target-count error, got %A" other
+
           QueryHandlerVariableTests.tests
 
           testCase "SELECT DATABASE() returns NULL before USE"

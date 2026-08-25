@@ -24,6 +24,7 @@ let private mkSelect
     : Statement =
     Select
         { Projections = projections
+          IntoVariables = []
           Distinct = false
           CalculateFoundRows = false
           StraightJoin = false
@@ -129,6 +130,7 @@ let tests =
                         (parseOk "SELECT * FROM information_schema.tables AS t")
                         (Select
                             { Projections = [ Star None, None ]
+                              IntoVariables = []
                               Distinct = false
                               CalculateFoundRows = false
                               StraightJoin = false
@@ -152,6 +154,7 @@ let tests =
                         (parseOk "SELECT * FROM t x")
                         (Select
                             { Projections = [ Star None, None ]
+                              IntoVariables = []
                               Distinct = false
                               CalculateFoundRows = false
                               StraightJoin = false
@@ -1378,6 +1381,7 @@ let tests =
                             "t",
                             [ "a"; "b" ],
                             { Projections = [ col "x", None; col "y", None ]
+                              IntoVariables = []
                               Distinct = false
                               CalculateFoundRows = false
                               StraightJoin = false
@@ -2314,6 +2318,17 @@ let tests =
                     match parse "SELECT @x + 1, @@GLOBAL.max_connections, @x := 3" with
                     | Ok(Select { Projections = projections }) -> Expect.equal projections expected "variable expressions"
                     | other -> failtestf "expected variable expressions, got %A" other
+
+                testCase "SELECT INTO keeps its user-variable targets"
+                <| fun _ ->
+                    match parse "SELECT id, name INTO @chosen_id, @`chosen name` FROM users" with
+                    | Ok(Select { IntoVariables = targets }) ->
+                        Expect.equal
+                            targets
+                            [ { Name = "chosen_id"; Sql = "@chosen_id" }
+                              { Name = "chosen name"; Sql = "@`chosen name`" } ]
+                            "assignment targets"
+                    | other -> failtestf "expected SELECT INTO targets, got %A" other
 
                 testCase "a bare at sign is MySQL's anonymous NULL variable reference"
                 <| fun _ ->

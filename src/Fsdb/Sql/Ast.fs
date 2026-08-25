@@ -536,6 +536,7 @@ and Join =
 /// does.
 and SelectStmt =
     { Projections: Projection list
+      IntoVariables: UserVariableRef list
       Distinct: bool
       CalculateFoundRows: bool
       StraightJoin: bool
