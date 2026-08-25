@@ -309,7 +309,12 @@ _bench-header mode="in-memory fsdb; durable MySQL" users="10000" orders="50000" 
 [group('bench')]
 bench-quick:
     @just _bench-run --quick
+    @mkdir -p benchmarks/results
+    @just _bench-header > "benchmarks/results/$(git rev-parse --short HEAD)-quick.md"
+    @cat BenchmarkDotNet.Artifacts/results/Fsdb.Benchmarks.ServerBenchmarks.ServerBenchmarks-report-github.md >> "benchmarks/results/$(git rev-parse --short HEAD)-quick.md"
+    @if [ -f BenchmarkDotNet.Artifacts/results/Fsdb.Benchmarks.ServerBenchmarks.ConnectBenchmarks-report-github.md ]; then cat BenchmarkDotNet.Artifacts/results/Fsdb.Benchmarks.ServerBenchmarks.ConnectBenchmarks-report-github.md >> "benchmarks/results/$(git rev-parse --short HEAD)-quick.md"; fi
     @rm -rf BenchmarkDotNet.Artifacts
+    @echo "results: benchmarks/results/$(git rev-parse --short HEAD)-quick.md"
 
 # N-writer throughput under concurrency, fsdb vs MySQL (ops/sec, not latency).
 # Complements `bench`: the latency suite is single-connection and cannot see

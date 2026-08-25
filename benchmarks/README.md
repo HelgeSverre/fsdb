@@ -9,7 +9,7 @@ hotspots, not to chase parity — fsdb optimizes for readable F# first.
 ```sh
 just bench               # full latency suite, results -> results/<git-sha>.md
 just bench-features      # recent SQL features only, results -> results/<git-sha>-features.md
-just bench-quick         # ShortRun validation, no results file
+just bench-quick         # ShortRun validation, results -> results/<git-sha>-quick.md
 just bench-load          # 8-worker throughput, results -> results/<git-sha>-load.md
 just bench-load-scale    # throughput at 1/2/4/8/16 workers
 just bench-durable       # four-target durability-matched latency
