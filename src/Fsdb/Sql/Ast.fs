@@ -625,6 +625,11 @@ type TriggerOrder =
     | Follows of trigger: string
     | Precedes of trigger: string
 
+type ExplainFormat =
+    | ExplainTraditional
+    | ExplainJson
+    | ExplainAnalyze
+
 type Statement =
     | CreateDatabase of name: string * ifNotExists: bool
     | DropDatabase of name: string * ifExists: bool
@@ -749,10 +754,9 @@ type Statement =
     | CreateView of name: string * columns: string list * definition: string * orReplace: bool
     /// `DROP VIEW [IF EXISTS] view [, ...]`.
     | DropView of names: string list * ifExists: bool
-    /// `EXPLAIN [FORMAT=TRADITIONAL] stmt` — MySQL's classic tabular
-    /// `EXPLAIN` accepts `SELECT`/`UPDATE`/`DELETE`/`INSERT`, all handled by
-    /// describing what `Executor` would actually do rather than running it.
-    | Explain of Statement
+    /// `EXPLAIN [FORMAT=TRADITIONAL|JSON] stmt` describes the access plan for
+    /// `SELECT`/`UPDATE`/`DELETE`/`INSERT` without running the statement.
+    | Explain of format: ExplainFormat * statement: Statement
 
 /// A `SET` target: `col` or `table.col` — the table qualifier only matters
 /// once there's more than one table in scope (a multi-table `UPDATE ...

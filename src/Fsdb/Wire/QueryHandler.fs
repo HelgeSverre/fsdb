@@ -2134,7 +2134,7 @@ let rec mapPlaceholders (replace: int -> Expr) (stmt: Statement) : Statement =
                 OrderBy = List.map mapOrderKey d.OrderBy
                 Joins = List.map mapJoin d.Joins
                 Limit = Option.map mapExpr d.Limit }
-    | Explain s -> Explain(mapPlaceholders replace s)
+    | Explain(format, statement) -> Explain(format, mapPlaceholders replace statement)
     | _ -> stmt
 
 /// Binds parameter `Value`s into a parsed `Statement`, replacing every

@@ -53,7 +53,7 @@ module AstKind =
         | CreateView _ -> "create_view"
         | DropView _ -> "drop_view"
         | SetTriggerNew _ -> "set_trigger_new"
-        | Explain statement -> "explain_" + ofStatement statement
+        | Explain(_, statement) -> "explain_" + ofStatement statement
 
 [<RequireQualifiedAccess>]
 module ProcessRunner =

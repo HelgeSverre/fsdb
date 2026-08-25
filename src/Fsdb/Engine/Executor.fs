@@ -9764,6 +9764,58 @@ let private renderExplainRows (rows: ExplainRow list) : QueryResult =
 
     ResultSet(columns, rows |> List.sortBy (fun r -> r.Id |> Option.defaultValue System.Int32.MaxValue) |> List.map renderRow)
 
+let private renderExplainJson (rows: ExplainRow list) : QueryResult =
+    let jsonArray values =
+        let array = JsonArray()
+        values |> Seq.iter (fun value -> array.Add(value: JsonNode))
+        array
+
+    let tableNode (row: ExplainRow) =
+        let table = JsonObject()
+        row.Table |> Option.iter (fun value -> table["table_name"] <- JsonValue.Create(value))
+        row.Type |> Option.iter (fun value -> table["access_type"] <- JsonValue.Create(value))
+
+        row.Key
+        |> Option.iter (fun (key, length) ->
+            table["possible_keys"] <- jsonArray [ JsonValue.Create(key) ]
+            table["key"] <- JsonValue.Create(key)
+            length |> Option.iter (fun value -> table["key_length"] <- JsonValue.Create(string value)))
+
+        row.Ref
+        |> Option.iter (fun value -> table["ref"] <- jsonArray [ JsonValue.Create(value) ])
+
+        row.Rows
+        |> Option.iter (fun value ->
+            table["rows_examined_per_scan"] <- JsonValue.Create(value)
+            table["rows_produced_per_join"] <- JsonValue.Create(value))
+
+        row.Type |> Option.iter (fun _ -> table["filtered"] <- JsonValue.Create("100.00"))
+
+        if not row.Extra.IsEmpty then
+            table["message"] <- JsonValue.Create(String.concat "; " row.Extra)
+
+        let item = JsonObject()
+        item["table"] <- table
+        item
+
+    let sorted = rows |> List.sortBy (fun row -> row.Id |> Option.defaultValue System.Int32.MaxValue)
+    let queryBlock = JsonObject()
+
+    sorted
+    |> List.tryPick _.Id
+    |> Option.iter (fun id -> queryBlock["select_id"] <- JsonValue.Create(id))
+
+    match sorted with
+    | [ row ] ->
+        let item = tableNode row
+        queryBlock["table"] <- item["table"].DeepClone()
+    | rows -> queryBlock["nested_loop"] <- rows |> List.map (tableNode >> fun node -> node :> JsonNode) |> jsonArray
+
+    let root = JsonObject()
+    root["query_block"] <- queryBlock
+    let options = JsonSerializerOptions(WriteIndented = true)
+    ResultSet([ "EXPLAIN" ], [ [ Some(root.ToJsonString(options)) ] ])
+
 /// `EXPLAIN [FORMAT=TRADITIONAL] stmt` — a pure description of what
 /// `execute` would do with `stmt`, never actually running it. Still
 /// validates `stmt` the way actually running it would, though — real MySQL
@@ -9777,7 +9829,7 @@ let private renderExplainRows (rows: ExplainRow list) : QueryResult =
 /// engine has a join/subquery structure to describe (`SELECT`, `UNION`,
 /// `UPDATE`, `DELETE`, `INSERT` — plain or `... SELECT`); anything else
 /// (DDL, session statements, ...) is the same 1064 real MySQL gives.
-let rec private explainStatement (store: Store) (registry: Registry) (dbName: string) (stmt: Statement) : QueryResult =
+let rec private explainStatement (format: ExplainFormat) (store: Store) (registry: Registry) (dbName: string) (stmt: Statement) : QueryResult =
     let counter = ref 0
 
     let nextId () =
@@ -9788,7 +9840,13 @@ let rec private explainStatement (store: Store) (registry: Registry) (dbName: st
 
     let finish (result: Result<unit, QueryResult>) =
         match result with
-        | Ok() -> renderExplainRows (List.ofSeq acc)
+        | Ok() ->
+            let rows = List.ofSeq acc
+
+            match format with
+            | ExplainTraditional -> renderExplainRows rows
+            | ExplainJson -> renderExplainJson rows
+            | ExplainAnalyze -> Err(1235, "EXPLAIN ANALYZE is not supported")
         | Error e -> e
 
     /// `INSERT`'s target table never goes through `explainJoinBlock` (an
@@ -9861,7 +9919,7 @@ let rec private explainStatement (store: Store) (registry: Registry) (dbName: st
             @ (u.OrderBy |> List.map fst)
             @ Option.toList u.Limit
         let ctes = referencedMutationCtes u.Ctes u.Joins expressions
-        withCteQueryResult store registry dbName ctes (fun () -> explainStatement store registry dbName (Update { u with Ctes = [] }))
+        withCteQueryResult store registry dbName ctes (fun () -> explainStatement format store registry dbName (Update { u with Ctes = [] }))
     | Update u ->
         let id = nextId ()
         let extra = [ if u.Where.IsSome then "Using where"
@@ -9878,7 +9936,7 @@ let rec private explainStatement (store: Store) (registry: Registry) (dbName: st
             @ (d.OrderBy |> List.map fst)
             @ Option.toList d.Limit
         let ctes = referencedMutationCtes d.Ctes d.Joins expressions
-        withCteQueryResult store registry dbName ctes (fun () -> explainStatement store registry dbName (Delete { d with Ctes = [] }))
+        withCteQueryResult store registry dbName ctes (fun () -> explainStatement format store registry dbName (Delete { d with Ctes = [] }))
     | Delete d ->
         let id = nextId ()
         let extra = [ if d.Where.IsSome then "Using where"
@@ -9940,7 +9998,7 @@ let rec private explainStatement (store: Store) (registry: Registry) (dbName: st
                 let sid = nextId ()
                 explainSelectBlock store registry dbName nextId acc sid "SUBQUERY" select)
         )
-    | Explain inner -> explainStatement store registry dbName inner
+    | Explain(nestedFormat, inner) -> explainStatement nestedFormat store registry dbName inner
     | _ -> Err(1064, "EXPLAIN is not supported for this statement")
 
 /// A top-level `SELECT`'s resultset plus its per-column MySQL wire types —
@@ -12939,8 +12997,8 @@ let rec executeAs
                     | Ok counts -> ids, Affected(uint64 (List.sum counts))
                     | Error e -> ids, storageErr e
 
-    | Explain inner ->
-        ids, explainStatement store registry dbName inner
+    | Explain(format, inner) ->
+        ids, explainStatement format store registry dbName inner
 
 let transactionRowTargets (store: Store) (dbName: string) (statement: Statement) : (string * string * RowId list) option =
     let targets (tableRef: TableRef) predicate =

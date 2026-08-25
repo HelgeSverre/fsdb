@@ -1,5 +1,6 @@
 module Fsdb.Tests.ExecutorTests
 
+open System.Text.Json
 open Expecto
 open Fsdb.Ast
 open Fsdb.Value
@@ -1037,6 +1038,23 @@ let tests =
                     match runDefault store "EXPLAIN FORMAT=TRADITIONAL SELECT * FROM t" with
                     | ResultSet(_, [ [ Some "1"; Some "SIMPLE"; Some "t"; _; _; _; _; _; _; _; _; _ ] ]) -> ()
                     | other -> failtestf "expected the same shape as bare EXPLAIN, got %A" other
+
+                testCase "EXPLAIN FORMAT=JSON returns a structured plan"
+                <| fun _ ->
+                    let store = newStore ()
+                    runDefault store "CREATE TABLE t (id INT PRIMARY KEY)" |> ignore
+                    runDefault store "INSERT INTO t VALUES (1)" |> ignore
+
+                    match runDefault store "EXPLAIN FORMAT=JSON SELECT id FROM t WHERE id = 1" with
+                    | ResultSet([ "EXPLAIN" ], [ [ Some json ] ]) ->
+                        use document = JsonDocument.Parse(json)
+                        let queryBlock = document.RootElement.GetProperty("query_block")
+                        let table = queryBlock.GetProperty("table")
+                        Expect.equal (queryBlock.GetProperty("select_id").GetInt32()) 1 "select id"
+                        Expect.equal (table.GetProperty("table_name").GetString()) "t" "table name"
+                        Expect.equal (table.GetProperty("access_type").GetString()) "const" "access type"
+                        Expect.equal (table.GetProperty("key").GetString()) "PRIMARY" "selected key"
+                    | other -> failtestf "expected one JSON plan document, got %A" other
 
                 testCase "DESCRIBE statement is an EXPLAIN synonym"
                 <| fun _ ->

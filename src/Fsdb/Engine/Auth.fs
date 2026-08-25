@@ -931,7 +931,7 @@ let rec requiredPrivileges (defaultDb: string) (stmt: Statement) : (string * Pri
         | Ok select -> own @ requiredPrivileges viewDb select
         | Error _ -> own
     | DropView(names, _) -> onTables "DROP" (names |> List.map split)
-    | Explain inner -> requiredPrivileges defaultDb inner
+    | Explain(_, inner) -> requiredPrivileges defaultDb inner
 
 /// Adds privilege requirements whose target can only be resolved from the
 /// live catalog rather than from the statement shape alone.

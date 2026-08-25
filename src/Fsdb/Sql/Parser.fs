@@ -3111,15 +3111,19 @@ let private withDmlStmt: Parser<Statement, unit> =
         | Delete delete -> Delete { delete with Ctes = ctes }
         | _ -> statement
 
-/// `EXPLAIN [FORMAT=TRADITIONAL] stmt` — MySQL also accepts `DESCRIBE`/
+/// `EXPLAIN [FORMAT=TRADITIONAL|JSON] stmt` — MySQL also accepts `DESCRIBE`/
 /// `DESC` as synonyms when just describing a table's columns (not a
 /// statement), out of scope here; this only covers the `EXPLAIN stmt` form.
 let private explainStmt: Parser<Statement, unit> =
-    ((keyword "EXPLAIN"
-      >>. optional (attempt (keyword "FORMAT" >>. sym "=" >>. keyword "TRADITIONAL")))
-     <|> (keyword "DESCRIBE" >>% ())
-     <|> (keyword "DESC" >>% ()))
-    >>. statement
+    let format =
+        keyword "FORMAT"
+        >>. sym "="
+        >>. ((keyword "TRADITIONAL" >>% ExplainTraditional) <|> (keyword "JSON" >>% ExplainJson))
+
+    (((keyword "EXPLAIN" >>. opt (attempt format)) |>> Option.defaultValue ExplainTraditional)
+     <|> (keyword "DESCRIBE" >>% ExplainTraditional)
+     <|> (keyword "DESC" >>% ExplainTraditional))
+    .>>. statement
     |>> Explain
 
 // ---------------------------------------------------------------------------
