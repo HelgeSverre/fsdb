@@ -1003,6 +1003,7 @@ let private setTransactionAccess =
     Regex(@"^SET\s+(SESSION\s+)?TRANSACTION\s+READ\s+(ONLY|WRITE)$", RegexOptions.IgnoreCase)
 
 let private setCharacterSet = Regex(@"^SET\s+CHARACTER\s+SET\s+'?(\w+)'?$", RegexOptions.IgnoreCase)
+let private setRoleNone = Regex(@"^SET\s+ROLE\s+NONE$", RegexOptions.IgnoreCase)
 
 let private rebaseTransactionSnapshot (session: Session) (tx: Transaction) : Catalog * Store =
     let baseCatalog = session.Store.Catalog
@@ -1443,6 +1444,7 @@ type private Probe =
     | SetAutocommit of value: string
     | SetTransactionIsolation of scope: TransactionIsolationScope * level: string
     | SetTransactionAccess of sessionScope: bool * readOnly: bool
+    | SetRoleNone
     | SetCharacterSet of charset: string
     | SetPassword of user: string option * password: string
     | SetVar
@@ -1516,6 +1518,8 @@ let private tryProbe (sql: string) (upper: string) : Probe option =
         Some(SetTransactionAccess(m.Groups.[1].Success, m.Groups.[2].Value.Equals("ONLY", StringComparison.OrdinalIgnoreCase)))
     elif setCharacterSet.IsMatch sql then
         Some(SetCharacterSet((setCharacterSet.Match sql).Groups.[1].Value))
+    elif setRoleNone.IsMatch sql then
+        Some SetRoleNone
     elif setPasswordRe.IsMatch sql then
         let m = setPasswordRe.Match sql
         Some(SetPassword((if m.Groups.[1].Success then Some m.Groups.[1].Value else None), m.Groups.[2].Value))
@@ -1683,6 +1687,7 @@ let private runProbe (session: Session) (sql: string) (probe: Probe) : Session *
          else
              { session with PendingTransactionReadOnly = Some readOnly }),
         Affected 0UL
+    | SetRoleNone -> session, Affected 0UL
     | SetCharacterSet charset ->
         let charset = charset.ToLowerInvariant()
 

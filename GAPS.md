@@ -72,7 +72,7 @@ variants), USE, KILL, DESCRIBE are text-probed before the grammar
 | `CHECKSUM TABLE` returns a stable fsdb row checksum rather than MySQL's storage-engine-specific value; specialized FLUSH forms remain absent | low | divergence/refusal |
 | `LOCK TABLES…READ/WRITE` and `UNLOCK TABLES` are accepted without mutual exclusion or access restriction; `HANDLER` and XA transactions remain absent | low | divergence/refusal |
 | Partitioning: HASH declarations are accepted as logical table options; partition metadata, pruning, `PARTITION (p)` selection, and `ADD/DROP/COALESCE/REORGANIZE PARTITION` remain absent | medium | divergence/refusal |
-| `CREATE/DROP ROLE` are backed by locked `mysql.user` accounts; `SET ROLE`, `SET DEFAULT ROLE`, role grants/inheritance, dynamic privileges (`BACKUP_ADMIN`…), and `GRANT PROXY` remain absent | medium | divergence/refusal |
+| `CREATE/DROP ROLE` are backed by locked `mysql.user` accounts and `SET ROLE NONE` clears the empty active-role set; other `SET ROLE`, `SET DEFAULT ROLE`, role grants/inheritance, dynamic privileges (`BACKUP_ADMIN`…), and `GRANT PROXY` remain absent | medium | divergence/refusal |
 | Replication/admin SQL: `CHANGE REPLICATION SOURCE TO`, `PURGE BINARY LOGS`, `RESET`, `BINLOG`, `INSTALL/UNINSTALL PLUGIN|COMPONENT`, `ALTER INSTANCE`, `CREATE SERVER`, `TABLESPACE` statements | low | refusal |
 | `EXPLAIN FORMAT=JSON/TREE` report the logical access plan without MySQL's cost model; `EXPLAIN ANALYZE` reports aggregate runtime/cardinality rather than per-iterator observations | low | divergence |
 | `CREATE USER … ACCOUNT LOCK/UNLOCK` is enforced; auth-plugin selection, `REQUIRE SSL/X509`, resource limits, `PASSWORD EXPIRE`, and `ALTER USER` beyond password change remain absent | medium | refusal |
@@ -371,7 +371,7 @@ DROP TRIGGER resolved to its subject table for TRIGGER privilege
 |---|---|---|---|---|
 | Hostname accounts | forward-confirmed reverse DNS matching | numeric peer addresses plus the loopback `localhost` alias; DNS names are not trusted | low | divergence |
 | Text-probe privilege bypass | all statements checked | SET/USE and server-wide SHOW probes bypass the general AST gate; account, process, database, and table metadata probes carry scoped checks | low | divergence |
-| Roles | CREATE ROLE, SET ROLE, role grants, mandatory roles | CREATE/DROP ROLE persist locked accounts; activation, grants, inheritance, and mandatory roles are absent | medium | divergence/refusal |
+| Roles | CREATE ROLE, SET ROLE, role grants, mandatory roles | CREATE/DROP ROLE persist locked accounts and `SET ROLE NONE` succeeds; activation of named roles, grants, inheritance, and mandatory roles are absent | medium | divergence/refusal |
 | Dynamic privileges | BACKUP_ADMIN, CONNECTION_ADMIN, … | vocabulary absent from GRANT parsing | low | refusal |
 | Column-level privileges | mysql.columns_priv enforced | table exists, never consulted | low | divergence |
 | Account lock/expiry/resource limits | enforced | account locks are enforced; expiry and resource limits are not | low | divergence |

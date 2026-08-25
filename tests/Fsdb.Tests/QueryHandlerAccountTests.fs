@@ -246,6 +246,10 @@ let tests =
               | Affected 0UL -> ()
               | other -> failtestf "expected duplicate role no-op, got %A" other
 
+              match handle session "SET ROLE NONE" |> snd with
+              | Affected 0UL -> ()
+              | other -> failtestf "expected SET ROLE NONE to clear the empty active-role set, got %A" other
+
               match handle session "DROP ROLE reader" |> snd with
               | Affected 0UL -> Expect.isNone (Fsdb.Auth.tryUserRow store "reader") "role removed"
               | other -> failtestf "expected DROP ROLE, got %A" other
