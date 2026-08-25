@@ -2296,7 +2296,7 @@ let preparedMetadata
     (session: Session)
     (statement: Statement option)
     (parameterCount: int)
-    : ColumnMetadata list * ColumnDef list =
+    : ColumnMetadata list * Fsdb.Protocol.ColumnDef list =
     let generic = ColumnWire.parameterMetadataOfType(TVarchar 16383)
 
     match statement with
@@ -2311,7 +2311,23 @@ let preparedMetadata
         | Ok() ->
             let parameters = PreparedMetadata.parameterDefinitions store registry schema statement parameterCount
             let columns = Executor.statementColumns store registry schema statement |> Option.defaultValue []
-            parameters, columns
+            let origins =
+                Executor.statementColumnOrigins store schema statement
+                |> Option.filter (fun values -> values.Length = columns.Length)
+                |> Option.defaultValue (List.replicate columns.Length None)
+
+            let resultColumns =
+                List.map2
+                    (fun (column: ColumnDef) origin ->
+                        { Name = column.Name
+                          Metadata =
+                            { ColumnWire.metadataOfColumn column with
+                                Origin = origin } }
+                        : Fsdb.Protocol.ColumnDef)
+                    columns
+                    origins
+
+            parameters, resultColumns
 
 type private TextPreparedCommand =
     | PrepareText of name: string * source: string

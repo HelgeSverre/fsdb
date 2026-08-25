@@ -1290,11 +1290,7 @@ let private handleConnection
                                         :: (parameterMetadata
                                             |> List.map (fun metadata -> columnDefPayload { Name = "?"; Metadata = metadata }))
                                         @ paramDefEof
-                                        @ (resultColumns
-                                           |> List.map (fun column ->
-                                               columnDefPayload
-                                                   { Name = column.Name
-                                                     Metadata = ColumnWire.metadataOfColumn column }))
+                                        @ (resultColumns |> List.map columnDefPayload)
                                         @ resultDefEof
 
                                     do! sendPayloads stream seqId payloads |> Async.Ignore

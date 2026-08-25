@@ -2296,8 +2296,12 @@ let tests =
                   Expect.hasLength preparedColumns 1 "PREPARE advertises the SELECT result column"
 
                   let preparedColumn = Reader(preparedColumns.Head.Payload)
-                  for _ in 1..6 do
-                      preparedColumn.ReadLenEncString() |> ignore
+                  Expect.equal (preparedColumn.ReadLenEncString()) (Some "def") "prepared catalog"
+                  Expect.equal (preparedColumn.ReadLenEncString()) (Some "fsdb") "prepared schema"
+                  Expect.equal (preparedColumn.ReadLenEncString()) (Some "t") "prepared table"
+                  Expect.equal (preparedColumn.ReadLenEncString()) (Some "t") "prepared physical table"
+                  Expect.equal (preparedColumn.ReadLenEncString()) (Some "d") "prepared name"
+                  Expect.equal (preparedColumn.ReadLenEncString()) (Some "d") "prepared physical name"
 
                   preparedColumn.ReadLenEncInt() |> ignore
                   preparedColumn.ReadInt16LE() |> ignore

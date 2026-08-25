@@ -1456,6 +1456,102 @@ type private OutputColumnSource =
       Table: string
       Columns: ColumnDef list }
 
+let private outputColumnOrigins
+    (store: Store)
+    (dbName: string)
+    (qualifiers: Map<string, ColumnDef list * int>)
+    (select: SelectStmt)
+    : ColumnOrigin option list =
+    let sameName (left: string) (right: string) =
+        System.String.Equals(left, right, System.StringComparison.OrdinalIgnoreCase)
+
+    let qualifierColumns (qualifier: string) =
+        qualifiers
+        |> Map.tryFind (qualifier.ToLowerInvariant())
+        |> Option.map fst
+        |> Option.defaultValue []
+
+    let sourceItems = (select.From |> Option.toList) @ (select.Joins |> List.map _.Table)
+
+    let sourceQualifier = function
+        | FromTable table -> table.Alias |> Option.defaultValue table.Table
+        | FromSubquery(_, alias)
+        | FromLateral(_, alias)
+        | FromJsonTable(_, _, _, alias) -> alias
+
+    let cteNames =
+        seq {
+            yield! currentCteScope () |> Map.keys
+            yield! select.Ctes |> Seq.map (fun cte -> cte.CteName.ToLowerInvariant())
+        }
+        |> Set.ofSeq
+
+    let physicalSources =
+        sourceItems
+        |> List.choose (function
+            | FromTable table ->
+                let schema = table.Database |> Option.defaultValue dbName
+                let qualifier = table.Alias |> Option.defaultValue table.Table
+                let isCte = table.Database.IsNone && Set.contains (table.Table.ToLowerInvariant()) cteNames
+
+                if isCte || (tryStoredView store schema table.Table).IsSome then
+                    None
+                else
+                    qualifiers
+                    |> Map.tryFind (qualifier.ToLowerInvariant())
+                    |> Option.map (fun (columns, _) ->
+                        { Qualifier = qualifier
+                          Schema = schema
+                          Table = table.Table
+                          Columns = columns })
+            | _ -> None)
+
+    let originFor source (column: ColumnDef) =
+        { Schema = source.Schema
+          Table = source.Qualifier
+          OriginalTable = source.Table
+          OriginalName = column.Name }
+
+    let byQualifier qualifier name =
+        physicalSources
+        |> List.tryPick (fun source ->
+            if sameName source.Qualifier qualifier then
+                source.Columns
+                |> List.tryFind (fun column -> sameName column.Name name)
+                |> Option.map (originFor source)
+            else
+                None)
+
+    let byName name =
+        physicalSources
+        |> List.choose (fun source ->
+            source.Columns
+            |> List.tryFind (fun column -> sameName column.Name name)
+            |> Option.map (originFor source))
+        |> function
+            | [ origin ] -> Some origin
+            | _ -> None
+
+    let originsForExpression =
+        function
+        | Star None ->
+            sourceItems
+            |> List.collect (fun item ->
+                let qualifier = sourceQualifier item
+
+                match physicalSources |> List.tryFind (fun source -> sameName source.Qualifier qualifier) with
+                | Some source -> source.Columns |> List.map (originFor source >> Some)
+                | None -> qualifierColumns qualifier |> List.map (fun _ -> None))
+        | Star(Some qualifier) ->
+            match physicalSources |> List.tryFind (fun source -> sameName source.Qualifier qualifier) with
+            | Some source -> source.Columns |> List.map (originFor source >> Some)
+            | None -> qualifierColumns qualifier |> List.map (fun _ -> None)
+        | Col name -> [ byName name ]
+        | QualifiedCol(qualifier, name) -> [ byQualifier qualifier name ]
+        | _ -> [ None ]
+
+    select.Projections |> List.collect (fst >> originsForExpression)
+
 /// Static result metadata for each projection, used ahead of the
 /// value-derived fallback whenever the expression determines its own type.
 ///
@@ -1478,9 +1574,6 @@ let private outputColumnWireOverridesFor
     : ColumnMetadata option list =
     let projections = select.Projections
 
-    let sameName left right =
-        System.String.Equals(left, right, System.StringComparison.OrdinalIgnoreCase)
-
     let rec starQualifierCols (ctx: EvalContext) (qualifier: string) : ColumnDef list =
         match Map.tryFind (qualifier.ToLowerInvariant()) ctx.Qualifiers with
         | Some(cols, _) -> cols
@@ -1496,80 +1589,6 @@ let private outputColumnWireOverridesFor
         | TEnum _ when rollup -> Some { ColumnWire.metadataOfColumn c with TypeId = TypeVarString; Flags = 0us }
         | _ -> ColumnWire.resultMetadataOf c
 
-    let sourceItems = (select.From |> Option.toList) @ (select.Joins |> List.map _.Table)
-
-    let sourceQualifier = function
-        | FromTable table -> table.Alias |> Option.defaultValue table.Table
-        | FromSubquery(_, alias)
-        | FromLateral(_, alias)
-        | FromJsonTable(_, _, _, alias) -> alias
-
-    let physicalSources =
-        sourceItems
-        |> List.choose (function
-            | FromTable table ->
-                let schema = table.Database |> Option.defaultValue ctx.DbName
-                let qualifier = table.Alias |> Option.defaultValue table.Table
-                let isCte =
-                    table.Database.IsNone
-                    && (currentCteScope () |> Map.containsKey (table.Table.ToLowerInvariant()))
-
-                if isCte || (tryStoredView ctx.Store schema table.Table).IsSome then
-                    None
-                else
-                    ctx.Qualifiers
-                    |> Map.tryFind (qualifier.ToLowerInvariant())
-                    |> Option.map (fun (columns, _) ->
-                        { Qualifier = qualifier
-                          Schema = schema
-                          Table = table.Table
-                          Columns = columns })
-            | _ -> None)
-
-    let originFor source (column: ColumnDef) =
-        { Schema = source.Schema
-          Table = source.Qualifier
-          OriginalTable = source.Table
-          OriginalName = column.Name }
-
-    let originsForExpression expression =
-        let byQualifier qualifier name =
-            physicalSources
-            |> List.tryPick (fun source ->
-                if sameName source.Qualifier qualifier then
-                    source.Columns
-                    |> List.tryFind (fun column -> sameName column.Name name)
-                    |> Option.map (originFor source)
-                else
-                    None)
-
-        let byName name =
-            physicalSources
-            |> List.choose (fun source ->
-                source.Columns
-                |> List.tryFind (fun column -> sameName column.Name name)
-                |> Option.map (originFor source))
-            |> function
-                | [ origin ] -> Some origin
-                | _ -> None
-
-        match expression with
-        | Star None ->
-            sourceItems
-            |> List.collect (fun item ->
-                let qualifier = sourceQualifier item
-
-                match physicalSources |> List.tryFind (fun source -> sameName source.Qualifier qualifier) with
-                | Some source -> source.Columns |> List.map (originFor source >> Some)
-                | None -> starQualifierCols ctx qualifier |> List.map (fun _ -> None))
-        | Star(Some qualifier) ->
-            match physicalSources |> List.tryFind (fun source -> sameName source.Qualifier qualifier) with
-            | Some source -> source.Columns |> List.map (originFor source >> Some)
-            | None -> starQualifierCols ctx qualifier |> List.map (fun _ -> None)
-        | Col name -> [ byName name ]
-        | QualifiedCol(qualifier, name) -> [ byQualifier qualifier name ]
-        | _ -> [ None ]
-
     let overrides =
         projections
         |> List.collect (fun proj ->
@@ -1581,7 +1600,7 @@ let private outputColumnWireOverridesFor
                   | Some ty -> Some ty
                   | None -> metadataOfExpr ctx expr ])
 
-    let origins = projections |> List.collect (fst >> originsForExpression)
+    let origins = outputColumnOrigins ctx.Store ctx.DbName ctx.Qualifiers select
 
     if origins.Length = overrides.Length then
         List.map2
@@ -10521,6 +10540,20 @@ let statementColumns (store: Store) (registry: Registry) (schema: string) (state
         describeQueryColumns store registry schema (QueryBody(PlainSelect select))
     | Union(first, rest, orderBy, limit, offset) ->
         describeQueryColumns store registry schema (QueryBody(UnionSelect(first, rest, orderBy, limit, offset)))
+    | _ -> None
+
+/// PREPARE must expose the same physical source fields as later execution
+/// without evaluating the statement to recover them.
+let statementColumnOrigins (store: Store) (schema: string) (statement: Statement) : ColumnOrigin option list option =
+    match statement with
+    | Select select when select.IntoVariables.IsEmpty ->
+        let sources =
+            (select.From |> Option.toList) @ (select.Joins |> List.map _.Table)
+            |> List.map (fun source ->
+                fromItemQualifier source,
+                selectSourceColumns store schema source |> List.choose id)
+
+        Some(outputColumnOrigins store schema (qualifierRanges sources) select)
     | _ -> None
 
 /// Folds one `insertRows`/`insertRowsIgnore`/`upsertRows` result's
